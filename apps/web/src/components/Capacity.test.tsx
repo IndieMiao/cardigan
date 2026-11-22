@@ -79,9 +79,10 @@ test.each([
   if (route === "settings") {
     fireEvent.click(screen.getByRole("button", { name: "员工" }));
     expect(screen.getByRole("button", { name: /Agent 4\/10/u })).toBeTruthy();
-    // C-511: the old entry leads to the machine page, where each machine's
-    // detail edits its limit; merge check targets stay listed, read only.
-    fireEvent.click(screen.getByRole("button", { name: "并发与容量" }));
+    // C-511: the machine page, where each machine's detail edits its
+    // limit; merge check targets stay listed, read only. C-576 removed the
+    // duplicate 并发与容量 entry.
+    fireEvent.click(screen.getByRole("button", { name: "机器" }));
     await screen.findByRole("heading", { name: "机器" });
     expect(window.location.hash).toContain("tab=machines");
     expect(screen.getByRole("heading", { name: "合并检查" })).toBeTruthy();

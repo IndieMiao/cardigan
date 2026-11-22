@@ -1235,7 +1235,7 @@ test.each(focusSettings)(
     expect(document.activeElement).toBe(checkbox);
     expect(checkbox.getAttribute("aria-disabled")).toBe("false");
     fireEvent.click(checkbox);
-    const other = screen.getByRole("button", { name: "并发与容量" });
+    const other = screen.getByRole("button", { name: "授权" });
     other.focus();
     await act(async () => requests[2]?.resolve());
     await waitFor(() => expect(on(checkbox)).toBe(initial));

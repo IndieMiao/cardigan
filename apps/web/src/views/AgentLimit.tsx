@@ -17,6 +17,10 @@ import {
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { useNumberDraft, useSettingWrite } from "./useSettingWrite.js";
 
+/** C-576: why the limit cannot go higher than the host's `max_limit`. */
+export const hostMaximumHint = (max: number) =>
+  `主机配置的最大值为 ${max}，如需更高请联系主机运维`;
+
 /**
  * One machine's Agent limit, saved on blur or Enter (instant save, C-455).
  * C-511: shown in the machine detail; it was the 并发与容量 panel's row.
@@ -97,7 +101,7 @@ export function AgentLimitRow({
           invalidConfig || draft.valid
             ? undefined
             : tooLarge
-              ? `并发上限不能超过 ${max}。`
+              ? `${hostMaximumHint(max)}。`
               : "并发上限必须为正整数。"
         }
       />
@@ -163,7 +167,11 @@ export function MachineAgentLimit({
           limit={machine.run_limit}
           max={machine.run_limit_maximum}
           mergeCheckSlots={slots ?? 0}
-          description={`最多可设 ${machine.run_limit_maximum} 个`}
+          description={
+            machine.run_limit >= machine.run_limit_maximum
+              ? hostMaximumHint(machine.run_limit_maximum)
+              : `最多可设 ${machine.run_limit_maximum} 个`
+          }
           source={source}
           saved={saved}
         />

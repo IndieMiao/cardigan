@@ -96,7 +96,7 @@ const withBindings = (
   id = "local",
 ): MachineView => ({ ...byId(id), bindings });
 
-test("settings navigation lists 机器 right after 员工 and keeps 并发与容量 in place", () => {
+test("settings navigation lists 机器 right after 员工; 并发与容量 is gone (C-576)", () => {
   render(<SettingsPage projectId="p-1" client={client()} />);
   const nav = screen.getByRole("navigation", { name: "设置分栏" });
   expect(
@@ -105,7 +105,6 @@ test("settings navigation lists 机器 right after 员工 and keeps 并发与容
       .map((b) => b.textContent),
   ).toEqual([
     "偏好",
-    "并发与容量",
     "授权",
     "飞书绑定",
     "角色",
@@ -116,7 +115,7 @@ test("settings navigation lists 机器 right after 员工 and keeps 并发与容
   ]);
 });
 
-test("the list shows name, platform, status, heartbeat, running/limit and the latest check, read only", async () => {
+test("the list shows name, platform, status, occupied/limit and the latest check with its time, read only", async () => {
   const c = capacityClient();
   await openMachines(c);
   expect(c.machines).toHaveBeenCalledWith("p-1");
@@ -141,12 +140,20 @@ test("the list shows name, platform, status, heartbeat, running/limit and the la
   expect(text[2]).not.toContain("未检查");
   expect(text[2]).toContain("— / 1");
   expect(text[2]).toContain("停止接收新任务");
-  // Only the name opens a detail; nothing on the page writes.
+  // C-576: no 最近心跳 (the registry's last_seen is not a heartbeat); the
+  // latest check carries its time instead, and the count is named 占用.
+  expect(
+    within(table())
+      .getAllByRole("columnheader")
+      .map((h) => h.textContent),
+  ).toEqual(["名称", "系统", "占用 / 上限", "最近检查", "状态", "操作"]);
+  await waitFor(() => expect(rows[0]?.textContent).toMatch(/通过 · \S/u));
+  // The name and a row-end 详情 open the detail; nothing on the page writes.
   expect(
     within(table())
       .getAllByRole("button")
       .map((b) => b.textContent),
-  ).toEqual(["本机", "构建机", "Mac mini"]);
+  ).toEqual(["本机", "详情", "构建机", "详情", "Mac mini", "详情"]);
   expect(screen.queryByRole("spinbutton")).toBeNull();
   expect(screen.queryByRole("switch")).toBeNull();
   expect(c.setRunLimit).not.toHaveBeenCalled();
@@ -170,7 +177,7 @@ test("the detail shows capabilities, limits, bindings with the current project, 
   const facts = (label: string) =>
     view.getByText(label, { selector: "dt" }).nextElementSibling?.textContent;
   expect(facts("全部在跑")).toBe("3");
-  expect(facts("非常驻 / 上限")).toBe("2 / 6");
+  expect(facts("占用 / 上限")).toBe("2 / 6");
   expect(facts("排队")).toBe("1");
   expect(view.getByText("browser.chromium", { selector: "dt" })).toBeTruthy();
   // Capabilities per project, this one first: verified, expired, never
@@ -363,9 +370,10 @@ test("the list's latest check is the newest across all bindings, with its projec
     }),
   );
   const rows = within(table()).getAllByRole("row");
-  expect(rows[1]?.textContent).toContain("失败 示例项目");
+  // C-576: the check's time sits between its result and its project.
+  expect(rows[1]?.textContent).toMatch(/失败 · [^·]+ · 示例项目/u);
   expect(rows[1]?.textContent).not.toContain("通过");
-  expect(rows[2]?.textContent).toContain("失败 示例项目");
+  expect(rows[2]?.textContent).toMatch(/失败 · [^·]+ · 示例项目/u);
 });
 
 test("a refreshed detail drops finished Runs even when another project reuses the number", async () => {
@@ -473,7 +481,7 @@ test("a failed detail read keeps the drawer and retries", async () => {
   expect(machine).toHaveBeenCalledTimes(2);
 });
 
-test("C-511: 并发与容量 leads to the machine page, where the detail edits the limit", async () => {
+test("C-511/C-576: the machine row's 详情 opens the detail, where the limit is edited", async () => {
   const capacity: ExecutionCapacity = {
     agents: [
       {
@@ -496,7 +504,8 @@ test("C-511: 并发与容量 leads to the machine page, where the detail edits t
       <SettingsPage projectId="p-1" client={c} />
     </CapacityProvider>,
   );
-  fireEvent.click(screen.getByRole("button", { name: "并发与容量" }));
+  expect(screen.queryByRole("button", { name: "并发与容量" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
   await screen.findByRole("table", { name: "机器列表" });
   expect(window.location.hash).toContain("tab=machines");
   expect(
@@ -505,9 +514,13 @@ test("C-511: 并发与容量 leads to the machine page, where the detail edits t
   // The panel itself has no limit field; merge check targets stay listed.
   expect(screen.queryByRole("spinbutton")).toBeNull();
   expect(screen.getByRole("heading", { name: "合并检查" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "本机" }));
+  const detail = screen.getByRole("button", { name: "本机 详情" });
+  expect(detail.textContent).toBe("详情");
+  expect(detail.getAttribute("aria-haspopup")).toBe("dialog");
+  fireEvent.click(detail);
   const dialog = within(await screen.findByRole("dialog"));
   await waitFor(() => expect(limitField(dialog).value).toBe("6"));
+  expect(dialog.getByText("最多可设 16 个")).toBeTruthy();
   // A machine this project has no binding for shows its limit read only.
   fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -519,6 +532,22 @@ test("C-511: 并发与容量 leads to the machine page, where the detail edits t
     other.getByText("Agent 并发", { selector: "dt" }).nextElementSibling
       ?.textContent,
   ).toMatch(/最多可设/);
+});
+
+test("C-576: a limit at the host maximum says why it cannot go higher", async () => {
+  const c = capacityClient({
+    machine: vi.fn(async (_p: string, id: string) => ({
+      machine: { ...byId(id), run_limit: byId(id).run_limit_maximum },
+    })),
+  });
+  await openMachines(c);
+  fireEvent.click(screen.getByRole("button", { name: "本机 详情" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  await waitFor(() => expect(limitField(dialog).value).toBe("16"));
+  expect(
+    dialog.getByText("主机配置的最大值为 16，如需更高请联系主机运维"),
+  ).toBeTruthy();
+  expect(dialog.queryByText("最多可设 16 个")).toBeNull();
 });
 
 test("C-511: an old ?tab=capacity link lands on the machine page and replaces itself", async () => {
@@ -624,7 +653,7 @@ test("a cross-project capacity notice rereads the open machine; other settings p
       dialog.getByText(label, { selector: "dt" }).nextElementSibling
         ?.textContent;
     await waitFor(() => expect(facts("全部在跑")).toBe("1"));
-    await waitFor(() => expect(facts("非常驻 / 上限")).toBe("1 / 6"));
+    await waitFor(() => expect(facts("占用 / 上限")).toBe("1 / 6"));
     expect(machines.mock.calls.length).toBe(reads.list + 1);
     expect(machine.mock.calls.length).toBe(reads.detail + 1);
     expect(roles).not.toHaveBeenCalled();
@@ -663,7 +692,7 @@ test("a failed capacity refresh is not shown as current: only the machine's own 
   const dialog = within(await screen.findByRole("dialog"));
   const facts = (label: string) =>
     dialog.getByText(label, { selector: "dt" }).nextElementSibling?.textContent;
-  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 6"));
+  await waitFor(() => expect(facts("占用 / 上限")).toBe("2 / 6"));
   // The limit changes to 3: the machine read succeeds, the capacity read fails.
   fail = true;
   limit = 3;
@@ -674,7 +703,7 @@ test("a failed capacity refresh is not shown as current: only the machine's own 
   );
   // C-511: the detail edits the limit its own machine read shows.
   await waitFor(() => expect(limitField(dialog).value).toBe("3"));
-  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("— / 3"));
+  await waitFor(() => expect(facts("占用 / 上限")).toBe("— / 3"));
   expect(facts("排队")).toBe("—");
   const alert = await dialog.findByText(/并发读数未能更新/);
   const retry = within(alert.closest("[role=alert]") as HTMLElement).getByRole(
@@ -690,12 +719,12 @@ test("a failed capacity refresh is not shown as current: only the machine's own 
   fireEvent.click(retry);
   expect(await dialog.findByText("正在重新读取并发读数…")).toBeTruthy();
   expect(dialog.queryByText(/并发读数未能更新/)).toBeNull();
-  expect(facts("非常驻 / 上限")).toBe("— / 3");
+  expect(facts("占用 / 上限")).toBe("— / 3");
   expect(facts("排队")).toBe("—");
   expect(dialog.queryByText("2 / 6")).toBeNull();
   gate = undefined;
   await act(async () => held.resolve());
-  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 3"));
+  await waitFor(() => expect(facts("占用 / 上限")).toBe("2 / 3"));
   expect(facts("排队")).toBe("1");
   expect(dialog.queryByText("正在重新读取并发读数…")).toBeNull();
   expect(dialog.queryByText(/并发读数未能更新/)).toBeNull();
@@ -777,14 +806,14 @@ test("Q-1013: a drawer opened while a retry is in flight agrees with the list an
   fireEvent.click(screen.getByRole("button", { name: "本机" }));
   const dialog = within(await screen.findByRole("dialog"));
   const facts = drawerFacts(dialog);
-  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("— / 3"));
+  await waitFor(() => expect(facts("占用 / 上限")).toBe("— / 3"));
   expect(facts("排队")).toBe("—");
   expect(await dialog.findByText("正在重新读取并发读数…")).toBeTruthy();
   expect(document.body.textContent).not.toContain("2 / 6");
   // After the response: both show the new reading.
   state.gate = undefined;
   await act(async () => held.resolve());
-  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 3"));
+  await waitFor(() => expect(facts("占用 / 上限")).toBe("2 / 3"));
   expect(facts("排队")).toBe("1");
   expect(listCell()).toContain("2 / 3");
 });
@@ -800,7 +829,7 @@ test("Q-1013: the limit beside the count is the machine read's, even when the ca
   fireEvent.click(screen.getByRole("button", { name: "本机" }));
   const dialog = within(await screen.findByRole("dialog"));
   const facts = drawerFacts(dialog);
-  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 3"));
+  await waitFor(() => expect(facts("占用 / 上限")).toBe("2 / 3"));
   expect(limitField(dialog).value).toBe("3");
 });
 
@@ -812,20 +841,20 @@ test("Q-1013 guard: an ordinary background refresh keeps the last good reading u
   fireEvent.click(screen.getByRole("button", { name: "本机" }));
   const dialog = within(await screen.findByRole("dialog"));
   const facts = drawerFacts(dialog);
-  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 6"));
+  await waitFor(() => expect(facts("占用 / 上限")).toBe("2 / 6"));
   const held = Promise.withResolvers<void>();
   state.gate = held.promise;
   state.running = 3;
   view.rerender(page(1));
   // In flight: still the last good reading, no placeholder, no notice.
   await new Promise((r) => setTimeout(r, 50));
-  expect(facts("非常驻 / 上限")).toBe("2 / 6");
+  expect(facts("占用 / 上限")).toBe("2 / 6");
   expect(facts("排队")).toBe("1");
   expect(listCell()).toContain("2 / 6");
   expect(dialog.queryByText("正在重新读取并发读数…")).toBeNull();
   state.gate = undefined;
   await act(async () => held.resolve());
-  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("3 / 6"));
+  await waitFor(() => expect(facts("占用 / 上限")).toBe("3 / 6"));
 });
 
 test("Q-1017: failed → slow retry → 偏好 → back to 机器 and its detail shows no failed snapshot until the reply", async () => {
@@ -855,7 +884,7 @@ test("Q-1017: failed → slow retry → 偏好 → back to 机器 and its detail
   fireEvent.click(screen.getByRole("button", { name: "本机" }));
   const dialog = within(await screen.findByRole("dialog"));
   const facts = drawerFacts(dialog);
-  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("— / 3"));
+  await waitFor(() => expect(facts("占用 / 上限")).toBe("— / 3"));
   expect(facts("排队")).toBe("—");
   expect(await dialog.findByText("正在重新读取并发读数…")).toBeTruthy();
   expect(listCell()).toContain("— / 3");
@@ -865,7 +894,7 @@ test("Q-1017: failed → slow retry → 偏好 → back to 机器 and its detail
   state.queued = 0;
   state.gate = undefined;
   await act(async () => held.resolve());
-  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("0 / 3"));
+  await waitFor(() => expect(facts("占用 / 上限")).toBe("0 / 3"));
   expect(facts("排队")).toBe("0");
   expect(listCell()).toContain("0 / 3");
   expect(dialog.queryByText("正在重新读取并发读数…")).toBeNull();
