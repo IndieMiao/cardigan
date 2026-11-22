@@ -9,6 +9,7 @@ import type { CommandState } from "./core.js";
 import {
   beginIdleSessionRetirement,
   confirmWaitingRetirementExit,
+  handoffIdleSessionRetirement,
   settleIdleSessionRetirement,
   trackRetirementDispatch,
 } from "./idle-session-retirement.js";
@@ -685,3 +686,74 @@ test("retention cap only parks an exact kept-and-alive waiting ref, including le
     ).toBe(failures < 3);
   }
 });
+
+test.each(["timeout", "uncertain", "withdrawn"] as const)(
+  "Darwin %s handoff preserves the exact session and distinguishes an outstanding stop",
+  (outcome) => {
+    const s = setup(),
+      a = {
+        ...s.assignments[0]!,
+        machine_id: "fixture-worker",
+        runtime_ref: {
+          ...s.assignments[0]!.runtime_ref!,
+          machine_id: "fixture-worker",
+        },
+      },
+      io = { ...ports(), clock: { now: () => now } };
+    const base = {
+      ...s,
+      assignments: [a],
+      machines: s.machines!.map((m) => ({
+        ...m,
+        id: "fixture-worker",
+        os: "darwin",
+      })),
+    };
+    const pending = apply(
+      base,
+      value(beginIdleSessionRetirement(base, system, a.id, 60, io)),
+    );
+    const state = {
+      ...pending,
+      assignments: pending.assignments.map((v) => ({
+        ...v,
+        idle_retirement: { ...v.idle_retirement!, failures: 2 },
+      })),
+    };
+    const settled = value(
+      settleIdleSessionRetirement(
+        state,
+        system,
+        a.id,
+        {
+          outcome,
+          evidence: { reason: "confirmation_pending", stage: "confirm" },
+        },
+        1,
+        io,
+      ),
+    );
+    expect(settled.data.idle_retirement).toMatchObject({
+      handoff: true,
+      failures: 3,
+      phase: outcome === "withdrawn" ? "waiting" : "stopping",
+    });
+    expect(settled.token_requests).toEqual([]);
+    expect(settled.data.runtime_ref).toEqual(a.runtime_ref);
+    expect(
+      settled.events.filter(
+        (e) => e.type === "idle_session_retirement_handed_off",
+      ),
+    ).toHaveLength(1);
+    const handed = apply(state, settled);
+    expect(
+      sessionMaintenanceCandidate(handed, settled.data, now).candidate,
+    ).toBe(false);
+    expect(
+      value(handoffIdleSessionRetirement(handed, system, a.id, io)).changes,
+    ).toHaveLength(0);
+    expect(beginIdleSessionRetirement(handed, system, a.id, 60, io).ok).toBe(
+      false,
+    );
+  },
+);

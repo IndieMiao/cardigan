@@ -101,6 +101,95 @@ export class LocalGitTransport implements GitWorktreePort {
         "Existing clone does not belong to this local source; rebuild it from the central repository",
       );
   }
+  /** Check an existing standalone mirror, without cloning or following its URL. */
+  async verifyMirror(
+    repository: string,
+    central: string,
+    legacyOrigin?: (origin: string) => Promise<boolean>,
+  ) {
+    const origin = await this.git(repository, [
+      "config",
+      "--local",
+      "--get",
+      "remote.origin.url",
+    ]);
+    if (
+      (await this.git(repository, ["rev-parse", "--absolute-git-dir"])) !==
+        join(repository, ".git") ||
+      (origin !== central && !(await legacyOrigin?.(origin))) ||
+      // --get-url applies Git's actual remote/URL resolution without fetching.
+      (await this.git(repository, [
+        "ls-remote",
+        "--get-url",
+        "--",
+        "origin",
+      ])) !== origin
+    )
+      throw new Error("Local mirror does not belong to the project center");
+    // receive-pack dereferences symbolic tracking refs when updating/pruning.
+    // Only the standard alias is safe (the mirror receiver hides it).
+    const aliases = await this.git(repository, [
+      "for-each-ref",
+      "--format=%(if)%(symref)%(then)%(refname) %(symref)%(end)",
+      "refs/remotes/origin/",
+    ]);
+    if (
+      aliases
+        .split("\n")
+        .some(
+          (line) =>
+            line &&
+            !line.startsWith("refs/remotes/origin/HEAD refs/remotes/origin/"),
+        )
+    )
+      throw new Error("Unexpected symbolic reference in local mirror");
+  }
+  /** The files ref backend can't delete a prefix and create its descendant
+   * (or vice versa) in one transaction. Make room only for verified heads. */
+  async clearMirrorNameConflicts(repository: string, heads: readonly string[]) {
+    const prefixes = (name: string) => {
+      const parts: string[] = [];
+      for (
+        let slash = name.indexOf("/");
+        slash >= 0;
+        slash = name.indexOf("/", slash + 1)
+      )
+        parts.push(name.slice(0, slash));
+      return parts;
+    };
+    const names = new Set(heads),
+      dirs = new Set(heads.flatMap(prefixes));
+    const prefix = "refs/remotes/origin/";
+    const current = await this.git(repository, [
+      "for-each-ref",
+      "--format=%(refname) %(objectname) %(symref)",
+      prefix,
+    ]);
+    const blockers: Array<{ ref: string; sha: string }> = [];
+    for (const line of current.split("\n").filter(Boolean)) {
+      const [ref, sha, alias] = line.split(" ");
+      if (
+        !ref?.startsWith(prefix) ||
+        !sha ||
+        !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(sha)
+      )
+        throw new Error("Invalid mirror tracking reference");
+      const name = ref.slice(prefix.length);
+      if (
+        name === "HEAD" ||
+        alias ||
+        names.has(name) ||
+        !(dirs.has(name) || prefixes(name).some((p) => names.has(p)))
+      )
+        continue;
+      if (ref.includes("\ufffd"))
+        throw new Error("Ambiguous mirror tracking ref encoding");
+      blockers.push({ ref, sha });
+    }
+    for (const { ref, sha } of blockers)
+      await this.git(repository, ["update-ref", "--no-deref", "-d", ref, sha]);
+    return blockers.length > 0;
+  }
   async fetch(repository: string, source: string): Promise<void> {
     const local = await this.source(source);
     await this.git(repository, [

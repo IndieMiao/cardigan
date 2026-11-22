@@ -1,3 +1,6 @@
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import {
   acknowledgeRun,
   beginIdleSessionRetirement,
@@ -31,8 +34,10 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const f of fixtures.splice(0)) f.close();
 });
-function setup(upgrade = true, complete = true) {
-  const f = dispatchFixture();
+function setup(upgrade = true, complete = true, darwin = false) {
+  const f = darwin
+    ? dispatchFixture("worker", "none", "darwin")
+    : dispatchFixture();
   fixtures.push(f);
   const target = f.create();
   f.session(target.assignment, complete);
@@ -253,6 +258,96 @@ function waitNotices(f: ReturnType<typeof setup>) {
     .listNotifications({ project_id: f.project, recipient_kind: "pm_ops" })
     .filter((n) => notices.some((e) => e.id === n.event_id));
 }
+
+test("a supervised Darwin CLI can reuse its waiting session but a different parent or birth cannot", async () => {
+  const f = setup(false, true, true),
+    a = f.owner();
+  const launch = f.state().runs.find((r) => r.assignment_id === a.id);
+  if (!launch || !a.runtime_ref?.target)
+    throw Error("Expected a registered worker session");
+  const ref = {
+    ...a.runtime_ref,
+    launch_generation: { run_id: launch.id, generation: "registered" },
+  };
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project, { ...a, runtime_ref: ref }),
+  );
+  f.store.touchAssignmentActivity(f.project, a.id, f.clock.now());
+  f.advance(60 * 60_000 + 1);
+  f.runtime.retire_idle = vi.fn(async () => ({
+    ok: true as const,
+    value: {
+      outcome: "withdrawn" as const,
+      evidence: { stage: "probe" as const, reason: "probe_invalid" as const },
+    },
+  }));
+  await host.upgradeIdleAssignmentRoles(f.store, f.project, f.runtime, f.clock);
+  expect(f.owner().idle_retirement?.phase).toBe("waiting");
+  f.comment();
+  const cli = spawn("/bin/sleep", ["30"], { stdio: "ignore" }),
+    closed = once(cli, "close");
+  try {
+    await once(cli, "spawn");
+    const probe = (query: object) =>
+      execFileSync(
+        "python3",
+        [
+          "-IB",
+          fileURLToPath(
+            new URL(
+              "../../../packages/runtime-herdr/test-support/darwin-retirement.py",
+              import.meta.url,
+            ),
+          ),
+          JSON.stringify(query),
+        ],
+        { encoding: "utf8" },
+      ).trim();
+    const bound = {
+      cli: cli.pid,
+      generation: ref.launch_generation.generation,
+      target: a.runtime_ref.target.fingerprint,
+    };
+    const receipt = JSON.parse(probe(bound));
+    const observations: string[] = [];
+    let parent = process.pid + 1,
+      processReceipt = receipt;
+    f.runtime.observe_retirement = async (current, owner) => {
+      expect(current).toEqual(ref);
+      const result = probe({
+        ...bound,
+        parent,
+        process: processReceipt,
+        project: owner.project_id,
+        assignment: owner.assignment_id,
+        launch_run: current.launch_generation?.run_id,
+        terminal: current.terminal_ref.split("/").at(-1),
+        agent_name: current.agent_name,
+      });
+      observations.push(result);
+      return { ok: true, value: result === "alive" ? "alive" : "unknown" };
+    };
+    await f.dispatcher.tick(); // same birth, wrong terminal parent
+    expect(f.runtime.wake).not.toHaveBeenCalled();
+    parent = process.pid;
+    processReceipt = { ...receipt, start: "different" };
+    await f.dispatcher.tick(); // same parent, wrong birth
+    expect(f.runtime.wake).not.toHaveBeenCalled();
+    expect(f.owner().idle_retirement?.phase).toBe("waiting");
+    processReceipt = receipt;
+    await f.dispatcher.tick();
+    await f.dispatcher.tick();
+    expect(f.runtime.wake).toHaveBeenCalledOnce();
+    expect(vi.mocked(f.runtime.wake).mock.calls[0]?.[0]).toEqual(ref);
+    expect(observations).toEqual(["unknown", "unknown", "alive"]);
+    expect(f.owner().runtime_ref).toEqual(ref);
+    expect(f.startRun).not.toHaveBeenCalled();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+  } finally {
+    cli.kill();
+    await closed;
+  }
+});
 
 test("retirement alone guards an author-ended turn: report the refusal once and leave its Run queued", async () => {
   const logs = vi.spyOn(console, "info").mockImplementation(() => {});

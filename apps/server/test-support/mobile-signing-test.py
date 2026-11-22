@@ -18,7 +18,7 @@ import zipfile
 HELPERS = Path(__file__).resolve().parents[3] / 'deploy' / 'mobile-signing'
 sys.path.insert(0, str(HELPERS))
 from archives import inspect_zip
-from common import SCOPE, canonical, digest, directory, scope
+from common import SCOPE, SigningFailure, canonical, digest, directory, scope
 import host
 import platforms
 import worker
@@ -39,6 +39,9 @@ class Signing(unittest.TestCase):
         self.candidate=self.host/'candidate'
         with zipfile.ZipFile(self.candidate,'w') as z:
             z.writestr('AndroidManifest.xml',b'fixture')
+            z.writestr('assets/.godot/', b'')
+            z.writestr('assets/.godot/imported/icon.ctex', b'fixture')
+            z.writestr('assets/.import', b'fixture')
         self.candidate.chmod(0o600)
         self.spec={'id':'1'*32,'version':'test-v1','app':'test.fixture','build':'job-1','commit':'b'*40,
                    'sha256':digest(self.candidate),'expires':int(time.time())+600,'platform':'android',
@@ -79,6 +82,11 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
     def call(self,ctx=None,fence=lambda:None):
         return host.request(self.host,self.db,ctx or self.ctx,fence,self.dial)
 
+    def shown_receipt(self):
+        output = subprocess.check_output([sys.executable, '-IB', str(HELPERS/'host.py'),
+                                          str(self.host), 'show', self.spec['id']])
+        return json.loads(output)['worker_receipt']
+
     @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
     def test_once_reconcile_then_export(self):
         rid=self.spec['id']; out=self.host/'outputs'/rid
@@ -90,6 +98,7 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertEqual(self.call(),(rid,digest(out))); self.assertEqual(self.calls,2)
         self.assertEqual(self.call(),(rid,digest(out))); self.assertEqual(self.calls,2)
         self.assertEqual((self.worker/'uses').read_text(),'used\n')
+        self.assertEqual(self.shown_receipt(), {'state':'signed','sha256':digest(out)})
         self.assertNotEqual(digest(out),self.spec['sha256'])
         rows=''.join(self.db.iterdump()); self.assertNotIn('private-fixture-marker',rows)
         for k in ('run','machine','project','card','build','commit','sha256','version'): self.assertIn(self.spec[k],rows)
@@ -147,6 +156,7 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertEqual(self.db.execute('SELECT state,output FROM grants').fetchone(),('failed',None))
         with self.assertRaises(ValueError): self.call()
         self.assertFalse((self.worker/'uses').exists())
+        self.assertEqual(self.shown_receipt(), {'state':'failed','sha256':None,'failure_category':'signing_failed'})
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses root')
     def test_public_cert_pass_still_checks_signed_output(self):
@@ -155,6 +165,77 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         with self.assertRaises(ValueError): self.call()
         self.assertEqual((self.worker/'uses').read_text(),'used\n')
         self.assertEqual(self.db.execute('SELECT state,output FROM grants').fetchone(),('failed',None))
+        self.assertEqual(self.shown_receipt(), {'state':'failed','sha256':None,'failure_category':'apksigner_failed'})
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_failure_details_survive_disconnect_and_old_lookup(self):
+        cfg = json.loads(self.policy.read_bytes())
+        Path(cfg['aapt2']).write_text('#!/bin/sh\necho private-fixture-marker\n')
+        self.db.execute("CREATE TRIGGER lost BEFORE UPDATE OF state ON grants WHEN NEW.state='failed' "
+                        "BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        with self.assertRaises(sqlite3.DatabaseError): self.call()
+        rid = self.spec['id']
+        self.assertIsNone(self.shown_receipt())
+        self.db.execute('DROP TRIGGER lost')
+        # Legacy host compares the entire failed header, even on lookup.
+        msg = canonical({'mode':'lookup','grant':self.spec,'size':0}).encode() + b'\ncommit\n'
+        with self.dial(self.host, 'fixture') as proc:
+            reply, _ = proc.communicate(msg)
+        self.assertEqual(reply, b'ready\n{"status":"failed"}\n')
+        expected = {'state':'failed','sha256':None,'failure_category':'package_mismatch'}
+        self.assertEqual(host.reconcile(self.db,self.host,rid,self.dial), expected)
+        self.assertEqual(self.shown_receipt(), expected)
+        self.assertFalse((self.worker/'uses').exists())
+        from contextlib import closing
+        with closing(sqlite3.connect(self.worker/'audit.sqlite')) as db:
+            self.assertNotIn('private-fixture-marker', ''.join(db.iterdump()))
+            # Historical receipts have no detail table; an unrecognised peer value is not public either.
+            db.execute("UPDATE failure_categories SET category='private-fixture-marker'")
+            old = {'state':'failed','sha256':None}
+            db.commit()
+            self.assertEqual(worker.receipt(self.worker,self.spec), old)
+            db.execute('DROP TABLE failure_categories')
+            self.assertEqual(worker.receipt(self.worker,self.spec), old)
+        self.assertNotIn('private-fixture-marker', ''.join(self.db.iterdump()))
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_delayed_pending_reconcile_keeps_failed_receipt(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from contextlib import closing, contextmanager
+        from threading import Event
+
+        cfg = json.loads(self.policy.read_bytes())
+        Path(cfg['aapt2']).write_text('#!/bin/sh\necho different.package\n')
+        ready, resume = Event(), Event()
+
+        @contextmanager
+        def delayed_reply(root, peer):
+            with self.dial(root, peer) as proc:
+                yield proc
+            # The receipt was read during the signer's ready/commit handshake.
+            ready.set()
+            self.assertTrue(resume.wait(5))
+
+        def reconcile():
+            with closing(host.ledger(self.host)) as observer:
+                return host.reconcile(observer, self.host, self.spec['id'], delayed_reply)
+
+        expected = {'state':'failed','sha256':None,'failure_category':'package_mismatch'}
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = None
+            def fence():
+                nonlocal future
+                future = pool.submit(reconcile)
+                self.assertTrue(ready.wait(5))
+            try:
+                with self.assertRaises(ValueError): self.call(fence=fence)
+                self.assertEqual(self.shown_receipt(), expected)
+            finally:
+                resume.set()
+            self.assertEqual(future.result(), expected)
+        self.assertEqual(self.shown_receipt(), expected)
+        self.assertEqual(self.db.execute('SELECT state,output FROM grants').fetchone(), ('failed', None))
+        self.assertFalse((self.worker/'uses').exists())
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses root')
     def test_failed_first_audit_preserves_one_dispatch(self):
@@ -226,13 +307,72 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
                 self.assertNotIn(b'sha256',response.getvalue())
                 self.assertNotEqual(worker.receipt(self.worker,self.spec)['state'],'signed')
 
-    def test_unsafe_archive_members_are_refused(self):
-        for name,mode in [('../other',0),('/other',0),('ok/link',0o120777),('a\\b',0),('x/Foo',0)]:
+    def test_godot_paths_in_apk_but_not_ios_archive(self):
+        signed = self.root/'signed.apk'
+        platforms.android(json.loads(self.policy.read_bytes()), self.candidate, signed, self.root)
+        with zipfile.ZipFile(signed) as z:
+            self.assertEqual(z.read('assets/.godot/imported/icon.ctex'), b'fixture')
+            self.assertIn('assets/.import', z.namelist())
+        tree = directory(self.root, 'tree')
+        with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, tree)
+        self.assertEqual(caught.exception.category, 'archive_member_name')
+        self.assertFalse((tree/'assets/.godot').exists())
+
+    def test_apk_member_name_boundaries(self):
+        for name in ('../other','assets/../x','./file','x/.','/absolute','ok//file','ok//',
+                     'a\\b','x/line\nfeed','x/ctrl\x01','x/trailing.','x/trailing ',
+                     'x/.Cache/other','x/.cache/file/nested'):
             with self.subTest(name=name):
                 with zipfile.ZipFile(self.candidate,'w') as z:
-                    z.writestr('x/foo',b'first'); i=zipfile.ZipInfo(name);i.external_attr=mode<<16;z.writestr(i,b'fixture')
-                with self.assertRaises(ValueError): inspect_zip(self.candidate)
-        with patch('archives.LIMIT',1),self.assertRaises(ValueError): inspect_zip(self.candidate)
+                    z.writestr('x/.cache/file',b'first'); z.writestr(name,b'fixture')
+                with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, apk=True)
+                self.assertEqual(caught.exception.category, 'archive_member_name')
+
+    def test_same_godot_member_requires_classic_zip(self):
+        path = 'assets/.godot/item'
+        for zip64 in (False, True):
+            with self.subTest(zip64=zip64):
+                with zipfile.ZipFile(self.candidate, 'w') as z:
+                    z.writestr('AndroidManifest.xml', b'fixture')
+                    with z.open(path, 'w', force_zip64=zip64) as member:
+                        member.write(b'fixture')
+                if zip64:
+                    with self.assertRaises(ValueError): inspect_zip(self.candidate, apk=True)
+                else:
+                    self.assertIn(path, inspect_zip(self.candidate, apk=True))
+
+    def test_apk_extra_fields_are_checked_by_tag(self):
+        # An unrelated field may contain the same bytes as the ZIP64 tag.
+        item = zipfile.ZipInfo('assets/.godot/item')
+        for tag in (0xcafe, 0x0001):
+            with self.subTest(tag=tag):
+                item.extra = struct.pack('<HHQQ', tag, 16, 1, 1)
+                with zipfile.ZipFile(self.candidate, 'w') as z:
+                    z.writestr(item, b'x')
+                if tag == 0x0001:
+                    with self.assertRaises(ValueError): inspect_zip(self.candidate, apk=True)
+                else:
+                    self.assertIn(item.filename, inspect_zip(self.candidate, apk=True))
+
+    def test_apk_keeps_other_archive_limits(self):
+        with patch('archives.LIMIT',1), self.assertRaises(SigningFailure) as caught:
+            inspect_zip(self.candidate, apk=True)
+        self.assertEqual(caught.exception.category, 'archive_too_large')
+        with zipfile.ZipFile(self.candidate,'a') as z:
+            i=zipfile.ZipInfo('assets/.link'); i.external_attr=0o120777<<16; z.writestr(i,b'fixture')
+        with self.assertRaises(ValueError): inspect_zip(self.candidate, apk=True)
+        with zipfile.ZipFile(self.candidate,'w') as z:
+            z.writestr('plain',b'fixture'); z.comment=b'comment'
+        with self.assertRaises(ValueError): inspect_zip(self.candidate, apk=True)
+
+    def test_hidden_signature_files_are_not_unsigned_inputs(self):
+        for name in ('META-INF/KEY.SF', 'META-INF/.SF', 'META-INF/.rsa'):
+            with self.subTest(name=name):
+                with zipfile.ZipFile(self.candidate, 'w') as z:
+                    z.writestr('AndroidManifest.xml', b'fixture'); z.writestr(name, b'fixture')
+                with self.assertRaises(SigningFailure) as caught:
+                    platforms.android({}, self.candidate, self.root/'unused', self.root)
+                self.assertEqual(caught.exception.category, 'archive_invalid')
 
 
 class DeviceArchive(unittest.TestCase):
