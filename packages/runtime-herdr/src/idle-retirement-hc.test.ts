@@ -106,7 +106,14 @@ test.skipIf(!available || process.platform !== "linux").each([false, true])(
           ),
         ).toBe("exited");
       }
-      expect(result).toEqual({ ok: true, value: { outcome: "exited" } });
+      // A system-ended stop also asks the kernel whether the probed leader
+      // and its whole group are gone; plain idle retirement does not.
+      expect(result).toEqual({
+        ok: true,
+        value: cold
+          ? { outcome: "exited", process_group_exited: true }
+          : { outcome: "exited" },
+      });
       expect((await inspect()).state).toBe("finished");
       expect(await readFile(join(dir, "dirty.txt"), "utf8")).toBe(
         "uncommitted fixture",
