@@ -73,6 +73,7 @@ import {
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckFailureAuthority,
+  pmSystemMergeReturnAuthority,
 } from "./merge-delegation.js";
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
@@ -93,6 +94,10 @@ import {
   suggestionProgressEvents,
   suggestionProgressToken,
 } from "./suggestion-progress.js";
+import {
+  systemMergeEnabled,
+  systemMergeHumanReason,
+} from "./system-merge-policy.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import {
   autoResumeUsed,
@@ -828,6 +833,86 @@ export function requestDecision(
     return { ...decision, ...routing };
   });
 }
+const pendingDecision = (q: Decision) =>
+  ["open", "provisional", "snoozed"].includes(q.status);
+/** A merge confirmation the system still holds; PM may only hold or return it. */
+const systemHeldMerge = (q: Decision) =>
+  q.trigger === "merge_confirmation" &&
+  q.decider === "system" &&
+  pendingDecision(q);
+/**
+ * C-591: PM Ops or PM Office holds or returns a merge confirmation the system
+ * holds, with a reason and the basis it relies on (e.g. the human's answer or
+ * a review). Returning has the same effect as the human's request-changes;
+ * only the system or the human can confirm the merge itself.
+ */
+function pmHandleSystemMerge(
+  d: CommandDraft,
+  q: Decision,
+  p: {
+    option: string;
+    rationale: string;
+    basis: string | undefined;
+    raw_quote: string;
+    snooze_until?: string;
+  },
+) {
+  ensure(
+    p.option === "hold" || p.option === "request_changes",
+    "unauthorized",
+    "系统处理的合并确认只能由系统或人确认合并；PM 只能暂缓（hold）或退回修改（request_changes）",
+  );
+  ensure(
+    q.options.some((o) => o.key === p.option),
+    "validation_failed",
+    "Option is not part of this decision",
+  );
+  // A human-only reason (sensitive card, policy change, ...) that the system
+  // has not handed over yet still keeps PM out, as before.
+  const card = q.card_id ? d.card(q.card_id) : undefined;
+  const humanReason =
+    !card || !systemMergeEnabled(d.state, card)
+      ? "自动合并授权已关闭，须由人处理。"
+      : (systemMergeHumanReason(d.state, q) ??
+        (mergeRequiresHuman(d.state, q)
+          ? "此合并确认须由人处理。"
+          : undefined));
+  ensure(
+    !humanReason,
+    "unauthorized",
+    `${humanReason ?? ""}PM 不能暂缓或退回，请交人在 Workbench 或本机 CLI 处理`,
+  );
+  text(p.rationale, "rationale");
+  ensure(
+    typeof p.basis === "string" && p.basis.trim().length > 0,
+    "validation_failed",
+    "暂缓或退回系统处理的合并确认须写明依据（例如人的拍板或审核结论）",
+  );
+  ensure(
+    p.snooze_until === undefined || p.option === "hold",
+    "validation_failed",
+    "snooze_until 只能用于暂缓合并确认",
+  );
+  const proxy_authority = pmSystemMergeReturnAuthority(d.state.project_id);
+  const notice = `${p.rationale.trim()}\n依据：${p.basis.trim()}`;
+  return resolveDecisionDraft(
+    d,
+    q,
+    {
+      option: p.option,
+      rationale: p.rationale,
+      raw_quote: p.raw_quote,
+      notice,
+      proxy_authority,
+      ...(p.snooze_until !== undefined ? { snooze_until: p.snooze_until } : {}),
+      ...(p.option === "hold"
+        ? { delegated_merge: { notice, proxy_authority } }
+        : {}),
+    },
+    true,
+  );
+}
+
 export function recordDecision(
   state: CommandState,
   actor: Actor,
@@ -956,6 +1041,33 @@ export function recordDecision(
       decision.status === "resolved" &&
       decision.resolution?.option === "merge" &&
       p.option === "request_changes";
+    // C-591: PM Office may also hold or return a system-held merge
+    // confirmation, citing the quoted basis; it can never confirm the merge.
+    if (
+      actor.kind === "assignment" &&
+      actor.role_id === "pm" &&
+      d.assignment?.scope === "standing" &&
+      d.assignment.standing_mode !== "ops" &&
+      actor.allowed_tools.includes("record_decision") &&
+      systemHeldMerge(held)
+    ) {
+      ensure(
+        p.pause_plan === undefined && !p.delegate_future,
+        "validation_failed",
+        "系统处理的合并确认，PM 只能暂缓（hold）或退回修改（request_changes）",
+      );
+      if (held.card_id) d.card(held.card_id);
+      text(p.raw_quote, "raw_quote");
+      return pmHandleSystemMerge(d, held, {
+        option: p.option,
+        rationale: p.rationale,
+        basis: p.raw_quote,
+        raw_quote: p.raw_quote,
+        ...(p.snooze_until !== undefined
+          ? { snooze_until: p.snooze_until }
+          : {}),
+      });
+    }
     ensure(
       (actor.kind === "human" &&
         (decision.decider === "human" || returningConfirmed)) ||
@@ -1097,6 +1209,12 @@ function resolveDecisionDraft(
     merge_override?: { reason: string; blockers: readonly string[] };
     via_suggestion?: boolean;
     human_decided_merge_basis?: HumanDecidedMergeBasis;
+    /** C-591: delegated authority other than the PM merge preference. */
+    proxy_authority?: string;
+    delegated_merge?: {
+      readonly notice: string;
+      readonly proxy_authority: string;
+    };
   },
   delegated: boolean,
 ) {
@@ -1117,7 +1235,10 @@ function resolveDecisionDraft(
       "卡片已暂停，请先解除暂停",
     );
   if (decision.trigger === "merge_confirmation" && p.option === "hold")
-    return snoozeMergeConfirmation(d, decision, p);
+    return snoozeMergeConfirmation(d, decision, {
+      ...p,
+      ...(p.delegated_merge ? { delegated: p.delegated_merge } : {}),
+    });
   const actor = d.actor;
   const result = recordDecisionResolution(
     d,
@@ -1134,9 +1255,10 @@ function resolveDecisionDraft(
       ...(delegated
         ? {
             proxy_authority:
-              decision.trigger === "merge_confirmation"
+              p.proxy_authority ??
+              (decision.trigger === "merge_confirmation"
                 ? mergeDelegationAuthority(d)
-                : delegationAuthority(d, decision.category ?? "general"),
+                : delegationAuthority(d, decision.category ?? "general")),
           }
         : {}),
       ...(delegated &&
@@ -1236,6 +1358,28 @@ export function resolveDelegatedDecision(
         "来源无关建议须单独提交，不得混入合并批准或其它授权",
       );
       return suggestSourceMergeUnrelated(d, q, p.source_unrelated);
+    }
+    if (systemHeldMerge(q)) {
+      ensure(
+        !p.escalate &&
+          p.role_rule_basis === undefined &&
+          p.decision_evidence === undefined &&
+          p.pause_plan === undefined &&
+          p.attachment_ids === undefined &&
+          p.suggestion === undefined &&
+          p.plain_summary === undefined,
+        "validation_failed",
+        "系统处理的合并确认，PM 只能暂缓（hold）或退回修改（request_changes），并写明理由和依据（notice）",
+      );
+      return pmHandleSystemMerge(d, q, {
+        option: p.option,
+        rationale: p.rationale,
+        basis: p.notice,
+        raw_quote: p.rationale,
+        ...(p.snooze_until !== undefined
+          ? { snooze_until: p.snooze_until }
+          : {}),
+      });
     }
     if (p.role_rule_basis !== undefined) {
       ensure(
