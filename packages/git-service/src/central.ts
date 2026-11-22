@@ -192,14 +192,29 @@ export class CentralRepositoryService {
       return "fast_forwarded" as const;
     return (await this.git.isAncestor(repo, next, old)) ? "ahead" : "diverged";
   }
+  /**
+   * Bring one baseline branch up to date from the source. A branch created in
+   * the source after the central clone is created here like the initial
+   * clone; a central-only branch (merged here, absent from the source) has
+   * nothing to sync and is reported `ahead`. Missing on both sides, or any
+   * other I/O failure, is an error.
+   */
   async syncFromSource(project: CentralProject): Promise<SourceSync> {
-    // A card's baseline branch may appear in the source after the central
-    // clone; it is then created from the source like the initial clone.
-    const { repo, base, old, next } = await this.sourceRefs(
-      project,
-      false,
-      await this.ensureRepository(project),
-    );
+    const repo = await this.ensureRepository(project),
+      base = `refs/heads/${project.base_branch}`;
+    let snapshot: Awaited<ReturnType<typeof this.sourceRefs>>;
+    try {
+      snapshot = await this.sourceRefs(project, false, repo);
+    } catch (error) {
+      if (await this.sourceLacks(repo, project, base)) {
+        if (await this.git.readRef(repo, base)) return "ahead";
+        throw new Error(
+          "Baseline branch is missing in both the central repository and the source",
+        );
+      }
+      throw error;
+    }
+    const { old, next } = snapshot;
     if (!old) {
       await this.createRef(repo, base, next);
       return "fast_forwarded";
@@ -208,6 +223,31 @@ export class CentralRepositoryService {
     if (status === "fast_forwarded")
       await this.git.compareAndSwapRef(repo, base, next, old);
     return status;
+  }
+  /** Proven absence only: an unanswerable query is not treated as missing. */
+  private async sourceLacks(
+    repo: string,
+    project: CentralProject,
+    ref: string,
+  ): Promise<boolean> {
+    if (!this.git.sourceHasRef) return false;
+    try {
+      return !(await this.git.sourceHasRef(repo, project.source_repo, ref));
+    } catch {
+      return false;
+    }
+  }
+  /**
+   * The central repository with this baseline branch present; a branch the
+   * source created after the central clone is created on first use.
+   */
+  async ensureBranch(project: CentralProject): Promise<string> {
+    const repository = await this.ensureRepository(project);
+    if (
+      !(await this.git.readRef(repository, `refs/heads/${project.base_branch}`))
+    )
+      await this.syncFromSource(project);
+    return this.ensureCentral(project);
   }
   /** Read-only view of §3.2 for reconciliation: never moves the baseline. */
   async sourceStatus(project: CentralProject): Promise<SourceSync> {

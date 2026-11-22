@@ -2045,28 +2045,31 @@ export class MergeChecks {
     await tryPublication(task.project.project_id, async () => {
       if (this.fenced(task.project.project_id)) return;
       if (this.abort.signal.aborted || !this.valid(task, true)) return;
-      await this.git().publish(
-        task.project,
-        task.plan.completion_id,
-        candidate,
-        mergePublicationGuard({
-          store: this.options.store,
-          project: task.project.project_id as ProjectId,
-          plan: task.plan,
-          clock: this.options.clock,
-          settings: mergeProjectSettings(
-            this.options.configuration,
-            task.project.project_id,
-          ),
-          stopped: () =>
-            this.abort.signal.aborted || this.fenced(task.project.project_id),
-          result: {
-            kind: "merged",
-            merge_sha: candidate.candidate_sha,
-            previous_sha: candidate.previous_sha,
-            tree_sha: candidate.tree_sha,
-          },
-        }),
+      const git = this.git();
+      await mergeStage("发布合并", () =>
+        git.publish(
+          task.project,
+          task.plan.completion_id,
+          candidate,
+          mergePublicationGuard({
+            store: this.options.store,
+            project: task.project.project_id as ProjectId,
+            plan: task.plan,
+            clock: this.options.clock,
+            settings: mergeProjectSettings(
+              this.options.configuration,
+              task.project.project_id,
+            ),
+            stopped: () =>
+              this.abort.signal.aborted || this.fenced(task.project.project_id),
+            result: {
+              kind: "merged",
+              merge_sha: candidate.candidate_sha,
+              previous_sha: candidate.previous_sha,
+              tree_sha: candidate.tree_sha,
+            },
+          }),
+        ),
       );
     });
   }

@@ -52,6 +52,8 @@ export type CommandState = {
       readonly target: string;
       readonly branch: string;
       readonly base_branch: string;
+      /** The registered baseline: older records without a branch belong here. */
+      readonly registered?: boolean;
     }[];
   };
   /** Effective issuance tools, read in the flow-upgrade caller's fresh transaction. */

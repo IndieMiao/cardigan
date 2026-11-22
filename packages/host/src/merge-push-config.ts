@@ -8,6 +8,8 @@ export interface MergePushConfig {
   readonly branch: string;
   /** Central baseline branch this route publishes (cards with this `base_branch`). */
   readonly baseBranch: string;
+  /** The project's registered baseline: push records without a branch belong here. */
+  readonly registered?: boolean;
   readonly target: string;
   readonly keyFile?: string;
   readonly knownHostsFile?: string;
@@ -163,6 +165,7 @@ export async function parseMergePushConfig(
     remote,
     branch,
     baseBranch: source,
+    ...(source === baseBranch ? { registered: true } : {}),
     ...keys,
     target: createHash("sha256")
       .update(JSON.stringify([remote, branch]))

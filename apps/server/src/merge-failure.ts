@@ -33,8 +33,9 @@ export async function mergeStage<T>(
 }
 
 /**
- * One bounded line for a timeline: credentials redacted, absolute paths and
- * the argv line of a failed command dropped.
+ * One bounded line for a timeline: credentials, paths (quoted ones whole),
+ * URLs, hosts and IP addresses redacted; the argv line of a failed command
+ * dropped.
  */
 export function redactMergeFailure(error: unknown): string {
   const raw =
@@ -52,7 +53,22 @@ export function redactMergeFailure(error: unknown): string {
       .map((l) => l.trim())
       .find((l) => l.length > 0) ?? "";
   const clean = line
-    .replace(/(?<=^|[\s'"`(=])(?:file:\/\/)?~?\/[^\s'"`,;:)]*/gu, "<路径>")
+    // A quoted path may contain spaces: replace the whole quotation. Plain
+    // ref names stay readable.
+    .replace(/(['"`])([^'"`]*)\1/gu, (whole, quote: string, body: string) =>
+      /^refs\/[\w./-]+$/u.test(body) || !/[/\\@]|:\/\//u.test(body)
+        ? whole
+        : `${quote}<路径>${quote}`,
+    )
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`]+/giu, "<地址>")
+    .replace(/\b[\w.-]+@[\w.-]+:[^\s'"`]*/gu, "<地址>")
+    .replace(/(?<=^|[\s'"`(=])~?\/[^\s'"`,;:)]*/gu, "<路径>")
+    .replace(/\b(host(?:name)?)\s+[^\s'"`,;:]+/giu, "$1 <主机>")
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/gu, "<地址>")
+    .replace(
+      /\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b|\b(?:[0-9a-f]{1,4}:){1,7}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?|(?<![\w:])::[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*/giu,
+      "<地址>",
+    )
     .replace(/[\p{Cc}]/gu, "")
     .slice(0, 200);
   return clean || "未知错误";

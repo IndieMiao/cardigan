@@ -902,3 +902,48 @@ test("C-589: one batch never mixes baseline branches; each branch queues separat
     ),
   ).toMatchObject({ ok: true });
 });
+
+test("C-589: a merge window protects files only on its own baseline branch", async () => {
+  const f = await fixture(3);
+  const [one, two, three] = f.members;
+  if (!one || !two || !three) throw new Error("Missing cards");
+  f.commit(
+    setMergeWindow(
+      f.state(),
+      human,
+      { card_id: one.card_id, open: true, reason: "Protect shared file" },
+      f.io,
+    ),
+  );
+  f.commit(
+    refreshMergeWindows(
+      f.state(),
+      system,
+      {
+        paths: f.members.map((m) => ({
+          card_id: m.card_id,
+          versions: mergeWindowVersions(f.state(), m.card_id),
+          files: ["src/shared.ts"],
+        })),
+      },
+      f.io,
+    ),
+  );
+  const branched = (): CommandState => ({
+    ...f.state(),
+    cards: f
+      .state()
+      .cards.map((card) =>
+        card.id === two.card_id
+          ? { ...card, base_branch: "integration/demo" }
+          : card,
+      ),
+  });
+  // Same file, other branch: not held. Same branch keeps the protection.
+  expect(heldByMergeWindow(branched(), two.card_id)).toBeUndefined();
+  expect(heldByMergeWindow(branched(), three.card_id)).toBe(one.card_id);
+  expect(mergeQueue(branched()).map((q) => q.plan.card_id)).toEqual([
+    one.card_id,
+    two.card_id,
+  ]);
+});

@@ -45,6 +45,7 @@ export function mergeProjectSettings(
                 target: route.target,
                 branch: route.branch,
                 base_branch: route.baseBranch,
+                ...(route.registered ? { registered: true } : {}),
               })),
             }
           : {}),
@@ -137,6 +138,7 @@ export class MergePushExecutor {
           {
             target: push.target,
             branch: push.branch,
+            base_branch: push.baseBranch,
             attempt_id: randomUUID(),
           },
           ports,

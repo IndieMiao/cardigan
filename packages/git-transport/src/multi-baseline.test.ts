@@ -184,3 +184,30 @@ test("unusable branch names and branches missing from the source fail explicitly
   ).rejects.toThrow();
   expect(await git(repo, "show-ref", "--heads")).not.toContain("nowhere");
 });
+
+test("a central-only branch merges without a source branch; missing on both sides fails", async () => {
+  await git(f.source, "switch", "-q", "-c", farm);
+  const farmBase = await commit(f.source, "farm base");
+  await git(f.source, "switch", "-q", "main");
+  const view = centralBranch(f.project, farm);
+  expect(await f.central.ensureBranch(view)).toBe(repo);
+  expect(await git(repo, "rev-parse", `refs/heads/${farm}`)).toBe(farmBase);
+  const onFarm = await deliver("D-5", farmBase, "central-only.txt");
+  // The source drops the branch; the central branch carries on alone.
+  await git(f.source, "branch", "-q", "-D", farm);
+  expect(await f.central.syncFromSource(view)).toBe("ahead");
+  const prepared = await f.central.prepareMerge(
+    view,
+    plan("C-5", "D-50", farm, "D-5", onFarm),
+  );
+  expect(prepared).toMatchObject({
+    status: "candidate",
+    previous_sha: farmBase,
+  });
+  await expect(
+    f.central.syncFromSource(centralBranch(f.project, "nowhere")),
+  ).rejects.toThrow(/missing in both/u);
+  await expect(
+    f.central.ensureBranch(centralBranch(f.project, "nowhere")),
+  ).rejects.toThrow(/missing in both/u);
+});

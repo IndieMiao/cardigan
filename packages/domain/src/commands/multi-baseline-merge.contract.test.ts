@@ -3,6 +3,7 @@ import {
   type Actor,
   beginMergePush,
   type CommandState,
+  foreignMergePushCommits,
   mergePushRoute,
   pmMergeBlockers,
   recordMergeResult,
@@ -149,4 +150,71 @@ test("a missing check result says whether the gate is unconfigured or the candid
   const blockers = pmMergeBlockers(gated(), q);
   expect(blockers).toContain(`合并候选准备失败，检查未排队：${reason}`);
   expect(blockers.join("\n")).not.toContain("未配置合并闸门");
+});
+
+test("rebinding a remote branch to another baseline never inherits the old queue or trusted boundary", async () => {
+  const onMain = await merged("main", { merge_push: [main] });
+  expect(onMain.queued).toHaveLength(1);
+  // The same remote target now publishes integration/farm instead of main.
+  const rebound = { ...main, base_branch: "integration/farm" };
+  const state = (): CommandState => ({
+    ...onMain.state(),
+    project_settings: { merge_push: [rebound] },
+  });
+  expect(
+    beginMergePush(
+      state(),
+      system,
+      {
+        target: main.target,
+        branch: "main",
+        base_branch: "integration/farm",
+        attempt_id: "rebound-1",
+      },
+      onMain.f.io,
+    ),
+  ).toMatchObject({ ok: true, value: { data: undefined } });
+  // The original binding still sees its queued merge.
+  expect(
+    beginMergePush(
+      onMain.state(),
+      system,
+      { target: main.target, branch: "main", attempt_id: "main-1" },
+      onMain.f.io,
+    ),
+  ).toMatchObject({
+    ok: true,
+    value: { data: { base_branch: "main", sha: "c".repeat(40) } },
+  });
+});
+
+test("foreign-commit evidence counts only merges into the route's own branch", async () => {
+  const onFarm = await merged("integration/farm");
+  const chain = [
+    {
+      sha: "c".repeat(40),
+      parent: "d".repeat(40),
+      author: "Fixture",
+      committer: "Fixture",
+      subject: "farm merge",
+    },
+  ];
+  expect(
+    foreignMergePushCommits(
+      onFarm.state(),
+      main.target,
+      "d".repeat(40),
+      chain,
+      "main",
+    ).foreign.map((c) => c.sha),
+  ).toEqual(["c".repeat(40)]);
+  expect(
+    foreignMergePushCommits(
+      onFarm.state(),
+      farm.target,
+      "d".repeat(40),
+      chain,
+      "integration/farm",
+    ).foreign,
+  ).toEqual([]);
 });

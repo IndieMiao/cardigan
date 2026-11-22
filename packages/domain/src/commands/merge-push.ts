@@ -13,6 +13,12 @@ export type MergePushFailure = "rejected" | "network" | "auth" | "other";
 export interface MergePushDestination {
   readonly target: string;
   readonly branch: string;
+  /**
+   * Central baseline branch this route publishes. Records of one target are
+   * kept per base branch: rebinding a remote branch to another baseline never
+   * inherits the old queue, attempt or trusted boundary.
+   */
+  readonly base_branch?: string;
 }
 export interface MergePushAttempt extends MergePushDestination {
   readonly attempt_id: string;
@@ -75,7 +81,7 @@ interface Finished extends MergePushAttempt {
   readonly exit_code?: number;
   readonly next_retry_at?: string;
 }
-const records = (state: CommandState, target: string) =>
+const targetRecords = (state: CommandState, target: string) =>
   state.events
     .filter(
       (e) =>
@@ -84,6 +90,65 @@ const records = (state: CommandState, target: string) =>
         (e.payload as { target?: string } | null)?.target === target,
     )
     .sort((a, b) => a.seq - b.seq);
+/**
+ * The baseline branch a push record belongs to. New records carry it; older
+ * ones derive it from the card whose merge was queued, so an unchanged single
+ * route keeps its history.
+ */
+function recordBranches(state: CommandState, events: readonly Event[]) {
+  const byId = new Map(events.map((e) => [e.id, e]));
+  const branches = new Map<EventId, string | undefined>();
+  const of = (e: Event | undefined, depth = 0): string | undefined => {
+    if (!e || depth > 2) return undefined;
+    if (branches.has(e.id)) return branches.get(e.id);
+    const payload = e.payload as {
+      base_branch?: unknown;
+      card_id?: unknown;
+      queue_ids?: unknown;
+      held_event_id?: unknown;
+    } | null;
+    let branch: string | undefined;
+    if (typeof payload?.base_branch === "string") branch = payload.base_branch;
+    else if (e.type === "merge_push_queued")
+      branch = state.cards.find((c) => c.id === payload?.card_id)?.base_branch;
+    else if (Array.isArray(payload?.queue_ids) && payload.queue_ids.length)
+      branch = of(byId.get(payload.queue_ids[0] as EventId), depth + 1);
+    else if (typeof payload?.held_event_id === "string")
+      branch = of(byId.get(payload.held_event_id as EventId), depth + 1);
+    branches.set(e.id, branch);
+    return branch;
+  };
+  return of;
+}
+/**
+ * Records of one route: a target and the central branch it publishes.
+ * Records whose branch cannot be derived belong only to the registered route.
+ */
+const records = (
+  state: CommandState,
+  target: string,
+  base_branch: string | undefined,
+  registered = registeredRoute(state, target, base_branch),
+) => {
+  const events = targetRecords(state, target);
+  if (base_branch === undefined) return events;
+  const branch = recordBranches(state, events);
+  return events.filter((e) => {
+    const own = branch(e);
+    return own === base_branch || (own === undefined && registered);
+  });
+};
+const registeredRoute = (
+  state: CommandState,
+  target: string,
+  base_branch: string | undefined,
+) =>
+  (state.project_settings?.merge_push ?? []).some(
+    (r) => r.target === target && r.base_branch === base_branch && r.registered,
+  );
+/** The baseline branch of one record of `target` (an attempt or a hold). */
+const branchOf = (state: CommandState, target: string, event: Event) =>
+  recordBranches(state, targetRecords(state, target))(event);
 const validDestination = (p: MergePushDestination) =>
   /^[a-f0-9]{64}$/u.test(p.target) &&
   p.branch.trim() === p.branch &&
@@ -133,10 +198,21 @@ export function foreignMergePushCommits(
   target: string,
   base: string,
   chain: readonly MergePushCommit[],
+  /** Only merges into this central branch count as the loop's own commits. */
+  base_branch?: string,
 ): { readonly foreign: readonly MergePushCommit[]; readonly broken: boolean } {
   const segments = new Map<string, string>();
+  const registered = registeredRoute(state, target, base_branch);
   for (const e of state.events) {
     if (e.type !== "card_merged") continue;
+    // Only merges into this route's branch are evidence for its chain.
+    const merged = state.cards.find((c) => c.id === e.card_id)?.base_branch;
+    if (
+      base_branch !== undefined &&
+      merged !== base_branch &&
+      !(merged === undefined && registered)
+    )
+      continue;
     const r = (e.payload as { result?: Record<string, unknown> } | null)
       ?.result;
     if (
@@ -148,7 +224,7 @@ export function foreignMergePushCommits(
       segments.set(r.merge_sha, r.previous_sha);
   }
   const accepted = new Set(
-    records(state, target)
+    records(state, target, base_branch)
       .filter((e) => e.type === "merge_push_hold_resolved")
       .flatMap((e) => (e.payload as unknown as Resolved).accepted),
   );
@@ -231,14 +307,15 @@ export function beginMergePush(
       "validation_failed",
       "Invalid push identity",
     );
-    ensure(
-      (state.project_settings?.merge_push ?? []).some(
-        (r) => r.target === p.target && r.branch === p.branch,
-      ),
-      "illegal_transition",
-      "Push destination is not enabled",
+    const route = (state.project_settings?.merge_push ?? []).find(
+      (r) =>
+        r.target === p.target &&
+        r.branch === p.branch &&
+        (p.base_branch === undefined || r.base_branch === p.base_branch),
     );
-    const events = records(state, p.target),
+    ensure(route, "illegal_transition", "Push destination is not enabled");
+    const base_branch = route.base_branch;
+    const events = records(state, p.target, base_branch),
       last = control(events);
     if (last?.type === "merge_push_started") {
       const started = last.payload as unknown as MergePushAttempt;
@@ -279,6 +356,7 @@ export function beginMergePush(
       d.emit("merge_push_hold_resolved", undefined, {
         target: p.target,
         branch: p.branch,
+        base_branch,
         held_event_id: last.id,
         human_action_id: held.human_action_id,
         mode: "reverted",
@@ -344,7 +422,7 @@ export function beginMergePush(
       "Push must start at the first pending merge",
     );
     ensure(
-      !events.some(
+      !targetRecords(state, p.target).some(
         (e) =>
           (e.payload as { attempt_id?: string } | null)?.attempt_id ===
           p.attempt_id,
@@ -357,6 +435,7 @@ export function beginMergePush(
     const attempt: MergePushAttempt = {
       target: p.target,
       branch: p.branch,
+      base_branch,
       attempt_id: p.attempt_id,
       queue_ids: selected.map((e) => e.id),
       sha: target.sha,
@@ -450,7 +529,18 @@ export function recordMergePushResult(
       "validation_failed",
       "Invalid push exit code",
     );
-    const events = records(state, p.target);
+    // The attempt's own baseline branch selects its records, even if the
+    // route was rebound while it ran.
+    const own = targetRecords(state, p.target).find(
+      (e) =>
+        e.type === "merge_push_started" &&
+        (e.payload as unknown as MergePushAttempt).attempt_id === p.attempt_id,
+    );
+    const events = records(
+      state,
+      p.target,
+      own ? branchOf(state, p.target, own) : undefined,
+    );
     const existing = events.find(
       (e) =>
         ["merge_pushed", "merge_push_failed"].includes(e.type) &&
@@ -627,7 +717,13 @@ export function checkMergePushRange(
       "validation_failed",
       "Invalid first-parent range",
     );
-    const events = records(state, p.target),
+    const own = targetRecords(state, p.target).find(
+      (e) =>
+        e.type === "merge_push_started" &&
+        (e.payload as unknown as MergePushAttempt).attempt_id === p.attempt_id,
+    );
+    const branch = own ? branchOf(state, p.target, own) : undefined;
+    const events = records(state, p.target, branch),
       last = control(events);
     if (
       last?.type === "merge_push_held" &&
@@ -654,6 +750,7 @@ export function checkMergePushRange(
       p.target,
       base,
       p.chain,
+      branch,
     );
     const reasons: MergePushHoldReason[] = [];
     if (attempt.base_trusted !== true) reasons.push("boundary");
@@ -730,7 +827,8 @@ export function acceptMergePushHold(
     ensure(event, "not_found", "No push hold for this human action");
     const held = event.payload as unknown as Held;
     ensure(
-      control(records(state, held.target))?.id === event.id,
+      control(records(state, held.target, branchOf(state, held.target, event)))
+        ?.id === event.id,
       "stale_target",
       "This push hold was already resolved",
     );
@@ -743,9 +841,11 @@ export function acceptMergePushHold(
       human_action_id: p.human_action_id,
       text: p.text,
     });
+    const heldBranch = branchOf(state, held.target, event);
     d.emit("merge_push_hold_resolved", undefined, {
       target: held.target,
       branch: held.branch,
+      ...(heldBranch === undefined ? {} : { base_branch: heldBranch }),
       held_event_id: event.id,
       human_action_id: p.human_action_id,
       mode: "accept",

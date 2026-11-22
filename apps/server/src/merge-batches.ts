@@ -31,6 +31,7 @@ import {
 import { type CentralProject, centralBranch } from "@cardigan/git-service";
 import type { ProjectMergeGate } from "@cardigan/host";
 import type { MergeGit } from "./git.js";
+import { mergeFailureReason, mergeStage } from "./merge-failure.js";
 import { tryPublication } from "./publication-lock.js";
 
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
@@ -90,20 +91,28 @@ export class MergeBatches {
       !git.baseline
     )
       throw new Error("合并队列缺少可信批次 Git 入口");
-    const baselines = new Map<string, Promise<string>>();
+    // Read only the branches that have work. A failing branch is isolated:
+    // its cards record the failing step, other branches keep their queue.
+    const baselines = new Map<string, Promise<string | undefined>>();
+    const failures = new Map<string, unknown>();
     const baselineOf = (branch: string) => {
       let read = baselines.get(branch);
       if (!read) {
-        const project = view(branch);
-        read = git.sync(project).then(() => {
-          if (!git.baseline) throw new Error("合并队列缺少可信批次 Git 入口");
-          return git.baseline(project);
+        read = (async () => {
+          const project = await mergeStage("选择基线分支", () => view(branch));
+          await mergeStage("同步源仓库", () => git.sync(project));
+          return mergeStage("读取基线", () => {
+            if (!git.baseline) throw new Error("合并队列缺少可信批次 Git 入口");
+            return git.baseline(project);
+          });
+        })().catch((error: unknown) => {
+          failures.set(branch, error);
+          return undefined;
         });
         baselines.set(branch, read);
       }
       return read;
     };
-    await baselineOf(registered.base_branch);
     if (git.deliveryChangedPaths) {
       const snapshot = state(id),
         windows = mergeWindows(snapshot.events).filter((w) => w.open);
@@ -119,12 +128,15 @@ export class MergeBatches {
           const versions = mergeWindowVersions(snapshot, card.id);
           const files = new Set<string>();
           const branch = card.base_branch ?? registered.base_branch;
+          const base = await baselineOf(branch);
+          // An unreadable branch keeps its cards' previous protection paths.
+          if (base === undefined) continue;
           for (const delivery of snapshot.deliveries.filter((v) =>
             versions.includes(v.id),
           ))
             for (const file of await git.deliveryChangedPaths(
               view(branch),
-              await baselineOf(branch),
+              base,
               delivery.subject.value,
             ))
               files.add(file);
@@ -154,9 +166,12 @@ export class MergeBatches {
         }
       }
       let reason: "stale" | "member_left" | undefined;
-      const project = viewOf(batch);
-      if ((await baselineOf(project.base_branch)) !== batch.base_sha)
-        reason = "stale";
+      const branch = branchOf(batch.members[0]?.card_id ?? "");
+      const base = await baselineOf(branch);
+      // Retry on a later tick; never abort a batch on an unreadable baseline.
+      if (base === undefined) continue;
+      const project = view(branch);
+      if (base !== batch.base_sha) reason = "stale";
       else {
         try {
           // The failed member has already returned for fixes. Only the proven
@@ -244,12 +259,23 @@ export class MergeBatches {
       command(id, (s, a, p) =>
         abortMergeBatch(s, a, { batch_id: probe.id, reason: "interrupted" }, p),
       );
-    if (activeMergeFamilies(state(id).events).length || fenced(id)) return;
+    if (activeMergeFamilies(state(id).events).length || fenced(id)) {
+      this.recordFailures(id, failures);
+      return;
+    }
     const queue = mergeQueue(state(id));
-    const branch = queue[0]?.plan.base_branch;
+    // The first branch in queue order whose baseline is readable forms the
+    // batch; other branches wait their turn, failed ones record why.
+    let branch: string | undefined;
+    for (const item of queue)
+      if ((await baselineOf(item.plan.base_branch)) !== undefined) {
+        branch = item.plan.base_branch;
+        break;
+      }
+    this.recordFailures(id, failures);
+    if (branch === undefined) return;
     const chosen: typeof queue = [];
     for (const item of queue) {
-      // The head of the queue chooses the branch; other branches wait their turn.
       if (item.plan.base_branch !== branch) continue;
       if (
         chosen.length >= settings.queue.maxBatchSize ||
@@ -259,9 +285,8 @@ export class MergeBatches {
       chosen.push(item);
       if (item.solo) break;
     }
-    if (!chosen.length || !branch) return;
+    if (!chosen.length) return;
     const project = view(branch);
-    await baselineOf(branch);
     const prepared = await git.prepareBatch(
       project,
       chosen.map((q) => q.plan),
@@ -388,6 +413,41 @@ export class MergeBatches {
         command(id, (s, a, p) =>
           formBisectProbe(s, a, { batch_id: batch.id, length }, p),
         );
+  }
+
+  /** Once per completion, like the direct merge loop: queued cards of a failed branch. */
+  private recordFailures(id: string, failures: ReadonlyMap<string, unknown>) {
+    if (!failures.size) return;
+    const { state, command } = this.options;
+    const snapshot = state(id);
+    for (const item of mergeQueue(snapshot)) {
+      if (!failures.has(item.plan.base_branch)) continue;
+      const recorded = snapshot.events.some(
+        (e) =>
+          e.type === "merge_failed" &&
+          (e.payload as { completion_id?: string } | null)?.completion_id ===
+            item.plan.completion_id,
+      );
+      if (recorded) continue;
+      command(id, (s, a, p) =>
+        recordMergeResult(
+          s,
+          a,
+          {
+            card_id: item.plan.card_id,
+            completion_id: item.plan.completion_id,
+            result: {
+              kind: "failed",
+              reason: mergeFailureReason(
+                item.plan.card_id,
+                failures.get(item.plan.base_branch),
+              ),
+            },
+          },
+          p,
+        ),
+      );
+    }
   }
 
   private async publish(project: CentralProject, batch: MergeBatch) {

@@ -323,7 +323,8 @@ export class GitWorktreeService {
     const { path, repository, readonly, baselineRef, branch } = target,
       a = input.assignment,
       card = input.card as Card;
-    const central = await this.central.ensureCentral(project);
+    // The card's branch may exist only in the source so far.
+    const central = await this.central.ensureBranch(project);
     await this.git.ensureClone(central, repository);
     const checkoutRef = input.target_sha ?? `refs/remotes/${baselineRef}`;
     const existing = (await this.git.listWorktrees(repository)).find(

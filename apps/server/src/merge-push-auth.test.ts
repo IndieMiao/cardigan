@@ -28,6 +28,7 @@ function fixture() {
     target: "f".repeat(64),
     branch: "main",
     baseBranch: "main",
+    registered: true,
     remote: "file:///unused",
   };
   let time = Date.parse("2035-01-01T00:00:00.000Z");

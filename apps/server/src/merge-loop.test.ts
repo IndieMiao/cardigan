@@ -877,6 +877,35 @@ test("C-589: the merge gate checks and publishes a card on another baseline bran
   expect(c.errors).toEqual([]);
 }, 30_000);
 
+test("C-589: a gated publication error is attributed to publication, not to checks", async () => {
+  const scenario = m4Scenario(f, "auto");
+  const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
+  const { product, completion } = await acceptThroughMergeGate(
+    f,
+    scenario,
+    sha,
+  );
+  await pin(product.id, sha);
+  const c = await gated();
+  vi.spyOn(c.binding, "publish").mockRejectedValue(
+    new Error(`fixture publish I/O error in ${f.dataDir}/central`),
+  );
+  await new MergeExecutor(c.options).tick();
+  await new MergeExecutor(c.options).tick();
+  expect(
+    latestMergeCheck(f.state().events, scenario.card.id, completion.id)?.status,
+  ).toBe("passed");
+  const reasons = f
+    .state()
+    .events.filter((e) => e.type === "merge_failed")
+    .map((e) => (e.payload as { result?: { reason?: string } }).result?.reason);
+  expect(reasons).toEqual([
+    `合并 ${scenario.card.id} 在「发布合并」环节失败：fixture publish I/O error in <路径>。未发布未经检查的代码`,
+  ]);
+  expect(f.card().status).toBe("awaiting_merge");
+  expect(await baseline()).toBe(repos.base);
+}, 30_000);
+
 test("an invalid configured gate blocks both execution and CLI recheck", async () => {
   const scenario = m4Scenario(f, "auto");
   const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
@@ -1281,6 +1310,56 @@ test("C-391: three approved cards share one final-tree check, one CAS and audita
     { sha: batch.final_sha, previous: repos.base, tree: batch.final_tree_sha },
   ]);
 }, 20_000);
+
+test("C-589: a queue branch that cannot sync records its step; other branches still batch and publish", async () => {
+  const farm = "integration/farm";
+  git(repos.source, "checkout", "-q", "-b", farm);
+  const farmBase = commit(repos.source, "farm.txt", "farm\n");
+  git(repos.source, "checkout", "-q", "main");
+  const [onMain] = await queuedCards(1);
+  const onFarm = m4Scenario(f, "auto", farm);
+  git(repos.agent, "fetch", "-q", "origin");
+  git(repos.agent, "checkout", "-q", "-B", "batch-farm", `origin/${farm}`);
+  const farmSha = commit(repos.agent, "farm-card.txt", "farm card\n");
+  git(repos.agent, "checkout", "-q", "main");
+  const delivered = await acceptThroughMergeGate(f, onFarm, farmSha);
+  await pin(delivered.product.id, farmSha);
+  const { options, binding } = await gated("true", true);
+  let broken = false;
+  const sync = binding.sync.bind(binding);
+  vi.spyOn(binding, "sync").mockImplementation(async (view) => {
+    if (broken && view.base_branch === "main")
+      throw new Error(`fixture outage at ${repos.root}/central`);
+    return sync(view);
+  });
+  const executor = new MergeExecutor(options);
+  await executor.tick(); // Independent card checks on both branches.
+  broken = true;
+  await executor.tick(); // main cannot sync; the farm card still forms a batch.
+  await executor.tick(); // Batch check and publication.
+  await executor.tick();
+  const card = (id: string | undefined) =>
+    f.state().cards.find((c) => c.id === id);
+  expect(card(onFarm.card.id)?.status).toBe("done");
+  expect(card(onMain)?.status).toBe("awaiting_merge");
+  const failed = f
+    .state()
+    .events.filter((e) => e.type === "merge_failed")
+    .map((e) => [
+      e.card_id,
+      (e.payload as { result?: { reason?: string } }).result?.reason,
+    ]);
+  expect(failed).toEqual([
+    [
+      onMain,
+      expect.stringContaining(`合并 ${onMain} 在「同步源仓库」环节失败`),
+    ],
+  ]);
+  expect(JSON.stringify(failed)).not.toContain(repos.root);
+  const repository = await central.ensureCentral(project);
+  expect(git(repository, "rev-parse", `refs/heads/${farm}^1`)).toBe(farmBase);
+  expect(await baseline()).toBe(repos.base);
+}, 30_000);
 
 test("C-391: recovery records all cards after CAS succeeded but recording crashed", async () => {
   await queuedCards(3);
