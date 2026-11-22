@@ -77,8 +77,8 @@ import type {
   Store,
   StoreTransactionContext,
 } from "@cardigan/store";
-
 import { backupBranches, backupWriter } from "./git-backup.js";
+import type { SnapshotOrphan } from "./orphan-cleanup.js";
 
 /**
  * M4.4: the server's Git assembly.
@@ -330,11 +330,7 @@ function agentWorkspace(
 /** What the control plane's phase loops need: merge plus cleanup/reconcile. */
 export type GitPhases = MergeGit &
   ReconcileGit & {
-    snapshotOrphan?(
-      project: ProjectId,
-      assignment: Assignment,
-      expected?: string,
-    ): Promise<string>;
+    snapshotOrphan?: SnapshotOrphan;
   };
 
 /**
@@ -907,7 +903,7 @@ export class ServerGit implements GitBinding {
   async snapshotOrphan(
     id: ProjectId,
     assignment: Assignment,
-    expected?: string,
+    verification?: Parameters<SnapshotOrphan>[2],
   ) {
     const project = this.projectOf(id);
     const ref = assignment.runtime_ref;
@@ -929,19 +925,24 @@ export class ServerGit implements GitBinding {
       assignment,
     );
     const backup = `refs/cardigan/backups/orphans/${assignment.id}/${generation}`;
-    const sha = await workerGit<string>(execution, {
+    const sha = await workerGit<string | null>(execution, {
       project: id,
       assignment: assignment.id,
-      operation: "snapshot",
+      operation: verification ? "verify-sealed-snapshot" : "snapshot",
+      ...(verification
+        ? { process: verification.process, expected: verification.sha }
+        : {}),
       timeout_ms: 60_000,
       repository: assignment.worktree_path,
       branch: assignment.branch,
       generation,
     });
     validateTarget?.();
-    if (expected && sha !== expected) throw new Error("Workspace changed");
+    if (!sha) return null;
+    if (verification && sha !== verification.sha)
+      throw new Error("Workspace changed");
     const repository = await central.ensureCentral(project);
-    if (!expected) {
+    if (!verification) {
       const source = await central.agentSource(project, assignment.machine_id);
       validateTarget?.();
       await central.git.fetchRefs(

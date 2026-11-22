@@ -3,11 +3,12 @@ import { posix } from "node:path";
 import { promisify } from "node:util";
 import { agentProcessCommand } from "./agent-ssh.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
-
 import { WorkerPreparationFailure } from "./worker-preparation-failure.js";
+import type { WorkerProcessIdentity } from "./worker-primitives.js";
 
 type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 export type WorkerGitOperation =
+  | "verify-sealed-snapshot"
   | "snapshot"
   | "check"
   | "stage"
@@ -30,6 +31,8 @@ export interface WorkerGitRequest {
   readonly format?: "sha1" | "sha256";
   readonly branch?: string;
   readonly generation?: string;
+  readonly expected?: string;
+  readonly process?: WorkerProcessIdentity;
   readonly args?: readonly string[];
 }
 
@@ -158,6 +161,8 @@ function validReply(operation: WorkerGitOperation, value: unknown): boolean {
       return typeof value === "boolean";
     case "directories":
       return Array.isArray(value) && value.every((v) => typeof v === "string");
+    case "verify-sealed-snapshot":
+      return value === null || validReply("snapshot", value);
     case "snapshot":
       return (
         typeof value === "string" &&

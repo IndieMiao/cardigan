@@ -15,8 +15,11 @@ import { unfinishedRun } from "./dispatch-alert.js";
 export type SnapshotOrphan = (
   project: ProjectId,
   a: Assignment,
-  expected?: string,
-) => Promise<string>;
+  verification?: {
+    sha: string;
+    process: NonNullable<RemoteWorkerLoss["process"]>;
+  },
+) => Promise<string | null>;
 const facts = (s: CommandState, loss: RemoteWorkerLoss) =>
   s.events.filter(
     (e) =>
@@ -160,7 +163,11 @@ export async function cleanReleasedOrphan(options: {
     !options.stopped() && !terminalFact(s) && !!exclusive(s, loss);
   let sha: string | undefined,
     verified = false,
-    backupFailed = false;
+    failure:
+      | "backup_failed"
+      | "writer_fence_unavailable"
+      | "sealed_verification_failed"
+      | undefined;
   const result = await runtime
     .retire_idle(a.runtime_ref, {
       ...idleRetirementPolicy(),
@@ -171,13 +178,22 @@ export async function cleanReleasedOrphan(options: {
       workspace_preflight: async () => {
         if (!eligible(state())) return false;
         try {
-          sha = await snapshot(project, a);
-          verified =
-            eligible(state()) &&
-            /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(sha) &&
-            (await snapshot(project, a, sha)) === sha;
+          sha = (await snapshot(project, a)) ?? undefined;
+          if (
+            !sha ||
+            !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(sha) ||
+            !eligible(state())
+          )
+            return false;
+          const sealed = await snapshot(project, a, { sha, process: receipt });
+          verified = sealed === sha;
+          if (!verified)
+            failure =
+              sealed === null
+                ? "writer_fence_unavailable"
+                : "sealed_verification_failed";
         } catch {
-          backupFailed = true;
+          failure = sha ? "sealed_verification_failed" : "backup_failed";
         }
         return verified;
       },
@@ -191,13 +207,13 @@ export async function cleanReleasedOrphan(options: {
         }),
     })
     .catch(() => undefined);
-  const reason = backupFailed
-    ? "backup_failed"
-    : result?.ok
+  const reason =
+    failure ??
+    (result?.ok
       ? result.value.outcome === "exited"
         ? "await_process_confirmation"
         : result.value.evidence.reason
-      : "result_unknown";
+      : "result_unknown");
   store.uow.run((tx) =>
     emit(tx, "remote_orphan_cleanup_finished", reason, sha),
   );

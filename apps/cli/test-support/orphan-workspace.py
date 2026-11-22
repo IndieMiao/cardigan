@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 
 def git(path, *args):
@@ -37,13 +38,16 @@ with tempfile.TemporaryDirectory() as tmp:
     w.safety = ['-c', 'core.hooksPath=/dev/null']
     before = git(tree, 'status', '--porcelain=v1')
     try:
-        if sys.argv[2:] == ['legacy']:
+        if sys.argv[2:] in (['legacy'], ['snapshot-only']):
+            if sys.argv[2:] == ['snapshot-only']:
+                assert w.operate()
+                w.request.update(operation='verify-sealed-snapshot')
             try:
                 w.operate()
             except ValueError as error:
                 assert str(error) == 'unsupported_operation'
             else:
-                raise AssertionError('old helper unexpectedly accepted snapshot')
+                raise AssertionError('old helper unexpectedly accepted new operation')
             w.request.update(operation='git', args=['-C',str(tree),'rev-parse','HEAD'])
             assert w.operate().strip() == git(repo, 'rev-parse', 'HEAD')
         else:
@@ -81,6 +85,44 @@ with tempfile.TemporaryDirectory() as tmp:
             else:
                 raise AssertionError('changed workspace considered backed up')
             assert git(repo, 'rev-parse', backup) == sha
+            if sys.platform == 'linux':
+                # An ordinary worker has no durable seal. Even the replicated
+                # SHA and the real original process can never substitute for it.
+                generation = 'b' * 32
+                w.request.update(operation='snapshot', generation=generation)
+                (tree / 'link').unlink()
+                before = git(tree, 'status', '--porcelain=v1')
+                sha = w.operate()
+                w.request.update(operation='verify-sealed-snapshot', expected=sha,
+                                 process=worker.native.identity('fixture', os.getpid(), generation, os.getpgrp()))
+                w.root = tmp
+                assert w.operate() is None
+                # Drive the complete traversal with synthetic kernel flags,
+                # keeping real worktree/index/ref reads and byte comparisons.
+                # The server fixture separately exercises actual kernel write denial.
+                mount = worker.mount_id(w.lock)
+                def verify(_w, _path):
+                    worker.verify_storage_seals(w, str(tree), {mount: 'ext4'})
+                    return True
+                with patch.object(worker, 'durable_writer_fence', verify), \
+                        patch.object(worker, 'inode_flags', return_value=0x100010):
+                    assert w.operate() == sha
+                    victim = (tree / 'mixed').stat().st_ino
+                    with patch.object(worker, 'inode_flags', side_effect=lambda fd:
+                            0x10 if os.fstat(fd).st_ino == victim else 0x100010):
+                        try:
+                            w.operate()
+                        except ValueError:
+                            pass
+                        else:
+                            raise AssertionError('immutable alone passed as verity')
+                    (tree / 'mixed').write_text('changed')
+                    try:
+                        w.operate()
+                    except ValueError:
+                        pass
+                    else:
+                        raise AssertionError('seal accepted different working bytes')
         assert git(tree, 'status', '--porcelain=v1') == before
     finally:
         os.close(w.lock)
