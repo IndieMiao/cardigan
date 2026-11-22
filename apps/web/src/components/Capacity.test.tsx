@@ -104,8 +104,12 @@ test("hover, keyboard and touch expose machine/CI details; Escape dismisses", as
   fireEvent.pointerEnter(button, { pointerType: "mouse" });
   let tooltip = await screen.findByRole("tooltip");
   expect(tooltip.textContent).toContain("第二台工作机 · Agent");
-  expect(tooltip.textContent).toContain("全部 5 · 非常驻 3 / 上限 6 / 排队 2");
-  expect(tooltip.textContent).toContain("全部 1 · 非常驻 1 / 上限 4 / 排队 0");
+  // C-576: 占用 adds this host's CI slots (3 + 2), as the scheduler does.
+  expect(tooltip.textContent).toContain("全部 5 · 占用 5 / 上限 6 / 排队 2");
+  expect(tooltip.textContent).toContain("全部 1 · 占用 1 / 上限 4 / 排队 0");
+  expect(tooltip.textContent).not.toContain("非常驻");
+  expect(tooltip.textContent).toContain("上限可在设置 → 机器的详情中修改。");
+  expect(tooltip.textContent).not.toContain("并发与容量”中");
   expect(tooltip.textContent).toContain("本机 CI 另占 2 个 Agent 名额");
   expect(tooltip.textContent).toContain(
     "常驻 PM（Office / Ops）和主机运维不占额度",

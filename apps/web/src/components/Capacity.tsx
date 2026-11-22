@@ -100,7 +100,10 @@ export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
         <div className="capacity-detail-row" key={machine.machine_id}>
           <strong>{machine.label} · Agent</strong>
           <span>
-            全部 {machine.total_running} · 非常驻 {machine.running} / 上限{" "}
+            {/* C-576: 占用 is what the scheduler compares with the limit, as
+                on the machine page: limited Runs plus this host's CI slots. */}
+            全部 {machine.total_running} · 占用{" "}
+            {machine.running + machine.merge_check_slots} / 上限{" "}
             {machine.limit || "不可用"} / 排队 {machine.queued}
           </span>
           {!!machine.resources?.length && (
@@ -120,8 +123,8 @@ export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
       ))}
       <p>
         常驻 PM（Office / Ops）和主机运维不占额度、不参与容量排队；工作项 PM
-        与其他 Agent
-        一样排队。上限比较非常驻占用，全部计数包含常驻。占用含启动和停止预留。
+        与其他 Agent 一样排队。上限比较占用：占用不含常驻、含本机 CI
+        名额，全部计数包含常驻。占用含启动和停止预留。
       </p>
       {data.merge_checks.map((target) => (
         <div className="capacity-detail-row" key={target.machine_id}>
@@ -139,7 +142,8 @@ export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
         data.merge_checks.length === 0 && <p>未启用合并检查</p>
       )}
       <p>
-        检查占用包含尚未确认结束的远端运行；排队包含作者预检。上限可在设置的“并发与容量”中查看。
+        检查占用包含尚未确认结束的远端运行；排队包含作者预检。上限可在设置 →
+        机器的详情中修改。
       </p>
     </>
   );

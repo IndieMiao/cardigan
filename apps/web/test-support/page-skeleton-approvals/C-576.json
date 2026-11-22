@@ -1,0 +1,26 @@
+{
+  "capacity-1440-dark.png": {
+    "hash": "7a27a6d96cd91e5fada18823b6b5c83bda27b9651463764b72bd39e2b65179bc",
+    "replaces": [
+      "4b452dedcc32d8c1490d7a478fd74da9e8c7b9c90e6fa6a7147b84cd2bac3127"
+    ]
+  },
+  "capacity-1440-light.png": {
+    "hash": "b7abba9436328d43eb5423aea63d8a874361d94e7cae98cb63d24775ea1f05e4",
+    "replaces": [
+      "2c2ae39d95cf90eb16c76c3d36a7f6134b46dfe0e5b858a24fd0402ba3c8b954"
+    ]
+  },
+  "capacity-390-dark.png": {
+    "hash": "5b9c509bfb580e4882345055515d00ac3929fdf17cfc237824d9f633301d9414",
+    "replaces": [
+      "012d4534e21c729ea2f7c607bfa4f3cb3ab5368c17071a856fcb7ccce8a578cc"
+    ]
+  },
+  "capacity-390-light.png": {
+    "hash": "9b00a0d6da136e89f0426a3a88c26d8dfd900dc087d69be2010fc229654fc856",
+    "replaces": [
+      "d5a36d3cd16672dd3955af616ff461e772d3bff66978e5acf26a860bcffb688c"
+    ]
+  }
+}
