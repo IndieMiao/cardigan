@@ -122,8 +122,9 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         with self.assertRaises(sqlite3.DatabaseError): self.call()
         with self.assertRaises(ValueError): host.checked_output(self.db,rid,out)
         self.db.execute('DROP TRIGGER interrupt')
-        self.assertEqual(self.call(),(rid,digest(out))); self.assertEqual(self.calls,2)
-        self.assertEqual(self.call(),(rid,digest(out))); self.assertEqual(self.calls,2)
+        # C-601: a claimed request first asks the signer's receipt (read-only), then looks it up.
+        self.assertEqual(self.call(),(rid,digest(out))); self.assertEqual(self.calls,3)
+        self.assertEqual(self.call(),(rid,digest(out))); self.assertEqual(self.calls,3)
         self.assertEqual((self.worker/'uses').read_text(),'used\n')
         self.assertEqual(self.shown_receipt(), {'state':'signed','sha256':digest(out)})
         self.assertNotEqual(digest(out),self.spec['sha256'])
@@ -364,6 +365,163 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
                                       accepted=lambda *a: reported.append(a)), result)
         self.assertEqual(reported[-1][::2], (rid, 'stored')); self.assertEqual(self.calls, 3)
 
+    def worker_receipt(self, **kw):
+        return worker.receipt(self.worker, self.spec, **kw)
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_transfer_cut_off_resumes_same_number_and_signs_once(self):
+        # C-601: the server restarted while the input was on its way. The signer
+        # never got a commit, so the same Run resends the same number and signs once.
+        rid = self.spec['id']; real = host.transfer; procs = []
+        def dial(root, peer):
+            procs.append(self.dial(root, peer)); return procs[-1]
+        def cut_off(src, dst, size):
+            if dst is None or len(procs) != 1:
+                return real(src, dst, size)
+            dst.write(src.read(size // 2)); dst.close()
+            self.assertNotEqual(procs[0].wait(timeout=10), 0)
+            raise host.Stopped('interrupted')
+        with patch('host.transfer', cut_off), self.assertRaises(host.Stopped):
+            host.request(self.host, self.db, self.ctx, lambda: None, dial)
+        self.assertEqual(self.actions(), ['registered','approved','request','interrupted'])
+        self.assertEqual(self.db.execute('SELECT state,output FROM grants').fetchone(), ('pending', None))
+        self.assertEqual(self.worker_receipt(dispatch_states=True), {'state':'received','sha256':None})
+        # Old control hosts only know pending for a request that has not finished.
+        self.assertEqual(self.worker_receipt(), {'state':'pending','sha256':None})
+        reported = []
+        result = host.request(self.host, self.db, self.ctx, lambda: None, dial,
+                              accepted=lambda *a: reported.append(a))
+        out = self.host/'outputs'/rid
+        self.assertEqual(result, (rid, digest(out)))
+        self.assertEqual(digest(out), digest(self.worker/'outputs'/rid))
+        # Reported before the receipt query, so the caller keeps the number either way.
+        self.assertEqual(reported, [(rid, host.budget(self.host, self.candidate.stat().st_size), 'continue')])
+        self.assertEqual(self.actions()[-3:], ['resume','dispatch','signed'])
+        self.assertEqual(len(procs), 3)  # cut-off attempt, receipt query, resend
+        self.assertEqual((self.worker/'uses').read_text(), 'used\n')
+        self.assertEqual(self.call(), result); self.assertEqual(self.calls, 3)
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_failed_receipt_query_keeps_number_and_never_resends(self):
+        # Review V-2980:1: the receipt query of a claimed request fails (peer gone).
+        # The number is still reported for polling; an unknown receipt sends nothing.
+        rid = self.spec['id']
+        def gone(): raise BrokenPipeError()
+        with self.assertRaises(BrokenPipeError): self.call(fence=gone)
+        def silent(root, peer):
+            self.calls += 1
+            return subprocess.Popen([sys.executable, '-IB', '-c', 'import sys; sys.stdin.readline()'],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        reported = []
+        with self.assertRaises(ValueError):
+            host.request(self.host, self.db, self.ctx, lambda: None, silent, accepted=lambda *a: reported.append(a))
+        self.assertEqual(reported, [(rid, host.budget(self.host, self.candidate.stat().st_size), 'continue')])
+        self.assertEqual(self.actions()[-1], 'not_released')
+        self.assertEqual(self.db.execute('SELECT state FROM grants').fetchone(), ('pending',))
+        self.assertFalse((self.worker/'uses').exists())
+        # Back online: the same number resumes and is signed once.
+        self.assertEqual(self.call()[0], rid)
+        self.assertEqual((self.worker/'uses').read_text(), 'used\n')
+
+    def test_stopped_receipt_query_is_bounded_and_audited(self):
+        # Review V-2980:2: SIGTERM while a peer stays silent on the receipt query.
+        # The helper hangs up at once, records interrupted, and leaves no connection.
+        with sqlite3.connect(self.host/'audit.sqlite') as db:
+            db.execute("UPDATE grants SET state='pending'")
+            db.execute("INSERT INTO dispatch_peer VALUES(?,?)", (self.spec['id'], 'fixture'))
+        procs = []
+        def silent(root, peer):
+            procs.append(subprocess.Popen([sys.executable, '-IB', '-c', 'import sys, time; sys.stdin.readline(); time.sleep(30)'],
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL))
+            return procs[-1]
+        import threading
+        main = threading.main_thread().ident
+        timer = threading.Timer(0.25, lambda: signal.pthread_kill(main, signal.SIGTERM))
+        previous = signal.signal(signal.SIGTERM, host.stop('interrupted'))
+        started = time.monotonic()
+        try:
+            timer.start()
+            with self.assertRaises(host.Stopped):
+                host.request(self.host, self.db, self.ctx, lambda: None, silent)
+        finally:
+            timer.cancel(); signal.signal(signal.SIGTERM, previous)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(len(procs), 1); self.assertIsNotNone(procs[0].poll())
+        self.assertEqual(self.actions()[-1], 'interrupted')
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_fence_lost_before_commit_resumes(self):
+        # The helper never passed the fence (old server gone): nothing was dispatched.
+        def gone(): raise BrokenPipeError()
+        with self.assertRaises(BrokenPipeError): self.call(fence=gone)
+        self.assertEqual(self.worker_receipt(dispatch_states=True)['state'], 'received')
+        self.assertEqual(self.call()[0], self.spec['id'])
+        self.assertEqual(self.actions()[-5:], ['request','not_released','resume','dispatch','signed'])
+        self.assertEqual((self.worker/'uses').read_text(), 'used\n')
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_cut_off_after_commit_is_looked_up_not_resent(self):
+        # C-601: committed, signed, the result lost on the way back. No operator
+        # reconcile: the same Run's next call looks the stored output up.
+        rid = self.spec['id']; real_line = host.line
+        def lost(stream):
+            data = real_line(stream)
+            if data.startswith(b'{"sha256"'): raise host.Stopped('interrupted')
+            return data
+        with patch('host.line', lost), self.assertRaises(host.Stopped): self.call()
+        self.assertEqual(self.worker_receipt(dispatch_states=True)['state'], 'signed')
+        self.assertEqual(self.call(), (rid, digest(self.host/'outputs'/rid)))
+        self.assertEqual(self.actions()[2:], ['request','dispatch','interrupted','lookup','reconcile','signed'])
+        self.assertEqual((self.worker/'uses').read_text(), 'used\n')
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_committed_or_busy_request_is_never_resent(self):
+        import fcntl
+        from contextlib import closing
+        def gone(): raise BrokenPipeError()
+        with self.assertRaises(BrokenPipeError): self.call(fence=gone)
+        # Another connection still holds the signer (e.g. the old helper is ending):
+        # the resend is refused by the serial lock, then accepted once it is free.
+        with (self.worker/'serial.lock').open('ab') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with self.assertRaises(ValueError): self.call()
+        self.assertEqual(self.actions()[-2:], ['resume','not_released'])
+        # The signer took the commit and stopped before a result (crash while signing,
+        # or an old signer whose pending is ambiguous): from here on lookup only.
+        with closing(sqlite3.connect(self.worker/'audit.sqlite')) as db:
+            db.execute("UPDATE receipts SET state='pending'"); db.commit()
+        calls = self.calls
+        with self.assertRaises(ValueError): self.call()
+        self.assertEqual(self.actions()[-3:], ['lookup','reconcile','not_released'])
+        self.assertEqual(self.calls, calls + 2)  # receipt query, lookup; no input sent
+        data = self.candidate.read_bytes()
+        src = io.BytesIO(canonical({'grant':self.spec,'mode':'sign','size':len(data)}).encode()+b'\n'+data+b'commit\n')
+        dst = io.BytesIO()
+        with self.assertRaises(ValueError): worker.serve(self.worker, src, dst)
+        self.assertEqual(dst.getvalue(), b'')
+        self.assertFalse((self.worker/'uses').exists())
+        # Another grant under the same number is not a resend either.
+        with closing(sqlite3.connect(self.worker/'audit.sqlite')) as db:
+            db.execute("UPDATE receipts SET state='received'"); db.commit()
+        other = {**self.spec, 'build': 'job-2'}
+        src = io.BytesIO(canonical({'grant':other,'mode':'sign','size':len(data)}).encode()+b'\n'+data+b'commit\n')
+        with self.assertRaises(ValueError): worker.serve(self.worker, src, io.BytesIO())
+        with self.assertRaises(ValueError): worker.receipt(self.worker, other, dispatch_states=True)
+        self.assertFalse((self.worker/'uses').exists())
+
+    def test_receipt_states_for_new_and_old_hosts(self):
+        absent = {'state':'absent','sha256':None}
+        self.assertEqual(self.worker_receipt(dispatch_states=True), absent)  # no journal yet
+        with self.assertRaises(Exception): self.worker_receipt()
+        directory(self.worker, 'outputs')
+        with sqlite3.connect(self.worker/'audit.sqlite') as db:
+            db.execute('CREATE TABLE receipts(id TEXT PRIMARY KEY, spec TEXT, state TEXT, sha TEXT)')
+        self.assertEqual(self.worker_receipt(dispatch_states=True), absent)
+        with self.assertRaises(ValueError): self.worker_receipt()
+        src = io.BytesIO(canonical({'grant':self.spec,'mode':'receipt','size':0,'dispatch_states':True}).encode()+b'\n')
+        dst = io.BytesIO(); worker.serve(self.worker, src, dst)
+        self.assertEqual(json.loads(dst.getvalue()), absent)
+
     def test_main_reports_acceptance_then_fences(self):
         out = directory(self.host,'outputs')/self.spec['id']
         save(out, 'signed-fixture')
@@ -411,6 +569,24 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
             proc.terminate()
             self.assertNotEqual(proc.wait(timeout=10), 0)
         self.assertEqual(self.actions()[-2:], ['request', 'interrupted'])
+
+    @unittest.skipUnless(os.path.exists('/usr/bin/ssh'), 'helper dials the fixed OpenSSH client')
+    def test_orphaned_helper_interrupts_itself(self):
+        # C-601: the server exits while its helper waits on the signer. The helper
+        # notices it was orphaned, records interrupted and frees the connection.
+        save(self.host/'ssh.conf', 'Host fixture\n  ProxyCommand /bin/sleep 30\n')
+        parent = subprocess.run([sys.executable, '-IB', '-c', '''import subprocess, sys
+p = subprocess.Popen([sys.executable, '-IB', sys.argv[1], sys.argv[2], 'request'],
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+p.stdin.write(sys.stdin.buffer.readline()); p.stdin.flush()
+sys.stdout.buffer.write(p.stdout.readline())''', str(HELPERS/'host.py'), str(self.host)],
+            input=canonical(self.ctx).encode()+b'\n', capture_output=True, timeout=10)
+        self.assertTrue(parent.stdout.startswith(f'accepted {self.spec["id"]} '.encode()))
+        for _ in range(100):
+            if self.actions()[-1:] == ['interrupted']: break
+            time.sleep(0.1)
+        self.assertEqual(self.actions()[-2:], ['request', 'interrupted'])
+        self.assertEqual(self.db.execute('SELECT state FROM grants').fetchone(), ('pending',))
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses root')
     def test_worker_historical_receipt_is_metadata_only(self):
