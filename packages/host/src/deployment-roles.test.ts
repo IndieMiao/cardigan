@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { type Assignment, upgradeRole } from "@cardigan/domain";
+import {
+  type Assignment,
+  type RoleDefinition,
+  upgradeRole,
+} from "@cardigan/domain";
 import { DEFAULT_ROLE_KINDS, defaultRoleDefinition } from "@cardigan/roles";
 import {
   getRoleVersion,
@@ -389,14 +393,114 @@ test("MC-2 deployed machine capabilities append a role version while keeping wor
   }
 });
 
-test.each([
-  "legacy_baseline",
-  "full_baseline",
-  "manual",
-  "requirements_changed",
-] as const)(
-  "a role upgraded by the CLI from the previous default upgrades on the next deployment: %s",
-  (mode) => {
+type Requirements = readonly string[];
+const deploymentCases: readonly {
+  readonly name: string;
+  /** How the previous default differs from the deployed one. */
+  readonly previous: {
+    readonly instructions?: string;
+    readonly required_capabilities: Requirements;
+  };
+  /** A project edit after the CLI upgrade. */
+  readonly edit?: {
+    readonly instructions?: string;
+    readonly required_capabilities?: Requirements;
+  };
+  readonly supervisor: "full" | "legacy";
+  readonly receipt:
+    | "default_hash"
+    | "legacy_matched"
+    | "legacy_conflict"
+    | "none";
+  readonly notice?: string;
+}[] = [
+  {
+    name: "CLI upgrade, current supervisor",
+    previous: {
+      instructions: "Earlier default instructions",
+      required_capabilities: ["browser.chromium"],
+    },
+    supervisor: "full",
+    receipt: "none",
+  },
+  {
+    name: "CLI upgrade, older supervisor, published receipt",
+    previous: {
+      instructions: "Earlier default instructions",
+      required_capabilities: ["browser.chromium"],
+    },
+    supervisor: "legacy",
+    receipt: "default_hash",
+  },
+  {
+    name: "CLI upgrade, older supervisor, receipt without defaults",
+    previous: {
+      instructions: "Earlier default instructions",
+      required_capabilities: ["browser.chromium"],
+    },
+    supervisor: "legacy",
+    receipt: "legacy_conflict",
+    notice: "无法确认当前机器要求是否为项目手改",
+  },
+  {
+    name: "hand-edited instructions",
+    previous: {
+      instructions: "Earlier default instructions",
+      required_capabilities: ["browser.chromium"],
+    },
+    edit: { instructions: "Earlier default instructions\nProject review rule" },
+    supervisor: "full",
+    receipt: "default_hash",
+    notice: "当前版本有手工改动",
+  },
+  {
+    name: "hand-added requirement the next default also adds",
+    previous: {
+      instructions: "Earlier default instructions",
+      required_capabilities: [],
+    },
+    edit: { required_capabilities: ["browser.chromium"] },
+    supervisor: "full",
+    receipt: "default_hash",
+    notice: "当前版本有手工改动",
+  },
+  {
+    name: "hand-added requirement the next default also adds, no receipt",
+    previous: {
+      instructions: "Earlier default instructions",
+      required_capabilities: [],
+    },
+    edit: { required_capabilities: ["browser.chromium"] },
+    supervisor: "full",
+    receipt: "none",
+    notice: "无法确认当前机器要求是否为项目手改",
+  },
+  {
+    name: "next default drops a requirement, older supervisor",
+    previous: {
+      instructions: "Earlier default instructions",
+      required_capabilities: ["browser.chromium", "gpu"],
+    },
+    supervisor: "legacy",
+    receipt: "default_hash",
+  },
+  {
+    name: "next default only adds a requirement, older supervisor",
+    previous: { required_capabilities: [] },
+    supervisor: "legacy",
+    receipt: "legacy_matched",
+  },
+  {
+    name: "next default only adds a requirement, current supervisor",
+    previous: { required_capabilities: [] },
+    supervisor: "full",
+    receipt: "none",
+  },
+];
+
+test.each(deploymentCases)(
+  "a deployment upgrades only roles matching a published default: $name",
+  ({ previous, edit, supervisor, receipt, notice }) => {
     const store = Store.open({ dbPath: ":memory:" });
     const project = "cli-upgrade";
     try {
@@ -406,20 +510,26 @@ test.each([
         launch_profile_ref: "fixture",
       };
       const nextDefault = defaultRoleDefinition("design_director", launch);
+      expect(nextDefault.required_capabilities).toEqual(["browser.chromium"]);
       const previousDefault = {
         ...nextDefault,
-        instructions: "Earlier default instructions",
+        ...previous,
+        required_capabilities: [...previous.required_capabilities],
       };
-      expect(previousDefault.required_capabilities).toEqual([
-        "browser.chromium",
-      ]);
-      const { required_capabilities: _, ...beforeRequirements } =
-        previousDefault;
-      store.uow.run((tx) => {
+      // A supervisor built before machine requirements omits them from its snapshot.
+      const snapshot = (role: RoleDefinition) =>
+        deploymentRolePolicyHash(
+          supervisor === "full" ? role : { ...role, required_capabilities: [] },
+        );
+      const { required_capabilities: _, ...oldest } = {
+        ...nextDefault,
+        instructions: "Oldest default instructions",
+      };
+      const versions = store.uow.run((tx) => {
         writeRole(
           tx,
           project,
-          { ...beforeRequirements, core_prompt: "", version: 1 },
+          { ...oldest, core_prompt: "", version: 1 },
           { mode: "add" },
         );
         // Same write as `cardigan role upgrade design_director --from-default`.
@@ -433,64 +543,96 @@ test.each([
         if (!upgraded.ok || upgraded.value.unchanged)
           throw new Error("Expected a CLI upgrade");
         persistRoleEffect(tx, project, upgraded.value.effect);
-        if (mode === "manual" || mode === "requirements_changed")
+        if (edit)
           writeRole(
             tx,
             project,
             {
               ...previousDefault,
+              ...edit,
+              required_capabilities: [
+                ...(edit.required_capabilities ??
+                  previousDefault.required_capabilities),
+              ],
               core_prompt: "",
               version: 3,
-              ...(mode === "manual"
-                ? {
-                    instructions: `${previousDefault.instructions}\nProject review rule`,
-                  }
-                : { required_capabilities: ["browser.chromium", "gpu"] }),
             },
             { mode: "update" },
           );
+        // The receipt the previous release published, before the CLI upgrade.
+        const published = {
+          default_hash: {
+            version: 1,
+            policy_hash: deploymentRolePolicyHash(oldest),
+            disposition: "conflict",
+            default_hash: deploymentRolePolicyHash(previousDefault),
+          },
+          legacy_matched: {
+            version: 2,
+            policy_hash: deploymentRolePolicyHash(previousDefault),
+            disposition: "matched",
+          },
+          legacy_conflict: {
+            version: 1,
+            policy_hash: deploymentRolePolicyHash(oldest),
+            disposition: "conflict",
+          },
+          none: undefined,
+        }[receipt];
+        if (published)
+          tx.events.append(project, {
+            id: tx.ids.nextEventId(),
+            seq: tx.ids.nextEventSequence(project),
+            type: "host_role_pack_published",
+            actor: { kind: "system", project_id: project },
+            created_at: "2026-11-18T00:00:00.000Z",
+            payload: {
+              pack_hash: "previous-release",
+              roles: { design_director: published },
+            },
+          });
+        return listRoleVersions(tx, project).length;
       });
       const before = store.uow.read((tx) =>
         getRoleVersion(tx, project, "design_director"),
       );
-      // A supervisor built before machine requirements omits them from its snapshot.
-      const baseline =
-        mode === "full_baseline"
-          ? deploymentRolePolicyHash(previousDefault)
-          : deploymentRolePolicyHash({
-              ...previousDefault,
-              required_capabilities: [],
-            });
+      const changed =
+        snapshot(previousDefault) === snapshot(nextDefault)
+          ? []
+          : ["design_director"];
       upgradeDeployedRoles(
         store,
         project,
-        ["design_director"],
-        { design_director: baseline },
+        changed,
+        { design_director: snapshot(previousDefault) },
         new Set(["fixture"]),
       );
       store.uow.read((tx) => {
         const after = getRoleVersion(tx, project, "design_director");
         const events = tx.events.listAfter(project, undefined, 0);
-        const receipt = events
+        const latest = events
           .filter((e) => e.type === "host_role_pack_published")
           .at(-1)?.payload as {
-          roles: Record<string, { disposition: string }>;
+          roles: Record<string, { disposition: string; default_hash: string }>;
         };
-        if (mode === "legacy_baseline" || mode === "full_baseline") {
-          expect(after).toMatchObject({
-            version: 3,
-            instructions: nextDefault.instructions,
-            required_capabilities: ["browser.chromium"],
-          });
-          expect(tx.human_actions.list(project)).toEqual([]);
+        const actions = tx.human_actions.list(project);
+        expect(latest.roles.design_director?.default_hash).toBe(
+          deploymentRolePolicyHash(nextDefault),
+        );
+        if (notice === undefined) {
+          expect(after?.version).toBe(versions + 1);
+          expect(after && deploymentRolePolicyHash(after)).toBe(
+            deploymentRolePolicyHash(nextDefault),
+          );
+          expect(actions).toEqual([]);
           expect(events.map((e) => e.type)).toContain("host_role_upgraded");
-          expect(receipt.roles.design_director?.disposition).toBe("matched");
+          expect(latest.roles.design_director?.disposition).toBe("matched");
         } else {
           expect(after).toEqual(before);
-          const actions = tx.human_actions.list(project);
           expect(actions).toHaveLength(1);
-          expect(actions[0]?.instructions).toContain("当前版本有手工改动");
-          expect(receipt.roles.design_director?.disposition).toBe("conflict");
+          expect(actions[0]?.instructions).toContain(notice);
+          expect(events.map((e) => e.type)).not.toContain("host_role_upgraded");
+          expect(latest.roles.design_director?.disposition).toBe("conflict");
         }
       });
     } finally {

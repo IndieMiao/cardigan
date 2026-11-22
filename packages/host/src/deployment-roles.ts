@@ -70,32 +70,14 @@ export function deploymentRolePolicyHash(role: RoleDefinition): string {
   return createHash("sha256").update(JSON.stringify(policy)).digest("hex");
 }
 
-/**
- * Supervisors built before machine requirements hash the previous pack without
- * required_capabilities, and the supervisor does not upgrade with the release.
- * That legacy hash cannot vouch for the requirements, so accept it only when the
- * role already carries the next default's requirements: the upgrade loses nothing.
- */
-function matchesPreviousDefault(
-  role: RoleDefinition,
-  baseline: string,
-  next: RoleDefinition,
-): boolean {
-  if (deploymentRolePolicyHash(role) === baseline) return true;
-  const requirements = (r: RoleDefinition) =>
-    JSON.stringify([...(r.required_capabilities ?? [])].sort());
-  return (
-    deploymentRolePolicyHash({ ...role, required_capabilities: [] }) ===
-      baseline && requirements(role) === requirements(next)
-  );
-}
-
 /** Fingerprint the loaded package, not the mutable project role definitions. */
 let loadedPackHash: string | undefined;
 type PublishedRole = {
   readonly version: number;
   readonly policy_hash: string;
   readonly disposition: "matched" | "conflict" | "unverified";
+  /** The publishing release's own default policy; older receipts omit it. */
+  readonly default_hash?: string;
 };
 type RolePackReceipt = {
   readonly pack_hash: string;
@@ -178,6 +160,26 @@ function rolePackPublication(tx: ReadRepositories, project: ProjectId) {
     .at(-1);
 }
 
+/**
+ * Defaults of the pack this project last published, recorded by the deployed
+ * release itself. Unlike the supervisor's snapshot it never depends on the
+ * supervisor's build, which does not upgrade with the release.
+ */
+function publishedDefaults(tx: ReadRepositories, project: ProjectId) {
+  const receipt = rolePackPublication(tx, project)?.payload as
+    | RolePackReceipt
+    | undefined;
+  return new Map(
+    Object.entries(receipt?.roles ?? {}).flatMap(([id, role]) => {
+      // A matched role in an older receipt equalled that release's default.
+      const hash =
+        role.default_hash ??
+        (role.disposition === "matched" ? role.policy_hash : undefined);
+      return hash ? [[id, hash] as const] : [];
+    }),
+  );
+}
+
 /** Run from the deployed build, so defaults come from that exact release. */
 export function upgradeDeployedRoles(
   store: Store,
@@ -203,11 +205,14 @@ export function upgradeDeployedRoles(
           ),
         ),
       );
+    const baselineOf = (id: string) =>
+      Object.hasOwn(previousDefaults, id) ? previousDefaults[id] : undefined;
+    const published = publishedDefaults(tx, project);
     const ids = [
       ...new Set(listRoleVersions(tx, project).map((r) => r.role_id)),
     ];
     for (const id of ids) {
-      if (!isDefaultRoleId(id) || !changedRoles.includes(id)) continue;
+      if (!isDefaultRoleId(id)) continue;
       const roles = listRoleVersions(tx, project);
       const latest = roles.filter((r) => r.role_id === id).at(-1);
       if (!latest || latest.status === "inactive") continue;
@@ -216,31 +221,45 @@ export function upgradeDeployedRoles(
         launch_profile_ref: latest.launch_profile_ref,
       });
       const currentHash = deploymentRolePolicyHash(latest);
+      const sourceHash = deploymentRolePolicyHash(source);
       // No write is necessary when a formerly manual rule has reached the default pack.
-      if (currentHash === deploymentRolePolicyHash(source)) continue;
-      const baseline = Object.hasOwn(previousDefaults, id)
-        ? previousDefaults[id]
-        : undefined;
-      if (!baseline) {
+      if (currentHash === sourceHash) continue;
+      // An older supervisor's snapshot misses machine requirement changes; the
+      // published receipt still shows this role's default moved.
+      const previous = published.get(id);
+      if (
+        !changedRoles.includes(id) &&
+        (previous === undefined || previous === sourceHash)
+      )
+        continue;
+      const baseline = baselineOf(id);
+      if (currentHash !== previous && !baseline) {
         recordRoleDeferral(
           tx,
           project,
-          `missing-default:${id}:${latest.version}:${deploymentRolePolicyHash(source)}`,
+          `missing-default:${id}:${latest.version}:${sourceHash}`,
           `角色 ${id} 缺少上一默认包指纹，系统保留当前版本并通知 PM 排查部署基线；未创建人工拍板。`,
           clock.now(),
         );
         continue;
       }
-      if (!matchesPreviousDefault(latest, baseline, source)) {
+      if (currentHash !== previous && currentHash !== baseline) {
         if (source.instructions === undefined)
           throw new Error("Default role instructions missing");
         const diff = roleUpgradeDiff(latest, {
           ...source,
           instructions: source.instructions,
         });
+        // A supervisor built before machine requirements hashes without them;
+        // only a published receipt can then tell a hand-added requirement apart.
+        const unverifiable =
+          previous === undefined &&
+          !!latest.required_capabilities?.length &&
+          deploymentRolePolicyHash({ ...latest, required_capabilities: [] }) ===
+            baseline;
         pending(
-          `deployment-role-manual:${id}:${latest.version}:${deploymentRolePolicyHash(source)}`,
-          `角色 ${id} 未自动升级：${baseline ? "当前版本有手工改动，与上一次已部署默认版本不一致" : "缺少上一次已部署默认版本，无法确认当前版本是否有手工改动"}。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
+          `deployment-role-manual:${id}:${latest.version}:${sourceHash}`,
+          `角色 ${id} 未自动升级：${unverifiable ? "上一次已部署默认版本的指纹不含机器要求，无法确认当前机器要求是否为项目手改" : "当前版本有手工改动，与上一次已部署默认版本不一致"}。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
         );
         continue;
       }
@@ -288,20 +307,24 @@ export function upgradeDeployedRoles(
     for (const role of listRoleVersions(tx, project)) {
       if (!isDefaultRoleId(role.role_id)) continue;
       const policy_hash = deploymentRolePolicyHash(role);
-      const source = defaultRoleDefinition(role.role_id, {
-        harness: role.harness,
-        launch_profile_ref: role.launch_profile_ref,
-      });
-      const baseline = previousDefaults[role.role_id];
+      const default_hash = deploymentRolePolicyHash(
+        defaultRoleDefinition(role.role_id, {
+          harness: role.harness,
+          launch_profile_ref: role.launch_profile_ref,
+        }),
+      );
+      const baseline = baselineOf(role.role_id);
+      const previous = published.get(role.role_id);
       roles[role.role_id] = {
         version: role.version,
         policy_hash,
         disposition:
-          policy_hash === deploymentRolePolicyHash(source)
+          policy_hash === default_hash
             ? "matched"
-            : baseline && !matchesPreviousDefault(role, baseline, source)
+            : baseline && policy_hash !== baseline && policy_hash !== previous
               ? "conflict"
               : "unverified",
+        default_hash,
       };
     }
     const receipt: RolePackReceipt = { pack_hash, roles };
