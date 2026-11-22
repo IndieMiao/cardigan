@@ -513,6 +513,7 @@ export function updateCard(
     goal?: string;
     acceptance_criteria?: readonly string[];
     priority?: number | string;
+    deadline?: string | null;
     status?: Card["status"];
     story_children?: StoryChildChoice;
     risk_tags?: Card["risk_tags"];
@@ -559,6 +560,7 @@ export function updateCard(
           p.goal === undefined &&
           p.acceptance_criteria === undefined &&
           p.priority === undefined &&
+          p.deadline === undefined &&
           p.status === undefined &&
           p.is_ui_framework === undefined &&
           p.depends_on_cards === undefined &&
@@ -574,6 +576,7 @@ export function updateCard(
     }
     if (p.title !== undefined) text(p.title, "title");
     if (p.goal !== undefined) text(p.goal, "goal");
+    if (p.deadline != null) text(p.deadline, "deadline");
     if (p.high_risk !== undefined)
       ensure(
         d.actor.kind === "human" && typeof p.high_risk === "boolean",
@@ -625,8 +628,11 @@ export function updateCard(
     if (cancelling && card.story)
       settleStoryChildren(d, card, p.story_children);
     const cancelledRunIds = cancelling ? cancelCardWork(d, card) : [];
+    const { deadline: previousDeadline, ...base } = dependencyCard;
+    const deadline = p.deadline === undefined ? previousDeadline : p.deadline;
     const result: Card = {
-      ...dependencyCard,
+      ...base,
+      ...(deadline == null ? {} : { deadline }),
       status,
       ...(p.status !== undefined &&
       p.wait_for_dependencies === undefined &&
@@ -646,12 +652,23 @@ export function updateCard(
     };
     d.put("cards", result);
     if (status === "cancelled") cancelCardHumanActions(d, card.id);
+    const notes = [dependencyChangeNotice(result, p)];
+    if (p.deadline !== undefined && p.deadline !== (previousDeadline ?? null))
+      notes.push(
+        p.deadline === null ? "截止日期已清除" : `截止日期：${p.deadline}`,
+      );
     d.emit(
       "card_updated",
       card.id,
       {
         card_id: card.id,
         status,
+        ...(p.deadline !== undefined
+          ? {
+              previous_deadline: previousDeadline ?? null,
+              deadline: p.deadline,
+            }
+          : {}),
         ...(p.is_ui_framework !== undefined
           ? { is_ui_framework: p.is_ui_framework }
           : {}),
@@ -686,7 +703,7 @@ export function updateCard(
             }
           : {}),
       },
-      { type: "status_change", body: dependencyChangeNotice(result, p) },
+      { type: "status_change", body: notes.join("\n") },
     );
     recordFrameworkLinks(d, result, card);
     invalidateReviewReuse(d);

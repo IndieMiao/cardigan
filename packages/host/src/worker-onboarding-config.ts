@@ -284,14 +284,49 @@ export function parseWorkerOnboarding(
   }
 }
 
-type BindingSource = "applied" | "draft";
+/** Replace only PATH and the validated tool environment for this exact binding.
+ * Keep every enrollment/identity field for the ordinary digest and conflict checks. */
+export function withWorkerEnvironment(
+  config: WorkerOnboardingConfig,
+  source: unknown,
+  dataDir: string,
+) {
+  const { worker, runtime, digest: _digest, ...metadata } = config;
+  const raw = onboardingObject(source);
+  const machine =
+    Array.isArray(raw.machines) &&
+    raw.machines.find((m) => m?.id === worker.machine_id);
+  const binding =
+    machine &&
+    Array.isArray(machine.projects) &&
+    machine.projects.find(
+      (p: Record<string, unknown>) => p?.project_id === worker.project_id,
+    );
+  if (!binding) return onboardingFail("worker_config_conflict");
+  const machines = runtime.machines.map((m) => ({
+    ...m,
+    projects: (m.projects as Record<string, unknown>[]).map(
+      ({ path: _path, env: _env, ...p }) => ({
+        ...p,
+        path: binding.path,
+        ...(binding.env === undefined ? {} : { env: binding.env }),
+      }),
+    ),
+  }));
+  return parseWorkerOnboarding(
+    { version: 1, ...metadata, runtime: { ...runtime, machines } },
+    dataDir,
+  );
+}
+
+type BindingSource = "applied" | "bound" | "draft";
 
 function onboardingBindingDigest(
   { mcp_url, ...binding }: Record<string, unknown>,
   source: BindingSource,
 ): string {
   // Only the applied file has operator-managed settings; compare drafts in full.
-  if (source === "applied") delete binding.allow_remote_launch;
+  if (source !== "draft") delete binding.allow_remote_launch;
   return onboardingDigest({ ...binding, mcp_url: mcpUrl(mcp_url) });
 }
 
@@ -302,7 +337,7 @@ export function checkWorkerDraft(
   dataDir: string,
   source: BindingSource = "draft",
 ): void {
-  if (current === undefined) return;
+  if (current === undefined && source !== "bound") return;
   try {
     parseRuntimeWorkers(current, dataDir);
     const raw = onboardingObject(current);
@@ -311,6 +346,8 @@ export function checkWorkerDraft(
     ).map((m) => ({ ...m, os: m.os === "macos" ? "darwin" : m.os }));
     const incoming = config.runtime.machines[0] as Record<string, unknown>;
     const existing = machines.find((m) => m.id === incoming.id);
+    if (!existing && source === "bound")
+      onboardingFail("worker_config_conflict");
     if (!existing) machines.push(incoming);
     else {
       const { projects: oldProjects, ...oldIdentity } = existing;
@@ -331,6 +368,7 @@ export function checkWorkerDraft(
           onboardingBindingDigest(binding, source)
       )
         onboardingFail("worker_config_conflict");
+      if (!old && source === "bound") onboardingFail("worker_config_conflict");
       if (!old) projects.push(binding);
       existing.projects = projects;
     }

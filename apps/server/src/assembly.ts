@@ -218,6 +218,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       : { inactivityGraceMs: options.inactivityGraceMs }),
   });
   const monitor = new RuntimeMonitor({
+    ...(options.git?.snapshotOrphan
+      ? { snapshotOrphan: options.git.snapshotOrphan.bind(options.git) }
+      : {}),
     store: options.store,
     runtime: options.runtime,
     clock,

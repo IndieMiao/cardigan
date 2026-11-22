@@ -571,6 +571,8 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Current binding already applied when this Run reused an older session PATH. */
+  readonly session_environment_binding?: string;
   /** This Run's first bell, not a business ACK or an inbox cursor. Never inherit on recovery. */
   readonly bell_delivery?: {
     readonly run_id: RunId;
@@ -1248,6 +1250,7 @@ export interface HumanAction {
   readonly follow_up_work_items?: readonly WorkItemId[];
   readonly status: HumanActionStatus;
   readonly result?: {
+    readonly conclusion?: "exited" | "false_alarm" | "unconfirmed";
     readonly text: string;
     readonly attachments: readonly AttachmentId[];
     readonly at: Timestamp;

@@ -1053,6 +1053,9 @@ export async function retryDispatchedRuns(
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             ...guard,
+            ...(addressed.machine_id !== "local"
+              ? { session_run: { assignment_id: job.a.id, run_id: job.run.id } }
+              : {}),
             ...(retirementHeld && !guard.prompt_binding
               ? {
                   retirement_owner: {

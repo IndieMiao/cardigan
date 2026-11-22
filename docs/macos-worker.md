@@ -366,3 +366,11 @@ cardigan machine check worker-a --project example
 ```
 
 若先前 helper 落后，激活后等待下一轮后台巡检再做双检查。密钥仅存控制主机私有配置；启动布局、launchd 和调度开关不变。Mac 入口单独固定 Darwin 和系统 Python（需要可用的 `/usr/bin/python3` 及 `/usr/bin/openssl`），使用 root 安装的检查器，不从 Homebrew、worker HOME 或上传的包加载检查代码。逐文件原子替换及备份、失败后的人工恢复和撤销方式与 [Linux 受限接入](linux-worker.md#可选一次接入之后由后台升级-helper) 相同。不要用一次接入替代 macOS 现场隔离验证。
+
+`machine check` 返回 `invalid_launch` 时，查看同一份 `health.blockers` 里的原因：`target_mismatch` 表示登记与执行目标不匹配，`target_changed` 表示检查期间绑定发生了变化，`worker_configuration_incomplete` 表示缺少远程启动配置。原因不包含账号路径或 SSH 原始输出；只有 `target_invalid` 时没有更具体的可公开原因。
+
+改同一绑定的 `path` 或工具环境后，可运行 `cardigan worker apply-config --project <项目> --machine <机器>`。命令等待旧 Run 排空，然后按顺序执行 worker 和机器检查；不会启用派发或解除已有停派。控制主机的日常巡检会重新检查绑定，新启动也须通过实时检查。旧会话按原环境核对；撤权、删绑、更换账号、SSH 信任目标或绑定代次立即拒绝旧通道。主机没有记录旧环境时不猜测。
+
+失联宽限结束时，主机比对原进程的启动回执。缺回执、身份无法核实或 helper 配置错误不是退出证据。失联待办支持 `human-action done --conclusion exited|false_alarm|unconfirmed`：误报保留原 Run 和资格；无法确认只记录结果，待办保持未结。主机重新核实同一进程存活时自动撤销待办。
+
+已结算且指派已释放的原进程不再交给人结束。系统核实精确归属和稳定句柄后，在中心库 `refs/cardigan/backups/orphans/<指派>/<启动代次>` 保存工作树（含未忽略的新文件），第一父提交是原 HEAD，第二父提交保存暂存树。两次备份相同不代表还能安全停止。只对存储侧已原地封存至进程退出的专用 Linux 工作区，在核实内核写保护和中心备份后发一次 TERM；普通可写目录只观察，不发强制信号。旧 helper、不支持 pidfd 的机器（含 macOS）、子模块或无法核实的工作区都保留进程并记录原因。已发信号但未证实退出时只观察，不重复终止。
