@@ -71,6 +71,20 @@ runtime:
 
 将 `identity_file` 和 `known_hosts_file` 改为上一步文件的**绝对路径**；YAML 不展开 `$HOME`、`~` 或其它变量。`host` 是 DNS 名或地址，不接受 `user@host`、SSH 配置别名的隐式设置或命令；账号、端口、身份文件和 host key 都显式填写。`--host` 如有提供，必须与 YAML 一致。默认文件名按 `worker-<机器>-<项目>.yaml` 查找，也可显式传 `--config <文件>`。
 
+Android 项目可在私有 `runtime-workers.yaml` 对应的 `machines[].projects[]` 条目中加 `env`（与 `path` 同级；使用向导时也在输入的同一绑定中填写）：
+
+```yaml
+env:
+  ANDROID_HOME: /home/cg_example/Android/Sdk
+  ANDROID_AVD_HOME: /home/cg_example/.android/avd
+  ANDROID_ADB_SERVER_PORT: "15037"  # 示例：换成分配给本项目的端口，不用默认 5037
+```
+
+`env` 只传给该项目在该机器上新启动的 Run 和能力检查命令，不修改账号的登录环境，也不分配端口或设备。用工具的绝对路径；如需按名称找到 `adb`，把 SDK 的 `platform-tools` 目录加到绑定的 `path`，不要设置 `env.PATH`。变更前先清退使用旧绑定的会话，再重新检查机器能力。省略 `env` 或填写 `{}` 保持原行为。
+
+每个绑定最多 32 项。键以大写英文字母开头，后续限大写字母、数字、下划线，总长不超过 64。不得使用凭据名（含 `TOKEN`、`SECRET`、`KEY`、`PASSWORD` 等），也不得覆盖账号、启动器、加载器或资源策略变量（如 `HOME`、`PATH`、`LD_*`、`CARDIGAN_*`、`ADB_SERVER_SOCKET`）。值必须是无控制字符的字符串，每值最多 1024 个 UTF-8 字节，合计最多 8192 字节。端口等数字要加引号；不会展开 `$HOME` 或执行 shell。**不要在这里放凭据**：值会进入启动材料，校验变量名不能判断值是否保密。
+
+
 发布限额必须显式填写。上述试点建议为：头部 64 KiB、单文件 1 MiB、批次 8 MiB、发布超时 30 秒；它们只限制启动材料发布，不是附件大小或测试输出上限。按实际启动材料调整，向导不修改全局默认值。`mcp_timeout_ms` 是 RW-2 的启动鉴权超时，默认 10 秒；向导自身的 `timeout_ms` 默认 15 秒。两处 `mcp_url` 必须一致；项目绑定中省略时，草案会使用顶层地址补齐。
 
 试点普通 Agent Run 并发上限设为 1。在控制主机私有 `$CARDIGAN_CONFIG_DIR/run-capacity.yaml` 中合入：

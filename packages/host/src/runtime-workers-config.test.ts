@@ -33,6 +33,7 @@ import { refreshMachineObservations } from "./machine-capabilities.js";
 import { BUILTIN_MACHINE_CAPABILITIES } from "./machine-capability-catalog.js";
 import { configureMachinePlacement } from "./machine-placement.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
+import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import { RuntimeTargets } from "./runtime-targets.js";
 import {
   loadRuntimeWorkers,
@@ -92,6 +93,74 @@ test("remote launch requires an explicit boolean opt-in in the private project b
     expect(() => parseRuntimeWorkers(config(enabled), "/private/data")).toThrow(
       "configuration invalid",
     );
+});
+
+test("worker env is bounded literal project data; omitted and empty keep the legacy target", () => {
+  const base = workerConfig();
+  const machine = base.machines[0];
+  const project = machine?.projects[0];
+  if (!machine || !project) throw new Error("Missing fixture");
+  const parse = (env?: unknown) => {
+    const [worker] = parseRuntimeWorkers(
+      { ...base, machines: [{ ...machine, projects: [{ ...project, env }] }] },
+      "/private/data",
+    );
+    if (!worker) throw new Error("Missing worker");
+    return worker;
+  };
+  const sdk = {
+    ANDROID_HOME: "/fixture/Android's SDK",
+    ANDROID_ADB_SERVER_PORT: "15037",
+  };
+  const worker = parse(sdk);
+  expect(worker.execution.env).toEqual(sdk);
+  expect(parse({})).toEqual(parse());
+  expect(parse().execution).not.toHaveProperty("env");
+  const pin = (env?: unknown) => runtimeTargetBinding(parse(env)).fingerprint;
+  expect(pin(sdk)).toBe(
+    pin({ ANDROID_ADB_SERVER_PORT: "15037", ANDROID_HOME: sdk.ANDROID_HOME }),
+  );
+  expect(pin(sdk)).not.toBe(pin());
+  expect(pin(sdk)).not.toBe(pin({ ...sdk, ANDROID_ADB_SERVER_PORT: "15038" }));
+  expect(parse({ A: "é".repeat(512) }).execution.env?.A).toHaveLength(512);
+  for (const env of [
+    null,
+    [],
+    "SDK=x",
+    ["A"],
+    { A: 15037 },
+    { A: {} },
+    { A: "x\n" },
+    { A: "x\0" },
+    { A: "é".repeat(513) },
+    Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`A${i}`, "x"])),
+    Object.fromEntries(
+      Array.from({ length: 9 }, (_, i) => [`A${i}`, "x".repeat(1024)]),
+    ),
+    ...[
+      "lower",
+      "1ABC",
+      "A-B",
+      "A".repeat(65),
+      "API_TOKEN_ID",
+      "MY_SECRET",
+      "API_KEY",
+      "PASSWORD_FILE",
+      "HOME",
+      "PATH",
+      "CARDIGAN_DATA_DIR",
+      "LOGNAME",
+      "GIT_CONFIG_COUNT",
+      "LD_PRELOAD",
+      "DYLD_INSERT_LIBRARIES",
+      "NODE_OPTIONS",
+      "BASH_ENV",
+      "ADB_SERVER_SOCKET",
+      "ANDROID_SERIAL",
+    ].map((k) => ({ [k]: "invalid" })),
+  ]) {
+    expect(() => parse(env)).toThrow(/^Runtime worker configuration invalid$/);
+  }
 });
 
 test("trusted workers carry physical identity and project-specific endpoint/account/PATH", () => {
@@ -250,7 +319,12 @@ test("two project accounts retain one physical machine and may use the same term
     root: "/workers/b",
     alias: "fixture-b",
   });
+  Object.assign(project, { env: { ANDROID_ADB_SERVER_PORT: "15037" } });
   const workers = parseRuntimeWorkers(config, "/private/data");
+  expect(workers.map((w) => w.execution.env)).toEqual([
+    { ANDROID_ADB_SERVER_PORT: "15037" },
+    undefined,
+  ]);
   expect(workers).toHaveLength(2);
   expect(new Set(workers.map((w) => w.machine_id))).toEqual(
     new Set(["worker-a"]),
