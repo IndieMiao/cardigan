@@ -29,7 +29,7 @@ const owner = () =>
   f.state().assignments.find((a) => a.id === target.assignment.id);
 const currentRun = () =>
   f.state().runs.find((r) => r.assignment_id === target.assignment.id);
-let evidence: "alive" | "exited" | "unknown" = "unknown";
+let evidence: "alive" | "exited" | "unknown" | "unreachable" = "unreachable";
 const probeRemoteProcess = vi.fn(async () => evidence);
 const startMonitor = () =>
   new RuntimeMonitor({
@@ -38,7 +38,7 @@ const startMonitor = () =>
     clock: f.clock,
   });
 beforeEach(() => {
-  evidence = "unknown";
+  evidence = "unreachable";
   probeRemoteProcess.mockClear();
   f = dispatchFixture();
   f.store.uow.run((tx) =>
@@ -364,7 +364,7 @@ test("same identity reappearing after an unavailable probe withdraws the H and k
   expect(f.store.verifyToken(token.token)).toBeDefined();
 });
 
-test.each(["alive", "exited", "unknown"] as const)(
+test.each(["alive", "exited", "unreachable", "unknown"] as const)(
   "grace expiry checks remote process: %s",
   async (result) => {
     events.send({
@@ -378,7 +378,9 @@ test.each(["alive", "exited", "unknown"] as const)(
     monitor.reconcile();
     await setImmediate();
     expect(probeRemoteProcess).toHaveBeenCalled();
-    expect(f.state().human_actions).toHaveLength(result === "alive" ? 0 : 1);
+    expect(f.state().human_actions).toHaveLength(
+      result === "alive" || result === "unknown" ? 0 : 1,
+    );
     expect(currentRun()?.status).toBe(
       result === "alive" ? "running" : "unknown",
     );

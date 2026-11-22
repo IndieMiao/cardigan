@@ -1414,56 +1414,77 @@ test("machine checks persist a fixed routing reason before or during the probe",
   ]);
 });
 
-test("PATH edits drain the affected project binding while preserving the authorized startup environment after restart", async () => {
-  const a = assignment("worker-a");
-  const ref = value(
-    await router.provision(a, role, machine("worker-a"), launch),
-  );
-  let run = {
-    id: "R-1",
-    assignment_id: a.id,
-    trigger_event_id: "evt",
-    kind: "initial",
-    status: "running",
-    role_version: 1,
-    model: "fixture",
-    agent_cli_version: "fixture",
-    outcome: null,
-    summary: "",
-  } as import("@cardigan/domain").Run;
-  store.uow.run((tx) => {
-    tx.assignments.put("fixture", { ...a, runtime_ref: ref });
-    tx.runs.put("fixture", run);
-  });
-  workers = workers.map((w) =>
-    w.machine_id === "worker-a"
-      ? { ...w, execution: { ...w.execution, path: "/new/bin:/usr/bin" } }
-      : w,
-  );
-  const restarted = router.forProject("fixture");
-  expect(restarted.executionForRef(ref)).toMatchObject({
-    path: "/usr/bin:/bin",
-    target: ref.target,
-  });
-  expect((await restarted.status(ref)).ok).toBe(true);
-  expect(
-    await restarted.forLaunch("fixture", assignment("worker-b")),
-  ).toBeDefined();
-  await expect(
-    restarted.forLaunch("fixture", assignment("worker-a")),
-  ).rejects.toThrow("worker_binding_draining");
-  run = { ...run, status: "completed" };
-  store.uow.run((tx) => tx.runs.put("fixture", run));
-  expect(value(await restarted.check("fixture", "worker-a"))).toMatchObject({
-    launch_enabled: true,
-    blockers: [],
-  });
-  expect((await restarted.forLaunch("fixture", a)).execution).toMatchObject({
-    path: "/new/bin:/usr/bin",
-  });
-  workers = workers.map((w) => ({
-    ...w,
-    execution: { ...w.execution, user: "different" },
-  }));
-  expect((await restarted.status(ref)).ok).toBe(false);
-});
+test.each([
+  { os: "linux", arch: "x64" },
+  { os: "darwin", arch: "arm64" },
+] as const)(
+  "$os environment edits drain only the affected binding and survive restart",
+  async (platform) => {
+    workers = workers.map((w) => ({ ...w, ...platform }));
+    store.uow.run((tx) => {
+      for (const w of workers)
+        tx.machines.put("fixture", {
+          ...machine(w.machine_id, w.execution.machine),
+          ...platform,
+        });
+    });
+    const a = assignment("worker-a");
+    const ref = value(
+      await router.provision(a, role, machine("worker-a"), launch),
+    );
+    let run = {
+      id: "R-1",
+      assignment_id: a.id,
+      trigger_event_id: "evt",
+      kind: "initial",
+      status: "running",
+      role_version: 1,
+      model: "fixture",
+      agent_cli_version: "fixture",
+      outcome: null,
+      summary: "",
+    } as import("@cardigan/domain").Run;
+    store.uow.run((tx) => {
+      tx.assignments.put("fixture", { ...a, runtime_ref: ref });
+      tx.runs.put("fixture", run);
+    });
+    workers = workers.map((w) =>
+      w.machine_id === "worker-a"
+        ? {
+            ...w,
+            execution: {
+              ...w.execution,
+              path: "/new/bin:/usr/bin",
+              env: { ANDROID_HOME: "/new/sdk" },
+            },
+          }
+        : w,
+    );
+    const restarted = router.forProject("fixture");
+    expect(restarted.executionForRef(ref)).toMatchObject({
+      path: "/usr/bin:/bin",
+      target: ref.target,
+    });
+    expect((await restarted.status(ref)).ok).toBe(true);
+    expect(
+      await restarted.forLaunch("fixture", assignment("worker-b")),
+    ).toBeDefined();
+    await expect(
+      restarted.forLaunch("fixture", assignment("worker-a")),
+    ).rejects.toThrow("worker_binding_draining");
+    run = { ...run, status: "completed" };
+    store.uow.run((tx) => tx.runs.put("fixture", run));
+    expect(value(await restarted.check("fixture", "worker-a"))).toMatchObject({
+      launch_enabled: true,
+      blockers: [],
+    });
+    expect((await restarted.forLaunch("fixture", a)).execution).toMatchObject({
+      path: "/new/bin:/usr/bin",
+    });
+    workers = workers.map((w) => ({
+      ...w,
+      execution: { ...w.execution, user: "different" },
+    }));
+    expect((await restarted.status(ref)).ok).toBe(false);
+  },
+);

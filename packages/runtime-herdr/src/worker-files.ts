@@ -5,7 +5,10 @@ import type { RuntimeTargetBinding } from "@cardigan/domain";
 import type { LaunchFile } from "./agent-files.js";
 import { agentProcessCommand } from "./agent-ssh.js";
 import type { ExecutionConfig, WorkerPublishLimits } from "./execution.js";
-import { WorkerPreparationFailure } from "./worker-preparation-failure.js";
+import {
+  WorkerPreparationFailure,
+  WorkerTransportUnavailable,
+} from "./worker-preparation-failure.js";
 import type { WorkerProcessIdentity } from "./worker-primitives.js";
 
 export type { WorkerPublishLimits } from "./execution.js";
@@ -265,8 +268,16 @@ export async function workerFiles(
                 : size > policy.header_max_bytes
                   ? "reply_too_large"
                   : "unknown (stderr omitted)";
+          const Failure =
+            (code === 255 &&
+              /(?:connection refused|connection timed out|no route to host|network is unreachable)/iu.test(
+                text,
+              )) ||
+            summary === "timeout"
+              ? WorkerTransportUnavailable
+              : WorkerPreparationFailure;
           reject(
-            new WorkerPreparationFailure(
+            new Failure(
               `Worker publication rejected: ${operation}; exit=${code ?? "signal"}; ${summary}`,
             ),
           );

@@ -9,6 +9,7 @@ import re
 import signal
 import selectors
 import time
+import tempfile
 import stat
 import subprocess
 import sys
@@ -183,6 +184,9 @@ class Workspace:
     def operate(self):
         r, op = self.request, self.request['operation']
         path = r.get('repository', self.repo)
+        if op == 'snapshot':
+            require(path == self.leaves[0])
+            return workspace_snapshot(self, path, r['branch'], r['generation'])
         if op == 'check':
             return True  # __init__ has checked the same paths used by Git operations.
         if op == 'directories':
@@ -286,6 +290,44 @@ class Workspace:
             os.rmdir(path)
             return None
         raise ValueError('unsupported_operation')
+
+
+def workspace_snapshot(workspace, path, branch, generation):
+    """Preserve HEAD, index and working tree without stashing or modifying either.
+    A second capture compares trees to the immutable first snapshot, not timestamps.
+    """
+    require(re.fullmatch(r'agent/[A-Za-z0-9._/-]+', branch) and re.fullmatch(r'[a-f0-9]{32}', generation))
+    def git(*args):
+        return workspace.git(path, list(args)).rstrip('\n')
+    require(git('rev-parse', '--show-toplevel') == path and git('symbolic-ref', 'HEAD') == 'refs/heads/' + branch)
+    require(git('rev-parse', '--path-format=absolute', '--git-common-dir') == workspace.repo + '/.git')
+    # Do not claim that a gitlink or sparse checkout contains the underlying files.
+    require(all(entry.startswith('H ') for entry in git('ls-files', '-v', '-z').split('\0') if entry))
+    head = git('rev-parse', '--verify', 'HEAD^{commit}')
+    index = git('write-tree')
+    with tempfile.TemporaryDirectory() as scratch:
+        workspace.env['GIT_INDEX_FILE'] = scratch + '/index'
+        try:
+            git('read-tree', index)
+            git('add', '-A', '--', '.')
+            tree = git('write-tree')
+        finally:
+            del workspace.env['GIT_INDEX_FILE']
+    for candidate in (head, index, tree):
+        require(all(not entry.startswith('160000 ') for entry in git('ls-tree', '-r', '-z', candidate).split('\0') if entry))
+    require(head == git('rev-parse', 'HEAD') and index == git('write-tree'))
+    ref = 'refs/cardigan/backups/orphans/' + workspace.request['assignment'] + '/' + generation
+    sha = git('for-each-ref', '--format=%(objectname)', ref)
+    if not sha:
+        def commit(tree, *parents):
+            return git('-c', 'user.name=Cardigan', '-c', 'user.email=backup@cardigan.invalid',
+                       'commit-tree', tree, *parents, '-m', 'Orphan workspace backup')
+        staged = commit(index, '-p', head)
+        sha = commit(tree, '-p', head, '-p', staged)
+        git('update-ref', ref, sha, '0' * len(sha))
+    require(git('rev-parse', ref) == sha and git('rev-parse', ref + '^{tree}') == tree
+            and git('rev-parse', ref + '^1') == head and git('rev-parse', ref + '^2^{tree}') == index)
+    return sha
 
 
 def main():

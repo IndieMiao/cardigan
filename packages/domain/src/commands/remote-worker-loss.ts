@@ -92,7 +92,7 @@ export function requestRemoteWorkerExit(
     requestExitConfirmationInDraft(d, {
       action_id,
       assignment_id: a.id,
-      instructions: `机器 ${a.machine_id} 的 ${a.id} 已失联。${backup}\n1. 确认旧机器已关机，或手动结束旧进程及其子进程。\n2. 确认旧进程已退出后，选择“已退出”并回传退出情况；若原会话并未失联，选择“误报”。\n3. PM 再选择其它机器，从备份或基线重新指派。`,
+      instructions: `机器 ${a.machine_id} 的 ${a.id} 已失联。${backup}\n1. 确认旧机器已关机，或手动结束旧进程及其子进程。\n2. 确认旧进程已退出后，选择“已退出”并回传退出情况；若原会话并未失联，选择“误报”；证据不足时选择“无法确认”，此待办保持未结。\n3. PM 再选择其它机器，从备份或基线重新指派。`,
       why_human:
         "失联不能证明进程已退出；系统不会自动结束旧进程。未提交或最后备份之后的工作可能丢失。",
     });

@@ -124,6 +124,7 @@ export { HostOpsService } from "./host-ops.js";
 export { tryHelperConfirmationLock, tryHostOpsLock } from "./host-ops-lock.js";
 export {
   boundedRetirementError,
+  idleRetirementPolicy,
   observeRetirementForDispatch,
   recordRetirementDispatch,
 } from "./idle-session-retirement.js";

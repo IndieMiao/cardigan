@@ -413,6 +413,8 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 
 `machine check` 失败时查看 `health.blockers`：`invalid_launch` 旁的 `target_mismatch` 表示登记与执行目标不匹配，`target_changed` 表示检查期间绑定发生了变化，`worker_configuration_incomplete` 表示缺少远程启动配置。`target_invalid` 是没有可公开原因时的回退，不是进程退出证明。
 
-同一项目账号只改 `path` 时，已记录的会话继续按启动时的 PATH 核对；旧 Run 排空前，新派发等待 `worker_binding_draining`。排空后例行机器检查使用新配置。不应通过删除绑定或换代来应用 PATH：删绑、撤权、换账号、换 SSH 信任目标或显式换代都不会沿用旧通道。控制主机未记录过旧 PATH 时也不会猜测。
+改同一绑定的 `path` 或工具环境后，可运行 `cardigan worker apply-config --project <项目> --machine <机器>`。命令等待旧 Run 排空，然后按顺序执行 worker 和机器检查；不会启用派发或解除已有停派。控制主机的日常巡检会重新检查绑定，新启动也须通过实时检查。旧会话按原环境核对；撤权、删绑、更换账号、SSH 信任目标或绑定代次立即拒绝旧通道。主机没有记录旧环境时不猜测。
 
-失联宽限到期时，主机比对启动时记录的进程身份；连接失败不代表退出。若系统尚不能核实，失联待办须选“已退出”或“误报”。误报保留原 Run 和资格；再次核实原进程存活时自动撤销未结项待办。CLI 用 `--conclusion exited` 或 `--conclusion false_alarm` 指定结论。
+失联宽限结束时，主机比对原进程的启动回执。缺回执、身份无法核实或 helper 配置错误不是退出证据。失联待办支持 `human-action done --conclusion exited|false_alarm|unconfirmed`：误报保留原 Run 和资格；无法确认只记录结果，待办保持未结。主机重新核实同一进程存活时自动撤销待办。
+
+已结算且指派已释放的原进程不再交给人结束。系统核实精确归属和稳定句柄后，在中心库 `refs/cardigan/backups/orphans/<指派>/<启动代次>` 保存工作树（含未忽略的新文件），第一父提交是原 HEAD，第二父提交保存暂存树。发 TERM 前再次比对工作区；不发强制信号。旧 helper、不支持 pidfd 的机器（含 macOS）、子模块或无法核实的工作区都保留进程并记录原因。已发信号但未证实退出时只观察，不重复终止。

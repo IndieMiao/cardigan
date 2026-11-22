@@ -5,6 +5,7 @@ import type {
   Event,
   ProjectId,
   RemoteWorkerLoss,
+  Runtime,
   RuntimeObservation,
   RuntimeRef,
   RuntimeResult,
@@ -39,22 +40,24 @@ import {
 } from "./dispatch-alert.js";
 import { dispatcherClock, type StandingResolver } from "./dispatch-inbox.js";
 import { dispatcherInterval } from "./dispatch-loop.js";
+import { cleanReleasedOrphan, type SnapshotOrphan } from "./orphan-cleanup.js";
 import { lastSuccessfulWorkerBackup } from "./worker-backup.js";
 
 /** HerdrRuntime implements this host-side subscription interface. */
-export interface RuntimeEventSource {
+export interface RuntimeEventSource extends Pick<Runtime, "retire_idle"> {
   probeRemoteProcess?(
     project: ProjectId,
     assignment: Assignment["id"],
     ref: RuntimeRef,
     saved?: RemoteWorkerLoss["process"],
-  ): Promise<RuntimeObservation["process"]>;
+  ): Promise<RuntimeObservation["process"] | "unreachable">;
   events(
     ref: RuntimeRef,
     signal?: AbortSignal,
   ): AsyncIterable<RuntimeResult<RuntimeEvent>>;
 }
 export interface RuntimeMonitorOptions {
+  snapshotOrphan?: SnapshotOrphan;
   store: Store;
   runtime: RuntimeEventSource;
   clock?: Clock;
@@ -412,6 +415,10 @@ export class RuntimeMonitor {
           this.fact(tx, state, a, "runtime_exit_observed");
         return;
       }
+      if (proof && alive && a.runtime_state === "unknown")
+        this.fact(tx, state, a, "remote_worker_process_checked", {
+          process: "alive",
+        });
       if (!alive || a.runtime_state === "unknown") {
         const event = alive ? "reconnected" : "connection_lost";
         tx.assignments.put(project, {
@@ -518,12 +525,36 @@ export class RuntimeMonitor {
         ),
       )
       .catch(() => "unknown" as const)
-      .then((result) => {
+      .then(async (result) => {
         if (this.stopped) return;
         const process = result ?? "unknown";
         if (process === "alive" || loss)
-          this.observe(project, a.id, ref, process, "exit", stamp);
+          this.observe(
+            project,
+            a.id,
+            ref,
+            process === "unreachable" ? "unknown" : process,
+            "exit",
+            stamp,
+          );
         else this.expire(project, { id: a.id, stamp, process });
+        if (
+          loss &&
+          process !== "exited" &&
+          remoteWorkerLossReleased(state.events, loss.action_id)
+        )
+          await cleanReleasedOrphan({
+            store: this.options.store,
+            project,
+            clock: this.clock,
+            loss,
+            alive: process === "alive",
+            stopped: () => this.stopped,
+            runtime: this.options.runtime,
+            ...(this.options.snapshotOrphan
+              ? { snapshot: this.options.snapshotOrphan }
+              : {}),
+          });
       })
       .catch((error) => {
         this.failure = error;
@@ -586,16 +617,28 @@ export class RuntimeMonitor {
           this.fact(tx, state, a, "runtime_unknown_surfaced");
         if (Date.parse(at) - Date.parse(since.created_at) < this.grace)
           continue;
-        if (a.machine_id !== "local" && a.runtime_ref) {
+        if (a.machine_id !== "local") {
+          if (!a.runtime_ref) continue;
           if (!checked) {
             this.probe(project, state, a, a.runtime_ref);
             continue;
           }
           if (this.probeKey(state, a, a.runtime_ref) !== checked.stamp)
             continue;
-          this.fact(tx, state, a, "remote_worker_process_checked", {
-            process: checked.process,
-          });
+          const last = state.events.findLast(
+            (e) =>
+              e.type === "remote_worker_process_checked" &&
+              payloadString(e.payload, "assignment_id") === a.id &&
+              payloadString(e.payload, "disconnect_id") === since.id,
+          );
+          if (
+            payloadString(last?.payload ?? null, "process") !== checked.process
+          )
+            this.fact(tx, state, a, "remote_worker_process_checked", {
+              process: checked.process,
+              disconnect_id: since.id,
+            });
+          if (checked.process === "unknown") continue;
         }
         tx.assignments.put(project, {
           ...a,

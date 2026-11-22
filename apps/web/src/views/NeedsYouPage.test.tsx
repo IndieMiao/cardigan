@@ -760,42 +760,49 @@ test("execution results require text; errors preserve the draft for retry", asyn
   );
 });
 
-test("remote loss completion sends the selected conclusion separately from the note", async () => {
-  const completeAction = vi.fn().mockResolvedValue(undefined);
-  const data = page([]);
-  render(
-    <NeedsYouPage
-      client={fakeClient({
-        needsYou: async () => ({
-          ...data,
-          human_actions: data.human_actions.map((a) => ({
-            ...a,
-            requires_loss_conclusion: true,
-          })),
-        }),
-        completeAction,
-      })}
-      projectId="p-1"
-    />,
-  );
-  const choice = await screen.findByRole("combobox", { name: "失联结论" });
-  changeControl(screen.getByLabelText("H-1 执行结果"), {
-    target: { value: "已核对" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "确认已完成" }));
-  expect(completeAction).not.toHaveBeenCalled();
-  changeControl(choice, { target: { value: "false_alarm" } });
-  fireEvent.click(screen.getByRole("button", { name: "确认已完成" }));
-  await waitFor(() =>
-    expect(completeAction).toHaveBeenCalledWith(
-      "p-1",
-      "H-1",
-      "已核对",
-      expect.any(String),
-      "false_alarm",
-    ),
-  );
-});
+test.each(["false_alarm", "unconfirmed", "exited"])(
+  "remote loss records %s separately from the note",
+  async (verdict) => {
+    const completeAction = vi.fn().mockResolvedValue(undefined);
+    const data = page([]);
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: async () => ({
+            ...data,
+            human_actions: data.human_actions.map((a) => ({
+              ...a,
+              requires_loss_conclusion: true,
+            })),
+          }),
+          completeAction,
+        })}
+        projectId="p-1"
+      />,
+    );
+    const choice = await screen.findByRole("combobox", { name: "失联结论" });
+    changeControl(screen.getByLabelText("H-1 执行结果"), {
+      target: { value: "已核对" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认已完成" }));
+    expect(completeAction).not.toHaveBeenCalled();
+    changeControl(choice, { target: { value: verdict } });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: verdict === "unconfirmed" ? "记录核对结果" : "确认已完成",
+      }),
+    );
+    await waitFor(() =>
+      expect(completeAction).toHaveBeenCalledWith(
+        "p-1",
+        "H-1",
+        "已核对",
+        expect.any(String),
+        verdict,
+      ),
+    );
+  },
+);
 
 test("handles loading, failed reads with retry, and empty data", async () => {
   let settle: (p: NeedsPage) => void = () => {};

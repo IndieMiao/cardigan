@@ -66,7 +66,7 @@ export function completeActionDraft(
   p: {
     human_action_id: HumanActionId;
     text: string;
-    conclusion?: "exited" | "false_alarm";
+    conclusion?: "exited" | "false_alarm" | "unconfirmed";
     attachments?: readonly string[];
   },
   helperVerified = false,
@@ -98,10 +98,10 @@ export function completeActionDraft(
   const remote = remoteExitAction(d.state, action.id);
   ensure(
     remote
-      ? ["exited", "false_alarm"].includes(p.conclusion ?? "")
+      ? ["exited", "false_alarm", "unconfirmed"].includes(p.conclusion ?? "")
       : !p.conclusion,
     "validation_failed",
-    "失联待办须选择已退出或误报，其他待办不适用",
+    "失联待办须选择已退出、误报或无法确认，其他待办不适用",
   );
   if (p.conclusion === "false_alarm") {
     const request = d.state.events.findLast(
@@ -133,6 +133,34 @@ export function completeActionDraft(
       "validation_failed",
       "Attachment belongs to another card",
     );
+  if (p.conclusion === "unconfirmed") {
+    ensure(
+      action.status === "open",
+      "illegal_transition",
+      "只能记录未结待办的核对结果",
+    );
+    const pending: HumanAction = {
+      ...action,
+      result: {
+        conclusion: p.conclusion,
+        text: p.text,
+        attachments: p.attachments ?? [],
+        at: d.now,
+      },
+    };
+    d.put("human_actions", pending);
+    d.emit(
+      "remote_worker_exit_unconfirmed",
+      action.card_id,
+      { human_action_id: action.id, conclusion: p.conclusion },
+      {
+        type: "human_action",
+        human_action_id: action.id,
+        body: `无法确认旧进程退出：${p.text}`,
+      },
+    );
+    return pending;
+  }
   const result: HumanAction = {
     ...action,
     status: unwrap(transition("human_action", action.status, "complete")),

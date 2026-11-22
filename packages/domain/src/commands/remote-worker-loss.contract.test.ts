@@ -839,3 +839,31 @@ test("remote H requires an explicit conclusion; a false alarm never releases or 
     releaseLostRemoteWorker(state, system, f.request.data.action_id, f.io).ok,
   ).toBe(false);
 });
+
+test("an inconclusive human observation retains the same open fence until a definite answer", () => {
+  const f = setup(),
+    p = { human_action_id: f.action.id, text: "无法联系机器" };
+  const state = apply(
+    f.current,
+    value(
+      completeHumanAction(
+        f.current,
+        human,
+        { ...p, conclusion: "unconfirmed" },
+        f.io,
+      ),
+    ),
+  );
+  expect(
+    state.human_actions.find((h) => h.id === p.human_action_id),
+  ).toMatchObject({ status: "open", result: { conclusion: "unconfirmed" } });
+  expect(state.runs).toEqual(f.current.runs);
+  expect(hostOpsPending(state.events, owner)).toBe(true);
+  expect(
+    releaseLostRemoteWorker(state, system, f.request.data.action_id, f.io).ok,
+  ).toBe(false);
+  expect(
+    completeHumanAction(state, human, { ...p, conclusion: "false_alarm" }, f.io)
+      .ok,
+  ).toBe(true);
+});

@@ -251,7 +251,7 @@ const clarification = z.object({
 const action = z
   .object({
     text,
-    conclusion: z.enum(["false_alarm", "exited"]).optional(),
+    conclusion: z.enum(["false_alarm", "exited", "unconfirmed"]).optional(),
     attachments: z.array(text).optional(),
   })
   .strict();

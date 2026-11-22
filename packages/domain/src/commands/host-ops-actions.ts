@@ -675,7 +675,9 @@ export function hostOpsExitConfirmation(
   );
   return action?.status === "done" &&
     completed?.actor.kind === "human" &&
-    (completed.payload as { conclusion?: string }).conclusion !== "false_alarm"
+    [undefined, "exited"].includes(
+      (completed.payload as { conclusion?: string }).conclusion,
+    )
     ? { status: "confirmed", human_action_id: id }
     : { status: "rejected", human_action_id: id };
 }

@@ -111,6 +111,11 @@ export interface Runtime {
             /** One owner-bound TERM; recheck workspace inside the signal slot,
              * then terminal identity/activity, then synchronous authority. */
             readonly system_finished_turn: true;
+            readonly expected_process?: NonNullable<
+              NonNullable<
+                import("./entities.js").Run["launch_publication"]
+              >["process"]
+            >;
             readonly workspace_preflight: () => Promise<boolean>;
           }
       ),

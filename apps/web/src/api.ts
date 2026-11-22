@@ -2311,7 +2311,7 @@ export interface CardiganClient {
     id: string,
     text: string,
     idempotencyKey?: string,
-    conclusion?: "exited" | "false_alarm",
+    conclusion?: "exited" | "false_alarm" | "unconfirmed",
   ): Promise<void>;
   session(): Promise<SessionInfo>;
   login(password: string): Promise<void>;
@@ -3381,7 +3381,7 @@ export class HttpCardiganClient implements CardiganClient {
     id: string,
     text: string,
     idempotencyKey: string = crypto.randomUUID(),
-    conclusion?: "exited" | "false_alarm",
+    conclusion?: "exited" | "false_alarm" | "unconfirmed",
   ): Promise<void> {
     await this.write(
       projectId,

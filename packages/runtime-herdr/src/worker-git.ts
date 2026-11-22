@@ -8,6 +8,7 @@ import { WorkerPreparationFailure } from "./worker-preparation-failure.js";
 
 type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 export type WorkerGitOperation =
+  | "snapshot"
   | "check"
   | "stage"
   | "validate"
@@ -27,6 +28,8 @@ export interface WorkerGitRequest {
   readonly repository?: string;
   readonly source?: string;
   readonly format?: "sha1" | "sha256";
+  readonly branch?: string;
+  readonly generation?: string;
   readonly args?: readonly string[];
 }
 
@@ -155,6 +158,11 @@ function validReply(operation: WorkerGitOperation, value: unknown): boolean {
       return typeof value === "boolean";
     case "directories":
       return Array.isArray(value) && value.every((v) => typeof v === "string");
+    case "snapshot":
+      return (
+        typeof value === "string" &&
+        /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(value)
+      );
     case "git":
     case "stage":
       return typeof value === "string";

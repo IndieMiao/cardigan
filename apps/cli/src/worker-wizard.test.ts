@@ -653,3 +653,16 @@ test.each(["wizard", "capability"] as const)(
     }
   },
 );
+
+test("apply-config dry-run describes drain and both checks without opening the registry", async () => {
+  expect(
+    await runWorkerCommand(["apply-config", ...args, "--dry-run"], io),
+  ).toBe(0);
+  expect(lines.join(" ")).toMatch(/排空.*worker.*机器/u);
+  await expect(
+    runWorkerCommand(["apply-config", ...args], {
+      ...io,
+      env: { ...io.env, MCP_TOKEN: "fixture" },
+    }),
+  ).rejects.toThrow(/人类/u);
+});

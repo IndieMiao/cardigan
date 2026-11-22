@@ -1667,9 +1667,9 @@ function HumanAction({
   elapsed,
 }: Props & { item: NeedsAction; done: () => void; elapsed: number }) {
   const [text, setText] = useState("");
-  const [conclusion, setConclusion] = useState<"exited" | "false_alarm" | "">(
-    "",
-  );
+  const [conclusion, setConclusion] = useState<
+    "exited" | "false_alarm" | "unconfirmed" | ""
+  >("");
   const action = useAction(done);
   if (item.completion_notice !== undefined)
     return (
@@ -1858,12 +1858,17 @@ function HumanAction({
               aria-label="失联结论"
               value={conclusion}
               onValueChange={(v) =>
-                setConclusion(v === "exited" || v === "false_alarm" ? v : "")
+                setConclusion(
+                  v === "exited" || v === "false_alarm" || v === "unconfirmed"
+                    ? v
+                    : "",
+                )
               }
             >
               <option value="">请选择</option>
               <option value="exited">已退出</option>
-              <option value="false_alarm">误报</option>
+              <option value="false_alarm">仍在运行（误报）</option>
+              <option value="unconfirmed">无法确认</option>
             </SelectControl>
           </label>
         )}
@@ -1876,7 +1881,7 @@ function HumanAction({
           />
         </label>
         <button type="submit" disabled={action.busy || !text.trim()}>
-          确认已完成
+          {conclusion === "unconfirmed" ? "记录核对结果" : "确认已完成"}
         </button>
       </form>
       <RequestFeedback
