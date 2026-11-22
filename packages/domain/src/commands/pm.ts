@@ -61,7 +61,12 @@ import {
   type PreMergeCheckInput,
 } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
-import { canResume, queueResumedRun, resumeWork } from "./resumption.js";
+import { deferResume } from "./resume-attention.js";
+import {
+  queueResumedRun,
+  resumeBlockReason,
+  resumeWork,
+} from "./resumption.js";
 import {
   type ReviewLimitResolution,
   resolveReviewLimit,
@@ -976,12 +981,19 @@ export function updateWorkItem(
       const { reported_blocker: _confirmed, ...remaining } = result;
       result = remaining;
     }
-    if (resume && !confirmReported)
-      ensure(
-        canResume(d, result),
-        "illegal_transition",
-        "Work item still has unresolved blockers or an exhausted review limit",
+    if (resume || confirmReported) {
+      const reason = resumeBlockReason(d, result);
+      // A status-only confirmation may clear the reported blocker independently.
+      // For a mixed request either all fields take effect or none do. The reason
+      // is an audit fact, not a partial update to the item.
+      const compound = Object.keys(p).some(
+        (key) => key !== "status" && key !== "work_item_id",
       );
+      if (reason && (!confirmReported || compound)) {
+        deferResume(d, item, reason);
+        return item;
+      }
+    }
     d.put("work_items", result);
     const resumed =
       resume ||
@@ -1045,6 +1057,10 @@ export function updateWorkItem(
         });
     }
     if (resumed) queueResumedRun(d, item, event);
+    else if (confirmReported || resume) {
+      const reason = resumeBlockReason(d, result);
+      if (reason) deferResume(d, result, reason, event.id);
+    }
     invalidateReviewReuse(d);
     if (p.required !== undefined) syncRiskTagMerge(d, d.card(card.id));
     return result;

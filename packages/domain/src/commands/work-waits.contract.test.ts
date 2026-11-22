@@ -1,10 +1,13 @@
 import { beforeEach, expect, test } from "vitest";
 import type { Actor, Event, JsonValue } from "../entities.js";
 import type { ResumeCondition } from "../work-wait.js";
-import { reportBlocker } from "./coordination.js";
+import { reportBlocker, requestHumanAction } from "./coordination.js";
 import type { CommandState } from "./core.js";
 import { prepareDelivery, submitDelivery } from "./delivery.js";
+import { updateCard, updateWorkItem } from "./pm.js";
+import { listNeedsYou } from "./queries.js";
 import { finishRun, settlePendingRunFinish } from "./runtime.js";
+import { stopWorkItemAssignment } from "./stop.js";
 import {
   actor,
   apply,
@@ -293,8 +296,8 @@ test("a condition can settle before finish; no concurrent Run is woken", () => {
 
 test.each([
   "hold",
-  "manual",
-  "closed",
+  "human_action",
+  "review_limit",
   "suspended",
   "stopped",
   "other_blocker",
@@ -306,32 +309,69 @@ test.each([
   finish();
   c.settled();
   const before = state;
-  if (guard === "hold" || guard === "closed")
+  if (guard === "hold")
     state = {
       ...state,
       cards: state.cards.map((c) =>
         c.id === "C-1"
           ? {
               ...c,
-              ...(guard === "hold"
-                ? {
-                    hold: {
-                      reason: "Paused",
-                      set_at: io.clock.now(),
-                      set_by: "human" as const,
-                      resume_condition: "PM resumes",
-                    },
-                  }
-                : { status: "cancelled" as const }),
+              hold: {
+                reason: "Paused",
+                set_at: io.clock.now(),
+                set_by: "human",
+                resume_condition: "PM resumes",
+              },
             }
           : c,
       ),
     };
-  if (guard === "manual")
+  if (guard === "human_action")
     state = {
       ...state,
+      human_actions: [
+        {
+          id: id("human_action", 1),
+          key: id("human_action", 1),
+          requested_by: "human",
+          instructions: "Connect",
+          why_human: "Account",
+          expected_return: "Connected",
+          blocks_merge: true,
+          prerequisite: "external_account",
+          blocked_work_items: [work],
+          status: "open",
+        },
+      ],
+    };
+  if (guard === "review_limit")
+    state = {
+      ...state,
+      reviews: [
+        {
+          id: id("review", 1),
+          work_item_id: work,
+          run_id: runId,
+          delivery_id: id("delivery", 1),
+          target_sha: base,
+          kind: "code",
+          verdict: "reject",
+          blocking: true,
+          recheck_required: true,
+          issues: [],
+          attachments: [],
+        },
+      ],
       work_items: state.work_items.map((w) =>
-        w.id === work ? { ...w, manual_assign: true } : w,
+        w.id === work
+          ? {
+              ...w,
+              kind: "verify",
+              status: "blocked",
+              max_review_rounds: 1,
+              review_plan_target: id("decision", 1),
+            }
+          : w,
       ),
     };
   if (guard === "suspended")
@@ -365,10 +405,33 @@ test.each([
         },
       ],
     };
-  expect(scan().data).toEqual([]);
+  const blocked = scan();
+  expect(blocked.data).toEqual([]);
+  const reasons: Record<string, string> = {
+    hold: "卡片已暂停",
+    human_action: "合并前置操作 H-1 尚未完成",
+    review_limit: "审核轮数已达上限",
+    suspended: "指派未激活",
+    stopped: "指派已被人工停止",
+    other_blocker: "拍板 Q-1 尚未解决",
+  };
+  expect(blocked.events).toMatchObject([
+    {
+      type: "work_item_resume_deferred",
+      payload: { work_item_id: work, reason: reasons[guard] },
+    },
+  ]);
+  expect(blocked.timeline[0]?.body).toContain(reasons[guard]);
   expect(item()?.reported_blocker).toBeDefined();
-  state = before;
+  expect(pmQueue()).toMatchObject([
+    { work_item_id: work, reason: reasons[guard] },
+  ]);
+  expect(scan().events).toEqual([]);
+  state = { ...before, events: state.events };
+  if (guard === "stopped")
+    event("run_dispatched", { assignment_id: owner }, system, id("card", 1));
   expect(scan().data).toEqual([work]);
+  expect(pmQueue()).toEqual([]);
 });
 
 test("resolved decision resumes, revoked/provisional does not", () => {
@@ -565,6 +628,264 @@ test.each([false, true])(
     });
     expect(item()?.reported_blocker?.auto_resume_disabled).toBe(true);
     expect(scan().data).toEqual([]);
+  },
+);
+
+function pmQueue() {
+  const pmState = {
+    ...state,
+    assignments: state.assignments.map((a) =>
+      a.scope === "standing" ? { ...a, standing_mode: "ops" as const } : a,
+    ),
+  };
+  return value(listNeedsYou(pmState, actor(4, "pm"), io.clock)).data.pm_queue
+    ?.deferred_resumes;
+}
+
+test.each(["automatic", "pm"])(
+  "C-549 W-1831: manual assignment → author blocked → same precheck passes → %s recovery",
+  (mode) => {
+    const pm = actor(4, "pm");
+    const update = (
+      fields: { manual_assign: true } | { status: "in_progress" },
+    ) => {
+      const effect = value(
+        updateWorkItem(state, pm, { work_item_id: work, ...fields }, io),
+      );
+      state = apply(state, effect);
+      return effect;
+    };
+    update({ manual_assign: true }); // C-549 seq 882; resolving Q-1107 did not clear this flag.
+    const condition = {
+      kind: "precheck_finished" as const,
+      target_id: "06H036DS4QSPB81KST6EHECM0W",
+    };
+    authorCheck(condition.target_id, "queued");
+    block(condition); // seq 1020
+    finish();
+    expect(scan().events).toEqual([]);
+    const passed = authorCheck(condition.target_id, "passed"); // seq 1026
+    if (mode === "automatic") {
+      expect(scan().events[0]).toMatchObject({
+        type: "work_item_resume_requested",
+        payload: { condition, evidence: passed.id, assignment_id: owner },
+      });
+    } else {
+      const resumed = update({ status: "in_progress" }); // seq 1034, before the next maintenance tick
+      expect(resumed.events).toMatchObject([
+        { type: "work_item_updated" },
+        {
+          type: "run_queued",
+          payload: {
+            assignment_id: owner,
+            trigger_event_id: resumed.events[0]?.id,
+          },
+        },
+      ]);
+      update({ status: "in_progress" });
+      expect(
+        state.runs.filter(
+          (r) => r.assignment_id === owner && r.status === "queued",
+        ),
+      ).toHaveLength(1);
+    }
+    expect(item()).toMatchObject({
+      status: "in_progress",
+      manual_assign: true,
+      assignment_id: owner,
+    });
+    expect(scan().events).toEqual([]);
+  },
+);
+
+test("confirming one blocker cannot bypass another; PM sees one reason until work resumes", () => {
+  const pm = actor(4, "pm");
+  const condition = { kind: "precheck_finished" as const, target_id: "check" };
+  authorCheck("check", "queued");
+  block(condition);
+  finish();
+  state = {
+    ...state,
+    human_actions: [
+      {
+        id: id("human_action", 1),
+        key: id("human_action", 1),
+        requested_by: "human",
+        instructions: "Connect",
+        why_human: "Account",
+        expected_return: "Connected",
+        blocks_merge: true,
+        prerequisite: "credential",
+        blocked_work_items: [work],
+        status: "open",
+      },
+    ],
+  };
+  const update = () => {
+    const result = value(
+      updateWorkItem(
+        state,
+        pm,
+        { work_item_id: work, status: "in_progress" },
+        io,
+      ),
+    );
+    state = apply(state, result);
+    return result;
+  };
+  expect(update().events.map((e) => e.type)).toEqual([
+    "work_item_updated",
+    "work_item_resume_deferred",
+  ]);
+  expect(item()?.status).toBe("blocked");
+  expect(update().events).toEqual([]);
+  expect(pmQueue()).toMatchObject([
+    { work_item_id: work, reason: "合并前置操作 H-1 尚未完成" },
+  ]);
+  state = { ...state, human_actions: [] };
+  expect(update().events.some((e) => e.type === "run_queued")).toBe(true);
+  expect(pmQueue()).toEqual([]);
+});
+
+function pmUpdate(
+  fields: Pick<
+    Parameters<typeof updateWorkItem>[2],
+    "status" | "manual_assign"
+  >,
+) {
+  const effect = value(
+    updateWorkItem(
+      state,
+      actor(4, "pm"),
+      { work_item_id: work, ...fields },
+      io,
+    ),
+  );
+  state = apply(state, effect);
+  return effect;
+}
+function blockForDeployment() {
+  block({ kind: "deployment_ready", target_id: next });
+  finish();
+}
+function deploymentReady() {
+  event("host_deployment_recorded", {
+    to: next,
+    status: "deployed",
+    ready: true,
+  });
+}
+
+test("a human stop survives both automatic and PM resume; only an actual restart clears its notice", () => {
+  pmUpdate({ manual_assign: true });
+  blockForDeployment();
+  deploymentReady();
+  state = apply(
+    state,
+    value(
+      stopWorkItemAssignment(
+        state,
+        human,
+        { assignment_id: owner, reason: "Investigating" },
+        io,
+      ),
+    ),
+  );
+  expect(scan().events).toMatchObject([
+    {
+      type: "work_item_resume_deferred",
+      payload: { reason: "指派已被人工停止" },
+    },
+  ]);
+  expect(pmUpdate({ status: "in_progress" }).events.map((e) => e.type)).toEqual(
+    ["work_item_updated"],
+  );
+  expect(
+    state.runs.filter(
+      (r) => r.assignment_id === owner && r.status === "queued",
+    ),
+  ).toHaveLength(0);
+  expect(scan().events).toEqual([]);
+  // A queue receipt is not proof that the human has successfully restarted it.
+  event("run_queued", { assignment_id: owner }, human, id("card", 1));
+  expect(pmQueue()).toMatchObject([
+    { work_item_id: work, reason: "指派已被人工停止" },
+  ]);
+  event("run_dispatched", { assignment_id: owner }, system, id("card", 1));
+  expect(pmQueue()).toEqual([]);
+});
+
+test("cancelling a held card retires its wait across rescans, restart and a title edit", () => {
+  const card_id = id("card", 1);
+  blockForDeployment();
+  state = apply(
+    state,
+    value(
+      updateCard(
+        state,
+        human,
+        { card_id, hold: { reason: "Paused", resume_condition: "PM clears" } },
+        io,
+      ),
+    ),
+  );
+  deploymentReady();
+  expect(scan().events).toMatchObject([{ type: "work_item_resume_deferred" }]);
+  expect(pmQueue()).toHaveLength(1);
+  state = apply(
+    state,
+    value(updateCard(state, human, { card_id, status: "cancelled" }, io)),
+  );
+  expect(item()?.status).toBe("cancelled");
+  expect(pmQueue()).toEqual([]);
+  expect(scan().events).toEqual([]);
+  state = apply(
+    state,
+    value(updateCard(state, human, { card_id, title: "Archive" }, io)),
+  );
+  state = JSON.parse(JSON.stringify(state)) as CommandState;
+  expect(scan().events).toEqual([]);
+  expect(pmQueue()).toEqual([]);
+  expect(
+    state.events.filter((e) => e.type === "work_item_resume_deferred"),
+  ).toHaveLength(1);
+});
+
+test.each([false, true])(
+  "a blocked compound resume records one reason and applies no fields (reported=%s)",
+  (reported) => {
+    pmUpdate({ manual_assign: true });
+    if (reported) blockForDeployment();
+    const requested = value(
+      requestHumanAction(
+        state,
+        actor(4, "pm"),
+        {
+          card_id: id("card", 1),
+          instructions: "Connect",
+          why_human: "Account",
+          expected_return: "Connected",
+          blocked_work_items: [work],
+          blocks_merge: true,
+          prerequisite: "credential",
+        },
+        io,
+      ),
+    );
+    state = apply(state, requested);
+    const before = item();
+    expect(before).toMatchObject({ manual_assign: true, status: "blocked" });
+    const attempt = () =>
+      pmUpdate({ status: "in_progress", manual_assign: false });
+    const reason = `合并前置操作 ${requested.data.id} 尚未完成`;
+    const deferred = attempt();
+    expect(deferred.events).toMatchObject([
+      { type: "work_item_resume_deferred", payload: { reason } },
+    ]);
+    expect(deferred.timeline[0]?.body).toContain(reason);
+    expect(attempt().events).toEqual([]);
+    expect(item()).toEqual(before);
+    expect(pmQueue()).toMatchObject([{ work_item_id: work, reason }]);
   },
 );
 

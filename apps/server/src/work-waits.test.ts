@@ -1,4 +1,4 @@
-import { finishRun, reportBlocker } from "@cardigan/domain";
+import { finishRun, reportBlocker, updateWorkItem } from "@cardigan/domain";
 import { PROJECT_EVENT_STREAM, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
@@ -147,6 +147,14 @@ test.each(["blocked", "error", "unknown"] as const)(
   async (agent) => {
     const target = f.create();
     allowBlocker();
+    f.apply((s, a, p) =>
+      updateWorkItem(
+        s,
+        a,
+        { work_item_id: target.item.id, manual_assign: true },
+        p,
+      ),
+    );
     precheck("running");
     const previous = blockForPrecheck(target);
     for (const card_id of [undefined, target.card.id])
