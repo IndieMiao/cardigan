@@ -15,6 +15,7 @@ import type {
 } from "@cardigan/domain";
 import {
   applyStandingMode,
+  holdsPublicationTool,
   holdsStandingOnlyTools,
   isStandingOnlyTool,
   standingModeFromTools,
@@ -219,6 +220,8 @@ function modeScopedTools(
     return allowed_tools.filter(
       (tool) =>
         tool !== "record_decision" &&
+        (tool !== "publish_artifact" ||
+          (!!assignment && holdsPublicationTool(assignment))) &&
         (!isStandingOnlyTool(tool) ||
           (assignment !== undefined && holdsStandingOnlyTools(assignment))),
     );
