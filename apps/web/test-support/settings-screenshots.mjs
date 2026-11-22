@@ -670,7 +670,7 @@ try {
                 专用账号: "cg_studio",
                 UID: "1501",
                 GID: "1501",
-                "MCP 地址": "https://control.invalid/mcp",
+                "MCP 地址": "https://control.example.ts.net/mcp",
               };
               const set = Object.getOwnPropertyDescriptor(
                 HTMLInputElement.prototype,
