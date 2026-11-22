@@ -497,15 +497,18 @@ try {
             const scene = async (name, section) => {
               await run((section) => {
                 const d = document.querySelector("[role=dialog]");
-                const target = section
-                  ? [...d.querySelectorAll("h3, table, label")].find(
-                      (e) =>
-                        (e.tagName === "LABEL"
-                          ? e.firstChild?.textContent?.trim()
-                          : e.textContent.trim()) === section ||
-                        e.getAttribute("aria-label") === section,
-                    )
-                  : undefined;
+                const target =
+                  section === "@top"
+                    ? d.querySelector("[data-feedback-host]")
+                    : section
+                      ? [...d.querySelectorAll("h3, table, label")].find(
+                          (e) =>
+                            (e.tagName === "LABEL"
+                              ? e.firstChild?.textContent?.trim()
+                              : e.textContent.trim()) === section ||
+                            e.getAttribute("aria-label") === section,
+                        )
+                      : undefined;
                 if (section && !target)
                   throw new Error(`Missing section: ${section}`);
                 if (target) target.scrollIntoView({ block: "start" });
@@ -674,7 +677,7 @@ try {
             await until(
               "document.querySelector('[role=dialog]').textContent.includes('会自动复查')",
             );
-            await scene("wizard-recheck", "概况");
+            await scene("wizard-recheck", "@top");
             await press("继续检查");
             await until(has("复查"));
             await press("预览开启");
