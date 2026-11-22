@@ -14,7 +14,7 @@ import { DatabaseSync } from "node:sqlite";
 import { buffer } from "node:stream/consumers";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import {
   openMobileArtifact,
   requestMobileSignature,
@@ -307,11 +307,32 @@ test("a claimed attempt that ended without a result is unconfirmed, then looked 
     });
     // E.g. the operator reconciled peer_signed; the ledger only allows lookup.
     writeFileSync(join(host.ctl, "kind"), "lookup");
+    // Side by side (V-2954): a restarted server has no job memory at all...
+    vi.resetModules();
+    const restarted = await import("./mobile-signing.js");
+    // A fresh module instance: its in-flight job table starts empty.
+    expect(restarted.requestMobileSignature).not.toBe(requestMobileSignature);
+    expect(
+      await restarted.requestMobileSignature(
+        host.data,
+        jobScope("R-11"),
+        () => {},
+        { program: host.program, acceptWaitMs: 2_000 },
+      ),
+    ).toMatchObject({ status: "signed", request_id: "1".repeat(32) });
+    // ...and the live server, which remembers the failed attempt, must not
+    // need a restart: its first poll looks the same request up as well.
     expect(await call()).toMatchObject({
       status: "signed",
       request_id: "1".repeat(32),
     });
-    expect(host.spawns()).toEqual(["lost", "lookup", "check"]);
+    expect(host.spawns()).toEqual([
+      "lost",
+      "lookup",
+      "check",
+      "lookup",
+      "check",
+    ]);
   } finally {
     rmSync(host.data, { recursive: true, force: true });
   }
