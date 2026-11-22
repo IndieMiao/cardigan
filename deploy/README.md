@@ -30,6 +30,10 @@ sudo python3 deploy/install-agent.py --host-user <主机用户名> \
 本 PR 不执行 sudo。用户安装后再验证：agent 无 sudo、不能访问主机 home 和 Cardigan data；专用密钥可从 localhost 登录，其他密钥不能登录；agent-ssh 启动的终端 UID 为 agent；token/secrets 只由主机和 agent 读取并在启动后删除。
 
 
+## Agent 附件助手（C-595）
+
+`agent-tools/` 下的 `download-attachment.mjs`、`upload-evidence.mjs` 是只依赖 Node 内置模块的预构建单文件，随本目录安装到受管机器的 `/opt/cardigan/deploy/agent-tools/`，员工启动时通过 `CARDIGAN_AGENT_TOOLS` 找到它们。不要手改，修改源码后运行 `pnpm --filter @cardigan/mcp-server build:agent-tools` 重建。`cardigan machine check` 的 `agent.attachment_tools` 能力项会核对它们与当前发布一致。
+
 ## 安装 cardigan 命令
 
 在主机用户的 Cardigan 仓库中构建 CLI，再运行无需 sudo 的安装脚本：

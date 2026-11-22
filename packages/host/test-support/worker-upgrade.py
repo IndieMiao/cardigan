@@ -146,6 +146,33 @@ class UpgradeTest(unittest.TestCase):
                 module['unpack'](archive, dest, manifest)
                 self.assertEqual(digest(dest / 'deploy' / names[0]), manifest[names[0]])
 
+    def test_nested_executable_agent_tools_ship_with_the_release(self):
+        # C-595: the unchanged template ships the prebuilt agent tools in a nested,
+        # executable directory, verified against the manifest like every release file.
+        source = Path(__file__).resolve().parents[3] / 'deploy' / 'agent-tools'
+        tools = ('download-attachment.mjs', 'upload-evidence.mjs')
+        staged = self.root / 'staged' / 'deploy'
+        (staged / 'agent-tools').mkdir(parents=True)
+        for name in tools:
+            (staged / 'agent-tools' / name).write_bytes((source / name).read_bytes())
+            (staged / 'agent-tools' / name).chmod(0o755)
+        for n in names:
+            (staged / n).write_text('new-' + n)
+        manifest = {p.relative_to(staged).as_posix(): digest(p) for p in staged.rglob('*') if p.is_file()}
+        archive = self.root / 'deploy.tar.gz'
+        with tarfile.open(archive, 'w:gz') as tar:
+            tar.add(staged, arcname='deploy')
+        dest = self.root / 'unpacked'
+        dest.mkdir()
+        module['unpack'](archive, dest, manifest)
+        self.cfg.update(manifest=manifest, os='darwin')
+        upgrade(self.work, dest / 'deploy', self.live, self.lib, 123, self.cfg, digest, lambda _: None, lambda _: True)
+        for name in tools:
+            path = self.live / 'agent-tools' / name
+            self.assertEqual(digest(path), manifest['agent-tools/' + name])
+            self.assertEqual(path.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((self.backup / 'previous').read_text(), 'leave-intact')
+
 
 if __name__ == '__main__':
     unittest.main()

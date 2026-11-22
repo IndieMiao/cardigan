@@ -171,7 +171,7 @@ test.each([
 );
 
 test.each([false, true])(
-  "employee local-test marker reaches worker launch material (remote=%s)",
+  "employee local-test marker and agent tools reach launch material (remote=%s)",
   (remote) => {
     const compiled = compileAssignmentLaunch({
       assignment: { assignment_id: "A-1", run_id: "R-1" },
@@ -183,6 +183,7 @@ test.each([false, true])(
       first_prompt: "fixture",
       secrets,
       agent_local_tests: true,
+      agent_tools_dir: "/opt/cardigan/deploy/agent-tools",
       ...(remote
         ? {
             worker_launch: {
@@ -198,8 +199,16 @@ test.each([false, true])(
         file.path.endsWith(remote ? "/launch.json" : "/launch.sh"),
       )?.content ?? "";
     if (remote)
-      expect(JSON.parse(material).env.CARDIGAN_AGENT_LOCAL_TESTS).toBe("1");
-    else expect(material).toContain("export CARDIGAN_AGENT_LOCAL_TESTS='1'");
+      expect(JSON.parse(material).env).toMatchObject({
+        CARDIGAN_AGENT_LOCAL_TESTS: "1",
+        CARDIGAN_AGENT_TOOLS: "/opt/cardigan/deploy/agent-tools",
+      });
+    else {
+      expect(material).toContain("export CARDIGAN_AGENT_LOCAL_TESTS='1'");
+      expect(material).toContain(
+        "export CARDIGAN_AGENT_TOOLS='/opt/cardigan/deploy/agent-tools'",
+      );
+    }
   },
 );
 
