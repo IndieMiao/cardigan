@@ -90,6 +90,17 @@ export class CleanupExecutor {
     return next;
   }
 
+  /** Finish the current pass. Each tick consumes at least one pending entry
+   * of a bounded page, so this ends; the timer loop pages instead. */
+  async sweep(project_id?: ProjectId): Promise<void> {
+    const projects = () =>
+      project_id
+        ? [project_id]
+        : this.options.store.listProjects().map((entry) => entry.id);
+    do await this.tick(project_id);
+    while (projects().some((project) => this.pending(project)));
+  }
+
   private async project(project_id: ProjectId) {
     const done =
       this.pass.get(project_id) ?? new Set<"releases" | "owners" | "builds">();
