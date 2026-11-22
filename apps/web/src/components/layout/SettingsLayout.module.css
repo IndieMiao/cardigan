@@ -573,6 +573,10 @@
   .steps > li[data-state="failed"] {
     color: var(--danger);
   }
+  /* An optional step that was not needed: muted, dashed, never ticked. */
+  [data-state="skipped"] > .stepMarker {
+    border-style: dashed;
+  }
   [data-failed] > .stepMarker {
     border-color: var(--danger);
     color: var(--danger);

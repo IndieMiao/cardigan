@@ -592,8 +592,9 @@ export function SettingsField({
         {label}
         {children({ invalid: error ? true : undefined, describedBy })}
       </label>
-      {hint && <SettingsFieldHint id={hintId}>{hint}</SettingsFieldHint>}
+      {/* The note to correct comes first, right under the control. */}
       {error && <SettingsWarning id={id}>{error}</SettingsWarning>}
+      {hint && <SettingsFieldHint id={hintId}>{hint}</SettingsFieldHint>}
     </>
   );
   // A hinted field keeps its label, hint and note together (4px apart).
@@ -620,18 +621,20 @@ export function SettingsFieldHint({
  * Steps before `current` are done; `current` equal to the number of steps
  * means all are done. A `failed` step (e.g. checks that did not pass) is
  * never shown as done, also when the reader has moved on to the step that
- * fixes it.
+ * fixes it; an optional step that was not needed is `skipped`, not done.
  */
 export function SettingsSteps({
   label,
   steps,
   current,
   failed,
+  skipped,
 }: {
   label: string;
   steps: readonly string[];
   current: number;
   failed?: number | undefined;
+  skipped?: number | undefined;
 }) {
   return (
     <ol aria-label={label} className={styles.steps}>
@@ -639,11 +642,13 @@ export function SettingsSteps({
         const state =
           i === failed && i !== current
             ? "failed"
-            : i < current
-              ? "done"
-              : i === current
-                ? "current"
-                : "todo";
+            : i === skipped && i < current
+              ? "skipped"
+              : i < current
+                ? "done"
+                : i === current
+                  ? "current"
+                  : "todo";
         return (
           <li
             key={step}
@@ -661,9 +666,13 @@ export function SettingsSteps({
               )}
             </span>
             {step}
-            {(state === "done" || i === failed) && (
+            {(state === "done" || state === "skipped" || i === failed) && (
               <span className={styles.visuallyHidden}>
-                {i === failed ? "（未通过）" : "（已完成）"}
+                {i === failed
+                  ? "（未通过）"
+                  : state === "skipped"
+                    ? "（未用到）"
+                    : "（已完成）"}
               </span>
             )}
           </li>

@@ -71,9 +71,33 @@ export function storedWizard(projectId: string): string | undefined {
 function rememberWizard(projectId: string, id: string | undefined) {
   try {
     if (id) window.localStorage.setItem(storageKey(projectId), id);
-    else window.localStorage.removeItem(storageKey(projectId));
+    else {
+      window.localStorage.removeItem(storageKey(projectId));
+      window.localStorage.removeItem(commandsKey(projectId));
+    }
   } catch {
     // Without storage the wizard still works; only resuming is lost.
+  }
+}
+/**
+ * C-565: the session whose checks stopped at a target-machine step, so the
+ * step bar shows “目标机命令” as done only when it was really needed (also
+ * after coming back); a session that passed straight through skips it.
+ */
+const commandsKey = (projectId: string) =>
+  `cardigan.worker-wizard.${projectId}.commands`;
+function commandsNeeded(projectId: string): string | undefined {
+  try {
+    return window.localStorage.getItem(commandsKey(projectId)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+function rememberCommandsNeeded(projectId: string, id: string) {
+  try {
+    window.localStorage.setItem(commandsKey(projectId), id);
+  } catch {
+    // Only the step bar's “not needed” mark depends on it.
   }
 }
 
@@ -292,6 +316,8 @@ function stopOf(wizard: WorkerWizardView | undefined) {
 }
 /** The step bar's index of the checks, shown failed until they pass. */
 const CHECKS_STEP = 2;
+/** The step bar's index of the target-machine commands (optional). */
+const COMMANDS_STEP = 3;
 function wizardStep(wizard: WorkerWizardView | undefined): number {
   switch (wizard?.phase) {
     case undefined:
@@ -300,7 +326,7 @@ function wizardStep(wizard: WorkerWizardView | undefined): number {
       return 1;
     case "failed": {
       const stop = stopOf(wizard);
-      return stop && isTargetStep(stop) ? 3 : CHECKS_STEP;
+      return stop && isTargetStep(stop) ? COMMANDS_STEP : CHECKS_STEP;
     }
     case "passed":
       return 4;
@@ -631,6 +657,16 @@ export function WorkerWizardDrawer({
    */
   const [rechecks, setRechecks] = useState<{ step: string; count: number }>();
   const stop = !editing && readState === "ok" ? stopOf(wizard) : undefined;
+  const [neededFor, setNeededFor] = useState(() => commandsNeeded(projectId));
+  const targetStopId =
+    wizard && stopOf(wizard) && isTargetStep(stopOf(wizard) as WorkerWizardStep)
+      ? wizard.id
+      : undefined;
+  useEffect(() => {
+    if (!targetStopId) return;
+    rememberCommandsNeeded(projectId, targetStopId);
+    setNeededFor(targetStopId);
+  }, [projectId, targetStopId]);
   const blockedStep =
     stop && isTargetStep(stop) && wizard?.check_id ? stop.step : undefined;
   const recheckCount =
@@ -668,7 +704,7 @@ export function WorkerWizardDrawer({
     : recheckCount >= autoRecheckMax
       ? "自动复查已停止：在目标机执行命令后，请点“继续检查”。"
       : autoRecheck
-        ? `执行目标机命令后会自动复查（每 ${Math.round(autoRecheckMs / 1000)} 秒，已复查 ${recheckCount}/${autoRecheckMax} 次）`
+        ? `自动复查中（${recheckCount}/${autoRecheckMax}）`
         : undefined;
 
   const phase = wizard?.phase;
@@ -784,6 +820,11 @@ export function WorkerWizardDrawer({
             failed={
               !showForm && content?.phase === "failed" ? CHECKS_STEP : undefined
             }
+            skipped={
+              !showForm && content && neededFor !== content.id
+                ? COMMANDS_STEP
+                : undefined
+            }
           />
         )}
         {showForm && (
@@ -791,6 +832,7 @@ export function WorkerWizardDrawer({
             form={form}
             errors={fieldErrors}
             mcpSource={mcpSource}
+            accountSuggested={form.account === suggestedAccount(projectId)}
             setForm={(next, key) => {
               if (key === "mcp_url") {
                 mcpEdited.current = true;
@@ -909,6 +951,7 @@ function WizardForm({
   form,
   errors,
   mcpSource,
+  accountSuggested,
   setForm,
   busy,
   back,
@@ -916,6 +959,8 @@ function WizardForm({
   onCancel,
 }: {
   form: Form;
+  /** The account field still holds the recommended name. */
+  accountSuggested: boolean;
   /** Each mistake is shown beside its own field. */
   errors: FieldErrors;
   mcpSource: McpSource;
@@ -1023,7 +1068,7 @@ function WizardForm({
           {text(
             "account",
             "专用账号",
-            "目标机上为本项目新建的非管理员账号：以 cg_ 开头，每个项目单独一个，不复用个人或 CI 账号。已按项目名推荐。",
+            `目标机上为本项目新建的非管理员账号：以 cg_ 开头，每个项目单独一个，不复用个人或 CI 账号。${accountSuggested ? "已按项目名推荐。" : ""}`,
           )}
           {text(
             "uid",

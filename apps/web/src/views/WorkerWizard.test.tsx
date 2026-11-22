@@ -871,7 +871,7 @@ const stepBar = (dialog: ReturnType<typeof within>) => {
       .filter((n) => !(n instanceof HTMLElement && n.ariaHidden === "true"))
       .map((n) => n.textContent)
       .join("")
-      .replace(/（已完成）|（未通过）/gu, "");
+      .replace(/（已完成）|（未通过）|（未用到）/gu, "");
   return {
     names: items.map(name),
     current: items
@@ -880,6 +880,9 @@ const stepBar = (dialog: ReturnType<typeof within>) => {
     done: items.filter((li) => li.textContent?.includes("（已完成）")).length,
     failed: items
       .filter((li) => li.textContent?.includes("（未通过）"))
+      .map(name),
+    skipped: items
+      .filter((li) => li.textContent?.includes("（未用到）"))
       .map(name),
   };
 };
@@ -901,6 +904,7 @@ test("C-565: the whole wizard path is shown from the first screen, with the curr
     current: ["填写"],
     done: 0,
     failed: [],
+    skipped: [],
   });
   await fill(dialog);
   fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
@@ -1122,7 +1126,7 @@ test("C-565: a late automatic recheck from a stale page reads the moved-on sessi
   const fake = backend(["account"]);
   const dialog = drawer(fake.client, { autoRecheckMs: 80 });
   await toBlocked(dialog);
-  await dialog.findByText(/会自动复查/u);
+  await dialog.findByText(/自动复查中/u);
   // Another page continued and passed the check, then previewed launch.
   fake.mutate((w) => ({
     ...w,
@@ -1147,7 +1151,7 @@ test("C-565: an earlier blocked row left from a previous round does not keep the
   const fake = backend(["account"]);
   const dialog = drawer(fake.client, { autoRecheckMs: 60_000 });
   await toBlocked(dialog);
-  await dialog.findByText(/会自动复查/u);
+  await dialog.findByText(/自动复查中/u);
   cleanup();
   // This round stopped at the configuration check; account is left over.
   fake.mutate((w) => ({
@@ -1253,4 +1257,24 @@ test("C-565: the host's explicit remote MCP address is named as such", async () 
     document.getElementById(mcp.getAttribute("aria-describedby") ?? "")
       ?.textContent,
   ).toContain("已填入控制主机配置的 MCP 地址");
+});
+
+test("C-565: checks that pass straight through leave the commands step as not needed, never ticked", async () => {
+  const fake = backend(["passed"]);
+  const dialog = drawer(fake.client);
+  await toBlocked(dialog);
+  await dialog.findByRole("button", { name: "复查" });
+  expect(stepBar(dialog)).toMatchObject({
+    current: ["开启远程派发"],
+    done: 3,
+    failed: [],
+    skipped: ["目标机命令"],
+  });
+});
+
+test("C-565: while rechecking, the status is short and counts the rechecks", async () => {
+  const fake = backend(["account", "passed"]);
+  const dialog = drawer(fake.client, { autoRecheckMs: 60_000 });
+  await toBlocked(dialog);
+  expect(await dialog.findByText("自动复查中（0/20）")).toBeTruthy();
 });

@@ -35,7 +35,10 @@ const steps = (blocked?: string): WorkerWizardStep[] => {
             state: "blocked",
             elapsed_ms: 15000,
             reason: `worker_${step}_blocked`,
-            next: "核对 worker-known-hosts 中的主机指纹与 SSH 公钥，确认目标机 22 端口可达后重试。",
+            next:
+              step === "account"
+                ? "按“目标机命令”的“账号”一步建好专用账号和主组，核对 UID/GID 未被占用后重试。"
+                : "核对 worker-known-hosts 中的主机指纹与 SSH 公钥，确认目标机 22 端口可达后重试。",
           }
         : { step, state: "pending", elapsed_ms: 0 },
   );
