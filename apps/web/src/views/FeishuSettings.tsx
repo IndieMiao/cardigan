@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type { CardiganClient, FeishuBindingView } from "../api.js";
+import {
+  ApiError,
+  type CardiganClient,
+  describeError,
+  type FeishuBindingView,
+  type FeishuChannel,
+  type FeishuSettingsView,
+} from "../api.js";
 import { StatusTag } from "../components/Foundation.js";
 import {
   SettingsGroup,
   SettingsPanel,
   SettingsRow,
+  useDrawerReturnFocus,
 } from "../components/layout/SettingsLayout.js";
 import {
   RequestFeedback,
@@ -12,11 +20,13 @@ import {
 } from "../components/RequestFeedback.js";
 import { Button } from "../components/ui/button.js";
 import { useResource } from "../useResource.js";
+import { FeishuConfigEditor } from "./FeishuConfigEditor.js";
 import {
   FeishuConfigGroups,
   FeishuStatusRows,
-  useFeishuConfig,
+  type FeishuTestState,
 } from "./FeishuConfigGroups.js";
+import { testOutcome } from "./feishu-config.js";
 import { trackSettingsRead, useSettingWrite } from "./useSettingWrite.js";
 
 // /api/me/feishu addresses one binding regardless of the settings page's project.
@@ -55,7 +65,33 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
     return trackSettingsRead(client.feishuBinding());
   }, [client]);
   const resource = useResource(load, 0, visible);
-  const config = useFeishuConfig();
+  const settings = useFeishuSettingsReader(client, visible);
+  const config = settings.data;
+  const [editing, setEditing] = useState(false);
+  const [savedNote, setSavedNote] = useState("");
+  const editButton = useRef<HTMLButtonElement>(null);
+  const { remember } = useDrawerReturnFocus(editing, () => editButton.current);
+  const [tests, setTests] = useState<
+    Partial<Record<FeishuChannel, FeishuTestState>>
+  >({});
+  const testing = useRef(new Set<FeishuChannel>());
+  const sendTest = async (channel: FeishuChannel) => {
+    if (testing.current.has(channel) || !client.testFeishuChannel) return;
+    testing.current.add(channel);
+    setTests((old) => ({ ...old, [channel]: { pending: true } }));
+    let outcome: FeishuTestState["outcome"];
+    try {
+      // Each click is one new request; only its network retries reuse the key.
+      outcome = testOutcome(
+        await client.testFeishuChannel(channel, crypto.randomUUID()),
+      );
+    } catch (error) {
+      outcome = testOutcome(undefined, error);
+    } finally {
+      testing.current.delete(channel);
+    }
+    setTests((old) => ({ ...old, [channel]: { pending: false, outcome } }));
+  };
   const data = resource.data;
   const save = useSettingWrite({
     name: "飞书绑定",
@@ -134,7 +170,27 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
       (grant?.code ? "等待飞书确认" : expired ? "绑定码已过期" : "未绑定"));
   const busyOrStale = save.busy || !!resource.error;
   return (
-    <SettingsPanel title="飞书绑定" titleId={title} hidden={!visible}>
+    <SettingsPanel
+      title="飞书绑定"
+      titleId={title}
+      hidden={!visible}
+      actions={
+        config && (
+          <Button
+            ref={editButton}
+            variant="primary"
+            aria-haspopup="dialog"
+            onClick={() => {
+              remember();
+              setSavedNote("");
+              setEditing(true);
+            }}
+          >
+            编辑配置
+          </Button>
+        )
+      }
+    >
       <SettingsGroup title="状态">
         {config && <FeishuStatusRows config={config} />}
         <SettingsRow
@@ -209,7 +265,37 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
           </SettingsRow>
         )}
       </SettingsGroup>
-      {config && <FeishuConfigGroups config={config} />}
+      {config && (
+        <FeishuConfigGroups
+          config={config}
+          bound={data?.bound}
+          tests={tests}
+          onTest={(channel) => void sendTest(channel)}
+        />
+      )}
+      {config && editing && (
+        <FeishuConfigEditor
+          client={client}
+          view={config}
+          reread={settings.read}
+          onSaved={() => {
+            setEditing(false);
+            setSavedNote("已保存飞书配置");
+            settings.reload();
+          }}
+          onClose={() => setEditing(false)}
+        />
+      )}
+      <RequestFeedback
+        message={savedNote}
+        pending={settings.pending}
+        interactive={settings.interactive}
+        pendingMessage="正在读取飞书配置…"
+        error={
+          settings.error ? `未能读取飞书配置：${settings.error}` : undefined
+        }
+        retry={settings.error ? settings.reload : undefined}
+      />
       <RequestFeedback
         interactive={save.saving}
         pending={save.saving || resource.pending}
@@ -225,4 +311,80 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
       />
     </SettingsPanel>
   );
+}
+
+/**
+ * C-561: reads of the bot settings, ordered by when they started: a reply is
+ * shown only when no later-started read was shown already. Sessions the
+ * server does not let manage the bot (403) or a server without the endpoint
+ * (404) keep the binding entry alone, without an error.
+ */
+function useFeishuSettingsReader(client: CardiganClient, visible: boolean) {
+  const [state, setState] = useState<{
+    data?: FeishuSettingsView;
+    error?: string;
+    interactive: number;
+  }>({ interactive: 0 });
+  const order = useRef({ started: 0, shown: 0 });
+  const shown = useRef<FeishuSettingsView | undefined>(undefined);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const read = useCallback(
+    async ({ interactive = false } = {}): Promise<FeishuSettingsView> => {
+      if (!client.feishuSettings) throw new Error("飞书配置服务不可用");
+      const n = ++order.current.started;
+      const done = interactive ? 1 : 0;
+      if (done)
+        setState((old) => ({ ...old, interactive: old.interactive + 1 }));
+      try {
+        const data = await client.feishuSettings();
+        if (n > order.current.shown) {
+          order.current.shown = n;
+          shown.current = data;
+          if (alive.current)
+            setState((old) => ({ data, interactive: old.interactive - done }));
+        } else if (alive.current && done)
+          setState((old) => ({ ...old, interactive: old.interactive - done }));
+        return shown.current ?? data;
+      } catch (error) {
+        const newer = n < order.current.shown ? shown.current : undefined;
+        const unavailable =
+          error instanceof ApiError && [403, 404].includes(error.status);
+        if (alive.current)
+          setState((old) =>
+            newer
+              ? { ...old, interactive: old.interactive - done }
+              : unavailable
+                ? { interactive: old.interactive - done }
+                : {
+                    ...old,
+                    interactive: old.interactive - done,
+                    error: describeError(error),
+                  },
+          );
+        if (newer) return newer;
+        throw error;
+      }
+    },
+    [client],
+  );
+  const reload = useCallback(() => {
+    read({ interactive: true }).catch(() => {});
+  }, [read]);
+  useEffect(() => {
+    if (visible && client.feishuSettings) reload();
+  }, [visible, client, reload]);
+  return {
+    data: state.data,
+    error: state.error,
+    pending: state.interactive > 0 && !state.data,
+    interactive: state.interactive > 0,
+    read: useCallback(() => read(), [read]),
+    reload,
+  };
 }
