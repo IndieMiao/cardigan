@@ -12,13 +12,27 @@ export function extChannelActivation(db: DatabaseSync, name: string) {
   ).get(name) as (ExtChannelActivation & { fingerprint: string }) | undefined;
 }
 
+export const extEventWatermark = (db: DatabaseSync) =>
+  Number(
+    prepare(db, "SELECT COALESCE(MAX(rowid),0) AS n FROM events").get()!.n,
+  );
+
 /** Caller owns the configuration activation transaction. No raw settings are persisted. */
 export function activateExtChannels(
   db: DatabaseSync,
   tx: StoreTransactionContext,
   fingerprints: Map<string, string>,
   now: string,
+  publication?: string,
 ) {
+  // If Web died after publishing the inode, background and Web must both replay
+  // the actual cutover, not discard events appended between rename and recovery.
+  const pending =
+    publication &&
+    prepare(
+      db,
+      "SELECT watermark FROM feishu_settings_publications WHERE publication=?",
+    ).get(publication);
   const active = new Map<string, ExtChannelActivation>();
   for (const { name } of prepare(
     db,
@@ -30,9 +44,9 @@ export function activateExtChannels(
   for (const [name, fingerprint] of fingerprints) {
     let row = extChannelActivation(db, name);
     if (row?.fingerprint !== fingerprint) {
-      const watermark = Number(
-        prepare(db, "SELECT COALESCE(MAX(rowid),0) AS n FROM events").get()!.n,
-      );
+      const watermark = pending
+        ? Number(pending.watermark)
+        : extEventWatermark(db);
       row = { epoch: randomUUID(), watermark, fingerprint };
       prepare(
         db,

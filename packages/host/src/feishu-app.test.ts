@@ -494,3 +494,27 @@ test("test DM uses only the current binding of this owner, no action buttons, no
   expect(await port.send(message, signal)).toBe("permanent");
   expect(remote.create).toHaveBeenCalledTimes(1);
 });
+
+test("recreating the inbox for the same app and tenant does not reset the current binding window", () => {
+  const code = issue();
+  const reload = () =>
+    feishuInbox(
+      db,
+      c,
+      () => {},
+      () => now,
+      { bindingAttempts: 1, pending: 32 },
+      remote.bindingFailure,
+    );
+  receive = reload();
+  redeem("ordinary chat");
+  receive = reload();
+  redeem(code);
+  expect(binding()).toBeUndefined();
+  now += 59999;
+  redeem(code);
+  expect(binding()).toBeUndefined();
+  now += 1;
+  redeem(code);
+  expect(binding()?.open_id).toBe("owner");
+});

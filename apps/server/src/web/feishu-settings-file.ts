@@ -156,6 +156,7 @@ function readPrivate(path: string) {
       throw invalid();
     return {
       text: readFileSync(fd, "utf8"),
+      identity: `${st.dev}:${st.ino}:${st.mtimeNs}`,
       stamp: `${st.dev}:${st.ino}:${st.ctimeNs}:${st.mtimeNs}`,
       at: new Date(Number(st.mtimeMs)).toISOString(),
     };
@@ -304,8 +305,8 @@ export function plan(f: FileState, change: Change) {
     }
   const before = publicSettings(f),
     after = publicSettings(f, merged);
-  for (const k of Object.keys(change.settings))
-    if (after[k] === null) throw invalid();
+  // Rotation must not unmask an unchanged field containing the old credential.
+  if (Object.values(after).includes(null)) throw invalid();
   for (const name of channelNames) {
     if (!merged.enabled || !merged[`channels.${name}.enabled`]) continue;
     for (const k of keyMapKeys())
@@ -336,7 +337,11 @@ export function publish(
   f: FileState,
   change: Change,
   input: Values,
-  beforeCommit: (config: ReturnType<typeof loadExtMessageConfig>) => void,
+  commit: (
+    publication: string,
+    config: ReturnType<typeof loadExtMessageConfig>,
+    install: () => void,
+  ) => void,
 ) {
   if (
     Object.keys(input).sort().join() !== [...change.secrets.set].sort().join()
@@ -355,6 +360,13 @@ export function publish(
     const now = new Date().toISOString();
     for (const name of channelNames) {
       const keys = keyMapKeys().filter((k) => keyMap[k][0] === name);
+      // An unchanged inline credential takes its legacy timestamp from the old
+      // YAML inode. Pin it before replacing that inode, even on a settings-only save.
+      if (f.doc.hasIn(["channels", name, "credential"]))
+        for (const k of keys) {
+          const at = f.secrets[k].updated_at;
+          if (at) f.doc.setIn(["settings_secret_times", k], at);
+        }
       if (
         !keys.some(
           (k) =>
@@ -397,6 +409,7 @@ export function publish(
               : f.secrets[k].updated_at,
           );
     }
+    f.doc.set("settings_publication", id);
     writeNewPrivateFile(temp, String(f.doc));
     const next = readSettings(temp, dir),
       effective = loadExtMessageConfig(temp, dir);
@@ -414,9 +427,11 @@ export function publish(
       writeNewPrivateFile(backup, f.yaml.text);
       renameSync(backup, `${f.path}.${id}.bak`);
     }
-    beforeCommit(effective);
-    renameSync(temp, f.path);
-    installed = true;
+    commit(`${id}:${next.yaml!.identity}`, effective, () => {
+      if (readSettings(f.path).version !== f.version) throw stale();
+      renameSync(temp, f.path);
+      installed = true;
+    });
   } finally {
     if (!installed || !hasSecrets)
       rmSync(generation, { recursive: true, force: true });

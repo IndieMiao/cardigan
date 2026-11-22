@@ -61,8 +61,6 @@ export function feishuInbox(
   current = () => true,
 ) {
   const scope = appScope(c);
-  let window = 0,
-    tries = 0;
   return (kind: "action" | "binding", raw: unknown) => {
     const e = object(raw),
       op = object(e.operator),
@@ -97,11 +95,16 @@ export function feishuInbox(
           m.content.length > 256
         )
           return reject("ignored_message");
-        if (now - window >= 60_000) {
-          window = now;
-          tries = 0;
-        }
-        if (++tries > limits.bindingAttempts) return reject("limited");
+        // The writer transaction covers both quota and redemption. Reloading a WS
+        // worker (or rotating its secret) must not grant the same scope a fresh window.
+        const budget = db
+          .prepare(`INSERT INTO feishu_binding_windows(scope,start,tries) VALUES(?,?,1)
+          ON CONFLICT(scope) DO UPDATE SET
+            tries=CASE WHEN excluded.start-start>=60000 THEN 1 ELSE tries+1 END,
+            start=CASE WHEN excluded.start-start>=60000 THEN excluded.start ELSE start END
+          WHERE excluded.start-start>=60000 OR tries<?`)
+          .run(scope, now, limits.bindingAttempts);
+        if (!budget.changes) return reject("limited");
         let code: unknown;
         try {
           code = object(JSON.parse(m.content)).text;

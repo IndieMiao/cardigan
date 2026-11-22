@@ -4,13 +4,11 @@ import { dirname } from "node:path";
 import {
   boundTestAdapter,
   extChannelLimit,
-  extFingerprints,
   extMessageAdapters,
   loadExtMessageConfig,
   sendExtMessage,
 } from "@cardigan/host";
 import {
-  activateExtChannels,
   finishExtAttempt,
   reserveExtAttempt,
   type Store,
@@ -30,6 +28,7 @@ import {
   stale,
   valuesSchema,
 } from "./feishu-settings-file.js";
+import { FeishuPublication } from "./feishu-settings-publication.js";
 import {
   HttpRejection,
   methodNotAllowed,
@@ -65,10 +64,18 @@ export class FeishuSettings {
     string,
     { owner: string; version: string; change: Change }
   >();
+  private readonly publication: FeishuPublication;
   constructor(
     private store: Store,
     private path: string,
-  ) {}
+  ) {
+    this.publication = new FeishuPublication(store, path);
+    try {
+      this.publication.recover();
+    } catch {
+      /* Retry on the next settings request. */
+    }
+  }
   private replay(key: string, subject: string) {
     const row = this.store.database
       .prepare(
@@ -111,6 +118,8 @@ export class FeishuSettings {
       const actor = authorize();
       const replay = this.replay(key, subject);
       if (replay) return { result: replay } as const;
+      const f = readSettings(this.path),
+        safeUrl = publicSettings(f).workbench_url;
       const c = loadExtMessageConfig(this.path);
       if (
         c.status !== "loaded" ||
@@ -122,6 +131,12 @@ export class FeishuSettings {
           "channel_disabled",
           "渠道未启用或配置无效",
         );
+      if (
+        typeof safeUrl !== "string" ||
+        safeUrl !== c.config.workbench_url ||
+        readSettings(this.path).version !== f.version
+      )
+        throw invalid();
       const credential = c.config.channels[channel].credential,
         timeout = c.config.policy.timeout_ms;
       const adapter =
@@ -150,7 +165,7 @@ export class FeishuSettings {
         throw new HttpRejection(429, "rate_limited", "渠道已限速");
       // Ambiguous outcome, including a process exit after dispatch, never authorizes a retry.
       this.record(key, subject, actor, [subject], "unknown");
-      return { adapter, timeout, url: c.config.workbench_url } as const;
+      return { adapter, timeout, url: safeUrl } as const;
     });
     if ("result" in ready) return ready.result;
     const result = await sendExtMessage(
@@ -190,6 +205,7 @@ export class FeishuSettings {
     if (rest === "") {
       human();
       if (req.method !== "GET") methodNotAllowed(["GET"]);
+      this.publication.recover();
       const f = readSettings(this.path);
       sendJson(res, 200, {
         version: f.version,
@@ -235,45 +251,79 @@ export class FeishuSettings {
     if (rest === "/confirm") {
       const input = checked(confirm, body),
         subject = `confirm:${input.preview_id}:${input.version}`;
-      const result = await serialSecrets(dirname(this.path), async () =>
-        this.store.uow.run((tx) => {
-          const actor = human();
-          const replay = this.replay(key, subject);
-          if (replay) return replay;
-          const p = this.previews.get(input.preview_id),
-            f = readSettings(this.path);
+      const result = await serialSecrets(dirname(this.path), async () => {
+        // Fence a crashed request before another save can overwrite its only publication proof.
+        let replay: string | null;
+        try {
+          replay = this.store.uow.run((tx) => {
+            human();
+            this.publication.settle(tx, key);
+            return this.replay(key, subject);
+          });
+        } catch (e) {
+          human();
           if (
-            !p ||
-            p.owner !== owner ||
-            input.version !== p.version ||
-            f.version !== p.version
+            this.replay(key, subject) === "prepared" &&
+            this.publication.installed(key)
           )
-            throw stale();
-          const diff = plan(f, p.change);
-          try {
-            publish(f, p.change, input.secrets, (effective) => {
-              activateExtChannels(
-                this.store.database,
-                tx,
-                extFingerprints(effective, true),
-                new Date().toISOString(),
-              );
-              this.record(
+            return "applied";
+          throw e;
+        }
+        if (replay === "not_applied" || replay === "unconfirmed")
+          throw new HttpRejection(
+            409,
+            replay,
+            replay === "not_applied"
+              ? "未应用，请重新预览"
+              : "无法确认，请核对当前配置",
+          );
+        if (replay) return replay;
+        const p = this.previews.get(input.preview_id),
+          f = readSettings(this.path);
+        if (
+          !p ||
+          p.owner !== owner ||
+          p.version !== input.version ||
+          f.version !== p.version
+        )
+          throw stale();
+        const diff = plan(f, p.change);
+        try {
+          publish(f, p.change, input.secrets, (id, c, install) => {
+            try {
+              this.publication.commit(
                 key,
-                subject,
-                actor,
-                diff.map((d) => d.key),
-                "applied",
+                f,
+                id,
+                c,
+                () => {
+                  this.record(
+                    key,
+                    subject,
+                    human(),
+                    diff.map((d) => d.key),
+                    "prepared",
+                  );
+                },
+                human,
+                install,
               );
-            });
-          } catch (e) {
-            if (e instanceof HttpRejection) throw e;
-            throw invalid();
-          }
-          this.previews.delete(input.preview_id);
-          return "applied";
-        }),
-      );
+            } catch (e) {
+              if (e instanceof HttpRejection) throw e;
+              throw new HttpRejection(
+                503,
+                "publication_unavailable",
+                "保存暂不可用，请用同一请求键核对结果",
+              );
+            }
+          });
+        } catch (e) {
+          if (e instanceof HttpRejection) throw e;
+          throw invalid();
+        }
+        this.previews.delete(input.preview_id);
+        return "applied";
+      });
       sendJson(res, 200, { result });
       return;
     }

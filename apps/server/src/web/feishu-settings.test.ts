@@ -8,14 +8,17 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadExtMessageConfig } from "@cardigan/host";
+import { extEventWatermark, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { parse } from "yaml";
 import { call, webHarness } from "../../test-support/web.js";
+import { project_id } from "../../test-support/web-data.js";
 
 const mock = vi.hoisted(() => ({
   send: vi.fn(),
@@ -107,6 +110,7 @@ beforeEach(async () => {
   h = await webHarness({
     password: "test-private-password",
     feishuSettingsPath: path,
+    diskStore: true,
   });
   cookie = await h.login("test-private-password");
   mock.failRename = false;
@@ -222,15 +226,28 @@ test("failure at rename preserves both live secret files and YAML, with no succe
   });
   mock.failRename = true;
   expect(
-    (await confirm(p, { app_secret: "new-app", lark_sign_secret: "new-sign" }))
-      .status,
-  ).toBe(400);
+    (
+      await confirm(
+        p,
+        { app_secret: "new-app", lark_sign_secret: "new-sign" },
+        "failed-rename",
+      )
+    ).status,
+  ).toBe(503);
+  mock.failRename = false;
+  const replay = await confirm(
+    p,
+    { app_secret: "new-app", lark_sign_secret: "new-sign" },
+    "failed-rename",
+  );
+  expect(replay.status).toBe(409);
+  expect(replay.body).toContain("not_applied");
   expect(settings()).toBe(original);
   expect(readFileSync(join(dir, "feishu-app.secrets"), "utf8")).toBe(app);
   expect(readFileSync(join(dir, "ext-message.secrets"), "utf8")).toContain(
     sign,
   );
-  expect(audit()).toBe("[]");
+  expect(JSON.parse(audit())).toMatchObject([{ result: "not_applied" }]);
   expect(readdirSync(dir).filter((k) => k.startsWith("."))).toEqual([]);
 });
 test("permission and symlink failures do not follow target, preview is session/version bound and never accepts credential paths", async () => {
@@ -337,4 +354,125 @@ test("test requests use the selected channel budget, and clearing required keys 
   expect((await state()).secrets.lark_webhook.set).toBe(false);
   expect(parse(settings()).channels.lark.credential_file).toBeUndefined();
   expect((await post("test/lark", {})).status).toBe(409);
+});
+
+test("a failed reservation COMMIT leaves the original file and preview retryable", async () => {
+  const original = fixture(),
+    db = h.store.database;
+  const p = await preview({ settings: { "policy.timeout_ms": 987 } });
+  db.exec(`CREATE TABLE abort_commit (id TEXT REFERENCES members(id) DEFERRABLE INITIALLY DEFERRED);
+    CREATE TRIGGER reject_reservation AFTER INSERT ON feishu_settings_requests BEGIN INSERT INTO abort_commit VALUES('missing'); END;`);
+  expect((await confirm(p, {}, "commit")).status).toBe(503);
+  expect(settings()).toBe(original);
+  expect(audit()).toBe("[]");
+  db.exec("DROP TRIGGER reject_reservation");
+  expect((await confirm(p, {}, "commit")).json).toEqual({ result: "applied" });
+});
+
+test("after rename, a failed outcome COMMIT is proved by the durable reservation and reconciled on restart", async () => {
+  fixture();
+  const db = h.store.database;
+  const p = await preview({ settings: { "policy.timeout_ms": 987 } });
+  db.exec(`CREATE TABLE abort_commit (id TEXT REFERENCES members(id) DEFERRABLE INITIALLY DEFERRED);
+    CREATE TRIGGER reject_outcome AFTER UPDATE OF result ON feishu_settings_requests WHEN NEW.result='applied' BEGIN INSERT INTO abort_commit VALUES('missing'); END;`);
+  expect((await confirm(p, {}, "ambiguous")).json).toEqual({
+    result: "applied",
+  });
+  expect(parse(settings()).policy.timeout_ms).toBe(987);
+  expect(JSON.parse(audit())).toMatchObject([{ result: "prepared" }]);
+  expect((await confirm(p, {}, "ambiguous")).json).toEqual({
+    result: "applied",
+  });
+  // An event committed after publication must remain beyond the recovered activation cutoff.
+  const cutoff = extEventWatermark(db);
+  h.store.createProject({ id: project_id, name: "fixture" });
+  h.store.uow.run((tx) =>
+    tx.events.append(project_id, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project_id),
+      type: "fixture_test",
+      actor: { kind: "system", project_id },
+      created_at: new Date().toISOString(),
+      payload: {},
+    }),
+  );
+  expect(extEventWatermark(db)).toBeGreaterThan(cutoff);
+  db.exec("DROP TRIGGER reject_outcome");
+  const { FeishuSettings } = await import("./feishu-settings.js");
+  const reopened = Store.open({ dataDir: h.dataDir });
+  try {
+    new FeishuSettings(reopened, path);
+  } finally {
+    reopened.close();
+  } // new connection, empty previews
+  expect(
+    db.prepare("SELECT DISTINCT watermark FROM ext_message_channels").all(),
+  ).toEqual([{ watermark: cutoff }]);
+  expect(JSON.parse(audit())).toMatchObject([
+    { result: "applied", keys: JSON.stringify(["policy.timeout_ms"]) },
+  ]);
+  expect(
+    db.prepare("SELECT * FROM feishu_settings_publications").all(),
+  ).toEqual([]);
+  expect(
+    db.prepare("SELECT name FROM ext_message_channels ORDER BY name").all(),
+  ).toEqual([{ name: "lark" }, { name: "lark_app" }]);
+  expect((await confirm(p, {}, "ambiguous")).json).toEqual({
+    result: "applied",
+  });
+});
+
+test("a settings-only save preserves legacy inline credential timestamps", async () => {
+  fixture();
+  put(
+    "ext-message.yaml",
+    settings().replace(
+      "credential_file: feishu-app.secrets",
+      `credential: '${app}'`,
+    ),
+  );
+  utimesSync(path, new Date("2026-01-01"), new Date("2026-01-01"));
+  const before = (await state()).secrets;
+  expect(before.app_secret.updated_at).toBe("2026-01-01T00:00:00.000Z");
+  expect(
+    (await confirm(await preview({ settings: { "policy.timeout_ms": 1234 } })))
+      .status,
+  ).toBe(200);
+  expect((await state()).secrets).toEqual(before);
+});
+
+test("a masked link cannot be sent or unmasked by rotating or clearing the credential", async () => {
+  fixture();
+  put(
+    "ext-message.yaml",
+    settings().replace(
+      "https://workbench.invalid",
+      `https://workbench.invalid/${sign}`,
+    ),
+  );
+  const s = await state();
+  expect(s.settings.workbench_url).toBeNull();
+  for (const name of ["lark", "lark_app"])
+    expect((await post(`test/${name}`, {})).status).toBe(400);
+  expect(audit()).toBe("[]");
+  expect(mock.send).not.toHaveBeenCalled();
+  expect(mock.appSend).not.toHaveBeenCalled();
+  for (const action of ["set", "clear"])
+    expect(
+      (
+        await post("preview", {
+          version: s.version,
+          change: { secrets: { [action]: ["lark_sign_secret"] } },
+        })
+      ).status,
+    ).toBe(400);
+  const p = await preview({
+    settings: { workbench_url: "https://safe.invalid" },
+    secrets: { set: ["lark_sign_secret"] },
+  });
+  expect(JSON.stringify(p)).not.toContain(sign);
+  expect((await confirm(p, { lark_sign_secret: "replacement" })).status).toBe(
+    200,
+  );
+  expect(JSON.stringify(await state())).not.toContain(sign);
 });

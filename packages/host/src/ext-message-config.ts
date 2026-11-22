@@ -35,7 +35,11 @@ export interface ExtMessageConfig {
 }
 export type ExtMessageConfiguration =
   | { readonly status: "missing" | "invalid" }
-  | { readonly status: "loaded"; readonly config: ExtMessageConfig };
+  | {
+      readonly status: "loaded";
+      readonly publication?: string;
+      readonly config: ExtMessageConfig;
+    };
 export const defaultExtMessagePath = (env: NodeJS.ProcessEnv = process.env) =>
   join(
     env.CARDIGAN_CONFIG_DIR ??
@@ -68,7 +72,10 @@ const integer = (value: unknown, fallback: number): number => {
   return n;
 };
 /** Check the opened file, not a path stat before an attacker could swap it. */
-function privateText(path: string): string {
+function privateText(
+  path: string,
+  identify?: (identity: string) => void,
+): string {
   const fd = openSync(
     path,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -81,6 +88,10 @@ function privateText(path: string): string {
       (process.getuid && stat.uid !== process.getuid())
     )
       return invalid();
+    if (identify) {
+      const st = fstatSync(fd, { bigint: true });
+      identify(`${st.dev}:${st.ino}:${st.mtimeNs}`);
+    }
     return readFileSync(fd, "utf8");
   } finally {
     closeSync(fd);
@@ -90,9 +101,11 @@ export function loadExtMessageConfig(
   path = defaultExtMessagePath(),
   credentialDir = dirname(path),
 ): ExtMessageConfiguration {
-  let text: string;
+  let text: string, identity: string | undefined;
   try {
-    text = privateText(path);
+    text = privateText(path, (id) => {
+      identity = id;
+    });
   } catch (error) {
     return {
       status:
@@ -240,6 +253,10 @@ export function loadExtMessageConfig(
     }
     return {
       status: "loaded",
+      ...(typeof raw.settings_publication === "string" &&
+      /^[0-9a-f-]{36}$/u.test(raw.settings_publication)
+        ? { publication: `${raw.settings_publication}:${identity}` }
+        : {}),
       config: {
         enabled,
         workbench_url: base,

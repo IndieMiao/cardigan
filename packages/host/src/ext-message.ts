@@ -313,20 +313,26 @@ export function extFingerprints(
   const fingerprints = new Map<string, string>();
   if (c.status === "loaded" && c.config.enabled) {
     for (const [name, channel] of Object.entries(c.config.channels)) {
-      if (channel.enabled && (name !== "lark_app" || applicationActive))
+      if (channel.enabled && (name !== "lark_app" || applicationActive)) {
+        // Keep the pre-override fingerprint format, using only the effective budget.
+        const { max_per_minute: _override, ...effectiveChannel } = channel;
         fingerprints.set(
           name,
           createHash("sha256")
             .update(
               JSON.stringify([
                 c.config.workbench_url,
-                c.config.policy,
+                {
+                  ...c.config.policy,
+                  max_per_minute: extChannelLimit(c.config, name),
+                },
                 c.config.quiet_hours,
-                channel,
+                effectiveChannel,
               ]),
             )
             .digest("hex"),
         );
+      }
     }
   }
   return fingerprints;
@@ -348,7 +354,13 @@ export class ExtMessageSender {
     const { configuration: c, store } = this.options;
     const fingerprints = extFingerprints(c, !!this.app);
     const activate = (tx: StoreTransactionContext) =>
-      activateExtChannels(store.database, tx, fingerprints, this.clock.now());
+      activateExtChannels(
+        store.database,
+        tx,
+        fingerprints,
+        this.clock.now(),
+        c.status === "loaded" ? c.publication : undefined,
+      );
     this.activations = tx ? activate(tx) : store.uow.run(activate);
   }
   private current(channel: string) {

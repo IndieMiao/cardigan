@@ -118,7 +118,7 @@ quiet_hours:
 
 也支持渠道的 `credential` 字段直接保存上述 JSON 字符串，与 `credential_file` 二选一；建议使用单独秘密文件。`secret` 可省略，表示机器人未启用签名校验。配置及秘密文件必须是主机用户拥有的普通文件，权限严格为 `0600`，不接受符号链接；关闭渠道时不读取秘密文件。只接受 `open.feishu.cn` 下的标准自定义机器人 HTTPS webhook，无用户名、查询参数、片段或额外端口；发送禁止跟随重定向，凭据不进入数据库或错误输出。
 
-将两个 `enabled` 都设为 `true` 并按部署流程重启 server 后生效。`cardigan ext-message status` 查看最近加载状态与固定错误分类；由人在本机执行 `cardigan ext-message test --channel lark` 可显式发送固定测试消息（遵守总开关和渠道开关，单次测试不受免打扰时段影响）。Agent Token 无权执行这两条命令，系统不提供发送消息的 MCP 或 HTTP 入口。
+将总开关和渠道的 `enabled` 都设为 `true` 后，后台在下一发送轮次重载 YAML，无需重启。`cardigan ext-message status` 可查看加载状态；人在本机可用 `cardigan ext-message test --channel lark` 发送固定测试消息。Workbench 的人员登录会话也可向已配置的群或本人绑定的应用私聊发送测试消息；同一请求重试不会重发。测试遵守渠道开关，不受免打扰时段影响。Agent 和 PM Token 无权调用，不提供发送消息的 MCP 工具。
 
 免打扰默认关闭；开启时必须显式提供时区和不同的起止时间，起点包含、终点不包含，支持跨午夜并使用所选时区的夏令时规则。时段内只入队，结束后的下一轮按项目和渠道合成一条汇总。重启保留队列，发送前剔除已处理事项并重读敏感标记；最多列 20 条，其余可从汇总末尾的 Needs You 总入口查看。标题按 Unicode 码点限制为 120 字，链接另列；这两个上限可配置。
 

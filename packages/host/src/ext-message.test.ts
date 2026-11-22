@@ -1977,3 +1977,27 @@ test("live config switch installs new rate and target; disabled-period facts are
   expect(sent).toEqual(["first", "second", "second"]);
   await live.stop();
 });
+
+test("inheriting or overriding the same effective budget preserves the epoch and pending retries", async () => {
+  config = { ...config, policy: { ...config.policy, max_per_minute: 3 } };
+  startChannel();
+  fake.result = "retryable";
+  await sender().tick();
+  const epoch = () => outbox.extChannelActivation(store.database, "fake");
+  const initial = epoch();
+  expect(initial).toBeDefined();
+  for (const global of [3, 8]) {
+    config = {
+      ...config,
+      policy: { ...config.policy, max_per_minute: global },
+      channels: { fake: { ...config.channels.fake!, max_per_minute: 3 } },
+    };
+    sender().recordStatus();
+    expect(epoch()).toEqual(initial);
+    expect(rows()).toMatchObject([{ status: "pending", attempts: 1 }]);
+  }
+  fake.result = "sent";
+  advance(30000);
+  await sender().tick();
+  expect(rows()[0]?.status).toBe("sent");
+});
