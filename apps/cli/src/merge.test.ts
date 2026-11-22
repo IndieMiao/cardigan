@@ -344,6 +344,20 @@ test("merge status lists the card, the confirmation and the plan", async () => {
   );
 });
 
+test("C-577: merge status reports the persisted system decider before handoff", async () => {
+  await seatAwaitingMerge();
+  store.uow.run((tx) => {
+    const q = tx.decisions
+      .list(project)
+      .find((q) => q.trigger === "merge_confirmation");
+    if (!q) throw new Error("Missing confirmation");
+    tx.decisions.put(project, { ...q, decider: "system" });
+  });
+  expect((await cardigan("merge", "status", card_id)).out).toContain(
+    "Q-1 open decider=system",
+  );
+});
+
 test("C-112: merge status names the human action that holds the merge", async () => {
   await seatAwaitingMerge();
   expect((await cardigan("merge", "confirm", card_id)).code).toBe(0);

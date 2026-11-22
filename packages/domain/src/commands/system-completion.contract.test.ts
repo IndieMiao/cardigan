@@ -3,9 +3,12 @@ import type { CommandState, Delivery, ReviewIssue } from "../index.js";
 import {
   createWorkItem,
   developmentCardTemplate,
+  listNeedsYou,
   mergePlan,
   postComment,
   prepareDelivery,
+  recordDecision,
+  setProjectPreferences,
   submitDelivery,
   submitReview,
   systemCompleteCard,
@@ -417,7 +420,7 @@ test("B3a: human template still requests a human decision and never accepts dire
   );
 });
 
-test("B3a: a template without completion work directly enters merge, without fabricating PM review", async () => {
+async function readyWithoutCompletionReviewer() {
   const f = await setup();
   f.review();
   f.state = {
@@ -434,6 +437,78 @@ test("B3a: a template without completion work directly enters merge, without fab
       (w) => w.template_key !== "pm_acceptance",
     ),
   };
+  return f;
+}
+
+test.each([false, true])(
+  "C-577: C-15/Q-7 replay from product review to system completion (gate=%s)",
+  async (enabled) => {
+    const f = await readyWithoutCompletionReviewer();
+    const cardId = id("card", 1);
+    f.state = {
+      ...f.state,
+      project_settings: { merge_gate_enabled: enabled },
+      // A gated product already had an author precheck. This is not a merge check.
+      events: enabled
+        ? [
+            ...f.state.events,
+            {
+              id: f.io.ids.nextEventId(),
+              seq: f.io.ids.nextEventSequence(human.project_id, cardId),
+              type: "precheck_finished",
+              actor: system,
+              card_id: cardId,
+              payload: { head_sha: subject.value, status: "passed" },
+              created_at: f.io.clock.now(),
+            },
+          ]
+        : f.state.events,
+    };
+    f.commit(
+      value(setProjectPreferences(f.state, human, { auto_merge: "on" }, f.io)),
+    );
+    const completion = present(f.complete());
+    const q = present(
+      f.state.decisions.find((q) => q.trigger === "merge_confirmation"),
+    );
+    expect(q).toMatchObject({
+      target: { delivery_id: completion.id },
+      decider: enabled ? "system" : "human",
+      status: "open",
+    });
+    const inbox = value(listNeedsYou(f.state, human)).data.decisions;
+    if (enabled) {
+      expect(inbox).not.toContainEqual(expect.objectContaining({ id: q.id }));
+      return;
+    }
+    expect(inbox).toContainEqual(
+      expect.objectContaining({
+        id: q.id,
+        merge_confirmation: expect.objectContaining({ blockers: [] }),
+      }),
+    );
+    expect(mergePlan(f.state, id("card", 1)).ok).toBe(false);
+    f.commit(
+      value(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: q.id,
+            option: "merge",
+            rationale: "确认合并",
+            raw_quote: "确认合并",
+          },
+          f.io,
+        ),
+      ),
+    );
+    expect(mergePlan(f.state, id("card", 1)).ok).toBe(true);
+  },
+);
+
+test("B3a: a template without completion work directly enters merge, without fabricating PM review", async () => {
+  const f = await readyWithoutCompletionReviewer();
   const completion = present(f.complete());
   expect(completion.status).toBe("accepted");
   expect(f.state.cards.find((c) => c.id === id("card", 1))?.status).toBe(

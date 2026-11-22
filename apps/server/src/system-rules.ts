@@ -37,10 +37,12 @@ export function runSystemRules(
   loadState: StateLoader = loadCommandState,
   baseline?: { branch: string; sha: string },
   {
+    mergeGateEnabled,
     baselineConflictMaxResumes: conflictMaxResumes,
     authorPrecheckFailureLimit,
     frameworkWaitReminderMs,
   }: {
+    mergeGateEnabled?: (project: ProjectId) => boolean;
     baselineConflictMaxResumes?: number;
     authorPrecheckFailureLimit?: number;
     frameworkWaitReminderMs?: number;
@@ -164,7 +166,15 @@ export function runSystemRules(
       )
         continue;
       const completion = systemCompleteCard(
-        state,
+        mergeGateEnabled
+          ? {
+              ...state,
+              project_settings: {
+                ...state.project_settings,
+                merge_gate_enabled: mergeGateEnabled(project),
+              },
+            }
+          : state,
         actor,
         { card_id: card.id },
         ports,

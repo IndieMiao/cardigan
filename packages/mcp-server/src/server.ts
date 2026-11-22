@@ -548,6 +548,7 @@ async function serveMcp(
   allowedHosts: string[],
 ): Promise<void> {
   const server = createMcpServer({
+    projectSettings: options.projectSettings,
     store: options.store,
     identity,
     ...(options.auditProbeCall
