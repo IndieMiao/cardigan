@@ -39,7 +39,6 @@ import {
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   latestCardTemplate,
-  latestMergeCheck,
   listNeedsYou,
   listNeedsYouCounts,
   markCardDone,
@@ -81,6 +80,11 @@ import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
 import { runQueuedAt } from "../run-queued-at.js";
 import { autoMergePauseView } from "./auto-merge-pause.js";
+import {
+  type CardChecking,
+  cardCheckingIndex,
+  currentCardMergeCheck,
+} from "./card-checking.js";
 import { cardDependencyGraph } from "./card-dependencies.js";
 import { PAGE_LIMITS } from "./pagination.js";
 import {
@@ -315,6 +319,7 @@ function webRunAuthorView(state: CommandState, run_id: string) {
 
 type WebAuthorView = ReturnType<typeof webAuthorView>;
 type WebCardView = Omit<CardView, "next_owners"> & {
+  readonly checking?: CardChecking;
   readonly next_owners: readonly (CardView["next_owners"][number] &
     WebAuthorView)[];
 };
@@ -325,15 +330,18 @@ export function cardViews(
   dependencyState: CardDependencyState = state,
   mergeState?: CommandState,
 ): WebCardView[] {
+  const checkingOf = cardCheckingIndex(state, mergeState);
   return unwrap(projectSnapshot(state, human(state.project_id))).data.cards.map(
     (card) => {
       const stage = mergeState
         ? mergeStage(mergeState, card)
         : card.merge_stage;
       const { merge_stage: _stage, ...fields } = card;
+      const checking = checkingOf(card);
       return {
         ...fields,
         ...(stage ? { merge_stage: stage } : {}),
+        ...(checking ? { checking } : {}),
         ...(card.depends_on_cards?.length ||
         dependencyState.cards.some((c) => c.depends_on_cards?.includes(card.id))
           ? { dependency: cardDependencyView(dependencyState, card) }
@@ -1298,24 +1306,6 @@ function preMergeChecksView(state: CommandState, cardId: string | undefined) {
     note: check.note ?? null,
     updated_at: check.updated_at,
   }));
-}
-
-function currentCardMergeCheck(state: CommandState, cardId: CardId) {
-  if (!state.cards.some((c) => c.id === cardId)) return undefined;
-  const items = new Set(
-    state.work_items.filter((w) => w.card_id === cardId).map((w) => w.id),
-  );
-  const completion = state.deliveries
-    .filter(
-      (d) =>
-        items.has(d.work_item_id) &&
-        d.kind === "card_completion" &&
-        d.status !== "superseded",
-    )
-    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-  return completion
-    ? latestMergeCheck(state.events, cardId, completion.id)
-    : undefined;
 }
 
 function decisionActionWebView(

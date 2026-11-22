@@ -55,6 +55,7 @@ export function cardSummary(card: CardListView) {
     early_start,
     merge_stage,
     merge_solo,
+    checking,
   } = card;
   return {
     id,
@@ -84,6 +85,7 @@ export function cardSummary(card: CardListView) {
     ...(early_start ? { early_start } : {}),
     ...(merge_stage ? { merge_stage } : {}),
     ...(merge_solo !== undefined ? { merge_solo } : {}),
+    ...(checking ? { checking } : {}),
   };
 }
 export function readCardsPage(

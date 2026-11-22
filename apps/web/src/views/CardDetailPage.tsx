@@ -643,6 +643,7 @@ function CardContent({
         )}
         <CardStatusLine
           detail={detail}
+          projectId={projectId}
           metadata={
             <>
               <span>
