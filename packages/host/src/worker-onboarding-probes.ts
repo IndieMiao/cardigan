@@ -280,7 +280,7 @@ export function workerNextAction(
   }
   if (step === "helpers") {
     const guide = config.worker.os === "darwin" ? "macos" : "linux";
-    return `${WORKER_NEXT_ACTION.helpers.replace("linux-worker.md", `${guide}-worker.md`)}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-files.py ${e.fileHelper?.path}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-git.py ${e.gitHelper?.path}`;
+    return `${WORKER_NEXT_ACTION.helpers.replace("linux-worker.md", `${guide}-worker.md`)}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-files.py ${e.fileHelper?.path}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-git.py ${e.gitHelper?.path}\nsudo install -d -o root -g ${e.gid} -m 0750 ${e.agentRoot}/libexec/agent-tools\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/agent-tools/download-attachment.mjs /opt/cardigan/deploy/agent-tools/upload-evidence.mjs ${e.agentRoot}/libexec/agent-tools/`;
   }
   if (config.worker.os === "darwin") {
     const actions: Record<WorkerProbe, string> = {

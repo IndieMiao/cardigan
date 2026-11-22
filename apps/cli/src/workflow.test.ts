@@ -316,7 +316,10 @@ test("machine check uses the configured browser on the Run target; show retains 
       "scopes" in argv &&
       argv.scopes.some((s) => s.value === registry)
         ? { ok: true, output: "Chromium 152.0.1.2" }
-        : { ok: false, output: "" },
+        : // C-595: the local attachment tools are installed and current.
+          Array.isArray(argv) && argv[1] === "-e"
+          ? { ok: true, output: "agent-tools ok\n" }
+          : { ok: false, output: "" },
     );
     expect(await run(["machine", "check", "local"])).toBe(0);
     expect(printed()).toContain('"version": "152.0.1.2"');
@@ -342,6 +345,11 @@ test("machine check uses the configured browser on the Run target; show retains 
             "PATH:google-chrome",
             "$HOME/.cache/ms-playwright",
           ],
+        },
+        {
+          key: "agent.attachment_tools",
+          search_locations: [],
+          reason: "附件助手检查未完成",
         },
       ],
     });

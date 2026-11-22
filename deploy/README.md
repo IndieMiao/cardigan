@@ -30,6 +30,44 @@ sudo python3 deploy/install-agent.py --host-user <主机用户名> \
 本 PR 不执行 sudo。用户安装后再验证：agent 无 sudo、不能访问主机 home 和 Cardigan data；专用密钥可从 localhost 登录，其他密钥不能登录；agent-ssh 启动的终端 UID 为 agent；token/secrets 只由主机和 agent 读取并在启动后删除。
 
 
+## Agent 附件助手（C-595）
+
+`agent-tools/` 下的 `download-attachment.mjs`、`upload-evidence.mjs` 是只依赖 Node 内置模块的预构建单文件。受管 worker 上装在 `<工作根>/libexec/agent-tools/`（root 所有、项目组只读），由 worker 向导首装，并随人工升级和 `cardigan-helper-v2` 签名升级与 helper 一起更新。员工启动时通过 `CARDIGAN_AGENT_TOOLS` 找到它们。不要手改，修改源码后运行 `pnpm --filter @cardigan/mcp-server build:agent-tools` 重建。
+
+`cardigan machine check` 的 `agent.attachment_tools` 能力项会核对两个文件存在、可执行且与当前发布一致；不一致时只报原因和期望 SHA-256，不生成命令。在 C-595 之前登记签名升级的机器不会自动装上助手（自动补装另卡处理），这时按下面的固定步骤手动补装。每次补装都用新建的暂存目录，只删除这个目录，不碰管理员家目录或别处的同名文件；两份文件分别核对：每个期望值都必须是完整的 64 位十六进制 SHA-256 且与对应文件一致，任一不符即停止，暂存目录保留供排查，重试从第 1 步重新开始。macOS 把第 1 步的 `SUM=sha256sum` 改成 `SUM='shasum -a 256'`。
+
+```sh
+# 1. 目标机，管理员：填入 machine check 报出的期望摘要和本机路径，新建本次暂存目录
+DL_SHA=<download-attachment.mjs 的期望 SHA-256>
+UP_SHA=<upload-evidence.mjs 的期望 SHA-256>
+TOOLS=<工作根>/libexec/agent-tools
+GROUP=<项目组>
+SUM=sha256sum
+stage=$(mktemp -d) && echo "$stage"
+```
+
+```sh
+# 2. 控制主机，主机账号：从当前已部署的发行目录拷两个文件进上一步打印的暂存目录
+scp <发行目录>/deploy/agent-tools/download-attachment.mjs <发行目录>/deploy/agent-tools/upload-evidence.mjs <管理员>@<目标机>:<暂存目录>/
+```
+
+```sh
+# 3. 目标机，管理员：两份文件逐个核对后才安装（Run 账号需要读和执行，与向导一致用 root:项目组 0750），
+#    安装后再逐个复核，最后只删除本次暂存目录
+check() { printf '%s\n' "$2" | grep -Eqx '[0-9a-f]{64}' && [ "$($SUM "$1" | cut -d ' ' -f 1)" = "$2" ]; }
+cd "$stage" &&
+  check download-attachment.mjs "$DL_SHA" &&
+  check upload-evidence.mjs "$UP_SHA" &&
+  sudo test ! -L "$TOOLS" &&
+  sudo install -d -o root -g "$GROUP" -m 0750 "$TOOLS" &&
+  sudo install -o root -g "$GROUP" -m 0750 download-attachment.mjs upload-evidence.mjs "$TOOLS/" &&
+  [ "$(sudo $SUM "$TOOLS/download-attachment.mjs" | cut -d ' ' -f 1)" = "$DL_SHA" ] &&
+  [ "$(sudo $SUM "$TOOLS/upload-evidence.mjs" | cut -d ' ' -f 1)" = "$UP_SHA" ] &&
+  cd / && rm -r "$stage"
+```
+
+完成后重跑 `cardigan machine check <机器>` 确认 `agent.attachment_tools` 已可用。
+
 ## 安装 cardigan 命令
 
 在主机用户的 Cardigan 仓库中构建 CLI，再运行无需 sudo 的安装脚本：

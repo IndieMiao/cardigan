@@ -16,6 +16,7 @@ import type { Machine } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { parse } from "yaml";
+import { AGENT_TOOLS, agentToolsRelease } from "./agent-tools.js";
 import { refreshMachineObservations } from "./machine-capabilities.js";
 import { MachineCheckJournal } from "./machine-check-journal.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
@@ -38,10 +39,13 @@ import {
   upgradeState,
 } from "./worker-upgrade-gate.js";
 import {
+  installRelease,
   signedHelperBundle,
   upgradePrincipal,
 } from "./worker-upgrade-transport.js";
 import { workerWizardForm } from "./worker-wizard-form.js";
+
+const toolEntries = AGENT_TOOLS.map((n) => `agent-tools/${n}`);
 
 const project = "sample",
   machine = "worker-a",
@@ -613,7 +617,8 @@ test("signs only the approved running deployment commit, not a changed worktree 
     "-c",
     "core.hooksPath=/dev/null",
   ];
-  for (const n of helpers)
+  mkdirSync(join(deploy, "agent-tools"), { mode: 0o700 });
+  for (const n of [...helpers, ...toolEntries])
     copyFileSync(
       fileURLToPath(new URL(`../../../deploy/${n}`, import.meta.url)),
       join(deploy, n),
@@ -660,4 +665,52 @@ test("signs only the approved running deployment commit, not a changed worktree 
         .update(Buffer.from(bundle.files[n] ?? "", "base64"))
         .digest("hex"),
     ).toBe(workerHelperDigests()[n]);
+  // C-595: v2 also carries the attachment tools; v1 stays byte-compatible.
+  const tools = agentToolsRelease();
+  expect(JSON.parse(bundle.manifest)).toMatchObject({
+    kind: "cardigan-helper-v2",
+    digests: Object.fromEntries(
+      AGENT_TOOLS.map((n) => [`agent-tools/${n}`, tools?.digests[n]]),
+    ),
+  });
+  expect(Object.keys(bundle.files).sort()).toEqual(
+    [...helpers, ...toolEntries].sort(),
+  );
+  const legacy = await signedHelperBundle(
+    worker,
+    project,
+    identity,
+    undefined,
+    "v1",
+  );
+  expect(JSON.parse(legacy.manifest)).toMatchObject({
+    kind: "cardigan-helper-v1",
+    digests: workerHelperDigests(),
+  });
+  expect(Object.keys(legacy.files).sort()).toEqual([...helpers].sort());
+});
+
+test("an entry enrolled before C-595 gets the unchanged v1 bundle after refusing v2", async () => {
+  const f = await setup();
+  const worker = f.options.execution;
+  const before = Object.fromEntries(helpers.map((n) => [n, "a".repeat(64)]));
+  const send = vi.fn(async (...args: unknown[]) => {
+    if (args[3] === "v2") throw new Error("worker_upgrade_install_failed");
+    return before;
+  });
+  await expect(
+    installRelease(worker, project, "identity", undefined, send),
+  ).resolves.toEqual(before);
+  expect(send.mock.calls.map((call) => call[3])).toEqual(["v2", "v1"]);
+  // A v2 entry succeeds first time; a controller-side refusal is never retried.
+  send.mockClear();
+  send.mockResolvedValueOnce(before);
+  await installRelease(worker, project, "identity", undefined, send);
+  expect(send.mock.calls.map((call) => call[3])).toEqual(["v2"]);
+  send.mockClear();
+  send.mockRejectedValueOnce(new Error("worker_upgrade_unavailable"));
+  await expect(
+    installRelease(worker, project, "identity", undefined, send),
+  ).rejects.toThrow("worker_upgrade_unavailable");
+  expect(send).toHaveBeenCalledOnce();
 });

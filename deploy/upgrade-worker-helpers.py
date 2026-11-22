@@ -19,6 +19,10 @@ from pathlib import Path
 BOOT = Path(__file__).parent
 LEGACY = Path('/opt/cardigan-helper-upgrade')
 NAMES = ('worker-files.py', 'worker-git.py', 'worker-primitives.py')
+# C-595: prebuilt attachment tools, installed into libexec/agent-tools. Only this
+# bootstrap version accepts them; v1 entries keep rejecting the larger set.
+TOOLS = ('agent-tools/download-attachment.mjs', 'agent-tools/upload-evidence.mjs')
+KIND = 'cardigan-helper-v2'
 LIMIT = 1024 * 1024
 USER = 'cardigan_updater'
 
@@ -42,12 +46,12 @@ def unpack(raw, project, verify, now, previous):
     require(len(manifest) < 4096)
     verify(manifest, base64.b64decode(bundle['signature'], validate=True))
     meta = json.loads(manifest, object_pairs_hook=unique)
-    require(set(meta) == {'kind', 'project', 'issued', 'digests'} and meta['kind'] == 'cardigan-helper-v1'
+    require(set(meta) == {'kind', 'project', 'issued', 'digests'} and meta['kind'] == KIND
             and meta['project'] == project and type(meta['issued']) is int
             and now - 120000 <= meta['issued'] <= now + 10000 and meta['issued'] > previous)
-    require(set(bundle['files']) == set(meta['digests']) == set(NAMES))
-    files = {n: base64.b64decode(bundle['files'][n], validate=True) for n in NAMES}
-    require(all(files[n] and digest(files[n]) == meta['digests'][n] for n in NAMES))
+    require(set(bundle['files']) == set(meta['digests']) == set(NAMES + TOOLS))
+    files = {n: base64.b64decode(bundle['files'][n], validate=True) for n in NAMES + TOOLS}
+    require(all(files[n] and digest(files[n]) == meta['digests'][n] for n in NAMES + TOOLS))
     return meta['issued'], files
 
 
@@ -75,22 +79,51 @@ def write_new(path, data, gid, mode):
         os.fsync(f.fileno())
 
 
+def tool_directory(target, gid, acl_safe):
+    # Root-owned and group read-only like libexec; created on the first v2 install.
+    path = target / 'agent-tools'
+    try:
+        path.mkdir(mode=0o700)
+        created = True
+    except FileExistsError:
+        created = False
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if created:
+            os.fchown(fd, 0, gid)
+            os.fchmod(fd, 0o750)
+        s = os.fstat(fd)
+        require(s.st_uid == 0 and s.st_gid == gid and stat.S_IMODE(s.st_mode) == 0o750 and acl_safe(fd))
+    finally:
+        os.close(fd)
+    return path
+
+
 def update(files, target, gid, backup, acl_safe, check):
     # target is a pinned administrator-only namespace. No filenames from input.
     old = {n: read_installed(target / n, gid, acl_safe) for n in NAMES}
     check(old[NAMES[2]])
-    for n in NAMES:
-        write_new(backup / n, old[n], gid, 0o600)
+    tools = tool_directory(target, gid, acl_safe)
+    for n in TOOLS:
+        try:
+            old[n] = read_installed(target / n, gid, acl_safe)
+        except FileNotFoundError:
+            old[n] = None  # First v2 installation.
+    for n in NAMES + TOOLS:
+        if old[n] is not None:
+            write_new(backup / n.replace('/', '-'), old[n], gid, 0o600)
     # Stage on the target filesystem. Rollback copies remain root-only.
     with tempfile.TemporaryDirectory(dir=target) as staging:
         stage = Path(staging)
-        for n in NAMES:
-            write_new(stage / n, files[n], gid, 0o750)
+        for n in NAMES + TOOLS:
+            write_new(stage / n.replace('/', '-'), files[n], gid, 0o750)
         for n in NAMES:
             os.replace(stage / n, target / n)
-        require(all(read_installed(target / n, gid, acl_safe) == files[n] for n in NAMES))
+        for n in TOOLS:
+            os.replace(stage / n.replace('/', '-'), tools / Path(n).name)
+        require(all(read_installed(target / n, gid, acl_safe) == files[n] for n in NAMES + TOOLS))
         check(files[NAMES[2]])
-    return {n: digest(old[n]) for n in NAMES}
+    return {n: None if old[n] is None else digest(old[n]) for n in NAMES + TOOLS}
 
 
 def verify_release(state, public_key, manifest, signature):
