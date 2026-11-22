@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
 import {
   existsSync,
@@ -6,21 +7,25 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { RuntimeRef } from "@cardigan/domain";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterAll, afterEach, expect, test, vi } from "vitest";
 import { enrollDarwinOwner, stopDarwinOwner } from "./darwin-idle-owner.js";
+import { DARWIN_OWNER_SEED, darwinOwnerKey } from "./darwin-owner-key.js";
 import type { ExecutionConfig } from "./execution.js";
 import { assignment, launch, role } from "./test-support.js";
 import { workerFileRequest } from "./worker-files.js";
 
 const generation = "a".repeat(32),
-  fingerprint = "b".repeat(64);
+  fingerprint = "b".repeat(64),
+  dataDir = mkdtempSync(join(realpathSync(tmpdir()), "darwin-owner-data-"));
 const e: Extract<ExecutionConfig, { mode: "agent-ssh" }> = {
   mode: "agent-ssh",
   machine: "fixture",
@@ -29,7 +34,7 @@ const e: Extract<ExecutionConfig, { mode: "agent-ssh" }> = {
   user: "worker",
   identityFile: "/private/id",
   knownHostsFile: "/private/hosts",
-  dataDir: "/private",
+  dataDir,
   target: {
     machine_id: "remote",
     project_id: "fixture",
@@ -86,7 +91,11 @@ const ref: RuntimeRef = {
   target: e.target!,
   launch_generation: { run_id: "R-1" as never, generation },
 };
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
+afterAll(() => rmSync(dataDir, { recursive: true, force: true }));
 
 test("registration excludes legacy, Linux, standing, external and disabled launches", async () => {
   vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", "0");
@@ -102,11 +111,24 @@ test("registration excludes legacy, Linux, standing, external and disabled launc
   expect(await enrollDarwinOwner(e, assignment, role, launch)).toBe(launch);
   const managed = await enrollDarwinOwner(e, assignment, role, l);
   expect(managed.args.slice(-8)).toEqual([l.command, ...launchArgs]);
-  expect(managed.args.join(" ")).not.toContain("BEGIN PRIVATE KEY");
+  expect(managed.args.join(" ")).not.toContain("PRIVATE KEY");
+  // Only the host-private seed is stored; the enrollment key is rebuilt from it.
+  expect(statSync(join(dataDir, DARWIN_OWNER_SEED)).mode & 0o777).toBe(0o600);
+  const config = JSON.parse(managed.args[4]!);
+  const rebuilt = await darwinOwnerKey(
+    dataDir,
+    JSON.stringify([fingerprint, config.directory, "R-1"]),
+  );
+  expect(config.public_pem).toBe(
+    rebuilt.publicKey.export({ type: "spki", format: "pem" }),
+  );
+  // No seed directory: the session still launches, just unenrolled.
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const missing = { ...e, dataDir: join(dataDir, "missing") };
+  expect(await enrollDarwinOwner(missing, assignment, role, l)).toBe(l);
 });
 
-test("signed normal stop binds the direct child; dirty, stale, busy and withdrawn requests do not stop it", async () => {
-  vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+async function ownerFixture(publicPem?: string) {
   const root = mkdtempSync(join(realpathSync(tmpdir()), "darwin-owner-")),
     tree = join(root, "worktrees/fixture/A-1"),
     build = join(root, "builds/fixture/A-1"),
@@ -136,6 +158,8 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     cwd: tree,
   });
   const config = JSON.parse(launched.args[4]!);
+  // A legacy owner holds a key that only the previous controller process had.
+  if (publicPem) config.public_pem = publicPem;
   mkdirSync(config.directory, { recursive: true });
   const proc = spawn(
     "python3",
@@ -152,29 +176,62 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     },
   );
   const closed = once(proc, "close");
+  const cleanup = async () => {
+    if (proc.exitCode === null) {
+      proc.kill();
+      await closed;
+    }
+    rmSync(root, { recursive: true, force: true });
+  };
   try {
     await expect.poll(() => existsSync(join(root, "child"))).toBe(true);
-    const enrolled = JSON.parse(readFileSync(join(root, "child"), "utf8"));
-    const pid = enrolled.pid;
-    const options = {
-      project_id: "fixture",
-      assignment_id: "A-1",
-      hangup_ms: 100,
-      terminate_ms: 500,
-      before_signal: () => true,
-      enrolled_process: enrolled,
-    };
-    // Exercise the exact worker-side relay without SSH or production credentials.
-    const transport = async (_: unknown, argv: readonly string[]) => ({
-      file: argv[0]!,
-      args: argv.slice(1),
-    });
-    const stop = (patch: Partial<typeof options> = {}) =>
-      stopDarwinOwner(execution, ref, { ...options, ...patch }, transport);
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
+  const enrolled = JSON.parse(readFileSync(join(root, "child"), "utf8"));
+  const options = {
+    project_id: "fixture",
+    assignment_id: "A-1",
+    hangup_ms: 100,
+    terminate_ms: 500,
+    before_signal: () => true,
+    enrolled_process: enrolled,
+  };
+  // Exercise the exact worker-side relay without SSH or production credentials.
+  const transport = async (_: unknown, argv: readonly string[]) => ({
+    file: argv[0]!,
+    args: argv.slice(1),
+  });
+  const stop = (
+    patch: Partial<typeof options> = {},
+    stopOwner = stopDarwinOwner,
+  ) => stopOwner(execution, ref, { ...options, ...patch }, transport);
+  return {
+    root,
+    tree,
+    build,
+    git,
+    config,
+    proc,
+    closed,
+    enrolled,
+    pid: enrolled.pid as number,
+    stop,
+    cleanup,
+  };
+}
+
+test("signed normal stop binds the direct child; dirty, stale, busy and withdrawn requests do not stop it", async () => {
+  vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+  const f = await ownerFixture();
+  const { root, tree, build, git, config, proc, closed, enrolled, pid } = f;
+  const { stop, cleanup } = f;
+  try {
     expect(
       (
         await stop({
-          enrolled_process: { ...options.enrolled_process, start: "reused" },
+          enrolled_process: { ...enrolled, start: "reused" },
         })
       ).outcome,
     ).toBe("withdrawn");
@@ -230,15 +287,49 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     writeFileSync(join(root, "state"), "replaced");
     expect((await stop()).outcome).toBe("withdrawn");
     writeFileSync(join(root, "state"), "idle");
-    expect((await stop()).outcome).toBe("uncertain");
+    // A missing or replaced seed cannot serve this owner: refuse, never sign.
+    const seed = join(dataDir, DARWIN_OWNER_SEED);
+    renameSync(seed, `${seed}.saved`);
+    expect(await stop()).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "conditional_close_unavailable" },
+    });
+    writeFileSync(seed, Buffer.alloc(32, 7), { mode: 0o600 });
+    expect(await stop()).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "conditional_close_unavailable" },
+    });
+    renameSync(`${seed}.saved`, seed);
+    expect(proc.exitCode).toBeNull();
+    process.kill(pid, 0);
+    // A restarted controller holds no enrollment state; it rebuilds the key.
+    vi.resetModules();
+    const restarted = await import("./darwin-idle-owner.js");
+    expect((await stop({}, restarted.stopDarwinOwner)).outcome).toBe(
+      "uncertain",
+    );
     expect((await closed)[0]).toBe(143);
     expect(existsSync(join(config.directory, "idle-owner.sock"))).toBe(false);
     expect(existsSync(join(tree, ".git"))).toBe(true);
   } finally {
-    if (proc.exitCode === null) {
-      proc.kill();
-      await closed;
-    }
-    rmSync(root, { recursive: true, force: true });
+    await cleanup();
+  }
+}, 20000);
+
+test("an owner enrolled with a key the controller cannot rebuild is never signed for", async () => {
+  vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+  const legacy = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const { proc, pid, stop, cleanup } = await ownerFixture(
+    legacy.publicKey.export({ type: "spki", format: "pem" }).toString(),
+  );
+  try {
+    expect(await stop()).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "conditional_close_unavailable" },
+    });
+    expect(proc.exitCode).toBeNull();
+    process.kill(pid, 0);
+  } finally {
+    await cleanup();
   }
 }, 20000);

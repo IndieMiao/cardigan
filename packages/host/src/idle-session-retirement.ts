@@ -16,6 +16,7 @@ import {
   type Runtime,
   type RuntimeErrorCode,
   retirementOwnsSession,
+  retirementReadoptable,
   runtimeErrorCodes,
   sessionMaintenanceCandidate,
   settleIdleSessionRetirement,
@@ -189,7 +190,11 @@ export async function retireIdleSessions(
           a.scope === "work_item" &&
           !a.external &&
           a.status === "active" &&
-          !(a.idle_retirement?.handoff && retirementOwnsSession(a)) &&
+          !(
+            a.idle_retirement?.handoff &&
+            retirementOwnsSession(a) &&
+            !retirementReadoptable(state, a)
+          ) &&
           (needsRetirementHandoff(state, a) ||
             a.idle_retirement?.phase === "stopping" ||
             (runtime.retire_idle &&
@@ -233,7 +238,8 @@ export async function retireIdleSessions(
         if (
           !current ||
           (current.idle_retirement?.handoff &&
-            retirementOwnsSession(current)) ||
+            retirementOwnsSession(current) &&
+            !retirementReadoptable(state, current)) ||
           JSON.stringify(current.runtime_ref) !== JSON.stringify(a.runtime_ref)
         )
           return;

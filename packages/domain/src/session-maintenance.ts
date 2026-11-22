@@ -43,6 +43,21 @@ export function needsRetirementHandoff(state: CommandState, a: Assignment) {
   );
 }
 
+/** C-597: a no-key handoff that never sent a stop gets one more claim, now that
+ * a signal-free exit path exists. Stop fences and other reasons stay handed off. */
+export function retirementReadoptable(state: CommandState, a: Assignment) {
+  const p = a.idle_retirement;
+  return (
+    !!p?.handoff &&
+    !p.readopted &&
+    p.phase === "waiting" &&
+    p.last_failure === "unavailable" &&
+    p.evidence?.reason === "conditional_close_unavailable" &&
+    retirementOwnsSession(a) &&
+    darwinWorker(state, a)
+  );
+}
+
 function relatedOwners(state: CommandState, a: Assignment) {
   return state.assignments.filter(
     (other) =>
@@ -179,7 +194,11 @@ export function sessionMaintenanceCandidate(
   )
     return excluded("operation_pending");
   if (a.role_upgrade) return excluded("upgrade_pending");
-  if (a.idle_retirement?.handoff && retirementOwnsSession(a))
+  if (
+    a.idle_retirement?.handoff &&
+    retirementOwnsSession(a) &&
+    !retirementReadoptable(state, a)
+  )
     return excluded("retained_for_dispatch");
   if (a.idle_retirement?.phase === "stopping")
     return excluded("retirement_pending");

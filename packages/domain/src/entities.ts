@@ -514,6 +514,8 @@ interface AssignmentFields {
     };
     readonly last_failure?: "timeout" | "uncertain" | "unavailable";
     readonly notice_sent?: boolean;
+    /** C-597: this generation already had its one re-claim after a no-key handoff. */
+    readonly readopted?: true;
   };
   readonly session_maintenance?: import("./session-maintenance-types.js").SessionMaintenance;
   /** Immutable identity; absent on legacy assignments. */

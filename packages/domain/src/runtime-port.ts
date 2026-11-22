@@ -88,6 +88,9 @@ export interface RetirementIdentity {
   /** First host-confirmed bell on this exact legacy ref; the worker must
    * independently show this Run as the terminal's original launch label. */
   readonly first_bell_run_id?: RunId;
+  /** Host-recorded harness of the enrolled launch Run. It only selects that
+   * harness's own exit command; it never grants a stop. */
+  readonly harness?: Run["harness"];
   readonly project_id: string;
   readonly assignment_id: string;
 }

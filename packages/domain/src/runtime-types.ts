@@ -37,6 +37,7 @@ export const retirementReasons = {
   process_gone: "探测时原进程已消失，尚未确认终端退出",
   probe_invalid: "未取得有效的进程身份证明",
   guard_changed: "发信号前空闲资格已改变",
+  workspace_unverified: "工作区有未提交内容或无法核对，未请求退出",
   still_live: "等待结束后终端仍存活",
   confirmation_pending: "尚未确认原会话退出",
 } as const;
