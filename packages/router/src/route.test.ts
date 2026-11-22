@@ -1553,11 +1553,14 @@ test("release wakes only actionable assigned work, even if old delivery notifica
     "assignment:A-1",
     "assignment:A-2",
   ]);
+  const manual = {
+    ...state,
+    work_items: state.work_items.map((w) => ({ ...w, manual_assign: true })),
+  };
+  expect(recipients(routeEvent({ event: released, snapshot: manual }))).toEqual(
+    ["needs_you", "assignment:A-1", "assignment:A-2"],
+  );
   for (const blocked of [
-    {
-      ...state,
-      work_items: state.work_items.map((w) => ({ ...w, manual_assign: true })),
-    },
     {
       ...state,
       work_items: state.work_items.map((w) => ({
@@ -1646,25 +1649,28 @@ test("C-414 explicit waits avoid empty-run escalation and automatic recovery sen
   ).toEqual(["pm_ops"]);
 });
 
-test("candidate conflict retry exhaustion is sent only to PM Ops", () => {
-  const note = event(
-    "baseline_conflict_limit_reached",
-    { body: "同一提交自动同步已达上限" },
-    { actor: { kind: "system", project_id } },
-  );
-  const result = routeEvent({ event: note, snapshot: snapshot() });
-  expect(result.notifications).toHaveLength(1);
-  expect(result.notifications[0]).toMatchObject({
-    recipient: { kind: "pm_ops" },
-    kind: "escalation",
-  });
-  expect(
-    routeEvent({
-      event: { ...note, actor: { kind: "system", project_id: "other" } },
-      snapshot: snapshot(),
-    }).notifications,
-  ).toEqual([]);
-});
+test.each(["baseline_conflict_limit_reached", "work_item_resume_deferred"])(
+  "%s is sent only to PM Ops",
+  (type) => {
+    const note = event(
+      type,
+      { body: "同一提交自动同步已达上限" },
+      { actor: { kind: "system", project_id } },
+    );
+    const result = routeEvent({ event: note, snapshot: snapshot() });
+    expect(result.notifications).toHaveLength(1);
+    expect(result.notifications[0]).toMatchObject({
+      recipient: { kind: "pm_ops" },
+      kind: "escalation",
+    });
+    expect(
+      routeEvent({
+        event: { ...note, actor: { kind: "system", project_id: "other" } },
+        snapshot: snapshot(),
+      }).notifications,
+    ).toEqual([]);
+  },
+);
 
 test("candidate conflict results inform an active author but cannot bypass bounded idle recovery or produce empty-run PM noise", () => {
   const conflict = event(

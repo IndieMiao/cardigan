@@ -292,7 +292,6 @@ test("a consumed conflict does not waive repeated-blocker or repeated-wait prote
 
 test.each([
   "hold",
-  "manual",
   "unknown_run",
   "other_blocker",
   "human_blocker",
@@ -343,13 +342,6 @@ test.each([
         },
       })),
     };
-  if (guard === "manual")
-    state = {
-      ...state,
-      work_items: state.work_items.map((w) =>
-        w.id === work ? { ...w, manual_assign: true } : w,
-      ),
-    };
   if (guard === "unknown_run")
     state = {
       ...state,
@@ -397,6 +389,19 @@ test.each([
   expect(
     state.events.some((e) => e.type === "work_item_resume_requested"),
   ).toBe(false);
+});
+
+test("a manual assignment resumes once after a verified baseline change", () => {
+  conflict("conflict-1");
+  finish();
+  state = {
+    ...state,
+    work_items: state.work_items.map((w) =>
+      w.id === work ? { ...w, manual_assign: true } : w,
+    ),
+  };
+  expect(scan().data).toEqual([work]);
+  expect(scan().events).toEqual([]);
 });
 
 test("recognizes the historical host diagnostic but not arbitrary error text", () => {

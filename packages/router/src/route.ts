@@ -2139,7 +2139,6 @@ export function routeEvent(input: RouteInput): RouteResult {
           const owner = assignmentOf(input, item.assignment_id);
           if (
             item.card_id !== card.id ||
-            item.manual_assign ||
             item.reported_blocker ||
             item.replaced_by_work_item_id ||
             !owner ||
@@ -2193,6 +2192,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           payloadString(input.event.payload, "body") ?? "系统已恢复等待工作项",
         );
       break;
+    case "work_item_resume_deferred":
     case "precheck_wait_escalated":
     case "baseline_conflict_limit_reached":
       if (

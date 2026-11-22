@@ -4,6 +4,8 @@ import type { ResumeCondition } from "../work-wait.js";
 import { reportBlocker } from "./coordination.js";
 import type { CommandState } from "./core.js";
 import { prepareDelivery, submitDelivery } from "./delivery.js";
+import { updateWorkItem } from "./pm.js";
+import { listNeedsYou } from "./queries.js";
 import { finishRun, settlePendingRunFinish } from "./runtime.js";
 import {
   actor,
@@ -293,7 +295,8 @@ test("a condition can settle before finish; no concurrent Run is woken", () => {
 
 test.each([
   "hold",
-  "manual",
+  "human_action",
+  "review_limit",
   "closed",
   "suspended",
   "stopped",
@@ -327,11 +330,52 @@ test.each([
           : c,
       ),
     };
-  if (guard === "manual")
+  if (guard === "human_action")
     state = {
       ...state,
+      human_actions: [
+        {
+          id: id("human_action", 1),
+          key: id("human_action", 1),
+          requested_by: "human",
+          instructions: "Connect",
+          why_human: "Account",
+          expected_return: "Connected",
+          blocks_merge: true,
+          prerequisite: "external_account",
+          blocked_work_items: [work],
+          status: "open",
+        },
+      ],
+    };
+  if (guard === "review_limit")
+    state = {
+      ...state,
+      reviews: [
+        {
+          id: id("review", 1),
+          work_item_id: work,
+          run_id: runId,
+          delivery_id: id("delivery", 1),
+          target_sha: base,
+          kind: "code",
+          verdict: "reject",
+          blocking: true,
+          recheck_required: true,
+          issues: [],
+          attachments: [],
+        },
+      ],
       work_items: state.work_items.map((w) =>
-        w.id === work ? { ...w, manual_assign: true } : w,
+        w.id === work
+          ? {
+              ...w,
+              kind: "verify",
+              status: "blocked",
+              max_review_rounds: 1,
+              review_plan_target: id("decision", 1),
+            }
+          : w,
       ),
     };
   if (guard === "suspended")
@@ -365,10 +409,34 @@ test.each([
         },
       ],
     };
-  expect(scan().data).toEqual([]);
+  const blocked = scan();
+  expect(blocked.data).toEqual([]);
+  const reasons: Record<string, string> = {
+    hold: "卡片已暂停",
+    closed: "卡片状态为 cancelled",
+    human_action: "合并前置操作 H-1 尚未完成",
+    review_limit: "审核轮数已达上限",
+    suspended: "指派未激活",
+    stopped: "指派已被人工停止",
+    other_blocker: "拍板 Q-1 尚未解决",
+  };
+  expect(blocked.events).toMatchObject([
+    {
+      type: "work_item_resume_deferred",
+      payload: { work_item_id: work, reason: reasons[guard] },
+    },
+  ]);
+  expect(blocked.timeline[0]?.body).toContain(reasons[guard]);
   expect(item()?.reported_blocker).toBeDefined();
-  state = before;
+  expect(pmQueue()).toMatchObject([
+    { work_item_id: work, reason: reasons[guard] },
+  ]);
+  expect(scan().events).toEqual([]);
+  state = { ...before, events: state.events };
+  if (guard === "stopped")
+    event("run_dispatched", { assignment_id: owner }, system, id("card", 1));
   expect(scan().data).toEqual([work]);
+  expect(pmQueue()).toEqual([]);
 });
 
 test("resolved decision resumes, revoked/provisional does not", () => {
@@ -567,6 +635,122 @@ test.each([false, true])(
     expect(scan().data).toEqual([]);
   },
 );
+
+function pmQueue() {
+  const pmState = {
+    ...state,
+    assignments: state.assignments.map((a) =>
+      a.scope === "standing" ? { ...a, standing_mode: "ops" as const } : a,
+    ),
+  };
+  return value(listNeedsYou(pmState, actor(4, "pm"), io.clock)).data.pm_queue
+    ?.deferred_resumes;
+}
+
+test.each(["automatic", "pm"])(
+  "C-549 W-1831: manual assignment → author blocked → same precheck passes → %s recovery",
+  (mode) => {
+    const pm = actor(4, "pm");
+    const update = (
+      fields: { manual_assign: true } | { status: "in_progress" },
+    ) => {
+      const effect = value(
+        updateWorkItem(state, pm, { work_item_id: work, ...fields }, io),
+      );
+      state = apply(state, effect);
+      return effect;
+    };
+    update({ manual_assign: true }); // C-549 seq 882; resolving Q-1107 did not clear this flag.
+    const condition = {
+      kind: "precheck_finished" as const,
+      target_id: "06H036DS4QSPB81KST6EHECM0W",
+    };
+    authorCheck(condition.target_id, "queued");
+    block(condition); // seq 1020
+    finish();
+    expect(scan().events).toEqual([]);
+    const passed = authorCheck(condition.target_id, "passed"); // seq 1026
+    if (mode === "automatic") {
+      expect(scan().events[0]).toMatchObject({
+        type: "work_item_resume_requested",
+        payload: { condition, evidence: passed.id, assignment_id: owner },
+      });
+    } else {
+      const resumed = update({ status: "in_progress" }); // seq 1034, before the next maintenance tick
+      expect(resumed.events).toMatchObject([
+        { type: "work_item_updated" },
+        {
+          type: "run_queued",
+          payload: {
+            assignment_id: owner,
+            trigger_event_id: resumed.events[0]?.id,
+          },
+        },
+      ]);
+      update({ status: "in_progress" });
+      expect(
+        state.runs.filter(
+          (r) => r.assignment_id === owner && r.status === "queued",
+        ),
+      ).toHaveLength(1);
+    }
+    expect(item()).toMatchObject({
+      status: "in_progress",
+      manual_assign: true,
+      assignment_id: owner,
+    });
+    expect(scan().events).toEqual([]);
+  },
+);
+
+test("confirming one blocker cannot bypass another; PM sees one reason until work resumes", () => {
+  const pm = actor(4, "pm");
+  const condition = { kind: "precheck_finished" as const, target_id: "check" };
+  authorCheck("check", "queued");
+  block(condition);
+  finish();
+  state = {
+    ...state,
+    human_actions: [
+      {
+        id: id("human_action", 1),
+        key: id("human_action", 1),
+        requested_by: "human",
+        instructions: "Connect",
+        why_human: "Account",
+        expected_return: "Connected",
+        blocks_merge: true,
+        prerequisite: "credential",
+        blocked_work_items: [work],
+        status: "open",
+      },
+    ],
+  };
+  const update = () => {
+    const result = value(
+      updateWorkItem(
+        state,
+        pm,
+        { work_item_id: work, status: "in_progress" },
+        io,
+      ),
+    );
+    state = apply(state, result);
+    return result;
+  };
+  expect(update().events.map((e) => e.type)).toEqual([
+    "work_item_updated",
+    "work_item_resume_deferred",
+  ]);
+  expect(item()?.status).toBe("blocked");
+  expect(update().events).toEqual([]);
+  expect(pmQueue()).toMatchObject([
+    { work_item_id: work, reason: "合并前置操作 H-1 尚未完成" },
+  ]);
+  state = { ...state, human_actions: [] };
+  expect(update().events.some((e) => e.type === "run_queued")).toBe(true);
+  expect(pmQueue()).toEqual([]);
+});
 
 function authorCheck(attempt: string, status: string, head = base) {
   return event(
