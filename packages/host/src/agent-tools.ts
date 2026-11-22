@@ -232,18 +232,21 @@ export function agentToolsProblem(
   const status = RESULT.exec(output)?.[1];
   if (status === undefined) return "附件助手检查未完成";
   if (status === "ok") return undefined;
-  return status
-    .split(",")
-    .map((entry) => {
-      const [kind, name] = entry.split(":") as [
-        keyof typeof PROBLEM_TEXT,
-        string,
-      ];
-      if (!AGENT_TOOLS.includes(name as AgentTool)) return "附件助手检查未完成";
-      const digest = expected?.[name as AgentTool];
-      return `附件助手 ${name} ${PROBLEM_TEXT[kind]}${digest ? `（期望 SHA-256 ${digest}）` : ""}`;
-    })
-    .join("；");
+  const problems = status.split(",").map((entry) => {
+    const [kind, name] = entry.split(":") as [
+      keyof typeof PROBLEM_TEXT,
+      string,
+    ];
+    return AGENT_TOOLS.includes(name as AgentTool)
+      ? `附件助手 ${name} ${PROBLEM_TEXT[kind]}`
+      : undefined;
+  });
+  if (problems.some((p) => p === undefined)) return "附件助手检查未完成";
+  // A manual install replaces both files, so always name both expected digests.
+  const digests = expected
+    ? `（当前发布期望 SHA-256：${AGENT_TOOLS.map((name) => `${name} ${expected[name]}`).join("，")}）`
+    : "";
+  return `${problems.join("；")}${digests}`;
 }
 
 /** Version records the release commit the matching tools were verified against. */

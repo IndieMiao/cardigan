@@ -12,7 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "vitest";
-import { AGENT_TOOLS, agentToolsRelease } from "./agent-tools.js";
+import {
+  AGENT_TOOLS,
+  agentToolsProblem,
+  agentToolsRelease,
+} from "./agent-tools.js";
 
 // C-595 / Q-1177: run the fixed manual install steps exactly as written in
 // deploy/README.md against isolated directories. Only the operator inputs are
@@ -74,14 +78,24 @@ function steps(f: ReturnType<typeof fixture>) {
   const release = agentToolsRelease();
   if (!release) throw new Error("release checkout unavailable");
   const [prepare, copy, install] = readmeSteps();
+  // The operator copies both expected digests from what machine check reports,
+  // even when only one file is wrong.
+  const reason = agentToolsProblem(
+    "agent-tools missing:upload-evidence.mjs\n",
+    release.digests,
+  );
+  const reported = (name: string) =>
+    new RegExp(`${name.replace(".", "\\.")} ([0-9a-f]{64})`, "u").exec(
+      reason ?? "",
+    )?.[1] ?? "unreported";
   const filled = prepare
     .replace(
       "<download-attachment.mjs 的期望 SHA-256>",
-      release.digests["download-attachment.mjs"],
+      reported("download-attachment.mjs"),
     )
     .replace(
       "<upload-evidence.mjs 的期望 SHA-256>",
-      release.digests["upload-evidence.mjs"],
+      reported("upload-evidence.mjs"),
     )
     .replace("<工作根>/libexec/agent-tools", f.tools)
     .replace("<项目组>", String(process.getgid?.() ?? 0));

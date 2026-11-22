@@ -298,7 +298,8 @@ test("machine check records current tools and a readable reason otherwise", asyn
       {
         key: AGENT_TOOLS_CAPABILITY,
         search_locations: [],
-        reason: `附件助手 download-attachment.mjs 与当前发布的 SHA-256 不一致（期望 SHA-256 ${currentRelease().digests["download-attachment.mjs"]}）`,
+        // Only one file is stale, yet both expected digests are named.
+        reason: `附件助手 download-attachment.mjs 与当前发布的 SHA-256 不一致（当前发布期望 SHA-256：download-attachment.mjs ${currentRelease().digests["download-attachment.mjs"]}，upload-evidence.mjs ${currentRelease().digests["upload-evidence.mjs"]}）`,
       },
     ]);
     // C-595/Q-1177: only the reason and expected digest; no operator command,
