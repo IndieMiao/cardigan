@@ -28,6 +28,7 @@ const historical = new Map(
         "views/AgentLimit.tsx",
         "views/SettingsPage.tsx",
         "components/Foundation.tsx",
+        "components/Capacity.tsx",
       ].map((path) => [
         resolve(root, "src", path),
         git("show", `${baseline}:apps/web/src/${path}`),
@@ -267,6 +268,32 @@ try {
         "document.querySelector('[role=dialog] input[type=number]')?.value === '16'",
       );
       await scene("machine-drawer-max");
+      // Q-1138: with this host's CI slots, the machine list and the header
+      // popover show the same 占用 (3 + 2), counted once.
+      await open(
+        "/?scene=ci#/p/p-1/settings?tab=machines",
+        machinesReady,
+        theme,
+      );
+      await scene("machines-ci");
+      await run(() => {
+        const button = [...document.querySelectorAll("button")].find((b) =>
+          b.getAttribute("aria-label")?.endsWith("查看并发与容量详情"),
+        );
+        button.click();
+      });
+      await until("!!document.querySelector('[role=tooltip]')");
+      await scene("popover-ci");
+      results.ciCounts = await run(() => ({
+        list: document
+          .querySelector("table[aria-label='机器列表'] tbody tr")
+          ?.querySelectorAll("td")[2]
+          ?.textContent.trim(),
+        popover: [...document.querySelectorAll("[role=tooltip] span")]
+          .map((s) => s.textContent.trim())
+          .filter((t) => t.startsWith("全部")),
+        popoverText: document.querySelector("[role=tooltip]")?.textContent,
+      }));
       cases.push({ width, theme, results });
     }
   await send("Emulation.setDeviceMetricsOverride", {
@@ -350,10 +377,19 @@ try {
     `${JSON.stringify(report, null, 2)}\n`,
   );
   // Checked after the report is written, so a failure leaves its numbers.
+  if (!baseline)
+    for (const { results } of cases) {
+      const { list, popover } = results.ciCounts;
+      assert.equal(list, "5 / 6", "machine list 占用 with CI slots");
+      assert(
+        popover.some((t) => t.includes("占用 5 / 上限 6")),
+        `popover 占用 with CI slots: ${popover}`,
+      );
+    }
   assert.deepEqual(browser.errors, []);
   for (const { results } of cases)
     for (const [name, m] of Object.entries(results)) {
-      if (name === "cards") continue;
+      if (name === "cards" || name === "ciCounts") continue;
       assert(m.scrollWidth <= m.innerWidth, `${name}: page overflows`);
       assert(m.hash.includes("tab=machines"), `${name}: not the machine page`);
       assert.deepEqual(

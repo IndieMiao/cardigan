@@ -13,8 +13,12 @@ import { settingsPanels } from "./settings-panels-data.js";
 // Mac mini), one capacity record and the synthetic card list. `?scene=max`
 // puts 本机's Agent limit at its host maximum (16). No backend, host or
 // production record is read or written; limit writes only resolve.
+// `?scene=ci`: 本机's own merge checks take 2 Agent slots beside 3 limited
+// Runs, so 占用 is 5 on the machine page and in the header popover alike.
 Date.now = () => new Date(NOW).getTime();
-const atMaximum = new URLSearchParams(location.search).get("scene") === "max";
+const scene = new URLSearchParams(location.search).get("scene");
+const atMaximum = scene === "max";
+const ciSlots = scene === "ci" ? 2 : 0;
 const machine = (id: string): MachineView => {
   const found = fixtureMachines.find((m) => m.id === id);
   if (!found) throw new Error(`合成数据中没有机器 ${id}`);
@@ -32,7 +36,7 @@ const capacity: ExecutionCapacity = {
       limit: atMaximum ? 16 : 6,
       max_limit: 16,
       queued: 2,
-      merge_check_slots: 0,
+      merge_check_slots: ciSlots,
     },
     {
       machine_id: "builder",
