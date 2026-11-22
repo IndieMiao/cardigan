@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   AGENT_TOOLS,
   agentToolsProblem,
@@ -74,6 +74,11 @@ function run(script: string, f: ReturnType<typeof fixture>) {
   }).toString();
 }
 
+// The README documents one SUM line per platform; run every case with both
+// tools. On this Linux host the shasum run covers the macOS tool path, it is
+// not a macOS machine result.
+let sumLine = "SUM=sha256sum";
+
 function steps(
   f: ReturnType<typeof fixture>,
   pasted: (name: string, digest: string) => string = (_, digest) => digest,
@@ -104,8 +109,10 @@ function steps(
       reported("upload-evidence.mjs"),
     )
     .replace("<工作根>/libexec/agent-tools", f.tools)
-    .replace("<项目组>", String(process.getgid?.() ?? 0));
+    .replace("<项目组>", String(process.getgid?.() ?? 0))
+    .replace(/^SUM=sha256sum$/mu, sumLine);
   expect(filled).not.toMatch(/<[^>]+>/u);
+  expect(filled).toContain(sumLine);
   const vars = filled
     .split("\n")
     .filter((line) => /^[A-Z_]+=/u.test(line))
@@ -126,79 +133,90 @@ function steps(
   };
 }
 
-test("README steps install from the controller release on a worker with no prior material, sparing same-named files", () => {
-  const f = fixture();
-  const operator = Buffer.from("operator-owned fixture file\n");
-  for (const name of AGENT_TOOLS) writeFileSync(join(f.home, name), operator);
-  const s = steps(f);
-  const stage = s.prepare();
-  expect(stage.startsWith(f.tmp)).toBe(true);
-  s.copy(stage);
-  // Copying never touched the operator's own files.
-  for (const name of AGENT_TOOLS)
-    expect(readFileSync(join(f.home, name))).toEqual(operator);
-  s.install(stage);
-  for (const name of AGENT_TOOLS) {
-    expect(readFileSync(join(f.tools, name))).toEqual(s.release.files[name]);
-    expect(statSync(join(f.tools, name)).mode & 0o7777).toBe(0o750);
-    expect(readFileSync(join(f.home, name))).toEqual(operator);
-  }
-  expect(statSync(f.tools).mode & 0o7777).toBe(0o750);
-  // Only this attempt's staging directory is removed.
-  expect(existsSync(stage)).toBe(false);
-  expect(existsSync(f.home)).toBe(true);
-});
+describe.each([
+  ["sha256sum (Linux path)", "SUM=sha256sum"],
+  ["shasum -a 256 (macOS tool path)", "SUM='shasum -a 256'"],
+] as const)("with %s", (_label, line) => {
+  beforeEach(() => {
+    sumLine = line;
+  });
 
-test("README steps stop on a digest mismatch, keep the evidence and succeed on a fresh retry", () => {
-  const f = fixture();
-  const s = steps(f);
-  const failed = s.prepare();
-  s.copy(failed);
-  writeFileSync(join(failed, AGENT_TOOLS[1]), "tampered\n");
-  expect(() => s.install(failed)).toThrow();
-  expect(existsSync(f.tools)).toBe(false);
-  expect(readFileSync(join(failed, AGENT_TOOLS[1]), "utf8")).toBe("tampered\n");
-  // A retry restarts from step 1 with its own new staging directory.
-  const retry = s.prepare();
-  expect(retry).not.toBe(failed);
-  s.copy(retry);
-  s.install(retry);
-  for (const name of AGENT_TOOLS)
-    expect(readFileSync(join(f.tools, name))).toEqual(s.release.files[name]);
-  expect(existsSync(retry)).toBe(false);
-  expect(existsSync(failed)).toBe(true);
-});
-
-test("README steps refuse a linked tools directory", () => {
-  const f = fixture();
-  const elsewhere = temp();
-  execFileSync("/bin/ln", ["-s", elsewhere, f.tools]);
-  const s = steps(f);
-  const stage = s.prepare();
-  s.copy(stage);
-  expect(() => s.install(stage)).toThrow();
-  for (const name of AGENT_TOOLS)
-    expect(existsSync(join(elsewhere, name))).toBe(false);
-});
-
-test.each([
-  ["download-attachment.mjs", (d: string) => d.slice(0, 63)],
-  ["upload-evidence.mjs", (d: string) => d.slice(0, 63)],
-  ["upload-evidence.mjs", (d: string) => `${d}0`],
-  ["download-attachment.mjs", (d: string) => d.toUpperCase()],
-  ["upload-evidence.mjs", () => ""],
-] as const)(
-  "README steps refuse a malformed pasted digest for %s even when the other is right",
-  (target, mangle) => {
+  test("README steps install from the controller release on a worker with no prior material, sparing same-named files", () => {
     const f = fixture();
-    const s = steps(f, (name, digest) =>
-      name === target ? mangle(digest) : digest,
+    const operator = Buffer.from("operator-owned fixture file\n");
+    for (const name of AGENT_TOOLS) writeFileSync(join(f.home, name), operator);
+    const s = steps(f);
+    const stage = s.prepare();
+    expect(stage.startsWith(f.tmp)).toBe(true);
+    s.copy(stage);
+    // Copying never touched the operator's own files.
+    for (const name of AGENT_TOOLS)
+      expect(readFileSync(join(f.home, name))).toEqual(operator);
+    s.install(stage);
+    for (const name of AGENT_TOOLS) {
+      expect(readFileSync(join(f.tools, name))).toEqual(s.release.files[name]);
+      expect(statSync(join(f.tools, name)).mode & 0o7777).toBe(0o750);
+      expect(readFileSync(join(f.home, name))).toEqual(operator);
+    }
+    expect(statSync(f.tools).mode & 0o7777).toBe(0o750);
+    // Only this attempt's staging directory is removed.
+    expect(existsSync(stage)).toBe(false);
+    expect(existsSync(f.home)).toBe(true);
+  });
+
+  test("README steps stop on a digest mismatch, keep the evidence and succeed on a fresh retry", () => {
+    const f = fixture();
+    const s = steps(f);
+    const failed = s.prepare();
+    s.copy(failed);
+    writeFileSync(join(failed, AGENT_TOOLS[1]), "tampered\n");
+    expect(() => s.install(failed)).toThrow();
+    expect(existsSync(f.tools)).toBe(false);
+    expect(readFileSync(join(failed, AGENT_TOOLS[1]), "utf8")).toBe(
+      "tampered\n",
     );
+    // A retry restarts from step 1 with its own new staging directory.
+    const retry = s.prepare();
+    expect(retry).not.toBe(failed);
+    s.copy(retry);
+    s.install(retry);
+    for (const name of AGENT_TOOLS)
+      expect(readFileSync(join(f.tools, name))).toEqual(s.release.files[name]);
+    expect(existsSync(retry)).toBe(false);
+    expect(existsSync(failed)).toBe(true);
+  });
+
+  test("README steps refuse a linked tools directory", () => {
+    const f = fixture();
+    const elsewhere = temp();
+    execFileSync("/bin/ln", ["-s", elsewhere, f.tools]);
+    const s = steps(f);
     const stage = s.prepare();
     s.copy(stage);
     expect(() => s.install(stage)).toThrow();
-    expect(existsSync(f.tools)).toBe(false);
     for (const name of AGENT_TOOLS)
-      expect(existsSync(join(stage, name))).toBe(true);
-  },
-);
+      expect(existsSync(join(elsewhere, name))).toBe(false);
+  });
+
+  test.each([
+    ["download-attachment.mjs", (d: string) => d.slice(0, 63)],
+    ["upload-evidence.mjs", (d: string) => d.slice(0, 63)],
+    ["upload-evidence.mjs", (d: string) => `${d}0`],
+    ["download-attachment.mjs", (d: string) => d.toUpperCase()],
+    ["upload-evidence.mjs", () => ""],
+  ] as const)(
+    "README steps refuse a malformed pasted digest for %s even when the other is right",
+    (target, mangle) => {
+      const f = fixture();
+      const s = steps(f, (name, digest) =>
+        name === target ? mangle(digest) : digest,
+      );
+      const stage = s.prepare();
+      s.copy(stage);
+      expect(() => s.install(stage)).toThrow();
+      expect(existsSync(f.tools)).toBe(false);
+      for (const name of AGENT_TOOLS)
+        expect(existsSync(join(stage, name))).toBe(true);
+    },
+  );
+});
