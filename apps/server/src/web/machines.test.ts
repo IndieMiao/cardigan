@@ -567,3 +567,113 @@ test.each([true, false])(
     }
   },
 );
+
+test("C-599: an attachment tools notice shows only the command the current binding and release give", async () => {
+  let binding: string | undefined = "pinned";
+  let command = "current release";
+  const f = await m5Cross({
+    machineHost: {
+      check: async () => ({ status: "passed", failed_steps: [] }),
+      bindings: () => () => null,
+      bindingFingerprint: () => binding,
+      upgradeCommand: () => (binding === "pinned" ? command : "other binding"),
+      workerRecord: () => null,
+    },
+  });
+  try {
+    const project = f.project.project_id;
+    const id = f.store().uow.run((tx) => {
+      const local = tx.machines.get(project, "local");
+      if (!local) throw new Error("missing fixture");
+      tx.machines.put(project, {
+        ...local,
+        id: "remote",
+        label: "Remote",
+        herdr_machine: "remote",
+      });
+      const id = tx.ids.next(project, "human_action");
+      tx.human_actions.put(project, {
+        id,
+        key: id,
+        status: "open",
+        requested_by: "system",
+        instructions: "Install tools",
+        why_human: "Administrator",
+        expected_return: "Result",
+        blocked_work_items: [],
+        triage: "host",
+        terminal: {
+          target: "remote",
+          login: "owner",
+          command: "current release",
+          expected_output: "ok",
+          on_failure: "stop",
+        },
+        // A handoff can never substitute the administrator command.
+        handoff: {
+          terminal: {
+            target: "remote",
+            login: "owner",
+            command: "rewritten",
+            expected_output: "ok",
+            on_failure: "stop",
+          },
+          title: "t",
+          summary: "s",
+          why_human: "w",
+          instructions: "i",
+          expected_outcome: "o",
+          expected_return: "r",
+          rewritten_by: "system",
+          rewritten_at: new Date(f.now()).toISOString(),
+        },
+      });
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project),
+        created_at: new Date(f.now()).toISOString(),
+        actor: { kind: "system", project_id: project },
+        type: "host_deployment_action_requested",
+        payload: {
+          key: `worker-agent-tools:remote:${"b".repeat(64)}`,
+          reason: "worker_maintenance",
+          human_action_id: id,
+        },
+      });
+      return id;
+    });
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const shown = async () =>
+      (
+        (await f.call(f.projectPath("/needs-you"))).json as {
+          human_actions: {
+            id: string;
+            instructions: string;
+            terminal?: { command: string };
+          }[];
+        }
+      ).human_actions.find((h) => h.id === id);
+    const revision = async () =>
+      (
+        (await f.call(f.projectPath("/needs-you/version"))).json as {
+          revision: string;
+        }
+      ).revision;
+    expect((await shown())?.terminal?.command).toBe("current release");
+    // A new release: the stored command is hidden, not replaced.
+    command = "new release";
+    const hidden = await shown();
+    expect(hidden?.terminal).toBeUndefined();
+    expect(hidden?.instructions).toContain("当前升级命令不可用");
+    command = "current release";
+    const previous = await revision();
+    binding = "replaced";
+    expect(await revision()).not.toBe(previous);
+    expect((await shown())?.terminal).toBeUndefined();
+    binding = undefined;
+    expect((await shown())?.terminal).toBeUndefined();
+  } finally {
+    await f.close();
+  }
+});

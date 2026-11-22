@@ -59,6 +59,8 @@ export function upgradePrincipal(project: string, identity: string) {
         entry: "/opt/cardigan-helper-upgrade/upgrade",
       };
 }
+/** Nothing reached the worker: the local release or signing material was refused. */
+export const WORKER_UPGRADE_NOT_SENT = "worker_upgrade_not_sent";
 /** v2 entries (enrolled since C-595) also install the agent tools; v1 entries refuse them. */
 export type HelperProtocol = "v1" | "v2";
 const toolEntries = AGENT_TOOLS.map((name) => `agent-tools/${name}` as const);
@@ -145,22 +147,29 @@ async function sendRelease(
   signal?: AbortSignal,
 ) {
   const { user, entry } = upgradePrincipal(project, identity);
-  const command = await agentProcessCommand(
-    {
-      ...worker,
-      user,
-      identityFile: identity,
-      path: "/usr/bin:/bin",
-    },
-    ["/usr/bin/sudo", "-n", "--", entry],
-  );
-  const bundle = await signedHelperBundle(
-    worker,
-    project,
-    identity,
-    signal,
-    protocol,
-  );
+  let command: Awaited<ReturnType<typeof agentProcessCommand>>;
+  let bundle: Awaited<ReturnType<typeof signedHelperBundle>>;
+  try {
+    command = await agentProcessCommand(
+      {
+        ...worker,
+        user,
+        identityFile: identity,
+        path: "/usr/bin:/bin",
+      },
+      ["/usr/bin/sudo", "-n", "--", entry],
+    );
+    bundle = await signedHelperBundle(
+      worker,
+      project,
+      identity,
+      signal,
+      protocol,
+    );
+  } catch {
+    // C-599: prepared locally and refused before any connection to the worker.
+    throw new Error(WORKER_UPGRADE_NOT_SENT);
+  }
   const result = await new Promise<string>((resolve, reject) => {
     const ssh = execFile(
       "/usr/bin/ssh",

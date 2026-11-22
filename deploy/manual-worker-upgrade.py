@@ -93,7 +93,13 @@ def migrate_bootstrap(release, project, root=BOOTSTRAP):
             continue
         require(stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and stat.S_IMODE(s.st_mode) == 0o700,
                 'unsafe_helper_upgrade_entry')
-        if boot == root and (boot / 'project').read_text().rstrip('\n') != project:
+        # C-599: only an entry that names this project, read without following links.
+        fd = os.open(boot / 'project', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as f:
+            p = os.fstat(fd)
+            require(stat.S_ISREG(p.st_mode) and p.st_uid == 0 and p.st_nlink == 1, 'unsafe_helper_upgrade_entry')
+            named = f.read(4096).decode('utf-8', 'replace').rstrip('\n')
+        if named != project:
             continue
         for name in BOOTSTRAP_FILES:
             target = boot / name

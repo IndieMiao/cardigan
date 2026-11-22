@@ -35,10 +35,11 @@ import { upgradeKey, upgradeState } from "./worker-upgrade-gate.js";
 
 type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 
+export type AgentToolsState = "stale" | "current" | "unknown";
 /**
- * Whether a remote binding lacks the current attachment tools. Unknown (probe
- * failure) and an unverifiable controller release never count as stale: neither
- * would let an installation succeed.
+ * Whether a remote binding lacks the current attachment tools. A failed probe,
+ * unparseable output or an unverifiable controller release is "unknown": never
+ * a reason to install, and never remembered as current either.
  */
 export async function agentToolsStale(
   execution: ExecutionConfig,
@@ -46,19 +47,38 @@ export async function agentToolsStale(
   os: string,
   signal?: AbortSignal,
   probe: CapabilityProbe = probeMachineCapability,
-) {
+): Promise<AgentToolsState> {
   const current = agentToolsRelease();
-  if (!current) return false;
+  if (!current) return "unknown";
   const result = await probe(
     execution,
     os,
     agentToolsCapability(execution, machine, current).check,
     signal,
   );
-  if (!result.ok) return false;
+  if (!result.ok) return "unknown";
   const problem = agentToolsProblem(result.output);
-  return problem !== undefined && agentToolsReinstallable(problem);
+  if (problem === undefined) return "current";
+  return agentToolsReinstallable(problem) ? "stale" : "unknown";
 }
+
+// Release keys whose tools a patrol probe found current, per store and machine.
+// Only "current" is remembered; any later stale observation forgets it.
+const confirmed = new WeakMap<Store, Map<string, string>>();
+const slot = (project: string, machine: string) => `${project}\0${machine}`;
+export const agentToolsConfirmed = {
+  has(store: Store, project: string, machine: string, key: string) {
+    return confirmed.get(store)?.get(slot(project, machine)) === key;
+  },
+  set(store: Store, project: string, machine: string, key: string) {
+    const seen = confirmed.get(store) ?? new Map<string, string>();
+    seen.set(slot(project, machine), key);
+    confirmed.set(store, seen);
+  },
+  forget(store: Store, project: string, machine: string) {
+    confirmed.get(store)?.delete(slot(project, machine));
+  },
+};
 
 export type { AgentToolsOutcome };
 
@@ -211,33 +231,42 @@ async function reconcile(
     pinned.project_id !== project
   )
     return settle({ status: "unverifiable" }, stale);
-  let enrolled: string | undefined;
-  try {
-    enrolled = enrolledUpgradeIdentity(
-      dirname(runtimeWorkersPath(o.env)),
-      project,
-      machine,
-    );
-  } catch {
-    return settle({ status: "unverifiable" }, stale);
-  }
-  let note = "该机未登记签名自动升级";
-  if (enrolled) {
+  // The outer observation saw stale tools: any earlier "current" probe is void.
+  agentToolsConfirmed.forget(store, project, machine);
+  // Re-evaluated after staging: enrollment or an upgrade attempt may change meanwhile.
+  const route = ():
+    | { outcome: AgentToolsOutcome; reason: string }
+    | { note: string } => {
+    let enrolled: string | undefined;
+    try {
+      enrolled = enrolledUpgradeIdentity(
+        dirname(runtimeWorkersPath(o.env)),
+        project,
+        machine,
+      );
+    } catch {
+      return { outcome: { status: "unverifiable" }, reason: stale };
+    }
+    if (!enrolled) return { note: "该机未登记签名自动升级" };
     const row = upgradeState(store, project, machine);
     // The signed upgrade owns the first attempt for each release key.
     if (row?.release_key !== upgradeKey(pinned.fingerprint))
-      return settle(
-        { status: "automatic" },
-        "已登记签名自动升级，等待巡检按当前发布安装",
-      );
+      return {
+        outcome: { status: "automatic" },
+        reason: "已登记签名自动升级，等待巡检按当前发布安装",
+      };
     if (row.state === "failed" || row.state === "worker_checked")
-      return settle(
-        { status: "held" },
-        "签名自动升级未通过核验，按升级待办恢复",
-      );
-    note =
-      "签名自动升级已对本版本执行一次，附件助手仍未就绪：C-595 之前登记的 v1 入口只能更新三个 helper，需要本命令迁移；v2 入口则是安装后复查未通过";
-  }
+      return {
+        outcome: { status: "held" },
+        reason: "签名自动升级未通过核验，按升级待办恢复",
+      };
+    return {
+      note: "签名自动升级已对本版本执行一次，附件助手仍未就绪：C-595 之前登记的 v1 入口只能更新三个 helper，需要本命令迁移；v2 入口则是安装后复查未通过",
+    };
+  };
+  const first = route();
+  if ("outcome" in first) return settle(first.outcome, first.reason);
+  const { note } = first;
   let terminal: ActionCommand | undefined;
   try {
     terminal = await (o.stage ?? stageWorkerUpgrade)(
@@ -248,7 +277,18 @@ async function reconcile(
   } catch {
     /* Never surface raw SSH diagnostics or advertise unstaged files. */
   }
-  if ((await o.currentBinding()) !== pinned.fingerprint) return undefined;
+  let binding: string | undefined;
+  try {
+    binding = await o.currentBinding();
+  } catch {
+    binding = undefined;
+  }
+  // Rebound while staging: this observation's command is void, and so are older ones.
+  if (binding !== pinned.fingerprint)
+    return settle(
+      { status: "unverifiable" },
+      "暂存期间机器绑定已变化，旧的补装命令作废",
+    );
   const key = agentToolsActionKey(
     machine,
     pinned.fingerprint,
@@ -262,6 +302,19 @@ async function reconcile(
   }\n${AGENT_TOOLS.map((name) => `${digests?.[name]}  agent-tools/${name}`).join("\n")}`;
   return store.uow.run((tx) => {
     if (!o.stillCurrent(tx)) return undefined;
+    const again = route();
+    if (!("note" in again) || again.note !== note) {
+      const changed =
+        "outcome" in again
+          ? again
+          : {
+              outcome: { status: "unverifiable" } as AgentToolsOutcome,
+              reason: "暂存期间签名升级登记已变化，旧的补装命令作废",
+            };
+      if (hasOpenNotice(store, project, machine))
+        retire(tx, project, machine, clock, changed.reason);
+      return changed.outcome;
+    }
     retire(
       tx,
       project,

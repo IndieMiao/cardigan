@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import { workerAgentToolsAction } from "../worker-helper-action.js";
 import { completeHumanAction, triageHumanAction } from "./coordination.js";
 import {
   completeVerifiedHelperAction,
@@ -712,6 +713,55 @@ test("C-599: only system retires stale open notices of one machine's refreshable
       ),
     ).events,
   ).toEqual([]);
+  // C-599: identified only by the project's system request; its command is
+  // an administrator upgrade that no handoff may substitute.
+  const malformed = state.human_actions.find((h) => h.id === neighbor);
+  if (!malformed) throw new Error("missing notice");
+  expect(workerAgentToolsAction(state, malformed)).toEqual({
+    machine_id: null, // "old" is not a 64-hex digest: fenced, target unknown.
+  });
+  const hex = open(`worker-agent-tools:remote-2:${"c".repeat(64)}`);
+  const tools = state.human_actions.find((h) => h.id === hex);
+  if (!tools) throw new Error("missing notice");
+  expect(workerAgentToolsAction(state, tools)).toEqual({
+    machine_id: "remote-2",
+  });
+  const foreign = state.events.map((e) => ({
+    ...e,
+    actor: { ...system, project_id: "other" },
+  }));
+  expect(
+    workerAgentToolsAction({ ...state, events: foreign }, tools),
+  ).toBeUndefined();
+  const rewrite = {
+    human_action_id: hex,
+    disposition: "host" as const,
+    rationale: "改写",
+    title: "补装",
+    summary: "补装附件助手",
+    why_human: "需要管理员",
+    instructions: "执行命令",
+    expected_outcome: "助手可用",
+    expected_return: "结果",
+    terminal: {
+      target: "remote-2",
+      login: "admin",
+      command: "rewritten",
+      expected_output: "ok",
+      on_failure: "stop",
+    },
+  };
+  const refused = triageHumanAction(state, human, rewrite, io);
+  expect(refused.ok).toBe(false);
+  expect(JSON.stringify(refused)).toContain("系统升级命令不能改写");
+  const ordinary = open("worker-cooldown:remote-2");
+  const plain = triageHumanAction(
+    state,
+    human,
+    { ...rewrite, human_action_id: ordinary },
+    io,
+  );
+  expect(JSON.stringify(plain)).not.toContain("系统升级命令不能改写");
   // A retired key that comes back is a new open notice.
   const again = open(`${prefix}old`);
   expect(again).not.toBe(old);

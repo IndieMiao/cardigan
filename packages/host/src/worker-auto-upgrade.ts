@@ -2,7 +2,10 @@ import { dirname, join } from "node:path";
 import { occupiedRunSlots } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
-import { agentToolsStale } from "./agent-tools-maintenance.js";
+import {
+  agentToolsConfirmed,
+  agentToolsStale,
+} from "./agent-tools-maintenance.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   matchesWorkerPlatform,
@@ -27,6 +30,7 @@ import {
   installedAgentTools,
   installRelease,
   promotionPending,
+  WORKER_UPGRADE_NOT_SENT,
 } from "./worker-upgrade-transport.js";
 
 type Check = { blockers: readonly string[]; launch_enabled: boolean };
@@ -69,13 +73,11 @@ export async function patrolHelperUpgrade(
   // C-599: an enrolled, otherwise healthy binding that has not tried this key
   // yet also installs for missing/stale tools, including while it recovers.
   let toolsStale = false;
-  const seen = confirmedTools(store);
-  const slot = `${project}\0${machine}`;
   if (
     !helpersStale &&
     !initial.blockers.length &&
     previous?.release_key !== key &&
-    seen.get(slot) !== key &&
+    !agentToolsConfirmed.has(store, project, machine, key) &&
     adapters.toolsStale
   ) {
     let enrolled = false;
@@ -86,9 +88,12 @@ export async function patrolHelperUpgrade(
     }
     const os = store.uow.read((tx) => tx.machines.get(project, machine))?.os;
     if (enrolled && os) {
-      toolsStale = await adapters.toolsStale(execution, machine, os, signal);
-      // Current tools need no further remote probe for this key in this process.
-      if (!toolsStale) seen.set(slot, key);
+      const state = await adapters.toolsStale(execution, machine, os, signal);
+      toolsStale = state === "stale";
+      // Current tools need no further remote probe for this key in this process;
+      // an unknown result is probed again by the next patrol.
+      if (state === "current")
+        agentToolsConfirmed.set(store, project, machine, key);
     }
   }
   // A tools-only refresh of a released machine never holds dispatch before it writes.
@@ -246,8 +251,13 @@ export async function patrolHelperUpgrade(
         .run(JSON.stringify(evidence()), project, machine, key),
     );
     return result;
-  } catch {
-    if (toolsOnly && stage === "configuration") {
+  } catch (error) {
+    const notSent =
+      stage === "configuration" ||
+      (stage === "install" &&
+        error instanceof Error &&
+        error.message === WORKER_UPGRADE_NOT_SENT);
+    if (toolsOnly && notSent) {
       // Nothing was sent yet: undo the claim instead of holding a healthy machine.
       store.uow.run(() =>
         previous
@@ -274,11 +284,4 @@ export async function patrolHelperUpgrade(
     fail();
     return held;
   }
-}
-
-const toolsCache = new WeakMap<Store, Map<string, string>>();
-function confirmedTools(store: Store) {
-  const seen = toolsCache.get(store) ?? new Map<string, string>();
-  toolsCache.set(store, seen);
-  return seen;
 }

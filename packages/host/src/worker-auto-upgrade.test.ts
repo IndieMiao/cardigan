@@ -51,6 +51,7 @@ import {
   installRelease,
   signedHelperBundle,
   upgradePrincipal,
+  WORKER_UPGRADE_NOT_SENT,
 } from "./worker-upgrade-transport.js";
 import { workerWizardForm } from "./worker-wizard-form.js";
 
@@ -164,7 +165,7 @@ async function setup(
   };
   const stageUpgrade = vi.fn<typeof stageWorkerUpgrade>(async () => terminal);
   // C-599: when set, the outer observation probes the attachment tools with this output.
-  const tools: { output?: string } = {};
+  const tools: { output?: string; binding?: string } = {};
   const journal = new MachineCheckJournal(store);
   const registered: Machine = {
     id: machine,
@@ -202,7 +203,7 @@ async function setup(
             machine: registered,
             execution: {
               ...options.execution,
-              target: { ...target, fingerprint: binding },
+              target: { ...target, fingerprint: tools.binding ?? binding },
             },
           }),
           check: () => raw(job.id),
@@ -757,7 +758,11 @@ test.each(["linux", "macos"])(
     const f = await setup(os);
     f.enroll();
     f.tools.output = missing;
-    const toolsStale = vi.fn(async () => f.tools.output !== "agent-tools ok");
+    const toolsStale = vi.fn(async () =>
+      f.tools.output !== "agent-tools ok"
+        ? ("stale" as const)
+        : ("current" as const),
+    );
     Object.assign(f.adapters, { toolsStale });
     f.adapters.install.mockImplementationOnce(async () => {
       expect(f.isHeld()).toBe(true);
@@ -792,7 +797,9 @@ test.each([
     const f = await setup("linux");
     f.enroll();
     f.tools.output = missing;
-    Object.assign(f.adapters, { toolsStale: vi.fn(async () => true) });
+    Object.assign(f.adapters, {
+      toolsStale: vi.fn(async () => "stale" as const),
+    });
     f.adapters.install.mockResolvedValueOnce(result);
     // Tools never block dispatch: the helpers are verified, the tools are not.
     expect(await f.run(pass)).toEqual(pass);
@@ -819,7 +826,9 @@ test("C-599: a tools-only refresh does not hold dispatch while it cannot start",
   const f = await setup("linux");
   f.enroll();
   f.tools.output = missing;
-  Object.assign(f.adapters, { toolsStale: vi.fn(async () => true) });
+  Object.assign(f.adapters, {
+    toolsStale: vi.fn(async () => "stale" as const),
+  });
   f.adapters.promotionPending = () => true;
   expect(await f.run(pass)).toEqual(pass);
   expect(f.adapters.install).not.toHaveBeenCalled();
@@ -838,7 +847,9 @@ test("C-599: a failed tools install after the claim holds dispatch and offers no
   const f = await setup("linux");
   f.enroll();
   f.tools.output = missing;
-  Object.assign(f.adapters, { toolsStale: vi.fn(async () => true) });
+  Object.assign(f.adapters, {
+    toolsStale: vi.fn(async () => "stale" as const),
+  });
   f.adapters.install.mockRejectedValueOnce(new Error("ssh"));
   expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
   expect(f.isHeld()).toBe(true);
@@ -1024,7 +1035,9 @@ test("C-599: a held worker recovering under a new key also installs stale tools"
     )
     .run(project, machine, "old-key");
   f.tools.output = missing;
-  Object.assign(f.adapters, { toolsStale: vi.fn(async () => true) });
+  Object.assign(f.adapters, {
+    toolsStale: vi.fn(async () => "stale" as const),
+  });
   f.adapters.install.mockImplementationOnce(async () => {
     f.tools.output = "agent-tools ok";
     return v2Result;
@@ -1039,7 +1052,9 @@ test("C-599: a tools-only refresh that fails before sending anything does not ho
   const f = await setup("linux");
   f.enroll();
   f.tools.output = missing;
-  Object.assign(f.adapters, { toolsStale: vi.fn(async () => true) });
+  Object.assign(f.adapters, {
+    toolsStale: vi.fn(async () => "stale" as const),
+  });
   f.options.bindingCurrent.mockReturnValue(false);
   expect(await f.run(pass)).toEqual(pass);
   expect(f.adapters.install).not.toHaveBeenCalled();
@@ -1056,10 +1071,100 @@ test("C-599: current tools are probed once per release key, not on every patrol"
   const f = await setup("linux");
   f.enroll();
   f.tools.output = "agent-tools ok";
-  const toolsStale = vi.fn(async () => false);
+  const toolsStale = vi.fn(async () => "current" as const);
   Object.assign(f.adapters, { toolsStale });
   expect(await f.run(pass)).toEqual(pass);
   expect(await f.run(pass)).toEqual(pass);
   expect(toolsStale).toHaveBeenCalledOnce();
   expect(f.adapters.install).not.toHaveBeenCalled();
+});
+
+test("C-599: an unknown probe is never remembered; a later stale probe installs", async () => {
+  const f = await setup("linux");
+  f.enroll();
+  f.tools.output = missing;
+  const toolsStale = vi
+    .fn<() => Promise<"stale" | "current" | "unknown">>()
+    .mockResolvedValueOnce("unknown")
+    .mockResolvedValue("stale");
+  Object.assign(f.adapters, { toolsStale });
+  f.adapters.install.mockResolvedValueOnce(v2Result);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).not.toHaveBeenCalled();
+  expect(await f.run(pass)).toEqual(pass);
+  expect(toolsStale).toHaveBeenCalledTimes(2);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+});
+
+test("C-599: a stale observation forgets an earlier current probe", async () => {
+  const f = await setup("linux");
+  f.enroll();
+  f.tools.output = "agent-tools ok";
+  const toolsStale = vi
+    .fn<() => Promise<"stale" | "current" | "unknown">>()
+    .mockResolvedValueOnce("current")
+    .mockResolvedValue("stale");
+  Object.assign(f.adapters, { toolsStale });
+  expect(await f.run(pass)).toEqual(pass);
+  // The tools drift under the same key: the outer observation reports it.
+  f.tools.output = missing;
+  expect(await f.run(pass)).toEqual(pass);
+  expect(toolsStale).toHaveBeenCalledTimes(1);
+  expect(f.last()?.agent_tools).toEqual({ status: "automatic" });
+  f.adapters.install.mockResolvedValueOnce(v2Result);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(toolsStale).toHaveBeenCalledTimes(2);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+});
+
+test("C-599: a tools-only release refused locally before sending does not hold dispatch", async () => {
+  const f = await setup("linux");
+  f.enroll();
+  f.tools.output = missing;
+  Object.assign(f.adapters, {
+    toolsStale: vi.fn(async () => "stale" as const),
+  });
+  f.adapters.install.mockRejectedValueOnce(new Error(WORKER_UPGRADE_NOT_SENT));
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.isHeld()).toBe(false);
+  expect(upgradeState(f.store, project, machine)).toBeUndefined();
+  expect(open(f)).toEqual([]);
+  // A helper upgrade that is refused locally still holds, as before.
+  f.adapters.install.mockRejectedValueOnce(new Error(WORKER_UPGRADE_NOT_SENT));
+  expect((await f.run(mismatch)).blockers).toEqual([upgradeHold]);
+});
+
+test("C-599: the local bundle refusal is reported as not sent, before any SSH", async () => {
+  const f = await setup();
+  // No deployment state: signing refuses locally.
+  await expect(
+    installRelease(f.options.execution, project, "identity"),
+  ).rejects.toThrow(WORKER_UPGRADE_NOT_SENT);
+});
+
+test("C-599: rebinding while staging retires the old notice and offers no command", async () => {
+  const f = await setup("linux");
+  f.tools.output = missing;
+  f.stageUpgrade.mockResolvedValue({ ...f.terminal, command: "old-binding" });
+  await f.manual("machine");
+  expect(open(f)).toHaveLength(1);
+  f.stageUpgrade.mockImplementationOnce(async () => {
+    f.tools.binding = "moved";
+    return { ...f.terminal, command: "old-binding" };
+  });
+  await f.manual("machine");
+  expect(open(f)).toEqual([]);
+  expect(f.last()?.agent_tools).toEqual({ status: "unverifiable" });
+});
+
+test("C-599: enrollment completed while staging never publishes a manual command", async () => {
+  const f = await setup("linux");
+  f.tools.output = missing;
+  f.stageUpgrade.mockImplementationOnce(async () => {
+    f.enroll();
+    return f.terminal;
+  });
+  await f.manual("machine");
+  expect(open(f)).toEqual([]);
+  expect(f.last()?.agent_tools).toEqual({ status: "automatic" });
 });

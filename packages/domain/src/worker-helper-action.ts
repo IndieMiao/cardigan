@@ -59,3 +59,38 @@ export function matchesOpenHelperAction(
   const origin = workerHelperAction(state, action);
   return origin?.machine_id === target.machine_id && origin.key === target.key;
 }
+
+/**
+ * C-599: a host-refreshed attachment tools notice. Identified only by the
+ * project's own system request event, never by editable text. Its command is
+ * an administrator upgrade: show it only while it equals the current one.
+ */
+export function workerAgentToolsAction(
+  state: Pick<CommandState, "project_id" | "events">,
+  action: HumanAction,
+) {
+  if (action.requested_by !== "system" || action.card_id) return undefined;
+  const request = eventsOfType(
+    state.events,
+    "host_deployment_action_requested",
+  ).findLast((e) => {
+    const p = e.payload as { human_action_id?: string; reason?: string };
+    return (
+      e.actor.kind === "system" &&
+      e.actor.project_id === state.project_id &&
+      !e.card_id &&
+      p.reason === "worker_maintenance" &&
+      p.human_action_id === action.id
+    );
+  });
+  const key = (request?.payload as { key?: unknown } | undefined)?.key;
+  const machine =
+    typeof key === "string" &&
+    /^worker-agent-tools:([a-zA-Z0-9][a-zA-Z0-9._-]*):[0-9a-f]{64}$/u.exec(
+      key,
+    )?.[1];
+  // A malformed key in this namespace is still fenced; never guess its target.
+  return typeof key === "string" && key.startsWith("worker-agent-tools:")
+    ? { machine_id: machine || null }
+    : undefined;
+}

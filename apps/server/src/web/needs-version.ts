@@ -3,6 +3,7 @@ import {
   type Machine,
   needsYouReadPhase,
   type ProjectId,
+  workerAgentToolsAction,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
@@ -39,6 +40,24 @@ export function readNeedsVersion(
           ? [h.id]
           : [],
       );
+    // C-599: a tools notice's command is shown only for the current binding.
+    const toolsBindings =
+      currentBinding &&
+      state?.human_actions.flatMap((h) => {
+        if (h.status !== "open" || !h.terminal) return [];
+        const tools = workerAgentToolsAction(state, h);
+        return tools
+          ? [
+              [
+                h.id,
+                currentBinding(
+                  project,
+                  state.machines?.find((m) => m.id === tools.machine_id),
+                ),
+              ],
+            ]
+          : [];
+      });
     return createHash("sha256")
       .update(
         JSON.stringify([
@@ -46,6 +65,7 @@ export function readNeedsVersion(
           store.snapshotVersion(project) ?? randomUUID(),
           context,
           visibleBindings,
+          toolsBindings ?? null,
           now === undefined || !state
             ? null
             : needsYouReadPhase(state, now, runtimeGrace),

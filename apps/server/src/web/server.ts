@@ -1090,6 +1090,8 @@ async function serveProjectRoute(
         (section ?? undefined) as NeedsYouSection | undefined,
         (project, machine, binding) =>
           context.checks.currentUpgradeCommand(project, machine, binding),
+        (project, machine) =>
+          context.checks.currentToolsCommand(project, machine),
       ),
     });
     return;
