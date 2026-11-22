@@ -41,6 +41,7 @@ import {
   SECRET_LABELS,
   STALE,
   saveProblem,
+  withoutTypedSecrets,
 } from "./feishu-config.js";
 import {
   type HeldFeishuDraft,
@@ -124,30 +125,43 @@ export function FeishuConfigEditor({
   const place = useContext(SettingPlaceContext);
   const project = place?.project;
   const finished = useRef(false);
-  const latest = useRef({ base, draft, dirty });
-  latest.current = { base, draft, dirty };
+  // The hold this editor made last; a confirmation answered after the editor
+  // is gone ends only that hold, never a newer draft (V-2869).
+  const heldToken = useRef<number | undefined>(undefined);
+  const latest = useRef({ base, draft, dirty, values });
+  latest.current = { base, draft, dirty, values };
   const reveal = place?.reveal;
   useEffect(() => {
     if (!project) return;
     if (hidden && dirty)
-      holdFeishuDraft({
+      heldToken.current = holdFeishuDraft({
         project,
         base,
-        draft,
+        draft: withoutTypedSecrets(base, draft, values),
         ...(reveal ? { reveal } : {}),
       });
     else releaseFeishuDraft(project);
-  }, [project, hidden, dirty, base, draft, reveal]);
+  }, [project, hidden, dirty, base, draft, values, reveal]);
   useEffect(
     () => () => {
       if (!project || finished.current) return;
-      const { base, draft, dirty } = latest.current;
+      const { base, draft, dirty, values } = latest.current;
       // The settings page went away with the draft unconfirmed.
-      if (dirty) holdFeishuDraft({ project, base, draft });
+      if (dirty)
+        heldToken.current = holdFeishuDraft({
+          project,
+          base,
+          draft: withoutTypedSecrets(base, draft, values),
+        });
       else releaseFeishuDraft(project);
     },
     [project],
   );
+  /** The server applied the change: end its hold even if the editor is gone. */
+  const applied = () => {
+    if (alive.current) saved();
+    else if (project) releaseFeishuDraft(project, heldToken.current);
+  };
   const close = () => {
     finished.current = true;
     if (project) releaseFeishuDraft(project);
@@ -277,7 +291,7 @@ export function FeishuConfigEditor({
           withSecrets ? secrets : undefined,
         );
         keys.current.delete(preview_id);
-        if (alive.current) saved();
+        applied();
         return;
       } catch (error) {
         if (!alive.current) return;
@@ -299,7 +313,7 @@ export function FeishuConfigEditor({
             // A recorded receipt answers success; anything else stays unknown.
             await client.confirmFeishuSettings(version, preview_id, key);
             keys.current.delete(preview_id);
-            if (alive.current) saved();
+            applied();
             return;
           } catch {
             if (!alive.current) return;

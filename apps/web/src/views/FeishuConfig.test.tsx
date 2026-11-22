@@ -812,3 +812,106 @@ test("a saved or untouched editor holds nothing", async () => {
   expect(heldFeishuDraft("p-1")).toBeUndefined();
   expect(screen.queryByText("飞书配置有未确认的修改，还没有保存。")).toBeNull();
 });
+
+// V-2869: held drafts carry no credential, and a late success ends only its own hold.
+test("a held draft drops a text field holding a credential being typed and keeps unrelated edits", async () => {
+  const { client } = setup();
+  window.location.hash = "#/p/p-1/settings?tab=feishu";
+  const { rerender } = render(<Shell client={client} page />);
+  await screen.findByText("每分钟 20 条");
+  await openEditor();
+  type("标题长度（字）", "99");
+  fireEvent.click(
+    within(secretBlock("群机器人签名密钥")).getByRole("button", {
+      name: "填写",
+    }),
+  );
+  type("新群机器人签名密钥", SIGN);
+  type("Workbench 链接", `https://wb.example.test/${SIGN}`);
+  // Hidden behind another tab: the held copy is already clean.
+  await go("#/p/p-1/settings");
+  expect(JSON.stringify(heldFeishuDraft("p-1"))).not.toContain(SIGN);
+  // Leaving the settings page: still clean, the unrelated edit kept.
+  await go("#/p/p-1/activity");
+  rerender(<Shell client={client} page={false} />);
+  const held = heldFeishuDraft("p-1");
+  expect(JSON.stringify(held)).not.toContain(SIGN);
+  expect(held?.draft.fields.workbench_url).toBe(
+    "https://workbench.example.test",
+  );
+  expect(held?.draft.fields.title_limit).toBe("99");
+  await go("#/p/p-1/settings?tab=feishu");
+  rerender(<Shell client={client} page />);
+  expect(
+    (await screen.findByLabelText<HTMLInputElement>("标题长度（字）")).value,
+  ).toBe("99");
+  expect(field("Workbench 链接").value).toBe("https://workbench.example.test");
+  expect(
+    [...document.querySelectorAll("input")].some((i) => i.value.includes(SIGN)),
+  ).toBe(false);
+  expect(document.body.textContent).not.toContain(SIGN);
+});
+
+function deferredConfirm(server: ReturnType<typeof fakeFeishuSettings>) {
+  const pending: (() => void)[] = [];
+  const confirmFeishuSettings: NonNullable<
+    CardiganClient["confirmFeishuSettings"]
+  > = async (...args) => {
+    await new Promise<void>((resolve) => pending.push(resolve));
+    await server.client.confirmFeishuSettings(...args);
+  };
+  return { confirmFeishuSettings, release: () => pending.shift()?.() };
+}
+
+test("a confirmation that succeeds after leaving ends its held draft", async () => {
+  const { client, server } = setup();
+  const slow = deferredConfirm(server);
+  const app = { ...client, confirmFeishuSettings: slow.confirmFeishuSettings };
+  window.location.hash = "#/p/p-1/settings?tab=feishu";
+  const { rerender } = render(<Shell client={app} page />);
+  await screen.findByText("每分钟 20 条");
+  await openEditor();
+  type("标题长度（字）", "99");
+  await preview();
+  fireEvent.click(within(dialog()).getByRole("button", { name: "确认保存" }));
+  await go("#/p/p-1/activity");
+  rerender(<Shell client={app} page={false} />);
+  expect(heldFeishuDraft("p-1")).toBeDefined();
+  await act(async () => slow.release());
+  await waitFor(() => expect(heldFeishuDraft("p-1")).toBeUndefined());
+  expect(server.view.settings["policy.title_limit"]).toBe(99);
+  expect(screen.queryByText("飞书配置有未确认的修改，还没有保存。")).toBeNull();
+  const unload = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(unload);
+  expect(unload.defaultPrevented).toBe(false);
+});
+
+test("a late success does not clear a newer draft held after it", async () => {
+  const { client, server } = setup();
+  const slow = deferredConfirm(server);
+  const app = { ...client, confirmFeishuSettings: slow.confirmFeishuSettings };
+  window.location.hash = "#/p/p-1/settings?tab=feishu";
+  const { rerender } = render(<Shell client={app} page />);
+  await screen.findByText("每分钟 20 条");
+  await openEditor();
+  type("标题长度（字）", "99");
+  await preview();
+  fireEvent.click(within(dialog()).getByRole("button", { name: "确认保存" }));
+  await go("#/p/p-1/activity");
+  rerender(<Shell client={app} page={false} />);
+  // Back to the held draft, a new edit, and away again: a newer hold.
+  await go("#/p/p-1/settings?tab=feishu");
+  rerender(<Shell client={app} page />);
+  await screen.findByLabelText("标题长度（字）");
+  type("时区", "Europe/Berlin");
+  await go("#/p/p-1/activity");
+  rerender(<Shell client={app} page={false} />);
+  const newer = heldFeishuDraft("p-1");
+  expect(newer?.draft.fields.timezone).toBe("Europe/Berlin");
+  await act(async () => slow.release());
+  expect(server.view.settings["policy.title_limit"]).toBe(99);
+  expect(heldFeishuDraft("p-1")).toBe(newer);
+  expect(
+    screen.getAllByText("飞书配置有未确认的修改，还没有保存。"),
+  ).toHaveLength(1);
+});

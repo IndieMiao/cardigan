@@ -15,6 +15,8 @@ import type { FeishuDraft } from "./feishu-config.js";
  */
 export interface HeldFeishuDraft {
   readonly project: string;
+  /** Which hold this is: an older editor's late outcome cannot end a newer one. */
+  readonly token?: number;
   /** The read the draft was made against (a stale one is refreshed on preview). */
   readonly base: FeishuSettingsView;
   readonly draft: FeishuDraft;
@@ -38,12 +40,30 @@ function set(next: readonly HeldFeishuDraft[]) {
   for (const listener of listeners) listener();
 }
 
-export function holdFeishuDraft(entry: HeldFeishuDraft) {
-  set([...held.filter((h) => h.project !== entry.project), entry]);
+let nextToken = 0;
+/** Hold (or replace) the project's draft; returns this hold's token. */
+export function holdFeishuDraft(entry: Omit<HeldFeishuDraft, "token">) {
+  const token = ++nextToken;
+  set([
+    ...held.filter((h) => h.project !== entry.project),
+    { ...entry, token },
+  ]);
+  return token;
 }
-export function releaseFeishuDraft(project: string) {
-  if (held.some((h) => h.project === project))
-    set(held.filter((h) => h.project !== project));
+/** End the project's hold; with `token`, only that very hold. */
+export function releaseFeishuDraft(project: string, token?: number) {
+  if (
+    held.some(
+      (h) =>
+        h.project === project && (token === undefined || h.token === token),
+    )
+  )
+    set(
+      held.filter(
+        (h) =>
+          h.project !== project || (token !== undefined && h.token !== token),
+      ),
+    );
 }
 export function heldFeishuDraft(project: string) {
   return held.find((h) => h.project === project);

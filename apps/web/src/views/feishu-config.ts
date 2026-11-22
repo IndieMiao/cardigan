@@ -259,6 +259,35 @@ export function netEdits(view: FeishuSettingsView, draft: FeishuDraft) {
   return out;
 }
 
+/**
+ * V-2869: the draft kept out of view (memory only). A text field holding a
+ * credential being typed falls back to the read's value, so the held draft
+ * never carries it; unrelated edits stay.
+ */
+export function withoutTypedSecrets(
+  view: FeishuSettingsView,
+  draft: FeishuDraft,
+  values: Readonly<Partial<Record<FeishuSecretKey, string>>>,
+): FeishuDraft {
+  const typed = FEISHU_SECRET_KEYS.filter((k) => draft.secrets[k] === "replace")
+    .map((k) => values[k] ?? "")
+    .filter((v) => v !== "");
+  const hit = draftFields.filter(
+    (f) =>
+      FIELDS[f].unit === "text" &&
+      typed.some((v) => draft.fields[f].includes(v)),
+  );
+  if (!hit.length) return draft;
+  const fresh = draftFrom(view);
+  const fields = { ...draft.fields };
+  const retyped = new Set(draft.retyped);
+  for (const f of hit) {
+    fields[f] = fresh.fields[f];
+    retyped.delete(f);
+  }
+  return { ...draft, fields, retyped };
+}
+
 export type DraftProblems = Partial<
   Record<DraftField | FeishuSecretKey, string>
 >;
