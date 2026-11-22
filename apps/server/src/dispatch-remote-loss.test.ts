@@ -15,6 +15,9 @@ import { runtimeEvents } from "../test-support/runtime-events.js";
 import { startControlPlane } from "./assembly.js";
 import { RuntimeMonitor } from "./dispatch-monitor.js";
 
+import { readNeedsState } from "./web/needs-state.js";
+import { needsYou } from "./web/read.js";
+
 let f: ReturnType<typeof dispatchFixture>;
 let target: ReturnType<typeof f.create>;
 let events: ReturnType<typeof runtimeEvents>;
@@ -29,13 +32,17 @@ const owner = () =>
   f.state().assignments.find((a) => a.id === target.assignment.id);
 const currentRun = () =>
   f.state().runs.find((r) => r.assignment_id === target.assignment.id);
+let evidence: "alive" | "exited" | "unknown" | "unreachable" = "unreachable";
+const probeRemoteProcess = vi.fn(async () => evidence);
 const startMonitor = () =>
   new RuntimeMonitor({
     store: f.store,
-    runtime: events.source,
+    runtime: { ...events.source, probeRemoteProcess },
     clock: f.clock,
   });
 beforeEach(() => {
+  evidence = "unreachable";
+  probeRemoteProcess.mockClear();
   f = dispatchFixture();
   f.store.uow.run((tx) =>
     tx.machines.put(f.project, {
@@ -97,7 +104,7 @@ async function lose() {
   await expect.poll(() => owner()?.runtime_state).toBe("unknown");
   f.advance(300000);
   monitor.reconcile();
-  expect(owner()?.runtime_state).toBe("lost");
+  await expect.poll(() => owner()?.runtime_state).toBe("lost");
 }
 function alive(seq: number) {
   events.send({
@@ -132,6 +139,7 @@ test.each([
         a,
         {
           human_action_id: action.id,
+          conclusion: "exited",
           text: "Old process stopped",
         },
         p,
@@ -187,11 +195,12 @@ test.each([
       .toBe(false);
     monitor.reconcile();
     expect.soft(events.sessions.at(-1)?.signal?.aborted).toBe(false);
+    evidence = "alive";
     alive(3);
     await setImmediate();
     expect(
       f.state().human_actions.filter((h) => h.status === "open"),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
     expect(hostOpsPending(f.state().events, replacement.id)).toBe(true);
     expect(() =>
       f.apply((s, a, p) =>
@@ -220,11 +229,13 @@ test.each(["exited", "finished", "terminal.finished"] as const)(
       completeHumanAction(
         s,
         a,
-        { human_action_id: action.id, text: "Stopped" },
+        { human_action_id: action.id, conclusion: "exited", text: "Stopped" },
         p,
       ),
     );
     monitor.reconcile();
+    await setImmediate(); // discard the sample taken before release
+    evidence = "exited";
     events.send({
       seq: 2,
       type: observation === "exited" ? "snapshot" : observation,
@@ -296,7 +307,11 @@ test("remote lost persists one confirmation, fences dispatch and atomically revo
     completeHumanAction(
       s,
       a,
-      { human_action_id: action.id, text: "Machine powered off" },
+      {
+        human_action_id: action.id,
+        conclusion: "exited",
+        text: "Machine powered off",
+      },
       p,
     ),
   );
@@ -342,39 +357,102 @@ test("remote lost persists one confirmation, fences dispatch and atomically revo
   expect(f.state().runs).toHaveLength(1);
 });
 
-test("a reconnecting old process stays lost and asks the human again if observed alive after confirmation", async () => {
+test("Needs You rereads the last inconclusive observation without closing the exit request", async () => {
   await lose();
-  monitor.reconcile();
-  alive(2);
-  await expect
-    .poll(
-      () =>
-        f.state().events.filter((e) => e.type === "remote_worker_alive").length,
-    )
-    .toBe(1);
-  expect(owner()?.runtime_state).toBe("lost");
-  expect(currentRun()?.status).toBe("unknown");
   const action = f.state().human_actions[0];
   if (!action) throw new Error("Missing exit request");
-  f.apply((s, a, p) =>
-    completeHumanAction(
-      s,
-      a,
-      { human_action_id: action.id, text: "Stopped" },
-      p,
-    ),
-  );
-  monitor.reconcile();
-  alive(3);
-  await expect
-    .poll(
-      () => f.state().human_actions.filter((h) => h.status === "open").length,
-    )
-    .toBe(1);
-  expect(owner()?.status).toBe("released");
-  expect(currentRun()?.outcome).toBe("failed");
-  expect(f.state().runs).toHaveLength(1);
+  const read = () =>
+    needsYou(
+      readNeedsState(f.store, f.project),
+      f.clock.now(),
+    ).human_actions.find((h) => h.id === action.id);
+  expect(read()).toMatchObject({ requires_loss_conclusion: true });
+  expect(read()).not.toHaveProperty("last_loss_observation");
+  const observe = () =>
+    f.apply((s, a, p) =>
+      completeHumanAction(
+        s,
+        a,
+        {
+          human_action_id: action.id,
+          conclusion: "unconfirmed",
+          text: "No new evidence",
+        },
+        p,
+      ),
+    );
+  const at = f.clock.now();
+  observe();
+  f.advance(60_000);
+  observe();
+  expect(read()?.last_loss_observation).toEqual({
+    conclusion: "unconfirmed",
+    at,
+  });
+  expect(
+    f.state().events.filter((e) => e.type === "remote_worker_exit_unconfirmed"),
+  ).toHaveLength(1);
 });
+
+test("same identity reappearing after an unavailable probe withdraws the H and keeps the token", async () => {
+  await lose();
+  evidence = "alive";
+  monitor.reconcile();
+  await expect.poll(() => f.state().human_actions[0]?.status).toBe("cancelled");
+  expect(owner()?.status).toBe("active");
+  expect(currentRun()?.status).toBe("running");
+  expect(f.store.verifyToken(token.token)).toBeDefined();
+});
+
+test("a live observation in the grace period does not start an unacknowledged dispatch", async () => {
+  const original = currentRun();
+  if (!original) throw new Error("Missing Run");
+  const { started_at: _, ...run } = original;
+  f.store.uow.run((tx) =>
+    tx.runs.put(f.project, { ...run, status: "dispatched" }),
+  );
+  events.send({
+    seq: 1,
+    type: "lost",
+    terminal_ref: f.refFor(target.assignment).terminal_ref,
+  });
+  await expect.poll(() => currentRun()?.status).toBe("unknown");
+  evidence = "alive";
+  alive(2);
+  await expect.poll(() => currentRun()?.status).toBe("dispatched");
+  expect(currentRun()?.started_at).toBeUndefined();
+  expect(f.state().human_actions).toHaveLength(0);
+});
+
+test.each(["alive", "exited", "unreachable", "unknown"] as const)(
+  "grace expiry checks remote process: %s",
+  async (result) => {
+    events.send({
+      seq: 1,
+      type: "lost",
+      terminal_ref: f.refFor(target.assignment).terminal_ref,
+    });
+    await expect.poll(() => owner()?.runtime_state).toBe("unknown");
+    evidence = result;
+    f.advance(300000);
+    monitor.reconcile();
+    await setImmediate();
+    expect(probeRemoteProcess).toHaveBeenCalled();
+    expect(f.state().human_actions).toHaveLength(
+      result === "alive" || result === "unknown" ? 0 : 1,
+    );
+    expect(currentRun()?.status).toBe(
+      result === "alive" ? "running" : "unknown",
+    );
+    if (result !== "alive")
+      expect(
+        f
+          .state()
+          .events.findLast((e) => e.type === "remote_worker_process_checked")
+          ?.payload,
+      ).toMatchObject({ process: result });
+  },
+);
 
 const runtimeStub = () => ({
   ...events.source,
@@ -438,7 +516,11 @@ test("a released backup takeover can continue in-progress work after dispatcher 
     completeHumanAction(
       s,
       a,
-      { human_action_id: action.id, text: "Confirmed stopped" },
+      {
+        human_action_id: action.id,
+        conclusion: "exited",
+        text: "Confirmed stopped",
+      },
       p,
     ),
   );

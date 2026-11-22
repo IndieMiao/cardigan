@@ -91,7 +91,7 @@ const TOP_LEVEL_USAGE = [
   "  comment add      发评论：--text <内容> 或 --text-file <路径>，可重复 --file 附文件，--note <说明>",
   "  attachment add   上传附件：--file <路径> [--note <说明>] [--kind evidence|artifact] [--basis <Q-n>] [--entry <C-n#k>]",
   "  machine          人专属机器登记/查看/更新/drain/check",
-  "  worker add|resume|check|status  接入 Linux worker（仅人类）",
+  "  worker add|resume|check|status|apply-config  接入 Linux worker（仅人类）",
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 H-n",

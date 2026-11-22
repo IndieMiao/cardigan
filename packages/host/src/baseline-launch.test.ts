@@ -432,6 +432,12 @@ test("workspace routing rejects missing helpers, unregistered machines and stale
         target: target.execution.target,
       },
     } as Assignment;
+    // Shared Git can be prepared before launch opt-in, but a session-bound
+    // worktree cannot be touched with a revoked runtime binding.
+    expect(() => targets.forWorkspace(project, bound)).toThrow(
+      "remote_launch_disabled",
+    );
+    workers = workers.map((w) => ({ ...w, allow_remote_launch: true }));
     expect(targets.forWorkspace(project, bound).execution.target).toEqual(
       target.execution.target,
     );

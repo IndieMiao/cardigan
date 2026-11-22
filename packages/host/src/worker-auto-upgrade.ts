@@ -9,7 +9,7 @@ import {
 } from "./runtime-workers-config.js";
 import { helperMismatch } from "./worker-helper-release.js";
 import { notifyWorkerMaintenance } from "./worker-maintenance.js";
-import { onboardWorker } from "./worker-onboarding.js";
+import { onboardWorker, workerCheckConfig } from "./worker-onboarding.js";
 import {
   parseWorkerOnboarding,
   readOnboardingYaml,
@@ -136,13 +136,19 @@ export async function patrolHelperUpgrade(
       stage = "unexpected_drift";
       throw new Error();
     }
-    const cfg = parseWorkerOnboarding(
+    const draft = parseWorkerOnboarding(
       readOnboardingYaml(join(root, `worker-${machine}-${project}.yaml`)),
       execution.dataDir,
     );
+    const workerCheck = workerCheckConfig(
+      draft,
+      root,
+      execution.dataDir,
+      "bound",
+    );
     if (
       !execution.target ||
-      runtimeTargetBinding(cfg.worker).fingerprint !==
+      runtimeTargetBinding(workerCheck.config.worker).fingerprint !==
         execution.target.fingerprint ||
       !options.bindingCurrent() ||
       execution.fileHelper?.path !==
@@ -160,7 +166,7 @@ export async function patrolHelperUpgrade(
     if (
       !options.bindingCurrent() ||
       !(await adapters.workerCheck({
-        config: cfg,
+        ...workerCheck,
         configRoot: root,
         dataDir: execution.dataDir,
         mode: "check",
@@ -170,7 +176,7 @@ export async function patrolHelperUpgrade(
             return (
               !!m &&
               m.herdr_machine === machine &&
-              matchesWorkerPlatform(m, cfg.worker)
+              matchesWorkerPlatform(m, workerCheck.config.worker)
             );
           }),
         beforeStep: () => signal?.throwIfAborted(),
