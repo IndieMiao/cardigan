@@ -75,6 +75,8 @@ function noticeBody(e: Event) {
 const noticeOnlyEvents = new Map([
   ["merge_changes_requested", "request_changes"],
   ["merge_check_requeued", "recheck"],
+  // C-591: PM held a system-held merge confirmation.
+  ["merge_confirmation_snoozed", "hold"],
 ]);
 /** C-177: system alerts shown as notices; they resolve nothing. */
 const systemNoticeEvents = new Map([
