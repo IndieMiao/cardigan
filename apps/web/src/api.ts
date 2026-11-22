@@ -66,6 +66,7 @@ export interface ProjectSummary {
 }
 
 export interface WaitingOnItem {
+  readonly review_phase?: import("@cardigan/domain").WaitingOnItem["review_phase"];
   readonly kind: "decision" | "human_action" | "review" | "blocked";
   readonly ref: string;
   readonly label: string;

@@ -7,6 +7,7 @@ import type {
   Runtime,
   WorkItem,
 } from "@cardigan/domain";
+import { pauseDiscussionFor } from "@cardigan/domain";
 import {
   CentralRepositoryService,
   GitWorktreeService,
@@ -80,14 +81,21 @@ export function reviewTargetSha(
   project: ProjectId,
   item?: WorkItem,
 ): string {
-  return store.uow.read((tx) => currentDeliverySha(tx, project, item));
+  return store.uow.read((tx) => {
+    const sha = currentDeliverySha(tx, project, item);
+    if (!sha)
+      throw new Error(
+        `No current Git delivery for readonly work item ${item?.id}`,
+      );
+    return sha;
+  });
 }
 
 function currentDeliverySha(
   tx: ReadRepositories,
   project: ProjectId,
   item?: WorkItem,
-): string {
+): string | undefined {
   if (item?.kind !== "verify")
     throw new Error("Readonly Assignment requires a verification work item");
   const delivery = tx.deliveries
@@ -102,11 +110,9 @@ function currentDeliverySha(
             d.requested_verifiers.includes(item.id)),
     )
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-  if (delivery?.subject.kind !== "git_head")
-    throw new Error(
-      `No current Git delivery for readonly work item ${item.id}`,
-    );
-  return delivery.subject.value;
+  return delivery?.subject.kind === "git_head"
+    ? delivery.subject.value
+    : undefined;
 }
 
 /** A plan is a discussion target, never a substitute SHA for a formal review. */
@@ -130,12 +136,25 @@ export function readonlyWorktreeTarget(
       throw new Error(
         `Readonly Assignment no longer owns an active work item ${assignment.work_item_id}`,
       );
-    return current.review_plan_target
-      ? { work_item: current, review_plan: current.review_plan_target }
-      : {
-          work_item: current,
-          target_sha: currentDeliverySha(tx, project, current),
-        };
+    if (current.review_plan_target)
+      return { work_item: current, review_plan: current.review_plan_target };
+    // A pause can also name a reviewer who still has a formal delivery to inspect.
+    // Never substitute the baseline for that delivery. Without one, project the
+    // current discussion target from the same read transaction for a readonly checkout.
+    const sha = currentDeliverySha(tx, project, current);
+    if (sha) return { work_item: current, target_sha: sha };
+    const plan = pauseDiscussionFor(
+      tx.decisions.list(project),
+      assignment.id,
+    )?.id;
+    if (plan)
+      return {
+        work_item: { ...current, review_plan_target: plan },
+        review_plan: plan,
+      };
+    throw new Error(
+      `No current Git delivery for readonly work item ${current.id}`,
+    );
   });
 }
 

@@ -313,7 +313,11 @@ export const getCardTool = defineTool({
         assignments,
         deliveries,
         reviews,
-        decisions,
+        decisions: state.decisions.filter(
+          (q) => q.card_id === cardId || q.affected_cards.includes(cardId),
+        ),
+        events,
+        runs: state.runs,
         human_actions,
         status,
       });
