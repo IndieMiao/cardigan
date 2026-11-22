@@ -1,6 +1,10 @@
 import { posix } from "node:path";
 import type { AgentExecution, ExecutionConfig } from "@cardigan/runtime-herdr";
 import { GITHUB_POLL_DEFAULTS } from "./github-rate-limit.js";
+import {
+  type GithubStepContract,
+  parseGithubStepContract,
+} from "./github-step-contract.js";
 import { secureCredentialFile } from "./merge-push-config.js";
 import {
   type InfraFlakyRule,
@@ -40,6 +44,8 @@ export interface GithubMergeGateExecutor {
   /** Bound GitHub runs may wait for a runner independently of discovery. */
   readonly queueWaitMs?: number;
   readonly failureExcerptBytes?: number;
+  /** C-592: expected job step shape; absent keeps Cardigan's own workflow. */
+  readonly stepContract?: GithubStepContract;
   readonly repo: string;
   readonly workflow: string;
   readonly appId: number;
@@ -154,6 +160,7 @@ async function parseExecutor(
             "wait_start_ms",
             "queue_wait_ms",
             "failure_excerpt_bytes",
+            "step_contract",
             "type",
             "repo",
             "workflow",
@@ -178,6 +185,10 @@ async function parseExecutor(
       !/^[A-Za-z0-9_-]+\[bot\]$/u.test(entry.bot_login)
     )
       fail("bot_login 必须是 App 的机器人身份");
+    const stepContract =
+      entry.step_contract === undefined
+        ? undefined
+        : parseGithubStepContract(entry.step_contract);
     const appId = integer(
       entry.app_id,
       0,
@@ -258,6 +269,7 @@ async function parseExecutor(
         "failure_excerpt_bytes 无效",
       ),
       ...(entry.scoped_checks === true ? { scopedChecks: true } : {}),
+      ...(stepContract ? { stepContract } : {}),
       repo: entry.repo as string,
       workflow: entry.workflow as string,
       appId,

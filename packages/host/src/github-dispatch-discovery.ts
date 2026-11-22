@@ -54,6 +54,8 @@ export function githubDispatchIdentity(
   const dispatchConfig = { ...config };
   delete dispatchConfig.branchRetentionMs;
   delete dispatchConfig.queueWaitMs;
+  // Result mapping policy (C-592), not dispatch identity.
+  delete dispatchConfig.stepContract;
   if (dispatchConfig.scopedChecks === false) delete dispatchConfig.scopedChecks;
   const digest = (candidate: GithubMergeGateExecutor) =>
     createHash("sha256")
