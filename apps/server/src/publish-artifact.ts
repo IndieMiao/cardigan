@@ -14,7 +14,7 @@ import {
   PublicationError,
   type PublicationOptions,
 } from "@cardigan/mcp-server";
-import { publicationTarget } from "./publication-target.js";
+import { ossEnvironment, publicationTarget } from "./publication-target.js";
 
 const digest = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 async function stageApk(data: string, a: Attachment, dest: string) {
@@ -59,11 +59,16 @@ async function stageApk(data: string, a: Attachment, dest: string) {
     throw new PublicationError("artifact");
   }
 }
-const run = async (tool: string, args: string[], cwd: string) =>
+const run = async (
+  tool: string,
+  args: string[],
+  cwd: string,
+  environment?: Record<string, string>,
+) =>
   (
     await promisify(execFile)(tool, args, {
       cwd,
-      env: { PATH: "/usr/bin:/bin", HOME: cwd, LANG: "C" },
+      env: { PATH: "/usr/bin:/bin", HOME: cwd, LANG: "C", ...environment },
       timeout: 600000,
       killSignal: "SIGKILL",
       maxBuffer: 1024 * 1024,
@@ -191,6 +196,8 @@ export function apkPublisher(
         flag: "wx",
         mode: 0o600,
       });
+      current();
+      const credentials = await ossEnvironment(root, t);
       const oss = (api: string, ...args: string[]) =>
         execute(
           t.ossutil,
@@ -204,9 +211,9 @@ export function apkPublisher(
             "--endpoint",
             `https://oss-${t.region}.aliyuncs.com`,
             "--config-file",
-            join(root, t.credential_file),
-            "--profile",
-            t.profile,
+            "/dev/null",
+            "--mode",
+            "AK",
             "--retry-times",
             "0",
             "--loglevel",
@@ -214,6 +221,7 @@ export function apkPublisher(
             ...args,
           ],
           dir,
+          credentials,
         ).then((stdout) =>
           stdout.replace(/\n[0-9]+(?:\.[0-9]+)?\(s\) elapsed\s*$/u, ""),
         );

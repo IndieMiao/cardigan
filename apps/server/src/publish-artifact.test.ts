@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
+  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -30,7 +31,7 @@ const apk = Buffer.from("synthetic apk bytes"),
   project = "fixture";
 const target = {
   type: "aliyun-oss",
-  credential_file: "oss.conf",
+  credential_file: "publish/fixture/aliyun-config.json",
   profile: "fixture",
   bucket: "fixture-test",
   region: "us-west-1",
@@ -57,9 +58,25 @@ const request = {
 async function setup() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "apk-publish-")));
   roots.push(root);
+  await mkdir(join(root, "publish", "fixture"), {
+    recursive: true,
+    mode: 0o700,
+  });
+  const testId = randomUUID(),
+    testKey = randomUUID();
   await writeFile(
-    join(root, "oss.conf"),
-    "[profile fixture]\nmode=Anonymous\n",
+    join(root, target.credential_file),
+    JSON.stringify({
+      profiles: [
+        {
+          name: target.profile,
+          mode: "AK",
+          region_id: target.region,
+          access_key_id: testId,
+          access_key_secret: testKey,
+        },
+      ],
+    }),
     { mode: 0o600 },
   );
   await writeFile(
@@ -77,36 +94,47 @@ async function setup() {
     badHash: false,
     versioned: false,
   };
-  const execute = vi.fn(async (tool: string, args: string[]) => {
-    const arg = (name: string) => args[args.indexOf(name) + 1]!;
-    if (tool === target.apksigner)
-      return `Signer #1 certificate SHA-256 digest: ${flags.signer}\n`;
-    if (tool === target.apkanalyzer)
-      return `${({ "application-id": flags.manifest, "version-name": request.version, "version-code": "13" } as Record<string, string>)[args[1]!]}\n`;
-    expect(arg("--config-file")).toBe(join(root, "oss.conf"));
-    expect(arg("--profile")).toBe(target.profile);
-    switch (args[1]) {
-      case "get-bucket-versioning":
-        return flags.versioned
-          ? "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>"
-          : "<VersioningConfiguration/>\n0.123456(s) elapsed\n";
-      case "list-objects-v2":
-        expect(arg("--prefix")).toBe(prefix);
-        return JSON.stringify({
-          KeyCount: String(objects.size),
-          IsTruncated: "false",
-        });
-      case "put-object": {
-        const key = arg("--key");
-        expect(args).toContain("--forbid-overwrite=true");
-        if (objects.has(key)) throw Error("private details");
-        objects.set(key, await readFile(arg("--body").slice(7)));
-        return "";
+  const execute = vi.fn(
+    async (
+      tool: string,
+      args: string[],
+      _cwd?: string,
+      environment?: Record<string, string>,
+    ) => {
+      expect(args.join(" ")).not.toContain(testKey);
+      if (tool === target.ossutil)
+        expect(environment?.OSS_ACCESS_KEY_SECRET === testKey).toBe(true);
+      else expect(environment).toBeUndefined();
+      const arg = (name: string) => args[args.indexOf(name) + 1]!;
+      if (tool === target.apksigner)
+        return `Signer #1 certificate SHA-256 digest: ${flags.signer}\n`;
+      if (tool === target.apkanalyzer)
+        return `${({ "application-id": flags.manifest, "version-name": request.version, "version-code": "13" } as Record<string, string>)[args[1]!]}\n`;
+      expect(arg("--config-file")).toBe("/dev/null");
+      expect(arg("--mode")).toBe("AK");
+      switch (args[1]) {
+        case "get-bucket-versioning":
+          return flags.versioned
+            ? "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>"
+            : "<VersioningConfiguration/>\n0.123456(s) elapsed\n";
+        case "list-objects-v2":
+          expect(arg("--prefix")).toBe(prefix);
+          return JSON.stringify({
+            KeyCount: String(objects.size),
+            IsTruncated: "false",
+          });
+        case "put-object": {
+          const key = arg("--key");
+          expect(args).toContain("--forbid-overwrite=true");
+          if (objects.has(key)) throw Error("private details");
+          objects.set(key, await readFile(arg("--body").slice(7)));
+          return "";
+        }
+        default:
+          throw Error();
       }
-      default:
-        throw Error();
-    }
-  });
+    },
+  );
   const get: typeof fetch = async (url, init) => {
     expect(init?.redirect).toBe("error");
     expect(init?.credentials).toBe("omit");
@@ -161,7 +189,7 @@ test.each([
   const f = await setup();
   switch (issue) {
     case "configuration":
-      await chmod(join(f.root, "oss.conf"), 0o644);
+      await chmod(join(f.root, target.credential_file), 0o644);
       break;
     case "signature":
       f.flags.signer = "0".repeat(64);
@@ -188,7 +216,40 @@ test.each([
   expect(f.claim).toHaveBeenCalledTimes(download ? 1 : 0);
 });
 
-// Optional transport contract: a real ossutil 2.x binary, anonymous profile, loopback-only fake OSS.
+test.each([
+  "another-project",
+  "multiple-profiles",
+  "wrong-profile",
+  "wrong-region",
+])("refuses mismatched profile or credential path: %s", async (issue) => {
+  const f = await setup();
+  if (issue === "another-project")
+    await writeFile(
+      join(f.root, "publish-targets.json"),
+      JSON.stringify({
+        [project]: {
+          ...target,
+          credential_file: "publish/other/aliyun-config.json",
+        },
+      }),
+    );
+  else {
+    const path = join(f.root, target.credential_file),
+      registry = JSON.parse(await readFile(path, "utf8"));
+    if (issue === "multiple-profiles")
+      registry.profiles.push({ ...registry.profiles[0], name: "another" });
+    if (issue === "wrong-profile") registry.profiles[0].name = "another";
+    if (issue === "wrong-region") registry.profiles[0].region_id = "another";
+    await writeFile(path, JSON.stringify(registry));
+  }
+  await expect(f.call()).rejects.toThrow("configuration");
+  expect(f.execute.mock.calls.some(([tool]) => tool === target.ossutil)).toBe(
+    false,
+  );
+  expect(f.claim).not.toHaveBeenCalled();
+});
+
+// Optional transport contract: a real ossutil 2.x binary, generated disposable profile, loopback-only fake OSS.
 // No cloud account, real credentials, or external endpoint in this harness.
 test.skipIf(!process.env.C585_TEST_OSSUTIL)(
   "real ossutil serializes the three conditional writes; no cloud contact",
@@ -196,6 +257,10 @@ test.skipIf(!process.env.C585_TEST_OSSUTIL)(
     const f = await setup();
     const nonce = new Set<string>();
     const srv = createServer(async (req, res) => {
+      if (!req.headers.authorization?.startsWith("OSS4-HMAC-SHA256 ")) {
+        res.writeHead(403).end();
+        return;
+      }
       const url = new URL(req.url!, "http://localhost");
       const key = url.pathname.slice(target.bucket.length + 2);
       if (req.method === "PUT") {
@@ -225,21 +290,15 @@ test.skipIf(!process.env.C585_TEST_OSSUTIL)(
       const publish = apkPublisher(
         f.root,
         f.root,
-        async (tool, args, cwd) => {
+        async (tool, args, cwd, environment) => {
           if (tool !== target.ossutil) return f.execute(tool, args);
-          const safe = [
-            ...args,
-            "--addressing-style",
-            "path",
-            "--mode",
-            "Anonymous",
-          ];
+          const safe = [...args, "--addressing-style", "path"];
           safe[safe.indexOf("--endpoint") + 1] =
             `http://127.0.0.1:${addr.port}`;
           return (
             await promisify(execFile)(process.env.C585_TEST_OSSUTIL!, safe, {
               cwd,
-              env: { HOME: cwd, PATH: "/usr/bin:/bin" },
+              env: { HOME: cwd, PATH: "/usr/bin:/bin", ...environment },
             })
           ).stdout;
         },
