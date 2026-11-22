@@ -10,6 +10,7 @@ import {
   SettingsRow,
   SettingsValue,
 } from "../components/layout/SettingsLayout.js";
+import { Tooltip } from "../components/Tooltip.js";
 import { Button } from "../components/ui/button.js";
 import { formatValue, SECRET_LABELS } from "./feishu-config.js";
 
@@ -33,13 +34,15 @@ function Value({
   config,
   label,
   setting,
+  help,
 }: {
   config: FeishuSettingsView;
   label: string;
   setting: string;
+  help?: string;
 }) {
   return (
-    <SettingsRow label={label}>
+    <SettingsRow label={label} help={help}>
       <SettingsValue>
         {formatValue(setting, config.settings[setting])}
       </SettingsValue>
@@ -106,18 +109,21 @@ function TestRow({
         )
       }
     >
-      <Button
-        id={buttonId}
-        aria-labelledby={`${buttonId} ${labelId}`}
-        disabled={!!unavailable}
-        aria-disabled={!!unavailable || pending}
-        title={unavailable}
-        onClick={() => {
-          if (!unavailable && !pending) onSend();
-        }}
-      >
-        {pending ? "发送中…" : "发送测试消息"}
-      </Button>
+      {/* Unavailable stays focusable: the reason is in the shared tooltip
+          for pointer and keyboard alike (V-2845). */}
+      <Tooltip content={unavailable}>
+        <Button
+          id={buttonId}
+          aria-labelledby={`${buttonId} ${labelId}`}
+          aria-disabled={!!unavailable || pending}
+          data-disabled={unavailable ? true : undefined}
+          onClick={() => {
+            if (!unavailable && !pending) onSend();
+          }}
+        >
+          {pending ? "发送中…" : "发送测试消息"}
+        </Button>
+      </Tooltip>
     </SettingsRow>
   );
 }
@@ -212,6 +218,7 @@ export function FeishuConfigGroups({
           config={config}
           label="发送次数上限"
           setting="policy.max_attempts"
+          help="等于重试间隔的个数加 1。在“编辑配置 → 高级 → 重试间隔”中修改。"
         />
         <Value config={config} label="标题长度" setting="policy.title_limit" />
         <Value config={config} label="汇总条数" setting="policy.digest_limit" />

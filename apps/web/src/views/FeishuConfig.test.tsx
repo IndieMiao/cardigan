@@ -495,11 +495,24 @@ test("tests are unavailable while the channel is off or the person is not bound"
   const app = screen.getByRole<HTMLButtonElement>("button", {
     name: "发送测试消息 应用私聊测试",
   });
-  expect(lark.disabled).toBe(true);
-  expect(lark.title).toBe("群机器人未开启");
   await screen.findByText("未绑定");
-  expect(app.disabled).toBe(true);
-  expect(app.title).toBe("本人尚未绑定");
+  // Unavailable buttons stay focusable; the reason is in the shared tooltip.
+  for (const [button, reason] of [
+    [lark, "群机器人未开启"],
+    [app, "本人尚未绑定"],
+  ] as const) {
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.hasAttribute("title")).toBe(false);
+    await act(async () => {
+      button.focus();
+    });
+    expect(document.activeElement).toBe(button);
+    expect((await screen.findByRole("tooltip")).textContent).toContain(reason);
+    await act(async () => {
+      button.blur();
+    });
+  }
   fireEvent.click(lark);
   fireEvent.click(app);
   expect(send).not.toHaveBeenCalled();
