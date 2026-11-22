@@ -437,6 +437,8 @@ test.each([
   "lost_proof",
   "live_again",
   "live_during_backup",
+  "finished_group_alive",
+  "finished_group_gone",
 ] as const)(
   "M5.6: recover the original queued writer after core exit without waiting or signaling (%s)",
   async (mode) => {
@@ -454,6 +456,7 @@ test.each([
     const resumes =
       mode === "clean" ||
       mode === "monitor_refresh" ||
+      mode === "finished_group_gone" ||
       keepsMaterial ||
       (trackedEdit && mode !== "shared_at_launch");
     const backedUp = resumes || mode.endsWith("_at_launch");
@@ -530,6 +533,19 @@ test.each([
       value: gone,
     }));
     s.runtime.retire_idle = vi.fn();
+    if (mode === "finished_group_alive" || mode === "finished_group_gone") {
+      // The terminal manager reports the row finished while the core is up:
+      // only a kernel check of the receipt's process group proves exit.
+      s.runtime.observe_retirement = vi.fn(async () => ({
+        ok: true as const,
+        value: "exited" as const,
+      }));
+      gone = false;
+      s.runtime.confirm_local_group_exit = vi.fn(async () => ({
+        ok: true as const,
+        value: mode === "finished_group_gone",
+      }));
+    }
     const revive = () => {
       s.runtime.observe_retirement = vi.fn(async () => ({
         ok: true as const,
@@ -630,7 +646,10 @@ test.each([
             expect(events("host_ops_action_finished")).toMatchObject([
               { payload: { reason: "workspace_backup_unconfirmed" } },
             ]);
-          else if (mode === "live_during_backup")
+          else if (
+            mode === "live_during_backup" ||
+            mode === "finished_group_alive"
+          )
             expect(events("host_ops_action_finished")).toMatchObject([
               { payload: { reason: "terminal_exit_unconfirmed" } },
             ]);
@@ -764,6 +783,10 @@ test.each([
         if (mode !== "live_again" && mode !== "live_during_backup")
           await d.tick();
         expect(startRun).not.toHaveBeenCalled();
+        if (mode === "finished_group_alive") {
+          expect(s.runtime.confirm_local_group_exit).toHaveBeenCalled();
+          expect(s.runtime.provision).not.toHaveBeenCalled();
+        }
       }
     } finally {
       await d.close();

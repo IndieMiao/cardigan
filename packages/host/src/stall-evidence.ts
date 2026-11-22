@@ -230,12 +230,50 @@ export async function remoteStallExit(
   a: Assignment,
   execution?: ExecutionConfig,
 ) {
+  return (
+    a.machine_id !== "local" && registeredLaunchExited(state, a, execution)
+  );
+}
+/** A finished terminal row is not exit evidence for a local checkout writer.
+ * Require the kernel: the in-memory launch receipt's process group, the
+ * adapter's own post-signal group check, or a registered worker launch. */
+export async function localTurnExitProof(
+  state: CommandState,
+  a: Assignment,
+  runtime: Runtime,
+  ref: RuntimeRef,
+  execution?: ExecutionConfig,
+) {
+  if (
+    a.machine_id !== "local" ||
+    ref.machine_id !== "local" ||
+    !isDeepStrictEqual(a.runtime_ref, ref) ||
+    sharedStallRegistration(state, a)
+  )
+    return false;
+  const owner = { project_id: state.project_id, assignment_id: a.id };
+  if (ref.local_process_receipt)
+    for (const probe of [
+      runtime.confirm_local_group_exit,
+      runtime.confirm_local_exit,
+    ]) {
+      const gone = await probe
+        ?.call(runtime, ref, owner)
+        .catch(() => undefined);
+      if (gone?.ok && gone.value) return true;
+    }
+  return registeredLaunchExited(state, a, execution);
+}
+async function registeredLaunchExited(
+  state: CommandState,
+  a: Assignment,
+  execution?: ExecutionConfig,
+) {
   const ref = a.runtime_ref,
     gen = ref?.launch_generation;
   if (
     !ref ||
     !gen ||
-    a.machine_id === "local" ||
     execution?.mode !== "agent-ssh" ||
     !execution.target ||
     !boundWorkspaceTarget(state.project_id, a, execution)
@@ -311,11 +349,7 @@ export async function transferredSessionExited(
     .catch(() => undefined);
   if (!observed?.ok || observed.value !== "exited") return false;
   if (a.machine_id !== "local") return remoteStallExit(state, a, execution);
-  if (!ref.local_process_receipt) return false;
-  const process = await runtime
-    .confirm_local_exit?.(ref, owner)
-    .catch(() => undefined);
-  return !!process?.ok && process.value;
+  return localTurnExitProof(state, a, runtime, ref, execution);
 }
 export async function stallEvidence(
   state: CommandState,

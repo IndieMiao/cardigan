@@ -461,6 +461,36 @@ export class HerdrRuntime implements Runtime {
       return;
     }
   }
+  confirm_local_group_exit(ref: RuntimeRef, owner: RetirementIdentity) {
+    return result(async () => {
+      this.checkRef(ref);
+      const receipt = this.localReceipt(ref, owner);
+      if (!receipt) return false;
+      for (const pid of [receipt.pid, -receipt.pid]) {
+        try {
+          process.kill(pid, 0);
+          return false;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ESRCH") return false;
+        }
+      }
+      return this.localProcesses.get(ref.terminal_ref) === receipt;
+    });
+  }
+  private localReceipt(ref: RuntimeRef, owner: RetirementIdentity) {
+    const receipt = this.localProcesses.get(ref.terminal_ref);
+    return this.execution.mode !== "local" ||
+      ref.machine_id !== "local" ||
+      !receipt ||
+      receipt.id !== ref.local_process_receipt ||
+      receipt.project !== owner.project_id ||
+      receipt.assignment !== owner.assignment_id ||
+      receipt.name !== ref.agent_name ||
+      receipt.launch?.run_id !== ref.launch_generation?.run_id ||
+      receipt.launch?.generation !== ref.launch_generation?.generation
+      ? undefined
+      : receipt;
+  }
   confirm_local_exit(ref: RuntimeRef, owner: RetirementIdentity) {
     return result(async () => {
       this.checkRef(ref);
@@ -1259,6 +1289,26 @@ export class HerdrRuntime implements Runtime {
         } while (Date.now() < until);
         return inspect();
       };
+      // A finished terminal row only observes the leader. For a system-ended
+      // turn, ask the kernel whether the probed leader and its group are gone.
+      const settled = async (): Promise<
+        RuntimeResult<IdleRetirementResult>
+      > => {
+        if (!options.system_finished_turn) return exited;
+        try {
+          const gone = await this.client.exec(
+            exec("gone", JSON.stringify(identity)),
+          );
+          if (gone.trim() === "gone")
+            return {
+              ok: true,
+              value: { outcome: "exited", process_group_exited: true },
+            };
+        } catch {
+          // Unconfirmed: the caller needs other process evidence.
+        }
+        return exited;
+      };
       this.invalidateStatus(ref);
       try {
         for (const [mode, budget] of [
@@ -1266,7 +1316,7 @@ export class HerdrRuntime implements Runtime {
           ["TERM", options.terminate_ms],
         ] as const) {
           if (options.system_finished_turn && mode === "HUP") continue;
-          if (await inspect()) return exited;
+          if (await inspect()) return settled();
           stage = mode;
           let refused: RetirementEvidence["reason"] = "guard_changed";
           // The queue's guard runs after all waits and immediately before IO.
@@ -1306,7 +1356,7 @@ export class HerdrRuntime implements Runtime {
             ))
           )
             return failure(attempted ? "uncertain" : "withdrawn", refused);
-          if (await wait(budget)) return exited;
+          if (await wait(budget)) return settled();
         }
         return failure("timeout", "still_live");
       } finally {

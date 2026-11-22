@@ -85,6 +85,7 @@ import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import { writerPlacementSeal } from "./retained-writer.js";
 import {
+  localTurnExitProof,
   remoteStallExit,
   stallWorkspace,
   transferredSessionExited,
@@ -1688,6 +1689,7 @@ export class HostOpsService {
                 false,
                 checkWorkspace,
                 beforeSignal,
+                async () => !!(await exited()),
               );
               if (result === "exited" && !(await exited()))
                 result = "terminal_exit_unconfirmed";
@@ -1713,6 +1715,16 @@ export class HostOpsService {
                     !!remote || stopStarted || exitOnly,
                     checkWorkspace,
                     beforeSignal,
+                    async () =>
+                      !!a &&
+                      !!action.runtime_ref &&
+                      (await localTurnExitProof(
+                        read(),
+                        a,
+                        runtime,
+                        action.runtime_ref,
+                        this.stallExecution(project, a.machine_id),
+                      )),
                   );
           } else return;
           // Exit can also be observed without sending anything. Exit alone
