@@ -28,9 +28,24 @@ test.each([
   });
   expect(role.allowed_tools).toContain("read_attachment");
   expect(role.instructions).toContain("元数据不等于已阅读证据");
-  expect(role.instructions).toContain("download-attachment.js");
+  expect(role.instructions).toContain(
+    'node "$CARDIGAN_AGENT_TOOLS/download-attachment.mjs"',
+  );
+  // C-595: the fixed entry needs no build inside the project repository.
+  expect(role.instructions).not.toContain("先在允许的可写目录构建该包");
   expect(role.instructions).toContain("next_offset");
   expect(validateRole(role).ok).toBe(true);
+});
+
+test("design_director uploads evidence through the fixed agent tool", () => {
+  const role = defaultRoleDefinition("design_director", {
+    harness: "codex",
+    launch_profile_ref: "fixture",
+  });
+  expect(role.instructions).toContain(
+    'node "$CARDIGAN_AGENT_TOOLS/upload-evidence.mjs"',
+  );
+  expect(role.instructions).not.toContain("（先构建该包）");
 });
 
 test.each([

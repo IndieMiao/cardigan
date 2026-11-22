@@ -23,14 +23,25 @@ def signing_session(c, root):
             lock_keychain(c, root)
 
 
-def receipt(root, spec, *, failure_details=True):
+# Receipt states: `received` (C-601) while the input arrives and until the
+# commit; the key is never used in it, so the same request number may be
+# resent. `pending` is written durably on commit, before any key use; from
+# then on only lookup. Old signers wrote `pending` already on receipt.
+def receipt(root, spec, *, failure_details=True, dispatch_states=False):
     # Metadata only: no signing policy/key access, no output bytes, no journal mutation.
-    with closing(sqlite3.connect((root/'audit.sqlite').as_uri()+'?mode=ro', uri=True)) as db:
-        row = db.execute('SELECT state,sha FROM receipts WHERE id=? AND spec=?',
-                         (spec['id'], canonical(spec))).fetchone()
-        require(row)
-        details = read_failure(db, spec['id']) if failure_details and row[0] == 'failed' else {}
-        return {'state': row[0], 'sha256': row[1], **details}
+    # Old control hosts know only pending/signed/failed and an existing row.
+    path = root/'audit.sqlite'
+    if dispatch_states and not path.exists():
+        return {'state': 'absent', 'sha256': None}
+    with closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True)) as db:
+        table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipts'").fetchone()
+        row = db.execute('SELECT spec,state,sha FROM receipts WHERE id=?', (spec['id'],)).fetchone() if table else None
+        if dispatch_states and row is None:
+            return {'state': 'absent', 'sha256': None}
+        require(row and row[0] == canonical(spec))
+        state = row[1] if dispatch_states or row[1] != 'received' else 'pending'
+        details = read_failure(db, spec['id']) if failure_details and state == 'failed' else {}
+        return {'state': state, 'sha256': row[2], **details}
 
 
 def serve(root, src, dst, adapters=None):
@@ -40,7 +51,8 @@ def serve(root, src, dst, adapters=None):
     require(s['worker_uid'] != os.getuid() and os.getuid() != 0)
     if mode == 'receipt':
         require(req['size'] == 0)
-        send(dst, canonical(receipt(root, s, failure_details=req.get('failure_details') is True)).encode())
+        send(dst, canonical(receipt(root, s, failure_details=req.get('failure_details') is True,
+                                    dispatch_states=req.get('dispatch_states') is True)).encode())
         return
     require(mode in ('sign', 'lookup'))
     with (root/'serial.lock').open('ab') as lock:
@@ -58,7 +70,13 @@ def serve(root, src, dst, adapters=None):
                 tmp = Path(d)
                 if mode == 'sign':
                     candidate = tmp/('input.apk' if s['platform']=='android' else 'input.zip')
-                    db.execute("INSERT INTO receipts VALUES(?,?,'pending',NULL)", (rid,spec))
+                    # Under the serial lock: a resend is accepted only while the
+                    # earlier attempt never reached the commit (C-601).
+                    seen = db.execute('SELECT spec,state FROM receipts WHERE id=?', (rid,)).fetchone()
+                    if seen:
+                        require(seen == (spec, 'received'))
+                    else:
+                        db.execute("INSERT INTO receipts VALUES(?,?,'received',NULL)", (rid,spec))
                     with candidate.open('xb') as f:
                         require(transfer(src, f, req['size']) == s['sha256'])
                 else:
@@ -68,6 +86,9 @@ def serve(root, src, dst, adapters=None):
                 manifest(s)
                 require(config(root/'identity.json') == c)
                 if mode == 'sign':
+                    # Durable dispatch mark before any key use; never resent after this.
+                    require(db.execute("UPDATE receipts SET state='pending' WHERE id=? AND spec=? AND state='received'",
+                                       (rid, spec)).rowcount == 1)
                     try:
                         signed = tmp/('signed.apk' if s['platform']=='android' else 'signed.zip')
                         (adapters or {'android':android,'ios':ios})[s['platform']](c,candidate,signed,tmp)

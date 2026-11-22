@@ -33,6 +33,7 @@ import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { runAgentTool } from "../test-support/agent-tools.js";
 import {
   fileAttachmentStore,
   MAX_ATTACHMENT_BYTES,
@@ -717,6 +718,36 @@ test.each(["design_director", "independent_reviewer"])(
     const output = join(dataDir, "downloaded.png");
     await downloadAttachment(server.url, attachmentId, output, token);
     expect(await readFile(output)).toEqual(png);
+    // C-595: the prebuilt tools that managed machines run, outside any workspace.
+    const prebuiltUpload = await runAgentTool(
+      "upload-evidence",
+      [server.url, card_id, "D-1", imageFile],
+      token,
+    );
+    expect(prebuiltUpload).toMatchObject({ status: 0, stderr: "" });
+    const prebuiltId = prebuiltUpload.stdout.trim();
+    const prebuiltRecord = store.uow.read((tx) =>
+      tx.attachments.get(project_id, prebuiltId as never),
+    );
+    expect(prebuiltRecord).toMatchObject({
+      sha256: sha256(png),
+      size: png.length,
+      attach_to: args.attach_to,
+    });
+    const prebuiltOutput = join(dataDir, "prebuilt-downloaded.png");
+    const prebuiltDownload = await runAgentTool(
+      "download-attachment",
+      [server.url, prebuiltId, prebuiltOutput],
+      token,
+    );
+    expect(prebuiltDownload.stderr).toBe("");
+    expect(JSON.parse(prebuiltDownload.stdout)).toEqual({
+      attachment_id: prebuiltId,
+      sha256: prebuiltRecord?.sha256,
+      size: prebuiltRecord?.size,
+      reference_only: false,
+    });
+    expect(await readFile(prebuiltOutput)).toEqual(png);
     const report = await ok<Attachment>(client, "upload_attachment", {
       ...upload,
       attach_to: args.attach_to,

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
@@ -20,11 +20,19 @@ export interface MobileSigningTiming {
   /** Local hash-and-release of a stored output (default 600 s). */
   readonly permitMs?: number;
 }
-type Mode = "sign" | "lookup" | "stored";
+/**
+ * C-601: `continue` is a claimed request whose signer receipt is being
+ * checked; it then resends the input (never committed) or looks it up.
+ */
+type Mode = "sign" | "continue" | "lookup" | "stored";
 interface Progress {
   accepted(request_id: string, seconds: number, mode: Mode): void;
   committed(): void;
 }
+// Every helper process until it exits, so a server shutdown can end them
+// cleanly instead of leaving orphans that wait for a commit (C-601).
+const live = new Map<ChildProcess, Promise<void>>();
+let draining = false;
 const HOST = fileURLToPath(
   new URL("../../../deploy/mobile-signing/host.py", import.meta.url),
 );
@@ -48,6 +56,8 @@ function helper(
     "-IB",
     HOST,
   ];
+  // Every helper is started here: none after a shutdown began (C-601).
+  if (draining) return Promise.reject(new Error("Signing unavailable"));
   return new Promise((resolve, reject) => {
     const child = spawn(
       file,
@@ -65,6 +75,15 @@ function helper(
         env: { PATH: "/usr/bin:/bin", LANG: "C" },
         stdio: ["pipe", "pipe", "ignore", ...(artifact ? [artifact.fd] : [])],
       },
+    );
+    live.set(
+      child,
+      new Promise<void>((exited) =>
+        child.once("close", () => {
+          live.delete(child);
+          exited();
+        }),
+      ),
     );
     const input = child.stdin,
       output = child.stdout;
@@ -102,7 +121,7 @@ function helper(
     input.on("error", fail);
     const handle = (row: string) => {
       const start =
-        /^accepted ([0-9a-f]{32}) ([1-9][0-9]{0,6}) (sign|lookup|stored)$/u.exec(
+        /^accepted ([0-9a-f]{32}) ([1-9][0-9]{0,6}) (sign|continue|lookup|stored)$/u.exec(
           row,
         );
       if (
@@ -250,7 +269,9 @@ function startJob(
  * - `queued`: the helper has not claimed the grant yet; no request number.
  * - `pending`: claimed under `request_id`; transfer or signing in progress.
  * - `unconfirmed`: claimed, but the attempt ended without a result; the next
- *   call looks the same request number up again (never a new signature).
+ *   call continues the same request number: it resends the input if the
+ *   signer never received the commit (C-601), otherwise it looks it up. The
+ *   signer signs each request number at most once.
  * - `signed`: receipt re-validated against the ledger at the time of return.
  * A refusal before any claim throws.
  */
@@ -276,19 +297,45 @@ export async function requestMobileSignature(
       delay(timing.acceptWaitMs ?? 2_000, undefined, { ref: false }),
     ]);
   let job = jobs.get(key);
+  if (
+    draining &&
+    (!job ||
+      (job.outcome && ("receipt" in job.outcome || job.request_id !== null)))
+  )
+    // Shutting down: never start a helper. The next server process continues
+    // from the ledger under the same request number.
+    return job?.request_id
+      ? {
+          status: "unconfirmed" as const,
+          request_id: job.request_id,
+          platform: scope.platform,
+          poll_after_seconds: 60,
+        }
+      : {
+          status: "queued" as const,
+          request_id: null,
+          platform: scope.platform,
+          elapsed_seconds: 0,
+          poll_after_seconds: 5,
+        };
   if (!job) {
     job = startJob(key, dataDir, scope, current, timing);
     await wait(job);
   } else if (job.outcome && "error" in job.outcome && job.request_id) {
     // The previous attempt ended after its claim without a result (e.g. the
-    // helper was interrupted after the signer finished). Look it up again.
+    // helper was interrupted). Continue the same request: resend or look up.
     jobs.delete(key);
     job = startJob(key, dataDir, scope, current, timing);
     await wait(job);
   }
   const elapsed_seconds = Math.floor((Date.now() - job.started) / 1000);
   if (job.outcome) {
-    if (jobs.get(key) === job && !("error" in job.outcome && job.request_id))
+    // While shutting down a settled job keeps answering with its number.
+    if (
+      !draining &&
+      jobs.get(key) === job &&
+      !("error" in job.outcome && job.request_id)
+    )
       jobs.delete(key);
     if ("error" in job.outcome) {
       if (!job.request_id) throw new Error("Signing unavailable");
@@ -299,8 +346,16 @@ export async function requestMobileSignature(
         poll_after_seconds: 60,
       };
     }
-    // A remembered success is only reported while the ledger still releases it.
+    // A remembered success is only reported while the ledger still releases
+    // it. Shutting down: no check now; the next process looks it up again.
     const receipt = job.outcome.receipt;
+    if (draining)
+      return {
+        status: "unconfirmed" as const,
+        request_id: receipt.request_id,
+        platform: scope.platform,
+        poll_after_seconds: 60,
+      };
     const now = await helper(dataDir, scope, current, timing, {
       check: receipt.request_id,
     });
@@ -325,6 +380,30 @@ export async function requestMobileSignature(
     elapsed_seconds,
     poll_after_seconds: 30,
   };
+}
+
+/**
+ * Server shutdown (C-601): start no further helper, give the running ones up
+ * to `waitMs` to finish, then SIGTERM them so each records `interrupted` and
+ * closes its signer connection; SIGKILL after `killMs`. A claimed request
+ * left before its commit is resent by the next process; one already
+ * committed is looked up. Resolves once every helper has exited or the
+ * SIGKILL was sent. Final for the process: it is about to exit.
+ */
+export async function drainMobileSigning(options: {
+  readonly waitMs: number;
+  readonly killMs: number;
+}): Promise<void> {
+  draining = true;
+  const exited = (ms: number) =>
+    Promise.race([
+      Promise.all(live.values()),
+      delay(Math.max(0, ms), undefined, { ref: false }),
+    ]);
+  if (live.size) await exited(options.waitMs);
+  for (const child of live.keys()) child.kill("SIGTERM");
+  if (live.size) await exited(options.killMs);
+  for (const child of live.keys()) child.kill("SIGKILL");
 }
 
 export async function openMobileArtifact(

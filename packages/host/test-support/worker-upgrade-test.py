@@ -16,7 +16,10 @@ from unittest.mock import patch
 
 DEPLOY = Path(__file__).resolve().parents[3] / 'deploy'
 api = runpy.run_path(str(DEPLOY / 'upgrade-worker-helpers.py'))
+# Entries already enrolled before C-595 keep this exact v1 copy.
+legacy_api = runpy.run_path(str(Path(__file__).with_name('upgrade-worker-helpers-v1.py')))
 NAMES = api['NAMES']
+TOOLS = api['TOOLS']
 
 
 class EntryTest(unittest.TestCase):
@@ -25,13 +28,28 @@ class EntryTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.files = {name: b'not executable Python\n' for name in NAMES}
-        self.meta = dict(kind='cardigan-helper-v1', project='sample', issued=100, digests={
-            n: api['digest'](f) for n, f in self.files.items()})
-        self.bundle = dict(signature='AA==', manifest=json.dumps(self.meta), files={
-            n: base64.b64encode(f).decode() for n, f in self.files.items()})
+        self.files.update({name: b'#!/usr/bin/env node\n' + name.encode() for name in TOOLS})
+        self.bundle = self.signed('cardigan-helper-v2', self.files)
 
-    def unpack(self, verify=lambda *_: None, previous=0):
-        return api['unpack'](json.dumps(self.bundle).encode(), 'sample', verify, 100, previous)
+    def signed(self, kind, files):
+        self.meta = dict(kind=kind, project='sample', issued=100, digests={
+            n: api['digest'](f) for n, f in files.items()})
+        return dict(signature='AA==', manifest=json.dumps(self.meta), files={
+            n: base64.b64encode(f).decode() for n, f in files.items()})
+
+    def unpack(self, verify=lambda *_: None, previous=0, entry=api):
+        return entry['unpack'](json.dumps(self.bundle).encode(), 'sample', verify, 100, previous)
+
+    def test_protocol_versions_never_cross(self):
+        # A v2 bundle is refused whole by an entry enrolled before C-595, so the
+        # controller retries the unchanged v1 bundle; v2 entries refuse v1 bundles.
+        with self.assertRaises(ValueError): self.unpack(entry=legacy_api)
+        helpers = {n: self.files[n] for n in NAMES}
+        self.bundle = self.signed('cardigan-helper-v1', helpers)
+        self.assertEqual(self.unpack(entry=legacy_api)[1], helpers)
+        with self.assertRaises(ValueError): self.unpack()
+        self.bundle = self.signed('cardigan-helper-v2', helpers)
+        with self.assertRaises(ValueError): self.unpack()
 
     def test_signed_manifest_requires_pinned_key(self):
         def run(*args, data=None):
@@ -58,6 +76,13 @@ class EntryTest(unittest.TestCase):
         self.bundle['files'][NAMES[0]] = 'AAAA'
         with self.assertRaises(ValueError): self.unpack()
 
+    def test_tool_directory_must_be_root_owned_and_unlinked(self):
+        target = self.root / 'libexec'; target.mkdir()
+        (target / 'agent-tools').symlink_to(self.root)
+        with self.assertRaises(OSError): api['tool_directory'](target, os.getgid(), lambda _: True)
+        (target / 'agent-tools').unlink(); (target / 'agent-tools').mkdir(mode=0o770)
+        with self.assertRaises(ValueError): api['tool_directory'](target, os.getgid(), lambda _: True)
+
     def test_installed_symlink_refused_before_any_write(self):
         target = self.root / NAMES[0]
         target.symlink_to(self.root / 'absent')
@@ -81,6 +106,21 @@ class EntryTest(unittest.TestCase):
             self.assertEqual(result[n], api['digest'](old))
             self.assertEqual((backup / n).read_bytes(), old)
             self.assertEqual((target / n).read_bytes(), self.files[n])
+        # First v2 install: no previous tools, root-owned group read-only copies.
+        self.assertEqual(stat.S_IMODE((target / 'agent-tools').stat().st_mode), 0o750)
+        for n in TOOLS:
+            self.assertIsNone(result[n])
+            self.assertEqual((target / n).read_bytes(), self.files[n])
+            self.assertEqual(stat.S_IMODE((target / n).stat().st_mode), 0o750)
+        # A later release backs the previous tools up before replacing them.
+        newer = {n: data + b'2' for n, data in self.files.items()}
+        second = backup / 'second'; second.mkdir()
+        with patch.object(os, 'fstat', root_stat), patch.object(os, 'fchown'):
+            result = api['update'](newer, target, os.getgid(), second, lambda _: True, lambda _: None)
+        for n in TOOLS:
+            self.assertEqual(result[n], api['digest'](self.files[n]))
+            self.assertEqual((second / n.replace('/', '-')).read_bytes(), self.files[n])
+            self.assertEqual((target / n).read_bytes(), newer[n])
 
     def test_inventory_checks_all_but_writes_only_one_binding(self):
         m = runpy.run_path(str(DEPLOY / 'install-macos-worker.py'))
@@ -172,9 +212,13 @@ class EntryTest(unittest.TestCase):
         target = self.root / 'libexec'; target.mkdir()
         backup = self.root / 'backup'; backup.mkdir()
         def timeout(*_): api['timed_out'](None, None)
-        with patch.dict(api['update'].__globals__, {'read_installed':lambda *_:b'old'}), patch.object(os,'fchown'), patch.object(os,'replace',side_effect=timeout):
+        def tools(t, *_):
+            (t / 'agent-tools').mkdir()
+            return t / 'agent-tools'
+        with patch.dict(api['update'].__globals__, {'read_installed':lambda *_:b'old', 'tool_directory':tools}), patch.object(os,'fchown'), patch.object(os,'replace',side_effect=timeout):
             with self.assertRaises(TimeoutError): api['update'](self.files,target,os.getgid(),backup,lambda _:True,lambda _:None)
-        self.assertEqual(list(target.iterdir()),[])
+        self.assertEqual(list(target.iterdir()),[target / 'agent-tools'])
+        self.assertEqual(list((target / 'agent-tools').iterdir()),[])
         self.assertTrue(all((backup/n).read_bytes()==b'old' for n in NAMES))
 
     def test_main_authorization_order_and_exact_binding(self):
