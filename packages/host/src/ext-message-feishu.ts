@@ -80,17 +80,7 @@ const line = (message: ExtMessageEntry) =>
 
 export function feishuPayload(message: ExtMessage) {
   const prefix = `[Cardigan]${message.project ? ` ${message.project}` : ""}`;
-  const content =
-    "items" in message
-      ? [
-          [text(`${prefix} ${message.title}`)],
-          ...message.items.flatMap((item) => [
-            [text(line(item))],
-            [link(item.url)],
-          ]),
-          [link(message.url)],
-        ]
-      : [[text(`${prefix} ${line(message)}`)], [link(message.url)]];
+  const content = [[text(`${prefix} ${line(message)}`)], [link(message.url)]];
   return { msg_type: "post", content: { post: { zh_cn: { content } } } };
 }
 
