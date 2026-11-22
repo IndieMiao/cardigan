@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   isAcceptedLaunchRevision,
+  launchFileStamp,
   selectableLaunchConfig,
 } from "@cardigan/host";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -39,13 +40,33 @@ const faults = vi.hoisted(() => ({
   onCleanupWrite: undefined as (() => void) | undefined,
   /** Remaining failures of removing an own staging directory. */
   stagingRmFailures: 0,
+  /**
+   * V-2753:1: outcomes of the next reads of secrets.env made by the key
+   * clean-up (`vanish` moves the file away, then reads ENOENT).
+   */
+  cleanupReads: [] as ("ok" | "EIO" | "ENOENT" | "vanish")[],
+  /** Every clean-up read of secrets.env fails with this code while set. */
+  cleanupReadAlways: undefined as string | undefined,
+  /** V-2753:2: a different `launchFilesStamp` sample, while set. */
+  filesStamp: undefined as (() => string) | undefined,
+  filesStampCalls: 0,
+  /** T12: the next secrets.env read of the rename step fails once. */
+  renameCheckReadFails: false,
+  /** The fence each publication was given. */
+  published: [] as { files: string }[],
 }));
 vi.mock("@cardigan/host", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@cardigan/host")>();
   return {
     ...actual,
+    launchFilesStamp: (dir: string) => {
+      if (!faults.filesStamp) return actual.launchFilesStamp(dir);
+      faults.filesStampCalls += 1;
+      return faults.filesStamp();
+    },
     publishModelFile: (...args: Parameters<typeof actual.publishModelFile>) => {
       faults.beforePublish?.();
+      faults.published.push(args[7] as { files: string });
       const revision = actual.publishModelFile(...args);
       faults.afterPublish?.();
       return revision;
@@ -87,7 +108,34 @@ vi.mock("node:fs", async (importOriginal) => {
     }
     return actual.rmSync(path, opts);
   };
-  const patched = { writeFileSync, renameSync, rmSync };
+  const cleanupRead = (path: unknown) =>
+    String(path).endsWith("/secrets.env") &&
+    !staged(path) &&
+    (faults.cleanupReadAlways !== undefined ||
+      faults.cleanupReads.length > 0) &&
+    !!new Error().stack?.includes("removeOwnKeys");
+  const readFileSync = ((path: string, opts?: unknown) => {
+    if (
+      faults.renameCheckReadFails &&
+      String(path).endsWith("/secrets.env") &&
+      !staged(path) &&
+      new Error().stack?.includes("stageAndRename")
+    ) {
+      faults.renameCheckReadFails = false;
+      throw Object.assign(new Error("fixture: EIO"), { code: "EIO" });
+    }
+    if (cleanupRead(path)) {
+      const next = faults.cleanupReadAlways ?? faults.cleanupReads.shift();
+      if (next === "vanish") {
+        actual.renameSync(path, `${path}.moved`);
+        throw Object.assign(new Error("fixture: ENOENT"), { code: "ENOENT" });
+      }
+      if (next !== "ok")
+        throw Object.assign(new Error(`fixture: ${next}`), { code: next });
+    }
+    return actual.readFileSync(path, opts as never);
+  }) as typeof actual.readFileSync;
+  const patched = { writeFileSync, renameSync, rmSync, readFileSync };
   return { ...actual, ...patched, default: { ...actual, ...patched } };
 });
 
@@ -261,6 +309,12 @@ beforeEach(async () => {
   faults.afterSecretsRename = undefined;
   faults.onCleanupWrite = undefined;
   faults.stagingRmFailures = 0;
+  faults.cleanupReads = [];
+  faults.cleanupReadAlways = undefined;
+  faults.filesStamp = undefined;
+  faults.filesStampCalls = 0;
+  faults.renameCheckReadFails = false;
+  faults.published = [];
   dir = mkdtempSync(join(tmpdir(), "launch-matrix-"));
   file = join(dir, "launch.yaml");
   writeFileSync(file, config, { mode: 0o600 });
@@ -897,4 +951,200 @@ test("T9: concurrent confirmations are serialised; the second sees the new versi
   expect(audit().map((r) => r.status)).toEqual(["applied"]);
   expect(intentsLeft()).toEqual([]);
   expect(readFileSync(file, "utf8")).not.toContain("Second");
+});
+
+const ownIntent = () =>
+  rows("SELECT resolved, keys_done FROM launch_secret_intents");
+const outsideCopies = () =>
+  readdirSync(dir).filter((n) => n.endsWith(".tmp") || n.endsWith(".moved"));
+
+// T10 (V-2753:1): the rotation is published; the clean-up cannot read
+// secrets.env, which is still provably ours. That is no proof of a change:
+// the clean-up is kept and retried, the published result never changes.
+test("T10: an unreadable secrets.env during the old-key clean-up is retried, even while it keeps failing", async () => {
+  const data = await confirmation(REPLACE);
+  faults.cleanupReadAlways = "EIO";
+  const ok = await confirm(data, { KEY: fresh });
+  expect(ok.status, ok.body).toBe(200);
+  expect(receiptsOf(data.preview_id)).toEqual([{ installed: 1 }]);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect(ownIntent()).toEqual([{ resolved: "applied", keys_done: 0 }]);
+  expect(stagingEntries()).toEqual([data.preview_id]);
+  // Still failing: reads and the replay keep the record and the answer.
+  await reread();
+  await reread();
+  expect((await confirm(data, undefined)).status).toBe(200);
+  expect(ownIntent()).toEqual([{ resolved: "applied", keys_done: 0 }]);
+  expect(readFileSync(secretsFile(), "utf8")).toContain(`KEY=${secret}`);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  // The fault is gone: the next read removes the old key and finishes.
+  faults.cleanupReadAlways = undefined;
+  await reread();
+  const text = readFileSync(secretsFile(), "utf8");
+  expect(text).not.toContain(`KEY=${secret}`);
+  expect(text).toContain(`${fresher(data.preview_id)}=${fresh}`);
+  expect(text).toContain("OTHER=other-private-value");
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+  expect(outsideCopies()).toEqual([]);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect((await confirm(data, undefined)).status).toBe(200);
+});
+
+// T10 ENOENT: the read reports ENOENT, but a fresh check still finds our file.
+test("T10 ENOENT: a missing-file read while the file is still ours is retried", async () => {
+  const data = await confirmation(REPLACE);
+  faults.cleanupReads = ["ENOENT"];
+  const ok = await confirm(data, { KEY: fresh });
+  expect(ok.status, ok.body).toBe(200);
+  expect(ownIntent()).toEqual([{ resolved: "applied", keys_done: 0 }]);
+  expect(readFileSync(secretsFile(), "utf8")).toContain(`KEY=${secret}`);
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).not.toContain(`KEY=${secret}`);
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect((await confirm(data, undefined)).status).toBe(200);
+});
+
+// T10b (V-2753:1): the last read before the clean-up's rename fails.
+test("T10b: an unreadable secrets.env at the clean-up's last check is retried; the copy stays staged", async () => {
+  const data = await confirmation(REPLACE);
+  faults.cleanupReads = ["ok", "EIO"];
+  const ok = await confirm(data, { KEY: fresh });
+  expect(ok.status, ok.body).toBe(200);
+  expect(faults.cleanupReads).toEqual([]);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect(ownIntent()).toEqual([{ resolved: "applied", keys_done: 0 }]);
+  expect(readdirSync(join(stagingRoot(), data.preview_id))).toContain(
+    "cleanup",
+  );
+  expect(outsideCopies()).toEqual([]);
+  expect(readFileSync(secretsFile(), "utf8")).toContain(`KEY=${secret}`);
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).not.toContain(`KEY=${secret}`);
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+  expect(outsideCopies()).toEqual([]);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect((await confirm(data, undefined)).status).toBe(200);
+});
+
+// T10c (V-2753:1, failure branch): the YAML step is refused; removing the
+// new key cannot read secrets.env. The key waits, unusable, then goes.
+test("T10c: a failed write's new key waits as pending while its clean-up cannot read, then goes", async () => {
+  const data = await confirmation(REPLACE);
+  const key = fresher(data.preview_id);
+  faults.beforePublish = () => {
+    faults.beforePublish = undefined;
+    appendFileSync(file, "# operator comment\n");
+  };
+  faults.cleanupReads = ["EIO"];
+  const refused = await confirm(data, { KEY: fresh });
+  expect(refused.json).toMatchObject({ error: { code: "stale_snapshot" } });
+  expect(faults.cleanupReads).toEqual([]);
+  expect(readFileSync(file, "utf8")).toBe(`${config}# operator comment\n`);
+  expect(audit().map((r) => r.status)).toEqual(["not_applied"]);
+  expect(ownIntent()).toEqual([{ resolved: "failed", keys_done: 0 }]);
+  expect(readFileSync(secretsFile(), "utf8")).toContain(`${key}=${fresh}`);
+  // Waiting for its clean-up, the new key cannot be referenced.
+  faults.cleanupReadAlways = "EIO";
+  await reread();
+  const use = await post("preview", {
+    version,
+    change: {
+      op: "edit_provider",
+      name: "gateway",
+      fields: { secret_env: { AUX_ENV: key } },
+    },
+  });
+  expect(use.json).toMatchObject({
+    error: { code: "validation_failed", details: { field: "secret_pending" } },
+  });
+  faults.cleanupReadAlways = undefined;
+  await reread();
+  const text = readFileSync(secretsFile(), "utf8");
+  expect(text).not.toContain(key);
+  expect(text).toBe(secretsText);
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+  expect(audit().map((r) => r.status)).toEqual(["not_applied"]);
+  expect((await confirm(data, undefined)).json).toMatchObject({
+    error: { code: "stale_snapshot" },
+  });
+});
+
+// T10d: contrast. The file is really gone when the clean-up reads it: that
+// is a proved change, so every key is kept and the clean-up ends.
+test("T10d: secrets.env proved gone during the clean-up keeps every key and ends it", async () => {
+  const data = await confirmation(REPLACE);
+  faults.cleanupReads = ["vanish"];
+  const ok = await confirm(data, { KEY: fresh });
+  expect(ok.status, ok.body).toBe(200);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+  const moved = readFileSync(`${secretsFile()}.moved`, "utf8");
+  expect(moved).toContain(`KEY=${secret}`);
+  expect(moved).toContain(`${fresher(data.preview_id)}=${fresh}`);
+  // The operator puts it back; nothing is removed from it afterwards.
+  renameSync(`${secretsFile()}.moved`, secretsFile());
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).toBe(moved);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect((await confirm(data, undefined)).status).toBe(200);
+});
+
+// T11 (V-2753:2): after the stamp is verified and recorded, a different
+// metadata sample would contradict it. The publication is given exactly the
+// verified evidence: the checked launch.yaml stamp and the recorded stamp.
+test("T11: the publication fence is the verified launch.yaml stamp and the recorded secrets stamp", async () => {
+  const data = await confirmation(REPLACE);
+  const yamlBefore = launchFileStamp(file);
+  let recorded: unknown;
+  faults.afterSecretsRename = () => {
+    faults.afterSecretsRename = undefined;
+    faults.filesStamp = () => "fixture-yaml/fixture-other-inode";
+  };
+  faults.beforePublish = () => {
+    faults.filesStamp = undefined;
+    recorded = rows("SELECT after_stamp FROM launch_secret_intents")[0]
+      ?.after_stamp;
+  };
+  const ok = await confirm(data, { KEY: fresh });
+  expect(ok.status, ok.body).toBe(200);
+  expect(faults.filesStampCalls).toBe(0);
+  expect(typeof recorded).toBe("string");
+  const [fence] = faults.published;
+  expect(fence?.files.split("/")).toEqual([yamlBefore, recorded]);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect(readFileSync(file, "utf8")).toContain(fresher(data.preview_id));
+  expect((await confirm(data, undefined)).status).toBe(200);
+});
+
+// T12: right after the rename, the check cannot read secrets.env, so no
+// ownership is proved: the save stops, nothing is published or removed.
+test("T12: an unreadable secrets.env right after the rename stops the save; the new key is kept", async () => {
+  const data = await confirmation(REPLACE);
+  faults.afterSecretsRename = () => {
+    faults.afterSecretsRename = undefined;
+    faults.renameCheckReadFails = true;
+  };
+  const refused = await confirm(data, { KEY: fresh });
+  expect(faults.renameCheckReadFails).toBe(false);
+  expect(refused.json).toMatchObject({ error: { code: "stale_snapshot" } });
+  expect(faults.published).toEqual([]);
+  expect(readFileSync(file, "utf8")).toBe(config);
+  const text = readFileSync(secretsFile(), "utf8");
+  expect(text).toContain(`KEY=${secret}`);
+  expect(text).toContain(`${fresher(data.preview_id)}=${fresh}`);
+  expect(audit().map((r) => r.status)).toEqual(["not_applied"]);
+  expect(receiptsOf(data.preview_id)).toEqual([]);
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).toBe(text);
+  expect((await confirm(data, undefined)).json).toMatchObject({
+    error: { code: "stale_snapshot" },
+  });
 });

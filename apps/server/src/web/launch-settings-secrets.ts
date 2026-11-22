@@ -13,7 +13,8 @@ import { join } from "node:path";
 import {
   assertLaunchFence,
   type LaunchFence,
-  launchFilesStamp,
+  launchFileStamp,
+  withSecretsStamp,
 } from "@cardigan/host";
 import { parseSecretsText } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
@@ -196,9 +197,17 @@ const fileId = (path: string) => {
   const s = lstatSync(path, { bigint: true, throwIfNoEntry: false });
   return s ? `${s.dev}:${s.ino}` : null;
 };
+/**
+ * The same sample the launch fence takes (V-2753:2); `null` only when the
+ * file is absent. Any other error throws: it proves nothing about the file.
+ */
 const fileStamp = (path: string) => {
-  const s = lstatSync(path, { bigint: true, throwIfNoEntry: false });
-  return s ? `${s.dev}:${s.ino}:${s.size}:${s.ctimeNs}:${s.mtimeNs}` : null;
+  try {
+    return launchFileStamp(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 };
 
 function intents(store: Store, operation?: string): Intent[] {
@@ -277,13 +286,31 @@ const readText = (path: string) => {
   }
 };
 
+/** Retry the clean-up later: nothing proves the file changed (V-2753:1). */
+class CleanupRetry extends Error {}
+
+/**
+ * The text of a file this clean-up still owns. A read that fails is not a
+ * change: it throws (retry), unless a fresh check proves the file is no
+ * longer ours (`null`: keep every key, the clean-up ends).
+ */
+function readOwn(path: string, ours: () => boolean) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && !ours())
+      return null;
+    throw new CleanupRetry("secrets.env unreadable", { cause: error });
+  }
+}
+
 /**
  * R1': remove `keys` only while secrets.env is still exactly the file this
  * operation installed and nothing references them (under the write lock).
  * The rewritten file is staged in the operation's own staging directory, so
  * an interrupted clean-up never leaves a copy anywhere else. Any outside
- * change seen before the rename keeps every key. Returns false only when it
- * must be retried later.
+ * change seen before the rename keeps every key. Returns false, or throws,
+ * when it must be retried later: a read that fails never ends it.
  */
 function removeOwnKeys(
   store: Store,
@@ -306,8 +333,8 @@ function removeOwnKeys(
       )
       .flatMap((o) => o.keys),
   );
-  const original = readText(i.path);
-  if (original === null || !ours()) return true;
+  const original = readOwn(i.path, ours);
+  if (original === null || !ours()) return true; // provably changed: keep
   const present = parseSecretsText(original);
   const removable = keys.filter(
     (k) => Object.hasOwn(present, k) && !referenced.has(k) && !reserved.has(k),
@@ -322,7 +349,7 @@ function removeOwnKeys(
   writeFileSync(temp, next, { flag: "wx", mode: 0o600 });
   const tempId = fileId(temp);
   // Last check before the rename: still our file, still the text we read.
-  if (!ours() || readText(i.path) !== original) {
+  if (!ours() || readOwn(i.path, ours) !== original) {
     rmSync(temp, { force: true });
     return true;
   }
@@ -633,7 +660,9 @@ function stageAndRename(
         return null;
       }
       if (i) afterRename(i);
-      return launchFilesStamp(dir);
+      // V-2753:2: the publication expects exactly what was verified: the
+      // launch.yaml stamp current() just checked and the recorded stamp.
+      return withSecretsStamp(fence.files, stamp);
     });
     if (files !== null) {
       // A clear is decided with its rename; its tail (staging) follows now.
