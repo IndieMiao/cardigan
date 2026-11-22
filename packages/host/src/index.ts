@@ -263,6 +263,8 @@ export {
 } from "./resource-leases.js";
 export { targetProbe } from "./resource-probe.js";
 export {
+  firstIncidentBackup,
+  incidentIdentity,
   RetainedWriterRefused,
   recordRetainedWriterRefusal,
   retainedWriterRefusal,

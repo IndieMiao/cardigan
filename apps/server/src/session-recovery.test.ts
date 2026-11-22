@@ -443,6 +443,7 @@ test.each([
   "finished_group_alive",
   "finished_group_gone",
   "missing_after_token",
+  "missing_then_replaced_at_launch",
 ] as const)(
   "M5.6: recover the original queued writer after core exit without waiting or signaling (%s)",
   async (mode) => {
@@ -831,6 +832,9 @@ test.each([
         } else {
           renameSync(workspace, kept);
           if (mode === "replaced_at_launch")
+            // The original holds uncommitted work the commit does not have.
+            writeFileSync(join(kept, "source"), "uncommitted draft");
+          if (mode === "replaced_at_launch")
             execFileSync("git", [
               "clone",
               "--quiet",
@@ -896,8 +900,12 @@ test.each([
           // Only the refused attempt itself; no retry after the lease.
           expect(startRun).toHaveBeenCalledOnce();
         }
-        if (mode === "missing_at_launch" || mode === "missing_after_token")
-          expect(existsSync(workspace)).toBe(false);
+        const missing = [
+          "missing_at_launch",
+          "missing_after_token",
+          "missing_then_replaced_at_launch",
+        ].includes(mode);
+        if (missing) expect(existsSync(workspace)).toBe(false);
         if (mode === "missing_after_token")
           // Only this attempt's credentials are withdrawn.
           expect(
@@ -905,40 +913,107 @@ test.each([
               .run((tx) => tx.tokensForAssignment(f.project, a.id))
               .filter((t) => t.revoked_at === null),
           ).toHaveLength(0);
-        if (mode === "missing_at_launch" || mode === "missing_after_token") {
-          // The checkout is back. Ops takes over the same incident; the new
-          // action re-verifies backup and placement, and the original Run
-          // starts exactly once despite the earlier refusal.
-          renameSync(kept, workspace);
-          await opsTakeover();
-          await vi.waitFor(
+        const takeoverResult = (reason: string) =>
+          vi.waitFor(
             async () => {
               f.advance(31_000);
               await service.tick();
-              expect(events("dispatch_stall_backup_verified")).toHaveLength(2);
               expect(
                 events("host_ops_action_finished").filter(
-                  (e) => (e.payload as { run_id?: string }).run_id === s.run.id,
+                  (e) => (e.payload as { reason?: string }).reason === reason,
                 ),
-              ).toHaveLength(2);
+              ).toHaveLength(1);
             },
             { timeout: 10_000 },
           );
+        const keptOriginal = async () => {
           await d.tick();
           await d.tick();
-          expect(startRun).toHaveBeenCalledTimes(2);
-          expect(s.runtime.provision).toHaveBeenCalledOnce();
-          expect(vi.mocked(s.runtime.provision).mock.calls[0]?.[3].cwd).toBe(
-            workspace,
+          expect(s.runtime.provision).not.toHaveBeenCalled();
+          expect(f.state().runs.find((r) => r.id === s.run.id)?.status).toBe(
+            "queued",
           );
-          expect(
-            f.state().runs.filter((r) => r.assignment_id === a.id),
-          ).toEqual(
-            expect.arrayContaining([
-              expect.objectContaining({ id: s.run.id, status: "dispatched" }),
-            ]),
+          expect(s.notes().map((n) => n.status)).not.toContain("resolved");
+        };
+        if (missing) {
+          // The checkout is back. Ops takes over the same incident; the new
+          // action must match the incident's first directory identity.
+          renameSync(kept, workspace);
+          await opsTakeover();
+          {
+            await vi.waitFor(
+              async () => {
+                f.advance(31_000);
+                await service.tick();
+                expect(events("dispatch_stall_backup_verified")).toHaveLength(
+                  2,
+                );
+                expect(
+                  events("host_ops_action_finished").filter(
+                    (e) =>
+                      (e.payload as { run_id?: string }).run_id === s.run.id,
+                  ),
+                ).toHaveLength(2);
+              },
+              { timeout: 10_000 },
+            );
+            const [firstRecord, takeoverRecord] = events(
+              "dispatch_stall_backup_verified",
+            ).map((e) => e.payload as { workspace_seal?: string });
+            expect(takeoverRecord?.workspace_seal).toBe(
+              firstRecord?.workspace_seal,
+            );
+            if (mode === "missing_then_replaced_at_launch") {
+              // Swapped for a same-commit copy after the takeover settled:
+              // the launch still checks the incident's first identity.
+              const swapped = `${workspace}-swapped`;
+              renameSync(workspace, swapped);
+              execFileSync("git", [
+                "clone",
+                "--quiet",
+                "--local",
+                swapped,
+                workspace,
+              ]);
+              await keptOriginal();
+              expect(events("retained_writer_refused")).toHaveLength(2);
+              expect(
+                execFileSync("git", ["-C", swapped, "rev-parse", "HEAD"], {
+                  encoding: "utf8",
+                }).trim(),
+              ).toBe(sha);
+            } else {
+              await d.tick();
+              await d.tick();
+              expect(startRun).toHaveBeenCalledTimes(2);
+              expect(s.runtime.provision).toHaveBeenCalledOnce();
+              expect(
+                vi.mocked(s.runtime.provision).mock.calls[0]?.[3].cwd,
+              ).toBe(workspace);
+              expect(
+                f.state().runs.filter((r) => r.assignment_id === a.id),
+              ).toEqual(
+                expect.arrayContaining([
+                  expect.objectContaining({
+                    id: s.run.id,
+                    status: "dispatched",
+                  }),
+                ]),
+              );
+              expect(events("run_dispatch_aborted")).toEqual([]);
+            }
+          }
+        }
+        if (mode === "replaced_at_launch") {
+          // A same path, branch and commit replacement is not the original:
+          // Ops cannot take over with it, and the original draft stays.
+          await opsTakeover();
+          await takeoverResult("workspace_placement_changed");
+          expect(events("dispatch_stall_backup_verified")).toHaveLength(1);
+          await keptOriginal();
+          expect(readFileSync(join(kept, "source"), "utf8")).toBe(
+            "uncommitted draft",
           );
-          expect(events("run_dispatch_aborted")).toEqual([]);
         }
         if (mode === "shared_at_launch")
           expect(readFileSync(join(workspace, "source"), "utf8")).toBe(

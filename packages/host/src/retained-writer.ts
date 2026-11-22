@@ -6,6 +6,7 @@ import {
   type Clock,
   type CommandState,
   eventsOfType,
+  type HostOpsExecution,
   type ProjectId,
   type Run,
   type RuntimeRef,
@@ -198,6 +199,75 @@ export function retainedWriterRefusal(state: CommandState, run: Run) {
   });
 }
 
+type BackupRow = {
+  assignment_id?: string;
+  action_id?: string;
+  sha?: string;
+  workspace_seal?: string;
+};
+type IncidentAction = Pick<
+  HostOpsExecution,
+  "assignment_id" | "dispatch_stall_id" | "system_finished_run_id"
+>;
+const sameIncident = (
+  action: IncidentAction,
+  other: Partial<IncidentAction> | undefined,
+) =>
+  !!other &&
+  other.assignment_id === action.assignment_id &&
+  (action.system_finished_run_id
+    ? other.system_finished_run_id === action.system_finished_run_id
+    : !!action.dispatch_stall_id &&
+      other.dispatch_stall_id === action.dispatch_stall_id);
+/** The incident's first system backup record: the directory identity every
+ * later takeover, settlement and launch of the same incident must match.
+ * Looked up by incident (ended Run or cause), never by a newer action id. */
+export function firstIncidentBackup(
+  state: CommandState,
+  action: IncidentAction,
+): BackupRow | undefined {
+  const taken = new Map<string, Partial<IncidentAction>>(
+    eventsOfType(state.events, "host_ops_action_taken").map((e) => [
+      e.id,
+      e.payload as Partial<IncidentAction>,
+    ]),
+  );
+  return eventsOfType(state.events, "dispatch_stall_backup_verified").find(
+    (e) => {
+      const p = e.payload as BackupRow;
+      return (
+        e.actor.kind === "system" &&
+        p.assignment_id === action.assignment_id &&
+        !!p.action_id &&
+        sameIncident(action, taken.get(p.action_id))
+      );
+    },
+  )?.payload as BackupRow | undefined;
+}
+/** A recovery of this incident already settled its session and then refused
+ * the preserved checkout: its first backup record is now mandatory evidence. */
+export function incidentWriterRefused(
+  state: CommandState,
+  action: IncidentAction,
+) {
+  return eventsOfType(state.events, "retained_writer_refused").some((e) =>
+    sameIncident(action, e.payload as Partial<IncidentAction>),
+  );
+}
+
+/** The takeover's identity verdict for a freshly computed directory seal:
+ * the matching first record, `null` (mismatch, or a refused incident whose
+ * first record is missing), or `undefined` when this action records the first. */
+export function incidentIdentity(
+  state: CommandState,
+  action: IncidentAction,
+  seal: string,
+) {
+  const first = firstIncidentBackup(state, action);
+  if (first) return first.workspace_seal === seal ? first : null;
+  return incidentWriterRefused(state, action) ? null : undefined;
+}
+
 /** No placement or repair is allowed on this path, including when a caller
  * supplied a worktree. A missing/mismatched receipt must never fall through. */
 export function retainedWriterForRun(
@@ -208,13 +278,14 @@ export function retainedWriterForRun(
   const action = automaticContextActionForRun(state.events, run);
   // Every stall recovery (turn or ordinary row) resumes a writer in place.
   if (!action?.dispatch_stall_id) return;
-  const row = eventsOfType(state.events, "dispatch_stall_backup_verified").find(
+  // The incident's first record is the directory identity; this action's own
+  // record (written by a later takeover) must carry the very same seal.
+  const row = firstIncidentBackup(state, action);
+  const own = eventsOfType(state.events, "dispatch_stall_backup_verified").find(
     (e) =>
       e.actor.kind === "system" &&
-      (e.payload as { action_id?: string }).action_id === action.action_id,
-  )?.payload as
-    | { assignment_id?: string; sha?: string; workspace_seal?: string }
-    | undefined;
+      (e.payload as BackupRow).action_id === action.action_id,
+  )?.payload as BackupRow | undefined;
   const role = state.roles.find(
     (r) => r.role_id === a.role_id && r.role_version === a.role_version,
   );
@@ -231,6 +302,8 @@ export function retainedWriterForRun(
     action.assignment_id !== a.id ||
     !row ||
     row.assignment_id !== a.id ||
+    (own &&
+      (own.workspace_seal !== row.workspace_seal || own.sha !== row.sha)) ||
     role?.worktree !== "write" ||
     !row.workspace_seal ||
     !row.sha ||

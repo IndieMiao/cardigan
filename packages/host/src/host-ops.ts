@@ -83,7 +83,7 @@ import {
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { writerPlacementSeal } from "./retained-writer.js";
+import { incidentIdentity, writerPlacementSeal } from "./retained-writer.js";
 import {
   localTurnExitProof,
   remoteStallExit,
@@ -1413,6 +1413,7 @@ export class HostOpsService {
       // Only inspect the fixed workspace here: the runtime already owns
       // its signal slot, so a nested runtime probe could wait on itself.
       let workspaceSeal: string | undefined;
+      let placementChanged = false;
       let backup: { ref: string; sha: string } | undefined;
       const checkWorkspace = async () => {
         const state = read();
@@ -1603,16 +1604,36 @@ export class HostOpsService {
                 this.contextAbort.signal,
               );
               if (!workspaceSeal) throw new Error();
+              // The incident's first backup record is the directory identity.
+              // Same path, branch and commit do not prove uncommitted work is
+              // there; a missing first record after a refusal is no proof either.
+              const seal = workspaceSeal;
+              const identity = (s: CommandState) =>
+                incidentIdentity(s, action, seal);
+              const first = identity(read());
+              if (first === null) {
+                placementChanged = true;
+                throw new Error();
+              }
               backup = await this.options.stallBackup?.(
                 project,
                 a,
                 action.action_id,
               );
+              if (first && backup && backup.sha !== first.sha) {
+                placementChanged = true;
+                throw new Error();
+              }
               if (!backup || !(await checkWorkspace())) throw new Error();
               const verified = { ...backup, workspace_seal: workspaceSeal };
               store.uow.run((tx) => {
                 const state = loadCommandState(tx, project);
                 const current = state.assignments.find((v) => v.id === a.id);
+                const fresh = identity(state);
+                if (fresh === null || (fresh && fresh.sha !== verified.sha)) {
+                  placementChanged = true;
+                  throw new Error();
+                }
                 if (
                   !pendingHostOpsActions(state.events).some(
                     (v) => v.action_id === action.action_id,
@@ -1661,7 +1682,11 @@ export class HostOpsService {
                 }
               });
             } catch {
-              fail("workspace_backup_unconfirmed");
+              fail(
+                placementChanged
+                  ? "workspace_placement_changed"
+                  : "workspace_backup_unconfirmed",
+              );
               return;
             }
           }
