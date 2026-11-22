@@ -36,6 +36,7 @@ import {
 } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { executionPaths } from "@cardigan/runtime-herdr";
+import { moveNotification, recordNotification } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { buildCheckoutFacts, buildCheckoutIdle } from "./build-checkouts.js";
 import { CleanupExecutor } from "./cleanup-loop.js";
@@ -246,6 +247,66 @@ test("cleanup keeps the checkout while the Run is unfinished and removes it afte
   // Idempotent: a second round finds nothing to do.
   await cleanup().tick(f.project_id);
   expect(existsSync(build)).toBe(false);
+});
+
+test("an undelivered resume arriving under the removal lock preserves the original review build", async () => {
+  await startReviewer();
+  f.endRun(s.reviewer);
+  const file = join(buildPath(), "scratch");
+  writeFileSync(file, "reviewer-local");
+  const before = refs(central());
+  const service = serverGit();
+  const remove = service.removeBuildCheckout.bind(service);
+  const createFailure = () =>
+    f.store.uow.run((tx) => {
+      const at = f.clock.now(),
+        card = s.development.card_id;
+      const event = {
+        type: "work_item_resume_requested",
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(f.project_id, card),
+        card_id: card,
+        actor: { kind: "system" as const, project_id: f.project_id },
+        created_at: at,
+        payload: {
+          assignment_id: s.reviewer.id,
+          work_item_id: s.codeReview.id,
+        },
+      };
+      tx.events.append(f.project_id, event);
+      const { notification } = recordNotification(f.store.database, {
+        project_id: f.project_id,
+        event_id: event.id,
+        card_id: card,
+        seq: event.seq,
+        at,
+        kind: "assignment",
+        recipient: { kind: "assignment", assignment_id: s.reviewer.id },
+      });
+      moveNotification(f.store.database, {
+        project_id: f.project_id,
+        id: notification.id,
+        event: "deliver_failed",
+        at,
+      });
+    });
+  const spy = vi
+    .spyOn(service, "removeBuildCheckout")
+    .mockImplementationOnce((input) => {
+      createFailure();
+      return remove(input);
+    });
+  const loop = new CleanupExecutor({
+    store: f.store,
+    git: service,
+    runtime,
+    clock: f.clock,
+  });
+  await loop.tick(f.project_id);
+  await loop.tick(f.project_id);
+  expect(spy).toHaveBeenCalledTimes(1);
+  expect(readFileSync(file, "utf8")).toBe("reviewer-local");
+  expect(refs(central())).toBe(before);
 });
 
 test("removal re-checks idleness under the repository lock", async () => {

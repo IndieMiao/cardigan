@@ -1871,3 +1871,106 @@ test.each(["waiting", "stopping"] as const)(
     expect(f.runtime.release).not.toHaveBeenCalled();
   },
 );
+
+test("a passed precheck with a rejected resume snapshot keeps the undelivered note and hands off once", async () => {
+  const f = setup();
+  const { assignment: a, card, item } = f.target;
+  const old = f.latest();
+  f.advance(1000);
+  const check = f.event(
+    "precheck_finished",
+    { status: "passed", assignment_id: a.id, work_item_id: item.id },
+    undefined,
+    card.id,
+  );
+  const resume = f.event(
+    "work_item_resume_requested",
+    {
+      assignment_id: a.id,
+      work_item_id: item.id,
+      previous_run_id: old.id,
+      evidence: check.id,
+    },
+    a,
+    card.id,
+  );
+  f.skipEvents();
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: false,
+    error: { code: "runtime_not_found", message: "missing terminal row" },
+  });
+  const dispatcher = new Dispatcher({
+    ...f.options,
+    snapshot: async () => {
+      throw new Error("no launch snapshot");
+    },
+  });
+  try {
+    await dispatcher.tick();
+    const note = f.notes().find((n) => n.event_id === resume.id);
+    if (!note) throw new Error("missing resume notification");
+    expect(note).toMatchObject({ status: "delivery_failed", attempts: 0 });
+    const failure = f
+      .state()
+      .events.find(
+        (e) =>
+          e.type === "bell_delivery_failed" &&
+          (e.payload as { reason: string }).reason === "snapshot_unavailable",
+      );
+    if (!failure) throw new Error("missing preflight failure");
+    expect(failure.payload).toMatchObject({
+      assignment_id: a.id,
+      notification_ids: [note.id],
+    });
+    const rows = async () =>
+      (await f.view()).dispatch_stalls.filter((s) => s.assignment_id === a.id);
+    const events = (type: string) =>
+      f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === type &&
+            (e.payload as { assignment_id: string }).assignment_id === a.id,
+        );
+    // Even a later ordinary status snapshot cannot substitute for bound exit proof.
+    vi.mocked(f.runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "exited", agent: "unknown", observed_seq: 2 },
+    });
+    await f.service.tick();
+    expect(await rows()).toMatchObject([
+      {
+        cause_id: failure.id,
+        can_restart: false,
+        restart_blocked: "launch_snapshot_unavailable",
+      },
+    ]);
+    f.advance(900_000);
+    await f.service.tick();
+    await f.service.tick();
+    expect(events("dispatch_stall_attention")).toHaveLength(1);
+    expect(events("dispatch_stall_handoff_overdue")).toHaveLength(1);
+    for (const id of [note.id, resume.id, failure.id])
+      await expect(f.restart(a, id)).rejects.toThrow();
+    expect(f.notes().find((n) => n.id === note.id)).toEqual(note);
+    expect(f.state().runs.filter((r) => r.assignment_id === a.id)).toEqual([
+      old,
+    ]);
+    expect(
+      f.state().assignments.find((v) => v.id === a.id)?.runtime_ref,
+    ).toEqual(f.refFor(a));
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(f.options.startRun).not.toHaveBeenCalled();
+    unwrap(
+      f.store.ackEvents({
+        project_id: f.project,
+        assignment_id: a.id,
+        card_id: card.id,
+        up_to_seq: resume.seq,
+      }),
+    );
+    expect(await rows()).toEqual([]);
+  } finally {
+    await dispatcher.close();
+  }
+});

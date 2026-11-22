@@ -184,7 +184,6 @@ export function dispatchStallCauses(
     if (
       kind !== "retirement_wait" &&
       kind !== "running_wait" &&
-      kind !== "resume_not_dispatched" &&
       kind !== "queued_successor" &&
       (acked.get(`${a.id}/${sourceCard ?? ""}`) ?? -1) >= seq
     )
@@ -201,7 +200,10 @@ export function dispatchStallCauses(
       runs.some((r) => untouchedStallSuccessor(state, a, r));
     if (unfinished && !due && !auditOnly && !transfer) return;
     const blocked = (() => {
-      if (auditOnly) return auditOnly;
+      // A preflight incident has no stop authority, but still reports a real
+      // human stop, work-item wait or active execution in preference to it.
+      if (auditOnly && auditOnly !== "launch_snapshot_unavailable")
+        return auditOnly;
       if (sharedStallRegistration(state, a)) return "shared_registration";
       if (
         binding?.queued_run_id &&
@@ -247,7 +249,7 @@ export function dispatchStallCauses(
         )
       )
         return "work_item_wait";
-      return null;
+      return auditOnly ?? null;
     })();
     if (
       blocked &&
@@ -279,6 +281,34 @@ export function dispatchStallCauses(
       machine_id: a.machine_id,
     });
   }
+  // A preflight rejection happened before a bell or Run existed. It describes
+  // missing launch configuration, not a missing process. Link only the exact
+  // undelivered notes in the host failure; a retry/ACK/new queue retires it.
+  const failures = new Map<string, Event>();
+  const failed = new Set(
+    notes
+      .filter((n) => n.status === "delivery_failed" && !n.run_id && !n.attempts)
+      .map((n) => n.id),
+  );
+  if (failed.size) {
+    for (const event of eventsOfType(state.events, "bell_delivery_failed")) {
+      const p = event.payload as {
+        reason?: string;
+        run_id?: string;
+        notification_ids?: string[];
+      };
+      if (
+        event.actor.kind !== "system" ||
+        p.reason !== "snapshot_unavailable" ||
+        p.run_id ||
+        !Array.isArray(p.notification_ids)
+      )
+        continue;
+      for (const id of p.notification_ids)
+        if (failed.has(id)) failures.set(id, event);
+    }
+  }
+  const preflightOwners = new Set<Assignment["id"]>();
   for (const n of notes) {
     if (
       !["pending", "belled", "delivery_failed", "needs_attention"].includes(
@@ -304,6 +334,32 @@ export function dispatchStallCauses(
           : logicalOwner(n.recipient.kind);
     const a = owner && assignments.get(owner);
     if (!a) continue;
+    const failure = failures.get(n.id);
+    if (
+      failure &&
+      a.scope === "work_item" &&
+      a.runtime_ref &&
+      n.recipient.kind === "assignment" &&
+      (failure.payload as { assignment_id?: string }).assignment_id === a.id &&
+      failure.created_at >= n.created_at
+    ) {
+      // Superseded failures must not fall back into the generic backlog.
+      if (
+        (acked.get(`${a.id}/${n.card_id ?? ""}`) ?? -1) >= n.seq ||
+        (latestQueue.get(a.id) ?? "") > n.created_at
+      )
+        continue;
+      preflightOwners.add(a.id);
+      add(
+        "notification_backlog",
+        a,
+        { ...n, id: failure.id },
+        eventById(state.events, n.event_id),
+        failure,
+        "launch_snapshot_unavailable",
+      );
+      continue;
+    }
     const entry = handoffs.get(n.id);
     const handoff =
       n.status === "needs_attention" ||
@@ -505,5 +561,13 @@ export function dispatchStallCauses(
         seq: reply.event_seq,
       });
   }
-  return found;
+  // The same resume/instruction may also be visible through its source event
+  // or a sibling notification. None is a second, address-based restart path.
+  return found.filter(
+    (s) =>
+      !preflightOwners.has(s.assignment_id) ||
+      s.restart_blocked ||
+      s.system_finished_run_id ||
+      s.retirement_handoff,
+  );
 }
