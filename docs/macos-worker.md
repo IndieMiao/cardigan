@@ -343,3 +343,5 @@ cardigan machine check worker-a --project example
 ```
 
 若先前 helper 落后，激活后等待下一轮后台巡检再做双检查。密钥仅存控制主机私有配置；启动布局、launchd 和调度开关不变。Mac 入口单独固定 Darwin 和系统 Python（需要可用的 `/usr/bin/python3` 及 `/usr/bin/openssl`），使用 root 安装的检查器，不从 Homebrew、worker HOME 或上传的包加载检查代码。逐文件原子替换及备份、失败后的人工恢复和撤销方式与 [Linux 受限接入](linux-worker.md#可选一次接入之后由后台升级-helper) 相同。不要用一次接入替代 macOS 现场隔离验证。
+
+`machine check` 返回 `invalid_launch` 时，查看同一份 `health.blockers` 里的原因：`target_mismatch` 表示登记与执行目标不匹配，`target_changed` 表示检查期间绑定发生了变化，`worker_configuration_incomplete` 表示缺少远程启动配置。原因不包含账号路径或 SSH 原始输出；只有 `target_invalid` 时没有更具体的可公开原因。

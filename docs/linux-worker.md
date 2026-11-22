@@ -396,3 +396,5 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 升级失败会保持停派：同一绑定、同一组摘要不会再自动安装。按运维待办查出失败阶段；部分替换时按备份整体还原或人工安装当前可信版本，然后顺序执行上面两条检查。仅 worker check 成功不能解锁；同一绑定的 machine check 也须通过，且不覆盖人工 drain 或关闭派发。未完成的初始化不原地重跑：保留已有账号、文件和备份，让管理员检查冲突。撤销接入时先停用该专用身份，再由管理员移除对应受限授权，勿改 worker 的既有连接。
 
 撤销接入并遇到新部署或绑定变更时，下一轮巡检将旧停派记录转到当前版本，不执行安装，不沿用旧检查证据。按当前发行版人工修复后，在同一绑定依次运行 `worker check`、`machine check`；以两项检查正式完成的结果为准。新的 worker 检查一旦开始，之前的 worker 通过结果即失效。
+
+`machine check` 失败时查看 `health.blockers`：`invalid_launch` 旁的 `target_mismatch` 表示登记与执行目标不匹配，`target_changed` 表示检查期间绑定发生了变化，`worker_configuration_incomplete` 表示缺少远程启动配置。`target_invalid` 是没有可公开原因时的回退，不是进程退出证明。

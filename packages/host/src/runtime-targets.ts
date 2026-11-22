@@ -41,6 +41,11 @@ import {
   MachineCheckJournal,
 } from "./machine-check-journal.js";
 import { targetProbe } from "./resource-probe.js";
+import {
+  machineCheckBlockers,
+  RuntimeTargetError,
+  targetFailure,
+} from "./runtime-target-error.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   loadRuntimeWorkers,
@@ -61,6 +66,8 @@ import {
   upgradeKey,
   upgradeState,
 } from "./worker-upgrade-gate.js";
+
+export { RuntimeTargetError } from "./runtime-target-error.js";
 
 type TargetState = Pick<ReadRepositories, "machines" | "assignments">;
 type Adapter = Runtime &
@@ -97,24 +104,6 @@ export interface RuntimeTargetsOptions extends HerdrOptions {
   readonly workerReadiness?: typeof workerReadiness;
   readonly workerMcpReachability?: typeof checkWorkerMcpReachability;
 }
-export class RuntimeTargetError extends Error {
-  readonly code = "invalid_launch" as const;
-  get transient(): boolean {
-    return [
-      "mcp_timeout",
-      "mcp_protocol_error",
-      "mcp_gateway_error",
-      "mcp_unreachable",
-      "worker_unreachable",
-      "machine_check_runtime_timeout",
-      "machine_check_runtime_queue_timeout",
-      "machine_check_runtime_unavailable",
-    ].includes(this.reason);
-  }
-  constructor(readonly reason: string) {
-    super(`Runtime target rejected: ${reason}`);
-  }
-}
 /** Only constructed by the router before it delegates this exact launch. An
  * adapter failure (even with the same code or text) is not such a receipt. */
 class ProvisionTargetRefusal extends RuntimeTargetError {
@@ -141,13 +130,7 @@ const rejected = (reason = "target_mismatch"): never => {
 };
 const failure = <T>(error?: unknown): RuntimeResult<T> => ({
   ok: false,
-  error: {
-    code: "invalid_launch",
-    message:
-      error instanceof RuntimeTargetError
-        ? error.message
-        : "Runtime target rejected: target_invalid",
-  },
+  error: targetFailure(error),
 });
 
 // Only fixed routing refusals are fit for persistent retirement evidence.
@@ -611,7 +594,10 @@ export class RuntimeTargets implements Runtime {
           const result = await this.rawMachineCheck(project, machine);
           return result.ok
             ? result.value
-            : { blockers: [result.error.code], launch_enabled: false };
+            : {
+                blockers: machineCheckBlockers(result.error),
+                launch_enabled: false,
+              };
         };
         return patrolHelperUpgrade(
           {
@@ -677,7 +663,7 @@ export class RuntimeTargets implements Runtime {
           onTargetRefusal?.(
             "invalid_launch",
             new RuntimeTargetError("target_changed"),
-          ) ?? failure()
+          ) ?? failure(new RuntimeTargetError("target_changed"))
         );
       if (!created.ok && onTargetRefusal)
         return onTargetRefusal(created.error.code);
@@ -989,7 +975,7 @@ export async function observeRegisteredMachine(
         target.execution.target?.fingerprint !==
           options.helperConfirmation.binding
       )
-        throw new Error("Machine target changed");
+        throw new RuntimeTargetError("target_changed");
       return target;
     },
     check: async () => {
@@ -1002,7 +988,10 @@ export async function observeRegisteredMachine(
             blockers: checked.value.blockers,
             launch_enabled: checked.value.launch_enabled,
           }
-        : { blockers: [checked.error.code], launch_enabled: false };
+        : {
+            blockers: machineCheckBlockers(checked.error),
+            launch_enabled: false,
+          };
     },
   });
   // Never publish maintenance success as normal health or dispatch evidence. Only

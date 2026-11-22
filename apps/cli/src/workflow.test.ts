@@ -176,6 +176,10 @@ test("machine CLI is human-only, audits metadata and cannot enable remote execut
   ).toBe(0);
   expect(await run(["machine", "check", "worker-a"])).not.toBe(0);
   expect(errors.join("\n")).toContain("机器检查未通过");
+  expect(JSON.parse(output.at(-1) ?? "{}").health.blockers).toEqual([
+    "invalid_launch",
+    "worker_unconfigured",
+  ]);
   expect(
     await run(["machine", "update", "worker-a", "--ssh-endpoint", "forbidden"]),
   ).not.toBe(0);

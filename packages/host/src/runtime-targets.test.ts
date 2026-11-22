@@ -1387,3 +1387,27 @@ test("a manual confirmation may ignore drain but not a failed automatic upgrade"
   });
   expect(observed.health?.available).toBe(false);
 });
+
+test("machine checks persist a fixed routing reason before or during the probe", async () => {
+  const options = {
+    store,
+    project: "fixture",
+    machine: "worker-a",
+    catalog: () => [],
+  };
+  const check = () => observeRegisteredMachine(options, () => router);
+  workers = workers.map((w) => ({ ...w, arch: "other" }));
+  expect((await check()).health?.blockers).toEqual([
+    "invalid_launch",
+    "target_mismatch",
+  ]);
+  workers = workers.map((w) => ({
+    ...w,
+    arch: "x64",
+    execution: { ...w.execution, path: "" },
+  }));
+  expect((await check()).health?.blockers).toEqual([
+    "invalid_launch",
+    "worker_configuration_incomplete",
+  ]);
+});
