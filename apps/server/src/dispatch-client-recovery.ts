@@ -2,7 +2,6 @@ import {
   type Assignment,
   assignmentCardHeld,
   assignmentDependenciesAllowStart,
-  associatedHarnessActivity,
   type Clock,
   type CommandState,
   currentHarnessActivity,
@@ -14,8 +13,9 @@ import {
   type Run,
   type Runtime,
   reviewReceiptTargetCurrent,
+  runModelOutputTime,
 } from "@cardigan/domain";
-import { tryHostOpsLock, wakeIsCurrent } from "@cardigan/host";
+import { tryHostOpsLock, turnSessionKey, wakeIsCurrent } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
 import { type Store, unfinishedBellAttempts } from "@cardigan/store";
@@ -36,6 +36,16 @@ const interval = 60_000;
 const claimed = "client_resume_claimed";
 const attention = "client_resume_attention";
 const progressed = "client_resume_progressed";
+const clearScreen = "client_resume_screen_cleared";
+function receivedOnBoundTerminal(run: Run, a: Assignment) {
+  const bell = run.bell_delivery;
+  return (
+    bell?.run_id === run.id &&
+    !!bell.received_at &&
+    (!bell.session_ref || bell.session_ref === a.session_ref) &&
+    JSON.stringify(bell.runtime_ref) === JSON.stringify(a.runtime_ref)
+  );
+}
 function receipt(s: CommandState, run: Run, type: string) {
   return eventsOfType(s.events, type).findLast(
     (e) =>
@@ -81,31 +91,24 @@ export class ClientRecovery {
     }
     // Workers need not export a transcript. An acknowledged bell on this exact
     // session plus the client's *current* disconnect-and-empty-editor UI is required.
-    const bell = run.bell_delivery;
     if (
       !raw &&
-      bell?.run_id === run.id &&
-      bell.received_at &&
-      JSON.stringify(bell.runtime_ref) === JSON.stringify(a.runtime_ref) &&
+      receivedOnBoundTerminal(run, a) &&
       Date.parse(this.clock.now()) - since >= interval
     )
       return { screen: true, at: since };
   }
   private lastProgress(s: CommandState, a: Assignment, run: Run) {
-    const sample = associatedHarnessActivity(
-      s,
-      a,
-      this.clock.now(),
-      this.options.harnessActivity?.(s.project_id, a.id),
-    );
-    const modelAt =
-      sample?.source === `${run.harness}:session_metadata` &&
-      (sample.error ? sample.last_progress_at : sample.updated_at);
-    const at = modelAt ? Date.parse(modelAt) : NaN;
     return lastRunActivity(
       run,
       a,
-      sample && at <= Date.parse(sample.updated_at) ? at : undefined,
+      runModelOutputTime(
+        s,
+        a,
+        run,
+        this.clock.now(),
+        this.options.harnessActivity?.(s.project_id, a.id),
+      ),
     );
   }
   private eligible(s: CommandState, a: Assignment, run: Run) {
@@ -154,7 +157,22 @@ export class ClientRecovery {
       const resolved = previous && receipt(s, run, progressed);
       const watching = previous && !resolved;
       const proof = watching ? undefined : this.proof(s, a, run);
-      if ((!watching && !proof) || !this.eligible(s, a, run)) continue;
+      const screenOnly = (
+        state: CommandState,
+        owner: Assignment,
+        current: Run,
+      ) =>
+        receivedOnBoundTerminal(current, owner) &&
+        !this.options.harnessActivity?.(state.project_id, owner.id);
+      const claimSession =
+        previous && payloadString(previous.payload, "session_key");
+      const sameSession = (owner: Assignment) =>
+        !claimSession || claimSession === turnSessionKey(owner);
+      // A new terminal cannot establish a transition on the claimed terminal.
+      if (resolved && !sameSession(a)) continue;
+      const monitorScreen = previous && sameSession(a) && screenOnly(s, a, run);
+      if ((!watching && !proof && !monitorScreen) || !this.eligible(s, a, run))
+        continue;
       this.next.set(key, now + interval);
       const write = (
         type: string,
@@ -188,6 +206,7 @@ export class ClientRecovery {
               ?.card_id,
             type,
             reason,
+            session_key: turnSessionKey(owner),
             ...(progressAt !== undefined
               ? { progress_at: new Date(progressAt).toISOString() }
               : {}),
@@ -205,27 +224,73 @@ export class ClientRecovery {
       // the original error screen. Watching it never grants another write.
       if (watching) {
         const at = Date.parse(previous.created_at);
-        const hasProgress = (
+        const progressTime = (
           state: CommandState,
           owner: Assignment,
           current: Run,
-        ) => this.lastProgress(state, owner, current) > at;
-        const latest = this.lastProgress(s, a, run);
+        ) =>
+          sameSession(owner)
+            ? this.lastProgress(state, owner, current)
+            : Number.NEGATIVE_INFINITY;
+        const latest = progressTime(s, a, run);
         if (latest > at) {
+          if (
+            !write(
+              progressed,
+              "续跑后已检测到本轮新进展",
+              (state, owner, current) =>
+                progressTime(state, owner, current) >= latest,
+              latest,
+            )
+          )
+            continue;
+        } else {
+          if (now - at >= interval)
+            write(
+              attention,
+              "领取续跑提示后仍无本轮新进展；请主机运维核对原会话，不重复投递。",
+              (state, owner, current) =>
+                !receipt(state, current, progressed) &&
+                progressTime(state, owner, current) <= at,
+            );
+          continue;
+        }
+        if (!monitorScreen) continue;
+      }
+      // No transcript timestamp exists on this worker. MCP progress says the
+      // Run moved, not that the old error actually disappeared. Require a
+      // positive clear -> disconnected transition on this very same terminal.
+      // An unreadable screen is neither observation. Neither path can wake.
+      if (monitorScreen) {
+        const clear = receipt(s, run, clearScreen);
+        if (
+          !runtime.observe_prompt ||
+          (clear &&
+            (payloadString(clear.payload, "session_key") !==
+              turnSessionKey(a) ||
+              now - lastRunActivity(run, a) < interval))
+        )
+          continue;
+        const observation = await runtime
+          .observe_prompt(ref, {
+            project_id: project,
+            assignment_id: a.id,
+            harness: run.harness,
+            require_disconnect: !!clear,
+          })
+          .catch(() => undefined);
+        if (observation?.ok && observation.value) {
           write(
-            progressed,
-            "续跑后已检测到本轮新进展",
+            clear ? attention : clearScreen,
+            clear
+              ? "本轮恢复后原终端再次断流；请主机运维接管，不再自动发送。"
+              : "已核实原终端不再显示上次断流。",
             (state, owner, current) =>
-              this.lastProgress(state, owner, current) >= latest,
-            latest,
-          );
-        } else if (now - at >= interval) {
-          write(
-            attention,
-            "领取续跑提示后仍无本轮新进展；请主机运维核对原会话，不重复投递。",
-            (state, owner, current) =>
-              !receipt(state, current, progressed) &&
-              !hasProgress(state, owner, current),
+              screenOnly(state, owner, current) &&
+              lastRunActivity(current, owner) === lastRunActivity(run, a) &&
+              !!receipt(state, current, progressed) &&
+              !receipt(state, current, attention) &&
+              receipt(state, current, clearScreen)?.id === clear?.id,
           );
         }
         continue;

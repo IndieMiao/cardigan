@@ -1,4 +1,4 @@
-import type { PromptBinding, RuntimeRef } from "@cardigan/domain";
+import type { PromptObservation, RuntimeRef } from "@cardigan/domain";
 import type { HcClient } from "./client.js";
 
 interface Terminal {
@@ -14,7 +14,7 @@ interface Terminal {
 // only an empty editor and its own idle footer. Plain text cannot distinguish
 // a stock placeholder from a draft containing those same words.
 // Never export screen text, arguments, process ids or error messages.
-function editor(screen: string, binding: PromptBinding) {
+function editor(screen: string, binding: PromptObservation) {
   if (Buffer.byteLength(screen) > 65536) return false;
   const lines = screen
     .split(/\r?\n/u)
@@ -39,17 +39,19 @@ function editor(screen: string, binding: PromptBinding) {
     )
   )
     return false;
-  if (!binding.require_disconnect) return true;
+  if (binding.require_disconnect === undefined) return true;
   while (/^─+$/u.test(bottom.at(-1) ?? "")) bottom.pop();
-  return /^(?:[⎿●■⚠]\s*)?(?:API Error:\s*Connection lost mid-response|stream disconnected(?: before completion)?)(?:[.: ].*)?$/iu.test(
-    bottom.at(-1) ?? "",
-  );
+  const disconnected =
+    /^(?:[⎿●■⚠]\s*)?(?:API Error:\s*Connection lost mid-response|stream disconnected(?: before completion)?)(?:[.: ].*)?$/iu.test(
+      bottom.at(-1) ?? "",
+    );
+  return disconnected === binding.require_disconnect;
 }
 
 export async function boundPrompt(
   raw: Pick<HcClient, "exec">,
   ref: RuntimeRef,
-  binding: PromptBinding,
+  binding: PromptObservation,
 ) {
   if (
     !/^[a-z0-9_-]{1,32}$/u.test(ref.agent_name) ||

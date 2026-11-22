@@ -94,6 +94,7 @@ export interface ActivityMetadata {
   cwd: string;
   updated_at: string;
   model_silent_since?: number;
+  model_output_at?: string;
   turn_ended?: true;
   error?: HarnessActivity["error"];
 }
@@ -123,6 +124,11 @@ export function parseActivityMetadata(
     session_id: v.session_id,
     cwd: v.cwd,
     updated_at: v.updated_at,
+    ...(typeof v.model_output_at === "string" &&
+    v.model_output_at.length <= 64 &&
+    Date.parse(v.model_output_at) <= Date.parse(v.updated_at)
+      ? { model_output_at: v.model_output_at }
+      : {}),
     ...(typeof v.model_silent_since === "number" &&
     Number.isSafeInteger(v.model_silent_since) &&
     v.model_silent_since >= 0

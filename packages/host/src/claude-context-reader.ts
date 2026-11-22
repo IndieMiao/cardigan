@@ -41,7 +41,7 @@ function text(value, max) {
 }
 function summarize(lines, path, attributable, activityOnly, complete) {
   const workerSession = activityOnly ? basename(path, '.jsonl') : undefined;
-  let activity, progress, fault, silentSince = complete ? 0 : undefined;
+  let activity, progress, output, fault, silentSince = complete ? 0 : undefined;
   if (attributable) {
     for (const line of lines.slice(-256)) {
       let event;
@@ -69,6 +69,13 @@ function summarize(lines, path, attributable, activityOnly, complete) {
         if (apiError) fault = error !== 'unclassified' ? activity : undefined;
         else if (event.type === 'assistant') { silentSince = Date.parse(timestamp); fault = undefined; }
       }
+      const content = object(event.message)?.content;
+      if (!apiError && event.type === 'assistant' &&
+          ((typeof content === 'string' && content.length) || (Array.isArray(content) && content.some(b =>
+            (b?.type === 'text' && typeof b.text === 'string' && b.text.length) ||
+            (b?.type === 'thinking' && typeof b.thinking === 'string' && b.thinking.length) ||
+            (b?.type === 'tool_use' && typeof b.name === 'string' && b.name.length && typeof b.id === 'string' && b.id.length))))) output = activity;
+      if (output && output.session_id === activity.session_id && output.cwd === activity.cwd) activity.model_output_at = output.updated_at;
       if (!apiError) progress = activity;
       else if (progress && progress.session_id === activity.session_id) activity.progress = progress;
     }

@@ -295,6 +295,11 @@ test.each(["claude-code", "codex"] as const)(
       return "{}";
     };
     expect(value(await runtime.observe_prompt(ref, binding))).toBe(true);
+    const cleared = () =>
+      runtime
+        .observe_prompt(ref, { ...binding, require_disconnect: false })
+        .then(value);
+    expect(await cleared()).toBe(false);
     const poke = () =>
       runtime.wake(ref, "fixture", { prompt_binding: binding });
     fg = "bash";
@@ -308,7 +313,12 @@ test.each(["claude-code", "codex"] as const)(
     state = "unknown";
     screen = idle.replace(/\n([›❯])/u, "\n$1 pending input");
     expect(value(await poke()).withdrawn).toBe(true);
-    screen = idle.replace(/disconnected|Connection lost/u, "other");
+    expect(await cleared()).toBe(false);
+    screen = idle.split("\n").slice(1).join("\n");
+    expect(await cleared()).toBe(true);
+    address = "other";
+    expect(await cleared()).toBe(false);
+    address = ref.terminal_ref;
     expect(value(await poke()).withdrawn).toBe(true);
     expect(send).not.toHaveBeenCalled();
     screen = idle;

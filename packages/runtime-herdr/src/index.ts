@@ -34,6 +34,7 @@ import type {
   Assignment,
   IdleRetirementResult,
   Machine,
+  PromptObservation,
   RetirementEvidence,
   RetirementIdentity,
   Role,
@@ -581,10 +582,7 @@ export class HerdrRuntime implements Runtime {
       return ref;
     });
   }
-  observe_prompt(
-    ref: RuntimeRef,
-    binding: NonNullable<RuntimeWakeOptions["prompt_binding"]>,
-  ) {
+  observe_prompt(ref: RuntimeRef, binding: PromptObservation) {
     return result(async () => {
       this.checkRef(ref);
       return !!(await boundPrompt(this.client, ref, binding));
