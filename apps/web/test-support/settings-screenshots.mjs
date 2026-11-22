@@ -701,7 +701,7 @@ try {
             await press("继续检查");
             // C-565: a stop the commands fix; the page will check again.
             await until(
-              "document.querySelector('[role=dialog]').textContent.includes('会自动复查')",
+              "document.querySelector('[role=dialog]').textContent.includes('自动复查中')",
             );
             await scene("wizard-recheck", "@top");
             await press("继续检查");
