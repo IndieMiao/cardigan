@@ -14,6 +14,7 @@ import {
   type CardiganClient,
   type FeishuTestResult,
 } from "../api.js";
+import { RequestFeedbackScope } from "../components/RequestFeedback.js";
 import {
   type FakeFeishuOptions,
   fakeFeishuSettings,
@@ -328,7 +329,7 @@ test("credentials: replace and clear, never shown; enabling a channel needs its 
       within(secrets)
         .getAllByText("未设置")
         .map((e) => e.closest("[data-settings-row]")?.textContent),
-    ).toContain("群机器人 Webhook未设置"),
+    ).toContainEqual(expect.stringMatching(/^群机器人 Webhook未设置/u)),
   );
   expect(document.body.textContent).not.toContain("cli_0123456789abcdef");
 });
@@ -558,4 +559,142 @@ test("change rules: units, retry attempts and masked fields", () => {
   expect(fixed.change).toEqual({
     settings: { workbench_url: "https://wb.example.test" },
   });
+});
+
+// V-2844 (C-561 review): regressions for the five findings.
+test("a credential being typed cannot reach the preview through a public field", async () => {
+  const { client, server } = setup();
+  render(<FeishuSettings client={client} />);
+  await screen.findByText("每分钟 20 条");
+  await openEditor();
+  fireEvent.click(
+    within(secretBlock("群机器人签名密钥")).getByRole("button", {
+      name: "填写",
+    }),
+  );
+  type("新群机器人签名密钥", SIGN);
+  type("Workbench 链接", `https://wb.example.test/${SIGN}`);
+  await preview();
+  expect(server.log.previews).toHaveLength(0);
+  expect(field("Workbench 链接").getAttribute("aria-invalid")).toBe("true");
+  expect(dialog().textContent).toContain("这一项不能包含正在填写的凭据。");
+  // The note names the field only; the value is never repeated as text.
+  expect(dialog().textContent).not.toContain(SIGN);
+  type("Workbench 链接", "https://wb.example.test");
+  await preview();
+  expect(JSON.stringify(server.log.previews)).not.toContain(SIGN);
+});
+
+test("a stale refresh replays only net edits, not a switch changed and changed back", async () => {
+  const { client, server } = setup();
+  render(<FeishuSettings client={client} />);
+  await screen.findByText("每分钟 20 条");
+  await openEditor();
+  const lark = within(dialog()).getByRole("switch", { name: "群机器人" });
+  fireEvent.click(lark);
+  fireEvent.click(lark);
+  type("标题长度（字）", "99");
+  server.changeElsewhere({ "channels.lark.enabled": false });
+  await preview();
+  await act(async () => {
+    fireEvent.click(
+      within(dialog()).getByRole("button", { name: "刷新并重新预览" }),
+    );
+  });
+  expect(server.log.previews.at(-1)).toEqual({
+    settings: { "policy.title_limit": 99 },
+  });
+  // The switch now follows the other session's save.
+  await act(async () => {
+    fireEvent.click(within(dialog()).getByRole("button", { name: "返回修改" }));
+  });
+  expect(
+    within(dialog())
+      .getByRole("switch", { name: "群机器人" })
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+});
+
+test("a late older read cannot bring the configuration back after a newer 403/404", async () => {
+  const server = fakeFeishuSettings();
+  let first: (() => void) | undefined;
+  let calls = 0;
+  const client = fakeClient({
+    feishuBinding: async () => ({ state: "connected", bound: true }),
+    ...server.client,
+    feishuSettings: async () => {
+      calls++;
+      if (calls === 1) {
+        await new Promise<void>((resolve) => {
+          first = resolve;
+        });
+        return server.view;
+      }
+      throw new ApiError(404, "not_found", "接口不存在");
+    },
+  });
+  const view = (hidden: boolean) => (
+    <RequestFeedbackScope hidden={hidden}>
+      <FeishuSettings client={client} />
+    </RequestFeedbackScope>
+  );
+  const { rerender } = render(view(false));
+  await screen.findByText("已绑定");
+  rerender(view(true));
+  await act(async () => {
+    rerender(view(false));
+  });
+  expect(calls).toBe(2);
+  await act(async () => first?.());
+  expect(screen.queryByRole("button", { name: "编辑配置" })).toBeNull();
+  expect(screen.queryByText("每分钟 20 条")).toBeNull();
+});
+
+test("leaving the Feishu panel (e.g. browser back) hides the drawer and keeps the draft", async () => {
+  const { client } = setup();
+  const view = (hidden: boolean) => (
+    <RequestFeedbackScope hidden={hidden}>
+      <FeishuSettings client={client} />
+    </RequestFeedbackScope>
+  );
+  const { rerender } = render(view(false));
+  await screen.findByText("每分钟 20 条");
+  await openEditor();
+  type("标题长度（字）", "99");
+  rerender(view(true));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  // Closing the tab still asks while the edit is unconfirmed.
+  const unload = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(unload);
+  expect(unload.defaultPrevented).toBe(true);
+  rerender(view(false));
+  expect(
+    (await screen.findByLabelText<HTMLInputElement>("标题长度（字）")).value,
+  ).toBe("99");
+});
+
+test("a cleared credential still shows when it was last changed", async () => {
+  const base = syntheticFeishuView();
+  const server = fakeFeishuSettings({
+    ...base,
+    secrets: {
+      ...base.secrets,
+      lark_sign_secret: { set: false, updated_at: "2025-12-31T01:00:00Z" },
+    },
+  });
+  const client = fakeClient({
+    feishuBinding: async () => ({ state: "connected", bound: true }),
+    ...server.client,
+  });
+  render(<FeishuSettings client={client} />);
+  await screen.findByText("每分钟 20 条");
+  const row = screen
+    .getByText("群机器人签名密钥")
+    .closest("[data-settings-row]");
+  expect(row?.textContent).toContain("未设置");
+  expect(row?.textContent).toMatch(/2025-12-31/u);
+  await openEditor();
+  const block = secretBlock("群机器人签名密钥");
+  expect(block.textContent).toContain("未设置");
+  expect(block.textContent).toContain("最后修改");
 });

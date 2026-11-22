@@ -70,7 +70,10 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
   const [editing, setEditing] = useState(false);
   const [savedNote, setSavedNote] = useState("");
   const editButton = useRef<HTMLButtonElement>(null);
-  const { remember } = useDrawerReturnFocus(editing, () => editButton.current);
+  const { remember } = useDrawerReturnFocus(
+    editing && visible,
+    () => editButton.current,
+  );
   const [tests, setTests] = useState<
     Partial<Record<FeishuChannel, FeishuTestState>>
   >({});
@@ -278,6 +281,7 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
           client={client}
           view={config}
           reread={settings.read}
+          hidden={!visible}
           onSaved={() => {
             setEditing(false);
             setSavedNote("已保存飞书配置");
@@ -352,22 +356,30 @@ function useFeishuSettingsReader(client: CardiganClient, visible: boolean) {
           setState((old) => ({ ...old, interactive: old.interactive - done }));
         return shown.current ?? data;
       } catch (error) {
-        const newer = n < order.current.shown ? shown.current : undefined;
         const unavailable =
           error instanceof ApiError && [403, 404].includes(error.status);
+        if (n > order.current.shown && unavailable) {
+          // The newest answer: no settings for this session. Older replies
+          // arriving later cannot bring the configuration back.
+          order.current.shown = n;
+          shown.current = undefined;
+          if (alive.current)
+            setState((old) => ({ interactive: old.interactive - done }));
+          throw error;
+        }
+        const newer = n < order.current.shown;
+        // A failure is shown only while no later-started read was shown.
         if (alive.current)
           setState((old) =>
             newer
               ? { ...old, interactive: old.interactive - done }
-              : unavailable
-                ? { interactive: old.interactive - done }
-                : {
-                    ...old,
-                    interactive: old.interactive - done,
-                    error: describeError(error),
-                  },
+              : {
+                  ...old,
+                  interactive: old.interactive - done,
+                  error: describeError(error),
+                },
           );
-        if (newer) return newer;
+        if (newer && shown.current) return shown.current;
         throw error;
       }
     },

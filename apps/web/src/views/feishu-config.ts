@@ -213,6 +213,52 @@ export function secretProblem(key: FeishuSecretKey, value: string) {
   return undefined;
 }
 
+class Problem {
+  constructor(readonly message: string) {}
+}
+/** A field's text as the value the server stores, or why it is not one. */
+function parseField(field: DraftField, text: string): unknown {
+  const unit = FIELDS[field].unit;
+  const value =
+    unit === "text"
+      ? text
+      : unit === "count"
+        ? parseCount(text)
+        : unit === "seconds"
+          ? parseDuration(text, 1000)
+          : unit === "minutes"
+            ? parseDuration(text, 60000)
+            : parseDelays(text);
+  return unit !== "text" && typeof value === "string"
+    ? new Problem(value)
+    : value;
+}
+
+/**
+ * The parts of `draft` that differ from the read `view` (net edits: a value
+ * changed and changed back is not an edit). An unparsable field counts, so
+ * the person's text is kept.
+ */
+export function netEdits(view: FeishuSettingsView, draft: FeishuDraft) {
+  const out = new Set<DraftField | DraftSwitch>();
+  for (const [k, key] of Object.entries(SWITCH_KEYS) as [DraftSwitch, string][])
+    if (draft.switches[k] !== (view.settings[key] === true)) out.add(k);
+  const masked = new Set(maskedFields(view));
+  for (const field of draftFields) {
+    if (masked.has(field)) {
+      if (draft.retyped.has(field)) out.add(field);
+      continue;
+    }
+    const value = parseField(field, draft.fields[field]);
+    if (
+      value instanceof Problem ||
+      JSON.stringify(value) !== JSON.stringify(view.settings[FIELDS[field].key])
+    )
+      out.add(field);
+  }
+  return out;
+}
+
 export type DraftProblems = Partial<
   Record<DraftField | FeishuSecretKey, string>
 >;
@@ -235,21 +281,11 @@ export function buildChange(
   const masked = new Set(maskedFields(view));
   const merged: Record<string, unknown> = { ...s };
   for (const field of draftFields) {
-    const { key, unit } = FIELDS[field];
-    const text = draft.fields[field];
+    const { key } = FIELDS[field];
     if (masked.has(field) && !draft.retyped.has(field)) continue;
-    const value =
-      unit === "text"
-        ? text
-        : unit === "count"
-          ? parseCount(text)
-          : unit === "seconds"
-            ? parseDuration(text, 1000)
-            : unit === "minutes"
-              ? parseDuration(text, 60000)
-              : parseDelays(text);
-    if (unit !== "text" && typeof value === "string") {
-      problems[field] = value;
+    const value = parseField(field, draft.fields[field]);
+    if (value instanceof Problem) {
+      problems[field] = value.message;
       continue;
     }
     if (JSON.stringify(value) === JSON.stringify(s[key])) continue;
@@ -298,6 +334,22 @@ export function buildChange(
     set.push(key);
     const problem = secretProblem(key, values[key] ?? "");
     if (problem) problems[key] = problem;
+  }
+  // A credential being typed must not reach the preview through a public
+  // text field (now or as an unchanged value): the field is marked, never
+  // the value repeated.
+  const typed = set.map((k) => values[k] ?? "").filter((v) => v !== "");
+  for (const field of draftFields) {
+    if (FIELDS[field].unit !== "text" || problems[field]) continue;
+    const current = s[FIELDS[field].key];
+    const texts = [
+      ...(masked.has(field) && !draft.retyped.has(field)
+        ? []
+        : [draft.fields[field]]),
+      ...(typeof current === "string" ? [current] : []),
+    ];
+    if (typed.some((v) => texts.some((t) => t.includes(v))))
+      problems[field] = "这一项不能包含正在填写的凭据。";
   }
   if (draft.switches.enabled)
     for (const channel of ["lark", "lark_app"] as const) {

@@ -36,6 +36,7 @@ import {
   formatSecretDiff,
   formatValue,
   maskedFields,
+  netEdits,
   provedNotWritten,
   SECRET_LABELS,
   STALE,
@@ -62,9 +63,16 @@ export function FeishuConfigEditor({
   reread,
   onSaved,
   onClose,
+  hidden = false,
 }: {
   client: CardiganClient;
   view: FeishuSettingsView;
+  /**
+   * The Feishu panel is not shown (another settings tab, e.g. after the
+   * browser went back): the drawer steps aside and keeps the draft until the
+   * panel is shown again; closing the tab still asks while it is unconfirmed.
+   */
+  hidden?: boolean;
   /** Read the settings again through the page's ordered reader. */
   reread: () => Promise<FeishuSettingsView>;
   onSaved: () => void;
@@ -112,20 +120,25 @@ export function FeishuConfigEditor({
       if (alive.current) setBusy(false);
     }
   };
-  /** A newer read: untouched fields follow it, the person's edits stay. */
+  /**
+   * A newer read: the person's net edits against the read they started from
+   * are replayed on it; everything else (also a value changed and changed
+   * back) follows the new read, so another session's save is not undone.
+   */
   const rebase = (next: FeishuSettingsView): FeishuDraft => {
     const fresh = draftFrom(next);
+    const mine = netEdits(base, draft);
     const rebased: FeishuDraft = {
       switches: Object.fromEntries(
         Object.entries(fresh.switches).map(([k, v]) => [
           k,
-          edited.has(k as DraftSwitch) ? draft.switches[k as DraftSwitch] : v,
+          mine.has(k as DraftSwitch) ? draft.switches[k as DraftSwitch] : v,
         ]),
       ) as FeishuDraft["switches"],
       fields: Object.fromEntries(
         draftFields.map((f) => [
           f,
-          edited.has(f) ? draft.fields[f] : fresh.fields[f],
+          mine.has(f) ? draft.fields[f] : fresh.fields[f],
         ]),
       ) as FeishuDraft["fields"],
       retyped: new Set(
@@ -264,6 +277,10 @@ export function FeishuConfigEditor({
     });
   };
   const masked = maskedFields(base);
+  /** Diff values never repeat a credential being typed (defence in depth). */
+  const typed = Object.values(values).filter((v): v is string => !!v);
+  const safe = (text: string) =>
+    typed.some((v) => text.includes(v)) ? "已隐藏" : text;
   const shown = (name: Edited | FeishuSecretKey) =>
     attempted ||
     edited.has(name as Edited) ||
@@ -346,13 +363,13 @@ export function FeishuConfigEditor({
                   <SettingsDiff op="remove">
                     {line.key.startsWith("secrets.")
                       ? formatSecretDiff("before", line.before)
-                      : formatValue(line.key, line.before)}
+                      : safe(formatValue(line.key, line.before))}
                   </SettingsDiff>
                   {" → "}
                   <SettingsDiff op="add">
                     {line.key.startsWith("secrets.")
                       ? formatSecretDiff("after", line.after)
-                      : formatValue(line.key, line.after)}
+                      : safe(formatValue(line.key, line.after))}
                   </SettingsDiff>
                 </SettingsFact>
               ))}
@@ -475,7 +492,7 @@ export function FeishuConfigEditor({
   return (
     <Drawer
       className={settingsDrawerClassName}
-      open
+      open={!hidden}
       onOpenChange={(next) => !next && leave()}
       title="编辑飞书配置"
       description="编辑飞书配置"
@@ -522,7 +539,7 @@ function SecretEditor({
                 status={state.set ? "done" : "pending"}
                 label={state.set ? "已设置" : "未设置"}
               />
-              {state.set && state.updated_at && (
+              {state.updated_at && (
                 <>
                   {" "}
                   最后修改 <Time value={state.updated_at} />

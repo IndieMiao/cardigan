@@ -65,7 +65,7 @@ function Secret({
         />
       }
     >
-      {state.set && state.updated_at && (
+      {state.updated_at && (
         <SettingsValue>{formatTime(state.updated_at)}</SettingsValue>
       )}
     </SettingsRow>
