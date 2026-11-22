@@ -71,6 +71,19 @@ test.each([
   expect(body).not.toContain("要新开问题必须是 critical 并带 proof");
 });
 
+test("C-574: both default code review roles publish the same rejection criteria", () => {
+  const criteria = (role: DefaultRoleId) =>
+    defaultRoleDefinition(role, launch)
+      .instructions?.split("## 什么问题必须改\n")[1]
+      ?.split("\n## ")[0]
+      ?.trim();
+  const reviewer = criteria("reviewer");
+  expect(reviewer).toBeTruthy();
+  expect(criteria("independent_reviewer")).toBe(reviewer);
+  expect(criteria("design_director")).toBeUndefined();
+  expect(reviewer).toMatchSnapshot();
+});
+
 test("fast patch self-review is advisory and plan reading follows card scope", () => {
   for (const role of ["coder", "pm"] as const)
     expect(instructionsFor(role)).toContain(
