@@ -618,33 +618,53 @@ export function SettingsFieldHint({
 /**
  * C-565: the whole path of a multi-step drawer, shown from its first screen.
  * Steps before `current` are done; `current` equal to the number of steps
- * means all are done.
+ * means all are done. A `failed` step (e.g. checks that did not pass) is
+ * never shown as done, also when the reader has moved on to the step that
+ * fixes it.
  */
 export function SettingsSteps({
   label,
   steps,
   current,
+  failed,
 }: {
   label: string;
   steps: readonly string[];
   current: number;
+  failed?: number | undefined;
 }) {
   return (
     <ol aria-label={label} className={styles.steps}>
       {steps.map((step, i) => {
-        const state = i < current ? "done" : i === current ? "current" : "todo";
+        const state =
+          i === failed && i !== current
+            ? "failed"
+            : i < current
+              ? "done"
+              : i === current
+                ? "current"
+                : "todo";
         return (
           <li
             key={step}
             data-state={state}
+            data-failed={i === failed || undefined}
             aria-current={state === "current" ? "step" : undefined}
           >
             <span className={styles.stepMarker} aria-hidden="true">
-              {state === "done" ? <Check /> : i + 1}
+              {i === failed ? (
+                <TriangleAlert />
+              ) : state === "done" ? (
+                <Check />
+              ) : (
+                i + 1
+              )}
             </span>
             {step}
-            {state === "done" && (
-              <span className={styles.visuallyHidden}>（已完成）</span>
+            {(state === "done" || i === failed) && (
+              <span className={styles.visuallyHidden}>
+                {i === failed ? "（未通过）" : "（已完成）"}
+              </span>
             )}
           </li>
         );

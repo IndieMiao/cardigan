@@ -65,6 +65,7 @@ function backend(runs: (WorkerWizardStep["step"] | "passed")[]) {
   let wizard: WorkerWizardView | undefined;
   let polls = 0;
   let previews = 0;
+  let checks = 0;
   const writes: string[] = [];
   const steps = (blockedAt?: string): WorkerWizardStep[] => {
     const at = blockedAt ? STEPS.indexOf(blockedAt as never) : STEPS.length;
@@ -132,6 +133,13 @@ function backend(runs: (WorkerWizardStep["step"] | "passed")[]) {
     workerWizardAction: vi.fn(
       async (_p: string, _id: string, action: WorkerWizardAction) => {
         if (!wizard) throw new ApiError(404, "not_found", "没有此向导会话");
+        // Like the server: an automatic recheck only continues its check.
+        if (
+          "resume_check_id" in action &&
+          (wizard.phase !== "failed" ||
+            wizard.check_id !== action.resume_check_id)
+        )
+          throw new ApiError(409, "worker_check_changed", "向导状态已改变");
         writes.push(action.kind);
         if (action.kind === "cancel") {
           wizard = undefined;
@@ -150,6 +158,7 @@ function backend(runs: (WorkerWizardStep["step"] | "passed")[]) {
           const { preview: _, ...rest } = wizard;
           wizard = {
             ...rest,
+            check_id: `check-${++checks}`,
             phase: "running",
             steps: wizard.steps.map((s) =>
               s.state === "blocked" ? { ...s, state: "running" } : s,
@@ -856,12 +865,22 @@ const stepBar = (dialog: ReturnType<typeof within>) => {
   const items = within(
     dialog.getByRole("list", { name: "添加 worker 的步骤" }),
   ).getAllByRole("listitem");
+  /** The step's name: without its marker and the screen-reader state. */
+  const name = (li: HTMLElement) =>
+    [...li.childNodes]
+      .filter((n) => !(n instanceof HTMLElement && n.ariaHidden === "true"))
+      .map((n) => n.textContent)
+      .join("")
+      .replace(/（已完成）|（未通过）/gu, "");
   return {
-    names: items.map((li) => li.textContent?.replace(/^\d|（已完成）/gu, "")),
+    names: items.map(name),
     current: items
       .filter((li) => li.getAttribute("aria-current") === "step")
-      .map((li) => li.textContent?.replace(/^\d/u, "")),
-    done: items.filter((li) => li.dataset.state === "done").length,
+      .map(name),
+    done: items.filter((li) => li.textContent?.includes("（已完成）")).length,
+    failed: items
+      .filter((li) => li.textContent?.includes("（未通过）"))
+      .map(name),
   };
 };
 async function toBlocked(
@@ -875,12 +894,13 @@ async function toBlocked(
 }
 
 test("C-565: the whole wizard path is shown from the first screen, with the current step marked", async () => {
-  const fake = backend(["ssh", "account", "passed"]);
+  const fake = backend(["resources", "account", "passed"]);
   const dialog = drawer(fake.client, { autoRecheckMs: 60_000 });
   expect(stepBar(dialog)).toEqual({
     names: ["填写", "预览确认", "9 项检查", "目标机命令", "开启远程派发"],
     current: ["填写"],
     done: 0,
+    failed: [],
   });
   await fill(dialog);
   fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
@@ -891,15 +911,25 @@ test("C-565: the whole wizard path is shown from the first screen, with the curr
   await dialog.findByRole("button", { name: "开始检查" });
   expect(stepBar(dialog).current).toEqual(["9 项检查"]);
   fireEvent.click(dialog.getByRole("button", { name: "开始检查" }));
-  // Stopped at SSH: still a check matter, not a target-machine command.
+  // Stopped at the resources: still a check matter, shown as not passed.
   await dialog.findByRole("button", { name: "继续检查" });
-  expect(stepBar(dialog).current).toEqual(["9 项检查"]);
+  expect(stepBar(dialog)).toMatchObject({
+    current: ["9 项检查"],
+    failed: ["9 项检查"],
+    done: 2,
+  });
   fireEvent.click(dialog.getByRole("button", { name: "继续检查" }));
-  // Stopped at the account: the commands are the step now.
+  // Stopped at the account: the commands are the step now, and the checks
+  // are still not passed (never ticked as done).
   await waitFor(() => expect(stepBar(dialog).current).toEqual(["目标机命令"]));
+  expect(stepBar(dialog)).toMatchObject({ failed: ["9 项检查"], done: 2 });
   fireEvent.click(dialog.getByRole("button", { name: "继续检查" }));
   await dialog.findByRole("button", { name: "复查" });
-  expect(stepBar(dialog).current).toEqual(["开启远程派发"]);
+  expect(stepBar(dialog)).toMatchObject({
+    current: ["开启远程派发"],
+    failed: [],
+    done: 4,
+  });
   fireEvent.click(dialog.getByRole("button", { name: "预览开启" }));
   fireEvent.click(
     await dialog.findByRole("checkbox", { name: "我确认开启远程派发" }),
@@ -1016,7 +1046,11 @@ test("C-565: mistakes are shown beside their fields and the first one takes focu
   expect(notes).toContain("UID 须为不小于 501 的整数。");
   const mcp = dialog.getByRole("textbox", { name: "MCP 地址" });
   expect(mcp.getAttribute("aria-invalid")).toBe("true");
-  expect(dialog.getByText("MCP 地址须为 HTTPS 的 /mcp 地址。")).toBeTruthy();
+  expect(
+    dialog.getByText(
+      "MCP 地址须为 Tailscale Serve 的 HTTPS 地址：https://<主机>.<tailnet>.ts.net/mcp，可带端口，不带账号、查询参数。",
+    ),
+  ).toBeTruthy();
   expect(
     dialog.getByRole("textbox", { name: "GID" }).getAttribute("aria-invalid"),
   ).toBeNull();
@@ -1056,14 +1090,124 @@ test("C-565: automatic rechecks stop at their limit; 继续检查 stays and star
   expect(fake.writes).toEqual(["confirm", "run", "run", "run", "run", "run"]);
 });
 
-test("C-565: a stop the commands do not fix (SSH) waits for 继续检查", async () => {
-  const fake = backend(["ssh"]);
+test("C-565: a stop the commands do not fix (resources) waits for 继续检查", async () => {
+  const fake = backend(["resources"]);
   const dialog = drawer(fake.client);
   await toBlocked(dialog);
   await dialog.findByRole("button", { name: "继续检查" });
   await new Promise((done) => setTimeout(done, 150));
   expect(fake.writes).toEqual(["confirm", "run"]);
   expect(dialog.queryByText(/自动复查/u)).toBeNull();
+});
+
+test("C-565: a first onboarding stops at SSH (no account yet) and is rechecked until the account works", async () => {
+  const fake = backend(["ssh", "ssh", "passed"]);
+  const dialog = drawer(fake.client);
+  await toBlocked(dialog);
+  await dialog.findByRole("button", { name: "复查" }, { timeout: 3000 });
+  expect(fake.writes).toEqual(["confirm", "run", "run", "run"]);
+  // Each automatic run named the failed check it continued.
+  const runs = vi
+    .mocked(fake.client.workerWizardAction)
+    .mock.calls.map(([, , action]) => action)
+    .filter((a) => a.kind === "run");
+  expect(runs).toEqual([
+    { kind: "run" },
+    { kind: "run", resume_check_id: "check-1" },
+    { kind: "run", resume_check_id: "check-2" },
+  ]);
+});
+
+test("C-565: a late automatic recheck from a stale page reads the moved-on session instead of starting a check", async () => {
+  const fake = backend(["account"]);
+  const dialog = drawer(fake.client, { autoRecheckMs: 80 });
+  await toBlocked(dialog);
+  await dialog.findByText(/会自动复查/u);
+  // Another page continued and passed the check, then previewed launch.
+  fake.mutate((w) => ({
+    ...w,
+    phase: "passed",
+    check_id: "check-other",
+    steps: w.steps.map((s) => ({ ...s, state: "passed" })),
+    preview: {
+      preview_id: "pv-other",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      file: "runtime-workers.yaml",
+      diff: [],
+    },
+  }));
+  // The timer fires: refused, so this page shows where the session is.
+  await dialog.findByRole("button", { name: "复查" }, { timeout: 3000 });
+  expect(fake.writes).toEqual(["confirm", "run"]);
+  expect(fake.current()?.preview?.preview_id).toBe("pv-other");
+  expect(dialog.queryByRole("alert")).toBeNull();
+});
+
+test("C-565: an earlier blocked row left from a previous round does not keep the checks running", async () => {
+  const fake = backend(["account"]);
+  const dialog = drawer(fake.client, { autoRecheckMs: 60_000 });
+  await toBlocked(dialog);
+  await dialog.findByText(/会自动复查/u);
+  cleanup();
+  // This round stopped at the configuration check; account is left over.
+  fake.mutate((w) => ({
+    ...w,
+    steps: w.steps.map((s) =>
+      s.step === "configuration"
+        ? { ...s, state: "blocked", reason: "worker_config_changed" }
+        : s,
+    ),
+  }));
+  window.localStorage.setItem(
+    "cardigan.worker-wizard.p-1",
+    fake.current()?.id ?? "",
+  );
+  const again = drawer(fake.client, { autoRecheckMs: 20 });
+  await again.findByRole("table", { name: "接入步骤" });
+  await new Promise((done) => setTimeout(done, 150));
+  expect(fake.writes).toEqual(["confirm", "run"]);
+  expect(again.queryByText(/自动复查/u)).toBeNull();
+  expect(stepBar(again)).toMatchObject({
+    current: ["9 项检查"],
+    failed: ["9 项检查"],
+  });
+});
+
+test("C-565: refusals the server ties to a field, and common address mistakes, show beside the field", async () => {
+  const fake = backend([]);
+  const create = fake.client.createWorkerWizard;
+  fake.client.createWorkerWizard = vi
+    .fn()
+    .mockRejectedValueOnce(
+      new ApiError(400, "worker_mcp_url_invalid", "请核对向导配置"),
+    )
+    .mockImplementation(create);
+  const dialog = drawer(fake.client);
+  const box = (name: string) => dialog.getByRole("textbox", { name });
+  await fill(dialog, { ...input, host: "worker.example.org:22" });
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  await waitFor(() =>
+    expect(box("主机地址").getAttribute("aria-invalid")).toBe("true"),
+  );
+  expect(
+    dialog.getByText("主机地址不带端口，端口填在“SSH 端口”里。"),
+  ).toBeTruthy();
+  fireEvent.change(box("主机地址"), { target: { value: "admin@worker" } });
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  await dialog.findByText("主机地址不带用户名，账号填在“专用账号”里。");
+  expect(fake.client.createWorkerWizard).not.toHaveBeenCalled();
+  fireEvent.change(box("主机地址"), { target: { value: "worker.invalid" } });
+  // The server refuses the MCP address: the note is beside that field.
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  await waitFor(() =>
+    expect(box("MCP 地址").getAttribute("aria-invalid")).toBe("true"),
+  );
+  expect(dialog.queryByRole("alert")).toBeNull();
+  fireEvent.change(box("MCP 地址"), {
+    target: { value: "https://control.example.ts.net/mcp" },
+  });
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  await dialog.findByRole("button", { name: "确认写入配置" });
 });
 
 test("C-565: the suggestions are a same-origin read of the owner's wizard defaults", async () => {
@@ -1086,4 +1230,27 @@ test("C-565: the suggestions are a same-origin read of the owner's wizard defaul
   expect(url).toBe("/api/projects/p%201/worker-wizards/defaults");
   expect(init.method ?? "GET").toBe("GET");
   expect(init.credentials).toBe("same-origin");
+});
+
+test("C-565: the host's explicit remote MCP address is named as such", async () => {
+  const fake = backend([]);
+  const dialog = drawer({
+    ...fake.client,
+    workerWizardDefaults: vi.fn(async () => ({
+      defaults: {
+        mcp_url: "https://mcp.example.ts.net:8443/mcp",
+        mcp_source: "host" as const,
+      },
+    })),
+  });
+  const mcp = dialog.getByRole("textbox", { name: "MCP 地址" });
+  await waitFor(() =>
+    expect((mcp as HTMLInputElement).value).toBe(
+      "https://mcp.example.ts.net:8443/mcp",
+    ),
+  );
+  expect(
+    document.getElementById(mcp.getAttribute("aria-describedby") ?? "")
+      ?.textContent,
+  ).toContain("已填入控制主机配置的 MCP 地址");
 });

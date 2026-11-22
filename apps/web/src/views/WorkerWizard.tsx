@@ -122,7 +122,8 @@ const WIZARD_ERRORS: Readonly<Record<string, string>> = {
     "机器编号无效：只能用字母、数字、点、下划线和连字符，且不能是 local。",
   worker_identity_conflict:
     "这个机器编号已按不同的系统或架构登记，请换一个编号或核对已有登记。",
-  worker_mcp_url_invalid: "MCP 地址无效，请填写控制主机的 MCP 地址。",
+  worker_mcp_url_invalid:
+    "MCP 地址须为 Tailscale Serve 的 HTTPS 地址：https://<主机>.<tailnet>.ts.net/mcp，可带端口，不带账号、查询参数。",
   worker_mcp_url_conflict: "MCP 地址与这台机器已有的项目绑定不一致，请核对。",
   worker_busy: "这台机器正在检查，请等它结束后再试。",
   worker_preview_stale: "预览已过期或状态已改变，已重新读取，请核对后再确认。",
@@ -131,6 +132,14 @@ const WIZARD_ERRORS: Readonly<Record<string, string>> = {
   worker_config_changed: "接入配置在确认后被改动，请重新预览并确认。",
   worker_private_file_invalid:
     "主机私有配置文件的权限或归属不符，请在控制主机上核对后重试。",
+  worker_check_changed: "向导状态已改变，已重新读取。",
+};
+/** Refusals the server ties to one field: shown beside it, not on top. */
+const FIELD_ERRORS: Readonly<Record<string, keyof Form>> = {
+  worker_identity_invalid: "machine_id",
+  worker_identity_conflict: "machine_id",
+  worker_mcp_url_invalid: "mcp_url",
+  worker_mcp_url_conflict: "mcp_url",
 };
 function wizardError(error: unknown): string {
   if (error instanceof ApiError) {
@@ -187,7 +196,20 @@ function validate(
   const label = form.label.trim();
   if (!label || label.length > 80)
     errors.label = "请填写名称（不超过 80 个字）。";
-  if (!form.host.trim()) errors.host = "请填写主机地址。";
+  const host = form.host.trim();
+  if (!host) errors.host = "请填写主机地址。";
+  else if (host.includes("@"))
+    errors.host = "主机地址不带用户名，账号填在“专用账号”里。";
+  else if (/^[^:]+:\d+$/u.test(host))
+    errors.host = "主机地址不带端口，端口填在“SSH 端口”里。";
+  else if (host.includes("/"))
+    errors.host = "只填域名或 IP，不带 ssh:// 或路径。";
+  else if (
+    !/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/u.test(host) &&
+    !(/^[0-9A-Fa-f:.]+$/u.test(host) && host.split(":").length > 2)
+  )
+    errors.host =
+      "主机地址只能是域名或 IP：字母、数字、点、下划线和连字符，或 IPv6 地址。";
   const port = integer(form.port);
   if (!(port >= 1 && port <= 65535))
     errors.port = "SSH 端口须为 1～65535 的整数。";
@@ -201,15 +223,15 @@ function validate(
     errors.gid = "GID 须为不小于 501 的整数。";
   const mcp = form.mcp_url.trim();
   if (!mcp) errors.mcp_url = "请填写 MCP 地址。";
-  else if (!/^https:\/\/[^/?#@\s]+\/mcp$/u.test(mcp))
-    errors.mcp_url = "MCP 地址须为 HTTPS 的 /mcp 地址。";
+  else if (!TAILNET_MCP.test(mcp))
+    errors.mcp_url = WIZARD_ERRORS.worker_mcp_url_invalid as string;
   if (Object.keys(errors).length > 0) return { errors };
   const input: WorkerWizardInput = {
     machine_id: machine,
     label,
     os: form.os,
     arch: form.os === "macos" ? "arm64" : form.arch,
-    host: form.host.trim(),
+    host,
     port,
     account: form.account.trim(),
     uid,
@@ -229,9 +251,11 @@ function suggestedAccount(projectId: string): string {
   return name ? `cg_${name}` : "";
 }
 /** Where a prefilled MCP address came from, for its hint. */
-type McpSource = "workers" | "page" | undefined;
+type McpSource = "workers" | "host" | "page" | undefined;
 const TAILNET =
   /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ts\.net(?::[0-9]+)?$/u;
+/** The remote-worker MCP rule the host applies (`workerMcpConfig`). */
+const TAILNET_MCP = new RegExp(`${TAILNET.source.slice(0, -1)}/mcp$`, "u");
 /** This Workbench reached through Tailscale Serve: its `/mcp` on the same name. */
 function pageMcpUrl(): string | undefined {
   try {
@@ -250,10 +274,24 @@ const WIZARD_STEPS = [
   "目标机命令",
   "开启远程派发",
 ] as const;
-/** Checks that stop for commands an administrator runs on the target. */
-const isCommandStep = (s: WorkerWizardStep) =>
-  s.command_key !== undefined ||
-  (COMMAND_KEYS as readonly string[]).includes(s.step);
+/**
+ * Checks an administrator fixes on the target machine with the commands:
+ * SSH too, since a first onboarding logs in as the account not yet created.
+ */
+const TARGET_STEPS: readonly string[] = ["ssh", ...COMMAND_KEYS];
+const isTargetStep = (s: WorkerWizardStep) =>
+  s.command_key !== undefined || TARGET_STEPS.includes(s.step);
+/**
+ * Where the latest check stopped: the first blocked step. Steps run in
+ * order, so a later blocked row is left over from an earlier round.
+ */
+function stopOf(wizard: WorkerWizardView | undefined) {
+  return wizard?.phase === "failed"
+    ? wizard.steps.find((s) => s.state === "blocked")
+    : undefined;
+}
+/** The step bar's index of the checks, shown failed until they pass. */
+const CHECKS_STEP = 2;
 function wizardStep(wizard: WorkerWizardView | undefined): number {
   switch (wizard?.phase) {
     case undefined:
@@ -261,8 +299,8 @@ function wizardStep(wizard: WorkerWizardView | undefined): number {
     case "preview":
       return 1;
     case "failed": {
-      const blocked = wizard.steps.find((s) => s.state === "blocked");
-      return blocked && isCommandStep(blocked) ? 3 : 2;
+      const stop = stopOf(wizard);
+      return stop && isTargetStep(stop) ? 3 : CHECKS_STEP;
     }
     case "passed":
       return 4;
@@ -431,7 +469,7 @@ export function WorkerWizardDrawer({
         const url = defaults.mcp_url;
         if (!live || !url || mcpEdited.current) return;
         setForm((f) => ({ ...f, mcp_url: url }));
-        setMcpSource("workers");
+        setMcpSource(defaults.mcp_source === "host" ? "host" : "workers");
       })
       // Only a suggestion: without it the field keeps its hint.
       .catch(() => undefined);
@@ -453,6 +491,8 @@ export function WorkerWizardDrawer({
     name: string,
     request: () => Promise<WorkerWizardView | undefined>,
     after?: (next: WorkerWizardView | undefined) => void,
+    /** Explains a refusal some other way (beside a field, or silently). */
+    explained?: (cause: unknown) => boolean,
   ) => {
     if (sending.current) return;
     sending.current = true;
@@ -466,7 +506,7 @@ export function WorkerWizardDrawer({
       after?.(next);
     } catch (cause) {
       if (!alive.current) return;
-      setError(wizardError(cause));
+      if (!explained?.(cause)) setError(wizardError(cause));
       // The server is the record: show where the session really is.
       if (wizard) await read(wizard.id, true);
     } finally {
@@ -537,6 +577,14 @@ export function WorkerWizardDrawer({
         return created;
       },
       () => setEditing(false),
+      (cause) => {
+        // A refusal the server ties to a field is shown beside that field.
+        const key =
+          cause instanceof ApiError ? FIELD_ERRORS[cause.code] : undefined;
+        if (!key || !(cause instanceof ApiError)) return false;
+        setFieldErrors({ [key]: wizardError(cause) });
+        return true;
+      },
     );
   };
   const cancel = () => {
@@ -582,11 +630,9 @@ export function WorkerWizardDrawer({
    * failed read, editing the form or leaving pauses it.
    */
   const [rechecks, setRechecks] = useState<{ step: string; count: number }>();
+  const stop = !editing && readState === "ok" ? stopOf(wizard) : undefined;
   const blockedStep =
-    wizard?.phase === "failed" && !editing && readState === "ok"
-      ? wizard.steps.find((s) => s.state === "blocked" && isCommandStep(s))
-          ?.step
-      : undefined;
+    stop && isTargetStep(stop) && wizard?.check_id ? stop.step : undefined;
   const recheckCount =
     blockedStep && rechecks?.step === blockedStep ? rechecks.count : 0;
   const autoRecheck =
@@ -595,7 +641,20 @@ export function WorkerWizardDrawer({
     busy === undefined &&
     recheckCount < autoRecheckMax;
   const startRun = useRef<() => void>(undefined);
-  startRun.current = () => void act("run", step({ kind: "run" }));
+  // It continues only the failed check this page saw: once the session has
+  // moved on (another page continued or passed it), the server refuses and
+  // this page reads the current state instead of starting a new check.
+  startRun.current = () => {
+    const resume_check_id = wizard?.check_id;
+    if (!resume_check_id) return;
+    void act(
+      "run",
+      step({ kind: "run", resume_check_id }),
+      undefined,
+      (cause) =>
+        cause instanceof ApiError && cause.code === "worker_check_changed",
+    );
+  };
   useEffect(() => {
     if (!autoRecheck || !blockedStep) return;
     const timer = window.setTimeout(() => {
@@ -722,6 +781,9 @@ export function WorkerWizardDrawer({
             label="添加 worker 的步骤"
             steps={WIZARD_STEPS}
             current={showForm ? 0 : wizardStep(content)}
+            failed={
+              !showForm && content?.phase === "failed" ? CHECKS_STEP : undefined
+            }
           />
         )}
         {showForm && (
@@ -992,9 +1054,11 @@ function WizardForm({
               }
               {mcpSource === "workers"
                 ? "已填入现有 worker 使用的地址。"
-                : mcpSource === "page"
-                  ? "已按当前 Workbench 的地址填入，请核对 /mcp 的转发。"
-                  : ""}
+                : mcpSource === "host"
+                  ? "已填入控制主机配置的 MCP 地址。"
+                  : mcpSource === "page"
+                    ? "已按当前 Workbench 的地址填入，请核对 /mcp 的转发。"
+                    : ""}
             </>,
           )}
         </fieldset>

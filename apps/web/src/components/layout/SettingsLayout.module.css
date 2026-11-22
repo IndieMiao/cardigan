@@ -185,6 +185,11 @@
   .groupToggle :global(.lucide) {
     color: var(--text-muted);
   }
+  /* C-565 step marker icon (declared before the more specific icon rules). */
+  .stepMarker > :global(.lucide) {
+    width: var(--ui-arrow);
+    height: var(--ui-arrow);
+  }
   .groupToggle[aria-expanded="true"] :global(.lucide) {
     transform: rotate(90deg);
   }
@@ -546,10 +551,6 @@
     gap: var(--ui-space-1);
     white-space: nowrap;
   }
-  .stepMarker > :global(.lucide) {
-    width: var(--ui-arrow);
-    height: var(--ui-arrow);
-  }
   .steps > li:is([data-state="done"], [data-state="current"]) {
     color: var(--text);
   }
@@ -568,10 +569,22 @@
     line-height: var(--ui-leading-xs);
     font-weight: 400;
   }
+  /* A step that did not pass: danger colour, never ticked as done. */
+  .steps > li[data-state="failed"] {
+    color: var(--danger);
+  }
+  [data-failed] > .stepMarker {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
   [data-state="current"] > .stepMarker {
     border-color: var(--text);
     background: var(--text);
     color: var(--surface);
+  }
+  [data-state="current"][data-failed] > .stepMarker {
+    border-color: var(--danger);
+    background: var(--danger);
   }
   .visuallyHidden {
     position: absolute;

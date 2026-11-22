@@ -1335,8 +1335,12 @@ export interface WorkerWizardInput {
 }
 /** C-565: what the host already knows for a new worker (owner only). */
 export interface WorkerWizardDefaults {
-  /** The HTTPS `/mcp` address existing remote workers use. */
+  /**
+   * The HTTPS `/mcp` address existing remote workers use (`workers`), or the
+   * host's explicit remote MCP address when none is bound yet (`host`).
+   */
   readonly mcp_url?: string;
+  readonly mcp_source?: "workers" | "host";
 }
 export type WorkerWizardStepName =
   | "configuration"
@@ -1405,6 +1409,11 @@ export interface WorkerWizardView {
  */
 export type WorkerWizardAction =
   | { readonly kind: "run" | "cancel" | "launch-preview" }
+  /**
+   * C-565: an automatic recheck continues only the failed check it saw; the
+   * server refuses it (`worker_check_changed`) once the session moved on.
+   */
+  | { readonly kind: "run"; readonly resume_check_id: string }
   | { readonly kind: "confirm"; readonly preview_id: string }
   | {
       readonly kind: "enable";
