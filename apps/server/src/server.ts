@@ -614,6 +614,13 @@ async function assembleServer(
   // shares the store but nothing else: a failure here must not leave a
   // half-started server behind.
   let web: RunningWebServer | undefined;
+  const checkHost = machineHost(
+    store,
+    execution,
+    session,
+    { ...runtimeEnv },
+    () => options.dispatcher?.upstream?.browser?.browsers_path,
+  );
   const webOptions = options.web;
   if (webOptions !== undefined && options.role !== "background") {
     try {
@@ -630,13 +637,7 @@ async function assembleServer(
                     : hostOps.executionDiagnostics(project),
               }
             : {}),
-          machineHost: machineHost(
-            store,
-            execution,
-            session,
-            { ...runtimeEnv },
-            () => options.dispatcher?.upstream?.browser?.browsers_path,
-          ),
+          machineHost: checkHost,
           machineDisplayName: runCapacity.displayNameForMachine,
           resourceLimits: runCapacity.resourcesForMachine,
           capabilityCatalog: () =>
@@ -729,6 +730,7 @@ async function assembleServer(
           config.attachmentIntervalMs;
       const served = mcp;
       plane = startControlPlane({
+        machineHost: checkHost,
         // P2a-10 A: the fingerprint comes from the endpoint's own tool set, so
         // it always matches what a new session would list.
         toolCatalog: (assignment, project) => {

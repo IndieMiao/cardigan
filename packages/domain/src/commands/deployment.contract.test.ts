@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import { completeHumanAction, triageHumanAction } from "./coordination.js";
 import {
+  completeVerifiedHelperAction,
   controlDeployment,
   currentDeploymentPin,
   reconcileSupervisorNotice,
@@ -10,6 +11,7 @@ import {
   requestDeploymentAction,
   retireVerifiedHelperAction,
 } from "./deployment.js";
+import { listNeedsYou } from "./queries.js";
 
 test("deployment controls are human-only and bind exact versions without forging merge evidence", () => {
   let state = fixture();
@@ -624,5 +626,89 @@ test("only verified system evidence retires the matching open manual helper acti
   });
   expect(
     value(retireVerifiedHelperAction(state, system, target, io)).events,
+  ).toEqual([]);
+});
+
+test("patrol completes only a matching open helper action with two passed checks, once", () => {
+  const io = ports(),
+    machine_id = "remote";
+  const system = { kind: "system", project_id: human.project_id } as const;
+  const state = {
+    ...fixture(),
+    machines: [{ ...machine(), id: machine_id, herdr_machine: machine_id }],
+  };
+  const key = helperKey(machine_id),
+    binding = "pinned";
+  const opened = value(
+    requestDeploymentAction(
+      state,
+      system,
+      {
+        key,
+        reason: "worker_maintenance",
+        instructions: "private text",
+        helper_upgrade: { machine_id, binding },
+      },
+      io,
+    ),
+  );
+  const pending = apply(state, opened);
+  const passed = { status: "passed", failed_steps: [] } as const;
+  const proof = {
+    human_action_id: opened.data.id,
+    machine_id,
+    binding,
+    key,
+    checks: { worker: passed, machine: passed },
+  };
+  for (const caller of [
+    human,
+    actor(5, "host_ops"),
+    { ...system, project_id: "other" },
+  ])
+    expect(completeVerifiedHelperAction(pending, caller, proof, io).ok).toBe(
+      false,
+    );
+  for (const change of [
+    { key: helperKey(machine_id, "b") },
+    { machine_id: "other" },
+    { binding: "other" },
+    {
+      checks: {
+        worker: passed,
+        machine: { ...passed, failed_steps: ["mismatch"] },
+      },
+    },
+  ])
+    expect(
+      value(
+        completeVerifiedHelperAction(
+          pending,
+          system,
+          { ...proof, ...change },
+          io,
+        ),
+      ).events,
+    ).toEqual([]);
+  const needs = (s: typeof pending) =>
+    value(listNeedsYou(s, human)).data.human_actions.map((h) => h.id);
+  expect(needs(pending)).toContain(opened.data.id);
+  const result = value(
+    completeVerifiedHelperAction(pending, system, proof, io),
+  );
+  expect(result.events.map((e) => e.type)).toEqual([
+    "worker_helper_upgrade_checked",
+    "human_action_completed",
+  ]);
+  expect(result.events[1]).toMatchObject({
+    actor: system,
+    created_at: now,
+    payload: { result: expect.stringContaining(machine_id) },
+  });
+  expect(JSON.stringify(result.events)).not.toMatch(/private text|pinned/);
+  const done = apply(pending, result);
+  expect(needs(done)).not.toContain(opened.data.id);
+  expect(
+    value(completeVerifiedHelperAction(done, system, proof, io)).events,
   ).toEqual([]);
 });

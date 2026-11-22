@@ -30,6 +30,7 @@ import {
   startBackupLoop,
   startReconcileLoop,
 } from "./reconcile-loop.js";
+import type { MachineHost } from "./web/machine-host.js";
 
 /**
  * M3.5: the control plane the server runs beside the MCP endpoint.
@@ -39,6 +40,7 @@ import {
  * `stop()` (loop + monitor drain) → close the MCP endpoint → close the Store.
  */
 export interface ControlPlaneOptions {
+  readonly machineHost?: MachineHost;
   readonly upstream?: LaunchConfig;
   readonly hostOpsTick?: () => Promise<void>;
   readonly harnessActivity?: DispatcherOptions["harnessActivity"];
@@ -265,6 +267,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       ? startMachineCapabilityLoop({
           store: options.store,
           runtime: options.runtime,
+          ...(options.machineHost
+            ? { verification: { host: options.machineHost, clock } }
+            : {}),
           onError: report,
         })
       : undefined;
