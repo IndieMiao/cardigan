@@ -26,6 +26,10 @@ class UpgradeTest(unittest.TestCase):
             (self.release / n).write_text('new-' + n)
             (self.lib / n).write_text('old-' + n)
         (self.release / 'extra').write_text('new-release')
+        # Mirror unpack()'s modes for this archive of non-executable files.
+        self.release.chmod(0o755)
+        for entry in self.release.iterdir():
+            entry.chmod(0o644)
         (self.live / 'previous').write_text('leave-intact')
         self.cfg = {'project': 'sample', 'rev': 'c' * 40, 'manifest': {p.name: digest(p) for p in self.release.iterdir()}}
         self.backup = self.root / ('deploy.bak-' + 'c' * 12 + '-' + hashlib.sha256(b'sample').hexdigest()[:20])
