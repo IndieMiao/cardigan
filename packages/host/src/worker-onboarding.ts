@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { stringify } from "yaml";
 import { CpuProfileDirectory } from "./cpu-profile-files.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
+import { parseRuntimeWorkers } from "./runtime-workers-config.js";
 import {
   checkWorkerDraft,
   checkWorkerSocketPaths,
@@ -231,6 +232,70 @@ export function withWorkerBindingCheck<T>(
   }
 }
 
+function checkedEnrollment(
+  config: WorkerOnboardingConfig,
+  dataDir: string,
+  dir: CpuProfileDirectory,
+  old?: WorkerJournal,
+) {
+  if (!old) return onboardingFail("worker_journal_missing");
+  const saved = readOnboardingYaml(
+    join(dir.path, `${config.worker.project_id}.runtime-workers.yaml`),
+  );
+  const enrolled = withWorkerEnvironment(config, saved, dataDir);
+  if (
+    old.digest !== enrolled.digest ||
+    onboardingDigest(saved) !== onboardingDigest(enrolled.runtime)
+  )
+    return onboardingFail("worker_config_changed");
+  return enrolled;
+}
+
+/** Use the enrollment for identity, but probe the environment actually in use.
+ * Only an explicit onboarding check can precede publication of the binding. */
+export function workerCheckConfig(
+  draft: WorkerOnboardingConfig,
+  configRoot: string,
+  dataDir: string,
+  mode: "check" | "bound" | "apply-config",
+): Pick<
+  WorkerOnboardingOptions,
+  "config" | "requireAppliedBinding" | "appliedEnvironment"
+> {
+  const current = readOnboardingYaml(join(configRoot, "runtime-workers.yaml"));
+  if (
+    mode === "check" &&
+    (current === undefined ||
+      !parseRuntimeWorkers(current, dataDir).some(
+        (w) =>
+          w.machine_id === draft.worker.machine_id &&
+          w.project_id === draft.worker.project_id,
+      ))
+  )
+    return { config: draft };
+  const config = withWorkerEnvironment(draft, current, dataDir);
+  checkWorkerDraft(config, current, dataDir, "bound");
+  // Verify before any automatic installation, not only in the subsequent worker
+  // check. The latter repeats this validation under the onboarding lock.
+  const { project_id: project, machine_id: machine } = config.worker;
+  const old = workerOnboardingStatus(configRoot, project, machine);
+  // An unchanged, already configured target need not have used the onboarding wizard.
+  if (
+    mode !== "apply-config" &&
+    config.digest === draft.digest &&
+    (!old || old.digest === config.digest)
+  )
+    return { config, requireAppliedBinding: true };
+  if (!old) return onboardingFail("worker_journal_missing");
+  const dir = machineDirectory(configRoot, machine, false);
+  try {
+    checkedEnrollment(config, dataDir, dir, old);
+  } finally {
+    dir.close();
+  }
+  return { config, appliedEnvironment: true };
+}
+
 export interface WorkerOnboardingOptions {
   readonly config: WorkerOnboardingConfig;
   readonly configRoot: string;
@@ -238,6 +303,8 @@ export interface WorkerOnboardingOptions {
   readonly mode: "add" | "resume" | "check";
   /** In check mode only, compare the effective environment against the durable enrollment. */
   readonly appliedEnvironment?: true;
+  /** Never fall back to pre-publication onboarding if the live binding disappears. */
+  readonly requireAppliedBinding?: true;
   /** Explicit acknowledgement of the exact newly parsed configuration. */
   readonly confirmConfig?: string;
   /** Only the interactive session can vouch for a completed prefix. CLI checks stay fresh. */
@@ -280,14 +347,8 @@ export async function onboardWorker(
     if (mode === "resume" && !old)
       return onboardingFail("worker_journal_missing");
     const enrolled = options.appliedEnvironment
-      ? mode === "check" && old
-        ? withWorkerEnvironment(
-            config,
-            readOnboardingYaml(
-              join(dir.path, `${project}.runtime-workers.yaml`),
-            ),
-            dataDir,
-          )
+      ? mode === "check"
+        ? checkedEnrollment(config, dataDir, dir, old)
         : onboardingFail("worker_journal_missing")
       : config;
     if (old && old.digest !== enrolled.digest && !confirmed)
@@ -296,7 +357,9 @@ export async function onboardWorker(
       config,
       readOnboardingYaml(join(configRoot, "runtime-workers.yaml")),
       dataDir,
-      "applied",
+      options.appliedEnvironment || options.requireAppliedBinding
+        ? "bound"
+        : "applied",
     );
     const binding = checkReservedBindings(root, enrolled, dataDir, confirmed);
     // Bind before registration too: a crash before draft publication must not

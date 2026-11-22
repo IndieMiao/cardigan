@@ -14,7 +14,7 @@ import {
   WORKER_STEPS,
   WorkerOnboardingError,
   type WorkerProbeRunner,
-  withWorkerEnvironment,
+  workerCheckConfig,
   workerJournalId,
   workerOnboardingStatus,
 } from "@cardigan/host";
@@ -162,14 +162,11 @@ export async function runWorkerCommand(
             ),
             dataDir,
           );
-          const config =
-            mode === "apply-config"
-              ? withWorkerEnvironment(
-                  draft,
-                  readOnboardingYaml(runtimeWorkersPath(io.env)),
-                  dataDir,
-                )
-              : draft;
+          const workerCheck =
+            mode === "apply-config" || mode === "check"
+              ? workerCheckConfig(draft, configRoot, dataDir, mode)
+              : { config: draft };
+          const { config } = workerCheck;
           if (
             pinned &&
             runtimeTargetBinding(config.worker).fingerprint !== pinned
@@ -226,11 +223,10 @@ export async function runWorkerCommand(
           };
 
           const passed = await onboardWorker({
-            config,
+            ...workerCheck,
             configRoot,
             dataDir,
             mode: mode === "apply-config" ? "check" : mode,
-            ...(mode === "apply-config" ? { appliedEnvironment: true } : {}),
             ...(flags["confirm-config"]
               ? { confirmConfig: flags["confirm-config"] }
               : {}),
