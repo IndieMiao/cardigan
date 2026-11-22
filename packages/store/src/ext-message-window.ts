@@ -111,6 +111,47 @@ export function invalidateExtHistory(
     });
 }
 
+/**
+ * C-580: record the push filter of the configuration being activated and
+ * return the cutoff of every enabled scope. A scope never seen before keeps
+ * no cutoff (0); one switched from off to on starts at the current event
+ * position. Project scopes no longer excluded are switched on. Caller owns
+ * the activation transaction.
+ */
+export function activateExtFilterMarks(
+  db: DatabaseSync,
+  kinds: Readonly<Record<string, boolean>>,
+  excludedProjects: readonly string[],
+): Map<string, number> {
+  const scopes = new Map<string, boolean>(
+    Object.entries(kinds).map(([kind, on]) => [`kind:${kind}`, on]),
+  );
+  for (const row of prepare(
+    db,
+    "SELECT scope FROM ext_message_filter_marks WHERE scope GLOB 'project:*'",
+  ).all())
+    scopes.set(String(row.scope), true);
+  for (const id of excludedProjects) scopes.set(`project:${id}`, false);
+  const marks = new Map<string, number>();
+  let now: number | undefined;
+  for (const [scope, on] of scopes) {
+    const row = prepare(
+      db,
+      "SELECT enabled,watermark FROM ext_message_filter_marks WHERE scope=?",
+    ).get(scope);
+    const was = row ? Number(row.enabled) === 1 : undefined;
+    let watermark = row ? Number(row.watermark) : 0;
+    if (on && was === false) watermark = now ??= extEventWatermark(db);
+    if (!row || was !== on || Number(row.watermark) !== watermark)
+      prepare(
+        db,
+        "INSERT OR REPLACE INTO ext_message_filter_marks(scope,enabled,watermark) VALUES(?,?,?)",
+      ).run(scope, on ? 1 : 0, watermark);
+    if (on) marks.set(scope, watermark);
+  }
+  return marks;
+}
+
 export function afterExtWatermark(
   db: DatabaseSync,
   project: string,

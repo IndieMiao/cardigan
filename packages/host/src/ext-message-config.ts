@@ -97,10 +97,7 @@ function parseFilter(value: unknown): ExtMessageFilter {
     excluded.length > extMaxExcludedProjects ||
     new Set(excluded).size !== excluded.length ||
     !excluded.every(
-      (id) =>
-        typeof id === "string" &&
-        id.length <= 64 &&
-        extProjectIdPattern.test(id),
+      (id) => typeof id === "string" && extProjectIdPattern.test(id),
     )
   )
     return invalid();

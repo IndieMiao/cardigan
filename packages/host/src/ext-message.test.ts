@@ -2084,7 +2084,7 @@ const noFailureTrace = () => {
   ).toBe(false);
 };
 
-test("C-580 without a filter section, decisions, actions and merge confirmations are pushed and notices are not", async () => {
+test("C-580 without a filter section, decisions and actions are pushed and notices never enter the queue", async () => {
   const path = join(dir, "ext-message.yaml");
   writeFileSync(
     path,
@@ -2095,8 +2095,7 @@ test("C-580 without a filter section, decisions, actions and merge confirmations
     }),
     { mode: 0o600 },
   );
-  const loaded = loadExtMessageConfig(path);
-  expect(loaded).toMatchObject({
+  expect(loadExtMessageConfig(path)).toMatchObject({
     status: "loaded",
     config: { filter: EXT_MESSAGE_FILTER_DEFAULTS },
   });
@@ -2110,30 +2109,92 @@ test("C-580 without a filter section, decisions, actions and merge confirmations
   await sender().tick();
   // Merge confirmations need a live completion; the domain contract covers them.
   expect(sentKinds().sort()).toEqual(["decision", "human_action"]);
-  // The notice never became pending: one silent skipped row, no audit noise.
-  expect(rows().filter((r) => r.item_kind === "notice")).toMatchObject([
-    { status: "skipped", attempts: 0 },
-  ]);
-  expect(events().some((e) => e.type === "ext_message_skipped")).toBe(false);
+  expect(rows().some((r) => r.item_kind === "notice")).toBe(false);
   noFailureTrace();
 });
 
-test("C-580 switching a kind on later pushes only its new items, never the backlog filtered while it was off", async () => {
+test("C-580 switching a kind back on never sends anything filtered while it was off, however large the backlog", async () => {
   config = { ...config, policy: { ...config.policy, max_per_minute: 100 } };
   sender().recordStatus();
-  addNotice();
+  // Observed while off (one tick), and created while off but never observed.
+  for (let n = 0; n < 40; n++) addNotice();
   await sender().tick();
+  for (let n = 0; n < 5; n++) addNotice();
   expect(fake.messages).toEqual([]);
   config = { ...config, filter: pushFilter({ notice: true }) };
-  // A new generation keeps the same channel epoch (the filter is not a rotation).
+  // The filter is not a rotation: the channel keeps its epoch.
   const epoch = outbox.extChannelActivation(store.database, "fake");
-  sender().recordStatus();
+  const on = sender();
+  on.recordStatus();
   expect(outbox.extChannelActivation(store.database, "fake")).toEqual(epoch);
-  await sender().tick();
+  await on.tick();
+  await on.tick();
   expect(fake.messages).toEqual([]);
+  addNotice();
+  await on.tick();
+  expect(sentKinds()).toEqual(["notice"]);
+  // Off and on again: the same cutoff applies once more.
+  config = { ...config, filter: pushFilter({ notice: false }) };
+  sender().recordStatus();
+  addNotice();
+  config = { ...config, filter: pushFilter({ notice: true }) };
+  const again = sender();
+  again.recordStatus();
+  await again.tick();
+  expect(sentKinds()).toEqual(["notice"]);
+});
+
+test("C-580 a rate-held item of a kind switched off is skipped at once and not sent when switched back on", async () => {
+  config = {
+    ...config,
+    policy: { ...config.policy, max_per_minute: 1 },
+    filter: pushFilter({ notice: true }),
+  };
+  sender().recordStatus();
+  addNotice();
   addNotice();
   await sender().tick();
   expect(sentKinds()).toEqual(["notice"]);
+  expect(rows().map((r) => [r.status, r.digest_id])).toContainEqual([
+    "pending",
+    "rate:queued",
+  ]);
+  advance(20_000);
+  config = { ...config, filter: pushFilter({ notice: false }) };
+  sender().recordStatus();
+  await sender().tick();
+  expect(rows().filter((r) => r.status === "pending")).toEqual([]);
+  expect(rows().filter((r) => r.status === "skipped")).toHaveLength(1);
+  advance(41_000);
+  config = { ...config, filter: pushFilter({ notice: true }) };
+  sender().recordStatus();
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  noFailureTrace();
+});
+
+test("C-580 skipping filtered rate-held members spends no slot and keeps the allowed members", async () => {
+  config = {
+    ...config,
+    policy: { ...config.policy, max_per_minute: 1 },
+    filter: pushFilter({ notice: true }),
+  };
+  sender().recordStatus();
+  addNotice();
+  addNotice();
+  addAction(1);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  config = { ...config, filter: pushFilter({ notice: false }) };
+  sender().recordStatus();
+  advance(61_000);
+  await sender().tick();
+  // The overflow summary counts only the action: the filtered notice left
+  // the batch without spending the slot.
+  expect(fake.messages).toHaveLength(2);
+  expect(fake.messages[1]).toMatchObject({ title: "1 条待处理" });
+  expect(rows().filter((r) => r.status === "pending")).toEqual([]);
+  noFailureTrace();
 });
 
 test("C-580 excluded projects are isolated: one project's filter never mutes another", async () => {
@@ -2151,18 +2212,18 @@ test("C-580 excluded projects are isolated: one project's filter never mutes ano
   addDecision(3, other);
   await sender().tick();
   expect(fake.messages.map((m) => m.project)).toEqual([project_id]);
-  expect(
-    rows()
-      .filter((r) => r.project_id === other)
-      .map((r) => r.status),
-  ).toEqual(["skipped", "skipped"]);
-  // Switching the projects around takes effect for each project's new items.
+  expect(rows().some((r) => r.project_id === other)).toBe(false);
+  // Swap the projects: each project's new items follow its own switch, and
+  // nothing from the time the other project was excluded is sent.
   config = { ...config, filter: pushFilter({}, [project_id]) };
   sender().recordStatus();
   addAction(4);
   addAction(5, other);
   await sender().tick();
-  expect(fake.messages.map((m) => m.project)).toEqual([project_id, other]);
+  expect(fake.messages.map((m) => [m.project, "item" in m && m.item])).toEqual([
+    [project_id, "H-1"],
+    [other, "H-5"],
+  ]);
 });
 
 test("C-580 a retry of a kind switched off stops without another attempt or failure notice", async () => {
@@ -2180,7 +2241,6 @@ test("C-580 a retry of a kind switched off stops without another attempt or fail
   expect(rows()).toMatchObject([{ status: "skipped", attempts: 1 }]);
   noFailureTrace();
   // Kinds still switched on keep retrying as before.
-  config = { ...config, filter: pushFilter({ human_action: true }) };
   addDecision(1);
   await sender().tick();
   expect(rows().find((r) => r.item_kind === "decision")).toMatchObject({
@@ -2225,9 +2285,7 @@ test("C-580 a sensitive item of a pushed kind still carries only the generic pro
       url: "https://workbench.invalid/#/p/p-fictional/cards/C-1?at=human-action-H-1",
     },
   ]);
-  expect(rows().find((r) => r.item_kind === "decision")?.status).toBe(
-    "skipped",
-  );
+  expect(rows().some((r) => r.item_kind === "decision")).toBe(false);
 });
 
 test("C-580 a saved filter is hot-loaded by the live sender within one tick", async () => {
@@ -2256,24 +2314,12 @@ test("C-580 a saved filter is hot-loaded by the live sender within one tick", as
   await live.tick();
   expect(fake.messages).toEqual([]);
   write({ human_action: true, notice: true });
+  await live.tick();
+  // H-1 arrived while actions were off and stays unsent.
+  expect(fake.messages).toEqual([]);
   addAction(2);
   addNotice();
   await live.tick();
   expect(sentKinds().sort()).toEqual(["human_action", "notice"]);
   await live.stop();
-});
-
-test("C-580 filtered backlog is recorded in bounded batches without sending", async () => {
-  sender().recordStatus();
-  for (let n = 0; n < 40; n++) addNotice();
-  const active = sender();
-  await active.tick();
-  expect(rows()).toHaveLength(32);
-  await active.tick();
-  expect(rows()).toHaveLength(40);
-  expect(rows().every((r) => r.status === "skipped")).toBe(true);
-  expect(fake.messages).toEqual([]);
-  // Complete: a later tick neither rescans into new rows nor sends.
-  await active.tick();
-  expect(rows()).toHaveLength(40);
 });

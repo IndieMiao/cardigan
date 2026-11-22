@@ -15,6 +15,7 @@ import { Tooltip } from "../components/Tooltip.js";
 import { Button } from "../components/ui/button.js";
 import {
   excludedFrom,
+  excludedMasked,
   formatValue,
   PUSH_LABELS,
   SECRET_LABELS,
@@ -142,6 +143,7 @@ function pushedProjects(
   config: FeishuSettingsView,
   projects: readonly ProjectSummary[] | undefined,
 ) {
+  if (excludedMasked(config)) return "已隐藏";
   const excluded = excludedFrom(config);
   if (!projects)
     return excluded.length ? `除 ${excluded.join("、")} 外全部` : "全部";
@@ -220,7 +222,7 @@ export function FeishuConfigGroups({
             setting={setting}
           />
         ))}
-        <SettingsRow label="项目">
+        <SettingsRow label="推送的项目">
           <SettingsValue>{pushedProjects(config, projects)}</SettingsValue>
         </SettingsRow>
       </SettingsGroup>

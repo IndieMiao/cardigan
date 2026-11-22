@@ -369,7 +369,7 @@ try {
   const feishuPush = async (width, theme, open) => {
     await open(
       "?feishu=connected&feishuConfig=1&feishuProjects=1#/p/p-1/settings?tab=feishu",
-      "[...document.querySelectorAll('[data-settings-row]')].some((r) => r.textContent === '项目全部')",
+      "[...document.querySelectorAll('[data-settings-row]')].some((r) => r.textContent === '推送的项目全部')",
     );
     await capture("feishu-push", width, theme);
     await feishuPress("编辑配置");
@@ -396,7 +396,7 @@ try {
     await feishuScene("feishu-push-preview", width, theme);
     await feishuPress("确认保存");
     await until(
-      "!document.querySelector('[role=dialog]') && [...document.querySelectorAll('[data-settings-row]')].some((r) => r.textContent === '项目Cardigan 自己')",
+      "!document.querySelector('[role=dialog]') && [...document.querySelectorAll('[data-settings-row]')].some((r) => r.textContent === '推送的项目Cardigan 自己')",
     );
     await capture("feishu-push-saved", width, theme);
   };

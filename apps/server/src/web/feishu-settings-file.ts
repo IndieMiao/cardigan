@@ -66,7 +66,7 @@ const url = z
   });
 // C-580: the same project identifiers the background loader accepts.
 const projects = z
-  .array(z.string().max(64).regex(extProjectIdPattern))
+  .array(z.string().regex(extProjectIdPattern))
   .max(extMaxExcludedProjects)
   .refine((ids) => new Set(ids).size === ids.length);
 // Only these paths can ever reach a diff, an audit row, or setIn(). Never serialize raw YAML.
@@ -296,7 +296,12 @@ export function publicSettings(f: FileState, settings = f.settings) {
   return Object.fromEntries(
     Object.entries(settings).map(([k, v]) => [
       k,
-      typeof v === "string" && values.some((s) => v.includes(s)) ? null : v,
+      // C-580: a list (excluded projects) is hidden whole if any member is.
+      (Array.isArray(v) ? v : [v]).some(
+        (m) => typeof m === "string" && values.some((s) => m.includes(s)),
+      )
+        ? null
+        : v,
     ]),
   );
 }

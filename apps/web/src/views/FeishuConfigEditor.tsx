@@ -42,7 +42,9 @@ import {
   PROJECTS_EDIT,
   PUSH_KINDS,
   PUSH_LABELS,
+  projectEdits,
   provedNotWritten,
+  replayProjectEdits,
   SECRET_LABELS,
   STALE,
   saveProblem,
@@ -218,7 +220,9 @@ export function FeishuConfigEditor({
           mine.has(f) ? draft.fields[f] : fresh.fields[f],
         ]),
       ) as FeishuDraft["fields"],
-      excluded: mine.has(PROJECTS_EDIT) ? draft.excluded : fresh.excluded,
+      // Only the projects this person changed; others follow the new read.
+      excluded: replayProjectEdits(fresh.excluded, projectEdits(base, draft)),
+      projectsTouched: draft.projectsTouched,
       retyped: new Set(
         [...draft.retyped].filter((f) => maskedFields(next).includes(f)),
       ),
@@ -340,6 +344,7 @@ export function FeishuConfigEditor({
     setEdited((old) => new Set(old).add(PROJECTS_EDIT));
     setDraft((old) => ({
       ...old,
+      projectsTouched: true,
       excluded: pushed
         ? old.excluded.filter((id) => id !== project)
         : [...new Set([...old.excluded, project])].sort(),
@@ -432,6 +437,7 @@ export function FeishuConfigEditor({
     </label>
   );
 
+  const names = new Map((projects ?? []).map((p) => [p.id, p.name]));
   // Excluded projects no longer listed stay choosable by their identifier.
   const choices = [
     ...(projects ?? []).map((p) => ({ id: p.id, name: p.name })),
@@ -458,13 +464,13 @@ export function FeishuConfigEditor({
                   <SettingsDiff op="remove">
                     {line.key.startsWith("secrets.")
                       ? formatSecretDiff("before", line.before)
-                      : safe(formatValue(line.key, line.before))}
+                      : safe(formatValue(line.key, line.before, names))}
                   </SettingsDiff>
                   {" → "}
                   <SettingsDiff op="add">
                     {line.key.startsWith("secrets.")
                       ? formatSecretDiff("after", line.after)
-                      : safe(formatValue(line.key, line.after))}
+                      : safe(formatValue(line.key, line.after, names))}
                   </SettingsDiff>
                 </SettingsFact>
               ))}
@@ -553,6 +559,9 @@ export function FeishuConfigEditor({
                   </label>
                 ))}
               </div>
+              {shown(PROJECTS_EDIT) && (
+                <SettingsWarning>{shown(PROJECTS_EDIT)}</SettingsWarning>
+              )}
             </fieldset>
           </SettingsDialogFields>
         </SettingsSection>

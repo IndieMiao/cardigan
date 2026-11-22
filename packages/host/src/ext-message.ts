@@ -17,6 +17,7 @@ import {
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   activateExtChannels,
+  activateExtFilterMarks,
   afterExtWatermark,
   claimExtMessage,
   closeExtRateBatch,
@@ -47,7 +48,6 @@ import {
   type StoreTransactionContext,
   saveExtQuietOverflow,
   settleExtMessage,
-  skipFilteredExtMessage,
 } from "@cardigan/store";
 import {
   type ExtMessageConfig,
@@ -136,7 +136,6 @@ function planChannel(
   through: number | null,
   slots: number,
   now: string,
-  filtered: ReadonlySet<string> = new Set(),
 ) {
   const previous = extQuietOverflow(store.database, project, channel);
   const remembered = new Set<string>(
@@ -171,23 +170,7 @@ function planChannel(
     assignedRate: boolean;
   }[] = [];
   let newRows = 0;
-  // C-580: filtered items never enter the queue; a skipped row keeps them out
-  // even after their kind or project is switched on again.
-  const skips: ExtMessageItem[] = [];
-  let skipsIncomplete = false;
   for (const item of items) {
-    if (filtered.has(itemKey(item.kind, item.item_id))) {
-      // Bounded like new rows; the rest follow on the next projection.
-      if (
-        !item.handled &&
-        afterExtWatermark(store.database, project, item.event_id, watermark) &&
-        !hasExtMessage(store.database, item, channel)
-      ) {
-        if (skips.length < projectionBatch) skips.push(item);
-        else skipsIncomplete = true;
-      }
-      continue;
-    }
     if (
       item.handled ||
       !afterExtWatermark(store.database, project, item.event_id, watermark)
@@ -312,12 +295,11 @@ function planChannel(
     return {
       channel,
       writes,
-      skips,
       admissions,
       collecting,
       singles,
       hasRate,
-      complete: complete && !skipsIncomplete && next === null,
+      complete: complete && next === null,
       incompleteDigest,
       incompleteOrdinary,
       previous,
@@ -327,6 +309,21 @@ function planChannel(
   return { ...classify(slots), classify };
 }
 
+/**
+ * C-580: record the push filter of a loaded configuration; a kind or project
+ * switched back on starts after the current event position. The settings
+ * publication calls this under the same writer lock as its channel
+ * activation, so nothing created between saving and the background reload is
+ * lost or replayed.
+ */
+export function activateExtMessageFilter(
+  db: Store["database"],
+  c: ExtMessageConfiguration,
+) {
+  if (c.status !== "loaded") return undefined;
+  const filter = c.config.filter ?? EXT_MESSAGE_FILTER_DEFAULTS;
+  return activateExtFilterMarks(db, filter.kinds, filter.excluded_projects);
+}
 export function extFingerprints(
   c: ExtMessageConfiguration,
   applicationActive: boolean,
@@ -369,19 +366,24 @@ export class ExtMessageSender {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
   }
   private activations?: Map<string, ExtChannelActivation>;
+  /** C-580: cutoff per enabled filter scope (`kind:…`, `project:…`). */
+  private filterMarks = new Map<string, number>();
   private observedBinding?: string;
   private activate(tx?: StoreTransactionContext): void {
     if (this.activations) return;
     const { configuration: c, store } = this.options;
     const fingerprints = extFingerprints(c, !!this.app);
-    const activate = (tx: StoreTransactionContext) =>
-      activateExtChannels(
+    const activate = (tx: StoreTransactionContext) => {
+      const marks = activateExtMessageFilter(store.database, c);
+      if (marks) this.filterMarks = marks;
+      return activateExtChannels(
         store.database,
         tx,
         fingerprints,
         this.clock.now(),
         c.status === "loaded" ? c.publication : undefined,
       );
+    };
     this.activations = tx ? activate(tx) : store.uow.run(activate);
   }
   private current(channel: string) {
@@ -687,16 +689,35 @@ export class ExtMessageSender {
       )
         return;
       const state = loadCommandState(tx, projectId);
+      // C-580: a filtered item is treated as handled: never queued, and a
+      // queued, retrying or rate-held row settles as skipped (no failure
+      // notice). Items from before a scope was switched back on stay filtered.
       const filter = config.filter ?? EXT_MESSAGE_FILTER_DEFAULTS;
+      const after = (scope: string, item: ExtMessageItem) => {
+        const mark = this.filterMarks.get(scope);
+        return (
+          !mark ||
+          afterExtWatermark(store.database, projectId, item.event_id, mark)
+        );
+      };
       const filtered = new Set<string>();
-      // Pending and retrying rows of a filtered item settle as skipped, like
-      // a handled item: no further attempt and no failure notice.
-      const sourceItems = extMessageItems(state, projectId);
-      const items = sourceItems.map((item) => {
-        if (extMessageAllowed(filter, item)) return item;
+      const items = extMessageItems(state, projectId).map((item) => {
+        if (
+          extMessageAllowed(filter, item) &&
+          after(`kind:${item.kind}`, item) &&
+          after(`project:${item.project_id}`, item)
+        )
+          return item;
         filtered.add(itemKey(item.kind, item.item_id));
         return { ...item, handled: true };
       });
+      const filteredRows = channels.flatMap((channel) =>
+        pendingExtMessages(store.database, projectId, channel).filter(
+          (row) =>
+            filtered.has(itemKey(row.item_kind, row.item_id)) &&
+            !(row.lease_until && row.lease_until > now),
+        ),
+      );
       const quiet = extMessageQuiet(config, now);
       const plans =
         projected && !config.quiet_hours
@@ -706,30 +727,48 @@ export class ExtMessageSender {
                 store,
                 projectId,
                 channel,
-                sourceItems,
+                items,
                 config,
                 quiet,
                 watermarks.get(channel)!,
                 rateBatches.get(channel)!,
                 available(channel, now),
                 now,
-                filtered,
               ),
             );
       return {
         cursor,
         plans,
+        filteredRows,
         version,
         state,
         items: new Map(items.map((i) => [itemKey(i.kind, i.item_id), i])),
       };
     });
     if (!plan) return;
+    // C-580: settle filtered queue rows before any quota, rate batch or
+    // digest decision, so they never spend a slot or join a later send.
+    if (plan.filteredRows.length)
+      plan.version = store.uow.run((tx) => {
+        const at = this.clock.now();
+        const unchanged = store.snapshotVersion(projectId) === plan.version;
+        for (const row of plan.filteredRows) {
+          const fresh = getExtMessage(store.database, row);
+          if (
+            fresh?.status !== "pending" ||
+            fresh.lease_id !== row.lease_id ||
+            (fresh.lease_until !== null && fresh.lease_until > at)
+          )
+            continue;
+          this.settle(tx, fresh, "skipped", null, at, at);
+        }
+        // Only our own audits changed the snapshot; later claims may use it.
+        return unchanged ? store.snapshotVersion(projectId)! : plan.version;
+      });
     if (
       plan.plans.some(
         (p) =>
           p.writes.length ||
-          p.skips.length ||
           p.admissions.length ||
           p.previous !== p.next ||
           (p.singles.size &&
@@ -773,8 +812,6 @@ export class ExtMessageSender {
             deferExtRateBatch(store.database, p.channel);
           for (const { item, channel, group } of p.writes)
             projectExtMessage(store.database, item, channel, enqueueAt, group);
-          for (const item of p.skips)
-            skipFilteredExtMessage(store.database, item, p.channel, enqueueAt);
           for (const { row, group } of p.admissions)
             if (group === "queued") markExtQuiet(store.database, row);
             else groupExtMessage(store.database, row, group);

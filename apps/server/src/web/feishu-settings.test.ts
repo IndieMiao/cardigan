@@ -660,3 +660,78 @@ test.each([
     expect(readFileSync(path, "utf8")).toBe(original);
   },
 );
+test("C-580 a kind switched back on is cut off at the save, not at the later background reload", async () => {
+  fixture();
+  const db = h.store.database;
+  const mark = () =>
+    db
+      .prepare(
+        "SELECT enabled,watermark FROM ext_message_filter_marks WHERE scope='kind:notice'",
+      )
+      .get();
+  new ExtMessageSender({
+    store: h.store,
+    configuration: loadExtMessageConfig(path),
+    startApplication: () => undefined,
+  }).recordStatus();
+  expect(mark()).toEqual({ enabled: 0, watermark: 0 });
+  const p = await preview({ settings: { "filter.notice": true } });
+  expect((await confirm(p)).status).toBe(200);
+  const atSave = extEventWatermark(db);
+  expect(mark()).toEqual({ enabled: 1, watermark: atSave });
+  // Facts recorded after the save are after the cutoff; a background reload
+  // of the same publication keeps it.
+  h.store.uow.run((tx) =>
+    tx.events.append(project_id, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project_id),
+      type: "host_role_upgraded",
+      actor: { kind: "system", project_id },
+      created_at: new Date().toISOString(),
+      payload: {},
+    }),
+  );
+  new ExtMessageSender({
+    store: h.store,
+    configuration: loadExtMessageConfig(path),
+    startApplication: () => undefined,
+  }).recordStatus();
+  expect(mark()).toEqual({ enabled: 1, watermark: atSave });
+});
+test("C-580 an excluded project list holding a credential is hidden on read and cannot be previewed until corrected", async () => {
+  fixture();
+  // A hand-edited list whose member equals the synthetic tenant key.
+  writeFileSync(
+    path,
+    `${settings()}filter:\n  excluded_projects: [cardigan, ${tenant}]\n`,
+    { mode: 0o600 },
+  );
+  const read = await state();
+  expect(read.settings["filter.excluded_projects"]).toBeNull();
+  const r = await get();
+  expect(r.body).not.toContain(tenant);
+  const { version } = read;
+  const unsafe = await post("preview", {
+    version,
+    change: { settings: { "filter.notice": true } },
+  });
+  expect(unsafe.status).toBe(400);
+  expect(unsafe.body).not.toContain(tenant);
+  const fixed = await preview({
+    settings: { "filter.excluded_projects": ["cardigan"] },
+  });
+  expect(JSON.stringify(fixed)).not.toContain(tenant);
+  expect(fixed.diff).toEqual([
+    { key: "filter.excluded_projects", before: null, after: ["cardigan"] },
+  ]);
+});
+test("C-580 any project identifier the CLI can create can be excluded", async () => {
+  fixture();
+  const long = `p${"x".repeat(200)}`;
+  const p = await preview({ settings: { "filter.excluded_projects": [long] } });
+  expect((await confirm(p)).status).toBe(200);
+  expect(loadExtMessageConfig(path)).toMatchObject({
+    status: "loaded",
+    config: { filter: { excluded_projects: [long] } },
+  });
+});
