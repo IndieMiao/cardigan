@@ -94,6 +94,10 @@ import {
   suggestionProgressEvents,
   suggestionProgressToken,
 } from "./suggestion-progress.js";
+import {
+  systemMergeEnabled,
+  systemMergeHumanReason,
+} from "./system-merge-policy.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import {
   autoResumeUsed,
@@ -862,6 +866,21 @@ function pmHandleSystemMerge(
     q.options.some((o) => o.key === p.option),
     "validation_failed",
     "Option is not part of this decision",
+  );
+  // A human-only reason (sensitive card, policy change, ...) that the system
+  // has not handed over yet still keeps PM out, as before.
+  const card = q.card_id ? d.card(q.card_id) : undefined;
+  const humanReason =
+    !card || !systemMergeEnabled(d.state, card)
+      ? "自动合并授权已关闭，须由人处理。"
+      : (systemMergeHumanReason(d.state, q) ??
+        (mergeRequiresHuman(d.state, q)
+          ? "此合并确认须由人处理。"
+          : undefined));
+  ensure(
+    !humanReason,
+    "unauthorized",
+    `${humanReason ?? ""}PM 不能暂缓或退回，请交人在 Workbench 或本机 CLI 处理`,
   );
   text(p.rationale, "rationale");
   ensure(

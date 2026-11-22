@@ -4,9 +4,12 @@ import {
   type Assignment,
   type CommandState,
   type Decision,
+  expireMergeSnoozes,
   notices,
   recordDecision,
   resolveDelegatedDecision,
+  setCardSensitive,
+  setProjectPreferences,
   standingTools,
   systemConfirmMerge,
 } from "../index.js";
@@ -294,5 +297,120 @@ test("C-591: PM Office returns a system-held merge confirmation citing the quote
   expect(notices(f.state)[0]).toMatchObject({
     decision_id: q.id,
     option: "request_changes",
+  });
+});
+
+test("C-591: once the card needs the human, PM can no longer hold or return the not-yet-handed-over system confirmation", async () => {
+  const { f, q } = await setup();
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
+  expect(decision(f.state, q)).toMatchObject({
+    decider: "system",
+    status: "open",
+  });
+  for (const option of ["hold", "request_changes"]) {
+    expect(
+      resolveDelegatedDecision(
+        f.state,
+        standing(ops),
+        { decision_id: q.id, option, rationale: "按图 2 返工", notice: basis },
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+    expect(
+      recordDecision(
+        f.state,
+        standing(office),
+        {
+          decision_id: q.id,
+          option,
+          rationale: "按图 2 返工",
+          raw_quote: basis,
+        },
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+  }
+});
+
+const hold = (f: Awaited<ReturnType<typeof setup>>["f"], q: Decision) =>
+  f.commit(
+    resolveDelegatedDecision(
+      f.state,
+      standing(ops),
+      {
+        decision_id: q.id,
+        option: "hold",
+        rationale: "等人确认图 2",
+        notice: basis,
+      },
+      f.io,
+    ),
+  );
+
+test("C-591: turning auto merge off during a PM hold hands the confirmation to the human at once", async () => {
+  const { f, q } = await setup();
+  hold(f, q);
+  f.commit(setProjectPreferences(f.state, human, { auto_merge: "off" }, f.io));
+  expect(decision(f.state, q)?.status).toBe("superseded");
+  expect(f.state.decisions.at(-1)).toMatchObject({
+    trigger: "merge_confirmation",
+    decider: "human",
+    status: "open",
+    amends: q.id,
+  });
+});
+
+test("C-591: a PM hold that expires after the card became sensitive goes to the human, not back to the system", async () => {
+  const { f, q } = await setup();
+  const held = hold(f, q);
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
+  expect(decision(f.state, q)?.status).toBe("snoozed");
+  const until = held.snooze?.until;
+  if (!until) throw new Error("Missing snooze");
+  expect(
+    f.commit(
+      expireMergeSnoozes(f.state, system, {
+        ...f.io,
+        clock: { now: () => until },
+      }),
+    ),
+  ).toEqual([]);
+  expect(decision(f.state, q)?.status).toBe("superseded");
+  expect(f.state.decisions.at(-1)).toMatchObject({
+    decider: "human",
+    status: "open",
+    human_required_reason: expect.any(String),
+  });
+});
+
+test("C-591: a PM hold on a still-eligible system confirmation resumes to the system on expiry", async () => {
+  const { f, q } = await setup();
+  const held = hold(f, q);
+  const until = held.snooze?.until;
+  if (!until) throw new Error("Missing snooze");
+  const resumed = f.commit(
+    expireMergeSnoozes(f.state, system, {
+      ...f.io,
+      clock: { now: () => until },
+    }),
+  );
+  expect(resumed.map((v) => v.id)).toEqual([q.id]);
+  expect(decision(f.state, q)).toMatchObject({
+    decider: "system",
+    status: "open",
   });
 });

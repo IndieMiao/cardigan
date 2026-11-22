@@ -14,7 +14,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
-import { mergeContext } from "./merge.js";
+import { mergeContext, syncSystemMerge } from "./merge.js";
 import { projectPreferences } from "./preferences.js";
 
 /** C-180: query shared by the stall detector and its callers. */
@@ -168,6 +168,13 @@ export function expireMergeSnoozes(
         ),
       };
       d.put("decisions", next);
+      // C-591: a system-held confirmation PM held is rechecked on expiry, so a
+      // policy or sensitivity change during the hold is handed to the human.
+      const card = d.list("cards").find((c) => c.id === cardId);
+      if (current && next.decider === "system" && card) {
+        syncSystemMerge(d, card);
+        if (d.get("decisions", q.id).status !== "open") continue;
+      }
       if (!current) {
         d.emit("decision_superseded", q.card_id, {
           decision_id: q.id,
