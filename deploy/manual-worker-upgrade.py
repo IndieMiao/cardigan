@@ -1,5 +1,6 @@
 """Run only from the verified administrator copy. Binding and manifest come from the controller."""
 import base64
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -16,6 +17,7 @@ import tarfile
 import tempfile
 
 
+DEPLOY_OWNER = (0, 0)  # root:root (Linux), root:wheel (Darwin)
 HELPERS = ('worker-primitives.py', 'worker-files.py', 'worker-git.py')
 
 
@@ -71,13 +73,52 @@ def install(source, target, gid):
     os.replace(out.name, target)
 
 
-def upgrade_files(work, release, live, lib, gid, b, installed, run_installer):
+def exchange_directories(live, pending):
+    # Both names are on the same protected volume. Unsupported filesystems fail
+    # closed; two successive renames would temporarily remove the shared entry.
+    libc = ctypes.CDLL(None, use_errno=True)
+    paths = os.fsencode(live), os.fsencode(pending)
+    if platform.system() == 'Darwin':
+        result = libc.renamex_np(*paths, 2)  # RENAME_SWAP
+    else:
+        result = libc.renameat2(-100, paths[0], -100, paths[1], 2)  # AT_FDCWD, RENAME_EXCHANGE
+    if result != 0:
+        raise OSError(ctypes.get_errno(), 'deploy_atomic_exchange_failed')
+
+
+def matches_release(live, release, manifest, acl_safe):
+    # Only descend into protected directories and hash regular files of the
+    # verified release's size. Identical bytes in a writable tree are not a hit.
+    def same(path, expected):
+        s = path.lstat()
+        e = expected.stat()
+        if ((s.st_uid, s.st_gid) != DEPLOY_OWNER or s.st_mode != e.st_mode
+                or s.st_mode & 0o022):
+            return False
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not acl_safe(fd):
+                return False
+            if stat.S_ISDIR(s.st_mode):
+                return (set(os.listdir(path)) == set(os.listdir(expected)) and
+                        all(same(path / n, expected / n) for n in os.listdir(expected)))
+            return (stat.S_ISREG(s.st_mode) and s.st_nlink == 1 and s.st_size == e.st_size
+                    and digest(path) == manifest[path.relative_to(live).as_posix()])
+        finally:
+            os.close(fd)
+    return same(live, release)
+
+
+def upgrade_files(work, release, live, lib, gid, b, installed, run_installer, acl_safe):
     # The caller holds the protected installation-directory lock. Never overwrite a
     # previous backup; a partially completed upgrade needs an operator, not a retry.
     tag = b['rev'][:12]
-    backup = live.with_name('deploy.bak-' + tag)
-    pending = live.with_name('deploy.new-' + tag)
-    require(not os.path.lexists(backup) and not os.path.lexists(pending), 'existing_deploy_backup_or_stage')
+    # The release directory is shared; keep a distinct restore point per binding.
+    deploy_tag = tag + '-' + hashlib.sha256(b['project'].encode()).hexdigest()[:20]
+    backup = live.with_name('deploy.bak-' + deploy_tag)
+    pending = live.with_name('deploy.new-' + deploy_tag)
+    require(not any(os.path.lexists(p) for p in (backup, pending, live.with_name('deploy.bak-' + tag),
+            live.with_name('deploy.new-' + tag))), 'existing_deploy_backup_or_stage')
     mac = b['os'] == 'darwin'
     manifest = b['manifest']
     old = {n: installed(lib / n) for n in HELPERS}
@@ -94,15 +135,17 @@ def upgrade_files(work, release, live, lib, gid, b, installed, run_installer):
         require(digest(dest) == old[name], 'helper_backup_digest: ' + name)
         print('helper 备份：', dest, flush=True)
 
-    shutil.copytree(release, pending)
-    # Recheck the actual new tree on the destination volume before moving the live tree.
-    require({p.relative_to(pending).as_posix(): digest(p) for p in pending.rglob('*') if p.is_file()} == manifest,
-            'deploy_copy_digest')
-    for p in (pending, *pending.rglob('*')):
-        os.chown(p, 0, 0)  # root:root (Linux), root:wheel (Darwin)
-    live.rename(backup)
-    print('deploy 备份：', backup, flush=True)
-    pending.rename(live)
+    if not matches_release(live, release, manifest, acl_safe):
+        shutil.copytree(release, pending)
+        require({p.relative_to(pending).as_posix(): digest(p) for p in pending.rglob('*') if p.is_file()} == manifest,
+                'deploy_copy_digest')
+        for p in (pending, *pending.rglob('*')):
+            os.chown(p, *DEPLOY_OWNER)
+        exchange_directories(live, pending)
+        # After the single switch even an interruption here leaves live usable;
+        # pending still contains the untouched old tree until filed as a backup.
+        pending.rename(backup)
+        print('deploy 备份：', backup, flush=True)
     if not mac:
         name = HELPERS[0]
         if old[name] is not None and old[name] != manifest[name]:
@@ -133,8 +176,7 @@ def upgrade(encoded):
     installer = runpy.run_path(str(release / 'install-macos-worker.py'))
     native = runpy.run_path(str(release / 'worker-primitives.py'))
     live = Path('/opt/cardigan/deploy')
-    config_path = Path('/Library/Cardigan/worker.json' if mac else '/etc/cardigan/worker.json')
-    cfg = installer['trusted_json'](config_path)
+    config_path, cfg = installer['select_binding'](installer['binding_inventory'](platform.system()), b['project'])
     account = pwd.getpwnam(cfg['account'])
     require(cfg['project'] == b['project'] and cfg['root'] == b['root'] and
             cfg['account'] == b['account'] and cfg['uid'] == account.pw_uid > 0 and
@@ -152,6 +194,6 @@ def upgrade(encoded):
         def check(flag):
             subprocess.run([sys.executable, '-IB', str(entry), '--config', str(config_path), flag], check=True)
         upgrade_files(work, release, live, lib, account.pw_gid, b,
-                      lambda p: installed_digest(p, account.pw_gid, native['acl_safe']), check)
+                      lambda p: installed_digest(p, account.pw_gid, native['acl_safe']), check, native['acl_safe'])
     finally:
         os.close(fd)

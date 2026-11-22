@@ -71,7 +71,7 @@ export function finishUpgrade(
       project,
       { now },
       `worker-upgrade:${machine}:${key}`,
-      `机器 ${machine} 的 helper 自动升级未获验证（${stage}），已保持停派，本版本不会再次自动安装。请主机运维检查发行签名、受限入口及 worker / machine check，再按接入文档恢复。`,
+      `项目 ${project} 的机器 ${machine} 的 helper 自动升级未获验证（${stage}），已保持停派，本版本不会再次自动安装。请主机运维检查发行签名、受限入口及 worker / machine check，再按接入文档恢复。`,
     );
 }
 // This runs in the terminal journal transaction, never in a runtime/SSH probe.

@@ -98,7 +98,7 @@ export async function patrolHelperUpgrade(
             project,
             { now: () => new Date().toISOString() },
             `worker-upgrade:${machine}:${key}`,
-            `机器 ${machine} 的升级中断且已退出自动更新。请按当前版本人工恢复并顺序运行 worker check、machine check。`,
+            `项目 ${project} 的机器 ${machine} 的升级中断且已退出自动更新。请按当前版本人工恢复并顺序运行 worker check、machine check。`,
           );
       });
     }
