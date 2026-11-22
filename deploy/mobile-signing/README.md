@@ -25,3 +25,33 @@ Q-963 只批准开发与隔离测试。不开开关、不配置专用账号、�
 - Android：只收有 AndroidManifest 且包名匹配的未签 APK；固定别名签名，必须通过 `apksigner verify --print-certs`、唯一证书指纹和输出包名核对。不收 AAB。
 - iOS：ZIP 内唯一 `.xcarchive`，`Products/Applications` 下一个设备 `.app`，只接受未签 arm64 iOS 主程序与清单列出的普通 framework；允许归档外层 dSYM，不支持扩展、模拟器、通用切片、链接、已有签名/描述文件或未知可执行体。授权项必须与锁定的描述文件精确相容，不猜测通配符。由内到外逐项签名，核对团队、证书、Bundle ID 与授权项，再整体严格验签。交付摘要针对最终的 `.xcarchive.zip` 字节，不是目录摘要。两端都限制单包及展开总量 512 MiB、成员数 16000；不接受 ZIP64、归档注释、路径别名和非常规文件，超限留人工离线处理。
 - 自动化夹具检查拒绝、重放、账本中断和签名调用/验签顺序，不能证明真实钥匙串、厂商工具链或现场账号隔离。合并后按 H-156 用测试身份核对普通 Run 无法读取、导出或绕过服务签名；最后与打包卡各自核准一个实际候选，记录输入/输出摘要、请求号、卡/Run 和独立验签结论。生产签名须另行逐件许可；商店、TestFlight 与下载站还需**单独**由人确认发布件摘要、版本、目标与渠道。
+
+## 升级已有签名端程序（管理员）
+
+C-548/C-551 只更新项目 worker 的三个 helper，**不更新独立签名端**。先确认含修复的控制主机发行版已部署成功。从该次部署记录定位不可变发行目录，不从 Git 工作树、Run 或待签附件取程序。在其 `deploy/mobile-signing` 目录执行：
+
+```sh
+/usr/bin/shasum -a 256 archives.py common.py host.py platforms.py worker.py | /usr/bin/shasum -a 256
+```
+
+通过受信管理通道把这五个文件放到签名机管理员专用暂存目录（`$STAGE`），另从控制主机记录取得上面输出的 64 位摘要（`$EXPECTED`，不要在签名机从待装文件计算期望值）。暂缓新签名并等在途请求结束。确认 `/opt/cardigan/deploy` 及祖先由管理员控制、无 Run/签名账号写权限或可写 ACL，目标是真实的**纯程序目录**，策略、密钥和审计账本均另存。管理员在签名机执行这一条命令；它只安装固定五份文件，核验新副本后才移开旧版：
+
+```sh
+sudo /bin/sh -eu -c '
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+  cd /opt/cardigan/deploy
+  test -d mobile-signing && test ! -L mobile-signing || exit 1
+  work=$(mktemp -d .signer-upgrade.XXXXXX)
+  mkdir -m 0755 "$work/new"
+  for f in archives.py common.py host.py platforms.py worker.py; do
+    install -o root -g wheel -m 0644 "$1/$f" "$work/new/$f"
+  done
+  actual=$(cd "$work/new" && shasum -a 256 archives.py common.py host.py platforms.py worker.py | shasum -a 256)
+  test "${actual%% *}" = "$2"
+  mv mobile-signing "$work/previous"
+  mv "$work/new" mobile-signing || { mv "$work/previous" mobile-signing; exit 1; }
+  printf "已安装；旧版保留在 %s/previous\n" "$work"
+' sh "${STAGE:?需提供管理员暂存目录绝对路径}" "${EXPECTED:?需提供控制主机发行版摘要}"
+```
+
+若切换中断，保持停签，检查 `.signer-upgrade.*/previous`；确认本次备份后可恢复到原程序目录。不要改授权、删除账本或从工作树补文件。forced command 每次新建 Python 进程，下次连接即用新版。先验安装目录摘要与控制主机一致再恢复请求。新主机的 `show <id>` 在 `worker_receipt.failure_category` 显示签名端记录的固定失败类别；其中 `archive_member_name` 表示路径名或路径别名被拒，`archive_too_large` 表示数量或大小超限，`package_mismatch` 表示包名不符，`apksigner_failed` 表示签名或验签失败。断连先 `reconcile <id>` 再 `show`。旧版失败回执没有该字段，不能据此推断原因。重送要在新 Run 中用新请求号重新登记并核准原候选摘要；不要沿用失败的批准。
