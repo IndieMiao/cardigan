@@ -7,7 +7,7 @@ import zipfile
 from common import LIMIT, require
 
 
-SEGMENT = re.compile(r'[a-zA-Z0-9_+@.][a-zA-Z0-9_.$@+ -]*')
+SEGMENT = re.compile(r'[a-zA-Z0-9_+@.-][a-zA-Z0-9_.$@+ -]*')
 LOCAL_HEADER = struct.Struct('<4s14xIIHH')  # signature, sizes, name/extra lengths
 
 
@@ -57,8 +57,10 @@ def inspect_zip(path, dest=None, *, apk=False):
             parts = name.split('/')
             # No empty/absolute segments, trailing dots/spaces (including . and ..),
             # separators other than '/', or control characters, even for APKs.
+            # Only APKs may start a segment with '.' (Godot) or '-' (AAPT2 shortened
+            # resources); member names never reach a tool's argv.
             require(len(name)<=512 and len(parts)<=32 and all(
-                SEGMENT.fullmatch(p) and (apk or not p.startswith('.')) and not p.endswith((' ', '.')) for p in parts), 'archive_member_name')
+                SEGMENT.fullmatch(p) and (apk or not p.startswith(('.', '-'))) and not p.endswith((' ', '.')) for p in parts), 'archive_member_name')
             require(not (i.flag_bits & 1) and i.compress_type in (0,8))
             require(stat.S_IFMT(i.external_attr >> 16) in (0, stat.S_IFDIR if i.is_dir() else stat.S_IFREG))
             require(name not in seen, 'archive_member_name')
