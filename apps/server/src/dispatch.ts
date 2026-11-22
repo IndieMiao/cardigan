@@ -2173,13 +2173,6 @@ export class Dispatcher {
           ),
         );
         persistEffect(tx, project, limits);
-        if (
-          job.assignment.scope === "work_item" &&
-          limits.data.includes(job.assignment.work_item_id)
-        ) {
-          withdrawBellAttempt(store.database, project, job.attempt.id);
-          return false;
-        }
         state = loadCommandState(tx, project);
       }
       const run = state.runs.find((r) => r.id === job.run.id);

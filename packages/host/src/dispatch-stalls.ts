@@ -12,6 +12,7 @@ import {
   hasRunTarget,
   type Notification,
   pmNotificationState,
+  reviewDiscussionInstruction,
   reviewWakeBlocked,
   runById,
   runsOf,
@@ -209,6 +210,10 @@ export function dispatchStallCauses(
       if (!hasRunTarget(a, state)) return "no_target";
       if (
         w &&
+        !(
+          w.status === "waiting_decision" &&
+          reviewDiscussionInstruction(w, trigger)
+        ) &&
         !["in_progress", "ready", "todo", "changes_requested"].includes(
           w.status,
         )
@@ -235,7 +240,8 @@ export function dispatchStallCauses(
       ...(handoff ? { handoff_event_id: handoff.id } : {}),
       ...(trigger &&
       (trigger.type === "review_submitted" ||
-        trigger.type === "decision_resolved")
+        trigger.type === "decision_resolved" ||
+        (w && reviewDiscussionInstruction(w, trigger)))
         ? { review_trigger_id: trigger.id }
         : {}),
       age_ms: age,

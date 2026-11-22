@@ -46,6 +46,25 @@ export function sharedReworkItem(state: State, q: Decision) {
   );
 }
 
+/** Only domain-issued, item-addressed instructions can start a discussion. A
+ * proposal request must belong to the assigned strategy, not match prose. */
+export function reviewDiscussionInstruction(item: WorkItem, event?: Event) {
+  if (
+    item.kind !== "verify" ||
+    event?.type !== "instruction_issued" ||
+    event.card_id !== item.card_id
+  )
+    return false;
+  const p = event.payload as {
+    work_item_id?: string;
+    decision_id?: string;
+  };
+  return (
+    p?.work_item_id === item.id &&
+    (p.decision_id === undefined || p.decision_id === item.review_plan_target)
+  );
+}
+
 /** Re-read at routing and launch: a durable notification is not permission to work. */
 function reviewWakeDisposition(
   state: State & { events: readonly Event[]; reviews: readonly Review[] },
@@ -53,7 +72,15 @@ function reviewWakeDisposition(
   itemId?: string,
   alreadyQueued = false,
 ): "paused" | "obsolete" | undefined {
-  if (!event || !itemId) return;
+  if (!itemId) return;
+  const verifier = state.work_items.find((w) => w.id === itemId);
+  if (
+    verifier?.kind === "verify" &&
+    verifier.status === "waiting_decision" &&
+    !reviewDiscussionInstruction(verifier, event)
+  )
+    return "paused";
+  if (!event) return;
   const p = event.payload as Record<string, unknown> | null;
   if (event.type === "review_submitted") {
     if (p?.review_limit_wait === true) return "obsolete";

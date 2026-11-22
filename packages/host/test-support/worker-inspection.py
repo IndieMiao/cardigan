@@ -18,6 +18,51 @@ native = runpy.run_path(str(deploy / 'worker-primitives.py'))
 
 
 class CollectorTest(unittest.TestCase):
+    def test_legacy_loopback_layout_is_distinct_from_project_worker(self):
+        user = SimpleNamespace(pw_name='agent', pw_gid=2001, pw_dir='/var/lib/cardigan-agent')
+        def info(uid, gid, mode):
+            return SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=mode, st_nlink=1)
+        c = dict(local=True, platform='linux', gid=2002, root='/worker')
+        with contextlib.ExitStack() as stack:
+            for name, number in [('getgid', 2001), ('getegid', 2001), ('getuid', 3000), ('getgroups', [2001, 2002])]:
+                stack.enter_context(patch('os.' + name, return_value=number))
+            stack.enter_context(patch('grp.getgrgid', side_effect=lambda g: SimpleNamespace(gr_name={2001:'agent', 2002:'cardigan-share'}[g])))
+            stack.enter_context(patch.dict(probe['managed_loopback_account'].__globals__, directory=contextlib.nullcontext))
+            stack.enter_context(patch('os.fstat', side_effect=lambda fd: info(0,2001,0o750) if fd == user.pw_dir else info(4000,2002,0o2750)))
+            marker = stack.enter_context(patch('os.stat', return_value=info(0,2001,0o100600)))
+            probe['managed_loopback_account'](c,user)
+            for invalid in [dict(c, local=False), dict(c, platform='darwin')]:
+                with self.assertRaises(ValueError): probe['managed_loopback_account'](invalid,user)
+            marker.return_value = info(3000,2001,0o100600)
+            with self.assertRaises(ValueError): probe['managed_loopback_account'](c,user)
+
+    def test_retirement_projection_of_bound_loopback_socket(self):
+        binding = dict(project='fixture', assignment='A-1', launch_run='R-4', generation='launch',
+                       session='fixture', terminal='t2', local=True, platform='linux')
+        labels = dict(cardigan='1', project='fixture', assignment='A-1', run='R-4', generation='launch')
+        terminal = dict(address='t2', labels=labels, pid=123, state='live', created_ms=42, text='never exported')
+        def rpc(method, params):
+            self.assertEqual((method, params), ('terminal.get', dict(terminal='t2')))
+            return terminal
+        account = MagicMock()
+        with contextlib.ExitStack() as stack:
+            for name in ('getuid','geteuid'): stack.enter_context(patch('os.' + name, return_value=1001))
+            stack.enter_context(patch('pwd.getpwuid',return_value=SimpleNamespace(pw_dir='/unused')))
+            stack.enter_context(patch('platform.system',return_value='Linux'))
+            ps = stack.enter_context(patch('os.stat',return_value=SimpleNamespace(st_uid=1001)))
+            stack.enter_context(patch.dict(probe['retirement_terminal'].__globals__,
+                managed_loopback_account=account, core_rpc=lambda *args: contextlib.nullcontext(rpc)))
+            read = lambda: probe['retirement_terminal'](binding)
+            self.assertNotIn('text', read()); account.assert_called_once(); ps.assert_called_once_with('/proc/123')
+            for key in labels:
+                with patch.dict(labels,{key:'changed'}), self.assertRaises(ValueError): read()
+            with patch.dict(terminal, pid=None), self.assertRaises(ValueError): read()
+            with patch.dict(terminal, address='t3'), self.assertRaises(ValueError): read()
+            with patch.dict(terminal,status=dict(state='working')): self.assertEqual(read()['status']['state'], 'blocked')
+            ps.return_value=SimpleNamespace(st_uid=2)
+            with self.assertRaises(ValueError): read()
+            with patch.dict(terminal,state='finished',pid=None): self.assertEqual(read()['state'], 'finished')
+
     def hc_fixture(self, system, change=None):
         labels = dict(cardigan='1', project='test', assignment='A-1', run='R-8')
         t = dict(labels=labels, address='t2', state='live', pid=None, created_ms=15, foreground={'pid':42})

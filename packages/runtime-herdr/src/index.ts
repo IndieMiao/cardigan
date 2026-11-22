@@ -14,6 +14,10 @@ import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
+import { loopbackTerminal, managedLoopback } from "./loopback-terminal.js";
+
+export { managedLoopback } from "./loopback-terminal.js";
+
 import { idleRetirementHelper } from "./idle-retirement.js";
 import { confirmationVisible } from "./interaction.js";
 import { terminalSnapshot } from "./terminal-activity.js";
@@ -989,14 +993,67 @@ export class HerdrRuntime implements Runtime {
     )
       fail("runtime_conflict", "Idle terminal identity changed");
   }
+  /** The loopback relay can report a live address without the worker's owner
+   * labels. Inspect the same managed socket/account as worker diagnostics.
+   * Return only the fixed terminal projection, never a screen or controller PID. */
+  private async retirementTerminal(
+    ref: RuntimeRef,
+    owner: RetirementIdentity,
+    raw?: Pick<HcClient, "exec">,
+  ): Promise<Terminal> {
+    const execution = this.execution;
+    if (managedLoopback(execution) && ref.machine_id === "local") {
+      if (
+        ref.target?.project_id !== owner.project_id ||
+        ref.target?.session !== this.session
+      )
+        fail("runtime_conflict", "Loopback binding changed");
+      const run = ref.launch_generation?.run_id ?? owner.first_bell_run_id;
+      if (!run) fail("runtime_conflict", "Missing bound worker launch Run");
+      const terminal = ref.terminal_ref.slice(execution.machine.length + 1);
+      const t: Terminal = await loopbackTerminal(execution, {
+        project: owner.project_id,
+        assignment: owner.assignment_id,
+        launch_run: run,
+        generation: ref.launch_generation?.generation ?? null,
+        terminal,
+        session: this.session,
+      });
+      if (
+        t.address !== terminal ||
+        t.labels?.cardigan !== "1" ||
+        t.labels.run !== run ||
+        !["live", "finished"].includes(t.state) ||
+        !Number.isSafeInteger(t.created_ms) ||
+        (t.state === "live" &&
+          (!Number.isSafeInteger(t.pid) || (t.pid ?? 0) <= 1))
+      )
+        fail("runtime_conflict", "Unconfirmed worker terminal");
+      return { ...t, address: ref.terminal_ref };
+    }
+    return raw
+      ? JSON.parse(await raw.exec(["get", ref.terminal_ref, "--json"]))
+      : this.json(["get", ref.terminal_ref]);
+  }
   observe_retirement(
     ref: RuntimeRef,
-    identity: RetirementIdentity,
+    identity: RetirementIdentity & { readonly system_finished_turn?: true },
   ): Promise<RuntimeResult<RuntimeObservation["process"]>> {
     return result(async () => {
       this.checkRef(ref);
-      const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      const terminal: Terminal = identity.system_finished_turn
+        ? await this.retirementTerminal(ref, identity)
+        : await this.json(["get", ref.terminal_ref]);
       this.checkRetirementTerminal(ref, identity, terminal);
+      if (
+        identity.system_finished_turn &&
+        terminal.state === "live" &&
+        (terminal.keep ||
+          !["unknown", "idle", "done"].includes(
+            terminal.status?.state ?? "unknown",
+          ))
+      )
+        return "unknown";
       return terminal.state === "finished"
         ? "exited"
         : terminal.state === "live"
@@ -1035,7 +1092,11 @@ export class HerdrRuntime implements Runtime {
         if (!Number.isSafeInteger(ms) || ms < 1 || ms > 30_000)
           fail("invalid_launch", "Invalid idle retirement timeout");
       stage = "get";
-      const first: Terminal = await this.json(["get", ref.terminal_ref]);
+      const readTerminal = () =>
+        options.system_finished_turn
+          ? this.retirementTerminal(ref, options)
+          : this.json(["get", ref.terminal_ref]);
+      const first: Terminal = await readTerminal();
       const check = (terminal: Terminal) => {
         state =
           terminal.state === "live" || terminal.state === "finished"
@@ -1073,6 +1134,10 @@ export class HerdrRuntime implements Runtime {
         ...(identity ? [identity] : []),
       ];
       stage = "probe";
+      // A direct worker observation does not itself authorize the relay used
+      // by the pidfd helper. Revalidate its registration before the probe.
+      if (options.system_finished_turn && managedLoopback(this.execution))
+        await this.live();
       const raw = await this.client.exec(exec("probe"));
       reason = "probe_invalid";
       const identity = JSON.parse(raw);
@@ -1097,7 +1162,7 @@ export class HerdrRuntime implements Runtime {
       };
       const inspect = async () => {
         stage = "confirm";
-        return hasExited(await this.json(["get", ref.terminal_ref]));
+        return hasExited(await readTerminal());
       };
       const wait = async (ms: number) => {
         const until = Date.now() + ms;
@@ -1132,8 +1197,10 @@ export class HerdrRuntime implements Runtime {
                     // Inside the acquired signal slot. Even if the address is reused
                     // after this read, the helper can only signal the probed pidfd.
                     if (!(await options.workspace_preflight())) return false;
-                    const target: Terminal = JSON.parse(
-                      await raw.exec(["get", ref.terminal_ref, "--json"]),
+                    const target = await this.retirementTerminal(
+                      ref,
+                      options,
+                      raw,
                     );
                     if (hasExited(target)) {
                       refused = "terminal_not_live";

@@ -676,6 +676,28 @@ test.each([2, 3])(
       value(finishHostOpsAction(pending, system, intent.data.action_id, io))
         .data.run?.status,
     ).toBe("queued");
+    const waiting = {
+      ...pending,
+      work_items: pending.work_items.map((w) =>
+        w.assignment_id === owner
+          ? { ...w, status: "waiting_decision" as const }
+          : w,
+      ),
+    };
+    const paused = apply(
+      waiting,
+      value(finishHostOpsAction(waiting, system, intent.data.action_id, io)),
+    );
+    expect(hostOpsPending(paused.events, owner)).toBe(false);
+    expect(paused.events.at(-1)?.payload).toMatchObject({
+      result: "stopped_without_restart",
+    });
+    expect(
+      paused.runs.filter(
+        (r) => r.assignment_id === owner && r.status === "queued",
+      ),
+    ).toHaveLength(0);
+    expect(prepareHostOpsAction(paused, caller, p).ok).toBe(false);
     const withdrawn: CommandState = {
       ...pending,
       deliveries: [{ ...delivery, status: "superseded" }],
