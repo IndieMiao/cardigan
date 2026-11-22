@@ -21,6 +21,8 @@ export interface CardChecking {
     readonly attempt_ids: readonly string[];
     /** Blocked work items whose blocker only waits for one of these attempts. */
     readonly waiting_items: readonly string[];
+    /** Other cards whose precheck is waited for; their events refresh this card. */
+    readonly cards?: readonly string[];
   };
   readonly merge_check?: {
     readonly attempt_id: string;
@@ -104,18 +106,22 @@ export function cardCheckingIndex(
   precheckEvents: readonly Event[] = [],
 ) {
   // Trusted system events only (the domain projection), latest per attempt.
-  const attemptStatus = new Map(
+  const attempts = new Map(
     prechecks([...state.events, ...precheckEvents]).map((c) => [
       c.attempt_id,
-      c.status,
+      c,
     ]),
   );
-  const precheckWaits = new Map<string, { item: string; target: string }[]>();
+  const precheckWaits = new Map<
+    string,
+    { item: string; target: string; card: string }[]
+  >();
   for (const item of state.work_items) {
     const target = precheckWait(item);
-    if (!target || !active(attemptStatus.get(target) ?? "")) continue;
+    const attempt = target ? attempts.get(target) : undefined;
+    if (!target || !attempt || !active(attempt.status)) continue;
     const list = precheckWaits.get(item.card_id) ?? [];
-    list.push({ item: item.id, target });
+    list.push({ item: item.id, target, card: attempt.card_id });
     precheckWaits.set(item.card_id, list);
   }
   return (
@@ -123,7 +129,7 @@ export function cardCheckingIndex(
   ): CardChecking | undefined => {
     const waits = precheckWaits.get(card.id) ?? [];
     // Own running attempts, then attempts on other cards this card waits for.
-    const attempts = [
+    const running = [
       ...new Set([
         ...(card.prechecks ?? [])
           .filter((c) => active(c.status))
@@ -131,16 +137,20 @@ export function cardCheckingIndex(
         ...waits.map((w) => w.target),
       ]),
     ];
+    const others = [
+      ...new Set(waits.map((w) => w.card).filter((id) => id !== card.id)),
+    ];
     const merge =
       card.status === "awaiting_merge"
         ? currentCardMergeCheck(mergeState, card.id)
         : undefined;
     const checking: CardChecking = {
-      ...(attempts.length
+      ...(running.length
         ? {
             precheck: {
-              attempt_ids: attempts,
+              attempt_ids: running,
               waiting_items: waits.map((w) => w.item),
+              ...(others.length ? { cards: others } : {}),
             },
           }
         : {}),

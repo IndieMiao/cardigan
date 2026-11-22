@@ -199,6 +199,8 @@ export interface CardChecking {
     readonly attempt_ids: readonly string[];
     /** Blocked work items that only wait for one of these attempts. */
     readonly waiting_items: readonly string[];
+    /** Other cards whose precheck is waited for; their events refresh this card. */
+    readonly cards?: readonly string[];
   };
   readonly merge_check?: {
     readonly attempt_id: string;

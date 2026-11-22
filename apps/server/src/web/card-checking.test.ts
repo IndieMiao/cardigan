@@ -165,6 +165,8 @@ describe("waits for another card's precheck (C-567 review)", () => {
         precheck: {
           attempt_ids: ["other-1"],
           waiting_items: [id("work_item", 1)],
+          // The detail page follows this card's events to see the wait settle.
+          cards: [card2],
         },
       });
     },
@@ -186,6 +188,7 @@ describe("waits for another card's precheck (C-567 review)", () => {
     expect(view?.checking?.precheck?.waiting_items).toStrictEqual([
       id("work_item", 1),
     ]);
+    expect(view?.checking?.precheck?.cards).toStrictEqual([card2]);
     // Once that attempt settles the item reads as a blocker again.
     const settled = cardListViews(scoped, undefined, [], undefined, undefined, [
       ...outside,

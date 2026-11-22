@@ -82,6 +82,7 @@ test("board and detail mark a wait for an off-page card's precheck", () => {
       precheck: {
         attempt_ids: ["attempt-other"],
         waiting_items: [f.produce.id],
+        cards: [other.id],
       },
     };
     expect(board()?.checking).toStrictEqual(marked);
