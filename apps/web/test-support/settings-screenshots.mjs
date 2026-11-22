@@ -397,8 +397,15 @@ try {
         const isNew = await evaluate(
           "!document.querySelector('.settings-layout')",
         );
-        await click("并发与容量");
-        // C-511: the old entry now lands on the machine page.
+        // C-511: the old entry lands on the machine page. C-576 removed the
+        // entry; its old link (?tab=capacity) still lands there.
+        await run(() => {
+          const entry = [
+            ...document.querySelectorAll("nav[aria-label='设置分栏'] button"),
+          ].find((item) => item.textContent.trim() === "并发与容量");
+          if (entry) entry.click();
+          else window.location.hash = "#/p/p-1/settings?tab=capacity";
+        });
         await until(
           "[...document.querySelectorAll('h2')].some((h) => (h.textContent.includes('并发与容量') || h.textContent.trim() === '机器') && h.offsetParent) && document.body.textContent.includes('本机')",
         );
