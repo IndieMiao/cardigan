@@ -259,3 +259,60 @@ test("target preflight runs before the final synchronous authority check and nev
   expect(guard).toHaveBeenCalledOnce();
   expect(raw.exec).toHaveBeenCalledTimes(1);
 });
+
+test.each(["claude-code", "codex"] as const)(
+  "bound %s prompt is re-proven inside send slot and never types into a kept shell",
+  async (harness) => {
+    const raw = client(),
+      runtime = value(await HerdrRuntime.create({ client: raw }));
+    const binding = {
+      project_id: "fixture",
+      assignment_id: "A-1",
+      harness,
+      require_disconnect: true as const,
+    };
+    const idle =
+      harness === "codex"
+        ? "■ stream disconnected before completion\n›\n? for shortcuts"
+        : "⎿  API Error: Connection lost mid-response\n──────────\n❯\n──────────\n? for shortcuts";
+    let screen = idle,
+      fg = harness === "codex" ? "codex" : "claude",
+      address = ref.terminal_ref,
+      state = "unknown";
+    const send = vi.fn();
+    raw.exec = async (args) => {
+      if (args[0] === "get")
+        return JSON.stringify({
+          address: args[1] === ref.agent_name ? address : ref.terminal_ref,
+          state: "live",
+          status: { state },
+          labels: { project: "fixture", assignment: "A-1" },
+          foreground: { pid: 10, name: fg },
+          created_ms: 1000,
+        });
+      if (args[0] === "read") return screen;
+      if (args[0] === "send") send();
+      return "{}";
+    };
+    expect(value(await runtime.observe_prompt(ref, binding))).toBe(true);
+    const poke = () =>
+      runtime.wake(ref, "fixture", { prompt_binding: binding });
+    fg = "bash";
+    expect(value(await poke()).withdrawn).toBe(true);
+    fg = harness === "codex" ? "codex" : "claude";
+    address = "t2";
+    expect(value(await poke()).withdrawn).toBe(true);
+    address = ref.terminal_ref;
+    state = "working";
+    expect(value(await poke()).withdrawn).toBe(true);
+    state = "unknown";
+    screen = idle.replace(/\n([›❯])/u, "\n$1 pending input");
+    expect(value(await poke()).withdrawn).toBe(true);
+    screen = idle.replace(/disconnected|Connection lost/u, "other");
+    expect(value(await poke()).withdrawn).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+    screen = idle;
+    expect(value(await poke())).toEqual({ sent: true });
+    expect(send).toHaveBeenCalledOnce();
+  },
+);

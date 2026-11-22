@@ -1602,3 +1602,92 @@ test("withdrawn rejection cannot authorize a restart via its still-pending notif
   await expect(f.restart(f.target.assignment, signal.id)).rejects.toThrow();
   expect(f.runtime.release).not.toHaveBeenCalled();
 });
+
+test("A-1800 replay: retained reviewer receives its original instruction after a failed turn recovery", async () => {
+  const { f, a, item, notice, run } = endedReviewer(true);
+  f.store.uow.run((tx) => {
+    const owner = tx.assignments.get(f.project, a.id)!,
+      old = tx.runs.get(f.project, run.id)!;
+    tx.runs.put(f.project, { ...old, harness: "codex" });
+    tx.assignments.put(f.project, {
+      ...owner,
+      idle_retirement: {
+        phase: "waiting",
+        runtime_ref: owner.runtime_ref!,
+        started_at: f.clock.now(),
+        threshold_minutes: 60,
+        failures: 40,
+        last_failure: "unavailable",
+        evidence: {
+          stage: "confirm",
+          reason: "kept_terminal",
+          observation: "alive",
+        },
+      },
+    });
+  });
+  let ready = false;
+  f.runtime.observe_prompt = vi.fn(async () => ({ ok: true, value: ready }));
+  const dispatcher = new Dispatcher(f.options);
+  const events = (type: string) =>
+    f.state().events.filter((e) => e.type === type);
+  try {
+    await dispatcher.tick();
+    f.advance(600000);
+    await dispatcher.tick();
+    await vi.waitFor(async () => {
+      await f.service.tick();
+      expect(events("bell_turn_recovery_failed")).toHaveLength(1);
+    });
+    expect(events("bell_turn_recovery_due")).toHaveLength(1);
+    f.advance(30000);
+    await f.service.tick();
+    const alert = events("dispatch_stall_attention").filter(
+      (e) =>
+        (e.payload as { system_finished_run_id?: string })
+          .system_finished_run_id === run.id,
+    );
+    expect(alert).toMatchObject([
+      {
+        payload: {
+          restart_blocked: "session_maintenance",
+          can_restart: false,
+          next_step: expect.stringContaining("主机运维"),
+        },
+      },
+    ]);
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: f.ops.id })
+        .filter((n) => n.event_id === alert[0]?.id),
+    ).toHaveLength(1);
+    expect(f.runtime.wake).not.toHaveBeenCalled();
+    ready = true;
+    await dispatcher.tick();
+    expect(events("retained_session_bell_sent")).toMatchObject([
+      { payload: { assignment_id: a.id } },
+    ]);
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: a.id })
+        .find((n) => n.event_id === notice.id),
+    ).toMatchObject({ status: "belled" });
+    expect(f.runtime.wake).toHaveBeenCalledWith(
+      f.refFor(a),
+      expect.any(String),
+      expect.objectContaining({
+        prompt_binding: {
+          project_id: f.project,
+          assignment_id: a.id,
+          harness: "codex",
+        },
+      }),
+    );
+    expect(f.state().work_items.find((w) => w.id === item.id)?.status).toBe(
+      "waiting_decision",
+    );
+    expect(f.runtime.release).not.toHaveBeenCalled();
+  } finally {
+    await dispatcher.close();
+  }
+});

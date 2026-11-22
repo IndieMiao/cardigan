@@ -133,6 +133,7 @@ import {
   unfinishedRun,
   wakeFailure,
 } from "./dispatch-alert.js";
+import { ClientRecovery } from "./dispatch-client-recovery.js";
 import { InactiveRunReaper } from "./dispatch-inactive.js";
 import { InactivityAlerts } from "./dispatch-inactivity-alerts.js";
 import {
@@ -153,6 +154,7 @@ import { DispatchSkips } from "./dispatch-skips.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import {
   handoffUnread,
+  keptPromptBinding,
   previousInboxTurn,
   recordTurnWait,
   settleRefusedWake,
@@ -317,6 +319,7 @@ export class Dispatcher {
   private readonly inactive: InactiveRunReaper;
   private readonly skips: DispatchSkips;
   private readonly queuedRunPatrol: QueuedRunPatrol;
+  private readonly clientRecovery: ClientRecovery;
   private readonly inactivityAlerts: InactivityAlerts;
   /** C-247: set once shutdown begins; no Run is claimed, woken or launched after it. */
   private closing = false;
@@ -365,6 +368,11 @@ export class Dispatcher {
       (!Number.isSafeInteger(cancelAfterMs) || cancelAfterMs < 1)
     )
       throw new Error("Invalid inactive Run cancellation grace");
+    this.clientRecovery = new ClientRecovery(
+      options,
+      this.clock,
+      () => this.closing,
+    );
     this.inactivityAlerts = new InactivityAlerts({
       ...options,
       clock: this.clock,
@@ -426,7 +434,10 @@ export class Dispatcher {
   close(): Promise<void> {
     this.closing = true;
     this.inactivityAlerts.close();
-    return this.inactive.close();
+    return Promise.all([
+      this.inactive.close(),
+      this.clientRecovery.drain(),
+    ]).then(() => {});
   }
   /** Calls on one instance serialize; cross-process attempts are guarded in SQLite. */
   // Keep the legacy argument for callers; scheduling always spans all projects.
@@ -739,6 +750,8 @@ export class Dispatcher {
       }),
     );
     step("maintenance", () => this.maintenance(project));
+    if (this.options.runtime.observe_prompt)
+      this.clientRecovery.schedule(this.state(project));
     resolveObsoletePmNotifications(
       store,
       project,
@@ -899,8 +912,27 @@ export class Dispatcher {
       );
       return skip("wake_guard:no_runtime_ref");
     }
+    const prior = state.runs
+      .filter(
+        (r) =>
+          r.assignment_id === a.id &&
+          r.started_at &&
+          r.role_version === a.role_version,
+      )
+      .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))[0];
     let observation = "unavailable";
-    if (a.runtime_ref) {
+    const binding = keptPromptBinding(project, a, prior?.harness);
+    if (binding && a.runtime_ref) {
+      const prompt = await this.options.runtime
+        .observe_prompt?.(a.runtime_ref, binding)
+        .catch(() => undefined);
+      if (prompt?.ok && prompt.value) {
+        guard = { prompt_binding: binding };
+        live = true;
+        observation = "bound_idle_prompt";
+      }
+    }
+    if (a.runtime_ref && !live) {
       const runtimeRef = a.runtime_ref;
       if (retirementHeld) {
         const owner = await observeRetirementForDispatch(
@@ -910,7 +942,20 @@ export class Dispatcher {
           this.options.runtime,
           this.clock,
         );
-        if (owner !== "alive") {
+        if (owner !== "alive" || binding) {
+          if (guardedTurn && owner !== "exited")
+            this.waitForTurn(
+              project,
+              a,
+              guardedTurn,
+              notes,
+              "bound_prompt_unconfirmed",
+              queued,
+            );
+          if (owner === "alive") {
+            retirementWait({ source: "snapshot", status: "unknown" });
+            return skip("bound_prompt_unconfirmed");
+          }
           if (owner !== "deferred" && owner !== "exited")
             retirementWait({ source: "owner", status: owner });
           return skip(`retirement_owner:${owner}`);
@@ -969,7 +1014,7 @@ export class Dispatcher {
         }
       }
       if (retirementHeld || guardedTurn) {
-        guard = observed?.ok ? idleWakeGuard(observed.value) : undefined;
+        guard ??= observed?.ok ? idleWakeGuard(observed.value) : undefined;
         // An explicit finish does not waive the idle check for a retirement-held session.
         if (
           !guard &&
@@ -1017,14 +1062,6 @@ export class Dispatcher {
         return skip("runtime_unavailable");
       }
     }
-    const prior = state.runs
-      .filter(
-        (r) =>
-          r.assignment_id === a.id &&
-          r.started_at &&
-          r.role_version === a.role_version,
-      )
-      .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))[0];
     let snapshot: LaunchSnapshot;
     let replaceProfile = false;
     // P2a-10 A (finding 40): the Harness lists MCP tools once per session, so
@@ -1243,7 +1280,7 @@ export class Dispatcher {
             [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
             {
               ...guard,
-              ...(retirementHeld
+              ...(retirementHeld && !guard?.prompt_binding
                 ? {
                     retirement_owner: {
                       project_id: project,
@@ -1421,7 +1458,10 @@ export class Dispatcher {
       reason,
       job.bell,
       failure,
-      sent && live && retirementHeld && a.idle_retirement?.dispatch_wait
+      sent &&
+        live &&
+        retirementHeld &&
+        (guard?.prompt_binding || a.idle_retirement?.dispatch_wait)
         ? a
         : undefined,
     );
@@ -2324,6 +2364,21 @@ export class Dispatcher {
       }
       let state = this.loadState(tx, project);
       if (resumedRetirement) {
+        if (
+          resumedRetirement.idle_retirement?.evidence?.reason ===
+          "kept_terminal"
+        )
+          dispatchAlert(tx, store, state, at, {
+            assignment: resumedRetirement,
+            run_id: attempt.run_id,
+            card_id: state.work_items.find(
+              (w) => w.id === resumedRetirement.work_item_id,
+            )?.card_id,
+            type: "retained_session_bell_sent",
+            reason: "已核对原会话并直接投递",
+            notification_ids: attempt.notification_ids,
+            audience: "activity_log",
+          });
         persistEffect(
           tx,
           project,

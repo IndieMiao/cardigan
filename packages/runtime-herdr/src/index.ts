@@ -48,6 +48,7 @@ import type {
 } from "@cardigan/domain";
 import { type AgentBinary, isAgentBinary } from "@cardigan/domain";
 import { registerAgentMachine } from "./agent-ssh.js";
+import { boundPrompt } from "./bound-prompt.js";
 import {
   type GovernedHcClient,
   governHcClient,
@@ -580,6 +581,15 @@ export class HerdrRuntime implements Runtime {
       return ref;
     });
   }
+  observe_prompt(
+    ref: RuntimeRef,
+    binding: NonNullable<RuntimeWakeOptions["prompt_binding"]>,
+  ) {
+    return result(async () => {
+      this.checkRef(ref);
+      return boundPrompt(this.client, ref, binding);
+    });
+  }
   wake(ref: RuntimeRef, doorbell: string, options?: RuntimeWakeOptions) {
     return result<RuntimeWakeResult>(async () => {
       this.checkRef(ref);
@@ -602,12 +612,20 @@ export class HerdrRuntime implements Runtime {
             doorbell,
           ],
           options?.before_send ?? (() => true),
-          (guard || options?.retirement_owner || options?.resource_preflight) &&
+          (guard ||
+            options?.retirement_owner ||
+            options?.resource_preflight ||
+            options?.prompt_binding) &&
             (async (raw) => {
               try {
                 if (
                   options?.resource_preflight &&
                   !(await options.resource_preflight())
+                )
+                  return false;
+                if (
+                  options?.prompt_binding &&
+                  !(await boundPrompt(raw, ref, options.prompt_binding))
                 )
                   return false;
                 if (!guard && !options?.retirement_owner) return true;
