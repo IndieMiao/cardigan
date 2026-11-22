@@ -1,21 +1,18 @@
 import { spawn } from "node:child_process";
-import {
-  createHash,
-  generateKeyPairSync,
-  type KeyObject,
-  sign,
-} from "node:crypto";
+import { createHash, sign } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
 import type {
   Assignment,
   IdleRetirementResult,
+  RetirementEvidence,
   Role,
   Runtime,
   RuntimeLaunch,
   RuntimeRef,
 } from "@cardigan/domain";
 import { agentProcessCommand } from "./agent-ssh.js";
+import { darwinOwnerKey } from "./darwin-owner-key.js";
 import type { ExecutionConfig } from "./execution.js";
 import { workerFileRequest, workerLaunchPath } from "./worker-files.js";
 
@@ -28,7 +25,6 @@ const enabled = (e: ExecutionConfig) =>
   process.env.CARDIGAN_DARWIN_IDLE_TARGETS?.split(",").includes(
     e.target.fingerprint,
   ) === true;
-const keys = new Map<string, KeyObject>();
 const enrollment = (
   e: Ssh,
   project: string,
@@ -99,11 +95,12 @@ export async function enrollDarwinOwner(
     ),
   );
   if (!owner || !inspector) throw new Error("Missing Darwin owner");
-  const key = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-  // A cold controller or evicted enrollment loses authority, never identity evidence.
-  const oldest = keys.keys().next().value;
-  if (keys.size >= 1024 && oldest) keys.delete(oldest);
-  keys.set(id, key.privateKey);
+  // Rebuilt from the host-private seed after any restart. Without a seed the
+  // session still launches unenrolled and retirement keeps the bounded handoff.
+  const key = await darwinOwnerKey(e.dataDir, id, true).catch(() => {
+    console.error("Darwin idle owner seed unavailable; launch not enrolled");
+  });
+  if (!key) return launch;
   const config = {
     project,
     assignment: a.id,
@@ -140,16 +137,30 @@ export async function enrollDarwinOwner(
 }
 
 // This relay has no signal operation. The same connected socket carries the challenge and response.
+// Exit 3: no owner listens for this generation (launched before enrollment).
 const relay = `import os,socket,sys
 os.chdir(sys.argv[1])
 with socket.socket(socket.AF_UNIX) as s:
- s.settimeout(10); s.connect('idle-owner.sock'); s.sendall(sys.stdin.buffer.readline(2048))
+ s.settimeout(10)
+ try: s.connect('idle-owner.sock')
+ except (FileNotFoundError, ConnectionRefusedError): sys.exit(3)
+ s.sendall(sys.stdin.buffer.readline(2048))
  with s.makefile('rb') as f:
   for i in range(2):
-   line=f.readline(128)
+   line=f.readline(256)
    if not line.endswith(b'\\n'): sys.exit(1)
    sys.stdout.buffer.write(line); sys.stdout.buffer.flush()
    if i==0: s.sendall(sys.stdin.buffer.readline(256))`;
+
+type Refusal = RetirementEvidence["reason"];
+const refused = (reason: Refusal): IdleRetirementResult => ({
+  outcome: "withdrawn",
+  evidence: { stage: "probe", reason },
+});
+const uncertain = (): IdleRetirementResult => ({
+  outcome: "uncertain",
+  evidence: { stage: "confirm", reason: "confirmation_pending" },
+});
 
 export async function stopDarwinOwner(
   e: Ssh,
@@ -157,12 +168,6 @@ export async function stopDarwinOwner(
   options: Stop,
   transport = agentProcessCommand,
 ): Promise<IdleRetirementResult> {
-  const refused = (
-    reason: "conditional_close_unavailable" | "guard_changed" | "probe_invalid",
-  ): IdleRetirementResult => ({
-    outcome: "withdrawn",
-    evidence: { stage: "probe", reason },
-  });
   const g = ref.launch_generation,
     p = options.enrolled_process,
     target = e.target;
@@ -184,7 +189,10 @@ export async function stopDarwinOwner(
     g.run_id,
     g.generation,
   );
-  const key = keys.get(id);
+  // Without a key this controller can rebuild no owner can be asked. No
+  // other entry can bind the original generation at delivery (Q-1166): the
+  // session is kept and the bounded handoff applies.
+  const key = await darwinOwnerKey(e.dataDir, id).catch(() => undefined);
   if (!key) return refused("conditional_close_unavailable");
   const request =
     JSON.stringify({
@@ -198,7 +206,10 @@ export async function stopDarwinOwner(
     relay,
     directory,
   ]);
-  return new Promise((resolve) => {
+  // An owner this controller cannot serve (none listening, or a key it
+  // cannot rebuild) is never signed for: nothing was attempted.
+  const unowned = refused("conditional_close_unavailable");
+  return new Promise<IdleRetirementResult>((resolve) => {
     const child = spawn(cmd.file, cmd.args, {
       cwd: "/",
       env: { PATH: "/usr/bin:/bin" },
@@ -214,30 +225,31 @@ export async function stopDarwinOwner(
       child.stdin.end();
       resolve(value);
     };
-    const uncertain = (): IdleRetirementResult => ({
-      outcome: "uncertain",
-      evidence: { stage: "confirm", reason: "confirmation_pending" },
-    });
     const lost = () =>
       finish(attempted ? uncertain() : refused("probe_invalid"));
     child.stdin.on("error", lost);
     child.on("error", lost);
-    child.on("close", lost);
+    child.on("close", (code) =>
+      code === 3 && !attempted ? finish(unowned) : lost(),
+    );
     child.stdout.setEncoding("utf8").on("data", (data: string) => {
       if (settled) return;
       buffer += data;
-      if (buffer.length > 128) return lost();
+      if (buffer.length > 256) return lost();
       if (!buffer.includes("\n")) return;
       if (attempted) return finish(uncertain());
-      if (!/^[a-f0-9]{64}\n$/u.test(buffer)) return lost();
-      const message = `${buffer.trim()}:${createHash("sha256").update(request).digest("hex")}`;
+      // Owners enrolled before durable keys report no key id.
+      const challenge = /^([a-f0-9]{64})(?: ([a-f0-9]{64}))?\n$/u.exec(buffer);
+      if (!challenge) return lost();
+      if (challenge[2] !== key.id) return finish(unowned);
+      const message = `${challenge[1]}:${createHash("sha256").update(request).digest("hex")}`;
       buffer = "";
       try {
         if (!enabled(e) || !options.before_signal())
           return finish(refused("guard_changed"));
         attempted = true;
         child.stdin.write(
-          `${sign("sha256", Buffer.from(message), key).toString("base64")}\n`,
+          `${sign("sha256", Buffer.from(message), key.privateKey).toString("base64")}\n`,
         );
       } catch {
         lost();
