@@ -1,4 +1,5 @@
 """Private files and bounded, typed messages shared by the host and forced command."""
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -13,8 +14,50 @@ SCOPE = ('project', 'machine', 'card', 'assignment', 'run', 'platform', 'worker_
 FIELDS = (*SCOPE, 'id', 'version', 'app', 'build', 'commit', 'sha256', 'expires')
 
 
-def require(value):
+# Only these constants cross the signing boundary; never stringify a tool error.
+FAILURES = frozenset(('archive_invalid', 'archive_member_name', 'archive_too_large',
+                      'package_mismatch', 'apksigner_failed', 'signing_failed'))
+
+
+class SigningFailure(ValueError):
+    def __init__(self, category):
+        super().__init__('refused')
+        self.category = category
+
+
+@contextmanager
+def failure_stage(category):
+    try:
+        yield
+    except SigningFailure:
+        raise
+    except Exception:
+        raise SigningFailure(category) from None
+
+
+def failure_fields(category):
+    return {'failure_category': category} if isinstance(category, str) and category in FAILURES else {}
+
+
+def save_failure(db, rid, category):
+    if failure_fields(category):
+        # Side table keeps old writers and pre-upgrade receipts compatible.
+        db.execute('CREATE TABLE IF NOT EXISTS failure_categories (id TEXT PRIMARY KEY, category TEXT NOT NULL)')
+        db.execute('INSERT OR REPLACE INTO failure_categories VALUES (?,?)', (rid, category))
+
+
+def read_failure(db, rid):
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='failure_categories'").fetchone():
+        row = db.execute('SELECT category FROM failure_categories WHERE id=?', (rid,)).fetchone()
+        if row:
+            return failure_fields(row[0])
+    return {}
+
+
+def require(value, category=None):
     if not value:
+        if category:
+            raise SigningFailure(category)
         raise ValueError('refused')
 
 
@@ -59,6 +102,17 @@ def directory(base, name):
     path = base / name
     path.mkdir(mode=0o700, exist_ok=True)
     return private_dir(path)
+
+
+@contextmanager
+def transaction(db):
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        yield
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
 
 
 def database(base, schema):

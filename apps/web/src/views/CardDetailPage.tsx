@@ -482,11 +482,17 @@ function CardContent({
     cardId,
     revision,
   });
+  // C-581: reveal the anchor's panel once per anchor; a live refresh must not
+  // pull a reader back from the panel they switched to.
+  const revealed = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
-    if (!anchor || !anchorReady) return;
+    if (!anchor) revealed.current = undefined;
+    if (!anchor || !anchorReady || revealed.current === anchor) return;
     const target = document.getElementById(anchor);
     const panel = target?.closest<HTMLElement>("[data-card-panel]");
-    if (panel && article.current?.contains(panel)) setSelectedSection(panel.id);
+    if (!panel || !article.current?.contains(panel)) return;
+    revealed.current = anchor;
+    setSelectedSection(panel.id);
   }, [anchor, anchorReady]);
   const opened = useRef(false);
   useEffect(() => {
@@ -501,14 +507,30 @@ function CardContent({
   // Anchors may render before route filters settle. Follow their row while this
   // snapshot lays out, then stop on interaction or refresh; never move a reader
   // back to the latest entry on an unrelated SSE update.
+  // C-581: a refresh re-runs this effect and a new ResizeObserver reports once
+  // on observe, so a settled location must not observe or position again.
+  // Settling belongs to one visit: navigating away and back (A → B → A) is a
+  // new visit and positions again; only refreshes of the same visit stay put.
+  const settled = useRef<string | undefined>(undefined),
+    visit = useRef<string | undefined>(undefined);
   useEffect(() => {
     const region = scroll.current;
     if (!region) return;
     let position: () => void;
     let initial = true;
+    let location: string | undefined;
     if (anchor) {
-      if (!anchorReady) return;
-      const location = `${anchor}/${filters.type ?? ""}/${filters.author ?? ""}`;
+      location = `${anchor}/${filters.type ?? ""}/${filters.author ?? ""}`;
+      if (visit.current !== location) {
+        visit.current = location;
+        settled.current = undefined;
+      }
+      if (!anchorReady) {
+        // A refresh started after the row was positioned: its follow is over.
+        if (lastAnchor.current === location) settled.current = location;
+        return;
+      }
+      if (settled.current === location) return;
       initial = lastAnchor.current !== location;
       position = () => {
         const target = document.getElementById(anchor);
@@ -532,6 +554,8 @@ function CardContent({
     } else {
       // C-205: start at the decision summary; explicit timeline anchors still win.
       lastAnchor.current = undefined;
+      settled.current = undefined;
+      visit.current = undefined;
       return;
     }
     let following = true;
@@ -546,6 +570,7 @@ function CardContent({
     observer?.observe(article.current ?? region);
     const stop = () => {
       following = false;
+      if (lastAnchor.current === location) settled.current = location;
       observer?.disconnect();
     };
     for (const event of ["wheel", "pointerdown", "keydown"])

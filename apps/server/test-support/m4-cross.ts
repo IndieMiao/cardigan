@@ -677,6 +677,7 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
                 "resolve_delegated_decision",
                 "triage_human_action",
                 "replace_verification_work_item",
+                "publish_artifact",
               ].includes(tool) &&
                 !(STANDING_ONLY_TOOLS as readonly string[]).includes(tool) &&
                 !(

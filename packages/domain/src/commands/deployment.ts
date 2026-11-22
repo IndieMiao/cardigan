@@ -2,7 +2,10 @@ import type { Actor, Event, HumanAction } from "../entities.js";
 import { eventsOfType } from "../event-index.js";
 import type { AssignmentId, CardId, HumanActionId, RunId } from "../ids.js";
 import { transition } from "../transitions.js";
-import { workerHelperAction } from "../worker-helper-action.js";
+import {
+  matchesOpenHelperAction,
+  workerHelperAction,
+} from "../worker-helper-action.js";
 import type { CommandDraft, CommandPorts, CommandState } from "./core.js";
 import { command, ensure, unwrap } from "./core.js";
 import {
@@ -251,6 +254,54 @@ export function recordHelperUpgradeChecks(
     )
       ? completeActionDraft(d, p, true)
       : updated;
+  });
+}
+
+/** Internal patrol only: the host owns both fresh, binding-scoped checks. */
+export function completeVerifiedHelperAction(
+  state: CommandState,
+  actor: Actor,
+  target: {
+    human_action_id: HumanActionId;
+    machine_id: string;
+    binding: string;
+    key: string;
+    checks: Omit<NonNullable<HumanAction["helper_checks"]>, "at">;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "record_deployment", ports, (d) => {
+    const action = d.get("human_actions", target.human_action_id);
+    if (
+      ![target.checks.worker, target.checks.machine].every(
+        (r) => r.status === "passed" && !r.failed_steps.length,
+      ) ||
+      !matchesOpenHelperAction(state, action, target) ||
+      !d
+        .list("machines")
+        .some((m) => m.id === target.machine_id && m.herdr_machine === m.id)
+    )
+      return;
+    d.put("human_actions", {
+      ...action,
+      helper_checks: { at: d.now, ...target.checks },
+    });
+    d.emit("worker_helper_upgrade_checked", undefined, {
+      human_action_id: action.id,
+      machine_id: target.machine_id,
+      release_key: target.key,
+      sha256_match: true,
+      worker: target.checks.worker.status,
+      machine: target.checks.machine.status,
+    });
+    completeActionDraft(
+      d,
+      {
+        human_action_id: action.id,
+        text: `${d.now} 系统核验机器 ${target.machine_id}：三个 helper 文件的 SHA-256 均与当前部署一致；worker check 和 machine check 均通过。`,
+      },
+      true,
+    );
   });
 }
 interface DeploymentActionInput {

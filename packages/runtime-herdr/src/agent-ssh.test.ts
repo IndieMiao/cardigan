@@ -896,7 +896,8 @@ test("macOS registers only its fixed entry and refuses the old autostart alias w
 // Neither the fixture credentials nor a live worker are used for transport.
 test.each([
   ["linux-worker", "refused", "withdrawn", "hc_failed"],
-  ["darwin-worker", "no_pidfd", "withdrawn", "pidfd_unavailable"],
+  ["linux-worker", "no_pidfd", "withdrawn", "pidfd_unavailable"],
+  ["darwin-worker", "legacy", "withdrawn", "conditional_close_unavailable"],
   ["linux-worker", "timeout", "timeout", "still_live"],
   ["linux-worker", "lost_receipt", "uncertain", "hc_failed"],
   ["linux-worker", "success", "exited", null],
@@ -964,7 +965,7 @@ test.each([
           machine,
           user: "worker_fixture",
           target,
-          ...(scenario === "no_pidfd"
+          ...(scenario === "legacy"
             ? {
                 macosCore: {
                   python: "/usr/bin/python3",
@@ -984,6 +985,23 @@ test.each([
         before_signal: () => true,
       }),
     );
+    if (scenario === "legacy") {
+      expect(result).toMatchObject({
+        outcome,
+        evidence: { stage: "probe", reason },
+      });
+      expect(modes).toEqual([]); // an unenrolled macOS worker never enters the Linux helper
+      finished = true;
+      expect(
+        value(
+          await runtime.observe_retirement(owned, {
+            project_id: "fixture",
+            assignment_id: "A-1",
+          }),
+        ),
+      ).toBe("unknown");
+      return;
+    }
     expect(result).toMatchObject({
       outcome,
       ...(reason ? { evidence: { reason, terminal_state: "live" } } : {}),

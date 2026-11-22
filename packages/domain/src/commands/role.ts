@@ -126,6 +126,13 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
       "validation_failed",
       "host_ops 只能是常驻角色，不能派活、交付、审核、建卡或拍板",
     );
+    ensure(
+      !role.allowed_tools.includes("publish_artifact") ||
+        (role.role_id === "pm" && kind === "standing") ||
+        role.role_id === "release_ops",
+      "validation_failed",
+      "发布工具仅限常驻 PM Office 或 release_ops",
+    );
     const allowed = ROLE_TOOL_ALLOWLISTS[kind];
     ensure(
       role.allowed_tools.every((tool) => allowed.includes(tool)),

@@ -1,4 +1,4 @@
-import type { CardId, Clock, ProjectId } from "@cardigan/domain";
+import type { Clock, ProjectId } from "@cardigan/domain";
 import type { ReconcileChecks, ReconcileFinding } from "@cardigan/git-service";
 import { retireReconcileNotifications, type Store } from "@cardigan/store";
 import { buildCheckoutFacts } from "./build-checkouts.js";
@@ -10,11 +10,11 @@ import { profileSpan, profileSpanSync } from "./tick-profile.js";
 /**
  * M4.4 reconciliation and backup loops (plan §3.6, §3.7; development plan §12.6).
  *
- * Reconciliation compares Git, the worktree directories and the database. It
- * only reports: findings go into the store with their first/last-seen times and
+ * Reconciliation compares Git, the worktree directories and the database.
+ * Findings go into the store with their first/last-seen times and
  * a new finding becomes a project-level `reconcile_finding` event, which the
- * Router hands to PM Ops. The one repair it performs is §3.3's: a Git delivery
- * without its fixed ref is re-pinned from the candidate ref.
+ * Router hands to PM Ops. Each tick also refreshes existing local mirrors;
+ * a Git delivery missing its fixed ref is re-pinned from the candidate (§3.3).
  *
  * The backup loop fetches `agent/*` from the base clone into the central
  * repository; a failure is logged and changes nothing.
@@ -132,10 +132,21 @@ export class ReconcileExecutor {
 
   tick(project_id?: ProjectId): Promise<void> {
     const next = this.serial.then(async () => {
-      for (const project of project_id
+      const projects = project_id
         ? [project_id]
-        : this.options.store.listProjects().map((entry) => entry.id))
-        await this.project(project as ProjectId);
+        : this.options.store.listProjects().map((entry) => entry.id);
+      // A failed filesystem/worker scan below must not starve other projects' mirrors.
+      for (const id of projects) {
+        const project = this.options.git.projectOf(id as ProjectId);
+        if (!project) continue;
+        try {
+          await this.options.git.refreshLocalMirror?.(project);
+        } catch {
+          // Do not log stderr or configuration from the Agent-owned clone.
+          this.report(`Local mirror refresh failed for ${id}`);
+        }
+      }
+      for (const id of projects) await this.project(id as ProjectId);
     });
     this.serial = next.catch(() => {});
     return next;
