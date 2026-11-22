@@ -350,7 +350,7 @@ test("a remote failure carries a digest-checked manual install command", () => {
   ).toBeUndefined();
 });
 
-test("machine check reports the manual install command for a remote worker", async () => {
+test("machine check reports the current manual install command on every retry and target", async () => {
   const root = temp();
   const store = Store.open({ dataDir: root });
   try {
@@ -367,43 +367,96 @@ test("machine check reports the manual install command for a remote worker", asy
       last_seen: new Date().toISOString(),
     } as const;
     store.uow.run((tx) => tx.machines.put("a", registered));
-    const execution = {
-      ...sshExecution(root),
-      target: {
-        project_id: "a",
-        machine_id: "worker-a",
-        session: "s",
-        generation: "g",
-        fingerprint: "f".repeat(64),
-      },
-    } as const;
-    const observed = await refreshMachineObservations({
-      store,
-      project: "a",
-      machine: "worker-a",
-      env: { CARDIGAN_CONFIG_DIR: root },
-      stageUpgrade: async () => {
-        throw new Error("no helper mismatch expected");
-      },
-      target: () => ({ machine: registered, execution }),
-      check: async () => ({ blockers: [], launch_enabled: true }),
-      probe: async (_execution, _os, command) =>
-        Array.isArray(command) && command[1] === "-e"
-          ? { ok: true, output: "agent-tools missing:upload-evidence.mjs\n" }
-          : { ok: false, output: "" },
-    });
-    expect(observed.health?.available).toBe(true);
-    expect(
-      observed.health?.capability_failures?.find(
+    const binding = (agentRoot: string, gidValue: number) =>
+      ({
+        ...sshExecution(agentRoot),
+        gid: gidValue,
+        target: {
+          project_id: "a",
+          machine_id: "worker-a",
+          session: "s",
+          generation: "g",
+          fingerprint: "f".repeat(64),
+        },
+      }) as const;
+    const observe = async (
+      execution: ReturnType<typeof binding>,
+      result: { ok: boolean; output: string },
+    ) =>
+      (
+        await refreshMachineObservations({
+          store,
+          project: "a",
+          machine: "worker-a",
+          env: { CARDIGAN_CONFIG_DIR: root },
+          stageUpgrade: async () => {
+            throw new Error("no helper mismatch expected");
+          },
+          target: () => ({ machine: registered, execution }),
+          check: async () => ({ blockers: [], launch_enabled: true }),
+          probe: async (_execution, _os, command) =>
+            Array.isArray(command) && command[1] === "-e"
+              ? result
+              : { ok: false, output: "" },
+        })
+      ).health;
+    const tools = (health: Awaited<ReturnType<typeof observe>>) =>
+      health?.capability_failures?.find(
         (f) => f.key === AGENT_TOOLS_CAPABILITY,
-      ),
-    ).toEqual({
+      );
+    const first = binding(join(root, "first"), 901);
+    const missing = {
+      ok: true,
+      output: "agent-tools missing:upload-evidence.mjs\n",
+    };
+    // A transient probe failure has no command; the retry computes one.
+    expect(tools(await observe(first, { ok: false, output: "" }))).toEqual({
+      key: AGENT_TOOLS_CAPABILITY,
+      search_locations: [],
+      reason: "附件助手检查未完成",
+    });
+    const health = await observe(first, missing);
+    expect(health?.available).toBe(true);
+    expect(tools(health)).toEqual({
       key: AGENT_TOOLS_CAPABILITY,
       search_locations: [],
       reason: "附件助手 upload-evidence.mjs 缺失",
-      remedy: agentToolsInstallCommand(execution, "linux", currentRelease()),
+      remedy: agentToolsInstallCommand(first, "linux", currentRelease()),
     });
+    // A changed binding replaces the command; nothing of the old target remains.
+    const second = binding(join(root, "second"), 902);
+    const replaced = tools(await observe(second, missing));
+    expect(replaced?.remedy).toBe(
+      agentToolsInstallCommand(second, "linux", currentRelease()),
+    );
+    expect(replaced?.remedy).not.toContain(join(root, "first"));
+    expect(replaced?.remedy).not.toContain("-g 901");
+    // Once installed, the stored observation carries no command at all.
+    expect(
+      tools(await observe(second, { ok: true, output: "agent-tools ok\n" })),
+    ).toBeUndefined();
   } finally {
     store.close();
   }
+});
+
+test("a new release yields a command pinned to its own digests", () => {
+  const root = temp();
+  const current = currentRelease();
+  const next = {
+    ...current,
+    source: "e".repeat(40),
+    digests: { ...current.digests, "upload-evidence.mjs": "d".repeat(64) },
+  };
+  const command = agentToolsInstallCommand(sshExecution(root), "linux", next);
+  expect(command).toContain(`'${"d".repeat(64)}  upload-evidence.mjs'`);
+  expect(command).not.toContain(current.digests["upload-evidence.mjs"]);
+  expect(
+    agentToolsCapability(
+      sshExecution(root),
+      "worker-a",
+      next,
+      "linux",
+    ).failureRemedy?.("附件助手 upload-evidence.mjs 缺失"),
+  ).toBe(command);
 });
