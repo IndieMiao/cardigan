@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # reviewed release, not cwd
-from common import (SCOPE, canonical, config, database, digest, directory, failure_fields, json,
+from common import (SCOPE, canonical, config, database, digest, directory, json,
                     line, manifest, persist, private_dir, private_file, re, read_failure, require,
                     save_failure, scope, send, time, transaction, transfer)
 
@@ -76,6 +76,21 @@ def connect(root, peer):
         env={'PATH':'/usr/bin:/bin', 'LC_ALL':'C'}, cwd=root)
 
 
+def observe(db, rid, state, sha, category=None):
+    # Called under the caller's write transaction, after peer IO. A snapshot
+    # of pending may arrive after another connection has recorded the outcome.
+    old = db.execute('SELECT state,sha FROM observed WHERE id=?', (rid,)).fetchone()
+    if old and old[0] != 'pending':
+        require(state == 'pending' or old == (state, sha))
+        state, sha = old
+    else:
+        db.execute('INSERT OR REPLACE INTO observed VALUES(?,?,?)', (rid, state, sha))
+    if state == 'failed':
+        save_failure(db, rid, category)
+        return {'state': state, 'sha256': None, **read_failure(db, rid)}
+    return {'state': state, 'sha256': sha}
+
+
 def request(root, db, identity, fence, dial=connect):
     ctx = scope(identity)
     require(set(identity) == set(SCOPE))
@@ -130,8 +145,7 @@ def request(root, db, identity, fence, dial=connect):
             if header.get('status') == 'failed':
                 with transaction(db):
                     db.execute("UPDATE grants SET state='failed' WHERE id=? AND state='pending'", (rid,))
-                    db.execute("INSERT OR REPLACE INTO observed VALUES(?,'failed',NULL)", (rid,))
-                    save_failure(db, rid, header.get('failure_category'))
+                    observe(db, rid, 'failed', None, header.get('failure_category'))
                 raise ValueError('refused')
             with tempfile.TemporaryDirectory(dir=root) as tmp:
                 received = Path(tmp)/'output'
@@ -143,6 +157,7 @@ def request(root, db, identity, fence, dial=connect):
                 db.execute('BEGIN IMMEDIATE')
                 try:
                     require(db.execute("UPDATE grants SET state='signed',output=? WHERE id=? AND NOT revoked AND state IN ('pending','peer_signed','signed')",(sha,rid)).rowcount == 1)
+                    observe(db, rid, 'signed', sha)
                     event(db,ctx,rid,'signed')
                     db.commit()
                 except BaseException:
@@ -188,12 +203,8 @@ def reconcile(db, root, rid, dial=connect):
         if state != 'pending':
             db.execute("UPDATE grants SET state=? WHERE id=? AND state='pending'",
                        ('peer_signed' if state=='signed' else 'failed', rid))
-        db.execute('INSERT OR REPLACE INTO observed VALUES(?,?,?)',(rid,state,sha))
         event(db,scope(spec),rid,'receipt_'+state)
-        details = failure_fields(response.get('failure_category')) if state == 'failed' else {}
-        if details:
-            save_failure(db, rid, details['failure_category'])
-    return {'state': state, 'sha256': sha, **details}
+        return observe(db, rid, state, sha, response.get('failure_category') if state == 'failed' else None)
 
 
 def release_authority(root, db, rid, identity=None):

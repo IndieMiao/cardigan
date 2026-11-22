@@ -98,6 +98,7 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertEqual(self.call(),(rid,digest(out))); self.assertEqual(self.calls,2)
         self.assertEqual(self.call(),(rid,digest(out))); self.assertEqual(self.calls,2)
         self.assertEqual((self.worker/'uses').read_text(),'used\n')
+        self.assertEqual(self.shown_receipt(), {'state':'signed','sha256':digest(out)})
         self.assertNotEqual(digest(out),self.spec['sha256'])
         rows=''.join(self.db.iterdump()); self.assertNotIn('private-fixture-marker',rows)
         for k in ('run','machine','project','card','build','commit','sha256','version'): self.assertIn(self.spec[k],rows)
@@ -198,6 +199,45 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertNotIn('private-fixture-marker', ''.join(self.db.iterdump()))
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_delayed_pending_reconcile_keeps_failed_receipt(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from contextlib import closing, contextmanager
+        from threading import Event
+
+        cfg = json.loads(self.policy.read_bytes())
+        Path(cfg['aapt2']).write_text('#!/bin/sh\necho different.package\n')
+        ready, resume = Event(), Event()
+
+        @contextmanager
+        def delayed_reply(root, peer):
+            with self.dial(root, peer) as proc:
+                yield proc
+            # The receipt was read during the signer's ready/commit handshake.
+            ready.set()
+            self.assertTrue(resume.wait(5))
+
+        def reconcile():
+            with closing(host.ledger(self.host)) as observer:
+                return host.reconcile(observer, self.host, self.spec['id'], delayed_reply)
+
+        expected = {'state':'failed','sha256':None,'failure_category':'package_mismatch'}
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = None
+            def fence():
+                nonlocal future
+                future = pool.submit(reconcile)
+                self.assertTrue(ready.wait(5))
+            try:
+                with self.assertRaises(ValueError): self.call(fence=fence)
+                self.assertEqual(self.shown_receipt(), expected)
+            finally:
+                resume.set()
+            self.assertEqual(future.result(), expected)
+        self.assertEqual(self.shown_receipt(), expected)
+        self.assertEqual(self.db.execute('SELECT state,output FROM grants').fetchone(), ('failed', None))
+        self.assertFalse((self.worker/'uses').exists())
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
     def test_failed_first_audit_preserves_one_dispatch(self):
         self.db.execute("CREATE TRIGGER deny BEFORE INSERT ON events WHEN NEW.action='request' BEGIN SELECT RAISE(ABORT,'fixture'); END")
         with self.assertRaises(sqlite3.DatabaseError): self.call()
@@ -287,6 +327,32 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
                     z.writestr('x/.cache/file',b'first'); z.writestr(name,b'fixture')
                 with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, apk=True)
                 self.assertEqual(caught.exception.category, 'archive_member_name')
+
+    def test_same_godot_member_requires_classic_zip(self):
+        path = 'assets/.godot/item'
+        for zip64 in (False, True):
+            with self.subTest(zip64=zip64):
+                with zipfile.ZipFile(self.candidate, 'w') as z:
+                    z.writestr('AndroidManifest.xml', b'fixture')
+                    with z.open(path, 'w', force_zip64=zip64) as member:
+                        member.write(b'fixture')
+                if zip64:
+                    with self.assertRaises(ValueError): inspect_zip(self.candidate, apk=True)
+                else:
+                    self.assertIn(path, inspect_zip(self.candidate, apk=True))
+
+    def test_apk_extra_fields_are_checked_by_tag(self):
+        # An unrelated field may contain the same bytes as the ZIP64 tag.
+        item = zipfile.ZipInfo('assets/.godot/item')
+        for tag in (0xcafe, 0x0001):
+            with self.subTest(tag=tag):
+                item.extra = struct.pack('<HHQQ', tag, 16, 1, 1)
+                with zipfile.ZipFile(self.candidate, 'w') as z:
+                    z.writestr(item, b'x')
+                if tag == 0x0001:
+                    with self.assertRaises(ValueError): inspect_zip(self.candidate, apk=True)
+                else:
+                    self.assertIn(item.filename, inspect_zip(self.candidate, apk=True))
 
     def test_apk_keeps_other_archive_limits(self):
         with patch('archives.LIMIT',1), self.assertRaises(SigningFailure) as caught:
