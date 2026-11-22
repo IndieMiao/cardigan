@@ -2,9 +2,11 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -14,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { Store } from "@cardigan/store";
+import { readMachineObservations, Store } from "@cardigan/store";
 import { afterEach, expect, test } from "vitest";
 import {
   AGENT_TOOLS,
@@ -307,7 +309,7 @@ test("machine check records current tools and a readable reason otherwise", asyn
   }
 });
 
-test("a remote failure carries a digest-checked manual install command", () => {
+test("a remote failure carries a two-step command sourced from the controller release", () => {
   const root = temp();
   const release = currentRelease();
   const command = agentToolsInstallCommand(
@@ -325,11 +327,36 @@ test("a remote failure carries a digest-checked manual install command", () => {
   expect(
     agentToolsInstallCommand(sshExecution(root), "darwin", release),
   ).toContain("/usr/bin/shasum -a 256 -c -");
-  // The verification half runs as-is against the committed release copies.
-  const verify = command.split(" && ").slice(1, 2).join(" && ");
-  expect(
-    execFileSync("/bin/sh", ["-c", verify], { cwd: deployTools }).toString(),
-  ).toContain("download-attachment.mjs: OK");
+  // Step 1 copies from this controller's deployed release, not the worker's deploy tree.
+  const [copy, install] = command.split("\n") as [string, string];
+  expect(copy).toBe(
+    `控制主机（主机账号）：scp ${join(deployTools, "download-attachment.mjs")} ${join(deployTools, "upload-evidence.mjs")} <管理员>@<目标机>:`,
+  );
+  expect(command).not.toContain("/opt/cardigan/deploy");
+  // Step 2 runs from a home directory holding only the two copied files (a
+  // worker whose deploy tree predates the tools). Privilege is simulated.
+  const home = temp();
+  for (const name of AGENT_TOOLS)
+    writeFileSync(join(home, name), readFileSync(join(deployTools, name)));
+  const step = install
+    .replace(/^目标机（管理员登录后在家目录）：/u, "")
+    .replaceAll("sudo ", "")
+    .replaceAll("-o root ", "");
+  execFileSync("/bin/sh", ["-c", step], { cwd: home });
+  for (const name of AGENT_TOOLS) {
+    expect(readFileSync(join(target, name))).toEqual(release.files[name]);
+    expect(statSync(join(target, name)).mode & 0o7777).toBe(0o750);
+  }
+  expect(readdirSync(home)).toEqual([]);
+  // A tampered copy stops before anything is installed.
+  rmSync(target, { recursive: true });
+  for (const name of AGENT_TOOLS)
+    writeFileSync(join(home, name), readFileSync(join(deployTools, name)));
+  writeFileSync(join(home, AGENT_TOOLS[1]), "tampered");
+  expect(() =>
+    execFileSync("/bin/sh", ["-c", step], { cwd: home, stdio: "ignore" }),
+  ).toThrow();
+  expect(existsSync(target)).toBe(false);
   const remote = agentToolsCapability(
     sshExecution(root),
     "mac-mini",
@@ -423,6 +450,19 @@ test("machine check reports the current manual install command on every retry an
       reason: "附件助手 upload-evidence.mjs 缺失",
       remedy: agentToolsInstallCommand(first, "linux", currentRelease()),
     });
+    // `machine show` reads the stored observation: the reason, never a command
+    // that was not rebuilt for the current release and binding.
+    expect(
+      readMachineObservations(store, "a", "worker-a").health
+        ?.capability_failures,
+    ).toContainEqual({
+      key: AGENT_TOOLS_CAPABILITY,
+      search_locations: [],
+      reason: "附件助手 upload-evidence.mjs 缺失",
+    });
+    expect(
+      JSON.stringify(readMachineObservations(store, "a", "worker-a")),
+    ).not.toContain("remedy");
     // A changed binding replaces the command; nothing of the old target remains.
     const second = binding(join(root, "second"), 902);
     const replaced = tools(await observe(second, missing));

@@ -239,30 +239,34 @@ export function agentToolsProblem(output: string): string | undefined {
     .join("；");
 }
 
-/** Version records the release commit the matching tools were verified against. */
 /**
- * Operator command for a remote worker: verify the copies in the installed deploy
- * release against this controller's digests, then install them root-owned and
- * group read-only. A digest failure means /opt/cardigan/deploy must be upgraded first.
+ * Two operator steps for a remote worker, independent of what that worker's
+ * deploy directory contains: copy the two files from this controller's deployed
+ * release, then on the worker verify them against the release digests before
+ * installing them root-owned and group read-only. Regenerated on every check.
  */
 export function agentToolsInstallCommand(
   execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
   os: string,
   current: AgentToolsRelease,
+  source: string = releaseAgentToolsDirectory(),
 ) {
   const target = remoteAgentToolsDirectory(execution.agentRoot);
   const sums = AGENT_TOOLS.map(
     (name) => `'${current.digests[name]}  ${name}'`,
   ).join(" ");
-  return [
-    "cd /opt/cardigan/deploy/agent-tools",
+  const copy = `scp ${AGENT_TOOLS.map((name) => join(source, name)).join(" ")} <管理员>@<目标机>:`;
+  const install = [
     `printf '%s\\n' ${sums} | ${os === "darwin" ? "/usr/bin/shasum -a 256" : "/usr/bin/sha256sum"} -c -`,
     `sudo test ! -L ${target}`,
     `sudo install -d -o root -g ${execution.gid} -m 0750 ${target}`,
     `sudo install -o root -g ${execution.gid} -m 0750 ${AGENT_TOOLS.join(" ")} ${target}/`,
+    `rm -f ${AGENT_TOOLS.join(" ")}`,
   ].join(" && ");
+  return `控制主机（主机账号）：${copy}\n目标机（管理员登录后在家目录）：${install}`;
 }
 
+/** Version records the release commit the matching tools were verified against. */
 export function agentToolsCapability(
   execution: ExecutionConfig,
   machine: string,
