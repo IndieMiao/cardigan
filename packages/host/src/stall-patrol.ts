@@ -27,6 +27,9 @@ import {
 } from "./dispatch-stalls.js";
 import { stallEvidence } from "./stall-evidence.js";
 
+const turnNextStep =
+  "系统会复查原通知；请主机运维从派发停滞核对终端名字、归属及客户端状态，确认空闲后续办。不能确认时保留会话，不自动重启。";
+
 // Keep diagnostics and notifications compact, without using a display row as a recovery fence.
 function oldestPerGroup(causes: DispatchStall[]) {
   const rows = new Map<string, DispatchStall>();
@@ -131,6 +134,14 @@ export class StallPatrol {
       evidence.set(a.id, view);
       result.push({
         ...s,
+        ...(s.system_finished_run_id &&
+        eventsOfType(state.events, "bell_turn_recovery_failed").some(
+          (e) =>
+            (e.payload as { system_finished_run_id?: string })
+              .system_finished_run_id === s.system_finished_run_id,
+        )
+          ? { next_step: turnNextStep }
+          : {}),
         ...view,
         can_restart:
           actionable.has(s) &&
@@ -262,28 +273,60 @@ export class StallPatrol {
         }
         reason = effect.error.message;
       }
-      if (recorded(fresh, "bell_turn_recovery_failed")) return;
-      const event = {
-        id: tx.ids.nextEventId(),
-        seq: tx.ids.nextEventSequence(project, stall.card_id ?? undefined),
+      const incident = {
         ...(stall.card_id ? { card_id: stall.card_id } : {}),
         actor: { kind: "system" as const, project_id: project },
-        type: "bell_turn_recovery_failed",
         created_at: this.clock.now(),
-        payload: { ...row, ...view, can_restart: false, reason },
-      };
-      tx.events.append(project, event);
-      recordNotification(this.store.database, {
-        project_id: project,
-        event_id: event.id,
-        card_id: stall.card_id ?? undefined,
-        seq: event.seq,
-        at: event.created_at,
-        recipient: {
-          kind: recoveryPm(a),
+        payload: {
+          ...row,
+          ...view,
+          can_restart: false,
+          reason,
+          next_step: turnNextStep,
         },
-        kind: "run_attention",
-      });
+      };
+      const publish = (
+        type: string,
+        recipient:
+          | Parameters<typeof recordNotification>[1]["recipient"]
+          | undefined,
+      ) => {
+        const event = {
+          ...incident,
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(project, stall.card_id ?? undefined),
+          type,
+        };
+        tx.events.append(project, event);
+        if (recipient)
+          recordNotification(this.store.database, {
+            project_id: project,
+            event_id: event.id,
+            card_id: stall.card_id ?? undefined,
+            seq: event.seq,
+            at: event.created_at,
+            recipient,
+            kind: "run_attention",
+          });
+      };
+      if (!recorded(fresh, "bell_turn_recovery_failed"))
+        publish("bell_turn_recovery_failed", { kind: recoveryPm(a) });
+      // Adopt older failures too. All overdue notices for this owner's turn
+      // share a handoff; the still-pending originals keep their retry path.
+      if (!recorded(fresh, "dispatch_stall_attention")) {
+        const ops = fresh.assignments.find(
+          (o) =>
+            o.scope === "standing" &&
+            o.role_id === "host_ops" &&
+            o.status === "active" &&
+            !o.external &&
+            o.id !== a.id,
+        );
+        publish(
+          "dispatch_stall_attention",
+          ops ? { kind: "assignment", assignment_id: ops.id } : undefined,
+        );
+      }
     });
   }
   async tick(

@@ -4,7 +4,10 @@ import {
   type CommandState,
   eventsOfType,
   type Notification,
+  type ProjectId,
+  type PromptBinding,
   type Run,
+  retirementOwnsSession,
   runsOf,
   systemEndedTurn,
 } from "@cardigan/domain";
@@ -23,6 +26,20 @@ import {
   hostOpsAlertRecipient,
 } from "./dispatch-alert.js";
 import type { StandingResolver } from "./dispatch-inbox.js";
+
+export function keptPromptBinding(
+  project: ProjectId,
+  a: Assignment,
+  harness: Run["harness"],
+): PromptBinding | undefined {
+  if (
+    a.idle_retirement?.phase === "waiting" &&
+    a.idle_retirement.evidence?.reason === "kept_terminal" &&
+    retirementOwnsSession(a) &&
+    (harness === "codex" || harness === "claude-code")
+  )
+    return { project_id: project, assignment_id: a.id, harness };
+}
 
 /** CandidateIndex groups unread retries by their original Run, separately from new work. */
 export function previousInboxTurn(

@@ -169,16 +169,21 @@ export function sessionMaintenanceCandidate(
     return excluded("activity_unknown");
   if (at - Math.max(lastRun, mcp) <= threshold * 60_000)
     return excluded("recent_activity");
-  if (
-    a.idle_retirement?.phase === "waiting" &&
-    retirementOwnsSession(a) &&
-    Date.parse(a.idle_retirement.retry_at ?? "") > at
-  )
-    return excluded(
-      a.idle_retirement.last_failure === "unavailable"
-        ? "retirement_unavailable"
-        : "retirement_timeout",
-    );
+  const pending = a.idle_retirement;
+  if (pending?.phase === "waiting" && retirementOwnsSession(a)) {
+    if (
+      pending.failures >= 3 &&
+      pending.evidence?.reason === "kept_terminal" &&
+      pending.evidence.observation === "alive"
+    )
+      return excluded("retained_for_dispatch");
+    if (Date.parse(pending.retry_at ?? "") > at)
+      return excluded(
+        pending.last_failure === "unavailable"
+          ? "retirement_unavailable"
+          : "retirement_timeout",
+      );
+  }
   return {
     candidate: true,
     reason: ["lost", "unknown"].includes(a.runtime_state)

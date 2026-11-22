@@ -3,7 +3,7 @@ import {
   type ContextObservation,
   contextObservationCurrent,
 } from "./context-usage.js";
-import type { Assignment } from "./entities.js";
+import type { Assignment, Run } from "./entities.js";
 import type { RunId } from "./ids.js";
 
 /** Host-only evidence; no transcript text or caller-supplied paths. */
@@ -20,6 +20,8 @@ export interface HarnessActivity
   readonly model_silent_since?: number;
   /** Last normal Claude record in the same bounded transcript read, before an error. */
   readonly last_progress_at?: string;
+  /** Latest positively identified model output in this same session and workspace. */
+  readonly model_output_at?: string;
   readonly error?:
     | "rate_limit"
     | "server_error"
@@ -68,4 +70,33 @@ export function currentHarnessActivity(
 
 export function harnessActivityTime(sample: HarnessActivity | undefined) {
   return sample && !sample.error ? Date.parse(sample.updated_at) : undefined;
+}
+
+/** A record write, user echo, task start or generic progress is not evidence
+ * that the model resumed. Recheck the output timestamp against the Run and
+ * session generation independently of the containing transcript record. */
+export function runModelOutputTime(
+  state: CommandState,
+  a: Assignment,
+  run: Run,
+  now: string,
+  raw: HarnessActivity | undefined,
+) {
+  const sample = associatedHarnessActivity(state, a, now, raw);
+  if (
+    !sample ||
+    sample.run_id !== run.id ||
+    sample.source !== `${run.harness}:session_metadata` ||
+    !sample.model_output_at
+  )
+    return;
+  const at = Date.parse(sample.model_output_at);
+  if (
+    at <= Date.parse(sample.updated_at) &&
+    associatedHarnessActivity(state, a, now, {
+      ...sample,
+      updated_at: sample.model_output_at,
+    })
+  )
+    return at;
 }
