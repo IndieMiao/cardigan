@@ -6,16 +6,20 @@ import {
   useRef,
   useState,
 } from "react";
-import type {
-  CardiganClient,
-  LaunchChange,
-  LaunchPreview,
-  LaunchProfileFields,
-  LaunchProfileReference,
-  LaunchProfileView,
-  LaunchProviderSecret,
-  LaunchProviderView,
-  LaunchSettingsView,
+import {
+  ApiError,
+  type CardiganClient,
+  type LaunchChange,
+  type LaunchModelCheck,
+  type LaunchModelList,
+  type LaunchModelMetadata,
+  type LaunchPreview,
+  type LaunchProfileFields,
+  type LaunchProfileReference,
+  type LaunchProfileView,
+  type LaunchProviderSecret,
+  type LaunchProviderView,
+  type LaunchSettingsView,
 } from "../api.js";
 import { StatusTag, Time } from "../components/Foundation.js";
 import {
@@ -29,6 +33,7 @@ import {
   SettingsWarning,
 } from "../components/layout/SettingsLayout.js";
 import { Button } from "../components/ui/button.js";
+import { Combobox, type ComboboxOption } from "../components/ui/combobox.js";
 import { Input } from "../components/ui/input.js";
 import { SelectControl } from "../components/ui/select-control.js";
 import {
@@ -574,7 +579,6 @@ function TextField({
   );
 }
 
-const CUSTOM = "__custom__";
 type ProfileDraft = Record<
   | "name"
   | "harness"
@@ -598,8 +602,6 @@ export function ProfileForm({
   profile?: LaunchProfileView;
 }) {
   const { settings } = context;
-  const models = settings.models ?? {};
-  const aliases = Object.keys(models);
   const initial: ProfileDraft = {
     name: profile?.name ?? "",
     harness: profile?.harness ?? HARNESSES[0] ?? "",
@@ -617,9 +619,6 @@ export function ProfileForm({
   // so a refreshed snapshot never turns someone else's change into ours.
   const [edits, setEdits] = useState<Partial<ProfileDraft>>({});
   const draft: ProfileDraft = { ...initial, ...edits };
-  const [custom, setCustom] = useState(
-    initial.model !== "" && !aliases.includes(initial.model),
-  );
   // A field put back to the read's value is no longer an edit.
   const patch = (next: Partial<ProfileDraft>) =>
     setEdits((old) => {
@@ -636,14 +635,44 @@ export function ProfileForm({
   const creating = profile === undefined;
   const taken =
     creating && settings.profiles.some((p) => p.name === draft.name.trim());
+  // C-564: the harness decides which permission modes can be chosen. An old
+  // value outside the list stays only while neither it nor the harness changes.
+  const modesOf = (harness: string) => settings.permission_modes?.[harness];
+  const modes = modesOf(draft.harness);
+  const keptMode =
+    draft.permission_mode === initial.permission_mode &&
+    draft.harness === initial.harness;
+  const setHarness = (harness: string) => {
+    const mode =
+      harness === initial.harness
+        ? initial.permission_mode
+        : draft.permission_mode;
+    const allowed = modesOf(harness);
+    patch({
+      harness,
+      permission_mode:
+        allowed &&
+        harness !== initial.harness &&
+        mode !== "" &&
+        !allowed.includes(mode)
+          ? ""
+          : mode,
+    });
+  };
   const problems = {
     name: creating
       ? (nameProblem(draft.name.trim()) ??
         (taken ? "已有同名配置，换一个名称。" : undefined))
       : undefined,
-    model: custom && draft.model !== "" ? textProblem(draft.model) : undefined,
+    model: draft.model !== "" ? textProblem(draft.model) : undefined,
     effort: optionalNameProblem(draft.effort.trim()),
-    permission_mode: permissionProblem(draft.permission_mode.trim()),
+    permission_mode: modes
+      ? draft.permission_mode !== "" &&
+        !modes.includes(draft.permission_mode) &&
+        !keptMode
+        ? "不是这个 Harness 可选的权限模式。"
+        : undefined
+      : permissionProblem(draft.permission_mode.trim()),
     provider_flag: optionalNameProblem(draft.provider_flag.trim()),
   };
   const fields: LaunchProfileFields = {};
@@ -682,6 +711,11 @@ export function ProfileForm({
   const dirty = Object.entries(edits).some(
     ([key, value]) => value !== initial[key as keyof ProfileDraft],
   );
+  const choices = useModelChoices(
+    context.client,
+    settings.version,
+    draft.provider,
+  );
   return (
     <LaunchEditor
       context={context}
@@ -692,12 +726,23 @@ export function ProfileForm({
       fieldNames={creating ? ["name"] : []}
       fields={(server) => (
         <ProfileFields
+          client={context.client}
           draft={draft}
           patch={patch}
+          setHarness={setHarness}
           creating={creating}
-          custom={custom}
-          setCustom={setCustom}
           settings={settings}
+          choices={choices}
+          legacyMode={
+            // The read's own value, while the harness is unchanged: it stays
+            // choosable after picking another, and choosing it is no edit.
+            modes !== undefined &&
+            draft.harness === initial.harness &&
+            initial.permission_mode !== "" &&
+            !modes.includes(initial.permission_mode)
+              ? initial.permission_mode
+              : undefined
+          }
           problems={{
             ...problems,
             name: problems.name ?? server?.message,
@@ -708,24 +753,348 @@ export function ProfileForm({
   );
 }
 
-function ProfileFields({
+/** C-564: what the model list of the chosen Provider holds, or why not. */
+type ModelChoices =
+  | { readonly state: "none" }
+  | { readonly state: "loading" }
+  | { readonly state: "error"; readonly message: string }
+  | { readonly state: "loaded"; readonly list: LaunchModelList };
+
+/**
+ * C-564: the saved Provider's model choices, read once per Provider and
+ * settings version. A reply for another Provider or an older read is dropped.
+ */
+function useModelChoices(
+  client: CardiganClient,
+  version: string,
+  provider: string,
+): ModelChoices {
+  const [result, setResult] = useState<{
+    key: string;
+    choices: ModelChoices;
+  }>();
+  const key = `${version}\n${provider}`;
+  useEffect(() => {
+    if (!provider) return;
+    let live = true;
+    client.launchModels(version, provider).then(
+      (list) => {
+        if (live) setResult({ key, choices: { state: "loaded", list } });
+      },
+      (error: unknown) => {
+        if (!live) return;
+        setResult({
+          key,
+          choices: {
+            state: "error",
+            message:
+              error instanceof ApiError && error.code === "stale_snapshot"
+                ? "启动配置已在别处修改，刷新后可重新读取"
+                : error instanceof Error && error.message
+                  ? error.message
+                  : "读取失败",
+          },
+        });
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, version, provider, key]);
+  if (!provider) return { state: "none" };
+  return result?.key === key ? result.choices : { state: "loading" };
+}
+
+const LISTING_PROBLEM: Partial<
+  Record<LaunchModelList["listing"]["status"], string>
+> = {
+  failed: "Provider 模型列表读取失败",
+  partial: "Provider 模型列表未读完",
+  no_endpoint: "Provider 没有端点，未读取其模型列表",
+  missing_secret: "Provider 密钥未设置，未读取其模型列表",
+};
+const CATALOG_PROBLEM: Partial<
+  Record<LaunchModelList["catalog"]["status"], string>
+> = {
+  unavailable: "模型目录暂不可用",
+  stale: "模型目录未能更新，显示的是旧版本",
+};
+
+/** Why some choices may be missing; `undefined` when nothing went wrong. */
+function choicesProblem(choices: ModelChoices) {
+  if (choices.state === "error") return `模型列表读取失败：${choices.message}`;
+  if (choices.state !== "loaded") return undefined;
+  const { list } = choices;
+  const parts = [
+    CATALOG_PROBLEM[list.catalog.status],
+    LISTING_PROBLEM[list.listing.status],
+  ].filter(Boolean);
+  return parts.length ? parts.join("；") : undefined;
+}
+
+/** Context, output and efforts in one short line (empty when unknown). */
+function modelMeta(meta: LaunchModelMetadata | null | undefined) {
+  if (!meta) return "";
+  return [
+    meta.context_window !== undefined &&
+      `上下文 ${compact.format(meta.context_window)}`,
+    meta.max_output_tokens !== undefined &&
+      `输出 ${compact.format(meta.max_output_tokens)}`,
+    meta.reasoning_efforts?.length &&
+      `推理强度 ${meta.reasoning_efforts.join("/")}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+const compact = new Intl.NumberFormat("en-US", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+/** C-564: the one-line meaning of each Claude Code permission mode. */
+const PERMISSION_MEANING: Readonly<Record<string, string>> = {
+  "": "不传此参数，沿用 Claude Code 自身的设置。",
+  plan: "只做规划：不改文件、不执行命令。",
+  manual: "改文件或执行命令前逐次询问。",
+  acceptEdits: "自动接受文件修改，执行命令前询问。",
+  dontAsk: "未预先允许的操作直接拒绝，不询问。",
+  auto: "由 Claude Code 自动判断是否放行。",
+  bypassPermissions: "跳过全部权限确认。",
+};
+
+/** C-564: what an online check of the typed ID found, in a few words. */
+const CHECK_RESULT: Record<LaunchModelCheck["status"], string> = {
+  listed: "Provider 列出了这个模型",
+  not_listed: "Provider 未列出这个模型",
+  incomplete: "Provider 模型列表未查完，无法确认",
+  failed: "核对失败",
+  no_endpoint: "Provider 没有端点，无法核对",
+  missing_secret: "Provider 密钥未设置，无法核对",
+};
+
+/**
+ * C-564: check a typed model ID against the saved Provider's list, before
+ * saving. A result belongs to one request for one version, Provider and ID;
+ * editing any of them drops it, including a request still running, so the
+ * same ID can be checked again later. A reply only lands on its own request.
+ */
+function useModelCheck(
+  client: CardiganClient,
+  version: string,
+  provider: string,
+  model: string,
+) {
+  const key = `${version}\n${provider}\n${model}`;
+  const [result, setResult] = useState<{
+    key: string;
+    request: number;
+    state: "running" | LaunchModelCheck["status"] | { error: string };
+  }>();
+  const requests = useRef(0);
+  useEffect(() => {
+    setResult((prev) => (prev && prev.key !== key ? undefined : prev));
+  }, [key]);
+  const start = () => {
+    if (result?.key === key && result.state === "running") return;
+    requests.current += 1;
+    const request = requests.current;
+    const settle = (
+      state: "running" | LaunchModelCheck["status"] | { error: string },
+    ) =>
+      setResult((prev) =>
+        prev?.request === request ? { key, request, state } : prev,
+      );
+    setResult({ key, request, state: "running" });
+    client.checkLaunchModel(version, provider, model).then(
+      (answer) => settle(answer.status),
+      (error: unknown) =>
+        settle({
+          error:
+            error instanceof ApiError && error.code === "stale_snapshot"
+              ? "启动配置已在别处修改，刷新后可重新核对"
+              : error instanceof Error && error.message
+                ? error.message
+                : "核对失败",
+        }),
+    );
+  };
+  return { state: result?.key === key ? result.state : undefined, start };
+}
+
+function ModelField({
+  client,
   draft,
   patch,
-  creating,
-  custom,
-  setCustom,
   settings,
-  problems,
+  choices,
+  error,
+}: {
+  client: CardiganClient;
+  draft: ProfileDraft;
+  patch: (next: Partial<ProfileDraft>) => void;
+  settings: LaunchSettingsView;
+  choices: ModelChoices;
+  error: string | undefined;
+}) {
+  const aliases = Object.entries(settings.models ?? {}).filter(
+    ([, m]) => !draft.provider || !m.provider || m.provider === draft.provider,
+  );
+  const listed = choices.state === "loaded" ? choices.list.models : [];
+  const options: ComboboxOption[] = [
+    ...aliases.map(([alias, m]) => ({
+      value: alias,
+      meta: [`别名 → ${m.id}`, modelMeta(m)].filter(Boolean).join(" · "),
+    })),
+    ...listed
+      .filter((m) => !aliases.some(([alias]) => alias === m.id))
+      .map((m) => ({ value: m.id, meta: modelMeta(m) || undefined })),
+  ];
+  const value = draft.model.trim();
+  const alias = aliases.find(([a]) => a === value)?.[1];
+  const found = listed.find((m) => m.id === value);
+  const problem = choicesProblem(choices);
+  const loading = choices.state === "loading";
+  const check = useModelCheck(client, settings.version, draft.provider, value);
+  const confirmed = check.state === "listed";
+  const unverified = value !== "" && !alias && !found && !loading && !confirmed;
+  const checkText =
+    check.state === undefined || check.state === "running"
+      ? undefined
+      : typeof check.state === "object"
+        ? `核对失败：${check.state.error}`
+        : CHECK_RESULT[check.state];
+  const facts = alias
+    ? [`别名 → ${alias.id}`, modelMeta(alias)].filter(Boolean).join(" · ")
+    : modelMeta(found);
+  // Only a typed ID outside every list, with a saved Provider, can be checked.
+  const checkable = unverified && draft.provider !== "" && !textProblem(value);
+  const hint =
+    loading || problem || unverified || facts || confirmed ? (
+      <>
+        {unverified && (
+          <>
+            <StatusTag status="unknown" label="未验证" />{" "}
+          </>
+        )}
+        {confirmed && (
+          <>
+            <StatusTag status="passed" label="已核对" />{" "}
+          </>
+        )}
+        {[loading ? "正在读取模型列表…" : facts, checkText, problem]
+          .filter(Boolean)
+          .join("；")}
+        {checkable && (
+          <>
+            {" "}
+            <Button
+              variant="link"
+              size="content"
+              aria-disabled={check.state === "running" || undefined}
+              onClick={() => {
+                if (check.state !== "running") check.start();
+              }}
+            >
+              {check.state === "running" ? "正在核对…" : "在线核对"}
+            </Button>
+          </>
+        )}
+      </>
+    ) : undefined;
+  return (
+    <SettingsField label="模型" error={error} hint={hint}>
+      {(field) => (
+        <Combobox
+          label="可选模型"
+          value={draft.model}
+          onValueChange={(model) => patch({ model })}
+          options={options}
+          status={loading ? "正在读取模型列表…" : undefined}
+          autoComplete="off"
+          spellCheck={false}
+          aria-invalid={field.invalid}
+          aria-describedby={field.describedBy}
+        />
+      )}
+    </SettingsField>
+  );
+}
+
+function PermissionField({
+  draft,
+  patch,
+  modes,
+  legacy,
+  error,
 }: {
   draft: ProfileDraft;
   patch: (next: Partial<ProfileDraft>) => void;
+  modes: readonly string[] | undefined;
+  /** The read's unsupported value, kept as an option while untouched harness. */
+  legacy: string | undefined;
+  error: string | undefined;
+}) {
+  if (!modes)
+    return (
+      <TextField
+        label="权限模式"
+        error={error}
+        value={draft.permission_mode}
+        onChange={(value) => patch({ permission_mode: value })}
+      />
+    );
+  const unused = modes.length === 0 && draft.permission_mode === "";
+  const hint = unused
+    ? `${draft.harness} 不使用此参数。`
+    : legacy !== undefined && draft.permission_mode === legacy
+      ? "当前值不在可选列表中，不改这一项时原样保留。"
+      : PERMISSION_MEANING[draft.permission_mode];
+  return (
+    <SettingsField label="权限模式" error={error} hint={hint}>
+      {(field) => (
+        <SelectControl
+          value={draft.permission_mode}
+          disabled={unused}
+          aria-invalid={field.invalid}
+          aria-describedby={field.describedBy}
+          onValueChange={(permission_mode) => patch({ permission_mode })}
+        >
+          <option value="">{unused ? "不适用" : "未设置"}</option>
+          {legacy !== undefined && (
+            <option value={legacy}>{legacy}（当前值）</option>
+          )}
+          {modes.map((mode) => (
+            <option key={mode} value={mode}>
+              {mode}
+            </option>
+          ))}
+        </SelectControl>
+      )}
+    </SettingsField>
+  );
+}
+
+function ProfileFields({
+  client,
+  draft,
+  patch,
+  setHarness,
+  creating,
+  settings,
+  choices,
+  legacyMode,
+  problems,
+}: {
+  client: CardiganClient;
+  draft: ProfileDraft;
+  patch: (next: Partial<ProfileDraft>) => void;
+  setHarness: (harness: string) => void;
   creating: boolean;
-  custom: boolean;
-  setCustom: (custom: boolean) => void;
   settings: LaunchSettingsView;
+  choices: ModelChoices;
+  legacyMode: string | undefined;
   problems: Partial<Record<keyof ProfileDraft, string | undefined>>;
 }) {
-  const models = settings.models ?? {};
   const harnesses = HARNESSES.includes(draft.harness as never)
     ? HARNESSES
     : [draft.harness, ...HARNESSES];
@@ -749,10 +1118,7 @@ function ProfileFields({
       )}
       <label>
         Harness
-        <SelectControl
-          value={draft.harness}
-          onValueChange={(harness) => patch({ harness })}
-        >
+        <SelectControl value={draft.harness} onValueChange={setHarness}>
           {harnesses.map((h) => (
             <option key={h} value={h}>
               {h}
@@ -774,48 +1140,26 @@ function ProfileFields({
           ))}
         </SelectControl>
       </label>
-      <label>
-        模型
-        <SelectControl
-          value={custom ? CUSTOM : draft.model}
-          onValueChange={(value) => {
-            if (value === CUSTOM) {
-              setCustom(true);
-              patch({ model: "" });
-            } else {
-              setCustom(false);
-              patch({ model: value });
-            }
-          }}
-        >
-          <option value="">未设置</option>
-          {Object.entries(models).map(([alias, m]) => (
-            <option key={alias} value={alias}>
-              {alias} → {m.id}
-            </option>
-          ))}
-          <option value={CUSTOM}>填写模型标识</option>
-        </SelectControl>
-      </label>
-      {custom && (
-        <TextField
-          label="模型标识"
-          error={problems.model}
-          value={draft.model}
-          onChange={(value) => patch({ model: value })}
-        />
-      )}
+      <ModelField
+        client={client}
+        draft={draft}
+        patch={patch}
+        settings={settings}
+        choices={choices}
+        error={problems.model}
+      />
       <TextField
         label="推理强度"
         error={problems.effort}
         value={draft.effort}
         onChange={(value) => patch({ effort: value })}
       />
-      <TextField
-        label="权限模式"
+      <PermissionField
+        draft={draft}
+        patch={patch}
+        modes={settings.permission_modes?.[draft.harness]}
+        legacy={legacyMode}
         error={problems.permission_mode}
-        value={draft.permission_mode}
-        onChange={(value) => patch({ permission_mode: value })}
       />
       <TextField
         label="Provider 参数"
@@ -849,6 +1193,14 @@ export function CopyProfileForm({
   const [name, setName] = useState("");
   const trimmed = name.trim();
   const taken = context.settings.profiles.some((p) => p.name === trimmed);
+  // C-564: a kept hand-written permission mode outside the harness's options
+  // stays on the original only; a copy would save it anew.
+  const mode = source.parameters.permission_mode;
+  const modes = context.settings.permission_modes?.[source.harness];
+  const legacyMode =
+    mode !== null && modes !== undefined && !modes.includes(mode)
+      ? mode
+      : undefined;
   const local =
     name === ""
       ? undefined
@@ -859,7 +1211,7 @@ export function CopyProfileForm({
       context={context}
       label="复制启动配置"
       change={
-        trimmed && !local
+        trimmed && !local && legacyMode === undefined
           ? { op: "copy_profile", name: trimmed, source: source.name }
           : undefined
       }
@@ -867,6 +1219,7 @@ export function CopyProfileForm({
       fieldNames={["name"]}
       fields={(server) => (
         <CopyFields
+          legacyMode={legacyMode}
           source={source.name}
           name={name}
           setName={setName}
@@ -877,11 +1230,13 @@ export function CopyProfileForm({
   );
 }
 function CopyFields({
+  legacyMode,
   source,
   name,
   setName,
   problem,
 }: {
+  legacyMode: string | undefined;
   source: string;
   name: string;
   setName: (name: string) => void;
@@ -892,6 +1247,12 @@ function CopyFields({
       <SettingsFacts>
         <SettingsFact label="来源">{source}</SettingsFact>
       </SettingsFacts>
+      {legacyMode !== undefined && (
+        <SettingsWarning role="alert">
+          原配置的权限模式 {legacyMode}{" "}
+          不在可选列表中，不能复制；请先在原配置中改选。
+        </SettingsWarning>
+      )}
       <TextField
         label="新配置名称"
         error={problem}

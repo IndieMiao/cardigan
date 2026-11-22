@@ -13,6 +13,7 @@ export function SuggestionList({
   field,
   id,
   label,
+  matchField = false,
   children,
 }: {
   open: boolean;
@@ -21,6 +22,8 @@ export function SuggestionList({
   field: RefObject<HTMLElement | null>;
   id: string;
   label: string;
+  /** C-564: as wide as the field (a combobox) instead of the menu width. */
+  matchField?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -31,7 +34,9 @@ export function SuggestionList({
         align="start"
         sideOffset={4}
         collisionPadding={8}
-        className="ui-suggestions"
+        className={
+          matchField ? "ui-suggestions ui-suggestions-field" : "ui-suggestions"
+        }
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
         onInteractOutside={(event) => {
