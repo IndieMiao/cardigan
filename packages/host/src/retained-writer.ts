@@ -219,45 +219,70 @@ const sameIncident = (
     ? other.system_finished_run_id === action.system_finished_run_id
     : !!action.dispatch_stall_id &&
       other.dispatch_stall_id === action.dispatch_stall_id);
-/** The incident's first system backup record: the directory identity every
- * later takeover, settlement and launch of the same incident must match.
+/** The incident's actions in event order, and the first one that settled
+ * (finished with a successor Run). A writer settles only after recording its
+ * own system backup receipt, so that receipt is mandatory evidence. */
+function incidentHistory(state: CommandState, action: IncidentAction) {
+  const order = new Map<string, number>();
+  for (const e of eventsOfType(state.events, "host_ops_action_taken"))
+    if (sameIncident(action, e.payload as Partial<IncidentAction>))
+      order.set(e.id, order.size);
+  let settled: number | undefined;
+  for (const e of eventsOfType(state.events, "host_ops_action_finished")) {
+    const p = e.payload as { action_id?: string; run_id?: string };
+    const at = p.action_id ? order.get(p.action_id) : undefined;
+    if (p.run_id && at !== undefined && (settled === undefined || at < settled))
+      settled = at;
+  }
+  return { order, settled };
+}
+/** The incident's original directory identity: its earliest system backup
+ * receipt, provided that receipt's action is not later than the first settled
+ * action. A receipt written by an unsettled attempt still counts. When the
+ * first settled action's receipt is unreadable, no later receipt replaces it.
  * Looked up by incident (ended Run or cause), never by a newer action id. */
 export function firstIncidentBackup(
   state: CommandState,
   action: IncidentAction,
 ): BackupRow | undefined {
-  const taken = new Map<string, Partial<IncidentAction>>(
-    eventsOfType(state.events, "host_ops_action_taken").map((e) => [
-      e.id,
-      e.payload as Partial<IncidentAction>,
-    ]),
-  );
-  return eventsOfType(state.events, "dispatch_stall_backup_verified").find(
-    (e) => {
-      const p = e.payload as BackupRow;
-      return (
-        e.actor.kind === "system" &&
-        p.assignment_id === action.assignment_id &&
-        !!p.action_id &&
-        sameIncident(action, taken.get(p.action_id))
-      );
-    },
-  )?.payload as BackupRow | undefined;
+  const { order, settled } = incidentHistory(state, action);
+  let earliest: { at: number; row: BackupRow } | undefined;
+  for (const e of eventsOfType(
+    state.events,
+    "dispatch_stall_backup_verified",
+  )) {
+    const p = e.payload as BackupRow;
+    const at = p.action_id ? order.get(p.action_id) : undefined;
+    if (
+      e.actor.kind === "system" &&
+      p.assignment_id === action.assignment_id &&
+      at !== undefined &&
+      (!earliest || at < earliest.at)
+    )
+      earliest = { at, row: p };
+  }
+  if (!earliest) return;
+  return settled === undefined || earliest.at <= settled
+    ? earliest.row
+    : undefined;
 }
-/** A recovery of this incident already settled its session and then refused
- * the preserved checkout: its first backup record is now mandatory evidence. */
+/** A recovery of this incident already settled its session (and possibly
+ * refused the preserved checkout): its first receipt is mandatory evidence. */
 export function incidentWriterRefused(
   state: CommandState,
   action: IncidentAction,
 ) {
-  return eventsOfType(state.events, "retained_writer_refused").some((e) =>
-    sameIncident(action, e.payload as Partial<IncidentAction>),
+  return (
+    incidentHistory(state, action).settled !== undefined ||
+    eventsOfType(state.events, "retained_writer_refused").some((e) =>
+      sameIncident(action, e.payload as Partial<IncidentAction>),
+    )
   );
 }
-
 /** The takeover's identity verdict for a freshly computed directory seal:
- * the matching first record, `null` (mismatch, or a refused incident whose
- * first record is missing), or `undefined` when this action records the first. */
+ * the matching first record, `null` (mismatch, or an incident whose required
+ * first record is missing), or `undefined` when this action records the first
+ * (no receipt was ever written and nothing has settled). */
 export function incidentIdentity(
   state: CommandState,
   action: IncidentAction,
