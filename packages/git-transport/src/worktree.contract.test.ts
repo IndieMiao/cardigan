@@ -570,3 +570,49 @@ test.each(["backup", "main"] as const)(
     ).toBe(recovered.base_sha);
   },
 );
+
+test("C-589: a card branch created in the source after the central clone gets a worktree", async () => {
+  // The central repository exists before the branch does.
+  placement(await service.ensureWorktree(input));
+  await git(source, "switch", "-c", "integration/late");
+  const late = await commit(source, "late branch");
+  await git(source, "switch", "main");
+  const created = placement(
+    await service.ensureWorktree({
+      ...input,
+      assignment: {
+        ...input.assignment,
+        id: "A-2" as never,
+        work_item_id: "W-2" as never,
+      },
+      work_item: {
+        ...input.work_item,
+        id: "W-2" as never,
+        assignment_id: "A-2" as never,
+      },
+      card: { ...input.card, base_branch: "integration/late" },
+    }),
+  );
+  expect(created.base_sha).toBe(late);
+  expect(created.baseline).toEqual({
+    ref: "origin/integration/late",
+    sha: late,
+  });
+  // A branch missing on both sides still fails.
+  await expect(
+    service.ensureWorktree({
+      ...input,
+      assignment: {
+        ...input.assignment,
+        id: "A-3" as never,
+        work_item_id: "W-3" as never,
+      },
+      work_item: {
+        ...input.work_item,
+        id: "W-3" as never,
+        assignment_id: "A-3" as never,
+      },
+      card: { ...input.card, base_branch: "integration/nowhere" },
+    }),
+  ).rejects.toThrow(/missing in both/u);
+});

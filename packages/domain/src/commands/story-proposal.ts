@@ -6,14 +6,13 @@ import {
   type StoryProposal,
 } from "../story-discussion.js";
 import { requireCardDependencyStart } from "./card-dependencies.js";
-import {
-  attempt,
-  type CommandPorts,
-  type CommandState,
-  ensure,
-} from "./core.js";
+import { type CommandPorts, type CommandState, ensure } from "./core.js";
 import { createCardInDraft } from "./pm.js";
-import { storyProposalOrder } from "./story-discussion.js";
+import {
+  checkStoryChild,
+  storyChildForm,
+  storyProposalOrder,
+} from "./story-discussion.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 
 export interface ConfirmStoryProposalParams {
@@ -148,46 +147,27 @@ function openChildren(
     });
     const depends_on_cards = [...siblings, ...(child.depends_on_cards ?? [])];
     // Name the child on refusal; the whole confirmation still rolls back.
-    const result = attempt(() =>
-      createCardInDraft(d, {
-        title: child.title,
-        goal: child.goal,
-        template_id: child.template_id,
-        acceptance_criteria: child.acceptance_criteria,
-        priority: child.priority,
-        parent_card_id: story.id,
-        source: {
-          kind: "quote",
-          text: `需求卡 ${story.id} 拆解方案第 ${proposal.version} 版第 ${number} 张（${proposal.entry_id}）`,
+    const card = checkStoryChild(number, child.title, () =>
+      createCardInDraft(
+        d,
+        {
+          ...storyChildForm(
+            story.id,
+            child,
+            `需求卡 ${story.id} 拆解方案第 ${proposal.version} 版第 ${number} 张（${proposal.entry_id}）`,
+          ),
+          story_source: {
+            card_id: story.id,
+            version: proposal.version,
+            entry_id: proposal.entry_id,
+            number,
+          },
+          ...(depends_on_cards.length ? { depends_on_cards } : {}),
         },
-        story_source: {
-          card_id: story.id,
-          version: proposal.version,
-          entry_id: proposal.entry_id,
-          number,
-        },
-        ...(depends_on_cards.length ? { depends_on_cards } : {}),
-        ...(child.state_and_save === undefined
-          ? {}
-          : {
-              state_and_save: child.state_and_save as NonNullable<
-                Card["state_and_save"]
-              >,
-            }),
-        ...(child.repo === undefined ? {} : { repo: child.repo }),
-        ...(child.base_branch === undefined
-          ? {}
-          : { base_branch: child.base_branch }),
-      }),
+        { registered_repo_only: true },
+      ),
     );
-    if (!result.ok)
-      ensure(
-        false,
-        result.error.code,
-        `第 ${number} 张子卡「${child.title}」无法开出：${readable(result.error.message)}`,
-        { child: number },
-      );
-    opened.set(index, result.value);
+    opened.set(index, card);
   }
   // Proposal order: card_ids[i] is the card opened for child i + 1.
   return proposal.children.map((_, i) => {
@@ -195,10 +175,4 @@ function openChildren(
     ensure(card, "invariant_violation", "拆解方案子卡缺失");
     return card;
   });
-}
-
-/** `text()` answers in English; the person reading the refusal reads Chinese. */
-function readable(message: string): string {
-  const field = /^(.+) is required$/u.exec(message)?.[1];
-  return field ? `缺少 ${field}` : message;
 }

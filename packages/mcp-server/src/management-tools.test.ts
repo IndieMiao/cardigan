@@ -2973,10 +2973,22 @@ test("Office submits a versioned decomposition through MCP; get_card shows every
     acceptance_criteria: ["Part works"],
     owner_role: "pm",
   };
+  const dev = { ...child, template_id: "dev", base_branch: "release" };
+  const proposal = {
+    card_id,
+    body: "拆解",
+    story_discussion: { action: "propose", children: [dev] },
+  };
+  expect(
+    (await raw(office, "post_comment", proposal)).structuredContent,
+  ).toMatchObject({
+    error: { message: "第 1 张子卡「Part」无法开出：缺少 repo" },
+  });
+  registerRepository();
   const first = await ok<TimelineEntry>(office, "post_comment", {
     card_id,
     body: "拆解",
-    story_discussion: { action: "propose", children: [child] },
+    story_discussion: { action: "propose", children: [dev] },
   });
   const second = await ok<TimelineEntry>(office, "post_comment", {
     card_id,

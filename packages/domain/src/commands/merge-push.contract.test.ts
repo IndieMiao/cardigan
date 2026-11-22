@@ -28,7 +28,9 @@ async function fixture(
   const { completion } = await f.accept();
   const state = (): CommandState => ({
     ...f.state,
-    project_settings: { merge_push: destination },
+    project_settings: {
+      merge_push: [{ ...destination, base_branch: "main" }],
+    },
   });
   const merge = {
     card_id: f.card.id,

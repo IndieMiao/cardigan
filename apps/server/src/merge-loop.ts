@@ -21,13 +21,18 @@ import {
   recordMergeResult,
   systemConfirmMerge,
 } from "@cardigan/domain";
-import type { CentralProject, MergeOutcome } from "@cardigan/git-service";
+import {
+  type CentralProject,
+  centralBranch,
+  type MergeOutcome,
+} from "@cardigan/git-service";
 import { withMergeTransferBudget } from "@cardigan/git-transport";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { CheckHandoffs, type Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
 import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
+import { mergeFailureReason, mergeStage } from "./merge-failure.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
@@ -323,14 +328,18 @@ export class MergeExecutor {
    * the round: a broken card must not block the other cards of its project.
    */
   private async merge(
-    project: CentralProject,
+    registered: CentralProject,
     plan: MergePlan,
   ): Promise<boolean> {
-    const project_id = project.project_id as ProjectId;
+    const project_id = registered.project_id as ProjectId;
     try {
       if (new CheckHandoffs(this.options.store, "").blockedProject(project_id))
         return false;
-      await this.options.git.sync(project);
+      // Each card merges into its own baseline branch of the central repository.
+      const project = await mergeStage("选择基线分支", () =>
+        centralBranch(registered, plan.base_branch),
+      );
+      await mergeStage("同步源仓库", () => this.options.git.sync(project));
       const merged = await tryPublication(project_id, async () => {
         if (
           this.stopped ||
@@ -347,38 +356,46 @@ export class MergeExecutor {
           return false;
         let outcome: MergeOutcome;
         const git = this.options.git;
-        if (git.prepare && git.publish) {
-          const candidate = await git.prepare(project, plan);
+        const { prepare, publish } = git;
+        if (prepare && publish) {
+          const candidate = await mergeStage("准备合并候选", () =>
+            prepare.call(git, project, plan),
+          );
           if (candidate.status === "candidate") {
-            const published = await git.publish(
-              project,
-              plan.completion_id,
-              candidate,
-              mergePublicationGuard({
-                store: this.options.store,
-                project: project_id,
-                plan,
-                clock: this.clock,
-                settings: this.settings(project_id),
-                stopped: () =>
-                  this.stopped ||
-                  this.checks?.configured(project_id) === true ||
-                  new CheckHandoffs(this.options.store, "").blockedProject(
-                    project_id,
-                  ),
-                result: {
-                  kind: "merged",
-                  merge_sha: candidate.candidate_sha,
-                  previous_sha: candidate.previous_sha,
-                  tree_sha: candidate.tree_sha,
-                },
-              }),
+            const published = await mergeStage("发布合并", () =>
+              publish.call(
+                git,
+                project,
+                plan.completion_id,
+                candidate,
+                mergePublicationGuard({
+                  store: this.options.store,
+                  project: project_id,
+                  plan,
+                  clock: this.clock,
+                  settings: this.settings(project_id),
+                  stopped: () =>
+                    this.stopped ||
+                    this.checks?.configured(project_id) === true ||
+                    new CheckHandoffs(this.options.store, "").blockedProject(
+                      project_id,
+                    ),
+                  result: {
+                    kind: "merged",
+                    merge_sha: candidate.candidate_sha,
+                    previous_sha: candidate.previous_sha,
+                    tree_sha: candidate.tree_sha,
+                  },
+                }),
+              ),
             );
             return published.status !== "stale";
           }
           outcome = candidate;
         } else {
-          outcome = await git.merge(project, plan);
+          outcome = await mergeStage("准备合并候选", () =>
+            git.merge(project, plan),
+          );
         }
         if (outcome.status === "stale") return false;
         if (outcome.status === "merged")
@@ -408,9 +425,7 @@ export class MergeExecutor {
       this.recordFailure(
         project_id,
         plan,
-        `Merge of ${plan.card_id} failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        mergeFailureReason(plan.card_id, error),
       );
       return true;
     }
