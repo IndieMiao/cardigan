@@ -35,6 +35,7 @@ export async function darwinRetirementObservation(
     launch_run: launch.run_id,
     generation: launch.generation,
     terminal: ref.terminal_ref.slice(execution.machine.length + 1),
+    agent_name: ref.agent_name,
     process: p,
     require_idle: owner.system_finished_turn === true,
     primitive: posix.join(

@@ -12,16 +12,53 @@ import resource
 import secrets
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 
-def clean_tree(path):
-    if path.resolve(strict=True) != path or not (path / '.git').is_dir() or (path / '.git').is_symlink():
+def metadata(path):
+    # Read Git's small registration files only; never follow a substituted link or FIFO.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not 0 < info.st_size <= 4096:
+            raise ValueError('unverified worktree registration')
+        return os.read(fd, 4097)
+    finally:
+        os.close(fd)
+
+
+def canonical(path):
+    try:
+        return path.resolve(strict=True) == path
+    except (OSError, RuntimeError):  # pathlib can report a symlink loop as RuntimeError
         return False
+
+
+def registered_admin(path, common):
+    if not canonical(path) or not canonical(common):
+        return None
+    link = re.fullmatch(rb'gitdir: (/[^\x00\r\n]+)\n', metadata(path / '.git'))
+    if not link:
+        return None
+    admin = Path(os.fsdecode(link[1]))
+    if (admin.parent != common / 'worktrees' or not canonical(admin)
+            or metadata(admin / 'commondir') != b'../..\n'
+            or metadata(admin / 'gitdir') != os.fsencode(path / '.git') + b'\n'):
+        return None
+    return admin
+
+
+def clean_tree(path, common, project):
+    admin = registered_admin(path, common)
+    if not admin:
+        return False
+    # Do not let Git rediscover a different repository through a changed .git file.
     env = dict(PATH='/usr/bin:/bin', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+               GIT_DIR=str(admin), GIT_COMMON_DIR=str(common), GIT_WORK_TREE=str(path),
                GIT_NO_LAZY_FETCH='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C')
     def git(*args):
         # Bound noisy/large repositories without transferring paths off the worker.
@@ -37,6 +74,8 @@ def clean_tree(path):
     keys = git('config', '--local', '--no-includes', '--name-only', '--list').decode().splitlines()
     if any(not re.fullmatch(r'core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode)|remote\.origin\.(url|fetch)|branch\..+\.(remote|merge)|extensions\.objectformat', k) for k in keys):
         return False
+    if git('config', '--local', '--no-includes', '--get-all', 'remote.origin.url') != os.fsencode('cardigan-central:' + project) + b'\n':
+        return False
     # Unborn/damaged checkouts and indexes hiding tracked changes are not proof.
     if not re.fullmatch(b'[0-9a-f]{40}(?:[0-9a-f]{24})?\n', git('rev-parse', '--verify', 'HEAD^{commit}')):
         return False
@@ -44,7 +83,8 @@ def clean_tree(path):
            for row in git('ls-files', '--stage', '-v', '-z').split(b'\x00') if row):
         return False
     return (git('rev-parse', '--show-toplevel') == os.fsencode(path) + b'\n' and
-            not git('status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignore-submodules=none'))
+            not git('status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignore-submodules=none') and
+            registered_admin(path, common) == admin)
 
 
 def workspace(c):
@@ -53,8 +93,9 @@ def workspace(c):
     if c['worktree'] == 'none':
         return (Path.cwd() == Path(c['root'], 'runs', leaf, 'generations', c['generation']) and
                 not os.path.lexists(tree) and not os.path.lexists(build))
-    return (Path.cwd() == tree and clean_tree(tree) and
-            (not os.path.lexists(build) or clean_tree(build)))
+    common = Path(c['root'], 'repos', c['project'], '.git')
+    return (Path.cwd() == tree and clean_tree(tree, common, c['project']) and
+            (not os.path.lexists(build) or clean_tree(build, common, c['project'])))
 
 
 def valid_signature(public_pem, message, signature):

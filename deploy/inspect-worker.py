@@ -188,14 +188,39 @@ def darwin_retirement(c, terminal_owner=None):
                 or t.get('rm') is not False or t.get('pid') != terminal_owner
                 or (t.get('foreground') or {}).get('pid') not in (terminal_owner, p['pid'])):
             return 'unknown'
-        observed = darwin_execution(p, runpy.run_path(c['primitive'])['darwin_identity'])
+        native = runpy.run_path(c['primitive'])['darwin_identity']
+        observed = darwin_execution(p, native)
         if t['state'] == 'finished' and observed == 'exited':
             return 'exited'
         if t['state'] == 'live' and t.get('keep') is True:
             return 'kept'
-        idle = (t.get('status') or {}).get('state') in ('idle', 'done')
-        if (t['state'] == 'live' and observed == 'alive' and (terminal_owner or p['pid']) == t.get('pid')
-                and t.get('keep') is False and (idle or not c['require_idle'])):
+        def live(t):
+            idle = (t.get('status') or {}).get('state') in ('idle', 'done')
+            return t.get('state') == 'live' and t.get('keep') is False and (idle or not c['require_idle'])
+        if observed != 'alive' or not live(t):
+            return 'unknown'
+        if (terminal_owner or p['pid']) == t.get('pid'):
+            return 'alive'
+        # Read-only observation runs OUTSIDE the supervisor. The journal identifies
+        # its CLI child, not the terminal PID. Prove immediate parentage between two
+        # native birth checks, then re-read the same labeled terminal generation.
+        parent = t.get('pid')
+        def supervised(row):
+            return (row.get('name') == c['agent_name'] and row.get('rm') is False
+                    and (row.get('foreground') or {}).get('pid') in (parent, p['pid']))
+        if terminal_owner is not None or type(parent) != int or parent <= 1 or not supervised(t):
+            return 'unknown'
+        try:
+            ppid = subprocess.check_output(['/bin/ps', '-p', str(p['pid']), '-o', 'ppid='],
+                                           env={'LC_ALL': 'C'}, stdin=subprocess.DEVNULL,
+                                           stderr=subprocess.DEVNULL, timeout=1).strip()
+        except (OSError, subprocess.SubprocessError):
+            return 'unknown'
+        if ppid != str(parent).encode() or darwin_execution(p, native) != 'alive':
+            return 'unknown'
+        again = rpc('terminal.get', dict(terminal=c['terminal']))
+        if (live(again) and supervised(again) and all(again.get(k) == t[k] for k in ('address', 'created_ms', 'pid'))
+                and all(again['labels'].get(k) == v for k, v in labels.items())):
             return 'alive'
         return 'unknown'
 

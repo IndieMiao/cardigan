@@ -60,6 +60,7 @@ test("native observation uses only the pinned generation and worker account", as
       session: target.session,
       user: "fixture",
       terminal: "t1",
+      agent_name: ref.agent_name,
       process: processReceipt,
     }),
   );

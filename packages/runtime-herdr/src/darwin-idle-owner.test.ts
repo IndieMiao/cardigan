@@ -7,6 +7,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -108,12 +109,14 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
   vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
   const root = mkdtempSync(join(realpathSync(tmpdir()), "darwin-owner-")),
     tree = join(root, "worktrees/fixture/A-1"),
+    build = join(root, "builds/fixture/A-1"),
+    repo = join(root, "repos/fixture"),
     execution = { ...e, agentRoot: root };
-  mkdirSync(tree, { recursive: true });
-  execFileSync("git", ["init", "-q", tree]);
-  execFileSync("git", [
-    "-C",
-    tree,
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args]);
+  mkdirSync(repo, { recursive: true });
+  git("init", "--template=", "-q");
+  git("config", "--local", "remote.origin.url", "cardigan-central:fixture");
+  git(
     "-c",
     "user.name=Fixture",
     "-c",
@@ -122,7 +125,10 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     "--allow-empty",
     "-qm",
     "initial",
-  ]);
+  );
+  // Same registered clone, branch worktree and detached build checkout as WorkerGitTransport.
+  git("worktree", "add", "-q", "-b", "agent/fixture", "--", tree, "HEAD");
+  git("worktree", "add", "-q", "--detach", "--", build, "HEAD");
   writeFileSync(join(root, "state"), "idle");
   const launched = await enrollDarwinOwner(execution, assignment, role, {
     ...l,
@@ -179,6 +185,34 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     expect((await stop()).outcome).toBe("withdrawn");
     expect(readFileSync(join(tree, "pending"), "utf8")).toBe("preserve me");
     rmSync(join(tree, "pending"));
+    writeFileSync(join(build, "pending"), "keep build changes");
+    expect((await stop()).outcome).toBe("withdrawn");
+    expect(readFileSync(join(build, "pending"), "utf8")).toBe(
+      "keep build changes",
+    );
+    rmSync(join(build, "pending"));
+    const marker = join(tree, ".git"),
+      registered = readFileSync(marker);
+    writeFileSync(marker, readFileSync(join(build, ".git"))); // Same repository, wrong backlink.
+    expect((await stop()).outcome).toBe("withdrawn");
+    writeFileSync(marker, `gitdir: ${join(root, "unbound", ".git")}\n`);
+    expect((await stop()).outcome).toBe("withdrawn");
+    rmSync(marker);
+    symlinkSync(join(build, ".git"), marker);
+    expect((await stop()).outcome).toBe("withdrawn");
+    rmSync(marker);
+    writeFileSync(marker, registered);
+    const commonFile = join(
+      registered.toString().trim().slice("gitdir: ".length),
+      "commondir",
+    );
+    const common = readFileSync(commonFile);
+    writeFileSync(commonFile, "../elsewhere\n");
+    expect((await stop()).outcome).toBe("withdrawn");
+    writeFileSync(commonFile, common);
+    git("config", "remote.origin.url", "cardigan-central:other");
+    expect((await stop()).outcome).toBe("withdrawn");
+    git("config", "remote.origin.url", "cardigan-central:fixture");
     // Become busy AFTER worker readiness. A signed request without independent
     // exit evidence retains the fence, even when the worker reports refusal.
     expect(
