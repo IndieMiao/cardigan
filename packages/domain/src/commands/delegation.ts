@@ -240,6 +240,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     );
   if (q.trigger === "merge_confirmation")
     return (
+      d.state.project_settings?.merge_gate_enabled !== false &&
       !q.source_unrelated_human_required &&
       !d.list("cards").some((c) => c.id === q.card_id && flowAtLeast(c, 4)) &&
       pmMergeConfirmation(projectPreference(d)) &&

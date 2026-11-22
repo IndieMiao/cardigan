@@ -22,6 +22,10 @@ import {
   type CapabilityProbe,
   probeMachineCapability,
 } from "./machine-capability-probe.js";
+import {
+  RuntimeTargetError,
+  safeTargetReason,
+} from "./runtime-target-error.js";
 import { runtimeWorkersPath } from "./runtime-workers-config.js";
 import {
   helperMismatch,
@@ -180,19 +184,22 @@ export async function refreshMachineObservations(
         current.machine.arch,
       ])
     )
-      throw new Error("Machine target changed");
+      throw new RuntimeTargetError("target_changed");
     checkedTarget = current;
     if (health.status === "passed")
       targetFingerprint = observationFingerprint(
         target.execution.target?.fingerprint,
         target.machine,
       );
-  } catch {
+  } catch (error) {
     // Do not echo configuration, command output, SSH parameters, or exceptions.
     health = {
       status: "failed",
       checked_at: now(),
-      blockers: ["machine_observation_failed"],
+      blockers:
+        error instanceof RuntimeTargetError
+          ? [error.code, safeTargetReason(error)]
+          : ["machine_observation_failed"],
       launch_enabled: false,
     };
     capabilities = [];

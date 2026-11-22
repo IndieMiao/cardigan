@@ -760,6 +760,115 @@ test("execution results require text; errors preserve the draft for retry", asyn
   );
 });
 
+test.each(["false_alarm", "unconfirmed", "exited"])(
+  "remote loss records %s separately from the note",
+  async (verdict) => {
+    const completeAction = vi.fn().mockResolvedValue(undefined);
+    const data = page([]);
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: async () => ({
+            ...data,
+            human_actions: data.human_actions.map((a) => ({
+              ...a,
+              requires_loss_conclusion: true,
+            })),
+          }),
+          completeAction,
+        })}
+        projectId="p-1"
+      />,
+    );
+    const choice = await screen.findByRole("combobox", {
+      name: "H-1 失联结论",
+    });
+    changeControl(screen.getByLabelText("H-1 执行结果"), {
+      target: { value: "已核对" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认已完成" }));
+    expect(completeAction).not.toHaveBeenCalled();
+    changeControl(choice, { target: { value: verdict } });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: verdict === "unconfirmed" ? "记录核对结果" : "确认已完成",
+      }),
+    );
+    await waitFor(() =>
+      expect(completeAction).toHaveBeenCalledWith(
+        "p-1",
+        "H-1",
+        "已核对",
+        expect.any(String),
+        verdict,
+      ),
+    );
+  },
+);
+
+test("a reopened loss request shows the saved observation and still accepts a definite conclusion", async () => {
+  const at = "2026-01-02T12:00:00.000Z";
+  const data = page([]);
+  let recorded = false;
+  const completeAction = vi.fn(async () => {
+    recorded = true;
+  });
+  const client = fakeClient({
+    needsYou: async () => ({
+      ...data,
+      human_actions: data.human_actions.map((a) => ({
+        ...a,
+        requires_loss_conclusion: true,
+        ...(recorded
+          ? {
+              last_loss_observation: { conclusion: "unconfirmed" as const, at },
+            }
+          : {}),
+      })),
+    }),
+    completeAction,
+  });
+  const renderPage = () =>
+    render(<NeedsYouPage client={client} projectId="p-1" />);
+  const view = renderPage();
+  const choice = await screen.findByRole("combobox", { name: "H-1 失联结论" });
+  expect(screen.queryByText("已记录：无法确认")).toBeNull();
+  changeControl(choice, { target: { value: "unconfirmed" } });
+  changeControl(screen.getByLabelText("H-1 执行结果"), {
+    target: { value: "仍无法连接" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "记录核对结果" }));
+  await screen.findByText("已记录：无法确认");
+  expect(
+    (screen.getByRole("button", { name: "记录核对结果" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  view.unmount();
+  renderPage();
+  await screen.findByText("已记录：无法确认");
+  expect(
+    screen
+      .getByRole("article", { name: "执行 H-1" })
+      .querySelector(`time[datetime="${at}"]`),
+  ).not.toBeNull();
+  changeControl(screen.getByRole("combobox", { name: "H-1 失联结论" }), {
+    target: { value: "exited" },
+  });
+  changeControl(screen.getByLabelText("H-1 执行结果"), {
+    target: { value: "已核实退出" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "确认已完成" }));
+  await waitFor(() =>
+    expect(completeAction).toHaveBeenLastCalledWith(
+      "p-1",
+      "H-1",
+      "已核实退出",
+      expect.any(String),
+      "exited",
+    ),
+  );
+});
+
 test("handles loading, failed reads with retry, and empty data", async () => {
   let settle: (p: NeedsPage) => void = () => {};
   const needsYou = vi

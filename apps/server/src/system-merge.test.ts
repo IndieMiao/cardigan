@@ -94,6 +94,7 @@ async function setup() {
   };
   return {
     store,
+    root,
     openPeer: () => Store.open({ dataDir: root }),
     project,
     state,
@@ -138,6 +139,49 @@ function publisher(project: ProjectId, mutate?: () => void) {
   };
   return { git, published };
 }
+
+test("C-577: a disabled gate hands the stored system decision back once, even with a historical pass", async () => {
+  const f = await setup();
+  try {
+    const { git, published } = publisher(f.project);
+    const loop = new MergeExecutor({
+      store: f.store,
+      clock: f.clock,
+      git,
+      gate: {
+        configuration: {
+          errors: [],
+          forProject: () => ({ status: "disabled" }),
+        },
+        execution: { mode: "local", dataDir: f.root },
+      },
+    });
+    await loop.tick();
+    expect(f.read().decisions.find((q) => q.id === f.q.id)).toMatchObject({
+      decider: "human",
+      status: "open",
+      target: f.q.target,
+    });
+    expect(
+      needsYou(f.read(), f.clock.now(), "disabled").decisions.map((q) => q.id),
+    ).toContain(f.q.id);
+    await loop.tick();
+    expect(
+      f
+        .read()
+        .events.filter(
+          (e) =>
+            e.type === "decision_requested" &&
+            (e.payload as { previous_decider?: string }).previous_decider ===
+              "system",
+        ),
+    ).toHaveLength(1);
+    expect(published).not.toHaveBeenCalled();
+    expect(loop.confirmationErrorCount).toBe(0);
+  } finally {
+    f.close();
+  }
+});
 
 test("A3: merge loop confirms once, produces only a Needs You notice, and records done through fake guarded publisher", async () => {
   const f = await setup();

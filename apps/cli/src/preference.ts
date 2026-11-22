@@ -12,6 +12,7 @@ import {
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
+  type ProjectId,
   pmConfirmHumanDecidedMerges,
   pmConfirmRoleRuleImplementations,
   pmMergeConfirmation,
@@ -30,10 +31,11 @@ import {
   validSystemReviewLimitMax,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
-import { openStore } from "@cardigan/store";
+import { openStore, type Store } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
 import {
   announceDataDir,
+  loadProjectMergeGate,
   resolveActor,
   resolveProject,
   runCommand,
@@ -42,10 +44,10 @@ import type { CliIo } from "./io.js";
 
 const USAGE =
   "cardigan preference get machine-preference | set machine-preference <JSON机器编号数组> | get auto-merge | set auto-merge <on|off> | get high-risk-paths | set high-risk-paths <JSON路径数组> | get cross-card-read | set cross-card-read <on|off> | get auto-merge-paused | set auto-merge-paused <on|off> | get flow-version | set flow-version <版本> | get auto-security-paths | set auto-security-paths <JSON路径数组> | get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-confirm-role-rule-implementations | set pm-confirm-role-rule-implementations <on|off> | get pm-confirm-human-decided-merges | set pm-confirm-human-decided-merges <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> | get system-review-limit-raise | set system-review-limit-raise <on|off> | get system-review-limit-max-raises | set system-review-limit-max-raises <次数|off> | get role-rule-paths | set role-rule-paths <JSON路径数组|off> [--project <p>] [--data-dir <目录>]";
-export function runPreferenceCommand(
+export async function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
-): number {
+): Promise<number> {
   if (args.includes("--help") || args.includes("-h")) {
     io.stdout(USAGE);
     return EXIT.ok;
@@ -77,6 +79,40 @@ export function runPreferenceCommand(
     flags[name] = value as string;
   }
   const [action, preference, raw, toggle] = positions;
+  // Preference changes can reassign open confirmations in the same transaction.
+  async function writePreferences(
+    store: Store,
+    project: ProjectId,
+    operation: string,
+    patch: Parameters<typeof setProjectPreferences>[2],
+  ) {
+    const actor = resolveActor(io, project, store);
+    const gate = await loadProjectMergeGate(
+      store,
+      project,
+      io,
+      flags["data-dir"],
+    );
+    return runCommand(store, {
+      operation,
+      target: `${project} ${preference}`,
+      project_id: project,
+      actor,
+      reduce: (s, a, ports) =>
+        setProjectPreferences(
+          {
+            ...s,
+            project_settings: {
+              ...s.project_settings,
+              merge_gate_enabled: gate.status !== "disabled",
+            },
+          },
+          a,
+          patch,
+          ports,
+        ),
+    });
+  }
   if (preference === "flow-version") {
     if (
       !["get", "set"].includes(action ?? "") ||
@@ -99,13 +135,8 @@ export function runPreferenceCommand(
       const project = resolveProject(store, io, flags.project);
       const pref =
         action === "set"
-          ? runCommand(store, {
-              operation: "设置新卡流程版本",
-              target: project,
-              project_id: project,
-              actor: resolveActor(io, project, store),
-              reduce: (s, a, ports) =>
-                setProjectPreferences(s, a, { flow_version }, ports),
+          ? await writePreferences(store, project, "设置新卡流程版本", {
+              flow_version,
             })
           : store.uow.read((tx) =>
               projectPreferences(loadCommandState(tx, project)),
@@ -189,13 +220,8 @@ export function runPreferenceCommand(
       const project = resolveProject(store, io, flags.project);
       const pref =
         action === "set"
-          ? runCommand(store, {
-              operation: "设置系统审核偏好",
-              target: `${project} ${preference}`,
-              project_id: project,
-              actor: resolveActor(io, project, store),
-              reduce: (s, a, ports) =>
-                setProjectPreferences(s, a, { [systemKey]: setting }, ports),
+          ? await writePreferences(store, project, "设置系统审核偏好", {
+              [systemKey]: setting,
             })
           : store.uow.read((tx) =>
               projectPreferences(loadCommandState(tx, project)),
@@ -340,85 +366,75 @@ export function runPreferenceCommand(
     const project = resolveProject(store, io, flags.project);
     const preferences =
       action === "set"
-        ? runCommand(store, {
-            operation: "设置项目偏好",
-            target: `${project} ${preference}`,
-            project_id: project,
-            actor: resolveActor(io, project, store),
-            reduce: (s, a, ports) =>
-              setProjectPreferences(
-                s,
-                a,
-                shadow
-                  ? { system_merge_shadow: raw === "on" }
-                  : shadowPolicy
-                    ? { system_merge_shadow_policy: shadowPolicyValue }
-                    : independentDelegation
-                      ? {
-                          independent_review_limit_delegation: raw === "on",
-                          ...(raw === "on"
-                            ? {
-                                independent_review_limit_delegation_max:
-                                  INDEPENDENT_REVIEW_DELEGATION_MAX,
-                              }
-                            : {}),
-                        }
-                      : independentMax
+        ? await writePreferences(
+            store,
+            project,
+            "设置项目偏好",
+            shadow
+              ? { system_merge_shadow: raw === "on" }
+              : shadowPolicy
+                ? { system_merge_shadow_policy: shadowPolicyValue }
+                : independentDelegation
+                  ? {
+                      independent_review_limit_delegation: raw === "on",
+                      ...(raw === "on"
                         ? {
                             independent_review_limit_delegation_max:
-                              raw === "off" ? null : Number(raw),
+                              INDEPENDENT_REVIEW_DELEGATION_MAX,
                           }
-                        : contextKey
-                          ? { [contextKey]: Number(minutes) }
-                          : roundsKey
-                            ? { [roundsKey]: Number(raw) }
-                            : delegation
+                        : {}),
+                    }
+                  : independentMax
+                    ? {
+                        independent_review_limit_delegation_max:
+                          raw === "off" ? null : Number(raw),
+                      }
+                    : contextKey
+                      ? { [contextKey]: Number(minutes) }
+                      : roundsKey
+                        ? { [roundsKey]: Number(raw) }
+                        : delegation
+                          ? {
+                              decision_delegation: {
+                                [raw as DelegationCategory]: toggle === "on",
+                              },
+                            }
+                          : roleImplementations
+                            ? {
+                                pm_confirm_role_rule_implementations:
+                                  raw === "on",
+                              }
+                            : humanDecidedMerge
                               ? {
-                                  decision_delegation: {
-                                    [raw as DelegationCategory]:
-                                      toggle === "on",
-                                  },
+                                  pm_confirm_human_decided_merges: raw === "on",
                                 }
-                              : roleImplementations
-                                ? {
-                                    pm_confirm_role_rule_implementations:
-                                      raw === "on",
-                                  }
-                                : humanDecidedMerge
+                              : pmMerge
+                                ? { pm_merge_confirmation: raw === "on" }
+                                : browser
                                   ? {
-                                      pm_confirm_human_decided_merges:
-                                        raw === "on",
+                                      enable_reviewer_browser: raw === "on",
                                     }
-                                  : pmMerge
-                                    ? { pm_merge_confirmation: raw === "on" }
-                                    : browser
+                                  : tickProfile
+                                    ? { tick_profile: raw === "on" }
+                                    : stall
                                       ? {
-                                          enable_reviewer_browser: raw === "on",
+                                          merge_confirm_stall_after_minutes:
+                                            Number(minutes),
                                         }
-                                      : tickProfile
-                                        ? { tick_profile: raw === "on" }
-                                        : stall
+                                      : snooze
+                                        ? {
+                                            merge_confirm_snooze_default_minutes:
+                                              Number(minutes),
+                                          }
+                                        : snoozeMax
                                           ? {
-                                              merge_confirm_stall_after_minutes:
+                                              merge_confirm_snooze_max_minutes:
                                                 Number(minutes),
                                             }
-                                          : snooze
-                                            ? {
-                                                merge_confirm_snooze_default_minutes:
-                                                  Number(minutes),
-                                              }
-                                            : snoozeMax
-                                              ? {
-                                                  merge_confirm_snooze_max_minutes:
-                                                    Number(minutes),
-                                                }
-                                              : {
-                                                  auto_merge_after_minutes:
-                                                    minutes,
-                                                },
-                ports,
-              ),
-          })
+                                          : {
+                                              auto_merge_after_minutes: minutes,
+                                            },
+          )
         : store.uow.read((tx) =>
             projectPreferences(loadCommandState(tx, project)),
           );
