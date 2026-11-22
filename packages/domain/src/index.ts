@@ -63,6 +63,7 @@ export {
 export {
   beginIdleSessionRetirement,
   confirmWaitingRetirementExit,
+  handoffIdleSessionRetirement,
   settleIdleSessionRetirement,
   trackRetirementDispatch,
 } from "./commands/idle-session-retirement.js";
