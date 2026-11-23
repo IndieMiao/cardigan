@@ -333,6 +333,29 @@ test("Build Tools 37 v3.1 labels parse, but a rotated second certificate is refu
   const single = rotation.replace(/digest: [a-f0-9]{64}/gu, `digest: ${real}`);
   expect(signedOnlyBy(single, real)).toBe(true);
 });
+// Same certificate for SDK 28–32 and 33+, verbatim excerpts from independent review
+// evidence attachment-8967 (Build Tools 36.1.0 and 37.0.0).
+const targeted =
+  "ad707196e1a70d68523e7e9d10f2fdc7b5b67c672e998605ad13726f967925fb";
+const sdkTargeted = {
+  "36.1.0": `Verifies\nVerified using v3 scheme (APK Signature Scheme v3): true\nVerified using v3.1 scheme (APK Signature Scheme v3.1): true\nNumber of signers: 1\nSigner (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: ${targeted}\nSigner (minSdkVersion=28, maxSdkVersion=32) certificate SHA-256 digest: ${targeted}\n`,
+  "37.0.0": `Verifies\nVerified using v3 scheme (APK Signature Scheme v3): true\nVerified using v3.1 scheme (APK Signature Scheme v3.1): true\nVerified using v3.2 scheme (APK Signature Scheme v3.2): false\nNumber of signers: 1\nV3.1 Signer: (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: ${targeted}\nV3.0 Signer: (minSdkVersion=28, maxSdkVersion=32) certificate SHA-256 digest: ${targeted}\n`,
+};
+test.each(["36.1.0", "37.0.0"] as const)(
+  "Build Tools %s v3.1 with one certificate for both SDK ranges passes",
+  (version) => {
+    const output = sdkTargeted[version];
+    expect(signedOnlyBy(output, targeted)).toBe(true);
+    expect(signedOnlyBy(output, cert)).toBe(false);
+    // One range rotated to another certificate is still refused.
+    const rotated = output.replace(
+      `maxSdkVersion=32) certificate SHA-256 digest: ${targeted}`,
+      `maxSdkVersion=32) certificate SHA-256 digest: ${"0".repeat(64)}`,
+    );
+    expect(rotated).not.toBe(output);
+    expect(signedOnlyBy(rotated, targeted)).toBe(false);
+  },
+);
 const legacy = (signers: string[], count = signers.length) =>
   `Verifies\nVerified using v1 scheme (JAR signing): true\nVerified using v2 scheme (APK Signature Scheme v2): true\nNumber of signers: ${count}\n${signers.map((d, i) => `Signer #${i + 1} certificate DN: CN=test\nSigner #${i + 1} certificate SHA-256 digest: ${d}\nSigner #${i + 1} certificate SHA-1 digest: ${"c".repeat(40)}\n`).join("")}`;
 test("older apksigner `Signer #1` output still passes", () => {
