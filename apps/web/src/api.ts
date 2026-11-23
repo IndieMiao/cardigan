@@ -605,6 +605,8 @@ export interface AttachmentView extends AuthorView {
   readonly download_path: string;
   /** Small server-rendered preview for inline bitmaps; null otherwise. */
   readonly thumbnail_path: string | null;
+  /** Lightbox image for inline bitmaps; older servers omit it. */
+  readonly preview_path?: string | null;
 }
 
 export interface CardRelations {
@@ -2072,7 +2074,39 @@ export type FeishuTestResult =
   | "timeout"
   | "unknown";
 
+/** C-614: off-site copy health of the control host (counts only). */
+export interface OffsiteStatusView {
+  readonly configured: "absent" | "invalid" | "ready";
+  readonly bucket?: string;
+  readonly region?: string;
+  readonly synced: { readonly count: number; readonly bytes: number };
+  readonly pending: { readonly count: number; readonly bytes: number };
+  readonly failed: {
+    readonly count: number;
+    readonly last_code?: string;
+    readonly last_at?: string;
+  };
+  readonly last_success_at?: string;
+  readonly checked_at?: string;
+  readonly usage: {
+    readonly month: string;
+    readonly egress_bytes: number;
+    readonly process_bytes: number;
+    readonly requests: number;
+    readonly estimated_yuan: number;
+    readonly budget_yuan?: number;
+  };
+  readonly alerts: readonly (
+    | "config_invalid"
+    | "unreachable"
+    | "sync_failed"
+    | "over_budget"
+  )[];
+}
+
 export interface CardiganClient {
+  /** C-614: null when this server has no off-site copy wired. */
+  offsiteStatus?(): Promise<OffsiteStatusView | null>;
   feishuBinding?(action?: "code" | "unbind"): Promise<FeishuBindingView>;
   /** C-561: Feishu bot settings (human sessions only; 403 otherwise). */
   feishuSettings?(): Promise<FeishuSettingsView>;
@@ -2590,6 +2624,9 @@ export class HttpCardiganClient implements CardiganClient {
     options: Readonly<Record<string, string>>,
   ) {
     return this.cardPages.get(this.cardsKey(project, filter, options))?.page;
+  }
+  offsiteStatus(): Promise<OffsiteStatusView | null> {
+    return this.request("/api/offsite");
   }
   feishuBinding(action?: "code" | "unbind") {
     return this.request<FeishuBindingView>(

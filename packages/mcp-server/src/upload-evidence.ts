@@ -5,8 +5,8 @@ import { basename } from "node:path";
 import { type ErrorCode, errorCodes } from "@cardigan/domain";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { MAX_ATTACHMENT_BYTES } from "./attachments.js";
 import { isCliEntry } from "./cli-entry.js";
+import { MAX_ATTACHMENT_BYTES } from "./limits.js";
 
 interface EvidenceInput {
   readonly file: string;
