@@ -844,6 +844,18 @@ async function assembleServer(
           options.dispatcher.reconcileIntervalMs ?? config.reconcileIntervalMs,
         backupIntervalMs =
           options.dispatcher.backupIntervalMs ?? config.backupIntervalMs,
+        centralMaintenanceWindow =
+          options.dispatcher.centralMaintenanceWindow ??
+          config.centralMaintenanceWindow,
+        centralMaintenanceIntervalMs =
+          options.dispatcher.centralMaintenanceIntervalMs ??
+          config.centralMaintenanceIntervalMs,
+        centralCruftIntervalMs =
+          options.dispatcher.centralCruftIntervalMs ??
+          config.centralCruftIntervalMs,
+        centralRefRetentionMs =
+          options.dispatcher.centralRefRetentionMs ??
+          config.centralRefRetentionMs,
         attachmentIntervalMs =
           options.dispatcher.attachmentIntervalMs ??
           config.attachmentIntervalMs;
@@ -967,6 +979,20 @@ async function assembleServer(
         ...(cleanupIntervalMs === undefined ? {} : { cleanupIntervalMs }),
         ...(reconcileIntervalMs === undefined ? {} : { reconcileIntervalMs }),
         ...(backupIntervalMs === undefined ? {} : { backupIntervalMs }),
+        ...(centralMaintenanceWindow === undefined
+          ? {}
+          : { centralMaintenanceWindow }),
+        ...(centralMaintenanceIntervalMs === undefined
+          ? {}
+          : { centralMaintenanceIntervalMs }),
+        ...(centralCruftIntervalMs === undefined
+          ? {}
+          : { centralCruftIntervalMs }),
+        ...(centralRefRetentionMs === undefined
+          ? {}
+          : { centralRefRetentionMs }),
+        centralMaintenanceLog: (line) =>
+          process.stdout.write(`${JSON.stringify(line)}\n`),
         ...(attachmentIntervalMs === undefined ? {} : { attachmentIntervalMs }),
         // The blob GC sweeps `<dataDir>/attachments`; §9.3.
         dataDir: config.dataDir,
