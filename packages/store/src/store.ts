@@ -76,6 +76,7 @@ import {
   clearRepositoryCache,
   createReadRepositories,
   createRepositories,
+  platformDeploymentReader,
   type ReadEventRepository,
   type ReadRepositories,
 } from "./repositories.js";
@@ -114,6 +115,7 @@ export interface StoreTransactionContext
   readonly employees: GlobalRepositories["employees"];
   readonly members: GlobalRepositories["members"];
   readonly cachedCommandState?: SnapshotTransaction["state"];
+  readonly platformDeployments: (project: ProjectId, sha: string) => Event[];
   readonly global_ids: GlobalIdAllocator;
   /** Issue a token inside this transaction (assignment and token commit together). */
   issueToken(input: IssueTokenInput): IssuedToken;
@@ -552,8 +554,9 @@ export class Store {
    * if unchanged does `write` run, so the lock covers persistence alone.
    *
    * A changed read set discards the plan and recomputes, at most `attempts`
-   * times; then (or when the plan reads machine placement, which spans other
-   * projects and files) the plan and its write run in one `BEGIN IMMEDIATE`
+   * times; then (or when the plan reads machine placement or other projects'
+   * deployment records, which lie outside the project version) the plan and
+   * its write run in one `BEGIN IMMEDIATE`
    * transaction exactly like `uow.run`. Plans must therefore be repeatable:
    * no side effects outside the transaction they are given.
    */
@@ -628,6 +631,11 @@ export class Store {
               },
             }
           : {}),
+        // Other projects' deployment records are outside the project version.
+        platformDeployments: () => {
+          outside = true;
+          throw new PessimisticRequired();
+        },
         events: { ...repositories.events, listStreams: events.listStreams },
         ids: ids.ids,
       };
@@ -782,6 +790,7 @@ export class Store {
           ? { test_review_trust: this.#testReviewTrust }
           : {}),
         events: { ...repositories.events, listStreams: events.listStreams },
+        platformDeployments: platformDeploymentReader(this.#db),
         ...createGlobalRepositories(this.#db, "write", snapshots),
         global_ids: createGlobalIdAllocator(this.#db),
         ids: createIdAllocator(this.#db),

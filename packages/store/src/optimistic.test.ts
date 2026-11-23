@@ -227,6 +227,23 @@ test("C-641: machine placement is outside the validated read set and runs pessim
   });
 });
 
+test("C-641: other projects' deployment records are outside the read set and run pessimistically", () => {
+  withTwoConnections((store, other) => {
+    const locked: boolean[] = [];
+    const value = store.uow.optimistic(project_id, (tx) => {
+      locked.push(!writerFree(other));
+      try {
+        return { value: tx.platformDeployments?.(project_id, "a".repeat(40)) };
+      } catch {
+        return { value: "swallowed" };
+      }
+    });
+    expect(value).toEqual([]);
+    expect(locked).toEqual([false, true]);
+    expect(store.optimisticStats.fallbacks).toBe(1);
+  });
+});
+
 test("C-641: plan and write failures persist nothing; nesting is rejected", () => {
   withTwoConnections((store) => {
     expect(() =>

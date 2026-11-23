@@ -62,7 +62,13 @@ function runSystemSteps(
     const from = next;
     next = store.uow.optimistic(project, (tx) => {
       const state = loadState(tx, project);
-      const ports = { clock, ids: tx.ids };
+      const ports = {
+        clock,
+        ids: tx.ids,
+        ...(tx.platformDeployments
+          ? { platform_deployments: tx.platformDeployments }
+          : {}),
+      };
       for (let index = from; index < steps.length; index++) {
         const result = steps[index]?.(state, ports);
         if (!result) continue;

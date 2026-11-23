@@ -207,6 +207,9 @@ export function executeCommand<P, T>(
                   ...(tx.unreservedAssignment
                     ? { unreservedAssignment: tx.unreservedAssignment }
                     : {}),
+                  ...(tx.platformDeployments
+                    ? { platform_deployments: tx.platformDeployments }
+                    : {}),
                 }),
               ),
             );
