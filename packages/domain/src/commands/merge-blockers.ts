@@ -1,4 +1,4 @@
-import { autoRiskPaths } from "../auto-risk.js";
+import { missingAutoRiskPathEvidence } from "../auto-risk.js";
 import { unmetCardDependencies } from "../card-dependencies.js";
 import { isReviewStale, reviewPassed, unresolvedMustFix } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
@@ -173,18 +173,20 @@ export function systemMergeBlockers(
         w.kind === "produce" &&
         w.status !== "cancelled",
     );
+    // Artifact products are never merged, so they need no path evidence.
     if (
-      products.some((w) => {
-        const latest = newest(
-          state.deliveries.filter(
-            (v) =>
-              v.work_item_id === w.id &&
-              v.kind !== "card_completion" &&
-              v.status !== "superseded",
+      products.some((w) =>
+        missingAutoRiskPathEvidence(
+          newest(
+            state.deliveries.filter(
+              (v) =>
+                v.work_item_id === w.id &&
+                v.kind !== "card_completion" &&
+                v.status !== "superseded",
+            ),
           ),
-        );
-        return !latest || autoRiskPaths(latest) === undefined;
-      })
+        ),
+      )
     )
       return [...blockers, "缺少完整的当前交付文件差异证据"];
   }
