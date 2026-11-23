@@ -16,11 +16,22 @@ import { collectRoleRuleInventory } from "./role-rule-inventory.js";
 /**
  * C-642: a delivery source read in two phases. Everything remote or slow has
  * already happened; `publish` only writes local refs and is the one step a
- * caller runs under the project repository lock. A `value` needs no write.
+ * caller runs under the project repository lock. A `value` is already the
+ * answer; its optional `record` is a best-effort ref write under the same lock
+ * whose failure (including a lock timeout) never changes that answer.
  */
 export type StagedDeliverySource<T> =
-  | { readonly value: T }
+  | { readonly value: T; readonly record?: () => Promise<void> }
   | { readonly publish: () => Promise<T> };
+
+/** Run both phases without a lock (single-process callers and tests). */
+async function settleDeliverySource<T>(
+  staged: StagedDeliverySource<T>,
+): Promise<T> {
+  if (!("value" in staged)) return staged.publish();
+  await staged.record?.().catch(() => undefined);
+  return staged.value;
+}
 
 const failureMessage = (error: unknown) =>
   `Git delivery verification failed: ${error instanceof Error ? error.message : "Git operation failed"}`;
@@ -50,7 +61,10 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
     this.central.validateSource();
     return head;
   }
-  /** The latest fetched tip of this Assignment; the last publication wins. */
+  /**
+   * The fetched tip of this Assignment. Reads overlap outside the lock, so an
+   * older tip published late never moves the ref back onto its ancestor.
+   */
   private async publishIncoming(
     repository: string,
     a: Assignment,
@@ -59,7 +73,13 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
     this.central.validateSource();
     const ref = this.incoming(a),
       current = await this.central.git.readRef(repository, ref);
-    if (current !== head)
+    if (
+      current !== head &&
+      !(
+        current &&
+        (await this.central.git.isAncestor(repository, head, current))
+      )
+    )
       await this.central.git.compareAndSwapRef(
         repository,
         ref,
@@ -68,8 +88,7 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       );
   }
   async head(a: Assignment): Promise<string> {
-    const staged = await this.prepareHead(a);
-    return "value" in staged ? staged.value : staged.publish();
+    return settleDeliverySource(await this.prepareHead(a));
   }
   /** Same transport as delivery; the precheck ref is published by the caller. */
   async prepareHead(a: Assignment): Promise<StagedDeliverySource<string>> {
@@ -102,8 +121,9 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
     assignment: Assignment,
     previous?: Delivery,
   ): Promise<Result<readonly DeliveryEvidence[]>> {
-    const staged = await this.prepareVerify(subject, assignment, previous);
-    return "value" in staged ? staged.value : staged.publish();
+    return settleDeliverySource(
+      await this.prepareVerify(subject, assignment, previous),
+    );
   }
   /** All Git reads and the remote fetch; `publish` writes the incoming and candidate refs. */
   async prepareVerify(
@@ -140,17 +160,13 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       failure: Result<readonly DeliveryEvidence[]>,
     ): StagedDeliverySource<Result<readonly DeliveryEvidence[]>> => {
       const fetched = staged;
-      if (!fetched) return { value: failure };
-      return {
-        publish: async () => {
-          try {
-            await this.publishIncoming(fetched.repository, a, fetched.head);
-          } catch {
-            // The answer is already a rejection.
+      return fetched
+        ? {
+            value: failure,
+            record: () =>
+              this.publishIncoming(fetched.repository, a, fetched.head),
           }
-          return failure;
-        },
-      };
+        : { value: failure };
     };
     try {
       const repository = await this.central.ensureCentral(this.project);

@@ -116,6 +116,36 @@ test("C-642: staging a branch imports its tip without any ref or leftover stage"
     (await readdir(join(repo, ".."))).filter((name) => name.startsWith(".")),
   ).toEqual([]);
 });
+test("C-642: a late publication of an older read never moves the incoming tip back", async () => {
+  const first = await commit(work, "first");
+  const late = await verifier.prepareVerify(
+    { kind: "git_head", value: first },
+    assignment,
+  );
+  const second = await commit(work, "second");
+  expect((await verify(second)).ok).toBe(true);
+  expect(await f.transport.readRef(repo, "refs/cardigan/incoming/A-1")).toBe(
+    second,
+  );
+  if ("value" in late) throw new Error("Expected a publication");
+  const result = await late.publish();
+  expect(result.ok).toBe(true);
+  if (result.ok)
+    expect(
+      result.value.find((e) => e.kind === "commit")?.details.branch_head_sha,
+    ).toBe(first);
+  expect(await f.transport.readRef(repo, "refs/cardigan/incoming/A-1")).toBe(
+    second,
+  );
+  expect(await refs("candidates")).toBe(
+    [
+      `refs/cardigan/candidates/A-1/${first}:${first}`,
+      `refs/cardigan/candidates/A-1/${second}:${second}`,
+    ]
+      .sort()
+      .join("\n"),
+  );
+});
 test.each(["missing", "tree", "blob", "foreign", "tag"])(
   "rejects %s objects without candidate or delivery refs",
   async (kind) => {

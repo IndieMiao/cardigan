@@ -1272,6 +1272,64 @@ test("C-642: a lock timeout at publication still reads as busy and publishes not
   ).toBe("");
 });
 
+test("C-642: a busy lock never replaces the reason of a rejected delivery", async () => {
+  const a = required(assignments[0]);
+  const work = required(repositories.get(key(f.project_id, a.machine_id)));
+  const head = git(work, "rev-parse", "HEAD");
+  // Another worker's commit: never on this Assignment's branch.
+  const foreign = git(
+    required(
+      repositories.get(key(f.project_id, required(assignments[1]).machine_id)),
+    ),
+    "rev-parse",
+    "HEAD",
+  );
+  const errors: DeliverySourceErrorEntry[] = [];
+  const observed = new ServerGit({
+    dataDir,
+    store: f.store,
+    targets: (service as unknown as { options: ServerGitOptions }).options
+      .targets,
+    onSourceError: (entry) => errors.push(entry),
+  });
+  vi.spyOn(
+    observed as unknown as { lock: RepositoryLock },
+    "lock",
+  ).mockRejectedValueOnce(new RepositoryLockTimeoutError(30_000));
+  const result = await observed
+    .verifierFor(f.project_id)
+    .verify({ kind: "git_head", value: foreign }, a);
+  expect(result.ok).toBe(false);
+  if (!result.ok)
+    expect(result.error.message).toMatch(
+      /not a commit|not on the recorded Assignment branch/,
+    );
+  expect(errors).toEqual([]);
+  // The tip is only recorded best effort; the next read records it.
+  expect(
+    git(
+      center(),
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/cardigan/incoming",
+    ),
+  ).toBe("");
+  expect(
+    (
+      await observed
+        .verifierFor(f.project_id)
+        .verify({ kind: "git_head", value: foreign }, a)
+    ).ok,
+  ).toBe(false);
+  expect(
+    git(
+      center(),
+      "rev-parse",
+      `refs/cardigan/incoming/${a.machine_id}/${a.id}`,
+    ),
+  ).toBe(head);
+});
+
 function interceptWorkerFetch(
   machine: string,
   after: (stage: string) => Promise<void>,

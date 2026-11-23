@@ -1393,6 +1393,25 @@ test("C-642: failed or blocked probes are only shared in flight, and a changed b
   expect(readiness).toHaveBeenCalledTimes(5);
 });
 
+test("C-642: a rejected probe is not reused, and project views share the router's probes", async () => {
+  readiness.mockRejectedValueOnce(new Error("probe exploded"));
+  await expect(
+    router.forLaunch("fixture", assignment("worker-a")),
+  ).rejects.toThrow();
+  expect(readiness).toHaveBeenCalledTimes(1);
+  await router.forLaunch("fixture", assignment("worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(2);
+  await router
+    .forProject("fixture")
+    .forLaunch("fixture", assignment("worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(2);
+  // A live check through the project view refreshes the same shared result.
+  readiness.mockResolvedValueOnce(["worker_helpers"]);
+  value(await router.forProject("fixture").check("fixture", "worker-a"));
+  await router.forLaunch("fixture", assignment("worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(4);
+});
+
 test("C-642: the probe cache window is configurable and invalid values are refused", async () => {
   const create = (options: {
     probeCacheMs?: number;

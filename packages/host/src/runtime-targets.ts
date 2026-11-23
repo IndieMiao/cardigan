@@ -195,13 +195,14 @@ export class RuntimeTargets implements Runtime {
   >();
   private readonly workers: () => readonly RuntimeWorker[];
   private readonly probeCacheMs: number;
-  private readonly probes = new Map<
-    string,
-    { result: Promise<RuntimeResult<readonly string[]>>; until?: number }
-  >();
   private constructor(
     private readonly options: RuntimeTargetsOptions,
     private readonly registered: RegisteredRuntime | undefined,
+    /** Shared with `forProject` views of the same router. */
+    private readonly probes = new Map<
+      string,
+      { result: Promise<RuntimeResult<readonly string[]>>; until?: number }
+    >(),
   ) {
     this.paths = new WorkerPathHistory(options.execution.dataDir);
     this.probeCacheMs = machineProbeCacheMs(options);
@@ -707,7 +708,11 @@ export class RuntimeTargets implements Runtime {
   forProject(project: ProjectId): RuntimeTargets {
     if (this.options.project && this.options.project !== project)
       return rejected();
-    return new RuntimeTargets({ ...this.options, project }, this.registered);
+    return new RuntimeTargets(
+      { ...this.options, project },
+      this.registered,
+      this.probes,
+    );
   }
   /** Live unless `cached` (preflight only); a clean live probe refreshes that cache. */
   check(

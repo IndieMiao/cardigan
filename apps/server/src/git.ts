@@ -1349,7 +1349,8 @@ export class ServerGit implements GitBinding {
   /**
    * C-642: resolve the target and read the source (remote fetch, Git reads)
    * outside the project lock; the lock covers only the local ref publication,
-   * which rechecks the target first.
+   * which rechecks the target first. A rejection already decided only records
+   * the fetched tip, best effort: a busy lock never replaces its reason.
    */
   private async withAssignmentSource<T>(
     project: CentralProject,
@@ -1362,7 +1363,19 @@ export class ServerGit implements GitBinding {
     const staged = await prepare(
       this.workspaceServices(project, assignment).central,
     );
-    if ("value" in staged) return staged.value;
+    const publish = <R>(write: () => Promise<R>) =>
+      this.publishSource(project, assignment, operation, write);
+    if (!("value" in staged)) return publish(staged.publish);
+    const { record } = staged;
+    if (record) await publish(record).catch(() => undefined);
+    return staged.value;
+  }
+  private async publishSource<R>(
+    project: CentralProject,
+    assignment: Assignment,
+    operation: "verify" | "head",
+    write: () => Promise<R>,
+  ): Promise<R> {
     const requested = performance.now();
     let entered: number | undefined;
     try {
@@ -1373,7 +1386,7 @@ export class ServerGit implements GitBinding {
         },
         () => {
           entered = performance.now();
-          return staged.publish();
+          return write();
         },
       );
     } finally {
