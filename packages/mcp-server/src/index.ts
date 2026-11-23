@@ -89,4 +89,8 @@ export {
   type PublicationOptions,
   type PublishInput,
 } from "./tools/publish-artifact.js";
+export type {
+  ChainCandidate,
+  ChainGrant,
+} from "./tools/release-chain-signing.js";
 export { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";

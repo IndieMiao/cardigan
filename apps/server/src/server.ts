@@ -72,6 +72,7 @@ import { mergeProjectSettings } from "./merge-push-loop.js";
 import {
   drainMobileSigning,
   openMobileArtifact,
+  registerChainCandidate,
   requestMobileSignature,
 } from "./mobile-signing.js";
 import { serverProbes } from "./probes.js";
@@ -526,6 +527,13 @@ async function assembleServer(
                       openMobileArtifact(config.dataDir, scope, id, current),
                     signMobile: (scope, current) =>
                       requestMobileSignature(config.dataDir, scope, current),
+                    chainSigning: (scope, candidate, current) =>
+                      registerChainCandidate(
+                        config.dataDir,
+                        scope,
+                        candidate,
+                        current,
+                      ),
                   }
                 : {}),
               enqueueOwnerMessage: (actor, input, revalidate) =>

@@ -2,9 +2,14 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { SigningScope } from "@cardigan/mcp-server";
+import type {
+  ChainCandidate,
+  ChainGrant,
+  SigningScope,
+} from "@cardigan/mcp-server";
 
 export interface MobileSigningTiming {
   /** Test seam: interpreter and helper, before the private root and command. */
@@ -433,5 +438,87 @@ export async function openMobileArtifact(
   } catch (e) {
     await f.close();
     throw e;
+  }
+}
+
+/**
+ * C-612: register and approve this Run's release-chain candidate through
+ * `host.py chain`. The candidate bytes go to the helper on fd 3; the host
+ * verifies the digest, fixes app and credential version from its route, and
+ * reports `new`, `existing` (this chain's candidate already holds the Run's
+ * grant) or `other`. Bounded by `permitMs`; never started while draining.
+ */
+export async function registerChainCandidate(
+  dataDir: string,
+  scope: SigningScope,
+  candidate: ChainCandidate,
+  current: () => void,
+  timing: MobileSigningTiming = {},
+): Promise<ChainGrant> {
+  if (draining) throw new Error("Signing unavailable");
+  current();
+  const source = await candidate.source();
+  const [file = "/usr/bin/python3", ...prefix] = timing.program ?? [
+    "/usr/bin/python3",
+    "-IB",
+    HOST,
+  ];
+  const child = spawn(
+    file,
+    [...prefix, join(dataDir, "mobile-signing"), "chain"],
+    {
+      cwd: dataDir,
+      env: { PATH: "/usr/bin:/bin", LANG: "C" },
+      stdio: ["pipe", "pipe", "ignore", "pipe"],
+    },
+  );
+  live.set(
+    child,
+    new Promise<void>((exited) =>
+      child.once("close", () => {
+        live.delete(child);
+        exited();
+      }),
+    ),
+  );
+  // The host skips fd 3 for an existing grant; a reset pipe is not an error.
+  const ignore = () => {};
+  child.stdin?.on("error", ignore);
+  child.stdio[3]?.on("error", ignore);
+  const timer = setTimeout(() => {
+    child.kill("SIGTERM");
+    setTimeout(() => child.kill("SIGKILL"), timing.killMs ?? 30_000).unref();
+  }, timing.permitMs ?? 600_000);
+  timer.unref();
+  try {
+    const closed = new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    let text = "";
+    child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
+      text += chunk;
+      if (text.length > 128) child.kill("SIGKILL");
+    });
+    child.stdin?.end(
+      `${JSON.stringify(scope)}\n${JSON.stringify({
+        commit: candidate.commit,
+        build: candidate.build,
+        sha256: candidate.sha256,
+        size: candidate.size,
+      })}\n`,
+    );
+    const input = child.stdio[3];
+    if (!input || !("write" in input)) throw new Error("Signing unavailable");
+
+    // A refusal may close fd 3 early; the exit code decides.
+    await pipeline(source, input).catch(() => undefined);
+    const code = await closed;
+    const m = /^([0-9a-f]{32}) (new|existing|other)\n$/u.exec(text);
+    if (code !== 0 || !m?.[1] || !m[2]) throw new Error("Signing unavailable");
+    return { request_id: m[1], status: m[2] as ChainGrant["status"] };
+  } finally {
+    clearTimeout(timer);
+    source.destroy();
   }
 }
