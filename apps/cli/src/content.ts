@@ -11,6 +11,7 @@ import {
 } from "@cardigan/domain";
 import {
   attachmentMimeForExtension,
+  formatAttachmentLimit,
   loadCommandState,
   MAX_ATTACHMENT_BYTES,
   persistEffect,
@@ -38,7 +39,7 @@ const USAGE = [
   "--note 为本次所有附件的一句话说明，最多 200 字符；文件名自动取本地文件名。",
   "单独上传默认 evidence；artifact 必须带 --basis（拍板编号形如 Q-3；旧写法 q(3) 需加引号）。",
   "省略 --entry 时创建一条“上传附件”评论；指定时挂到当前卡片的已有条目。",
-  "附件每个不超过 10 MiB，按扩展名识别：png、jpg/jpeg、gif、webp、avif、svg、html/htm、md/markdown、txt/log、json、pdf。",
+  `附件每个不超过 ${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}（主机 CARDIGAN_ATTACHMENT_MAX_MIB 配置），按扩展名识别：png、jpg/jpeg、gif、webp、avif、svg、html/htm、md/markdown、txt/log、json、pdf。`,
   "通用：--project <p> 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
   "      --data-dir <路径> 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
 ].join("\n");
@@ -126,7 +127,10 @@ async function readFile(path: string, io: CliIo, attachment: boolean) {
       if (!stat.isFile())
         throw new CliError(`不是普通文件：${path}`, EXIT.usage);
       if (attachment && stat.size > MAX_ATTACHMENT_BYTES)
-        throw new CliError(`附件超过 10 MiB：${path}`, EXIT.usage);
+        throw new CliError(
+          `附件超过 ${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}：${path}`,
+          EXIT.usage,
+        );
       return await file.readFile();
     } finally {
       await file.close();

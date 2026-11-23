@@ -34,6 +34,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { runAgentTool } from "../test-support/agent-tools.js";
+import { MAX_STORED_ATTACHMENT_BYTES } from "./attachment-limits.js";
 import {
   fileAttachmentStore,
   MAX_ATTACHMENT_BYTES,
@@ -322,7 +323,7 @@ test("read_attachment enforces token tool, card and project scope before reading
 });
 
 test.each([
-  { size: MAX_ATTACHMENT_BYTES + 1 },
+  { size: MAX_STORED_ATTACHMENT_BYTES + 1 },
   { size: -1 },
   { size: 1.5 },
   { sha256: "../outside" },
@@ -838,6 +839,19 @@ test("C-95: request_decision only references this project's decision cards; reje
   ).toEqual([own.id]);
 });
 
+test("upload_attachment publishes the host limit for worker helpers", async () => {
+  const tool = (await coder.listTools()).tools.find(
+    (t) => t.name === "upload_attachment",
+  );
+  expect(tool?.description).toContain(
+    `(${MAX_ATTACHMENT_BYTES / 1048576} MiB)`,
+  );
+  expect(
+    (tool?.inputSchema.properties?.file as { maxLength?: number } | undefined)
+      ?.maxLength,
+  ).toBe(4 * Math.ceil(MAX_ATTACHMENT_BYTES / 3));
+});
+
 test("10 MiB passes through HTTP; oversized, malformed and checksum-mismatched content is refused", async () => {
   const large = Buffer.alloc(MAX_ATTACHMENT_BYTES, 0x61);
   expect(
@@ -847,6 +861,13 @@ test("10 MiB passes through HTTP; oversized, malformed and checksum-mismatched c
     }),
   ).toMatchObject({ size: MAX_ATTACHMENT_BYTES, sha256: sha256(large) });
   const writes = vi.mocked(blobs.put).mock.calls.length;
+  const over = await call(coder, "upload_attachment", {
+    ...upload,
+    file: Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64"),
+  });
+  expect(JSON.stringify(over.structuredContent ?? over.content)).toContain(
+    `Attachment exceeds ${MAX_ATTACHMENT_BYTES / 1048576} MiB`,
+  );
   for (const file of [
     Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64"),
     "YQ",

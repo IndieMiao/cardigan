@@ -340,6 +340,15 @@ export function CommentBox({
       setError("附件说明最多 200 字符，不能包含控制字符或换行。");
       return;
     }
+    // Refuse before posting: the comment is created first, attachments follow.
+    const limit = client.attachmentMaxBytes?.();
+    if (
+      limit !== undefined &&
+      images.some((image) => image.file.size > limit)
+    ) {
+      setError(`附件不能超过 ${formatMiB(limit)}。`);
+      return;
+    }
     sending.current = true;
     setSubmitting(true);
     setError(undefined);
@@ -907,6 +916,11 @@ export function mentionsIn(body: string): string[] {
   }
   return [...found];
 }
+
+const formatMiB = (bytes: number) =>
+  bytes % 1048576 === 0
+    ? `${bytes / 1048576} MiB`
+    : `${(bytes / 1048576).toFixed(1)} MiB`;
 
 /** Canonical padded base64 of a pasted image (the API decodes it strictly). */
 export async function toBase64(file: File): Promise<string> {

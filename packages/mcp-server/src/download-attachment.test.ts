@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { MAX_ATTACHMENT_BYTES, sha256 } from "./attachments.js";
+import { MAX_STORED_ATTACHMENT_BYTES } from "./attachment-limits.js";
+import { sha256 } from "./attachments.js";
 import { downloadAttachment } from "./download-attachment.js";
 
 let directory: string;
@@ -94,7 +95,7 @@ test.each([301, 302, 303, 307, 308])(
 test.each([
   { headers: { "x-attachment-id": "F-2" } },
   { headers: { "x-attachment-sha256": "0".repeat(64) } },
-  { headers: { "content-length": String(MAX_ATTACHMENT_BYTES + 1) } },
+  { headers: { "content-length": String(MAX_STORED_ATTACHMENT_BYTES + 1) } },
   { headers: { "x-attachment-sha256": "invalid" } },
   { body: Buffer.alloc(bytes.length) },
 ])("refuses invalid identity, size and digest: %j", async (patch) => {

@@ -18,6 +18,7 @@ test("the existing session read returns private-path-free build info only after 
   try {
     const anonymous = await call(harness.port, "/api/session");
     expect(anonymous.json).not.toHaveProperty("build");
+    expect(anonymous.json).not.toHaveProperty("attachment_max_bytes");
     const cookie = await harness.login(PASSWORD);
     const response = await call(harness.port, "/api/session", { cookie });
     expect(response.status).toBe(200);
@@ -25,6 +26,8 @@ test("the existing session read returns private-path-free build info only after 
     expect(response.json).toMatchObject({
       authenticated: true,
       build: readBuildInfo(),
+      // C-616: the host attachment limit, for the comment box pre-check.
+      attachment_max_bytes: 10 * 1024 * 1024,
     });
     const build = (response.json as { build: unknown }).build;
     expect(Object.keys(build as object).sort()).toEqual([

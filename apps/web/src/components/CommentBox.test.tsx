@@ -206,6 +206,34 @@ test("invalid attachment notes are rejected before posting and a 200-character U
   await waitFor(() => expect(uploadAttachment).toHaveBeenCalledOnce());
 });
 
+test("a file over the host limit is refused before the comment is posted", async () => {
+  const addComment = vi.fn(async () => ({
+    id: "C-1#44",
+    body: "Evidence",
+    created_at: "2026-01-01",
+  }));
+  const uploadAttachment = vi.fn(async () => ({ id: "attachment-1" }));
+  render(
+    <CommentBox
+      client={{
+        ...fakeClient({ addComment, uploadAttachment }),
+        attachmentMaxBytes: () => 30 * 1024 * 1024,
+      }}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const input = screen.getByLabelText("评论正文");
+  const large = new File(["png"], "large.png", { type: "image/png" });
+  Object.defineProperty(large, "size", { value: 30 * 1024 * 1024 + 1 });
+  fireEvent.paste(input, { clipboardData: { files: [large] } });
+  fireEvent.change(input, { target: { value: "Evidence" } });
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  expect(screen.getByRole("alert").textContent).toBe("附件不能超过 30 MiB。");
+  expect(addComment).not.toHaveBeenCalled();
+  expect(uploadAttachment).not.toHaveBeenCalled();
+});
+
 test("a rejected comment keeps the text and explains itself", async () => {
   render(
     <CommentBox

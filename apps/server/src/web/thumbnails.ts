@@ -64,7 +64,7 @@ function avifBrand(
     brands.push(ascii(offset, offset + 4));
   return brands.some((brand) => brand === "avif" || brand === "avis");
 }
-/** About 1440×69000; bounds decoder memory for a hostile 10 MiB upload. */
+/** About 1440×69000; bounds decoder memory for a hostile upload at the attachment limit. */
 const MAX_INPUT_PIXELS = 100_000_000;
 /** Renders running at once; a page of thumbnails queues behind these. */
 const MAX_RENDERS = 2;

@@ -108,7 +108,7 @@ test("blob reads reject oversized sparse files, symlinks and directories", async
   const sparse = await open(target, "w");
   await sparse.truncate(1024 * 1024 * 1024);
   await sparse.close();
-  await expect(blobs.get(digest)).rejects.toThrow("10 MiB");
+  await expect(blobs.get(digest)).rejects.toThrow("64 MiB");
   await rm(target);
   const outside = join(dataDir, "outside");
   await writeFile(outside, content);

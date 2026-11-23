@@ -244,6 +244,7 @@ export function requireOrigin(
 export async function readJsonBody(
   req: IncomingMessage,
   limit = MAX_JSON_BODY_BYTES,
+  tooLarge = "request body is too large",
 ): Promise<Record<string, unknown>> {
   const contentType = req.headers["content-type"];
   const type = Array.isArray(contentType) ? contentType[0] : contentType;
@@ -256,11 +257,7 @@ export async function readJsonBody(
   }
   const declared = Number(req.headers["content-length"] ?? "0");
   if (Number.isFinite(declared) && declared > limit) {
-    throw new HttpRejection(
-      413,
-      "payload_too_large",
-      "request body is too large",
-    );
+    throw new HttpRejection(413, "payload_too_large", tooLarge);
   }
 
   const chunks: Buffer[] = [];
@@ -271,11 +268,7 @@ export async function readJsonBody(
       : Buffer.from(chunk as string);
     size += buffer.byteLength;
     if (size > limit) {
-      throw new HttpRejection(
-        413,
-        "payload_too_large",
-        "request body is too large",
-      );
+      throw new HttpRejection(413, "payload_too_large", tooLarge);
     }
     chunks.push(buffer);
   }

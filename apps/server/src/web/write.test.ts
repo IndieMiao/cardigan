@@ -587,19 +587,38 @@ test("attachment boundary rejects noncanonical base64 and files over 10 MiB", as
     "not-base64!",
     Buffer.alloc(10 * 1024 * 1024 + 1).toString("base64"),
   ]) {
-    expect(
-      await request(cardPath("attachments"), {
-        file,
-        mime: "text/plain",
-        kind: "evidence",
-        attach_to: { kind: "timeline_entry", id: comment.body.id },
-      }),
-    ).toMatchObject({
+    const response = await request(cardPath("attachments"), {
+      file,
+      mime: "text/plain",
+      kind: "evidence",
+      attach_to: { kind: "timeline_entry", id: comment.body.id },
+    });
+    expect(response).toMatchObject({
       status: 400,
       body: { error: { code: "validation_failed" } },
     });
+    if (file.length > 100)
+      expect(response.body.error.message).toBe("Attachment exceeds 10 MiB");
     expect(snapshot()).toBe(before);
   }
+  // Over the base64 bound: refused before decoding, naming the host limit.
+  expect(
+    await request(cardPath("attachments"), {
+      file: "A".repeat(4 * Math.ceil((10 * 1024 * 1024) / 3) + 4),
+      mime: "text/plain",
+      kind: "evidence",
+      attach_to: { kind: "timeline_entry", id: comment.body.id },
+    }),
+  ).toMatchObject({
+    status: 413,
+    body: {
+      error: {
+        code: "payload_too_large",
+        message: "Attachment exceeds 10 MiB",
+      },
+    },
+  });
+  expect(snapshot()).toBe(before);
 }, 30_000);
 
 test("every write route enforces cookie authentication, Origin and JSON before any mutation", async () => {

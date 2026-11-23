@@ -3,12 +3,22 @@ import { constants } from "node:fs";
 import { link, mkdir, open, rm, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { type AttachmentStore, prepareAttachment } from "@cardigan/domain";
+import {
+  formatAttachmentLimit,
+  MAX_STORED_ATTACHMENT_BYTES,
+  resolveAttachmentLimits,
+} from "./attachment-limits.js";
 import { ToolError } from "./errors.js";
 
-export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-export const MAX_ATTACHMENT_BASE64 = 4 * Math.ceil(MAX_ATTACHMENT_BYTES / 3);
+/** Resolved once per process from the host environment (C-616); invalid values fail at startup. */
+export const ATTACHMENT_LIMITS = resolveAttachmentLimits(process.env);
+export const MAX_ATTACHMENT_BYTES = ATTACHMENT_LIMITS.bytes;
+export const MAX_ATTACHMENT_BASE64 = ATTACHMENT_LIMITS.base64;
 // Leave room for the JSON-RPC envelope while keeping the HTTP body bounded.
-export const MAX_MCP_BODY_BYTES = MAX_ATTACHMENT_BASE64 + 1024 * 1024;
+export const MAX_MCP_BODY_BYTES = ATTACHMENT_LIMITS.bodyBytes;
+/** Exact text of the over-limit refusal; the CLI translates it by this key. */
+export const attachmentTooLargeMessage = (bytes = MAX_ATTACHMENT_BYTES) =>
+  `Attachment exceeds ${formatAttachmentLimit(bytes)}`;
 export const sha256 = (content: Uint8Array) =>
   createHash("sha256").update(content).digest("hex");
 
@@ -58,10 +68,17 @@ export async function prepareAttachmentFile(
   return result.value;
 }
 
-export function decodeAttachment(file: string, expected?: string) {
+export function decodeAttachment(
+  file: string,
+  expected?: string,
+  maxBytes = MAX_ATTACHMENT_BYTES,
+) {
+  // Refuse by length before Buffer.from allocates a decoded copy.
+  if (file.length > 4 * Math.ceil(maxBytes / 3))
+    throw ToolError.validation(attachmentTooLargeMessage(maxBytes));
   const content = Buffer.from(file, "base64");
-  if (content.byteLength > MAX_ATTACHMENT_BYTES)
-    throw ToolError.validation("Attachment exceeds 10 MiB");
+  if (content.byteLength > maxBytes)
+    throw ToolError.validation(attachmentTooLargeMessage(maxBytes));
   // Buffer.from alone silently accepts whitespace, bad padding and other junk.
   if (content.toString("base64") !== file)
     throw ToolError.validation("File must be canonical padded base64");
@@ -91,9 +108,9 @@ export function fileAttachmentStore(
       );
       try {
         const info = await file.stat();
-        if (!info.isFile() || info.size > MAX_ATTACHMENT_BYTES)
+        if (!info.isFile() || info.size > MAX_STORED_ATTACHMENT_BYTES)
           throw ToolError.validation(
-            "Stored attachment must be a file up to 10 MiB",
+            `Stored attachment must be a file up to ${formatAttachmentLimit(MAX_STORED_ATTACHMENT_BYTES)}`,
           );
         // Bound the read even if another process grows the file after stat.
         // One extra byte detects growth without ever using an unbounded readFile.
@@ -132,7 +149,7 @@ export function fileAttachmentStore(
     async put(digest, content) {
       const target = path(digest);
       if (
-        content.byteLength > MAX_ATTACHMENT_BYTES ||
+        content.byteLength > MAX_STORED_ATTACHMENT_BYTES ||
         sha256(content) !== digest
       )
         throw ToolError.validation("Invalid attachment content");

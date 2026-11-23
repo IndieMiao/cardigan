@@ -18,7 +18,7 @@
 - Actor 由认证层构造。内核核对项目、Assignment 存在/active、固定的 Role 版本、角色及 Token 的工具许可；工作项 Assignment 只能访问本卡，常驻 PM 可访问项目。正文或参数里的署名不能覆盖 author。
 - Clock 和 IdAllocator 注入。适配器须在同一个事务内分配编号并写入整批结果；收到失败 Result 必须回滚该事务（包括已分配编号）。domain 不调用仓储，不直接做网络、文件、数据库、哈希或随机数 IO。
 - `prepareDelivery` 是事务外端口预检，实际调用注入的 DeliveryVerifier；`submitDelivery` 是同步归约，验证进程内凭据并重查当前快照。凭据不是 MCP 参数，不能由客户端 JSON 构造，也不应持久化。M1 可注入接受/拒绝桩，M4 换为真实 Git 校验。
-- M1.6c 的附件参数 file 是规范带填充 base64（解码后 ≤10MiB），适配层计算 sha256 并核对可选的客户端摘要，经 prepareAttachment 在事务外写入内容寻址 AttachmentStore。uploadAttachment 在新的幂等事务快照中验证身份、basis 和 attach_to；失败回滚数据库，但保留已发布文件，避免误删共享内容。元数据返回相对 storage_path；未引用文件及崩溃临时文件的清理留待后续。
+- M1.6c 的附件参数 file 是规范带填充 base64（解码后不超过主机上限：`CARDIGAN_ATTACHMENT_MAX_MIB`，默认 10 MiB，C-616），适配层计算 sha256 并核对可选的客户端摘要，经 prepareAttachment 在事务外写入内容寻址 AttachmentStore。uploadAttachment 在新的幂等事务快照中验证身份、basis 和 attach_to；失败回滚数据库，但保留已发布文件，避免误删共享内容。元数据返回相对 storage_path；未引用文件及崩溃临时文件的清理留待后续。
 - projectSnapshot / listNeedsYou 在同一个只读事务的 CommandState 上执行，不写幂等缓存；heartbeat / finishRun 则复用写命令的幂等入口。
 - 初始 Run 的创建/派发、Token 的实际随机值/哈希和幂等缓存由外层负责；命令不接受调用者自报的 Run 归属或 Token 权限。现有 store 的幂等入口应包裹命令事务，不能直接重复归约替代请求幂等。
 

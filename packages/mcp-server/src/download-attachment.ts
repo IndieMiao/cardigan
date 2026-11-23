@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { type FileHandle, link, open, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { MAX_ARTIFACT_BYTES } from "./artifact-files.js";
-import { MAX_ATTACHMENT_BYTES } from "./attachments.js";
+import { MAX_STORED_ATTACHMENT_BYTES } from "./attachment-limits.js";
 import { isCliEntry } from "./cli-entry.js";
 
 const messages = {
@@ -71,7 +71,9 @@ export async function downloadAttachment(
       size >
         (response.headers.get("x-artifact-size") === sizeText
           ? MAX_ARTIFACT_BYTES
-          : MAX_ATTACHMENT_BYTES) ||
+          : // Any attachment the host may store, whatever its current upload
+            // limit (C-616); the checksum below still binds every byte.
+            MAX_STORED_ATTACHMENT_BYTES) ||
       !/^[a-f0-9]{64}$/u.test(digest) ||
       response.headers.get("x-attachment-id") !== attachmentId ||
       !response.body

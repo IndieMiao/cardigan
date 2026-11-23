@@ -32,6 +32,7 @@ import type {
   MergeGateConfiguration,
   ReadResourceLimits,
 } from "@cardigan/host";
+import { MAX_ATTACHMENT_BYTES } from "@cardigan/mcp-server";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import {
   feishuStatus,
@@ -1235,6 +1236,8 @@ function sessionStatus(context: RequestContext): void {
     ...(live && token
       ? {
           build: context.buildInfo,
+          // C-616: lets the comment box refuse an oversized file before posting.
+          attachment_max_bytes: MAX_ATTACHMENT_BYTES,
           read_scope: createHash("sha256")
             .update(`needs-you-read-scope:${token}`)
             .digest("hex"),
