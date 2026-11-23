@@ -1507,6 +1507,14 @@ export interface DecisionHistoryRecord extends DecisionView {
     resolved_by: string;
     via: string;
     proxy_authority?: string;
+    /** C-617 / Q-1198: the owner's answer cited as evidence for PM's decision. */
+    owner_record?: {
+      readonly card_id: string;
+      readonly timeline_entry_id: string;
+      readonly quote: string;
+      readonly at: string;
+      readonly attachment_id?: string;
+    };
   };
 }
 /** C-134: newest 10 first; pass `next_cursor` back to read the next 10. */
