@@ -4,6 +4,7 @@ import {
   cardReadAccess,
   isReferenceCard,
   type ToolName,
+  type WorkItem,
 } from "@cardigan/domain";
 import type { McpReadContext } from "../backend.js";
 import { ToolError } from "../errors.js";
@@ -39,6 +40,13 @@ function referenceReader(
     throw new ToolError("unauthorized", "当前指派已失效。");
   const items = tx.work_items.list(project);
   const preferences = tx.project_preferences?.get(project, project);
+  // C-648: access and provenance only consult the Assignment's own item, so
+  // narrow once; a snapshot audit calls this reader for every card.
+  const own = items.filter(
+    (item) =>
+      assignment.scope === "work_item" && item.id === assignment.work_item_id,
+  );
+  let byCard: Map<CardId, WorkItem[]> | undefined;
   // One synchronous transaction owns this reader. It must never escape into
   // another request or be reused after a transaction/revision/identity change.
   return (id: CardId) => {
@@ -47,19 +55,27 @@ function referenceReader(
       project_id: project,
       assignment,
       card,
-      work_items: items,
+      work_items: own,
       preferences,
       check_log,
     });
     if (!card || access === "none")
       throw ToolError.notFound("卡片不存在或无权读取。");
-    const reference = isReferenceCard(assignment, card, items);
+    const reference = isReferenceCard(assignment, card, own);
+    if (!byCard) {
+      byCard = new Map();
+      for (const item of items) {
+        const list = byCard.get(item.card_id);
+        if (list) list.push(item);
+        else byCard.set(item.card_id, [item]);
+      }
+    }
     return {
       card,
       assignment,
       access,
       reference,
-      work_items: items.filter((item) => item.card_id === id),
+      work_items: byCard.get(id) ?? [],
       provenance: reference
         ? { source_card_id: id, reference_notice: CROSS_CARD_REFERENCE_NOTICE }
         : {},

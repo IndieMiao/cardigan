@@ -3,6 +3,7 @@ import type {
   Assignment,
   Card,
   Decision,
+  Delivery,
   Event,
   HumanAction,
   JsonValue,
@@ -231,6 +232,13 @@ export function referenceReadState(
         (entry.human_action_id === undefined ||
           actionIds.has(entry.human_action_id)),
     );
+  // C-648: keyed lookups with the same answers as the per-attachment scans.
+  const key = (card: string, id: string) => `${card}\u0000${id}`;
+  const entries = new Set(timeline.map((e) => key(e.card_id, e.id)));
+  const ownedItems = new Set(state.work_items.map((w) => key(w.card_id, w.id)));
+  const firstDelivery = new Map<string, Delivery>();
+  for (const v of state.deliveries)
+    if (!firstDelivery.has(v.id)) firstDelivery.set(v.id, v);
   return {
     ...state,
     work_items,
@@ -244,15 +252,11 @@ export function referenceReadState(
     attachments: state.attachments.filter((a) => {
       if (!scope.card(a.card_id)) return false;
       if (a.attach_to.kind === "timeline_entry")
-        return timeline.some(
-          (e) => e.id === a.attach_to.id && e.card_id === a.card_id,
-        );
-      const delivery = state.deliveries.find((v) => v.id === a.attach_to.id);
+        return entries.has(key(a.card_id, a.attach_to.id));
+      const delivery = firstDelivery.get(a.attach_to.id);
       return (
         delivery !== undefined &&
-        state.work_items.some(
-          (w) => w.id === delivery.work_item_id && w.card_id === a.card_id,
-        )
+        ownedItems.has(key(a.card_id, delivery.work_item_id))
       );
     }),
     events: state.events

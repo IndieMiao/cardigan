@@ -147,7 +147,9 @@ export function cardCriticalPathLengths(
     lengths.set(card.id, weights.get(card.id) ?? 1);
     for (const id of new Set(card.depends_on_cards ?? [])) {
       if (cards.get(id)?.project_id !== card.project_id) continue;
-      successors.set(id, [...(successors.get(id) ?? []), card.id]);
+      const list = successors.get(id);
+      if (list) list.push(card.id);
+      else successors.set(id, [card.id]);
     }
   }
   const queue: CardId[] = [];
