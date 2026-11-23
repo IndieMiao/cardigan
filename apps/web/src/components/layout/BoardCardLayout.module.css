@@ -20,6 +20,10 @@
   .card:has(> :global(.template-marker)) :global(.card-tile-head) {
     padding-inline-end: calc(var(--ui-control) + var(--ui-space-2));
   }
+  /* C-659: the other end of a hover dependency line, as faint as hover. */
+  .card[data-dependency-related] {
+    border-color: var(--ui-border-hover);
+  }
   .card > :global(.template-marker) {
     position: absolute;
     top: calc(var(--ui-space-3) + (var(--ui-leading) - var(--ui-control)) / 2);
