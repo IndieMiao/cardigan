@@ -10,6 +10,7 @@ import type {
   WorkItem,
 } from "@cardigan/domain";
 import {
+  postComment,
   prepareMergePlan,
   productCardTemplate,
   recordDecision,
@@ -1394,6 +1395,113 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
       instructions: "请在主机同步当前项目基线",
     },
   });
+});
+
+test("C-617: PM Ops links the owner's comment to a PM-routed decision over MCP, without new authority", async () => {
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const ops: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      scope: "standing",
+      standing_mode: "ops",
+      mcp_token_id: "fixture-owner-record-ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  const ops = await connect(opsAssignment, true);
+  const q = await ok<Decision>(office, "request_decision", {
+    card_id: card.id,
+    category: "feature_detail",
+    kind: "choose",
+    question: "按钮放哪里",
+    context: "两种放法",
+    options: [
+      { key: "left", description: "放左边", impact: "靠近标题" },
+      { key: "right", description: "放右边", impact: "靠近操作区" },
+    ],
+    recommended: "left",
+    affected_cards: [card.id],
+    affected_work_items: [],
+    blocking: false,
+    decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  expect(q.decider).toBe("role:pm");
+  // The owner's own comment is written by the control plane, not by an Agent.
+  const comment = (body: string) =>
+    store.uow.run((tx) => {
+      const effect = unwrap(
+        postComment(
+          loadCommandState(tx, project),
+          { kind: "human", project_id: project },
+          { card_id: card.id, body },
+          { clock: { now: () => "2026-01-03T00:00:00.000Z" }, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, project, effect);
+      const entry = effect.timeline[0];
+      if (!entry) throw new Error("Missing comment");
+      return entry;
+    });
+  const vague = comment(`${q.id} 都可以`);
+  const before = rows();
+  const rejected = await raw(ops, "resolve_delegated_decision", {
+    decision_id: q.id,
+    option: "left",
+    rationale: "所有者已答复",
+    owner_record: { timeline_entry_id: vague.id },
+  });
+  expect(rejected.isError).toBe(true);
+  expect(JSON.stringify(rejected.content)).toContain("只写一句明确的选择");
+  expect(rows()).toEqual(before);
+  // PM Office still cannot record a PM-routed decision.
+  const transcribed = await raw(office, "record_decision", {
+    decision_id: q.id,
+    option: "left",
+    rationale: "转录",
+    raw_quote: "放左边",
+  });
+  expect(transcribed.isError).toBe(true);
+  expect(JSON.stringify(transcribed.content)).toContain("PM Office 不能代记");
+  const answer = comment(`${q.id} 选 left`);
+  const p = {
+    decision_id: q.id,
+    option: "left",
+    rationale: "所有者已在卡上选左边",
+    owner_record: { timeline_entry_id: answer.id },
+  };
+  const resolved = await ok<Decision>(
+    ops,
+    "resolve_delegated_decision",
+    p,
+    "owner-record-answer",
+  );
+  expect(resolved.resolution).toMatchObject({
+    via: "delegated",
+    resolved_by: `assignment:${opsAssignment.id}`,
+    raw_quote: p.rationale,
+    rationale: p.rationale,
+    owner_record: {
+      author: "human",
+      timeline_entry_id: answer.id,
+      quote: answer.body,
+      at: "2026-01-03T00:00:00.000Z",
+    },
+  });
+  expect(
+    await ok(ops, "resolve_delegated_decision", p, "owner-record-answer"),
+  ).toEqual(resolved);
+  expect((await raw(ops, "resolve_delegated_decision", p)).isError).toBe(true);
+  const timeline = store.uow.read((tx) => tx.timeline.list(project));
+  expect(
+    timeline.filter(
+      (e: TimelineEntry) =>
+        e.type === "decision_resolved" && e.decision_id === q.id,
+    ),
+  ).toHaveLength(1);
 });
 
 test("C-110: only standing PM Ops can replace a template verifier; invalid attempts and persistence failure roll back", async () => {
