@@ -1213,7 +1213,6 @@ export function mentionsIn(body: string): string[] {
   return [...found];
 }
 
-
 /** Canonical padded base64 of a pasted image (the API decodes it strictly). */
 export async function toBase64(file: File): Promise<string> {
   const bytes = new Uint8Array(await file.arrayBuffer());

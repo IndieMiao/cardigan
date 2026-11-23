@@ -30,6 +30,35 @@ export function useAttachmentRefs(
   known: ReadonlySet<string>,
   version: unknown,
 ): readonly ReferencedAttachment[] {
+  return useAttachmentRefsState(
+    client,
+    projectId,
+    cardId,
+    texts,
+    known,
+    version,
+  ).attachments;
+}
+
+/** What `useAttachmentRefs` shows, and whether it answers the current input. */
+export interface AttachmentRefsState {
+  readonly attachments: readonly ReferencedAttachment[];
+  /**
+   * False while a read for the current numbers and `version` is outstanding:
+   * `attachments` is then empty for now, not the answer (V-3096).
+   */
+  readonly settled: boolean;
+}
+
+/** `useAttachmentRefs` that also says whether its answer is still coming. */
+export function useAttachmentRefsState(
+  client: Pick<CardiganClient, "attachmentRefs">,
+  projectId: string,
+  cardId: string,
+  texts: readonly string[],
+  known: ReadonlySet<string>,
+  version: unknown,
+): AttachmentRefsState {
   // Each body on its own (V-3068): an open code block in one comment must
   // not hide the numbers of the next. Callers memoise `texts`.
   const missing = useMemo(
@@ -68,5 +97,10 @@ export function useAttachmentRefs(
       live = false;
     };
   }, [current, missing, client, projectId, cardId, key, version]);
-  return current && answer ? answer.attachments : NONE;
+  const waiting = !current && missing.length > 0 && !!client.attachmentRefs;
+  const attachments = current && answer ? answer.attachments : NONE;
+  return useMemo(
+    () => ({ attachments, settled: !waiting }),
+    [attachments, waiting],
+  );
 }

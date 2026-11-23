@@ -274,6 +274,50 @@ test("an event on the source card refreshes the page and a withdrawn chip turns 
   );
 });
 
+test("a refresh while the source card's stream is ahead reads once and settles (V-3096)", async () => {
+  const { client, attachmentRefs } = server();
+  const card = vi.mocked(client.card);
+  // C-9 had events after the page opened: following it lifts the revision.
+  let base = 0;
+  const cardRevision = (_id: string, affected: readonly string[]) =>
+    Math.max(base, affected.includes("C-9") ? 5 : 0);
+  const view = render(
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      cardRevision={cardRevision}
+    />,
+  );
+  await selectCardTab(/^时间线/);
+  await screen.findByText("已加载 20 / 25 条");
+  reachBottom();
+  await screen.findByText("已加载 25 / 25 条");
+  await waitFor(() => expect(chip()).toBeTruthy());
+  // C-1's own event (3 < 5) refreshes the head page; the kept older rows
+  // read their numbers again while C-9 stays followed.
+  base = 3;
+  view.rerender(
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      cardRevision={(id, affected) => cardRevision(id, affected)}
+    />,
+  );
+  await waitFor(() => expect(chip()).toBeTruthy());
+  await act(() => new Promise((done) => setTimeout(done, 300)));
+  const settled = {
+    card: card.mock.calls.length,
+    refs: attachmentRefs.mock.calls.length,
+  };
+  await act(() => new Promise((done) => setTimeout(done, 300)));
+  expect(card.mock.calls.length).toBe(settled.card);
+  expect(attachmentRefs.mock.calls.length).toBe(settled.refs);
+  expect(attachmentRefs.mock.calls.length).toBeLessThanOrEqual(2);
+  expect(chip()?.textContent).toContain("数值表.json");
+});
+
 test("numbers no attachment can have are not asked for, and batches of 100 fail on their own", async () => {
   const valid = Array.from({ length: 150 }, (_, i) => `attachment-${1000 + i}`);
   const body = [...valid, "attachment-12345678901234567"].join(" ");

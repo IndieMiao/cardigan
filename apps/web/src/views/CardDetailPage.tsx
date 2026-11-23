@@ -66,7 +66,7 @@ import { Button } from "../components/ui/button.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
-import { useAttachmentRefs } from "../useAttachmentRefs.js";
+import { useAttachmentRefsState } from "../useAttachmentRefs.js";
 import { useResource } from "../useResource.js";
 import { MergeConfirmation, SuggestedDecision } from "./NeedsYouPage.js";
 
@@ -515,7 +515,7 @@ function CardContent({
     () => detail.timeline.map((entry) => entry.body),
     [detail.timeline],
   );
-  const laterRefs = useAttachmentRefs(
+  const later = useAttachmentRefsState(
     client,
     projectId,
     cardId,
@@ -523,21 +523,26 @@ function CardContent({
     knownAttachments,
     detail.timeline,
   );
+  const laterRefs = later.attachments;
   const referencedAttachments = useMemo(
     () => [...(detail.referenced_attachments ?? []), ...laterRefs],
     [detail.referenced_attachments, laterRefs],
   );
   useEffect(() => {
-    const cards = [
-      ...new Set(referencedAttachments.map((a) => a.card_id)),
-    ].sort();
-    onReferencedCards?.((current) =>
-      current.length === cards.length &&
-      current.every((id, i) => id === cards[i])
+    const shown = referencedAttachments.map((a) => a.card_id);
+    onReferencedCards?.((current) => {
+      // While the follow-up read is out, its cards are unknown rather than
+      // gone: keep following them, or the page's revision drops, it reloads,
+      // asks again and never settles (V-3096). The answer sets the exact list.
+      const cards = [
+        ...new Set(later.settled ? shown : [...current, ...shown]),
+      ].sort();
+      return current.length === cards.length &&
+        current.every((id, i) => id === cards[i])
         ? current
-        : cards,
-    );
-  }, [referencedAttachments, onReferencedCards]);
+        : cards;
+    });
+  }, [referencedAttachments, later.settled, onReferencedCards]);
   const storyAttachments = useStoryAttachments({
     detail: head,
     client,
