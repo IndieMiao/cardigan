@@ -1,7 +1,12 @@
 import fs, { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Event, GitPublicationGuard, MergeBatch } from "@cardigan/domain";
+import type {
+  CardId,
+  Event,
+  GitPublicationGuard,
+  MergeBatch,
+} from "@cardigan/domain";
 import {
   completeHumanAction,
   createHostOpsAssignment,
@@ -7636,6 +7641,414 @@ test("V-2510: an actual API outage before publication keeps its project backoff"
             (e.payload as RepositoryReceipt).outcome === "timeout",
         ),
     ).toBe(false);
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+const interruptedAttempts = (h: { f: M4Fixture }) =>
+  h.f
+    .state()
+    .events.filter(
+      (e) =>
+        e.type === "merge_check_finished" &&
+        (e.payload as { status?: string }).status === "interrupted",
+    );
+
+test("C-647: without the queue a restart re-attaches the running check when only the rebuilt candidate commit differs", async () => {
+  const h = await parallelGithub(1);
+  const first = h.create();
+  await first.schedule([h.f.project_id]);
+  await h.running(0);
+  const before = h.check(0);
+  first.stop();
+  await first.idle();
+  // commit-tree stamps a new commit time: same baseline and tree, new SHA.
+  h.git.prepare.mockResolvedValue({
+    status: "candidate",
+    candidate_sha: "e".repeat(40),
+    tree_sha: before.tree_sha,
+    previous_sha: required(before.base_sha),
+  });
+  // The deployment that restarted the controller also changed the limit.
+  h.c.setConfig({
+    ...h.c.options.configuration.forProject(),
+    executor: { ...h.config, maxConcurrent: 16 },
+  } as ProjectMergeGate);
+  const next = h.create();
+  try {
+    await next.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(h.client.run.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    expect(h.check(0)).toMatchObject({
+      attempt_id: before.attempt_id,
+      status: "running",
+    });
+    h.finish(0);
+    await next.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(0).status).toBe("passed"));
+    await next.idle();
+    expect(h.check(0)).toMatchObject({
+      attempt_id: before.attempt_id,
+      external_run: before.external_run,
+      candidate_sha: before.candidate_sha,
+      tree_sha: before.tree_sha,
+      base_sha: before.base_sha,
+    });
+    expect(h.client.dispatch).toHaveBeenCalledTimes(1);
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(interruptedAttempts(h)).toEqual([]);
+    // The pass is for this tree on this baseline: the rebuilt candidate publishes.
+    h.f.decide(
+      required(mergeConfirmation(h.f, required(h.cards[0]).scenario.card.id)),
+      "merge",
+    );
+    await (await next.schedule([h.f.project_id])).done;
+    await next.idle();
+    expect(h.git.publish).toHaveBeenCalledTimes(1);
+    expect(h.git.publish.mock.calls[0]?.[2]).toMatchObject({
+      candidate_sha: "e".repeat(40),
+      tree_sha: before.tree_sha,
+    });
+    expect(h.client.dispatch).toHaveBeenCalledTimes(1);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test("C-647: without the queue a restart with a changed tree still interrupts and checks again", async () => {
+  const h = await parallelGithub(1);
+  const first = h.create();
+  await first.schedule([h.f.project_id]);
+  await h.running(0);
+  const before = h.check(0);
+  first.stop();
+  await first.idle();
+  h.git.prepare.mockResolvedValue({
+    status: "candidate",
+    candidate_sha: "e".repeat(40),
+    tree_sha: "f".repeat(40),
+    previous_sha: required(before.base_sha),
+  });
+  const next = h.create();
+  try {
+    await next.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(h.check(0).attempt_id).not.toBe(before.attempt_id),
+    );
+    expect(interruptedAttempts(h)).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({ attempt_id: before.attempt_id }),
+      }),
+    ]);
+    expect(h.check(0)).toMatchObject({ tree_sha: "f".repeat(40) });
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test("C-647: after a restart a lower-priority card that leaves the same-card mutex first does not take the slot of a higher one still waiting (11-23 18:04)", async () => {
+  const h = await parallelGithub(2);
+  const [high, low] = h.cards.map((c) => c.scenario.card.id) as [
+    CardId,
+    CardId,
+  ];
+  setPriority(h.f, 4, high);
+  setPriority(h.f, 3, low);
+  const first = h.create();
+  await h.startPair(first);
+  const before = [h.check(0), h.check(1)];
+  first.stop();
+  await first.idle();
+  // The merge that triggered the deployment moved main: both checks restart.
+  h.c.advance(true);
+  const next = h.create();
+  const project = [h.f.project_id];
+  const dispatchedCards = () =>
+    h.client.dispatch.mock.calls.slice(2).map(([, inputs]) => inputs.card);
+  const oldRun = (i: number) =>
+    required(h.runs.get(required(before[i]?.external_run).run_id));
+  try {
+    await vi.waitFor(async () => {
+      await next.schedule(project);
+      for (const i of [0, 1]) {
+        expect(h.check(i).attempt_id).not.toBe(before[i]?.attempt_id);
+        expect(h.check(i).queue_wait?.reason).toBe("等待同卡检查释放互斥");
+      }
+    });
+    // The low-priority card's old run settles first, as C-620's did.
+    oldRun(1).conclusion = "cancelled";
+    h.advance();
+    await vi.waitFor(async () => {
+      h.advance(5000);
+      await next.schedule(project);
+      expect(h.check(1).queue_wait?.reason).toBe(
+        "等待更高优先级的检查先取得名额",
+      );
+    });
+    expect(dispatchedCards()).toEqual([]);
+    expect(h.check(0).queue_wait?.reason).toBe("等待同卡检查释放互斥");
+    // Once the high-priority card is free both fit in the two slots.
+    oldRun(0).conclusion = "cancelled";
+    await vi.waitFor(async () => {
+      h.advance(5000);
+      await next.schedule(project);
+      expect(dispatchedCards().toSorted()).toEqual([high, low].toSorted());
+    });
+    await h.running(0, 1);
+    h.finish(0);
+    h.finish(1);
+    await vi.waitFor(async () => {
+      h.advance(5000);
+      await next.schedule(project);
+      expect([h.check(0).status, h.check(1).status]).toEqual([
+        "passed",
+        "passed",
+      ]);
+    });
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test("C-647: an author precheck does not take the slot of a merge check still waiting for its same-card mutex", async () => {
+  const h = await parallelGithub(1);
+  const first = h.create();
+  await first.schedule([h.f.project_id]);
+  await h.running(0);
+  const before = h.check(0);
+  first.stop();
+  await first.idle();
+  h.c.setConfig({
+    ...h.c.options.configuration.forProject(),
+    executor: { ...h.config, maxConcurrent: 2 },
+  } as ProjectMergeGate);
+  h.c.advance(true);
+  const next = h.create();
+  const project = [h.f.project_id];
+  try {
+    await vi.waitFor(async () => {
+      await next.schedule(project);
+      expect(h.check(0).queue_wait?.reason).toBe("等待同卡检查释放互斥");
+    });
+    await queueGithubAuthor(h);
+    for (let i = 0; i < 3; i++) {
+      h.advance(5000);
+      await next.schedule(project);
+    }
+    // One slot is the old run being cancelled, the other is kept for its card.
+    expect(h.client.dispatch).toHaveBeenCalledTimes(1);
+    required(h.runs.get(required(before.external_run).run_id)).conclusion =
+      "cancelled";
+    await vi.waitFor(async () => {
+      h.advance(5000);
+      await next.schedule(project);
+      expect(
+        h.client.dispatch.mock.calls.slice(1).map(([, i]) => i.kind),
+      ).toEqual(["merge_check", "precheck"]);
+    });
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+async function queuedBatches(count: number, maxBatchSize: number) {
+  const { h, gate, publish } = await confirmedGithubBatch(count);
+  const settings = h.c.options.configuration.forProject();
+  if (settings.status !== "enabled" || !settings.queue)
+    throw new Error("Missing queue");
+  h.c.setConfig({ ...settings, queue: { ...settings.queue, maxBatchSize } });
+  // Batches build on the current main; publishing one moves it.
+  let main = "a".repeat(40);
+  h.git.baseline.mockImplementation(async () => main);
+  let formed = 0;
+  Object.assign(h.git, {
+    prepareBatch: async (
+      _project: CentralProject,
+      plans: readonly MergePlan[],
+    ) => {
+      formed++;
+      return {
+        base_sha: main,
+        conflicts: [],
+        noops: [],
+        members: plans.map((plan, i) => ({
+          card_id: plan.card_id,
+          completion_id: plan.completion_id,
+          merge_sha: `${formed}${i}`.repeat(20),
+          tree_sha: `${formed}${i + 5}`.repeat(20),
+        })),
+      };
+    },
+  });
+  publish.mockImplementation(async (_project, batch: MergeBatch) => {
+    main = batch.final_sha;
+    return { status: "published" as const };
+  });
+  const cardDispatches = () =>
+    h.client.dispatch.mock.calls.filter(([, i]) => i.merge_tier === "card")
+      .length;
+  const batches = () => mergeBatches(h.f.state().events);
+  const batchRun = (batch: MergeBatch | undefined) =>
+    required(h.runs.get(required(batch?.check?.external_run).run_id));
+  return { h, gate, publish, cardDispatches, batches, batchRun };
+}
+
+test("C-647: in queue mode main moving under waiting cards never reruns their passed card checks", async () => {
+  const { h, gate, publish, cardDispatches, batches, batchRun } =
+    await queuedBatches(3, 2);
+  const project = [h.f.project_id];
+  const cardChecks = () => [0, 1, 2].map((i) => h.check(i).attempt_id);
+  const passed = cardChecks();
+  expect(cardDispatches()).toBe(3);
+  try {
+    await vi.waitFor(async () => {
+      await gate.schedule(project);
+      expect(batches()[0]?.check?.status).toBe("running");
+    });
+    expect(batches()[0]?.members).toHaveLength(2);
+    batchRun(batches()[0]).conclusion = "success";
+    // Main moves twice: the first batch publishes, then the remaining card
+    // forms its own batch on the new main without a new card check.
+    await vi.waitFor(async () => {
+      h.advance();
+      await gate.schedule(project);
+      expect(batches()[1]?.check?.status).toBe("running");
+    });
+    expect(batches()[1]?.base_sha).toBe(batches()[0]?.final_sha);
+    batchRun(batches()[1]).conclusion = "success";
+    await vi.waitFor(async () => {
+      h.advance();
+      await gate.schedule(project);
+      expect(batches().map((b) => b.status)).toEqual([
+        "published",
+        "published",
+      ]);
+    });
+    await gate.idle();
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(cardDispatches()).toBe(3);
+    expect(cardChecks()).toEqual(passed);
+    expect(interruptedAttempts(h)).toEqual([]);
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(
+      h.f.state().events.filter((e) => e.type === "card_merged"),
+    ).toHaveLength(3);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-647: a failing batch is split by the existing rules and leaves the card outside it untouched", async () => {
+  const { h, gate, cardDispatches, batches, batchRun } = await queuedBatches(
+    3,
+    2,
+  );
+  const project = [h.f.project_id];
+  const outside = required(h.cards[2]).scenario.card.id;
+  const outsideCheck = h.check(2);
+  try {
+    await vi.waitFor(async () => {
+      await gate.schedule(project);
+      expect(batches()[0]?.check?.status).toBe("running");
+    });
+    const batch = required(batches()[0]);
+    expect(batch.members.map((m) => m.card_id)).not.toContain(outside);
+    h.complete("failure");
+    batchRun(batch).conclusion = "failure";
+    await vi.waitFor(async () => {
+      h.advance();
+      await gate.schedule(project);
+      const probe = batches().find((b) => b.parent_batch_id === batch.id);
+      expect(probe?.members.map((m) => m.card_id)).toEqual([
+        batch.members[0]?.card_id,
+      ]);
+    });
+    expect(batches().find((b) => b.id === batch.id)?.status).toBe("bisecting");
+    // The card outside the batch keeps its passed card check and its place.
+    expect(h.check(2)).toEqual(outsideCheck);
+    expect(cardDispatches()).toBe(3);
+    expect(
+      batches().some((b) => b.members.some((m) => m.card_id === outside)),
+    ).toBe(false);
+    expect(
+      h.f
+        .state()
+        .events.filter(
+          (e) =>
+            e.card_id === outside &&
+            [
+              "merge_batch_member_deferred",
+              "merge_failed",
+              "merge_conflicted",
+            ].includes(e.type),
+        ),
+    ).toEqual([]);
+    expect(h.f.state().cards.find((c) => c.id === outside)?.status).toBe(
+      "awaiting_merge",
+    );
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-647: merge_solo in queue mode isolates the card without cutting off the cards behind it or voiding its own check", async () => {
+  const { h, gate, publish, cardDispatches, batches, batchRun } =
+    await queuedBatches(3, 4);
+  const [a, solo, b] = h.cards.map((c) => c.scenario.card.id) as [
+    CardId,
+    CardId,
+    CardId,
+  ];
+  setPriority(h.f, 4, a);
+  setPriority(h.f, 3, solo);
+  setPriority(h.f, 2, b);
+  h.f.store.uow.run((tx) => {
+    const card = required(tx.cards.get(h.f.project_id, solo));
+    tx.cards.put(h.f.project_id, { ...card, merge_solo: true });
+  });
+  const project = [h.f.project_id];
+  const soloCheck = h.check(1);
+  try {
+    await vi.waitFor(async () => {
+      await gate.schedule(project);
+      expect(batches()[0]?.check?.status).toBe("running");
+    });
+    // The solo card cannot join this batch; the card behind it still can.
+    expect(batches()[0]?.members.map((m) => m.card_id)).toEqual([a, b]);
+    batchRun(batches()[0]).conclusion = "success";
+    await vi.waitFor(async () => {
+      h.advance();
+      await gate.schedule(project);
+      expect(batches()[1]?.check?.status).toBe("running");
+    });
+    expect(batches()[1]).toMatchObject({
+      solo: true,
+      members: [expect.objectContaining({ card_id: solo })],
+      base_sha: batches()[0]?.final_sha,
+    });
+    batchRun(batches()[1]).conclusion = "success";
+    await vi.waitFor(async () => {
+      h.advance();
+      await gate.schedule(project);
+      expect(batches()[1]?.status).toBe("published");
+    });
+    await gate.idle();
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(h.check(1)).toEqual(soloCheck);
+    expect(cardDispatches()).toBe(3);
+    expect(h.c.errors).not.toHaveBeenCalled();
   } finally {
     gate.stop();
     await gate.idle();
