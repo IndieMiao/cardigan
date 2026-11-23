@@ -10,14 +10,15 @@ export function acceptedCompletion(
   state: Pick<CommandState, "work_items" | "deliveries">,
   card: Card,
 ) {
+  // Select the card's work items once: O(deliveries + work items) per card.
+  const items = new Set<string>();
+  for (const w of state.work_items) if (w.card_id === card.id) items.add(w.id);
   const value = newest(
     state.deliveries.filter(
       (v) =>
         v.kind === "card_completion" &&
         v.status !== "superseded" &&
-        state.work_items.some(
-          (w) => w.card_id === card.id && w.id === v.work_item_id,
-        ),
+        items.has(v.work_item_id),
     ),
   );
   ensure(

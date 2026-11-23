@@ -908,3 +908,100 @@ test("reclaiming a dead host lease never settles an ambiguous remote dispatch or
     journal.claim({ ...f.intent, attempt: "another", candidate: undefined }, 1),
   ).toThrow();
 });
+
+test("C-629: batch checks read the cached system stream, never a full re-read, with unchanged results", () => {
+  const f = setup();
+  f.journal.claim(f.intent, 1);
+  const project = human.project_id;
+  const batchCheck = {
+    card_id: f.card.id,
+    completion_id: f.completion.id,
+    attempt_id: f.intent.attempt,
+    candidate_sha: f.intent.candidate.sha,
+    tree_sha: "b".repeat(40),
+    executor: { name: config.name, type: "github" },
+    status: "queued",
+    batch_id: "B-1",
+  };
+  const system = (type: string, payload: object) =>
+    f.store.uow.run((tx) =>
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project),
+        type,
+        actor: { kind: "system", project_id: project },
+        payload,
+        created_at: f.intent.startedAt,
+      } as Event),
+    );
+  // Unrelated system history and another attempt's batch check.
+  for (let i = 0; i < 50; i++) system("project_noise", { i });
+  system("merge_batch_check_queued", {
+    batch_id: "B-0",
+    check: { ...batchCheck, attempt_id: "other" },
+  });
+  system("merge_batch_formed", {
+    id: "B-1",
+    project_id: project,
+    purpose: "main",
+    members: [],
+    status: "checking",
+  });
+  system("merge_batch_check_queued", { batch_id: "B-1", check: batchCheck });
+  const compare = (expected: unknown) =>
+    f.store.uow.read((tx) => {
+      const history = vi.spyOn(tx.events, "listAfter");
+      const cached = f.journal.candidateCheck(tx, f.intent);
+      expect(
+        history.mock.calls.filter(([, card]) => card === undefined),
+      ).toEqual([]);
+      history.mockRestore();
+      const legacy = f.journal.candidateCheck(
+        { ...tx, events: { listAfter: tx.events.listAfter } },
+        f.intent,
+      );
+      expect(cached).toEqual(legacy);
+      expect(cached).toEqual(expected);
+      return cached;
+    });
+  const found = compare(batchCheck);
+  // A caller's copy cannot alter the shared decoded history.
+  Object.assign(found ?? {}, { candidate_sha: "e".repeat(40) });
+  compare(batchCheck);
+  // Latest batch check for the attempt wins; a mismatched SHA rejects it.
+  system("merge_batch_check_running", {
+    batch_id: "B-1",
+    check: { ...batchCheck, candidate_sha: "d".repeat(40) },
+  });
+  compare(undefined);
+  system("merge_batch_check_running", {
+    batch_id: "B-1",
+    check: { ...batchCheck, status: "running" },
+  });
+  compare({ ...batchCheck, status: "running" });
+  // Reconcile resolves the batch from the same cached stream.
+  const uow = f.store.uow;
+  const reads: unknown[][] = [];
+  const spy = vi.spyOn(f.store, "uow", "get").mockReturnValue({
+    ...uow,
+    run: (operation) =>
+      uow.run((tx) => {
+        const history = vi.spyOn(tx.events, "listAfter");
+        try {
+          return operation(tx);
+        } finally {
+          reads.push(...history.mock.calls.filter(([, c]) => c === undefined));
+        }
+      }),
+  } as typeof uow);
+  f.reconcile();
+  expect(f.journal.unfinished()).toEqual([f.intent]);
+  system("merge_batch_aborted", { batch_id: "B-1" });
+  f.reconcile();
+  spy.mockRestore();
+  expect(reads).toEqual([]);
+  expect(f.journal.all()[0]).toMatchObject({
+    finished: true,
+    abandoned: "superseded",
+  });
+});
