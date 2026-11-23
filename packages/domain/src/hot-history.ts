@@ -197,3 +197,25 @@ export function commandTargetCards(
   for (const value of values) visit(value, 0);
   return found;
 }
+
+/**
+ * The hot command state as a pure function of the whole-history state; the
+ * Store-backed loader must produce exactly these events. `extra` names cards
+ * whose inbox notifications are still live or that a command targets.
+ */
+export function hotCommandEvents(
+  state: HotCardInput & { readonly events: readonly Event[] },
+  extra: Iterable<CardId | undefined> = [],
+): Event[] {
+  const triggers = new Set<string>(liveTriggerEventIds(state.runs));
+  const triggerCards = state.events
+    .filter((e) => triggers.has(e.id))
+    .map((e) => e.card_id);
+  const hot = hotCardIds(state, [...triggerCards, ...extra]);
+  return state.events.filter(
+    (e) =>
+      !e.card_id ||
+      hot.has(e.card_id) ||
+      !COLD_CARD_OMITTED_EVENT_TYPES.has(e.type),
+  );
+}

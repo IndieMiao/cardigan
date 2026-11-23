@@ -301,3 +301,4 @@ export {
 export * from "./verification-activity.js";
 export * from "./work-wait.js";
 export * from "./worker-helper-action.js";
+export * from "./hot-history-shadow.js";
