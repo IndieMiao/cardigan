@@ -170,7 +170,7 @@ describe("owner record linking", () => {
     const f = setup();
     const q = f.request();
     expect(q.decider).toBe("role:pm");
-    const entry = f.comment(`${q.id} 选 split，这三项分开做`);
+    const entry = f.comment(`${q.id} 选 split`);
     const resolved = f.commit(f.link(q.id, { timeline_entry_id: entry.id }));
     expect(resolved.status).toBe("resolved");
     expect(resolved.resolution).toMatchObject({
@@ -218,30 +218,26 @@ describe("owner record linking", () => {
     );
   });
 
-  test("accepts a reply to the decision request and an affected card", () => {
+  test("accepts a reply to the decision request on the same card", () => {
     const f = setup();
-    const q = f.request("general", { wide: true });
+    const q = f.request();
     const request = f.state.timeline.find(
-      (e) =>
-        e.type === "decision_request" &&
-        e.decision_id === q.id &&
-        e.card_id === id("card", 2),
+      (e) => e.type === "decision_request" && e.decision_id === q.id,
     );
     expect(request).toBeDefined();
     const entry = f.comment("选择：并入本卡", {
-      card: 2,
       reply_to: request?.id as TimelineEntry["id"],
     });
     const resolved = f.commit(
       f.link(q.id, { timeline_entry_id: entry.id }, "merge_in"),
     );
-    expect(resolved.resolution?.owner_record?.card_id).toBe(id("card", 2));
+    expect(resolved.resolution?.owner_record?.card_id).toBe(id("card", 1));
   });
 
   test("keeps an owner-uploaded attachment on the quoted entry", () => {
     const f = setup();
     const q = f.request();
-    const entry = f.comment(`${q.id}：选 split，见标注图`);
+    const entry = f.comment(`${q.id}：选 split`);
     const file = (n: number, extra: Partial<Attachment> = {}): Attachment =>
       ({
         id: `att-${n}`,
@@ -296,11 +292,11 @@ describe("owner record linking", () => {
     const vague = f.comment(`${q.id} 按你们的意思办`);
     expect(
       error(f.link(q.id, { timeline_entry_id: vague.id }))?.message,
-    ).toContain("明确写出所选选项");
+    ).toContain("只写一句明确的选择");
     const both = f.comment(`${q.id} split 或 merge_in 都行`);
     expect(
       error(f.link(q.id, { timeline_entry_id: both.id }))?.message,
-    ).toContain("不提及其它选项");
+    ).toContain("其它选项");
     const other = f.comment(`${q.id} 选 merge_in`);
     // The option PM submits must be the one the owner wrote.
     expect(
@@ -316,13 +312,15 @@ describe("owner record linking", () => {
     ["question word", "Q 选 split 吗"],
     ["hedge", "Q 选 split 还是再想想"],
     ["english negation", "Q don't choose split"],
+    ["V-3065 objection after the choice", "Q 有人建议选 split，我反对。"],
+    ["reason appended", "Q 选 split，等实测再说"],
   ])("rejects an unclear answer: %s", (_name, body) => {
     const f = setup();
     const q = f.request();
     const entry = f.comment(body.replace("Q", q.id));
     expect(
       error(f.link(q.id, { timeline_entry_id: entry.id }))?.message,
-    ).toContain("明确写出所选选项");
+    ).toContain("只写一句明确的选择");
   });
 
   test("a reply in the answer's thread overtakes it even without citing the decision", () => {
@@ -403,7 +401,7 @@ describe("owner record linking", () => {
     // Same project but neither the decision card nor an affected card.
     expect(
       error(f.link(q.id, { timeline_entry_id: foreign.id }))?.message,
-    ).toContain("受影响的卡片");
+    ).toContain("本拍板所在的卡片");
   });
 
   test.each([true, false])(
@@ -634,26 +632,56 @@ describe("owner record linking", () => {
     expect(f.state.decisions.find((d) => d.id === q.id)?.status).toBe("open");
   });
 
-  test("V-3045: a quote on a sensitive card is not copied onto a less restricted card", () => {
+  test.each([
+    ["both cards sensitive", true],
+    ["both cards ordinary", false],
+  ])(
+    "V-3065: a decision spanning other cards never carries the quote (%s)",
+    (_name, sensitive) => {
+      const f = setup();
+      const q = f.request("general", { wide: true });
+      f.state = {
+        ...f.state,
+        cards: f.state.cards.map((c) => ({ ...c, sensitive })),
+      };
+      for (const card of [1, 2]) {
+        const entry = f.comment(`${q.id} 选 split`, { card });
+        expect(
+          error(f.link(q.id, { timeline_entry_id: entry.id }))?.message,
+        ).toMatch(sensitive ? /同一张卡|未授权/u : /同一张卡/u);
+        // Neither the events nor the timeline of any card receive the quote.
+        expect(
+          f.state.events.some(
+            (e) =>
+              e.type === "decision_resolved" &&
+              JSON.stringify(e.payload).includes("owner_record"),
+          ),
+        ).toBe(false);
+        expect(
+          f.state.timeline.some(
+            (e) =>
+              e.type === "decision_resolved" && e.body.includes(entry.body),
+          ),
+        ).toBe(false);
+      }
+      expect(f.state.decisions.find((d) => d.id === q.id)?.status).toBe("open");
+    },
+  );
+
+  test("V-3065: a bare reply under a comment asking two decisions answers neither", () => {
     const f = setup();
-    const q = f.request("general", { wide: true });
-    f.state = {
-      ...f.state,
-      cards: f.state.cards.map((c) =>
-        c.id === id("card", 2) ? { ...c, sensitive: true } : c,
-      ),
-    };
-    const entry = f.comment(`${q.id} 选 split`, { card: 2 });
+    const q1 = f.request();
+    const q2 = f.request();
+    const ask = f.comment(`${q1.id} 和 ${q2.id} 怎么定？`, { by: f.pm });
+    const reply = f.comment("选 split", { reply_to: ask.id });
+    for (const q of [q1, q2])
+      expect(
+        error(f.link(q.id, { timeline_entry_id: reply.id }))?.message,
+      ).toContain("同时涉及其它拍板");
+    // A reply that names the single decision is unambiguous.
+    const named = f.comment(`${q1.id} 选 split`, { reply_to: ask.id });
     expect(
-      error(f.link(q.id, { timeline_entry_id: entry.id }))?.message,
-    ).toContain("敏感卡");
-    expect(
-      f.state.timeline.some(
-        (e) =>
-          e.card_id === id("card", 1) &&
-          e.body.includes(entry.body) &&
-          e.id !== entry.id,
-      ),
-    ).toBe(false);
+      f.commit(f.link(q1.id, { timeline_entry_id: named.id })).status,
+    ).toBe("resolved");
   });
 });

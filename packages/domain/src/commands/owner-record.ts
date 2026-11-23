@@ -44,31 +44,29 @@ const optionPatterns = (o: Decision["options"][number]) =>
 const optionMentioned = (body: string, o: Decision["options"][number]) =>
   optionPatterns(o).some((p) => new RegExp(p, "iu").test(body));
 /**
- * An explicit selection word right before the option ("选 split"、"选择：并入本卡"、
- * "choose split"). Bare mentions, questions, hedges and any negation in the
- * same clause ("不要选 split") are ambiguous.
+ * V-3065: only a complete, explicit affirmative answer counts: the whole
+ * comment is "选 split" / "选择：并入本卡" / "choose split", optionally
+ * prefixed with the decision ID and ending with one full stop. Anything
+ * else (reasons, objections, questions, hedges) stays with the existing
+ * PM decision route instead of a growing list of negation words.
  */
-const SELECT = "(?:选择|选定|选|定为|choose|pick|option)";
-const NEGATION =
-  /不|别|没|未|勿|非|don'?t|(?<![\w-])(?:not|no|never)(?![\w-])/iu;
-const HEDGE =
-  /[?？]|吗|么|是否|还是|或者|再想想|再说|再等|等等|先等|等实测|等一下|搁置|暂缓|待定|回头|稍后|maybe|later/iu;
-const CLAUSE = /[，。,.;；！!\n]+/u;
-function explicitlyChosen(body: string, o: Decision["options"][number]) {
-  if (HEDGE.test(body)) return false;
-  const chosen = optionPatterns(o).map(
-    (p) => new RegExp(`${SELECT}\\s*[:：]?\\s*["“「]?${p}`, "iu"),
-  );
-  const clauses = body
-    .split(CLAUSE)
-    .filter((c) => chosen.some((r) => r.test(c)));
-  return clauses.length > 0 && clauses.every((c) => !NEGATION.test(c));
-}
-
-function boundTo(entry: TimelineEntry, q: Decision, requests: Set<string>) {
-  return (
-    entry.refs.some((r) => r.kind === "decision" && r.id === q.id) ||
-    (!!entry.reply_to && requests.has(entry.reply_to))
+const SELECT = "(?:选择|选定|改选|选|定为|choose|pick)";
+function explicitlyChosen(
+  body: string,
+  decision: Decision["id"],
+  o: Decision["options"][number],
+) {
+  const text = body
+    .trim()
+    .replace(
+      new RegExp(`^${escapeRegExp(decision)}\\s*[:：,，]?\\s*`, "u"),
+      "",
+    );
+  return optionPatterns(o).some((p) =>
+    new RegExp(
+      `^${SELECT}\\s*[:：]?\\s*["“「]?${p}["”」]?\\s*[。.!！]?$`,
+      "iu",
+    ).test(text),
   );
 }
 
@@ -119,15 +117,15 @@ export function bindOwnerRecord(
   const card = d.list("cards").find((c) => c.id === entry.card_id);
   reject(
     card && card.project_id === d.state.project_id && cards.has(card.id),
-    "所有者原话须在本项目、本拍板所在或受影响的卡片上",
+    "所有者原话须在本项目、本拍板所在的卡片上",
   );
-  // The quote is written to every decision card; never widen a sensitive card's audience.
+  // V-3065: the quote is copied into the decision, its events and timeline on
+  // every card the decision touches. Equal sensitivity flags do not mean equal
+  // readers, so only a decision confined to the quote's own card may cite it:
+  // whoever can read the decision can already read the original comment.
   reject(
-    !card.sensitive ||
-      [...cards].every(
-        (id) => d.list("cards").find((c) => c.id === id)?.sensitive,
-      ),
-    "所有者原话在敏感卡上，不能写到可见范围更大的卡片",
+    q.card_id === card.id && cards.size === 1,
+    "所有者原话只能用于同一张卡上、且不涉及其它卡的拍板，以免让读不到来源卡的人看到原话",
   );
   reject(
     ownerEntry(entry),
@@ -143,37 +141,47 @@ export function bindOwnerRecord(
     .map((e) => ({ card_id: e.card_id, seq: e.seq, at: e.created_at }));
   const here = pointOf(entry);
   const asked = opened.find((e) => e.card_id === entry.card_id) ?? opened[0];
-  const requests = new Set<string>(
-    timeline
-      .filter((e) => e.type === "decision_request" && e.decision_id === q.id)
-      .map((e) => e.id),
+  // Which decisions an entry answers: its own decision refs (or the request
+  // it is), otherwise whatever the entry it replies to or revises answers.
+  const byId = new Map(timeline.map((e) => [e.id as string, e]));
+  const answered = new Map<string, ReadonlySet<string>>();
+  const decisionsOf = (e: TimelineEntry): ReadonlySet<string> => {
+    const known = answered.get(e.id);
+    if (known) return known;
+    answered.set(e.id, new Set());
+    const own = new Set<string>(
+      e.refs.flatMap((r) => (r.kind === "decision" ? [r.id] : [])),
+    );
+    if (e.type === "decision_request" && e.decision_id) own.add(e.decision_id);
+    const result = own.size
+      ? own
+      : new Set(
+          [e.reply_to, e.supersedes].flatMap((id) => {
+            const parent = id ? byId.get(id) : undefined;
+            return parent ? [...decisionsOf(parent)] : [];
+          }),
+        );
+    answered.set(e.id, result);
+    return result;
+  };
+  const targets = decisionsOf(entry);
+  reject(
+    asked !== undefined && isAfter(here, asked) && targets.has(q.id),
+    `所有者原话须在 ${q.id} 提出之后，并引用 ${q.id} 或回复这条拍板`,
   );
-  // Bound entries and the cited answer's thread both follow replies and
-  // revisions: an edit or a reply keeps its place even without repeating refs.
-  const bound = new Set<string>(requests);
+  const otherDecisions = [...targets].filter((id) => id !== q.id);
+  reject(
+    otherDecisions.length === 0,
+    `所有者原话（含所回复的内容）同时涉及其它拍板（${otherDecisions.join("、")}），无法确定答的是哪一条`,
+  );
+  // Replies and revisions in the cited answer's thread may retract it without citing the decision.
   const thread = new Set<string>([entry.id]);
   for (const e of [...timeline].sort(
     (a, b) =>
       a.created_at.localeCompare(b.created_at) || a.event_seq - b.event_seq,
-  )) {
-    const links = [e.reply_to, e.supersedes].filter(
-      (id): id is NonNullable<typeof id> => id !== undefined,
-    );
-    if (boundTo(e, q, requests) || links.some((id) => bound.has(id)))
-      bound.add(e.id);
-    if (links.some((id) => thread.has(id))) thread.add(e.id);
-  }
-  reject(
-    asked !== undefined && isAfter(here, asked) && bound.has(entry.id),
-    `所有者原话须在 ${q.id} 提出之后，并引用 ${q.id} 或回复这条拍板`,
-  );
-  const otherDecisions = entry.refs.flatMap((r) =>
-    r.kind === "decision" && r.id !== q.id ? [r.id] : [],
-  );
-  reject(
-    otherDecisions.length === 0,
-    `所有者原话同时涉及其它拍板（${otherDecisions.join("、")}），无法确定答的是哪一条`,
-  );
+  ))
+    if ([e.reply_to, e.supersedes].some((id) => id && thread.has(id)))
+      thread.add(e.id);
   const later = timeline.filter(
     (e) =>
       e.id !== entry.id &&
@@ -181,7 +189,7 @@ export function bindOwnerRecord(
       ownerEntry(e) &&
       !e.retracted &&
       !timeline.some((x) => x.supersedes === e.id) &&
-      (bound.has(e.id) || thread.has(e.id)) &&
+      (decisionsOf(e).has(q.id) || thread.has(e.id)) &&
       notBefore(pointOf(e), here),
   );
   reject(
@@ -194,8 +202,8 @@ export function bindOwnerRecord(
     (o) => o.key !== option && optionMentioned(entry.body, o),
   );
   reject(
-    explicitlyChosen(entry.body, chosen) && others.length === 0,
-    `所有者原话须明确写出所选选项（如“选 ${chosen.key}”），不带疑问或否定，且不提及其它选项`,
+    explicitlyChosen(entry.body, q.id, chosen) && others.length === 0,
+    `所有者原话须只写一句明确的选择（如“${q.id} 选 ${chosen.key}”），不带理由、反对、疑问或其它选项`,
   );
   const submitted = new Map<string | undefined, Point>(
     eventsOfType(events, "delivery_submitted").map((e) => [

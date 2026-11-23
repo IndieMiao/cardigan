@@ -1455,7 +1455,7 @@ test("C-617: PM Ops links the owner's comment to a PM-routed decision over MCP, 
     owner_record: { timeline_entry_id: vague.id },
   });
   expect(rejected.isError).toBe(true);
-  expect(JSON.stringify(rejected.content)).toContain("明确写出所选选项");
+  expect(JSON.stringify(rejected.content)).toContain("只写一句明确的选择");
   expect(rows()).toEqual(before);
   // PM Office still cannot record a PM-routed decision.
   const transcribed = await raw(office, "record_decision", {
