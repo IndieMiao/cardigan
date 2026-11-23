@@ -56,12 +56,21 @@ export type RetirementEvidence = {
   readonly exit_code?: number;
   readonly observation?: "alive" | "exited" | "unknown" | RuntimeErrorCode;
 };
+export type RetirementSignalEvidence = {
+  readonly pid: number;
+  readonly signals: readonly ("HUP" | "TERM")[];
+  readonly exit_code?: number;
+  readonly exit_reason?: string;
+};
 export type IdleRetirementResult =
   | {
       readonly outcome: "exited";
       /** System-turn stops only: the probed process and its group are gone,
        * checked by the kernel after the terminal finished. */
       readonly process_group_exited?: true;
+      /** Only with `report_signals`: the probed program PID and the signals
+       * this call actually sent before the terminal finished. */
+      readonly signalled?: RetirementSignalEvidence;
     }
   | {
       readonly outcome: "withdrawn" | "timeout" | "uncertain";

@@ -172,6 +172,8 @@ type Terminal = {
   foreground?: Parameters<typeof terminalSnapshot>[1];
   created_ms?: number;
   keep?: boolean;
+  exit_code?: number | null;
+  reason?: string | null;
 };
 const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
 const statusStates = new WeakMap<
@@ -1265,8 +1267,11 @@ export class HerdrRuntime implements Runtime {
       )
         return failure("withdrawn", "identity_changed");
       reason = "hc_failed";
+      const sent: ("HUP" | "TERM")[] = [];
+      let last: Terminal = first;
       const hasExited = (terminal: Terminal) => {
         check(terminal);
+        last = terminal;
         if (terminal.state === "finished") return true;
         if (
           terminal.state !== "live" ||
@@ -1294,7 +1299,26 @@ export class HerdrRuntime implements Runtime {
       const settled = async (): Promise<
         RuntimeResult<IdleRetirementResult>
       > => {
-        if (!options.system_finished_turn) return exited;
+        if (!options.system_finished_turn)
+          return options.report_signals && sent.length
+            ? {
+                ok: true,
+                value: {
+                  outcome: "exited",
+                  signalled: {
+                    pid: first.pid as number,
+                    signals: [...sent],
+                    ...(Number.isSafeInteger(last.exit_code)
+                      ? { exit_code: last.exit_code as number }
+                      : {}),
+                    ...(typeof last.reason === "string" &&
+                    /^[a-z_]{1,32}$/u.test(last.reason)
+                      ? { exit_reason: last.reason }
+                      : {}),
+                  },
+                },
+              }
+            : exited;
         try {
           const gone = await this.client.exec(
             exec("gone", JSON.stringify(identity)),
@@ -1356,6 +1380,7 @@ export class HerdrRuntime implements Runtime {
             ))
           )
             return failure(attempted ? "uncertain" : "withdrawn", refused);
+          sent.push(mode);
           if (await wait(budget)) return settled();
         }
         return failure("timeout", "still_live");
