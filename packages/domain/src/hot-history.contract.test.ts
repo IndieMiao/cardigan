@@ -9,7 +9,13 @@ import {
   run,
   value,
 } from "./commands/test-fixtures.js";
-import type { Card, Event, HumanAction, WorkItem } from "./entities.js";
+import type {
+  Card,
+  Event,
+  HumanAction,
+  JsonValue,
+  WorkItem,
+} from "./entities.js";
 import {
   COLD_CARD_OMITTED_EVENT_TYPES,
   cardClosed,
@@ -25,7 +31,7 @@ let serial = 0;
 const event = (
   type: string,
   card_id?: CardId,
-  payload: Record<string, unknown> = {},
+  payload: Record<string, JsonValue> = {},
 ): Event => ({
   id: value(parseEventId(String(++serial).padStart(26, "0"))),
   seq: serial,
@@ -75,13 +81,13 @@ function scenario(): CommandState {
     ...telemetry(c5),
     ...telemetry(c6),
   ];
-  const item6: WorkItem = {
+  const item6 = {
     ...(base.work_items[0] as WorkItem),
     id: id("work_item", 6),
     card_id: c6,
     status: "accepted",
     assignment_id: id("assignment", 6),
-  };
+  } as WorkItem;
   const action: HumanAction = {
     id: id("human_action", 1),
     key: id("human_action", 1),

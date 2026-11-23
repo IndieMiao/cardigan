@@ -29,7 +29,7 @@ export const COLD_CARD_OMITTED_EVENT_TYPES: ReadonlySet<string> = new Set([
   "bell_wake_deferred",
   "session_maintenance_changed",
   "machine_selected",
-  "github_check_dispatch",
+  // github_check_dispatch stays: a github_run_completed wait may name any card's run.
   "github_check_progress",
 ]);
 
@@ -90,7 +90,8 @@ export function hotCardIds(
     add(card.id);
     for (const before of card.depends_on_cards ?? []) add(before);
     add(card.parent_card_id);
-    if (card.source.kind === "decision") {
+    // Legacy rows may lack optional-looking fields; never fail closed here.
+    if (card.source?.kind === "decision") {
       const source = decisions.get(card.source.decision_id);
       add(source?.card_id);
       for (const id of source?.affected_cards ?? []) add(id);
@@ -118,8 +119,8 @@ export function hotCardIds(
   for (const q of state.decisions) {
     if (!OPEN_DECISION.has(q.status)) continue;
     add(q.card_id);
-    for (const id of q.affected_cards) add(id);
-    for (const id of q.affected_work_items) add(items.get(id));
+    for (const id of q.affected_cards ?? []) add(id);
+    for (const id of q.affected_work_items ?? []) add(items.get(id));
     if (q.ready_when && "card_id" in q.ready_when) add(q.ready_when.card_id);
   }
   for (const id of extra) add(id);
@@ -172,7 +173,7 @@ export function commandTargetCards(
   for (const r of state.reviews)
     index.set(r.id, () => [item(deliveries.get(r.delivery_id)?.work_item_id)]);
   for (const q of state.decisions)
-    index.set(q.id, () => [q.card_id, ...q.affected_cards]);
+    index.set(q.id, () => [q.card_id, ...(q.affected_cards ?? [])]);
   for (const h of state.human_actions) index.set(h.id, () => [h.card_id]);
   const assignments = new Map(state.assignments.map((a) => [a.id, a]));
   for (const run of state.runs)

@@ -24,6 +24,7 @@ import {
   runQueuePositions,
   stoppedByHuman,
 } from "@cardigan/domain";
+import { loadCommandState } from "@cardigan/mcp-server";
 import {
   type ReadRepositories,
   readRunLimit,
@@ -99,7 +100,11 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       cards: tx.cards.list(project.id),
       card_templates: tx.card_templates.list(project.id),
       deliveries: tx.deliveries.list(project.id),
-      events: tx.events.listStreams?.(project.id),
+      // C-639: in hot scope reuse the hot command history (same rule inputs).
+      events:
+        tx.command_state_scope === "hot" && tx.events.listStreams
+          ? loadCommandState(tx, project.id).events
+          : tx.events.listStreams?.(project.id),
     };
     key.push(
       lists.id,
@@ -136,7 +141,13 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
     const items = new Map(project.work_items.map((w) => [w.id, w] as const));
     const cards = new Map(project.cards.map((c) => [c.id, c] as const));
     const history = project.events
-      ? [...project.events.values()].flat()
+      ? Array.isArray(project.events)
+        ? (project.events as readonly Event[])
+        : [
+            ...(
+              project.events as ReadonlyMap<string, readonly Event[]>
+            ).values(),
+          ].flat()
       : [undefined, ...project.cards.map((c) => c.id)].flatMap((card) =>
           tx.events.listAfter(project.id, card, 0),
         );
@@ -218,7 +229,7 @@ function queueSnapshot(
 }
 
 const pendingActions = new WeakMap<
-  ReadonlyMap<string, readonly Event[]>,
+  object,
   WeakMap<readonly object[], readonly HostOpsExecution[]>
 >();
 
@@ -368,22 +379,29 @@ export function runCapacitySnapshot(
     // offers it; otherwise re-read each stream. Same streams, same order.
     // C-230: with the cache, also reuse the result while the stream map and
     // card list are the same immutable snapshots (see `queueCache`).
+    const hot =
+      tx.command_state_scope === "hot" && tx.events.listStreams
+        ? loadCommandState(tx, project.id).events
+        : undefined;
     const streams = tx.events.listStreams?.(project.id);
     const cards = tx.cards.list(project.id);
+    // Host actions and their finishes are never cold-omitted types (C-639).
     const collect = () =>
       pendingHostOpsActions(
-        [undefined, ...cards.map((card) => card.id)].flatMap((card) =>
-          streams
-            ? (streams.get(card ?? "") ?? [])
-            : tx.events.listAfter(project.id, card, 0),
-        ),
+        hot ??
+          [undefined, ...cards.map((card) => card.id)].flatMap((card) =>
+            streams
+              ? (streams.get(card ?? "") ?? [])
+              : tx.events.listAfter(project.id, card, 0),
+          ),
       );
     let actions: readonly HostOpsExecution[];
-    if (streams) {
-      let byCards = pendingActions.get(streams);
+    const cacheKey = hot ?? streams;
+    if (cacheKey) {
+      let byCards = pendingActions.get(cacheKey);
       if (!byCards) {
         byCards = new WeakMap();
-        pendingActions.set(streams, byCards);
+        pendingActions.set(cacheKey, byCards);
       }
       actions = byCards.get(cards) ?? collect();
       byCards.set(cards, actions);
