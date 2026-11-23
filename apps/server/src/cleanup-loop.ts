@@ -5,6 +5,7 @@ import type {
   CardId,
   Clock,
   ProjectId,
+  Run,
   Runtime,
   RuntimeRef,
 } from "@cardigan/domain";
@@ -284,9 +285,15 @@ export class CleanupExecutor {
     if (project === undefined) return;
     // A failed resume can leave no successor Run. Its build directory is
     // still evidence for the recovery handoff, not disposable idle output.
-    const idle = (id: string) =>
+    // C-664: one Run snapshot pre-filters a page; the removal itself re-reads
+    // fresh Runs under the repository lock, which is what decides.
+    let snapshot: readonly Run[] | undefined;
+    const idle = (id: string, fresh = true) =>
       this.options.store.uow.read((tx) => {
-        if (!buildCheckoutIdle(tx.runs.list(project_id), id)) return false;
+        if (fresh || snapshot === undefined)
+          snapshot = tx.runs.list(project_id);
+        const runs = snapshot;
+        if (!buildCheckoutIdle(runs, id)) return false;
         const a = tx.assignments.get(project_id, id as AssignmentId);
         if (a?.scope !== "work_item" || a.status === "released") return true;
         if (a.idle_retirement?.handoff) return false;
@@ -333,7 +340,7 @@ export class CleanupExecutor {
         // A released Assignment whose terminal release failed this round keeps
         // its build until the next round confirms the exit (§12.6).
         if (unconfirmed.has(assignment_id)) return;
-        if (!idle(assignment_id)) return;
+        if (!idle(assignment_id, false)) return;
         try {
           await remove({
             project,
