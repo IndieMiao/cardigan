@@ -920,7 +920,8 @@ test("C-599: a failed tools install after the claim is recorded, offers no tools
   expect(upgradeState(f.store, project, machine)).toMatchObject({
     state: "failed",
   });
-  expect(f.last()?.agent_tools).toBeUndefined();
+  // The check passes now, so the tools outcome names the unverified attempt.
+  expect(f.last()?.agent_tools).toEqual({ status: "held" });
   expect(f.stageUpgrade).not.toHaveBeenCalled();
   expect(open(f).map((a) => a.instructions)).toEqual([
     expect.stringContaining("helper 自动升级未获验证（install）"),
