@@ -48,6 +48,16 @@ test("C-615 other cards' attachments a body mentions resolve unless sensitive or
         download_path: `/api/projects/${encodeURIComponent(f.card.project_id)}/attachments/${file.id}`,
       }),
     ]);
+    // V-3068: a later comment ending inside an unclosed code block does not
+    // turn the earlier comment's number into code: bodies are parsed apart.
+    const fence = await f.call(f.projectPath(`/cards/${other.id}/comments`), {
+      method: "POST",
+      body: { body: "构建日志：\n```text\nBuild succeeded" },
+    });
+    expect(fence.status).toBe(200);
+    expect((await read()).referenced_attachments?.map((a) => a.id)).toEqual([
+      file.id,
+    ]);
     // The card's own list is unchanged: the other card's file is not attached here.
     expect(detail.attachments.map((a) => a.id)).not.toContain(file.id);
     // The owning card lists its own attachment, not as a cross-card reference.

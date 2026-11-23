@@ -1,4 +1,4 @@
-import { attachmentReferenceIds } from "@cardigan/domain";
+import { attachmentReferenceIdsIn } from "@cardigan/domain";
 import { useEffect, useMemo, useState } from "react";
 import type { CardiganClient, ReferencedAttachment } from "./api.js";
 
@@ -20,10 +20,11 @@ export function useAttachmentRefs(
   known: ReadonlySet<string>,
   version: unknown,
 ): readonly ReferencedAttachment[] {
-  const text = texts.join("\n");
+  // Each body on its own (V-3068): an open code block in one comment must
+  // not hide the numbers of the next. Callers memoise `texts`.
   const missing = useMemo(
-    () => attachmentReferenceIds(text).filter((id) => !known.has(id)),
-    [text, known],
+    () => attachmentReferenceIdsIn(texts).filter((id) => !known.has(id)),
+    [texts, known],
   );
   const key = `${projectId}\n${cardId}\n${missing.join(",")}`;
   const [answer, setAnswer] = useState<{

@@ -65,6 +65,15 @@ export function attachmentReferenceIds(text: string): string[] {
   ];
 }
 
+/**
+ * The numbers several separate bodies name, once each. Every body is its own
+ * Markdown document: an unclosed fence in one comment must not turn the next
+ * comment's references into code, so bodies are never joined before parsing.
+ */
+export function attachmentReferenceIdsIn(bodies: readonly string[]): string[] {
+  return [...new Set(bodies.flatMap(attachmentReferenceIds))];
+}
+
 /** Replace references; `undefined` keeps the original text. */
 export function replaceAttachmentRefs(
   text: string,

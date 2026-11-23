@@ -137,6 +137,30 @@ test("an image chip opens the preview", async () => {
   ).toBe(shot.download_path);
 });
 
+test("an image chip previews the C-614 preview image and falls back to the local copy", async () => {
+  const preview = "/api/projects/p-1/attachments/attachment-5/preview";
+  const entry = timelineEntry({ id: "C-1#2", body: "看 attachment-5" });
+  const withPreview = { ...shot, preview_path: preview };
+  render(
+    <Timeline
+      projectId="p-1"
+      cardId="C-1"
+      entries={[entry]}
+      attachments={[withPreview]}
+      detail={cardDetail({ timeline: [entry], attachments: [withPreview] })}
+    />,
+  );
+  fireEvent.click(screen.getByRole("link", { name: /shot\.png/u }));
+  const image = within(await screen.findByRole("dialog")).getByRole("img", {
+    name: "附件 shot.png",
+  });
+  expect(image.getAttribute("src")).toBe(preview);
+  fireEvent.error(image);
+  await waitFor(() =>
+    expect(image.getAttribute("src")).toBe(`${preview}?local=1`),
+  );
+});
+
 test("a PDF chip opens a local copy in a new tab", async () => {
   const tab = { opener: {} as unknown, location: { href: "" }, close: vi.fn() };
   const open = vi.spyOn(window, "open").mockReturnValue(tab as never);

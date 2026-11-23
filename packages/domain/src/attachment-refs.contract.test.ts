@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   attachmentReferenceIds,
+  attachmentReferenceIdsIn,
   attachmentRefMatches,
   markdownLiteralRanges,
   replaceAttachmentRefs,
@@ -101,4 +102,13 @@ test("C-615 attachment-new-N is the author's N-th upload to that entry, by numbe
   expect(resolvePendingAttachmentRefs("attachment-new-1", entry, [])).toBe(
     "attachment-new-1",
   );
+});
+
+test("C-615 separate bodies are parsed apart: one body's open fence does not hide another's numbers", () => {
+  const bodies = ["构建日志：\n```text\nBuild attachment-1", "见 attachment-2"];
+  expect(attachmentReferenceIds(bodies.join("\n"))).toEqual([]);
+  expect(attachmentReferenceIdsIn(bodies)).toEqual(["attachment-2"]);
+  expect(
+    attachmentReferenceIdsIn(["attachment-3", "再看 attachment-3"]),
+  ).toEqual(["attachment-3"]);
 });

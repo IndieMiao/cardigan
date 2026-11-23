@@ -46,8 +46,12 @@ export function AttachmentRefBody({
         chips.map((c) => {
           const label =
             c.querySelector(".ui-attachment-ref-name")?.textContent ?? "";
+          // C-614: the preview image (maybe off-site), with the local copy
+          // as the fallback, like the attachment grid.
+          const preview = c.dataset.preview;
           return {
-            src: c.getAttribute("href") ?? "",
+            src: preview ?? c.getAttribute("href") ?? "",
+            ...(preview ? { fallbackSrc: `${preview}?local=1` } : {}),
             alt: `附件 ${label}`,
             caption: (
               <>

@@ -36,10 +36,13 @@ export function readAttachmentRefs(
   return store.uow.read((tx) => {
     if (!tx.cards.get(project_id, card_id)) return undefined;
     if (!ids.length) return { attachments: [] };
-    const text = ids.join("\n");
-    const state = withReferences(store, emptyState(tx, project_id), text);
+    const state = withReferences(
+      store,
+      emptyState(tx, project_id),
+      ids.join("\n"),
+    );
     return {
-      attachments: referencedAttachmentViews(state, card_id, text),
+      attachments: referencedAttachmentViews(state, card_id, ids),
     };
   });
 }

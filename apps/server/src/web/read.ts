@@ -19,7 +19,7 @@ import type {
   WorkItem,
 } from "@cardigan/domain";
 import {
-  attachmentReferenceIds,
+  attachmentReferenceIdsIn,
   authorView,
   autoMergeSchedule,
   builtinCardTemplates,
@@ -718,10 +718,12 @@ export function decisionAttachmentViews(
 export function referencedAttachmentViews(
   state: CommandState,
   card_id: CardId,
-  text: string,
+  bodies: readonly string[],
   attachmentEntryCards?: ReadonlyMap<string, CardId>,
 ): (AttachmentView & { readonly card_id: string })[] {
-  const ids = attachmentReferenceIds(text);
+  // Each body is parsed on its own (V-3068): one comment's open code block
+  // must not hide the numbers of the next.
+  const ids = attachmentReferenceIdsIn(bodies);
   if (!ids.length || projectPreferences(state).cross_card_read === false)
     return [];
   const entryCard = new Map([
@@ -1254,7 +1256,13 @@ export function cardDetail(
     referenced_attachments: referencedAttachmentViews(
       state,
       card_id,
-      [description, ...timeline.map((e) => e.body)].join("\n"),
+      [
+        card.title,
+        card.goal,
+        ...card.acceptance_criteria,
+        ...card.out_of_scope,
+        ...timeline.map((e) => e.body),
+      ],
       options.attachmentEntryCards,
     ),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.

@@ -115,6 +115,8 @@ export interface AttachmentRefTarget {
   readonly kind: AttachmentRefKind;
   readonly href?: string;
   readonly thumbnail?: string;
+  /** C-614: lightbox image of a bitmap (may be an off-site copy). */
+  readonly preview?: string;
   /** Another card's attachment. */
   readonly cardId?: string;
 }
@@ -135,6 +137,7 @@ export function attachmentTarget(
     ...(attachment.thumbnail_path
       ? { thumbnail: attachment.thumbnail_path }
       : {}),
+    ...(attachment.preview_path ? { preview: attachment.preview_path } : {}),
     ...(attachment.card_id && attachment.card_id !== cardId
       ? { cardId: attachment.card_id }
       : {}),

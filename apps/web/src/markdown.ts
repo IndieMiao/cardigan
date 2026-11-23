@@ -245,7 +245,11 @@ export function attachmentChip(target: AttachmentRefTarget): string {
     target.kind === "image" && target.thumbnail?.startsWith("/")
       ? `<span class="ui-attachment-ref-peek" aria-hidden="true"><img src="${esc(target.thumbnail)}" alt="" loading="lazy"></span>`
       : "";
-  return `<a class="ui-attachment-ref" href="${esc(href)}" data-attachment-ref="${esc(target.id)}" data-kind="${target.kind}" data-mime="${esc(target.mime)}" title="${title}"${open}>${icon}${name}${peek}</a>`;
+  const preview =
+    target.kind === "image" && target.preview?.startsWith("/")
+      ? ` data-preview="${esc(target.preview)}"`
+      : "";
+  return `<a class="ui-attachment-ref" href="${esc(href)}" data-attachment-ref="${esc(target.id)}" data-kind="${target.kind}" data-mime="${esc(target.mime)}"${preview} title="${title}"${open}>${icon}${name}${peek}</a>`;
 }
 
 markdown.renderer.rules.attachment_ref = (tokens, index) => {

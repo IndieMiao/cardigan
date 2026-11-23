@@ -168,3 +168,46 @@ test("an older page's other-card attachment is a chip after paging and after a r
     "attachment-77",
   );
 });
+
+test("a newer comment ending in an open code block leaves an older comment's chip alone", async () => {
+  const entries = [
+    timelineEntry({
+      id: "C-1#2",
+      event_seq: 2,
+      body: "构建日志：\n```text\nBuild succeeded",
+    }),
+    timelineEntry({
+      id: "C-1#1",
+      event_seq: 1,
+      body: "数值沿用 attachment-77",
+    }),
+  ];
+  const attachmentRefs = vi.fn(
+    async (_p: string, _c: string, ids: readonly string[]) => ({
+      attachments: [foreign].filter((a) => ids.includes(a.id)),
+    }),
+  );
+  const client = fakeClient({
+    card: async () =>
+      cardDetail({
+        timeline: entries,
+        attachments: [],
+        referenced_attachments: [],
+        timeline_next_cursor: null,
+        counts: { ...cardDetail().counts, timeline: entries.length },
+      }),
+    attachmentRefs,
+  });
+  render(<CardDetailPage client={client} projectId="p-1" cardId="C-1" />);
+  await selectCardTab(/^时间线/);
+  await waitFor(() =>
+    expect(attachmentRefs).toHaveBeenCalledWith("p-1", "C-1", [foreign.id]),
+  );
+  await waitFor(() =>
+    expect(
+      document.querySelector(
+        '[id="entry-C-1#1"] a[data-attachment-ref="attachment-77"]',
+      ),
+    ).toBeTruthy(),
+  );
+});
