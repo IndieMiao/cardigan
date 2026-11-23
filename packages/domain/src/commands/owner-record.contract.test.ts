@@ -212,7 +212,7 @@ describe("owner record linking", () => {
         e.card_id === id("card", 2),
     );
     expect(request).toBeDefined();
-    const entry = f.comment("并入本卡", {
+    const entry = f.comment("选择：并入本卡", {
       card: 2,
       reply_to: request?.id as TimelineEntry["id"],
     });
@@ -225,7 +225,7 @@ describe("owner record linking", () => {
   test("keeps an owner-uploaded attachment on the quoted entry", () => {
     const f = setup();
     const q = f.request();
-    const entry = f.comment(`${q.id}：split，见标注图`);
+    const entry = f.comment(`${q.id}：选 split，见标注图`);
     const file = (n: number, extra: Partial<Attachment> = {}): Attachment =>
       ({
         id: `att-${n}`,
@@ -293,6 +293,32 @@ describe("owner record linking", () => {
     expect(f.state.decisions.find((d) => d.id === q.id)?.status).toBe("open");
   });
 
+  test.each([
+    ["bare mention", "Q split"],
+    ["negation", "Q 不选 split"],
+    ["question", "Q 选 split？"],
+    ["question word", "Q 选 split 吗"],
+    ["hedge", "Q 选 split 还是再想想"],
+    ["english negation", "Q don't choose split"],
+  ])("rejects an unclear answer: %s", (_name, body) => {
+    const f = setup();
+    const q = f.request();
+    const entry = f.comment(body.replace("Q", q.id));
+    expect(
+      error(f.link(q.id, { timeline_entry_id: entry.id }))?.message,
+    ).toContain("明确写出所选选项");
+  });
+
+  test("a reply in the answer's thread overtakes it even without citing the decision", () => {
+    const f = setup();
+    const q = f.request();
+    const entry = f.comment(`${q.id} 选 split`);
+    const reply = f.comment("算了，再等等", { reply_to: entry.id });
+    expect(
+      error(f.link(q.id, { timeline_entry_id: entry.id }))?.message,
+    ).toContain(reply.id);
+  });
+
   test("rejects answers given before the question, superseded, or overtaken", () => {
     const f = setup();
     const q = f.request();
@@ -305,7 +331,7 @@ describe("owner record linking", () => {
       author: "human",
       refs: [{ kind: "decision", id: q.id }],
       retracted: false,
-      body: `${q.id} split`,
+      body: `${q.id} 选 split`,
       mentions: [],
       created_at: now,
     };
@@ -313,12 +339,12 @@ describe("owner record linking", () => {
     expect(
       error(f.link(q.id, { timeline_entry_id: early.id }))?.message,
     ).toContain("提出之后");
-    const first = f.comment(`${q.id} split`);
-    const edited = f.comment(`${q.id} merge_in`, { supersedes: first.id });
+    const first = f.comment(`${q.id} 选 split`);
+    const edited = f.comment(`${q.id} 选 merge_in`, { supersedes: first.id });
     expect(
       error(f.link(q.id, { timeline_entry_id: first.id }))?.message,
     ).toContain("已撤回或已被改写");
-    const later = f.comment(`${q.id} 还是 split`);
+    const later = f.comment(`${q.id} 改选 split`);
     expect(
       error(f.link(q.id, { timeline_entry_id: edited.id }, "merge_in"))
         ?.message,
@@ -338,7 +364,7 @@ describe("owner record linking", () => {
       author: "human",
       refs: [{ kind: "decision", id: q.id }],
       retracted: false,
-      body: `${q.id} split`,
+      body: `${q.id} 选 split`,
       mentions: [],
       created_at: now,
     };
@@ -364,55 +390,58 @@ describe("owner record linking", () => {
     ).toContain("受影响的卡片");
   });
 
-  test("rejects a record when the deliveries changed after the answer", () => {
-    const f = setup();
-    const q = f.request("general", {
-      affected_work_items: [id("work_item", 1)],
-    });
-    const entry = f.comment(`${q.id} split`);
-    const delivery: Delivery = {
-      id: id("delivery", 1),
-      work_item_id: id("work_item", 1),
-      run_id: id("run", 1),
-      kind: "code",
-      summary: "新版本",
-      subject,
-      evidence: [],
-      attachments: [],
-      known_gaps: [],
-      requested_verifiers: [],
-      status: "submitted",
-    } as Delivery;
-    const seq = Math.max(
-      ...f.state.events
-        .filter((e) => e.card_id === id("card", 1))
-        .map((e) => e.seq),
-    );
-    f.state = {
-      ...f.state,
-      deliveries: [delivery],
-      events: [
-        ...f.state.events,
-        {
-          id: "E-delivery" as never,
-          card_id: id("card", 1),
-          seq: seq + 1,
-          type: "delivery_submitted",
-          actor: actor(),
-          payload: { delivery_id: delivery.id, superseded: [] },
-          created_at: now,
-        },
-      ],
-    };
-    expect(
-      error(f.link(q.id, { timeline_entry_id: entry.id }))?.message,
-    ).toContain("交付有变化");
-  });
+  test.each([true, false])(
+    "rejects a record when the deliveries changed after the answer (work item listed: %s)",
+    (listed) => {
+      const f = setup();
+      const q = f.request("general", {
+        affected_work_items: listed ? [id("work_item", 1)] : [],
+      });
+      const entry = f.comment(`${q.id} 选 split`);
+      const delivery: Delivery = {
+        id: id("delivery", 1),
+        work_item_id: id("work_item", 1),
+        run_id: id("run", 1),
+        kind: "code",
+        summary: "新版本",
+        subject,
+        evidence: [],
+        attachments: [],
+        known_gaps: [],
+        requested_verifiers: [],
+        status: "submitted",
+      } as Delivery;
+      const seq = Math.max(
+        ...f.state.events
+          .filter((e) => e.card_id === id("card", 1))
+          .map((e) => e.seq),
+      );
+      f.state = {
+        ...f.state,
+        deliveries: [delivery],
+        events: [
+          ...f.state.events,
+          {
+            id: "E-delivery" as never,
+            card_id: id("card", 1),
+            seq: seq + 1,
+            type: "delivery_submitted",
+            actor: actor(),
+            payload: { delivery_id: delivery.id, superseded: [] },
+            created_at: now,
+          },
+        ],
+      };
+      expect(
+        error(f.link(q.id, { timeline_entry_id: entry.id }))?.message,
+      ).toContain("交付有变化");
+    },
+  );
 
   test("never adds authority: human-only, undelegated and routing rules stay", () => {
     const f = setup();
     const spending = f.request("spending");
-    const quote = f.comment(`${spending.id} split`);
+    const quote = f.comment(`${spending.id} 选 split`);
     const spendingResult = f.link(spending.id, { timeline_entry_id: quote.id });
     expect(spending.decider).toBe("role:pm");
     expect(error(spendingResult)?.message).toContain(
@@ -423,7 +452,7 @@ describe("owner record linking", () => {
     ).not.toBe("resolved");
 
     const q = f.request();
-    const entry = f.comment(`${q.id} split`);
+    const entry = f.comment(`${q.id} 选 split`);
     const humanOnly = {
       ...(f.state.decisions.find(
         (d) => d.id === q.id,

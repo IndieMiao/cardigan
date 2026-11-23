@@ -30,17 +30,38 @@ function stale(condition: unknown, message: string): asserts condition {
   ensure(condition, "stale_target", `${message}；${FALLBACK}`);
 }
 
-/** Whole-token match for ASCII keys, literal match for other text. */
-function mentions(body: string, needle: string): boolean {
+const escapeRegExp = (value: string) =>
+  value.replace(/[-\\^$.*+?()[\]{}|]/gu, "\\$&");
+/** Whole-token pattern for ASCII keys, literal pattern for other text. */
+function pattern(needle: string): string | undefined {
   const value = needle.trim();
-  if (!value) return false;
-  if (!/^[\w-]+$/u.test(value)) return body.includes(value);
-  const escaped = value.replace(/[-\\^$.*+?()[\]{}|]/gu, "\\$&");
-  return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`, "iu").test(body);
+  if (!value) return undefined;
+  return /^[\w-]+$/u.test(value)
+    ? `(?<![\\w-])${escapeRegExp(value)}(?![\\w-])`
+    : escapeRegExp(value);
 }
-
+const optionPatterns = (o: Decision["options"][number]) =>
+  [pattern(o.key), pattern(o.description)].filter(
+    (p): p is string => p !== undefined,
+  );
 const optionMentioned = (body: string, o: Decision["options"][number]) =>
-  mentions(body, o.key) || mentions(body, o.description);
+  optionPatterns(o).some((p) => new RegExp(p, "iu").test(body));
+/**
+ * An explicit selection word right before the option ("选 split"、"选择：并入本卡"、
+ * "choose split"). Bare mentions, questions and negations are ambiguous.
+ */
+const SELECT = "(?:选择|选定|选|定为|choose|pick|option)";
+const NEGATION = "(?:不|别|没|未|勿|非|don'?t|not|no)";
+const QUESTION = /[?？]|吗|么|是否|还是|或者|再想想|再说/iu;
+function explicitlyChosen(body: string, o: Decision["options"][number]) {
+  if (QUESTION.test(body)) return false;
+  const chosen = optionPatterns(o).map(
+    (p) =>
+      new RegExp(`(${NEGATION}\\s*)?${SELECT}\\s*[:：]?\\s*["“「]?${p}`, "giu"),
+  );
+  const hits = chosen.flatMap((r) => [...body.matchAll(r)]);
+  return hits.length > 0 && hits.every((m) => m[1] === undefined);
+}
 
 function boundTo(entry: TimelineEntry, q: Decision, requests: Set<string>) {
   return (
@@ -62,6 +83,9 @@ const pointOf = (e: TimelineEntry): Point => ({
 });
 const isAfter = (a: Point, b: Point) =>
   a.card_id === b.card_id ? a.seq > b.seq : a.at > b.at;
+/** Staleness side: an equal time on another card cannot be ordered, so it counts. */
+const notBefore = (a: Point, b: Point) =>
+  a.card_id === b.card_id ? a.seq > b.seq : a.at >= b.at;
 
 const ownerEntry = (entry: TimelineEntry) =>
   entry.type === "comment" &&
@@ -118,6 +142,11 @@ export function bindOwnerRecord(
     asked !== undefined && isAfter(here, asked) && boundTo(entry, q, requests),
     `所有者原话须在 ${q.id} 提出之后，并引用 ${q.id} 或回复这条拍板`,
   );
+  // Replies in the quoted answer's thread may retract it without citing the decision.
+  const thread = new Set<string>([entry.id]);
+  for (const e of [...timeline].sort((a, b) => a.event_seq - b.event_seq))
+    if (e.reply_to && thread.has(e.reply_to) && e.card_id === entry.card_id)
+      thread.add(e.id);
   const later = timeline.filter(
     (e) =>
       e.id !== entry.id &&
@@ -125,8 +154,8 @@ export function bindOwnerRecord(
       ownerEntry(e) &&
       !e.retracted &&
       !timeline.some((x) => x.supersedes === e.id) &&
-      boundTo(e, q, requests) &&
-      isAfter(pointOf(e), here),
+      (boundTo(e, q, requests) || thread.has(e.id)) &&
+      notBefore(pointOf(e), here),
   );
   reject(
     later.length === 0,
@@ -138,8 +167,8 @@ export function bindOwnerRecord(
     (o) => o.key !== option && optionMentioned(entry.body, o),
   );
   reject(
-    optionMentioned(entry.body, chosen) && others.length === 0,
-    `所有者原话须明确写出所选选项（${chosen.key}），且不提及其它选项`,
+    explicitlyChosen(entry.body, chosen) && others.length === 0,
+    `所有者原话须明确写出所选选项（如“选 ${chosen.key}”），不带疑问或否定，且不提及其它选项`,
   );
   const submitted = new Map<string | undefined, Point>(
     eventsOfType(events, "delivery_submitted").map((e) => [
@@ -149,7 +178,7 @@ export function bindOwnerRecord(
   );
   const submittedAfter = (id: string) => {
     const at = submitted.get(id);
-    return !at || isAfter(at, here);
+    return !at || notBefore(at, here);
   };
   if (q.kind === "approve") {
     const goal = q.target;
@@ -158,15 +187,27 @@ export function bindOwnerRecord(
         ? d.list("deliveries").find((v) => v.id === goal.delivery_id)
         : undefined;
     stale(
-      target && target.status !== "superseded" && !submittedAfter(target.id),
+      target &&
+        (target.status === "submitted" || target.status === "accepted") &&
+        !submittedAfter(target.id),
       "所有者原话须针对当前适用的交付版本",
     );
   }
+  // Any product delivery on the decision's cards after the answer changes what it applies to.
+  const items = new Set<string>([
+    ...q.affected_work_items,
+    ...d
+      .list("work_items")
+      .filter((w) => cards.has(w.card_id))
+      .map((w) => w.id),
+  ]);
   const changed = d
     .list("deliveries")
     .filter(
       (v) =>
-        q.affected_work_items.includes(v.work_item_id) && submittedAfter(v.id),
+        items.has(v.work_item_id) &&
+        v.kind !== "card_completion" &&
+        submittedAfter(v.id),
     );
   stale(
     changed.length === 0,
