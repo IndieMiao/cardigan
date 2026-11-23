@@ -1,8 +1,10 @@
-import { type ReactElement, type ReactNode, useEffect } from "react";
+import { type ReactElement, type ReactNode, useEffect, useState } from "react";
 import * as Dialog from "./ui/dialog.js";
 
 export interface LightboxImage {
   readonly src: string;
+  /** Loaded instead when `src` fails, e.g. the local copy of an OSS image. */
+  readonly fallbackSrc?: string;
   readonly alt: string;
   readonly caption?: ReactNode;
 }
@@ -26,6 +28,12 @@ export function Lightbox({
   trigger,
 }: LightboxProps) {
   const current = images[index];
+  const [failed, setFailed] = useState<ReadonlySet<string>>(new Set());
+  const source =
+    current &&
+    (failed.has(current.src) && current.fallbackSrc
+      ? current.fallbackSrc
+      : current.src);
   /**
    * §9 U6a: a preview dims the whole viewport, so the page records it and the
    * drawer drops its own mask instead of stacking two of them.
@@ -73,8 +81,11 @@ export function Lightbox({
             {current && (
               <img
                 className="lightbox-image"
-                src={current.src}
+                src={source}
                 alt={current.alt}
+                onError={() =>
+                  setFailed((previous) => new Set(previous).add(current.src))
+                }
               />
             )}
             {images.length > 1 && (

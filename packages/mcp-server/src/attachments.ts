@@ -9,6 +9,7 @@ import {
   resolveAttachmentLimits,
 } from "./attachment-limits.js";
 import { ToolError } from "./errors.js";
+import { offsiteFor } from "./offsite/offsite.js";
 
 /** Resolved once per process from the host environment (C-616); invalid values fail at startup. */
 export const ATTACHMENT_LIMITS = resolveAttachmentLimits(process.env);
@@ -108,7 +109,7 @@ export function fileAttachmentStore(
       throw ToolError.validation("Invalid attachment sha256");
     return join(directory, digest);
   };
-  const get = async (digest: string) => {
+  const local = async (digest: string) => {
     const target = path(digest);
     try {
       // Never follow a blob symlink or block while opening a special file.
@@ -154,48 +155,75 @@ export function fileAttachmentStore(
       throw ToolError.validation("Stored attachment could not be read");
     }
   };
-  return {
-    get,
-    async put(digest, content) {
-      const target = path(digest);
-      // New blobs follow the current host limit; only reads keep the ceiling.
-      if (content.byteLength > maxBytes)
-        throw ToolError.validation(attachmentTooLargeMessage(maxBytes));
-      if (sha256(content) !== digest)
-        throw ToolError.validation("Invalid attachment content");
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-      const temporary = join(directory, `.${randomUUID()}.tmp`);
-      try {
-        await writeFile(temporary, content, { flag: "wx", mode: 0o600 });
-        // Publish a complete file atomically without overwriting another upload.
-        // Two retries cover a blob the attachment sweep removes in between.
-        for (let attempt = 0; ; attempt++) {
+  /**
+   * C-614: local first. A blob missing here is fetched from the verified
+   * off-site copy, checked against its digest and cached locally; an absent
+   * or failing OSS leaves the result exactly as before (missing).
+   */
+  const get = async (digest: string) => {
+    const found = await local(digest);
+    if (found !== undefined) return found;
+    // C-616: a restore is a read of an accepted blob, so it is bounded by the
+    // stored ceiling rather than the current upload limit.
+    const remote = await offsiteFor(dataDir)?.fetchAttachment(
+      digest,
+      MAX_STORED_ATTACHMENT_BYTES,
+    );
+    if (remote === undefined || sha256(remote) !== digest) return undefined;
+    // A full disk costs only the cache; the verified bytes are still served.
+    await publish(digest, remote, MAX_STORED_ATTACHMENT_BYTES).catch(
+      () => undefined,
+    );
+    return remote;
+  };
+  /** Writes a verified blob of at most `limit` bytes; see `put`. */
+  async function publish(
+    digest: string,
+    content: Uint8Array,
+    limit: number,
+  ): Promise<{ storage_path: string }> {
+    const target = path(digest);
+    if (content.byteLength > limit)
+      throw ToolError.validation(attachmentTooLargeMessage(limit));
+    if (sha256(content) !== digest)
+      throw ToolError.validation("Invalid attachment content");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const temporary = join(directory, `.${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporary, content, { flag: "wx", mode: 0o600 });
+      // Publish a complete file atomically without overwriting another upload.
+      // Two retries cover a blob the attachment sweep removes in between.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await link(temporary, target);
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          if (!(await local(digest))) throw new Error("Attachment disappeared");
+          // Reusing an existing blob refreshes its modification time, so the
+          // sweep's 24 hour grace period covers the record this upload is
+          // about to write (§9.3). Without it an old rejected blob could be
+          // deleted right after being reused.
           try {
-            await link(temporary, target);
+            const now = new Date();
+            await utimes(target, now, now);
             break;
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-            if (!(await get(digest))) throw new Error("Attachment disappeared");
-            // Reusing an existing blob refreshes its modification time, so the
-            // sweep's 24 hour grace period covers the record this upload is
-            // about to write (§9.3). Without it an old rejected blob could be
-            // deleted right after being reused.
-            try {
-              const now = new Date();
-              await utimes(target, now, now);
-              break;
-            } catch (touched) {
-              if ((touched as NodeJS.ErrnoException).code !== "ENOENT")
-                throw touched;
-              if (attempt >= 1) throw new Error("Attachment disappeared");
-              // The blob vanished between the check and the touch: publish again.
-            }
+          } catch (touched) {
+            if ((touched as NodeJS.ErrnoException).code !== "ENOENT")
+              throw touched;
+            if (attempt >= 1) throw new Error("Attachment disappeared");
+            // The blob vanished between the check and the touch: publish again.
           }
         }
-      } finally {
-        await rm(temporary, { force: true });
       }
-      return { storage_path: `attachments/${digest}` };
-    },
+    } finally {
+      await rm(temporary, { force: true });
+    }
+    return { storage_path: `attachments/${digest}` };
+  }
+  return {
+    get,
+    // New blobs follow the current host limit; only reads keep the ceiling.
+    put: (digest, content) => publish(digest, content, maxBytes),
   };
 }

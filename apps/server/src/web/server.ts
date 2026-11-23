@@ -32,7 +32,7 @@ import type {
   MergeGateConfiguration,
   ReadResourceLimits,
 } from "@cardigan/host";
-import { MAX_ATTACHMENT_BYTES } from "@cardigan/mcp-server";
+import { MAX_ATTACHMENT_BYTES, offsiteFor } from "@cardigan/mcp-server";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import {
   feishuStatus,
@@ -46,7 +46,7 @@ import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { mergeProjectSettings } from "../merge-push-loop.js";
 import { readActivity } from "./activity-state.js";
-import { serveAttachment } from "./attachments.js";
+import { serveAttachment, serveAttachmentPreview } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
 import { cardSectionPayload } from "./card-sections.js";
 import {
@@ -387,7 +387,7 @@ export async function startWebServer(
     res: ServerResponse,
     recordTiming: RequestContext["recordTiming"],
   ): Promise<void> {
-    applySecurityHeaders(res);
+    applySecurityHeaders(res, offsiteFor(dataDir)?.imageOrigin());
     // Parsing against a fixed base keeps the URL independent of the Host header;
     // requireHost decides separately whether that header may be trusted.
     const url = new URL(req.url ?? "/", "http://workbench.invalid");
@@ -584,6 +584,13 @@ async function handleApi(context: RequestContext): Promise<void> {
       context.dataDir,
       path.slice("/api/avatars/".length),
     );
+  }
+
+  // C-614: off-site copy health for the control host; counts only, no secrets.
+  if (path === "/api/offsite") {
+    if (req.method !== "GET") methodNotAllowed(["GET"]);
+    sendJson(res, 200, offsiteFor(context.dataDir)?.status() ?? null);
+    return;
   }
 
   if (path === "/api/me") {
@@ -870,6 +877,22 @@ async function serveProjectRoute(
       store,
       project_id,
       attachment_id: decodeURIComponent(thumbnail[1] ?? ""),
+      req,
+      res,
+      dataDir: context.dataDir,
+    });
+    if (!served) {
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    }
+    return;
+  }
+
+  const preview = /^\/attachments\/([^/]+)\/preview$/.exec(rest);
+  if (preview !== null) {
+    const served = await serveAttachmentPreview({
+      store,
+      project_id,
+      attachment_id: decodeURIComponent(preview[1] ?? ""),
       req,
       res,
       dataDir: context.dataDir,
