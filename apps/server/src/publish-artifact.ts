@@ -142,29 +142,6 @@ export const ossApi =
       stdout.replace(/\n[0-9]+(?:\.[0-9]+)?\(s\) elapsed\s*$/u, ""),
     );
 
-const untruncated = (listed: { IsTruncated?: unknown }) =>
-  [false, "false"].includes(listed.IsTruncated as never);
-const emptyListing = (listed: Record<string, unknown>) =>
-  [0, "0"].includes(listed.KeyCount as never) &&
-  !listed.Contents &&
-  untruncated(listed);
-/** ossutil renders a single listed object as an object, several as an array. */
-function resumable(listed: Record<string, unknown>, key: string, size: number) {
-  const contents = Array.isArray(listed.Contents)
-    ? listed.Contents
-    : listed.Contents
-      ? [listed.Contents]
-      : [];
-  const only = contents[0] as { Key?: unknown; Size?: unknown } | undefined;
-  return (
-    [1, "1"].includes(listed.KeyCount as never) &&
-    untruncated(listed) &&
-    contents.length === 1 &&
-    only?.Key === key &&
-    String(only.Size) === String(size)
-  );
-}
-
 export const run: Execute = async (
   tool: string,
   args: string[],
@@ -352,16 +329,18 @@ export function apkPublisher(
           "--prefix",
           prefix,
           "--max-keys",
-          "2",
+          "1",
           "--output-format",
           "json",
         ),
       );
-      const resume = resumable(listed, prefix + filename, a.size);
-      if (!resume && !emptyListing(listed)) throw Error();
-      // A lone same-size APK is resumed only against this card's own earlier claim of this
-      // URL and digest; its bytes are then proven by the public SHA-256 read-back below.
-      claim(url, resume);
+      if (
+        ![0, "0"].includes(listed.KeyCount) ||
+        listed.Contents ||
+        ![false, "false"].includes(listed.IsTruncated)
+      )
+        throw Error();
+      claim(url);
       // APK is the first conditional write for every contender. A partial directory is sealed, never repaired by overwrite.
       const put = async (name: string) => {
         current();
@@ -381,8 +360,7 @@ export function apkPublisher(
               : "text/plain",
         );
       };
-      if (resume) stage = "download";
-      else await put(filename);
+      await put(filename);
       await readBack(get, delays, url, a.size, a.sha256);
       await readBack(get, delays, url, 1, a.sha256, { total: a.size, first });
       for (const [name, body] of [

@@ -29,8 +29,7 @@ export interface PublicationOptions {
     project: string,
     a: Attachment,
     request: PublishInput,
-    /** `resume`: the prefix holds only this APK; skip its upload and only read back. */
-    claim: (url: string, resume?: boolean) => void,
+    claim: (url: string) => void,
     current: () => void,
   ) => Promise<{ url: string; size: number; sha256: string }>;
 }
@@ -42,7 +41,6 @@ export class PublicationError extends Error {
       | "scope"
       | "approval"
       | "already_claimed"
-      | "retry_exhausted"
       | "configuration"
       | "artifact"
       | "signature"
@@ -55,37 +53,6 @@ export class PublicationError extends Error {
     super(category);
   }
 }
-/** Host stages that fail before the first OSS write; the approval is not claimed by them. */
-const BEFORE_WRITE = new Set<string>([
-  "configuration",
-  "artifact",
-  "signature",
-  "manifest",
-  "immutable_prefix",
-  "host_error",
-]);
-/** One original attempt plus one retry after fixing a failure that wrote nothing. */
-export const PUBLICATION_ATTEMPTS = 2;
-function attempts(
-  tx: McpReadContext,
-  p: string,
-  card: CardId,
-  decision: string,
-) {
-  let claimed = false,
-    failed = 0;
-  for (const e of tx.events.listAfter(p, card, 0)) {
-    const payload = e.payload as { decision_id?: string; result?: string };
-    if (payload?.decision_id !== decision) continue;
-    if (e.type === "artifact_publication_claimed") claimed = true;
-    if (
-      e.type === "artifact_publication_failed" &&
-      BEFORE_WRITE.has(payload.result ?? "")
-    )
-      failed++;
-  }
-  return { claimed, failed };
-}
 function audit(
   tx: TransactionContext,
   ctx: ToolContext,
@@ -93,7 +60,6 @@ function audit(
   request: PublishInput,
   phase: "claimed" | "failed" | "verified",
   result: string,
-  note = "",
 ) {
   const actor = ctx.identity.actor,
     p = actor.project_id,
@@ -116,7 +82,7 @@ function audit(
     event_seq: seq,
     type: "system",
     author: "system",
-    body: `测试包外发 ${phase} · ${request.attachment_id} · ${request.decision_id} · ${result}${note}`,
+    body: `测试包外发 ${phase} · ${request.attachment_id} · ${request.decision_id} · ${result}`,
     refs: [],
     mentions: [],
     retracted: false,
@@ -127,7 +93,7 @@ export function publicationTool(options: PublicationOptions) {
   return defineTool({
     name: "publish_artifact",
     description:
-      "Publish one signed test APK to this project's configured HTTPS destination. If an earlier claim on this card already wrote only this APK to the same URL, a new approval resumes it: read back, then write the sidecars. Requires a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths.",
+      "Publish one signed test APK to this project's configured HTTPS destination. Requires a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths.",
     input,
     handler: async (request, ctx) => {
       const { actor, token } = ctx.identity,
@@ -185,15 +151,7 @@ export function publicationTool(options: PublicationOptions) {
           }
         };
         revalidate();
-        const a = ctx.store.uow.read((tx) => {
-          const a = authorized(tx),
-            used = attempts(tx, p, a.card_id, request.decision_id);
-          // Checked before any host IO; the claim below re-checks atomically.
-          if (used.claimed) throw new PublicationError("already_claimed");
-          if (used.failed >= PUBLICATION_ATTEMPTS)
-            throw new PublicationError("retry_exhausted");
-          return a;
-        });
+        const a = ctx.store.uow.read(authorized);
         if (!options.publishArtifact) throw new PublicationError("not_enabled");
         const fresh = (tx: McpReadContext) => {
           const now = authorized(tx);
@@ -205,7 +163,7 @@ export function publicationTool(options: PublicationOptions) {
           )
             throw new PublicationError("artifact");
         };
-        const claim = (url: string, resume = false) => {
+        const claim = (url: string) => {
           revalidate();
           ctx.store.uow.run((tx) => {
             fresh(tx);
@@ -219,31 +177,24 @@ export function publicationTool(options: PublicationOptions) {
               )
             )
               throw new PublicationError("approval");
-            if (attempts(tx, p, a.card_id, request.decision_id).claimed)
-              throw new PublicationError("already_claimed");
-            const receipt = `${url} · ${a.sha256}`;
-            // Only this card's own earlier claim of the same URL and digest proves who wrote the lone APK.
             if (
-              resume &&
-              !tx.events
+              tx.events
                 .listAfter(p, a.card_id, 0)
                 .some(
                   (e) =>
                     e.type === "artifact_publication_claimed" &&
-                    (e.payload as { result?: string })?.result === receipt,
+                    (e.payload as { decision_id?: string })?.decision_id ===
+                      request.decision_id,
                 )
             )
-              throw new PublicationError("immutable_prefix");
+              throw new PublicationError("already_claimed");
             audit(
               tx,
               ctx,
               a.card_id,
               request,
               "claimed",
-              receipt,
-              resume
-                ? "（续做：APK 已在目录中，跳过上传，只回读并补写清单）"
-                : "",
+              `${url} · ${a.sha256}`,
             );
           });
         };
@@ -273,34 +224,21 @@ export function publicationTool(options: PublicationOptions) {
       } catch (e) {
         const category =
           e instanceof PublicationError ? e.category : "host_error";
-        let note = "";
         if (card) {
           const id = card;
           try {
-            ctx.store.uow.run((tx) => {
-              const before = BEFORE_WRITE.has(category)
-                ? attempts(tx, p, id, request.decision_id)
-                : undefined;
-              if (before && !before.claimed) {
-                const left = PUBLICATION_ATTEMPTS - before.failed - 1;
-                note =
-                  left > 0
-                    ? `（未写入，修复后可用同一拍板重试 ${left} 次）`
-                    : "（未写入，本拍板重试已用尽，请重新发起外发拍板）";
-              }
-              audit(tx, ctx, id, request, "failed", category, note);
-            });
+            ctx.store.uow.run((tx) =>
+              audit(tx, ctx, id, request, "failed", category),
+            );
           } catch {
             throw new ToolError("validation_failed", "测试包外发审计不可用");
           }
         }
         throw new ToolError(
-          category === "scope" ||
-            category === "approval" ||
-            category === "retry_exhausted"
+          category === "scope" || category === "approval"
             ? "forbidden_tool"
             : "validation_failed",
-          `测试包外发未放行：${category}${note}`,
+          `测试包外发未放行：${category}`,
         );
       }
     },

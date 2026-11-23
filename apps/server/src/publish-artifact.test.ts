@@ -125,20 +125,10 @@ async function setup() {
             : "<VersioningConfiguration/>\n0.123456(s) elapsed\n";
         case "list-objects-v2":
           expect(arg("--prefix")).toBe(prefix);
-          expect(arg("--max-keys")).toBe("2");
-          {
-            const listed = [...objects]
-              .filter(([k]) => k.startsWith(prefix))
-              .map(([Key, b]) => ({ Key, Size: String(b.length) }));
-            const page = listed.slice(0, 2);
-            return JSON.stringify({
-              KeyCount: String(page.length),
-              IsTruncated: String(listed.length > 2),
-              ...(page.length
-                ? { Contents: page.length === 1 ? page[0] : page }
-                : {}),
-            });
-          }
+          return JSON.stringify({
+            KeyCount: String(objects.size),
+            IsTruncated: "false",
+          });
         case "put-object": {
           const key = arg("--key");
           expect(args).toContain("--forbid-overwrite=true");
@@ -249,58 +239,6 @@ test("wrong bytes are not retried", async () => {
   await expect(f.call()).rejects.toThrow("download");
   expect(f.reads.get(`false${f.prefix}app.apk`)).toBe(1);
 });
-test("after a post-write read-back failure, a new approval resumes the lone APK and writes the sidecars", async () => {
-  const f = await setup();
-  f.flags.missing = 99;
-  await expect(f.call()).rejects.toThrow("download");
-  expect([...f.objects.keys()]).toEqual([`${f.prefix}app.apk`]);
-  expect(f.claim).toHaveBeenLastCalledWith(
-    `${target.origin}/${f.prefix}app.apk`,
-    false,
-  );
-  f.flags.missing = 0;
-  f.reads.clear();
-  const puts = () =>
-    f.execute.mock.calls.filter(([, args]) => args[1] === "put-object").length;
-  const before = puts();
-  await expect(f.call()).resolves.toMatchObject({ sha256: sha });
-  expect(f.claim).toHaveBeenLastCalledWith(
-    `${target.origin}/${f.prefix}app.apk`,
-    true,
-  );
-  expect(puts() - before).toBe(2);
-  expect(f.objects.size).toBe(3);
-  await expect(f.call()).rejects.toThrow("immutable_prefix");
-});
-test.each([
-  "different size",
-  "same size, different bytes",
-  "another object",
-  "claim refused",
-] as const)("resume refuses: %s", async (issue) => {
-  const f = await setup();
-  const key = `${f.prefix}app.apk`;
-  f.objects.set(
-    key,
-    issue === "different size"
-      ? Buffer.concat([apk, Buffer.from("x")])
-      : issue === "same size, different bytes"
-        ? Buffer.alloc(apk.length)
-        : apk,
-  );
-  if (issue === "another object") f.objects.set(`${f.prefix}SHA256SUMS`, apk);
-  if (issue === "claim refused")
-    f.claim.mockImplementation(() => {
-      throw Error("immutable_prefix");
-    });
-  const failure =
-    issue === "same size, different bytes" ? "download" : "immutable_prefix";
-  await expect(f.call()).rejects.toThrow(failure);
-  expect(
-    f.execute.mock.calls.some(([, args]) => args[1] === "put-object"),
-  ).toBe(false);
-});
-
 test.each([
   "configuration",
   "signature",
