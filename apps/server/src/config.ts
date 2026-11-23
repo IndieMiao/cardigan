@@ -11,6 +11,14 @@ import {
 } from "@cardigan/domain";
 import { DEFAULT_CHECK_CLEANUP_GRACE_MS } from "@cardigan/git-service";
 import { resolveAttachmentInlineBytes } from "@cardigan/mcp-server";
+import {
+  DEFAULT_CENTRAL_CRUFT_INTERVAL_MS,
+  DEFAULT_CENTRAL_MAINTENANCE_INTERVAL_MS,
+  DEFAULT_CENTRAL_MAINTENANCE_WINDOW,
+  type MaintenanceWindow,
+  parseMaintenanceWindow,
+} from "./central-maintenance-loop.js";
+import { DEFAULT_CENTRAL_REF_RETENTION_MS } from "./central-ref-retention.js";
 import { DEFAULT_MERGE_WATCHDOG_MS } from "./merge-watchdog.js";
 
 export const DEFAULT_DATA_DIR = defaultDataDirectory();
@@ -52,6 +60,12 @@ export interface ServerConfig {
   /** Q-618: five minutes by default, configurable in trusted host environment. */
   readonly recoveryInspectionIntervalMs?: number;
   readonly backupIntervalMs?: number;
+  /** C-637: off-peak central repository maintenance (host local time); undefined is off. */
+  readonly centralMaintenanceWindow?: MaintenanceWindow;
+  readonly centralMaintenanceIntervalMs?: number;
+  readonly centralCruftIntervalMs?: number;
+  /** Q-1233: 14 days after the owning card ended. */
+  readonly centralRefRetentionMs?: number;
   /** Orphaned attachment blobs (§9.3); 6 hours by default. */
   readonly attachmentIntervalMs?: number;
   readonly providerFailureThreshold?: number;
@@ -112,6 +126,10 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_CHECK_CLEANUP_GRACE_MS?: string | undefined;
   readonly CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_BACKUP_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_CENTRAL_MAINTENANCE_WINDOW?: string | undefined;
+  readonly CARDIGAN_CENTRAL_MAINTENANCE_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_CENTRAL_REF_RETENTION_DAYS?: string | undefined;
   readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_PROVIDER_FAILURE_THRESHOLD?: string | undefined;
   readonly CARDIGAN_PROVIDER_COOLDOWN_MS?: string | undefined;
@@ -193,6 +211,10 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     );
   const runtimeUnknownGraceMs = parseRuntimeUnknownGraceMs(
     env.CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS,
+  );
+  const centralMaintenanceWindow = parseMaintenanceWindow(
+    nonEmpty(env.CARDIGAN_CENTRAL_MAINTENANCE_WINDOW) ??
+      DEFAULT_CENTRAL_MAINTENANCE_WINDOW,
   );
   const portText = nonEmpty(env.CARDIGAN_MCP_PORT);
   const port = portText === undefined ? DEFAULT_MCP_PORT : Number(portText);
@@ -337,6 +359,25 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       "CARDIGAN_BACKUP_INTERVAL_MS",
       DEFAULT_INTERVALS.backup,
     ),
+    ...(centralMaintenanceWindow === undefined
+      ? {}
+      : { centralMaintenanceWindow }),
+    centralMaintenanceIntervalMs: interval(
+      env.CARDIGAN_CENTRAL_MAINTENANCE_INTERVAL_MS,
+      "CARDIGAN_CENTRAL_MAINTENANCE_INTERVAL_MS",
+      DEFAULT_CENTRAL_MAINTENANCE_INTERVAL_MS,
+    ),
+    centralCruftIntervalMs: interval(
+      env.CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS,
+      "CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS",
+      DEFAULT_CENTRAL_CRUFT_INTERVAL_MS,
+    ),
+    centralRefRetentionMs:
+      positiveInteger(
+        nonEmpty(env.CARDIGAN_CENTRAL_REF_RETENTION_DAYS),
+        DEFAULT_CENTRAL_REF_RETENTION_MS / 86_400_000,
+        "CARDIGAN_CENTRAL_REF_RETENTION_DAYS",
+      ) * 86_400_000,
     checkCleanupGraceMs: interval(
       env.CARDIGAN_CHECK_CLEANUP_GRACE_MS,
       "CARDIGAN_CHECK_CLEANUP_GRACE_MS",

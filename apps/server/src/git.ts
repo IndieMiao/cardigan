@@ -1,5 +1,5 @@
 import { lstat, realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type {
   Assignment,
   Delivery,
@@ -7,6 +7,7 @@ import type {
   DeliverySubject,
   DeliveryVerifier,
   GitPublicationGuard,
+  GitRef,
   MergeBatch,
   MergePlan,
   MergePushCommit,
@@ -41,12 +42,14 @@ import {
   type CandidateDeleteRequest,
   type CandidatePushRequest,
   CentralGitTransport,
+  type CentralRepackMode,
   LocalGitTransport,
   type PushResult,
   type WorkspaceGit as WorkspaceGitPort,
   withGitTimeout,
 } from "@cardigan/git-transport";
 import {
+  acquireRepositoryFlock,
   type CandidateTestSnapshot,
   candidateTestPath,
   HostTestReviewTrust,
@@ -60,6 +63,7 @@ import {
   proveSystemReviewLimit,
   RuntimeTargetError,
   type RuntimeTargets,
+  repositoryLockPath,
   safeTargetReason,
   systemReviewLimitFailure,
   type TestIsolationSource,
@@ -86,6 +90,7 @@ import type {
   Store,
   StoreTransactionContext,
 } from "@cardigan/store";
+import type { CentralMaintenanceGit } from "./central-maintenance-loop.js";
 import { backupBranches, backupWriter } from "./git-backup.js";
 import type { SnapshotOrphan } from "./orphan-cleanup.js";
 
@@ -415,7 +420,8 @@ function agentWorkspace(
 
 /** What the control plane's phase loops need: merge plus cleanup/reconcile. */
 export type GitPhases = MergeGit &
-  ReconcileGit & {
+  ReconcileGit &
+  CentralMaintenanceGit & {
     snapshotOrphan?: SnapshotOrphan;
   };
 
@@ -609,11 +615,11 @@ export class ServerGit implements GitBinding {
             project,
             assignment,
             (central) =>
-              new GitDeliveryVerifier(central, project).verify(
-                subject,
-                assignment,
-                previous,
-              ),
+              new GitDeliveryVerifier(
+                central,
+                project,
+                this.cardBaselineOf(project, assignment),
+              ).verify(subject, assignment, previous),
           );
         } catch (error) {
           const failure = classifyDeliverySourceError(error);
@@ -632,6 +638,29 @@ export class ServerGit implements GitBinding {
       },
     } satisfies DeliveryVerifier;
   };
+
+  /**
+   * C-654: the card's own baseline branch (C-589), against which the author's
+   * own changes are measured. Undefined means the project baseline.
+   */
+  private cardBaselineOf(
+    project: CentralProject,
+    assignment: Assignment,
+  ): string | undefined {
+    const uow = this.options.store.uow;
+    if (!uow || assignment.scope !== "work_item") return undefined;
+    const branch = uow.read((tx) => {
+      const item = tx.work_items.get(
+        project.project_id as ProjectId,
+        assignment.work_item_id,
+      );
+      return item
+        ? tx.cards.get(project.project_id as ProjectId, item.card_id)
+            ?.base_branch
+        : undefined;
+    });
+    return branch && branch !== project.base_branch ? branch : undefined;
+  }
 
   async checkHead(
     projectId: ProjectId,
@@ -1127,6 +1156,49 @@ export class ServerGit implements GitBinding {
       throw new Error("Snapshot verification failed");
     validateTarget?.();
     return sha;
+  }
+  /**
+   * C-637: the existing central repository for off-peak maintenance. It never
+   * creates one and never takes the repository lock; a separate per-project
+   * flock only keeps two host processes from repacking at the same time.
+   */
+  async centralMaintenance(project: CentralProject) {
+    const repository = this.central.repositoryPath(project);
+    const present = await lstat(repository).then(
+      (entry) => entry.isDirectory(),
+      (error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      },
+    );
+    if (!present) return undefined;
+    let release = async () => {};
+    if (process.platform === "linux")
+      try {
+        release = await acquireRepositoryFlock(
+          join(
+            dirname(
+              repositoryLockPath(this.options.dataDir, project.project_id),
+            ),
+            `maintenance-${project.project_id}.lock`,
+          ),
+          1,
+        );
+      } catch (error) {
+        if (error instanceof RepositoryLockTimeoutError) return undefined;
+        throw error;
+      }
+    const transport = this.transport;
+    return {
+      target: {
+        lastCruftPack: () => transport.lastCruftPack(repository),
+        repack: (mode: CentralRepackMode) => transport.repack(repository, mode),
+        listRefs: (prefix: string) => transport.listRefs(repository, prefix),
+        deleteRefs: (refs: readonly GitRef[]) =>
+          transport.deleteRetainedRefs(repository, refs),
+      },
+      release,
+    };
   }
   async backup(project: CentralProject): Promise<void> {
     const projectId = project.project_id as ProjectId;

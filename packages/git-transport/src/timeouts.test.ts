@@ -115,7 +115,7 @@ test.each(["central", "local"] as const)(
 );
 
 test("query and transfer defaults, environment overrides and invalid timeout settings", async () => {
-  for (const command of ["clone", "fetch", "push", "bundle"])
+  for (const command of ["clone", "fetch", "push", "bundle", "repack"])
     expect(await withGitTimeout(command, {}, async (ms) => ms)).toBe(1_800_000);
   expect(await withGitTimeout("rev-parse", {}, async (ms) => ms)).toBe(30_000);
   vi.stubEnv("CARDIGAN_GIT_QUERY_TIMEOUT_MS", "47");
