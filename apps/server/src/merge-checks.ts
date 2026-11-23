@@ -138,6 +138,9 @@ class RepositoryWaitExhausted extends Error {
   }
 }
 class StaleCheckTarget extends CheckExecutorSuspended {}
+/** C-609: fixed summary when central main moved under a queued or running check. */
+export const MERGE_CHECK_BASELINE_MOVED =
+  "中心 main 已前进，候选已改变，按新基线重新检查";
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
@@ -749,7 +752,41 @@ export class MergeChecks {
     this.prepared.set(id, { key, value });
     return value;
   }
-  private async interrupt(task: Task, check: MergeCheckView) {
+  /**
+   * C-609: a queue-mode card check passes for its completion on any baseline
+   * (`passedCardCheck`). A restarted controller re-prepares the candidate on
+   * the moved main; the bound GitHub run it already started stays useful, so
+   * it is re-attached and read rather than interrupted and run again.
+   */
+  private resumableCardCheck(task: Task, latest: MergeCheckView): boolean {
+    if (
+      !task.settings.queue ||
+      task.batch ||
+      latest.level !== "card" ||
+      latest.status !== "running" ||
+      latest.recheck_requested ||
+      !latest.external_run ||
+      this.githubActive.has(latest.attempt_id)
+    )
+      return false;
+    const run = latest.external_run.run_id;
+    return new GithubDispatchJournal(this.options.store)
+      .unfinished()
+      .some(
+        (intent) =>
+          intent.project === task.project.project_id &&
+          intent.card === task.plan.card_id &&
+          intent.attempt === latest.attempt_id &&
+          intent.executor === task.settings.executor?.name &&
+          !intent.abandoned &&
+          intent.externalRun?.run_id === run,
+      );
+  }
+  private async interrupt(
+    task: Task,
+    check: MergeCheckView,
+    reason?: "baseline",
+  ) {
     // A queued attempt has no writer; preserve any existing crashed-attempt log.
     try {
       const log = await createMergeCheckLog({
@@ -773,7 +810,12 @@ export class MergeChecks {
         ...check,
         status: "interrupted",
         checks: [],
-        summary: "检查中断或候选已改变，重新排队",
+        // C-609: a moved baseline needs a new check whether or not the server
+        // restarted; keep it distinguishable from an actual interruption.
+        summary:
+          reason === "baseline"
+            ? MERGE_CHECK_BASELINE_MOVED
+            : "检查中断或候选已改变，重新排队",
         log_ref: `${check.attempt_id}.log`,
       },
       true,
@@ -881,10 +923,18 @@ export class MergeChecks {
         task.settings.executor?.type === "github" &&
         latest.executor?.type === "github" &&
         latest.executor.name === task.settings.executor.name &&
-        sameCandidate
+        (sameCandidate || this.resumableCardCheck(task, latest))
       )
         return latest;
-      await this.interrupt(task, latest);
+      await this.interrupt(
+        task,
+        latest,
+        latest.base_sha !== undefined &&
+          candidate.previous_sha !== undefined &&
+          latest.base_sha !== candidate.previous_sha
+          ? "baseline"
+          : undefined,
+      );
     }
     if (
       this.passed(task, {

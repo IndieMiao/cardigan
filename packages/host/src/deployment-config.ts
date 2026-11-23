@@ -18,6 +18,10 @@ export interface DeploymentConfig {
   readonly build_timeout_ms: number;
   readonly evidence_wait_timeout_ms?: number;
   readonly capacity_wait_timeout_ms?: number;
+  /** C-609: minimum gap between automatic restarts; 0 disables batching. */
+  readonly batch_window_ms?: number;
+  /** C-609: bounded wait for managed long operations; 0 disables it. */
+  readonly operation_wait_timeout_ms?: number;
   readonly retention?: RetentionPolicy;
   readonly disk_low_percent?: number;
   readonly server_log_max_bytes?: number;
@@ -30,6 +34,12 @@ export const DEFAULT_DISK_LOW_PERCENT = 15;
 export const DEFAULT_CAPACITY_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
 /** Q-462: waiting for evidence only raises attention; it never authorizes deployment. */
 export const DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
+/** C-609: consecutive merges within five minutes of a restart deploy together. */
+export const DEFAULT_BATCH_WINDOW_MS = 5 * 60 * 1000;
+/** C-609: the wait for long operations ends in a deployment after 15 minutes. */
+export const DEFAULT_OPERATION_WAIT_TIMEOUT_MS = 15 * 60 * 1000;
+/** Optional keys where 0 turns the C-609 behavior off. */
+const DISABLEABLE = ["batch_window_ms", "operation_wait_timeout_ms"];
 
 /** Host policy only; no repository discovery or request-supplied deployment target. */
 export async function loadDeploymentConfig(
@@ -78,6 +88,8 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     "build_timeout_ms",
     "evidence_wait_timeout_ms",
     "capacity_wait_timeout_ms",
+    "batch_window_ms",
+    "operation_wait_timeout_ms",
     "retention",
     "disk_low_percent",
     "server_log_max_bytes",
@@ -94,7 +106,17 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     !/^[a-f0-9]{40}$/u.test(value.initial_sha)
   )
     throw new Error("Invalid deployment configuration");
-  for (const key of keys.filter((k) => k.endsWith("_ms")))
+  for (const key of DISABLEABLE)
+    if (
+      value[key] !== undefined &&
+      (!Number.isSafeInteger(value[key]) ||
+        Number(value[key]) < 0 ||
+        Number(value[key]) > 2147483647)
+    )
+      throw new Error("Invalid deployment timeout");
+  for (const key of keys.filter(
+    (k) => k.endsWith("_ms") && !DISABLEABLE.includes(k),
+  ))
     if (
       !(
         ["evidence_wait_timeout_ms", "capacity_wait_timeout_ms"].includes(
@@ -138,6 +160,9 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
       value.capacity_wait_timeout_ms ?? DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
     evidence_wait_timeout_ms:
       value.evidence_wait_timeout_ms ?? DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS,
+    batch_window_ms: value.batch_window_ms ?? DEFAULT_BATCH_WINDOW_MS,
+    operation_wait_timeout_ms:
+      value.operation_wait_timeout_ms ?? DEFAULT_OPERATION_WAIT_TIMEOUT_MS,
   } as unknown as DeploymentConfig;
 }
 
