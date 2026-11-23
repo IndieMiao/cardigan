@@ -574,7 +574,7 @@ test("worker sources reject object/branch forgeries and object format mismatches
   });
   await expect(
     new GitDeliveryVerifier(mismatch, f.project).head(a),
-  ).rejects.toThrow();
+  ).rejects.toMatchObject({ name: "CheckHeadFailure" });
   const wrongTarget = new CentralRepositoryService(f.transport, {
     dataDir: f.dataDir,
     agentSource: async () => ({
@@ -588,8 +588,16 @@ test("worker sources reject object/branch forgeries and object format mismatches
       uploadPack: "false",
     }),
   });
-  await expect(
-    new GitDeliveryVerifier(wrongTarget, f.project).head(a),
-  ).rejects.toThrow(/binding mismatch/);
+  // C-632: the host classifies the stage; the raw cause stays server-side.
+  const wrong = await new GitDeliveryVerifier(wrongTarget, f.project)
+    .head(a)
+    .catch((error: unknown) => error);
+  expect(wrong).toMatchObject({
+    name: "CheckHeadFailure",
+    reason: "environment_unavailable",
+    cause: expect.objectContaining({
+      message: expect.stringMatching(/binding mismatch/),
+    }),
+  });
   expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
 });

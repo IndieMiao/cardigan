@@ -21,6 +21,7 @@ import {
   pausedByHuman,
   stopExitConfirmed,
   stoppedByHuman,
+  stopReleasePending,
 } from "./stop-state.js";
 
 export {
@@ -55,8 +56,14 @@ const pendingWork = (r: Run) =>
  *    cancel the remaining unfinished Runs, settle the runtime state and clear
  *    the ref. Until then the running Run keeps its run slot, so a failed
  *    release neither under-counts capacity nor loses the ref to retry with.
- *    A no-op when the stop no longer holds or the session changed. After a
- *    managed stop's release the Assignment is no longer stopped (C-620).
+ *    A no-op when the session changed. After a managed stop's release the
+ *    Assignment is no longer stopped (C-620).
+ *
+ * C-645: step 2 does not depend on the stop still holding. A human start (or a
+ * dispatch onto the same terminal) between the two steps ends the stop, but
+ * the host has already released the terminal step 1 was recorded for. The
+ * settlement then still cancels that session's Runs and clears the ref, and
+ * keeps never-started queued work such as the human start's Run.
  */
 export function stopWorkItemAssignment(
   state: CommandState,
@@ -125,11 +132,16 @@ export function stopWorkItemAssignment(
       return { assignment: a, cancelled: 0 };
     }
     if (p.released_runtime_ref !== undefined) {
+      const holds = stoppedByHuman(state.events, a.id);
       if (
-        !stoppedByHuman(state.events, a.id) ||
+        !(
+          holds ||
+          stopReleasePending(state.events, a.id, p.released_runtime_ref)
+        ) ||
         JSON.stringify(a.runtime_ref) !== JSON.stringify(p.released_runtime_ref)
       )
         return { assignment: a, cancelled: 0 };
+      // A start that ended the stop is no pause: its queued Run is kept.
       const managed = !pausedByHuman(state.events, a.id);
       const runs = d
         .list("runs")
@@ -152,6 +164,7 @@ export function stopWorkItemAssignment(
         ...retirementWaitReceipt(a),
         assignment_id: a.id,
         cancelled_run_ids: runs.map((r) => r.id),
+        ...(holds ? {} : { superseded: true }),
       });
       // C-620: work that became ready during the stop window starts now.
       if (managed) replayStopDeferredResume(d, next);
@@ -173,6 +186,8 @@ export function stopWorkItemAssignment(
         assignment_id: a.id,
         hold,
         cancelled_run_ids: queued.map((r) => r.id),
+        // C-645: the session this stop releases; its settlement depends on it.
+        ...(a.runtime_ref ? { runtime_ref: { ...a.runtime_ref } } : {}),
       },
       {
         type: "status_change",

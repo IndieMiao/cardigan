@@ -30,6 +30,7 @@ import {
   MachineLeases,
   messageOf,
   type PreparedWorktree,
+  RunPreparationDeferred,
   RunProviderDeferred,
   RuntimeTargets,
   readonlyWorktreeTarget,
@@ -465,7 +466,10 @@ async function startUnlocked(
     };
   } catch (error) {
     // Admission has already committed this resumed Run to the queue.
-    if (error instanceof RunProviderDeferred)
+    if (
+      error instanceof RunProviderDeferred ||
+      error instanceof RunPreparationDeferred
+    )
       throw new CliError(error.message, EXIT.failure);
     if (resuming) pauseStanding(store, project_id, assignment.id, actor);
     const message = formatLaunchError(assignment.id, error);
