@@ -74,6 +74,7 @@ import {
   recoveryPm,
 } from "./automatic-context-restart.js";
 import {
+  assignmentActivityScope,
   type ContextUsageOptions,
   contextThresholdView,
   DEFAULT_CONTEXT_STALE_AFTER_MS,
@@ -752,6 +753,7 @@ export class HostOpsService {
           "活动采样期间会话已更换，请重新读取诊断",
         );
     }
+    const scope = assignmentActivityScope(current);
     for (const session of sessions) {
       if (!session.assignment_id) continue;
       const assignment = current.assignments.find(
@@ -760,7 +762,7 @@ export class HostOpsService {
       const sample =
         assignment &&
         currentHarnessActivity(
-          current,
+          scope(assignment),
           assignment,
           this.clock.now(),
           session.activity,
