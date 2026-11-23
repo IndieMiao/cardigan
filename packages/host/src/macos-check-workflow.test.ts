@@ -236,6 +236,14 @@ describe("Cardigan macOS check workflow", () => {
               failureMessages: timeout
                 ? ["Error: Test timed out in 30000ms."]
                 : [],
+              meta: {
+                cardigan_phases: [
+                  { name: "fixture ready", at_ms: 1200 },
+                  { name: "signed stop sent", at_ms: 7300 },
+                  { name: "bad", at_ms: 10 },
+                  { name: "await exit\u0007", at_ms: 8000 },
+                ],
+              },
             },
             { title: "d", status: "pending" },
           ],
@@ -266,7 +274,7 @@ describe("Cardigan macOS check workflow", () => {
       ]);
     });
 
-    test("a timed-out case carries the timings of its file's cases", () => {
+    test("a timed-out case carries its own phase marks and its file's case timings", () => {
       const report = summarize(vitest("failed", true), "failure");
       expect(report?.exit_code).toBe(1);
       expect(report?.real_hc_cases[0]?.status).toBe("failed");
@@ -276,6 +284,12 @@ describe("Cardigan macOS check workflow", () => {
           title: realHc,
           status: "failed",
           duration_ms: 30000,
+          // Out-of-order marks are dropped; control characters never reach the host.
+          phases: [
+            { name: "fixture ready", at_ms: 1200 },
+            { name: "signed stop sent", at_ms: 7300 },
+            { name: "await exit", at_ms: 8000 },
+          ],
           file_cases: [
             { title: "c", status: "passed", duration_ms: 1 },
             { title: realHc, status: "failed", duration_ms: 30000 },

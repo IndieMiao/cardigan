@@ -29,14 +29,22 @@ export interface MacosCheckReport {
   readonly real_hc_cases: readonly (MacosCase & { readonly file: string })[];
   readonly timeouts: readonly (MacosCase & {
     readonly file: string;
+    /** Marks the case itself recorded (task.meta.cardigan_phases), in order. */
+    readonly phases: readonly MacosPhase[];
     readonly file_cases: readonly MacosCase[];
   })[];
+}
+/** A named point a test reached, in ms since the case started. */
+export interface MacosPhase {
+  readonly name: string;
+  readonly at_ms: number;
 }
 export interface MacosStepTiming {
   readonly name: string;
   readonly conclusion: string | null;
   readonly seconds: number | null;
 }
+const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
 const object = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 /** Printable, bounded text; candidate-controlled values never carry control characters. */
@@ -62,6 +70,14 @@ const caseOf = (v: unknown): MacosCase | undefined => {
   )
     return undefined;
   return { title, status: v.status as CaseStatus, duration_ms: duration };
+};
+const phaseOf = (v: unknown): MacosPhase | undefined => {
+  if (!object(v)) return undefined;
+  const name = text(v.name, 80),
+    at = count(v.at_ms);
+  return name !== undefined && at !== undefined
+    ? { name, at_ms: at }
+    : undefined;
 };
 const fileOf =
   (files: readonly string[]) =>
@@ -128,9 +144,13 @@ export function parseMacosCheckLog(
   const timeouts = list(raw.timeouts, 8, (v) => {
     const c = caseOf(v),
       name = object(v) ? file(v.file) : undefined,
-      cases = object(v) ? list(v.file_cases, 50, caseOf) : undefined;
-    return c && name && cases
-      ? { file: name, ...c, file_cases: cases }
+      cases = object(v) ? list(v.file_cases, 50, caseOf) : undefined,
+      phases = object(v) ? list(v.phases ?? [], 50, phaseOf) : undefined;
+    return c &&
+      name &&
+      cases &&
+      phases?.every((p, i) => i === 0 || p.at_ms >= (phases[i - 1]?.at_ms ?? 0))
+      ? { file: name, ...c, phases, file_cases: cases }
       : undefined;
   });
   const fields = {
@@ -161,6 +181,46 @@ export function parseMacosCheckLog(
   };
 }
 
+/**
+ * Why a parsed report cannot count as this check's evidence: it must name the
+ * host's candidate commit and tree and cover exactly the requested files.
+ */
+export function macosReportMismatch(
+  report: MacosCheckReport,
+  expected: {
+    readonly files: readonly string[];
+    readonly tested_sha?: string | undefined;
+    readonly tree_sha?: string | undefined;
+  },
+): string | undefined {
+  if (
+    report.candidate_sha !== expected.tested_sha ||
+    report.candidate_tree !== expected.tree_sha
+  )
+    return "汇总中的候选与本次检查不一致";
+  const reported = new Set(report.files.map((f) => f.file));
+  if (
+    reported.size !== expected.files.length ||
+    expected.files.some((f) => !reported.has(f))
+  )
+    return "汇总未覆盖全部请求的测试文件";
+  return undefined;
+}
+/** Each phase's time until the next mark; the last one runs to the case's end. */
+export function macosPhaseTimings(
+  phases: readonly MacosPhase[],
+  totalMs: number,
+): string {
+  return phases
+    .map((p, i) => {
+      const next = phases[i + 1];
+      const ms = (next ? next.at_ms : Math.max(totalMs, p.at_ms)) - p.at_ms;
+      return next
+        ? `${p.name} ${seconds(ms)}`
+        : `${p.name}（最后到达，停留 ${seconds(ms)}）`;
+    })
+    .join(" → ");
+}
 /** Trusted GitHub step timings of the job; candidate output cannot alter them. */
 export function macosStepTimings(job: GithubJob): MacosStepTiming[] {
   return job.steps.slice(0, 64).map((step) => {
@@ -176,7 +236,6 @@ export function macosStepTimings(job: GithubJob): MacosStepTiming[] {
     };
   });
 }
-const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
 /** One timeline body: environment, per-file counts, real hc cases, exit code and timings. */
 export function macosCheckSummary(input: {
   readonly status: string;
@@ -206,7 +265,7 @@ export function macosCheckSummary(input: {
     );
     for (const t of report.timeouts)
       lines.push(
-        `超时：${t.file} › ${t.title}（${seconds(t.duration_ms)}）；同文件分步计时：${t.file_cases.map((c) => `${c.title} ${c.status} ${seconds(c.duration_ms)}`).join("；")}`,
+        `超时：${t.file} › ${t.title}（${seconds(t.duration_ms)}）；${t.phases.length ? `分步计时：${macosPhaseTimings(t.phases, t.duration_ms)}` : "用例未记录分步"}；同文件用例耗时：${t.file_cases.map((c) => `${c.title} ${c.status} ${seconds(c.duration_ms)}`).join("；")}`,
       );
   } else if (input.status !== "not_run" && input.status !== "cancelled")
     lines.push("未取得测试汇总");

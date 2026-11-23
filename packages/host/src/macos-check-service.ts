@@ -32,6 +32,7 @@ import {
 } from "./github-client.js";
 import {
   type ExternalGithubRun,
+  type GithubDispatchIntent,
   GithubDispatchJournal,
 } from "./github-dispatch-journal.js";
 import { ProbeBudget } from "./github-probe.js";
@@ -46,6 +47,7 @@ import {
   type MacosCheckReport,
   type MacosStepTiming,
   macosCheckSummary,
+  macosReportMismatch,
   macosStepTimings,
   parseMacosCheckLog,
 } from "./macos-check-result.js";
@@ -106,6 +108,17 @@ const TERMINAL: readonly MacosCheckStatus[] = [
 ];
 const MAX_LOG_CHARS = 1024 * 1024;
 const TIMEOUT = "超过主机监督时限";
+const UNCONFIRMED = "远程运行未能确认";
+const PRIVATE_NOT_RUN =
+  "私有仓库的托管 macOS 运行会计费，本项目未开启花钱类常驻授权，未运行";
+/** Request order is display only; the same set of files is the same check. */
+const sameFileSet = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length &&
+  [...a].sort().join("\n") === [...b].sort().join("\n");
+/** Evidence read from the run failed; retry the same run, never redispatch. */
+class EvidenceUnavailable extends Error {
+  steps?: MacosStepTiming[];
+}
 export const macosCheckView = (job: MacosCheckJob) => ({
   macos_check_id: job.id,
   card_id: job.card_id,
@@ -308,9 +321,7 @@ export class MacosCheckService {
             j.head_sha === current.head_sha,
         );
         const active = same.find(
-          (j) =>
-            !TERMINAL.includes(j.status) &&
-            JSON.stringify(j.files) === JSON.stringify(files),
+          (j) => !TERMINAL.includes(j.status) && sameFileSet(j.files, files),
         );
         if (active) return { ...macosCheckView(active), joined: true };
         if (same.length >= profile.max_runs_per_candidate)
@@ -370,11 +381,13 @@ export class MacosCheckService {
     ).length;
     for (let job of jobs) {
       if (job.cleanup === "complete" && job.reported) continue;
-      // Reported results whose remote cleanup stays unconfirmed stop retrying.
+      // Reported results whose candidate branch removal stays unconfirmed
+      // stop retrying; an open dispatch reservation is always settled.
       if (
         TERMINAL.includes(job.status) &&
         job.reported &&
-        age(job) >= 2 * job.profile.timeout_ms
+        age(job) >= 2 * job.profile.timeout_ms &&
+        !this.reservationOpen(job)
       )
         continue;
       try {
@@ -402,6 +415,14 @@ export class MacosCheckService {
       if (TERMINAL.includes(job.status) && !job.reported)
         await this.report(job).catch(() => undefined);
     }
+  }
+  private reservationOpen(job: MacosCheckJob): boolean {
+    return new GithubDispatchJournal(this.options.store, job.card_id)
+      .all()
+      .some(
+        (i) =>
+          i.project === job.project_id && i.attempt === job.id && !i.finished,
+      );
   }
   private client(job: MacosCheckJob, config: GithubMergeGateExecutor) {
     const rate = new ProbeBudget(
@@ -458,25 +479,18 @@ export class MacosCheckService {
         };
       }
       if (!job.billing) {
-        const repository = await client.repository();
-        const delegated = this.options.store.uow.read(
-          (tx) =>
-            decisionDelegation(
-              tx.project_preferences.get(job.project_id, job.project_id),
-            ).spending,
-        );
-        if (repository.private && !delegated)
+        const billing = await this.billing(job, client);
+        if (!billing)
           return {
             ...job,
             status: "not_run",
             cleanup: "complete",
-            reason:
-              "私有仓库的托管 macOS 运行会计费，本项目未开启花钱类常驻授权，未运行",
+            reason: PRIVATE_NOT_RUN,
           };
         job = this.checkpoint({
           ...job,
           status: "running",
-          billing: repository.private ? "private_delegated" : "public",
+          billing,
           executor_fingerprint: fingerprint,
         });
       }
@@ -501,17 +515,44 @@ export class MacosCheckService {
           };
         }
       }
-      // An unconfirmable dispatch ends at the deadline instead of holding a slot.
-      const abandon = (): MacosCheckJob => ({
-        ...job,
-        status: job.reason === TIMEOUT ? "timed_out" : "cancelled",
-        reason: `${job.reason ?? "已取消"}；远程运行未能确认`,
-        cleanup: "held",
-      });
+      // An unconfirmable dispatch is reported at the deadline; its reservation
+      // is then settled below (absence proven, or the original run bound).
+      const abandon = (): MacosCheckJob => {
+        const current = intentOf();
+        if (current && !current.finished)
+          journal.abandonProbe(current, `macOS check ended: ${UNCONFIRMED}`);
+        return {
+          ...job,
+          status: job.reason === TIMEOUT ? "timed_out" : "cancelled",
+          reason: `${job.reason ?? "已取消"}；${UNCONFIRMED}`,
+          cleanup: "held",
+        };
+      };
+      let gate: "denied" | undefined;
       let session: Awaited<ReturnType<typeof this.session>>;
       try {
-        session = await this.session(job, config, client, journal, ref);
+        session = await this.session(job, config, client, journal, ref, {
+          // Billing is decided again right before the candidate is published.
+          beforePublish: async () => {
+            const billing = await this.billing(job, client);
+            if (!billing) gate = "denied";
+            else if (billing !== job.billing)
+              job = this.checkpoint({ ...job, billing });
+            return !!billing;
+          },
+        });
       } catch (error) {
+        if (gate === "denied") {
+          const current = intentOf();
+          if (current && !current.finished)
+            journal.finishUnpublishedProbe(current);
+          return {
+            ...job,
+            status: "not_run",
+            cleanup: "complete",
+            reason: PRIVATE_NOT_RUN,
+          };
+        }
         if (stop) return abandon();
         throw error;
       }
@@ -528,14 +569,30 @@ export class MacosCheckService {
           cleanup: "pending",
         };
       }
-      job = this.checkpoint({
+      const bound = {
         ...job,
         run: { run_id: run.id, html_url: session.run.html_url },
-        ...(await this.result(job, client, run)),
-      });
+      };
+      let outcome: Partial<MacosCheckJob>;
+      try {
+        outcome = await this.result(job, client, run);
+      } catch (error) {
+        // Reading evidence of a finished run is retried on the same run until
+        // the supervision deadline; it never dispatches or counts a rerun.
+        if (!(error instanceof EvidenceUnavailable)) throw error;
+        if (!stop) return { ...bound, cleanup: "pending" };
+        outcome = {
+          status: "failed",
+          reason: "主机监督时限内未能读取运行日志，结果不作通过",
+          ...(error.steps ? { steps: error.steps } : {}),
+        };
+      }
+      job = this.checkpoint({ ...bound, ...outcome });
       session.finish?.();
     }
     intent = intentOf();
+    if (intent && !intent.finished)
+      intent = await this.settle(job, config, client, journal, ref, intent);
     if (!intent?.finished) return { ...job, cleanup: "held" };
     if (intent.deleted) {
       this.sessions.delete(job.id);
@@ -569,6 +626,7 @@ export class MacosCheckService {
     client: Client,
     journal: GithubDispatchJournal,
     ref: string,
+    gate: { beforePublish?: () => Promise<boolean> } = {},
   ) {
     const existing = this.sessions.get(job.id);
     if (existing) return existing;
@@ -580,7 +638,8 @@ export class MacosCheckService {
       poll: async () => {
         throw new Error("macOS checks poll through the service");
       },
-      cancel: async () => {},
+      // Only a run the executor validated as this request's own reaches here.
+      cancel: async (run) => client.cancel(run.run_id),
       fetchFailureLog: async () => {},
     };
     const executor = new GithubCheckExecutor({
@@ -596,6 +655,8 @@ export class MacosCheckService {
       push: async (input) => {
         if (input.ref !== ref || input.sha !== job.tested_sha)
           throw new Error("macOS check scope rejected");
+        if (gate.beforePublish && !(await gate.beforePublish()))
+          return { status: "not_started" };
         return this.options.push(job.project_id, input);
       },
       isBaselineAncestor: (sha, branch) =>
@@ -603,17 +664,31 @@ export class MacosCheckService {
       ...(this.options.now ? { now: this.options.now } : {}),
     });
     try {
-      const handle = await executor.dispatch({
+      const request = {
         project: job.project_id,
         attempt: job.id,
-        kind: "precheck",
+        kind: "precheck" as const,
         sha: job.tested_sha as string,
         tree: job.tree_sha as string,
         totalTimeoutMs: job.profile.timeout_ms,
         checks: [],
         workflowInputs: { files: job.files.join(" ") },
-      });
-      if (!bound.run) return undefined;
+      };
+      const abandoned = journal
+        .all()
+        .find(
+          (i) =>
+            i.project === job.project_id &&
+            i.attempt === job.id &&
+            i.abandoned &&
+            !i.finished,
+        );
+      // An abandoned reservation is only recovered: absence releases it, a
+      // found run is bound (and cancelled); it is never published again.
+      const handle = abandoned
+        ? await executor.recoverAbandoned(request, abandoned)
+        : await executor.dispatch(request);
+      if (!handle || !bound.run) return undefined;
       const session = {
         handle,
         run: bound.run,
@@ -625,6 +700,57 @@ export class MacosCheckService {
       if (error instanceof GithubRetryLater) return undefined;
       throw error;
     }
+  }
+  /** Repository visibility and spending delegation, read now; undefined: not allowed. */
+  private async billing(
+    job: MacosCheckJob,
+    client: Client,
+  ): Promise<MacosCheckJob["billing"]> {
+    const repository = await client.repository();
+    if (!repository.private) return "public";
+    const delegated = this.options.store.uow.read(
+      (tx) =>
+        decisionDelegation(
+          tx.project_preferences.get(job.project_id, job.project_id),
+        ).spending,
+    );
+    return delegated ? "private_delegated" : undefined;
+  }
+  /**
+   * A reported job whose dispatch reservation is still open: prove there is
+   * no run (releasing the slot), or bind the original run, cancel it and
+   * release it once GitHub reports it terminal. Never dispatches.
+   */
+  private async settle(
+    job: MacosCheckJob,
+    config: GithubMergeGateExecutor,
+    client: Client,
+    journal: GithubDispatchJournal,
+    ref: string,
+    intent: GithubDispatchIntent,
+  ): Promise<GithubDispatchIntent | undefined> {
+    const current = () =>
+      journal
+        .all()
+        .find((i) => i.project === job.project_id && i.attempt === job.id);
+    if (!intent.abandoned && !this.sessions.has(job.id))
+      journal.abandonProbe(intent, `macOS check ended: ${job.status}`);
+    let session: Awaited<ReturnType<typeof this.session>>;
+    try {
+      session = await this.session(job, config, client, journal, ref);
+    } catch {
+      return current();
+    }
+    if (!session) return current();
+    const run = await client.run(session.run.run_id);
+    if (run.id !== session.run.run_id || run.run_attempt !== 1)
+      return current();
+    if (run.status !== "completed") {
+      await this.cancel(job, client, journal, ref, run);
+      return current();
+    }
+    session.finish?.();
+    return current();
   }
   private async cancel(
     job: MacosCheckJob,
@@ -655,7 +781,12 @@ export class MacosCheckService {
     client: Client,
     run: GithubRun,
   ): Promise<Partial<MacosCheckJob>> {
-    const jobs = await client.jobs(run.id);
+    let jobs: Awaited<ReturnType<Client["jobs"]>>;
+    try {
+      jobs = await client.jobs(run.id);
+    } catch {
+      throw new EvidenceUnavailable();
+    }
     const remote = jobs.length === 1 ? jobs[0] : undefined;
     const steps = remote ? macosStepTimings(remote) : [];
     let report: MacosCheckReport | undefined;
@@ -668,26 +799,31 @@ export class MacosCheckService {
             log = (log + text).slice(-MAX_LOG_CHARS);
           };
         });
-        report = parseMacosCheckLog(log, job.files);
       } catch {
-        report = undefined;
+        throw Object.assign(new EvidenceUnavailable(), { steps });
       }
+      report = parseMacosCheckLog(log, job.files);
     }
-    const candidate = report?.candidate_sha === job.tested_sha;
+    const mismatch = report && macosReportMismatch(report, job);
     const timedOut =
       run.conclusion === "timed_out" ||
       remote?.steps.some((s) => s.conclusion === "timed_out") ||
       !!report?.timeouts.length;
+    const clean =
+      run.conclusion === "success" &&
+      remote?.conclusion === "success" &&
+      report?.test_step === "success" &&
+      report.exit_code === 0 &&
+      !report.timeouts.length &&
+      report.files.every(
+        (f) => f.status === "passed" && f.failed === 0 && f.passed > 0,
+      );
     const status: MacosCheckStatus =
       run.conclusion === "cancelled"
         ? job.reason === TIMEOUT
           ? "timed_out"
           : "cancelled"
-        : run.conclusion === "success" &&
-            report &&
-            candidate &&
-            report.exit_code === 0 &&
-            report.files.every((f) => f.status === "passed")
+        : report && !mismatch && clean
           ? "passed"
           : timedOut
             ? "timed_out"
@@ -696,8 +832,8 @@ export class MacosCheckService {
       status,
       steps,
       ...(report ? { report } : {}),
-      ...(report && !candidate
-        ? { reason: "汇总中的候选与本次检查不一致，结果不作通过" }
+      ...(mismatch
+        ? { reason: `${mismatch}，结果不作通过` }
         : !report && run.conclusion === "success"
           ? { reason: "未取得测试汇总，结果不作通过" }
           : {}),

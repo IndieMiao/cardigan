@@ -566,14 +566,8 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     delivery: string,
     head: string,
-    attempt: string,
   ) {
-    return this.central.prepareDeliveryCandidate(
-      project,
-      delivery,
-      head,
-      attempt,
-    );
+    return this.central.prepareDeliveryCandidate(project, delivery, head);
   }
   /** §3.3 step 2; a failure here is logged by the caller and repaired by reconcile. */
   async pinDelivery(input: {

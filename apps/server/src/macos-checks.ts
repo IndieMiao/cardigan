@@ -53,7 +53,6 @@ export function serverMacosChecks(options: {
         project,
         job.delivery_id,
         job.head_sha,
-        job.id,
       );
       return {
         sha: prepared.candidate_sha,

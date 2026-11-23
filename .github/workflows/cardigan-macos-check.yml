@@ -163,6 +163,20 @@ jobs:
           def status(value):
               return value if value in ('passed', 'failed') else 'skipped'
 
+          def phases(case):
+              # A case marks its own steps in task.meta.cardigan_phases as
+              # [{name, at_ms}] (ms since it started); those survive a timeout.
+              meta = case.get('meta')
+              raw = meta.get('cardigan_phases') if isinstance(meta, dict) else None
+              out, last = [], 0
+              for mark in raw[:50] if isinstance(raw, list) else []:
+                  at = mark.get('at_ms') if isinstance(mark, dict) else None
+                  if isinstance(at, bool) or not isinstance(at, (int, float)) or not last <= at < 10 ** 12:
+                      continue
+                  last = int(at)
+                  out.append({'name': text(mark.get('name'), 80), 'at_ms': last})
+              return out
+
           exit_code = os.environ.get('TEST_EXIT_CODE', '')
           summary = {
               'version': 1,
@@ -198,12 +212,17 @@ jobs:
                       if re.search(r'\breal hc\b', row['title'], re.I):
                           summary['real_hc_cases'].append({'file': name, **row})
                       if any('timed out' in str(m).lower() for m in case.get('failureMessages', [])):
-                          summary['timeouts'].append({'file': name, **row, 'file_cases': timeline[:50]})
+                          summary['timeouts'].append({'file': name, **row, 'phases': phases(case), 'file_cases': timeline[:50]})
               summary['files'].append(entry)
           summary['real_hc_cases'] = summary['real_hc_cases'][:32]
           summary['timeouts'] = summary['timeouts'][:8]
 
           line = json.dumps(summary, ensure_ascii=False, separators=(',', ':'))
+          # Stay well inside the host's line limit: other cases' timings go first.
+          while len(line.encode()) > 60000 and any(t['file_cases'] for t in summary['timeouts']):
+              for t in summary['timeouts']:
+                  t['file_cases'] = t['file_cases'][:len(t['file_cases']) // 2]
+              line = json.dumps(summary, ensure_ascii=False, separators=(',', ':'))
           print(json.dumps(summary, ensure_ascii=False, indent=2))
           if os.environ.get('GITHUB_STEP_SUMMARY'):
               with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
