@@ -72,6 +72,18 @@ export function AttachmentRefBody({
       openInTab(href, kind).catch(() => setError(`未能打开 ${name}`));
     }
   };
+  // An image chip near the right edge opens its preview leftwards (V-3069).
+  const placePeek = (target: EventTarget) => {
+    const chip = (target as Element).closest?.<HTMLElement>(
+      'a[data-attachment-ref][data-kind="image"]',
+    );
+    const peek = chip?.querySelector(".ui-attachment-ref-peek");
+    if (!chip || !peek) return;
+    const right = chip.getBoundingClientRect().left + peek.scrollWidth;
+    if (right > document.documentElement.clientWidth)
+      chip.dataset.peekAlign = "end";
+    else delete chip.dataset.peekAlign;
+  };
   return (
     <>
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: the chips are links; Enter on a link fires this click. */}
@@ -79,6 +91,8 @@ export function AttachmentRefBody({
       <div
         className={className}
         onClick={onClick}
+        onMouseOver={(event) => placePeek(event.target)}
+        onFocus={(event) => placePeek(event.target)}
         dangerouslySetInnerHTML={{ __html: html }}
       />
       {error && (

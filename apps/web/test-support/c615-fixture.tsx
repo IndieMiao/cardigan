@@ -31,7 +31,12 @@ const file = (id: string, name: string, mime: string, size: number) =>
     download_path: `/__c615/files/${id}${mime === "image/png" ? ".png" : ""}`,
   });
 const attachments = [
-  file("attachment-141", "新手引导评审.pdf", "application/pdf", 1_843_200),
+  file(
+    "attachment-141",
+    "Gensen前30分钟新手引导评审_第二版_含所有者批注与数值修订建议_最终稿_2026-11-23_v7.pdf",
+    "application/pdf",
+    1_843_200,
+  ),
   file("attachment-142", "第一关截图.png", "image/png", 312_000),
   file("attachment-143", "server.log", "text/plain", 48_000),
 ];

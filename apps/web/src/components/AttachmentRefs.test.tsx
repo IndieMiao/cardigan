@@ -161,6 +161,27 @@ test("an image chip previews the C-614 preview image and falls back to the local
   );
 });
 
+test("an image chip near the right edge opens its hover preview leftwards", () => {
+  const body = timeline("看 attachment-5");
+  const chip = within(body).getByRole("link", { name: /shot\.png/u });
+  const peek = chip.querySelector(".ui-attachment-ref-peek") as HTMLElement;
+  Object.defineProperty(peek, "scrollWidth", { value: 230 });
+  Object.defineProperty(document.documentElement, "clientWidth", {
+    value: 390,
+    configurable: true,
+  });
+  const at = (left: number) =>
+    vi.spyOn(chip, "getBoundingClientRect").mockReturnValue({
+      left,
+    } as DOMRect);
+  at(200);
+  fireEvent.mouseOver(chip);
+  expect(chip.dataset.peekAlign).toBe("end");
+  at(20);
+  fireEvent.focus(chip);
+  expect(chip.dataset.peekAlign).toBeUndefined();
+});
+
 test("a PDF chip opens a local copy in a new tab", async () => {
   const tab = { opener: {} as unknown, location: { href: "" }, close: vi.fn() };
   const open = vi.spyOn(window, "open").mockReturnValue(tab as never);
@@ -270,6 +291,22 @@ test("`#` opens at a word start only, and pending numbers follow the files sent"
       "attachment-3",
     ),
   ).toEqual({ body: "见 attachment-3 后", caret: 15 });
+  // Chinese text or punctuation right after ends the number: no space.
+  expect(
+    insertAttachmentRef(
+      "见 #pd，后",
+      { start: 2, query: "pd", end: 5 },
+      "attachment-3",
+    ).body,
+  ).toBe("见 attachment-3，后");
+  // ASCII text right after needs the space to stay a separate word.
+  expect(
+    insertAttachmentRef(
+      "见 #pdand",
+      { start: 2, query: "pd", end: 5 },
+      "attachment-3",
+    ).body,
+  ).toBe("见 attachment-3 and");
   expect(
     numberPendingRefs(
       "attachment-new-3 和 attachment-new-5 与 attachment-2",

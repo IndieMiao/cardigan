@@ -1,4 +1,4 @@
-// C-615: attachments in comments. Captures 1440 × light/dark of the card
+// C-615: attachments in comments. Captures 1440 and 390 × light/dark of the card
 // page: the timeline with attachment chips (own, other card, unknown number as
 // text, an image chip hovered), the comment box with chosen files as chips and
 // a refused file's reason, and the `#` list open. Measures chip geometry and
@@ -149,18 +149,30 @@ try {
         options: [...document.querySelectorAll("[role=option]")].map(
           (e) => e.textContent,
         ),
+        // The hover preview, if shown, stays inside the viewport.
+        peek: (() => {
+          const shown = [
+            ...document.querySelectorAll(".ui-attachment-ref-peek"),
+          ].find((e) => getComputedStyle(e).display !== "none");
+          if (!shown) return null;
+          const r = shown.getBoundingClientRect();
+          return { left: Math.round(r.left), right: Math.round(r.right) };
+        })(),
         scrollWidth: document.documentElement.scrollWidth,
         innerWidth,
       };
     });
-  await send("Emulation.setDeviceMetricsOverride", {
-    width: 1440,
-    height: 1000,
-    deviceScaleFactor: 1,
-    mobile: false,
-  });
-  for (const theme of ["light", "dark"]) {
-    const result = { theme, shots: [] };
+  for (const [width, theme] of [1440, 390].flatMap((w) =>
+    ["light", "dark"].map((t) => [w, t]),
+  )) {
+    await send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height: width > 600 ? 1000 : 844,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    const tag = `${width}-${theme}`;
+    const result = { width, theme, shots: [] };
     cases.push(result);
     // The Workbench follows the system colour scheme (theme.css media query).
     await send("Emulation.setEmulatedMedia", {
@@ -192,9 +204,11 @@ try {
     await settle();
     // Hover the image chip so its preview shows.
     const image = await run(() => {
-      const r = document
-        .querySelector('a.ui-attachment-ref[data-kind="image"]')
-        .getBoundingClientRect();
+      const chip = document.querySelector(
+        'a.ui-attachment-ref[data-kind="image"]',
+      );
+      chip.scrollIntoView({ block: "center" });
+      const r = chip.getBoundingClientRect();
       return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
     });
     await send("Input.dispatchMouseEvent", {
@@ -204,7 +218,7 @@ try {
     });
     await settle();
     result.timeline = await measure();
-    result.shots.push(await shot(`timeline-${theme}.png`));
+    result.shots.push(await shot(`timeline-${tag}.png`));
     await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
 
     // The comment box: two chosen files, one refused, then `#`.
@@ -231,41 +245,51 @@ try {
     await run(() => document.querySelector(".comment-input").focus());
     await settle();
     result.files = await measure();
-    result.shots.push(await shot(`comment-files-${theme}.png`));
+    result.shots.push(await shot(`comment-files-${tag}.png`));
     await send("Input.insertText", { text: "复测结果见 #" });
     await until("document.querySelectorAll('[role=option]').length > 0");
     await settle();
     result.box = await measure();
-    result.shots.push(await shot(`comment-box-${theme}.png`));
+    result.shots.push(await shot(`comment-box-${tag}.png`));
   }
   await writeFile(
     resolve(output, "measurements.json"),
     `${JSON.stringify(cases, null, 2)}\n`,
   );
-  const [light, dark] = cases;
-  assert.equal(light.scheme.dark, false, "light scheme");
-  assert.equal(dark.scheme.dark, true, "dark scheme");
-  assert.notEqual(
-    light.scheme.background,
-    dark.scheme.background,
-    "light and dark backgrounds differ",
-  );
-  for (const name of ["timeline", "comment-files", "comment-box"]) {
-    const [a, b] = await Promise.all(
-      ["light", "dark"].map((theme) =>
-        readFile(resolve(output, `${name}-${theme}.png`)),
-      ),
+  for (const width of [1440, 390]) {
+    const light = cases.find((c) => c.width === width && c.theme === "light");
+    const dark = cases.find((c) => c.width === width && c.theme === "dark");
+    assert.equal(light.scheme.dark, false, `${width}: light scheme`);
+    assert.equal(dark.scheme.dark, true, `${width}: dark scheme`);
+    assert.notEqual(
+      light.scheme.background,
+      dark.scheme.background,
+      `${width}: light and dark backgrounds differ`,
     );
-    assert(!a.equals(b), `${name}: light and dark shots differ`);
+    for (const name of ["timeline", "comment-files", "comment-box"]) {
+      const [a, b] = await Promise.all(
+        ["light", "dark"].map((theme) =>
+          readFile(resolve(output, `${name}-${width}-${theme}.png`)),
+        ),
+      );
+      assert(!a.equals(b), `${name} ${width}: light and dark shots differ`);
+    }
   }
   for (const c of cases) {
-    assert.equal(c.timeline.chips.length, 6, `${c.theme}: chips`);
-    assert.equal(c.timeline.plain, true, `${c.theme}: unknown stays text`);
-    assert.equal(c.files.pending.length, 2, `${c.theme}: pending`);
-    assert.equal(c.files.problems.length, 1, `${c.theme}: refused`);
-    assert.equal(c.box.options.length, 5, `${c.theme}: candidates`);
+    const label = `${c.width}/${c.theme}`;
+    assert.equal(c.timeline.chips.length, 6, `${label}: chips`);
+    assert.equal(c.timeline.plain, true, `${label}: unknown stays text`);
+    assert(c.timeline.peek, `${label}: hover preview shown`);
+    assert(
+      c.timeline.peek.left >= 0 &&
+        c.timeline.peek.right <= c.timeline.innerWidth,
+      `${label}: hover preview inside the viewport`,
+    );
+    assert.equal(c.files.pending.length, 2, `${label}: pending`);
+    assert.equal(c.files.problems.length, 1, `${label}: refused`);
+    assert.equal(c.box.options.length, 5, `${label}: candidates`);
     for (const m of [c.timeline, c.files, c.box])
-      assert(m.scrollWidth <= m.innerWidth, `${c.theme}: page overflows`);
+      assert(m.scrollWidth <= m.innerWidth, `${label}: page overflows`);
   }
 } finally {
   await browser?.close();

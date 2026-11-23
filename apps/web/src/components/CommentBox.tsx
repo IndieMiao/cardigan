@@ -696,23 +696,29 @@ export function CommentBox({
         </p>
       )}
       {expanded && (
-        <div className="comment-tabs" role="tablist" aria-label="评论编辑方式">
-          <Button
-            type="button"
-            role="tab"
-            aria-selected={tab === "write"}
-            onClick={() => setTab("write")}
+        <div className="ui-comment-toolbar">
+          <div
+            className="comment-tabs"
+            role="tablist"
+            aria-label="评论编辑方式"
           >
-            编写
-          </Button>
-          <Button
-            type="button"
-            role="tab"
-            aria-selected={tab === "preview"}
-            onClick={() => setTab("preview")}
-          >
-            预览
-          </Button>
+            <Button
+              type="button"
+              role="tab"
+              aria-selected={tab === "write"}
+              onClick={() => setTab("write")}
+            >
+              编写
+            </Button>
+            <Button
+              type="button"
+              role="tab"
+              aria-selected={tab === "preview"}
+              onClick={() => setTab("preview")}
+            >
+              预览
+            </Button>
+          </div>
           <FilePicker
             label="上传附件"
             accept={UPLOAD_ACCEPT}

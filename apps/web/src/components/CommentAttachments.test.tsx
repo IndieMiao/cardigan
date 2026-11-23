@@ -344,13 +344,14 @@ test("choosing a reference mid-sentence replaces only the `#` and its query", ()
   input.setSelectionRange(4, 4);
   fireEvent.select(input);
   fireEvent.click(screen.getByRole("option", { name: /评审\.pdf/u }));
-  expect(input.value).toBe("请看 attachment-3 后续说明。");
-  const typed = "请看 #评后续";
+  // Chinese text after the reference ends the number: no space is added.
+  expect(input.value).toBe("请看 attachment-3后续说明。");
+  const typed = "请看 #评，后续";
   fireEvent.change(input, { target: { value: typed } });
   input.setSelectionRange(5, 5);
   fireEvent.select(input);
   fireEvent.keyDown(input, { key: "Enter" });
-  expect(input.value).toBe("请看 attachment-3 后续");
+  expect(input.value).toBe("请看 attachment-3，后续");
 });
 
 test("the preview reads another card's attachment named for the first time; unreadable numbers stay text", async () => {

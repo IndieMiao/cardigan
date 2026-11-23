@@ -1033,8 +1033,11 @@
     height: var(--ui-arrow);
     color: var(--text-muted);
   }
+  /* A long name is cut short so the chip never widens the body: a percentage
+     cap does not shrink an inline box's min-content (V-3069). */
   .ui-attachment-ref-name {
     min-width: 0;
+    max-width: min(var(--ui-search-max), 50vw);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1051,9 +1054,17 @@
     background: var(--surface);
     box-shadow: 0 var(--ui-space-1) var(--ui-space-3) rgb(0 0 0 / 0.16);
   }
+  /* Near the right edge the preview opens leftwards (AttachmentRefBody). */
+  .ui-attachment-ref[data-peek-align="end"] > .ui-attachment-ref-peek {
+    right: 0;
+    left: auto;
+  }
   .ui-attachment-ref-peek > img {
     display: block;
-    width: calc(var(--ui-graph-node) * 1.25);
+    width: min(
+      calc(var(--ui-graph-node) * 1.25),
+      calc(100vw - var(--ui-space-4))
+    );
     height: var(--ui-graph-node);
     object-fit: contain;
   }
@@ -1092,7 +1103,7 @@
   }
   .ui-file-chip-name {
     min-width: 0;
-    max-width: var(--ui-search-max);
+    max-width: min(var(--ui-search-max), 30vw);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1114,7 +1125,9 @@
     justify-content: center;
     flex: none;
     width: var(--ui-control);
-    height: 100%;
+    /* A full 28px target: it overlaps the chip's top and bottom border. */
+    height: var(--ui-control);
+    margin-block: calc(-1 * var(--ui-stroke));
     padding: 0;
     border: 0;
     border-radius: 0 var(--ui-radius) var(--ui-radius) 0;
@@ -1146,7 +1159,13 @@
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
   }
-  .ui-file-picker {
+  /* The comment box's tabs, with the upload button at the far end. */
+  .ui-comment-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+  }
+  button.ui-file-picker {
     margin-inline-start: auto;
     gap: var(--ui-space-1);
   }

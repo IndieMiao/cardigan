@@ -204,7 +204,11 @@ export function attachmentQuery(
   return { start, query, end: caret };
 }
 
-/** Replace the `#query` with the reference and a trailing space. */
+/**
+ * Replace the `#query` with the reference. A space follows unless the text
+ * after it already starts with a space or with a non-ASCII character such as
+ * Chinese text or punctuation (`attachment-3，`), which ends the number too.
+ */
 export function insertAttachmentRef(
   body: string,
   query: AttachmentQuery,
@@ -213,7 +217,8 @@ export function insertAttachmentRef(
   const before = body.slice(0, query.start);
   const after = body.slice(query.end);
   const space = /^\s/u.test(after);
-  const inserted = `${token}${space ? "" : " "}`;
+  const joined = /^[^\p{ASCII}]/u.test(after);
+  const inserted = `${token}${space || joined ? "" : " "}`;
   return {
     body: before + inserted + after,
     caret: before.length + inserted.length + (space ? 1 : 0),
