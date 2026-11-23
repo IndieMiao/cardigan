@@ -105,6 +105,8 @@ export function CommentBox({
   const caret = useRef<number | undefined>(undefined);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  /** Host attachment limit from the session; unknown on older servers. */
+  const attachmentLimit = client.attachmentMaxBytes?.();
   const [focused, setFocused] = useState(false);
   const [focusRequest, setFocusRequest] = useState(0);
   const afterFocus = useRef<((input: HTMLTextAreaElement) => void) | undefined>(
@@ -341,12 +343,11 @@ export function CommentBox({
       return;
     }
     // Refuse before posting: the comment is created first, attachments follow.
-    const limit = client.attachmentMaxBytes?.();
     if (
-      limit !== undefined &&
-      images.some((image) => image.file.size > limit)
+      attachmentLimit !== undefined &&
+      images.some((image) => image.file.size > attachmentLimit)
     ) {
-      setError(`附件不能超过 ${formatMiB(limit)}。`);
+      setError(`附件不能超过 ${formatMiB(attachmentLimit)}。`);
       return;
     }
     sending.current = true;
@@ -478,7 +479,11 @@ export function CommentBox({
             aria-activedescendant={
               listOpen && matches.length > 0 ? optionId(current) : undefined
             }
-            placeholder="支持 Markdown；@ 提及员工；可以直接粘贴图片"
+            placeholder={
+              attachmentLimit === undefined
+                ? "支持 Markdown；@ 提及员工；可以直接粘贴图片"
+                : `支持 Markdown；@ 提及员工；可以直接粘贴图片，单张不超过 ${formatMiB(attachmentLimit)}`
+            }
             rows={expanded ? 6 : 2}
             value={body}
             disabled={submitting}
@@ -502,10 +507,22 @@ export function CommentBox({
                 (file) => file.type.startsWith("image/"),
               );
               if (files.length === 0) return;
+              // Refuse an oversized image here: once listed it could not be
+              // removed and would block the comment (C-616).
+              const accepted =
+                attachmentLimit === undefined
+                  ? files
+                  : files.filter((file) => file.size <= attachmentLimit);
+              if (
+                attachmentLimit !== undefined &&
+                accepted.length < files.length
+              )
+                setError(`附件不能超过 ${formatMiB(attachmentLimit)}。`);
+              if (accepted.length === 0) return;
               startDraft();
               setImages((current) => [
                 ...current,
-                ...files.map((file) => ({
+                ...accepted.map((file) => ({
                   id: crypto.randomUUID(),
                   idempotencyKey: crypto.randomUUID(),
                   name: file.name || file.type,
