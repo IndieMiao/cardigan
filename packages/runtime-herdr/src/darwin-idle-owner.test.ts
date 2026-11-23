@@ -1,5 +1,5 @@
-import { execFileSync, spawn } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
   existsSync,
@@ -13,15 +13,24 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import type { RuntimeRef } from "@cardigan/domain";
 import { afterAll, afterEach, expect, test, vi } from "vitest";
+import { testHcBinary } from "../../../test-support/hc.js";
+import {
+  createPrivateTestRoot,
+  createTestRuntime,
+} from "../../../test-support/paths.js";
+import { corePid, stopCore } from "../test-support/hc-core.js";
 import { enrollDarwinOwner, stopDarwinOwner } from "./darwin-idle-owner.js";
 import { DARWIN_OWNER_SEED, darwinOwnerKey } from "./darwin-owner-key.js";
 import type { ExecutionConfig } from "./execution.js";
 import { assignment, launch, role } from "./test-support.js";
 import { workerFileRequest } from "./worker-files.js";
+
+const execFileAsync = promisify(execFile);
 
 const generation = "a".repeat(32),
   fingerprint = "b".repeat(64),
@@ -144,8 +153,9 @@ test("registration excludes legacy, Linux, standing, external and disabled launc
   expect(await enrollDarwinOwner(missing, assignment, role, l)).toBe(l);
 });
 
-async function ownerFixture(publicPem?: string) {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), "darwin-owner-")),
+/** The registered clone, branch worktree and build checkout one owner guards. */
+async function enrolledWorkspace(parent = realpathSync(tmpdir())) {
+  const root = mkdtempSync(join(parent, "darwin-owner-")),
     tree = join(root, "worktrees/fixture/A-1"),
     build = join(root, "builds/fixture/A-1"),
     repo = join(root, "repos/fixture"),
@@ -174,9 +184,15 @@ async function ownerFixture(publicPem?: string) {
     cwd: tree,
   });
   const config = JSON.parse(launched.args[4]!);
+  mkdirSync(config.directory, { recursive: true });
+  return { root, tree, build, git, config, execution };
+}
+
+async function ownerFixture(publicPem?: string) {
+  const { root, tree, build, git, config, execution } =
+    await enrolledWorkspace();
   // A legacy owner holds a key that only the previous controller process had.
   if (publicPem) config.public_pem = publicPem;
-  mkdirSync(config.directory, { recursive: true });
   const proc = spawn(
     "python3",
     [
@@ -192,11 +208,16 @@ async function ownerFixture(publicPem?: string) {
     },
   );
   const closed = once(proc, "close");
+  let child: number | undefined;
   const cleanup = async () => {
     if (proc.exitCode === null) {
       proc.kill();
       await closed;
     }
+    // A failed test leaves the owner's direct child running; end it too.
+    try {
+      if (child) process.kill(child);
+    } catch {}
     rmSync(root, { recursive: true, force: true });
   };
   try {
@@ -206,6 +227,7 @@ async function ownerFixture(publicPem?: string) {
     throw err;
   }
   const enrolled = JSON.parse(readFileSync(join(root, "child"), "utf8"));
+  child = enrolled.pid;
   const options = {
     project_id: "fixture",
     assignment_id: "A-1",
@@ -273,7 +295,11 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
       "withdrawn",
     );
     writeFileSync(join(tree, "pending"), "preserve me");
+    // The abandoned challenge released the owner: the next request is served
+    // without waiting out the owner's 3 s signature read.
+    const served = Date.now();
     expect((await stop()).outcome).toBe("withdrawn");
+    expect(Date.now() - served).toBeLessThan(2500);
     expect(readFileSync(join(tree, "pending"), "utf8")).toBe("preserve me");
     rmSync(join(tree, "pending"));
     writeFileSync(join(build, "pending"), "keep build changes");
@@ -320,7 +346,42 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     process.kill(pid, 0);
     writeFileSync(join(root, "state"), "replaced");
     expect((await stop()).outcome).toBe("withdrawn");
-    writeFileSync(join(root, "state"), "idle");
+    // A harness that self-reports a busy state is never stopped.
+    for (const busy of ["working", "blocked", "error"]) {
+      writeFileSync(join(root, "state"), busy);
+      expect(await stop()).toEqual({
+        outcome: "withdrawn",
+        evidence: { stage: "probe", reason: "probe_invalid" },
+      });
+    }
+    expect(proc.exitCode).toBeNull();
+    process.kill(pid, 0);
+    // Claude Code and Codex never self-report: hc keeps their status null.
+    // Null alone is not idle: a turn still running on screen is never stopped.
+    writeFileSync(join(root, "state"), "null");
+    writeFileSync(join(root, "screen"), "busy");
+    expect(await stop()).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "probe_invalid" },
+    });
+    expect(proc.exitCode).toBeNull();
+    process.kill(pid, 0);
+    // A malformed core reply refuses this request; the owner keeps serving.
+    writeFileSync(join(root, "screen"), "malformed");
+    expect(await stop()).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "probe_invalid" },
+    });
+    // Still listening: an exited owner would answer conditional_close_unavailable.
+    writeFileSync(join(root, "screen"), "busy");
+    expect(await stop()).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "probe_invalid" },
+    });
+    expect(proc.exitCode).toBeNull();
+    process.kill(pid, 0);
+    // Back at its own empty prompt, the same null-status session may be stopped.
+    writeFileSync(join(root, "screen"), "idle");
     // A missing or replaced seed cannot serve this owner: refuse, never sign.
     const seed = join(dataDir, DARWIN_OWNER_SEED);
     renameSync(seed, `${seed}.saved`);
@@ -348,7 +409,8 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
   } finally {
     await cleanup();
   }
-}, 20000);
+  // About 19 real owner round trips, two of them with both 1.5 s idle reads.
+}, 30000);
 
 test("an owner enrolled with a key the controller cannot rebuild is never signed for", async () => {
   vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
@@ -420,3 +482,163 @@ test("a generation without an owner is refused with no further worker command", 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// C-602: the owner reads the terminal record and screen from the real core,
+// not a model. Only the Darwin platform/account checks and the native birth
+// adapter are substituted (on macOS the birth adapter is the native one); the
+// isolated session never touches a production socket or session.
+const hcBinary =
+  process.env.CARDIGAN_TEST_HC ?? join(homedir(), ".local/bin/hc");
+const hcAvailable = testHcBinary({ binary: hcBinary });
+test.skipIf(!hcAvailable || !["linux", "darwin"].includes(process.platform))(
+  "real hc: a null-status session at its steady empty prompt is stopped; one still in its turn, redrawing or reporting busy is not",
+  async () => {
+    vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+    // Short, canonical paths: Darwin limits UNIX socket names to 104 bytes.
+    const dir = createPrivateTestRoot();
+    const runtime = realpathSync(createTestRuntime(join(dir, "rt")));
+    const session = `own-${randomUUID().slice(0, 8)}`,
+      socket = join(runtime, "hc.sock");
+    const env = {
+      ...process.env,
+      HC_SESSION: session,
+      HC_SOCKET: socket,
+      XDG_RUNTIME_DIR: runtime,
+      XDG_STATE_HOME: join(dir, "state"),
+      XDG_CONFIG_HOME: join(dir, "config"),
+    };
+    const hc = async (...args: string[]) =>
+      (await execFileAsync(hcBinary, args, { env, timeout: 10000 })).stdout;
+    const transport = async (_: unknown, argv: readonly string[]) => ({
+      file: argv[0]!,
+      args: argv.slice(1),
+    });
+    const owned = async (
+      screen: "idle" | "busy" | "ticking",
+      report?: "working",
+    ) => {
+      const w = await enrolledWorkspace(dir);
+      // Names are unique among live terminals; the owner checks its own.
+      w.config.agent_name = ["fixture", screen, report]
+        .filter(Boolean)
+        .join("-");
+      const launched = JSON.parse(
+        await hc(
+          "run",
+          "--bg",
+          "--json",
+          "--no-parent",
+          "--no-notify",
+          "--name",
+          w.config.agent_name,
+          "--cwd",
+          w.tree,
+          ...Object.entries({
+            cardigan: "1",
+            project: "fixture",
+            assignment: "A-1",
+            run: "R-1",
+            generation,
+          }).flatMap(([k, v]) => ["--label", `${k}=${v}`]),
+          "--",
+          "python3",
+          "-IB",
+          resolve("packages/runtime-herdr/test-support/darwin-idle-fixture.py"),
+          resolve("deploy/darwin-idle-owner.py"),
+          JSON.stringify(w.config),
+          ["real", screen, ...(report ? [report] : [])].join(":"),
+        ),
+      );
+      const terminal = launched.address as string;
+      const record = async () =>
+        JSON.parse(await hc("get", terminal, "--json"));
+      await expect
+        .poll(() => existsSync(join(w.root, "child")), { timeout: 10000 })
+        .toBe(true);
+      await expect
+        .poll(
+          async () =>
+            (await hc("read", terminal, "--lines", "0")).includes(
+              "? for shortcuts",
+            ) && (await record()).foreground?.pid,
+          { timeout: 10000 },
+        )
+        .toEqual(expect.any(Number));
+      if (report)
+        await expect
+          .poll(async () => (await record()).status?.state, { timeout: 10000 })
+          .toBe(report);
+      const enrolled = JSON.parse(readFileSync(join(w.root, "child"), "utf8"));
+      const stop = () =>
+        stopDarwinOwner(
+          w.execution,
+          { ...ref, terminal_ref: `fixture/${terminal}` },
+          {
+            project_id: "fixture",
+            assignment_id: "A-1",
+            hangup_ms: 100,
+            terminate_ms: 500,
+            before_signal: () => true,
+            enrolled_process: enrolled,
+          },
+          transport,
+        );
+      return { ...w, terminal, record, enrolled, stop };
+    };
+    const refused = {
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "probe_invalid" },
+    };
+    try {
+      // Codex and Claude Code never send OSC 7501: status stays null in both.
+      const running = await owned("busy");
+      const quiet = await owned("idle");
+      for (const s of [running, quiet])
+        expect(await s.record()).toMatchObject({
+          state: "live",
+          status: null,
+          cwd: s.tree,
+          name: s.config.agent_name,
+          rm: false,
+          keep: false,
+        });
+      // The old turn is still running on screen: never signed, never stopped.
+      expect(await running.stop()).toEqual(refused);
+      expect((await running.record()).state).toBe("live");
+      process.kill(running.enrolled.pid, 0);
+      // Still redrawing above an idle-looking prompt: two reads differ, kept.
+      const drawing = await owned("ticking");
+      expect(await drawing.stop()).toEqual(refused);
+      expect((await drawing.record()).state).toBe("live");
+      process.kill(drawing.enrolled.pid, 0);
+      // Back at its own empty prompt: signed, TERM to the direct child only.
+      const before = await quiet.record();
+      expect(before.foreground.pid).toBe(before.pid);
+      expect(await quiet.stop()).toEqual({
+        outcome: "uncertain",
+        evidence: { stage: "confirm", reason: "confirmation_pending" },
+      });
+      await expect
+        .poll(async () => (await quiet.record()).state, { timeout: 10000 })
+        .toBe("finished");
+      expect((await quiet.record()).exit_code).toBe(143);
+      expect(() => process.kill(quiet.enrolled.pid, 0)).toThrow();
+      expect(existsSync(join(quiet.tree, ".git"))).toBe(true);
+      expect((await running.record()).state).toBe("live");
+      // A harness that reports itself busy is refused even at a prompt.
+      const working = await owned("idle", "working");
+      expect(await working.stop()).toEqual(refused);
+      process.kill(working.enrolled.pid, 0);
+      for (const s of [running, drawing, working]) await hc("kill", s.terminal);
+    } finally {
+      await stopCore({
+        session,
+        socket,
+        env,
+        pid: corePid({ session, socket, env }),
+      });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+  60000,
+);

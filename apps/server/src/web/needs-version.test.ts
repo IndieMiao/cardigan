@@ -6,7 +6,11 @@ import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { webHarness } from "../../test-support/web.js";
 import { project_id, seedWebProject } from "../../test-support/web-data.js";
-import { readNeedsVersion } from "./needs-version.js";
+import {
+  NEEDS_PHASE_REFRESH_MS,
+  needsClockPhase,
+  readNeedsVersion,
+} from "./needs-version.js";
 
 test("source version observes committed cross-connection and global changes, isolates projects, and never builds command state", async () => {
   const root = await mkdtemp(join(tmpdir(), "needs-version-"));
@@ -111,5 +115,38 @@ test("version preflight requires its own live session and full responses bind th
     expect((await fetch(`${path}/version`, { headers })).status).toBe(401);
   } finally {
     await h.close();
+  }
+});
+
+test("C-634 an unchanged project reuses its clock phase within the refresh span; data or a later clock recompute it", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    let computed = 0;
+    const phase = (version: string | undefined, now: string) =>
+      needsClockPhase(store, project_id, version, now, () => {
+        computed++;
+        return `${version}@${now}`;
+      });
+    const start = Date.parse("2030-01-01T00:00:00.000Z");
+    const at = (ms: number) => new Date(start + ms).toISOString();
+    expect(phase("v1", at(0))).toBe(`v1@${at(0)}`);
+    expect(phase("v1", at(NEEDS_PHASE_REFRESH_MS - 1))).toBe(`v1@${at(0)}`);
+    expect(computed).toBe(1);
+    // Another project never shares the phase.
+    needsClockPhase(store, "other" as ProjectId, "v1", at(1), () => "x");
+    expect(phase("v1", at(2))).toBe(`v1@${at(0)}`);
+    // A data change recomputes at once.
+    expect(phase("v2", at(3))).toBe(`v2@${at(3)}`);
+    // So does the end of the span, and a clock that moved backwards.
+    expect(phase("v2", at(3 + NEEDS_PHASE_REFRESH_MS))).toBe(
+      `v2@${at(3 + NEEDS_PHASE_REFRESH_MS)}`,
+    );
+    expect(phase("v2", at(0))).toBe(`v2@${at(0)}`);
+    // Without a snapshot version nothing is reused.
+    expect(phase(undefined, at(0))).toBe(`undefined@${at(0)}`);
+    expect(phase(undefined, at(0))).toBe(`undefined@${at(0)}`);
+    expect(computed).toBe(6);
+  } finally {
+    store.close();
   }
 });

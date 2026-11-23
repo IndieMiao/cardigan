@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   type RepositoryLock,
   type RepositoryLockKey,
+  type RepositoryLockSample,
   RepositoryLockTimeoutError,
   repositoryLock,
 } from "@cardigan/git-service";
@@ -73,13 +74,19 @@ export async function acquireRepositoryFlock(
  */
 export function hostRepositoryLock(
   dataDir: string,
-  options: { waitMs?: number; run?: FlockRunner } = {},
+  options: {
+    waitMs?: number;
+    run?: FlockRunner;
+    /** C-636: wait/hold time of every use, by operation. */
+    observe?: (sample: RepositoryLockSample) => void;
+  } = {},
 ): RepositoryLock {
   const flock = process.platform === "linux";
   const make = (waitMs?: number) =>
     repositoryLock({
       now: () => performance.now(),
       ...(waitMs === undefined ? {} : { waitMs }),
+      ...(options.observe ? { observe: options.observe } : {}),
       ...(flock
         ? {
             acquire: (key: RepositoryLockKey, remainingMs: number) =>

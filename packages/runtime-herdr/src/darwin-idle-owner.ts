@@ -138,6 +138,8 @@ export async function enrollDarwinOwner(
 
 // This relay has no signal operation. The same connected socket carries the challenge and response.
 // Exit 3: no owner listens for this generation (launched before enrollment).
+// A challenge the controller abandons (no signature line) closes the socket
+// at once, so the single-threaded owner is not held for its read timeout.
 const relay = `import os,socket,sys
 os.chdir(sys.argv[1])
 with socket.socket(socket.AF_UNIX) as s:
@@ -150,7 +152,10 @@ with socket.socket(socket.AF_UNIX) as s:
    line=f.readline(256)
    if not line.endswith(b'\\n'): sys.exit(1)
    sys.stdout.buffer.write(line); sys.stdout.buffer.flush()
-   if i==0: s.sendall(sys.stdin.buffer.readline(256))`;
+   if i==0:
+    signature=sys.stdin.buffer.readline(256)
+    if not signature.endswith(b'\\n'): sys.exit(1)
+    s.sendall(signature)`;
 
 type Refusal = RetirementEvidence["reason"];
 const refused = (reason: Refusal): IdleRetirementResult => ({
