@@ -10,7 +10,7 @@
  */
 import { performance } from "node:perf_hooks";
 import { type CardId, postComment } from "@cardigan/domain";
-import { readRunQueue } from "@cardigan/host";
+import { GithubDispatchJournal, readRunQueue } from "@cardigan/host";
 import { expect, test } from "vitest";
 import {
   acceptThroughMergeGate,
@@ -32,6 +32,8 @@ const ROUNDS = Number(process.env.REPLAY_ROUNDS ?? 20);
 /** Bulk history appended after seeding: the production shape is history-heavy. */
 const SYSTEM_EVENTS = Number(process.env.REPLAY_SYSTEM_EVENTS ?? 60_000);
 const CARD_EVENTS = Number(process.env.REPLAY_CARD_EVENTS ?? 150);
+/** Finished GitHub check dispatch phases per card, as every precheck leaves. */
+const DISPATCH_EVENTS = Number(process.env.REPLAY_DISPATCH_EVENTS ?? 6);
 
 test.skipIf(process.env.CARDIGAN_WORKBENCH_REPLAY !== "1")(
   "time Workbench version reads against production-shaped synthetic data",
@@ -63,8 +65,39 @@ test.skipIf(process.env.CARDIGAN_WORKBENCH_REPLAY !== "1")(
           });
       };
       append(undefined, SYSTEM_EVENTS);
-      for (const card of tx.cards.list(f.project_id))
+      for (const card of tx.cards.list(f.project_id)) {
         append(card.id, CARD_EVENTS);
+        for (let i = 0; i < DISPATCH_EVENTS; i++)
+          tx.events.append(f.project_id, {
+            id: tx.ids.nextEventId(),
+            seq: tx.ids.nextEventSequence(f.project_id, card.id),
+            card_id: card.id,
+            type: "github_check_dispatch",
+            actor: { kind: "system", project_id: f.project_id },
+            payload: {
+              project: f.project_id,
+              card: card.id,
+              attempt: `attempt-${i >> 1}`,
+              key: "k".repeat(64),
+              startedAt: f.clock.now(),
+              phase: "dispatching",
+              executor: "github-actions",
+              candidate: {
+                repo: "o/r",
+                ref: `refs/heads/ci/${i}`,
+                sha: "a".repeat(40),
+              },
+              externalRun: {
+                provider: "github",
+                run_id: i,
+                run_attempt: 1,
+                html_url: "https://example.invalid/run",
+              },
+              ...(i % 2 ? { finished: true } : {}),
+            },
+            created_at: f.clock.now(),
+          });
+      }
     });
     const st = f.state();
     const gate = {
@@ -160,6 +193,18 @@ test.skipIf(process.env.CARDIGAN_WORKBENCH_REPLAY !== "1")(
         sse_queue_revision: time(() =>
           JSON.stringify(
             readRunQueue(f.store).filter((r) => r.project_id === f.project_id),
+          ),
+        ),
+        journal_clone_all: time(() =>
+          f.store.uow.read((tx) =>
+            new GithubDispatchJournal(f.store)
+              .allAt(tx)
+              .filter((intent) => !intent.finished),
+          ),
+        ),
+        journal_executors: time(() =>
+          f.store.uow.read((tx) =>
+            new GithubDispatchJournal(f.store).unfinishedExecutorsAt(tx),
           ),
         ),
         capacity_unchanged: time(capacity),

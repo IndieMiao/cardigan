@@ -166,9 +166,8 @@ export function executionCapacity(
         target_limit: number;
       }
     >();
-    const remote = new GithubDispatchJournal(store)
-      .allAt(tx)
-      .filter((intent) => !intent.finished);
+    // C-634: counted without cloning every card's intents.
+    const remote = new GithubDispatchJournal(store).unfinishedExecutorsAt(tx);
     let merge_config_invalid = false;
     for (const project of projects) {
       const config = mergeGate?.forProject(project.id);
@@ -179,7 +178,7 @@ export function executionCapacity(
         machine_id: machine,
         running: Math.max(
           snapshot.mergeChecks.get(machine) ?? 0,
-          remote.filter((intent) => intent.executor === machine).length,
+          remote.filter((executor) => executor === machine).length,
         ),
         executor_type: config.executor
           ? (config.executor.type ?? "ssh")

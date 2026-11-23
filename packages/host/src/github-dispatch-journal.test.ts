@@ -259,6 +259,45 @@ test("bulk journal reads share immutable histories without hiding another connec
   expect(f.journal.unfinished()).toHaveLength(0);
 });
 
+test("C-634 counts unfinished executors from the shared projection without cloning or reading per stream", () => {
+  const f = setup();
+  const executors = () =>
+    f.store.uow.read((tx) => {
+      const history = vi.spyOn(tx.events, "listAfter");
+      const counted = f.journal.unfinishedExecutorsAt(tx);
+      expect(history).not.toHaveBeenCalled();
+      // Same answer as the cloning reader, and through the per-stream fallback.
+      expect(counted).toEqual(
+        f.journal
+          .allAt(tx)
+          .filter((intent) => !intent.finished)
+          .map((intent) => intent.executor),
+      );
+      expect(
+        f.journal.unfinishedExecutorsAt({
+          ...tx,
+          events: { listAfter: tx.events.listAfter },
+        }),
+      ).toEqual(counted);
+      return counted;
+    });
+  expect(executors()).toEqual([]);
+  f.journal.claim(f.intent, 1);
+  expect(executors()).toEqual([f.intent.executor]);
+  f.store.uow.run((tx) =>
+    tx.events.append(human.project_id, {
+      id: tx.ids.nextEventId(),
+      card_id: f.card.id,
+      seq: tx.ids.nextEventSequence(human.project_id, f.card.id),
+      type: "github_check_dispatch",
+      actor: { kind: "system", project_id: human.project_id },
+      payload: { ...f.intent, finished: true },
+      created_at: f.intent.startedAt,
+    }),
+  );
+  expect(executors()).toEqual([]);
+});
+
 test.each([
   "executor",
   "candidate",
