@@ -35,6 +35,7 @@ test("the real host registers and approves a release-chain candidate once per Ru
           app: "example.test",
           version: "test-v1",
           peer: "fixture",
+          test_identity: true,
         },
       ]),
       { mode: 0o600 },
@@ -94,6 +95,29 @@ test("the real host registers and approves a release-chain candidate once per Ru
         run: "R-1",
       },
     });
+    // A route not marked as the test signing identity is never auto-approved.
+    writeFileSync(
+      join(root, "routes.json"),
+      JSON.stringify([
+        {
+          project: "project",
+          machine: "worker",
+          platform: "android",
+          app: "example.test",
+          version: "test-v1",
+          peer: "fixture",
+        },
+      ]),
+      { mode: 0o600 },
+    );
+    await expect(
+      registerChainCandidate(
+        data,
+        { ...scope, run: "R-3" },
+        candidate(),
+        current,
+      ),
+    ).rejects.toThrow(/^Signing unavailable$/u);
     // Bytes that do not match the bound digest register nothing.
     await expect(
       registerChainCandidate(

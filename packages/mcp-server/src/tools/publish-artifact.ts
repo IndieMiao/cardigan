@@ -7,6 +7,7 @@ import {
   type DecisionId,
   holdsPublicationTool,
   RELEASE_CHAIN_OPTION,
+  releaseChainSmoked,
   releaseChainUrl,
   type TransactionContext,
 } from "@cardigan/domain";
@@ -158,7 +159,7 @@ export function publicationTool(options: PublicationOptions) {
   return defineTool({
     name: "publish_artifact",
     description:
-      "Publish one signed test APK to this project's configured HTTPS destination. Approval is either a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`, or the card's approved release chain, which covers the signed APK the system bound from the signing receipt. A release chain is one publish approval for intake, signing, signed intake and publication: kind approve, target.subject artifact_sha256 = the unsigned APK digest, and one option `release_chain` described exactly `发布链 <40-hex source commit> 发布到 <https APK URL template>`, where the template may use `<version>` (versionName) and `<sha12>` (first 12 hex of the signed APK digest). Use the chain decision as the basis for the unsigned intake. A failure before any OSS write consumes nothing: fix it and call again with the same decision. After a failure once writing began, calling again with the same (or a new) approval resumes: the files this release already wrote are read back and verified, only the missing ones are written, and nothing is overwritten. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths.",
+      "Publish one signed test APK to this project's configured HTTPS destination. Approval is either a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`, or the card's approved release chain, which covers the signed APK the system bound from the signing receipt and, when the card has a smoke step, only the one whose accepted smoke delivery names it (subject artifact_sha256). A release chain is one publish approval for intake, signing, signed intake and publication: kind approve, target.subject artifact_sha256 = the unsigned APK digest, and one option `release_chain` described exactly `发布链 <40-hex source commit> 发布到 <https APK URL template>`, where the template may use `<version>` (versionName) and `<sha12>` (first 12 hex of the signed APK digest). Use the chain decision as the basis for the unsigned intake. A failure before any OSS write consumes nothing: fix it and call again with the same decision. After a failure once writing began, calling again with the same (or a new) approval resumes: the files this release already wrote are read back and verified, only the missing ones are written, and nothing is overwritten. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths.",
     input,
     handler: async (request, ctx) => {
       const { actor, token } = ctx.identity,
@@ -204,6 +205,18 @@ export function publicationTool(options: PublicationOptions) {
             q?.resolution?.option === RELEASE_CHAIN_OPTION
               ? tx.events.listAfter(p, a.card_id, 0)
               : [],
+          )
+        )
+          throw new PublicationError("approval");
+        // C-612: under a chain, only the signed APK the card's smoke step
+        // accepted; checked again at the claim, before any write.
+        if (
+          q?.resolution?.option === RELEASE_CHAIN_OPTION &&
+          !releaseChainSmoked(
+            a.card_id,
+            a.sha256,
+            tx.work_items.list(p),
+            tx.deliveries.list(p),
           )
         )
           throw new PublicationError("approval");

@@ -8,6 +8,7 @@ import {
   project_id,
   seedProject,
   serverCard,
+  workItems,
 } from "./test-support.js";
 import { PublicationError, publicationTool } from "./tools/publish-artifact.js";
 
@@ -470,6 +471,108 @@ test("an approved release chain publishes the signed APK it bound, at its templa
       sha256: signed,
     });
     await expect(tool.handler(request, ctx)).rejects.toThrow("already_claimed");
+  } finally {
+    store.close();
+  }
+});
+
+test("C-612: under a chain only the signed APK the card's smoke step accepted is published", async () => {
+  const { store, entry, ctx } = publisherContext();
+  try {
+    const unsigned = "a".repeat(64),
+      signed = "b".repeat(64),
+      template = "https://example.invalid/test/<version>-<sha12>/app.apk",
+      url = `https://example.invalid/test/1.0-${signed.slice(0, 12)}/app.apk`;
+    const smoke = (status: string) =>
+      ({
+        ...workItems,
+        id: "W-7",
+        title: "冒烟",
+        role_id: "release_ops",
+        template_key: "smoke",
+        status,
+      }) as never;
+    const delivered = (sha: string) =>
+      ({
+        id: "D-7",
+        work_item_id: "W-7",
+        kind: "test_report",
+        summary: "冒烟通过",
+        subject: { kind: "artifact_sha256", value: sha },
+        status: "accepted",
+        requested_verifiers: [],
+        attachments: [],
+        author: "assignment:A-1",
+        created_at: NOW,
+      }) as never;
+    store.uow.run((tx) => {
+      tx.decisions.put(
+        project_id,
+        approval(
+          "Q-1",
+          unsigned,
+          [
+            {
+              key: "release_chain",
+              description: `发布链 ${"c".repeat(40)} 发布到 ${template}`,
+              impact: "按链执行",
+            },
+          ],
+          "release_chain",
+          [],
+        ),
+      );
+      tx.attachments.put(project_id, {
+        id: "attachment-1",
+        kind: "artifact",
+        basis: "Q-1" as Decision["id"],
+        card_id,
+        sha256: signed,
+        size: 6,
+        mime: "application/vnd.android.package-archive",
+        uploaded_by: "system",
+        storage_path: "",
+        attach_to: { kind: "timeline_entry", id: entry },
+      } as Attachment);
+      tx.events.append(project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project_id, card_id),
+        card_id,
+        type: "release_chain_signed",
+        actor: { kind: "system", project_id },
+        created_at: NOW,
+        payload: {
+          decision_id: "Q-1",
+          request_id: "f".repeat(32),
+          sha256: signed,
+        },
+      });
+      tx.work_items.put(project_id, smoke("in_progress"));
+    });
+    const request = {
+      attachment_id: "attachment-1",
+      decision_id: "Q-1",
+      version: "1.0",
+      versionCode: 1,
+    };
+    const pub = vi.fn(async (_p, _a, _r, claim: (u: string) => void) => {
+      claim(url);
+      return { url, size: 6, sha256: signed };
+    });
+    const tool = publicationTool({ publishArtifact: pub });
+    // Smoke not finished, or it accepted other bytes: refused before host IO.
+    await expect(tool.handler(request, ctx)).rejects.toThrow("approval");
+    store.uow.run((tx) => {
+      tx.work_items.put(project_id, smoke("accepted"));
+      tx.deliveries.put(project_id, delivered("d".repeat(64)));
+    });
+    await expect(tool.handler(request, ctx)).rejects.toThrow("approval");
+    expect(pub).not.toHaveBeenCalled();
+    store.uow.run((tx) => tx.deliveries.put(project_id, delivered(signed)));
+    await expect(tool.handler(request, ctx)).resolves.toMatchObject({
+      url,
+      sha256: signed,
+    });
   } finally {
     store.close();
   }

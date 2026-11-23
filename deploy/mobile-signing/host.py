@@ -192,7 +192,7 @@ def chain_grant(root, db, identity, request, source):
     Internal Android test candidates only. The control service passes the
     chain's bound source commit and unsigned digest, the build reference and
     the byte count; the single route for this project, machine and platform
-    fixes the app and credential version. The signer still checks project,
+    marked `"test_identity": true` fixes the app and credential version. The signer still checks project,
     machine, Run, digest and package name. One candidate per Run: an existing
     grant for this scope is reported, never replaced.
     """
@@ -217,8 +217,10 @@ def chain_grant(root, db, identity, request, source):
     found = known()
     if found:
         return found
+    # Only a route the administrator marked as this project's internal test
+    # signing identity; any other route keeps per-candidate operator approval.
     hits = [r for r in config(root / 'routes.json')
-            if all(r[k] == identity[k] for k in ('project', 'machine', 'platform'))]
+            if all(r[k] == identity[k] for k in ('project', 'machine', 'platform')) and r.get('test_identity') is True]
     require(len(hits) == 1)
     s = {**identity, 'id': secrets.token_hex(16), 'version': hits[0]['version'], 'app': hits[0]['app'],
          'build': request['build'], 'commit': request['commit'], 'sha256': request['sha256'],

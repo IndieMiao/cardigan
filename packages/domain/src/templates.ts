@@ -291,7 +291,9 @@ export const releaseCardTemplate = {
       role_id: "release_ops",
       required: true,
       depends_on: ["signing"],
-      completion_criteria: ["用签后入库的包冒烟，附结果"],
+      completion_criteria: [
+        "用签后入库的包冒烟，附结果；交付的 subject 填这份签后包的 artifact_sha256，外发只认冒烟通过的这份",
+      ],
     },
     {
       key: "publish",

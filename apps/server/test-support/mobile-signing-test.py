@@ -75,7 +75,8 @@ class Signing(unittest.TestCase):
                    'project':'example','machine':'worker','run':'R-1','card':'C-1','assignment':'A-1','worker_uid':os.getuid()+1}
         self.ctx={k:self.spec[k] for k in SCOPE}; self.calls=0
         route={k:self.spec[k] for k in ('project','machine','platform','version','app')}
-        save(self.host/'routes.json',canonical([{**route,'peer':'fixture'}]))
+        # The fixture identity is the internal test signing identity (C-612).
+        save(self.host/'routes.json',canonical([{**route,'peer':'fixture','test_identity':True}]))
         def program(name,body):
             p=save(self.worker/name,'#!/usr/bin/python3\n'+body); p.chmod(0o700); return str(p)
         fingerprint=hashlib.sha256(b'fixture-public').hexdigest()
@@ -380,6 +381,26 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertEqual(host.chain_grant(self.host, self.db, ident, req, io.BytesIO(self.candidate.read_bytes())),
                          (spec['id'], 'other'))
         self.assertIsNone(host.chain_of(self.db, spec['id']))
+
+    def mark_test_identity(self, extra=()):
+        routes = json.loads((self.host/'routes.json').read_text())
+        save(self.host/'routes.json', canonical([{**r, 'test_identity': True} for r in routes] + list(extra)))
+
+    def test_release_chain_only_for_the_marked_test_identity(self):
+        # C-612: an ordinary route keeps per-candidate operator approval.
+        routes = json.loads((self.host/'routes.json').read_text())
+        save(self.host/'routes.json', canonical([{k: v for k, v in r.items() if k != 'test_identity'} for r in routes]))
+        with self.assertRaises(ValueError):
+            self.chain()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM grants').fetchone(), (1,))
+        # A production route next to the marked test route is never chosen.
+        production = {**routes[0], 'version': 'release-v1', 'app': 'example.release'}
+        production.pop('test_identity', None)
+        self.mark_test_identity([production])
+        _, (rid, status) = self.chain()
+        self.assertEqual(status, 'new')
+        spec = json.loads(self.db.execute('SELECT spec FROM grants WHERE id=?', (rid,)).fetchone()[0])
+        self.assertEqual((spec['version'], spec['app']), ('test-v1', 'test.fixture'))
 
     def test_release_chain_refuses_substitution_ios_and_ambiguous_routes(self):
         before = self.db.execute('SELECT count(*) FROM grants').fetchone()

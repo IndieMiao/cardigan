@@ -5,6 +5,7 @@ import {
   RELEASE_CHAIN_SIGNED,
   releaseChainOf,
   releaseChainSigned,
+  releaseChainSmoked,
   releaseChainUrl,
 } from "./artifact-publication.js";
 import { prepareAttachment, uploadAttachment } from "./commands/attachments.js";
@@ -23,7 +24,13 @@ import {
   role,
   value,
 } from "./commands/test-fixtures.js";
-import type { Attachment, Decision, Event } from "./entities.js";
+import type {
+  Attachment,
+  Decision,
+  Delivery,
+  Event,
+  WorkItem,
+} from "./entities.js";
 import { releaseCardTemplate } from "./templates.js";
 
 const project = human.project_id,
@@ -379,4 +386,57 @@ test("C-612: an artifact on the chain basis must carry a digest the approved cha
   // Ordinary bases and evidence keep their existing use.
   expect((await upload("e".repeat(64), { basis: general.key })).ok).toBe(true);
   expect((await upload("e".repeat(64), { kind: "evidence" })).ok).toBe(true);
+});
+
+test("C-612: a chain publishes only the signed bytes the card's smoke step accepted", () => {
+  const smoke = (over: Partial<WorkItem> = {}) =>
+    ({
+      id: id("work_item", 7),
+      card_id: c,
+      kind: "produce",
+      template_key: "smoke",
+      status: "accepted",
+      ...over,
+    }) as WorkItem;
+  const delivered = (sha: string, over: Partial<Delivery> = {}) =>
+    ({
+      id: "D-7",
+      work_item_id: id("work_item", 7),
+      status: "accepted",
+      subject: { kind: "artifact_sha256", value: sha },
+      ...over,
+    }) as Delivery;
+  // No smoke step on the card: unchanged.
+  expect(releaseChainSmoked(c, signed, [], [])).toBe(true);
+  expect(releaseChainSmoked(c, signed, [smoke()], [delivered(signed)])).toBe(
+    true,
+  );
+  expect(
+    releaseChainSmoked(c, signed, [smoke()], [delivered(signed.toUpperCase())]),
+  ).toBe(true);
+  for (const [items, deliveries] of [
+    [[smoke({ status: "in_progress" })], [delivered(signed)]],
+    [[smoke()], [delivered(unsigned)]],
+    [[smoke()], [delivered(signed, { status: "rejected" })]],
+    [
+      [smoke()],
+      [delivered(signed, { subject: { kind: "git_head", value: commit } })],
+    ],
+    [[smoke()], []],
+  ] as const)
+    expect(releaseChainSmoked(c, signed, [...items], [...deliveries])).toBe(
+      false,
+    );
+  // A cancelled smoke step, or another card's, does not hold this card.
+  expect(
+    releaseChainSmoked(c, signed, [smoke({ status: "cancelled" })], []),
+  ).toBe(true);
+  expect(
+    releaseChainSmoked(
+      c,
+      signed,
+      [smoke({ card_id: id("card", 2), status: "todo" })],
+      [],
+    ),
+  ).toBe(true);
 });

@@ -2,7 +2,13 @@ import {
   categoryAuthorization,
   categoryDelegated,
 } from "./decision-authorization.js";
-import type { Attachment, Decision, Event } from "./entities.js";
+import type {
+  Attachment,
+  Decision,
+  Delivery,
+  Event,
+  WorkItem,
+} from "./entities.js";
 import type { ProjectPreferences } from "./preferences.js";
 
 export function holdsPublicationTool(a: {
@@ -150,6 +156,40 @@ export function releaseChainSigned(
       });
   }
   return out;
+}
+
+/** The packaging template's smoke step (C-612). */
+export const RELEASE_SMOKE_KEY = "smoke";
+/**
+ * A chain publishes only the signed APK its card's smoke step accepted: the
+ * smoke work item is accepted and an accepted delivery of it names exactly
+ * these bytes (`artifact_sha256`). A card without a smoke step (an older
+ * packaging card) is unchanged.
+ */
+export function releaseChainSmoked(
+  card_id: string,
+  sha256: string,
+  work_items: readonly WorkItem[],
+  deliveries: readonly Delivery[],
+): boolean {
+  const smoke = work_items.filter(
+    (w) =>
+      w.card_id === card_id &&
+      w.template_key === RELEASE_SMOKE_KEY &&
+      w.kind === "produce" &&
+      w.status !== "cancelled",
+  );
+  return smoke.every(
+    (w) =>
+      w.status === "accepted" &&
+      deliveries.some(
+        (d) =>
+          d.work_item_id === w.id &&
+          d.status === "accepted" &&
+          d.subject.kind === "artifact_sha256" &&
+          d.subject.value.toLowerCase() === sha256,
+      ),
+  );
 }
 
 /** Consent is for these bytes, not a general project preference, merge, or signature. */
