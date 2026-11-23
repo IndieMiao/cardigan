@@ -14,7 +14,11 @@ import {
   PublicationError,
   type PublicationOptions,
 } from "@cardigan/mcp-server";
-import { ossEnvironment, publicationTarget } from "./publication-target.js";
+import {
+  ossEnvironment,
+  type PublishTarget,
+  publicationTarget,
+} from "./publication-target.js";
 
 const digest = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 async function stageApk(data: string, a: Attachment, dest: string) {
@@ -59,7 +63,88 @@ async function stageApk(data: string, a: Attachment, dest: string) {
     throw new PublicationError("artifact");
   }
 }
-const run = async (
+/**
+ * `apksigner verify --verbose --print-certs` labels each scheme's signer. Build Tools 37
+ * (apksigner 0.9) prints `V1 Signer:`, `V2 Signer:`, `V3.0 Signer:` and, for SDK-targeted
+ * signing, `V3.1 Signer: (minSdkVersion=…, maxSdkVersion=…)`; Build Tools 36.1 prints
+ * `Signer (minSdkVersion=…, maxSdkVersion=…)` there, and older releases `Signer #n`.
+ * Require a verified APK with exactly one signer whose every reported certificate equals
+ * the registered one; any other certificate digest line fails closed.
+ */
+export function signedOnlyBy(output: string, certificate: string) {
+  const lines = output.split(/\r?\n/u);
+  const digests = lines.filter((l) =>
+    l.includes("certificate SHA-256 digest:"),
+  );
+  const seen = digests.map((l) =>
+    /^(?:Signer #(\d+)|Signer \(minSdkVersion=\d+, maxSdkVersion=\d+\)|V[1-9](?:\.\d)? Signer:(?: \(minSdkVersion=\d+, maxSdkVersion=\d+\))?) certificate SHA-256 digest: ([a-fA-F0-9]{64})$/u.exec(
+      l,
+    ),
+  );
+  return (
+    lines.includes("Verifies") &&
+    lines.filter((l) => l.startsWith("Number of signers:")).join() ===
+      "Number of signers: 1" &&
+    seen.length > 0 &&
+    seen.every(
+      (m) =>
+        m !== null &&
+        (m[1] === undefined || m[1] === "1") &&
+        m[2]?.toLowerCase() === certificate,
+    )
+  );
+}
+
+/** OSS reports an empty configuration only when versioning was never enabled. */
+export const versioningOff = (xml: string) =>
+  /^(?:<\?xml [^?]*\?>\s*)?<VersioningConfiguration(?: xmlns="[^"]+")?\s*(?:\/>|>\s*<\/VersioningConfiguration>)$/u.test(
+    xml.trim(),
+  );
+
+export type Execute = (
+  tool: string,
+  args: string[],
+  cwd: string,
+  environment?: Record<string, string>,
+) => Promise<string>;
+
+/** Credentials only reach the ossutil child through its environment, never argv or a config file. */
+export const ossApi =
+  (
+    execute: Execute,
+    t: PublishTarget,
+    dir: string,
+    credentials: Record<string, string>,
+  ) =>
+  (api: string, ...args: string[]) =>
+    execute(
+      t.ossutil,
+      [
+        "api",
+        api,
+        "--bucket",
+        t.bucket,
+        "--region",
+        t.region,
+        "--endpoint",
+        `https://oss-${t.region}.aliyuncs.com`,
+        "--config-file",
+        "/dev/null",
+        "--mode",
+        "AK",
+        "--retry-times",
+        "0",
+        "--loglevel",
+        "off",
+        ...args,
+      ],
+      dir,
+      credentials,
+    ).then((stdout) =>
+      stdout.replace(/\n[0-9]+(?:\.[0-9]+)?\(s\) elapsed\s*$/u, ""),
+    );
+
+export const run: Execute = async (
   tool: string,
   args: string[],
   cwd: string,
@@ -75,8 +160,15 @@ const run = async (
     })
   ).stdout;
 
+/** Seconds between public read-back attempts: a CDN may briefly miss a just-written object. */
+export const READBACK_DELAYS = [5000, 15000, 30000, 60000] as const;
+const pause = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** A CDN fill race (missing object, Range ignored, wrong Content-Range, cut connection). */
+class Transient extends Error {}
+
 /** No redirects, cookies or OSS credentials on the public download path. */
-async function readBack(
+async function readOnce(
   get: typeof fetch,
   url: string,
   size: number,
@@ -86,50 +178,85 @@ async function readBack(
   const abort = new AbortController();
   const timeout = setTimeout(() => abort.abort(), 600000).unref();
   try {
-    const res = await get(url, {
-      redirect: "error",
-      credentials: "omit",
-      signal: abort.signal,
-      headers: {
-        "Accept-Encoding": "identity",
-        ...(range ? { Range: "bytes=0-0" } : {}),
-      },
-    });
+    let res: Response;
+    try {
+      res = await get(url, {
+        redirect: "error",
+        credentials: "omit",
+        signal: abort.signal,
+        headers: {
+          "Accept-Encoding": "identity",
+          ...(range ? { Range: "bytes=0-0" } : {}),
+        },
+      });
+    } catch {
+      throw new Transient();
+    }
+    if (res.status === 404 || (range && res.status === 200)) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new Transient();
+    }
+    if (res.status !== (range ? 206 : 200) || !res.body) throw Error();
     if (
-      res.status !== (range ? 206 : 200) ||
-      !res.body ||
-      (range && res.headers.get("content-range") !== `bytes 0-0/${range.total}`)
-    )
-      throw Error();
+      range &&
+      res.headers.get("content-range") !== `bytes 0-0/${range.total}`
+    ) {
+      await res.body.cancel().catch(() => undefined);
+      throw new Transient();
+    }
     const hash = createHash("sha256");
     let bytes = 0;
     const reader = res.body.getReader();
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytes += value.length;
+      let chunk: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        chunk = await reader.read();
+      } catch {
+        throw new Transient();
+      }
+      if (chunk.done) break;
+      bytes += chunk.value.length;
       if (bytes > size) throw Error();
-      hash.update(value);
+      hash.update(chunk.value);
     }
+    if (bytes < size) throw new Transient();
     if (
-      bytes !== size ||
       hash.digest("hex") !==
-        (range ? digest(Buffer.from([range.first])) : sha256)
+      (range ? digest(Buffer.from([range.first])) : sha256)
     )
       throw Error();
-  } catch {
-    throw new PublicationError("download");
   } finally {
     abort.abort();
     clearTimeout(timeout);
+  }
+}
+/** Retries only the transient cases, with a bounded backoff; wrong bytes fail at once. */
+async function readBack(
+  get: typeof fetch,
+  delays: readonly number[],
+  url: string,
+  size: number,
+  sha256: string,
+  range?: { total: number; first: number },
+) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await readOnce(get, url, size, sha256, range);
+    } catch (e) {
+      const wait = delays[attempt];
+      if (!(e instanceof Transient) || wait === undefined)
+        throw new PublicationError("download");
+      await pause(wait);
+    }
   }
 }
 
 export function apkPublisher(
   dataDir: string,
   root = join(homedir(), ".config", "cardigan"),
-  execute = run,
+  execute: Execute = run,
   get = fetch,
+  delays: readonly number[] = READBACK_DELAYS,
 ): NonNullable<PublicationOptions["publishArtifact"]> {
   return async (project, a, request, claim, current) => {
     const t = await publicationTarget(root, project);
@@ -145,17 +272,7 @@ export function apkPublisher(
         ["verify", "--verbose", "--print-certs", apk],
         dir,
       );
-      const signers = [
-        ...certs.matchAll(
-          /^Signer #(\d+) certificate SHA-256 digest: ([a-fA-F0-9]{64})\r?$/gmu,
-        ),
-      ];
-      if (
-        signers.length !== 1 ||
-        signers[0]?.[1] !== "1" ||
-        signers[0]?.[2]?.toLowerCase() !== t.test_certificate_sha256
-      )
-        throw Error();
+      if (!signedOnlyBy(certs, t.test_certificate_sha256)) throw Error();
       stage = "manifest";
       for (const [field, value] of [
         ["application-id", t.package_name],
@@ -198,42 +315,13 @@ export function apkPublisher(
       });
       current();
       const credentials = await ossEnvironment(root, t);
-      const oss = (api: string, ...args: string[]) =>
-        execute(
-          t.ossutil,
-          [
-            "api",
-            api,
-            "--bucket",
-            t.bucket,
-            "--region",
-            t.region,
-            "--endpoint",
-            `https://oss-${t.region}.aliyuncs.com`,
-            "--config-file",
-            "/dev/null",
-            "--mode",
-            "AK",
-            "--retry-times",
-            "0",
-            "--loglevel",
-            "off",
-            ...args,
-          ],
-          dir,
-          credentials,
-        ).then((stdout) =>
-          stdout.replace(/\n[0-9]+(?:\.[0-9]+)?\(s\) elapsed\s*$/u, ""),
-        );
+      const oss = ossApi(execute, t, dir, credentials);
       stage = "immutable_prefix";
       current();
       // OSS ignores forbid-overwrite on buckets with enabled/suspended versioning.
-      const versioning = (
-        await oss("get-bucket-versioning", "--output-format", "raw")
-      ).trim();
       if (
-        !/^(?:<\?xml [^?]*\?>\s*)?<VersioningConfiguration(?: xmlns="[^"]+")?\s*(?:\/>|>\s*<\/VersioningConfiguration>)$/u.test(
-          versioning,
+        !versioningOff(
+          await oss("get-bucket-versioning", "--output-format", "raw"),
         )
       )
         throw Error();
@@ -275,14 +363,14 @@ export function apkPublisher(
         );
       };
       await put(filename);
-      await readBack(get, url, a.size, a.sha256);
-      await readBack(get, url, 1, a.sha256, { total: a.size, first });
+      await readBack(get, delays, url, a.size, a.sha256);
+      await readBack(get, delays, url, 1, a.sha256, { total: a.size, first });
       for (const [name, body] of [
         ["SHA256SUMS", sums],
         ["release.json", release],
       ] as const) {
         await put(name);
-        await readBack(get, base + name, body.length, digest(body));
+        await readBack(get, delays, base + name, body.length, digest(body));
       }
       return { url, size: a.size, sha256: a.sha256 };
     } catch (e) {
