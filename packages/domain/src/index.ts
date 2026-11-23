@@ -171,6 +171,10 @@ export { pauseStandingAssignment } from "./commands/standing.js";
 export { rotateStandingAfterDeployment } from "./commands/standing-deployment.js";
 export * from "./commands/standing-pm-stall.js";
 export {
+  humanStopRecorded,
+  openStopEpisodeStart,
+  pausedByHuman,
+  stopExitConfirmed,
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./commands/stop.js";
@@ -233,6 +237,7 @@ export {
 } from "./interaction.js";
 export * from "./machine-placement.js";
 export * from "./machine-requirements.js";
+export * from "./macos-checks.js";
 export * from "./mcp-session.js";
 export * from "./member.js";
 export * from "./merge-batch.js";

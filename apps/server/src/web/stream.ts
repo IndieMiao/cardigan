@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Event, ProjectId } from "@cardigan/domain";
+import type { CardId, Event, ProjectId } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
 import type { Store } from "@cardigan/store";
 import { PROJECT_EVENT_STREAM } from "@cardigan/store";
@@ -109,20 +109,12 @@ export async function serveStream(options: StreamOptions): Promise<void> {
 
   // A client that sends no cursors starts at "now": it asked for changes, not
   // for the project's history. History is one explicit `after=project:0` away.
+  // C-634: one aggregate query, not a history read per card.
   if (options.after.length === 0) {
-    store.uow.read((tx) => {
-      const streams = [
-        { card_id: undefined, key: PROJECT_EVENT_STREAM },
-        ...tx.cards.list(project_id).map((card) => ({
-          card_id: card.id,
-          key: card.id as string,
-        })),
-      ];
-      for (const { card_id, key } of streams) {
-        const latest = tx.events.listAfter(project_id, card_id, 0).at(-1);
-        if (latest !== undefined) cursors.set(key, latest.seq);
-      }
-    });
+    for (const [stream, seq] of store.uow.read(() =>
+      store.latestEventSeqs(project_id),
+    ))
+      cursors.set(stream, seq);
   }
 
   // The run queue has no seq, so a reconnecting client cannot ask for what it
@@ -189,19 +181,21 @@ export async function serveStream(options: StreamOptions): Promise<void> {
         capacityRevision = nextCapacity;
         res.write(capacityFrame(capacityRevision));
       }
-      batch = store.uow.read((tx) => {
-        const streams = [
-          { card_id: undefined, key: PROJECT_EVENT_STREAM },
-          ...tx.cards.list(project_id).map((card) => ({
-            card_id: card.id,
-            key: card.id as string,
-          })),
-        ];
-        return streams.flatMap(({ card_id, key }) => {
-          const since = cursors.get(key) ?? 0;
-          return tx.events.listAfter(project_id, card_id, since);
-        });
-      });
+      // C-634: only streams whose counter passed this connection's cursor
+      // are read; an idle poll is one small query.
+      batch = store.uow.read((tx) =>
+        [...store.eventStreamCounters(project_id)].flatMap(
+          ([stream, counter]) => {
+            const since = cursors.get(stream) ?? 0;
+            if (counter <= since) return [];
+            return tx.events.listAfter(
+              project_id,
+              stream === PROJECT_EVENT_STREAM ? undefined : (stream as CardId),
+              since,
+            );
+          },
+        ),
+      );
     } catch (error) {
       options.log?.({
         event: "web_stream",

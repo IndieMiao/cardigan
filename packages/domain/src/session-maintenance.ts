@@ -1,6 +1,6 @@
 import { assignmentCardHeld } from "./card-hold.js";
 import type { CommandState } from "./commands/core.js";
-import { stoppedByHuman } from "./commands/stop.js";
+import { stoppedByHuman } from "./commands/stop-state.js";
 import type { Assignment } from "./entities.js";
 import { eventsOfType } from "./event-index.js";
 import { hostOpsPending } from "./host-ops.js";

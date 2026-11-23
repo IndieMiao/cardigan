@@ -1,11 +1,10 @@
 import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
 import type { Result } from "../errors.js";
 import { hostOpsPending } from "../host-ops.js";
-import type { AssignmentId, CardId } from "../ids.js";
+import type { AssignmentId } from "../ids.js";
 import { retirementWaitReceipt } from "../retirement-session.js";
 import { transition } from "../transitions.js";
 import {
-  type CommandDraft,
   type CommandEffect,
   type CommandPorts,
   type CommandState,
@@ -13,96 +12,51 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { replayStopDeferredResume } from "./resumption.js";
 
-const ASSIGNMENT_STOPPED = "assignment_stopped";
-const ASSIGNMENT_STOP_RELEASED = "assignment_stop_released";
-const ASSIGNMENT_START_REQUESTED = "assignment_start_requested";
+import {
+  ASSIGNMENT_STOP_EXIT_CONFIRMED,
+  ASSIGNMENT_STOP_RELEASED,
+  ASSIGNMENT_STOPPED,
+  pausedByHuman,
+  stopExitConfirmed,
+  stoppedByHuman,
+} from "./stop-state.js";
 
-// One index per immutable event snapshot. Array order (not timestamps or
-// per-card sequence numbers) remains the authority, exactly as in the scan.
-const stoppedAssignments = new WeakMap<
-  readonly Event[],
-  ReadonlyMap<unknown, boolean>
->();
-
-const field = (payload: unknown, key: string): unknown =>
-  payload !== null && typeof payload === "object"
-    ? (payload as Record<string, unknown>)[key]
-    : undefined;
-
-/**
- * C-211: a work-item Assignment the human stopped stays stopped until the
- * human starts it again. The latest of its `assignment_stopped`,
- * `assignment_start_requested` and `run_dispatched` events decides: the
- * Dispatcher does not wake, replace or start a session for it in between (new
- * bells stay pending), and host_ops cannot restart it either.
- *
- * C-624: a human start that has to queue for capacity is still the human's
- * start. Before, only the eventual dispatch lifted the stop, so the queued Run
- * was never dispatched by anyone and held the head of the machine queue.
- */
-export function stoppedByHuman(
-  events: readonly Event[],
-  assignment_id: AssignmentId,
-): boolean {
-  let stopped = stoppedAssignments.get(events);
-  if (!stopped) {
-    const index = new Map<unknown, boolean>();
-    for (const event of events)
-      if (
-        event.type === ASSIGNMENT_STOPPED ||
-        event.type === "run_dispatched" ||
-        (event.type === ASSIGNMENT_START_REQUESTED &&
-          event.actor.kind === "human")
-      )
-        index.set(
-          field(event.payload, "assignment_id"),
-          event.type === ASSIGNMENT_STOPPED,
-        );
-    stopped = index;
-    stoppedAssignments.set(events, stopped);
-  }
-  return stopped.get(assignment_id) ?? false;
-}
-
-/**
- * C-624: record a human start of a stopped work-item Assignment when its Run is
- * queued, not only once it is dispatched. Only the human ends a human stop.
- */
-export function recordHumanStart(
-  d: CommandDraft,
-  assignment: Assignment,
-  run: Run,
-  card: CardId | undefined,
-) {
-  if (
-    d.actor.kind !== "human" ||
-    assignment.scope !== "work_item" ||
-    !stoppedByHuman(d.state.events, assignment.id)
-  )
-    return;
-  d.emit(ASSIGNMENT_START_REQUESTED, card, {
-    assignment_id: assignment.id,
-    run_id: run.id,
-  });
-}
+export {
+  humanStopRecorded,
+  openStopEpisodeStart,
+  pausedByHuman,
+  recordHumanStart,
+  stopExitConfirmed,
+  stoppedByHuman,
+} from "./stop-state.js";
 
 const unfinished = (status: string) =>
   !["completed", "failed", "cancelled"].includes(status);
+/** A never-started queued Run holds no terminal; a managed stop keeps it. */
+const pendingWork = (r: Run) =>
+  r.status === "queued" &&
+  !r.started_at &&
+  !r.dispatch_stop &&
+  !r.inactivity_stop;
 
 /**
  * `cardigan assignment stop` for a work-item Assignment, in two steps around
  * the terminal release.
  *
  * 1. Before the terminal is touched: record `assignment_stopped`, so the
- *    Dispatcher starts nothing for it from now on, and cancel its queued Runs
- *    (they hold no terminal and no run slot). Refused while a host operation
- *    is pending, so the two never leave each other unfinishable.
+ *    Dispatcher starts nothing for it from now on. A pause (`hold`, the
+ *    default here) cancels its queued Runs (they hold no terminal and no run
+ *    slot); a managed stop keeps never-started queued Runs as pending work.
+ *    Refused while a host operation is pending, so the two never leave each
+ *    other unfinishable.
  * 2. With `released_runtime_ref`, once the host has released that terminal:
  *    cancel the remaining unfinished Runs, settle the runtime state and clear
  *    the ref. Until then the running Run keeps its run slot, so a failed
  *    release neither under-counts capacity nor loses the ref to retry with.
- *    A no-op when the stop no longer holds or the session changed.
+ *    A no-op when the stop no longer holds or the session changed. After a
+ *    managed stop's release the Assignment is no longer stopped (C-620).
  */
 export function stopWorkItemAssignment(
   state: CommandState,
@@ -111,6 +65,13 @@ export function stopWorkItemAssignment(
     assignment_id: AssignmentId;
     reason: string;
     released_runtime_ref?: RuntimeRef;
+    /**
+     * C-620: host-proven exit of this exact session, recorded before cleanup
+     * so a retried stop reuses it instead of looking for a removed terminal.
+     */
+    exit_confirmed_ref?: RuntimeRef;
+    /** C-620: false = managed stop, woken by new work after release. */
+    hold?: boolean;
   },
   ports: CommandPorts,
 ): Result<CommandEffect<{ assignment: Assignment; cancelled: number }>> {
@@ -137,6 +98,8 @@ export function stopWorkItemAssignment(
       `${a.id} 还有待处理的主机运维操作，等它处理完再停止；之后可以重新执行 cardigan assignment stop ${a.id}`,
     );
     const card = d.work(a.work_item_id).card_id;
+    // A managed stop never downgrades an existing pause.
+    const hold = (p.hold ?? true) || pausedByHuman(state.events, a.id);
     const cancel = (runs: readonly Run[]) => {
       for (const r of runs)
         d.put("runs", {
@@ -147,15 +110,35 @@ export function stopWorkItemAssignment(
           finished_at: d.now,
         });
     };
+    if (p.exit_confirmed_ref !== undefined) {
+      if (
+        !stoppedByHuman(state.events, a.id) ||
+        JSON.stringify(a.runtime_ref) !==
+          JSON.stringify(p.exit_confirmed_ref) ||
+        stopExitConfirmed(state.events, a.id, p.exit_confirmed_ref)
+      )
+        return { assignment: a, cancelled: 0 };
+      d.emit(ASSIGNMENT_STOP_EXIT_CONFIRMED, card, {
+        assignment_id: a.id,
+        runtime_ref: { ...p.exit_confirmed_ref },
+      });
+      return { assignment: a, cancelled: 0 };
+    }
     if (p.released_runtime_ref !== undefined) {
       if (
         !stoppedByHuman(state.events, a.id) ||
         JSON.stringify(a.runtime_ref) !== JSON.stringify(p.released_runtime_ref)
       )
         return { assignment: a, cancelled: 0 };
+      const managed = !pausedByHuman(state.events, a.id);
       const runs = d
         .list("runs")
-        .filter((r) => r.assignment_id === a.id && unfinished(r.status));
+        .filter(
+          (r) =>
+            r.assignment_id === a.id &&
+            unfinished(r.status) &&
+            !(managed && pendingWork(r)),
+        );
       cancel(runs);
       // A later start launches from a clean runtime state, as after a restart.
       const runtime_state = ["unknown", "lost"].includes(a.runtime_state)
@@ -170,20 +153,33 @@ export function stopWorkItemAssignment(
         assignment_id: a.id,
         cancelled_run_ids: runs.map((r) => r.id),
       });
+      // C-620: work that became ready during the stop window starts now.
+      if (managed) replayStopDeferredResume(d, next);
       return { assignment: next, cancelled: runs.length };
     }
     const queued = d
       .list("runs")
-      .filter((r) => r.assignment_id === a.id && r.status === "queued");
+      .filter(
+        (r) =>
+          r.assignment_id === a.id &&
+          r.status === "queued" &&
+          !(!hold && pendingWork(r)),
+      );
     cancel(queued);
     d.emit(
       ASSIGNMENT_STOPPED,
       card,
       {
         assignment_id: a.id,
+        hold,
         cancelled_run_ids: queued.map((r) => r.id),
       },
-      { type: "status_change", body: `Stopped ${a.id}` },
+      {
+        type: "status_change",
+        body: hold
+          ? `Paused ${a.id}`
+          : `Stopped ${a.id}; new work starts a new session`,
+      },
     );
     return { assignment: a, cancelled: queued.length };
   });

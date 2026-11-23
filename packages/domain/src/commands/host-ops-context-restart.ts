@@ -29,7 +29,7 @@ import {
 } from "./host-ops-actions.js";
 import { settingsValid } from "./launch.js";
 import { projectPreferences } from "./preferences.js";
-import { stoppedByHuman } from "./stop.js";
+import { stoppedByHuman } from "./stop-state.js";
 
 /** Reused before preparation, in the intent transaction and immediately before stopping. */
 export function automaticContextRestartReady(

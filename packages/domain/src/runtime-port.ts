@@ -80,6 +80,14 @@ export interface RuntimeInteractionReader {
     identity: { project_id: string; assignment_id: string; harness: string },
   ): Promise<RuntimeResult<import("./interaction.js").InteractionState>>;
 }
+/**
+ * C-626: hc can report no activity for these CLIs. For a system-ended turn the
+ * adapter may then treat a live terminal as idle only while this exact bound
+ * CLI shows its own empty editor and idle footer (the dispatcher's prompt
+ * observation). A working, blocked or error status never qualifies, and the
+ * terminal identity, generation and keep guards are unchanged.
+ */
+export type TurnIdlePrompt = PromptObservation;
 export interface RetirementIdentity {
   /** Host-enrolled native identity for this exact remote launch; never a stop capability. */
   readonly enrolled_process?: NonNullable<
@@ -99,7 +107,11 @@ export interface Runtime {
   /** Read-only. Only a finished terminal with this exact identity proves exit. */
   observe_retirement?(
     ref: RuntimeRef,
-    identity: RetirementIdentity & { readonly system_finished_turn?: true },
+    identity: RetirementIdentity & {
+      readonly system_finished_turn?: true;
+      /** System turns only: see TurnIdlePrompt. */
+      readonly idle_prompt?: TurnIdlePrompt;
+    },
   ): Promise<RuntimeResult<RuntimeObservation["process"]>>;
   /** Read-only local kernel check for an already queued Run whose core is gone.
    * A missing socket alone never proves the original terminal process exited. */
@@ -122,7 +134,11 @@ export interface Runtime {
       readonly terminate_ms: number;
       readonly before_signal: () => boolean;
     } & (
-        | { readonly system_finished_turn?: never }
+        | {
+            readonly system_finished_turn?: never;
+            /** Report the probed PID and the signals sent on exit. */
+            readonly report_signals?: true;
+          }
         | {
             /** One owner-bound TERM; recheck workspace inside the signal slot,
              * then terminal identity/activity, then synchronous authority. */
@@ -133,6 +149,8 @@ export interface Runtime {
               >["process"]
             >;
             readonly workspace_preflight: () => Promise<boolean>;
+            /** See TurnIdlePrompt; rechecked inside the signal slot. */
+            readonly idle_prompt?: TurnIdlePrompt;
           }
       ),
   ): Promise<RuntimeResult<IdleRetirementResult>>;

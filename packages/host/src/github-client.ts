@@ -339,6 +339,22 @@ export class GithubClient {
       throw new GithubExecutorError("security");
     return id as number;
   }
+  /** C-611: visibility decides whether a hosted macOS run is billable. */
+  async repository(
+    signal?: AbortSignal,
+  ): Promise<{ readonly private: boolean }> {
+    const { body } = await this.request(
+      `repos/${this.options.config.repo}`,
+      await this.token(),
+      "GET",
+      undefined,
+      undefined,
+      signal,
+    );
+    if (typeof body.private !== "boolean")
+      throw new GithubExecutorError("security");
+    return { private: body.private };
+  }
   async run(id: number, signal?: AbortSignal): Promise<GithubRun> {
     if (!Number.isSafeInteger(id) || id < 1)
       throw new GithubExecutorError("security");

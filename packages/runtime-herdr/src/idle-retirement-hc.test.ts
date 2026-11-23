@@ -108,16 +108,105 @@ test.skipIf(!available || process.platform !== "linux").each([false, true])(
       }
       // A system-ended stop also asks the kernel whether the probed leader
       // and its whole group are gone; plain idle retirement does not.
+      // C-626: the system-turn stop also reports its owner-bound TERM.
       expect(result).toEqual({
         ok: true,
         value: cold
-          ? { outcome: "exited", process_group_exited: true }
+          ? {
+              outcome: "exited",
+              process_group_exited: true,
+              stop: {
+                path: "linux_pidfd",
+                signal: "TERM",
+                pid: expect.any(Number),
+              },
+            }
           : { outcome: "exited" },
       });
       expect((await inspect()).state).toBe("finished");
       expect(await readFile(join(dir, "dirty.txt"), "utf8")).toBe(
         "uncommitted fixture",
       );
+    } finally {
+      await stopCore({
+        session,
+        socket: socketPath,
+        env,
+        pid: corePid({ session, socket: socketPath, env }),
+      });
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+  30000,
+);
+
+// C-625: a standing PM restart records the probed PID and the signals sent.
+test.skipIf(!available || process.platform !== "linux")(
+  "real hc reports the probed PID and signals when asked",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cg-idle-hc-"));
+    const runtimeDir = createTestRuntime(join(dir, "runtime")),
+      socketPath = join(runtimeDir, "hc.sock");
+    const session = `idle-${randomUUID().slice(0, 8)}`;
+    const env = {
+      ...process.env,
+      HC_SESSION: session,
+      HC_SOCKET: socketPath,
+      XDG_RUNTIME_DIR: runtimeDir,
+      XDG_STATE_HOME: join(dir, "state"),
+      XDG_CONFIG_HOME: join(dir, "config"),
+    };
+    try {
+      const program = join(dir, "agent.cjs");
+      // Ignores the hangup like a session that keeps running; leaves on TERM.
+      await writeFile(
+        program,
+        String.raw`process.on('SIGHUP',()=>{});process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000);process.stdout.write('\x1b]7501;state=idle:app=fixture\x1b\\');`,
+      );
+      const runtime = value(
+        await HerdrRuntime.create({ binary, session, socketPath, env }),
+      );
+      const ref = value(
+        await runtime.provision(assignment, role, machine, {
+          ...launch,
+          command: process.execPath,
+          args: [program],
+          cwd: dir,
+        }),
+      );
+      const inspect = async () =>
+        JSON.parse(
+          (
+            await exec(binary, ["get", ref.terminal_ref, "--json"], {
+              env,
+              timeout: 10000,
+            })
+          ).stdout,
+        );
+      await vi.waitFor(
+        async () => expect((await inspect()).status?.state).toBe("idle"),
+        { timeout: 10000 },
+      );
+      const pid = (await inspect()).pid;
+      const result = await runtime.retire_idle(ref, {
+        project_id: "fixture",
+        assignment_id: assignment.id,
+        hangup_ms: 1000,
+        terminate_ms: 5000,
+        report_signals: true,
+        before_signal: () => true,
+      });
+      expect(result).toEqual({
+        ok: true,
+        value: {
+          outcome: "exited",
+          signalled: expect.objectContaining({
+            pid,
+            signals: ["HUP", "TERM"],
+          }),
+        },
+      });
+      expect((await inspect()).state).toBe("finished");
     } finally {
       await stopCore({
         session,

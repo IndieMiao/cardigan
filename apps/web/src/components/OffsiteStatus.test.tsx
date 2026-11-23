@@ -65,3 +65,25 @@ test("byte sizes use binary units", () => {
   expect(formatBytes(1536)).toBe("1.5 KiB");
   expect(formatBytes(334 * 1024 ** 2)).toBe("334.0 MiB");
 });
+
+test("C-628: the event-loop delay of the sync and the server is shown, and a slow loop alerts", async () => {
+  render(
+    <OffsiteStatusSection
+      client={client(
+        view({
+          alerts: ["loop_slow"],
+          loop_delay: {
+            sync: { p99_ms: 312.4, max_ms: 840, window_ms: 60_000 },
+            server: { p99_ms: 11.6, max_ms: 20.2, window_ms: 60_000 },
+          },
+        }),
+      )}
+    />,
+  );
+  expect(await screen.findByText("事件循环延迟过高")).toBeTruthy();
+  expect(
+    screen.getByText(
+      "同步进程 p99 312 ms · 最大 840 ms；服务进程 p99 12 ms · 最大 20 ms",
+    ),
+  ).toBeTruthy();
+});

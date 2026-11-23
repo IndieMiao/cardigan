@@ -39,7 +39,7 @@ import {
 } from "./core.js";
 import { currentReviewTarget, reviewRound } from "./review-round.js";
 import { restartStandingSession, resumeStanding } from "./standing.js";
-import { recordHumanStart } from "./stop.js";
+import { recordHumanStart } from "./stop-state.js";
 import { incrementalTestReview } from "./test-review.js";
 import { activeWork } from "./workflow.js";
 
