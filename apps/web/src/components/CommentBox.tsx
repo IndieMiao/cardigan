@@ -764,7 +764,7 @@ export function CommentBox({
             placeholder={
               attachmentLimit === undefined
                 ? "支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件"
-                : `支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件，单个不超过 ${formatMiB(attachmentLimit)}`
+                : `支持 Markdown；@ 提及；# 引用附件；单个文件不超过 ${formatMiB(attachmentLimit)}`
             }
             rows={expanded ? 6 : 2}
             value={body}

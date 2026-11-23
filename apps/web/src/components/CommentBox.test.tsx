@@ -228,7 +228,7 @@ test("a file over the host limit is refused when pasted and the comment still go
   const input = screen.getByLabelText("评论正文");
   // The current limit is part of the existing placeholder.
   expect(input.getAttribute("placeholder")).toBe(
-    "支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件，单个不超过 30 MiB",
+    "支持 Markdown；@ 提及；# 引用附件；单个文件不超过 30 MiB",
   );
   fireEvent.change(input, { target: { value: "Evidence" } });
   const large = new File(["png"], "large.png", { type: "image/png" });
