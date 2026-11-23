@@ -113,6 +113,22 @@ export function appendEvents(
   );
 }
 
+/**
+ * `events.flatMap(each)` (scoping, redaction, filtering), applying the same
+ * function to the telemetry journal so derived read states keep it.
+ */
+export function flatMapEvents(
+  events: readonly Event[],
+  each: (event: Event) => readonly Event[],
+): readonly Event[] {
+  const next = events.flatMap(each);
+  const journal = journals.get(events);
+  if (!journal) return next;
+  return attach(next, journal.telemetry.flatMap(each), () =>
+    journal.full().flatMap(each),
+  );
+}
+
 /** Same order and duplicates as filter; never cache a clock-dependent answer. */
 export function eventsOfType(events: readonly Event[], type: string) {
   const journal = TELEMETRY_EVENT_TYPES.has(type)

@@ -9,6 +9,7 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "./entities.js";
+import { flatMapEvents } from "./event-index.js";
 import type { ProjectId } from "./ids.js";
 import { mergeBatches } from "./merge-batch.js";
 import { crossCardRead, type ProjectPreferences } from "./preferences.js";
@@ -255,8 +256,11 @@ export function referenceReadState(
         )
       );
     }),
-    events: state.events
-      .flatMap(batchScope.event)
-      .filter((e) => e.card_id === undefined || scope.card(e.card_id)),
+    // C-643: keep the telemetry journal (run starts drive review activity).
+    events: flatMapEvents(state.events, (e) =>
+      e.card_id === undefined || scope.card(e.card_id)
+        ? batchScope.event(e)
+        : [],
+    ),
   };
 }

@@ -219,6 +219,7 @@ export {
   eventById,
   eventsForDecision,
   eventsOfType,
+  flatMapEvents,
   fullEventHistory,
   isTelemetryEvent,
   TELEMETRY_EVENT_TYPES,

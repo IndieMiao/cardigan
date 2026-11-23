@@ -6,6 +6,7 @@ import {
   eventById,
   eventsForDecision,
   eventsOfType,
+  flatMapEvents,
   fullEventHistory,
   isTelemetryEvent,
   type JsonValue,
@@ -138,4 +139,20 @@ test("C-643: draft histories keep the journal and see newly emitted telemetry", 
   // Plain arrays stay plain.
   expect(appendEvents([stop], [queued])).toEqual([stop, queued]);
   expect(telemetryEvents(appendEvents([stop], [queued]))).toEqual([]);
+});
+
+test("C-643: scoped read states keep the journal through flatMapEvents", () => {
+  const history = parts();
+  const events = commandEventHistory(history);
+  const onCard = (e: Event) => (e.card_id === card ? [e] : []);
+  const scoped = flatMapEvents(events, onCard);
+  expect(scoped).toEqual(events.flatMap(onCard));
+  expect(fullEventHistory(scoped)).toEqual(history.flat().flatMap(onCard));
+  expect(eventsOfType(scoped, "run_started")).toEqual(
+    history.flat().filter((e) => e.type === "run_started"),
+  );
+  expect(eventsOfType(scoped, "session_maintenance_changed")).toEqual([]);
+  expect(flatMapEvents(history.flat(), onCard)).toEqual(
+    history.flat().flatMap(onCard),
+  );
 });
