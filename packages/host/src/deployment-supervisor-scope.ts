@@ -10,7 +10,7 @@ const watchSources = new Map<string, RegExp>([
   ],
   [
     "packages/host",
-    /^src\/(deployment(?:-[\w-]+)?|index|runtime-workers-config|worker-mcp|runtime-target-fingerprint|warnings|capacity-owner|process-identity|repository-lock|preparation-budget)\.ts$/u,
+    /^src\/(deployment(?:-[\w-]+)?|index|runtime-workers-config|worker-mcp|runtime-target-fingerprint|warnings|capacity-owner|process-identity|repository-lock|preparation-budget|long-operations)\.ts$/u,
   ],
   ["packages/domain", /^src\//u],
   ["packages/store", /^(src\/|migrations\/.*\.sql$)/u],

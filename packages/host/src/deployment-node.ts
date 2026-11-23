@@ -31,6 +31,8 @@ import {
   readInterruptedDeployment,
   writeDeploymentRecord,
   writeDeploymentStop,
+  writeInterruptedOperations,
+  writeOperationWait,
   writeServerLogAudit,
   writeSupervisorComparison,
   writeSupervisorComparisonUnavailable,
@@ -53,6 +55,7 @@ import {
   taggedServerOutput,
 } from "./deployment-server-log.js";
 import { supervisorChanges } from "./deployment-supervisor-scope.js";
+import { liveLongOperations } from "./long-operations.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
 
@@ -74,6 +77,8 @@ interface State {
 /** Own child handles plus boot/start identity; never search cmdline or signal by name. */
 export class NodeDeploymentDriver implements DeploymentDriver {
   readonly enabled: boolean;
+  readonly batchWindowMs: number;
+  readonly operationWaitMs: number;
   private state!: State;
   private readonly retention?: DeploymentRetention;
   private readyMessage = false;
@@ -93,6 +98,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private supervisorSha: string | null | undefined;
   private checkedSupervisorMain?: string;
   private failedSupervisorMain?: string;
+  private lastOperationWait: string | undefined;
   constructor(
     private readonly options: {
       store: Store;
@@ -102,6 +108,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     },
   ) {
     this.enabled = options.config.enabled;
+    // Defaults are applied by parseDeploymentConfig; a hand-built config opts out.
+    this.batchWindowMs = options.config.batch_window_ms ?? 0;
+    this.operationWaitMs = options.config.operation_wait_timeout_ms ?? 0;
     this.directory = deploymentDirectory(options.dataDir);
     if (options.config.retention)
       this.retention = new DeploymentRetention(
@@ -444,7 +453,37 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     throw new Error("Server exited");
   }
   async beforeStop(record: DeploymentRecord) {
-    return writeDeploymentStop(this.options.store, PROJECT, record);
+    const stopping = writeDeploymentStop(this.options.store, PROJECT, record);
+    if (record.interrupted_operations?.length)
+      try {
+        writeInterruptedOperations(this.options.store, record);
+      } catch {
+        // Card notes are informational; the project audit already lists them.
+      }
+    return stopping;
+  }
+  async operations() {
+    return liveLongOperations(this.options.store).map(
+      ({ kind, project_id, card_id, label, started_at }) => ({
+        kind,
+        project_id,
+        card_id,
+        label,
+        started_at,
+      }),
+    );
+  }
+  async waitForOperations(record: DeploymentRecord) {
+    // Ticks repeat the same observation; skip the state load when unchanged.
+    const key = JSON.stringify([
+      record.status,
+      record.from,
+      record.to,
+      record.deferred_operations ?? [],
+    ]);
+    if (this.lastOperationWait === key) return;
+    writeOperationWait(this.options.store, PROJECT, record);
+    this.lastOperationWait = key;
   }
   async current() {
     return this.state.current;

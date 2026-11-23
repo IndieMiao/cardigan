@@ -174,6 +174,13 @@ export { recordLaunchNotice } from "./launch-notice.js";
 export { selectableLaunchConfig } from "./launch-profile-choices.js";
 export { recoverLaunchPublications } from "./launch-publish.js";
 export * from "./live-ext-message.js";
+export {
+  holdLongOperation,
+  type LongOperation,
+  type LongOperationKind,
+  liveLongOperations,
+  withLongOperation,
+} from "./long-operations.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";

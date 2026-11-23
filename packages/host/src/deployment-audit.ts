@@ -1,7 +1,9 @@
 import {
+  type CardId,
   type DeliveryId,
   type DeploymentControl,
   type DeploymentRecord,
+  type Event,
   hasPassedMergeCheck,
   mergeBatches,
   type ProjectId,
@@ -196,6 +198,108 @@ export function writeDeploymentRecord(
         ),
       ),
     );
+  });
+}
+
+/**
+ * C-609: audit a batching or operation wait once per distinct situation.
+ * Never notifies or opens a human action: these waits are bounded and always
+ * end in a deployment.
+ */
+export function writeOperationWait(
+  store: Store,
+  project: ProjectId,
+  record: DeploymentRecord,
+) {
+  if (
+    record.status !== "waiting_for_batch" &&
+    record.status !== "waiting_for_operations"
+  )
+    throw new Error("Not an operation wait");
+  store.uow.run((tx) => {
+    const now = new Date().toISOString();
+    const state = loadCommandState(tx, project);
+    const latest = state.events.findLast(
+      (e) => e.type === "host_deployment_recorded" && e.actor.kind === "system",
+    );
+    const prior = latest?.payload as DeploymentRecord | undefined;
+    const continuous =
+      prior?.status === record.status &&
+      prior.from === record.from &&
+      prior.to === record.to;
+    if (
+      continuous &&
+      JSON.stringify(prior.deferred_operations ?? []) ===
+        JSON.stringify(record.deferred_operations ?? [])
+    )
+      return;
+    const effect = unwrap(
+      recordDeployment(
+        state,
+        { kind: "system", project_id: project },
+        {
+          ...record,
+          ...(continuous ? { attempt: prior.attempt } : {}),
+          waiting_since: continuous
+            ? (prior.waiting_since ?? latest?.created_at ?? now)
+            : now,
+        },
+        { ids: tx.ids, clock: { now: () => now } },
+      ),
+    );
+    persistEffect(tx, project, effect);
+  });
+}
+
+/**
+ * C-609: the server is being stopped while these operations still run. Each
+ * affected card gets one timeline note in its own project; the operations
+ * resume or are requeued by the next server.
+ */
+export function writeInterruptedOperations(
+  store: Store,
+  record: DeploymentRecord,
+) {
+  const ops = record.interrupted_operations ?? [];
+  store.uow.run((tx) => {
+    const now = new Date().toISOString();
+    for (const op of ops) {
+      if (!op.card_id) continue;
+      const project = op.project_id as ProjectId;
+      const card = op.card_id as CardId;
+      if (!tx.cards.get(project, card)) continue;
+      const event: Event = {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project, card),
+        card_id: card,
+        type: "host_deployment_operation_interrupted",
+        actor: { kind: "system", project_id: project },
+        payload: {
+          attempt: record.attempt,
+          from: record.from,
+          to: record.to,
+          kind: op.kind,
+          label: op.label,
+          started_at: op.started_at,
+        },
+        created_at: now,
+      };
+      tx.events.append(project, event);
+      const entry = tx.ids.nextTimelineEntryId(project, card);
+      tx.timeline.put(project, {
+        id: entry,
+        short_id: entry,
+        card_id: card,
+        event_seq: event.seq,
+        type: "system",
+        author: "system",
+        refs: [],
+        mentions: [],
+        retracted: false,
+        created_at: now,
+        body: `自动部署等待已达上限，服务端照常重启；本卡的${op.label}（${op.started_at} 开始）仍在进行，重启后续跑或重排。`,
+      });
+    }
   });
 }
 

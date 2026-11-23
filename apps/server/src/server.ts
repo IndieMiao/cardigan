@@ -12,6 +12,7 @@ import {
   enqueueOwnerMessage,
   executorExecution,
   HostOpsService,
+  holdLongOperation,
   LiveExtMessageSender,
   loadMachineCapabilityCatalog,
   loadMergeGateConfig,
@@ -26,6 +27,7 @@ import {
   scrubRunCredentials,
   sessionFingerprint,
   targetProbe,
+  withLongOperation,
 } from "@cardigan/host";
 import type { McpBackend } from "@cardigan/mcp-server";
 import {
@@ -215,6 +217,25 @@ export async function startCardiganServer(
     throw error;
   }
 }
+
+/** C-609: an automatic deployment waits for an artifact upload in progress. */
+export function trackedPublisher(
+  store: Store,
+  publish: ArtifactPublisher,
+): ArtifactPublisher {
+  return (project, attachment, request, claim, current) =>
+    withLongOperation(
+      store,
+      {
+        kind: "artifact_publication",
+        project_id: project,
+        card_id: attachment.card_id,
+        label: "测试包外发",
+      },
+      () => publish(project, attachment, request, claim, current),
+    );
+}
+type ArtifactPublisher = ReturnType<typeof apkPublisher>;
 
 async function assembleServer(
   options: StartServerOptions,
@@ -518,14 +539,31 @@ async function assembleServer(
               probeHost: probes,
               ...(execution.mode === "agent-ssh" &&
               runtimeEnv.CARDIGAN_ARTIFACT_PUBLICATION === "1"
-                ? { publishArtifact: apkPublisher(config.dataDir) }
+                ? {
+                    publishArtifact: trackedPublisher(
+                      store,
+                      apkPublisher(config.dataDir),
+                    ),
+                  }
                 : {}),
               ...(mobileSigning
                 ? {
                     openMobileArtifact: (scope, id, current) =>
                       openMobileArtifact(config.dataDir, scope, id, current),
                     signMobile: (scope, current) =>
-                      requestMobileSignature(config.dataDir, scope, current),
+                      requestMobileSignature(
+                        config.dataDir,
+                        scope,
+                        current,
+                        {},
+                        (signing) =>
+                          holdLongOperation(store, {
+                            kind: "mobile_signing",
+                            project_id: signing.project,
+                            card_id: signing.card,
+                            label: `受管送签（${signing.platform}）`,
+                          }),
+                      ),
                   }
                 : {}),
               enqueueOwnerMessage: (actor, input, revalidate) =>

@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 import { occupiedRunSlots } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
+import { holdLongOperation } from "./long-operations.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   matchesWorkerPlatform,
@@ -131,6 +132,12 @@ export async function patrolHelperUpgrade(
     return true;
   });
   if (!claimed) return held;
+  // C-609: an interrupted install needs manual recovery; deployments wait.
+  const release = holdLongOperation(store, {
+    kind: "worker_upgrade",
+    project_id: project,
+    label: `worker 升级（${machine}）`,
+  });
   try {
     if (previous?.release_key === key) {
       stage = "unexpected_drift";
@@ -200,5 +207,7 @@ export async function patrolHelperUpgrade(
   } catch {
     fail();
     return held;
+  } finally {
+    release();
   }
 }

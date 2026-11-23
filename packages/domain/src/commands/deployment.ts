@@ -88,6 +88,38 @@ export function currentDeploymentPin(events: readonly Event[]) {
     : undefined;
 }
 
+/** C-609: a host-registered managed long operation (fixed kinds, host labels). */
+export type DeploymentOperation = {
+  readonly kind: string;
+  readonly project_id: string;
+  readonly card_id: string | null;
+  readonly label: string;
+  readonly started_at: string;
+};
+
+/** The host truncates longer lists; a record never carries an unbounded payload. */
+export const MAX_DEPLOYMENT_OPERATIONS = 50;
+
+function validDeploymentOperation(op: DeploymentOperation): boolean {
+  return (
+    !!op &&
+    typeof op === "object" &&
+    [op.kind, op.project_id, op.label, op.started_at].every(
+      (v) => typeof v === "string" && v.length > 0 && v.length <= 200,
+    ) &&
+    (op.card_id === null ||
+      (typeof op.card_id === "string" && op.card_id.length <= 100))
+  );
+}
+
+const copyOperation = (op: DeploymentOperation): DeploymentOperation => ({
+  kind: op.kind,
+  project_id: op.project_id,
+  card_id: op.card_id,
+  label: op.label,
+  started_at: op.started_at,
+});
+
 /** Host-supplied, already redacted deployment evidence; never an execution request. */
 export interface DeploymentRecord {
   readonly control_event_id?: string;
@@ -98,6 +130,10 @@ export interface DeploymentRecord {
     | "started"
     | "waiting_for_evidence"
     | "waiting_for_capacity"
+    /** C-609: main moved again soon after a deployment; only the latest is deployed. */
+    | "waiting_for_batch"
+    /** C-609: managed long operations are still running; bounded wait. */
+    | "waiting_for_operations"
     | "stopping"
     | "deployed"
     | "failed"
@@ -113,6 +149,13 @@ export interface DeploymentRecord {
   readonly evidence_wait_exceeded?: boolean;
   readonly capacity_wait_exceeded?: boolean;
   readonly blocking_checks?: readonly { project: string; attempt: string }[];
+  /** C-609: operations this deployment waited for (bounded). */
+  readonly deferred_operations?: readonly DeploymentOperation[];
+  readonly operations_wait_exceeded?: boolean;
+  /** C-609: operations still running when the server was stopped anyway. */
+  readonly interrupted_operations?: readonly DeploymentOperation[];
+  /** C-609: deployments are at least this far apart; later merges are batched. */
+  readonly batch_window_ms?: number;
   readonly failure_stage?: "build" | "start" | "ready" | "host";
   /** Same-project runs observed immediately before requesting server shutdown. */
   readonly stop_snapshot?: {
@@ -151,6 +194,20 @@ export function recordDeployment(
       "validation_failed",
       "部署备份标识必须是主机生成的文件名",
     );
+    ensure(
+      [record.deferred_operations, record.interrupted_operations].every(
+        (list) =>
+          list === undefined ||
+          (Array.isArray(list) &&
+            list.length <= MAX_DEPLOYMENT_OPERATIONS &&
+            list.every(validDeploymentOperation)),
+      ) &&
+        (record.batch_window_ms === undefined ||
+          (Number.isSafeInteger(record.batch_window_ms) &&
+            record.batch_window_ms > 0)),
+      "validation_failed",
+      "部署等待记录无效",
+    );
     d.emit("host_deployment_recorded", undefined, {
       ...record,
       ...(record.stop_snapshot
@@ -159,6 +216,15 @@ export function recordDeployment(
               captured_at: record.stop_snapshot.captured_at,
               runs: record.stop_snapshot.runs.map((r) => ({ ...r })),
             },
+          }
+        : {}),
+      ...(record.deferred_operations
+        ? { deferred_operations: record.deferred_operations.map(copyOperation) }
+        : {}),
+      ...(record.interrupted_operations
+        ? {
+            interrupted_operations:
+              record.interrupted_operations.map(copyOperation),
           }
         : {}),
     });

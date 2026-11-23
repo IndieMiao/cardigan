@@ -220,13 +220,23 @@ function receiptFor(
   };
 }
 
+/** C-609: registers the helper as a managed long operation; returns its release. */
+export type SigningTracker = (scope: SigningScope) => () => void;
+
 function startJob(
   key: string,
   dataDir: string,
   scope: SigningScope,
   current: () => void,
   timing: MobileSigningTiming,
+  track?: SigningTracker,
 ): Job {
+  let release = () => {};
+  try {
+    release = track?.(scope) ?? release;
+  } catch {
+    /* Deployment bookkeeping never blocks signing. */
+  }
   const job: Job = {
     phase: "queued",
     request_id: null,
@@ -255,6 +265,7 @@ function startJob(
     ),
   };
   void job.done.then(() => {
+    release();
     setTimeout(() => {
       if (jobs.get(key) === job) jobs.delete(key);
     }, RETAIN_SETTLED_MS).unref();
@@ -280,6 +291,7 @@ export async function requestMobileSignature(
   scope: SigningScope,
   current: () => void,
   timing: MobileSigningTiming = {},
+  track?: SigningTracker,
 ) {
   const key = JSON.stringify([
     dataDir,
@@ -319,13 +331,13 @@ export async function requestMobileSignature(
           poll_after_seconds: 5,
         };
   if (!job) {
-    job = startJob(key, dataDir, scope, current, timing);
+    job = startJob(key, dataDir, scope, current, timing, track);
     await wait(job);
   } else if (job.outcome && "error" in job.outcome && job.request_id) {
     // The previous attempt ended after its claim without a result (e.g. the
     // helper was interrupted). Continue the same request: resend or look up.
     jobs.delete(key);
-    job = startJob(key, dataDir, scope, current, timing);
+    job = startJob(key, dataDir, scope, current, timing, track);
     await wait(job);
   }
   const elapsed_seconds = Math.floor((Date.now() - job.started) / 1000);

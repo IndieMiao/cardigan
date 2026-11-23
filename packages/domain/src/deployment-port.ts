@@ -1,4 +1,7 @@
-import type { DeploymentRecord } from "./commands/deployment.js";
+import type {
+  DeploymentOperation,
+  DeploymentRecord,
+} from "./commands/deployment.js";
 
 export interface DeploymentBuild {
   readonly sha: string;
@@ -36,4 +39,17 @@ export interface DeploymentDriver {
   refreshRoles(): Promise<void>;
   record(record: DeploymentRecord): Promise<void>;
   now(): number;
+  /**
+   * C-609, optional for legacy adapters: deployments start at least this far
+   * apart (ms); merges in between are deployed together as the latest main.
+   */
+  readonly batchWindowMs?: number;
+  /** C-609: upper bound (ms) of the wait for managed long operations. */
+  readonly operationWaitMs?: number;
+  /** C-609: managed long operations still running; never throws. */
+  operations?(): Promise<readonly DeploymentOperation[]>;
+  /** Deduplicated audit of a batching or operation wait; never blocks. */
+  waitForOperations?(record: DeploymentRecord): Promise<void>;
+  /** Interval between operation checks after the build (test seam). */
+  sleep?(ms: number): Promise<void>;
 }

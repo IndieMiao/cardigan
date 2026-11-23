@@ -5108,6 +5108,112 @@ test("C-316: restarting two live GitHub checks preserves durable capacity and re
   }
 });
 
+async function restartAfterBaselineMove(queue: boolean) {
+  const h = await parallelGithub(1);
+  if (queue) {
+    const initial = h.c.options.configuration.forProject();
+    if (initial.status !== "enabled") throw new Error("Missing config");
+    h.c.setConfig({
+      ...initial,
+      queue: {
+        maxBatchSize: 4,
+        conflictThreshold: 2,
+        windowTimeoutMs: 86_400_000,
+      },
+      executor: { ...h.config, maxConcurrent: 2, scopedChecks: true },
+    });
+    // Unconfirmed cards never form a batch; the batch writer stays idle.
+    Object.assign(h.git, {
+      prepareBatch: vi.fn(),
+      pinBatch: vi.fn(),
+      publishBatch: vi.fn(),
+    });
+  }
+  const first = h.create();
+  await first.schedule([h.f.project_id]);
+  await h.running(0);
+  const before = h.check(0);
+  first.stop();
+  await first.idle();
+  // The merge that triggered the deployment moved central main meanwhile.
+  h.git.prepare.mockResolvedValue({
+    status: "candidate",
+    candidate_sha: "e".repeat(40),
+    tree_sha: "f".repeat(40),
+    previous_sha: "b".repeat(40),
+  });
+  return { h, before, next: h.create() };
+}
+
+test("C-609: a restarted controller re-attaches a running queue-mode card check after main moved", async () => {
+  const { h, before, next } = await restartAfterBaselineMove(true);
+  try {
+    expect(before).toMatchObject({ level: "card", status: "running" });
+    await next.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(h.client.run.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    expect(h.check(0)).toMatchObject({
+      attempt_id: before.attempt_id,
+      status: "running",
+    });
+    h.finish(0);
+    await next.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(0).status).toBe("passed"));
+    await next.idle();
+    expect(h.check(0)).toMatchObject({
+      attempt_id: before.attempt_id,
+      external_run: before.external_run,
+      base_sha: before.base_sha,
+    });
+    expect(h.client.dispatch).toHaveBeenCalledTimes(1);
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(
+      h.f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "merge_check_finished" &&
+            (e.payload as { status?: string }).status === "interrupted",
+        ),
+    ).toEqual([]);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test("C-609: without the queue a moved main still needs a new check, recorded as a baseline change", async () => {
+  const { MERGE_CHECK_BASELINE_MOVED } = await import("./merge-checks.js");
+  const { h, before, next } = await restartAfterBaselineMove(false);
+  try {
+    await next.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(h.check(0).attempt_id).not.toBe(before.attempt_id),
+    );
+    const interrupted = h.f
+      .state()
+      .events.filter(
+        (e) =>
+          e.type === "merge_check_finished" &&
+          (e.payload as { attempt_id?: string }).attempt_id ===
+            before.attempt_id,
+      )
+      .map((e) => e.payload as { status: string; summary: string });
+    expect(interrupted).toEqual([
+      expect.objectContaining({
+        status: "interrupted",
+        summary: MERGE_CHECK_BASELINE_MOVED,
+      }),
+    ]);
+    expect(h.check(0)).toMatchObject({ base_sha: "b".repeat(40) });
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
 test.each([false, true])(
   "C-316: a late parallel pass on old main is rebuilt and checked again before serial publication (changed tree=%s)",
   async (changedTree) => {

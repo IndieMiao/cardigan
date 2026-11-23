@@ -189,7 +189,12 @@ test("stopping snapshots only running Runs and preserves every workflow state", 
   expect(finished.data.stop_snapshot).toEqual(effect.data.stop_snapshot);
 });
 
-test.each(["waiting_for_evidence", "waiting_for_capacity"] as const)(
+test.each([
+  "waiting_for_evidence",
+  "waiting_for_capacity",
+  "waiting_for_batch",
+  "waiting_for_operations",
+] as const)(
   "%s only records an observation and grants no workflow transition",
   (status) => {
     const state = fixture();
@@ -216,6 +221,60 @@ test.each(["waiting_for_evidence", "waiting_for_capacity"] as const)(
     expect(JSON.stringify(state)).toBe(original);
   },
 );
+
+test("C-609: operation waits carry bounded, copied host records and grant no transition", () => {
+  const state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const op = {
+    kind: "mobile_signing",
+    project_id: "sensen",
+    card_id: "C-14",
+    label: "受管送签（android）",
+    started_at: now,
+  };
+  const deferred = [op];
+  const effect = value(
+    recordDeployment(
+      state,
+      system,
+      {
+        ...record,
+        status: "stopping",
+        deferred_operations: deferred,
+        interrupted_operations: [{ ...op, card_id: null }],
+        batch_window_ms: 300000,
+      },
+      ports(),
+    ),
+  );
+  expect(effect.changes).toEqual([]);
+  expect(effect.events[0]?.payload).toMatchObject({
+    deferred_operations: [op],
+    interrupted_operations: [{ ...op, card_id: null }],
+    batch_window_ms: 300000,
+  });
+  const payload = effect.events[0]?.payload as
+    | { deferred_operations?: unknown }
+    | undefined;
+  expect(payload?.deferred_operations).not.toBe(deferred);
+  for (const invalid of [
+    { deferred_operations: [{ ...op, label: "" }] },
+    { deferred_operations: [{ ...op, label: "x".repeat(201) }] },
+    { interrupted_operations: [{ ...op, card_id: 7 }] },
+    { interrupted_operations: Array.from({ length: 51 }, () => op) },
+    { deferred_operations: "signing" },
+    { batch_window_ms: 0 },
+    { batch_window_ms: 1.5 },
+  ])
+    expect(
+      recordDeployment(
+        state,
+        system,
+        { ...record, ...(invalid as object) },
+        ports(),
+      ).ok,
+    ).toBe(false);
+});
 
 test("backup evidence accepts only generated basenames, never paths or free text", () => {
   const state = fixture();
