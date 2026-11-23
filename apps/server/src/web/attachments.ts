@@ -3,10 +3,12 @@ import type { AttachmentId, ProjectId } from "@cardigan/domain";
 import {
   ATTACHMENT_EXTENSIONS,
   fileAttachmentStore,
+  offsiteFor,
   sendArtifact,
 } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { INLINE_MIME_TYPES } from "./read.js";
+import { localOnly, redirectToOffsite } from "./thumbnails.js";
 
 /**
  * Attachment download (M5 plan §3.2: XSS through Agent-written content).
@@ -88,4 +90,34 @@ export async function serveAttachment(
   });
   res.end(context.req.method === "HEAD" ? undefined : Buffer.from(blob));
   return true;
+}
+
+/**
+ * C-614: the lightbox image. A verified off-site copy is resized by OSS and
+ * loaded from a signed URL; otherwise (or with `?local=1`) this is the same
+ * inline original the download route serves. Only inline bitmaps qualify.
+ */
+export async function serveAttachmentPreview(
+  context: AttachmentDownloadContext,
+): Promise<boolean> {
+  const { store, project_id, attachment_id, req, res } = context;
+  const attachment = store.uow.read((tx) =>
+    tx.attachments.get(project_id, attachment_id as AttachmentId),
+  );
+  const mime = attachment?.mime.toLowerCase();
+  if (
+    attachment === undefined ||
+    attachment.streamed_artifact ||
+    mime === undefined ||
+    !INLINE_MIME_TYPES.has(mime)
+  )
+    return false;
+  const remote = localOnly(req)
+    ? undefined
+    : offsiteFor(context.dataDir)?.previewUrl(attachment.sha256, mime);
+  if (remote) {
+    redirectToOffsite(res, remote);
+    return true;
+  }
+  return serveAttachment(context);
 }

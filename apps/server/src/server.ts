@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   type Assignment,
@@ -27,11 +28,13 @@ import {
   sessionFingerprint,
   targetProbe,
 } from "@cardigan/host";
-import type { McpBackend } from "@cardigan/mcp-server";
 import {
   defaultToolCatalog,
   type Logger,
+  type McpBackend,
+  Offsite,
   type RunningServer,
+  registerOffsite,
   startMcpServer,
   stdoutLogger,
 } from "@cardigan/mcp-server";
@@ -74,6 +77,7 @@ import {
   openMobileArtifact,
   requestMobileSignature,
 } from "./mobile-signing.js";
+import { OFFSITE_SYNC_INTERVAL_MS, OffsiteSync } from "./offsite-sync.js";
 import { serverProbes } from "./probes.js";
 import { apkPublisher } from "./publish-artifact.js";
 import {
@@ -105,6 +109,11 @@ const MOBILE_SIGNING_TERM_MS = 2_000;
 export interface StartServerOptions {
   /** Explicit production role. Omitted only for embedded single-process callers. */
   readonly role?: "web" | "background";
+  /**
+   * C-614: directory of the private OSS storage credential; defaults to
+   * `<config dir>/storage`. `false` disables the off-site copy entirely.
+   */
+  readonly offsiteStorageDir?: string | false;
   /** Activate the launch publisher only while this process owns the dispatch lock. */
   readonly backgroundReady?: Promise<void>;
   readonly onBackgroundOwner?: () => () => void;
@@ -716,6 +725,27 @@ async function assembleServer(
   // Start background work only after every listener is bound. A Web port
   // timeout must not have to drain a merge, dispatch or reconciliation that
   // started during the retry window.
+  // C-614: the off-site copy is optional. Without its credential file every
+  // read, upload and thumbnail stays local, exactly as before.
+  const offsiteStorage =
+    options.offsiteStorageDir ??
+    join(
+      runtimeEnv.CARDIGAN_CONFIG_DIR ??
+        process.env.CARDIGAN_CONFIG_DIR ??
+        join(homedir(), ".config", "cardigan"),
+      "storage",
+    );
+  const offsite =
+    offsiteStorage === false
+      ? undefined
+      : new Offsite({
+          dataDir: config.dataDir,
+          storageDir: offsiteStorage,
+          role: options.role ?? "server",
+        });
+  const unregisterOffsite = offsite ? registerOffsite(offsite) : undefined;
+  let offsiteSync: OffsiteSync | undefined;
+  let offsiteLoop: TimerLoop | undefined;
   const startup = Promise.withResolvers<boolean>();
   let plane: ControlPlane | undefined;
   let extLoop: TimerLoop | undefined;
@@ -875,6 +905,21 @@ async function assembleServer(
         // The blob GC sweeps `<dataDir>/attachments`; §9.3.
         dataDir: config.dataDir,
       });
+      if (offsite) {
+        const sync = new OffsiteSync({ offsite, store });
+        offsiteSync = sync;
+        offsiteLoop = startTimerLoop({
+          name: "offsite-sync",
+          startup: startup.promise,
+          initialDelayMs: 5000,
+          intervalMs: OFFSITE_SYNC_INTERVAL_MS,
+          // A large artifact may take minutes; that is expected, not a stall.
+          slowTickMs: 15 * 60_000,
+          continueSoon: () => sync.continueSoon,
+          tick: () => sync.tick(),
+          onError: () => warnLine("附件异地同步本轮未完成，将重试"),
+        });
+      }
       extSender = new LiveExtMessageSender(
         defaultExtMessagePath({ ...runtimeEnv }),
         {
@@ -899,12 +944,15 @@ async function assembleServer(
       });
     } catch (error) {
       startup.resolve(false);
+      offsiteSync?.stop();
       await Promise.allSettled([
         extSender?.stop(),
         extLoop?.stop(),
         probeLoop?.stop(),
+        offsiteLoop?.stop(),
         plane?.stop(),
       ]);
+      unregisterOffsite?.();
       await web?.close();
       await diagnostics?.close();
       await hostOps?.close();
@@ -961,12 +1009,15 @@ async function assembleServer(
     startup.resolve(false);
     await checkControl?.close();
     await web?.close();
+    offsiteSync?.stop();
     await Promise.allSettled([
       extSender?.stop(),
       extLoop?.stop(),
       probeLoop?.stop(),
+      offsiteLoop?.stop(),
       plane?.stop(),
     ]);
+    unregisterOffsite?.();
     await diagnostics?.close();
     await hostOps?.close();
     await mcp.close();
@@ -1014,6 +1065,7 @@ async function assembleServer(
         extSender?.stop(),
         extLoop?.stop(),
         probeLoop?.stop(),
+        (offsiteSync?.stop(), offsiteLoop?.stop()),
         // C-601: in-flight signing helpers end inside the shutdown grace (a
         // margin before the forced exit), never as orphans of this process.
         mobileSigning
@@ -1028,6 +1080,7 @@ async function assembleServer(
       await diagnostics?.close();
       await hostOps?.close();
       await mcp.close();
+      unregisterOffsite?.();
       stopProfiler();
       if (ownsStore) {
         store.close();
