@@ -15,7 +15,8 @@ permissions:
 env:
   CANDIDATE_SHA: 44493173ca7c778febe575987e0e66ab03021f10
   CANDIDATE_TREE: e21bcd8bc1090073b16a32e55f3ffd4bf9de9e5a
-  HC_VERSION: 0.1.21
+  # The candidate manifest's macos-aarch64 archive digest (its pinned hc release).
+  HC_ARCHIVE_SHA256: 1ab38dd9270f63a8f794d6d60e8702eb0d1c85a72bda85d735e5eea43f05ffed
   REAL_HC_CASE: 'real hc: a null-status session at its steady empty prompt is stopped'
 jobs:
   macos:
@@ -64,16 +65,16 @@ jobs:
           release="$(python3 -I - <<'PY'
           import json, os, pathlib
           manifest = json.loads(pathlib.Path('deploy/hc-version.json').read_text())
-          version = os.environ['HC_VERSION']
-          if manifest['version'] != version:
-              raise SystemExit(f'candidate pins hc {manifest["version"]}, expected {version}')
+          version = manifest['version']
           release = manifest['targets']['macos-aarch64']
+          if release['sha256'] != os.environ['HC_ARCHIVE_SHA256']:
+              raise SystemExit('candidate manifest does not pin the expected hc archive')
           if release['url'] != f'https://releases.herdr.dev/core/{version}/herdr-core-macos-aarch64.tar.gz':
               raise SystemExit('unexpected hc archive url')
-          print(release['url'], release['sha256'], manifest['download_user_agent'])
+          print(release['url'], release['sha256'], manifest['download_user_agent'], version)
           PY
           )"
-          read -r url sha256 agent <<< "$release"
+          read -r url sha256 agent version <<< "$release"
           curl --fail --silent --show-error --location --max-time 120 \
             --user-agent "$agent" --output "$target/hc.tar.gz" "$url"
           echo "$sha256  $target/hc.tar.gz" | shasum -a 256 -c -
@@ -82,7 +83,7 @@ jobs:
           lipo -archs "$app" | tr ' ' '\n' | grep -qx arm64
           mkdir "$target/bin"
           ln -s "$app" "$target/bin/hc"
-          test "$("$target/bin/hc" --version)" = "hc $HC_VERSION"
+          test "$("$target/bin/hc" --version)" = "hc $version"
           echo "$target/bin" >> "$GITHUB_PATH"
           {
             echo CARDIGAN_REQUIRE_HC=1

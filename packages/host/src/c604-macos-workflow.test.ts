@@ -37,6 +37,11 @@ const step = (name: string): Step => {
   return found;
 };
 const CANDIDATE = "44493173ca7c778febe575987e0e66ab03021f10";
+// The candidate pins the same hc release as this tree.
+const manifest = JSON.parse(
+  readFileSync(new URL("deploy/hc-version.json", root), "utf8"),
+);
+const macArchive = manifest.targets["macos-aarch64"];
 const FILES = [
   "packages/runtime-herdr/src/darwin-retirement.test.ts",
   "packages/runtime-herdr/src/darwin-idle-owner.test.ts",
@@ -61,11 +66,11 @@ describe("C-604 isolated macOS workflow", () => {
     expect(source).not.toMatch(/upload-artifact|actions\/cache|mac-mini/u);
   });
 
-  test("pins the D-2309 precheck candidate, its tree and hc 0.1.21", () => {
+  test("pins the D-2309 precheck candidate, its tree and the manifest hc archive", () => {
     expect(workflow.env).toMatchObject({
       CANDIDATE_SHA: CANDIDATE,
       CANDIDATE_TREE: "e21bcd8bc1090073b16a32e55f3ffd4bf9de9e5a",
-      HC_VERSION: "0.1.21",
+      HC_ARCHIVE_SHA256: macArchive.sha256,
     });
     const checkout = step("Checkout candidate");
     expect(checkout.with).toEqual({
@@ -140,19 +145,20 @@ describe("C-604 isolated macOS workflow", () => {
       input: script,
       encoding: "utf8",
       cwd: fileURLToPath(root),
-      env: { PATH: process.env.PATH, HC_VERSION: "0.1.21" },
+      env: { PATH: process.env.PATH, HC_ARCHIVE_SHA256: macArchive.sha256 },
     });
     expect(result.status).toBe(0);
     expect(result.stdout.trim().split(" ")).toEqual([
-      "https://releases.herdr.dev/core/0.1.21/herdr-core-macos-aarch64.tar.gz",
-      "1ab38dd9270f63a8f794d6d60e8702eb0d1c85a72bda85d735e5eea43f05ffed",
-      "cardigan-hc-download/1",
+      macArchive.url,
+      macArchive.sha256,
+      manifest.download_user_agent,
+      manifest.version,
     ]);
     const mismatch = spawnSync("python3", ["-I", "-"], {
       input: script,
       encoding: "utf8",
       cwd: fileURLToPath(root),
-      env: { PATH: process.env.PATH, HC_VERSION: "0.1.20" },
+      env: { PATH: process.env.PATH, HC_ARCHIVE_SHA256: "0".repeat(64) },
     });
     expect(mismatch.status).not.toBe(0);
   });
