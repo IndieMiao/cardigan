@@ -598,7 +598,7 @@ def session_unit(name):
 
 
 def user_manager(args, timeout):
-    """Exit code, None without systemctl, False on timeout or other failure."""
+    """Exit code, None without the tool, -1 on timeout or other failure."""
     env = {'PATH': '/usr/bin:/bin', 'XDG_RUNTIME_DIR': '/run/user/%d' % os.getuid()}
     try:
         return subprocess.run(args, env=env, cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -606,7 +606,7 @@ def user_manager(args, timeout):
     except FileNotFoundError:
         return None
     except (OSError, subprocess.SubprocessError):
-        return False
+        return -1
 
 
 def reap_entry(root, name, systemctl='/usr/bin/systemctl'):

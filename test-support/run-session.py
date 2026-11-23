@@ -204,11 +204,36 @@ def tmp_cases():
         subprocess.run(['rm', '-rf', base, stamps])
 
 
+def stop_cases():
+    # A scope that cannot be confirmed stopped keeps the entry for a later sweep.
+    base = tempfile.mkdtemp(prefix='cg-stop-')
+    try:
+        root = pathlib.Path(base)
+        name = 'A-1.R-1.999999999'
+        (root / name / 'tmp').mkdir(parents=True)
+        (root / name / 'owner').write_text(json.dumps({'birth': 'x', 'scoped': True}))
+        tool = root / 'systemctl'
+        g = m['reap_entry'].__globals__
+        seconds = g['SCOPE_STOP_SECONDS']
+        g['SCOPE_STOP_SECONDS'] = -19.8  # a 0.2 s bound for the hanging case
+        try:
+            for body, reaped in (('sleep 5', False), ('exit 1', False), ('exit 5', True)):
+                tool.write_text('#!/bin/sh\n' + body + '\n')
+                tool.chmod(0o755)
+                assert m['reap_entry'](str(root), name, systemctl=str(tool)) is reaped, body
+                assert (root / name).exists() is not reaped, body
+        finally:
+            g['SCOPE_STOP_SECONDS'] = seconds
+    finally:
+        subprocess.run(['rm', '-rf', base])
+
+
 if __name__ == '__main__':
     assert sys.platform == 'linux'
     scoped = user_manager()
     sweep_cases()
     tmp_cases()
+    stop_cases()
     setup_failure_still_starts()
     lifecycle(False)
     if scoped:
