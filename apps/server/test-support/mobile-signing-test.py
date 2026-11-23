@@ -296,6 +296,62 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
     def actions(self):
         return [a for (a,) in self.db.execute('SELECT action FROM events WHERE request=? ORDER BY rowid',(self.spec['id'],))]
 
+    def chain(self, run='R-9', sha=None, size=None, data=None, platform='android'):
+        ident = {**self.ctx, 'run': run, 'platform': platform}
+        body = self.candidate.read_bytes() if data is None else data
+        req = {'commit': 'c'*40, 'build': 'attachment-7', 'sha256': sha or digest(self.candidate),
+               'size': len(body) if size is None else size}
+        return ident, host.chain_grant(self.host, self.db, ident, req, io.BytesIO(body))
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
+    def test_release_chain_registers_and_approves_once_then_signs(self):
+        # C-612: no operator register/approve; the route fixes app and version.
+        ident, (rid, status) = self.chain()
+        self.assertEqual(status, 'new')
+        spec, state = self.db.execute('SELECT spec,state FROM grants WHERE id=?', (rid,)).fetchone()
+        spec = json.loads(spec)
+        self.assertEqual(state, 'approved')
+        self.assertEqual({k: spec[k] for k in ('app', 'version', 'commit', 'build', 'run')},
+                         {'app': 'test.fixture', 'version': 'test-v1', 'commit': 'c'*40,
+                          'build': 'attachment-7', 'run': 'R-9'})
+        self.assertGreater(spec['expires'], time.time() + 3600)
+        self.assertEqual(digest(self.host/'inputs'/rid), digest(self.candidate))
+        self.assertEqual(self.chain()[1], (rid, 'existing'))
+        self.assertEqual(self.chain(sha='e'*64, data=b'x')[1], (rid, 'other'))
+        self.assertEqual(self.db.execute('SELECT count(*) FROM grants WHERE scope=?', (scope(ident),)).fetchone(), (1,))
+        out_rid, sha = host.request(self.host, self.db, ident, lambda: None, self.dial)
+        self.assertEqual(out_rid, rid)
+        self.assertEqual(digest(self.host/'outputs'/rid), sha)
+        actions = [a for (a,) in self.db.execute('SELECT action FROM events WHERE request=? ORDER BY rowid', (rid,))]
+        self.assertEqual(actions, ['chain_registered', 'chain_approved', 'request', 'dispatch', 'signed'])
+        self.db.execute('UPDATE grants SET revoked=1 WHERE id=?', (rid,))
+        self.assertEqual(self.chain()[1], (rid, 'other'))
+
+    def test_release_chain_refuses_substitution_ios_and_ambiguous_routes(self):
+        before = self.db.execute('SELECT count(*) FROM grants').fetchone()
+        for kwargs in ({'sha': 'e'*64}, {'data': b'not the candidate'}, {'size': 1},
+                       {'platform': 'ios'}, {'run': 'R 9'}):
+            with self.assertRaises(Exception):
+                self.chain(**kwargs)
+        routes = json.loads((self.host/'routes.json').read_text())
+        save(self.host/'routes.json', canonical(routes + [{**routes[0], 'version': 'test-v2'}]))
+        with self.assertRaises(ValueError):
+            self.chain()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM grants').fetchone(), before)
+        self.assertEqual({p.name for p in (self.host/'inputs').iterdir()}, {self.spec['id']})
+
+    def test_release_chain_main_reads_scope_request_and_fd3(self):
+        ident = {**self.ctx, 'run': 'R-8'}
+        req = {'commit': 'c'*40, 'build': 'attachment-7', 'sha256': digest(self.candidate),
+               'size': self.candidate.stat().st_size}
+        done = subprocess.run(['/bin/sh', '-c', 'exec "$0" -IB "$1" "$2" chain 3<"$3"', sys.executable,
+                               str(HELPERS/'host.py'), str(self.host), str(self.candidate)],
+                              input=(canonical(ident)+'\n'+canonical(req)+'\n').encode(), capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        rid, status = done.stdout.decode().split()
+        self.assertEqual(status, 'new')
+        self.assertRegex(rid, '^[0-9a-f]{32}$')
+
     def test_budget_scales_with_input_size_and_private_limits(self):
         # C-598: 334 MB at the default 512 KiB/s each way, plus ten minutes for signing.
         self.assertEqual(host.budget(self.host, 0), 600)

@@ -1,6 +1,7 @@
 """Trusted control host only. No caller-supplied command, path, key reference or target."""
 import os
 from pathlib import Path
+import secrets
 import signal
 import subprocess
 import stat
@@ -95,6 +96,63 @@ def approve(root, db, s):
     except BaseException:
         db.rollback()
         raise
+
+
+# C-612: a chain grant lives as long as a packaging Run reasonably can.
+CHAIN_TTL = 86400
+
+
+def chain_grant(root, db, identity, request, source):
+    """An approved release chain stands in for the operator's register + approve.
+
+    Internal Android test candidates only. The control service passes the
+    chain's bound source commit and unsigned digest, the build reference and
+    the byte count; the single route for this project, machine and platform
+    fixes the app and credential version. The signer still checks project,
+    machine, Run, digest and package name. One candidate per Run: an existing
+    grant for this scope is reported, never replaced.
+    """
+    ctx = scope(identity)
+    require(set(identity) == set(SCOPE) and identity['platform'] == 'android')
+    require(type(request) is dict and set(request) == {'commit', 'build', 'sha256', 'size'})
+
+    def known():
+        row = db.execute('SELECT id,spec,revoked FROM grants WHERE scope=?', (ctx,)).fetchone()
+        if row:
+            same = json.loads(row[1])['sha256'] == request['sha256'] and not row[2]
+            return row[0], 'existing' if same else 'other'
+        return None
+
+    found = known()
+    if found:
+        return found
+    hits = [r for r in config(root / 'routes.json')
+            if all(r[k] == identity[k] for k in ('project', 'machine', 'platform'))]
+    require(len(hits) == 1)
+    s = {**identity, 'id': secrets.token_hex(16), 'version': hits[0]['version'], 'app': hits[0]['app'],
+         'build': request['build'], 'commit': request['commit'], 'sha256': request['sha256'],
+         'expires': int(time.time()) + CHAIN_TTL}
+    manifest(s)
+    route(root, s)
+    with tempfile.TemporaryDirectory(dir=root) as tmp:
+        copy = Path(tmp) / 'input'
+        with copy.open('xb') as dst:
+            require(transfer(source, dst, request['size']) == s['sha256'] and not source.read(1))
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            found = known()  # a concurrent chain call won the scope
+            if found:
+                db.rollback()
+                return found
+            db.execute("INSERT INTO grants(id,scope,spec,state) VALUES(?,?,?,'approved')", (s['id'], ctx, canonical(s)))
+            persist(copy, directory(root, 'inputs') / s['id'])
+            event(db, ctx, s['id'], 'chain_registered')
+            event(db, ctx, s['id'], 'chain_approved')
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+    return s['id'], 'new'
 
 
 def connect(root, peer):
@@ -359,6 +417,13 @@ def main():
         print(rid,release_authority(root,db,rid,json.loads(line(sys.stdin.buffer))))
     elif cmd == 'reconcile':
         print(canonical(reconcile(db,root,sys.argv[3])))
+    elif cmd == 'chain':
+        # Two lines on stdin (Run scope, chain request); candidate bytes on fd 3.
+        identity = json.loads(line(sys.stdin.buffer))
+        chained = json.loads(line(sys.stdin.buffer))
+        with os.fdopen(3, 'rb') as f:
+            rid, status = chain_grant(root, db, identity, chained, f)
+        print(rid, status)
     elif cmd == 'register':
         register(root,db,config(staged(root,sys.argv[3])),staged(root,sys.argv[4]))
     elif cmd == 'approve':
