@@ -220,6 +220,10 @@ const PROBLEM_TEXT = {
   not_executable: "无法执行",
 } as const;
 
+/** C-599: a per-file reason that installing the verified current release fixes. */
+export const agentToolsReinstallable = (reason: string) =>
+  AGENT_TOOLS.some((name) => reason.startsWith(`附件助手 ${name} `));
+
 /**
  * Readable reason for a failed check; undefined means installed and current.
  * With the release digests each problem names the expected SHA-256, so an
