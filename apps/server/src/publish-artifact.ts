@@ -64,10 +64,11 @@ async function stageApk(data: string, a: Attachment, dest: string) {
   }
 }
 /**
- * `apksigner verify --verbose --print-certs` names v1/v2 signers `Signer #n` and
- * v3/v3.1 signers `V3[.x] Signer[ (minSdkVersion=…)][:]`. Require a verified APK with
- * exactly one signer whose every reported certificate equals the registered one; any
- * other certificate digest line (unknown scheme, lineage, stamp) fails closed.
+ * `apksigner verify --verbose --print-certs` labels each scheme's signer. Build Tools 37
+ * (apksigner 0.9) prints `V1 Signer:`, `V2 Signer:`, `V3.0 Signer:` and, with SDK-targeted
+ * rotation, `V3.1 Signer: (minSdkVersion=…, maxSdkVersion=…)`; older releases print
+ * `Signer #n`. Require a verified APK with exactly one signer whose every reported
+ * certificate equals the registered one; any other certificate digest line fails closed.
  */
 export function signedOnlyBy(output: string, certificate: string) {
   const lines = output.split(/\r?\n/u);
@@ -75,7 +76,7 @@ export function signedOnlyBy(output: string, certificate: string) {
     l.includes("certificate SHA-256 digest:"),
   );
   const seen = digests.map((l) =>
-    /^(?:Signer #(\d+)|V3(?:\.\d+)? Signer(?: \([^()]*\))?:?) certificate SHA-256 digest: ([a-fA-F0-9]{64})$/u.exec(
+    /^(?:Signer #(\d+)|V[1-9](?:\.\d)? Signer:(?: \(minSdkVersion=\d+, maxSdkVersion=\d+\))?) certificate SHA-256 digest: ([a-fA-F0-9]{64})$/u.exec(
       l,
     ),
   );

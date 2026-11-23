@@ -278,61 +278,93 @@ test.each([
   expect(f.claim).toHaveBeenCalledTimes(download ? 1 : 0);
 });
 
-const head = (scheme: string) =>
-  `Verifies\nVerified using v1 scheme (JAR signing): ${scheme.includes("1")}\nVerified using v2 scheme (APK Signature Scheme v2): ${scheme.includes("2")}\nVerified using v3 scheme (APK Signature Scheme v3): ${scheme.includes("3")}\n`;
-const line = (name: string, digest = cert) =>
-  `${name} certificate DN: CN=test\n${name} certificate SHA-256 digest: ${digest}\n${name} certificate SHA-1 digest: ${"c".repeat(40)}\n${name} public key SHA-256 digest: ${"d".repeat(64)}\n`;
-test.each([
-  ["v1/v2 only", `${head("12")}Number of signers: 1\n${line("Signer #1")}`],
-  ["v3-only", `${head("3")}Number of signers: 1\n${line("V3.0 Signer:")}`],
+// Verbatim `apksigner verify --verbose --print-certs` stdout from Android SDK Build Tools
+// 37.0.0 (apksigner 0.9) on disposable test keys, recorded in review evidence attachment-8965.
+const real = "39bf69c178a6e7dac6876b53ed69e341dcd9bb63cb7b6d0cdf29ac3071027f4f";
+const verified = (schemes: string) =>
   [
-    "v3-only, CRLF and upper-case digest",
-    `${head("3")}Number of signers: 1\n${line("V3.0 Signer:", cert.toUpperCase())}`.replaceAll(
-      "\n",
-      "\r\n",
+    "Verifies",
+    ...[
+      "v1 scheme (JAR signing)",
+      "v2 scheme (APK Signature Scheme v2)",
+      "v3 scheme (APK Signature Scheme v3)",
+      "v3.1 scheme (APK Signature Scheme v3.1)",
+      "v3.2 scheme (APK Signature Scheme v3.2)",
+    ].map(
+      (name, i) =>
+        `Verified using ${name}: ${schemes.split(",").includes(["1", "2", "3", "3.1", "3.2"][i]!)}`,
+    ),
+    "Number of signers: 1",
+  ].join("\n");
+const apksigner37 = {
+  v1: `${verified("1")}\nV1 Signer: certificate SHA-256 digest: ${real}\n`,
+  v2: `${verified("2")}\nV2 Signer: certificate SHA-256 digest: ${real}\n`,
+  v3: `${verified("3")}\nV3.0 Signer: certificate SHA-256 digest: ${real}\n`,
+  "v2+v3": `${verified("2,3")}\nV3.0 Signer: certificate SHA-256 digest: ${real}\n`,
+  "v3.1 rotation": `${verified("2,3,3.1")}\nV3.1 Signer: (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: ac5d9b5eea035317d6352d949dfbdddd760d6d10048b7d53a6f509dfc048cf4a\nV3.0 Signer: (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: 16930e5b8c757beb8a1f8bf27f5c7bd197deac3dbab18c090645c84ceac97f21\n`,
+};
+test("the recorded verbose output matches attachment-8965", () => {
+  expect(apksigner37.v1).toBe(
+    `Verifies\nVerified using v1 scheme (JAR signing): true\nVerified using v2 scheme (APK Signature Scheme v2): false\nVerified using v3 scheme (APK Signature Scheme v3): false\nVerified using v3.1 scheme (APK Signature Scheme v3.1): false\nVerified using v3.2 scheme (APK Signature Scheme v3.2): false\nNumber of signers: 1\nV1 Signer: certificate SHA-256 digest: ${real}\n`,
+  );
+});
+test.each(["v1", "v2", "v3", "v2+v3"] as const)(
+  "Build Tools 37 %s with the registered certificate passes",
+  (scheme) => {
+    expect(signedOnlyBy(apksigner37[scheme], real)).toBe(true);
+    expect(signedOnlyBy(apksigner37[scheme], cert)).toBe(false);
+    expect(
+      signedOnlyBy(
+        apksigner37[scheme]
+          .replaceAll("\n", "\r\n")
+          .replace(real, real.toUpperCase()),
+        real,
+      ),
+    ).toBe(true);
+  },
+);
+test("Build Tools 37 v3.1 labels parse, but a rotated second certificate is refused", () => {
+  const rotation = apksigner37["v3.1 rotation"];
+  for (const digest of [
+    "ac5d9b5eea035317d6352d949dfbdddd760d6d10048b7d53a6f509dfc048cf4a",
+    "16930e5b8c757beb8a1f8bf27f5c7bd197deac3dbab18c090645c84ceac97f21",
+  ])
+    expect(signedOnlyBy(rotation, digest)).toBe(false);
+  const single = rotation.replace(/digest: [a-f0-9]{64}/gu, `digest: ${real}`);
+  expect(signedOnlyBy(single, real)).toBe(true);
+});
+const legacy = (signers: string[], count = signers.length) =>
+  `Verifies\nVerified using v1 scheme (JAR signing): true\nVerified using v2 scheme (APK Signature Scheme v2): true\nNumber of signers: ${count}\n${signers.map((d, i) => `Signer #${i + 1} certificate DN: CN=test\nSigner #${i + 1} certificate SHA-256 digest: ${d}\nSigner #${i + 1} certificate SHA-1 digest: ${"c".repeat(40)}\n`).join("")}`;
+test("older apksigner `Signer #1` output still passes", () => {
+  expect(signedOnlyBy(legacy([cert]), cert)).toBe(true);
+});
+test.each([
+  ["multiple signers", legacy([cert, cert])],
+  ["a second signer under a count of one", legacy([cert, cert], 1)],
+  ["a wrong certificate", legacy(["0".repeat(64)])],
+  [
+    "v2 and v3 disagreeing",
+    apksigner37["v2+v3"].replace(
+      "Number of signers: 1\n",
+      `Number of signers: 1\nV2 Signer: certificate SHA-256 digest: ${"0".repeat(64)}\n`,
     ),
   ],
   [
-    "v2+v3",
-    `${head("23")}Number of signers: 1\n${line("Signer #1")}${line("V3.0 Signer:")}`,
+    "an unrecognised certificate line",
+    `${apksigner37.v3}Source Stamp Signer certificate SHA-256 digest: ${real}\n`,
   ],
   [
-    "v3+v3.1 with SDK ranges",
-    `${head("3")}Number of signers: 1\n${line("V3.1 Signer (minSdkVersion=33, maxSdkVersion=2147483647)")}${line("V3 Signer (minSdkVersion=24, maxSdkVersion=32)")}`,
+    "a label without the colon",
+    apksigner37.v3.replace("V3.0 Signer:", "V3.0 Signer"),
   ],
-])("signature accepts the registered single signer: %s", (_, output) => {
-  expect(signedOnlyBy(output, cert)).toBe(true);
-});
-test.each([
+  ["a missing Verifies line", apksigner37.v3.replace("Verifies\n", "")],
   [
-    "multiple signers",
-    `${head("2")}Number of signers: 2\n${line("Signer #1")}${line("Signer #2")}`,
+    "a missing signer count",
+    apksigner37.v3.replace("Number of signers: 1\n", ""),
   ],
-  [
-    "second signer without a count",
-    `${head("2")}Number of signers: 1\n${line("Signer #1")}${line("Signer #2")}`,
-  ],
-  [
-    "v3-only, wrong certificate",
-    `${head("3")}Number of signers: 1\n${line("V3.0 Signer:", "0".repeat(64))}`,
-  ],
-  [
-    "v2+v3 disagree",
-    `${head("23")}Number of signers: 1\n${line("Signer #1")}${line("V3.0 Signer:", "0".repeat(64))}`,
-  ],
-  [
-    "rotated v3.1 key",
-    `${head("3")}Number of signers: 1\n${line("V3.1 Signer (minSdkVersion=33, maxSdkVersion=2147483647)", "0".repeat(64))}${line("V3 Signer (minSdkVersion=24, maxSdkVersion=32)")}`,
-  ],
-  [
-    "unknown certificate line",
-    `${head("3")}Number of signers: 1\n${line("V3.0 Signer:")}${line("Source Stamp Signer", "0".repeat(64))}`,
-  ],
-  ["not verified", `Number of signers: 1\n${line("V3.0 Signer:")}`],
-  ["no signer count", `${head("3")}${line("V3.0 Signer:")}`],
-  ["no certificate", `${head("3")}Number of signers: 1\n`],
+  ["no certificate line", apksigner37.v3.replace(/V3\.0 Signer: .*\n/u, "")],
 ])("signature refuses %s", (_, output) => {
-  expect(signedOnlyBy(output, cert)).toBe(false);
+  expect(signedOnlyBy(output, output.includes(real) ? real : cert)).toBe(false);
 });
 
 test.each([
