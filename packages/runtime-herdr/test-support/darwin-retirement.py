@@ -116,6 +116,25 @@ with contextlib.ExitStack() as stack:
     assert observe() == 'alive'
     assert all(call.args[0] == 'terminal.get' for call in rpc.call_args_list)
     c['require_idle'] = True
+    # C-626 merge: the controller's opt-in (sent only after its own bound
+    # empty-editor read) alone admits null or 'unknown' activity, without a
+    # worker read. Without it, 'unknown' is a reported non-idle state and is
+    # refused unread; only a null status earns the two-screen proof.
+    shown[:] = [busy]
+    for status, opted, expected in ((None, True, 'alive'), ({'state': 'unknown'}, True, 'alive'), ({}, True, 'alive'),
+                                    ({'state': 'unknown'}, False, 'unknown'), ({}, False, 'unknown'),
+                                    (None, False, 'unknown'), ({'state': 'working'}, True, 'unknown'),
+                                    ({'state': 'blocked'}, True, 'unknown'), ({'state': 'error'}, True, 'unknown'),
+                                    (False, True, 'unknown'), ([], True, 'unknown'), ('', True, 'unknown')):
+        record[:] = [dict(quiet, status=status)]
+        calls.clear()
+        assert worker.retirement_terminal(dict(c, unknown_activity=True) if opted else c) == expected, (status, opted)
+        assert ('terminal.read' in calls) == (status is None and not opted), (status, opted, calls)
+    # The opt-in is a literal True only.
+    record[:] = [dict(quiet, status={'state': 'unknown'})]
+    assert worker.retirement_terminal(dict(c, unknown_activity='yes')) == 'unknown'
+    record[:] = [quiet]
+    shown[:] = [claude_idle]
     rpc = saved
     # A reported status must be a well-formed idle report.
     for status, expected in ((False, 'unknown'), ([], 'unknown'), ('idle', 'unknown'), ({}, 'unknown'),
