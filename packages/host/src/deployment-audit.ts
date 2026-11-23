@@ -2,6 +2,7 @@ import {
   type CardId,
   type DeliveryId,
   type DeploymentControl,
+  type DeploymentOperation,
   type DeploymentRecord,
   type Event,
   hasPassedMergeCheck,
@@ -252,15 +253,19 @@ export function writeOperationWait(
 }
 
 /**
- * C-609: the server is being stopped while these operations still run. Each
- * affected card gets one timeline note in its own project; the operations
- * resume or are requeued by the next server.
+ * C-609: one timeline note per operation on its own card, in its own project.
+ * Only that card's readers see which operation it was; the deployment
+ * project's record keeps per-kind counts.
  */
-export function writeInterruptedOperations(
+function writeOperationNotes(
   store: Store,
-  record: DeploymentRecord,
+  type:
+    | "host_deployment_operation_deferred"
+    | "host_deployment_operation_interrupted",
+  attempt: string,
+  ops: readonly DeploymentOperation[],
+  body: (op: DeploymentOperation) => string,
 ) {
-  const ops = record.interrupted_operations ?? [];
   store.uow.run((tx) => {
     const now = new Date().toISOString();
     for (const op of ops) {
@@ -272,12 +277,10 @@ export function writeInterruptedOperations(
         id: tx.ids.nextEventId(),
         seq: tx.ids.nextEventSequence(project, card),
         card_id: card,
-        type: "host_deployment_operation_interrupted",
+        type,
         actor: { kind: "system", project_id: project },
         payload: {
-          attempt: record.attempt,
-          from: record.from,
-          to: record.to,
+          attempt,
           kind: op.kind,
           label: op.label,
           started_at: op.started_at,
@@ -297,10 +300,45 @@ export function writeInterruptedOperations(
         mentions: [],
         retracted: false,
         created_at: now,
-        body: `自动部署等待已达上限，服务端照常重启；本卡的${op.label}（${op.started_at} 开始）仍在进行，重启后续跑或重排。`,
+        body: body(op),
       });
     }
   });
+}
+
+/** C-609: an automatic deployment is waiting for these operations (bounded). */
+export function writeDeferredOperations(
+  store: Store,
+  attempt: string,
+  ops: readonly DeploymentOperation[],
+) {
+  writeOperationNotes(
+    store,
+    "host_deployment_operation_deferred",
+    attempt,
+    ops,
+    (op) =>
+      `自动部署正在等待本卡的${op.label}（${op.started_at} 开始）结束后再重启服务端；等待有上限，到时照常部署。`,
+  );
+}
+
+/**
+ * C-609: the server is being stopped while these operations still run; they
+ * resume or are requeued by the next server.
+ */
+export function writeInterruptedOperations(
+  store: Store,
+  attempt: string,
+  ops: readonly DeploymentOperation[],
+) {
+  writeOperationNotes(
+    store,
+    "host_deployment_operation_interrupted",
+    attempt,
+    ops,
+    (op) =>
+      `自动部署等待已达上限，服务端照常重启；本卡的${op.label}（${op.started_at} 开始）仍在进行，重启后续跑或重排。`,
+  );
 }
 
 /** Prove every published segment has a real gate result; foreign main changes fail closed. */

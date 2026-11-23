@@ -29,7 +29,13 @@ export interface PublicationOptions {
     project: string,
     a: Attachment,
     request: PublishInput,
-    claim: (url: string) => void,
+    /**
+     * Durably claim the decision for `url`. `existing` (C-609): the prefix
+     * already holds this release's objects, which is accepted only to
+     * continue this decision's own interrupted claim for the same URL and
+     * artifact; otherwise it throws.
+     */
+    claim: (url: string, existing?: boolean) => void,
     current: () => void,
   ) => Promise<{ url: string; size: number; sha256: string }>;
 }
@@ -58,7 +64,7 @@ function audit(
   ctx: ToolContext,
   card: CardId,
   request: PublishInput,
-  phase: "claimed" | "failed" | "verified",
+  phase: "claimed" | "resumed" | "failed" | "verified",
   result: string,
 ) {
   const actor = ctx.identity.actor,
@@ -89,6 +95,13 @@ function audit(
     created_at: at,
   });
 }
+/**
+ * C-609: decisions whose publication runs in this process. A claim with no
+ * verified result that is not in flight here was cut off (e.g. by a server
+ * restart) and may be continued under the same approval.
+ */
+const inFlight = new Set<string>();
+
 export function publicationTool(options: PublicationOptions) {
   return defineTool({
     name: "publish_artifact",
@@ -141,6 +154,8 @@ export function publicationTool(options: PublicationOptions) {
           throw new PublicationError("approval");
         return a;
       };
+      const flight = JSON.stringify([p, request.decision_id]);
+      let flying = false;
       try {
         if (!ctx.revalidateToken) throw new PublicationError("scope");
         const revalidate = () => {
@@ -163,7 +178,7 @@ export function publicationTool(options: PublicationOptions) {
           )
             throw new PublicationError("artifact");
         };
-        const claim = (url: string) => {
+        const claim = (url: string, existing = false) => {
           revalidate();
           ctx.store.uow.run((tx) => {
             fresh(tx);
@@ -177,25 +192,34 @@ export function publicationTool(options: PublicationOptions) {
               )
             )
               throw new PublicationError("approval");
-            if (
-              tx.events
-                .listAfter(p, a.card_id, 0)
-                .some(
-                  (e) =>
-                    e.type === "artifact_publication_claimed" &&
-                    (e.payload as { decision_id?: string })?.decision_id ===
-                      request.decision_id,
-                )
-            )
-              throw new PublicationError("already_claimed");
-            audit(
-              tx,
-              ctx,
-              a.card_id,
-              request,
-              "claimed",
-              `${url} · ${a.sha256}`,
+            const mine = tx.events
+              .listAfter(p, a.card_id, 0)
+              .filter(
+                (e) =>
+                  (e.payload as { decision_id?: string })?.decision_id ===
+                  request.decision_id,
+              );
+            const claimed = mine.find(
+              (e) => e.type === "artifact_publication_claimed",
             );
+            const target = `${url} · ${a.sha256}`;
+            if (claimed) {
+              // Continue only the same URL and artifact, never a verified or
+              // running publication; the objects are re-verified, never
+              // overwritten.
+              if (
+                (claimed.payload as { result?: string }).result !== target ||
+                mine.some((e) => e.type === "artifact_publication_verified") ||
+                inFlight.has(flight)
+              )
+                throw new PublicationError("already_claimed");
+              audit(tx, ctx, a.card_id, request, "resumed", target);
+            } else {
+              if (existing) throw new PublicationError("immutable_prefix");
+              audit(tx, ctx, a.card_id, request, "claimed", target);
+            }
+            inFlight.add(flight);
+            flying = true;
           });
         };
         const result = await options.publishArtifact(
@@ -240,6 +264,8 @@ export function publicationTool(options: PublicationOptions) {
             : "validation_failed",
           `测试包外发未放行：${category}`,
         );
+      } finally {
+        if (flying) inFlight.delete(flight);
       }
     },
   });

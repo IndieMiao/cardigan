@@ -220,8 +220,12 @@ function receiptFor(
   };
 }
 
-/** C-609: registers the helper as a managed long operation; returns its release. */
-export type SigningTracker = (scope: SigningScope) => () => void;
+/**
+ * C-609: registers the helper as a managed long operation and resolves to its
+ * release. While a deployment's stop fence stands it stays pending, so the job
+ * remains `queued` and never claims a grant on a server about to stop.
+ */
+export type SigningTracker = (scope: SigningScope) => Promise<() => void>;
 
 function startJob(
   key: string,
@@ -232,37 +236,43 @@ function startJob(
   track?: SigningTracker,
 ): Job {
   let release = () => {};
-  try {
-    release = track?.(scope) ?? release;
-  } catch {
-    /* Deployment bookkeeping never blocks signing. */
-  }
+  const tracked = async () => {
+    try {
+      release = (await track?.(scope)) ?? release;
+    } catch {
+      /* Deployment bookkeeping never blocks signing. */
+    }
+  };
   const job: Job = {
     phase: "queued",
     request_id: null,
     mode: null,
     deadline_seconds: null,
     started: Date.now(),
-    done: helper(dataDir, scope, current, timing, {
-      progress: {
-        accepted: (id, seconds, mode) => {
-          job.phase = "transferring";
-          job.request_id = id;
-          job.mode = mode;
-          job.deadline_seconds = seconds;
+    done: tracked()
+      .then(() =>
+        helper(dataDir, scope, current, timing, {
+          progress: {
+            accepted: (id, seconds, mode) => {
+              job.phase = "transferring";
+              job.request_id = id;
+              job.mode = mode;
+              job.deadline_seconds = seconds;
+            },
+            committed: () => {
+              job.phase = "signing";
+            },
+          },
+        }),
+      )
+      .then(
+        (receipt) => {
+          job.outcome = { receipt: receiptFor(scope, receipt) };
         },
-        committed: () => {
-          job.phase = "signing";
+        () => {
+          job.outcome = { error: true };
         },
-      },
-    }).then(
-      (receipt) => {
-        job.outcome = { receipt: receiptFor(scope, receipt) };
-      },
-      () => {
-        job.outcome = { error: true };
-      },
-    ),
+      ),
   };
   void job.done.then(() => {
     release();

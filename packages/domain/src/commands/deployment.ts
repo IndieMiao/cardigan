@@ -88,8 +88,14 @@ export function currentDeploymentPin(events: readonly Event[]) {
     : undefined;
 }
 
-/** C-609: a host-registered managed long operation (fixed kinds, host labels). */
+/**
+ * C-609: a host-registered managed long operation. Host-internal only: it
+ * names another project's card, so it never enters the deployment project's
+ * record; the record carries `DeploymentOperationCount` instead and the
+ * detail goes to the source card's own timeline.
+ */
 export type DeploymentOperation = {
+  readonly id: string;
   readonly kind: string;
   readonly project_id: string;
   readonly card_id: string | null;
@@ -97,28 +103,46 @@ export type DeploymentOperation = {
   readonly started_at: string;
 };
 
-/** The host truncates longer lists; a record never carries an unbounded payload. */
-export const MAX_DEPLOYMENT_OPERATIONS = 50;
+/** C-609: how many operations of one kind; carries no project or card. */
+export type DeploymentOperationCount = {
+  readonly kind: string;
+  readonly count: number;
+};
 
-function validDeploymentOperation(op: DeploymentOperation): boolean {
+/** Distinct kinds per record; the host registers a handful of fixed kinds. */
+export const MAX_DEPLOYMENT_OPERATION_KINDS = 20;
+
+/** Group by kind; counts are exact, never truncated. */
+export function countDeploymentOperations(
+  ops: readonly Pick<DeploymentOperation, "kind">[],
+): DeploymentOperationCount[] {
+  const counts = new Map<string, number>();
+  for (const op of ops) counts.set(op.kind, (counts.get(op.kind) ?? 0) + 1);
+  return [...counts]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([kind, count]) => ({ kind, count }));
+}
+
+function validOperationCounts(list: unknown): boolean {
   return (
-    !!op &&
-    typeof op === "object" &&
-    [op.kind, op.project_id, op.label, op.started_at].every(
-      (v) => typeof v === "string" && v.length > 0 && v.length <= 200,
-    ) &&
-    (op.card_id === null ||
-      (typeof op.card_id === "string" && op.card_id.length <= 100))
+    Array.isArray(list) &&
+    list.length <= MAX_DEPLOYMENT_OPERATION_KINDS &&
+    new Set(list.map((c) => c?.kind)).size === list.length &&
+    list.every(
+      (c) =>
+        !!c &&
+        typeof c === "object" &&
+        Object.keys(c).length === 2 &&
+        typeof c.kind === "string" &&
+        /^[a-z][a-z0-9_]{0,63}$/u.test(c.kind) &&
+        Number.isSafeInteger(c.count) &&
+        c.count > 0,
+    )
   );
 }
 
-const copyOperation = (op: DeploymentOperation): DeploymentOperation => ({
-  kind: op.kind,
-  project_id: op.project_id,
-  card_id: op.card_id,
-  label: op.label,
-  started_at: op.started_at,
-});
+const copyCounts = (list: readonly DeploymentOperationCount[]) =>
+  list.map(({ kind, count }) => ({ kind, count }));
 
 /** Host-supplied, already redacted deployment evidence; never an execution request. */
 export interface DeploymentRecord {
@@ -149,11 +173,11 @@ export interface DeploymentRecord {
   readonly evidence_wait_exceeded?: boolean;
   readonly capacity_wait_exceeded?: boolean;
   readonly blocking_checks?: readonly { project: string; attempt: string }[];
-  /** C-609: operations this deployment waited for (bounded). */
-  readonly deferred_operations?: readonly DeploymentOperation[];
+  /** C-609: operations this deployment waited for (bounded), by kind. */
+  readonly deferred_operations?: readonly DeploymentOperationCount[];
   readonly operations_wait_exceeded?: boolean;
-  /** C-609: operations still running when the server was stopped anyway. */
-  readonly interrupted_operations?: readonly DeploymentOperation[];
+  /** C-609: operations still running when the server was stopped anyway, by kind. */
+  readonly interrupted_operations?: readonly DeploymentOperationCount[];
   /** C-609: deployments are at least this far apart; later merges are batched. */
   readonly batch_window_ms?: number;
   readonly failure_stage?: "build" | "start" | "ready" | "host";
@@ -196,11 +220,7 @@ export function recordDeployment(
     );
     ensure(
       [record.deferred_operations, record.interrupted_operations].every(
-        (list) =>
-          list === undefined ||
-          (Array.isArray(list) &&
-            list.length <= MAX_DEPLOYMENT_OPERATIONS &&
-            list.every(validDeploymentOperation)),
+        (list) => list === undefined || validOperationCounts(list),
       ) &&
         (record.batch_window_ms === undefined ||
           (Number.isSafeInteger(record.batch_window_ms) &&
@@ -219,12 +239,11 @@ export function recordDeployment(
           }
         : {}),
       ...(record.deferred_operations
-        ? { deferred_operations: record.deferred_operations.map(copyOperation) }
+        ? { deferred_operations: copyCounts(record.deferred_operations) }
         : {}),
       ...(record.interrupted_operations
         ? {
-            interrupted_operations:
-              record.interrupted_operations.map(copyOperation),
+            interrupted_operations: copyCounts(record.interrupted_operations),
           }
         : {}),
     });

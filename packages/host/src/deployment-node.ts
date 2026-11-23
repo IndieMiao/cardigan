@@ -21,6 +21,7 @@ import { promisify } from "node:util";
 import type {
   DeploymentBuild,
   DeploymentDriver,
+  DeploymentOperation,
   DeploymentRecord,
 } from "@cardigan/domain";
 import { currentDeploymentPin } from "@cardigan/domain";
@@ -29,6 +30,7 @@ import type { Store } from "@cardigan/store";
 import {
   deploymentMergeSegments,
   readInterruptedDeployment,
+  writeDeferredOperations,
   writeDeploymentRecord,
   writeDeploymentStop,
   writeInterruptedOperations,
@@ -55,7 +57,11 @@ import {
   taggedServerOutput,
 } from "./deployment-server-log.js";
 import { supervisorChanges } from "./deployment-supervisor-scope.js";
-import { liveLongOperations } from "./long-operations.js";
+import {
+  fenceLongOperations,
+  liveLongOperations,
+  releaseLongOperationFence,
+} from "./long-operations.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
 
@@ -99,6 +105,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private checkedSupervisorMain?: string;
   private failedSupervisorMain?: string;
   private lastOperationWait: string | undefined;
+  private notedOperations = new Set<string>();
   constructor(
     private readonly options: {
       store: Store;
@@ -452,28 +459,45 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     }
     throw new Error("Server exited");
   }
-  async beforeStop(record: DeploymentRecord) {
+  async beforeStop(
+    record: DeploymentRecord,
+    interrupted: readonly DeploymentOperation[] = [],
+  ) {
     const stopping = writeDeploymentStop(this.options.store, PROJECT, record);
-    if (record.interrupted_operations?.length)
+    if (interrupted.length)
       try {
-        writeInterruptedOperations(this.options.store, record);
+        writeInterruptedOperations(
+          this.options.store,
+          record.attempt,
+          interrupted,
+        );
       } catch {
-        // Card notes are informational; the project audit already lists them.
+        // Card notes are informational; the project audit keeps the counts.
       }
     return stopping;
   }
   async operations() {
-    return liveLongOperations(this.options.store).map(
-      ({ kind, project_id, card_id, label, started_at }) => ({
-        kind,
-        project_id,
-        card_id,
-        label,
-        started_at,
-      }),
-    );
+    return liveLongOperations(this.options.store);
   }
-  async waitForOperations(record: DeploymentRecord) {
+  async fenceOperations() {
+    return fenceLongOperations(this.options.store);
+  }
+  async releaseOperationFence() {
+    releaseLongOperationFence(this.options.store);
+  }
+  async waitForOperations(
+    record: DeploymentRecord,
+    operations: readonly DeploymentOperation[] = [],
+  ) {
+    // Each source card hears once per operation that a deployment waits for it.
+    const fresh = operations.filter((op) => !this.notedOperations.has(op.id));
+    this.notedOperations = new Set(operations.map((op) => op.id));
+    if (fresh.length)
+      try {
+        writeDeferredOperations(this.options.store, record.attempt, fresh);
+      } catch {
+        /* Card notes are informational; the wait stays bounded. */
+      }
     // Ticks repeat the same observation; skip the state load when unchanged.
     const key = JSON.stringify([
       record.status,

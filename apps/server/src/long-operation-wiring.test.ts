@@ -1,4 +1,8 @@
-import { liveLongOperations } from "@cardigan/host";
+import {
+  fenceLongOperations,
+  liveLongOperations,
+  releaseLongOperationFence,
+} from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { expect, test } from "vitest";
 import { trackedPublisher } from "./server.js";
@@ -35,6 +39,34 @@ test("C-609: an artifact upload is registered for its whole duration, including 
       [expect.objectContaining({ card_id: "C-2" })],
     ]);
     expect(liveLongOperations(store)).toEqual([]);
+  } finally {
+    store.close();
+  }
+});
+
+test("C-609: an upload requested while the stop fence stands starts only after it lifts", async () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    store.createProject({ id: "sensen" });
+    let started = false;
+    const publish = trackedPublisher(store, async () => {
+      started = true;
+      return { url: "https://example.invalid/a", size: 1, sha256: "" };
+    });
+    fenceLongOperations(store);
+    const pending = publish(
+      "sensen" as never,
+      { card_id: "C-1" } as never,
+      {} as never,
+      () => {},
+      () => {},
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    expect(started).toBe(false);
+    expect(liveLongOperations(store)).toEqual([]);
+    releaseLongOperationFence(store);
+    await expect(pending).resolves.toMatchObject({ size: 1 });
+    expect(started).toBe(true);
   } finally {
     store.close();
   }

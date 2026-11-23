@@ -6,7 +6,7 @@ import {
   agentToolsConfirmed,
   agentToolsStale,
 } from "./agent-tools-maintenance.js";
-import { holdLongOperation } from "./long-operations.js";
+import { holdLongOperation, keepUntilSettled } from "./long-operations.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   matchesWorkerPlatform,
@@ -71,13 +71,20 @@ export async function patrolHelperUpgrade(
   const root = dirname(runtimeWorkersPath(options.env));
   const key = upgradeKey(execution.target?.fingerprint);
   const helpersStale = initial.blockers.some(helperMismatch);
+  // C-609: an install of this release on this binding that a restart cut off
+  // resumes once. What is already there is re-verified, and only what the
+  // check shows missing is installed again; a second interruption fails.
+  const resuming =
+    previous?.release_key === key &&
+    previous.state === "installing" &&
+    Number(previous.resumes ?? 0) < 1;
   // C-599: an enrolled, otherwise healthy binding that has not tried this key
   // yet also installs for missing/stale tools, including while it recovers.
   let toolsStale = false;
   if (
     !helpersStale &&
     !initial.blockers.length &&
-    previous?.release_key !== key &&
+    (previous?.release_key !== key || resuming) &&
     !agentToolsConfirmed.has(store, project, machine, key) &&
     adapters.toolsStale
   ) {
@@ -116,7 +123,7 @@ export async function patrolHelperUpgrade(
     store.uow.run((tx) =>
       finishUpgrade(store, tx, project, machine, key, stage, evidence(), false),
     );
-  if (previous?.release_key === key) {
+  if (previous?.release_key === key && !resuming) {
     if (previous.state === "installing") {
       stage = "interrupted";
       fail();
@@ -128,6 +135,11 @@ export async function patrolHelperUpgrade(
   }
   const identity = enrolledUpgradeIdentity(root, project, machine);
   // Missing enrollment never enables SSH. Malformed/private-file failures may not authorize it either.
+  if (!identity && resuming) {
+    stage = "interrupted";
+    fail();
+    return { ...held, blockers: [...initial.blockers, upgradeHold] };
+  }
   if (!identity) {
     if (
       wasHeld &&
@@ -157,8 +169,13 @@ export async function patrolHelperUpgrade(
       : initial;
   }
   const needsInstall = toolsStale || helpersStale;
-  if (!needsInstall && initial.blockers.length)
+  if (!needsInstall && initial.blockers.length) {
+    if (resuming) {
+      stage = "interrupted";
+      fail();
+    }
     return { ...held, blockers: [...initial.blockers, upgradeHold] };
+  }
   try {
     // A tools-only refresh never holds dispatch before it writes: retry next patrol.
     if (adapters.promotionPending(execution.dataDir))
@@ -167,31 +184,52 @@ export async function patrolHelperUpgrade(
     if (toolsOnly) return initial;
     /* Missing/invalid deployment proof is recorded as an installation failure. */
   }
-  const claimed = store.uow.run((tx) => {
-    if (
-      occupiedRunSlots(
-        tx.assignments.list(project),
-        tx.runs.list(project),
-        machine,
-      ) > 0
-    )
-      return false;
-    store.database
-      .prepare(
-        "INSERT INTO worker_helper_upgrades(project_id,machine_id,release_key,state) VALUES (?,?,?,'installing') ON CONFLICT(project_id,machine_id) DO UPDATE SET release_key=excluded.release_key,state='installing',pending_final=NULL",
-      )
-      .run(project, machine, key);
-    return true;
-  });
-  if (!claimed) return toolsOnly ? initial : held;
-  // C-609: an interrupted install needs manual recovery; deployments wait.
-  const release = holdLongOperation(store, {
-    kind: "worker_upgrade",
-    project_id: project,
-    label: `worker 升级（${machine}）`,
-  });
+  // C-609: registered before the claim. While a deployment's stop fence
+  // stands this waits, so no install starts on a server about to stop.
+  const release = await holdLongOperation(
+    store,
+    {
+      kind: "worker_upgrade",
+      project_id: project,
+      label: `worker 升级（${machine}）`,
+    },
+    { signal },
+  );
+  let claimed = false;
   try {
-    if (previous?.release_key === key) {
+    claimed = store.uow.run((tx) => {
+      if (
+        occupiedRunSlots(
+          tx.assignments.list(project),
+          tx.runs.list(project),
+          machine,
+        ) > 0
+      )
+        return false;
+      if (resuming)
+        return (
+          store.database
+            .prepare(
+              "UPDATE worker_helper_upgrades SET resumes=resumes+1,pending_final=NULL WHERE project_id=? AND machine_id=? AND release_key=? AND state='installing' AND resumes=?",
+            )
+            .run(project, machine, key, Number(previous?.resumes ?? 0))
+            .changes === 1
+        );
+      store.database
+        .prepare(
+          "INSERT INTO worker_helper_upgrades(project_id,machine_id,release_key,state) VALUES (?,?,?,'installing') ON CONFLICT(project_id,machine_id) DO UPDATE SET release_key=excluded.release_key,state='installing',pending_final=NULL,resumes=0",
+        )
+        .run(project, machine, key);
+      return true;
+    });
+  } finally {
+    if (!claimed) release();
+  }
+  if (!claimed) return toolsOnly ? initial : held;
+  // Kept until the journal records the final result (C-609).
+  let settling = false;
+  try {
+    if (previous?.release_key === key && !resuming) {
       stage = "unexpected_drift";
       throw new Error();
     }
@@ -257,6 +295,8 @@ export async function patrolHelperUpgrade(
         )
         .run(JSON.stringify(evidence()), project, machine, key),
     );
+    keepUntilSettled(options.job, release);
+    settling = true;
     return result;
   } catch (error) {
     const notSent =
@@ -291,6 +331,6 @@ export async function patrolHelperUpgrade(
     fail();
     return held;
   } finally {
-    release();
+    if (!settling) release();
   }
 }

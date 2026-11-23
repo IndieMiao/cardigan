@@ -8,6 +8,7 @@ import { DeploymentController } from "./deployment.js";
 
 const sha = (c: string) => c.repeat(40);
 const signing: DeploymentOperation = {
+  id: "op-1",
   kind: "mobile_signing",
   project_id: "sensen",
   card_id: "C-14",
@@ -20,6 +21,15 @@ function fixture(options: { batch?: number; wait?: number } = {}) {
   const calls: string[] = [];
   const records: DeploymentRecord[] = [];
   const waits: DeploymentRecord[] = [];
+  /** Operation detail handed to the driver for the source cards. */
+  const detail: {
+    waited: DeploymentOperation[][];
+    interrupted: DeploymentOperation[][];
+  } = {
+    waited: [],
+    interrupted: [],
+  };
+  const fence = { up: false, taken: 0, released: 0 };
   let time = 0;
   let current = { sha: sha("a"), release: "a" };
   let main = sha("b");
@@ -47,12 +57,15 @@ function fixture(options: { batch?: number; wait?: number } = {}) {
     },
     migrationsChanged: async () => false,
     backup: async () => "unused",
-    beforeStop: async (record) => {
+    beforeStop: async (record, interrupted = []) => {
+      detail.interrupted.push([...interrupted]);
       const stopping: DeploymentRecord = { ...record, status: "stopping" };
       records.push(stopping);
       return stopping;
     },
     stop: async () => {
+      // The stop decision always stands on a fence (C-609).
+      expect(fence.up).toBe(true);
       calls.push("stop");
     },
     start: async (build) => {
@@ -68,8 +81,18 @@ function fixture(options: { batch?: number; wait?: number } = {}) {
     },
     now: () => time,
     operations: async () => ops,
-    waitForOperations: async (record) => {
+    fenceOperations: async () => {
+      fence.up = true;
+      fence.taken++;
+      return ops;
+    },
+    releaseOperationFence: async () => {
+      fence.up = false;
+      fence.released++;
+    },
+    waitForOperations: async (record, operations = []) => {
       waits.push(record);
+      detail.waited.push([...operations]);
     },
     sleep: async (ms) => {
       calls.push(`sleep:${ms}`);
@@ -81,6 +104,8 @@ function fixture(options: { batch?: number; wait?: number } = {}) {
     calls,
     records,
     waits,
+    detail,
+    fence,
     controller: new DeploymentController(driver),
     advance: (ms: number) => {
       time += ms;
@@ -147,9 +172,14 @@ test("C-609: in-flight operations defer the deployment before capacity is taken,
   expect(f.waits).toHaveLength(2);
   expect(f.waits[0]).toMatchObject({
     status: "waiting_for_operations",
-    deferred_operations: [signing],
+    deferred_operations: [{ kind: "mobile_signing", count: 1 }],
   });
-  expect(f.waits[0]?.summary).toContain("sensen/C-14 受管送签（android）");
+  // The deployment project's record names no other project, card or label.
+  expect(f.waits[0]?.summary).toContain("受管送签 1 项");
+  for (const secret of ["sensen", "C-14", "android"])
+    expect(JSON.stringify(f.waits)).not.toContain(secret);
+  // The detail goes to the driver, which writes it on the source card.
+  expect(f.detail.waited[0]).toEqual([signing]);
   f.setOps([]);
   f.advance(30_000);
   await f.controller.tick();
@@ -171,12 +201,16 @@ test("C-609: the wait is bounded; at the deadline it deploys and records what it
   await f.controller.tick();
   expect(f.calls).toEqual(["acquire", "build:c", "stop", "start:c"]);
   const stopping = f.records.find((r) => r.status === "stopping");
-  expect(stopping).toMatchObject({ interrupted_operations: [signing] });
+  const counts = [{ kind: "mobile_signing", count: 1 }];
+  expect(stopping).toMatchObject({ interrupted_operations: counts });
   expect(stopping?.summary).toContain("等待受管长操作已达上限，照常部署");
   expect(f.records.at(-1)).toMatchObject({
     status: "deployed",
-    interrupted_operations: [signing],
+    interrupted_operations: counts,
   });
+  expect(f.detail.interrupted).toEqual([[signing]]);
+  expect(JSON.stringify(f.records)).not.toContain("C-14");
+  expect(f.fence).toMatchObject({ up: false, taken: 1, released: 1 });
 });
 
 test("C-609: an operation that starts during the build delays the stop until it ends", async () => {
@@ -204,7 +238,7 @@ test("C-609: an operation that starts during the build delays the stop until it 
   ]);
   expect(f.waits[0]).toMatchObject({
     status: "waiting_for_operations",
-    deferred_operations: [signing],
+    deferred_operations: [{ kind: "mobile_signing", count: 1 }],
   });
   expect(f.records.at(-1)).toMatchObject({ status: "deployed" });
   expect(f.records.at(-1)).not.toHaveProperty("interrupted_operations");
@@ -229,8 +263,9 @@ test("C-609: the post-build wait is bounded and records the operations it interr
   ]);
   expect(g.records.at(-1)).toMatchObject({
     status: "deployed",
-    interrupted_operations: [signing],
+    interrupted_operations: [{ kind: "mobile_signing", count: 1 }],
   });
+  expect(g.detail.interrupted).toEqual([[signing]]);
 });
 
 test("C-609: a deadline already spent before the build is not granted again after it", async () => {
@@ -268,11 +303,82 @@ test("C-609: drivers without the new hooks keep deploying immediately", async ()
     "batchWindowMs",
     "operationWaitMs",
     "operations",
+    "fenceOperations",
+    "releaseOperationFence",
     "waitForOperations",
     "sleep",
   ] as const)
     delete (legacy as Partial<Record<string, unknown>>)[key];
+  legacy.stop = async () => {
+    f.calls.push("stop");
+  };
   const controller = new DeploymentController(legacy);
   await controller.tick();
   expect(f.calls).toEqual(["acquire", "build:b", "stop", "start:b"]);
+});
+
+test("C-609: an operation that starts after the last read but before the stop is waited for, not cut off", async () => {
+  // Review V-3044: snapshot(0) → snapshot(0) → start → stop(live=1, audited=0).
+  const f = fixture({ wait: 900_000 });
+  const late: DeploymentOperation = {
+    ...signing,
+    id: "op-2",
+    kind: "artifact_publication",
+    label: "测试包外发",
+  };
+  let fences = 0;
+  f.driver.fenceOperations = async () => {
+    f.fence.up = true;
+    // It registered just before the fence; the fence returns it atomically.
+    return ++fences === 1 ? [late] : [];
+  };
+  await f.controller.tick();
+  expect(f.calls).toEqual([
+    "acquire",
+    "build:b",
+    "sleep:5000",
+    "stop",
+    "start:b",
+  ]);
+  expect(f.detail.waited).toEqual([[late]]);
+  expect(f.detail.interrupted).toEqual([[]]);
+  expect(f.records.at(-1)).not.toHaveProperty("interrupted_operations");
+});
+
+test("C-609: at the deadline the fence returns exactly what the stop interrupts", async () => {
+  const f = fixture({ wait: 0 });
+  const late: DeploymentOperation = {
+    ...signing,
+    id: "op-2",
+    kind: "artifact_publication",
+    label: "测试包外发",
+  };
+  // Nothing visible to the plain read; the fence sees the late start.
+  f.driver.fenceOperations = async () => {
+    f.fence.up = true;
+    return [late];
+  };
+  await f.controller.tick();
+  expect(f.calls).toEqual(["acquire", "build:b", "stop", "start:b"]);
+  expect(f.detail.interrupted).toEqual([[late]]);
+  expect(f.records.at(-1)).toMatchObject({
+    interrupted_operations: [{ kind: "artifact_publication", count: 1 }],
+  });
+});
+
+test("C-609: the fence is lifted when the attempt fails or rolls back", async () => {
+  const f = fixture({ wait: 900_000 });
+  let readies = 0;
+  f.driver.ready = async () => ++readies > 1; // the new build never gets ready
+  await f.controller.tick();
+  expect(f.records.at(-1)?.status).toBe("rolled_back");
+  expect(f.fence).toMatchObject({ up: false, taken: 1, released: 1 });
+  const g = fixture({ wait: 900_000 });
+  g.driver.fenceOperations = async () => {
+    g.fence.up = true;
+    throw new Error("registry unavailable");
+  };
+  await g.controller.tick();
+  expect(g.records.at(-1)?.status).toBe("deployed");
+  expect(g.fence).toMatchObject({ up: false, released: 1 });
 });

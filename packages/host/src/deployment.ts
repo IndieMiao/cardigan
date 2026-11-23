@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import type {
-  DeploymentDriver,
-  DeploymentOperation,
-  DeploymentRecord,
+import {
+  countDeploymentOperations,
+  type DeploymentDriver,
+  type DeploymentOperation,
+  type DeploymentRecord,
 } from "@cardigan/domain";
-import { MAX_DEPLOYMENT_OPERATIONS } from "@cardigan/domain";
 
 /** Fatal to the supervisor: its host service manager must recover the server. */
 export class DeploymentServerUnavailable extends Error {
@@ -17,14 +17,22 @@ export class DeploymentServerUnavailable extends Error {
 /** C-609: how often the post-build wait re-reads the operation registry. */
 export const OPERATION_POLL_MS = 5_000;
 
+const KIND_LABELS: Readonly<Record<string, string>> = {
+  mobile_signing: "受管送签",
+  artifact_publication: "测试包外发",
+  worker_upgrade: "worker 升级",
+};
+
+/**
+ * Per-kind counts only: the deployment project's record never names another
+ * project or card. Each source card gets its own detailed note.
+ */
 const operationSummary = (ops: readonly DeploymentOperation[]) =>
-  ops
-    .slice(0, 5)
+  countDeploymentOperations(ops)
     .map(
-      (op) =>
-        `${op.project_id}${op.card_id ? `/${op.card_id}` : ""} ${op.label}`,
+      ({ kind, count }) => `${KIND_LABELS[kind] ?? "其它长操作"} ${count} 项`,
     )
-    .join("、") + (ops.length > 5 ? ` 等 ${ops.length} 项` : "");
+    .join("、");
 
 /** A supervisor outside the server lifetime; no Agent, HTTP or MCP entry point. */
 export class DeploymentController {
@@ -34,6 +42,8 @@ export class DeploymentController {
   private lastRestartAt: number | undefined;
   /** One bounded operation wait per from→to deployment. */
   private drain: { key: string; since: number } | undefined;
+  /** The start of new long operations is closed until this attempt ends. */
+  private fenced = false;
   constructor(private readonly driver: DeploymentDriver) {}
 
   /** C-609: deployments within the window wait and then take the latest main. */
@@ -46,12 +56,31 @@ export class DeploymentController {
 
   private async operations(): Promise<readonly DeploymentOperation[]> {
     try {
-      return ((await this.driver.operations?.()) ?? []).slice(
-        0,
-        MAX_DEPLOYMENT_OPERATIONS,
-      );
+      return (await this.driver.operations?.()) ?? [];
     } catch {
       return []; // An unreadable registry never holds a deployment.
+    }
+  }
+
+  /** Close new starts and read what still runs, in one step (C-609). */
+  private async fence(): Promise<readonly DeploymentOperation[]> {
+    const d = this.driver;
+    if (!d.fenceOperations) return this.operations();
+    this.fenced = true;
+    try {
+      return await d.fenceOperations();
+    } catch {
+      return this.operations();
+    }
+  }
+
+  private async unfence() {
+    if (!this.fenced) return;
+    this.fenced = false;
+    try {
+      await this.driver.releaseOperationFence?.();
+    } catch {
+      /* An abandoned fence expires with its owner or its age limit. */
     }
   }
 
@@ -62,9 +91,12 @@ export class DeploymentController {
     return this.drain.since + (d.operationWaitMs ?? 0) - d.now();
   }
 
-  private async deferred(record: DeploymentRecord) {
+  private async deferred(
+    record: DeploymentRecord,
+    ops?: readonly DeploymentOperation[],
+  ) {
     try {
-      await this.driver.waitForOperations?.(record);
+      await this.driver.waitForOperations?.(record, ops);
     } catch {
       /* Audit only; the wait itself stays bounded. */
     }
@@ -72,33 +104,53 @@ export class DeploymentController {
 
   /**
    * After the build, wait (bounded by the same deadline) for operations that
-   * started meanwhile; whatever still runs at the deadline is recorded as
-   * interrupted and resumes or is requeued by the next server.
+   * started meanwhile. The stop decision and the fence on new starts are one
+   * step: an operation either runs before the fence (and is waited for, or
+   * recorded as interrupted at the deadline) or waits for the next server.
    */
   private async settle(
     key: string,
     record: DeploymentRecord,
-  ): Promise<DeploymentRecord> {
+  ): Promise<{
+    record: DeploymentRecord;
+    interrupted: readonly DeploymentOperation[];
+  }> {
     const d = this.driver;
     let ops = await this.operations();
-    while (ops.length && this.remainingWait(key) > 0) {
-      await this.deferred({
-        ...record,
-        status: "waiting_for_operations",
-        deferred_operations: ops,
-        summary: `构建已完成，等待受管长操作结束后再停服：${operationSummary(ops)}`,
-      });
+    for (;;) {
+      if (!ops.length || this.remainingWait(key) <= 0) {
+        const running = await this.fence();
+        if (!running.length || this.remainingWait(key) <= 0) {
+          ops = running;
+          break;
+        }
+        // Started between the last read and the fence: wait for it as well.
+        await this.unfence();
+        ops = running;
+      }
+      await this.deferred(
+        {
+          ...record,
+          status: "waiting_for_operations",
+          deferred_operations: countDeploymentOperations(ops),
+          summary: `构建已完成，等待受管长操作结束后再停服：${operationSummary(ops)}`,
+        },
+        ops,
+      );
       const ms = Math.min(OPERATION_POLL_MS, this.remainingWait(key));
       await (d.sleep ? d.sleep(ms) : delay(ms));
       ops = await this.operations();
     }
     return ops.length
       ? {
-          ...record,
-          interrupted_operations: ops,
-          summary: `${record.summary}；等待受管长操作已达上限，照常部署，重启后续跑或重排：${operationSummary(ops)}`,
+          record: {
+            ...record,
+            interrupted_operations: countDeploymentOperations(ops),
+            summary: `${record.summary}；等待受管长操作已达上限，照常部署，重启后续跑或重排：${operationSummary(ops)}`,
+          },
+          interrupted: ops,
         }
-      : record;
+      : { record, interrupted: [] };
   }
 
   async tick(): Promise<void> {
@@ -154,12 +206,15 @@ export class DeploymentController {
       if (!busy.length) this.drain = undefined;
       else if (this.remainingWait(drainKey) > 0) {
         // Before taking capacity: checks keep being admitted while we wait.
-        await this.deferred({
-          ...record,
-          status: "waiting_for_operations",
-          deferred_operations: busy,
-          summary: `等待受管长操作结束或到达可续点后再部署：${operationSummary(busy)}`,
-        });
+        await this.deferred(
+          {
+            ...record,
+            status: "waiting_for_operations",
+            deferred_operations: countDeploymentOperations(busy),
+            summary: `等待受管长操作结束或到达可续点后再部署：${operationSummary(busy)}`,
+          },
+          busy,
+        );
         return;
       }
       unlock = await d.acquire();
@@ -206,8 +261,8 @@ export class DeploymentController {
         if (!result.build) throw new Error("build_failed");
         stage = "host";
         const migrations = await d.migrationsChanged(current.sha, target);
-        record = await this.settle(drainKey, record);
-        record = await d.beforeStop(record);
+        const settled = await this.settle(drainKey, record);
+        record = await d.beforeStop(settled.record, settled.interrupted);
         // Backup is taken with the old server stopped, before any new migration.
         stoppedAt = d.now();
         this.lastRestartAt = stoppedAt;
@@ -289,6 +344,7 @@ export class DeploymentController {
       }
     } finally {
       try {
+        await this.unfence();
         await unlock?.();
         if (!waitingForCapacity) await d.releaseCapacityWait();
       } finally {
