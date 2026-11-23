@@ -5,8 +5,13 @@ import { basename } from "node:path";
 import { type ErrorCode, errorCodes } from "@cardigan/domain";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  attachmentLimits,
+  formatAttachmentLimit,
+  limitFromBase64Length,
+  MAX_STORED_ATTACHMENT_BYTES,
+} from "./attachment-limits.js";
 import { isCliEntry } from "./cli-entry.js";
-import { MAX_ATTACHMENT_BYTES } from "./limits.js";
 
 interface EvidenceInput {
   readonly file: string;
@@ -21,7 +26,7 @@ const FAILURE_MESSAGES = {
     "Usage: upload-evidence <configured Card MCP URL> <card ID> <delivery ID> <file> [MIME type] (MCP_TOKEN from the environment).",
   credential: "A session credential is required.",
   endpoint: "Invalid Card MCP URL; use HTTP(S) without URL credentials.",
-  file: "Evidence must be a readable, stable regular file up to 10 MiB (no symlinks).",
+  file: "Evidence must be a readable, stable regular file up to the server attachment limit (no symlinks).",
   connection:
     "Could not connect to Card MCP; check the configured address and session credential.",
   upload:
@@ -32,16 +37,57 @@ const FAILURE_MESSAGES = {
 
 /** Only fixed local text and allowlisted domain codes may reach CLI stderr. */
 class EvidenceUploadError extends Error {
-  constructor(stage: keyof typeof FAILURE_MESSAGES, code?: ErrorCode) {
+  constructor(
+    stage: keyof typeof FAILURE_MESSAGES,
+    code?: ErrorCode,
+    limit?: number,
+  ) {
+    const message =
+      limit === undefined
+        ? FAILURE_MESSAGES[stage]
+        : FAILURE_MESSAGES[stage].replace(
+            "the server attachment limit",
+            formatAttachmentLimit(limit),
+          );
     super(
-      `Evidence upload failed [${stage}${code ? `:${code}` : ""}]: ${FAILURE_MESSAGES[stage]} No evidence ID was confirmed.`,
+      `Evidence upload failed [${stage}${code ? `:${code}` : ""}]: ${message} No evidence ID was confirmed.`,
     );
+  }
+}
+
+/**
+ * The limit the connected server publishes as `upload_attachment`'s
+ * `file.maxLength` (C-616), so the helper follows host configuration without a
+ * redeploy. Older servers, or a missing tool, fall back to the default limit.
+ */
+export async function publishedAttachmentLimit(
+  client: Pick<Client, "listTools">,
+): Promise<number> {
+  const fallback = attachmentLimits().bytes;
+  try {
+    const { tools } = await client.listTools();
+    const schema = tools.find((tool) => tool.name === "upload_attachment")
+      ?.inputSchema as
+      | { properties?: { file?: { maxLength?: unknown } } }
+      | undefined;
+    const maxLength = schema?.properties?.file?.maxLength;
+    if (typeof maxLength !== "number" || !Number.isSafeInteger(maxLength))
+      return fallback;
+    const bytes = limitFromBase64Length(maxLength);
+    return bytes > 0 ? Math.min(bytes, MAX_STORED_ATTACHMENT_BYTES) : fallback;
+  } catch {
+    return fallback;
   }
 }
 
 /** Local client helper: paths never reach the server; the existing token/tool
  * and card scope still authorize the upload. Never print image bytes or tokens. */
-export async function uploadEvidenceFile(client: Client, input: EvidenceInput) {
+export async function uploadEvidenceFile(
+  client: Client,
+  input: EvidenceInput,
+  limit?: number,
+) {
+  const maxBytes = limit ?? (await publishedAttachmentLimit(client));
   let content: Buffer;
   try {
     const file = await open(
@@ -50,7 +96,7 @@ export async function uploadEvidenceFile(client: Client, input: EvidenceInput) {
     );
     try {
       const info = await file.stat();
-      if (!info.isFile() || info.size > MAX_ATTACHMENT_BYTES)
+      if (!info.isFile() || info.size > maxBytes)
         throw new Error("Invalid evidence file");
       const buffer = Buffer.alloc(info.size + 1);
       let size = 0;
@@ -65,7 +111,7 @@ export async function uploadEvidenceFile(client: Client, input: EvidenceInput) {
       await file.close();
     }
   } catch {
-    throw new EvidenceUploadError("file");
+    throw new EvidenceUploadError("file", undefined, maxBytes);
   }
   const sha256 = createHash("sha256").update(content).digest("hex");
   const result = await client

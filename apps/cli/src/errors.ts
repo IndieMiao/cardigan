@@ -1,4 +1,9 @@
 import type { ErrorCode, RuntimeErrorCode } from "@cardigan/domain";
+import {
+  attachmentTooLargeMessage,
+  formatAttachmentLimit,
+  MAX_ATTACHMENT_BYTES,
+} from "@cardigan/mcp-server";
 
 interface CodedError {
   readonly code: string;
@@ -76,7 +81,7 @@ const SPECIFIC_REASONS: Partial<Record<ErrorCode, Record<string, string>>> = {
     "standing_mode must be office or ops": "常驻模式必须为 office 或 ops",
     "A standing Assignment cannot change its mode":
       "常驻 Assignment 不能更改模式",
-    "Attachment exceeds 10 MiB": "附件超过 10 MiB",
+    [attachmentTooLargeMessage()]: `附件超过 ${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}`,
     "File must be canonical padded base64": "附件编码不合法",
     "Attachment sha256 does not match content": "附件 SHA-256 校验失败",
     "Attachment storage failed":

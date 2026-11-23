@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { DeploymentDriver, DeploymentRecord } from "@cardigan/domain";
+import { setTimeout as delay } from "node:timers/promises";
+import {
+  countDeploymentOperations,
+  type DeploymentDriver,
+  type DeploymentOperation,
+  type DeploymentRecord,
+} from "@cardigan/domain";
 
 /** Fatal to the supervisor: its host service manager must recover the server. */
 export class DeploymentServerUnavailable extends Error {
@@ -8,11 +14,144 @@ export class DeploymentServerUnavailable extends Error {
   }
 }
 
+/** C-609: how often the post-build wait re-reads the operation registry. */
+export const OPERATION_POLL_MS = 5_000;
+
+const KIND_LABELS: Readonly<Record<string, string>> = {
+  mobile_signing: "受管送签",
+  artifact_publication: "测试包外发",
+  worker_upgrade: "worker 升级",
+};
+
+/**
+ * Per-kind counts only: the deployment project's record never names another
+ * project or card. Each source card gets its own detailed note.
+ */
+const operationSummary = (ops: readonly DeploymentOperation[]) =>
+  countDeploymentOperations(ops)
+    .map(
+      ({ kind, count }) => `${KIND_LABELS[kind] ?? "其它长操作"} ${count} 项`,
+    )
+    .join("、");
+
 /** A supervisor outside the server lifetime; no Agent, HTTP or MCP entry point. */
 export class DeploymentController {
   private busy = false;
   private readonly failed = new Set<string>();
+  /** End of the last attempt that restarted the server (in-memory). */
+  private lastRestartAt: number | undefined;
+  /** One bounded operation wait per from→to deployment. */
+  private drain: { key: string; since: number } | undefined;
+  /** The start of new long operations is closed until this attempt ends. */
+  private fenced = false;
   constructor(private readonly driver: DeploymentDriver) {}
+
+  /** C-609: deployments within the window wait and then take the latest main. */
+  private batched(): number | undefined {
+    const window = this.driver.batchWindowMs ?? 0;
+    if (window <= 0 || this.lastRestartAt === undefined) return undefined;
+    const remaining = this.lastRestartAt + window - this.driver.now();
+    return remaining > 0 ? remaining : undefined;
+  }
+
+  private async operations(): Promise<readonly DeploymentOperation[]> {
+    try {
+      return (await this.driver.operations?.()) ?? [];
+    } catch {
+      return []; // An unreadable registry never holds a deployment.
+    }
+  }
+
+  /** Close new starts and read what still runs, in one step (C-609). */
+  private async fence(): Promise<readonly DeploymentOperation[]> {
+    const d = this.driver;
+    if (!d.fenceOperations) return this.operations();
+    this.fenced = true;
+    try {
+      return await d.fenceOperations();
+    } catch {
+      return this.operations();
+    }
+  }
+
+  private async unfence() {
+    if (!this.fenced) return;
+    this.fenced = false;
+    try {
+      await this.driver.releaseOperationFence?.();
+    } catch {
+      /* An abandoned fence expires with its owner or its age limit. */
+    }
+  }
+
+  /** Time left in this deployment's bounded operation wait; starts the clock. */
+  private remainingWait(key: string): number {
+    const d = this.driver;
+    if (this.drain?.key !== key) this.drain = { key, since: d.now() };
+    return this.drain.since + (d.operationWaitMs ?? 0) - d.now();
+  }
+
+  private async deferred(
+    record: DeploymentRecord,
+    ops?: readonly DeploymentOperation[],
+  ) {
+    try {
+      await this.driver.waitForOperations?.(record, ops);
+    } catch {
+      /* Audit only; the wait itself stays bounded. */
+    }
+  }
+
+  /**
+   * After the build, wait (bounded by the same deadline) for operations that
+   * started meanwhile. The stop decision and the fence on new starts are one
+   * step: an operation either runs before the fence (and is waited for, or
+   * recorded as interrupted at the deadline) or waits for the next server.
+   */
+  private async settle(
+    key: string,
+    record: DeploymentRecord,
+  ): Promise<{
+    record: DeploymentRecord;
+    interrupted: readonly DeploymentOperation[];
+  }> {
+    const d = this.driver;
+    let ops = await this.operations();
+    for (;;) {
+      if (!ops.length || this.remainingWait(key) <= 0) {
+        const running = await this.fence();
+        if (!running.length || this.remainingWait(key) <= 0) {
+          ops = running;
+          break;
+        }
+        // Started between the last read and the fence: wait for it as well.
+        await this.unfence();
+        ops = running;
+      }
+      await this.deferred(
+        {
+          ...record,
+          status: "waiting_for_operations",
+          deferred_operations: countDeploymentOperations(ops),
+          summary: `构建已完成，等待受管长操作结束后再停服：${operationSummary(ops)}`,
+        },
+        ops,
+      );
+      const ms = Math.min(OPERATION_POLL_MS, this.remainingWait(key));
+      await (d.sleep ? d.sleep(ms) : delay(ms));
+      ops = await this.operations();
+    }
+    return ops.length
+      ? {
+          record: {
+            ...record,
+            interrupted_operations: countDeploymentOperations(ops),
+            summary: `${record.summary}；等待受管长操作已达上限，照常部署，重启后续跑或重排：${operationSummary(ops)}`,
+          },
+          interrupted: ops,
+        }
+      : { record, interrupted: [] };
+  }
 
   async tick(): Promise<void> {
     const d = this.driver;
@@ -31,7 +170,10 @@ export class DeploymentController {
       const selection = d.target ? await d.target() : { sha: await d.main() };
       const target = selection.sha;
       const failureKey = `${target}:${selection.control_event_id ?? "main"}`;
-      if (current.sha === target || this.failed.has(failureKey)) return;
+      if (current.sha === target || this.failed.has(failureKey)) {
+        this.drain = undefined;
+        return;
+      }
       let record: DeploymentRecord = {
         attempt: randomUUID(),
         from: current.sha,
@@ -47,6 +189,34 @@ export class DeploymentController {
           ? { control_event_id: selection.control_event_id }
           : {}),
       };
+      // C-609: a human pin is explicit and is never batched.
+      const batchWait = selection.control_event_id ? undefined : this.batched();
+      if (batchWait !== undefined) {
+        await this.deferred({
+          ...record,
+          status: "waiting_for_batch",
+          ...(d.batchWindowMs ? { batch_window_ms: d.batchWindowMs } : {}),
+          summary: `距上次部署不足合批窗口，约 ${Math.ceil(batchWait / 1000)} 秒后部署届时最新的中心 main`,
+        });
+        return;
+      }
+      // Keyed by the running build: a main that keeps moving cannot extend it.
+      const drainKey = current.sha;
+      const busy = await this.operations();
+      if (!busy.length) this.drain = undefined;
+      else if (this.remainingWait(drainKey) > 0) {
+        // Before taking capacity: checks keep being admitted while we wait.
+        await this.deferred(
+          {
+            ...record,
+            status: "waiting_for_operations",
+            deferred_operations: countDeploymentOperations(busy),
+            summary: `等待受管长操作结束或到达可续点后再部署：${operationSummary(busy)}`,
+          },
+          busy,
+        );
+        return;
+      }
       unlock = await d.acquire();
       if (!unlock) {
         await d.waitForCapacity({
@@ -91,9 +261,11 @@ export class DeploymentController {
         if (!result.build) throw new Error("build_failed");
         stage = "host";
         const migrations = await d.migrationsChanged(current.sha, target);
-        record = await d.beforeStop(record);
+        const settled = await this.settle(drainKey, record);
+        record = await d.beforeStop(settled.record, settled.interrupted);
         // Backup is taken with the old server stopped, before any new migration.
         stoppedAt = d.now();
+        this.lastRestartAt = stoppedAt;
         await d.stop();
         oldStopped = true;
         if (migrations) record = { ...record, backup_file: await d.backup() };
@@ -156,6 +328,8 @@ export class DeploymentController {
           downtime_ms: stoppedAt === undefined ? 0 : d.now() - stoppedAt,
         };
       }
+      if (stoppedAt !== undefined) this.lastRestartAt = d.now();
+      this.drain = undefined;
       await d.record(record);
       if (record.status === "deployed") {
         try {
@@ -170,6 +344,7 @@ export class DeploymentController {
       }
     } finally {
       try {
+        await this.unfence();
         await unlock?.();
         if (!waitingForCapacity) await d.releaseCapacityWait();
       } finally {

@@ -251,6 +251,44 @@ async function readBack(
   }
 }
 
+/**
+ * The release objects already under `prefix`, or a refusal when the listing
+ * holds anything else or cannot be read with certainty. Fails closed.
+ */
+function presentObjects(
+  listed: {
+    KeyCount?: unknown;
+    IsTruncated?: unknown;
+    Contents?: unknown;
+  },
+  prefix: string,
+  names: readonly string[],
+): Set<string> {
+  if (![false, "false"].includes(listed.IsTruncated as never)) throw Error();
+  const count = Number(listed.KeyCount);
+  const contents =
+    listed.Contents === undefined
+      ? []
+      : Array.isArray(listed.Contents)
+        ? listed.Contents
+        : [listed.Contents];
+  if (!Number.isSafeInteger(count) || count !== contents.length) throw Error();
+  const present = new Set<string>();
+  for (const entry of contents) {
+    const key = (entry as { Key?: unknown } | null)?.Key;
+    const name = typeof key === "string" ? key.slice(prefix.length) : "";
+    if (
+      typeof key !== "string" ||
+      !key.startsWith(prefix) ||
+      !names.includes(name) ||
+      present.has(name)
+    )
+      throw Error();
+    present.add(name);
+  }
+  return present;
+}
+
 export function apkPublisher(
   dataDir: string,
   root = join(homedir(), ".config", "cardigan"),
@@ -331,22 +369,24 @@ export function apkPublisher(
           "--prefix",
           prefix,
           "--max-keys",
-          "1",
+          "4",
           "--output-format",
           "json",
         ),
       );
-      if (
-        ![0, "0"].includes(listed.KeyCount) ||
-        listed.Contents ||
-        ![false, "false"].includes(listed.IsTruncated)
-      )
-        throw Error();
-      claim(url);
-      // APK is the first conditional write for every contender. A partial directory is sealed, never repaired by overwrite.
+      const names = [filename, "SHA256SUMS", "release.json"] as const;
+      const existing = presentObjects(listed, prefix, names);
+      // C-609: an empty prefix takes a fresh claim. A prefix holding only this
+      // release's own objects is accepted solely to continue this decision's
+      // interrupted claim (same URL and artifact); `claim` refuses otherwise.
+      claim(url, existing.size > 0);
+      // APK is the first conditional write for every contender. A partial
+      // directory is never repaired by overwrite: an object already there is
+      // only read back and must match this release byte for byte.
       const put = async (name: string) => {
         current();
         stage = "upload";
+        if (existing.has(name)) return;
         await oss(
           "put-object",
           "--key",

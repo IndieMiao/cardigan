@@ -4,17 +4,28 @@ export {
   openArtifact,
   sendArtifact,
 } from "./artifact-files.js";
+export {
+  ATTACHMENT_MAX_MIB_ENV,
+  type AttachmentLimits,
+  attachmentLimits,
+  formatAttachmentLimit,
+  MAX_STORED_ATTACHMENT_BYTES,
+  resolveAttachmentLimits,
+} from "./attachment-limits.js";
 export { resolveAttachmentInlineBytes } from "./attachment-preview.js";
 // M5.1: the Workbench serves attachment downloads from the same content-
 // addressed store the MCP upload path writes to.
 export {
   ATTACHMENT_EXTENSIONS,
+  ATTACHMENT_LIMITS,
   attachmentMimeForExtension,
+  attachmentTooLargeMessage,
   decodeAttachment,
   fileAttachmentStore,
   MAX_ATTACHMENT_BASE64,
   MAX_ATTACHMENT_BYTES,
   MAX_MCP_BODY_BYTES,
+  mcpBodyTooLargeMessage,
   prepareAttachmentFile,
 } from "./attachments.js";
 export {
@@ -104,6 +115,9 @@ export {
 } from "./tools/index.js";
 export type { SigningScope } from "./tools/mobile-signing.js";
 export {
+  continuePublication,
+  interruptedPublication,
+  MAX_PUBLICATION_CONTINUATIONS,
   PublicationError,
   type PublicationOptions,
   type PublishInput,

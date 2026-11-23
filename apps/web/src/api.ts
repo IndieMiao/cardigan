@@ -57,6 +57,8 @@ export interface SessionInfo {
   /** Non-authorizing, session-specific namespace for overlapping tab reads. */
   readonly read_scope?: string;
   readonly build?: BuildInfo;
+  /** Host attachment upload limit in bytes (C-616); only when authenticated. */
+  readonly attachment_max_bytes?: number;
 }
 
 export interface ProjectSummary {
@@ -1507,6 +1509,14 @@ export interface DecisionHistoryRecord extends DecisionView {
     resolved_by: string;
     via: string;
     proxy_authority?: string;
+    /** C-617 / Q-1198: the owner's answer cited as evidence for PM's decision. */
+    owner_record?: {
+      readonly card_id: string;
+      readonly timeline_entry_id: string;
+      readonly quote: string;
+      readonly at: string;
+      readonly attachment_id?: string;
+    };
   };
 }
 /** C-134: newest 10 first; pass `next_cursor` back to read the next 10. */
@@ -2507,6 +2517,8 @@ export interface CardiganClient {
     conclusion?: "exited" | "false_alarm" | "unconfirmed",
   ): Promise<void>;
   session(): Promise<SessionInfo>;
+  /** Upload limit from the latest session read; unknown before it. */
+  attachmentMaxBytes?(): number | undefined;
   login(password: string): Promise<void>;
   logout(): Promise<void>;
   projects(): Promise<readonly ProjectSummary[]>;
@@ -2571,6 +2583,7 @@ export class HttpCardiganClient implements CardiganClient {
     return subscribeProject(projectId, callbacks, this.streamFactory);
   }
   private readScope: string | undefined;
+  private attachmentLimit: number | undefined;
   private cardsGeneration = 0;
   private cardsReadSequence = 0;
   private readonly cardPages = new Map<
@@ -2651,8 +2664,17 @@ export class HttpCardiganClient implements CardiganClient {
     if (!session.authenticated || session.read_scope !== this.readScope)
       this.clearCards();
     this.readScope = session.authenticated ? session.read_scope : undefined;
+    this.attachmentLimit =
+      typeof session.attachment_max_bytes === "number" &&
+      Number.isSafeInteger(session.attachment_max_bytes) &&
+      session.attachment_max_bytes > 0
+        ? session.attachment_max_bytes
+        : undefined;
     if (!this.readScope) clearSharedReads();
     return session;
+  }
+  attachmentMaxBytes() {
+    return this.attachmentLimit;
   }
 
   async login(password: string): Promise<void> {
@@ -3876,10 +3898,12 @@ async function toApiError(
  * (`cardigan preference set ...`); the Web points at the settings label instead.
  */
 function webErrorMessage(message: string): string {
-  return message.replace(
-    /^(暂缓到期时间距现在不能超过 \d+ 分钟)（merge-confirm-snooze-max）/u,
-    "$1（可在项目设置的“合并确认最长暂缓时长”中调整）",
-  );
+  return message
+    .replace(
+      /^(暂缓到期时间距现在不能超过 \d+ 分钟)（merge-confirm-snooze-max）/u,
+      "$1（可在项目设置的“合并确认最长暂缓时长”中调整）",
+    )
+    .replace(/^Attachment exceeds (\d+(?:\.\d)? MiB)$/u, "附件超过 $1");
 }
 
 /** Human-readable Chinese explanation of a failed request. */

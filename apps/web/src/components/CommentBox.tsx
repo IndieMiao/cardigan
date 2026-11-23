@@ -105,6 +105,8 @@ export function CommentBox({
   const caret = useRef<number | undefined>(undefined);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  /** Host attachment limit from the session; unknown on older servers. */
+  const attachmentLimit = client.attachmentMaxBytes?.();
   const [focused, setFocused] = useState(false);
   const [focusRequest, setFocusRequest] = useState(0);
   const afterFocus = useRef<((input: HTMLTextAreaElement) => void) | undefined>(
@@ -340,6 +342,14 @@ export function CommentBox({
       setError("附件说明最多 200 字符，不能包含控制字符或换行。");
       return;
     }
+    // Refuse before posting: the comment is created first, attachments follow.
+    if (
+      attachmentLimit !== undefined &&
+      images.some((image) => image.file.size > attachmentLimit)
+    ) {
+      setError(`附件不能超过 ${formatMiB(attachmentLimit)}。`);
+      return;
+    }
     sending.current = true;
     setSubmitting(true);
     setError(undefined);
@@ -469,7 +479,11 @@ export function CommentBox({
             aria-activedescendant={
               listOpen && matches.length > 0 ? optionId(current) : undefined
             }
-            placeholder="支持 Markdown；@ 提及员工；可以直接粘贴图片"
+            placeholder={
+              attachmentLimit === undefined
+                ? "支持 Markdown；@ 提及员工；可以直接粘贴图片"
+                : `支持 Markdown；@ 提及员工；可以直接粘贴图片，单张不超过 ${formatMiB(attachmentLimit)}`
+            }
             rows={expanded ? 6 : 2}
             value={body}
             disabled={submitting}
@@ -493,10 +507,22 @@ export function CommentBox({
                 (file) => file.type.startsWith("image/"),
               );
               if (files.length === 0) return;
+              // Refuse an oversized image here: once listed it could not be
+              // removed and would block the comment (C-616).
+              const accepted =
+                attachmentLimit === undefined
+                  ? files
+                  : files.filter((file) => file.size <= attachmentLimit);
+              if (
+                attachmentLimit !== undefined &&
+                accepted.length < files.length
+              )
+                setError(`附件不能超过 ${formatMiB(attachmentLimit)}。`);
+              if (accepted.length === 0) return;
               startDraft();
               setImages((current) => [
                 ...current,
-                ...files.map((file) => ({
+                ...accepted.map((file) => ({
                   id: crypto.randomUUID(),
                   idempotencyKey: crypto.randomUUID(),
                   name: file.name || file.type,
@@ -907,6 +933,11 @@ export function mentionsIn(body: string): string[] {
   }
   return [...found];
 }
+
+const formatMiB = (bytes: number) =>
+  bytes % 1048576 === 0
+    ? `${bytes / 1048576} MiB`
+    : `${(bytes / 1048576).toFixed(1)} MiB`;
 
 /** Canonical padded base64 of a pasted image (the API decodes it strictly). */
 export async function toBase64(file: File): Promise<string> {
