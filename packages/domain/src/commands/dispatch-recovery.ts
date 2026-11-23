@@ -3,6 +3,11 @@ import type { Actor, Run, RuntimeRef } from "../entities.js";
 import { eventById } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
+import {
+  dispatchReasonText,
+  MCP_SESSION_FAILURE,
+  mcpSessionMissing,
+} from "../mcp-session.js";
 import { assignmentCanReadCard, type Notification } from "../notification.js";
 import {
   DEFAULT_PROVIDER_COOLDOWN_MS,
@@ -253,16 +258,24 @@ export function recoverDispatch(
       Date.parse(d.now) -
       Date.parse(started) -
       dispatchTargetWaitMs(run, d.now);
+    // C-600: a session proven to lack native Card tools needs no timeout.
+    const mcpMissing =
+      run.status === "dispatched" && !run.started_at && mcpSessionMissing(a);
     const reason = startupFailed
       ? "recovery_startup_failed"
       : stopping
         ? stop?.reason
-        : elapsed >= p.timeout_ms
-          ? "dispatch_timeout"
-          : p.failed_attempts >= p.max_failures
-            ? "delivery_retry_exhausted"
-            : undefined;
+        : mcpMissing
+          ? "mcp_unavailable"
+          : elapsed >= p.timeout_ms
+            ? "dispatch_timeout"
+            : p.failed_attempts >= p.max_failures
+              ? "delivery_retry_exhausted"
+              : undefined;
     if (!reason) return;
+    // C-600: a session without Card tools settles only through its own stop
+    // fence and exit proof, never by escalation that leaves it running.
+    if (reason === "mcp_unavailable" && !stopping) return;
     // A prior unconfirmed-stop alert cannot prevent later exit settlement.
     if (
       !stopped &&
@@ -280,6 +293,10 @@ export function recoverDispatch(
       ((!restart && dispatchRecoveryUsed(state.events, a.id)) ||
         recoveryChainUsed(state, run));
     const unreadable = unreadableCommentTrigger(state, run);
+    // C-600: a session without Card tools is never left running, also once
+    // its single rebuild is spent: the confirmed stop settles it as a failed
+    // start before the escalation below.
+    const mcp = reason === "mcp_unavailable";
     // Report the whole recovery episode without changing this Run's timeout.
     const recovery = state.events.find(
       (e) =>
@@ -298,7 +315,7 @@ export function recoverDispatch(
       (!recovered ||
         unreadable ||
         reviewWake === "obsolete" ||
-        (stopped && policy)) &&
+        (stopped && (policy || mcp))) &&
       !p.stop_failed &&
       !startupFailed
     ) {
@@ -321,8 +338,12 @@ export function recoverDispatch(
               ? `${context}；无权读取触发评论所在卡片，确认终端退出后取消，不再重排。`
               : reviewWake
                 ? `${context}；审核目标已暂停或变更，确认终端退出后不再重排。`
-                : `${context}；${reason}，确认终端退出后自动重排一次。`,
+                : mcp && recovered
+                  ? `${context}；${MCP_SESSION_FAILURE}，已确认终端退出，记为启动失败，不再重排。`
+                  : `${context}；${dispatchReasonText(reason)}，确认终端退出后自动重排一次。`,
         );
+        if (mcp)
+          d.put("runs", { ...cancelled, failure_reason: "mcp_unavailable" });
         if (provider) {
           d.put("runs", {
             ...cancelled,
@@ -404,7 +425,7 @@ export function recoverDispatch(
           ? `${context}；模型服务不可用，已排队重试（${id}），不计开工或返工。`
           : restart
             ? `${context}；服务重启后核对发现终端已不存在，已取消旧执行并重排为 ${id}。不占用此 Assignment 的自动恢复机会。${policy ? "本业务根链的一次后继额度已使用。" : ""}`
-            : `${context}；已取消旧执行并自动重排为 ${id}。此 Assignment 的自动恢复机会已使用。`;
+            : `${context}；${reason === "mcp_unavailable" ? `${MCP_SESSION_FAILURE}，` : ""}已取消旧执行并自动重排为 ${id}（新会话）。此 Assignment 的自动恢复机会已使用。`;
         const event = d.emit(
           "run_dispatch_recovered",
           card?.id,
@@ -462,7 +483,18 @@ export function recoverDispatch(
         return next;
       }
     }
-    const body = `${context}；${p.stop_failed ? "无法确认旧终端已停止，已保留原 Run 和凭据，暂不重排" : "已自动恢复过一次，仍未成功"}。请检查终端与服务，必要时执行 cardigan assignment stop ${a.id}，再执行 cardigan assignment start ${a.id}，并回报处理结果。`;
+    const body = `${context}；${mcp ? `${MCP_SESSION_FAILURE}，${stopped && !p.stop_failed ? "已确认终端退出并记为启动失败，" : ""}` : ""}${p.stop_failed ? "无法确认旧终端已停止，已保留原 Run 和凭据，暂不重排" : "已自动恢复过一次，仍未成功"}。请检查${mcp ? "该机器到 Card MCP 的网络路径（可运行机器检查，含系统代理）、" : ""}终端与服务，必要时执行 cardigan assignment stop ${a.id}，再执行 cardigan assignment start ${a.id}，并回报处理结果。`;
+    // C-600: settling a session without Card tools after an earlier report
+    // for this Run (e.g. an unconfirmed stop) reports nothing twice.
+    if (
+      mcp &&
+      state.events.some(
+        (e) =>
+          e.type === "run_dispatch_stalled" &&
+          field(e.payload, "run_id") === run.id,
+      )
+    )
+      return;
     const ops = state.assignments.find(
       (candidate) =>
         candidate.status === "active" &&
@@ -485,6 +517,14 @@ export function recoverDispatch(
       },
       { type: "system", body, run_id: run.id },
     );
+    // C-600: Needs You always learns of a session without Card tools, also
+    // when PM Ops owns the follow-up.
+    if (mcp)
+      d.emit("mcp_session_failed", card?.id, {
+        assignment_id: a.id,
+        run_id: run.id,
+        notice: body,
+      });
     if (!ops) {
       const id = d.ids.next(state.project_id, "human_action");
       d.put("human_actions", {
