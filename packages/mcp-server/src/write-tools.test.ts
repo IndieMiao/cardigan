@@ -1041,9 +1041,10 @@ test("C-610: submit_review carries basis and pass_conditions; get_card drafts th
     ],
   });
   expect(result.isError).not.toBe(true);
+  // The schema accepts a list; only a second rejection fixes it.
+  expect(result.structuredContent).not.toHaveProperty("pass_conditions");
   expect(result.structuredContent).toMatchObject({
     verdict: "reject",
-    pass_conditions: [{ description: "保存后读回新值", basis: "AC1" }],
     issues: [
       { must_fix: false, follow_up: { reason: "guard" } },
       { must_fix: true, basis: "lost_work" },

@@ -1,6 +1,8 @@
 import {
+  type CommandEffect,
   type CommandState,
   postComment,
+  type Result,
   type ReviewIssue,
   type SubmitReviewParams,
   sharedMustFixes,
@@ -158,7 +160,13 @@ export async function sharedReviewFixture(
     if (result.ok) state = apply(state, result.value);
     return result;
   }
+  function act<T>(run: (s: CommandState) => Result<CommandEffect<T>>) {
+    const effect = value(run(state));
+    state = apply(state, effect);
+    return effect.data;
+  }
   return {
+    act,
     comment,
     confirmPause,
     submit,

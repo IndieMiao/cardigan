@@ -7,6 +7,7 @@ import {
   postComment,
   type ReviewIssue,
   rejectionStreakCards,
+  rejectionStreakEpisodes,
   type SubmitReviewParams,
   submitReview,
   type TimelineEntryId,
@@ -17,6 +18,8 @@ import {
   required,
 } from "./flow-review-limit/test-fixtures.js";
 import { resumeBlockReason } from "./resumption.js";
+import { first, sharedReviewFixture } from "./shared-review/test-fixtures.js";
+import { actor, id } from "./test-fixtures.js";
 
 const bug = (over: Partial<ReviewIssue> = {}): ReviewIssue => ({
   severity: "major",
@@ -29,8 +32,27 @@ const bug = (over: Partial<ReviewIssue> = {}): ReviewIssue => ({
 });
 const checklist = [{ description: "Saved value is read back", basis: "AC1" }];
 
-function setup(version = 5) {
+function setup(version = 5, criteria?: string[]) {
   const { f } = flowReviewFixture(undefined, version);
+  if (criteria)
+    f.commit({
+      ok: true,
+      value: {
+        data: null,
+        changes: [
+          {
+            collection: "cards",
+            entity: {
+              ...required(f.state.cards[0]),
+              acceptance_criteria: criteria,
+            },
+          },
+        ],
+        events: [],
+        timeline: [],
+        token_requests: [],
+      },
+    });
   const verifierId = required(f.reviewer.work_item_id);
   const submit = (
     v: Delivery,
@@ -291,4 +313,183 @@ test("AC4: the guard pattern targets stop requests, not stall bugs", () => {
     "只读成员能修改别人的卡片",
   ])
     expect(GUARD_PATTERN.test(text), text).toBe(false);
+});
+
+test("V-3029#1: a review left with only follow-ups is saved and lets the delivery proceed", async () => {
+  for (const extra of [
+    { rejection_category: "功能错误" },
+    { recheck_required: true },
+  ]) {
+    const s = setup();
+    const v = await s.deliver();
+    const r = s.review(v, [bug()], extra);
+    expect(r).toMatchObject({ verdict: "pass", recheck_required: false });
+    expect(r).not.toHaveProperty("rejection_category");
+    expect(r.issues[0]?.follow_up).toEqual({ reason: "no_basis" });
+    expect(s.verifier().status).toBe("passed");
+    expect(s.f.state.deliveries.find((d) => d.id === v.id)?.status).toBe(
+      "accepted",
+    );
+  }
+});
+
+test("V-3029#2: a list attached to the first rejection does not narrow round two", async () => {
+  const s = setup();
+  s.review(await s.deliver(), [bug({ basis: "AC1" })], {
+    pass_conditions: checklist,
+  });
+  expect(s.f.state.reviews.at(-1)).not.toHaveProperty("pass_conditions");
+  const second = s.review(await s.deliver(), [bug({ basis: "AC1" })], {
+    pass_conditions: [{ description: "Second-round list", basis: "AC1" }],
+  });
+  expect(second.verdict).toBe("reject");
+  // Round three is held to the list fixed by the second rejection.
+  const third = s.review(await s.deliver(), [bug({ basis: "PC1" })]);
+  expect(third.verdict).toBe("reject");
+});
+
+test("V-3029#3: a new minor edge outside the list becomes a follow-up instead of failing the review", async () => {
+  const s = setup();
+  s.review(await s.deliver(), [bug({ basis: "AC1" })]);
+  s.review(await s.deliver(), [bug({ basis: "AC1" })], {
+    pass_conditions: checklist,
+  });
+  const { proof: _proof, ...unproven } = bug({
+    severity: "minor",
+    basis: "AC1",
+    description: "A brand new narrow edge",
+  });
+  const r = s.review(await s.deliver(), [unproven]);
+  expect(r.verdict).toBe("pass");
+  expect(r.issues[0]?.follow_up).toEqual({ reason: "outside_checklist" });
+});
+
+test("V-3029#4: data or numeric-limit violations of another criterion still block after the list", async () => {
+  const s = setup(5, ["保存后可读回", "数量最多 10 件"]);
+  s.review(await s.deliver(), [bug({ basis: "AC1" })]);
+  s.review(await s.deliver(), [bug({ basis: "AC1" })], {
+    pass_conditions: checklist,
+  });
+  const r = s.review(await s.deliver(), [
+    bug({
+      basis: "AC2",
+      impact: "data_or_permission",
+      description: "保存 11 件后读回 11 件，超过上限",
+    }),
+  ]);
+  expect(r.verdict).toBe("reject");
+});
+
+test("V-3029#5: asking to remove a guard is not a guard; a PCn keeps its condition's lost-work exemption", async () => {
+  const s = setup();
+  const removal = s.review(await s.deliver(), [
+    bug({
+      basis: "AC1",
+      description:
+        "验收要求保存后自动继续，当前却必须人工确认。请移除多余确认。",
+    }),
+  ]);
+  expect(removal.verdict).toBe("reject");
+  s.review(await s.deliver(), [bug({ basis: "AC1" })], {
+    pass_conditions: [{ description: "未提交文件不丢", basis: "lost_work" }],
+  });
+  const kept = s.review(await s.deliver(), [
+    bug({ basis: "PC1", description: "核不清时就停住，否则会丢未提交文件" }),
+  ]);
+  expect(kept.verdict).toBe("reject");
+});
+
+test("V-3029#6: parallel lanes disputing the same shared finding share one PM decision", async () => {
+  const f = await sharedReviewFixture(2, [first], 2);
+  f.review(2, [first]);
+  f.review(3, [], f.refs());
+  expect(f.state.decisions).toEqual([]);
+  const cardId = required(
+    f.state.work_items.find((w) => w.id === id("work_item", 2)),
+  ).card_id;
+  for (const n of [2, 3]) {
+    const verifier = id("work_item", n);
+    const proposal = required(
+      f.act((s) =>
+        postComment(
+          s,
+          actor(),
+          {
+            card_id: cardId,
+            body: "不变量",
+            review_alignment: {
+              work_item_id: verifier,
+              step: "propose",
+              invariants: ["校验存在"],
+            },
+          },
+          f.io,
+        ),
+      ),
+    );
+    f.act((s) =>
+      postComment(
+        s,
+        actor(n, n === 2 ? "reviewer" : "independent_reviewer"),
+        {
+          card_id: cardId,
+          body: "分歧",
+          reply_to: proposal.id,
+          review_alignment: { work_item_id: verifier, step: "dispute" },
+        },
+        f.io,
+      ),
+    );
+  }
+  expect(f.state.decisions).toHaveLength(1);
+  expect(f.state.decisions[0]?.affected_work_items).toEqual([
+    id("work_item", 2),
+    id("work_item", 3),
+  ]);
+});
+
+test("V-3029#7: the metric counts each episode, so a card recurring after deployment is counted again", async () => {
+  const s = setup();
+  await s.threeRejections();
+  const episode = required(rejectionStreakEpisodes(s.f.state)[0]);
+  // Re-time the episode to day one and replay a second episode on day two.
+  const day = (e: (typeof s.f.state.events)[number], at: string) => ({
+    ...e,
+    created_at: at,
+  });
+  const reviewed = s.f.state.events.filter(
+    (e) => e.type === "review_submitted",
+  );
+  const pass = {
+    ...required(reviewed[0]),
+    payload: { review_id: "V-900", verdict: "pass" },
+  };
+  const second = reviewed.map((e, n) => ({
+    ...e,
+    seq: e.seq + 1000 + n,
+    payload: { ...(e.payload as object), review_id: `V-9${n + 1}` },
+  }));
+  const state = {
+    events: [
+      ...reviewed.map((e) => day(e, "2026-11-22T01:00:00.000Z")),
+      day({ ...pass, seq: 999 }, "2026-11-22T02:00:00.000Z"),
+      ...second.map((e) => day(e, "2026-11-23T01:00:00.000Z")),
+    ],
+    reviews: [
+      ...s.f.state.reviews,
+      ...["V-900", "V-91", "V-92", "V-93"].map((rid) => ({
+        id: rid as never,
+        work_item_id: s.verifierId,
+      })),
+    ],
+  };
+  expect(episode.max_streak).toBe(3);
+  expect(rejectionStreakEpisodes(state)).toHaveLength(2);
+  const after = { from: "2026-11-23T00:00:00.000Z" };
+  expect(rejectionStreakCards(state, after)).toEqual([
+    expect.objectContaining({ card_id: s.f.card.id }),
+  ]);
+  expect(
+    rejectionStreakCards(state, { to: "2026-11-23T00:00:00.000Z" }),
+  ).toHaveLength(1);
 });

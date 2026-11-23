@@ -595,6 +595,10 @@ test("C-610: every verifier role states review convergence once; PM only handles
     "只有分歧才交 PM 裁决",
     "不提守卫类必改项",
     "安全、权限、数值边界问题照常是必改项",
+    "第 1 次驳回附带的清单不生效",
+    "impact 为 `data_or_permission` 的数据、权限或数值上限错误不受清单限制",
+    "引用 `PCn` 时按该通过条件的依据",
+    "要求移除多余确认或停摆的意见不算守卫",
   ])
     expect(rules).toContain(phrase);
   const pm = instructionsFor("pm");
@@ -603,7 +607,7 @@ test("C-610: every verifier role states review convergence once; PM only handles
     "只有对齐出现分歧",
     "`get_card.follow_up_draft`",
     "由你判断是否用 `create_card` 开卡",
-    "`project_snapshot.review_convergence`",
+    "`project_snapshot.review_convergence.rejection_streak_episodes`",
   ])
     expect(pm).toContain(phrase);
   expect(pm).not.toContain("同一验证项连续第 3 次驳回、交付与需求不一致");

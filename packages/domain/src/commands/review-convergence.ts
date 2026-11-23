@@ -43,6 +43,8 @@ export function reviewPassConditions(
 ): readonly PassCondition[] | undefined {
   if (!flowAtLeast(card, 5) || verdict !== "reject") return;
   const streak = rejectionStreak(d, item);
+  // Only the second consecutive rejection (or later) fixes a checklist.
+  if (!streak.length) return;
   if (input === undefined) {
     ensure(
       streak.length !== 1 || !!activeChecklist(streak),

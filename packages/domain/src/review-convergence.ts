@@ -29,7 +29,10 @@ const GUARD_EXEMPT: ReadonlySet<string> = new Set([
   "dual_executor",
   "security",
 ]);
-/** Once a checklist exists, only it, agreed invariants and these stay blocking. */
+/**
+ * Once a checklist exists, only it, agreed invariants, these and data or
+ * permission errors (including numeric limits) stay blocking.
+ */
 const CHECKLIST_EXEMPT: ReadonlySet<string> = new Set([
   "lost_work",
   "dual_executor",
@@ -43,6 +46,15 @@ export const MAX_ALIGNMENT_INVARIANTS = 10;
 /** New human confirmations, stop conditions and "stop when unsure" requests. */
 export const GUARD_PATTERN =
   /人工确认|人工拍板|交人(?:确认|拍板)|由人确认|停摆|(?:应|须|要|就|先)(?:停住|停下|暂停)|核不清|核实不了|(?:无法|不能)(?:核实|确认)(?:时|就)|不确定(?:时|就)(?:停|拒绝|报错)|(?:应|须|要|就)(?:停止|拒绝)推进|fail[- ]?closed/iu;
+
+/** Asking to remove a confirmation or stop is the opposite of adding a guard. */
+const GUARD_REMOVAL =
+  /(?:移除|去掉|删掉|删除|取消|不应|不该|不要|无需|不需要)[^。；;\n]{0,12}(?:确认|拍板|停住|停下|暂停|停摆|阻塞)|(?:确认|拍板|停住|停下|暂停|停摆|阻塞)[^。；;\n]{0,6}(?:是多余|多余的|应移除|应去掉|应取消)|多余(?:的)?(?:人工)?确认/u;
+
+/** A guard request: a new confirmation, stop condition or "stop when unsure". */
+export function isGuardRequest(description: string): boolean {
+  return GUARD_PATTERN.test(description) && !GUARD_REMOVAL.test(description);
+}
 
 export type BasisRef =
   | {
@@ -88,6 +100,18 @@ export function basisProblem(
   return ref.index <= size ? undefined : `basis 超出范围，可选 ${choices}`;
 }
 
+/** The standing invariant a basis rests on, following a PCn to its condition. */
+function standingOf(
+  ref: BasisRef | undefined,
+  checklist: readonly PassCondition[] | undefined,
+): StandingInvariant | undefined {
+  if (ref?.kind === "standing") return ref.key;
+  const condition =
+    ref?.kind === "pass_condition" ? checklist?.[ref.index - 1] : undefined;
+  const inner = condition ? parseBasis(condition.basis) : undefined;
+  return inner?.kind === "standing" ? inner.key : undefined;
+}
+
 function downgradeReason(
   issue: ReviewIssue,
   card: Pick<Card, "acceptance_criteria" | "invariants">,
@@ -96,9 +120,9 @@ function downgradeReason(
   if (!issue.basis || basisProblem(card, issue.basis, checklist))
     return "no_basis";
   const ref = parseBasis(issue.basis);
-  const standing = ref?.kind === "standing" ? ref.key : undefined;
+  const standing = standingOf(ref, checklist);
   if (
-    GUARD_PATTERN.test(issue.description) &&
+    isGuardRequest(issue.description) &&
     !(standing && GUARD_EXEMPT.has(standing))
   )
     return "guard";
@@ -106,7 +130,8 @@ function downgradeReason(
     checklist?.length &&
     ref?.kind !== "pass_condition" &&
     ref?.kind !== "invariant" &&
-    !(standing && CHECKLIST_EXEMPT.has(standing))
+    !(standing && CHECKLIST_EXEMPT.has(standing)) &&
+    issue.impact !== "data_or_permission"
   )
     return "outside_checklist";
 }
@@ -129,11 +154,15 @@ export function convergeIssues(
   });
 }
 
-/** The first checklist of a rejection streak (streak is newest first). */
+/**
+ * The checklist fixed by the second consecutive rejection (streak is newest
+ * first). A list attached to the first rejection never narrows round two.
+ */
 export function activeChecklist(
   streak: readonly Pick<Review, "pass_conditions">[],
 ): readonly PassCondition[] | undefined {
-  return streak.findLast((r) => r.pass_conditions?.length)?.pass_conditions;
+  return streak.slice(0, -1).findLast((r) => r.pass_conditions?.length)
+    ?.pass_conditions;
 }
 
 /** The alignment round covering this rejection streak, if any. */
@@ -207,21 +236,24 @@ export function followUpDraft(
   };
 }
 
-export interface RejectionStreakCard {
+export interface RejectionStreakEpisode {
   readonly card_id: CardId;
+  readonly work_item_id: WorkItemId;
+  /** Longest consecutive rejection count of this episode. */
   readonly max_streak: number;
-  /** When a verifier first reached three consecutive rejections. */
+  /** When the verifier reached three consecutive rejections in this episode. */
   readonly reached_at: string;
 }
 
-/** C-610 metric: cards whose verifier was rejected three or more times in a row. */
-export function rejectionStreakCards(state: {
+/** C-610 metric: every time a verifier reaches three consecutive rejections. */
+export function rejectionStreakEpisodes(state: {
   readonly events: readonly Event[];
   readonly reviews: readonly Pick<Review, "id" | "work_item_id">[];
-}): RejectionStreakCard[] {
+}): RejectionStreakEpisode[] {
   const items = new Map(state.reviews.map((r) => [r.id, r.work_item_id]));
-  const streaks = new Map<string, number>();
-  const cards = new Map<CardId, RejectionStreakCard>();
+  const streaks = new Map<WorkItemId, number>();
+  const open = new Map<WorkItemId, number>();
+  const episodes: RejectionStreakEpisode[] = [];
   for (const e of [...state.events].sort((a, b) => a.seq - b.seq)) {
     if (e.type !== "review_submitted" || !e.card_id) continue;
     const p = e.payload as { review_id?: unknown; verdict?: unknown } | null;
@@ -232,15 +264,53 @@ export function rejectionStreakCards(state: {
     if (!item) continue;
     const streak = p?.verdict === "reject" ? (streaks.get(item) ?? 0) + 1 : 0;
     streaks.set(item, streak);
-    if (streak < 3) continue;
+    if (streak < 3) {
+      open.delete(item);
+      continue;
+    }
+    const index = open.get(item);
+    if (index === undefined) {
+      open.set(item, episodes.length);
+      episodes.push({
+        card_id: e.card_id,
+        work_item_id: item,
+        max_streak: streak,
+        reached_at: e.created_at,
+      });
+    } else {
+      const episode = episodes[index];
+      if (episode) episodes[index] = { ...episode, max_streak: streak };
+    }
+  }
+  return episodes;
+}
+
+export interface RejectionStreakCard {
+  readonly card_id: CardId;
+  readonly max_streak: number;
+  /** First time in the window a verifier reached three consecutive rejections. */
+  readonly reached_at: string;
+}
+
+/**
+ * Cards with a three-rejection episode reached inside [from, to), each counted
+ * once per window, so the same card can appear before and after a deployment.
+ */
+export function rejectionStreakCards(
+  state: Parameters<typeof rejectionStreakEpisodes>[0],
+  window: { readonly from?: string; readonly to?: string } = {},
+): RejectionStreakCard[] {
+  const cards = new Map<CardId, RejectionStreakCard>();
+  for (const e of rejectionStreakEpisodes(state)) {
+    const at = Date.parse(e.reached_at);
+    if (window.from !== undefined && at < Date.parse(window.from)) continue;
+    if (window.to !== undefined && at >= Date.parse(window.to)) continue;
     const known = cards.get(e.card_id);
     cards.set(e.card_id, {
       card_id: e.card_id,
-      max_streak: Math.max(streak, known?.max_streak ?? 0),
-      reached_at: known?.reached_at ?? e.created_at,
+      max_streak: Math.max(e.max_streak, known?.max_streak ?? 0),
+      reached_at: known?.reached_at ?? e.reached_at,
     });
   }
-  return [...cards.values()].sort((a, b) =>
-    a.reached_at.localeCompare(b.reached_at),
-  );
+  return [...cards.values()];
 }

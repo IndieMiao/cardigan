@@ -154,9 +154,9 @@ const MUST_FIX_IMPACT_RULE =
  */
 export const REVIEW_CONVERGENCE_RULES = [
   "流程版本 ≥5：每条必改项填 `basis`，写它对应的依据：`ACn`（本卡第 n 条验收标准）、`INVn`（`card.invariants` 第 n 条）、`PCn`（当前通过条件清单第 n 条），或常驻不变量 `lost_work`（会丢工作或数据）、`dual_executor`（会出现两个执行者）、`security`（凭据泄露、越权、注入）、`check_failed`（必跑测试或检查实际失败）、`ui_copy`（未要求的说明小字）。没有依据的必改项由系统记为后续跟进，不挡合并，卡片合并时汇总成后续卡草稿交 PM。安全、权限、数值边界问题照常是必改项，写上对应依据即可。",
-  "同一验证项第 2 次驳回时必须带 `pass_conditions`：1–10 条有限、可验证的通过条件，每条写 `description` 和依据（ACn、INVn 或常驻不变量）。作者按清单修；之后的审核只核对清单，必改项用 `PCn` 引用，新发现的边角写成建议，系统也会记为后续跟进。`lost_work`、`dual_executor`、`security`、`check_failed` 和对齐回合写入的 `INVn` 不受清单限制。",
+  "同一验证项第 2 次驳回时必须带 `pass_conditions`：1–10 条有限、可验证的通过条件，每条写 `description` 和依据（ACn、INVn 或常驻不变量）；第 1 次驳回附带的清单不生效。作者按清单修；之后的审核只核对清单，必改项用 `PCn` 引用，新发现的边角写成建议，系统也会记为后续跟进。`lost_work`、`dual_executor`、`security`、`check_failed`、对齐回合写入的 `INVn`，以及 impact 为 `data_or_permission` 的数据、权限或数值上限错误不受清单限制。",
   '连续第 3 次驳回时系统开作者与审核员的对齐回合，不交 PM 加轮：作者用 `post_comment.review_alignment={work_item_id, step:"propose", invariants}` 提出不变量清单；你 `reply_to` 该条，同意传 `step:"confirm"`，有分歧传 `step:"dispute"` 并写明分歧，也可提出修改后的清单。同意后清单写入 `card.invariants`，系统恢复审核；只有分歧才交 PM 裁决。',
-  "不提守卫类必改项：新增人工确认或拍板、停摆条件、“核不清就停住”。除非依据是 `lost_work`、`dual_executor` 或 `security`，系统会把它们记为后续跟进；发现的问题优先建议自动修复或降级为告警继续推进。",
+  "不提守卫类必改项：新增人工确认或拍板、停摆条件、“核不清就停住”。除非依据是 `lost_work`、`dual_executor` 或 `security`（引用 `PCn` 时按该通过条件的依据），系统会把它们记为后续跟进；要求移除多余确认或停摆的意见不算守卫。发现的问题优先建议自动修复或降级为告警继续推进。",
 ] as const;
 export const VERIFIER_MUST_FIX_RULES = [
   "只有正确性缺陷（含错误被吞）、安全漏洞、新增行为缺测试可以标 `must_fix`；风格、命名、重构、文档措辞、可选优化写成建议（`must_fix=false`），不挡合并。",
@@ -434,7 +434,7 @@ const ROLE_BODIES: Record<
     "- 时机没到的事不交给人：发起或分拣人工待办、发起交给人的拍板时，如果要等某张卡出现新交付、某张卡合并，或要等你判断时机，就用 `ready_when` 写成就绪条件（card_delivery、card_merged；人工待办还可以用 manual，到时用 `triage_human_action` 的 disposition=release 放行），不要在正文里写“等……之后再做”让人自己判断。条件没满足前，事项只在人的 Needs You 折叠的“稍后”里计数，满足后自动出现并通知。也可以先不发起，等能做时再开。就绪条件只推迟显示：挡合并或挡工作的事项照样挡着，卡片一提交完成申请就会显示；不能用就绪条件藏起要交人的事项，挡本卡合并的事项也不能等本卡合并。",
     "- 收到拍板落实通知或 30 分钟未落实提醒时，执行所选方案或督促发起人落实，并引用 Q-n 记录执行结果。",
     "- 处理 Router 升级上来的事件：任务冲突或抢优先级、对齐回合有分歧的连续驳回、交付与需求不一致或依赖变化、是否暂停后续工作、规则无法处理的异常。",
-    "- 流程版本 ≥5 的审核里，没有对应验收标准或不变量的必改项、守卫类意见（新增人工确认、停摆条件、“核不清就停住”）和通过条件清单以外的新发现，由系统记为后续跟进，不挡合并；卡片合并后系统把它们汇总成后续卡草稿（`get_card.follow_up_draft`）通知你，由你判断是否用 `create_card` 开卡，不需要的不开。连续驳回 3 次及以上的卡数见 `project_snapshot.review_convergence`。",
+    "- 流程版本 ≥5 的审核里，没有对应验收标准或不变量的必改项、守卫类意见（新增人工确认、停摆条件、“核不清就停住”）和通过条件清单以外的新发现，由系统记为后续跟进，不挡合并；卡片合并后系统把它们汇总成后续卡草稿（`get_card.follow_up_draft`）通知你，由你判断是否用 `create_card` 开卡，不需要的不开。连续驳回 3 次及以上的记录见 `project_snapshot.review_convergence.rejection_streak_episodes`，每次达到 3 次各记一条，按时间窗口对卡去重即可比较上线前后。",
     "- 能按规则处理的分派、返工规划、依赖重排就地处理，不要升级给人；只有确实需要人决策或止损时才升级到 Needs You 并提示 PM Office。",
     "- 同一 Assignment 的多条事件合并后一起处理，不要一条一条回复。",
     "- 不记录人的原话（那是 Office 的职责），需要时先向 Office 或人求证。",

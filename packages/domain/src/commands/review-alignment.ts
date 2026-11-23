@@ -124,7 +124,8 @@ export function recordReviewAlignment(
       },
       { kind: "system", project_id: d.state.project_id },
     );
-    requestReviewLimit(d, disputed);
+    // The rejection binds shared findings, so parallel lanes join one decision.
+    requestReviewLimit(d, disputed, d.get("reviews", alignment.review_id));
     return;
   }
   const first = (card.invariants?.length ?? 0) + 1;

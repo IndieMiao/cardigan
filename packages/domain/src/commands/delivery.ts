@@ -1045,22 +1045,25 @@ export function submitReview(
       "validation_failed",
       "Every must-fix issue requires a valid impact",
     );
-    const calculated = deriveReview(
-      convergeSubmittedIssues(d, card, item, p.issues, issues),
-      p.recheck_required ?? false,
-      p.followup_card_id,
-    );
-    if (p.followup_card_id !== undefined) {
+    const converged = convergeSubmittedIssues(d, card, item, p.issues, issues);
+    // C-610: once every requested must-fix became a follow-up, nothing is
+    // rejected or deferred; the follow-ups are saved and the delivery proceeds.
+    const followUpOnly =
+      converged.some((i) => i.follow_up) &&
+      !converged.some((i) => i.must_fix && !i.pre_existing);
+    const recheckRequired = !followUpOnly && (p.recheck_required ?? false);
+    const followupCardId = followUpOnly ? undefined : p.followup_card_id;
+    const rejectionCategory = followUpOnly ? undefined : p.rejection_category;
+    const calculated = deriveReview(converged, recheckRequired, followupCardId);
+    if (followupCardId !== undefined) {
       ensure(
         calculated.verdict === "conditional" &&
-          !p.recheck_required &&
-          !!p.followup_card_id,
+          !recheckRequired &&
+          !!followupCardId,
         "validation_failed",
-        calculated.issues.some((i) => i.follow_up)
-          ? "必改项缺少可引用的 basis，已记为后续跟进、不挡合并，无需 followup_card_id"
-          : "Only UX-only must-fix issues can be deferred to a follow-up card",
+        "Only UX-only must-fix issues can be deferred to a follow-up card",
       );
-      const followup = d.get("cards", p.followup_card_id);
+      const followup = d.get("cards", followupCardId);
       ensure(
         followup.id !== card.id &&
           followup.project_id === card.project_id &&
@@ -1119,9 +1122,10 @@ export function submitReview(
       .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
     if (prior && !testReview)
       ensure(
-        issues.every(
+        converged.every(
           (issue) =>
             issue.pre_existing ||
+            !!issue.follow_up ||
             prior.issues.some(
               (old) => old.description.trim() === issue.description.trim(),
             ) ||
@@ -1145,13 +1149,13 @@ export function submitReview(
       "illegal_transition",
       "Verification is not running or its round limit was reached",
     );
-    if (p.rejection_category !== undefined)
+    if (rejectionCategory !== undefined)
       ensure(
         calculated.verdict === "reject" &&
-          typeof p.rejection_category === "string" &&
-          p.rejection_category.trim().length > 0 &&
-          p.rejection_category.trim().length <= 48 &&
-          !/[\r\n]/u.test(p.rejection_category),
+          typeof rejectionCategory === "string" &&
+          rejectionCategory.trim().length > 0 &&
+          rejectionCategory.trim().length <= 48 &&
+          !/[\r\n]/u.test(rejectionCategory),
         "validation_failed",
         "驳回类别须为 1 至 48 字的单行文字，仅用于驳回",
       );
@@ -1172,11 +1176,11 @@ export function submitReview(
         ? { issues: bindSharedFindings(calculated.issues, id, existing) }
         : {}),
       ...(passConditions ? { pass_conditions: passConditions } : {}),
-      ...(p.rejection_category
-        ? { rejection_category: p.rejection_category.trim() }
+      ...(rejectionCategory
+        ? { rejection_category: rejectionCategory.trim() }
         : {}),
-      ...(p.followup_card_id ? { followup_card_id: p.followup_card_id } : {}),
-      recheck_required: p.recheck_required ?? false,
+      ...(followupCardId ? { followup_card_id: followupCardId } : {}),
+      recheck_required: recheckRequired,
       ...(testReview ? { test_review: testReview } : {}),
       attachments: [...(p.attachments ?? [])],
       ...(reuseContext

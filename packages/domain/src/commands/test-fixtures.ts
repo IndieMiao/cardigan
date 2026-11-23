@@ -232,7 +232,9 @@ export function convergent(state: CommandState, workItemId: string) {
   const end = reviews.findIndex((r) => r.verdict !== "reject");
   const streak = end === -1 ? reviews : reviews.slice(0, end);
   return {
-    basis: streak.some((r) => r.pass_conditions?.length) ? "PC1" : "AC1",
+    basis: streak.slice(0, -1).some((r) => r.pass_conditions?.length)
+      ? "PC1"
+      : "AC1",
     pass_conditions: [
       { description: "The required check passes", basis: "AC1" },
     ],

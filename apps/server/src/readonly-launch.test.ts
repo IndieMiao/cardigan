@@ -476,7 +476,7 @@ async function replaceDuringPlan(proposeFirst: boolean) {
                 must_fix: true,
                 pre_existing: false,
                 impact: "functional",
-                basis: i === 1 ? "AC1" : "PC1",
+                basis: i === 3 ? "PC1" : "AC1",
                 description: "旧快照写回",
                 proof: "旧数据覆盖新数据",
               },
