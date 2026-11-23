@@ -172,7 +172,6 @@ function expectStillBlocked(
 
 test("platform fix: merge alone is not a deployment; after deployment the author's new session delivers and clears the blocker in one step", async () => {
   block({ kind: "deployment_ready", target_id: deployed });
-  // The author keeps working in a session; the background cannot wake a second executor.
   mergeCard2();
   expectStillBlocked(await deliver(), "尚无系统记录证明已满足");
   deploy(deployed, "stopping", false);
@@ -186,13 +185,7 @@ test("platform fix: merge alone is not a deployment; after deployment the author
     status: "deployed",
     ready: true,
   });
-  // The background sees the satisfied wait but an active Run: it only defers to PM.
-  const deferred = scan();
-  expect(deferred.data).toEqual([]);
-  expect(deferred.events.map((e) => e.type)).toEqual([
-    "work_item_resume_deferred",
-  ]);
-  expect(pmQueue()).toMatchObject([{ work_item_id: work }]);
+  // The author delivers before the background has refreshed the blocker.
   const blockerEvent = state.events.findLast(
     (e) => e.type === "blocker_reported",
   );
@@ -233,6 +226,234 @@ test("platform fix: merge alone is not a deployment; after deployment the author
   expect(scan().events).toEqual([]);
   finish();
   expect(scan().events).toEqual([]);
+});
+
+test("live author Run: the background clears the satisfied wait in place and notifies that Run once", () => {
+  block({ kind: "deployment_ready", target_id: deployed });
+  mergeCard2();
+  expect(scan().data).toEqual([]);
+  deploy(deployed, "deployed", true);
+  const blockerEvent = state.events.findLast(
+    (e) => e.type === "blocker_reported",
+  );
+  const effect = scan();
+  expect(effect.data).toEqual([work]);
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "work_item_resume_requested",
+    "work_waits_resumed",
+  ]);
+  expect(effect.events[0]?.payload).toMatchObject({
+    work_item_id: work,
+    assignment_id: owner,
+    active_run_id: runId,
+    condition: { kind: "deployment_ready", target_id: deployed },
+    blocker_event_id: blockerEvent?.id,
+    reported_blocker_cleared: true,
+  });
+  expect(effect.timeline[0]?.body).toContain(`进行中的 ${runId} 继续`);
+  expect(item()).toMatchObject({ status: "in_progress" });
+  expect(item()?.reported_blocker).toBeUndefined();
+  expect(state.runs.filter((r) => r.assignment_id === owner)).toHaveLength(1);
+  expect(pmQueue()).toEqual([]);
+  // Replays and the Run's own finish do not resume or wake again.
+  expect(scan().events).toEqual([]);
+  finish();
+  expect(scan().events).toEqual([]);
+});
+
+test.each(["hold", "stopping run", "other blocker"])(
+  "live author Run: %s still keeps the satisfied wait blocked",
+  (guard) => {
+    block({ kind: "card_merged", target_id: id("card", 2) });
+    mergeCard2();
+    if (guard === "hold")
+      state = {
+        ...state,
+        cards: state.cards.map((c) =>
+          c.id === id("card", 1)
+            ? {
+                ...c,
+                hold: {
+                  reason: "Paused",
+                  set_at: io.clock.now(),
+                  set_by: "human",
+                  resume_condition: "PM resumes",
+                },
+              }
+            : c,
+        ),
+      };
+    if (guard === "stopping run")
+      state = {
+        ...state,
+        runs: state.runs.map((r) =>
+          r.id === runId
+            ? {
+                ...r,
+                dispatch_stop: {
+                  attempt_id: io.ids.nextEventId(),
+                  runtime_ref: null,
+                  lease_until: io.clock.now(),
+                  stopping: false,
+                },
+              }
+            : r,
+        ) as CommandState["runs"],
+      };
+    if (guard === "other blocker")
+      state = {
+        ...state,
+        decisions: [decision({ blocking: true, affected_work_items: [work] })],
+      };
+    const effect = scan();
+    expect(effect.data).toEqual([]);
+    expect(
+      effect.events.some((e) => e.type === "work_item_resume_requested"),
+    ).toBe(false);
+    expect(item()?.status).toBe("blocked");
+    expect(item()?.reported_blocker).toBeDefined();
+  },
+);
+
+const platform = "platform-project";
+function platformRecord(
+  to: string,
+  status: string,
+  ready: boolean,
+  patch: Partial<Event> = {},
+): Event {
+  return {
+    id: io.ids.nextEventId(),
+    seq: io.ids.nextEventSequence(platform, undefined),
+    type: "host_deployment_recorded",
+    actor: { kind: "system", project_id: platform },
+    payload: { from: "a".repeat(40), to, status, ready },
+    created_at: io.clock.now(),
+    ...patch,
+  };
+}
+function withPlatform(records: readonly Event[]) {
+  io = {
+    ...io,
+    platform_deployments: (project, sha) =>
+      records.filter(
+        (e) =>
+          e.actor.project_id !== project &&
+          (e.payload as { to?: string }).to === sha,
+      ),
+  };
+}
+
+test("platform project: only a trusted, ready deployment of the exact SHA settles a business wait", async () => {
+  block({ kind: "deployment_ready", target_id: deployed });
+  const records: Event[] = [
+    // The platform card merged; merge alone is not a deployment.
+    {
+      ...platformRecord(deployed, "stopping", false),
+      type: "card_merged",
+      card_id: id("card", 9),
+    },
+    platformRecord(deployed, "stopping", false),
+    platformRecord(deployed, "failed", true),
+    platformRecord(other, "deployed", true),
+    // Untrusted authors, card streams and this project's own id never count.
+    platformRecord(deployed, "deployed", true, {
+      actor: { kind: "human", project_id: platform },
+    }),
+    platformRecord(deployed, "deployed", true, { card_id: id("card", 9) }),
+    platformRecord(deployed, "deployed", true, {
+      actor: { kind: "system", project_id: state.project_id },
+    }),
+  ];
+  withPlatform(records);
+  expect(scan().data).toEqual([]);
+  expectStillBlocked(await deliver(), "尚无系统记录证明已满足");
+  const ready = platformRecord(deployed, "deployed", true);
+  withPlatform([...records, ready]);
+  const effect = await delivered();
+  expect(
+    effect.events.find((e) => e.type === "blocker_wait_delivered")?.payload,
+  ).toMatchObject({
+    condition: { kind: "deployment_ready", target_id: deployed },
+    evidence: `${platform}/${ready.id}`,
+  });
+  expect(item()?.status).toBe("delivered");
+});
+
+test("platform project: a later rollback of the same SHA no longer counts", () => {
+  block({ kind: "deployment_ready", target_id: deployed });
+  finish();
+  const history = [
+    platformRecord(deployed, "deployed", true),
+    platformRecord(deployed, "rolled_back", false),
+  ];
+  withPlatform(history);
+  expect(scan().data).toEqual([]);
+  const ready = platformRecord(deployed, "deployed", true);
+  withPlatform([...history, ready]);
+  const effect = scan();
+  expect(effect.data).toEqual([work]);
+  expect(effect.events[0]?.payload).toMatchObject({
+    evidence: `${platform}/${ready.id}`,
+  });
+});
+
+test("upstream precheck of another item: delivery waits for it to finish, then clears inline", async () => {
+  const upstream = { card_id: id("card", 2), work_item_id: id("work_item", 9) };
+  event(
+    "precheck_queued",
+    { ...upstream, attempt_id: "upstream", status: "queued" },
+    system,
+    id("card", 2),
+  );
+  block({ kind: "precheck_finished", target_id: "upstream" });
+  event(
+    "precheck_started",
+    { ...upstream, attempt_id: "upstream", status: "running" },
+    system,
+    id("card", 2),
+  );
+  expectStillBlocked(await deliver(), "尚无系统记录证明已满足");
+  event(
+    "precheck_finished",
+    {
+      ...upstream,
+      attempt_id: "upstream",
+      status: "passed",
+      head_sha: deployed,
+    },
+    system,
+    id("card", 2),
+  );
+  const effect = await delivered();
+  expect(
+    effect.events.find((e) => e.type === "blocker_wait_delivered")?.payload,
+  ).toMatchObject({
+    condition: { kind: "precheck_finished", target_id: "upstream" },
+  });
+  expect(item()?.status).toBe("delivered");
+});
+
+test("own precheck wait keeps the same-commit rule", async () => {
+  const own = {
+    card_id: id("card", 1),
+    work_item_id: work,
+    assignment_id: owner,
+  };
+  event(
+    "precheck_queued",
+    { ...own, attempt_id: "own", status: "queued", head_sha: other },
+    system,
+    id("card", 1),
+  );
+  block({ kind: "precheck_finished", target_id: "own" });
+  event(
+    "precheck_finished",
+    { ...own, attempt_id: "own", status: "passed", head_sha: other },
+    system,
+    id("card", 1),
+  );
+  expectStillBlocked(await deliver(), "同一提交预检通过");
 });
 
 const verifiable: {

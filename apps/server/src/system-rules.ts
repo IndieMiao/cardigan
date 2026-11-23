@@ -51,7 +51,11 @@ export function runSystemRules(
   rotateIdleDeployedRoles(store, project, loadState);
   store.uow.run((tx) => {
     const actor = { kind: "system" as const, project_id: project };
-    const ports = { clock, ids: tx.ids };
+    const ports = {
+      clock,
+      ids: tx.ids,
+      platform_deployments: tx.platformDeployments,
+    };
     let state = loadState(tx, project);
     const dependencies = refreshCardDependencies(
       state,

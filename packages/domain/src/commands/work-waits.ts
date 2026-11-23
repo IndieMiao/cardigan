@@ -177,6 +177,31 @@ export function autoResumeUsed(
   );
 }
 
+/** A ready deployment of exactly this SHA, here or on the control plane's platform project. */
+function deploymentEvidence(d: CommandDraft, sha: string): string | undefined {
+  const ready = (e: Event | undefined) => {
+    const p = e && payload(e);
+    return p?.to === sha && p.status === "deployed" && p.ready === true;
+  };
+  const local = trusted(d).findLast(
+    (e) => e.type === "host_deployment_recorded" && payload(e).to === sha,
+  );
+  if (ready(local)) return local?.id;
+  const latest = new Map<string, Event>();
+  for (const e of d.ports?.platform_deployments?.(d.state.project_id, sha) ??
+    [])
+    if (
+      e.type === "host_deployment_recorded" &&
+      e.actor.kind === "system" &&
+      e.actor.project_id !== d.state.project_id &&
+      !e.card_id &&
+      payload(e).to === sha &&
+      (latest.get(e.actor.project_id)?.seq ?? -1) < e.seq
+    )
+      latest.set(e.actor.project_id, e);
+  for (const [project, e] of latest) if (ready(e)) return `${project}/${e.id}`;
+}
+
 function satisfied(
   d: CommandDraft,
   c: RunWait["condition"],
@@ -196,6 +221,7 @@ function satisfied(
     const q = d.list("decisions").find((q) => q.id === c.target_id);
     return q?.status === "resolved" ? q.id : undefined;
   }
+  if (c.kind === "deployment_ready") return deploymentEvidence(d, c.target_id);
   const event = targetEvent(d, c);
   if (!event) return;
   const p = payload(event);
@@ -219,10 +245,6 @@ function satisfied(
       return d
         .list("cards")
         .some((card) => card.id === c.target_id && card.status === "done")
-        ? event.id
-        : undefined;
-    case "deployment_ready":
-      return p.to === c.target_id && p.status === "deployed" && p.ready === true
         ? event.id
         : undefined;
   }
@@ -251,6 +273,7 @@ const BLOCKER_WAIT_DELIVERED = "blocker_wait_delivered";
 
 /** Conditions whose system record alone proves the wait is over, independent of the delivered subject. */
 const DELIVERY_SETTLED_KINDS: ReadonlySet<ResumeCondition["kind"]> = new Set([
+  "precheck_finished",
   "merge_check_finished",
   "github_run_completed",
   "card_merged",
@@ -305,7 +328,15 @@ export function resumeDeliveryWait(
       )
   )
     return { reason: "Run 正在停止" };
-  if (condition.kind === "precheck_finished") {
+  // Only this item's own check keeps the strict same-commit rule; a wait on
+  // another item's check is an upstream prerequisite like any other.
+  const ownCheck =
+    condition.kind === "precheck_finished" &&
+    (() => {
+      const target = targetEvent(d, condition);
+      return !target || payload(target).work_item_id === item.id;
+    })();
+  if (ownCheck) {
     const resumed =
       subject.kind === "git_head"
         ? resumePassedDeliveryWait(d, item, subject.value)
@@ -487,13 +518,18 @@ export function resumeWorkWaits(
           ? authorWait.event.id
           : undefined
         : satisfied(d, condition, p.baseline, item);
+      const active = runs
+        .filter((r) => !["completed", "failed", "cancelled"].includes(r.status))
+        .toSorted((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+      // A live author session continues in place: clear the reported blocker and
+      // notify that Run. Baseline conflicts still need a fresh, synced session.
+      const continuing =
+        active && blocker && !conflictWait ? active : undefined;
       const guard =
         waitOwnerGuard(d, item, owner) ??
         (runs.some((r) => r.dispatch_stop || r.inactivity_stop)
           ? "Run 正在停止"
-          : runs.some(
-                (r) => !["completed", "failed", "cancelled"].includes(r.status),
-              )
+          : active && !continuing
             ? "已有未结束的 Run"
             : undefined);
       if (guard) {
@@ -598,7 +634,9 @@ export function resumeWorkWaits(
       if (!["in_progress", "ready"].includes(next.status)) continue;
       const body = recovery
         ? `${item.id} 基线前进，自动同步；系统恢复并请求继续执行（${recovery.retry}/${maxResumes}），冲突由作者处理。`
-        : `${item.id} 等待条件已满足：${condition.kind} ${condition.target_id}；系统恢复并请求继续执行。`;
+        : continuing
+          ? `${item.id} 等待条件已满足：${condition.kind} ${condition.target_id}；系统已解除阻塞，请进行中的 ${continuing.id} 继续。`
+          : `${item.id} 等待条件已满足：${condition.kind} ${condition.target_id}；系统恢复并请求继续执行。`;
       const event = d.emit(
         "work_item_resume_requested",
         item.card_id,
@@ -610,6 +648,7 @@ export function resumeWorkWaits(
           condition: { ...condition },
           evidence,
           previous_run_id: last?.id ?? null,
+          ...(continuing ? { active_run_id: continuing.id } : {}),
           reported_blocker_cleared: !!blocker,
           ...(blocker ? blockerReference(d, item, blocker) : {}),
           ...(recovery
