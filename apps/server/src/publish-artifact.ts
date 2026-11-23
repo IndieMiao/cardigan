@@ -65,10 +65,11 @@ async function stageApk(data: string, a: Attachment, dest: string) {
 }
 /**
  * `apksigner verify --verbose --print-certs` labels each scheme's signer. Build Tools 37
- * (apksigner 0.9) prints `V1 Signer:`, `V2 Signer:`, `V3.0 Signer:` and, with SDK-targeted
- * targeting, `V3.1 Signer: (minSdkVersion=…, maxSdkVersion=…)`; Build Tools 36.1 prints
- * `Signer (minSdkVersion=…, maxSdkVersion=…)` there, and older releases `Signer #n`. Require a verified APK with exactly one signer whose every reported
- * certificate equals the registered one; any other certificate digest line fails closed.
+ * (apksigner 0.9) prints `V1 Signer:`, `V2 Signer:`, `V3.0 Signer:` and, for SDK-targeted
+ * signing, `V3.1 Signer: (minSdkVersion=…, maxSdkVersion=…)`; Build Tools 36.1 prints
+ * `Signer (minSdkVersion=…, maxSdkVersion=…)` there, and older releases `Signer #n`.
+ * Require a verified APK with exactly one signer whose every reported certificate equals
+ * the registered one; any other certificate digest line fails closed.
  */
 export function signedOnlyBy(output: string, certificate: string) {
   const lines = output.split(/\r?\n/u);
