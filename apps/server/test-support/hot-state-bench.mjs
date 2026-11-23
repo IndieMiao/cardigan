@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
   compareHotState,
+  hotCardIds,
   hotCommandEvents,
   listNeedsYou,
   postComment,
@@ -99,9 +100,14 @@ function generate(dir, perProject = 300_000, systemShare = 0.1) {
     store.uow.run((tx) => {
       for (const card of cards)
         if (!open.has(card.id))
-          tx.cards.put(project, { ...card, status: "done", resolution: "done" });
+          tx.cards.put(project, {
+            ...card,
+            status: "done",
+            resolution: "done",
+          });
       for (const a of tx.assignments.list(project)) {
-        const item = a.work_item_id && tx.work_items.get(project, a.work_item_id);
+        const item =
+          a.work_item_id && tx.work_items.get(project, a.work_item_id);
         if (item && !open.has(item.card_id))
           tx.assignments.put(project, {
             ...a,
@@ -112,6 +118,18 @@ function generate(dir, perProject = 300_000, systemShare = 0.1) {
       for (const run of tx.runs.list(project))
         if (!["completed", "failed", "cancelled"].includes(run.status))
           tx.runs.put(project, { ...run, status: "completed" });
+      // Closed cards rarely keep open questions or actions; open ones keep theirs.
+      const closedCard = (id) => id !== undefined && !open.has(id);
+      for (const q of tx.decisions.list(project))
+        if (
+          ["open", "snoozed", "provisional"].includes(q.status) &&
+          closedCard(q.card_id) &&
+          (q.affected_cards ?? []).every(closedCard)
+        )
+          tx.decisions.put(project, { ...q, status: "resolved" });
+      for (const h of tx.human_actions.list(project))
+        if (h.status === "open" && closedCard(h.card_id))
+          tx.human_actions.put(project, { ...h, status: "done" });
     });
     const openIds = [...open];
     const closedIds = cards.filter((c) => !open.has(c.id)).map((c) => c.id);
@@ -158,8 +176,7 @@ const quantile = (values, q) => {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted.length
     ? Math.round(
-        sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] *
-          10,
+        sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] * 10,
       ) / 10
     : null;
 };
@@ -187,7 +204,8 @@ function bench(db, scope, iterations = 20) {
   const time = (name, run) => {
     const t = performance.now();
     const value = run();
-    (timings[name] ??= []).push(performance.now() - t);
+    timings[name] ??= [];
+    timings[name].push(performance.now() - t);
     return value;
   };
   for (let i = 0; i < iterations; i++)
@@ -249,6 +267,7 @@ function shadow(db) {
       );
       const after = hot.uow.read((tx) => loadCommandState(tx, project));
       const expected = hotCommandEvents(before, notified);
+      const hotCards = hotCardIds(before, notified).size;
       const sameEvents =
         expected.length === after.events.length &&
         expected.every((e, i) => e.id === after.events[i]?.id);
@@ -256,6 +275,7 @@ function shadow(db) {
       report.push({
         project,
         events: { full: before.events.length, hot: after.events.length },
+        cards: { total: before.cards.length, hot: hotCards },
         loader_matches_definition: sameEvents,
         failed: checks.filter((c) => !c.equal),
         checked: checks.length,
@@ -274,7 +294,11 @@ function shadow(db) {
 async function background(db, scope, seconds = 60) {
   if (!db || !["full", "hot"].includes(scope))
     throw new Error("Expected DB full|hot");
-  const setup = Store.open({ dbPath: db, migrate: false, commandState: "full" });
+  const setup = Store.open({
+    dbPath: db,
+    migrate: false,
+    commandState: "full",
+  });
   const clock = { now: () => new Date().toISOString() };
   // Production restarts with routed cursors; settle them in a separate open.
   for (const { id: project } of setup.listProjects())

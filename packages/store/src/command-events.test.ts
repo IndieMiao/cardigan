@@ -1,5 +1,6 @@
 import type { CardId, Event } from "@cardigan/domain";
 import { expect, test, vi } from "vitest";
+import { commandStateScope } from "./store.js";
 import { card, project_id, withTempStore } from "./test-support.js";
 
 const at = "2026-01-01T00:00:00.000Z";
@@ -128,5 +129,21 @@ test("C-639 out-of-order seqs from interleaved writers stay sorted per stream", 
           ?.map((e) => e.id),
       ),
     ).toEqual(["a1", "a2", "a3"]);
+  });
+});
+
+test("C-639 command state scope defaults to hot and rejects unknown values", () => {
+  expect(commandStateScope(undefined)).toBe("hot");
+  expect(commandStateScope("")).toBe("hot");
+  expect(commandStateScope("hot")).toBe("hot");
+  expect(commandStateScope("full")).toBe("full");
+  expect(() => commandStateScope("cold")).toThrow("hot or full");
+  withTempStore((store) => {
+    expect(store.commandStateScope).toBe(
+      commandStateScope(process.env.CARDIGAN_COMMAND_STATE),
+    );
+    store.uow.read((tx) =>
+      expect(tx.command_state_scope).toBe(store.commandStateScope),
+    );
   });
 });

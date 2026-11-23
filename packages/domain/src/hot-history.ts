@@ -157,33 +157,7 @@ export function commandTargetCards(
   },
   values: readonly unknown[],
 ): Set<CardId> {
-  const cards = new Set(state.cards.map((c) => c.id as string));
-  const items = new Map(state.work_items.map((w) => [w.id as string, w]));
-  const index = new Map<string, () => readonly (CardId | undefined)[]>();
-  const item = (id: string | undefined) =>
-    id === undefined ? undefined : items.get(id)?.card_id;
-  for (const w of state.work_items) index.set(w.id, () => [w.card_id]);
-  for (const a of state.assignments)
-    index.set(a.id, () => [
-      a.scope === "work_item" ? item(a.work_item_id) : undefined,
-    ]);
-  const deliveries = new Map(state.deliveries.map((v) => [v.id, v]));
-  for (const v of state.deliveries)
-    index.set(v.id, () => [item(v.work_item_id)]);
-  for (const r of state.reviews)
-    index.set(r.id, () => [item(deliveries.get(r.delivery_id)?.work_item_id)]);
-  for (const q of state.decisions)
-    index.set(q.id, () => [q.card_id, ...(q.affected_cards ?? [])]);
-  for (const h of state.human_actions) index.set(h.id, () => [h.card_id]);
-  const assignments = new Map(state.assignments.map((a) => [a.id, a]));
-  for (const run of state.runs)
-    index.set(run.id, () => {
-      const a = assignments.get(run.assignment_id);
-      return [
-        a?.scope === "work_item" ? item(a.work_item_id) : undefined,
-        run.recovery_policy?.card_id,
-      ];
-    });
+  const { cards, index } = targetIndex(state);
   const found = new Set<CardId>();
   const visit = (value: unknown, depth: number) => {
     if (typeof value === "string") {
@@ -219,4 +193,47 @@ export function hotCommandEvents(
       hot.has(e.card_id) ||
       !COLD_CARD_OMITTED_EVENT_TYPES.has(e.type),
   );
+}
+
+type TargetState = Parameters<typeof commandTargetCards>[0];
+type TargetIndex = {
+  readonly cards: ReadonlySet<string>;
+  readonly index: ReadonlyMap<string, () => readonly (CardId | undefined)[]>;
+};
+/** Built once per immutable state snapshot; commands only look ids up. */
+const targetIndexes = new WeakMap<object, TargetIndex>();
+function targetIndex(state: TargetState): TargetIndex {
+  const cached = targetIndexes.get(state);
+  if (cached) return cached;
+
+  const cards = new Set(state.cards.map((c) => c.id as string));
+  const items = new Map(state.work_items.map((w) => [w.id as string, w]));
+  const index = new Map<string, () => readonly (CardId | undefined)[]>();
+  const item = (id: string | undefined) =>
+    id === undefined ? undefined : items.get(id)?.card_id;
+  for (const w of state.work_items) index.set(w.id, () => [w.card_id]);
+  for (const a of state.assignments)
+    index.set(a.id, () => [
+      a.scope === "work_item" ? item(a.work_item_id) : undefined,
+    ]);
+  const deliveries = new Map(state.deliveries.map((v) => [v.id, v]));
+  for (const v of state.deliveries)
+    index.set(v.id, () => [item(v.work_item_id)]);
+  for (const r of state.reviews)
+    index.set(r.id, () => [item(deliveries.get(r.delivery_id)?.work_item_id)]);
+  for (const q of state.decisions)
+    index.set(q.id, () => [q.card_id, ...(q.affected_cards ?? [])]);
+  for (const h of state.human_actions) index.set(h.id, () => [h.card_id]);
+  const assignments = new Map(state.assignments.map((a) => [a.id, a]));
+  for (const run of state.runs)
+    index.set(run.id, () => {
+      const a = assignments.get(run.assignment_id);
+      return [
+        a?.scope === "work_item" ? item(a.work_item_id) : undefined,
+        run.recovery_policy?.card_id,
+      ];
+    });
+  const built = { cards, index };
+  targetIndexes.set(state, built);
+  return built;
 }

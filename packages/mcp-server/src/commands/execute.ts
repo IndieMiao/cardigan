@@ -1,10 +1,3 @@
-import {
-  COLD_CARD_OMITTED_EVENT_TYPES,
-  coldCardEvents,
-  commandTargetCards,
-  hotCardIds,
-  liveTriggerEventIds,
-} from "@cardigan/domain";
 import type {
   Actor,
   CardId,
@@ -18,6 +11,13 @@ import type {
   Result,
   ToolName,
   TransactionContext,
+} from "@cardigan/domain";
+import {
+  COLD_CARD_OMITTED_EVENT_TYPES,
+  coldCardEvents,
+  commandTargetCards,
+  hotCardIds,
+  liveTriggerEventIds,
 } from "@cardigan/domain";
 import type {
   CommandEventStreams,
@@ -70,6 +70,24 @@ const extensions = new WeakMap<
   CommandState,
   { key: string; state: CommandState }
 >();
+
+/**
+ * Pins only widen the hot set (more history is always correct); they expire
+ * after this many base rebuilds without a target or notification naming them.
+ */
+const STICKY_GENERATIONS = 512;
+const sticky = new Map<
+  string,
+  { generation: number; used: Map<string, number> }
+>();
+function stickyPins(project: string) {
+  let pins = sticky.get(project);
+  if (!pins) {
+    pins = { generation: 0, used: new Map() };
+    sticky.set(project, pins);
+  }
+  return pins;
+}
 
 export interface CommandStateOptions {
   /** Command parameters (or ids) naming the cards a command is about. */
@@ -140,6 +158,8 @@ function extendHot(
   );
   if (options.targets?.length)
     for (const id of commandTargetCards(state, options.targets)) extra.add(id);
+  const pins = stickyPins(state.project_id);
+  for (const id of extra) pins.used.set(id, pins.generation);
   const missing = [...extra].filter(
     (id) => !base.has(id) && state.cards.some((c) => c.id === id),
   );
@@ -179,10 +199,16 @@ function readCommandState(
       project_id,
       liveTriggerEventIds(entities.runs),
     );
-    hotCards = hotCardIds(entities, [...(triggers?.values() ?? [])] as (
-      | CardId
-      | undefined
-    )[]);
+    // Recently targeted or notified cold cards join the base hot set, so
+    // repeated targets reuse one history (and its indexes) per snapshot.
+    const pins = stickyPins(project_id);
+    pins.generation++;
+    for (const [id, used] of pins.used)
+      if (pins.generation - used > STICKY_GENERATIONS) pins.used.delete(id);
+    hotCards = hotCardIds(entities, [
+      ...((triggers?.values() ?? []) as Iterable<CardId | undefined>),
+      ...(pins.used.keys() as Iterable<CardId>),
+    ]);
   }
   // Store reads only newly appended rows. Keep the original project/card/seq
   // order, including filtering out streams whose card is absent from this snapshot.

@@ -214,7 +214,6 @@ export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
 export { eventById, eventsForDecision, eventsOfType } from "./event-index.js";
-export * from "./hot-history.js";
 export * from "./ext-interaction.js";
 export * from "./ext-message.js";
 export * from "./flow.js";
@@ -230,6 +229,8 @@ export {
 export * from "./harness-activity.js";
 export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
+export * from "./hot-history.js";
+export * from "./hot-history-shadow.js";
 export * from "./ids.js";
 export {
   currentInteraction,
@@ -301,4 +302,3 @@ export {
 export * from "./verification-activity.js";
 export * from "./work-wait.js";
 export * from "./worker-helper-action.js";
-export * from "./hot-history-shadow.js";

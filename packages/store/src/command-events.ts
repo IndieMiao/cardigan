@@ -154,7 +154,7 @@ class Snapshot implements EventStreams, ReadonlyMap<string, readonly Event[]> {
     if (list.length || exclude) {
       const rows = prepare(
         this.owner.db,
-        `SELECT stream, doc FROM events WHERE project_id = ? AND type ${exclude ? "NOT IN" : "IN"} (${list.map(() => "?").join(",")}) AND rowid <= ? ORDER BY rowid`,
+        `SELECT stream, doc FROM events WHERE project_id = ? AND type ${exclude ? "NOT IN" : "IN"} (${list.map(() => "?").join(",")}) AND rowid <= ? ORDER BY stream, seq`,
       ).all(this.owner.project, ...list, this.through) as Row[];
       appendTo(
         streams,
