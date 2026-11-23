@@ -16,7 +16,11 @@ import {
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
-import { fileAttachmentStore, MAX_MCP_BODY_BYTES } from "./attachments.js";
+import {
+  fileAttachmentStore,
+  MAX_MCP_BODY_BYTES,
+  mcpBodyTooLargeMessage,
+} from "./attachments.js";
 import {
   authenticate,
   bearerToken,
@@ -581,6 +585,30 @@ async function serveMcp(
   log: Logger,
   allowedHosts: string[],
 ): Promise<void> {
+  // C-616: refuse a declared oversized body before the SDK does, so the 413
+  // names the attachment limit and not only the request body bound. Chunked
+  // bodies without a length still stop at the transport's own bound below.
+  const declared = Number(req.headers["content-length"]);
+  if (
+    req.method === "POST" &&
+    allowedHosts.includes(req.headers.host ?? "") &&
+    Number.isFinite(declared) &&
+    declared > MAX_MCP_BODY_BYTES
+  ) {
+    res
+      .writeHead(413, {
+        "Content-Type": "application/json",
+        Connection: "close",
+      })
+      .end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: mcpBodyTooLargeMessage() },
+          id: null,
+        }),
+      );
+    return;
+  }
   const server = createMcpServer({
     projectSettings: options.projectSettings,
     store: options.store,

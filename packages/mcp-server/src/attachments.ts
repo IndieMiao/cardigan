@@ -16,6 +16,15 @@ export const MAX_ATTACHMENT_BYTES = ATTACHMENT_LIMITS.bytes;
 export const MAX_ATTACHMENT_BASE64 = ATTACHMENT_LIMITS.base64;
 // Leave room for the JSON-RPC envelope while keeping the HTTP body bounded.
 export const MAX_MCP_BODY_BYTES = ATTACHMENT_LIMITS.bodyBytes;
+/**
+ * C-616: 413 text for an MCP request body over `MAX_MCP_BODY_BYTES`, naming
+ * both the body bound and the ordinary attachment limit it is derived from.
+ */
+export const mcpBodyTooLargeMessage = (
+  bodyBytes = MAX_MCP_BODY_BYTES,
+  attachmentBytes = MAX_ATTACHMENT_BYTES,
+) =>
+  `Payload Too Large: request body must not exceed ${bodyBytes} bytes; attachments are limited to ${formatAttachmentLimit(attachmentBytes)} (larger files use the artifact upload)`;
 /** Exact text of the over-limit refusal; the CLI translates it by this key. */
 export const attachmentTooLargeMessage = (bytes = MAX_ATTACHMENT_BYTES) =>
   `Attachment exceeds ${formatAttachmentLimit(bytes)}`;
@@ -91,6 +100,7 @@ export function decodeAttachment(
 /** Content-addressed blobs outlive failed DB transactions; shared blobs are never removed. */
 export function fileAttachmentStore(
   dataDir = process.env.CARDIGAN_DATA_DIR ?? ".data",
+  maxBytes = MAX_ATTACHMENT_BYTES,
 ): AttachmentStore {
   const directory = resolve(dataDir, "attachments");
   const path = (digest: string) => {
@@ -148,10 +158,10 @@ export function fileAttachmentStore(
     get,
     async put(digest, content) {
       const target = path(digest);
-      if (
-        content.byteLength > MAX_STORED_ATTACHMENT_BYTES ||
-        sha256(content) !== digest
-      )
+      // New blobs follow the current host limit; only reads keep the ceiling.
+      if (content.byteLength > maxBytes)
+        throw ToolError.validation(attachmentTooLargeMessage(maxBytes));
+      if (sha256(content) !== digest)
         throw ToolError.validation("Invalid attachment content");
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const temporary = join(directory, `.${randomUUID()}.tmp`);

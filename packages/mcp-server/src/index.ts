@@ -25,6 +25,7 @@ export {
   MAX_ATTACHMENT_BASE64,
   MAX_ATTACHMENT_BYTES,
   MAX_MCP_BODY_BYTES,
+  mcpBodyTooLargeMessage,
   prepareAttachmentFile,
 } from "./attachments.js";
 export {

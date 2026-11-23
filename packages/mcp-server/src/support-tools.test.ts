@@ -39,6 +39,7 @@ import {
   fileAttachmentStore,
   MAX_ATTACHMENT_BYTES,
   MAX_MCP_BODY_BYTES,
+  mcpBodyTooLargeMessage,
   sha256,
 } from "./attachments.js";
 import { downloadAttachment } from "./download-attachment.js";
@@ -902,6 +903,10 @@ test("10 MiB passes through HTTP; oversized, malformed and checksum-mismatched c
     }),
   });
   expect(response.status).toBe(413);
+  // C-616: the refusal names the attachment limit, not only the body bound.
+  expect(await response.json()).toMatchObject({
+    error: { message: mcpBodyTooLargeMessage() },
+  });
   // Full-suite CPU load can exceed 5 seconds while encoding and checking 10 MiB bodies.
 }, 30_000);
 

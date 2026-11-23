@@ -14,8 +14,11 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import {
   ATTACHMENT_EXTENSIONS,
   attachmentMimeForExtension,
+  attachmentTooLargeMessage,
   fileAttachmentStore,
   MAX_ATTACHMENT_BYTES,
+  MAX_MCP_BODY_BYTES,
+  mcpBodyTooLargeMessage,
   prepareAttachmentFile,
   sha256,
 } from "./attachments.js";
@@ -64,7 +67,7 @@ test("shared preflight validates hashes and detects corrupt existing blobs", asy
   );
 });
 
-test("shared preflight enforces canonical base64 and the inclusive 10 MiB limit", async () => {
+test("shared preflight enforces canonical base64 and the inclusive host limit", async () => {
   await expect(prepareAttachmentFile("bad-base64!", dataDir)).rejects.toThrow(
     "base64",
   );
@@ -77,7 +80,42 @@ test("shared preflight enforces canonical base64 and the inclusive 10 MiB limit"
       Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64"),
       dataDir,
     ),
-  ).rejects.toThrow("10 MiB");
+  ).rejects.toThrow(attachmentTooLargeMessage());
+});
+
+test("C-616: new blobs follow the current limit while older larger blobs stay readable", async () => {
+  // Default store: the host limit (10 MiB unless configured) bounds every write.
+  const over = Buffer.alloc(MAX_ATTACHMENT_BYTES + 1, 0x61);
+  await expect(
+    fileAttachmentStore(dataDir).put(sha256(over), over),
+  ).rejects.toThrow(attachmentTooLargeMessage());
+  // A lowered limit: a 2 KiB blob accepted earlier stays readable, a new one is refused.
+  const earlier = Buffer.alloc(2048, 0x62),
+    digest = sha256(earlier);
+  await fileAttachmentStore(dataDir, 4096).put(digest, earlier);
+  const lowered = fileAttachmentStore(dataDir, 1024);
+  expect(await lowered.get(digest)).toEqual(earlier);
+  const fresh = Buffer.alloc(1025, 0x63);
+  await expect(lowered.put(sha256(fresh), fresh)).rejects.toThrow(
+    "Attachment exceeds 1024 bytes",
+  );
+  const exact = Buffer.alloc(1024, 0x64);
+  expect(await lowered.put(sha256(exact), exact)).toMatchObject({
+    storage_path: `attachments/${sha256(exact)}`,
+  });
+  // A wrong digest is still refused without naming the limit.
+  await expect(lowered.put(sha256(earlier), exact)).rejects.toThrow(
+    "Invalid attachment content",
+  );
+});
+
+test("C-616: the MCP body refusal names both the body bound and the attachment limit", () => {
+  expect(mcpBodyTooLargeMessage()).toBe(
+    `Payload Too Large: request body must not exceed ${MAX_MCP_BODY_BYTES} bytes; attachments are limited to ${MAX_ATTACHMENT_BYTES / 1048576} MiB (larger files use the artifact upload)`,
+  );
+  expect(mcpBodyTooLargeMessage(42_991_616, 30 * 1048576)).toBe(
+    "Payload Too Large: request body must not exceed 42991616 bytes; attachments are limited to 30 MiB (larger files use the artifact upload)",
+  );
 });
 
 test("reusing an existing blob refreshes its mtime so the sweep keeps it", async () => {
