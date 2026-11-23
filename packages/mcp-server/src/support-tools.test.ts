@@ -910,6 +910,65 @@ test("10 MiB passes through HTTP; oversized, malformed and checksum-mismatched c
   // Full-suite CPU load can exceed 5 seconds while encoding and checking 10 MiB bodies.
 }, 30_000);
 
+test("C-616: a chunked MCP body gets the same limits and refusal as a declared one", async () => {
+  // A ReadableStream body has no Content-Length, so fetch sends it chunked.
+  const chunked = (text: string) =>
+    fetch(server.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: new ReadableStream({
+        start(controller) {
+          const bytes = Buffer.from(text);
+          for (let at = 0; at < bytes.length; at += 1024 * 1024)
+            controller.enqueue(bytes.subarray(at, at + 1024 * 1024));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    } as RequestInit);
+  const oversized = await chunked(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "upload_attachment",
+        arguments: {
+          ...upload,
+          file: Buffer.alloc(MAX_ATTACHMENT_BYTES + 1024 * 1024 * 2).toString(
+            "base64",
+          ),
+        },
+      },
+    }),
+  );
+  expect(oversized.status).toBe(413);
+  expect(await oversized.json()).toMatchObject({
+    error: { message: mcpBodyTooLargeMessage() },
+  });
+  expect(blobs.put).not.toHaveBeenCalled();
+  // Within the bound the parsed body reaches the transport unchanged.
+  const listed = await chunked(
+    JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+  );
+  expect(listed.status).toBe(200);
+  expect(await listed.json()).toMatchObject({
+    id: 2,
+    result: {
+      tools: expect.arrayContaining([
+        expect.objectContaining({ name: "upload_attachment" }),
+      ]),
+    },
+  });
+  const broken = await chunked("{not json");
+  expect(broken.status).toBe(400);
+  expect(await broken.json()).toMatchObject({ error: { code: -32700 } });
+}, 30_000);
+
 test("late transaction failure retains blobs, rolls back all DB writes, and can be retried", async () => {
   const shared = await ok<Attachment>(coder, "upload_attachment", upload);
   const before = counts();
