@@ -520,3 +520,59 @@ test("an exit command refused at the send slot is retried; an uncertain one star
   ]);
   expectSettledOnce(pm);
 });
+
+test("without an activity report, the bound empty prompt is the idle evidence and guards the exit command", async () => {
+  const { pm } = standingPm();
+  agent = "unknown";
+  runtime.observe_prompt = vi.fn(async () => ({
+    ok: true as const,
+    value: true,
+  }));
+  vi.mocked(runtime.wake).mockImplementation(async () => {
+    process_ = "exited";
+    return { ok: true, value: { sent: true } };
+  });
+  await restart(pm);
+  await service.tick();
+  const binding = {
+    project_id: f.project,
+    assignment_id: pm.id,
+    harness: "claude-code",
+  };
+  expect(runtime.observe_prompt).toHaveBeenCalledWith(
+    expect.anything(),
+    binding,
+  );
+  expect(runtime.wake).toHaveBeenCalledExactlyOnceWith(
+    expect.anything(),
+    "/exit",
+    expect.objectContaining({ prompt_binding: binding }),
+  );
+  expect(
+    f
+      .state()
+      .events.find(
+        (e) =>
+          e.type === STANDING_EXIT_STEP &&
+          (e.payload as { step: string }).step === "exit_command",
+      )?.payload,
+  ).toMatchObject({ idle_basis: "bound_idle_prompt" });
+  expectSettledOnce(pm);
+});
+
+test("without an activity report or an idle prompt nothing is typed or signalled; host operations are reminded", async () => {
+  const { pm } = standingPm();
+  agent = "unknown";
+  runtime.observe_prompt = vi.fn(async () => ({
+    ok: true as const,
+    value: false,
+  }));
+  await restart(pm);
+  await service.tick();
+  for (let i = 0; i < 5; i++) await drain();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(runtime.retire_idle).not.toHaveBeenCalled();
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(steps(actionId())).toEqual(["busy", "overdue"]);
+  expect(hostOpsPending(f.state().events, pm.id)).toBe(true);
+});

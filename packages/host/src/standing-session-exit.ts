@@ -10,6 +10,7 @@ import {
   type Runtime,
   type RuntimeObservation,
   type RuntimeRef,
+  type RuntimeWakeOptions,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { recordNotification, type Store } from "@cardigan/store";
@@ -208,13 +209,22 @@ export async function exitStandingSession(
   );
   const command = exitCommand(input.harness);
   if (!requested && command) {
-    if (!idle(seen)) return "legacy";
+    const evidence = await idleEvidence(input, seen);
+    if (!evidence) return "legacy";
+    if (evidence === "not_idle") {
+      // No activity report and the CLI's own prompt is not an idle, empty
+      // editor: treat it as a running turn. Wait; never type or signal.
+      if (!last("busy"))
+        record("busy", {
+          agent_state: seen.agent,
+          observed_seq: seen.observed_seq,
+          basis: "prompt_not_idle",
+        });
+      input.defer("old_session_busy");
+      return "waiting";
+    }
+    const { basis, guard } = evidence;
     if (!input.mayStop(overdue())) return "waiting";
-    const guard = idleWakeGuard({
-      process: "alive",
-      agent: seen.agent,
-      observed_seq: seen.observed_seq ?? 0,
-    });
     let authorized = false;
     const sent = await runtime
       .wake(ref, command, {
@@ -232,7 +242,7 @@ export async function exitStandingSession(
           command,
           sent: false,
           withdrawn: true,
-          idle_basis: `terminal_status_${seen.agent}`,
+          idle_basis: basis,
           observed_seq: seen.observed_seq,
         });
       input.defer("standing_exit_command_withdrawn");
@@ -241,7 +251,7 @@ export async function exitStandingSession(
     record("exit_command", {
       command,
       sent: delivered,
-      idle_basis: `terminal_status_${seen.agent}`,
+      idle_basis: basis,
       observed_seq: seen.observed_seq,
       ...(sent && !sent.ok ? { runtime_code: sent.error.code } : {}),
     });
@@ -361,6 +371,51 @@ export async function exitStandingSession(
       : "standing_exit_unconfirmed",
   );
   return "waiting";
+}
+
+/**
+ * Idle evidence for typing the exit command, rechecked by hc in the send slot.
+ * hc often has no OSC activity for these CLIs; then only the bound, empty
+ * editor with the CLI's own idle footer counts (the dispatcher's guard).
+ */
+async function idleEvidence(
+  input: StandingExitInput,
+  seen: Observed,
+): Promise<
+  { basis: string; guard: RuntimeWakeOptions } | "not_idle" | undefined
+> {
+  if (idle(seen)) {
+    const guard = idleWakeGuard({
+      process: "alive",
+      agent: seen.agent,
+      observed_seq: seen.observed_seq ?? 0,
+    });
+    return guard
+      ? { basis: `terminal_status_${seen.agent}`, guard }
+      : undefined;
+  }
+  const harness = input.harness;
+  if (
+    seen.process !== "alive" ||
+    seen.agent !== "unknown" ||
+    (harness !== "claude-code" && harness !== "codex") ||
+    !input.runtime.observe_prompt
+  )
+    return undefined;
+  const binding = {
+    project_id: input.project,
+    assignment_id: input.action.assignment_id,
+    harness,
+  } as const;
+  const prompt = await input.runtime
+    .observe_prompt(input.action.runtime_ref, binding)
+    .catch(() => undefined);
+  // An unavailable observation keeps the original path; a positive "not an
+  // idle editor" is the CLI showing a turn, a prompt or a draft.
+  if (!prompt?.ok) return undefined;
+  return prompt.value
+    ? { basis: "bound_idle_prompt", guard: { prompt_binding: binding } }
+    : "not_idle";
 }
 
 /**
