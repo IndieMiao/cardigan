@@ -227,11 +227,11 @@ test("first call is accepted at once; polls of the same Run follow one job to it
   }
 }, 20_000);
 
-test("a same-machine handoff path from the host is reported with the receipt, only for this request", async () => {
+test("a same-machine handoff path from the host is reported with the receipt, never a traversing one", async () => {
   for (const [kind, expected] of [
     [
       "handoff",
-      { path: `/srv/handoff/${"1".repeat(32)}.apk`, sha256: "a".repeat(64) },
+      { path: `/srv/handoff/${"2".repeat(32)}.apk`, sha256: "a".repeat(64) },
     ],
     ["handoff-other", undefined],
   ] as const) {

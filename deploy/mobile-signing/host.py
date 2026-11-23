@@ -70,8 +70,9 @@ def handoff_route(root, s):
     return s['platform'] == 'android' and len(hits) == 1 and hits[0].get('handoff') is True
 
 
-def handoff_path(rid, value):
-    return (isinstance(value, str) and re.fullmatch(r'(?:/[A-Za-z0-9_.-]+)+/' + rid + r'\.apk', value, re.ASCII)
+def handoff_path(value):
+    # The signer names each copy randomly; only this ledger and, once released, the Run learn it.
+    return (isinstance(value, str) and re.fullmatch(r'(?:/[A-Za-z0-9_.-]+)+/[0-9a-f]{32}\.apk', value, re.ASCII)
             and '/../' not in value + '/' and '/./' not in value + '/')
 
 
@@ -82,15 +83,15 @@ def handoffs(db):
 def withdraw(db, root, rid, dial=None):
     """After a revocation, ask the signer to remove the same-machine copy.
 
-    Best effort and never blocking: the ledger stops reporting the path at
-    once; an unreachable or older signer leaves the copy to its expiry.
+    Never blocking: a revoked grant is no longer released, so its path is
+    not reported again. The ledger keeps the handoff until the signer
+    confirms the removal; repeating `revoke` retries, and an unreachable or
+    older signer leaves the copy to the signer's periodic expiry job.
     """
     path = handed_off(db, rid, None)
     if path is None:
         return False
     row = db.execute('SELECT spec,peer FROM grants JOIN dispatch_peer USING(id) WHERE id=?', (rid,)).fetchone()
-    with transaction(db):
-        db.execute('DELETE FROM handoffs WHERE id=?', (rid,))
     done = False
     if row:
         try:
@@ -103,6 +104,9 @@ def withdraw(db, root, rid, dial=None):
                 hang_up(p)
         except Exception:
             done = False
+    if done:
+        with transaction(db):
+            db.execute('DELETE FROM handoffs WHERE id=?', (rid,))
     event(db, scope(json.loads(row[0])) if row else None, rid, 'handoff_withdrawn' if done else 'handoff_withdraw_failed')
     return done
 
@@ -181,9 +185,14 @@ def attested(identity):
     return {k: v for k, v in identity.items() if k != 'chain'}, chain
 
 
-def bound_to(db, rid, chain):
-    derived = chain_of(db, rid)
-    require(derived is None or derived == chain)
+def bound_to(root, db, s, chain):
+    """A chain-derived grant: attested by the service and still on a marked test route."""
+    derived = chain_of(db, s['id'])
+    if derived is None:
+        return
+    require(derived == chain)
+    hits = [r for r in config(root / 'routes.json') if all(r[k] == s[k] for k in ('project','machine','platform','version','app'))]
+    require(len(hits) == 1 and hits[0].get('test_identity') is True)
 
 
 def chain_grant(root, db, identity, request, source):
@@ -316,13 +325,13 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
         s, state = json.loads(row[0]), row[1]
         rid = s['id']
         require(state in USABLE)
-        bound_to(db, rid, chain)
+        bound_to(root, db, s, chain)
         manifest(s)
         peer = route(root,s)
 
         def authorized():
             require(db.execute('SELECT 1 FROM grants WHERE id=? AND NOT revoked', (rid,)).fetchone())
-            bound_to(db, rid, chain)
+            bound_to(root, db, s, chain)
             require(route(root,s) == peer)
             manifest(s)
 
@@ -400,7 +409,7 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
                 try:
                     require(db.execute("UPDATE grants SET state='signed',output=? WHERE id=? AND NOT revoked AND state IN ('pending','peer_signed','signed')",(sha,rid)).rowcount == 1)
                     observe(db, rid, 'signed', sha)
-                    if local and handoff_path(rid, header.get('handoff')):
+                    if local and handoff_path(header.get('handoff')):
                         handoffs(db)
                         db.execute('INSERT OR REPLACE INTO handoffs VALUES(?,?,?)', (rid, header['handoff'], sha))
                     event(db,ctx,rid,'signed')
@@ -519,7 +528,7 @@ def main():
         require(re.fullmatch('[0-9a-f]{32}',rid))
         identity, chain = attested(json.loads(line(sys.stdin.buffer)))
         sha = release_authority(root,db,rid,identity)
-        bound_to(db, rid, chain)
+        bound_to(root, db, json.loads(db.execute('SELECT spec FROM grants WHERE id=?', (rid,)).fetchone()[0]), chain)
         print(rid,sha)
     elif cmd == 'reconcile':
         print(canonical(reconcile(db,root,sys.argv[3])))

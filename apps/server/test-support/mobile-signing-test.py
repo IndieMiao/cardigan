@@ -427,7 +427,7 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertEqual(status, 'new')
         self.assertRegex(rid, '^[0-9a-f]{32}$')
 
-    def with_handoff(self, mode=0o710, route=True, policy=True, members=None):
+    def with_handoff(self, mode=0o710, route=True, policy=True, members=None, pruned=True):
         drop = self.root/'handoff'
         drop.mkdir(mode=0o700, exist_ok=True); drop.chmod(mode)
         if policy:
@@ -436,20 +436,31 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         save(self.host/'routes.json', canonical([{**r, **({'handoff': True} if route else {})} for r in routes]))
         # The directory's group as account lookup would report it (no real groups in tests).
         self.members = {self.spec['worker_uid']} if members is None else members
+        if pruned:
+            self.prune_job()
         return drop
+
+    def prune_job(self):
+        # The administrator's scheduled job, exactly as installed: a local run with `prune`.
+        # Its effects are asserted where they matter; a pre-C-612 signer has no such job.
+        subprocess.run([sys.executable, '-IB', str(HELPERS/'worker.py'), str(self.worker), 'prune'],
+                       env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
     def test_same_machine_handoff_of_signed_apk(self):
-        # C-612: the signer also places the signed APK, readable by the worker's group only.
+        # C-612: the signer places the signed APK under a random name, readable by the worker's group only.
         drop = self.with_handoff()
         rid, sha = self.call()
-        placed = drop/f'{rid}.apk'
+        placed = Path(host.handed_off(self.db, rid, sha))
+        self.assertEqual(placed.parent, drop)
+        self.assertRegex(placed.name, '^[0-9a-f]{32}[.]apk$')
+        self.assertNotEqual(placed.name, f'{rid}.apk')
         self.assertEqual(digest(placed), sha)
         self.assertEqual(oct(placed.stat().st_mode & 0o777), oct(0o640))
         self.assertEqual(placed.stat().st_gid, drop.stat().st_gid)
-        self.assertEqual(host.handed_off(self.db, rid, sha), str(placed))
         self.assertEqual(sorted(p.name for p in drop.iterdir()), [placed.name])
-        # A later lookup reports the same file; other bytes never match it.
+        # Other bytes never match it; a later lookup reports the same file.
         self.assertIsNone(host.handed_off(self.db, rid, 'e'*64))
         self.assertEqual(self.call(), (rid, sha))
         self.assertEqual(host.handed_off(self.db, rid, sha), str(placed))
@@ -463,54 +474,110 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
             self.assertEqual(proc.stdout.read(), f'{rid} {sha} {placed}\n'.encode())
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
+    def test_handoff_name_is_disclosed_only_by_the_released_receipt(self):
+        # Revoked between the signer's copy and the host's final check: nothing names the copy.
+        drop = self.with_handoff()
+        rid = self.spec['id']
+        real = self.dial
+        test = self
+        class Reader:
+            # Revoke as soon as the signer's result header arrives: signed, copy placed.
+            def __init__(self, raw): self.raw = raw
+            def readline(self, n=-1):
+                data = self.raw.readline(n)
+                if data.startswith(b'{'):
+                    test.db.execute('UPDATE grants SET revoked=1 WHERE id=?', (rid,))
+                return data
+            def read(self, n=-1): return self.raw.read(n)
+            def close(self): self.raw.close()
+        class Revoking:
+            def __init__(self, p): self.p, self.stdin, self.stdout = p, p.stdin, Reader(p.stdout)
+            def wait(self, timeout=None): return self.p.wait(timeout=timeout)
+            def kill(self): self.p.kill()
+        with self.assertRaises(ValueError):
+            host.request(self.host, self.db, self.ctx, lambda: None, lambda root, peer: Revoking(real(root, peer)))
+        copies = list(drop.iterdir())
+        self.assertEqual(len(copies), 1)
+        self.assertNotEqual(copies[0].name, f'{rid}.apk')
+        self.assertIsNone(host.handed_off(self.db, rid, None))
+        self.assertNotIn(copies[0].name.encode(), self.db.execute("SELECT group_concat(spec) FROM grants").fetchone()[0].encode())
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
     def test_handoff_is_skipped_never_blocking(self):
-        # Others may traverse or list, the group admits another account, or nothing is configured.
+        # Others may traverse or list, the group admits another account, no recent
+        # expiry job, or nothing is configured.
         other = self.spec['worker_uid'] + 1
         for kwargs in ({'mode': 0o711}, {'mode': 0o751}, {'mode': 0o750}, {'mode': 0o755},
                        {'members': {self.spec['worker_uid'], other}}, {'members': {other}}, {'members': set()},
-                       {'route': False}, {'policy': False}):
+                       {'pruned': False}, {'pruned': 'stale'}, {'route': False}, {'policy': False}):
             with self.subTest(**{k: str(v) for k, v in kwargs.items()}):
                 self.setUp()
-                drop = self.with_handoff(**kwargs)
+                pruned = kwargs.get('pruned', True)
+                drop = self.with_handoff(pruned=pruned is not False, **{k: v for k, v in kwargs.items() if k != 'pruned'})
+                if pruned == 'stale':
+                    old = time.time() - worker.PRUNE_FRESH - 60
+                    os.utime(self.worker/'handoff-pruned', (old, old))
                 rid, sha = self.call()
                 self.assertEqual(digest(self.host/'outputs'/rid), sha)
                 self.assertEqual(list(drop.iterdir()), [])
                 self.assertIsNone(host.handed_off(self.db, rid, sha))
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
-    def test_handoff_expires_and_is_withdrawn_on_revoke(self):
+    def test_handoff_expires_by_the_scheduled_job_and_is_withdrawn_on_revoke(self):
         drop = self.with_handoff()
         rid, sha = self.call()
-        placed = drop/f'{rid}.apk'
-        self.assertTrue(placed.exists())
+        placed = Path(host.handed_off(self.db, rid, sha))
         old = time.time() - worker.HANDOFF_TTL - 60
         foreign = drop/'notes.txt'
         save(foreign, b'kept')
         os.utime(foreign, (old, old))
-        # A revocation withdraws the copy and stops reporting the path.
+        # A failed withdrawal keeps the ledger row, so repeating it retries.
         self.db.execute('UPDATE grants SET revoked=1 WHERE id=?', (rid,))
+        def unreachable(root, peer):
+            raise OSError('down')
+        self.assertFalse(host.withdraw(self.db, self.host, rid, unreachable))
+        self.assertEqual(host.handed_off(self.db, rid, sha), str(placed))
+        self.assertEqual(self.actions()[-1], 'handoff_withdraw_failed')
         self.assertTrue(host.withdraw(self.db, self.host, rid, self.dial))
         self.assertFalse(placed.exists())
         self.assertTrue(foreign.exists())
         self.assertIsNone(host.handed_off(self.db, rid, sha))
         self.assertEqual(self.actions()[-1], 'handoff_withdrawn')
         self.assertFalse(host.withdraw(self.db, self.host, rid, self.dial))
-        # Expired copies and stale temporary files go on the signer's next use; fresh ones stay.
+        # On an idle signer the scheduled job alone removes expired copies and
+        # stale temporary files; fresh ones and foreign files stay.
         expired, stale, fresh = drop/f'{"3"*32}.apk', drop/f'.{"3"*32}.tmp', drop/f'{"4"*32}.apk'
         for path in (expired, stale, fresh):
             save(path, b'x')
         os.utime(expired, (old, old)); os.utime(stale, (old, old))
-        worker.prune(drop)
+        before = (self.worker/'handoff-pruned').stat().st_mtime
+        os.utime(self.worker/'handoff-pruned', (before - 100, before - 100))
+        self.prune_job()
         self.assertEqual(sorted(p.name for p in drop.iterdir()), sorted([fresh.name, foreign.name]))
-        # An unreachable signer never blocks the revocation.
-        self.with_handoff()
-        rid2, _ = self.chain(run='R-7')[1]
-        self.db.execute("INSERT INTO handoffs VALUES(?,?,?)", (rid2, str(drop/f'{rid2}.apk'), 'a'*64))
-        self.db.execute("INSERT INTO dispatch_peer VALUES(?,?)", (rid2, 'fixture'))
-        def unreachable(root, peer):
-            raise OSError('down')
-        self.assertFalse(host.withdraw(self.db, self.host, rid2, unreachable))
-        self.assertIsNone(host.handed_off(self.db, rid2, None))
+        self.assertGreater((self.worker/'handoff-pruned').stat().st_mtime, before - 100)
+        self.assertEqual(oct((self.worker/'handoff-pruned').stat().st_mode & 0o777), oct(0o600))
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
+    def test_release_chain_grant_needs_its_route_still_marked_for_tests(self):
+        # Unmarking the route before the key is used stops the chain grant; an
+        # operator grant on the same route is unaffected.
+        ident, (rid, _) = self.chain()
+        routes = json.loads((self.host/'routes.json').read_text())
+        save(self.host/'routes.json', canonical([{k: v for k, v in r.items() if k != 'test_identity'} for r in routes]))
+        with self.assertRaises(ValueError):
+            host.request(self.host, self.db, {**ident, 'chain': 'Q-1'}, lambda: None, self.dial)
+        self.assertEqual(self.calls, 0)
+        self.assertEqual(self.call()[0], self.spec['id'])
+        # Unmarked at the commit fence: the signer never gets the commit.
+        self.mark_test_identity()
+        def unmark():
+            save(self.host/'routes.json', canonical([{k: v for k, v in r.items() if k != 'test_identity'} for r in routes]))
+        with self.assertRaises(ValueError):
+            host.request(self.host, self.db, {**ident, 'chain': 'Q-1'}, unmark, self.dial)
+        # Claimed but never committed: the signer holds it as received, the key unused.
+        self.assertEqual(self.db.execute('SELECT state FROM grants WHERE id=?', (rid,)).fetchone(), ('pending',))
+        self.assertEqual(worker.receipt(self.worker, json.loads(self.db.execute(
+            'SELECT spec FROM grants WHERE id=?', (rid,)).fetchone()[0]), dispatch_states=True)['state'], 'received')
 
     def test_budget_scales_with_input_size_and_private_limits(self):
         # C-598: 334 MB at the default 512 KiB/s each way, plus ten minutes for signing.

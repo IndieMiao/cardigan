@@ -560,7 +560,10 @@ test("C-612: under a chain only the signed APK the card's smoke step accepted is
       return { url, size: 6, sha256: signed };
     });
     const tool = publicationTool({ publishArtifact: pub });
-    // Smoke not finished, or it accepted other bytes: refused before host IO.
+    // Smoke not finished, cancelled (e.g. with its card), or it accepted
+    // other bytes: refused before host IO.
+    await expect(tool.handler(request, ctx)).rejects.toThrow("approval");
+    store.uow.run((tx) => tx.work_items.put(project_id, smoke("cancelled")));
     await expect(tool.handler(request, ctx)).rejects.toThrow("approval");
     store.uow.run((tx) => {
       tx.work_items.put(project_id, smoke("accepted"));

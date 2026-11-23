@@ -427,10 +427,18 @@ test("C-612: a chain publishes only the signed bytes the card's smoke step accep
     expect(releaseChainSmoked(c, signed, [...items], [...deliveries])).toBe(
       false,
     );
-  // A cancelled smoke step, or another card's, does not hold this card.
+  // A cancelled smoke step (e.g. with its card) never passes; another card's does not hold this one.
   expect(
     releaseChainSmoked(c, signed, [smoke({ status: "cancelled" })], []),
-  ).toBe(true);
+  ).toBe(false);
+  expect(
+    releaseChainSmoked(
+      c,
+      signed,
+      [smoke({ status: "cancelled" })],
+      [delivered(signed)],
+    ),
+  ).toBe(false);
   expect(
     releaseChainSmoked(
       c,

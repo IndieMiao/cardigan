@@ -161,7 +161,8 @@ function helper(
         if ("progress" in run) run.progress.committed();
         return true;
       }
-      // C-612: an optional third field is the signer's same-machine handoff path.
+      // C-612: an optional third field is the signer's same-machine handoff
+      // path, under a random name the host discloses only after release.
       const done =
         /^([0-9a-f]{32}) ([0-9a-f]{64})(?: ((?:\/[A-Za-z0-9_.-]+)+\/[0-9a-f]{32}\.apk))?$/u.exec(
           row,
@@ -170,7 +171,9 @@ function helper(
         receipt = {
           request_id: done[1],
           sha256: done[2],
-          ...(done[3]?.endsWith(`/${done[1]}.apk`) ? { handoff: done[3] } : {}),
+          ...(done[3] && !/\/\.\.?\//u.test(done[3])
+            ? { handoff: done[3] }
+            : {}),
         };
         return true;
       }

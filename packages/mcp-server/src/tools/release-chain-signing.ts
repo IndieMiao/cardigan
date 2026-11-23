@@ -267,6 +267,8 @@ export async function prepareReleaseChain(
   }
 }
 
+const intakes = new Map<string, Promise<Record<string, unknown>>>();
+
 /**
  * Bind the signed digest from the host-verified receipt to the chain, then
  * store the signed output as this card's artifact straight from the control
@@ -326,63 +328,84 @@ export async function signedIntake(
   if (earlier) return { ...base, signed_attachment_id: earlier.id };
   if (!options.openMobileArtifact)
     return { ...base, signed_intake: "unavailable" };
-  let opened: Readable | undefined;
-  try {
-    const file = await options.openMobileArtifact(
-      scope,
-      receipt.request_id,
-      current,
-    );
-    opened = file.stream;
-    if (file.sha256 !== receipt.sha256) throw new Error("digest");
-    const target: AttachmentTarget = {
-      card_id: card,
-      mime: "application/vnd.android.package-archive",
-      kind: "artifact",
-      basis: decision_id as AttachmentTarget["basis"] & string,
-      attach_to: { kind: "timeline_entry", id: entry },
-      original_filename: `${receipt.request_id}.apk`,
-      note: `发布链 ${decision_id} 签后入库`,
-    } as AttachmentTarget;
-    const receiptStored = await prepareStreamedArtifact(
-      scope.run as never,
-      () =>
-        receiveArtifact(
-          file.stream,
-          options.dataDir,
-          file.size,
-          receipt.sha256,
-          () => {},
-        ),
-    );
-    let published = false;
-    try {
-      current();
-      // Keyed by this copy, not the request: a retry after an expired or
-      // failed intake stores a fresh copy instead of replaying an old answer.
-      const result = executeCommand(
-        ctx,
-        "upload_attachment",
-        `release-chain-signed-${receipt.request_id}-${receiptStored.stream.blob_id}`,
-        { ...target, sha256: receipt.sha256, artifact_size: file.size },
-        (state, actor, { sha256: _s, artifact_size: _n, ...params }, ports) =>
-          uploadAttachment(state, actor, params, receiptStored, ports),
-      ) as Attachment;
-      published =
-        result.streamed_artifact?.blob_id === receiptStored.stream.blob_id;
-      return { ...base, signed_attachment_id: result.id };
-    } finally {
-      if (!published)
-        await rm(artifactPath(options.dataDir, receiptStored.stream.blob_id), {
-          force: true,
-        });
-    }
-  } catch {
-    // Closed on every failure, including a refusal before the copy started.
-    opened?.destroy();
+  const open = options.openMobileArtifact;
+  // One intake per signed output at a time: overlapping polls of the same
+  // receipt wait for it and return its attachment instead of a second copy.
+  const key = `${p}/${card}/${receipt.request_id}/${receipt.sha256}`;
+  const running = intakes.get(key);
+  if (running) {
+    await running.catch(() => undefined);
     const later = stored();
     return later
       ? { ...base, signed_attachment_id: later.id }
       : { ...base, signed_intake: "retry" };
+  }
+  const copy = (async (): Promise<Record<string, unknown>> => {
+    let opened: Readable | undefined;
+    try {
+      const file = await open(scope, receipt.request_id, current);
+      opened = file.stream;
+      if (file.sha256 !== receipt.sha256) throw new Error("digest");
+      const target: AttachmentTarget = {
+        card_id: card,
+        mime: "application/vnd.android.package-archive",
+        kind: "artifact",
+        basis: decision_id as AttachmentTarget["basis"] & string,
+        attach_to: { kind: "timeline_entry", id: entry },
+        original_filename: `${receipt.request_id}.apk`,
+        note: `发布链 ${decision_id} 签后入库`,
+      } as AttachmentTarget;
+      const receiptStored = await prepareStreamedArtifact(
+        scope.run as never,
+        () =>
+          receiveArtifact(
+            file.stream,
+            options.dataDir,
+            file.size,
+            receipt.sha256,
+            () => {},
+          ),
+      );
+      let published = false;
+      try {
+        current();
+        const meanwhile = stored();
+        if (meanwhile) return { ...base, signed_attachment_id: meanwhile.id };
+        // Keyed by this copy, not the request: a retry after an expired or
+        // failed intake stores a fresh copy instead of replaying an old answer.
+        const result = executeCommand(
+          ctx,
+          "upload_attachment",
+          `release-chain-signed-${receipt.request_id}-${receiptStored.stream.blob_id}`,
+          { ...target, sha256: receipt.sha256, artifact_size: file.size },
+          (state, actor, { sha256: _s, artifact_size: _n, ...params }, ports) =>
+            uploadAttachment(state, actor, params, receiptStored, ports),
+        ) as Attachment;
+        published =
+          result.streamed_artifact?.blob_id === receiptStored.stream.blob_id;
+        return { ...base, signed_attachment_id: result.id };
+      } finally {
+        if (!published)
+          await rm(
+            artifactPath(options.dataDir, receiptStored.stream.blob_id),
+            {
+              force: true,
+            },
+          );
+      }
+    } catch {
+      // Closed on every failure, including a refusal before the copy started.
+      opened?.destroy();
+      const later = stored();
+      return later
+        ? { ...base, signed_attachment_id: later.id }
+        : { ...base, signed_intake: "retry" };
+    }
+  })();
+  intakes.set(key, copy);
+  try {
+    return await copy;
+  } finally {
+    if (intakes.get(key) === copy) intakes.delete(key);
   }
 }

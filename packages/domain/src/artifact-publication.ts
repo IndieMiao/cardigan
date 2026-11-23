@@ -161,10 +161,11 @@ export function releaseChainSigned(
 /** The packaging template's smoke step (C-612). */
 export const RELEASE_SMOKE_KEY = "smoke";
 /**
- * A chain publishes only the signed APK its card's smoke step accepted: the
+ * A chain publishes only the signed APK its card's smoke step accepted: a
  * smoke work item is accepted and an accepted delivery of it names exactly
- * these bytes (`artifact_sha256`). A card without a smoke step (an older
- * packaging card) is unchanged.
+ * these bytes (`artifact_sha256`). A smoke step that was cancelled (for
+ * example with its card) never passes. Only a card that never had a smoke
+ * step (an older packaging card) is unchanged.
  */
 export function releaseChainSmoked(
   card_id: string,
@@ -176,19 +177,21 @@ export function releaseChainSmoked(
     (w) =>
       w.card_id === card_id &&
       w.template_key === RELEASE_SMOKE_KEY &&
-      w.kind === "produce" &&
-      w.status !== "cancelled",
+      w.kind === "produce",
   );
-  return smoke.every(
-    (w) =>
-      w.status === "accepted" &&
-      deliveries.some(
-        (d) =>
-          d.work_item_id === w.id &&
-          d.status === "accepted" &&
-          d.subject.kind === "artifact_sha256" &&
-          d.subject.value.toLowerCase() === sha256,
-      ),
+  return (
+    smoke.length === 0 ||
+    smoke.some(
+      (w) =>
+        w.status === "accepted" &&
+        deliveries.some(
+          (d) =>
+            d.work_item_id === w.id &&
+            d.status === "accepted" &&
+            d.subject.kind === "artifact_sha256" &&
+            d.subject.value.toLowerCase() === sha256,
+        ),
+    )
   );
 }
 

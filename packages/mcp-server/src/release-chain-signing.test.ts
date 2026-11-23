@@ -397,3 +397,51 @@ test("C-612: an expired signed intake is stored again under a fresh key, never r
     store.close();
   }
 });
+
+test("C-612: overlapping polls of one signing receipt store a single signed APK", async () => {
+  const { store, chain, intake, ctx } = signingRun();
+  try {
+    store.uow.run((tx) => {
+      tx.decisions.put(project_id, chain);
+      tx.attachments.put(project_id, intake);
+    });
+    const h = host();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = 0;
+    h.openMobileArtifact.mockImplementation(async () => {
+      entered++;
+      await gate;
+      return {
+        size: signedBytes.length,
+        sha256: signed,
+        stream: Readable.from([signedBytes]),
+      };
+    });
+    const tool = mobileSigningTool({ ...h, dataDir });
+    const id = async () =>
+      (
+        (await tool.handler({ platform: "android" }, ctx)) as {
+          release_chain: { signed_attachment_id: string };
+        }
+      ).release_chain.signed_attachment_id;
+    const first = id();
+    const second = id();
+    await vi.waitFor(() => expect(entered).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toBe(b);
+    expect(entered).toBe(1);
+    const copies = store.uow.read((tx) =>
+      tx.attachments
+        .list(project_id)
+        .filter((x) => x.sha256 === signed && x.kind === "artifact"),
+    );
+    expect(copies).toHaveLength(1);
+  } finally {
+    store.close();
+  }
+});
