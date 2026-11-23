@@ -1510,3 +1510,69 @@ test("C-609: a new install waits at a deployment's stop fence before it claims a
   expect(await running).toEqual(pass);
   expect(f.adapters.install).toHaveBeenCalledOnce();
 });
+
+test("C-609: a shutdown cancelling the worker check keeps the install resumable; the next patrol completes the verification", async () => {
+  // Review V-3064:2, the reviewer's own reproduction.
+  const f = await setup();
+  f.enroll();
+  const ctl = new AbortController();
+  Object.assign(f.options, { signal: ctl.signal });
+  f.adapters.workerCheck.mockImplementationOnce(async (args) => {
+    ctl.abort();
+    await args.beforeStep?.();
+    return true;
+  });
+  await f.run(mismatch); // install succeeded; the stop arrives in worker_check
+  expect(upgradeState(f.store, project, machine)).toMatchObject({
+    state: "installing",
+    resumes: 0,
+    pending_final: null,
+  });
+  expect(f.actions()).toEqual([]);
+  Object.assign(f.options, { signal: undefined });
+  expect(await f.run(pass)).toEqual(pass); // next server, helpers now match
+  expect(upgradeState(f.store, project, machine)?.state).toBe("verified");
+  expect(f.isHeld()).toBe(false);
+  expect(f.adapters.workerCheck).toHaveBeenCalledTimes(2);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+});
+
+test("C-609: a shutdown after the patrol but before the journal settles drops the pending result instead of failing it", async () => {
+  const f = await setup();
+  f.enroll();
+  const ctl = new AbortController();
+  const { job } = f.journal.claim(project, machine, "machine", "cli");
+  await expect(
+    f.journal.execute(
+      job,
+      async () => {
+        await patrolHelperUpgrade(
+          { ...f.options, signal: ctl.signal, job: job.id },
+          mismatch,
+          f.adapters,
+        );
+        // The outer observation is cut off by the stop.
+        ctl.abort();
+        throw new Error("observation cancelled");
+      },
+      () => ({ status: "passed", failed_steps: [] }),
+    ),
+  ).rejects.toThrow("observation cancelled");
+  expect(upgradeState(f.store, project, machine)).toMatchObject({
+    state: "installing",
+    pending_final: null,
+  });
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.isHeld()).toBe(false);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+});
+
+test("C-609: a check that genuinely fails is still a failure", async () => {
+  const f = await setup();
+  f.enroll();
+  f.adapters.workerCheck.mockResolvedValueOnce(false);
+  expect((await f.run(mismatch)).blockers).toEqual([upgradeHold]);
+  expect(upgradeState(f.store, project, machine)?.state).toBe("failed");
+  expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
+  expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
+});

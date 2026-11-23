@@ -228,6 +228,23 @@ export async function patrolHelperUpgrade(
   if (!claimed) return toolsOnly ? initial : held;
   // Kept until the journal records the final result (C-609).
   let settling = false;
+  // C-609: the server stopping (e.g. an automatic deployment) cancels the
+  // patrol. That is no verdict on the release: the install stays resumable,
+  // without spending its one resume, and the next patrol re-verifies it on
+  // this binding, installing only what its check shows missing.
+  const keepResumable = () => {
+    try {
+      store.uow.run(() =>
+        store.database
+          .prepare(
+            "UPDATE worker_helper_upgrades SET resumes=0,pending_final=NULL WHERE project_id=? AND machine_id=? AND release_key=? AND state='installing'",
+          )
+          .run(project, machine, key),
+      );
+    } catch {
+      /* A store closing with the server leaves the row installing anyway. */
+    }
+  };
   try {
     if (previous?.release_key === key && !resuming) {
       stage = "unexpected_drift";
@@ -295,7 +312,14 @@ export async function patrolHelperUpgrade(
         )
         .run(JSON.stringify(evidence()), project, machine, key),
     );
-    keepUntilSettled(options.job, release);
+    // Cancelled before the journal settles: the pending result is dropped
+    // rather than recorded as a failure.
+    const cancelled = () => keepResumable();
+    signal?.addEventListener("abort", cancelled, { once: true });
+    keepUntilSettled(options.job, () => {
+      signal?.removeEventListener("abort", cancelled);
+      release();
+    });
     settling = true;
     return result;
   } catch (error) {
@@ -327,6 +351,10 @@ export async function patrolHelperUpgrade(
               .run(project, machine, key),
       );
       return initial;
+    }
+    if (signal?.aborted) {
+      keepResumable();
+      return held;
     }
     fail();
     return held;

@@ -85,6 +85,9 @@ export {
 } from "./tools/index.js";
 export type { SigningScope } from "./tools/mobile-signing.js";
 export {
+  continuePublication,
+  interruptedPublication,
+  MAX_PUBLICATION_CONTINUATIONS,
   PublicationError,
   type PublicationOptions,
   type PublishInput,
