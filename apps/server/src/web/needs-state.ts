@@ -1,4 +1,9 @@
-import type { CommandState, ProjectId } from "@cardigan/domain";
+import {
+  type CommandState,
+  type Event,
+  type ProjectId,
+  telemetryEvents,
+} from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { orderedNeedsDecisions } from "./needs-order.js";
@@ -25,13 +30,16 @@ export function readNeedsState(store: Store, project: ProjectId): CommandState {
   // Preserve immutable event indexes when every ordered event is still the
   // exact same object. Publish only after the Store read transaction committed.
   const events = previous?.value.events;
+  const same = (a: readonly Event[], b: readonly Event[]) =>
+    a.length === b.length && a.every((event, i) => event === b[i]);
   const value = {
     ...source,
     decisions: orderedNeedsDecisions(source),
+    // C-643: the telemetry journal travels with the event array.
     events:
       events &&
-      events.length === source.events.length &&
-      events.every((event, i) => event === source.events[i])
+      same(events, source.events) &&
+      same(telemetryEvents(events), telemetryEvents(source.events))
         ? events
         : source.events,
   };

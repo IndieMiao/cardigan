@@ -1,4 +1,5 @@
 import type { Actor, Assignment, Event, WorkItem } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
 import {
   latestPrecheckConflict,
@@ -61,9 +62,10 @@ function targetEvent(d: CommandDraft, c: ResumeCondition): Event | undefined {
         payload(e).attempt_id === c.target_id,
     );
   if (c.kind === "github_run_completed" && /^[1-9][0-9]*$/u.test(c.target_id))
-    return events.findLast(
+    return eventsOfType(d.state.events, "github_check_dispatch").findLast(
       (e) =>
-        e.type === "github_check_dispatch" &&
+        e.actor.kind === "system" &&
+        e.actor.project_id === d.state.project_id &&
         String(
           (payload(e).externalRun as { run_id?: number } | undefined)?.run_id,
         ) === c.target_id,

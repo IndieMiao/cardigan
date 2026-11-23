@@ -12,6 +12,7 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type {
   AssignmentId,
@@ -817,7 +818,7 @@ export function requestDecision(
       highRiskCategories.includes(p.category) &&
       !categoryDelegated(
         d.list("project_preferences").find((p) => p.id === d.state.project_id),
-        [...d.state.events, ...d.events],
+        appendEvents(d.state.events, d.events),
         p.category,
       )
     ) {

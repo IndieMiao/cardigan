@@ -1,4 +1,5 @@
 import type { Assignment, Event, Run, RuntimeRef } from "../entities.js";
+import { fullEventHistory } from "../event-index.js";
 import type { AssignmentId, CardId } from "../ids.js";
 import type { CommandDraft } from "./core.js";
 
@@ -45,7 +46,8 @@ function stopIndex(events: readonly Event[]): StopIndex {
       episode.delete(id);
       exited.delete(id);
     };
-    for (const [at, event] of events.entries()) {
+    // C-643: `run_dispatched` is telemetry; array order covers the full history.
+    for (const [at, event] of fullEventHistory(events).entries()) {
       const id = field(event.payload, "assignment_id");
       if (event.type === ASSIGNMENT_STOPPED) {
         state.set(
@@ -122,6 +124,7 @@ export function pausedByHuman(
  * episode that has not been released or ended by a new dispatch yet. A
  * retried stop belongs to the same episode.
  */
+/** Position in `fullEventHistory(events)`, not in a telemetry-free array. */
 export function openStopEpisodeStart(
   events: readonly Event[],
   assignment_id: AssignmentId,

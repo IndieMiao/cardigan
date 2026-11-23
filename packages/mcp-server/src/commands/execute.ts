@@ -1,15 +1,16 @@
-import type {
-  Actor,
-  Clock,
-  CommandEffect,
-  CommandPorts,
-  CommandState,
-  Event,
-  ProjectId,
-  Repository,
-  Result,
-  ToolName,
-  TransactionContext,
+import {
+  type Actor,
+  type Clock,
+  type CommandEffect,
+  type CommandPorts,
+  type CommandState,
+  commandEventHistory,
+  type Event,
+  type ProjectId,
+  type Repository,
+  type Result,
+  type ToolName,
+  type TransactionContext,
 } from "@cardigan/domain";
 import type { McpBackend, McpReadContext } from "../backend.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
@@ -20,7 +21,12 @@ const histories = new WeakMap<
   { cards: readonly string[]; events: readonly Event[] }
 >();
 
-/** Entity-only revisions do not change immutable event history or its indexes. */
+/**
+ * Entity-only revisions do not change immutable event history or its indexes.
+ * C-643: telemetry (run lifecycle, GitHub dispatch journal, branch backups,
+ * session maintenance) stays out of the command-state stream; rules read it
+ * through the attached journal (`eventsOfType`, `eventById`, `fullEventHistory`).
+ */
 function eventHistory(
   streams: ReadonlyMap<string, readonly Event[]>,
   cards: readonly { id: string }[],
@@ -31,8 +37,8 @@ function eventHistory(
     cached.cards.every((id, i) => id === cards[i]?.id)
   )
     return cached.events;
-  const events = ["", ...cards.map((c) => c.id)].flatMap(
-    (id) => streams.get(id) ?? [],
+  const events = commandEventHistory(
+    ["", ...cards.map((c) => c.id)].map((id) => streams.get(id) ?? []),
   );
   histories.set(streams, { cards: cards.map((c) => c.id), events });
   return events;
@@ -112,8 +118,10 @@ function readCommandState(
     timeline: tx.timeline.list(project_id),
     events: streams
       ? eventHistory(streams, cards)
-      : [undefined, ...cards.map((c) => c.id)].flatMap((id) =>
-          tx.events.listAfter(project_id, id, 0),
+      : commandEventHistory(
+          [undefined, ...cards.map((c) => c.id)].map((id) =>
+            tx.events.listAfter(project_id, id, 0),
+          ),
         ),
   };
 }

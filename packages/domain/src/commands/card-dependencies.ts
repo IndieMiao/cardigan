@@ -4,6 +4,7 @@ import {
   unmetCardDependencies,
 } from "../card-dependencies.js";
 import type { Actor, Card, Event } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import type { CardId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
@@ -70,7 +71,7 @@ function draftEvents(d: CommandDraft): readonly Event[] {
   const hit = joinedEvents.get(d);
   if (hit && hit.base === d.state.events && hit.n === n && hit.last === last)
     return hit.events;
-  const events = [...d.state.events, ...d.events];
+  const events = appendEvents(d.state.events, d.events);
   joinedEvents.set(d, { base: d.state.events, n, last, events });
   return events;
 }

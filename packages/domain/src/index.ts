@@ -213,7 +213,17 @@ export * from "./dispatch-tier.js";
 export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
-export { eventById, eventsForDecision, eventsOfType } from "./event-index.js";
+export {
+  appendEvents,
+  commandEventHistory,
+  eventById,
+  eventsForDecision,
+  eventsOfType,
+  fullEventHistory,
+  isTelemetryEvent,
+  TELEMETRY_EVENT_TYPES,
+  telemetryEvents,
+} from "./event-index.js";
 export * from "./ext-interaction.js";
 export * from "./ext-message.js";
 export * from "./flow.js";

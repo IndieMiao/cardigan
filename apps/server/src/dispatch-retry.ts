@@ -12,6 +12,7 @@ import {
   dispatchRecoveryQueuedAt,
   dispatchRecoveryUsed,
   dispatchTargetWaitMs,
+  eventById,
   type HarnessActivity,
   hasRunTarget,
   hostOpsPending,
@@ -938,8 +939,9 @@ export async function retryDispatchedRuns(
       const item = current.state.work_items.find(
         (w) => w.id === current.a.work_item_id,
       );
-      const cause = current.state.events.find(
-        (e) => e.id === current.run.trigger_event_id,
+      const cause = eventById(
+        current.state.events,
+        current.run.trigger_event_id,
       );
       // An absent card on an existing receipt means project stream. It is
       // not a missing value to fill with the recipient's work-item card.

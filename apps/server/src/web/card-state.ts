@@ -4,7 +4,7 @@ import type {
   ProjectId,
   TimelineEntry,
 } from "@cardigan/domain";
-import { extractReferences } from "@cardigan/domain";
+import { extractReferences, fullEventHistory } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
@@ -21,8 +21,8 @@ function cardState(tx: ReadRepositories, project_id: ProjectId): CommandState {
   const config = tx.events
     .listAfter(project_id, undefined, 0)
     .findLast((e) => e.type === "merge_queue_configured");
-  if (config)
-    return loadCommandState(tx, project_id, {
+  if (config) {
+    const state = loadCommandState(tx, project_id, {
       merge_gate_enabled: true,
       ...(config.payload
         ? {
@@ -32,6 +32,9 @@ function cardState(tx: ReadRepositories, project_id: ProjectId): CommandState {
           }
         : {}),
     });
+    // C-643: card views show the complete history, telemetry included.
+    return { ...state, events: fullEventHistory(state.events) };
+  }
   return {
     project_id,
     project_preferences: tx.project_preferences.list(project_id),

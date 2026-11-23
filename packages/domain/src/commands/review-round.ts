@@ -1,4 +1,5 @@
 import type { Delivery, Run, WorkItem } from "../entities.js";
+import { appendEvents, eventById } from "../event-index.js";
 import type { EventId } from "../ids.js";
 import type { CommandDraft } from "./core.js";
 
@@ -26,7 +27,7 @@ export function conflictRepairEvent(
       : undefined;
   }
   let sourceRun = run;
-  let trigger = d.state.events.find((e) => e.id === sourceRun.trigger_event_id);
+  let trigger = eventById(d.state.events, sourceRun.trigger_event_id);
   const visited = new Set<EventId>();
   // Both host restarts and automatic recovery retain the same logical fix.
   // Follow mixed/repeated recovery chains, validating every Run/event binding.
@@ -64,7 +65,7 @@ export function conflictRepairEvent(
     )
       return undefined;
     sourceRun = previous;
-    trigger = d.state.events.find((e) => e.id === sourceRun.trigger_event_id);
+    trigger = eventById(d.state.events, sourceRun.trigger_event_id);
   }
   const payload = trigger?.payload as { work_item_id?: string } | undefined;
   return run.kind === "fix" &&
@@ -113,7 +114,7 @@ export function rejectionStreak(d: CommandDraft, item: WorkItem) {
 export function reviewRejectionsNeedAttention(d: CommandDraft, item: WorkItem) {
   const streak = rejectionStreak(d, item);
   if (streak.length < 3) return false;
-  return ![...d.state.events, ...d.events].some(
+  return !appendEvents(d.state.events, d.events).some(
     (e) =>
       e.type === "review_limit_rejections_acknowledged" &&
       (e.payload as Record<string, unknown>).review_id === streak[0]?.id &&
