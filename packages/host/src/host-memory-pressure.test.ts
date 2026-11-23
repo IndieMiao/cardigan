@@ -91,6 +91,11 @@ test("one notice per episode over either threshold, durable across restarts, rea
       "host_memory_pressure",
     ]);
     expect(probe.details).toHaveBeenCalledTimes(2);
+    // A delayed first sample does nothing before its time.
+    const delayed = new HostMemoryPressureMonitor(store, {}, probe, 500_000);
+    const calls = probe.usage.mock.calls.length;
+    await delayed.poll(499_999);
+    expect(probe.usage.mock.calls.length).toBe(calls);
     // Configured thresholds replace the defaults.
     usage = { tmp_percent: 85, swap_percent: 85 };
     const custom = new HostMemoryPressureMonitor(

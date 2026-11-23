@@ -111,7 +111,8 @@ export function linuxPressureProbe(tmp = "/tmp"): PressureProbe {
     async details() {
       const names = await owners();
       const owner = (uid: number) => names.get(uid) ?? String(uid);
-      const budget = { nodes: 200_000, deadline: Date.now() + 5_000 };
+      // Bounded: a slow, swapping host must not stall the supervisor loop.
+      const budget = { nodes: 100_000, deadline: Date.now() + 2_000 };
       const tmpEntries: TmpEntry[] = [];
       for (const name of (await readdir(tmp)).slice(0, 4096)) {
         const path = join(tmp, name);
@@ -216,7 +217,10 @@ export class HostMemoryPressureMonitor {
     private readonly store: Store,
     thresholds: { tmp?: number | undefined; swap?: number | undefined } = {},
     private readonly probe: PressureProbe = linuxPressureProbe(),
+    /** First sample time; the supervisor waits a minute after start. */
+    firstPollAt = 0,
   ) {
+    this.next = firstPollAt;
     this.thresholds = {
       tmp: thresholds.tmp ?? DEFAULT_TMP_HIGH_PERCENT,
       swap: thresholds.swap ?? DEFAULT_SWAP_HIGH_PERCENT,

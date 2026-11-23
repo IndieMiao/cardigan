@@ -141,10 +141,14 @@ export async function runSelfDeployCommand(
     );
     const pressure =
       process.platform === "linux"
-        ? new HostMemoryPressureMonitor(store, {
-            tmp: config.tmp_high_percent,
-            swap: config.swap_high_percent,
-          })
+        ? new HostMemoryPressureMonitor(
+            store,
+            { tmp: config.tmp_high_percent, swap: config.swap_high_percent },
+            undefined,
+            // C-656: start after a minute so a supervisor that exits at once
+            // (or a short-lived test) never scans the host's /tmp.
+            Date.now() + 60_000,
+          )
         : undefined;
     const stop = new AbortController();
     const signal = () => stop.abort();
