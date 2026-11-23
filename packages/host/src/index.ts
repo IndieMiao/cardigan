@@ -307,6 +307,13 @@ export {
   StandingPmRecovery,
   standingPmStallPolicy,
 } from "./standing-pm-recovery.js";
+export {
+  exitCommand,
+  STANDING_EXIT_STEP,
+  type StandingExitPolicy,
+  standingExitPolicy,
+  standingExitSteps,
+} from "./standing-session-exit.js";
 export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 export {
   proveSystemReviewLimit,
