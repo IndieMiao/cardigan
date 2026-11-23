@@ -63,7 +63,7 @@ export async function loopbackFixture(
         keep: false,
         created_ms: 1234,
         ...(sample !== "incomplete" ? { pid: 12345 } : {}),
-        status: { state: sample === "busy" ? "working" : "unknown" },
+        status: { state: sample === "busy" ? "working" : "idle" },
         labels: {
           ...labels,
           ...(sample === "conflict" ? { assignment: "other" } : {}),
@@ -128,6 +128,11 @@ export async function loopbackFixture(
             boot: "fixture",
             uid: 1001,
           });
+        // The helper's post-exit kernel check of the probed leader and group.
+        if (mode === "gone") {
+          if (!exited) throw new Error("exit 25");
+          return "gone\n";
+        }
         expect(mode).toBe("TERM");
         signals.push(mode);
         exited = true;

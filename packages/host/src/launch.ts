@@ -91,6 +91,10 @@ import {
 } from "./preparation-queue.js";
 import type { ReadProjectQuota } from "./project-quotas.js";
 import type { MachineLeases, ResourceAccess } from "./resource-leases.js";
+import {
+  RetainedWriterRefused,
+  retainedWriterForRun,
+} from "./retained-writer.js";
 import { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 import {
   effectiveRunLimit,
@@ -605,7 +609,10 @@ async function launchWithClaim(
     return result;
   } catch (error) {
     deferred = error instanceof RunTargetDeferred;
-    withdrawn = error instanceof RunWakeWithdrawn;
+    // Nothing was delivered; the original notifications keep their retry path.
+    withdrawn =
+      error instanceof RunWakeWithdrawn ||
+      error instanceof RetainedWriterRefused;
     throw error;
   } finally {
     if (withdrawn)
@@ -813,6 +820,18 @@ async function launch(
       !card?.repo)
       ? preparation()
       : withPreparationQueue(execution.dataDir, project, preparation);
+  const retained = host.store.uow.read((tx) =>
+    retainedWriterForRun(loadCommandState(tx, project), current, assignment),
+  );
+  const writerBinding = () =>
+    host.store.uow.read((tx) =>
+      retained?.binding(loadCommandState(tx, project)),
+    );
+  const verifyWriter = async () => {
+    if (!retained) return;
+    const current = writerBinding();
+    if (current) await retained.verify(current, execution);
+  };
   if (input.reuse_session && assignment.runtime_ref) {
     const observed = await host.runtime.status(assignment.runtime_ref);
     if (observed.ok && observed.value.process === "alive") {
@@ -1005,6 +1024,11 @@ async function launch(
   let launchToken: string | undefined;
   let provisionRefusal: ProvisionTargetRefusal | undefined;
   try {
+    if (retained) {
+      await verifyWriter();
+      worktree = retained.tree;
+      workDir = worktree.path;
+    }
     if (remote && execution.mode === "agent-ssh") {
       publication = LaunchPublication.begin(
         host,
@@ -1199,6 +1223,7 @@ async function launch(
 
     if (reviewPrompt() !== preparedReviewPrompt) throw new RunWakeWithdrawn();
     step = "runtime provision";
+    await verifyWriter();
     const launchDesc: RuntimeLaunch = publication?.description() ?? {
       ...verifiedLocalLaunch(compiled),
       cwd: workDir,
@@ -1214,6 +1239,7 @@ async function launch(
     const runtime: Pick<RuntimeTargets, "provision" | "resume_or_replace"> =
       host.runtime;
     const enterAdapter = () => {
+      if (retained) writerBinding();
       if (publication) requireTarget();
       publication?.assertCurrent();
       publication?.update("provisioning", { provision_attempted: true });
@@ -1221,7 +1247,7 @@ async function launch(
     // The router has asynchronous target checks of its own. Journal at the
     // actual adapter boundary; an opaque runtime must be fenced before entry.
     const boundary: [] | [() => void] =
-      publication && host.runtime instanceof RuntimeTargets
+      (publication || retained) && host.runtime instanceof RuntimeTargets
         ? [enterAdapter]
         : [];
     if (!boundary.length) enterAdapter();
@@ -1378,7 +1404,20 @@ async function launch(
       token_id: tokenId,
     };
   } catch (error) {
+    // Verification precedes any credential, terminal or publication. Keep the
+    // queued Run: cancelling it would consume the work Ops must still recover.
+    if (
+      error instanceof RetainedWriterRefused &&
+      tokenId === undefined &&
+      ref === undefined &&
+      publication === undefined
+    )
+      throw error;
+    // A later checkout recheck (before any terminal exists) withdraws only
+    // this attempt's token, credentials and publication; the queue stays.
+    const refused = error instanceof RetainedWriterRefused && ref === undefined;
     const deferred =
+      !refused &&
       step !== "sentinel write" &&
       (error instanceof RunTargetDeferred ||
         refreshTargetWait(host.store, project, input.run.id, clock));
@@ -1397,8 +1436,8 @@ async function launch(
       let exited = false;
       try {
         exited = await publication.stop(
-          deferred || retry,
-          deferred || retry
+          deferred || retry || refused,
+          deferred || retry || refused
             ? undefined
             : {
                 reason,
@@ -1417,6 +1456,7 @@ async function launch(
         report("远程启动撤回尚未确认，保留阶段和容量预留");
       }
       if (deferred && exited) throw new RunTargetDeferred();
+      if (refused && exited) throw error;
       if (retry && exited)
         throw new RunPreflightDeferred(targetFailure.reason, { cause: error });
       throw new HostLaunchError(
@@ -1434,8 +1474,9 @@ async function launch(
       clock,
       step,
       report,
-      keepRun: deferred,
+      keepRun: deferred || refused,
       ...(!deferred &&
+      !refused &&
       step === "directory preparation" &&
       ref === undefined &&
       tokenId === undefined
@@ -1454,6 +1495,7 @@ async function launch(
       ...(tokenId === undefined ? {} : { tokenId }),
     });
     if (deferred) throw new RunTargetDeferred();
+    if (refused) throw error;
     throw error instanceof HostLaunchError
       ? error
       : new HostLaunchError(step, messageOf(error), { cause: error });

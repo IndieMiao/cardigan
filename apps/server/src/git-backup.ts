@@ -61,7 +61,7 @@ export async function backupBranches(
   if (a && (edits.length !== 1 || edits[0]?.ref !== prefix + branch))
     throw new Error("Missing staged Assignment branch");
   if (!edits.length) return;
-  await input.lock({ project_id: id, repository }, async () => {
+  return input.lock({ project_id: id, repository }, async () => {
     let published = false;
     const commit = (tx: StoreTransactionContext) => {
       const currentProject = input.currentProject();
@@ -116,6 +116,7 @@ export async function backupBranches(
     };
     try {
       uow.run(commit);
+      return a ? edits[0] : undefined;
     } catch (error) {
       if (published) transaction.rollback();
       throw error;

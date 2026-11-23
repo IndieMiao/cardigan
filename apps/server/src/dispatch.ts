@@ -55,6 +55,7 @@ import {
   stoppedByHuman,
   trackRetirementDispatch,
   unreadableCommentTrigger,
+  untouchedStallSuccessor,
 } from "@cardigan/domain";
 import {
   armBellReceipt,
@@ -77,13 +78,16 @@ import {
   type ReadResourceLimits,
   type ResourceAccess,
   type ResourceAdmission,
+  RetainedWriterRefused,
   RunPreflightDeferred,
   RunPreparationDeferred,
   RunTargetDeferred,
   RuntimeTargetError,
   type RuntimeTargets,
+  recordRetainedWriterRefusal,
   recordRetirementDispatch,
   redactFailureLine,
+  retainedWriterRefusal,
   runCapacitySnapshot,
   settleTestReviewLimits,
   testReviewRunPrompt,
@@ -817,12 +821,15 @@ export class Dispatcher {
   }
   private busy(state: CommandState, a: Assignment, continuing?: RunId) {
     if (a.role_upgrade) return "role_upgrade";
-    if (a.idle_retirement?.phase === "stopping") return "idle_retirement";
+    if (a.idle_retirement?.handoff || a.idle_retirement?.phase === "stopping")
+      return "idle_retirement";
     if (hostOpsPending(state.events, a.id)) return "host_operation";
     // C-211: a stopped Assignment waits for the human's start; its bells stay
     // pending and no session is woken, replaced or started for it.
     if (stoppedByHuman(state.events, a.id)) return "human_stopped";
     const queued = this.queued(state, a);
+    // A refused preserved checkout waits for Ops; never retry it every tick.
+    if (queued && retainedWriterRefusal(state, queued)) return "host_operation";
     // C-244: keyed per Run snapshot; same as scanning runs for `a`.
     return runsOf(state.runs, a.id).some(
       (r) =>
@@ -1025,8 +1032,16 @@ export class Dispatcher {
           observed?.error.code === "runtime_unavailable";
       let previousExitConfirmed = false;
       // Only an existing queued Run can take the between-Runs recovery path.
-      // A new notice needs the stall patrol's independent workspace check.
-      if (queued && systemTurn && sessionLoss) {
+      // With a checkout, positive exit only accelerates the preservation patrol;
+      // it never authorizes this dispatch to skip the backup or launch directly.
+      if (
+        queued &&
+        systemTurn &&
+        sessionLoss &&
+        a.machine_id === "local" &&
+        !retirementHeld &&
+        untouchedStallSuccessor(state, a, queued)
+      ) {
         // A missing event-snapshot row is not exit proof: check the bound
         // terminal itself, or its local launch receipt when the core is gone.
         const exact = await this.options.runtime
@@ -1035,9 +1050,7 @@ export class Dispatcher {
             assignment_id: a.id,
           })
           .catch(() => undefined);
-        previousExitConfirmed = exact?.ok
-          ? exact.value === "exited"
-          : exact?.error.code === "runtime_not_found";
+        previousExitConfirmed = exact?.ok === true && exact.value === "exited";
         if (
           !exact?.ok &&
           exact?.error.code === "runtime_unavailable" &&
@@ -1051,6 +1064,23 @@ export class Dispatcher {
             .catch(() => undefined);
           previousExitConfirmed = gone?.ok === true && gone.value === true;
         }
+      }
+      if (
+        queued &&
+        guardedTurn?.reason === "system_finished_turn" &&
+        previousExitConfirmed &&
+        (a.worktree_path || runtimeRef.worktree_path)
+      ) {
+        this.waitForTurn(
+          project,
+          a,
+          guardedTurn,
+          notes,
+          observation,
+          queued,
+          true,
+        );
+        return skip("awaiting_workspace_preservation");
       }
       if (retirementHeld || guardedTurn || changedEnvironment) {
         guard ??= observed?.ok ? idleWakeGuard(observed.value) : undefined;
@@ -1458,6 +1488,18 @@ export class Dispatcher {
         this.deferPreflight(job, queued?.queue_reason)
       )
         return skip("preflight_wait");
+      if (error instanceof RetainedWriterRefused) {
+        // Definitely unsent: the launch kept the queued Run. Withdraw this
+        // attempt with the refusal so lease recovery cannot cancel the Run.
+        recordRetainedWriterRefusal(
+          this.options.store,
+          project,
+          job.run.id,
+          this.clock,
+          job.attempt.id,
+        );
+        return skip("writer_refused");
+      }
       if (error instanceof RunPreparationDeferred) {
         const attempt = job.attempt;
         this.options.store.uow.run(() =>
@@ -1610,6 +1652,7 @@ export class Dispatcher {
     notes: readonly Notification[],
     observation: string,
     queued: Run | undefined,
+    observedExit = false,
   ) {
     const { turn, reason } = guarded;
     const continuing = reason === "continuing_turn";
@@ -1635,10 +1678,18 @@ export class Dispatcher {
       )
         return;
       const pending = this.pendingForOwner(fresh, owner, notes);
+      const currentQueue = queued ? this.queued(fresh, owner) : undefined;
       if (
         notes.length
           ? !pending.length
-          : !queued || this.queued(fresh, owner)?.id !== queued.id
+          : !queued || currentQueue?.id !== queued.id
+      )
+        return;
+      if (
+        observedExit &&
+        (!currentQueue ||
+          currentQueue.id !== queued?.id ||
+          !untouchedStallSuccessor(fresh, owner, currentQueue))
       )
         return;
       recordTurnWait(tx, this.options.store, fresh, this.clock.now(), {
@@ -1646,7 +1697,9 @@ export class Dispatcher {
         turn,
         reason,
         observation,
+        ...(observedExit ? { observed_exit: true } : {}),
         notes: pending,
+        ...(queued ? { queued_run_id: queued.id } : {}),
         timeoutMs: this.dispatchTimeoutMs,
         standing: this.options.standing,
       });
