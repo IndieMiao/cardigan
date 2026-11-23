@@ -598,6 +598,8 @@ export interface AttachmentView extends WebAuthorView {
   readonly download_path: string;
   /** C-540: small WebP preview for inline bitmaps; null for everything else. */
   readonly thumbnail_path: string | null;
+  /** C-614: lightbox image for inline bitmaps (may come from OSS); null otherwise. */
+  readonly preview_path: string | null;
 }
 
 /** MIME types safe enough for `<img src>` (§3.2); SVG and HTML are not. */
@@ -663,6 +665,7 @@ function attachmentViewMapper(state: CommandState) {
       // §6 C-95: the same authenticated download route serves decision previews.
       download_path,
       thumbnail_path: inline ? `${download_path}/thumbnail` : null,
+      preview_path: inline ? `${download_path}/preview` : null,
     };
   };
 }
