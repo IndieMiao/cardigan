@@ -9,6 +9,7 @@ import json
 import os
 import re
 import select
+import signal
 import socket
 import stat
 import subprocess
@@ -27,6 +28,12 @@ KEY = re.compile(r'(A-[1-9][0-9]{0,15})\.(R-[1-9][0-9]{0,15})\.(R-[1-9][0-9]{0,1
 def require(value):
     if not value:
         raise ValueError('resource_identity_unknown')
+
+
+def describe(exc):
+    # Only this file's fixed lowercase codes are shown; never paths or values.
+    text = str(exc) if isinstance(exc, ValueError) else ''
+    return text if re.fullmatch(r'[a-z][a-z_ ]{0,63}', text) else type(exc).__name__
 
 
 def audit(key, outcome):
@@ -227,7 +234,8 @@ class Confirmation:
         self.next = time.monotonic() + self.interval
         try:
             state = self.read()
-        except (OSError, subprocess.SubprocessError, http.client.HTTPException, KeyError, TypeError, ValueError):
+        except Exception:
+            # Any failed read is unknown, never an exit or a supervisor crash.
             state = 'unknown'
         if state != self.last and state in ('unknown', 'expired_preview'):
             audit(self.key, state)
@@ -251,7 +259,7 @@ def activate_vite(key, argv, env, port, ended):
             listener.listen()
         except OSError:
             audit(key, 'vite_listener_unavailable')
-            raise
+            raise ValueError('vite port unavailable')
         listener.setblocking(False)
         print(f'cardigan: waiting for first connection on 127.0.0.1:{port}', flush=True)
         while True:
@@ -292,17 +300,18 @@ def supervise_vite(key, argv, confirmation, exited, env, cancellation, port):
     else:
         task = activate_vite(key, argv, env, port, ended)
         if task is None:
-            return 0  # listener released; no project process was started
+            return 0, ''  # listener released; no project process was started
     env.clear()
     disown_stdio()
     os.environ.clear()
     while True:
         code = task.poll()
         if code is not None:
-            return (128-code if code < 0 else code) % 256
-        if select.select([cancellation], [], [], 0)[0] or ended():
+            return (128-code if code < 0 else code) % 256, ''
+        why = stop_cause(key, select.select([cancellation], [], [], 0)[0], exited, confirmation)
+        if why:
             audit(key, 'vite_ingress_unproven_retained')
-            return 125
+            return 125, why + '; Vite ingress unproven, Vite retained'
         time.sleep(0.12)
 
 
@@ -329,9 +338,10 @@ def supervise(key, argv, confirmation, exited, env, cancellation):
             poll = select.poll()
             poll.register(publisher, select.POLLHUP | select.POLLERR)
             if not foreground and poll.poll(0):
-                return 0
+                return 0, ''
             cancelled = foreground and select.select([cancellation], [], [], 0)[0]
-            if cancelled or exited() or confirmation.state() == 'ended':
+            why = stop_cause(key, cancelled, exited, confirmation)
+            if why:
                 try:
                     publisher.sendall(SETTLED)
                     # Keep our write half open. With the participant's write
@@ -344,36 +354,69 @@ def supervise(key, argv, confirmation, exited, env, cancellation):
                     while time.monotonic() < deadline:
                         if task.poll() is not None and poll.poll(0):
                             audit(key, 'private_participants_released')
-                            return 143
+                            return 143, why + '; private participants released'
                         time.sleep(0.05)
                     audit(key, 'private_release_unconfirmed_retained')
+                    return 125, why + '; release unconfirmed, private task retained'
                 except (BrokenPipeError,ConnectionResetError):
                     audit(key, 'missing_private_participant_retained')
-                return 125
+                    return 125, why + '; private participant missing, task retained'
             time.sleep(0.12)
 
 
+def stop_cause(key, cancelled, exited, confirmation):
+    """Why supervision is ending, or None. Each cause is audited once."""
+    why = ('entry cancelled' if cancelled else 'agent session exited' if exited()
+           else 'run ended' if confirmation.state() == 'ended' else None)
+    if why:
+        audit(key, 'stop_' + why.replace(' ', '_'))
+    return why
+
+
 status_pipe = None
+# One status byte, then an optional short ASCII reason. A single write below
+# PIPE_BUF is atomic; the entry reads until EOF.
+REASON_MAX = 200
 
 
-def emit_status(code):
+def emit_status(code, reason=''):
     global status_pipe
     if status_pipe is not None:
         try:
-            os.write(status_pipe, bytes([code % 256]))
+            os.write(status_pipe, bytes([code % 256]) + reason.encode('ascii', 'replace')[:REASON_MAX])
         except BrokenPipeError:
             pass
         os.close(status_pipe)
         status_pipe = None
 
 
-def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, project_vite=False, on_demand_port=None):
-    global status_pipe
-    require(KEY.fullmatch(key) and argv)
-    expected = expected or birth(pid)
-    require(birth(pid) == expected)
-    confirmation = confirmation or Confirmation(key, hashlib.sha256(os.environ['MCP_TOKEN'].encode()).digest())
-    require(confirmation.state() == 'active')
+def supervisor_lost(child):
+    """Describe a supervisor that closed the status pipe without a status."""
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            done, status = os.waitpid(child, os.WNOHANG)
+        except ChildProcessError:
+            return 'exit unobserved'
+        if done:
+            break
+        if time.monotonic() > deadline:
+            return 'exit unobserved'
+        time.sleep(0.02)
+    if os.WIFSIGNALED(status):
+        number = os.WTERMSIG(status)
+        try:
+            return signal.Signals(number).name
+        except ValueError:
+            return f'signal {number}'
+    return f'exit {os.WEXITSTATUS(status)}' if os.WIFEXITED(status) else 'exit unobserved'
+
+
+def prepare(tag, key, base, confirmation):
+    """Runs in the supervisor: lifecycle read, scratch directories, audit."""
+    state = confirmation.state()
+    if state != 'active':
+        return None, 'run not active (' + str(state) + ')'
     root, parent = namespace(tag, True, base)
     try:
         scope = directory(root, scope_name(key), True)
@@ -383,34 +426,73 @@ def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, 
             os.close(scope)
     finally:
         os.close(root)
-    path = os.path.join(parent, scope_name(key), 'tmp')
     # Q-1011: no recursive inspection, unlink, rename, or transfer of scratch.
     audit(key, 'shared_directory_retained')
+    return os.path.join(parent, scope_name(key), 'tmp'), ''
+
+
+def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, project_vite=False, on_demand_port=None):
+    global status_pipe
+    require(KEY.fullmatch(key) and argv)
+    expected = expected or birth(pid)
+    require(birth(pid) == expected)
+    token = None if confirmation else hashlib.sha256(os.environ['MCP_TOKEN'].encode()).digest()
+    # C-605: fork before this process resolves a host name, opens TLS or
+    # writes the system log. On Darwin those start libdispatch/XPC state; a
+    # child forked after that dies on its next lookup (the first lifecycle
+    # read, 15 s in) without a status, settlement or audit. The child is the
+    # first and only process here to use them; the entry only waits.
     reader, writer = os.pipe()
     cancel_read, cancel_write = os.pipe()
-    if os.fork() == 0:
-        # The parent has already audited the retained directory. libc can
-        # cache its log socket across fork: release it through its owner before
-        # recycling fd numbers for a pidfd, cancellation or lifetime socket.
+    child = os.fork()
+    if child == 0:
+        # libc can cache its log socket across fork: release it through its
+        # owner before recycling fd numbers for a pidfd, cancellation or
+        # lifetime socket.
         syslog.closelog()
         retain_fds({writer, cancel_read})
         status_pipe = writer
+        code, reason = 125, 'supervisor failed'
         try:
             os.setsid()
-            args = (key, argv, confirmation, session_watch(pid, expected),
-                    dict(os.environ, TMPDIR=path, TEMP=path, TMP=path), cancel_read)
-            code = supervise_vite(*args, on_demand_port) if project_vite else supervise(*args)
-            emit_status(code)
+            check = confirmation or Confirmation(key, token)
+            path, reason = prepare(tag, key, base, check)
+            if path is not None:
+                reason = 'supervisor failed'
+                args = (key, argv, check, session_watch(pid, expected),
+                        dict(os.environ, TMPDIR=path, TEMP=path, TMP=path), cancel_read)
+                code, reason = supervise_vite(*args, on_demand_port) if project_vite else supervise(*args)
+        except BaseException as exc:
+            reason = 'supervisor failed (' + describe(exc) + ')'
+            try:
+                audit(key, 'supervisor_failed ' + type(exc).__name__)
+            except Exception:
+                pass
         finally:
+            emit_status(code, reason)
             os._exit(0)
     os.close(cancel_read)
     os.close(writer)
     try:
-        data = os.read(reader, 1)
-        return data[0] if data else 125
+        data = b''
+        while len(data) <= REASON_MAX:
+            block = os.read(reader, REASON_MAX + 1)
+            if not block:
+                break
+            data += block
     finally:
         os.close(reader)
         os.close(cancel_write)
+    if not data:
+        how = supervisor_lost(child)
+        audit(key, 'supervisor_lost ' + how.replace(' ', '_'))
+        print('cardigan: supervisor lost (' + how + '); lifetime connection closed without settlement, '
+              'private task retained', file=sys.stderr, flush=True)
+        return 125
+    reason = data[1:].decode('ascii', 'replace')
+    if reason:
+        print('cardigan: ' + reason, file=sys.stderr, flush=True)
+    return data[0]
 
 
 def dead(fd):
@@ -494,6 +576,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
-        print('cardigan: run resource unavailable', file=sys.stderr)
+    except Exception as exc:
+        print('cardigan: run resource unavailable (' + describe(exc) + ')', file=sys.stderr)
         sys.exit(125)

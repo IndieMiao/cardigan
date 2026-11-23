@@ -120,7 +120,7 @@ sub=subprocess.Popen([sys.executable,'-I','-c',{WAIT!r}],pass_fds=(int(os.enviro
 {WAIT}"""
             cli = other if key.startswith('A-2') else session
             job = subprocess.Popen([sys.executable, '-I', '-B', '-c', stub, str(source), TAG, key, str(cli.pid), base,
-                                    sys.executable, '-I', '-c', task])
+                                    sys.executable, '-I', '-c', task], stderr=subprocess.PIPE)
             jobs.append(job)
         root, parent = m['namespace'](TAG, False, base) if os.listdir(base) else (None, '')
         if root is None:
@@ -158,6 +158,7 @@ sub=subprocess.Popen([sys.executable,'-I','-c',{WAIT!r}],pass_fds=(int(os.enviro
         assert session.poll() is None and jobs[1].poll() is None and jobs[2].poll() is None
         session.terminate(); session.wait(timeout=2)
         assert jobs[1].wait(timeout=5) == 143  # same live CLI, second Run closed only now
+        assert os.read(jobs[1].stderr.fileno(), 4096) == b'cardigan: agent session exited; private participants released\n'
         assert (parent/m['scope_name'](keys[1])/'tmp'/'ready').exists()
         assert other.poll() is None and jobs[2].poll() is None
         other.terminate(); other.wait(timeout=2)
@@ -170,6 +171,7 @@ sub=subprocess.Popen([sys.executable,'-I','-c',{WAIT!r}],pass_fds=(int(os.enviro
                 p.terminate(); p.wait(timeout=2)
         for job in jobs:
             job.wait(timeout=6)
+            job.stderr.close()
 
 
 def foreground_contracts(base):
@@ -227,7 +229,7 @@ subprocess.Popen([sys.executable,'-I','-c',{service!r},*sys.argv[1:]],
     with subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(20)']) as session:
         try:
             with subprocess.Popen([sys.executable,'-IB','-c',stub,str(source),TAG,key,str(session.pid),base,
-                                   sys.executable,'-I','-c',service,str(ready),path]) as job:
+                                   sys.executable,'-I','-c',service,str(ready),path], stderr=subprocess.PIPE) as job:
                 until(lambda: ready.exists() and ready.read_text())
                 exited = m['session_watch'](int(ready.read_text()))
                 with socket.socket(socket.AF_UNIX) as client:
@@ -235,6 +237,8 @@ subprocess.Popen([sys.executable,'-I','-c',{service!r},*sys.argv[1:]],
                     client.sendall(b'a'); assert client.recv(1) == b'a'
                     states[key] = 'ended'
                     assert job.wait(timeout=6) == 125 and not exited()
+                    # The declared bound (the Run) was reached: say so.
+                    assert os.read(job.stderr.fileno(), 4096) == b'cardigan: run ended; release unconfirmed, private task retained\n'
                     client.sendall(b'b'); assert client.recv(1) == b'b'
                 until(exited)
         finally:
@@ -491,6 +495,105 @@ def darwin_watch():
             pass
 
 
+def long_foreground(base):
+    # C-605: a command outliving many lifecycle re-reads keeps its supervisor
+    # and its own exit status. Darwin failed at the first re-read (15 s).
+    key = 'A-9.R-1.R-1'
+    with subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(20)']) as session:
+        try:
+            before = served[key, 'active']
+            run = subprocess.run([sys.executable, '-IB', '-c', entry(cached_audit), str(source), TAG, key, str(session.pid), base,
+                                  sys.executable, '-I', '-c', 'import time;time.sleep(1.5);raise SystemExit(9)'],
+                                 capture_output=True, timeout=8)
+            assert run.returncode == 9 and run.stderr == b'', run.stderr
+            assert served[key, 'active'] - before >= 10  # re-read by the supervisor throughout
+            assert session.poll() is None
+        finally:
+            session.terminate(); session.wait(timeout=3)
+
+
+def lost_supervisor(base):
+    # The supervisor dies uncatchably (as on Darwin). The entry must not
+    # return a bare 125: it names the loss, and the participant sees EOF
+    # without a settlement record. Nothing is signalled except the fixture's
+    # own supervisor process, found as the task's parent.
+    key = 'A-9.R-1.R-2'
+    task = """import os,pathlib,socket
+p=pathlib.Path(os.environ['TMPDIR'])
+s=socket.socket(fileno=int(os.environ['CARDIGAN_PRIVATE_LIFETIME_FD']));s.settimeout(10)
+(p/'supervisor').write_text(str(os.getppid()))
+data=s.recv(128)
+(p/'lifetime').write_text('eof' if data==b'' else repr(data))"""
+    with subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(20)']) as session:
+        try:
+            with subprocess.Popen([sys.executable, '-IB', '-c', entry(cached_audit), str(source), TAG, key, str(session.pid), base,
+                                   sys.executable, '-I', '-c', task], stderr=subprocess.PIPE) as job:
+                until(lambda: os.path.isdir(base) and os.listdir(base))
+                _, parent = m['namespace'](TAG, False, base)
+                scratch = pathlib.Path(parent)/m['scope_name'](key)/'tmp'
+                os.close(_)
+                until(lambda: (scratch/'supervisor').exists() and (scratch/'supervisor').read_text())
+                supervisor = int((scratch/'supervisor').read_text())
+                assert supervisor != job.pid
+                os.kill(supervisor, 9)
+                assert job.wait(timeout=5) == 125
+                assert os.read(job.stderr.fileno(), 4096) == (b'cardigan: supervisor lost (SIGKILL); lifetime connection closed '
+                                             b'without settlement, private task retained\n')
+                until(lambda: (scratch/'lifetime').exists())
+                assert (scratch/'lifetime').read_text() == 'eof'
+                audit = (pathlib.Path(keydir.name)/'audit').read_text().splitlines()
+                assert f'cardigan run_resource {key} supervisor_lost SIGKILL' in audit
+        finally:
+            session.terminate(); session.wait(timeout=3)
+
+
+def inactive_run(base):
+    # A Run that already ended starts nothing and says why.
+    key = 'A-9.R-1.R-3'
+    states[key] = 'ended'
+    marker = pathlib.Path(base)/'started'
+    with subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(20)']) as session:
+        try:
+            run = subprocess.run([sys.executable, '-IB', '-c', stub, str(source), TAG, key, str(session.pid), base,
+                                  sys.executable, '-I', '-c', f'open({str(marker)!r},"w")'], capture_output=True, timeout=4)
+            assert run.returncode == 125 and run.stderr == b'cardigan: run not active (ended)\n', run.stderr
+            assert not marker.exists()
+        finally:
+            session.terminate(); session.wait(timeout=3)
+
+
+def fork_first():
+    # C-605 regression guard (Darwin cannot run in CI): the entry forks before
+    # any lifecycle read, scratch creation or system-log write. Those all run
+    # in the supervisor, the first process to use name lookup, TLS or logging.
+    ns = m['command'].__globals__
+    events = []
+    class Forked(Exception): pass
+    class Probe:
+        def state(self): events.append('state'); return 'active'
+    class System:
+        def __getattr__(self, name): return getattr(os, name)
+        def fork(self): events.append('fork'); raise Forked
+    with mock.patch.dict(ns, os=System(), birth=lambda _: 'same',
+                         audit=lambda *a: events.append('audit'),
+                         namespace=lambda *a: events.append('namespace')):
+        try:
+            m['command'](TAG, 'A-1.R-1.R-1', 123, ['true'], confirmation=Probe())
+            raise AssertionError('did not fork')
+        except Forked:
+            pass
+    assert events == ['fork'], events
+    # Without an injected confirmation only the token digest is taken first.
+    events.clear()
+    with mock.patch.dict(ns, os=System(), birth=lambda _: 'same', audit=lambda *a: events.append('audit'),
+                         Confirmation=lambda *a: events.append('confirmation')):
+        try:
+            m['command'](TAG, 'A-1.R-1.R-1', 123, ['true'])
+        except Forked:
+            pass
+    assert events == ['fork'], events
+
+
 if sys.argv[1:] == ['on-demand-vite']:
     try:
         with tempfile.TemporaryDirectory() as base: occupied_vite_port(base)
@@ -516,6 +619,10 @@ with tempfile.TemporaryDirectory() as base:
 reply = mock.Mock(side_effect=[TimeoutError(), 'expired_preview', 'ended'])
 check = m['Confirmation']('A-1.R-1.R-1', 'synthetic', read=reply, interval=0)
 assert [check.state() for _ in range(3)] == ['unknown', 'expired_preview', 'ended']
+# Unexpected read errors are unknown too, never a supervisor crash.
+check = m['Confirmation']('A-1.R-1.R-1', 'synthetic', read=mock.Mock(side_effect=[RuntimeError(), 'active']), interval=0)
+assert [check.state() for _ in range(2)] == ['unknown', 'active']
+fork_first()
 darwin_watch()
 linux_watch_errors()
 observer_enrollment()
@@ -525,6 +632,12 @@ with tempfile.TemporaryDirectory() as base:
     test_runs(base)
 with tempfile.TemporaryDirectory() as base:
     session_bypass(base)
+with tempfile.TemporaryDirectory() as base:
+    long_foreground(base)
+with tempfile.TemporaryDirectory() as base:
+    lost_supervisor(base)
+with tempfile.TemporaryDirectory() as base:
+    inactive_run(base)
 for detached in (False, True):
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="custody-") as base:
         registered_service(base, detached)
