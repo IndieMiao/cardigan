@@ -591,9 +591,10 @@ export async function observeReadiness(
   };
 }
 
-// Helper drift already has its own upgrade task (automatic or manual).
+// Helper drift and attachment tools already have their own upgrade tasks (C-548/C-599).
 const alerting = (item: MachineReadinessItem) =>
   item.key !== "helper" &&
+  item.key !== "agent_tools" &&
   (item.status === "warning" || item.status === "failed");
 
 /**

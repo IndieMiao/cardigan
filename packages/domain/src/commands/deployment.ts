@@ -355,6 +355,62 @@ export function retireVerifiedHelperAction(
   });
 }
 
+/** C-599: one namespace of host-refreshed worker notices per machine. */
+const REFRESHABLE_PREFIX = /^worker-agent-tools:[a-zA-Z0-9][a-zA-Z0-9._-]*:$/u;
+
+/**
+ * Internal system handoff: cancel the open worker maintenance notices of one
+ * refreshable namespace whose command no longer matches the current binding
+ * and release (`keep` is the current key, if any). Never reports them done.
+ */
+export function retireWorkerMaintenanceActions(
+  state: CommandState,
+  actor: Actor,
+  target: { prefix: string; keep?: string; reason: string },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "record_deployment", ports, (d) => {
+    ensure(
+      REFRESHABLE_PREFIX.test(target.prefix) &&
+        (target.keep === undefined || target.keep.startsWith(target.prefix)) &&
+        target.reason.trim().length > 0,
+      "validation_failed",
+      "只能淘汰同一台机器的可刷新维护待办",
+    );
+    const actions = new Map(d.list("human_actions").map((h) => [h.id, h]));
+    for (const e of eventsOfType(
+      state.events,
+      "host_deployment_action_requested",
+    )) {
+      const p = e.payload as {
+        key?: unknown;
+        reason?: unknown;
+        human_action_id?: unknown;
+      };
+      if (
+        e.actor.kind !== "system" ||
+        e.actor.project_id !== state.project_id ||
+        e.card_id ||
+        p.reason !== "worker_maintenance" ||
+        typeof p.key !== "string" ||
+        !p.key.startsWith(target.prefix) ||
+        p.key === target.keep
+      )
+        continue;
+      const action = actions.get(p.human_action_id as HumanActionId);
+      if (
+        action?.status !== "open" ||
+        action.requested_by !== "system" ||
+        action.card_id ||
+        action.blocked_work_items.length
+      )
+        continue;
+      supersedeHelperAction(d, action, target.reason);
+      actions.delete(action.id);
+    }
+  });
+}
+
 export function requestDeploymentAction(
   state: CommandState,
   actor: Actor,
