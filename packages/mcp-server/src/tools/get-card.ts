@@ -24,6 +24,7 @@ import {
   prechecks,
   precheckView,
   referenceReadState,
+  resolvePendingAttachmentRefs,
   roleRuleDeliveries,
   roleRuleInventory,
   runAuthorView,
@@ -359,6 +360,12 @@ export const getCardTool = defineTool({
           .filter((entry) => entry.card_id === cardId)
           .map((entry) => ({
             ...entry,
+            // C-615: a comment's `attachment-new-N` reads as the number it got.
+            body: resolvePendingAttachmentRefs(
+              entry.body,
+              entry,
+              state.attachments,
+            ),
             ...authorView(authors, entry.author),
           })),
       ),
