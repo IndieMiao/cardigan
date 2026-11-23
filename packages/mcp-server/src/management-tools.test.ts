@@ -1482,13 +1482,13 @@ test("C-617: PM Ops links the owner's comment to a PM-routed decision over MCP, 
   expect(resolved.resolution).toMatchObject({
     via: "delegated",
     resolved_by: `assignment:${opsAssignment.id}`,
-    raw_quote: answer.body,
+    raw_quote: p.rationale,
+    rationale: p.rationale,
     owner_record: {
       author: "human",
       timeline_entry_id: answer.id,
       quote: answer.body,
       at: "2026-01-03T00:00:00.000Z",
-      registered_by: `assignment:${opsAssignment.id}`,
     },
   });
   expect(

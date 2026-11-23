@@ -1137,24 +1137,23 @@ test("C-617: an owner comment posted in Workbench closes the PM-routed decision 
     const record = history.decisions.find((d) => d.id === q.id) as
       | (Decision & { decision_maker?: string })
       | undefined;
-    // The owner decided; PM Ops only registered it.
-    expect(record?.decision_maker).toBe("human");
+    // Q-1198: PM Ops decided under delegation; the owner's words are evidence.
+    expect(record?.decision_maker).toBe("pm");
     const byMaker = async (decider: string) =>
       (
         (await f.call(f.projectPath(`/decision-history?decider=${decider}`)))
           .json as { decisions: Decision[] }
       ).decisions.map((d) => d.id);
-    expect(await byMaker("human")).toContain(q.id);
-    expect(await byMaker("pm")).not.toContain(q.id);
+    expect(await byMaker("pm")).toContain(q.id);
+    expect(await byMaker("human")).not.toContain(q.id);
     expect(record?.resolution).toMatchObject({
       via: "delegated",
       resolved_by: `assignment:${ops.id}`,
-      raw_quote: owner.body,
+      raw_quote: "所有者已在卡上选择放在标题旁",
       owner_record: {
         author: "human",
         timeline_entry_id: owner.id,
         quote: owner.body,
-        registered_by: `assignment:${ops.id}`,
       },
     });
     expect(
@@ -1163,7 +1162,7 @@ test("C-617: an owner comment posted in Workbench closes the PM-routed decision 
         .timeline.find(
           (e) => e.type === "decision_resolved" && e.decision_id === q.id,
         )?.body,
-    ).toContain(`所有者已在卡上答复（${owner.id}`);
+    ).toContain(`依据：所有者原话（${owner.id}`);
   } finally {
     await f.close();
   }

@@ -20,7 +20,7 @@ import {
   independentReviewLimitItem,
   independentReviewLimitTarget,
 } from "./independent-review-limit-delegation.js";
-import { ownerRecordBody } from "./owner-record.js";
+import { withOwnerEvidence } from "./owner-record.js";
 import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { instructPauseOwner, prepareReviewPause } from "./review-pause.js";
@@ -439,9 +439,9 @@ export function recordDecisionResolution(
         type: "decision_resolved",
         decision_id: q.id,
         ...(reviewItemId ? { work_item_id: reviewItemId } : {}),
-        body: resolution.owner_record
-          ? `${ownerRecordBody(resolution.owner_record, resolution.rationale)}${resolution.notice ? `\n${resolution.notice}` : ""}`
-          : resolution.human_decided_merge_basis
+        body: withOwnerEvidence(
+          resolution.owner_record,
+          resolution.human_decided_merge_basis
             ? `${resolution.notice ?? resolution.raw_quote}\n\n拍板对应依据：\n${resolution.human_decided_merge_basis.entries.map((e) => `- ${e.decision_id} / ${e.option} → ${e.completion_id} / ${e.delivery_id} / ${e.target_sha}：${e.evidence}`).join("\n")}`
             : resolution.merge_override
               ? `强行确认合并；理由：${resolution.merge_override.reason}\n当时缺项：${resolution.merge_override.blockers.length ? `\n${resolution.merge_override.blockers.map((b) => `- ${b}`).join("\n")}` : "无"}\n${resolution.raw_quote}`
@@ -452,6 +452,7 @@ export function recordDecisionResolution(
                     highRiskCategories.includes(q.category)
                   ? (resolution.notice ?? resolution.raw_quote)
                   : resolution.raw_quote,
+        ),
       },
     );
     for (const item of unblocked) queueResumedRun(d, item, event);

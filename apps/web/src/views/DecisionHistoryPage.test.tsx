@@ -96,15 +96,14 @@ test("history shows the record row, and the drawer shows option, rationale and a
   expect(window.location.hash).toContain("card_id=C-1");
 });
 
-test("C-617: the drawer separates the owner's quoted answer from the PM who registered it", async () => {
+test("C-617 / Q-1198: PM's delegated decision shows the owner's words as separate cited evidence", async () => {
   const linked: DecisionHistoryRecord = {
     ...record,
-    // The server reports the owner as the decision maker for linked answers.
-    decision_maker: "human",
+    decision_maker: "pm",
     resolution: {
       ...record.resolution,
-      raw_quote: "Q-1 选 go",
-      rationale: "所有者已在卡上答复",
+      raw_quote: "所有者已在卡上选 go",
+      rationale: "所有者已在卡上选 go",
       owner_record: {
         card_id: "C-1",
         timeline_entry_id: "C-1#7",
@@ -126,22 +125,22 @@ test("C-617: the drawer separates the owner's quoted answer from the PM who regi
     />,
   );
   const row = await screen.findByRole("row", { name: "拍板记录 Q-1" });
-  expect(row.textContent).toContain("所有者");
-  expect(row.textContent).not.toContain("PM 代拍");
+  expect(row.textContent).toContain("PM 代拍");
   fireEvent.click(screen.getByRole("link", { name: "是否继续" }));
   const drawer = await screen.findByRole("dialog");
   expect(drawer.querySelector(".card-metadata")?.textContent).toContain(
-    "所有者",
+    "PM 代拍",
   );
-  expect(drawer.textContent).not.toContain("PM 代拍");
-  expect(drawer.textContent).toContain("所有者原话");
+  // The formal result stays PM's: the quote is not inside the result section.
+  const result = screen.getByRole("region", { name: "结果" });
+  expect(result.textContent).toContain("所有者已在卡上选 go");
+  expect(result.textContent).not.toContain("Q-1 选 go");
+  const evidence = screen.getByRole("region", { name: "依据：所有者原话" });
   // The quote uses the shared Markdown quote style.
-  expect(drawer.querySelector(".markdown blockquote")?.textContent).toContain(
+  expect(evidence.querySelector(".markdown blockquote")?.textContent).toContain(
     "Q-1 选 go",
   );
-  expect(drawer.textContent).toContain("C-1#7 · 附件 att-1");
-  // Same column name as the list: the PM who registered it.
-  expect(drawer.textContent).toContain("记录人");
+  expect(evidence.textContent).toContain("C-1#7 · 附件 att-1");
 });
 
 test("empty and failed history queries have readable states", async () => {

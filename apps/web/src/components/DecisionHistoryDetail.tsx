@@ -109,21 +109,6 @@ export function DecisionHistoryDetail({
                 <Markdown body={q.resolution.rationale} />
               </dd>
             </div>
-            {q.resolution.owner_record && (
-              <div>
-                <dt>所有者原话</dt>
-                <dd>
-                  <Markdown body={quoted(q.resolution.owner_record.quote)} />
-                </dd>
-                <dd>
-                  {q.resolution.owner_record.timeline_entry_id}
-                  {q.resolution.owner_record.attachment_id &&
-                    ` · 附件 ${q.resolution.owner_record.attachment_id}`}
-                  {" · "}
-                  <Time value={q.resolution.owner_record.at} />
-                </dd>
-              </div>
-            )}
             {q.resolution.proxy_authority && (
               <div>
                 <dt>授权依据</dt>
@@ -142,6 +127,19 @@ export function DecisionHistoryDetail({
             </div>
           </dl>
         </section>
+        {q.resolution.owner_record && (
+          <section aria-label="依据：所有者原话">
+            <h2>依据：所有者原话</h2>
+            <Markdown body={quoted(q.resolution.owner_record.quote)} />
+            <p>
+              {q.resolution.owner_record.timeline_entry_id}
+              {q.resolution.owner_record.attachment_id &&
+                ` · 附件 ${q.resolution.owner_record.attachment_id}`}
+              {" · "}
+              <Time value={q.resolution.owner_record.at} />
+            </p>
+          </section>
+        )}
       </div>
     </CardDetailLayout>
   );

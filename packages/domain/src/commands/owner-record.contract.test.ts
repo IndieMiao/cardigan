@@ -177,7 +177,8 @@ describe("owner record linking", () => {
       option: "split",
       via: "delegated",
       resolved_by: `assignment:${id("assignment", 4)}`,
-      raw_quote: entry.body,
+      // Q-1198: the formal answer and rationale are PM's own.
+      raw_quote: "所有者已在卡上明确选择拆卡",
       rationale: "所有者已在卡上明确选择拆卡",
       owner_record: {
         author: "human",
@@ -185,9 +186,11 @@ describe("owner record linking", () => {
         timeline_entry_id: entry.id,
         quote: entry.body,
         at: now,
-        registered_by: `assignment:${id("assignment", 4)}`,
       },
     });
+    expect(resolved.resolution?.owner_record).not.toHaveProperty(
+      "registered_by",
+    );
     const event = f.state.events.findLast(
       (e) => e.type === "decision_resolved",
     );
@@ -197,17 +200,15 @@ describe("owner record linking", () => {
     const body = f.state.timeline.findLast(
       (e) => e.type === "decision_resolved",
     )?.body;
-    expect(body).toContain(`所有者已在卡上答复（${entry.id}，${now}）`);
+    // PM's answer first; the owner's words follow as cited evidence.
+    expect(body?.startsWith("所有者已在卡上明确选择拆卡")).toBe(true);
+    expect(body).toContain(`依据：所有者原话（${entry.id}，${now}）`);
     expect(body).toContain(`> ${entry.body}`);
-    expect(body).toContain("PM 关联登记，不代替所有者作决定");
-    // History shows the owner as the decision maker; the PM stays the registrar.
+    // History: PM decided under delegation; never shown as the owner's own confirmation.
     const history = decisionHistory(f.state).find((h) => h.id === q.id);
-    expect(history?.decision_maker).toBe("human");
-    expect(history?.resolution.resolved_by).toBe(
-      `assignment:${id("assignment", 4)}`,
-    );
+    expect(history?.decision_maker).toBe("pm");
     expect(
-      decisionHistory(f.state, { decider: "pm" }).map((h) => h.id),
+      decisionHistory(f.state, { decider: "human" }).map((h) => h.id),
     ).not.toContain(q.id);
     expect(history?.resolution.owner_record?.author).toBe("human");
     // One decision cannot be closed twice, even with the same record.

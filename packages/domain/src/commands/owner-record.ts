@@ -1,18 +1,14 @@
-import type {
-  Decision,
-  OwnerDecisionRecord,
-  TimelineEntry,
-} from "../entities.js";
+import type { Decision, OwnerEvidence, TimelineEntry } from "../entities.js";
 import { eventsForDecision, eventsOfType } from "../event-index.js";
 import type { AttachmentId, CardId, TimelineEntryId } from "../ids.js";
 import { type CommandDraft, ensure } from "./core.js";
 
 /**
- * C-617: PM Ops links an answer the owner already gave on the card to a
- * PM-routed decision instead of asking the owner again. The record only
- * replaces the repeated question: the caller's existing authorization
- * (category delegation, human-only reasons, merge gates) is checked
- * unchanged, and the quote is copied from the record, never typed by PM.
+ * C-617 / Q-1198: PM Ops decides a PM-routed decision under its existing
+ * delegation and cites the answer the owner already gave on the card as
+ * evidence, instead of asking the owner again. The formal answer and
+ * rationale stay PM's; the quote is copied from the record, never typed by
+ * PM, and never counts as the owner's personal confirmation.
  */
 export interface OwnerRecordInput {
   readonly timeline_entry_id: TimelineEntryId;
@@ -104,7 +100,7 @@ export function bindOwnerRecord(
   q: Decision,
   option: string,
   input: OwnerRecordInput,
-): OwnerDecisionRecord {
+): OwnerEvidence {
   reject(
     !q.trigger && q.decider === "role:pm" && !q.human_required_reason,
     "只有路由给 PM、且无须由人亲自确认的普通拍板可以关联所有者原话",
@@ -279,15 +275,18 @@ export function bindOwnerRecord(
     ...(input.attachment_id !== undefined
       ? { attachment_id: input.attachment_id }
       : {}),
-    registered_by: d.author,
   };
 }
 
-/** Timeline wording: who decided (with source and time) and who registered. */
-export function ownerRecordBody(
-  record: OwnerDecisionRecord,
-  rationale: string,
+/**
+ * Q-1198: the timeline keeps PM's own answer first; the owner's words follow
+ * as cited evidence with source and time, never as the formal answer.
+ */
+export function withOwnerEvidence(
+  record: OwnerEvidence | undefined,
+  body: string,
 ) {
+  if (!record) return body;
   const quote = record.quote
     .split("\n")
     .map((line) => `> ${line}`)
@@ -297,5 +296,5 @@ export function ownerRecordBody(
     record.at,
     ...(record.attachment_id ? [`附件 ${record.attachment_id}`] : []),
   ].join("，");
-  return `所有者已在卡上答复（${source}）：\n${quote}\n\nPM 关联登记，不代替所有者作决定；登记说明：${rationale.trim()}`;
+  return `${body}\n\n依据：所有者原话（${source}）\n${quote}`;
 }

@@ -1505,7 +1505,7 @@ export interface DecisionHistoryRecord extends DecisionView {
     resolved_by: string;
     via: string;
     proxy_authority?: string;
-    /** C-617: the owner's answer on the card, registered by `resolved_by`. */
+    /** C-617 / Q-1198: the owner's answer cited as evidence for PM's decision. */
     owner_record?: {
       readonly card_id: string;
       readonly timeline_entry_id: string;

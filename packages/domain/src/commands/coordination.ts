@@ -1085,7 +1085,7 @@ export function recordDecision(
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
       actor.kind === "assignment" && decision.decider === "role:pm"
-        ? "这条拍板路由给 PM Ops，PM Office 不能代记；所有者已在卡上答复时，由 PM Ops 在授权范围内关联原话（resolve_delegated_decision 的 owner_record）"
+        ? "这条拍板路由给 PM Ops，PM Office 不能代记；所有者已在卡上答复时，由 PM Ops 在授权范围内自行决定并引用原话作依据（resolve_delegated_decision 的 owner_record）"
         : "Only PM Office or the designated human can record decisions",
     );
     // §7.4: a sensitive or PM-escalated merge needs a human Actor; PM Office
@@ -1217,8 +1217,8 @@ function resolveDecisionDraft(
     human_decided_merge_basis?: HumanDecidedMergeBasis;
     /** C-591: delegated authority other than the PM merge preference. */
     proxy_authority?: string;
-    /** C-617: validated owner answer; the quote replaces the PM rationale. */
-    owner_record?: import("../entities.js").OwnerDecisionRecord;
+    /** C-617: validated owner answer cited as evidence; never the formal answer. */
+    owner_record?: import("../entities.js").OwnerEvidence;
     delegated_merge?: {
       readonly notice: string;
       readonly proxy_authority: string;
@@ -1680,7 +1680,7 @@ export function resolveDelegatedDecision(
       q,
       {
         ...input,
-        raw_quote: ownerRecord ? ownerRecord.quote : p.rationale,
+        raw_quote: p.rationale,
         ...(basis ? { human_decided_merge_basis: basis } : {}),
         ...(ownerRecord ? { owner_record: ownerRecord } : {}),
       },

@@ -39,7 +39,7 @@ export function readDecisionHistory(
     throw new HttpRejection(400, "validation_failed", "拍板记录游标无效");
   const at = "json_extract(d.doc, '$.resolution.at')";
   const maker =
-    "CASE WHEN json_extract(d.doc, '$.resolution.resolved_by') = 'system' THEN 'system' WHEN json_extract(d.doc, '$.resolution.owner_record') IS NOT NULL THEN 'human' WHEN json_extract(d.doc, '$.resolution.via') = 'delegated' THEN 'pm' ELSE 'human' END";
+    "CASE WHEN json_extract(d.doc, '$.resolution.resolved_by') = 'system' THEN 'system' WHEN json_extract(d.doc, '$.resolution.via') = 'delegated' THEN 'pm' ELSE 'human' END";
   const where = [
     "d.project_id = ?",
     `${at} IS NOT NULL`,
