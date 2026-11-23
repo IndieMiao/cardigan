@@ -19,7 +19,7 @@ import {
 } from "./core.js";
 import { decisionFollowupBlocked } from "./decision-followup.js";
 import { beginHostOpsActionInDraft } from "./host-ops-actions.js";
-import { stoppedByHuman } from "./stop.js";
+import { stoppedByHuman } from "./stop-state.js";
 
 /**
  * C-596: a managed standing PM whose oldest undelivered notice has waited

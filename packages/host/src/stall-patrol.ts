@@ -169,9 +169,28 @@ function standingRestarted(state: CommandState, stall: DispatchStall) {
   );
 }
 
+/**
+ * C-626: how long the bound empty editor must keep standing in for a missing
+ * hc activity report before the patrol stops a system-ended turn. Every patrol
+ * pass (about 30 s) re-reads it; any other observation restarts the window.
+ */
+export const DEFAULT_TURN_IDLE_PROMPT_MS = 60_000;
+export function turnIdlePromptMs() {
+  const raw = process.env.CARDIGAN_TURN_IDLE_PROMPT_MS;
+  if (raw === undefined) return DEFAULT_TURN_IDLE_PROMPT_MS;
+  const value = Number(raw);
+  if (!/^\d+$/u.test(raw) || !Number.isSafeInteger(value) || value > 3_600_000)
+    throw new Error("Invalid CARDIGAN_TURN_IDLE_PROMPT_MS");
+  return value;
+}
+
 /** Called by the existing host service's tick. Reads never publish or start a recovery. */
 export class StallPatrol {
   private readonly standingPm: StandingPmRecovery;
+  /** First consecutive bound-idle-prompt observation per incident (in memory:
+   * a restarted host simply observes the full window again). */
+  private readonly idlePromptSince = new Map<string, number>();
+  private readonly idlePromptMs = turnIdlePromptMs();
   constructor(
     private store: Store,
     private clock: Clock,
@@ -450,8 +469,24 @@ export class StallPatrol {
         });
       return;
     }
-    if (!a || handled(state) || hostOpsPending(state.events, a.id)) return;
+    const incident = `${project}/${stall.assignment_id}/${turnKey(stall)}`;
+    if (!a || handled(state) || hostOpsPending(state.events, a.id)) {
+      if (!a || handled(state)) this.idlePromptSince.delete(incident);
+      return;
+    }
     const view = await this.evidence(state, a, stall);
+    // The bound empty editor must persist across the window; until then
+    // keep the session and the original queue untouched, without an alert.
+    if (
+      !stall.restart_blocked &&
+      view.can_restart &&
+      view.idle_basis === "bound_idle_prompt"
+    ) {
+      const now = Date.parse(this.clock.now());
+      const since = this.idlePromptSince.get(incident) ?? now;
+      this.idlePromptSince.set(incident, since);
+      if (now - since < this.idlePromptMs) return;
+    } else this.idlePromptSince.delete(incident);
     let reason =
       stall.restart_blocked ?? (!view.can_restart ? "unsafe_evidence" : null);
     let launch: HostOpsExecution["snapshot"];
@@ -571,6 +606,12 @@ export class StallPatrol {
     ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
   ) {
     const { state, actionable, patrol, turns } = this.publish(project);
+    const open = new Set(
+      turns.map((s) => `${project}/${s.assignment_id}/${turnKey(s)}`),
+    );
+    for (const key of this.idlePromptSince.keys())
+      if (key.startsWith(`${project}/`) && !open.has(key))
+        this.idlePromptSince.delete(key);
     const seen = new Set<string>();
     for (const stall of turns.sort(
       (a, b) => Number(!!a.restart_blocked) - Number(!!b.restart_blocked),

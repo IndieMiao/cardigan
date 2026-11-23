@@ -1,5 +1,9 @@
 import { useCallback } from "react";
-import type { CardiganClient, OffsiteStatusView } from "../api.js";
+import type {
+  CardiganClient,
+  OffsiteLoopDelay,
+  OffsiteStatusView,
+} from "../api.js";
 import { useResource } from "../useResource.js";
 import { StatusTag, Time } from "./Foundation.js";
 import {
@@ -14,7 +18,12 @@ const ALERTS: Readonly<Record<OffsiteStatusView["alerts"][number], string>> = {
   unreachable: "OSS 不可达",
   sync_failed: "同步失败",
   over_budget: "超出月度上限",
+  loop_slow: "事件循环延迟过高",
 };
+
+const delayText = (label: string, delay: OffsiteLoopDelay | undefined) =>
+  delay &&
+  `${label} p99 ${Math.round(delay.p99_ms)} ms · 最大 ${Math.round(delay.max_ms)} ms`;
 
 export function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -91,6 +100,16 @@ export function OffsiteStatusSection({
               "—"
             )}
           </SettingsFact>
+          {status.loop_delay && (
+            <SettingsFact label="事件循环延迟">
+              {[
+                delayText("同步进程", status.loop_delay.sync),
+                delayText("服务进程", status.loop_delay.server),
+              ]
+                .filter(Boolean)
+                .join("；")}
+            </SettingsFact>
+          )}
           <SettingsFact label={`${status.usage.month} 估算费用`}>
             ¥{status.usage.estimated_yuan.toFixed(2)}
             {status.usage.budget_yuan !== undefined &&

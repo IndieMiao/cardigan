@@ -25,7 +25,7 @@ import {
   startFakeOss,
   writeStorageConfig,
 } from "../../../packages/mcp-server/test-support/fake-oss.js";
-import { OffsiteSync } from "./offsite-sync.js";
+import { OFFSITE_RESCAN_MS, OffsiteSync } from "./offsite-sync.js";
 
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 let root: string, dataDir: string, configDir: string;
@@ -262,6 +262,9 @@ test("an outage with nothing left to retry clears once OSS answers again", async
   expect(await h.status()).toMatchObject({ reachable: false });
   await rm(join(dataDir, "attachments", gone.digest));
   fake.mode = "up";
+  // C-628: the listing is reused until the next rescan; a removed file
+  // leaves the queue then (or as soon as its upload finds it gone).
+  clock = new Date(clock.getTime() + OFFSITE_RESCAN_MS);
   await h.sync.tick();
   expect(await h.status()).toMatchObject({
     reachable: true,

@@ -190,6 +190,9 @@ export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";
 export * from "./machine-check-journal.js";
 export { configureMachinePlacement } from "./machine-placement.js";
+export * from "./macos-check-config.js";
+export * from "./macos-check-result.js";
+export * from "./macos-check-service.js";
 export {
   DEFAULT_MCP_HOST,
   DEFAULT_MCP_PORT,
@@ -317,7 +320,19 @@ export {
   StandingPmRecovery,
   standingPmStallPolicy,
 } from "./standing-pm-recovery.js";
-export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
+export {
+  exitCommand,
+  STANDING_EXIT_STEP,
+  type StandingExitPolicy,
+  standingExitPolicy,
+  standingExitSteps,
+} from "./standing-session-exit.js";
+export {
+  revokeStoppedRunTokens,
+  stoppedSessionExited,
+  stoppedSessionLive,
+  stopRunRuntime,
+} from "./stop-run.js";
 export {
   proveSystemReviewLimit,
   systemReviewLimitFailure,

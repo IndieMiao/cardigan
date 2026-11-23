@@ -132,11 +132,26 @@ export class GithubCheckExecutor implements CheckExecutor {
         request.signal?.aborted
       )
         throw new GithubExecutorError("security");
+      // C-647: a restart may also change the local admission limit (for
+      // example max_concurrent 1 -> 16). Resuming this attempt's own durable
+      // intent proves its historical key; workflow, credentials and inputs
+      // must still match exactly.
+      const known =
+        abandoned?.key ??
+        this.options.journal
+          .unfinished()
+          .find(
+            (intent) =>
+              intent.project === request.project &&
+              intent.card === context.card &&
+              intent.attempt === request.attempt &&
+              intent.executor === this.options.config.name,
+          )?.key;
       const { inputs, key } = githubDispatchIdentity(
         request,
         context,
         this.options.config,
-        abandoned?.key,
+        known,
       );
       if (
         abandoned &&

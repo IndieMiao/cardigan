@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import type { LoopDelay } from "./loop-delay.js";
 
 /**
  * C-614 bookkeeping under `<dataDir>/offsite/` (0700). The background sync
@@ -159,6 +160,8 @@ export interface SyncStatus {
   readonly last_success_at?: string;
   /** Last attempt reached OSS and was refused or timed out. */
   readonly reachable: boolean;
+  /** C-628: event-loop delay of the process that ran the sync. */
+  readonly loop_delay?: LoopDelay;
 }
 
 function atomicWrite(path: string, content: string) {

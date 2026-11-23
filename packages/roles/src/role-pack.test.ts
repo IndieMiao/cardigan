@@ -551,7 +551,13 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
   });
   // An exact allowlist also excludes delivery, PM and host_ops tools.
   expect([...role.allowed_tools].sort()).toEqual(
-    [...BASE_TOOLS, "submit_review", "withdraw_review"].sort(),
+    [
+      ...BASE_TOOLS,
+      "submit_review",
+      "withdraw_review",
+      // C-611: reviewers request macOS evidence for the delivery directly.
+      "request_macos_check",
+    ].sort(),
   );
   expect(validateRole(role).ok).toBe(true);
   for (const phrase of [
