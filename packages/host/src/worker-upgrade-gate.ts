@@ -3,6 +3,7 @@ import {
   type Store,
   type StoreTransactionContext,
 } from "@cardigan/store";
+import { AGENT_TOOLS_CAPABILITY, agentToolsRelease } from "./agent-tools.js";
 import type { MachineCheckJob } from "./machine-check-types.js";
 import {
   observationFingerprint,
@@ -14,8 +15,12 @@ import {
 } from "./worker-maintenance.js";
 
 export const upgradeHold = "worker_helper_upgrade_unverified";
+// C-599: the attachment tools are part of a release; a tools-only change is a new key.
 export const upgradeKey = (fingerprint: string | undefined) =>
-  `${fingerprint}:${Object.values(workerHelperDigests()).join(":")}`;
+  `${fingerprint}:${[
+    ...Object.values(workerHelperDigests()),
+    ...Object.values(agentToolsRelease()?.digests ?? {}),
+  ].join(":")}`;
 export function upgradeState(store: Store, project: string, machine: string) {
   return store.database
     .prepare(
@@ -31,6 +36,8 @@ export interface InstallEvidence {
   job: string;
   before: Record<string, string>;
   start: number;
+  /** C-599: what the signed entry did with the attachment tools. */
+  tools?: "installed" | "entry_v1";
 }
 export function finishUpgrade(
   store: Store,
@@ -41,6 +48,8 @@ export function finishUpgrade(
   stage: string,
   evidence: InstallEvidence,
   passed: boolean,
+  /** C-599: whether the outer observation found the tools current afterwards. */
+  toolsCurrent?: boolean,
 ) {
   const updated = store.database
     .prepare(
@@ -63,6 +72,17 @@ export function finishUpgrade(
       duration_ms: Date.now() - evidence.start,
       before: evidence.before,
       expected: { ...workerHelperDigests() },
+      // A v1 entry only takes the helpers; never report that as tools installed.
+      ...(evidence.tools
+        ? {
+            agent_tools:
+              evidence.tools === "entry_v1"
+                ? "entry_v1_needs_migration"
+                : toolsCurrent
+                  ? "verified"
+                  : "unverified",
+          }
+        : {}),
     },
   });
   if (!passed)
@@ -120,6 +140,11 @@ export function settleUpgradeCheck(
         "machine_check",
         evidence,
         passed,
+        !!obs?.capabilities.some(
+          (c) =>
+            c.key === AGENT_TOOLS_CAPABILITY &&
+            c.evidence_ref === `machine-observation:${job.id}#${c.key}`,
+        ),
       );
       if (passed && binding)
         retireManualUpgrade(tx, project, machine, binding, {
