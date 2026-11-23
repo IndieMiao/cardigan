@@ -253,6 +253,13 @@ function receiptFor(
   };
 }
 
+/**
+ * C-609: registers the helper as a managed long operation and resolves to its
+ * release. While a deployment's stop fence stands it stays pending, so the job
+ * remains `queued` and never claims a grant on a server about to stop.
+ */
+export type SigningTracker = (scope: SigningScope) => Promise<() => void>;
+
 function startJob(
   key: string,
   dataDir: string,
@@ -260,42 +267,56 @@ function startJob(
   current: () => void,
   timing: MobileSigningTiming,
   chain: string | undefined,
+  track?: SigningTracker,
 ): Job {
+  let release = () => {};
+  const tracked = async () => {
+    try {
+      release = (await track?.(scope)) ?? release;
+    } catch {
+      /* Deployment bookkeeping never blocks signing. */
+    }
+  };
   const job: Job = {
     phase: "queued",
     request_id: null,
     mode: null,
     deadline_seconds: null,
     started: Date.now(),
-    done: helper(
-      dataDir,
-      scope,
-      current,
-      timing,
-      {
-        progress: {
-          accepted: (id, seconds, mode) => {
-            job.phase = "transferring";
-            job.request_id = id;
-            job.mode = mode;
-            job.deadline_seconds = seconds;
+    done: tracked()
+      .then(() =>
+        helper(
+          dataDir,
+          scope,
+          current,
+          timing,
+          {
+            progress: {
+              accepted: (id, seconds, mode) => {
+                job.phase = "transferring";
+                job.request_id = id;
+                job.mode = mode;
+                job.deadline_seconds = seconds;
+              },
+              committed: () => {
+                job.phase = "signing";
+              },
+            },
           },
-          committed: () => {
-            job.phase = "signing";
-          },
+          chain,
+        ),
+      )
+      .then(
+        (receipt) => {
+          job.outcome = { receipt: receiptFor(scope, receipt) };
         },
-      },
-      chain,
-    ).then(
-      (receipt) => {
-        job.outcome = { receipt: receiptFor(scope, receipt) };
-      },
-      () => {
-        job.outcome = { error: true };
-      },
-    ),
+        () => {
+          job.outcome = { error: true };
+        },
+      ),
   };
   void job.done.then(() => {
+    release();
     setTimeout(() => {
       if (jobs.get(key) === job) jobs.delete(key);
     }, RETAIN_SETTLED_MS).unref();
@@ -323,6 +344,7 @@ export async function requestMobileSignature(
   timing: MobileSigningTiming = {},
   /** C-612: set only while the Run's release chain is approved (see host `attested`). */
   chain?: string,
+  track?: SigningTracker,
 ) {
   const key = JSON.stringify([
     dataDir,
@@ -362,13 +384,13 @@ export async function requestMobileSignature(
           poll_after_seconds: 5,
         };
   if (!job) {
-    job = startJob(key, dataDir, scope, current, timing, chain);
+    job = startJob(key, dataDir, scope, current, timing, chain, track);
     await wait(job);
   } else if (job.outcome && "error" in job.outcome && job.request_id) {
     // The previous attempt ended after its claim without a result (e.g. the
     // helper was interrupted). Continue the same request: resend or look up.
     jobs.delete(key);
-    job = startJob(key, dataDir, scope, current, timing, chain);
+    job = startJob(key, dataDir, scope, current, timing, chain, track);
     await wait(job);
   }
   const elapsed_seconds = Math.floor((Date.now() - job.started) / 1000);

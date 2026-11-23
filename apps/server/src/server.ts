@@ -13,6 +13,7 @@ import {
   enqueueOwnerMessage,
   executorExecution,
   HostOpsService,
+  holdLongOperation,
   LiveExtMessageSender,
   loadMachineCapabilityCatalog,
   loadMergeGateConfig,
@@ -80,6 +81,10 @@ import {
 } from "./mobile-signing.js";
 import { OFFSITE_SYNC_INTERVAL_MS, OffsiteSync } from "./offsite-sync.js";
 import { serverProbes } from "./probes.js";
+import {
+  resumeInterruptedPublications,
+  trackedPublisher,
+} from "./publication-recovery.js";
 import { apkPublisher } from "./publish-artifact.js";
 import {
   clearTickProfileSync,
@@ -225,6 +230,11 @@ export async function startCardiganServer(
     throw error;
   }
 }
+
+export {
+  resumeInterruptedPublications,
+  trackedPublisher,
+} from "./publication-recovery.js";
 
 async function assembleServer(
   options: StartServerOptions,
@@ -509,6 +519,13 @@ async function assembleServer(
     options.role !== "background" &&
     execution.mode === "agent-ssh" &&
     runtimeEnv.CARDIGAN_MOBILE_SIGNING === "1";
+  // C-609: one publisher per server, so its shutdown marks cut-off uploads.
+  const publisher =
+    options.role !== "background" &&
+    execution.mode === "agent-ssh" &&
+    runtimeEnv.CARDIGAN_ARTIFACT_PUBLICATION === "1"
+      ? trackedPublisher(store, apkPublisher(config.dataDir))
+      : undefined;
   let mcp: RunningServer;
   try {
     mcp =
@@ -526,10 +543,7 @@ async function assembleServer(
               // depending on domain only (§20.2).
               store: store as McpBackend,
               probeHost: probes,
-              ...(execution.mode === "agent-ssh" &&
-              runtimeEnv.CARDIGAN_ARTIFACT_PUBLICATION === "1"
-                ? { publishArtifact: apkPublisher(config.dataDir) }
-                : {}),
+              ...(publisher ? { publishArtifact: publisher } : {}),
               ...(mobileSigning
                 ? {
                     openMobileArtifact: (scope, id, current) =>
@@ -541,6 +555,13 @@ async function assembleServer(
                         current,
                         {},
                         chain,
+                        (signing) =>
+                          holdLongOperation(store, {
+                            kind: "mobile_signing",
+                            project_id: signing.project,
+                            card_id: signing.card,
+                            label: `受管送签（${signing.platform}）`,
+                          }),
                       ),
                     chainSigning: (scope, candidate, current) =>
                       registerChainCandidate(
@@ -1059,6 +1080,8 @@ async function assembleServer(
   if (options.backgroundReady)
     void options.backgroundReady.then(() => startup.resolve(true));
   else startup.resolve(true);
+  // C-609: publications a restart cut off continue without their caller.
+  if (publisher) void resumeInterruptedPublications(store, publisher);
   return {
     url: mcp.url,
     host: mcp.host,
@@ -1066,6 +1089,8 @@ async function assembleServer(
     store,
     ...(web === undefined ? {} : { web }),
     close: async () => {
+      // C-609: uploads failing from here on were cut off, not refused.
+      publisher?.drain();
       // The Workbench closes first, alongside the control plane: it stops
       // accepting connections and ends every SSE stream at once, so an open
       // browser tab cannot hold the restart while the phase loops drain their
