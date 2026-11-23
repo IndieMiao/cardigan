@@ -19,8 +19,15 @@ export function AttachmentPreview({
   const [open, setOpen] = useState(false),
     [index, setIndex] = useState(initial),
     // C-540: a thumbnail that fails to load shows the placeholder, not a blank box.
+    // C-614: the first failure retries the locally rendered thumbnail, since
+    // the server may have redirected to an off-site copy the browser cannot reach.
     [failed, setFailed] = useState<string | null>(null),
-    thumbnail = attachment.thumbnail_path;
+    [local, setLocal] = useState(false),
+    thumbnail =
+      attachment.thumbnail_path &&
+      (local
+        ? `${attachment.thumbnail_path}?local=1`
+        : attachment.thumbnail_path);
   return (
     <Lightbox
       open={open}
@@ -31,7 +38,8 @@ export function AttachmentPreview({
       index={index}
       onIndexChange={setIndex}
       images={images.map((a) => ({
-        src: a.download_path,
+        src: a.preview_path ?? a.download_path,
+        ...(a.preview_path ? { fallbackSrc: `${a.preview_path}?local=1` } : {}),
         alt: `附件 ${attachmentName(a)}`,
         caption: (
           <>
@@ -59,7 +67,7 @@ export function AttachmentPreview({
               src={thumbnail}
               alt={`附件 ${attachmentName(attachment)}`}
               loading="lazy"
-              onError={() => setFailed(thumbnail)}
+              onError={() => (local ? setFailed(thumbnail) : setLocal(true))}
             />
           ) : (
             <ImageUnavailableIcon />
