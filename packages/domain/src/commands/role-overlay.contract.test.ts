@@ -88,6 +88,8 @@ test("C-613 a version stores and validates its overlay", () => {
     { ...overlay("c"), removed_tools: ["publish_artifact"] },
     { ...overlay("c"), base_hash: "" },
     { ...overlay("c"), base_role_id: "Bad Id" },
+    // Derived from submit_review: a lone removal would silently not apply.
+    { ...overlay("c"), removed_tools: ["withdraw_review"] },
   ])
     expect(
       validateRole({

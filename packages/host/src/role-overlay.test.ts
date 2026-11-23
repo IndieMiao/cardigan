@@ -21,6 +21,8 @@ import {
 
 const launch = { harness: "codex" as const, launch_profile_ref: "fixture" };
 const TIME_RULE = "时间点约束：只认交付时刻的基线和证据。";
+/** A release that changed no default role. */
+const STABLE = { changedRoles: [], previousDefaults: {} };
 
 function withStore(run: (store: Store, project: string) => void) {
   const store = Store.open({ dbPath: ":memory:" });
@@ -69,8 +71,8 @@ test("C-613 a customised role that reads losslessly migrates once, keeping its r
       allowed_tools: [...pack.allowed_tools, "list_needs_you"],
     };
     put(store, project, before, 1);
-    syncProjectOverlayRoles(store, project);
-    syncProjectOverlayRoles(store, project);
+    syncProjectOverlayRoles(store, project, STABLE);
+    syncProjectOverlayRoles(store, project, STABLE);
     const after = store.uow.read((tx) =>
       getRoleVersion(tx, project, "reviewer"),
     );
@@ -196,8 +198,8 @@ test("C-613 an overlay edited by hand, or conflicting with the pack, keeps its v
       { instructions: "Older" },
     );
     put(store, project, { ...conflict, role_id: "tester" }, 1);
-    syncProjectOverlayRoles(store, project);
-    syncProjectOverlayRoles(store, project);
+    syncProjectOverlayRoles(store, project, STABLE);
+    syncProjectOverlayRoles(store, project, STABLE);
     store.uow.read((tx) => {
       expect(getRoleVersion(tx, project, "reviewer")?.version).toBe(1);
       expect(getRoleVersion(tx, project, "tester")?.version).toBe(1);
@@ -234,7 +236,7 @@ test("C-613 a stale customised role is not migrated; only other projects get the
       },
       1,
     );
-    syncProjectOverlayRoles(store, project);
+    syncProjectOverlayRoles(store, project, STABLE);
     store.uow.read((tx) => {
       expect(getRoleVersion(tx, project, "host_ops")?.version).toBe(1);
       expect(getRoleVersion(tx, project, "reviewer")?.version).toBe(1);
@@ -299,3 +301,64 @@ test("C-613 derivation keeps every project paragraph and tool; a foreign base is
     default_overlay: { base_role_id: "reviewer" },
   });
 });
+
+test("C-613 V-3025: an untouched previous default whose pack withdrew a tool upgrades on the default path, not into an overlay", () =>
+  withStore((store) => {
+    store.createProject({ id: "cardigan" });
+    const pack = defaultRoleDefinition("reviewer", launch);
+    // The previous pack granted list_needs_you; this release withdrew it.
+    const previous = {
+      ...pack,
+      allowed_tools: [...pack.allowed_tools, "list_needs_you" as const],
+    };
+    put(store, "cardigan", previous, 1);
+    upgradeDeployedRoles(
+      store,
+      "cardigan",
+      ["reviewer"],
+      { reviewer: deploymentRolePolicyHash(previous) },
+      new Set(["fixture"]),
+    );
+    const role = store.uow.read((tx) =>
+      getRoleVersion(tx, "cardigan", "reviewer"),
+    );
+    expect(role?.version).toBe(2);
+    expect(role?.default_overlay).toBeUndefined();
+    expect(role?.allowed_tools).not.toContain("list_needs_you");
+    expect(events(store, "cardigan", "host_role_overlay_migrated")).toEqual([]);
+  }));
+
+test("C-613 V-3025: other projects never migrate an untouched previous default or a role whose default just changed", () =>
+  withStore((store, project) => {
+    const reviewer = defaultRoleDefinition("reviewer", launch);
+    const tester = defaultRoleDefinition("tester", launch);
+    const previous = {
+      ...reviewer,
+      allowed_tools: [...reviewer.allowed_tools, "list_needs_you" as const],
+    };
+    put(store, project, previous, 1);
+    // Looks like default + a project tool, but this release changed tester.
+    put(
+      store,
+      project,
+      {
+        ...tester,
+        allowed_tools: [...tester.allowed_tools, "list_needs_you" as const],
+      },
+      1,
+    );
+    syncProjectOverlayRoles(store, project, {
+      changedRoles: ["reviewer", "tester"],
+      previousDefaults: { reviewer: deploymentRolePolicyHash(previous) },
+    });
+    store.uow.read((tx) => {
+      expect(getRoleVersion(tx, project, "reviewer")?.version).toBe(1);
+      expect(getRoleVersion(tx, project, "tester")?.version).toBe(1);
+    });
+    const notices = events(store, project, "host_role_upgrade_deferred").map(
+      (e) => (e.payload as { notice: string }).notice,
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("tester");
+    expect(notices[0]).toContain("本次部署改动了它的默认包");
+  }));

@@ -123,6 +123,13 @@ export function overlayEditedByHand(role: Role): boolean {
   );
 }
 
+/** What the deployment supervisor reports about this release's default pack. */
+export interface DeployedPack {
+  readonly changedRoles: readonly string[];
+  /** Policy hashes of the previously deployed defaults, by role id. */
+  readonly previousDefaults: Readonly<Record<string, string>>;
+}
+
 const paragraphs = (text: string) =>
   text
     .split(/\n[ \t]*\n/u)
@@ -231,6 +238,7 @@ export function syncOverlayRoles(
   tx: StoreTransactionContext,
   project: ProjectId,
   now: () => string,
+  pack: DeployedPack,
   /** False where the default-pack path already reports a customised role. */
   noticeCandidates = true,
 ) {
@@ -245,18 +253,26 @@ export function syncOverlayRoles(
     let source: ReturnType<typeof composeOverlaySource>;
     let migrated: DerivedOverlay | undefined;
     if (!overlay) {
-      const pack = packRole(id, latest);
-      // Plain default roles keep the existing default-pack path.
+      const current = packRole(id, latest);
+      const hash = deploymentRolePolicyHash(latest);
+      // Plain default roles, current or previous, keep the default-pack path:
+      // a tool or paragraph the new pack dropped must not become a project rule.
       if (
-        !pack ||
-        deploymentRolePolicyHash(latest) === deploymentRolePolicyHash(pack)
+        !current ||
+        hash === deploymentRolePolicyHash(current) ||
+        (Object.hasOwn(pack.previousDefaults, id) &&
+          pack.previousDefaults[id] === hash)
       )
         continue;
+      // When this release changed the role's default, a project-looking extra
+      // may be exactly what the pack just withdrew; never guess at deployment.
+      const changed = pack.changedRoles.includes(id);
       migrated = deriveOverlayRules(latest, id);
       if (!migrated) continue;
       // Lacking default text or tools may be an older pack or a deliberate
       // removal; neither is guessed at deployment.
       if (
+        changed ||
         migrated.mismatched.length ||
         migrated.missing.length ||
         migrated.missing_tools.length
@@ -265,8 +281,9 @@ export function syncOverlayRoles(
           recordRoleDeferral(
             tx,
             project,
-            `overlay-candidate:${id}:${latest.version}:${deploymentRolePolicyHash(pack)}`,
+            `overlay-candidate:${id}:${latest.version}:${deploymentRolePolicyHash(current)}`,
             `角色 ${id} v${latest.version} 是项目定制版，但不能无损读成“当前默认包 + 附加规则”（${[
+              ...(changed ? ["本次部署改动了它的默认包"] : []),
               ...migrated.mismatched.map((f) => `${f} 与默认包不同`),
               ...(migrated.missing.length
                 ? [`缺少默认包的 ${migrated.missing.length} 段说明`]
@@ -365,8 +382,12 @@ export function syncOverlayRoles(
 }
 
 /** Projects without the bootstrap deployment receipt only take the overlay pass. */
-export function syncProjectOverlayRoles(store: Store, project: ProjectId) {
+export function syncProjectOverlayRoles(
+  store: Store,
+  project: ProjectId,
+  pack: DeployedPack,
+) {
   store.uow.run((tx) =>
-    syncOverlayRoles(tx, project, () => new Date().toISOString()),
+    syncOverlayRoles(tx, project, () => new Date().toISOString(), pack),
   );
 }

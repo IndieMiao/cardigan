@@ -106,7 +106,10 @@ export async function runSelfDeployCommand(
       for (const other of store.listProjects()) {
         if (other.id === "cardigan") continue;
         try {
-          syncProjectOverlayRoles(store, other.id);
+          syncProjectOverlayRoles(store, other.id, {
+            changedRoles: changed,
+            previousDefaults: previous as Record<string, string>,
+          });
         } catch {
           io.stderr(
             `项目 ${other.id} 的定制角色未能随默认包升级，下次部署重试`,

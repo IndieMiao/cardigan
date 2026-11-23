@@ -203,6 +203,11 @@ function validateOverlay(overlay: RoleOverlay): void {
       `${key} 含有不认识的工具`,
     );
   ensure(
+    !overlay.removed_tools.includes("withdraw_review"),
+    "validation_failed",
+    "withdraw_review 随 submit_review 授予，不能单独移除",
+  );
+  ensure(
     !overlay.extra_tools.some((tool) => overlay.removed_tools.includes(tool)),
     "validation_failed",
     "同一工具不能既追加又移除",

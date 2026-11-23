@@ -145,7 +145,13 @@ export function upgradeDeployedRoles(
         ),
       );
     // C-613: overlay roles follow the pack on every deployment.
-    syncOverlayRoles(tx, project, clock.now, false);
+    syncOverlayRoles(
+      tx,
+      project,
+      clock.now,
+      { changedRoles, previousDefaults },
+      false,
+    );
     const ids = [
       ...new Set(listRoleVersions(tx, project).map((r) => r.role_id)),
     ];
