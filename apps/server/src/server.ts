@@ -73,6 +73,7 @@ import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { serverMacosChecks } from "./macos-checks.js";
+import { McpReader } from "./mcp-reader.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import {
   drainMobileSigning,
@@ -526,6 +527,11 @@ async function assembleServer(
           hostOpsOptions.clock,
         )
       : undefined;
+  // C-648: project_snapshot reads off the Web event loop.
+  const reader =
+    options.role !== "background" && databaseFile
+      ? new McpReader({ dbPath: databaseFile })
+      : undefined;
   const listen = createListenRetry({
     intervalMs:
       config.listenRetryIntervalMs ?? DEFAULT_LISTEN_RETRY_INTERVAL_MS,
@@ -671,11 +677,18 @@ async function assembleServer(
                   }
                 : {}),
               pinDelivery: (request) => git.pinDelivery(request),
+              ...(reader
+                ? {
+                    readProjectSnapshot: (context, input) =>
+                      reader.projectSnapshot(context, input),
+                  }
+                : {}),
               log: mcpLog,
             }),
           );
   } catch (error) {
     await diagnostics?.close();
+    await reader?.close();
     await hostOps?.close();
     stopProfiler();
     if (ownsStore) {
@@ -759,6 +772,7 @@ async function assembleServer(
       );
     } catch (error) {
       await diagnostics?.close();
+      await reader?.close();
       await hostOps?.close();
       await mcp.close();
       stopProfiler();
@@ -1019,6 +1033,7 @@ async function assembleServer(
       unregisterOffsite?.();
       await web?.close();
       await diagnostics?.close();
+      await reader?.close();
       await hostOps?.close();
       await mcp.close();
       stopProfiler();
@@ -1084,6 +1099,7 @@ async function assembleServer(
     ]);
     unregisterOffsite?.();
     await diagnostics?.close();
+    await reader?.close();
     await hostOps?.close();
     await mcp.close();
     stopProfiler();
@@ -1148,6 +1164,7 @@ async function assembleServer(
           : undefined,
       ]);
       await diagnostics?.close();
+      await reader?.close();
       await hostOps?.close();
       await mcp.close();
       unregisterOffsite?.();
