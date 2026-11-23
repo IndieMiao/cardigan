@@ -311,14 +311,18 @@ export function rotateIdleDeployedRoles(
       if (
         !latest ||
         latest.role_version <= previous.role_version ||
-        !eventsOfType(state.events, "host_role_upgraded").some(
-          (e) =>
+        // An audited upgrade after the pinned version; later versions that
+        // only changed overlay metadata carry it (C-613).
+        !eventsOfType(state.events, "host_role_upgraded").some((e) => {
+          const p = e.payload as Record<string, unknown>;
+          return (
             e.actor.kind === "system" &&
-            (e.payload as Record<string, unknown>).role_id ===
-              previous.role_id &&
-            (e.payload as Record<string, unknown>).to_version ===
-              latest.role_version,
-        ) ||
+            p.role_id === previous.role_id &&
+            typeof p.to_version === "number" &&
+            p.to_version > previous.role_version &&
+            p.to_version <= latest.role_version
+          );
+        }) ||
         state.runs.some(
           (r) =>
             r.assignment_id === previous.id &&

@@ -195,3 +195,16 @@ test("C-613 replace mode keeps the role's own text and still follows the base's 
     }).ok,
   ).toBe(false);
 });
+
+test("C-613 withdraw_review can be removed together with submit_review", () => {
+  expect(
+    validateRole({
+      ...composed(pack, overlay("c")),
+      default_overlay: {
+        ...overlay("c"),
+        extra_tools: [],
+        removed_tools: ["submit_review", "withdraw_review"],
+      },
+    }).ok,
+  ).toBe(true);
+});

@@ -41,15 +41,19 @@ export function rotateStandingAfterDeployment(
     ensure(
       latest &&
         latest.role_version > previous.role_version &&
-        state.events.some(
-          (e) =>
+        // C-613: a later metadata-only version (no new upgrade audit) still
+        // carries a session pinned before an audited upgrade.
+        state.events.some((e) => {
+          const p = e.payload as Record<string, unknown>;
+          return (
             e.actor.kind === "system" &&
             e.type === "host_role_upgraded" &&
-            (e.payload as Record<string, unknown>).role_id ===
-              previous.role_id &&
-            (e.payload as Record<string, unknown>).to_version ===
-              latest.role_version,
-        ),
+            p.role_id === previous.role_id &&
+            typeof p.to_version === "number" &&
+            p.to_version > previous.role_version &&
+            p.to_version <= latest.role_version
+          );
+        }),
       "illegal_transition",
       "没有已部署默认包的升级审计",
     );

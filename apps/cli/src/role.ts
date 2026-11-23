@@ -656,6 +656,11 @@ async function registerOverlay(
     const derived = deriveOverlayRules(latest, base, mode);
     if (!derived)
       fail(`角色 ${id} 不在默认角色包里，请用 --base 指定作为底的默认角色`);
+    // Registering never changes the role's kind, worktree or capabilities.
+    if (derived.mismatched.length)
+      fail(
+        `角色 ${id} 的 ${derived.mismatched.join("、")} 与默认角色 ${base} 不同，附加规则不能表达；请选 kind、worktree、能力都一致的默认角色作为 --base`,
+      );
     // Registered rules stay as they are unless the version was edited outside
     // them; otherwise read them from the current version, which keeps its
     // text and permissions (a lacking default tool stays removed).
@@ -679,9 +684,11 @@ async function registerOverlay(
       removed.delete(tool);
       if (!packTools.includes(tool)) extra.add(tool);
     }
+    // An explicit removal is kept even for a tool the pack lacks today, so a
+    // later pack that adds it does not grant it.
     for (const tool of remove ?? []) {
       extra.delete(tool);
-      if (packTools.includes(tool)) removed.add(tool);
+      removed.add(tool);
     }
     const rules = {
       base_role_id: base,
@@ -720,11 +727,6 @@ async function registerOverlay(
           : []),
         ...(start === derived.rules && derived.moved
           ? ["  追加说明会移到默认说明之后"]
-          : []),
-        ...(derived.mismatched.length
-          ? [
-              `！${derived.mismatched.join("、")} 与默认角色 ${base} 不同，登记后取默认包的值`,
-            ]
           : []),
         `  迁移前策略指纹：${deploymentRolePolicyHash(latest)}`,
         `  迁移后策略指纹：${source.default_overlay.composed_hash}`,

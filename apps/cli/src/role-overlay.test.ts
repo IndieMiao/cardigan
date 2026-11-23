@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Role } from "@cardigan/domain";
+import { composeRoleOverlay, type Role } from "@cardigan/domain";
 import { deploymentRolePolicyHash } from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
@@ -339,4 +339,149 @@ test("C-613 V-3026: a role of its own keeps its text and follows only the base's
     instructions_mode: "replace",
     removed_tools: ["project_snapshot"],
   });
+});
+
+test("C-613 V-3028: release_ops follows a default of the same kind and never gains PM-only tools", async () => {
+  const coder = defaultRoleDefinition("coder", {
+    harness: "codex",
+    launch_profile_ref: "codex-agent",
+  });
+  const own = "发布员：只负责核对渠道、版本号并发布制品。";
+  store((s) =>
+    s.uow.run((tx) =>
+      writeRole(
+        tx,
+        PROJECT,
+        {
+          ...coder,
+          role_id: "release_ops",
+          display_name: "发布员",
+          core_prompt: "",
+          version: 1,
+          instructions: own,
+          allowed_tools: ["whoami", "publish_artifact"],
+        } as Role,
+        { mode: "add" },
+      ),
+    ),
+  );
+  // A base of another kind would rewrite kind, worktree and capabilities.
+  expect(
+    await run([
+      "role",
+      "overlay",
+      "release_ops",
+      "--base",
+      "pm",
+      "--keep-instructions",
+      "--dry-run",
+    ]),
+  ).toBe(2);
+  expect(printed()).toContain("kind");
+  // send_owner_message stays a standing-PM tool.
+  expect(
+    await run([
+      "role",
+      "overlay",
+      "release_ops",
+      "--base",
+      "coder",
+      "--keep-instructions",
+      "--add-tools",
+      "send_owner_message",
+    ]),
+  ).toBe(2);
+  expect(
+    await run([
+      "role",
+      "overlay",
+      "release_ops",
+      "--base",
+      "coder",
+      "--keep-instructions",
+    ]),
+  ).toBe(0);
+  const next = latest("release_ops");
+  expect(next.version).toBe(2);
+  expect(next.instructions).toBe(own);
+  expect([...next.allowed_tools].sort()).toEqual([
+    "publish_artifact",
+    "whoami",
+  ]);
+  expect(next.default_overlay).toMatchObject({
+    base_role_id: "coder",
+    instructions_mode: "replace",
+    extra_tools: ["publish_artifact"],
+  });
+});
+
+test("C-613 V-3028: an explicit removal outside today's pack is kept for later packs", async () => {
+  const pack = defaultRoleDefinition("reviewer", {
+    harness: "codex",
+    launch_profile_ref: "codex-agent",
+  });
+  store((s) =>
+    s.uow.run((tx) =>
+      writeRole(
+        tx,
+        PROJECT,
+        {
+          ...pack,
+          core_prompt: "",
+          version: 1,
+          allowed_tools: [...pack.allowed_tools, "list_needs_you"],
+        } as Role,
+        { mode: "add" },
+      ),
+    ),
+  );
+  expect(
+    await run([
+      "role",
+      "overlay",
+      "reviewer",
+      "--remove-tools",
+      "list_needs_you",
+    ]),
+  ).toBe(0);
+  const overlay = latest("reviewer").default_overlay;
+  expect(overlay?.removed_tools).toEqual(["list_needs_you"]);
+  expect(
+    composeRoleOverlay(
+      { ...pack, allowed_tools: [...pack.allowed_tools, "list_needs_you"] },
+      overlay as NonNullable<typeof overlay>,
+    ).allowed_tools,
+  ).not.toContain("list_needs_you");
+});
+
+test("C-613 V-3028: a role without review tools gets neither submit nor withdraw", async () => {
+  const pack = defaultRoleDefinition("reviewer", {
+    harness: "codex",
+    launch_profile_ref: "codex-agent",
+  });
+  store((s) =>
+    s.uow.run((tx) =>
+      writeRole(
+        tx,
+        PROJECT,
+        {
+          ...pack,
+          core_prompt: "",
+          version: 1,
+          allowed_tools: pack.allowed_tools.filter(
+            (t) => t !== "submit_review" && t !== "withdraw_review",
+          ),
+        } as Role,
+        { mode: "add" },
+      ),
+    ),
+  );
+  expect(await run(["role", "overlay", "reviewer"])).toBe(0);
+  const next = latest("reviewer");
+  expect(next.allowed_tools).not.toContain("submit_review");
+  expect(next.allowed_tools).not.toContain("withdraw_review");
+  expect([...(next.default_overlay?.removed_tools ?? [])].sort()).toEqual([
+    "submit_review",
+    "withdraw_review",
+  ]);
 });

@@ -11,6 +11,7 @@ import { expect, test } from "vitest";
 import {
   deploymentRolePolicyHash,
   idleRolePolicies,
+  rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
 import {
@@ -18,6 +19,12 @@ import {
   deriveOverlayRules,
   syncProjectOverlayRoles,
 } from "./role-overlay.js";
+import { weakRolePolicyHash } from "./role-policy-hash.js";
+import {
+  knownDefault,
+  knownDefaults,
+  rememberDefault,
+} from "./role-provenance.js";
 
 const launch = { harness: "codex" as const, launch_profile_ref: "fixture" };
 const TIME_RULE = "时间点约束：只认交付时刻的基线和证据。";
@@ -75,6 +82,28 @@ test("C-613 a customised role that reads losslessly migrates once, keeping its r
       allowed_tools: [...pack.allowed_tools, "list_needs_you"],
     };
     put(store, project, before, 1);
+    // Without any older default to compare with, an extra tool is not guessed.
+    syncProjectOverlayRoles(store, project, STABLE);
+    expect(
+      store.uow.read((tx) => getRoleVersion(tx, project, "reviewer")?.version),
+    ).toBe(1);
+    expect(
+      events(store, project, "host_role_upgrade_deferred").map(
+        (e) => (e.payload as { notice: string }).notice,
+      ),
+    ).toEqual([expect.stringContaining("额外工具无法与更早的默认包核对")]);
+    // An earlier pack is remembered and did not have list_needs_you.
+    store.uow.run((tx) =>
+      rememberDefault(
+        tx,
+        project,
+        knownDefaults(tx, project),
+        "reviewer",
+        knownDefault({ ...pack, instructions: "Older reviewer text" }),
+        "pack",
+        "2026-01-01T00:00:00.000Z",
+      ),
+    );
     syncProjectOverlayRoles(store, project, STABLE);
     syncProjectOverlayRoles(store, project, STABLE);
     const after = store.uow.read((tx) =>
@@ -521,3 +550,123 @@ test("C-613 V-3026: a repeated project paragraph is kept every time it occurs", 
     moved: true,
   });
 });
+
+test("C-613 V-3028: a deferred proof is reused by the next release instead of guessing again", () =>
+  withStore((store, project) => {
+    const pack = defaultRoleDefinition("reviewer", launch);
+    const v1 = {
+      ...pack,
+      allowed_tools: [...pack.allowed_tools, "list_needs_you" as const],
+    };
+    put(store, project, v1, 1);
+    syncProjectOverlayRoles(store, project, {
+      changedRoles: ["reviewer"],
+      previousDefaults: { reviewer: deploymentRolePolicyHash(v1) },
+      profiles: () => new Set(),
+    });
+    expect(
+      store.uow.read((tx) => getRoleVersion(tx, project, "reviewer")?.version),
+    ).toBe(1);
+    // The next release changes nothing for reviewer; its profile is back.
+    syncProjectOverlayRoles(store, project, {
+      ...STABLE,
+      previousDefaults: { reviewer: deploymentRolePolicyHash(pack) },
+    });
+    const role = store.uow.read((tx) =>
+      getRoleVersion(tx, project, "reviewer"),
+    );
+    expect(role?.version).toBe(2);
+    expect(role?.default_overlay).toBeUndefined();
+    expect(role?.allowed_tools).not.toContain("list_needs_you");
+  }));
+
+test("C-613 V-3028: a tool the project pre-added before the pack adopted it is proven, and other new tools arrive", () =>
+  withStore((store) => {
+    store.createProject({ id: "cardigan" });
+    const pack = defaultRoleDefinition("reviewer", launch);
+    const previous: RoleDefinition = {
+      ...pack,
+      instructions: "Older reviewer instructions",
+      allowed_tools: pack.allowed_tools.filter(
+        (t) => t !== "get_check_log" && t !== "read_attachment",
+      ),
+    };
+    put(
+      store,
+      "cardigan",
+      {
+        ...previous,
+        instructions: `${previous.instructions}\n\n${TIME_RULE}`,
+        allowed_tools: [...previous.allowed_tools, "get_check_log"],
+      },
+      1,
+    );
+    upgradeDeployedRoles(
+      store,
+      "cardigan",
+      ["reviewer"],
+      { reviewer: deploymentRolePolicyHash(previous) },
+      new Set(["fixture"]),
+    );
+    store.uow.read((tx) => {
+      const role = getRoleVersion(tx, "cardigan", "reviewer");
+      expect(role?.version).toBe(2);
+      expect(role?.allowed_tools).toEqual(
+        expect.arrayContaining(["get_check_log", "read_attachment"]),
+      );
+      expect(role?.default_overlay).toMatchObject({
+        append_instructions: TIME_RULE,
+        extra_tools: ["get_check_log"],
+      });
+      expect(tx.human_actions.list("cardigan")).toEqual([]);
+    });
+  }));
+
+test("C-613 V-3028: an older supervisor's fingerprint without machine requirements still proves a plain default", () =>
+  withStore((store, project) => {
+    const pack = defaultRoleDefinition("frontend_engineer", launch);
+    const previous = {
+      ...pack,
+      allowed_tools: pack.allowed_tools.filter((t) => t !== "get_check_log"),
+    };
+    put(store, project, previous, 1);
+    syncProjectOverlayRoles(store, project, {
+      ...STABLE,
+      changedRoles: ["frontend_engineer"],
+      previousDefaults: {
+        frontend_engineer: weakRolePolicyHash(previous),
+      },
+    });
+    const role = store.uow.read((tx) =>
+      getRoleVersion(tx, project, "frontend_engineer"),
+    );
+    expect(role?.version).toBe(2);
+    expect(role?.allowed_tools).toContain("get_check_log");
+    expect(role?.required_capabilities).toEqual(["browser.chromium"]);
+  }));
+
+test("C-613 V-3028: a session pinned before an audited upgrade follows a later metadata-only version", () =>
+  withStore((store, project) => {
+    const pack = defaultRoleDefinition("pm", launch);
+    put(store, project, { ...pack, instructions: "Earlier" }, 1);
+    put(store, project, pack, 2);
+    put(store, project, pack, 3);
+    store.uow.run((tx) => {
+      tx.assignments.put(project, opsAssignment(1));
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project),
+        type: "host_role_upgraded",
+        actor: { kind: "system", project_id: project },
+        created_at: "2026-01-01T00:00:00.000Z",
+        payload: { role_id: "pm", from_version: 1, to_version: 2 },
+      });
+    });
+    const next = rotateIdleDeployedRoles(store, project);
+    store.uow.read((tx) => {
+      expect(tx.assignments.get(project, "A-60" as never)?.status).toBe(
+        "released",
+      );
+      expect(next && tx.assignments.get(project, next)?.role_version).toBe(3);
+    });
+  }));

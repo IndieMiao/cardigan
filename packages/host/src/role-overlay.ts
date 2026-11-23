@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   composeRoleOverlay,
   type ProjectId,
@@ -9,13 +8,29 @@ import {
   type ToolName,
   upgradeRoleAfterDeployment,
 } from "@cardigan/domain";
-import { defaultRoleDefinition, isDefaultRoleId } from "@cardigan/roles";
+import {
+  DEFAULT_ROLE_KINDS,
+  defaultRoleDefinition,
+  isDefaultRoleId,
+} from "@cardigan/roles";
 import {
   listRoleVersions,
   persistRoleEffect,
   type Store,
   type StoreTransactionContext,
 } from "@cardigan/store";
+import { deploymentRolePolicyHash } from "./role-policy-hash.js";
+import {
+  isOlderDefault,
+  type KnownDefault,
+  knownDefault,
+  knownDefaults,
+  paragraphHash,
+  paragraphs,
+  provePreviousDefault,
+  rememberDefault,
+  rulesAgainstKnown,
+} from "./role-provenance.js";
 
 /**
  * C-613: a project role is a default-pack role plus the project's own rules.
@@ -23,21 +38,7 @@ import {
  * should equal; deployment receipts, idle session upgrades and the CLI share it.
  */
 
-/** Only fields replaced by --from-default participate; project launch settings stay local. */
-export function deploymentRolePolicyHash(role: RoleDefinition): string {
-  const policy = {
-    instructions: role.instructions ?? role.core_prompt ?? "",
-    allowed_tools: [...role.allowed_tools].sort(),
-    capabilities: [...role.capabilities].sort(),
-    kind: role.kind,
-    worktree: role.worktree,
-    // Keep historical hashes for roles with no machine capability constraints.
-    ...(role.required_capabilities?.length
-      ? { required_capabilities: [...role.required_capabilities].sort() }
-      : {}),
-  };
-  return createHash("sha256").update(JSON.stringify(policy)).digest("hex");
-}
+export { deploymentRolePolicyHash };
 
 export function recordRoleDeferral(
   tx: StoreTransactionContext,
@@ -135,12 +136,6 @@ export interface DeployedPack {
   readonly profiles?: () => ReadonlySet<string>;
 }
 
-const paragraphs = (text: string) =>
-  text
-    .split(/\n[ \t]*\n/u)
-    .map((p) => p.trim())
-    .filter(Boolean);
-
 export interface DerivedOverlay {
   readonly rules: RoleOverlayRules;
   /** Default paragraphs the role lacks; composing adds them back. */
@@ -194,9 +189,12 @@ export function deriveOverlayRules(
   const extra_tools = [...new Set(role.allowed_tools)].filter(
     (t) => !baseTools.includes(t),
   ) as ToolName[];
-  // withdraw_review follows submit_review and cannot be removed on its own.
+  // withdraw_review follows submit_review: it is removed only together.
   const missing_tools = baseTools.filter(
-    (t) => !role.allowed_tools.includes(t) && t !== "withdraw_review",
+    (t) =>
+      !role.allowed_tools.includes(t) &&
+      (t !== "withdraw_review" ||
+        !role.allowed_tools.includes("submit_review")),
   );
   const own = role.instructions ?? role.core_prompt;
   const baseText = (base.instructions ?? "").replace(/\s+$/u, "");
@@ -237,53 +235,6 @@ export function deriveOverlayRules(
   };
 }
 
-/** At most 2^6 tool subsets per text cut; larger extras are not guessed. */
-const MAX_SPLIT_TOOLS = 6;
-
-/**
- * Read a role as "the previously deployed default + appended paragraphs +
- * extra tools", proven by the supervisor's exact policy hash of that default.
- * Anything the role has beyond the previous default is a project rule;
- * anything the new pack withdrew from the previous default is not.
- */
-export function splitFromPreviousDefault(
-  role: Role,
-  previousHash: string,
-): RoleOverlayRules | undefined {
-  const text = role.instructions;
-  const current = packRole(role.role_id, role);
-  if (text === undefined || !current) return undefined;
-  const currentTools = baseToolsOf(current);
-  const candidates = [...new Set(role.allowed_tools)].filter(
-    (t) => t === "withdraw_review" || !currentTools.includes(t),
-  );
-  if (candidates.length > MAX_SPLIT_TOOLS) return undefined;
-  const cuts = new Set([text.length]);
-  for (const m of text.matchAll(/\n[ \t]*\n/gu))
-    for (const at of [m.index, m.index + 1, m.index + m[0].length])
-      cuts.add(at);
-  const subsets = Array.from({ length: 2 ** candidates.length }, (_, bits) =>
-    candidates.filter((_, i) => bits & (1 << i)),
-  ).sort((a, b) => a.length - b.length);
-  for (const cut of [...cuts].sort((a, b) => b - a))
-    for (const extra of subsets) {
-      const previous = {
-        ...role,
-        instructions: text.slice(0, cut),
-        allowed_tools: role.allowed_tools.filter((t) => !extra.includes(t)),
-      };
-      if (deploymentRolePolicyHash(previous) !== previousHash) continue;
-      return {
-        base_role_id: role.role_id,
-        append_instructions: text.slice(cut).trim(),
-        // withdraw_review is derived again from submit_review.
-        extra_tools: extra.filter((t) => t !== "withdraw_review"),
-        removed_tools: [],
-      };
-    }
-  return undefined;
-}
-
 /** Before/after facts for a notice or the CLI; no instruction text is lost. */
 export function overlaySummary(rules: RoleOverlayRules) {
   return {
@@ -307,14 +258,34 @@ type Plan =
       readonly migrated?: { readonly rules: RoleOverlayRules; moved: boolean };
     };
 
-function planRole(
+interface PlanContext {
+  readonly project: ProjectId;
+  readonly pack: DeployedPack;
+  readonly defaultPath: boolean;
+  readonly known: ReadonlyMap<string, readonly KnownDefault[]>;
+  /** Keep a proven older default, so a deferral or a later release can reuse it. */
+  readonly remember: (id: string, value: RoleDefinition) => void;
+}
+
+function overlayWrite(
   latest: Role,
-  project: ProjectId,
-  pack: DeployedPack,
-  defaultPath: boolean,
-): Plan {
+  rules: RoleOverlayRules,
+  moved: boolean,
+): Plan | undefined {
+  const source = composeOverlaySource(latest, rules);
+  return (
+    source && {
+      kind: "write",
+      source,
+      composed_hash: source.default_overlay.composed_hash,
+      migrated: { rules, moved },
+    }
+  );
+}
+
+function planRole(latest: Role, c: PlanContext): Plan {
   const id = latest.role_id;
-  const hint = `cardigan role overlay ${id} --project ${project} --dry-run`;
+  const hint = `cardigan role overlay ${id} --project ${c.project} --dry-run`;
   const overlay = latest.default_overlay;
   if (overlay) {
     if (overlayEditedByHand(latest))
@@ -338,52 +309,68 @@ function planRole(
   }
   const current = packRole(id, latest);
   if (!current) return { kind: "skip" };
-  const hash = deploymentRolePolicyHash(latest);
   const currentHash = deploymentRolePolicyHash(current);
-  if (hash === currentHash) return { kind: "skip" };
-  const previous = Object.hasOwn(pack.previousDefaults, id)
-    ? pack.previousDefaults[id]
+  if (deploymentRolePolicyHash(latest) === currentHash) return { kind: "skip" };
+  const older = (c.known.get(id) ?? []).filter(
+    (k) => k.policy_hash !== currentHash,
+  );
+  const previous = Object.hasOwn(c.pack.previousDefaults, id)
+    ? c.pack.previousDefaults[id]
     : undefined;
-  if (previous === hash)
-    // An untouched previous default takes the plain new default; the
-    // bootstrap project's default-pack path already does exactly this.
-    return defaultPath
+  // 1. An untouched older default takes the plain new default; the bootstrap
+  // project's default-pack path already does exactly this.
+  if (isOlderDefault(latest, current, older, previous)) {
+    c.remember(id, latest);
+    return c.defaultPath
       ? { kind: "skip" }
       : { kind: "write", source: current, composed_hash: currentHash };
-  const split = previous && splitFromPreviousDefault(latest, previous);
-  if (split) {
-    const source = composeOverlaySource(latest, split);
-    if (source)
-      return {
-        kind: "write",
-        source,
-        composed_hash: source.default_overlay.composed_hash,
-        migrated: { rules: split, moved: false },
-      };
   }
+  // 2. Project rules on top of a remembered older default, read against that
+  // default's own content: tools it had are never project rules.
+  for (const known of older) {
+    const rules = rulesAgainstKnown(latest, known);
+    const plan = rules && overlayWrite(latest, rules, false);
+    if (plan) return plan;
+  }
+  // 3. Project rules on top of the previous default, proven by its hash.
+  const proof = previous && provePreviousDefault(latest, current, previous);
+  if (proof) {
+    c.remember(id, proof.previous);
+    const plan = overlayWrite(latest, proof.rules, false);
+    if (plan) return plan;
+  }
+  // 4. Project rules on top of the current default. When this release changed
+  // the role's default, or an apparent extra is in an older default, it may be
+  // what a pack withdrew; extra tools also need older defaults to compare with.
   const derived = deriveOverlayRules(latest, id);
-  // When this release changed the role's default, an apparent extra may be
-  // what the pack just withdrew; never guess at deployment.
-  const changed = pack.changedRoles.includes(id);
+  const changed = c.pack.changedRoles.includes(id);
+  const stale =
+    !!derived &&
+    older.some(
+      (k) =>
+        derived.rules.extra_tools.some((t) => k.allowed_tools.includes(t)) ||
+        paragraphs(derived.rules.append_instructions).some((p) =>
+          k.paragraphs.includes(paragraphHash(p)),
+        ),
+    );
+  const unproven = !!derived?.rules.extra_tools.length && older.length === 0;
   if (
     derived &&
     !changed &&
+    !stale &&
+    !unproven &&
     !derived.mismatched.length &&
     !derived.missing.length &&
     !derived.missing_tools.length
   ) {
-    const source = composeOverlaySource(latest, derived.rules);
-    if (source)
-      return {
-        kind: "write",
-        source,
-        composed_hash: source.default_overlay.composed_hash,
-        migrated: { rules: derived.rules, moved: derived.moved },
-      };
+    const plan = overlayWrite(latest, derived.rules, derived.moved);
+    if (plan) return plan;
   }
-  if (defaultPath) return { kind: "skip" };
+  if (c.defaultPath) return { kind: "skip" };
   const reasons = [
     ...(changed ? ["本次部署改动了它的默认包"] : []),
+    ...(stale ? ["多出的内容见于更早的默认包"] : []),
+    ...(unproven ? ["额外工具无法与更早的默认包核对"] : []),
     ...(derived?.mismatched ?? []).map((f) => `${f} 与默认包不同`),
     ...(derived?.missing.length
       ? [`缺少默认包的 ${derived.missing.length} 段说明`]
@@ -418,12 +405,40 @@ export function syncOverlayRoles(
   const actor = { kind: "system" as const, project_id: project };
   const ports = { ids: tx.ids, clock: { now } };
   let profiles: ReadonlySet<string> | undefined;
+  const known = knownDefaults(tx, project);
+  const remember = (id: string, value: RoleDefinition) =>
+    rememberDefault(
+      tx,
+      project,
+      known,
+      id,
+      knownDefault(value),
+      "proof",
+      now(),
+    );
+  // Remember this pack, so later releases can read roles built on it.
+  for (const id of Object.keys(DEFAULT_ROLE_KINDS))
+    rememberDefault(
+      tx,
+      project,
+      known,
+      id,
+      knownDefault(
+        defaultRoleDefinition(id as keyof typeof DEFAULT_ROLE_KINDS, {
+          harness: "codex",
+          launch_profile_ref: "deployment",
+        }),
+      ),
+      "pack",
+      now(),
+    );
+  const context: PlanContext = { project, pack, defaultPath, known, remember };
   const ids = [...new Set(listRoleVersions(tx, project).map((r) => r.role_id))];
   for (const id of ids) {
     const roles = listRoleVersions(tx, project);
     const latest = roles.filter((r) => r.role_id === id).at(-1);
     if (!latest || latest.status === "inactive") continue;
-    const plan = planRole(latest, project, pack, defaultPath);
+    const plan = planRole(latest, context);
     if (plan.kind === "skip") continue;
     if (plan.kind === "notice") {
       recordRoleDeferral(tx, project, plan.key, plan.text, now());
