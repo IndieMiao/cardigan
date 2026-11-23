@@ -77,6 +77,53 @@ def tool_directory(lib, gid):
             'unsafe_agent_tools_directory')
 
 
+BOOTSTRAP = Path('/opt/cardigan-helper-upgrade')
+BOOTSTRAP_FILES = ('upgrade-worker-helpers.py', 'install-macos-worker.py', 'worker-primitives.py')
+
+
+def migrate_bootstrap(release, project, root=BOOTSTRAP):
+    # C-595: an entry enrolled earlier pins the v1 checker, which refuses the
+    # attachment tools. Replace only its pinned scripts with this verified
+    # release; keys, account, sudo rule and replay state stay untouched.
+    tag = hashlib.sha256(project.encode()).hexdigest()[:20]
+    for boot in (root, root.with_name(root.name + '-' + tag)):
+        try:
+            s = boot.lstat()
+        except FileNotFoundError:
+            continue
+        require(stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and stat.S_IMODE(s.st_mode) == 0o700,
+                'unsafe_helper_upgrade_entry')
+        # C-599: only an entry that names this project, read without following links.
+        fd = os.open(boot / 'project', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as f:
+            p = os.fstat(fd)
+            require(stat.S_ISREG(p.st_mode) and p.st_uid == 0 and p.st_nlink == 1, 'unsafe_helper_upgrade_entry')
+            named = f.read(4096).decode('utf-8', 'replace').rstrip('\n')
+        if named != project:
+            # Another project's shared entry is skipped; this project's own
+            # entry naming another project is a conflict, never a success.
+            require(boot == root, 'helper_upgrade_entry_project_mismatch')
+            continue
+        for name in BOOTSTRAP_FILES:
+            target = boot / name
+            t = target.lstat()
+            require(stat.S_ISREG(t.st_mode) and t.st_uid == 0 and t.st_nlink == 1, 'unsafe_helper_upgrade_entry')
+            data = (release / name).read_bytes()
+            if target.read_bytes() == data:
+                continue
+            staged = boot / ('.' + name + '.new')
+            fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+            with os.fdopen(fd, 'wb') as out:
+                os.fchown(out.fileno(), 0, 0)
+                os.fchmod(out.fileno(), 0o400)
+                out.write(data)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(staged, target)
+            require(target.read_bytes() == data, 'helper_upgrade_entry_digest: ' + name)
+        print('签名升级入口已迁移到 v2：', boot, flush=True)
+
+
 def install(source, target, gid):
     with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as out:
         with source.open('rb') as src:
@@ -122,7 +169,7 @@ def matches_release(live, release, manifest, acl_safe):
     return same(live, release)
 
 
-def upgrade_files(work, release, live, lib, gid, b, installed, run_installer, acl_safe):
+def upgrade_files(work, release, live, lib, gid, b, installed, run_installer, acl_safe, migrate=None):
     # The caller holds the protected installation-directory lock. Never overwrite a
     # previous backup; a partially completed upgrade needs an operator, not a retry.
     tag = b['rev'][:12]
@@ -176,6 +223,7 @@ def upgrade_files(work, release, live, lib, gid, b, installed, run_installer, ac
             install(live / name, lib / name, gid)
     for name in HELPERS + TOOLS:
         require(installed(lib / name) == manifest[name], 'installed_helper_mismatch: ' + name)
+    (migrate or migrate_bootstrap)(release, b['project'])
     print('升级完成')
 
 
