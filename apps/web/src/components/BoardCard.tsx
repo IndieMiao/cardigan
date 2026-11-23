@@ -141,6 +141,7 @@ export function BoardCard({
         card.merge_stage?.batch_id ? (card.merge_stage.color ?? 0) : undefined
       }
       data-batch-id={card.merge_stage?.batch_id}
+      data-card-id={card.id}
       onMouseEnter={(e) => highlightBatch(e.currentTarget, true)}
       onMouseLeave={(e) => highlightBatch(e.currentTarget, false)}
       className={`${boardCardStyles.card} card-tile board-card ui-surface-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
