@@ -139,6 +139,7 @@ const schemas = {
     card_id: id("card"),
     work_item_id: id("work_item"),
     body: text,
+    decision_id: id("decision").optional(),
   },
   post_comment: {
     story_discussion: z
@@ -840,7 +841,7 @@ export function managementTools(clock?: Clock) {
     }),
     wire(
       "issue_instruction",
-      "Instruct an unfinished work item as PM Ops.",
+      "Instruct an unfinished work item as PM Ops. To ask a verifier held by a pending review-limit decision (confirm a direction, add an opinion) pass that decision_id: only that verifier's Assignment is woken, it may answer with post_comment (reply_to the instruction), its reply reaches PM Ops, and it still cannot submit a review, change the decision or advance the merge. Ordinary comments do not wake a waiting verifier.",
       issueInstruction,
     ),
     wire("report_blocker", "Report a work item blocker.", reportBlocker),

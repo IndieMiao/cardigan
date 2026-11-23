@@ -620,6 +620,32 @@ test("C-610: every verifier role states review convergence once; PM only handles
   expect(instructionsFor("coder")).not.toContain(REVIEW_CONVERGENCE_RULES[0]);
 });
 
+test("C-619: a held verifier answers only decision-bound questions; PM asks with decision_id", () => {
+  for (const role of [
+    "reviewer",
+    "independent_reviewer",
+    "design_director",
+  ] as const) {
+    const body = instructionsFor(role);
+    for (const phrase of [
+      "`issue_instruction` 绑定这条拍板（`decision_id`）的提问会唤醒你",
+      "用 `post_comment` 回复该条（`reply_to`）",
+      "不能提交审核结论、处理拍板或推进合并",
+      "普通评论不会唤醒等待中的审核项",
+    ])
+      expect(body, role).toContain(phrase);
+  }
+  const pm = instructionsFor("pm");
+  for (const phrase of [
+    "用 `issue_instruction` 对该审核项下指令并传 `decision_id` 绑定这条拍板",
+    "拍板已结、交付已换版本或审核员已更换时不会唤醒",
+    "审核员回复该指令后系统通知你",
+    "普通评论或提醒不会唤醒等待中的审核员",
+  ])
+    expect(pm).toContain(phrase);
+  expect(instructionsFor("coder")).not.toContain("绑定这条拍板");
+});
+
 test("C-618: verifiers mark platform-blocked evidence pending; authors supply it on a new delivery", () => {
   const rules = REVIEW_CONVERGENCE_RULES.join("\n");
   for (const phrase of [

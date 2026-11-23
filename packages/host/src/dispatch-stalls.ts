@@ -259,7 +259,7 @@ export function dispatchStallCauses(
         w &&
         !(
           w.status === "waiting_decision" &&
-          reviewDiscussionInstruction(w, trigger, state.decisions)
+          reviewDiscussionInstruction(w, trigger, state)
         ) &&
         // C-618: a delivered author is asked to supply unblocked evidence.
         !(w.status === "delivered" && evidenceUnblockedInstruction(trigger)) &&
@@ -291,7 +291,7 @@ export function dispatchStallCauses(
       ...(trigger &&
       (trigger.type === "review_submitted" ||
         trigger.type === "decision_resolved" ||
-        (w && reviewDiscussionInstruction(w, trigger, state.decisions)))
+        (w && reviewDiscussionInstruction(w, trigger, state)))
         ? { review_trigger_id: trigger.id }
         : {}),
       age_ms: age,

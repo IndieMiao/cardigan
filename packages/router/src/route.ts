@@ -16,6 +16,7 @@ import {
   authorPrecheckWaitHandled,
   canStartWork,
   cardTemplate,
+  decisionQuestionPayload,
   employeeNameKey,
   flowAtLeast,
   followUpDraft,
@@ -340,6 +341,7 @@ function routeComment(input: RouteInput, draft: Draft): void {
       `new comment on ${item.id}`,
     );
   }
+  routeDecisionAnswer(input, draft, entry);
 
   if (mentions.length > 0) {
     routeMentions(input, draft, mentions, item?.card_id);
@@ -359,6 +361,40 @@ function routeComment(input: RouteInput, draft: Draft): void {
       `comment from the human on ${subject(input)}`,
     );
   }
+}
+
+/**
+ * C-619: the verifier's reply to a decision-bound question goes back to PM
+ * Ops, who holds the decision. Only the asked verifier's own reply counts.
+ */
+function routeDecisionAnswer(
+  input: RouteInput,
+  draft: Draft,
+  entry: TimelineEntry | undefined,
+): void {
+  if (!entry?.reply_to || input.event.actor.kind !== "assignment") return;
+  const asked = input.snapshot.timeline.find(
+    (t) => t.id === entry.reply_to && t.card_id === entry.card_id,
+  );
+  if (asked?.type !== "instruction") return;
+  const question = decisionQuestionPayload(
+    input.snapshot.events.find(
+      (e) => e.seq === asked.event_seq && e.card_id === asked.card_id,
+    ),
+  );
+  if (
+    !question ||
+    question.question.assignment_id !== input.event.actor.assignment_id
+  )
+    return;
+  note(
+    input,
+    draft,
+    recipient.pm_ops(),
+    "comment",
+    "6.4/decision question answered",
+    `${question.work_item_id} 的审核员已在 ${entry.id} 答复 ${question.decision_id} 的提问（${asked.id}），请据此处理该拍板。`,
+  );
 }
 
 /** §6.5: the four @mention cases. */
@@ -553,11 +589,24 @@ function routeMentions(
 function routeInstruction(input: RouteInput, draft: Draft): void {
   const work_item_id = payloadString(input.event.payload, "work_item_id");
   const item = itemOf(input, work_item_id as WorkItemId | undefined);
+  const question = decisionQuestionPayload(input.event);
   if (
-    payloadString(input.event.payload, "pause_recipient") &&
+    (payloadString(input.event.payload, "pause_recipient") || question) &&
     (!item || reviewWakeBlocked(input.snapshot, input.event, item.id))
   )
     return;
+  if (question && item) {
+    // C-619: a question bound to the decision this verifier waits on.
+    noteAssignment(
+      input,
+      draft,
+      item,
+      "instruction",
+      "6.4/instruction",
+      `${question.decision_id} 等待期间的提问：读取 ${item.id} 的指令后用 post_comment 回复该条（reply_to）答复；不能提交审核结论、处理拍板或推进合并。`,
+    );
+    return;
+  }
   if (item === undefined) {
     note(
       input,

@@ -1,4 +1,8 @@
 import { categoryDelegated } from "../decision-authorization.js";
+import {
+  decisionQuestionBinding,
+  heldByReviewDecision,
+} from "../decision-question.js";
 import type {
   Actor,
   Assignment,
@@ -154,7 +158,13 @@ import { activeWork } from "./workflow.js";
 export function issueInstruction(
   state: CommandState,
   actor: Actor,
-  p: { card_id: CardId; work_item_id: WorkItemId; body: string },
+  p: {
+    card_id: CardId;
+    work_item_id: WorkItemId;
+    body: string;
+    /** C-619: ask the verifier held by this pending review-limit decision. */
+    decision_id?: DecisionId | undefined;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "issue_instruction", ports, (d) => {
@@ -180,19 +190,43 @@ export function issueInstruction(
       "Cannot instruct closed work or a card awaiting merge",
     );
     text(p.body, "body");
+    const question =
+      p.decision_id === undefined
+        ? undefined
+        : decisionQuestion(d, item, d.get("decisions", p.decision_id));
     d.emit(
       "instruction_issued",
       card.id,
-      { work_item_id: item.id },
+      {
+        work_item_id: item.id,
+        ...(question
+          ? {
+              decision_id: question.decision,
+              decision_question: question.binding,
+            }
+          : {}),
+      },
       {
         type: "instruction",
         body: p.body,
         work_item_id: item.id,
+        ...(question ? { decision_id: question.decision } : {}),
         refs: extractReferences(p.body),
       },
     );
     return d.timeline[0];
   });
+}
+/** C-619: only the verifier held by this pending decision can be asked. */
+function decisionQuestion(d: CommandDraft, item: WorkItem, q: Decision) {
+  ensure(
+    !!heldByReviewDecision(d.list("decisions"), item, q.id),
+    "illegal_transition",
+    `${item.id} 没有在等待 ${q.id}：只能向正在等待该审核拍板的审核项提问`,
+  );
+  const binding = decisionQuestionBinding(item, d.list("deliveries"));
+  ensure(!!binding, "illegal_transition", `${item.id} 尚无负责的审核员`);
+  return { decision: q.id, binding };
 }
 export function postComment(
   state: CommandState,
