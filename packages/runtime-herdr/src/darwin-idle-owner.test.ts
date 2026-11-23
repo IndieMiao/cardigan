@@ -326,6 +326,20 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     });
     expect(proc.exitCode).toBeNull();
     process.kill(pid, 0);
+    // A malformed core reply refuses this request; the owner keeps serving.
+    writeFileSync(join(root, "screen"), "malformed");
+    expect(await stop()).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "probe_invalid" },
+    });
+    // Still listening: an exited owner would answer conditional_close_unavailable.
+    writeFileSync(join(root, "screen"), "busy");
+    expect(await stop()).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "probe_invalid" },
+    });
+    expect(proc.exitCode).toBeNull();
+    process.kill(pid, 0);
     // Back at its own empty prompt, the same null-status session may be stopped.
     writeFileSync(join(root, "screen"), "idle");
     // A missing or replaced seed cannot serve this owner: refuse, never sign.

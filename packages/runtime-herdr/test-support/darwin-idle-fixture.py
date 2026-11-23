@@ -31,7 +31,9 @@ SCREENS = dict(idle=IDLE, busy='✻ Working… (3s · esc to interrupt)\r\n' + I
 
 def rpc(method, params):
     if method == 'terminal.read':
-        return dict(text=SCREENS[(root/'screen').read_text() if (root/'screen').exists() else 'idle'])
+        screen = (root/'screen').read_text() if (root/'screen').exists() else 'idle'
+        # `malformed`: a core reply that is not an object (no `.get`).
+        return ['malformed'] if screen == 'malformed' else dict(text=SCREENS[screen])
     assert method == 'terminal.get'
     state = (root/'state').read_text()
     return dict(address='t1', created_ms=1, pid=os.getpid(), name=c['agent_name'], cwd=c['cwd'],
