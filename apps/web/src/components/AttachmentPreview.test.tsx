@@ -44,6 +44,11 @@ test("C-540: thumbnails load the small rendition; preview and download keep the 
 test("C-540: a thumbnail that fails to load becomes the shared placeholder, still openable", async () => {
   render(<DecisionAttachments attachments={[image]} />);
   const trigger = screen.getByRole("button", { name: "预览 390-dark.png" });
+  // C-614: the first failure retries the locally rendered thumbnail.
+  fireEvent.error(within(trigger).getByRole("img"));
+  expect(within(trigger).getByRole("img").getAttribute("src")).toBe(
+    `${image.thumbnail_path}?local=1`,
+  );
   fireEvent.error(within(trigger).getByRole("img"));
   expect(within(trigger).queryByRole("img")).toBeNull();
   const icon = trigger.querySelector("svg.lucide-image-off");
@@ -67,4 +72,19 @@ test("C-540: a bitmap without a thumbnail never falls back to the original", () 
   const trigger = screen.getByRole("button", { name: "预览 390-dark.png" });
   expect(trigger.querySelector("img")).toBeNull();
   expect(trigger.querySelector("svg.lucide-image-off")).not.toBeNull();
+});
+
+test("C-614: the lightbox shows the preview route and falls back to the local original", async () => {
+  const preview = { ...image, preview_path: `${image.download_path}/preview` };
+  render(<AttachmentGrid attachments={[preview]} />);
+  fireEvent.click(screen.getByRole("button", { name: "预览 390-dark.png" }));
+  const dialog = await screen.findByRole("dialog");
+  const img = within(dialog).getByRole("img", { name: "附件 390-dark.png" });
+  expect(img.getAttribute("src")).toBe(preview.preview_path);
+  fireEvent.error(img);
+  expect(
+    within(dialog)
+      .getByRole("img", { name: "附件 390-dark.png" })
+      .getAttribute("src"),
+  ).toBe(`${preview.preview_path}?local=1`);
 });

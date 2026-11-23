@@ -746,6 +746,8 @@ test.each(["design_director", "independent_reviewer"])(
       sha256: prebuiltRecord?.sha256,
       size: prebuiltRecord?.size,
       reference_only: false,
+      // C-614: no off-site copy is wired here, so the bytes came from Card MCP.
+      via: "card_mcp",
     });
     expect(await readFile(prebuiltOutput)).toEqual(png);
     const report = await ok<Attachment>(client, "upload_attachment", {

@@ -4,7 +4,7 @@ import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import type { AttachmentId, ProjectId } from "@cardigan/domain";
-import { fileAttachmentStore } from "@cardigan/mcp-server";
+import { fileAttachmentStore, offsiteFor } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import sharp from "sharp";
 import { INLINE_MIME_TYPES } from "./read.js";
@@ -304,6 +304,16 @@ export async function serveAttachmentThumbnail(
     res.end();
     return true;
   }
+  // C-614: OSS renders the thumbnail from the verified off-site copy. The
+  // Workbench retries with `?local=1` when that image fails to load, and any
+  // missing configuration, copy or connectivity falls through to local.
+  const remote = localOnly(req)
+    ? undefined
+    : offsiteFor(dataDir)?.thumbnailUrl(digest);
+  if (remote) {
+    redirectToOffsite(res, remote);
+    return true;
+  }
   const output = await cacheFor(dataDir).get(digest, () =>
     fileAttachmentStore(dataDir).get(digest),
   );
@@ -326,4 +336,22 @@ export async function serveAttachmentThumbnail(
   });
   res.end(output);
   return true;
+}
+
+/** `?local=1`: the browser could not load the off-site image. */
+export function localOnly(req: IncomingMessage) {
+  return /[?&]local=1(?:&|$)/u.test(req.url ?? "");
+}
+
+/**
+ * Same-session redirect to a signed, short-lived OSS URL. The redirect may be
+ * reused for a few minutes; the URL itself stays valid for longer.
+ */
+export function redirectToOffsite(res: ServerResponse, url: string) {
+  res.writeHead(302, {
+    Location: url,
+    "Cache-Control": "private, max-age=240",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+  });
+  res.end();
 }
