@@ -45,7 +45,7 @@ function verifierThrowing(error: unknown) {
         ({ id: project, repo_path: join(dataDir, "source") }) as never,
       listProjects: () => [],
     },
-    // Resolving the workspace target is the first step inside the lock.
+    // C-642: resolving the workspace target is the first step, before the lock.
     targets: {
       forWorkspace: () => {
         throw error;

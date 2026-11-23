@@ -644,6 +644,41 @@ export class CentralGitTransport
         return { ref, sha, type };
       });
   }
+  /** C-642: the same private stage as a backup, for one delivery branch. The
+   * remote transfer needs no project lock; only the caller's ref write does. */
+  async fetchBranchTip(
+    repository: string,
+    source: GitRepositoryAddress,
+    branch: string,
+    uploadPack?: string,
+  ): Promise<string> {
+    if (dirname(repository) !== this.root)
+      throw new Error("Unexpected central repository path");
+    const head = `refs/heads/${branch}`;
+    await this.checked(repository, ["check-ref-format", head]);
+    const format = await this.objectFormat(repository);
+    const stage = await mkdtemp(join(this.root, ".incoming-"));
+    try {
+      await this.checked(stage, [
+        "init",
+        "--bare",
+        "--template=",
+        `--object-format=${format}`,
+      ]);
+      await writeFile(
+        join(stage, "objects/info/alternates"),
+        `../../${basename(repository)}/objects\n`,
+      );
+      await this.fetchRefs(stage, source, [`+${head}:${head}`], uploadPack);
+      const tip = await this.readRef(stage, head);
+      if (!tip || (await this.objectType(stage, tip)) !== "commit")
+        throw new Error("No branch HEAD");
+      await this.fetchRefs(repository, stage, [tip]);
+      return tip;
+    } finally {
+      await rm(stage, { recursive: true, force: true });
+    }
+  }
   /** Private refs per transfer. Borrow center objects for negotiation; import
    * only the validated tips, without creating any ref (including FETCH_HEAD).
    * Unpublished objects are not recovery roots and can be collected by Git. */

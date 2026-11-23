@@ -133,6 +133,17 @@ export interface GitCentralPort {
     /** Polling only: skip transfer when all advertised refs already match. */
     skipIfUnchanged?: boolean,
   ): Promise<void>;
+  /**
+   * C-642: fetch one branch through a private stage and import only its tip
+   * commit's objects. No ref (including FETCH_HEAD) is written in `repository`;
+   * the caller publishes the returned commit with a ref write of its own.
+   */
+  fetchBranchTip(
+    repository: string,
+    source: GitRepositoryAddress,
+    branch: string,
+    uploadPack?: string,
+  ): Promise<string>;
   /** Every backup writer, including worktree cleanup, confirms refs and generations together. */
   prepareBranchBackup(
     repository: string,

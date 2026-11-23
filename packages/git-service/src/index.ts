@@ -922,4 +922,4 @@ export class GitWorktreeService {
   }
 }
 
-export { GitDeliveryVerifier } from "./delivery.js";
+export { GitDeliveryVerifier, type StagedDeliverySource } from "./delivery.js";

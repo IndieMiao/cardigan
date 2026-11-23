@@ -402,6 +402,8 @@ async function assembleServer(
         : { captureAgent: options.captureAgent }),
       onSourceError: (entry) =>
         process.stdout.write(`${JSON.stringify(entry)}\n`),
+      onSourceLock: (entry) =>
+        process.stdout.write(`${JSON.stringify(entry)}\n`),
     });
 
   const probes = serverProbes({

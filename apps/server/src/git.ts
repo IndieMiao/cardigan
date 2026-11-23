@@ -33,6 +33,7 @@ import {
   reconcile,
   reconcileExecutorChecks,
   type SourceSync,
+  type StagedDeliverySource,
   validCentralBranch,
   type WorktreeDiff,
 } from "@cardigan/git-service";
@@ -156,6 +157,8 @@ export interface ServerGitOptions {
    * class (busy, runtime target, other) and never the exception text.
    */
   readonly onSourceError?: (entry: DeliverySourceErrorEntry) => void;
+  /** C-642: one line per delivery source publication, with lock wait and hold. */
+  readonly onSourceLock?: (entry: DeliverySourceLockEntry) => void;
   /** Test seam for the SSH listing; production uses `agentListChecks`. */
   readonly listChecks?: (
     execution: AgentExecution,
@@ -185,6 +188,15 @@ export type DeliverySourceErrorEntry = DeliverySourceError & {
   readonly project_id: string;
   readonly assignment_id: string;
 };
+
+export interface DeliverySourceLockEntry {
+  readonly event: "delivery_source_lock";
+  readonly project_id: string;
+  readonly assignment_id: string;
+  readonly operation: "verify" | "head";
+  readonly wait_ms: number;
+  readonly held_ms: number;
+}
 
 const ERROR_CLASS = /^[A-Za-z][A-Za-z0-9]{0,63}$/u;
 export function classifyDeliverySourceError(
@@ -602,8 +614,9 @@ export class ServerGit implements GitBinding {
           return await this.withAssignmentSource(
             project,
             assignment,
+            "verify",
             (central) =>
-              new GitDeliveryVerifier(central, project).verify(
+              new GitDeliveryVerifier(central, project).prepareVerify(
                 subject,
                 assignment,
                 previous,
@@ -633,8 +646,8 @@ export class ServerGit implements GitBinding {
   ): Promise<string> {
     const project = this.projectOf(projectId);
     if (!project) throw new Error("No registered repository");
-    return this.withAssignmentSource(project, assignment, (central) =>
-      new GitDeliveryVerifier(central, project).head(assignment),
+    return this.withAssignmentSource(project, assignment, "head", (central) =>
+      new GitDeliveryVerifier(central, project).prepareHead(assignment),
     );
   }
   preparePrecheck(
@@ -1333,19 +1346,53 @@ export class ServerGit implements GitBinding {
         : []),
     ];
   }
+  /**
+   * C-642: resolve the target and read the source (remote fetch, Git reads)
+   * outside the project lock; the lock covers only the local ref publication,
+   * which rechecks the target first.
+   */
   private async withAssignmentSource<T>(
     project: CentralProject,
     assignment: Assignment,
-    operation: (central: CentralRepositoryService) => Promise<T>,
+    operation: "verify" | "head",
+    prepare: (
+      central: CentralRepositoryService,
+    ) => Promise<StagedDeliverySource<T>>,
   ): Promise<T> {
-    return this.lock(
-      {
-        project_id: project.project_id,
-        repository: this.central.repositoryPath(project),
-      },
-      async () =>
-        operation(this.workspaceServices(project, assignment).central),
+    const staged = await prepare(
+      this.workspaceServices(project, assignment).central,
     );
+    if ("value" in staged) return staged.value;
+    const requested = performance.now();
+    let entered: number | undefined;
+    try {
+      return await this.lock(
+        {
+          project_id: project.project_id,
+          repository: this.central.repositoryPath(project),
+        },
+        () => {
+          entered = performance.now();
+          return staged.publish();
+        },
+      );
+    } finally {
+      if (entered !== undefined) {
+        const held_ms = Math.round(performance.now() - entered);
+        try {
+          this.options.onSourceLock?.({
+            event: "delivery_source_lock",
+            project_id: project.project_id,
+            assignment_id: assignment.id,
+            operation,
+            wait_ms: Math.round(entered - requested),
+            held_ms,
+          });
+        } catch {
+          // A failing log never changes the answer.
+        }
+      }
+    }
   }
   private worktreesFor(project: CentralProject, assignment: Assignment) {
     return this.workspaceServices(project, assignment).worktrees;

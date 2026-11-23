@@ -115,6 +115,23 @@ export interface RuntimeTargetsOptions extends HerdrOptions {
   /** Host probe injection for tests; never loaded from project input. */
   readonly workerReadiness?: typeof workerReadiness;
   readonly workerMcpReachability?: typeof checkWorkerMcpReachability;
+  /** C-642: reuse of a clean machine probe; `CARDIGAN_MACHINE_PROBE_CACHE_MS`. */
+  readonly probeCacheMs?: number;
+}
+const DEFAULT_MACHINE_PROBE_CACHE_MS = 5_000;
+function machineProbeCacheMs(
+  options: Pick<RuntimeTargetsOptions, "probeCacheMs" | "env">,
+): number {
+  const raw =
+    options.probeCacheMs ??
+    (options.env?.CARDIGAN_MACHINE_PROBE_CACHE_MS === undefined
+      ? DEFAULT_MACHINE_PROBE_CACHE_MS
+      : Number(options.env.CARDIGAN_MACHINE_PROBE_CACHE_MS));
+  if (!Number.isSafeInteger(raw) || raw < 0 || raw > 60_000)
+    throw new Error(
+      "CARDIGAN_MACHINE_PROBE_CACHE_MS must be an integer between 0 and 60000",
+    );
+  return raw;
 }
 /** Only constructed by the router before it delegates this exact launch. An
  * adapter failure (even with the same code or text) is not such a receipt. */
@@ -177,11 +194,17 @@ export class RuntimeTargets implements Runtime {
     Promise<RuntimeResult<Adapter>>
   >();
   private readonly workers: () => readonly RuntimeWorker[];
+  private readonly probeCacheMs: number;
+  private readonly probes = new Map<
+    string,
+    { result: Promise<RuntimeResult<readonly string[]>>; until?: number }
+  >();
   private constructor(
     private readonly options: RuntimeTargetsOptions,
     private readonly registered: RegisteredRuntime | undefined,
   ) {
     this.paths = new WorkerPathHistory(options.execution.dataDir);
+    this.probeCacheMs = machineProbeCacheMs(options);
     this.workers =
       options.workers ??
       (() =>
@@ -460,9 +483,10 @@ export class RuntimeTargets implements Runtime {
     const resolve = pinned ?? (() => this.launchTarget(project, assignment));
     const target = resolve();
     if (assignment.machine_id === "local") return target;
+    // C-642: launches may share a recent clean probe of the same binding.
     const checked = pinned
-      ? await this.rawMachineCheck(project, assignment.machine_id, pinned)
-      : await this.check(project, assignment.machine_id);
+      ? await this.rawMachineCheck(project, assignment.machine_id, pinned, true)
+      : await this.check(project, assignment.machine_id, false, true);
     if (!checked.ok) return rejected(`machine_check_${checked.error.code}`);
     if (checked.value.blockers.length)
       return rejected(checked.value.blockers[0]);
@@ -678,43 +702,48 @@ export class RuntimeTargets implements Runtime {
       return rejected();
     return new RuntimeTargets({ ...this.options, project }, this.registered);
   }
+  /** Live unless `cached` (launch only); a clean live probe refreshes the launch cache. */
   check(
     project: ProjectId,
     machine_id: string,
     forObservation = false,
+    cached = false,
   ): Promise<RuntimeResult<MachineCheck>> {
-    return this.rawMachineCheck(project, machine_id).then((result) => {
-      if (
-        result.ok &&
-        machine_id !== "local" &&
-        upgradeHeld(this.options.store, project, machine_id)
-      ) {
-        const row = upgradeState(this.options.store, project, machine_id);
+    return this.rawMachineCheck(project, machine_id, undefined, cached).then(
+      (result) => {
         if (
-          forObservation &&
-          row?.state === "worker_checked" &&
-          row.release_key ===
-            upgradeKey(
-              this.resolve(project, machine_id).execution.target?.fingerprint,
-            )
-        )
-          return result;
-        return {
-          ...result,
-          value: {
-            ...result.value,
-            blockers: [...result.value.blockers, upgradeHold],
-            launch_enabled: false,
-          },
-        };
-      }
-      return result;
-    });
+          result.ok &&
+          machine_id !== "local" &&
+          upgradeHeld(this.options.store, project, machine_id)
+        ) {
+          const row = upgradeState(this.options.store, project, machine_id);
+          if (
+            forObservation &&
+            row?.state === "worker_checked" &&
+            row.release_key ===
+              upgradeKey(
+                this.resolve(project, machine_id).execution.target?.fingerprint,
+              )
+          )
+            return result;
+          return {
+            ...result,
+            value: {
+              ...result.value,
+              blockers: [...result.value.blockers, upgradeHold],
+              launch_enabled: false,
+            },
+          };
+        }
+        return result;
+      },
+    );
   }
   private rawMachineCheck(
     project: ProjectId,
     machine_id: string,
     pinned?: () => Target,
+    cached = false,
   ): Promise<RuntimeResult<MachineCheck>> {
     const resolve = pinned ?? (() => this.resolve(project, machine_id));
     return this.invoke<MachineCheck>(
@@ -734,20 +763,20 @@ export class RuntimeTargets implements Runtime {
       },
       async (runtime) => {
         const target = resolve();
-        // Health is a live observation for local execution accounts too.
-        const live =
-          target.execution.mode === "local"
-            ? await runtime.checkLocalHealth()
-            : await runtime.captureAgent("git", ["--version"]);
-        if (!live.ok) return live;
-        let blockers: readonly string[] = [];
+        const probed = await this.probe(
+          project,
+          machine_id,
+          target,
+          runtime,
+          cached,
+        );
+        if (!probed.ok) return probed;
+        let blockers = probed.value;
         if (
           target.execution.mode === "local" &&
           (target.machine.os !== platform() || target.machine.arch !== arch())
         )
           blockers = ["machine_platform_mismatch"];
-        if (machine_id !== "local")
-          blockers = await this.workerBlockers(target);
         const current = resolve();
         if (
           target.execution.target?.fingerprint !==
@@ -770,6 +799,64 @@ export class RuntimeTargets implements Runtime {
         };
       },
     );
+  }
+  /**
+   * C-642: the live probe (health, worker readiness and MCP reachability) of
+   * one target binding. Concurrent callers share one probe in flight. Only a
+   * launch (`cached`) reuses a clean result for `probeCacheMs` after it
+   * settles; explicit checks and patrol always probe again, and their result
+   * replaces the cached one. Failures and blockers are never reused, and every
+   * caller still reads machine state and the binding itself.
+   */
+  private probe(
+    project: ProjectId,
+    machine_id: string,
+    target: Target,
+    runtime: Adapter,
+    cached: boolean,
+  ): Promise<RuntimeResult<readonly string[]>> {
+    const key = JSON.stringify([
+      project,
+      machine_id,
+      target.execution.mode,
+      target.execution.target?.fingerprint ?? null,
+    ]);
+    const now = performance.now();
+    for (const [k, entry] of this.probes)
+      if (entry.until !== undefined && entry.until <= now)
+        this.probes.delete(k);
+    const shared = this.probes.get(key);
+    if (shared && (shared.until === undefined || cached)) return shared.result;
+    const entry: {
+      result: Promise<RuntimeResult<readonly string[]>>;
+      until?: number;
+    } = {
+      result: (async () => {
+        // Health is a live observation for local execution accounts too.
+        const live =
+          target.execution.mode === "local"
+            ? await runtime.checkLocalHealth()
+            : await runtime.captureAgent("git", ["--version"]);
+        if (!live.ok) return live;
+        return {
+          ok: true as const,
+          value:
+            machine_id === "local" ? [] : await this.workerBlockers(target),
+        };
+      })(),
+    };
+    this.probes.set(key, entry);
+    const settle = (clean: boolean) => {
+      if (this.probes.get(key) !== entry) return;
+      if (clean && this.probeCacheMs > 0)
+        entry.until = performance.now() + this.probeCacheMs;
+      else this.probes.delete(key);
+    };
+    entry.result.then(
+      (result) => settle(result.ok && result.value.length === 0),
+      () => settle(false),
+    );
+    return entry.result;
   }
   refreshMachine(
     project: ProjectId,
