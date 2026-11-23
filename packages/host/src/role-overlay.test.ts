@@ -4,6 +4,7 @@ import {
   type Role,
   type RoleDefinition,
   type RoleOverlayRules,
+  type Run,
 } from "@cardigan/domain";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
@@ -760,14 +761,128 @@ test("C-613 V-3037:1 a system metadata-only version carries the audit and rotate
     expect(notices(store, project)).toEqual([
       expect.stringContaining("不存在或未通过校验"),
     ]);
-    // Between deployments the unchanged profile is enough.
-    const next = rotateIdleDeployedRoles(store, project);
+    // V-3073:1 ①-a: the production patrol passes no profiles; the unchanged
+    // profile name is no recovery, so the session stays and no alert repeats.
+    rotateIdleDeployedRoles(store, project);
+    rotateIdleDeployedRoles(store, project);
+    expect(status(store, project)).toBe("active");
+    expect(notices(store, project)).toHaveLength(1);
+    expect(launchChecks(store, project)).toEqual([
+      { role_id: "pm", role_version: 3, profile: "fixture", valid: false },
+    ]);
+    // ①-b: the next deployment finds the profile valid and the session idle:
+    // it rotates there, once.
+    const next = rotateIdleDeployedRoles(
+      store,
+      project,
+      undefined,
+      () => new Set(["fixture"]),
+    );
     expect(status(store, project)).toBe("released");
     expect(
       store.uow.read(
         (tx) => next && tx.assignments.get(project, next)?.role_version,
       ),
     ).toBe(3);
+    rotateIdleDeployedRoles(store, project);
+    rotateIdleDeployedRoles(
+      store,
+      project,
+      undefined,
+      () => new Set(["fixture"]),
+    );
+    expect(events(store, project, "standing_pm_rotated")).toHaveLength(1);
+    expect(launchChecks(store, project).map((c) => c.valid)).toEqual([
+      false,
+      true,
+    ]);
+    expect(notices(store, project)).toHaveLength(1);
+  }));
+
+const launchChecks = (store: Store, project: string) =>
+  events(store, project, "host_role_launch_checked").map((e) => e.payload);
+const busy = (store: Store, project: string, status: Run["status"]) =>
+  store.uow.run((tx) =>
+    tx.runs.put(project, {
+      id: "R-60" as never,
+      assignment_id: "A-60" as never,
+      trigger_event_id: "00000000000000000000000001" as never,
+      kind: "initial",
+      status,
+      role_version: 1,
+      model: "fixture",
+      agent_cli_version: "1",
+      outcome: status === "completed" ? "completed" : null,
+      summary: "",
+    }),
+  );
+
+test("C-613 V-3073:1 ①-c/①-d a profile found valid while the session is busy rotates on a later patrol; another role rotates meanwhile", () =>
+  withStore((store, project) => {
+    const pm = defaultRoleDefinition("pm", launch);
+    put(store, project, { ...pm, instructions: "Earlier" }, 1);
+    put(store, project, pm, 2);
+    audit(store, project, { from_version: 1, to_version: 2 });
+    // ①-d: another standing role on its own, valid launch profile.
+    const reviewer = defaultRoleDefinition("reviewer", {
+      ...launch,
+      launch_profile_ref: "other",
+    });
+    put(store, project, { ...reviewer, instructions: "Earlier" }, 1);
+    put(store, project, reviewer, 2);
+    audit(store, project, {
+      role_id: "reviewer",
+      from_version: 1,
+      to_version: 2,
+    });
+    store.uow.run((tx) => {
+      tx.assignments.put(project, opsAssignment(1));
+      tx.assignments.put(project, {
+        ...opsAssignment(1),
+        id: "A-61" as never,
+        role_id: "reviewer",
+        standing_mode: undefined,
+      });
+    });
+    const other = () =>
+      store.uow.read((tx) => tx.assignments.get(project, "A-61" as never));
+    // pm's profile is broken in this deployment; reviewer's is fine.
+    rotateIdleDeployedRoles(
+      store,
+      project,
+      undefined,
+      () => new Set(["other"]),
+    );
+    rotateIdleDeployedRoles(store, project);
+    expect(status(store, project)).toBe("active");
+    expect(other()?.status).toBe("released");
+    expect(events(store, project, "standing_role_rotated")).toHaveLength(1);
+    // ①-c: the profile is restored, but pm is busy during the deployment.
+    busy(store, project, "running");
+    rotateIdleDeployedRoles(
+      store,
+      project,
+      undefined,
+      () => new Set(["fixture", "other"]),
+    );
+    rotateIdleDeployedRoles(store, project);
+    expect(status(store, project)).toBe("active");
+    expect(
+      launchChecks(store, project).filter((c) => c.role_id === "pm"),
+    ).toEqual([
+      { role_id: "pm", role_version: 2, profile: "fixture", valid: false },
+      { role_id: "pm", role_version: 2, profile: "fixture", valid: true },
+    ]);
+    // Once idle, a patrol reads the recorded "valid" and rotates once.
+    busy(store, project, "completed");
+    rotateIdleDeployedRoles(store, project);
+    rotateIdleDeployedRoles(store, project);
+    expect(status(store, project)).toBe("released");
+    expect(events(store, project, "standing_pm_rotated")).toHaveLength(1);
+    expect(events(store, project, "standing_role_rotated")).toHaveLength(1);
+    expect(notices(store, project)).toEqual([
+      expect.stringContaining("常驻角色 pm v2 的启动配置 fixture 不存在"),
+    ]);
   }));
 
 test("C-613 V-3037:1 between deployments a changed launch profile waits for the next deployment", () =>

@@ -186,34 +186,50 @@ export interface OlderReading {
   readonly rules: RoleOverlayRules;
   /** The record the reading is based on. */
   readonly known: KnownDefault;
-  /** The older default proven from a hash-only record, to be remembered. */
-  readonly proven?: RoleDefinition;
+  /**
+   * Every older default proven here from a hash-only record, chosen or not,
+   * to be remembered with its content.
+   */
+  readonly proven: readonly RoleDefinition[];
 }
 
 /**
- * Steps 3 and 4 of the C-613 provenance order: read the version as an older
+ * Step 3 of the C-613 provenance order: read the version as an older
  * recorded default plus project rules. `older` excludes this release's own
- * default. Content the current pack has anyway is no project rule. Any other
- * extra tool or paragraph must appear in no recorded default of the role, or
- * it may be what a later pack withdrew. Content records are tried first, then
- * hash-only ones by proof. Among candidates the one with the fewest extra,
- * appended and removed items wins; a tie goes to the newer record, so a rerun
- * of one release reaches the same reading.
+ * default. Every hash-only record is proven first (V-3073:2), so its content
+ * counts like a content record. Content the current pack has anyway is no
+ * project rule. Any other extra tool or paragraph must appear in no recorded
+ * or proven default of the role, or it may be what a later pack withdrew.
+ * Among all candidates the one with the fewest extra, appended and removed
+ * items wins; a tie goes to the newer record, so a rerun of one release
+ * reaches the same reading.
  */
 export function readOnOlderDefault(
   role: Role,
   current: RoleDefinition,
   older: readonly KnownDefault[],
 ): OlderReading | undefined {
+  const readings = older.map((known) => {
+    if (known.content)
+      return { known, content: known.content, rules: undefined };
+    const proof = provePreviousDefault(role, current, known.policy_hash);
+    return {
+      known,
+      content: proof && knownDefault(proof.previous).content,
+      rules: proof?.rules,
+      previous: proof?.previous,
+    };
+  });
+  const proven = readings.flatMap((r) => (r.previous ? [r.previous] : []));
   const currentTools = new Set(current.allowed_tools);
   const currentParagraphs = new Set(
     paragraphs(current.instructions ?? "").map(paragraphHash),
   );
   const recordedTools = new Set(
-    older.flatMap((k) => k.content?.allowed_tools ?? []),
+    readings.flatMap((r) => r.content?.allowed_tools ?? []),
   );
   const recordedParagraphs = new Set(
-    older.flatMap((k) => k.content?.paragraphs ?? []),
+    readings.flatMap((r) => r.content?.paragraphs ?? []),
   );
   const tidy = (rules: RoleOverlayRules): RoleOverlayRules | undefined => {
     const extra_tools = rules.extra_tools.filter((t) => !currentTools.has(t));
@@ -235,28 +251,17 @@ export function readOnOlderDefault(
     r.extra_tools.length +
     paragraphs(r.append_instructions).length +
     r.removed_tools.length;
-  const best = (readings: readonly OlderReading[]) =>
-    readings.reduce<OlderReading | undefined>(
+  return readings
+    .flatMap(({ known, content, rules }) => {
+      const read = rules ?? (content && rulesAgainstKnown(role, content));
+      const tidied = read && tidy(read);
+      return tidied ? [{ rules: tidied, known, proven }] : [];
+    })
+    .reduce<OlderReading | undefined>(
       (chosen, next) =>
         chosen && score(chosen.rules) < score(next.rules) ? chosen : next,
       undefined,
     );
-  const byContent = best(
-    older.flatMap((known) => {
-      const read = known.content && rulesAgainstKnown(role, known.content);
-      const rules = read && tidy(read);
-      return rules ? [{ rules, known }] : [];
-    }),
-  );
-  if (byContent) return byContent;
-  return best(
-    older.flatMap((known) => {
-      if (known.content) return [];
-      const proof = provePreviousDefault(role, current, known.policy_hash);
-      const rules = proof && tidy(proof.rules);
-      return rules ? [{ rules, known, proven: proof.previous }] : [];
-    }),
-  );
 }
 
 /** Upper bound of tool variants tried per text cut. */

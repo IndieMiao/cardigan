@@ -286,9 +286,10 @@ function overlayWrite(
  * The C-613 provenance order, the same for every project (Q-1197):
  * 1. equal to the current default: nothing to do;
  * 2. equal to any recorded older default: untouched, take the new default;
- * 3./4. an older recorded default plus project rules (`readOnOlderDefault`):
- *    recompose them on the new default;
- * 5. otherwise keep the version. The bootstrap project leaves it to the
+ *    a hash-only record is remembered with this version's content;
+ * 3. an older recorded or proven default plus project rules
+ *    (`readOnOlderDefault`): recompose them on the new default;
+ * 4. otherwise keep the version. The bootstrap project leaves it to the
  *    default-pack path; elsewhere PM is notified.
  * "Older" excludes this release's own default, so a rerun of one release
  * reaches the same conclusion.
@@ -325,11 +326,16 @@ function planRole(latest: Role, c: PlanContext): Plan {
   const older = (c.known.get(id) ?? []).filter(
     (k) => k.policy_hash !== currentHash,
   );
-  if (older.some((k) => k.policy_hash === hash))
+  const exact = older.find((k) => k.policy_hash === hash);
+  if (exact) {
+    // The version is that older default itself: keep its content now, so a
+    // deferral and a later project edit still know what it held (V-3073:2).
+    if (!exact.content) c.remember(id, latest);
     return { kind: "write", source: current, composed_hash: currentHash };
+  }
   const reading = readOnOlderDefault(latest, current, older);
   if (reading) {
-    if (reading.proven) c.remember(id, reading.proven);
+    for (const proven of reading.proven) c.remember(id, proven);
     const { append_instructions, extra_tools, removed_tools } = reading.rules;
     // Everything beyond the older default is in the new one already.
     if (!append_instructions && !extra_tools.length && !removed_tools.length)

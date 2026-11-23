@@ -302,3 +302,114 @@ test("C-613 a rerun of one release with several records reaches the same version
       "list_needs_you",
     );
   }));
+
+/** A pre-C-613 publication receipt: its matched entry seeds a hash-only record. */
+function seedReceipt(store: Store, project: string, role: RoleDefinition) {
+  store.uow.run((tx) =>
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project),
+      type: "host_role_pack_published",
+      actor: { kind: "system", project_id: project },
+      created_at: "2026-01-01T00:00:00.000Z",
+      payload: {
+        pack_hash: "older-pack",
+        roles: {
+          reviewer: {
+            version: 1,
+            policy_hash: deploymentRolePolicyHash(role),
+            disposition: "matched",
+          },
+        },
+      },
+    }),
+  );
+}
+const TITLE = "项目的报表标题";
+/** Q-1204 fixtures: R1's second paragraph and list_needs_you are withdrawn by R2. */
+const R1: Partial<RoleDefinition> = {
+  instructions: "单页报表\n\n已废弃的报表格式",
+  allowed_tools: P1.allowed_tools,
+};
+const R2: Partial<RoleDefinition> = {
+  instructions: "单页报表",
+  allowed_tools: P2.allowed_tools,
+};
+const R3: Partial<RoleDefinition> = {
+  instructions: "两页报表",
+  allowed_tools: P3.allowed_tools,
+};
+const stream = (store: Store) =>
+  store.uow.read((tx) => tx.events.listAfter("sensen", undefined, 0));
+
+test("C-613 V-3073:2 ②-a/②-b an exact hit on a hash-only default is remembered with its content, so a deferral and a later project edit never keep what the pack withdrew", () =>
+  withStore((store) => {
+    seedReceipt(store, "sensen", pack(R1));
+    put(store, "sensen", pack(R1), 1);
+    // Release 2 withdraws a paragraph and a tool; the profile is broken.
+    release.reviewer = R2;
+    syncProjectOverlayRoles(store, "sensen", broken);
+    expect(reviewer(store, "sensen")?.version).toBe(1);
+    expect(
+      store.uow.read((tx) => knownDefaults(tx, "sensen").get("reviewer")?.[0]),
+    ).toEqual(knownDefault(pack(R1)));
+    // The project then appends its own paragraph to v1.
+    put(
+      store,
+      "sensen",
+      { ...pack(R1), instructions: `${R1.instructions}\n\n${TITLE}` },
+      2,
+    );
+    release.reviewer = R3;
+    syncProjectOverlayRoles(store, "sensen", valid);
+    const first = stream(store);
+    // ②-d: a rerun of the release writes nothing more.
+    syncProjectOverlayRoles(store, "sensen", valid);
+    expect(stream(store)).toEqual(first);
+    const role = reviewer(store, "sensen");
+    expect(role?.version).toBe(3);
+    expect(role?.instructions).toBe(`${R3.instructions}\n\n${TITLE}`);
+    expect(role?.allowed_tools).not.toContain("list_needs_you");
+    expect(role?.default_overlay).toMatchObject({
+      append_instructions: TITLE,
+      extra_tools: [],
+      removed_tools: [],
+    });
+    expect(store.uow.read((tx) => tx.human_actions.list("sensen"))).toEqual([]);
+  }));
+
+test("C-613 V-3073:2 ②-c a hash-only default the role never equalled is proven before choosing, so a newer content record cannot claim the withdrawn content", () =>
+  withStore((store) => {
+    const at = "2026-01-01T00:00:00.000Z";
+    seedReceipt(store, "sensen", pack(R1));
+    store.uow.run((tx) =>
+      recordDefault(tx, "sensen", "reviewer", pack(R2), "pack", at),
+    );
+    // The role was R1 plus a project paragraph from the start.
+    put(
+      store,
+      "sensen",
+      { ...pack(R1), instructions: `${R1.instructions}\n\n${LOCAL}` },
+      1,
+    );
+    release.reviewer = R3;
+    syncProjectOverlayRoles(store, "sensen", valid);
+    const first = stream(store);
+    syncProjectOverlayRoles(store, "sensen", valid);
+    expect(stream(store)).toEqual(first);
+    const role = reviewer(store, "sensen");
+    expect(role?.version).toBe(2);
+    expect(role?.instructions).toBe(`${R3.instructions}\n\n${LOCAL}`);
+    expect(role?.allowed_tools).not.toContain("list_needs_you");
+    expect(role?.default_overlay).toMatchObject({
+      append_instructions: LOCAL,
+      extra_tools: [],
+      removed_tools: [],
+    });
+    // The proof joined the seed with its content.
+    expect(
+      store.uow.read((tx) => knownDefaults(tx, "sensen").get("reviewer")),
+    ).toEqual(
+      expect.arrayContaining([knownDefault(pack(R1)), knownDefault(pack(R2))]),
+    );
+  }));

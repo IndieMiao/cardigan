@@ -294,6 +294,66 @@ export function upgradeDeployedRoles(
   );
 }
 
+/**
+ * C-613 V-3073:1: a deployment's conclusion on a standing role's target
+ * launch profile, per role, version and profile. Only the system writes it,
+ * in the project stream and on no card, and only when it changes.
+ */
+export const LAUNCH_CHECKED_EVENT = "host_role_launch_checked";
+interface LaunchTarget {
+  readonly role_id: string;
+  readonly role_version: number;
+  readonly profile: string | undefined;
+}
+
+function lastLaunchCheck(
+  tx: ReadRepositories,
+  project: ProjectId,
+  target: LaunchTarget,
+): boolean | undefined {
+  const last = tx.events
+    .listAfter(project, undefined, 0)
+    .filter((e) => {
+      const p = e.payload as Partial<LaunchTarget>;
+      return (
+        e.type === LAUNCH_CHECKED_EVENT &&
+        e.card_id === undefined &&
+        e.actor.kind === "system" &&
+        e.actor.project_id === project &&
+        p.role_id === target.role_id &&
+        p.role_version === target.role_version &&
+        p.profile === target.profile
+      );
+    })
+    .sort((a, b) => a.seq - b.seq)
+    .at(-1);
+  const valid = (last?.payload as { valid?: unknown } | undefined)?.valid;
+  return typeof valid === "boolean" ? valid : undefined;
+}
+
+function recordLaunchCheck(
+  tx: StoreTransactionContext,
+  project: ProjectId,
+  target: LaunchTarget & { readonly profile: string },
+  valid: boolean,
+  at: string,
+) {
+  if (lastLaunchCheck(tx, project, target) === valid) return;
+  tx.events.append(project, {
+    id: tx.ids.nextEventId(),
+    seq: tx.ids.nextEventSequence(project),
+    type: LAUNCH_CHECKED_EVENT,
+    actor: { kind: "system", project_id: project },
+    created_at: at,
+    payload: {
+      role_id: target.role_id,
+      role_version: target.role_version,
+      profile: target.profile,
+      valid,
+    },
+  });
+}
+
 /** Retry every maintenance tick; busy sessions retain their pinned version until idle. */
 export function rotateIdleDeployedRoles(
   store: Store,
@@ -344,25 +404,41 @@ export function rotateIdleDeployedRoles(
         !latest ||
         latest.role_version <= previous.role_version ||
         audited === undefined ||
-        audited <= previous.role_version ||
-        state.runs.some(
-          (r) =>
-            r.assignment_id === previous.id &&
-            !["completed", "failed", "cancelled"].includes(r.status),
-        )
+        audited <= previous.role_version
       )
         continue;
-      // The new session must be launchable: in a deployment the profile is
-      // checked now; between deployments only an unchanged profile is taken.
+      // The new session must be launchable. A deployment checks the profile
+      // and records its conclusion, busy session or not; between deployments
+      // that conclusion stands (V-3073:1), else only an unchanged profile is
+      // taken.
       const pinned = state.roles.find(
         (r) =>
           r.role_id === previous.role_id &&
           r.role_version === previous.role_version,
       );
       const profile = latest.launch_profile_ref;
-      const launchable = profiles
-        ? profile !== undefined && profiles().has(profile)
-        : profile !== undefined && profile === pinned?.launch_profile_ref;
+      const target = {
+        role_id: previous.role_id,
+        role_version: latest.role_version,
+        profile,
+      };
+      let launchable: boolean;
+      if (profiles) {
+        launchable = profile !== undefined && profiles().has(profile);
+        if (profile !== undefined)
+          recordLaunchCheck(
+            tx,
+            project,
+            { ...target, profile },
+            launchable,
+            clock.now(),
+          );
+      } else {
+        // Already notified by the deployment that found it invalid.
+        if (lastLaunchCheck(tx, project, target) === false) continue;
+        launchable =
+          profile !== undefined && profile === pinned?.launch_profile_ref;
+      }
       if (!launchable) {
         recordRoleDeferral(
           tx,
@@ -375,6 +451,14 @@ export function rotateIdleDeployedRoles(
         );
         continue;
       }
+      if (
+        state.runs.some(
+          (r) =>
+            r.assignment_id === previous.id &&
+            !["completed", "failed", "cancelled"].includes(r.status),
+        )
+      )
+        continue;
       const rotated =
         previous.role_id === "pm"
           ? rotatePmAfterDeployment(
