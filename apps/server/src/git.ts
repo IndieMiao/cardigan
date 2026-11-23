@@ -16,7 +16,7 @@ import type {
   SystemReviewLimitFailure,
   SystemReviewLimitOutcome,
 } from "@cardigan/domain";
-import { validationFailed } from "@cardigan/domain";
+import { CheckHeadFailure, validationFailed } from "@cardigan/domain";
 import {
   type CentralProject,
   CentralRepositoryService,
@@ -667,10 +667,21 @@ export class ServerGit implements GitBinding {
     assignment: Assignment,
   ): Promise<string> {
     const project = this.projectOf(projectId);
-    if (!project) throw new Error("No registered repository");
-    return this.withAssignmentSource(project, assignment, (central) =>
-      new GitDeliveryVerifier(central, project).head(assignment),
-    );
+    if (!project) throw new CheckHeadFailure("environment_unavailable");
+    try {
+      return await this.withAssignmentSource(project, assignment, (central) =>
+        new GitDeliveryVerifier(central, project).head(assignment),
+      );
+    } catch (error) {
+      // Lock timeouts stay retryable for every caller; the remaining setup
+      // failures (worker target or helper resolution) name the environment.
+      if (
+        error instanceof RepositoryLockTimeoutError ||
+        error instanceof CheckHeadFailure
+      )
+        throw error;
+      throw new CheckHeadFailure("environment_unavailable", { cause: error });
+    }
   }
   preparePrecheck(
     project: CentralProject,

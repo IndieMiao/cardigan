@@ -19,6 +19,10 @@ import {
   parseMaintenanceWindow,
 } from "./central-maintenance-loop.js";
 import { DEFAULT_CENTRAL_REF_RETENTION_MS } from "./central-ref-retention.js";
+import {
+  type CheckHeadRetryOptions,
+  DEFAULT_CHECK_HEAD_RETRY,
+} from "./check-head-retry.js";
 import { DEFAULT_MERGE_WATCHDOG_MS } from "./merge-watchdog.js";
 
 export const DEFAULT_DATA_DIR = defaultDataDirectory();
@@ -39,6 +43,8 @@ export interface ServerConfig {
     readonly per_read_bytes: number;
     readonly per_assignment_attempt_bytes: number;
   };
+  /** C-632: request_check busy-lock retry; defaults when no variable is set. */
+  readonly checkHeadRetry?: CheckHeadRetryOptions;
   readonly execution?: ExecutionConfig;
   readonly dataDir: string;
   /** Loopback by default; the MCP endpoint is never exposed publicly (§14). */
@@ -144,6 +150,9 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_SHUTDOWN_GRACE_MS?: string | undefined;
   readonly CARDIGAN_MCP_SESSION_CHECK?: string | undefined;
   readonly CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS?: string | undefined;
+  readonly CARDIGAN_CHECK_HEAD_RETRY_ATTEMPTS?: string | undefined;
+  readonly CARDIGAN_CHECK_HEAD_RETRY_TOTAL_MS?: string | undefined;
+  readonly CARDIGAN_CHECK_HEAD_RETRY_BACKOFF_MS?: string | undefined;
 }
 
 export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
@@ -227,8 +236,10 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
   const sessionCheck = nonEmpty(env.CARDIGAN_MCP_SESSION_CHECK);
   if (sessionCheck !== undefined && !["0", "1"].includes(sessionCheck))
     throw new Error("CARDIGAN_MCP_SESSION_CHECK must be 0 or 1");
+  const checkHeadRetry = resolveCheckHeadRetry(env);
   return {
     mcpSessionCheck: sessionCheck !== "0",
+    ...(checkHeadRetry ? { checkHeadRetry } : {}),
     ...(checkLogLimits ? { checkLogLimits } : {}),
     ...(attachmentInlineBytes === undefined ? {} : { attachmentInlineBytes }),
     dataDir,
@@ -392,6 +403,39 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       env.CARDIGAN_SHUTDOWN_GRACE_MS,
       "CARDIGAN_SHUTDOWN_GRACE_MS",
       DEFAULT_SHUTDOWN_GRACE_MS,
+    ),
+  };
+}
+
+function resolveCheckHeadRetry(
+  env: ServerEnv,
+): CheckHeadRetryOptions | undefined {
+  const attemptsText = nonEmpty(env.CARDIGAN_CHECK_HEAD_RETRY_ATTEMPTS);
+  if (
+    attemptsText === undefined &&
+    nonEmpty(env.CARDIGAN_CHECK_HEAD_RETRY_TOTAL_MS) === undefined &&
+    nonEmpty(env.CARDIGAN_CHECK_HEAD_RETRY_BACKOFF_MS) === undefined
+  )
+    return undefined;
+  const attempts =
+    attemptsText === undefined
+      ? DEFAULT_CHECK_HEAD_RETRY.attempts
+      : Number(attemptsText);
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10)
+    throw new Error(
+      "CARDIGAN_CHECK_HEAD_RETRY_ATTEMPTS must be an integer from 1 to 10",
+    );
+  return {
+    attempts,
+    totalMs: interval(
+      env.CARDIGAN_CHECK_HEAD_RETRY_TOTAL_MS,
+      "CARDIGAN_CHECK_HEAD_RETRY_TOTAL_MS",
+      DEFAULT_CHECK_HEAD_RETRY.totalMs,
+    ),
+    backoffMs: interval(
+      env.CARDIGAN_CHECK_HEAD_RETRY_BACKOFF_MS,
+      "CARDIGAN_CHECK_HEAD_RETRY_BACKOFF_MS",
+      DEFAULT_CHECK_HEAD_RETRY.backoffMs,
     ),
   };
 }
