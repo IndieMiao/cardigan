@@ -930,6 +930,8 @@ function CardContent({
             projectId={projectId}
             cardId={cardId}
             hasPmOps={detail.card.story ? undefined : detail.has_pm_ops}
+            attachments={detail.attachments}
+            referencedAttachments={detail.referenced_attachments}
             onPosted={onPosted}
             onConflict={onCommentConflict}
           />

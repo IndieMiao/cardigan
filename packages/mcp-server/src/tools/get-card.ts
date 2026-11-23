@@ -33,6 +33,7 @@ import {
   verificationActivity,
 } from "@cardigan/domain";
 import { z } from "zod";
+import { resolvePendingAttachmentRefs } from "../attachment-refs.js";
 import { ToolError } from "../errors.js";
 import { timeRead } from "../read-timing.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
@@ -359,6 +360,12 @@ export const getCardTool = defineTool({
           .filter((entry) => entry.card_id === cardId)
           .map((entry) => ({
             ...entry,
+            // C-615: a comment's `attachment-new-N` reads as the number it got.
+            body: resolvePendingAttachmentRefs(
+              entry.body,
+              entry,
+              state.attachments,
+            ),
             ...authorView(authors, entry.author),
           })),
       ),

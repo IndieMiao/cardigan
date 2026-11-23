@@ -159,7 +159,9 @@ function setup(
 
 test("the placeholder names employees instead of roles or Assignments", () => {
   const { input } = setup();
-  expect(input.placeholder).toBe("支持 Markdown；@ 提及员工；可以直接粘贴图片");
+  expect(input.placeholder).toBe(
+    "支持 Markdown；@ 提及员工；# 引用附件；可以粘贴或拖入文件",
+  );
 });
 
 test("typing @ reads the card's candidates and lists avatar, name and title, card people first", async () => {

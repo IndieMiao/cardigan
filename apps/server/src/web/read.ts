@@ -68,8 +68,10 @@ import {
 } from "@cardigan/domain";
 import { type ProjectMergeGate, previewPorts } from "@cardigan/host";
 import {
+  attachmentReferenceIds,
   loadCommandState,
   type RecordReadTiming,
+  resolvePendingAttachmentRefs,
   timeRead,
 } from "@cardigan/mcp-server";
 import {
@@ -703,6 +705,46 @@ export function decisionAttachmentViews(
   });
 }
 
+/**
+ * C-615: other cards' attachments the card's bodies mention, so the browser
+ * can show them as chips. The current card's own attachments are already in
+ * `attachments`. An attachment of a sensitive card, or any other card while
+ * the project turned cross-card reading off, is left out like a missing one:
+ * the body keeps the number as text.
+ */
+export function referencedAttachmentViews(
+  state: CommandState,
+  card_id: CardId,
+  text: string,
+  attachmentEntryCards?: ReadonlyMap<string, CardId>,
+): (AttachmentView & { readonly card_id: string })[] {
+  const ids = attachmentReferenceIds(text);
+  if (!ids.length || projectPreferences(state).cross_card_read === false)
+    return [];
+  const entryCard = new Map([
+    ...(attachmentEntryCards ?? []),
+    ...state.timeline.map((entry) => [entry.id, entry.card_id] as const),
+  ]);
+  const owner = (attachment: Attachment): CardId | undefined => {
+    if (attachment.card_id) return attachment.card_id;
+    const target = attachment.attach_to;
+    if (target.kind === "timeline_entry") return entryCard.get(target.id);
+    const delivery = state.deliveries.find((d) => d.id === target.id);
+    return state.work_items.find((w) => w.id === delivery?.work_item_id)
+      ?.card_id;
+  };
+  const view = attachmentViewMapper(state);
+  return ids.flatMap((id) => {
+    const attachment = state.attachments.find((a) => a.id === id);
+    if (!attachment || attachment.streamed_artifact?.expired) return [];
+    const card = owner(attachment);
+    if (!card || card === card_id) return [];
+    const other = state.cards.find((c) => c.id === card);
+    if (!other || other.sensitive) return [];
+    return [{ ...view(attachment), card_id: card }];
+  });
+}
+
 const SELECTION_EVENTS = new Set([
   "work_item_assigned",
   "machine_selected",
@@ -1013,8 +1055,15 @@ export function cardDetail(
               r.work_item_id === entry.work_item_id,
           )?.id
         : undefined;
+    // C-615: a comment's `attachment-new-N` reads as the number it got.
+    const body = resolvePendingAttachmentRefs(
+      entry.body,
+      entry,
+      state.attachments,
+    );
     return {
       ...entry,
+      body,
       ...webAuthorView(state, entry.author),
       event_type: event?.type ?? null,
       ...(event?.type === "merge_check_blocked"
@@ -1056,7 +1105,7 @@ export function cardDetail(
         ? (roles.get(entry.author.slice(11)) ?? null)
         : null,
       ...(review_id ? { review_id } : {}),
-      references: references(entry.body),
+      references: references(body),
     };
   };
   const source = card.source;
@@ -1198,6 +1247,12 @@ export function cardDetail(
     })),
     attachments: timeRead(options.recordTiming, "attachment_views", () =>
       attachmentViews(state, card_id, options.attachmentEntryCards),
+    ),
+    referenced_attachments: referencedAttachmentViews(
+      state,
+      card_id,
+      [description, ...timeline.map((e) => e.body)].join("\n"),
+      options.attachmentEntryCards,
     ),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.
     relations: {

@@ -677,6 +677,13 @@ export interface CardDetail {
   readonly decisions: readonly DecisionView[];
   readonly human_actions: readonly HumanActionView[];
   readonly attachments: readonly AttachmentView[];
+  /**
+   * C-615: other cards' attachments this page's bodies mention by number and
+   * the reader may see; anything else stays plain text.
+   */
+  readonly referenced_attachments?: readonly (AttachmentView & {
+    readonly card_id: string;
+  })[];
   readonly relations: CardRelations;
   readonly counts: {
     readonly timeline: number;

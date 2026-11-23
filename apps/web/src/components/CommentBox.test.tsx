@@ -152,7 +152,9 @@ test("pasted images are uploaded as evidence on the new comment", async () => {
   const input = screen.getByLabelText("评论正文");
   const file = new File(["png-bytes"], "screenshot.png", { type: "image/png" });
   fireEvent.paste(input, { clipboardData: { files: [file] } });
-  expect(screen.getByText(/已捕获 1 张图片/u)).toBeTruthy();
+  expect(
+    screen.getByRole("list", { name: "待上传的附件" }).textContent,
+  ).toContain("screenshot.png");
   expect((input as HTMLTextAreaElement).rows).toBe(6);
   fireEvent.change(screen.getByLabelText("screenshot.png 的说明"), {
     target: { value: "修复后的界面" },
@@ -170,7 +172,7 @@ test("pasted images are uploaded as evidence on the new comment", async () => {
     attach_to: { kind: "timeline_entry", id: "C-1#43" },
   });
   expect(uploads[0]?.file).toBe(btoa("png-bytes"));
-  expect(screen.queryByText(/已捕获/u)).toBeNull();
+  expect(screen.queryByRole("list", { name: "待上传的附件" })).toBeNull();
 });
 
 test("invalid attachment notes are rejected before posting and a 200-character Unicode note can be sent", async () => {

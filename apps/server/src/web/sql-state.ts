@@ -4,6 +4,7 @@ import {
   extractReferences,
   type ProjectId,
 } from "@cardigan/domain";
+import { attachmentReferenceIds } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
 
 type Collection =
@@ -368,6 +369,22 @@ export function withReferences(
     readDocs(store, state.project_id, table, inIds("id"), [
       JSON.stringify(ids),
     ]);
+  // C-615: `attachment-N` in a body, with the card it belongs to, so its
+  // sensitivity can be checked before the browser gets its metadata.
+  const attachmentIds = attachmentReferenceIds(text);
+  if (attachmentIds.length) {
+    next.attachments = unique([
+      ...next.attachments,
+      ...query("attachments", attachmentIds),
+    ]);
+    next.cards = unique([
+      ...next.cards,
+      ...query(
+        "cards",
+        next.attachments.flatMap((a) => (a.card_id ? [a.card_id] : [])),
+      ),
+    ]);
+  }
   next.deliveries = unique([
     ...next.deliveries,
     ...query(

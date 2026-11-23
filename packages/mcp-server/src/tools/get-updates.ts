@@ -1,5 +1,9 @@
 import { authorView, type CardId, mergeBatchReadScope } from "@cardigan/domain";
 import { z } from "zod";
+import {
+  hasPendingAttachmentRefs,
+  resolvePendingAttachmentRefs,
+} from "../attachment-refs.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import { PROJECT_STREAM, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
@@ -70,6 +74,30 @@ export const getUpdatesTool = defineTool({
       employees: tx.employees?.list() ?? [],
       members: tx.members?.list() ?? [],
     }));
+    // C-615: a comment's `attachment-new-N` reads as the number it got. Only
+    // cards with such a comment read their attachments.
+    const pending = new Set(
+      updates.timeline
+        .filter((entry) => hasPendingAttachmentRefs(entry.body))
+        .map((entry) => entry.card_id),
+    );
+    const attachments = new Map(
+      pending.size
+        ? store.uow.read((tx) =>
+            [...pending].map(
+              (card) =>
+                [
+                  card,
+                  tx.cardSources?.(project_id, card).attachments ??
+                    tx.attachments
+                      .list(project_id)
+                      .filter((a) => a.card_id === card),
+                ] as const,
+            ),
+          )
+        : [],
+    );
+    const uploads = (card: CardId) => attachments.get(card) ?? [];
     return publicSourceMergeData({
       card_id: cardId ?? null,
       since_seq: start,
@@ -85,6 +113,11 @@ export const getUpdatesTool = defineTool({
       })),
       timeline: updates.timeline.map(batchScope.timeline).map((entry) => ({
         ...entry,
+        body: resolvePendingAttachmentRefs(
+          entry.body,
+          entry,
+          uploads(entry.card_id),
+        ),
         ...authorView(authors, entry.author),
       })),
     });
