@@ -86,8 +86,31 @@ const reviewInput = z.object({
         .describe("Required for every must_fix issue"),
       pre_existing: z.boolean(),
       proof: z.string().optional(),
+      basis: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe(
+          "必改项的依据：ACn（本卡第 n 条验收标准）、INVn（card.invariants 第 n 条）、PCn（当前通过条件清单第 n 条）或常驻不变量 lost_work、dual_executor、security、check_failed、ui_copy。流程版本 ≥5 缺依据的必改项改记为后续跟进，不挡合并",
+        ),
     }),
   ),
+  pass_conditions: z
+    .array(
+      z
+        .object({
+          description: z.string().trim().min(1).max(500),
+          basis: z.string().trim().min(1),
+        })
+        .strict(),
+    )
+    .min(1)
+    .max(10)
+    .optional()
+    .describe(
+      "通过条件清单：同一验证项第 2 次驳回时必填，1–10 条可验证的条件，每条的 basis 为 ACn、INVn 或常驻不变量；之后的审核只核对这份清单，必改项用 PCn 引用",
+    ),
   issue_refs: z
     .array(
       z.union([

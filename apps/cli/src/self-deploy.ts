@@ -5,6 +5,7 @@ import {
   DeploymentController,
   DeploymentDiskMonitor,
   DeploymentServerUnavailable,
+  HostMemoryPressureMonitor,
   loadDeploymentConfig,
   NodeDeploymentDriver,
   RunCapacityDeferred,
@@ -138,6 +139,17 @@ export async function runSelfDeployCommand(
       dataDir,
       config.disk_low_percent,
     );
+    const pressure =
+      process.platform === "linux"
+        ? new HostMemoryPressureMonitor(
+            store,
+            { tmp: config.tmp_high_percent, swap: config.swap_high_percent },
+            undefined,
+            // C-656: start after a minute so a supervisor that exits at once
+            // (or a short-lived test) never scans the host's /tmp.
+            Date.now() + 60_000,
+          )
+        : undefined;
     const stop = new AbortController();
     const signal = () => stop.abort();
     io.signals.on("SIGTERM", signal);
@@ -148,6 +160,11 @@ export async function runSelfDeployCommand(
           await disk.poll();
         } catch {
           io.stderr("本次磁盘空间检查未完成，保留上次观测状态");
+        }
+        try {
+          await pressure?.poll();
+        } catch {
+          io.stderr("本次 /tmp 与 swap 用量检查未完成，保留上次观测状态");
         }
         try {
           await controller.tick();
