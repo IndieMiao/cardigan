@@ -312,7 +312,7 @@ test.each([
         "wake",
         "status",
         "interrupt",
-        // C-642: the replacement launch shares the provision's clean probe.
+        "captureAgent",
         "resume_or_replace",
         "human_entry",
         "release",
@@ -1305,7 +1305,7 @@ test("missing MCP config rejects before any network probe", async () => {
   expect(mcpReachability).not.toHaveBeenCalled();
 });
 
-test("C-642: launch probes of one binding merge for 5 s, and a configuration change during one prevents launch", async () => {
+test("C-642: preflight probes of one binding merge for 5 s; the final check stays live and a configuration change during it prevents launch", async () => {
   let now = 1_000;
   vi.spyOn(performance, "now").mockImplementation(() => now);
   try {
@@ -1330,7 +1330,8 @@ test("C-642: launch probes of one binding merge for 5 s, and a configuration cha
     // Another machine is another probe.
     await router.forLaunch("fixture", assignment("worker-b"));
     expect(mcpReachability).toHaveBeenCalledTimes(3);
-    now += 5_000;
+    // The final check before the adapter starts an Agent is always live, even
+    // inside the window.
     mcpReachability.mockImplementationOnce(async () => {
       workers = workers.map((w) => ({
         ...w,

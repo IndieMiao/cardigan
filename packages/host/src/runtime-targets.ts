@@ -475,18 +475,25 @@ export class RuntimeTargets implements Runtime {
   ): void {
     this.launchTarget(project, assignment);
   }
+  /** `reuse=false` is the final check before an adapter starts an Agent. */
   async forLaunch(
     project: ProjectId,
     assignment: Pick<Assignment, "machine_id" | "runtime_ref">,
     pinned?: () => Target,
+    reuse = true,
   ): Promise<Target> {
     const resolve = pinned ?? (() => this.launchTarget(project, assignment));
     const target = resolve();
     if (assignment.machine_id === "local") return target;
-    // C-642: launches may share a recent clean probe of the same binding.
+    // C-642: preflights may share a recent clean probe of the same binding.
     const checked = pinned
-      ? await this.rawMachineCheck(project, assignment.machine_id, pinned, true)
-      : await this.check(project, assignment.machine_id, false, true);
+      ? await this.rawMachineCheck(
+          project,
+          assignment.machine_id,
+          pinned,
+          reuse,
+        )
+      : await this.check(project, assignment.machine_id, false, reuse);
     if (!checked.ok) return rejected(`machine_check_${checked.error.code}`);
     if (checked.value.blockers.length)
       return rejected(checked.value.blockers[0]);
@@ -702,7 +709,7 @@ export class RuntimeTargets implements Runtime {
       return rejected();
     return new RuntimeTargets({ ...this.options, project }, this.registered);
   }
-  /** Live unless `cached` (launch only); a clean live probe refreshes the launch cache. */
+  /** Live unless `cached` (preflight only); a clean live probe refreshes that cache. */
   check(
     project: ProjectId,
     machine_id: string,
@@ -802,10 +809,11 @@ export class RuntimeTargets implements Runtime {
   }
   /**
    * C-642: the live probe (health, worker readiness and MCP reachability) of
-   * one target binding. Concurrent callers share one probe in flight. Only a
-   * launch (`cached`) reuses a clean result for `probeCacheMs` after it
-   * settles; explicit checks and patrol always probe again, and their result
-   * replaces the cached one. Failures and blockers are never reused, and every
+   * one target binding. Preflights (`cached`: session, Git capture, launch
+   * preparation) share a probe in flight and reuse a clean result for
+   * `probeCacheMs` after it settles. Explicit checks, patrol and the final
+   * check before an adapter starts an Agent always start a new probe, which
+   * replaces the shared one. Failures and blockers are never reused, and every
    * caller still reads machine state and the binding itself.
    */
   private probe(
@@ -826,7 +834,7 @@ export class RuntimeTargets implements Runtime {
       if (entry.until !== undefined && entry.until <= now)
         this.probes.delete(k);
     const shared = this.probes.get(key);
-    if (shared && (shared.until === undefined || cached)) return shared.result;
+    if (shared && cached) return shared.result;
     const entry: {
       result: Promise<RuntimeResult<readonly string[]>>;
       until?: number;
@@ -994,7 +1002,7 @@ export class RuntimeTargets implements Runtime {
         : undefined;
     let checked: Target;
     try {
-      checked = await this.forLaunch(project, assignment, pinned);
+      checked = await this.forLaunch(project, assignment, pinned, false);
     } catch (error) {
       return { ok: false, error: new ProvisionTargetRefusal(launch, error) };
     }
@@ -1227,7 +1235,7 @@ export class RuntimeTargets implements Runtime {
     let checked: Target | undefined;
     if (ref.machine_id !== "local") {
       try {
-        checked = await this.forLaunch(project, assignment);
+        checked = await this.forLaunch(project, assignment, undefined, false);
       } catch (error) {
         return { ok: false, error: new ProvisionTargetRefusal(launch, error) };
       }
