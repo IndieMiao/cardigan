@@ -208,6 +208,7 @@ export {
   mergeCheckAttemptRunning,
   mergeCheckAttemptRunningInTransaction,
   mergeCheckCapacityAvailable,
+  runningMergeChecks,
 } from "./merge-check-capacity.js";
 export {
   loadMergeGateConfig,

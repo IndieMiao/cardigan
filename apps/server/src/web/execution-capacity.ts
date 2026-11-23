@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import {
   DEFAULT_MAX_RUN_LIMIT,
   latestMergeCheck,
@@ -12,6 +13,7 @@ import {
   machineRunCapacity,
   type ReadResourceLimits,
   runCapacitySnapshot,
+  runningMergeChecks,
 } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
@@ -20,10 +22,123 @@ import type { ReadRepositories, Store } from "@cardigan/store";
 export function executionCapacityRevision(
   ...args: Parameters<typeof executionCapacity>
 ) {
+  return capacityRevisionOf(executionCapacity(...args));
+}
+
+function capacityRevisionOf(view: ExecutionCapacityView): string {
   return createHash("sha256")
-    .update(JSON.stringify(executionCapacity(...args)))
+    .update(JSON.stringify(view))
     .digest("hex")
     .slice(0, 16);
+}
+
+export type ExecutionCapacityView = ReturnType<typeof executionCapacity>;
+
+/**
+ * C-634: the stored inputs of the capacity view, as counters and small rows
+ * instead of the view itself. `command_versions` advances with every write to
+ * cards, work items, Assignments, Runs, deliveries, events (merge checks,
+ * prechecks, GitHub dispatch intents, host ops) and BellAttempts; the tables
+ * without those triggers are read whole, and leases only while active at
+ * `now`. Read it before the view, so a write landing in between only costs one
+ * extra rebuild, never a stale view.
+ */
+export function executionCapacityInputs(store: Store, now: string): string {
+  const db = store.database;
+  return store.uow.read(() =>
+    JSON.stringify([
+      db
+        .prepare(
+          "SELECT project_id, collection, version FROM command_versions ORDER BY project_id, collection",
+        )
+        .all()
+        .map((row) => [row.project_id, row.collection, row.version]),
+      db
+        .prepare(
+          "SELECT machine, resource, project, starts_at, ends_at, binding, verified_at, run_id FROM machine_resource_leases WHERE ends_at>? OR (binding IS NOT NULL AND verified_at IS NULL) ORDER BY machine, resource, starts_at, generation",
+        )
+        .all(now)
+        .map((row) => Object.values(row)),
+      db
+        .prepare(
+          "SELECT machine, project, run_id, reason FROM machine_resource_waits ORDER BY machine, project, run_id",
+        )
+        .all()
+        .map((row) => Object.values(row)),
+      db
+        .prepare(
+          "SELECT machine_id, doc FROM run_capacity_limits ORDER BY machine_id",
+        )
+        .all()
+        .map((row) => [row.machine_id, row.doc]),
+      // Includes owner liveness: a dead check process releases its slot.
+      [...runningMergeChecks(store)].sort(([a], [b]) => a.localeCompare(b)),
+      store.listProjects().map((project) => project.id),
+    ]),
+  );
+}
+
+/** Rebuild at least this often when no counted input moved (clock and process inputs). */
+export const CAPACITY_REFRESH_MS = 10_000;
+
+/**
+ * C-634: one capacity view per project shared by every SSE connection and the
+ * GET endpoint. It is rebuilt only when `executionCapacityInputs` changed or
+ * the refresh interval passed; the revision is still the hash of the view, so
+ * a client refetches exactly when the view it would get differs.
+ */
+export class ExecutionCapacityCache {
+  readonly #entries = new Map<
+    string,
+    {
+      inputs: string;
+      builtAt: number;
+      view: ExecutionCapacityView;
+      revision: string;
+    }
+  >();
+  constructor(
+    private readonly options: {
+      readonly inputs: (now: string) => string;
+      readonly build: (
+        project: string | undefined,
+        now: string,
+      ) => ExecutionCapacityView;
+      readonly now: () => string;
+      readonly refreshMs?: number;
+      readonly monotonicMs?: () => number;
+    },
+  ) {}
+
+  read(project: string | undefined): {
+    view: ExecutionCapacityView;
+    revision: string;
+  } {
+    const now = this.options.now();
+    const at = this.options.monotonicMs?.() ?? performance.now();
+    const inputs = this.options.inputs(now);
+    const key = project ?? "";
+    const cached = this.#entries.get(key);
+    if (
+      cached &&
+      cached.inputs === inputs &&
+      at - cached.builtAt < (this.options.refreshMs ?? CAPACITY_REFRESH_MS)
+    )
+      return cached;
+    const view = this.options.build(project, now);
+    const entry = {
+      inputs,
+      builtAt: at,
+      view,
+      revision: capacityRevisionOf(view),
+    };
+    this.#entries.set(key, entry);
+    return entry;
+  }
+
+  revision(project: string | undefined): string {
+    return this.read(project).revision;
+  }
 }
 
 /** All projects share machine capacity; return only display fields, never executor credentials. */

@@ -63,8 +63,9 @@ import {
 import { readDecisionHistory } from "./decision-history-state.js";
 import { drainTasks } from "./drain-tasks.js";
 import {
+  ExecutionCapacityCache,
   executionCapacity,
-  executionCapacityRevision,
+  executionCapacityInputs,
 } from "./execution-capacity.js";
 import {
   declaredCapabilities,
@@ -216,6 +217,7 @@ interface RequestContext {
   readonly buildInfo: BuildInfo;
   readonly cardsCache: CardsCacheOptions | undefined;
   readonly needsReadEpoch: string;
+  readonly capacity: ExecutionCapacityCache;
   readonly runLimit: WebServerOptions["runLimit"];
   readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
   readonly machineDisplayName: WebServerOptions["machineDisplayName"];
@@ -262,6 +264,22 @@ export async function startWebServer(
     );
   const clock = options.clock ?? systemClock;
   const needsReadEpoch = randomUUID();
+  // C-634: every SSE connection and the GET share one view per project.
+  const capacity = new ExecutionCapacityCache({
+    now: () => clock.now(),
+    inputs: (now) => executionCapacityInputs(store, now),
+    build: (project, now) =>
+      executionCapacity(
+        store,
+        options.runLimit,
+        options.mergeGate,
+        options.runLimitMaximum,
+        options.machineDisplayName,
+        options.resourceLimits,
+        project,
+        now,
+      ),
+  });
   const limiter = options.loginLimiter ?? new LoginLimiter();
   const log =
     options.log ??
@@ -406,6 +424,7 @@ export async function startWebServer(
         buildInfo,
         cardsCache: options.cardsCache,
         needsReadEpoch,
+        capacity,
         req,
         res,
         url,
@@ -704,17 +723,7 @@ async function serveProjectRoute(
       req,
       res,
       after,
-      capacityRevision: () =>
-        executionCapacityRevision(
-          store,
-          context.runLimit,
-          context.mergeGate,
-          context.runLimitMaximum,
-          context.machineDisplayName,
-          context.resourceLimits,
-          project_id,
-          clock.now(),
-        ),
+      capacityRevision: () => context.capacity.revision(project_id),
       ...(context.stream?.pollMs === undefined
         ? {}
         : { pollMs: context.stream.pollMs }),
@@ -758,20 +767,7 @@ async function serveProjectRoute(
   if (req.method !== "GET") methodNotAllowed(["GET"]);
 
   if (rest === "/execution/capacity") {
-    sendJson(
-      res,
-      200,
-      executionCapacity(
-        store,
-        context.runLimit,
-        context.mergeGate,
-        context.runLimitMaximum,
-        context.machineDisplayName,
-        context.resourceLimits,
-        project_id,
-        clock.now(),
-      ),
-    );
+    sendJson(res, 200, context.capacity.read(project_id).view);
     return;
   }
 

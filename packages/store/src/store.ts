@@ -75,6 +75,7 @@ import {
 } from "./repositories.js";
 import { RunResourceAuthority } from "./run-resource-authority.js";
 import { backfillStandingModesInTransaction } from "./standing.js";
+import { prepare } from "./statements.js";
 import { seedCardTemplates } from "./templates.js";
 import {
   findTokenByHash,
@@ -867,6 +868,44 @@ export class Store {
         }
       | undefined;
     return row === undefined ? undefined : projectRecord(row);
+  }
+
+  /**
+   * C-634: highest seq per event stream (`""` is the project stream) in one
+   * aggregate query. Streams come from the counters every append advances;
+   * each max is an index lookup, so the cost follows the stream count, not
+   * the history.
+   */
+  latestEventSeqs(project: ProjectId): Map<string, number> {
+    return new Map(
+      prepare(
+        this.#db,
+        `SELECT c.stream AS stream,
+          (SELECT MAX(e.seq) FROM events e
+            WHERE e.project_id = c.project_id AND e.stream = c.stream) AS seq
+        FROM event_counters c WHERE c.project_id = ?`,
+      )
+        .all(project)
+        .flatMap((row) =>
+          row.seq === null ? [] : [[String(row.stream), Number(row.seq)]],
+        ),
+    );
+  }
+
+  /**
+   * C-634: per-stream allocation counters. Allocation and append share one
+   * transaction, so a committed counter is never behind its stream: a stream
+   * whose counter is at or below a reader's cursor has nothing new for it.
+   */
+  eventStreamCounters(project: ProjectId): Map<string, number> {
+    return new Map(
+      prepare(
+        this.#db,
+        "SELECT stream, seq FROM event_counters WHERE project_id = ?",
+      )
+        .all(project)
+        .map((row) => [String(row.stream), Number(row.seq)]),
+    );
   }
 
   listProjects(): ProjectRecord[] {
