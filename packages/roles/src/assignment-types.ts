@@ -81,10 +81,16 @@ export interface AssignmentMcpEndpoint {
   readonly server_name?: string;
   /**
    * C-600: per-launch key the harness sends as `MCP_SESSION_HEADER` from its
-   * own MCP configuration (never the environment), so the endpoint can tell
-   * this harness's native requests from any other client of the Token.
+   * own MCP configuration (never the session's environment), so the endpoint
+   * can tell this harness's native requests from any other client of the
+   * Token. Codex hands it to its Card bridge only (`MCP_BRIDGE_SESSION_ENV`).
    */
   readonly session_key?: string;
+  /**
+   * C-600: interpreter that runs the Codex Card bridge where the harness
+   * starts (`DEFAULT_MCP_BRIDGE_PYTHON` when absent).
+   */
+  readonly bridge_python?: string;
 }
 
 /** C-600: header and key shape shared with the Card MCP endpoint. */

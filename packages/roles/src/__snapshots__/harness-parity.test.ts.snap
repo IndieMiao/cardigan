@@ -26,8 +26,6 @@ exports[`claude-code LP-2 launch parity 1`] = `
     "GIT_CONFIG_KEY_1": "safe.directory",
     "GIT_CONFIG_VALUE_0": "",
     "GIT_CONFIG_VALUE_1": "/fixture/work",
-    "NO_PROXY": "example.invalid",
-    "no_proxy": "example.invalid",
   },
   "files": [
     {
@@ -53,7 +51,7 @@ exports[`claude-code LP-2 launch parity 1`] = `
     {
       "mode": 448,
       "path": "/fixture/run/launch.sh",
-      "sha256": "aff7372858ccb92f2887cee25acfabe03cb74a9d5ec409e85b3e58343e821bdc",
+      "sha256": "e0412437a842a30bef61edf100848bdb289db02b14d58d400facd3195450411d",
     },
   ],
   "harness": "claude-code",
@@ -83,8 +81,6 @@ exports[`codex LP-2 launch parity 1`] = `
     "GIT_CONFIG_KEY_1": "safe.directory",
     "GIT_CONFIG_VALUE_0": "",
     "GIT_CONFIG_VALUE_1": "/fixture/work",
-    "NO_PROXY": "example.invalid",
-    "no_proxy": "example.invalid",
   },
   "files": [
     {
@@ -100,12 +96,12 @@ exports[`codex LP-2 launch parity 1`] = `
     {
       "mode": 384,
       "path": "/fixture/run/codex/config.toml",
-      "sha256": "2da31d0a0f7d44040a6fb62c173b4cfba1f5887199737f634c9dac885dc32da4",
+      "sha256": "8a1c02e74b0a5e85c2e8b0963213d98be0521b6de903d1e0065cc0aa66173190",
     },
     {
       "mode": 448,
       "path": "/fixture/run/launch.sh",
-      "sha256": "6a5d42e5ea00701c7cec64fc895b89714dc59c95cb51b6cd74c32c12e85b9185",
+      "sha256": "3a38b40976953e1eb1cc714bd19e65edfc4bd9aa5e4b5333cf83efb20d4d4514",
     },
   ],
   "harness": "codex",
@@ -136,9 +132,7 @@ exports[`pi LP-2 launch parity 1`] = `
     "GIT_CONFIG_KEY_1": "safe.directory",
     "GIT_CONFIG_VALUE_0": "",
     "GIT_CONFIG_VALUE_1": "/fixture/work",
-    "NO_PROXY": "example.invalid",
     "PI_CODING_AGENT_DIR": "/fixture/run/pi",
-    "no_proxy": "example.invalid",
   },
   "files": [
     {
@@ -169,7 +163,7 @@ exports[`pi LP-2 launch parity 1`] = `
     {
       "mode": 448,
       "path": "/fixture/run/launch.sh",
-      "sha256": "e001f2d2e1be160f3788d3040786f0474776d6534e31d34e62da611110b95734",
+      "sha256": "eaf0075b65527bf87813342778aa84f0a817b6ec58b1446d274c8b1fafb23671",
     },
   ],
   "harness": "pi",

@@ -28,14 +28,6 @@ import {
   type CompiledLaunch,
   compileResolvedLaunch,
 } from "./compile.js";
-import {
-  launchProxyBypass,
-  launchProxyBypassShell,
-  MCP_PROXY_BYPASS_KEYS,
-  mcpProxyBypassHost,
-  type ProxyBypassValues,
-  pickProxyBypass,
-} from "./mcp-proxy.js";
 import { composeRolePrompt } from "./prompt.js";
 import type {
   BrowserLaunchDefinition,
@@ -204,7 +196,6 @@ export function compileAssignmentLaunch(
   }
   // Claude Code keeps provider settings in its settings file instead of the
   // process environment, so collect those credentials from the file too.
-  const settingsProxy: ProxyBypassValues = {};
   for (const file of base.files) {
     let parsed: { env?: Record<string, string> };
     try {
@@ -217,9 +208,6 @@ export function compileAssignmentLaunch(
         secretEnv[name] = value;
       }
     }
-    // C-600: settings env overrides the process environment inside Claude.
-    if (parsed.env && typeof parsed.env === "object")
-      Object.assign(settingsProxy, pickProxyBypass(parsed.env));
   }
   const strippedBaseFiles = base.files.map((file) => {
     if (secretKeys.size === 0 && !adapter.assignmentSettings) return file;
@@ -298,50 +286,6 @@ export function compileAssignmentLaunch(
       throw new Error("Worker environment conflicts with launch profile");
     env[key] = value;
   }
-  // C-600: the Card MCP host never goes through a proxy, whatever the
-  // harness reads from the system; existing exceptions keep their meaning.
-  // A bypass list is routing, not a credential: it never rides the secret
-  // channel, so refuse that before any launch material exists.
-  if (MCP_PROXY_BYPASS_KEYS.some((key) => Object.hasOwn(secretEnv, key)))
-    throw new Error(
-      "NO_PROXY/no_proxy cannot be a provider secret; set it in provider env",
-    );
-  const mcpHost = mcpProxyBypassHost(input.mcp.url);
-  // Layers the launch sets (Claude settings over profile env). The account's
-  // inherited lists are only known where the harness starts, so local and
-  // worker material merge at run time; settings files carry merged values
-  // for the spellings they set, since those override the process.
-  const fixedProxy = { ...pickProxyBypass(env), ...settingsProxy };
-  const mergedProxy = launchProxyBypass(input.mcp.url, fixedProxy);
-  // A settings file is written before the account's lists are known: an
-  // empty spelling there stays empty unless a launch layer fixes the other.
-  const settingsMergedProxy = launchProxyBypass(input.mcp.url, fixedProxy, {
-    absentMayBeInherited: true,
-  });
-  const proxyShell = mcpHost
-    ? launchProxyBypassShell(mcpHost, fixedProxy, shellQuote)
-    : undefined;
-  if (proxyShell) for (const key of MCP_PROXY_BYPASS_KEYS) delete env[key];
-  const bypassedBaseFiles = strippedBaseFiles.map((file) => {
-    if (!mcpHost) return file;
-    try {
-      const parsed = JSON.parse(file.content) as {
-        env?: Record<string, string>;
-      };
-      if (!parsed.env || !MCP_PROXY_BYPASS_KEYS.some((k) => k in parsed.env!))
-        return file;
-      const env = { ...parsed.env };
-      for (const key of MCP_PROXY_BYPASS_KEYS)
-        if (Object.hasOwn(env, key))
-          env[key] = settingsMergedProxy[key] as string;
-      return {
-        ...file,
-        content: `${JSON.stringify({ ...parsed, env }, null, 2)}\n`,
-      };
-    } catch {
-      return file;
-    }
-  });
   const secretsFile = join(input.run_dir, SECRETS_FILE_NAME);
   const secretsFiles: CompiledFile[] =
     Object.keys(secretEnv).length === 0
@@ -363,8 +307,7 @@ export function compileAssignmentLaunch(
     profile: base.profile,
     command,
     args,
-    // What the harness sees when the account inherits no bypass lists.
-    env: proxyShell ? { ...env, ...mergedProxy } : env,
+    env,
     secret_env: secretEnv,
     files: [
       {
@@ -377,7 +320,7 @@ export function compileAssignmentLaunch(
         content: withTrailingNewline(firstPrompt),
         mode: 0o600,
       },
-      ...bypassedBaseFiles,
+      ...strippedBaseFiles,
       ...harnessFiles,
       ...(testLimit ? [testLimit.file] : []),
       ...resourceFiles,
@@ -388,20 +331,8 @@ export function compileAssignmentLaunch(
               path: join(input.run_dir, "launch.json"),
               content: JSON.stringify({
                 harness,
-                // C-600: the worker helper overlays env on the inherited
-                // environment; a POSIX sh step merges the bypass lists there
-                // and execs the CLI in place (same process).
-                ...(proxyShell
-                  ? {
-                      command: "/bin/sh",
-                      args: [
-                        "-c",
-                        `${proxyShell}exec "$0" "$@"\n`,
-                        command,
-                        ...args,
-                      ],
-                    }
-                  : { command, args }),
+                command,
+                args,
                 env,
                 nice: agentNice,
                 cwd: input.work_dir,
@@ -428,7 +359,6 @@ export function compileAssignmentLaunch(
               command,
               args,
               env,
-              ...(proxyShell ? { proxyBypass: proxyShell } : {}),
               localSetup: adapter.localSetup?.(input, shellQuote) ?? "",
             }),
         mode: 0o700,
@@ -504,16 +434,9 @@ function launchScriptContent(options: {
   readonly args: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly localSetup: string;
-  /** C-600: merge the account's inherited NO_PROXY lists at run time. */
-  readonly proxyBypass?: string;
 }): string {
   const quote = shellQuote;
   const exports = Object.entries(options.env)
-    .filter(
-      ([name]) =>
-        options.proxyBypass === undefined ||
-        !(MCP_PROXY_BYPASS_KEYS as readonly string[]).includes(name),
-    )
     .map(([name, value]) => `export ${name}=${quote(value)}`)
     .join("\n");
   const args = options.args.map(quote).join(" ");
@@ -548,7 +471,7 @@ if [ -z "$MCP_TOKEN" ]; then
 fi
 export MCP_TOKEN
 ${credentials}${exports}
-${options.proxyBypass ?? ""}${options.env.CARDIGAN_RUN_COMMAND ? 'export CARDIGAN_SESSION_PID=$$\nCARDIGAN_SESSION_BIRTH=$(exec env -i PATH=/usr/bin:/bin /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" observe-session "$$" "$CARDIGAN_RESOURCE_SESSION") || CARDIGAN_SESSION_BIRTH=unavailable\nexport CARDIGAN_SESSION_BIRTH\n' : ""}# Git's legacy command-line environment must not override the scoped list.
+${options.env.CARDIGAN_RUN_COMMAND ? 'export CARDIGAN_SESSION_PID=$$\nCARDIGAN_SESSION_BIRTH=$(exec env -i PATH=/usr/bin:/bin /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" observe-session "$$" "$CARDIGAN_RESOURCE_SESSION") || CARDIGAN_SESSION_BIRTH=unavailable\nexport CARDIGAN_SESSION_BIRTH\n' : ""}# Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is

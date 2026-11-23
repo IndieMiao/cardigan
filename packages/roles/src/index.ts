@@ -65,11 +65,13 @@ export {
   reportLaunchWarnings,
 } from "./launch-diagnostics.js";
 export {
-  launchProxyBypass,
-  MCP_PROXY_BYPASS_KEYS,
-  mcpProxyBypassHost,
-  withMcpProxyBypass,
-} from "./mcp-proxy.js";
+  DEFAULT_MCP_BRIDGE_PYTHON,
+  MCP_BRIDGE_PROBE_ARGS,
+  MCP_BRIDGE_SESSION_ENV,
+  MCP_BRIDGE_SOURCE,
+  mcpBridgeAccepts,
+  mcpBridgeArgs,
+} from "./mcp-bridge.js";
 export {
   type CatalogEntry,
   catalogCache,

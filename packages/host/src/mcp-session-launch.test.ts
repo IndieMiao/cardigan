@@ -16,8 +16,8 @@ import { launchRun } from "./launch.js";
 
 /**
  * C-600: the real host start flow marks a new session as waiting for its
- * native Card tool listing only when the host enables the check, and every
- * launch names the Card MCP host in NO_PROXY.
+ * native Card tool listing only when the host enables the check. Codex reaches
+ * Card MCP through its stdio bridge; no launch rewrites the proxy variables.
  */
 test.each([
   { harness: "codex", verify: true, expected: "pending" },
@@ -26,7 +26,7 @@ test.each([
   { harness: "pi", verify: true, expected: undefined },
   { harness: "codex", verify: false, expected: undefined },
 ] as const)(
-  "C-600 $harness host launch (verify=$verify) records the session handshake and bypasses proxies for Card MCP",
+  "C-600 $harness host launch (verify=$verify) records the session handshake and leaves proxy variables alone",
   async ({ harness, verify, expected }) => {
     const root = await mkdtemp(join(tmpdir(), "cg-mcp-session-"));
     const dataDir = join(root, "data");
@@ -119,8 +119,8 @@ test.each([
         store.uow.read((tx) => tx.assignments.get(project, assignment.id))
           ?.mcp_handshake,
       ).toBe(expected);
-      // The key lives only in the harness's own MCP configuration; the
-      // Assignment keeps its digest.
+      // The key lives only in the harness's own MCP configuration (for Codex,
+      // the bridge's own environment table); the Assignment keeps its digest.
       const config =
         harness === "codex"
           ? await readFile(
@@ -130,9 +130,10 @@ test.each([
           : harness === "claude-code"
             ? await readFile(join(launched.run_dir, "mcp.json"), "utf8")
             : "";
-      const key = /"X-Cardigan-Session"\s*[:=]\s*"([A-Za-z0-9_-]+)"/u.exec(
-        config,
-      )?.[1];
+      const key =
+        /(?:"X-Cardigan-Session"|env = \{ "CARDIGAN_MCP_SESSION") *[:=] *"([A-Za-z0-9_-]+)"/u.exec(
+          config,
+        )?.[1];
       const digest = store.uow.read((tx) =>
         tx.assignments.get(project, assignment.id),
       )?.mcp_session_key_sha256;
@@ -155,14 +156,21 @@ test.each([
         expect(script).not.toContain(key);
       } else {
         expect(digest).toBeUndefined();
-        if (!verify) expect(config).not.toContain("X-Cardigan-Session");
+        if (!verify) {
+          expect(key).toBeUndefined();
+          expect(config).not.toContain('CARDIGAN_MCP_SESSION" =');
+        }
       }
       const script = await readFile(
         join(launched.run_dir, "launch.sh"),
         "utf8",
       );
-      expect(script).toContain("cardigan_bypass '127.0.0.1'");
-      expect(script).toContain('export NO_PROXY="$cardigan_upper"');
+      expect(script).not.toMatch(/no_proxy|cardigan_bypass/iu);
+      if (harness === "codex") {
+        expect(config).toContain('command = "/usr/bin/python3"');
+        expect(config).not.toMatch(/^url = /mu);
+        expect(config).toContain('env_vars = ["MCP_TOKEN"]');
+      }
     } finally {
       store.close();
       await rm(root, { recursive: true, force: true });

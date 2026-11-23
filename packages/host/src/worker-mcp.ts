@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { launchProxyBypass } from "@cardigan/roles";
+import { MCP_BRIDGE_PROBE_ARGS } from "@cardigan/roles";
 import {
   agentProcessCommand,
   type ExecutionConfig,
@@ -16,7 +16,6 @@ const codes = [
   "mcp_protocol_error",
   "mcp_gateway_error",
   "mcp_worker_failed",
-  "mcp_harness_proxy_failed",
 ] as const;
 type Code = (typeof codes)[number];
 export class WorkerMcpError extends Error {
@@ -50,112 +49,16 @@ export function workerMcpConfig(url: unknown, timeoutMs: unknown = 10_000) {
   }
 }
 
-// Executed by the worker's isolated Python. URL/token go only through stdin.
-// initialize authenticates without acknowledging a Run or touching tool activity.
-// C-600: the route is the harness's. Its HTTP client takes the account's system
-// proxy (macOS SystemConfiguration, without the exception list) unless the
-// launch's NO_PROXY names the host; the probe environment has no other proxy.
-// urllib would re-apply the system exception list to a chosen proxy, so the
-// probe turns that check off: the harness does not apply it either.
-const probe = `
-import http.client, json, socket, ssl, sys, urllib.error, urllib.parse, urllib.request
-urllib.request.proxy_bypass = lambda host: False
-def harness_proxy(data):
-    try:
-        import _scproxy
-        proxy = _scproxy._get_proxies().get("https")
-    except Exception:
-        return None
-    if not isinstance(proxy, str) or not proxy:
-        return None
-    host = (urllib.parse.urlsplit(data["url"]).hostname or "").lower()
-    for entry in data["no_proxy"].split(","):
-        entry = entry.strip().lower()
-        if entry == "*" or (entry.lstrip(".") and (host == entry.lstrip(".")
-                or host.endswith("." + entry.lstrip(".")))):
-            return None
-    return proxy
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-def read_reply(response):
-    raw = response.read(65537)
-    length = response.headers.get("Content-Length", "")
-    if length.isdecimal() and len(raw) < min(65537, int(length)):
-        raise http.client.IncompleteRead(raw)
-    return raw
-
-def check(data, proxy):
-    try:
-        context = ssl.create_default_context()
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({"https": proxy} if proxy else {}),
-            urllib.request.HTTPSHandler(context=context), NoRedirect())
-        body = json.dumps({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-            "protocolVersion":"2025-03-26","capabilities":{},
-            "clientInfo":{"name":"cardigan-worker-preflight","version":"1"}}}).encode()
-        headers = {"Content-Type":"application/json", "Accept":"application/json, text/event-stream"}
-        if data["authenticate"]:
-            headers["Authorization"] = "Bearer " + data["token"]
-        req = urllib.request.Request(data["url"], data=body, method="POST", headers=headers)
-        with opener.open(req, timeout=data["timeoutMs"]/1000) as response:
-            if not data["authenticate"]: return "mcp_protocol_error"
-            raw = read_reply(response)
-            if response.status != 200 or len(raw) > 65536:
-                return "mcp_protocol_error"
-            reply = json.loads(raw)
-            result = reply.get("result", {})
-            if (reply.get("jsonrpc") != "2.0" or reply.get("id") != 1 or "error" in reply
-                or result.get("serverInfo", {}).get("name") != "cardigan"
-                or result.get("protocolVersion") != "2025-03-26"):
-                return "mcp_protocol_error"
-        return "ok"
-    except urllib.error.HTTPError as error:
-        if 500 <= error.code < 600: return "mcp_gateway_error"
-        if error.code == 401 and not data["authenticate"]:
-            try:
-                raw = read_reply(error)
-                if (len(raw) <= 65536 and error.headers.get("WWW-Authenticate") == "Bearer"
-                    and json.loads(raw).get("error", {}).get("code") == "unauthorized"):
-                    return "ok"
-            except http.client.HTTPException: return "mcp_gateway_error"
-            except Exception: pass
-            return "mcp_protocol_error"
-        if error.code in (401, 403): return "mcp_auth_failed"
-        if 300 <= error.code < 400: return "mcp_redirect"
-        return "mcp_protocol_error"
-    except http.client.HTTPException:
-        return "mcp_gateway_error"
-    except (ssl.SSLError, urllib.error.URLError, OSError) as error:
-        reason = getattr(error, "reason", error)
-        if isinstance(reason, ssl.SSLError): return "mcp_tls_failed"
-        if isinstance(reason, (TimeoutError, socket.timeout)): return "mcp_timeout"
-        return "mcp_unreachable"
-    except Exception:
-        return "mcp_protocol_error"
-def main():
-    try:
-        data = json.load(sys.stdin)
-        proxy = harness_proxy(data)
-    except Exception:
-        return "mcp_worker_failed"
-    code = check(data, proxy)
-    return "mcp_harness_proxy_failed" if proxy and code != "ok" else code
-print(main())
-`;
-
 /**
- * The NO_PROXY a launch on this worker carries for the Card MCP address, as
- * the harness reads it (upper case first). Computed by the launch compiler's
- * own function over the worker's configured launch environment, so a launch
- * that stopped naming the host is caught here as the system-proxy route.
+ * C-600: the interpreter that runs Card MCP code on this worker: the launch
+ * preflight, the machine check and the Codex Card bridge all use it.
  */
-export function launchNoProxy(
+export function workerMcpPython(
   execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
-  url: string,
 ): string {
-  const values = launchProxyBypass(url, execution.env ?? {});
-  return values.NO_PROXY ?? values.no_proxy ?? "";
+  return (
+    execution.fileHelper?.python ?? execution.gitHelper?.python ?? "python3"
+  );
 }
 
 /** Authenticated startup never accepts a reachability-only result. */
@@ -170,8 +73,8 @@ export function checkWorkerMcp(
 
 /**
  * A human machine check needs no Assignment credential and grants no
- * authority. It follows the harness route: the worker account's system proxy
- * unless the launch's NO_PROXY (`launchNoProxy`) names the host.
+ * authority. C-600: it runs the Codex Card bridge's own connection function
+ * on the worker, so it takes exactly the harness's route: direct, no proxy.
  */
 export function checkWorkerMcpReachability(
   execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
@@ -186,12 +89,10 @@ async function probeWorkerMcp(
   const config = workerMcpConfig(execution.mcp?.url, execution.mcp?.timeoutMs);
   const started = Date.now();
   try {
+    // URL and token go only through stdin.
     const command = await agentProcessCommand(execution, [
-      execution.fileHelper?.python ?? execution.gitHelper?.python ?? "python3",
-      "-I",
-      "-B",
-      "-c",
-      probe,
+      workerMcpPython(execution),
+      ...MCP_BRIDGE_PROBE_ARGS,
     ]);
     const remaining = config.timeoutMs - (Date.now() - started);
     if (remaining <= 0) throw new WorkerMcpError("mcp_timeout");
@@ -224,12 +125,7 @@ async function probeWorkerMcp(
         else resolve(output.trim());
       });
       child.stdin.end(
-        JSON.stringify({
-          ...config,
-          no_proxy: launchNoProxy(execution, config.url),
-          authenticate: token !== undefined,
-          token,
-        }),
+        JSON.stringify({ ...config, authenticate: token !== undefined, token }),
       );
     });
     if (code !== "ok")

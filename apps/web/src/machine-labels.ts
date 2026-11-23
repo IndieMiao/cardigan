@@ -15,7 +15,6 @@ const BLOCKERS: Readonly<Record<string, string>> = {
   machine_observation_failed: "能力检查失败",
   machine_not_ready: "机器未就绪",
   machine_platform_mismatch: "OS 或架构与登记不一致",
-  mcp_harness_proxy_failed: "Agent 经系统代理连不上 Card MCP",
 };
 /** Host blocker codes; unknown codes stay visible as-is rather than hidden. */
 export function healthBlockerLabel(code: string): string {

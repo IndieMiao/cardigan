@@ -24,6 +24,8 @@ import {
   defaultRoles,
   firstPrompt,
   type Harness,
+  MCP_BRIDGE_SOURCE,
+  mcpBridgeArgs,
   parseLaunchConfig,
   START_FILE_NAME,
 } from "./index.js";
@@ -338,7 +340,11 @@ describe("snapshot: codex", () => {
       files: compiled.files.map((file) => ({
         path: file.path,
         mode: file.mode.toString(8),
-        content: file.content,
+        // C-600: the Card bridge's source is pinned by mcp-bridge.test.ts.
+        content: file.content.replace(
+          JSON.stringify(MCP_BRIDGE_SOURCE),
+          '"<MCP_BRIDGE_SOURCE>"',
+        ),
       })),
     }).toMatchSnapshot();
   });
@@ -350,8 +356,15 @@ describe("snapshot: codex", () => {
       (file) => file.path === `${RUN_DIR}/codex/config.toml`,
     );
     expect(config?.content).toContain("[mcp_servers.card]");
-    expect(config?.content).toContain(`url = "${MCP_URL}"`);
-    expect(config?.content).toContain('bearer_token_env_var = "MCP_TOKEN"');
+    // C-600: the Card server is the stdio bridge to MCP_URL; Codex forwards
+    // the Token from its environment to the bridge only.
+    expect(config?.content).toContain(
+      `args = [${mcpBridgeArgs(MCP_URL)
+        .map((arg) => JSON.stringify(arg))
+        .join(", ")}]`,
+    );
+    expect(config?.content).toContain('env_vars = ["MCP_TOKEN"]');
+    expect(config?.content).not.toContain(TOKEN);
     expect(config?.content).toContain(
       "[mcp_servers.card.tools.submit_delivery]",
     );

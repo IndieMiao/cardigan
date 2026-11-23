@@ -134,6 +134,7 @@ import {
   checkWorkerMcp,
   WorkerMcpError,
   workerMcpConfig,
+  workerMcpPython,
 } from "./worker-mcp.js";
 import {
   type PreparedWorktree,
@@ -1152,6 +1153,11 @@ async function launch(
       mcp: {
         url: mcpUrl,
         ...(mcpSessionKey ? { session_key: mcpSessionKey } : {}),
+        // C-600: the Codex Card bridge runs on the interpreter the MCP
+        // preflight and the machine check use on this worker.
+        ...(remote && execution.mode === "agent-ssh"
+          ? { bridge_python: workerMcpPython(execution) }
+          : {}),
       },
       run_dir: runDir,
       work_dir: workDir,
