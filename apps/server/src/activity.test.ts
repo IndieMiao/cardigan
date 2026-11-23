@@ -1,7 +1,7 @@
-import { performance } from "node:perf_hooks";
 import { afterEach, expect, test } from "vitest";
 import {
   activitiesSince,
+  activityNow,
   beginActivity,
   currentActivity,
   type StallLine,
@@ -46,7 +46,7 @@ test("C-638: an activity is current inside its context and leaves the running se
   expect(currentActivity()).toBeUndefined();
   const handle = beginActivity("request", "c638-handle");
   expect(handle.run(() => currentActivity()?.kind)).toBe("request");
-  const at = performance.now();
+  const at = activityNow();
   expect(
     activitiesSince(at).find((a) => a.name === "c638-handle"),
   ).toMatchObject({ finished: false });
@@ -63,9 +63,7 @@ test("C-638: an activity is current inside its context and leaves the running se
     }),
   ).rejects.toThrow("boom");
   expect(
-    activitiesSince(performance.now() + 1).some(
-      (a) => a.name === "c638-failing",
-    ),
+    activitiesSince(activityNow() + 1).some((a) => a.name === "c638-failing"),
   ).toBe(false);
 });
 

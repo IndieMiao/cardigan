@@ -117,7 +117,8 @@ export function repositoryLock(
         const unlock = options.acquire
           ? await options.acquire(key, remaining)
           : undefined;
-        acquired = now();
+        // Read the clock only for an observer; callers may script `now`.
+        acquired = options.observe ? now() : started;
         try {
           return await work();
         } finally {

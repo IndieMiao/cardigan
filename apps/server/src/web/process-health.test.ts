@@ -1,10 +1,9 @@
 /** C-638: heap use against the V8 limit on the control host's health page. */
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { performance } from "node:perf_hooks";
 import { afterEach, expect, test } from "vitest";
 import { call, type WebHarness, webHarness } from "../../test-support/web.js";
-import { activitiesSince } from "../activity.js";
+import { activitiesSince, activityNow } from "../activity.js";
 import {
   PROCESS_HEALTH_STALE_MS,
   processHealthDirectory,
@@ -128,7 +127,7 @@ test("the background role publishes a sample at once and keeps it fresh", async 
 test("C-638: a Workbench request is tracked by method and route template only", async () => {
   h = await webHarness({ password: PASSWORD });
   const cookie = await h.login(PASSWORD);
-  const since = performance.now();
+  const since = activityNow();
   await call(h.port, "/api/projects/secret-project/cards/C-99?q=secret-text", {
     cookie,
   });

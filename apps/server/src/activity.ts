@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { performance } from "node:perf_hooks";
 
 /**
  * C-638: what this process is running right now — loop ticks and HTTP
@@ -16,6 +15,12 @@ export interface Activity {
   readonly started: number;
   ended?: number;
 }
+
+/**
+ * Monotonic milliseconds for activity times and stall checks. Not
+ * `performance.now`, which tests stub to script loop durations.
+ */
+export const activityNow = () => Number(process.hrtime.bigint()) / 1e6;
 
 const context = new AsyncLocalStorage<Activity>();
 const running = new Set<Activity>();
@@ -40,13 +45,13 @@ export function beginActivity(
   kind: ActivityKind,
   name: string,
 ): ActivityHandle {
-  const activity: Activity = { kind, name, started: performance.now() };
+  const activity: Activity = { kind, name, started: activityNow() };
   running.add(activity);
   return {
     run: (fn) => context.run(activity, fn),
     end: () => {
       if (activity.ended !== undefined) return;
-      activity.ended = performance.now();
+      activity.ended = activityNow();
       running.delete(activity);
       finished.push(activity);
       if (finished.length > FINISHED_KEPT) finished.shift();
@@ -83,7 +88,7 @@ export interface ActivitySeen {
  */
 export function activitiesSince(
   since: number,
-  at = performance.now(),
+  at = activityNow(),
 ): ActivitySeen[] {
   const seen = (a: Activity) => ({
     kind: a.kind,
@@ -128,7 +133,7 @@ export class StallWatch {
   readonly #log: (line: StallLine) => void;
   readonly #threshold: number;
   readonly #interval: number;
-  #last = performance.now();
+  #last = activityNow();
   #timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(options: StallWatchOptions) {
@@ -143,7 +148,7 @@ export class StallWatch {
   }
 
   /** Compare the elapsed time with the cadence; exposed for tests. */
-  check(at = performance.now()): void {
+  check(at = activityNow()): void {
     const delay = at - this.#last - this.#interval;
     this.#last = at;
     if (delay < this.#threshold) return;
