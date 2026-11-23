@@ -1,4 +1,9 @@
-import type { Actor, Event, ToolName } from "../entities.js";
+import {
+  type Actor,
+  type Event,
+  type ToolName,
+  toolNames,
+} from "../entities.js";
 import type { Result } from "../errors.js";
 import { isHarness } from "../harness.js";
 import { HOST_OPS_FORBIDDEN_TOOLS } from "../host-ops.js";
@@ -9,6 +14,8 @@ import {
   isStandingOnlyTool,
   ROLE_TOOL_ALLOWLISTS,
   type Role,
+  type RoleOverlay,
+  type RoleOverlayRules,
   roleKind,
 } from "../role.js";
 import { roleInstructionsError } from "../role-prompt.js";
@@ -44,6 +51,7 @@ const editable = [
   "worktree",
   "required_machine_tags",
   "required_capabilities",
+  "default_overlay",
 ];
 
 function reviewTools(tools: readonly ToolName[]): readonly ToolName[] {
@@ -108,6 +116,8 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
       "validation_failed",
       requirements.ok ? "" : requirements.error.message,
     );
+    if (role.default_overlay !== undefined)
+      validateOverlay(role.default_overlay);
     // Save the derived permission in this new version; old roles/tokens stay fixed.
     role = { ...role, allowed_tools: reviewTools(role.allowed_tools) };
     const kind = roleKind(role);
@@ -171,6 +181,70 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
   });
 }
 
+function validateOverlay(overlay: RoleOverlay): void {
+  ensure(
+    typeof overlay === "object" &&
+      overlay !== null &&
+      typeof overlay.base_role_id === "string" &&
+      /^[a-z0-9][a-z0-9._-]*$/u.test(overlay.base_role_id) &&
+      typeof overlay.append_instructions === "string" &&
+      typeof overlay.base_hash === "string" &&
+      overlay.base_hash.trim() !== "" &&
+      typeof overlay.composed_hash === "string" &&
+      overlay.composed_hash.trim() !== "",
+    "validation_failed",
+    "项目附加规则不完整",
+  );
+  for (const key of ["extra_tools", "removed_tools"] as const)
+    ensure(
+      Array.isArray(overlay[key]) &&
+        overlay[key].every((tool) => toolNames.includes(tool)),
+      "validation_failed",
+      `${key} 含有不认识的工具`,
+    );
+  ensure(
+    !overlay.extra_tools.some((tool) => overlay.removed_tools.includes(tool)),
+    "validation_failed",
+    "同一工具不能既追加又移除",
+  );
+}
+
+/**
+ * Pure composition of a default-pack role and project rules (C-613). Removed
+ * tools win; the review-derived tool is added last, exactly as a save does.
+ */
+export function composeRoleOverlay(
+  source: Pick<RoleDefinition, "allowed_tools" | "instructions">,
+  rules: Pick<
+    RoleOverlayRules,
+    "append_instructions" | "extra_tools" | "removed_tools"
+  >,
+): { readonly instructions: string; readonly allowed_tools: ToolName[] } {
+  const base = source.instructions ?? "";
+  const extra = rules.append_instructions.trim();
+  const tools = [
+    ...new Set([...source.allowed_tools, ...rules.extra_tools]),
+  ].filter((tool) => !rules.removed_tools.includes(tool));
+  return {
+    instructions: extra ? `${base.replace(/\s+$/u, "")}\n\n${extra}` : base,
+    allowed_tools: [...reviewTools(tools)],
+  };
+}
+
+function sameOverlay(a?: RoleOverlay, b?: RoleOverlay): boolean {
+  if (!a || !b) return a === b;
+  const list = (x: readonly string[], y: readonly string[]) =>
+    x.length === y.length && x.every((v) => y.includes(v));
+  return (
+    a.base_role_id === b.base_role_id &&
+    a.append_instructions === b.append_instructions &&
+    a.base_hash === b.base_hash &&
+    a.composed_hash === b.composed_hash &&
+    list(a.extra_tools, b.extra_tools) &&
+    list(a.removed_tools, b.removed_tools)
+  );
+}
+
 function authorize(state: RoleCommandState, actor: Actor): void {
   ensure(
     canManageRoles(actor, state.project_id),
@@ -230,6 +304,15 @@ function save(
     ...(source.required_capabilities === undefined
       ? {}
       : { required_capabilities: [...new Set(source.required_capabilities)] }),
+    ...(source.default_overlay === undefined
+      ? {}
+      : {
+          default_overlay: {
+            ...source.default_overlay,
+            extra_tools: [...source.default_overlay.extra_tools],
+            removed_tools: [...source.default_overlay.removed_tools],
+          },
+        }),
     version: (latest(state, definition.role_id)?.version ?? 0) + 1,
     status,
   };
@@ -409,7 +492,11 @@ export type DefaultPackPatch = Pick<
   | "kind"
   | "worktree"
   | "required_capabilities"
-> & { readonly instructions: string };
+> & {
+  readonly instructions: string;
+  /** Present when the source is a default-pack role composed with project rules. */
+  readonly default_overlay?: RoleOverlay;
+};
 
 export interface RoleFieldChange {
   readonly field:
@@ -548,6 +635,17 @@ export function previewRoleUpgrade(
   });
 }
 
+/** A plain default upgrade also ends a previous overlay; it never keeps stale hashes. */
+function withPatch(previous: Role, patch: DefaultPackPatch): RoleDefinition {
+  const {
+    default_overlay: _stale,
+    version: _v,
+    status: _s,
+    ...rest
+  } = previous;
+  return { ...rest, ...patch };
+}
+
 function previewDefaultUpgrade(
   state: RoleCommandState,
   id: string,
@@ -566,6 +664,7 @@ function previewDefaultUpgrade(
     required_capabilities: [...(source.required_capabilities ?? [])],
     kind: source.kind,
     worktree: source.worktree,
+    ...(source.default_overlay && { default_overlay: source.default_overlay }),
   };
   const diff = roleUpgradeDiff(previous, patch);
   const same = (a: readonly string[], b: readonly string[]) =>
@@ -573,9 +672,10 @@ function previewDefaultUpgrade(
   const unchanged =
     diff.fields.length === 0 &&
     same(previous.allowed_tools, patch.allowed_tools) &&
-    same(previous.capabilities, patch.capabilities);
+    same(previous.capabilities, patch.capabilities) &&
+    sameOverlay(previous.default_overlay, patch.default_overlay);
   if (!unchanged) {
-    const checked = validateRole({ ...previous, ...patch });
+    const checked = validateRole(withPatch(previous, patch));
     ensure(
       checked.ok,
       "validation_failed",
@@ -587,8 +687,9 @@ function previewDefaultUpgrade(
 
 /**
  * Append a version whose policy fields come from the default pack, keeping the
- * project's own launch fields. The caller resolves `source` from the pack; the
- * write itself is `updateRole`, so authorization and `validateRole` are shared.
+ * project's own launch fields. The caller resolves `source` from the pack, or a
+ * pack role composed with the project's rules (C-613); the write is the same
+ * validated `save` as `updateRole`.
  */
 export function upgradeRole(
   state: RoleCommandState,
@@ -606,13 +707,15 @@ export function upgradeRole(
     );
     const { unchanged, previous, diff, patch } = preview.value;
     if (unchanged) return { unchanged: true, previous, diff };
-    const effect = updateRole(state, actor, id, patch, ports);
-    ensure(
-      effect.ok,
-      effect.ok ? "validation_failed" : effect.error.code,
-      effect.ok ? "" : effect.error.message,
+    const effect = save(
+      state,
+      actor,
+      withPatch(previous, patch),
+      previous.status ?? "active",
+      "role_updated",
+      ports,
     );
-    return { unchanged: false, previous, diff, effect: effect.value };
+    return { unchanged: false, previous, diff, effect };
   });
 }
 
@@ -636,7 +739,7 @@ export function upgradeRoleAfterDeployment(
     const effect = save(
       state,
       actor,
-      { ...preview.previous, ...preview.patch },
+      withPatch(preview.previous, preview.patch),
       "active",
       "role_updated",
       ports,

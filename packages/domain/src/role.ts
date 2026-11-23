@@ -24,7 +24,29 @@ export interface Role extends Omit<RoleReference, "role_version"> {
   readonly abilities: readonly string[];
   readonly worktree: RoleWorktree;
   readonly required_machine_tags: readonly string[];
+  /** C-613: this version is a default-pack role plus project rules. */
+  readonly default_overlay?: RoleOverlay;
 }
+
+/** The project's own rules on top of a default-pack role. */
+export type RoleOverlayRules = {
+  /** Default-pack role the version is composed from; usually the role itself. */
+  readonly base_role_id: string;
+  /** Appended after the default instructions; empty means none. */
+  readonly append_instructions: string;
+  readonly extra_tools: readonly ToolName[];
+  /** Explicit removals win over the default pack, including tools it adds later. */
+  readonly removed_tools: readonly ToolName[];
+};
+/**
+ * Hashes are computed by the host with its deployment policy hash. A version
+ * whose policy no longer matches `composed_hash` was edited outside the
+ * overlay and is never recomposed silently.
+ */
+export type RoleOverlay = RoleOverlayRules & {
+  readonly base_hash: string;
+  readonly composed_hash: string;
+};
 
 export function roleReference(role: Role): RoleReference {
   return {

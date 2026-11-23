@@ -85,6 +85,7 @@ const systemNoticeEvents = new Map([
   ["host_disk_space_low", "主机磁盘可用空间不足"],
   ["launch_reload_failed", "主机启动配置重载失败"],
   ["host_role_upgraded", "默认角色已自动升级"],
+  ["host_role_overlay_migrated", "定制角色已迁移为默认包加附加规则"],
   ["host_role_upgrade_deferred", "角色升级等待系统排查"],
   ["standing_role_rotated", "常驻会话已自动轮换"],
   ["standing_pm_rotated", "常驻 PM 已轮换"],

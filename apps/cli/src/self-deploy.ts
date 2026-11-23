@@ -8,6 +8,7 @@ import {
   loadDeploymentConfig,
   NodeDeploymentDriver,
   RunCapacityDeferred,
+  syncProjectOverlayRoles,
   upgradeDeployedRoles,
   writeDeploymentNotice,
 } from "@cardigan/host";
@@ -101,6 +102,17 @@ export async function runSelfDeployCommand(
         previous as Record<string, string>,
         profiles,
       );
+      // C-613: project-customised roles elsewhere follow the same pack.
+      for (const other of store.listProjects()) {
+        if (other.id === "cardigan") continue;
+        try {
+          syncProjectOverlayRoles(store, other.id);
+        } catch {
+          io.stderr(
+            `项目 ${other.id} 的定制角色未能随默认包升级，下次部署重试`,
+          );
+        }
+      }
       if (
         assignment &&
         store.uow.read(

@@ -276,6 +276,13 @@ export {
   RoleDocumentError,
 } from "./role-document.js";
 export {
+  composeOverlaySource,
+  deriveOverlayRules,
+  overlayEditedByHand,
+  overlaySummary,
+  syncProjectOverlayRoles,
+} from "./role-overlay.js";
+export {
   effectiveRunLimit,
   hasEarlierCapacityWait,
   MERGE_CHECK_RUN_SLOTS,

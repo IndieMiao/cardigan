@@ -580,3 +580,71 @@ test("post-deploy starts the replacement Ops as host automation only when it has
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("C-613 post-deploy role sync also migrates customised roles in other projects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cg-self-deploy-overlay-"));
+  const dataDir = join(root, "data");
+  const store = Store.open({ dataDir });
+  const io: CliIo = {
+    env: {
+      CARDIGAN_DATA_DIR: dataDir,
+      CARDIGAN_CONFIG_DIR: root,
+      CARDIGAN_DEPLOYMENT_CHANGED_ROLES: "[]",
+      CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: "{}",
+    },
+    cwd: root,
+    platform: "linux",
+    stdout: () => {},
+    stderr: () => {},
+    signals: { on: () => {}, off: () => {} },
+    spawnInherit: () => {
+      throw new Error("No real launch");
+    },
+    captureCommand: async () => {
+      throw new Error("No real command");
+    },
+  };
+  try {
+    await writeFile(
+      join(root, "self-deploy.yaml"),
+      JSON.stringify({
+        initial_release: root,
+        initial_sha: "a".repeat(40),
+        ready_timeout_ms: 1000,
+        stop_timeout_ms: 1000,
+        build_timeout_ms: 1000,
+        poll_interval_ms: 1000,
+      }),
+      { mode: 0o600 },
+    );
+    store.createProject({ id: "cardigan" });
+    store.createProject({ id: "sensen" });
+    const pack = defaultRoleDefinition("reviewer", {
+      harness: "codex",
+      launch_profile_ref: "fixture",
+    });
+    store.uow.run((tx) =>
+      writeRole(
+        tx,
+        "sensen",
+        {
+          ...pack,
+          core_prompt: "",
+          instructions: `${pack.instructions}\n\n时间点约束`,
+          version: 1,
+        },
+        { mode: "add" },
+      ),
+    );
+    expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
+    expect(
+      store.uow.read((tx) => getRoleVersion(tx, "sensen", "reviewer")),
+    ).toMatchObject({
+      version: 2,
+      default_overlay: { append_instructions: "时间点约束" },
+    });
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -8,6 +8,7 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   host_deployment_supervisor_comparison_unavailable:
     "未能核实部署监督器差异，将重试",
   host_role_upgraded: "自动升级了角色",
+  host_role_overlay_migrated: "把定制角色迁移为默认包加附加规则",
   standing_pm_rotated: "轮换了常驻 PM",
   host_deployment_action_requested: "请求处理部署事项",
   project_preferences_updated: "更新了项目偏好",

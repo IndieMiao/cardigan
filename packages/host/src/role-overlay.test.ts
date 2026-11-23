@@ -1,0 +1,279 @@
+import {
+  type Assignment,
+  composeRoleOverlay,
+  type Role,
+  type RoleDefinition,
+  type RoleOverlayRules,
+} from "@cardigan/domain";
+import { defaultRoleDefinition } from "@cardigan/roles";
+import { getRoleVersion, Store, writeRole } from "@cardigan/store";
+import { expect, test } from "vitest";
+import {
+  deploymentRolePolicyHash,
+  idleRolePolicies,
+  upgradeDeployedRoles,
+} from "./deployment-roles.js";
+import {
+  composeOverlaySource,
+  deriveOverlayRules,
+  syncProjectOverlayRoles,
+} from "./role-overlay.js";
+
+const launch = { harness: "codex" as const, launch_profile_ref: "fixture" };
+const TIME_RULE = "时间点约束：只认交付时刻的基线和证据。";
+
+function withStore(run: (store: Store, project: string) => void) {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    store.createProject({ id: "sensen" });
+    run(store, "sensen");
+  } finally {
+    store.close();
+  }
+}
+function put(store: Store, project: string, role: RoleDefinition, v: number) {
+  store.uow.run((tx) =>
+    writeRole(tx, project, { core_prompt: "", ...role, version: v } as Role, {
+      mode: v === 1 ? "add" : "update",
+    }),
+  );
+}
+const events = (store: Store, project: string, type: string) =>
+  store.uow.read((tx) =>
+    tx.events.listAfter(project, undefined, 0).filter((e) => e.type === type),
+  );
+/** An overlay version composed from an older pack, as a previous release wrote it. */
+function olderOverlay(
+  id: "pm" | "reviewer",
+  rules: RoleOverlayRules,
+  older: Partial<RoleDefinition>,
+): RoleDefinition {
+  const base = { ...defaultRoleDefinition(id, launch), ...older };
+  const composed = { ...base, ...composeRoleOverlay(base, rules) };
+  return {
+    ...composed,
+    default_overlay: {
+      ...rules,
+      base_hash: deploymentRolePolicyHash(base),
+      composed_hash: deploymentRolePolicyHash(composed),
+    },
+  };
+}
+
+test("C-613 a customised role that reads losslessly migrates once, keeping its rules", () =>
+  withStore((store, project) => {
+    const pack = defaultRoleDefinition("reviewer", launch);
+    const before: RoleDefinition = {
+      ...pack,
+      instructions: `${pack.instructions}\n\n${TIME_RULE}`,
+      allowed_tools: pack.allowed_tools.filter((t) => t !== "project_snapshot"),
+    };
+    put(store, project, before, 1);
+    syncProjectOverlayRoles(store, project);
+    syncProjectOverlayRoles(store, project);
+    const after = store.uow.read((tx) =>
+      getRoleVersion(tx, project, "reviewer"),
+    );
+    expect(after?.version).toBe(2);
+    // Content is unchanged; only the structure is new.
+    expect(deploymentRolePolicyHash(after as Role)).toBe(
+      deploymentRolePolicyHash(before),
+    );
+    expect(after?.default_overlay).toMatchObject({
+      base_role_id: "reviewer",
+      append_instructions: TIME_RULE,
+      extra_tools: [],
+      removed_tools: ["project_snapshot"],
+      base_hash: deploymentRolePolicyHash(pack),
+      composed_hash: deploymentRolePolicyHash(before),
+    });
+    const [migrated] = events(store, project, "host_role_overlay_migrated");
+    expect(migrated?.payload).toMatchObject({
+      role_id: "reviewer",
+      from_version: 1,
+      to_version: 2,
+      before_hash: deploymentRolePolicyHash(before),
+      after_hash: deploymentRolePolicyHash(before),
+      moved: false,
+      overlay: { appended_paragraphs: 1, removed_tools: ["project_snapshot"] },
+    });
+    expect(events(store, project, "host_role_overlay_migrated")).toHaveLength(
+      1,
+    );
+    expect(store.uow.read((tx) => tx.human_actions.list(project))).toEqual([]);
+  }));
+
+test("C-613 a new pack is recomposed with project rules, the idle PM rotates, and no human action opens", () =>
+  withStore((store, project) => {
+    const pack = defaultRoleDefinition("pm", launch);
+    const rules: RoleOverlayRules = {
+      base_role_id: "pm",
+      append_instructions: "Local PM policy",
+      extra_tools: [],
+      removed_tools: ["create_card"],
+    };
+    // The older pack lacked get_check_log: a new default tool must arrive.
+    const v1 = olderOverlay("pm", rules, {
+      instructions: "Earlier instructions",
+      allowed_tools: pack.allowed_tools.filter((t) => t !== "get_check_log"),
+    });
+    put(store, project, v1, 1);
+    const previous: Assignment = {
+      id: "A-50" as never,
+      scope: "standing",
+      standing_mode: "ops",
+      role_id: "pm",
+      role_version: 1,
+      status: "active",
+      runtime_state: "not_provisioned",
+      machine_id: "local",
+      runtime_ref: null,
+      mcp_token_id: "fixture",
+      created_at: "2026-01-01T00:00:00.000Z",
+    };
+    store.uow.run((tx) => tx.assignments.put(project, previous));
+    // No supervisor fingerprint and no changed list: overlays need neither.
+    const next = upgradeDeployedRoles(store, project, [], {});
+    store.uow.read((tx) => {
+      const role = getRoleVersion(tx, project, "pm");
+      expect(role?.version).toBe(2);
+      expect(role?.instructions).toBe(
+        `${pack.instructions}\n\nLocal PM policy`,
+      );
+      expect(role?.allowed_tools).toContain("get_check_log");
+      expect(role?.allowed_tools).not.toContain("create_card");
+      expect(role?.default_overlay).toMatchObject({
+        ...rules,
+        base_hash: deploymentRolePolicyHash(pack),
+        composed_hash: deploymentRolePolicyHash(role as Role),
+      });
+      expect(tx.human_actions.list(project)).toEqual([]);
+      expect(tx.assignments.get(project, previous.id)?.status).toBe("released");
+      expect(next && tx.assignments.get(project, next)).toMatchObject({
+        role_version: 2,
+        standing_mode: "ops",
+      });
+      expect(idleRolePolicies(tx, project).get("pm")).toMatchObject({
+        matches: true,
+        published: true,
+      });
+    });
+    const [upgraded] = events(store, project, "host_role_upgraded");
+    expect(upgraded?.payload).toMatchObject({
+      role_id: "pm",
+      from_version: 1,
+      to_version: 2,
+      overlay: { removed_tools: ["create_card"] },
+    });
+    const [receipt] = events(store, project, "host_role_pack_published");
+    expect(
+      (
+        receipt?.payload as
+          | { roles: Record<string, { disposition: string }> }
+          | undefined
+      )?.roles.pm?.disposition,
+    ).toBe("matched");
+    upgradeDeployedRoles(store, project, ["pm"], {});
+    expect(store.uow.read((tx) => getRoleVersion(tx, project, "pm"))).toEqual(
+      expect.objectContaining({ version: 2 }),
+    );
+  }));
+
+test("C-613 an overlay edited by hand, or conflicting with the pack, keeps its version and only notifies PM", () =>
+  withStore((store, project) => {
+    const rules: RoleOverlayRules = {
+      base_role_id: "reviewer",
+      append_instructions: TIME_RULE,
+      extra_tools: [],
+      removed_tools: [],
+    };
+    const v1 = olderOverlay("reviewer", rules, { instructions: "Older" });
+    put(store, project, { ...v1, instructions: "Hand edit" }, 1);
+    // publish_artifact is never valid on a reviewer: the composition fails validation.
+    const conflict = olderOverlay(
+      "reviewer",
+      { ...rules, base_role_id: "reviewer", extra_tools: ["publish_artifact"] },
+      { instructions: "Older" },
+    );
+    put(store, project, { ...conflict, role_id: "tester" }, 1);
+    syncProjectOverlayRoles(store, project);
+    syncProjectOverlayRoles(store, project);
+    store.uow.read((tx) => {
+      expect(getRoleVersion(tx, project, "reviewer")?.version).toBe(1);
+      expect(getRoleVersion(tx, project, "tester")?.version).toBe(1);
+      expect(tx.human_actions.list(project)).toEqual([]);
+    });
+    const notices = events(store, project, "host_role_upgrade_deferred").map(
+      (e) => (e.payload as { notice: string }).notice,
+    );
+    expect(notices).toHaveLength(2);
+    expect(notices.join("\n")).toContain("在项目附加规则之外另有改动");
+    expect(notices.join("\n")).toContain("与项目附加规则冲突");
+  }));
+
+test("C-613 a stale customised role is not migrated; only other projects get the notice", () =>
+  withStore((store, project) => {
+    const pack = defaultRoleDefinition("host_ops", launch);
+    put(
+      store,
+      project,
+      { ...pack, instructions: "Earlier default\n\nSSH 说明" },
+      1,
+    );
+    syncProjectOverlayRoles(store, project);
+    expect(
+      store.uow.read((tx) => getRoleVersion(tx, project, "host_ops")?.version),
+    ).toBe(1);
+    const [notice] = events(store, project, "host_role_upgrade_deferred");
+    expect(
+      (notice?.payload as { notice?: string } | undefined)?.notice,
+    ).toContain(
+      `cardigan role overlay host_ops --project ${project} --dry-run`,
+    );
+    store.createProject({ id: "cardigan" });
+    put(
+      store,
+      "cardigan",
+      { ...pack, instructions: "Earlier default\n\nSSH 说明" },
+      1,
+    );
+    upgradeDeployedRoles(store, "cardigan", [], {});
+    expect(events(store, "cardigan", "host_role_upgrade_deferred")).toEqual([]);
+  }));
+
+test("C-613 derivation keeps every project paragraph and tool; a foreign base is explicit", () => {
+  const pack = defaultRoleDefinition("reviewer", launch);
+  const [first, ...rest] = (pack.instructions ?? "").split("\n\n");
+  const interleaved = {
+    ...pack,
+    core_prompt: "",
+    version: 3,
+    instructions: [first, TIME_RULE, ...rest].join("\n\n"),
+    allowed_tools: [...pack.allowed_tools, "withdraw_review" as const],
+  } as Role;
+  const derived = deriveOverlayRules(interleaved, "reviewer");
+  expect(derived).toMatchObject({
+    rules: { append_instructions: TIME_RULE, extra_tools: [] },
+    missing: [],
+    mismatched: [],
+    moved: true,
+  });
+  const release = {
+    ...interleaved,
+    role_id: "release_ops",
+    kind: "standing",
+  } as Role;
+  expect(deriveOverlayRules(release, "release_ops")).toBeUndefined();
+  expect(deriveOverlayRules(release, "reviewer")?.mismatched).toContain("kind");
+  const composed = composeOverlaySource(release, {
+    base_role_id: "reviewer",
+    append_instructions: TIME_RULE,
+    extra_tools: [],
+    removed_tools: [],
+  });
+  expect(composed).toMatchObject({
+    role_id: "release_ops",
+    kind: "verify",
+    default_overlay: { base_role_id: "reviewer" },
+  });
+});

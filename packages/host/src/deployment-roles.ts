@@ -26,49 +26,14 @@ import {
   type StoreTransactionContext,
 } from "@cardigan/store";
 import { persistPmRotation } from "./pm-rotation.js";
+import {
+  deploymentRolePolicyHash,
+  expectedRolePolicy,
+  recordRoleDeferral,
+  syncOverlayRoles,
+} from "./role-overlay.js";
 
-function recordRoleDeferral(
-  tx: StoreTransactionContext,
-  project: ProjectId,
-  key: string,
-  notice: string,
-  at: string,
-) {
-  if (
-    tx.events
-      .listAfter(project, undefined, 0)
-      .some(
-        (e) =>
-          e.type === "host_role_upgrade_deferred" &&
-          (e.payload as { key?: string }).key === key,
-      )
-  )
-    return;
-  tx.events.append(project, {
-    id: tx.ids.nextEventId(),
-    seq: tx.ids.nextEventSequence(project),
-    type: "host_role_upgrade_deferred",
-    actor: { kind: "system", project_id: project },
-    created_at: at,
-    payload: { key, notice },
-  });
-}
-
-/** Only fields replaced by --from-default participate; project launch settings stay local. */
-export function deploymentRolePolicyHash(role: RoleDefinition): string {
-  const policy = {
-    instructions: role.instructions ?? role.core_prompt ?? "",
-    allowed_tools: [...role.allowed_tools].sort(),
-    capabilities: [...role.capabilities].sort(),
-    kind: role.kind,
-    worktree: role.worktree,
-    // Keep historical hashes for roles with no machine capability constraints.
-    ...(role.required_capabilities?.length
-      ? { required_capabilities: [...role.required_capabilities].sort() }
-      : {}),
-  };
-  return createHash("sha256").update(JSON.stringify(policy)).digest("hex");
-}
+export { deploymentRolePolicyHash };
 
 /** Fingerprint the loaded package, not the mutable project role definitions. */
 let loadedPackHash: string | undefined;
@@ -118,13 +83,9 @@ export function idleRolePolicies(tx: ReadRepositories, project: ProjectId) {
   const publication = rolePackPublication(tx, project);
   return new Map(
     [...latest].flatMap(([id, role]) => {
-      if (!isDefaultRoleId(id)) return [];
-      const hash = deploymentRolePolicyHash(
-        defaultRoleDefinition(id, {
-          harness: role.harness,
-          launch_profile_ref: role.launch_profile_ref,
-        }),
-      );
+      const expected = expectedRolePolicy(role);
+      if (!expected) return [];
+      const hash = deploymentRolePolicyHash(expected);
       const matches = deploymentRolePolicyHash(role) === hash;
       // Old installations may have no publication receipt. Matching defaults are
       // safe; an unexplained mismatch is never evidence of a manual edit.
@@ -183,6 +144,8 @@ export function upgradeDeployedRoles(
           ),
         ),
       );
+    // C-613: overlay roles follow the pack on every deployment.
+    syncOverlayRoles(tx, project, clock.now, false);
     const ids = [
       ...new Set(listRoleVersions(tx, project).map((r) => r.role_id)),
     ];
@@ -190,7 +153,8 @@ export function upgradeDeployedRoles(
       if (!isDefaultRoleId(id) || !changedRoles.includes(id)) continue;
       const roles = listRoleVersions(tx, project);
       const latest = roles.filter((r) => r.role_id === id).at(-1);
-      if (!latest || latest.status === "inactive") continue;
+      if (!latest || latest.status === "inactive" || latest.default_overlay)
+        continue;
       const source = defaultRoleDefinition(id, {
         harness: latest.harness,
         launch_profile_ref: latest.launch_profile_ref,
@@ -266,14 +230,10 @@ export function upgradeDeployedRoles(
     const pack_hash = defaultRolePackHash();
     const roles: Record<string, PublishedRole> = {};
     for (const role of listRoleVersions(tx, project)) {
-      if (!isDefaultRoleId(role.role_id)) continue;
+      const policy = expectedRolePolicy(role);
+      if (!policy) continue;
       const policy_hash = deploymentRolePolicyHash(role);
-      const expected = deploymentRolePolicyHash(
-        defaultRoleDefinition(role.role_id, {
-          harness: role.harness,
-          launch_profile_ref: role.launch_profile_ref,
-        }),
-      );
+      const expected = deploymentRolePolicyHash(policy);
       const baseline = previousDefaults[role.role_id];
       roles[role.role_id] = {
         version: role.version,
