@@ -1099,6 +1099,79 @@ describe("stopAssignment and attachAssignment", () => {
     expect(readFileSync(join(runDir, "start"), "utf8")).toBe("successor\n");
   });
 
+  test.each([false, true])(
+    "C-645 a human start while the stop holds the launch lock (hold=%s): the release still clears the old ref, the start launches once afterwards",
+    async (hold) => {
+      const assignment = assignWorkItem("none");
+      const runtime = new FakeRuntime();
+      const first = await startFor(assignment.id, runtime);
+      // Between Runs: the previous Run finished, its terminal idles.
+      store.uow.run((tx) => {
+        const run = tx.runs.get(project_id, first.run_id as never);
+        const current = tx.assignments.get(project_id, assignment.id);
+        if (!run || !current) throw new Error("missing fixture");
+        tx.runs.put(project_id, {
+          ...run,
+          status: "completed",
+          outcome: "completed" as never,
+          finished_at: new Date().toISOString(),
+        });
+        tx.assignments.put(project_id, { ...current, runtime_state: "idle" });
+      });
+      let open = () => {};
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const release = runtime.release.bind(runtime);
+      runtime.release = async (ref) => {
+        const result = await release(ref);
+        await gate;
+        return result;
+      };
+      const stopping = stopAssignment({
+        store,
+        project_id,
+        assignment_id: assignment.id,
+        runtime,
+        execution: { mode: "local", dataDir },
+        ...(hold ? { hold } : {}),
+      });
+      await expect.poll(() => runtime.released.length).toBe(1);
+      // The human start queues its Run (ending the stop) while the stop
+      // still holds the launch lock, so it cannot launch yet.
+      await expect(startFor(assignment.id, runtime)).rejects.toThrow(
+        /保留执行排队等待/,
+      );
+      expect(stopFacts(assignment.id).stopped).toBe(false);
+      open();
+      await expect(stopping).resolves.toMatchObject({ released: true });
+      // No dangling ref to the released terminal; the start's Run is kept.
+      expect(stopFacts(assignment.id)).toMatchObject({
+        ref: null,
+        stopped: false,
+        released: 1,
+      });
+      const runs = () =>
+        store.uow.read((tx) =>
+          tx.runs
+            .list(project_id)
+            .filter((r) => r.assignment_id === assignment.id),
+        );
+      const queued = runs().filter((r) => r.status === "queued");
+      expect(queued).toHaveLength(1);
+      // The queued start launches exactly one fresh session.
+      runtime.release = release;
+      const second = await startFor(assignment.id, runtime);
+      expect(second.run_id).toBe(queued[0]?.id);
+      expect(runtime.provisions).toHaveLength(2);
+      expect(runtime.live.size).toBe(1);
+      expect(stopFacts(assignment.id).ref).toEqual(second.runtime_ref);
+      expect(
+        runs().filter((r) => ["dispatched", "running"].includes(r.status)),
+      ).toHaveLength(1);
+    },
+  );
+
   test("C-211 a failed release keeps the running Run's slot and the ref, and the stop can be retried", async () => {
     const assignment = assignWorkItem("none");
     const runtime = new FakeRuntime();
