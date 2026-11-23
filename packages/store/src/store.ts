@@ -1093,11 +1093,17 @@ export class Store {
    * watchdog of M3 plan §3.3 uses it to tell a busy Agent from a stuck one.
    * Unknown or unreleased Assignments are silently ignored, so a tool call can
    * never fail because of this bookkeeping.
+   *
+   * C-600: `token_id` is the Token the request authenticated with. A verified
+   * session records its launch's Token; a request on another one (a late call
+   * of the replaced session) is not this session's activity and is ignored,
+   * checked inside this write.
    */
   touchAssignmentActivity(
     project_id: ProjectId,
     assignment_id: AssignmentId,
     at: string = this.#clock.now(),
+    token_id?: string,
   ): boolean {
     return this.#run(() => {
       const row = this.#db
@@ -1106,6 +1112,12 @@ export class Store {
       if (row === undefined) return false;
       const assignment = JSON.parse(row.doc) as Assignment;
       if (assignment.status !== "active") return false;
+      if (
+        token_id !== undefined &&
+        assignment.mcp_session_token_id !== undefined &&
+        token_id !== assignment.mcp_session_token_id
+      )
+        return false;
       this.#db
         .prepare(
           "UPDATE assignments SET doc = ?, last_mcp_activity_at = ? WHERE project_id = ? AND id = ?",
@@ -1120,6 +1132,78 @@ export class Store {
           assignment_id,
         );
       return true;
+    });
+  }
+
+  /**
+   * C-600: advance the current verified session's Card MCP handshake.
+   * `key_sha256` is the digest of the request's session header (or, for
+   * `deadline`, the session the host timed). Only the launch's own key
+   * counts as native: its `tools/list` or tool call turns `pending` into
+   * `listed`. Any other tool call while pending proves the session has no
+   * native tools (`missing`), and so does an expired `deadline` for the same
+   * session. Other states never change here. Returns the resulting state.
+   */
+  advanceMcpHandshake(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    observed: "tools_listed" | "tool_called" | "deadline",
+    key_sha256?: string,
+    token_id?: string,
+  ): Assignment["mcp_handshake"] {
+    const read = () => {
+      const row = this.#db
+        .prepare("SELECT doc FROM assignments WHERE project_id = ? AND id = ?")
+        .get(project_id, assignment_id) as { doc: string } | undefined;
+      return row && (JSON.parse(row.doc) as Assignment);
+    };
+    const next = (a: Assignment): NonNullable<Assignment["mcp_handshake"]> => {
+      const own =
+        key_sha256 !== undefined && key_sha256 === a.mcp_session_key_sha256;
+      if (observed === "deadline") return own ? "missing" : "pending";
+      if (own) return "listed";
+      // Another launch's key comes from that launch's own harness (e.g. a
+      // late call): no evidence about this session. Only a call carrying no
+      // key at all — a wrapper — proves this session lacks native tools.
+      return observed === "tool_called" && key_sha256 === undefined
+        ? "missing"
+        : "pending";
+    };
+    // A request on another launch's Token (e.g. a late call of the replaced
+    // session) says nothing about this session.
+    const foreign = (a: Assignment) =>
+      token_id !== undefined &&
+      a.mcp_session_token_id !== undefined &&
+      token_id !== a.mcp_session_token_id;
+    // Every request passes here: only a changing pending session writes.
+    const seen = read();
+    if (seen && foreign(seen)) return undefined;
+    if (
+      seen?.status !== "active" ||
+      seen.mcp_handshake !== "pending" ||
+      next(seen) === "pending"
+    )
+      return seen?.mcp_handshake;
+    return this.#run(() => {
+      const assignment = read();
+      if (assignment === undefined || foreign(assignment)) return undefined;
+      if (
+        assignment.status !== "active" ||
+        assignment.mcp_handshake !== "pending"
+      )
+        return assignment.mcp_handshake;
+      const mcp_handshake = next(assignment);
+      if (mcp_handshake === "pending") return mcp_handshake;
+      this.#db
+        .prepare(
+          "UPDATE assignments SET doc = ? WHERE project_id = ? AND id = ?",
+        )
+        .run(
+          JSON.stringify({ ...assignment, mcp_handshake } satisfies Assignment),
+          project_id,
+          assignment_id,
+        );
+      return mcp_handshake;
     });
   }
 

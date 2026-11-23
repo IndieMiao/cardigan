@@ -314,8 +314,9 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 shell_tool = true
 
 [mcp_servers.card]
-url = "http://127.0.0.1:3004/mcp"
-bearer_token_env_var = "MCP_TOKEN"
+command = "/usr/bin/python3"
+args = ["-I", "-B", "-c", "<MCP_BRIDGE_SOURCE>", "bridge", "http://127.0.0.1:3004/mcp"]
+env_vars = ["MCP_TOKEN"]
 
 [mcp_servers.card.tools.whoami]
 approval_mode = "approve"

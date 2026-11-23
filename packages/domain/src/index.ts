@@ -233,6 +233,7 @@ export {
 export * from "./machine-placement.js";
 export * from "./machine-requirements.js";
 export * from "./macos-checks.js";
+export * from "./mcp-session.js";
 export * from "./member.js";
 export * from "./merge-batch.js";
 export * from "./merge-override.js";

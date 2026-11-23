@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -6,7 +6,13 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { pipeline } from "node:stream/promises";
-import type { OwnerMessagePort } from "@cardigan/domain";
+import { setTimeout as delay } from "node:timers/promises";
+import {
+  MCP_SESSION_FAILURE,
+  MCP_SESSION_HEADER,
+  MCP_SESSION_KEY_PATTERN,
+  type OwnerMessagePort,
+} from "@cardigan/domain";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
@@ -558,6 +564,21 @@ export async function startMcpServer(
   };
 }
 
+/** C-600: bounded retries of the handshake write before failing a listing. */
+const HANDSHAKE_WRITE_RETRIES = 3;
+const HANDSHAKE_RETRY_MS = 100;
+
+/**
+ * C-600: digest of the per-launch key a verified harness sends from its own
+ * MCP configuration; absent or malformed headers prove nothing.
+ */
+function sessionKeyDigest(req: IncomingMessage): string | undefined {
+  const value = req.headers[MCP_SESSION_HEADER.toLowerCase()];
+  return typeof value === "string" && MCP_SESSION_KEY_PATTERN.test(value)
+    ? createHash("sha256").update(value).digest("hex")
+    : undefined;
+}
+
 async function serveMcp(
   req: IncomingMessage,
   res: ServerResponse,
@@ -580,13 +601,51 @@ async function serveMcp(
     // and `tools/list` must not start the Run (§4 step 8) or make an idle Agent
     // look busy (M3 plan §3.3).
     onToolCall: () => {
+      // C-600: both are bound to this request's Token, so a late call of a
+      // replaced session neither starts nor keeps alive the new session.
       options.store.touchAssignmentActivity?.(
         identity.actor.project_id,
         identity.actor.assignment_id,
+        undefined,
+        identity.token.id,
       );
       if (options.acknowledgeRuns !== false) {
         acknowledgeDispatchedRun(options.store, identity);
       }
+    },
+    // C-600: a native listing must be recorded before it is answered; a
+    // briefly busy database is retried, then the client gets an error.
+    onToolList: async () => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          options.store.advanceMcpHandshake?.(
+            identity.actor.project_id,
+            identity.actor.assignment_id,
+            "tools_listed",
+            sessionKeyDigest(req),
+            identity.token.id,
+          );
+          return;
+        } catch (error) {
+          if (attempt >= HANDSHAKE_WRITE_RETRIES) throw error;
+          await delay(HANDSHAKE_RETRY_MS * (attempt + 1));
+        }
+      }
+    },
+    refuseToolCall: () => {
+      const handshake = options.store.advanceMcpHandshake?.(
+        identity.actor.project_id,
+        identity.actor.assignment_id,
+        "tool_called",
+        sessionKeyDigest(req),
+        identity.token.id,
+      );
+      return handshake === "missing"
+        ? {
+            code: "illegal_transition",
+            message: `${MCP_SESSION_FAILURE}（本次启动的 Harness 未列出工具）。系统会重建会话；请停止本会话的工作，不要改用命令行或其它方式调用 Card MCP。`,
+          }
+        : undefined;
     },
     revalidateToken: () => {
       const token = bearerToken(req.headers.authorization);

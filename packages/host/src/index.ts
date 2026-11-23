@@ -3,6 +3,7 @@ export {
   type AgentGitRunner,
   AgentGitTransport,
 } from "./agent-git.js";
+export { agentToolsCommandVisible } from "./agent-tools-maintenance.js";
 export {
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
   MAX_IDLE_ROLE_UPGRADES,
@@ -366,6 +367,7 @@ export * from "./worker-observations.js";
 export * from "./worker-onboarding.js";
 export { upgradeMaterials } from "./worker-upgrade.js";
 export { manualWorkerUpgradeAllowed } from "./worker-upgrade-enrollment.js";
+export { upgradeKey } from "./worker-upgrade-gate.js";
 export * from "./worker-wizard-files.js";
 export * from "./worker-wizard-form.js";
 export {
