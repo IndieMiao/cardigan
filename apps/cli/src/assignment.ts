@@ -636,9 +636,33 @@ export async function stopAssignment(input: {
     }
     return { released: ref !== null, aborted: paused.aborted, paused: true };
   }
+  if (ref === null && hasQueuedRun(input.store, input.project_id, assignment)) {
+    // C-624: a queued Run without a terminal (for example a start that waited
+    // for capacity) can still be withdrawn: record the stop and cancel it.
+    // C-620: always a pause here. A managed stop keeps queued work and lifts
+    // itself only on a terminal release, which never comes without a terminal.
+    const stopped = runCommand(input.store, {
+      operation: "停止 Assignment",
+      target: assignment.id,
+      project_id: input.project_id,
+      actor,
+      reduce: (s, a, p) =>
+        stopWorkItemAssignment(
+          s,
+          a,
+          {
+            assignment_id: assignment.id,
+            reason: "stopped by host",
+            hold: true,
+          },
+          p,
+        ),
+    });
+    return { released: false, aborted: stopped.cancelled > 0, held: true };
+  }
   if (ref === null) {
     throw new CliError(
-      `Assignment ${assignment.id} 没有在运行的终端；若需取消未派发的排队 Run 并改派，请执行 cardigan assignment release ${assignment.id} --cancel-queued-run <R-n>。`,
+      `Assignment ${assignment.id} 没有在运行的终端，也没有排队的 Run，没有可停止的内容。`,
       EXIT.usage,
     );
   }
@@ -795,6 +819,18 @@ function loadEvents(
     project,
     workItem && tx.work_items.get(project, workItem)?.card_id,
     0,
+  );
+}
+
+function hasQueuedRun(
+  store: Store,
+  project: ProjectId,
+  assignment: Assignment,
+): boolean {
+  return store.uow.read((tx) =>
+    tx.runs
+      .list(project)
+      .some((r) => r.assignment_id === assignment.id && r.status === "queued"),
   );
 }
 
@@ -1107,9 +1143,11 @@ export async function runAssignmentCommand(
           ? `${assignmentId} 的原会话已停止或已被新会话取代，没有改动。`
           : result.paused
             ? `已暂停常驻 PM ${assignmentId}，门铃将排队；用 cardigan pm start 或 assignment start 恢复。`
-            : result.held
-              ? `已暂停 ${assignmentId}：终端已释放${result.aborted ? "，未结束和排队的 Run 已取消" : ""}（worktree 保留）。之后的门铃会排队，不会自动起新会话；用 cardigan assignment start ${assignmentId} 恢复。`
-              : `已停止 ${assignmentId}：终端已释放${result.aborted ? "，正在进行的 Run 已结束" : ""}（worktree 和待办保留）。有新工作时会自动起新会话；如需人工暂停，用 cardigan assignment stop ${assignmentId} --hold。`,
+            : !result.released
+              ? `已暂停 ${assignmentId}：没有终端，排队的 Run 已取消（worktree 保留）。之后的门铃会排队，不会自动起新会话；用 cardigan assignment start ${assignmentId} 恢复，或用 cardigan assignment release ${assignmentId} 释放。`
+              : result.held
+                ? `已暂停 ${assignmentId}：终端已释放${result.aborted ? "，未结束和排队的 Run 已取消" : ""}（worktree 保留）。之后的门铃会排队，不会自动起新会话；用 cardigan assignment start ${assignmentId} 恢复。`
+                : `已停止 ${assignmentId}：终端已释放${result.aborted ? "，正在进行的 Run 已结束" : ""}（worktree 和待办保留）。有新工作时会自动起新会话；如需人工暂停，用 cardigan assignment stop ${assignmentId} --hold。`,
       );
       return EXIT.ok;
     }

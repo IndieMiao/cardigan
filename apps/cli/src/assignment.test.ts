@@ -25,6 +25,7 @@ import {
   createCard,
   occupiedRunSlots,
   providerAdmission,
+  queueRun,
   type Role,
   stoppedByHuman,
 } from "@cardigan/domain";
@@ -1597,5 +1598,78 @@ describe("C-154 standing PM session restart", () => {
       }),
     ).rejects.toThrow(/不是在岗的常驻 PM/);
     expect(runtime.provisions).toHaveLength(0);
+  });
+});
+
+describe("C-624 stop without a terminal", () => {
+  test("cancels a queued start and keeps the Assignment stopped", async () => {
+    const assignment = assignWorkItem("none");
+    const runtime = new FakeRuntime();
+    await startAssignment({
+      store,
+      io,
+      project_id,
+      assignment_id: assignment.id,
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
+      mcpUrl: "http://127.0.0.1:3004/mcp",
+      runtime,
+      dataDir,
+    });
+    await stopAssignment({
+      store,
+      project_id,
+      assignment_id: assignment.id,
+      runtime,
+    });
+    // A later human start that had to wait for capacity left a queued Run.
+    const queued = runCommand(store, {
+      project_id,
+      actor: humanActor(project_id),
+      reduce: (state, actor, ports) =>
+        queueRun(
+          state,
+          actor,
+          {
+            assignment_id: assignment.id,
+            reuse_queued: true,
+            model: "m",
+            agent_cli_version: "1",
+          },
+          ports,
+        ),
+    });
+    const before = store.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(stoppedByHuman(before.events, assignment.id)).toBe(false);
+    expect(
+      before.assignments.find((a) => a.id === assignment.id)?.runtime_ref,
+    ).toBeNull();
+
+    const result = await stopAssignment({
+      store,
+      project_id,
+      assignment_id: assignment.id,
+      runtime,
+    });
+    expect(result).toEqual({ released: false, aborted: true, held: true });
+    const after = store.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(after.runs.find((r) => r.id === queued.id)?.status).toBe(
+      "cancelled",
+    );
+    expect(stoppedByHuman(after.events, assignment.id)).toBe(true);
+    // Only the first stop released a terminal.
+    expect(runtime.released).toHaveLength(1);
+
+    // Nothing left to stop: the refusal says so instead of pointing elsewhere.
+    await expect(
+      stopAssignment({
+        store,
+        project_id,
+        assignment_id: assignment.id,
+        runtime,
+      }),
+    ).rejects.toThrow(/没有在运行的终端，也没有排队的 Run/);
   });
 });

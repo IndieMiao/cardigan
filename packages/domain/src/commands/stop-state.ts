@@ -1,8 +1,11 @@
-import type { Event, RuntimeRef } from "../entities.js";
-import type { AssignmentId } from "../ids.js";
+import type { Assignment, Event, Run, RuntimeRef } from "../entities.js";
+import type { AssignmentId, CardId } from "../ids.js";
+import type { CommandDraft } from "./core.js";
 
 export const ASSIGNMENT_STOPPED = "assignment_stopped";
 export const ASSIGNMENT_STOP_RELEASED = "assignment_stop_released";
+/** C-624: a human start queued for capacity; ends the stop like a dispatch. */
+export const ASSIGNMENT_START_REQUESTED = "assignment_start_requested";
 /** C-620: exit of the stopped session proven once, reused by a retry. */
 export const ASSIGNMENT_STOP_EXIT_CONFIRMED = "assignment_stop_exit_confirmed";
 
@@ -15,7 +18,7 @@ export const ASSIGNMENT_STOP_EXIT_CONFIRMED = "assignment_stop_exit_confirmed";
 type StopState = "held" | "stopping" | "released";
 interface StopIndex {
   readonly state: ReadonlyMap<unknown, StopState>;
-  /** Latest of a stop (any kind) and `run_dispatched` is the stop. */
+  /** Latest of a stop (any kind) and a start (dispatch or human start) is the stop. */
   readonly recorded: ReadonlyMap<unknown, boolean>;
   /** Index of the first stop of the episode that is still unreleased. */
   readonly episode: ReadonlyMap<unknown, number>;
@@ -52,7 +55,11 @@ function stopIndex(events: readonly Event[]): StopIndex {
         recorded.set(id, true);
         // A retried stop continues the same episode.
         if (!episode.has(id)) episode.set(id, at);
-      } else if (event.type === "run_dispatched") {
+      } else if (
+        event.type === "run_dispatched" ||
+        (event.type === ASSIGNMENT_START_REQUESTED &&
+          event.actor.kind === "human")
+      ) {
         state.delete(id);
         recorded.set(id, false);
         close(id);
@@ -73,10 +80,14 @@ function stopIndex(events: readonly Event[]): StopIndex {
 
 /**
  * C-211: a work-item Assignment the human paused stays stopped until the
- * human starts it again. The latest of its `assignment_stopped` and
- * `run_dispatched` events decides: the Dispatcher does not wake, replace or
- * start a session for it in between (new bells stay pending), and host_ops
- * cannot restart it either.
+ * human starts it again. The latest of its `assignment_stopped`,
+ * `assignment_start_requested` (human only) and `run_dispatched` events
+ * decides: the Dispatcher does not wake, replace or start a session for it in
+ * between (new bells stay pending), and host_ops cannot restart it either.
+ *
+ * C-624: a human start that has to queue for capacity is still the human's
+ * start. Before, only the eventual dispatch lifted the stop, so the queued Run
+ * was never dispatched by anyone and held the head of the machine queue.
  *
  * C-620: a managed stop (`hold: false`) fences the same way only until its
  * terminal release is confirmed. After `assignment_stop_released` it is no
@@ -125,4 +136,26 @@ export function stopExitConfirmed(
   ref: RuntimeRef,
 ): boolean {
   return stopIndex(events).exited.get(assignment_id) === JSON.stringify(ref);
+}
+
+/**
+ * C-624: record a human start of a stopped work-item Assignment when its Run is
+ * queued, not only once it is dispatched. Only the human ends a human stop.
+ */
+export function recordHumanStart(
+  d: CommandDraft,
+  assignment: Assignment,
+  run: Run,
+  card: CardId | undefined,
+) {
+  if (
+    d.actor.kind !== "human" ||
+    assignment.scope !== "work_item" ||
+    !stoppedByHuman(d.state.events, assignment.id)
+  )
+    return;
+  d.emit(ASSIGNMENT_START_REQUESTED, card, {
+    assignment_id: assignment.id,
+    run_id: run.id,
+  });
 }

@@ -27,6 +27,7 @@ export {
   humanStopRecorded,
   openStopEpisodeStart,
   pausedByHuman,
+  recordHumanStart,
   stopExitConfirmed,
   stoppedByHuman,
 } from "./stop-state.js";
