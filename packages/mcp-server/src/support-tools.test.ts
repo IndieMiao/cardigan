@@ -34,10 +34,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { runAgentTool } from "../test-support/agent-tools.js";
+import { MAX_STORED_ATTACHMENT_BYTES } from "./attachment-limits.js";
 import {
   fileAttachmentStore,
   MAX_ATTACHMENT_BYTES,
   MAX_MCP_BODY_BYTES,
+  mcpBodyTooLargeMessage,
   sha256,
 } from "./attachments.js";
 import { downloadAttachment } from "./download-attachment.js";
@@ -322,7 +324,7 @@ test("read_attachment enforces token tool, card and project scope before reading
 });
 
 test.each([
-  { size: MAX_ATTACHMENT_BYTES + 1 },
+  { size: MAX_STORED_ATTACHMENT_BYTES + 1 },
   { size: -1 },
   { size: 1.5 },
   { sha256: "../outside" },
@@ -746,6 +748,8 @@ test.each(["design_director", "independent_reviewer"])(
       sha256: prebuiltRecord?.sha256,
       size: prebuiltRecord?.size,
       reference_only: false,
+      // C-614: no off-site copy is wired here, so the bytes came from Card MCP.
+      via: "card_mcp",
     });
     expect(await readFile(prebuiltOutput)).toEqual(png);
     const report = await ok<Attachment>(client, "upload_attachment", {
@@ -838,6 +842,19 @@ test("C-95: request_decision only references this project's decision cards; reje
   ).toEqual([own.id]);
 });
 
+test("upload_attachment publishes the host limit for worker helpers", async () => {
+  const tool = (await coder.listTools()).tools.find(
+    (t) => t.name === "upload_attachment",
+  );
+  expect(tool?.description).toContain(
+    `(${MAX_ATTACHMENT_BYTES / 1048576} MiB)`,
+  );
+  expect(
+    (tool?.inputSchema.properties?.file as { maxLength?: number } | undefined)
+      ?.maxLength,
+  ).toBe(4 * Math.ceil(MAX_ATTACHMENT_BYTES / 3));
+});
+
 test("10 MiB passes through HTTP; oversized, malformed and checksum-mismatched content is refused", async () => {
   const large = Buffer.alloc(MAX_ATTACHMENT_BYTES, 0x61);
   expect(
@@ -847,6 +864,13 @@ test("10 MiB passes through HTTP; oversized, malformed and checksum-mismatched c
     }),
   ).toMatchObject({ size: MAX_ATTACHMENT_BYTES, sha256: sha256(large) });
   const writes = vi.mocked(blobs.put).mock.calls.length;
+  const over = await call(coder, "upload_attachment", {
+    ...upload,
+    file: Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64"),
+  });
+  expect(JSON.stringify(over.structuredContent ?? over.content)).toContain(
+    `Attachment exceeds ${MAX_ATTACHMENT_BYTES / 1048576} MiB`,
+  );
   for (const file of [
     Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64"),
     "YQ",
@@ -881,7 +905,70 @@ test("10 MiB passes through HTTP; oversized, malformed and checksum-mismatched c
     }),
   });
   expect(response.status).toBe(413);
+  // C-616: the refusal names the attachment limit, not only the body bound.
+  expect(await response.json()).toMatchObject({
+    error: { message: mcpBodyTooLargeMessage() },
+  });
   // Full-suite CPU load can exceed 5 seconds while encoding and checking 10 MiB bodies.
+}, 30_000);
+
+test("C-616: a chunked MCP body gets the same limits and refusal as a declared one", async () => {
+  // A ReadableStream body has no Content-Length, so fetch sends it chunked.
+  const chunked = (text: string) =>
+    fetch(server.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: new ReadableStream({
+        start(controller) {
+          const bytes = Buffer.from(text);
+          for (let at = 0; at < bytes.length; at += 1024 * 1024)
+            controller.enqueue(bytes.subarray(at, at + 1024 * 1024));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    } as RequestInit);
+  const oversized = await chunked(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "upload_attachment",
+        arguments: {
+          ...upload,
+          file: Buffer.alloc(MAX_ATTACHMENT_BYTES + 1024 * 1024 * 2).toString(
+            "base64",
+          ),
+        },
+      },
+    }),
+  );
+  expect(oversized.status).toBe(413);
+  expect(await oversized.json()).toMatchObject({
+    error: { message: mcpBodyTooLargeMessage() },
+  });
+  expect(blobs.put).not.toHaveBeenCalled();
+  // Within the bound the parsed body reaches the transport unchanged.
+  const listed = await chunked(
+    JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+  );
+  expect(listed.status).toBe(200);
+  expect(await listed.json()).toMatchObject({
+    id: 2,
+    result: {
+      tools: expect.arrayContaining([
+        expect.objectContaining({ name: "upload_attachment" }),
+      ]),
+    },
+  });
+  const broken = await chunked("{not json");
+  expect(broken.status).toBe(400);
+  expect(await broken.json()).toMatchObject({ error: { code: -32700 } });
 }, 30_000);
 
 test("late transaction failure retains blobs, rolls back all DB writes, and can be retried", async () => {

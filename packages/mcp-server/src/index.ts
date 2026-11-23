@@ -4,17 +4,28 @@ export {
   openArtifact,
   sendArtifact,
 } from "./artifact-files.js";
+export {
+  ATTACHMENT_MAX_MIB_ENV,
+  type AttachmentLimits,
+  attachmentLimits,
+  formatAttachmentLimit,
+  MAX_STORED_ATTACHMENT_BYTES,
+  resolveAttachmentLimits,
+} from "./attachment-limits.js";
 export { resolveAttachmentInlineBytes } from "./attachment-preview.js";
 // M5.1: the Workbench serves attachment downloads from the same content-
 // addressed store the MCP upload path writes to.
 export {
   ATTACHMENT_EXTENSIONS,
+  ATTACHMENT_LIMITS,
   attachmentMimeForExtension,
+  attachmentTooLargeMessage,
   decodeAttachment,
   fileAttachmentStore,
   MAX_ATTACHMENT_BASE64,
   MAX_ATTACHMENT_BYTES,
   MAX_MCP_BODY_BYTES,
+  mcpBodyTooLargeMessage,
   prepareAttachmentFile,
 } from "./attachments.js";
 export {
@@ -59,6 +70,25 @@ export {
   memoryLogger,
   stdoutLogger,
 } from "./log.js";
+// C-614: off-site copy of attachments and artifacts in a private OSS bucket.
+export {
+  artifactKey,
+  attachmentKey,
+  Offsite,
+  type OffsiteAlert,
+  type OffsiteOptions,
+  type OffsiteStatusView,
+  offsiteFor,
+  offsiteTarget,
+  registerOffsite,
+  type SignedLink,
+} from "./offsite/offsite.js";
+export { OssClient, OssError, type OssTransport } from "./offsite/oss.js";
+export {
+  type SyncedLedger,
+  type SyncStatus,
+  writeSyncStatus,
+} from "./offsite/state.js";
 export { type RecordReadTiming, timeRead } from "./read-timing.js";
 export {
   defaultToolCatalog,
@@ -85,6 +115,9 @@ export {
 } from "./tools/index.js";
 export type { SigningScope } from "./tools/mobile-signing.js";
 export {
+  continuePublication,
+  interruptedPublication,
+  MAX_PUBLICATION_CONTINUATIONS,
   PublicationError,
   type PublicationOptions,
   type PublishInput,

@@ -7,6 +7,7 @@
  * state-changing request without the matching Origin is 403, a login failure
  * backs off, and only the described cookie is issued.
  */
+import { MAX_ATTACHMENT_BYTES } from "@cardigan/mcp-server";
 import { expect, test } from "vitest";
 import { call, webHarness } from "../../test-support/web.js";
 import { readBuildInfo } from "../build-info.js";
@@ -18,6 +19,7 @@ test("the existing session read returns private-path-free build info only after 
   try {
     const anonymous = await call(harness.port, "/api/session");
     expect(anonymous.json).not.toHaveProperty("build");
+    expect(anonymous.json).not.toHaveProperty("attachment_max_bytes");
     const cookie = await harness.login(PASSWORD);
     const response = await call(harness.port, "/api/session", { cookie });
     expect(response.status).toBe(200);
@@ -25,6 +27,8 @@ test("the existing session read returns private-path-free build info only after 
     expect(response.json).toMatchObject({
       authenticated: true,
       build: readBuildInfo(),
+      // C-616: the host attachment limit, for the comment box pre-check.
+      attachment_max_bytes: MAX_ATTACHMENT_BYTES,
     });
     const build = (response.json as { build: unknown }).build;
     expect(Object.keys(build as object).sort()).toEqual([

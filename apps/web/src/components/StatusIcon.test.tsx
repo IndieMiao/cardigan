@@ -56,6 +56,7 @@ const groups = {
     "delivery_failed",
     "executor_unreachable",
     "provider_unavailable",
+    "mcp_unavailable",
   ],
   cancelled: [
     "cancelled",

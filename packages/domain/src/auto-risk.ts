@@ -79,6 +79,19 @@ export function autoRiskPaths(
   return evidence?.complete ? evidence.paths : undefined;
 }
 
+/**
+ * Only Git products are merged (see cardMergeCandidates), so only they need
+ * host path evidence. Artifacts and documents change no repository paths; a
+ * product without any current delivery stays unknown and fails closed.
+ */
+export function missingAutoRiskPathEvidence(
+  latest: Delivery | undefined,
+): boolean {
+  if (!latest) return true;
+  if (latest.subject.kind !== "git_head") return false;
+  return autoRiskPaths(latest) === undefined;
+}
+
 /** Legacy A3 evidence boundary; Flow Lite handles missing paths as a readiness gate. */
 export function autoRiskMergeReason(
   state: {
@@ -105,7 +118,7 @@ export function autoRiskMergeReason(
             v.status !== "superseded",
         )
         .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-      return latest && autoRiskPaths(latest) !== undefined;
+      return !missingAutoRiskPathEvidence(latest);
     })
   )
     return undefined;

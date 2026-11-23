@@ -83,3 +83,161 @@ test("touchAssignmentActivity is visible to a second connection", () => {
     }
   });
 });
+
+test("C-600 only the launch's own key advances a pending session; anything else proves it has no native tools", () => {
+  withTempStore((store, dataDir) => {
+    const id = assignment().id;
+    const own = "a".repeat(64),
+      other = "b".repeat(64);
+    store.uow.run((tx) => tx.assignments.put(project_id, assignment()));
+    // Legacy and unverified sessions have no handshake to advance.
+    expect(
+      store.advanceMcpHandshake(project_id, id, "tool_called"),
+    ).toBeUndefined();
+    expect(
+      store.uow.read((tx) => tx.assignments.get(project_id, id))?.mcp_handshake,
+    ).toBeUndefined();
+
+    const pending = () =>
+      store.uow.run((tx) =>
+        tx.assignments.put(project_id, {
+          ...assignment(),
+          mcp_handshake: "pending",
+          mcp_session_key_sha256: own,
+          mcp_session_token_id: "token-new",
+        }),
+      );
+    pending();
+    // A late call on the replaced launch's Token says nothing about this one.
+    expect(
+      store.advanceMcpHandshake(
+        project_id,
+        id,
+        "tool_called",
+        undefined,
+        "token-old",
+      ),
+    ).toBeUndefined();
+    expect(
+      store.advanceMcpHandshake(
+        project_id,
+        id,
+        "tools_listed",
+        own,
+        "token-old",
+      ),
+    ).toBeUndefined();
+    expect(
+      store.uow.read((tx) => tx.assignments.get(project_id, id))?.mcp_handshake,
+    ).toBe("pending");
+    // Another client of the same Token listing tools proves nothing.
+    expect(store.advanceMcpHandshake(project_id, id, "tools_listed")).toBe(
+      "pending",
+    );
+    expect(
+      store.advanceMcpHandshake(project_id, id, "tools_listed", other),
+    ).toBe("pending");
+    // A late call from another launch's harness (its own key) proves nothing.
+    expect(
+      store.advanceMcpHandshake(project_id, id, "tool_called", other),
+    ).toBe("pending");
+    // A deadline for another session does not touch this one.
+    expect(store.advanceMcpHandshake(project_id, id, "deadline", other)).toBe(
+      "pending",
+    );
+    expect(store.advanceMcpHandshake(project_id, id, "tools_listed", own)).toBe(
+      "listed",
+    );
+    // Later calls without the key cannot undo a native listing.
+    expect(store.advanceMcpHandshake(project_id, id, "tool_called")).toBe(
+      "listed",
+    );
+
+    // A native call before listing (same key) is still native.
+    pending();
+    expect(store.advanceMcpHandshake(project_id, id, "tool_called", own)).toBe(
+      "listed",
+    );
+
+    pending();
+    expect(store.advanceMcpHandshake(project_id, id, "tool_called")).toBe(
+      "missing",
+    );
+    // Listing afterwards does not revive the session.
+    expect(store.advanceMcpHandshake(project_id, id, "tools_listed", own)).toBe(
+      "missing",
+    );
+    const reopened = StoreFor.open({ dataDir });
+    try {
+      expect(
+        reopened.uow.read((tx) => tx.assignments.get(project_id, id))
+          ?.mcp_handshake,
+      ).toBe("missing");
+    } finally {
+      reopened.close();
+    }
+
+    // The host's deadline for this very session.
+    pending();
+    expect(store.advanceMcpHandshake(project_id, id, "deadline", own)).toBe(
+      "missing",
+    );
+
+    store.uow.run((tx) =>
+      tx.assignments.put(project_id, {
+        ...assignment(),
+        status: "released",
+        mcp_handshake: "pending",
+        mcp_session_key_sha256: own,
+      }),
+    );
+    expect(store.advanceMcpHandshake(project_id, id, "tool_called")).toBe(
+      "pending",
+    );
+  });
+});
+
+test("C-600 V-2999:1 another launch's Token is not the verified session's activity", () => {
+  withTempStore((store) => {
+    const id = assignment().id;
+    const activity = () =>
+      store.uow.read((tx) => tx.assignments.get(project_id, id))
+        ?.last_mcp_activity_at;
+    store.uow.run((tx) =>
+      tx.assignments.put(project_id, {
+        ...assignment(),
+        mcp_handshake: "listed",
+        mcp_session_key_sha256: "a".repeat(64),
+        mcp_session_token_id: "token-new",
+      }),
+    );
+    expect(
+      store.touchAssignmentActivity(
+        project_id,
+        id,
+        "2026-01-01T00:01:00.000Z",
+        "token-old",
+      ),
+    ).toBe(false);
+    expect(activity()).toBeUndefined();
+    expect(
+      store.touchAssignmentActivity(
+        project_id,
+        id,
+        "2026-01-01T00:02:00.000Z",
+        "token-new",
+      ),
+    ).toBe(true);
+    expect(activity()).toBe("2026-01-01T00:02:00.000Z");
+    // Sessions without a recorded launch Token keep the old behaviour.
+    store.uow.run((tx) => tx.assignments.put(project_id, assignment()));
+    expect(
+      store.touchAssignmentActivity(
+        project_id,
+        id,
+        "2026-01-01T00:03:00.000Z",
+        "token-any",
+      ),
+    ).toBe(true);
+  });
+});

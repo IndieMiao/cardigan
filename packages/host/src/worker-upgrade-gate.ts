@@ -25,7 +25,7 @@ export const upgradeKey = (fingerprint: string | undefined) =>
 export function upgradeState(store: Store, project: string, machine: string) {
   return store.database
     .prepare(
-      "SELECT release_key,state,pending_final FROM worker_helper_upgrades WHERE project_id=? AND machine_id=?",
+      "SELECT release_key,state,pending_final,resumes FROM worker_helper_upgrades WHERE project_id=? AND machine_id=?",
     )
     .get(project, machine);
 }

@@ -130,6 +130,7 @@ export * from "./commands/merge-shadow.js";
 export * from "./commands/merge-snooze.js";
 export * from "./commands/merge-window.js";
 export * from "./commands/notices.js";
+export type { OwnerRecordInput } from "./commands/owner-record.js";
 export {
   buildPlainSummary,
   PLAIN_SUMMARY_LIMITS,
@@ -232,6 +233,7 @@ export {
 } from "./interaction.js";
 export * from "./machine-placement.js";
 export * from "./machine-requirements.js";
+export * from "./mcp-session.js";
 export * from "./member.js";
 export * from "./merge-batch.js";
 export * from "./merge-override.js";

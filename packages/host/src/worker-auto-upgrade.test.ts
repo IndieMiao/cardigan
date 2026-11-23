@@ -1474,3 +1474,176 @@ test("C-599: a failed signed attempt and a failed observation never show the too
   });
   expect(visible()).toBe(false);
 });
+
+/** A restart cut off an install of the current release on this binding. */
+function cutOff(f: Awaited<ReturnType<typeof setup>>, resumes = 0) {
+  f.store.database
+    .prepare(
+      "INSERT INTO worker_helper_upgrades(project_id,machine_id,release_key,state,resumes) VALUES (?,?,?,'installing',?)",
+    )
+    .run(project, machine, upgradeKey(f.target.fingerprint), resumes);
+}
+
+test("C-609: an install cut off by a restart resumes once; helpers already current are re-verified, not re-installed", async () => {
+  const f = await setup();
+  f.enroll();
+  cutOff(f);
+  expect(f.isHeld()).toBe(true);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).not.toHaveBeenCalled();
+  expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
+  expect(f.options.check).toHaveBeenCalledOnce();
+  expect(f.isHeld()).toBe(false);
+  expect(upgradeState(f.store, project, machine)).toMatchObject({
+    state: "verified",
+    resumes: 1,
+  });
+  expect(f.actions()).toEqual([]);
+});
+
+test("C-609: a resumed install whose check still shows stale helpers installs them once", async () => {
+  const f = await setup();
+  f.enroll();
+  cutOff(f);
+  expect(await f.run(mismatch)).toEqual(pass);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+  expect(f.adapters.install).toHaveBeenCalledBefore(f.adapters.workerCheck);
+  expect(f.isHeld()).toBe(false);
+});
+
+test("C-609: a second interruption of the same release fails; (C-608) dispatch follows the live check", async () => {
+  const f = await setup();
+  f.enroll();
+  cutOff(f, 1);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.isHeld()).toBe(false);
+  expect(f.adapters.install).not.toHaveBeenCalled();
+  expect(f.adapters.workerCheck).not.toHaveBeenCalled();
+  expect(upgradeState(f.store, project, machine)).toMatchObject({
+    state: "failed",
+  });
+  expect(f.actions()[0]?.instructions).toContain("interrupted");
+});
+
+test("C-609: without enrollment an interrupted install is not resumed", async () => {
+  const f = await setup();
+  cutOff(f);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.isHeld()).toBe(false);
+  expect(f.adapters.install).not.toHaveBeenCalled();
+  expect(upgradeState(f.store, project, machine)).toMatchObject({
+    state: "failed",
+  });
+});
+
+test("C-609: the deployment hold lasts until the journal settles the final result", async () => {
+  const f = await setup();
+  f.enroll();
+  const { liveLongOperations } = await import("./long-operations.js");
+  const { job } = f.journal.claim(project, machine, "machine", "cli");
+  let during: number | undefined;
+  await f.journal.execute(
+    job,
+    async () => {
+      const result = await patrolHelperUpgrade(
+        { ...f.options, job: job.id },
+        mismatch,
+        f.adapters,
+      );
+      // The patrol has returned; the final result is not recorded yet.
+      during = liveLongOperations(f.store).length;
+      return result;
+    },
+    () => ({ status: "passed", failed_steps: [] }),
+  );
+  expect(during).toBe(1);
+  expect(liveLongOperations(f.store)).toEqual([]);
+});
+
+test("C-609: a new install waits at a deployment's stop fence before it claims anything", async () => {
+  const f = await setup();
+  f.enroll();
+  const { fenceLongOperations, releaseLongOperationFence } = await import(
+    "./long-operations.js"
+  );
+  fenceLongOperations(f.store);
+  let done = false;
+  const running = f.run().then((r) => {
+    done = true;
+    return r;
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  expect(done).toBe(false);
+  expect(f.adapters.install).not.toHaveBeenCalled();
+  expect(upgradeState(f.store, project, machine)).toBeUndefined();
+  releaseLongOperationFence(f.store);
+  expect(await running).toEqual(pass);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+});
+
+test("C-609: a shutdown cancelling the worker check keeps the install resumable; the next patrol completes the verification", async () => {
+  // Review V-3064:2, the reviewer's own reproduction.
+  const f = await setup();
+  f.enroll();
+  const ctl = new AbortController();
+  Object.assign(f.options, { signal: ctl.signal });
+  f.adapters.workerCheck.mockImplementationOnce(async (args) => {
+    ctl.abort();
+    await args.beforeStep?.();
+    return true;
+  });
+  await f.run(mismatch); // install succeeded; the stop arrives in worker_check
+  expect(upgradeState(f.store, project, machine)).toMatchObject({
+    state: "installing",
+    resumes: 0,
+    pending_final: null,
+  });
+  expect(f.actions()).toEqual([]);
+  Object.assign(f.options, { signal: undefined });
+  expect(await f.run(pass)).toEqual(pass); // next server, helpers now match
+  expect(upgradeState(f.store, project, machine)?.state).toBe("verified");
+  expect(f.isHeld()).toBe(false);
+  expect(f.adapters.workerCheck).toHaveBeenCalledTimes(2);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+});
+
+test("C-609: a shutdown after the patrol but before the journal settles drops the pending result instead of failing it", async () => {
+  const f = await setup();
+  f.enroll();
+  const ctl = new AbortController();
+  const { job } = f.journal.claim(project, machine, "machine", "cli");
+  await expect(
+    f.journal.execute(
+      job,
+      async () => {
+        await patrolHelperUpgrade(
+          { ...f.options, signal: ctl.signal, job: job.id },
+          mismatch,
+          f.adapters,
+        );
+        // The outer observation is cut off by the stop.
+        ctl.abort();
+        throw new Error("observation cancelled");
+      },
+      () => ({ status: "passed", failed_steps: [] }),
+    ),
+  ).rejects.toThrow("observation cancelled");
+  expect(upgradeState(f.store, project, machine)).toMatchObject({
+    state: "installing",
+    pending_final: null,
+  });
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.isHeld()).toBe(false);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+});
+
+test("C-609: a check that genuinely fails is still a failure", async () => {
+  const f = await setup();
+  f.enroll();
+  f.adapters.workerCheck.mockResolvedValueOnce(false);
+  // C-608: the failure is recorded; dispatch follows the live check.
+  expect(await f.run(mismatch)).toEqual(soft);
+  expect(upgradeState(f.store, project, machine)?.state).toBe("failed");
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
+});

@@ -4,7 +4,7 @@ import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import type { AttachmentId, ProjectId } from "@cardigan/domain";
-import { fileAttachmentStore } from "@cardigan/mcp-server";
+import { fileAttachmentStore, offsiteFor } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import sharp from "sharp";
 import { INLINE_MIME_TYPES } from "./read.js";
@@ -64,7 +64,7 @@ function avifBrand(
     brands.push(ascii(offset, offset + 4));
   return brands.some((brand) => brand === "avif" || brand === "avis");
 }
-/** About 1440×69000; bounds decoder memory for a hostile 10 MiB upload. */
+/** About 1440×69000; bounds decoder memory for a hostile upload at the attachment limit. */
 const MAX_INPUT_PIXELS = 100_000_000;
 /** Renders running at once; a page of thumbnails queues behind these. */
 const MAX_RENDERS = 2;
@@ -304,6 +304,16 @@ export async function serveAttachmentThumbnail(
     res.end();
     return true;
   }
+  // C-614: OSS renders the thumbnail from the verified off-site copy. The
+  // Workbench retries with `?local=1` when that image fails to load, and any
+  // missing configuration, copy or connectivity falls through to local.
+  const remote = localOnly(req)
+    ? undefined
+    : offsiteFor(dataDir)?.thumbnailUrl(digest);
+  if (remote) {
+    redirectToOffsite(res, remote);
+    return true;
+  }
   const output = await cacheFor(dataDir).get(digest, () =>
     fileAttachmentStore(dataDir).get(digest),
   );
@@ -326,4 +336,36 @@ export async function serveAttachmentThumbnail(
   });
   res.end(output);
   return true;
+}
+
+/** `?local=1`: the browser could not load the off-site image. */
+export function localOnly(req: IncomingMessage) {
+  return /[?&]local=1(?:&|$)/u.test(req.url ?? "");
+}
+
+const REDIRECT_MAX_AGE_SECONDS = 240;
+const REDIRECT_MARGIN_SECONDS = 30;
+/**
+ * Same-session redirect to a signed, short-lived OSS URL. The redirect may be
+ * reused for a few minutes, never beyond the signature's remaining lifetime.
+ */
+export function redirectToOffsite(
+  res: ServerResponse,
+  link: { readonly url: string; readonly valid_for_seconds: number },
+) {
+  // Never let the browser reuse a redirect past (or close to) the end of the
+  // signature: an expired URL would only send it back to the local path.
+  const maxAge = Math.max(
+    0,
+    Math.min(
+      REDIRECT_MAX_AGE_SECONDS,
+      link.valid_for_seconds - REDIRECT_MARGIN_SECONDS,
+    ),
+  );
+  res.writeHead(302, {
+    Location: link.url,
+    "Cache-Control": maxAge > 0 ? `private, max-age=${maxAge}` : "no-store",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+  });
+  res.end();
 }
