@@ -11,6 +11,7 @@ import {
   type GithubClient,
   GithubExecutorError,
   type GithubJob,
+  GithubLogError,
   GithubNotFoundError,
   type GithubRun,
 } from "./github-client.js";
@@ -26,11 +27,14 @@ import {
   nextMaintenanceRetry,
 } from "./github-rate-limit.js";
 import {
+  compareGithubStepContract,
+  describeGithubStepMatcher,
   GITHUB_CHECK_NAMES,
   GITHUB_COMPLETE_STEP,
   GITHUB_SETUP_STEP,
   type GithubStepContract,
-  matchesGithubStepContract,
+  type GithubStepShape,
+  githubStepShape,
 } from "./github-step-contract.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 
@@ -97,6 +101,8 @@ interface Pending {
   listed?: { etag: string; run: GithubRun };
   failedJob?: number | undefined;
   logSteps?: GithubJob["steps"];
+  /** C-661: a contract rejection's diagnostic, written as the failure log. */
+  rejection?: string | undefined;
   boundByDispatchId: boolean;
   progress?: string;
   started?: boolean;
@@ -109,12 +115,21 @@ const unavailable = (): CheckoutResult => ({
   cleanup_errors: [],
   reason: "GitHub 检查身份或步骤无法确认",
 });
-const rejected = (): CheckoutResult => ({
+export const GITHUB_CONTRACT_REJECTED = "GitHub 检查步骤合同不符，拒绝通过";
+const rejected = (detail: string): CheckoutResult => ({
   status: "failed",
   checks: [],
   cleanup_errors: [],
-  reason: "GitHub 检查步骤合同不符，拒绝通过",
+  reason: `${GITHUB_CONTRACT_REJECTED}：${detail}`,
 });
+const MAX_SHOWN_NAME = 120;
+/** GitHub step names come from the baseline workflow; bound them for display. */
+const shown = (name: unknown): string =>
+  typeof name !== "string"
+    ? "（无）"
+    : name.length > MAX_SHOWN_NAME
+      ? `${name.slice(0, MAX_SHOWN_NAME).replace(/[\p{Cc}\p{Cf}]/gu, "?")}…`
+      : name.replace(/[\p{Cc}\p{Cf}]/gu, "?");
 /** One host-driven maintenance loop per executor. No per-run interval or Agent entry point. */
 export class GithubCheckPoller implements GithubCheckLifecycle {
   private readonly pending = new Map<number, Pending>();
@@ -220,6 +235,12 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     if (!state.failedJob) {
       // Cancellations have no failed job and never require diagnostics.
       if (state.identity.conclusion === "cancelled") return;
+      // C-661: a successful job rejected by the step contract has no job log
+      // to download; the host's own diagnostic is the failure log.
+      if (state.rejection) {
+        open()(`${state.rejection}\n`);
+        return;
+      }
       throw new FailureLogError("job_unavailable");
     }
     for (let attempt = 0; ; attempt++) {
@@ -240,10 +261,18 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
           (error.category === "auth" || error.category === "security")
         )
           throw new FailureLogError(error.category);
-        if (attempt === 2)
-          throw new FailureLogError(
-            error instanceof GithubNotFoundError ? "not_found" : "api",
-          );
+        // A download that ran into its total cap would only repeat that wait.
+        if (
+          attempt === 2 ||
+          (error instanceof GithubLogError && error.limit === "total")
+        )
+          // C-529: other provider diagnostics never leave this boundary; only
+          // the job log client's scrubbed, fixed-shape detail is recorded.
+          throw error instanceof GithubLogError
+            ? new FailureLogError(error.failure, error.diagnostic)
+            : new FailureLogError(
+                error instanceof GithubNotFoundError ? "not_found" : "api",
+              );
         const ms = 1000 * 2 ** attempt;
         if (this.options.waitForLogRetry)
           await this.options.waitForLogRetry(ms, signal);
@@ -460,6 +489,9 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     state.failedJob = result.logSource?.jobId;
     if (state.failedJob && result.checks.length && jobs[0])
       state.logSteps = jobs[0].steps;
+    state.rejection = result.reason?.startsWith(GITHUB_CONTRACT_REJECTED)
+      ? result.reason
+      : undefined;
     state.onTerminal?.();
     this.close(state, result);
   }
@@ -578,7 +610,12 @@ function mapGithubCheckResult(
     !Number.isSafeInteger(job.id) ||
     job.id < 1
   )
-    return { ...rejected(), logSource: { url: run.html_url } };
+    return {
+      ...rejected(
+        `须为唯一、已结束、属于本次运行且名为 check 的 job（实际 ${jobs.length} 个 job${job ? `，名为 ${shown(job.name)}，状态 ${shown(job.status)}` : ""}）`,
+      ),
+      logSource: { url: run.html_url },
+    };
   const result = mapGithubCheckSteps(request, run, job, contract);
   return result.status === "passed"
     ? result
@@ -596,7 +633,7 @@ function mapGithubCheckSteps(
   job: GithubJob,
   configured?: GithubStepContract,
 ): CheckoutResult {
-  if (!Array.isArray(job.steps)) return rejected();
+  if (!Array.isArray(job.steps)) return rejected("job 没有步骤列表");
 
   const steps = [...job.steps];
   if (steps[0]?.name === GITHUB_SETUP_STEP) steps.shift();
@@ -610,36 +647,72 @@ function mapGithubCheckSteps(
     : checkFlakeIds.map((id) => `Recovered ${id}`);
   const caseContract =
     !configured && steps.some((step) => step?.name === CASE_SCOPE_STEP);
-  const contract =
-    configured ?? (caseContract ? CARDIGAN_CASE_CONTRACT : CARDIGAN_CONTRACT);
-  const mainStepCount =
-    contract.steps.length + (job.steps[0]?.name === GITHUB_SETUP_STEP ? 1 : 0);
+  // C-661: a configured contract may differ per baseline. The run's
+  // head_branch is the baseline the workflow was dispatched on; both callers
+  // verified it against the bound identity before reading jobs.
+  const contract: GithubStepShape = configured
+    ? githubStepShape(configured, run.head_branch)
+    : caseContract
+      ? CARDIGAN_CASE_CONTRACT
+      : CARDIGAN_CONTRACT;
+  const contractName = configured
+    ? configured.branches?.has(run.head_branch)
+      ? `基线 ${shown(run.head_branch)} 的步骤合同`
+      : `执行器默认步骤合同（基线 ${shown(run.head_branch)}）`
+    : "Cardigan 默认步骤合同";
+  const setup = job.steps[0]?.name === GITHUB_SETUP_STEP ? 1 : 0;
+  if (steps.some((step) => !step)) return rejected("job 步骤列表含空项");
+  const comparison = compareGithubStepContract(
+    steps.map((step) => step.name),
+    contract,
+  );
+  if (!comparison.ok)
+    return rejected(
+      [
+        `${contractName}第 ${comparison.index + 1 + setup} 步期望 ${shown(comparison.expected)}，实际 ${shown(comparison.actual)}`,
+        `期望步骤：${[
+          `${GITHUB_SETUP_STEP}（可缺省）`,
+          ...contract.steps.map((matcher) =>
+            shown(describeGithubStepMatcher(matcher)),
+          ),
+        ].join("、")}`,
+        `期望收尾（按序，均可缺省）：${[
+          ...contract.postSteps.map((matcher) =>
+            "name" in matcher
+              ? shown(matcher.name)
+              : `Post Run ${shown(matcher.uses)}@<ref>`,
+          ),
+          GITHUB_COMPLETE_STEP,
+        ].join("、")}`,
+        `实际步骤：${job.steps.map((step) => shown(step.name)).join("、")}`,
+      ].join("\n"),
+    );
+  const mainStepCount = comparison.mainSteps + setup;
+  const bad = job.steps.findIndex(
+    (step, index) =>
+      !Number.isSafeInteger(step.number) ||
+      // Main steps are contiguous; GitHub allocates post-action numbers
+      // separately, leaving gaps before/between the known cleanup steps.
+      (index < mainStepCount
+        ? step.number !== index + 1
+        : step.number <= (job.steps[index - 1]?.number ?? step.number)) ||
+      step.status !== "completed" ||
+      !["success", "failure", "timed_out", "skipped", "cancelled"].includes(
+        step.conclusion ?? "",
+      ),
+  );
+  const badStep = job.steps[bad];
+  if (badStep)
+    return rejected(
+      `第 ${bad + 1} 步 ${shown(badStep.name)} 的编号不连续，或未结束、结论未知`,
+    );
   if (
-    steps.some((step) => !step) ||
-    !matchesGithubStepContract(
-      steps.map((step) => step.name),
-      contract,
-    ) ||
-    job.steps.some(
-      (step, index) =>
-        !step ||
-        !Number.isSafeInteger(step.number) ||
-        // Main steps are contiguous; GitHub allocates post-action numbers
-        // separately, leaving gaps before/between the known cleanup steps.
-        (index < mainStepCount
-          ? step.number !== index + 1
-          : step.number <= (job.steps[index - 1]?.number ?? step.number)) ||
-        step.status !== "completed" ||
-        !["success", "failure", "timed_out", "skipped", "cancelled"].includes(
-          step.conclusion ?? "",
-        ),
-    ) ||
     request.checks.length !== GITHUB_CHECK_NAMES.length ||
     request.checks.some(
       (step, index) => step.name !== GITHUB_CHECK_NAMES[index],
     )
   )
-    return rejected();
+    return rejected(`请求的检查须依次为 ${GITHUB_CHECK_NAMES.join("/")}`);
   const scope = githubCheckScope(request);
   const intentionalSkip = (name: string) =>
     receipts.includes(name) ||
@@ -706,7 +779,7 @@ function mapGithubCheckSteps(
               .some((pkg) => checkFlakeCases[id].file.startsWith(`${pkg}/`)),
         )))
   )
-    return rejected();
+    return rejected("Recovered 回执与本次检查范围不符");
   const failedGithubStep = job.steps.find(
     (s) =>
       !checks.some((c) => c.name === s.name) &&

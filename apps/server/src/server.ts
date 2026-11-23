@@ -59,6 +59,7 @@ import {
 } from "./assembly.js";
 import { checkArtifact, readCheckApproval } from "./check-handoff-artifact.js";
 import { startCheckControl } from "./check-handoff-control.js";
+import { retryingCheckHeadReader } from "./check-head-retry.js";
 import {
   DEFAULT_LISTEN_RETRY_INTERVAL_MS,
   DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
@@ -673,13 +674,9 @@ async function assembleServer(
               // §3.3: production always verifies against the real Git service, and the
               // verifier follows the project the request belongs to.
               deliveryVerifier: git.verifierFor,
-              checkHead: (project) => ({
-                head: async (assignment) => {
-                  if (!git.checkHead)
-                    throw new Error("Check HEAD reader unavailable");
-                  return git.checkHead(project, assignment);
-                },
-              }),
+              // C-632: a busy repository lock is retried before failing.
+              checkHead: (project) =>
+                retryingCheckHeadReader(git, project, config.checkHeadRetry),
               ...(hostOps
                 ? {
                     hostOps: {
@@ -865,6 +862,18 @@ async function assembleServer(
           options.dispatcher.reconcileIntervalMs ?? config.reconcileIntervalMs,
         backupIntervalMs =
           options.dispatcher.backupIntervalMs ?? config.backupIntervalMs,
+        centralMaintenanceWindow =
+          options.dispatcher.centralMaintenanceWindow ??
+          config.centralMaintenanceWindow,
+        centralMaintenanceIntervalMs =
+          options.dispatcher.centralMaintenanceIntervalMs ??
+          config.centralMaintenanceIntervalMs,
+        centralCruftIntervalMs =
+          options.dispatcher.centralCruftIntervalMs ??
+          config.centralCruftIntervalMs,
+        centralRefRetentionMs =
+          options.dispatcher.centralRefRetentionMs ??
+          config.centralRefRetentionMs,
         attachmentIntervalMs =
           options.dispatcher.attachmentIntervalMs ??
           config.attachmentIntervalMs;
@@ -988,6 +997,20 @@ async function assembleServer(
         ...(cleanupIntervalMs === undefined ? {} : { cleanupIntervalMs }),
         ...(reconcileIntervalMs === undefined ? {} : { reconcileIntervalMs }),
         ...(backupIntervalMs === undefined ? {} : { backupIntervalMs }),
+        ...(centralMaintenanceWindow === undefined
+          ? {}
+          : { centralMaintenanceWindow }),
+        ...(centralMaintenanceIntervalMs === undefined
+          ? {}
+          : { centralMaintenanceIntervalMs }),
+        ...(centralCruftIntervalMs === undefined
+          ? {}
+          : { centralCruftIntervalMs }),
+        ...(centralRefRetentionMs === undefined
+          ? {}
+          : { centralRefRetentionMs }),
+        centralMaintenanceLog: (line) =>
+          process.stdout.write(`${JSON.stringify(line)}\n`),
         ...(attachmentIntervalMs === undefined ? {} : { attachmentIntervalMs }),
         // The blob GC sweeps `<dataDir>/attachments`; §9.3.
         dataDir: config.dataDir,

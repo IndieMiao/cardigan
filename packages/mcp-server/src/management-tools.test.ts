@@ -3123,3 +3123,52 @@ test("Office submits a versioned decomposition through MCP; get_card shows every
     },
   });
 });
+
+test("C-610: post_comment passes review_alignment to the domain", async () => {
+  const client = await coder();
+  const result = await raw(client, "post_comment", {
+    card_id: card.id,
+    body: "不变量",
+    review_alignment: {
+      work_item_id: work("reviewer").id,
+      step: "propose",
+      invariants: ["保存后读回新值"],
+    },
+  });
+  expect(result.isError).toBe(true);
+  expect(result.structuredContent).toMatchObject({
+    error: { code: "illegal_transition" },
+  });
+});
+
+test("C-619: issue_instruction passes decision_id to the domain and validates its format", async () => {
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const ops: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      scope: "standing",
+      standing_mode: "ops",
+      mcp_token_id: "fixture-question-ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  const ops = await connect(opsAssignment, true);
+  const args = {
+    card_id: card.id,
+    work_item_id: work("reviewer").id,
+    body: "请确认方向",
+  };
+  const before = rows();
+  for (const [decision_id, code] of [
+    ["Q-999", "not_found"],
+    ["not a decision", "validation_failed"],
+  ] as const)
+    expect(
+      (await raw(ops, "issue_instruction", { ...args, decision_id }))
+        .structuredContent,
+    ).toMatchObject({ error: { code } });
+  expect(rows()).toEqual(before);
+});

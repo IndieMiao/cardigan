@@ -20,7 +20,63 @@ export interface RequestCheckParams {
   readonly work_item_id: WorkItemId;
 }
 export interface CheckHeadReader {
+  /** Rejects with a {@link CheckHeadFailure} when the host knows why. */
   head(assignment: Assignment): Promise<string>;
+}
+/**
+ * Why the host could not read the recorded branch HEAD. Retryable reasons are
+ * transient host conditions; the rest are real branch or setup errors.
+ */
+export const checkHeadFailureReasons = [
+  "repository_busy",
+  "fetch_failed",
+  "repository_failed",
+  "environment_unavailable",
+  "branch_missing",
+  "object_mismatch",
+  "ownership_mismatch",
+] as const;
+export type CheckHeadFailureReason = (typeof checkHeadFailureReasons)[number];
+/** Host-side classification; carries no Git output, paths or credentials. */
+export class CheckHeadFailure extends Error {
+  constructor(
+    readonly reason: CheckHeadFailureReason,
+    options?: { readonly cause?: unknown },
+  ) {
+    super(`Check HEAD failed: ${reason}`, options);
+    this.name = "CheckHeadFailure";
+  }
+}
+const checkHeadMessages: Readonly<
+  Record<CheckHeadFailureReason | "unknown", string>
+> = {
+  repository_busy:
+    "主机仓库忙，已自动重试到总时限仍未取得仓库锁；请稍后用新的幂等键重新 request_check，持续出现再报告阻塞",
+  fetch_failed:
+    "主机从工作机拉取登记分支失败；请稍后用新的幂等键重试，持续失败再报告阻塞请主机运维排查工作机连接",
+  repository_failed: "主机读写中央仓库失败；请报告阻塞请主机运维排查中央仓库",
+  environment_unavailable:
+    "主机未配置或无法使用本项目的Git检查环境；请报告阻塞请主机运维排查",
+  branch_missing:
+    "登记分支在工作机上不存在或没有提交；请在登记分支上提交后再 request_check",
+  object_mismatch: "登记分支HEAD不是提交对象；请核对登记分支后再 request_check",
+  ownership_mismatch:
+    "登记分支、工作目录或工作机与当前负责人不符；请用 whoami 核对，仍不符时报告阻塞",
+  unknown:
+    "无法读取当前产出分支HEAD（未分类原因）；请稍后用新的幂等键重试，持续失败再报告阻塞请主机运维查看服务端日志",
+};
+const retryableReasons: ReadonlySet<CheckHeadFailureReason> = new Set([
+  "repository_busy",
+  "fetch_failed",
+]);
+function checkHeadReason(error: unknown): CheckHeadFailureReason | undefined {
+  if (error instanceof CheckHeadFailure) return error.reason;
+  // Tolerates duplicated module instances; only known reasons are trusted.
+  const reason =
+    error instanceof Error && error.name === "CheckHeadFailure"
+      ? (error as { reason?: unknown }).reason
+      : undefined;
+  return checkHeadFailureReasons.find((r) => r === reason);
 }
 const sha = (s: unknown): s is string =>
   typeof s === "string" && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(s);
@@ -96,12 +152,18 @@ export async function prepareCheck(
       ensure(sha(head), "validation_failed", "主机未取得有效分支HEAD");
       return { [proof]: true, source: source(checked.value.a), head };
     });
-  } catch {
+  } catch (error) {
+    const reason = checkHeadReason(error);
     return attempt((): never => {
+      // Only the fixed reason and message leave the host, never the raw error.
       ensure(
         false,
         "validation_failed",
-        "无法读取当前产出分支HEAD，请核对Git检查环境",
+        checkHeadMessages[reason ?? "unknown"],
+        {
+          reason: reason ?? "unknown",
+          retryable: reason === undefined || retryableReasons.has(reason),
+        },
       );
     });
   }

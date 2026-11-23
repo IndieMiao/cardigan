@@ -795,3 +795,28 @@ test("an ordinary writer stall is not stopped by Ops until its committed branch 
   ).toEqual([]);
   expect(git("log", "-1", "--format=%s")).toBe("local work");
 });
+
+test("C-618: a lost evidence-unblocked instruction to a delivered author stays visible; other instructions still wait", async () => {
+  const f = setup();
+  const item = f.target.item;
+  f.store.uow.run((tx) =>
+    tx.work_items.put(f.project, {
+      ...(tx.work_items.get(f.project, item.id) as typeof item),
+      status: "delivered",
+    } as typeof item),
+  );
+  f.advance(1);
+  const plain = f.event("instruction_issued", { work_item_id: item.id });
+  f.advance(610000);
+  expect((await f.view()).dispatch_stalls).toEqual([]);
+  const evidence = f.event("instruction_issued", {
+    work_item_id: item.id,
+    evidence_unblocked: ["V-1"] as never,
+  });
+  f.advance(610000);
+  const stalls = (await f.view()).dispatch_stalls;
+  expect(stalls).toEqual([
+    expect.objectContaining({ cause_id: evidence.id, kind: "owner_not_woken" }),
+  ]);
+  expect(stalls.some((s) => s.cause_id === plain.id)).toBe(false);
+});

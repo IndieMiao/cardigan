@@ -2,6 +2,7 @@ import { expect, test, vi } from "vitest";
 import {
   CheckExecutorSuspended,
   type CheckRequest,
+  FailureLogError,
   runCheckExecutor,
   SshCheckExecutor,
 } from "./check-executor.js";
@@ -165,6 +166,41 @@ test("D1 rework: broken diagnostic consumers cannot replace the trusted terminal
   expect(report.mock.calls[0]?.[0]).toMatchObject({
     message: "检查失败日志获取失败，保留原执行结果与清理提示",
   });
+});
+
+test("C-658: a classified log download failure keeps its category and detail on the trusted result", async () => {
+  const terminal: CheckoutResult = {
+    ...result,
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 134 }],
+    logSource: {
+      url: "https://github.com/fixture/project/actions/runs/1",
+      jobId: 2,
+    },
+  };
+  const report = vi.fn();
+  expect(
+    await runCheckExecutor(
+      {
+        dispatch: async () => ({ id: "fixture" }),
+        poll: async () => terminal,
+        cancel: async () => {},
+        fetchFailureLog: async () => {
+          throw new FailureLogError(
+            "timeout",
+            "60 秒未收到新数据（已接收 3.9 MB，用时 75 秒）",
+          );
+        },
+      },
+      request("merge_check"),
+      report,
+    ),
+  ).toEqual({
+    ...terminal,
+    logFailure: "timeout",
+    logFailureDetail: "60 秒未收到新数据（已接收 3.9 MB，用时 75 秒）",
+  });
+  expect(report).toHaveBeenCalledOnce();
 });
 
 test.each(["dispatch", "poll"])(

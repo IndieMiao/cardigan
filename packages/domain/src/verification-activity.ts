@@ -1,5 +1,6 @@
 import { isReviewStale } from "./derived.js";
 import type { Delivery, Event, Review, Run, WorkItem } from "./entities.js";
+import { evidenceWait } from "./review-evidence.js";
 
 export interface VerificationActivity {
   readonly status: string;
@@ -40,10 +41,14 @@ export function verificationTarget(
         .filter((r) => r.work_item_id === item.id && !isReviewStale(r, latest))
         .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0]
     : undefined;
-  // Conditional reviews keep the same submitted version open for another Run.
+  // Conditional reviews keep the same submitted version open for another Run;
+  // C-618: pending platform evidence waits for the author's new delivery.
   return latest?.status === "submitted" &&
     latest.requested_verifiers.includes(item.id) &&
-    (!review || (review.verdict === "conditional" && !review.followup_card_id))
+    (!review ||
+      (review.verdict === "conditional" &&
+        !review.followup_card_id &&
+        !evidenceWait(review)))
     ? latest
     : undefined;
 }
@@ -56,7 +61,18 @@ export function verificationActivity(
   if (item.kind !== "verify" || !["ready", "in_progress"].includes(item.status))
     return undefined;
   const target = verificationTarget(item, input);
-  if (!target) return { status: "waiting_delivery", label: "等待新交付" };
+  if (!target)
+    return {
+      status: "waiting_delivery",
+      label: evidenceWait(
+        input.reviews
+          .filter((r) => r.work_item_id === item.id && !r.withdrawn)
+          .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0] ??
+          {},
+      )
+        ? "证据待补"
+        : "等待新交付",
+    };
   const run = input.runs
     .filter(
       (r) =>

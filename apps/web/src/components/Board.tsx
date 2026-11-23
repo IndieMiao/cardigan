@@ -12,6 +12,7 @@ import type { CardDisplay } from "../card-display.js";
 import { BOARD_STATUSES, cardStatusLabel } from "../status.js";
 import { useBoardPan } from "../useBoardPan.js";
 import { BoardCard } from "./BoardCard.js";
+import { BoardDependencies } from "./BoardDependencies.js";
 import { StatusTag } from "./Foundation.js";
 import { MergeBatchHeading } from "./layout/MergeBatchLayout.js";
 import { groupBatchCards } from "./MergeBatch.js";
@@ -184,6 +185,8 @@ export function Board({
   const scroller = useRef<HTMLElement>(null);
   const [more, setMore] = useState(false);
   useBoardPan(scroller);
+  // C-659: lines to the hovered or focused card's prerequisites and dependents.
+  const frame = useRef<HTMLDivElement>(null);
   const measure = useCallback(() => {
     const element = scroller.current;
     if (!element) return;
@@ -240,7 +243,8 @@ export function Board({
       <p className="visually-hidden" role="status" aria-live="polite">
         {announcement}
       </p>
-      <div className="board-scroll">
+      <div className="board-scroll" ref={frame}>
+        <BoardDependencies board={scroller} frame={frame} cards={cards} />
         <section
           className="board"
           ref={scroller}
@@ -273,6 +277,7 @@ export function Board({
                 key={status}
                 className={`board-column${collapsed ? " board-column-collapsed" : ""}`}
                 aria-label={label}
+                data-status={status}
               >
                 <h3 className="board-column-title">
                   {collapsed ? (

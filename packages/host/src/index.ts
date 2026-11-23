@@ -124,6 +124,11 @@ export {
 } from "./github-dispatch-journal.js";
 export * from "./github-probe.js";
 export * from "./github-rate-limit.js";
+export {
+  HostMemoryPressureMonitor,
+  linuxPressureProbe,
+  pressureNotice,
+} from "./host-memory-pressure.js";
 export { HostOpsService } from "./host-ops.js";
 export { tryHelperConfirmationLock, tryHostOpsLock } from "./host-ops-lock.js";
 export {

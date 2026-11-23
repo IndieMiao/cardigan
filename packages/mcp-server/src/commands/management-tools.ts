@@ -139,6 +139,7 @@ const schemas = {
     card_id: id("card"),
     work_item_id: id("work_item"),
     body: text,
+    decision_id: id("decision").optional(),
   },
   post_comment: {
     story_discussion: z
@@ -217,6 +218,17 @@ const schemas = {
       .optional()
       .describe(
         "暂停或换做法：负责人提交方案，待确认人 reply_to 当前方案并确认方向，不等于审核通过",
+      ),
+    review_alignment: z
+      .object({
+        work_item_id: id("work_item"),
+        step: z.enum(["propose", "confirm", "dispute"]),
+        invariants: z.array(text).min(1).max(10).optional(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "对齐回合（连续第 3 次驳回后）：作者或审核员用 propose 提出 1–10 条不变量（invariants），对方 reply_to 该条后 confirm 同意或 dispute 写明分歧；同意后写入 card.invariants 并恢复审核，分歧交 PM 裁决",
       ),
     host_report_for: id("human_action")
       .optional()
@@ -829,7 +841,7 @@ export function managementTools(clock?: Clock) {
     }),
     wire(
       "issue_instruction",
-      "Instruct an unfinished work item as PM Ops.",
+      "Instruct an unfinished work item as PM Ops. To ask a verifier held by a pending review-limit decision (confirm a direction, add an opinion) pass that decision_id: only that verifier's Assignment is woken, it may answer with post_comment (reply_to the instruction), its reply reaches PM Ops, and it still cannot submit a review, change the decision or advance the merge. Ordinary comments do not wake a waiting verifier.",
       issueInstruction,
     ),
     wire("report_blocker", "Report a work item blocker.", reportBlocker),
