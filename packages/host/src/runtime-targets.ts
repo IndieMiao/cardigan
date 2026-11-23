@@ -1450,6 +1450,7 @@ export async function checkRegisteredMachine(
       options.machine,
       outcome,
       target,
+      options.env,
     );
     return guidance ? { ...rest, agent_tools_guidance: guidance } : rest;
   };

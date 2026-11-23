@@ -4,16 +4,18 @@ import {
   type ActionCommand,
   type Clock,
   type HumanActionId,
+  type Machine,
   requestDeploymentAction,
   retireWorkerMaintenanceActions,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
-import type {
-  MachineCapability,
-  MachineHealth,
-  Store,
-  StoreTransactionContext,
+import {
+  type MachineCapability,
+  type MachineHealth,
+  readMachineObservationsInTransaction,
+  type Store,
+  type StoreTransactionContext,
 } from "@cardigan/store";
 import {
   AGENT_TOOLS,
@@ -27,8 +29,10 @@ import {
   type CapabilityProbe,
   probeMachineCapability,
 } from "./machine-capability-probe.js";
+import { MachineCheckJournal } from "./machine-check-journal.js";
 import type { AgentToolsOutcome } from "./machine-check-types.js";
 import { runtimeWorkersPath } from "./runtime-workers-config.js";
+import { observationFingerprint } from "./worker-helper-release.js";
 import { stageWorkerUpgrade, upgradeMaterials } from "./worker-upgrade.js";
 import { enrolledUpgradeIdentity } from "./worker-upgrade-enrollment.js";
 import { upgradeKey, upgradeState } from "./worker-upgrade-gate.js";
@@ -141,10 +145,14 @@ const UNVERIFIABLE = "当前绑定或控制端发行材料无法核验，旧的�
  * Who handles stale tools for this binding now: the signed upgrade (first
  * attempt of each release key), its recovery, or an administrator (`note`) —
  * an unenrolled machine, or an enrolled one whose attempt for this key left
- * the tools stale (v1 entry or failed recheck). Shared by the notice and by
- * the Needs You view, so both show a command under the same rule.
+ * the tools stale (v1 entry or failed recheck).
+ *
+ * Internal to the observation that stages the notice: inside that observation
+ * an `installing` attempt of this key is about to settle, so the notice may be
+ * prepared now. Whether anyone may see its command is decided only by
+ * `agentToolsCommandVisible`.
  */
-export function agentToolsRoute(
+function agentToolsRoute(
   store: Store,
   project: string,
   machine: string,
@@ -176,6 +184,64 @@ export function agentToolsRoute(
   return {
     note: "签名自动升级已对本版本执行一次，附件助手仍未就绪：C-595 之前登记的 v1 入口只能更新三个 helper，需要本命令迁移；v2 入口则是安装后复查未通过",
   };
+}
+
+/**
+ * C-599 (Q-1187): the only rule for showing the tools command outside the
+ * observation that staged it — Needs You, its version and the CLI guidance.
+ * Staging a notice does not authorise showing it, and a dispatch pause does not
+ * mean the signed attempt is over. Shown only when every condition holds:
+ * - no check of this machine is running (none has started, or all settled);
+ * - no upgrade attempt is unsettled or held (installing, pending final,
+ *   failed, worker_checked); an enrolled binding's attempt for this exact
+ *   release key has settled as verified;
+ * - the administrator owns the route (unenrolled, or enrolled and attempted);
+ * - the latest settled observation belongs to this binding and platform, is
+ *   still fresh and found the tools missing or stale in a reinstallable way.
+ *   For an enrolled binding that observation is the recheck after the signed
+ *   attempt: `verified` is written when that same observation's job settles.
+ * The caller still compares the stored command with one re-derived from the
+ * current binding and release, so a new release or binding hides it too.
+ */
+export function agentToolsCommandVisible(
+  store: Store,
+  project: string,
+  machine: string,
+  platform: Pick<Machine, "os" | "arch">,
+  fingerprint: string,
+  env?: NodeJS.ProcessEnv,
+  now = new Date().toISOString(),
+): boolean {
+  if (machine === "local") return false;
+  const journal = new MachineCheckJournal(store);
+  if (journal.running(machine)) return false;
+  const row = upgradeState(store, project, machine);
+  if (row && (row.state !== "verified" || row.pending_final)) return false;
+  if (!("note" in agentToolsRoute(store, project, machine, fingerprint, env)))
+    return false;
+  const expected = observationFingerprint(fingerprint, platform);
+  if (!expected) return false;
+  const observed = readMachineObservationsInTransaction(
+    store,
+    project,
+    machine,
+    now,
+    expected,
+  );
+  const health = observed.health;
+  if (
+    !observed.observation_target_matches ||
+    !health?.available ||
+    observed.capabilities.some((c) => c.key === AGENT_TOOLS_CAPABILITY)
+  )
+    return false;
+  const problem = health.capability_failures?.find(
+    (f) => f.key === AGENT_TOOLS_CAPABILITY,
+  )?.reason;
+  // Re-read last: a check that started while reading hides the command.
+  return (
+    !!problem && agentToolsReinstallable(problem) && !journal.running(machine)
+  );
 }
 
 export interface AgentToolsReconcileOptions {
@@ -384,14 +450,18 @@ const MESSAGES: Record<AgentToolsGuidance["status"], string> = {
 /**
  * For the explicit caller only (never `machine show`, the patrol or history):
  * return this observation's command after re-deriving it from the current
- * binding and verified release; any difference returns no command.
+ * binding and verified release, under `agentToolsCommandVisible`; any
+ * difference returns no command.
  */
 export function agentToolsGuidance(
   store: Store,
   project: string,
   machine: string,
   outcome: AgentToolsOutcome | undefined,
-  target: { execution: ExecutionConfig; machine: { os: string } } | undefined,
+  target:
+    | { execution: ExecutionConfig; machine: Pick<Machine, "os" | "arch"> }
+    | undefined,
+  env?: NodeJS.ProcessEnv,
 ): AgentToolsGuidance | undefined {
   if (!outcome || outcome.status === "current") return undefined;
   const reply = (status: AgentToolsGuidance["status"], extra = {}) => ({
@@ -415,7 +485,17 @@ export function agentToolsGuidance(
     !pinned ||
     pinned.machine_id !== machine ||
     pinned.project_id !== project ||
-    !outcome.human_action_id
+    !outcome.human_action_id ||
+    // Same rule as Needs You: read after this caller's check settled, so a
+    // check or signed attempt started since then returns no command.
+    !agentToolsCommandVisible(
+      store,
+      project,
+      machine,
+      target.machine,
+      pinned.fingerprint,
+      env,
+    )
   )
     return changed;
   let command: string;

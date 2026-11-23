@@ -1,7 +1,7 @@
 import { dirname, join } from "node:path";
 import type { Machine } from "@cardigan/domain";
 import {
-  agentToolsRoute,
+  agentToolsCommandVisible,
   type CheckKind,
   type CheckResult,
   loadRuntimeWorkers,
@@ -50,7 +50,8 @@ export interface MachineHost {
   /**
    * C-599: the attachment tools command an administrator may run now. Unlike
    * the helper command this includes enrolled bindings whose signed attempt
-   * for the current release left the tools stale (v1 entry, failed recheck).
+   * for the current release left the tools stale (v1 entry, failed recheck),
+   * but only once that attempt and every check of the machine have settled.
    */
   toolsCommand?(project: string, machine: Machine): string | undefined;
   bindings(): (project: string, machine: string) => BindingSummary | null;
@@ -124,10 +125,15 @@ export function machineHost(
       const worker = boundWorker(project, machine);
       if (worker?.execution.mode !== "agent-ssh") return undefined;
       const target = runtimeTargetBinding(worker);
+      // Never while a check or signed attempt may still write these files.
       if (
-        !(
-          "note" in
-          agentToolsRoute(store, project, machine.id, target.fingerprint, env)
+        !agentToolsCommandVisible(
+          store,
+          project,
+          machine.id,
+          machine,
+          target.fingerprint,
+          env,
         )
       )
         return undefined;

@@ -1,7 +1,11 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { upgradeKey } from "@cardigan/host";
+import {
+  MachineCheckJournal,
+  observationFingerprint,
+  upgradeKey,
+} from "@cardigan/host";
 import {
   beginMachineObservation,
   completeMachineObservation,
@@ -20,6 +24,7 @@ import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 import { MachineChecks } from "./machine-checks.js";
 import { type MachineHost, machineHost } from "./machine-host.js";
 import { machineView } from "./machine-view.js";
+import { readNeedsVersion } from "./needs-version.js";
 
 test("global read, atomic drain/resume, authenticated single-flight checks and durable results", async () => {
   const gate = Promise.withResolvers<void>();
@@ -679,7 +684,7 @@ test("C-599: an attachment tools notice shows only the command the current bindi
   }
 });
 
-test("C-599: the real host offers the tools command to unenrolled bindings and to enrolled ones only after their signed attempt", async () => {
+test("C-599: the real host shows the tools command only after every check and signed attempt settled on a reinstallable recheck", async () => {
   const root = await mkdtemp(join(tmpdir(), "machine-tools-"));
   const store = Store.open({ dbPath: ":memory:" });
   try {
@@ -734,31 +739,187 @@ test("C-599: the real host offers the tools command to unenrolled bindings and t
     const registration = {
       ...machine(),
       id: "worker",
+      label: "worker",
       herdr_machine: "worker",
     };
-    const unenrolled = host.toolsCommand?.("example", registration);
-    expect(unenrolled).toBe(host.upgradeCommand?.("example", registration));
-    expect(unenrolled).toContain("sha256sum");
+    store.uow.run((tx) => tx.machines.put("example", registration));
     const fingerprint = host.bindingFingerprint?.("example", registration);
     if (!fingerprint) throw new Error("missing binding");
+    const expected = host.upgradeCommand?.("example", registration);
+    expect(expected).toContain("sha256sum");
+    const shown = () => host.toolsCommand?.("example", registration);
+    const system = { kind: "system", project_id: "example" } as const;
+    let n = 0;
+    const observe = (
+      reason: string | null,
+      at = fingerprint,
+      status: "passed" | "failed" = "passed",
+      platform = registration,
+    ) => {
+      const id = `obs-${n++}`;
+      const now = new Date().toISOString();
+      beginMachineObservation(store, system, "example", "worker", id, now);
+      completeMachineObservation(
+        store,
+        system,
+        "example",
+        "worker",
+        id,
+        {
+          status,
+          checked_at: now,
+          blockers: [],
+          launch_enabled: status === "passed",
+          ...(reason
+            ? {
+                capability_failures: [
+                  {
+                    key: "agent.attachment_tools",
+                    search_locations: [],
+                    reason,
+                  },
+                ],
+              }
+            : {}),
+        },
+        reason === null
+          ? [
+              {
+                key: "agent.attachment_tools",
+                version: null,
+                verified_at: now,
+                evidence_ref: `machine-observation:${id}#agent.attachment_tools`,
+              },
+            ]
+          : [],
+        observationFingerprint(at, platform),
+      );
+    };
+    const stale = "附件助手 download-attachment.mjs 缺失";
+    // Nothing has been observed for this binding yet.
+    expect(shown()).toBeUndefined();
+    observe(stale);
+    expect(shown()).toBe(expected);
+    // Needs You's version follows the same rule as the view.
+    const notice = store.uow.run((tx) => {
+      const id = tx.ids.next("example", "human_action");
+      tx.human_actions.put("example", {
+        id,
+        key: id,
+        status: "open",
+        requested_by: "system",
+        instructions: "Install tools",
+        why_human: "Administrator",
+        expected_return: "Result",
+        blocked_work_items: [],
+        triage: "host",
+        terminal: {
+          target: "worker",
+          login: "owner",
+          command: expected ?? "",
+          expected_output: "ok",
+          on_failure: "stop",
+        },
+      });
+      tx.events.append("example", {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence("example"),
+        created_at: new Date().toISOString(),
+        actor: system,
+        type: "host_deployment_action_requested",
+        payload: {
+          key: `worker-agent-tools:worker:${"b".repeat(64)}`,
+          reason: "worker_maintenance",
+          human_action_id: id,
+        },
+      });
+      return id;
+    });
+    const version = () =>
+      readNeedsVersion(
+        store,
+        "example" as never,
+        "ctx",
+        undefined,
+        undefined,
+        undefined,
+        (project, machine) => host.toolsCommand?.(project, machine),
+      );
+    const visibleVersion = version();
+    expect(notice).toBeTruthy();
+    // Any running check of the machine, of any kind, project or source, hides it
+    // even before it has replaced the observation.
+    const journal = new MachineCheckJournal(store);
+    for (const [project, kind, source] of [
+      ["example", "machine", "patrol"],
+      ["example", "worker", "web"],
+      ["peer", "machine", "cli"],
+    ] as const) {
+      const { job } = journal.claim(project, "worker", kind, source);
+      expect(shown()).toBeUndefined();
+      expect(version()).not.toBe(visibleVersion);
+      await journal.execute(
+        job,
+        async () => undefined,
+        () => ({ status: "failed", failed_steps: ["fixture"] }),
+      );
+      expect(shown()).toBe(expected);
+      expect(version()).toBe(visibleVersion);
+    }
+    // Only a settled, current, reinstallable observation of this binding counts.
+    for (const hide of [
+      () => observe(null),
+      () => observe(stale, fingerprint, "failed"),
+      () => observe("附件助手检查未完成"),
+      () => observe(stale, "rebound"),
+      () =>
+        observe(stale, fingerprint, "passed", {
+          ...registration,
+          arch: "arm64",
+        }),
+    ]) {
+      hide();
+      expect(shown()).toBeUndefined();
+      observe(stale);
+      expect(shown()).toBe(expected);
+    }
     // Enrolled: the signed upgrade owns this release's first attempt.
     await writeFile(join(root, "upgrade-6-worker-example.key"), "fixture", {
       mode: 0o600,
     });
     expect(host.upgradeCommand?.("example", registration)).toBeUndefined();
-    expect(host.toolsCommand?.("example", registration)).toBeUndefined();
-    const attempt = (state: string) =>
+    expect(shown()).toBeUndefined();
+    const attempt = (
+      state: string,
+      key = upgradeKey(fingerprint),
+      pending: string | null = null,
+    ) =>
       store.database
         .prepare(
-          "INSERT INTO worker_helper_upgrades(project_id,machine_id,release_key,state) VALUES ('example','worker',?,?) ON CONFLICT(project_id,machine_id) DO UPDATE SET release_key=excluded.release_key,state=excluded.state",
+          "INSERT INTO worker_helper_upgrades(project_id,machine_id,release_key,state,pending_final) VALUES ('example','worker',?,?,?) ON CONFLICT(project_id,machine_id) DO UPDATE SET release_key=excluded.release_key,state=excluded.state,pending_final=excluded.pending_final",
         )
-        .run(upgradeKey(fingerprint), state);
-    // Attempted (v1 fallback or failed tools recheck): the migration command is valid.
-    attempt("verified");
-    expect(host.toolsCommand?.("example", registration)).toBe(unenrolled);
-    // Recovering from a failed upgrade: follow that notice instead.
+        .run(key, state, pending);
+    // The signed attempt is running or awaiting its recheck: dispatch is paused,
+    // but an administrator must not write the same files now.
+    attempt("installing");
+    expect(shown()).toBeUndefined();
+    attempt("installing", upgradeKey(fingerprint), "{}");
+    expect(shown()).toBeUndefined();
+    // Held: follow the upgrade notice instead.
     attempt("failed");
-    expect(host.toolsCommand?.("example", registration)).toBeUndefined();
+    expect(shown()).toBeUndefined();
+    attempt("worker_checked");
+    expect(shown()).toBeUndefined();
+    // Another release's attempt is no evidence for this one.
+    attempt("verified", upgradeKey("other"));
+    expect(shown()).toBeUndefined();
+    // This release's attempt settled and its recheck still finds the tools stale.
+    attempt("verified");
+    expect(shown()).toBe(expected);
+    observe(null);
+    expect(shown()).toBeUndefined();
+    observe(stale);
+    expect(shown()).toBe(expected);
     expect(host.toolsCommand?.("other", registration)).toBeUndefined();
   } finally {
     store.close();

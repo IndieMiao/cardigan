@@ -3,7 +3,7 @@ export {
   type AgentGitRunner,
   AgentGitTransport,
 } from "./agent-git.js";
-export { agentToolsRoute } from "./agent-tools-maintenance.js";
+export { agentToolsCommandVisible } from "./agent-tools-maintenance.js";
 export {
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
   MAX_IDLE_ROLE_UPGRADES,
