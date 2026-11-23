@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 import type { Machine } from "@cardigan/domain";
 import {
+  agentToolsCommandVisible,
   type CheckKind,
   type CheckResult,
   loadRuntimeWorkers,
@@ -46,6 +47,13 @@ export interface MachineHost {
     purpose?: "manual-upgrade",
   ): string | undefined;
   upgradeCommand?(project: string, machine: Machine): string | undefined;
+  /**
+   * C-599: the attachment tools command an administrator may run now. Unlike
+   * the helper command this includes enrolled bindings whose signed attempt
+   * for the current release left the tools stale (v1 entry, failed recheck),
+   * but only once that attempt and every check of the machine have settled.
+   */
+  toolsCommand?(project: string, machine: Machine): string | undefined;
   bindings(): (project: string, machine: string) => BindingSummary | null;
   workerRecord(
     project: string,
@@ -112,6 +120,26 @@ export function machineHost(
         { ...worker.execution, target: runtimeTargetBinding(worker) },
         machine.os,
       ).terminal.command;
+    },
+    toolsCommand(project, machine) {
+      const worker = boundWorker(project, machine);
+      if (worker?.execution.mode !== "agent-ssh") return undefined;
+      const target = runtimeTargetBinding(worker);
+      // Never while a check or signed attempt may still write these files.
+      if (
+        !agentToolsCommandVisible(
+          store,
+          project,
+          machine.id,
+          machine,
+          target.fingerprint,
+          env,
+        )
+      )
+        return undefined;
+      // Same derivation as the staged notice; never stage on read.
+      return upgradeMaterials({ ...worker.execution, target }, machine.os)
+        .terminal.command;
     },
     bindings() {
       const workers = loadRuntimeWorkers(dataDir, file);
@@ -206,6 +234,8 @@ export function machineHost(
           status: result.health.status === "passed" ? "passed" : "failed",
           failed_steps: result.health.blockers,
           ...(result.maintenance ? { maintenance: result.maintenance } : {}),
+          // C-599: a CLI check that joins this one reads the same tools outcome.
+          ...(result.agent_tools ? { agent_tools: result.agent_tools } : {}),
         };
       }
 

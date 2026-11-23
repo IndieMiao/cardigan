@@ -59,6 +59,8 @@ export function upgradePrincipal(project: string, identity: string) {
         entry: "/opt/cardigan-helper-upgrade/upgrade",
       };
 }
+/** Nothing reached the worker: the local release or signing material was refused. */
+export const WORKER_UPGRADE_NOT_SENT = "worker_upgrade_not_sent";
 /** v2 entries (enrolled since C-595) also install the agent tools; v1 entries refuse them. */
 export type HelperProtocol = "v1" | "v2";
 const toolEntries = AGENT_TOOLS.map((name) => `agent-tools/${name}` as const);
@@ -145,22 +147,29 @@ async function sendRelease(
   signal?: AbortSignal,
 ) {
   const { user, entry } = upgradePrincipal(project, identity);
-  const command = await agentProcessCommand(
-    {
-      ...worker,
-      user,
-      identityFile: identity,
-      path: "/usr/bin:/bin",
-    },
-    ["/usr/bin/sudo", "-n", "--", entry],
-  );
-  const bundle = await signedHelperBundle(
-    worker,
-    project,
-    identity,
-    signal,
-    protocol,
-  );
+  let command: Awaited<ReturnType<typeof agentProcessCommand>>;
+  let bundle: Awaited<ReturnType<typeof signedHelperBundle>>;
+  try {
+    command = await agentProcessCommand(
+      {
+        ...worker,
+        user,
+        identityFile: identity,
+        path: "/usr/bin:/bin",
+      },
+      ["/usr/bin/sudo", "-n", "--", entry],
+    );
+    bundle = await signedHelperBundle(
+      worker,
+      project,
+      identity,
+      signal,
+      protocol,
+    );
+  } catch {
+    // C-599: prepared locally and refused before any connection to the worker.
+    throw new Error(WORKER_UPGRADE_NOT_SENT);
+  }
   const result = await new Promise<string>((resolve, reject) => {
     const ssh = execFile(
       "/usr/bin/ssh",
@@ -196,12 +205,20 @@ async function sendRelease(
     )
   )
     return invalid();
-  return Object.fromEntries(helpers.map((n) => [n, String(old[n])]));
+  // Tool entries are present only when a v2 entry installed them ("none": first install).
+  return Object.fromEntries([
+    ...helpers.map((n) => [n, String(old[n])]),
+    ...tools.map((n) => [n, old[n] === null ? "none" : String(old[n])]),
+  ]) as Record<string, string>;
 }
+/** C-599: true only when the release went through a v2 entry, which installs the tools. */
+export const installedAgentTools = (before: Record<string, string>) =>
+  toolEntries.every((n) => typeof before[n] === "string");
 /**
  * Entries enrolled before C-595 refuse a v2 bundle while verifying it, before
  * any write or replay record, so only then retry the unchanged v1 bundle.
- * Their helpers stay current; machine check reports the tools they cannot take.
+ * Their helpers stay current; the result then lacks the tool entries and the
+ * machine is reported as needing an administrator migration (C-599).
  */
 export async function installRelease(
   worker: Worker,
@@ -219,6 +236,17 @@ export async function installRelease(
     )
       throw error;
     signal?.throwIfAborted();
-    return await send(worker, project, identity, "v1", signal);
+    try {
+      return await send(worker, project, identity, "v1", signal);
+    } catch (fallback) {
+      // C-599: v2 already reached the worker; a v1 refused locally does not
+      // make the whole attempt "not sent".
+      if (
+        fallback instanceof Error &&
+        fallback.message === WORKER_UPGRADE_NOT_SENT
+      )
+        throw new Error("worker_upgrade_install_failed");
+      throw fallback;
+    }
   }
 }

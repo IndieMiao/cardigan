@@ -1,6 +1,8 @@
 """Synthetic filesystem and mocked ownership/installer only; never run sudo or touch a real worker."""
 from pathlib import Path
 import hashlib
+import io
+import os
 import runpy
 import tarfile
 import tempfile
@@ -45,7 +47,9 @@ class UpgradeTest(unittest.TestCase):
         owner = self.root.stat()
         # Root ownership of the tools directory is covered by test_tool_directory_requires_root.
         m = mock.patch.dict(upgrade.__globals__, DEPLOY_OWNER=(owner.st_uid, owner.st_gid),
-                            tool_directory=lambda lib, gid: (lib / 'agent-tools').mkdir(exist_ok=True))
+                            tool_directory=lambda lib, gid: (lib / 'agent-tools').mkdir(exist_ok=True),
+                            migrate_bootstrap=lambda release, project: self.migrated.append(project))
+        self.migrated = []
         m.start(); self.addCleanup(m.stop)
         self.calls = []
         for command in ('os.chown', 'os.fchown'):
@@ -74,8 +78,78 @@ class UpgradeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unsafe_agent_tools_directory'):
             module['tool_directory'](self.lib, 123)
 
+    def test_enrolled_v1_entry_is_migrated_to_the_verified_release(self):
+        boot = self.root / 'cardigan-helper-upgrade'
+        tagged = boot.with_name(boot.name + '-' + hashlib.sha256(b'sample').hexdigest()[:20])
+        files = module['BOOTSTRAP_FILES']
+        for d, project in ((boot, 'other'), (tagged, 'sample')):
+            d.mkdir(mode=0o700)
+            (d / 'project').write_text(project + '\n')
+            for n in files:
+                (d / n).write_text('v1-' + n)
+                (self.release / n).write_text('v2-' + n)
+        real, real_fstat = Path.lstat, os.fstat
+        def root_owned(s):
+            return os.stat_result((s.st_mode, s.st_ino, s.st_dev, s.st_nlink, 0, 0, *tuple(s)[6:]))
+        with mock.patch.object(Path, 'lstat', lambda path: root_owned(real(path))), \
+                mock.patch('os.fstat', lambda fd: root_owned(real_fstat(fd))):
+            module['migrate_bootstrap'](self.release, 'sample', boot)
+            for n in files:
+                self.assertEqual((tagged / n).read_text(), 'v2-' + n)
+                self.assertEqual((tagged / n).stat().st_mode & 0o777, 0o400)
+                self.assertEqual((boot / n).read_text(), 'v1-' + n)  # Another project's entry.
+            # C-599: a tagged entry naming another project is never rewritten.
+            (tagged / 'project').write_text('other\n')
+            for n in files:
+                (tagged / n).chmod(0o600)
+                (tagged / n).write_text('v1-' + n)
+            out = io.StringIO()
+            with mock.patch('sys.stdout', out), \
+                    self.assertRaisesRegex(ValueError, 'helper_upgrade_entry_project_mismatch'):
+                module['migrate_bootstrap'](self.release, 'sample', boot)
+            self.assertEqual([(tagged / n).read_text() for n in files], ['v1-' + n for n in files])
+            self.assertNotIn('迁移', out.getvalue())
+            # The project file is never followed through a link.
+            (tagged / 'project').unlink()
+            (tagged / 'project').symlink_to(boot / 'project')
+            with self.assertRaises(OSError):
+                module['migrate_bootstrap'](self.release, 'sample', boot)
+            (tagged / 'project').unlink()
+            (tagged / 'project').write_text('sample\n')
+            tagged.chmod(0o755)
+            with self.assertRaisesRegex(ValueError, 'unsafe_helper_upgrade_entry'):
+                module['migrate_bootstrap'](self.release, 'sample', boot)
+
+    def test_conflicting_project_entry_fails_the_whole_upgrade(self):
+        # C-599: this project's own entry naming another project is not a skip.
+        entries = Path(tempfile.mkdtemp(dir=self.root))
+        boot = entries / 'cardigan-helper-upgrade'
+        tagged = boot.with_name(boot.name + '-' + hashlib.sha256(b'sample').hexdigest()[:20])
+        tagged.mkdir(mode=0o700)
+        (tagged / 'project').write_text('other\n')
+        for n in module['BOOTSTRAP_FILES']:
+            (tagged / n).write_text('v1-' + n)
+        real, real_fstat = Path.lstat, os.fstat
+        def root_owned(s):
+            return os.stat_result((s.st_mode, s.st_ino, s.st_dev, s.st_nlink, 0, 0, *tuple(s)[6:]))
+        def entry_lstat(path):
+            s = real(path)
+            return root_owned(s) if entries in path.parents else s
+        out = io.StringIO()
+        with mock.patch.dict(upgrade.__globals__, migrate_bootstrap=lambda release, project:
+                             module['migrate_bootstrap'](release, project, boot)), \
+                mock.patch.object(Path, 'lstat', entry_lstat), \
+                mock.patch('os.fstat', lambda fd: root_owned(real_fstat(fd))), \
+                mock.patch('sys.stdout', out), \
+                self.assertRaisesRegex(ValueError, 'helper_upgrade_entry_project_mismatch'):
+            self.run_upgrade('linux')
+        self.assertNotIn('升级完成', out.getvalue())
+        self.assertEqual([(tagged / n).read_text() for n in module['BOOTSTRAP_FILES']],
+                         ['v1-' + n for n in module['BOOTSTRAP_FILES']])
+
     def test_linux(self):
         self.run_upgrade('linux')
+        self.assertEqual(self.migrated, ['sample'])
         for n in tools:
             self.assertEqual(digest(self.lib / n), self.cfg['manifest'][n])
             self.assertEqual((self.lib / n).stat().st_mode & 0o777, 0o750)
