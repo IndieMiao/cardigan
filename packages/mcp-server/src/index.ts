@@ -59,6 +59,25 @@ export {
   memoryLogger,
   stdoutLogger,
 } from "./log.js";
+// C-614: off-site copy of attachments and artifacts in a private OSS bucket.
+export {
+  artifactKey,
+  attachmentKey,
+  Offsite,
+  type OffsiteAlert,
+  type OffsiteOptions,
+  type OffsiteStatusView,
+  offsiteFor,
+  offsiteTarget,
+  registerOffsite,
+  type SignedLink,
+} from "./offsite/offsite.js";
+export { OssClient, OssError, type OssTransport } from "./offsite/oss.js";
+export {
+  type SyncedLedger,
+  type SyncStatus,
+  writeSyncStatus,
+} from "./offsite/state.js";
 export { type RecordReadTiming, timeRead } from "./read-timing.js";
 export {
   defaultToolCatalog,

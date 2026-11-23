@@ -4,8 +4,10 @@ import { link, mkdir, open, rm, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { type AttachmentStore, prepareAttachment } from "@cardigan/domain";
 import { ToolError } from "./errors.js";
+import { MAX_ATTACHMENT_BYTES } from "./limits.js";
+import { offsiteFor } from "./offsite/offsite.js";
 
-export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+export { MAX_ATTACHMENT_BYTES };
 export const MAX_ATTACHMENT_BASE64 = 4 * Math.ceil(MAX_ATTACHMENT_BYTES / 3);
 // Leave room for the JSON-RPC envelope while keeping the HTTP body bounded.
 export const MAX_MCP_BODY_BYTES = MAX_ATTACHMENT_BASE64 + 1024 * 1024;
@@ -81,7 +83,7 @@ export function fileAttachmentStore(
       throw ToolError.validation("Invalid attachment sha256");
     return join(directory, digest);
   };
-  const get = async (digest: string) => {
+  const local = async (digest: string) => {
     const target = path(digest);
     try {
       // Never follow a blob symlink or block while opening a special file.
@@ -127,7 +129,24 @@ export function fileAttachmentStore(
       throw ToolError.validation("Stored attachment could not be read");
     }
   };
-  return {
+  /**
+   * C-614: local first. A blob missing here is fetched from the verified
+   * off-site copy, checked against its digest and cached locally; an absent
+   * or failing OSS leaves the result exactly as before (missing).
+   */
+  const get = async (digest: string) => {
+    const found = await local(digest);
+    if (found !== undefined) return found;
+    const remote = await offsiteFor(dataDir)?.fetchAttachment(
+      digest,
+      MAX_ATTACHMENT_BYTES,
+    );
+    if (remote === undefined || sha256(remote) !== digest) return undefined;
+    // A full disk costs only the cache; the verified bytes are still served.
+    await store.put(digest, remote).catch(() => undefined);
+    return remote;
+  };
+  const store: AttachmentStore = {
     get,
     async put(digest, content) {
       const target = path(digest);
@@ -148,7 +167,8 @@ export function fileAttachmentStore(
             break;
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-            if (!(await get(digest))) throw new Error("Attachment disappeared");
+            if (!(await local(digest)))
+              throw new Error("Attachment disappeared");
             // Reusing an existing blob refreshes its modification time, so the
             // sweep's 24 hour grace period covers the record this upload is
             // about to write (§9.3). Without it an old rejected blob could be
@@ -171,4 +191,5 @@ export function fileAttachmentStore(
       return { storage_path: `attachments/${digest}` };
     },
   };
+  return store;
 }
