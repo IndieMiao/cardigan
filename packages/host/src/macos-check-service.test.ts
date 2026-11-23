@@ -23,6 +23,8 @@ import {
 } from "./macos-check-service.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 
+// Each case opens its own SQLite store; several cases build more than one.
+vi.setConfig({ testTimeout: 20_000 });
 const roots: string[] = [],
   stores: Store[] = [];
 afterEach(() => {
@@ -651,4 +653,95 @@ test("only a report naming the candidate commit and tree and covering every requ
     await x.service.tick();
     expect(x.jobs()[0]?.status).toBe("failed");
   }
+});
+
+test("a delegation revoked while the push waits for the repository lock stops the POST; the pushed branch is removed", async () => {
+  const x = setup();
+  x.client.repository.mockResolvedValue({ private: true });
+  delegate(x.store, true);
+  let release = () => {};
+  x.options.push.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        release = () => resolve({ status: "pushed" as const });
+      }),
+  );
+  await x.request("k1");
+  const ticking = x.service.tick();
+  await vi.waitFor(() => expect(x.options.push).toHaveBeenCalledTimes(1));
+  delegate(x.store, false);
+  release();
+  await ticking;
+  expect(x.client.dispatch).not.toHaveBeenCalled();
+  expect(x.jobs()[0]).toMatchObject({
+    status: "not_run",
+    cleanup: "complete",
+    reported: true,
+    reason: expect.stringContaining("未开启花钱类常驻授权"),
+  });
+  expect(x.options.remove).toHaveBeenCalledTimes(1);
+  // The reservation is released: the next request runs once allowed again.
+  delegate(x.store, true);
+  await x.request("k2", [FILES[0] as string]);
+  await x.service.tick();
+  expect(x.client.dispatch).toHaveBeenCalledTimes(1);
+  expect(x.store.uow.read((tx) => tx.human_actions.list(project_id))).toEqual(
+    [],
+  );
+});
+
+test("a late-found original run that already finished is settled without a cancel loop; the next request dispatches", async () => {
+  const x = setup({ [project_id]: { timeout_ms: 600_000, max_concurrent: 1 } });
+  let posted: Record<string, string> | undefined;
+  x.client.dispatch.mockImplementationOnce(async (_ref, inputs) => {
+    posted = inputs;
+    throw new Error("HTTP 502");
+  });
+  x.client.runs.mockResolvedValue([]);
+  await x.request("k1");
+  await x.service.tick();
+  x.advance(600_000);
+  await x.service.tick();
+  expect(x.jobs()[0]?.status).toBe("timed_out");
+  const original = (await x.client.run()) as GithubRun;
+  const late = {
+    ...original,
+    id: 777,
+    display_title: githubCheckRunName(posted ?? {}),
+    html_url: "https://github.com/fixture/project/actions/runs/777",
+    status: "completed",
+    conclusion: "success",
+  };
+  x.client.runs.mockResolvedValue([late]);
+  x.client.run.mockResolvedValue(late);
+  x.client.cancel.mockRejectedValue(new Error("HTTP 409"));
+  await x.request("k2", [FILES[0] as string]);
+  for (let i = 0; i < 5 && x.client.dispatch.mock.calls.length < 2; i++) {
+    x.advance(30_000);
+    await x.service.tick();
+  }
+  expect(x.client.cancel).not.toHaveBeenCalled();
+  expect(x.jobs()[0]).toMatchObject({
+    status: "timed_out",
+    cleanup: "complete",
+  });
+  expect(x.client.dispatch).toHaveBeenCalledTimes(2);
+  expect(x.jobs()[1]?.status).toBe("running");
+
+  // A cancel racing completion: the 409 is accepted once the run reads completed.
+  const y = setup({ [project_id]: { timeout_ms: 600_000 } });
+  await y.request("k1");
+  await y.service.tick();
+  y.client.cancel.mockImplementationOnce(async () => {
+    y.finish("cancelled");
+    throw new Error("HTTP 409");
+  });
+  y.advance(600_000);
+  await y.service.tick();
+  await y.service.tick();
+  expect(y.client.cancel).toHaveBeenCalledTimes(1);
+  expect(y.jobs()[0]).toMatchObject({
+    status: "timed_out",
+    cleanup: "complete",
+  });
 });

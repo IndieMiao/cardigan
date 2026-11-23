@@ -115,6 +115,18 @@ const PRIVATE_NOT_RUN =
 const sameFileSet = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length &&
   [...a].sort().join("\n") === [...b].sort().join("\n");
+/** Cancel a run unless it already finished; a cancel racing completion is not an error. */
+async function cancelUnlessDone(
+  client: Pick<Client, "run" | "cancel">,
+  id: number,
+) {
+  if ((await client.run(id)).status === "completed") return;
+  try {
+    await client.cancel(id);
+  } catch (error) {
+    if ((await client.run(id)).status !== "completed") throw error;
+  }
+}
 /** Evidence read from the run failed; retry the same run, never redispatch. */
 class EvidenceUnavailable extends Error {
   steps?: MacosStepTiming[];
@@ -528,30 +540,43 @@ export class MacosCheckService {
           cleanup: "held",
         };
       };
-      let gate: "denied" | undefined;
+      let gate: "before_push" | "after_push" | undefined;
+      // Billing is decided right before the candidate is published and again
+      // after the push (which may wait for the repository lock), before POST.
+      const allowed = async () => {
+        const billing = await this.billing(job, client);
+        if (billing && billing !== job.billing)
+          job = this.checkpoint({ ...job, billing });
+        return !!billing;
+      };
       let session: Awaited<ReturnType<typeof this.session>>;
       try {
         session = await this.session(job, config, client, journal, ref, {
-          // Billing is decided again right before the candidate is published.
           beforePublish: async () => {
-            const billing = await this.billing(job, client);
-            if (!billing) gate = "denied";
-            else if (billing !== job.billing)
-              job = this.checkpoint({ ...job, billing });
-            return !!billing;
+            if (await allowed()) return true;
+            gate = "before_push";
+            return false;
+          },
+          beforeDispatch: async () => {
+            if (await allowed()) return true;
+            gate = "after_push";
+            return false;
           },
         });
       } catch (error) {
-        if (gate === "denied") {
+        if (gate) {
           const current = intentOf();
           if (current && !current.finished)
             journal.finishUnpublishedProbe(current);
-          return {
+          const denied = {
             ...job,
-            status: "not_run",
-            cleanup: "complete",
+            status: "not_run" as const,
             reason: PRIVATE_NOT_RUN,
           };
+          // A pushed candidate branch is removed by the cleanup below.
+          if (gate === "before_push") return { ...denied, cleanup: "complete" };
+          job = this.checkpoint({ ...denied, cleanup: "pending" });
+          return this.advance(job);
         }
         if (stop) return abandon();
         throw error;
@@ -626,11 +651,15 @@ export class MacosCheckService {
     client: Client,
     journal: GithubDispatchJournal,
     ref: string,
-    gate: { beforePublish?: () => Promise<boolean> } = {},
+    gate: {
+      beforePublish?: () => Promise<boolean>;
+      beforeDispatch?: () => Promise<boolean>;
+    } = {},
   ) {
     const existing = this.sessions.get(job.id);
     if (existing) return existing;
     let bound: { finish?: () => void; run?: ExternalGithubRun } = {};
+    const publication = new AbortController();
     const lifecycle: GithubCheckLifecycle = {
       register: (run, _request, _identity, onTerminal) => {
         bound = { run, ...(onTerminal ? { finish: onTerminal } : {}) };
@@ -639,7 +668,7 @@ export class MacosCheckService {
         throw new Error("macOS checks poll through the service");
       },
       // Only a run the executor validated as this request's own reaches here.
-      cancel: async (run) => client.cancel(run.run_id),
+      cancel: async (run) => cancelUnlessDone(client, run.run_id),
       fetchFailureLog: async () => {},
     };
     const executor = new GithubCheckExecutor({
@@ -657,7 +686,15 @@ export class MacosCheckService {
           throw new Error("macOS check scope rejected");
         if (gate.beforePublish && !(await gate.beforePublish()))
           return { status: "not_started" };
-        return this.options.push(job.project_id, input);
+        const pushed = await this.options.push(job.project_id, input);
+        // Aborting after a push settles it as cancelled: no POST follows.
+        if (
+          pushed.status === "pushed" &&
+          gate.beforeDispatch &&
+          !(await gate.beforeDispatch())
+        )
+          publication.abort();
+        return pushed;
       },
       isBaselineAncestor: (sha, branch) =>
         this.options.isBaselineAncestor(job.project_id, sha, branch),
@@ -665,6 +702,7 @@ export class MacosCheckService {
     });
     try {
       const request = {
+        signal: publication.signal,
         project: job.project_id,
         attempt: job.id,
         kind: "precheck" as const,
@@ -774,7 +812,7 @@ export class MacosCheckService {
         ? { ...owned.identity, display_title: observed.display_title }
         : owned.identity;
     if (sameGithubRun(observed as GithubRun, expected))
-      await client.cancel(current.id);
+      await cancelUnlessDone(client, current.id);
   }
   private async result(
     job: MacosCheckJob,
