@@ -16,6 +16,7 @@ import type {
   ProjectId,
   ReadMachinePlacement,
   Result,
+  RunId,
   TimelineEntry,
   ToolName,
   TransactionContext,
@@ -241,6 +242,15 @@ type PlacementReader = (
   ...args: Parameters<ReadMachinePlacement>
 ) => ReturnType<ReadMachinePlacement>;
 
+/** C-635: an MCP activity time waiting to ride along with a write. */
+export interface DeferredActivity {
+  readonly project_id: ProjectId;
+  readonly assignment_id: AssignmentId;
+  readonly at: string;
+  /** C-600: the request's Token; another launch's Token is not activity. */
+  readonly token_id?: string;
+}
+
 export class Store {
   readonly #db: DatabaseSync;
   #observer: StoreObserver | undefined;
@@ -262,6 +272,8 @@ export class Store {
   }
   #snapshots: CommandSnapshots | undefined;
   readonly #commandEvents = new CommandEvents();
+  /** C-635: deferred MCP activity, keyed by project, Assignment and Token. */
+  readonly #deferredActivity = new Map<string, DeferredActivity>();
 
   /** Call inside the consuming transaction: covers local writes and other connections. */
   snapshotVersion(project: ProjectId): string | undefined {
@@ -584,7 +596,12 @@ export class Store {
         },
       };
       const result = operation(tx);
+      // C-635: deferred MCP activity rides along with this write.
+      const settled = this.#applyDeferredActivity();
       this.#db.exec("COMMIT");
+      for (const [key, entry] of settled)
+        if (this.#deferredActivity.get(key) === entry)
+          this.#deferredActivity.delete(key);
       events.commit();
       snapshots?.commit();
       return result;
@@ -1151,6 +1168,53 @@ export class Store {
     key_sha256?: string,
     token_id?: string,
   ): Assignment["mcp_handshake"] {
+    return this.#advanceMcpHandshake(
+      project_id,
+      assignment_id,
+      observed,
+      key_sha256,
+      token_id,
+      true,
+    ).state;
+  }
+
+  /**
+   * C-635: `advanceMcpHandshake` for the tool-call hot path. It never waits
+   * for another process's write lock: when the transition must be written
+   * and the lock is busy, the state it would have written is returned with
+   * `persisted: false`, so the caller decides now and persists later.
+   */
+  tryAdvanceMcpHandshake(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    observed: "tools_listed" | "tool_called",
+    key_sha256?: string,
+    token_id?: string,
+  ): {
+    readonly state: Assignment["mcp_handshake"];
+    readonly persisted: boolean;
+  } {
+    return this.#advanceMcpHandshake(
+      project_id,
+      assignment_id,
+      observed,
+      key_sha256,
+      token_id,
+      false,
+    );
+  }
+
+  #advanceMcpHandshake(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    observed: "tools_listed" | "tool_called" | "deadline",
+    key_sha256: string | undefined,
+    token_id: string | undefined,
+    wait: boolean,
+  ): {
+    readonly state: Assignment["mcp_handshake"];
+    readonly persisted: boolean;
+  } {
     const read = () => {
       const row = this.#db
         .prepare("SELECT doc FROM assignments WHERE project_id = ? AND id = ?")
@@ -1177,34 +1241,164 @@ export class Store {
       token_id !== a.mcp_session_token_id;
     // Every request passes here: only a changing pending session writes.
     const seen = read();
-    if (seen && foreign(seen)) return undefined;
+    if (seen && foreign(seen)) return { state: undefined, persisted: true };
     if (
       seen?.status !== "active" ||
       seen.mcp_handshake !== "pending" ||
       next(seen) === "pending"
     )
-      return seen?.mcp_handshake;
-    return this.#run(() => {
-      const assignment = read();
-      if (assignment === undefined || foreign(assignment)) return undefined;
-      if (
-        assignment.status !== "active" ||
-        assignment.mcp_handshake !== "pending"
-      )
-        return assignment.mcp_handshake;
-      const mcp_handshake = next(assignment);
-      if (mcp_handshake === "pending") return mcp_handshake;
+      return { state: seen?.mcp_handshake, persisted: true };
+    const write = () =>
+      this.#timed("run", () =>
+        this.#run(() => {
+          const assignment = read();
+          if (assignment === undefined || foreign(assignment)) return undefined;
+          if (
+            assignment.status !== "active" ||
+            assignment.mcp_handshake !== "pending"
+          )
+            return assignment.mcp_handshake;
+          const mcp_handshake = next(assignment);
+          if (mcp_handshake === "pending") return mcp_handshake;
+          this.#db
+            .prepare(
+              "UPDATE assignments SET doc = ? WHERE project_id = ? AND id = ?",
+            )
+            .run(
+              JSON.stringify({
+                ...assignment,
+                mcp_handshake,
+              } satisfies Assignment),
+              project_id,
+              assignment_id,
+            );
+          return mcp_handshake;
+        }),
+      );
+    if (wait) return { state: write(), persisted: true };
+    const attempt = this.withoutLockWait(write);
+    return attempt.busy
+      ? { state: next(seen), persisted: false }
+      : { state: attempt.value, persisted: true };
+  }
+
+  /**
+   * C-635: run `operation` (typically one write) without waiting for another
+   * process's write lock: SQLite's busy timeout is 0 for its duration, and a
+   * busy database yields `{ busy: true }` instead of freezing this process's
+   * event loop. The operation's own transaction is rolled back as usual.
+   */
+  withoutLockWait<T>(
+    operation: () => T,
+  ): { readonly busy: false; readonly value: T } | { readonly busy: true } {
+    if (this.#inTransaction)
+      throw new Error("nested UnitOfWork is not supported");
+    const db = this.#db;
+    const timeout = Number(
+      (db.prepare("PRAGMA busy_timeout").get() as { timeout: number }).timeout,
+    );
+    db.exec("PRAGMA busy_timeout = 0");
+    try {
+      return { busy: false, value: operation() };
+    } catch (error) {
+      if (isSqliteBusy(error)) return { busy: true };
+      throw error;
+    } finally {
+      db.exec(`PRAGMA busy_timeout = ${timeout}`);
+    }
+  }
+
+  /**
+   * C-635: defer an MCP activity time instead of writing it now. Deferred
+   * times ride along with the next write transaction of this Store (any
+   * command, cursor or idempotent write), or with `flushDeferredActivity`.
+   * Each one obeys `touchAssignmentActivity`'s rules when it is applied
+   * (active Assignment, the session's own Token), checked in that write, and
+   * never moves the recorded time backwards.
+   */
+  deferAssignmentActivity(entry: DeferredActivity): void {
+    const key = JSON.stringify([
+      entry.project_id,
+      entry.assignment_id,
+      entry.token_id ?? null,
+    ]);
+    const known = this.#deferredActivity.get(key);
+    if (!known || Date.parse(known.at) < Date.parse(entry.at))
+      this.#deferredActivity.set(key, entry);
+  }
+
+  /** C-635: activity times deferred and not yet written. */
+  deferredAssignmentActivity(): readonly DeferredActivity[] {
+    return [...this.#deferredActivity.values()];
+  }
+
+  /**
+   * C-635: write every deferred activity time in one transaction; nothing,
+   * not even a transaction, when none is deferred. Returns how many were
+   * settled (written or no longer applicable).
+   */
+  flushDeferredActivity(): number {
+    if (this.#deferredActivity.size === 0) return 0;
+    const before = this.#deferredActivity.size;
+    this.#timed("run", () => this.#run(() => undefined));
+    return before - this.#deferredActivity.size;
+  }
+
+  /** Inside a write transaction: apply deferred activity times. */
+  #applyDeferredActivity(): [string, DeferredActivity][] {
+    if (this.#deferredActivity.size === 0) return [];
+    const settled: [string, DeferredActivity][] = [];
+    const select = this.#db.prepare(
+      "SELECT doc FROM assignments WHERE project_id = ? AND id = ?",
+    );
+    const update = this.#db.prepare(
+      "UPDATE assignments SET doc = ?, last_mcp_activity_at = ? WHERE project_id = ? AND id = ?",
+    );
+    for (const [key, entry] of this.#deferredActivity) {
+      try {
+        const row = select.get(entry.project_id, entry.assignment_id) as
+          | { doc: string }
+          | undefined;
+        const assignment =
+          row === undefined ? undefined : (JSON.parse(row.doc) as Assignment);
+        const stored = Date.parse(assignment?.last_mcp_activity_at ?? "");
+        if (
+          assignment?.status === "active" &&
+          (entry.token_id === undefined ||
+            assignment.mcp_session_token_id === undefined ||
+            entry.token_id === assignment.mcp_session_token_id) &&
+          !(Number.isFinite(stored) && stored >= Date.parse(entry.at))
+        )
+          update.run(
+            JSON.stringify({
+              ...assignment,
+              last_mcp_activity_at: entry.at,
+            } satisfies Assignment),
+            entry.at,
+            entry.project_id,
+            entry.assignment_id,
+          );
+        settled.push([key, entry]);
+      } catch {
+        // Bookkeeping never fails the transaction it rides along with; the
+        // entry stays deferred for the next write.
+      }
+    }
+    return settled;
+  }
+
+  /** C-635: the Assignment's dispatched Runs, by index instead of a project-wide scan. */
+  dispatchedRunIds(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+  ): RunId[] {
+    return (
       this.#db
         .prepare(
-          "UPDATE assignments SET doc = ? WHERE project_id = ? AND id = ?",
+          "SELECT id FROM runs WHERE project_id = ? AND assignment_id = ? AND json_extract(doc, '$.status') = 'dispatched' ORDER BY rowid",
         )
-        .run(
-          JSON.stringify({ ...assignment, mcp_handshake } satisfies Assignment),
-          project_id,
-          assignment_id,
-        );
-      return mcp_handshake;
-    });
+        .all(project_id, assignment_id) as { id: RunId }[]
+    ).map((row) => row.id);
   }
 
   /**
