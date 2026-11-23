@@ -235,6 +235,8 @@ function satisfied(
           "timed_out",
           "interrupted",
           "executor_unreachable",
+          // A system environment failure is a finished attempt too (precheck.ts).
+          "environment_failed",
         ].includes(String(p.status))
         ? event.id
         : undefined;

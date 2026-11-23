@@ -398,39 +398,86 @@ test("platform project: a later rollback of the same SHA no longer counts", () =
   });
 });
 
-test("upstream precheck of another item: delivery waits for it to finish, then clears inline", async () => {
-  const upstream = { card_id: id("card", 2), work_item_id: id("work_item", 9) };
+const upstream = { card_id: id("card", 2), work_item_id: id("work_item", 9) };
+function upstreamCheck(type: string, status: string) {
   event(
-    "precheck_queued",
-    { ...upstream, attempt_id: "upstream", status: "queued" },
+    type,
+    { ...upstream, attempt_id: "upstream", status, head_sha: deployed },
     system,
     id("card", 2),
   );
+}
+
+test.each(["passed", "failed", "environment_failed"])(
+  "upstream precheck of another item ending %s: delivery waits for it to finish, then clears inline",
+  async (status) => {
+    upstreamCheck("precheck_queued", "queued");
+    block({ kind: "precheck_finished", target_id: "upstream" });
+    upstreamCheck("precheck_started", "running");
+    expectStillBlocked(await deliver(), "尚无系统记录证明已满足");
+    upstreamCheck("precheck_finished", status);
+    const effect = await delivered();
+    expect(
+      effect.events.find((e) => e.type === "blocker_wait_delivered")?.payload,
+    ).toMatchObject({
+      condition: { kind: "precheck_finished", target_id: "upstream" },
+    });
+    expect(item()?.status).toBe("delivered");
+  },
+);
+
+test.each(["passed", "failed", "environment_failed"])(
+  "upstream precheck of another item ending %s: the background resumes and notifies once",
+  (status) => {
+    upstreamCheck("precheck_queued", "queued");
+    block({ kind: "precheck_finished", target_id: "upstream" });
+    finish();
+    upstreamCheck("precheck_started", "running");
+    expect(scan().data).toEqual([]);
+    upstreamCheck("precheck_finished", status);
+    const effect = scan();
+    expect(effect.data).toEqual([work]);
+    expect(effect.events[0]).toMatchObject({
+      type: "work_item_resume_requested",
+      payload: {
+        condition: { kind: "precheck_finished", target_id: "upstream" },
+      },
+    });
+    expect(scan().events).toEqual([]);
+  },
+);
+
+test("merge gate on: after an upstream environment failure, delivery needs and then accepts its own passed precheck", async () => {
+  state = {
+    ...state,
+    cards: state.cards.map((c) => ({ ...c, flow_version: 3 })),
+    project_settings: { merge_gate_enabled: true },
+  };
+  upstreamCheck("precheck_queued", "queued");
   block({ kind: "precheck_finished", target_id: "upstream" });
-  event(
-    "precheck_started",
-    { ...upstream, attempt_id: "upstream", status: "running" },
-    system,
-    id("card", 2),
-  );
-  expectStillBlocked(await deliver(), "尚无系统记录证明已满足");
+  upstreamCheck("precheck_finished", "environment_failed");
+  const prepared = await prepareDelivery(state, actor(), params, {
+    verify: async () => ({ ok: true, value: [] }),
+  });
+  expect(prepared.ok).toBe(false);
+  expect(item()?.status).toBe("blocked");
+  // Once the delivery's own precheck passes, the same blocked item delivers inline.
   event(
     "precheck_finished",
     {
-      ...upstream,
-      attempt_id: "upstream",
+      attempt_id: "own-pass",
+      head_sha: subject.value,
+      base_sha: "d".repeat(40),
+      tree_sha: "e".repeat(40),
       status: "passed",
-      head_sha: deployed,
     },
     system,
-    id("card", 2),
+    id("card", 1),
   );
   const effect = await delivered();
-  expect(
-    effect.events.find((e) => e.type === "blocker_wait_delivered")?.payload,
-  ).toMatchObject({
-    condition: { kind: "precheck_finished", target_id: "upstream" },
-  });
+  expect(effect.events.map((e) => e.type)).toEqual(
+    expect.arrayContaining(["blocker_wait_delivered", "delivery_submitted"]),
+  );
   expect(item()?.status).toBe("delivered");
 });
 
