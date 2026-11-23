@@ -108,10 +108,19 @@ test.skipIf(!available || process.platform !== "linux").each([false, true])(
       }
       // A system-ended stop also asks the kernel whether the probed leader
       // and its whole group are gone; plain idle retirement does not.
+      // C-626: the system-turn stop also reports its owner-bound TERM.
       expect(result).toEqual({
         ok: true,
         value: cold
-          ? { outcome: "exited", process_group_exited: true }
+          ? {
+              outcome: "exited",
+              process_group_exited: true,
+              stop: {
+                path: "linux_pidfd",
+                signal: "TERM",
+                pid: expect.any(Number),
+              },
+            }
           : { outcome: "exited" },
       });
       expect((await inspect()).state).toBe("finished");
