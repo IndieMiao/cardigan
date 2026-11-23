@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { request } from "node:http";
+import { createServer as createHttpServer, request } from "node:http";
 import { createServer, type Server } from "node:https";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startMcpServer } from "@cardigan/mcp-server";
+import { MCP_BRIDGE_PROBE_ARGS, MCP_BRIDGE_SOURCE } from "@cardigan/roles";
 import {
   agentProcessCommand,
   type ExecutionConfig,
@@ -27,6 +28,10 @@ vi.mock("@cardigan/runtime-herdr", async (original) => ({
 let root: string, server: Server, endpoint: string;
 let proxyTarget: string | undefined, observedHost: string | undefined;
 let authorization: string | undefined, challenge: string | undefined;
+/** C-600: proxy URL put in every proxy setting the probe could read. */
+let proxyEnvironment: string | undefined;
+/** C-600: where the Card address resolves instead of the fixture server. */
+let directPort: number | undefined;
 let status: number,
   body: unknown,
   requests: number,
@@ -135,16 +140,25 @@ beforeEach(() => {
   observedHost = undefined;
   authorization = `Bearer ${credential}`;
   challenge = undefined;
+  proxyEnvironment = undefined;
+  directPort = undefined;
   vi.mocked(agentProcessCommand)
     .mockReset()
     .mockImplementation(async (_config, args) => {
-      expect(args.slice(0, 4)).toEqual(["python3", "-I", "-B", "-c"]);
+      // C-600: the probe is the Codex Card bridge's own source.
+      expect(args).toEqual(["python3", ...MCP_BRIDGE_PROBE_ARGS]);
+      expect(args[4]).toBe(MCP_BRIDGE_SOURCE);
       expect(args.join(" ")).not.toContain(credential);
       expect(args.join(" ")).not.toContain(endpoint);
       // The SSH seam runs the actual worker program locally against a fixture TLS
       // server. Only this test adds its CA and synthetic DNS mapping.
-      const prefix = `import os, socket\nos.environ.pop("SSL_CERT_FILE", None)\n${trusted ? `os.environ["SSL_CERT_FILE"] = ${JSON.stringify(join(root, "cert.pem"))}\n` : ""}lookup = socket.getaddrinfo\nsocket.getaddrinfo = lambda host, port, *a, **kw: lookup("127.0.0.1", ${(server.address() as AddressInfo).port}, *a, **kw)\n`;
-      return { file: "python3", args: ["-I", "-B", "-c", prefix + args[4]] };
+      // C-600: a proxy environment may add every proxy variable and a macOS
+      // system proxy (`_scproxy`) whose exception list omits the tailnet.
+      const prefix = `import os, socket\nos.environ.pop("SSL_CERT_FILE", None)\n${trusted ? `os.environ["SSL_CERT_FILE"] = ${JSON.stringify(join(root, "cert.pem"))}\n` : ""}${proxyEnvironment ? `${["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"].map((name) => `os.environ[${JSON.stringify(name)}] = ${JSON.stringify(proxyEnvironment)}\n`).join("")}os.environ.pop("NO_PROXY", None)\nos.environ.pop("no_proxy", None)\nimport sys, types\nscproxy = types.ModuleType("_scproxy")\nscproxy._get_proxies = lambda: {"http": ${JSON.stringify(proxyEnvironment)}, "https": ${JSON.stringify(proxyEnvironment)}}\nscproxy._get_proxy_settings = lambda: {"exclude_simple": False, "exceptions": []}\nsys.modules["_scproxy"] = scproxy\nsys.platform = "darwin"\n` : ""}lookup = socket.getaddrinfo\nsocket.getaddrinfo = lambda host, port, *a, **kw: lookup(host, port, *a, **kw) if host == "127.0.0.1" else lookup("127.0.0.1", ${directPort ?? (server.address() as AddressInfo).port}, *a, **kw)\n`;
+      return {
+        file: "python3",
+        args: ["-I", "-B", "-c", prefix + args[4], ...args.slice(5)],
+      };
     });
 });
 
@@ -349,4 +363,78 @@ test("SSH failure is redacted", async () => {
     /^mcp_worker_failed$/,
   );
   expect(requests).toBe(0);
+});
+
+/** A CONNECT proxy that would tunnel to the fixture server, counting tunnels. */
+async function connectProxy() {
+  let connections = 0;
+  const proxy = createHttpServer((_req, res) => {
+    connections++;
+    res.writeHead(502).end();
+  });
+  proxy.on("connect", (_req, client: Socket, head: Buffer) => {
+    connections++;
+    const upstream = connect(
+      (server.address() as AddressInfo).port,
+      "127.0.0.1",
+      () => {
+        client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        upstream.write(head);
+        upstream.pipe(client);
+        client.pipe(upstream);
+      },
+    );
+    upstream.on("error", () => client.destroy());
+    client.on("error", () => upstream.destroy());
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`,
+    connections: () => connections,
+    close: () =>
+      new Promise<void>((resolve) => {
+        proxy.closeAllConnections();
+        proxy.close(() => resolve());
+      }),
+  };
+}
+
+test("C-600 the probe takes the bridge's direct route whatever proxy the worker account has", async () => {
+  const proxy = await connectProxy();
+  proxyEnvironment = proxy.url;
+  try {
+    await expect(
+      checkWorkerMcp(execution(), credential),
+    ).resolves.toBeUndefined();
+    authorization = undefined;
+    status = 401;
+    challenge = "Bearer";
+    body = { error: { code: "unauthorized", message: "unauthorized" } };
+    await expect(
+      checkWorkerMcpReachability(execution()),
+    ).resolves.toBeUndefined();
+    expect(requests).toBe(2);
+    expect(proxy.connections()).toBe(0);
+  } finally {
+    await proxy.close();
+  }
+});
+
+test("C-600 an unreachable Card address is not rescued by a working proxy", async () => {
+  const proxy = await connectProxy();
+  proxyEnvironment = proxy.url;
+  const closed = createHttpServer();
+  await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+  directPort = (closed.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => closed.close(() => resolve()));
+  try {
+    // The proxy could tunnel to the fixture server; the direct address is shut.
+    await expect(checkWorkerMcp(execution(), credential)).rejects.toThrow(
+      /^mcp_unreachable$/,
+    );
+    expect(requests).toBe(0);
+    expect(proxy.connections()).toBe(0);
+  } finally {
+    await proxy.close();
+  }
 });
