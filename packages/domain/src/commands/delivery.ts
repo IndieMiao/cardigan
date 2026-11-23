@@ -56,6 +56,10 @@ import {
   reuseIndependentReviewCheck,
 } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
+import {
+  convergeSubmittedIssues,
+  reviewPassConditions,
+} from "./review-convergence.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
 import { checkPauseDelivery } from "./review-pause.js";
 import {
@@ -884,6 +888,7 @@ export type SubmitReviewParams = Pick<
 } & Partial<
     Pick<
       Review,
+      | "pass_conditions"
       | "attachments"
       | "recheck_required"
       | "screenshot_check"
@@ -993,7 +998,9 @@ export function submitReview(
             typeof i.pre_existing === "boolean" &&
             typeof i.description === "string" &&
             i.description.trim() &&
-            (i.proof === undefined || typeof i.proof === "string"),
+            (i.proof === undefined || typeof i.proof === "string") &&
+            (i.basis === undefined || typeof i.basis === "string") &&
+            i.follow_up === undefined,
         ),
       "validation_failed",
       "Review issues must describe severity and must_fix",
@@ -1037,20 +1044,25 @@ export function submitReview(
       "validation_failed",
       "Every must-fix issue requires a valid impact",
     );
-    const calculated = deriveReview(
-      issues,
-      p.recheck_required ?? false,
-      p.followup_card_id,
-    );
-    if (p.followup_card_id !== undefined) {
+    const converged = convergeSubmittedIssues(d, card, item, p.issues, issues);
+    // C-610: once every requested must-fix became a follow-up, nothing is
+    // rejected or deferred; the follow-ups are saved and the delivery proceeds.
+    const followUpOnly =
+      converged.some((i) => i.follow_up) &&
+      !converged.some((i) => i.must_fix && !i.pre_existing);
+    const recheckRequired = !followUpOnly && (p.recheck_required ?? false);
+    const followupCardId = followUpOnly ? undefined : p.followup_card_id;
+    const rejectionCategory = followUpOnly ? undefined : p.rejection_category;
+    const calculated = deriveReview(converged, recheckRequired, followupCardId);
+    if (followupCardId !== undefined) {
       ensure(
         calculated.verdict === "conditional" &&
-          !p.recheck_required &&
-          !!p.followup_card_id,
+          !recheckRequired &&
+          !!followupCardId,
         "validation_failed",
         "Only UX-only must-fix issues can be deferred to a follow-up card",
       );
-      const followup = d.get("cards", p.followup_card_id);
+      const followup = d.get("cards", followupCardId);
       ensure(
         followup.id !== card.id &&
           followup.project_id === card.project_id &&
@@ -1109,9 +1121,10 @@ export function submitReview(
       .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
     if (prior && !testReview)
       ensure(
-        issues.every(
+        converged.every(
           (issue) =>
             issue.pre_existing ||
+            !!issue.follow_up ||
             prior.issues.some(
               (old) => old.description.trim() === issue.description.trim(),
             ) ||
@@ -1122,19 +1135,26 @@ export function submitReview(
         "validation_failed",
         "New findings after round one require critical severity or a must-fix major issue, with proof (reproduction steps, script or attachment reference)",
       );
+    const passConditions = reviewPassConditions(
+      d,
+      card,
+      item,
+      calculated.verdict,
+      p.pass_conditions,
+    );
     item = activeWork(d, item);
     ensure(
       item.status === "in_progress",
       "illegal_transition",
       "Verification is not running or its round limit was reached",
     );
-    if (p.rejection_category !== undefined)
+    if (rejectionCategory !== undefined)
       ensure(
         calculated.verdict === "reject" &&
-          typeof p.rejection_category === "string" &&
-          p.rejection_category.trim().length > 0 &&
-          p.rejection_category.trim().length <= 48 &&
-          !/[\r\n]/u.test(p.rejection_category),
+          typeof rejectionCategory === "string" &&
+          rejectionCategory.trim().length > 0 &&
+          rejectionCategory.trim().length <= 48 &&
+          !/[\r\n]/u.test(rejectionCategory),
         "validation_failed",
         "驳回类别须为 1 至 48 字的单行文字，仅用于驳回",
       );
@@ -1154,11 +1174,12 @@ export function submitReview(
       ...(shared
         ? { issues: bindSharedFindings(calculated.issues, id, existing) }
         : {}),
-      ...(p.rejection_category
-        ? { rejection_category: p.rejection_category.trim() }
+      ...(passConditions ? { pass_conditions: passConditions } : {}),
+      ...(rejectionCategory
+        ? { rejection_category: rejectionCategory.trim() }
         : {}),
-      ...(p.followup_card_id ? { followup_card_id: p.followup_card_id } : {}),
-      recheck_required: p.recheck_required ?? false,
+      ...(followupCardId ? { followup_card_id: followupCardId } : {}),
+      recheck_required: recheckRequired,
       ...(testReview ? { test_review: testReview } : {}),
       attachments: [...(p.attachments ?? [])],
       ...(reuseContext
@@ -1240,6 +1261,7 @@ export function submitReview(
     const reviewLimitWait =
       (flowLimit && !flowRaised) ||
       (parallelLate && pendingSharedReview(d.list("decisions"), target.id));
+    const followUps = value.issues.filter((i) => i.follow_up).length;
     d.emit(
       "review_submitted",
       card.id,
@@ -1252,6 +1274,9 @@ export function submitReview(
           ? { followup_card_id: value.followup_card_id }
           : {}),
         issues: value.issues.map((issue) => ({ ...issue })),
+        ...(value.pass_conditions
+          ? { pass_conditions: value.pass_conditions.map((c) => ({ ...c })) }
+          : {}),
         rework_allowed:
           (value.blocking || value.recheck_required) && !reviewLimitWait,
         ...(reviewLimitWait ? { review_limit_wait: true } : {}),
@@ -1259,9 +1284,7 @@ export function submitReview(
       },
       {
         type: "review",
-        body: testReview
-          ? `增量复核（只改测试）：${value.verdict}`
-          : value.verdict,
+        body: `${testReview ? `增量复核（只改测试）：${value.verdict}` : value.verdict}${followUps ? `（${followUps} 条意见记为后续跟进，不挡合并）` : ""}`,
         delivery_id: target.id,
         work_item_id: item.id,
         run_id: run.id,

@@ -52,7 +52,10 @@ function ops(f: ReturnType<typeof flowReviewFixture>["f"]) {
 test.each([undefined, 1, 2, 3, 4, 5])(
   "B6: flow %s automatically adds rounds without configured caps; third consecutive reject goes to PM",
   async (version) => {
-    const { f, review, reconcile } = flowReviewFixture(undefined, version);
+    const { f, review, reconcile, dispute } = flowReviewFixture(
+      undefined,
+      version,
+    );
     const pm = ops(f);
     for (let n = 0; n < 3; n++) {
       review(await f.deliver("code", (n + 1).toString().repeat(40)));
@@ -60,6 +63,12 @@ test.each([undefined, 1, 2, 3, 4, 5])(
         f.state.work_items.find((w) => w.id === f.reviewer.work_item_id),
       );
       expect(item.status).toBe(n < 2 ? "failed" : "waiting_decision");
+      // C-610: flow 5 aligns first; only a disputed round reaches PM.
+      if (n === 2 && (version ?? 5) >= 5) {
+        expect(item).toMatchObject({ review_alignment: { status: "open" } });
+        expect(f.state.decisions).toHaveLength(0);
+        dispute();
+      }
       expect(f.state.decisions).toHaveLength(n < 2 ? 0 : 1);
       f.commit(reconcile());
     }
@@ -192,7 +201,7 @@ async function intervention(
   categories: (string | undefined)[] = ["权限", "时序", "时序"],
   parallel = false,
 ) {
-  const { f, review } = flowReviewFixture();
+  const { f, review, dispute } = flowReviewFixture();
   const pm = ops(f);
   let peer: Assignment | undefined;
   if (parallel) {
@@ -233,6 +242,8 @@ async function intervention(
         reviewer,
       );
   }
+  for (const reviewer of peer ? [f.reviewer, peer] : [f.reviewer])
+    dispute(reviewer);
   const q = required(
     f.state.decisions.find(
       (q) => q.affected_work_items[0] === f.reviewer.work_item_id,

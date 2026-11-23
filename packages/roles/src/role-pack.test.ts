@@ -1,6 +1,7 @@
 import {
   HOST_OPS_ROLE_TOOLS,
   ROLE_TOOL_ALLOWLISTS,
+  STANDING_INVARIANTS,
   STANDING_ROLE_TOOLS,
   validateRole,
 } from "@cardigan/domain";
@@ -24,6 +25,7 @@ import {
   PM_PRE_MERGE_CHECK_RULE,
   PM_UI_VERIFICATION_RULES,
   PRODUCER_PLAIN_CHANGE_RULE,
+  REVIEW_CONVERGENCE_RULES,
   REVIEWER_PRE_MERGE_CHECK_RULE,
 } from "./role-pack.js";
 
@@ -566,12 +568,56 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
     "不复查 `code_review` 已覆盖",
     "`target_sha` 必须等于交付的 `subject`",
     "有阻塞问题必须标为 must_fix 并退回",
-    "轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 3 次驳回暂停并交 PM",
+    "轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 3 次驳回先开对齐回合，双方有分歧才交 PM",
     "复核员不能是本次交付的作者，不追溯历史 Assignment",
     "可写构建目录",
     "worker 数不超过主机限流配置的上限",
   ])
     expect(role.instructions).toContain(phrase);
+});
+
+test("C-610: every verifier role states review convergence once; PM only handles disputes and follow-up drafts", () => {
+  for (const role of [
+    "reviewer",
+    "independent_reviewer",
+    "design_director",
+  ] as const) {
+    const body = instructionsFor(role);
+    for (const rule of REVIEW_CONVERGENCE_RULES)
+      expect(body.split(`- ${rule}`).length - 1, role).toBe(1);
+  }
+  const rules = REVIEW_CONVERGENCE_RULES.join("\n");
+  // The prompt names exactly the bases the server accepts.
+  for (const key of Object.keys(STANDING_INVARIANTS))
+    expect(rules).toContain(`\`${key}\``);
+  for (const phrase of [
+    "`ACn`",
+    "`INVn`",
+    "`PCn`",
+    "没有依据的必改项由系统记为后续跟进，不挡合并",
+    "同一验证项第 2 次驳回时必须带 `pass_conditions`",
+    "之后的审核只核对清单",
+    "连续第 3 次驳回时系统开作者与审核员的对齐回合，不交 PM 加轮",
+    "只有分歧才交 PM 裁决",
+    "不提守卫类必改项",
+    "安全、权限、数值边界问题照常是必改项",
+    "第 1 次驳回附带的清单不生效",
+    "impact 为 `data_or_permission` 的数据、权限或数值上限错误不受清单限制",
+    "引用 `PCn` 时按该通过条件的依据",
+    "要求移除多余确认或停摆的意见不算守卫",
+  ])
+    expect(rules).toContain(phrase);
+  const pm = instructionsFor("pm");
+  for (const phrase of [
+    "系统先开作者与审核员的对齐回合，产出不变量清单后自动继续，不交 PM 加轮",
+    "只有对齐出现分歧",
+    "`get_card.follow_up_draft`",
+    "由你判断是否用 `create_card` 开卡",
+    "`project_snapshot.review_convergence.rejection_streak_episodes`",
+  ])
+    expect(pm).toContain(phrase);
+  expect(pm).not.toContain("同一验证项连续第 3 次驳回、交付与需求不一致");
+  expect(instructionsFor("coder")).not.toContain(REVIEW_CONVERGENCE_RULES[0]);
 });
 
 // C-162: wording copied independently of role-pack.ts.

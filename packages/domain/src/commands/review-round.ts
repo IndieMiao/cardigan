@@ -1,5 +1,6 @@
 import type { Delivery, Run, WorkItem } from "../entities.js";
 import type { EventId } from "../ids.js";
+import { streakAlignment } from "../review-convergence.js";
 import type { CommandDraft } from "./core.js";
 
 /** Only the first product of a trusted conflict fix inherits its source marker. */
@@ -113,10 +114,18 @@ export function rejectionStreak(d: CommandDraft, item: WorkItem) {
 export function reviewRejectionsNeedAttention(d: CommandDraft, item: WorkItem) {
   const streak = rejectionStreak(d, item);
   if (streak.length < 3) return false;
+  // C-610: an agreed alignment round settles the rest of its streak.
+  if (streakAlignment(item, streak)?.status === "agreed") return false;
   return ![...d.state.events, ...d.events].some(
     (e) =>
       e.type === "review_limit_rejections_acknowledged" &&
       (e.payload as Record<string, unknown>).review_id === streak[0]?.id &&
       (e.payload as Record<string, unknown>).work_item_id === item.id,
   );
+}
+
+/** C-610: the alignment round of the current streak, while still undecided. */
+export function openAlignment(d: CommandDraft, item: WorkItem) {
+  const alignment = streakAlignment(item, rejectionStreak(d, item));
+  return alignment?.status === "open" ? alignment : undefined;
 }

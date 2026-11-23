@@ -3123,3 +3123,20 @@ test("Office submits a versioned decomposition through MCP; get_card shows every
     },
   });
 });
+
+test("C-610: post_comment passes review_alignment to the domain", async () => {
+  const client = await coder();
+  const result = await raw(client, "post_comment", {
+    card_id: card.id,
+    body: "不变量",
+    review_alignment: {
+      work_item_id: work("reviewer").id,
+      step: "propose",
+      invariants: ["保存后读回新值"],
+    },
+  });
+  expect(result.isError).toBe(true);
+  expect(result.structuredContent).toMatchObject({
+    error: { code: "illegal_transition" },
+  });
+});

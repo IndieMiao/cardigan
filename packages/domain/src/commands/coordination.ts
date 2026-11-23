@@ -83,6 +83,10 @@ import { bindOwnerRecord, type OwnerRecordInput } from "./owner-record.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { authorPrecheckWait } from "./precheck-wait.js";
 import {
+  type ReviewAlignmentComment,
+  recordReviewAlignment,
+} from "./review-alignment.js";
+import {
   isReviewLimitOption,
   resolveReviewLimit,
 } from "./review-limit-resolution.js";
@@ -199,6 +203,7 @@ export function postComment(
     host_result_for?: HumanActionId;
     host_report_for?: HumanActionId;
     review_plan?: ReviewPlanComment;
+    review_alignment?: ReviewAlignmentComment;
   } & Partial<
       Pick<
         TimelineEntry,
@@ -217,6 +222,7 @@ export function postComment(
           p.host_report_for ||
           p.host_result_for ||
           p.review_plan ||
+          p.review_alignment ||
           p.work_item_id ||
           p.supersedes
         ),
@@ -366,6 +372,14 @@ export function postComment(
     }
     if (p.review_plan && d.timeline[0])
       recordReviewPlan(d, d.timeline[0], p.review_plan);
+    if (p.review_alignment && d.timeline[0]) {
+      ensure(
+        !p.review_plan,
+        "validation_failed",
+        "review_alignment 与 review_plan 不能同时提交",
+      );
+      recordReviewAlignment(d, d.timeline[0], p.review_alignment);
+    }
     if (p.host_result_for) {
       const action = d.get("human_actions", p.host_result_for);
       ensure(

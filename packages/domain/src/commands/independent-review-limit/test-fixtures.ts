@@ -11,7 +11,7 @@ import {
 import { command } from "../core.js";
 import { assignDecision } from "../delegation.js";
 import { mergeFixture } from "../merge/test-fixtures.js";
-import { fixture, human, ports, role } from "../test-fixtures.js";
+import { convergent, fixture, human, ports, role } from "../test-fixtures.js";
 
 export function independentReviewLimitFixture(
   preferences: Partial<ProjectPreferences> = {
@@ -75,6 +75,7 @@ export function independentReviewLimitFixture(
     reject = false,
   ) => {
     f.start(owner);
+    const { basis, pass_conditions } = convergent(f.state, item.id);
     return f.commit(
       submitReview(
         f.state,
@@ -83,12 +84,14 @@ export function independentReviewLimitFixture(
           delivery_id: delivery.id,
           target_sha: delivery.subject.value,
           kind: "code",
+          pass_conditions,
           issues: reject
             ? [
                 {
                   severity: "major",
                   description: "Defect",
                   impact: "functional" as const,
+                  basis,
                   must_fix: true,
                   pre_existing: false,
                 },
