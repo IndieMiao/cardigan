@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Delivery } from "@cardigan/domain";
@@ -33,6 +33,15 @@ const FILES = [
   "packages/runtime-herdr/src/darwin-retirement.test.ts",
   "packages/runtime-herdr/src/darwin-idle-owner.test.ts",
 ];
+// The manifest is the only place an hc release is named.
+const HC = `hc ${
+  JSON.parse(
+    readFileSync(
+      new URL("../../../deploy/hc-version.json", import.meta.url),
+      "utf8",
+    ),
+  ).version
+}`;
 const HEAD = "a".repeat(40),
   CANDIDATE = "c".repeat(40);
 const base: GithubMergeGateExecutor = {
@@ -53,7 +62,7 @@ const summary = (patch: Record<string, unknown> = {}) => ({
   candidate_tree: "d".repeat(40),
   macos: "15.5 (24F74)",
   arch: "arm64",
-  hc: "hc 0.1.21",
+  hc: HC,
   test_step: "success",
   exit_code: 0,
   files: FILES.map((file) => ({
@@ -269,7 +278,7 @@ test("an author request runs the current delivery's candidate, writes the result
   expect(x.options.remove).toHaveBeenCalledTimes(1);
   const body = x.timeline().at(-1) ?? "";
   expect(body).toContain("macOS 检查结束：passed");
-  expect(body).toContain("macOS 15.5 (24F74)，arm64，hc 0.1.21");
+  expect(body).toContain(`macOS 15.5 (24F74)，arm64，${HC}`);
   expect(body).toContain(`${FILES[0]}：通过 2，失败 0，跳过 0`);
   expect(body).toContain("真实 hc 用例：real hc: stops = passed");
   expect(body).toContain("退出码 0");
