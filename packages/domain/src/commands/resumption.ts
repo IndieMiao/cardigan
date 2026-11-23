@@ -4,7 +4,7 @@ import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { createQueuedRun, launchSettings } from "./launch.js";
 import { closedResumeTarget, deferResume } from "./resume-attention.js";
-import { ASSIGNMENT_STOPPED, pausedByHuman } from "./stop-state.js";
+import { openStopEpisodeStart, pausedByHuman } from "./stop-state.js";
 import { reviewRound } from "./workflow.js";
 
 function upgradedSinceRun(
@@ -210,12 +210,10 @@ export function replayStopDeferredResume(
 ) {
   if (assignment.scope !== "work_item") return;
   const events = d.state.events;
-  const stopAt = events.findLastIndex(
-    (e) =>
-      e.type === ASSIGNMENT_STOPPED &&
-      field(e.payload, "assignment_id") === assignment.id,
-  );
-  if (stopAt < 0) return;
+  // From the first stop of this episode: a retried stop records another
+  // `assignment_stopped`, but the resume deferred before it still counts.
+  const stopAt = openStopEpisodeStart(events, assignment.id);
+  if (stopAt === undefined) return;
   const deferred = events
     .slice(stopAt + 1)
     .findLast(

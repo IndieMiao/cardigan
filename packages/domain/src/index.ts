@@ -171,7 +171,9 @@ export { rotateStandingAfterDeployment } from "./commands/standing-deployment.js
 export * from "./commands/standing-pm-stall.js";
 export {
   humanStopRecorded,
+  openStopEpisodeStart,
   pausedByHuman,
+  stopExitConfirmed,
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./commands/stop.js";

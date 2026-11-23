@@ -415,12 +415,16 @@ test.each([false, true])(
 );
 
 test.each([
-  ["idle session", false, false],
-  ["Run still being stopped", true, false],
-  ["pause", false, true],
+  ["idle session", false, false, false],
+  ["Run still being stopped", true, false, false],
+  ["pause", false, true, false],
+  // V-3074:3 / V-3077:1: the same stop command retried before its release.
+  ["idle session, retried stop", false, false, true],
+  ["Run still being stopped, retried stop", true, false, true],
+  ["pause, retried stop", false, true, true],
 ] as const)(
   "C-620 a work item unblocked between a managed stop and its release gets one Run after the release (%s)",
-  (_name, running, hold) => {
+  (_name, running, hold, retried) => {
     const owner = id("assignment", 1);
     const ref = {
       machine_id: "local" as never,
@@ -497,6 +501,12 @@ test.each([
         ),
       ),
     );
+    if (retried) {
+      stop({ hold });
+      stop({ exit_confirmed_ref: ref });
+      // A repeated confirmation is not recorded twice.
+      stop({ exit_confirmed_ref: ref });
+    }
     stop({ released_runtime_ref: ref });
     const pending = state.runs.filter(
       (r) =>

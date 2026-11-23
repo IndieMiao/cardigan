@@ -1,8 +1,10 @@
-import type { Event } from "../entities.js";
+import type { Event, RuntimeRef } from "../entities.js";
 import type { AssignmentId } from "../ids.js";
 
 export const ASSIGNMENT_STOPPED = "assignment_stopped";
 export const ASSIGNMENT_STOP_RELEASED = "assignment_stop_released";
+/** C-620: exit of the stopped session proven once, reused by a retry. */
+export const ASSIGNMENT_STOP_EXIT_CONFIRMED = "assignment_stop_exit_confirmed";
 
 /**
  * C-620: `held` is an explicit human pause (and every legacy stop without a
@@ -15,6 +17,10 @@ interface StopIndex {
   readonly state: ReadonlyMap<unknown, StopState>;
   /** Latest of a stop (any kind) and `run_dispatched` is the stop. */
   readonly recorded: ReadonlyMap<unknown, boolean>;
+  /** Index of the first stop of the episode that is still unreleased. */
+  readonly episode: ReadonlyMap<unknown, number>;
+  /** Session whose exit this unreleased episode has already proven. */
+  readonly exited: ReadonlyMap<unknown, unknown>;
 }
 // One index per immutable event snapshot. Array order (not timestamps or
 // per-card sequence numbers) remains the authority, exactly as in the scan.
@@ -30,7 +36,13 @@ function stopIndex(events: readonly Event[]): StopIndex {
   if (!index) {
     const state = new Map<unknown, StopState>();
     const recorded = new Map<unknown, boolean>();
-    for (const event of events) {
+    const episode = new Map<unknown, number>();
+    const exited = new Map<unknown, unknown>();
+    const close = (id: unknown) => {
+      episode.delete(id);
+      exited.delete(id);
+    };
+    for (const [at, event] of events.entries()) {
       const id = field(event.payload, "assignment_id");
       if (event.type === ASSIGNMENT_STOPPED) {
         state.set(
@@ -38,16 +50,22 @@ function stopIndex(events: readonly Event[]): StopIndex {
           field(event.payload, "hold") === false ? "stopping" : "held",
         );
         recorded.set(id, true);
+        // A retried stop continues the same episode.
+        if (!episode.has(id)) episode.set(id, at);
       } else if (event.type === "run_dispatched") {
         state.delete(id);
         recorded.set(id, false);
+        close(id);
+      } else if (event.type === ASSIGNMENT_STOP_RELEASED) {
+        if (state.get(id) === "stopping") state.set(id, "released");
+        close(id);
       } else if (
-        event.type === ASSIGNMENT_STOP_RELEASED &&
-        state.get(id) === "stopping"
+        event.type === ASSIGNMENT_STOP_EXIT_CONFIRMED &&
+        episode.has(id)
       )
-        state.set(id, "released");
+        exited.set(id, JSON.stringify(field(event.payload, "runtime_ref")));
     }
-    index = { state, recorded };
+    index = { state, recorded, episode, exited };
     stoppedAssignments.set(events, index);
   }
   return index;
@@ -86,4 +104,25 @@ export function pausedByHuman(
   assignment_id: AssignmentId,
 ): boolean {
   return stopIndex(events).state.get(assignment_id) === "held";
+}
+
+/**
+ * C-620: index (in `events`) of the first `assignment_stopped` of the stop
+ * episode that has not been released or ended by a new dispatch yet. A
+ * retried stop belongs to the same episode.
+ */
+export function openStopEpisodeStart(
+  events: readonly Event[],
+  assignment_id: AssignmentId,
+): number | undefined {
+  return stopIndex(events).episode.get(assignment_id);
+}
+
+/** C-620: this unreleased stop has already proven `ref`'s exit. */
+export function stopExitConfirmed(
+  events: readonly Event[],
+  assignment_id: AssignmentId,
+  ref: RuntimeRef,
+): boolean {
+  return stopIndex(events).exited.get(assignment_id) === JSON.stringify(ref);
 }

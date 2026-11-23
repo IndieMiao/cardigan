@@ -15,15 +15,19 @@ import {
 import { replayStopDeferredResume } from "./resumption.js";
 
 import {
+  ASSIGNMENT_STOP_EXIT_CONFIRMED,
   ASSIGNMENT_STOP_RELEASED,
   ASSIGNMENT_STOPPED,
   pausedByHuman,
+  stopExitConfirmed,
   stoppedByHuman,
 } from "./stop-state.js";
 
 export {
   humanStopRecorded,
+  openStopEpisodeStart,
   pausedByHuman,
+  stopExitConfirmed,
   stoppedByHuman,
 } from "./stop-state.js";
 
@@ -60,6 +64,11 @@ export function stopWorkItemAssignment(
     assignment_id: AssignmentId;
     reason: string;
     released_runtime_ref?: RuntimeRef;
+    /**
+     * C-620: host-proven exit of this exact session, recorded before cleanup
+     * so a retried stop reuses it instead of looking for a removed terminal.
+     */
+    exit_confirmed_ref?: RuntimeRef;
     /** C-620: false = managed stop, woken by new work after release. */
     hold?: boolean;
   },
@@ -100,6 +109,20 @@ export function stopWorkItemAssignment(
           finished_at: d.now,
         });
     };
+    if (p.exit_confirmed_ref !== undefined) {
+      if (
+        !stoppedByHuman(state.events, a.id) ||
+        JSON.stringify(a.runtime_ref) !==
+          JSON.stringify(p.exit_confirmed_ref) ||
+        stopExitConfirmed(state.events, a.id, p.exit_confirmed_ref)
+      )
+        return { assignment: a, cancelled: 0 };
+      d.emit(ASSIGNMENT_STOP_EXIT_CONFIRMED, card, {
+        assignment_id: a.id,
+        runtime_ref: { ...p.exit_confirmed_ref },
+      });
+      return { assignment: a, cancelled: 0 };
+    }
     if (p.released_runtime_ref !== undefined) {
       if (
         !stoppedByHuman(state.events, a.id) ||

@@ -12,7 +12,9 @@ import { beginHostOpsAction } from "./host-ops-actions.js";
 import { dispatchRun } from "./launch.js";
 import {
   humanStopRecorded,
+  openStopEpisodeStart,
   pausedByHuman,
+  stopExitConfirmed,
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./stop.js";
@@ -53,7 +55,11 @@ function base(): CommandState {
 }
 const stop = (
   s: CommandState,
-  extra: { released_runtime_ref?: RuntimeRef; hold?: boolean } = {},
+  extra: {
+    released_runtime_ref?: RuntimeRef;
+    exit_confirmed_ref?: RuntimeRef;
+    hold?: boolean;
+  } = {},
 ) =>
   stopWorkItemAssignment(
     s,
@@ -500,4 +506,52 @@ test("C-620 host_ops can restart a released managed stop, but not one whose rele
   );
   const allowed = beginHostOpsAction(released, caller, restart, ports());
   expect(allowed.ok ? "ok" : allowed.error.message).toBe("ok");
+});
+
+test("C-620 a stop episode spans retries; its proven exit is recorded once for the exact session and ends with the release", () => {
+  const A1 = id("assignment", 1);
+  const step = (
+    s: CommandState,
+    extra: Parameters<typeof stop>[1],
+  ): CommandState => {
+    const result = stop(s, extra);
+    if (!result.ok) throw new Error(result.error.message);
+    return apply(s, result.value);
+  };
+  const base0 = base();
+  // Without a stop there is nothing to confirm.
+  expect(stop(base0, { exit_confirmed_ref: ref })).toMatchObject({
+    ok: true,
+    value: { changes: [] },
+  });
+  let s = step(base0, { hold: false });
+  const first = s.events.length - 1;
+  expect(openStopEpisodeStart(s.events, A1)).toBe(first);
+  // A retry continues the same episode.
+  s = step(s, { hold: false });
+  expect(openStopEpisodeStart(s.events, A1)).toBe(first);
+  // Only the exact current session can be confirmed, and only once.
+  const other = { ...ref, terminal_ref: "t2" };
+  expect(stop(s, { exit_confirmed_ref: other })).toMatchObject({
+    ok: true,
+    value: { changes: [] },
+  });
+  expect(stopExitConfirmed(s.events, A1, ref)).toBe(false);
+  s = step(s, { exit_confirmed_ref: ref });
+  expect(s.events.at(-1)).toMatchObject({
+    type: "assignment_stop_exit_confirmed",
+    payload: { assignment_id: A1, runtime_ref: ref },
+  });
+  expect(stopExitConfirmed(s.events, A1, ref)).toBe(true);
+  expect(stopExitConfirmed(s.events, A1, other)).toBe(false);
+  expect(stop(s, { exit_confirmed_ref: ref })).toMatchObject({
+    ok: true,
+    value: { changes: [] },
+  });
+  // Confirmation alone neither clears the session nor lifts the fence.
+  expect(stoppedByHuman(s.events, A1)).toBe(true);
+  expect(s.assignments.find((a) => a.id === A1)?.runtime_ref).toEqual(ref);
+  s = step(s, { released_runtime_ref: ref });
+  expect(openStopEpisodeStart(s.events, A1)).toBeUndefined();
+  expect(stopExitConfirmed(s.events, A1, ref)).toBe(false);
 });

@@ -46,30 +46,47 @@ export async function stopRunRuntime(
 }
 
 /**
- * C-620: independent exit proof for a managed `assignment stop` whose release
- * did not itself kill this session (the terminal row was already missing). A
- * missing row or an unavailable observation is not proof; only this exact
- * session observed as exited, or the local kernel check of its launch
- * receipt, is. Otherwise the caller keeps the reference and the stop.
+ * C-620: a managed `assignment stop` may only treat its own release as exit
+ * when that release ended a live session: the adapter checked this session's
+ * identity and killed it. Observe before releasing; a finished or missing
+ * terminal row says nothing about the session's process group.
+ */
+export async function stoppedSessionLive(
+  runtime: Runtime,
+  ref: RuntimeRef,
+  owner: RetirementIdentity,
+): Promise<boolean> {
+  if (runtime.observe_retirement) {
+    const exact = await runtime
+      .observe_retirement(ref, owner)
+      .catch(() => undefined);
+    return exact?.ok === true && exact.value === "alive";
+  }
+  const observed = await runtime.status(ref).catch(() => undefined);
+  return observed?.ok === true && observed.value.process === "alive";
+}
+
+/**
+ * C-620: independent exit proof when the release did not end a live session
+ * (the row was already finished or gone). Removing or reading a terminal row
+ * is never proof. Only the kernel check that this session's launch receipt
+ * process and its whole group are gone counts; otherwise the caller keeps the
+ * reference and the stop.
  */
 export async function stoppedSessionExited(
   runtime: Runtime,
   ref: RuntimeRef,
   owner: RetirementIdentity,
 ): Promise<boolean> {
-  if (runtime.observe_retirement) {
-    const exact = await observeTurnOwner(runtime, ref, owner, false);
-    if (exact?.ok === true && exact.value === "exited") return true;
-  } else {
-    const observed = await runtime.status(ref).catch(() => undefined);
-    if (observed?.ok === true && observed.value.process === "exited")
-      return true;
-  }
   if (ref.machine_id !== "local" || !ref.local_process_receipt) return false;
-  const proof = await runtime
-    .confirm_local_exit?.(ref, owner)
-    .catch(() => undefined);
-  return proof?.ok === true && proof.value;
+  for (const check of [
+    runtime.confirm_local_group_exit,
+    runtime.confirm_local_exit,
+  ]) {
+    const proof = await check?.call(runtime, ref, owner).catch(() => undefined);
+    if (proof?.ok === true && proof.value) return true;
+  }
+  return false;
 }
 
 /** System-ended bells never use address-based release, even for cleanup. A
