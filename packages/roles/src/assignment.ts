@@ -17,6 +17,7 @@ import {
   type CompiledAssignmentLaunch,
   LAUNCH_SCRIPT_NAME,
   MCP_SERVER_NAME,
+  MCP_SESSION_KEY_PATTERN,
   RUN_RESOURCE_RULE,
   SECRETS_FILE_NAME,
   START_FILE_NAME,
@@ -56,6 +57,11 @@ export function compileAssignmentLaunch(
   const agentNice = input.agent_nice ?? 10;
   if (!Number.isInteger(agentNice) || agentNice < 0 || agentNice > 19)
     throw new Error("Agent niceness must be an integer from 0 to 19");
+  if (
+    input.mcp.session_key !== undefined &&
+    !MCP_SESSION_KEY_PATTERN.test(input.mcp.session_key)
+  )
+    throw new Error("Invalid MCP session key");
   const identity = employeeIdentityPrompt(input.employee?.identity);
   const policyRule = input.resource_bindings
     ? "\n\n只能使用本次 CARDIGAN_RESOURCE_BINDINGS 中分配的端口和设备。禁止裸 adb、默认 5037、未分配端口及用户 USB 真机。没有分配则不得操作设备。"
