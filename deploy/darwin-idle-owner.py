@@ -181,7 +181,7 @@ def supervise(c, command, inspect):
                     conn, _ = listener.accept()
                     with conn:
                         handle(conn, c, child, inspect, c['public_pem'], spent)
-                except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
                     continue
             return child.returncode if child.returncode >= 0 else 128-child.returncode
         finally:

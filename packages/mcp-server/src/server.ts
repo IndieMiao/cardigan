@@ -28,7 +28,6 @@ import {
   recordIdentity,
 } from "./auth.js";
 import type { McpBackend } from "./backend.js";
-import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import {
   type DeliveryToolOptions,
   deliveryTools,
@@ -45,12 +44,17 @@ import {
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
 import { freshResourceNonce, runResourceState } from "./run-resource-state.js";
+import { ToolCallBookkeeping } from "./tool-call-bookkeeping.js";
 import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
 import {
   type CheckLogOptions,
   getCheckLogTool,
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
+import {
+  type MacosCheckToolOptions,
+  macosCheckTool,
+} from "./tools/macos-check.js";
 import {
   type MobileSigningOptions,
   mobileAccess,
@@ -77,7 +81,8 @@ export interface McpServerOptions
     ReservationOptions,
     MobileSigningOptions,
     PublicationOptions,
-    ProbeToolOptions {
+    ProbeToolOptions,
+    MacosCheckToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
   readonly bodyTimeoutMs?: number;
@@ -91,6 +96,8 @@ export interface McpServerOptions
   readonly tools?: readonly ToolDefinition[];
   /** `false` disables the M2.6 acknowledge hook (tests of pure tool routing). */
   readonly acknowledgeRuns?: boolean;
+  /** C-635: minimum spacing of one session's activity writes (default 30 s). */
+  readonly activityWriteIntervalMs?: number;
   readonly auditProbeCall?: (actor: Identity["actor"], code: string) => void;
 }
 
@@ -138,12 +145,14 @@ export function serverTools(
     ReservationOptions &
     MobileSigningOptions &
     PublicationOptions &
-    ProbeToolOptions,
+    ProbeToolOptions &
+    MacosCheckToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
     runProbeTool(options),
+    macosCheckTool(options),
     mobileSigningTool(options),
     publicationTool(options),
     reservationTool(options),
@@ -191,6 +200,20 @@ export async function startMcpServer(
     options.tools ?? serverTools({ ...options, artifactUploads, log: sink });
 
   const catalogs = new Map<string, string>();
+  const bookkeeping = new ToolCallBookkeeping({
+    store: options.store,
+    acknowledgeRuns: options.acknowledgeRuns !== false,
+    ...(options.activityWriteIntervalMs === undefined
+      ? {}
+      : { activityWriteIntervalMs: options.activityWriteIntervalMs }),
+    log: (entry) =>
+      sink({
+        ...entry,
+        timestamp: new Date().toISOString(),
+        role: "web",
+        pid: process.pid,
+      }),
+  });
 
   // Filled in once the socket is bound; the DNS rebinding check needs the port.
   let boundPort = 0;
@@ -508,7 +531,16 @@ export async function startMcpServer(
     }
 
     const authenticatedAt = Date.now();
-    await serveMcp(req, res, identity.value, options, tools, log, allowedHosts);
+    await serveMcp(
+      req,
+      res,
+      identity.value,
+      options,
+      tools,
+      log,
+      allowedHosts,
+      bookkeeping,
+    );
     log({
       event: "http",
       method: req.method,
@@ -555,7 +587,12 @@ export async function startMcpServer(
     },
     close: () =>
       new Promise<void>((resolve, reject) => {
-        http.close((error) => (error ? reject(error) : resolve()));
+        http.close((error) => {
+          // C-635: one last attempt at deferred writes once requests stopped.
+          bookkeeping.close();
+          if (error) reject(error);
+          else resolve();
+        });
         http.closeAllConnections();
       }),
   };
@@ -645,6 +682,7 @@ async function serveMcp(
   tools: readonly ToolDefinition[],
   log: Logger,
   allowedHosts: string[],
+  bookkeeping: ToolCallBookkeeping,
 ): Promise<void> {
   // C-616: the MCP transport's own 413 names only the body bound. Refuse an
   // oversized body here instead, so both a declared length and a chunked body
@@ -687,19 +725,10 @@ async function serveMcp(
     // The hooks belong to the tool call, not to the connection: `initialize`
     // and `tools/list` must not start the Run (§4 step 8) or make an idle Agent
     // look busy (M3 plan §3.3).
-    onToolCall: () => {
-      // C-600: both are bound to this request's Token, so a late call of a
-      // replaced session neither starts nor keeps alive the new session.
-      options.store.touchAssignmentActivity?.(
-        identity.actor.project_id,
-        identity.actor.assignment_id,
-        undefined,
-        identity.token.id,
-      );
-      if (options.acknowledgeRuns !== false) {
-        acknowledgeDispatchedRun(options.store, identity);
-      }
-    },
+    // C-600: both are bound to this request's Token, so a late call of a
+    // replaced session neither starts nor keeps alive the new session.
+    // C-635: neither waits for another process's write lock.
+    onToolCall: () => bookkeeping.toolCalled(identity),
     // C-600: a native listing must be recorded before it is answered; a
     // briefly busy database is retried, then the client gets an error.
     onToolList: async () => {
@@ -720,13 +749,7 @@ async function serveMcp(
       }
     },
     refuseToolCall: () => {
-      const handshake = options.store.advanceMcpHandshake?.(
-        identity.actor.project_id,
-        identity.actor.assignment_id,
-        "tool_called",
-        sessionKeyDigest(req),
-        identity.token.id,
-      );
+      const handshake = bookkeeping.handshake(identity, sessionKeyDigest(req));
       return handshake === "missing"
         ? {
             code: "illegal_transition",

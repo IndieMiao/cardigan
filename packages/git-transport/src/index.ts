@@ -13,6 +13,9 @@ import { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
 export {
   type CentralGitOptions,
   CentralGitTransport,
+  type CentralObjectStats,
+  type CentralRepackMode,
+  type CentralRepackResult,
   type FirstParentCommit,
   type TreeEntry,
 } from "./central.js";

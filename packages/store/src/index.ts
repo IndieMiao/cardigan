@@ -90,6 +90,7 @@ export {
   type AckEventsParams,
   type AckEventsResult,
   DEFAULT_DB_FILE,
+  type DeferredActivity,
   type GetUpdatesParams,
   type GetUpdatesResult,
   hashRequest,

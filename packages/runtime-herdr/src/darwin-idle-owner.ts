@@ -138,6 +138,8 @@ export async function enrollDarwinOwner(
 
 // This relay has no signal operation. The same connected socket carries the challenge and response.
 // Exit 3: no owner listens for this generation (launched before enrollment).
+// A challenge the controller abandons (no signature line) closes the socket
+// at once, so the single-threaded owner is not held for its read timeout.
 const relay = `import os,socket,sys
 os.chdir(sys.argv[1])
 with socket.socket(socket.AF_UNIX) as s:
@@ -150,7 +152,10 @@ with socket.socket(socket.AF_UNIX) as s:
    line=f.readline(256)
    if not line.endswith(b'\\n'): sys.exit(1)
    sys.stdout.buffer.write(line); sys.stdout.buffer.flush()
-   if i==0: s.sendall(sys.stdin.buffer.readline(256))`;
+   if i==0:
+    signature=sys.stdin.buffer.readline(256)
+    if not signature.endswith(b'\\n'): sys.exit(1)
+    s.sendall(signature)`;
 
 type Refusal = RetirementEvidence["reason"];
 const refused = (reason: Refusal): IdleRetirementResult => ({
@@ -171,12 +176,14 @@ export async function stopDarwinOwner(
   const g = ref.launch_generation,
     p = options.enrolled_process,
     target = e.target;
+  // C-626: a system-ended turn may ask the owner too. The adapter already
+  // ran its workspace preflight; the owner still requires a clean checkout
+  // and an idle status itself, and refuses before any challenge otherwise.
   if (
     !enabled(e) ||
     !target ||
     !g ||
     !p ||
-    options.system_finished_turn ||
     !ref.terminal_ref.startsWith(`${e.machine}/`) ||
     p.machine !== target.fingerprint ||
     p.terminal !== g.generation

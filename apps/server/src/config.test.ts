@@ -44,6 +44,10 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     runtimeUnknownGraceMs: 60_000,
     checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
+    centralMaintenanceWindow: { start: 180, end: 360 },
+    centralMaintenanceIntervalMs: 900_000,
+    centralCruftIntervalMs: 604_800_000,
+    centralRefRetentionMs: 1_209_600_000,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
     dispatchTimeoutMs: 600_000,
     providerFailureThreshold: 2,
@@ -126,6 +130,10 @@ test("reads data dir and port from the environment", () => {
     runtimeUnknownGraceMs: 60_000,
     checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
+    centralMaintenanceWindow: { start: 180, end: 360 },
+    centralMaintenanceIntervalMs: 900_000,
+    centralCruftIntervalMs: 604_800_000,
+    centralRefRetentionMs: 1_209_600_000,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
     dispatchTimeoutMs: 600_000,
     providerFailureThreshold: 3,
@@ -409,4 +417,32 @@ test("C-600 the MCP handshake deadline is a positive millisecond setting", () =>
     expect(() =>
       resolveServerConfig({ CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS: value }),
     ).toThrow("CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS");
+});
+
+test("C-637: central maintenance runs 03:00-06:00 host time by default, is configurable and can be turned off", () => {
+  const config = resolveServerConfig({
+    CARDIGAN_CENTRAL_MAINTENANCE_WINDOW: "22:30-01:00",
+    CARDIGAN_CENTRAL_MAINTENANCE_INTERVAL_MS: "60000",
+    CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS: "86400000",
+    CARDIGAN_CENTRAL_REF_RETENTION_DAYS: "30",
+  });
+  expect(config).toMatchObject({
+    centralMaintenanceWindow: { start: 22 * 60 + 30, end: 60 },
+    centralMaintenanceIntervalMs: 60_000,
+    centralCruftIntervalMs: 86_400_000,
+    centralRefRetentionMs: 2_592_000_000,
+  });
+  expect(
+    resolveServerConfig({ CARDIGAN_CENTRAL_MAINTENANCE_WINDOW: "off" }),
+  ).not.toHaveProperty("centralMaintenanceWindow");
+  expect(() =>
+    resolveServerConfig({ CARDIGAN_CENTRAL_MAINTENANCE_WINDOW: "3-6" }),
+  ).toThrow(/CARDIGAN_CENTRAL_MAINTENANCE_WINDOW must be HH:MM-HH:MM/);
+  expect(() =>
+    resolveServerConfig({ CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS: "0" }),
+  ).toThrow(/CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS/);
+  for (const days of ["0", "1.5", "-14"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_CENTRAL_REF_RETENTION_DAYS: days }),
+    ).toThrow(/CARDIGAN_CENTRAL_REF_RETENTION_DAYS/);
 });

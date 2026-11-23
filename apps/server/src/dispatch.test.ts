@@ -24,6 +24,7 @@ import {
   releaseAssignment,
   requestDecision,
   setRunLimit,
+  stoppedByHuman,
   stopWorkItemAssignment,
   updateCard,
   updateWorkItem,
@@ -1060,6 +1061,99 @@ test("C-211 a stopped Assignment gets no new session from queued Runs or later b
   await new Dispatcher(options).tick();
   expect(runtime.wake).toHaveBeenCalled();
 });
+test("C-620 a managed stop starts a fresh session for new work only after its release is confirmed, once for repeated bells", async () => {
+  const owner = () =>
+    f.state().assignments.find((a) => a.id === target.assignment.id);
+  const ref = owner()?.runtime_ref;
+  if (!ref) throw new Error("Missing session");
+  f.apply((s, a, p) =>
+    stopWorkItemAssignment(
+      s,
+      a,
+      {
+        assignment_id: target.assignment.id,
+        reason: "stopped by host",
+        hold: false,
+      },
+      p,
+    ),
+  );
+  comment();
+  // Exit not confirmed yet: never a second executor.
+  await new Dispatcher(options).tick();
+  expect(options.startRun).not.toHaveBeenCalled();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(ownNotes().map((n) => n.status)).toEqual(["pending"]);
+  f.apply((s, a, p) =>
+    stopWorkItemAssignment(
+      s,
+      a,
+      {
+        assignment_id: target.assignment.id,
+        reason: "stopped by host",
+        released_runtime_ref: ref,
+      },
+      p,
+    ),
+  );
+  expect(owner()?.runtime_ref).toBeNull();
+  expect(stoppedByHuman(f.state().events, target.assignment.id)).toBe(false);
+  comment("Another bell for the same work");
+  const dispatcher = new Dispatcher(options);
+  await Promise.all([dispatcher.tick(), new Dispatcher(options).tick()]);
+  await dispatcher.tick();
+  expect(options.startRun).toHaveBeenCalledOnce();
+  expect(
+    f
+      .state()
+      .runs.filter(
+        (r) =>
+          r.assignment_id === target.assignment.id &&
+          !["completed", "failed", "cancelled"].includes(r.status),
+      ),
+  ).toHaveLength(1);
+  // Same Assignment and work item; nothing was released or reassigned.
+  expect(owner()?.status).toBe("active");
+  expect(
+    f.state().work_items.find((w) => w.id === target.item.id)?.assignment_id,
+  ).toBe(target.assignment.id);
+});
+
+test("C-620 a system-recycled Assignment starts a fresh session for new work; an unconfirmed recycle does not", async () => {
+  const owner = () =>
+    f.store.uow.read((tx) =>
+      tx.assignments.get(f.project, target.assignment.id),
+    ) as Assignment;
+  const ref = owner().runtime_ref;
+  if (!ref) throw new Error("Missing session");
+  const recycling = owner();
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project, {
+      ...recycling,
+      idle_retirement: {
+        phase: "stopping",
+        runtime_ref: ref,
+        started_at: f.clock.now(),
+        threshold_minutes: 30,
+        failures: 0,
+      },
+    }),
+  );
+  comment();
+  await new Dispatcher(options).tick();
+  expect(options.startRun).not.toHaveBeenCalled();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  // Recycle confirmed: the session is gone and its fence settled.
+  const { idle_retirement: _r, session_ref: _s, ...rest } = owner();
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project, { ...rest, runtime_ref: null }),
+  );
+  comment("New work");
+  await new Dispatcher(options).tick();
+  await new Dispatcher(options).tick();
+  expect(options.startRun).toHaveBeenCalledOnce();
+});
+
 test("C-56 wake failure retries the same Run after backoff without immediate escalation", async () => {
   comment();
   vi.mocked(runtime.wake).mockResolvedValue({
@@ -1516,6 +1610,67 @@ test("MC-4 a missing slot holds the entire Run without reserving an unrelated fr
   });
 });
 
+test("C-620 a head waiting on an occupied emulator does not hold back later godot-only Runs; the emulator stays FIFO", async () => {
+  const settings = {
+    ...options,
+    runLimit: () => 6,
+    resourceLimits: () =>
+      new Map([
+        ["android.emulator", 1],
+        ["godot", 3],
+      ]),
+  };
+  // R-726 (C-28) holds the only emulator.
+  const holder = f.create();
+  requireCapabilities(holder.item, ["android.emulator"]);
+  f.session(holder.assignment, false);
+  // R-715 (C-14 smoke) is queued first and needs the emulator and godot.
+  requireCapabilities(target.item, ["android.emulator", "godot"]);
+  comment();
+  await new Dispatcher(settings).tick();
+  const [head] = readRunQueue(f.store);
+  expect(head).toMatchObject({ assignment_id: target.assignment.id });
+  // Later godot-only work (C-32, C-33) arrives behind it.
+  const later = [f.create(), f.create()];
+  for (const t of later) {
+    requireCapabilities(t.item, ["godot"]);
+    f.session(t.assignment);
+  }
+  // A later emulator user must keep waiting behind the head.
+  const emulatorLater = f.create();
+  requireCapabilities(emulatorLater.item, ["android.emulator"]);
+  f.session(emulatorLater.assignment);
+  for (const t of [...later, emulatorLater]) {
+    f.advance(100);
+    f.apply((s, a, p) =>
+      postComment(
+        s,
+        a,
+        { card_id: t.card.id, work_item_id: t.item.id, body: "work" },
+        p,
+      ),
+    );
+  }
+  await new Dispatcher(settings).tick();
+  const status = (a: Assignment) =>
+    f
+      .state()
+      .runs.filter((r) => r.assignment_id === a.id)
+      .map((r) => r.status);
+  for (const t of later) expect(status(t.assignment)).toContain("dispatched");
+  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+    target.assignment.id,
+    emulatorLater.assignment.id,
+  ]);
+  // The emulator is released: the head gets it before the later emulator user.
+  finish(holder.assignment);
+  await new Dispatcher(settings).tick();
+  expect(status(target.assignment)).toContain("dispatched");
+  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+    emulatorLater.assignment.id,
+  ]);
+});
+
 test("MC-4 a withdrawn legacy Run holds its retry's resources before and after redispatch", async () => {
   const owner = f.create();
   requireCapabilities(owner.item, ["godot"]);
@@ -1656,7 +1811,7 @@ test("MC-4 a withdrawn legacy Run holds its retry's resources before and after r
   });
 });
 
-test("MC-4 stopping a queued follow-up reserves the terminal but not its unclaimed resources", async () => {
+test("MC-4 stopping a queued follow-up holds neither its unclaimed resources nor (C-620) the idle terminal's slot", async () => {
   const busy = f.create();
   requireCapabilities(busy.item, ["godot"]);
   f.session(busy.assignment, false);
@@ -1705,7 +1860,8 @@ test("MC-4 stopping a queued follow-up reserves the terminal but not its unclaim
   const capacity = f.store.uow.read((tx) =>
     runCapacitySnapshot(f.store, tx, resourceLimits),
   );
-  expect(capacity.occupied.get("local")).toBe(2); // busy Run + terminal stop reservation
+  // C-620: only the busy Run counts; the idle terminal being stopped does not.
+  expect(capacity.occupied.get("local")).toBe(1);
   expect(capacity.resourcesForMachine("local").get("blender")?.occupied).toBe(
     0,
   );
@@ -3051,8 +3207,11 @@ test("Q-86 an in-flight stop fences concurrent dispatchers and preserves a Run t
     finish(t.busy.assignment);
     await new Dispatcher(t.settings).tick();
     expect(runtime.release).toHaveBeenCalledOnce();
+    // C-620: the finished turn's session is idle while its stop is still in
+    // flight, so it holds no slot and the waiting Run is admitted at once.
+    // The stopping Assignment itself still gets no second session.
     expect(slots()).toBe(1);
-    expect(runtime.wake).not.toHaveBeenCalled();
+    expect(runtime.wake).toHaveBeenCalledOnce();
     release();
     await first;
     expect(f.state().runs.find((r) => r.id === t.run.id)).toMatchObject({

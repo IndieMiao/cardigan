@@ -25,6 +25,7 @@ const processContracts = [
   "packages/roles/src/test-worker-limit.test.ts",
   "packages/host/src/worker-claude-opener.integration.test.ts",
   "apps/server/src/diagnostics-reader.test.ts",
+  "apps/server/src/mcp-reader.test.ts",
   "apps/cli/src/assignment-attach.test.ts",
   "packages/runtime-herdr/src/runtime.acceptance.test.ts",
 ];

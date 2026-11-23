@@ -96,16 +96,66 @@ function affects(d: CommandDraft, q: Decision, id: CardId) {
 }
 type CommandCardView = Omit<CardView, "waiting_on" | "next_owners" | "why"> &
   CardDerivedFields;
+interface CardViewSources {
+  readonly items: ReadonlyMap<CardId, readonly WorkItem[]>;
+  readonly deliveries: ReadonlyMap<CardId, readonly Delivery[]>;
+  readonly readableCards: readonly Card[];
+  readonly dependencies: CommandState;
+}
+const NO_ITEMS: readonly WorkItem[] = [];
+const NO_DELIVERIES: readonly Delivery[] = [];
+/**
+ * C-648: card-independent sources, built once per snapshot. Groups keep the
+ * draft list order, so every card sees exactly what its own filter returned.
+ */
+function cardViewSources(d: CommandDraft): CardViewSources {
+  const items = new Map<CardId, WorkItem[]>();
+  const owner = new Map<WorkItemId, CardId>();
+  for (const w of d.list("work_items")) {
+    owner.set(w.id, w.card_id);
+    const list = items.get(w.card_id);
+    if (list) list.push(w);
+    else items.set(w.card_id, [w]);
+  }
+  const deliveries = new Map<CardId, Delivery[]>();
+  for (const v of d.list("deliveries")) {
+    const card = owner.get(v.work_item_id);
+    if (card === undefined) continue;
+    const list = deliveries.get(card);
+    if (list) list.push(v);
+    else deliveries.set(card, [v]);
+  }
+  const assignment = d.assignment;
+  const readableCards =
+    assignment?.scope === "work_item"
+      ? d.state.cards.filter(
+          (c) =>
+            cardReadAccess({
+              project_id: d.state.project_id,
+              assignment,
+              card: c,
+              work_items: d.state.work_items,
+              preferences: projectPreferences(d.state),
+            }) !== "none",
+        )
+      : d.state.cards;
+  // One state object: dependency path lengths are cached by its collections.
+  return {
+    items,
+    deliveries,
+    readableCards,
+    dependencies: { ...d.state, cards: readableCards },
+  };
+}
 function cardView(
   d: CommandDraft,
   id: CardId,
-  reference = false,
+  reference: boolean,
+  sources: CardViewSources,
 ): CommandCardView {
   const card = reference ? d.get("cards", id) : d.card(id);
-  const items = d.list("work_items").filter((w) => w.card_id === id);
-  const deliveries = d
-    .list("deliveries")
-    .filter((v) => items.some((w) => w.id === v.work_item_id));
+  const items = sources.items.get(id) ?? NO_ITEMS;
+  const deliveries = sources.deliveries.get(id) ?? NO_DELIVERIES;
   const decisions = d
     .list("decisions")
     .filter(
@@ -148,24 +198,10 @@ function cardView(
   });
   const classification = mergeClassificationView(d.state, card);
   const merge_stage = mergeStage(d.state, card);
-  const assignment = d.assignment;
-  const readableCards =
-    assignment?.scope === "work_item"
-      ? d.state.cards.filter(
-          (c) =>
-            cardReadAccess({
-              project_id: d.state.project_id,
-              assignment,
-              card: c,
-              work_items: d.state.work_items,
-              preferences: projectPreferences(d.state),
-            }) !== "none",
-        )
-      : d.state.cards;
   const dependency =
     card.depends_on_cards?.length ||
-    readableCards.some((c) => c.depends_on_cards?.includes(card.id))
-      ? cardDependencyView({ ...d.state, cards: readableCards }, card)
+    sources.readableCards.some((c) => c.depends_on_cards?.includes(card.id))
+      ? cardDependencyView(sources.dependencies, card)
       : undefined;
   return {
     ...card,
@@ -212,15 +248,19 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
             isRoleActive(state.roles, employee.role_id),
         )
         .map(({ id, name, title, role_id }) => ({ id, name, title, role_id })),
-      cards: [...d.list("cards")]
-        .sort((a, b) =>
-          d.state.cards.some((c) => c.depends_on_cards?.length)
-            ? b.priority - a.priority ||
-              (cardCriticalPathLengths(d.state).get(b.id) ?? 0) -
-                (cardCriticalPathLengths(d.state).get(a.id) ?? 0)
-            : 0,
-        )
-        .map((c) => cardView(d, c.id)),
+      cards: (() => {
+        const ordered = d.state.cards.some((c) => c.depends_on_cards?.length);
+        const lengths = ordered ? cardCriticalPathLengths(d.state) : undefined;
+        const sources = cardViewSources(d);
+        return [...d.list("cards")]
+          .sort((a, b) =>
+            lengths
+              ? b.priority - a.priority ||
+                (lengths.get(b.id) ?? 0) - (lengths.get(a.id) ?? 0)
+              : 0,
+          )
+          .map((c) => cardView(d, c.id, false, sources));
+      })(),
     };
   });
 }
@@ -255,6 +295,7 @@ export function referenceProjectSnapshot(state: CommandState, actor: Actor) {
       d.pm();
       d.projectAccess();
     }
+    const sources = cardViewSources(d);
     const cards = state.cards.flatMap((card) => {
       const access = cardReadAccess({
         project_id: state.project_id,
@@ -275,22 +316,24 @@ export function referenceProjectSnapshot(state: CommandState, actor: Actor) {
           ...provenance,
           ...(access === "summary"
             ? { id: card.id, title: card.title, status: card.status }
-            : cardView(d, card.id, true)),
+            : cardView(d, card.id, true, sources)),
         },
       ];
     });
+    const ordered = state.cards.some((c) => c.depends_on_cards?.length);
+    const lengths = ordered ? cardCriticalPathLengths(visibleState) : undefined;
+    // First match, as `find` returned for legacy duplicate ids.
+    const priority = new Map<string, number>();
+    for (const c of state.cards)
+      if (!priority.has(c.id)) priority.set(c.id, c.priority);
     return {
       project_id: state.project_id,
-      cards: cards.sort((a, b) => {
-        if (!state.cards.some((c) => c.depends_on_cards?.length)) return 0;
-        const first = state.cards.find((c) => c.id === a.id);
-        const second = state.cards.find((c) => c.id === b.id);
-        return (
-          (second?.priority ?? 0) - (first?.priority ?? 0) ||
-          (cardCriticalPathLengths(visibleState).get(b.id) ?? 0) -
-            (cardCriticalPathLengths(visibleState).get(a.id) ?? 0)
-        );
-      }),
+      cards: cards.sort((a, b) =>
+        lengths
+          ? (priority.get(b.id) ?? 0) - (priority.get(a.id) ?? 0) ||
+            (lengths.get(b.id) ?? 0) - (lengths.get(a.id) ?? 0)
+          : 0,
+      ),
       // C-610 metric: compare counts before and after the deployment time.
       review_convergence: {
         rejection_streak_episodes: rejectionStreakEpisodes(visibleState).filter(

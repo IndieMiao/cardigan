@@ -12,6 +12,23 @@ export interface RepositoryLockKey {
   readonly project_id: string;
   /** The project's shared base clone; also the in-process queue key. */
   readonly repository: string;
+  /**
+   * C-636: what the holder does, for wait/hold metrics only. Never part of
+   * the queue key: every operation on a repository still serializes.
+   */
+  readonly operation?: string;
+}
+
+/** C-636: one lock use, reported after release (or after a failed wait). */
+export interface RepositoryLockSample {
+  readonly project_id: string;
+  readonly machine_id: string;
+  readonly operation: string;
+  /** From the call until `work` started, or until the wait failed. */
+  readonly wait_ms: number;
+  /** Time inside `work` plus the release; 0 when the lock was never held. */
+  readonly hold_ms: number;
+  readonly outcome: "ok" | "error" | "timeout";
 }
 /** Run `work` while holding the project's base-clone lock. */
 export type RepositoryLock = <T>(
@@ -32,6 +49,8 @@ export interface RepositoryLockOptions {
     remainingMs: number,
   ) => Promise<() => Promise<void>>;
   readonly now?: () => number;
+  /** C-636: called once per use; a throwing observer never changes the result. */
+  readonly observe?: (sample: RepositoryLockSample) => void;
 }
 
 // Shared by every lock in this process: services are created per request, so
@@ -82,27 +101,54 @@ export function repositoryLock(
     throw new Error("Repository lock wait must be a positive integer");
   return async (key, work) => {
     const started = now();
-    const release = await inProcessSlot(
-      JSON.stringify([
-        key.machine_id ?? "local",
-        key.project_id,
-        key.repository,
-      ]),
-      waitMs,
-    );
+    let entered: number | undefined;
+    let outcome: RepositoryLockSample["outcome"] = "error";
     try {
-      const remaining = waitMs - (now() - started);
-      if (remaining <= 0) throw new RepositoryLockTimeoutError(waitMs);
-      const unlock = options.acquire
-        ? await options.acquire(key, remaining)
-        : undefined;
+      const release = await inProcessSlot(
+        JSON.stringify([
+          key.machine_id ?? "local",
+          key.project_id,
+          key.repository,
+        ]),
+        waitMs,
+      );
       try {
-        return await work();
+        const remaining = waitMs - (now() - started);
+        if (remaining <= 0) throw new RepositoryLockTimeoutError(waitMs);
+        const unlock = options.acquire
+          ? await options.acquire(key, remaining)
+          : undefined;
+        entered = now();
+        try {
+          const result = await work();
+          outcome = "ok";
+          return result;
+        } finally {
+          await unlock?.();
+        }
       } finally {
-        await unlock?.();
+        release();
       }
+    } catch (error) {
+      if (entered === undefined && error instanceof RepositoryLockTimeoutError)
+        outcome = "timeout";
+      throw error;
     } finally {
-      release();
+      if (options.observe) {
+        const ended = now();
+        try {
+          options.observe({
+            project_id: key.project_id,
+            machine_id: key.machine_id ?? "local",
+            operation: key.operation ?? "unspecified",
+            wait_ms: Math.max(0, (entered ?? ended) - started),
+            hold_ms: entered === undefined ? 0 : Math.max(0, ended - entered),
+            outcome,
+          });
+        } catch {
+          // Metrics never change the locked work's answer.
+        }
+      }
     }
   };
 }

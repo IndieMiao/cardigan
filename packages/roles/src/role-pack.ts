@@ -277,6 +277,9 @@ const PM_FLOW_RULES = [
 ] as const;
 
 /** Shared coding delivery rules; frontend work uses the same gates as coder. */
+/** C-611: macOS evidence comes from the standard executor, not manual runs. */
+const MACOS_CHECK_RULE =
+  "需要 macOS 实跑证据时，用 `request_macos_check({test_files, idempotency_key})` 对本卡当前交付请求标准 macOS 检查：只传仓库内测试文件，主机取当前交付合入基线后的候选；结果（macOS 版本和架构、hc 版本、各文件通过／失败／跳过数、真实 hc 用例、退出码、步骤计时）自动回填到卡片时间线和附件。可在主机上限内重跑，不另建人工待办或一次性工作流。";
 const CODER_RULES = [
   "- 只在当前 worktree 与分支上改动，本地 commit，不 push。",
   `- 做界面改动时：${UI_COPY_RULE}`,
@@ -297,6 +300,7 @@ const CODER_RULES = [
   "- 预检候选合并冲突（Precheck merge conflict）时，直接 `finish_run` 结束当前 Run，等待系统带着最新基线自动唤醒，无需报告阻塞或声明额外等待。新 Run 先合入已同步的基线并解冲突，再测试、commit、重新预检；系统不会自动解冲突，同一提交自动同步达到上限后交 PM。其它需要新基线的阻塞可用 `report_blocker.resume_when={kind:baseline_updated,target_id:主机登记的基线SHA}`。",
   "- `request_recheck({card_id, reason, idempotency_key})` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。",
   "- 流程版本 ≤2 的旧卡不调用 `request_check`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 `request_recheck`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。",
+  `- ${MACOS_CHECK_RULE}`,
   "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
   `- ${HUMAN_ACTION_MERGE_RULE}`,
 ] as const;
@@ -481,6 +485,7 @@ const ROLE_BODIES: Record<
     "- 用 `get_card` 看清交付的 `subject`、工作项和上轮问题，只审核当前版本。`dev@2` 工程卡由代码审核逐条对照卡片和工作项的验收标准，在 `submit_review` 中写清对应行为、证据和未覆盖项，不能只写通过；它没有 PM 完成验收。`product@1` 保留工作项 PM 完成验收，代码审核仍对照自身验收要求；旧卡按固定模板版本审核。",
     "- 按本卡固定的 `flow_version` 审核：流程版本 ≥3 且启用合并闸门的 Git 交付，只审核已有通过预检的 SHA；从 `get_card.card.prechecks` 核对 `status=passed`、`head_sha` 等于当前交付完整 SHA，缺失、失败、仍在运行或 SHA 不符时报告阻塞，不能把作者自报当作通过。流程版本 ≤2 的旧卡沿用原审核门禁，不要求不存在的作者预检；非 Git 交付或未启用合并闸门时沿用原规则。",
     "- 需要复现时本地只跑卡片允许的相关检查，全量测试和 e2e 结果看绑定 `run_id`、SHA 和候选树的远程 run；可用 `get_check_log` 读取本卡日志，不替作者请求预检或重查。预检通过不代替正式审核、独立复核或最终合并检查。",
+    `- ${MACOS_CHECK_RULE}审核员可直接请求，不要求作者为补证重交。`,
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 里每项写清 severity、must_fix、pre_existing，必要时给 proof。",
     `- ${MUST_FIX_IMPACT_RULE}`,
     ...REVIEW_CONVERGENCE_RULES.map((line) => `- ${line}`),
@@ -502,6 +507,7 @@ const ROLE_BODIES: Record<
     "- 用 `get_card` 确认当前交付 SHA、工作项、验收标准和上轮问题；用 `read_attachment` 读取相关证据。交付变化后核对系统的审核沿用记录，不能证明等价时重新复核。",
     "- 按本卡固定的 `flow_version` 审核：流程版本 ≥3 且启用合并闸门的 Git 交付，只审核已有通过预检的 SHA；从 `get_card.card.prechecks` 核对 `status=passed`、`head_sha` 等于当前交付完整 SHA，缺失、失败、仍在运行或 SHA 不符时报告阻塞，不能把作者自报当作通过。流程版本 ≤2 的旧卡沿用原审核门禁，不要求不存在的作者预检；非 Git 交付或未启用合并闸门时沿用原规则。",
     "- 需要复现时本地只跑卡片允许的相关检查，全量测试和 e2e 结果看绑定 `run_id`、SHA 和候选树的远程 run；可用 `get_check_log` 读取本卡日志，不替作者请求预检或重查。预检通过不代替正式审核、独立复核或最终合并检查。",
+    `- ${MACOS_CHECK_RULE}审核员可直接请求，不要求作者为补证重交。`,
     "- 聚焦真实的安全、权限和数值边界缺陷，例如达到上限后仍能扣款；并发或迁移问题要指出会怎样写错或丢失数据；不复查 `code_review` 已覆盖的风格、命名和普通缺陷。",
     "- 复核员不能是本次交付的作者，不追溯历史 Assignment；发现身份冲突先报告阻塞。",
     "- 用 `submit_review` 提交结论，`target_sha` 必须等于交付的 `subject`；问题写清 severity、must_fix、pre_existing 和证据。",
@@ -775,6 +781,14 @@ export function defaultRoleDefinition(
           : [
               ...common,
               "get_check_log",
+              ...([
+                "coder",
+                "frontend_engineer",
+                "reviewer",
+                "independent_reviewer",
+              ].includes(role)
+                ? ["request_macos_check" as const]
+                : []),
               ...(["coder", "frontend_engineer"].includes(role)
                 ? ["run_probe" as const]
                 : []),

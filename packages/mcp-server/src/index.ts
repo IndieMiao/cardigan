@@ -58,6 +58,12 @@ export {
   hostOpsTools,
 } from "./commands/host-ops-tools.js";
 export { managementTools } from "./commands/management-tools.js";
+export {
+  type ProjectSnapshotInput,
+  type ProjectSnapshotRead,
+  type ProjectSnapshotReader,
+  readProjectSnapshot,
+} from "./commands/support-tools.js";
 export { workerEvidence } from "./commands/worker-evidence.js";
 export {
   ERROR_CODES,
@@ -70,6 +76,11 @@ export {
   memoryLogger,
   stdoutLogger,
 } from "./log.js";
+export {
+  LOOP_DELAY_LIMIT_MS,
+  type LoopDelay,
+  processLoopDelay,
+} from "./offsite/loop-delay.js";
 // C-614: off-site copy of attachments and artifacts in a private OSS bucket.
 export {
   artifactKey,
@@ -113,6 +124,10 @@ export {
   type ToolDefinition,
   whoamiTool,
 } from "./tools/index.js";
+export {
+  type MacosCheckToolOptions,
+  macosCheckTool,
+} from "./tools/macos-check.js";
 export type { SigningScope } from "./tools/mobile-signing.js";
 export {
   continuePublication,

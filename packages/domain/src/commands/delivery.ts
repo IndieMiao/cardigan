@@ -79,7 +79,7 @@ import {
   invalidTestReviewPasses,
   testReviewCandidate,
 } from "./test-review.js";
-import { resumePassedDeliveryWait } from "./work-waits.js";
+import { resumeDeliveryWait } from "./work-waits.js";
 import { activeWork, reviewRound, workCompleted } from "./workflow.js";
 
 export type SubmitDeliveryParams = Pick<
@@ -493,16 +493,15 @@ export function deliverySubmission(
     if (
       item.status === "blocked" &&
       !completion &&
-      p.subject.kind === "git_head" &&
       d.tool === "submit_delivery"
     ) {
-      const resumed = resumePassedDeliveryWait(d, item, p.subject.value);
+      const resumed = resumeDeliveryWait(d, item, p.subject);
       ensure(
-        resumed?.kind === "produce",
+        "item" in resumed && resumed.item.kind === "produce",
         "illegal_transition",
-        "工作项仍有阻塞，只有当前作者等待的同一提交预检通过后才能直接交付",
+        `工作项仍有阻塞：${"reason" in resumed ? resumed.reason : "工作项无法恢复"}`,
       );
-      item = resumed;
+      item = resumed.item;
     }
     const added = upgradeFastPatch(d, {
       ...p,

@@ -152,7 +152,9 @@ test("pasted images are uploaded as evidence on the new comment", async () => {
   const input = screen.getByLabelText("评论正文");
   const file = new File(["png-bytes"], "screenshot.png", { type: "image/png" });
   fireEvent.paste(input, { clipboardData: { files: [file] } });
-  expect(screen.getByText(/已捕获 1 张图片/u)).toBeTruthy();
+  expect(
+    screen.getByRole("list", { name: "待上传的附件" }).textContent,
+  ).toContain("screenshot.png");
   expect((input as HTMLTextAreaElement).rows).toBe(6);
   fireEvent.change(screen.getByLabelText("screenshot.png 的说明"), {
     target: { value: "修复后的界面" },
@@ -170,7 +172,7 @@ test("pasted images are uploaded as evidence on the new comment", async () => {
     attach_to: { kind: "timeline_entry", id: "C-1#43" },
   });
   expect(uploads[0]?.file).toBe(btoa("png-bytes"));
-  expect(screen.queryByText(/已捕获/u)).toBeNull();
+  expect(screen.queryByRole("list", { name: "待上传的附件" })).toBeNull();
 });
 
 test("invalid attachment notes are rejected before posting and a 200-character Unicode note can be sent", async () => {
@@ -226,7 +228,7 @@ test("a file over the host limit is refused when pasted and the comment still go
   const input = screen.getByLabelText("评论正文");
   // The current limit is part of the existing placeholder.
   expect(input.getAttribute("placeholder")).toBe(
-    "支持 Markdown；@ 提及员工；可以直接粘贴图片，单张不超过 30 MiB",
+    "支持 Markdown；@ 提及；# 引用附件；单个文件不超过 30 MiB",
   );
   fireEvent.change(input, { target: { value: "Evidence" } });
   const large = new File(["png"], "large.png", { type: "image/png" });
@@ -235,7 +237,9 @@ test("a file over the host limit is refused when pasted and the comment still go
   Object.defineProperty(exact, "size", { value: 30 * 1024 * 1024 });
   // Refused on paste: never listed, the text stays, the limit is named.
   fireEvent.paste(input, { clipboardData: { files: [large] } });
-  expect(screen.getByRole("alert").textContent).toBe("附件不能超过 30 MiB。");
+  expect(screen.getByRole("alert").textContent).toContain(
+    "large.png：超过 30 MiB",
+  );
   expect(screen.queryByLabelText("large.png 的说明")).toBeNull();
   expect((input as HTMLTextAreaElement).value).toBe("Evidence");
   expect(addComment).not.toHaveBeenCalled();
@@ -258,7 +262,7 @@ test("without a published limit the placeholder and paste behave as before", () 
   );
   const input = screen.getByLabelText("评论正文");
   expect(input.getAttribute("placeholder")).toBe(
-    "支持 Markdown；@ 提及员工；可以直接粘贴图片",
+    "支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件",
   );
   const large = new File(["png"], "large.png", { type: "image/png" });
   Object.defineProperty(large, "size", { value: 64 * 1024 * 1024 });
@@ -364,14 +368,16 @@ test("partial upload failure retains comment and individual image keys on retry"
   expect(input.value).toBe("两张图片");
   fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
   await waitFor(() => expect(input.value).toBe(""));
-  expect(fetcher.mock.calls).toHaveLength(6);
+  // The retry replays the comment and the failed image only (C-615): the
+  // accepted first image is not sent again.
+  expect(fetcher.mock.calls).toHaveLength(5);
   const keys = fetcher.mock.calls.map(([, init]) =>
     new Headers(init?.headers).get("Idempotency-Key"),
   );
   expect(new Set(keys.slice(0, 3)).size).toBe(3);
-  expect(keys.slice(3)).toEqual(keys.slice(0, 3));
+  expect(keys.slice(3)).toEqual([keys[0], keys[2]]);
   expect(fetcher.mock.calls.slice(3).map(([, init]) => init?.body)).toEqual(
-    fetcher.mock.calls.slice(0, 3).map(([, init]) => init?.body),
+    [0, 2].map((i) => fetcher.mock.calls[i]?.[1]?.body),
   );
 });
 

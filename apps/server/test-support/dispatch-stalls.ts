@@ -16,8 +16,8 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
-export function setup() {
-  const f = recoveryFixture();
+export function setup(machine_id = "local") {
+  const f = recoveryFixture(machine_id);
   const { store, project, clock } = f;
   store.uow.run((tx) =>
     tx.roles.put(project, {

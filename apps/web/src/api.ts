@@ -609,6 +609,8 @@ export interface AttachmentView extends AuthorView {
   readonly thumbnail_path: string | null;
   /** Lightbox image for inline bitmaps; older servers omit it. */
   readonly preview_path?: string | null;
+  /** C-615: the `attachment-new-N` of its comment this file fills. */
+  readonly ref_slot?: number;
 }
 
 export interface CardRelations {
@@ -681,6 +683,11 @@ export interface CardDetail {
   readonly decisions: readonly DecisionView[];
   readonly human_actions: readonly HumanActionView[];
   readonly attachments: readonly AttachmentView[];
+  /**
+   * C-615: other cards' attachments this page's bodies mention by number and
+   * the reader may see; anything else stays plain text.
+   */
+  readonly referenced_attachments?: readonly ReferencedAttachment[];
   readonly relations: CardRelations;
   readonly counts: {
     readonly timeline: number;
@@ -716,6 +723,17 @@ export interface UploadAttachmentInput {
     | { readonly kind: "delivery"; readonly id: string };
   readonly basis?: string;
   readonly sha256?: string;
+  /** C-615: the `attachment-new-N` of the comment this file fills. */
+  readonly ref_slot?: number;
+}
+
+/** An attachment of another card, as `CardDetail.referenced_attachments`. */
+export type ReferencedAttachment = AttachmentView & {
+  readonly card_id: string;
+};
+
+export interface AttachmentRefsResponse {
+  readonly attachments: readonly ReferencedAttachment[];
 }
 
 export interface AttachmentReceipt {
@@ -2092,12 +2110,23 @@ export interface OffsiteStatusView {
     readonly estimated_yuan: number;
     readonly budget_yuan?: number;
   };
+  /** C-628: event-loop delay of the syncing process and of the server. */
+  readonly loop_delay?: {
+    readonly sync?: OffsiteLoopDelay;
+    readonly server?: OffsiteLoopDelay;
+  };
   readonly alerts: readonly (
     | "config_invalid"
     | "unreachable"
     | "sync_failed"
     | "over_budget"
+    | "loop_slow"
   )[];
+}
+export interface OffsiteLoopDelay {
+  readonly p99_ms: number;
+  readonly max_ms: number;
+  readonly window_ms: number;
 }
 
 export interface CardiganClient {
@@ -2542,6 +2571,15 @@ export interface CardiganClient {
     projectId: string,
     cardId: string,
   ): Promise<MentionCandidates>;
+  /**
+   * C-615: other cards' attachments the page names but did not receive (a
+   * draft, older timeline pages); unreadable or missing numbers are left out.
+   */
+  attachmentRefs?(
+    projectId: string,
+    cardId: string,
+    ids: readonly string[],
+  ): Promise<AttachmentRefsResponse>;
   addComment(
     projectId: string,
     cardId: string,
@@ -2816,6 +2854,16 @@ export class HttpCardiganClient implements CardiganClient {
   ): Promise<MentionCandidates> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/mentions`,
+    );
+  }
+
+  attachmentRefs(
+    projectId: string,
+    cardId: string,
+    ids: readonly string[],
+  ): Promise<AttachmentRefsResponse> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/attachment-refs?ids=${ids.map(encodeURIComponent).join(",")}`,
     );
   }
 

@@ -46,6 +46,7 @@ import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { mergeProjectSettings } from "../merge-push-loop.js";
 import { readActivity } from "./activity-state.js";
+import { readAttachmentRefs } from "./attachment-ref-read.js";
 import { serveAttachment, serveAttachmentPreview } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
 import { cardSectionPayload } from "./card-sections.js";
@@ -63,8 +64,9 @@ import {
 import { readDecisionHistory } from "./decision-history-state.js";
 import { drainTasks } from "./drain-tasks.js";
 import {
+  ExecutionCapacityCache,
   executionCapacity,
-  executionCapacityRevision,
+  executionCapacityInputs,
 } from "./execution-capacity.js";
 import {
   declaredCapabilities,
@@ -216,6 +218,7 @@ interface RequestContext {
   readonly buildInfo: BuildInfo;
   readonly cardsCache: CardsCacheOptions | undefined;
   readonly needsReadEpoch: string;
+  readonly capacity: ExecutionCapacityCache;
   readonly runLimit: WebServerOptions["runLimit"];
   readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
   readonly machineDisplayName: WebServerOptions["machineDisplayName"];
@@ -262,6 +265,22 @@ export async function startWebServer(
     );
   const clock = options.clock ?? systemClock;
   const needsReadEpoch = randomUUID();
+  // C-634: every SSE connection and the GET share one view per project.
+  const capacity = new ExecutionCapacityCache({
+    now: () => clock.now(),
+    inputs: (now) => executionCapacityInputs(store, now),
+    build: (project, now) =>
+      executionCapacity(
+        store,
+        options.runLimit,
+        options.mergeGate,
+        options.runLimitMaximum,
+        options.machineDisplayName,
+        options.resourceLimits,
+        project,
+        now,
+      ),
+  });
   const limiter = options.loginLimiter ?? new LoginLimiter();
   const log =
     options.log ??
@@ -406,6 +425,7 @@ export async function startWebServer(
         buildInfo,
         cardsCache: options.cardsCache,
         needsReadEpoch,
+        capacity,
         req,
         res,
         url,
@@ -704,17 +724,7 @@ async function serveProjectRoute(
       req,
       res,
       after,
-      capacityRevision: () =>
-        executionCapacityRevision(
-          store,
-          context.runLimit,
-          context.mergeGate,
-          context.runLimitMaximum,
-          context.machineDisplayName,
-          context.resourceLimits,
-          project_id,
-          clock.now(),
-        ),
+      capacityRevision: () => context.capacity.revision(project_id),
       ...(context.stream?.pollMs === undefined
         ? {}
         : { pollMs: context.stream.pollMs }),
@@ -758,20 +768,7 @@ async function serveProjectRoute(
   if (req.method !== "GET") methodNotAllowed(["GET"]);
 
   if (rest === "/execution/capacity") {
-    sendJson(
-      res,
-      200,
-      executionCapacity(
-        store,
-        context.runLimit,
-        context.mergeGate,
-        context.runLimitMaximum,
-        context.machineDisplayName,
-        context.resourceLimits,
-        project_id,
-        clock.now(),
-      ),
-    );
+    sendJson(res, 200, context.capacity.read(project_id).view);
     return;
   }
 
@@ -941,6 +938,59 @@ async function serveProjectRoute(
         throw new HttpRejection(400, "validation_failed", error.message);
       throw error;
     }
+    return;
+  }
+
+  // C-615 / V-3070: another card's attachment as a chip of this card. The
+  // reference is rechecked on every read (sensitive source card, cross-card
+  // reading off); the plain /attachments routes keep their own rules.
+  const refFile =
+    /^\/cards\/([^/]+)\/attachment-refs\/([^/]+)(\/thumbnail|\/preview)?$/.exec(
+      rest,
+    );
+  if (refFile !== null) {
+    const card_id = decodeURIComponent(refFile[1] ?? "") as CardId;
+    const attachment_id = decodeURIComponent(refFile[2] ?? "");
+    const allowed = readAttachmentRefs(
+      store,
+      project_id,
+      card_id,
+      attachment_id,
+    )?.attachments.some((a) => a.id === attachment_id);
+    if (!allowed)
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    const serve =
+      refFile[3] === "/thumbnail"
+        ? serveAttachmentThumbnail
+        : refFile[3] === "/preview"
+          ? serveAttachmentPreview
+          : serveAttachment;
+    const served = await serve({
+      store,
+      project_id,
+      attachment_id,
+      req,
+      res,
+      dataDir: context.dataDir,
+    });
+    if (!served)
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    return;
+  }
+
+  const attachmentRefs = /^\/cards\/([^/]+)\/attachment-refs$/.exec(rest);
+  if (attachmentRefs !== null) {
+    const card_id = decodeURIComponent(attachmentRefs[1] ?? "") as CardId;
+    const refs = readAttachmentRefs(
+      store,
+      project_id,
+      card_id,
+      url.searchParams.get("ids"),
+    );
+    if (refs === undefined) {
+      throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
+    }
+    sendJson(res, 200, refs);
     return;
   }
 

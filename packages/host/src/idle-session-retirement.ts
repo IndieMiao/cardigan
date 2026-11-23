@@ -7,6 +7,7 @@ import {
   confirmWaitingRetirementExit,
   darwinWorker,
   handoffIdleSessionRetirement,
+  humanStopRecorded,
   needsRetirementHandoff,
   type ProjectId,
   type RetirementDispatchWait,
@@ -19,7 +20,6 @@ import {
   runtimeErrorCodes,
   sessionMaintenanceCandidate,
   settleIdleSessionRetirement,
-  stoppedByHuman,
   trackRetirementDispatch,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -372,7 +372,10 @@ export async function retireIdleSessions(
         const state = loadCommandState(tx, project);
         // A missing remote snapshot alone is not proof of exit. The human stop
         // path clears its exact ref only after successful release.
-        if (pending.runtime_ref === null && stoppedByHuman(state.events, a.id))
+        if (
+          pending.runtime_ref === null &&
+          humanStopRecorded(state.events, a.id)
+        )
           result = { outcome: "exited" };
         const retry = Math.min(
           policy.retry_max_ms,

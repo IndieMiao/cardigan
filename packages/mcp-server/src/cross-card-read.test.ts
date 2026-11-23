@@ -9,7 +9,11 @@ import { afterEach, expect, test, vi } from "vitest";
 import { sha256 } from "./attachments.js";
 import { authenticate } from "./auth.js";
 import { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
-import { supportTools } from "./commands/support-tools.js";
+import {
+  type ProjectSnapshotReader,
+  readProjectSnapshot,
+  supportTools,
+} from "./commands/support-tools.js";
 import { toDomainError } from "./errors.js";
 import {
   assignments,
@@ -468,6 +472,53 @@ test("project_snapshot writes no cross-card audit for an own-card-only snapshot"
     cards: [expect.objectContaining({ id: serverCard.id })],
   });
   expect(readAudits(f.store)).toEqual([]);
+});
+
+test("C-648: a host reader serves only the read half; token, audit and its recheck stay on the caller", async () => {
+  const f = fixture();
+  const calls: unknown[] = [];
+  let afterRead: (() => void) | undefined;
+  const reader: ProjectSnapshotReader = async (context, input) => {
+    calls.push([context.identity.actor, input]);
+    const read = readProjectSnapshot(f.store, context.identity.actor, input);
+    afterRead?.();
+    return read;
+  };
+  const hosted = supportTools({ readProjectSnapshot: reader }).find(
+    (t) => t.name === "project_snapshot",
+  );
+  if (!hosted) throw new Error("missing snapshot tool");
+  const inline = await f.snapshot.handler({}, f.context);
+  const result = hosted.handler({}, f.context);
+  expect(result).toBeInstanceOf(Promise);
+  expect(await result).toEqual(inline);
+  expect(calls).toEqual([[f.context.identity.actor, {}]]);
+  expect(readAudits(f.store)).toHaveLength(2);
+  expect(
+    await hosted.handler({ read_audit_employee_id: "E-1" }, f.context),
+  ).toMatchObject({
+    read_audit: [{ tool: "project_snapshot" }, { tool: "project_snapshot" }],
+  });
+  expect(calls.at(-1)).toEqual([
+    f.context.identity.actor,
+    { read_audit_employee_id: "E-1" },
+  ]);
+
+  // Access changed while the read was off the caller: the audit recheck fails closed.
+  afterRead = () =>
+    f.store.uow.run((tx) =>
+      tx.cards.put(project_id, { ...serverCard, id: other, sensitive: true }),
+    );
+  await expect(hosted.handler({}, f.context)).rejects.toThrow(
+    "卡片不存在或无权读取。",
+  );
+  expect(readAudits(f.store)).toHaveLength(3);
+
+  f.store.revokeToken(f.issued.record.id);
+  const count = calls.length;
+  expect(() => hosted.handler({}, f.context)).toThrow("Token 已失效。");
+  expect(calls).toHaveLength(count);
+  expect(readAudits(f.store)).toHaveLength(3);
 });
 
 test("snapshot audit reads shared authority once in its own fresh transaction", () => {
