@@ -81,7 +81,7 @@ export async function serveAttachmentDownload(
       const entry = signed?.synced(artifactKey(blob));
       const location =
         entry?.sha256 === a.sha256 && entry.size === a.size
-          ? signed?.signedUrl(artifactKey(blob))
+          ? signed?.signedUrl(artifactKey(blob))?.url
           : undefined;
       if (location) {
         accessibleAttachment(a.id, context);
@@ -110,7 +110,7 @@ export async function serveAttachmentDownload(
     );
     const location =
       signed?.synced(attachmentKey(attachment.sha256))?.size === attachment.size
-        ? signed.signedUrl(attachmentKey(attachment.sha256))
+        ? signed.signedUrl(attachmentKey(attachment.sha256))?.url
         : undefined;
     if (location) {
       sendSigned(res, attachment, location, false, provenance?.source_card_id);

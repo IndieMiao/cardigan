@@ -68,10 +68,13 @@ export {
   type OffsiteOptions,
   type OffsiteStatusView,
   offsiteFor,
+  offsiteTarget,
   registerOffsite,
+  type SignedLink,
 } from "./offsite/offsite.js";
 export { OssClient, OssError, type OssTransport } from "./offsite/oss.js";
 export {
+  type SyncedLedger,
   type SyncStatus,
   writeSyncStatus,
 } from "./offsite/state.js";

@@ -1,6 +1,7 @@
 /** C-614: Workbench images may come from OSS; the local path always remains. */
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Attachment, CardId, TimelineEntry } from "@cardigan/domain";
@@ -14,6 +15,7 @@ import {
 } from "../../../../packages/mcp-server/test-support/fake-oss.js";
 import { call, type WebHarness, webHarness } from "../../test-support/web.js";
 import { project_id, seedWebProject } from "../../test-support/web-data.js";
+import { redirectToOffsite } from "./thumbnails.js";
 
 const PASSWORD = "offsite-test-password";
 let h: WebHarness | undefined, fake: FakeOss | undefined, root: string;
@@ -164,4 +166,26 @@ test("without OSS every image is served locally and the CSP is unchanged", async
     (await call(h?.port ?? 0, "/api/offsite", { cookie })).json,
   ).toMatchObject({ configured: "absent", alerts: [] });
   expect(fake?.requests).toEqual([]);
+});
+
+test("a redirect is never cached past the end of its signature", () => {
+  const sent: unknown[] = [];
+  const res = {
+    writeHead: (_status: number, headers: Record<string, unknown>) => {
+      sent.push(headers["Cache-Control"]);
+      return res;
+    },
+    end: () => res,
+  } as unknown as ServerResponse;
+  for (const seconds of [600, 120, 60, 20])
+    redirectToOffsite(res, {
+      url: "https://bucket.invalid/x",
+      valid_for_seconds: seconds,
+    });
+  expect(sent).toEqual([
+    "private, max-age=240",
+    "private, max-age=90",
+    "private, max-age=30",
+    "no-store",
+  ]);
 });

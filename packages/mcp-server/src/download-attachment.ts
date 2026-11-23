@@ -22,6 +22,8 @@ class AttachmentDownloadError extends Error {
 }
 
 const SIGNED_TYPE = "application/vnd.cardigan.signed-download+json";
+/** Statuses after which the plain Card MCP channel is tried once more. */
+const RETRY_PLAIN = new Set([408, 429, 500, 502, 503, 504]);
 
 interface Expected {
   readonly size: number;
@@ -185,15 +187,32 @@ export async function downloadAttachment(
           Authorization: `Bearer ${token}`,
           ...(signed ? { "X-Cardigan-Download": "signed-url" } : {}),
         },
-        redirect: "error",
+        // Never followed. With the offer a redirect comes back as a response
+        // (and fails below without a retry); a thrown error is then only a
+        // connection failure, which the plain channel may not repeat.
+        redirect: signed ? "manual" : "error",
         signal: AbortSignal.timeout(60 * 60_000),
       });
     } catch {
       throw new AttachmentDownloadError("download");
     }
   };
-  let response = await request(true);
-  if (response.ok && response.headers.get("content-type") === SIGNED_TYPE) {
+  // C-614: the signed-URL offer is optional. If asking for it fails in a way
+  // the plain channel may not (connection, timeout, server or rate-limit
+  // error), ask once more without it, with the same credential and checks.
+  let response: Response;
+  try {
+    response = await request(true);
+  } catch {
+    response = await request(false);
+  }
+  if (RETRY_PLAIN.has(response.status)) {
+    await response.body?.cancel().catch(() => undefined);
+    response = await request(false);
+  } else if (
+    response.ok &&
+    response.headers.get("content-type") === SIGNED_TYPE
+  ) {
     const reference = response.headers.has("x-source-card-id");
     const saved = await fromSignedUrl(response, attachmentId, file);
     if (saved)

@@ -12,8 +12,11 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
@@ -48,7 +51,7 @@ import {
   Offsite,
   registerOffsite,
 } from "./offsite.js";
-import type { OssClient } from "./oss.js";
+import { OssClient, presignGet } from "./oss.js";
 import { SyncedLedger } from "./state.js";
 
 let root: string, dataDir: string, configDir: string;
@@ -132,8 +135,9 @@ test("configuration: absent, private-only, and both credential layouts", async (
 });
 
 test("the ledger is shared append-only and ignores torn or foreign lines", async () => {
-  const writer = new SyncedLedger(dataDir);
-  const reader = new SyncedLedger(dataDir);
+  const target = "0123456789abcdef";
+  const writer = new SyncedLedger(dataDir, target);
+  const reader = new SyncedLedger(dataDir, target);
   writer.record({
     key: attachmentKey("a".repeat(64)),
     sha256: "a".repeat(64),
@@ -141,7 +145,7 @@ test("the ledger is shared append-only and ignores torn or foreign lines", async
     at: NOW,
   });
   expect(reader.refresh().get(attachmentKey("a".repeat(64)))?.size).toBe(3);
-  const file = join(dataDir, "offsite", "synced.jsonl");
+  const file = join(dataDir, "offsite", `synced-${target}.jsonl`);
   expect((await stat(file)).mode & 0o777).toBe(0o600);
   await appendFile(
     file,
@@ -163,8 +167,10 @@ test("signed URLs cover every parameter; tampering and expiry are refused", asyn
   const body = Buffer.from("image bytes");
   const digest = synced(o, attachmentKey("c".repeat(64)), body);
   expect(digest).toHaveLength(64);
-  const url = o.thumbnailUrl("c".repeat(64));
+  const url = o.thumbnailUrl("c".repeat(64))?.url;
   expect(url).toBeDefined();
+  // Signed at 03:00:00 (stable window) for 600 seconds; now is 03:00:10.
+  expect(o.thumbnailUrl("c".repeat(64))?.valid_for_seconds).toBe(590);
   const parsed = new URL(url ?? "");
   expect(parsed.searchParams.get("x-oss-process")).toContain("resize,w_480");
   expect(parsed.searchParams.get("x-oss-signature-version")).toBe(
@@ -178,9 +184,9 @@ test("signed URLs cover every parameter; tampering and expiry are refused", asyn
   expect((await fetch(tampered)).status).toBe(403);
   // Stable within half the lifetime, so the browser reuses its cache.
   clock = new Date("2026-11-23T03:04:59.000Z");
-  expect(o.thumbnailUrl("c".repeat(64))).toBe(url);
+  expect(o.thumbnailUrl("c".repeat(64))?.url).toBe(url);
   clock = new Date("2026-11-23T03:05:00.000Z");
-  expect(o.thumbnailUrl("c".repeat(64))).not.toBe(url);
+  expect(o.thumbnailUrl("c".repeat(64))?.url).not.toBe(url);
   // Signed at 03:00:00 for 600 seconds.
   clock = new Date("2026-11-23T03:10:01.000Z");
   expect((await fetch(parsed)).status).toBe(403);
@@ -260,6 +266,66 @@ test("a streamed artifact gone locally is restored from its verified copy", asyn
   });
 });
 
+test("after the data directory is lost, recorded content comes back from the bucket by its key", async () => {
+  // The objects exist remotely; the ledger went with the data directory.
+  const body = Buffer.from("attachment restored after a disk loss");
+  const digest = sha256(body);
+  fake.objects.set(attachmentKey(digest), { body, sha256: digest });
+  const blob = "2f0f0f0f-1111-2222-3333-444444444444";
+  const big = Buffer.alloc(128 * 1024, 5);
+  fake.objects.set(artifactKey(blob), { body: big, sha256: sha256(big) });
+  const o = await offsite();
+  expect(o.ledger.count).toBe(0);
+  expect(await fileAttachmentStore(dataDir).get(digest)).toEqual(body);
+  expect(await readFile(join(dataDir, "attachments", digest))).toEqual(body);
+  // There is no artifacts/ directory at all.
+  const file = await openArtifact(dataDir, {
+    id: "F-1",
+    sha256: sha256(big),
+    size: big.length,
+    streamed_artifact: { blob_id: blob },
+  } as unknown as Attachment);
+  await file.close();
+  expect(await readFile(join(dataDir, "artifacts", blob))).toEqual(big);
+  expect((await stat(join(dataDir, "artifacts"))).mode & 0o777).toBe(0o700);
+  // Verified reads are recorded, so signed URLs work again.
+  expect(o.ledger.count).toBe(2);
+  expect(o.thumbnailUrl(digest)).toBeDefined();
+});
+
+test("without a ledger entry, other bytes are refused and a missing object is not asked again soon", async () => {
+  const o = await offsite();
+  const body = Buffer.from("never trusted without its digest");
+  const digest = sha256(body);
+  fake.objects.set(attachmentKey(digest), { body: Buffer.from("other bytes") });
+  expect(await fileAttachmentStore(dataDir).get(digest)).toBeUndefined();
+  await expect(
+    stat(join(dataDir, "attachments", digest)),
+  ).rejects.toMatchObject({ code: "ENOENT" });
+  const blob = "3f0f0f0f-1111-2222-3333-444444444444";
+  fake.objects.set(artifactKey(blob), { body: Buffer.from("other bytes") });
+  await expect(
+    openArtifact(dataDir, {
+      id: "F-2",
+      sha256: digest,
+      size: 11,
+      streamed_artifact: { blob_id: blob },
+    } as unknown as Attachment),
+  ).rejects.toMatchObject({ code: "not_found" });
+  expect(o.ledger.count).toBe(0);
+  const missing = "9".repeat(64);
+  const gets = () =>
+    fake.requests.filter(
+      (r) => r.method === "GET" && r.key === attachmentKey(missing),
+    ).length;
+  expect(await fileAttachmentStore(dataDir).get(missing)).toBeUndefined();
+  expect(await fileAttachmentStore(dataDir).get(missing)).toBeUndefined();
+  expect(gets()).toBe(1);
+  clock = new Date(clock.getTime() + 10 * 60_000 + 1);
+  expect(await fileAttachmentStore(dataDir).get(missing)).toBeUndefined();
+  expect(gets()).toBe(2);
+});
+
 test("uploads never overwrite and carry the verified digest", async () => {
   const o = await offsite();
   const client = o.client() as OssClient;
@@ -296,6 +362,142 @@ test("usage and the monthly estimate show on the status; over budget only alerts
   // Over budget still signs.
   expect(o.previewUrl(sha256(body), "image/png")).toBeDefined();
   expect(JSON.stringify(status)).not.toContain("fixture-secret");
+});
+
+test("requests are charged in the month they happen; only storage carries over", async () => {
+  const o = await offsite({
+    monthly_budget_yuan: 1.5,
+    prices: {
+      storage_gb_month: 0,
+      egress_gb: 0,
+      image_process_gb: 0,
+      requests_10k: 10_000,
+    },
+  });
+  const body = Buffer.from("one object");
+  synced(o, attachmentKey(sha256(body)), body);
+  // Its one upload, counted by the sync when it happened.
+  o.usage.add({ requests: 1 });
+  const november = o.status();
+  expect(november.usage).toMatchObject({
+    month: "2026-11",
+    requests: 1,
+    estimated_yuan: 1,
+  });
+  expect(november.alerts).toEqual([]);
+  clock = new Date("2026-12-02T00:00:00.000Z");
+  const december = o.status();
+  expect(december.usage).toMatchObject({
+    month: "2026-12",
+    requests: 0,
+    estimated_yuan: 0,
+  });
+  expect(december.alerts).toEqual([]);
+});
+
+test.each(["503", "reset"] as const)(
+  "when asking for a signed URL fails (%s), the helper retries once on the plain channel",
+  async (failure) => {
+    const body = Buffer.from("bytes from the plain Card MCP channel");
+    const seen: (string | undefined)[] = [];
+    const server = createServer((req, res) => {
+      const offer = req.headers["x-cardigan-download"];
+      seen.push(typeof offer === "string" ? offer : undefined);
+      if (req.headers.authorization !== "Bearer fixture-token") {
+        res.writeHead(401).end();
+        return;
+      }
+      if (offer === "signed-url") {
+        if (failure === "reset") req.socket.destroy();
+        else res.writeHead(503).end();
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": body.length,
+        "X-Attachment-Id": "F-7",
+        "X-Attachment-Sha256": sha256(body),
+      });
+      res.end(body);
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    cleanup.push(
+      () =>
+        new Promise<void>((done) => {
+          server.closeAllConnections();
+          server.close(() => done());
+        }),
+    );
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/attachments`;
+    const file = join(root, `plain-${failure}`);
+    expect(
+      await downloadAttachment(url, "F-7", file, "fixture-token"),
+    ).toMatchObject({ via: "card_mcp", sha256: sha256(body) });
+    expect(await readFile(file)).toEqual(body);
+    expect(seen).toEqual(["signed-url", undefined]);
+    // Errors the plain channel would repeat are not retried.
+    seen.length = 0;
+    await expect(
+      downloadAttachment(url, "F-7", join(root, "denied"), "wrong-token"),
+    ).rejects.toThrow("[download]");
+    expect(seen).toEqual(["signed-url"]);
+  },
+);
+
+/**
+ * Fixed V4 vectors. The expected signatures come from a separate Python
+ * implementation of the published OSS V4 algorithm (canonical request, scope
+ * `<day>/<region>/oss/aliyun_v4_request`, key `aliyun_v4<secret>` chained over
+ * day, region, `oss`, `aliyun_v4_request`), not from this module.
+ */
+test("V4 signatures match fixed vectors for a header-signed PUT and a pre-signed GET", async () => {
+  const credentials = {
+    bucket: "examplebucket",
+    region: "cn-hangzhou",
+    access_key_id: "LTAI5tExampleKeyId",
+    access_key_secret: "ExampleSecret0123456789",
+  };
+  const at = new Date("2026-11-23T03:15:00.000Z");
+  const sent: { url: string; headers: Record<string, string> }[] = [];
+  const client = new OssClient(
+    credentials,
+    async (url, init) => {
+      sent.push({ url, headers: init.headers });
+      return Object.assign(Readable.from([]), {
+        statusCode: 200,
+        headers: {},
+      }) as never;
+    },
+    () => at,
+  );
+  await client.put(attachmentKey("a".repeat(64)), Buffer.alloc(0), {
+    size: 0,
+    sha256: "a".repeat(64),
+    md5: "1B2M2Y8AsgTpgAmY7PhCfg==",
+  });
+  expect(sent[0]?.url).toBe(
+    `https://examplebucket.oss-cn-hangzhou.aliyuncs.com/attachments/${"a".repeat(64)}`,
+  );
+  expect(sent[0]?.headers.authorization).toBe(
+    "OSS4-HMAC-SHA256 Credential=LTAI5tExampleKeyId/20261123/cn-hangzhou/oss/aliyun_v4_request,Signature=8031c46f68dbb5f6efb2e3af3feda0ed4f03529572574e53d7cdb47071d9420c",
+  );
+  const url = new URL(
+    presignGet(
+      credentials,
+      artifactKey("0f0f0f0f-1111-2222-3333-444444444444"),
+      {
+        expires: 600,
+        at,
+        query: { "x-oss-process": "image/resize,w_480" },
+      },
+    ),
+  );
+  expect(url.searchParams.get("x-oss-signature")).toBe(
+    "004673b1cf89420a1ece8b331da44b11bb415d70d03728f9043ae492754145af",
+  );
+  expect(url.searchParams.get("x-oss-credential")).toBe(
+    "LTAI5tExampleKeyId/20261123/cn-hangzhou/oss/aliyun_v4_request",
+  );
 });
 
 describe_download();

@@ -16,10 +16,14 @@ import {
 import { join, resolve } from "node:path";
 
 /**
- * C-614 bookkeeping under `<dataDir>/offsite/` (0700). The background sync is
- * the only writer of the ledger and status; any process may read them. Usage
- * counters are written per process role so two processes never share a file.
- * Nothing here is ever deleted by Cardigan.
+ * C-614 bookkeeping under `<dataDir>/offsite/` (0700). The background sync
+ * writes the status; it and verified restores append to the ledger; any
+ * process may read them. Usage counters are written per process role so two
+ * processes never share a file. Nothing here is ever deleted by Cardigan.
+ *
+ * The ledger and the status belong to one target (endpoint, bucket and
+ * region, see `offsiteTarget`): switching the configuration to another bucket
+ * starts an empty ledger, so every object is copied there again.
  */
 export const offsiteDirectory = (dataDir: string) =>
   resolve(dataDir, "offsite");
@@ -36,6 +40,7 @@ function ensureDirectory(path: string) {
   if (!lstatSync(path).isDirectory()) throw new Error("offsite directory");
 }
 
+const TARGET = /^[a-f0-9]{16}$/u;
 const KEY = /^(?:attachments\/[a-f0-9]{64}|artifacts\/[a-f0-9-]{36})$/u;
 
 /** Append-only record of objects whose upload was verified. */
@@ -47,9 +52,13 @@ export class SyncedLedger {
   private identity = "";
   private bytes = 0;
 
-  constructor(dataDir: string) {
+  constructor(
+    dataDir: string,
+    readonly target: string,
+  ) {
+    if (!TARGET.test(target)) throw new Error("invalid offsite target");
     this.dir = offsiteDirectory(dataDir);
-    this.file = join(this.dir, "synced.jsonl");
+    this.file = join(this.dir, `synced-${target}.jsonl`);
   }
 
   /** Read lines appended since the last call; a replaced file is re-read. */
@@ -138,6 +147,8 @@ export class SyncedLedger {
 
 export interface SyncStatus {
   readonly checked_at: string;
+  /** `offsiteTarget` of the configuration the status describes. */
+  readonly target?: string;
   readonly configured: "absent" | "invalid" | "ready";
   readonly pending: { readonly count: number; readonly bytes: number };
   readonly failed: {

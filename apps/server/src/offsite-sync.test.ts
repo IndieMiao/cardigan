@@ -75,9 +75,18 @@ async function harness(configured = true) {
       ),
   };
 }
-async function attachment(text: string) {
+/** A committed attachment record for `digest` (not a streamed artifact). */
+function recordAttachment(digest: string, size: number) {
+  records.push({
+    id: `F-${records.length + 1}`,
+    sha256: digest,
+    size,
+  } as unknown as Attachment);
+}
+async function attachment(text: string, recorded = true) {
   const body = Buffer.from(text);
   await fileAttachmentStore(dataDir).put(sha(body), body);
+  if (recorded) recordAttachment(sha(body), body.length);
   return { body, digest: sha(body) };
 }
 async function artifact(blob: string, body: Buffer) {
@@ -189,6 +198,7 @@ test("a corrupt local file is never copied", async () => {
   await writeFile(join(dataDir, "attachments", "e".repeat(64)), "bad", {
     mode: 0o600,
   });
+  recordAttachment("e".repeat(64), 3);
   await artifact(BLOB, Buffer.from("recorded"));
   await writeFile(join(dataDir, "artifacts", BLOB), "tampered", {
     mode: 0o600,
@@ -237,4 +247,94 @@ test("an outage with nothing left to retry clears once OSS answers again", async
     pending: { count: 0 },
     failed: { count: 0 },
   });
+});
+
+test("an attachment blob without a committed record stays local until one is committed", async () => {
+  const kept = await attachment("recorded attachment");
+  // The blob of an upload the domain rejected: written first, never recorded.
+  const rejected = await attachment("rejected upload", false);
+  const h = await harness();
+  await h.sync.tick();
+  expect([...fake.objects.keys()]).toEqual([attachmentKey(kept.digest)]);
+  expect(await h.status()).toMatchObject({
+    pending: { count: 0 },
+    failed: { count: 0 },
+  });
+  // Never removed locally.
+  expect(await readFile(join(dataDir, "attachments", rejected.digest))).toEqual(
+    rejected.body,
+  );
+  // Committed later: copied once the records are read again.
+  recordAttachment(rejected.digest, rejected.body.length);
+  clock = new Date(clock.getTime() + 61_000);
+  await h.sync.tick();
+  expect(fake.objects.has(attachmentKey(rejected.digest))).toBe(true);
+});
+
+test("switching to another bucket copies everything there again", async () => {
+  const one = await attachment("copied to the first bucket");
+  await artifact(BLOB, Buffer.alloc(2048, 3));
+  const h = await harness();
+  await h.sync.tick();
+  expect(fake.objects.size).toBe(2);
+  const first = (await h.status()).target;
+  const other = await startFakeOss(() => clock);
+  try {
+    await writeStorageConfig(configDir, other);
+    clock = new Date(clock.getTime() + 61_000);
+    // The first bucket's copies do not count for the second one.
+    expect(h.offsite.ledger.count).toBe(0);
+    expect(h.offsite.thumbnailUrl(one.digest)).toBeUndefined();
+    await h.sync.tick();
+    expect([...other.objects.keys()].sort()).toEqual(
+      [attachmentKey(one.digest), artifactKey(BLOB)].sort(),
+    );
+    const status = await h.status();
+    expect(status.target).not.toBe(first);
+    expect(status).toMatchObject({
+      pending: { count: 0 },
+      failed: { count: 0 },
+      reachable: true,
+    });
+    expect(h.offsite.ledger.count).toBe(2);
+    expect(h.offsite.thumbnailUrl(one.digest)?.url).toMatch(
+      new RegExp(`^${other.endpoint}/`, "u"),
+    );
+  } finally {
+    await other.close();
+  }
+});
+
+test("an idle, fully synced copy still notices an outage or a refused key, and recovery", async () => {
+  const one = await attachment("synced before the outage");
+  const h = await harness();
+  await h.sync.tick();
+  expect(await h.status()).toMatchObject({
+    pending: { count: 0 },
+    reachable: true,
+  });
+  // Idle checks are rate-limited: nothing is sent within the probe interval.
+  const sent = fake.requests.length;
+  clock = new Date(clock.getTime() + 30_000);
+  await h.sync.tick();
+  expect(fake.requests).toHaveLength(sent);
+  for (const mode of ["down", "denied"] as const) {
+    fake.mode = mode;
+    clock = new Date(clock.getTime() + 5 * 60_000);
+    await h.sync.tick();
+    expect(await h.status()).toMatchObject({ reachable: false });
+    expect(h.offsite.status().alerts).toContain("unreachable");
+    // No URL that cannot work is handed out; local reads are unaffected.
+    expect(h.offsite.thumbnailUrl(one.digest)).toBeUndefined();
+    expect(await fileAttachmentStore(dataDir).get(one.digest)).toEqual(
+      one.body,
+    );
+    // While down, every tick checks again, so recovery shows promptly.
+    fake.mode = "up";
+    clock = new Date(clock.getTime() + 30_000);
+    await h.sync.tick();
+    expect(await h.status()).toMatchObject({ reachable: true });
+    expect(h.offsite.status().alerts).toEqual([]);
+    expect(h.offsite.thumbnailUrl(one.digest)).toBeDefined();
+  }
 });

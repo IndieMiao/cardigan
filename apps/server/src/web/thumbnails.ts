@@ -343,14 +343,28 @@ export function localOnly(req: IncomingMessage) {
   return /[?&]local=1(?:&|$)/u.test(req.url ?? "");
 }
 
+const REDIRECT_MAX_AGE_SECONDS = 240;
+const REDIRECT_MARGIN_SECONDS = 30;
 /**
  * Same-session redirect to a signed, short-lived OSS URL. The redirect may be
- * reused for a few minutes; the URL itself stays valid for longer.
+ * reused for a few minutes, never beyond the signature's remaining lifetime.
  */
-export function redirectToOffsite(res: ServerResponse, url: string) {
+export function redirectToOffsite(
+  res: ServerResponse,
+  link: { readonly url: string; readonly valid_for_seconds: number },
+) {
+  // Never let the browser reuse a redirect past (or close to) the end of the
+  // signature: an expired URL would only send it back to the local path.
+  const maxAge = Math.max(
+    0,
+    Math.min(
+      REDIRECT_MAX_AGE_SECONDS,
+      link.valid_for_seconds - REDIRECT_MARGIN_SECONDS,
+    ),
+  );
   res.writeHead(302, {
-    Location: url,
-    "Cache-Control": "private, max-age=240",
+    Location: link.url,
+    "Cache-Control": maxAge > 0 ? `private, max-age=${maxAge}` : "no-store",
     "Content-Security-Policy": "default-src 'none'; sandbox",
   });
   res.end();
