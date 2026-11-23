@@ -182,15 +182,36 @@ test("an existing object is accepted only when it holds the same bytes, and is n
   });
   const foreign = { body: Buffer.from("not ours"), sha256: "f".repeat(64) };
   fake.objects.set(attachmentKey(other.digest), foreign);
+  // Same length and the right metadata, but a damaged body.
+  const damaged = await attachment("damaged remote body");
+  const bad = {
+    body: Buffer.alloc(damaged.body.length, 0x41),
+    sha256: damaged.digest,
+  };
+  fake.objects.set(attachmentKey(damaged.digest), bad);
   const h = await harness();
   await h.sync.tick();
   expect(h.offsite.ledger.get(attachmentKey(same.digest))).toBeDefined();
   expect(h.offsite.ledger.get(attachmentKey(other.digest))).toBeUndefined();
+  expect(h.offsite.ledger.get(attachmentKey(damaged.digest))).toBeUndefined();
+  // Never overwritten.
   expect(fake.objects.get(attachmentKey(other.digest))).toBe(foreign);
+  expect(fake.objects.get(attachmentKey(damaged.digest))).toBe(bad);
+  // The existing objects' content was read, not just their metadata.
+  expect(
+    fake.requests
+      .filter((r) => r.method === "GET")
+      .map((r) => r.key)
+      .sort(),
+  ).toEqual(
+    [same.digest, other.digest, damaged.digest].map(attachmentKey).sort(),
+  );
   expect(await h.status()).toMatchObject({
-    failed: { count: 1, last_code: "integrity" },
+    pending: { count: 2 },
+    failed: { count: 2, last_code: "integrity" },
     reachable: true,
   });
+  expect(h.offsite.thumbnailUrl(damaged.digest)).toBeUndefined();
 });
 
 test("a corrupt local file is never copied", async () => {

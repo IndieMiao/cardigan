@@ -316,6 +316,37 @@ export class OffsiteSync {
     return this.records;
   }
 
+  /** Stream the existing object and compare its length and SHA-256. */
+  private async verifyRemote(client: OssClient, item: Candidate) {
+    const { offsite } = this.options;
+    let bytes = 0;
+    try {
+      const res = await client.get(
+        item.key,
+        Math.max(120_000, Math.ceil(item.size / 1024)),
+        this.abort.signal,
+      );
+      const hash = createHash("sha256");
+      try {
+        for await (const chunk of res as AsyncIterable<Buffer>) {
+          bytes += chunk.length;
+          if (bytes > item.size) throw new OssError("integrity");
+          hash.update(chunk);
+        }
+      } finally {
+        res.destroy();
+      }
+      if (bytes !== item.size || hash.digest("hex") !== item.sha256)
+        throw new OssError("integrity");
+    } catch (error) {
+      if (error instanceof OssError) throw error;
+      // A body cut off mid-stream: try again later like any other outage.
+      throw new OssError("network");
+    } finally {
+      offsite.usage.add({ requests: 1, egress_bytes: bytes });
+    }
+  }
+
   private async upload(
     item: Candidate,
     client: OssClient,
@@ -357,11 +388,10 @@ export class OffsiteSync {
       );
       offsite.usage.add({ requests: 1 });
       if (result === "exists") {
-        // Never overwritten: accept the object only if it is the same bytes.
-        const head = await client.head(item.key, this.abort.signal);
-        offsite.usage.add({ requests: 1 });
-        if (head?.size !== item.size || head.sha256 !== item.sha256)
-          throw new OssError("integrity");
+        // Never overwritten or deleted: the object counts as a copy only if
+        // its actual content hashes to the recorded digest. Metadata alone
+        // (size, `x-oss-meta-sha256`) can match a damaged body.
+        await this.verifyRemote(client, item);
       }
       ledger.record({
         key: item.key,
