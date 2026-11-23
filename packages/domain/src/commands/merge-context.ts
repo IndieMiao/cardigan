@@ -2,22 +2,40 @@ import type { Card } from "../entities.js";
 import type { CardId } from "../ids.js";
 import { type CommandState, ensure } from "./core.js";
 
-const newest = <T extends { readonly id: string }>(values: readonly T[]) =>
-  [...values].sort(
-    (a, b) => Number(b.id.replace(/\D/g, "")) - Number(a.id.replace(/\D/g, "")),
-  )[0];
+const idNumber = (id: string) => Number(id.replace(/\D/g, ""));
+
+/**
+ * C-631: the value with the largest numeric id, first one on ties — the same
+ * pick as a stable descending sort, without copying and sorting the input.
+ */
+export function newestById<T extends { readonly id: string }>(
+  values: Iterable<T>,
+): T | undefined {
+  let best: T | undefined;
+  let bestN = 0;
+  for (const v of values) {
+    const n = idNumber(v.id);
+    if (best === undefined || n > bestN) {
+      best = v;
+      bestN = n;
+    }
+  }
+  return best;
+}
+
+/** C-631: one pass over work items, then one pass over deliveries. */
 export function acceptedCompletion(
   state: Pick<CommandState, "work_items" | "deliveries">,
   card: Card,
 ) {
-  const value = newest(
+  const ids = new Set<string>();
+  for (const w of state.work_items) if (w.card_id === card.id) ids.add(w.id);
+  const value = newestById(
     state.deliveries.filter(
       (v) =>
         v.kind === "card_completion" &&
         v.status !== "superseded" &&
-        state.work_items.some(
-          (w) => w.card_id === card.id && w.id === v.work_item_id,
-        ),
+        ids.has(v.work_item_id),
     ),
   );
   ensure(
