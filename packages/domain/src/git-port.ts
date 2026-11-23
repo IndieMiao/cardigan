@@ -59,6 +59,8 @@ export interface GitWorktreePort {
     options: { readonly force: boolean },
   ): Promise<void>;
   deleteBranch(repository: string, branch: string): Promise<void>;
+  /** C-664: `git worktree prune`; drops only registrations without a directory. */
+  pruneWorktrees?(repository: string): Promise<void>;
 }
 
 /** In-memory result of `merge-tree --write-tree`; conflicts never move a ref. */

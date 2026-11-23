@@ -527,6 +527,26 @@ export class GitWorktreeService {
   }
 
   /**
+   * C-664: Assignment ids with a write/review worktree directory or a Git
+   * registration under this machine's `worktrees/<project>` root. Used by the
+   * cleanup loop instead of host-side `access()`, which cannot see a worker.
+   */
+  async listWorktreeOwners(project_id: string): Promise<readonly string[]> {
+    if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project_id))
+      throw new Error("Invalid project path component");
+    const root = join(this.worktrees, project_id),
+      repository = join(this.repositories, project_id);
+    const found = new Set(
+      (await this.files.directories(root)).map((path) => basename(path)),
+    );
+    if (await this.files.exists(repository))
+      for (const entry of await this.git.listWorktrees(repository))
+        if (dirname(resolve(entry.path)) === root)
+          found.add(basename(entry.path));
+    return [...found].filter((name) => parseId("assignment", name).ok).sort();
+  }
+
+  /**
    * P2a-3: remove a build checkout without asking — it holds no work. `idle`
    * is re-evaluated under the repository lock, after any concurrent
    * preparation finished, so a Run that just started keeps its checkout.
@@ -588,6 +608,9 @@ export class GitWorktreeService {
         await this.git.removeWorktree(repository, path, { force: true });
     }
     await this.pruneBuild(path);
+    // C-664: drop registrations whose directories are already gone, as a
+    // manual `rm` + `git worktree prune` would; Git keeps locked entries.
+    await this.git.pruneWorktrees?.(repository);
   }
   private async pruneBuild(path: string): Promise<void> {
     await this.files.removeEmpty(path).catch((error) => {
@@ -607,14 +630,19 @@ export class GitWorktreeService {
       assignment.machine_id !== this.machineId ||
       !parseId("assignment", assignment.id).ok ||
       assignment.scope !== "work_item" ||
-      !assignment.worktree_path ||
-      !isAbsolute(assignment.worktree_path)
+      (assignment.worktree_path !== undefined &&
+        !isAbsolute(assignment.worktree_path))
     )
       throw new Error(
-        "Cleanup requires a work-item Assignment with an absolute worktree path",
+        "Cleanup requires a work-item Assignment of this machine; a recorded worktree path must be absolute",
       );
+    // C-664: the only directory an Assignment may own is fixed by project,
+    // machine and id. A released record that lost its path still locates it.
     const path = join(this.worktrees, project_id, assignment.id);
-    if (resolve(assignment.worktree_path) !== path)
+    if (
+      assignment.worktree_path !== undefined &&
+      resolve(assignment.worktree_path) !== path
+    )
       throw new Error("Assignment worktree is outside its project root");
     return {
       path,
