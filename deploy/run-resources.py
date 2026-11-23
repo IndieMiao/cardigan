@@ -193,6 +193,12 @@ def verify_state(public, signature, payload):
         for fd in fds: os.close(fd)
 
 
+READ_TIMEOUT = 10  # seconds per socket operation of one lifecycle read
+READ_BOUND = 15  # seconds for a whole read, the same as the re-read interval
+STARTUP_WAIT = 30  # seconds the first read may keep answering unknown
+STARTUP_RETRY = 1
+
+
 def host_state(key, read_key):
     endpoint, project, machine, registration, public = AUTHORITY
     url = urlsplit(endpoint)
@@ -201,7 +207,9 @@ def host_state(key, read_key):
     nonce = f'{int(time.time()*1000):016x}' + os.urandom(24).hex()
     started = time.monotonic()
     proof = hmac.new(read_key, f'resource-read-v1:{registration}:{key}:{nonce}'.encode('ascii'), 'sha256').hexdigest()
-    client = (http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection)(url.hostname, url.port, timeout=2)
+    # C-605: a saturated worker link has shown 2-6 s round trips; TLS needs
+    # several. The signed per-request nonce, not this bound, prevents replay.
+    client = (http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection)(url.hostname, url.port, timeout=READ_TIMEOUT)
     try:
         client.request('GET', '/mcp?run_resource=' + key, headers={'X-Resource-Nonce':nonce,
             'X-Resource-Registration':registration, 'X-Resource-Proof':proof})
@@ -216,7 +224,7 @@ def host_state(key, read_key):
         fields = json.loads(payload)
         require(isinstance(fields, list) and len(fields) == 7 and fields[:-1] == [
             'resource-state-v1', registration, nonce, key, project, machine])
-        require(fields[-1] in ('active', 'ended', 'expired_preview', 'unknown') and time.monotonic()-started < 5)
+        require(fields[-1] in ('active', 'ended', 'expired_preview', 'unknown') and time.monotonic()-started < READ_BOUND)
         return fields[-1]
     finally:
         client.close()
@@ -228,8 +236,8 @@ class Confirmation:
         self.key, self.interval, self.next = key, interval, 0
         self.last = None
 
-    def state(self):
-        if time.monotonic() < self.next:
+    def state(self, fresh=False):
+        if not fresh and time.monotonic() < self.next:
             return self.last
         self.next = time.monotonic() + self.interval
         try:
@@ -414,7 +422,12 @@ def supervisor_lost(child):
 
 def prepare(tag, key, base, confirmation):
     """Runs in the supervisor: lifecycle read, scratch directories, audit."""
-    state = confirmation.state()
+    # One failed read on a busy link is not a refusal; a terminal answer is.
+    deadline = time.monotonic() + STARTUP_WAIT
+    state = confirmation.state(fresh=True)
+    while state == 'unknown' and time.monotonic() < deadline:
+        time.sleep(STARTUP_RETRY)
+        state = confirmation.state(fresh=True)
     if state != 'active':
         return None, 'run not active (' + str(state) + ')'
     root, parent = namespace(tag, True, base)

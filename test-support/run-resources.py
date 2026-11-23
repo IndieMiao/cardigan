@@ -43,7 +43,12 @@ class Authority(BaseHTTPRequestHandler):
         proof = hmac.new(hashlib.sha256(b'synthetic').digest(),f'resource-read-v1:{registration}:{key}:{nonce}'.encode(),'sha256').hexdigest()
         if not hmac.compare_digest(self.headers['X-Resource-Proof'],proof):
             self.send_error(403); return
+        if states.get(key) == 'unanswered':  # a read that fails outright
+            served[key, 'unanswered'] += 1
+            self.send_error(503); return
         state = states.get(key, 'active')
+        if state == 'slow':  # a saturated link: answer after 3 s
+            time.sleep(3); state = 'active'
         if state == 'ended' and key in held_terminal:
             arrived, release = held_terminal[key]
             arrived.set(); assert release.wait(timeout=2)
@@ -547,6 +552,29 @@ data=s.recv(128)
             session.terminate(); session.wait(timeout=3)
 
 
+def slow_start(base):
+    # C-605: startup on a busy link. A failed first read is retried; a slow
+    # (3 s) answer is accepted; the command then runs normally.
+    with subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(30)']) as session:
+        try:
+            key = 'A-9.R-1.R-4'
+            states[key] = 'unanswered'
+            job = subprocess.Popen([sys.executable, '-IB', '-c', stub, str(source), TAG, key, str(session.pid), base,
+                                    sys.executable, '-I', '-c', 'raise SystemExit(4)'], stderr=subprocess.PIPE)
+            until(lambda: served[key, 'unanswered'] >= 2)
+            assert job.poll() is None
+            states[key] = 'active'
+            assert job.wait(timeout=6) == 4 and os.read(job.stderr.fileno(), 4096) == b''
+            job.stderr.close()
+            key = 'A-9.R-1.R-5'
+            states[key] = 'slow'
+            run = subprocess.run([sys.executable, '-IB', '-c', stub, str(source), TAG, key, str(session.pid), base,
+                                  sys.executable, '-I', '-c', 'raise SystemExit(5)'], capture_output=True, timeout=10)
+            assert run.returncode == 5 and run.stderr == b'', run.stderr
+        finally:
+            session.terminate(); session.wait(timeout=3)
+
+
 def inactive_run(base):
     # A Run that already ended starts nothing and says why.
     key = 'A-9.R-1.R-3'
@@ -570,7 +598,7 @@ def fork_first():
     events = []
     class Forked(Exception): pass
     class Probe:
-        def state(self): events.append('state'); return 'active'
+        def state(self, fresh=False): events.append('state'); return 'active'
     class System:
         def __getattr__(self, name): return getattr(os, name)
         def fork(self): events.append('fork'); raise Forked
@@ -638,6 +666,8 @@ with tempfile.TemporaryDirectory() as base:
     lost_supervisor(base)
 with tempfile.TemporaryDirectory() as base:
     inactive_run(base)
+with tempfile.TemporaryDirectory() as base:
+    slow_start(base)
 for detached in (False, True):
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="custody-") as base:
         registered_service(base, detached)
