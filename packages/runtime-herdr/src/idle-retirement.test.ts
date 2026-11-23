@@ -18,6 +18,7 @@ function adapter(finishAfter?: string) {
     created_ms: 1000,
     labels: { project: "fixture", assignment: "A-1" },
     keep: false,
+    status: { state: "idle" },
   };
   const client: HcClient = {
     available: async () => true,
@@ -301,5 +302,125 @@ test.skipIf(process.platform !== "linux")(
         await exited;
       }
     }
+  },
+);
+
+test("silence, an unreported activity state and a matching address do not authorize a system-turn stop", async () => {
+  const f = adapter(),
+    runtime = await f.create();
+  f.terminal.status.state = "unknown";
+  const opts = {
+    ...options(),
+    system_finished_turn: true as const,
+    workspace_preflight: vi.fn(async () => true),
+  };
+  expect(value(await runtime.observe_retirement(ref, opts))).toBe("unknown");
+  expect(value(await runtime.retire_idle(ref, opts))).toMatchObject({
+    outcome: "withdrawn",
+    evidence: { reason: "terminal_busy" },
+  });
+  expect(opts.workspace_preflight).not.toHaveBeenCalled();
+  expect(
+    vi
+      .mocked(f.client.exec)
+      .mock.calls.filter(
+        ([args]) => args.includes("TERM") || args.includes("HUP"),
+      ),
+  ).toHaveLength(0);
+});
+
+test.skipIf(process.platform !== "linux")(
+  "real helper reports a system-turn exit only when the leader and its whole group are gone",
+  async () => {
+    const gone = (pid: number, group = pid, uid = process.getuid?.() ?? -1) =>
+      exec(
+        "python3",
+        [
+          "-I",
+          "-c",
+          idleRetirementHelper,
+          "gone",
+          String(pid),
+          "fixture-t1",
+          JSON.stringify({ pid, group, uid }),
+        ],
+        { timeout: 5000 },
+      );
+    // The leader leaves a member behind in its own process group.
+    const leader = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const c=require('child_process').spawn('sleep',['30'],{stdio:'ignore'});console.log('ready '+c.pid);process.stdin.resume();process.stdin.on('data',()=>process.exit(0))`,
+      ],
+      { detached: true, stdio: ["pipe", "pipe", "ignore"] },
+    );
+    let output = "";
+    leader.stdout.on("data", (data) => {
+      output += data;
+    });
+    const solo = spawn(
+      process.execPath,
+      [
+        "-e",
+        "process.stdin.resume();process.stdin.on('data',()=>process.exit(0))",
+      ],
+      { detached: true, stdio: ["pipe", "ignore", "ignore"] },
+    );
+    const leaderPid = leader.pid!,
+      soloPid = solo.pid!;
+    try {
+      await vi.waitFor(() => expect(output).toContain("ready"));
+      await expect(gone(leaderPid)).rejects.toMatchObject({ code: 25 });
+      const left = once(leader, "exit");
+      leader.stdin.end("exit");
+      await left;
+      // The leader is reaped; its group member still runs.
+      await expect(gone(leaderPid)).rejects.toMatchObject({ code: 25 });
+      await expect(gone(leaderPid, leaderPid, 0)).rejects.toMatchObject({
+        code: 2,
+      });
+      const done = once(solo, "exit");
+      solo.stdin.end("exit");
+      await done;
+      expect((await gone(soloPid)).stdout.trim()).toBe("gone");
+    } finally {
+      try {
+        process.kill(-leaderPid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+      if (solo.exitCode === null && solo.signalCode === null) solo.kill();
+    }
+  },
+);
+
+test.each([true, false])(
+  "system turn stop marks a kernel-confirmed group exit only (%s)",
+  async (confirmed) => {
+    const f = adapter("TERM"),
+      runtime = await f.create();
+    const call = vi.mocked(f.client.exec),
+      original = call.getMockImplementation()!;
+    call.mockImplementation(async (args) => {
+      if (args.includes("gone")) {
+        if (!confirmed) throw new Error("exit 25");
+        return "gone\n";
+      }
+      return original(args);
+    });
+    const stopped = value(
+      await runtime.retire_idle(ref, {
+        ...options(),
+        system_finished_turn: true,
+        workspace_preflight: async () => true,
+      }),
+    );
+    expect(stopped).toEqual(
+      confirmed
+        ? { outcome: "exited", process_group_exited: true }
+        : { outcome: "exited" },
+    );
+    expect(call.mock.calls.filter(([a]) => a.includes("gone"))).toHaveLength(1);
   },
 );

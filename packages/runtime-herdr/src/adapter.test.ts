@@ -258,9 +258,15 @@ test.skipIf(process.platform !== "linux")(
       vi.mocked(client.exec).mockClear();
       client.available = async () => false;
       expect(value(await runtime.confirm_local_exit(bound, owner))).toBe(false);
+      expect(value(await runtime.confirm_local_group_exit(bound, owner))).toBe(
+        false,
+      );
       child.stdin.end();
       await ended;
       expect(value(await runtime.confirm_local_exit(bound, owner))).toBe(true);
+      expect(value(await runtime.confirm_local_group_exit(bound, owner))).toBe(
+        true,
+      );
       // The leader is gone, but another member of its process group may remain.
       const probe = vi
         .spyOn(process, "kill")
@@ -308,6 +314,19 @@ test.skipIf(process.platform !== "linux")(
       ).toBe(false);
       await writeFile(socketPath, "not a socket");
       expect(value(await runtime.confirm_local_exit(bound, owner))).toBe(false);
+      // A running core does not hide the kernel's group answer, but the
+      // receipt must still be this Assignment's exact launch.
+      expect(value(await runtime.confirm_local_group_exit(bound, owner))).toBe(
+        true,
+      );
+      expect(
+        value(
+          await runtime.confirm_local_group_exit(bound, {
+            ...owner,
+            assignment_id: "A-2",
+          }),
+        ),
+      ).toBe(false);
       expect(client.exec).not.toHaveBeenCalled(); // Even a positive check cannot bootstrap a core.
     } finally {
       child.stdin.end();

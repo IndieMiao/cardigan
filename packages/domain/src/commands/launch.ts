@@ -11,6 +11,7 @@ import { HARNESSES, isHarness } from "../harness.js";
 import {
   automaticContextActionForRun,
   hostOpsPending,
+  observedLocalExitCause,
   pendingHostOpsActions,
 } from "../host-ops.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
@@ -695,14 +696,36 @@ export function dispatchRun(
       );
     }
     const contextAction = automaticContextActionForRun(state.events, run);
-    if (contextAction && p.runtime_ref && !p.replacement)
+    if (contextAction && p.runtime_ref && !p.replacement) {
+      const cause = eventById(state.events, contextAction.dispatch_stall_id);
+      const exited = observedLocalExitCause(cause);
+      const turn =
+        contextAction.system_finished_run_id &&
+        state.runs.find(
+          (r) =>
+            r.assignment_id === assignment.id &&
+            r.id === contextAction.system_finished_run_id,
+        );
+      const stall = !!contextAction.dispatch_stall_id;
+      const reason = exited
+        ? "observed_local_exit"
+        : stall
+          ? "dispatch_stall"
+          : "context_usage";
+      const terminal = contextAction.runtime_ref?.terminal_ref;
+      const body = stall
+        ? `${exited ? "运行时失联，经核实旧执行已退出" : terminal ? "积压待办接续，已确认旧会话退出" : "积压待办接续"}。${terminal ? `旧终端：${JSON.stringify({ terminal_ref: terminal })}。` : ""}${turn ? `最近 Run：${turn.id}，outcome：${turn.outcome ?? "无"}。` : ""}新会话先读卡片和 get_updates。`
+        : "主机运维上下文到档；已确认旧会话退出，新会话先读取交接和 get_updates。";
       d.emit(
         "session_replaced",
         cardId(d, assignment),
         {
           assignment_id: assignment.id,
           run_id: run.id,
-          reason: "context_usage",
+          reason,
+          ...(turn
+            ? { last_run_id: turn.id, last_outcome: turn.outcome ?? null }
+            : {}),
           old_runtime_ref: contextAction.runtime_ref
             ? { ...contextAction.runtime_ref }
             : null,
@@ -711,10 +734,11 @@ export function dispatchRun(
         },
         {
           type: "handoff",
-          body: "主机运维上下文到档；已确认旧会话退出，新会话先读取交接和 get_updates。",
+          body,
           run_id: run.id,
         },
       );
+    }
     let runtime = assignment.runtime_state;
     if (p.replacement && ["unknown", "lost"].includes(runtime))
       runtime = unwrap(transition("runtime", runtime, "session_replaced"));

@@ -104,7 +104,13 @@ test.each(["pending", "belled"] as const)(
         (await f.view()).dispatch_stalls.filter(
           (s) => s.assignment_id === a.id,
         ),
-      ).toEqual([]);
+      ).toMatchObject([
+        {
+          kind: "running_wait",
+          restart_blocked: "client_execution_unconfirmed",
+          can_restart: false,
+        },
+      ]);
       await expect(f.restart(a, instruction.id)).rejects.toThrow();
       expect(f.notes().find((n) => n.id === note.id)).toMatchObject({
         status,
@@ -120,6 +126,7 @@ test.each(["pending", "belled"] as const)(
 
 test("an instruction ACKed by the original Run is consumed only on its own card stream", async () => {
   const f = setup();
+  f.ownTerminals();
   const { assignment: a, card, item } = f.target;
   const run = f.session(a, false);
   f.advance(300_000);
@@ -241,6 +248,7 @@ function reviewerFixture() {
 
 test("a cleaned verifier build allows recovery; an existing unreadable checkout, link or dirty work blocks it", async () => {
   const { f, a, card, item, tree, parent, build } = reviewerFixture();
+  f.ownTerminals();
   f.advance(1);
   const e = f.event(
     "instruction_issued",
@@ -271,8 +279,50 @@ test("a cleaned verifier build allows recovery; an existing unreadable checkout,
   expect(await row()).toMatchObject({ workspace: "clean", can_restart: true });
   await f.restart(a, e.id);
   await f.service.tick();
-  await vi.waitFor(() => expect(f.runtime.release).toHaveBeenCalledOnce());
+  // Same guards as turn recovery: one owner-bound idle stop, never by address.
+  await vi.waitFor(() => expect(f.runtime.retire_idle).toHaveBeenCalledOnce());
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  await vi.waitFor(() =>
+    expect(
+      f.state().events.filter((v) => v.type === "host_ops_action_finished"),
+    ).toMatchObject([{ payload: { assignment_id: a.id } }]),
+  );
 });
+
+test.each(["unowned", "busy", "finished_without_kernel_proof"] as const)(
+  "an ordinary instruction stall without owner and exit proof stays read-only for Ops (%s)",
+  async (mode) => {
+    const { f, a, card, item } = reviewerFixture();
+    f.ownTerminals();
+    if (mode === "unowned") delete f.runtime.observe_retirement;
+    if (mode === "busy") f.working.add(f.refFor(a).terminal_ref);
+    if (mode === "finished_without_kernel_proof")
+      // The terminal row finished; no launch receipt or registered group.
+      f.runtime.observe_retirement = vi.fn(async () => ({
+        ok: true as const,
+        value: "exited" as const,
+      }));
+    f.advance(1);
+    const e = f.event(
+      "instruction_issued",
+      { work_item_id: item.id },
+      undefined,
+      card.id,
+    );
+    f.advance(610_000);
+    expect((await f.view()).dispatch_stalls[0]).toMatchObject({
+      can_restart: false,
+      terminal_owner:
+        mode === "unowned" || mode === "busy" ? "unconfirmed" : "confirmed",
+    });
+    await expect(f.restart(a, e.id)).rejects.toMatchObject({
+      code: "stale_target",
+    });
+    await f.service.tick();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(f.runtime.retire_idle).not.toHaveBeenCalled();
+  },
+);
 
 function endedReviewer(discussWhileWaiting = false) {
   const fixture = reviewerFixture();
@@ -644,8 +694,33 @@ test("a paused reviewer's directed instruction recovers on independently proven 
     });
     await f.service.tick();
     expect(
-      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+      f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "host_ops_action_taken" &&
+            (e.payload as { assignment_id?: string }).assignment_id === a.id,
+        ),
     ).toHaveLength(0);
+    // C-573: an outstanding failure that nobody picked up is not a recovery.
+    f.advance(15 * 60_000);
+    await vi.waitFor(async () => {
+      await f.service.tick();
+      const escalation = f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "dispatch_stall_handoff_overdue" &&
+            (e.payload as { assignment_id: string }).assignment_id === a.id,
+        );
+      expect(escalation).toHaveLength(1);
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project })
+          .filter((n) => n.event_id === escalation[0]?.id),
+      ).toMatchObject([{ recipient: { kind: "pm_office" } }]);
+    });
+    expect(f.runtime.release).not.toHaveBeenCalled();
     f.advance(30_000); // Next scheduled patrol, same outstanding notice.
     proof.mockResolvedValue({ ok: true, value: true });
     expect(await row()).toMatchObject({
@@ -656,14 +731,26 @@ test("a paused reviewer's directed instruction recovers on independently proven 
     await vi.waitFor(async () => {
       await f.service.tick();
       expect(
-        f.state().events.some((e) => e.type === "host_ops_action_finished"),
+        f
+          .state()
+          .events.some(
+            (e) =>
+              e.type === "host_ops_action_finished" &&
+              (e.payload as { assignment_id?: string }).assignment_id === a.id,
+          ),
       ).toBe(true);
     });
     expect(
       f.state().events.filter((e) => e.type === "bell_turn_recovery_failed"),
     ).toHaveLength(1);
     expect(
-      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+      f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "host_ops_action_taken" &&
+            (e.payload as { assignment_id?: string }).assignment_id === a.id,
+        ),
     ).toHaveLength(1);
     expect(proof).toHaveBeenCalledWith(ref, {
       project_id: f.project,
@@ -760,6 +847,45 @@ test.each(["dirty", "unknown"])(
   },
 );
 
+test("an existing queued successor is preserved when both the snapshot and exact terminal row are missing", async () => {
+  const { f, a, notice } = endedReviewer();
+  const successor = f.apply((state, actor, ports) =>
+    queueRun(
+      state,
+      actor,
+      {
+        assignment_id: a.id,
+        model: "fixture",
+        agent_cli_version: "fixture",
+      },
+      ports,
+    ),
+  );
+  const missing = {
+    ok: false,
+    error: { code: "runtime_not_found", message: "missing" },
+  } as const;
+  vi.mocked(f.runtime.status).mockResolvedValue(missing);
+  f.runtime.observe_retirement = vi.fn(async () => missing);
+  const dispatcher = new Dispatcher(f.options);
+  try {
+    await dispatcher.tick();
+    // Repo-backed replacements require the patrol's workspace preflight.
+    expect(f.options.startRun).not.toHaveBeenCalled();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(f.state().runs.find((r) => r.id === successor.id)?.status).toBe(
+      "queued",
+    );
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: a.id })
+        .find((n) => n.event_id === notice.id)?.status,
+    ).toBe("pending");
+  } finally {
+    await dispatcher.close();
+  }
+});
+
 test.each([
   "automatic",
   "tool",
@@ -767,6 +893,7 @@ test.each([
   "owner_mismatch",
   "lost_observation",
   "in_flight",
+  "queued_successor",
   "stop_refused",
   "dirty_in_slot",
   "dirty_at_exit",
@@ -811,7 +938,10 @@ test.each([
     if (mode === "dirty_at_exit") {
       writeFileSync(join(tree, "keep"), "original");
       exited = true; // The old terminal exited by itself, without a stop.
-      return { ok: true, value: { outcome: "exited" } };
+      return {
+        ok: true,
+        value: { outcome: "exited", process_group_exited: true },
+      };
     }
     if (mode === "dirty_in_slot") {
       writeFileSync(join(tree, "keep"), "original");
@@ -831,7 +961,7 @@ test.each([
     signaled();
     exited = mode !== "exit_unconfirmed";
     return exited
-      ? { ok: true, value: { outcome: "exited" } }
+      ? { ok: true, value: { outcome: "exited", process_group_exited: true } }
       : {
           ok: true,
           value: {
@@ -871,21 +1001,28 @@ test.each([
     ]);
     const cause = events("bell_turn_recovery_due")[0]?.id as string;
     if (mode === "dirty") writeFileSync(join(tree, "keep"), "original");
-    if (mode === "in_flight")
-      f.apply((state, actor, p) =>
-        queueRun(
-          state,
-          actor,
-          {
-            assignment_id: a.id,
-            model: "fixture",
-            agent_cli_version: "fixture",
-          },
-          p,
-        ),
+    const next =
+      mode === "in_flight" || mode === "queued_successor"
+        ? f.apply((state, actor, p) =>
+            queueRun(
+              state,
+              actor,
+              {
+                assignment_id: a.id,
+                model: "fixture",
+                agent_cli_version: "fixture",
+              },
+              p,
+            ),
+          )
+        : undefined;
+    if (next && mode === "in_flight")
+      f.store.uow.run((tx) =>
+        tx.runs.put(f.project, { ...next, recovery_runtime: f.refFor(a) }),
       );
     const safe = [
       "automatic",
+      "queued_successor",
       "tool",
       "exit_unconfirmed",
       "stop_refused",
@@ -962,7 +1099,7 @@ test.each([
         );
         expect(events("host_ops_action_taken")).toMatchObject([
           {
-            actor: { kind: mode === "automatic" ? "system" : "assignment" },
+            actor: { kind: mode === "tool" ? "assignment" : "system" },
             payload: { assignment_id: a.id, system_finished_run_id: run.id },
           },
         ]);
@@ -972,6 +1109,7 @@ test.each([
           .find((n) => n.event_id === notice.id);
         expect(original).toMatchObject({ status: "belled", seq: notice.seq });
         expect(original?.run_id).not.toBe(run.id);
+        if (next) expect(original?.run_id).toBe(next.id);
       }
     } else {
       await vi.waitFor(() =>
@@ -1183,7 +1321,10 @@ test("synthetic review handoff: reading the bell is not a restart; safe fresh ev
       expect(await opts.workspace_preflight()).toBe(true);
       expect(opts.before_signal()).toBe(true);
       retired = true;
-      return { ok: true, value: { outcome: "exited" } };
+      return {
+        ok: true,
+        value: { outcome: "exited", process_group_exited: true },
+      };
     });
     f.runtime.observe_retirement = async () => ({
       ok: true,
@@ -1536,6 +1677,7 @@ test.each([
   "review pause %s does not authorize an unrelated followup",
   async (when) => {
     const f = setup();
+    f.ownTerminals();
     const a = f.target.assignment;
     const { signal, pause } = rejected(f);
     if (when === "before_request") {
@@ -1559,11 +1701,12 @@ test.each([
     await f.restart(a, signal.id);
     if (when === "before_stop") pause();
     if (when === "after_stop") {
-      const release = vi.mocked(f.runtime.release).getMockImplementation();
-      if (!release) throw new Error("missing fixture release");
-      vi.mocked(f.runtime.release).mockImplementationOnce(async (ref) => {
+      const retire = f.runtime.retire_idle;
+      if (!retire) throw new Error("missing fixture stop");
+      f.runtime.retire_idle = vi.fn(async (ref, opts) => {
+        const result = await retire(ref, opts);
         pause();
-        return release(ref);
+        return result;
       });
     }
     await f.service.tick();
@@ -1580,8 +1723,9 @@ test.each([
     } else {
       expect(f.state().runs.filter((r) => r.status === "queued")).toEqual([]);
       if (when === "before_stop")
-        expect(f.runtime.release).not.toHaveBeenCalled();
+        expect(f.runtime.retire_idle).not.toHaveBeenCalled();
     }
+    expect(f.runtime.release).not.toHaveBeenCalled();
   },
 );
 
@@ -1687,6 +1831,198 @@ test("A-1800 replay: retained reviewer receives its original instruction after a
       "waiting_decision",
     );
     expect(f.runtime.release).not.toHaveBeenCalled();
+  } finally {
+    await dispatcher.close();
+  }
+});
+
+test.each(["waiting", "stopping"] as const)(
+  "C-575 %s handoff keeps one queue; incomplete exit never releases the terminal",
+  async (phase) => {
+    const { f, a } = reviewerFixture();
+    const queue = f.apply((s, actor, p) =>
+      queueRun(
+        s,
+        actor,
+        { assignment_id: a.id, model: "fixture", agent_cli_version: "fixture" },
+        p,
+      ),
+    );
+    const receipt = "c".repeat(32);
+    f.store.uow.run((tx) => {
+      const current = tx.assignments.get(f.project, a.id)!;
+      const ref = { ...f.refFor(a), local_process_receipt: receipt };
+      tx.assignments.put(f.project, {
+        ...current,
+        runtime_ref: ref,
+        idle_retirement: {
+          phase,
+          started_at: f.clock.now(),
+          runtime_ref: ref,
+          handoff: true,
+          threshold_minutes: 60,
+          failures: 3,
+        },
+      });
+    });
+    let kernelExit = false;
+    let terminalExit = phase === "stopping";
+    f.runtime.observe_retirement = vi.fn(async () => ({
+      ok: true as const,
+      value: terminalExit ? ("exited" as const) : ("alive" as const),
+    }));
+    f.runtime.confirm_local_exit = vi.fn(async () => ({
+      ok: true as const,
+      value: kernelExit,
+    }));
+    vi.mocked(f.runtime.status).mockImplementation(async () => ({
+      ok: true as const,
+      value: {
+        agent: "idle" as const,
+        process: terminalExit ? ("exited" as const) : ("alive" as const),
+        observed_seq: 1,
+      },
+    }));
+    const signal = vi.fn();
+    f.runtime.retire_idle = vi.fn(async (_r, opts) => {
+      if (!(await opts.workspace_preflight()) || !opts.before_signal())
+        throw new Error("unexpected refusal");
+      signal();
+      terminalExit = true;
+      kernelExit = true;
+      return { ok: true as const, value: { outcome: "exited" as const } };
+    });
+    if (phase === "stopping") {
+      await f.service.tick();
+      await f.service.tick();
+      expect(
+        f.state().assignments.find((o) => o.id === a.id)?.idle_retirement
+          ?.phase,
+      ).toBe("stopping");
+      expect(f.runtime.retire_idle).not.toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(
+          f.state().events.filter((e) => e.type === "dispatch_stall_attention"),
+        ).toHaveLength(1),
+      );
+      kernelExit = true;
+      f.advance(60_000);
+    }
+    await vi.waitFor(async () => {
+      await f.service.tick();
+      expect(
+        f.state().assignments.find((o) => o.id === a.id)?.idle_retirement,
+      ).toBeUndefined();
+    });
+    expect(f.state().runs.filter((r) => r.assignment_id === a.id)).toEqual([
+      queue,
+    ]);
+    expect(
+      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+    ).toHaveLength(1);
+    expect(signal).toHaveBeenCalledTimes(phase === "waiting" ? 1 : 0);
+    expect(f.runtime.release).not.toHaveBeenCalled();
+  },
+);
+
+test("a passed precheck with a rejected resume snapshot keeps the undelivered note and hands off once", async () => {
+  const f = setup();
+  const { assignment: a, card, item } = f.target;
+  const old = f.latest();
+  f.advance(1000);
+  const check = f.event(
+    "precheck_finished",
+    { status: "passed", assignment_id: a.id, work_item_id: item.id },
+    undefined,
+    card.id,
+  );
+  const resume = f.event(
+    "work_item_resume_requested",
+    {
+      assignment_id: a.id,
+      work_item_id: item.id,
+      previous_run_id: old.id,
+      evidence: check.id,
+    },
+    a,
+    card.id,
+  );
+  f.skipEvents();
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: false,
+    error: { code: "runtime_not_found", message: "missing terminal row" },
+  });
+  const dispatcher = new Dispatcher({
+    ...f.options,
+    snapshot: async () => {
+      throw new Error("no launch snapshot");
+    },
+  });
+  try {
+    await dispatcher.tick();
+    const note = f.notes().find((n) => n.event_id === resume.id);
+    if (!note) throw new Error("missing resume notification");
+    expect(note).toMatchObject({ status: "delivery_failed", attempts: 0 });
+    const failure = f
+      .state()
+      .events.find(
+        (e) =>
+          e.type === "bell_delivery_failed" &&
+          (e.payload as { reason: string }).reason === "snapshot_unavailable",
+      );
+    if (!failure) throw new Error("missing preflight failure");
+    expect(failure.payload).toMatchObject({
+      assignment_id: a.id,
+      notification_ids: [note.id],
+    });
+    const rows = async () =>
+      (await f.view()).dispatch_stalls.filter((s) => s.assignment_id === a.id);
+    const events = (type: string) =>
+      f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === type &&
+            (e.payload as { assignment_id: string }).assignment_id === a.id,
+        );
+    // Even a later ordinary status snapshot cannot substitute for bound exit proof.
+    vi.mocked(f.runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "exited", agent: "unknown", observed_seq: 2 },
+    });
+    await f.service.tick();
+    expect(await rows()).toMatchObject([
+      {
+        cause_id: failure.id,
+        can_restart: false,
+        restart_blocked: "launch_snapshot_unavailable",
+      },
+    ]);
+    f.advance(900_000);
+    await f.service.tick();
+    await f.service.tick();
+    expect(events("dispatch_stall_attention")).toHaveLength(1);
+    expect(events("dispatch_stall_handoff_overdue")).toHaveLength(1);
+    for (const id of [note.id, resume.id, failure.id])
+      await expect(f.restart(a, id)).rejects.toThrow();
+    expect(f.notes().find((n) => n.id === note.id)).toEqual(note);
+    expect(f.state().runs.filter((r) => r.assignment_id === a.id)).toEqual([
+      old,
+    ]);
+    expect(
+      f.state().assignments.find((v) => v.id === a.id)?.runtime_ref,
+    ).toEqual(f.refFor(a));
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(f.options.startRun).not.toHaveBeenCalled();
+    unwrap(
+      f.store.ackEvents({
+        project_id: f.project,
+        assignment_id: a.id,
+        card_id: card.id,
+        up_to_seq: resume.seq,
+      }),
+    );
+    expect(await rows()).toEqual([]);
   } finally {
     await dispatcher.close();
   }
