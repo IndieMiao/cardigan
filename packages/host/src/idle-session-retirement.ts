@@ -184,6 +184,8 @@ function keptShellOwner(store: Store, state: CommandState, a: Assignment) {
     a.external ||
     a.status !== "active" ||
     !a.runtime_ref ||
+    // Only a macOS worker can prove the launched CLI left a shell.
+    !darwinWorker(state, a) ||
     a.role_upgrade ||
     (a.idle_retirement?.phase === "stopping" && !a.idle_retirement.handoff) ||
     stoppedByHuman(state.events, a.id) ||
