@@ -302,7 +302,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project_id,
         repository,
-        operation: "worktree_prepare",
+        operation: "worktree.ensure",
       },
       () =>
         this.placeWorktree(input, project, {
@@ -482,7 +482,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project_id,
         repository,
-        operation: "build_checkout_prepare",
+        operation: "build.ensure",
       },
       async () => {
         const central = await this.central.ensureCentral(project);
@@ -543,7 +543,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project.project_id,
         repository,
-        operation: "build_checkout_remove",
+        operation: "build.remove",
       },
       async () => {
         if (!input.idle()) return { status: "in_use" };
@@ -668,7 +668,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project.project_id,
         repository,
-        operation: "worktree_diff",
+        operation: "worktree.diff",
       },
       async () => {
         const summary = await this.changeSummary(
@@ -700,7 +700,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project.project_id,
         repository: worktree.repository,
-        operation: "worktree_remove",
+        operation: "worktree.remove",
       },
       () => this.removeLocked(input, worktree),
     );

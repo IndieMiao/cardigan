@@ -61,7 +61,7 @@ export async function backupBranches(
   if (a && (edits.length !== 1 || edits[0]?.ref !== prefix + branch))
     throw new Error("Missing staged Assignment branch");
   if (!edits.length) return;
-  const key = { project_id: id, repository, operation: "branch_backup" };
+  const key = { project_id: id, repository, operation: "backup.publish" };
   return input.lock(key, async () => {
     let published = false;
     const commit = (tx: StoreTransactionContext) => {

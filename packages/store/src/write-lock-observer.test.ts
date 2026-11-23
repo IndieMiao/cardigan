@@ -47,3 +47,24 @@ test("C-638: write transactions report the lock wait apart from the hold", () =>
     }
   });
 });
+
+test("C-638: a throwing write-lock observer changes no transaction result", () => {
+  withTempStore((store) => {
+    store.createProject({ id: project_id });
+    store.observe({
+      writeLock: () => {
+        throw new Error("observer");
+      },
+    });
+    try {
+      expect(store.uow.run(() => "committed")).toBe("committed");
+      expect(() =>
+        store.uow.run(() => {
+          throw new Error("work failed");
+        }),
+      ).toThrow("work failed");
+    } finally {
+      store.observe(undefined);
+    }
+  });
+});

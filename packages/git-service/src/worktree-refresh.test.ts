@@ -131,7 +131,7 @@ test("an injected lock binds placement to the machine, project and base clone", 
       machine_id: "local",
       project_id: "project",
       repository: "/fixture/agent/repos/project",
-      operation: "worktree_prepare",
+      operation: "worktree.ensure",
     },
     expect.any(Function),
   );

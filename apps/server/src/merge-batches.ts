@@ -285,14 +285,19 @@ export class MergeBatches {
     }
     this.recordFailures(id, failures);
     if (branch === undefined) return;
+    // C-647 merge_solo (queue mode): the flag only isolates the card in a batch
+    // of its own. It never changes the card's queue rank, and its passed card
+    // check stays valid on any baseline (`passedCardCheck`), so other batches
+    // merging first never void it. A solo card at the head forms its own
+    // batch; a solo card further back is skipped for this batch (it could not
+    // join it anyway) and does not cut off the passed cards behind it; it
+    // keeps its rank and leads the next batch unless higher-ranked cards come.
+    // Without the queue the flag has no effect at all (see MergeChecks).
     const chosen: typeof queue = [];
     for (const item of queue) {
       if (item.plan.base_branch !== branch) continue;
-      if (
-        chosen.length >= settings.queue.maxBatchSize ||
-        (chosen.length && item.solo)
-      )
-        break;
+      if (chosen.length >= settings.queue.maxBatchSize) break;
+      if (chosen.length && item.solo) continue;
       chosen.push(item);
       if (item.solo) break;
     }

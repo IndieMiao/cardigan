@@ -22,6 +22,7 @@ import {
   latestMergeCheck,
   type MergeBatch,
   mergeBatches,
+  mergeExecutorOutage,
   mergePlan,
   passedCardCheck,
   prechecks,
@@ -141,6 +142,8 @@ class StaleCheckTarget extends CheckExecutorSuspended {}
 /** C-609: fixed summary when central main moved under a queued or running check. */
 export const MERGE_CHECK_BASELINE_MOVED =
   "中心 main 已前进，候选已改变，按新基线重新检查";
+/** C-647: capacity is kept for higher-ranked work that still waits for a slot. */
+const PRIORITY_WAIT = "等待更高优先级的检查先取得名额";
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
@@ -756,34 +759,51 @@ export class MergeChecks {
     return value;
   }
   /**
-   * C-609: a queue-mode card check passes for its completion on any baseline
-   * (`passedCardCheck`). A restarted controller re-prepares the candidate on
-   * the moved main; the bound GitHub run it already started stays useful, so
-   * it is re-attached and read rather than interrupted and run again.
+   * A restarted controller re-prepares the candidate. The bound GitHub run it
+   * already started stays useful, so it is re-attached and read rather than
+   * interrupted, cancelled and run again:
+   * - C-609 (queue): a card check passes for its completion on any baseline
+   *   (`passedCardCheck`), so a moved main does not matter.
+   * - C-647 (no queue): `commit-tree` stamps a new commit time, so a rebuilt
+   *   candidate gets a new SHA even when nothing changed. Same baseline and
+   *   same tree are the same candidate content, and a single-level pass is
+   *   matched by tree and baseline only (`hasPassedMergeCheck`). A moved
+   *   baseline or a changed tree still interrupts and checks again.
    */
-  private resumableCardCheck(task: Task, latest: MergeCheckView): boolean {
+  private resumableGithubRun(
+    task: Task,
+    latest: MergeCheckView,
+    candidate: { tree_sha: string; previous_sha?: string | undefined },
+  ): boolean {
     if (
-      !task.settings.queue ||
       task.batch ||
-      latest.level !== "card" ||
       latest.status !== "running" ||
       latest.recheck_requested ||
       !latest.external_run ||
       this.githubActive.has(latest.attempt_id)
     )
       return false;
+    if (task.settings.queue) {
+      if (latest.level !== "card") return false;
+    } else if (
+      (latest.level ?? "single") !== "single" ||
+      latest.tree_sha !== candidate.tree_sha ||
+      latest.base_sha === undefined ||
+      latest.base_sha !== candidate.previous_sha
+    )
+      return false;
     const run = latest.external_run.run_id;
-    return new GithubDispatchJournal(this.options.store)
-      .unfinished()
-      .some(
-        (intent) =>
-          intent.project === task.project.project_id &&
-          intent.card === task.plan.card_id &&
-          intent.attempt === latest.attempt_id &&
-          intent.executor === task.settings.executor?.name &&
-          !intent.abandoned &&
-          intent.externalRun?.run_id === run,
-      );
+    return new GithubDispatchJournal(this.options.store).unfinished().some(
+      (intent) =>
+        intent.project === task.project.project_id &&
+        intent.card === task.plan.card_id &&
+        intent.attempt === latest.attempt_id &&
+        intent.executor === task.settings.executor?.name &&
+        !intent.abandoned &&
+        intent.externalRun?.run_id === run &&
+        // The run must still belong to the configured repository and bot.
+        this.githubMaintenanceConfig(intent) !== undefined,
+    );
   }
   private async interrupt(
     task: Task,
@@ -926,7 +946,7 @@ export class MergeChecks {
         task.settings.executor?.type === "github" &&
         latest.executor?.type === "github" &&
         latest.executor.name === task.settings.executor.name &&
-        (sameCandidate || this.resumableCardCheck(task, latest))
+        (sameCandidate || this.resumableGithubRun(task, latest, candidate))
       )
         return latest;
       await this.interrupt(
@@ -1141,6 +1161,25 @@ export class MergeChecks {
     )
       return;
     const limit = target.type === "github" ? target.maxConcurrent : 1;
+    // C-647: merge work still waiting for a slot (for example on the same-card
+    // mutex after a restart) keeps its capacity ahead of author checks.
+    const intents =
+      target.type === "github"
+        ? new GithubDispatchJournal(this.options.store).admitted()
+        : [];
+    const backoff = this.backoff();
+    const pending = tasks.filter(
+      (task) =>
+        (task.settings.executor?.name ?? LOCAL_EXECUTOR) === target.name &&
+        this.needsSlot(task, intents, backoff),
+    ).length;
+    if (
+      pending &&
+      intents.filter((intent) => intent.executor === target.name).length +
+        pending >=
+        limit
+    )
+      return;
     const pool = this.slots.get(target.name);
     if (
       pool?.waiting.length ||
@@ -1274,15 +1313,108 @@ export class MergeChecks {
         return this.waiting(task, "等待核对本次 GitHub 派发");
       if (!own && inFlight.length >= executor.maxConcurrent)
         return this.waiting(task, "等待 GitHub 检查容量");
+      if (
+        !own &&
+        inFlight.length + this.ahead(task, executor.name, unfinished) >=
+          executor.maxConcurrent
+      )
+        return this.waiting(task, PRIORITY_WAIT);
     }
-    return (
-      !executor ||
-      mergeCheckCapacityAvailable(
+    if (
+      executor &&
+      !mergeCheckCapacityAvailable(
         this.options.store,
         executor.name,
         executor.type === "github" ? executor.maxConcurrent : 1,
-      ) ||
-      this.waiting(task, "等待检查执行容量")
+      )
+    )
+      return this.waiting(task, "等待检查执行容量");
+    if (
+      executor &&
+      executor.type !== "github" &&
+      this.ahead(task, executor.name, []) > 0
+    )
+      return this.waiting(task, PRIORITY_WAIT);
+    return true;
+  }
+  /**
+   * C-647: higher-ranked merge work on the same executor that still needs a
+   * new check slot. Ranking is `compare` (priority, batch, entered time). A
+   * task blocked on something of its own (the same-card mutex after a restart,
+   * a slot it has not reached yet) keeps its place: the capacity it will need
+   * is not handed to lower-ranked work meanwhile. A task whose current attempt
+   * already owns a dispatch intent is counted in flight, not here. Cooling,
+   * held, failed and passed work needs no slot now and reserves nothing.
+   */
+  private ahead(
+    task: Task,
+    executor: string,
+    intents: readonly GithubDispatchIntent[],
+  ): number {
+    const projects = this.options.store
+      .listProjects()
+      .map((p) => p.id)
+      .filter((id) => {
+        const settings = this.options.configuration.forProject(id);
+        return (
+          settings.status === "enabled" &&
+          (settings.executor?.name ?? LOCAL_EXECUTOR) === executor
+        );
+      });
+    const key = this.key(task);
+    const backoff = this.backoff();
+    return this.tasks(projects).filter(
+      (other) =>
+        this.key(other) !== key &&
+        this.compare(other, task) < 0 &&
+        this.needsSlot(other, intents, backoff),
+    ).length;
+  }
+  /** A project's own executor backoff keeps its work out of every slot. */
+  private backoff(): (task: Task) => boolean {
+    const seen = new Map<string, boolean>();
+    const now = Date.parse(this.options.clock.now());
+    return (task) => {
+      const executor = task.settings.executor?.name;
+      if (!executor) return false;
+      const id = `${task.project.project_id}/${executor}`;
+      let cooling = seen.get(id);
+      if (cooling === undefined) {
+        const outage = mergeExecutorOutage(
+          this.state(task.project.project_id),
+          executor,
+        );
+        cooling = !!outage && Date.parse(outage.next_retry_at) > now;
+        seen.set(id, cooling);
+      }
+      return cooling;
+    };
+  }
+  private needsSlot(
+    task: Task,
+    intents: readonly GithubDispatchIntent[],
+    backoff: (task: Task) => boolean,
+  ): boolean {
+    if (
+      task.repositoryCooling ||
+      this.active.has(this.key(task)) ||
+      backoff(task)
+    )
+      return false;
+    const check = this.latest(task);
+    if (
+      check &&
+      !check.recheck_requested &&
+      !["queued", "interrupted", "executor_unreachable"].includes(check.status)
+    )
+      return false;
+    return !(
+      check &&
+      intents.some(
+        (intent) =>
+          intent.project === task.project.project_id &&
+          intent.attempt === check.attempt_id,
+      )
     );
   }
   private executor(
@@ -2024,6 +2156,14 @@ export class MergeChecks {
       !latest.recheck_requested
     );
   }
+  /**
+   * Direct (non-queue) publication. Every card is checked and published on
+   * its own, so C-647 `merge_solo` has no effect here: it neither moves the
+   * card ahead nor holds others back, and it does not change which baseline a
+   * check must pass on. Any merge moves main and voids other single-level
+   * checks whether or not they are solo; only the queue (card-level checks
+   * valid on any baseline) avoids that.
+   */
   private async publish(task: Task) {
     if (task.settings.queue || task.batch) return;
     if (this.failedCompletion(task)) return;

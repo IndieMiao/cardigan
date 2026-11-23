@@ -161,78 +161,92 @@ test("the same repository spelling on different physical machines or projects ha
   }
 });
 
-test("C-638: each use reports its operation, wait and hold separately", async () => {
-  let now = 0;
+test("C-636: every use reports its operation, wait and hold times", async () => {
+  let clock = 0;
   const samples: unknown[] = [];
-  const acquire = vi.fn(async () => {
-    now += 30; // waiting on the cross-process lock
-    return async () => undefined;
-  });
   const lock = repositoryLock({
-    acquire,
-    now: () => now,
+    waitMs: 1_000,
+    now: () => clock,
+    acquire: async () => {
+      clock += 7; // waiting for the cross-process layer
+      return async () => {
+        clock += 1; // releasing counts as holding
+      };
+    },
     observe: (sample) => samples.push(sample),
   });
-  await lock(
-    { ...key("/repos/timed"), operation: "candidate_push" },
-    async () => {
-      now += 200;
-    },
-  );
   await expect(
-    lock(key("/repos/timed"), async () => {
-      now += 5;
-      throw new Error("work failed");
+    lock(
+      { ...key("/repos/observed"), operation: "candidate.check" },
+      async () => {
+        clock += 20;
+        return "done";
+      },
+    ),
+  ).resolves.toBe("done");
+  const failure = new Error("work failed");
+  await expect(
+    lock({ ...key("/repos/observed"), machine_id: "mac" }, async () => {
+      clock += 3;
+      throw failure;
     }),
-  ).rejects.toThrow("work failed");
+  ).rejects.toBe(failure);
   expect(samples).toEqual([
     {
       project_id: "p",
-      operation: "candidate_push",
-      wait_ms: 30,
-      hold_ms: 200,
-      outcome: "held",
+      machine_id: "local",
+      operation: "candidate.check",
+      wait_ms: 7,
+      hold_ms: 21,
+      outcome: "ok",
     },
     {
       project_id: "p",
+      machine_id: "mac",
       operation: "unspecified",
-      wait_ms: 30,
-      hold_ms: 5,
-      outcome: "held",
+      wait_ms: 7,
+      hold_ms: 4,
+      outcome: "error",
     },
   ]);
 });
 
-test("C-638: a lock never held reports its wait and why, and a throwing observer changes nothing", async () => {
-  const samples: { outcome: string; hold_ms?: number }[] = [];
-  const timeout = repositoryLock({
-    acquire: async () => {
-      throw new RepositoryLockTimeoutError(1);
-    },
+test("C-636: a wait that ran out is a timeout with no hold; a failing observer changes nothing", async () => {
+  const samples: { outcome: string; hold_ms: number; wait_ms: number }[] = [];
+  let release!: () => void;
+  const held = repositoryLock()(
+    key("/repos/observed-timeout"),
+    () => new Promise<void>((resolve) => (release = resolve)),
+  );
+  const waiter = repositoryLock({
+    waitMs: 20,
     observe: (sample) => samples.push(sample),
+  })({ ...key("/repos/observed-timeout"), operation: "w" }, async () => 1);
+  await expect(waiter).rejects.toBeInstanceOf(RepositoryLockTimeoutError);
+  expect(samples).toHaveLength(1);
+  expect(samples[0]).toMatchObject({ outcome: "timeout", hold_ms: 0 });
+  expect(samples[0]?.wait_ms).toBeGreaterThanOrEqual(15);
+  // A nested timeout raised by the work itself is the work's error.
+  const inner = new RepositoryLockTimeoutError(1);
+  await expect(
+    repositoryLock({ observe: (sample) => samples.push(sample) })(
+      key("/repos/observed-inner"),
+      async () => {
+        throw inner;
+      },
+    ),
+  ).rejects.toBe(inner);
+  expect(samples[1]).toMatchObject({ outcome: "error" });
+  release();
+  await held;
+  const throwing = vi.fn(() => {
+    throw new Error("metrics down");
   });
   await expect(
-    timeout(key("/repos/never"), async () => 1),
-  ).rejects.toBeInstanceOf(RepositoryLockTimeoutError);
-  const broken = repositoryLock({
-    acquire: async () => {
-      throw new Error("flock exited with 2");
-    },
-    observe: (sample) => samples.push(sample),
-  });
-  await expect(broken(key("/repos/never"), async () => 1)).rejects.toThrow(
-    "flock exited",
-  );
-  expect(samples.map((s) => [s.outcome, s.hold_ms])).toEqual([
-    ["timeout", undefined],
-    ["failed", undefined],
-  ]);
-  const throwing = repositoryLock({
-    observe: () => {
-      throw new Error("observer");
-    },
-  });
-  await expect(throwing(key("/repos/never"), async () => "ok")).resolves.toBe(
-    "ok",
-  );
+    repositoryLock({ observe: throwing })(
+      key("/repos/observed-throwing"),
+      async () => "kept",
+    ),
+  ).resolves.toBe("kept");
+  expect(throwing).toHaveBeenCalledOnce();
 });

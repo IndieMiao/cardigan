@@ -77,7 +77,7 @@ export function hostRepositoryLock(
   options: {
     waitMs?: number;
     run?: FlockRunner;
-    /** C-638: wait and hold time of every use, by operation. */
+    /** C-636: wait/hold time of every use, by operation. */
     observe?: (sample: RepositoryLockSample) => void;
   } = {},
 ): RepositoryLock {

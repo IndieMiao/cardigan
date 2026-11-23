@@ -9,7 +9,6 @@ import {
   profileSpan,
   profileSpanSync,
   profileTick,
-  recordRepositoryLock,
   releaseSha,
   setTickProfiler,
   setTickProfileSync,
@@ -494,27 +493,14 @@ test("C-638: projects are pass-throughs when off or outside a profiled tick", as
   expect(lines[0]).not.toHaveProperty("projects");
 });
 
-test("C-638: lock waits and holds are summarized by lock and operation in the report", async () => {
+test("C-638: SQLite write-lock waits and holds are summarized by operation in the report", async () => {
   const { profiler, lines } = install();
   await profileTick("merge", async () => {
     tickStoreObserver.writeLock(2, 10);
     tickStoreObserver.writeLock(4, 30);
-    recordRepositoryLock({
-      project_id: "alpha",
-      operation: "candidate_push",
-      wait_ms: 1500,
-      hold_ms: 4900,
-      outcome: "held",
-    });
   });
   // A request has no owning tick; its locks still count, by operation.
   tickStoreObserver.writeLock(5000, undefined);
-  recordRepositoryLock({
-    project_id: "alpha",
-    operation: "assignment_source",
-    wait_ms: 30000,
-    outcome: "timeout",
-  });
   profiler.report();
   const locks = lines.filter((l) => l.event === "lock_profile");
   expect(locks).toEqual([
@@ -525,26 +511,15 @@ test("C-638: lock waits and holds are summarized by lock and operation in the re
       hold: expect.objectContaining({ n: 2, max_ms: 30, total_ms: 40 }),
     }),
     expect.objectContaining({
-      lock: "repository",
-      op: "candidate_push",
-      project: "alpha",
-      wait: expect.objectContaining({ n: 1, max_ms: 1500 }),
-      hold: expect.objectContaining({ n: 1, max_ms: 4900 }),
-    }),
-    expect.objectContaining({
       lock: "sqlite",
       op: "other",
       timeouts: 1,
       wait: expect.objectContaining({ n: 1, max_ms: 5000 }),
       hold: { n: 0, total_ms: 0 },
     }),
-    expect.objectContaining({
-      lock: "repository",
-      op: "assignment_source",
-      timeouts: 1,
-    }),
   ]);
+  expect(locks[0]).not.toHaveProperty("timeouts");
   // The window resets; nothing about locks is repeated.
   profiler.report();
-  expect(lines.filter((l) => l.event === "lock_profile")).toHaveLength(4);
+  expect(lines.filter((l) => l.event === "lock_profile")).toHaveLength(2);
 });

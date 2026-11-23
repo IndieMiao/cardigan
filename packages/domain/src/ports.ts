@@ -110,6 +110,11 @@ export type UnreservedAssignment = (
 ) => boolean;
 export interface TransactionContext extends Repositories {
   readonly unreservedAssignment?: UnreservedAssignment;
+  /** Read-only host deployment records of a SHA in the control plane's other projects. */
+  readonly platformDeployments?: (
+    project: ProjectId,
+    sha: string,
+  ) => readonly Event[];
   readonly read_machine_placement?: import("./machine-placement.js").ReadMachinePlacement;
   readonly test_review_trust?: import("./test-review.js").TestReviewTrust;
   readonly employees?: EmployeeRepository;

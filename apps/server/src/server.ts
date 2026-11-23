@@ -74,6 +74,7 @@ import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { serverMacosChecks } from "./macos-checks.js";
+import { McpReader } from "./mcp-reader.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import {
   drainMobileSigning,
@@ -88,6 +89,7 @@ import {
   trackedPublisher,
 } from "./publication-recovery.js";
 import { apkPublisher } from "./publish-artifact.js";
+import { RepositoryLockMetrics } from "./repository-lock-metrics.js";
 import {
   clearTickProfileSync,
   releaseSha,
@@ -328,6 +330,11 @@ async function assembleServer(
     options.role === "background"
       ? publishProcessHealth(config.dataDir, "background")
       : undefined;
+  // C-636: always-on repository lock wait/hold times, by operation.
+  const lockMetrics = new RepositoryLockMetrics({
+    log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+    sha,
+  });
   let profilerStopped = false;
   const stopProfiler = () => {
     if (profilerStopped) return;
@@ -336,6 +343,7 @@ async function assembleServer(
     profiles.close();
     stalls.stop();
     stopHealth?.();
+    lockMetrics.stop();
   };
   // Request latencies go to whichever profiler is installed right now.
   const mcpLog: Logger = (entry) => {
@@ -417,6 +425,7 @@ async function assembleServer(
         : { captureAgent: options.captureAgent }),
       onSourceError: (entry) =>
         process.stdout.write(`${JSON.stringify(entry)}\n`),
+      onLockSample: lockMetrics.record,
     });
 
   const probes = serverProbes({
@@ -532,6 +541,11 @@ async function assembleServer(
           hostOpsOptions.runtime,
           hostOpsOptions.clock,
         )
+      : undefined;
+  // C-648: project_snapshot reads off the Web event loop.
+  const reader =
+    options.role !== "background" && databaseFile
+      ? new McpReader({ dbPath: databaseFile })
       : undefined;
   const listen = createListenRetry({
     intervalMs:
@@ -680,11 +694,18 @@ async function assembleServer(
                   }
                 : {}),
               pinDelivery: (request) => git.pinDelivery(request),
+              ...(reader
+                ? {
+                    readProjectSnapshot: (context, input) =>
+                      reader.projectSnapshot(context, input),
+                  }
+                : {}),
               log: mcpLog,
             }),
           );
   } catch (error) {
     await diagnostics?.close();
+    await reader?.close();
     await hostOps?.close();
     stopProfiler();
     if (ownsStore) {
@@ -769,6 +790,7 @@ async function assembleServer(
       );
     } catch (error) {
       await diagnostics?.close();
+      await reader?.close();
       await hostOps?.close();
       await mcp.close();
       stopProfiler();
@@ -1029,6 +1051,7 @@ async function assembleServer(
       unregisterOffsite?.();
       await web?.close();
       await diagnostics?.close();
+      await reader?.close();
       await hostOps?.close();
       await mcp.close();
       stopProfiler();
@@ -1094,6 +1117,7 @@ async function assembleServer(
     ]);
     unregisterOffsite?.();
     await diagnostics?.close();
+    await reader?.close();
     await hostOps?.close();
     await mcp.close();
     stopProfiler();
@@ -1158,6 +1182,7 @@ async function assembleServer(
           : undefined,
       ]);
       await diagnostics?.close();
+      await reader?.close();
       await hostOps?.close();
       await mcp.close();
       unregisterOffsite?.();

@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
-import type { RepositoryLockSample } from "@cardigan/git-service";
 import type { StoreObserver } from "@cardigan/store";
 import { currentActivity, trackActivity } from "./activity.js";
 
@@ -14,8 +13,8 @@ import { currentActivity, trackActivity } from "./activity.js";
  * SQL, card text, prompts, tokens or request bodies. C-265: every line also
  * carries `ts` (ISO time) and `sha` (the running release commit, or
  * "unknown"), so a window can be cut by time and version. C-638: ticks are
- * also split by project, and lock waits and holds are summarized by lock and
- * operation (`lock_profile`); project ids and operation names only.
+ * also split by project, and SQLite write-lock waits and holds are
+ * summarized by operation (`lock_profile`); project ids and names only.
  */
 export type ProfileLine = Readonly<Record<string, unknown>>;
 
@@ -39,9 +38,7 @@ interface TickSample {
 }
 
 interface LockSamples {
-  readonly lock: "sqlite" | "repository";
   readonly op: string;
-  readonly project?: string;
   readonly wait: number[];
   readonly hold: number[];
   timeouts: number;
@@ -105,18 +102,6 @@ export const tickStoreObserver: Required<StoreObserver> = {
     (owner.getStore() ?? current)?.storeObserver.writeLock(waitMs, holdMs),
 };
 
-/** C-638: repository lock timing, for `hostRepositoryLock({ observe })`. */
-export function recordRepositoryLock(sample: RepositoryLockSample): void {
-  (owner.getStore() ?? current)?.lock(
-    "repository",
-    sample.operation,
-    sample.wait_ms,
-    sample.hold_ms,
-    sample.outcome === "timeout",
-    sample.project_id,
-  );
-}
-
 export class TickProfiler {
   readonly #als = new AsyncLocalStorage<TickSample>();
   readonly #project = new AsyncLocalStorage<ProjectSample>();
@@ -172,40 +157,26 @@ export class TickProfiler {
       if (sample) sample.lockWaitMs += waitMs;
       const project = this.#project.getStore();
       if (project) project.lockWaitMs += waitMs;
-      this.lock("sqlite", undefined, waitMs, holdMs, holdMs === undefined);
+      this.#writeLock(waitMs, holdMs);
     },
   };
 
   /**
-   * C-638: one lock use. The operation defaults to the current loop or
-   * request (`currentActivity`), else "other".
+   * C-638: one SQLite write-lock use, grouped by the current loop or request
+   * (`currentActivity`), else "other". The repository lock has its own
+   * always-on `repository_lock` lines (C-636).
    */
-  lock(
-    lock: "sqlite" | "repository",
-    operation: string | undefined,
-    waitMs: number,
-    holdMs: number | undefined,
-    timedOut: boolean,
-    project?: string,
-  ): void {
+  #writeLock(waitMs: number, holdMs: number | undefined): void {
     if (this.#finished) return;
-    const op = operation ?? currentActivity()?.name ?? "other";
-    const key = JSON.stringify([lock, op, project ?? null]);
-    let samples = this.#locks.get(key);
+    const op = currentActivity()?.name ?? "other";
+    let samples = this.#locks.get(op);
     if (!samples) {
-      samples = {
-        lock,
-        op,
-        ...(project === undefined ? {} : { project }),
-        wait: [],
-        hold: [],
-        timeouts: 0,
-      };
-      this.#locks.set(key, samples);
+      samples = { op, wait: [], hold: [], timeouts: 0 };
+      this.#locks.set(op, samples);
     }
     samples.wait.push(waitMs);
-    if (holdMs !== undefined) samples.hold.push(holdMs);
-    if (timedOut) samples.timeouts++;
+    if (holdMs === undefined) samples.timeouts++;
+    else samples.hold.push(holdMs);
   }
 
   /** Loops whose tick is running right now. */
@@ -384,9 +355,8 @@ export class TickProfiler {
     for (const samples of this.#locks.values())
       this.#log({
         event: "lock_profile",
-        lock: samples.lock,
+        lock: "sqlite",
         op: samples.op,
-        ...(samples.project === undefined ? {} : { project: samples.project }),
         ...(samples.timeouts ? { timeouts: samples.timeouts } : {}),
         wait: { ...summary(samples.wait), total_ms: total(samples.wait) },
         hold: { ...summary(samples.hold), total_ms: total(samples.hold) },
