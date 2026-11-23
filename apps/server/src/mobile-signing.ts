@@ -168,9 +168,7 @@ function helper(
         receipt = {
           request_id: done[1],
           sha256: done[2],
-          ...(done[3]?.endsWith(`/${done[1]}.apk`)
-            ? { handoff: done[3] }
-            : {}),
+          ...(done[3]?.endsWith(`/${done[1]}.apk`) ? { handoff: done[3] } : {}),
         };
         return true;
       }

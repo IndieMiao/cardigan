@@ -2,6 +2,7 @@ import { rm } from "node:fs/promises";
 import { Readable } from "node:stream";
 import {
   type Attachment,
+  type AttachmentStore,
   type AttachmentTarget,
   approvedReleaseChain,
   type CardId,
@@ -21,7 +22,7 @@ import {
 import { fileAttachmentStore } from "../attachments.js";
 import type { McpReadContext } from "../backend.js";
 import { executeCommand } from "../commands/execute.js";
-import type { MobileSigningOptions, SigningScope } from "./mobile-signing.js";
+import type { SigningScope } from "./signing-scope.js";
 import type { ToolContext } from "./types.js";
 
 /** What the control service needs to register the chain's candidate for one Run. */
@@ -37,6 +38,21 @@ export interface ChainGrant {
   readonly request_id: string;
   /** `other`: this Run already holds a different or revoked grant; not this chain's. */
   readonly status: "new" | "existing" | "other";
+}
+/** The parts of the signing tool options the release chain uses. */
+export interface ChainSigningOptions {
+  readonly chainSigning?: (
+    scope: SigningScope,
+    candidate: ChainCandidate,
+    current: () => void,
+  ) => Promise<ChainGrant>;
+  readonly openMobileArtifact?: (
+    scope: SigningScope,
+    id: string,
+    current: () => void,
+  ) => Promise<{ size: number; sha256: string; stream: Readable }>;
+  readonly dataDir?: string;
+  readonly attachmentStore?: AttachmentStore;
 }
 interface Prepared {
   readonly chain: ReleaseChain;
@@ -125,7 +141,7 @@ function chainCandidate(tx: McpReadContext, scope: SigningScope) {
 }
 
 async function bytes(
-  options: MobileSigningOptions,
+  options: ChainSigningOptions,
   a: Attachment,
 ): Promise<Readable> {
   if (a.streamed_artifact) {
@@ -150,7 +166,7 @@ async function bytes(
  * refusal by the host) unchanged.
  */
 export async function prepareReleaseChain(
-  options: MobileSigningOptions,
+  options: ChainSigningOptions,
   ctx: ToolContext,
   scope: SigningScope,
   current: () => void,
@@ -214,7 +230,7 @@ export async function prepareReleaseChain(
  * server's own. A failed intake is reported and retried on the next poll.
  */
 export async function signedIntake(
-  options: MobileSigningOptions,
+  options: ChainSigningOptions,
   ctx: ToolContext,
   scope: SigningScope,
   current: () => void,

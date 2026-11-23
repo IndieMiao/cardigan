@@ -8,17 +8,10 @@ import {
   prepareReleaseChain,
   signedIntake,
 } from "./release-chain-signing.js";
+import type { SigningScope } from "./signing-scope.js";
 import { defineTool, type ToolContext } from "./types.js";
 
-export interface SigningScope {
-  project: string;
-  worker_uid: number;
-  machine: string;
-  card: string;
-  assignment: string;
-  run: string;
-  platform: "android" | "ios";
-}
+export type { SigningScope } from "./signing-scope.js";
 export interface MobileSigningOptions {
   openMobileArtifact?: (
     scope: SigningScope,
