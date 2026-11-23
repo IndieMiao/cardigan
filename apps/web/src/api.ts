@@ -2090,12 +2090,23 @@ export interface OffsiteStatusView {
     readonly estimated_yuan: number;
     readonly budget_yuan?: number;
   };
+  /** C-628: event-loop delay of the syncing process and of the server. */
+  readonly loop_delay?: {
+    readonly sync?: OffsiteLoopDelay;
+    readonly server?: OffsiteLoopDelay;
+  };
   readonly alerts: readonly (
     | "config_invalid"
     | "unreachable"
     | "sync_failed"
     | "over_budget"
+    | "loop_slow"
   )[];
+}
+export interface OffsiteLoopDelay {
+  readonly p99_ms: number;
+  readonly max_ms: number;
+  readonly window_ms: number;
 }
 
 export interface CardiganClient {
