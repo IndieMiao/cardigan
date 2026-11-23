@@ -266,6 +266,35 @@ test("all Agent harnesses default to nice 10 and accept only integers from 0 to 
   }
 });
 
+test("C-656: local sessions with run resources start through the private TMPDIR and scope wrapper", () => {
+  const launchFile = (compiled: CompiledAssignmentLaunch) =>
+    compiled.files.find((file) => file.path === compiled.launch_script)
+      ?.content ?? "";
+  const plain = launchFile(compile("claude-code", "claude-agent", "fixture"));
+  expect(plain).toContain("\nexec nice -n 10 'claude'");
+  expect(plain).not.toContain(" session -- ");
+  const compiled = compileAssignmentLaunch({
+    assignment: { assignment_id: "A-12", run_id: "R-5", project_id: "p" },
+    role: roleFor("claude-code", "claude-agent"),
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: WORK_DIR,
+    first_prompt: "fixture",
+    secrets,
+    run_resources: { target: "a".repeat(64), source: "pass\n" },
+  });
+  const script = launchFile(compiled);
+  // The wrapper execs the same command line, so the CLI keeps the launch PID.
+  expect(script).toContain(
+    `\nexec /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" session -- nice -n 10 'claude'`,
+  );
+  expect(script.indexOf("export CARDIGAN_SESSION_PID=$$")).toBeLessThan(
+    script.indexOf(" session -- "),
+  );
+  expect(compiled.env.TMPDIR).toBeUndefined();
+});
+
 const first = firstPrompt({
   card_id: "C-3",
   work_item_id: "W-7",

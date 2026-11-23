@@ -1374,7 +1374,8 @@ test.each([
       agent_cli_version: "codex fixture-version",
     });
     expect(readFileSync(join(first.run_dir, "launch.sh"), "utf8")).toContain(
-      `exec nice -n ${expectedNice} 'codex'`,
+      // C-656: host launches start the CLI through the session wrapper.
+      `session -- nice -n ${expectedNice} 'codex'`,
     );
     store.uow.run((tx) => {
       const employee = tx.employees.list()[0];
@@ -1402,7 +1403,8 @@ test.each([
       agent_cli_version: "pi fixture-version",
     });
     expect(readFileSync(join(second.run_dir, "launch.sh"), "utf8")).toContain(
-      `exec nice -n ${expectedNice} 'pi'`,
+      // C-656: host launches start the CLI through the session wrapper.
+      `session -- nice -n ${expectedNice} 'pi'`,
     );
     expect(
       store.uow.read((tx) => tx.runs.list(project_id))[0]?.launch_profile_ref,
