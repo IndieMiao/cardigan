@@ -1018,3 +1018,29 @@ test.each([
     expect(f.client.jobLog).not.toHaveBeenCalled();
   },
 );
+
+test("C-658: generic provider diagnostics still never reach the log failure", async () => {
+  const f = setup(1);
+  f.complete();
+  const j = job(1);
+  f.client.jobs.mockResolvedValueOnce([
+    {
+      ...j,
+      conclusion: "failure",
+      steps: j.steps.map((s) =>
+        s.name === "test" ? { ...s, conclusion: "failure" } : s,
+      ),
+    },
+  ]);
+  const auth = new GithubExecutorError("auth");
+  auth.diagnostic = "do-not-record-provider-detail";
+  f.client.jobLog.mockRejectedValueOnce(auth);
+  const terminal = f.poller.poll(external(1));
+  await f.poller.tick();
+  await terminal;
+  const error = await f.poller
+    .fetchFailureLog(external(1), () => () => {})
+    .catch((e: unknown) => e);
+  expect(error).toMatchObject({ category: "auth" });
+  expect((error as { detail?: string }).detail).toBeUndefined();
+});
