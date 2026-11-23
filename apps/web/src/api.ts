@@ -1108,7 +1108,7 @@ export interface RunView {
     readonly after_minutes: number;
     readonly waited_ms: number;
   };
-  readonly failure_reason?: "provider_unavailable";
+  readonly failure_reason?: "provider_unavailable" | "mcp_unavailable";
   readonly queue_reason?:
     | "concurrency_limit"
     | "runtime_unavailable"
