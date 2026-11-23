@@ -11,10 +11,12 @@ import {
   contextUsageLevel,
   contextUsageThresholds,
   currentHarnessActivity,
+  type Event,
   type HarnessActivity,
   isHarness,
   type ProjectId,
   projectPreferences,
+  type Run,
   type RuntimeRef,
 } from "@cardigan/domain";
 import {
@@ -215,6 +217,42 @@ async function workerPaths(
   };
 }
 
+/**
+ * Index events and Runs by assignment once per pass. Generation and activity
+ * checks only read events whose payload names the assignment and that
+ * assignment's Runs, so each scoped state yields the same answers as the full
+ * state without rescanning project history for every active assignment.
+ */
+export function assignmentActivityScope(state: CommandState) {
+  const events = new Map<string, Event[]>();
+  for (const e of state.events) {
+    const id = (e.payload as { assignment_id?: unknown } | null)?.assignment_id;
+    if (typeof id !== "string") continue;
+    const list = events.get(id);
+    if (list) list.push(e);
+    else events.set(id, [e]);
+  }
+  const runs = new Map<string, Run[]>();
+  for (const r of state.runs) {
+    const list = runs.get(r.assignment_id);
+    if (list) list.push(r);
+    else runs.set(r.assignment_id, [r]);
+  }
+  const scoped = new Map<string, CommandState>();
+  return (a: Pick<Assignment, "id">): CommandState => {
+    let view = scoped.get(a.id);
+    if (!view) {
+      view = {
+        ...state,
+        events: events.get(a.id) ?? [],
+        runs: runs.get(a.id) ?? [],
+      };
+      scoped.set(a.id, view);
+    }
+    return view;
+  };
+}
+
 export async function readSessionContexts(
   state: CommandState,
   options: ContextUsageOptions | undefined,
@@ -227,10 +265,12 @@ export async function readSessionContexts(
   const result: SessionContextDiagnostic[] = [];
   const active = state.assignments.filter((a) => a.status === "active");
   const staleMs = options?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
+  const scope = assignmentActivityScope(state);
   for (const a of active) {
     if (options?.signal?.aborted) break;
+    const own = scope(a);
     const remote = !!a.machine_id && a.machine_id !== "local";
-    const run = state.runs.findLast((r) => r.assignment_id === a.id);
+    const run = own.runs.at(-1);
     const boundPaths = () =>
       workerPaths(a, state.project_id, resolveWorker).catch(() => undefined);
     const worker =
@@ -305,7 +345,7 @@ export async function readSessionContexts(
             [
               String(
                 Math.max(
-                  contextGenerationStart(a, state.events),
+                  contextGenerationStart(a, own.events),
                   Date.parse(run?.started_at ?? a.created_at),
                 ),
               ),
@@ -381,7 +421,7 @@ export async function readSessionContexts(
         : undefined;
     // Bind the command's own start, not merely some other activity in the file.
     const start = associatedHarnessActivity(
-      state,
+      own,
       a,
       now,
       bindActivity(pending?.start),
@@ -396,7 +436,7 @@ export async function readSessionContexts(
         ? { command: pending.command, since: start.updated_at }
         : undefined;
     const startupFailure = bindActivity(startupMetadata);
-    const activityFresh = !!currentHarnessActivity(state, a, now, activity);
+    const activityFresh = !!currentHarnessActivity(own, a, now, activity);
     const activityStatus: HarnessActivityStatus = activityReadFailed
       ? "read_failed"
       : !run || !a.runtime_ref || a.external || !root || !source
@@ -404,7 +444,7 @@ export async function readSessionContexts(
         : !activityMetadata
           ? "missing"
           : !activity ||
-              !contextObservationCurrent(a, activity, state.events) ||
+              !contextObservationCurrent(a, activity, own.events) ||
               Date.parse(activity.updated_at) <
                 Date.parse(run.started_at ?? a.created_at)
             ? "unassociated"
@@ -423,7 +463,7 @@ export async function readSessionContexts(
     const fresh =
       !!observation &&
       contextUsageFresh(observation, now, staleMs) &&
-      contextObservationCurrent(a, observation, state.events);
+      contextObservationCurrent(a, observation, own.events);
     result.push({
       agent: usage?.agent ?? null,
       cwd: usage?.cwd ?? null,

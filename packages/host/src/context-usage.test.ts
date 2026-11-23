@@ -3,13 +3,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type Assignment,
+  associatedHarnessActivity,
   type CommandState,
+  contextGenerationStart,
   contextObservationCurrent,
+  currentHarnessActivity,
+  type Event,
+  type HarnessActivity,
 } from "@cardigan/domain";
 import type { LaunchConfig } from "@cardigan/roles";
 import { executionPaths } from "@cardigan/runtime-herdr";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
+  assignmentActivityScope,
   claudeContextWindow,
   claudeLaunchModel,
   parseClaudeTranscript,
@@ -602,4 +608,161 @@ test("production RuntimeRef (no session id) yields a current sample; a stale ses
     status: "stale",
     level: null,
   });
+});
+
+const GENERATION_TYPES = [
+  "session_replaced",
+  "standing_session_restarted",
+  "assignment_resumed",
+  "host_ops_action_finished",
+];
+/** Deterministic history: generation and unrelated events for many assignments. */
+function crowdedState(assignments: number, events: number): CommandState {
+  const ids = Array.from({ length: assignments }, (_, i) => `A-${i + 1}`);
+  const at = (i: number) =>
+    new Date(Date.parse(a.created_at) + i * 1000).toISOString();
+  const list: Event[] = [];
+  for (let i = 0; i < events; i++) {
+    const owner = ids[(i * 7) % ids.length] ?? "A-1";
+    const type =
+      i % 5 === 0
+        ? (GENERATION_TYPES[i % GENERATION_TYPES.length] ?? "session_replaced")
+        : "run_started";
+    list.push({
+      id: `E-${i}`,
+      seq: i + 1,
+      type,
+      actor: { kind: "system", project_id: "fixture" },
+      payload:
+        i % 97 === 0 && type === "run_started"
+          ? null
+          : i % 13 === 0
+            ? { assignment_id: 42 }
+            : { assignment_id: owner },
+      created_at: at(i % 600),
+    } as unknown as Event);
+  }
+  return {
+    ...state("claude-code"),
+    assignments: ids.map((id) => ({
+      ...a,
+      id,
+      runtime_ref: { terminal_ref: `t-${id}` },
+    })),
+    runs: ids.flatMap((id, i) => [
+      { id: `R-${i}-old`, assignment_id: id, status: "completed" },
+      { id: `R-${i}`, assignment_id: id, status: "running", started_at: now },
+    ]),
+    events: list,
+  } as unknown as CommandState;
+}
+
+test("C-629: assignment scope gives the same generation and activity answers as the full state", () => {
+  const full = crowdedState(20, 3000);
+  const scope = assignmentActivityScope(full);
+  let current = 0;
+  for (const assignment of full.assignments) {
+    const own = scope(assignment);
+    expect(scope(assignment)).toBe(own);
+    expect(contextGenerationStart(assignment, own.events)).toBe(
+      contextGenerationStart(assignment, full.events),
+    );
+    expect(own.runs.at(-1)).toEqual(
+      full.runs.findLast((r) => r.assignment_id === assignment.id),
+    );
+    for (const offset of [0, 120, 299, 300, 450, 599, 700]) {
+      const updated_at = new Date(
+        Date.parse(a.created_at) + offset * 1000,
+      ).toISOString();
+      const sample: HarnessActivity = {
+        assignment_id: assignment.id,
+        runtime_key: JSON.stringify(assignment.runtime_ref),
+        session_id: "session-1",
+        updated_at,
+        source: "claude-code:session_metadata",
+        run_id: own.runs.at(-1)?.id ?? "R-missing",
+        stale_after_ms: 3_600_000,
+      } as HarnessActivity;
+      const later = new Date(Date.parse(updated_at) + 60_000).toISOString();
+      const expected = contextObservationCurrent(
+        assignment,
+        sample,
+        full.events,
+      );
+      if (expected) current++;
+      expect(contextObservationCurrent(assignment, sample, own.events)).toBe(
+        expected,
+      );
+      expect(associatedHarnessActivity(own, assignment, later, sample)).toEqual(
+        associatedHarnessActivity(full, assignment, later, sample),
+      );
+      expect(currentHarnessActivity(own, assignment, later, sample)).toEqual(
+        currentHarnessActivity(full, assignment, later, sample),
+      );
+    }
+  }
+  // The fixture exercises both sides of every generation boundary.
+  expect(current).toBeGreaterThan(0);
+  expect(current).toBeLessThan(full.assignments.length * 7);
+});
+
+test("C-629: one pass indexes history instead of rescanning it per active assignment", async () => {
+  await write(
+    join(claudeDir(), "session-1.jsonl"),
+    `${claudeLine(claudeUsage(2, 860000))}\n`,
+  );
+  const generation = (created_at: string) =>
+    ({
+      id: "E-gen",
+      seq: 1,
+      type: "session_replaced",
+      actor: { kind: "system", project_id: "fixture" },
+      payload: { assignment_id: a.id },
+      created_at,
+    }) as unknown as Event;
+  const read = async (created_at: string) => {
+    const base = claudeState();
+    const crowd = crowdedState(20, 3000);
+    const events = [
+      ...crowd.events.map((e) => ({
+        ...e,
+        payload:
+          (e.payload as { assignment_id?: unknown } | null)?.assignment_id ===
+          a.id
+            ? { assignment_id: "A-other" }
+            : e.payload,
+      })),
+      generation(created_at),
+    ];
+    const filter = vi.spyOn(events, "filter");
+    const reduce = vi.spyOn(events, "reduce");
+    const s = {
+      ...base,
+      assignments: [
+        ...base.assignments,
+        ...crowd.assignments.filter((x) => x.id !== a.id),
+      ],
+      runs: [
+        ...crowd.runs.filter((r) => r.assignment_id !== a.id),
+        ...base.runs,
+      ],
+      events,
+    } as unknown as CommandState;
+    const contexts = await readSessionContexts(
+      s,
+      { execution: execution() },
+      now,
+    );
+    expect(filter).not.toHaveBeenCalled();
+    expect(reduce).not.toHaveBeenCalled();
+    return contexts.find((c) => c.assignment_id === a.id);
+  };
+  // Generation reset before the sample: current. After it: an old cache.
+  expect(await read(a.created_at)).toMatchObject({
+    status: "fresh",
+    used_percentage: 86.6,
+  });
+  expect(
+    await read(new Date(Date.parse(now) + 1000).toISOString()),
+  ).toMatchObject({ status: "stale", level: null });
 });
