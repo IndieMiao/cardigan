@@ -90,8 +90,10 @@ export class WorkbenchReadPool {
     const timeoutMs = options.timeoutMs ?? WORKBENCH_READ_DEFAULTS.timeoutMs;
     if (!Number.isSafeInteger(workers) || workers < 1 || workers > 16)
       throw new Error("Workbench read workers must be an integer in 1..16");
-    if (!Number.isSafeInteger(maxQueue) || maxQueue < 0)
-      throw new Error("Workbench read queue limit must be a whole number");
+    // At least one waiting slot: with none, even an idle worker would refuse
+    // every read, because a read always queues before it reaches its worker.
+    if (!Number.isSafeInteger(maxQueue) || maxQueue < 1)
+      throw new Error("Workbench read queue limit must be a positive integer");
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)
       throw new Error("Workbench read timeout must be a positive integer");
     this.#options = {
@@ -399,7 +401,7 @@ export function workbenchReadOptionsFromEnv(
   const maxQueue = parse(
     "CARDIGAN_WORKBENCH_READ_QUEUE",
     WORKBENCH_READ_DEFAULTS.maxQueue,
-    0,
+    1,
   );
   const timeoutMs = parse(
     "CARDIGAN_WORKBENCH_READ_TIMEOUT_MS",

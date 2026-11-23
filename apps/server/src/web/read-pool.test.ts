@@ -92,6 +92,12 @@ async function rejection(promise: Promise<unknown>) {
   return error as HttpRejection;
 }
 
+test("the smallest queue still serves an idle worker", async () => {
+  const p = pool({ workers: 1, maxQueue: 1 });
+  expect(body(await p.read(op("ok"))).project).toBe("p1");
+  expect(body(await p.read(op("ok"))).seen).toBe(2);
+});
+
 test("a full queue answers 503 read_busy at once with Retry-After", async () => {
   const p = pool({ workers: 1, maxQueue: 1, timeoutMs: 60_000 });
   const running = p.read(op("hang"));
@@ -245,10 +251,12 @@ test("options come from the environment; 0 workers keeps reads inline", () => {
     { CARDIGAN_WORKBENCH_READ_WORKERS: "-1" },
     { CARDIGAN_WORKBENCH_READ_WORKERS: "17" },
     { CARDIGAN_WORKBENCH_READ_QUEUE: "1.5" },
+    { CARDIGAN_WORKBENCH_READ_QUEUE: "0" },
     { CARDIGAN_WORKBENCH_READ_TIMEOUT_MS: "0" },
   ])
     expect(() => workbenchReadOptionsFromEnv(env)).toThrow();
   expect(() => new WorkbenchReadPool({ dbPath: "x", workers: 0 })).toThrow();
+  expect(() => new WorkbenchReadPool({ dbPath: "x", maxQueue: 0 })).toThrow();
 });
 
 test("only machines named by open helper notices are asked for host facts", () => {
