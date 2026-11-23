@@ -9,7 +9,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ProjectId, requestDecision } from "@cardigan/domain";
-import { loadCommandState, MAX_ATTACHMENT_BYTES } from "@cardigan/mcp-server";
+import {
+  formatAttachmentLimit,
+  loadCommandState,
+  MAX_ATTACHMENT_BYTES,
+} from "@cardigan/mcp-server";
 import { routeEvent } from "@cardigan/router";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -341,7 +345,7 @@ test("rejects missing, blank, unknown and oversized files before posting a comme
         "--text=x",
         `--file=${file("large.txt", Buffer.alloc(MAX_ATTACHMENT_BYTES + 1))}`,
       ],
-      "超过 10 MiB",
+      `超过 ${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}`,
     ],
     [
       ["--text=x", `--file=${file("valid.txt")}`, "--file=bad.exe"],

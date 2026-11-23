@@ -23,10 +23,13 @@ import {
 import { z } from "zod";
 import { MAX_ARTIFACT_BYTES } from "../artifact-files.js";
 import type { ArtifactUploads } from "../artifact-uploads.js";
+import { formatAttachmentLimit } from "../attachment-limits.js";
 import {
+  attachmentTooLargeMessage,
   decodeAttachment,
   fileAttachmentStore,
   MAX_ATTACHMENT_BASE64,
+  MAX_ATTACHMENT_BYTES,
 } from "../attachments.js";
 import { ToolError } from "../errors.js";
 import { readAttachmentTool } from "../tools/read-attachment.js";
@@ -76,14 +79,13 @@ export function supportTools(options: SupportToolOptions = {}) {
     ),
     defineTool({
       name: "upload_attachment",
-      description:
-        "Upload a base64 attachment (10 MiB), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint. The stored sha256 is computed by the server, so a stored attachment needs no read-back download.",
+      description: `Upload a base64 attachment (${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint. The stored sha256 is computed by the server, so a stored attachment needs no read-back download.`,
       input: z.object({
         idempotency_key,
         card_id: id("card"),
         file: z
           .string()
-          .max(MAX_ATTACHMENT_BASE64)
+          .max(MAX_ATTACHMENT_BASE64, attachmentTooLargeMessage())
           .describe("Canonical padded base64 file content.")
           .optional(),
         artifact_size: z

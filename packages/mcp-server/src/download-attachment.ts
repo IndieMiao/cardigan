@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type FileHandle, link, open, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { MAX_STORED_ATTACHMENT_BYTES } from "./attachment-limits.js";
 import { isCliEntry } from "./cli-entry.js";
-import { MAX_ARTIFACT_BYTES, MAX_ATTACHMENT_BYTES } from "./limits.js";
+import { MAX_ARTIFACT_BYTES } from "./limits.js";
 
 const messages = {
   arguments:
@@ -80,7 +81,9 @@ function expectedFrom(
     sizeText === null ||
     !/^\d+$/u.test(sizeText) ||
     !Number.isSafeInteger(size) ||
-    size > (artifact ? MAX_ARTIFACT_BYTES : MAX_ATTACHMENT_BYTES) ||
+    // Any attachment the host may store, whatever its current upload limit
+    // (C-616); the checksum still binds every byte.
+    size > (artifact ? MAX_ARTIFACT_BYTES : MAX_STORED_ATTACHMENT_BYTES) ||
     !/^[a-f0-9]{64}$/u.test(digest) ||
     response.headers.get("x-attachment-id") !== attachmentId
   )
