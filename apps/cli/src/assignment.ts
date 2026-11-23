@@ -416,6 +416,11 @@ async function startUnlocked(
         resourceLimits: capacity.resourcesForMachine,
         launch: options.launch,
         mcpUrl: options.mcpUrl,
+        // C-600: manual starts verify only when the operator opts in; the
+        // server's automatic launches verify unless explicitly turned off.
+        ...(io.env.CARDIGAN_MCP_SESSION_CHECK === "1"
+          ? { verifyMcpSession: true }
+          : {}),
         dataDir: options.dataDir,
         configDir: cliLaunchPaths(io).configDir,
         execution,

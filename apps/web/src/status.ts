@@ -61,6 +61,7 @@ export const STATUS_LABELS = {
   lost: "失联",
   queued: "排队中",
   provider_unavailable: "模型服务不可用",
+  mcp_unavailable: "MCP 初始化失败",
   dispatched: "已派发",
   acked: "已签收",
   completed: "已完成",

@@ -3,6 +3,7 @@ import { HARNESS_CATALOG } from "@cardigan/domain";
 import {
   BROWSER_MCP_SERVER_NAME,
   BROWSER_TOOL_PATTERN,
+  MCP_SESSION_HEADER,
   TOKEN_ENV_VAR,
 } from "../assignment-types.js";
 import { readClaudeContext } from "./claude-context.js";
@@ -31,6 +32,7 @@ export const claudeCode: HarnessAdapter = {
   },
   versionArgs: ["--version"],
   contextSource: "claude_transcript:last_usage",
+  listsMcpToolsAtStartup: true,
   readContext: readClaudeContext,
   compile({ input, resolved, providerEnv, secretEnv, profileArgs, extraArgs }) {
     // Claude Code reads provider settings from a settings file. Cardigan writes
@@ -97,7 +99,12 @@ export const claudeCode: HarnessAdapter = {
             [serverName]: {
               type: "http",
               url: input.mcp.url,
-              headers: { Authorization: `Bearer \${${TOKEN_ENV_VAR}}` },
+              headers: {
+                Authorization: `Bearer \${${TOKEN_ENV_VAR}}`,
+                ...(input.mcp.session_key
+                  ? { [MCP_SESSION_HEADER]: input.mcp.session_key }
+                  : {}),
+              },
             },
             ...(browser === undefined
               ? {}
