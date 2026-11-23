@@ -46,10 +46,11 @@ export async function stopRunRuntime(
 }
 
 /**
- * C-620: a managed `assignment stop` lifts its dispatch fence only on exit
- * proven for this exact session. A missing terminal row (`runtime_not_found`)
- * or an unavailable observation is not proof; the caller keeps the reference
- * and the stop so it can be retried.
+ * C-620: independent exit proof for a managed `assignment stop` whose release
+ * did not itself kill this session (the terminal row was already missing). A
+ * missing row or an unavailable observation is not proof; only this exact
+ * session observed as exited, or the local kernel check of its launch
+ * receipt, is. Otherwise the caller keeps the reference and the stop.
  */
 export async function stoppedSessionExited(
   runtime: Runtime,
@@ -58,10 +59,17 @@ export async function stoppedSessionExited(
 ): Promise<boolean> {
   if (runtime.observe_retirement) {
     const exact = await observeTurnOwner(runtime, ref, owner, false);
-    return exact?.ok === true && exact.value === "exited";
+    if (exact?.ok === true && exact.value === "exited") return true;
+  } else {
+    const observed = await runtime.status(ref).catch(() => undefined);
+    if (observed?.ok === true && observed.value.process === "exited")
+      return true;
   }
-  const observed = await runtime.status(ref).catch(() => undefined);
-  return observed?.ok === true && observed.value.process === "exited";
+  if (ref.machine_id !== "local" || !ref.local_process_receipt) return false;
+  const proof = await runtime
+    .confirm_local_exit?.(ref, owner)
+    .catch(() => undefined);
+  return proof?.ok === true && proof.value;
 }
 
 /** System-ended bells never use address-based release, even for cleanup. A

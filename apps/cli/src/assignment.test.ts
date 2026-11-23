@@ -79,18 +79,7 @@ class FakeRuntime implements Runtime {
   async wake(): Promise<RuntimeResult<{ readonly sent: boolean }>> {
     return { ok: true, value: { sent: true } };
   }
-  /** C-620: a released terminal reports its own exit unless disabled. */
-  exitOnRelease = true;
-  async status(ref?: RuntimeRef): Promise<RuntimeResult<RuntimeObservation>> {
-    if (
-      this.exitOnRelease &&
-      ref &&
-      this.released.some((r) => r.terminal_ref === ref.terminal_ref)
-    )
-      return {
-        ok: true,
-        value: { process: "exited", agent: "unknown", observed_seq: 1 },
-      };
+  async status(): Promise<RuntimeResult<RuntimeObservation>> {
     return this.statusResult;
   }
   /** Owner-bound exit observation, consistent with `status`. */
@@ -922,7 +911,7 @@ describe("stopAssignment and attachAssignment", () => {
     };
   };
 
-  test("C-620 a managed stop settles only on exit proven for this session; a missing terminal is not proof and the same command retries", async () => {
+  test("C-620 a managed stop settles on its own successful release or on exit observed for this session; a missing terminal is not proof and the same command retries", async () => {
     const assignment = assignWorkItem("none");
     const runtime = new FakeRuntime();
     const started = await startFor(assignment.id, runtime);
@@ -931,7 +920,6 @@ describe("stopAssignment and attachAssignment", () => {
       "utf8",
     ).trim();
     // The terminal row is gone, but the session's own process still runs.
-    runtime.exitOnRelease = false;
     runtime.releaseResult = {
       ok: false,
       error: { code: "runtime_not_found", message: "gone" },
@@ -958,9 +946,12 @@ describe("stopAssignment and attachAssignment", () => {
       store.uow.read((tx) => tx.runs.get(project_id, started.run_id as never))
         ?.status,
     ).not.toBe("cancelled");
-    // Exit is now observed for this exact session: the retry settles.
-    runtime.exitOnRelease = true;
-    runtime.releaseResult = { ok: true, value: undefined };
+    // Exit is now observed for this exact session: the retry settles even
+    // though the terminal row is still missing.
+    runtime.statusResult = {
+      ok: true,
+      value: { process: "exited", agent: "unknown", observed_seq: 2 },
+    } as never;
     expect(await stop()).toMatchObject({ released: true, held: false });
     expect(stopFacts(assignment.id)).toEqual({
       ref: null,
@@ -1410,7 +1401,6 @@ describe("C-154 standing PM session restart", () => {
   test("restart keeps everything when the old terminal is not proven to have exited", async () => {
     standingOps();
     const runtime = new FakeRuntime();
-    runtime.exitOnRelease = false;
     const first = await startAssignment(options(runtime));
     const token = readFileSync(
       join(dataDir, "runs", "p-one", "A-1", "token"),

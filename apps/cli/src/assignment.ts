@@ -706,10 +706,13 @@ async function stopWorkItemSession(
     );
   }
   // A managed stop lifts its fence and lets new work start a session, so it
-  // needs exit proven for this exact session; a missing terminal row is not
-  // proof. A pause keeps the C-211 rule.
+  // needs exit proven for this exact session. A successful release is that
+  // proof: the adapter checked this terminal's identity, then killed and
+  // removed it. A terminal row that was already missing is not; it needs an
+  // independent observation. A pause keeps the C-211 rule.
   if (
     !held &&
+    !released.ok &&
     !(await stoppedSessionExited(input.runtime, ref, {
       project_id: input.project_id,
       assignment_id: assignment.id,
