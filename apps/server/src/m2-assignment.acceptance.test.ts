@@ -301,7 +301,7 @@ exec "${process.execPath}" "${join(root, "agent.mjs")}" "$@"
     );
     writeFile(
       join(root, "agent.mjs"),
-      `import { writeFileSync } from "node:fs";
+      `import { renameSync, writeFileSync } from "node:fs";
 import { Client } from "${join(SDK, "client", "index.js")}";
 import { StreamableHTTPClientTransport } from "${join(SDK, "client", "streamableHttp.js")}";
 const client = new Client({ name: "fake-agent", version: "0" });
@@ -315,10 +315,12 @@ const card = await client.callTool({
   name: "get_card",
   arguments: { card_id: process.env.CARDIGAN_CARD_ID },
 });
+// Write then rename so the test never reads a half-written report.
 writeFileSync(
-  process.env.CARDIGAN_REPORT,
+  process.env.CARDIGAN_REPORT + ".tmp",
   JSON.stringify({ who: who.structuredContent ?? who, card: card.structuredContent ?? card }),
 );
+renameSync(process.env.CARDIGAN_REPORT + ".tmp", process.env.CARDIGAN_REPORT);
 process.stdout.write("\\u001b]7501;state=idle\\u0007");
 setInterval(() => {}, 1000);
 `,
