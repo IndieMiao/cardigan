@@ -47,6 +47,50 @@ export async function stopRunRuntime(
     : ("unconfirmed" as const);
 }
 
+/**
+ * C-620: a managed `assignment stop` may only treat its own release as exit
+ * when that release ended a live session: the adapter checked this session's
+ * identity and killed it. Observe before releasing; a finished or missing
+ * terminal row says nothing about the session's process group.
+ */
+export async function stoppedSessionLive(
+  runtime: Runtime,
+  ref: RuntimeRef,
+  owner: RetirementIdentity,
+): Promise<boolean> {
+  if (runtime.observe_retirement) {
+    const exact = await runtime
+      .observe_retirement(ref, owner)
+      .catch(() => undefined);
+    return exact?.ok === true && exact.value === "alive";
+  }
+  const observed = await runtime.status(ref).catch(() => undefined);
+  return observed?.ok === true && observed.value.process === "alive";
+}
+
+/**
+ * C-620: independent exit proof when the release did not end a live session
+ * (the row was already finished or gone). Removing or reading a terminal row
+ * is never proof. Only the kernel check that this session's launch receipt
+ * process and its whole group are gone counts; otherwise the caller keeps the
+ * reference and the stop.
+ */
+export async function stoppedSessionExited(
+  runtime: Runtime,
+  ref: RuntimeRef,
+  owner: RetirementIdentity,
+): Promise<boolean> {
+  if (ref.machine_id !== "local" || !ref.local_process_receipt) return false;
+  for (const check of [
+    runtime.confirm_local_group_exit,
+    runtime.confirm_local_exit,
+  ]) {
+    const proof = await check?.call(runtime, ref, owner).catch(() => undefined);
+    if (proof?.ok === true && proof.value) return true;
+  }
+  return false;
+}
+
 /** System-ended bells never use address-based release, even for cleanup. A
  * previously started stop may only read exit evidence; no second signal.
  * A local "exited" needs process evidence beyond the finished terminal row:

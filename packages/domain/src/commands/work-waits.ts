@@ -16,7 +16,7 @@ import {
 import { authorPrecheckWait } from "./precheck-wait.js";
 import { closedResumeTarget, deferResume } from "./resume-attention.js";
 import { resumeBlockReason, resumeWork } from "./resumption.js";
-import { stoppedByHuman } from "./stop.js";
+import { stoppedByHuman } from "./stop-state.js";
 
 const payload = (e: Event) => e.payload as Record<string, unknown>;
 const trusted = (d: CommandDraft) =>
