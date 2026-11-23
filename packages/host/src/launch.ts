@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -41,6 +41,7 @@ import {
   compileAssignmentLaunch,
   compiledLaunchSettings,
   firstPrompt,
+  getHarnessAdapter,
   type LaunchConfig,
   resolveProfile,
   SECRETS_FILE_NAME,
@@ -133,6 +134,7 @@ import {
   checkWorkerMcp,
   WorkerMcpError,
   workerMcpConfig,
+  workerMcpPython,
 } from "./worker-mcp.js";
 import {
   type PreparedWorktree,
@@ -189,6 +191,11 @@ export interface LaunchHost {
     readonly secrets: Readonly<Record<string, string>>;
   };
   readonly mcpUrl: string;
+  /**
+   * C-600: new sessions must list the Card MCP tools before their first tool
+   * call; a session without native tools is refused and rebuilt once.
+   */
+  readonly verifyMcpSession?: boolean;
   readonly dataDir: string;
   readonly execution?: ExecutionConfig | undefined;
   readonly clock?: Clock | undefined;
@@ -1091,6 +1098,11 @@ async function launch(
     const compiledReview = reviewContext();
     preparedReviewPrompt = compiledReview?.prompt;
     compiledReviewScope = compiledReview?.scope;
+    // C-600: a per-launch key only this session's harness sends from its own
+    // MCP configuration; the endpoint keeps its digest on the Assignment.
+    const mcpSessionKey = host.verifyMcpSession
+      ? randomBytes(24).toString("base64url")
+      : undefined;
     const compiled = compileAssignmentLaunch({
       ...(employee !== undefined
         ? { employee: { launch_profile_ref: profileRef, identity: employee } }
@@ -1138,7 +1150,15 @@ async function launch(
       ...(assignment.machine_id === "local"
         ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
         : {}),
-      mcp: { url: mcpUrl },
+      mcp: {
+        url: mcpUrl,
+        ...(mcpSessionKey ? { session_key: mcpSessionKey } : {}),
+        // C-600: the Codex Card bridge runs on the interpreter the MCP
+        // preflight and the machine check use on this worker.
+        ...(remote && execution.mode === "agent-ssh"
+          ? { bridge_python: workerMcpPython(execution) }
+          : {}),
+      },
       run_dir: runDir,
       work_dir: workDir,
       ...(publication ? { worker_launch: publication.wrapper() } : {}),
@@ -1333,6 +1353,17 @@ async function launch(
                 : { tool_catalog: toolCatalog }),
             },
             runtime_ref: dispatchRef,
+            ...(mcpSessionKey &&
+            getHarnessAdapter(compiled.harness).listsMcpToolsAtStartup
+              ? {
+                  verify_mcp_session: {
+                    key_sha256: createHash("sha256")
+                      .update(mcpSessionKey)
+                      .digest("hex"),
+                    token_id: issued.record.id,
+                  },
+                }
+              : {}),
             ...(baseSha === undefined ? {} : { base_sha: baseSha }),
             ...(input.replacement ? { replacement: input.replacement } : {}),
           },

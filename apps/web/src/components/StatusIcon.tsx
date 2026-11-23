@@ -100,6 +100,7 @@ const statusShapes = {
   unknown: "unknown",
   lost: "error",
   provider_unavailable: "error",
+  mcp_unavailable: "error",
   queued: "pending",
   dispatched: "dispatched",
   acked: "dispatched",

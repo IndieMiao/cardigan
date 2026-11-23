@@ -2,6 +2,12 @@ import { join } from "node:path";
 import { HARNESS_CATALOG } from "@cardigan/domain";
 import type { BrowserServer } from "../assignment-types.js";
 import { BROWSER_MCP_SERVER_NAME, TOKEN_ENV_VAR } from "../assignment-types.js";
+import {
+  DEFAULT_MCP_BRIDGE_PYTHON,
+  MCP_BRIDGE_SESSION_ENV,
+  mcpBridgeAccepts,
+  mcpBridgeArgs,
+} from "../mcp-bridge.js";
 import type {
   LaunchProfileDefinition,
   ProviderDefinition,
@@ -37,18 +43,24 @@ function inlineCodexProvider(
 }
 
 /**
- * `config.toml` for Codex: the Card server with an env-var token reference and
- * per-tool approval, plus the Core Prompt as the model instruction file.
- * `model_instructions_file` replaces Codex's own instructions, so the Core
- * Prompt carries the full protocol (§M2.4).
+ * `config.toml` for Codex: the Card server with per-tool approval, plus the
+ * Core Prompt as the model instruction file. `model_instructions_file`
+ * replaces Codex's own instructions, so the Core Prompt carries the full
+ * protocol (§M2.4).
+ *
+ * C-600: the Card server is the stdio bridge (`mcp-bridge.ts`), never Codex's
+ * own HTTP client, which takes the system proxy without its exception list.
+ * The file holds no Token: Codex forwards `MCP_TOKEN` from its environment to
+ * the bridge only. The session key is set for the bridge process alone.
  */
 function codexConfig(
   serverName: string,
-  url: string,
+  mcp: { readonly url: string; readonly python: string },
   tools: readonly string[],
   coreFile: string,
   trustedPaths: readonly string[],
   browser: BrowserServer | undefined,
+  sessionKey: string | undefined,
 ): string {
   const lines = [
     `model_instructions_file = ${JSON.stringify(coreFile)}`,
@@ -57,8 +69,16 @@ function codexConfig(
     "shell_tool = true",
     "",
     `[mcp_servers.${serverName}]`,
-    `url = ${JSON.stringify(url)}`,
-    `bearer_token_env_var = ${JSON.stringify(TOKEN_ENV_VAR)}`,
+    `command = ${JSON.stringify(mcp.python)}`,
+    `args = [${mcpBridgeArgs(mcp.url)
+      .map((arg) => JSON.stringify(arg))
+      .join(", ")}]`,
+    `env_vars = [${JSON.stringify(TOKEN_ENV_VAR)}]`,
+    ...(sessionKey
+      ? [
+          `env = { ${JSON.stringify(MCP_BRIDGE_SESSION_ENV)} = ${JSON.stringify(sessionKey)} }`,
+        ]
+      : []),
     "",
   ];
   for (const tool of tools) {
@@ -165,6 +185,7 @@ export const codex: HarnessAdapter = {
   },
   versionArgs: ["--version"],
   contextSource: "codex_rollout:last_token_usage",
+  listsMcpToolsAtStartup: true,
   readContext: readCodexContext,
   compile({ resolved, providerEnv, secretEnv, profileArgs, extraArgs }) {
     // Codex keeps its own config; Cardigan only composes arguments:
@@ -204,11 +225,24 @@ export const codex: HarnessAdapter = {
   }) {
     // Codex reads config.toml from CODEX_HOME; the file holds no credentials,
     // only the environment variable name.
+    if (!mcpBridgeAccepts(input.mcp.url))
+      throw new Error(
+        "Card MCP address must be HTTPS, or HTTP on a loopback address",
+      );
+    if (
+      input.mcp.bridge_python !== undefined &&
+      !input.mcp.bridge_python.startsWith("/") &&
+      input.mcp.bridge_python !== "python3"
+    )
+      throw new Error("Card MCP bridge interpreter must be an absolute path");
     harnessFiles.push({
       path: join(input.run_dir, "codex", "config.toml"),
       content: codexConfig(
         serverName,
-        input.mcp.url,
+        {
+          url: new URL(input.mcp.url).href,
+          python: input.mcp.bridge_python ?? DEFAULT_MCP_BRIDGE_PYTHON,
+        },
         input.role.allowed_tools,
         coreFile,
         input.worker_launch && input.role.worktree === "none"
@@ -219,6 +253,7 @@ export const codex: HarnessAdapter = {
               ...(input.build_dir ? [input.build_dir] : []),
             ],
         browser,
+        input.mcp.session_key,
       ),
       mode: 0o600,
     });
