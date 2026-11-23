@@ -165,7 +165,10 @@ test.each(
           join(launched.run_dir, "launch.sh"),
           "utf8",
         );
-        expect(script).toContain(`exec nice -n ${named ? 17 : 10} `);
+        // C-656: host launches start the CLI through the session wrapper.
+        expect(script).toContain(
+          `exec /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" session -- nice -n ${named ? 17 : 10} `,
+        );
         expect(script).toContain("export NODE_OPTIONS=");
         expect(script).toContain("export CARDIGAN_AGENT_LOCAL_TESTS='1'");
         if (harness === "pi") {
