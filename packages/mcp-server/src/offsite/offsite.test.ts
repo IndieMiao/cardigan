@@ -326,6 +326,90 @@ test("without a ledger entry, other bytes are refused and a missing object is no
   expect(gets()).toBe(2);
 });
 
+test("a read keeps the bucket it started with, and a 404 in one bucket does not hide another", async () => {
+  const body = Buffer.from("restored from bucket A");
+  const digest = sha256(body);
+  fake.objects.set(attachmentKey(digest), { body, sha256: digest });
+  const o = await offsite();
+  const first = o.target();
+  const other = await startFakeOss(() => clock);
+  cleanup.push(() => other.close());
+  const only = Buffer.from("only in bucket B");
+  other.objects.set(attachmentKey(sha256(only)), {
+    body: only,
+    sha256: sha256(only),
+  });
+  // Bucket A does not have it.
+  expect(await fileAttachmentStore(dataDir).get(sha256(only))).toBeUndefined();
+  // A read from A is still in flight when the configuration moves to B.
+  let release = () => {};
+  let started = () => {};
+  const sent = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  fake.hold = () =>
+    new Promise<void>((resolve) => {
+      release = resolve;
+      started();
+    });
+  const reading = fileAttachmentStore(dataDir).get(digest);
+  await sent;
+  await writeStorageConfig(configDir, other);
+  clock = new Date(clock.getTime() + 31_000);
+  expect(o.target()).not.toBe(first);
+  release();
+  expect(await reading).toEqual(body);
+  // The proven copy is A's: B records nothing and signs nothing for it.
+  expect(o.ledger.count).toBe(0);
+  expect(o.thumbnailUrl(digest)).toBeUndefined();
+  expect(
+    new SyncedLedger(dataDir, first ?? "").refresh().get(attachmentKey(digest)),
+  ).toBeDefined();
+  expect(other.requests).toEqual([]);
+  // A's "missing" does not stop asking B.
+  expect(await fileAttachmentStore(dataDir).get(sha256(only))).toEqual(only);
+  expect(other.requests).toMatchObject([
+    { method: "GET", key: attachmentKey(sha256(only)) },
+  ]);
+  expect(o.ledger.get(attachmentKey(sha256(only)))).toBeDefined();
+});
+
+test("an artifact restore in flight during a bucket switch is recorded for its own bucket", async () => {
+  const blob = "4f0f0f0f-1111-2222-3333-444444444444";
+  const body = Buffer.alloc(64 * 1024, 4);
+  fake.objects.set(artifactKey(blob), { body, sha256: sha256(body) });
+  const o = await offsite();
+  const first = o.target();
+  const other = await startFakeOss(() => clock);
+  cleanup.push(() => other.close());
+  let release = () => {};
+  let started = () => {};
+  const sent = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  fake.hold = () =>
+    new Promise<void>((resolve) => {
+      release = resolve;
+      started();
+    });
+  const opening = openArtifact(dataDir, {
+    id: "F-4",
+    sha256: sha256(body),
+    size: body.length,
+    streamed_artifact: { blob_id: blob },
+  } as unknown as Attachment);
+  await sent;
+  await writeStorageConfig(configDir, other);
+  clock = new Date(clock.getTime() + 31_000);
+  release();
+  await (await opening).close();
+  expect(await readFile(join(dataDir, "artifacts", blob))).toEqual(body);
+  expect(o.ledger.get(artifactKey(blob))).toBeUndefined();
+  expect(
+    new SyncedLedger(dataDir, first ?? "").refresh().get(artifactKey(blob)),
+  ).toBeDefined();
+});
+
 test("uploads never overwrite and carry the verified digest", async () => {
   const o = await offsite();
   const client = o.client() as OssClient;

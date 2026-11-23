@@ -22,6 +22,8 @@ export interface FakeOss {
   }[];
   /** `down` drops connections; `denied` answers 403; `corrupt` serves other bytes. */
   mode: "up" | "down" | "denied" | "corrupt";
+  /** Awaited before answering a GET, to hold a read open mid-flight. */
+  hold: (() => Promise<void>) | undefined;
   close(): Promise<void>;
 }
 
@@ -41,7 +43,10 @@ export async function startFakeOss(
   };
   const objects = new Map<string, { body: Buffer; sha256?: string }>();
   const requests: FakeOss["requests"] = [];
-  const state = { mode: "up" as FakeOss["mode"] };
+  const state = {
+    mode: "up" as FakeOss["mode"],
+    hold: undefined as FakeOss["hold"],
+  };
   let credentials: OssCredentials = base;
   const verify = (req: IncomingMessage, key: string, url: URL) => {
     const headers: Record<string, string> = {};
@@ -98,7 +103,8 @@ export async function startFakeOss(
     const key = decodeURIComponent(url.pathname.slice(1));
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
-    req.on("end", () => {
+    req.on("end", async () => {
+      if (req.method === "GET" && state.hold) await state.hold();
       const how = verify(req, key, url);
       if (state.mode === "denied" || !how || how === "expired") {
         res.writeHead(403).end();
@@ -161,6 +167,12 @@ export async function startFakeOss(
     },
     set mode(mode) {
       state.mode = mode;
+    },
+    get hold() {
+      return state.hold;
+    },
+    set hold(hold) {
+      state.hold = hold;
     },
     close: () =>
       new Promise<void>((resolve) => {

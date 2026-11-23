@@ -67,6 +67,13 @@ export function offsiteTarget(
 /** Ledger of a host without a valid configuration; nothing is recorded there. */
 const NO_TARGET = "0".repeat(16);
 
+/** One target's client and ledger, fixed for the length of a read. */
+interface Source {
+  readonly client: OssClient;
+  readonly target: string;
+  readonly ledger: SyncedLedger;
+}
+
 /** A signed URL and how many more seconds it stays valid. */
 export interface SignedLink {
   readonly url: string;
@@ -100,7 +107,10 @@ export class Offsite {
 
   /** Verified objects of the current target (empty without a configuration). */
   get ledger(): SyncedLedger {
-    const target = this.target() ?? NO_TARGET;
+    return this.ledgerFor(this.target() ?? NO_TARGET);
+  }
+
+  private ledgerFor(target: string): SyncedLedger {
     let ledger = this.ledgers.get(target);
     if (!ledger) {
       ledger = new SyncedLedger(this.dataDir, target);
@@ -164,33 +174,52 @@ export class Offsite {
   }
 
   /**
-   * Whether OSS should be asked for `key`: configured, not known to be down,
-   * and not answered "missing" recently. Without a ledger entry (for example
-   * after the data directory was restored) the deterministic key is still
-   * tried; the caller's record supplies the digest the bytes must match.
+   * Where to read `key` from: the client, target and ledger of the current
+   * configuration, taken together once. A read keeps this source to the end,
+   * so a configuration switched to another bucket meanwhile never receives
+   * its result. Undefined when OSS is not configured, known to be down, or
+   * answered "missing" for this key in this target recently. Without a ledger
+   * entry (for example after the data directory was restored) the
+   * deterministic key is still tried; the caller's record supplies the digest
+   * the bytes must match.
    */
-  private fetchable(key: string) {
-    const client = this.client();
-    if (!client || !this.reachable()) return undefined;
-    const until = this.missing.get(key);
+  private source(key: string): Source | undefined {
+    const config = this.config();
+    const client = this.cached?.client;
+    if (config.state !== "ready" || !client || !this.reachable())
+      return undefined;
+    const target = offsiteTarget(config.settings.credentials);
+    const missing = `${target}/${key}`;
+    const until = this.missing.get(missing);
     if (until !== undefined) {
       if (until > this.now().getTime()) return undefined;
-      this.missing.delete(key);
+      this.missing.delete(missing);
     }
-    return client;
+    return { client, target, ledger: this.ledgerFor(target).refresh() };
   }
 
-  private noteMissing(key: string, error: unknown) {
+  private noteMissing(source: Source, key: string, error: unknown) {
     if (!(error instanceof OssError && error.code === "not_found")) return;
     if (this.missing.size >= MISSING_LIMIT) this.missing.clear();
-    this.missing.set(key, this.now().getTime() + MISSING_RETRY_MS);
+    this.missing.set(
+      `${source.target}/${key}`,
+      this.now().getTime() + MISSING_RETRY_MS,
+    );
   }
 
-  /** A verified read proves the copy: later reads may use signed URLs. */
-  private remember(key: string, sha256: string, size: number) {
-    if (this.ledger.refresh().get(key)) return;
+  /**
+   * A verified read proves the copy in the target it came from (never the
+   * current one, if that changed meanwhile): later reads may use signed URLs.
+   */
+  private remember(source: Source, key: string, sha256: string, size: number) {
+    if (source.ledger.refresh().get(key)) return;
     try {
-      this.ledger.record({ key, sha256, size, at: this.now().toISOString() });
+      source.ledger.record({
+        key,
+        sha256,
+        size,
+        at: this.now().toISOString(),
+      });
     } catch {
       // Only the bookkeeping is lost; the verified bytes are still used.
     }
@@ -283,15 +312,15 @@ export class Offsite {
   ): Promise<Buffer | undefined> {
     if (!/^[a-f0-9]{64}$/u.test(digest)) return undefined;
     const key = attachmentKey(digest);
-    const entry = this.synced(key);
+    const source = this.source(key);
+    if (!source) return undefined;
+    const entry = source.ledger.get(key);
     if (entry && (entry.sha256 !== digest || entry.size > limit))
       return undefined;
-    const client = this.fetchable(key);
-    if (!client) return undefined;
     const expected = entry?.size;
     let size = 0;
     try {
-      const res = await client.get(key, 60_000);
+      const res = await source.client.get(key, 60_000);
       const chunks: Buffer[] = [];
       try {
         for await (const chunk of res as AsyncIterable<Buffer>) {
@@ -308,10 +337,10 @@ export class Offsite {
         createHash("sha256").update(content).digest("hex") !== digest
       )
         return undefined;
-      this.remember(key, digest, content.length);
+      this.remember(source, key, digest, content.length);
       return content;
     } catch (error) {
-      this.noteMissing(key, error);
+      this.noteMissing(source, key, error);
       return undefined;
     } finally {
       this.usage.add({ requests: 1, egress_bytes: size });
@@ -329,18 +358,18 @@ export class Offsite {
     sha256: string,
   ): Promise<boolean> {
     const key = artifactKey(blobId);
-    const entry = this.synced(key);
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) return false;
+    const source = this.source(key);
+    if (!source) return false;
     // A ledger entry that disagrees with the record is never trusted; no entry
     // at all (restored data directory) still tries the deterministic key.
+    const entry = source.ledger.get(key);
     if (entry && (entry.sha256 !== sha256 || entry.size !== size)) return false;
-    if (!/^[a-f0-9]{64}$/u.test(sha256)) return false;
-    const client = this.fetchable(key);
-    if (!client) return false;
     const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
     let file: Awaited<ReturnType<typeof open>> | undefined;
     try {
       await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-      const res = await client.get(
+      const res = await source.client.get(
         key,
         Math.max(120_000, Math.ceil(size / 1024)),
       );
@@ -363,10 +392,10 @@ export class Offsite {
       await link(temporary, path).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "EEXIST") throw error;
       });
-      this.remember(key, sha256, size);
+      this.remember(source, key, sha256, size);
       return true;
     } catch (error) {
-      this.noteMissing(key, error);
+      this.noteMissing(source, key, error);
       return false;
     } finally {
       await file?.close();
