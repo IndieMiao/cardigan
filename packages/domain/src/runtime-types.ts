@@ -65,6 +65,12 @@ export type RetirementEvidence = {
   readonly observation?: "alive" | "exited" | "unknown" | RuntimeErrorCode;
   readonly stop?: RetirementStop;
 };
+export type RetirementSignalEvidence = {
+  readonly pid: number;
+  readonly signals: readonly ("HUP" | "TERM")[];
+  readonly exit_code?: number;
+  readonly exit_reason?: string;
+};
 export type IdleRetirementResult =
   | {
       readonly outcome: "exited";
@@ -72,6 +78,9 @@ export type IdleRetirementResult =
        * checked by the kernel after the terminal finished. */
       readonly process_group_exited?: true;
       readonly stop?: RetirementStop;
+      /** Only with `report_signals`: the probed program PID and the signals
+       * this call actually sent before the terminal finished. */
+      readonly signalled?: RetirementSignalEvidence;
     }
   | {
       readonly outcome: "withdrawn" | "timeout" | "uncertain";

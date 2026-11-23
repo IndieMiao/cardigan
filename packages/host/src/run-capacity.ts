@@ -19,6 +19,7 @@ import {
   remainingResourceRatio,
   runOccupiesSlot,
   runQueuePositions,
+  stoppedByHuman,
 } from "@cardigan/domain";
 import {
   type ReadRepositories,
@@ -71,8 +72,8 @@ export function runCapacityMachines(
  * fresh array per call only misses the cache. Unfinished BellAttempts are not
  * snapshotted, so they are re-read and filtered on every call.
  *
- * Rows match the former JOIN: queued for `concurrency_limit`, owner active and
- * not capacity exempt, trigger event present; the card is the owner's work item
+ * Rows match the former JOIN: queued for `concurrency_limit`, owner active,
+ * not capacity exempt and not stopped by the human, trigger event present; the card is the owner's work item
  * card, else the trigger event's card, and priority comes from that card.
  */
 type QueueKey = readonly unknown[];
@@ -141,6 +142,9 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       const owner = assignments.get(run.assignment_id);
       if (owner?.status !== "active" || isRunCapacityExempt(owner)) continue;
       if (!assignmentDependenciesAllowStart(dependencyState, owner)) continue;
+      // C-624: nobody dispatches a human-stopped owner, so it cannot hold a
+      // queue position ahead of others. A human start restores its place.
+      if (stoppedByHuman(history, owner.id)) continue;
       let cause = triggerEvents.get(run);
       if (!cause) {
         triggerEvent ??= store.database.prepare(

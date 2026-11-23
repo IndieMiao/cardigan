@@ -1,10 +1,11 @@
 import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
 import type { Result } from "../errors.js";
 import { hostOpsPending } from "../host-ops.js";
-import type { AssignmentId } from "../ids.js";
+import type { AssignmentId, CardId } from "../ids.js";
 import { retirementWaitReceipt } from "../retirement-session.js";
 import { transition } from "../transitions.js";
 import {
+  type CommandDraft,
   type CommandEffect,
   type CommandPorts,
   type CommandState,
@@ -15,6 +16,7 @@ import {
 
 const ASSIGNMENT_STOPPED = "assignment_stopped";
 const ASSIGNMENT_STOP_RELEASED = "assignment_stop_released";
+const ASSIGNMENT_START_REQUESTED = "assignment_start_requested";
 
 // One index per immutable event snapshot. Array order (not timestamps or
 // per-card sequence numbers) remains the authority, exactly as in the scan.
@@ -30,10 +32,14 @@ const field = (payload: unknown, key: string): unknown =>
 
 /**
  * C-211: a work-item Assignment the human stopped stays stopped until the
- * human starts it again. The latest of its `assignment_stopped` and
- * `run_dispatched` events decides: the Dispatcher does not wake, replace or
- * start a session for it in between (new bells stay pending), and host_ops
- * cannot restart it either.
+ * human starts it again. The latest of its `assignment_stopped`,
+ * `assignment_start_requested` and `run_dispatched` events decides: the
+ * Dispatcher does not wake, replace or start a session for it in between (new
+ * bells stay pending), and host_ops cannot restart it either.
+ *
+ * C-624: a human start that has to queue for capacity is still the human's
+ * start. Before, only the eventual dispatch lifted the stop, so the queued Run
+ * was never dispatched by anyone and held the head of the machine queue.
  */
 export function stoppedByHuman(
   events: readonly Event[],
@@ -43,7 +49,12 @@ export function stoppedByHuman(
   if (!stopped) {
     const index = new Map<unknown, boolean>();
     for (const event of events)
-      if (event.type === ASSIGNMENT_STOPPED || event.type === "run_dispatched")
+      if (
+        event.type === ASSIGNMENT_STOPPED ||
+        event.type === "run_dispatched" ||
+        (event.type === ASSIGNMENT_START_REQUESTED &&
+          event.actor.kind === "human")
+      )
         index.set(
           field(event.payload, "assignment_id"),
           event.type === ASSIGNMENT_STOPPED,
@@ -52,6 +63,28 @@ export function stoppedByHuman(
     stoppedAssignments.set(events, stopped);
   }
   return stopped.get(assignment_id) ?? false;
+}
+
+/**
+ * C-624: record a human start of a stopped work-item Assignment when its Run is
+ * queued, not only once it is dispatched. Only the human ends a human stop.
+ */
+export function recordHumanStart(
+  d: CommandDraft,
+  assignment: Assignment,
+  run: Run,
+  card: CardId | undefined,
+) {
+  if (
+    d.actor.kind !== "human" ||
+    assignment.scope !== "work_item" ||
+    !stoppedByHuman(d.state.events, assignment.id)
+  )
+    return;
+  d.emit(ASSIGNMENT_START_REQUESTED, card, {
+    assignment_id: assignment.id,
+    run_id: run.id,
+  });
 }
 
 const unfinished = (status: string) =>
