@@ -6,30 +6,35 @@ import type {
   RoleOverlayRules,
   ToolName,
 } from "@cardigan/domain";
-import type { StoreTransactionContext } from "@cardigan/store";
-import {
-  deploymentRolePolicyHash,
-  policyHasher,
-  weakRolePolicyHash,
-} from "./role-policy-hash.js";
+import type {
+  ReadRepositories,
+  StoreTransactionContext,
+} from "@cardigan/store";
+import { deploymentRolePolicyHash, policyHasher } from "./role-policy-hash.js";
 
 /**
- * C-613: which default-pack contents a project role may have been built on.
- * Every deployed pack, and every older default proven by the supervisor's
- * exact fingerprint, is remembered compactly (paragraph hashes, not text), so
- * a later deployment, or a retry after a deferral, still tells project rules
- * from content an earlier pack had.
+ * C-613 (shared with C-603): the one trusted record of default-pack contents a
+ * project role may have been built on. Only the system appends it, in the
+ * project's own stream and on no card. Each entry is one role's full policy
+ * hash (`deploymentRolePolicyHash`) and, when known, a compact content
+ * fingerprint (paragraph hashes, not text). It is written for every deployed
+ * pack, for each `role upgrade --from-default`, and for an older default this
+ * module proves; existing pre-C-613 publication receipts seed hash-only entries.
  */
 export const DEFAULTS_EVENT = "host_role_defaults_recorded";
 
-export interface KnownDefault {
-  readonly policy_hash: string;
+export interface KnownContent {
   readonly paragraphs: readonly string[];
   readonly allowed_tools: readonly ToolName[];
   readonly capabilities: readonly string[];
   readonly kind: string;
   readonly worktree: string;
   readonly required_capabilities: readonly string[];
+}
+export interface KnownDefault {
+  readonly policy_hash: string;
+  /** Missing on a seed: only the hash is known, content must be proven. */
+  readonly content?: KnownContent;
 }
 
 export const paragraphs = (text: string) =>
@@ -43,49 +48,86 @@ export const paragraphHash = (p: string) =>
 export function knownDefault(role: RoleDefinition): KnownDefault {
   return {
     policy_hash: deploymentRolePolicyHash(role),
-    paragraphs: paragraphs(role.instructions ?? role.core_prompt ?? "").map(
-      paragraphHash,
-    ),
-    allowed_tools: [...role.allowed_tools],
-    capabilities: [...role.capabilities],
-    kind: role.kind,
-    worktree: role.worktree,
-    required_capabilities: [...(role.required_capabilities ?? [])],
+    content: {
+      paragraphs: paragraphs(role.instructions ?? role.core_prompt ?? "").map(
+        paragraphHash,
+      ),
+      allowed_tools: [...role.allowed_tools],
+      capabilities: [...role.capabilities],
+      kind: role.kind,
+      worktree: role.worktree,
+      required_capabilities: [...(role.required_capabilities ?? [])],
+    },
   };
 }
 
-/** Newest first, per role id. */
+const trusted = (
+  e: { card_id?: string; actor: { kind: string; project_id?: string } },
+  project: ProjectId,
+) =>
+  e.card_id === undefined &&
+  e.actor.kind === "system" &&
+  e.actor.project_id === project;
+
+/**
+ * Oldest first, per role id; one entry per hash. Read from this project's
+ * stream only. Seeds come from the `matched` entries of publication receipts
+ * written before the first record: those receipts covered plain default roles
+ * only, so a matched hash was that release's default.
+ */
 export function knownDefaults(
-  tx: StoreTransactionContext,
+  tx: ReadRepositories,
   project: ProjectId,
 ): Map<string, KnownDefault[]> {
   const known = new Map<string, KnownDefault[]>();
-  for (const e of tx.events.listAfter(project, undefined, 0)) {
-    if (
-      e.type !== DEFAULTS_EVENT ||
-      e.card_id !== undefined ||
-      e.actor.kind !== "system"
-    )
-      continue;
-    const p = e.payload as { role_id?: string; known?: KnownDefault };
-    if (!p.role_id || !p.known) continue;
-    known.set(p.role_id, [p.known, ...(known.get(p.role_id) ?? [])]);
+  const add = (role_id: string, value: KnownDefault) => {
+    const list = known.get(role_id) ?? [];
+    const at = list.findIndex((k) => k.policy_hash === value.policy_hash);
+    if (at < 0) known.set(role_id, [...list, value]);
+    else if (!list[at]?.content && value.content)
+      known.set(role_id, list.with(at, value));
+  };
+  let recorded = false;
+  const stream = [...tx.events.listAfter(project, undefined, 0)].sort(
+    (a, b) => a.seq - b.seq,
+  );
+  for (const e of stream) {
+    if (!trusted(e, project)) continue;
+    if (e.type === DEFAULTS_EVENT) {
+      recorded = true;
+      const p = e.payload as { role_id?: unknown; known?: KnownDefault };
+      if (
+        typeof p.role_id === "string" &&
+        typeof p.known?.policy_hash === "string"
+      )
+        add(p.role_id, p.known);
+    } else if (e.type === "host_role_pack_published" && !recorded) {
+      const roles = (e.payload as { roles?: Record<string, unknown> }).roles;
+      for (const [role_id, entry] of Object.entries(roles ?? {})) {
+        const r = entry as { policy_hash?: unknown; disposition?: unknown };
+        if (r?.disposition === "matched" && typeof r.policy_hash === "string")
+          add(role_id, { policy_hash: r.policy_hash });
+      }
+    }
   }
   return known;
 }
 
+/** Append a default unless the record already holds it with content. */
 export function rememberDefault(
   tx: StoreTransactionContext,
   project: ProjectId,
   known: Map<string, KnownDefault[]>,
   role_id: string,
   value: KnownDefault,
-  source: "pack" | "proof",
+  source: "pack" | "proof" | "cli",
   at: string,
 ) {
   const list = known.get(role_id) ?? [];
-  if (list.some((k) => k.policy_hash === value.policy_hash)) return;
-  known.set(role_id, [value, ...list]);
+  const index = list.findIndex((k) => k.policy_hash === value.policy_hash);
+  const existing = list[index];
+  if (existing && (existing.content || !value.content)) return;
+  known.set(role_id, existing ? list.with(index, value) : [...list, value]);
   tx.events.append(project, {
     id: tx.ids.nextEventId(),
     seq: tx.ids.nextEventSequence(project),
@@ -99,28 +141,6 @@ export function rememberDefault(
 const sameSet = (a: readonly string[], b: readonly string[]) =>
   [...new Set(a)].sort().join("\n") === [...new Set(b)].sort().join("\n");
 
-/** Whether the version is exactly an older default (strongly or weakly proven). */
-export function isOlderDefault(
-  role: Role,
-  current: RoleDefinition,
-  older: readonly KnownDefault[],
-  previousHash: string | undefined,
-) {
-  const hash = deploymentRolePolicyHash(role);
-  if (older.some((k) => k.policy_hash === hash) || previousHash === hash)
-    return true;
-  // An older supervisor hashed without machine requirements; trust it only
-  // when the requirements are the default's, so none can be lost.
-  return (
-    previousHash !== undefined &&
-    previousHash === weakRolePolicyHash(role) &&
-    sameSet(
-      role.required_capabilities ?? [],
-      current.required_capabilities ?? [],
-    )
-  );
-}
-
 /**
  * Read the version as `known + appended paragraphs + tool changes`, all
  * proven against that known default's own content. Undefined when a known
@@ -128,7 +148,7 @@ export function isOlderDefault(
  */
 export function rulesAgainstKnown(
   role: Role,
-  known: KnownDefault,
+  known: KnownContent,
 ): RoleOverlayRules | undefined {
   const text = role.instructions;
   if (
@@ -162,14 +182,90 @@ export function rulesAgainstKnown(
   };
 }
 
+export interface OlderReading {
+  readonly rules: RoleOverlayRules;
+  /** The record the reading is based on. */
+  readonly known: KnownDefault;
+  /** The older default proven from a hash-only record, to be remembered. */
+  readonly proven?: RoleDefinition;
+}
+
+/**
+ * Steps 3 and 4 of the C-613 provenance order: read the version as an older
+ * recorded default plus project rules. `older` excludes this release's own
+ * default. Content the current pack has anyway is no project rule. Any other
+ * extra tool or paragraph must appear in no recorded default of the role, or
+ * it may be what a later pack withdrew. Content records are tried first, then
+ * hash-only ones by proof. Among candidates the one with the fewest extra,
+ * appended and removed items wins; a tie goes to the newer record, so a rerun
+ * of one release reaches the same reading.
+ */
+export function readOnOlderDefault(
+  role: Role,
+  current: RoleDefinition,
+  older: readonly KnownDefault[],
+): OlderReading | undefined {
+  const currentTools = new Set(current.allowed_tools);
+  const currentParagraphs = new Set(
+    paragraphs(current.instructions ?? "").map(paragraphHash),
+  );
+  const recordedTools = new Set(
+    older.flatMap((k) => k.content?.allowed_tools ?? []),
+  );
+  const recordedParagraphs = new Set(
+    older.flatMap((k) => k.content?.paragraphs ?? []),
+  );
+  const tidy = (rules: RoleOverlayRules): RoleOverlayRules | undefined => {
+    const extra_tools = rules.extra_tools.filter((t) => !currentTools.has(t));
+    const appended = paragraphs(rules.append_instructions).filter(
+      (p) => !currentParagraphs.has(paragraphHash(p)),
+    );
+    if (
+      extra_tools.some((t) => recordedTools.has(t)) ||
+      appended.some((p) => recordedParagraphs.has(paragraphHash(p)))
+    )
+      return undefined;
+    return {
+      ...rules,
+      append_instructions: appended.join("\n\n"),
+      extra_tools,
+    };
+  };
+  const score = (r: RoleOverlayRules) =>
+    r.extra_tools.length +
+    paragraphs(r.append_instructions).length +
+    r.removed_tools.length;
+  const best = (readings: readonly OlderReading[]) =>
+    readings.reduce<OlderReading | undefined>(
+      (chosen, next) =>
+        chosen && score(chosen.rules) < score(next.rules) ? chosen : next,
+      undefined,
+    );
+  const byContent = best(
+    older.flatMap((known) => {
+      const read = known.content && rulesAgainstKnown(role, known.content);
+      const rules = read && tidy(read);
+      return rules ? [{ rules, known }] : [];
+    }),
+  );
+  if (byContent) return byContent;
+  return best(
+    older.flatMap((known) => {
+      if (known.content) return [];
+      const proof = provePreviousDefault(role, current, known.policy_hash);
+      const rules = proof && tidy(proof.rules);
+      return rules ? [{ rules, known, proven: proof.previous }] : [];
+    }),
+  );
+}
+
 /** Upper bound of tool variants tried per text cut. */
 const MAX_VARIANTS = 30_000;
 /** Project text is appended; only the last boundaries are cut. */
 const MAX_CUTS = 12;
 
 /**
- * Find the previously deployed default inside the version by its exact
- * supervisor fingerprint: a text prefix plus the version's tools minus a few
+ * Find a recorded older default inside the version by its full policy hash: a text prefix plus the version's tools minus a few
  * project additions (any tool the new pack lacks, and up to two it has).
  */
 export function provePreviousDefault(
@@ -204,10 +300,6 @@ export function provePreviousDefault(
   extras.sort((a, b) => a.length - b.length);
   const boundaries = [...text.matchAll(/\n[ \t]*\n/gu)].map((m) => m.index);
   const cuts = [text.length, ...boundaries.reverse().slice(0, MAX_CUTS)];
-  const weakOk = sameSet(
-    role.required_capabilities ?? [],
-    current.required_capabilities ?? [],
-  );
   for (const cut of cuts) {
     const hash = policyHasher(text.slice(0, cut));
     for (const extra of extras) {
@@ -215,11 +307,7 @@ export function provePreviousDefault(
         ...role,
         allowed_tools: role.allowed_tools.filter((t) => !extra.includes(t)),
       };
-      if (
-        hash(previous, true) !== previousHash &&
-        !(weakOk && hash(previous, false) === previousHash)
-      )
-        continue;
+      if (hash(previous, true) !== previousHash) continue;
       return {
         rules: {
           base_role_id: role.role_id,
@@ -233,4 +321,24 @@ export function provePreviousDefault(
     }
   }
   return undefined;
+}
+
+/** Record one default role as the trusted record holds it (CLI upgrades). */
+export function recordDefault(
+  tx: StoreTransactionContext,
+  project: ProjectId,
+  role_id: string,
+  value: RoleDefinition,
+  source: "pack" | "cli",
+  at: string,
+) {
+  rememberDefault(
+    tx,
+    project,
+    knownDefaults(tx, project),
+    role_id,
+    knownDefault(value),
+    source,
+    at,
+  );
 }

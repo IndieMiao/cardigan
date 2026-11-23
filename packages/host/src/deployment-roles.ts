@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import {
   type CommandState,
+  deploymentAuditedVersion,
   eventsOfType,
   type ProjectId,
   pendingRoleConflictActions,
-  type RoleDefinition,
   requestDeploymentAction,
   resolveMatchedRoleActions,
   roleUpgradeDiff,
@@ -32,6 +32,7 @@ import {
   recordRoleDeferral,
   syncOverlayRoles,
 } from "./role-overlay.js";
+import { knownDefaults } from "./role-provenance.js";
 
 export { deploymentRolePolicyHash };
 
@@ -147,19 +148,22 @@ export function upgradeDeployedRoles(
           ),
         ),
       );
-    // C-613: overlay roles follow the pack on every deployment.
-    syncOverlayRoles(
+    // C-613: every role is first judged against the trusted default record;
+    // what that pass decided is not judged again below.
+    const handled = syncOverlayRoles(
       tx,
       project,
       clock.now,
-      { changedRoles, previousDefaults, profiles: profileNames },
+      { profiles: profileNames },
       true,
     );
+    const known = knownDefaults(tx, project);
     const ids = [
       ...new Set(listRoleVersions(tx, project).map((r) => r.role_id)),
     ];
     for (const id of ids) {
-      if (!isDefaultRoleId(id) || !changedRoles.includes(id)) continue;
+      if (!isDefaultRoleId(id) || !changedRoles.includes(id) || handled.has(id))
+        continue;
       const roles = listRoleVersions(tx, project);
       const latest = roles.filter((r) => r.role_id === id).at(-1);
       if (!latest || latest.status === "inactive" || latest.default_overlay)
@@ -185,6 +189,21 @@ export function upgradeDeployedRoles(
         continue;
       }
       if (currentHash !== baseline) {
+        // Only a recorded older default makes a mismatch a manual edit to
+        // review (C-603). Without one, e.g. an older supervisor's fingerprint
+        // that omits machine requirements, nothing is proven: keep the version
+        // and notify PM, opening no human action (V-3037:2).
+        const sourceHash = deploymentRolePolicyHash(source);
+        if (!(known.get(id) ?? []).some((k) => k.policy_hash !== sourceHash)) {
+          recordRoleDeferral(
+            tx,
+            project,
+            `unverified-default:${id}:${latest.version}:${sourceHash}`,
+            `角色 ${id} v${latest.version} 与上一默认包指纹不一致，且没有可核对的已记录默认包；系统保留当前版本并通知 PM，未创建人工拍板。`,
+            clock.now(),
+          );
+          continue;
+        }
         if (source.instructions === undefined)
           throw new Error("Default role instructions missing");
         const diff = roleUpgradeDiff(latest, {
@@ -192,8 +211,8 @@ export function upgradeDeployedRoles(
           instructions: source.instructions,
         });
         pending(
-          `deployment-role-manual:${id}:${latest.version}:${deploymentRolePolicyHash(source)}`,
-          `角色 ${id} 未自动升级：${baseline ? "当前版本有手工改动，与上一次已部署默认版本不一致" : "缺少上一次已部署默认版本，无法确认当前版本是否有手工改动"}。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
+          `deployment-role-manual:${id}:${latest.version}:${sourceHash}`,
+          `角色 ${id} 未自动升级：当前版本有手工改动，与已记录的默认版本都不一致。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
         );
         continue;
       }
@@ -267,7 +286,12 @@ export function upgradeDeployedRoles(
         payload: { ...receipt },
       });
   });
-  return rotateIdleDeployedRoles(store, project);
+  return rotateIdleDeployedRoles(
+    store,
+    project,
+    loadCommandState,
+    profileNames,
+  );
 }
 
 /** Retry every maintenance tick; busy sessions retain their pinned version until idle. */
@@ -278,6 +302,8 @@ export function rotateIdleDeployedRoles(
     tx: StoreTransactionContext,
     project: ProjectId,
   ) => CommandState = loadCommandState,
+  /** Valid launch profiles, known in a deployment only. */
+  profiles?: () => ReadonlySet<string>,
 ) {
   return store.uow.run((tx) => {
     let state = loadState(tx, project);
@@ -308,21 +334,17 @@ export function rotateIdleDeployedRoles(
       const latest = state.roles
         .filter((r) => r.role_id === previous.role_id)
         .sort((a, b) => b.role_version - a.role_version)[0];
+      // Only to a version an audited system upgrade reaches (V-3037:1): an
+      // upgrade audit to exactly that version, or a metadata-only audit that
+      // carries one with the same policy and launch fields.
+      const audited =
+        latest &&
+        deploymentAuditedVersion(state, previous.role_id, latest.role_version);
       if (
         !latest ||
         latest.role_version <= previous.role_version ||
-        // An audited upgrade after the pinned version; later versions that
-        // only changed overlay metadata carry it (C-613).
-        !eventsOfType(state.events, "host_role_upgraded").some((e) => {
-          const p = e.payload as Record<string, unknown>;
-          return (
-            e.actor.kind === "system" &&
-            p.role_id === previous.role_id &&
-            typeof p.to_version === "number" &&
-            p.to_version > previous.role_version &&
-            p.to_version <= latest.role_version
-          );
-        }) ||
+        audited === undefined ||
+        audited <= previous.role_version ||
         state.runs.some(
           (r) =>
             r.assignment_id === previous.id &&
@@ -330,6 +352,29 @@ export function rotateIdleDeployedRoles(
         )
       )
         continue;
+      // The new session must be launchable: in a deployment the profile is
+      // checked now; between deployments only an unchanged profile is taken.
+      const pinned = state.roles.find(
+        (r) =>
+          r.role_id === previous.role_id &&
+          r.role_version === previous.role_version,
+      );
+      const profile = latest.launch_profile_ref;
+      const launchable = profiles
+        ? profile !== undefined && profiles().has(profile)
+        : profile !== undefined && profile === pinned?.launch_profile_ref;
+      if (!launchable) {
+        recordRoleDeferral(
+          tx,
+          project,
+          `rotation-profile:${previous.id}:${latest.role_version}:${profile}`,
+          profiles
+            ? `常驻角色 ${previous.role_id} v${latest.role_version} 的启动配置 ${profile} 不存在或未通过校验；系统保留原会话并通知 PM 排查。`
+            : `常驻角色 ${previous.role_id} v${latest.role_version} 换了启动配置 ${profile}，部署之外无法核对；系统保留原会话，下次部署核对后再轮换。`,
+          clock.now(),
+        );
+        continue;
+      }
       const rotated =
         previous.role_id === "pm"
           ? rotatePmAfterDeployment(

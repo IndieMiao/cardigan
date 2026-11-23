@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { composeRoleOverlay, type Role } from "@cardigan/domain";
-import { deploymentRolePolicyHash } from "@cardigan/host";
+import { deploymentRolePolicyHash, knownDefaults } from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -165,10 +165,20 @@ test("C-613 role upgrade --from-default keeps the project rules instead of overw
   ).toBe(0);
   expect(printed()).toContain("按“当前默认包 + 附加规则”升级");
   expect(latest("reviewer").version).toBe(1);
+  // A dry run records nothing.
+  const recorded = () =>
+    store((s) =>
+      s.uow.read((tx) => knownDefaults(tx, PROJECT).get("reviewer") ?? []),
+    );
+  expect(recorded()).toEqual([]);
   expect(await run(["role", "upgrade", "reviewer", "--from-default"])).toBe(0);
   const next = latest("reviewer");
   expect(next.version).toBe(2);
   expect(next.instructions).toBe(`${pack.instructions}\n\n${TIME_RULE}`);
+  // The default this upgrade took joins the trusted record (C-603/C-613).
+  expect(recorded()).toEqual([
+    expect.objectContaining({ policy_hash: deploymentRolePolicyHash(pack) }),
+  ]);
   expect(next.default_overlay).toMatchObject({
     ...rules,
     base_hash: deploymentRolePolicyHash(pack),

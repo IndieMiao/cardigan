@@ -1,10 +1,12 @@
 import {
   composeRoleOverlay,
+  deploymentAuditedVersion,
   type ProjectId,
   type Role,
   type RoleDefinition,
   type RoleOverlay,
   type RoleOverlayRules,
+  roleReference,
   type ToolName,
   upgradeRoleAfterDeployment,
 } from "@cardigan/domain";
@@ -21,15 +23,12 @@ import {
 } from "@cardigan/store";
 import { deploymentRolePolicyHash } from "./role-policy-hash.js";
 import {
-  isOlderDefault,
   type KnownDefault,
   knownDefault,
   knownDefaults,
-  paragraphHash,
   paragraphs,
-  provePreviousDefault,
+  readOnOlderDefault,
   rememberDefault,
-  rulesAgainstKnown,
 } from "./role-provenance.js";
 
 /**
@@ -127,11 +126,12 @@ export function overlayEditedByHand(role: Role): boolean {
   );
 }
 
-/** What the deployment supervisor reports about this release's default pack. */
+/**
+ * What a deployment pass needs besides the loaded pack. Provenance comes from
+ * the trusted default record only, never from the supervisor's fingerprints
+ * or its list of changed roles.
+ */
 export interface DeployedPack {
-  readonly changedRoles: readonly string[];
-  /** Policy hashes of the previously deployed defaults, by role id. */
-  readonly previousDefaults: Readonly<Record<string, string>>;
   /** Launch profiles that pass validation; read only when a version is written. */
   readonly profiles?: () => ReadonlySet<string>;
 }
@@ -260,10 +260,9 @@ type Plan =
 
 interface PlanContext {
   readonly project: ProjectId;
-  readonly pack: DeployedPack;
   readonly defaultPath: boolean;
   readonly known: ReadonlyMap<string, readonly KnownDefault[]>;
-  /** Keep a proven older default, so a deferral or a later release can reuse it. */
+  /** Keep a proven older default, so a deferral or a later release reuses it. */
   readonly remember: (id: string, value: RoleDefinition) => void;
 }
 
@@ -283,6 +282,17 @@ function overlayWrite(
   );
 }
 
+/**
+ * The C-613 provenance order, the same for every project (Q-1197):
+ * 1. equal to the current default: nothing to do;
+ * 2. equal to any recorded older default: untouched, take the new default;
+ * 3./4. an older recorded default plus project rules (`readOnOlderDefault`):
+ *    recompose them on the new default;
+ * 5. otherwise keep the version. The bootstrap project leaves it to the
+ *    default-pack path; elsewhere PM is notified.
+ * "Older" excludes this release's own default, so a rerun of one release
+ * reaches the same conclusion.
+ */
 function planRole(latest: Role, c: PlanContext): Plan {
   const id = latest.role_id;
   const hint = `cardigan role overlay ${id} --project ${c.project} --dry-run`;
@@ -310,67 +320,27 @@ function planRole(latest: Role, c: PlanContext): Plan {
   const current = packRole(id, latest);
   if (!current) return { kind: "skip" };
   const currentHash = deploymentRolePolicyHash(current);
-  if (deploymentRolePolicyHash(latest) === currentHash) return { kind: "skip" };
+  const hash = deploymentRolePolicyHash(latest);
+  if (hash === currentHash) return { kind: "skip" };
   const older = (c.known.get(id) ?? []).filter(
     (k) => k.policy_hash !== currentHash,
   );
-  const previous = Object.hasOwn(c.pack.previousDefaults, id)
-    ? c.pack.previousDefaults[id]
-    : undefined;
-  // 1. An untouched older default takes the plain new default; the bootstrap
-  // project's default-pack path already does exactly this.
-  if (isOlderDefault(latest, current, older, previous)) {
-    c.remember(id, latest);
-    return c.defaultPath
-      ? { kind: "skip" }
-      : { kind: "write", source: current, composed_hash: currentHash };
-  }
-  // 2. Project rules on top of a remembered older default, read against that
-  // default's own content: tools it had are never project rules.
-  for (const known of older) {
-    const rules = rulesAgainstKnown(latest, known);
-    const plan = rules && overlayWrite(latest, rules, false);
-    if (plan) return plan;
-  }
-  // 3. Project rules on top of the previous default, proven by its hash.
-  const proof = previous && provePreviousDefault(latest, current, previous);
-  if (proof) {
-    c.remember(id, proof.previous);
-    const plan = overlayWrite(latest, proof.rules, false);
-    if (plan) return plan;
-  }
-  // 4. Project rules on top of the current default. When this release changed
-  // the role's default, or an apparent extra is in an older default, it may be
-  // what a pack withdrew; extra tools also need older defaults to compare with.
-  const derived = deriveOverlayRules(latest, id);
-  const changed = c.pack.changedRoles.includes(id);
-  const stale =
-    !!derived &&
-    older.some(
-      (k) =>
-        derived.rules.extra_tools.some((t) => k.allowed_tools.includes(t)) ||
-        paragraphs(derived.rules.append_instructions).some((p) =>
-          k.paragraphs.includes(paragraphHash(p)),
-        ),
-    );
-  const unproven = !!derived?.rules.extra_tools.length && older.length === 0;
-  if (
-    derived &&
-    !changed &&
-    !stale &&
-    !unproven &&
-    !derived.mismatched.length &&
-    !derived.missing.length &&
-    !derived.missing_tools.length
-  ) {
-    const plan = overlayWrite(latest, derived.rules, derived.moved);
+  if (older.some((k) => k.policy_hash === hash))
+    return { kind: "write", source: current, composed_hash: currentHash };
+  const reading = readOnOlderDefault(latest, current, older);
+  if (reading) {
+    if (reading.proven) c.remember(id, reading.proven);
+    const { append_instructions, extra_tools, removed_tools } = reading.rules;
+    // Everything beyond the older default is in the new one already.
+    if (!append_instructions && !extra_tools.length && !removed_tools.length)
+      return { kind: "write", source: current, composed_hash: currentHash };
+    const plan = overlayWrite(latest, reading.rules, false);
     if (plan) return plan;
   }
   if (c.defaultPath) return { kind: "skip" };
+  const derived = deriveOverlayRules(latest, id);
   const reasons = [
-    ...(changed ? ["本次部署改动了它的默认包"] : []),
-    ...(stale ? ["多出的内容见于更早的默认包"] : []),
-    ...(unproven ? ["额外工具无法与更早的默认包核对"] : []),
+    ...(older.length ? [] : ["没有可核对的更早默认包记录"]),
     ...(derived?.mismatched ?? []).map((f) => `${f} 与默认包不同`),
     ...(derived?.missing.length
       ? [`缺少默认包的 ${derived.missing.length} 段说明`]
@@ -382,18 +352,18 @@ function planRole(latest: Role, c: PlanContext): Plan {
   return {
     kind: "notice",
     key: `overlay-candidate:${id}:${latest.version}:${currentHash}`,
-    text: `角色 ${id} v${latest.version} 是项目定制版，但不能确认它是“默认包 + 附加规则”（${reasons.join("，")}），暂不自动迁移；需要人用 ${hint} 核对后登记。`,
+    text: `角色 ${id} v${latest.version} 是项目定制版，但不能确认它是“已记录的默认包 + 附加规则”${reasons.length ? `（${reasons.join("，")}）` : ""}，暂不自动迁移；需要人用 ${hint} 核对后登记。`,
   };
 }
 
 /**
  * Deployment pass for one project (C-613), run from the deployed build:
- * overlay roles are recomposed from the new pack, and a customised default
- * role is migrated only when its project rules are proven (against the
- * previous default's exact hash, or losslessly against an unchanged default).
+ * overlay roles are recomposed from the new pack, and a default-id role is
+ * upgraded or migrated only as far as the trusted default record proves.
  * Problems keep the current version and notify PM; no human action is opened.
- * `defaultPath` is true where the bootstrap default-pack path handles plain
- * defaults and reports unproven customisations itself.
+ * `defaultPath` is true where the bootstrap default-pack path handles what
+ * this pass leaves alone. Returns the role ids this pass decided on (written
+ * or deferred), which that path must not judge a second time.
  */
 export function syncOverlayRoles(
   tx: StoreTransactionContext,
@@ -401,10 +371,11 @@ export function syncOverlayRoles(
   now: () => string,
   pack: DeployedPack,
   defaultPath = false,
-) {
+): ReadonlySet<string> {
   const actor = { kind: "system" as const, project_id: project };
   const ports = { ids: tx.ids, clock: { now } };
   let profiles: ReadonlySet<string> | undefined;
+  const handled = new Set<string>();
   const known = knownDefaults(tx, project);
   const remember = (id: string, value: RoleDefinition) =>
     rememberDefault(
@@ -416,7 +387,7 @@ export function syncOverlayRoles(
       "proof",
       now(),
     );
-  // Remember this pack, so later releases can read roles built on it.
+  // Record this pack, so later releases can read roles built on it.
   for (const id of Object.keys(DEFAULT_ROLE_KINDS))
     rememberDefault(
       tx,
@@ -432,7 +403,7 @@ export function syncOverlayRoles(
       "pack",
       now(),
     );
-  const context: PlanContext = { project, pack, defaultPath, known, remember };
+  const context: PlanContext = { project, defaultPath, known, remember };
   const ids = [...new Set(listRoleVersions(tx, project).map((r) => r.role_id))];
   for (const id of ids) {
     const roles = listRoleVersions(tx, project);
@@ -440,6 +411,7 @@ export function syncOverlayRoles(
     if (!latest || latest.status === "inactive") continue;
     const plan = planRole(latest, context);
     if (plan.kind === "skip") continue;
+    handled.add(id);
     if (plan.kind === "notice") {
       recordRoleDeferral(tx, project, plan.key, plan.text, now());
       continue;
@@ -486,6 +458,21 @@ export function syncOverlayRoles(
     persistRoleEffect(tx, project, effect);
     const to = effect.data.version;
     const changedText = composed_hash !== before;
+    // Same policy, same launch fields: the new version may carry the audit of
+    // the version it replaces (V-3037:1), so a session pinned before that
+    // audited upgrade can follow. Nothing else is carried.
+    const carried =
+      !changedText &&
+      effect.data.launch_profile_ref === latest.launch_profile_ref &&
+      effect.data.harness === latest.harness &&
+      deploymentAuditedVersion(
+        {
+          roles: listRoleVersions(tx, project).map(roleReference),
+          events: tx.events.listAfter(project, undefined, 0),
+        },
+        id,
+        latest.version,
+      ) !== undefined;
     const summary = migrated && overlaySummary(migrated.rules);
     const migration = migrated && {
       before_hash: before,
@@ -496,12 +483,15 @@ export function syncOverlayRoles(
     const migratedText =
       summary &&
       `已迁移为“默认包 + 项目附加规则”，保留追加说明 ${summary.appended_paragraphs} 段${summary.extra_tools.length ? `、额外工具 ${summary.extra_tools.join("、")}` : ""}${summary.removed_tools.length ? `、移除工具 ${summary.removed_tools.join("、")}` : ""}${migrated?.moved ? "，追加说明已移到默认说明之后" : ""}`;
-    // A changed text rotates idle standing sessions, which only follow
-    // host_role_upgraded; a structure-only migration needs no rotation.
+    // Idle standing sessions follow host_role_upgraded only; a structure-only
+    // migration with no audited upgrade to carry needs no rotation.
     tx.events.append(project, {
       id: tx.ids.nextEventId(),
       seq: tx.ids.nextEventSequence(project),
-      type: changedText ? "host_role_upgraded" : "host_role_overlay_migrated",
+      type:
+        changedText || carried
+          ? "host_role_upgraded"
+          : "host_role_overlay_migrated",
       actor,
       created_at: now(),
       // Drop absent fields; the stored payload is plain JSON.
@@ -510,17 +500,19 @@ export function syncOverlayRoles(
           role_id: id,
           from_version: latest.version,
           to_version: to,
+          metadata_only: carried || undefined,
           diff: changedText ? result.value.diff : undefined,
           overlay:
             source.default_overlay && overlaySummary(source.default_overlay),
           migrated: migration,
           notice: changedText
             ? `角色 ${id} 已按新默认包${source.default_overlay ? "和项目附加规则" : ""}自动升级：v${latest.version} → v${to}${migratedText ? `；${migratedText}` : ""}。`
-            : `角色 ${id} ${migratedText}：v${latest.version} → v${to}，生效内容不变。`,
+            : `角色 ${id} ${migratedText ?? "的附加规则记录已更新"}：v${latest.version} → v${to}，生效内容不变。`,
         }),
       ),
     });
   }
+  return handled;
 }
 
 /** Projects without the bootstrap default-pack path take this pass alone. */

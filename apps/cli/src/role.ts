@@ -28,6 +28,7 @@ import {
   overlaySummary,
   previewRoleDocument,
   RoleDocumentError,
+  recordDefault,
 } from "@cardigan/host";
 import {
   convertLegacyRole,
@@ -613,6 +614,20 @@ function upgradeFromDefault(
     printUpgrade(io, result.value);
     checkProfile(result.value.effect.data);
     persistRoleEffect(tx, project, result.value.effect);
+    // C-613/C-603: the default this upgrade took joins the trusted record.
+    const base = latest.default_overlay?.base_role_id ?? id;
+    if (isDefaultRoleId(base))
+      recordDefault(
+        tx,
+        project,
+        base,
+        defaultRoleDefinition(base, {
+          harness: latest.harness,
+          launch_profile_ref: latest.launch_profile_ref,
+        }),
+        "cli",
+        systemClock.now(),
+      );
     io.stdout(
       `已按默认角色包升级 ${id} 到 v${result.value.effect.data.version}（项目 ${project}）`,
     );

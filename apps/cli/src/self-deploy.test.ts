@@ -21,8 +21,10 @@ import { gitSafetyArguments } from "@cardigan/git-transport";
 import {
   DeploymentServerUnavailable,
   deploymentRolePolicyHash,
+  knownDefaults,
   NodeDeploymentDriver,
   RunCapacityDeferred,
+  recordDefault,
 } from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
@@ -629,26 +631,50 @@ test("C-613 post-deploy role sync also migrates customised roles in other projec
       harness: "codex",
       launch_profile_ref: "fixture",
     });
-    store.uow.run((tx) =>
+    // An earlier release recorded its reviewer default in sensen; the
+    // project appended its own rule on top of it.
+    const older = { ...pack, instructions: "Earlier reviewer default" };
+    store.uow.run((tx) => {
+      recordDefault(
+        tx,
+        "sensen",
+        "reviewer",
+        older,
+        "pack",
+        "2026-01-01T00:00:00.000Z",
+      );
       writeRole(
         tx,
         "sensen",
         {
-          ...pack,
+          ...older,
           core_prompt: "",
-          instructions: `${pack.instructions}\n\n时间点约束`,
+          instructions: `${older.instructions}\n\n时间点约束`,
           version: 1,
         },
         { mode: "add" },
-      ),
-    );
+      );
+    });
+    expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
     expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
     expect(
       store.uow.read((tx) => getRoleVersion(tx, "sensen", "reviewer")),
     ).toMatchObject({
       version: 2,
+      instructions: `${pack.instructions}\n\n时间点约束`,
       default_overlay: { append_instructions: "时间点约束" },
     });
+    // Each project keeps its own record of the deployed pack.
+    for (const project of ["cardigan", "sensen"])
+      expect(
+        store.uow.read((tx) => knownDefaults(tx, project).get("reviewer")),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            policy_hash: deploymentRolePolicyHash(pack),
+          }),
+        ]),
+      );
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
