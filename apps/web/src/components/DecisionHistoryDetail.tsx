@@ -102,6 +102,23 @@ export function DecisionHistoryDetail({
                 <Markdown body={q.resolution.rationale} />
               </dd>
             </div>
+            {q.resolution.owner_record && (
+              <div>
+                <dt>所有者原话</dt>
+                <dd>
+                  <blockquote>
+                    <Markdown body={q.resolution.owner_record.quote} />
+                  </blockquote>
+                </dd>
+                <dd>
+                  {q.resolution.owner_record.timeline_entry_id}
+                  {q.resolution.owner_record.attachment_id &&
+                    ` · 附件 ${q.resolution.owner_record.attachment_id}`}
+                  {" · "}
+                  <Time value={q.resolution.owner_record.at} />
+                </dd>
+              </div>
+            )}
             {q.resolution.proxy_authority && (
               <div>
                 <dt>授权依据</dt>
@@ -109,7 +126,7 @@ export function DecisionHistoryDetail({
               </div>
             )}
             <div>
-              <dt>记录人</dt>
+              <dt>{q.resolution.owner_record ? "登记人" : "记录人"}</dt>
               <dd>
                 <EmployeeIdentity
                   {...q.resolution}

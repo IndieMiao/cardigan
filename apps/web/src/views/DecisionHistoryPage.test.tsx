@@ -96,6 +96,44 @@ test("history shows the record row, and the drawer shows option, rationale and a
   expect(window.location.hash).toContain("card_id=C-1");
 });
 
+test("C-617: the drawer separates the owner's quoted answer from the PM who registered it", async () => {
+  const linked: DecisionHistoryRecord = {
+    ...record,
+    resolution: {
+      ...record.resolution,
+      raw_quote: "Q-1 选 go",
+      rationale: "所有者已在卡上答复",
+      owner_record: {
+        card_id: "C-1",
+        timeline_entry_id: "C-1#7",
+        quote: "Q-1 选 go",
+        at: "2026-11-09T00:00:00Z",
+        attachment_id: "att-1",
+      },
+    },
+  };
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({
+        decisionHistory: vi.fn(async () => ({
+          decisions: [linked],
+          next_cursor: null,
+        })),
+      })}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("link", { name: "是否继续" }));
+  const drawer = await screen.findByRole("dialog");
+  expect(drawer.textContent).toContain("所有者原话");
+  expect(drawer.querySelector("blockquote")?.textContent).toContain(
+    "Q-1 选 go",
+  );
+  expect(drawer.textContent).toContain("C-1#7 · 附件 att-1");
+  expect(drawer.textContent).toContain("登记人");
+  expect(drawer.textContent).not.toContain("记录人");
+});
+
 test("empty and failed history queries have readable states", async () => {
   render(<DecisionHistoryPage projectId="p-1" client={fakeClient()} />);
   expect(await screen.findByText("没有拍板记录")).toBeTruthy();

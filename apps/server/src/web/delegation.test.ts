@@ -1074,3 +1074,86 @@ test(
   () => humanAuthorizationAcross("ungated confirmation"),
   30_000,
 );
+
+test("C-617: an owner comment posted in Workbench closes the PM-routed decision through PM Ops and shows both people in history", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    await f.start(f.primary.owner);
+    const q = await f.mcp<Decision>(f.primary.owner, "request_decision", {
+      card_id: f.card.id,
+      category: "feature_detail",
+      kind: "choose",
+      question: "提示放在哪里",
+      context: "两种放法",
+      options: [
+        { key: "go", description: "放在标题旁", impact: "更显眼" },
+        { key: "hold", description: "放进帮助页", impact: "界面更干净" },
+      ],
+      recommended: "go",
+      decider: "role:pm",
+      blocking: false,
+      affected_cards: [f.card.id],
+      affected_work_items: [],
+    });
+    expect(q.decider).toBe("role:pm");
+    const relayed = await f.mcp<{ id: string }>(
+      f.primary.owner,
+      "post_comment",
+      { card_id: f.card.id, body: `${q.id} 所有者说 go` },
+    );
+    const posted = await f.call(f.projectPath(`/cards/${f.card.id}/comments`), {
+      method: "POST",
+      body: { body: `${q.id} 选 go` },
+    });
+    expect(posted.status).toBe(200);
+    const owner = posted.json as { id: string; author: string; body: string };
+    expect(owner.author).toBe("human");
+    const ops = f
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing Ops");
+    await f.start(ops);
+    const relayResult = await f.raw(ops, "resolve_delegated_decision", {
+      decision_id: q.id,
+      option: "go",
+      rationale: "代理转述不算",
+      owner_record: { timeline_entry_id: relayed.id },
+    });
+    expect(relayResult.isError).toBe(true);
+    expect(f.state().decisions.find((d) => d.id === q.id)?.status).toBe("open");
+    await f.mcp(ops, "resolve_delegated_decision", {
+      decision_id: q.id,
+      option: "go",
+      rationale: "所有者已在卡上选择放在标题旁",
+      owner_record: { timeline_entry_id: owner.id },
+    });
+    const history = (await f.call(f.projectPath("/decision-history"))).json as {
+      decisions: Decision[];
+    };
+    const record = history.decisions.find((d) => d.id === q.id);
+    expect(record?.resolution).toMatchObject({
+      via: "delegated",
+      resolved_by: `assignment:${ops.id}`,
+      raw_quote: owner.body,
+      owner_record: {
+        author: "human",
+        timeline_entry_id: owner.id,
+        quote: owner.body,
+        registered_by: `assignment:${ops.id}`,
+      },
+    });
+    expect(
+      f
+        .state()
+        .timeline.find(
+          (e) => e.type === "decision_resolved" && e.decision_id === q.id,
+        )?.body,
+    ).toContain(`所有者已在卡上答复（${owner.id}`);
+  } finally {
+    await f.close();
+  }
+});

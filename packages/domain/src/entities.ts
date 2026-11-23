@@ -976,7 +976,24 @@ export interface DecisionResolution {
   readonly taken_over_from?: "role:pm" | "system";
   /** C-192: the human submitted the raiser's suggestion with one click. */
   readonly via_suggestion?: true;
+  /** C-617: the owner's answer already on the card, linked by the registrar. */
+  readonly owner_record?: OwnerDecisionRecord;
   readonly at: Timestamp;
+}
+/**
+ * C-617: who decided (the owner, in a timeline comment, with source and time)
+ * versus who registered it (`registered_by`). The resolution keeps the
+ * registrar's own authority; this record grants none.
+ */
+export interface OwnerDecisionRecord {
+  readonly author: "human";
+  readonly card_id: CardId;
+  readonly timeline_entry_id: TimelineEntryId;
+  /** The comment body, copied verbatim by the control plane. */
+  readonly quote: string;
+  readonly at: Timestamp;
+  readonly attachment_id?: AttachmentId;
+  readonly registered_by: Author;
 }
 /**
  * C-192: the raiser's (or escalating PM's) suggested answer, shown to the

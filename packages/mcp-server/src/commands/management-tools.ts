@@ -379,6 +379,15 @@ const schemas = {
       .describe(
         "With escalate only: existing attachments on the decision's cards to show the human, in display order",
       ),
+    owner_record: z
+      .strictObject({
+        timeline_entry_id: entryId,
+        attachment_id: text.optional(),
+      })
+      .optional()
+      .describe(
+        "所有者已在卡上明确答复这条 PM 拍板时，引用原话结案（C-n#N）：须为所有者本人在本拍板所在或受影响卡片上的评论，在拍板提出之后、引用本拍板或回复拍板请求、写明所选选项且不提其它选项，未撤回、之后无新答复、交付未变；attachment_id 只认所有者上传在这条评论上的附件。服务端原样抄录原话并分别记录所有者与登记人；只用于你本来就有权处理的普通拍板，不增加授权，不与 escalate、合并或其它依据同用。不满足时按现有途径处理。",
+      ),
   },
   complete_host_action: {
     human_action_id: id("human_action"),
@@ -826,7 +835,7 @@ export function managementTools(clock?: Clock) {
     wire("report_blocker", "Report a work item blocker.", reportBlocker),
     wire(
       "resolve_delegated_decision",
-      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; human-decided scope/permission merges require decision_evidence when the human-only project preference is enabled; other human-only conditions remain enforced. A system-held merge confirmation (decider=system) accepts only hold or request_changes, with the rationale and a notice citing the basis (e.g. the human's answer or a review); merge stays with the system or the human.",
+      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; human-decided scope/permission merges require decision_evidence when the human-only project preference is enabled; other human-only conditions remain enforced. A system-held merge confirmation (decider=system) accepts only hold or request_changes, with the rationale and a notice citing the basis (e.g. the human's answer or a review); merge stays with the system or the human. When the owner already answered a PM-routed decision on the card, pass owner_record to close it with the owner's verbatim words instead of asking again; it adds no authority.",
       resolveDelegatedDecision,
     ),
     wire(

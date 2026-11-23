@@ -79,6 +79,7 @@ import {
   pmSystemMergeReturnAuthority,
 } from "./merge-delegation.js";
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
+import { bindOwnerRecord, type OwnerRecordInput } from "./owner-record.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { authorPrecheckWait } from "./precheck-wait.js";
 import {
@@ -1083,7 +1084,9 @@ export function recordDecision(
           !highRiskCategories.includes(decision.category ?? "general") &&
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
-      "Only PM Office or the designated human can record decisions",
+      actor.kind === "assignment" && decision.decider === "role:pm"
+        ? "这条拍板路由给 PM Ops，PM Office 不能代记；所有者已在卡上答复时，由 PM Ops 在授权范围内关联原话（resolve_delegated_decision 的 owner_record）"
+        : "Only PM Office or the designated human can record decisions",
     );
     // §7.4: a sensitive or PM-escalated merge needs a human Actor; PM Office
     // transcription would record resolved_by=human without one.
@@ -1214,6 +1217,8 @@ function resolveDecisionDraft(
     human_decided_merge_basis?: HumanDecidedMergeBasis;
     /** C-591: delegated authority other than the PM merge preference. */
     proxy_authority?: string;
+    /** C-617: validated owner answer; the quote replaces the PM rationale. */
+    owner_record?: import("../entities.js").OwnerDecisionRecord;
     delegated_merge?: {
       readonly notice: string;
       readonly proxy_authority: string;
@@ -1281,6 +1286,7 @@ function resolveDecisionDraft(
       ...(p.human_decided_merge_basis
         ? { human_decided_merge_basis: p.human_decided_merge_basis }
         : {}),
+      ...(p.owner_record ? { owner_record: p.owner_record } : {}),
       raw_quote: p.raw_quote,
       via_chain: [...(p.via_chain ?? []), d.author],
       ...(p.batch ? { batch: p.batch } : {}),
@@ -1336,6 +1342,11 @@ export function resolveDelegatedDecision(
      * the decision has none yet, otherwise an audited rewrite.
      */
     plain_summary?: PlainSummary;
+    /**
+     * C-617: the owner's answer already on the card. Requires the same
+     * authorization as a PM decision; it never adds authority.
+     */
+    owner_record?: OwnerRecordInput;
   },
   ports: CommandPorts,
 ) {
@@ -1346,6 +1357,28 @@ export function resolveDelegatedDecision(
       "Only standing PM Ops can decide under project authorization",
     );
     let q = d.get("decisions", p.decision_id);
+    if (p.owner_record !== undefined)
+      ensure(
+        !p.escalate &&
+          p.source_unrelated === undefined &&
+          p.role_rule_basis === undefined &&
+          p.decision_evidence === undefined &&
+          p.pause_plan === undefined &&
+          p.snooze_until === undefined &&
+          p.notice === undefined &&
+          p.attachment_ids === undefined &&
+          p.suggestion === undefined &&
+          p.plain_summary === undefined &&
+          !q.trigger,
+        "validation_failed",
+        "关联所有者原话只用于结案普通拍板，不能与交人、合并、暂停或其它依据一起提交",
+      );
+    if (p.owner_record !== undefined)
+      ensure(
+        ["open", "provisional"].includes(q.status) && !q.superseded_by,
+        "stale_target",
+        "拍板已结案或已被替换，不能重复结案",
+      );
     if (p.source_unrelated !== undefined) {
       ensure(
         p.escalate === true &&
@@ -1483,7 +1516,9 @@ export function resolveDelegatedDecision(
       "unauthorized",
       q.trigger === "merge_confirmation" && mergeRequiresHuman(state, q)
         ? "此合并确认须由人处理，PM 只能重新检查明确的超时失败，不能退回或代确认合并"
-        : "Decision is not authorized for PM Ops",
+        : p.owner_record
+          ? "这条拍板未授权 PM 处理；所有者原话不构成新的授权，请交给人（escalate）"
+          : "Decision is not authorized for PM Ops",
     );
     text(p.rationale, "rationale");
     ensure(
@@ -1637,13 +1672,17 @@ export function resolveDelegatedDecision(
       "validation_failed",
       "Option is not part of this decision",
     );
+    const { owner_record: ownerInput, ...input } = p;
+    const ownerRecord =
+      ownerInput && bindOwnerRecord(d, q, p.option, ownerInput);
     return resolveDecisionDraft(
       d,
       q,
       {
-        ...p,
-        raw_quote: p.rationale,
+        ...input,
+        raw_quote: ownerRecord ? ownerRecord.quote : p.rationale,
         ...(basis ? { human_decided_merge_basis: basis } : {}),
+        ...(ownerRecord ? { owner_record: ownerRecord } : {}),
       },
       true,
     );

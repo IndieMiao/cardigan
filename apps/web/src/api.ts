@@ -1505,6 +1505,14 @@ export interface DecisionHistoryRecord extends DecisionView {
     resolved_by: string;
     via: string;
     proxy_authority?: string;
+    /** C-617: the owner's answer on the card, registered by `resolved_by`. */
+    owner_record?: {
+      readonly card_id: string;
+      readonly timeline_entry_id: string;
+      readonly quote: string;
+      readonly at: string;
+      readonly attachment_id?: string;
+    };
   };
 }
 /** C-134: newest 10 first; pass `next_cursor` back to read the next 10. */
