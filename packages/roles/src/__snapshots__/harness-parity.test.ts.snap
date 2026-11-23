@@ -96,7 +96,7 @@ exports[`codex LP-2 launch parity 1`] = `
     {
       "mode": 384,
       "path": "/fixture/run/codex/config.toml",
-      "sha256": "2da31d0a0f7d44040a6fb62c173b4cfba1f5887199737f634c9dac885dc32da4",
+      "sha256": "8a1c02e74b0a5e85c2e8b0963213d98be0521b6de903d1e0065cc0aa66173190",
     },
     {
       "mode": 448,

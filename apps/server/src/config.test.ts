@@ -25,6 +25,7 @@ test("dispatcher interval is optional, defaults in the loop to 1000ms and accept
 
 test("S10 defaults to loopback, port 3004 and the same user data directory as the CLI", () => {
   expect(resolveServerConfig({ HOME: "/fixture/home" })).toEqual({
+    mcpSessionCheck: true,
     dataDir: "/fixture/home/.local/share/cardigan",
     execution: {
       mode: "local",
@@ -109,6 +110,7 @@ test("reads data dir and port from the environment", () => {
       CARDIGAN_PROVIDER_COOLDOWN_MS: "1000",
     }),
   ).toEqual({
+    mcpSessionCheck: true,
     dataDir: "/srv/cardigan/data",
     execution: { mode: "local", dataDir: "/srv/cardigan/data" },
     host: DEFAULT_MCP_HOST,
@@ -381,4 +383,30 @@ test("worker inspection cadence accepts only a positive deployment interval", ()
   expect(() =>
     resolveServerConfig({ CARDIGAN_WORKER_INSPECTION_INTERVAL_MS: "0" }),
   ).toThrow("positive");
+});
+
+test("C-600 the MCP session check is on unless explicitly turned off", () => {
+  expect(resolveServerConfig({}).mcpSessionCheck).toBe(true);
+  expect(
+    resolveServerConfig({ CARDIGAN_MCP_SESSION_CHECK: "1" }).mcpSessionCheck,
+  ).toBe(true);
+  expect(
+    resolveServerConfig({ CARDIGAN_MCP_SESSION_CHECK: "0" }).mcpSessionCheck,
+  ).toBe(false);
+  for (const value of ["off", "true", "2"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_MCP_SESSION_CHECK: value }),
+    ).toThrow("CARDIGAN_MCP_SESSION_CHECK");
+});
+
+test("C-600 the MCP handshake deadline is a positive millisecond setting", () => {
+  expect(resolveServerConfig({}).mcpHandshakeTimeoutMs).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS: "90000" })
+      .mcpHandshakeTimeoutMs,
+  ).toBe(90000);
+  for (const value of ["0", "-1", "1.5", "soon"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS: value }),
+    ).toThrow("CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS");
 });

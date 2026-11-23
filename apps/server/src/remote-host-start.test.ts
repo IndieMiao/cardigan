@@ -123,7 +123,7 @@ print(json.dumps(dict(r,process=None,observed='unknown',phase={'publish':'publis
       `#!/bin/sh
 for cmd do :; done
 case "$cmd" in
-  *'urllib.request'*) cat >/dev/null; echo ok;;
+  *'def card_post'*) cat >/dev/null; echo ok;;
   ${operation ? `*'-git.py'*'"operation":"${operation}"'*) ${command};;` : ""}
   *) exec sh -c "$cmd";;
 esac\n`,

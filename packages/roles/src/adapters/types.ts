@@ -75,6 +75,12 @@ export interface HarnessAdapter {
   profileArgs?(profile: LaunchProfileDefinition): readonly string[];
   readContext(input: ContextReadInput): Promise<ContextReading | undefined>;
   readonly contextSource: string;
+  /**
+   * C-600: the harness always calls MCP `tools/list` at session start, before
+   * any tool call, so a call without it proves the session has no native
+   * tools. Pi's adapter may connect lazily from cached metadata, so not Pi.
+   */
+  readonly listsMcpToolsAtStartup?: true;
   readonly useStatuslineCache?: boolean;
   readonly allowWorktreeDescendant?: boolean;
   readonly activityDiagnostic?: string;
