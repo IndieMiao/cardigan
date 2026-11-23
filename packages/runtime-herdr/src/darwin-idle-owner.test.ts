@@ -192,11 +192,16 @@ async function ownerFixture(publicPem?: string) {
     },
   );
   const closed = once(proc, "close");
+  let child: number | undefined;
   const cleanup = async () => {
     if (proc.exitCode === null) {
       proc.kill();
       await closed;
     }
+    // A failed test leaves the owner's direct child running; end it too.
+    try {
+      if (child) process.kill(child);
+    } catch {}
     rmSync(root, { recursive: true, force: true });
   };
   try {
@@ -206,6 +211,7 @@ async function ownerFixture(publicPem?: string) {
     throw err;
   }
   const enrolled = JSON.parse(readFileSync(join(root, "child"), "utf8"));
+  child = enrolled.pid;
   const options = {
     project_id: "fixture",
     assignment_id: "A-1",

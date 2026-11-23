@@ -42,9 +42,11 @@ def rpc(method, params):
                 status=None if state == 'null' else {'state':state}, labels=dict(cardigan='1',project=c['project'],assignment=c['assignment'],
                     run=c['launch_run'],generation=('next' if state=='replaced' else c['generation'])))
 
+# The child outlives every test limit (30 s mock, 60 s real hc): only the
+# owner's TERM (exit 143) or the test's own cleanup ends it, never a timeout.
 # Same identity primitive as the shipped worker launcher. Only the core and the
 # platform selection are substituted on Linux; there is no production socket.
-script = "import os,sys,runpy,json,time; from pathlib import Path; p=runpy.run_path(sys.argv[1])['identity'](sys.argv[2],os.getpid(),sys.argv[3],os.getpgrp()); p['uid']=int(sys.argv[5]);Path(sys.argv[4]).write_text(json.dumps(p)); sys.argv[7:] and print(f'\\x1b]7501;state={sys.argv[7]}\\x07', end='', flush=True); s=(sys.argv[6:] or [''])[0]; [(print('\\x1b[2J\\x1b[H'+s.replace('{n}',str(i)), end='', flush=True), time.sleep(0.4 if '{n}' in s else 20)) for i in range(50 if '{n}' in s else 1)]"
+script = "import os,sys,runpy,json,time; from pathlib import Path; p=runpy.run_path(sys.argv[1])['identity'](sys.argv[2],os.getpid(),sys.argv[3],os.getpgrp()); p['uid']=int(sys.argv[5]);Path(sys.argv[4]).write_text(json.dumps(p)); sys.argv[7:] and print(f'\\x1b]7501;state={sys.argv[7]}\\x07', end='', flush=True); s=(sys.argv[6:] or [''])[0]; [(print('\\x1b[2J\\x1b[H'+s.replace('{n}',str(i)), end='', flush=True), time.sleep(0.4 if '{n}' in s else 90)) for i in range(50 if '{n}' in s else 1)]"
 mode = sys.argv[3].split(':') if len(sys.argv) > 3 else ['']
 real = mode[0] == 'real'
 draw = [SCREENS[mode[1] if len(mode) > 1 else 'idle'], *mode[2:3]] if real else []
