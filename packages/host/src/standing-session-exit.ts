@@ -201,8 +201,10 @@ export async function exitStandingSession(
     input.defer("old_session_busy");
     return "waiting";
   }
+  // A command that may have been typed starts the grace period; only a
+  // proven non-send (withdrawn) leaves it to be tried again.
   const requested = steps.findLast(
-    (s) => s.step === "exit_command" && s.payload.sent === true,
+    (s) => s.step === "exit_command" && s.payload.withdrawn !== true,
   );
   const command = exitCommand(input.harness);
   if (!requested && command) {
@@ -221,8 +223,19 @@ export async function exitStandingSession(
       })
       .catch(() => undefined);
     const delivered = sent?.ok === true && sent.value.sent;
-    if (!delivered && !authorized) {
-      // The guard refused before any IO: nothing was typed into the session.
+    const withdrawn = sent?.ok === true && sent.value.withdrawn === true;
+    if (!delivered && (!authorized || withdrawn)) {
+      // Refused before any IO: nothing was typed. Record a refusal once.
+      const previous = last("exit_command");
+      if (withdrawn && previous?.payload.withdrawn !== true)
+        record("exit_command", {
+          command,
+          sent: false,
+          withdrawn: true,
+          idle_basis: `terminal_status_${seen.agent}`,
+          observed_seq: seen.observed_seq,
+        });
+      input.defer("standing_exit_command_withdrawn");
       return "waiting";
     }
     record("exit_command", {
@@ -232,10 +245,6 @@ export async function exitStandingSession(
       observed_seq: seen.observed_seq,
       ...(sent && !sent.ok ? { runtime_code: sent.error.code } : {}),
     });
-    if (!delivered) {
-      input.defer("standing_exit_command_unconfirmed");
-      return "waiting";
-    }
     const exited = await settle(policy.settle_ms);
     if (exited) return finished(exited);
     input.defer("standing_exit_requested");

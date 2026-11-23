@@ -485,3 +485,38 @@ test("an inconclusive interaction holds an idle session only until the threshold
   expect(steps(actionId())).toEqual(["exit_command", "exited"]);
   await service.close();
 });
+
+test("an exit command refused at the send slot is retried; an uncertain one starts the grace period", async () => {
+  const { pm } = standingPm();
+  vi.mocked(runtime.wake).mockResolvedValue({
+    ok: true,
+    value: { sent: false, withdrawn: true },
+  });
+  await restart(pm);
+  await service.tick();
+  await drain();
+  expect(runtime.wake).toHaveBeenCalledTimes(2);
+  expect(runtime.retire_idle).not.toHaveBeenCalled();
+  expect(steps(actionId())).toEqual(["exit_command"]);
+  // A failed send does not prove nothing was typed: no third command.
+  vi.mocked(runtime.wake).mockImplementation(async (_ref, _bell, options) => {
+    options?.before_send?.();
+    return {
+      ok: false,
+      error: { code: "runtime_timeout", message: "fixture" },
+    };
+  });
+  await drain();
+  await drain(30_000);
+  expect(runtime.wake).toHaveBeenCalledTimes(3);
+  expect(runtime.retire_idle).not.toHaveBeenCalled();
+  await drain();
+  expect(runtime.retire_idle).toHaveBeenCalledTimes(1);
+  expect(steps(actionId())).toEqual([
+    "exit_command",
+    "exit_command",
+    "terminate",
+    "exited",
+  ]);
+  expectSettledOnce(pm);
+});
