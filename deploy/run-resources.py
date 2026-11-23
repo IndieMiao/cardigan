@@ -170,7 +170,7 @@ def retain_fds(keep):
                     raise
 
 
-def verify_state(public, signature, payload):
+def verify_state(public, signature, payload, timeout=2):
     # Use the system crypto implementation, not a Python package/import from
     # the project. The two short, public inputs never name writable files.
     fds = []
@@ -185,7 +185,7 @@ def verify_state(public, signature, payload):
                 os.close(w)
         result = subprocess.run(['/usr/bin/openssl', 'dgst', '-sha256', '-verify',
             '/dev/fd/%d' % fds[0], '-signature', '/dev/fd/%d' % fds[1]],
-            input=payload.encode('utf8'), pass_fds=fds, timeout=2, cwd='/',
+            input=payload.encode('utf8'), pass_fds=fds, timeout=timeout, cwd='/',
             env={'PATH':'/usr/bin:/bin','OPENSSL_CONF':'/dev/null'},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         require(result.returncode == 0)
@@ -199,32 +199,44 @@ STARTUP_WAIT = 30  # seconds the first read may keep answering unknown
 STARTUP_RETRY = 1
 
 
-def host_state(key, read_key):
+def host_state(key, read_key, budget=READ_BOUND):
     endpoint, project, machine, registration, public = AUTHORITY
+    # Every step gets only what is left of the budget, so a read ends (as an
+    # error, i.e. unknown) by then instead of being rejected after the fact.
+    deadline = time.monotonic() + min(budget, READ_BOUND)
+    def left(cap=READ_TIMEOUT):
+        remaining = deadline - time.monotonic()
+        require(remaining > 0)
+        return min(cap, remaining)
     url = urlsplit(endpoint)
     require(url.path == '/mcp' and not (url.query or url.fragment or url.username or url.password))
     require(url.scheme == 'https' or (url.scheme == 'http' and url.hostname in ('localhost', '127.0.0.1', '::1')))
     nonce = f'{int(time.time()*1000):016x}' + os.urandom(24).hex()
-    started = time.monotonic()
     proof = hmac.new(read_key, f'resource-read-v1:{registration}:{key}:{nonce}'.encode('ascii'), 'sha256').hexdigest()
     # C-605: a saturated worker link has shown 2-6 s round trips; TLS needs
     # several. The signed per-request nonce, not this bound, prevents replay.
-    client = (http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection)(url.hostname, url.port, timeout=READ_TIMEOUT)
+    client = (http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection)(url.hostname, url.port, timeout=left())
     try:
+        client.connect()
+        client.sock.settimeout(left())
         client.request('GET', '/mcp?run_resource=' + key, headers={'X-Resource-Nonce':nonce,
             'X-Resource-Registration':registration, 'X-Resource-Proof':proof})
+        client.sock.settimeout(left())
         res = client.getresponse()
         require(res.status == 200)
+        # The response may own the socket now (connection close); its body
+        # reads keep the timeout set before getresponse.
         data = res.read(2049)
         require(len(data) <= 2048)
         row = json.loads(data)
         payload = row['payload']
         require(isinstance(payload, str) and isinstance(row['signature'], str))
-        verify_state(public, row['signature'], payload)
+        verify_state(public, row['signature'], payload, timeout=left(2))
         fields = json.loads(payload)
         require(isinstance(fields, list) and len(fields) == 7 and fields[:-1] == [
             'resource-state-v1', registration, nonce, key, project, machine])
-        require(fields[-1] in ('active', 'ended', 'expired_preview', 'unknown') and time.monotonic()-started < READ_BOUND)
+        require(fields[-1] in ('active', 'ended', 'expired_preview', 'unknown'))
+        left()
         return fields[-1]
     finally:
         client.close()
@@ -232,16 +244,16 @@ def host_state(key, read_key):
 
 class Confirmation:
     def __init__(self, key, token, read=host_state, interval=15):
-        self.read = lambda: read(key, token)
+        self.read = lambda budget: read(key, token, budget)
         self.key, self.interval, self.next = key, interval, 0
         self.last = None
 
-    def state(self, fresh=False):
+    def state(self, fresh=False, budget=READ_BOUND):
         if not fresh and time.monotonic() < self.next:
             return self.last
         self.next = time.monotonic() + self.interval
         try:
-            state = self.read()
+            state = self.read(budget)
         except Exception:
             # Any failed read is unknown, never an exit or a supervisor crash.
             state = 'unknown'
@@ -315,7 +327,9 @@ def supervise_vite(key, argv, confirmation, exited, env, cancellation, port):
     while True:
         code = task.poll()
         if code is not None:
-            return (128-code if code < 0 else code) % 256, ''
+            status = (128-code if code < 0 else code) % 256
+            audit(key, f'vite_finished {status}')
+            return status, ''
         why = stop_cause(key, select.select([cancellation], [], [], 0)[0], exited, confirmation)
         if why:
             audit(key, 'vite_ingress_unproven_retained')
@@ -340,12 +354,17 @@ def supervise(key, argv, confirmation, exited, env, cancellation):
             if foreground and code is not None:
                 foreground = False
                 os.close(cancellation)
-                emit_status((128-code if code < 0 else code) % 256)
+                status = (128-code if code < 0 else code) % 256
+                audit(key, f'foreground_exited {status}')
+                emit_status(status)
             # POLLHUP, unlike a readable half-close, means all copies of the
             # private participant endpoint have gone. Never enumerate a PGID.
             poll = select.poll()
             poll.register(publisher, select.POLLHUP | select.POLLERR)
             if not foreground and poll.poll(0):
+                # Command ended and every private participant has closed its
+                # end: the checkable record of a normal finish (no SETTLED).
+                audit(key, f'private_task_finished {status}')
                 return 0, ''
             cancelled = foreground and select.select([cancellation], [], [], 0)[0]
             why = stop_cause(key, cancelled, exited, confirmation)
@@ -420,16 +439,41 @@ def supervisor_lost(child):
     return f'exit {os.WEXITSTATUS(status)}' if os.WIFEXITED(status) else 'exit unobserved'
 
 
-def prepare(tag, key, base, confirmation):
+def startup_gate(key, cancellation, exited):
+    """A reason not to start, checked while waiting and right before start."""
+    why = ('entry cancelled before start' if select.select([cancellation], [], [], 0)[0]
+           else 'agent session exited before start' if exited() else '')
+    if why:
+        audit(key, 'start_refused_' + why.split()[0])
+    return why
+
+
+def prepare(tag, key, base, confirmation, cancellation, exited):
     """Runs in the supervisor: lifecycle read, scratch directories, audit."""
     # One failed read on a busy link is not a refusal; a terminal answer is.
+    # The whole wait, including each read, is bounded by one monotonic
+    # budget; an answer that arrives after it starts nothing.
     deadline = time.monotonic() + STARTUP_WAIT
-    state = confirmation.state(fresh=True)
-    while state == 'unknown' and time.monotonic() < deadline:
-        time.sleep(STARTUP_RETRY)
-        state = confirmation.state(fresh=True)
+    state = 'unknown'
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        state = confirmation.state(fresh=True, budget=remaining)
+        if time.monotonic() >= deadline:
+            state = 'unknown' if state == 'active' else state
+            break
+        if state != 'unknown':
+            break
+        why = startup_gate(key, cancellation, exited)
+        if why:
+            return None, why
+        select.select([cancellation], [], [], max(0, min(STARTUP_RETRY, deadline - time.monotonic())))
     if state != 'active':
         return None, 'run not active (' + str(state) + ')'
+    why = startup_gate(key, cancellation, exited)
+    if why:
+        return None, why
     root, parent = namespace(tag, True, base)
     try:
         scope = directory(root, scope_name(key), True)
@@ -469,10 +513,14 @@ def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, 
         try:
             os.setsid()
             check = confirmation or Confirmation(key, token)
-            path, reason = prepare(tag, key, base, check)
+            watch = session_watch(pid, expected)
+            path, reason = prepare(tag, key, base, check, cancel_read, watch)
             if path is not None:
+                # Scratch creation took time too: the last gate before start.
+                reason = startup_gate(key, cancel_read, watch)
+            if path is not None and not reason:
                 reason = 'supervisor failed'
-                args = (key, argv, check, session_watch(pid, expected),
+                args = (key, argv, check, watch,
                         dict(os.environ, TMPDIR=path, TEMP=path, TMP=path), cancel_read)
                 code, reason = supervise_vite(*args, on_demand_port) if project_vite else supervise(*args)
         except BaseException as exc:
@@ -500,7 +548,7 @@ def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, 
         how = supervisor_lost(child)
         audit(key, 'supervisor_lost ' + how.replace(' ', '_'))
         print('cardigan: supervisor lost (' + how + '); lifetime connection closed without settlement, '
-              'private task retained', file=sys.stderr, flush=True)
+              'task state unconfirmed', file=sys.stderr, flush=True)
         return 125
     reason = data[1:].decode('ascii', 'replace')
     if reason:

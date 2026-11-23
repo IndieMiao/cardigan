@@ -55,7 +55,10 @@ class Authority(BaseHTTPRequestHandler):
         payload = json.dumps(['resource-state-v1',registration,nonce if state != 'stale' else 'old',key,'fixture','isolated',state if state not in ('bad-signature','stale') else 'ended'])
         sig = subprocess.run(['/usr/bin/openssl','dgst','-sha256','-sign',private], input=payload.encode(),check=True,stdout=subprocess.PIPE).stdout
         row = dict(payload=payload,signature=base64.b64encode(sig if state != 'bad-signature' else b'invalid').decode())
-        self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(row).encode())
+        try:
+            self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(row).encode())
+        except BrokenPipeError:
+            return  # the reader's budget ran out first (read_budget)
         served[key, state] += 1
 
 http = ThreadingHTTPServer(('127.0.0.1', 0), Authority)
@@ -512,6 +515,13 @@ def long_foreground(base):
                                  capture_output=True, timeout=8)
             assert run.returncode == 9 and run.stderr == b'', run.stderr
             assert served[key, 'active'] - before >= 10  # re-read by the supervisor throughout
+            # A checkable finish once the command ended and no participant
+            # holds the lifetime connection; never a SETTLED record for it.
+            log = pathlib.Path(keydir.name)/'audit'
+            until(lambda: f'cardigan run_resource {key} private_task_finished 9' in log.read_text().splitlines())
+            lines = log.read_text().splitlines()
+            assert f'cardigan run_resource {key} foreground_exited 9' in lines
+            assert not any(line.startswith(f'cardigan run_resource {key} stop_') for line in lines)
             assert session.poll() is None
         finally:
             session.terminate(); session.wait(timeout=3)
@@ -543,7 +553,7 @@ data=s.recv(128)
                 os.kill(supervisor, 9)
                 assert job.wait(timeout=5) == 125
                 assert os.read(job.stderr.fileno(), 4096) == (b'cardigan: supervisor lost (SIGKILL); lifetime connection closed '
-                                             b'without settlement, private task retained\n')
+                                             b'without settlement, task state unconfirmed\n')
                 until(lambda: (scratch/'lifetime').exists())
                 assert (scratch/'lifetime').read_text() == 'eof'
                 audit = (pathlib.Path(keydir.name)/'audit').read_text().splitlines()
@@ -573,6 +583,78 @@ def slow_start(base):
             assert run.returncode == 5 and run.stderr == b'', run.stderr
         finally:
             session.terminate(); session.wait(timeout=3)
+
+
+def refused_start(base):
+    # C-605 review: while the first read is still pending, a cancelled entry
+    # or an exited agent session means nothing may start afterwards.
+    log = pathlib.Path(keydir.name)/'audit'
+    for case in ('cancelled', 'session'):
+        key = 'A-9.R-2.R-1' if case == 'cancelled' else 'A-9.R-2.R-2'
+        marker = pathlib.Path(base)/('started-' + case)
+        states[key] = 'unanswered'
+        with subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(30)']) as session:
+            try:
+                job = subprocess.Popen([sys.executable, '-IB', '-c', entry(cached_audit), str(source), TAG, key, str(session.pid), base,
+                                        sys.executable, '-I', '-c', f'open({str(marker)!r},"w")'], stderr=subprocess.PIPE)
+                until(lambda: served[key, 'unanswered'] >= 1)
+                if case == 'cancelled':
+                    job.terminate(); assert job.wait(timeout=3) == -15
+                else:
+                    session.terminate(); session.wait(timeout=3)
+                states[key] = 'active'
+                expected = f'cardigan run_resource {key} start_refused_' + ('entry' if case == 'cancelled' else 'agent')
+                until(lambda: expected in log.read_text().splitlines())
+                if case == 'session':
+                    assert job.wait(timeout=3) == 125
+                    assert os.read(job.stderr.fileno(), 4096) == b'cardigan: agent session exited before start\n'
+                # A late active answer may still be read; it starts nothing.
+                time.sleep(0.3); assert not marker.exists()
+                job.stderr.close()
+            finally:
+                if session.poll() is None:
+                    session.terminate(); session.wait(timeout=3)
+
+
+def startup_budget():
+    # C-605 review: the 30 s startup budget bounds every read; an answer that
+    # arrives after it starts nothing. Synthetic clock, no process or socket.
+    ns = m['prepare'].__globals__
+    for duration, answers, expected_starts in ((9, ['unknown'] * 3 + ['active'], [0, 10, 20]),
+                                               (12, ['unknown', 'unknown', 'active'], [0, 13, 26])):
+        clock = SimpleNamespace(t=0.0)
+        starts, budgets = [], []
+        def read(key, token, budget, answers=iter(answers), duration=duration):
+            starts.append(clock.t); budgets.append(budget)
+            clock.t += duration
+            return next(answers)
+        def wait(r, w, x, timeout):
+            clock.t += timeout
+            return [], [], []
+        check = m['Confirmation']('A-1.R-1.R-1', b'token', read=read, interval=0)
+        fake_time = SimpleNamespace(monotonic=lambda: clock.t, time=time.time)
+        with mock.patch.dict(ns, time=fake_time, select=SimpleNamespace(select=wait), audit=lambda *a: None,
+                             namespace=lambda *a: (_ for _ in ()).throw(AssertionError('scratch created'))):
+            path, reason = m['prepare'](TAG, 'A-1.R-1.R-1', '/nonexistent', check, -1, lambda: False)
+        assert path is None and reason == 'run not active (unknown)', reason
+        assert starts == expected_starts, starts
+        assert all(b <= 30 - s for s, b in zip(starts, budgets)), budgets
+
+
+def read_budget():
+    # The read itself ends within its budget, not after a slow answer.
+    ns = m['host_state'].__globals__
+    key = 'A-9.R-3.R-1'
+    states[key] = 'slow'
+    with mock.patch.dict(ns, AUTHORITY=[f'http://127.0.0.1:{http.server_port}/mcp', 'fixture', 'isolated', 'fixture-token-id', public]):
+        began = time.monotonic()
+        try:
+            m['host_state'](key, hashlib.sha256(b'synthetic').digest(), 1)
+            raise AssertionError('slow answer accepted beyond budget')
+        except OSError:
+            pass
+        assert time.monotonic() - began < 2
+        assert m['host_state'](key, hashlib.sha256(b'synthetic').digest(), 6) == 'active'
 
 
 def inactive_run(base):
@@ -651,6 +733,8 @@ assert [check.state() for _ in range(3)] == ['unknown', 'expired_preview', 'ende
 check = m['Confirmation']('A-1.R-1.R-1', 'synthetic', read=mock.Mock(side_effect=[RuntimeError(), 'active']), interval=0)
 assert [check.state() for _ in range(2)] == ['unknown', 'active']
 fork_first()
+startup_budget()
+read_budget()
 darwin_watch()
 linux_watch_errors()
 observer_enrollment()
@@ -668,6 +752,8 @@ with tempfile.TemporaryDirectory() as base:
     inactive_run(base)
 with tempfile.TemporaryDirectory() as base:
     slow_start(base)
+with tempfile.TemporaryDirectory() as base:
+    refused_start(base)
 for detached in (False, True):
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="custody-") as base:
         registered_service(base, detached)
