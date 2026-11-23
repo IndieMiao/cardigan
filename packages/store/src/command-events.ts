@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
+  type CardId,
   type Event,
   EventLog,
   EventLogView,
@@ -28,36 +29,46 @@ export class CommandEvents {
 
   transaction(db: DatabaseSync) {
     const pending = new Map<ProjectId, Snapshot>();
+    const listStreams = (project: ProjectId): EventLogView => {
+      const through = Number(
+        (
+          db
+            .prepare("SELECT COALESCE(MAX(rowid), 0) AS n FROM events")
+            .get() as { n: number }
+        ).n,
+      );
+      const previous = pending.get(project) ?? this.committed.get(project);
+      if (previous?.through === through) return previous.view;
+      const rows = db
+        .prepare(
+          "SELECT doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid",
+        )
+        .all(previous?.through ?? 0, through, project);
+      // Another project's rows move the watermark without changing this view.
+      if (previous && rows.length === 0) {
+        pending.set(project, { ...previous, through });
+        return previous.view;
+      }
+      const added = rows.map((row) => JSON.parse(row.doc as string) as Event);
+      const next = previous
+        ? extend(previous, added, through)
+        : rebuild([], added, through);
+      pending.set(project, next);
+      return next.view;
+    };
     return {
       listStreams: (
         project: ProjectId,
-      ): ReadonlyMap<string, readonly Event[]> => {
-        const through = Number(
-          (
-            db
-              .prepare("SELECT COALESCE(MAX(rowid), 0) AS n FROM events")
-              .get() as { n: number }
-          ).n,
-        );
-        const previous = pending.get(project) ?? this.committed.get(project);
-        if (previous?.through === through) return previous.view;
-        const rows = db
-          .prepare(
-            "SELECT doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid",
-          )
-          .all(previous?.through ?? 0, through, project);
-        // Another project's rows move the watermark without changing this view.
-        if (previous && rows.length === 0) {
-          pending.set(project, { ...previous, through });
-          return previous.view;
-        }
-        const added = rows.map((row) => JSON.parse(row.doc as string) as Event);
-        const next = previous
-          ? extend(previous, added, through)
-          : rebuild([], added, through);
-        pending.set(project, next);
-        return next.view;
-      },
+      ): ReadonlyMap<string, readonly Event[]> => listStreams(project),
+      /**
+       * C-640: the transaction's `events.listAfter` answered from the same
+       * view (own writes included): no SQL scan or per-row JSON.parse.
+       */
+      listAfter: (
+        project: ProjectId,
+        card: CardId | undefined,
+        since: number,
+      ): readonly Event[] => listStreams(project).after(card ?? "", since),
       commit: () => {
         for (const [project, snapshot] of pending)
           this.committed.set(project, publish(snapshot));

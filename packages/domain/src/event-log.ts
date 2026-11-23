@@ -189,6 +189,30 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
     return [...this.keys()].length;
   }
 
+  /**
+   * Same as `events.listAfter(project, stream || undefined, since)`: the
+   * stream's events with seq > `since`, seq ascending, in a fresh array.
+   */
+  after(stream: string, since: number): Event[] {
+    const out: Event[] = [];
+    const take = (log: EventLog | undefined, limit: number) => {
+      const seg = log?.streams.get(stream);
+      if (!seg) return;
+      const n = below(seg.ords, limit);
+      let lo = 0;
+      let hi = n;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if ((seg.events[mid] as Event).seq <= since) lo = mid + 1;
+        else hi = mid;
+      }
+      for (let i = lo; i < n; i++) out.push(seg.events[i] as Event);
+    };
+    take(this.base, this.baseEnd);
+    take(this.overlay, this.end);
+    return out;
+  }
+
   has(key: string): boolean {
     return (
       this.#segment(this.base, key, this.baseEnd) > 0 ||
