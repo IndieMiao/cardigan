@@ -334,6 +334,7 @@ export { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 export * from "./runtime-targets.js";
 export * from "./runtime-workers-config.js";
 export { pinStallBackup } from "./stall-backup.js";
+export type { SessionExitVerdict } from "./stall-evidence.js";
 export {
   StandingPmRecovery,
   standingPmStallPolicy,
@@ -350,6 +351,7 @@ export {
   stoppedSessionExited,
   stoppedSessionLive,
   stopRunRuntime,
+  storedSessionExitProof,
 } from "./stop-run.js";
 export {
   proveSystemReviewLimit,

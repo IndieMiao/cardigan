@@ -43,6 +43,7 @@ import {
   runDirectory,
   startAssignment,
   stopAssignment,
+  unconfirmedExitMessage,
 } from "./assignment.js";
 import { humanActor, runCommand } from "./host.js";
 import type { CapturedOutput, CliIo } from "./io.js";
@@ -943,6 +944,10 @@ describe("stopAssignment and attachAssignment", () => {
       value: { process: "exited", agent: "unknown", observed_seq: 1 },
     } as never;
     await expect(stop()).rejects.toThrow(/未能确认 A-\d+ 的原会话已退出/);
+    // C-663: the hint names why, and when --hold then start is safe.
+    await expect(stop()).rejects.toThrow(
+      /没有可核对的进程登记.*核实该指派的终端和进程都已不在后.*--hold 再 cardigan assignment start/,
+    );
     // A missing row (runtime_not_found) is no proof either.
     runtime.releaseResult = {
       ok: false,
@@ -1747,4 +1752,32 @@ describe("C-624 stop without a terminal", () => {
       }),
     ).rejects.toThrow(/没有在运行的终端，也没有排队的 Run/);
   });
+});
+
+test("C-663 an unconfirmed stop says why and whether --hold then start is safe", () => {
+  const id = "A-7" as Assignment["id"];
+  const unsafe = /不要用 --hold 再 start/;
+  expect(unconfirmedExitMessage(id, "terminal_alive")).toMatch(
+    /原终端仍在运行.*重试 cardigan assignment stop A-7/,
+  );
+  expect(unconfirmedExitMessage(id, "terminal_alive")).toMatch(unsafe);
+  expect(unconfirmedExitMessage(id, "process_alive")).toMatch(
+    /worker 上仍有该指派登记的进程/,
+  );
+  expect(unconfirmedExitMessage(id, "process_alive")).toMatch(unsafe);
+  expect(unconfirmedExitMessage(id, "unreachable")).toMatch(
+    /worker 暂时无法连接.*恢复 worker 连接后重试.*连接恢复前不要用 --hold 再 start/,
+  );
+  expect(unconfirmedExitMessage(id, "unproven")).toMatch(
+    /核实该指派的终端和进程都已不在后，执行 cardigan assignment stop A-7 --hold 再 cardigan assignment start A-7 是安全的/,
+  );
+  for (const verdict of [
+    "terminal_alive",
+    "process_alive",
+    "unreachable",
+    "unproven",
+  ] as const)
+    expect(unconfirmedExitMessage(id, verdict)).toMatch(
+      /^未能确认 A-7 的原会话已退出：.*停止状态和终端引用均已保留，不会另起会话。/,
+    );
 });
