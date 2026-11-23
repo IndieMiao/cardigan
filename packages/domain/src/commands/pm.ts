@@ -393,7 +393,7 @@ export function createCardInDraft(
         title: w.title,
         role_id: w.role_id,
         required: w.required,
-        depends_on: [],
+        depends_on: (w.depends_on ?? []).map((k) => ids.get(k) as WorkItemId),
         completion_criteria: [
           ...acceptance,
           ...(w.completion_criteria ?? []),
