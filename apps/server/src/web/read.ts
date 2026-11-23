@@ -739,6 +739,10 @@ export function referencedAttachmentViews(
       ?.card_id;
   };
   const view = attachmentViewMapper(state);
+  // V-3070: the chip's file, thumbnail and preview go through the referencing
+  // card, which rechecks this rule on every read; a link kept on an open page
+  // stops working once the source card turns sensitive.
+  const base = `/api/projects/${encodeURIComponent(state.project_id)}/cards/${encodeURIComponent(card_id)}/attachment-refs`;
   return ids.flatMap((id) => {
     const attachment = state.attachments.find((a) => a.id === id);
     if (!attachment || attachment.streamed_artifact?.expired) return [];
@@ -746,7 +750,17 @@ export function referencedAttachmentViews(
     if (!card || card === card_id) return [];
     const other = state.cards.find((c) => c.id === card);
     if (!other || other.sensitive) return [];
-    return [{ ...view(attachment), card_id: card }];
+    const plain = view(attachment);
+    const download_path = `${base}/${encodeURIComponent(attachment.id)}`;
+    return [
+      {
+        ...plain,
+        card_id: card,
+        download_path,
+        thumbnail_path: plain.thumbnail_path && `${download_path}/thumbnail`,
+        preview_path: plain.preview_path && `${download_path}/preview`,
+      },
+    ];
   });
 }
 

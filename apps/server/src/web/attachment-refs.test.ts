@@ -45,9 +45,15 @@ test("C-615 other cards' attachments a body mentions resolve unless sensitive or
         id: file.id,
         card_id: f.card.id,
         mime: "application/pdf",
-        download_path: `/api/projects/${encodeURIComponent(f.card.project_id)}/attachments/${file.id}`,
+        // V-3070: the chip's file goes through the referencing card.
+        download_path: `/api/projects/${encodeURIComponent(f.card.project_id)}/cards/${other.id}/attachment-refs/${file.id}`,
       }),
     ]);
+    const viaRef = f.projectPath(
+      `/cards/${other.id}/attachment-refs/${file.id}`,
+    );
+    const direct = f.projectPath(`/attachments/${file.id}`);
+    expect((await f.call(viaRef)).status).toBe(200);
     // V-3068: a later comment ending inside an unclosed code block does not
     // turn the earlier comment's number into code: bodies are parsed apart.
     const fence = await f.call(f.projectPath(`/cards/${other.id}/comments`), {
@@ -72,6 +78,11 @@ test("C-615 other cards' attachments a body mentions resolve unless sensitive or
     expect(sensitive.status).toBe(200);
     expect((await read()).referenced_attachments).toEqual([]);
     expect((await refs(file.id)).attachments).toEqual([]);
+    // A link kept on an open page stops working; the owning card's own route
+    // keeps its existing rule for the human.
+    expect((await f.call(viaRef)).status).toBe(404);
+    expect((await f.call(`${viaRef}/thumbnail`)).status).toBe(404);
+    expect((await f.call(direct)).status).toBe(200);
     await f.call(f.projectPath(`/cards/${f.card.id}/sensitive`), {
       method: "POST",
       body: { sensitive: false },
@@ -108,29 +119,55 @@ test("C-615 other cards' attachments a body mentions resolve unless sensitive or
     );
     expect((await read()).referenced_attachments).toEqual([]);
     expect((await refs(file.id)).attachments).toEqual([]);
+    expect((await f.call(viaRef)).status).toBe(404);
   } finally {
     await f.close();
   }
 }, 30_000);
 
-test("C-615 a comment's attachment-new-N reads as the uploaded number in the Workbench, get_card and get_updates", async () => {
+test("C-615 a comment's attachment-new-N reads as the file uploaded for slot N in the Workbench, get_card and get_updates", async () => {
   const f = await m5Cross();
   try {
     await f.password(TEST_PASSWORD);
     await f.login();
-    const comment = await f.agentComment(
-      "评审 attachment-new-1，日志attachment-new-2，没有 attachment-new-3，示例 `attachment-new-1`",
-    );
-    const upload = (mime: string, body: string) =>
-      f.mcp<{ id: string }>(f.primary.owner, "upload_attachment", {
-        card_id: f.card.id,
-        file: Buffer.from(body).toString("base64"),
-        mime,
-        kind: "evidence",
-        attach_to: { kind: "timeline_entry", id: comment.id },
-      });
-    const pdf = await upload("application/pdf", "%PDF-1.4");
-    const log = await upload("text/plain", "log line");
+    const posted = await f.call(f.projectPath(`/cards/${f.card.id}/comments`), {
+      method: "POST",
+      body: {
+        body: "评审 attachment-new-1，日志attachment-new-2，没有 attachment-new-3，示例 `attachment-new-1`",
+      },
+    });
+    expect(posted.status).toBe(200);
+    const comment = posted.json as { id: string };
+    let key = 0;
+    const upload = async (mime: string, body: string, ref_slot?: number) => {
+      const response = await f.call(
+        f.projectPath(`/cards/${f.card.id}/attachments`),
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": `c615-upload-${++key}` },
+          body: {
+            file: Buffer.from(body).toString("base64"),
+            mime,
+            kind: "evidence",
+            attach_to: { kind: "timeline_entry", id: comment.id },
+            ...(ref_slot === undefined ? {} : { ref_slot }),
+          },
+        },
+      );
+      return response;
+    };
+    const pdf = (await upload("application/pdf", "%PDF-1.4", 1)).json as {
+      id: string;
+    };
+    // V-3070: another upload to the same comment before slot 2 is filled
+    // (a failed file being retried) takes no slot.
+    const extra = await upload("text/plain", "unrelated");
+    expect(extra.status).toBe(200);
+    const log = (await upload("text/plain", "log line", 2)).json as {
+      id: string;
+    };
+    // A slot is filled once.
+    expect((await upload("text/plain", "again", 2)).status).toBe(400);
     const expected = `评审 ${pdf.id}，日志${log.id}，没有 attachment-new-3，示例 \`attachment-new-1\``;
 
     const detail = (await f.call(f.projectPath(`/cards/${f.card.id}`)))
@@ -138,6 +175,7 @@ test("C-615 a comment's attachment-new-N reads as the uploaded number in the Wor
     expect(detail.timeline.find((e) => e.id === comment.id)?.body).toBe(
       expected,
     );
+    await f.start(f.primary.owner);
     const card = await f.mcp<{ timeline: { id: string; body: string }[] }>(
       f.primary.owner,
       "get_card",

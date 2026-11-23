@@ -89,50 +89,53 @@ export function replaceAttachmentRefs(
 }
 
 /**
- * The body with every `attachment-new-N` replaced by the number the N-th
- * upload of the entry's author to this entry got (in number order, which is
- * upload order). An N not uploaded (yet) stays as written.
+ * The body with every `attachment-new-N` replaced by the number of the file
+ * the entry's author uploaded to this entry for slot N (`ref_slot`). Other
+ * uploads to the entry, in whatever order, never take a slot; an N not
+ * uploaded (yet) stays as written.
  */
 export function resolvePendingAttachmentRefs(
   body: string,
   entry: Pick<TimelineEntry, "id" | "author" | "card_id">,
   attachments: readonly Pick<
     Attachment,
-    "id" | "attach_to" | "uploaded_by" | "card_id"
+    "id" | "attach_to" | "uploaded_by" | "card_id" | "ref_slot"
   >[],
 ): string {
   if (!body.includes("attachment-new-")) return body;
-  const own = entryUploads(entry, attachments);
-  if (!own.length) return body;
+  const slots = entrySlots(entry, attachments);
+  if (!slots.size) return body;
   return replaceAttachmentRefs(body, (match) =>
-    match.pending ? own[match.number - 1] : undefined,
+    match.pending ? slots.get(match.number) : undefined,
   );
 }
 
-/** The ids the entry's author uploaded to the entry, in upload order. */
-export function entryUploads(
+/** Slot N → the attachment the entry's author uploaded to it for N. */
+export function entrySlots(
   entry: Pick<TimelineEntry, "id" | "author" | "card_id">,
   attachments: readonly Pick<
     Attachment,
-    "id" | "attach_to" | "uploaded_by" | "card_id"
+    "id" | "attach_to" | "uploaded_by" | "card_id" | "ref_slot"
   >[],
-): string[] {
-  return attachments
-    .filter(
-      (a) =>
-        a.attach_to.kind === "timeline_entry" &&
-        a.attach_to.id === entry.id &&
-        (!a.card_id || a.card_id === entry.card_id) &&
-        a.uploaded_by === entry.author,
+): Map<number, string> {
+  const slots = new Map<number, string>();
+  for (const a of attachments)
+    if (
+      a.ref_slot !== undefined &&
+      a.attach_to.kind === "timeline_entry" &&
+      a.attach_to.id === entry.id &&
+      (!a.card_id || a.card_id === entry.card_id) &&
+      a.uploaded_by === entry.author &&
+      !slots.has(a.ref_slot)
     )
-    .map((a) => ({
-      id: a.id,
-      n: Number(/^attachment-([1-9][0-9]*)$/u.exec(a.id)?.[1] ?? Number.NaN),
-    }))
-    .filter((a) => Number.isSafeInteger(a.n))
-    .sort((a, b) => a.n - b.n)
-    .map((a) => a.id);
+      slots.set(a.ref_slot, a.id);
+  return slots;
 }
+
+/** The longest attachment number a read accepts (`attachment-` + 16 digits). */
+export const ATTACHMENT_ID_PATTERN = /^attachment-[1-9][0-9]{0,15}$/u;
+/** At most this many numbers per attachment-refs read. */
+export const MAX_ATTACHMENT_REF_READ = 100;
 
 /**
  * Where a Markdown body is literal: fenced and indented code blocks, inline

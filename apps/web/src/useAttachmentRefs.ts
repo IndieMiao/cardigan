@@ -1,4 +1,8 @@
-import { attachmentReferenceIdsIn } from "@cardigan/domain";
+import {
+  ATTACHMENT_ID_PATTERN,
+  attachmentReferenceIdsIn,
+  MAX_ATTACHMENT_REF_READ,
+} from "@cardigan/domain";
 import { useEffect, useMemo, useState } from "react";
 import type { CardiganClient, ReferencedAttachment } from "./api.js";
 
@@ -7,10 +11,16 @@ const NONE: readonly ReferencedAttachment[] = [];
 /**
  * C-615: the other cards' attachments that `texts` name and `known` does not
  * cover, read from the server with the card's permissions (a draft's preview,
- * timeline pages loaded later or kept across a refresh). `version` is the
- * page data the answer belongs to: a new one asks again, so a permission
- * tightened since then no longer shows the old metadata once the answer
- * arrives. Unreadable or missing numbers come back absent and stay text.
+ * timeline pages loaded later or kept across a refresh). Unreadable or
+ * missing numbers come back absent and stay text.
+ *
+ * `version` is the page data the answer belongs to. A new one asks again and,
+ * until that answer arrives, shows the numbers as text (V-3070): a permission
+ * withdrawn since then must not keep showing the old name and link.
+ *
+ * Numbers no attachment can have are not asked for, and the rest go in
+ * batches of at most `MAX_ATTACHMENT_REF_READ`, each on its own: one bad
+ * number or a failed batch never hides the readable ones of another batch.
  */
 export function useAttachmentRefs(
   client: Pick<CardiganClient, "attachmentRefs">,
@@ -23,7 +33,10 @@ export function useAttachmentRefs(
   // Each body on its own (V-3068): an open code block in one comment must
   // not hide the numbers of the next. Callers memoise `texts`.
   const missing = useMemo(
-    () => attachmentReferenceIdsIn(texts).filter((id) => !known.has(id)),
+    () =>
+      attachmentReferenceIdsIn(texts).filter(
+        (id) => !known.has(id) && ATTACHMENT_ID_PATTERN.test(id),
+      ),
     [texts, known],
   );
   const key = `${projectId}\n${cardId}\n${missing.join(",")}`;
@@ -32,27 +45,28 @@ export function useAttachmentRefs(
     readonly version: unknown;
     readonly attachments: readonly ReferencedAttachment[];
   }>();
-  const stale = answer?.key !== key || answer.version !== version;
+  const current = answer?.key === key && answer.version === version;
   useEffect(() => {
-    if (!stale || !missing.length || !client.attachmentRefs) return;
+    if (current || !missing.length || !client.attachmentRefs) return;
+    const read = client.attachmentRefs.bind(client);
     let live = true;
-    client.attachmentRefs(projectId, cardId, missing).then(
-      (response) => {
-        if (live)
-          setAnswer({ key, version, attachments: response.attachments });
-      },
-      () => {
-        // A failed read leaves the numbers as text; the next change asks again.
-        if (live) setAnswer({ key, version, attachments: NONE });
-      },
-    );
+    const batches: string[][] = [];
+    for (let i = 0; i < missing.length; i += MAX_ATTACHMENT_REF_READ)
+      batches.push(missing.slice(i, i + MAX_ATTACHMENT_REF_READ));
+    void Promise.all(
+      batches.map((batch) =>
+        read(projectId, cardId, batch).then(
+          (response) => response.attachments,
+          // A failed batch leaves its numbers as text; the next change asks again.
+          () => NONE,
+        ),
+      ),
+    ).then((results) => {
+      if (live) setAnswer({ key, version, attachments: results.flat() });
+    });
     return () => {
       live = false;
     };
-  }, [stale, missing, client, projectId, cardId, key, version]);
-  if (!missing.length || !answer) return NONE;
-  // Until a newer answer arrives, keep the previous one for the same numbers.
-  return answer.key === key
-    ? answer.attachments
-    : answer.attachments.filter((a) => missing.includes(a.id));
+  }, [current, missing, client, projectId, cardId, key, version]);
+  return current && answer ? answer.attachments : NONE;
 }

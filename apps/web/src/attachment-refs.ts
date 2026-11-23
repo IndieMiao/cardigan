@@ -148,33 +148,29 @@ export const pendingToken = (n: number) => `attachment-new-${n}`;
 
 /**
  * The references a comment's body may use: every attachment the reader can
- * see by number, and `attachment-new-N` for the N-th file the comment's author
- * uploaded to it (in upload order, which the comment box keeps).
+ * see by number, and `attachment-new-N` for the file the comment's author
+ * uploaded to it for slot N (`ref_slot`, as the server resolves it).
  */
 export function entryAttachmentRefs(
   known: AttachmentRefs,
   entry: { readonly id: string; readonly author: string },
   attachments: readonly AttachmentView[],
 ): AttachmentRefs {
-  const own = attachments
-    .filter(
-      (a) =>
-        a.attach_to.kind === "timeline_entry" &&
-        a.attach_to.id === entry.id &&
-        a.uploaded_by === entry.author,
-    )
-    .sort((a, b) => attachmentNumber(a.id) - attachmentNumber(b.id));
+  const own = attachments.filter(
+    (a) =>
+      a.ref_slot !== undefined &&
+      a.attach_to.kind === "timeline_entry" &&
+      a.attach_to.id === entry.id &&
+      a.uploaded_by === entry.author,
+  );
   if (!own.length) return known;
   const refs = new Map(known);
-  own.forEach((attachment, index) => {
+  for (const attachment of own) {
     const target = known.get(attachment.id);
-    if (target) refs.set(pendingToken(index + 1), target);
-  });
+    const token = pendingToken(attachment.ref_slot ?? 0);
+    if (target && !refs.has(token)) refs.set(token, target);
+  }
   return refs;
-}
-
-function attachmentNumber(id: string): number {
-  return Number(/^attachment-(\d+)$/u.exec(id)?.[1] ?? Number.NaN);
 }
 
 /** Where the `#query` the caret is in starts, and what follows the `#`. */

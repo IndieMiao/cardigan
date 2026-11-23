@@ -211,3 +211,107 @@ test("a newer comment ending in an open code block leaves an older comment's chi
     ).toBeTruthy(),
   );
 });
+
+test("an event on the source card refreshes the page and a withdrawn chip turns to text at once", async () => {
+  let readable = true;
+  const entries = [
+    timelineEntry({
+      id: "C-1#1",
+      event_seq: 1,
+      body: "数值沿用 attachment-77",
+    }),
+  ];
+  const card = vi.fn(async () =>
+    cardDetail({
+      timeline: entries,
+      attachments: [],
+      referenced_attachments: readable ? [foreign] : [],
+      timeline_next_cursor: null,
+      counts: { ...cardDetail().counts, timeline: entries.length },
+    }),
+  );
+  const client = fakeClient({ card });
+  // The shared project stream: only C-9's (the file's card's) events change.
+  let sourceRevision = 0;
+  const followed: string[][] = [];
+  const cardRevision = (_id: string, affected: readonly string[]) => {
+    followed.push([...affected]);
+    return affected.includes("C-9") ? sourceRevision : 0;
+  };
+  const view = render(
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      cardRevision={cardRevision}
+    />,
+  );
+  await selectCardTab(/^时间线/);
+  await waitFor(() =>
+    expect(
+      document.querySelector('a[data-attachment-ref="attachment-77"]'),
+    ).toBeTruthy(),
+  );
+  // The page follows the card the chip's file belongs to.
+  await waitFor(() => expect(followed.at(-1)).toContain("C-9"));
+  const reads = card.mock.calls.length;
+  // C-9 turns sensitive: the server stops returning it and C-9's stream moves.
+  readable = false;
+  sourceRevision = 1;
+  view.rerender(
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      cardRevision={(id, affected) => cardRevision(id, affected)}
+    />,
+  );
+  await waitFor(() => expect(card.mock.calls.length).toBeGreaterThan(reads));
+  await waitFor(() =>
+    expect(
+      document.querySelector('a[data-attachment-ref="attachment-77"]'),
+    ).toBeNull(),
+  );
+});
+
+test("numbers no attachment can have are not asked for, and batches of 100 fail on their own", async () => {
+  const valid = Array.from({ length: 150 }, (_, i) => `attachment-${1000 + i}`);
+  const body = [...valid, "attachment-12345678901234567"].join(" ");
+  const entries = [timelineEntry({ id: "C-1#1", event_seq: 1, body })];
+  const calls: (readonly string[])[] = [];
+  const attachmentRefs = vi.fn(
+    async (_p: string, _c: string, ids: readonly string[]) => {
+      calls.push(ids);
+      // The first batch fails; the second answers for its own numbers.
+      if (calls.length === 1) throw new Error("400");
+      return {
+        attachments: ids.includes("attachment-1149")
+          ? [{ ...foreign, id: "attachment-1149" }]
+          : [],
+      };
+    },
+  );
+  const client = fakeClient({
+    card: async () =>
+      cardDetail({
+        timeline: entries,
+        attachments: [],
+        referenced_attachments: [],
+        timeline_next_cursor: null,
+        counts: { ...cardDetail().counts, timeline: 1 },
+      }),
+    attachmentRefs,
+  });
+  render(<CardDetailPage client={client} projectId="p-1" cardId="C-1" />);
+  await selectCardTab(/^时间线/);
+  await waitFor(() =>
+    expect(
+      document.querySelector('a[data-attachment-ref="attachment-1149"]'),
+    ).toBeTruthy(),
+  );
+  expect(calls.map((ids) => ids.length)).toEqual([100, 50]);
+  expect(calls.flat()).not.toContain("attachment-12345678901234567");
+  expect(
+    document.querySelector('a[data-attachment-ref="attachment-1000"]'),
+  ).toBeNull();
+});

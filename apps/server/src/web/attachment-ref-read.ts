@@ -1,11 +1,13 @@
-import type { CardId, ProjectId } from "@cardigan/domain";
+import {
+  ATTACHMENT_ID_PATTERN,
+  type CardId,
+  MAX_ATTACHMENT_REF_READ,
+  type ProjectId,
+} from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 import { HttpRejection } from "./http.js";
 import { referencedAttachmentViews } from "./read.js";
 import { emptyState, withReferences } from "./sql-state.js";
-
-/** At most this many numbers per read; a body rarely names more. */
-export const MAX_ATTACHMENT_REFS = 100;
 
 /**
  * C-615: other cards' attachments that a card page names by number but did
@@ -28,9 +30,10 @@ export function readAttachmentRefs(
         .filter(Boolean),
     ),
   ];
+  // The browser filters and batches (useAttachmentRefs); this bound stays.
   if (
-    ids.length > MAX_ATTACHMENT_REFS ||
-    ids.some((id) => !/^attachment-[1-9][0-9]{0,15}$/u.test(id))
+    ids.length > MAX_ATTACHMENT_REF_READ ||
+    ids.some((id) => !ATTACHMENT_ID_PATTERN.test(id))
   )
     throw new HttpRejection(400, "validation_failed", "附件编号无效");
   return store.uow.read((tx) => {

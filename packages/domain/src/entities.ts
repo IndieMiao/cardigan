@@ -1325,6 +1325,12 @@ interface AttachmentFields {
     | { readonly kind: "timeline_entry"; readonly id: TimelineEntryId }
     | { readonly kind: "delivery"; readonly id: DeliveryId };
   readonly supersedes?: AttachmentId;
+  /**
+   * C-615: the N of `attachment-new-N` this file fills in the body of the
+   * comment it is attached to (only that comment's author sets it, once per
+   * N). Reads resolve the placeholder by this, not by upload order.
+   */
+  readonly ref_slot?: number;
 }
 export type Attachment = AttachmentFields &
   (

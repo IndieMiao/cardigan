@@ -67,37 +67,46 @@ test("C-615 replacing references leaves literal text alone", () => {
   ).toBe("attachment-99 `attachment-new-1`");
 });
 
-test("C-615 attachment-new-N is the author's N-th upload to that entry, by number", () => {
+test("C-615 attachment-new-N is the author's file for slot N on that entry, whatever the upload order", () => {
   const entry = {
     id: "C-1#2",
     author: "human",
     card_id: "C-1",
   } as unknown as Pick<TimelineEntry, "id" | "author" | "card_id">;
-  const on = (id: string, uploaded_by = "human", target = "C-1#2") =>
+  const on = (
+    id: string,
+    ref_slot: number | undefined,
+    uploaded_by = "human",
+    target = "C-1#2",
+  ) =>
     ({
       id,
       uploaded_by,
       card_id: "C-1",
       attach_to: { kind: "timeline_entry", id: target },
+      ...(ref_slot === undefined ? {} : { ref_slot }),
     }) as unknown as Pick<
       Attachment,
-      "id" | "attach_to" | "uploaded_by" | "card_id"
+      "id" | "attach_to" | "uploaded_by" | "card_id" | "ref_slot"
     >;
   const attachments = [
-    on("attachment-10"),
-    on("attachment-9"),
-    // Someone else's file on the same comment and another comment's file never count.
-    on("attachment-8", "assignment:A-1"),
-    on("attachment-7", "human", "C-1#3"),
+    on("attachment-10", 1),
+    // V-3070: an unrelated upload to the same comment between a failure and
+    // its retry takes no slot.
+    on("attachment-11", undefined),
+    on("attachment-12", 2),
+    // Someone else's or another comment's slot never counts.
+    on("attachment-13", 3, "assignment:A-1"),
+    on("attachment-14", 3, "human", "C-1#3"),
   ];
   expect(
     resolvePendingAttachmentRefs(
-      "attachment-new-1、attachment-new-2、attachment-new-3、xattachment-new-1、`attachment-new-2`",
+      "attachment-new-1、日志：attachment-new-2、attachment-new-3、xattachment-new-1、`attachment-new-2`",
       entry,
       attachments,
     ),
   ).toBe(
-    "attachment-9、attachment-10、attachment-new-3、xattachment-new-1、`attachment-new-2`",
+    "attachment-10、日志：attachment-12、attachment-new-3、xattachment-new-1、`attachment-new-2`",
   );
   expect(resolvePendingAttachmentRefs("attachment-new-1", entry, [])).toBe(
     "attachment-new-1",

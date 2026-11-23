@@ -1,4 +1,6 @@
 import {
+  type Dispatch,
+  type SetStateAction,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -128,6 +130,9 @@ export function CardDetailPage(props: CardDetailPageProps) {
     onTitleChange,
   } = props;
   const [affectedCards, setAffectedCards] = useState<readonly string[]>([]);
+  // C-615: cards whose attachments this page shows as chips; their events
+  // (say, turning sensitive) refresh this page too.
+  const [referencedCards, setReferencedCards] = useState<readonly string[]>([]);
   const [routeFilters] = useRouteFilters({ kind: "card", projectId, cardId });
   const routeLocation = `${projectId}/${cardId}/${routeAnchor ?? ""}/${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
   const [localAnchor, setLocalAnchor] = useState<{
@@ -327,6 +332,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
             ),
             // C-567: another card's precheck ending settles this card's wait.
             ...(data.card.checking?.precheck?.cards ?? []),
+            ...referencedCards,
           ]),
       ),
     ].sort();
@@ -335,7 +341,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
         ? current
         : ids,
     );
-  }, [data, cardId]);
+  }, [data, cardId, referencedCards]);
   useEffect(() => {
     const filterKey = `${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
     if (query.current.at === anchor && previousFilters.current === filterKey)
@@ -373,6 +379,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
         <CardContent
           key={`${projectId}/${cardId}`}
           detail={data}
+          onReferencedCards={setReferencedCards}
           revision={
             cardRevision ? cardRevision(cardId, affectedCards) : revision
           }
@@ -434,8 +441,10 @@ function CardContent({
   pagerReady,
   loadOlder,
   anchorReady,
+  onReferencedCards,
 }: {
   detail: CardDetail;
+  onReferencedCards?: Dispatch<SetStateAction<readonly string[]>>;
   revision: number;
   client: CardiganClient;
   projectId: string;
@@ -518,6 +527,17 @@ function CardContent({
     () => [...(detail.referenced_attachments ?? []), ...laterRefs],
     [detail.referenced_attachments, laterRefs],
   );
+  useEffect(() => {
+    const cards = [
+      ...new Set(referencedAttachments.map((a) => a.card_id)),
+    ].sort();
+    onReferencedCards?.((current) =>
+      current.length === cards.length &&
+      current.every((id, i) => id === cards[i])
+        ? current
+        : cards,
+    );
+  }, [referencedAttachments, onReferencedCards]);
   const storyAttachments = useStoryAttachments({
     detail: head,
     client,

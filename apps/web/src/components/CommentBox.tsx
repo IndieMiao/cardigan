@@ -583,8 +583,10 @@ export function CommentBox({
         startDraft(),
       );
       if (files.length) setPosted(true);
-      // One at a time, in the box's order: `attachment-new-N` relies on it.
-      for (const file of files) {
+      // One at a time, in the box's order. Each file fills its own slot N of
+      // the body's `attachment-new-N`, so a retry or another upload to the
+      // comment never shifts what N names.
+      for (const [index, file] of files.entries()) {
         if (file.uploaded) continue;
         const filename = uploadFilename(file.file.name);
         const receipt = await client.uploadAttachment(
@@ -597,6 +599,7 @@ export function CommentBox({
             mime: file.mime,
             kind: "evidence",
             attach_to: { kind: "timeline_entry", id: comment.id },
+            ref_slot: index + 1,
           },
           file.idempotencyKey,
         );

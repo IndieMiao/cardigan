@@ -945,6 +945,43 @@ async function serveProjectRoute(
     return;
   }
 
+  // C-615 / V-3070: another card's attachment as a chip of this card. The
+  // reference is rechecked on every read (sensitive source card, cross-card
+  // reading off); the plain /attachments routes keep their own rules.
+  const refFile =
+    /^\/cards\/([^/]+)\/attachment-refs\/([^/]+)(\/thumbnail|\/preview)?$/.exec(
+      rest,
+    );
+  if (refFile !== null) {
+    const card_id = decodeURIComponent(refFile[1] ?? "") as CardId;
+    const attachment_id = decodeURIComponent(refFile[2] ?? "");
+    const allowed = readAttachmentRefs(
+      store,
+      project_id,
+      card_id,
+      attachment_id,
+    )?.attachments.some((a) => a.id === attachment_id);
+    if (!allowed)
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    const serve =
+      refFile[3] === "/thumbnail"
+        ? serveAttachmentThumbnail
+        : refFile[3] === "/preview"
+          ? serveAttachmentPreview
+          : serveAttachment;
+    const served = await serve({
+      store,
+      project_id,
+      attachment_id,
+      req,
+      res,
+      dataDir: context.dataDir,
+    });
+    if (!served)
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    return;
+  }
+
   const attachmentRefs = /^\/cards\/([^/]+)\/attachment-refs$/.exec(rest);
   if (attachmentRefs !== null) {
     const card_id = decodeURIComponent(attachmentRefs[1] ?? "") as CardId;

@@ -98,10 +98,15 @@ test("the button adds several files as removable chips and uploads them in order
   await waitFor(() => expect(uploads).toHaveLength(2));
   expect(posted).toEqual([{ body: "附上文件" }]);
   expect(
-    uploads.map((u) => [u.original_filename, u.mime, u.attach_to]),
+    uploads.map((u) => [u.original_filename, u.mime, u.attach_to, u.ref_slot]),
   ).toEqual([
-    ["guide.pdf", "application/pdf", { kind: "timeline_entry", id: "C-1#9" }],
-    ["run.log", "text/plain", { kind: "timeline_entry", id: "C-1#9" }],
+    [
+      "guide.pdf",
+      "application/pdf",
+      { kind: "timeline_entry", id: "C-1#9" },
+      1,
+    ],
+    ["run.log", "text/plain", { kind: "timeline_entry", id: "C-1#9" }, 2],
   ]);
   await waitFor(() =>
     expect(screen.queryByRole("list", { name: "待上传的附件" })).toBeNull(),

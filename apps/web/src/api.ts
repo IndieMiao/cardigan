@@ -607,6 +607,8 @@ export interface AttachmentView extends AuthorView {
   readonly thumbnail_path: string | null;
   /** Lightbox image for inline bitmaps; older servers omit it. */
   readonly preview_path?: string | null;
+  /** C-615: the `attachment-new-N` of its comment this file fills. */
+  readonly ref_slot?: number;
 }
 
 export interface CardRelations {
@@ -719,6 +721,8 @@ export interface UploadAttachmentInput {
     | { readonly kind: "delivery"; readonly id: string };
   readonly basis?: string;
   readonly sha256?: string;
+  /** C-615: the `attachment-new-N` of the comment this file fills. */
+  readonly ref_slot?: number;
 }
 
 /** An attachment of another card, as `CardDetail.referenced_attachments`. */

@@ -46,6 +46,7 @@ const shot = attachment({
   original_filename: "shot.png",
   attach_to: { kind: "timeline_entry", id: "C-1#2" },
   uploaded_by: "human",
+  ref_slot: 1,
   download_path: "/api/projects/p-1/attachments/attachment-5",
   thumbnail_path: "/api/projects/p-1/attachments/attachment-5/thumbnail",
 });
