@@ -1836,6 +1836,8 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "host_role_upgrade_deferred":
+    case "host_role_upgraded":
+    case "host_role_overlay_migrated":
     case "session_maintenance_attention":
       note(
         input,
