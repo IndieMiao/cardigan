@@ -1,5 +1,5 @@
 import type { CommandState } from "./commands/core.js";
-import { stoppedByHuman } from "./commands/stop.js";
+import { stoppedByHuman } from "./commands/stop-state.js";
 import { canStartWork } from "./commands/workflow.js";
 import type { Assignment, Run, RuntimeRef, WorkItem } from "./entities.js";
 import { flowAtLeast } from "./flow.js";

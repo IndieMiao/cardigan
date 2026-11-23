@@ -4,7 +4,7 @@ import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { createQueuedRun, launchSettings } from "./launch.js";
 import { closedResumeTarget, deferResume } from "./resume-attention.js";
-import { stoppedByHuman } from "./stop.js";
+import { ASSIGNMENT_STOPPED, pausedByHuman } from "./stop-state.js";
 import { reviewRound } from "./workflow.js";
 
 function upgradedSinceRun(
@@ -108,7 +108,10 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
   if (card.hold) return deferResume(d, item, "卡片已暂停", event.id);
   if (!item.assignment_id) return deferResume(d, item, "没有负责人", event.id);
   const assignment = d.get("assignments", item.assignment_id);
-  const stop = stoppedByHuman(d.state.events, assignment.id)
+  // C-620: only a pause defers for the stop itself. A managed stop that is
+  // still releasing its terminal keeps the queued Run; the Dispatcher fences
+  // it until the release is confirmed and then starts a fresh session.
+  const stop = pausedByHuman(d.state.events, assignment.id)
     ? "指派已被人工停止"
     : undefined;
   const deferred = (reason: string) =>
@@ -188,4 +191,55 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     ...launchSettings(previous),
     agent_cli_version: previous.agent_cli_version,
   });
+}
+
+const field = (payload: unknown, key: string): unknown =>
+  payload !== null && typeof payload === "object"
+    ? (payload as Record<string, unknown>)[key]
+    : undefined;
+
+/**
+ * C-620: when a managed stop's release is confirmed, replay the resume its
+ * stop window deferred (for example because the Run being stopped was still
+ * unfinished), so the unblocked work item gets one Run and needs no human.
+ * Call after the stopped Runs are cancelled and the terminal is cleared.
+ */
+export function replayStopDeferredResume(
+  d: CommandDraft,
+  assignment: Assignment,
+) {
+  if (assignment.scope !== "work_item") return;
+  const events = d.state.events;
+  const stopAt = events.findLastIndex(
+    (e) =>
+      e.type === ASSIGNMENT_STOPPED &&
+      field(e.payload, "assignment_id") === assignment.id,
+  );
+  if (stopAt < 0) return;
+  const deferred = events
+    .slice(stopAt + 1)
+    .findLast(
+      (e) =>
+        e.type === "work_item_resume_deferred" &&
+        field(e.payload, "work_item_id") === assignment.work_item_id &&
+        field(e.payload, "assignment_id") === assignment.id,
+    );
+  const trigger =
+    deferred &&
+    events.find((e) => e.id === field(deferred.payload, "evidence"));
+  if (!trigger) return;
+  const item = d.get("work_items", assignment.work_item_id);
+  if (
+    item.assignment_id !== assignment.id ||
+    ["blocked", "waiting_decision"].includes(item.status) ||
+    d
+      .list("runs")
+      .some(
+        (r) =>
+          r.assignment_id === assignment.id &&
+          !["completed", "failed", "cancelled"].includes(r.status),
+      )
+  )
+    return;
+  queueResumedRun(d, item, trigger);
 }

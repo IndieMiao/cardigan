@@ -22,7 +22,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
-import { humanStopRecorded } from "./stop.js";
+import { humanStopRecorded } from "./stop-state.js";
 
 export function beginIdleSessionRetirement(
   state: CommandState,

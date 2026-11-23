@@ -79,8 +79,26 @@ class FakeRuntime implements Runtime {
   async wake(): Promise<RuntimeResult<{ readonly sent: boolean }>> {
     return { ok: true, value: { sent: true } };
   }
-  async status(): Promise<RuntimeResult<RuntimeObservation>> {
+  /** C-620: a released terminal reports its own exit unless disabled. */
+  exitOnRelease = true;
+  async status(ref?: RuntimeRef): Promise<RuntimeResult<RuntimeObservation>> {
+    if (
+      this.exitOnRelease &&
+      ref &&
+      this.released.some((r) => r.terminal_ref === ref.terminal_ref)
+    )
+      return {
+        ok: true,
+        value: { process: "exited", agent: "unknown", observed_seq: 1 },
+      };
     return this.statusResult;
+  }
+  /** Owner-bound exit observation, consistent with `status`. */
+  async observe_retirement(
+    ref: RuntimeRef,
+  ): Promise<RuntimeResult<RuntimeObservation["process"]>> {
+    const observed = await this.status(ref);
+    return observed.ok ? { ok: true, value: observed.value.process } : observed;
   }
   async probeTerminal(): Promise<RuntimeResult<RuntimeObservation["process"]>> {
     return this.statusResult.ok
@@ -879,6 +897,145 @@ describe("stopAssignment and attachAssignment", () => {
     ).toBe(true);
   });
 
+  const startFor = (assignment_id: Assignment["id"], runtime: FakeRuntime) =>
+    startAssignment({
+      store,
+      io,
+      project_id,
+      assignment_id,
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
+      mcpUrl: "http://127.0.0.1:3004/mcp",
+      runtime,
+      dataDir,
+    });
+  const stopFacts = (id: Assignment["id"]) => {
+    const state = store.uow.read((tx) => loadCommandState(tx, project_id));
+    return {
+      ref: state.assignments.find((a) => a.id === id)?.runtime_ref ?? null,
+      stopped: stoppedByHuman(state.events, id),
+      released: state.events.filter(
+        (e) => e.type === "assignment_stop_released",
+      ).length,
+    };
+  };
+
+  test("C-620 a managed stop settles only on exit proven for this session; a missing terminal is not proof and the same command retries", async () => {
+    const assignment = assignWorkItem("none");
+    const runtime = new FakeRuntime();
+    const started = await startFor(assignment.id, runtime);
+    const token = readFileSync(
+      join(dataDir, "runs", "p-one", assignment.id, "token"),
+      "utf8",
+    ).trim();
+    // The terminal row is gone, but the session's own process still runs.
+    runtime.exitOnRelease = false;
+    runtime.releaseResult = {
+      ok: false,
+      error: { code: "runtime_not_found", message: "gone" },
+    };
+    runtime.statusResult = {
+      ok: true,
+      value: { process: "alive", agent: "working", observed_seq: 1 },
+    } as never;
+    const stop = () =>
+      stopAssignment({
+        store,
+        project_id,
+        assignment_id: assignment.id,
+        runtime,
+      });
+    await expect(stop()).rejects.toThrow(/未能确认 A-\d+ 的原会话已退出/);
+    expect(stopFacts(assignment.id)).toEqual({
+      ref: started.runtime_ref,
+      stopped: true,
+      released: 0,
+    });
+    expect(store.verifyToken(token)?.assignment_id).toBe(assignment.id);
+    expect(
+      store.uow.read((tx) => tx.runs.get(project_id, started.run_id as never))
+        ?.status,
+    ).not.toBe("cancelled");
+    // Exit is now observed for this exact session: the retry settles.
+    runtime.exitOnRelease = true;
+    runtime.releaseResult = { ok: true, value: undefined };
+    expect(await stop()).toMatchObject({ released: true, held: false });
+    expect(stopFacts(assignment.id)).toEqual({
+      ref: null,
+      stopped: false,
+      released: 1,
+    });
+    expect(store.verifyToken(token)).toBeUndefined();
+  });
+
+  test("C-620 a failed cleanup keeps the stop and the reference, so the same command can be retried", async () => {
+    const assignment = assignWorkItem("none");
+    const runtime = new FakeRuntime();
+    const started = await startFor(assignment.id, runtime);
+    const runDir = join(dataDir, "runs", "p-one", assignment.id);
+    // Local cleanup cannot remove a directory in place of the start marker.
+    rmSync(join(runDir, "start"), { force: true });
+    mkdirSync(join(runDir, "start", "blocked"), { recursive: true });
+    const stop = () =>
+      stopAssignment({
+        store,
+        project_id,
+        assignment_id: assignment.id,
+        runtime,
+        execution: { mode: "local", dataDir },
+      });
+    await expect(stop()).rejects.toThrow();
+    expect(stopFacts(assignment.id)).toEqual({
+      ref: started.runtime_ref,
+      stopped: true,
+      released: 0,
+    });
+    rmSync(join(runDir, "start"), { recursive: true, force: true });
+    expect(await stop()).toMatchObject({ released: true });
+    expect(stopFacts(assignment.id)).toMatchObject({ ref: null, released: 1 });
+  });
+
+  test("C-620 overlapping stops serialize on the launch lock: one release and cleanup, the late one has no side effects, a successor keeps its files", async () => {
+    const assignment = assignWorkItem("none");
+    const runtime = new FakeRuntime();
+    await startFor(assignment.id, runtime);
+    let open = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const release = runtime.release.bind(runtime);
+    runtime.release = async (ref) => {
+      const result = await release(ref);
+      await gate;
+      return result;
+    };
+    const stop = () =>
+      stopAssignment({
+        store,
+        project_id,
+        assignment_id: assignment.id,
+        runtime,
+        execution: { mode: "local", dataDir },
+      });
+    const first = stop();
+    await expect.poll(() => runtime.released.length).toBe(1);
+    const late = stop();
+    open();
+    await expect(first).resolves.toMatchObject({ released: true });
+    await expect(late).rejects.toThrow(/没有在运行的终端/);
+    expect(runtime.released).toHaveLength(1);
+    expect(stopFacts(assignment.id)).toMatchObject({ released: 1 });
+    // A successor started afterwards keeps its credentials and start marker.
+    const successor = await startFor(assignment.id, runtime);
+    const runDir = join(dataDir, "runs", "p-one", assignment.id);
+    expect(existsSync(join(runDir, "start"))).toBe(true);
+    const token = readFileSync(join(runDir, "token"), "utf8").trim();
+    expect(store.verifyToken(token)?.assignment_id).toBe(assignment.id);
+    expect(stopFacts(assignment.id).ref).toEqual(successor.runtime_ref);
+  });
+
   test("C-211 a failed release keeps the running Run's slot and the ref, and the stop can be retried", async () => {
     const assignment = assignWorkItem("none");
     const runtime = new FakeRuntime();
@@ -1253,6 +1410,7 @@ describe("C-154 standing PM session restart", () => {
   test("restart keeps everything when the old terminal is not proven to have exited", async () => {
     standingOps();
     const runtime = new FakeRuntime();
+    runtime.exitOnRelease = false;
     const first = await startAssignment(options(runtime));
     const token = readFileSync(
       join(dataDir, "runs", "p-one", "A-1", "token"),

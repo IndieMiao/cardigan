@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type {
   Actor,
   Assignment,
@@ -14,6 +15,7 @@ import {
   queueRun,
   releaseAssignment,
   standingModeOf,
+  stoppedByHuman,
   stopWorkItemAssignment,
 } from "@cardigan/domain";
 import {
@@ -34,6 +36,7 @@ import {
   resolveMcpUrl,
   scrubRunCredentials,
   settleTestReviewLimits,
+  stoppedSessionExited,
   stopRunRuntime,
   targetProbe,
   tryHostOpsLock,
@@ -630,33 +633,54 @@ export async function stopAssignment(input: {
     }
     return { released: ref !== null, aborted: paused.aborted, paused: true };
   }
+  // C-620: the whole work-item stop, from reading the session through
+  // settlement, runs under the per-Assignment launch lock. Every new session
+  // goes through `launchRun`, which takes the same lock, so a stop always acts
+  // on one session and its cleanup can never touch a successor.
+  const unlock = await launchLock(input.store, input.project_id, assignment.id);
+  if (!unlock)
+    throw new CliError(
+      `${assignment.id} 正在启动或交接会话，没有改动；稍后重试 cardigan assignment stop ${assignment.id}。`,
+      EXIT.failure,
+    );
+  try {
+    return await stopWorkItemSession(input, actor);
+  } finally {
+    await unlock();
+  }
+}
+
+async function stopWorkItemSession(
+  input: Parameters<typeof stopAssignment>[0],
+  actor: Actor,
+) {
+  const { assignment } = requireAssignment(
+    input.store,
+    input.project_id,
+    input.assignment_id,
+  );
+  const ref = assignment.runtime_ref;
   if (ref === null) {
     throw new CliError(
       `Assignment ${assignment.id} 没有在运行的终端；若需取消未派发的排队 Run 并改派，请执行 cardigan assignment release ${assignment.id} --cancel-queued-run <R-n>。`,
       EXIT.usage,
     );
   }
-  // C-620: a managed stop never downgrades an existing pause (domain rule).
-  const held =
-    input.hold === true ||
+  const execution =
+    input.runtime instanceof RuntimeTargets
+      ? input.runtime.executionForRef(ref, input.project_id)
+      : input.execution;
+  const events = () =>
     input.store.uow.read((tx) =>
-      pausedByHuman(
-        // Stop events are recorded on the work item's card stream.
-        tx.events.listAfter(
-          input.project_id,
-          assignment.work_item_id &&
-            tx.work_items.get(input.project_id, assignment.work_item_id)
-              ?.card_id,
-          0,
-        ),
-        assignment.id,
-      ),
+      loadEvents(tx, input.project_id, assignment.work_item_id),
     );
+  // C-620: a managed stop never downgrades an existing pause (domain rule).
+  const held = input.hold === true || pausedByHuman(events(), assignment.id);
   // C-211: persist the stop before touching the terminal: from here on the
-  // Dispatcher starts no session for this Assignment until the human runs
-  // `cardigan assignment start` again, and its queued Runs are cancelled.
-  // The running Run keeps its run slot until the terminal is released, so a
-  // failed release can be retried and never under-counts capacity.
+  // Dispatcher starts no session for this Assignment until the stop settles
+  // (a pause: until the human runs `cardigan assignment start`). The running
+  // Run keeps its run slot until the terminal is released, so a failed
+  // release can be retried and never under-counts capacity.
   const stopped = runCommand(input.store, {
     operation: "停止 Assignment",
     target: assignment.id,
@@ -681,6 +705,49 @@ export async function stopAssignment(input: {
       EXIT.failure,
     );
   }
+  // A managed stop lifts its fence and lets new work start a session, so it
+  // needs exit proven for this exact session; a missing terminal row is not
+  // proof. A pause keeps the C-211 rule.
+  if (
+    !held &&
+    !(await stoppedSessionExited(input.runtime, ref, {
+      project_id: input.project_id,
+      assignment_id: assignment.id,
+    }))
+  )
+    throw new CliError(
+      `未能确认 ${assignment.id} 的原会话已退出：停止状态和终端引用均已保留，不会另起会话；稍后重试 cardigan assignment stop ${assignment.id}。`,
+      EXIT.failure,
+    );
+  // Defensive: nothing to clean up if this session was settled meanwhile.
+  const current = input.store.uow.read((tx) =>
+    tx.assignments.get(input.project_id, assignment.id),
+  );
+  if (
+    !stoppedByHuman(events(), assignment.id) ||
+    JSON.stringify(current?.runtime_ref) !== JSON.stringify(ref)
+  )
+    return { released: false, aborted: stopped.cancelled > 0, held };
+  // §9.1: the session is over, so its tokens die with it. A token that
+  // outlives a stopped terminal could still read and write the project.
+  // Clean up before settling: a failure keeps the stop and the reference,
+  // so the same command can be retried.
+  const revoked = input.store.uow.run((tx) =>
+    tx
+      .tokensForAssignment(input.project_id, assignment.id)
+      .filter((token) => token.revoked_at === null)
+      .map((token) => tx.revokeToken(token.id)),
+  );
+  if (revoked.some((ok) => !ok)) {
+    throw new CliError("作废 Token 失败", EXIT.failure);
+  }
+  if (execution)
+    await scrubRunCredentials(
+      execution,
+      input.project_id,
+      input.assignment_id,
+      ref,
+    );
   const settled = runCommand(input.store, {
     operation: "停止 Assignment",
     target: assignment.id,
@@ -698,29 +765,37 @@ export async function stopAssignment(input: {
         p,
       ),
   });
-  // §9.1: the session is over, so its tokens die with it. A token that outlives
-  // a stopped terminal could still read and write the project.
-  const revoked = input.store.uow.run((tx) =>
-    tx
-      .tokensForAssignment(input.project_id, assignment.id)
-      .filter((token) => token.revoked_at === null)
-      .map((token) => tx.revokeToken(token.id)),
-  );
-  if (revoked.some((ok) => !ok)) {
-    throw new CliError("作废 Token 失败", EXIT.failure);
-  }
-  if (execution)
-    await scrubRunCredentials(
-      execution,
-      input.project_id,
-      input.assignment_id,
-      ref,
-    );
   return {
     released: true,
     aborted: stopped.cancelled + settled.cancelled > 0,
     held,
   };
+}
+
+/** Short wait for a launch or wake that is already in its critical section. */
+async function launchLock(
+  store: Store,
+  project: ProjectId,
+  assignment: Assignment["id"],
+) {
+  for (let attempt = 0; ; attempt++) {
+    const unlock = await tryHostOpsLock(store, project, assignment, "launch");
+    if (unlock || attempt >= 20) return unlock;
+    await sleep(250);
+  }
+}
+
+/** Stop events are recorded on the work item's card stream. */
+function loadEvents(
+  tx: Parameters<Parameters<Store["uow"]["read"]>[0]>[0],
+  project: ProjectId,
+  workItem: Assignment["work_item_id"],
+) {
+  return tx.events.listAfter(
+    project,
+    workItem && tx.work_items.get(project, workItem)?.card_id,
+    0,
+  );
 }
 
 function attachRef(

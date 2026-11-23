@@ -45,6 +45,25 @@ export async function stopRunRuntime(
     : ("unconfirmed" as const);
 }
 
+/**
+ * C-620: a managed `assignment stop` lifts its dispatch fence only on exit
+ * proven for this exact session. A missing terminal row (`runtime_not_found`)
+ * or an unavailable observation is not proof; the caller keeps the reference
+ * and the stop so it can be retried.
+ */
+export async function stoppedSessionExited(
+  runtime: Runtime,
+  ref: RuntimeRef,
+  owner: RetirementIdentity,
+): Promise<boolean> {
+  if (runtime.observe_retirement) {
+    const exact = await observeTurnOwner(runtime, ref, owner, false);
+    return exact?.ok === true && exact.value === "exited";
+  }
+  const observed = await runtime.status(ref).catch(() => undefined);
+  return observed?.ok === true && observed.value.process === "exited";
+}
+
 /** System-ended bells never use address-based release, even for cleanup. A
  * previously started stop may only read exit evidence; no second signal.
  * A local "exited" needs process evidence beyond the finished terminal row:

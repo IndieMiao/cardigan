@@ -307,7 +307,11 @@ export {
   StandingPmRecovery,
   standingPmStallPolicy,
 } from "./standing-pm-recovery.js";
-export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
+export {
+  revokeStoppedRunTokens,
+  stoppedSessionExited,
+  stopRunRuntime,
+} from "./stop-run.js";
 export {
   proveSystemReviewLimit,
   systemReviewLimitFailure,

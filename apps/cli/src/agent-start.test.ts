@@ -118,8 +118,11 @@ describe.skipIf(process.platform !== "linux" || process.getgid?.() === 0)(
         release: vi.fn(async () => ok(undefined)),
         wake: async () => ok({ sent: true }),
         interrupt: async () => ok(undefined),
+        // C-620: a released terminal reports its own exit.
         status: async () =>
-          ok({ process: "alive", agent: "idle", observed_seq: 1 }),
+          vi.mocked(runtime.release).mock.calls.length
+            ? ok({ process: "exited", agent: "unknown", observed_seq: 2 })
+            : ok({ process: "alive", agent: "idle", observed_seq: 1 }),
         human_entry: async () => ok("fixture attach"),
         resume_or_replace: async () => {
           throw new Error("unused");
