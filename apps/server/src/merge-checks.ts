@@ -132,11 +132,6 @@ import {
 } from "./repository-check-wait.js";
 import { profileSpan, profileSpanSync, tickProfiler } from "./tick-profile.js";
 
-class RepositoryWaitExhausted extends Error {
-  constructor(readonly timeouts: number) {
-    super("Repository wait exhausted");
-  }
-}
 class StaleCheckTarget extends CheckExecutorSuspended {}
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
@@ -192,9 +187,11 @@ export interface MergeCheckOptions {
   readonly recover?: typeof recoverCheckDirectory;
   readonly recoveryInspectionIntervalMs?: number;
   readonly repositoryRetryDelaysMs?: readonly number[];
+  /** Total lock wait before host ops is reminded; the check stays queued. */
+  readonly repositoryWaitAlertMs?: number;
 }
 function repositoryWaitReason(timeouts: number, retryAt: string) {
-  return `仓库忙，候选尚未分发；第 ${timeouts} 次等待锁超时，${retryAt} 后重试`;
+  return `等待仓库空闲（仓库忙，候选尚未分发）；第 ${timeouts} 次等待锁超时，${retryAt} 后重试`;
 }
 
 interface Task {
@@ -312,6 +309,7 @@ export class MergeChecks {
     this.repositoryCalls = new RepositoryCheckCalls(
       options.store,
       options.clock,
+      options.repositoryWaitAlertMs,
     );
     this.lockBackoff = repositoryRetryDelays(options.repositoryRetryDelaysMs);
     if (options.requireConfirmedExit && (!options.run || options.checkExecutor))
@@ -1476,7 +1474,6 @@ export class MergeChecks {
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
     let connected = false;
-    let repositoryBusy = false;
     let callId: string | undefined;
     let receipt: RepositoryReceipt | undefined;
     const settle = (id: string, outcome: RepositoryReceipt["outcome"]) =>
@@ -1645,8 +1642,6 @@ export class MergeChecks {
           this.lockBackoff,
         );
         if (admission.kind === "wait") return;
-        if (admission.kind === "exhausted")
-          throw new RepositoryWaitExhausted(admission.timeouts);
         callId = admission.id;
       }
       this.waiting(
@@ -1755,38 +1750,21 @@ export class MergeChecks {
       // lock. Leave this attempt queued; contention is not an executor failure.
       if (error instanceof MergeLockBusy) throw error;
       if (error instanceof StaleCheckTarget) return;
-      if (
-        error instanceof CandidateRepositoryBusy ||
-        error instanceof RepositoryWaitExhausted
-      ) {
+      if (error instanceof CandidateRepositoryBusy) {
         // A non-GitHub executor returns its proof to the supervisor directly.
-        if (callId && error instanceof CandidateRepositoryBusy) {
+        if (callId) {
           receipt = settle(callId, "timeout");
           callId = undefined;
         }
-        const timeouts =
-          error instanceof RepositoryWaitExhausted
-            ? error.timeouts
-            : receipt?.outcome === "timeout"
-              ? receipt.ordinal
-              : undefined;
-        if (timeouts === undefined)
+        // Lock contention is not a check result: the attempt stays queued and
+        // retries with backoff; only an overdue wait reminds host ops.
+        if (receipt?.outcome !== "timeout" || !receipt.retry_at)
           throw new Error("Missing repository timeout receipt");
-        const retryAt = receipt?.retry_at;
-        const current = this.validLockObservation(task, check);
-        if (retryAt) {
-          const reason = repositoryWaitReason(timeouts, retryAt);
-          if (current) this.waiting(task, reason, check);
-          if (executedOn?.type !== "github") await log?.waiting(reason);
-          return;
-        }
-        repositoryBusy = true;
-        result = {
-          status: "failed",
-          checks: [],
-          cleanup_errors: [],
-          reason: `仓库忙：候选分发等待仓库锁已超时 ${timeouts} 次，检查未启动，已停止自动重试`,
-        };
+        const reason = repositoryWaitReason(receipt.ordinal, receipt.retry_at);
+        if (this.validLockObservation(task, check))
+          this.waiting(task, reason, check);
+        if (executedOn?.type !== "github") await log?.waiting(reason);
+        return;
       } else if (error instanceof CheckExecutorSuspended) {
         if (this.abort.signal.aborted) return;
         this.waiting(task, "卡片已暂停，等待恢复检查");
@@ -1931,12 +1909,7 @@ export class MergeChecks {
         log_ref: `${check.attempt_id}.log`,
       };
     }
-    if (
-      (executedOn?.type === "github" || task.batch) &&
-      !(repositoryBusy
-        ? this.validLockObservation(task, check)
-        : this.valid(task))
-    ) {
+    if ((executedOn?.type === "github" || task.batch) && !this.valid(task)) {
       this.githubActive.delete(check.attempt_id);
       this.seen.delete(check.attempt_id);
       return;
@@ -1975,9 +1948,6 @@ export class MergeChecks {
       log_ref: finished.log_ref,
       timeout_only: finished.timeout_only === true,
       infra_flaky: finished.infra_flaky === true,
-      ...(repositoryBusy
-        ? { startup_failure: "repository_busy" as const }
-        : {}),
       ...(executedOn?.type === "github" && finished.failure_excerpt
         ? { failure_excerpt: finished.failure_excerpt }
         : {}),
