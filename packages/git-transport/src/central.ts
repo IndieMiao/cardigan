@@ -991,6 +991,21 @@ export class CentralGitTransport
     if (r.code > 1) throw new Error(r.stderr);
     return r.code === 0;
   }
+  async mergeBases(repository: string, left: string, right: string) {
+    const r = await this.command(repository, [
+      "merge-base",
+      "--all",
+      "--",
+      left,
+      right,
+    ]);
+    if (r.code === 1) return [];
+    if (r.code !== 0) throw new Error(r.stderr);
+    const bases = r.stdout.split("\n").filter(Boolean);
+    if (!bases.every((sha) => fullSha.test(sha)))
+      throw new Error("Invalid merge base");
+    return bases;
+  }
   async objectFormat(repository: string) {
     const format = await this.checked(repository, [
       "rev-parse",

@@ -609,11 +609,11 @@ export class ServerGit implements GitBinding {
             project,
             assignment,
             (central) =>
-              new GitDeliveryVerifier(central, project).verify(
-                subject,
-                assignment,
-                previous,
-              ),
+              new GitDeliveryVerifier(
+                central,
+                project,
+                this.cardBaselineOf(project, assignment),
+              ).verify(subject, assignment, previous),
           );
         } catch (error) {
           const failure = classifyDeliverySourceError(error);
@@ -632,6 +632,29 @@ export class ServerGit implements GitBinding {
       },
     } satisfies DeliveryVerifier;
   };
+
+  /**
+   * C-654: the card's own baseline branch (C-589), against which the author's
+   * own changes are measured. Undefined means the project baseline.
+   */
+  private cardBaselineOf(
+    project: CentralProject,
+    assignment: Assignment,
+  ): string | undefined {
+    const uow = this.options.store.uow;
+    if (!uow || assignment.scope !== "work_item") return undefined;
+    const branch = uow.read((tx) => {
+      const item = tx.work_items.get(
+        project.project_id as ProjectId,
+        assignment.work_item_id,
+      );
+      return item
+        ? tx.cards.get(project.project_id as ProjectId, item.card_id)
+            ?.base_branch
+        : undefined;
+    });
+    return branch && branch !== project.base_branch ? branch : undefined;
+  }
 
   async checkHead(
     projectId: ProjectId,

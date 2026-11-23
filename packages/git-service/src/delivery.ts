@@ -11,7 +11,11 @@ import {
   type Result,
   validationFailed,
 } from "@cardigan/domain";
-import type { CentralProject, CentralRepositoryService } from "./central.js";
+import {
+  type CentralProject,
+  type CentralRepositoryService,
+  validCentralBranch,
+} from "./central.js";
 import { RepositoryLockTimeoutError } from "./lock.js";
 import { reviewEquivalence } from "./review-equivalence.js";
 import { collectRoleRuleInventory } from "./role-rule-inventory.js";
@@ -50,10 +54,22 @@ const fetchFailure = (error: unknown): CheckHeadFailureReason => {
 
 /** prepareDelivery supplies the Assignment from its database snapshot, not tool parameters. */
 export class GitDeliveryVerifier implements DeliveryVerifier {
+  /**
+   * `baselineBranch` is the card's own baseline (C-589 multi-baseline). The
+   * author's own changes are measured against it; the project baseline is
+   * used only when the card names none.
+   */
   constructor(
     private readonly central: CentralRepositoryService,
     private readonly project: CentralProject,
-  ) {}
+    private readonly baselineBranch?: string,
+  ) {
+    if (baselineBranch !== undefined && !validCentralBranch(baselineBranch))
+      throw new Error("Invalid card baseline branch name");
+  }
+  private get baselineRef() {
+    return `refs/heads/${this.baselineBranch ?? this.project.base_branch}`;
+  }
   private incoming(a: Assignment) {
     return a.machine_id === "local"
       ? `refs/cardigan/incoming/${a.id}`
@@ -165,11 +181,7 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
           "Delivery SHA is not on the recorded Assignment branch",
         );
       const base_sha =
-        a.base_sha ??
-        (await git.readRef(
-          repository,
-          `refs/heads/${this.project.base_branch}`,
-        ));
+        a.base_sha ?? (await git.readRef(repository, this.baselineRef));
       if (!base_sha)
         return validationFailed("Delivery base SHA is unavailable");
       const inventory = await collectRoleRuleInventory(
@@ -185,34 +197,39 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         `refs/cardigan/candidates/${a.id}/${sha}`,
         sha,
       );
-      const baseline = await git.readRef(
-        repository,
-        `refs/heads/${this.project.base_branch}`,
-      );
-      // Main changes already included in the branch are not this author's risk.
-      // Keep the original Assignment baseline in commit/role evidence for audit.
-      const ownInventory =
-        baseline &&
-        baseline !== base_sha &&
-        (await git.isAncestor(repository, baseline, sha))
-          ? await collectRoleRuleInventory(git, repository, baseline, sha)
-          : undefined;
-      const ownPaths: DeliveryEvidence | undefined = ownInventory
-        ? {
-            kind: "diff",
-            details: {
-              own_path_inventory: {
-                version: 1,
-                sha,
-                tree_sha,
-                base_sha: baseline ?? base_sha,
-                assignment_base_sha: base_sha,
-                complete: ownInventory.complete,
-                paths: ownInventory.changes.map((change) => change.path),
-              },
-            },
-          }
+      const baseline = await git.readRef(repository, this.baselineRef);
+      // Card-baseline changes already merged into the branch are not this
+      // author's risk. Start from the newest baseline commit the branch
+      // contains: the tip itself, or the unique merge base when the baseline
+      // has moved on since the author last merged it. Keep the original
+      // Assignment baseline in commit/role evidence for audit.
+      const ownBase = baseline
+        ? await ownChangesBase(git, repository, baseline, sha)
         : undefined;
+      // A start older than the Assignment baseline only widens the inventory,
+      // which stays the conservative side.
+      const ownInventory =
+        ownBase && ownBase !== base_sha
+          ? await collectRoleRuleInventory(git, repository, ownBase, sha)
+          : undefined;
+      const ownPaths: DeliveryEvidence | undefined =
+        ownInventory && ownBase && baseline
+          ? {
+              kind: "diff",
+              details: {
+                own_path_inventory: {
+                  version: 1,
+                  sha,
+                  tree_sha,
+                  base_sha: ownBase,
+                  baseline_sha: baseline,
+                  assignment_base_sha: base_sha,
+                  complete: ownInventory.complete,
+                  paths: ownInventory.changes.map((change) => change.path),
+                },
+              },
+            }
+          : undefined;
       const equivalence =
         previous && baseline
           ? await reviewEquivalence(git, repository, baseline, previous, sha)
@@ -247,4 +264,22 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       );
     }
   }
+}
+
+/**
+ * The newest card-baseline commit contained in the delivery: the baseline tip
+ * when the branch already contains it, otherwise the single merge base of the
+ * two. Unrelated histories, criss-cross merges (several bases) or a Git
+ * adapter without merge-base support yield nothing, so verification falls
+ * back to the full Assignment-baseline inventory.
+ */
+async function ownChangesBase(
+  git: CentralRepositoryService["git"],
+  repository: string,
+  baseline: string,
+  sha: string,
+): Promise<string | undefined> {
+  if (await git.isAncestor(repository, baseline, sha)) return baseline;
+  const bases = (await git.mergeBases?.(repository, sha, baseline)) ?? [];
+  return bases.length === 1 ? bases[0] : undefined;
 }
