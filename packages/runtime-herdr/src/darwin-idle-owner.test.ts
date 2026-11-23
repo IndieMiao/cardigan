@@ -255,7 +255,11 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
       "withdrawn",
     );
     writeFileSync(join(tree, "pending"), "preserve me");
+    // The abandoned challenge released the owner: the next request is served
+    // without waiting out the owner's 3 s signature read.
+    const served = Date.now();
     expect((await stop()).outcome).toBe("withdrawn");
+    expect(Date.now() - served).toBeLessThan(2500);
     expect(readFileSync(join(tree, "pending"), "utf8")).toBe("preserve me");
     rmSync(join(tree, "pending"));
     writeFileSync(join(build, "pending"), "keep build changes");
@@ -351,7 +355,8 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
   } finally {
     await cleanup();
   }
-}, 20000);
+  // About 19 real owner round trips, two of them with both 1.5 s idle reads.
+}, 30000);
 
 test("an owner enrolled with a key the controller cannot rebuild is never signed for", async () => {
   vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
