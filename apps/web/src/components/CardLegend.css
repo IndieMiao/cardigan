@@ -8,13 +8,6 @@
 }
 .card-guide-preview {
   position: relative;
-  padding-left: 24px;
-}
-.card-guide-preview::before {
-  content: "1";
-  position: absolute;
-  left: 0;
-  top: 12px;
 }
 .card-guide-preview .card-id::before {
   content: "2";
@@ -40,10 +33,6 @@
 .card-guide-preview .board-card-badge[aria-label^="附件："]::before {
   content: "10";
 }
-.card-guide-preview .board-card-waiting::before {
-  content: "11";
-}
-.card-guide-preview::before,
 .card-guide-preview
   :is(
     .card-id,
@@ -91,10 +80,6 @@
   height: 20px;
   flex: none;
 }
-.card-guide-swatch {
-  padding: 4px 10px;
-  background: var(--surface);
-}
 @media (max-width: 760px) {
   .card-guide-example {
     grid-template-columns: minmax(0, 1fr);
@@ -106,7 +91,7 @@
 }
 
 .card-guide-preview .template-marker::before {
-  content: "12";
+  content: "11";
   position: absolute;
   left: -6px;
   top: -10px;

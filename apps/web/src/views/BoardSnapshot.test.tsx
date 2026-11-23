@@ -93,10 +93,11 @@ test("U4b cards show role, progress, update and a textual blocker; newly occupie
   expect(
     within(tile as HTMLElement).getByRole("link", { name: "进度：2/5" }),
   ).toBeTruthy();
-  expect(
-    within(tile as HTMLElement).getByRole("link", { name: "阻塞：等待权限" })
-      .className,
-  ).toContain("board-card-blocked");
+  const blocker = within(tile as HTMLElement).getByRole("link", {
+    name: "阻塞：等待权限",
+  });
+  expect(blocker.getAttribute("data-card-signal")).toBe("blocked");
+  expect(blocker.textContent).toBe("阻塞");
   expect(tile.querySelector("time")?.getAttribute("datetime")).toBe(
     active.updated_at,
   );
@@ -220,19 +221,19 @@ test("U4b recent deliveries are a five-column table with the full safe summary t
 });
 
 test.each([
-  { kinds: ["decision"], labels: ["等你拍板"], tone: "waiting" },
-  { kinds: ["human_action"], labels: ["待你执行"], tone: "waiting" },
-  { kinds: ["blocked"], labels: ["阻塞"], tone: "blocked" },
-  { kinds: ["review"], labels: [], tone: undefined },
-  { kinds: [], labels: [], tone: undefined },
+  { kinds: ["decision"], signal: "decision", text: "待拍板" },
+  { kinds: ["human_action"], signal: "human_action", text: "待人工" },
+  { kinds: ["blocked"], signal: "blocked", text: "阻塞" },
+  { kinds: ["review"], signal: undefined, text: undefined },
+  { kinds: [], signal: undefined, text: undefined },
   {
     kinds: ["decision", "human_action", "blocked", "decision", "review"],
-    labels: ["等你拍板", "待你执行", "阻塞"],
-    tone: "blocked",
+    signal: "blocked",
+    text: "阻塞",
   },
 ] as const)(
-  "U4b board labels waiting reasons independently ($kinds)",
-  async ({ kinds, labels, tone }) => {
+  "U4b board shows the highest-priority waiting reason as a corner tag ($kinds)",
+  async ({ kinds, signal, text }) => {
     const item: CardListItem = {
       ...active,
       waiting_on: kinds.map((kind) => ({ kind, ref: "fixture", label: kind })),
@@ -247,25 +248,11 @@ test.each([
     const link = await screen.findByRole("link", { name: /准备发布/ });
     const tile = link.closest<HTMLElement>(".card-tile");
     if (!tile) throw new Error("Missing card tile");
-    expect(
-      [
-        ...tile.querySelectorAll(".board-card-waiting, .board-card-blocked"),
-      ].map((tag) => tag.textContent),
-    ).toEqual(labels);
-    expect(
-      tile.closest(".card-tile")?.classList.contains("card-tile-blocked"),
-    ).toBe(tone === "blocked");
-    expect(
-      tile.closest(".card-tile")?.classList.contains("card-tile-waiting"),
-    ).toBe(tone === "waiting");
-    for (const label of ["等你拍板", "待你执行"]) {
-      const badge = within(tile).queryByText(label, { exact: true });
-      if (badge)
-        expect(
-          badge
-            .closest(".board-card-badge")
-            ?.classList.contains("board-card-waiting"),
-        ).toBe(true);
-    }
+    const tags = [...tile.querySelectorAll("[data-card-signal]")];
+    expect(tags.map((tag) => tag.getAttribute("data-card-signal"))).toEqual(
+      signal ? [signal] : [],
+    );
+    expect(tags.map((tag) => tag.textContent)).toEqual(text ? [text] : []);
+    expect(tile.className).not.toMatch(/card-tile-(blocked|waiting)/);
   },
 );
