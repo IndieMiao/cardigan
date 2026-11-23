@@ -35,6 +35,8 @@ export interface StartRunHost {
     readonly secrets: Readonly<Record<string, string>>;
   };
   readonly mcpUrl: string;
+  /** C-600: refuse and rebuild sessions whose harness never listed Card tools. */
+  readonly verifyMcpSession?: boolean;
   readonly dataDir: string;
   readonly execution?: ExecutionConfig;
   readonly clock?: Clock;
@@ -68,6 +70,7 @@ export async function startQueuedRun(
     runtime: host.runtime,
     launch: host.launch,
     mcpUrl: host.mcpUrl,
+    ...(host.verifyMcpSession ? { verifyMcpSession: true } : {}),
     dataDir: host.dataDir,
     ...(host.execution === undefined ? {} : { execution: host.execution }),
     ...(host.clock === undefined ? {} : { clock: host.clock }),

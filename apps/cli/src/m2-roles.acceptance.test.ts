@@ -17,6 +17,7 @@ import {
   corePromptFor,
   firstPrompt,
   type Harness,
+  MCP_BRIDGE_SOURCE,
   parseLaunchConfig,
   START_FILE_NAME,
 } from "@cardigan/roles";
@@ -300,21 +301,25 @@ test.each(harnesses)(
         "<run>",
       );
       expect(config).toContain('model_instructions_file = "<run>/core.md"');
-      expect(config).toContain('bearer_token_env_var = "MCP_TOKEN"');
       for (const tool of ["whoami", "get_card"])
         expect(config).toContain(
           `[mcp_servers.card.tools.${tool}]\napproval_mode = "approve"`,
         );
+      // C-600: Codex reaches Card MCP through the stdio bridge, which takes
+      // the Token from MCP_TOKEN in its environment.
       expect(
-        config.match(
-          /\[mcp_servers.card\][\s\S]*?(?=\n\[mcp_servers.card.tools)/u,
-        )?.[0],
+        config
+          .match(
+            /\[mcp_servers.card\][\s\S]*?(?=\n\[mcp_servers.card.tools)/u,
+          )?.[0]
+          .replace(JSON.stringify(MCP_BRIDGE_SOURCE), '"<MCP_BRIDGE_SOURCE>"'),
       ).toMatchInlineSnapshot(`
-      "[mcp_servers.card]
-      url = "http://127.0.0.1:3004/mcp"
-      bearer_token_env_var = "MCP_TOKEN"
-      "
-    `);
+        "[mcp_servers.card]
+        command = "/usr/bin/python3"
+        args = ["-I", "-B", "-c", "<MCP_BRIDGE_SOURCE>", "bridge", "http://127.0.0.1:3004/mcp"]
+        env_vars = ["MCP_TOKEN"]
+        "
+      `);
     } else {
       expect(output.env.PI_CODING_AGENT_DIR).toBe(join(root, "run", "pi"));
       expect(output.args).toEqual(
