@@ -38,6 +38,7 @@ import { prechecks, precheckView } from "../precheck.js";
 import { crossCardRead } from "../preferences.js";
 import { providerIncidents } from "../provider-start.js";
 import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
+import { rejectionStreakCards } from "../review-convergence.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
 import {
@@ -188,6 +189,10 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
     return {
       project_id: state.project_id,
       merge_batches: mergeBatches(state.events),
+      // C-610 metric: compare counts before and after the deployment time.
+      review_convergence: {
+        rejection_streak_cards: rejectionStreakCards(state),
+      },
       system_rules: {
         system_review_limit_raise:
           projectPreferences(state).system_review_limit_raise === true,
@@ -286,6 +291,12 @@ export function referenceProjectSnapshot(state: CommandState, actor: Actor) {
             (cardCriticalPathLengths(visibleState).get(a.id) ?? 0)
         );
       }),
+      // C-610 metric: compare counts before and after the deployment time.
+      review_convergence: {
+        rejection_streak_cards: rejectionStreakCards(visibleState).filter((c) =>
+          cards.some((v) => v.id === c.card_id),
+        ),
+      },
       system_rules: {
         system_review_limit_raise:
           projectPreferences(state).system_review_limit_raise === true,

@@ -469,12 +469,14 @@ async function replaceDuringPlan(proposeFirst: boolean) {
             target_sha: candidate.subject.value,
             kind: "code",
             rejection_category: "并发时序",
+            pass_conditions: [{ description: "写入前核对版本", basis: "AC1" }],
             issues: [
               {
                 severity: "major",
                 must_fix: true,
                 pre_existing: false,
                 impact: "functional",
+                basis: i === 1 ? "AC1" : "PC1",
                 description: "旧快照写回",
                 proof: "旧数据覆盖新数据",
               },
@@ -493,6 +495,43 @@ async function replaceDuringPlan(proposeFirst: boolean) {
     )
       f.endRun(card.reviewer);
   }
+  // C-610: the third rejection reaches PM only after a disputed alignment.
+  const invariants = f.apply(
+    (s, a, p) =>
+      postComment(
+        s,
+        a,
+        {
+          card_id: card.card.id,
+          body: "不变量",
+          review_alignment: {
+            work_item_id: card.codeReview.id,
+            step: "propose",
+            invariants: ["新值不被旧快照覆盖"],
+          },
+        },
+        p,
+      ),
+    f.actorFor(card.coder),
+  );
+  f.apply(
+    (s, a, p) =>
+      postComment(
+        s,
+        a,
+        {
+          card_id: card.card.id,
+          body: "分歧",
+          reply_to: invariants.id,
+          review_alignment: {
+            work_item_id: card.codeReview.id,
+            step: "dispute",
+          },
+        },
+        p,
+      ),
+    f.actorFor(card.reviewer),
+  );
   const q = f
     .state()
     .decisions.find(

@@ -88,6 +88,7 @@ export async function sharedReviewFixture(
         kind: "code",
         issues,
         issue_refs: refs,
+        pass_conditions: [{ description: "Validation exists", basis: "AC1" }],
       },
       io,
     );

@@ -251,6 +251,7 @@ export * from "./provider-start.js";
 export * from "./readiness.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
 export * from "./remote-worker-loss.js";
+export * from "./review-convergence.js";
 export {
   type ReviewLimitAttention,
   reviewLimitAttention,

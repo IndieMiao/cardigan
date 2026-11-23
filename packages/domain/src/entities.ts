@@ -158,6 +158,8 @@ export interface Card {
   readonly title: string;
   readonly goal: string;
   readonly acceptance_criteria: readonly string[];
+  /** C-610: invariants agreed in a review alignment round; cited as INVn. */
+  readonly invariants?: readonly CardInvariant[];
   readonly source:
     | { readonly kind: "quote"; readonly text: string }
     | { readonly kind: "decision"; readonly decision_id: DecisionId };
@@ -414,6 +416,24 @@ export interface MergeCheckView {
   /** A1b: host classified complete logs using its reviewed executor allowlist. */
   readonly infra_flaky?: boolean;
 }
+export interface CardInvariant {
+  readonly text: string;
+  readonly work_item_id: WorkItemId;
+  /** The confirmed alignment proposal. */
+  readonly entry_id: TimelineEntryId;
+}
+export interface ReviewAlignment {
+  /** The rejection that opened the round; the round covers its streak. */
+  readonly review_id: ReviewId;
+  readonly status: "open" | "agreed" | "disputed";
+  readonly proposal?: {
+    readonly entry_id: TimelineEntryId;
+    readonly by: AssignmentId;
+    readonly invariants: readonly string[];
+  };
+  /** The confirm or dispute reply. */
+  readonly reply_entry_id?: TimelineEntryId;
+}
 interface WorkItemFields {
   readonly requirements?: import("./machine-requirements.js").WorkItemRequirements;
   /** PM/human hold: system assignment and reminders skip this item. */
@@ -445,12 +465,15 @@ export type WorkItem = WorkItemFields &
         readonly status: ProduceStatus;
         readonly target_work_item_id?: never;
         readonly review_plan_target?: never;
+        readonly review_alignment?: never;
       }
     | {
         readonly kind: "verify";
         readonly status: VerifyStatus;
         /** Pending proposal this verifier can act on even without a current delivery. */
         readonly review_plan_target?: DecisionId;
+        /** C-610: alignment round opened by the third consecutive rejection. */
+        readonly review_alignment?: ReviewAlignment;
         readonly target_work_item_id?: WorkItemId;
         readonly max_review_rounds: number;
       }
@@ -879,8 +902,20 @@ export interface ReviewIssue {
   readonly must_fix: boolean;
   readonly pre_existing: boolean;
   readonly proof?: string;
+  /** C-610: acceptance criterion, card invariant, pass condition or standing invariant. */
+  readonly basis?: string;
+  /** C-610: server-owned; a requested must-fix recorded as a non-blocking follow-up. */
+  readonly follow_up?: { readonly reason: ReviewFollowUpReason };
+}
+export type ReviewFollowUpReason = "no_basis" | "guard" | "outside_checklist";
+/** C-610: a finite, verifiable condition the next review checks. */
+export interface PassCondition {
+  readonly description: string;
+  readonly basis: string;
 }
 export interface Review {
+  /** C-610: fixed on the second consecutive rejection; later reviews check only these. */
+  readonly pass_conditions?: readonly PassCondition[];
   readonly rejection_category?: string;
   /** Historical quota fact, preserved even when a later lease expires. */
   readonly test_review?: import("./test-review.js").TestReviewBinding;

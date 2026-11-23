@@ -56,6 +56,10 @@ import {
   reuseIndependentReviewCheck,
 } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
+import {
+  convergeSubmittedIssues,
+  reviewPassConditions,
+} from "./review-convergence.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
 import { checkPauseDelivery } from "./review-pause.js";
 import {
@@ -885,6 +889,7 @@ export type SubmitReviewParams = Pick<
 } & Partial<
     Pick<
       Review,
+      | "pass_conditions"
       | "attachments"
       | "recheck_required"
       | "screenshot_check"
@@ -994,7 +999,9 @@ export function submitReview(
             typeof i.pre_existing === "boolean" &&
             typeof i.description === "string" &&
             i.description.trim() &&
-            (i.proof === undefined || typeof i.proof === "string"),
+            (i.proof === undefined || typeof i.proof === "string") &&
+            (i.basis === undefined || typeof i.basis === "string") &&
+            i.follow_up === undefined,
         ),
       "validation_failed",
       "Review issues must describe severity and must_fix",
@@ -1039,7 +1046,7 @@ export function submitReview(
       "Every must-fix issue requires a valid impact",
     );
     const calculated = deriveReview(
-      issues,
+      convergeSubmittedIssues(d, card, item, p.issues, issues),
       p.recheck_required ?? false,
       p.followup_card_id,
     );
@@ -1049,7 +1056,9 @@ export function submitReview(
           !p.recheck_required &&
           !!p.followup_card_id,
         "validation_failed",
-        "Only UX-only must-fix issues can be deferred to a follow-up card",
+        calculated.issues.some((i) => i.follow_up)
+          ? "必改项缺少可引用的 basis，已记为后续跟进、不挡合并，无需 followup_card_id"
+          : "Only UX-only must-fix issues can be deferred to a follow-up card",
       );
       const followup = d.get("cards", p.followup_card_id);
       ensure(
@@ -1123,6 +1132,13 @@ export function submitReview(
         "validation_failed",
         "New findings after round one require critical severity or a must-fix major issue, with proof (reproduction steps, script or attachment reference)",
       );
+    const passConditions = reviewPassConditions(
+      d,
+      card,
+      item,
+      calculated.verdict,
+      p.pass_conditions,
+    );
     item = activeWork(d, item);
     ensure(
       item.status === "in_progress",
@@ -1155,6 +1171,7 @@ export function submitReview(
       ...(shared
         ? { issues: bindSharedFindings(calculated.issues, id, existing) }
         : {}),
+      ...(passConditions ? { pass_conditions: passConditions } : {}),
       ...(p.rejection_category
         ? { rejection_category: p.rejection_category.trim() }
         : {}),
@@ -1241,6 +1258,7 @@ export function submitReview(
     const reviewLimitWait =
       (flowLimit && !flowRaised) ||
       (parallelLate && pendingSharedReview(d.list("decisions"), target.id));
+    const followUps = value.issues.filter((i) => i.follow_up).length;
     d.emit(
       "review_submitted",
       card.id,
@@ -1253,6 +1271,9 @@ export function submitReview(
           ? { followup_card_id: value.followup_card_id }
           : {}),
         issues: value.issues.map((issue) => ({ ...issue })),
+        ...(value.pass_conditions
+          ? { pass_conditions: value.pass_conditions.map((c) => ({ ...c })) }
+          : {}),
         rework_allowed:
           (value.blocking || value.recheck_required) && !reviewLimitWait,
         ...(reviewLimitWait ? { review_limit_wait: true } : {}),
@@ -1260,9 +1281,7 @@ export function submitReview(
       },
       {
         type: "review",
-        body: testReview
-          ? `增量复核（只改测试）：${value.verdict}`
-          : value.verdict,
+        body: `${testReview ? `增量复核（只改测试）：${value.verdict}` : value.verdict}${followUps ? `（${followUps} 条意见记为后续跟进，不挡合并）` : ""}`,
         delivery_id: target.id,
         work_item_id: item.id,
         run_id: run.id,

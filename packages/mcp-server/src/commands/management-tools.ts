@@ -218,6 +218,17 @@ const schemas = {
       .describe(
         "暂停或换做法：负责人提交方案，待确认人 reply_to 当前方案并确认方向，不等于审核通过",
       ),
+    review_alignment: z
+      .object({
+        work_item_id: id("work_item"),
+        step: z.enum(["propose", "confirm", "dispute"]),
+        invariants: z.array(text).min(1).max(10).optional(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "对齐回合（连续第 3 次驳回后）：作者或审核员用 propose 提出 1–10 条不变量（invariants），对方 reply_to 该条后 confirm 同意或 dispute 写明分歧；同意后写入 card.invariants 并恢复审核，分歧交 PM 裁决",
+      ),
     host_report_for: id("human_action")
       .optional()
       .describe(

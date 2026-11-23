@@ -18,6 +18,7 @@ import {
   cardTemplate,
   employeeNameKey,
   flowAtLeast,
+  followUpDraft,
   humanDecisionGroupKey,
   isCompletionVerifier,
   isPrecheckConflict,
@@ -2618,9 +2619,64 @@ export function routeEvent(input: RouteInput): RouteResult {
     case NEEDS_YOU_ITEM_READY:
       routeReadiness(input, draft);
       break;
-    case "card_merged":
-      // The system timeline is the result; no PM retelling run.
+    case "card_merged": {
+      // The system timeline is the result; PM only hears about C-610 follow-ups.
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      const items = new Set(
+        input.snapshot.work_items
+          .filter((w) => w.card_id === card?.id)
+          .map((w) => w.id),
+      );
+      const followUps =
+        card &&
+        followUpDraft(
+          card,
+          input.snapshot.reviews.filter((r) => items.has(r.work_item_id)),
+        );
+      if (input.event.actor.kind === "system" && followUps)
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "card",
+          "6.4/card merged",
+          `${followUps.source_card_id} 已合并；审核中 ${followUps.items.length} 条意见记为后续跟进、未挡合并。后续卡草稿见 get_card.follow_up_draft，由你决定是否开卡。`,
+        );
       break;
+    }
+    case "review_alignment_agreed": {
+      if (input.event.actor.kind !== "system") break;
+      const producer =
+        payloadString(input.event.payload, "wake") === "producer";
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (
+        !card ||
+        ["done", "cancelled", "awaiting_merge"].includes(card.status)
+      )
+        break;
+      noteAssignment(
+        input,
+        draft,
+        itemOf(
+          input,
+          payloadString(
+            input.event.payload,
+            producer ? "producer_id" : "work_item_id",
+          ) as WorkItemId | undefined,
+        ),
+        "review",
+        "flow-v2/B2",
+        producer
+          ? "对齐回合已达成一致，请按不变量清单和通过条件修改后重新交付。"
+          : "对齐回合已达成一致，请审核当前交付。",
+        producer ? "rework" : "decision_resumed",
+      );
+      break;
+    }
     case "merge_failed":
       note(
         input,

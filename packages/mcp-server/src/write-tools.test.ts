@@ -781,6 +781,7 @@ test("flow 5 late review is atomic and idempotent over concurrent MCP requests",
             severity: "major",
             description: "Bug",
             impact: "functional" as const,
+            basis: "AC1",
             must_fix: true,
             pre_existing: false,
           },
@@ -1005,5 +1006,54 @@ test("B3a: MCP accepts future product plain summaries, refuses manual completion
     employee: null,
     plain_summary: TEST_PLAIN_SUMMARY,
     system_completion: { version: 1 },
+  });
+});
+
+test("C-610: submit_review carries basis and pass_conditions; get_card drafts the follow-ups", async () => {
+  store.uow.run((tx) =>
+    tx.cards.put(project_id, { ...serverCard, flow_version: 5 }),
+  );
+  const coder = await connect();
+  const reviewer = await connect(1);
+  expect((await call(coder, "submit_delivery", delivery)).isError).not.toBe(
+    true,
+  );
+  const result = await call(reviewer, "submit_review", {
+    ...review,
+    pass_conditions: [{ description: "保存后读回新值", basis: "AC1" }],
+    issues: [
+      {
+        severity: "major",
+        description: "核不清状态时就停住，交人工确认",
+        impact: "functional" as const,
+        basis: "AC1",
+        must_fix: true,
+        pre_existing: false,
+      },
+      {
+        severity: "major",
+        description: "Saved value is lost",
+        impact: "functional" as const,
+        basis: "lost_work",
+        must_fix: true,
+        pre_existing: false,
+      },
+    ],
+  });
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent).toMatchObject({
+    verdict: "reject",
+    pass_conditions: [{ description: "保存后读回新值", basis: "AC1" }],
+    issues: [
+      { must_fix: false, follow_up: { reason: "guard" } },
+      { must_fix: true, basis: "lost_work" },
+    ],
+  });
+  expect(
+    (await call(reviewer, "get_card", { card_id })).structuredContent
+      ?.follow_up_draft,
+  ).toMatchObject({
+    source_card_id: card_id,
+    items: [{ description: "核不清状态时就停住，交人工确认", reason: "guard" }],
   });
 });
