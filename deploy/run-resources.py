@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import syslog
+import threading
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
@@ -216,6 +217,17 @@ def host_state(key, read_key, budget=READ_BOUND):
     # C-605: a saturated worker link has shown 2-6 s round trips; TLS needs
     # several. The signed per-request nonce, not this bound, prevents replay.
     client = (http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection)(url.hostname, url.port, timeout=left())
+    # Socket timeouts bound each wait, not their sum: a response trickling in
+    # pieces could hold the supervisor past the budget. A one-shot real-time
+    # alarm ends the whole read at its deadline (name lookup excepted: it is
+    # one C call and the handler runs when it returns). The supervisor is
+    # single-threaded; timers are not inherited across fork or exec.
+    armed = threading.current_thread() is threading.main_thread()
+    if armed:
+        def expire(signum, frame):
+            raise TimeoutError('lifecycle read budget exhausted')
+        previous = signal.signal(signal.SIGALRM, expire)
+        signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline - time.monotonic()))
     try:
         client.connect()
         client.sock.settimeout(left())
@@ -239,6 +251,9 @@ def host_state(key, read_key, budget=READ_BOUND):
         left()
         return fields[-1]
     finally:
+        if armed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
         client.close()
 
 

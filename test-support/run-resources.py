@@ -10,6 +10,7 @@ import pathlib
 import runpy
 import socket
 import select
+import signal
 import re
 import subprocess
 import sys
@@ -47,8 +48,11 @@ class Authority(BaseHTTPRequestHandler):
             served[key, 'unanswered'] += 1
             self.send_error(503); return
         state = states.get(key, 'active')
+        trickle = state == 'trickle'  # headers and body in pieces, 0.8 s apart
         if state == 'slow':  # a saturated link: answer after 3 s
             time.sleep(3); state = 'active'
+        if trickle:
+            state = 'active'
         if state == 'ended' and key in held_terminal:
             arrived, release = held_terminal[key]
             arrived.set(); assert release.wait(timeout=2)
@@ -56,8 +60,17 @@ class Authority(BaseHTTPRequestHandler):
         sig = subprocess.run(['/usr/bin/openssl','dgst','-sha256','-sign',private], input=payload.encode(),check=True,stdout=subprocess.PIPE).stdout
         row = dict(payload=payload,signature=base64.b64encode(sig if state != 'bad-signature' else b'invalid').decode())
         try:
+            if trickle:
+                body = json.dumps(row).encode()
+                parts = [b'HTTP/1.0 200 OK\r\n', b'Content-Length: %d\r\n\r\n' % len(body),
+                         body[:len(body)//2], body[len(body)//2:]]
+                for i, part in enumerate(parts):
+                    if i: time.sleep(0.8)
+                    self.wfile.write(part); self.wfile.flush()
+                served[key, 'trickle'] += 1
+                return
             self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(row).encode())
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionResetError):
             return  # the reader's budget ran out first (read_budget)
         served[key, state] += 1
 
@@ -78,9 +91,11 @@ cached_audit = f"""class AuditSink:
 m['audit'].__globals__['syslog'] = AuditSink()"""
 
 
-def entry(audit_sink="", vite_entry=False):
+def entry(audit_sink="", vite_entry=False, read_bound=None):
+    bound = f"m['host_state'].__globals__['READ_BOUND']={read_bound!r}" if read_bound else ''
     setup = f"""import runpy,sys,os,hashlib
 m=runpy.run_path(sys.argv[1]);m['host_state'].__globals__['AUTHORITY']=['http://127.0.0.1:{http.server_port}/mcp','fixture','isolated','fixture-token-id',{public!r}]
+{bound}
 {audit_sink}
 c=m['Confirmation'](sys.argv[3],hashlib.sha256(os.environ['MCP_TOKEN'].encode()).digest(),interval=0.05)
 """
@@ -655,6 +670,48 @@ def read_budget():
             pass
         assert time.monotonic() - began < 2
         assert m['host_state'](key, hashlib.sha256(b'synthetic').digest(), 6) == 'active'
+        # Every piece arrives well within one socket timeout, but the whole
+        # response takes 2.4 s: the read must still end at its 1.5 s budget.
+        key = 'A-9.R-3.R-2'
+        states[key] = 'trickle'
+        began = time.monotonic()
+        try:
+            m['host_state'](key, hashlib.sha256(b'synthetic').digest(), 1.5)
+            raise AssertionError('trickled answer accepted beyond budget')
+        except TimeoutError:
+            pass
+        assert time.monotonic() - began < 1.8
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+        assert signal.getsignal(signal.SIGALRM) == signal.SIG_DFL
+        assert m['host_state'](key, hashlib.sha256(b'synthetic').digest(), 6) == 'active'
+
+
+def trickled_reread(base):
+    # The command exits while a re-read is trickling in. The entry returns
+    # within one read budget (here 1.5 s), not after the whole response.
+    key = 'A-9.R-3.R-3'
+    states[key] = 'active'
+    with subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(30)']) as session:
+        try:
+            job = subprocess.Popen([sys.executable, '-IB', '-c', entry(cached_audit, read_bound=1.5), str(source), TAG, key,
+                                    str(session.pid), base, sys.executable, '-I', '-c',
+                                    'import os,pathlib,time;pathlib.Path(os.environ["TMPDIR"],"up").write_text(str(os.getpid()));time.sleep(30)'],
+                                   stderr=subprocess.PIPE)
+            until(lambda: os.path.isdir(base) and os.listdir(base))
+            root, parent = m['namespace'](TAG, False, base); os.close(root)
+            scratch = pathlib.Path(parent)/m['scope_name'](key)/'tmp'
+            until(lambda: (scratch/'up').exists() and (scratch/'up').read_text())
+            states[key] = 'trickle'
+            until(lambda: served[key, 'active'] >= 1 and job.poll() is None)
+            time.sleep(0.3)  # a trickled re-read is now in flight
+            os.kill(int((scratch/'up').read_text()), 15)  # the fixture's own command ends now
+            began = time.monotonic()
+            assert job.wait(timeout=6) == 143, job.returncode  # 128 + SIGTERM, reported as before
+            elapsed = time.monotonic() - began
+            assert elapsed < 2.2, elapsed
+            job.stderr.close()
+        finally:
+            session.terminate(); session.wait(timeout=3)
 
 
 def inactive_run(base):
@@ -754,6 +811,8 @@ with tempfile.TemporaryDirectory() as base:
     slow_start(base)
 with tempfile.TemporaryDirectory() as base:
     refused_start(base)
+with tempfile.TemporaryDirectory() as base:
+    trickled_reread(base)
 for detached in (False, True):
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="custody-") as base:
         registered_service(base, detached)
