@@ -270,6 +270,7 @@ describe("C-635 activity writes", () => {
     const bk = new ToolCallBookkeeping({
       store,
       now: time.now,
+      clock: () => new Date(time.now()).toISOString(),
       timers: time.timers,
     });
     const who = identity(assignment);
@@ -313,6 +314,7 @@ describe("C-635 activity writes", () => {
       store,
       acknowledgeRuns: false,
       now: time.now,
+      clock: () => new Date(time.now()).toISOString(),
       timers: time.timers,
     });
     writes = 0;
@@ -333,6 +335,27 @@ describe("C-635 activity writes", () => {
     expect(writes).toBe(2);
   });
 
+  test("activity is stamped with the store's clock; deadlines run on the timer clock even if it is frozen", () => {
+    const time = fakeTime();
+    const frozen = "2030-01-01T00:00:00.000Z";
+    const a = activeAssignment("A-41");
+    const bk = new ToolCallBookkeeping({
+      store,
+      acknowledgeRuns: false,
+      now: time.now,
+      clock: () => frozen,
+      timers: time.timers,
+    });
+    bk.toolCalled(identity(a, a.mcp_token_id));
+    time.advanceTo(T0 + WAKE);
+    expect(stored(a.id)?.last_mcp_activity_at).toBe(frozen);
+    // The same instant again is already recorded: nothing deferred.
+    time.advanceTo(T0 + 10 * INTERVAL);
+    bk.toolCalled(identity(a, a.mcp_token_id));
+    expect(bk.pending).toBe(0);
+    expect(time.armed).toBe(0);
+  });
+
   test("pending sessions are written together in one transaction", () => {
     const time = fakeTime();
     const a = activeAssignment("A-71", { last_mcp_activity_at: NOW });
@@ -343,6 +366,7 @@ describe("C-635 activity writes", () => {
       store,
       acknowledgeRuns: false,
       now: time.now,
+      clock: () => new Date(time.now()).toISOString(),
       timers: time.timers,
     });
     writes = 0;
@@ -366,6 +390,7 @@ describe("C-635 activity writes", () => {
       store,
       acknowledgeRuns: false,
       now: time.now,
+      clock: () => new Date(time.now()).toISOString(),
       timers: time.timers,
     });
     time.advanceTo(T0 + 1_000);
@@ -398,6 +423,7 @@ describe("C-635 activity writes", () => {
       store,
       acknowledgeRuns: false,
       now: time.now,
+      clock: () => new Date(time.now()).toISOString(),
       timers: time.timers,
     });
     const who = identity(a, a.mcp_token_id);
@@ -465,6 +491,7 @@ describe("C-635 activity writes", () => {
       store,
       acknowledgeRuns: false,
       now: time.now,
+      clock: () => new Date(time.now()).toISOString(),
       timers: time.timers,
     });
     let seed = 11;
@@ -516,6 +543,7 @@ describe("C-635 a busy database never holds up the tool call", () => {
     const bk = new ToolCallBookkeeping({
       store,
       now: time.now,
+      clock: () => new Date(time.now()).toISOString(),
       timers: time.timers,
     });
     const who = identity(assignment, "tok-launch");
@@ -556,6 +584,7 @@ describe("C-635 a busy database never holds up the tool call", () => {
     const bk = new ToolCallBookkeeping({
       store,
       now: time.now,
+      clock: () => new Date(time.now()).toISOString(),
       timers: time.timers,
     });
     const release = holdWriteLock();
@@ -578,6 +607,7 @@ describe("C-635 a busy database never holds up the tool call", () => {
       store,
       acknowledgeRuns: false,
       now: time.now,
+      clock: () => new Date(time.now()).toISOString(),
       timers: time.timers,
     });
     time.advanceTo(T0 + 3_000);

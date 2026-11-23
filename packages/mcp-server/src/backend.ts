@@ -208,6 +208,8 @@ export interface McpBackend {
     key_sha256?: string,
     token_id?: string,
   ): { readonly state: string | undefined; readonly persisted: boolean };
+  /** C-635: the store's clock, which stamps MCP activity. */
+  now?(): string;
   /** C-635: run `operation` without waiting for another process's write lock. */
   withoutLockWait?<T>(
     operation: () => T,

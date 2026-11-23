@@ -39,7 +39,10 @@ export interface ToolCallBookkeepingOptions {
   readonly acknowledgeRuns?: boolean;
   /** Minimum spacing of one session's activity writes. */
   readonly activityWriteIntervalMs?: number;
+  /** Timer clock (ms) for deadlines and retries. */
   readonly now?: () => number;
+  /** Activity timestamps; defaults to the store's clock, as before C-635. */
+  readonly clock?: () => string;
   readonly timers?: ToolCallTimers;
   readonly log?: Logger;
 }
@@ -78,6 +81,7 @@ export class ToolCallBookkeeping {
   readonly #acknowledge: boolean;
   readonly #interval: number;
   readonly #now: () => number;
+  readonly #clock: () => string;
   readonly #timers: ToolCallTimers;
   readonly #log: Logger | undefined;
   /** Deadline of each session's deferred activity. */
@@ -96,6 +100,10 @@ export class ToolCallBookkeeping {
     this.#interval =
       options.activityWriteIntervalMs ?? DEFAULT_ACTIVITY_WRITE_INTERVAL_MS;
     this.#now = options.now ?? Date.now;
+    const store = options.store;
+    this.#clock =
+      options.clock ??
+      (() => store.now?.() ?? new Date(this.#now()).toISOString());
     this.#timers = options.timers ?? defaultTimers;
     this.#log = options.log;
   }
@@ -217,19 +225,23 @@ export class ToolCallBookkeeping {
     );
     // The same rules as the write itself, which rechecks them.
     if (!assignment || !ownActiveSession(assignment, token_id)) return;
-    const now = this.#now();
+    // The activity time comes from the store's clock, as before C-635; the
+    // deadline is scheduled on this bookkeeping's own (timer) clock.
+    const at = this.#clock();
+    const now = Date.parse(at);
     const stored = Date.parse(assignment.last_mcp_activity_at ?? "");
     // Already recorded at or after this call.
     if (Number.isFinite(stored) && stored >= now) return;
-    const due =
+    const delay =
       Number.isFinite(stored) && now - stored < this.#interval
-        ? stored + this.#interval
-        : now + ACTIVITY_WAKE_DELAY_MS;
+        ? stored + this.#interval - now
+        : ACTIVITY_WAKE_DELAY_MS;
+    const due = this.#now() + delay;
     store.deferAssignmentActivity?.({
       project_id,
       assignment_id,
       token_id,
-      at: new Date(now).toISOString(),
+      at,
     });
     const key = keyOf(identity);
     this.#due.set(key, Math.min(this.#due.get(key) ?? due, due));

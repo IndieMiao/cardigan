@@ -1308,6 +1308,11 @@ export class Store {
     }
   }
 
+  /** C-635: this Store's clock; MCP activity is stamped with it. */
+  now(): string {
+    return this.#clock.now();
+  }
+
   /**
    * C-635: defer an MCP activity time instead of writing it now. Deferred
    * times ride along with the next write transaction of this Store (any
