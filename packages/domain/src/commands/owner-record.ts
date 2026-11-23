@@ -296,5 +296,5 @@ export function withOwnerEvidence(
     record.at,
     ...(record.attachment_id ? [`附件 ${record.attachment_id}`] : []),
   ].join("，");
-  return `${body}\n\n依据：所有者原话（${source}）\n${quote}`;
+  return `${body}\n\n依据：所有者原话（${source}）\n${quote}\n\nPM 按委派作出决定，并引用所有者原话作为依据。该记录不等于所有者亲自确认。`;
 }

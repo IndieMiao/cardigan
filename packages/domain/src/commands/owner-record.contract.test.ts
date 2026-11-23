@@ -204,6 +204,7 @@ describe("owner record linking", () => {
     expect(body?.startsWith("所有者已在卡上明确选择拆卡")).toBe(true);
     expect(body).toContain(`依据：所有者原话（${entry.id}，${now}）`);
     expect(body).toContain(`> ${entry.body}`);
+    expect(body).toContain("该记录不等于所有者亲自确认");
     // History: PM decided under delegation; never shown as the owner's own confirmation.
     const history = decisionHistory(f.state).find((h) => h.id === q.id);
     expect(history?.decision_maker).toBe("pm");

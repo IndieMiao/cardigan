@@ -140,7 +140,9 @@ test("C-617 / Q-1198: PM's delegated decision shows the owner's words as separat
   expect(evidence.querySelector(".markdown blockquote")?.textContent).toContain(
     "Q-1 选 go",
   );
-  expect(evidence.textContent).toContain("C-1#7 · 附件 att-1");
+  expect(evidence.textContent).toContain("来源：C-1#7 · 附件 att-1");
+  // No explanatory hint in the drawer; that sentence lives on the timeline only.
+  expect(drawer.textContent).not.toContain("不等于所有者亲自确认");
 });
 
 test("empty and failed history queries have readable states", async () => {

@@ -132,7 +132,7 @@ export function DecisionHistoryDetail({
             <h2>依据：所有者原话</h2>
             <Markdown body={quoted(q.resolution.owner_record.quote)} />
             <p>
-              {q.resolution.owner_record.timeline_entry_id}
+              来源：{q.resolution.owner_record.timeline_entry_id}
               {q.resolution.owner_record.attachment_id &&
                 ` · 附件 ${q.resolution.owner_record.attachment_id}`}
               {" · "}
