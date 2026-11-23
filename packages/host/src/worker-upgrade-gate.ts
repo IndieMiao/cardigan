@@ -5,6 +5,7 @@ import {
 } from "@cardigan/store";
 import type { MachineCheckJob } from "./machine-check-types.js";
 import {
+  helperMismatch,
   observationFingerprint,
   workerHelperDigests,
 } from "./worker-helper-release.js";
@@ -104,6 +105,8 @@ export function settleUpgradeCheck(
     upgradeKey(binding) === key &&
     obs?.observation_target_matches &&
     obs.health?.available &&
+    // A compatible helper still awaiting upgrade is not upgrade evidence (C-608).
+    !obs.health.warnings?.some(helperMismatch) &&
     obs.health.evidence_ref === `machine-observation:${job.id}`
   );
   if (

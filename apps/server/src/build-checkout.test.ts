@@ -28,6 +28,7 @@ import {
 import {
   launchEntities,
   prepareRoleWorktree,
+  sessionFilesRevision,
   sessionFingerprint,
   VERIFIER_LAUNCH_REVISION,
   withPreparationQueue,
@@ -776,10 +777,16 @@ test("a verifier session launched without the build environment is fingerprinted
     .state()
     .runs.filter((run) => run.assignment_id === s.reviewer.id)
     .at(-1)?.tool_catalog;
-  expect(recorded?.endsWith(`+${VERIFIER_LAUNCH_REVISION}`)).toBe(true);
+  // C-608: every session also records this release's run-command entry.
+  const files = `+${sessionFilesRevision()}`;
+  expect(files).toMatch(/^\+run-command-[a-f0-9]{16}$/u);
+  expect(recorded?.endsWith(`+${VERIFIER_LAUNCH_REVISION}${files}`)).toBe(true);
   // ...which an older session's bare catalog never equals, so the Dispatcher's
   // existing comparison (P2a-10 A) replaces it before its next wake.
-  const bare = recorded?.slice(0, -`+${VERIFIER_LAUNCH_REVISION}`.length);
+  const bare = recorded?.slice(
+    0,
+    -`+${VERIFIER_LAUNCH_REVISION}${files}`.length,
+  );
   const reviewer = launchEntities(f.store, f.project_id, s.reviewer.id);
   expect(sessionFingerprint(bare, reviewer.role, reviewer.assignment)).toBe(
     recorded,
@@ -787,10 +794,16 @@ test("a verifier session launched without the build environment is fingerprinted
   expect(bare).not.toBe(recorded);
   // Writers and standing sessions keep their fingerprint: no replacement.
   const coder = launchEntities(f.store, f.project_id, s.coder.id);
-  expect(sessionFingerprint("c", coder.role, coder.assignment)).toBe("c");
-  expect(sessionFingerprint("c", reviewer.role, { scope: "standing" })).toBe(
-    "c",
+  expect(sessionFingerprint("c", coder.role, coder.assignment)).toBe(
+    `c${files}`,
   );
+  expect(sessionFingerprint("c", reviewer.role, { scope: "standing" })).toBe(
+    `c${files}`,
+  );
+  // A session started with an older run-command entry is replaced once too.
+  expect(
+    sessionFingerprint("c", coder.role, coder.assignment, "run-command-old"),
+  ).not.toBe(sessionFingerprint("c", coder.role, coder.assignment));
   expect(
     sessionFingerprint(undefined, reviewer.role, reviewer.assignment),
   ).toBeUndefined();

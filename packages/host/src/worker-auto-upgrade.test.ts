@@ -265,6 +265,7 @@ async function setup(
     options,
     adapters,
     enroll,
+    finalize,
     isHeld,
     verified,
     target,
@@ -521,6 +522,21 @@ test.each(["install", "worker_check", "machine_check"])(
     expect(f.verified()).toBe(true);
   },
 );
+test("C-608: a manual machine check with the old helper still in place is not upgrade evidence", async () => {
+  const f = await setup();
+  f.enroll();
+  f.adapters.install.mockRejectedValueOnce(new Error());
+  await f.run();
+  await f.manual("worker");
+  expect(upgradeState(f.store, project, machine)?.state).toBe("worker_checked");
+  // Compatible, so the machine dispatches, but the upgrade is not verified.
+  expect(
+    await f.finalize("machine", f.target.fingerprint, async () => mismatch),
+  ).toEqual(soft);
+  expect(f.verified()).toBe(false);
+  await f.manual("machine");
+  expect(f.verified()).toBe(true);
+});
 test.each(["failed", "installing", "worker_checked"])(
   "revoked enrollment: %s stays unverified until both checks on the new key",
   async (state) => {

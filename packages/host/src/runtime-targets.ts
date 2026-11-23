@@ -61,6 +61,7 @@ import {
 import { patrolHelperUpgrade } from "./worker-auto-upgrade.js";
 import {
   hasHelperMismatch,
+  helperMismatch,
   softHelperMismatch,
 } from "./worker-helper-release.js";
 import {
@@ -1481,9 +1482,11 @@ export async function observeRegisteredMachine(
       `machine-observation:${options.observationId}` &&
     result.health.blockers.includes("machine_not_ready")
   ) {
-    const failed_steps = result.health.blockers.filter(
-      (s) => s !== "machine_not_ready",
-    );
+    // A manual helper confirmation needs the current helper, not just a compatible one.
+    const failed_steps = [
+      ...result.health.blockers.filter((s) => s !== "machine_not_ready"),
+      ...(result.health.warnings ?? []).filter(helperMismatch),
+    ];
     maintenance = {
       status: failed_steps.length ? "failed" : "passed",
       failed_steps,

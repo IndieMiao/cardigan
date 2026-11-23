@@ -1474,6 +1474,34 @@ test.each([
   },
 );
 
+test("C-608: a manual helper confirmation still needs the current helper digest", async () => {
+  const project = "fixture",
+    id = "worker-a";
+  store.uow.run((tx) =>
+    tx.machines.put(project, { ...machine(id, id), status: "draining" }),
+  );
+  readiness.mockResolvedValue([digestMismatch]);
+  const observed = await observeRegisteredMachine(
+    {
+      store,
+      project,
+      machine: id,
+      observationId: "confirm-digest",
+      helperConfirmation: {
+        binding:
+          router.resolve(project, id).execution.target?.fingerprint ??
+          "missing",
+      },
+      catalog: () => [],
+    },
+    () => router,
+  );
+  expect(observed.maintenance).toEqual({
+    status: "failed",
+    failed_steps: [digestMismatch],
+  });
+});
+
 test("a manual confirmation may ignore drain but not an automatic upgrade in progress", async () => {
   const project = "fixture",
     id = "worker-a";
