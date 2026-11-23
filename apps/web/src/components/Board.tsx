@@ -10,11 +10,10 @@ import {
 import type { CardListItem } from "../api.js";
 import type { CardDisplay } from "../card-display.js";
 import { BOARD_STATUSES, cardStatusLabel } from "../status.js";
-import { useBoardDependencies } from "../useBoardDependencies.js";
 import { useBoardPan } from "../useBoardPan.js";
 import { BoardCard } from "./BoardCard.js";
+import { BoardDependencies } from "./BoardDependencies.js";
 import { StatusTag } from "./Foundation.js";
-import { BoardDependencyLines } from "./layout/BoardDependencyLayout.js";
 import { MergeBatchHeading } from "./layout/MergeBatchLayout.js";
 import { groupBatchCards } from "./MergeBatch.js";
 import { Tooltip } from "./Tooltip.js";
@@ -188,7 +187,6 @@ export function Board({
   useBoardPan(scroller);
   // C-659: lines to the hovered or focused card's prerequisites and dependents.
   const frame = useRef<HTMLDivElement>(null);
-  const dependencyLines = useBoardDependencies(scroller, frame, cards);
   const measure = useCallback(() => {
     const element = scroller.current;
     if (!element) return;
@@ -246,9 +244,7 @@ export function Board({
         {announcement}
       </p>
       <div className="board-scroll" ref={frame}>
-        {dependencyLines.length > 0 && (
-          <BoardDependencyLines lines={dependencyLines} />
-        )}
+        <BoardDependencies board={scroller} frame={frame} cards={cards} />
         <section
           className="board"
           ref={scroller}

@@ -156,8 +156,32 @@ try {
           const a = p.getPointAtLength(0),
             b = p.getPointAtLength(p.getTotalLength()),
             s = getComputedStyle(p);
+          // Sample every 2px: which cards (other than the line's two ends)
+          // does a visible piece of the line lie on? (Design review V-3178.)
+          const ends = p.dataset.edge.split(">");
+          const crosses = new Set();
+          const total = p.getTotalLength();
+          for (let at = 0; at <= total; at += 2) {
+            const q = p.getPointAtLength(at);
+            const x = q.x + origin.left,
+              y = q.y + origin.top;
+            for (const tile of document.querySelectorAll("[data-card-id]")) {
+              if (ends.includes(tile.dataset.cardId)) continue;
+              const r = tile.getBoundingClientRect();
+              if (
+                r.width &&
+                x > r.left + 0.5 &&
+                x < r.right - 0.5 &&
+                y > r.top + 0.5 &&
+                y < r.bottom - 0.5
+              )
+                crosses.add(tile.dataset.cardId);
+            }
+          }
           return {
             key: p.dataset.edge,
+            length: r2(total),
+            crosses: [...crosses],
             start: { x: r2(a.x + origin.left), y: r2(a.y + origin.top) },
             end: { x: r2(b.x + origin.left), y: r2(b.y + origin.top) },
             stroke: s.stroke,
@@ -269,6 +293,14 @@ try {
       );
       assert(line.marker, `${label} ${line.key}: arrow`);
       assert(from === active || to === active, `${label}: ${line.key}`);
+      assert.deepEqual(
+        line.crosses,
+        [],
+        `${label} ${line.key}: runs over unrelated cards`,
+      );
+      // Leaves the right edge of `from`, enters the left edge of `to`.
+      assert(near(line.start.x, a.right), `${label} ${line.key}: out right`);
+      assert(near(line.end.x, b.left - 6), `${label} ${line.key}: in left`);
     }
   };
   const cardStatus = {

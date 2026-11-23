@@ -11,9 +11,12 @@ import {
   connectorPath,
   intersectBoxes,
   type LineBox,
+  type LineEnd,
 } from "./board-dependency-lines.js";
 import type { BoardDependencyLine } from "./components/layout/BoardDependencyLayout.js";
 
+/** The crossing band's centre below the board's top edge (tracks at 3 and 6). */
+const BAND_OFFSET = 4.5;
 /** Set on the card at the other end of a drawn line. */
 export const RELATED_ATTRIBUTE = "data-dependency-related";
 
@@ -34,7 +37,11 @@ const cardElement = (target: EventTarget | null) =>
  * A related card is "visible" when part of it shows inside its lane and the
  * board's scroll viewport. A card in a folded lane points at that lane's
  * strip; a card scrolled out of view, filtered out or not yet loaded gets no
- * line, so no line ever ends in empty space.
+ * line, so no line ever ends in empty space. Routes avoid every card (see
+ * `connectorPath`), so no visible piece of a line touches an unrelated card.
+ *
+ * Call it from a component of its own: hovering then re-renders only the
+ * lines, not the board.
  */
 export function useBoardDependencies(
   board: RefObject<HTMLElement | null>,
@@ -85,14 +92,31 @@ export function useBoardDependencies(
       top: box.top - origin.top,
       bottom: box.bottom - origin.top,
     });
+    const end = (box: LineBox, holder: Element | null): LineEnd => {
+      const column = holder ? boxOf(holder) : box;
+      return {
+        box: local(box),
+        column: {
+          left: column.left - origin.left,
+          right: column.right - origin.left,
+        },
+      };
+    };
     const visible = (element: Element) => {
       let box: LineBox | null = boxOf(element);
       const lane = element.closest(".board-lane-cards");
       if (lane) box = intersectBoxes(box, boxOf(lane));
       return box && intersectBoxes(box, viewport);
     };
-    const from = visible(source);
-    if (!from) return commit([]);
+    const shown = visible(source);
+    if (!shown) return commit([]);
+    const from = end(shown, source.closest(".board-column"));
+    // The band in the lanes' 10px top padding, above the headings and the
+    // folded strips (which start 8px down).
+    const frameBox = {
+      band: viewport.top - origin.top + BAND_OFFSET,
+      viewport: local(viewport),
+    };
     const next: BoardDependencyLine[] = [];
     const edges = [
       ...dependency.predecessors.map((c) => [c.id, true] as const),
@@ -103,10 +127,11 @@ export function useBoardDependencies(
       if (id === active || seen.has(`${id}${before}`)) continue;
       seen.add(`${id}${before}`);
       const element = find(id);
-      let box: LineBox | null = null;
+      let other: LineEnd | null = null;
       if (element) {
-        box = visible(element);
+        const box = visible(element);
         if (box) {
+          other = end(box, element.closest(".board-column"));
           element.setAttribute(RELATED_ATTRIBUTE, "");
           marked.current.push(element);
         }
@@ -118,26 +143,28 @@ export function useBoardDependencies(
           ].find((lane) => lane.dataset.status === status),
           toggle = strip?.querySelector(".column-toggle"),
           count = strip?.querySelector(".board-column-count");
-        if (toggle && count) {
+        if (strip && toggle && count) {
           const { left, right } = boxOf(toggle),
             { top, bottom } = boxOf(count);
-          box = intersectBoxes({ left, right, top, bottom }, viewport);
+          const box = intersectBoxes({ left, right, top, bottom }, viewport);
+          if (box) other = end(box, strip);
         }
       }
-      if (!box) continue;
+      if (!other) continue;
       next.push({
         key: before ? `${id}>${active}` : `${active}>${id}`,
         d: before
-          ? connectorPath(local(box), local(from))
-          : connectorPath(local(from), local(box)),
+          ? connectorPath(other, from, frameBox, false)
+          : connectorPath(from, other, frameBox, true),
       });
     }
     commit(next);
   }, [active, board, frame]);
 
-  // Every board render (refresh, folding, more cards) re-measures; a no-op
-  // while nothing is hovered or focused.
-  useLayoutEffect(draw);
+  // A new hover target or new card data re-measures; a no-op while nothing
+  // is hovered or focused.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: cards only trigger a redraw; draw reads the latest list.
+  useLayoutEffect(draw, [draw, cards]);
 
   useEffect(() => {
     const root = board.current;
@@ -168,7 +195,8 @@ export function useBoardDependencies(
     };
   }, [board]);
 
-  // Follow the board's sideways scroll, every lane's own scroll and resizes.
+  // Follow the board's sideways scroll, every lane's own scroll, resizes and
+  // the board's own re-renders (folding, more cards, refresh).
   useEffect(() => {
     const root = board.current;
     if (!active || !root) return;
@@ -186,9 +214,15 @@ export function useBoardDependencies(
         ? undefined
         : new ResizeObserver(schedule);
     resize?.observe(root);
+    const mutation =
+      typeof MutationObserver === "undefined"
+        ? undefined
+        : new MutationObserver(schedule);
+    mutation?.observe(root, { childList: true, subtree: true });
     return () => {
       root.removeEventListener("scroll", schedule, { capture: true });
       resize?.disconnect();
+      mutation?.disconnect();
       cancelAnimationFrame(frameId);
     };
   }, [active, board, draw]);

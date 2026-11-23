@@ -9,7 +9,11 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { CardListItem, CardStatus, DependencyCard } from "../api.js";
-import { connectorPath, LINE_ARROW } from "../board-dependency-lines.js";
+import {
+  connectorPath,
+  LINE_ARROW,
+  type LineEnd,
+} from "../board-dependency-lines.js";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
 import { card } from "../testing/fixtures.js";
 import { Board, type BoardLanes } from "./Board.js";
@@ -31,6 +35,15 @@ let lane: Rect;
 const BOARD: Rect = { left: 0, top: 0, right: 1400, bottom: 900 };
 const STRIP: Rect = { left: 1300, top: 0, right: 1340, bottom: 900 };
 const COUNT: Rect = { left: 1316, top: 40, right: 1324, bottom: 60 };
+/** Lane columns: 334px wide (4px padding round 326px cards), 16px gaps. */
+const COLUMNS: Record<string, Rect> = {
+  todo: { left: -4, top: 0, right: 330, bottom: 900 },
+  in_progress: { left: 346, top: 0, right: 680, bottom: 900 },
+  review: { left: 696, top: 0, right: 1030, bottom: 900 },
+  done: { left: 1292, top: 0, right: 1348, bottom: 900 },
+};
+/** Board top 0: the band above the lane headings is centred at 4.5. */
+const FRAME = { band: 4.5, viewport: BOARD };
 
 beforeEach(() => {
   lane = { left: 0, top: 40, right: 1400, bottom: 900 };
@@ -46,13 +59,15 @@ beforeEach(() => {
       const element = this as HTMLElement;
       const box = element.dataset.cardId
         ? rects[element.dataset.cardId]
-        : element.classList.contains("board-lane-cards")
-          ? lane
-          : element.classList.contains("column-toggle")
-            ? STRIP
-            : element.classList.contains("board-column-count")
-              ? COUNT
-              : BOARD;
+        : element.classList.contains("board-column")
+          ? (COLUMNS[element.dataset.status ?? ""] ?? BOARD)
+          : element.classList.contains("board-lane-cards")
+            ? lane
+            : element.classList.contains("column-toggle")
+              ? STRIP
+              : element.classList.contains("board-column-count")
+                ? COUNT
+                : BOARD;
       const { left, top, right, bottom } = box ?? {
         left: 0,
         top: 0,
@@ -147,6 +162,39 @@ const edges = (container: HTMLElement) =>
   [...container.querySelectorAll("[data-edge]")].map((e) =>
     e.getAttribute("data-edge"),
   );
+const endOf = (id: string, status: string): LineEnd => {
+  const { left, right } = COLUMNS[status] as Rect;
+  return { box: rects[id] as Rect, column: { left, right } };
+};
+/** Every point of the path's polyline (corner controls included). */
+const points = (d: string) =>
+  [...d.matchAll(/(-?[\d.]+) (-?[\d.]+)/g)].map(
+    ([, x, y]) => [Number(x), Number(y)] as const,
+  );
+/** Cards a path's visible run would cross, other than its own two ends. */
+function crossed(d: string, ends: readonly string[]) {
+  const hit = new Set<string>();
+  const p = points(d);
+  for (let i = 1; i < p.length; i++) {
+    const [ax, ay] = p[i - 1] as readonly [number, number],
+      [bx, by] = p[i] as readonly [number, number];
+    const steps = Math.ceil(Math.hypot(bx - ax, by - ay));
+    for (let t = 0; t <= steps; t++) {
+      const x = ax + ((bx - ax) * t) / (steps || 1),
+        y = ay + ((by - ay) * t) / (steps || 1);
+      for (const [id, r] of Object.entries(rects))
+        if (
+          !ends.includes(id) &&
+          x > r.left + 0.5 &&
+          x < r.right - 0.5 &&
+          y > r.top + 0.5 &&
+          y < r.bottom - 0.5
+        )
+          hit.add(id);
+    }
+  }
+  return [...hit];
+}
 const related = (board: HTMLElement) =>
   [...board.querySelectorAll("[data-dependency-related]")].map(
     (e) => (e as HTMLElement).dataset.cardId,
@@ -171,23 +219,51 @@ test("hovering a card draws lines to visible prerequisites and dependents, leavi
     "C-2>C-5",
   ]);
   expect(related(board).sort()).toEqual(["C-1", "C-3", "C-5"]);
-  // The board paints over the lines: they sit before it in the frame.
+  // Rendered before the board in its frame (the cards paint above).
   expect(lines?.nextElementSibling).toBe(board);
   const d = (key: string) =>
-    container.querySelector(`[data-edge="${key}"]`)?.getAttribute("d");
+    container.querySelector(`[data-edge="${key}"]`)?.getAttribute("d") ?? "";
+  // Into the hovered card: a step in the gap between the neighbouring lanes.
   expect(d("C-1>C-2")).toBe(
-    connectorPath(rects["C-1"] as Rect, rects["C-2"] as Rect),
+    connectorPath(
+      endOf("C-1", "todo"),
+      endOf("C-2", "in_progress"),
+      FRAME,
+      false,
+    ),
   );
+  expect(d("C-1>C-2")).toMatch(/^M326 150L/);
+  expect(d("C-1>C-2")).toMatch(new RegExp(`L${350 - LINE_ARROW} 150$`));
+  // To the folded lane: round through the band, into the strip by its count.
   expect(d("C-2>C-6")).toBe(
-    connectorPath(rects["C-2"] as Rect, {
-      left: STRIP.left,
-      right: STRIP.right,
-      top: COUNT.top,
-      bottom: COUNT.bottom,
-    }),
+    connectorPath(
+      endOf("C-2", "in_progress"),
+      {
+        box: {
+          left: STRIP.left,
+          right: STRIP.right,
+          top: COUNT.top,
+          bottom: COUNT.bottom,
+        },
+        column: {
+          left: COLUMNS.done?.left ?? 0,
+          right: COLUMNS.done?.right ?? 0,
+        },
+      },
+      FRAME,
+      true,
+    ),
   );
-  // Same lane: bows out past the right edges and arrows into C-5's right edge.
-  expect(d("C-2>C-5")).toMatch(new RegExp(`${676 + LINE_ARROW} 550$`));
+  expect(d("C-2>C-6")).toMatch(new RegExp(`L${STRIP.left - LINE_ARROW} 50$`));
+  // Same lane: out of C-2's right edge, over the top, into C-5's left edge.
+  expect(d("C-2>C-5")).toMatch(/^M676 150L/);
+  expect(d("C-2>C-5")).toMatch(new RegExp(`L${350 - LINE_ARROW} 550$`));
+  // No visible run passes over a card other than its own two ends: C-4 sits
+  // between C-2 and C-5, C-3 between C-2 and the folded lane.
+  // (The check itself: a straight run across the lanes would hit C-4.)
+  expect(crossed("M0 250L1400 250", [])).toEqual(["C-4"]);
+  for (const key of edges(container) as string[])
+    expect([key, crossed(d(key), key.split(">"))]).toEqual([key, []]);
   // Moving to the gap or off the board removes every line and highlight.
   hover(board);
   expect(svg(container)).toBeNull();
@@ -245,16 +321,18 @@ test("lines follow scrolling and leave nothing behind when the lane folds", asyn
   );
   // Folding the hovered card's lane removes it: no stale lines remain.
   rerender({ done: true, in_progress: true });
-  expect(svg(container)).toBeNull();
+  await waitFor(() => expect(svg(container)).toBeNull());
   expect(related(board)).toEqual([]);
 });
 
-test("unrelated lanes folding while hovering redraws to the strip", () => {
+test("unrelated lanes folding while hovering redraws to the strip", async () => {
   const { container, linkOf, rerender } = setup(CARDS, {});
   hover(linkOf("C-2"));
   expect(edges(container)).toContain("C-2>C-3");
   rerender({ review: true });
-  expect(
-    container.querySelector('[data-edge="C-2>C-3"]')?.getAttribute("d"),
-  ).toMatch(new RegExp(`${STRIP.left - LINE_ARROW} 50$`));
+  await waitFor(() =>
+    expect(
+      container.querySelector('[data-edge="C-2>C-3"]')?.getAttribute("d"),
+    ).toMatch(new RegExp(`${STRIP.left - LINE_ARROW} 50$`)),
+  );
 });
