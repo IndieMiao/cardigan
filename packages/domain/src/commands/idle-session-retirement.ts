@@ -22,7 +22,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
-import { stoppedByHuman } from "./stop.js";
+import { humanStopRecorded } from "./stop.js";
 
 export function beginIdleSessionRetirement(
   state: CommandState,
@@ -315,7 +315,7 @@ export function settleIdleSessionRetirement(
     if (pending?.phase !== "stopping" || pending.handoff) return a;
     ensure(
       retirementOwnsSession(a) ||
-        (a.runtime_ref === null && stoppedByHuman(state.events, a.id)),
+        (a.runtime_ref === null && humanStopRecorded(state.events, a.id)),
       "illegal_transition",
       "Retiring session changed",
     );

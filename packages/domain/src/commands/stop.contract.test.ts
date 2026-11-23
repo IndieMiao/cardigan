@@ -10,7 +10,12 @@ import { occupiedRunSlots } from "../run-capacity.js";
 import type { CommandState } from "./core.js";
 import { beginHostOpsAction } from "./host-ops-actions.js";
 import { dispatchRun } from "./launch.js";
-import { stoppedByHuman, stopWorkItemAssignment } from "./stop.js";
+import {
+  humanStopRecorded,
+  pausedByHuman,
+  stoppedByHuman,
+  stopWorkItemAssignment,
+} from "./stop.js";
 import {
   actor,
   apply,
@@ -48,7 +53,7 @@ function base(): CommandState {
 }
 const stop = (
   s: CommandState,
-  extra: { released_runtime_ref?: RuntimeRef } = {},
+  extra: { released_runtime_ref?: RuntimeRef; hold?: boolean } = {},
 ) =>
   stopWorkItemAssignment(
     s,
@@ -342,4 +347,157 @@ test("C-235 a wake dispatched before the stop is cancelled and its terminal rele
   // The cancelled Run cannot be dispatched again by a late wake either.
   expect(dispatch(next).ok).toBe(false);
   expect(dispatch(next, freshRef).ok).toBe(false);
+});
+
+/**
+ * C-620: a managed stop (`hold: false`, the CLI default) fences dispatch only
+ * until its terminal release is confirmed; an explicit pause (`hold`, and
+ * every legacy stop) keeps holding until the human starts it again.
+ */
+test("C-620 a managed stop keeps unstarted queued work and stops fencing once its release is confirmed", () => {
+  const A1 = id("assignment", 1);
+  const s = base();
+  const first = stop(s, { hold: false });
+  expect(first.ok && first.value.data.cancelled).toBe(0);
+  const stopping = apply(s, (first as { ok: true; value: never }).value);
+  expect(stopping.events.at(-1)).toMatchObject({
+    type: "assignment_stopped",
+    payload: { assignment_id: A1, hold: false, cancelled_run_ids: [] },
+  });
+  // Release not yet confirmed: still fenced, exactly like a pause.
+  expect(stoppedByHuman(stopping.events, A1)).toBe(true);
+  expect(pausedByHuman(stopping.events, A1)).toBe(false);
+  expect(stopping.runs.find((r) => r.id === id("run", 9))?.status).toBe(
+    "queued",
+  );
+  // A release of another terminal settles nothing and keeps the fence.
+  const wrong = stop(stopping, {
+    released_runtime_ref: { ...ref, terminal_ref: "t2" },
+  });
+  expect(wrong.ok && wrong.value.changes).toEqual([]);
+  const settled = stop(stopping, { released_runtime_ref: ref });
+  expect(settled.ok && settled.value.data.cancelled).toBe(1);
+  const next = apply(stopping, (settled as { ok: true; value: never }).value);
+  const status = (n: number) =>
+    next.runs.find((r) => r.id === id("run", n))?.status;
+  expect(status(1)).toBe("cancelled");
+  expect(status(9)).toBe("queued");
+  expect(next.assignments.find((a) => a.id === A1)).toMatchObject({
+    runtime_ref: null,
+  });
+  // Released: no longer stopped, so new work starts a fresh session.
+  expect(stoppedByHuman(next.events, A1)).toBe(false);
+  expect(pausedByHuman(next.events, A1)).toBe(false);
+  // The stop itself is still on record until the next dispatch.
+  expect(humanStopRecorded(next.events, A1)).toBe(true);
+  // The queued work dispatches onto a fresh terminal.
+  expect(dispatch(next, freshRef).ok).toBe(true);
+});
+
+test("C-620 a pause and every legacy stop keep holding after release; a managed stop never downgrades a pause", () => {
+  const A1 = id("assignment", 1);
+  for (const hold of [true, undefined]) {
+    const s = base();
+    const paused = apply(
+      s,
+      (
+        stop(s, hold === undefined ? {} : { hold }) as {
+          ok: true;
+          value: never;
+        }
+      ).value,
+    );
+    expect(paused.events.at(-1)).toMatchObject({
+      payload: { hold: true, cancelled_run_ids: [id("run", 9)] },
+    });
+    // Retrying a stop without --hold keeps the pause.
+    const retried = apply(
+      paused,
+      (stop(paused, { hold: false }) as { ok: true; value: never }).value,
+    );
+    expect(retried.events.at(-1)).toMatchObject({ payload: { hold: true } });
+    const next = apply(
+      retried,
+      (
+        stop(retried, { released_runtime_ref: ref }) as {
+          ok: true;
+          value: never;
+        }
+      ).value,
+    );
+    expect(stoppedByHuman(next.events, A1)).toBe(true);
+    expect(pausedByHuman(next.events, A1)).toBe(true);
+  }
+  // A legacy event without `hold` is a pause.
+  const legacy = (type: string, seq: number, payload = {}): Event => ({
+    id: String(seq).padStart(26, "0") as never,
+    seq,
+    type,
+    actor: human,
+    payload: { assignment_id: A1, ...payload },
+    created_at: "2026-01-01T00:00:00.000Z",
+  });
+  const events = [
+    legacy("assignment_stopped", 1),
+    legacy("assignment_stop_released", 2),
+  ];
+  expect(stoppedByHuman(events, A1)).toBe(true);
+  expect(pausedByHuman(events, A1)).toBe(true);
+  // A managed stop released, then a new dispatch, then a pause: paused again.
+  const replay = [
+    legacy("assignment_stopped", 1, { hold: false }),
+    legacy("assignment_stop_released", 2),
+    legacy("run_dispatched", 3),
+    legacy("assignment_stopped", 4, { hold: true }),
+    legacy("assignment_stop_released", 5),
+  ];
+  expect(stoppedByHuman(replay.slice(0, 2), A1)).toBe(false);
+  expect(humanStopRecorded(replay.slice(0, 3), A1)).toBe(false);
+  expect(stoppedByHuman(replay, A1)).toBe(true);
+  // A duplicated release event cannot lift a later pause.
+  expect(
+    stoppedByHuman([...replay, legacy("assignment_stop_released", 6)], A1),
+  ).toBe(true);
+});
+
+test("C-620 host_ops can restart a released managed stop, but not one whose release is pending", () => {
+  const { work_item_id: _w, ...opsFields } = assignment(10, "host_ops");
+  const s0 = { ...base(), runs: fixture().runs };
+  const s = {
+    ...s0,
+    roles: [
+      ...s0.roles,
+      { ...role("host_ops"), allowed_tools: HOST_OPS_ROLE_TOOLS },
+    ],
+    assignments: [
+      ...s0.assignments,
+      { ...opsFields, scope: "standing" } as Assignment,
+    ],
+  };
+  const caller = {
+    ...actor(10, "host_ops"),
+    allowed_tools: HOST_OPS_ROLE_TOOLS,
+  } as never;
+  const restart = {
+    tool: "host_ops_restart_assignment" as const,
+    target_id: id("assignment", 1),
+    reason: "Recover",
+    snapshot: { model: "test", agent_cli_version: "test" },
+  };
+  const stopping = apply(
+    s,
+    (stop(s, { hold: false }) as { ok: true; value: never }).value,
+  );
+  expect(beginHostOpsAction(stopping, caller, restart, ports()).ok).toBe(false);
+  const released = apply(
+    stopping,
+    (
+      stop(stopping, { released_runtime_ref: ref }) as {
+        ok: true;
+        value: never;
+      }
+    ).value,
+  );
+  const allowed = beginHostOpsAction(released, caller, restart, ports());
+  expect(allowed.ok ? "ok" : allowed.error.message).toBe("ok");
 });

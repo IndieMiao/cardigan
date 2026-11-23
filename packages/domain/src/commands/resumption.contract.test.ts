@@ -333,6 +333,87 @@ test("a stopped upgraded owner retains a fresh-role notice AND one PM stop reaso
   ).toMatchObject([{ work_item_id: producer, reason: "指派已被人工停止" }]);
 });
 
+test.each([false, true])(
+  "C-620 a work item status change after a released managed stop queues new work; a pause (hold=%s) defers it",
+  (hold) => {
+    const owner = id("assignment", 1);
+    const ref = {
+      machine_id: "local" as never,
+      runtime_machine: "local",
+      terminal_ref: "t1",
+      agent_name: "a1",
+    };
+    let state = fixture();
+    state = apply(
+      state,
+      value(
+        reportBlocker(
+          state,
+          actor(),
+          { work_item_id: producer, reason: "Wait", needs: "role" },
+          io,
+        ),
+      ),
+    );
+    state = apply(
+      state,
+      value(
+        finishRun(
+          state,
+          actor(),
+          { run_id: id("run", 1), outcome: "blocked", summary: "Waiting" },
+          io,
+        ),
+      ),
+    );
+    state = {
+      ...state,
+      assignments: state.assignments.map((a) =>
+        a.id === owner ? { ...a, runtime_ref: ref } : a,
+      ),
+    };
+    for (const extra of [{ hold }, { released_runtime_ref: ref }])
+      state = apply(
+        state,
+        value(
+          stopWorkItemAssignment(
+            state,
+            human,
+            { assignment_id: owner, reason: "stopped by host", ...extra },
+            io,
+          ),
+        ),
+      );
+    const before = state.runs.length;
+    state = apply(
+      state,
+      value(
+        updateWorkItem(
+          state,
+          office,
+          { work_item_id: producer, status: "in_progress" },
+          io,
+        ),
+      ),
+    );
+    const queued = state.runs
+      .slice(before)
+      .filter((r) => r.assignment_id === owner && r.status === "queued");
+    const deferred = state.events.filter(
+      (e) => e.type === "work_item_resume_deferred",
+    );
+    if (hold) {
+      expect(queued).toEqual([]);
+      expect(deferred).toMatchObject([
+        { payload: { reason: "指派已被人工停止" } },
+      ]);
+    } else {
+      expect(queued).toHaveLength(1);
+      expect(deferred).toEqual([]);
+    }
+  },
+);
+
 test.each(["triage", "legacy"] as const)(
   "an upgraded human action resumed by %s persists a fresh-session request",
   (entry) => {

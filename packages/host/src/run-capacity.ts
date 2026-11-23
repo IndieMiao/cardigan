@@ -9,15 +9,13 @@ import {
   type DispatchOrder,
   dispatchTier,
   type Event,
-  type HostOpsExecution,
   isRunCapacityExempt,
   type MachineResources,
   type MachineRunCapacity,
-  pendingHostOpsActions,
   type QueuedRun,
   type Run,
   remainingResourceRatio,
-  runOccupiesSlot,
+  runHoldsCapacity,
   runQueuePositions,
 } from "@cardigan/domain";
 import {
@@ -29,11 +27,7 @@ import {
 import { runningMergeChecks } from "./merge-check-capacity.js";
 import { LOCAL_EXECUTOR } from "./merge-gate-executors.js";
 import type { ReadProjectQuota } from "./project-quotas.js";
-import {
-  assignmentResourceKeys,
-  legacyResourceKeys,
-  wasDispatched,
-} from "./run-resources.js";
+import { assignmentResourceKeys, legacyResourceKeys } from "./run-resources.js";
 
 // P2a-9 / phase-2 §2.1: merge checks build and test the entire repository.
 // Reserve the suggested two slots while actually running; tune after measurement.
@@ -210,11 +204,6 @@ function queueSnapshot(
   );
 }
 
-const pendingActions = new WeakMap<
-  ReadonlyMap<string, readonly Event[]>,
-  WeakMap<readonly object[], readonly HostOpsExecution[]>
->();
-
 /** Keep the existing order among runnable waiters, without blocking other resources. */
 export function hasEarlierCapacityWait(
   tx: ReadRepositories,
@@ -289,28 +278,7 @@ export function runCapacitySnapshot(
     const runs = tx.runs.list(project.id);
     // C-216: reuse the Store's cached per-stream history when the transaction
     // offers it; otherwise re-read each stream. Same streams, same order.
-    // C-230: with the cache, also reuse the result while the stream map and
-    // card list are the same immutable snapshots (see `queueCache`).
     const streams = tx.events.listStreams?.(project.id);
-    const cards = tx.cards.list(project.id);
-    const collect = () =>
-      pendingHostOpsActions(
-        [undefined, ...cards.map((card) => card.id)].flatMap((card) =>
-          streams
-            ? (streams.get(card ?? "") ?? [])
-            : tx.events.listAfter(project.id, card, 0),
-        ),
-      );
-    let actions: readonly HostOpsExecution[];
-    if (streams) {
-      let byCards = pendingActions.get(streams);
-      if (!byCards) {
-        byCards = new WeakMap();
-        pendingActions.set(streams, byCards);
-      }
-      actions = byCards.get(cards) ?? collect();
-      byCards.set(cards, actions);
-    } else actions = collect();
     const reserved = new Set(
       unfinishedBellAttempts(store.database, project.id).map((a) => a.run_id),
     );
@@ -333,7 +301,7 @@ export function runCapacitySnapshot(
     };
     const usageByMachine = new Map<string, Usage>();
     projectUsage.set(project.id, usageByMachine);
-    const count = (assignmentId: AssignmentId, run?: Run, stopOnly = false) => {
+    const count = (assignmentId: AssignmentId, run: Run) => {
       const owner = owners.get(assignmentId);
       if (!owner) return;
       const machine = owner.machine_id;
@@ -347,15 +315,7 @@ export function runCapacitySnapshot(
       }
       if (usage && !isRunCapacityExempt(owner)) usage.occupied++;
       const slots = resourceSlots(machine);
-      // Stop intents keep their existing machine slot. An idle terminal is not
-      // proof that its queued follow-up acquired any resources. Active Runs and
-      // in-flight startup reservations have already been counted in the Run loop.
-      if (
-        slots.size &&
-        owner.work_item_id &&
-        run &&
-        (!stopOnly || wasDispatched(historyFor(owner), run))
-      ) {
+      if (slots.size && owner.work_item_id) {
         for (const key of run.resource_keys ??
           legacyResourceKeys(
             tx,
@@ -374,22 +334,16 @@ export function runCapacitySnapshot(
       }
       countedOwners.add(owner.id);
     };
+    // C-620: only unfinished Runs and in-flight startups hold machine and
+    // resource slots. An idle session, including one whose stop or recycle is
+    // still unconfirmed (a pending host operation), holds none; its successor
+    // is admitted through this same count, so normal dispatch keeps the limit.
     for (const run of runs)
       if (
-        runOccupiesSlot(run) ||
+        runHoldsCapacity(run) ||
         (run.status === "queued" && reserved.has(run.id))
       )
         count(run.assignment_id, run);
-    for (const action of actions)
-      if (
-        action.runtime_ref !== null &&
-        !countedOwners.has(action.assignment_id)
-      )
-        count(
-          action.assignment_id,
-          action.run_id ? tx.runs.get(project.id, action.run_id) : undefined,
-          true,
-        );
   }
   // Runtime occupancy is independent of whether a card still accepts a merge
   // result. Dead process incarnations (including PID reuse) release on restart.

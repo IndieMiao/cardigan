@@ -92,7 +92,7 @@ test("C-296 absolute and limited occupancy share physical machine buckets across
 });
 
 test.each(["coder", "pm", "host_ops"])(
-  "C-296 %s startup and stop reservations count once, with the same exemption as live Runs",
+  "C-296 %s startup and stop reservations of unfinished Runs count once, with the same exemption as live Runs; C-620 an ended turn's idle session counts none",
   (role) => {
     const owner = role === "coder" ? assignment(1) : standing(1, role);
     const limited = role === "coder" ? 1 : 0;
@@ -154,7 +154,6 @@ test.each(["coder", "pm", "host_ops"])(
       { ...execution, status: "queued" },
       {
         ...execution,
-        status: "completed",
         inactivity_stop: {
           attempt_id: "stop",
           runtime_ref: ref,
@@ -188,6 +187,43 @@ test.each(["coder", "pm", "host_ops"])(
         expect(fallback.agentOccupied).toEqual(cached.agentOccupied);
       });
     }
+    // C-620: the turn ended. Its session may still be stopping or awaiting
+    // recycle, but it holds no admission or resource slot.
+    for (const variant of [
+      {
+        ...execution,
+        status: "completed",
+        inactivity_stop: {
+          attempt_id: "stop",
+          runtime_ref: ref,
+          stopping: true,
+          lease_until: now,
+        },
+      },
+      {
+        ...execution,
+        status: "cancelled",
+        dispatch_stop: {
+          attempt_id: execution.trigger_event_id,
+          runtime_ref: ref,
+          stopping: true,
+          lease_until: now,
+          reason: "dispatch_timeout",
+        },
+      },
+      {
+        ...execution,
+        status: "failed",
+        launch_publication: {
+          generation: "g",
+          phase: "stopping",
+        } as unknown as Run["launch_publication"],
+      },
+    ] as Run[]) {
+      store.uow.run((tx) => tx.runs.put("first", variant));
+      expect(counts()).toEqual([0, 0, 0]);
+      expect(slots()).toEqual([0, 0, 0]);
+    }
     store.uow.run((tx) =>
       tx.runs.put("first", { ...execution, status: "completed" }),
     );
@@ -212,7 +248,8 @@ test.each(["coder", "pm", "host_ops"])(
     });
     expect(counts()).toEqual([1, limited, limited]); // intent and Run overlap
     expect(slots()).toEqual([limited, limited, 0]);
-    // Reporting completion does not confirm exit for the pending stop.
+    // C-620: once the turn ends, the pending stop (unconfirmed exit, e.g. a
+    // recycle that cannot be proven on a remote worker) holds no slot.
     store.uow.run((tx) =>
       tx.runs.put("first", {
         ...execution,
@@ -220,8 +257,8 @@ test.each(["coder", "pm", "host_ops"])(
         status: "completed",
       }),
     );
-    expect(counts()).toEqual([1, limited, limited]);
-    expect(slots()).toEqual([limited, limited, 0]);
+    expect(counts()).toEqual([0, 0, 0]);
+    expect(slots()).toEqual([0, 0, 0]);
     store.uow.run((tx) =>
       tx.events.append("first", {
         id: tx.ids.nextEventId(),

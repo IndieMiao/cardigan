@@ -170,6 +170,8 @@ export { pauseStandingAssignment } from "./commands/standing.js";
 export { rotateStandingAfterDeployment } from "./commands/standing-deployment.js";
 export * from "./commands/standing-pm-stall.js";
 export {
+  humanStopRecorded,
+  pausedByHuman,
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./commands/stop.js";

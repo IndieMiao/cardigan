@@ -708,7 +708,7 @@ describe("stopAssignment and attachAssignment", () => {
       }
     },
   );
-  test("stop releases the terminal, cancels the Run and keeps the directory", async () => {
+  test("stop --hold releases the terminal, cancels the Run and keeps the directory", async () => {
     const assignment = assignWorkItem("none");
     const runtime = new FakeRuntime();
     const started = await startAssignment({
@@ -755,10 +755,12 @@ describe("stopAssignment and attachAssignment", () => {
       project_id,
       assignment_id: assignment.id,
       runtime,
+      hold: true,
     });
     expect(stopped.released).toBe(true);
     expect(stopped.aborted).toBe(true);
     expect(stopped.paused).toBeUndefined();
+    expect(stopped.held).toBe(true);
     expect(runtime.released[0]?.terminal_ref).toBe(
       started.runtime_ref.terminal_ref,
     );
@@ -811,6 +813,70 @@ describe("stopAssignment and attachAssignment", () => {
     ).toHaveLength(1);
     expect(stoppedByHuman(resumed.events, assignment.id)).toBe(false);
     expect(runtime.provisions).toHaveLength(2);
+  });
+
+  test("C-620 a managed stop keeps the worktree and unstarted queued work, and no longer fences dispatch once released", async () => {
+    const assignment = assignWorkItem("none");
+    const runtime = new FakeRuntime();
+    const started = await startAssignment({
+      store,
+      io,
+      project_id,
+      assignment_id: assignment.id,
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
+      mcpUrl: "http://127.0.0.1:3004/mcp",
+      runtime,
+      dataDir,
+    });
+    const live = store.uow.read((tx) =>
+      tx.runs.get(project_id, started.run_id as never),
+    );
+    if (!live) throw new Error("Missing started Run");
+    const other = store.uow
+      .read((tx) => loadCommandState(tx, project_id))
+      .events.find((e) => e.id !== live.trigger_event_id)?.id;
+    if (!other) throw new Error("Missing another event");
+    store.uow.run((tx) =>
+      tx.runs.put(project_id, {
+        ...live,
+        id: "R-99" as never,
+        trigger_event_id: other,
+        status: "queued",
+        kind: "followup",
+      }),
+    );
+    const stopped = await stopAssignment({
+      store,
+      project_id,
+      assignment_id: assignment.id,
+      runtime,
+    });
+    expect(stopped).toMatchObject({
+      released: true,
+      aborted: true,
+      held: false,
+    });
+    const run = (id: string) =>
+      store.uow.read((tx) => tx.runs.get(project_id, id as never))?.status;
+    expect(run(started.run_id)).toBe("cancelled");
+    // Pending work survives for the next session; the stop is settled.
+    expect(run("R-99")).toBe("queued");
+    const state = store.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(
+      state.assignments.find((a) => a.id === assignment.id)?.runtime_ref,
+    ).toBeNull();
+    expect(stoppedByHuman(state.events, assignment.id)).toBe(false);
+    expect(
+      statSync(join(dataDir, "runs", "p-one", assignment.id)).isDirectory(),
+    ).toBe(true);
+    expect(
+      store.uow
+        .run((tx) => tx.tokensForAssignment(project_id, assignment.id))
+        .every((candidate) => candidate.revoked_at !== null),
+    ).toBe(true);
   });
 
   test("C-211 a failed release keeps the running Run's slot and the ref, and the stop can be retried", async () => {

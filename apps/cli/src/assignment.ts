@@ -9,6 +9,7 @@ import type {
 import {
   abortDispatch,
   EXTERNAL_ASSIGNMENT_START_ERROR,
+  pausedByHuman,
   pauseStandingAssignment,
   queueRun,
   releaseAssignment,
@@ -587,7 +588,14 @@ export async function stopAssignment(input: {
   readonly runtime: Runtime;
   readonly execution?: ExecutionConfig;
   readonly actor?: Actor;
-}): Promise<{ released: boolean; aborted: boolean; paused?: boolean }> {
+  /** C-620: explicit pause; without it new work wakes a fresh session after release. */
+  readonly hold?: boolean;
+}): Promise<{
+  released: boolean;
+  aborted: boolean;
+  paused?: boolean;
+  held?: boolean;
+}> {
   const actor = input.actor ?? {
     kind: "human" as const,
     project_id: input.project_id,
@@ -628,6 +636,22 @@ export async function stopAssignment(input: {
       EXIT.usage,
     );
   }
+  // C-620: a managed stop never downgrades an existing pause (domain rule).
+  const held =
+    input.hold === true ||
+    input.store.uow.read((tx) =>
+      pausedByHuman(
+        // Stop events are recorded on the work item's card stream.
+        tx.events.listAfter(
+          input.project_id,
+          assignment.work_item_id &&
+            tx.work_items.get(input.project_id, assignment.work_item_id)
+              ?.card_id,
+          0,
+        ),
+        assignment.id,
+      ),
+    );
   // C-211: persist the stop before touching the terminal: from here on the
   // Dispatcher starts no session for this Assignment until the human runs
   // `cardigan assignment start` again, and its queued Runs are cancelled.
@@ -642,7 +666,11 @@ export async function stopAssignment(input: {
       stopWorkItemAssignment(
         s,
         a,
-        { assignment_id: assignment.id, reason: "stopped by host" },
+        {
+          assignment_id: assignment.id,
+          reason: "stopped by host",
+          hold: input.hold === true,
+        },
         p,
       ),
   });
@@ -691,6 +719,7 @@ export async function stopAssignment(input: {
   return {
     released: true,
     aborted: stopped.cancelled + settled.cancelled > 0,
+    held,
   };
 }
 
@@ -826,10 +855,12 @@ export { writeRole };
 const USAGE = [
   "用法：",
   "  cardigan assignment start <A-n> [--project <p>] [--mcp-url <url>] [--hc-session <s>] [--data-dir <目录>]",
-  "  cardigan assignment stop <A-n> [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
+  "  cardigan assignment stop <A-n> [--hold] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment release <A-n> [--cancel-queued-run <R-n>] [--project <p>] [--data-dir <目录>]",
   "  cardigan assignment attach <A-n> [--print] [--interactive] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
-  "  stop：释放终端并取消未结束和排队的 Run；之后不会自动起新会话，门铃排队，用 assignment start 恢复。主机运维操作待处理时拒绝 stop；终端释放失败可直接重试。",
+  "  stop：释放终端并结束正在进行的 Run（worktree 和未开始的排队 Run 保留）；确认释放后，有新通知、新指派或工作项状态变化时自动起新会话。",
+  "  stop --hold：人工暂停，同时取消排队的 Run；之后不会自动起新会话，门铃排队，用 assignment start 恢复。已暂停的指派再执行 stop 仍保持暂停。",
+  "  主机运维操作待处理时拒绝 stop；终端释放失败可直接重试，释放确认前不会另起会话。",
   "  attach：输入和输出均为终端（TTY）时直接只读观察；--interactive 允许输入，--print 或非 TTY 只打印命令（默认带 --observe）。",
   "  按 Ctrl+\\ 分离退出；--interactive 下你的输入会直接发给正在工作的 Agent。",
 ].join("\n");
@@ -852,7 +883,10 @@ function parseArgs(args: readonly string[]) {
   const positionals: string[] = [];
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] as string;
-    if (sub === "attach" && ["--print", "--interactive"].includes(token)) {
+    if (
+      (sub === "attach" && ["--print", "--interactive"].includes(token)) ||
+      (sub === "stop" && token === "--hold")
+    ) {
       flags[token.slice(2)] = "true";
       continue;
     }
@@ -991,11 +1025,14 @@ export async function runAssignmentCommand(
         assignment_id: assignmentId,
         runtime,
         execution,
+        hold: flags.hold === "true",
       });
       io.stdout(
         result.paused
           ? `已暂停常驻 PM ${assignmentId}，门铃将排队；用 cardigan pm start 或 assignment start 恢复。`
-          : `已停止 ${assignmentId}：终端已释放${result.aborted ? "，未结束和排队的 Run 已取消" : ""}（worktree 保留）。之后的门铃会排队，不会自动起新会话；用 cardigan assignment start ${assignmentId} 恢复。`,
+          : result.held
+            ? `已暂停 ${assignmentId}：终端已释放${result.aborted ? "，未结束和排队的 Run 已取消" : ""}（worktree 保留）。之后的门铃会排队，不会自动起新会话；用 cardigan assignment start ${assignmentId} 恢复。`
+            : `已停止 ${assignmentId}：终端已释放${result.aborted ? "，正在进行的 Run 已结束" : ""}（worktree 和待办保留）。有新工作时会自动起新会话；如需人工暂停，用 cardigan assignment stop ${assignmentId} --hold。`,
       );
       return EXIT.ok;
     }
