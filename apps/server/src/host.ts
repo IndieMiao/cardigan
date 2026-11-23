@@ -206,6 +206,8 @@ export async function createHostWiring(options: {
       (await live.refresh()).config.browser?.browsers_path,
     execution,
     session: env.CARDIGAN_HC_SESSION ?? "cardigan",
+    // C-608: an MCP timeout at launch refreshes the readiness patrol now.
+    refreshAfterLaunchFailure: true,
     ...(options.client === undefined ? {} : { client: options.client }),
   });
   if (!created.ok)

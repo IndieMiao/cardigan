@@ -58,6 +58,30 @@ export interface MachineHealth {
     /** Fixed controller text for a failed built-in check; never command output. */
     readonly reason?: string;
   }[];
+  /** Non-blocking problems: the machine stays available for dispatch. */
+  readonly warnings?: readonly string[];
+  readonly readiness?: MachineReadiness;
+}
+export type MachineReadinessStatus =
+  | "ok"
+  | "warning"
+  | "repaired"
+  | "failed"
+  | "unknown";
+/** Only fixed controller text and numbers; never worker command output. */
+export interface MachineReadinessItem {
+  readonly key: string;
+  readonly status: MachineReadinessStatus;
+  readonly detail: string;
+}
+export interface MachineReadiness {
+  readonly checked_at: string;
+  readonly items: readonly MachineReadinessItem[];
+  readonly metrics?: {
+    readonly disk_free_bytes?: number;
+    readonly rtt_ms?: number;
+    readonly throughput_bytes_per_s?: number;
+  };
 }
 function systemOnly(actor: Actor, project: string): void {
   if (actor.kind !== "system" || actor.project_id !== project)

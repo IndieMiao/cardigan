@@ -59,6 +59,9 @@ import {
   latestMachineCheck,
   type MachineCheckRow,
   machineActiveRuns,
+  readinessKeyLabel,
+  readinessRows,
+  readinessTag,
 } from "../machine-labels.js";
 import { settingKey, trackSettingsRead } from "../settings-clock.js";
 import { statusLabel } from "../status.js";
@@ -553,6 +556,9 @@ function MachineFacts({
   const checks = bindings.flatMap((b) =>
     bindingChecks(b, machine.id).map((check) => ({ binding: b, check })),
   );
+  const readiness = bindings.flatMap((binding) =>
+    readinessRows(binding).map((item) => ({ binding, item })),
+  );
   return (
     <>
       <SettingsSection title="概况">
@@ -624,6 +630,49 @@ function MachineFacts({
                         status={tag.status}
                         label={tag.label}
                         subdued={c.state !== "verified"}
+                      />
+                    </DataTableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </SettingsTable>
+        )}
+      </SettingsSection>
+      <SettingsSection title="就绪巡检">
+        {readiness.length === 0 ? (
+          <p>没有巡检记录</p>
+        ) : (
+          <SettingsTable aria-label="就绪巡检">
+            <TableHeader>
+              <TableRow>
+                <TableHead>检查项</TableHead>
+                <TableHead>项目</TableHead>
+                <TableHead>结果</TableHead>
+                <TableHead>状态</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {readiness.map(({ binding, item }) => {
+                const tag = readinessTag(item.status);
+                return (
+                  <TableRow key={`${binding.project_id}:${item.key}`}>
+                    <DataTableCell nowrap data-record="lead">
+                      {readinessKeyLabel(item.key)}
+                    </DataTableCell>
+                    <DataTableCell data-label="项目">
+                      {binding.project_name}
+                    </DataTableCell>
+                    <DataTableCell data-label="结果">
+                      {item.detail}
+                    </DataTableCell>
+                    <DataTableCell nowrap data-record="aside">
+                      <StatusTag
+                        status={tag.status}
+                        label={tag.label}
+                        subdued={
+                          item.status === "ok" || item.status === "unknown"
+                        }
                       />
                     </DataTableCell>
                   </TableRow>

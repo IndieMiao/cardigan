@@ -23,9 +23,9 @@ export function upgradeState(store: Store, project: string, machine: string) {
     )
     .get(project, machine);
 }
+/** Dispatch fence: only while helpers are being written (C-608). Live checks decide otherwise. */
 export function upgradeHeld(store: Store, project: string, machine: string) {
-  const row = upgradeState(store, project, machine);
-  return !!row && row.state !== "verified";
+  return upgradeState(store, project, machine)?.state === "installing";
 }
 export interface InstallEvidence {
   job: string;
@@ -71,7 +71,9 @@ export function finishUpgrade(
       project,
       { now },
       `worker-upgrade:${machine}:${key}`,
-      `项目 ${project} 的机器 ${machine} 的 helper 自动升级未获验证（${stage}），已保持停派，本版本不会再次自动安装。请主机运维检查发行签名、受限入口及 worker / machine check，再按接入文档恢复。`,
+      stage === "unexpected_drift"
+        ? `项目 ${project} 的机器 ${machine} 的 helper 在验证通过后又与当前部署不一致，系统不会自动重写。派发按实时检查继续；请主机运维核对是谁改动了 helper。`
+        : `项目 ${project} 的机器 ${machine} 的 helper 自动升级未获验证（${stage}）。派发按实时检查继续，系统会在 6 小时后自动重试；如持续失败，请主机运维检查发行签名、受限入口及 worker / machine check。`,
     );
 }
 // This runs in the terminal journal transaction, never in a runtime/SSH probe.

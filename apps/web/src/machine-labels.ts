@@ -2,6 +2,7 @@ import type {
   ExecutionMachine,
   MachineBindingView,
   MachineCapabilityView,
+  MachineReadinessView,
   MachineRequirements,
   MachineSelection,
   MachineSelectionCandidate,
@@ -10,7 +11,7 @@ import type {
 import { STATUS_LABELS } from "./status.js";
 
 const BLOCKERS: Readonly<Record<string, string>> = {
-  worker_helper_upgrade_unverified: "升级后尚未通过双检查",
+  worker_helper_upgrade_unverified: "helper 正在升级",
   machine_check_failed: "机器检查失败",
   machine_observation_failed: "能力检查失败",
   machine_not_ready: "机器未就绪",
@@ -19,6 +20,42 @@ const BLOCKERS: Readonly<Record<string, string>> = {
 /** Host blocker codes; unknown codes stay visible as-is rather than hidden. */
 export function healthBlockerLabel(code: string): string {
   return BLOCKERS[code] ?? code;
+}
+
+type ReadinessItem = MachineReadinessView["items"][number];
+const READINESS_TAGS: Readonly<
+  Record<ReadinessItem["status"], { status: string; label: string }>
+> = {
+  ok: { status: "passed", label: "正常" },
+  repaired: { status: "resolved", label: "已自动修复" },
+  warning: { status: "needs_attention", label: "告警" },
+  failed: { status: "failed", label: "停派" },
+  unknown: { status: "not_run", label: "未检查" },
+};
+const READINESS_KEYS: Readonly<Record<string, string>> = {
+  disk: "磁盘",
+  network: "到控制主机的链路",
+  mcp: "Card MCP",
+  helper: "worker helper",
+  agent_tools: "附件助手",
+  config: "巡检配置",
+};
+export function readinessTag(status: ReadinessItem["status"]) {
+  return READINESS_TAGS[status] ?? READINESS_TAGS.unknown;
+}
+/** `avd:<name>` and `simulator:<name>` name a declared device. */
+export function readinessKeyLabel(key: string): string {
+  const [kind, name] = key.split(/:(.*)/su);
+  if (name && kind === "avd") return `AVD ${name}`;
+  if (name && kind === "simulator") return `模拟器 ${name}`;
+  return READINESS_KEYS[key] ?? key;
+}
+/** Problems first; within a status the patrol's own order. */
+export function readinessRows(binding: MachineBindingView) {
+  const order = ["failed", "warning", "unknown", "repaired", "ok"];
+  return [...(binding.machine_check?.readiness?.items ?? [])].sort(
+    (a, b) => order.indexOf(a.status) - order.indexOf(b.status),
+  );
 }
 
 export type HealthView = {

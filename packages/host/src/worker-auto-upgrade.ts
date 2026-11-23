@@ -7,8 +7,7 @@ import {
   matchesWorkerPlatform,
   runtimeWorkersPath,
 } from "./runtime-workers-config.js";
-import { helperMismatch } from "./worker-helper-release.js";
-import { notifyWorkerMaintenance } from "./worker-maintenance.js";
+import { hasHelperMismatch } from "./worker-helper-release.js";
 import { onboardWorker, workerCheckConfig } from "./worker-onboarding.js";
 import {
   parseWorkerOnboarding,
@@ -17,7 +16,6 @@ import {
 import { enrolledUpgradeIdentity } from "./worker-upgrade-enrollment.js";
 import {
   finishUpgrade,
-  upgradeHold,
   upgradeKey,
   upgradeState,
 } from "./worker-upgrade-gate.js";
@@ -26,10 +24,36 @@ import {
   promotionPending,
 } from "./worker-upgrade-transport.js";
 
-type Check = { blockers: readonly string[]; launch_enabled: boolean };
-const held: Check = { blockers: [upgradeHold], launch_enabled: false };
+type Check = {
+  blockers: readonly string[];
+  warnings?: readonly string[];
+  launch_enabled: boolean;
+};
+/** C-608: a failed attempt of the same release is retried after this, never left to a human. */
+export const UPGRADE_RETRY_MS = 6 * 60 * 60 * 1000;
 
-/** Called only while the patrol owns the machine check journal. No launch path installs. */
+/** Latest failed attempt for this machine; drift after a verified install is never retried. */
+function retryDue(store: Store, project: string, machine: string, now: number) {
+  const row = store.database
+    .prepare(
+      "SELECT doc FROM events WHERE project_id=? AND type='worker_helper_upgrade_failed' AND json_extract(doc,'$.payload.machine_id')=? ORDER BY rowid DESC LIMIT 1",
+    )
+    .get(project, machine);
+  if (!row) return true;
+  const event = JSON.parse(String(row.doc)) as {
+    created_at?: string;
+    payload?: { stage?: string };
+  };
+  if (event.payload?.stage === "unexpected_drift") return false;
+  const at = Date.parse(event.created_at ?? "");
+  return !Number.isFinite(at) || now - at >= UPGRADE_RETRY_MS;
+}
+
+/**
+ * Called only while the patrol owns the machine check journal. Launches use the
+ * same entry through RuntimeTargets.refreshMachine. Only an install in progress
+ * holds dispatch; any other outcome returns the live check (C-608).
+ */
 export async function patrolHelperUpgrade(
   options: {
     store: Store;
@@ -41,6 +65,7 @@ export async function patrolHelperUpgrade(
     signal?: AbortSignal | undefined;
     bindingCurrent: () => boolean;
     check: () => Promise<Check>;
+    now?: () => number;
   },
   initial: Check,
   adapters = {
@@ -52,8 +77,8 @@ export async function patrolHelperUpgrade(
   const { store, project, machine, execution, signal } = options;
   if (machine === "local" || execution.mode !== "agent-ssh") return initial;
   const previous = upgradeState(store, project, machine);
-  const wasHeld = !!previous && previous.state !== "verified";
-  if (!wasHeld && !initial.blockers.some(helperMismatch)) return initial;
+  const unverified = !!previous && previous.state !== "verified";
+  if (!unverified && !hasHelperMismatch(initial)) return initial;
   if (initial.blockers.includes("machine_not_ready")) return initial;
   const root = dirname(runtimeWorkersPath(options.env));
   const key = upgradeKey(execution.target?.fingerprint);
@@ -62,55 +87,59 @@ export async function patrolHelperUpgrade(
   const start = Date.now();
   let before: Record<string, string> = {};
   const evidence = () => ({ before, start, job: options.job });
-  const fail = () =>
+  const fail = (release = key) =>
     store.uow.run((tx) =>
-      finishUpgrade(store, tx, project, machine, key, stage, evidence(), false),
+      finishUpgrade(
+        store,
+        tx,
+        project,
+        machine,
+        release,
+        stage,
+        evidence(),
+        false,
+      ),
     );
+  if (previous?.state === "installing") {
+    // The journal owner is this patrol: an installing row is an interrupted attempt.
+    stage = "interrupted";
+    fail(String(previous.release_key));
+    if (previous.release_key === key) return initial;
+  }
   if (previous?.release_key === key) {
-    if (previous.state === "installing") {
-      stage = "interrupted";
-      fail();
-    }
     if (previous.state === "worker_checked") return initial;
-    if (previous.state !== "verified") return held;
+    if (
+      previous.state !== "verified" &&
+      !retryDue(store, project, machine, options.now?.() ?? Date.now())
+    )
+      return initial;
     // Drift after a verified install needs investigation, not another root write.
-    if (!initial.blockers.some(helperMismatch)) return initial;
+    if (previous.state === "verified" && !hasHelperMismatch(initial))
+      return initial;
   }
   const identity = enrolledUpgradeIdentity(root, project, machine);
   // Missing enrollment never enables SSH. Malformed/private-file failures may not authorize it either.
   if (!identity) {
     if (
-      wasHeld &&
+      unverified &&
       previous.release_key !== key &&
       execution.target &&
       options.bindingCurrent()
-    ) {
+    )
       // The patrol holds the machine job. Do not carry any worker proof across keys.
-      store.uow.run((tx) => {
+      store.uow.run(() => {
         store.database
           .prepare(
             "UPDATE worker_helper_upgrades SET release_key=?,state='failed',pending_final=NULL WHERE project_id=? AND machine_id=? AND release_key=? AND state!='verified'",
           )
           .run(key, project, machine, String(previous.release_key));
-        if (previous.state === "installing")
-          notifyWorkerMaintenance(
-            tx,
-            project,
-            { now: () => new Date().toISOString() },
-            `worker-upgrade:${machine}:${key}`,
-            `项目 ${project} 的机器 ${machine} 的升级中断且已退出自动更新。请按当前版本人工恢复并顺序运行 worker check、machine check。`,
-          );
       });
-    }
-    return wasHeld
-      ? { ...held, blockers: [...initial.blockers, upgradeHold] }
-      : initial;
+    return initial;
   }
-  const needsInstall = initial.blockers.some(helperMismatch);
-  if (!needsInstall && initial.blockers.length)
-    return { ...held, blockers: [...initial.blockers, upgradeHold] };
+  const needsInstall = hasHelperMismatch(initial);
+  if (!needsInstall && initial.blockers.length) return initial;
   try {
-    if (adapters.promotionPending(execution.dataDir)) return held;
+    if (adapters.promotionPending(execution.dataDir)) return initial;
   } catch {
     /* Missing/invalid deployment proof is recorded as an installation failure. */
   }
@@ -130,9 +159,10 @@ export async function patrolHelperUpgrade(
       .run(project, machine, key);
     return true;
   });
-  if (!claimed) return held;
+  // Busy machines keep running on the compatible helper; the next idle patrol installs.
+  if (!claimed) return initial;
   try {
-    if (previous?.release_key === key) {
+    if (previous?.release_key === key && previous.state === "verified") {
       stage = "unexpected_drift";
       throw new Error();
     }
@@ -186,7 +216,12 @@ export async function patrolHelperUpgrade(
       throw new Error();
     stage = "machine_check";
     const result = await options.check();
-    if (result.blockers.length || !options.bindingCurrent()) throw new Error();
+    if (
+      result.blockers.length ||
+      hasHelperMismatch(result) ||
+      !options.bindingCurrent()
+    )
+      throw new Error();
     signal?.throwIfAborted();
     // Outer capability probes, the final binding fence and journal completion still have to pass.
     store.uow.run(() =>
@@ -199,6 +234,7 @@ export async function patrolHelperUpgrade(
     return result;
   } catch {
     fail();
-    return held;
+    // Launches still run their own live check before anything is published.
+    return initial;
   }
 }
