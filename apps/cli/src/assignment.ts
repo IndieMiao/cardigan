@@ -35,11 +35,13 @@ import {
   RuntimeTargets,
   readonlyWorktreeTarget,
   resolveMcpUrl,
+  type SessionExitVerdict,
   scrubRunCredentials,
   settleTestReviewLimits,
   stoppedSessionExited,
   stoppedSessionLive,
   stopRunRuntime,
+  storedSessionExitProof,
   targetProbe,
   tryHostOpsLock,
   type WorktreeProvider,
@@ -743,6 +745,16 @@ async function stopWorkItemSession(
     const live = !held && (await stoppedSessionLive(input.runtime, ref, owner));
     const released = await input.runtime.release(ref, { force: true });
     if (!released.ok && released.error.code !== "runtime_not_found") {
+      // C-663: an unreachable worker says nothing about the session either way.
+      if (
+        !held &&
+        ref.machine_id !== "local" &&
+        released.error.code === "runtime_unavailable"
+      )
+        throw new CliError(
+          unconfirmedExitMessage(assignment.id, "unreachable"),
+          EXIT.failure,
+        );
       throw new CliError(
         formatCommandError("释放终端", assignment.id, released.error),
         EXIT.failure,
@@ -756,12 +768,22 @@ async function stopWorkItemSession(
     // it ended a live session; a finished or missing terminal row does not.
     // A pause keeps the C-211 rule.
     if (!held) {
-      if (
-        !(live && released.ok) &&
-        !(await stoppedSessionExited(input.runtime, ref, owner))
-      )
+      const verdict =
+        live && released.ok
+          ? "exited"
+          : await stoppedSessionExited(input.runtime, ref, owner, () =>
+              storedSessionExitProof(
+                input.store,
+                input.project_id,
+                assignment.id,
+                ref,
+                input.runtime,
+                execution,
+              ),
+            );
+      if (verdict !== "exited")
         throw new CliError(
-          `未能确认 ${assignment.id} 的原会话已退出：停止状态和终端引用均已保留，不会另起会话。可稍后重试 cardigan assignment stop ${assignment.id}；若确认无需自动续办，可执行 cardigan assignment stop ${assignment.id} --hold 改为人工暂停。`,
+          unconfirmedExitMessage(assignment.id, verdict),
           EXIT.failure,
         );
       command({ exit_confirmed_ref: ref });
@@ -783,6 +805,31 @@ async function stopWorkItemSession(
     aborted: stopped.cancelled + settled.cancelled > 0,
     held,
   };
+}
+
+/**
+ * C-663: say why the exit could not be proven and what is safe next. A pause
+ * followed by a start launches a second session, so it is only safe once the
+ * old one is known to be gone; an unreachable worker proves nothing.
+ */
+export function unconfirmedExitMessage(
+  id: Assignment["id"],
+  verdict: Exclude<SessionExitVerdict, "exited">,
+): string {
+  const reason = {
+    terminal_alive: "原终端仍在运行",
+    process_alive: "原终端已不在，但 worker 上仍有该指派登记的进程",
+    unreachable: "worker 暂时无法连接，查不到原终端和进程",
+    unproven:
+      "没有可核对的进程登记（如旧版启动或主机重启后），无法用进程证明它已退出",
+  }[verdict];
+  const next = {
+    terminal_alive: `稍后重试 cardigan assignment stop ${id}；不要用 --hold 再 start 绕过，否则会有两个会话同时工作。`,
+    process_alive: `等该进程结束后重试 cardigan assignment stop ${id}；不要用 --hold 再 start 绕过，否则会有两个会话同时工作。`,
+    unreachable: `恢复 worker 连接后重试 cardigan assignment stop ${id}，系统会重新核对；连接恢复前不要用 --hold 再 start。`,
+    unproven: `在 worker 上核实该指派的终端和进程都已不在后，执行 cardigan assignment stop ${id} --hold 再 cardigan assignment start ${id} 是安全的；未核实前不要这样做。`,
+  }[verdict];
+  return `未能确认 ${id} 的原会话已退出：${reason}。停止状态和终端引用均已保留，不会另起会话。${next}`;
 }
 
 function revokeTokens(
