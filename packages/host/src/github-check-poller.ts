@@ -11,6 +11,7 @@ import {
   type GithubClient,
   GithubExecutorError,
   type GithubJob,
+  GithubLogError,
   GithubNotFoundError,
   type GithubRun,
 } from "./github-client.js";
@@ -239,11 +240,20 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
           error instanceof GithubExecutorError &&
           (error.category === "auth" || error.category === "security")
         )
-          throw new FailureLogError(error.category);
-        if (attempt === 2)
-          throw new FailureLogError(
-            error instanceof GithubNotFoundError ? "not_found" : "api",
-          );
+          throw new FailureLogError(error.category, error.diagnostic);
+        // A download that ran into its total cap would only repeat that wait.
+        if (
+          attempt === 2 ||
+          (error instanceof GithubLogError && error.limit === "total")
+        )
+          throw error instanceof GithubLogError
+            ? new FailureLogError(error.failure, error.diagnostic)
+            : new FailureLogError(
+                error instanceof GithubNotFoundError ? "not_found" : "api",
+                error instanceof GithubExecutorError
+                  ? error.diagnostic
+                  : undefined,
+              );
         const ms = 1000 * 2 ** attempt;
         if (this.options.waitForLogRetry)
           await this.options.waitForLogRetry(ms, signal);
