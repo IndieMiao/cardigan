@@ -100,6 +100,7 @@ export function resumeAttention(state: CommandState) {
       [
         "work_item_resume_requested",
         "precheck_wait_delivered",
+        "blocker_wait_delivered",
         "blocker_reported",
         "work_item_assigned",
         "work_item_replaced",

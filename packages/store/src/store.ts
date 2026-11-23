@@ -70,6 +70,7 @@ import {
   clearRepositoryCache,
   createReadRepositories,
   createRepositories,
+  platformDeploymentReader,
   type ReadEventRepository,
   type ReadRepositories,
 } from "./repositories.js";
@@ -108,6 +109,7 @@ export interface StoreTransactionContext
   readonly employees: GlobalRepositories["employees"];
   readonly members: GlobalRepositories["members"];
   readonly cachedCommandState?: SnapshotTransaction["state"];
+  readonly platformDeployments: (project: ProjectId, sha: string) => Event[];
   readonly global_ids: GlobalIdAllocator;
   /** Issue a token inside this transaction (assignment and token commit together). */
   issueToken(input: IssueTokenInput): IssuedToken;
@@ -571,6 +573,7 @@ export class Store {
           listAfter: events.listAfter,
           listStreams: events.listStreams,
         },
+        platformDeployments: platformDeploymentReader(this.#db),
         ...createGlobalRepositories(this.#db, "write", snapshots),
         global_ids: createGlobalIdAllocator(this.#db),
         ids: createIdAllocator(this.#db),

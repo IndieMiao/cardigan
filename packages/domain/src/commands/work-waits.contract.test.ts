@@ -282,16 +282,24 @@ test("local timeout, untrusted events and cancellation requests cannot settle a 
   expect(scan().data).toEqual([]);
 });
 
-test("a condition can settle before finish; no concurrent Run is woken", () => {
+test("a condition can settle before finish; the live Run is notified in place, no concurrent Run is woken", () => {
   const c = cases[0];
   if (!c) throw new Error("Missing case");
   c.waiting();
   block(c.condition);
   c.settled();
-  expect(scan().data).toEqual([]);
-  expect(item()?.status).toBe("blocked");
+  const effect = scan();
+  expect(effect.data).toEqual([work]);
+  expect(item()).toMatchObject({ status: "in_progress" });
+  expect(item()?.reported_blocker).toBeUndefined();
+  expect(effect.events[0]).toMatchObject({
+    type: "work_item_resume_requested",
+    payload: { active_run_id: runId, reported_blocker_cleared: true },
+  });
+  expect(effect.events.some((e) => e.type === "run_queued")).toBe(false);
+  expect(state.runs.filter((r) => r.assignment_id === owner)).toHaveLength(1);
   finish();
-  expect(scan().data).toEqual([work]);
+  expect(scan().events).toEqual([]);
 });
 
 test.each([
