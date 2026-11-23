@@ -96,6 +96,9 @@ function record(
 }
 const payloadOf = (e: Event) =>
   (e.payload ?? {}) as Record<string, string | undefined>;
+/** Chain progress is only what the control plane itself recorded. */
+const chainEvent = (e: Event, type: string) =>
+  e.type === type && e.actor.kind === "system";
 
 /** The newest approved chain on this card whose unsigned package is stored here. */
 function chainCandidate(tx: McpReadContext, scope: SigningScope) {
@@ -120,9 +123,18 @@ function chainCandidate(tx: McpReadContext, scope: SigningScope) {
         !a.streamed_artifact?.expired,
     );
   for (const chain of chains) {
+    // A published chain is finished: later Runs sign only by operator approval.
+    if (
+      cardEvents.some(
+        (e) =>
+          e.type === "artifact_publication_verified" &&
+          payloadOf(e).decision_id === chain.decision_id,
+      )
+    )
+      continue;
     const known = cardEvents.find(
       (e) =>
-        e.type === RELEASE_CHAIN_SIGNING_APPROVED &&
+        chainEvent(e, RELEASE_CHAIN_SIGNING_APPROVED) &&
         payloadOf(e).decision_id === chain.decision_id &&
         payloadOf(e).run_id === scope.run,
     );
@@ -197,7 +209,7 @@ export async function prepareReleaseChain(
           .listAfter(scope.project, scope.card as CardId, 0)
           .some(
             (e) =>
-              e.type === RELEASE_CHAIN_SIGNING_APPROVED &&
+              chainEvent(e, RELEASE_CHAIN_SIGNING_APPROVED) &&
               payloadOf(e).request_id === grant.request_id,
           )
       )
@@ -245,7 +257,7 @@ export async function signedIntake(
       .listAfter(p, card, 0)
       .find(
         (e) =>
-          e.type === RELEASE_CHAIN_SIGNED &&
+          chainEvent(e, RELEASE_CHAIN_SIGNED) &&
           payloadOf(e).decision_id === decision_id &&
           payloadOf(e).request_id === receipt.request_id,
       );
@@ -282,16 +294,15 @@ export async function signedIntake(
   if (earlier) return { ...base, signed_attachment_id: earlier.id };
   if (!options.openMobileArtifact)
     return { ...base, signed_intake: "unavailable" };
+  let opened: Readable | undefined;
   try {
     const file = await options.openMobileArtifact(
       scope,
       receipt.request_id,
       current,
     );
-    if (file.sha256 !== receipt.sha256) {
-      file.stream.destroy();
-      throw new Error("digest");
-    }
+    opened = file.stream;
+    if (file.sha256 !== receipt.sha256) throw new Error("digest");
     const target: AttachmentTarget = {
       card_id: card,
       mime: "application/vnd.android.package-archive",
@@ -333,6 +344,8 @@ export async function signedIntake(
         });
     }
   } catch {
+    // Closed on every failure, including a refusal before the copy started.
+    opened?.destroy();
     const later = stored();
     return later
       ? { ...base, signed_attachment_id: later.id }

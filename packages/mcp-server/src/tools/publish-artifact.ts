@@ -88,7 +88,33 @@ function verified(
         (e.payload as { decision_id?: string })?.decision_id === decision,
     );
 }
-/** One executor per approval: a second concurrent call is refused, never queued. */
+/**
+ * A release chain publishes one APK to one place: once it claimed a URL and
+ * digest, it only continues that same receipt (C-612).
+ */
+function chainClaimedElsewhere(
+  tx: McpReadContext,
+  p: string,
+  card: CardId,
+  decision: string,
+  receipt: string | undefined,
+  sha256: string,
+) {
+  return tx.events.listAfter(p, card, 0).some((e) => {
+    const payload = e.payload as { decision_id?: string; result?: string };
+    return (
+      e.type === "artifact_publication_claimed" &&
+      payload?.decision_id === decision &&
+      (receipt === undefined
+        ? !payload.result?.endsWith(` · ${sha256}`)
+        : payload.result !== receipt)
+    );
+  });
+}
+/**
+ * One executor per approval and per APK: a second concurrent call for either
+ * is refused, never queued.
+ */
 const running = new Set<string>();
 function audit(
   tx: TransactionContext,
@@ -197,17 +223,32 @@ export function publicationTool(options: PublicationOptions) {
           // Checked before any host IO; the claim below re-checks atomically.
           if (verified(tx, p, a.card_id, request.decision_id))
             throw new PublicationError("already_claimed");
+          if (
+            tx.decisions.get(p, request.decision_id as DecisionId)?.resolution
+              ?.option === RELEASE_CHAIN_OPTION &&
+            chainClaimedElsewhere(
+              tx,
+              p,
+              a.card_id,
+              request.decision_id,
+              undefined,
+              a.sha256,
+            )
+          )
+            throw new PublicationError("already_claimed");
           return a;
         });
         if (!options.publishArtifact) throw new PublicationError("not_enabled");
-        const slot = `${p}/${request.decision_id}`;
-        if (running.has(slot)) {
+        const slot = `${p}/${request.decision_id}`,
+          bytes = `${p}/sha256/${a.sha256}`;
+        if (running.has(slot) || running.has(bytes)) {
           // Another executor holds this approval: refuse without an audit
           // row, so its own outcome stays the last word on the card.
           card = undefined;
           throw new PublicationError("in_progress");
         }
         running.add(slot);
+        running.add(bytes);
         try {
           const fresh = (tx: McpReadContext) => {
             const now = authorized(tx);
@@ -251,6 +292,18 @@ export function publicationTool(options: PublicationOptions) {
               if (verified(tx, p, a.card_id, request.decision_id))
                 throw new PublicationError("already_claimed");
               const receipt = `${url} · ${a.sha256}`;
+              if (
+                chain &&
+                chainClaimedElsewhere(
+                  tx,
+                  p,
+                  a.card_id,
+                  request.decision_id,
+                  receipt,
+                  a.sha256,
+                )
+              )
+                throw new PublicationError("already_claimed");
               // Only this card's own earlier claim of the same URL and digest proves who wrote the lone APK.
               if (
                 resume &&
@@ -301,6 +354,7 @@ export function publicationTool(options: PublicationOptions) {
           return result;
         } finally {
           running.delete(slot);
+          running.delete(bytes);
         }
       } catch (e) {
         const category =

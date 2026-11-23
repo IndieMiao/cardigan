@@ -322,8 +322,20 @@ test("one executor per approval: a concurrent call is refused without touching t
       version: "1.0",
       versionCode: 1,
     };
+    store.uow.run((tx) =>
+      tx.decisions.put(
+        project_id,
+        approval("Q-2", digest, [
+          { key: "publish", description: `发布到 ${url}`, impact: "公开" },
+        ]),
+      ),
+    );
     const first = tool.handler(request, ctx);
     await expect(tool.handler(request, ctx)).rejects.toThrow("in_progress");
+    // Another approval for the same APK is a second executor too.
+    await expect(
+      tool.handler({ ...request, decision_id: "Q-2" }, ctx),
+    ).rejects.toThrow("in_progress");
     release();
     await expect(first).resolves.toMatchObject({ url });
     expect(pub).toHaveBeenCalledOnce();
@@ -407,6 +419,51 @@ test("an approved release chain publishes the signed APK it bound, at its templa
     );
     target = "https://example.invalid/test/1.0-aaaaaaaaaaaa/app.apk";
     await expect(tool.handler(request, ctx)).rejects.toThrow("approval");
+    target = url;
+    // A chain that claimed one place continues only there.
+    const late = vi.fn(async (_p, _a, _r, claim: (u: string) => void) => {
+      claim(target);
+      throw new PublicationError("download");
+    });
+    await expect(
+      publicationTool({ publishArtifact: late }).handler(request, ctx),
+    ).rejects.toThrow("download");
+    const other = `https://example.invalid/test/2.0-${signed.slice(0, 12)}/app.apk`;
+    target = other;
+    await expect(
+      publicationTool({ publishArtifact: late }).handler(
+        { ...request, version: "2.0" },
+        ctx,
+      ),
+    ).rejects.toThrow("already_claimed");
+    store.uow.run((tx) => {
+      tx.attachments.put(project_id, {
+        ...(tx.attachments.get(
+          project_id,
+          "attachment-1" as never,
+        ) as Attachment),
+        id: "attachment-9",
+        sha256: "d".repeat(64),
+      } as Attachment);
+      tx.events.append(project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project_id, card_id),
+        card_id,
+        type: "release_chain_signed",
+        actor: { kind: "system", project_id },
+        created_at: NOW,
+        payload: {
+          decision_id: "Q-1",
+          request_id: "e".repeat(32),
+          sha256: "d".repeat(64),
+        },
+      });
+    });
+    await expect(
+      tool.handler({ ...request, attachment_id: "attachment-9" }, ctx),
+    ).rejects.toThrow("already_claimed");
+    // The version change reached the host but was refused at the claim, before any write.
+    expect(late).toHaveBeenCalledTimes(2);
     target = url;
     await expect(tool.handler(request, ctx)).resolves.toMatchObject({
       url,

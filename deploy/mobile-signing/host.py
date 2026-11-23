@@ -121,8 +121,9 @@ def approve(root, db, s):
         raise
 
 
-# C-612: a chain grant lives as long as a packaging Run reasonably can.
-CHAIN_TTL = 86400
+# C-612: a chain grant outlives any packaging Run, so signed intake and
+# download never fail on its expiry.
+CHAIN_TTL = 7 * 86400
 
 
 def chain_grant(root, db, identity, request, source):

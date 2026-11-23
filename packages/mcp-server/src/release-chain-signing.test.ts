@@ -257,6 +257,20 @@ test("an approved chain registers this Run's candidate once, binds the signed di
         .filter((e) => e.type.startsWith("release_chain_"))
         .every((e) => e.actor.kind === "system"),
     ).toBe(true);
+    // A published chain is finished: a later Run is not auto-registered.
+    store.uow.run((tx) => {
+      tx.events.append(project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project_id, card_id),
+        card_id,
+        type: "artifact_publication_verified",
+        actor: ctx.identity.actor,
+        created_at: NOW,
+        payload: { decision_id: "Q-1", result: "ok" },
+      });
+    });
+    await expect(call()).resolves.toEqual(receipt);
+    expect(h.chainSigning).toHaveBeenCalledOnce();
     // The stored signed APK is exactly what the chain may publish.
     expect(
       stored &&
