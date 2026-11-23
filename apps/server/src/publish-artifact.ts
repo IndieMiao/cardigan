@@ -14,7 +14,11 @@ import {
   PublicationError,
   type PublicationOptions,
 } from "@cardigan/mcp-server";
-import { ossEnvironment, publicationTarget } from "./publication-target.js";
+import {
+  ossEnvironment,
+  type PublishTarget,
+  publicationTarget,
+} from "./publication-target.js";
 
 const digest = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 async function stageApk(data: string, a: Attachment, dest: string) {
@@ -59,7 +63,86 @@ async function stageApk(data: string, a: Attachment, dest: string) {
     throw new PublicationError("artifact");
   }
 }
-const run = async (
+/**
+ * `apksigner verify --verbose --print-certs` names v1/v2 signers `Signer #n` and
+ * v3/v3.1 signers `V3[.x] Signer[ (minSdkVersion=…)][:]`. Require a verified APK with
+ * exactly one signer whose every reported certificate equals the registered one; any
+ * other certificate digest line (unknown scheme, lineage, stamp) fails closed.
+ */
+export function signedOnlyBy(output: string, certificate: string) {
+  const lines = output.split(/\r?\n/u);
+  const digests = lines.filter((l) =>
+    l.includes("certificate SHA-256 digest:"),
+  );
+  const seen = digests.map((l) =>
+    /^(?:Signer #(\d+)|V3(?:\.\d+)? Signer(?: \([^()]*\))?:?) certificate SHA-256 digest: ([a-fA-F0-9]{64})$/u.exec(
+      l,
+    ),
+  );
+  return (
+    lines.includes("Verifies") &&
+    lines.filter((l) => l.startsWith("Number of signers:")).join() ===
+      "Number of signers: 1" &&
+    seen.length > 0 &&
+    seen.every(
+      (m) =>
+        m !== null &&
+        (m[1] === undefined || m[1] === "1") &&
+        m[2]?.toLowerCase() === certificate,
+    )
+  );
+}
+
+/** OSS reports an empty configuration only when versioning was never enabled. */
+export const versioningOff = (xml: string) =>
+  /^(?:<\?xml [^?]*\?>\s*)?<VersioningConfiguration(?: xmlns="[^"]+")?\s*(?:\/>|>\s*<\/VersioningConfiguration>)$/u.test(
+    xml.trim(),
+  );
+
+export type Execute = (
+  tool: string,
+  args: string[],
+  cwd: string,
+  environment?: Record<string, string>,
+) => Promise<string>;
+
+/** Credentials only reach the ossutil child through its environment, never argv or a config file. */
+export const ossApi =
+  (
+    execute: Execute,
+    t: PublishTarget,
+    dir: string,
+    credentials: Record<string, string>,
+  ) =>
+  (api: string, ...args: string[]) =>
+    execute(
+      t.ossutil,
+      [
+        "api",
+        api,
+        "--bucket",
+        t.bucket,
+        "--region",
+        t.region,
+        "--endpoint",
+        `https://oss-${t.region}.aliyuncs.com`,
+        "--config-file",
+        "/dev/null",
+        "--mode",
+        "AK",
+        "--retry-times",
+        "0",
+        "--loglevel",
+        "off",
+        ...args,
+      ],
+      dir,
+      credentials,
+    ).then((stdout) =>
+      stdout.replace(/\n[0-9]+(?:\.[0-9]+)?\(s\) elapsed\s*$/u, ""),
+    );
+
+export const run: Execute = async (
   tool: string,
   args: string[],
   cwd: string,
@@ -128,7 +211,7 @@ async function readBack(
 export function apkPublisher(
   dataDir: string,
   root = join(homedir(), ".config", "cardigan"),
-  execute = run,
+  execute: Execute = run,
   get = fetch,
 ): NonNullable<PublicationOptions["publishArtifact"]> {
   return async (project, a, request, claim, current) => {
@@ -145,17 +228,7 @@ export function apkPublisher(
         ["verify", "--verbose", "--print-certs", apk],
         dir,
       );
-      const signers = [
-        ...certs.matchAll(
-          /^Signer #(\d+) certificate SHA-256 digest: ([a-fA-F0-9]{64})\r?$/gmu,
-        ),
-      ];
-      if (
-        signers.length !== 1 ||
-        signers[0]?.[1] !== "1" ||
-        signers[0]?.[2]?.toLowerCase() !== t.test_certificate_sha256
-      )
-        throw Error();
+      if (!signedOnlyBy(certs, t.test_certificate_sha256)) throw Error();
       stage = "manifest";
       for (const [field, value] of [
         ["application-id", t.package_name],
@@ -198,42 +271,13 @@ export function apkPublisher(
       });
       current();
       const credentials = await ossEnvironment(root, t);
-      const oss = (api: string, ...args: string[]) =>
-        execute(
-          t.ossutil,
-          [
-            "api",
-            api,
-            "--bucket",
-            t.bucket,
-            "--region",
-            t.region,
-            "--endpoint",
-            `https://oss-${t.region}.aliyuncs.com`,
-            "--config-file",
-            "/dev/null",
-            "--mode",
-            "AK",
-            "--retry-times",
-            "0",
-            "--loglevel",
-            "off",
-            ...args,
-          ],
-          dir,
-          credentials,
-        ).then((stdout) =>
-          stdout.replace(/\n[0-9]+(?:\.[0-9]+)?\(s\) elapsed\s*$/u, ""),
-        );
+      const oss = ossApi(execute, t, dir, credentials);
       stage = "immutable_prefix";
       current();
       // OSS ignores forbid-overwrite on buckets with enabled/suspended versioning.
-      const versioning = (
-        await oss("get-bucket-versioning", "--output-format", "raw")
-      ).trim();
       if (
-        !/^(?:<\?xml [^?]*\?>\s*)?<VersioningConfiguration(?: xmlns="[^"]+")?\s*(?:\/>|>\s*<\/VersioningConfiguration>)$/u.test(
-          versioning,
+        !versioningOff(
+          await oss("get-bucket-versioning", "--output-format", "raw"),
         )
       )
         throw Error();

@@ -17,7 +17,7 @@ import { promisify } from "node:util";
 import type { Attachment } from "@cardigan/domain";
 import { fileAttachmentStore } from "@cardigan/mcp-server";
 import { afterEach, expect, test, vi } from "vitest";
-import { apkPublisher } from "./publish-artifact.js";
+import { apkPublisher, signedOnlyBy } from "./publish-artifact.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -107,7 +107,7 @@ async function setup() {
       else expect(environment).toBeUndefined();
       const arg = (name: string) => args[args.indexOf(name) + 1]!;
       if (tool === target.apksigner)
-        return `Signer #1 certificate SHA-256 digest: ${flags.signer}\n`;
+        return `Verifies\nVerified using v3 scheme (APK Signature Scheme v3): true\nNumber of signers: 1\nV3.0 Signer: certificate SHA-256 digest: ${flags.signer}\n`;
       if (tool === target.apkanalyzer)
         return `${({ "application-id": flags.manifest, "version-name": request.version, "version-code": "13" } as Record<string, string>)[args[1]!]}\n`;
       expect(arg("--config-file")).toBe("/dev/null");
@@ -214,6 +214,63 @@ test.each([
   await expect(f.call()).rejects.toThrow(download ? "download" : issue);
   expect(f.objects.size).toBe(download ? 1 : 0);
   expect(f.claim).toHaveBeenCalledTimes(download ? 1 : 0);
+});
+
+const head = (scheme: string) =>
+  `Verifies\nVerified using v1 scheme (JAR signing): ${scheme.includes("1")}\nVerified using v2 scheme (APK Signature Scheme v2): ${scheme.includes("2")}\nVerified using v3 scheme (APK Signature Scheme v3): ${scheme.includes("3")}\n`;
+const line = (name: string, digest = cert) =>
+  `${name} certificate DN: CN=test\n${name} certificate SHA-256 digest: ${digest}\n${name} certificate SHA-1 digest: ${"c".repeat(40)}\n${name} public key SHA-256 digest: ${"d".repeat(64)}\n`;
+test.each([
+  ["v1/v2 only", `${head("12")}Number of signers: 1\n${line("Signer #1")}`],
+  ["v3-only", `${head("3")}Number of signers: 1\n${line("V3.0 Signer:")}`],
+  [
+    "v3-only, CRLF and upper-case digest",
+    `${head("3")}Number of signers: 1\n${line("V3.0 Signer:", cert.toUpperCase())}`.replaceAll(
+      "\n",
+      "\r\n",
+    ),
+  ],
+  [
+    "v2+v3",
+    `${head("23")}Number of signers: 1\n${line("Signer #1")}${line("V3.0 Signer:")}`,
+  ],
+  [
+    "v3+v3.1 with SDK ranges",
+    `${head("3")}Number of signers: 1\n${line("V3.1 Signer (minSdkVersion=33, maxSdkVersion=2147483647)")}${line("V3 Signer (minSdkVersion=24, maxSdkVersion=32)")}`,
+  ],
+])("signature accepts the registered single signer: %s", (_, output) => {
+  expect(signedOnlyBy(output, cert)).toBe(true);
+});
+test.each([
+  [
+    "multiple signers",
+    `${head("2")}Number of signers: 2\n${line("Signer #1")}${line("Signer #2")}`,
+  ],
+  [
+    "second signer without a count",
+    `${head("2")}Number of signers: 1\n${line("Signer #1")}${line("Signer #2")}`,
+  ],
+  [
+    "v3-only, wrong certificate",
+    `${head("3")}Number of signers: 1\n${line("V3.0 Signer:", "0".repeat(64))}`,
+  ],
+  [
+    "v2+v3 disagree",
+    `${head("23")}Number of signers: 1\n${line("Signer #1")}${line("V3.0 Signer:", "0".repeat(64))}`,
+  ],
+  [
+    "rotated v3.1 key",
+    `${head("3")}Number of signers: 1\n${line("V3.1 Signer (minSdkVersion=33, maxSdkVersion=2147483647)", "0".repeat(64))}${line("V3 Signer (minSdkVersion=24, maxSdkVersion=32)")}`,
+  ],
+  [
+    "unknown certificate line",
+    `${head("3")}Number of signers: 1\n${line("V3.0 Signer:")}${line("Source Stamp Signer", "0".repeat(64))}`,
+  ],
+  ["not verified", `Number of signers: 1\n${line("V3.0 Signer:")}`],
+  ["no signer count", `${head("3")}${line("V3.0 Signer:")}`],
+  ["no certificate", `${head("3")}Number of signers: 1\n`],
+])("signature refuses %s", (_, output) => {
+  expect(signedOnlyBy(output, cert)).toBe(false);
 });
 
 test.each([
