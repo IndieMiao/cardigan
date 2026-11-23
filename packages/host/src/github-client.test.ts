@@ -13,7 +13,12 @@ import { join } from "node:path";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { GithubBudgetJournal } from "./github-budget-journal.js";
-import { GithubClient, GithubNotFoundError } from "./github-client.js";
+import {
+  GithubClient,
+  GithubExecutorError,
+  GithubLogError,
+  GithubNotFoundError,
+} from "./github-client.js";
 import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
 
 const roots: string[] = [];
@@ -34,7 +39,10 @@ afterEach(async () => {
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
 });
-async function setup(rate?: GithubRateLimit) {
+async function setup(
+  rate?: GithubRateLimit,
+  logLimits?: { responseMs?: number; idleMs?: number; totalMs?: number },
+) {
   const root = await mkdtemp(join(tmpdir(), "cg-github-auth-"));
   roots.push(root);
   await chmod(root, 0o700);
@@ -78,6 +86,7 @@ async function setup(rate?: GithubRateLimit) {
     fetch: fetcher as typeof fetch,
     now: () => now,
     ...(rate ? { rate } : {}),
+    ...(logLimits ? { logLimits } : {}),
   });
   return {
     root,
@@ -885,4 +894,169 @@ test("signed job storage Retry-After pauses other calls on the same REST budget"
   await expect(f.client.run(123)).rejects.toBeInstanceOf(GithubRetryLater);
   expect(f.fetcher).toHaveBeenCalledTimes(2);
   expect(open).not.toHaveBeenCalled();
+});
+
+const pause = (ms: number) => new Promise((done) => setTimeout(done, ms));
+/** A body that yields `chunks` blocks, waiting `gap` ms before each one. */
+function slowBody(chunk: Uint8Array, chunks: number, gap: number, end?: Error) {
+  let sent = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      await pause(gap);
+      if (sent++ < chunks) controller.enqueue(chunk);
+      else if (end) controller.error(end);
+      else controller.close();
+    },
+  });
+}
+async function logFailure(promise: Promise<unknown>) {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected the job log download to fail");
+}
+
+test("C-658: a multi-MB log slower than the response window is fully received while bytes keep arriving", async () => {
+  const f = await setup(undefined, {
+    responseMs: 100,
+    idleMs: 100,
+    totalMs: 10_000,
+  });
+  await f.client.token();
+  const line = new TextEncoder().encode(`${"x".repeat(1023)}\n`);
+  const chunk = new Uint8Array(64 * 1024);
+  for (let i = 0; i < chunk.length; i += line.length) chunk.set(line, i);
+  // 64 chunks * 64 KiB = 4 MiB over ~1.3 s, far beyond the 100 ms windows.
+  f.fetcher.mockImplementationOnce(
+    async () => new Response(slowBody(chunk, 64, 20)),
+  );
+  let bytes = 0;
+  const open = vi.fn(() => (text: string) => {
+    bytes += Buffer.byteLength(text);
+  });
+  await f.client.jobLog(11, open);
+  expect(open).toHaveBeenCalledOnce();
+  expect(bytes).toBe(4 * 1024 * 1024);
+});
+
+test.each([
+  [
+    "response",
+    () => new Promise<Response>(() => {}),
+    /^等待响应超过 0 秒（已接收 0 B，用时 \d+ 秒）$/u,
+  ],
+  [
+    "idle",
+    async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(1536).fill(65));
+          },
+        }),
+      ),
+    /^0 秒未收到新数据（已接收 1\.5 KB，用时 \d+ 秒）$/u,
+  ],
+  [
+    "total",
+    async () => new Response(slowBody(new Uint8Array(10).fill(65), 1000, 10)),
+    /^超过下载总时限 0 秒（已接收 \d+ B，用时 \d+ 秒）$/u,
+  ],
+] as const)(
+  "C-658: an internal %s timeout is classified as timeout, not api",
+  async (limit, respond, diagnostic) => {
+    const f = await setup(undefined, {
+      responseMs: 60,
+      idleMs: 60,
+      totalMs: limit === "total" ? 200 : 10_000,
+    });
+    await f.client.token();
+    f.fetcher.mockImplementationOnce(respond);
+    const error = await logFailure(f.client.jobLog(11, () => () => {}));
+    expect(error).toBeInstanceOf(GithubLogError);
+    expect(error).toMatchObject({ failure: "timeout", limit });
+    expect((error as GithubLogError).diagnostic).toMatch(diagnostic);
+  },
+);
+
+test("C-658: transport errors are network failures with a scrubbed cause chain", async () => {
+  const f = await setup();
+  await f.client.token();
+  const socket = Object.assign(new Error("other side closed"), {
+    name: "SocketError",
+    code: "UND_ERR_SOCKET",
+  });
+  f.fetcher.mockImplementationOnce(
+    async () =>
+      new Response(
+        slowBody(
+          new Uint8Array(2048).fill(65),
+          2,
+          0,
+          new TypeError("terminated", { cause: socket }),
+        ),
+      ),
+  );
+  let text = "";
+  const mid = await logFailure(
+    f.client.jobLog(11, () => (chunk) => {
+      text += chunk;
+    }),
+  );
+  expect(mid).toMatchObject({
+    failure: "network",
+    diagnostic: expect.stringMatching(
+      /^TypeError: terminated <- SocketError: other side closed \(UND_ERR_SOCKET\)（已接收 4\.0 KB，用时 \d+ 秒）$/u,
+    ),
+  });
+  expect(text).toHaveLength(4096);
+  f.fetcher.mockRejectedValueOnce(
+    new TypeError("fetch failed", {
+      cause: Object.assign(
+        new Error("getaddrinfo ENOTFOUND fixture.blob.core.windows.net"),
+        { code: "ENOTFOUND" },
+      ),
+    }),
+  );
+  const connect = await logFailure(f.client.jobLog(11, () => () => {}));
+  expect(connect).toMatchObject({
+    failure: "network",
+    diagnostic: expect.stringMatching(
+      /^TypeError: fetch failed <- Error \(ENOTFOUND\)（已接收 0 B，用时 \d+ 秒）$/u,
+    ),
+  });
+});
+
+test("C-658: HTTP errors keep their status; local processing errors are not network failures", async () => {
+  const f = await setup();
+  await f.client.token();
+  f.fetcher.mockImplementationOnce(
+    async () => new Response("private provider body", { status: 502 }),
+  );
+  expect(await logFailure(f.client.jobLog(11, () => () => {}))).toMatchObject({
+    failure: "http",
+    diagnostic: "HTTP 502",
+  });
+  f.fetcher.mockImplementationOnce(
+    async () =>
+      new Response(null, { status: 302, headers: { location: "::bad::" } }),
+  );
+  expect(await logFailure(f.client.jobLog(11, () => () => {}))).toMatchObject({
+    failure: "http",
+    diagnostic: "HTTP 302 跳转地址无效",
+  });
+  f.fetcher.mockImplementationOnce(async () => new Response("FAIL\n"));
+  const local = await logFailure(
+    f.client.jobLog(11, () => () => {
+      throw new RangeError("token=synthetic-secret in log text");
+    }),
+  );
+  expect(local).toBeInstanceOf(GithubExecutorError);
+  expect(local).not.toBeInstanceOf(GithubLogError);
+  expect(local).toMatchObject({
+    category: "api",
+    diagnostic: "日志处理失败：RangeError",
+  });
 });
