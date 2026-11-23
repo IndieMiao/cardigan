@@ -186,8 +186,11 @@ export function upgradeDeployedRoles(
   project: ProjectId,
   changedRoles: readonly string[],
   previousDefaults: Readonly<Record<string, string>>,
-  profiles: ReadonlySet<string> = new Set(),
+  profiles: ReadonlySet<string> | (() => ReadonlySet<string>) = new Set(),
 ) {
+  let loadedProfiles: ReadonlySet<string> | undefined;
+  const profileNames = () =>
+    (loadedProfiles ??= typeof profiles === "function" ? profiles() : profiles);
   store.uow.run((tx) => {
     const actor = { kind: "system" as const, project_id: project };
     const clock = { now: () => new Date().toISOString() };
@@ -226,14 +229,14 @@ export function upgradeDeployedRoles(
       if (currentHash === sourceHash) continue;
       // An older supervisor's snapshot misses machine requirement changes; the
       // published receipt still shows this role's default moved.
+      // A rerun of this release reads its own receipt, which names no earlier default.
       const previous = published.get(id);
-      if (
-        !changedRoles.includes(id) &&
-        (previous === undefined || previous === sourceHash)
-      )
-        continue;
-      const baseline = baselineOf(id);
-      if (currentHash !== previous && !baseline) {
+      const prior = previous === sourceHash ? undefined : previous;
+      if (!changedRoles.includes(id) && prior === undefined) continue;
+      // A receipt the release wrote itself outranks a supervisor fingerprint,
+      // which an older supervisor computes without machine requirements.
+      const reference = prior ?? baselineOf(id);
+      if (!reference) {
         recordRoleDeferral(
           tx,
           project,
@@ -243,7 +246,7 @@ export function upgradeDeployedRoles(
         );
         continue;
       }
-      if (currentHash !== previous && currentHash !== baseline) {
+      if (currentHash !== reference) {
         if (source.instructions === undefined)
           throw new Error("Default role instructions missing");
         const diff = roleUpgradeDiff(latest, {
@@ -253,17 +256,17 @@ export function upgradeDeployedRoles(
         // A supervisor built before machine requirements hashes without them;
         // only a published receipt can then tell a hand-added requirement apart.
         const unverifiable =
-          previous === undefined &&
+          prior === undefined &&
           !!latest.required_capabilities?.length &&
           deploymentRolePolicyHash({ ...latest, required_capabilities: [] }) ===
-            baseline;
+            reference;
         pending(
           `deployment-role-manual:${id}:${latest.version}:${sourceHash}`,
           `角色 ${id} 未自动升级：${unverifiable ? "上一次已部署默认版本的指纹不含机器要求，无法确认当前机器要求是否为项目手改" : "当前版本有手工改动，与上一次已部署默认版本不一致"}。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
         );
         continue;
       }
-      if (!profiles.has(source.launch_profile_ref)) {
+      if (!profileNames().has(source.launch_profile_ref)) {
         recordRoleDeferral(
           tx,
           project,
@@ -313,15 +316,17 @@ export function upgradeDeployedRoles(
           launch_profile_ref: role.launch_profile_ref,
         }),
       );
-      const baseline = baselineOf(role.role_id);
       const previous = published.get(role.role_id);
+      const reference =
+        (previous === default_hash ? undefined : previous) ??
+        baselineOf(role.role_id);
       roles[role.role_id] = {
         version: role.version,
         policy_hash,
         disposition:
           policy_hash === default_hash
             ? "matched"
-            : baseline && policy_hash !== baseline && policy_hash !== previous
+            : reference && policy_hash !== reference
               ? "conflict"
               : "unverified",
         default_hash,

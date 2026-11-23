@@ -86,14 +86,16 @@ export async function runSelfDeployCommand(
         )
       )
         throw invalid();
-      let profiles: ReadonlySet<string> = new Set();
-      if (changed.length) {
+      // Read only when a role is about to upgrade: published receipts can find
+      // changes the supervisor's list misses.
+      const profiles = (): ReadonlySet<string> => {
         try {
-          profiles = validProfileNames(cliLaunchPaths(io));
+          return validProfileNames(cliLaunchPaths(io));
         } catch {
           io.stderr("启动配置未通过校验，不发布依赖该配置的新角色版本");
+          return new Set();
         }
-      }
+      };
       const assignment = upgradeDeployedRoles(
         store,
         "cardigan",

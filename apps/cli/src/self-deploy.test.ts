@@ -580,3 +580,151 @@ test("post-deploy starts the replacement Ops as host automation only when it has
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.each([
+  {
+    name: "a requirement-only change the older supervisor does not list",
+    previous: [] as string[],
+    cleared: false,
+    changed: [] as string[],
+    upgrades: true,
+  },
+  {
+    name: "requirements a project cleared while another role changed",
+    previous: ["browser.chromium", "gpu"],
+    cleared: true,
+    changed: ["pm"],
+    upgrades: false,
+  },
+])(
+  "post-deploy role sync trusts the published receipt over an older supervisor: $name",
+  async ({ previous, cleared, changed, upgrades }) => {
+    const root = await mkdtemp(join(tmpdir(), "cg-self-deploy-"));
+    const dataDir = join(root, "data");
+    const store = Store.open({ dataDir });
+    vi.mocked(startAssignmentById).mockReset();
+    const launch = { harness: "codex" as const, launch_profile_ref: "fixture" };
+    const nextDefault = defaultRoleDefinition("design_director", launch);
+    const previousDefault = {
+      ...nextDefault,
+      required_capabilities: previous,
+    };
+    const io: CliIo = {
+      env: {
+        CARDIGAN_DATA_DIR: dataDir,
+        CARDIGAN_CONFIG_DIR: root,
+        CARDIGAN_DEPLOYMENT_CHANGED_ROLES: JSON.stringify(changed),
+        // An older supervisor hashes the previous pack without machine requirements.
+        CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: JSON.stringify({
+          design_director: deploymentRolePolicyHash({
+            ...previousDefault,
+            required_capabilities: [],
+          }),
+        }),
+      },
+      cwd: root,
+      platform: "linux",
+      stdout: () => {},
+      stderr: () => {},
+      signals: { on: () => {}, off: () => {} },
+      spawnInherit: () => {
+        throw new Error("No real launch");
+      },
+      captureCommand: async () => {
+        throw new Error("No real command");
+      },
+    };
+    try {
+      await writeFile(
+        join(root, "self-deploy.yaml"),
+        JSON.stringify({
+          initial_release: root,
+          initial_sha: "a".repeat(40),
+          ready_timeout_ms: 1000,
+          stop_timeout_ms: 1000,
+          build_timeout_ms: 1000,
+          poll_interval_ms: 1000,
+        }),
+        { mode: 0o600 },
+      );
+      await writeFile(
+        join(root, "launch.yaml"),
+        JSON.stringify({
+          profiles: { fixture: { harness: "codex", model: "m" } },
+        }),
+      );
+      store.createProject({ id: "cardigan" });
+      store.uow.run((tx) => {
+        writeRole(
+          tx,
+          "cardigan",
+          { ...previousDefault, core_prompt: "", version: 1 },
+          { mode: "add" },
+        );
+        tx.events.append("cardigan", {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence("cardigan"),
+          type: "host_role_pack_published",
+          actor: { kind: "system", project_id: "cardigan" },
+          created_at: "2026-11-18T00:00:00.000Z",
+          payload: {
+            pack_hash: "previous-release",
+            roles: {
+              design_director: {
+                version: 1,
+                policy_hash: deploymentRolePolicyHash(previousDefault),
+                disposition: "matched",
+                default_hash: deploymentRolePolicyHash(previousDefault),
+              },
+            },
+          },
+        });
+        if (cleared)
+          writeRole(
+            tx,
+            "cardigan",
+            {
+              ...previousDefault,
+              required_capabilities: [],
+              core_prompt: "",
+              version: 2,
+            },
+            { mode: "update" },
+          );
+      });
+      const before = store.uow.read((tx) =>
+        getRoleVersion(tx, "cardigan", "design_director"),
+      );
+      expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
+      store.uow.read((tx) => {
+        const after = getRoleVersion(tx, "cardigan", "design_director");
+        const events = tx.events.listAfter("cardigan", undefined, 0);
+        const receipt = events
+          .filter((e) => e.type === "host_role_pack_published")
+          .at(-1)?.payload as {
+          roles: Record<string, { disposition: string }>;
+        };
+        const actions = tx.human_actions.list("cardigan");
+        if (upgrades) {
+          expect(after).toMatchObject({
+            version: 2,
+            required_capabilities: ["browser.chromium"],
+          });
+          expect(events.map((e) => e.type)).toContain("host_role_upgraded");
+          expect(actions).toEqual([]);
+          expect(receipt.roles.design_director?.disposition).toBe("matched");
+        } else {
+          expect(after).toEqual(before);
+          expect(events.map((e) => e.type)).not.toContain("host_role_upgraded");
+          expect(actions).toHaveLength(1);
+          expect(actions[0]?.instructions).toContain("当前版本有手工改动");
+          expect(receipt.roles.design_director?.disposition).toBe("conflict");
+        }
+        expect(JSON.stringify(events)).not.toContain("missing-profile");
+      });
+    } finally {
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
