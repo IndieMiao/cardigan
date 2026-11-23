@@ -211,8 +211,20 @@ export class CleanupExecutor {
     if (!git.listBuildCheckouts || !remove) return;
     const project = git.projectOf(project_id);
     if (project === undefined) return;
-    const runs = () =>
-      this.options.store.uow.read((tx) => tx.runs.list(project_id));
+    // A failed resume can leave no successor Run. Its build directory is
+    // still evidence for the recovery handoff, not disposable idle output.
+    const idle = (id: string) =>
+      this.options.store.uow.read((tx) => {
+        if (!buildCheckoutIdle(tx.runs.list(project_id), id)) return false;
+        const a = tx.assignments.get(project_id, id as AssignmentId);
+        if (a?.scope !== "work_item" || a.status === "released") return true;
+        if (a.idle_retirement?.handoff) return false;
+        return !this.options.store.listNotifications({
+          project_id,
+          assignment_id: a.id,
+          statuses: ["pending", "delivery_failed", "needs_attention"],
+        }).length;
+      });
     let owners: readonly string[] | undefined = [];
     try {
       if (!this.builds.has(project_id))
@@ -232,13 +244,13 @@ export class CleanupExecutor {
         // A released Assignment whose terminal release failed this round keeps
         // its build until the next round confirms the exit (§12.6).
         if (unconfirmed.has(assignment_id)) return;
-        if (!buildCheckoutIdle(runs(), assignment_id)) return;
+        if (!idle(assignment_id)) return;
         try {
           await remove({
             project,
             assignment_id,
             // Re-read under the repository lock: a Run queued meanwhile wins.
-            idle: () => buildCheckoutIdle(runs(), assignment_id),
+            idle: () => idle(assignment_id),
           });
         } catch (error) {
           // Reconcile reports the leftover after the cleanup grace.

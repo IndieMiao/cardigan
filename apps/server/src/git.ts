@@ -52,6 +52,7 @@ import {
   hostRepositoryLock,
   loadWorkspace,
   type MergePushConfig,
+  pinStallBackup,
   preparationBusy,
   preparationRevision,
   proveSystemReviewLimit,
@@ -347,6 +348,11 @@ export type GitPhases = MergeGit &
  * routing inject a stub; production always uses `ServerGit` (real Git).
  */
 export interface GitBinding extends GitPhases {
+  stallBackup?(
+    project: ProjectId,
+    a: Assignment,
+    action: string,
+  ): Promise<{ ref: string; sha: string }>;
   checkHead?(project: ProjectId, assignment: Assignment): Promise<string>;
   readonly verifierFor: DeliveryVerifierFor;
   pinDelivery(input: {
@@ -910,6 +916,40 @@ export class ServerGit implements GitBinding {
     }
     const truncated = Boolean(tip && tip !== base && chain.length >= limit);
     return { head, chain, truncated };
+  }
+  /** A single registered writer, never the periodic all-branches sweep. Pin the
+   * transported commit in the host-owned center, not inside an agent checkout. */
+  async stallBackup(id: ProjectId, assignment: Assignment, action: string) {
+    const project = this.projectOf(id),
+      uow = this.options.store.uow;
+    if (!project || !uow || !backupWriter(assignment))
+      throw new Error("Stall backup unavailable");
+    const source = this.workspaceServices(project, assignment);
+    const tip = await backupBranches(
+      {
+        project,
+        currentProject: () => this.projectOf(id),
+        lock: this.lock,
+        uow,
+        ...source,
+      },
+      { assignment },
+    );
+    if (!tip) throw new Error("Stall branch backup missing");
+    const git = source.central.git,
+      repo = await source.central.ensureCentral(project);
+    return this.lock({ project_id: id, repository: repo }, () =>
+      pinStallBackup(
+        {
+          create: (ref, sha) => git.compareAndSwapRef(repo, ref, sha, null),
+          read: (ref) => git.readRef(repo, ref),
+          tree: (sha) => git.treeOfCommit(repo, sha),
+        },
+        assignment.id,
+        action,
+        tip.sha,
+      ),
+    );
   }
   async snapshotOrphan(
     id: ProjectId,

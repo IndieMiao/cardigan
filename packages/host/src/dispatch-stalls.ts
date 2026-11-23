@@ -9,15 +9,19 @@ import {
   type Event,
   eventById,
   eventsOfType,
+  type HostOpsExecution,
   hasRunTarget,
   type Notification,
   pmNotificationState,
+  retirementStallHandoff,
   reviewDiscussionInstruction,
   reviewWakeBlocked,
   runById,
   runsOf,
+  sharedStallRegistration,
   stoppedByHuman,
   systemEndedTurn,
+  untouchedStallSuccessor,
 } from "@cardigan/domain";
 import type { standingResolver } from "@cardigan/store";
 
@@ -33,6 +37,9 @@ export function dispatchStallMs() {
   return value;
 }
 export type StallKind =
+  | "retirement_wait"
+  | "running_wait"
+  | "queued_successor"
   | "notification_backlog"
   | "resume_not_dispatched"
   | "standing_backlog"
@@ -45,6 +52,7 @@ export interface DispatchStall {
   review_trigger_id?: Event["id"];
   handoff_event_id?: Event["id"];
   system_finished_run_id?: string;
+  retirement_handoff?: NonNullable<HostOpsExecution["retirement_handoff"]>;
   age_ms: number;
   runtime_state: Assignment["runtime_state"];
   machine_id: string;
@@ -147,16 +155,18 @@ export function dispatchStallCauses(
     source: Pick<Event, "seq" | "card_id" | "created_at"> & { id: string },
     trigger = eventById(state.events, source.id),
     handoff?: Event,
+    auditOnly?: string,
+    transfer?: HostOpsExecution["retirement_handoff"],
   ) {
     const { id: cause, created_at: at, card_id: sourceCard, seq } = source;
     const age = Date.parse(now) - Date.parse(at);
     const due =
       handoff?.type === "bell_turn_recovery_due" ? handoff : undefined;
     const binding = due?.payload as
-      | { run_id: string; session_key: string }
+      | { run_id: string; session_key: string; queued_run_id?: string }
       | undefined;
     if (
-      (!due && !(age >= threshold)) ||
+      (!auditOnly && !due && !transfer && !(age >= threshold)) ||
       !a ||
       at < a.created_at ||
       a.status !== "active" ||
@@ -172,7 +182,9 @@ export function dispatchStallCauses(
       return;
     // Sequence numbers are local to the source stream, not to the displayed card.
     if (
-      kind !== "resume_not_dispatched" &&
+      kind !== "retirement_wait" &&
+      kind !== "running_wait" &&
+      kind !== "queued_successor" &&
       (acked.get(`${a.id}/${sourceCard ?? ""}`) ?? -1) >= seq
     )
       return;
@@ -183,17 +195,52 @@ export function dispatchStallCauses(
         r.dispatch_stop ||
         r.inactivity_stop,
     );
-    if (unfinished && !due) return;
+    const onlySuccessor =
+      (!!binding || !!transfer) &&
+      runs.some((r) => untouchedStallSuccessor(state, a, r));
+    if (unfinished && !due && !auditOnly && !transfer) return;
     const blocked = (() => {
-      if (unfinished) return "unfinished_run";
+      // A preflight incident has no stop authority, but still reports a real
+      // human stop, work-item wait or active execution in preference to it.
+      if (auditOnly && auditOnly !== "launch_snapshot_unavailable")
+        return auditOnly;
+      if (sharedStallRegistration(state, a)) return "shared_registration";
+      if (
+        binding?.queued_run_id &&
+        !runs.some(
+          (r) =>
+            r.id === binding.queued_run_id &&
+            untouchedStallSuccessor(state, a, r),
+        )
+      )
+        return "queue_changed";
+      if (unfinished && !onlySuccessor) return "unfinished_run";
+      // Our own recovery settled the session, then its successor launch was
+      // refused: the unbound queue is still this incident, for Ops to take over.
+      const settledByRefusal =
+        !!binding &&
+        !a.runtime_ref &&
+        eventsOfType(state.events, "retained_writer_refused").some((e) => {
+          const p = e.payload as {
+            assignment_id?: string;
+            run_id?: string;
+            system_finished_run_id?: string;
+          };
+          return (
+            p.assignment_id === a.id &&
+            p.system_finished_run_id === binding.run_id &&
+            (!binding.queued_run_id || p.run_id === binding.queued_run_id)
+          );
+        });
       if (
         binding &&
-        (binding.session_key !== turnSessionKey(a) ||
+        ((binding.session_key !== turnSessionKey(a) && !settledByRefusal) ||
           systemEndedTurn(state, a)?.id !== binding.run_id)
       )
         return "turn_binding_changed";
       if (stoppedByHuman(state.events, a.id)) return "human_stopped";
-      if (a.role_upgrade || a.idle_retirement) return "session_maintenance";
+      if (a.role_upgrade || (a.idle_retirement && !transfer))
+        return "session_maintenance";
       const parent = card && cards.get(card);
       if (parent && ["done", "cancelled"].includes(parent.status))
         return "closed_card";
@@ -219,7 +266,7 @@ export function dispatchStallCauses(
         )
       )
         return "work_item_wait";
-      return null;
+      return auditOnly ?? null;
     })();
     if (
       blocked &&
@@ -237,6 +284,7 @@ export function dispatchStallCauses(
       card_id: card ?? null,
       cause_id: due?.id ?? cause,
       ...(binding ? { system_finished_run_id: binding.run_id } : {}),
+      ...(transfer ? { retirement_handoff: transfer } : {}),
       ...(handoff ? { handoff_event_id: handoff.id } : {}),
       ...(trigger &&
       (trigger.type === "review_submitted" ||
@@ -250,6 +298,34 @@ export function dispatchStallCauses(
       machine_id: a.machine_id,
     });
   }
+  // A preflight rejection happened before a bell or Run existed. It describes
+  // missing launch configuration, not a missing process. Link only the exact
+  // undelivered notes in the host failure; a retry/ACK/new queue retires it.
+  const failures = new Map<string, Event>();
+  const failed = new Set(
+    notes
+      .filter((n) => n.status === "delivery_failed" && !n.run_id && !n.attempts)
+      .map((n) => n.id),
+  );
+  if (failed.size) {
+    for (const event of eventsOfType(state.events, "bell_delivery_failed")) {
+      const p = event.payload as {
+        reason?: string;
+        run_id?: string;
+        notification_ids?: string[];
+      };
+      if (
+        event.actor.kind !== "system" ||
+        p.reason !== "snapshot_unavailable" ||
+        p.run_id ||
+        !Array.isArray(p.notification_ids)
+      )
+        continue;
+      for (const id of p.notification_ids)
+        if (failed.has(id)) failures.set(id, event);
+    }
+  }
+  const preflightOwners = new Set<Assignment["id"]>();
   for (const n of notes) {
     if (
       !["pending", "belled", "delivery_failed", "needs_attention"].includes(
@@ -257,6 +333,13 @@ export function dispatchStallCauses(
       ) ||
       n.recipient.kind === "needs_you" ||
       (n.next_attempt_at && n.next_attempt_at > now)
+    )
+      continue;
+    // The original incident remains visible. Deliver its PM reminder normally,
+    // but never open a second stall solely because that reminder is still unread.
+    if (
+      eventById(state.events, n.event_id)?.type ===
+      "dispatch_stall_handoff_overdue"
     )
       continue;
     const sent = n.run_id && runById(state.runs, n.run_id);
@@ -268,6 +351,32 @@ export function dispatchStallCauses(
           : logicalOwner(n.recipient.kind);
     const a = owner && assignments.get(owner);
     if (!a) continue;
+    const failure = failures.get(n.id);
+    if (
+      failure &&
+      a.scope === "work_item" &&
+      a.runtime_ref &&
+      n.recipient.kind === "assignment" &&
+      (failure.payload as { assignment_id?: string }).assignment_id === a.id &&
+      failure.created_at >= n.created_at
+    ) {
+      // Superseded failures must not fall back into the generic backlog.
+      if (
+        (acked.get(`${a.id}/${n.card_id ?? ""}`) ?? -1) >= n.seq ||
+        (latestQueue.get(a.id) ?? "") > n.created_at
+      )
+        continue;
+      preflightOwners.add(a.id);
+      add(
+        "notification_backlog",
+        a,
+        { ...n, id: failure.id },
+        eventById(state.events, n.event_id),
+        failure,
+        "launch_snapshot_unavailable",
+      );
+      continue;
+    }
     const entry = handoffs.get(n.id);
     const handoff =
       n.status === "needs_attention" ||
@@ -300,6 +409,108 @@ export function dispatchStallCauses(
       eventById(state.events, n.event_id),
       handoff?.event,
     );
+  }
+  // Expose existing supervisor incidents, without treating their age as stop
+  // authority. Do not turn ordinary comments on a working Run into incidents.
+  for (const e of eventsOfType(state.events, "run_queued")) {
+    const p = e.payload as { assignment_id: Assignment["id"]; run_id: string };
+    const a = assignments.get(p.assignment_id);
+    if (!a?.idle_retirement?.handoff) continue;
+    const queue = runById(state.runs, p.run_id);
+    if (queue?.status !== "queued") continue;
+    const handoff = retirementStallHandoff(state, a, e.id);
+    add(
+      "retirement_wait",
+      a,
+      e,
+      eventById(state.events, queue.trigger_event_id),
+      undefined,
+      handoff ? undefined : "retirement_handoff_changed",
+      handoff,
+    );
+  }
+  for (const a of state.assignments) {
+    const wait = a.idle_retirement?.dispatch_wait;
+    const event = wait && eventById(state.events, wait.event_id);
+    const queue =
+      event &&
+      runById(state.runs, (event.payload as { run_id: string }).run_id);
+    if (
+      !a.idle_retirement?.handoff &&
+      event?.type === "session_maintenance_attention" &&
+      event.actor.kind === "system" &&
+      queue?.assignment_id === a.id &&
+      queue.status === "queued" &&
+      a.idle_retirement?.phase === "waiting"
+    ) {
+      add(
+        "retirement_wait",
+        a,
+        event,
+        event,
+        undefined,
+        "retirement_exit_unconfirmed",
+      );
+    }
+  }
+  const liveNotes = new Set(
+    notes.filter((n) => n.status !== "needs_attention").map((n) => n.id),
+  );
+  const belled = new Set(
+    notes.filter((n) => n.status === "belled").map((n) => n.run_id),
+  );
+  for (const type of ["run_inbox_stalled", "run_inactive"])
+    for (const event of eventsOfType(state.events, type)) {
+      const p = event.payload as {
+        assignment_id: Assignment["id"];
+        run_id: string;
+        notification_ids?: string[];
+      };
+      const r = runById(state.runs, p.run_id);
+      if (
+        event.actor.kind !== "system" ||
+        r?.status !== "running" ||
+        r.assignment_id !== p.assignment_id ||
+        !(type === "run_inactive"
+          ? belled.has(r.id)
+          : p.notification_ids?.some((id) => liveNotes.has(id)))
+      )
+        continue;
+      add(
+        "running_wait",
+        assignments.get(p.assignment_id),
+        event,
+        event,
+        undefined,
+        "client_execution_unconfirmed",
+      );
+    }
+  // An empty bell has no Notification row. Bind it to this precise queue, not
+  // whatever happens to be waiting at the address when the next patrol runs.
+  for (const e of eventsOfType(state.events, "bell_turn_recovery_due")) {
+    const p = e.payload as {
+      queued_run_id?: string;
+      run_id?: string;
+      assignment_id: string;
+      session_key?: string;
+    };
+    if (!p.queued_run_id || e.actor.kind !== "system") continue;
+    const owner = assignments.get(p.assignment_id as Assignment["id"]),
+      queue = runById(state.runs, p.queued_run_id);
+    if (
+      owner &&
+      queue &&
+      untouchedStallSuccessor(state, owner, queue) &&
+      p.session_key === turnSessionKey(owner) &&
+      systemEndedTurn(state, owner)?.id === p.run_id
+    )
+      add(
+        "queued_successor",
+        owner,
+        e,
+        eventById(state.events, queue.trigger_event_id),
+        e,
+      );
   }
   for (const e of eventsOfType(state.events, "work_item_resume_requested")) {
     const p = e.payload as {
@@ -367,5 +578,13 @@ export function dispatchStallCauses(
         seq: reply.event_seq,
       });
   }
-  return found;
+  // The same resume/instruction may also be visible through its source event
+  // or a sibling notification. None is a second, address-based restart path.
+  return found.filter(
+    (s) =>
+      !preflightOwners.has(s.assignment_id) ||
+      s.restart_blocked ||
+      s.system_finished_run_id ||
+      s.retirement_handoff,
+  );
 }

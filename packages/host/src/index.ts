@@ -262,6 +262,13 @@ export {
   type ResourceAdmission,
 } from "./resource-leases.js";
 export { targetProbe } from "./resource-probe.js";
+export {
+  firstIncidentBackup,
+  incidentIdentity,
+  RetainedWriterRefused,
+  recordRetainedWriterRefusal,
+  retainedWriterRefusal,
+} from "./retained-writer.js";
 export { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 export {
   applyRoleDocument,
@@ -294,6 +301,7 @@ export {
 export { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 export * from "./runtime-targets.js";
 export * from "./runtime-workers-config.js";
+export { pinStallBackup } from "./stall-backup.js";
 export {
   StandingPmRecovery,
   standingPmStallPolicy,

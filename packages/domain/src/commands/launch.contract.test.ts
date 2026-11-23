@@ -91,6 +91,7 @@ test("Role definitions preserve RoleReference compatibility; Runtime exposes its
     | "resume_or_replace"
     | "human_entry"
     | "confirm_local_exit"
+    | "confirm_local_group_exit"
     | "observe_prompt"
     | "observe_retirement"
     | "retire_idle"

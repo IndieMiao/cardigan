@@ -107,6 +107,13 @@ export interface Runtime {
     ref: RuntimeRef,
     owner: RetirementIdentity,
   ): Promise<RuntimeResult<boolean>>;
+  /** Read-only local kernel check that the receipt's process and its whole
+   * group are gone while the terminal core may still run. A finished terminal
+   * row alone never proves this. Never starts hc or signals a process. */
+  confirm_local_group_exit?(
+    ref: RuntimeRef,
+    owner: RetirementIdentity,
+  ): Promise<RuntimeResult<boolean>>;
   /** Optional host-only idle retirement. Never escalates beyond HUP/TERM. */
   retire_idle?(
     ref: RuntimeRef,
