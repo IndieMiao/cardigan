@@ -39,10 +39,16 @@ export interface HarnessOptions {
   readonly feishuSettingsPath?: string;
   /** Integration fixtures with independent processes must share the real write lock. */
   readonly diskStore?: boolean;
+  /** C-644: run heavy reads in read workers on the disk store (needs `diskStore`). */
+  readonly workbenchReads?: Omit<
+    NonNullable<WebServerOptions["workbenchReads"]>,
+    "dbPath"
+  >;
   readonly launchSettings?: WebServerOptions["launchSettings"];
   readonly roleLaunchConfig?: WebServerOptions["roleLaunchConfig"];
   readonly executionDiagnostics?: WebServerOptions["executionDiagnostics"];
   readonly mergeGate?: WebServerOptions["mergeGate"];
+  readonly clock?: WebServerOptions["clock"];
   readonly contextUsage?: WebServerOptions["contextUsage"];
   readonly log?: (event: Readonly<Record<string, unknown>>) => void;
   readonly env?: WebEnv;
@@ -94,6 +100,15 @@ export async function webHarness(
     store,
     dataDir,
     ...(options.mergeGate ? { mergeGate: options.mergeGate } : {}),
+    ...(options.clock ? { clock: options.clock } : {}),
+    ...(options.workbenchReads && options.diskStore
+      ? {
+          workbenchReads: {
+            dbPath: join(dataDir, "cardigan.db"),
+            ...options.workbenchReads,
+          },
+        }
+      : {}),
     ...(options.contextUsage ? { contextUsage: options.contextUsage } : {}),
     ...(options.executionDiagnostics
       ? { executionDiagnostics: options.executionDiagnostics }

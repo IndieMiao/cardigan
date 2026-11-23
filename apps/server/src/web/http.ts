@@ -182,6 +182,22 @@ export function sendJson(
   res.end(payload);
 }
 
+/** C-644: a JSON body a read worker already serialized. */
+export function sendJsonText(
+  res: ServerResponse,
+  status: number,
+  payload: string,
+  headers: Readonly<Record<string, string>> = {},
+): void {
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(payload),
+    "Cache-Control": "no-store",
+    ...headers,
+  });
+  res.end(payload);
+}
+
 export function sendError(
   res: ServerResponse,
   status: number,
