@@ -214,6 +214,7 @@ export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
 export { eventById, eventsForDecision, eventsOfType } from "./event-index.js";
+export * from "./hot-history.js";
 export * from "./ext-interaction.js";
 export * from "./ext-message.js";
 export * from "./flow.js";

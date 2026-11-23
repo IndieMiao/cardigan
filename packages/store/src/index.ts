@@ -97,6 +97,8 @@ export {
   type IdempotentResult,
   type IssuedToken,
   type IssueTokenInput,
+  type CommandStateScope,
+  commandStateScope,
   openStore,
   type ProjectCreateInput,
   type ProjectRecord,
@@ -107,6 +109,7 @@ export {
   type StoreUnitOfWork,
   type TokenRecord,
 } from "./store.js";
+export type { EventStreams, HotStateHints } from "./command-events.js";
 export {
   findTokenByHash,
   hashToken,

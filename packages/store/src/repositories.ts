@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { EventStreams, HotStateHints } from "./command-events.js";
 import type { SnapshotTransaction } from "./command-snapshots.js";
 import { decodeEntity } from "./decode-entity.js";
 import {
@@ -55,7 +56,7 @@ export type ReadRepository<Entity, Key> = Pick<
 
 export type ReadEventRepository = Pick<EventRepository, "listAfter"> & {
   /** Optional bulk history reader supplied by Store's transaction cache. */
-  listStreams?(project: ProjectId): ReadonlyMap<string, readonly Event[]>;
+  listStreams?(project: ProjectId): EventStreams;
 };
 
 /** Everything `uow.read` hands to its callback. */
@@ -69,6 +70,9 @@ export interface ReadRepositories extends ReadGlobalRepositories {
   readonly dependencyEvents?: (project: ProjectId) => Event[];
   readonly test_review_trust?: import("@cardigan/domain").TestReviewTrust;
   readonly cachedCommandState?: SnapshotTransaction["state"];
+  /** C-639: process-wide command state scope chosen when the Store opened. */
+  readonly command_state_scope?: "full" | "hot";
+  readonly hot_state_hints?: HotStateHints;
   readonly project_preferences: ReadRepository<ProjectPreferences, ProjectId>;
   readonly card_templates: ReadRepository<
     CardTemplate,
