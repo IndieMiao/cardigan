@@ -17,7 +17,7 @@ import { promisify } from "node:util";
 import type { Attachment } from "@cardigan/domain";
 import { fileAttachmentStore } from "@cardigan/mcp-server";
 import { afterEach, expect, test, vi } from "vitest";
-import { apkPublisher } from "./publish-artifact.js";
+import { apkPublisher, signedOnlyBy } from "./publish-artifact.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -93,7 +93,13 @@ async function setup() {
     range: 206,
     badHash: false,
     versioned: false,
+    /** CDN fill race: answer this many reads per URL with 404 / ignored Range / bad Content-Range / cut stream. */
+    missing: 0,
+    rangeIgnored: 0,
+    wrongContentRange: 0,
+    cut: 0,
   };
+  const reads = new Map<string, number>();
   const execute = vi.fn(
     async (
       tool: string,
@@ -107,7 +113,7 @@ async function setup() {
       else expect(environment).toBeUndefined();
       const arg = (name: string) => args[args.indexOf(name) + 1]!;
       if (tool === target.apksigner)
-        return `Signer #1 certificate SHA-256 digest: ${flags.signer}\n`;
+        return `Verifies\nVerified using v3 scheme (APK Signature Scheme v3): true\nNumber of signers: 1\nV3.0 Signer: certificate SHA-256 digest: ${flags.signer}\n`;
       if (tool === target.apkanalyzer)
         return `${({ "application-id": flags.manifest, "version-name": request.version, "version-code": "13" } as Record<string, string>)[args[1]!]}\n`;
       expect(arg("--config-file")).toBe("/dev/null");
@@ -139,12 +145,28 @@ async function setup() {
     expect(init?.redirect).toBe("error");
     expect(init?.credentials).toBe("omit");
     const path = String(url).slice(target.origin.length + 1);
+    const ranged = new Headers(init?.headers).has("range");
+    const n = (reads.get(`${ranged}${path}`) ?? 0) + 1;
+    reads.set(`${ranged}${path}`, n);
     const b = objects.get(path);
-    if (!b) return new Response(null, { status: 404 });
-    if (new Headers(init?.headers).has("range"))
+    if (!b || n <= flags.missing) return new Response(null, { status: 404 });
+    if (n <= flags.cut)
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(new Uint8Array(b.subarray(0, 1)));
+            c.error(Error("reset"));
+          },
+        }),
+      );
+    if (ranged && n <= flags.rangeIgnored)
+      return new Response(new Uint8Array(b));
+    if (ranged)
       return new Response(new Uint8Array(b.subarray(0, 1)), {
         status: flags.range,
-        headers: { "content-range": `bytes 0-0/${b.length}` },
+        headers: {
+          "content-range": `bytes 0-0/${n <= flags.wrongContentRange ? b.length + 1 : b.length}`,
+        },
       });
     return new Response(
       new Uint8Array(flags.badHash ? Buffer.alloc(b.length) : b),
@@ -152,9 +174,27 @@ async function setup() {
   };
   const claim = vi.fn(),
     current = vi.fn();
+  const delays = [0, 0, 0, 0];
   const call = () =>
-    apkPublisher(root, root, execute, get)(project, a, request, claim, current);
-  return { root, objects, prefix, flags, execute, get, claim, current, call };
+    apkPublisher(root, root, execute, get, delays)(
+      project,
+      a,
+      request,
+      claim,
+      current,
+    );
+  return {
+    root,
+    objects,
+    prefix,
+    flags,
+    reads,
+    execute,
+    get,
+    claim,
+    current,
+    call,
+  };
 }
 
 test("sealed test prefix, verified public bytes, Range and release sidecars", async () => {
@@ -176,6 +216,28 @@ test("sealed test prefix, verified public bytes, Range and release sidecars", as
   expect(
     (await readdir(f.root)).filter((v) => v.startsWith("publish-apk-")),
   ).toEqual([]);
+});
+test.each([
+  ["404 until the CDN fills", "missing", 4],
+  ["Range answered with a full 200", "rangeIgnored", 4],
+  ["wrong Content-Range", "wrongContentRange", 4],
+  ["connection cut mid-body", "cut", 4],
+] as const)("read-back retries a %s, bounded", async (_, flag, limit) => {
+  const ok = await setup();
+  ok.flags[flag] = limit;
+  await expect(ok.call()).resolves.toMatchObject({ sha256: sha });
+  expect(ok.objects.size).toBe(3);
+  const fail = await setup();
+  fail.flags[flag] = limit + 1;
+  await expect(fail.call()).rejects.toThrow("download");
+  expect(fail.objects.size).toBe(1);
+  expect(Math.max(...fail.reads.values())).toBe(limit + 1);
+});
+test("wrong bytes are not retried", async () => {
+  const f = await setup();
+  f.flags.badHash = true;
+  await expect(f.call()).rejects.toThrow("download");
+  expect(f.reads.get(`false${f.prefix}app.apk`)).toBe(1);
 });
 test.each([
   "configuration",
@@ -214,6 +276,118 @@ test.each([
   await expect(f.call()).rejects.toThrow(download ? "download" : issue);
   expect(f.objects.size).toBe(download ? 1 : 0);
   expect(f.claim).toHaveBeenCalledTimes(download ? 1 : 0);
+});
+
+// Verbatim `apksigner verify --verbose --print-certs` stdout from Android SDK Build Tools
+// 37.0.0 (apksigner 0.9) on disposable test keys, recorded in review evidence attachment-8965.
+const real = "39bf69c178a6e7dac6876b53ed69e341dcd9bb63cb7b6d0cdf29ac3071027f4f";
+const verified = (schemes: string) =>
+  [
+    "Verifies",
+    ...[
+      "v1 scheme (JAR signing)",
+      "v2 scheme (APK Signature Scheme v2)",
+      "v3 scheme (APK Signature Scheme v3)",
+      "v3.1 scheme (APK Signature Scheme v3.1)",
+      "v3.2 scheme (APK Signature Scheme v3.2)",
+    ].map(
+      (name, i) =>
+        `Verified using ${name}: ${schemes.split(",").includes(["1", "2", "3", "3.1", "3.2"][i]!)}`,
+    ),
+    "Number of signers: 1",
+  ].join("\n");
+const apksigner37 = {
+  v1: `${verified("1")}\nV1 Signer: certificate SHA-256 digest: ${real}\n`,
+  v2: `${verified("2")}\nV2 Signer: certificate SHA-256 digest: ${real}\n`,
+  v3: `${verified("3")}\nV3.0 Signer: certificate SHA-256 digest: ${real}\n`,
+  "v2+v3": `${verified("2,3")}\nV3.0 Signer: certificate SHA-256 digest: ${real}\n`,
+  "v3.1 rotation": `${verified("2,3,3.1")}\nV3.1 Signer: (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: ac5d9b5eea035317d6352d949dfbdddd760d6d10048b7d53a6f509dfc048cf4a\nV3.0 Signer: (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: 16930e5b8c757beb8a1f8bf27f5c7bd197deac3dbab18c090645c84ceac97f21\n`,
+};
+test("the recorded verbose output matches attachment-8965", () => {
+  expect(apksigner37.v1).toBe(
+    `Verifies\nVerified using v1 scheme (JAR signing): true\nVerified using v2 scheme (APK Signature Scheme v2): false\nVerified using v3 scheme (APK Signature Scheme v3): false\nVerified using v3.1 scheme (APK Signature Scheme v3.1): false\nVerified using v3.2 scheme (APK Signature Scheme v3.2): false\nNumber of signers: 1\nV1 Signer: certificate SHA-256 digest: ${real}\n`,
+  );
+});
+test.each(["v1", "v2", "v3", "v2+v3"] as const)(
+  "Build Tools 37 %s with the registered certificate passes",
+  (scheme) => {
+    expect(signedOnlyBy(apksigner37[scheme], real)).toBe(true);
+    expect(signedOnlyBy(apksigner37[scheme], cert)).toBe(false);
+    expect(
+      signedOnlyBy(
+        apksigner37[scheme]
+          .replaceAll("\n", "\r\n")
+          .replace(real, real.toUpperCase()),
+        real,
+      ),
+    ).toBe(true);
+  },
+);
+test("Build Tools 37 v3.1 labels parse, but a rotated second certificate is refused", () => {
+  const rotation = apksigner37["v3.1 rotation"];
+  for (const digest of [
+    "ac5d9b5eea035317d6352d949dfbdddd760d6d10048b7d53a6f509dfc048cf4a",
+    "16930e5b8c757beb8a1f8bf27f5c7bd197deac3dbab18c090645c84ceac97f21",
+  ])
+    expect(signedOnlyBy(rotation, digest)).toBe(false);
+  const single = rotation.replace(/digest: [a-f0-9]{64}/gu, `digest: ${real}`);
+  expect(signedOnlyBy(single, real)).toBe(true);
+});
+// Same certificate for SDK 28–32 and 33+, verbatim excerpts from independent review
+// evidence attachment-8967 (Build Tools 36.1.0 and 37.0.0).
+const targeted =
+  "ad707196e1a70d68523e7e9d10f2fdc7b5b67c672e998605ad13726f967925fb";
+const sdkTargeted = {
+  "36.1.0": `Verifies\nVerified using v3 scheme (APK Signature Scheme v3): true\nVerified using v3.1 scheme (APK Signature Scheme v3.1): true\nNumber of signers: 1\nSigner (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: ${targeted}\nSigner (minSdkVersion=28, maxSdkVersion=32) certificate SHA-256 digest: ${targeted}\n`,
+  "37.0.0": `Verifies\nVerified using v3 scheme (APK Signature Scheme v3): true\nVerified using v3.1 scheme (APK Signature Scheme v3.1): true\nVerified using v3.2 scheme (APK Signature Scheme v3.2): false\nNumber of signers: 1\nV3.1 Signer: (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: ${targeted}\nV3.0 Signer: (minSdkVersion=28, maxSdkVersion=32) certificate SHA-256 digest: ${targeted}\n`,
+};
+test.each(["36.1.0", "37.0.0"] as const)(
+  "Build Tools %s v3.1 with one certificate for both SDK ranges passes",
+  (version) => {
+    const output = sdkTargeted[version];
+    expect(signedOnlyBy(output, targeted)).toBe(true);
+    expect(signedOnlyBy(output, cert)).toBe(false);
+    // One range rotated to another certificate is still refused.
+    const rotated = output.replace(
+      `maxSdkVersion=32) certificate SHA-256 digest: ${targeted}`,
+      `maxSdkVersion=32) certificate SHA-256 digest: ${"0".repeat(64)}`,
+    );
+    expect(rotated).not.toBe(output);
+    expect(signedOnlyBy(rotated, targeted)).toBe(false);
+  },
+);
+const legacy = (signers: string[], count = signers.length) =>
+  `Verifies\nVerified using v1 scheme (JAR signing): true\nVerified using v2 scheme (APK Signature Scheme v2): true\nNumber of signers: ${count}\n${signers.map((d, i) => `Signer #${i + 1} certificate DN: CN=test\nSigner #${i + 1} certificate SHA-256 digest: ${d}\nSigner #${i + 1} certificate SHA-1 digest: ${"c".repeat(40)}\n`).join("")}`;
+test("older apksigner `Signer #1` output still passes", () => {
+  expect(signedOnlyBy(legacy([cert]), cert)).toBe(true);
+});
+test.each([
+  ["multiple signers", legacy([cert, cert])],
+  ["a second signer under a count of one", legacy([cert, cert], 1)],
+  ["a wrong certificate", legacy(["0".repeat(64)])],
+  [
+    "v2 and v3 disagreeing",
+    apksigner37["v2+v3"].replace(
+      "Number of signers: 1\n",
+      `Number of signers: 1\nV2 Signer: certificate SHA-256 digest: ${"0".repeat(64)}\n`,
+    ),
+  ],
+  [
+    "an unrecognised certificate line",
+    `${apksigner37.v3}Source Stamp Signer certificate SHA-256 digest: ${real}\n`,
+  ],
+  [
+    "a label without the colon",
+    apksigner37.v3.replace("V3.0 Signer:", "V3.0 Signer"),
+  ],
+  ["a missing Verifies line", apksigner37.v3.replace("Verifies\n", "")],
+  [
+    "a missing signer count",
+    apksigner37.v3.replace("Number of signers: 1\n", ""),
+  ],
+  ["no certificate line", apksigner37.v3.replace(/V3\.0 Signer: .*\n/u, "")],
+])("signature refuses %s", (_, output) => {
+  expect(signedOnlyBy(output, output.includes(real) ? real : cert)).toBe(false);
 });
 
 test.each([
