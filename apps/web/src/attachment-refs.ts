@@ -35,7 +35,7 @@ const EXTENSION_ALIASES: Readonly<Record<string, string>> = {
   markdown: "md",
   log: "txt",
 };
-/** The server's single-attachment limit (`MAX_ATTACHMENT_BYTES`). */
+/** The server's default single-attachment limit (`MAX_ATTACHMENT_BYTES`). */
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 /** The file chooser's `accept`: every type and extension the server takes. */
@@ -63,13 +63,25 @@ export function uploadMime(
   )?.[0];
 }
 
-/** Why a file cannot be uploaded, or undefined when it can. */
+/** A byte limit in MiB, as the server states it. */
+export const formatMiB = (bytes: number) =>
+  bytes % 1048576 === 0
+    ? `${bytes / 1048576} MiB`
+    : `${(bytes / 1048576).toFixed(1)} MiB`;
+
+/**
+ * Why a file cannot be uploaded, or undefined when it can. `maxBytes` is the
+ * host's published limit; null when the server does not publish one (C-616),
+ * which leaves the size to the server.
+ */
 export function uploadProblem(
   file: Pick<File, "name" | "type" | "size">,
+  maxBytes: number | null = MAX_UPLOAD_BYTES,
 ): string | undefined {
   if (uploadMime(file) === undefined)
     return "不支持这种类型，可以上传图片、PDF、txt/log、md、json、html";
-  if (file.size > MAX_UPLOAD_BYTES) return "超过 10 MiB";
+  if (maxBytes !== null && file.size > maxBytes)
+    return `超过 ${formatMiB(maxBytes)}`;
   // The server's `original_filename` rules (domain `displayText`).
   if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(file.name)) return "文件名含控制字符";
   if ([...uploadFilename(file.name)].length > 200) return "文件名超过 200 字符";

@@ -208,6 +208,69 @@ test("invalid attachment notes are rejected before posting and a 200-character U
   await waitFor(() => expect(uploadAttachment).toHaveBeenCalledOnce());
 });
 
+test("a file over the host limit is refused when pasted and the comment still goes out", async () => {
+  const addComment = vi.fn(async () => ({
+    id: "C-1#44",
+    body: "Evidence",
+    created_at: "2026-01-01",
+  }));
+  const uploadAttachment = vi.fn(async () => ({ id: "attachment-1" }));
+  render(
+    <CommentBox
+      client={{
+        ...fakeClient({ addComment, uploadAttachment }),
+        attachmentMaxBytes: () => 30 * 1024 * 1024,
+      }}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const input = screen.getByLabelText("评论正文");
+  // The current limit is part of the existing placeholder.
+  expect(input.getAttribute("placeholder")).toBe(
+    "支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件，单个不超过 30 MiB",
+  );
+  fireEvent.change(input, { target: { value: "Evidence" } });
+  const large = new File(["png"], "large.png", { type: "image/png" });
+  Object.defineProperty(large, "size", { value: 30 * 1024 * 1024 + 1 });
+  const exact = new File(["png"], "exact.png", { type: "image/png" });
+  Object.defineProperty(exact, "size", { value: 30 * 1024 * 1024 });
+  // Refused on paste: never listed, the text stays, the limit is named.
+  fireEvent.paste(input, { clipboardData: { files: [large] } });
+  expect(screen.getByRole("alert").textContent).toContain(
+    "large.png：超过 30 MiB",
+  );
+  expect(screen.queryByLabelText("large.png 的说明")).toBeNull();
+  expect((input as HTMLTextAreaElement).value).toBe("Evidence");
+  expect(addComment).not.toHaveBeenCalled();
+  // A file at the limit pasted next is listed, and the comment goes out with it.
+  fireEvent.paste(input, { clipboardData: { files: [large, exact] } });
+  expect(screen.queryByLabelText("large.png 的说明")).toBeNull();
+  expect(screen.getByLabelText("exact.png 的说明")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await waitFor(() => expect(uploadAttachment).toHaveBeenCalledOnce());
+  expect(addComment).toHaveBeenCalledOnce();
+});
+
+test("without a published limit the placeholder and paste behave as before", () => {
+  render(
+    <CommentBox
+      client={{ ...fakeClient({}), attachmentMaxBytes: () => undefined }}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const input = screen.getByLabelText("评论正文");
+  expect(input.getAttribute("placeholder")).toBe(
+    "支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件",
+  );
+  const large = new File(["png"], "large.png", { type: "image/png" });
+  Object.defineProperty(large, "size", { value: 64 * 1024 * 1024 });
+  fireEvent.paste(input, { clipboardData: { files: [large] } });
+  expect(screen.getByLabelText("large.png 的说明")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
 test("a rejected comment keeps the text and explains itself", async () => {
   render(
     <CommentBox

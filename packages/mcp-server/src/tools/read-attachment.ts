@@ -6,11 +6,15 @@ import {
 import { z } from "zod";
 import { verifyArtifact } from "../artifact-files.js";
 import {
+  formatAttachmentLimit,
+  MAX_STORED_ATTACHMENT_BYTES,
+} from "../attachment-limits.js";
+import {
   attachmentPreview,
   MAX_ATTACHMENT_PAGE_BYTES,
   resolveAttachmentInlineBytes,
 } from "../attachment-preview.js";
-import { MAX_ATTACHMENT_BYTES, sha256 } from "../attachments.js";
+import { sha256 } from "../attachments.js";
 import { ToolError } from "../errors.js";
 import {
   auditReferenceRead,
@@ -24,7 +28,7 @@ const metadata = z.object({
     .string()
     .length(64)
     .regex(/^[a-f0-9]{64}$/u),
-  size: z.number().int().min(0).max(MAX_ATTACHMENT_BYTES),
+  size: z.number().int().min(0).max(MAX_STORED_ATTACHMENT_BYTES),
   // MIME is uploader-supplied metadata, not content sniffing. Preserve valid
   // parameters (e.g. text/plain; charset=utf-8), but reject control characters.
   mime: z
@@ -111,7 +115,7 @@ export async function readVerifiedAttachment(
 ) {
   if (!metadata.safeParse(attachment).success)
     throw ToolError.validation(
-      "Invalid attachment metadata or size exceeds 10 MiB",
+      `Invalid attachment metadata or size exceeds ${formatAttachmentLimit(MAX_STORED_ATTACHMENT_BYTES)}`,
     );
   let content: Uint8Array | undefined;
   try {
@@ -185,7 +189,7 @@ export function readAttachmentTool(
         .number()
         .int()
         .min(0)
-        .max(MAX_ATTACHMENT_BYTES)
+        .max(MAX_STORED_ATTACHMENT_BYTES)
         .optional()
         .describe(
           "UTF-8 byte offset at a character boundary; omitted means zero when paging.",

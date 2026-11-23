@@ -48,7 +48,7 @@ function setup(attachments: readonly AttachmentView[] = [review]) {
   });
   render(
     <CommentBox
-      client={client}
+      client={{ ...client, attachmentMaxBytes: () => 10 * 1024 * 1024 }}
       projectId="p-1"
       cardId="C-1"
       attachments={attachments}

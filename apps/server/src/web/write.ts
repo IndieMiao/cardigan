@@ -65,6 +65,7 @@ import {
   runCapacityMachines,
 } from "@cardigan/host";
 import {
+  attachmentTooLargeMessage,
   loadCommandState,
   MAX_ATTACHMENT_BASE64,
   MAX_MCP_BODY_BYTES,
@@ -258,7 +259,7 @@ const action = z
   })
   .strict();
 const attachment = z.object({
-  file: z.string().max(MAX_ATTACHMENT_BASE64),
+  file: z.string().max(MAX_ATTACHMENT_BASE64, attachmentTooLargeMessage()),
   mime: text,
   original_filename: z.string().optional(),
   note: z.string().optional(),
@@ -1167,10 +1168,14 @@ export async function serveWrite(
   if (!supported.includes(operation ?? "")) return false;
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
   c.authorize();
-  const body = await readJsonBody(
-    c.req,
-    operation === "attachments" ? MAX_MCP_BODY_BYTES : undefined,
-  );
+  const body =
+    operation === "attachments"
+      ? await readJsonBody(
+          c.req,
+          MAX_MCP_BODY_BYTES,
+          attachmentTooLargeMessage(),
+        )
+      : await readJsonBody(c.req);
   c.authorize();
   const header = c.req.headers["idempotency-key"];
   if (operation === "mark-done")
@@ -1419,6 +1424,16 @@ export async function serveWrite(
         issueInstruction(s, a, { ...p, card_id }, ports),
       );
     } else {
+      // Name the configured limit instead of a generic schema failure (C-616).
+      if (
+        typeof body.file === "string" &&
+        body.file.length > MAX_ATTACHMENT_BASE64
+      )
+        throw new HttpRejection(
+          413,
+          "payload_too_large",
+          attachmentTooLargeMessage(),
+        );
       const { file, sha256, ...p } = defined(parsed(attachment, body));
       let receipt: Awaited<ReturnType<typeof prepareAttachmentFile>>;
       try {

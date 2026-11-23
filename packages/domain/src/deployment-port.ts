@@ -1,4 +1,7 @@
-import type { DeploymentRecord } from "./commands/deployment.js";
+import type {
+  DeploymentOperation,
+  DeploymentRecord,
+} from "./commands/deployment.js";
 
 export interface DeploymentBuild {
   readonly sha: string;
@@ -26,7 +29,14 @@ export interface DeploymentDriver {
   build(sha: string): Promise<{ build?: DeploymentBuild; log_tail: string }>;
   migrationsChanged(from: string, to: string): Promise<boolean>;
   backup(): Promise<string>;
-  beforeStop(record: DeploymentRecord): Promise<DeploymentRecord>;
+  /**
+   * `interrupted` (C-609) is the detail behind `record.interrupted_operations`;
+   * it is written to each source card, never to the deployment project.
+   */
+  beforeStop(
+    record: DeploymentRecord,
+    interrupted?: readonly DeploymentOperation[],
+  ): Promise<DeploymentRecord>;
   stop(): Promise<void>;
   start(build: DeploymentBuild): Promise<void>;
   ready(): Promise<boolean>;
@@ -36,4 +46,32 @@ export interface DeploymentDriver {
   refreshRoles(): Promise<void>;
   record(record: DeploymentRecord): Promise<void>;
   now(): number;
+  /**
+   * C-609, optional for legacy adapters: deployments start at least this far
+   * apart (ms); merges in between are deployed together as the latest main.
+   */
+  readonly batchWindowMs?: number;
+  /** C-609: upper bound (ms) of the wait for managed long operations. */
+  readonly operationWaitMs?: number;
+  /** C-609: managed long operations still running; never throws. */
+  operations?(): Promise<readonly DeploymentOperation[]>;
+  /**
+   * C-609: atomically close the start of new managed long operations and
+   * return those still running at that instant. Operations requested while
+   * the fence stands wait and run on the next server. Never throws.
+   */
+  fenceOperations?(): Promise<readonly DeploymentOperation[]>;
+  /** C-609: reopen the start of managed long operations; never throws. */
+  releaseOperationFence?(): Promise<void>;
+  /**
+   * Deduplicated audit of a batching or operation wait; never blocks. The
+   * record carries per-kind counts only; `operations` (detail) is written to
+   * each source card's own timeline.
+   */
+  waitForOperations?(
+    record: DeploymentRecord,
+    operations?: readonly DeploymentOperation[],
+  ): Promise<void>;
+  /** Interval between operation checks after the build (test seam). */
+  sleep?(ms: number): Promise<void>;
 }

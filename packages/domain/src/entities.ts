@@ -976,7 +976,23 @@ export interface DecisionResolution {
   readonly taken_over_from?: "role:pm" | "system";
   /** C-192: the human submitted the raiser's suggestion with one click. */
   readonly via_suggestion?: true;
+  /** C-617 / Q-1198: the owner's answer cited as evidence for PM's decision. */
+  readonly owner_record?: OwnerEvidence;
   readonly at: Timestamp;
+}
+/**
+ * C-617 / Q-1198: the owner's own timeline comment cited as evidence, with
+ * source and time. The resolution (answer, rationale, resolved_by) stays the
+ * deciding PM's; this record grants no authority.
+ */
+export interface OwnerEvidence {
+  readonly author: "human";
+  readonly card_id: CardId;
+  readonly timeline_entry_id: TimelineEntryId;
+  /** The comment body, copied verbatim by the control plane. */
+  readonly quote: string;
+  readonly at: Timestamp;
+  readonly attachment_id?: AttachmentId;
 }
 /**
  * C-192: the raiser's (or escalating PM's) suggested answer, shown to the

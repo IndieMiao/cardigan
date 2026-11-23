@@ -26,6 +26,7 @@ import {
   attachmentRefKind,
   attachmentTarget,
   formatBytes,
+  formatMiB,
   insertAttachmentRef,
   numberPendingRefs,
   pendingToken,
@@ -166,6 +167,8 @@ export function CommentBox({
   const caret = useRef<number | undefined>(undefined);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  /** Host attachment limit from the session; unknown on older servers. */
+  const attachmentLimit = client.attachmentMaxBytes?.();
   const [focused, setFocused] = useState(false);
   const [focusRequest, setFocusRequest] = useState(0);
   const afterFocus = useRef<((input: HTMLTextAreaElement) => void) | undefined>(
@@ -470,7 +473,7 @@ export function CommentBox({
     const accepted: PendingFile[] = [];
     const rejected: { name: string; reason: string }[] = [];
     for (const file of chosen) {
-      const problem = uploadProblem(file);
+      const problem = uploadProblem(file, attachmentLimit ?? null);
       const mime = uploadMime(file);
       if (problem || !mime)
         rejected.push({ name: file.name || file.type, reason: problem ?? "" });
@@ -556,6 +559,14 @@ export function CommentBox({
       )
     ) {
       setError("附件说明最多 200 字符，不能包含控制字符或换行。");
+      return;
+    }
+    // Refuse before posting: the comment is created first, attachments follow.
+    if (
+      attachmentLimit !== undefined &&
+      files.some((pending) => pending.file.size > attachmentLimit)
+    ) {
+      setError(`附件不能超过 ${formatMiB(attachmentLimit)}。`);
       return;
     }
     const sent = numberPendingRefs(
@@ -750,7 +761,11 @@ export function CommentBox({
                   ? optionId(attachmentCurrent)
                   : undefined
             }
-            placeholder="支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件"
+            placeholder={
+              attachmentLimit === undefined
+                ? "支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件"
+                : `支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件，单个不超过 ${formatMiB(attachmentLimit)}`
+            }
             rows={expanded ? 6 : 2}
             value={body}
             disabled={submitting}
@@ -1197,6 +1212,7 @@ export function mentionsIn(body: string): string[] {
   }
   return [...found];
 }
+
 
 /** Canonical padded base64 of a pasted image (the API decodes it strictly). */
 export async function toBase64(file: File): Promise<string> {

@@ -20,6 +20,11 @@ import {
   requestWorktreeCleanup,
   triageHumanAction,
 } from "@cardigan/domain";
+import {
+  attachmentTooLargeMessage,
+  MAX_ATTACHMENT_BASE64,
+  MAX_ATTACHMENT_BYTES,
+} from "@cardigan/mcp-server";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { routeEvent } from "@cardigan/router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -580,26 +585,50 @@ test("attachment metadata is optional and rejects invalid names and notes withou
   expect(legacy.body).not.toHaveProperty("note");
 });
 
-test("attachment boundary rejects noncanonical base64 and files over 10 MiB", async () => {
+test("attachment boundary rejects noncanonical base64 and files over the host limit", async () => {
   const comment = await request(cardPath("comments"), { body: "Target" }),
     before = snapshot();
   for (const file of [
     "not-base64!",
-    Buffer.alloc(10 * 1024 * 1024 + 1).toString("base64"),
+    Buffer.alloc(MAX_ATTACHMENT_BYTES + 1).toString("base64"),
   ]) {
-    expect(
-      await request(cardPath("attachments"), {
-        file,
-        mime: "text/plain",
-        kind: "evidence",
-        attach_to: { kind: "timeline_entry", id: comment.body.id },
-      }),
-    ).toMatchObject({
-      status: 400,
-      body: { error: { code: "validation_failed" } },
+    const response = await request(cardPath("attachments"), {
+      file,
+      mime: "text/plain",
+      kind: "evidence",
+      attach_to: { kind: "timeline_entry", id: comment.body.id },
     });
+    if (file.length > 100) {
+      // One byte over: decoded and refused (400) unless the limit is a
+      // multiple of 3 bytes, where the base64 length bound already refuses
+      // it (413). Either way the message names the host limit.
+      expect([400, 413]).toContain(response.status);
+      expect(response.body.error.message).toBe(attachmentTooLargeMessage());
+    } else
+      expect(response).toMatchObject({
+        status: 400,
+        body: { error: { code: "validation_failed" } },
+      });
     expect(snapshot()).toBe(before);
   }
+  // Over the base64 bound: refused before decoding, naming the host limit.
+  expect(
+    await request(cardPath("attachments"), {
+      file: "A".repeat(MAX_ATTACHMENT_BASE64 + 4),
+      mime: "text/plain",
+      kind: "evidence",
+      attach_to: { kind: "timeline_entry", id: comment.body.id },
+    }),
+  ).toMatchObject({
+    status: 413,
+    body: {
+      error: {
+        code: "payload_too_large",
+        message: attachmentTooLargeMessage(),
+      },
+    },
+  });
+  expect(snapshot()).toBe(before);
 }, 30_000);
 
 test("every write route enforces cookie authentication, Origin and JSON before any mutation", async () => {
