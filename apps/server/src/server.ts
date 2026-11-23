@@ -525,8 +525,14 @@ async function assembleServer(
                 ? {
                     openMobileArtifact: (scope, id, current) =>
                       openMobileArtifact(config.dataDir, scope, id, current),
-                    signMobile: (scope, current) =>
-                      requestMobileSignature(config.dataDir, scope, current),
+                    signMobile: (scope, current, chain) =>
+                      requestMobileSignature(
+                        config.dataDir,
+                        scope,
+                        current,
+                        {},
+                        chain,
+                      ),
                     chainSigning: (scope, candidate, current) =>
                       registerChainCandidate(
                         config.dataDir,

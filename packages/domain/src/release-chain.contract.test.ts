@@ -7,10 +7,14 @@ import {
   releaseChainSigned,
   releaseChainUrl,
 } from "./artifact-publication.js";
+import { prepareAttachment, uploadAttachment } from "./commands/attachments.js";
+import { postComment } from "./commands/coordination.js";
 import type { CommandState } from "./commands/core.js";
 import { createCard } from "./commands/pm.js";
 import { validateCardTemplate } from "./commands/templates.js";
 import {
+  actor,
+  apply,
   fixture,
   human,
   id,
@@ -298,4 +302,81 @@ test("template dependencies may only name earlier items of the same template", (
         ),
       ),
     ).toContain("依赖");
+});
+
+test("C-612: an artifact on the chain basis must carry a digest the approved chain binds", async () => {
+  const io = ports();
+  const posted = value(
+    postComment(fixture(), actor(), { card_id: c, body: "包" }, io),
+  );
+  if (!posted.data) throw Error("missing entry");
+  const entry = posted.data.id;
+  const base = apply(fixture(), posted);
+  const general: Decision = {
+    ...chain,
+    id: id("decision", 2),
+    key: id("decision", 2),
+    category: "general",
+    options: [{ key: "ok", description: "普通依据", impact: "无" }],
+    resolution: { ...resolution, option: "ok" },
+  };
+  const upload = async (
+    sha256: string,
+    over: {
+      decision?: Decision;
+      events?: Event[];
+      basis?: string;
+      kind?: "artifact" | "evidence";
+    } = {},
+  ) =>
+    uploadAttachment(
+      {
+        ...base,
+        decisions: [...base.decisions, over.decision ?? chain, general],
+        events: [...base.events, ...(over.events ?? [])],
+      },
+      actor(),
+      {
+        card_id: c,
+        mime: "application/vnd.android.package-archive",
+        kind: over.kind ?? "artifact",
+        basis: (over.basis ?? key) as NonNullable<Attachment["basis"]>,
+        attach_to: { kind: "timeline_entry", id: entry },
+      },
+      value(
+        await prepareAttachment(sha256, new Uint8Array([1]), {
+          put: async (d) => ({ storage_path: `attachments/${d}` }),
+          get: async () => undefined,
+        }),
+      ),
+      io,
+    );
+  // The approved unsigned digest, and a signed digest bound from a system receipt.
+  expect((await upload(unsigned)).ok).toBe(true);
+  expect((await upload(signed, { events: [bound()] })).ok).toBe(true);
+  // Other bytes on the chain basis are refused at intake, not later at signing.
+  for (const [sha256, events] of [
+    ["e".repeat(64), [bound()]],
+    [signed, []],
+    [signed, [bound({ actor: human })]],
+    [signed, [bound({ card_id: id("card", 2) })]],
+  ] as const)
+    expect(await upload(sha256, { events: [...events] })).toMatchObject({
+      ok: false,
+      error: { code: "validation_failed" },
+    });
+  // A chain that is not approved, or no longer live, is no basis for intake.
+  const { resolution: _answer, ...unanswered } = chain;
+  for (const decision of [
+    { ...chain, resolution: { ...resolution, option: "reject" } },
+    { ...chain, superseded_by: id("decision", 3) },
+    { ...unanswered, status: "open" } as Decision,
+  ])
+    expect(await upload(unsigned, { decision })).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+  // Ordinary bases and evidence keep their existing use.
+  expect((await upload("e".repeat(64), { basis: general.key })).ok).toBe(true);
+  expect((await upload("e".repeat(64), { kind: "evidence" })).ok).toBe(true);
 });

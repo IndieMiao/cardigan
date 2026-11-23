@@ -40,7 +40,8 @@ test("the real host registers and approves a release-chain candidate once per Ru
       { mode: 0o600 },
     );
     const bytes = Buffer.from("unsigned-apk");
-    const candidate = (b = bytes) => ({
+    const candidate = (b = bytes, decision = "Q-1") => ({
+      decision,
       commit: "c".repeat(40),
       sha256: createHash("sha256").update(b).digest("hex"),
       size: b.length,
@@ -67,6 +68,10 @@ test("the real host registers and approves a release-chain candidate once per Ru
         candidate(Buffer.from("other")),
         current,
       ),
+    ).resolves.toEqual({ ...first, status: "other" });
+    // Another chain never adopts this Run's candidate.
+    await expect(
+      registerChainCandidate(data, scope, candidate(bytes, "Q-2"), current),
     ).resolves.toEqual({ ...first, status: "other" });
     const shown = JSON.parse(
       execFileSync(

@@ -349,3 +349,97 @@ test("bounds scan work, resumes past young blobs, and honors a reference added b
   while (gc.pending) expect((await gc.tick()).scanned).toBeLessThanOrEqual(128);
   expect(existsSync(join(f.directory, kept))).toBe(true);
 });
+
+test("C-612: a release chain's packages stay until its publication is verified", async () => {
+  const f = fixture(),
+    project = "p-1",
+    directory = join(f.dataDir, "artifacts");
+  mkdirSync(directory);
+  const paths: string[] = [];
+  for (const [n, basis] of [
+    [1, "Q-5"],
+    [2, "Q-5"],
+    [3, "Q-6"],
+  ] as const) {
+    const blob_id = randomUUID();
+    record(f.store, `F-${n}`, String(n).repeat(64));
+    paths.push(blob(directory, blob_id, DAY));
+    f.store.uow.run((tx) => {
+      const a = tx.attachments.get(project, `F-${n}`);
+      if (!a) throw Error("Missing attachment");
+      tx.attachments.put(project, {
+        ...a,
+        kind: "artifact",
+        basis: basis as Decision["id"],
+        size: 10,
+        storage_path: `artifacts/${blob_id}`,
+        streamed_artifact: {
+          blob_id,
+          run_id: "R-1" as never,
+          created_at: new Date(NOW - DAY).toISOString(),
+        },
+      });
+    });
+  }
+  const chain = (id: string, release: boolean) =>
+    ({
+      id,
+      key: id,
+      card_id: "C-1",
+      category: "publish",
+      kind: "approve",
+      // Not a stored digest: only the chain rule may keep these packages.
+      target: { subject: { kind: "artifact_sha256", value: "9".repeat(64) } },
+      options: release
+        ? [
+            {
+              key: "release_chain",
+              description: `发布链 ${"c".repeat(40)} 发布到 https://dl.example.invalid/<version>/app.apk`,
+              impact: "x",
+            },
+          ]
+        : [{ key: "ok", description: "普通", impact: "x" }],
+      attachment_ids: [],
+    }) as unknown as Decision;
+  f.store.uow.run((tx) => {
+    tx.cards.put(project, {
+      id: "C-1",
+      project_id: project,
+      title: "打包",
+      goal: "打包",
+      acceptance_criteria: [],
+      source: { kind: "quote", text: "x" },
+      out_of_scope: [],
+      related_cards: [],
+      repo: "example/repo",
+      base_branch: "main",
+      priority: 1,
+      status: "in_progress",
+      template: "release",
+      created_by: "human",
+      created_at: clock.now(),
+    } as never);
+    tx.decisions.put(project, chain("Q-5", true));
+    tx.decisions.put(project, chain("Q-6", false));
+  });
+  writeFileSync(
+    join(f.dataDir, "artifact-retention.json"),
+    '{"p-1":{"days":30,"max_bytes":1}}',
+  );
+  await sweepArtifacts(f.store, f.dataDir, clock.now());
+  // Over capacity: the ordinary basis goes, the unfinished chain's packages stay.
+  expect(paths.map((path) => existsSync(path))).toEqual([true, true, false]);
+  f.store.uow.run((tx) =>
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project, "C-1" as never),
+      card_id: "C-1" as never,
+      type: "artifact_publication_verified",
+      actor: { kind: "system", project_id: project as never },
+      created_at: clock.now(),
+      payload: { decision_id: "Q-5", result: "ok" },
+    }),
+  );
+  await sweepArtifacts(f.store, f.dataDir, clock.now());
+  expect(paths.map((path) => existsSync(path))).toEqual([false, false, false]);
+});

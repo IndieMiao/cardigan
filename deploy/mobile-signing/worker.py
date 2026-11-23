@@ -5,8 +5,10 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
+import re
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (SigningFailure, canonical, config, database, digest, directory, json, line,
@@ -45,43 +47,99 @@ def receipt(root, spec, *, failure_details=True, dispatch_states=False):
         return {'state': state, 'sha256': row[2], **details}
 
 
-HANDOFF_MODES = (0o711, 0o751)
+# C-612 same-machine handoff. Owner full access, group traverse only (with or
+# without setgid), nothing for others: no account lists the directory, and
+# only the directory's group can reach a file by name.
+HANDOFF_MODES = (0o710, 0o2710)
+HANDOFF_FILE = 0o640
+# The packaging Run reads its copy right after the receipt; later reads use
+# the authenticated download. Expired copies are removed on the next use.
+HANDOFF_TTL = 3600
+HANDOFF_NAME = re.compile(r'\.?[0-9a-f]{32}(?:\.apk|\..+)', re.ASCII)
 
 
-def handoff(c, rid, output, sha):
+def group_members(gid):
+    """Every account in the group: listed members and primary-group users."""
+    import grp
+    import pwd
+    uids = {pwd.getpwnam(name).pw_uid for name in grp.getgrgid(gid).gr_mem}
+    return uids | {p.pw_uid for p in pwd.getpwall() if p.pw_gid == gid}
+
+
+def handoff_dir(c, worker_uid):
+    """The handoff directory, only if its group admits exactly the target worker."""
+    d = Path(c['handoff_dir'])
+    st = d.lstat()
+    require(d.is_absolute() and stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid()
+            and stat.S_IMODE(st.st_mode) in HANDOFF_MODES)
+    require(group_members(st.st_gid) - {os.getuid()} == {worker_uid})
+    return d, st.st_gid
+
+
+def prune(d, now=None):
+    # Only this signer's own files with request-number names; never follows links.
+    now = time.time() if now is None else now
+    for entry in os.scandir(d):
+        try:
+            st = entry.stat(follow_symlinks=False)
+            if (HANDOFF_NAME.fullmatch(entry.name) and stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid()
+                    and now - st.st_mtime > HANDOFF_TTL):
+                os.unlink(d / entry.name)
+        except OSError:
+            pass
+
+
+def handoff(c, s, output, sha):
     """C-612: same-machine handoff of a signed Android test APK.
 
     Only when the control host asks for it and this identity names a
-    `handoff_dir`: an administrator-created directory owned by this signing
-    UID that others may traverse but neither list nor write. The file is
-    named by the unguessable request number, written whole, then linked in
-    without replacing anything. Any problem only skips the handoff; the
-    control host still receives the bytes as before.
+    `handoff_dir`: administrator-created, owned by this signing UID, mode
+    0710 (or 02710), whose group contains no account but the request's
+    worker UID. The file is readable by that group only, named by the
+    request number, written whole, linked in without replacing anything and
+    removed after `HANDOFF_TTL` or when the control host withdraws it. Any
+    problem only skips the handoff; the control host still receives the bytes
+    and the Run downloads them as before.
     """
     try:
-        d = Path(c['handoff_dir'])
-        st = d.lstat()
-        require(d.is_absolute() and stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid()
-                and stat.S_IMODE(st.st_mode) in HANDOFF_MODES)
+        rid = s['id']
+        d, gid = handoff_dir(c, s['worker_uid'])
+        prune(d)
         dest = d / f'{rid}.apk'
         if os.path.lexists(dest):
             ds = dest.lstat()
-            require(stat.S_ISREG(ds.st_mode) and ds.st_uid == os.getuid() and stat.S_IMODE(ds.st_mode) == 0o644)
+            require(stat.S_ISREG(ds.st_mode) and ds.st_uid == os.getuid() and ds.st_gid == gid
+                    and stat.S_IMODE(ds.st_mode) == HANDOFF_FILE)
             require(digest(dest) == sha)
             return str(dest)
         fd, tmp = tempfile.mkstemp(dir=d, prefix=f'.{rid}.')
         try:
             with os.fdopen(fd, 'wb') as out, output.open('rb') as f:
+                if os.fstat(out.fileno()).st_gid != gid:
+                    os.fchown(out.fileno(), -1, gid)
                 require(transfer(f, out, os.fstat(f.fileno()).st_size) == sha)
                 out.flush()
                 os.fsync(out.fileno())
-            os.chmod(tmp, 0o644)
+                os.fchmod(out.fileno(), HANDOFF_FILE)
+                st = os.fstat(out.fileno())
+                require(st.st_gid == gid and stat.S_IMODE(st.st_mode) == HANDOFF_FILE)
             os.link(tmp, dest)
         finally:
             os.unlink(tmp)
         return str(dest)
     except Exception:
         return None
+
+
+def withdraw(c, s):
+    """Remove this request's handed-off copy after the control host revoked it."""
+    d = Path(c['handoff_dir'])
+    require(d.is_absolute() and stat.S_ISDIR(d.lstat().st_mode) and d.lstat().st_uid == os.getuid())
+    dest = d / f'{s["id"]}.apk'
+    if os.path.lexists(dest):
+        require(stat.S_ISREG(dest.lstat().st_mode) and dest.lstat().st_uid == os.getuid())
+        os.unlink(dest)
+    prune(d)
 
 
 def serve(root, src, dst, adapters=None):
@@ -93,6 +151,14 @@ def serve(root, src, dst, adapters=None):
         require(req['size'] == 0)
         send(dst, canonical(receipt(root, s, failure_details=req.get('failure_details') is True,
                                     dispatch_states=req.get('dispatch_states') is True)).encode())
+        return
+    if mode == 'withdraw':
+        # C-612: no key, no bytes; only removes this request's own handoff copy.
+        require(req['size'] == 0)
+        c = config(root/'identity.json')
+        require(all(c[k] == s[k] for k in ('project','machine','platform','app','version')) and 'handoff_dir' in c)
+        withdraw(c, s)
+        send(dst, b'withdrawn')
         return
     require(mode in ('sign', 'lookup'))
     with (root/'serial.lock').open('ab') as lock:
@@ -151,7 +217,7 @@ def serve(root, src, dst, adapters=None):
             return
         require(row[0]=='signed' and digest(output)==row[1])
         size=output.stat().st_size
-        local = (handoff(c, rid, output, row[1]) if req.get('handoff') is True and s['platform'] == 'android'
+        local = (handoff(c, s, output, row[1]) if req.get('handoff') is True and s['platform'] == 'android'
                  and 'handoff_dir' in c else None)
         send(dst,canonical({'size':size,'sha256':row[1],**({'handoff':local} if local else {})}).encode())
         with output.open('rb') as f:
@@ -159,10 +225,14 @@ def serve(root, src, dst, adapters=None):
         dst.flush()
 
 
-if __name__=='__main__':
+def main():
     try:
         os.umask(0o077)
         require(not os.environ.get('SSH_ORIGINAL_COMMAND'))
         serve(private_dir(Path(sys.argv[1])),sys.stdin.buffer,sys.stdout.buffer)
     except Exception:
         sys.exit(1)
+
+
+if __name__=='__main__':
+    main()

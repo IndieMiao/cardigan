@@ -128,6 +128,8 @@ const templateDefinition = z
           required: z.boolean(),
           kind: z.enum(["produce", "verify"]),
           target_work_item_key: z.string().optional(),
+          // C-612: keys of earlier same-template items; checked by the domain.
+          depends_on: z.array(z.string()).optional(),
         })
         .strict(),
     ),

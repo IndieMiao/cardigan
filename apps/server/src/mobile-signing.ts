@@ -53,6 +53,8 @@ function helper(
     | { artifact: { id: string; fd: number } }
     | { progress: Progress }
     | { check: string },
+  /** C-612: the release chain this control service attests is still approved. */
+  chain?: string,
 ): Promise<{ request_id: string; sha256: string; handoff?: string }> {
   const artifact = "artifact" in run ? run.artifact : undefined;
   const check = "check" in run ? run.check : undefined;
@@ -197,7 +199,12 @@ function helper(
         return fail();
       resolve(receipt);
     });
-    input.write(`${JSON.stringify(scope)}\n`);
+    // A download (permit) never carries the attestation; a request and a
+    // ledger check do, so the host releases a chain-derived grant only while
+    // its chain is still approved.
+    input.write(
+      `${JSON.stringify(chain && !artifact ? { ...scope, chain } : scope)}\n`,
+    );
   });
 }
 
@@ -249,6 +256,7 @@ function startJob(
   scope: SigningScope,
   current: () => void,
   timing: MobileSigningTiming,
+  chain: string | undefined,
 ): Job {
   const job: Job = {
     phase: "queued",
@@ -256,19 +264,26 @@ function startJob(
     mode: null,
     deadline_seconds: null,
     started: Date.now(),
-    done: helper(dataDir, scope, current, timing, {
-      progress: {
-        accepted: (id, seconds, mode) => {
-          job.phase = "transferring";
-          job.request_id = id;
-          job.mode = mode;
-          job.deadline_seconds = seconds;
-        },
-        committed: () => {
-          job.phase = "signing";
+    done: helper(
+      dataDir,
+      scope,
+      current,
+      timing,
+      {
+        progress: {
+          accepted: (id, seconds, mode) => {
+            job.phase = "transferring";
+            job.request_id = id;
+            job.mode = mode;
+            job.deadline_seconds = seconds;
+          },
+          committed: () => {
+            job.phase = "signing";
+          },
         },
       },
-    }).then(
+      chain,
+    ).then(
       (receipt) => {
         job.outcome = { receipt: receiptFor(scope, receipt) };
       },
@@ -303,6 +318,8 @@ export async function requestMobileSignature(
   scope: SigningScope,
   current: () => void,
   timing: MobileSigningTiming = {},
+  /** C-612: set only while the Run's release chain is approved (see host `attested`). */
+  chain?: string,
 ) {
   const key = JSON.stringify([
     dataDir,
@@ -342,13 +359,13 @@ export async function requestMobileSignature(
           poll_after_seconds: 5,
         };
   if (!job) {
-    job = startJob(key, dataDir, scope, current, timing);
+    job = startJob(key, dataDir, scope, current, timing, chain);
     await wait(job);
   } else if (job.outcome && "error" in job.outcome && job.request_id) {
     // The previous attempt ended after its claim without a result (e.g. the
     // helper was interrupted). Continue the same request: resend or look up.
     jobs.delete(key);
-    job = startJob(key, dataDir, scope, current, timing);
+    job = startJob(key, dataDir, scope, current, timing, chain);
     await wait(job);
   }
   const elapsed_seconds = Math.floor((Date.now() - job.started) / 1000);
@@ -379,9 +396,14 @@ export async function requestMobileSignature(
         platform: scope.platform,
         poll_after_seconds: 60,
       };
-    const now = await helper(dataDir, scope, current, timing, {
-      check: receipt.request_id,
-    });
+    const now = await helper(
+      dataDir,
+      scope,
+      current,
+      timing,
+      { check: receipt.request_id },
+      chain,
+    );
     if (now.sha256 !== receipt.sha256) throw new Error("Signing unavailable");
     return receipt;
   }
@@ -524,6 +546,7 @@ export async function registerChainCandidate(
         build: candidate.build,
         sha256: candidate.sha256,
         size: candidate.size,
+        decision: candidate.decision,
       })}\n`,
     );
     const input = child.stdio[3];

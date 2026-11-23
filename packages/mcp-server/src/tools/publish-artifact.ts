@@ -71,7 +71,8 @@ const BEFORE_WRITE = new Set<string>([
  * C-612: a failure before the first OSS write consumes nothing, so the same
  * approval is retried as often as needed after a fix. A claimed attempt that
  * ended without verification may be continued with the same approval: the
- * host only writes into an empty prefix or resumes one holding this lone APK.
+ * host only writes into an empty prefix or resumes one holding only this
+ * release's own files (APK, SHA256SUMS, release.json), writing just the gaps.
  * Only a verified publication or a live attempt in this process refuses.
  */
 function verified(
@@ -157,7 +158,7 @@ export function publicationTool(options: PublicationOptions) {
   return defineTool({
     name: "publish_artifact",
     description:
-      "Publish one signed test APK to this project's configured HTTPS destination. Approval is either a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`, or the card's approved release chain, which covers the signed APK the system bound from the signing receipt. A release chain is one publish approval for intake, signing, signed intake and publication: kind approve, target.subject artifact_sha256 = the unsigned APK digest, and one option `release_chain` described exactly `发布链 <40-hex source commit> 发布到 <https APK URL template>`, where the template may use `<version>` (versionName) and `<sha12>` (first 12 hex of the signed APK digest). Use the chain decision as the basis for the unsigned intake. A failure before any OSS write consumes nothing: fix it and call again with the same decision. After a failure that wrote only this APK, calling again with the same (or a new) approval resumes: read back, then write the sidecars. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths.",
+      "Publish one signed test APK to this project's configured HTTPS destination. Approval is either a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`, or the card's approved release chain, which covers the signed APK the system bound from the signing receipt. A release chain is one publish approval for intake, signing, signed intake and publication: kind approve, target.subject artifact_sha256 = the unsigned APK digest, and one option `release_chain` described exactly `发布链 <40-hex source commit> 发布到 <https APK URL template>`, where the template may use `<version>` (versionName) and `<sha12>` (first 12 hex of the signed APK digest). Use the chain decision as the basis for the unsigned intake. A failure before any OSS write consumes nothing: fix it and call again with the same decision. After a failure once writing began, calling again with the same (or a new) approval resumes: the files this release already wrote are read back and verified, only the missing ones are written, and nothing is overwritten. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths.",
     input,
     handler: async (request, ctx) => {
       const { actor, token } = ctx.identity,
@@ -304,7 +305,7 @@ export function publicationTool(options: PublicationOptions) {
                 )
               )
                 throw new PublicationError("already_claimed");
-              // Only this card's own earlier claim of the same URL and digest proves who wrote the lone APK.
+              // Only this card's own earlier claim of the same URL and digest proves who wrote the existing files.
               if (
                 resume &&
                 !tx.events
@@ -324,7 +325,7 @@ export function publicationTool(options: PublicationOptions) {
                 "claimed",
                 receipt,
                 resume
-                  ? "（续做：APK 已在目录中，跳过上传，只回读并补写清单）"
+                  ? "（续做：目录中只有本次发布写入的文件，已有的只回读核验，只补写缺项）"
                   : "",
               );
             });

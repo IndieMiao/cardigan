@@ -102,7 +102,17 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
 
     def dial(self,root,peer):
         self.assertEqual(peer,'fixture'); self.calls+=1
-        return subprocess.Popen([sys.executable,'-IB',str(HELPERS/'worker.py'),str(self.worker)],
+        members = getattr(self, 'members', None)
+        # C-612: stand in for the account database's view of the handoff group.
+        program = ([sys.executable,'-IB',str(HELPERS/'worker.py'),str(self.worker)] if members is None else
+                   [sys.executable,'-IB','-c','import sys; sys.path.insert(0, sys.argv[1]); import worker; '
+                    'members = set(map(int, sys.argv[3].split(",") if sys.argv[3] else [])); '
+                    'worker.group_members = lambda gid: members; '
+                    'root = sys.argv[2]; sys.argv = [worker.__file__, root]; '
+                    # A pre-C-612 signer has no main(): run it unchanged.
+                    'import runpy; worker.main() if hasattr(worker, "main") else runpy.run_path(worker.__file__, run_name="__main__")',
+                    str(HELPERS), str(self.worker), ','.join(map(str, sorted(members)))])
+        return subprocess.Popen(program,
                                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
                                 cwd=self.worker,env={'PATH':'/usr/bin:/bin','LC_ALL':'C'})
 
@@ -296,11 +306,11 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
     def actions(self):
         return [a for (a,) in self.db.execute('SELECT action FROM events WHERE request=? ORDER BY rowid',(self.spec['id'],))]
 
-    def chain(self, run='R-9', sha=None, size=None, data=None, platform='android'):
+    def chain(self, run='R-9', sha=None, size=None, data=None, platform='android', commit='c'*40, decision='Q-1'):
         ident = {**self.ctx, 'run': run, 'platform': platform}
         body = self.candidate.read_bytes() if data is None else data
-        req = {'commit': 'c'*40, 'build': 'attachment-7', 'sha256': sha or digest(self.candidate),
-               'size': len(body) if size is None else size}
+        req = {'commit': commit, 'build': 'attachment-7', 'sha256': sha or digest(self.candidate),
+               'size': len(body) if size is None else size, 'decision': decision}
         return ident, host.chain_grant(self.host, self.db, ident, req, io.BytesIO(body))
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
@@ -314,12 +324,16 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertEqual({k: spec[k] for k in ('app', 'version', 'commit', 'build', 'run')},
                          {'app': 'test.fixture', 'version': 'test-v1', 'commit': 'c'*40,
                           'build': 'attachment-7', 'run': 'R-9'})
+        self.assertEqual(host.chain_of(self.db, rid), 'Q-1')
         self.assertGreater(spec['expires'], time.time() + 3600)
         self.assertEqual(digest(self.host/'inputs'/rid), digest(self.candidate))
         self.assertEqual(self.chain()[1], (rid, 'existing'))
+        # Same bytes, but another source commit or another chain: never this chain's.
+        self.assertEqual(self.chain(commit='d'*40)[1], (rid, 'other'))
+        self.assertEqual(self.chain(decision='Q-2')[1], (rid, 'other'))
         self.assertEqual(self.chain(sha='e'*64, data=b'x')[1], (rid, 'other'))
         self.assertEqual(self.db.execute('SELECT count(*) FROM grants WHERE scope=?', (scope(ident),)).fetchone(), (1,))
-        out_rid, sha = host.request(self.host, self.db, ident, lambda: None, self.dial)
+        out_rid, sha = host.request(self.host, self.db, {**ident, 'chain': 'Q-1'}, lambda: None, self.dial)
         self.assertEqual(out_rid, rid)
         self.assertEqual(digest(self.host/'outputs'/rid), sha)
         actions = [a for (a,) in self.db.execute('SELECT action FROM events WHERE request=? ORDER BY rowid', (rid,))]
@@ -327,10 +341,50 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.db.execute('UPDATE grants SET revoked=1 WHERE id=?', (rid,))
         self.assertEqual(self.chain()[1], (rid, 'other'))
 
+    @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
+    def test_release_chain_grant_needs_its_live_chain_never_an_operator_fallback(self):
+        # C-612: without the control service's attestation that this very chain is
+        # still approved, a chain-derived grant is neither dispatched nor released.
+        ident, (rid, _) = self.chain()
+        for attestation in ({}, {'chain': 'Q-2'}):
+            with self.subTest(**attestation), self.assertRaises(ValueError):
+                host.request(self.host, self.db, {**ident, **attestation}, lambda: None, self.dial)
+        self.assertEqual(self.calls, 0)
+        self.assertEqual(self.db.execute('SELECT state FROM grants WHERE id=?', (rid,)).fetchone(), ('approved',))
+        # Withdrawn at the commit fence: the signer never gets the commit.
+        def fence():
+            raise ValueError('chain withdrawn')
+        with self.assertRaises(ValueError):
+            host.request(self.host, self.db, {**ident, 'chain': 'Q-1'}, fence, self.dial)
+        self.assertFalse((self.worker/'fixture-signer').with_name('uses').exists())
+        self.assertEqual(self.call({**ident, 'chain': 'Q-1'}), (rid, digest(self.host/'outputs'/rid)))
+        def check(attestation):
+            return subprocess.run([sys.executable, '-IB', str(HELPERS/'host.py'), str(self.host), 'check', rid],
+                                  input=(canonical({**ident, **attestation})+'\n').encode(), capture_output=True)
+        self.assertEqual(check({'chain': 'Q-1'}).returncode, 0)
+        self.assertNotEqual(check({}).returncode, 0)
+        self.assertNotEqual(check({'chain': 'Q-2'}).returncode, 0)
+        # An operator grant ignores an attestation it does not need.
+        self.assertEqual(self.call({**self.ctx, 'chain': 'Q-1'})[0], self.spec['id'])
+
+    def test_release_chain_never_adopts_an_operator_candidate(self):
+        # A registered (not approved) or approved operator grant on this Run is `other`.
+        ident = {**self.ctx, 'run': 'R-5'}
+        spec = {**self.spec, 'id': '5'*32, 'run': 'R-5', 'commit': 'c'*40}
+        host.register(self.host, self.db, spec, self.candidate)
+        req = {'commit': 'c'*40, 'build': 'attachment-7', 'sha256': digest(self.candidate),
+               'size': self.candidate.stat().st_size, 'decision': 'Q-1'}
+        self.assertEqual(host.chain_grant(self.host, self.db, ident, req, io.BytesIO(self.candidate.read_bytes())),
+                         (spec['id'], 'other'))
+        host.approve(self.host, self.db, spec)
+        self.assertEqual(host.chain_grant(self.host, self.db, ident, req, io.BytesIO(self.candidate.read_bytes())),
+                         (spec['id'], 'other'))
+        self.assertIsNone(host.chain_of(self.db, spec['id']))
+
     def test_release_chain_refuses_substitution_ios_and_ambiguous_routes(self):
         before = self.db.execute('SELECT count(*) FROM grants').fetchone()
         for kwargs in ({'sha': 'e'*64}, {'data': b'not the candidate'}, {'size': 1},
-                       {'platform': 'ios'}, {'run': 'R 9'}):
+                       {'platform': 'ios'}, {'run': 'R 9'}, {'decision': 'Q 1'}, {'decision': ''}):
             with self.assertRaises(Exception):
                 self.chain(**kwargs)
         routes = json.loads((self.host/'routes.json').read_text())
@@ -343,7 +397,7 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
     def test_release_chain_main_reads_scope_request_and_fd3(self):
         ident = {**self.ctx, 'run': 'R-8'}
         req = {'commit': 'c'*40, 'build': 'attachment-7', 'sha256': digest(self.candidate),
-               'size': self.candidate.stat().st_size}
+               'size': self.candidate.stat().st_size, 'decision': 'Q-1'}
         done = subprocess.run(['/bin/sh', '-c', 'exec "$0" -IB "$1" "$2" chain 3<"$3"', sys.executable,
                                str(HELPERS/'host.py'), str(self.host), str(self.candidate)],
                               input=(canonical(ident)+'\n'+canonical(req)+'\n').encode(), capture_output=True)
@@ -352,23 +406,26 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertEqual(status, 'new')
         self.assertRegex(rid, '^[0-9a-f]{32}$')
 
-    def with_handoff(self, mode=0o711, route=True, policy=True):
+    def with_handoff(self, mode=0o710, route=True, policy=True, members=None):
         drop = self.root/'handoff'
         drop.mkdir(mode=0o700, exist_ok=True); drop.chmod(mode)
         if policy:
             save(self.policy, canonical({**json.loads(self.policy.read_text()), 'handoff_dir': str(drop)}))
         routes = json.loads((self.host/'routes.json').read_text())
         save(self.host/'routes.json', canonical([{**r, **({'handoff': True} if route else {})} for r in routes]))
+        # The directory's group as account lookup would report it (no real groups in tests).
+        self.members = {self.spec['worker_uid']} if members is None else members
         return drop
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
     def test_same_machine_handoff_of_signed_apk(self):
-        # C-612: the signer also places the signed APK for the worker on its machine.
+        # C-612: the signer also places the signed APK, readable by the worker's group only.
         drop = self.with_handoff()
         rid, sha = self.call()
         placed = drop/f'{rid}.apk'
         self.assertEqual(digest(placed), sha)
-        self.assertEqual(oct(placed.stat().st_mode & 0o777), oct(0o644))
+        self.assertEqual(oct(placed.stat().st_mode & 0o777), oct(0o640))
+        self.assertEqual(placed.stat().st_gid, drop.stat().st_gid)
         self.assertEqual(host.handed_off(self.db, rid, sha), str(placed))
         self.assertEqual(sorted(p.name for p in drop.iterdir()), [placed.name])
         # A later lookup reports the same file; other bytes never match it.
@@ -386,14 +443,53 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
     def test_handoff_is_skipped_never_blocking(self):
-        for kwargs in ({'mode': 0o755}, {'mode': 0o733}, {'route': False}, {'policy': False}):
-            with self.subTest(**kwargs):
+        # Others may traverse or list, the group admits another account, or nothing is configured.
+        other = self.spec['worker_uid'] + 1
+        for kwargs in ({'mode': 0o711}, {'mode': 0o751}, {'mode': 0o750}, {'mode': 0o755},
+                       {'members': {self.spec['worker_uid'], other}}, {'members': {other}}, {'members': set()},
+                       {'route': False}, {'policy': False}):
+            with self.subTest(**{k: str(v) for k, v in kwargs.items()}):
                 self.setUp()
                 drop = self.with_handoff(**kwargs)
                 rid, sha = self.call()
                 self.assertEqual(digest(self.host/'outputs'/rid), sha)
                 self.assertEqual(list(drop.iterdir()), [])
                 self.assertIsNone(host.handed_off(self.db, rid, sha))
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
+    def test_handoff_expires_and_is_withdrawn_on_revoke(self):
+        drop = self.with_handoff()
+        rid, sha = self.call()
+        placed = drop/f'{rid}.apk'
+        self.assertTrue(placed.exists())
+        old = time.time() - worker.HANDOFF_TTL - 60
+        foreign = drop/'notes.txt'
+        save(foreign, b'kept')
+        os.utime(foreign, (old, old))
+        # A revocation withdraws the copy and stops reporting the path.
+        self.db.execute('UPDATE grants SET revoked=1 WHERE id=?', (rid,))
+        self.assertTrue(host.withdraw(self.db, self.host, rid, self.dial))
+        self.assertFalse(placed.exists())
+        self.assertTrue(foreign.exists())
+        self.assertIsNone(host.handed_off(self.db, rid, sha))
+        self.assertEqual(self.actions()[-1], 'handoff_withdrawn')
+        self.assertFalse(host.withdraw(self.db, self.host, rid, self.dial))
+        # Expired copies and stale temporary files go on the signer's next use; fresh ones stay.
+        expired, stale, fresh = drop/f'{"3"*32}.apk', drop/f'.{"3"*32}.tmp', drop/f'{"4"*32}.apk'
+        for path in (expired, stale, fresh):
+            save(path, b'x')
+        os.utime(expired, (old, old)); os.utime(stale, (old, old))
+        worker.prune(drop)
+        self.assertEqual(sorted(p.name for p in drop.iterdir()), sorted([fresh.name, foreign.name]))
+        # An unreachable signer never blocks the revocation.
+        self.with_handoff()
+        rid2, _ = self.chain(run='R-7')[1]
+        self.db.execute("INSERT INTO handoffs VALUES(?,?,?)", (rid2, str(drop/f'{rid2}.apk'), 'a'*64))
+        self.db.execute("INSERT INTO dispatch_peer VALUES(?,?)", (rid2, 'fixture'))
+        def unreachable(root, peer):
+            raise OSError('down')
+        self.assertFalse(host.withdraw(self.db, self.host, rid2, unreachable))
+        self.assertIsNone(host.handed_off(self.db, rid2, None))
 
     def test_budget_scales_with_input_size_and_private_limits(self):
         # C-598: 334 MB at the default 512 KiB/s each way, plus ten minutes for signing.

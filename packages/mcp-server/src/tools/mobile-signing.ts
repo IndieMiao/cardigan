@@ -5,6 +5,7 @@ import { ToolError } from "../errors.js";
 import {
   type ChainCandidate,
   type ChainGrant,
+  chainCurrent,
   prepareReleaseChain,
   signedIntake,
 } from "./release-chain-signing.js";
@@ -18,7 +19,12 @@ export interface MobileSigningOptions {
     id: string,
     current: () => void,
   ) => Promise<{ size: number; sha256: string; stream: Readable }>;
-  signMobile?: (scope: SigningScope, current: () => void) => Promise<unknown>;
+  /** `chain`: the release chain this service attests is approved right now (C-612). */
+  signMobile?: (
+    scope: SigningScope,
+    current: () => void,
+    chain?: string,
+  ) => Promise<unknown>;
   /** C-612: register and approve this Run's release-chain candidate (idempotent). */
   chainSigning?: (
     scope: SigningScope,
@@ -120,17 +126,24 @@ export function mobileSigningTool(options: MobileSigningOptions) {
   return defineTool({
     name: "request_mobile_signature",
     description:
-      "Request the one approved APK or iOS archive for the current Run. Approval is the operator's per-candidate approval or, for an Android test package, the card's approved release chain: the chain's unsigned package stored on this card is registered and approved automatically for this Run, and once signed the signed APK is stored on the card by the server (release_chain.signed_attachment_id, digest computed by the server; no download, re-upload or read-back needed; signed_intake=retry means call again). A receipt with local_handoff means the signer runs on this worker's machine and left the same signed APK at local_handoff.path: read it there and verify sha256 instead of downloading. Call this tool directly, not through a shell or HTTP client. It returns within seconds: status=queued (not yet claimed, no request_id), pending (claimed under request_id, with phase), unconfirmed (claimed, the attempt ended without a result, e.g. a server restart; the next call continues the same request_id), or signed (a receipt re-validated against the ledger, with a read-only download for this Run). Keep this Run open and call again with the same platform about every poll_after_seconds. Repeated calls never sign twice: an input transfer cut off before dispatch is resent under the same request_id, a dispatched request is only looked up. An error means the request was refused before any claim: stop and report. Never publishes.",
+      "Request the one approved APK or iOS archive for the current Run. Approval is the operator's per-candidate approval or, for an Android test package, the card's approved release chain: the chain's unsigned package stored on this card is registered and approved automatically for this Run, and once signed the signed APK is stored on the card by the server (release_chain.signed_attachment_id, digest computed by the server; no download, re-upload or read-back needed; signed_intake=retry means call again). A receipt with local_handoff means the signer runs on this worker's machine and left the same signed APK at local_handoff.path, readable by this worker only and kept for about an hour: read it there and verify sha256 instead of downloading; if it is gone or differs, download. Call this tool directly, not through a shell or HTTP client. It returns within seconds: status=queued (not yet claimed, no request_id), pending (claimed under request_id, with phase), unconfirmed (claimed, the attempt ended without a result, e.g. a server restart; the next call continues the same request_id), or signed (a receipt re-validated against the ledger, with a read-only download for this Run). Keep this Run open and call again with the same platform about every poll_after_seconds. Repeated calls never sign twice: an input transfer cut off before dispatch is resent under the same request_id, a dispatched request is only looked up. An error means the request was refused before any claim: stop and report. Never publishes.",
     input: z.object({ platform: z.enum(["android", "ios"]) }).strict(),
     handler: async ({ platform }, ctx) => {
       if (!options.signMobile)
         throw new ToolError("illegal_transition", "移动签名未启用");
       const { scope, current } = mobileAccess(ctx, platform);
       const chain = await prepareReleaseChain(options, ctx, scope, current);
+      // A chain-derived grant is attested only while its chain stays approved,
+      // re-checked at the host's commit fence; without it the host refuses.
+      const fence = chain ? chainCurrent(ctx, scope, chain, current) : current;
       let result: unknown;
       try {
-        result = await options.signMobile(scope, current);
-        current();
+        result = await options.signMobile(
+          scope,
+          fence,
+          chain?.chain.decision_id,
+        );
+        fence();
       } catch {
         throw new ToolError(
           "illegal_transition",
@@ -149,7 +162,7 @@ export function mobileSigningTool(options: MobileSigningOptions) {
           options,
           ctx,
           scope,
-          current,
+          fence,
           chain,
           result,
         ),

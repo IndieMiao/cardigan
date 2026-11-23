@@ -309,7 +309,9 @@ export const releaseCardTemplate = {
       role_id: "release_ops",
       required: true,
       depends_on: ["publish"],
-      completion_criteria: ["按外发结果写版本说明"],
+      completion_criteria: [
+        "按外发结果写版本说明并交付；交付后系统转给托管 PM Office 发给所有者，不能发送时提示 PM Ops",
+      ],
     },
     acceptance,
   ],

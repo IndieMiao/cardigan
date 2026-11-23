@@ -253,6 +253,37 @@ test("a same-machine handoff path from the host is reported with the receipt, on
   }
 }, 20_000);
 
+test("C-612: the release-chain attestation reaches the host's request and ledger check only when given", async () => {
+  for (const chain of ["Q-1", undefined]) {
+    const host = fakeHost("stored");
+    try {
+      const receipt = await settle(() =>
+        requestMobileSignature(
+          host.data,
+          jobScope(`R-chain-${chain}`),
+          () => {},
+          { program: host.program, acceptWaitMs: 300 },
+          chain,
+        ),
+      );
+      expect(receipt).toMatchObject({ status: "signed" });
+      const sent = readFileSync(join(host.ctl, "identities"), "utf8")
+        .trim()
+        .split("\n")
+        .map((row) => {
+          const [kind, json] = row.split(/ (.*)/su);
+          return [kind, JSON.parse(json ?? "{}").chain];
+        });
+      expect(sent).toEqual([
+        ["stored", chain],
+        ["check", chain],
+      ]);
+    } finally {
+      rmSync(host.data, { recursive: true, force: true });
+    }
+  }
+}, 20_000);
+
 test("a helper past its reported deadline is terminated; the next poll looks the same request up", async () => {
   const host = fakeHost("hang");
   const call = () =>

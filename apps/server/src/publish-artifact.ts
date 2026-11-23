@@ -64,10 +64,12 @@ async function stageApk(data: string, a: Attachment, dest: string) {
   }
 }
 /**
- * `apksigner verify --verbose --print-certs` names v1/v2 signers `Signer #n` and
- * v3/v3.1 signers `V3[.x] Signer[ (minSdkVersion=…)][:]`. Require a verified APK with
- * exactly one signer whose every reported certificate equals the registered one; any
- * other certificate digest line (unknown scheme, lineage, stamp) fails closed.
+ * `apksigner verify --verbose --print-certs` labels each scheme's signer. Build Tools 37
+ * (apksigner 0.9) prints `V1 Signer:`, `V2 Signer:`, `V3.0 Signer:` and, for SDK-targeted
+ * signing, `V3.1 Signer: (minSdkVersion=…, maxSdkVersion=…)`; Build Tools 36.1 prints
+ * `Signer (minSdkVersion=…, maxSdkVersion=…)` there, and older releases `Signer #n`.
+ * Require a verified APK with exactly one signer whose every reported certificate equals
+ * the registered one; any other certificate digest line fails closed.
  */
 export function signedOnlyBy(output: string, certificate: string) {
   const lines = output.split(/\r?\n/u);
@@ -75,7 +77,7 @@ export function signedOnlyBy(output: string, certificate: string) {
     l.includes("certificate SHA-256 digest:"),
   );
   const seen = digests.map((l) =>
-    /^(?:Signer #(\d+)|V3(?:\.\d+)? Signer(?: \([^()]*\))?:?) certificate SHA-256 digest: ([a-fA-F0-9]{64})$/u.exec(
+    /^(?:Signer #(\d+)|Signer \(minSdkVersion=\d+, maxSdkVersion=\d+\)|V[1-9](?:\.\d)? Signer:(?: \(minSdkVersion=\d+, maxSdkVersion=\d+\))?) certificate SHA-256 digest: ([a-fA-F0-9]{64})$/u.exec(
       l,
     ),
   );
@@ -142,27 +144,45 @@ export const ossApi =
       stdout.replace(/\n[0-9]+(?:\.[0-9]+)?\(s\) elapsed\s*$/u, ""),
     );
 
-const untruncated = (listed: { IsTruncated?: unknown }) =>
-  [false, "false"].includes(listed.IsTruncated as never);
-const emptyListing = (listed: Record<string, unknown>) =>
-  [0, "0"].includes(listed.KeyCount as never) &&
-  !listed.Contents &&
-  untruncated(listed);
-/** ossutil renders a single listed object as an object, several as an array. */
-function resumable(listed: Record<string, unknown>, key: string, size: number) {
+/**
+ * The objects already under this release's prefix, if each one is a file this
+ * publication itself writes (`app.apk`, `SHA256SUMS`, `release.json`) at its
+ * exact size and the APK is among them; an empty directory gives an empty set.
+ * Anything else (a stranger, a wrong size, a manifest without the APK, a
+ * truncated listing) is undefined: the directory is sealed, never repaired.
+ * ossutil renders a single listed object as an object, several as an array.
+ */
+export function ownObjects(
+  listed: Record<string, unknown>,
+  prefix: string,
+  sizes: ReadonlyMap<string, number>,
+): Set<string> | undefined {
   const contents = Array.isArray(listed.Contents)
     ? listed.Contents
     : listed.Contents
       ? [listed.Contents]
       : [];
-  const only = contents[0] as { Key?: unknown; Size?: unknown } | undefined;
-  return (
-    [1, "1"].includes(listed.KeyCount as never) &&
-    untruncated(listed) &&
-    contents.length === 1 &&
-    only?.Key === key &&
-    String(only.Size) === String(size)
-  );
+  if (
+    ![false, "false"].includes(listed.IsTruncated as never) ||
+    String(listed.KeyCount) !== String(contents.length)
+  )
+    return undefined;
+  const names = new Set<string>();
+  for (const o of contents as { Key?: unknown; Size?: unknown }[]) {
+    const name =
+      typeof o?.Key === "string" && o.Key.startsWith(prefix)
+        ? o.Key.slice(prefix.length)
+        : undefined;
+    const size = name === undefined ? undefined : sizes.get(name);
+    if (
+      size === undefined ||
+      String(o.Size) !== String(size) ||
+      names.has(name as string)
+    )
+      return undefined;
+    names.add(name as string);
+  }
+  return names.size === 0 || names.has("app.apk") ? names : undefined;
 }
 
 export const run: Execute = async (
@@ -352,16 +372,25 @@ export function apkPublisher(
           "--prefix",
           prefix,
           "--max-keys",
-          "2",
+          "4",
           "--output-format",
           "json",
         ),
       );
-      const resume = resumable(listed, prefix + filename, a.size);
-      if (!resume && !emptyListing(listed)) throw Error();
-      // A lone same-size APK is resumed only against this card's own earlier claim of this
-      // URL and digest; its bytes are then proven by the public SHA-256 read-back below.
-      claim(url, resume);
+      const present = ownObjects(
+        listed,
+        prefix,
+        new Map([
+          [filename, a.size],
+          ["SHA256SUMS", sums.length],
+          ["release.json", release.length],
+        ]),
+      );
+      if (!present) throw Error();
+      // A directory holding only this release's own files is resumed only against this
+      // card's earlier claim of this URL and digest; every existing object is then proven
+      // by its public SHA-256 read-back below, and only the missing ones are written.
+      claim(url, present.size > 0);
       // APK is the first conditional write for every contender. A partial directory is sealed, never repaired by overwrite.
       const put = async (name: string) => {
         current();
@@ -381,15 +410,18 @@ export function apkPublisher(
               : "text/plain",
         );
       };
-      if (resume) stage = "download";
-      else await put(filename);
+      const write = async (name: string) => {
+        if (present.has(name)) stage = "download";
+        else await put(name);
+      };
+      await write(filename);
       await readBack(get, delays, url, a.size, a.sha256);
       await readBack(get, delays, url, 1, a.sha256, { total: a.size, first });
       for (const [name, body] of [
         ["SHA256SUMS", sums],
         ["release.json", release],
       ] as const) {
-        await put(name);
+        await write(name);
         await readBack(get, delays, base + name, body.length, digest(body));
       }
       return { url, size: a.size, sha256: a.sha256 };

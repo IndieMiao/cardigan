@@ -71,6 +71,7 @@ export type RuleId =
   | "6.4/system rules"
   // §6.4 rows
   | "story/discuss"
+  | "C-612/release notes"
   | "story/decompose"
   | "story/summary"
   | "story/confirm"

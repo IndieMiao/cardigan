@@ -27,6 +27,8 @@ import type { ToolContext } from "./types.js";
 
 /** What the control service needs to register the chain's candidate for one Run. */
 export interface ChainCandidate {
+  /** The release-chain decision the host records as this grant's origin. */
+  readonly decision: string;
   readonly commit: string;
   readonly sha256: string;
   readonly size: number;
@@ -54,7 +56,7 @@ export interface ChainSigningOptions {
   readonly dataDir?: string;
   readonly attachmentStore?: AttachmentStore;
 }
-interface Prepared {
+export interface Prepared {
   readonly chain: ReleaseChain;
   readonly request_id: string;
 }
@@ -100,13 +102,11 @@ const payloadOf = (e: Event) =>
 const chainEvent = (e: Event, type: string) =>
   e.type === type && e.actor.kind === "system";
 
-/** The newest approved chain on this card whose unsigned package is stored here. */
-function chainCandidate(tx: McpReadContext, scope: SigningScope) {
+function liveChains(tx: McpReadContext, scope: SigningScope) {
   const p = scope.project,
     prefs = tx.project_preferences?.get(p, p),
-    projectEvents = tx.events.listAfter(p, undefined, 0),
-    cardEvents = tx.events.listAfter(p, scope.card as CardId, 0);
-  const chains = tx.decisions
+    projectEvents = tx.events.listAfter(p, undefined, 0);
+  return tx.decisions
     .list(p)
     .filter((q) => q.card_id === scope.card)
     .sort((a, b) =>
@@ -114,6 +114,37 @@ function chainCandidate(tx: McpReadContext, scope: SigningScope) {
     )
     .map((q) => approvedReleaseChain(p, q, prefs, projectEvents))
     .filter((c) => c !== undefined);
+}
+
+/**
+ * Re-read at every fence: a chain-derived grant is only used while its chain
+ * is still approved, not superseded and not withdrawn. Never a fallback to
+ * an operator grant: the host refuses a chain grant without this attestation.
+ */
+export function chainCurrent(
+  ctx: ToolContext,
+  scope: SigningScope,
+  prepared: Prepared,
+  current: () => void,
+) {
+  return () => {
+    current();
+    if (
+      !ctx.store.uow.read((tx) =>
+        liveChains(tx, scope).some(
+          (c) => c.decision_id === prepared.chain.decision_id,
+        ),
+      )
+    )
+      throw new Error("Release chain no longer approved");
+  };
+}
+
+/** The newest approved chain on this card whose unsigned package is stored here. */
+function chainCandidate(tx: McpReadContext, scope: SigningScope) {
+  const p = scope.project,
+    cardEvents = tx.events.listAfter(p, scope.card as CardId, 0);
+  const chains = liveChains(tx, scope);
   const attachments = tx.attachments
     .list(p)
     .filter(
@@ -193,6 +224,7 @@ export async function prepareReleaseChain(
     const grant = await options.chainSigning(
       scope,
       {
+        decision: found.chain.decision_id,
         commit: found.chain.source_commit,
         sha256: a.sha256,
         size: a.size,
@@ -326,10 +358,12 @@ export async function signedIntake(
     let published = false;
     try {
       current();
+      // Keyed by this copy, not the request: a retry after an expired or
+      // failed intake stores a fresh copy instead of replaying an old answer.
       const result = executeCommand(
         ctx,
         "upload_attachment",
-        `release-chain-signed-${receipt.request_id}`,
+        `release-chain-signed-${receipt.request_id}-${receiptStored.stream.blob_id}`,
         { ...target, sha256: receipt.sha256, artifact_size: file.size },
         (state, actor, { sha256: _s, artifact_size: _n, ...params }, ports) =>
           uploadAttachment(state, actor, params, receiptStored, ports),

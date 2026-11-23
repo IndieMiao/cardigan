@@ -183,6 +183,7 @@ function host(fail = { open: false }) {
       for await (const c of await candidate.source()) chunks.push(c as Buffer);
       seen.push(Buffer.concat(chunks));
       expect(candidate).toMatchObject({
+        decision: "Q-1",
         commit,
         sha256: unsigned,
         size: unsignedBytes.length,
@@ -227,6 +228,8 @@ test("an approved chain registers this Run's candidate once, binds the signed di
       release_chain: { signed_attachment_id: string };
     };
     expect(done.release_chain.signed_attachment_id).toMatch(/^attachment-/u);
+    // The host is told which chain this service attests for the Run.
+    expect(h.signMobile.mock.calls.every((c) => c[2] === "Q-1")).toBe(true);
     const again = (await call()) as typeof done;
     expect(again.release_chain.signed_attachment_id).toBe(
       done.release_chain.signed_attachment_id,
@@ -311,6 +314,85 @@ test("without an approved chain, or with another grant on the Run, signing is un
       tx.events.listAfter(project_id, card_id, 0),
     );
     expect(events.some((e) => e.type.startsWith("release_chain_"))).toBe(false);
+  } finally {
+    store.close();
+  }
+});
+
+test("C-612: a chain-derived grant is attested only while its chain stays approved", async () => {
+  const { store, chain, intake, ctx } = signingRun();
+  try {
+    store.uow.run((tx) => {
+      tx.decisions.put(project_id, chain);
+      tx.attachments.put(project_id, intake);
+    });
+    const h = host();
+    // The host runs the fence right before the commit to the signer.
+    h.signMobile.mockImplementation(async (_scope, current: () => void) => {
+      current();
+      return receipt;
+    });
+    const tool = mobileSigningTool({ ...h, dataDir });
+    const call = () => tool.handler({ platform: "android" }, ctx);
+    await expect(call()).resolves.toMatchObject({ status: "signed" });
+    // Superseded while the request is in flight: the fence refuses the commit.
+    h.signMobile.mockImplementationOnce(async (_scope, current: () => void) => {
+      store.uow.run((tx) =>
+        tx.decisions.put(project_id, {
+          ...chain,
+          superseded_by: "Q-2" as Decision["id"],
+        }),
+      );
+      current();
+      return receipt;
+    });
+    await expect(call()).rejects.toThrow("签名未放行");
+    // No longer approved: no attestation is sent, so the host refuses the
+    // chain-derived grant instead of treating it as an operator approval.
+    h.signMobile.mockClear();
+    await call();
+    expect(h.signMobile).toHaveBeenCalledOnce();
+    expect(h.signMobile.mock.calls[0]?.[2]).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});
+
+test("C-612: an expired signed intake is stored again under a fresh key, never replayed", async () => {
+  const { store, chain, intake, ctx } = signingRun();
+  try {
+    store.uow.run((tx) => {
+      tx.decisions.put(project_id, chain);
+      tx.attachments.put(project_id, intake);
+    });
+    const h = host();
+    const tool = mobileSigningTool({ ...h, dataDir });
+    const call = async () =>
+      (
+        (await tool.handler({ platform: "android" }, ctx)) as {
+          release_chain: { signed_attachment_id: string };
+        }
+      ).release_chain.signed_attachment_id;
+    const first = await call();
+    store.uow.run((tx) => {
+      const a = tx.attachments.get(project_id, first as Attachment["id"]);
+      if (!a?.streamed_artifact) throw Error("not streamed");
+      tx.attachments.put(project_id, {
+        ...a,
+        streamed_artifact: {
+          ...a.streamed_artifact,
+          expired: { at: NOW, reason: "capacity" },
+        },
+      });
+    });
+    const second = await call();
+    expect(second).not.toBe(first);
+    expect(
+      store.uow.read((tx) =>
+        tx.attachments.get(project_id, second as Attachment["id"]),
+      ),
+    ).toMatchObject({ sha256: signed, basis: "Q-1" });
+    expect(h.openMobileArtifact).toHaveBeenCalledTimes(2);
   } finally {
     store.close();
   }
