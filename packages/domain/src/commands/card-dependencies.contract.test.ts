@@ -7,8 +7,11 @@ import {
 import type { Card, Event } from "../entities.js";
 import { mergePlan, recordMergeResult } from "../index.js";
 import { compareDispatchOrder } from "../run-capacity.js";
-import { refreshCardDependencies } from "./card-dependencies.js";
-import type { CommandState } from "./core.js";
+import {
+  dependencyState,
+  refreshCardDependencies,
+} from "./card-dependencies.js";
+import { CommandDraft, type CommandState } from "./core.js";
 import { prepareDelivery } from "./delivery.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { createCard, updateCard } from "./pm.js";
@@ -565,4 +568,29 @@ test("completion evidence remains card/project scoped and a rolled-back event sn
     ),
   ).toBe(true);
   expect(cardDependencyComplete(wrong, prerequisite)).toBe(false);
+});
+
+test("C-631: dependencyState keeps a stable events array so the per-card history cache hits", () => {
+  const s = state([card(), before()]);
+  const d = new CommandDraft(
+    { ...s, events: [event(c2)] },
+    human,
+    "get_updates",
+    ports(),
+  );
+  // Nothing emitted: the stored history itself, so the cache is shared.
+  expect(dependencyState(d).events).toBe(d.state.events);
+  d.events.push(event(c3));
+  const joined = dependencyState(d).events;
+  expect(joined).toEqual([...d.state.events, ...d.events]);
+  expect(dependencyState(d).events).toBe(joined);
+  // A new event or an in-place replacement of the last one rebuilds it.
+  d.events.push(event(c1));
+  const grown = dependencyState(d).events;
+  expect(grown).not.toBe(joined);
+  expect(grown).toEqual([...d.state.events, ...d.events]);
+  d.events[d.events.length - 1] = event(c2);
+  const replaced = dependencyState(d).events;
+  expect(replaced).not.toBe(grown);
+  expect(replaced).toEqual([...d.state.events, ...d.events]);
 });
