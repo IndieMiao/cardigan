@@ -89,8 +89,10 @@ def run_lifecycle(scoped):
         assert pathlib.Path(work, 'private').read_text().strip() == str(entry)
         daemon = int(pathlib.Path(work, 'daemon').read_text())
         # The waiter removes the whole private root once the CLI has exited.
-        assert wait_for(lambda: not entry.exists()), 'session root not reaped'
-        assert not any(p.name.startswith('.reaping.') for p in root.iterdir())
+        # The waiter renames the entry to a claimed name first, then deletes
+        # that tree: wait for both steps, not just the rename.
+        assert wait_for(lambda: not entry.exists() and not any(
+            p.name.startswith('.reaping.') for p in root.iterdir())), 'session root not reaped'
         if scoped:
             assert wait_for(lambda: not alive(daemon)), 'setsid descendant survived its session'
             unit = m['session_unit'](f'A-7.R-9.{pid}')
