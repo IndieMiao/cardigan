@@ -39,6 +39,7 @@ import {
 } from "./core.js";
 import { currentReviewTarget, reviewRound } from "./review-round.js";
 import { restartStandingSession, resumeStanding } from "./standing.js";
+import { recordHumanStart } from "./stop.js";
 import { incrementalTestReview } from "./test-review.js";
 import { activeWork } from "./workflow.js";
 
@@ -340,6 +341,7 @@ export function queueRunInDraft(
       requireTestReviewBudget(d, assignment, originalRunTrigger(state, queued));
       exclusive(d, assignment, { run: queued });
       snapshot(queued, assignment);
+      recordHumanStart(d, assignment, queued, cardId(d, assignment));
       return queued;
     }
   }
@@ -372,7 +374,9 @@ export function queueRunInDraft(
         ? eventById(state.events, p.trigger_event_id)
         : undefined,
   });
-  return createQueuedRun(d, assignment, p);
+  const run = createQueuedRun(d, assignment, p);
+  recordHumanStart(d, assignment, run, cardId(d, assignment));
+  return run;
 }
 
 /** Entry points validate their own cause before recording creation and snapshot together. */
