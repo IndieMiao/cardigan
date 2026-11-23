@@ -676,6 +676,11 @@ async function registerOverlay(
               ),
             ]
           : []),
+        ...(derived.missing_tools.some((t) => !rules.removed_tools.includes(t))
+          ? [
+              `  当前版本缺少默认包工具 ${list(derived.missing_tools.filter((t) => !rules.removed_tools.includes(t)))}，登记后会补上；要保持移除请加 --remove-tools`,
+            ]
+          : []),
         ...(!explicit && derived.moved ? ["  追加说明会移到默认说明之后"] : []),
         ...(derived.mismatched.length
           ? [

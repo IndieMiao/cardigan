@@ -133,6 +133,11 @@ export interface DerivedOverlay {
   readonly rules: RoleOverlayRules;
   /** Default paragraphs the role lacks; composing adds them back. */
   readonly missing: readonly string[];
+  /**
+   * Default tools the role lacks. A lack is read as "not yet installed", never
+   * as a removal: only an explicit removal keeps a default tool out.
+   */
+  readonly missing_tools: readonly ToolName[];
   /** Policy fields an overlay cannot express (kind, worktree, capabilities...). */
   readonly mismatched: readonly string[];
   /** Project paragraphs were interleaved and are moved after the default text. */
@@ -170,7 +175,7 @@ export function deriveOverlayRules(
   const extra_tools = [...new Set(role.allowed_tools)].filter(
     (t) => !baseTools.includes(t),
   ) as ToolName[];
-  const removed_tools = baseTools.filter(
+  const missing_tools = baseTools.filter(
     (t) => !role.allowed_tools.includes(t),
   );
   const own = role.instructions ?? role.core_prompt;
@@ -192,12 +197,13 @@ export function deriveOverlayRules(
     base_role_id: baseRoleId,
     append_instructions: append,
     extra_tools,
-    removed_tools,
+    removed_tools: [],
   };
   const composed = composeRoleOverlay(base, rules).instructions;
   return {
     rules,
     missing,
+    missing_tools,
     mismatched,
     moved:
       missing.length === 0 &&
@@ -248,7 +254,13 @@ export function syncOverlayRoles(
         continue;
       migrated = deriveOverlayRules(latest, id);
       if (!migrated) continue;
-      if (migrated.mismatched.length || migrated.missing.length) {
+      // Lacking default text or tools may be an older pack or a deliberate
+      // removal; neither is guessed at deployment.
+      if (
+        migrated.mismatched.length ||
+        migrated.missing.length ||
+        migrated.missing_tools.length
+      ) {
         if (noticeCandidates)
           recordRoleDeferral(
             tx,
@@ -258,6 +270,9 @@ export function syncOverlayRoles(
               ...migrated.mismatched.map((f) => `${f} 与默认包不同`),
               ...(migrated.missing.length
                 ? [`缺少默认包的 ${migrated.missing.length} 段说明`]
+                : []),
+              ...(migrated.missing_tools.length
+                ? [`缺少默认包工具 ${migrated.missing_tools.join("、")}`]
                 : []),
             ].join(
               "，",

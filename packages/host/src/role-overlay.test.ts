@@ -66,7 +66,7 @@ test("C-613 a customised role that reads losslessly migrates once, keeping its r
     const before: RoleDefinition = {
       ...pack,
       instructions: `${pack.instructions}\n\n${TIME_RULE}`,
-      allowed_tools: pack.allowed_tools.filter((t) => t !== "project_snapshot"),
+      allowed_tools: [...pack.allowed_tools, "list_needs_you"],
     };
     put(store, project, before, 1);
     syncProjectOverlayRoles(store, project);
@@ -82,8 +82,8 @@ test("C-613 a customised role that reads losslessly migrates once, keeping its r
     expect(after?.default_overlay).toMatchObject({
       base_role_id: "reviewer",
       append_instructions: TIME_RULE,
-      extra_tools: [],
-      removed_tools: ["project_snapshot"],
+      extra_tools: ["list_needs_you"],
+      removed_tools: [],
       base_hash: deploymentRolePolicyHash(pack),
       composed_hash: deploymentRolePolicyHash(before),
     });
@@ -95,7 +95,7 @@ test("C-613 a customised role that reads losslessly migrates once, keeping its r
       before_hash: deploymentRolePolicyHash(before),
       after_hash: deploymentRolePolicyHash(before),
       moved: false,
-      overlay: { appended_paragraphs: 1, removed_tools: ["project_snapshot"] },
+      overlay: { appended_paragraphs: 1, extra_tools: ["list_needs_you"] },
     });
     expect(events(store, project, "host_role_overlay_migrated")).toHaveLength(
       1,
@@ -220,11 +220,33 @@ test("C-613 a stale customised role is not migrated; only other projects get the
       { ...pack, instructions: "Earlier default\n\nSSH 说明" },
       1,
     );
+    // A missing default tool may be an older pack: it is never read as a removal.
+    const reviewer = defaultRoleDefinition("reviewer", launch);
+    put(
+      store,
+      project,
+      {
+        ...reviewer,
+        instructions: `${reviewer.instructions}\n\n${TIME_RULE}`,
+        allowed_tools: reviewer.allowed_tools.filter(
+          (t) => t !== "project_snapshot",
+        ),
+      },
+      1,
+    );
     syncProjectOverlayRoles(store, project);
+    store.uow.read((tx) => {
+      expect(getRoleVersion(tx, project, "host_ops")?.version).toBe(1);
+      expect(getRoleVersion(tx, project, "reviewer")?.version).toBe(1);
+    });
+    const [notice, toolNotice] = events(
+      store,
+      project,
+      "host_role_upgrade_deferred",
+    );
     expect(
-      store.uow.read((tx) => getRoleVersion(tx, project, "host_ops")?.version),
-    ).toBe(1);
-    const [notice] = events(store, project, "host_role_upgrade_deferred");
+      (toolNotice?.payload as { notice?: string } | undefined)?.notice,
+    ).toContain("缺少默认包工具 project_snapshot");
     expect(
       (notice?.payload as { notice?: string } | undefined)?.notice,
     ).toContain(
