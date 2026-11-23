@@ -1,5 +1,5 @@
 import { lstat, realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type {
   Assignment,
   Delivery,
@@ -40,12 +40,14 @@ import {
   type CandidateDeleteRequest,
   type CandidatePushRequest,
   CentralGitTransport,
+  type CentralRepackMode,
   LocalGitTransport,
   type PushResult,
   type WorkspaceGit as WorkspaceGitPort,
   withGitTimeout,
 } from "@cardigan/git-transport";
 import {
+  acquireRepositoryFlock,
   type CandidateTestSnapshot,
   candidateTestPath,
   HostTestReviewTrust,
@@ -59,6 +61,7 @@ import {
   proveSystemReviewLimit,
   RuntimeTargetError,
   type RuntimeTargets,
+  repositoryLockPath,
   safeTargetReason,
   systemReviewLimitFailure,
   type TestIsolationSource,
@@ -85,6 +88,7 @@ import type {
   Store,
   StoreTransactionContext,
 } from "@cardigan/store";
+import type { CentralMaintenanceGit } from "./central-maintenance-loop.js";
 import { backupBranches, backupWriter } from "./git-backup.js";
 import type { SnapshotOrphan } from "./orphan-cleanup.js";
 
@@ -412,7 +416,8 @@ function agentWorkspace(
 
 /** What the control plane's phase loops need: merge plus cleanup/reconcile. */
 export type GitPhases = MergeGit &
-  ReconcileGit & {
+  ReconcileGit &
+  CentralMaintenanceGit & {
     snapshotOrphan?: SnapshotOrphan;
   };
 
@@ -1102,6 +1107,46 @@ export class ServerGit implements GitBinding {
       throw new Error("Snapshot verification failed");
     validateTarget?.();
     return sha;
+  }
+  /**
+   * C-637: the existing central repository for off-peak maintenance. It never
+   * creates one and never takes the repository lock; a separate per-project
+   * flock only keeps two host processes from repacking at the same time.
+   */
+  async centralMaintenance(project: CentralProject) {
+    const repository = this.central.repositoryPath(project);
+    const present = await lstat(repository).then(
+      (entry) => entry.isDirectory(),
+      (error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      },
+    );
+    if (!present) return undefined;
+    let release = async () => {};
+    if (process.platform === "linux")
+      try {
+        release = await acquireRepositoryFlock(
+          join(
+            dirname(
+              repositoryLockPath(this.options.dataDir, project.project_id),
+            ),
+            `maintenance-${project.project_id}.lock`,
+          ),
+          1,
+        );
+      } catch (error) {
+        if (error instanceof RepositoryLockTimeoutError) return undefined;
+        throw error;
+      }
+    const transport = this.transport;
+    return {
+      target: {
+        lastCruftPack: () => transport.lastCruftPack(repository),
+        repack: (mode: CentralRepackMode) => transport.repack(repository, mode),
+      },
+      release,
+    };
   }
   async backup(project: CentralProject): Promise<void> {
     const projectId = project.project_id as ProjectId;
