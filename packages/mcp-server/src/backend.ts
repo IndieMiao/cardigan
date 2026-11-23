@@ -78,6 +78,11 @@ export interface McpReadContext {
   ) => Pick<CommandState, "timeline" | "attachments">;
   readonly projectMergeEvents?: (project: ProjectId) => readonly Event[];
   readonly dependencyEvents?: (project: ProjectId) => readonly Event[];
+  /** Trusted host deployment records of a SHA in the control plane's other projects. */
+  readonly platformDeployments?: (
+    project: ProjectId,
+    sha: string,
+  ) => readonly Event[];
   readonly read_machine_placement?: import("@cardigan/domain").ReadMachinePlacement;
   readonly test_review_trust?: import("@cardigan/domain").TestReviewTrust;
   readonly cachedCommandState?: (

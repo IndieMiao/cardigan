@@ -74,6 +74,7 @@ import {
   clearRepositoryCache,
   createReadRepositories,
   createRepositories,
+  platformDeploymentReader,
   type ReadEventRepository,
   type ReadRepositories,
 } from "./repositories.js";
@@ -114,6 +115,7 @@ export interface StoreTransactionContext
   readonly cachedCommandState?: SnapshotTransaction["state"];
   readonly command_state_scope?: CommandStateScope;
   readonly hot_state_hints?: HotStateHints;
+  readonly platformDeployments: (project: ProjectId, sha: string) => Event[];
   readonly global_ids: GlobalIdAllocator;
   /** Issue a token inside this transaction (assignment and token commit together). */
   issueToken(input: IssueTokenInput): IssuedToken;
@@ -597,6 +599,7 @@ export class Store {
         events: { ...repositories.events, listStreams: events.listStreams },
         command_state_scope: this.#commandStateScope,
         hot_state_hints: hotStateHints(this.#db),
+        platformDeployments: platformDeploymentReader(this.#db),
         ...createGlobalRepositories(this.#db, "write", snapshots),
         global_ids: createGlobalIdAllocator(this.#db),
         ids: createIdAllocator(this.#db),
