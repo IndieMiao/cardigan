@@ -180,7 +180,7 @@ export function requestReviewLimit(
         !reviewDiscussionInstruction(
           item,
           originalRunTrigger(d.state, run),
-          d.state.decisions,
+          d.state,
         )
       )
         endRun(d, run, "blocked", decision.question, {

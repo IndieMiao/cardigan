@@ -208,6 +208,7 @@ export {
   categoryDelegated,
 } from "./decision-authorization.js";
 export * from "./decision-groups.js";
+export * from "./decision-question.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
 export * from "./dispatch-tier.js";

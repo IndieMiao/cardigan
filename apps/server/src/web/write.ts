@@ -196,7 +196,11 @@ const cardComment = comment.extend({
     ])
     .optional(),
 });
-const instruction = z.object({ body: text, work_item_id: id("work_item") });
+const instruction = z.object({
+  body: text,
+  work_item_id: id("work_item"),
+  decision_id: id("decision").optional(),
+});
 const cardUpdate = z
   .object({
     hold: z

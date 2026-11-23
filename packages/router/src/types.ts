@@ -78,6 +78,7 @@ export type RuleId =
   | "6.4/work-item comment"
   | "6.4/card comment without mention"
   | "6.4/instruction"
+  | "6.4/decision question answered"
   | "6.4/work item assigned"
   | "6.4/work item resumed"
   | "6.4/delivery submitted"
