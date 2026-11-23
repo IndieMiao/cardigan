@@ -49,7 +49,7 @@ export const GUARD_PATTERN =
 
 /** Asking to remove a confirmation or stop is the opposite of adding a guard. */
 const GUARD_REMOVAL =
-  /(?:移除|去掉|删掉|删除|取消|不应|不该|不要|无需|不需要)[^。；;\n]{0,12}(?:确认|拍板|停住|停下|暂停|停摆|阻塞)|(?:确认|拍板|停住|停下|暂停|停摆|阻塞)[^。；;\n]{0,6}(?:是多余|多余的|应移除|应去掉|应取消)|多余(?:的)?(?:人工)?确认/u;
+  /(?:移除|去掉|删掉|删除|取消|不应|不该|不要|无需|不需要)[^。；;，,\n]{0,12}(?:确认|拍板|停住|停下|暂停|停摆|阻塞)|(?:确认|拍板|停住|停下|暂停|停摆|阻塞)[^。；;\n]{0,6}(?:是多余|多余的|应移除|应去掉|应取消)|多余(?:的)?(?:人工)?确认/u;
 
 /** A guard request: a new confirmation, stop condition or "stop when unsure". */
 export function isGuardRequest(description: string): boolean {
@@ -112,6 +112,17 @@ function standingOf(
   return inner?.kind === "standing" ? inner.key : undefined;
 }
 
+/** Whether a basis cites the card's criteria or invariants, directly or via a PCn. */
+function citesCard(
+  ref: BasisRef | undefined,
+  checklist: readonly PassCondition[] | undefined,
+): boolean {
+  const condition =
+    ref?.kind === "pass_condition" ? checklist?.[ref.index - 1] : undefined;
+  const inner = condition ? parseBasis(condition.basis) : ref;
+  return inner?.kind === "acceptance" || inner?.kind === "invariant";
+}
+
 function downgradeReason(
   issue: ReviewIssue,
   card: Pick<Card, "acceptance_criteria" | "invariants">,
@@ -121,9 +132,12 @@ function downgradeReason(
     return "no_basis";
   const ref = parseBasis(issue.basis);
   const standing = standingOf(ref, checklist);
+  // A stop or refusal the card already requires for data or permissions is a
+  // missing behaviour, not a new guard.
   if (
     isGuardRequest(issue.description) &&
-    !(standing && GUARD_EXEMPT.has(standing))
+    !(standing && GUARD_EXEMPT.has(standing)) &&
+    !(issue.impact === "data_or_permission" && citesCard(ref, checklist))
   )
     return "guard";
   if (

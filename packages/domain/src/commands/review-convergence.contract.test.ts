@@ -399,6 +399,53 @@ test("V-3029#5: asking to remove a guard is not a guard; a PCn keeps its conditi
   expect(kept.verdict).toBe("reject");
 });
 
+test("V-3091: a stop or refusal the criteria require for data or permissions is not a new guard", async () => {
+  const criteria = [
+    "非成员不能修改卡片",
+    "预算用完后暂停派发，不再扣款",
+    "数量最多 10 件",
+  ];
+  const cases = [
+    ["AC2", "预算用完后应暂停派发，当前仍继续扣款，余额变为负数"],
+    ["AC3", "第 11 件应拒绝推进保存，当前写入了 11 件"],
+    ["AC1", "Token 无法核实时应拒绝请求，当前直接放行，非成员可改卡"],
+    ["AC1", "成员校验应 fail closed，当前查询失败时放行写入"],
+  ] as const;
+  for (const [basis, description] of cases) {
+    const flagged = bug({ basis, description, impact: "data_or_permission" });
+    // Without a checklist.
+    const s = setup(5, criteria);
+    expect(s.review(await s.deliver(), [flagged]).verdict, description).toBe(
+      "reject",
+    );
+    // With a checklist, cited directly and through a PCn.
+    for (const cited of [basis, "PC1"]) {
+      const listed = setup(5, criteria);
+      listed.review(await listed.deliver(), [bug({ basis: "AC1" })]);
+      listed.review(await listed.deliver(), [bug({ basis: "AC1" })], {
+        pass_conditions: [{ description, basis }],
+      });
+      const r = listed.review(await listed.deliver(), [
+        { ...flagged, basis: cited },
+      ]);
+      expect(r.verdict, `${cited}: ${description}`).toBe("reject");
+    }
+  }
+
+  // Guards without a data or permission anchor are still downgraded.
+  const guard = "核不清提交状态时就停住，交人工确认后再继续";
+  for (const issue of [
+    bug({ basis: "AC2", description: guard }),
+    bug({ basis: "ui_copy", description: guard, impact: "data_or_permission" }),
+    bug({ basis: "AC1", description: "不要直接合并，应先人工确认" }),
+  ]) {
+    const s = setup(5, criteria);
+    const r = s.review(await s.deliver(), [issue]);
+    expect(r.verdict, issue.description).toBe("pass");
+    expect(r.issues[0]?.follow_up).toEqual({ reason: "guard" });
+  }
+});
+
 test("V-3029#6: parallel lanes disputing the same shared finding share one PM decision", async () => {
   const f = await sharedReviewFixture(2, [first], 2);
   f.review(2, [first]);
