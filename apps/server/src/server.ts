@@ -86,6 +86,7 @@ import {
   trackedPublisher,
 } from "./publication-recovery.js";
 import { apkPublisher } from "./publish-artifact.js";
+import { RepositoryLockMetrics } from "./repository-lock-metrics.js";
 import {
   clearTickProfileSync,
   releaseSha,
@@ -315,12 +316,18 @@ async function assembleServer(
   };
   setTickProfileSync(syncProfiles);
   profiles.sync();
+  // C-636: always-on repository lock wait/hold times, by operation.
+  const lockMetrics = new RepositoryLockMetrics({
+    log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+    sha,
+  });
   let profilerStopped = false;
   const stopProfiler = () => {
     if (profilerStopped) return;
     profilerStopped = true;
     clearTickProfileSync(syncProfiles);
     profiles.close();
+    lockMetrics.stop();
   };
   // Request latencies go to whichever profiler is installed right now.
   const mcpLog: Logger = (entry) => {
@@ -402,6 +409,7 @@ async function assembleServer(
         : { captureAgent: options.captureAgent }),
       onSourceError: (entry) =>
         process.stdout.write(`${JSON.stringify(entry)}\n`),
+      onLockSample: lockMetrics.record,
     });
 
   const probes = serverProbes({
