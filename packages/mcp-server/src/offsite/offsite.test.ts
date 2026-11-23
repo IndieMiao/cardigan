@@ -207,6 +207,21 @@ test("a blob missing locally comes from the verified copy and is cached", async 
   expect(fake.requests.filter((r) => r.method === "GET")).toHaveLength(gets);
 });
 
+test("C-616: a restore is bounded by the stored ceiling, not a lowered upload limit", async () => {
+  const o = await offsite();
+  // Accepted earlier under a larger limit; the host now allows 1 KiB uploads.
+  const body = Buffer.alloc(4096, 0x61);
+  const digest = synced(o, attachmentKey(sha256(body)), body);
+  const blobs = fileAttachmentStore(dataDir, 1024);
+  expect(await blobs.get(digest)).toEqual(body);
+  expect(await readFile(join(dataDir, "attachments", digest))).toEqual(body);
+  // New writes still follow the lowered limit.
+  const fresh = Buffer.alloc(2048, 0x62);
+  await expect(blobs.put(sha256(fresh), fresh)).rejects.toThrow(
+    "Attachment exceeds 1024 bytes",
+  );
+});
+
 test.each(["corrupt", "down", "denied"] as const)(
   "a %s copy is refused and the read stays missing",
   async (mode) => {
