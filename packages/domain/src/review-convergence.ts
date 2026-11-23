@@ -9,6 +9,7 @@ import type {
   WorkItem,
 } from "./entities.js";
 import type { CardId, ReviewId, WorkItemId } from "./ids.js";
+import { evidenceWait } from "./review-evidence.js";
 
 /**
  * C-610: project-wide invariants a must-fix may cite besides the card's own
@@ -262,9 +263,15 @@ export interface RejectionStreakEpisode {
 /** C-610 metric: every time a verifier reaches three consecutive rejections. */
 export function rejectionStreakEpisodes(state: {
   readonly events: readonly Event[];
-  readonly reviews: readonly Pick<Review, "id" | "work_item_id">[];
+  readonly reviews: readonly (Pick<Review, "id" | "work_item_id"> &
+    Partial<Pick<Review, "verdict" | "evidence_pending">>)[];
 }): RejectionStreakEpisode[] {
-  const items = new Map(state.reviews.map((r) => [r.id, r.work_item_id]));
+  // C-618: pure platform evidence waits neither extend nor end a streak.
+  const items = new Map(
+    state.reviews
+      .filter((r) => !evidenceWait(r))
+      .map((r) => [r.id, r.work_item_id]),
+  );
   const streaks = new Map<WorkItemId, number>();
   const open = new Map<WorkItemId, number>();
   const episodes: RejectionStreakEpisode[] = [];

@@ -620,6 +620,25 @@ test("C-610: every verifier role states review convergence once; PM only handles
   expect(instructionsFor("coder")).not.toContain(REVIEW_CONVERGENCE_RULES[0]);
 });
 
+test("C-618: verifiers mark platform-blocked evidence pending; authors supply it on a new delivery", () => {
+  const rules = REVIEW_CONVERGENCE_RULES.join("\n");
+  for (const phrase of [
+    "`evidence_pending={items, blocker}`",
+    "证据待补不是通过",
+    "不算驳回、不消耗轮数、不重置连续驳回",
+    "代码或功能必改照常写进 `issues`",
+    "`evidence_attachments`",
+    "`evidence_not_applicable`",
+    "旧版本上的证据不能沿用",
+  ])
+    expect(rules).toContain(phrase);
+  for (const role of ["coder", "frontend_engineer"] as const) {
+    const body = instructionsFor(role);
+    expect(body).toContain("`pending_evidence`");
+    expect(body).toContain("系统会通知你补证，只补仍适用的证据");
+  }
+});
+
 // C-162: wording copied independently of role-pack.ts.
 const MERGE_RULE =
   "只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，`request_human_action` 才传 `blocks_merge=true` 并填写 `prerequisite=credential|external_account`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。";

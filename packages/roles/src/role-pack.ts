@@ -156,6 +156,7 @@ export const REVIEW_CONVERGENCE_RULES = [
   "流程版本 ≥5：每条必改项填 `basis`，写它对应的依据：`ACn`（本卡第 n 条验收标准）、`INVn`（`card.invariants` 第 n 条）、`PCn`（当前通过条件清单第 n 条），或常驻不变量 `lost_work`（会丢工作或数据）、`dual_executor`（会出现两个执行者）、`security`（凭据泄露、越权、注入）、`check_failed`（必跑测试或检查实际失败）、`ui_copy`（未要求的说明小字）。没有依据的必改项由系统记为后续跟进，不挡合并，卡片合并时汇总成后续卡草稿交 PM。安全、权限、数值边界问题照常是必改项，写上对应依据即可。",
   "同一验证项第 2 次驳回时必须带 `pass_conditions`：1–10 条有限、可验证的通过条件，每条写 `description` 和依据（ACn、INVn 或常驻不变量）；第 1 次驳回附带的清单不生效。作者按清单修；之后的审核只核对清单，必改项用 `PCn` 引用，新发现的边角写成建议，系统也会记为后续跟进。`lost_work`、`dual_executor`、`security`、`check_failed`、对齐回合写入的 `INVn`，以及 impact 为 `data_or_permission` 的数据、权限或数值上限错误不受清单限制。",
   '连续第 3 次驳回时系统开作者与审核员的对齐回合，不交 PM 加轮：作者用 `post_comment.review_alignment={work_item_id, step:"propose", invariants}` 提出不变量清单；你 `reply_to` 该条，同意传 `step:"confirm"`，有分歧传 `step:"dispute"` 并写明分歧，也可提出修改后的清单。同意后清单写入 `card.invariants`，系统恢复审核；只有分歧才交 PM 裁决。',
+  '流程版本 ≥5：必需验收证据只因可核查的平台阻塞暂时拿不到时（作者自己能取得的证据和普通测试失败不算），不把缺证据写成必改项，改填 `evidence_pending={items, blocker}`：`items` 写缺的证据和它对应的 `ACn`/`INVn`/`PCn`，`blocker` 为 `{kind:"card_merged", target_id:本项目未完成的平台卡}` 或 `{kind:"deployment_ready", target_id:平台修复的完整提交 SHA}`。证据待补不是通过：没有代码必改时结论为 conditional，不算驳回、不消耗轮数、不重置连续驳回；代码或功能必改照常写进 `issues`。平台阻塞解除后系统通知作者补证，你只核对仍缺的证据：通过前用 `evidence_attachments` 引用绑定当前交付的证据附件，或用 `evidence_not_applicable` 说明为何不再适用；旧版本上的证据不能沿用。',
   "不提守卫类必改项：新增人工确认或拍板、停摆条件、“核不清就停住”。除非依据是 `lost_work`、`dual_executor` 或 `security`（引用 `PCn` 时按该通过条件的依据），系统会把它们记为后续跟进；要求移除多余确认或停摆的意见不算守卫。验收标准或卡上不变量本身要求的暂停、拒绝没有实现（如预算用完仍扣款、超过上限仍写入）不算新增守卫：依据写对应的 `ACn`/`INVn`（或指向它们的 `PCn`），impact 填 `data_or_permission`，照常是必改项。发现的问题优先建议自动修复或降级为告警继续推进。",
 ] as const;
 export const VERIFIER_MUST_FIX_RULES = [
@@ -301,6 +302,7 @@ const CODER_RULES = [
   "- `request_recheck({card_id, reason, idempotency_key})` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。",
   "- 流程版本 ≤2 的旧卡不调用 `request_check`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 `request_recheck`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。",
   `- ${MACOS_CHECK_RULE}`,
+  "- 审核员把必需证据标为平台阻塞待补（`get_card` 验证项上的 `pending_evidence`）时，不为它改代码；平台阻塞解除后系统会通知你补证，只补仍适用的证据，提交新交付并把证据附件绑定到新交付（`upload_attachment` 的 `attach_to` 指向新交付），旧版本证据不能沿用。",
   "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
   `- ${HUMAN_ACTION_MERGE_RULE}`,
 ] as const;
