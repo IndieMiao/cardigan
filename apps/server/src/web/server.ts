@@ -41,10 +41,12 @@ import {
   type Store,
   type WebSession,
 } from "@cardigan/store";
+import { beginActivity } from "../activity.js";
 import { type BuildInfo, readBuildInfo } from "../build-info.js";
 import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { mergeProjectSettings } from "../merge-push-loop.js";
+import { type ProcessRole, processHealthView } from "../process-health.js";
 import { readActivity } from "./activity-state.js";
 import { readAttachmentRefs } from "./attachment-ref-read.js";
 import { serveAttachment, serveAttachmentPreview } from "./attachments.js";
@@ -123,6 +125,16 @@ import { readPagedCard } from "./timeline-state.js";
 import { WorkerWizards } from "./worker-wizards.js";
 import { serveWrite } from "./write.js";
 
+const HTTP_METHODS = new Set([
+  "GET",
+  "HEAD",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OPTIONS",
+]);
+
 /**
  * The Workbench listener (M5 plan §3.1).
  *
@@ -174,6 +186,8 @@ export interface WebServerOptions {
   readonly loginLimiter?: LoginLimiter;
   /** Attachment blobs live beside the database (§9.3). */
   readonly dataDir?: string;
+  /** C-638: this process on the health page; "web" also shows the background one. */
+  readonly processRole?: ProcessRole;
   readonly mergeGate?: MergeGateConfiguration;
   /** C-153: the host_ops patrol cadence Needs You quotes to the human. */
   readonly hostOpsPatrolIntervalMs?: number;
@@ -234,6 +248,7 @@ interface RequestContext {
   readonly clock: Clock;
   readonly limiter: LoginLimiter;
   readonly dataDir: string;
+  readonly processRole: ProcessRole;
   readonly mergeGate: MergeGateConfiguration | undefined;
   readonly hostOpsPatrolIntervalMs: number | undefined;
   readonly hcSession: string | undefined;
@@ -354,8 +369,14 @@ export async function startWebServer(
       /* Invalid URLs are handled below. */
     }
     const phases: Record<string, number> = {};
+    // C-638: named by method and route template only, for stall attribution.
+    const activity = beginActivity(
+      "request",
+      `web ${HTTP_METHODS.has(req.method ?? "") ? req.method : "OTHER"} ${route}`,
+    );
     let logged = false;
     const completed = () => {
+      activity.end();
       if (logged) return;
       logged = true;
       log({
@@ -378,27 +399,31 @@ export async function startWebServer(
     };
     res.once("finish", completed);
     res.once("close", completed);
-    void handle(req, res, (stage, ms) => {
-      phases[stage] = ms;
-    }).catch((error: unknown) => {
-      code = error instanceof HttpRejection ? error.code : "internal_error";
-      if (!(error instanceof HttpRejection)) {
+    void activity
+      .run(() =>
+        handle(req, res, (stage, ms) => {
+          phases[stage] = ms;
+        }),
+      )
+      .catch((error: unknown) => {
+        code = error instanceof HttpRejection ? error.code : "internal_error";
+        if (!(error instanceof HttpRejection)) {
+          if (!res.headersSent) {
+            sendError(res, 500, "internal_error", "internal error");
+          } else {
+            res.end();
+          }
+          return;
+        }
         if (!res.headersSent) {
-          sendError(res, 500, "internal_error", "internal error");
+          sendError(res, error.status, error.code, error.message, {
+            ...(error.details === undefined ? {} : { details: error.details }),
+            headers: error.headers,
+          });
         } else {
           res.end();
         }
-        return;
-      }
-      if (!res.headersSent) {
-        sendError(res, error.status, error.code, error.message, {
-          ...(error.details === undefined ? {} : { details: error.details }),
-          headers: error.headers,
-        });
-      } else {
-        res.end();
-      }
-    });
+      });
   });
 
   async function handle(
@@ -434,6 +459,7 @@ export async function startWebServer(
         clock,
         limiter,
         dataDir,
+        processRole: options.processRole ?? "server",
         mergeGate: options.mergeGate,
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
         hcSession: options.hcSession,
@@ -610,6 +636,13 @@ async function handleApi(context: RequestContext): Promise<void> {
   if (path === "/api/offsite") {
     if (req.method !== "GET") methodNotAllowed(["GET"]);
     sendJson(res, 200, offsiteFor(context.dataDir)?.status() ?? null);
+    return;
+  }
+
+  // C-638: heap use and limit of the server processes; numbers only.
+  if (path === "/api/process-health") {
+    if (req.method !== "GET") methodNotAllowed(["GET"]);
+    sendJson(res, 200, processHealthView(context.dataDir, context.processRole));
     return;
   }
 

@@ -176,7 +176,11 @@ import { QueuedRunPatrol } from "./queued-run-patrol.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 import { recordSessionEnvironment } from "./session-environment.js";
 import { runSystemReviewLimits, runSystemRules } from "./system-rules.js";
-import { profileSpan, profileSpanSync } from "./tick-profile.js";
+import {
+  profileProject,
+  profileSpan,
+  profileSpanSync,
+} from "./tick-profile.js";
 
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
 export type LaunchSnapshot = Pick<
@@ -469,7 +473,11 @@ export class Dispatcher {
         const candidates: Candidate[] = [];
         await profileSpan("route", async () => {
           for (const project of this.options.store.listProjects())
-            candidates.push(...(await this.project(project.id)));
+            candidates.push(
+              ...(await profileProject(project.id, () =>
+                this.project(project.id),
+              )),
+            );
         });
         await profileSpan("inactive", () =>
           this.inactive.tick(
@@ -491,7 +499,9 @@ export class Dispatcher {
             this.state(c.project),
           )) {
             if (this.closing) break;
-            await this.deliver(candidate);
+            await profileProject(candidate.project, () =>
+              this.deliver(candidate),
+            );
             this.checkStandingInbox(candidate);
           }
         });

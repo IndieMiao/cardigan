@@ -2123,6 +2123,16 @@ export interface OffsiteStatusView {
     | "loop_slow"
   )[];
 }
+/** C-638: V8 heap use against its limit, per server process (numbers only). */
+export interface ProcessHealthView {
+  readonly processes: readonly {
+    readonly role: "web" | "background" | "server";
+    readonly heap_used_bytes: number;
+    readonly heap_limit_bytes: number;
+    readonly rss_bytes: number;
+    readonly checked_at: string;
+  }[];
+}
 export interface OffsiteLoopDelay {
   readonly p99_ms: number;
   readonly max_ms: number;
@@ -2132,6 +2142,8 @@ export interface OffsiteLoopDelay {
 export interface CardiganClient {
   /** C-614: null when this server has no off-site copy wired. */
   offsiteStatus?(): Promise<OffsiteStatusView | null>;
+  /** C-638: heap use and limit of the server processes. */
+  processHealth?(): Promise<ProcessHealthView>;
   feishuBinding?(action?: "code" | "unbind"): Promise<FeishuBindingView>;
   /** C-561: Feishu bot settings (human sessions only; 403 otherwise). */
   feishuSettings?(): Promise<FeishuSettingsView>;
@@ -2655,6 +2667,9 @@ export class HttpCardiganClient implements CardiganClient {
   }
   offsiteStatus(): Promise<OffsiteStatusView | null> {
     return this.request("/api/offsite");
+  }
+  processHealth(): Promise<ProcessHealthView> {
+    return this.request("/api/process-health");
   }
   feishuBinding(action?: "code" | "unbind") {
     return this.request<FeishuBindingView>(

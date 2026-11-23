@@ -29,10 +29,15 @@ export interface DeploymentConfig {
   /** C-656: alert when swap use exceeds this percent. */
   readonly swap_high_percent?: number;
   readonly server_log_max_bytes?: number;
+  /** C-638: with `server_log_max_bytes`, the directory's byte budget only. */
   readonly server_log_max_files?: number;
+  /** C-638: server logs older than this are removed; default 48. */
+  readonly server_log_retention_hours?: number;
 }
 
 export const DEFAULT_DISK_LOW_PERCENT = 15;
+/** C-638: a year; retention is still bounded by the log byte budget. */
+const MAX_SERVER_LOG_RETENTION_HOURS = 24 * 365;
 /** C-656: /tmp is a memory disk; what does not fit is swapped out. */
 export const DEFAULT_TMP_HIGH_PERCENT = 70;
 export const DEFAULT_SWAP_HIGH_PERCENT = 80;
@@ -103,6 +108,7 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     "swap_high_percent",
     "server_log_max_bytes",
     "server_log_max_files",
+    "server_log_retention_hours",
   ];
   if (
     Object.keys(value).some((k) => !keys.includes(k)) ||
@@ -151,6 +157,14 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     )
       throw new Error("Invalid server log capacity");
   }
+  if (
+    value.server_log_retention_hours !== undefined &&
+    (value.server_log_max_bytes === undefined ||
+      !Number.isSafeInteger(value.server_log_retention_hours) ||
+      Number(value.server_log_retention_hours) < 1 ||
+      Number(value.server_log_retention_hours) > MAX_SERVER_LOG_RETENTION_HOURS)
+  )
+    throw new Error("Invalid server log retention");
   if (
     value.disk_low_percent !== undefined &&
     (!Number.isInteger(value.disk_low_percent) ||

@@ -131,7 +131,12 @@ import {
   repositoryCheckWait,
   repositoryRetryDelays,
 } from "./repository-check-wait.js";
-import { profileSpan, profileSpanSync, tickProfiler } from "./tick-profile.js";
+import {
+  profileProject,
+  profileSpan,
+  profileSpanSync,
+  tickProfiler,
+} from "./tick-profile.js";
 
 class StaleCheckTarget extends CheckExecutorSuspended {}
 /** C-609: fixed summary when central main moved under a queued or running check. */
@@ -439,7 +444,7 @@ export class MergeChecks {
     const writer = this.writers.get(project) ?? new MergeMutex();
     this.writers.set(project, writer);
     try {
-      return await writer.run(work);
+      return await writer.run(() => profileProject(project, work));
     } finally {
       if (!writer.busy && this.writers.get(project) === writer)
         this.writers.delete(project);

@@ -51,6 +51,7 @@ import {
   writeRegisteredRuntime,
 } from "@cardigan/runtime-herdr";
 import { getRoleVersion, Store, tokensForAssignment } from "@cardigan/store";
+import { beginActivity, StallWatch } from "./activity.js";
 import {
   type ControlPlane,
   type ControlPlaneOptions,
@@ -83,6 +84,7 @@ import {
 } from "./mobile-signing.js";
 import { OFFSITE_SYNC_INTERVAL_MS, OffsiteSync } from "./offsite-sync.js";
 import { serverProbes } from "./probes.js";
+import { publishProcessHealth } from "./process-health.js";
 import {
   resumeInterruptedPublications,
   trackedPublisher,
@@ -318,6 +320,17 @@ async function assembleServer(
   };
   setTickProfileSync(syncProfiles);
   profiles.sync();
+  // C-638: always on, independent of the switch above: an event-loop stall of
+  // 2 s or more logs the loops and requests that were running.
+  const stalls = new StallWatch({
+    log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+    sha,
+  });
+  // C-638: the web process reads this for the health page (heap vs limit).
+  const stopHealth =
+    options.role === "background"
+      ? publishProcessHealth(config.dataDir, "background")
+      : undefined;
   // C-636: always-on repository lock wait/hold times, by operation.
   const lockMetrics = new RepositoryLockMetrics({
     log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
@@ -329,6 +342,8 @@ async function assembleServer(
     profilerStopped = true;
     clearTickProfileSync(syncProfiles);
     profiles.close();
+    stalls.stop();
+    stopHealth?.();
     lockMetrics.stop();
   };
   // Request latencies go to whichever profiler is installed right now.
@@ -566,6 +581,8 @@ async function assembleServer(
               // The store satisfies McpBackend structurally; this keeps mcp-server
               // depending on domain only (§20.2).
               store: store as McpBackend,
+              // C-638: stall attribution and lock timing by channel.
+              beginRequest: () => beginActivity("request", "mcp"),
               probeHost: probes,
               macosCheckHost: macosChecks,
               ...(publisher ? { publishArtifact: publisher } : {}),
@@ -712,6 +729,7 @@ async function assembleServer(
         startWebServer({
           store,
           mergeGate,
+          processRole: options.role === "web" ? "web" : "server",
           ...(hostOps
             ? {
                 contextUsage: (project) => hostOps.contextUsage(project),
