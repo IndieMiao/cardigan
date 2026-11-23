@@ -16,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { RuntimeRef } from "@cardigan/domain";
-import { afterAll, afterEach, beforeEach, expect, test, vi } from "vitest";
+import { afterAll, afterEach, expect, test, vi } from "vitest";
 import { enrollDarwinOwner, stopDarwinOwner } from "./darwin-idle-owner.js";
 import { DARWIN_OWNER_SEED, darwinOwnerKey } from "./darwin-owner-key.js";
 import type { ExecutionConfig } from "./execution.js";
@@ -54,6 +54,22 @@ const e: Extract<ExecutionConfig, { mode: "agent-ssh" }> = {
     path: "/installed/worker-files.py",
   },
 };
+// C-611: the owner fixture marks where a case is (task.meta.cardigan_phases),
+// so a timed-out macOS check reports the last step the case reached.
+let current: { meta: object; started: number } | undefined;
+test.beforeEach(({ task }) => {
+  current = { meta: task.meta, started: performance.now() };
+});
+function phases() {
+  const marks: { name: string; at_ms: number }[] = [];
+  const at = current;
+  if (at) Object.assign(at.meta, { cardigan_phases: marks });
+  return (name: string) => {
+    if (at && marks.length < 50)
+      marks.push({ name, at_ms: Math.round(performance.now() - at.started) });
+  };
+}
+
 function launchArgsFor(execution: typeof e) {
   const packet = workerFileRequest(
     execution,
@@ -128,28 +144,7 @@ test("registration excludes legacy, Linux, standing, external and disabled launc
   expect(await enrollDarwinOwner(missing, assignment, role, l)).toBe(l);
 });
 
-// C-611: the fixture marks where a case is (task.meta.cardigan_phases), so a
-// timed-out run on the macOS check reports the last step it reached.
-let current: { meta: object; started: number } | undefined;
-beforeEach(({ task }) => {
-  current = { meta: task.meta, started: performance.now() };
-});
-function phases() {
-  const test = current;
-  const marks: { name: string; at_ms: number }[] = [];
-  if (test) Object.assign(test.meta, { cardigan_phases: marks });
-  return (name: string) => {
-    if (test && marks.length < 50)
-      marks.push({
-        name,
-        at_ms: Math.round(performance.now() - test.started),
-      });
-  };
-}
-
 async function ownerFixture(publicPem?: string) {
-  const mark = phases();
-  mark("fixture: create repositories");
   const root = mkdtempSync(join(realpathSync(tmpdir()), "darwin-owner-")),
     tree = join(root, "worktrees/fixture/A-1"),
     build = join(root, "builds/fixture/A-1"),
@@ -173,7 +168,6 @@ async function ownerFixture(publicPem?: string) {
   git("worktree", "add", "-q", "-b", "agent/fixture", "--", tree, "HEAD");
   git("worktree", "add", "-q", "--detach", "--", build, "HEAD");
   writeFileSync(join(root, "state"), "idle");
-  mark("fixture: enroll owner");
   const launched = await enrollDarwinOwner(execution, assignment, role, {
     ...l,
     args: launchArgsFor(execution),
@@ -183,7 +177,6 @@ async function ownerFixture(publicPem?: string) {
   // A legacy owner holds a key that only the previous controller process had.
   if (publicPem) config.public_pem = publicPem;
   mkdirSync(config.directory, { recursive: true });
-  mark("fixture: spawn child");
   const proc = spawn(
     "python3",
     [
@@ -199,10 +192,6 @@ async function ownerFixture(publicPem?: string) {
     },
   );
   const closed = once(proc, "close");
-  void closed.then(
-    ([code]) => mark(`child closed: ${code}`),
-    () => {},
-  );
   const cleanup = async () => {
     if (proc.exitCode === null) {
       proc.kill();
@@ -216,7 +205,6 @@ async function ownerFixture(publicPem?: string) {
     await cleanup();
     throw err;
   }
-  mark("fixture: child ready");
   const enrolled = JSON.parse(readFileSync(join(root, "child"), "utf8"));
   const options = {
     project_id: "fixture",
@@ -231,12 +219,15 @@ async function ownerFixture(publicPem?: string) {
     file: argv[0]!,
     args: argv.slice(1),
   });
+  const mark = phases();
+  mark("fixture ready");
+  void closed.then(
+    ([code]) => mark(`child closed: ${code}`),
+    () => {},
+  );
   let stops = 0;
-  const stop: (
-    patch?: Partial<typeof options>,
-    stopOwner?: typeof stopDarwinOwner,
-  ) => ReturnType<typeof stopDarwinOwner> = async (
-    patch = {},
+  const stop = async (
+    patch: Partial<typeof options> = {},
     stopOwner = stopDarwinOwner,
   ) => {
     const n = ++stops;
