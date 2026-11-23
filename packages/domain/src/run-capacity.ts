@@ -65,16 +65,23 @@ export const runOccupiesSlot = (run: Run): boolean =>
       ["dispatched", "acked", "running"].includes(run.status),
   );
 
-const RUN_ENDED = ["completed", "failed", "cancelled"];
+/**
+ * C-620: the turn ended with a business result (finish_run, or a system
+ * ending of a blocking decision or review limit). Its session is idle. A
+ * cancelled Run is not: the human, host or system ended it from outside and
+ * its process may still be executing until exit is confirmed.
+ */
+export const runEndedByBusiness = (run: Run): boolean =>
+  run.status === "completed" || run.status === "failed";
 
 /**
- * C-620: admission and resource slots are held only by Runs that have not
- * ended. An ended turn leaves an idle session that holds none, even while it
- * is still being stopped or recycled. Physical leases, helper upgrades and
- * the per-Assignment launch fence keep using `runOccupiesSlot` until exit.
+ * C-620: admission, quota and resource slots. An idle session left by a
+ * business-ended turn holds none, even while it is still being stopped or
+ * recycled. Physical leases, helper upgrades and the per-Assignment launch
+ * fence keep using `runOccupiesSlot` until exit is confirmed.
  */
 export const runHoldsCapacity = (run: Run): boolean =>
-  !RUN_ENDED.includes(run.status) && runOccupiesSlot(run);
+  !runEndedByBusiness(run) && runOccupiesSlot(run);
 
 /** Absolute Run occupancy; capacity callers must also classify the owner. */
 export function occupiedRunSlots(

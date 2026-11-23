@@ -10,7 +10,7 @@ import {
   run,
 } from "../../domain/src/commands/test-fixtures.js";
 import { acquireMergeCheckCapacity } from "./merge-check-capacity.js";
-import { runCapacitySnapshot } from "./run-capacity.js";
+import { hasEarlierCapacityWait, runCapacitySnapshot } from "./run-capacity.js";
 
 let store: Store;
 beforeEach(() => {
@@ -162,6 +162,18 @@ test.each(["coder", "pm", "host_ops"])(
         },
       },
       {
+        // Cancelled from outside under a pending stop: may still execute.
+        ...execution,
+        status: "cancelled",
+        dispatch_stop: {
+          attempt_id: execution.trigger_event_id,
+          runtime_ref: ref,
+          stopping: true,
+          lease_until: now,
+          reason: "dispatch_timeout",
+        },
+      },
+      {
         ...execution,
         status: "unknown",
         dispatch_stop: {
@@ -187,8 +199,8 @@ test.each(["coder", "pm", "host_ops"])(
         expect(fallback.agentOccupied).toEqual(cached.agentOccupied);
       });
     }
-    // C-620: the turn ended. Its session may still be stopping or awaiting
-    // recycle, but it holds no admission or resource slot.
+    // C-620: the turn ended with a business result. Its session may still be
+    // stopping or awaiting recycle, but it holds no admission or resource slot.
     for (const variant of [
       {
         ...execution,
@@ -198,17 +210,6 @@ test.each(["coder", "pm", "host_ops"])(
           runtime_ref: ref,
           stopping: true,
           lease_until: now,
-        },
-      },
-      {
-        ...execution,
-        status: "cancelled",
-        dispatch_stop: {
-          attempt_id: execution.trigger_event_id,
-          runtime_ref: ref,
-          stopping: true,
-          lease_until: now,
-          reason: "dispatch_timeout",
         },
       },
       {
@@ -380,4 +381,80 @@ test("C-315 queue cache tracks formal deliveries, rollback and repository fallba
     });
     expect(fallback.queue).toEqual(runCapacitySnapshot(store, tx).queue);
   });
+});
+
+test("C-620 an earlier waiter whose owner cannot start a session now does not hold the queue; it regains its place when the fence clears", () => {
+  const waiting = (n: number): Run => ({
+    ...run(n),
+    status: "queued",
+    queue_reason: "concurrency_limit",
+  });
+  const head = assignment(1);
+  seed(head, waiting(1));
+  seed(assignment(2), waiting(2));
+  const blocks = () =>
+    store.uow.read((tx) => {
+      const { queue } = runCapacitySnapshot(store, tx);
+      const later = queue.find((e) => e.assignment_id === "A-2");
+      if (!later) throw new Error("Missing later waiter");
+      return hasEarlierCapacityWait(tx, queue, later, "local", new Map(), now);
+    });
+  expect(blocks()).toBe(true);
+  const put = (a: Assignment) =>
+    store.uow.run((tx) => tx.assignments.put("first", a));
+  const ref = {
+    machine_id: "local",
+    runtime_machine: "local",
+    terminal_ref: "t",
+    agent_name: "a",
+  };
+  // Unconfirmed recycle of its old session.
+  put({
+    ...head,
+    runtime_ref: ref,
+    idle_retirement: {
+      phase: "stopping",
+      runtime_ref: ref,
+      started_at: now,
+      threshold_minutes: 30,
+      failures: 0,
+    },
+  });
+  expect(blocks()).toBe(false);
+  put(head);
+  expect(blocks()).toBe(true);
+  // Another of its Runs is still active.
+  store.uow.run((tx) =>
+    tx.runs.put("first", { ...run(3, 1), status: "running" }),
+  );
+  expect(blocks()).toBe(false);
+  store.uow.run((tx) =>
+    tx.runs.put("first", { ...run(3, 1), status: "completed" }),
+  );
+  expect(blocks()).toBe(true);
+  // A pending host operation (exit not confirmed).
+  const action = store.uow.run((tx) => {
+    const id = tx.ids.nextEventId();
+    tx.events.append("first", {
+      id,
+      seq: tx.ids.nextEventSequence("first"),
+      type: "host_ops_action_taken",
+      actor: { kind: "system", project_id: "first" },
+      created_at: now,
+      payload: { execution: true, assignment_id: head.id, runtime_ref: ref },
+    });
+    return id;
+  });
+  expect(blocks()).toBe(false);
+  store.uow.run((tx) =>
+    tx.events.append("first", {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence("first"),
+      type: "host_ops_action_finished",
+      actor: { kind: "system", project_id: "first" },
+      created_at: now,
+      payload: { action_id: action },
+    }),
+  );
+  expect(blocks()).toBe(true);
 });

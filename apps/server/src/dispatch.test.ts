@@ -1610,6 +1610,67 @@ test("MC-4 a missing slot holds the entire Run without reserving an unrelated fr
   });
 });
 
+test("C-620 a head waiting on an occupied emulator does not hold back later godot-only Runs; the emulator stays FIFO", async () => {
+  const settings = {
+    ...options,
+    runLimit: () => 6,
+    resourceLimits: () =>
+      new Map([
+        ["android.emulator", 1],
+        ["godot", 3],
+      ]),
+  };
+  // R-726 (C-28) holds the only emulator.
+  const holder = f.create();
+  requireCapabilities(holder.item, ["android.emulator"]);
+  f.session(holder.assignment, false);
+  // R-715 (C-14 smoke) is queued first and needs the emulator and godot.
+  requireCapabilities(target.item, ["android.emulator", "godot"]);
+  comment();
+  await new Dispatcher(settings).tick();
+  const [head] = readRunQueue(f.store);
+  expect(head).toMatchObject({ assignment_id: target.assignment.id });
+  // Later godot-only work (C-32, C-33) arrives behind it.
+  const later = [f.create(), f.create()];
+  for (const t of later) {
+    requireCapabilities(t.item, ["godot"]);
+    f.session(t.assignment);
+  }
+  // A later emulator user must keep waiting behind the head.
+  const emulatorLater = f.create();
+  requireCapabilities(emulatorLater.item, ["android.emulator"]);
+  f.session(emulatorLater.assignment);
+  for (const t of [...later, emulatorLater]) {
+    f.advance(100);
+    f.apply((s, a, p) =>
+      postComment(
+        s,
+        a,
+        { card_id: t.card.id, work_item_id: t.item.id, body: "work" },
+        p,
+      ),
+    );
+  }
+  await new Dispatcher(settings).tick();
+  const status = (a: Assignment) =>
+    f
+      .state()
+      .runs.filter((r) => r.assignment_id === a.id)
+      .map((r) => r.status);
+  for (const t of later) expect(status(t.assignment)).toContain("dispatched");
+  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+    target.assignment.id,
+    emulatorLater.assignment.id,
+  ]);
+  // The emulator is released: the head gets it before the later emulator user.
+  finish(holder.assignment);
+  await new Dispatcher(settings).tick();
+  expect(status(target.assignment)).toContain("dispatched");
+  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+    emulatorLater.assignment.id,
+  ]);
+});
+
 test("MC-4 a withdrawn legacy Run holds its retry's resources before and after redispatch", async () => {
   const owner = f.create();
   requireCapabilities(owner.item, ["godot"]);

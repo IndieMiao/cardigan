@@ -59,8 +59,9 @@ test("absolute occupancy retains exempt Runs; only dispatched/acked/running coun
       "cancelled",
     ] as const
   ).map((status): Run => ({ ...run, status }));
-  // C-620: the same unfinished statuses hold admission; ended ones never do,
-  // even with a stop fence or an unfinished launch publication left behind.
+  // C-620: the same unfinished statuses hold admission. A business-ended turn
+  // never does, even with a stop fence left behind; a cancelled Run under a
+  // stop fence may still execute and keeps it until exit is confirmed.
   const fence = {
     attempt_id: "stop",
     runtime_ref: {
@@ -82,7 +83,14 @@ test("absolute occupancy retains exempt Runs; only dispatched/acked/running coun
       .map((r): Run => ({ ...r, inactivity_stop: fence }))
       .filter(runHoldsCapacity)
       .map((r) => r.status),
-  ).toEqual(["queued", "dispatched", "acked", "running", "unknown"]);
+  ).toEqual([
+    "queued",
+    "dispatched",
+    "acked",
+    "running",
+    "unknown",
+    "cancelled",
+  ]);
   expect(isStandingPm(pm)).toBe(true);
   expect(isStandingPm({ ...f.coder, role_id: "pm" })).toBe(false);
   expect(isStandingPm({ ...pm, role_id: "observer" })).toBe(false);
