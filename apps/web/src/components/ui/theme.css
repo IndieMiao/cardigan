@@ -1053,8 +1053,8 @@
   }
   .ui-attachment-ref-peek > img {
     display: block;
-    max-width: calc(var(--ui-graph-node) * 1.25);
-    max-height: var(--ui-graph-node);
+    width: calc(var(--ui-graph-node) * 1.25);
+    height: var(--ui-graph-node);
     object-fit: contain;
   }
   a.ui-attachment-ref:is(:hover, :focus-visible) > .ui-attachment-ref-peek {

@@ -1,7 +1,7 @@
 // C-615: attachments in comments. Captures 1440 × light/dark of the card
 // page: the timeline with attachment chips (own, other card, unknown number as
-// text, an image chip hovered), and the comment box with chosen files as chips,
-// a refused file's reason and the `#` list open. Measures chip geometry and
+// text, an image chip hovered), the comment box with chosen files as chips and
+// a refused file's reason, and the `#` list open. Measures chip geometry and
 // page overflow.
 // CHROMIUM_PATH=<chrome> node apps/web/test-support/c615-capture.mjs <new output dir>
 import assert from "node:assert/strict";
@@ -9,17 +9,53 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { deflateSync } from "node:zlib";
 import { createServer } from "vite";
 import { chromium } from "./chromium.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const output = resolve(process.argv[2] ?? "");
 assert(process.argv[2], "Pass a new output directory");
-// A 2×2 PNG, so the image chip's hover preview has something to show.
-const png = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP4z8DAwMDAxMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg==",
-  "base64",
-);
+// A 160×100 synthetic gradient PNG for the image chip's hover preview.
+const png = (() => {
+  const width = 160;
+  const height = 100;
+  const rows = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 3 + 1);
+    for (let x = 0; x < width; x++) {
+      rows[row + 1 + x * 3] = 40 + x;
+      rows[row + 2 + x * 3] = 90 + y;
+      rows[row + 3 + x * 3] = 200;
+    }
+  }
+  const crc = (data) => {
+    let c = ~0;
+    for (const byte of data) {
+      c ^= byte;
+      for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+    }
+    return ~c >>> 0;
+  };
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header.set([8, 2, 0, 0, 0], 8);
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(rows)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+})();
 const server = await createServer({
   root,
   logLevel: "error",
@@ -193,6 +229,9 @@ try {
     });
     await until("document.querySelectorAll('.ui-file-chip').length === 2");
     await run(() => document.querySelector(".comment-input").focus());
+    await settle();
+    result.files = await measure();
+    result.shots.push(await shot(`comment-files-${theme}.png`));
     await send("Input.insertText", { text: "复测结果见 #" });
     await until("document.querySelectorAll('[role=option]').length > 0");
     await settle();
@@ -211,7 +250,7 @@ try {
     dark.scheme.background,
     "light and dark backgrounds differ",
   );
-  for (const name of ["timeline", "comment-box"]) {
+  for (const name of ["timeline", "comment-files", "comment-box"]) {
     const [a, b] = await Promise.all(
       ["light", "dark"].map((theme) =>
         readFile(resolve(output, `${name}-${theme}.png`)),
@@ -222,10 +261,10 @@ try {
   for (const c of cases) {
     assert.equal(c.timeline.chips.length, 6, `${c.theme}: chips`);
     assert.equal(c.timeline.plain, true, `${c.theme}: unknown stays text`);
-    assert.equal(c.box.pending.length, 2, `${c.theme}: pending`);
-    assert.equal(c.box.problems.length, 1, `${c.theme}: refused`);
+    assert.equal(c.files.pending.length, 2, `${c.theme}: pending`);
+    assert.equal(c.files.problems.length, 1, `${c.theme}: refused`);
     assert.equal(c.box.options.length, 5, `${c.theme}: candidates`);
-    for (const m of [c.timeline, c.box])
+    for (const m of [c.timeline, c.files, c.box])
       assert(m.scrollWidth <= m.innerWidth, `${c.theme}: page overflows`);
   }
 } finally {
