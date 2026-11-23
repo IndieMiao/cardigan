@@ -97,6 +97,17 @@ export interface McpServerOptions
   /** `false` disables the M2.6 acknowledge hook (tests of pure tool routing). */
   readonly acknowledgeRuns?: boolean;
   readonly auditProbeCall?: (actor: Identity["actor"], code: string) => void;
+  /**
+   * C-638: called when a request arrives; the request is handled inside
+   * `run` and `end` is called once its response closes. Timing only.
+   */
+  readonly beginRequest?: () => RequestActivity;
+}
+
+/** C-638: a request as seen by the host's stall and lock timing. */
+export interface RequestActivity {
+  run<T>(fn: () => T): T;
+  end(): void;
 }
 
 export interface RunningServer {
@@ -213,21 +224,29 @@ export async function startMcpServer(
         pid: process.pid,
         request_id: requestId,
       });
-    void handleRequest(req, res, startedAt, log).catch((error: unknown) => {
-      log({
-        event: "http",
-        method: req.method,
-        code: "internal_error",
-        duration_ms: Date.now() - startedAt,
-      });
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: { code: "internal_error" } }));
-        return;
-      }
-      res.end();
-      void error;
-    });
+    const activity = options.beginRequest?.();
+    if (activity) {
+      res.once("finish", activity.end);
+      res.once("close", activity.end);
+    }
+    const handled = () => handleRequest(req, res, startedAt, log);
+    void (activity ? activity.run(handled) : handled()).catch(
+      (error: unknown) => {
+        log({
+          event: "http",
+          method: req.method,
+          code: "internal_error",
+          duration_ms: Date.now() - startedAt,
+        });
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { code: "internal_error" } }));
+          return;
+        }
+        res.end();
+        void error;
+      },
+    );
   });
 
   async function handleRequest(

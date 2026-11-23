@@ -25,10 +25,15 @@ export interface DeploymentConfig {
   readonly retention?: RetentionPolicy;
   readonly disk_low_percent?: number;
   readonly server_log_max_bytes?: number;
+  /** C-638: with `server_log_max_bytes`, the directory's byte budget only. */
   readonly server_log_max_files?: number;
+  /** C-638: server logs older than this are removed; default 48. */
+  readonly server_log_retention_hours?: number;
 }
 
 export const DEFAULT_DISK_LOW_PERCENT = 15;
+/** C-638: a year; retention is still bounded by the log byte budget. */
+const MAX_SERVER_LOG_RETENTION_HOURS = 24 * 365;
 
 /** Capacity waiting only raises attention; it never releases an unknown execution. */
 export const DEFAULT_CAPACITY_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -94,6 +99,7 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     "disk_low_percent",
     "server_log_max_bytes",
     "server_log_max_files",
+    "server_log_retention_hours",
   ];
   if (
     Object.keys(value).some((k) => !keys.includes(k)) ||
@@ -142,6 +148,14 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     )
       throw new Error("Invalid server log capacity");
   }
+  if (
+    value.server_log_retention_hours !== undefined &&
+    (value.server_log_max_bytes === undefined ||
+      !Number.isSafeInteger(value.server_log_retention_hours) ||
+      Number(value.server_log_retention_hours) < 1 ||
+      Number(value.server_log_retention_hours) > MAX_SERVER_LOG_RETENTION_HOURS)
+  )
+    throw new Error("Invalid server log retention");
   if (
     value.disk_low_percent !== undefined &&
     (!Number.isInteger(value.disk_low_percent) ||

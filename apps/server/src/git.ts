@@ -87,6 +87,7 @@ import type {
 } from "@cardigan/store";
 import { backupBranches, backupWriter } from "./git-backup.js";
 import type { SnapshotOrphan } from "./orphan-cleanup.js";
+import { recordRepositoryLock } from "./tick-profile.js";
 
 /**
  * M4.4: the server's Git assembly.
@@ -537,7 +538,10 @@ export class ServerGit implements GitBinding {
           })
         : undefined,
     );
-    this.lock = hostRepositoryLock(options.dataDir);
+    // C-638: wait and hold time per operation go to the tick profiler.
+    this.lock = hostRepositoryLock(options.dataDir, {
+      observe: recordRepositoryLock,
+    });
     const workspace =
       execution.mode === "agent-ssh" && options.captureAgent !== undefined
         ? agentWorkspace(options.captureAgent)
@@ -707,19 +711,20 @@ export class ServerGit implements GitBinding {
     input: CandidatePushRequest,
   ): Promise<PushResult> {
     const repository = await this.central.ensureCentral(project);
-    return this.withCandidateLock(project, repository, () =>
+    return this.withCandidateLock(project, repository, "candidate_push", () =>
       this.transport.pushCandidateCommit(repository, input),
     );
   }
   private async withCandidateLock<T>(
     project: CentralProject,
     repository: string,
+    operation: string,
     transfer: () => Promise<T>,
   ): Promise<T> {
     let started = false;
     try {
       return await this.lock(
-        { project_id: project.project_id, repository },
+        { project_id: project.project_id, repository, operation },
         () => {
           started = true;
           return transfer();
@@ -762,7 +767,11 @@ export class ServerGit implements GitBinding {
   ): Promise<void> {
     const repository = this.central.repositoryPath(project);
     await this.lock(
-      { project_id: project.project_id, repository },
+      {
+        project_id: project.project_id,
+        repository,
+        operation: "candidate_verify",
+      },
       async () => {
         if (
           ![candidate.sha, candidate.tree, candidate.base].every((s) =>
@@ -918,8 +927,11 @@ export class ServerGit implements GitBinding {
     );
     // Candidate distribution updates the base clone's refs: it shares the
     // wake path's project lock, held only for the transfer, not the checks.
-    await this.withCandidateLock(project, repository, () =>
-      this.transfer(execution, source, repository),
+    await this.withCandidateLock(
+      project,
+      repository,
+      "candidate_distribute",
+      () => this.transfer(execution, source, repository),
     );
   }
   private async transfer(
@@ -1030,17 +1042,19 @@ export class ServerGit implements GitBinding {
     if (!tip) throw new Error("Stall branch backup missing");
     const git = source.central.git,
       repo = await source.central.ensureCentral(project);
-    return this.lock({ project_id: id, repository: repo }, () =>
-      pinStallBackup(
-        {
-          create: (ref, sha) => git.compareAndSwapRef(repo, ref, sha, null),
-          read: (ref) => git.readRef(repo, ref),
-          tree: (sha) => git.treeOfCommit(repo, sha),
-        },
-        assignment.id,
-        action,
-        tip.sha,
-      ),
+    return this.lock(
+      { project_id: id, repository: repo, operation: "stall_backup_pin" },
+      () =>
+        pinStallBackup(
+          {
+            create: (ref, sha) => git.compareAndSwapRef(repo, ref, sha, null),
+            read: (ref) => git.readRef(repo, ref),
+            tree: (sha) => git.treeOfCommit(repo, sha),
+          },
+          assignment.id,
+          action,
+          tip.sha,
+        ),
     );
   }
   async snapshotOrphan(
@@ -1188,7 +1202,11 @@ export class ServerGit implements GitBinding {
       project.project_id,
     );
     await this.lock(
-      { project_id: project.project_id, repository },
+      {
+        project_id: project.project_id,
+        repository,
+        operation: "mirror_refresh",
+      },
       async () => {
         const leaf = await lstat(repository).catch((error) => {
           if ((error as NodeJS.ErrnoException).code === "ENOENT")
@@ -1342,6 +1360,7 @@ export class ServerGit implements GitBinding {
       {
         project_id: project.project_id,
         repository: this.central.repositoryPath(project),
+        operation: "assignment_source",
       },
       async () =>
         operation(this.workspaceServices(project, assignment).central),

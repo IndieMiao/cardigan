@@ -234,6 +234,13 @@ export interface StoreObserver {
   transaction?(kind: "run" | "read", durationMs: number): void;
   /** A command-state cache miss rebuilt inside a UnitOfWork. */
   stateBuild?(durationMs: number): void;
+  /**
+   * C-638: a `BEGIN IMMEDIATE` write transaction: the wait for SQLite's write
+   * lock (busy timeout included) and, once held, the time until it was
+   * released by commit or rollback. `holdMs` is undefined when it was never
+   * acquired.
+   */
+  writeLock?(waitMs: number, holdMs: number | undefined): void;
 }
 
 type PlacementReader = (
@@ -526,8 +533,24 @@ export class Store {
     if (this.#inTransaction) {
       throw new Error("nested UnitOfWork is not supported");
     }
-    this.#db.exec("BEGIN IMMEDIATE");
-    return this.#writeAndCommit(operation);
+    const observer = this.#observer;
+    if (!observer?.writeLock) {
+      this.#db.exec("BEGIN IMMEDIATE");
+      return this.#writeAndCommit(operation);
+    }
+    const started = performance.now();
+    try {
+      this.#db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      observer.writeLock(performance.now() - started, undefined);
+      throw error;
+    }
+    const acquired = performance.now();
+    try {
+      return this.#writeAndCommit(operation);
+    } finally {
+      observer.writeLock(acquired - started, performance.now() - acquired);
+    }
   }
 
   #writeAndCommit<T>(

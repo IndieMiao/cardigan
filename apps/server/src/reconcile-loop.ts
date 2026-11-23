@@ -10,7 +10,11 @@ import type { ReconcileGit, ReconcilePages } from "./git.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
 import { projectCycle, visitMaintenancePage } from "./maintenance-batch.js";
 import { systemClock } from "./merge-loop.js";
-import { profileSpan, profileSpanSync } from "./tick-profile.js";
+import {
+  profileProject,
+  profileSpan,
+  profileSpanSync,
+} from "./tick-profile.js";
 
 /**
  * M4.4 reconciliation and backup loops (plan §3.6, §3.7; development plan §12.6).
@@ -135,7 +139,9 @@ export class ReconcileExecutor {
         const project = this.options.git.projectOf(id as ProjectId);
         if (!project) continue;
         try {
-          await this.options.git.refreshLocalMirror?.(project);
+          await profileProject(id, async () =>
+            this.options.git.refreshLocalMirror?.(project),
+          );
         } catch {
           // Do not log stderr or configuration from the Agent-owned clone.
           this.report(`Local mirror refresh failed for ${id}`);
@@ -146,7 +152,7 @@ export class ReconcileExecutor {
         this.scans.set(project, pages);
         try {
           do {
-            if ((await pages.next()).done) {
+            if ((await profileProject(project, () => pages.next())).done) {
               this.scans.delete(project);
               break;
             }
@@ -328,8 +334,8 @@ export class BackupExecutor {
         const central = this.options.git.projectOf(project as ProjectId);
         if (central === undefined) continue;
         try {
-          await profileSpan("backup.fetch", () =>
-            this.options.git.backup(central),
+          await profileProject(project, () =>
+            profileSpan("backup.fetch", () => this.options.git.backup(central)),
           );
         } catch (error) {
           // §3.7: a failed backup keeps the previous one and changes no result.

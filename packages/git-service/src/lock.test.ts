@@ -160,3 +160,79 @@ test("the same repository spelling on different physical machines or projects ha
     await held;
   }
 });
+
+test("C-638: each use reports its operation, wait and hold separately", async () => {
+  let now = 0;
+  const samples: unknown[] = [];
+  const acquire = vi.fn(async () => {
+    now += 30; // waiting on the cross-process lock
+    return async () => undefined;
+  });
+  const lock = repositoryLock({
+    acquire,
+    now: () => now,
+    observe: (sample) => samples.push(sample),
+  });
+  await lock(
+    { ...key("/repos/timed"), operation: "candidate_push" },
+    async () => {
+      now += 200;
+    },
+  );
+  await expect(
+    lock(key("/repos/timed"), async () => {
+      now += 5;
+      throw new Error("work failed");
+    }),
+  ).rejects.toThrow("work failed");
+  expect(samples).toEqual([
+    {
+      project_id: "p",
+      operation: "candidate_push",
+      wait_ms: 30,
+      hold_ms: 200,
+      outcome: "held",
+    },
+    {
+      project_id: "p",
+      operation: "unspecified",
+      wait_ms: 30,
+      hold_ms: 5,
+      outcome: "held",
+    },
+  ]);
+});
+
+test("C-638: a lock never held reports its wait and why, and a throwing observer changes nothing", async () => {
+  const samples: { outcome: string; hold_ms?: number }[] = [];
+  const timeout = repositoryLock({
+    acquire: async () => {
+      throw new RepositoryLockTimeoutError(1);
+    },
+    observe: (sample) => samples.push(sample),
+  });
+  await expect(
+    timeout(key("/repos/never"), async () => 1),
+  ).rejects.toBeInstanceOf(RepositoryLockTimeoutError);
+  const broken = repositoryLock({
+    acquire: async () => {
+      throw new Error("flock exited with 2");
+    },
+    observe: (sample) => samples.push(sample),
+  });
+  await expect(broken(key("/repos/never"), async () => 1)).rejects.toThrow(
+    "flock exited",
+  );
+  expect(samples.map((s) => [s.outcome, s.hold_ms])).toEqual([
+    ["timeout", undefined],
+    ["failed", undefined],
+  ]);
+  const throwing = repositoryLock({
+    observe: () => {
+      throw new Error("observer");
+    },
+  });
+  await expect(throwing(key("/repos/never"), async () => "ok")).resolves.toBe(
+    "ok",
+  );
+});

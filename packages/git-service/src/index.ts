@@ -58,6 +58,7 @@ export {
   type RepositoryLock,
   type RepositoryLockKey,
   type RepositoryLockOptions,
+  type RepositoryLockSample,
   RepositoryLockTimeoutError,
   repositoryLock,
 } from "./lock.js";
@@ -297,7 +298,12 @@ export class GitWorktreeService {
       base_branch: card.base_branch,
     };
     return this.lock(
-      { machine_id: this.machineId, project_id: input.project_id, repository },
+      {
+        machine_id: this.machineId,
+        project_id: input.project_id,
+        repository,
+        operation: "worktree_prepare",
+      },
       () =>
         this.placeWorktree(input, project, {
           path,
@@ -472,7 +478,12 @@ export class GitWorktreeService {
         base_branch: card.base_branch,
       };
     return this.lock(
-      { machine_id: this.machineId, project_id: input.project_id, repository },
+      {
+        machine_id: this.machineId,
+        project_id: input.project_id,
+        repository,
+        operation: "build_checkout_prepare",
+      },
       async () => {
         const central = await this.central.ensureCentral(project);
         await this.git.ensureClone(central, repository);
@@ -532,6 +543,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project.project_id,
         repository,
+        operation: "build_checkout_remove",
       },
       async () => {
         if (!input.idle()) return { status: "in_use" };
@@ -656,6 +668,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project.project_id,
         repository,
+        operation: "worktree_diff",
       },
       async () => {
         const summary = await this.changeSummary(
@@ -687,6 +700,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project.project_id,
         repository: worktree.repository,
+        operation: "worktree_remove",
       },
       () => this.removeLocked(input, worktree),
     );
