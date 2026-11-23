@@ -30,8 +30,9 @@ function stale(condition: unknown, message: string): asserts condition {
   ensure(condition, "stale_target", `${message}；${FALLBACK}`);
 }
 
+// A bare "-" is literal outside a character class; "\\-" is a syntax error with the u flag.
 const escapeRegExp = (value: string) =>
-  value.replace(/[-\\^$.*+?()[\]{}|]/gu, "\\$&");
+  value.replace(/[\\^$.*+?()[\]{}|/]/gu, "\\$&");
 /** Whole-token pattern for ASCII keys, literal pattern for other text. */
 function pattern(needle: string): string | undefined {
   const value = needle.trim();
@@ -48,19 +49,24 @@ const optionMentioned = (body: string, o: Decision["options"][number]) =>
   optionPatterns(o).some((p) => new RegExp(p, "iu").test(body));
 /**
  * An explicit selection word right before the option ("选 split"、"选择：并入本卡"、
- * "choose split"). Bare mentions, questions and negations are ambiguous.
+ * "choose split"). Bare mentions, questions, hedges and any negation in the
+ * same clause ("不要选 split") are ambiguous.
  */
 const SELECT = "(?:选择|选定|选|定为|choose|pick|option)";
-const NEGATION = "(?:不|别|没|未|勿|非|don'?t|not|no)";
-const QUESTION = /[?？]|吗|么|是否|还是|或者|再想想|再说/iu;
+const NEGATION =
+  /不|别|没|未|勿|非|don'?t|(?<![\w-])(?:not|no|never)(?![\w-])/iu;
+const HEDGE =
+  /[?？]|吗|么|是否|还是|或者|再想想|再说|再等|等等|先等|等实测|等一下|搁置|暂缓|待定|回头|稍后|maybe|later/iu;
+const CLAUSE = /[，。,.;；！!\n]+/u;
 function explicitlyChosen(body: string, o: Decision["options"][number]) {
-  if (QUESTION.test(body)) return false;
+  if (HEDGE.test(body)) return false;
   const chosen = optionPatterns(o).map(
-    (p) =>
-      new RegExp(`(${NEGATION}\\s*)?${SELECT}\\s*[:：]?\\s*["“「]?${p}`, "giu"),
+    (p) => new RegExp(`${SELECT}\\s*[:：]?\\s*["“「]?${p}`, "iu"),
   );
-  const hits = chosen.flatMap((r) => [...body.matchAll(r)]);
-  return hits.length > 0 && hits.every((m) => m[1] === undefined);
+  const clauses = body
+    .split(CLAUSE)
+    .filter((c) => chosen.some((r) => r.test(c)));
+  return clauses.length > 0 && clauses.every((c) => !NEGATION.test(c));
 }
 
 function boundTo(entry: TimelineEntry, q: Decision, requests: Set<string>) {
@@ -119,6 +125,14 @@ export function bindOwnerRecord(
     card && card.project_id === d.state.project_id && cards.has(card.id),
     "所有者原话须在本项目、本拍板所在或受影响的卡片上",
   );
+  // The quote is written to every decision card; never widen a sensitive card's audience.
+  reject(
+    !card.sensitive ||
+      [...cards].every(
+        (id) => d.list("cards").find((c) => c.id === id)?.sensitive,
+      ),
+    "所有者原话在敏感卡上，不能写到可见范围更大的卡片",
+  );
   reject(
     ownerEntry(entry),
     "只认所有者本人在卡片上发的评论，不认代理转述或其它身份的记录",
@@ -138,15 +152,32 @@ export function bindOwnerRecord(
       .filter((e) => e.type === "decision_request" && e.decision_id === q.id)
       .map((e) => e.id),
   );
+  // Bound entries and the cited answer's thread both follow replies and
+  // revisions: an edit or a reply keeps its place even without repeating refs.
+  const bound = new Set<string>(requests);
+  const thread = new Set<string>([entry.id]);
+  for (const e of [...timeline].sort(
+    (a, b) =>
+      a.created_at.localeCompare(b.created_at) || a.event_seq - b.event_seq,
+  )) {
+    const links = [e.reply_to, e.supersedes].filter(
+      (id): id is NonNullable<typeof id> => id !== undefined,
+    );
+    if (boundTo(e, q, requests) || links.some((id) => bound.has(id)))
+      bound.add(e.id);
+    if (links.some((id) => thread.has(id))) thread.add(e.id);
+  }
   reject(
-    asked !== undefined && isAfter(here, asked) && boundTo(entry, q, requests),
+    asked !== undefined && isAfter(here, asked) && bound.has(entry.id),
     `所有者原话须在 ${q.id} 提出之后，并引用 ${q.id} 或回复这条拍板`,
   );
-  // Replies in the quoted answer's thread may retract it without citing the decision.
-  const thread = new Set<string>([entry.id]);
-  for (const e of [...timeline].sort((a, b) => a.event_seq - b.event_seq))
-    if (e.reply_to && thread.has(e.reply_to) && e.card_id === entry.card_id)
-      thread.add(e.id);
+  const otherDecisions = entry.refs.flatMap((r) =>
+    r.kind === "decision" && r.id !== q.id ? [r.id] : [],
+  );
+  reject(
+    otherDecisions.length === 0,
+    `所有者原话同时涉及其它拍板（${otherDecisions.join("、")}），无法确定答的是哪一条`,
+  );
   const later = timeline.filter(
     (e) =>
       e.id !== entry.id &&
@@ -154,7 +185,7 @@ export function bindOwnerRecord(
       ownerEntry(e) &&
       !e.retracted &&
       !timeline.some((x) => x.supersedes === e.id) &&
-      (boundTo(e, q, requests) || thread.has(e.id)) &&
+      (bound.has(e.id) || thread.has(e.id)) &&
       notBefore(pointOf(e), here),
   );
   reject(
@@ -182,10 +213,22 @@ export function bindOwnerRecord(
   };
   if (q.kind === "approve") {
     const goal = q.target;
-    const target =
+    const candidates =
       "delivery_id" in goal
-        ? d.list("deliveries").find((v) => v.id === goal.delivery_id)
-        : undefined;
+        ? d.list("deliveries").filter((v) => v.id === goal.delivery_id)
+        : d
+            .list("deliveries")
+            .filter(
+              (v) =>
+                v.subject.kind === goal.subject.kind &&
+                v.subject.value === goal.subject.value &&
+                v.status !== "superseded" &&
+                d
+                  .list("work_items")
+                  .some((w) => w.id === v.work_item_id && cards.has(w.card_id)),
+            );
+    // A subject must name exactly one current delivery on the decision's cards.
+    const target = candidates.length === 1 ? candidates[0] : undefined;
     stale(
       target &&
         (target.status === "submitted" || target.status === "accepted") &&

@@ -73,6 +73,8 @@ function setup() {
     extra: {
       affected_work_items?: ReturnType<typeof id<"work_item">>[];
       wide?: boolean;
+      firstKey?: string;
+      subject?: Delivery["subject"];
     } = {},
   ) =>
     commit(
@@ -82,14 +84,20 @@ function setup() {
         {
           card_id: id("card", 1),
           category,
-          kind: "choose",
+          ...(extra.subject
+            ? { kind: "approve" as const, target: { subject: extra.subject } }
+            : { kind: "choose" as const }),
           question: "拆卡还是并入？",
           context: "补充的三项",
           options: [
-            { key: "split", description: "拆成后续卡", impact: "本卡不变" },
+            {
+              key: extra.firstKey ?? "split",
+              description: "拆成后续卡",
+              impact: "本卡不变",
+            },
             { key: "merge_in", description: "并入本卡", impact: "范围扩大" },
           ],
-          recommended: "split",
+          recommended: extra.firstKey ?? "split",
           affected_cards: extra.wide
             ? [id("card", 1), id("card", 2)]
             : [id("card", 1)],
@@ -512,5 +520,138 @@ describe("owner record linking", () => {
     );
     expect(resolved.resolution?.owner_record).toBeUndefined();
     expect(resolved.resolution?.raw_quote).toBe("按授权拆卡");
+  });
+  test.each([
+    ["negation inside the clause", "Q 不要选 split，等实测"],
+    ["negation without hedge", "Q 不要选 split"],
+    ["english negation", "Q we should not pick split"],
+  ])("V-3045: a negated choice stays open (%s)", (_name, body) => {
+    const f = setup();
+    const q = f.request();
+    const entry = f.comment(body.replace("Q", q.id));
+    expect(f.link(q.id, { timeline_entry_id: entry.id }).ok).toBe(false);
+    expect(f.state.decisions.find((d) => d.id === q.id)?.status).toBe("open");
+    expect(
+      f.state.events.some(
+        (e) =>
+          e.type === "decision_resolved" &&
+          (e.payload as { decision_id?: string }).decision_id === q.id,
+      ),
+    ).toBe(false);
+  });
+
+  test("V-3045: a choice addressed to another decision stays open", () => {
+    const f = setup();
+    const q1 = f.request();
+    const q2 = f.request();
+    const entry = f.comment(`${q1.id} 先放着，${q2.id} 选 split`);
+    expect(
+      error(f.link(q1.id, { timeline_entry_id: entry.id }))?.message,
+    ).toContain(q2.id);
+    expect(f.state.decisions.find((d) => d.id === q1.id)?.status).toBe("open");
+    // A clean, unique answer to the same decision still links.
+    const clean = f.comment(`${q1.id} 选 split`);
+    expect(
+      f.commit(f.link(q1.id, { timeline_entry_id: clean.id })).status,
+    ).toBe("resolved");
+  });
+
+  test("V-3045: option keys with hyphens match literally instead of throwing", () => {
+    const f = setup();
+    const q = f.request("general", { firstKey: "follow-up" });
+    const other = f.comment(`${q.id} 选 merge_in`);
+    expect(
+      error(f.link(q.id, { timeline_entry_id: other.id }, "follow-up"))?.code,
+    ).toBe("validation_failed");
+    const entry = f.comment(`${q.id} 选 follow-up`);
+    const resolved = f.commit(
+      f.link(q.id, { timeline_entry_id: entry.id }, "follow-up"),
+    );
+    expect(resolved.resolution?.option).toBe("follow-up");
+  });
+
+  test("V-3045: an approval bound by full subject resolves to its one current delivery", () => {
+    const f = setup();
+    const delivery = {
+      id: id("delivery", 1),
+      work_item_id: id("work_item", 1),
+      run_id: id("run", 1),
+      kind: "code",
+      summary: "当前版本",
+      subject,
+      evidence: [],
+      attachments: [],
+      known_gaps: [],
+      requested_verifiers: [],
+      status: "accepted",
+    } as Delivery;
+    f.state = {
+      ...f.state,
+      deliveries: [delivery],
+      events: [
+        ...f.state.events,
+        {
+          id: "E-delivery" as never,
+          card_id: id("card", 1),
+          seq: 1,
+          type: "delivery_submitted",
+          actor: actor(),
+          payload: { delivery_id: delivery.id, superseded: [] },
+          created_at: now,
+        },
+      ],
+    };
+    const q = f.request("general", { subject });
+    const entry = f.comment(`${q.id} 选 split`);
+    // Superseded or missing versions are still stale.
+    const saved = f.state;
+    f.state = {
+      ...saved,
+      deliveries: [{ ...delivery, status: "superseded" }],
+    };
+    expect(error(f.link(q.id, { timeline_entry_id: entry.id }))?.code).toBe(
+      "stale_target",
+    );
+    f.state = saved;
+    expect(f.commit(f.link(q.id, { timeline_entry_id: entry.id })).status).toBe(
+      "resolved",
+    );
+  });
+
+  test("V-3045: an edited change of mind in the answer's thread keeps the old answer open", () => {
+    const f = setup();
+    const q = f.request();
+    const first = f.comment(`${q.id} 选 split`);
+    const changed = f.comment("改选 merge_in", { reply_to: first.id });
+    const edited = f.comment("改选 merge_in（更正措辞）", {
+      supersedes: changed.id,
+    });
+    expect(
+      error(f.link(q.id, { timeline_entry_id: first.id }))?.message,
+    ).toContain(edited.id);
+    expect(f.state.decisions.find((d) => d.id === q.id)?.status).toBe("open");
+  });
+
+  test("V-3045: a quote on a sensitive card is not copied onto a less restricted card", () => {
+    const f = setup();
+    const q = f.request("general", { wide: true });
+    f.state = {
+      ...f.state,
+      cards: f.state.cards.map((c) =>
+        c.id === id("card", 2) ? { ...c, sensitive: true } : c,
+      ),
+    };
+    const entry = f.comment(`${q.id} 选 split`, { card: 2 });
+    expect(
+      error(f.link(q.id, { timeline_entry_id: entry.id }))?.message,
+    ).toContain("敏感卡");
+    expect(
+      f.state.timeline.some(
+        (e) =>
+          e.card_id === id("card", 1) &&
+          e.body.includes(entry.body) &&
+          e.id !== entry.id,
+      ),
+    ).toBe(false);
   });
 });
