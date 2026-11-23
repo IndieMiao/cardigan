@@ -67,6 +67,7 @@ export interface ReadRepositories extends ReadGlobalRepositories {
   ) => { timeline: TimelineEntry[]; attachments: Attachment[] };
   readonly projectMergeEvents?: (project: ProjectId) => Event[];
   readonly dependencyEvents?: (project: ProjectId) => Event[];
+  readonly platformDeployments?: (project: ProjectId, sha: string) => Event[];
   readonly test_review_trust?: import("@cardigan/domain").TestReviewTrust;
   readonly cachedCommandState?: SnapshotTransaction["state"];
   readonly project_preferences: ReadRepository<ProjectPreferences, ProjectId>;
@@ -341,6 +342,7 @@ export function createReadRepositories(
         .all(project)
         .map((r) => JSON.parse(String(r.doc)) as Event),
     dependencyEvents: (project) => readCardDependencyEvents(db, project),
+    platformDeployments: platformDeploymentReader(db),
   };
 }
 
@@ -510,5 +512,36 @@ export function readCardDependencyEvents(db: DatabaseSync, project: ProjectId) {
     "SELECT doc FROM events WHERE project_id = ? AND type IN ('card_merged','card_marked_done','review_submitted','completion_reviewed','delivery_submitted','review_reused')",
   )
     .all(project)
+    .map((r) => JSON.parse(String(r.doc)) as Event);
+}
+
+const platformReaders = new WeakMap<
+  DatabaseSync,
+  (project: ProjectId, sha: string) => Event[]
+>();
+/**
+ * One stable lazy reader per connection, so it can live in a cached command
+ * state without changing its identity or equality between transactions.
+ */
+export function platformDeploymentReader(db: DatabaseSync) {
+  let reader = platformReaders.get(db);
+  if (!reader) {
+    reader = (project, sha) => readPlatformDeployments(db, project, sha);
+    platformReaders.set(db, reader);
+  }
+  return reader;
+}
+
+/** Host deployment records of one SHA written in the other projects of this control plane. */
+function readPlatformDeployments(
+  db: DatabaseSync,
+  project: ProjectId,
+  sha: string,
+) {
+  return prepare(
+    db,
+    "SELECT e.doc FROM projects p JOIN events e ON e.project_id = p.id AND e.type = 'host_deployment_recorded' WHERE p.id <> ? AND e.stream = '' AND json_extract(e.doc, '$.payload.to') = ? ORDER BY e.project_id, e.seq",
+  )
+    .all(project, sha)
     .map((r) => JSON.parse(String(r.doc)) as Event);
 }
