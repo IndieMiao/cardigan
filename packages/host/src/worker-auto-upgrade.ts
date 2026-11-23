@@ -2,6 +2,10 @@ import { dirname, join } from "node:path";
 import { occupiedRunSlots } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
+import {
+  agentToolsConfirmed,
+  agentToolsStale,
+} from "./agent-tools-maintenance.js";
 import { holdLongOperation } from "./long-operations.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
@@ -18,13 +22,16 @@ import {
 import { enrolledUpgradeIdentity } from "./worker-upgrade-enrollment.js";
 import {
   finishUpgrade,
+  type InstallEvidence,
   upgradeHold,
   upgradeKey,
   upgradeState,
 } from "./worker-upgrade-gate.js";
 import {
+  installedAgentTools,
   installRelease,
   promotionPending,
+  WORKER_UPGRADE_NOT_SENT,
 } from "./worker-upgrade-transport.js";
 
 type Check = { blockers: readonly string[]; launch_enabled: boolean };
@@ -44,25 +51,67 @@ export async function patrolHelperUpgrade(
     check: () => Promise<Check>;
   },
   initial: Check,
-  adapters = {
+  adapters: {
+    install: typeof installRelease;
+    workerCheck: typeof onboardWorker;
+    promotionPending: typeof promotionPending;
+    /** C-599: current helpers with missing/stale attachment tools also install, once per release key. */
+    toolsStale?: typeof agentToolsStale;
+  } = {
     install: installRelease,
     workerCheck: onboardWorker,
     promotionPending,
+    toolsStale: agentToolsStale,
   },
 ): Promise<Check> {
   const { store, project, machine, execution, signal } = options;
   if (machine === "local" || execution.mode !== "agent-ssh") return initial;
   const previous = upgradeState(store, project, machine);
   const wasHeld = !!previous && previous.state !== "verified";
-  if (!wasHeld && !initial.blockers.some(helperMismatch)) return initial;
-  if (initial.blockers.includes("machine_not_ready")) return initial;
   const root = dirname(runtimeWorkersPath(options.env));
   const key = upgradeKey(execution.target?.fingerprint);
+  const helpersStale = initial.blockers.some(helperMismatch);
+  // C-599: an enrolled, otherwise healthy binding that has not tried this key
+  // yet also installs for missing/stale tools, including while it recovers.
+  let toolsStale = false;
+  if (
+    !helpersStale &&
+    !initial.blockers.length &&
+    previous?.release_key !== key &&
+    !agentToolsConfirmed.has(store, project, machine, key) &&
+    adapters.toolsStale
+  ) {
+    let enrolled = false;
+    try {
+      enrolled = !!enrolledUpgradeIdentity(root, project, machine);
+    } catch {
+      /* An unreadable enrollment never authorizes an install. */
+    }
+    const os = store.uow.read((tx) => tx.machines.get(project, machine))?.os;
+    if (enrolled && os) {
+      const state = await adapters.toolsStale(execution, machine, os, signal);
+      toolsStale = state === "stale";
+      // Current tools need no further remote probe for this key in this process;
+      // an unknown result is probed again by the next patrol.
+      if (state === "current")
+        agentToolsConfirmed.set(store, project, machine, key);
+    }
+  }
+  // A tools-only refresh of a released machine never holds dispatch before it writes.
+  const toolsOnly = !wasHeld && !helpersStale && toolsStale;
+  if (!wasHeld && !helpersStale && !toolsStale) return initial;
+  if (initial.blockers.includes("machine_not_ready")) return initial;
 
   let stage = "configuration";
   const start = Date.now();
   let before: Record<string, string> = {};
-  const evidence = () => ({ before, start, job: options.job });
+  let tools: InstallEvidence["tools"];
+  const evidence = (): InstallEvidence => ({
+    before,
+    start,
+    job: options.job,
+    ...(tools ? { tools } : {}),
+  });
   const fail = () =>
     store.uow.run((tx) =>
       finishUpgrade(store, tx, project, machine, key, stage, evidence(), false),
@@ -107,12 +156,15 @@ export async function patrolHelperUpgrade(
       ? { ...held, blockers: [...initial.blockers, upgradeHold] }
       : initial;
   }
-  const needsInstall = initial.blockers.some(helperMismatch);
+  const needsInstall = toolsStale || helpersStale;
   if (!needsInstall && initial.blockers.length)
     return { ...held, blockers: [...initial.blockers, upgradeHold] };
   try {
-    if (adapters.promotionPending(execution.dataDir)) return held;
+    // A tools-only refresh never holds dispatch before it writes: retry next patrol.
+    if (adapters.promotionPending(execution.dataDir))
+      return toolsOnly ? initial : held;
   } catch {
+    if (toolsOnly) return initial;
     /* Missing/invalid deployment proof is recorded as an installation failure. */
   }
   const claimed = store.uow.run((tx) => {
@@ -131,7 +183,7 @@ export async function patrolHelperUpgrade(
       .run(project, machine, key);
     return true;
   });
-  if (!claimed) return held;
+  if (!claimed) return toolsOnly ? initial : held;
   // C-609: an interrupted install needs manual recovery; deployments wait.
   const release = holdLongOperation(store, {
     kind: "worker_upgrade",
@@ -168,6 +220,8 @@ export async function patrolHelperUpgrade(
     if (needsInstall) {
       stage = "install";
       before = await adapters.install(execution, project, identity, signal);
+      // A v1 entry upgraded only the helpers: never record that as tools installed.
+      tools = installedAgentTools(before) ? "installed" : "entry_v1";
     }
     stage = "worker_check";
     if (
@@ -204,7 +258,36 @@ export async function patrolHelperUpgrade(
         .run(JSON.stringify(evidence()), project, machine, key),
     );
     return result;
-  } catch {
+  } catch (error) {
+    const notSent =
+      stage === "configuration" ||
+      (stage === "install" &&
+        error instanceof Error &&
+        error.message === WORKER_UPGRADE_NOT_SENT);
+    if (toolsOnly && notSent) {
+      // Nothing was sent yet: undo the claim instead of holding a healthy machine.
+      store.uow.run(() =>
+        previous
+          ? store.database
+              .prepare(
+                "UPDATE worker_helper_upgrades SET release_key=?,state=?,pending_final=? WHERE project_id=? AND machine_id=? AND release_key=? AND state='installing'",
+              )
+              .run(
+                String(previous.release_key),
+                String(previous.state),
+                previous.pending_final ?? null,
+                project,
+                machine,
+                key,
+              )
+          : store.database
+              .prepare(
+                "DELETE FROM worker_helper_upgrades WHERE project_id=? AND machine_id=? AND release_key=? AND state='installing'",
+              )
+              .run(project, machine, key),
+      );
+      return initial;
+    }
     fail();
     return held;
   } finally {

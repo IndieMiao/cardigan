@@ -34,7 +34,11 @@ sudo python3 deploy/install-agent.py --host-user <主机用户名> \
 
 `agent-tools/` 下的 `download-attachment.mjs`、`upload-evidence.mjs` 是只依赖 Node 内置模块的预构建单文件。受管 worker 上装在 `<工作根>/libexec/agent-tools/`（root 所有、项目组只读），由 worker 向导首装，并随人工升级和 `cardigan-helper-v2` 签名升级与 helper 一起更新。员工启动时通过 `CARDIGAN_AGENT_TOOLS` 找到它们。不要手改，修改源码后运行 `pnpm --filter @cardigan/mcp-server build:agent-tools` 重建。
 
-`cardigan machine check` 的 `agent.attachment_tools` 能力项会核对两个文件存在、可执行且与当前发布一致；不一致时只报原因和期望 SHA-256，不生成命令。在 C-595 之前登记签名升级的机器不会自动装上助手（自动补装另卡处理），这时按下面的固定步骤手动补装。每次补装都用新建的暂存目录，只删除这个目录，不碰管理员家目录或别处的同名文件；两份文件分别核对：每个期望值都必须是完整的 64 位十六进制 SHA-256 且与对应文件一致，任一不符即停止，暂存目录保留供排查，重试从第 1 步重新开始。macOS 把第 1 步的 `SUM=sha256sum` 改成 `SUM='shasum -a 256'`。
+`cardigan machine check` 的 `agent.attachment_tools` 能力项会核对两个文件存在、可执行且与当前发布一致；不一致时报原因和期望 SHA-256，`machine show` 与检查历史不含命令。
+
+helper 已是当前版、只有助手缺失或不一致时（C-599）：已登记签名升级的机器由巡检按当前发布自动安装一次，外层 machine check 复查通过才记为助手已装，同一版本不再自动安装；C-595 之前登记的 v1 入口只能更新三个 helper，会明确记为“需要迁移”。v1 入口、自动安装后复查仍未通过、以及未登记签名升级的机器，由系统暂存经核验的完整发行材料并发一条主机运维待办；命令核对摘要后更新 deploy 目录、装入助手，并把本项目已登记的 v1 入口迁移到 v2。暂存失败的待办没有命令，下次巡检或重跑 machine check 会重新备料并替换它；换发行版或换绑定后旧待办自动作废。显式 `cardigan machine check`（独立运行或加入正在进行的巡检）在输出的 `agent_tools_guidance` 里给出本次结论，只有当前绑定和发行材料重新核对一致时才附该待办的命令。
+
+不方便用待办命令时，也可按下面的固定步骤手动补装。每次补装都用新建的暂存目录，只删除这个目录，不碰管理员家目录或别处的同名文件；两份文件分别核对：每个期望值都必须是完整的 64 位十六进制 SHA-256 且与对应文件一致，任一不符即停止，暂存目录保留供排查，重试从第 1 步重新开始。macOS 把第 1 步的 `SUM=sha256sum` 改成 `SUM='shasum -a 256'`。
 
 ```sh
 # 1. 目标机，管理员：填入 machine check 报出的期望摘要和本机路径，新建本次暂存目录

@@ -63,6 +63,7 @@ import {
   storyProgress,
   suggestionView,
   verificationActivity,
+  workerAgentToolsAction,
   workerHelperAction,
 } from "@cardigan/domain";
 import { type ProjectMergeGate, previewPorts } from "@cardigan/host";
@@ -1541,6 +1542,11 @@ export function needsYou(
     machine: Machine,
     binding: string,
   ) => string | undefined,
+  /** C-599: the command the current binding and release would stage now. */
+  currentToolsCommand?: (
+    project: string,
+    machine: Machine,
+  ) => string | undefined,
 ) {
   const result = unwrap(
     listNeedsYou(
@@ -1578,28 +1584,41 @@ export function needsYou(
     );
     const stored = state.human_actions.find((a) => a.id === action.id);
     const helper = workerHelperAction(state, action);
+    const tools = !helper && workerAgentToolsAction(state, action);
     const machine =
       helper && state.machines?.find((m) => m.id === helper.machine_id);
-    const terminal = !helper
-      ? (action.handoff?.terminal ?? action.terminal)
-      : machine &&
-          action.status === "open" &&
-          action.helper_upgrade?.binding &&
-          action.terminal &&
-          currentUpgradeCommand?.(
-            state.project_id,
-            machine,
-            action.helper_upgrade.binding,
-          ) === action.terminal.command
+    const toolsMachine =
+      tools && state.machines?.find((m) => m.id === tools.machine_id);
+    // Administrator upgrade commands are never replaced by a handoff and are
+    // shown only while they equal what the current binding and release give.
+    const terminal = tools
+      ? toolsMachine &&
+        action.status === "open" &&
+        action.terminal &&
+        currentToolsCommand?.(state.project_id, toolsMachine) ===
+          action.terminal.command
         ? action.terminal
-        : undefined;
+        : undefined
+      : !helper
+        ? (action.handoff?.terminal ?? action.terminal)
+        : machine &&
+            action.status === "open" &&
+            action.helper_upgrade?.binding &&
+            action.terminal &&
+            currentUpgradeCommand?.(
+              state.project_id,
+              machine,
+              action.helper_upgrade.binding,
+            ) === action.terminal.command
+          ? action.terminal
+          : undefined;
     return {
       ...webAuthorView(state, stored?.requested_by ?? "system"),
       kind: "human_action" as const,
       id: action.id,
       card_id: action.card_id ?? null,
       instructions:
-        helper && action.terminal && !terminal
+        (helper || tools) && action.terminal && !terminal
           ? "当前升级命令不可用，请主机运维重新核对目标和发行材料。"
           : (action.handoff?.instructions ?? action.instructions),
       terminal,
