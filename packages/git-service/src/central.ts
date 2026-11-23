@@ -617,6 +617,55 @@ export class CentralRepositoryService {
       base_sha: base,
     };
   }
+  /** C-611: the pinned delivery merged onto the current baseline, for a macOS check. */
+  async prepareDeliveryCandidate(
+    project: CentralProject,
+    delivery: string,
+    headSha: string,
+    attempt: string,
+  ) {
+    if (
+      !parseId("delivery", delivery).ok ||
+      !fullSha.test(headSha) ||
+      !/^[A-Za-z0-9_-]{1,80}$/u.test(attempt)
+    )
+      throw new Error("Invalid macOS check candidate identity");
+    const repository = await this.ensureCentral(project);
+    if (
+      (await this.git.readRef(
+        repository,
+        `refs/cardigan/deliveries/${delivery}`,
+      )) !== headSha
+    )
+      throw new Error("Unpinned delivery HEAD");
+    const base = await this.git.readRef(
+      repository,
+      `refs/heads/${project.base_branch}`,
+    );
+    if (!base) throw new Error("Missing baseline");
+    const merged = await this.mergeCandidate(
+      repository,
+      base,
+      headSha,
+      `macOS check ${delivery} ${attempt}`,
+      this.options.identity ?? DEFAULT_MERGE_IDENTITY,
+    );
+    if (merged.conflicts.length) throw new PrecheckMergeConflict(base);
+    const ref = `refs/cardigan/candidates/macos-${attempt}`;
+    const old = await this.git.readRef(repository, ref);
+    if (old !== merged.sha)
+      await this.git.compareAndSwapRef(
+        repository,
+        ref,
+        merged.sha,
+        old ?? null,
+      );
+    return {
+      candidate_sha: merged.sha,
+      tree_sha: await this.git.treeOfCommit(repository, merged.sha),
+      base_sha: base,
+    };
+  }
   /** Publish only by CAS, after the caller has checked this exact candidate tree. */
   async publishMerge(
     project: CentralProject,

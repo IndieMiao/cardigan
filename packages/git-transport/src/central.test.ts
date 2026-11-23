@@ -268,6 +268,48 @@ test("base clone fetches fixed delivery refs from center and rejects legacy sour
   expect(await readFile(join(base, ".git", "config"), "utf8")).toContain(repo);
 });
 
+test("a macOS check candidate merges only the pinned delivery onto the current baseline", async () => {
+  const repo = await f.central.ensureCentral(f.project);
+  await git(f.source, "switch", "-c", "delivery");
+  const head = await commit(f.source, "delivery");
+  await f.transport.fetchRefs(repo, f.source, [
+    "refs/heads/delivery:refs/cardigan/deliveries/D-1",
+  ]);
+  await git(f.source, "switch", "main");
+  await writeFile(join(f.source, "other"), "baseline moved");
+  await git(f.source, "add", "other");
+  await git(f.source, "commit", "-m", "baseline moved");
+  const base = await git(f.source, "rev-parse", "HEAD");
+  await f.central.syncFromSource(f.project);
+  const candidate = await f.central.prepareDeliveryCandidate(
+    f.project,
+    "D-1",
+    head,
+    "m1",
+  );
+  expect(candidate.base_sha).toBe(base);
+  expect(
+    (await git(repo, "rev-list", "--parents", "-n1", candidate.candidate_sha))
+      .split(" ")
+      .slice(1),
+  ).toEqual([base, head]);
+  expect(
+    await git(repo, "rev-parse", "refs/cardigan/candidates/macos-m1"),
+  ).toBe(candidate.candidate_sha);
+  expect(
+    await git(repo, "rev-parse", `${candidate.candidate_sha}^{tree}`),
+  ).toBe(candidate.tree_sha);
+  await expect(
+    f.central.prepareDeliveryCandidate(f.project, "D-2", head, "m2"),
+  ).rejects.toThrow(/Unpinned/);
+  await expect(
+    f.central.prepareDeliveryCandidate(f.project, "D-1", base, "m3"),
+  ).rejects.toThrow(/Unpinned/);
+  await expect(
+    f.central.prepareDeliveryCandidate(f.project, "D-1", head, "../x"),
+  ).rejects.toThrow(/Invalid/);
+});
+
 test("base fetch leaves automatic maintenance to its owner even above the repack threshold", async () => {
   const repo = await f.central.ensureCentral(f.project),
     base = join(f.root, "base"),
