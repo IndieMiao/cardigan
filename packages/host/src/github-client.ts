@@ -6,7 +6,12 @@ import {
   CheckExecutorUnavailable,
   type OpenFailureLog,
 } from "./check-executor.js";
-import { githubDeadline } from "./github-deadline.js";
+import { CHECKOUT_LIMITS } from "./checkout-limits.js";
+import {
+  GithubProgressTimeout,
+  githubDeadline,
+  githubProgressDeadline,
+} from "./github-deadline.js";
 import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 import { secureCredentialFile } from "./merge-push-config.js";
@@ -30,6 +35,47 @@ export class GithubNotFoundError extends GithubExecutorError {
     super("api");
     this.diagnostic = "HTTP 404";
   }
+}
+export type GithubLogFailure = "timeout" | "network" | "http";
+/** Classified job log download failure. The diagnostic is assembled only from
+ * fixed text, numbers and allow-listed error names, codes and messages. */
+export class GithubLogError extends GithubExecutorError {
+  constructor(
+    readonly failure: GithubLogFailure,
+    diagnostic: string,
+    readonly limit?: GithubProgressTimeout["limit"],
+  ) {
+    super("api");
+    this.diagnostic = diagnostic;
+  }
+}
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+/** Error names, codes and plain-word messages only: messages carrying hosts,
+ * addresses, URLs or punctuation are dropped, never quoted. */
+function errorChain(cause: unknown): string {
+  const parts: string[] = [];
+  let current = cause;
+  for (let depth = 0; depth < 3 && current instanceof Error; depth++) {
+    const name = /^[A-Za-z]{1,40}$/u.test(current.name)
+      ? current.name
+      : "Error";
+    const message = /^[A-Za-z][A-Za-z ,'-]{0,79}$/u.test(current.message)
+      ? `: ${current.message}`
+      : "";
+    const code =
+      "code" in current &&
+      typeof current.code === "string" &&
+      /^[A-Z][A-Z0-9_]{1,40}$/u.test(current.code)
+        ? ` (${current.code})`
+        : "";
+    parts.push(name + message + code);
+    current = current.cause;
+  }
+  return parts.join(" <- ") || "未知错误";
 }
 /** Transport text may contain an Authorization header, signed URL or private key.
  * Preserve only provider status / known transport causes across this boundary. */
@@ -135,6 +181,12 @@ export class GithubClient {
       fetch?: typeof fetch;
       now?: () => number;
       rate?: GithubRateLimit;
+      /** Job log download windows; defaults come from CHECKOUT_LIMITS. */
+      logLimits?: Partial<{
+        responseMs: number;
+        idleMs: number;
+        totalMs: number;
+      }>;
     },
   ) {
     this.rate = options.rate ?? new GithubRateLimit(undefined, options.now);
@@ -571,74 +623,135 @@ export class GithubClient {
   ): Promise<void> {
     if (!Number.isSafeInteger(id) || id < 1)
       throw new GithubExecutorError("security");
+    const limits = {
+      responseMs: CHECKOUT_LIMITS.remoteCommandMs,
+      idleMs: CHECKOUT_LIMITS.logIdleMs,
+      totalMs: CHECKOUT_LIMITS.logDownloadMs,
+      ...this.options.logLimits,
+    };
+    const started = Date.now();
+    let received = 0;
+    // Only transport stages are network failures; local log processing is not.
+    let stage = "transport" as "transport" | "local";
     try {
-      return await githubDeadline(async (signal) => {
-        const token = await this.token();
-        signal.throwIfAborted();
-        this.rate.reserve();
-        const init = {
-          redirect: "manual" as const,
-          signal,
-        };
-        let response = await (this.options.fetch ?? fetch)(
-          `https://api.github.com/repos/${this.options.config.repo}/actions/jobs/${id}/logs`,
-          { ...init, headers: { Authorization: `Bearer ${token}` } },
-        );
-        signal.throwIfAborted();
-        if (response.status === 403 || response.status === 429)
-          this.rate.backoff(response.headers.get("retry-after"));
-        if (response.status === 302) {
-          const url = new URL(response.headers.get("location") ?? "");
-          if (
-            url.protocol !== "https:" ||
-            url.username ||
-            url.password ||
-            url.port ||
-            !(
-              url.hostname.endsWith(".blob.core.windows.net") ||
-              url.hostname.endsWith(".actions.githubusercontent.com")
-            )
-          )
-            throw new GithubExecutorError("security");
-          // Signed storage URLs never receive the App token and cannot redirect again.
+      return await githubProgressDeadline(
+        async (signal, progress) => {
+          const token = await this.token();
+          signal.throwIfAborted();
           this.rate.reserve();
-          response = await (this.options.fetch ?? fetch)(url, {
-            ...init,
-            redirect: "error",
-          });
-        }
-        signal.throwIfAborted();
-        if (response.status === 403 || response.status === 429)
-          this.rate.backoff(response.headers.get("retry-after"));
-        if (response.status === 404) throw new GithubNotFoundError();
-        if (response.status === 401) throw new GithubExecutorError("auth");
-        if (!response.ok || !response.body)
-          throw new GithubExecutorError("api");
-        const reader = response.body.getReader();
-        const write = open(),
-          decoder = new TextDecoder();
-        let received = false;
-        try {
-          while (true) {
-            const part = await reader.read();
-            signal.throwIfAborted();
-            if (part.done) break;
-            if (part.value.length) received = true;
-            write(decoder.decode(part.value, { stream: true }));
+          const init = {
+            redirect: "manual" as const,
+            signal,
+          };
+          let response = await (this.options.fetch ?? fetch)(
+            `https://api.github.com/repos/${this.options.config.repo}/actions/jobs/${id}/logs`,
+            { ...init, headers: { Authorization: `Bearer ${token}` } },
+          );
+          signal.throwIfAborted();
+          if (response.status === 403 || response.status === 429)
+            this.rate.backoff(response.headers.get("retry-after"));
+          if (response.status === 302) {
+            let url: URL;
+            try {
+              url = new URL(response.headers.get("location") ?? "");
+            } catch {
+              throw new GithubLogError("http", "HTTP 302 跳转地址无效");
+            }
+            if (
+              url.protocol !== "https:" ||
+              url.username ||
+              url.password ||
+              url.port ||
+              !(
+                url.hostname.endsWith(".blob.core.windows.net") ||
+                url.hostname.endsWith(".actions.githubusercontent.com")
+              )
+            )
+              throw new GithubExecutorError("security");
+            // Signed storage URLs never receive the App token and cannot redirect again.
+            this.rate.reserve();
+            response = await (this.options.fetch ?? fetch)(url, {
+              ...init,
+              redirect: "error",
+            });
           }
-          if (!received) throw new GithubNotFoundError();
-          write(decoder.decode());
-        } finally {
-          await reader.cancel();
-        }
-      }, parent);
+          signal.throwIfAborted();
+          if (response.status === 403 || response.status === 429)
+            this.rate.backoff(response.headers.get("retry-after"));
+          if (response.status === 404) throw new GithubNotFoundError();
+          if (response.status === 401) {
+            const error = new GithubExecutorError("auth");
+            error.diagnostic = "HTTP 401";
+            throw error;
+          }
+          if (!response.ok)
+            throw new GithubLogError("http", `HTTP ${response.status}`);
+          if (!response.body)
+            throw new GithubLogError(
+              "http",
+              `HTTP ${response.status} 无响应内容`,
+            );
+          const reader = response.body.getReader();
+          stage = "local";
+          const write = open(),
+            decoder = new TextDecoder();
+          // Headers arrived: from now on the window is renewed by body bytes.
+          progress();
+          try {
+            while (true) {
+              stage = "transport";
+              const part = await reader.read();
+              signal.throwIfAborted();
+              if (part.done) break;
+              received += part.value.length;
+              stage = "local";
+              write(decoder.decode(part.value, { stream: true }));
+              // Renew after processing so slow local redaction of a large
+              // chunk is not mistaken for a stalled download.
+              progress();
+            }
+            if (!received) throw new GithubNotFoundError();
+            stage = "local";
+            write(decoder.decode());
+          } finally {
+            await reader.cancel();
+          }
+        },
+        limits,
+        parent,
+      );
     } catch (error) {
       if (
         error instanceof GithubRetryLater ||
         error instanceof GithubExecutorError
       )
         throw error;
-      throw new GithubExecutorError("api");
+      const progress = `已接收 ${formatBytes(received)}，用时 ${Math.round((Date.now() - started) / 1000)} 秒`;
+      if (error instanceof GithubProgressTimeout && !parent?.aborted) {
+        const seconds = Math.round(error.ms / 1000);
+        throw new GithubLogError(
+          "timeout",
+          `${
+            error.limit === "response"
+              ? `等待响应超过 ${seconds} 秒`
+              : error.limit === "idle"
+                ? `${seconds} 秒未收到新数据`
+                : `超过下载总时限 ${seconds} 秒`
+          }（${progress}）`,
+          error.limit,
+        );
+      }
+      if (parent?.aborted || stage === "local") {
+        const failure = new GithubExecutorError("api");
+        failure.diagnostic = parent?.aborted
+          ? `日志下载已取消（${progress}）`
+          : `日志处理失败：${errorChain(error)}`;
+        throw failure;
+      }
+      throw new GithubLogError(
+        "network",
+        `${errorChain(error)}（${progress}）`,
+      );
     }
   }
   private nextPage(

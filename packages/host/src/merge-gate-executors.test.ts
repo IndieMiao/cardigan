@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
+import type { GithubStepContract } from "./github-step-contract.js";
 import { loadMergeGateConfig } from "./merge-gate-config.js";
 import { executorExecution } from "./merge-gate-executors.js";
 
@@ -625,6 +626,56 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
       },
     },
   });
+  // C-661: per-baseline shapes and optional infrastructure steps.
+  const multi = (
+    await load({
+      step_contract: {
+        steps: [
+          "install",
+          "build",
+          "test",
+          "lint",
+          { name: "dynamic_farm", optional: true },
+          "deps",
+          "e2e",
+        ],
+        branches: {
+          "farm-dev": {
+            steps: ["install", "build", "test", "lint", "deps", "e2e"],
+          },
+        },
+      },
+    })
+  ).forProject("p");
+  expect(multi).toMatchObject({
+    status: "enabled",
+    executor: {
+      stepContract: {
+        steps: expect.arrayContaining([
+          { name: "dynamic_farm", optional: true },
+        ]),
+      },
+    },
+  });
+  expect(
+    (
+      multi as { executor: { stepContract: GithubStepContract } }
+    ).executor.stepContract.branches?.get("farm-dev")?.steps,
+  ).toHaveLength(6);
+  for (const step_contract of [
+    {
+      steps: ["install", "build", "test", "lint", "deps", "e2e"],
+      branches: { "farm dev": {} },
+    },
+    {
+      steps: ["install", "build", "test", "lint", "deps", "e2e"],
+      post_steps: [{ name: "x", optional: true }],
+    },
+  ]) {
+    const invalid = await load({ step_contract });
+    expect(invalid.forExecutor?.("github")).toBeUndefined();
+    expect(invalid.forProject("p").status).toBe("invalid");
+  }
   await chmod(join(f.ssh, "ci.key"), 0o644);
   expect((await load()).forProject("p").status).toBe("invalid");
 });

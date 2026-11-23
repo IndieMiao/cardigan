@@ -53,7 +53,11 @@ export type OpenFailureLog = (
   steps?: readonly StepTime[],
 ) => (text: string) => void;
 export class FailureLogError extends Error {
-  constructor(readonly category: NonNullable<CheckoutResult["logFailure"]>) {
+  constructor(
+    readonly category: NonNullable<CheckoutResult["logFailure"]>,
+    /** Built by the provider client from fixed text, numbers and codes only. */
+    readonly detail?: string,
+  ) {
     super(category);
   }
 }
@@ -198,8 +202,16 @@ export async function runCheckExecutor(
                 : error instanceof FailureLogError
                   ? error.category
                   : "api";
+              const detail =
+                !signal?.aborted && error instanceof FailureLogError
+                  ? error.detail
+                  : undefined;
               if (terminal.logSource)
-                polled = { ...terminal, logFailure: category };
+                polled = {
+                  ...terminal,
+                  logFailure: category,
+                  ...(detail ? { logFailureDetail: detail } : {}),
+                };
               if (!closed && !signal?.aborted)
                 diagnostic("检查失败日志获取失败，保留原执行结果与清理提示");
             }

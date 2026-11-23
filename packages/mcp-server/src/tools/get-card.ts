@@ -22,6 +22,7 @@ import {
   mergeClassificationView,
   mergeShadowComparisons,
   mergeStage,
+  outstandingEvidence,
   prechecks,
   precheckView,
   referenceReadState,
@@ -406,14 +407,30 @@ export const getCardTool = defineTool({
       waiting_on: derived.waiting_on,
       next_owners: derived.next_owners,
       why: derived.why,
-      work_items: work_items.map((item) => ({
-        ...item,
-        verification_activity: verificationActivity(item, {
-          ...authors,
-          deliveries,
-          reviews,
-        }),
-      })),
+      work_items: work_items.map((item) => {
+        // C-618: evidence this verifier left pending on a platform blocker.
+        const pending =
+          item.kind === "verify"
+            ? outstandingEvidence(reviews, item.id)
+            : undefined;
+        return {
+          ...item,
+          verification_activity: verificationActivity(item, {
+            ...authors,
+            deliveries,
+            reviews,
+          }),
+          ...(pending?.evidence_pending
+            ? {
+                pending_evidence: {
+                  review_id: pending.id,
+                  delivery_id: pending.delivery_id,
+                  ...pending.evidence_pending,
+                },
+              }
+            : {}),
+        };
+      }),
       decisions: state.decisions
         .filter(
           (q) => q.card_id === cardId || q.affected_cards.includes(cardId),

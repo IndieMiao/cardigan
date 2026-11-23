@@ -1,6 +1,7 @@
 import type { Delivery, Run, WorkItem } from "../entities.js";
 import type { EventId } from "../ids.js";
 import { streakAlignment } from "../review-convergence.js";
+import { evidenceWait } from "../review-evidence.js";
 import type { CommandDraft } from "./core.js";
 
 /** Only the first product of a trusted conflict fix inherits its source marker. */
@@ -101,11 +102,14 @@ export function reviewRound(
   );
 }
 
-/** A pass or conditional result ends a rejection streak; reuse spends no rounds. */
+/**
+ * A pass or conditional result ends a rejection streak; reuse spends no rounds.
+ * C-618: a pure platform evidence wait neither extends nor ends it.
+ */
 export function rejectionStreak(d: CommandDraft, item: WorkItem) {
   const reviews = d
     .list("reviews")
-    .filter((r) => r.work_item_id === item.id)
+    .filter((r) => r.work_item_id === item.id && !evidenceWait(r))
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
   const end = reviews.findIndex((r) => r.verdict !== "reject");
   return end === -1 ? reviews : reviews.slice(0, end);
