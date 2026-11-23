@@ -16,7 +16,11 @@ import {
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
-import { fileAttachmentStore, MAX_MCP_BODY_BYTES } from "./attachments.js";
+import {
+  fileAttachmentStore,
+  MAX_MCP_BODY_BYTES,
+  mcpBodyTooLargeMessage,
+} from "./attachments.js";
 import {
   authenticate,
   bearerToken,
@@ -572,6 +576,67 @@ function sessionKeyDigest(req: IncomingMessage): string | undefined {
     : undefined;
 }
 
+function jsonRpcError(
+  res: ServerResponse,
+  status: number,
+  code: number,
+  message: string,
+): void {
+  res
+    .writeHead(status, {
+      "Content-Type": "application/json",
+      Connection: "close",
+    })
+    .end(
+      JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: null }),
+    );
+}
+
+const mcpBodyTooLarge = (res: ServerResponse) =>
+  jsonRpcError(res, 413, -32000, mcpBodyTooLargeMessage());
+
+/**
+ * C-616: reads a body of unknown length as UTF-8, or `undefined` as soon as it
+ * passes `limit`; the rest is left unread and the 413 closes the connection.
+ */
+function readBodyWithin(
+  req: IncomingMessage,
+  limit: number,
+): Promise<string | undefined> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const done = () => {
+      req.off("data", data);
+      req.off("end", end);
+      req.off("error", fail);
+      req.off("close", closed);
+    };
+    const data = (chunk: Buffer) => {
+      size += chunk.byteLength;
+      if (size > limit) {
+        done();
+        req.pause();
+        resolve(undefined);
+      } else chunks.push(chunk);
+    };
+    const end = () => {
+      done();
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+    const fail = (error: Error) => {
+      done();
+      reject(error);
+    };
+    const closed = () =>
+      fail(new Error("Request closed before its body ended"));
+    req.on("data", data);
+    req.once("end", end);
+    req.once("error", fail);
+    req.once("close", closed);
+  });
+}
+
 async function serveMcp(
   req: IncomingMessage,
   res: ServerResponse,
@@ -581,6 +646,35 @@ async function serveMcp(
   log: Logger,
   allowedHosts: string[],
 ): Promise<void> {
+  // C-616: the MCP transport's own 413 names only the body bound. Refuse an
+  // oversized body here instead, so both a declared length and a chunked body
+  // name the attachment limit too. A chunked JSON body is read here within the
+  // same bound and handed over parsed; everything else stays with the SDK.
+  let parsedBody: unknown;
+  if (req.method === "POST" && allowedHosts.includes(req.headers.host ?? "")) {
+    const declared = req.headers["content-length"];
+    if (declared !== undefined && Number(declared) > MAX_MCP_BODY_BYTES) {
+      mcpBodyTooLarge(res);
+      return;
+    }
+    const type = req.headers["content-type"] ?? "";
+    if (
+      declared === undefined &&
+      type.split(";")[0]?.trim().toLowerCase() === "application/json"
+    ) {
+      const body = await readBodyWithin(req, MAX_MCP_BODY_BYTES);
+      if (body === undefined) {
+        mcpBodyTooLarge(res);
+        return;
+      }
+      try {
+        parsedBody = JSON.parse(body);
+      } catch {
+        jsonRpcError(res, 400, -32700, "Parse error: Invalid JSON");
+        return;
+      }
+    }
+  }
   const server = createMcpServer({
     projectSettings: options.projectSettings,
     store: options.store,
@@ -662,5 +756,5 @@ async function serveMcp(
   });
 
   await server.connect(transport);
-  await transport.handleRequest(req, res);
+  await transport.handleRequest(req, res, parsedBody);
 }
