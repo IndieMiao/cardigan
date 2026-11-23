@@ -225,3 +225,118 @@ test("C-613 a role outside the default pack needs an explicit base", async () =>
   );
   expect(printed()).toContain("已是默认包内容");
 });
+
+test("C-613 V-3026: partial options keep unspecified rules, and a rerun keeps an explicit removal", async () => {
+  const pack = defaultRoleDefinition("reviewer", {
+    harness: "codex",
+    launch_profile_ref: "codex-agent",
+  });
+  store((s) =>
+    s.uow.run((tx) =>
+      writeRole(
+        tx,
+        PROJECT,
+        {
+          ...pack,
+          core_prompt: "",
+          version: 1,
+          instructions: `${pack.instructions}\n\n${TIME_RULE}`,
+          allowed_tools: [...pack.allowed_tools, "list_needs_you"],
+        } as Role,
+        { mode: "add" },
+      ),
+    ),
+  );
+  expect(
+    await run([
+      "role",
+      "overlay",
+      "reviewer",
+      "--remove-tools",
+      "project_snapshot",
+    ]),
+  ).toBe(0);
+  const v2 = latest("reviewer");
+  expect(v2.instructions).toBe(`${pack.instructions}\n\n${TIME_RULE}`);
+  expect(v2.allowed_tools).toContain("list_needs_you");
+  expect(v2.allowed_tools).not.toContain("project_snapshot");
+  expect(v2.default_overlay).toMatchObject({
+    append_instructions: TIME_RULE,
+    extra_tools: ["list_needs_you"],
+    removed_tools: ["project_snapshot"],
+  });
+  expect(await run(["role", "overlay", "reviewer"])).toBe(0);
+  expect(printed()).toContain("没有追加新版本");
+  expect(latest("reviewer").allowed_tools).not.toContain("project_snapshot");
+  // A tool the current version lacks stays out unless explicitly added back.
+  expect(
+    await run([
+      "role",
+      "overlay",
+      "reviewer",
+      "--add-tools",
+      "project_snapshot",
+    ]),
+  ).toBe(0);
+  expect(latest("reviewer").allowed_tools).toContain("project_snapshot");
+  expect(latest("reviewer").default_overlay?.removed_tools).toEqual([]);
+});
+
+test("C-613 V-3026: a role of its own keeps its text and follows only the base's tools", async () => {
+  const pack = defaultRoleDefinition("tester", {
+    harness: "codex",
+    launch_profile_ref: "codex-agent",
+  });
+  const own = "发布员：只负责核对渠道和版本号。";
+  store((s) =>
+    s.uow.run((tx) =>
+      writeRole(
+        tx,
+        PROJECT,
+        {
+          ...pack,
+          role_id: "release_checker",
+          display_name: "发布核对",
+          core_prompt: "",
+          version: 1,
+          instructions: own,
+          allowed_tools: pack.allowed_tools.filter(
+            (t) => t !== "project_snapshot",
+          ),
+        } as Role,
+        { mode: "add" },
+      ),
+    ),
+  );
+  expect(
+    await run([
+      "role",
+      "overlay",
+      "release_checker",
+      "--base",
+      "tester",
+      "--keep-instructions",
+      "--dry-run",
+    ]),
+  ).toBe(0);
+  expect(printed()).toContain("保留本角色自己的说明");
+  expect(printed()).toContain("登记为显式移除");
+  expect(
+    await run([
+      "role",
+      "overlay",
+      "release_checker",
+      "--base",
+      "tester",
+      "--keep-instructions",
+    ]),
+  ).toBe(0);
+  const next = latest("release_checker");
+  expect(next.instructions).toBe(own);
+  expect(next.allowed_tools).not.toContain("project_snapshot");
+  expect(next.default_overlay).toMatchObject({
+    base_role_id: "tester",
+    instructions_mode: "replace",
+    removed_tools: ["project_snapshot"],
+  });
+});

@@ -68,9 +68,10 @@ const USAGE = [
   "  update <角色> --convert-legacy",
   "  upgrade <角色> --from-default [--dry-run]",
   "    带项目附加规则的角色按“当前默认包 + 附加规则”升级，附加规则保留。",
-  "  overlay <角色> [--base <默认角色>] [--append-file <file>] [--add-tools a,b] [--remove-tools a,b] [--dry-run]",
-  "    把角色登记为“默认包 + 项目附加规则”（追加说明、额外工具、显式移除的工具），之后随默认包自动升级。",
-  "    不带 --append-file/--add-tools/--remove-tools 时，从当前版本读出附加规则；打印迁移前后对比。",
+  "  overlay <角色> [--base <默认角色>] [--keep-instructions] [--append-file <file>] [--add-tools a,b] [--remove-tools a,b] [--dry-run]",
+  "    把角色登记为“默认包 + 项目附加规则”（追加说明、额外工具、显式移除的工具），之后随默认包自动升级；打印迁移前后对比。",
+  "    已登记的规则原样保留；未登记时从当前版本读出，说明和权限不变（缺少的默认包工具登记为显式移除）。",
+  "    --append-file 替换追加说明；--add-tools/--remove-tools 在现有规则上增减；--keep-instructions 用于非默认角色，保留本角色说明，只跟随底角色的工具。",
   "    为已有默认角色（pm、coder、frontend_engineer、reviewer、designer、ui_ux_designer、design_director、tester、host_ops）追加新版本：instructions、allowed_tools、",
   "    capabilities、required_capabilities、kind、worktree 取当前默认角色包；harness、launch_profile_ref、display_name、abilities、",
   "    required_machine_tags 保留项目自己的。先打印变化和放宽项；内容相同时不追加。--dry-run 只打印不写入。",
@@ -118,7 +119,14 @@ function parse(args: readonly string[]) {
     ],
     rollback: ["version"],
     upgrade: ["from-default", "dry-run"],
-    overlay: ["base", "append-file", "add-tools", "remove-tools", "dry-run"],
+    overlay: [
+      "base",
+      "append-file",
+      "add-tools",
+      "remove-tools",
+      "keep-instructions",
+      "dry-run",
+    ],
     deactivate: [],
     activate: [],
   };
@@ -133,6 +141,7 @@ function parse(args: readonly string[]) {
     "from-default",
     "convert-legacy",
     "dry-run",
+    "keep-instructions",
     "yes",
   ];
   const flags: Record<string, string> = {};
@@ -634,8 +643,6 @@ async function registerOverlay(
       : toolList(flags["remove-tools"]);
   if (flags.base !== undefined && !isDefaultRoleId(flags.base))
     fail(`${flags.base} 不是默认角色包里的角色`);
-  const explicit =
-    append !== undefined || add !== undefined || remove !== undefined;
   const human = resolveActor(io, project, store);
   const plan = (tx: Parameters<typeof listRoleVersions>[0]) => {
     const latest = getRoleVersion(tx, project, id);
@@ -643,32 +650,67 @@ async function registerOverlay(
       fail(`项目 ${project} 还没有角色 ${id}，先用 cardigan role add 创建`);
     const prior = latest.default_overlay;
     const base = flags.base ?? prior?.base_role_id ?? id;
-    const derived = deriveOverlayRules(latest, base);
+    const mode = flags["keep-instructions"]
+      ? "replace"
+      : (prior?.instructions_mode ?? "append");
+    const derived = deriveOverlayRules(latest, base, mode);
     if (!derived)
       fail(`角色 ${id} 不在默认角色包里，请用 --base 指定作为底的默认角色`);
-    const rules = explicit
-      ? {
-          base_role_id: base,
-          append_instructions: append ?? prior?.append_instructions ?? "",
-          extra_tools: add ?? prior?.extra_tools ?? [],
-          removed_tools: remove ?? prior?.removed_tools ?? [],
-        }
-      : derived.rules;
+    // Registered rules stay as they are unless the version was edited outside
+    // them; otherwise read them from the current version, which keeps its
+    // text and permissions (a lacking default tool stays removed).
+    const start =
+      prior &&
+      !overlayEditedByHand(latest) &&
+      prior.base_role_id === base &&
+      (prior.instructions_mode ?? "append") === mode
+        ? prior
+        : derived.rules;
+    const packTools =
+      composeOverlaySource(latest, {
+        base_role_id: base,
+        append_instructions: "",
+        extra_tools: [],
+        removed_tools: [],
+      })?.allowed_tools ?? [];
+    const extra = new Set(start.extra_tools);
+    const removed = new Set(start.removed_tools);
+    for (const tool of add ?? []) {
+      removed.delete(tool);
+      if (!packTools.includes(tool)) extra.add(tool);
+    }
+    for (const tool of remove ?? []) {
+      extra.delete(tool);
+      if (packTools.includes(tool)) removed.add(tool);
+    }
+    const rules = {
+      base_role_id: base,
+      append_instructions: append ?? start.append_instructions,
+      ...(mode === "replace" && { instructions_mode: "replace" as const }),
+      extra_tools: [...extra],
+      removed_tools: [...removed],
+    };
     const source = composeOverlaySource(latest, rules);
     if (!source) fail(`默认角色包没有 ${base}`);
     const list = (values: readonly string[]) =>
       values.length ? values.join(", ") : "无";
     const appended = source.default_overlay.append_instructions;
+    const stillRemoved = derived.missing_tools.filter((t) => removed.has(t));
     io.stdout(
       [
-        `角色 ${id} v${latest.version} → 默认角色 ${base} + 项目附加规则：`,
-        `  追加说明：${overlaySummary(rules).appended_paragraphs} 段`,
+        `角色 ${id} v${latest.version} → 默认角色 ${base} + 项目附加规则${mode === "replace" ? "（保留本角色自己的说明，只跟随默认包的工具和策略字段）" : ""}：`,
+        `  ${mode === "replace" ? "本角色说明" : "追加说明"}：${overlaySummary(rules).appended_paragraphs} 段`,
         ...(appended
           ? appended.split("\n").map((line) => `    | ${line}`)
           : []),
         `  额外工具：${list(rules.extra_tools)}`,
         `  移除工具：${list(rules.removed_tools)}`,
-        ...(derived.missing.length
+        ...(stillRemoved.length
+          ? [
+              `  当前版本没有默认包工具 ${list(stillRemoved)}，登记为显式移除；要补上请加 --add-tools`,
+            ]
+          : []),
+        ...(mode !== "replace" && derived.missing.length
           ? [
               `  当前版本缺少默认包的 ${derived.missing.length} 段说明，登记后会补上：`,
               ...derived.missing.map(
@@ -676,12 +718,9 @@ async function registerOverlay(
               ),
             ]
           : []),
-        ...(derived.missing_tools.some((t) => !rules.removed_tools.includes(t))
-          ? [
-              `  当前版本缺少默认包工具 ${list(derived.missing_tools.filter((t) => !rules.removed_tools.includes(t)))}，登记后会补上；要保持移除请加 --remove-tools`,
-            ]
+        ...(start === derived.rules && derived.moved
+          ? ["  追加说明会移到默认说明之后"]
           : []),
-        ...(!explicit && derived.moved ? ["  追加说明会移到默认说明之后"] : []),
         ...(derived.mismatched.length
           ? [
               `！${derived.mismatched.join("、")} 与默认角色 ${base} 不同，登记后取默认包的值`,

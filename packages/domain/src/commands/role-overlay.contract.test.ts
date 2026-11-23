@@ -175,3 +175,23 @@ test("C-613 a conflicting composition is rejected by the same validation", () =>
     false,
   );
 });
+
+test("C-613 replace mode keeps the role's own text and still follows the base's tools", () => {
+  const result = composeRoleOverlay(pack, {
+    ...rules,
+    instructions_mode: "replace",
+    append_instructions: "发布员自己的说明。",
+  });
+  expect(result.instructions).toBe("发布员自己的说明。");
+  expect(result.allowed_tools).toContain("publish_artifact");
+  expect(
+    validateRole({
+      ...composed(pack, overlay("c")),
+      default_overlay: {
+        ...overlay("c"),
+        instructions_mode: "replace",
+        append_instructions: " ",
+      },
+    }).ok,
+  ).toBe(false);
+});

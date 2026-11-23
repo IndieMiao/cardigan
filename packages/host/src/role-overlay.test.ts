@@ -22,7 +22,11 @@ import {
 const launch = { harness: "codex" as const, launch_profile_ref: "fixture" };
 const TIME_RULE = "时间点约束：只认交付时刻的基线和证据。";
 /** A release that changed no default role. */
-const STABLE = { changedRoles: [], previousDefaults: {} };
+const STABLE = {
+  changedRoles: [],
+  previousDefaults: {},
+  profiles: () => new Set(["fixture"]),
+};
 
 function withStore(run: (store: Store, project: string) => void) {
   const store = Store.open({ dbPath: ":memory:" });
@@ -94,10 +98,12 @@ test("C-613 a customised role that reads losslessly migrates once, keeping its r
       role_id: "reviewer",
       from_version: 1,
       to_version: 2,
-      before_hash: deploymentRolePolicyHash(before),
-      after_hash: deploymentRolePolicyHash(before),
-      moved: false,
-      overlay: { appended_paragraphs: 1, extra_tools: ["list_needs_you"] },
+      migrated: {
+        before_hash: deploymentRolePolicyHash(before),
+        after_hash: deploymentRolePolicyHash(before),
+        moved: false,
+        overlay: { appended_paragraphs: 1, extra_tools: ["list_needs_you"] },
+      },
     });
     expect(events(store, project, "host_role_overlay_migrated")).toHaveLength(
       1,
@@ -135,7 +141,13 @@ test("C-613 a new pack is recomposed with project rules, the idle PM rotates, an
     };
     store.uow.run((tx) => tx.assignments.put(project, previous));
     // No supervisor fingerprint and no changed list: overlays need neither.
-    const next = upgradeDeployedRoles(store, project, [], {});
+    const next = upgradeDeployedRoles(
+      store,
+      project,
+      [],
+      {},
+      new Set(["fixture"]),
+    );
     store.uow.read((tx) => {
       const role = getRoleVersion(tx, project, "pm");
       expect(role?.version).toBe(2);
@@ -175,7 +187,7 @@ test("C-613 a new pack is recomposed with project rules, the idle PM rotates, an
           | undefined
       )?.roles.pm?.disposition,
     ).toBe("matched");
-    upgradeDeployedRoles(store, project, ["pm"], {});
+    upgradeDeployedRoles(store, project, ["pm"], {}, new Set(["fixture"]));
     expect(store.uow.read((tx) => getRoleVersion(tx, project, "pm"))).toEqual(
       expect.objectContaining({ version: 2 }),
     );
@@ -261,7 +273,7 @@ test("C-613 a stale customised role is not migrated; only other projects get the
       { ...pack, instructions: "Earlier default\n\nSSH 说明" },
       1,
     );
-    upgradeDeployedRoles(store, "cardigan", [], {});
+    upgradeDeployedRoles(store, "cardigan", [], {}, new Set(["fixture"]));
     expect(events(store, "cardigan", "host_role_upgrade_deferred")).toEqual([]);
   }));
 
@@ -328,7 +340,7 @@ test("C-613 V-3025: an untouched previous default whose pack withdrew a tool upg
     expect(events(store, "cardigan", "host_role_overlay_migrated")).toEqual([]);
   }));
 
-test("C-613 V-3025: other projects never migrate an untouched previous default or a role whose default just changed", () =>
+test("C-613 V-3025/V-3026: other projects upgrade an untouched previous default and never guess a just-changed role", () =>
   withStore((store, project) => {
     const reviewer = defaultRoleDefinition("reviewer", launch);
     const tester = defaultRoleDefinition("tester", launch);
@@ -348,13 +360,20 @@ test("C-613 V-3025: other projects never migrate an untouched previous default o
       1,
     );
     syncProjectOverlayRoles(store, project, {
+      ...STABLE,
       changedRoles: ["reviewer", "tester"],
+      // tester: no fingerprint of the previous default is available.
       previousDefaults: { reviewer: deploymentRolePolicyHash(previous) },
     });
     store.uow.read((tx) => {
-      expect(getRoleVersion(tx, project, "reviewer")?.version).toBe(1);
+      const upgraded = getRoleVersion(tx, project, "reviewer");
+      expect(upgraded?.version).toBe(2);
+      expect(upgraded?.default_overlay).toBeUndefined();
+      expect(upgraded?.allowed_tools).not.toContain("list_needs_you");
       expect(getRoleVersion(tx, project, "tester")?.version).toBe(1);
+      expect(tx.human_actions.list(project)).toEqual([]);
     });
+    expect(events(store, project, "host_role_upgraded")).toHaveLength(1);
     const notices = events(store, project, "host_role_upgrade_deferred").map(
       (e) => (e.payload as { notice: string }).notice,
     );
@@ -362,3 +381,143 @@ test("C-613 V-3025: other projects never migrate an untouched previous default o
     expect(notices[0]).toContain("tester");
     expect(notices[0]).toContain("本次部署改动了它的默认包");
   }));
+
+const opsAssignment = (role_version: number): Assignment => ({
+  id: "A-60" as never,
+  scope: "standing",
+  standing_mode: "ops",
+  role_id: "pm",
+  role_version,
+  status: "active",
+  runtime_state: "not_provisioned",
+  machine_id: "local",
+  runtime_ref: null,
+  mcp_token_id: "fixture",
+  created_at: "2026-01-01T00:00:00.000Z",
+});
+
+test("C-613 V-3026: a previous default plus project rules is proven by its exact hash and recomposed, with no human action", () =>
+  withStore((store) => {
+    store.createProject({ id: "cardigan" });
+    const pack = defaultRoleDefinition("reviewer", launch);
+    // The previous pack lacked get_check_log and still granted list_needs_you.
+    const previous: RoleDefinition = {
+      ...pack,
+      instructions: "Older reviewer instructions",
+      allowed_tools: [
+        ...pack.allowed_tools.filter((t) => t !== "get_check_log"),
+        "list_needs_you",
+      ],
+    };
+    put(
+      store,
+      "cardigan",
+      {
+        ...previous,
+        instructions: `${previous.instructions}\n\n${TIME_RULE}`,
+        allowed_tools: [...previous.allowed_tools, "issue_instruction"],
+      },
+      1,
+    );
+    upgradeDeployedRoles(
+      store,
+      "cardigan",
+      ["reviewer"],
+      { reviewer: deploymentRolePolicyHash(previous) },
+      new Set(["fixture"]),
+    );
+    store.uow.read((tx) => {
+      const role = getRoleVersion(tx, "cardigan", "reviewer");
+      expect(role?.version).toBe(2);
+      expect(role?.instructions).toBe(`${pack.instructions}\n\n${TIME_RULE}`);
+      expect(role?.allowed_tools).toEqual(
+        expect.arrayContaining(["get_check_log", "issue_instruction"]),
+      );
+      expect(role?.allowed_tools).not.toContain("list_needs_you");
+      expect(role?.default_overlay).toMatchObject({
+        append_instructions: TIME_RULE,
+        extra_tools: ["issue_instruction"],
+        removed_tools: [],
+      });
+      expect(tx.human_actions.list("cardigan")).toEqual([]);
+    });
+    const [upgraded] = events(store, "cardigan", "host_role_upgraded");
+    expect(upgraded?.payload).toMatchObject({
+      to_version: 2,
+      migrated: { overlay: { extra_tools: ["issue_instruction"] } },
+    });
+  }));
+
+test("C-613 V-3026: a missing launch profile keeps the role and the standing session", () =>
+  withStore((store, project) => {
+    const rules: RoleOverlayRules = {
+      base_role_id: "pm",
+      append_instructions: "Local PM policy",
+      extra_tools: [],
+      removed_tools: [],
+    };
+    const v1 = olderOverlay("pm", rules, { instructions: "Earlier" });
+    put(store, project, { ...v1, launch_profile_ref: "missing-profile" }, 1);
+    store.uow.run((tx) => tx.assignments.put(project, opsAssignment(1)));
+    upgradeDeployedRoles(store, project, ["pm"], {}, new Set(["fixture"]));
+    store.uow.read((tx) => {
+      expect(getRoleVersion(tx, project, "pm")?.version).toBe(1);
+      expect(tx.assignments.get(project, "A-60" as never)?.status).toBe(
+        "active",
+      );
+    });
+    const [notice] = events(store, project, "host_role_upgrade_deferred");
+    expect(
+      (notice?.payload as { notice?: string } | undefined)?.notice,
+    ).toContain("missing-profile");
+  }));
+
+test("C-613 V-3026: a migration that moves project text rotates the idle standing session", () =>
+  withStore((store, project) => {
+    const pack = defaultRoleDefinition("pm", launch);
+    const [first, ...rest] = (pack.instructions ?? "").split("\n\n");
+    put(
+      store,
+      project,
+      {
+        ...pack,
+        instructions: [first, "Local PM policy", ...rest].join("\n\n"),
+      },
+      1,
+    );
+    store.uow.run((tx) => tx.assignments.put(project, opsAssignment(1)));
+    const next = upgradeDeployedRoles(
+      store,
+      project,
+      [],
+      {},
+      new Set(["fixture"]),
+    );
+    store.uow.read((tx) => {
+      expect(getRoleVersion(tx, project, "pm")?.instructions).toBe(
+        `${pack.instructions}\n\nLocal PM policy`,
+      );
+      expect(tx.assignments.get(project, "A-60" as never)?.status).toBe(
+        "released",
+      );
+      expect(next && tx.assignments.get(project, next)?.role_version).toBe(2);
+    });
+    const [upgraded] = events(store, project, "host_role_upgraded");
+    expect(upgraded?.payload).toMatchObject({ migrated: { moved: true } });
+  }));
+
+test("C-613 V-3026: a repeated project paragraph is kept every time it occurs", () => {
+  const pack = defaultRoleDefinition("pm", launch);
+  const [first, ...rest] = (pack.instructions ?? "").split("\n\n");
+  const role = {
+    ...pack,
+    core_prompt: "",
+    version: 1,
+    instructions: [first, "Twice", "Twice", ...rest].join("\n\n"),
+  } as Role;
+  expect(deriveOverlayRules(role, "pm")).toMatchObject({
+    rules: { append_instructions: "Twice\n\nTwice" },
+    missing: [],
+    moved: true,
+  });
+});

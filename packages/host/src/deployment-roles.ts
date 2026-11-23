@@ -125,8 +125,11 @@ export function upgradeDeployedRoles(
   project: ProjectId,
   changedRoles: readonly string[],
   previousDefaults: Readonly<Record<string, string>>,
-  profiles: ReadonlySet<string> = new Set(),
+  profiles: ReadonlySet<string> | (() => ReadonlySet<string>) = new Set(),
 ) {
+  let loadedProfiles: ReadonlySet<string> | undefined;
+  const profileNames = () =>
+    (loadedProfiles ??= typeof profiles === "function" ? profiles() : profiles);
   store.uow.run((tx) => {
     const actor = { kind: "system" as const, project_id: project };
     const clock = { now: () => new Date().toISOString() };
@@ -149,8 +152,8 @@ export function upgradeDeployedRoles(
       tx,
       project,
       clock.now,
-      { changedRoles, previousDefaults },
-      false,
+      { changedRoles, previousDefaults, profiles: profileNames },
+      true,
     );
     const ids = [
       ...new Set(listRoleVersions(tx, project).map((r) => r.role_id)),
@@ -194,7 +197,7 @@ export function upgradeDeployedRoles(
         );
         continue;
       }
-      if (!profiles.has(source.launch_profile_ref)) {
+      if (!profileNames().has(source.launch_profile_ref)) {
         recordRoleDeferral(
           tx,
           project,

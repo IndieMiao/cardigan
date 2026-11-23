@@ -34,6 +34,11 @@ export type RoleOverlayRules = {
   readonly base_role_id: string;
   /** Appended after the default instructions; empty means none. */
   readonly append_instructions: string;
+  /**
+   * `replace`: a role of its own (e.g. release_ops) keeps `append_instructions`
+   * as its whole text and follows the base only for tools and policy fields.
+   */
+  readonly instructions_mode?: "append" | "replace";
   readonly extra_tools: readonly ToolName[];
   /** Explicit removals win over the default pack, including tools it adds later. */
   readonly removed_tools: readonly ToolName[];

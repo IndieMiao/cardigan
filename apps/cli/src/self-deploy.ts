@@ -87,14 +87,19 @@ export async function runSelfDeployCommand(
         )
       )
         throw invalid();
-      let profiles: ReadonlySet<string> = new Set();
-      if (changed.length) {
+      // Read only when a role version is about to be written: overlay roles
+      // can follow the pack even when the supervisor lists no change.
+      let loaded: ReadonlySet<string> | undefined;
+      const profiles = (): ReadonlySet<string> => {
+        if (loaded) return loaded;
         try {
-          profiles = validProfileNames(cliLaunchPaths(io));
+          loaded = validProfileNames(cliLaunchPaths(io));
         } catch {
           io.stderr("启动配置未通过校验，不发布依赖该配置的新角色版本");
+          loaded = new Set();
         }
-      }
+        return loaded;
+      };
       const assignment = upgradeDeployedRoles(
         store,
         "cardigan",
@@ -109,6 +114,7 @@ export async function runSelfDeployCommand(
           syncProjectOverlayRoles(store, other.id, {
             changedRoles: changed,
             previousDefaults: previous as Record<string, string>,
+            profiles,
           });
         } catch {
           io.stderr(

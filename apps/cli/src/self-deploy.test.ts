@@ -617,6 +617,12 @@ test("C-613 post-deploy role sync also migrates customised roles in other projec
       }),
       { mode: 0o600 },
     );
+    await writeFile(
+      join(root, "launch.yaml"),
+      JSON.stringify({
+        profiles: { fixture: { harness: "codex", model: "m" } },
+      }),
+    );
     store.createProject({ id: "cardigan" });
     store.createProject({ id: "sensen" });
     const pack = defaultRoleDefinition("reviewer", {

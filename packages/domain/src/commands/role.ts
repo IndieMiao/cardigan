@@ -188,6 +188,9 @@ function validateOverlay(overlay: RoleOverlay): void {
       typeof overlay.base_role_id === "string" &&
       /^[a-z0-9][a-z0-9._-]*$/u.test(overlay.base_role_id) &&
       typeof overlay.append_instructions === "string" &&
+      [undefined, "append", "replace"].includes(overlay.instructions_mode) &&
+      (overlay.instructions_mode !== "replace" ||
+        overlay.append_instructions.trim() !== "") &&
       typeof overlay.base_hash === "string" &&
       overlay.base_hash.trim() !== "" &&
       typeof overlay.composed_hash === "string" &&
@@ -222,16 +225,23 @@ export function composeRoleOverlay(
   source: Pick<RoleDefinition, "allowed_tools" | "instructions">,
   rules: Pick<
     RoleOverlayRules,
-    "append_instructions" | "extra_tools" | "removed_tools"
+    | "append_instructions"
+    | "extra_tools"
+    | "removed_tools"
+    | "instructions_mode"
   >,
 ): { readonly instructions: string; readonly allowed_tools: ToolName[] } {
-  const base = source.instructions ?? "";
+  const base =
+    rules.instructions_mode === "replace" ? "" : (source.instructions ?? "");
   const extra = rules.append_instructions.trim();
   const tools = [
     ...new Set([...source.allowed_tools, ...rules.extra_tools]),
   ].filter((tool) => !rules.removed_tools.includes(tool));
   return {
-    instructions: extra ? `${base.replace(/\s+$/u, "")}\n\n${extra}` : base,
+    instructions:
+      extra && base
+        ? `${base.replace(/\s+$/u, "")}\n\n${extra}`
+        : extra || base,
     allowed_tools: [...reviewTools(tools)],
   };
 }
@@ -243,6 +253,7 @@ function sameOverlay(a?: RoleOverlay, b?: RoleOverlay): boolean {
   return (
     a.base_role_id === b.base_role_id &&
     a.append_instructions === b.append_instructions &&
+    (a.instructions_mode ?? "append") === (b.instructions_mode ?? "append") &&
     a.base_hash === b.base_hash &&
     a.composed_hash === b.composed_hash &&
     list(a.extra_tools, b.extra_tools) &&
