@@ -76,7 +76,10 @@ import {
   upgradeState,
 } from "./worker-upgrade-gate.js";
 
-export { RuntimeTargetError } from "./runtime-target-error.js";
+export {
+  RuntimeTargetError,
+  safeTargetReason,
+} from "./runtime-target-error.js";
 
 type TargetState = Pick<ReadRepositories, "machines" | "assignments">;
 type Adapter = Runtime &
