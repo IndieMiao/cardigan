@@ -60,6 +60,7 @@ import {
   convergeSubmittedIssues,
   reviewPassConditions,
 } from "./review-convergence.js";
+import { evidenceNote, reviewEvidence } from "./review-evidence.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
 import { checkPauseDelivery } from "./review-pause.js";
 import {
@@ -889,6 +890,9 @@ export type SubmitReviewParams = Pick<
     Pick<
       Review,
       | "pass_conditions"
+      | "evidence_pending"
+      | "evidence_attachments"
+      | "evidence_not_applicable"
       | "attachments"
       | "recheck_required"
       | "screenshot_check"
@@ -1053,7 +1057,21 @@ export function submitReview(
     const recheckRequired = !followUpOnly && (p.recheck_required ?? false);
     const followupCardId = followUpOnly ? undefined : p.followup_card_id;
     const rejectionCategory = followUpOnly ? undefined : p.rejection_category;
-    const calculated = deriveReview(converged, recheckRequired, followupCardId);
+    const derived = deriveReview(converged, recheckRequired, followupCardId);
+    // C-618: pending platform evidence never passes; without a code must-fix
+    // it is a conditional that spends no round and keeps the streak.
+    const calculated =
+      p.evidence_pending !== undefined && !derived.blocking
+        ? { ...derived, verdict: "conditional" as const }
+        : derived;
+    const evidence = reviewEvidence(
+      d,
+      card,
+      item,
+      target,
+      p,
+      reviewPassed({ ...calculated, followup_card_id: followupCardId }),
+    );
     if (followupCardId !== undefined) {
       ensure(
         calculated.verdict === "conditional" &&
@@ -1175,6 +1193,7 @@ export function submitReview(
         ? { issues: bindSharedFindings(calculated.issues, id, existing) }
         : {}),
       ...(passConditions ? { pass_conditions: passConditions } : {}),
+      ...evidence,
       ...(rejectionCategory
         ? { rejection_category: rejectionCategory.trim() }
         : {}),
@@ -1277,6 +1296,20 @@ export function submitReview(
         ...(value.pass_conditions
           ? { pass_conditions: value.pass_conditions.map((c) => ({ ...c })) }
           : {}),
+        ...(value.evidence_pending
+          ? {
+              evidence_pending: {
+                items: value.evidence_pending.items.map((c) => ({ ...c })),
+                blocker: { ...value.evidence_pending.blocker },
+              },
+            }
+          : {}),
+        ...(value.evidence_attachments
+          ? { evidence_attachments: [...value.evidence_attachments] }
+          : {}),
+        ...(value.evidence_not_applicable
+          ? { evidence_not_applicable: value.evidence_not_applicable }
+          : {}),
         rework_allowed:
           (value.blocking || value.recheck_required) && !reviewLimitWait,
         ...(reviewLimitWait ? { review_limit_wait: true } : {}),
@@ -1284,7 +1317,7 @@ export function submitReview(
       },
       {
         type: "review",
-        body: `${testReview ? `增量复核（只改测试）：${value.verdict}` : value.verdict}${followUps ? `（${followUps} 条意见记为后续跟进，不挡合并）` : ""}`,
+        body: `${testReview ? `增量复核（只改测试）：${value.verdict}` : value.verdict}${followUps ? `（${followUps} 条意见记为后续跟进，不挡合并）` : ""}${evidenceNote(value)}`,
         delivery_id: target.id,
         work_item_id: item.id,
         run_id: run.id,

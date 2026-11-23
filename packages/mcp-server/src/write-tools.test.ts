@@ -1058,3 +1058,46 @@ test("C-610: submit_review carries basis and pass_conditions; get_card drafts th
     items: [{ description: "核不清状态时就停住，交人工确认", reason: "guard" }],
   });
 });
+
+test("C-618: submit_review records platform-pending evidence without a rejection; get_card shows it", async () => {
+  store.uow.run((tx) => {
+    tx.cards.put(project_id, { ...serverCard, flow_version: 5 });
+    tx.cards.put(project_id, { ...serverCard, id: "C-2" as never });
+  });
+  const coder = await connect();
+  const reviewer = await connect(1);
+  expect((await call(coder, "submit_delivery", delivery)).isError).not.toBe(
+    true,
+  );
+  const evidence_pending = {
+    items: [{ description: "模拟器实跑记录", basis: "AC1" }],
+    blocker: { kind: "card_merged", target_id: "C-2" },
+  };
+  const invalid = await call(reviewer, "submit_review", {
+    ...review,
+    idempotency_key: "review-invalid-blocker",
+    evidence_pending: {
+      ...evidence_pending,
+      blocker: { kind: "card_merged", target_id: card_id },
+    },
+  });
+  expect(code(invalid)).toBe("validation_failed");
+  const result = await call(reviewer, "submit_review", {
+    ...review,
+    evidence_pending,
+  });
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent).toMatchObject({
+    verdict: "conditional",
+    blocking: false,
+    evidence_pending,
+  });
+  const view = (await call(coder, "get_card", { card_id }))
+    .structuredContent as {
+    work_items: Record<string, unknown>[];
+  };
+  expect(view.work_items.find((w) => w.kind === "verify")).toMatchObject({
+    pending_evidence: { delivery_id: "D-1", ...evidence_pending },
+    verification_activity: { label: "证据待补" },
+  });
+});

@@ -846,6 +846,10 @@ function routeReview(input: RouteInput, draft: Draft): void {
     return;
   }
 
+  // C-618: pending platform evidence is neither a pass nor rework; the system
+  // asks the author once the platform blocker is over.
+  if (verdict !== "reject" && payload.evidence_pending) return;
+
   // deriveReview represents nonblocking conditions without a recheck as pass.
   // Add a PM Ops summary without suppressing the normal completion routing.
   if (

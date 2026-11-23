@@ -929,7 +929,27 @@ export interface PassCondition {
   readonly description: string;
   readonly basis: string;
 }
+/** C-618: a platform blocker the system can check, e.g. an unmerged platform card. */
+export interface PlatformBlocker {
+  readonly kind: "card_merged" | "deployment_ready";
+  readonly target_id: string;
+}
+/** C-618: required acceptance evidence unobtainable only because of a platform blocker. */
+export interface EvidencePending {
+  readonly items: readonly PassCondition[];
+  readonly blocker: PlatformBlocker;
+}
 export interface Review {
+  /**
+   * C-618: evidence pending on a platform blocker. Without a code must-fix the
+   * review is a non-passing conditional that neither spends a round nor ends a
+   * rejection streak.
+   */
+  readonly evidence_pending?: EvidencePending;
+  /** C-618: version-bound evidence attachments that settled earlier pending evidence. */
+  readonly evidence_attachments?: readonly AttachmentId[];
+  /** C-618: why earlier pending evidence no longer applies to this version. */
+  readonly evidence_not_applicable?: string;
   /** C-610: fixed on the second consecutive rejection; later reviews check only these. */
   readonly pass_conditions?: readonly PassCondition[];
   readonly rejection_category?: string;
