@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  type Assignment,
   type CommandState,
   eventsOfType,
   type ProjectId,
@@ -301,15 +302,74 @@ export function upgradeDeployedRoles(
   return rotateIdleDeployedRoles(store, project);
 }
 
+/** The newest deployed role an idle standing Assignment should rotate to. */
+function rotationTarget(state: CommandState, previous: Assignment) {
+  if (
+    previous.scope !== "standing" ||
+    previous.status !== "active" ||
+    previous.external
+  )
+    return undefined;
+  const latest = state.roles
+    .filter((r) => r.role_id === previous.role_id)
+    .sort((a, b) => b.role_version - a.role_version)[0];
+  if (
+    !latest ||
+    latest.role_version <= previous.role_version ||
+    !eventsOfType(state.events, "host_role_upgraded").some(
+      (e) =>
+        e.actor.kind === "system" &&
+        (e.payload as Record<string, unknown>).role_id === previous.role_id &&
+        (e.payload as Record<string, unknown>).to_version ===
+          latest.role_version,
+    ) ||
+    state.runs.some(
+      (r) =>
+        r.assignment_id === previous.id &&
+        !["completed", "failed", "cancelled"].includes(r.status),
+    )
+  )
+    return undefined;
+  return latest;
+}
+
+function rotatedPm(state: CommandState) {
+  return state.assignments.find(
+    (a) =>
+      a.role_id === "pm" &&
+      a.standing_mode === "ops" &&
+      a.status === "active" &&
+      !state.runs.some((r) => r.assignment_id === a.id) &&
+      eventsOfType(state.events, "standing_pm_rotated").some(
+        (e) =>
+          e.actor.kind === "system" &&
+          (e.payload as { assignment_id?: string }).assignment_id === a.id,
+      ),
+  )?.id;
+}
+
 /** Retry every maintenance tick; busy sessions retain their pinned version until idle. */
 export function rotateIdleDeployedRoles(
   store: Store,
   project: ProjectId,
   loadState: (
-    tx: StoreTransactionContext,
+    tx: Parameters<typeof loadCommandState>[0],
     project: ProjectId,
   ) => CommandState = loadCommandState,
 ) {
+  // C-641: decide in a read snapshot; only pending work takes the writer lock,
+  // and the locked pass below re-evaluates everything.
+  const settled = store.uow.optimistic(project, (tx) => {
+    const state = loadState(tx, project);
+    return {
+      value:
+        pendingRoleConflictActions(state).length ||
+        state.assignments.some((a) => rotationTarget(state, a))
+          ? undefined
+          : { pm: rotatedPm(state) },
+    };
+  });
+  if (settled) return settled.pm;
   return store.uow.run((tx) => {
     let state = loadState(tx, project);
     const actor = { kind: "system" as const, project_id: project };
@@ -330,33 +390,8 @@ export function rotateIdleDeployedRoles(
       if (effect.changes.length) state = loadState(tx, project);
     }
     for (const previous of state.assignments) {
-      if (
-        previous.scope !== "standing" ||
-        previous.status !== "active" ||
-        previous.external
-      )
-        continue;
-      const latest = state.roles
-        .filter((r) => r.role_id === previous.role_id)
-        .sort((a, b) => b.role_version - a.role_version)[0];
-      if (
-        !latest ||
-        latest.role_version <= previous.role_version ||
-        !eventsOfType(state.events, "host_role_upgraded").some(
-          (e) =>
-            e.actor.kind === "system" &&
-            (e.payload as Record<string, unknown>).role_id ===
-              previous.role_id &&
-            (e.payload as Record<string, unknown>).to_version ===
-              latest.role_version,
-        ) ||
-        state.runs.some(
-          (r) =>
-            r.assignment_id === previous.id &&
-            !["completed", "failed", "cancelled"].includes(r.status),
-        )
-      )
-        continue;
+      const latest = rotationTarget(state, previous);
+      if (!latest) continue;
       const rotated =
         previous.role_id === "pm"
           ? rotatePmAfterDeployment(
@@ -380,17 +415,6 @@ export function rotateIdleDeployedRoles(
       persistPmRotation(store, tx, project, rotated.value, clock.now());
       state = loadState(tx, project);
     }
-    return state.assignments.find(
-      (a) =>
-        a.role_id === "pm" &&
-        a.standing_mode === "ops" &&
-        a.status === "active" &&
-        !state.runs.some((r) => r.assignment_id === a.id) &&
-        eventsOfType(state.events, "standing_pm_rotated").some(
-          (e) =>
-            e.actor.kind === "system" &&
-            (e.payload as { assignment_id?: string }).assignment_id === a.id,
-        ),
-    )?.id;
+    return rotatedPm(state);
   });
 }

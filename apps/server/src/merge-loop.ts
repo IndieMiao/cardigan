@@ -27,7 +27,11 @@ import {
   type MergeOutcome,
 } from "@cardigan/git-service";
 import { withMergeTransferBudget } from "@cardigan/git-transport";
-import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
+import {
+  effectWrites,
+  loadCommandState,
+  persistEffect,
+} from "@cardigan/mcp-server";
 import { CheckHandoffs, type Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
@@ -47,6 +51,10 @@ export const systemClock: Clock = { now: () => new Date().toISOString() };
 /**
  * Run one command as the system actor (§4.4: `recordMergeResult` is system-only).
  * Any Git IO has already happened outside this transaction.
+ *
+ * C-641: the state build and reducer run in a read snapshot; only a non-empty
+ * effect takes the writer lock, after the Store revalidates the read set
+ * (`Store.optimistic`). `reduce` may run more than once and must stay pure.
  */
 export function runSystemCommand<T>(
   store: Store,
@@ -59,14 +67,19 @@ export function runSystemCommand<T>(
   clock: Clock = systemClock,
 ): Result<T> {
   const actor: Actor = { kind: "system", project_id };
-  return store.uow.run((tx) => {
+  return store.uow.optimistic<Result<T>>(project_id, (tx) => {
     const result = reduce(loadCommandState(tx, project_id), actor, {
       clock,
       ids: tx.ids,
     });
-    if (!result.ok) return result;
-    persistEffect(tx, project_id, result.value);
-    return { ok: true as const, value: result.value.data };
+    if (!result.ok) return { value: result };
+    const effect = result.value;
+    return {
+      value: { ok: true as const, value: effect.data },
+      ...(effectWrites(effect)
+        ? { write: (w) => persistEffect(w, project_id, effect) }
+        : {}),
+    };
   });
 }
 

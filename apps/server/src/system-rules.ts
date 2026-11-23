@@ -3,11 +3,15 @@ import {
   autoAssignVerifier,
   beginSystemReviewLimitRaise,
   type Clock,
+  type CommandEffect,
+  type CommandPorts,
+  type CommandState,
   cardCriticalPathLengths,
   finishSystemReviewLimitRaise,
   flowAtLeast,
   maintainPmCoordination,
   type ProjectId,
+  type Result,
   refreshCancelledHumanActions,
   refreshCardDependencies,
   refreshHumanActionFollowUps,
@@ -24,10 +28,56 @@ import {
   rotateIdleDeployedRoles,
   systemReviewLimitFailure,
 } from "@cardigan/host";
-import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
+import {
+  effectWrites,
+  loadCommandState,
+  persistEffect,
+} from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { StateLoader } from "./dispatch-state.js";
 import type { MergeGit } from "./git.js";
+
+type SystemStep = (
+  state: CommandState,
+  ports: CommandPorts,
+) => Result<CommandEffect<unknown>> | undefined;
+
+/**
+ * C-641: run `steps` in order, each against the state left by the previous
+ * one. A run of steps without effect shares one read snapshot and takes no
+ * writer lock; each non-empty effect commits alone through `Store.optimistic`
+ * (read set revalidated, bounded retries, then the pessimistic fallback) and
+ * the next step reads the committed state. A rejected rule throws; the effects
+ * already committed by earlier steps stay, like separate system commands.
+ */
+function runSystemSteps(
+  store: Store,
+  project: ProjectId,
+  clock: Clock,
+  loadState: StateLoader,
+  steps: readonly SystemStep[],
+): void {
+  let next = 0;
+  while (next < steps.length) {
+    const from = next;
+    next = store.uow.optimistic(project, (tx) => {
+      const state = loadState(tx, project);
+      const ports = { clock, ids: tx.ids };
+      for (let index = from; index < steps.length; index++) {
+        const result = steps[index]?.(state, ports);
+        if (!result) continue;
+        if (!result.ok) throw new Error(result.error.message);
+        const effect = result.value;
+        if (effectWrites(effect))
+          return {
+            value: index + 1,
+            write: (w) => persistEffect(w, project, effect),
+          };
+      }
+      return { value: steps.length };
+    });
+  }
+}
 
 /** Run before routing: successful assignment sends the delivery straight to its owner. */
 export function runSystemRules(
@@ -49,167 +99,153 @@ export function runSystemRules(
   } = {},
 ) {
   rotateIdleDeployedRoles(store, project, loadState);
-  store.uow.run((tx) => {
-    const actor = { kind: "system" as const, project_id: project };
-    const ports = { clock, ids: tx.ids };
-    let state = loadState(tx, project);
-    const dependencies = refreshCardDependencies(
-      state,
-      actor,
-      ports,
-      frameworkWaitReminderMs,
-    );
-    if (!dependencies.ok) throw new Error(dependencies.error.message);
-    persistEffect(tx, project, dependencies.value);
-    if (dependencies.value.changes.length || dependencies.value.events.length)
-      state = loadState(tx, project);
-    const cancelledCards = new Set(
-      state.cards.filter((c) => c.status === "cancelled").map((c) => c.id),
-    );
-    if (
-      state.human_actions.some(
+  const actor = { kind: "system" as const, project_id: project };
+  const run = (steps: readonly SystemStep[]) =>
+    runSystemSteps(store, project, clock, loadState, steps);
+  const read = () => store.uow.read((tx) => loadState(tx, project));
+  run([
+    (state, ports) =>
+      refreshCardDependencies(state, actor, ports, frameworkWaitReminderMs),
+    (state, ports) => {
+      const cancelledCards = new Set(
+        state.cards.filter((c) => c.status === "cancelled").map((c) => c.id),
+      );
+      return state.human_actions.some(
         (h) =>
           h.status === "open" && h.card_id && cancelledCards.has(h.card_id),
       )
-    ) {
-      const cancelled = refreshCancelledHumanActions(state, actor, ports);
-      if (!cancelled.ok) throw new Error(cancelled.error.message);
-      persistEffect(tx, project, cancelled.value);
-      state = loadState(tx, project);
-    }
-    const waits = resumeWorkWaits(
-      state,
-      actor,
-      {
-        ...(baseline ? { baseline } : {}),
-        ...(authorPrecheckFailureLimit !== undefined
-          ? { precheck_failure_limit: authorPrecheckFailureLimit }
-          : {}),
-        ...(conflictMaxResumes !== undefined
-          ? { conflict_max_resumes: conflictMaxResumes }
-          : {}),
-      },
-      ports,
-    );
-    if (!waits.ok) throw new Error(waits.error.message);
-    persistEffect(tx, project, waits.value);
-    if (waits.value.events.length) state = loadState(tx, project);
-    const coordination = maintainPmCoordination(state, actor, ports);
-    if (!coordination.ok) throw new Error(coordination.error.message);
-    persistEffect(tx, project, coordination.value);
-    if (coordination.value.events.length) state = loadState(tx, project);
-    const lengths = cardCriticalPathLengths(state);
-    const priorities = new Map(state.cards.map((c) => [c.id, c.priority]));
-    for (const item of [...state.work_items].sort(
-      (a, b) =>
-        (priorities.get(b.card_id) ?? 0) - (priorities.get(a.card_id) ?? 0) ||
-        (lengths.get(b.card_id) ?? 0) - (lengths.get(a.card_id) ?? 0),
-    )) {
-      if (item.kind !== "produce" || item.assignment_id || item.manual_assign)
-        continue;
-      const assigned = autoAssignProducer(
+        ? refreshCancelledHumanActions(state, actor, ports)
+        : undefined;
+    },
+    (state, ports) =>
+      resumeWorkWaits(
         state,
         actor,
-        { work_item_id: item.id },
+        {
+          ...(baseline ? { baseline } : {}),
+          ...(authorPrecheckFailureLimit !== undefined
+            ? { precheck_failure_limit: authorPrecheckFailureLimit }
+            : {}),
+          ...(conflictMaxResumes !== undefined
+            ? { conflict_max_resumes: conflictMaxResumes }
+            : {}),
+        },
         ports,
-      );
-      if (!assigned.ok) throw new Error(assigned.error.message);
-      persistEffect(tx, project, assigned.value);
-      if (assigned.value.changes.length || assigned.value.events.length)
-        state = loadState(tx, project);
-    }
-    if (
-      state.human_actions.some(
+      ),
+    (state, ports) => maintainPmCoordination(state, actor, ports),
+  ]);
+  // Order and candidates come from the state at the start of each loop; every
+  // command rechecks its item against the state it actually runs on.
+  let state = read();
+  const lengths = cardCriticalPathLengths(state);
+  const priorities = new Map(state.cards.map((c) => [c.id, c.priority]));
+  run(
+    [...state.work_items]
+      .sort(
+        (a, b) =>
+          (priorities.get(b.card_id) ?? 0) - (priorities.get(a.card_id) ?? 0) ||
+          (lengths.get(b.card_id) ?? 0) - (lengths.get(a.card_id) ?? 0),
+      )
+      .filter(
+        (item) =>
+          item.kind === "produce" && !item.assignment_id && !item.manual_assign,
+      )
+      .map(
+        (item): SystemStep =>
+          (current, ports) =>
+            autoAssignProducer(
+              current,
+              actor,
+              { work_item_id: item.id },
+              ports,
+            ),
+      ),
+  );
+  run([
+    (current, ports) =>
+      current.human_actions.some(
         (h) =>
           h.status === "open" &&
           h.blocked_work_items.length &&
           h.blocks_merge === undefined,
       )
-    ) {
-      const followUps = refreshHumanActionFollowUps(state, actor, ports);
-      if (!followUps.ok) throw new Error(followUps.error.message);
-      persistEffect(tx, project, followUps.value);
-      if (followUps.value.changes.length) state = loadState(tx, project);
-    }
-    if (
-      state.deliveries.length &&
-      state.work_items.some(
+        ? refreshHumanActionFollowUps(current, actor, ports)
+        : undefined,
+    (current, ports) =>
+      current.deliveries.length &&
+      current.work_items.some(
         (w) =>
           w.kind === "verify" &&
           w.required &&
           w.target_work_item_id &&
           w.status === "todo",
       )
-    ) {
-      const bindings = refreshRequiredVerifiers(state, actor, ports);
-      if (!bindings.ok) throw new Error(bindings.error.message);
-      persistEffect(tx, project, bindings.value);
-      if (bindings.value.changes.length) state = loadState(tx, project);
-    }
-    if (
-      state.deliveries.length &&
-      state.work_items.some(
+        ? refreshRequiredVerifiers(current, actor, ports)
+        : undefined,
+    (current, ports) =>
+      current.deliveries.length &&
+      current.work_items.some(
         (w) =>
           w.kind === "verify" &&
           ["ready", "waiting_decision"].includes(w.status),
       )
-    ) {
-      const limits = refreshTestReviewLimits(state, actor, ports);
-      if (!limits.ok) throw new Error(limits.error.message);
-      persistEffect(tx, project, limits.value);
-      if (limits.value.changes.length) state = loadState(tx, project);
-    }
-    for (const card of state.cards) {
-      if (
-        !flowAtLeast(card, 5) ||
-        ["backlog", "todo", "done", "cancelled"].includes(card.status)
+        ? refreshTestReviewLimits(current, actor, ports)
+        : undefined,
+  ]);
+  state = read();
+  run(
+    state.cards
+      .filter(
+        (card) =>
+          flowAtLeast(card, 5) &&
+          !["backlog", "todo", "done", "cancelled"].includes(card.status),
       )
-        continue;
-      const completion = systemCompleteCard(
-        mergeGateEnabled
-          ? {
-              ...state,
-              project_settings: {
-                ...state.project_settings,
-                merge_gate_enabled: mergeGateEnabled(project),
-              },
-            }
-          : state,
-        actor,
-        { card_id: card.id },
-        ports,
-      );
-      if (!completion.ok) throw new Error(completion.error.message);
-      persistEffect(tx, project, completion.value);
-      if (completion.value.changes.length || completion.value.events.length)
-        state = loadState(tx, project);
-    }
-    if (
-      state.cards.some((card) => flowAtLeast(card, 5)) ||
-      state.project_preferences?.find((p) => p.id === project)
-        ?.system_auto_assign_verifiers === true
-    ) {
-      for (const item of [...state.work_items].sort(
-        (a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)),
-      )) {
-        if (item.kind !== "verify" || item.assignment_id || item.manual_assign)
-          continue;
-        const result = autoAssignVerifier(
-          state,
-          actor,
-          { work_item_id: item.id },
-          ports,
-        );
-        if (!result.ok) throw new Error(result.error.message);
-        persistEffect(tx, project, result.value);
-        if (result.value.events.length || result.value.changes.length)
-          state = loadState(tx, project);
-      }
-    }
-    const reminders = remindSystemWaits(state, actor, ports);
-    if (!reminders.ok) throw new Error(reminders.error.message);
-    persistEffect(tx, project, reminders.value);
-  });
+      .map(
+        (card): SystemStep =>
+          (current, ports) =>
+            systemCompleteCard(
+              mergeGateEnabled
+                ? {
+                    ...current,
+                    project_settings: {
+                      ...current.project_settings,
+                      merge_gate_enabled: mergeGateEnabled(project),
+                    },
+                  }
+                : current,
+              actor,
+              { card_id: card.id },
+              ports,
+            ),
+      ),
+  );
+  state = read();
+  if (
+    state.cards.some((card) => flowAtLeast(card, 5)) ||
+    state.project_preferences?.find((p) => p.id === project)
+      ?.system_auto_assign_verifiers === true
+  )
+    run(
+      [...state.work_items]
+        .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))
+        .filter(
+          (item) =>
+            item.kind === "verify" &&
+            !item.assignment_id &&
+            !item.manual_assign,
+        )
+        .map(
+          (item): SystemStep =>
+            (current, ports) =>
+              autoAssignVerifier(
+                current,
+                actor,
+                { work_item_id: item.id },
+                ports,
+              ),
+        ),
+    );
+  run([(current, ports) => remindSystemWaits(current, actor, ports)]);
 }
 
 /** Git IO stays outside SQLite; the second transaction repeats all eligibility checks. */

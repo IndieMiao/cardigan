@@ -118,6 +118,15 @@ function readCommandState(
   };
 }
 
+/** Whether `persistEffect` would write anything for `effect`. */
+export function effectWrites(effect: CommandEffect<unknown>): boolean {
+  return (
+    effect.changes.length > 0 ||
+    effect.events.length > 0 ||
+    effect.timeline.length > 0
+  );
+}
+
 /** Persist a command effect inside an open transaction (shared with the CLI). */
 export function persistEffect(
   tx: TransactionContext,
