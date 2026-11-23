@@ -2,8 +2,10 @@ import type {
   AssignmentId,
   ProjectId,
   RetirementIdentity,
+  RetirementStop,
   Runtime,
   RuntimeRef,
+  TurnIdlePrompt,
 } from "@cardigan/domain";
 import type { StoreTransactionContext } from "@cardigan/store";
 import { idleRetirementPolicy } from "./idle-session-retirement.js";
@@ -57,18 +59,29 @@ export async function stopSystemTurn(
   checkWorkspace: () => Promise<boolean>,
   beforeSignal: () => boolean,
   processExited: () => Promise<boolean> = async () => false,
+  turn: {
+    /** C-626: the bound empty editor stands in for missing hc activity. */
+    readonly idlePrompt?: TurnIdlePrompt | undefined;
+    /** C-626: a macOS worker generation (idle owner, then enrolled PID).
+     * Its exit is proven by `processExited` (the registered group). */
+    readonly remoteSignal?: boolean;
+    /** Which owner-bound TERM was attempted, once the stop has an outcome. */
+    readonly report?: (stop: RetirementStop | undefined) => void;
+  } = {},
 ) {
   if (!ref) return "terminal_binding_changed";
+  const remote = ref.machine_id !== "local";
   const confirmed = async (groupExited = false) => {
     const exact = await observeTurnOwner(runtime, ref, owner);
     if (exact?.ok !== true || exact.value !== "exited") return false;
-    // Remote callers prove the registered group's exit before calling.
-    return ref.machine_id !== "local" || groupExited || processExited();
+    // Observe-only remote callers prove the registered group's exit before calling.
+    if (remote) return !turn.remoteSignal || processExited();
+    return groupExited || processExited();
   };
-  // Remote stall recovery observes an exit; it never acquires new signal authority.
-  if (alreadyStopping || ref.machine_id !== "local")
+  // Other remote stall recovery observes an exit; it never acquires new signal authority.
+  if (alreadyStopping || (remote && !turn.remoteSignal))
     return (await confirmed()) ? "exited" : "terminal_exit_unconfirmed";
-  if (ref.local_process_receipt) {
+  if (ref.local_process_receipt && !remote) {
     const before = await observeTurnOwner(runtime, ref, owner);
     if (before?.ok && before.value === "exited")
       return (await processExited()) ? "exited" : "terminal_exit_unconfirmed";
@@ -82,6 +95,7 @@ export async function stopSystemTurn(
       hangup_ms,
       terminate_ms,
       system_finished_turn: true,
+      ...(turn.idlePrompt ? { idle_prompt: turn.idlePrompt } : {}),
       workspace_preflight: async () =>
         (workspaceReady = await checkWorkspace()),
       before_signal: () => {
@@ -92,6 +106,12 @@ export async function stopSystemTurn(
       },
     })
     .catch(() => undefined);
+  if (result?.ok)
+    turn.report?.(
+      result.value.outcome === "exited"
+        ? result.value.stop
+        : result.value.evidence.stop,
+    );
   if (result?.ok && result.value.outcome === "withdrawn")
     return result.value.evidence.reason;
   const groupExited =

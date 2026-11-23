@@ -195,7 +195,11 @@ def darwin_retirement(c, terminal_owner=None):
         if t['state'] == 'live' and t.get('keep') is True:
             return 'kept'
         def live(t):
-            idle = (t.get('status') or {}).get('state') in ('idle', 'done')
+            activity = (t.get('status') or {}).get('state')
+            # C-626: hc may report no activity for the CLI. Only a controller
+            # call that has just read the bound empty editor opts in; working,
+            # blocked or error never count. The idle owner never sets it.
+            idle = activity in ('idle', 'done') or (c.get('unknown_activity') is True and activity in (None, 'unknown'))
             return t.get('state') == 'live' and t.get('keep') is False and (idle or not c['require_idle'])
         if observed != 'alive' or not live(t):
             return 'unknown'

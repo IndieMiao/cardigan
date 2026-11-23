@@ -29,6 +29,7 @@ import {
   type ProjectId,
   pendingHostOpsActions,
   prepareHostOpsAction,
+  type RetirementStop,
   type RunId,
   type Runtime,
   type RuntimeRef,
@@ -89,10 +90,12 @@ import {
   writerPlacementSeal,
 } from "./retained-writer.js";
 import {
+  darwinTurnTarget,
   localTurnExitProof,
   remoteStallExit,
   stallWorkspace,
   transferredSessionExited,
+  turnIdlePrompt,
   writableInPlace,
 } from "./stall-evidence.js";
 import { recoveryBasis, StallPatrol } from "./stall-patrol.js";
@@ -1137,6 +1140,45 @@ export class HostOpsService {
     this.serial = next.catch(() => {});
     return next;
   }
+  /**
+   * C-626: evidence of a system-ended turn's owner-bound stop: the idle basis
+   * (hc status or the bound empty editor), the stop path, PID and signal, the
+   * result and (as the event time) when. Bounded facts only, never screen text.
+   */
+  private recordTurnExit(
+    project: ProjectId,
+    action: HostOpsExecution,
+    facts: {
+      idle_basis: string | null;
+      result: string;
+    } & Partial<RetirementStop>,
+  ) {
+    this.options.store.uow.run((tx) => {
+      const state = loadCommandState(tx, project);
+      const a = state.assignments.find((v) => v.id === action.assignment_id);
+      const card = state.work_items.find(
+        (w) => w.id === a?.work_item_id,
+      )?.card_id;
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project, card),
+        ...(card ? { card_id: card } : {}),
+        actor: { kind: "system", project_id: project },
+        type: "dispatch_stall_turn_exit",
+        created_at: this.clock.now(),
+        payload: {
+          action_id: action.action_id,
+          assignment_id: action.assignment_id,
+          system_finished_run_id: action.system_finished_run_id ?? null,
+          idle_basis: facts.idle_basis,
+          exit_path: facts.path ?? null,
+          signal: facts.signal ?? null,
+          pid: facts.pid ?? null,
+          result: facts.result,
+        },
+      });
+    });
+  }
   private defer(project: ProjectId, action: string, reason: string) {
     this.options.store.uow.run((tx) => {
       const events = loadCommandState(tx, project).events;
@@ -1423,6 +1465,7 @@ export class HostOpsService {
         }
       }
       let evidenceFailure: string | undefined;
+      let idleBasis: string | null | undefined;
       const checkStall = async () => {
         if (!action.dispatch_stall_id) return;
         const state = read();
@@ -1431,6 +1474,7 @@ export class HostOpsService {
           a && this.stallPatrol.current(state, a.id, action.dispatch_stall_id);
         const view =
           a && stall && (await this.stallPatrol.evidence(state, a, stall));
+        idleBasis = view ? view.idle_basis : undefined;
         evidenceFailure = !view
           ? "stall_not_current"
           : !view.can_restart
@@ -1768,13 +1812,17 @@ export class HostOpsService {
             // Settled by an earlier recovery: no session left to stop.
             result = "exited";
           } else if (action.system_finished_run_id) {
+            const execution = a && this.stallExecution(project, a.machine_id);
+            // C-626: a macOS worker's live turn is stopped through its idle
+            // owner or enrolled PID; other remote targets only settle an exit.
+            const darwin = !!a && darwinTurnTarget(a, execution);
+            const ended = action.system_finished_run_id;
+            let stop: RetirementStop | undefined;
+            let signalled = false;
             result =
               remote &&
-              !(await remoteStallExit(
-                read(),
-                a,
-                this.stallExecution(project, a.machine_id),
-              ))
+              !darwin &&
+              !(await remoteStallExit(read(), a, execution))
                 ? "terminal_exit_unconfirmed"
                 : await stopSystemTurn(
                     runtime,
@@ -1783,22 +1831,37 @@ export class HostOpsService {
                       read(),
                       action.assignment_id,
                       action.runtime_ref,
-                      action.system_finished_run_id,
+                      ended,
                     ),
-                    !!remote || stopStarted || exitOnly,
+                    (!!remote && !darwin) || stopStarted || exitOnly,
                     checkWorkspace,
-                    beforeSignal,
+                    () => (signalled = beforeSignal()),
                     async () =>
                       !!a &&
                       !!action.runtime_ref &&
-                      (await localTurnExitProof(
-                        read(),
-                        a,
-                        runtime,
-                        action.runtime_ref,
-                        this.stallExecution(project, a.machine_id),
-                      )),
+                      (remote
+                        ? await remoteStallExit(read(), a, execution)
+                        : await localTurnExitProof(
+                            read(),
+                            a,
+                            runtime,
+                            action.runtime_ref,
+                            execution,
+                          )),
+                    {
+                      idlePrompt: a && turnIdlePrompt(read(), a, ended),
+                      remoteSignal: darwin,
+                      report: (value) => {
+                        stop = value;
+                      },
+                    },
                   );
+            if (signalled || stop)
+              this.recordTurnExit(project, action, {
+                idle_basis: idleBasis ?? null,
+                ...(stop ?? {}),
+                result,
+              });
           } else {
             // Ordinary stall rows use the same guards: the evidence recheck and
             // writer backup above, one owner-bound idle stop and kernel exit
