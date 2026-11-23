@@ -3,6 +3,11 @@ import { link, mkdir, open, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { type OffsiteConfig, readOffsiteConfig } from "./config.js";
 import {
+  type LoopDelay,
+  loopDelaySlow,
+  processLoopDelay,
+} from "./loop-delay.js";
+import {
   bucketOrigin,
   OssClient,
   type OssCredentials,
@@ -434,6 +439,14 @@ export class Offsite {
       if ((sync?.failed.count ?? 0) > 0) alerts.push("sync_failed");
       if (budget !== undefined && estimate > budget) alerts.push("over_budget");
     }
+    // C-628: the syncing process and this one (MCP and web) stay responsive.
+    const own = processLoopDelay().snapshot();
+    const delay: { sync?: LoopDelay; server?: LoopDelay } = {
+      ...(sync?.loop_delay ? { sync: sync.loop_delay } : {}),
+      ...(own ? { server: own } : {}),
+    };
+    if (loopDelaySlow(delay.sync) || loopDelaySlow(delay.server))
+      alerts.push("loop_slow");
     return {
       configured: config.state,
       ...(config.state === "ready"
@@ -457,6 +470,7 @@ export class Offsite {
         estimated_yuan: Math.round(estimate * 100) / 100,
         ...(budget === undefined ? {} : { budget_yuan: budget }),
       },
+      ...(delay.sync || delay.server ? { loop_delay: delay } : {}),
       alerts,
     };
   }
@@ -466,7 +480,8 @@ export type OffsiteAlert =
   | "config_invalid"
   | "unreachable"
   | "sync_failed"
-  | "over_budget";
+  | "over_budget"
+  | "loop_slow";
 export interface OffsiteStatusView {
   readonly configured: SyncStatus["configured"];
   readonly bucket?: string;
@@ -484,6 +499,11 @@ export interface OffsiteStatusView {
     readonly estimated_yuan: number;
     readonly budget_yuan?: number;
   };
+  /** C-628: p99 and maximum event-loop delay of the sync and this process. */
+  readonly loop_delay?: {
+    readonly sync?: LoopDelay;
+    readonly server?: LoopDelay;
+  };
   readonly alerts: readonly OffsiteAlert[];
 }
 
@@ -494,6 +514,8 @@ export interface OffsiteStatusView {
  */
 const registry = new Map<string, Offsite>();
 export function registerOffsite(offsite: Offsite) {
+  // C-628: measured from startup, so the health page has a window to show.
+  processLoopDelay();
   registry.set(offsite.dataDir, offsite);
   return () => {
     if (registry.get(offsite.dataDir) === offsite) {

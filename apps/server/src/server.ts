@@ -399,6 +399,8 @@ async function assembleServer(
       ...(options.captureAgent === undefined
         ? {}
         : { captureAgent: options.captureAgent }),
+      onSourceError: (entry) =>
+        process.stdout.write(`${JSON.stringify(entry)}\n`),
     });
 
   const probes = serverProbes({
@@ -932,7 +934,15 @@ async function assembleServer(
         dataDir: config.dataDir,
       });
       if (offsite) {
-        const sync = new OffsiteSync({ offsite, store });
+        // C-628: only this (background) role syncs; the flock inside each
+        // tick keeps any other process on standby, so one host never scans
+        // and hashes twice at the same time.
+        const sync = new OffsiteSync({
+          offsite,
+          store,
+          role: options.role ?? "server",
+          log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+        });
         offsiteSync = sync;
         offsiteLoop = startTimerLoop({
           name: "offsite-sync",

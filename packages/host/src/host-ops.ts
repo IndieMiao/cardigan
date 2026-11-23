@@ -97,6 +97,13 @@ import {
 } from "./stall-evidence.js";
 import { recoveryBasis, StallPatrol } from "./stall-patrol.js";
 import {
+  exitStandingSession,
+  remindStandingExitOverdue,
+  type StandingExitOutcome,
+  type StandingExitPolicy,
+  standingExitPolicy,
+} from "./standing-session-exit.js";
+import {
   revokeStoppedRunTokens,
   stopRunRuntime,
   stopSystemTurn,
@@ -148,6 +155,8 @@ interface Options {
   hcSession?: string;
   /** Host observation/publication failures are reported here; drain still runs. */
   onError?: (error: unknown) => void;
+  /** C-625: standing PM exit timings; defaults read the environment. */
+  standingExit?: StandingExitPolicy;
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
@@ -176,8 +185,10 @@ export class HostOpsService {
   private lastStallPoll = Number.NEGATIVE_INFINITY;
   private lastContextPoll = Number.NEGATIVE_INFINITY;
   private serial: Promise<void> = Promise.resolve();
+  private readonly standingExitPolicy: StandingExitPolicy;
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
+    this.standingExitPolicy = options.standingExit ?? standingExitPolicy();
     this.stallPatrol = new StallPatrol(
       options.store,
       this.clock,
@@ -1301,7 +1312,9 @@ export class HostOpsService {
         : priorLease
           ? undefined
           : false;
+      let standingExitReason = "standing_exit_pending";
       const fail = (reason: string) => {
+        standingExitReason = reason;
         if (action.dispatch_stall_id) {
           const withdrawn = store.uow.run((tx) => {
             const effect = unwrap(
@@ -1419,7 +1432,14 @@ export class HostOpsService {
           if (this.upstream === observationMonitor)
             observationMonitor?.observationFailed(project);
           fail("upstream_observation_failed");
-          return;
+          // C-625: a standing PM restart still observes its own terminal; the
+          // upstream gate below then decides (bypassed only for confirmed idle).
+          if (
+            action.tool !== "host_ops_restart_standing_pm" ||
+            action.automatic_context_restart ||
+            preserve
+          )
+            return;
         }
       }
       let evidenceFailure: string | undefined;
@@ -1495,7 +1515,9 @@ export class HostOpsService {
           persistEffect(tx, project, effect);
           return effect.data;
         });
-      const mayStop = () => {
+      // C-625: a confirmed idle standing PM past the threshold no longer
+      // waits on the upstream diagnosis; nothing else is relaxed.
+      const mayStop = (idleOverdue = false) => {
         if (this.closing || !current()) return false;
         if (
           action.dispatch_stall_id &&
@@ -1562,6 +1584,7 @@ export class HostOpsService {
           );
           return true;
         } catch {
+          if (idleOverdue) return true;
           fail("upstream_recovery_not_ready");
           return false;
         }
@@ -1585,10 +1608,63 @@ export class HostOpsService {
               (e.payload as { reason?: string }).reason ===
                 "automatic_context_stop_started",
           ));
+      // C-625: an ordinary standing PM restart first lets an idle session
+      // leave on its own, then signals it once; a busy turn is never stopped.
+      const standingRef =
+        action.tool === "host_ops_restart_standing_pm" &&
+        !preserve &&
+        !foreign &&
+        !action.automatic_context_restart
+          ? action.runtime_ref
+          : null;
+      const remindStanding = () => {
+        if (standingRef && !this.closing)
+          remindStandingExitOverdue(
+            store,
+            project,
+            this.clock,
+            action,
+            this.standingExitPolicy,
+            standingExitReason,
+          );
+      };
+      let standing: StandingExitOutcome | undefined;
+      if (standingRef) {
+        const last = read().runs.findLast(
+          (r) => r.assignment_id === action.assignment_id && r.started_at,
+        );
+        standing = await exitStandingSession({
+          store,
+          project,
+          clock: this.clock,
+          runtime,
+          action: { ...action, runtime_ref: standingRef },
+          harness:
+            last?.harness ??
+            (last?.launch_profile_ref
+              ? this.options.upstream?.profiles[last.launch_profile_ref]
+                  ?.harness
+              : undefined),
+          policy: this.standingExitPolicy,
+          mayStop,
+          defer: (reason) => {
+            standingExitReason = reason;
+            this.defer(project, action.action_id, reason);
+          },
+        });
+        if (standing === "waiting") {
+          remindStanding();
+          return;
+        }
+      }
       // A started stop can only observe its exit. The original notice may
       // already be ACKed; settlement rechecks it before allowing a new Run.
-      if (!(turnRecovery && stopStarted) && !mayStop()) return;
-      if (foreign) {
+      if (standing === "exited") {
+        // Exit observed above; continue to the shared settlement.
+      } else if (!(turnRecovery && stopStarted) && !mayStop()) {
+        remindStanding();
+        return;
+      } else if (foreign) {
         // Automatic sources never ask the human to confirm the exit: a
         // C-596 restart stays pending (one executor) and the standing-PM
         // patrol hands it to host operations.
@@ -1844,6 +1920,7 @@ export class HostOpsService {
         }
         if (result !== "exited") {
           if (!this.closing) fail(result);
+          remindStanding();
           return;
         }
       }

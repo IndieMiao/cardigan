@@ -318,6 +318,13 @@ export {
   standingPmStallPolicy,
 } from "./standing-pm-recovery.js";
 export {
+  exitCommand,
+  STANDING_EXIT_STEP,
+  type StandingExitPolicy,
+  standingExitPolicy,
+  standingExitSteps,
+} from "./standing-session-exit.js";
+export {
   revokeStoppedRunTokens,
   stoppedSessionExited,
   stoppedSessionLive,

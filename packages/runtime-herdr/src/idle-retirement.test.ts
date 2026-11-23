@@ -424,3 +424,28 @@ test.each([true, false])(
     expect(call.mock.calls.filter(([a]) => a.includes("gone"))).toHaveLength(1);
   },
 );
+test.each([
+  ["HUP", ["HUP"]],
+  ["TERM", ["HUP", "TERM"]],
+] as const)(
+  "C-625: report_signals returns the probed PID and the signals sent (exit after %s)",
+  async (finishAfter, signals) => {
+    const f = adapter(finishAfter),
+      runtime = await f.create();
+    Object.assign(f.terminal, { exit_code: 0, reason: "signaled" });
+    expect(
+      value(
+        await runtime.retire_idle(ref, { ...options(), report_signals: true }),
+      ),
+    ).toEqual({
+      outcome: "exited",
+      signalled: { pid: 12345, signals, exit_code: 0, exit_reason: "signaled" },
+    });
+    // Without the option the result keeps its existing shape.
+    const g = adapter(finishAfter),
+      plain = await g.create();
+    expect(value(await plain.retire_idle(ref, options()))).toEqual({
+      outcome: "exited",
+    });
+  },
+);

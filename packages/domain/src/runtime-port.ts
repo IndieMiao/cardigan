@@ -122,7 +122,11 @@ export interface Runtime {
       readonly terminate_ms: number;
       readonly before_signal: () => boolean;
     } & (
-        | { readonly system_finished_turn?: never }
+        | {
+            readonly system_finished_turn?: never;
+            /** Report the probed PID and the signals sent on exit. */
+            readonly report_signals?: true;
+          }
         | {
             /** One owner-bound TERM; recheck workspace inside the signal slot,
              * then terminal identity/activity, then synchronous authority. */

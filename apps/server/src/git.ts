@@ -52,11 +52,14 @@ import {
   hostRepositoryLock,
   loadWorkspace,
   type MergePushConfig,
+  PreparationQueueTimeout,
   pinStallBackup,
   preparationBusy,
   preparationRevision,
   proveSystemReviewLimit,
+  RuntimeTargetError,
   type RuntimeTargets,
+  safeTargetReason,
   systemReviewLimitFailure,
   type TestIsolationSource,
   validateMergePushConfig,
@@ -148,11 +151,81 @@ export interface ServerGitOptions {
    * check directories live on another machine and are listed over SSH.
    */
   readonly checkExecutor?: (project_id: string) => AgentExecution | undefined;
+  /**
+   * C-628: one line per delivery source that could not be read, with its
+   * class (busy, runtime target, other) and never the exception text.
+   */
+  readonly onSourceError?: (entry: DeliverySourceErrorEntry) => void;
   /** Test seam for the SSH listing; production uses `agentListChecks`. */
   readonly listChecks?: (
     execution: AgentExecution,
     project_id: string,
   ) => Promise<AgentCheckListing>;
+}
+
+/**
+ * C-628: why a Git delivery source could not be read. A lock timeout is
+ * "busy, retry later" (the caller may queue), a runtime target refusal keeps
+ * its fixed reason code, and anything else only its error class.
+ */
+export type DeliverySourceError =
+  | { readonly source_error: "repository_busy"; readonly retryable: true }
+  | {
+      readonly source_error: "runtime_target";
+      readonly reason: string;
+      readonly retryable: boolean;
+    }
+  | {
+      readonly source_error: "other";
+      readonly error_class: string;
+      readonly retryable: false;
+    };
+export type DeliverySourceErrorEntry = DeliverySourceError & {
+  readonly event: "delivery_source_error";
+  readonly project_id: string;
+  readonly assignment_id: string;
+};
+
+const ERROR_CLASS = /^[A-Za-z][A-Za-z0-9]{0,63}$/u;
+export function classifyDeliverySourceError(
+  error: unknown,
+): DeliverySourceError {
+  if (
+    error instanceof RepositoryLockTimeoutError ||
+    error instanceof PreparationQueueTimeout
+  )
+    return { source_error: "repository_busy", retryable: true };
+  if (error instanceof RuntimeTargetError)
+    return {
+      source_error: "runtime_target",
+      // Both lists are fixed codes; anything else is `target_invalid`.
+      reason: error.transient ? error.reason : safeTargetReason(error),
+      retryable: error.transient,
+    };
+  const name =
+    error instanceof Error ? (error.constructor?.name ?? error.name) : "";
+  return {
+    source_error: "other",
+    error_class: ERROR_CLASS.test(name) ? name : "unknown",
+    retryable: false,
+  };
+}
+
+export function deliverySourceFailure(failure: DeliverySourceError) {
+  const message =
+    failure.source_error === "repository_busy"
+      ? "Git delivery source is busy (仓库忙，稍后重试)"
+      : failure.source_error === "runtime_target"
+        ? `Git delivery source is unavailable: runtime target ${failure.reason}`
+        : "Git delivery source is unavailable";
+  return {
+    ok: false as const,
+    error: {
+      code: "validation_failed" as const,
+      message,
+      details: { ...failure },
+    },
+  };
 }
 
 /** The candidate transport was never entered, even if other Git work was done. */
@@ -536,8 +609,19 @@ export class ServerGit implements GitBinding {
                 previous,
               ),
           );
-        } catch {
-          return validationFailed("Git delivery source is unavailable");
+        } catch (error) {
+          const failure = classifyDeliverySourceError(error);
+          try {
+            this.options.onSourceError?.({
+              event: "delivery_source_error",
+              project_id: project.project_id,
+              assignment_id: assignment.id,
+              ...failure,
+            });
+          } catch {
+            // A failing log never changes the answer.
+          }
+          return deliverySourceFailure(failure);
         }
       },
     } satisfies DeliveryVerifier;
