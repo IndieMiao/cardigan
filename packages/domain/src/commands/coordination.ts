@@ -39,7 +39,10 @@ import type { RoleRuleBasis } from "../role-rule.js";
 import { storyProgress, storyTerminal } from "../story.js";
 import type { StoryDiscussion } from "../story-discussion.js";
 import type { ResumeCondition } from "../work-wait.js";
-import { workerHelperAction } from "../worker-helper-action.js";
+import {
+  workerAgentToolsAction,
+  workerHelperAction,
+} from "../worker-helper-action.js";
 import { requireCardDependencyStart } from "./card-dependencies.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
@@ -2139,7 +2142,9 @@ export function triageHumanAction(
       : action.ready_when;
     validateTerminal(p.terminal);
     ensure(
-      !p.terminal || !workerHelperAction(d.state, action),
+      !p.terminal ||
+        (!workerHelperAction(d.state, action) &&
+          !workerAgentToolsAction(d.state, action)),
       "validation_failed",
       "系统升级命令不能改写",
     );

@@ -83,7 +83,12 @@ export class MachineChecks extends MachineCheckJournal {
           job,
           (progress) =>
             host.check(project, machine, kind, progress, this.signal, job.id),
-          ({ status, failed_steps }) => ({ status, failed_steps }),
+          // C-599: keep the tools outcome (never a command) for a joined CLI check.
+          ({ status, failed_steps, agent_tools }) => ({
+            status,
+            failed_steps,
+            ...(agent_tools ? { agent_tools } : {}),
+          }),
           (tx, final) => {
             machineAudit(
               tx,
@@ -160,6 +165,15 @@ export class MachineChecks extends MachineCheckJournal {
     }
     return undefined;
   }
+  /** C-599: an attachment tools notice is valid only while it equals this. */
+  currentToolsCommand(project: string, machine: Machine) {
+    try {
+      return this.host?.toolsCommand?.(project, machine);
+    } catch {
+      /* Invalid configuration or unreadable release: hide stale material. */
+    }
+    return undefined;
+  }
   async verifyHelper(
     project: string,
     machine: string | null,
@@ -231,7 +245,13 @@ export class MachineChecks extends MachineCheckJournal {
                 job.id,
                 { binding },
               ),
-            ({ status, failed_steps }) => ({ status, failed_steps }),
+            // C-599: a CLI check that joins this recovery check reads the same
+            // tools outcome; never a command.
+            ({ status, failed_steps, agent_tools }) => ({
+              status,
+              failed_steps,
+              ...(agent_tools ? { agent_tools } : {}),
+            }),
             (tx, job) =>
               machineAudit(
                 tx,
