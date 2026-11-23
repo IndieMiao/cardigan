@@ -1,4 +1,5 @@
 import type { WorkItem } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import { CommandDraft, ensure } from "./core.js";
 import { resumeWork } from "./resumption.js";
 import {
@@ -158,7 +159,7 @@ export function applyFlowReviewLimit(d: CommandDraft, item: WorkItem): boolean {
     "Only workflow settlement derives review budgets",
   );
   const system = new CommandDraft(
-    { ...d.state, events: [...d.state.events, ...d.events] },
+    { ...d.state, events: appendEvents(d.state.events, d.events) },
     { kind: "system", project_id: d.state.project_id },
     "system_review_limit",
     d.ports,

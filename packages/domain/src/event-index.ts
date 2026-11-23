@@ -1,10 +1,21 @@
 import type { Event } from "./entities.js";
+import {
+  attachEventIndex,
+  type EventIndexKind,
+  type HistoryIndex,
+  historyIndex,
+} from "./event-log.js";
 
 /**
  * C-221: keyed event lookup. Event collections are immutable snapshots (every
  * appended event yields a new array: Store stream caches, command drafts and
  * fixtures all copy), so an index keyed by the array's identity cannot go
  * stale; a rolled-back snapshot keeps its own index. Weak keys free unused ones.
+ *
+ * C-640: a Store history array (`EventLogView.history`) and an
+ * `appendEvents` result carry an attached index maintained on append, so
+ * lookups on them never rebuild over the whole array. Any other array keeps
+ * the lazy per-array index below with identical results.
  */
 const byId = new WeakMap<readonly Event[], ReadonlyMap<string, Event>>();
 const byType = new WeakMap<
@@ -13,8 +24,7 @@ const byType = new WeakMap<
 >();
 const noEvents: readonly Event[] = Object.freeze([]);
 
-/** Same order and duplicates as filter; never cache a clock-dependent answer. */
-export function eventsOfType(events: readonly Event[], type: string) {
+function typeBucket(events: readonly Event[], type: string) {
   let index = byType.get(events);
   if (!index) {
     const map = new Map<string, Event[]>();
@@ -28,11 +38,16 @@ export function eventsOfType(events: readonly Event[], type: string) {
   }
   return index.get(type) ?? noEvents;
 }
+
+/** Same order and duplicates as filter; never cache a clock-dependent answer. */
+export function eventsOfType(events: readonly Event[], type: string) {
+  return query(events, "type", type);
+}
 // Immutable snapshots retain the original order within every bucket. Build
 // each requested lookup once, including when many candidates share one card.
 function keyedEvents(keys: (e: Event) => readonly unknown[]) {
   const cache = new WeakMap<readonly Event[], Map<unknown, Event[]>>();
-  return (events: readonly Event[], key: string): readonly Event[] => {
+  return (events: readonly Event[], key: unknown): readonly Event[] => {
     let index = cache.get(events);
     if (!index) {
       index = new Map();
@@ -48,35 +63,70 @@ function keyedEvents(keys: (e: Event) => readonly unknown[]) {
     return index.get(key) ?? noEvents;
   };
 }
-const byField = (field: string) =>
+const fieldIndex = (field: string) =>
   keyedEvents((e) => {
     const value = (e.payload as Record<string, unknown> | null)?.[field];
     return typeof value === "string" ? [value] : [];
   });
-export const eventsForDecision = byField("decision_id");
-export const eventsForCompletion = byField("completion_id");
-export const eventsForWorkItem = byField("work_item_id");
-export const resumeEventsForItem = keyedEvents((e) => {
-  const p = e.payload;
-  return p &&
-    typeof p === "object" &&
-    "resume_work_items" in p &&
-    Array.isArray(p.resume_work_items)
-    ? p.resume_work_items
-    : [];
-});
+const plain: Record<
+  Exclude<EventIndexKind, "type">,
+  (events: readonly Event[], key: unknown) => readonly Event[]
+> = {
+  decision_id: fieldIndex("decision_id"),
+  completion_id: fieldIndex("completion_id"),
+  work_item_id: fieldIndex("work_item_id"),
+  resume_work_items: keyedEvents((e) => {
+    const p = e.payload;
+    return p &&
+      typeof p === "object" &&
+      "resume_work_items" in p &&
+      Array.isArray(p.resume_work_items)
+      ? p.resume_work_items
+      : [];
+  }),
+};
 const forCard = keyedEvents((e) => (e.card_id ? [e.card_id] : []));
+
+function query(
+  events: readonly Event[],
+  kind: EventIndexKind,
+  key: unknown,
+): readonly Event[] {
+  const index = historyIndex(events);
+  if (index) return index.query(kind, key);
+  return kind === "type"
+    ? typeof key === "string"
+      ? typeBucket(events, key)
+      : noEvents
+    : plain[kind](events, key);
+}
+
+export const eventsForDecision = (events: readonly Event[], key: string) =>
+  query(events, "decision_id", key);
+export const eventsForCompletion = (events: readonly Event[], key: string) =>
+  query(events, "completion_id", key);
+export const eventsForWorkItem = (events: readonly Event[], key: string) =>
+  query(events, "work_item_id", key);
+export const resumeEventsForItem = (events: readonly Event[], key: string) =>
+  query(events, "resume_work_items", key);
 export const cardEventsOfType = (
   events: readonly Event[],
   card: string,
   type: string,
-) => forCard(eventsOfType(events, type), card);
+): readonly Event[] => {
+  const index = historyIndex(events);
+  if (index) return index.card(card, type);
+  return forCard(typeBucket(events, type), card);
+};
 
 /** Same result as `events.find((e) => e.id === id)`: the first match wins. */
 export function eventById(
   events: readonly Event[],
   id: string | undefined,
 ): Event | undefined {
+  if (id === undefined) return undefined;
+  const attached = historyIndex(events);
+  if (attached) return attached.byId(id);
   let index = byId.get(events);
   if (!index) {
     const map = new Map<string, Event>();
@@ -84,5 +134,71 @@ export function eventById(
     index = map;
     byId.set(events, index);
   }
-  return id === undefined ? undefined : index.get(id);
+  return index.get(id);
+}
+
+/**
+ * Derived history `[...base, ...tail]`: answers combine the base's index with
+ * a small index over the tail instead of re-indexing the whole array.
+ */
+class AppendedIndex implements HistoryIndex {
+  readonly #cache = new Map<string, Map<unknown, readonly Event[]>>();
+  constructor(
+    private readonly base: readonly Event[],
+    private readonly tail: readonly Event[],
+  ) {}
+
+  #memo(space: string, key: unknown, build: () => readonly Event[]) {
+    let cache = this.#cache.get(space);
+    if (!cache) {
+      cache = new Map();
+      this.#cache.set(space, cache);
+    }
+    let events = cache.get(key);
+    if (!events) {
+      events = build();
+      cache.set(key, events);
+    }
+    return events;
+  }
+
+  #join(head: readonly Event[], tail: readonly Event[]) {
+    if (!tail.length) return head;
+    if (!head.length) return tail;
+    return [...head, ...tail];
+  }
+
+  query(kind: EventIndexKind, key: unknown): readonly Event[] {
+    return this.#memo(kind, key, () =>
+      this.#join(query(this.base, kind, key), query(this.tail, kind, key)),
+    );
+  }
+
+  card(card: string, type: string): readonly Event[] {
+    return this.#memo(`card:${type}`, card, () =>
+      this.#join(
+        cardEventsOfType(this.base, card, type),
+        cardEventsOfType(this.tail, card, type),
+      ),
+    );
+  }
+
+  byId(id: string): Event | undefined {
+    return eventById(this.base, id) ?? eventById(this.tail, id);
+  }
+}
+
+/**
+ * `[...base, ...tail]` whose lookups reuse the base's index (a Store history
+ * or an earlier `appendEvents` result) and index only the tail. The tail is
+ * copied, so later pushes to a draft's event list do not leak in.
+ */
+export function appendEvents(
+  base: readonly Event[],
+  tail: readonly Event[],
+): readonly Event[] {
+  if (!tail.length) return base;
+  const events = [...base, ...tail];
+  attachEventIndex(events, new AppendedIndex(base, [...tail]));
+  return events;
 }
