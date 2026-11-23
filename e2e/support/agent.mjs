@@ -50,6 +50,8 @@ await client.connect(
     },
   }),
 );
+// Like a native harness, list the Card tools before the first call (C-600).
+await client.listTools();
 const payload = (result) => JSON.parse(result.content[0].text);
 const call = async (name, args) => {
   const result = await client.callTool({ name, arguments: args });

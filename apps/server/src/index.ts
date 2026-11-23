@@ -124,6 +124,7 @@ export async function runServer(
       url: listenerMcpUrl(env, config, () => server?.url),
       store,
       dataDir: config.dataDir,
+      ...(config.mcpSessionCheck ? { verifyMcpSession: true } : {}),
       ...(config.execution === undefined
         ? {}
         : { execution: config.execution }),

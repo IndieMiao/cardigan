@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { MCP_BRIDGE_PROBE_ARGS } from "@cardigan/roles";
 import {
   agentProcessCommand,
   type ExecutionConfig,
@@ -48,70 +49,17 @@ export function workerMcpConfig(url: unknown, timeoutMs: unknown = 10_000) {
   }
 }
 
-// Executed by the worker's isolated Python. URL/token go only through stdin.
-// initialize authenticates without acknowledging a Run or touching tool activity.
-const probe = `
-import http.client, json, socket, ssl, sys, urllib.error, urllib.request
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-def read_reply(response):
-    raw = response.read(65537)
-    length = response.headers.get("Content-Length", "")
-    if length.isdecimal() and len(raw) < min(65537, int(length)):
-        raise http.client.IncompleteRead(raw)
-    return raw
-
-def check():
-    try:
-        data = json.load(sys.stdin)
-        context = ssl.create_default_context()
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-            urllib.request.HTTPSHandler(context=context), NoRedirect())
-        body = json.dumps({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-            "protocolVersion":"2025-03-26","capabilities":{},
-            "clientInfo":{"name":"cardigan-worker-preflight","version":"1"}}}).encode()
-        headers = {"Content-Type":"application/json", "Accept":"application/json, text/event-stream"}
-        if data["authenticate"]:
-            headers["Authorization"] = "Bearer " + data["token"]
-        req = urllib.request.Request(data["url"], data=body, method="POST", headers=headers)
-        with opener.open(req, timeout=data["timeoutMs"]/1000) as response:
-            if not data["authenticate"]: return "mcp_protocol_error"
-            raw = read_reply(response)
-            if response.status != 200 or len(raw) > 65536:
-                return "mcp_protocol_error"
-            reply = json.loads(raw)
-            result = reply.get("result", {})
-            if (reply.get("jsonrpc") != "2.0" or reply.get("id") != 1 or "error" in reply
-                or result.get("serverInfo", {}).get("name") != "cardigan"
-                or result.get("protocolVersion") != "2025-03-26"):
-                return "mcp_protocol_error"
-        return "ok"
-    except urllib.error.HTTPError as error:
-        if 500 <= error.code < 600: return "mcp_gateway_error"
-        if error.code == 401 and not data["authenticate"]:
-            try:
-                raw = read_reply(error)
-                if (len(raw) <= 65536 and error.headers.get("WWW-Authenticate") == "Bearer"
-                    and json.loads(raw).get("error", {}).get("code") == "unauthorized"):
-                    return "ok"
-            except http.client.HTTPException: return "mcp_gateway_error"
-            except Exception: pass
-            return "mcp_protocol_error"
-        if error.code in (401, 403): return "mcp_auth_failed"
-        if 300 <= error.code < 400: return "mcp_redirect"
-        return "mcp_protocol_error"
-    except http.client.HTTPException:
-        return "mcp_gateway_error"
-    except (ssl.SSLError, urllib.error.URLError, OSError) as error:
-        reason = getattr(error, "reason", error)
-        if isinstance(reason, ssl.SSLError): return "mcp_tls_failed"
-        if isinstance(reason, (TimeoutError, socket.timeout)): return "mcp_timeout"
-        return "mcp_unreachable"
-    except Exception:
-        return "mcp_protocol_error"
-print(check())
-`;
+/**
+ * C-600: the interpreter that runs Card MCP code on this worker: the launch
+ * preflight, the machine check and the Codex Card bridge all use it.
+ */
+export function workerMcpPython(
+  execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
+): string {
+  return (
+    execution.fileHelper?.python ?? execution.gitHelper?.python ?? "python3"
+  );
+}
 
 /** Authenticated startup never accepts a reachability-only result. */
 export function checkWorkerMcp(
@@ -123,7 +71,11 @@ export function checkWorkerMcp(
   return probeWorkerMcp(execution, token);
 }
 
-/** A human machine check needs no Assignment credential and grants no authority. */
+/**
+ * A human machine check needs no Assignment credential and grants no
+ * authority. C-600: it runs the Codex Card bridge's own connection function
+ * on the worker, so it takes exactly the harness's route: direct, no proxy.
+ */
 export function checkWorkerMcpReachability(
   execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
 ): Promise<void> {
@@ -137,12 +89,10 @@ async function probeWorkerMcp(
   const config = workerMcpConfig(execution.mcp?.url, execution.mcp?.timeoutMs);
   const started = Date.now();
   try {
+    // URL and token go only through stdin.
     const command = await agentProcessCommand(execution, [
-      execution.fileHelper?.python ?? execution.gitHelper?.python ?? "python3",
-      "-I",
-      "-B",
-      "-c",
-      probe,
+      workerMcpPython(execution),
+      ...MCP_BRIDGE_PROBE_ARGS,
     ]);
     const remaining = config.timeoutMs - (Date.now() - started);
     if (remaining <= 0) throw new WorkerMcpError("mcp_timeout");
