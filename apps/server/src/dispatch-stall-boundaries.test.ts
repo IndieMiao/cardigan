@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -16,13 +17,20 @@ import {
   finishRun,
   queueRun,
   type Run,
+  type Runtime,
   recordDecision,
   requestDecision,
   reviewRunWakeDisposition,
 } from "@cardigan/domain";
-import { armBellReceipt, confirmBellWrite, launchRun } from "@cardigan/host";
+import {
+  armBellReceipt,
+  confirmBellWrite,
+  HostOpsService,
+  launchRun,
+} from "@cardigan/host";
 import { unwrap } from "@cardigan/mcp-server";
 import { parseLaunchConfig } from "@cardigan/roles";
+import * as herdr from "@cardigan/runtime-herdr";
 import { moveNotification, recordNotification } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { stalledTranscript } from "../test-support/dispatch.js";
@@ -175,8 +183,8 @@ test("an instruction ACKed by the original Run is consumed only on its own card 
   expect(f.runtime.release).not.toHaveBeenCalled();
 });
 
-function reviewerFixture() {
-  const f = setup();
+function reviewerFixture(machine_id = "local") {
+  const f = setup(machine_id);
   const { card } = f.target;
   const run_id = f.latest().id;
   const { a, item } = f.store.uow.run((tx) => {
@@ -324,8 +332,8 @@ test.each(["unowned", "busy", "finished_without_kernel_proof"] as const)(
   },
 );
 
-function endedReviewer(discussWhileWaiting = false) {
-  const fixture = reviewerFixture();
+function endedReviewer(discussWhileWaiting = false, machine_id = "local") {
+  const fixture = reviewerFixture(machine_id);
   return endReviewerTurn(
     fixture,
     fixture.f.session(fixture.a, false),
@@ -2027,3 +2035,337 @@ test("a passed precheck with a rejected resume snapshot keeps the undelivered no
     await dispatcher.close();
   }
 });
+
+test.each(["idle", "busy", "darwin"] as const)(
+  "C-626: hc reports no activity; a dirty writer resumes once after the bound idle editor holds, never while busy (%s)",
+  async (mode) => {
+    const idle = mode !== "busy";
+    const { f, a, tree, run } = endedReviewer(
+      false,
+      mode === "darwin" ? "mac" : "local",
+    );
+    // A writer checkout with an uncommitted draft (A-78 had 183 changes).
+    const branch = "agent/test/c626";
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", tree, ...args], { encoding: "utf8" }).trim();
+    git("checkout", "-q", "-b", branch);
+    git(
+      "-c",
+      "user.name=fixture",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "base",
+    );
+    const sha = git("rev-parse", "HEAD");
+    writeFileSync(join(tree, "draft"), "uncommitted work");
+    f.store.uow.run((tx) => {
+      const role = tx.roles.get(f.project, {
+        role_id: a.role_id,
+        role_version: a.role_version,
+      });
+      const owner = tx.assignments.get(f.project, a.id);
+      const ended = tx.runs.get(f.project, run.id);
+      if (!role || !owner || !ended) throw new Error("missing fixture");
+      tx.roles.put(f.project, { ...role, worktree: "write" });
+      tx.assignments.put(f.project, { ...owner, branch, base_sha: sha });
+      tx.runs.put(f.project, { ...ended, harness: "claude-code" });
+    });
+    // macOS: the same writer on a registered worker generation (A-78).
+    const mac = darwinWorker(f, a, run, tree);
+    if (mode === "darwin") mac.install(() => stopped);
+    // hc has no activity for the CLI. Only the bound empty editor (here: the
+    // adapter's prompt-gated owner observation) can stand in for idle.
+    let stopped = false;
+    vi.mocked(f.runtime.status).mockImplementation(async () => ({
+      ok: true,
+      value: {
+        process: stopped ? "exited" : "alive",
+        agent: "unknown",
+        observed_seq: 1,
+      },
+    }));
+    f.runtime.observe_retirement = vi.fn(async (_ref, identity) => ({
+      ok: true as const,
+      value: stopped
+        ? ("exited" as const)
+        : idle && identity.idle_prompt?.harness === "claude-code"
+          ? ("alive" as const)
+          : ("unknown" as const),
+    }));
+    f.runtime.retire_idle = vi.fn<NonNullable<Runtime["retire_idle"]>>(
+      async (_ref, options) => {
+        if (
+          !options.system_finished_turn ||
+          !options.idle_prompt ||
+          !(await options.workspace_preflight()) ||
+          !options.before_signal()
+        )
+          return {
+            ok: true,
+            value: {
+              outcome: "withdrawn",
+              evidence: { stage: "TERM", reason: "guard_changed" },
+            },
+          };
+        stopped = true;
+        return {
+          ok: true,
+          value: {
+            outcome: "exited",
+            process_group_exited: true,
+            stop: {
+              path: mode === "darwin" ? "darwin_pid" : "linux_pidfd",
+              signal: "TERM",
+              pid: 4242,
+            },
+          },
+        };
+      },
+    );
+    const backup = vi.fn(async () => ({
+      sha,
+      ref: "refs/cardigan/stall-backups/test",
+    }));
+    const service = new HostOpsService({
+      ...f.options,
+      contextUsage: { execution: { mode: "local", dataDir: f.dataDir } },
+      stallBackup: backup,
+      ...(mode === "darwin"
+        ? {
+            workerExecution: (_p: string, machine: string) =>
+              machine === "mac" ? mac.execution : undefined,
+          }
+        : {}),
+    });
+    const dispatcher = new Dispatcher(f.options);
+    const events = (type: string) =>
+      f.state().events.filter((e) => e.type === type);
+    // One stall-patrol pass: wait for its owner observations (strict, then
+    // prompt-gated) so the clock does not move under an in-flight pass.
+    const patrol = async () => {
+      const observe = vi.mocked(f.runtime.observe_retirement!);
+      const before = observe.mock.calls.length;
+      await service.tick();
+      await vi.waitFor(() =>
+        expect(observe.mock.calls.length).toBeGreaterThanOrEqual(before + 2),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await service.tick();
+    };
+    try {
+      await dispatcher.tick();
+      f.advance(600000);
+      await dispatcher.tick();
+      expect(events("bell_turn_recovery_due")).toHaveLength(1);
+      // Inside the window: nothing is stopped, queued or alerted.
+      await patrol();
+      f.advance(31_000);
+      await patrol();
+      expect(events("host_ops_action_taken")).toEqual([]);
+      expect(f.runtime.retire_idle).not.toHaveBeenCalled();
+      if (idle) expect(events("bell_turn_recovery_failed")).toEqual([]);
+      f.advance(31_000);
+      await patrol();
+      await vi.waitFor(
+        async () => {
+          await service.tick();
+          if (idle)
+            expect(
+              events("host_ops_action_finished").filter(
+                (e) => (e.payload as { run_id?: string }).run_id,
+              ),
+            ).toHaveLength(1);
+          else expect(events("dispatch_stall_attention")).toHaveLength(1);
+        },
+        { timeout: 10000 },
+      );
+      // Later passes neither stop again nor alert again.
+      for (let i = 0; i < 3; i++) {
+        f.advance(31_000);
+        if (mode === "busy") await patrol();
+        else await service.tick();
+      }
+      if (mode === "busy") {
+        // Busy: kept as is, Ops told once, no signal, the draft untouched.
+        expect(f.runtime.retire_idle).not.toHaveBeenCalled();
+        expect(f.runtime.release).not.toHaveBeenCalled();
+        expect(events("bell_turn_recovery_failed")).toMatchObject([
+          {
+            payload: {
+              reason: "unsafe_evidence",
+              terminal_owner: "unconfirmed",
+              can_restart: false,
+            },
+          },
+        ]);
+        expect(events("dispatch_stall_attention")).toHaveLength(1);
+        expect(events("host_ops_action_taken")).toEqual([]);
+        expect(backup).not.toHaveBeenCalled();
+        expect(
+          f.state().assignments.find((v) => v.id === a.id)?.runtime_ref,
+        ).toEqual(f.refFor(a));
+      } else {
+        // macOS: settled only once the registered worker group is gone.
+        if (mode === "darwin") expect(mac.groupChecks()).toBeGreaterThan(0);
+        // Backup verified before the one owner-bound TERM; the draft stays.
+        expect(events("dispatch_stall_backup_verified")).toHaveLength(1);
+        expect(f.runtime.retire_idle).toHaveBeenCalledOnce();
+        expect(f.runtime.release).not.toHaveBeenCalled();
+        expect(events("host_ops_action_taken")).toHaveLength(1);
+        expect(events("dispatch_stall_turn_exit")).toMatchObject([
+          {
+            payload: {
+              assignment_id: a.id,
+              system_finished_run_id: run.id,
+              idle_basis: "bound_idle_prompt",
+              exit_path: mode === "darwin" ? "darwin_pid" : "linux_pidfd",
+              signal: "TERM",
+              pid: 4242,
+              result: "exited",
+            },
+          },
+        ]);
+        expect(events("bell_turn_recovery_failed")).toEqual([]);
+        const queued = f
+          .state()
+          .runs.filter(
+            (r) => r.assignment_id === a.id && r.status === "queued",
+          );
+        expect(queued).toHaveLength(1);
+        await dispatcher.tick();
+        await dispatcher.tick();
+        expect(f.options.startRun).toHaveBeenCalledOnce();
+        expect(f.options.startRun).toHaveBeenCalledWith(
+          expect.objectContaining({
+            run: expect.objectContaining({ id: queued[0]?.id }),
+          }),
+        );
+      }
+      expect(readFileSync(join(tree, "draft"), "utf8")).toBe(
+        "uncommitted work",
+      );
+      expect(git("rev-parse", "HEAD")).toBe(sha);
+    } finally {
+      mac.restore();
+      await dispatcher.close();
+      await service.close();
+    }
+  },
+  20000,
+);
+
+/** C-626: rebind an ended writer to a macOS worker generation. Worker
+ * commands run on this host against the same checkout; only the registered
+ * process-group check and the worker journal are substituted. */
+function darwinWorker(
+  f: ReturnType<typeof endedReviewer>["f"],
+  a: Assignment,
+  run: Run,
+  tree: string,
+) {
+  const target = {
+    project_id: f.project,
+    machine_id: "mac",
+    session: "fixture",
+    generation: "initial",
+    fingerprint: "f".repeat(64),
+  };
+  const execution = {
+    mode: "agent-ssh" as const,
+    machine: "mac",
+    dataDir: f.dataDir,
+    agentRoot: join(f.dataDir, "agent"),
+    gid: 1,
+    user: "worker",
+    identityFile: "/fixture/id",
+    knownHostsFile: "/fixture/hosts",
+    target,
+    macosCore: { python: "/usr/bin/python3", retiredLaunchdLabel: "fixture" },
+    fileHelper: {
+      python: "/usr/bin/python3",
+      path: "/fixture/worker-files.py",
+    },
+  };
+  const ref = {
+    machine_id: "mac",
+    runtime_machine: "mac",
+    terminal_ref: "mac/t626",
+    agent_name: "coder-c626",
+    target,
+    launch_generation: { run_id: run.id, generation: "g1" },
+  };
+  const process = {
+    machine: target.fingerprint,
+    terminal: "g1",
+    pid: 4242,
+    uid: 501,
+    process_group: 4242,
+    boot: "boot",
+    start: "1",
+  };
+  let checks = 0;
+  const spies: Array<{ mockRestore: () => void }> = [];
+  return {
+    execution,
+    groupChecks: () => checks,
+    restore: () => {
+      for (const spy of spies.splice(0)) spy.mockRestore();
+    },
+    install: (gone: () => boolean) => {
+      f.store.uow.run((tx) => {
+        const owner = tx.assignments.get(f.project, a.id);
+        const ended = tx.runs.get(f.project, run.id);
+        if (!owner || !ended) throw new Error("missing fixture");
+        tx.assignments.put(f.project, {
+          ...owner,
+          runtime_ref: ref,
+          worktree_path: tree,
+        });
+        const { bell_delivery: _b, recovery_runtime: _r, ...rest } = ended;
+        tx.runs.put(f.project, {
+          ...rest,
+          launch_publication: {
+            generation: "g1",
+            target,
+            phase: "started",
+            runtime_ref: ref,
+            process,
+          } as never,
+        });
+      });
+      spies.push(
+        vi
+          .spyOn(herdr, "agentProcessCommand")
+          .mockImplementation(async (_e, argv) => {
+            // The registered group check (groupGone) is the only substitute.
+            if (argv[3]?.includes("os.kill(process, 0)")) {
+              checks++;
+              return {
+                file: "python3",
+                args: ["-c", gone() ? "print('gone')" : "raise SystemExit(1)"],
+              };
+            }
+            return { file: argv[0]!, args: argv.slice(1) };
+          }),
+        vi.spyOn(herdr, "workerFiles").mockImplementation(
+          async () =>
+            ({
+              version: 1,
+              phase: "running",
+              observed: gone() ? "exited" : "alive",
+              process,
+              project: f.project,
+              assignment: a.id,
+              run: run.id,
+              generation: "g1",
+              target: target.fingerprint,
+            }) as never,
+        ),
+      );
+    },
+  };
+}

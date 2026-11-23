@@ -176,12 +176,14 @@ export async function stopDarwinOwner(
   const g = ref.launch_generation,
     p = options.enrolled_process,
     target = e.target;
+  // C-626: a system-ended turn may ask the owner too. The adapter already
+  // ran its workspace preflight; the owner still requires a clean checkout
+  // and an idle status itself, and refuses before any challenge otherwise.
   if (
     !enabled(e) ||
     !target ||
     !g ||
     !p ||
-    options.system_finished_turn ||
     !ref.terminal_ref.startsWith(`${e.machine}/`) ||
     p.machine !== target.fingerprint ||
     p.terminal !== g.generation

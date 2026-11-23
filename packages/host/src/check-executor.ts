@@ -33,6 +33,8 @@ export class CheckExecutorUnavailable extends Error {
 export interface CheckRequest extends Omit<CheckoutInput, "execution"> {
   readonly mergeTier?: "card" | "batch";
   readonly kind: "merge_check" | "precheck";
+  /** C-611: host-validated test files for the macOS workflow; never a command. */
+  readonly workflowInputs?: { readonly files: string };
   /** Recheck scheduling after asynchronous preparation, immediately before execution. */
   readonly beforeDispatch?: () => void | Promise<void>;
   /** Host shutdown detaches supervision; business cancellation continues to use signal. */

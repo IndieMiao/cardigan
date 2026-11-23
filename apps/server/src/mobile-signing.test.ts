@@ -227,6 +227,93 @@ test("first call is accepted at once; polls of the same Run follow one job to it
   }
 }, 20_000);
 
+test("C-609: one deployment hold covers the job from start until its helper settles", async () => {
+  const host = fakeHost("slow");
+  const scope = jobScope("R-21");
+  const holds: string[] = [];
+  const track = async (signing: typeof scope) => {
+    holds.push(`hold:${signing.run}:${signing.platform}`);
+    return () => {
+      holds.push("release");
+    };
+  };
+  const call = () =>
+    requestMobileSignature(
+      host.data,
+      scope,
+      () => {},
+      { program: host.program, acceptWaitMs: 300 },
+      track,
+    );
+  try {
+    await accepted(call);
+    await call();
+    expect(holds).toEqual(["hold:R-21:android"]);
+    writeFileSync(join(host.ctl, "ready"), "");
+    writeFileSync(join(host.ctl, "signed"), "");
+    await until(call, (r) => r.status === "signed");
+    expect(holds).toEqual(["hold:R-21:android", "release"]);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("C-609: a failing tracker never blocks signing", async () => {
+  const host = fakeHost("slow");
+  const scope = jobScope("R-22");
+  const call = () =>
+    requestMobileSignature(
+      host.data,
+      scope,
+      () => {},
+      { program: host.program, acceptWaitMs: 300 },
+      async () => {
+        throw new Error("registry unavailable");
+      },
+    );
+  try {
+    expect(await accepted(call)).toMatchObject({ status: "pending" });
+    writeFileSync(join(host.ctl, "ready"), "");
+    writeFileSync(join(host.ctl, "signed"), "");
+    expect(await until(call, (r) => r.status === "signed")).toMatchObject({
+      status: "signed",
+    });
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("C-609: while a deployment's stop fence stands the job stays queued and claims nothing", async () => {
+  const host = fakeHost("slow");
+  const scope = jobScope("R-23");
+  let lift: (() => void) | undefined;
+  const call = () =>
+    requestMobileSignature(
+      host.data,
+      scope,
+      () => {},
+      { program: host.program, acceptWaitMs: 100 },
+      () =>
+        new Promise((resolve) => {
+          lift = () => resolve(() => {});
+        }),
+    );
+  try {
+    expect(await call()).toMatchObject({ status: "queued", request_id: null });
+    expect(await call()).toMatchObject({ status: "queued", request_id: null });
+    expect(host.spawns()).toEqual([]);
+    lift?.();
+    expect(await accepted(call)).toMatchObject({ status: "pending" });
+    writeFileSync(join(host.ctl, "ready"), "");
+    writeFileSync(join(host.ctl, "signed"), "");
+    expect(await until(call, (r) => r.status === "signed")).toMatchObject({
+      status: "signed",
+    });
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
 test("a helper past its reported deadline is terminated; the next poll looks the same request up", async () => {
   const host = fakeHost("hang");
   const call = () =>

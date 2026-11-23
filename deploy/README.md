@@ -90,6 +90,10 @@ cardigan --help
 
 每次执行时，包装命令先加载并导出存在的 runtime.env；文件缺失时跳过，不会因缺少该文件报错。`agent-ssh` 模式下，如果当前进程尚无 `cardigan-share` 组身份，使用 `sg cardigan-share -c` 运行 CLI，每个参数与入口路径分别做 shell 引用，保留空格、引号和特殊字符。已有组身份或使用 local 模式时直接运行 CLI。该脚本不创建组或添加成员；共享组由 Agent 安装器配置，`sg` 失败会直接返回错误。
 
+## 附件大小上限
+
+普通附件上限由主机环境变量 `CARDIGAN_ATTACHMENT_MAX_MIB` 决定（整数 MiB，1–64，默认 10）；非法值拒绝启动。server 和 CLI 都按它校验，建议写进两者共同加载的 runtime.env（或 server 的服务单元与 CLI 的环境保持一致），改完重启 server 生效。base64 长度、MCP 与 Workbench 请求体上限随之推出；Workbench 登录后从会话读取上限，worker 上的 upload-evidence 助手从 `upload_attachment` 公布的长度上限读取，download-attachment 接受不超过 64 MiB 的普通附件。前面若有反向代理，请求体上限需不小于 `4 × ⌈上限 / 3⌉ + 1 MiB`（30 MiB 约 41 MiB）。更大的文件走制品上传通道。
+
 ## 使用隔离模式启动 Assignment
 
 安装并重新登录后，在启动 server 的主机终端加载 Agent 安装器生成的 runtime.env（按安装器打印的路径；用 `set -a` / `. <runtime.env>` / `set +a` 导出）。CLI 使用上文安装的 `cardigan` 命令，自动加载同一配置。随后沿用已登记的项目、Role 和 launch.yaml：

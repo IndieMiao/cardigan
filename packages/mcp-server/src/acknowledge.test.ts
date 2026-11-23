@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,13 +19,17 @@ import { Store, writeRole } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import type { Identity } from "./auth.js";
+import { authenticate, type Identity } from "./auth.js";
+import type { McpBackend } from "./backend.js";
 import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import { loadCommandState, persistEffect } from "./commands/execute.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import { acceptingVerifierFor } from "./test-support.js";
 
 const project_id = "p-ack" as ProjectId;
+/** C-600: the per-launch key a harness sends from its MCP configuration. */
+const SESSION_KEY = "fictional-session-key-0123456789";
+const SESSION_DIGEST = createHash("sha256").update(SESSION_KEY).digest("hex");
 const NOW = "2026-01-01T00:00:00.000Z";
 const human: Actor = { kind: "human", project_id };
 const agent = (assignment_id: string): Actor => ({
@@ -97,7 +102,7 @@ function ports(tx: TransactionContext): CommandPorts {
 /** A card with one coder assignment, dispatched with a runtime ref. */
 function dispatchedRun(
   worktree: Role["worktree"] = "none",
-  options: { readonly dispatch?: boolean } = {},
+  options: { readonly dispatch?: boolean; readonly verify?: boolean } = {},
 ) {
   if (worktree !== "none") {
     store.uow.run((tx) =>
@@ -170,6 +175,14 @@ function dispatchedRun(
           terminal_ref: "t1",
           agent_name: "coder-abcdef12-c-1-w-1-a-1",
         },
+        ...(options.verify
+          ? {
+              verify_mcp_session: {
+                key_sha256: SESSION_DIGEST,
+                token_id: "issued-at-launch",
+              },
+            }
+          : {}),
       },
       p,
     ),
@@ -390,5 +403,219 @@ describe("the HTTP layer", () => {
     const run = store.uow.read((tx) => tx.runs.list(project_id)[0]);
     expect(run?.status).toBe("running");
     expect(assignment.id).toBe(run?.assignment_id);
+  });
+});
+
+describe("C-600 a verified session must list the Card tools natively", () => {
+  let running: RunningServer;
+  const tools = ["whoami", "get_card", "get_updates"];
+  let token: string;
+  /** A Token of the previous launch of the same Assignment, still valid. */
+  let oldToken: string;
+  const connect = async (key?: string, bearer = token) => {
+    const client = new Client({ name: "fictional-client", version: "0.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(running.url), {
+        requestInit: {
+          headers: {
+            Authorization: `Bearer ${bearer}`,
+            ...(key ? { "X-Cardigan-Session": key } : {}),
+          },
+        },
+      }),
+    );
+    return client;
+  };
+  const start = async (verify: boolean, backend: McpBackend = store) => {
+    const seeded = dispatchedRun("none", { verify });
+    const issue = () =>
+      store.issueToken({
+        project_id,
+        assignment_id: seeded.assignment.id,
+        role: {
+          role_version: seeded.assignment.role_version,
+          allowed_tools: tools,
+        },
+      });
+    oldToken = issue().token;
+    const issued = issue();
+    token = issued.token;
+    // The host binds the verified session to the Token it issued for it.
+    if (verify)
+      store.uow.run((tx) => {
+        const a = tx.assignments.get(project_id, seeded.assignment.id);
+        if (a)
+          tx.assignments.put(project_id, {
+            ...a,
+            mcp_session_token_id: issued.record.id,
+          });
+      });
+    running = await startMcpServer({
+      store: backend,
+      host: "127.0.0.1",
+      port: 0,
+      log: () => undefined,
+    });
+    return seeded;
+  };
+  /** The real store whose handshake write fails `failures` times. */
+  const busyStore = (failures: number) => {
+    let left = failures;
+    return new Proxy(store, {
+      get(target, property) {
+        if (property === "advanceMcpHandshake")
+          return (...args: Parameters<Store["advanceMcpHandshake"]>) => {
+            if (args[2] === "tools_listed" && left > 0) {
+              left--;
+              throw new Error("database is locked");
+            }
+            return target.advanceMcpHandshake(...args);
+          };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as McpBackend;
+  };
+  const handshake = (id: Assignment["id"]) =>
+    store.uow.read((tx) => tx.assignments.get(project_id, id))?.mcp_handshake;
+  afterEach(async () => {
+    await running?.close();
+  });
+
+  test("only this launch's harness unlocks the session; its first call starts the Run", async () => {
+    const { assignment, run_id } = await start(true);
+    expect(handshake(assignment.id)).toBe("pending");
+    // Another client of the same Token (or a wrong key) listing proves nothing.
+    const other = await connect();
+    await other.listTools();
+    const wrong = await connect("another-launch-key-0123456789");
+    await wrong.listTools();
+    expect(handshake(assignment.id)).toBe("pending");
+    // initialize alone proves nothing either.
+    const native = await connect(SESSION_KEY);
+    expect(handshake(assignment.id)).toBe("pending");
+    expect(read(run_id)?.status).toBe("dispatched");
+    await native.listTools();
+    expect(handshake(assignment.id)).toBe("listed");
+    const who = await native.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).not.toBe(true);
+    expect(read(run_id)?.status).toBe("running");
+    for (const client of [other, wrong, native]) await client.close();
+  });
+
+  test("a call that is not this launch's harness is refused, never starts the Run and stays refused", async () => {
+    const { assignment, run_id } = await start(true);
+    const wrapper = await connect();
+    await wrapper.listTools();
+    const refused = await wrapper.callTool({ name: "whoami", arguments: {} });
+    expect(refused.isError).toBe(true);
+    expect(refused.structuredContent).toMatchObject({
+      error: {
+        code: "illegal_transition",
+        message: expect.stringContaining("MCP 初始化失败"),
+      },
+    });
+    expect(handshake(assignment.id)).toBe("missing");
+    expect(read(run_id)?.status).toBe("dispatched");
+    // Even the harness's own key cannot revive the session afterwards.
+    const native = await connect(SESSION_KEY);
+    await native.listTools();
+    const again = await native.callTool({ name: "get_updates", arguments: {} });
+    expect(again.isError).toBe(true);
+    expect(read(run_id)?.status).toBe("dispatched");
+    expect(
+      store.uow.read((tx) => tx.assignments.get(project_id, assignment.id))
+        ?.last_mcp_activity_at,
+    ).toBeUndefined();
+    for (const client of [wrapper, native]) await client.close();
+  });
+
+  test("calls on the previous launch's Token never decide the new session's handshake", async () => {
+    const { assignment, run_id } = await start(true);
+    const late = await connect(undefined, oldToken);
+    await late.listTools();
+    const call = await late.callTool({ name: "whoami", arguments: {} });
+    expect(call.isError).not.toBe(true);
+    expect(handshake(assignment.id)).toBe("pending");
+    // Nor can it start the new session's Run.
+    expect(read(run_id)?.status).toBe("dispatched");
+    const native = await connect(SESSION_KEY);
+    await native.listTools();
+    expect(handshake(assignment.id)).toBe("listed");
+    await native.callTool({ name: "whoami", arguments: {} });
+    expect(read(run_id)?.status).toBe("running");
+    for (const client of [late, native]) await client.close();
+  });
+
+  test("V-2999:1 a late call of the previous launch neither starts nor refreshes a session that has only listed", async () => {
+    const { assignment, run_id } = await start(true);
+    const activity = () =>
+      store.uow.read((tx) => tx.assignments.get(project_id, assignment.id))
+        ?.last_mcp_activity_at;
+    // The new harness has listed its tools but not called one yet.
+    const native = await connect(SESSION_KEY);
+    await native.listTools();
+    expect(handshake(assignment.id)).toBe("listed");
+    expect(read(run_id)?.status).toBe("dispatched");
+    // The replaced session's late call is answered, but writes nothing.
+    const late = await connect(undefined, oldToken);
+    const call = await late.callTool({ name: "whoami", arguments: {} });
+    expect(call.isError).not.toBe(true);
+    expect(read(run_id)?.status).toBe("dispatched");
+    expect(activity()).toBeUndefined();
+    // Replaying the confirmation with that authenticated identity: same.
+    const previous = authenticate(store, oldToken);
+    if (!previous.ok) throw new Error("old Token must still authenticate");
+    acknowledgeDispatchedRun(store, previous.value, () => NOW);
+    expect(read(run_id)?.status).toBe("dispatched");
+    expect(
+      store.touchAssignmentActivity(
+        project_id,
+        assignment.id,
+        NOW,
+        previous.value.token.id,
+      ),
+    ).toBe(false);
+    expect(activity()).toBeUndefined();
+    // Only this launch's own first call starts the Run and counts as activity.
+    const who = await native.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).not.toBe(true);
+    expect(read(run_id)?.status).toBe("running");
+    expect(activity()).toBeDefined();
+    for (const client of [late, native]) await client.close();
+  });
+
+  test("a briefly busy database is retried before the listing is answered", async () => {
+    const { assignment, run_id } = await start(true, busyStore(2));
+    const native = await connect(SESSION_KEY);
+    await native.listTools();
+    expect(handshake(assignment.id)).toBe("listed");
+    const who = await native.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).not.toBe(true);
+    expect(read(run_id)?.status).toBe("running");
+    await native.close();
+  });
+
+  test("an unrecorded listing is an error, and the same healthy session still starts afterwards", async () => {
+    const { assignment, run_id } = await start(true, busyStore(4));
+    const native = await connect(SESSION_KEY);
+    await expect(native.listTools()).rejects.toThrow(/retry tools\/list/u);
+    expect(handshake(assignment.id)).toBe("pending");
+    // The database recovers: the harness's next request still counts.
+    const who = await native.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).not.toBe(true);
+    expect(handshake(assignment.id)).toBe("listed");
+    expect(read(run_id)?.status).toBe("running");
+    await native.close();
+  });
+
+  test("sessions launched without verification keep the old behaviour", async () => {
+    const { assignment, run_id } = await start(false);
+    const client = await connect();
+    const who = await client.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).not.toBe(true);
+    expect(handshake(assignment.id)).toBeUndefined();
+    expect(read(run_id)?.status).toBe("running");
+    await client.close();
   });
 });

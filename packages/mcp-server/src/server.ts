@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -6,11 +6,21 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { pipeline } from "node:stream/promises";
-import type { OwnerMessagePort } from "@cardigan/domain";
+import { setTimeout as delay } from "node:timers/promises";
+import {
+  MCP_SESSION_FAILURE,
+  MCP_SESSION_HEADER,
+  MCP_SESSION_KEY_PATTERN,
+  type OwnerMessagePort,
+} from "@cardigan/domain";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
-import { fileAttachmentStore, MAX_MCP_BODY_BYTES } from "./attachments.js";
+import {
+  fileAttachmentStore,
+  MAX_MCP_BODY_BYTES,
+  mcpBodyTooLargeMessage,
+} from "./attachments.js";
 import {
   authenticate,
   bearerToken,
@@ -42,6 +52,10 @@ import {
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
 import {
+  type MacosCheckToolOptions,
+  macosCheckTool,
+} from "./tools/macos-check.js";
+import {
   type MobileSigningOptions,
   mobileAccess,
   mobileSigningTool,
@@ -67,7 +81,8 @@ export interface McpServerOptions
     ReservationOptions,
     MobileSigningOptions,
     PublicationOptions,
-    ProbeToolOptions {
+    ProbeToolOptions,
+    MacosCheckToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
   readonly bodyTimeoutMs?: number;
@@ -128,12 +143,14 @@ export function serverTools(
     ReservationOptions &
     MobileSigningOptions &
     PublicationOptions &
-    ProbeToolOptions,
+    ProbeToolOptions &
+    MacosCheckToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
     runProbeTool(options),
+    macosCheckTool(options),
     mobileSigningTool(options),
     publicationTool(options),
     reservationTool(options),
@@ -551,6 +568,82 @@ export async function startMcpServer(
   };
 }
 
+/** C-600: bounded retries of the handshake write before failing a listing. */
+const HANDSHAKE_WRITE_RETRIES = 3;
+const HANDSHAKE_RETRY_MS = 100;
+
+/**
+ * C-600: digest of the per-launch key a verified harness sends from its own
+ * MCP configuration; absent or malformed headers prove nothing.
+ */
+function sessionKeyDigest(req: IncomingMessage): string | undefined {
+  const value = req.headers[MCP_SESSION_HEADER.toLowerCase()];
+  return typeof value === "string" && MCP_SESSION_KEY_PATTERN.test(value)
+    ? createHash("sha256").update(value).digest("hex")
+    : undefined;
+}
+
+function jsonRpcError(
+  res: ServerResponse,
+  status: number,
+  code: number,
+  message: string,
+): void {
+  res
+    .writeHead(status, {
+      "Content-Type": "application/json",
+      Connection: "close",
+    })
+    .end(
+      JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: null }),
+    );
+}
+
+const mcpBodyTooLarge = (res: ServerResponse) =>
+  jsonRpcError(res, 413, -32000, mcpBodyTooLargeMessage());
+
+/**
+ * C-616: reads a body of unknown length as UTF-8, or `undefined` as soon as it
+ * passes `limit`; the rest is left unread and the 413 closes the connection.
+ */
+function readBodyWithin(
+  req: IncomingMessage,
+  limit: number,
+): Promise<string | undefined> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const done = () => {
+      req.off("data", data);
+      req.off("end", end);
+      req.off("error", fail);
+      req.off("close", closed);
+    };
+    const data = (chunk: Buffer) => {
+      size += chunk.byteLength;
+      if (size > limit) {
+        done();
+        req.pause();
+        resolve(undefined);
+      } else chunks.push(chunk);
+    };
+    const end = () => {
+      done();
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+    const fail = (error: Error) => {
+      done();
+      reject(error);
+    };
+    const closed = () =>
+      fail(new Error("Request closed before its body ended"));
+    req.on("data", data);
+    req.once("end", end);
+    req.once("error", fail);
+    req.once("close", closed);
+  });
+}
+
 async function serveMcp(
   req: IncomingMessage,
   res: ServerResponse,
@@ -560,6 +653,35 @@ async function serveMcp(
   log: Logger,
   allowedHosts: string[],
 ): Promise<void> {
+  // C-616: the MCP transport's own 413 names only the body bound. Refuse an
+  // oversized body here instead, so both a declared length and a chunked body
+  // name the attachment limit too. A chunked JSON body is read here within the
+  // same bound and handed over parsed; everything else stays with the SDK.
+  let parsedBody: unknown;
+  if (req.method === "POST" && allowedHosts.includes(req.headers.host ?? "")) {
+    const declared = req.headers["content-length"];
+    if (declared !== undefined && Number(declared) > MAX_MCP_BODY_BYTES) {
+      mcpBodyTooLarge(res);
+      return;
+    }
+    const type = req.headers["content-type"] ?? "";
+    if (
+      declared === undefined &&
+      type.split(";")[0]?.trim().toLowerCase() === "application/json"
+    ) {
+      const body = await readBodyWithin(req, MAX_MCP_BODY_BYTES);
+      if (body === undefined) {
+        mcpBodyTooLarge(res);
+        return;
+      }
+      try {
+        parsedBody = JSON.parse(body);
+      } catch {
+        jsonRpcError(res, 400, -32700, "Parse error: Invalid JSON");
+        return;
+      }
+    }
+  }
   const server = createMcpServer({
     projectSettings: options.projectSettings,
     store: options.store,
@@ -573,13 +695,51 @@ async function serveMcp(
     // and `tools/list` must not start the Run (§4 step 8) or make an idle Agent
     // look busy (M3 plan §3.3).
     onToolCall: () => {
+      // C-600: both are bound to this request's Token, so a late call of a
+      // replaced session neither starts nor keeps alive the new session.
       options.store.touchAssignmentActivity?.(
         identity.actor.project_id,
         identity.actor.assignment_id,
+        undefined,
+        identity.token.id,
       );
       if (options.acknowledgeRuns !== false) {
         acknowledgeDispatchedRun(options.store, identity);
       }
+    },
+    // C-600: a native listing must be recorded before it is answered; a
+    // briefly busy database is retried, then the client gets an error.
+    onToolList: async () => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          options.store.advanceMcpHandshake?.(
+            identity.actor.project_id,
+            identity.actor.assignment_id,
+            "tools_listed",
+            sessionKeyDigest(req),
+            identity.token.id,
+          );
+          return;
+        } catch (error) {
+          if (attempt >= HANDSHAKE_WRITE_RETRIES) throw error;
+          await delay(HANDSHAKE_RETRY_MS * (attempt + 1));
+        }
+      }
+    },
+    refuseToolCall: () => {
+      const handshake = options.store.advanceMcpHandshake?.(
+        identity.actor.project_id,
+        identity.actor.assignment_id,
+        "tool_called",
+        sessionKeyDigest(req),
+        identity.token.id,
+      );
+      return handshake === "missing"
+        ? {
+            code: "illegal_transition",
+            message: `${MCP_SESSION_FAILURE}（本次启动的 Harness 未列出工具）。系统会重建会话；请停止本会话的工作，不要改用命令行或其它方式调用 Card MCP。`,
+          }
+        : undefined;
     },
     revalidateToken: () => {
       const token = bearerToken(req.headers.authorization);
@@ -603,5 +763,5 @@ async function serveMcp(
   });
 
   await server.connect(transport);
-  await transport.handleRequest(req, res);
+  await transport.handleRequest(req, res, parsedBody);
 }

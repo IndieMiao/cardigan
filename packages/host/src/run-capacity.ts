@@ -10,6 +10,7 @@ import {
   dispatchTier,
   type Event,
   type HostOpsExecution,
+  hostOpsPending,
   isRunCapacityExempt,
   type MachineResources,
   type MachineRunCapacity,
@@ -17,8 +18,11 @@ import {
   type QueuedRun,
   type Run,
   remainingResourceRatio,
+  runEndedByBusiness,
+  runHoldsCapacity,
   runOccupiesSlot,
   runQueuePositions,
+  stoppedByHuman,
 } from "@cardigan/domain";
 import {
   type ReadRepositories,
@@ -71,8 +75,8 @@ export function runCapacityMachines(
  * fresh array per call only misses the cache. Unfinished BellAttempts are not
  * snapshotted, so they are re-read and filtered on every call.
  *
- * Rows match the former JOIN: queued for `concurrency_limit`, owner active and
- * not capacity exempt, trigger event present; the card is the owner's work item
+ * Rows match the former JOIN: queued for `concurrency_limit`, owner active,
+ * not capacity exempt and not stopped by the human, trigger event present; the card is the owner's work item
  * card, else the trigger event's card, and priority comes from that card.
  */
 type QueueKey = readonly unknown[];
@@ -141,6 +145,9 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       const owner = assignments.get(run.assignment_id);
       if (owner?.status !== "active" || isRunCapacityExempt(owner)) continue;
       if (!assignmentDependenciesAllowStart(dependencyState, owner)) continue;
+      // C-624: nobody dispatches a human-stopped owner, so it cannot hold a
+      // queue position ahead of others. A human start restores its place.
+      if (stoppedByHuman(history, owner.id)) continue;
       let cause = triggerEvents.get(run);
       if (!cause) {
         triggerEvent ??= store.database.prepare(
@@ -215,6 +222,75 @@ const pendingActions = new WeakMap<
   WeakMap<readonly object[], readonly HostOpsExecution[]>
 >();
 
+// Project + card stream per immutable snapshot pair, so the domain's per-array
+// memos (hostOpsPending, stoppedByHuman) are reused across claims.
+const ownerHistories = new WeakMap<
+  readonly Event[],
+  WeakMap<readonly Event[], readonly Event[]>
+>();
+function ownerHistory(
+  tx: ReadRepositories,
+  project: string,
+  owner: Assignment,
+): readonly Event[] {
+  const card =
+    owner.work_item_id &&
+    tx.work_items.get(project, owner.work_item_id)?.card_id;
+  const streams = tx.events.listStreams?.(project);
+  if (!streams)
+    return [
+      ...tx.events.listAfter(project, undefined, 0),
+      ...(card ? tx.events.listAfter(project, card, 0) : []),
+    ];
+  const base = streams.get("") ?? [];
+  const own = (card && streams.get(card)) || [];
+  let byCard = ownerHistories.get(base);
+  if (!byCard) {
+    byCard = new WeakMap();
+    ownerHistories.set(base, byCard);
+  }
+  let merged = byCard.get(own);
+  if (!merged) {
+    merged = [...base, ...own];
+    byCard.set(own, merged);
+  }
+  return merged;
+}
+
+/**
+ * C-620: an earlier waiter whose owner cannot start any session now (pending
+ * host operation, unconfirmed recycle, human stop, role upgrade, or another
+ * Run still active) is not runnable and must not hold the queue behind it.
+ * It regains its place as soon as the fence clears.
+ */
+function ownerFenced(
+  tx: ReadRepositories,
+  project: string,
+  owner: Assignment,
+  run: string,
+): boolean {
+  if (
+    owner.role_upgrade ||
+    owner.idle_retirement?.handoff ||
+    owner.idle_retirement?.phase === "stopping"
+  )
+    return true;
+  if (
+    tx.runs
+      .list(project)
+      .some(
+        (r) =>
+          r.assignment_id === owner.id &&
+          r.id !== run &&
+          r.status !== "queued" &&
+          runOccupiesSlot(r),
+      )
+  )
+    return true;
+  const events = ownerHistory(tx, project, owner);
+  return hostOpsPending(events, owner.id) || stoppedByHuman(events, owner.id);
+}
+
 /** Keep the existing order among runnable waiters, without blocking other resources. */
 export function hasEarlierCapacityWait(
   tx: ReadRepositories,
@@ -241,6 +317,7 @@ export function hasEarlierCapacityWait(
     return (
       !!owner &&
       (!owner.snapshot_retry || owner.snapshot_retry.ready_at <= now) &&
+      !ownerFenced(tx, entry.project_id, owner, entry.run_id) &&
       (!eligible || eligible(entry.project_id, owner)) &&
       (!resources.size ||
         remainingResourceRatio(
@@ -347,9 +424,10 @@ export function runCapacitySnapshot(
       }
       if (usage && !isRunCapacityExempt(owner)) usage.occupied++;
       const slots = resourceSlots(machine);
-      // Stop intents keep their existing machine slot. An idle terminal is not
-      // proof that its queued follow-up acquired any resources. Active Runs and
-      // in-flight startup reservations have already been counted in the Run loop.
+      // A pending stop of a possibly executing session keeps its machine slot.
+      // An idle terminal is not proof that its queued follow-up acquired any
+      // resources. Active Runs and in-flight startup reservations have already
+      // been counted in the Run loop.
       if (
         slots.size &&
         owner.work_item_id &&
@@ -374,22 +452,48 @@ export function runCapacitySnapshot(
       }
       countedOwners.add(owner.id);
     };
+    // C-620: an ended turn leaves an idle session. It holds no machine,
+    // quota or resource slot, even while its stop or recycle is unconfirmed;
+    // its successor is admitted through this same count, so normal dispatch
+    // keeps the limit. A Run cancelled under a pending stop may still be
+    // executing and keeps its slot until exit is confirmed.
     for (const run of runs)
       if (
-        runOccupiesSlot(run) ||
+        runHoldsCapacity(run) ||
         (run.status === "queued" && reserved.has(run.id))
       )
         count(run.assignment_id, run);
-    for (const action of actions)
+    for (const action of actions) {
       if (
-        action.runtime_ref !== null &&
-        !countedOwners.has(action.assignment_id)
+        action.runtime_ref === null ||
+        countedOwners.has(action.assignment_id) ||
+        // Idle-session recycle handoffs and system-ended idle turns.
+        action.retirement_handoff ||
+        action.system_finished_run_id
       )
-        count(
-          action.assignment_id,
-          action.run_id ? tx.runs.get(project.id, action.run_id) : undefined,
-          true,
+        continue;
+      const owner = owners.get(action.assignment_id);
+      if (!owner) continue;
+      const history = historyFor(owner);
+      const turn = runs
+        .filter(
+          (r) => r.assignment_id === owner.id && wasDispatched(history, r),
+        )
+        .reduce<Run | undefined>(
+          (last, r) =>
+            !last || Number(r.id.slice(2)) > Number(last.id.slice(2))
+              ? r
+              : last,
+          undefined,
         );
+      // No turn ever ran, or the last one ended with a business result: idle.
+      if (!turn || runEndedByBusiness(turn)) continue;
+      count(
+        action.assignment_id,
+        action.run_id ? tx.runs.get(project.id, action.run_id) : undefined,
+        true,
+      );
+    }
   }
   // Runtime occupancy is independent of whether a card still accepts a merge
   // result. Dead process incarnations (including PID reuse) release on restart.

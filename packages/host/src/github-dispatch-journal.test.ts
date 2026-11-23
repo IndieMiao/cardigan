@@ -186,6 +186,38 @@ test("cached check histories stay isolated from card-scoped probe journals", () 
   expect(f.journal.unfinished()).toEqual([f.intent]);
 });
 
+test("C-611: abandoning a probe reservation releases it only before publication; a dispatched one waits for proof", () => {
+  const f = setup();
+  const probe = new GithubDispatchJournal(f.store, f.card.id);
+  const intent: GithubDispatchIntent = {
+    ...f.intent,
+    attempt: "macos-1",
+    candidate: undefined,
+  };
+  expect(() => f.journal.abandonProbe(f.intent, "x")).toThrow("security");
+  probe.claim(intent);
+  probe.abandonProbe(intent, "ended");
+  expect(probe.all()[0]).toMatchObject({
+    abandoned: "attempt_finished",
+    finished: true,
+  });
+
+  const posted = {
+    ...intent,
+    attempt: "macos-2",
+    discoveryDeadlineAt: Date.parse(intent.startedAt) + 60_000,
+  };
+  probe.claim(posted);
+  probe.beginPublication(posted);
+  probe.beginDispatch(posted);
+  probe.settleDispatch(posted, undefined, Date.parse(posted.startedAt));
+  probe.abandonProbe(posted, "ended");
+  const current = probe.all().find((i) => i.attempt === "macos-2");
+  expect(current).toMatchObject({ abandoned: "attempt_finished" });
+  expect(current?.finished).toBeUndefined();
+  expect(probe.unfinished().map((i) => i.attempt)).toEqual(["macos-2"]);
+});
+
 test("bulk journal reads share immutable histories without hiding another connection or rollback", () => {
   const f = setup();
   f.journal.claim(f.intent, 1);

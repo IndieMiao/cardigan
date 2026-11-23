@@ -63,6 +63,22 @@ const e: Extract<ExecutionConfig, { mode: "agent-ssh" }> = {
     path: "/installed/worker-files.py",
   },
 };
+// C-611: the owner fixture marks where a case is (task.meta.cardigan_phases),
+// so a timed-out macOS check reports the last step the case reached.
+let current: { meta: object; started: number } | undefined;
+test.beforeEach(({ task }) => {
+  current = { meta: task.meta, started: performance.now() };
+});
+function phases() {
+  const marks: { name: string; at_ms: number }[] = [];
+  const at = current;
+  if (at) Object.assign(at.meta, { cardigan_phases: marks });
+  return (name: string) => {
+    if (at && marks.length < 50)
+      marks.push({ name, at_ms: Math.round(performance.now() - at.started) });
+  };
+}
+
 function launchArgsFor(execution: typeof e) {
   const packet = workerFileRequest(
     execution,
@@ -225,10 +241,28 @@ async function ownerFixture(publicPem?: string) {
     file: argv[0]!,
     args: argv.slice(1),
   });
-  const stop = (
+  const mark = phases();
+  mark("fixture ready");
+  void closed.then(
+    ([code]) => mark(`child closed: ${code}`),
+    () => {},
+  );
+  let stops = 0;
+  const stop = async (
     patch: Partial<typeof options> = {},
     stopOwner = stopDarwinOwner,
-  ) => stopOwner(execution, ref, { ...options, ...patch }, transport);
+  ) => {
+    const n = ++stops;
+    mark(`stop ${n}`);
+    const result = await stopOwner(
+      execution,
+      ref,
+      { ...options, ...patch },
+      transport,
+    );
+    mark(`stop ${n}: ${result.outcome}`);
+    return result;
+  };
   return {
     root,
     tree,

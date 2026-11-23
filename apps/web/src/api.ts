@@ -57,6 +57,8 @@ export interface SessionInfo {
   /** Non-authorizing, session-specific namespace for overlapping tab reads. */
   readonly read_scope?: string;
   readonly build?: BuildInfo;
+  /** Host attachment upload limit in bytes (C-616); only when authenticated. */
+  readonly attachment_max_bytes?: number;
 }
 
 export interface ProjectSummary {
@@ -605,6 +607,8 @@ export interface AttachmentView extends AuthorView {
   readonly download_path: string;
   /** Small server-rendered preview for inline bitmaps; null otherwise. */
   readonly thumbnail_path: string | null;
+  /** Lightbox image for inline bitmaps; older servers omit it. */
+  readonly preview_path?: string | null;
 }
 
 export interface CardRelations {
@@ -1101,7 +1105,7 @@ export interface RunView {
     readonly after_minutes: number;
     readonly waited_ms: number;
   };
-  readonly failure_reason?: "provider_unavailable";
+  readonly failure_reason?: "provider_unavailable" | "mcp_unavailable";
   readonly queue_reason?:
     | "concurrency_limit"
     | "runtime_unavailable"
@@ -1505,6 +1509,14 @@ export interface DecisionHistoryRecord extends DecisionView {
     resolved_by: string;
     via: string;
     proxy_authority?: string;
+    /** C-617 / Q-1198: the owner's answer cited as evidence for PM's decision. */
+    owner_record?: {
+      readonly card_id: string;
+      readonly timeline_entry_id: string;
+      readonly quote: string;
+      readonly at: string;
+      readonly attachment_id?: string;
+    };
   };
 }
 /** C-134: newest 10 first; pass `next_cursor` back to read the next 10. */
@@ -2058,7 +2070,50 @@ export type FeishuTestResult =
   | "timeout"
   | "unknown";
 
+/** C-614: off-site copy health of the control host (counts only). */
+export interface OffsiteStatusView {
+  readonly configured: "absent" | "invalid" | "ready";
+  readonly bucket?: string;
+  readonly region?: string;
+  readonly synced: { readonly count: number; readonly bytes: number };
+  readonly pending: { readonly count: number; readonly bytes: number };
+  readonly failed: {
+    readonly count: number;
+    readonly last_code?: string;
+    readonly last_at?: string;
+  };
+  readonly last_success_at?: string;
+  readonly checked_at?: string;
+  readonly usage: {
+    readonly month: string;
+    readonly egress_bytes: number;
+    readonly process_bytes: number;
+    readonly requests: number;
+    readonly estimated_yuan: number;
+    readonly budget_yuan?: number;
+  };
+  /** C-628: event-loop delay of the syncing process and of the server. */
+  readonly loop_delay?: {
+    readonly sync?: OffsiteLoopDelay;
+    readonly server?: OffsiteLoopDelay;
+  };
+  readonly alerts: readonly (
+    | "config_invalid"
+    | "unreachable"
+    | "sync_failed"
+    | "over_budget"
+    | "loop_slow"
+  )[];
+}
+export interface OffsiteLoopDelay {
+  readonly p99_ms: number;
+  readonly max_ms: number;
+  readonly window_ms: number;
+}
+
 export interface CardiganClient {
+  /** C-614: null when this server has no off-site copy wired. */
+  offsiteStatus?(): Promise<OffsiteStatusView | null>;
   feishuBinding?(action?: "code" | "unbind"): Promise<FeishuBindingView>;
   /** C-561: Feishu bot settings (human sessions only; 403 otherwise). */
   feishuSettings?(): Promise<FeishuSettingsView>;
@@ -2473,6 +2528,8 @@ export interface CardiganClient {
     conclusion?: "exited" | "false_alarm" | "unconfirmed",
   ): Promise<void>;
   session(): Promise<SessionInfo>;
+  /** Upload limit from the latest session read; unknown before it. */
+  attachmentMaxBytes?(): number | undefined;
   login(password: string): Promise<void>;
   logout(): Promise<void>;
   projects(): Promise<readonly ProjectSummary[]>;
@@ -2537,6 +2594,7 @@ export class HttpCardiganClient implements CardiganClient {
     return subscribeProject(projectId, callbacks, this.streamFactory);
   }
   private readScope: string | undefined;
+  private attachmentLimit: number | undefined;
   private cardsGeneration = 0;
   private cardsReadSequence = 0;
   private readonly cardPages = new Map<
@@ -2567,6 +2625,9 @@ export class HttpCardiganClient implements CardiganClient {
     options: Readonly<Record<string, string>>,
   ) {
     return this.cardPages.get(this.cardsKey(project, filter, options))?.page;
+  }
+  offsiteStatus(): Promise<OffsiteStatusView | null> {
+    return this.request("/api/offsite");
   }
   feishuBinding(action?: "code" | "unbind") {
     return this.request<FeishuBindingView>(
@@ -2614,8 +2675,17 @@ export class HttpCardiganClient implements CardiganClient {
     if (!session.authenticated || session.read_scope !== this.readScope)
       this.clearCards();
     this.readScope = session.authenticated ? session.read_scope : undefined;
+    this.attachmentLimit =
+      typeof session.attachment_max_bytes === "number" &&
+      Number.isSafeInteger(session.attachment_max_bytes) &&
+      session.attachment_max_bytes > 0
+        ? session.attachment_max_bytes
+        : undefined;
     if (!this.readScope) clearSharedReads();
     return session;
+  }
+  attachmentMaxBytes() {
+    return this.attachmentLimit;
   }
 
   async login(password: string): Promise<void> {
@@ -3839,10 +3909,12 @@ async function toApiError(
  * (`cardigan preference set ...`); the Web points at the settings label instead.
  */
 function webErrorMessage(message: string): string {
-  return message.replace(
-    /^(暂缓到期时间距现在不能超过 \d+ 分钟)（merge-confirm-snooze-max）/u,
-    "$1（可在项目设置的“合并确认最长暂缓时长”中调整）",
-  );
+  return message
+    .replace(
+      /^(暂缓到期时间距现在不能超过 \d+ 分钟)（merge-confirm-snooze-max）/u,
+      "$1（可在项目设置的“合并确认最长暂缓时长”中调整）",
+    )
+    .replace(/^Attachment exceeds (\d+(?:\.\d)? MiB)$/u, "附件超过 $1");
 }
 
 /** Human-readable Chinese explanation of a failed request. */

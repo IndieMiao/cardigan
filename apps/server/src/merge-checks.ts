@@ -132,12 +132,10 @@ import {
 } from "./repository-check-wait.js";
 import { profileSpan, profileSpanSync, tickProfiler } from "./tick-profile.js";
 
-class RepositoryWaitExhausted extends Error {
-  constructor(readonly timeouts: number) {
-    super("Repository wait exhausted");
-  }
-}
 class StaleCheckTarget extends CheckExecutorSuspended {}
+/** C-609: fixed summary when central main moved under a queued or running check. */
+export const MERGE_CHECK_BASELINE_MOVED =
+  "中心 main 已前进，候选已改变，按新基线重新检查";
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
@@ -192,9 +190,11 @@ export interface MergeCheckOptions {
   readonly recover?: typeof recoverCheckDirectory;
   readonly recoveryInspectionIntervalMs?: number;
   readonly repositoryRetryDelaysMs?: readonly number[];
+  /** Total lock wait before host ops is reminded; the check stays queued. */
+  readonly repositoryWaitAlertMs?: number;
 }
 function repositoryWaitReason(timeouts: number, retryAt: string) {
-  return `仓库忙，候选尚未分发；第 ${timeouts} 次等待锁超时，${retryAt} 后重试`;
+  return `等待仓库空闲（仓库忙，候选尚未分发）；第 ${timeouts} 次等待锁超时，${retryAt} 后重试`;
 }
 
 interface Task {
@@ -312,6 +312,7 @@ export class MergeChecks {
     this.repositoryCalls = new RepositoryCheckCalls(
       options.store,
       options.clock,
+      options.repositoryWaitAlertMs,
     );
     this.lockBackoff = repositoryRetryDelays(options.repositoryRetryDelaysMs);
     if (options.requireConfirmedExit && (!options.run || options.checkExecutor))
@@ -749,7 +750,41 @@ export class MergeChecks {
     this.prepared.set(id, { key, value });
     return value;
   }
-  private async interrupt(task: Task, check: MergeCheckView) {
+  /**
+   * C-609: a queue-mode card check passes for its completion on any baseline
+   * (`passedCardCheck`). A restarted controller re-prepares the candidate on
+   * the moved main; the bound GitHub run it already started stays useful, so
+   * it is re-attached and read rather than interrupted and run again.
+   */
+  private resumableCardCheck(task: Task, latest: MergeCheckView): boolean {
+    if (
+      !task.settings.queue ||
+      task.batch ||
+      latest.level !== "card" ||
+      latest.status !== "running" ||
+      latest.recheck_requested ||
+      !latest.external_run ||
+      this.githubActive.has(latest.attempt_id)
+    )
+      return false;
+    const run = latest.external_run.run_id;
+    return new GithubDispatchJournal(this.options.store)
+      .unfinished()
+      .some(
+        (intent) =>
+          intent.project === task.project.project_id &&
+          intent.card === task.plan.card_id &&
+          intent.attempt === latest.attempt_id &&
+          intent.executor === task.settings.executor?.name &&
+          !intent.abandoned &&
+          intent.externalRun?.run_id === run,
+      );
+  }
+  private async interrupt(
+    task: Task,
+    check: MergeCheckView,
+    reason?: "baseline",
+  ) {
     // A queued attempt has no writer; preserve any existing crashed-attempt log.
     try {
       const log = await createMergeCheckLog({
@@ -773,7 +808,12 @@ export class MergeChecks {
         ...check,
         status: "interrupted",
         checks: [],
-        summary: "检查中断或候选已改变，重新排队",
+        // C-609: a moved baseline needs a new check whether or not the server
+        // restarted; keep it distinguishable from an actual interruption.
+        summary:
+          reason === "baseline"
+            ? MERGE_CHECK_BASELINE_MOVED
+            : "检查中断或候选已改变，重新排队",
         log_ref: `${check.attempt_id}.log`,
       },
       true,
@@ -881,10 +921,18 @@ export class MergeChecks {
         task.settings.executor?.type === "github" &&
         latest.executor?.type === "github" &&
         latest.executor.name === task.settings.executor.name &&
-        sameCandidate
+        (sameCandidate || this.resumableCardCheck(task, latest))
       )
         return latest;
-      await this.interrupt(task, latest);
+      await this.interrupt(
+        task,
+        latest,
+        latest.base_sha !== undefined &&
+          candidate.previous_sha !== undefined &&
+          latest.base_sha !== candidate.previous_sha
+          ? "baseline"
+          : undefined,
+      );
     }
     if (
       this.passed(task, {
@@ -1476,7 +1524,6 @@ export class MergeChecks {
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
     let connected = false;
-    let repositoryBusy = false;
     let callId: string | undefined;
     let receipt: RepositoryReceipt | undefined;
     const settle = (id: string, outcome: RepositoryReceipt["outcome"]) =>
@@ -1645,8 +1692,6 @@ export class MergeChecks {
           this.lockBackoff,
         );
         if (admission.kind === "wait") return;
-        if (admission.kind === "exhausted")
-          throw new RepositoryWaitExhausted(admission.timeouts);
         callId = admission.id;
       }
       this.waiting(
@@ -1755,38 +1800,21 @@ export class MergeChecks {
       // lock. Leave this attempt queued; contention is not an executor failure.
       if (error instanceof MergeLockBusy) throw error;
       if (error instanceof StaleCheckTarget) return;
-      if (
-        error instanceof CandidateRepositoryBusy ||
-        error instanceof RepositoryWaitExhausted
-      ) {
+      if (error instanceof CandidateRepositoryBusy) {
         // A non-GitHub executor returns its proof to the supervisor directly.
-        if (callId && error instanceof CandidateRepositoryBusy) {
+        if (callId) {
           receipt = settle(callId, "timeout");
           callId = undefined;
         }
-        const timeouts =
-          error instanceof RepositoryWaitExhausted
-            ? error.timeouts
-            : receipt?.outcome === "timeout"
-              ? receipt.ordinal
-              : undefined;
-        if (timeouts === undefined)
+        // Lock contention is not a check result: the attempt stays queued and
+        // retries with backoff; only an overdue wait reminds host ops.
+        if (receipt?.outcome !== "timeout" || !receipt.retry_at)
           throw new Error("Missing repository timeout receipt");
-        const retryAt = receipt?.retry_at;
-        const current = this.validLockObservation(task, check);
-        if (retryAt) {
-          const reason = repositoryWaitReason(timeouts, retryAt);
-          if (current) this.waiting(task, reason, check);
-          if (executedOn?.type !== "github") await log?.waiting(reason);
-          return;
-        }
-        repositoryBusy = true;
-        result = {
-          status: "failed",
-          checks: [],
-          cleanup_errors: [],
-          reason: `仓库忙：候选分发等待仓库锁已超时 ${timeouts} 次，检查未启动，已停止自动重试`,
-        };
+        const reason = repositoryWaitReason(receipt.ordinal, receipt.retry_at);
+        if (this.validLockObservation(task, check))
+          this.waiting(task, reason, check);
+        if (executedOn?.type !== "github") await log?.waiting(reason);
+        return;
       } else if (error instanceof CheckExecutorSuspended) {
         if (this.abort.signal.aborted) return;
         this.waiting(task, "卡片已暂停，等待恢复检查");
@@ -1931,12 +1959,7 @@ export class MergeChecks {
         log_ref: `${check.attempt_id}.log`,
       };
     }
-    if (
-      (executedOn?.type === "github" || task.batch) &&
-      !(repositoryBusy
-        ? this.validLockObservation(task, check)
-        : this.valid(task))
-    ) {
+    if ((executedOn?.type === "github" || task.batch) && !this.valid(task)) {
       this.githubActive.delete(check.attempt_id);
       this.seen.delete(check.attempt_id);
       return;
@@ -1975,9 +1998,6 @@ export class MergeChecks {
       log_ref: finished.log_ref,
       timeout_only: finished.timeout_only === true,
       infra_flaky: finished.infra_flaky === true,
-      ...(repositoryBusy
-        ? { startup_failure: "repository_busy" as const }
-        : {}),
       ...(executedOn?.type === "github" && finished.failure_excerpt
         ? { failure_excerpt: finished.failure_excerpt }
         : {}),

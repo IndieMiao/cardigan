@@ -10,6 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { MAX_ATTACHMENT_BYTES } from "./attachments.js";
 import {
+  publishedAttachmentLimit,
   uploadEvidenceFile,
   uploadEvidenceSession,
 } from "./upload-evidence.js";
@@ -45,6 +46,8 @@ async function mcpFixture(
     redirect?: { method: "POST" | "GET"; status: number };
     errorCode?: string;
     connectionError?: boolean;
+    /** Published `upload_attachment` file.maxLength; null omits the tool. */
+    fileMaxLength?: number | null;
   } = {},
 ) {
   const requests: { method: string; path: string; authenticated: boolean }[] =
@@ -86,6 +89,25 @@ async function mcpFixture(
         protocolVersion: message.params.protocolVersion,
         capabilities: { tools: {} },
         serverInfo: { name: "fixture", version: "1" },
+      };
+    } else if (message.method === "tools/list") {
+      const maxLength =
+        options.fileMaxLength === undefined
+          ? 4 * Math.ceil(MAX_ATTACHMENT_BYTES / 3)
+          : options.fileMaxLength;
+      result = {
+        tools:
+          maxLength === null
+            ? []
+            : [
+                {
+                  name: "upload_attachment",
+                  inputSchema: {
+                    type: "object",
+                    properties: { file: { type: "string", maxLength } },
+                  },
+                },
+              ],
       };
     } else {
       // An asynchronous tool gives the independent SSE handshake time to finish.
@@ -258,7 +280,10 @@ test.each([68, 400 * 1024, MAX_ATTACHMENT_BYTES])(
         size,
       },
     });
-    expect(await uploadEvidenceFile(client, input(file))).toBe("attachment-1");
+    // The stub lists no tools, so pass the host limit the server would publish.
+    expect(
+      await uploadEvidenceFile(client, input(file), MAX_ATTACHMENT_BYTES),
+    ).toBe("attachment-1");
     const request = call.mock.calls[0]?.[0];
     expect(request).toMatchObject({
       name: "upload_attachment",
@@ -289,6 +314,85 @@ test("rejects missing, symlink, directory and oversized files before making a re
       uploadEvidenceFile(client, input(join(directory, name))),
     ).rejects.toThrow("regular file up to 10 MiB");
   expect(call).not.toHaveBeenCalled();
+});
+
+const MIB = 1024 * 1024;
+const published = (maxLength: unknown) => ({
+  tools: [
+    {
+      name: "upload_attachment",
+      inputSchema: {
+        type: "object" as const,
+        properties: { file: { type: "string", maxLength } },
+      },
+    },
+  ],
+});
+
+test.each([
+  { maxLength: 4 * Math.ceil((30 * MIB) / 3), limit: 30 * MIB },
+  { maxLength: 4 * Math.ceil((10 * MIB) / 3), limit: 10 * MIB },
+  { maxLength: 8, limit: 6 },
+  { maxLength: 4 * 1024 * MIB, limit: 64 * MIB },
+  { maxLength: "big", limit: 10 * MIB },
+  { maxLength: -4, limit: 10 * MIB },
+  { maxLength: 0, limit: 10 * MIB },
+])(
+  "follows the server-published limit $maxLength → $limit",
+  async ({ maxLength, limit }) => {
+    const client = new Client({ name: "fixture", version: "1" });
+    vi.spyOn(client, "listTools").mockResolvedValueOnce(published(maxLength));
+    expect(await publishedAttachmentLimit(client)).toBe(limit);
+  },
+);
+
+test("older servers without a published limit fall back to 10 MiB", async () => {
+  const client = new Client({ name: "fixture", version: "1" });
+  const list = vi.spyOn(client, "listTools");
+  list.mockResolvedValueOnce({ tools: [] });
+  expect(await publishedAttachmentLimit(client)).toBe(10 * MIB);
+  list.mockRejectedValueOnce(new Error("offline"));
+  expect(await publishedAttachmentLimit(client)).toBe(10 * MIB);
+});
+
+test("a 30 MiB server accepts 20 MiB evidence and names its limit when exceeded", async () => {
+  const client = new Client({ name: "fixture", version: "1" });
+  vi.spyOn(client, "listTools").mockResolvedValue(
+    published(4 * Math.ceil((30 * MIB) / 3)),
+  );
+  const file = join(directory, "large.bin");
+  const bytes = Buffer.alloc(20 * MIB, 0x5a);
+  await writeFile(file, bytes);
+  const call = vi.spyOn(client, "callTool").mockResolvedValue({
+    content: [],
+    structuredContent: {
+      id: "attachment-1",
+      card_id: "C-1",
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      size: bytes.length,
+    },
+  });
+  expect(await uploadEvidenceFile(client, input(file))).toBe("attachment-1");
+  const oversized = await open(join(directory, "oversized"), "w");
+  await oversized.truncate(30 * MIB + 1);
+  await oversized.close();
+  await expect(
+    uploadEvidenceFile(client, input(join(directory, "oversized"))),
+  ).rejects.toThrow("regular file up to 30 MiB");
+  expect(call).toHaveBeenCalledTimes(1);
+});
+
+test("the CLI reads the limit the connected server publishes", async () => {
+  const { endpoint } = await mcpFixture({ fileMaxLength: 8 });
+  const file = join(directory, "evidence.txt");
+  await writeFile(file, "1234567");
+  await expect(
+    uploadEvidenceSession(endpoint, input(file), fixtureToken),
+  ).rejects.toThrow("regular file up to 6 bytes");
+  await writeFile(file, "123456");
+  expect(await uploadEvidenceSession(endpoint, input(file), fixtureToken)).toBe(
+    "attachment-1",
+  );
 });
 
 test("does not accept rejected, incomplete or mismatched upload receipts", async () => {

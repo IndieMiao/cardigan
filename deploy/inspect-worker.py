@@ -221,8 +221,18 @@ def darwin_retirement(c, terminal_owner=None):
             return 'kept'
         def idle(t):
             status = t.get('status')
+            if status is not None and type(status) is not dict:
+                return False
+            activity = (status or {}).get('state')
+            if activity in ('idle', 'done'):
+                return True
+            # C-626: hc may report no activity for the CLI. Only a controller
+            # call that has just read the bound empty editor opts in; working,
+            # blocked or error never count. The idle owner never sets it.
+            if c.get('unknown_activity') is True and activity in (None, 'unknown'):
+                return True
             if status is not None:
-                return type(status) is dict and status.get('state') in ('idle', 'done')
+                return False
             # hc only relays OSC 7501. Claude Code and Codex never send it, so a
             # null status says nothing about the turn. Require the client's own
             # empty input prompt on this exact terminal generation, twice and

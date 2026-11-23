@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type {
   Actor,
   Assignment,
@@ -9,10 +10,12 @@ import type {
 import {
   abortDispatch,
   EXTERNAL_ASSIGNMENT_START_ERROR,
+  pausedByHuman,
   pauseStandingAssignment,
   queueRun,
   releaseAssignment,
   standingModeOf,
+  stopExitConfirmed,
   stopWorkItemAssignment,
 } from "@cardigan/domain";
 import {
@@ -33,6 +36,8 @@ import {
   resolveMcpUrl,
   scrubRunCredentials,
   settleTestReviewLimits,
+  stoppedSessionExited,
+  stoppedSessionLive,
   stopRunRuntime,
   targetProbe,
   tryHostOpsLock,
@@ -416,6 +421,11 @@ async function startUnlocked(
         resourceLimits: capacity.resourcesForMachine,
         launch: options.launch,
         mcpUrl: options.mcpUrl,
+        // C-600: manual starts verify only when the operator opts in; the
+        // server's automatic launches verify unless explicitly turned off.
+        ...(io.env.CARDIGAN_MCP_SESSION_CHECK === "1"
+          ? { verifyMcpSession: true }
+          : {}),
         dataDir: options.dataDir,
         configDir: cliLaunchPaths(io).configDir,
         execution,
@@ -582,7 +592,16 @@ export async function stopAssignment(input: {
   readonly runtime: Runtime;
   readonly execution?: ExecutionConfig;
   readonly actor?: Actor;
-}): Promise<{ released: boolean; aborted: boolean; paused?: boolean }> {
+  /** C-620: explicit pause; without it new work wakes a fresh session after release. */
+  readonly hold?: boolean;
+}): Promise<{
+  released: boolean;
+  aborted: boolean;
+  paused?: boolean;
+  held?: boolean;
+  /** C-620: the session this call was asked to stop was settled or replaced. */
+  stale?: boolean;
+}> {
   const actor = input.actor ?? {
     kind: "human" as const,
     project_id: input.project_id,
@@ -617,65 +636,136 @@ export async function stopAssignment(input: {
     }
     return { released: ref !== null, aborted: paused.aborted, paused: true };
   }
+  if (ref === null && hasQueuedRun(input.store, input.project_id, assignment)) {
+    // C-624: a queued Run without a terminal (for example a start that waited
+    // for capacity) can still be withdrawn: record the stop and cancel it.
+    // C-620: always a pause here. A managed stop keeps queued work and lifts
+    // itself only on a terminal release, which never comes without a terminal.
+    const stopped = runCommand(input.store, {
+      operation: "停止 Assignment",
+      target: assignment.id,
+      project_id: input.project_id,
+      actor,
+      reduce: (s, a, p) =>
+        stopWorkItemAssignment(
+          s,
+          a,
+          {
+            assignment_id: assignment.id,
+            reason: "stopped by host",
+            hold: true,
+          },
+          p,
+        ),
+    });
+    return { released: false, aborted: stopped.cancelled > 0, held: true };
+  }
   if (ref === null) {
     throw new CliError(
-      `Assignment ${assignment.id} 没有在运行的终端；若需取消未派发的排队 Run 并改派，请执行 cardigan assignment release ${assignment.id} --cancel-queued-run <R-n>。`,
+      `Assignment ${assignment.id} 没有在运行的终端，也没有排队的 Run，没有可停止的内容。`,
       EXIT.usage,
     );
   }
-  // C-211: persist the stop before touching the terminal: from here on the
-  // Dispatcher starts no session for this Assignment until the human runs
-  // `cardigan assignment start` again, and its queued Runs are cancelled.
-  // The running Run keeps its run slot until the terminal is released, so a
-  // failed release can be retried and never under-counts capacity.
-  const stopped = runCommand(input.store, {
-    operation: "停止 Assignment",
-    target: assignment.id,
-    project_id: input.project_id,
-    actor,
-    reduce: (s, a, p) =>
-      stopWorkItemAssignment(
-        s,
-        a,
-        { assignment_id: assignment.id, reason: "stopped by host" },
-        p,
-      ),
-  });
-  const released = await input.runtime.release(ref, { force: true });
-  if (!released.ok && released.error.code !== "runtime_not_found") {
+  // C-620: the whole work-item stop, from checking the session through
+  // settlement, runs under the per-Assignment launch lock. Every new session
+  // goes through `launchRun`, which takes the same lock. The call is bound to
+  // the session it was asked to stop: if a successor started while it waited,
+  // it changes nothing.
+  const unlock = await launchLock(input.store, input.project_id, assignment.id);
+  if (!unlock)
     throw new CliError(
-      formatCommandError("释放终端", assignment.id, released.error),
+      `${assignment.id} 正在启动或交接会话，没有改动；稍后重试 cardigan assignment stop ${assignment.id}。`,
       EXIT.failure,
     );
+  try {
+    return await stopWorkItemSession(input, actor, ref);
+  } finally {
+    await unlock();
   }
-  const settled = runCommand(input.store, {
-    operation: "停止 Assignment",
-    target: assignment.id,
-    project_id: input.project_id,
-    actor,
-    reduce: (s, a, p) =>
-      stopWorkItemAssignment(
-        s,
-        a,
-        {
-          assignment_id: assignment.id,
-          reason: "stopped by host",
-          released_runtime_ref: ref,
-        },
-        p,
-      ),
-  });
-  // §9.1: the session is over, so its tokens die with it. A token that outlives
-  // a stopped terminal could still read and write the project.
-  const revoked = input.store.uow.run((tx) =>
-    tx
-      .tokensForAssignment(input.project_id, assignment.id)
-      .filter((token) => token.revoked_at === null)
-      .map((token) => tx.revokeToken(token.id)),
+}
+
+async function stopWorkItemSession(
+  input: Parameters<typeof stopAssignment>[0],
+  actor: Actor,
+  expected: RuntimeRef,
+) {
+  const { assignment } = requireAssignment(
+    input.store,
+    input.project_id,
+    input.assignment_id,
   );
-  if (revoked.some((ok) => !ok)) {
-    throw new CliError("作废 Token 失败", EXIT.failure);
+  const ref = assignment.runtime_ref;
+  const events = () =>
+    input.store.uow.read((tx) =>
+      loadEvents(tx, input.project_id, assignment.work_item_id),
+    );
+  // A late request for a session that was settled or replaced meanwhile.
+  if (JSON.stringify(ref) !== JSON.stringify(expected) || ref === null)
+    return { released: false, aborted: false, stale: true as const };
+  const execution =
+    input.runtime instanceof RuntimeTargets
+      ? input.runtime.executionForRef(ref, input.project_id)
+      : input.execution;
+  const owner = { project_id: input.project_id, assignment_id: assignment.id };
+  // C-620: a managed stop never downgrades an existing pause (domain rule).
+  const held = input.hold === true || pausedByHuman(events(), assignment.id);
+  const command = (extra: {
+    released_runtime_ref?: RuntimeRef;
+    exit_confirmed_ref?: RuntimeRef;
+    hold?: boolean;
+  }) =>
+    runCommand(input.store, {
+      operation: "停止 Assignment",
+      target: assignment.id,
+      project_id: input.project_id,
+      actor,
+      reduce: (s, a, p) =>
+        stopWorkItemAssignment(
+          s,
+          a,
+          { assignment_id: assignment.id, reason: "stopped by host", ...extra },
+          p,
+        ),
+    });
+  // C-211: persist the stop before touching the terminal: from here on the
+  // Dispatcher starts no session for this Assignment until the stop settles
+  // (a pause: until the human runs `cardigan assignment start`). The running
+  // Run keeps its run slot until the terminal is released, so a failed
+  // release can be retried and never under-counts capacity.
+  const stopped = command({ hold: input.hold === true });
+  // A retry reuses an exit this stop already proved; the terminal row may be
+  // gone by now and is never looked for again.
+  if (!stopExitConfirmed(events(), assignment.id, ref)) {
+    const live = !held && (await stoppedSessionLive(input.runtime, ref, owner));
+    const released = await input.runtime.release(ref, { force: true });
+    if (!released.ok && released.error.code !== "runtime_not_found") {
+      throw new CliError(
+        formatCommandError("释放终端", assignment.id, released.error),
+        EXIT.failure,
+      );
+    }
+    // §9.1: the session is ending, so its tokens die with it, even before
+    // its exit is proven. A successor is issued new ones.
+    revokeTokens(input.store, input.project_id, assignment.id);
+    // A managed stop lifts its fence and lets new work start a session, so it
+    // needs this session's exit proven. Its own release proves it only when
+    // it ended a live session; a finished or missing terminal row does not.
+    // A pause keeps the C-211 rule.
+    if (!held) {
+      if (
+        !(live && released.ok) &&
+        !(await stoppedSessionExited(input.runtime, ref, owner))
+      )
+        throw new CliError(
+          `未能确认 ${assignment.id} 的原会话已退出：停止状态和终端引用均已保留，不会另起会话。可稍后重试 cardigan assignment stop ${assignment.id}；若确认无需自动续办，可执行 cardigan assignment stop ${assignment.id} --hold 改为人工暂停。`,
+          EXIT.failure,
+        );
+      command({ exit_confirmed_ref: ref });
+    }
   }
+  // Clean up before settling: a failure keeps the stop, the reference and
+  // any recorded exit, so the same command can be retried.
+  revokeTokens(input.store, input.project_id, assignment.id);
   if (execution)
     await scrubRunCredentials(
       execution,
@@ -683,10 +773,65 @@ export async function stopAssignment(input: {
       input.assignment_id,
       ref,
     );
+  const settled = command({ released_runtime_ref: ref });
   return {
     released: true,
     aborted: stopped.cancelled + settled.cancelled > 0,
+    held,
   };
+}
+
+function revokeTokens(
+  store: Store,
+  project: ProjectId,
+  assignment: Assignment["id"],
+) {
+  const revoked = store.uow.run((tx) =>
+    tx
+      .tokensForAssignment(project, assignment)
+      .filter((token) => token.revoked_at === null)
+      .map((token) => tx.revokeToken(token.id)),
+  );
+  if (revoked.some((ok) => !ok))
+    throw new CliError("作废 Token 失败", EXIT.failure);
+}
+
+/** Short wait for a launch or wake that is already in its critical section. */
+async function launchLock(
+  store: Store,
+  project: ProjectId,
+  assignment: Assignment["id"],
+) {
+  for (let attempt = 0; ; attempt++) {
+    const unlock = await tryHostOpsLock(store, project, assignment, "launch");
+    if (unlock || attempt >= 20) return unlock;
+    await sleep(250);
+  }
+}
+
+/** Stop events are recorded on the work item's card stream. */
+function loadEvents(
+  tx: Parameters<Parameters<Store["uow"]["read"]>[0]>[0],
+  project: ProjectId,
+  workItem: Assignment["work_item_id"],
+) {
+  return tx.events.listAfter(
+    project,
+    workItem && tx.work_items.get(project, workItem)?.card_id,
+    0,
+  );
+}
+
+function hasQueuedRun(
+  store: Store,
+  project: ProjectId,
+  assignment: Assignment,
+): boolean {
+  return store.uow.read((tx) =>
+    tx.runs
+      .list(project)
+      .some((r) => r.assignment_id === assignment.id && r.status === "queued"),
+  );
 }
 
 function attachRef(
@@ -821,10 +966,12 @@ export { writeRole };
 const USAGE = [
   "用法：",
   "  cardigan assignment start <A-n> [--project <p>] [--mcp-url <url>] [--hc-session <s>] [--data-dir <目录>]",
-  "  cardigan assignment stop <A-n> [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
+  "  cardigan assignment stop <A-n> [--hold] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment release <A-n> [--cancel-queued-run <R-n>] [--project <p>] [--data-dir <目录>]",
   "  cardigan assignment attach <A-n> [--print] [--interactive] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
-  "  stop：释放终端并取消未结束和排队的 Run；之后不会自动起新会话，门铃排队，用 assignment start 恢复。主机运维操作待处理时拒绝 stop；终端释放失败可直接重试。",
+  "  stop：释放终端并结束正在进行的 Run（worktree 和未开始的排队 Run 保留）；确认释放后，有新通知、新指派或工作项状态变化时自动起新会话。",
+  "  stop --hold：人工暂停，同时取消排队的 Run；之后不会自动起新会话，门铃排队，用 assignment start 恢复。已暂停的指派再执行 stop 仍保持暂停。",
+  "  主机运维操作待处理时拒绝 stop；终端释放失败可直接重试，释放确认前不会另起会话。",
   "  attach：输入和输出均为终端（TTY）时直接只读观察；--interactive 允许输入，--print 或非 TTY 只打印命令（默认带 --observe）。",
   "  按 Ctrl+\\ 分离退出；--interactive 下你的输入会直接发给正在工作的 Agent。",
 ].join("\n");
@@ -847,7 +994,10 @@ function parseArgs(args: readonly string[]) {
   const positionals: string[] = [];
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] as string;
-    if (sub === "attach" && ["--print", "--interactive"].includes(token)) {
+    if (
+      (sub === "attach" && ["--print", "--interactive"].includes(token)) ||
+      (sub === "stop" && token === "--hold")
+    ) {
       flags[token.slice(2)] = "true";
       continue;
     }
@@ -986,11 +1136,18 @@ export async function runAssignmentCommand(
         assignment_id: assignmentId,
         runtime,
         execution,
+        hold: flags.hold === "true",
       });
       io.stdout(
-        result.paused
-          ? `已暂停常驻 PM ${assignmentId}，门铃将排队；用 cardigan pm start 或 assignment start 恢复。`
-          : `已停止 ${assignmentId}：终端已释放${result.aborted ? "，未结束和排队的 Run 已取消" : ""}（worktree 保留）。之后的门铃会排队，不会自动起新会话；用 cardigan assignment start ${assignmentId} 恢复。`,
+        result.stale
+          ? `${assignmentId} 的原会话已停止或已被新会话取代，没有改动。`
+          : result.paused
+            ? `已暂停常驻 PM ${assignmentId}，门铃将排队；用 cardigan pm start 或 assignment start 恢复。`
+            : !result.released
+              ? `已暂停 ${assignmentId}：没有终端，排队的 Run 已取消（worktree 保留）。之后的门铃会排队，不会自动起新会话；用 cardigan assignment start ${assignmentId} 恢复，或用 cardigan assignment release ${assignmentId} 释放。`
+              : result.held
+                ? `已暂停 ${assignmentId}：终端已释放${result.aborted ? "，未结束和排队的 Run 已取消" : ""}（worktree 保留）。之后的门铃会排队，不会自动起新会话；用 cardigan assignment start ${assignmentId} 恢复。`
+                : `已停止 ${assignmentId}：终端已释放${result.aborted ? "，正在进行的 Run 已结束" : ""}（worktree 和待办保留）。有新工作时会自动起新会话；如需人工暂停，用 cardigan assignment stop ${assignmentId} --hold。`,
       );
       return EXIT.ok;
     }

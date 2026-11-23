@@ -63,6 +63,7 @@ export const toolNames = [
   "request_recheck",
   "request_check",
   "run_probe",
+  "request_macos_check",
   "request_mobile_signature",
   "publish_artifact",
   "submit_review",
@@ -96,6 +97,7 @@ export const toolNames = [
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 export type RoleWorktree = "none" | "write" | "readonly";
+export type McpHandshake = "pending" | "listed" | "missing";
 export interface RoleReference {
   readonly launch_profile_ref?: string;
   /** Legacy references may not declare a worktree policy. */
@@ -550,6 +552,19 @@ interface AssignmentFields {
   readonly released_at?: Timestamp;
   /** Last authenticated MCP call (M3.2); the watchdog of §3.3 reads it. */
   readonly last_mcp_activity_at?: Timestamp;
+  /**
+   * C-600: whether the current session's harness listed the Card MCP tools.
+   * `pending` is set when a verified launch dispatches a new session. Only a
+   * request carrying that launch's session key (sent by the harness from its
+   * own MCP configuration) counts as native: its `tools/list` turns the state
+   * into `listed`. Any other tool call while pending, or no listing within
+   * the host's handshake deadline, turns it into `missing`.
+   */
+  readonly mcp_handshake?: McpHandshake;
+  /** C-600: SHA-256 (hex) of the current verified session's key. */
+  readonly mcp_session_key_sha256?: string;
+  /** C-600: Token issued to that session; requests on older Tokens are ignored. */
+  readonly mcp_session_token_id?: string;
   /** Immutable scheduling flag; true only for standing Office assignments. */
   readonly external?: boolean;
 }
@@ -595,7 +610,7 @@ export interface Run {
     readonly idle_check_at?: Timestamp;
     readonly escalated_at?: Timestamp;
   };
-  readonly failure_reason?: "provider_unavailable";
+  readonly failure_reason?: "provider_unavailable" | "mcp_unavailable";
   readonly provider_probe?: {
     readonly episode: EventId;
     readonly at: Timestamp;
@@ -685,7 +700,8 @@ export interface Run {
       | "provider_unavailable"
       | "delivery_retry_exhausted"
       | "server_restart"
-      | "runtime_exited";
+      | "runtime_exited"
+      | "mcp_unavailable";
   };
   /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
   readonly inactivity_stop?: {
@@ -961,7 +977,23 @@ export interface DecisionResolution {
   readonly taken_over_from?: "role:pm" | "system";
   /** C-192: the human submitted the raiser's suggestion with one click. */
   readonly via_suggestion?: true;
+  /** C-617 / Q-1198: the owner's answer cited as evidence for PM's decision. */
+  readonly owner_record?: OwnerEvidence;
   readonly at: Timestamp;
+}
+/**
+ * C-617 / Q-1198: the owner's own timeline comment cited as evidence, with
+ * source and time. The resolution (answer, rationale, resolved_by) stays the
+ * deciding PM's; this record grants no authority.
+ */
+export interface OwnerEvidence {
+  readonly author: "human";
+  readonly card_id: CardId;
+  readonly timeline_entry_id: TimelineEntryId;
+  /** The comment body, copied verbatim by the control plane. */
+  readonly quote: string;
+  readonly at: Timestamp;
+  readonly attachment_id?: AttachmentId;
 }
 /**
  * C-192: the raiser's (or escalating PM's) suggested answer, shown to the

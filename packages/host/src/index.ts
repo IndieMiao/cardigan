@@ -175,11 +175,24 @@ export { recordLaunchNotice } from "./launch-notice.js";
 export { selectableLaunchConfig } from "./launch-profile-choices.js";
 export { recoverLaunchPublications } from "./launch-publish.js";
 export * from "./live-ext-message.js";
+export {
+  fenceLongOperations,
+  holdLongOperation,
+  LONG_OPERATION_FENCE_MAX_MS,
+  type LongOperation,
+  type LongOperationKind,
+  liveLongOperations,
+  releaseLongOperationFence,
+  withLongOperation,
+} from "./long-operations.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";
 export * from "./machine-check-journal.js";
 export { configureMachinePlacement } from "./machine-placement.js";
+export * from "./macos-check-config.js";
+export * from "./macos-check-result.js";
+export * from "./macos-check-service.js";
 export {
   DEFAULT_MCP_HOST,
   DEFAULT_MCP_PORT,
@@ -307,7 +320,19 @@ export {
   StandingPmRecovery,
   standingPmStallPolicy,
 } from "./standing-pm-recovery.js";
-export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
+export {
+  exitCommand,
+  STANDING_EXIT_STEP,
+  type StandingExitPolicy,
+  standingExitPolicy,
+  standingExitSteps,
+} from "./standing-session-exit.js";
+export {
+  revokeStoppedRunTokens,
+  stoppedSessionExited,
+  stoppedSessionLive,
+  stopRunRuntime,
+} from "./stop-run.js";
 export {
   proveSystemReviewLimit,
   systemReviewLimitFailure,

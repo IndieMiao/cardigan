@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   type Assignment,
@@ -12,6 +13,7 @@ import {
   enqueueOwnerMessage,
   executorExecution,
   HostOpsService,
+  holdLongOperation,
   LiveExtMessageSender,
   loadMachineCapabilityCatalog,
   loadMergeGateConfig,
@@ -27,11 +29,13 @@ import {
   sessionFingerprint,
   targetProbe,
 } from "@cardigan/host";
-import type { McpBackend } from "@cardigan/mcp-server";
 import {
   defaultToolCatalog,
   type Logger,
+  type McpBackend,
+  Offsite,
   type RunningServer,
+  registerOffsite,
   startMcpServer,
   stdoutLogger,
 } from "@cardigan/mcp-server";
@@ -68,13 +72,19 @@ import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
+import { serverMacosChecks } from "./macos-checks.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import {
   drainMobileSigning,
   openMobileArtifact,
   requestMobileSignature,
 } from "./mobile-signing.js";
+import { OFFSITE_SYNC_INTERVAL_MS, OffsiteSync } from "./offsite-sync.js";
 import { serverProbes } from "./probes.js";
+import {
+  resumeInterruptedPublications,
+  trackedPublisher,
+} from "./publication-recovery.js";
 import { apkPublisher } from "./publish-artifact.js";
 import {
   clearTickProfileSync,
@@ -105,6 +115,11 @@ const MOBILE_SIGNING_TERM_MS = 2_000;
 export interface StartServerOptions {
   /** Explicit production role. Omitted only for embedded single-process callers. */
   readonly role?: "web" | "background";
+  /**
+   * C-614: directory of the private OSS storage credential; defaults to
+   * `<config dir>/storage`. `false` disables the off-site copy entirely.
+   */
+  readonly offsiteStorageDir?: string | false;
   /** Activate the launch publisher only while this process owns the dispatch lock. */
   readonly backgroundReady?: Promise<void>;
   readonly onBackgroundOwner?: () => () => void;
@@ -215,6 +230,11 @@ export async function startCardiganServer(
     throw error;
   }
 }
+
+export {
+  resumeInterruptedPublications,
+  trackedPublisher,
+} from "./publication-recovery.js";
 
 async function assembleServer(
   options: StartServerOptions,
@@ -380,6 +400,8 @@ async function assembleServer(
       ...(options.captureAgent === undefined
         ? {}
         : { captureAgent: options.captureAgent }),
+      onSourceError: (entry) =>
+        process.stdout.write(`${JSON.stringify(entry)}\n`),
     });
 
   const probes = serverProbes({
@@ -389,6 +411,13 @@ async function assembleServer(
     git,
     configuration: mergeGate,
     releaseSha: sha,
+  });
+  const macosChecks = serverMacosChecks({
+    store,
+    dataDir: config.dataDir,
+    env: runtimeEnv,
+    git,
+    configuration: mergeGate,
   });
 
   // Assigned once, read from `close()`; the compiler cannot see through the
@@ -499,6 +528,13 @@ async function assembleServer(
     options.role !== "background" &&
     execution.mode === "agent-ssh" &&
     runtimeEnv.CARDIGAN_MOBILE_SIGNING === "1";
+  // C-609: one publisher per server, so its shutdown marks cut-off uploads.
+  const publisher =
+    options.role !== "background" &&
+    execution.mode === "agent-ssh" &&
+    runtimeEnv.CARDIGAN_ARTIFACT_PUBLICATION === "1"
+      ? trackedPublisher(store, apkPublisher(config.dataDir))
+      : undefined;
   let mcp: RunningServer;
   try {
     mcp =
@@ -516,16 +552,26 @@ async function assembleServer(
               // depending on domain only (§20.2).
               store: store as McpBackend,
               probeHost: probes,
-              ...(execution.mode === "agent-ssh" &&
-              runtimeEnv.CARDIGAN_ARTIFACT_PUBLICATION === "1"
-                ? { publishArtifact: apkPublisher(config.dataDir) }
-                : {}),
+              macosCheckHost: macosChecks,
+              ...(publisher ? { publishArtifact: publisher } : {}),
               ...(mobileSigning
                 ? {
                     openMobileArtifact: (scope, id, current) =>
                       openMobileArtifact(config.dataDir, scope, id, current),
                     signMobile: (scope, current) =>
-                      requestMobileSignature(config.dataDir, scope, current),
+                      requestMobileSignature(
+                        config.dataDir,
+                        scope,
+                        current,
+                        {},
+                        (signing) =>
+                          holdLongOperation(store, {
+                            kind: "mobile_signing",
+                            project_id: signing.project,
+                            card_id: signing.card,
+                            label: `受管送签（${signing.platform}）`,
+                          }),
+                      ),
                   }
                 : {}),
               enqueueOwnerMessage: (actor, input, revalidate) =>
@@ -716,10 +762,32 @@ async function assembleServer(
   // Start background work only after every listener is bound. A Web port
   // timeout must not have to drain a merge, dispatch or reconciliation that
   // started during the retry window.
+  // C-614: the off-site copy is optional. Without its credential file every
+  // read, upload and thumbnail stays local, exactly as before.
+  const offsiteStorage =
+    options.offsiteStorageDir ??
+    join(
+      runtimeEnv.CARDIGAN_CONFIG_DIR ??
+        process.env.CARDIGAN_CONFIG_DIR ??
+        join(homedir(), ".config", "cardigan"),
+      "storage",
+    );
+  const offsite =
+    offsiteStorage === false
+      ? undefined
+      : new Offsite({
+          dataDir: config.dataDir,
+          storageDir: offsiteStorage,
+          role: options.role ?? "server",
+        });
+  const unregisterOffsite = offsite ? registerOffsite(offsite) : undefined;
+  let offsiteSync: OffsiteSync | undefined;
+  let offsiteLoop: TimerLoop | undefined;
   const startup = Promise.withResolvers<boolean>();
   let plane: ControlPlane | undefined;
   let extLoop: TimerLoop | undefined;
   let probeLoop: TimerLoop | undefined;
+  let macosLoop: TimerLoop | undefined;
   let extSender: LiveExtMessageSender | undefined;
   if (options.dispatcher !== undefined && options.role !== "web") {
     try {
@@ -731,6 +799,15 @@ async function assembleServer(
         slowTickMs: 60000,
         tick: () => probes.tick(),
         onError: () => warnLine("集成探针执行或清理未完成，将重试"),
+      });
+      macosLoop = startTimerLoop({
+        name: "macos-checks",
+        startup: startup.promise,
+        initialDelayMs: 2000,
+        intervalMs: 15000,
+        slowTickMs: 120000,
+        tick: () => macosChecks.tick(),
+        onError: () => warnLine("macOS 检查执行或清理未完成，将重试"),
       });
       const mergeIntervalMs =
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
@@ -783,6 +860,9 @@ async function assembleServer(
           : {}),
         ...(config.providerCooldownMs !== undefined
           ? { providerCooldownMs: config.providerCooldownMs }
+          : {}),
+        ...(config.mcpHandshakeTimeoutMs !== undefined
+          ? { mcpHandshakeTimeoutMs: config.mcpHandshakeTimeoutMs }
           : {}),
         ...options.dispatcher,
         startup: startup.promise,
@@ -872,6 +952,29 @@ async function assembleServer(
         // The blob GC sweeps `<dataDir>/attachments`; §9.3.
         dataDir: config.dataDir,
       });
+      if (offsite) {
+        // C-628: only this (background) role syncs; the flock inside each
+        // tick keeps any other process on standby, so one host never scans
+        // and hashes twice at the same time.
+        const sync = new OffsiteSync({
+          offsite,
+          store,
+          role: options.role ?? "server",
+          log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+        });
+        offsiteSync = sync;
+        offsiteLoop = startTimerLoop({
+          name: "offsite-sync",
+          startup: startup.promise,
+          initialDelayMs: 5000,
+          intervalMs: OFFSITE_SYNC_INTERVAL_MS,
+          // A large artifact may take minutes; that is expected, not a stall.
+          slowTickMs: 15 * 60_000,
+          continueSoon: () => sync.continueSoon,
+          tick: () => sync.tick(),
+          onError: () => warnLine("附件异地同步本轮未完成，将重试"),
+        });
+      }
       extSender = new LiveExtMessageSender(
         defaultExtMessagePath({ ...runtimeEnv }),
         {
@@ -896,12 +999,16 @@ async function assembleServer(
       });
     } catch (error) {
       startup.resolve(false);
+      offsiteSync?.stop();
       await Promise.allSettled([
         extSender?.stop(),
         extLoop?.stop(),
         probeLoop?.stop(),
+        macosLoop?.stop(),
+        offsiteLoop?.stop(),
         plane?.stop(),
       ]);
+      unregisterOffsite?.();
       await web?.close();
       await diagnostics?.close();
       await hostOps?.close();
@@ -958,12 +1065,16 @@ async function assembleServer(
     startup.resolve(false);
     await checkControl?.close();
     await web?.close();
+    offsiteSync?.stop();
     await Promise.allSettled([
       extSender?.stop(),
       extLoop?.stop(),
       probeLoop?.stop(),
+      macosLoop?.stop(),
+      offsiteLoop?.stop(),
       plane?.stop(),
     ]);
+    unregisterOffsite?.();
     await diagnostics?.close();
     await hostOps?.close();
     await mcp.close();
@@ -991,6 +1102,8 @@ async function assembleServer(
   if (options.backgroundReady)
     void options.backgroundReady.then(() => startup.resolve(true));
   else startup.resolve(true);
+  // C-609: publications a restart cut off continue without their caller.
+  if (publisher) void resumeInterruptedPublications(store, publisher);
   return {
     url: mcp.url,
     host: mcp.host,
@@ -998,6 +1111,8 @@ async function assembleServer(
     store,
     ...(web === undefined ? {} : { web }),
     close: async () => {
+      // C-609: uploads failing from here on were cut off, not refused.
+      publisher?.drain();
       // The Workbench closes first, alongside the control plane: it stops
       // accepting connections and ends every SSE stream at once, so an open
       // browser tab cannot hold the restart while the phase loops drain their
@@ -1011,6 +1126,8 @@ async function assembleServer(
         extSender?.stop(),
         extLoop?.stop(),
         probeLoop?.stop(),
+        macosLoop?.stop(),
+        (offsiteSync?.stop(), offsiteLoop?.stop()),
         // C-601: in-flight signing helpers end inside the shutdown grace (a
         // margin before the forced exit), never as orphans of this process.
         mobileSigning
@@ -1025,6 +1142,7 @@ async function assembleServer(
       await diagnostics?.close();
       await hostOps?.close();
       await mcp.close();
+      unregisterOffsite?.();
       stopProfiler();
       if (ownsStore) {
         store.close();

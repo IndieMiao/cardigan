@@ -130,6 +130,7 @@ export * from "./commands/merge-shadow.js";
 export * from "./commands/merge-snooze.js";
 export * from "./commands/merge-window.js";
 export * from "./commands/notices.js";
+export type { OwnerRecordInput } from "./commands/owner-record.js";
 export {
   buildPlainSummary,
   PLAIN_SUMMARY_LIMITS,
@@ -170,6 +171,10 @@ export { pauseStandingAssignment } from "./commands/standing.js";
 export { rotateStandingAfterDeployment } from "./commands/standing-deployment.js";
 export * from "./commands/standing-pm-stall.js";
 export {
+  humanStopRecorded,
+  openStopEpisodeStart,
+  pausedByHuman,
+  stopExitConfirmed,
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./commands/stop.js";
@@ -232,6 +237,8 @@ export {
 } from "./interaction.js";
 export * from "./machine-placement.js";
 export * from "./machine-requirements.js";
+export * from "./macos-checks.js";
+export * from "./mcp-session.js";
 export * from "./member.js";
 export * from "./merge-batch.js";
 export * from "./merge-override.js";
