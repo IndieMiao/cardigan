@@ -102,6 +102,12 @@ export function defaultRolePackHash(): string {
   return loadedPackHash;
 }
 
+/**
+ * The only project whose default roles are published by deployment
+ * (`self-deploy roles`). A project with a publication receipt is managed too.
+ */
+export const ROLE_PACK_DEPLOYMENT_PROJECT = "cardigan";
+
 /** Read both the publication fence and role in the caller's fresh transaction. */
 export function idleRolePolicy(
   tx: ReadRepositories,
@@ -116,6 +122,8 @@ export function idleRolePolicies(tx: ReadRepositories, project: ProjectId) {
     listRoleVersions(tx, project).map((role) => [role.role_id, role]),
   );
   const publication = rolePackPublication(tx, project);
+  const managed =
+    publication !== undefined || project === ROLE_PACK_DEPLOYMENT_PROJECT;
   return new Map(
     [...latest].flatMap(([id, role]) => {
       if (!isDefaultRoleId(id)) return [];
@@ -126,10 +134,12 @@ export function idleRolePolicies(tx: ReadRepositories, project: ProjectId) {
         }),
       );
       const matches = deploymentRolePolicyHash(role) === hash;
-      // Old installations may have no publication receipt. Matching defaults are
-      // safe; an unexplained mismatch is never evidence of a manual edit.
       const receipt = publication?.payload as RolePackReceipt | undefined;
       const snapshot = receipt?.roles?.[id];
+      // Old deployment-managed installations may have no publication receipt.
+      // Matching defaults are safe; an unexplained mismatch is never evidence
+      // of a manual edit there. Other projects never receive a publication:
+      // their own latest version is authoritative and cannot conflict with it.
       const published = receipt
         ? receipt.pack_hash === defaultRolePackHash() &&
           !!snapshot &&
@@ -137,8 +147,11 @@ export function idleRolePolicies(tx: ReadRepositories, project: ProjectId) {
           (role.version !== snapshot.version ||
             deploymentRolePolicyHash(role) === snapshot.policy_hash) &&
           (matches || snapshot.disposition !== "unverified")
-        : matches;
-      return [[id as string, { role, hash, matches, published }] as const];
+        : matches || !managed;
+      const conflict = managed && !matches;
+      return [
+        [id as string, { role, hash, matches, published, conflict }] as const,
+      ];
     }),
   );
 }
