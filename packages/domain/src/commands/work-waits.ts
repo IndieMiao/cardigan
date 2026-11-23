@@ -141,12 +141,16 @@ export function autoResumeUsed(
   item: WorkItem,
   c?: RunWait["condition"],
 ) {
-  const automatic = trusted(d).filter(
+  // An inline delivery that settled a wait consumes that condition as well.
+  const automatic = d.state.events.filter(
     (e) =>
       e.card_id === item.card_id &&
-      e.type === "work_item_resume_requested" &&
-      payload(e).automatic_wait === true &&
-      payload(e).work_item_id === item.id,
+      e.actor.project_id === d.state.project_id &&
+      payload(e).work_item_id === item.id &&
+      ((e.type === "work_item_resume_requested" &&
+        e.actor.kind === "system" &&
+        payload(e).automatic_wait === true) ||
+        e.type === BLOCKER_WAIT_DELIVERED),
   );
   if (c && automatic.some((e) => sameCondition(payload(e).condition, c)))
     return true;
@@ -243,8 +247,108 @@ function waitOwnerGuard(d: CommandDraft, item: WorkItem, owner: Assignment) {
   if (!hasRunTarget(owner, d.state)) return "没有可执行的审核目标";
 }
 
+const BLOCKER_WAIT_DELIVERED = "blocker_wait_delivered";
+
+/** Conditions whose system record alone proves the wait is over, independent of the delivered subject. */
+const DELIVERY_SETTLED_KINDS: ReadonlySet<ResumeCondition["kind"]> = new Set([
+  "merge_check_finished",
+  "github_run_completed",
+  "card_merged",
+  "deployment_ready",
+  "decision_resolved",
+]);
+
+/** Trace a resumption back to the blocker report it clears. */
+function blockerReference(
+  d: CommandDraft,
+  item: WorkItem,
+  blocker: NonNullable<WorkItem["reported_blocker"]>,
+) {
+  const reported = d.state.events.findLast(
+    (e) =>
+      e.type === "blocker_reported" &&
+      e.card_id === item.card_id &&
+      e.actor.project_id === d.state.project_id &&
+      e.actor.kind === "assignment" &&
+      `assignment:${e.actor.assignment_id}` === blocker.reported_by &&
+      payload(e).work_item_id === item.id,
+  );
+  return {
+    ...(reported ? { blocker_event_id: reported.id } : {}),
+    blocker_reported_by: blocker.reported_by,
+    blocker_reported_at: blocker.reported_at,
+  };
+}
+
+/**
+ * Settle the current owner's satisfied wait inside the verified delivery
+ * transaction. Returns the resumed item, or the reason the blocker stays.
+ */
+export function resumeDeliveryWait(
+  d: CommandDraft,
+  item: WorkItem,
+  subject: { kind: string; value: string },
+): { item: WorkItem } | { reason: string } {
+  const blocker = item.reported_blocker;
+  const condition = blocker?.resume_when;
+  if (item.status !== "blocked" || !blocker || !condition || !d.assignment)
+    return { reason: "阻塞没有登记可核验的解除条件" };
+  const guard = waitOwnerGuard(d, item, d.assignment);
+  if (guard) return { reason: guard };
+  if (
+    d
+      .list("runs")
+      .some(
+        (r) =>
+          r.assignment_id === item.assignment_id &&
+          (r.dispatch_stop || r.inactivity_stop),
+      )
+  )
+    return { reason: "Run 正在停止" };
+  if (condition.kind === "precheck_finished") {
+    const resumed =
+      subject.kind === "git_head"
+        ? resumePassedDeliveryWait(d, item, subject.value)
+        : undefined;
+    return resumed
+      ? { item: resumed }
+      : { reason: "只有当前作者等待的同一提交预检通过后才能直接交付" };
+  }
+  if (!DELIVERY_SETTLED_KINDS.has(condition.kind))
+    return { reason: `${condition.kind} 等待由系统恢复` };
+  if (blocker.auto_resume_disabled || autoResumeUsed(d, item, condition))
+    return { reason: "同一解除条件已用过，请 PM 核查" };
+  const evidence = satisfied(d, condition, undefined, item);
+  if (!evidence)
+    return {
+      reason: `解除条件 ${condition.kind} ${condition.target_id} 尚无系统记录证明已满足`,
+    };
+  const { reported_blocker: _blocker, ...cleared } = item;
+  const other = resumeBlockReason(d, cleared);
+  if (other) return { reason: other };
+  const resumed = resumeWork(d, cleared);
+  if (!resumed) return { reason: "工作项无法恢复" };
+  d.emit(
+    BLOCKER_WAIT_DELIVERED,
+    item.card_id,
+    {
+      work_item_id: item.id,
+      assignment_id: d.assignment.id,
+      condition: { ...condition },
+      evidence,
+      ...blockerReference(d, item, blocker),
+    },
+    {
+      type: "status_change",
+      work_item_id: item.id,
+      body: `${item.id} 等待条件已满足：${condition.kind} ${condition.target_id}（依据 ${evidence}），提交交付时自动解除阻塞。`,
+    },
+  );
+  return { item: resumed };
+}
+
 /** Settle only this author's passed wait inside the verified delivery transaction. */
-export function resumePassedDeliveryWait(
+function resumePassedDeliveryWait(
   d: CommandDraft,
   item: WorkItem,
   head: string,
@@ -507,6 +611,7 @@ export function resumeWorkWaits(
           evidence,
           previous_run_id: last?.id ?? null,
           reported_blocker_cleared: !!blocker,
+          ...(blocker ? blockerReference(d, item, blocker) : {}),
           ...(recovery
             ? {
                 conflict_attempt_id: recovery.attempt_id,

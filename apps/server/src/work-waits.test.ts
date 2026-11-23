@@ -1,4 +1,11 @@
-import { finishRun, reportBlocker, updateWorkItem } from "@cardigan/domain";
+import {
+  finishRun,
+  prepareDelivery,
+  type Result,
+  reportBlocker,
+  submitDelivery,
+  updateWorkItem,
+} from "@cardigan/domain";
 import { PROJECT_EVENT_STREAM, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
@@ -11,6 +18,10 @@ beforeEach(() => {
   f = dispatchFixture();
 });
 afterEach(() => f.close());
+function unwrapOk<T>(result: Result<T>): T {
+  if (!result.ok) throw new Error(result.error.message);
+  return result.value;
+}
 const base = "a".repeat(40),
   next = "b".repeat(40);
 function wait() {
@@ -327,3 +338,89 @@ test.each(["explicit", "conflict", "blocked"])(
     expect(wake).toHaveBeenCalledTimes(1);
   },
 );
+
+test("C-622: a deployment wait settled while the author works is cleared by one delivery; later ticks never wake again", async () => {
+  const target = f.create();
+  allowBlocker();
+  const run = f.session(target.assignment, false);
+  const actor = {
+    ...f.actorFor(target.assignment),
+    allowed_tools: ["report_blocker" as const, "submit_delivery" as const],
+  };
+  f.apply(
+    (s, a, p) =>
+      reportBlocker(
+        s,
+        a,
+        {
+          work_item_id: target.item.id,
+          reason: "等待平台修复上线",
+          needs: "role",
+          resume_when: { kind: "deployment_ready", target_id: next },
+        },
+        p,
+      ),
+    actor,
+  );
+  f.store.uow.run((tx) =>
+    tx.events.append(f.project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(f.project),
+      type: "host_deployment_recorded",
+      actor: { kind: "system", project_id: f.project },
+      created_at: f.clock.now(),
+      payload: { from: base, to: next, status: "deployed", ready: true },
+    }),
+  );
+  // The author's Run is still active, so the background only defers.
+  runSystemRules(f.store, f.project, f.clock);
+  routeProjectEvents(f.store, f.project, { clock: f.clock });
+  expect(
+    f.state().work_items.find((w) => w.id === target.item.id)?.status,
+  ).toBe("blocked");
+  const state = f.state();
+  const params = {
+    work_item_id: target.item.id,
+    kind: "code" as const,
+    summary: "Ready",
+    subject: { kind: "git_head" as const, value: base },
+    requested_verifiers: state.work_items
+      .filter(
+        (w) =>
+          w.kind === "verify" &&
+          w.required &&
+          w.target_work_item_id === target.item.id,
+      )
+      .map((w) => w.id),
+  };
+  const receipt = unwrapOk(
+    await prepareDelivery(state, actor, params, {
+      verify: async () => ({ ok: true, value: [] }),
+    }),
+  );
+  f.apply((s, a, p) => submitDelivery(s, a, params, receipt, p), actor);
+  for (let i = 0; i < 2; i++) {
+    runSystemRules(f.store, f.project, f.clock);
+    routeProjectEvents(f.store, f.project, { clock: f.clock });
+  }
+  const after = f.state();
+  expect(after.work_items.find((w) => w.id === target.item.id)).toMatchObject({
+    status: "delivered",
+  });
+  expect(
+    after.work_items.find((w) => w.id === target.item.id)?.reported_blocker,
+  ).toBeUndefined();
+  expect(
+    after.events.filter((e) => e.type === "blocker_wait_delivered"),
+  ).toHaveLength(1);
+  expect(
+    after.events.some((e) => e.type === "work_item_resume_requested"),
+  ).toBe(false);
+  expect(
+    after.runs.filter(
+      (r) =>
+        r.assignment_id === target.assignment.id &&
+        !["completed", "failed", "cancelled"].includes(r.status),
+    ),
+  ).toMatchObject([{ id: run.id }]);
+});
