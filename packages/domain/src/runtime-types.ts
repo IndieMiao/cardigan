@@ -39,7 +39,15 @@ export const retirementReasons = {
   guard_changed: "发信号前空闲资格已改变",
   still_live: "等待结束后终端仍存活",
   confirmation_pending: "尚未确认原会话退出",
+  prompt_not_idle: "hc 未报告活动，绑定的提示符也不是空闲的空输入框",
 } as const;
+
+/** C-626: which owner-bound stop a system-ended turn used. Bounded facts only. */
+export type RetirementStop = {
+  readonly path: "linux_pidfd" | "darwin_idle_owner" | "darwin_pid";
+  readonly signal: "TERM";
+  readonly pid?: number;
+};
 
 export type RetirementDispatchWait =
   | { source: "owner"; status: RuntimeErrorCode | "unknown" | "unsupported" }
@@ -55,6 +63,7 @@ export type RetirementEvidence = {
   readonly hc_kind?: string;
   readonly exit_code?: number;
   readonly observation?: "alive" | "exited" | "unknown" | RuntimeErrorCode;
+  readonly stop?: RetirementStop;
 };
 export type RetirementSignalEvidence = {
   readonly pid: number;
@@ -68,6 +77,7 @@ export type IdleRetirementResult =
       /** System-turn stops only: the probed process and its group are gone,
        * checked by the kernel after the terminal finished. */
       readonly process_group_exited?: true;
+      readonly stop?: RetirementStop;
       /** Only with `report_signals`: the probed program PID and the signals
        * this call actually sent before the terminal finished. */
       readonly signalled?: RetirementSignalEvidence;

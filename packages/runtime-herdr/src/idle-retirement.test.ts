@@ -416,14 +416,84 @@ test.each([true, false])(
         workspace_preflight: async () => true,
       }),
     );
+    // C-626: the attempted owner-bound TERM is reported for evidence.
+    const stop = { path: "linux_pidfd", signal: "TERM", pid: 12345 };
     expect(stopped).toEqual(
       confirmed
-        ? { outcome: "exited", process_group_exited: true }
-        : { outcome: "exited" },
+        ? { outcome: "exited", process_group_exited: true, stop }
+        : { outcome: "exited", stop },
     );
     expect(call.mock.calls.filter(([a]) => a.includes("gone"))).toHaveLength(1);
   },
 );
+
+test.each([
+  ["no prompt binding", "unknown", "idle", false],
+  ["bound idle editor", "unknown", "idle", true],
+  ["turn still running", "unknown", "running", false],
+  ["reported working", "working", "idle", false],
+  ["busy at the signal slot", "unknown", "busy-in-slot", false],
+] as const)(
+  "C-626 Linux: no hc activity stops a system turn only on the bound empty editor (%s)",
+  async (name, activity, screen, stops) => {
+    const f = adapter("TERM"),
+      runtime = await f.create();
+    Object.assign(f.terminal, {
+      status: { state: activity },
+      foreground: { name: "claude", pid: 12345 },
+    });
+    const call = vi.mocked(f.client.exec),
+      original = call.getMockImplementation()!;
+    let probed = false;
+    call.mockImplementation(async (args) => {
+      if (args.includes("probe")) probed = true;
+      if (args[0] === "read")
+        return screen === "running" || (screen === "busy-in-slot" && probed)
+          ? "✻ Working… (esc to interrupt)\n❯\n? for shortcuts"
+          : "────────\n❯\n────────\n? for shortcuts";
+      return original(args);
+    });
+    const prompt = {
+      project_id: "fixture",
+      assignment_id: "A-1",
+      harness: "claude-code" as const,
+    };
+    const binding = name === "no prompt binding" ? {} : { idle_prompt: prompt };
+    expect(
+      value(
+        await runtime.observe_retirement(ref, {
+          project_id: "fixture",
+          assignment_id: "A-1",
+          system_finished_turn: true,
+          ...binding,
+        }),
+      ),
+    ).toBe(stops || screen === "busy-in-slot" ? "alive" : "unknown");
+    const guard = vi.fn(() => true);
+    const stopped = value(
+      await runtime.retire_idle(ref, {
+        ...options(),
+        system_finished_turn: true,
+        workspace_preflight: async () => true,
+        before_signal: guard,
+        ...binding,
+      }),
+    );
+    expect(stopped).toMatchObject(
+      stops
+        ? {
+            outcome: "exited",
+            stop: { path: "linux_pidfd", signal: "TERM", pid: 12345 },
+          }
+        : { outcome: "withdrawn", evidence: { reason: "terminal_busy" } },
+    );
+    expect(
+      call.mock.calls.filter(([args]) => args.includes("TERM")),
+    ).toHaveLength(stops ? 1 : 0);
+    expect(guard).toHaveBeenCalledTimes(stops ? 1 : 0);
+  },
+);
+
 test.each([
   ["HUP", ["HUP"]],
   ["TERM", ["HUP", "TERM"]],

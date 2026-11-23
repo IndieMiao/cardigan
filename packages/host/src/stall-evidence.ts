@@ -10,6 +10,7 @@ import {
   type RuntimeRef,
   sharedStallRegistration,
   systemTurnOwner,
+  type TurnIdlePrompt,
 } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import {
@@ -183,6 +184,33 @@ export async function stallWorkspace(
     return "unknown";
   }
 }
+/**
+ * C-626: the CLI of the system-ended turn, for the dispatcher's bound
+ * empty-editor observation. Only Claude Code and Codex draw a recognizable
+ * idle editor; any other harness keeps requiring an hc idle status.
+ */
+export function turnIdlePrompt(
+  state: CommandState,
+  a: Assignment,
+  systemTurn?: string,
+): TurnIdlePrompt | undefined {
+  const harness = state.runs.find(
+    (r) => r.id === systemTurn && r.assignment_id === a.id,
+  )?.harness;
+  return harness === "claude-code" || harness === "codex"
+    ? { project_id: state.project_id, assignment_id: a.id, harness }
+    : undefined;
+}
+/** C-626: a macOS worker generation whose system-ended turn the host may
+ * stop through its idle owner or the enrolled-PID fallback. */
+export function darwinTurnTarget(a: Assignment, execution?: ExecutionConfig) {
+  return (
+    a.machine_id !== "local" &&
+    execution?.mode === "agent-ssh" &&
+    !!execution.macosCore &&
+    !!a.runtime_ref?.launch_generation
+  );
+}
 /** Missing hc is not an exit. The native Linux adapter can independently
  * prove that this exact non-kept launch, its process group and socket are gone. */
 export async function observeTurnOwner(
@@ -190,11 +218,18 @@ export async function observeTurnOwner(
   ref: RuntimeRef,
   identity: RetirementIdentity,
   systemTurn = true,
+  idlePrompt?: TurnIdlePrompt,
 ) {
   const exact = await runtime
     .observe_retirement?.(
       ref,
-      systemTurn ? { ...identity, system_finished_turn: true } : identity,
+      systemTurn
+        ? {
+            ...identity,
+            system_finished_turn: true,
+            ...(idlePrompt ? { idle_prompt: idlePrompt } : {}),
+          }
+        : identity,
     )
     .catch(() => undefined);
   if (
@@ -366,7 +401,7 @@ export async function stallEvidence(
   const bound =
     !sharedStallRegistration(state, a) &&
     boundWorkspaceTarget(state.project_id, a, execution);
-  const [workspace, observed, owner] = await Promise.all([
+  const [workspace, observed, strictOwner] = await Promise.all([
     bound
       ? stallWorkspace(
           state,
@@ -393,6 +428,50 @@ export async function stallEvidence(
         )
       : undefined,
   ]);
+  // C-626: hc reports no activity (null/unknown) for a live terminal whose
+  // strict owner check could not confirm it. The bound CLI's own empty editor
+  // and idle footer, read around the same owner proof, is the equivalent idle
+  // evidence. Busy, blocked or error statuses and every identity, generation
+  // and keep guard are unchanged.
+  const prompt =
+    systemTurn && !transfer ? turnIdlePrompt(state, a, systemTurn) : undefined;
+  const promptOwner =
+    prompt &&
+    systemTurn &&
+    a.runtime_ref &&
+    strictOwner?.ok &&
+    strictOwner.value === "unknown" &&
+    observed?.ok &&
+    observed.value.process === "alive" &&
+    observed.value.agent === "unknown"
+      ? await observeTurnOwner(
+          runtime,
+          a.runtime_ref,
+          systemTurnOwner(state, a.id, a.runtime_ref, systemTurn),
+          true,
+          prompt,
+        )
+      : undefined;
+  const owner =
+    promptOwner?.ok && promptOwner.value === "alive"
+      ? promptOwner
+      : strictOwner;
+  const idle_basis =
+    promptOwner && owner === promptOwner
+      ? ("bound_idle_prompt" as const)
+      : owner?.ok && owner.value === "alive"
+        ? ("terminal_status" as const)
+        : null;
+  // A macOS worker's confirmed, live system-ended turn may be stopped through
+  // its owner or enrolled PID; other remote targets still settle exits only.
+  const remoteTurnStop =
+    !!systemTurn &&
+    !transfer &&
+    darwinTurnTarget(a, execution) &&
+    owner?.ok === true &&
+    owner.value === "alive" &&
+    observed?.ok === true &&
+    observed.value.process === "alive";
   const remoteExited =
     systemTurn &&
     a.machine_id !== "local" &&
@@ -434,6 +513,7 @@ export async function stallEvidence(
       (["unknown", "idle", "done"].includes(observed.value.agent) ||
         observed.value.process === "exited"));
   return {
+    idle_basis,
     terminal_owner: ownerConfirmed ? "confirmed" : "unconfirmed",
     workspace,
     terminal_state,
@@ -463,7 +543,7 @@ export async function stallEvidence(
         : (systemTurn
             ? (!!ownerConfirmed && unknownOrIdle) || unboundLocal
             : !!safeTerminal && (await ordinaryOwned())) &&
-          (a.machine_id === "local" || !!remoteExited)) &&
+          (a.machine_id === "local" || !!remoteExited || remoteTurnStop)) &&
       (writableInPlace(workspace) || workspace === "no_worktree"),
   };
 }
