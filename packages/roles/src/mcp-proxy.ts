@@ -5,11 +5,21 @@
  * NO_PROXY/no_proxy: the clients that honour system proxies also honour these
  * variables, while the model API keeps using whatever proxy is configured.
  *
- * Clients disagree on which spelling wins (curl and Python prefer lower case,
- * reqwest upper case), so each spelling keeps its own entries; a spelling that
- * was unset takes the other one's entries, so adding the Card host never
- * shadows an existing exception. A list that already bypasses everything
- * (`*`) is left exactly as it was.
+ * Clients disagree on which spelling wins and on what an empty value means:
+ *
+ * - Python urllib, undici: `no_proxy` if set (empty: none), else `NO_PROXY`;
+ * - curl, Go: the first non-empty of the two (curl lower first, Go upper);
+ * - reqwest (Codex): `NO_PROXY` if set (empty: none), else `no_proxy`.
+ *
+ * So every non-empty spelling gains the Card host and keeps its entries (`*`
+ * stays as it is); a spelling set in no layer takes the other one's entries;
+ * an explicitly empty spelling becomes the Card host only when the other one
+ * is not a non-empty list. When it is, clients already disagree (one reads
+ * "none", another falls back to the other list) and no value adds the Card
+ * host for both without changing someone's other routes, so the empty value
+ * stays: no client's non-Card route ever changes. A client reading that empty
+ * value keeps sending Card through its proxy; for a harness the session check
+ * then reports the MCP failure and the machine check shows the same route.
  */
 export const MCP_PROXY_BYPASS_KEYS = ["NO_PROXY", "no_proxy"] as const;
 
@@ -53,14 +63,28 @@ export function withMcpProxyBypass(
 export function launchProxyBypass(
   mcpUrl: string,
   current: Readonly<Partial<Record<string, string>>> = {},
+  options: {
+    /**
+     * A spelling missing from `current` may still be inherited at run time
+     * (Claude settings over the process): an empty value then stays empty,
+     * which never changes a non-Card route.
+     */
+    absentMayBeInherited?: boolean;
+  } = {},
 ): Partial<Record<(typeof MCP_PROXY_BYPASS_KEYS)[number], string>> {
   const host = mcpProxyBypassHost(mcpUrl);
   if (!host) return {};
-  const upper = current.NO_PROXY,
-    lower = current.no_proxy;
+  const merged = (own: string | undefined, other: string | undefined) => {
+    const otherListed =
+      other === undefined
+        ? options.absentMayBeInherited === true
+        : other !== "";
+    if (own === "" && otherListed) return "";
+    return withMcpProxyBypass(own ?? other, host);
+  };
   return {
-    NO_PROXY: withMcpProxyBypass(upper ?? lower, host),
-    no_proxy: withMcpProxyBypass(lower ?? upper, host),
+    NO_PROXY: merged(current.NO_PROXY, current.no_proxy),
+    no_proxy: merged(current.no_proxy, current.NO_PROXY),
   };
 }
 
@@ -81,11 +105,8 @@ export function pickProxyBypass(
 /**
  * The same merge in POSIX sh, run where the harness starts: the account's
  * inherited lists are only known there. `fixed` holds the values a launch
- * layer (profile env, Claude settings) sets; each spelling takes its fixed
- * value, else the inherited one, else — only when that spelling is set in
- * no layer — the other spelling's: exactly the list each client used before.
- * A spelling set to an empty value stays its own (empty) list, the way
- * clients read it, so it only gains the Card host.
+ * layer (profile env, Claude settings) sets; each spelling's prior list is
+ * its fixed value, else the inherited one, merged by the rule above.
  */
 export function launchProxyBypassShell(
   host: string,
@@ -96,9 +117,15 @@ export function launchProxyBypassShell(
     fixed[key] === undefined
       ? `if [ "\${${key}+set}" = set ]; then cardigan_set_${name}=1; cardigan_prior_${name}=$${key}; else cardigan_set_${name}=; cardigan_prior_${name}=; fi`
       : `cardigan_set_${name}=1; cardigan_prior_${name}=${quote(fixed[key])}`;
-  return `# C-600: the Card MCP host never goes through a proxy; every other
-# destination keeps the route it had (per spelling, layered, an empty value
-# is not unset, \`*\` untouched).
+  // Unset: the other's list; empty while the other is a non-empty list: kept
+  // empty (clients already disagree); otherwise: own list plus the Card host.
+  const merge = (own: string, other: string) =>
+    `if [ -z "$cardigan_set_${own}" ]; then cardigan_${own}=$(cardigan_bypass ${quote(host)} "$cardigan_prior_${other}")
+elif [ -z "$cardigan_prior_${own}" ] && [ -n "$cardigan_prior_${other}" ]; then cardigan_${own}=
+else cardigan_${own}=$(cardigan_bypass ${quote(host)} "$cardigan_prior_${own}"); fi`;
+  return `# C-600: the Card MCP host never goes through a proxy; no other destination
+# changes route for any client (per spelling, layered, \`*\` untouched, an empty
+# spelling stays empty while the other one is a non-empty list).
 cardigan_bypass() {
   case "$(printf '%s' "$2" | tr -d ' \\t')" in
     \\*) printf '%s' "$2" ;;
@@ -108,11 +135,9 @@ cardigan_bypass() {
 }
 ${prior("NO_PROXY", "upper")}
 ${prior("no_proxy", "lower")}
-if [ -n "$cardigan_set_upper" ]; then cardigan_src=$cardigan_prior_upper; else cardigan_src=$cardigan_prior_lower; fi
-cardigan_upper=$(cardigan_bypass ${quote(host)} "$cardigan_src")
-if [ -n "$cardigan_set_lower" ]; then cardigan_src=$cardigan_prior_lower; else cardigan_src=$cardigan_prior_upper; fi
-cardigan_lower=$(cardigan_bypass ${quote(host)} "$cardigan_src")
+${merge("upper", "lower")}
+${merge("lower", "upper")}
 export NO_PROXY="$cardigan_upper" no_proxy="$cardigan_lower"
-unset cardigan_set_upper cardigan_set_lower cardigan_prior_upper cardigan_prior_lower cardigan_src cardigan_upper cardigan_lower
+unset cardigan_set_upper cardigan_set_lower cardigan_prior_upper cardigan_prior_lower cardigan_upper cardigan_lower
 `;
 }

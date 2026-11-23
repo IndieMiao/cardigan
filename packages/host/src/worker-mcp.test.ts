@@ -482,7 +482,11 @@ test("C-600 without a system proxy setting the probe connects directly", async (
 });
 
 test.each([
-  [{ NO_PROXY: "", no_proxy: "*" }, "control.example-tailnet.ts.net"],
+  // Codex reads an explicitly empty NO_PROXY as "none" while no_proxy lists
+  // hosts: the launch keeps it empty, so the harness and this check both take
+  // the system proxy and the check reports it.
+  [{ NO_PROXY: "", no_proxy: "*" }, ""],
+  [{ NO_PROXY: "", no_proxy: ".lan" }, ""],
   [{ NO_PROXY: "*", no_proxy: "" }, "*"],
   [{ NO_PROXY: "", no_proxy: "" }, "control.example-tailnet.ts.net"],
   [
@@ -490,7 +494,7 @@ test.each([
     "control.example-tailnet.ts.net,localhost",
   ],
 ])(
-  "C-600 V-2999:2 an explicitly empty spelling is kept, as in the launch (%o)",
+  "C-600 the machine check reads the launch's empty spellings like the harness (%o)",
   async (env, upper) => {
     const config = { ...execution(), env };
     // Same values the launch compiler gives this worker's harness.
@@ -501,7 +505,14 @@ test.each([
     status = 401;
     challenge = "Bearer";
     body = { error: { code: "unauthorized", message: "unauthorized" } };
-    await expect(checkWorkerMcpReachability(config)).resolves.toBeUndefined();
-    expect(requests).toBe(1);
+    if (upper === "") {
+      await expect(checkWorkerMcpReachability(config)).rejects.toThrow(
+        /^mcp_harness_proxy_failed$/,
+      );
+      expect(requests).toBe(0);
+    } else {
+      await expect(checkWorkerMcpReachability(config)).resolves.toBeUndefined();
+      expect(requests).toBe(1);
+    }
   },
 );

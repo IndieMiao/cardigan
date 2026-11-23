@@ -313,6 +313,11 @@ export function compileAssignmentLaunch(
   // for the spellings they set, since those override the process.
   const fixedProxy = { ...pickProxyBypass(env), ...settingsProxy };
   const mergedProxy = launchProxyBypass(input.mcp.url, fixedProxy);
+  // A settings file is written before the account's lists are known: an
+  // empty spelling there stays empty unless a launch layer fixes the other.
+  const settingsMergedProxy = launchProxyBypass(input.mcp.url, fixedProxy, {
+    absentMayBeInherited: true,
+  });
   const proxyShell = mcpHost
     ? launchProxyBypassShell(mcpHost, fixedProxy, shellQuote)
     : undefined;
@@ -327,7 +332,8 @@ export function compileAssignmentLaunch(
         return file;
       const env = { ...parsed.env };
       for (const key of MCP_PROXY_BYPASS_KEYS)
-        if (Object.hasOwn(env, key)) env[key] = mergedProxy[key] as string;
+        if (Object.hasOwn(env, key))
+          env[key] = settingsMergedProxy[key] as string;
       return {
         ...file,
         content: `${JSON.stringify({ ...parsed, env }, null, 2)}\n`,
