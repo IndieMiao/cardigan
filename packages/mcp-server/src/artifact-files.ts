@@ -7,8 +7,10 @@ import { type Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Attachment } from "@cardigan/domain";
 import { ToolError } from "./errors.js";
+import { MAX_ARTIFACT_BYTES } from "./limits.js";
+import { offsiteFor } from "./offsite/offsite.js";
 
-export const MAX_ARTIFACT_BYTES = 2 * 1024 ** 3;
+export { MAX_ARTIFACT_BYTES };
 export const ARTIFACT_BLOB_ID =
   /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/u;
 export function artifactPath(dataDir: string | undefined, id: string) {
@@ -70,12 +72,29 @@ export async function openArtifact(dir: string | undefined, a: Attachment) {
   const blob = a.streamed_artifact;
   if (!blob || blob.expired)
     throw ToolError.notFound("Artifact is not available");
-  const file = await open(
-    artifactPath(dir, blob.blob_id),
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-  ).catch(() => {
-    throw ToolError.notFound("Artifact content unavailable");
-  });
+  const path = artifactPath(dir, blob.blob_id);
+  const flags =
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  const unavailable = () => ToolError.notFound("Artifact content unavailable");
+  const file = await open(path, flags).catch(
+    async (error: NodeJS.ErrnoException) => {
+      // C-614: a file gone locally is restored from its verified off-site
+      // copy first; without one the result is unchanged.
+      if (
+        error.code !== "ENOENT" ||
+        !(await offsiteFor(dir)?.restoreArtifact(
+          path,
+          blob.blob_id,
+          a.size,
+          a.sha256,
+        ))
+      )
+        throw unavailable();
+      return open(path, flags).catch(() => {
+        throw unavailable();
+      });
+    },
+  );
   try {
     const st = await file.stat();
     if (!st.isFile() || st.size !== a.size || a.size > MAX_ARTIFACT_BYTES)

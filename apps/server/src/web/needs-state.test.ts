@@ -37,7 +37,9 @@ function legacyProjection(view: ReturnType<typeof needsYou>) {
         ...legacy,
         notices: legacy.notices.map(({ source: _source, ...notice }) => notice),
       },
-      (key, value) => (key === "thumbnail_path" ? undefined : value),
+      // C-540 thumbnails and C-614 previews postdate the golden response.
+      (key, value) =>
+        key === "thumbnail_path" || key === "preview_path" ? undefined : value,
     ),
   );
 }
