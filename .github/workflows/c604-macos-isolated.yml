@@ -1,0 +1,174 @@
+# C-604 (Q-1185): one manual, isolated macOS run of the two C-602 Darwin test
+# files against the pinned precheck candidate of D-2309. Standard GitHub-hosted
+# runner only; no secrets, no production machine, no automatic trigger or retry.
+name: C-604 isolated macOS run
+run-name: c604/macos/${{ inputs.candidate }}
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Full candidate SHA; must equal the pinned C-602 candidate
+        required: true
+        type: string
+permissions:
+  contents: read
+env:
+  CANDIDATE_SHA: 44493173ca7c778febe575987e0e66ab03021f10
+  CANDIDATE_TREE: e21bcd8bc1090073b16a32e55f3ffd4bf9de9e5a
+  # The candidate manifest's macos-aarch64 archive digest (its pinned hc release).
+  HC_ARCHIVE_SHA256: 1ab38dd9270f63a8f794d6d60e8702eb0d1c85a72bda85d735e5eea43f05ffed
+  REAL_HC_CASE: 'real hc: a null-status session at its steady empty prompt is stopped'
+jobs:
+  macos:
+    # Standard (non-larger) arm64 runner, matching the macos-aarch64 hc archive.
+    runs-on: macos-15
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Refuse re-runs and other candidates
+        env:
+          REQUESTED: ${{ inputs.candidate }}
+        run: |
+          if [[ "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
+            echo "::error::C-604 authorizes a single attempt; re-runs are refused"
+            exit 1
+          fi
+          if [[ "$REQUESTED" != "$CANDIDATE_SHA" ]]; then
+            echo "::error::only the pinned candidate $CANDIDATE_SHA may run"
+            exit 1
+          fi
+          test "$(uname -s)/$(uname -m)" = Darwin/arm64
+      - name: Checkout candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify candidate identity
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Enable corepack
+        run: npm install --global corepack && corepack enable
+      - name: install
+        run: pnpm install --frozen-lockfile
+      - name: Install and verify hc
+        run: |
+          target="$RUNNER_TEMP/cardigan-hc"
+          mkdir "$target"
+          release="$(python3 -I - <<'PY'
+          import json, os, pathlib
+          manifest = json.loads(pathlib.Path('deploy/hc-version.json').read_text())
+          version = manifest['version']
+          release = manifest['targets']['macos-aarch64']
+          if release['sha256'] != os.environ['HC_ARCHIVE_SHA256']:
+              raise SystemExit('candidate manifest does not pin the expected hc archive')
+          if release['url'] != f'https://releases.herdr.dev/core/{version}/herdr-core-macos-aarch64.tar.gz':
+              raise SystemExit('unexpected hc archive url')
+          print(release['url'], release['sha256'], manifest['download_user_agent'], version)
+          PY
+          )"
+          read -r url sha256 agent version <<< "$release"
+          curl --fail --silent --show-error --location --max-time 120 \
+            --user-agent "$agent" --output "$target/hc.tar.gz" "$url"
+          echo "$sha256  $target/hc.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$target/hc.tar.gz" -C "$target" 'Herdr Core.app'
+          app="$target/Herdr Core.app/Contents/MacOS/herdr-core"
+          lipo -archs "$app" | tr ' ' '\n' | grep -qx arm64
+          mkdir "$target/bin"
+          ln -s "$app" "$target/bin/hc"
+          test "$("$target/bin/hc" --version)" = "hc $version"
+          echo "$target/bin" >> "$GITHUB_PATH"
+          {
+            echo CARDIGAN_REQUIRE_HC=1
+            echo "CARDIGAN_TEST_HC=$target/bin/hc"
+          } >> "$GITHUB_ENV"
+      - name: build
+        run: pnpm exec tsc -b packages/runtime-herdr
+      # Candidate code never gets a GitHub command file. No retry is configured.
+      - name: test
+        id: test
+        env:
+          COREPACK_ENABLE_NETWORK: '0'
+          CARDIGAN_FLAKE_CASES: ''
+          CARDIGAN_CHECKED_CASES: ''
+        run: |
+          status=0
+          env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STATE \
+            -u CARDIGAN_AGENT_LOCAL_TESTS \
+            pnpm exec vitest run --retry=0 --reporter=verbose --reporter=json \
+            --outputFile.json="$RUNNER_TEMP/c604-vitest.json" \
+            packages/runtime-herdr/src/darwin-retirement.test.ts \
+            packages/runtime-herdr/src/darwin-idle-owner.test.ts || status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+      - name: Summarize
+        if: ${{ always() }}
+        shell: python3 -I {0}
+        env:
+          REPORT: ${{ runner.temp }}/c604-vitest.json
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          TEST_EXIT_CODE: ${{ steps.test.outputs.exit_code }}
+        run: |
+          import json, os, pathlib, platform, subprocess
+
+          FILES = (
+              'packages/runtime-herdr/src/darwin-retirement.test.ts',
+              'packages/runtime-herdr/src/darwin-idle-owner.test.ts',
+          )
+
+          def command(*argv):
+              try:
+                  return subprocess.run(argv, capture_output=True, text=True, timeout=10).stdout.strip() or 'unavailable'
+              except (OSError, subprocess.SubprocessError):
+                  return 'unavailable'
+
+          summary = {
+              'run_id': os.environ.get('GITHUB_RUN_ID'),
+              'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT'),
+              'candidate_sha': command('git', 'rev-parse', 'HEAD'),
+              'candidate_tree': command('git', 'rev-parse', 'HEAD^{tree}'),
+              'macos': f"{command('sw_vers', '-productVersion')} ({command('sw_vers', '-buildVersion')})",
+              'arch': platform.machine(),
+              'hc': command(os.environ.get('CARDIGAN_TEST_HC', 'hc'), '--version'),
+              'test_step': os.environ.get('TEST_OUTCOME') or 'not run',
+              'vitest_exit_code': os.environ.get('TEST_EXIT_CODE') or 'none',
+              'files': {},
+              'real_hc_case': {'status': 'not found'},
+          }
+          try:
+              report = json.loads(pathlib.Path(os.environ['REPORT']).read_text())
+          except (OSError, ValueError):
+              report = None
+          for name in FILES:
+              entry = {'passed': 0, 'failed': 0, 'skipped': 0, 'file_status': 'no report'}
+              for module in (report or {}).get('testResults', []):
+                  if not module.get('name', '').endswith('/' + name):
+                      continue
+                  entry['file_status'] = module.get('status')
+                  if module.get('message'):
+                      entry['file_error'] = module['message'].splitlines()[0][:300]
+                  for case in module.get('assertionResults', []):
+                      state = case.get('status')
+                      key = state if state in ('passed', 'failed') else 'skipped'
+                      entry[key] += 1
+                      if case.get('title', '').startswith(os.environ['REAL_HC_CASE']):
+                          summary['real_hc_case'] = {'title': case['title'], 'status': state}
+              summary['files'][name] = entry
+          executed = summary['real_hc_case']['status'] in ('passed', 'failed')
+          summary['real_hc_case']['executed'] = executed
+
+          text = json.dumps(summary, ensure_ascii=False, indent=2)
+          print(text)
+          if os.environ.get('GITHUB_STEP_SUMMARY'):
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+                  out.write('## C-604 isolated macOS run\n\n```json\n' + text + '\n```\n')
+          if not executed:
+              print('::error::the real hc case did not execute')
+              raise SystemExit(1)
