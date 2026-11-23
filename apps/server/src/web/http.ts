@@ -47,7 +47,8 @@ export const SESSION_COOKIE = "cardigan_session";
 
 /** Fixed templates only: neither identifiers nor query strings reach logs. */
 export function requestRoute(path: string): string {
-  if (/^\/api\/(login|logout|session|me|projects)$/.test(path)) return path;
+  if (/^\/api\/(login|logout|session|me|projects|offsite)$/.test(path))
+    return path;
   if (/^\/api\/avatars\/[^/]+$/.test(path)) return "/api/avatars/:sha256";
   const project = /^\/api\/projects\/[^/]+(\/.*)$/.exec(path);
   const rest = project?.[1];
@@ -77,6 +78,8 @@ export function requestRoute(path: string): string {
       return `${prefix}/cards/:id/mentions`;
     if (/^\/attachments\/[^/]+\/thumbnail$/.test(rest))
       return `${prefix}/attachments/:id/thumbnail`;
+    if (/^\/attachments\/[^/]+\/preview$/.test(rest))
+      return `${prefix}/attachments/:id/preview`;
     const entity = /^\/(cards|attachments)\/[^/]+$/.exec(rest);
     if (entity) return `${prefix}/${entity[1]}/:id`;
     const write =
@@ -141,9 +144,24 @@ export function unauthorized(message = "login required"): never {
   });
 }
 
-export function applySecurityHeaders(res: ServerResponse): void {
+/**
+ * C-614: `imageOrigin` is the private OSS bucket origin that signed thumbnail
+ * and preview redirects point to; only images may load from it.
+ */
+export function applySecurityHeaders(
+  res: ServerResponse,
+  imageOrigin?: string,
+): void {
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
-    res.setHeader(name, value);
+    res.setHeader(
+      name,
+      imageOrigin && name === "Content-Security-Policy"
+        ? value.replace(
+            "img-src 'self' data: blob:",
+            `img-src 'self' data: blob: ${imageOrigin}`,
+          )
+        : value,
+    );
   }
 }
 

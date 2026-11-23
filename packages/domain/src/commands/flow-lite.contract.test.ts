@@ -1,19 +1,24 @@
 import { expect, test } from "vitest";
 import {
   autoMergeOn,
+  autoRiskMergeReason,
   autoRiskPaths,
   type CommandState,
   DEFAULT_HIGH_RISK_PATHS,
   type Decision,
   type DecisionCategory,
+  type Delivery,
   highRiskProducts,
   listNeedsYou,
   mergePlan,
   setCardSensitive,
   setProjectPreferences,
   systemConfirmMerge,
+  systemMergeBlockers,
   updateCard,
+  type WorkItem,
 } from "../index.js";
+import { cardMergeCandidates } from "../merge-candidates.js";
 import { CommandDraft } from "./core.js";
 import { mergeNeedsHuman } from "./delegation.js";
 import { notices } from "./notices.js";
@@ -637,3 +642,100 @@ test.each([4, 5])(
     expect(mergePlan(f.state, f.card.id).ok).toBe(true);
   },
 );
+
+const MISSING_PATH_EVIDENCE = "缺少完整的当前交付文件差异证据";
+
+/** C-623: add an optional producer whose current output is a signed artifact. */
+async function withArtifactProduct() {
+  const { f, q, product, check } = await lite(5);
+  check();
+  const code = f.state.deliveries.find((v) => v.id === product.id);
+  const item = f.state.work_items.find((w) => w.id === product.work_item_id);
+  if (!code || item?.kind !== "produce")
+    throw new Error("Missing code product");
+  const artifactItem: WorkItem = {
+    ...item,
+    id: id("work_item", 900),
+    title: "Signed APK",
+    required: false,
+    status: "accepted",
+  };
+  const { branch: _branch, ...source } = code;
+  const artifact: Delivery = {
+    ...source,
+    id: id("delivery", 900),
+    work_item_id: artifactItem.id,
+    kind: "other",
+    subject: { kind: "artifact_sha256", value: "e".repeat(64) },
+    evidence: [],
+    requested_verifiers: [],
+    status: "accepted",
+  };
+  const state: CommandState = {
+    ...f.state,
+    work_items: [...f.state.work_items, artifactItem],
+    deliveries: [...f.state.deliveries, artifact],
+  };
+  return { f, q, state, code, artifact };
+}
+
+test("C-623: artifact products need no path evidence; a code+artifact card merges by system", async () => {
+  const { f, q, state, code } = await withArtifactProduct();
+  expect(systemMergeBlockers(state, q)).not.toContain(MISSING_PATH_EVIDENCE);
+  expect(autoRiskMergeReason(state, f.card.id)).toBeUndefined();
+  // Only the Git product is merged; the artifact never reaches the repository.
+  expect(cardMergeCandidates(state, f.card).map((c) => c.delivery_id)).toEqual([
+    code.id,
+  ]);
+  const merged = systemConfirmMerge(state, system, { decision_id: q.id }, f.io);
+  expect(merged.ok).toBe(true);
+});
+
+test("C-623: a code product without path evidence still blocks next to an artifact", async () => {
+  const { f, q, state, code } = await withArtifactProduct();
+  const missing = {
+    ...state,
+    deliveries: state.deliveries.map((v) =>
+      v.id === code.id ? { ...v, evidence: [] } : v,
+    ),
+  };
+  expect(systemMergeBlockers(missing, q)).toContain(MISSING_PATH_EVIDENCE);
+  expect(autoRiskMergeReason(missing, f.card.id)).toContain("交人");
+  expect(
+    systemConfirmMerge(missing, system, { decision_id: q.id }, f.io).ok,
+  ).toBe(false);
+});
+
+test("C-623: a live producer with no current delivery stays unknown and blocks", async () => {
+  const { f, q, state, artifact } = await withArtifactProduct();
+  const empty = {
+    ...state,
+    deliveries: state.deliveries.filter((v) => v.id !== artifact.id),
+  };
+  expect(systemMergeBlockers(empty, q)).toContain(MISSING_PATH_EVIDENCE);
+  expect(autoRiskMergeReason(empty, f.card.id)).toContain("交人");
+});
+
+test("C-623: a pure artifact card has nothing to merge and no evidence gate", async () => {
+  const { f, state, code } = await withArtifactProduct();
+  const pure = {
+    ...state,
+    deliveries: state.deliveries.map((v) =>
+      v.id === code.id
+        ? {
+            ...v,
+            kind: "other" as const,
+            subject: {
+              kind: "artifact_sha256" as const,
+              value: "f".repeat(64),
+            },
+            evidence: [],
+          }
+        : v,
+    ),
+  };
+  // No Git product: completion ends as merge_not_required, never a confirmation.
+  expect(cardMergeCandidates(pure, f.card)).toEqual([]);
+  expect(autoRiskMergeReason(pure, f.card.id)).toBeUndefined();
+  expect(highRiskProducts(pure, f.card)).toEqual([]);
+});
