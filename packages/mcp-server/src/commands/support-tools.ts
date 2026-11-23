@@ -77,7 +77,7 @@ export function supportTools(options: SupportToolOptions = {}) {
     defineTool({
       name: "upload_attachment",
       description:
-        "Upload a base64 attachment (10 MiB), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint.",
+        "Upload a base64 attachment (10 MiB), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint. The stored sha256 is computed by the server, so a stored attachment needs no read-back download.",
       input: z.object({
         idempotency_key,
         card_id: id("card"),

@@ -227,6 +227,32 @@ test("first call is accepted at once; polls of the same Run follow one job to it
   }
 }, 20_000);
 
+test("a same-machine handoff path from the host is reported with the receipt, only for this request", async () => {
+  for (const [kind, expected] of [
+    [
+      "handoff",
+      { path: `/srv/handoff/${"1".repeat(32)}.apk`, sha256: "a".repeat(64) },
+    ],
+    ["handoff-other", undefined],
+  ] as const) {
+    const host = fakeHost(kind);
+    try {
+      const receipt = await settle(() =>
+        requestMobileSignature(host.data, jobScope(`R-${kind}`), () => {}, {
+          program: host.program,
+          acceptWaitMs: 300,
+        }),
+      );
+      expect(receipt).toMatchObject({ status: "signed" });
+      expect((receipt as { local_handoff?: unknown }).local_handoff).toEqual(
+        expected,
+      );
+    } finally {
+      rmSync(host.data, { recursive: true, force: true });
+    }
+  }
+}, 20_000);
+
 test("a helper past its reported deadline is terminated; the next poll looks the same request up", async () => {
   const host = fakeHost("hang");
   const call = () =>

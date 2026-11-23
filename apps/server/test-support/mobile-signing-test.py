@@ -352,6 +352,49 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertEqual(status, 'new')
         self.assertRegex(rid, '^[0-9a-f]{32}$')
 
+    def with_handoff(self, mode=0o711, route=True, policy=True):
+        drop = self.root/'handoff'
+        drop.mkdir(mode=0o700, exist_ok=True); drop.chmod(mode)
+        if policy:
+            save(self.policy, canonical({**json.loads(self.policy.read_text()), 'handoff_dir': str(drop)}))
+        routes = json.loads((self.host/'routes.json').read_text())
+        save(self.host/'routes.json', canonical([{**r, **({'handoff': True} if route else {})} for r in routes]))
+        return drop
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
+    def test_same_machine_handoff_of_signed_apk(self):
+        # C-612: the signer also places the signed APK for the worker on its machine.
+        drop = self.with_handoff()
+        rid, sha = self.call()
+        placed = drop/f'{rid}.apk'
+        self.assertEqual(digest(placed), sha)
+        self.assertEqual(oct(placed.stat().st_mode & 0o777), oct(0o644))
+        self.assertEqual(host.handed_off(self.db, rid, sha), str(placed))
+        self.assertEqual(sorted(p.name for p in drop.iterdir()), [placed.name])
+        # A later lookup reports the same file; other bytes never match it.
+        self.assertIsNone(host.handed_off(self.db, rid, 'e'*64))
+        self.assertEqual(self.call(), (rid, sha))
+        self.assertEqual(host.handed_off(self.db, rid, sha), str(placed))
+        proc = subprocess.Popen([sys.executable, '-IB', str(HELPERS/'host.py'), str(self.host), 'request'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        with proc:
+            proc.stdin.write(canonical(self.ctx).encode()+b'\n'); proc.stdin.flush()
+            self.assertTrue(proc.stdout.readline().startswith(f'accepted {rid} '.encode()))
+            self.assertEqual(proc.stdout.readline(), b'ready\n')
+            proc.stdin.write(b'commit\n'); proc.stdin.close()
+            self.assertEqual(proc.stdout.read(), f'{rid} {sha} {placed}\n'.encode())
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses to use a root signing identity')
+    def test_handoff_is_skipped_never_blocking(self):
+        for kwargs in ({'mode': 0o755}, {'mode': 0o733}, {'route': False}, {'policy': False}):
+            with self.subTest(**kwargs):
+                self.setUp()
+                drop = self.with_handoff(**kwargs)
+                rid, sha = self.call()
+                self.assertEqual(digest(self.host/'outputs'/rid), sha)
+                self.assertEqual(list(drop.iterdir()), [])
+                self.assertIsNone(host.handed_off(self.db, rid, sha))
+
     def test_budget_scales_with_input_size_and_private_limits(self):
         # C-598: 334 MB at the default 512 KiB/s each way, plus ten minutes for signing.
         self.assertEqual(host.budget(self.host, 0), 600)

@@ -57,4 +57,9 @@ if kind == 'slow':
 if kind == 'lost':
     # Interrupted after the signer finished: no result reaches the server.
     sys.exit(3)
-print(rid, 'a' * 64, flush=True)
+if kind == 'handoff':
+    print(rid, 'a' * 64, f'/srv/handoff/{rid}.apk', flush=True)
+elif kind == 'handoff-other':
+    print(rid, 'a' * 64, f'/srv/handoff/{"2" * 32}.apk', flush=True)
+else:
+    print(rid, 'a' * 64, flush=True)

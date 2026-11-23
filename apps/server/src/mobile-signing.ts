@@ -53,7 +53,7 @@ function helper(
     | { artifact: { id: string; fd: number } }
     | { progress: Progress }
     | { check: string },
-): Promise<{ request_id: string; sha256: string }> {
+): Promise<{ request_id: string; sha256: string; handoff?: string }> {
   const artifact = "artifact" in run ? run.artifact : undefined;
   const check = "check" in run ? run.check : undefined;
   const [file = "/usr/bin/python3", ...prefix] = timing.program ?? [
@@ -96,7 +96,9 @@ function helper(
       // A ledger check has no fence: its only line is the result.
       stage: "start" | "accepted" | "committed" = check ? "committed" : "start",
       accepted: string | undefined,
-      receipt: { request_id: string; sha256: string } | undefined,
+      receipt:
+        | { request_id: string; sha256: string; handoff?: string }
+        | undefined,
       failed = false,
       term: NodeJS.Timeout | undefined;
     // SIGTERM first: the helper records `interrupted` (or its own `timed_out`)
@@ -157,9 +159,19 @@ function helper(
         if ("progress" in run) run.progress.committed();
         return true;
       }
-      const done = /^([0-9a-f]{32}) ([0-9a-f]{64})$/u.exec(row);
+      // C-612: an optional third field is the signer's same-machine handoff path.
+      const done =
+        /^([0-9a-f]{32}) ([0-9a-f]{64})(?: ((?:\/[A-Za-z0-9_.-]+)+\/[0-9a-f]{32}\.apk))?$/u.exec(
+          row,
+        );
       if (stage === "committed" && !receipt && done?.[1] && done[2]) {
-        receipt = { request_id: done[1], sha256: done[2] };
+        receipt = {
+          request_id: done[1],
+          sha256: done[2],
+          ...(done[3]?.endsWith(`/${done[1]}.apk`)
+            ? { handoff: done[3] }
+            : {}),
+        };
         return true;
       }
       return false;
@@ -211,12 +223,20 @@ const RETAIN_SETTLED_MS = 3_600_000;
 
 function receiptFor(
   scope: SigningScope,
-  receipt: { request_id: string; sha256: string },
+  {
+    handoff,
+    ...receipt
+  }: { request_id: string; sha256: string; handoff?: string },
 ) {
   return {
     status: "signed" as const,
     ...receipt,
     platform: scope.platform,
+    // C-612: same signed bytes, already on the signer's (= this worker's)
+    // machine. Read it there and verify sha256; download otherwise.
+    ...(handoff && scope.platform === "android"
+      ? { local_handoff: { path: handoff, sha256: receipt.sha256 } }
+      : {}),
     download: {
       method: "GET",
       query: `?mobile_artifact=${receipt.request_id}&platform=${scope.platform}`,

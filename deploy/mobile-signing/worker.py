@@ -4,6 +4,7 @@ import fcntl
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import sys
 import tempfile
 
@@ -42,6 +43,45 @@ def receipt(root, spec, *, failure_details=True, dispatch_states=False):
         state = row[1] if dispatch_states or row[1] != 'received' else 'pending'
         details = read_failure(db, spec['id']) if failure_details and state == 'failed' else {}
         return {'state': state, 'sha256': row[2], **details}
+
+
+HANDOFF_MODES = (0o711, 0o751)
+
+
+def handoff(c, rid, output, sha):
+    """C-612: same-machine handoff of a signed Android test APK.
+
+    Only when the control host asks for it and this identity names a
+    `handoff_dir`: an administrator-created directory owned by this signing
+    UID that others may traverse but neither list nor write. The file is
+    named by the unguessable request number, written whole, then linked in
+    without replacing anything. Any problem only skips the handoff; the
+    control host still receives the bytes as before.
+    """
+    try:
+        d = Path(c['handoff_dir'])
+        st = d.lstat()
+        require(d.is_absolute() and stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid()
+                and stat.S_IMODE(st.st_mode) in HANDOFF_MODES)
+        dest = d / f'{rid}.apk'
+        if os.path.lexists(dest):
+            ds = dest.lstat()
+            require(stat.S_ISREG(ds.st_mode) and ds.st_uid == os.getuid() and stat.S_IMODE(ds.st_mode) == 0o644)
+            require(digest(dest) == sha)
+            return str(dest)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=f'.{rid}.')
+        try:
+            with os.fdopen(fd, 'wb') as out, output.open('rb') as f:
+                require(transfer(f, out, os.fstat(f.fileno()).st_size) == sha)
+                out.flush()
+                os.fsync(out.fileno())
+            os.chmod(tmp, 0o644)
+            os.link(tmp, dest)
+        finally:
+            os.unlink(tmp)
+        return str(dest)
+    except Exception:
+        return None
 
 
 def serve(root, src, dst, adapters=None):
@@ -111,7 +151,9 @@ def serve(root, src, dst, adapters=None):
             return
         require(row[0]=='signed' and digest(output)==row[1])
         size=output.stat().st_size
-        send(dst,canonical({'size':size,'sha256':row[1]}).encode())
+        local = (handoff(c, rid, output, row[1]) if req.get('handoff') is True and s['platform'] == 'android'
+                 and 'handoff_dir' in c else None)
+        send(dst,canonical({'size':size,'sha256':row[1],**({'handoff':local} if local else {})}).encode())
         with output.open('rb') as f:
             transfer(f,dst,size)
         dst.flush()

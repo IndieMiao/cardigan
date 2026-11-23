@@ -64,6 +64,29 @@ def route(root, s):
     return hits[0]['peer']
 
 
+def handoff_route(root, s):
+    # C-612: the administrator marks a route whose signer runs on the worker's machine.
+    hits = [p for p in config(root / 'routes.json') if all(p[k] == s[k] for k in ('project','machine','platform','version','app'))]
+    return s['platform'] == 'android' and len(hits) == 1 and hits[0].get('handoff') is True
+
+
+def handoff_path(rid, value):
+    return (isinstance(value, str) and re.fullmatch(r'(?:/[A-Za-z0-9_.-]+)+/' + rid + r'\.apk', value, re.ASCII)
+            and '/../' not in value + '/' and '/./' not in value + '/')
+
+
+def handoffs(db):
+    db.execute('CREATE TABLE IF NOT EXISTS handoffs (id TEXT PRIMARY KEY, path TEXT NOT NULL, sha TEXT NOT NULL)')
+
+
+def handed_off(db, rid, sha):
+    """The same-machine path the signer reported for exactly these bytes, if any."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='handoffs'").fetchone():
+        return None
+    row = db.execute('SELECT path FROM handoffs WHERE id=? AND sha=?', (rid, sha)).fetchone()
+    return row[0] if row else None
+
+
 def register(root, db, s, source):
     # Operator supplies a private, already registered build snapshot, not a worktree path.
     manifest(s)
@@ -267,8 +290,9 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
         try:
             inp = directory(root,'inputs') / rid
             size = inp.stat().st_size if fresh else 0
+            local = handoff_route(root, s)
             send(p.stdin, canonical({'grant':s,'mode':'sign' if fresh else 'lookup','size':size,
-                                     'failure_details':True}).encode())
+                                     'failure_details':True,**({'handoff':True} if local else {})}).encode())
             if fresh:
                 with inp.open('rb') as f:
                     require(transfer(f,p.stdin,size) == s['sha256'])
@@ -301,6 +325,9 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
                 try:
                     require(db.execute("UPDATE grants SET state='signed',output=? WHERE id=? AND NOT revoked AND state IN ('pending','peer_signed','signed')",(sha,rid)).rowcount == 1)
                     observe(db, rid, 'signed', sha)
+                    if local and handoff_path(rid, header.get('handoff')):
+                        handoffs(db)
+                        db.execute('INSERT OR REPLACE INTO handoffs VALUES(?,?,?)', (rid, header['handoff'], sha))
                     event(db,ctx,rid,'signed')
                     db.commit()
                 except BaseException:
@@ -403,7 +430,8 @@ def main():
         def accepted(rid, seconds, mode):
             send(sys.stdout.buffer, f'accepted {rid} {seconds} {mode}'.encode())
         rid, sha = request(root,db,json.loads(line(sys.stdin.buffer)),fence,accepted=accepted)
-        print(rid,sha)
+        local = handed_off(db, rid, sha)
+        print(rid, sha, *([local] if local else []))
     elif cmd == 'permit':
         rid=sys.argv[3]
         with os.fdopen(3,'rb') as f:
