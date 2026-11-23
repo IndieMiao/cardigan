@@ -17,7 +17,7 @@ import { promisify } from "node:util";
 import type { Attachment } from "@cardigan/domain";
 import { fileAttachmentStore } from "@cardigan/mcp-server";
 import { afterEach, expect, test, vi } from "vitest";
-import { apkPublisher } from "./publish-artifact.js";
+import { apkPublisher, signedOnlyBy } from "./publish-artifact.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -93,7 +93,13 @@ async function setup() {
     range: 206,
     badHash: false,
     versioned: false,
+    /** CDN fill race: answer this many reads per URL with 404 / ignored Range / bad Content-Range / cut stream. */
+    missing: 0,
+    rangeIgnored: 0,
+    wrongContentRange: 0,
+    cut: 0,
   };
+  const reads = new Map<string, number>();
   const execute = vi.fn(
     async (
       tool: string,
@@ -107,7 +113,7 @@ async function setup() {
       else expect(environment).toBeUndefined();
       const arg = (name: string) => args[args.indexOf(name) + 1]!;
       if (tool === target.apksigner)
-        return `Signer #1 certificate SHA-256 digest: ${flags.signer}\n`;
+        return `Verifies\nVerified using v3 scheme (APK Signature Scheme v3): true\nNumber of signers: 1\nV3.0 Signer: certificate SHA-256 digest: ${flags.signer}\n`;
       if (tool === target.apkanalyzer)
         return `${({ "application-id": flags.manifest, "version-name": request.version, "version-code": "13" } as Record<string, string>)[args[1]!]}\n`;
       expect(arg("--config-file")).toBe("/dev/null");
@@ -119,10 +125,20 @@ async function setup() {
             : "<VersioningConfiguration/>\n0.123456(s) elapsed\n";
         case "list-objects-v2":
           expect(arg("--prefix")).toBe(prefix);
-          return JSON.stringify({
-            KeyCount: String(objects.size),
-            IsTruncated: "false",
-          });
+          expect(arg("--max-keys")).toBe("2");
+          {
+            const listed = [...objects]
+              .filter(([k]) => k.startsWith(prefix))
+              .map(([Key, b]) => ({ Key, Size: String(b.length) }));
+            const page = listed.slice(0, 2);
+            return JSON.stringify({
+              KeyCount: String(page.length),
+              IsTruncated: String(listed.length > 2),
+              ...(page.length
+                ? { Contents: page.length === 1 ? page[0] : page }
+                : {}),
+            });
+          }
         case "put-object": {
           const key = arg("--key");
           expect(args).toContain("--forbid-overwrite=true");
@@ -139,12 +155,28 @@ async function setup() {
     expect(init?.redirect).toBe("error");
     expect(init?.credentials).toBe("omit");
     const path = String(url).slice(target.origin.length + 1);
+    const ranged = new Headers(init?.headers).has("range");
+    const n = (reads.get(`${ranged}${path}`) ?? 0) + 1;
+    reads.set(`${ranged}${path}`, n);
     const b = objects.get(path);
-    if (!b) return new Response(null, { status: 404 });
-    if (new Headers(init?.headers).has("range"))
+    if (!b || n <= flags.missing) return new Response(null, { status: 404 });
+    if (n <= flags.cut)
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(new Uint8Array(b.subarray(0, 1)));
+            c.error(Error("reset"));
+          },
+        }),
+      );
+    if (ranged && n <= flags.rangeIgnored)
+      return new Response(new Uint8Array(b));
+    if (ranged)
       return new Response(new Uint8Array(b.subarray(0, 1)), {
         status: flags.range,
-        headers: { "content-range": `bytes 0-0/${b.length}` },
+        headers: {
+          "content-range": `bytes 0-0/${n <= flags.wrongContentRange ? b.length + 1 : b.length}`,
+        },
       });
     return new Response(
       new Uint8Array(flags.badHash ? Buffer.alloc(b.length) : b),
@@ -152,9 +184,27 @@ async function setup() {
   };
   const claim = vi.fn(),
     current = vi.fn();
+  const delays = [0, 0, 0, 0];
   const call = () =>
-    apkPublisher(root, root, execute, get)(project, a, request, claim, current);
-  return { root, objects, prefix, flags, execute, get, claim, current, call };
+    apkPublisher(root, root, execute, get, delays)(
+      project,
+      a,
+      request,
+      claim,
+      current,
+    );
+  return {
+    root,
+    objects,
+    prefix,
+    flags,
+    reads,
+    execute,
+    get,
+    claim,
+    current,
+    call,
+  };
 }
 
 test("sealed test prefix, verified public bytes, Range and release sidecars", async () => {
@@ -177,6 +227,80 @@ test("sealed test prefix, verified public bytes, Range and release sidecars", as
     (await readdir(f.root)).filter((v) => v.startsWith("publish-apk-")),
   ).toEqual([]);
 });
+test.each([
+  ["404 until the CDN fills", "missing", 4],
+  ["Range answered with a full 200", "rangeIgnored", 4],
+  ["wrong Content-Range", "wrongContentRange", 4],
+  ["connection cut mid-body", "cut", 4],
+] as const)("read-back retries a %s, bounded", async (_, flag, limit) => {
+  const ok = await setup();
+  ok.flags[flag] = limit;
+  await expect(ok.call()).resolves.toMatchObject({ sha256: sha });
+  expect(ok.objects.size).toBe(3);
+  const fail = await setup();
+  fail.flags[flag] = limit + 1;
+  await expect(fail.call()).rejects.toThrow("download");
+  expect(fail.objects.size).toBe(1);
+  expect(Math.max(...fail.reads.values())).toBe(limit + 1);
+});
+test("wrong bytes are not retried", async () => {
+  const f = await setup();
+  f.flags.badHash = true;
+  await expect(f.call()).rejects.toThrow("download");
+  expect(f.reads.get(`false${f.prefix}app.apk`)).toBe(1);
+});
+test("after a post-write read-back failure, a new approval resumes the lone APK and writes the sidecars", async () => {
+  const f = await setup();
+  f.flags.missing = 99;
+  await expect(f.call()).rejects.toThrow("download");
+  expect([...f.objects.keys()]).toEqual([`${f.prefix}app.apk`]);
+  expect(f.claim).toHaveBeenLastCalledWith(
+    `${target.origin}/${f.prefix}app.apk`,
+    false,
+  );
+  f.flags.missing = 0;
+  f.reads.clear();
+  const puts = () =>
+    f.execute.mock.calls.filter(([, args]) => args[1] === "put-object").length;
+  const before = puts();
+  await expect(f.call()).resolves.toMatchObject({ sha256: sha });
+  expect(f.claim).toHaveBeenLastCalledWith(
+    `${target.origin}/${f.prefix}app.apk`,
+    true,
+  );
+  expect(puts() - before).toBe(2);
+  expect(f.objects.size).toBe(3);
+  await expect(f.call()).rejects.toThrow("immutable_prefix");
+});
+test.each([
+  "different size",
+  "same size, different bytes",
+  "another object",
+  "claim refused",
+] as const)("resume refuses: %s", async (issue) => {
+  const f = await setup();
+  const key = `${f.prefix}app.apk`;
+  f.objects.set(
+    key,
+    issue === "different size"
+      ? Buffer.concat([apk, Buffer.from("x")])
+      : issue === "same size, different bytes"
+        ? Buffer.alloc(apk.length)
+        : apk,
+  );
+  if (issue === "another object") f.objects.set(`${f.prefix}SHA256SUMS`, apk);
+  if (issue === "claim refused")
+    f.claim.mockImplementation(() => {
+      throw Error("immutable_prefix");
+    });
+  const failure =
+    issue === "same size, different bytes" ? "download" : "immutable_prefix";
+  await expect(f.call()).rejects.toThrow(failure);
+  expect(
+    f.execute.mock.calls.some(([, args]) => args[1] === "put-object"),
+  ).toBe(false);
+});
+
 test.each([
   "configuration",
   "signature",
@@ -214,6 +338,63 @@ test.each([
   await expect(f.call()).rejects.toThrow(download ? "download" : issue);
   expect(f.objects.size).toBe(download ? 1 : 0);
   expect(f.claim).toHaveBeenCalledTimes(download ? 1 : 0);
+});
+
+const head = (scheme: string) =>
+  `Verifies\nVerified using v1 scheme (JAR signing): ${scheme.includes("1")}\nVerified using v2 scheme (APK Signature Scheme v2): ${scheme.includes("2")}\nVerified using v3 scheme (APK Signature Scheme v3): ${scheme.includes("3")}\n`;
+const line = (name: string, digest = cert) =>
+  `${name} certificate DN: CN=test\n${name} certificate SHA-256 digest: ${digest}\n${name} certificate SHA-1 digest: ${"c".repeat(40)}\n${name} public key SHA-256 digest: ${"d".repeat(64)}\n`;
+test.each([
+  ["v1/v2 only", `${head("12")}Number of signers: 1\n${line("Signer #1")}`],
+  ["v3-only", `${head("3")}Number of signers: 1\n${line("V3.0 Signer:")}`],
+  [
+    "v3-only, CRLF and upper-case digest",
+    `${head("3")}Number of signers: 1\n${line("V3.0 Signer:", cert.toUpperCase())}`.replaceAll(
+      "\n",
+      "\r\n",
+    ),
+  ],
+  [
+    "v2+v3",
+    `${head("23")}Number of signers: 1\n${line("Signer #1")}${line("V3.0 Signer:")}`,
+  ],
+  [
+    "v3+v3.1 with SDK ranges",
+    `${head("3")}Number of signers: 1\n${line("V3.1 Signer (minSdkVersion=33, maxSdkVersion=2147483647)")}${line("V3 Signer (minSdkVersion=24, maxSdkVersion=32)")}`,
+  ],
+])("signature accepts the registered single signer: %s", (_, output) => {
+  expect(signedOnlyBy(output, cert)).toBe(true);
+});
+test.each([
+  [
+    "multiple signers",
+    `${head("2")}Number of signers: 2\n${line("Signer #1")}${line("Signer #2")}`,
+  ],
+  [
+    "second signer without a count",
+    `${head("2")}Number of signers: 1\n${line("Signer #1")}${line("Signer #2")}`,
+  ],
+  [
+    "v3-only, wrong certificate",
+    `${head("3")}Number of signers: 1\n${line("V3.0 Signer:", "0".repeat(64))}`,
+  ],
+  [
+    "v2+v3 disagree",
+    `${head("23")}Number of signers: 1\n${line("Signer #1")}${line("V3.0 Signer:", "0".repeat(64))}`,
+  ],
+  [
+    "rotated v3.1 key",
+    `${head("3")}Number of signers: 1\n${line("V3.1 Signer (minSdkVersion=33, maxSdkVersion=2147483647)", "0".repeat(64))}${line("V3 Signer (minSdkVersion=24, maxSdkVersion=32)")}`,
+  ],
+  [
+    "unknown certificate line",
+    `${head("3")}Number of signers: 1\n${line("V3.0 Signer:")}${line("Source Stamp Signer", "0".repeat(64))}`,
+  ],
+  ["not verified", `Number of signers: 1\n${line("V3.0 Signer:")}`],
+  ["no signer count", `${head("3")}${line("V3.0 Signer:")}`],
+  ["no certificate", `${head("3")}Number of signers: 1\n`],
+])("signature refuses %s", (_, output) => {
+  expect(signedOnlyBy(output, cert)).toBe(false);
 });
 
 test.each([
