@@ -104,7 +104,8 @@ class UpgradeTest(unittest.TestCase):
                 (tagged / n).chmod(0o600)
                 (tagged / n).write_text('v1-' + n)
             out = io.StringIO()
-            with mock.patch('sys.stdout', out):
+            with mock.patch('sys.stdout', out), \
+                    self.assertRaisesRegex(ValueError, 'helper_upgrade_entry_project_mismatch'):
                 module['migrate_bootstrap'](self.release, 'sample', boot)
             self.assertEqual([(tagged / n).read_text() for n in files], ['v1-' + n for n in files])
             self.assertNotIn('迁移', out.getvalue())
@@ -118,6 +119,33 @@ class UpgradeTest(unittest.TestCase):
             tagged.chmod(0o755)
             with self.assertRaisesRegex(ValueError, 'unsafe_helper_upgrade_entry'):
                 module['migrate_bootstrap'](self.release, 'sample', boot)
+
+    def test_conflicting_project_entry_fails_the_whole_upgrade(self):
+        # C-599: this project's own entry naming another project is not a skip.
+        entries = Path(tempfile.mkdtemp(dir=self.root))
+        boot = entries / 'cardigan-helper-upgrade'
+        tagged = boot.with_name(boot.name + '-' + hashlib.sha256(b'sample').hexdigest()[:20])
+        tagged.mkdir(mode=0o700)
+        (tagged / 'project').write_text('other\n')
+        for n in module['BOOTSTRAP_FILES']:
+            (tagged / n).write_text('v1-' + n)
+        real, real_fstat = Path.lstat, os.fstat
+        def root_owned(s):
+            return os.stat_result((s.st_mode, s.st_ino, s.st_dev, s.st_nlink, 0, 0, *tuple(s)[6:]))
+        def entry_lstat(path):
+            s = real(path)
+            return root_owned(s) if entries in path.parents else s
+        out = io.StringIO()
+        with mock.patch.dict(upgrade.__globals__, migrate_bootstrap=lambda release, project:
+                             module['migrate_bootstrap'](release, project, boot)), \
+                mock.patch.object(Path, 'lstat', entry_lstat), \
+                mock.patch('os.fstat', lambda fd: root_owned(real_fstat(fd))), \
+                mock.patch('sys.stdout', out), \
+                self.assertRaisesRegex(ValueError, 'helper_upgrade_entry_project_mismatch'):
+            self.run_upgrade('linux')
+        self.assertNotIn('升级完成', out.getvalue())
+        self.assertEqual([(tagged / n).read_text() for n in module['BOOTSTRAP_FILES']],
+                         ['v1-' + n for n in module['BOOTSTRAP_FILES']])
 
     def test_linux(self):
         self.run_upgrade('linux')

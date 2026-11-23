@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 import type { Machine } from "@cardigan/domain";
 import {
+  agentToolsRoute,
   type CheckKind,
   type CheckResult,
   loadRuntimeWorkers,
@@ -46,6 +47,12 @@ export interface MachineHost {
     purpose?: "manual-upgrade",
   ): string | undefined;
   upgradeCommand?(project: string, machine: Machine): string | undefined;
+  /**
+   * C-599: the attachment tools command an administrator may run now. Unlike
+   * the helper command this includes enrolled bindings whose signed attempt
+   * for the current release left the tools stale (v1 entry, failed recheck).
+   */
+  toolsCommand?(project: string, machine: Machine): string | undefined;
   bindings(): (project: string, machine: string) => BindingSummary | null;
   workerRecord(
     project: string,
@@ -112,6 +119,21 @@ export function machineHost(
         { ...worker.execution, target: runtimeTargetBinding(worker) },
         machine.os,
       ).terminal.command;
+    },
+    toolsCommand(project, machine) {
+      const worker = boundWorker(project, machine);
+      if (worker?.execution.mode !== "agent-ssh") return undefined;
+      const target = runtimeTargetBinding(worker);
+      if (
+        !(
+          "note" in
+          agentToolsRoute(store, project, machine.id, target.fingerprint, env)
+        )
+      )
+        return undefined;
+      // Same derivation as the staged notice; never stage on read.
+      return upgradeMaterials({ ...worker.execution, target }, machine.os)
+        .terminal.command;
     },
     bindings() {
       const workers = loadRuntimeWorkers(dataDir, file);

@@ -100,6 +100,9 @@ def migrate_bootstrap(release, project, root=BOOTSTRAP):
             require(stat.S_ISREG(p.st_mode) and p.st_uid == 0 and p.st_nlink == 1, 'unsafe_helper_upgrade_entry')
             named = f.read(4096).decode('utf-8', 'replace').rstrip('\n')
         if named != project:
+            # Another project's shared entry is skipped; this project's own
+            # entry naming another project is a conflict, never a success.
+            require(boot == root, 'helper_upgrade_entry_project_mismatch')
             continue
         for name in BOOTSTRAP_FILES:
             target = boot / name

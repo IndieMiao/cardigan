@@ -1168,3 +1168,37 @@ test("C-599: enrollment completed while staging never publishes a manual command
   expect(open(f)).toEqual([]);
   expect(f.last()?.agent_tools).toEqual({ status: "automatic" });
 });
+
+test("C-599: v2 reached the worker but v1 was refused locally: the attempt still holds", async () => {
+  const f = await setup("linux");
+  f.enroll();
+  f.tools.output = missing;
+  Object.assign(f.adapters, {
+    toolsStale: vi.fn(async () => "stale" as const),
+  });
+  const send = vi.fn(async (...args: unknown[]) => {
+    if (args[3] === "v2") throw new Error("worker_upgrade_install_failed");
+    throw new Error(WORKER_UPGRADE_NOT_SENT);
+  });
+  f.adapters.install.mockImplementationOnce((worker, p, identity, signal) =>
+    installRelease(worker, p, identity, signal, send),
+  );
+  expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
+  expect(send.mock.calls.map((call) => call[3])).toEqual(["v2", "v1"]);
+  expect(f.isHeld()).toBe(true);
+  expect(upgradeState(f.store, project, machine)).toMatchObject({
+    state: "failed",
+  });
+  // Only a v2 refused before sending is a clean skip.
+  await expect(
+    installRelease(
+      f.options.execution,
+      project,
+      "identity",
+      undefined,
+      async () => {
+        throw new Error(WORKER_UPGRADE_NOT_SENT);
+      },
+    ),
+  ).rejects.toThrow(WORKER_UPGRADE_NOT_SENT);
+});

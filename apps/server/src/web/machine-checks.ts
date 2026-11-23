@@ -168,7 +168,7 @@ export class MachineChecks extends MachineCheckJournal {
   /** C-599: an attachment tools notice is valid only while it equals this. */
   currentToolsCommand(project: string, machine: Machine) {
     try {
-      return this.host?.upgradeCommand?.(project, machine);
+      return this.host?.toolsCommand?.(project, machine);
     } catch {
       /* Invalid configuration or unreadable release: hide stale material. */
     }

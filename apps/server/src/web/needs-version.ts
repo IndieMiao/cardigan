@@ -19,10 +19,15 @@ export function readNeedsVersion(
     project: string,
     machine: Machine | undefined,
   ) => string | null,
+  /** C-599: the attachment tools command the current binding/release/route give. */
+  currentToolsCommand?: (
+    project: string,
+    machine: Machine,
+  ) => string | undefined,
 ): string {
   return store.uow.read((tx) => {
     const state =
-      now !== undefined || currentBinding
+      now !== undefined || currentBinding || currentToolsCommand
         ? loadCommandState(tx, project)
         : undefined;
     // A private binding can change without a SQLite revision. Invalidate cached
@@ -40,22 +45,17 @@ export function readNeedsVersion(
           ? [h.id]
           : [],
       );
-    // C-599: a tools notice's command is shown only for the current binding.
-    const toolsBindings =
-      currentBinding &&
+    // C-599: a tools notice's command is shown only while it is the current one.
+    const toolsVisible =
+      currentToolsCommand &&
       state?.human_actions.flatMap((h) => {
         if (h.status !== "open" || !h.terminal) return [];
         const tools = workerAgentToolsAction(state, h);
-        return tools
-          ? [
-              [
-                h.id,
-                currentBinding(
-                  project,
-                  state.machines?.find((m) => m.id === tools.machine_id),
-                ),
-              ],
-            ]
+        const machine =
+          tools && state.machines?.find((m) => m.id === tools.machine_id);
+        return machine &&
+          currentToolsCommand(project, machine) === h.terminal.command
+          ? [h.id]
           : [];
       });
     return createHash("sha256")
@@ -65,7 +65,7 @@ export function readNeedsVersion(
           store.snapshotVersion(project) ?? randomUUID(),
           context,
           visibleBindings,
-          toolsBindings ?? null,
+          toolsVisible ?? null,
           now === undefined || !state
             ? null
             : needsYouReadPhase(state, now, runtimeGrace),

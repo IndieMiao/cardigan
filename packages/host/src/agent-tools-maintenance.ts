@@ -136,6 +136,48 @@ function retire(
   );
 }
 
+const UNVERIFIABLE = "当前绑定或控制端发行材料无法核验，旧的补装命令作废";
+/**
+ * Who handles stale tools for this binding now: the signed upgrade (first
+ * attempt of each release key), its recovery, or an administrator (`note`) —
+ * an unenrolled machine, or an enrolled one whose attempt for this key left
+ * the tools stale (v1 entry or failed recheck). Shared by the notice and by
+ * the Needs You view, so both show a command under the same rule.
+ */
+export function agentToolsRoute(
+  store: Store,
+  project: string,
+  machine: string,
+  fingerprint: string,
+  env?: NodeJS.ProcessEnv,
+): { outcome: AgentToolsOutcome; reason: string } | { note: string } {
+  let enrolled: string | undefined;
+  try {
+    enrolled = enrolledUpgradeIdentity(
+      dirname(runtimeWorkersPath(env)),
+      project,
+      machine,
+    );
+  } catch {
+    return { outcome: { status: "unverifiable" }, reason: UNVERIFIABLE };
+  }
+  if (!enrolled) return { note: "该机未登记签名自动升级" };
+  const row = upgradeState(store, project, machine);
+  if (row?.release_key !== upgradeKey(fingerprint))
+    return {
+      outcome: { status: "automatic" },
+      reason: "已登记签名自动升级，等待巡检按当前发布安装",
+    };
+  if (row.state === "failed" || row.state === "worker_checked")
+    return {
+      outcome: { status: "held" },
+      reason: "签名自动升级未通过核验，按升级待办恢复",
+    };
+  return {
+    note: "签名自动升级已对本版本执行一次，附件助手仍未就绪：C-595 之前登记的 v1 入口只能更新三个 helper，需要本命令迁移；v2 入口则是安装后复查未通过",
+  };
+}
+
 export interface AgentToolsReconcileOptions {
   readonly store: Store;
   readonly project: string;
@@ -222,7 +264,7 @@ async function reconcile(
   if (!problem) return undefined;
   const { execution, machine: registered } = o.target;
   const pinned = execution.target;
-  const stale = "当前绑定或控制端发行材料无法核验，旧的补装命令作废";
+  const stale = UNVERIFIABLE;
   if (
     !agentToolsReinstallable(problem) ||
     execution.mode !== "agent-ssh" ||
@@ -234,36 +276,8 @@ async function reconcile(
   // The outer observation saw stale tools: any earlier "current" probe is void.
   agentToolsConfirmed.forget(store, project, machine);
   // Re-evaluated after staging: enrollment or an upgrade attempt may change meanwhile.
-  const route = ():
-    | { outcome: AgentToolsOutcome; reason: string }
-    | { note: string } => {
-    let enrolled: string | undefined;
-    try {
-      enrolled = enrolledUpgradeIdentity(
-        dirname(runtimeWorkersPath(o.env)),
-        project,
-        machine,
-      );
-    } catch {
-      return { outcome: { status: "unverifiable" }, reason: stale };
-    }
-    if (!enrolled) return { note: "该机未登记签名自动升级" };
-    const row = upgradeState(store, project, machine);
-    // The signed upgrade owns the first attempt for each release key.
-    if (row?.release_key !== upgradeKey(pinned.fingerprint))
-      return {
-        outcome: { status: "automatic" },
-        reason: "已登记签名自动升级，等待巡检按当前发布安装",
-      };
-    if (row.state === "failed" || row.state === "worker_checked")
-      return {
-        outcome: { status: "held" },
-        reason: "签名自动升级未通过核验，按升级待办恢复",
-      };
-    return {
-      note: "签名自动升级已对本版本执行一次，附件助手仍未就绪：C-595 之前登记的 v1 入口只能更新三个 helper，需要本命令迁移；v2 入口则是安装后复查未通过",
-    };
-  };
+  const route = () =>
+    agentToolsRoute(store, project, machine, pinned.fingerprint, o.env);
   const first = route();
   if ("outcome" in first) return settle(first.outcome, first.reason);
   const { note } = first;

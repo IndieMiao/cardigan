@@ -236,6 +236,17 @@ export async function installRelease(
     )
       throw error;
     signal?.throwIfAborted();
-    return await send(worker, project, identity, "v1", signal);
+    try {
+      return await send(worker, project, identity, "v1", signal);
+    } catch (fallback) {
+      // C-599: v2 already reached the worker; a v1 refused locally does not
+      // make the whole attempt "not sent".
+      if (
+        fallback instanceof Error &&
+        fallback.message === WORKER_UPGRADE_NOT_SENT
+      )
+        throw new Error("worker_upgrade_install_failed");
+      throw fallback;
+    }
   }
 }

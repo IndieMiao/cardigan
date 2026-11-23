@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { upgradeKey } from "@cardigan/host";
 import {
   beginMachineObservation,
   completeMachineObservation,
@@ -576,7 +577,7 @@ test("C-599: an attachment tools notice shows only the command the current bindi
       check: async () => ({ status: "passed", failed_steps: [] }),
       bindings: () => () => null,
       bindingFingerprint: () => binding,
-      upgradeCommand: () => (binding === "pinned" ? command : "other binding"),
+      toolsCommand: () => (binding === "pinned" ? command : "other binding"),
       workerRecord: () => null,
     },
   });
@@ -675,5 +676,92 @@ test("C-599: an attachment tools notice shows only the command the current bindi
     expect((await shown())?.terminal).toBeUndefined();
   } finally {
     await f.close();
+  }
+});
+
+test("C-599: the real host offers the tools command to unenrolled bindings and to enrolled ones only after their signed attempt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "machine-tools-"));
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    await writeFile(
+      join(root, "runtime-workers.yaml"),
+      JSON.stringify({
+        version: 1,
+        machines: [
+          {
+            id: "worker",
+            os: "linux",
+            arch: "x64",
+            host: "private.invalid",
+            port: 22,
+            identity_file: "/private/identity",
+            known_hosts_file: "/private/known_hosts",
+            host_key_alias: "worker",
+            projects: [
+              {
+                project_id: "example",
+                user: "worker_user",
+                gid: 2300,
+                alias: "binding",
+                session: "bound",
+                root: "/worker/example",
+                path: "/bin:/usr/bin",
+                generation: "g1",
+                publication: {
+                  header_max_bytes: 65536,
+                  file_max_bytes: 1048576,
+                  batch_max_bytes: 8388608,
+                  timeout_ms: 30000,
+                },
+                python: "/usr/bin/python3",
+                file_helper: "/worker/example/libexec/worker-files.py",
+                git_helper: "/worker/example/libexec/worker-git.py",
+                mcp_url: "https://private.example.ts.net/mcp",
+              },
+            ],
+          },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    store.createProject({ id: "example" });
+    const host = machineHost(
+      store,
+      { mode: "local", dataDir: root },
+      "local-session",
+      { CARDIGAN_CONFIG_DIR: root },
+    );
+    const registration = {
+      ...machine(),
+      id: "worker",
+      herdr_machine: "worker",
+    };
+    const unenrolled = host.toolsCommand?.("example", registration);
+    expect(unenrolled).toBe(host.upgradeCommand?.("example", registration));
+    expect(unenrolled).toContain("sha256sum");
+    const fingerprint = host.bindingFingerprint?.("example", registration);
+    if (!fingerprint) throw new Error("missing binding");
+    // Enrolled: the signed upgrade owns this release's first attempt.
+    await writeFile(join(root, "upgrade-6-worker-example.key"), "fixture", {
+      mode: 0o600,
+    });
+    expect(host.upgradeCommand?.("example", registration)).toBeUndefined();
+    expect(host.toolsCommand?.("example", registration)).toBeUndefined();
+    const attempt = (state: string) =>
+      store.database
+        .prepare(
+          "INSERT INTO worker_helper_upgrades(project_id,machine_id,release_key,state) VALUES ('example','worker',?,?) ON CONFLICT(project_id,machine_id) DO UPDATE SET release_key=excluded.release_key,state=excluded.state",
+        )
+        .run(upgradeKey(fingerprint), state);
+    // Attempted (v1 fallback or failed tools recheck): the migration command is valid.
+    attempt("verified");
+    expect(host.toolsCommand?.("example", registration)).toBe(unenrolled);
+    // Recovering from a failed upgrade: follow that notice instead.
+    attempt("failed");
+    expect(host.toolsCommand?.("example", registration)).toBeUndefined();
+    expect(host.toolsCommand?.("other", registration)).toBeUndefined();
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
