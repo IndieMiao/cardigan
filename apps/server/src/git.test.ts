@@ -179,12 +179,33 @@ test("delivery verification and backup read the Agent base clone", async () => {
     scope: "work_item",
   });
   expect(requestedHead).toBe(sha);
+  // C-632: real branch errors are classified and rejected at once.
   await expect(
     gitService.checkHead(f.project_id, {
       ...scenario.coder,
       status: "released",
     }),
-  ).rejects.toThrow();
+  ).rejects.toMatchObject({
+    name: "CheckHeadFailure",
+    reason: "ownership_mismatch",
+  });
+  await expect(
+    gitService.checkHead(f.project_id, {
+      ...scenario.coder,
+      branch: "c632-missing-branch",
+      worktree_path: join(
+        agentRoot,
+        "worktrees",
+        f.project_id,
+        scenario.coder.id,
+      ),
+      machine_id: "local",
+      scope: "work_item",
+    }),
+  ).rejects.toMatchObject({
+    name: "CheckHeadFailure",
+    reason: "branch_missing",
+  });
 
   // The delivery fetch reads the Agent base clone, not `<data>/agent/repos`.
   expect(sources).toContain(repository);
@@ -556,6 +577,38 @@ test("D4: candidate publication and workflow ancestor proof use only the configu
   } finally {
     push.mockRestore();
   }
+});
+
+test("C-632: checkHead keeps lock timeouts retryable and classifies setup failures without raw text", async () => {
+  const binding = new ServerGit({ store: f.store, dataDir });
+  const assignment = {
+    ...m4Scenario(f, "auto").coder,
+    branch: "feat/c632",
+    worktree_path: "/synthetic/worktree",
+    machine_id: "local",
+    scope: "work_item",
+  } as Assignment;
+  const lock = vi.spyOn(binding as unknown as { lock: RepositoryLock }, "lock");
+  try {
+    lock.mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
+    await expect(
+      binding.checkHead(f.project_id, assignment),
+    ).rejects.toBeInstanceOf(RepositoryLockTimeoutError);
+    lock.mockRejectedValueOnce(new Error("Worker target is not configured"));
+    const failure = await binding
+      .checkHead(f.project_id, assignment)
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      name: "CheckHeadFailure",
+      reason: "environment_unavailable",
+    });
+    expect((failure as Error).message).not.toContain("Worker target");
+  } finally {
+    lock.mockRestore();
+  }
+  await expect(
+    binding.checkHead("unregistered" as never, assignment),
+  ).rejects.toMatchObject({ reason: "environment_unavailable" });
 });
 
 test("D5: candidate removal uses the project center and exact leased transport request", async () => {

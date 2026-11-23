@@ -1,6 +1,8 @@
 import { isAbsolute } from "node:path";
 import {
   type Assignment,
+  CheckHeadFailure,
+  type CheckHeadFailureReason,
   type Delivery,
   type DeliveryEvidence,
   type DeliverySubject,
@@ -10,8 +12,41 @@ import {
   validationFailed,
 } from "@cardigan/domain";
 import type { CentralProject, CentralRepositoryService } from "./central.js";
+import { RepositoryLockTimeoutError } from "./lock.js";
 import { reviewEquivalence } from "./review-equivalence.js";
 import { collectRoleRuleInventory } from "./role-rule-inventory.js";
+
+/** Label a failed precheck HEAD stage; lock timeouts stay retryable as-is. */
+async function stage<T>(
+  reason: CheckHeadFailureReason | ((error: unknown) => CheckHeadFailureReason),
+  operation: () => Promise<T> | T,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (
+      error instanceof RepositoryLockTimeoutError ||
+      error instanceof CheckHeadFailure
+    )
+      throw error;
+    throw new CheckHeadFailure(
+      typeof reason === "function" ? reason(error) : reason,
+      { cause: error },
+    );
+  }
+}
+/** Git reports a branch absent on the worker as a missing remote ref. */
+const fetchFailure = (error: unknown): CheckHeadFailureReason => {
+  const text = [
+    error instanceof Error ? error.message : "",
+    (error as { stderr?: unknown } | undefined)?.stderr,
+  ]
+    .filter((part): part is string => typeof part === "string")
+    .join("\n");
+  return /couldn't find remote ref/iu.test(text)
+    ? "branch_missing"
+    : "fetch_failed";
+};
 
 /** prepareDelivery supplies the Assignment from its database snapshot, not tool parameters. */
 export class GitDeliveryVerifier implements DeliveryVerifier {
@@ -24,7 +59,10 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       ? `refs/cardigan/incoming/${a.id}`
       : `refs/cardigan/incoming/${a.machine_id}/${a.id}`;
   }
-  /** Fetch exactly the recorded Assignment branch, with the same transport as delivery. */
+  /**
+   * Fetch exactly the recorded Assignment branch, with the same transport as
+   * delivery. Failures are {@link CheckHeadFailure}s naming the failed stage.
+   */
   async head(a: Assignment): Promise<string> {
     if (
       !parseId("assignment", a.id).ok ||
@@ -35,28 +73,41 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       !a.worktree_path ||
       !isAbsolute(a.worktree_path)
     )
-      throw new Error("Invalid precheck Assignment");
-    const repository = await this.central.ensureCentral(this.project);
-    const source = await this.central.agentSource(this.project, a.machine_id);
-    const incoming = this.incoming(a);
-    await this.central.git.readRef(repository, `refs/heads/${a.branch}`);
-    await this.central.git.fetchRefs(
-      repository,
-      source.address,
-      [`+refs/heads/${a.branch}:${incoming}`],
-      source.uploadPack,
+      throw new CheckHeadFailure("ownership_mismatch");
+    const branch = a.branch;
+    const repository = await stage("repository_failed", () =>
+      this.central.ensureCentral(this.project),
     );
-    this.central.validateSource();
-    const head = await this.central.git.readRef(repository, incoming);
-    if (
-      !head ||
-      (await this.central.git.objectType(repository, head)) !== "commit"
-    )
-      throw new Error("No branch HEAD");
-    await this.central.createRef(
-      repository,
-      `refs/cardigan/prechecks/${a.id}/${head}`,
-      head,
+    const source = await stage("environment_unavailable", () =>
+      this.central.agentSource(this.project, a.machine_id),
+    );
+    const incoming = this.incoming(a);
+    await stage("ownership_mismatch", () =>
+      this.central.git.readRef(repository, `refs/heads/${branch}`),
+    );
+    await stage(fetchFailure, () =>
+      this.central.git.fetchRefs(
+        repository,
+        source.address,
+        [`+refs/heads/${branch}:${incoming}`],
+        source.uploadPack,
+      ),
+    );
+    await stage("environment_unavailable", () => this.central.validateSource());
+    const head = await stage("repository_failed", () =>
+      this.central.git.readRef(repository, incoming),
+    );
+    if (!head) throw new CheckHeadFailure("branch_missing");
+    const type = await stage("repository_failed", () =>
+      this.central.git.objectType(repository, head),
+    );
+    if (type !== "commit") throw new CheckHeadFailure("object_mismatch");
+    await stage("repository_failed", () =>
+      this.central.createRef(
+        repository,
+        `refs/cardigan/prechecks/${a.id}/${head}`,
+        head,
+      ),
     );
     return head;
   }

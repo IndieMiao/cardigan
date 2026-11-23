@@ -410,3 +410,27 @@ test("C-600 the MCP handshake deadline is a positive millisecond setting", () =>
       resolveServerConfig({ CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS: value }),
     ).toThrow("CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS");
 });
+
+test("C-632: request_check busy-lock retry is host-configured with defaults", () => {
+  expect(resolveServerConfig({}).checkHeadRetry).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_CHECK_HEAD_RETRY_TOTAL_MS: "60000" })
+      .checkHeadRetry,
+  ).toEqual({ attempts: 3, totalMs: 60000, backoffMs: 1000 });
+  expect(
+    resolveServerConfig({
+      CARDIGAN_CHECK_HEAD_RETRY_ATTEMPTS: "5",
+      CARDIGAN_CHECK_HEAD_RETRY_BACKOFF_MS: "500",
+    }).checkHeadRetry,
+  ).toEqual({ attempts: 5, totalMs: 90000, backoffMs: 500 });
+  for (const value of ["0", "11", "1.5", "many"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_CHECK_HEAD_RETRY_ATTEMPTS: value }),
+    ).toThrow("CARDIGAN_CHECK_HEAD_RETRY_ATTEMPTS");
+  for (const key of [
+    "CARDIGAN_CHECK_HEAD_RETRY_TOTAL_MS",
+    "CARDIGAN_CHECK_HEAD_RETRY_BACKOFF_MS",
+  ])
+    for (const value of ["0", "-1", "1.5", "soon"])
+      expect(() => resolveServerConfig({ [key]: value })).toThrow(key);
+});

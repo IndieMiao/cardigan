@@ -58,6 +58,7 @@ import {
 } from "./assembly.js";
 import { checkArtifact, readCheckApproval } from "./check-handoff-artifact.js";
 import { startCheckControl } from "./check-handoff-control.js";
+import { retryingCheckHeadReader } from "./check-head-retry.js";
 import {
   DEFAULT_LISTEN_RETRY_INTERVAL_MS,
   DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
@@ -631,13 +632,9 @@ async function assembleServer(
               // §3.3: production always verifies against the real Git service, and the
               // verifier follows the project the request belongs to.
               deliveryVerifier: git.verifierFor,
-              checkHead: (project) => ({
-                head: async (assignment) => {
-                  if (!git.checkHead)
-                    throw new Error("Check HEAD reader unavailable");
-                  return git.checkHead(project, assignment);
-                },
-              }),
+              // C-632: a busy repository lock is retried before failing.
+              checkHead: (project) =>
+                retryingCheckHeadReader(git, project, config.checkHeadRetry),
               ...(hostOps
                 ? {
                     hostOps: {
