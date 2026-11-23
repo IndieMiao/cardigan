@@ -9,7 +9,7 @@ import { HOST_OPS_ROLE_TOOLS } from "../host-ops.js";
 import { occupiedRunSlots } from "../run-capacity.js";
 import type { CommandState } from "./core.js";
 import { beginHostOpsAction } from "./host-ops-actions.js";
-import { dispatchRun } from "./launch.js";
+import { dispatchRun, queueRun } from "./launch.js";
 import { stoppedByHuman, stopWorkItemAssignment } from "./stop.js";
 import {
   actor,
@@ -342,4 +342,91 @@ test("C-235 a wake dispatched before the stop is cancelled and its terminal rele
   // The cancelled Run cannot be dispatched again by a late wake either.
   expect(dispatch(next).ok).toBe(false);
   expect(dispatch(next, freshRef).ok).toBe(false);
+});
+
+/**
+ * C-624: a human start that has to queue for capacity is the human's start.
+ * Before, only a dispatch lifted the stop, so the Dispatcher skipped the
+ * queued Run forever (R-715) and it held the head of the machine queue.
+ */
+const start = (s: CommandState, caller = human) =>
+  queueRun(
+    s,
+    caller,
+    {
+      assignment_id: id("assignment", 1),
+      reuse_queued: true,
+      model: "test",
+      agent_cli_version: "test",
+    },
+    ports(),
+  );
+
+test("C-624 a queued human start lifts the stop and records it once", () => {
+  const s = idle();
+  const stopped = apply(s, (stop(s) as { ok: true; value: never }).value);
+  expect(stoppedByHuman(stopped.events, id("assignment", 1))).toBe(true);
+  const started = start(stopped);
+  if (!started.ok) throw new Error(started.error.message);
+  const next = apply(stopped, started.value);
+  const run = started.value.data;
+  expect(run.status).toBe("queued");
+  const recorded = next.events.filter(
+    (e) => e.type === "assignment_start_requested",
+  );
+  expect(recorded).toHaveLength(1);
+  expect(recorded[0]).toMatchObject({
+    actor: { kind: "human" },
+    payload: { assignment_id: id("assignment", 1), run_id: run.id },
+  });
+  expect(stoppedByHuman(next.events, id("assignment", 1))).toBe(false);
+
+  // A repeated start reuses the same queued Run and records nothing more.
+  const again = start(next);
+  if (!again.ok) throw new Error(again.error.message);
+  expect(again.value.data.id).toBe(run.id);
+  expect(
+    again.value.events.some((e) => e.type === "assignment_start_requested"),
+  ).toBe(false);
+
+  // A later stop wins again and cancels the queued start.
+  const restopped = apply(
+    next,
+    (stop(next) as { ok: true; value: never }).value,
+  );
+  expect(stoppedByHuman(restopped.events, id("assignment", 1))).toBe(true);
+  expect(restopped.runs.find((r) => r.id === run.id)?.status).toBe("cancelled");
+});
+
+test("C-624 only a human start event lifts the stop", () => {
+  const s = idle();
+  const stopped = apply(s, (stop(s) as { ok: true; value: never }).value);
+  const system = { kind: "system", project_id: human.project_id } as const;
+  const queued = start(stopped, system);
+  if (!queued.ok) throw new Error(queued.error.message);
+  expect(
+    queued.value.events.some((e) => e.type === "assignment_start_requested"),
+  ).toBe(false);
+  const next = apply(stopped, queued.value);
+  expect(stoppedByHuman(next.events, id("assignment", 1))).toBe(true);
+
+  // The index ignores a forged non-human start event.
+  const forged: Event = {
+    id: "9".repeat(26) as never,
+    seq: 999,
+    type: "assignment_start_requested",
+    actor: system,
+    payload: { assignment_id: id("assignment", 1), run_id: "R-1" },
+    created_at: "2026-01-01T00:00:00.000Z",
+  };
+  expect(stoppedByHuman([...stopped.events, forged], id("assignment", 1))).toBe(
+    true,
+  );
+
+  // A start on an Assignment that is not stopped records nothing.
+  const plain = start(s);
+  if (!plain.ok) throw new Error(plain.error.message);
+  expect(
+    plain.value.events.some((e) => e.type === "assignment_start_requested"),
+  ).toBe(false);
 });
