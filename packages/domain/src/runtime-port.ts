@@ -18,6 +18,9 @@ export interface RuntimeObservation {
   readonly agent: "working" | "blocked" | "done" | "idle" | "error" | "unknown";
   /** Runtime event sequence, never a local timestamp. */
   readonly observed_seq: number;
+  /** C-667: the terminal replaces a lost program with a shell (hc --keep), so
+   * `alive` does not show that the launched CLI is still running. */
+  readonly kept?: true;
 }
 /** Both local and worker adapters must repeat this observation at the send slot. */
 export function idleWakeGuard(
@@ -113,6 +116,13 @@ export interface Runtime {
       readonly idle_prompt?: TurnIdlePrompt;
     },
   ): Promise<RuntimeResult<RuntimeObservation["process"]>>;
+  /** C-667: read-only. True only when this exact kept terminal is live with
+   * an idle replacement shell while the launched CLI's native identity and its
+   * whole process group are gone. Never a stop capability by itself. */
+  observe_kept_shell?(
+    ref: RuntimeRef,
+    owner: RetirementIdentity,
+  ): Promise<RuntimeResult<boolean>>;
   /** Read-only local kernel check for an already queued Run whose core is gone.
    * A missing socket alone never proves the original terminal process exited. */
   confirm_local_exit?(

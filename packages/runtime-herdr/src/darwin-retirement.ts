@@ -12,6 +12,8 @@ type Owner = RetirementIdentity & {
   readonly system_finished_turn?: true;
   /** C-626: only after the controller read the bound empty editor. */
   readonly unknown_activity?: true;
+  /** C-667: ask the worker to name an idle replacement shell of a kept terminal. */
+  readonly kept_shell?: true;
 };
 
 /** The pinned worker binding; undefined when any part is missing or foreign. */
@@ -47,6 +49,7 @@ function binding(execution: Ssh, ref: RuntimeRef, owner: Owner) {
     ...(owner.system_finished_turn && owner.unknown_activity
       ? { unknown_activity: true }
       : {}),
+    ...(owner.kept_shell ? { kept_shell: true } : {}),
     primitive: posix.join(
       posix.dirname(execution.fileHelper.path),
       "worker-primitives.py",
@@ -60,10 +63,11 @@ export async function darwinRetirementObservation(
   ref: RuntimeRef,
   owner: Owner,
   probe = workerTerminalProbe,
-): Promise<"alive" | "exited" | "kept" | "unknown"> {
+): Promise<"alive" | "exited" | "kept" | "shell" | "unknown"> {
   const bound = binding(execution, ref, owner);
   if (!bound) return "unknown";
   const observed: unknown = await probe(execution, bound);
+  if (observed === "shell") return owner.kept_shell ? "shell" : "kept";
   return observed === "exited" || observed === "alive" || observed === "kept"
     ? observed
     : "unknown";
