@@ -101,3 +101,48 @@ test("C-637: maintenance never leaves the central root", async () => {
     /Unexpected central repository path/,
   );
 });
+
+test("C-637 / Q-1233: retained refs are compare-and-deleted per chunk, only in their namespaces", async () => {
+  const repo = await f.central.ensureCentral(f.project);
+  const [a, b, c] = await fetchedPacks(repo, 3);
+  const sha = (x: string | undefined) => x ?? "";
+  await git(
+    repo,
+    "update-ref",
+    `refs/cardigan/prechecks/A-1/${sha(a)}`,
+    sha(a),
+  );
+  await git(repo, "update-ref", "refs/cardigan/candidates/D-9", sha(b));
+  await git(repo, "update-ref", "refs/cardigan/deliveries/D-9", sha(b));
+  await expect(
+    f.transport.deleteRetainedRefs(repo, [
+      { ref: "refs/cardigan/deliveries/D-9", sha: sha(b) },
+    ]),
+  ).rejects.toThrow(/Invalid retained ref deletion/);
+  await expect(f.transport.deleteRetainedRefs(f.source, [])).rejects.toThrow(
+    /Unexpected central repository path/,
+  );
+  const result = await f.transport.deleteRetainedRefs(
+    repo,
+    [
+      { ref: `refs/cardigan/prechecks/A-1/${sha(a)}`, sha: sha(a) },
+      { ref: `refs/cardigan/candidates/A-1/${sha(a)}`, sha: sha(a) },
+      // Moved since it was listed: its chunk is kept for the next run.
+      { ref: "refs/cardigan/candidates/D-9", sha: sha(c) },
+      { ref: `refs/cardigan/candidates/A-1/${sha(b)}`, sha: sha(b) },
+    ],
+    2,
+  );
+  expect(result).toEqual({ deleted: 2, failed: 2 });
+  const left = (await f.transport.listRefs(repo, "refs/cardigan/")).map(
+    (r) => r.ref,
+  );
+  expect(left).not.toContain(`refs/cardigan/prechecks/A-1/${sha(a)}`);
+  expect(left).not.toContain(`refs/cardigan/candidates/A-1/${sha(a)}`);
+  expect(left).toContain("refs/cardigan/candidates/D-9");
+  expect(left).toContain(`refs/cardigan/candidates/A-1/${sha(b)}`);
+  expect(left).toContain("refs/cardigan/deliveries/D-9");
+  // The commits stay in the object store; a cruft pass keeps them too.
+  await f.transport.repack(repo, "cruft");
+  expect(await git(repo, "cat-file", "-t", sha(a))).toBe("commit");
+});

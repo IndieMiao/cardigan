@@ -47,6 +47,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     centralMaintenanceWindow: { start: 180, end: 360 },
     centralMaintenanceIntervalMs: 900_000,
     centralCruftIntervalMs: 604_800_000,
+    centralRefRetentionMs: 1_209_600_000,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
     dispatchTimeoutMs: 600_000,
     providerFailureThreshold: 2,
@@ -132,6 +133,7 @@ test("reads data dir and port from the environment", () => {
     centralMaintenanceWindow: { start: 180, end: 360 },
     centralMaintenanceIntervalMs: 900_000,
     centralCruftIntervalMs: 604_800_000,
+    centralRefRetentionMs: 1_209_600_000,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
     dispatchTimeoutMs: 600_000,
     providerFailureThreshold: 3,
@@ -422,11 +424,13 @@ test("C-637: central maintenance runs 03:00-06:00 host time by default, is confi
     CARDIGAN_CENTRAL_MAINTENANCE_WINDOW: "22:30-01:00",
     CARDIGAN_CENTRAL_MAINTENANCE_INTERVAL_MS: "60000",
     CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS: "86400000",
+    CARDIGAN_CENTRAL_REF_RETENTION_DAYS: "30",
   });
   expect(config).toMatchObject({
     centralMaintenanceWindow: { start: 22 * 60 + 30, end: 60 },
     centralMaintenanceIntervalMs: 60_000,
     centralCruftIntervalMs: 86_400_000,
+    centralRefRetentionMs: 2_592_000_000,
   });
   expect(
     resolveServerConfig({ CARDIGAN_CENTRAL_MAINTENANCE_WINDOW: "off" }),
@@ -437,4 +441,8 @@ test("C-637: central maintenance runs 03:00-06:00 host time by default, is confi
   expect(() =>
     resolveServerConfig({ CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS: "0" }),
   ).toThrow(/CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS/);
+  for (const days of ["0", "1.5", "-14"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_CENTRAL_REF_RETENTION_DAYS: days }),
+    ).toThrow(/CARDIGAN_CENTRAL_REF_RETENTION_DAYS/);
 });

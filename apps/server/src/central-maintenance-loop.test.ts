@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ProjectId } from "@cardigan/domain";
+import type { GitRef, ProjectId } from "@cardigan/domain";
 import type { CentralProject } from "@cardigan/git-service";
 import type {
   CentralRepackMode,
@@ -15,6 +15,7 @@ import {
   parseMaintenanceWindow,
   windowOccurrence,
 } from "./central-maintenance-loop.js";
+import type { RefOwners } from "./central-ref-retention.js";
 import { ServerGit } from "./git.js";
 import { type M4Fixture, m4Fixture } from "./m4-fixtures.js";
 
@@ -52,8 +53,17 @@ test("C-637: one occurrence per window, keyed by the local date it opened", () =
   expect(windowOccurrence(night, local(24, 2))).toBeUndefined();
 });
 
-function harness(projects: readonly string[]) {
+function harness(
+  projects: readonly string[],
+  retention?: {
+    readonly refs: Map<string, GitRef[]>;
+    readonly owners: (project_id: string, cutoff: string) => RefOwners;
+    readonly deleteFails?: boolean;
+  },
+) {
   let now = local(23, 12);
+  const order: string[] = [];
+  const deleted: { project: string; refs: readonly GitRef[] }[] = [];
   const cruft = new Map<string, number | undefined>();
   const calls: { project: string; mode: CentralRepackMode }[] = [];
   const released: string[] = [];
@@ -73,7 +83,20 @@ function harness(projects: readonly string[]) {
       return {
         target: {
           lastCruftPack: async () => cruft.get(id),
+          listRefs: async (prefix) => {
+            order.push(`list ${prefix}`);
+            return (retention?.refs.get(id) ?? []).filter((r) =>
+              r.ref.startsWith(prefix),
+            );
+          },
+          deleteRefs: async (refs) => {
+            order.push("delete");
+            if (retention?.deleteFails) throw new Error("ref lock busy");
+            deleted.push({ project: id, refs });
+            return { deleted: refs.length, failed: 0 };
+          },
           repack: async (mode): Promise<CentralRepackResult> => {
+            order.push("repack");
             calls.push({ project: id, mode });
             if (fail.has(id)) throw new Error("repack failed");
             if (mode === "cruft") cruft.set(id, now.getTime());
@@ -100,8 +123,11 @@ function harness(projects: readonly string[]) {
     clock: { now: () => now.toISOString() as never },
     log,
     report,
+    ...(retention ? { refOwners: retention.owners } : {}),
   });
   return {
+    order,
+    deleted,
     executor,
     calls,
     released,
@@ -177,6 +203,83 @@ test("C-637: a cruft run that wrote no cruft pack still counts", async () => {
   h.set(local(24, 3));
   await h.executor.tick();
   expect(h.calls.map((c) => c.mode)).toEqual(["cruft", "geometric"]);
+});
+
+test("Q-1233: expired candidate and precheck refs are deleted before the repack, 14 days after the card ended", async () => {
+  const sha = "a".repeat(40);
+  const refs = new Map([
+    [
+      "alpha",
+      [
+        { ref: `refs/cardigan/prechecks/A-1/${sha}`, sha },
+        { ref: `refs/cardigan/candidates/A-2/${sha}`, sha },
+        { ref: "refs/cardigan/candidates/D-1", sha },
+      ],
+    ],
+  ]);
+  const cutoffs: string[] = [];
+  const h = harness(["alpha"], {
+    refs,
+    owners: (_project, cutoff) => {
+      cutoffs.push(cutoff);
+      return {
+        expiredCards: new Set(["C-1"]),
+        assignmentCard: new Map([
+          ["A-1", "C-1"],
+          ["A-2", "C-2"],
+        ]),
+        deliveryCard: new Map([["D-1", "C-1"]]),
+        precheckCard: new Map(),
+      };
+    },
+  });
+  h.set(local(23, 3));
+  await h.executor.tick();
+  expect(cutoffs).toEqual([
+    new Date(local(23, 3).getTime() - 14 * 86_400_000).toISOString(),
+  ]);
+  expect(h.order).toEqual([
+    "list refs/cardigan/candidates/",
+    "list refs/cardigan/prechecks/",
+    "delete",
+    "repack",
+  ]);
+  expect(h.deleted[0]?.refs.map((r) => r.ref)).toEqual([
+    "refs/cardigan/candidates/D-1",
+    `refs/cardigan/prechecks/A-1/${sha}`,
+  ]);
+  expect(h.log).toHaveBeenCalledWith(
+    expect.objectContaining({
+      refs_expired: 2,
+      refs_deleted: 2,
+      refs_kept_changed: 0,
+    }),
+  );
+});
+
+test("Q-1233: a failed ref cleanup is reported and the repack still runs", async () => {
+  const sha = "a".repeat(40);
+  const h = harness(["alpha"], {
+    refs: new Map([
+      ["alpha", [{ ref: `refs/cardigan/prechecks/A-1/${sha}`, sha }]],
+    ]),
+    owners: () => ({
+      expiredCards: new Set(["C-1"]),
+      assignmentCard: new Map([["A-1", "C-1"]]),
+      deliveryCard: new Map(),
+      precheckCard: new Map(),
+    }),
+    deleteFails: true,
+  });
+  h.set(local(23, 3));
+  await h.executor.tick();
+  expect(h.report).toHaveBeenCalledWith(
+    "central ref retention of alpha failed: ref lock busy",
+  );
+  expect(h.calls).toHaveLength(1);
+  expect(h.log).toHaveBeenCalledWith(
+    expect.not.objectContaining({ refs_deleted: expect.anything() }),
+  );
 });
 
 test("C-637: failures are reported, released and retried within the window; absent or busy centers are skipped", async () => {
@@ -285,6 +388,17 @@ test("C-637: ServerGit maintains only an existing center, outside the repository
     expect(result.after.packs).toBeLessThan(result.before.packs);
     expect(await held.target.lastCruftPack()).toBeGreaterThan(0);
     expect(run(center, "cat-file", "-t", unreachable)).toBe("blob");
+    const listed = await held.target.listRefs("refs/cardigan/candidates/");
+    expect(listed.map((r) => r.ref).sort()).toEqual(
+      [0, 1, 2, 3].map((i) => `refs/cardigan/candidates/A-1/${i}`),
+    );
+    expect(await held.target.deleteRefs(listed.slice(0, 1))).toEqual({
+      deleted: 1,
+      failed: 0,
+    });
+    expect(
+      (await held.target.listRefs("refs/cardigan/candidates/")).length,
+    ).toBe(3);
   } finally {
     await held.release();
   }

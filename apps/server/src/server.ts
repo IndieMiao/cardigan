@@ -834,6 +834,9 @@ async function assembleServer(
         centralCruftIntervalMs =
           options.dispatcher.centralCruftIntervalMs ??
           config.centralCruftIntervalMs,
+        centralRefRetentionMs =
+          options.dispatcher.centralRefRetentionMs ??
+          config.centralRefRetentionMs,
         attachmentIntervalMs =
           options.dispatcher.attachmentIntervalMs ??
           config.attachmentIntervalMs;
@@ -966,6 +969,9 @@ async function assembleServer(
         ...(centralCruftIntervalMs === undefined
           ? {}
           : { centralCruftIntervalMs }),
+        ...(centralRefRetentionMs === undefined
+          ? {}
+          : { centralRefRetentionMs }),
         centralMaintenanceLog: (line) =>
           process.stdout.write(`${JSON.stringify(line)}\n`),
         ...(attachmentIntervalMs === undefined ? {} : { attachmentIntervalMs }),

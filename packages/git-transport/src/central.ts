@@ -128,6 +128,9 @@ export interface CentralRepackResult {
   readonly after: CentralObjectStats;
   readonly duration_ms: number;
 }
+/** Only these namespaces have a retention period (Q-1233). */
+const retainedRef =
+  /^refs\/cardigan\/(?:candidates|prechecks)\/[A-Za-z0-9._/-]+$/u;
 const cruftIndex = /^pack-[a-f0-9]{40}(?:[a-f0-9]{24})?\.mtimes$/u;
 export interface CentralGitOptions extends GitTimeoutOptions {
   dataDir: string;
@@ -1556,6 +1559,57 @@ export class CentralGitTransport
       after: await this.objectStats(repository),
       duration_ms,
     };
+  }
+  /**
+   * C-637 / Q-1233: compare-and-delete expired candidate and precheck refs.
+   * Each chunk is one update-ref transaction; a chunk whose refs moved
+   * meanwhile fails as a whole and is left for the next run.
+   */
+  async deleteRetainedRefs(
+    repository: string,
+    refs: readonly GitRef[],
+    chunk = 500,
+  ): Promise<{ readonly deleted: number; readonly failed: number }> {
+    if (dirname(repository) !== this.root)
+      throw new Error("Unexpected central repository path");
+    for (const { ref, sha } of refs)
+      if (!retainedRef.test(ref) || ref.includes("..") || !fullSha.test(sha))
+        throw new Error("Invalid retained ref deletion");
+    await this.privateDirectory(this.root);
+    await this.privateDirectory(repository);
+    let deleted = 0,
+      failed = 0;
+    for (let at = 0; at < refs.length; at += chunk) {
+      const part = refs.slice(at, at + chunk);
+      const args = [
+        ...gitSafetyArguments,
+        "-C",
+        repository,
+        "update-ref",
+        "--no-deref",
+        "--stdin",
+        "-z",
+      ];
+      this.options.onCommand?.(repository, args);
+      try {
+        await withGitTimeout("update-ref", this.options, (timeout) => {
+          const run = exec("git", args, {
+            env: gitEnvironment(),
+            timeout,
+            killSignal: "SIGKILL",
+            maxBuffer: 1024 * 1024,
+          });
+          run.child.stdin?.end(
+            part.map(({ ref, sha }) => `delete ${ref}\0${sha}\0`).join(""),
+          );
+          return run;
+        });
+        deleted += part.length;
+      } catch {
+        failed += part.length;
+      }
+    }
+    return { deleted, failed };
   }
   /** C-637: when the newest cruft pack was written (its `.mtimes` file). */
   async lastCruftPack(repository: string): Promise<number | undefined> {

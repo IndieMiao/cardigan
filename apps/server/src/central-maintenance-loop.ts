@@ -1,10 +1,16 @@
-import type { Clock, ProjectId } from "@cardigan/domain";
+import type { Clock, GitRef, ProjectId } from "@cardigan/domain";
 import type { CentralProject } from "@cardigan/git-service";
 import type {
   CentralRepackMode,
   CentralRepackResult,
 } from "@cardigan/git-transport";
 import type { Store } from "@cardigan/store";
+import {
+  DEFAULT_CENTRAL_REF_RETENTION_MS,
+  expiredRefs,
+  RETAINED_REF_PREFIXES,
+  type RefOwners,
+} from "./central-ref-retention.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
 
 /**
@@ -15,7 +21,9 @@ import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
  * into a geometric progression), or a cruft repack when the newest cruft pack
  * is older than the cruft interval. Neither expires an object, and neither
  * holds the host repository lock, so preparations and merges never wait on
- * maintenance. Ref retention is not part of this loop.
+ * maintenance. Before the repack, candidate and precheck refs of cards that
+ * ended more than the retention period ago are deleted (Q-1233); their
+ * objects stay in the cruft pack because nothing expires.
  */
 export const DEFAULT_CENTRAL_MAINTENANCE_WINDOW = "03:00-06:00";
 export const DEFAULT_CENTRAL_MAINTENANCE_INTERVAL_MS = 900_000;
@@ -71,6 +79,10 @@ export interface CentralMaintenanceTarget {
   /** Newest cruft pack time in epoch milliseconds; undefined without one. */
   lastCruftPack(): Promise<number | undefined>;
   repack(mode: CentralRepackMode): Promise<CentralRepackResult>;
+  listRefs(prefix: string): Promise<readonly GitRef[]>;
+  deleteRefs(
+    refs: readonly GitRef[],
+  ): Promise<{ readonly deleted: number; readonly failed: number }>;
 }
 export interface CentralMaintenanceGit {
   projectOf(project_id: ProjectId): CentralProject | undefined;
@@ -88,6 +100,9 @@ export interface CentralMaintenanceOptions {
   readonly git: CentralMaintenanceGit;
   readonly window: MaintenanceWindow;
   readonly cruftIntervalMs?: number;
+  /** Q-1233: owners of candidate and precheck refs; without it no ref is deleted. */
+  readonly refOwners?: (project_id: string, cutoff: string) => RefOwners;
+  readonly refRetentionMs?: number;
   readonly clock?: Clock;
   /** One structured line per finished run (timings and object counts). */
   readonly log?: (line: Record<string, unknown>) => void;
@@ -137,6 +152,17 @@ export class CentralMaintenanceExecutor {
     const held = await this.options.git.centralMaintenance?.(project);
     if (held === undefined) return false;
     try {
+      // Before the repack, so the cruft pass collects what the refs held.
+      const refs = await this.pruneRefs(id, held.target, at).catch(
+        (error: unknown) => {
+          this.options.report?.(
+            `central ref retention of ${id} failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return undefined;
+        },
+      );
       const packed = await held.target.lastCruftPack(),
         ran = this.cruftRuns.get(id);
       const last =
@@ -164,11 +190,40 @@ export class CentralMaintenanceExecutor {
         loose_after: result.after.loose,
         size_pack_kib_before: result.before.size_pack_kib,
         size_pack_kib_after: result.after.size_pack_kib,
+        ...(refs === undefined
+          ? {}
+          : {
+              refs_expired: refs.deleted + refs.failed,
+              refs_deleted: refs.deleted,
+              refs_kept_changed: refs.failed,
+            }),
       });
       return true;
     } finally {
       await held.release();
     }
+  }
+
+  private async pruneRefs(
+    id: string,
+    target: CentralMaintenanceTarget,
+    at: Date,
+  ) {
+    const owners = this.options.refOwners;
+    if (owners === undefined) return undefined;
+    const cutoff = new Date(
+      at.getTime() -
+        (this.options.refRetentionMs ?? DEFAULT_CENTRAL_REF_RETENTION_MS),
+    ).toISOString();
+    const refs = (
+      await Promise.all(
+        RETAINED_REF_PREFIXES.map((prefix) => target.listRefs(prefix)),
+      )
+    ).flat();
+    const expired = expiredRefs(refs, owners(id, cutoff));
+    return expired.length
+      ? target.deleteRefs(expired)
+      : { deleted: 0, failed: 0 };
   }
 }
 

@@ -18,6 +18,7 @@ import {
   type MaintenanceWindow,
   parseMaintenanceWindow,
 } from "./central-maintenance-loop.js";
+import { DEFAULT_CENTRAL_REF_RETENTION_MS } from "./central-ref-retention.js";
 import { DEFAULT_MERGE_WATCHDOG_MS } from "./merge-watchdog.js";
 
 export const DEFAULT_DATA_DIR = defaultDataDirectory();
@@ -63,6 +64,8 @@ export interface ServerConfig {
   readonly centralMaintenanceWindow?: MaintenanceWindow;
   readonly centralMaintenanceIntervalMs?: number;
   readonly centralCruftIntervalMs?: number;
+  /** Q-1233: 14 days after the owning card ended. */
+  readonly centralRefRetentionMs?: number;
   /** Orphaned attachment blobs (§9.3); 6 hours by default. */
   readonly attachmentIntervalMs?: number;
   readonly providerFailureThreshold?: number;
@@ -126,6 +129,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_CENTRAL_MAINTENANCE_WINDOW?: string | undefined;
   readonly CARDIGAN_CENTRAL_MAINTENANCE_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_CENTRAL_REF_RETENTION_DAYS?: string | undefined;
   readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_PROVIDER_FAILURE_THRESHOLD?: string | undefined;
   readonly CARDIGAN_PROVIDER_COOLDOWN_MS?: string | undefined;
@@ -368,6 +372,12 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       "CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS",
       DEFAULT_CENTRAL_CRUFT_INTERVAL_MS,
     ),
+    centralRefRetentionMs:
+      positiveInteger(
+        nonEmpty(env.CARDIGAN_CENTRAL_REF_RETENTION_DAYS),
+        DEFAULT_CENTRAL_REF_RETENTION_MS / 86_400_000,
+        "CARDIGAN_CENTRAL_REF_RETENTION_DAYS",
+      ) * 86_400_000,
     checkCleanupGraceMs: interval(
       env.CARDIGAN_CHECK_CLEANUP_GRACE_MS,
       "CARDIGAN_CHECK_CLEANUP_GRACE_MS",

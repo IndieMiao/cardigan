@@ -7,6 +7,7 @@ import {
   type MaintenanceWindow,
   startCentralMaintenanceLoop,
 } from "./central-maintenance-loop.js";
+import { storeRefOwners } from "./central-ref-retention.js";
 import { type CleanupExecutor, startCleanupLoop } from "./cleanup-loop.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { dispatcherClock, type StandingResolver } from "./dispatch-inbox.js";
@@ -105,6 +106,8 @@ export interface ControlPlaneOptions {
   readonly centralMaintenanceWindow?: MaintenanceWindow;
   readonly centralMaintenanceIntervalMs?: number;
   readonly centralCruftIntervalMs?: number;
+  /** Q-1233: candidate and precheck refs outlive their ended card by this long. */
+  readonly centralRefRetentionMs?: number;
   readonly centralMaintenanceLog?: (line: Record<string, unknown>) => void;
   /**
    * Data directory holding `attachments/`. Without it the blob GC has nothing
@@ -390,6 +393,11 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           ...(options.centralCruftIntervalMs === undefined
             ? {}
             : { cruftIntervalMs: options.centralCruftIntervalMs }),
+          refOwners: (project_id, cutoff) =>
+            storeRefOwners(options.store, project_id, cutoff),
+          ...(options.centralRefRetentionMs === undefined
+            ? {}
+            : { refRetentionMs: options.centralRefRetentionMs }),
           ...(options.centralMaintenanceLog === undefined
             ? {}
             : { log: options.centralMaintenanceLog }),

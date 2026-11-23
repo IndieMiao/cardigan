@@ -7,6 +7,7 @@ import type {
   DeliverySubject,
   DeliveryVerifier,
   GitPublicationGuard,
+  GitRef,
   MergeBatch,
   MergePlan,
   MergePushCommit,
@@ -1144,6 +1145,9 @@ export class ServerGit implements GitBinding {
       target: {
         lastCruftPack: () => transport.lastCruftPack(repository),
         repack: (mode: CentralRepackMode) => transport.repack(repository, mode),
+        listRefs: (prefix: string) => transport.listRefs(repository, prefix),
+        deleteRefs: (refs: readonly GitRef[]) =>
+          transport.deleteRetainedRefs(repository, refs),
       },
       release,
     };
