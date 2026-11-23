@@ -72,6 +72,7 @@ import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
+import { serverMacosChecks } from "./macos-checks.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import {
   drainMobileSigning,
@@ -411,6 +412,13 @@ async function assembleServer(
     configuration: mergeGate,
     releaseSha: sha,
   });
+  const macosChecks = serverMacosChecks({
+    store,
+    dataDir: config.dataDir,
+    env: runtimeEnv,
+    git,
+    configuration: mergeGate,
+  });
 
   // Assigned once, read from `close()`; the compiler cannot see through the
   // callback, so use `let` with a definite type.
@@ -544,6 +552,7 @@ async function assembleServer(
               // depending on domain only (§20.2).
               store: store as McpBackend,
               probeHost: probes,
+              macosCheckHost: macosChecks,
               ...(publisher ? { publishArtifact: publisher } : {}),
               ...(mobileSigning
                 ? {
@@ -778,6 +787,7 @@ async function assembleServer(
   let plane: ControlPlane | undefined;
   let extLoop: TimerLoop | undefined;
   let probeLoop: TimerLoop | undefined;
+  let macosLoop: TimerLoop | undefined;
   let extSender: LiveExtMessageSender | undefined;
   if (options.dispatcher !== undefined && options.role !== "web") {
     try {
@@ -789,6 +799,15 @@ async function assembleServer(
         slowTickMs: 60000,
         tick: () => probes.tick(),
         onError: () => warnLine("集成探针执行或清理未完成，将重试"),
+      });
+      macosLoop = startTimerLoop({
+        name: "macos-checks",
+        startup: startup.promise,
+        initialDelayMs: 2000,
+        intervalMs: 15000,
+        slowTickMs: 120000,
+        tick: () => macosChecks.tick(),
+        onError: () => warnLine("macOS 检查执行或清理未完成，将重试"),
       });
       const mergeIntervalMs =
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
@@ -985,6 +1004,7 @@ async function assembleServer(
         extSender?.stop(),
         extLoop?.stop(),
         probeLoop?.stop(),
+        macosLoop?.stop(),
         offsiteLoop?.stop(),
         plane?.stop(),
       ]);
@@ -1050,6 +1070,7 @@ async function assembleServer(
       extSender?.stop(),
       extLoop?.stop(),
       probeLoop?.stop(),
+      macosLoop?.stop(),
       offsiteLoop?.stop(),
       plane?.stop(),
     ]);
@@ -1105,6 +1126,7 @@ async function assembleServer(
         extSender?.stop(),
         extLoop?.stop(),
         probeLoop?.stop(),
+        macosLoop?.stop(),
         (offsiteSync?.stop(), offsiteLoop?.stop()),
         // C-601: in-flight signing helpers end inside the shutdown grace (a
         // margin before the forced exit), never as orphans of this process.

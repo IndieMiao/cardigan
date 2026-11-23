@@ -1,0 +1,230 @@
+# C-611: standard macOS check executor. The Cardigan host dispatches it for
+# the current delivery's candidate (the delivery merged onto the baseline) and
+# reads the summary line back into the card. Each request is a new dispatch;
+# GitHub re-runs are refused. Standard GitHub-hosted arm64 runner only; no
+# secrets, caches, artifacts or production machines.
+name: Cardigan macOS check
+run-name: cardigan/${{ inputs.card }}/${{ inputs.delivery }}/${{ inputs.attempt }}/${{ inputs.kind }}/${{ inputs.sha }}/${{ inputs.tree }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        required: true
+        type: string
+      tree:
+        required: true
+        type: string
+      card:
+        required: true
+        type: string
+      delivery:
+        required: true
+        type: string
+      attempt:
+        required: true
+        type: string
+      kind:
+        required: true
+        type: string
+      files:
+        description: Space-separated repository test files
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  macos:
+    # Standard (non-larger) arm64 runner, matching the macos-aarch64 hc archive.
+    runs-on: macos-15
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Validate inputs
+        env:
+          EXPECTED_SHA: ${{ inputs.sha }}
+          EXPECTED_TREE: ${{ inputs.tree }}
+          FILES: ${{ inputs.files }}
+        run: |
+          if [[ "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
+            echo "::error::request a new macOS check instead of re-running"
+            exit 1
+          fi
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(uname -s)/$(uname -m)" = Darwin/arm64
+          python3 -I - <<'PY'
+          import os, re
+          files = os.environ['FILES'].split(' ')
+          pattern = re.compile(r'(?:apps|packages)/[a-z0-9-]+/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*\.test\.(?:ts|tsx|mts)')
+          if not (0 < len(files) <= 16 and len(set(files)) == len(files) and all(
+              len(f) <= 200 and pattern.fullmatch(f) and '..' not in f.split('/') for f in files)):
+              raise SystemExit('invalid test file set')
+          PY
+      - name: Checkout candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify candidate identity
+        env:
+          EXPECTED_SHA: ${{ inputs.sha }}
+          EXPECTED_TREE: ${{ inputs.tree }}
+          FILES: ${{ inputs.files }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          read -r -a files <<< "$FILES"
+          for file in "${files[@]}"; do
+            git ls-files --error-unmatch -- "$file" > /dev/null
+          done
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Enable corepack
+        run: npm install --global corepack && corepack enable
+      - name: install
+        run: pnpm install --frozen-lockfile
+      - name: Install and verify hc
+        run: |
+          target="$RUNNER_TEMP/cardigan-hc"
+          mkdir "$target"
+          release="$(python3 -I - <<'PY'
+          import json, pathlib
+          manifest = json.loads(pathlib.Path('deploy/hc-version.json').read_text())
+          version = manifest['version']
+          release = manifest['targets']['macos-aarch64']
+          if release['url'] != f'https://releases.herdr.dev/core/{version}/herdr-core-macos-aarch64.tar.gz':
+              raise SystemExit('unexpected hc archive url')
+          print(release['url'], release['sha256'], manifest['download_user_agent'], version)
+          PY
+          )"
+          read -r url sha256 agent version <<< "$release"
+          curl --fail --silent --show-error --location --max-time 120 \
+            --user-agent "$agent" --output "$target/hc.tar.gz" "$url"
+          echo "$sha256  $target/hc.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$target/hc.tar.gz" -C "$target" 'Herdr Core.app'
+          app="$target/Herdr Core.app/Contents/MacOS/herdr-core"
+          lipo -archs "$app" | tr ' ' '\n' | grep -qx arm64
+          mkdir "$target/bin"
+          ln -s "$app" "$target/bin/hc"
+          test "$("$target/bin/hc" --version)" = "hc $version"
+          echo "$target/bin" >> "$GITHUB_PATH"
+          {
+            echo CARDIGAN_REQUIRE_HC=1
+            echo "CARDIGAN_TEST_HC=$target/bin/hc"
+          } >> "$GITHUB_ENV"
+      - name: build
+        run: pnpm exec tsc -b
+      # Candidate code never gets a GitHub command file. No retry is configured.
+      - name: test
+        id: test
+        timeout-minutes: 25
+        env:
+          COREPACK_ENABLE_NETWORK: '0'
+          CARDIGAN_FLAKE_CASES: ''
+          CARDIGAN_CHECKED_CASES: ''
+          FILES: ${{ inputs.files }}
+        run: |
+          read -r -a files <<< "$FILES"
+          status=0
+          env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STATE \
+            -u CARDIGAN_AGENT_LOCAL_TESTS \
+            pnpm exec vitest run --retry=0 --reporter=verbose --reporter=json \
+            --outputFile.json="$RUNNER_TEMP/cardigan-macos-vitest.json" \
+            "${files[@]}" || status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+      # The host reads the single result line printed here; keep it last.
+      - name: Summarize
+        if: ${{ always() }}
+        shell: python3 -I {0}
+        env:
+          REPORT: ${{ runner.temp }}/cardigan-macos-vitest.json
+          FILES: ${{ inputs.files }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          TEST_EXIT_CODE: ${{ steps.test.outputs.exit_code }}
+        run: |
+          import base64, json, os, pathlib, platform, re, subprocess
+
+          def command(*argv):
+              try:
+                  out = subprocess.run(argv, capture_output=True, text=True, timeout=10).stdout.strip()
+              except (OSError, subprocess.SubprocessError):
+                  out = ''
+              return out[:100] or 'unavailable'
+
+          def text(value, limit=200):
+              return ''.join(ch for ch in str(value) if ch.isprintable())[:limit]
+
+          def status(value):
+              return value if value in ('passed', 'failed') else 'skipped'
+
+          def phases(case):
+              # A case marks its own steps in task.meta.cardigan_phases as
+              # [{name, at_ms}] (ms since it started); those survive a timeout.
+              meta = case.get('meta')
+              raw = meta.get('cardigan_phases') if isinstance(meta, dict) else None
+              out, last = [], 0
+              for mark in raw[:50] if isinstance(raw, list) else []:
+                  at = mark.get('at_ms') if isinstance(mark, dict) else None
+                  if isinstance(at, bool) or not isinstance(at, (int, float)) or not last <= at < 10 ** 12:
+                      continue
+                  last = int(at)
+                  out.append({'name': text(mark.get('name'), 80), 'at_ms': last})
+              return out
+
+          exit_code = os.environ.get('TEST_EXIT_CODE', '')
+          summary = {
+              'version': 1,
+              'candidate_sha': command('git', 'rev-parse', 'HEAD'),
+              'candidate_tree': command('git', 'rev-parse', 'HEAD^{tree}'),
+              'macos': f"{command('sw_vers', '-productVersion')} ({command('sw_vers', '-buildVersion')})",
+              'arch': text(platform.machine(), 20),
+              'hc': command(os.environ.get('CARDIGAN_TEST_HC', 'hc'), '--version'),
+              'test_step': text(os.environ.get('TEST_OUTCOME') or 'not_run', 20),
+              'exit_code': int(exit_code) if exit_code.isdigit() else None,
+              'files': [],
+              'real_hc_cases': [],
+              'timeouts': [],
+          }
+          try:
+              report = json.loads(pathlib.Path(os.environ['REPORT']).read_text())
+          except (OSError, ValueError):
+              report = {}
+          modules = report.get('testResults', []) if isinstance(report, dict) else []
+          for name in os.environ['FILES'].split(' '):
+              entry = {'file': name, 'status': 'no_report', 'passed': 0, 'failed': 0, 'skipped': 0}
+              module = next((m for m in modules if str(m.get('name', '')).endswith('/' + name)), None)
+              if module is not None:
+                  entry['status'] = text(module.get('status'), 20)
+                  if module.get('message'):
+                      entry['error'] = text(str(module['message']).splitlines()[0], 300)
+                  cases = module.get('assertionResults', [])
+                  timeline = [{'title': text(c.get('fullName') or c.get('title', '')),
+                               'status': status(c.get('status')),
+                               'duration_ms': int(c.get('duration') or 0)} for c in cases]
+                  for case, row in zip(cases, timeline):
+                      entry[row['status']] += 1
+                      if re.search(r'\breal hc\b', row['title'], re.I):
+                          summary['real_hc_cases'].append({'file': name, **row})
+                      if any('timed out' in str(m).lower() for m in case.get('failureMessages', [])):
+                          summary['timeouts'].append({'file': name, **row, 'phases': phases(case), 'file_cases': timeline[:50]})
+              summary['files'].append(entry)
+          summary['real_hc_cases'] = summary['real_hc_cases'][:32]
+          summary['timeouts'] = summary['timeouts'][:8]
+
+          line = json.dumps(summary, ensure_ascii=False, separators=(',', ':'))
+          # Stay well inside the host's line limit: other cases' timings go first.
+          while len(line.encode()) > 60000 and any(t['file_cases'] for t in summary['timeouts']):
+              for t in summary['timeouts']:
+                  t['file_cases'] = t['file_cases'][:len(t['file_cases']) // 2]
+              line = json.dumps(summary, ensure_ascii=False, separators=(',', ':'))
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          if os.environ.get('GITHUB_STEP_SUMMARY'):
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+                  out.write('## Cardigan macOS check\n\n```json\n' + json.dumps(summary, ensure_ascii=False, indent=2) + '\n```\n')
+          print('cardigan-macos-result ' + base64.b64encode(line.encode()).decode())

@@ -52,6 +52,10 @@ import {
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
 import {
+  type MacosCheckToolOptions,
+  macosCheckTool,
+} from "./tools/macos-check.js";
+import {
   type MobileSigningOptions,
   mobileAccess,
   mobileSigningTool,
@@ -77,7 +81,8 @@ export interface McpServerOptions
     ReservationOptions,
     MobileSigningOptions,
     PublicationOptions,
-    ProbeToolOptions {
+    ProbeToolOptions,
+    MacosCheckToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
   readonly bodyTimeoutMs?: number;
@@ -138,12 +143,14 @@ export function serverTools(
     ReservationOptions &
     MobileSigningOptions &
     PublicationOptions &
-    ProbeToolOptions,
+    ProbeToolOptions &
+    MacosCheckToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
     runProbeTool(options),
+    macosCheckTool(options),
     mobileSigningTool(options),
     publicationTool(options),
     reservationTool(options),

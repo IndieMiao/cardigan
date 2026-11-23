@@ -645,6 +645,14 @@ export class ServerGit implements GitBinding {
   ) {
     return this.central.preparePrecheck(project, assignment, head, attempt);
   }
+  /** C-611: the pinned delivery merged onto the current baseline. */
+  prepareDeliveryCandidate(
+    project: CentralProject,
+    delivery: string,
+    head: string,
+  ) {
+    return this.central.prepareDeliveryCandidate(project, delivery, head);
+  }
   /** §3.3 step 2; a failure here is logged by the caller and repaired by reconcile. */
   async pinDelivery(input: {
     readonly project_id: ProjectId;

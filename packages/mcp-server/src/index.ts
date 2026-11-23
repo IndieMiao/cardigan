@@ -118,6 +118,10 @@ export {
   type ToolDefinition,
   whoamiTool,
 } from "./tools/index.js";
+export {
+  type MacosCheckToolOptions,
+  macosCheckTool,
+} from "./tools/macos-check.js";
 export type { SigningScope } from "./tools/mobile-signing.js";
 export {
   continuePublication,

@@ -513,6 +513,34 @@ export class GithubDispatchJournal {
       if (!current.finished) this.save(tx, { ...current, finished: true });
     });
   }
+  /**
+   * C-611: a probe-stream request that ended before its run was bound. Mark
+   * the exact reservation abandoned so the shared absence proof can release
+   * it, or a later discovery binds only the original run. A reservation that
+   * never crossed publication is released at once.
+   */
+  abandonProbe(intent: GithubDispatchIntent, reason: string): void {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      if (!this.probeCard || !current || current.key !== intent.key)
+        throw new GithubExecutorError("security");
+      if (current.finished || current.abandoned || current.deleting) return;
+      const unpublished =
+        current.phase === "reserved" &&
+        !current.publisher &&
+        !current.dispatchedRunId &&
+        !current.externalRun &&
+        !current.identity;
+      this.save(tx, {
+        ...current,
+        abandoned: "attempt_finished",
+        abandonmentReason: reason,
+        ...(unpublished ? { finished: true } : {}),
+      });
+    });
+  }
   /** Fence under the same fresh transaction as eligibility checks. */
   beginCleanup(
     intent: GithubDispatchIntent,
@@ -1084,7 +1112,6 @@ export class GithubDispatchJournal {
         (i) => i.attempt === intent.attempt,
       );
       if (
-        this.probeCard ||
         !current ||
         current.key !== intent.key ||
         !this.ownsScan(current, intent) ||
