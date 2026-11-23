@@ -39,6 +39,7 @@ import {
   useDrawerReturnFocus,
 } from "../components/layout/SettingsLayout.js";
 import { CAPABILITY_TAGS } from "../components/MachineDetail.js";
+import { OffsiteStatusSection } from "../components/OffsiteStatus.js";
 import { CardLink } from "../components/Operations.js";
 import {
   RequestFeedback,
@@ -509,6 +510,9 @@ function MachineDrawer({
               )
             }
           />
+        )}
+        {machine?.id === "local" && client.offsiteStatus && (
+          <OffsiteStatusSection client={client} />
         )}
       </CardDetailLayout>
     </Drawer>

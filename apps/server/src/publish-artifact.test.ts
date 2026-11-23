@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Attachment } from "@cardigan/domain";
-import { fileAttachmentStore } from "@cardigan/mcp-server";
+import { fileAttachmentStore, PublicationError } from "@cardigan/mcp-server";
 import { afterEach, expect, test, vi } from "vitest";
 import { apkPublisher, signedOnlyBy } from "./publish-artifact.js";
 
@@ -98,6 +98,10 @@ async function setup() {
     rangeIgnored: 0,
     wrongContentRange: 0,
     cut: 0,
+    /** Foreign keys under the prefix. */
+    extra: [] as string[],
+    /** C-609: the tool accepts an existing prefix for this decision. */
+    resumable: false,
   };
   const reads = new Map<string, number>();
   const execute = vi.fn(
@@ -123,12 +127,22 @@ async function setup() {
           return flags.versioned
             ? "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>"
             : "<VersioningConfiguration/>\n0.123456(s) elapsed\n";
-        case "list-objects-v2":
+        case "list-objects-v2": {
           expect(arg("--prefix")).toBe(prefix);
+          const keys = [...objects.keys(), ...flags.extra].filter((k) =>
+            k.startsWith(prefix),
+          );
           return JSON.stringify({
-            KeyCount: String(objects.size),
+            KeyCount: String(keys.length),
             IsTruncated: "false",
+            // ossutil renders a single entry as an object, several as a list.
+            ...(keys.length === 1
+              ? { Contents: { Key: keys[0] } }
+              : keys.length
+                ? { Contents: keys.map((Key) => ({ Key })) }
+                : {}),
           });
+        }
         case "put-object": {
           const key = arg("--key");
           expect(args).toContain("--forbid-overwrite=true");
@@ -172,7 +186,16 @@ async function setup() {
       new Uint8Array(flags.badHash ? Buffer.alloc(b.length) : b),
     );
   };
-  const claim = vi.fn(),
+  // Models the tool: an existing prefix is accepted only to continue this
+  // decision's interrupted claim (C-609).
+  let claims = 0;
+  const claim = vi.fn((_url: string, existing?: boolean) => {
+      if (existing && !flags.resumable)
+        throw new PublicationError(
+          claims ? "already_claimed" : "immutable_prefix",
+        );
+      claims++;
+    }),
     current = vi.fn();
   const delays = [0, 0, 0, 0];
   const call = () =>
@@ -211,11 +234,70 @@ test("sealed test prefix, verified public bytes, Range and release sidecars", as
   expect(
     JSON.parse(f.objects.get(`${f.prefix}release.json`)!.toString()),
   ).toMatchObject({ versionCode: 13, sha256: sha });
-  await expect(f.call()).rejects.toThrow("immutable_prefix");
-  expect(f.claim).toHaveBeenCalledOnce();
+  const puts = () =>
+    f.execute.mock.calls.filter(([, args]) => args[1] === "put-object").length;
+  expect(puts()).toBe(3);
+  await expect(f.call()).rejects.toThrow("already_claimed");
+  expect(f.claim).toHaveBeenLastCalledWith(
+    `${target.origin}/${f.prefix}app.apk`,
+    true,
+  );
+  expect(puts()).toBe(3);
   expect(
     (await readdir(f.root)).filter((v) => v.startsWith("publish-apk-")),
   ).toEqual([]);
+});
+
+test("C-609: an interrupted claim continues: existing objects are read back, missing ones written, none overwritten", async () => {
+  const f = await setup();
+  // The earlier server stopped after the APK write.
+  f.objects.set(`${f.prefix}app.apk`, apk);
+  f.flags.resumable = true;
+  await expect(f.call()).resolves.toEqual({
+    url: `${target.origin}/${f.prefix}app.apk`,
+    size: apk.length,
+    sha256: sha,
+  });
+  expect(f.claim).toHaveBeenCalledExactlyOnceWith(
+    `${target.origin}/${f.prefix}app.apk`,
+    true,
+  );
+  const written = f.execute.mock.calls
+    .filter(([, args]) => args[1] === "put-object")
+    .map(([, args]) => args[args.indexOf("--key") + 1]);
+  expect(written).toEqual([`${f.prefix}SHA256SUMS`, `${f.prefix}release.json`]);
+  // The APK already there was verified through the public path.
+  expect(f.reads.get(`false${f.prefix}app.apk`)).toBe(1);
+  expect(f.reads.get(`true${f.prefix}app.apk`)).toBe(1);
+  // A complete prefix of the same release resumes as pure verification.
+  const g = await setup();
+  await expect(g.call()).resolves.toMatchObject({ sha256: sha });
+  g.flags.resumable = true;
+  await expect(g.call()).resolves.toMatchObject({ sha256: sha });
+  expect(
+    g.execute.mock.calls.filter(([, args]) => args[1] === "put-object"),
+  ).toHaveLength(3);
+});
+
+test("C-609: a continued claim never accepts foreign or different bytes", async () => {
+  const wrong = await setup();
+  wrong.objects.set(
+    `${wrong.prefix}app.apk`,
+    Buffer.from("other apk bytes!!!!"),
+  );
+  wrong.flags.resumable = true;
+  await expect(wrong.call()).rejects.toThrow("download");
+  expect(wrong.objects.size).toBe(1);
+  const foreign = await setup();
+  foreign.flags.extra = [`${foreign.prefix}other.txt`];
+  foreign.flags.resumable = true;
+  await expect(foreign.call()).rejects.toThrow("immutable_prefix");
+  expect(foreign.claim).not.toHaveBeenCalled();
+  // Without a claim of this decision, any existing object seals the prefix.
+  const sealed = await setup();
+  sealed.objects.set(`${sealed.prefix}app.apk`, apk);
+  await expect(sealed.call()).rejects.toThrow("immutable_prefix");
+  expect(sealed.objects.size).toBe(1);
 });
 test.each([
   ["404 until the CDN fills", "missing", 4],

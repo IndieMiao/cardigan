@@ -130,6 +130,7 @@ export * from "./commands/merge-shadow.js";
 export * from "./commands/merge-snooze.js";
 export * from "./commands/merge-window.js";
 export * from "./commands/notices.js";
+export type { OwnerRecordInput } from "./commands/owner-record.js";
 export {
   buildPlainSummary,
   PLAIN_SUMMARY_LIMITS,
