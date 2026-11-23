@@ -280,7 +280,10 @@ test.each([68, 400 * 1024, MAX_ATTACHMENT_BYTES])(
         size,
       },
     });
-    expect(await uploadEvidenceFile(client, input(file))).toBe("attachment-1");
+    // The stub lists no tools, so pass the host limit the server would publish.
+    expect(
+      await uploadEvidenceFile(client, input(file), MAX_ATTACHMENT_BYTES),
+    ).toBe("attachment-1");
     const request = call.mock.calls[0]?.[0];
     expect(request).toMatchObject({
       name: "upload_attachment",
