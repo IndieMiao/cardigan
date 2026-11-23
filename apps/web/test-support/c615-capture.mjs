@@ -5,7 +5,7 @@
 // page overflow.
 // CHROMIUM_PATH=<chrome> node apps/web/test-support/c615-capture.mjs <new output dir>
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -126,6 +126,10 @@ try {
   for (const theme of ["light", "dark"]) {
     const result = { theme, shots: [] };
     cases.push(result);
+    // The Workbench follows the system colour scheme (theme.css media query).
+    await send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-color-scheme", value: theme }],
+    });
     await send("Page.navigate", { url: "about:blank" });
     await until("location.href === 'about:blank'");
     await send("Page.navigate", {
@@ -133,12 +137,15 @@ try {
     });
     await until("!!document.querySelector('.card-page .comment-input')");
     await evaluate("document.fonts.ready.then(() => true)");
-    await run((theme) => {
-      document.documentElement.dataset.theme = theme;
+    result.scheme = await run(() => ({
+      dark: matchMedia("(prefers-color-scheme: dark)").matches,
+      background: getComputedStyle(document.body).backgroundColor,
+    }));
+    await run(() => {
       [...document.querySelectorAll(".card-page [role=tab]")]
         .find((t) => t.textContent.startsWith("时间线"))
         ?.click();
-    }, theme);
+    });
     await until("document.querySelectorAll('a.ui-attachment-ref').length > 0");
     await run(() =>
       document
@@ -196,6 +203,22 @@ try {
     resolve(output, "measurements.json"),
     `${JSON.stringify(cases, null, 2)}\n`,
   );
+  const [light, dark] = cases;
+  assert.equal(light.scheme.dark, false, "light scheme");
+  assert.equal(dark.scheme.dark, true, "dark scheme");
+  assert.notEqual(
+    light.scheme.background,
+    dark.scheme.background,
+    "light and dark backgrounds differ",
+  );
+  for (const name of ["timeline", "comment-box"]) {
+    const [a, b] = await Promise.all(
+      ["light", "dark"].map((theme) =>
+        readFile(resolve(output, `${name}-${theme}.png`)),
+      ),
+    );
+    assert(!a.equals(b), `${name}: light and dark shots differ`);
+  }
   for (const c of cases) {
     assert.equal(c.timeline.chips.length, 6, `${c.theme}: chips`);
     assert.equal(c.timeline.plain, true, `${c.theme}: unknown stays text`);

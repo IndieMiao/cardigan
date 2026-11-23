@@ -1,10 +1,10 @@
 import type { SQLInputValue } from "node:sqlite";
 import {
+  attachmentReferenceIds,
   type CommandState,
   extractReferences,
   type ProjectId,
 } from "@cardigan/domain";
-import { attachmentReferenceIds } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
 
 type Collection =

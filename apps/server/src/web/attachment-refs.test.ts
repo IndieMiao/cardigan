@@ -31,6 +31,14 @@ test("C-615 other cards' attachments a body mentions resolve unless sensitive or
     expect(posted.status).toBe(200);
     const read = async () =>
       (await f.call(f.projectPath(`/cards/${other.id}`))).json as CardDetail;
+    // A number the page did not receive yet (a draft, an older page) resolves
+    // on its own with the same rules.
+    const refs = async (ids: string) =>
+      (
+        await f.call(
+          f.projectPath(`/cards/${other.id}/attachment-refs?ids=${ids}`),
+        )
+      ).json as { attachments: { id: string; card_id: string }[] };
     const detail = await read();
     expect(detail.referenced_attachments).toEqual([
       expect.objectContaining({
@@ -53,11 +61,33 @@ test("C-615 other cards' attachments a body mentions resolve unless sensitive or
     );
     expect(sensitive.status).toBe(200);
     expect((await read()).referenced_attachments).toEqual([]);
+    expect((await refs(file.id)).attachments).toEqual([]);
     await f.call(f.projectPath(`/cards/${f.card.id}/sensitive`), {
       method: "POST",
       body: { sensitive: false },
     });
     expect((await read()).referenced_attachments).toHaveLength(1);
+    expect(
+      (await refs(`${file.id},attachment-999`)).attachments.map((a) => [
+        a.id,
+        a.card_id,
+      ]),
+    ).toEqual([[file.id, f.card.id]]);
+    // The card's own attachment is already on its page.
+    expect(
+      (
+        await f.call(
+          f.projectPath(`/cards/${f.card.id}/attachment-refs?ids=${file.id}`),
+        )
+      ).json,
+    ).toEqual({ attachments: [] });
+    expect(
+      (
+        await f.call(
+          f.projectPath(`/cards/${other.id}/attachment-refs?ids=C-1`),
+        )
+      ).status,
+    ).toBe(400);
 
     f.store().uow.run((tx) =>
       tx.project_preferences.put(f.card.project_id, {
@@ -67,6 +97,7 @@ test("C-615 other cards' attachments a body mentions resolve unless sensitive or
       }),
     );
     expect((await read()).referenced_attachments).toEqual([]);
+    expect((await refs(file.id)).attachments).toEqual([]);
   } finally {
     await f.close();
   }
@@ -78,7 +109,7 @@ test("C-615 a comment's attachment-new-N reads as the uploaded number in the Wor
     await f.password(TEST_PASSWORD);
     await f.login();
     const comment = await f.agentComment(
-      "评审 attachment-new-1，日志 attachment-new-2，没有 attachment-new-3",
+      "评审 attachment-new-1，日志attachment-new-2，没有 attachment-new-3，示例 `attachment-new-1`",
     );
     const upload = (mime: string, body: string) =>
       f.mcp<{ id: string }>(f.primary.owner, "upload_attachment", {
@@ -90,7 +121,7 @@ test("C-615 a comment's attachment-new-N reads as the uploaded number in the Wor
       });
     const pdf = await upload("application/pdf", "%PDF-1.4");
     const log = await upload("text/plain", "log line");
-    const expected = `评审 ${pdf.id}，日志 ${log.id}，没有 attachment-new-3`;
+    const expected = `评审 ${pdf.id}，日志${log.id}，没有 attachment-new-3，示例 \`attachment-new-1\``;
 
     const detail = (await f.call(f.projectPath(`/cards/${f.card.id}`)))
       .json as CardDetail;

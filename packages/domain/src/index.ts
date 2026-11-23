@@ -1,4 +1,5 @@
 export * from "./artifact-publication.js";
+export * from "./attachment-refs.js";
 export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";

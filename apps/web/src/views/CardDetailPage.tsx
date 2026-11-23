@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -63,6 +64,7 @@ import { Button } from "../components/ui/button.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
+import { useAttachmentRefs } from "../useAttachmentRefs.js";
 import { useResource } from "../useResource.js";
 import { MergeConfirmation, SuggestedDecision } from "./NeedsYouPage.js";
 
@@ -89,6 +91,15 @@ const mergeTimeline = (
   [...new Map(pages.flat().map((entry) => [entry.id, entry])).values()].sort(
     (a, b) => b.event_seq - a.event_seq,
   );
+/** Other cards' attachments of two pages, the newer read winning. */
+const mergeReferenced = (
+  current: CardDetail["referenced_attachments"],
+  older: CardDetail["referenced_attachments"],
+): NonNullable<CardDetail["referenced_attachments"]> => [
+  ...new Map(
+    [...(older ?? []), ...(current ?? [])].map((a) => [a.id, a]),
+  ).values(),
+];
 
 export interface CardDetailPageProps {
   readonly client: CardiganClient;
@@ -268,6 +279,11 @@ export function CardDetailPage(props: CardDetailPageProps) {
             ...latest.detail,
             timeline: mergeTimeline(latest.detail.timeline, detail.timeline),
             timeline_next_cursor: detail.timeline_next_cursor ?? null,
+            // C-615: the older page's other-card attachments come with it.
+            referenced_attachments: mergeReferenced(
+              latest.detail.referenced_attachments,
+              detail.referenced_attachments,
+            ),
           };
           history.current = { key, detail: merged };
           replace(merged);
@@ -475,6 +491,33 @@ function CardContent({
   );
   const detail = head.overview ? { ...head, ...panelData.data } : head;
   const panelReady = !head.overview || !!panelData.data;
+  // C-615: numbers on timeline pages the head read did not cover (older
+  // pages, rows kept across a refresh) are read on their own.
+  const knownAttachments = useMemo(
+    () =>
+      new Set(
+        [...detail.attachments, ...(detail.referenced_attachments ?? [])].map(
+          (a) => a.id,
+        ),
+      ),
+    [detail.attachments, detail.referenced_attachments],
+  );
+  const timelineBodies = useMemo(
+    () => detail.timeline.map((entry) => entry.body),
+    [detail.timeline],
+  );
+  const laterRefs = useAttachmentRefs(
+    client,
+    projectId,
+    cardId,
+    timelineBodies,
+    knownAttachments,
+    detail.timeline,
+  );
+  const referencedAttachments = useMemo(
+    () => [...(detail.referenced_attachments ?? []), ...laterRefs],
+    [detail.referenced_attachments, laterRefs],
+  );
   const storyAttachments = useStoryAttachments({
     detail: head,
     client,
@@ -931,7 +974,7 @@ function CardContent({
             cardId={cardId}
             hasPmOps={detail.card.story ? undefined : detail.has_pm_ops}
             attachments={detail.attachments}
-            referencedAttachments={detail.referenced_attachments}
+            referencedAttachments={referencedAttachments}
             onPosted={onPosted}
             onConflict={onCommentConflict}
           />
@@ -952,6 +995,7 @@ function CardContent({
                 entries={detail.timeline}
                 attachments={detail.attachments}
                 detail={detail}
+                referencedAttachments={referencedAttachments}
                 typeFilter={filters.type ?? ""}
                 authorFilter={filters.author ?? ""}
                 anchor={anchor}

@@ -258,3 +258,165 @@ test("a comment accepted with files still uploading keeps the files in place", a
     uploadAttachment.mock.calls[0]?.[3],
   );
 });
+
+test("a retry after a partial failure skips the accepted file and locks its note, so attachment-new-2 stays the second file", async () => {
+  const sent: { name?: string; key?: string }[] = [];
+  let fail = true;
+  const uploadAttachment = vi.fn(
+    async (
+      _p: string,
+      _c: string,
+      input: UploadAttachmentInput,
+      key?: string,
+    ) => {
+      if (input.original_filename === "b.txt" && fail) {
+        fail = false;
+        throw new TypeError("lost");
+      }
+      sent.push({
+        ...(input.original_filename ? { name: input.original_filename } : {}),
+        ...(key ? { key } : {}),
+      });
+      return { id: `attachment-${20 + sent.length}` };
+    },
+  );
+  const posted: CommentInput[] = [];
+  render(
+    <CommentBox
+      client={fakeClient({
+        addComment: async (_p, _c, input) => {
+          posted.push(input);
+          return { id: "C-1#9", body: input.body, created_at: "" };
+        },
+        uploadAttachment,
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const input = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
+  act(() => input.focus());
+  choose(
+    new File(["a"], "a.txt", { type: "text/plain" }),
+    new File(["b"], "b.txt", { type: "text/plain" }),
+  );
+  type(input, "读第二份 #b");
+  fireEvent.keyDown(input, { key: "Enter" });
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await screen.findByRole("alert");
+  // The accepted file's note can no longer change (it would need a new key).
+  expect(
+    (screen.getByLabelText("a.txt 的说明") as HTMLInputElement).disabled,
+  ).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await waitFor(() => expect(input.value).toBe(""));
+  expect(sent.map((s) => s.name)).toEqual(["a.txt", "b.txt"]);
+  expect(posted.map((p) => p.body)).toEqual([
+    "读第二份 attachment-new-2 ",
+    "读第二份 attachment-new-2 ",
+  ]);
+});
+
+test("`#` right after Chinese text inserts a reference the renderer and the send both recognise", async () => {
+  const { input, posted, uploads } = setup();
+  choose(new File(["b"], "b.txt", { type: "text/plain" }));
+  type(input, "见#");
+  fireEvent.click(screen.getByRole("option", { name: /评审\.pdf/u }));
+  expect(input.value).toBe("见attachment-3 ");
+  type(input, "见attachment-3 和#b");
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(input.value).toBe("见attachment-3 和attachment-new-1 ");
+  fireEvent.click(screen.getByRole("tab", { name: "预览" }));
+  const preview = document.querySelector(".comment-preview") as HTMLElement;
+  expect(
+    within(preview).getByRole("link", { name: /评审\.pdf/u }),
+  ).toBeTruthy();
+  expect(preview.querySelector("[data-pending]")?.textContent).toBe("b.txt");
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await waitFor(() => expect(uploads).toHaveLength(1));
+  expect(posted).toEqual([{ body: "见attachment-3 和attachment-new-1 " }]);
+});
+
+test("choosing a reference mid-sentence replaces only the `#` and its query", () => {
+  const { input } = setup();
+  const value = "请看 #后续说明。";
+  fireEvent.change(input, { target: { value } });
+  input.setSelectionRange(4, 4);
+  fireEvent.select(input);
+  fireEvent.click(screen.getByRole("option", { name: /评审\.pdf/u }));
+  expect(input.value).toBe("请看 attachment-3 后续说明。");
+  const typed = "请看 #评后续";
+  fireEvent.change(input, { target: { value: typed } });
+  input.setSelectionRange(5, 5);
+  fireEvent.select(input);
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(input.value).toBe("请看 attachment-3 后续");
+});
+
+test("the preview reads another card's attachment named for the first time; unreadable numbers stay text", async () => {
+  const other = {
+    ...attachment({
+      id: "attachment-77",
+      original_filename: "数值表.json",
+      mime: "application/json",
+      inline: false,
+      thumbnail_path: null,
+      download_path: "/api/projects/p-1/attachments/attachment-77",
+    }),
+    card_id: "C-9",
+  };
+  const attachmentRefs = vi.fn(
+    async (_p: string, _c: string, ids: readonly string[]) => ({
+      attachments: [other].filter((a) => ids.includes(a.id)),
+    }),
+  );
+  render(
+    <CommentBox
+      client={fakeClient({ attachmentRefs })}
+      projectId="p-1"
+      cardId="C-1"
+      attachments={[review]}
+    />,
+  );
+  const input = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
+  act(() => input.focus());
+  type(input, "attachment-3、attachment-77 与 attachment-88");
+  // Nothing is read while writing.
+  expect(attachmentRefs).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("tab", { name: "预览" }));
+  const preview = document.querySelector(".comment-preview") as HTMLElement;
+  const chip = await within(preview).findByRole("link", {
+    name: /数值表\.json/u,
+  });
+  expect(chip.title).toContain("C-9");
+  // Only the numbers the page did not know are asked for.
+  expect(attachmentRefs).toHaveBeenCalledWith("p-1", "C-1", [
+    "attachment-77",
+    "attachment-88",
+  ]);
+  expect(preview.textContent).toContain("attachment-88");
+  expect(
+    preview.querySelector('[data-attachment-ref="attachment-88"]'),
+  ).toBeNull();
+});
+
+test("an empty file is accepted and a file name over 200 characters is refused before sending", () => {
+  setup();
+  const long = `${"长".repeat(197)}.txt`;
+  choose(
+    new File([], "empty.log", { type: "" }),
+    new File(["x"], long, { type: "text/plain" }),
+  );
+  expect(chips()).toEqual([expect.stringContaining("empty.log0 B")]);
+  expect(screen.getByRole("alert").textContent).toContain(
+    "文件名超过 200 字符",
+  );
+});
+
+test("a placeholder inside code is literal: no file needed, sent as written", async () => {
+  const { input, posted } = setup();
+  type(input, "占位符示例：`attachment-new-1`");
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]?.body).toBe("占位符示例：`attachment-new-1`");
+});

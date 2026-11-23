@@ -160,7 +160,7 @@ function setup(
 test("the placeholder names employees instead of roles or Assignments", () => {
   const { input } = setup();
   expect(input.placeholder).toBe(
-    "支持 Markdown；@ 提及员工；# 引用附件；可以粘贴或拖入文件",
+    "支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件",
   );
 });
 

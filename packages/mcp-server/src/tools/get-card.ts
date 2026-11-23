@@ -24,6 +24,7 @@ import {
   prechecks,
   precheckView,
   referenceReadState,
+  resolvePendingAttachmentRefs,
   roleRuleDeliveries,
   roleRuleInventory,
   runAuthorView,
@@ -33,7 +34,6 @@ import {
   verificationActivity,
 } from "@cardigan/domain";
 import { z } from "zod";
-import { resolvePendingAttachmentRefs } from "../attachment-refs.js";
 import { ToolError } from "../errors.js";
 import { timeRead } from "../read-timing.js";
 import { publicSourceMergeData } from "../source-merge-public.js";

@@ -45,6 +45,7 @@ import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { mergeProjectSettings } from "../merge-push-loop.js";
 import { readActivity } from "./activity-state.js";
+import { readAttachmentRefs } from "./attachment-ref-read.js";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
 import { cardSectionPayload } from "./card-sections.js";
@@ -917,6 +918,22 @@ async function serveProjectRoute(
         throw new HttpRejection(400, "validation_failed", error.message);
       throw error;
     }
+    return;
+  }
+
+  const attachmentRefs = /^\/cards\/([^/]+)\/attachment-refs$/.exec(rest);
+  if (attachmentRefs !== null) {
+    const card_id = decodeURIComponent(attachmentRefs[1] ?? "") as CardId;
+    const refs = readAttachmentRefs(
+      store,
+      project_id,
+      card_id,
+      url.searchParams.get("ids"),
+    );
+    if (refs === undefined) {
+      throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
+    }
+    sendJson(res, 200, refs);
     return;
   }
 

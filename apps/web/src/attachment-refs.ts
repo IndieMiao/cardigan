@@ -1,3 +1,4 @@
+import { replaceAttachmentRefs } from "@cardigan/domain";
 import type { AttachmentView } from "./api.js";
 
 /**
@@ -8,7 +9,7 @@ import type { AttachmentView } from "./api.js";
  * Agent writes it in `post_comment`. A file that is only being uploaded with
  * the comment has no number yet, and a posted comment cannot be edited, so
  * the body names it `attachment-new-N`: the N-th file sent with that comment.
- * The server reads it as the number that upload got (mcp-server
+ * The server reads it as the number that upload got (domain
  * attachment-refs.ts), for the Workbench and for Agents alike; the timeline
  * resolves it here too, for a body read before the uploads finished.
  */
@@ -69,8 +70,16 @@ export function uploadProblem(
   if (uploadMime(file) === undefined)
     return "不支持这种类型，可以上传图片、PDF、txt/log、md、json、html";
   if (file.size > MAX_UPLOAD_BYTES) return "超过 10 MiB";
-  if (file.size === 0) return "是空文件";
+  // The server's `original_filename` rules (domain `displayText`).
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(file.name)) return "文件名含控制字符";
+  if ([...uploadFilename(file.name)].length > 200) return "文件名超过 200 字符";
   return undefined;
+}
+
+/** The name sent as `original_filename`: its last path part, if not blank. */
+export function uploadFilename(name: string): string {
+  const base = name.split(/[\\/]/u).at(-1) ?? "";
+  return base.trim() ? base : "";
 }
 
 export function formatBytes(bytes: number): string {
@@ -132,10 +141,6 @@ export function attachmentTarget(
   };
 }
 
-/** `attachment-12` or `attachment-new-1`, not inside a longer word. */
-export const ATTACHMENT_TOKEN =
-  /(?<![\p{L}\p{N}_-])attachment-(?:new-)?[1-9][0-9]*(?![\p{L}\p{N}_-])/gu;
-
 export const pendingToken = (n: number) => `attachment-new-${n}`;
 
 /**
@@ -173,7 +178,7 @@ function attachmentNumber(id: string): number {
 export interface AttachmentQuery {
   readonly start: number;
   readonly query: string;
-  /** End of the text a chosen reference replaces; at or after the caret. */
+  /** End of the text a chosen reference replaces: the caret. */
   readonly end: number;
 }
 
@@ -193,8 +198,7 @@ export function attachmentQuery(
   if (before !== undefined && /[\x21-\x7e]/u.test(before)) return undefined;
   const query = line.slice(start + 1);
   if (/[\s#]/u.test(query)) return undefined;
-  const rest = /^[^\s#]*/u.exec(text.slice(caret))?.[0].length ?? 0;
-  return { start, query, end: caret + rest };
+  return { start, query, end: caret };
 }
 
 /** Replace the `#query` with the reference and a trailing space. */
@@ -216,20 +220,20 @@ export function insertAttachmentRef(
 /**
  * The body to post: the draft's own `attachment-new-K` (K is the file's
  * draft number) becomes `attachment-new-N`, N the file's place among the
- * files sent. A reference to a file no longer in the box is reported.
+ * files sent. A reference to a file no longer in the box is reported. Code
+ * and link destinations are literal and stay as written (domain rule).
  */
 export function numberPendingRefs(
   body: string,
   drafts: readonly number[],
 ): { body: string; missing: readonly string[] } {
   const missing = new Set<string>();
-  const next = body.replace(ATTACHMENT_TOKEN, (token) => {
-    const draft = /^attachment-new-(\d+)$/u.exec(token)?.[1];
-    if (draft === undefined) return token;
-    const index = drafts.indexOf(Number(draft));
+  const next = replaceAttachmentRefs(body, (match) => {
+    if (!match.pending) return undefined;
+    const index = drafts.indexOf(match.number);
     if (index < 0) {
-      missing.add(token);
-      return token;
+      missing.add(match.token);
+      return undefined;
     }
     return pendingToken(index + 1);
   });

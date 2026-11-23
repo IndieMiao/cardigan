@@ -681,9 +681,7 @@ export interface CardDetail {
    * C-615: other cards' attachments this page's bodies mention by number and
    * the reader may see; anything else stays plain text.
    */
-  readonly referenced_attachments?: readonly (AttachmentView & {
-    readonly card_id: string;
-  })[];
+  readonly referenced_attachments?: readonly ReferencedAttachment[];
   readonly relations: CardRelations;
   readonly counts: {
     readonly timeline: number;
@@ -719,6 +717,15 @@ export interface UploadAttachmentInput {
     | { readonly kind: "delivery"; readonly id: string };
   readonly basis?: string;
   readonly sha256?: string;
+}
+
+/** An attachment of another card, as `CardDetail.referenced_attachments`. */
+export type ReferencedAttachment = AttachmentView & {
+  readonly card_id: string;
+};
+
+export interface AttachmentRefsResponse {
+  readonly attachments: readonly ReferencedAttachment[];
 }
 
 export interface AttachmentReceipt {
@@ -2503,6 +2510,15 @@ export interface CardiganClient {
     projectId: string,
     cardId: string,
   ): Promise<MentionCandidates>;
+  /**
+   * C-615: other cards' attachments the page names but did not receive (a
+   * draft, older timeline pages); unreadable or missing numbers are left out.
+   */
+  attachmentRefs?(
+    projectId: string,
+    cardId: string,
+    ids: readonly string[],
+  ): Promise<AttachmentRefsResponse>;
   addComment(
     projectId: string,
     cardId: string,
@@ -2764,6 +2780,16 @@ export class HttpCardiganClient implements CardiganClient {
   ): Promise<MentionCandidates> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/mentions`,
+    );
+  }
+
+  attachmentRefs(
+    projectId: string,
+    cardId: string,
+    ids: readonly string[],
+  ): Promise<AttachmentRefsResponse> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/attachment-refs?ids=${ids.map(encodeURIComponent).join(",")}`,
     );
   }
 

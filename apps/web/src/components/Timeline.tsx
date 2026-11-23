@@ -1,4 +1,9 @@
-import type { AttachmentView, CardDetail, TimelineEntryView } from "../api.js";
+import type {
+  AttachmentView,
+  CardDetail,
+  ReferencedAttachment,
+  TimelineEntryView,
+} from "../api.js";
 import {
   type AttachmentRefs,
   attachmentTarget,
@@ -80,6 +85,11 @@ export interface TimelineProps {
   readonly typeFilter?: string;
   readonly authorFilter?: string;
   readonly anchor?: string | undefined;
+  /**
+   * C-615: other cards' attachments bodies may name; defaults to
+   * `detail.referenced_attachments`.
+   */
+  readonly referencedAttachments?: readonly ReferencedAttachment[];
 }
 
 export const timelineCategory = (entry: TimelineEntryView) =>
@@ -158,6 +168,7 @@ export function Timeline({
   typeFilter = "",
   authorFilter = "",
   anchor,
+  referencedAttachments,
 }: TimelineProps) {
   const groups = timelineGroups(entries)
     .map((group) =>
@@ -186,7 +197,11 @@ export function Timeline({
       if (!owner || entry.event_seq < owner.event_seq) aliasRows.set(id, entry);
     }
   }
-  const known = timelineAttachmentRefs(attachments, detail, cardId);
+  const known = timelineAttachmentRefs(
+    attachments,
+    referencedAttachments ?? detail?.referenced_attachments,
+    cardId,
+  );
   const row = (entry: TimelineEntryView, nested = false) => {
     const related = attachments.filter(
       (a) =>
@@ -384,11 +399,11 @@ export function Timeline({
  */
 export function timelineAttachmentRefs(
   attachments: readonly AttachmentView[],
-  detail: Pick<CardDetail, "referenced_attachments"> | undefined,
+  referenced: readonly ReferencedAttachment[] | undefined,
   cardId: string,
 ): AttachmentRefs {
   return new Map(
-    [...attachments, ...(detail?.referenced_attachments ?? [])].map((a) => [
+    [...attachments, ...(referenced ?? [])].map((a) => [
       a.id,
       attachmentTarget(a, cardId),
     ]),

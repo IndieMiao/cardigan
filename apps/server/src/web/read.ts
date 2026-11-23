@@ -19,6 +19,7 @@ import type {
   WorkItem,
 } from "@cardigan/domain";
 import {
+  attachmentReferenceIds,
   authorView,
   autoMergeSchedule,
   builtinCardTemplates,
@@ -53,6 +54,7 @@ import {
   type Role,
   remoteExitAction,
   requiresUiStateAndSave,
+  resolvePendingAttachmentRefs,
   resolveReferences,
   roleKind,
   runAuthorView,
@@ -68,10 +70,8 @@ import {
 } from "@cardigan/domain";
 import { type ProjectMergeGate, previewPorts } from "@cardigan/host";
 import {
-  attachmentReferenceIds,
   loadCommandState,
   type RecordReadTiming,
-  resolvePendingAttachmentRefs,
   timeRead,
 } from "@cardigan/mcp-server";
 import {

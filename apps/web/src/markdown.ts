@@ -1,6 +1,6 @@
+import { attachmentRefMatches } from "@cardigan/domain";
 import MarkdownIt from "markdown-it";
 import {
-  ATTACHMENT_TOKEN,
   type AttachmentRefs,
   type AttachmentRefTarget,
   formatBytes,
@@ -189,10 +189,13 @@ markdown.core.ruler.push("attachment_refs", (state) => {
         continue;
       }
       let last = 0;
-      for (const match of token.content.matchAll(ATTACHMENT_TOKEN)) {
-        const target = refs.get(match[0]);
+      // The parser already split off code and links: all of it is prose.
+      for (const match of attachmentRefMatches(token.content, {
+        literals: false,
+      })) {
+        const target = refs.get(match.token);
         if (!target) continue;
-        const at = match.index ?? 0;
+        const at = match.start;
         if (at > last) {
           const text = new state.Token("text", "", 0);
           text.content = token.content.slice(last, at);
@@ -201,7 +204,7 @@ markdown.core.ruler.push("attachment_refs", (state) => {
         const chip = new state.Token("attachment_ref", "", 0);
         chip.meta = { target };
         children.push(chip);
-        last = at + match[0].length;
+        last = match.end;
       }
       if (last === 0) children.push(token);
       else if (last < token.content.length) {

@@ -30,10 +30,12 @@ import {
   numberPendingRefs,
   pendingToken,
   UPLOAD_ACCEPT,
+  uploadFilename,
   uploadMime,
   uploadProblem,
 } from "../attachment-refs.js";
 import { renderMarkdown } from "../markdown.js";
+import { useAttachmentRefs } from "../useAttachmentRefs.js";
 import { AttachmentRefBody } from "./AttachmentRefBody.js";
 import { EmployeeFace } from "./EmployeeIdentity.js";
 import { RequestFeedback } from "./RequestFeedback.js";
@@ -98,6 +100,12 @@ interface PendingFile {
   readonly mime: string;
   readonly file: File;
   readonly note: string;
+  /**
+   * The attachment this file became on the accepted comment. A retry skips it:
+   * sending it again (say with a changed note, so a new key) would add a
+   * second copy and shift what `attachment-new-N` names.
+   */
+  readonly uploaded?: string;
 }
 
 interface AttachmentCandidate {
@@ -173,7 +181,7 @@ export function CommentBox({
     setPosted(false);
     // Retained files will attach to a new comment, so they need new keys too.
     setFiles((current) =>
-      current.map((file) => ({
+      current.map(({ uploaded: _uploaded, ...file }) => ({
         ...file,
         idempotencyKey: crypto.randomUUID(),
       })),
@@ -202,7 +210,7 @@ export function CommentBox({
     afterFocus.current = undefined;
   }, [focusRequest]);
 
-  const previewRefs = useMemo(() => {
+  const ownRefs = useMemo(() => {
     const refs = new Map<string, AttachmentRefTarget>(
       [...attachments, ...(referencedAttachments ?? [])].map((a) => [
         a.id,
@@ -219,6 +227,27 @@ export function CommentBox({
       });
     return refs;
   }, [attachments, referencedAttachments, files, cardId]);
+  const knownIds = useMemo(() => new Set(ownRefs.keys()), [ownRefs]);
+  // Numbers the page has not seen yet (another card's file named for the
+  // first time) are read when the preview shows them.
+  const previewTexts = useMemo(
+    () => (tab === "preview" ? [body] : []),
+    [tab, body],
+  );
+  const draftRefs = useAttachmentRefs(
+    client,
+    projectId,
+    cardId,
+    previewTexts,
+    knownIds,
+    knownIds,
+  );
+  const previewRefs = useMemo(() => {
+    if (!draftRefs.length) return ownRefs;
+    const refs = new Map(ownRefs);
+    for (const a of draftRefs) refs.set(a.id, attachmentTarget(a, cardId));
+    return refs;
+  }, [ownRefs, draftRefs, cardId]);
   const preview = useMemo(
     () =>
       tab === "preview"
@@ -556,18 +585,25 @@ export function CommentBox({
       if (files.length) setPosted(true);
       // One at a time, in the box's order: `attachment-new-N` relies on it.
       for (const file of files) {
-        await client.uploadAttachment(
+        if (file.uploaded) continue;
+        const filename = uploadFilename(file.file.name);
+        const receipt = await client.uploadAttachment(
           projectId,
           cardId,
           {
             file: await toBase64(file.file),
-            ...(file.file.name ? { original_filename: file.file.name } : {}),
+            ...(filename ? { original_filename: filename } : {}),
             ...(file.note.trim() ? { note: file.note } : {}),
             mime: file.mime,
             kind: "evidence",
             attach_to: { kind: "timeline_entry", id: comment.id },
           },
           file.idempotencyKey,
+        );
+        setFiles((current) =>
+          current.map((item) =>
+            item.id === file.id ? { ...item, uploaded: receipt.id } : item,
+          ),
         );
       }
       setBody("");
@@ -705,7 +741,7 @@ export function CommentBox({
                   ? optionId(attachmentCurrent)
                   : undefined
             }
-            placeholder="支持 Markdown；@ 提及员工；# 引用附件；可以粘贴或拖入文件"
+            placeholder="支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件"
             rows={expanded ? 6 : 2}
             value={body}
             disabled={submitting}
@@ -804,7 +840,7 @@ export function CommentBox({
                 aria-label={`${file.name} 的说明`}
                 placeholder="说明（可选）"
                 value={file.note}
-                disabled={submitting}
+                disabled={submitting || posted}
                 onChange={(event) => {
                   const note = event.target.value;
                   setFiles((current) =>
@@ -838,9 +874,6 @@ export function CommentBox({
           >
             发表评论
           </Button>
-          <span className="hint">
-            以你的身份发表；正文支持 Markdown，编号由服务端识别成链接。
-          </span>
         </div>
       )}
     </section>

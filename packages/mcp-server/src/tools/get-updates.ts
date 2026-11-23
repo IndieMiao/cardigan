@@ -1,9 +1,10 @@
-import { authorView, type CardId, mergeBatchReadScope } from "@cardigan/domain";
-import { z } from "zod";
 import {
-  hasPendingAttachmentRefs,
+  authorView,
+  type CardId,
+  mergeBatchReadScope,
   resolvePendingAttachmentRefs,
-} from "../attachment-refs.js";
+} from "@cardigan/domain";
+import { z } from "zod";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import { PROJECT_STREAM, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
@@ -78,7 +79,7 @@ export const getUpdatesTool = defineTool({
     // cards with such a comment read their attachments.
     const pending = new Set(
       updates.timeline
-        .filter((entry) => hasPendingAttachmentRefs(entry.body))
+        .filter((entry) => entry.body.includes("attachment-new-"))
         .map((entry) => entry.card_id),
     );
     const attachments = new Map(

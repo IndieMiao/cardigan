@@ -305,14 +305,16 @@ test("partial upload failure retains comment and individual image keys on retry"
   expect(input.value).toBe("两张图片");
   fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
   await waitFor(() => expect(input.value).toBe(""));
-  expect(fetcher.mock.calls).toHaveLength(6);
+  // The retry replays the comment and the failed image only (C-615): the
+  // accepted first image is not sent again.
+  expect(fetcher.mock.calls).toHaveLength(5);
   const keys = fetcher.mock.calls.map(([, init]) =>
     new Headers(init?.headers).get("Idempotency-Key"),
   );
   expect(new Set(keys.slice(0, 3)).size).toBe(3);
-  expect(keys.slice(3)).toEqual(keys.slice(0, 3));
+  expect(keys.slice(3)).toEqual([keys[0], keys[2]]);
   expect(fetcher.mock.calls.slice(3).map(([, init]) => init?.body)).toEqual(
-    fetcher.mock.calls.slice(0, 3).map(([, init]) => init?.body),
+    [0, 2].map((i) => fetcher.mock.calls[i]?.[1]?.body),
   );
 });
 
