@@ -21,6 +21,7 @@ import { promisify } from "node:util";
 import type {
   DeploymentBuild,
   DeploymentDriver,
+  DeploymentOperation,
   DeploymentRecord,
 } from "@cardigan/domain";
 import { currentDeploymentPin } from "@cardigan/domain";
@@ -29,8 +30,11 @@ import type { Store } from "@cardigan/store";
 import {
   deploymentMergeSegments,
   readInterruptedDeployment,
+  writeDeferredOperations,
   writeDeploymentRecord,
   writeDeploymentStop,
+  writeInterruptedOperations,
+  writeOperationWait,
   writeServerLogAudit,
   writeSupervisorComparison,
   writeSupervisorComparisonUnavailable,
@@ -53,6 +57,11 @@ import {
   taggedServerOutput,
 } from "./deployment-server-log.js";
 import { supervisorChanges } from "./deployment-supervisor-scope.js";
+import {
+  fenceLongOperations,
+  liveLongOperations,
+  releaseLongOperationFence,
+} from "./long-operations.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
 
@@ -74,6 +83,8 @@ interface State {
 /** Own child handles plus boot/start identity; never search cmdline or signal by name. */
 export class NodeDeploymentDriver implements DeploymentDriver {
   readonly enabled: boolean;
+  readonly batchWindowMs: number;
+  readonly operationWaitMs: number;
   private state!: State;
   private readonly retention?: DeploymentRetention;
   private readyMessage = false;
@@ -93,6 +104,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private supervisorSha: string | null | undefined;
   private checkedSupervisorMain?: string;
   private failedSupervisorMain?: string;
+  private lastOperationWait: string | undefined;
+  private notedOperations = new Set<string>();
   constructor(
     private readonly options: {
       store: Store;
@@ -102,6 +115,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     },
   ) {
     this.enabled = options.config.enabled;
+    // Defaults are applied by parseDeploymentConfig; a hand-built config opts out.
+    this.batchWindowMs = options.config.batch_window_ms ?? 0;
+    this.operationWaitMs = options.config.operation_wait_timeout_ms ?? 0;
     this.directory = deploymentDirectory(options.dataDir);
     if (options.config.retention)
       this.retention = new DeploymentRetention(
@@ -443,8 +459,55 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     }
     throw new Error("Server exited");
   }
-  async beforeStop(record: DeploymentRecord) {
-    return writeDeploymentStop(this.options.store, PROJECT, record);
+  async beforeStop(
+    record: DeploymentRecord,
+    interrupted: readonly DeploymentOperation[] = [],
+  ) {
+    const stopping = writeDeploymentStop(this.options.store, PROJECT, record);
+    if (interrupted.length)
+      try {
+        writeInterruptedOperations(
+          this.options.store,
+          record.attempt,
+          interrupted,
+        );
+      } catch {
+        // Card notes are informational; the project audit keeps the counts.
+      }
+    return stopping;
+  }
+  async operations() {
+    return liveLongOperations(this.options.store);
+  }
+  async fenceOperations() {
+    return fenceLongOperations(this.options.store);
+  }
+  async releaseOperationFence() {
+    releaseLongOperationFence(this.options.store);
+  }
+  async waitForOperations(
+    record: DeploymentRecord,
+    operations: readonly DeploymentOperation[] = [],
+  ) {
+    // Each source card hears once per operation that a deployment waits for it.
+    const fresh = operations.filter((op) => !this.notedOperations.has(op.id));
+    this.notedOperations = new Set(operations.map((op) => op.id));
+    if (fresh.length)
+      try {
+        writeDeferredOperations(this.options.store, record.attempt, fresh);
+      } catch {
+        /* Card notes are informational; the wait stays bounded. */
+      }
+    // Ticks repeat the same observation; skip the state load when unchanged.
+    const key = JSON.stringify([
+      record.status,
+      record.from,
+      record.to,
+      record.deferred_operations ?? [],
+    ]);
+    if (this.lastOperationWait === key) return;
+    writeOperationWait(this.options.store, PROJECT, record);
+    this.lastOperationWait = key;
   }
   async current() {
     return this.state.current;

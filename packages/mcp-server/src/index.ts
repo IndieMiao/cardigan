@@ -108,6 +108,9 @@ export {
 } from "./tools/macos-check.js";
 export type { SigningScope } from "./tools/mobile-signing.js";
 export {
+  continuePublication,
+  interruptedPublication,
+  MAX_PUBLICATION_CONTINUATIONS,
   PublicationError,
   type PublicationOptions,
   type PublishInput,

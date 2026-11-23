@@ -4,6 +4,7 @@ import { completeHumanAction, triageHumanAction } from "./coordination.js";
 import {
   completeVerifiedHelperAction,
   controlDeployment,
+  countDeploymentOperations,
   currentDeploymentPin,
   reconcileSupervisorNotice,
   recordDeployment,
@@ -191,7 +192,12 @@ test("stopping snapshots only running Runs and preserves every workflow state", 
   expect(finished.data.stop_snapshot).toEqual(effect.data.stop_snapshot);
 });
 
-test.each(["waiting_for_evidence", "waiting_for_capacity"] as const)(
+test.each([
+  "waiting_for_evidence",
+  "waiting_for_capacity",
+  "waiting_for_batch",
+  "waiting_for_operations",
+] as const)(
   "%s only records an observation and grants no workflow transition",
   (status) => {
     const state = fixture();
@@ -218,6 +224,94 @@ test.each(["waiting_for_evidence", "waiting_for_capacity"] as const)(
     expect(JSON.stringify(state)).toBe(original);
   },
 );
+
+test("C-609: operation waits carry only per-kind counts, copied, and grant no transition", () => {
+  const state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const deferred = [
+    { kind: "artifact_publication", count: 1 },
+    { kind: "mobile_signing", count: 2 },
+  ];
+  const effect = value(
+    recordDeployment(
+      state,
+      system,
+      {
+        ...record,
+        status: "stopping",
+        deferred_operations: deferred,
+        interrupted_operations: [{ kind: "mobile_signing", count: 51 }],
+        batch_window_ms: 300000,
+      },
+      ports(),
+    ),
+  );
+  expect(effect.changes).toEqual([]);
+  expect(effect.events[0]?.payload).toMatchObject({
+    deferred_operations: deferred,
+    interrupted_operations: [{ kind: "mobile_signing", count: 51 }],
+    batch_window_ms: 300000,
+  });
+  const payload = effect.events[0]?.payload as
+    | { deferred_operations?: unknown }
+    | undefined;
+  expect(payload?.deferred_operations).not.toBe(deferred);
+  const detail = {
+    kind: "mobile_signing",
+    project_id: "sensen",
+    card_id: "C-14",
+    label: "受管送签（android）",
+    started_at: now,
+  };
+  for (const invalid of [
+    // Another project's card detail never enters the deployment project.
+    { deferred_operations: [detail] },
+    {
+      deferred_operations: [
+        { kind: "mobile_signing", count: 1, card_id: "C-14" },
+      ],
+    },
+    { deferred_operations: [{ kind: "mobile_signing", count: 0 }] },
+    { deferred_operations: [{ kind: "mobile_signing", count: 1.5 }] },
+    { deferred_operations: [{ kind: "Sensen/C-14", count: 1 }] },
+    {
+      interrupted_operations: [
+        { kind: "mobile_signing", count: 1 },
+        { kind: "mobile_signing", count: 1 },
+      ],
+    },
+    {
+      interrupted_operations: Array.from({ length: 21 }, (_, i) => ({
+        kind: `k${i}`,
+        count: 1,
+      })),
+    },
+    { deferred_operations: "signing" },
+    { batch_window_ms: 0 },
+    { batch_window_ms: 1.5 },
+  ])
+    expect(
+      recordDeployment(
+        state,
+        system,
+        { ...record, ...(invalid as object) },
+        ports(),
+      ).ok,
+    ).toBe(false);
+});
+
+test("C-609: operation counts group by kind and are never truncated", () => {
+  expect(
+    countDeploymentOperations([
+      ...Array.from({ length: 60 }, () => ({ kind: "mobile_signing" })),
+      { kind: "artifact_publication" },
+    ]),
+  ).toEqual([
+    { kind: "artifact_publication", count: 1 },
+    { kind: "mobile_signing", count: 60 },
+  ]);
+  expect(countDeploymentOperations([])).toEqual([]);
+});
 
 test("backup evidence accepts only generated basenames, never paths or free text", () => {
   const state = fixture();

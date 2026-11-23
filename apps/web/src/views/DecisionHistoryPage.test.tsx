@@ -96,6 +96,55 @@ test("history shows the record row, and the drawer shows option, rationale and a
   expect(window.location.hash).toContain("card_id=C-1");
 });
 
+test("C-617 / Q-1198: PM's delegated decision shows the owner's words as separate cited evidence", async () => {
+  const linked: DecisionHistoryRecord = {
+    ...record,
+    decision_maker: "pm",
+    resolution: {
+      ...record.resolution,
+      raw_quote: "所有者已在卡上选 go",
+      rationale: "所有者已在卡上选 go",
+      owner_record: {
+        card_id: "C-1",
+        timeline_entry_id: "C-1#7",
+        quote: "Q-1 选 go",
+        at: "2026-11-09T00:00:00Z",
+        attachment_id: "att-1",
+      },
+    },
+  };
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({
+        decisionHistory: vi.fn(async () => ({
+          decisions: [linked],
+          next_cursor: null,
+        })),
+      })}
+    />,
+  );
+  const row = await screen.findByRole("row", { name: "拍板记录 Q-1" });
+  expect(row.textContent).toContain("PM 代拍");
+  fireEvent.click(screen.getByRole("link", { name: "是否继续" }));
+  const drawer = await screen.findByRole("dialog");
+  expect(drawer.querySelector(".card-metadata")?.textContent).toContain(
+    "PM 代拍",
+  );
+  // The formal result stays PM's: the quote is not inside the result section.
+  const result = screen.getByRole("region", { name: "结果" });
+  expect(result.textContent).toContain("所有者已在卡上选 go");
+  expect(result.textContent).not.toContain("Q-1 选 go");
+  const evidence = screen.getByRole("region", { name: "依据：所有者原话" });
+  // The quote uses the shared Markdown quote style.
+  expect(evidence.querySelector(".markdown blockquote")?.textContent).toContain(
+    "Q-1 选 go",
+  );
+  expect(evidence.textContent).toContain("来源：C-1#7 · 附件 att-1");
+  // No explanatory hint in the drawer; that sentence lives on the timeline only.
+  expect(drawer.textContent).not.toContain("不等于所有者亲自确认");
+});
+
 test("empty and failed history queries have readable states", async () => {
   render(<DecisionHistoryPage projectId="p-1" client={fakeClient()} />);
   expect(await screen.findByText("没有拍板记录")).toBeTruthy();
