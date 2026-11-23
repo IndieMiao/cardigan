@@ -1,4 +1,13 @@
-import { finishRun, reportBlocker, updateWorkItem } from "@cardigan/domain";
+import {
+  finishRun,
+  prepareDelivery,
+  type Result,
+  recordDeployment,
+  reportBlocker,
+  submitDelivery,
+  updateWorkItem,
+} from "@cardigan/domain";
+import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { PROJECT_EVENT_STREAM, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
@@ -11,6 +20,10 @@ beforeEach(() => {
   f = dispatchFixture();
 });
 afterEach(() => f.close());
+function unwrapOk<T>(result: Result<T>): T {
+  if (!result.ok) throw new Error(result.error.message);
+  return result.value;
+}
 const base = "a".repeat(40),
   next = "b".repeat(40);
 function wait() {
@@ -327,3 +340,187 @@ test.each(["explicit", "conflict", "blocked"])(
     expect(wake).toHaveBeenCalledTimes(1);
   },
 );
+
+const platform = "p-platform" as never;
+function platformDeployment(status: "stopping" | "deployed", ready: boolean) {
+  f.store.uow.run((tx) =>
+    persistEffect(
+      tx,
+      platform,
+      unwrapOk(
+        recordDeployment(
+          loadCommandState(tx, platform),
+          { kind: "system", project_id: platform },
+          {
+            attempt: `deploy-${status}`,
+            from: base,
+            to: next,
+            status,
+            build: "passed",
+            ready,
+            downtime_ms: 0,
+            summary: "fixture deployment",
+          },
+          { clock: f.clock, ids: tx.ids },
+        ),
+      ),
+    ),
+  );
+}
+function blockOnPlatform(target: ReturnType<typeof f.create>) {
+  const actor = {
+    ...f.actorFor(target.assignment),
+    allowed_tools: ["report_blocker" as const, "submit_delivery" as const],
+  };
+  f.apply(
+    (s, a, p) =>
+      reportBlocker(
+        s,
+        a,
+        {
+          work_item_id: target.item.id,
+          reason: "等待平台修复上线",
+          needs: "role",
+          resume_when: { kind: "deployment_ready", target_id: next },
+        },
+        p,
+      ),
+    actor,
+  );
+  return actor;
+}
+async function deliverFor(
+  target: ReturnType<typeof f.create>,
+  actor: ReturnType<typeof blockOnPlatform>,
+) {
+  const state = f.state();
+  const params = {
+    work_item_id: target.item.id,
+    kind: "code" as const,
+    summary: "Ready",
+    subject: { kind: "git_head" as const, value: base },
+    requested_verifiers: state.work_items
+      .filter(
+        (w) =>
+          w.kind === "verify" &&
+          w.required &&
+          w.target_work_item_id === target.item.id,
+      )
+      .map((w) => w.id),
+  };
+  const receipt = unwrapOk(
+    await prepareDelivery(state, actor, params, {
+      verify: async () => ({ ok: true, value: [] }),
+    }),
+  );
+  // Mirror the MCP command transaction: the host supplies the platform reader.
+  f.store.uow.run((tx) =>
+    persistEffect(
+      tx,
+      f.project,
+      unwrapOk(
+        submitDelivery(
+          loadCommandState(tx, f.project),
+          actor,
+          params,
+          receipt,
+          {
+            clock: f.clock,
+            ids: tx.ids,
+            platform_deployments: tx.platformDeployments,
+          },
+        ),
+      ),
+    ),
+  );
+}
+
+test("C-622: a business wait on a platform deployment resumes the live author Run in place, exactly once", async () => {
+  f.store.createProject({ id: platform, name: "Platform" });
+  const target = f.create();
+  allowBlocker();
+  const run = f.session(target.assignment, false);
+  blockOnPlatform(target);
+  const wake = vi.fn<DispatcherOptions["runtime"]["wake"]>(async () => ({
+    ok: true,
+    value: { sent: true },
+  }));
+  const options: DispatcherOptions = {
+    store: f.store,
+    clock: f.clock,
+    runtime: {
+      status: async () => ({
+        ok: true,
+        value: { process: "alive", agent: "working", observed_seq: 1 },
+      }),
+      wake,
+    } as DispatcherOptions["runtime"],
+    snapshot: vi.fn(),
+    startRun: vi.fn(),
+  };
+  // Starting a deployment of the SHA is not a ready deployment.
+  platformDeployment("stopping", false);
+  await new Dispatcher(options).tick();
+  expect(
+    f.state().work_items.find((w) => w.id === target.item.id)?.status,
+  ).toBe("blocked");
+  platformDeployment("deployed", true);
+  for (let i = 0; i < 3; i++) await new Dispatcher(options).tick();
+  const state = f.state();
+  expect(state.work_items.find((w) => w.id === target.item.id)).toMatchObject({
+    status: "in_progress",
+  });
+  expect(
+    state.work_items.find((w) => w.id === target.item.id)?.reported_blocker,
+  ).toBeUndefined();
+  const resumes = state.events.filter(
+    (e) => e.type === "work_item_resume_requested",
+  );
+  expect(resumes).toHaveLength(1);
+  const ready = f.store.uow
+    .read((tx) => tx.events.listAfter(platform, undefined, 0))
+    .findLast((e) => e.type === "host_deployment_recorded");
+  expect(resumes[0]?.payload).toMatchObject({
+    active_run_id: run.id,
+    evidence: `${platform}/${ready?.id}`,
+  });
+  // The live Run is notified; no second executor is queued or started.
+  expect(
+    state.runs.filter((r) => r.assignment_id === target.assignment.id),
+  ).toMatchObject([{ id: run.id, status: "running" }]);
+  expect(
+    f.store.listNotifications({
+      project_id: f.project,
+      assignment_id: target.assignment.id,
+    }),
+  ).toContainEqual(expect.objectContaining({ event_id: resumes[0]?.id }));
+  expect(options.startRun).not.toHaveBeenCalled();
+});
+
+test("C-622: before the background refreshes, the author's delivery clears a satisfied platform deployment wait inline", async () => {
+  f.store.createProject({ id: platform, name: "Platform" });
+  const target = f.create();
+  allowBlocker();
+  f.session(target.assignment, false);
+  const actor = blockOnPlatform(target);
+  platformDeployment("stopping", false);
+  await expect(deliverFor(target, actor)).rejects.toThrow(
+    "尚无系统记录证明已满足",
+  );
+  platformDeployment("deployed", true);
+  await deliverFor(target, actor);
+  for (let i = 0; i < 2; i++) {
+    runSystemRules(f.store, f.project, f.clock);
+    routeProjectEvents(f.store, f.project, { clock: f.clock });
+  }
+  const after = f.state();
+  expect(after.work_items.find((w) => w.id === target.item.id)).toMatchObject({
+    status: "delivered",
+  });
+  expect(
+    after.events.filter((e) => e.type === "blocker_wait_delivered"),
+  ).toHaveLength(1);
+  expect(
+    after.events.some((e) => e.type === "work_item_resume_requested"),
+  ).toBe(false);
+});
