@@ -1093,11 +1093,17 @@ export class Store {
    * watchdog of M3 plan §3.3 uses it to tell a busy Agent from a stuck one.
    * Unknown or unreleased Assignments are silently ignored, so a tool call can
    * never fail because of this bookkeeping.
+   *
+   * C-600: `token_id` is the Token the request authenticated with. A verified
+   * session records its launch's Token; a request on another one (a late call
+   * of the replaced session) is not this session's activity and is ignored,
+   * checked inside this write.
    */
   touchAssignmentActivity(
     project_id: ProjectId,
     assignment_id: AssignmentId,
     at: string = this.#clock.now(),
+    token_id?: string,
   ): boolean {
     return this.#run(() => {
       const row = this.#db
@@ -1106,6 +1112,12 @@ export class Store {
       if (row === undefined) return false;
       const assignment = JSON.parse(row.doc) as Assignment;
       if (assignment.status !== "active") return false;
+      if (
+        token_id !== undefined &&
+        assignment.mcp_session_token_id !== undefined &&
+        token_id !== assignment.mcp_session_token_id
+      )
+        return false;
       this.#db
         .prepare(
           "UPDATE assignments SET doc = ?, last_mcp_activity_at = ? WHERE project_id = ? AND id = ?",

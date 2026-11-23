@@ -82,18 +82,23 @@ export function pickProxyBypass(
  * The same merge in POSIX sh, run where the harness starts: the account's
  * inherited lists are only known there. `fixed` holds the values a launch
  * layer (profile env, Claude settings) sets; each spelling takes its fixed
- * value, else the inherited one, else the other spelling's — exactly the
- * list each client used before — and gains the Card host.
+ * value, else the inherited one, else — only when that spelling is set in
+ * no layer — the other spelling's: exactly the list each client used before.
+ * A spelling set to an empty value stays its own (empty) list, the way
+ * clients read it, so it only gains the Card host.
  */
 export function launchProxyBypassShell(
   host: string,
   fixed: ProxyBypassValues,
   quote: (value: string) => string,
 ): string {
-  const prior = (key: (typeof MCP_PROXY_BYPASS_KEYS)[number]) =>
-    fixed[key] === undefined ? `"\${${key}:-}"` : quote(fixed[key]);
+  const prior = (key: (typeof MCP_PROXY_BYPASS_KEYS)[number], name: string) =>
+    fixed[key] === undefined
+      ? `if [ "\${${key}+set}" = set ]; then cardigan_set_${name}=1; cardigan_prior_${name}=$${key}; else cardigan_set_${name}=; cardigan_prior_${name}=; fi`
+      : `cardigan_set_${name}=1; cardigan_prior_${name}=${quote(fixed[key])}`;
   return `# C-600: the Card MCP host never goes through a proxy; every other
-# destination keeps the route it had (per spelling, layered, \`*\` untouched).
+# destination keeps the route it had (per spelling, layered, an empty value
+# is not unset, \`*\` untouched).
 cardigan_bypass() {
   case "$(printf '%s' "$2" | tr -d ' \\t')" in
     \\*) printf '%s' "$2" ;;
@@ -101,11 +106,13 @@ cardigan_bypass() {
     *) printf '%s,%s' "$1" "$2" ;;
   esac
 }
-cardigan_prior_upper=${prior("NO_PROXY")}
-cardigan_prior_lower=${prior("no_proxy")}
-cardigan_upper=$(cardigan_bypass ${quote(host)} "\${cardigan_prior_upper:-$cardigan_prior_lower}")
-cardigan_lower=$(cardigan_bypass ${quote(host)} "\${cardigan_prior_lower:-$cardigan_prior_upper}")
+${prior("NO_PROXY", "upper")}
+${prior("no_proxy", "lower")}
+if [ -n "$cardigan_set_upper" ]; then cardigan_src=$cardigan_prior_upper; else cardigan_src=$cardigan_prior_lower; fi
+cardigan_upper=$(cardigan_bypass ${quote(host)} "$cardigan_src")
+if [ -n "$cardigan_set_lower" ]; then cardigan_src=$cardigan_prior_lower; else cardigan_src=$cardigan_prior_upper; fi
+cardigan_lower=$(cardigan_bypass ${quote(host)} "$cardigan_src")
 export NO_PROXY="$cardigan_upper" no_proxy="$cardigan_lower"
-unset cardigan_prior_upper cardigan_prior_lower cardigan_upper cardigan_lower
+unset cardigan_set_upper cardigan_set_lower cardigan_prior_upper cardigan_prior_lower cardigan_src cardigan_upper cardigan_lower
 `;
 }

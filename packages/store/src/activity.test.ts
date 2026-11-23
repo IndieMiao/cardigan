@@ -196,3 +196,48 @@ test("C-600 only the launch's own key advances a pending session; anything else 
     );
   });
 });
+
+test("C-600 V-2999:1 another launch's Token is not the verified session's activity", () => {
+  withTempStore((store) => {
+    const id = assignment().id;
+    const activity = () =>
+      store.uow.read((tx) => tx.assignments.get(project_id, id))
+        ?.last_mcp_activity_at;
+    store.uow.run((tx) =>
+      tx.assignments.put(project_id, {
+        ...assignment(),
+        mcp_handshake: "listed",
+        mcp_session_key_sha256: "a".repeat(64),
+        mcp_session_token_id: "token-new",
+      }),
+    );
+    expect(
+      store.touchAssignmentActivity(
+        project_id,
+        id,
+        "2026-01-01T00:01:00.000Z",
+        "token-old",
+      ),
+    ).toBe(false);
+    expect(activity()).toBeUndefined();
+    expect(
+      store.touchAssignmentActivity(
+        project_id,
+        id,
+        "2026-01-01T00:02:00.000Z",
+        "token-new",
+      ),
+    ).toBe(true);
+    expect(activity()).toBe("2026-01-01T00:02:00.000Z");
+    // Sessions without a recorded launch Token keep the old behaviour.
+    store.uow.run((tx) => tx.assignments.put(project_id, assignment()));
+    expect(
+      store.touchAssignmentActivity(
+        project_id,
+        id,
+        "2026-01-01T00:03:00.000Z",
+        "token-any",
+      ),
+    ).toBe(true);
+  });
+});

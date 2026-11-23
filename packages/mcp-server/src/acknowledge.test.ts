@@ -19,7 +19,7 @@ import { Store, writeRole } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import type { Identity } from "./auth.js";
+import { authenticate, type Identity } from "./auth.js";
 import type { McpBackend } from "./backend.js";
 import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import { loadCommandState, persistEffect } from "./commands/execute.js";
@@ -544,6 +544,44 @@ describe("C-600 a verified session must list the Card tools natively", () => {
     expect(handshake(assignment.id)).toBe("listed");
     await native.callTool({ name: "whoami", arguments: {} });
     expect(read(run_id)?.status).toBe("running");
+    for (const client of [late, native]) await client.close();
+  });
+
+  test("V-2999:1 a late call of the previous launch neither starts nor refreshes a session that has only listed", async () => {
+    const { assignment, run_id } = await start(true);
+    const activity = () =>
+      store.uow.read((tx) => tx.assignments.get(project_id, assignment.id))
+        ?.last_mcp_activity_at;
+    // The new harness has listed its tools but not called one yet.
+    const native = await connect(SESSION_KEY);
+    await native.listTools();
+    expect(handshake(assignment.id)).toBe("listed");
+    expect(read(run_id)?.status).toBe("dispatched");
+    // The replaced session's late call is answered, but writes nothing.
+    const late = await connect(undefined, oldToken);
+    const call = await late.callTool({ name: "whoami", arguments: {} });
+    expect(call.isError).not.toBe(true);
+    expect(read(run_id)?.status).toBe("dispatched");
+    expect(activity()).toBeUndefined();
+    // Replaying the confirmation with that authenticated identity: same.
+    const previous = authenticate(store, oldToken);
+    if (!previous.ok) throw new Error("old Token must still authenticate");
+    acknowledgeDispatchedRun(store, previous.value, () => NOW);
+    expect(read(run_id)?.status).toBe("dispatched");
+    expect(
+      store.touchAssignmentActivity(
+        project_id,
+        assignment.id,
+        NOW,
+        previous.value.token.id,
+      ),
+    ).toBe(false);
+    expect(activity()).toBeUndefined();
+    // Only this launch's own first call starts the Run and counts as activity.
+    const who = await native.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).not.toBe(true);
+    expect(read(run_id)?.status).toBe("running");
+    expect(activity()).toBeDefined();
     for (const client of [late, native]) await client.close();
   });
 

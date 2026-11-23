@@ -144,7 +144,14 @@ test("C-600 only a verified new session waits for this launch's tool listing; a 
 
   // A Run on the same terminal belongs to the same session.
   observe("listed");
-  commit(acknowledgeRun(f.state, actor(), { run_id: second.id }, f.io));
+  commit(
+    acknowledgeRun(
+      f.state,
+      actor(),
+      { run_id: second.id, token_id: `token-${second.id}` },
+      f.io,
+    ),
+  );
   finished(second, "completed");
   const reused = commit(queue());
   commit(dispatchRun(f.state, system, { run_id: reused.id }, f.io));
@@ -154,7 +161,14 @@ test("C-600 only a verified new session waits for this launch's tool listing; a 
   });
 
   // Unverified relaunches never inherit the old session's handshake or key.
-  commit(acknowledgeRun(f.state, actor(), { run_id: reused.id }, f.io));
+  commit(
+    acknowledgeRun(
+      f.state,
+      actor(),
+      { run_id: reused.id, token_id: `token-${second.id}` },
+      f.io,
+    ),
+  );
   finished(reused, "completed");
   const third = commit(queue());
   launch(third, false, "t3");
@@ -193,7 +207,12 @@ test.each(["pending", "missing"] as const)(
     launch(r);
     observe(state);
     expect(
-      acknowledgeRun(f.state, actor(), { run_id: r.id }, f.io),
+      acknowledgeRun(
+        f.state,
+        actor(),
+        { run_id: r.id, token_id: `token-${r.id}` },
+        f.io,
+      ),
     ).toMatchObject({
       ok: false,
       error: {
@@ -205,11 +224,83 @@ test.each(["pending", "missing"] as const)(
     if (state === "pending") {
       observe("listed");
       expect(
-        commit(acknowledgeRun(f.state, actor(), { run_id: r.id }, f.io)),
+        commit(
+          acknowledgeRun(
+            f.state,
+            actor(),
+            { run_id: r.id, token_id: `token-${r.id}` },
+            f.io,
+          ),
+        ),
       ).toMatchObject({ status: "running" });
     }
   },
 );
+
+test("C-600 V-2999:1 only this launch's Token acknowledges a verified session's Run", () => {
+  const first = commit(queue());
+  launch(first, true, "t1");
+  observe("listed");
+  commit(
+    acknowledgeRun(
+      f.state,
+      actor(),
+      { run_id: first.id, token_id: `token-${first.id}` },
+      f.io,
+    ),
+  );
+  finished(first, "completed");
+  // The replacement session has listed its tools but not called one yet.
+  const second = commit(queue());
+  launch(second, true, "t2");
+  observe("listed");
+  const before = f.state;
+  for (const token_id of [`token-${first.id}`, undefined]) {
+    // A late call of the replaced session, or one without a Token id.
+    const result = acknowledgeRun(
+      f.state,
+      actor(),
+      { run_id: second.id, ...(token_id ? { token_id } : {}) },
+      f.io,
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      value: { data: { status: "dispatched" }, events: [] },
+    });
+    commit(result);
+    expect(f.state.runs.find((x) => x.id === second.id)?.status).toBe(
+      "dispatched",
+    );
+  }
+  expect(f.state.runs).toEqual(before.runs);
+  expect(f.state.work_items).toEqual(before.work_items);
+  // This launch's own Token starts it.
+  expect(
+    commit(
+      acknowledgeRun(
+        f.state,
+        actor(),
+        { run_id: second.id, token_id: `token-${second.id}` },
+        f.io,
+      ),
+    ),
+  ).toMatchObject({ status: "running" });
+});
+
+test("C-600 an unverified session acknowledges with any of its Tokens, as before", () => {
+  const r = commit(queue());
+  launch(r, false);
+  expect(
+    commit(
+      acknowledgeRun(
+        f.state,
+        actor(),
+        { run_id: r.id, token_id: "token-other" },
+        f.io,
+      ),
+    ),
+  ).toMatchObject({ status: "running" });
+});
 
 test("C-600 an MCP stop needs proof the session has no tools and is withdrawn if it lists them", () => {
   const r = commit(queue());

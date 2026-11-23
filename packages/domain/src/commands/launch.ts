@@ -833,13 +833,27 @@ export function dispatchRun(
 export function acknowledgeRun(
   state: CommandState,
   actor: Actor,
-  p: { run_id: RunId },
+  p: {
+    run_id: RunId;
+    /**
+     * C-600: id of the Token the acknowledging request authenticated with.
+     * A verified session records its launch's Token; any other (e.g. a late
+     * call of the replaced session) cannot start this launch's Run.
+     */
+    token_id?: string;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "acknowledge_run", ports, (d) => {
     const run = d.ownRun(p.run_id);
     if (run.status === "running") return run;
     const assignment = target(d, run.assignment_id);
+    // Checked in this write, so no other launch's request can slip between.
+    if (
+      assignment.mcp_session_token_id !== undefined &&
+      p.token_id !== assignment.mcp_session_token_id
+    )
+      return run;
     // C-600: a call before the harness listed the Card tools is not native.
     ensure(
       assignment.mcp_handshake !== "pending" &&

@@ -177,6 +177,8 @@ export interface McpBackend {
     project_id: ProjectId,
     assignment_id: AssignmentId,
     at?: string,
+    /** C-600: the request's Token; another launch's Token is not activity. */
+    token_id?: string,
   ): boolean;
   /** C-600: record the session's native `tools/list` or a premature tool call. */
   advanceMcpHandshake?(

@@ -82,6 +82,14 @@ const EXISTING: Env[] = [
   { NO_PROXY: "*" },
   { no_proxy: "*" },
   { NO_PROXY: "localhost, * " },
+  // V-2999:2 — a spelling set to an empty value is not an unset one.
+  { NO_PROXY: "" },
+  { no_proxy: "" },
+  { NO_PROXY: "", no_proxy: "" },
+  { NO_PROXY: "*", no_proxy: "" },
+  { NO_PROXY: "", no_proxy: "*" },
+  { NO_PROXY: "localhost", no_proxy: "" },
+  { NO_PROXY: "", no_proxy: ".lan" },
 ];
 /** Profile (or settings) layer × account-inherited layer, incl. cross-spelling. */
 const LAYERS: { profile: Env; inherited: Env }[] = [
@@ -106,6 +114,17 @@ const LAYERS: { profile: Env; inherited: Env }[] = [
   {
     profile: { NO_PROXY: "other.invalid", no_proxy: "other.invalid" },
     inherited: { NO_PROXY: "api.internal.invalid", no_proxy: ".lan" },
+  },
+  // Explicitly empty spellings across the profile and account layers.
+  { profile: { NO_PROXY: "*" }, inherited: { no_proxy: "" } },
+  { profile: { no_proxy: "*" }, inherited: { NO_PROXY: "" } },
+  { profile: { no_proxy: "" }, inherited: { NO_PROXY: "*" } },
+  { profile: { NO_PROXY: "" }, inherited: { no_proxy: "*" } },
+  { profile: { no_proxy: "" }, inherited: { no_proxy: ".lan" } },
+  { profile: { NO_PROXY: "" }, inherited: { NO_PROXY: "localhost" } },
+  {
+    profile: { NO_PROXY: "localhost" },
+    inherited: { NO_PROXY: "*", no_proxy: "" },
   },
 ];
 
@@ -243,6 +262,36 @@ test("C-600 the NO_PROXY entry is the bare Card MCP host and `*` lists stay as t
   expect(launchProxyBypass(TAILNET, { NO_PROXY: "localhost" })).toEqual({
     NO_PROXY: `${CARD},localhost`,
     no_proxy: `${CARD},localhost`,
+  });
+  // A spelling set to an empty value keeps its own (empty) list.
+  expect(launchProxyBypass(TAILNET, { NO_PROXY: "*", no_proxy: "" })).toEqual({
+    NO_PROXY: "*",
+    no_proxy: CARD,
+  });
+  expect(
+    launchProxyBypass(TAILNET, { NO_PROXY: "", no_proxy: ".lan" }),
+  ).toEqual({ NO_PROXY: CARD, no_proxy: `${CARD},.lan` });
+});
+
+test("C-600 V-2999:2 `NO_PROXY=*` with an empty `no_proxy` keeps non-Card traffic on the proxy", () => {
+  // The reviewer's counterexample, run through the real merge on both paths.
+  const before = { NO_PROXY: "*", no_proxy: "" };
+  expect(routes({ HTTPS_PROXY: PROXY, ...before }).urllib.slice(1)).toEqual(
+    HOSTS.slice(1).map(() => false),
+  );
+  const providerEnv = { NO_PROXY: "*", HTTPS_PROXY: PROXY };
+  const inherited = { no_proxy: "" };
+  const expected = { NO_PROXY: "*", no_proxy: CARD };
+  expect(localEnv(compile("codex", { providerEnv }), inherited)).toEqual(
+    expected,
+  );
+  expect(
+    workerEnv(compile("codex", { providerEnv, remote: true }), inherited),
+  ).toEqual(expected);
+  // Unset is still not empty: an absent spelling takes the other's list.
+  expect(localEnv(compile("codex", { providerEnv }), {})).toEqual({
+    NO_PROXY: "*",
+    no_proxy: "*",
   });
 });
 

@@ -594,9 +594,13 @@ async function serveMcp(
     // and `tools/list` must not start the Run (§4 step 8) or make an idle Agent
     // look busy (M3 plan §3.3).
     onToolCall: () => {
+      // C-600: both are bound to this request's Token, so a late call of a
+      // replaced session neither starts nor keeps alive the new session.
       options.store.touchAssignmentActivity?.(
         identity.actor.project_id,
         identity.actor.assignment_id,
+        undefined,
+        identity.token.id,
       );
       if (options.acknowledgeRuns !== false) {
         acknowledgeDispatchedRun(options.store, identity);

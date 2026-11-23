@@ -148,7 +148,7 @@ beforeEach(() => {
   challenge = undefined;
   systemProxy = undefined;
   darwin = false;
-  vi.mocked(launchProxyBypass).mockClear();
+  vi.mocked(launchProxyBypass).mockReset();
   vi.mocked(agentProcessCommand)
     .mockReset()
     .mockImplementation(async (_config, args) => {
@@ -480,3 +480,28 @@ test("C-600 without a system proxy setting the probe connects directly", async (
   ).resolves.toBeUndefined();
   expect(requests).toBe(1);
 });
+
+test.each([
+  [{ NO_PROXY: "", no_proxy: "*" }, "control.example-tailnet.ts.net"],
+  [{ NO_PROXY: "*", no_proxy: "" }, "*"],
+  [{ NO_PROXY: "", no_proxy: "" }, "control.example-tailnet.ts.net"],
+  [
+    { NO_PROXY: "localhost", no_proxy: "" },
+    "control.example-tailnet.ts.net,localhost",
+  ],
+])(
+  "C-600 V-2999:2 an explicitly empty spelling is kept, as in the launch (%o)",
+  async (env, upper) => {
+    const config = { ...execution(), env };
+    // Same values the launch compiler gives this worker's harness.
+    expect(launchNoProxy(config, endpoint)).toBe(upper);
+    expect(launchProxyBypass).toHaveBeenLastCalledWith(endpoint, env);
+    systemProxy = await deadProxy();
+    authorization = undefined;
+    status = 401;
+    challenge = "Bearer";
+    body = { error: { code: "unauthorized", message: "unauthorized" } };
+    await expect(checkWorkerMcpReachability(config)).resolves.toBeUndefined();
+    expect(requests).toBe(1);
+  },
+);
