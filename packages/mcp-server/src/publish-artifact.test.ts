@@ -223,6 +223,59 @@ test("a failure before the first OSS write leaves the approval for exactly one r
     await expect(tool.handler(second, ctx)).rejects.toThrow("already_claimed");
     expect(pub).toHaveBeenCalledTimes(4);
 
+    // A new approval resumes only a URL this card already claimed for the same digest.
+    const resume = vi.fn(
+      async (_p, _a, _r, claim: (u: string, r?: boolean) => void) => {
+        claim(url, true);
+        return { url, size: 6, sha256: digest };
+      },
+    );
+    store.uow.run((tx) => {
+      for (const id of ["Q-4", "Q-5"])
+        tx.decisions.put(project_id, {
+          ...tx.decisions.get(project_id, "Q-1" as Decision["id"])!,
+          id: id as Decision["id"],
+          key: id,
+          ...(id === "Q-5"
+            ? {
+                options: [
+                  {
+                    key: "publish",
+                    description: "发布到 https://example.invalid/other/app.apk",
+                    impact: "公开",
+                  },
+                ],
+              }
+            : {}),
+        });
+    });
+    await expect(
+      publicationTool({ publishArtifact: resume }).handler(
+        { ...request, decision_id: "Q-4" },
+        ctx,
+      ),
+    ).resolves.toMatchObject({ url });
+    const other = vi.fn(
+      async (_p, _a, _r, claim: (u: string, r?: boolean) => void) => {
+        claim("https://example.invalid/other/app.apk", true);
+        return { url, size: 6, sha256: digest };
+      },
+    );
+    await expect(
+      publicationTool({ publishArtifact: other }).handler(
+        { ...request, decision_id: "Q-5" },
+        ctx,
+      ),
+    ).rejects.toThrow(
+      "immutable_prefix（未写入，修复后可用同一拍板重试 1 次）",
+    );
+    const bodies = store.uow.read((tx) =>
+      tx.timeline.list(project_id).map((e) => e.body),
+    );
+    expect(bodies.some((b) => b.includes("Q-4") && b.includes("续做"))).toBe(
+      true,
+    );
+
     // A failure after the claim stays claimed: no retry note.
     store.uow.run((tx) =>
       tx.decisions.put(project_id, {

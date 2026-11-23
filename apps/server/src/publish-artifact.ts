@@ -142,6 +142,29 @@ export const ossApi =
       stdout.replace(/\n[0-9]+(?:\.[0-9]+)?\(s\) elapsed\s*$/u, ""),
     );
 
+const untruncated = (listed: { IsTruncated?: unknown }) =>
+  [false, "false"].includes(listed.IsTruncated as never);
+const emptyListing = (listed: Record<string, unknown>) =>
+  [0, "0"].includes(listed.KeyCount as never) &&
+  !listed.Contents &&
+  untruncated(listed);
+/** ossutil renders a single listed object as an object, several as an array. */
+function resumable(listed: Record<string, unknown>, key: string, size: number) {
+  const contents = Array.isArray(listed.Contents)
+    ? listed.Contents
+    : listed.Contents
+      ? [listed.Contents]
+      : [];
+  const only = contents[0] as { Key?: unknown; Size?: unknown } | undefined;
+  return (
+    [1, "1"].includes(listed.KeyCount as never) &&
+    untruncated(listed) &&
+    contents.length === 1 &&
+    only?.Key === key &&
+    String(only.Size) === String(size)
+  );
+}
+
 export const run: Execute = async (
   tool: string,
   args: string[],
@@ -158,8 +181,15 @@ export const run: Execute = async (
     })
   ).stdout;
 
+/** Seconds between public read-back attempts: a CDN may briefly miss a just-written object. */
+export const READBACK_DELAYS = [5000, 15000, 30000, 60000] as const;
+const pause = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** A CDN fill race (missing object, Range ignored, wrong Content-Range, cut connection). */
+class Transient extends Error {}
+
 /** No redirects, cookies or OSS credentials on the public download path. */
-async function readBack(
+async function readOnce(
   get: typeof fetch,
   url: string,
   size: number,
@@ -169,42 +199,76 @@ async function readBack(
   const abort = new AbortController();
   const timeout = setTimeout(() => abort.abort(), 600000).unref();
   try {
-    const res = await get(url, {
-      redirect: "error",
-      credentials: "omit",
-      signal: abort.signal,
-      headers: {
-        "Accept-Encoding": "identity",
-        ...(range ? { Range: "bytes=0-0" } : {}),
-      },
-    });
+    let res: Response;
+    try {
+      res = await get(url, {
+        redirect: "error",
+        credentials: "omit",
+        signal: abort.signal,
+        headers: {
+          "Accept-Encoding": "identity",
+          ...(range ? { Range: "bytes=0-0" } : {}),
+        },
+      });
+    } catch {
+      throw new Transient();
+    }
+    if (res.status === 404 || (range && res.status === 200)) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new Transient();
+    }
+    if (res.status !== (range ? 206 : 200) || !res.body) throw Error();
     if (
-      res.status !== (range ? 206 : 200) ||
-      !res.body ||
-      (range && res.headers.get("content-range") !== `bytes 0-0/${range.total}`)
-    )
-      throw Error();
+      range &&
+      res.headers.get("content-range") !== `bytes 0-0/${range.total}`
+    ) {
+      await res.body.cancel().catch(() => undefined);
+      throw new Transient();
+    }
     const hash = createHash("sha256");
     let bytes = 0;
     const reader = res.body.getReader();
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytes += value.length;
+      let chunk: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        chunk = await reader.read();
+      } catch {
+        throw new Transient();
+      }
+      if (chunk.done) break;
+      bytes += chunk.value.length;
       if (bytes > size) throw Error();
-      hash.update(value);
+      hash.update(chunk.value);
     }
+    if (bytes < size) throw new Transient();
     if (
-      bytes !== size ||
       hash.digest("hex") !==
-        (range ? digest(Buffer.from([range.first])) : sha256)
+      (range ? digest(Buffer.from([range.first])) : sha256)
     )
       throw Error();
-  } catch {
-    throw new PublicationError("download");
   } finally {
     abort.abort();
     clearTimeout(timeout);
+  }
+}
+/** Retries only the transient cases, with a bounded backoff; wrong bytes fail at once. */
+async function readBack(
+  get: typeof fetch,
+  delays: readonly number[],
+  url: string,
+  size: number,
+  sha256: string,
+  range?: { total: number; first: number },
+) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await readOnce(get, url, size, sha256, range);
+    } catch (e) {
+      const wait = delays[attempt];
+      if (!(e instanceof Transient) || wait === undefined)
+        throw new PublicationError("download");
+      await pause(wait);
+    }
   }
 }
 
@@ -213,6 +277,7 @@ export function apkPublisher(
   root = join(homedir(), ".config", "cardigan"),
   execute: Execute = run,
   get = fetch,
+  delays: readonly number[] = READBACK_DELAYS,
 ): NonNullable<PublicationOptions["publishArtifact"]> {
   return async (project, a, request, claim, current) => {
     const t = await publicationTarget(root, project);
@@ -287,18 +352,16 @@ export function apkPublisher(
           "--prefix",
           prefix,
           "--max-keys",
-          "1",
+          "2",
           "--output-format",
           "json",
         ),
       );
-      if (
-        ![0, "0"].includes(listed.KeyCount) ||
-        listed.Contents ||
-        ![false, "false"].includes(listed.IsTruncated)
-      )
-        throw Error();
-      claim(url);
+      const resume = resumable(listed, prefix + filename, a.size);
+      if (!resume && !emptyListing(listed)) throw Error();
+      // A lone same-size APK is resumed only against this card's own earlier claim of this
+      // URL and digest; its bytes are then proven by the public SHA-256 read-back below.
+      claim(url, resume);
       // APK is the first conditional write for every contender. A partial directory is sealed, never repaired by overwrite.
       const put = async (name: string) => {
         current();
@@ -318,15 +381,16 @@ export function apkPublisher(
               : "text/plain",
         );
       };
-      await put(filename);
-      await readBack(get, url, a.size, a.sha256);
-      await readBack(get, url, 1, a.sha256, { total: a.size, first });
+      if (resume) stage = "download";
+      else await put(filename);
+      await readBack(get, delays, url, a.size, a.sha256);
+      await readBack(get, delays, url, 1, a.sha256, { total: a.size, first });
       for (const [name, body] of [
         ["SHA256SUMS", sums],
         ["release.json", release],
       ] as const) {
         await put(name);
-        await readBack(get, base + name, body.length, digest(body));
+        await readBack(get, delays, base + name, body.length, digest(body));
       }
       return { url, size: a.size, sha256: a.sha256 };
     } catch (e) {

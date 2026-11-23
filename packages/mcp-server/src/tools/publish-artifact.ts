@@ -29,7 +29,8 @@ export interface PublicationOptions {
     project: string,
     a: Attachment,
     request: PublishInput,
-    claim: (url: string) => void,
+    /** `resume`: the prefix holds only this APK; skip its upload and only read back. */
+    claim: (url: string, resume?: boolean) => void,
     current: () => void,
   ) => Promise<{ url: string; size: number; sha256: string }>;
 }
@@ -126,7 +127,7 @@ export function publicationTool(options: PublicationOptions) {
   return defineTool({
     name: "publish_artifact",
     description:
-      "Publish one signed test APK to this project's configured HTTPS destination. Requires a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths.",
+      "Publish one signed test APK to this project's configured HTTPS destination. If an earlier claim on this card already wrote only this APK to the same URL, a new approval resumes it: read back, then write the sidecars. Requires a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths.",
     input,
     handler: async (request, ctx) => {
       const { actor, token } = ctx.identity,
@@ -204,7 +205,7 @@ export function publicationTool(options: PublicationOptions) {
           )
             throw new PublicationError("artifact");
         };
-        const claim = (url: string) => {
+        const claim = (url: string, resume = false) => {
           revalidate();
           ctx.store.uow.run((tx) => {
             fresh(tx);
@@ -220,13 +221,29 @@ export function publicationTool(options: PublicationOptions) {
               throw new PublicationError("approval");
             if (attempts(tx, p, a.card_id, request.decision_id).claimed)
               throw new PublicationError("already_claimed");
+            const receipt = `${url} · ${a.sha256}`;
+            // Only this card's own earlier claim of the same URL and digest proves who wrote the lone APK.
+            if (
+              resume &&
+              !tx.events
+                .listAfter(p, a.card_id, 0)
+                .some(
+                  (e) =>
+                    e.type === "artifact_publication_claimed" &&
+                    (e.payload as { result?: string })?.result === receipt,
+                )
+            )
+              throw new PublicationError("immutable_prefix");
             audit(
               tx,
               ctx,
               a.card_id,
               request,
               "claimed",
-              `${url} · ${a.sha256}`,
+              receipt,
+              resume
+                ? "（续做：APK 已在目录中，跳过上传，只回读并补写清单）"
+                : "",
             );
           });
         };

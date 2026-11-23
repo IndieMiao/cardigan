@@ -93,7 +93,13 @@ async function setup() {
     range: 206,
     badHash: false,
     versioned: false,
+    /** CDN fill race: answer this many reads per URL with 404 / ignored Range / bad Content-Range / cut stream. */
+    missing: 0,
+    rangeIgnored: 0,
+    wrongContentRange: 0,
+    cut: 0,
   };
+  const reads = new Map<string, number>();
   const execute = vi.fn(
     async (
       tool: string,
@@ -119,10 +125,20 @@ async function setup() {
             : "<VersioningConfiguration/>\n0.123456(s) elapsed\n";
         case "list-objects-v2":
           expect(arg("--prefix")).toBe(prefix);
-          return JSON.stringify({
-            KeyCount: String(objects.size),
-            IsTruncated: "false",
-          });
+          expect(arg("--max-keys")).toBe("2");
+          {
+            const listed = [...objects]
+              .filter(([k]) => k.startsWith(prefix))
+              .map(([Key, b]) => ({ Key, Size: String(b.length) }));
+            const page = listed.slice(0, 2);
+            return JSON.stringify({
+              KeyCount: String(page.length),
+              IsTruncated: String(listed.length > 2),
+              ...(page.length
+                ? { Contents: page.length === 1 ? page[0] : page }
+                : {}),
+            });
+          }
         case "put-object": {
           const key = arg("--key");
           expect(args).toContain("--forbid-overwrite=true");
@@ -139,12 +155,28 @@ async function setup() {
     expect(init?.redirect).toBe("error");
     expect(init?.credentials).toBe("omit");
     const path = String(url).slice(target.origin.length + 1);
+    const ranged = new Headers(init?.headers).has("range");
+    const n = (reads.get(`${ranged}${path}`) ?? 0) + 1;
+    reads.set(`${ranged}${path}`, n);
     const b = objects.get(path);
-    if (!b) return new Response(null, { status: 404 });
-    if (new Headers(init?.headers).has("range"))
+    if (!b || n <= flags.missing) return new Response(null, { status: 404 });
+    if (n <= flags.cut)
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(new Uint8Array(b.subarray(0, 1)));
+            c.error(Error("reset"));
+          },
+        }),
+      );
+    if (ranged && n <= flags.rangeIgnored)
+      return new Response(new Uint8Array(b));
+    if (ranged)
       return new Response(new Uint8Array(b.subarray(0, 1)), {
         status: flags.range,
-        headers: { "content-range": `bytes 0-0/${b.length}` },
+        headers: {
+          "content-range": `bytes 0-0/${n <= flags.wrongContentRange ? b.length + 1 : b.length}`,
+        },
       });
     return new Response(
       new Uint8Array(flags.badHash ? Buffer.alloc(b.length) : b),
@@ -152,9 +184,27 @@ async function setup() {
   };
   const claim = vi.fn(),
     current = vi.fn();
+  const delays = [0, 0, 0, 0];
   const call = () =>
-    apkPublisher(root, root, execute, get)(project, a, request, claim, current);
-  return { root, objects, prefix, flags, execute, get, claim, current, call };
+    apkPublisher(root, root, execute, get, delays)(
+      project,
+      a,
+      request,
+      claim,
+      current,
+    );
+  return {
+    root,
+    objects,
+    prefix,
+    flags,
+    reads,
+    execute,
+    get,
+    claim,
+    current,
+    call,
+  };
 }
 
 test("sealed test prefix, verified public bytes, Range and release sidecars", async () => {
@@ -177,6 +227,80 @@ test("sealed test prefix, verified public bytes, Range and release sidecars", as
     (await readdir(f.root)).filter((v) => v.startsWith("publish-apk-")),
   ).toEqual([]);
 });
+test.each([
+  ["404 until the CDN fills", "missing", 4],
+  ["Range answered with a full 200", "rangeIgnored", 4],
+  ["wrong Content-Range", "wrongContentRange", 4],
+  ["connection cut mid-body", "cut", 4],
+] as const)("read-back retries a %s, bounded", async (_, flag, limit) => {
+  const ok = await setup();
+  ok.flags[flag] = limit;
+  await expect(ok.call()).resolves.toMatchObject({ sha256: sha });
+  expect(ok.objects.size).toBe(3);
+  const fail = await setup();
+  fail.flags[flag] = limit + 1;
+  await expect(fail.call()).rejects.toThrow("download");
+  expect(fail.objects.size).toBe(1);
+  expect(Math.max(...fail.reads.values())).toBe(limit + 1);
+});
+test("wrong bytes are not retried", async () => {
+  const f = await setup();
+  f.flags.badHash = true;
+  await expect(f.call()).rejects.toThrow("download");
+  expect(f.reads.get(`false${f.prefix}app.apk`)).toBe(1);
+});
+test("after a post-write read-back failure, a new approval resumes the lone APK and writes the sidecars", async () => {
+  const f = await setup();
+  f.flags.missing = 99;
+  await expect(f.call()).rejects.toThrow("download");
+  expect([...f.objects.keys()]).toEqual([`${f.prefix}app.apk`]);
+  expect(f.claim).toHaveBeenLastCalledWith(
+    `${target.origin}/${f.prefix}app.apk`,
+    false,
+  );
+  f.flags.missing = 0;
+  f.reads.clear();
+  const puts = () =>
+    f.execute.mock.calls.filter(([, args]) => args[1] === "put-object").length;
+  const before = puts();
+  await expect(f.call()).resolves.toMatchObject({ sha256: sha });
+  expect(f.claim).toHaveBeenLastCalledWith(
+    `${target.origin}/${f.prefix}app.apk`,
+    true,
+  );
+  expect(puts() - before).toBe(2);
+  expect(f.objects.size).toBe(3);
+  await expect(f.call()).rejects.toThrow("immutable_prefix");
+});
+test.each([
+  "different size",
+  "same size, different bytes",
+  "another object",
+  "claim refused",
+] as const)("resume refuses: %s", async (issue) => {
+  const f = await setup();
+  const key = `${f.prefix}app.apk`;
+  f.objects.set(
+    key,
+    issue === "different size"
+      ? Buffer.concat([apk, Buffer.from("x")])
+      : issue === "same size, different bytes"
+        ? Buffer.alloc(apk.length)
+        : apk,
+  );
+  if (issue === "another object") f.objects.set(`${f.prefix}SHA256SUMS`, apk);
+  if (issue === "claim refused")
+    f.claim.mockImplementation(() => {
+      throw Error("immutable_prefix");
+    });
+  const failure =
+    issue === "same size, different bytes" ? "download" : "immutable_prefix";
+  await expect(f.call()).rejects.toThrow(failure);
+  expect(
+    f.execute.mock.calls.some(([, args]) => args[1] === "put-object"),
+  ).toBe(false);
+});
+
 test.each([
   "configuration",
   "signature",
