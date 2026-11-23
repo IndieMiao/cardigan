@@ -119,9 +119,13 @@ try {
   const hoverCard = async (id, middle = false) => {
     const point = await run(
       (id, middle) => {
-        const r = document
-          .querySelector(`[data-card-id="${id}"]`)
-          .getBoundingClientRect();
+        // The base code has no data-card-id: fall back to the number badge.
+        const r = (
+          document.querySelector(`[data-card-id="${id}"]`) ??
+          [...document.querySelectorAll(".board-card")].find(
+            (e) => e.querySelector(".card-id")?.textContent.trim() === id,
+          )
+        ).getBoundingClientRect();
         return {
           x: r.right - 24,
           y: middle ? (r.top + r.bottom) / 2 : r.bottom - 12,
@@ -314,8 +318,10 @@ try {
       if (width === 390)
         // Narrow: bring C-23's lane into view so the hover is on screen.
         await run(() => {
-          const lane = document
-            .querySelector('[data-card-id="C-23"]')
+          const lane = [...document.querySelectorAll(".board-card")]
+            .find(
+              (e) => e.querySelector(".card-id")?.textContent.trim() === "C-23",
+            )
             .closest(".board-column");
           document.querySelector(".board").scrollLeft = lane.offsetLeft - 12;
         });
