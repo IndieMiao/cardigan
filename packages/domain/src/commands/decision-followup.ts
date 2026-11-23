@@ -352,12 +352,15 @@ export function decisionHistory(
     .map((q) => ({
       ...q,
       category: q.category ?? "general",
+      // C-617: an owner answer linked by PM is the owner's decision; PM only registered it.
       decision_maker:
         q.resolution.resolved_by === "system"
           ? "system"
-          : q.resolution.via === "delegated"
-            ? "pm"
-            : "human",
+          : q.resolution.owner_record
+            ? "human"
+            : q.resolution.via === "delegated"
+              ? "pm"
+              : "human",
     }))
     .filter(
       (q) =>

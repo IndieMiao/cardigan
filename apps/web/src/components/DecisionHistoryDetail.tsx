@@ -34,6 +34,13 @@ function optionNote(q: DecisionHistoryRecord, key: string) {
   return notes.length ? `（${notes.join("，")}）` : "";
 }
 
+/** Render the owner's words with the shared Markdown quote style. */
+const quoted = (text: string) =>
+  text
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+
 /** C-457: one resolved decision in the shared detail drawer layout. */
 export function DecisionHistoryDetail({
   q,
@@ -106,9 +113,7 @@ export function DecisionHistoryDetail({
               <div>
                 <dt>所有者原话</dt>
                 <dd>
-                  <blockquote>
-                    <Markdown body={q.resolution.owner_record.quote} />
-                  </blockquote>
+                  <Markdown body={quoted(q.resolution.owner_record.quote)} />
                 </dd>
                 <dd>
                   {q.resolution.owner_record.timeline_entry_id}
@@ -126,7 +131,7 @@ export function DecisionHistoryDetail({
               </div>
             )}
             <div>
-              <dt>{q.resolution.owner_record ? "登记人" : "记录人"}</dt>
+              <dt>记录人</dt>
               <dd>
                 <EmployeeIdentity
                   {...q.resolution}

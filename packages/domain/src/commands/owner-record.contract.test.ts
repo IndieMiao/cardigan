@@ -192,9 +192,15 @@ describe("owner record linking", () => {
     expect(body).toContain(`所有者已在卡上答复（${entry.id}，${now}）`);
     expect(body).toContain(`> ${entry.body}`);
     expect(body).toContain("PM 关联登记，不代替所有者作决定");
-    // Decision history still reports the registrar's channel; the record shows the owner.
+    // History shows the owner as the decision maker; the PM stays the registrar.
     const history = decisionHistory(f.state).find((h) => h.id === q.id);
-    expect(history?.decision_maker).toBe("pm");
+    expect(history?.decision_maker).toBe("human");
+    expect(history?.resolution.resolved_by).toBe(
+      `assignment:${id("assignment", 4)}`,
+    );
+    expect(
+      decisionHistory(f.state, { decider: "pm" }).map((h) => h.id),
+    ).not.toContain(q.id);
     expect(history?.resolution.owner_record?.author).toBe("human");
     // One decision cannot be closed twice, even with the same record.
     expect(error(f.link(q.id, { timeline_entry_id: entry.id }))?.code).toBe(

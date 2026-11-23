@@ -99,6 +99,8 @@ test("history shows the record row, and the drawer shows option, rationale and a
 test("C-617: the drawer separates the owner's quoted answer from the PM who registered it", async () => {
   const linked: DecisionHistoryRecord = {
     ...record,
+    // The server reports the owner as the decision maker for linked answers.
+    decision_maker: "human",
     resolution: {
       ...record.resolution,
       raw_quote: "Q-1 选 go",
@@ -123,15 +125,23 @@ test("C-617: the drawer separates the owner's quoted answer from the PM who regi
       })}
     />,
   );
-  fireEvent.click(await screen.findByRole("link", { name: "是否继续" }));
+  const row = await screen.findByRole("row", { name: "拍板记录 Q-1" });
+  expect(row.textContent).toContain("所有者");
+  expect(row.textContent).not.toContain("PM 代拍");
+  fireEvent.click(screen.getByRole("link", { name: "是否继续" }));
   const drawer = await screen.findByRole("dialog");
+  expect(drawer.querySelector(".card-metadata")?.textContent).toContain(
+    "所有者",
+  );
+  expect(drawer.textContent).not.toContain("PM 代拍");
   expect(drawer.textContent).toContain("所有者原话");
-  expect(drawer.querySelector("blockquote")?.textContent).toContain(
+  // The quote uses the shared Markdown quote style.
+  expect(drawer.querySelector(".markdown blockquote")?.textContent).toContain(
     "Q-1 选 go",
   );
   expect(drawer.textContent).toContain("C-1#7 · 附件 att-1");
-  expect(drawer.textContent).toContain("登记人");
-  expect(drawer.textContent).not.toContain("记录人");
+  // Same column name as the list: the PM who registered it.
+  expect(drawer.textContent).toContain("记录人");
 });
 
 test("empty and failed history queries have readable states", async () => {

@@ -1134,7 +1134,18 @@ test("C-617: an owner comment posted in Workbench closes the PM-routed decision 
     const history = (await f.call(f.projectPath("/decision-history"))).json as {
       decisions: Decision[];
     };
-    const record = history.decisions.find((d) => d.id === q.id);
+    const record = history.decisions.find((d) => d.id === q.id) as
+      | (Decision & { decision_maker?: string })
+      | undefined;
+    // The owner decided; PM Ops only registered it.
+    expect(record?.decision_maker).toBe("human");
+    const byMaker = async (decider: string) =>
+      (
+        (await f.call(f.projectPath(`/decision-history?decider=${decider}`)))
+          .json as { decisions: Decision[] }
+      ).decisions.map((d) => d.id);
+    expect(await byMaker("human")).toContain(q.id);
+    expect(await byMaker("pm")).not.toContain(q.id);
     expect(record?.resolution).toMatchObject({
       via: "delegated",
       resolved_by: `assignment:${ops.id}`,
