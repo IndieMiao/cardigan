@@ -120,21 +120,65 @@ test("the actual MCP handler checks the token, card and stored decision before h
   }
 });
 
-test("a failure before the first OSS write leaves the approval for exactly one retry", async () => {
+function publisherContext() {
   const store = Store.open({ dbPath: ":memory:" });
+  const { assignment: a, timeline } = seedProject(store);
+  store.uow.run((tx) =>
+    tx.assignments.put(project_id, { ...a, role_id: "release_ops" }),
+  );
+  const token = store.issueToken({
+    project_id,
+    assignment_id: a.id,
+    role: { role_version: 1, allowed_tools: ["publish_artifact"] },
+  });
+  const identity = authenticate(store, token.token);
+  const entry = timeline[0]?.id;
+  if (!identity.ok || !entry) throw Error();
+  return {
+    store,
+    entry,
+    ctx: { identity: identity.value, store, revalidateToken: vi.fn() },
+  };
+}
+const approval = (
+  id: string,
+  digest: string,
+  options: Decision["options"],
+  option = "publish",
+  attachment_ids: string[] = ["attachment-1"],
+): Decision => ({
+  id: id as Decision["id"],
+  key: id as Decision["id"],
+  category: "publish",
+  card_id,
+  kind: "approve",
+  target: { subject: { kind: "artifact_sha256", value: digest } },
+  ...(attachment_ids.length ? { attachment_ids } : {}),
+  status: "resolved",
+  decider: "human",
+  options,
+  recommended: option,
+  question: "外发？",
+  context: "测试",
+  raised_by: "human",
+  affected_cards: [card_id],
+  affected_work_items: [],
+  blocking: false,
+  doc_refs: [],
+  resolution: {
+    option,
+    rationale: "通过",
+    resolved_by: "human",
+    via: "needs_you",
+    via_chain: [],
+    raw_quote: "通过",
+    at: NOW,
+  },
+});
+
+test("a failure before the first OSS write consumes nothing; after a write the same approval resumes", async () => {
+  const { store, entry, ctx } = publisherContext();
   try {
-    const { assignment: a, timeline } = seedProject(store);
-    store.uow.run((tx) =>
-      tx.assignments.put(project_id, { ...a, role_id: "release_ops" }),
-    );
-    const token = store.issueToken({
-      project_id,
-      assignment_id: a.id,
-      role: { role_version: 1, allowed_tools: ["publish_artifact"] },
-    });
-    const identity = authenticate(store, token.token);
-    if (!identity.ok) throw Error();
-    const ctx = { identity: identity.value, store, revalidateToken: vi.fn() };
     const digest = "a".repeat(64),
       url = "https://example.invalid/test/app.apk";
     const request = {
@@ -143,6 +187,9 @@ test("a failure before the first OSS write leaves the approval for exactly one r
       version: "1.0",
       versionCode: 1,
     };
+    const publish = [
+      { key: "publish", description: `发布到 ${url}`, impact: "公开" },
+    ];
     store.uow.run((tx) => {
       tx.attachments.put(project_id, {
         id: request.attachment_id,
@@ -153,39 +200,9 @@ test("a failure before the first OSS write leaves the approval for exactly one r
         mime: "application/octet-stream",
         uploaded_by: "human",
         storage_path: "",
-        attach_to: { kind: "timeline_entry", id: timeline[0]!.id },
+        attach_to: { kind: "timeline_entry", id: entry },
       });
-      tx.decisions.put(project_id, {
-        id: "Q-1" as Decision["id"],
-        key: "Q-1",
-        category: "publish",
-        card_id,
-        kind: "approve",
-        target: { subject: { kind: "artifact_sha256", value: digest } },
-        attachment_ids: [request.attachment_id],
-        status: "resolved",
-        decider: "human",
-        options: [
-          { key: "publish", description: `发布到 ${url}`, impact: "公开" },
-        ],
-        recommended: "publish",
-        question: "外发？",
-        context: "测试",
-        raised_by: "human",
-        affected_cards: [card_id],
-        affected_work_items: [],
-        blocking: false,
-        doc_refs: [],
-        resolution: {
-          option: "publish",
-          rationale: "通过",
-          resolved_by: "human",
-          via: "needs_you",
-          via_chain: [],
-          raw_quote: "通过",
-          at: NOW,
-        },
-      });
+      tx.decisions.put(project_id, approval("Q-1", digest, publish));
     });
     let fail: string | undefined = "signature";
     const pub = vi.fn(async (_p, _a, _r, claim: (u: string) => void) => {
@@ -195,109 +212,207 @@ test("a failure before the first OSS write leaves the approval for exactly one r
     });
     const call = () =>
       publicationTool({ publishArtifact: pub }).handler(request, ctx);
-    await expect(call()).rejects.toThrow(
-      "signature（未写入，修复后可用同一拍板重试 1 次）",
-    );
-    fail = "immutable_prefix";
-    await expect(call()).rejects.toThrow(
-      "immutable_prefix（未写入，本拍板重试已用尽",
-    );
+    for (const category of [
+      "signature",
+      "manifest",
+      "immutable_prefix",
+      "configuration",
+      "signature",
+    ]) {
+      fail = category;
+      await expect(call()).rejects.toThrow(
+        `${category}（未写入，修复后可用同一授权直接重试）`,
+      );
+    }
     fail = undefined;
-    await expect(call()).rejects.toThrow("retry_exhausted");
-    expect(pub).toHaveBeenCalledTimes(2);
+    await expect(call()).resolves.toMatchObject({ url });
+    await expect(call()).rejects.toThrow("already_claimed");
+    expect(pub).toHaveBeenCalledTimes(6);
 
-    // Attempts are counted per approval.
+    // A claimed attempt that failed after writing continues with the same
+    // approval: the host resumes only a lone APK this card already claimed.
     store.uow.run((tx) =>
-      tx.decisions.put(project_id, {
-        ...tx.decisions.get(project_id, "Q-1" as Decision["id"])!,
-        id: "Q-2" as Decision["id"],
-        key: "Q-2",
-      }),
+      tx.decisions.put(project_id, approval("Q-3", digest, publish)),
     );
-    const second = { ...request, decision_id: "Q-2" };
-    const tool = publicationTool({ publishArtifact: pub });
-    fail = "manifest";
-    await expect(tool.handler(second, ctx)).rejects.toThrow("重试 1 次");
-    fail = undefined;
-    await expect(tool.handler(second, ctx)).resolves.toMatchObject({ url });
-    await expect(tool.handler(second, ctx)).rejects.toThrow("already_claimed");
-    expect(pub).toHaveBeenCalledTimes(4);
-
-    // A new approval resumes only a URL this card already claimed for the same digest.
-    const resume = vi.fn(
-      async (_p, _a, _r, claim: (u: string, r?: boolean) => void) => {
-        claim(url, true);
-        return { url, size: 6, sha256: digest };
-      },
-    );
-    store.uow.run((tx) => {
-      for (const id of ["Q-4", "Q-5"])
-        tx.decisions.put(project_id, {
-          ...tx.decisions.get(project_id, "Q-1" as Decision["id"])!,
-          id: id as Decision["id"],
-          key: id,
-          ...(id === "Q-5"
-            ? {
-                options: [
-                  {
-                    key: "publish",
-                    description: "发布到 https://example.invalid/other/app.apk",
-                    impact: "公开",
-                  },
-                ],
-              }
-            : {}),
-        });
-    });
-    await expect(
-      publicationTool({ publishArtifact: resume }).handler(
-        { ...request, decision_id: "Q-4" },
-        ctx,
-      ),
-    ).resolves.toMatchObject({ url });
-    const other = vi.fn(
-      async (_p, _a, _r, claim: (u: string, r?: boolean) => void) => {
-        claim("https://example.invalid/other/app.apk", true);
-        return { url, size: 6, sha256: digest };
-      },
-    );
-    await expect(
-      publicationTool({ publishArtifact: other }).handler(
-        { ...request, decision_id: "Q-5" },
-        ctx,
-      ),
-    ).rejects.toThrow(
-      "immutable_prefix（未写入，修复后可用同一拍板重试 1 次）",
-    );
-    const bodies = store.uow.read((tx) =>
-      tx.timeline.list(project_id).map((e) => e.body),
-    );
-    expect(bodies.some((b) => b.includes("Q-4") && b.includes("续做"))).toBe(
-      true,
-    );
-
-    // A failure after the claim stays claimed: no retry note.
-    store.uow.run((tx) =>
-      tx.decisions.put(project_id, {
-        ...tx.decisions.get(project_id, "Q-1" as Decision["id"])!,
-        id: "Q-3" as Decision["id"],
-        key: "Q-3",
-      }),
-    );
-    const late = vi.fn(async (_p, _a, _r, claim: (u: string) => void) => {
-      claim(url);
-      throw new PublicationError("upload");
-    });
     const third = { ...request, decision_id: "Q-3" };
+    let resumed = false;
+    const late = vi.fn(
+      async (_p, _a, _r, claim: (u: string, r?: boolean) => void) => {
+        claim(url, resumed);
+        if (!resumed) throw new PublicationError("download");
+        return { url, size: 6, sha256: digest };
+      },
+    );
     const error = await publicationTool({ publishArtifact: late })
       .handler(third, ctx)
       .catch((e: Error) => e);
-    expect(String(error)).toContain("upload");
-    expect(String(error)).not.toContain("未写入");
+    expect(String(error)).toContain("download（可能已写入部分对象");
+    resumed = true;
     await expect(
       publicationTool({ publishArtifact: late }).handler(third, ctx),
-    ).rejects.toThrow("already_claimed");
-    expect(late).toHaveBeenCalledOnce();
+    ).resolves.toMatchObject({ url });
+    expect(late).toHaveBeenCalledTimes(2);
+    const bodies = store.uow.read((tx) =>
+      tx.timeline.list(project_id).map((e) => e.body),
+    );
+    expect(bodies.some((b) => b.includes("Q-3") && b.includes("续做"))).toBe(
+      true,
+    );
+
+    // Resume is refused for a URL this card never claimed for that digest.
+    const other = "https://example.invalid/other/app.apk";
+    store.uow.run((tx) =>
+      tx.decisions.put(
+        project_id,
+        approval("Q-5", digest, [
+          { key: "publish", description: `发布到 ${other}`, impact: "公开" },
+        ]),
+      ),
+    );
+    await expect(
+      publicationTool({
+        publishArtifact: async (_p, _a, _r, claim) => {
+          claim(other, true);
+          return { url: other, size: 6, sha256: digest };
+        },
+      }).handler({ ...request, decision_id: "Q-5" }, ctx),
+    ).rejects.toThrow("immutable_prefix（未写入");
+  } finally {
+    store.close();
+  }
+});
+
+test("one executor per approval: a concurrent call is refused without touching the host", async () => {
+  const { store, entry, ctx } = publisherContext();
+  try {
+    const digest = "a".repeat(64),
+      url = "https://example.invalid/test/app.apk";
+    store.uow.run((tx) => {
+      tx.attachments.put(project_id, {
+        id: "attachment-1",
+        kind: "evidence",
+        card_id,
+        sha256: digest,
+        size: 6,
+        mime: "application/octet-stream",
+        uploaded_by: "human",
+        storage_path: "",
+        attach_to: { kind: "timeline_entry", id: entry },
+      });
+      tx.decisions.put(
+        project_id,
+        approval("Q-1", digest, [
+          { key: "publish", description: `发布到 ${url}`, impact: "公开" },
+        ]),
+      );
+    });
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const pub = vi.fn(async (_p, _a, _r, claim: (u: string) => void) => {
+      await gate;
+      claim(url);
+      return { url, size: 6, sha256: digest };
+    });
+    const tool = publicationTool({ publishArtifact: pub });
+    const request = {
+      attachment_id: "attachment-1",
+      decision_id: "Q-1",
+      version: "1.0",
+      versionCode: 1,
+    };
+    const first = tool.handler(request, ctx);
+    await expect(tool.handler(request, ctx)).rejects.toThrow("in_progress");
+    release();
+    await expect(first).resolves.toMatchObject({ url });
+    expect(pub).toHaveBeenCalledOnce();
+    const failed = store.uow.read((tx) =>
+      tx.events
+        .listAfter(project_id, card_id, 0)
+        .filter((e) => e.type === "artifact_publication_failed"),
+    );
+    expect(failed).toEqual([]);
+  } finally {
+    store.close();
+  }
+});
+
+test("an approved release chain publishes the signed APK it bound, at its template URL", async () => {
+  const { store, entry, ctx } = publisherContext();
+  try {
+    const unsigned = "a".repeat(64),
+      signed = "b".repeat(64),
+      commit = "c".repeat(40),
+      template = "https://example.invalid/test/<version>-<sha12>/app.apk",
+      url = `https://example.invalid/test/1.0-${signed.slice(0, 12)}/app.apk`;
+    store.uow.run((tx) => {
+      tx.decisions.put(
+        project_id,
+        approval(
+          "Q-1",
+          unsigned,
+          [
+            {
+              key: "release_chain",
+              description: `发布链 ${commit} 发布到 ${template}`,
+              impact: "按链执行",
+            },
+          ],
+          "release_chain",
+          [],
+        ),
+      );
+      tx.attachments.put(project_id, {
+        id: "attachment-1",
+        kind: "artifact",
+        basis: "Q-1" as Decision["id"],
+        card_id,
+        sha256: signed,
+        size: 6,
+        mime: "application/vnd.android.package-archive",
+        uploaded_by: "system",
+        storage_path: "",
+        attach_to: { kind: "timeline_entry", id: entry },
+      } as Attachment);
+    });
+    const request = {
+      attachment_id: "attachment-1",
+      decision_id: "Q-1",
+      version: "1.0",
+      versionCode: 1,
+    };
+    let target = url;
+    const pub = vi.fn(async (_p, _a, _r, claim: (u: string) => void) => {
+      claim(target);
+      return { url: target, size: 6, sha256: signed };
+    });
+    const tool = publicationTool({ publishArtifact: pub });
+    // Nothing bound yet: the chain does not cover arbitrary card artifacts.
+    await expect(tool.handler(request, ctx)).rejects.toThrow("approval");
+    store.uow.run((tx) =>
+      tx.events.append(project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project_id, card_id),
+        card_id,
+        type: "release_chain_signed",
+        actor: { kind: "system", project_id },
+        created_at: NOW,
+        payload: {
+          decision_id: "Q-1",
+          request_id: "f".repeat(32),
+          sha256: signed,
+        },
+      }),
+    );
+    target = "https://example.invalid/test/1.0-aaaaaaaaaaaa/app.apk";
+    await expect(tool.handler(request, ctx)).rejects.toThrow("approval");
+    target = url;
+    await expect(tool.handler(request, ctx)).resolves.toMatchObject({
+      url,
+      sha256: signed,
+    });
+    await expect(tool.handler(request, ctx)).rejects.toThrow("already_claimed");
   } finally {
     store.close();
   }
