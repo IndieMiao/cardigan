@@ -149,6 +149,7 @@ export * from "./commands/precheck.js";
 export * from "./commands/preferences.js";
 export * from "./commands/preparation-recovery.js";
 export * from "./commands/queries.js";
+export * from "./commands/readonly-checkout.js";
 export * from "./commands/release.js";
 export * from "./commands/remote-worker-loss.js";
 export * from "./commands/replace-verifier.js";

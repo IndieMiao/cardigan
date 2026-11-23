@@ -378,9 +378,11 @@ export { upgradeKey } from "./worker-upgrade-gate.js";
 export * from "./worker-wizard-files.js";
 export * from "./worker-wizard-form.js";
 export {
+  type ArtifactCheckout,
   prepareReadonlyWorktree,
   prepareRoleWorktree,
   readonlyWorktreeTarget,
+  recordArtifactCheckout,
   reviewTargetSha,
   type WorktreeProvider,
   type WorktreeRequest,

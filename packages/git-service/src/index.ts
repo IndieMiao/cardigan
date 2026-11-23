@@ -14,6 +14,7 @@ import type {
   Card,
   DecisionId,
   Delivery,
+  DeliveryId,
   GitWorkspaceFiles,
   GitWorktree,
   GitWorktreePort,
@@ -92,6 +93,11 @@ export interface EnsureWorktreeInput {
   readonly review_plan?: DecisionId;
   /** The delivery commit being reviewed; required for ordinary readonly work. */
   readonly target_sha?: string;
+  /**
+   * C-630: the current artifact delivery under review has no Git commit and
+   * no recorded source commit, so the readonly checkout is the card baseline.
+   */
+  readonly artifact_delivery?: DeliveryId;
 }
 export interface WorktreeOptions {
   /** Fixed by the trusted target factory, never selected by a request path. */
@@ -276,8 +282,21 @@ export class GitWorktreeService {
         "Plan checkout requires the assigned verifier's pending plan and no delivery SHA",
       );
     if (
+      input.artifact_delivery !== undefined &&
+      (!readonly ||
+        item.kind !== "verify" ||
+        item.status === "cancelled" ||
+        !parseId("delivery", input.artifact_delivery).ok ||
+        input.review_plan !== undefined ||
+        input.target_sha !== undefined)
+    )
+      throw new Error(
+        "Artifact baseline checkout requires the assigned verifier and no delivery SHA or plan",
+      );
+    if (
       readonly &&
       !input.review_plan &&
+      !input.artifact_delivery &&
       !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/iu.test(input.target_sha ?? "")
     )
       throw new Error("Readonly worktree requires a delivery commit SHA");
@@ -335,9 +354,11 @@ export class GitWorktreeService {
         throw new Error(
           "Existing worktree has a different branch or review target",
         );
+      let artifactBaseline: string | undefined;
       if (
         readonly &&
         (input.review_plan ||
+          input.artifact_delivery ||
           existing.head.toLowerCase() !== input.target_sha?.toLowerCase())
       ) {
         if ((await this.git.changes(path)).tracked.length > 0)
@@ -346,10 +367,13 @@ export class GitWorktreeService {
         const target = await this.git.resolveCommit(repository, checkoutRef);
         if (target.toLowerCase() !== existing.head.toLowerCase())
           await this.git.checkoutDetached(path, target);
+        if (input.artifact_delivery) artifactBaseline = target;
       }
       // Refresh the shared clone before every writer Run without touching its
       // branch, original base or uncommitted work. Agent mode pushes from host.
-      let baseline: WorktreePlacement["baseline"];
+      let baseline: WorktreePlacement["baseline"] = artifactBaseline
+        ? { ref: baselineRef, sha: artifactBaseline }
+        : undefined;
       if (!readonly) {
         await this.git.fetch(repository, central);
         baseline = {
@@ -405,6 +429,9 @@ export class GitWorktreeService {
       worktree_path: path,
       ...(branch ? { branch } : {}),
       base_sha,
+      ...(readonly && input.artifact_delivery
+        ? { baseline: { ref: baselineRef, sha: base_sha } }
+        : {}),
       ...(!readonly
         ? {
             baseline: {
