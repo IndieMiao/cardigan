@@ -26,6 +26,7 @@ import {
   TimelineIcon,
 } from "./TimelineHeader.js";
 import { Prose } from "./ui/prose.js";
+import { isVideo, VideoPreview } from "./VideoPreview.js";
 
 /**
  * The card's timeline (M5 plan §3.7, §8.4 of the development plan).
@@ -366,6 +367,8 @@ export function Timeline({
                       <span className="attachment-caption" key={a.id}>
                         {isBitmap(a) ? (
                           <AttachmentPreview attachment={a} images={images} />
+                        ) : isVideo(a) ? (
+                          <VideoPreview attachment={a} compact />
                         ) : (
                           <a href={a.download_path} download>
                             下载 {attachmentName(a)}
@@ -424,6 +427,8 @@ function AttachmentItem({
     <li className="attachment">
       {isBitmap(attachment) ? (
         <AttachmentPreview attachment={attachment} images={[attachment]} />
+      ) : isVideo(attachment) ? (
+        <VideoPreview attachment={attachment} />
       ) : (
         <a
           className="attachment-download"

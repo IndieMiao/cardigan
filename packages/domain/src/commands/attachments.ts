@@ -1,4 +1,9 @@
-import type { Actor, Attachment } from "../entities.js";
+import type {
+  Actor,
+  Attachment,
+  VideoInfo,
+  VideoMetadata,
+} from "../entities.js";
 import type { Result } from "../errors.js";
 import type { RunId } from "../ids.js";
 import type { AttachmentStore } from "../ports.js";
@@ -76,6 +81,39 @@ export async function prepareAttachment(
     };
   }
 }
+/**
+ * C-683: a file the adapter streamed into the content-addressed store (videos
+ * too large to hold in memory). The adapter hashes every byte and publishes
+ * the blob in `put`; the receipt is the same as `prepareAttachment`'s, so the
+ * attachment record does not know how the bytes arrived.
+ */
+export async function prepareStreamedAttachment(
+  sha256: string,
+  size: number,
+  put: () => Promise<{ readonly storage_path: string }>,
+): Promise<Result<StoredAttachment>> {
+  if (
+    !/^[a-f0-9]{64}$/u.test(sha256) ||
+    !Number.isSafeInteger(size) ||
+    size < 0
+  )
+    return {
+      ok: false,
+      error: { code: "validation_failed", message: "Invalid sha256 or size" },
+    };
+  try {
+    const { storage_path } = await put();
+    return { ok: true, value: { [stored]: true, sha256, size, storage_path } };
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "validation_failed",
+        message: "Attachment storage failed",
+      },
+    };
+  }
+}
 export type AttachmentTarget = Pick<
   Attachment,
   "card_id" | "mime" | "kind" | "attach_to"
@@ -85,7 +123,69 @@ export type AttachmentTarget = Pick<
       Attachment,
       "basis" | "supersedes" | "original_filename" | "note" | "ref_slot"
     >
-  >;
+  > & {
+    /** C-683: what the uploader measured; video types only. */
+    readonly video?: VideoMetadata;
+  };
+/** C-683: the video types attachments accept. */
+export const VIDEO_MIME_TYPES: readonly string[] = [
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/x-m4v",
+];
+export const isVideoMimeType = (mime: string) =>
+  VIDEO_MIME_TYPES.includes((mime.split(";")[0] ?? "").trim().toLowerCase());
+/** C-683: largest cover frame a video record may name. */
+export const MAX_VIDEO_POSTER_BYTES = 512 * 1024;
+const MAX_VIDEO_SECONDS = 7 * 24 * 60 * 60;
+const MAX_VIDEO_PIXELS = 16_384;
+/** Validated metadata with only the fields given; undefined when none. */
+function videoMetadata(p: AttachmentTarget): VideoMetadata | undefined {
+  const v = p.video;
+  if (v === undefined) return undefined;
+  ensure(
+    isVideoMimeType(p.mime),
+    "validation_failed",
+    "video metadata applies to video attachments only",
+  );
+  ensure(
+    typeof v === "object" && v !== null,
+    "validation_failed",
+    "video must be an object",
+  );
+  const out: Record<string, number | string> = {};
+  const n = (key: keyof VideoMetadata, max: number, integer: boolean) => {
+    const value = v[key];
+    if (value === undefined) return;
+    ensure(
+      typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= 0 &&
+        value <= max &&
+        (!integer || Number.isInteger(value)),
+      "validation_failed",
+      `video.${key} is out of range`,
+    );
+    out[key] = integer ? value : Math.round(value * 1000) / 1000;
+  };
+  const c = (key: "video_codec" | "audio_codec") => {
+    const value = v[key];
+    if (value === undefined) return;
+    ensure(
+      typeof value === "string" && /^[A-Za-z0-9._-]{1,32}$/u.test(value),
+      "validation_failed",
+      `video.${key} must be a short codec name`,
+    );
+    out[key] = value;
+  };
+  n("duration_seconds", MAX_VIDEO_SECONDS, false);
+  n("width", MAX_VIDEO_PIXELS, true);
+  n("height", MAX_VIDEO_PIXELS, true);
+  c("video_codec");
+  c("audio_codec");
+  return Object.keys(out).length ? (out as VideoMetadata) : undefined;
+}
 /** The most files one comment may name as `attachment-new-N`. */
 export const MAX_REF_SLOT = 100;
 function validateTarget(d: CommandDraft, p: AttachmentTarget) {
@@ -169,7 +269,7 @@ function validateTarget(d: CommandDraft, p: AttachmentTarget) {
       "This ref_slot of the entry is already filled",
     );
   }
-  return { original_filename, note };
+  return { original_filename, note, video: videoMetadata(p) };
 }
 export function artifactUploadRun(
   state: CommandState,
@@ -203,9 +303,37 @@ export function uploadAttachment(
     | StoredAttachment
     | Awaited<ReturnType<typeof prepareStreamedArtifact>>,
   ports: CommandPorts,
+  /** C-683: the video's cover frame, stored before the record. */
+  poster?: StoredAttachment,
 ) {
   return command(state, actor, "upload_attachment", ports, (d) => {
-    const { original_filename, note } = validateTarget(d, p);
+    const { original_filename, note, video: measured } = validateTarget(d, p);
+    if (poster !== undefined) {
+      ensure(
+        poster?.[stored],
+        "validation_failed",
+        "A stored poster receipt is required",
+      );
+      ensure(
+        isVideoMimeType(p.mime),
+        "validation_failed",
+        "A poster applies to video attachments only",
+      );
+      ensure(
+        poster.size > 0 && poster.size <= MAX_VIDEO_POSTER_BYTES,
+        "validation_failed",
+        `A poster must be 1 to ${MAX_VIDEO_POSTER_BYTES} bytes`,
+      );
+    }
+    const video: VideoInfo | undefined =
+      measured || poster
+        ? {
+            ...measured,
+            ...(poster
+              ? { poster_sha256: poster.sha256, poster_size: poster.size }
+              : {}),
+          }
+        : undefined;
     ensure(
       receipt?.[stored],
       "validation_failed",
@@ -234,6 +362,7 @@ export function uploadAttachment(
       attach_to: p.attach_to,
       ...(p.supersedes ? { supersedes: p.supersedes } : {}),
       ...(p.ref_slot === undefined ? {} : { ref_slot: p.ref_slot }),
+      ...(video ? { video } : {}),
     };
     const attachment: Attachment =
       p.kind === "artifact"

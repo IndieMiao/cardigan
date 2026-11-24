@@ -1,14 +1,18 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AttachmentId, AttachmentStore } from "@cardigan/domain";
 import { sendArtifact } from "./artifact-files.js";
+import { sendFileRange } from "./attachment-stream.js";
+import { openAttachmentFile } from "./attachments.js";
 import { ToolError } from "./errors.js";
 import { artifactKey, attachmentKey, offsiteFor } from "./offsite/offsite.js";
 import {
   accessibleAttachment,
   readVerifiedAttachment,
+  revalidate,
 } from "./tools/read-attachment.js";
 import { auditReferenceRead, referenceCard } from "./tools/reference-read.js";
 import type { ToolContext } from "./tools/types.js";
+import { isVideoMime } from "./video-format.js";
 
 /** C-614: request header of helpers that can fetch from a signed OSS URL. */
 export const SIGNED_DOWNLOAD_HEADER = "x-cardigan-download";
@@ -100,6 +104,54 @@ export async function serveAttachmentDownload(
         if (provenance.source_card_id)
           res.setHeader("X-Source-Card-Id", provenance.source_card_id);
         auditReferenceRead(context, [a.card_id], "read_attachment");
+      });
+      return;
+    }
+    if (isVideoMime(a.mime)) {
+      // C-683: videos stream from disk. `X-Artifact-Size` lets helpers
+      // (including older ones) accept the larger size; the sha256 still
+      // binds every byte.
+      const current = () => {
+        const assignment = revalidate(context);
+        accessibleAttachment(a.id, {
+          ...context,
+          identity: { ...context.identity, assignment },
+        });
+        const { provenance } = context.store.uow.read((tx) =>
+          referenceCard(tx, context, a.card_id),
+        );
+        auditReferenceRead(context, [a.card_id], "read_attachment");
+        return provenance.source_card_id;
+      };
+      const location =
+        signed?.synced(attachmentKey(a.sha256))?.size === a.size
+          ? signed.signedUrl(attachmentKey(a.sha256))?.url
+          : undefined;
+      if (location) {
+        sendSigned(res, a, location, true, current());
+        return;
+      }
+      const file = await openAttachmentFile(
+        dataDir ?? process.env.CARDIGAN_DATA_DIR ?? ".data",
+        a.sha256,
+        a.size,
+      );
+      if (!file) throw ToolError.notFound("Attachment not found");
+      let source: string | undefined;
+      try {
+        source = current();
+      } catch (error) {
+        await file.close();
+        throw error;
+      }
+      await sendFileRange(req, res, file, a.size, {
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": `attachment; filename="${a.id.replace(/[^A-Za-z0-9._-]/gu, "_")}.bin"`,
+        "X-Attachment-Id": a.id,
+        "X-Attachment-Sha256": a.sha256,
+        "X-Attachment-Size": a.size,
+        "X-Artifact-Size": a.size,
+        ...(source ? { "X-Source-Card-Id": source } : {}),
       });
       return;
     }

@@ -2,6 +2,7 @@ import type { CardHold, DispatchOrder, ReviewImpact } from "@cardigan/domain";
 import { needsAges } from "./needs-age.js";
 import type { RunPresence } from "./run-presence.js";
 import { clearSharedReads, sharePendingRead } from "./shared-read.js";
+import type { VideoMeasurements } from "./video-probe.js";
 export interface MemberView {
   readonly id: string;
   readonly name: string;
@@ -59,6 +60,9 @@ export interface SessionInfo {
   readonly build?: BuildInfo;
   /** Host attachment upload limit in bytes (C-616); only when authenticated. */
   readonly attachment_max_bytes?: number;
+  /** C-683: host video limit and chunk size of resumable uploads. */
+  readonly video_max_bytes?: number;
+  readonly video_chunk_bytes?: number;
 }
 
 export interface ProjectSummary {
@@ -621,6 +625,18 @@ export interface AttachmentView extends AuthorView {
   readonly preview_path?: string | null;
   /** C-615: the `attachment-new-N` of its comment this file fills. */
   readonly ref_slot?: number;
+  /** C-683: videos only — what the uploader measured, and its cover frame. */
+  readonly video?: VideoMeasurements;
+  readonly poster_path?: string;
+}
+
+/** C-683: a resumable upload, as the server reports it. */
+export interface UploadStatus {
+  readonly upload_id: string;
+  readonly size: number;
+  readonly received: number;
+  readonly chunk_bytes: number;
+  readonly complete: boolean;
 }
 
 export interface CardRelations {
@@ -722,8 +738,12 @@ export interface PostedComment {
 }
 
 export interface UploadAttachmentInput {
-  /** Canonical padded base64. */
-  readonly file: string;
+  /** Canonical padded base64; or `upload_id` of a complete upload (video). */
+  readonly file?: string;
+  readonly upload_id?: string;
+  /** C-683: what the browser measured, and its cover frame (base64 JPEG). */
+  readonly video?: VideoMeasurements;
+  readonly poster?: string;
   readonly original_filename?: string;
   readonly note?: string;
   readonly mime: string;
@@ -2616,6 +2636,23 @@ export interface CardiganClient {
     input: UploadAttachmentInput,
     idempotencyKey?: string,
   ): Promise<AttachmentReceipt>;
+  /** C-683: video limit from the latest session read; unknown before it. */
+  videoMaxBytes?(): number | undefined;
+  /**
+   * C-683: send a video in chunks, continuing `uploadId` when given (a retry
+   * resumes where the server is). Resolves with the complete upload's id,
+   * which `uploadAttachment` takes instead of `file`.
+   */
+  uploadVideo?(
+    projectId: string,
+    file: Blob,
+    mime: string,
+    options?: {
+      readonly uploadId?: string | undefined;
+      readonly onStarted?: (uploadId: string) => void;
+      readonly onProgress?: (received: number, size: number) => void;
+    },
+  ): Promise<string>;
 }
 
 interface ErrorBody {
@@ -2646,6 +2683,7 @@ export class HttpCardiganClient implements CardiganClient {
   }
   private readScope: string | undefined;
   private attachmentLimit: number | undefined;
+  private videoLimit: number | undefined;
   private cardsGeneration = 0;
   private cardsReadSequence = 0;
   private readonly cardPages = new Map<
@@ -2735,11 +2773,81 @@ export class HttpCardiganClient implements CardiganClient {
       session.attachment_max_bytes > 0
         ? session.attachment_max_bytes
         : undefined;
+    this.videoLimit =
+      typeof session.video_max_bytes === "number" &&
+      Number.isSafeInteger(session.video_max_bytes) &&
+      session.video_max_bytes > 0
+        ? session.video_max_bytes
+        : undefined;
     if (!this.readScope) clearSharedReads();
     return session;
   }
   attachmentMaxBytes() {
     return this.attachmentLimit;
+  }
+
+  videoMaxBytes() {
+    return this.videoLimit;
+  }
+
+  async uploadVideo(
+    projectId: string,
+    file: Blob,
+    mime: string,
+    options: {
+      readonly uploadId?: string | undefined;
+      readonly onStarted?: (uploadId: string) => void;
+      readonly onProgress?: (received: number, size: number) => void;
+    } = {},
+  ): Promise<string> {
+    const base = `/api/projects/${encodeURIComponent(projectId)}/uploads`;
+    let status: UploadStatus | undefined;
+    if (options.uploadId) {
+      // An expired or unknown upload starts over; anything else is an error.
+      status = await this.request<UploadStatus>(
+        `${base}/${encodeURIComponent(options.uploadId)}`,
+      ).catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 404) return undefined;
+        throw error;
+      });
+      if (status && status.size !== file.size) status = undefined;
+    }
+    status ??= await this.request<UploadStatus>(base, {
+      method: "POST",
+      body: JSON.stringify({ size: file.size, mime }),
+      resend: false,
+    });
+    options.onStarted?.(status.upload_id);
+    const path = `${base}/${encodeURIComponent(status.upload_id)}`;
+    let failures = 0;
+    while (!status.complete) {
+      options.onProgress?.(status.received, status.size);
+      const offset: number = status.received;
+      const end: number = Math.min(offset + status.chunk_bytes, status.size);
+      try {
+        status = await this.request<UploadStatus>(`${path}?offset=${offset}`, {
+          method: "PUT",
+          body: file.slice(offset, end),
+          contentType: "application/octet-stream",
+          resend: false,
+        });
+        failures = 0;
+      } catch (error) {
+        // The server keeps what it has: ask for its offset and go on. A
+        // chunk that keeps failing is reported; a retry resumes from there.
+        if (error instanceof ApiError && error.status === 409)
+          status = await this.request<UploadStatus>(path);
+        else if (
+          ++failures <= 3 &&
+          (!(error instanceof ApiError) || error.status >= 500)
+        ) {
+          await this.retry.sleep(1000 * failures);
+          status = await this.request<UploadStatus>(path);
+        } else throw error;
+      }
+    }
+    options.onProgress?.(status.size, status.size);
+    return status.upload_id;
   }
 
   async login(password: string): Promise<void> {
@@ -3859,7 +3967,9 @@ export class HttpCardiganClient implements CardiganClient {
     path: string,
     init: {
       method?: string;
-      body?: string;
+      body?: string | Blob;
+      /** Content type of a non-JSON body (C-683 upload chunks). */
+      contentType?: string;
       idempotencyKey?: string;
       /**
        * C-511: whether a transport failure may be resent automatically. By
@@ -3879,7 +3989,7 @@ export class HttpCardiganClient implements CardiganClient {
           accept: "application/json",
           ...(init.body === undefined
             ? {}
-            : { "content-type": "application/json" }),
+            : { "content-type": init.contentType ?? "application/json" }),
           ...(init.idempotencyKey === undefined
             ? {}
             : { "Idempotency-Key": init.idempotencyKey }),
@@ -3980,12 +4090,20 @@ async function toApiError(
  * (`cardigan preference set ...`); the Web points at the settings label instead.
  */
 function webErrorMessage(message: string): string {
-  return message
-    .replace(
-      /^(暂缓到期时间距现在不能超过 \d+ 分钟)（merge-confirm-snooze-max）/u,
-      "$1（可在项目设置的“合并确认最长暂缓时长”中调整）",
-    )
-    .replace(/^Attachment exceeds (\d+(?:\.\d)? MiB)$/u, "附件超过 $1");
+  return (
+    message
+      .replace(
+        /^(暂缓到期时间距现在不能超过 \d+ 分钟)（merge-confirm-snooze-max）/u,
+        "$1（可在项目设置的“合并确认最长暂缓时长”中调整）",
+      )
+      .replace(/^Attachment exceeds (\d+(?:\.\d)? MiB)$/u, "附件超过 $1")
+      // C-683: video limit and the server's format check.
+      .replace(/^Video exceeds (\d+(?:\.\d)? MiB)$/u, "视频超过 $1")
+      .replace(
+        /^File content is not (\w+) video; .*$/u,
+        "文件内容与扩展名不符，不是 $1 视频",
+      )
+  );
 }
 
 /** Human-readable Chinese explanation of a failed request. */

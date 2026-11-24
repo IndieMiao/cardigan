@@ -362,7 +362,27 @@ export class Offsite {
     size: number,
     sha256: string,
   ): Promise<boolean> {
-    const key = artifactKey(blobId);
+    return this.restoreObject(artifactKey(blobId), path, size, sha256);
+  }
+
+  /**
+   * C-683: restore an attachment blob too large to hold in memory (a video)
+   * at `path`, streaming and verifying it like `restoreArtifact`.
+   */
+  async restoreAttachment(
+    path: string,
+    digest: string,
+    size: number,
+  ): Promise<boolean> {
+    return this.restoreObject(attachmentKey(digest), path, size, digest);
+  }
+
+  private async restoreObject(
+    key: string,
+    path: string,
+    size: number,
+    sha256: string,
+  ): Promise<boolean> {
     if (!/^[a-f0-9]{64}$/u.test(sha256)) return false;
     const source = this.source(key);
     if (!source) return false;
