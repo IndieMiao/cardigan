@@ -86,14 +86,16 @@ export class WorkbenchReadPool {
 
   constructor(options: WorkbenchReadOptions) {
     const workers = options.workers ?? WORKBENCH_READ_DEFAULTS.workers;
-    const maxQueue = options.maxQueue ?? WORKBENCH_READ_DEFAULTS.maxQueue;
+    const requestedQueue = options.maxQueue ?? WORKBENCH_READ_DEFAULTS.maxQueue;
     const timeoutMs = options.timeoutMs ?? WORKBENCH_READ_DEFAULTS.timeoutMs;
     if (!Number.isSafeInteger(workers) || workers < 1 || workers > 16)
       throw new Error("Workbench read workers must be an integer in 1..16");
+    if (!Number.isSafeInteger(requestedQueue))
+      throw new Error("Workbench read queue limit must be a whole number");
     // At least one waiting slot: with none, even an idle worker would refuse
     // every read, because a read always queues before it reaches its worker.
-    if (!Number.isSafeInteger(maxQueue) || maxQueue < 1)
-      throw new Error("Workbench read queue limit must be a positive integer");
+    // 0 or a negative limit is raised to 1 (C-657).
+    const maxQueue = Math.max(1, requestedQueue);
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)
       throw new Error("Workbench read timeout must be a positive integer");
     this.#options = {
@@ -398,15 +400,21 @@ export function workbenchReadOptionsFromEnv(
   );
   if (workers > 16)
     throw new Error("CARDIGAN_WORKBENCH_READ_WORKERS 不能超过 16");
-  const maxQueue = parse(
-    "CARDIGAN_WORKBENCH_READ_QUEUE",
-    WORKBENCH_READ_DEFAULTS.maxQueue,
-    1,
-  );
+  const maxQueue = parseQueue(env.CARDIGAN_WORKBENCH_READ_QUEUE);
   const timeoutMs = parse(
     "CARDIGAN_WORKBENCH_READ_TIMEOUT_MS",
     WORKBENCH_READ_DEFAULTS.timeoutMs,
     1,
   );
   return workers === 0 ? undefined : { workers, maxQueue, timeoutMs };
+}
+
+/** 0 or a negative queue limit is read as 1 (C-657); non-integers are refused. */
+function parseQueue(raw: string | undefined): number {
+  const text = raw?.trim();
+  if (!text) return WORKBENCH_READ_DEFAULTS.maxQueue;
+  const value = Number(text);
+  if (!/^-?\d+$/u.test(text) || !Number.isSafeInteger(value))
+    throw new Error("CARDIGAN_WORKBENCH_READ_QUEUE 必须是整数");
+  return Math.max(1, value);
 }
