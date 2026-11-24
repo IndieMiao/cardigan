@@ -120,6 +120,7 @@
     --priority-high: #bf560c;
     --priority-urgent: #c93135;
     --accent: #525252;
+    --accent-hover: #3d3d3d;
     --accent-contrast: #ffffff;
     --danger: #b42318;
     --danger-surface: var(--surface);
@@ -191,6 +192,7 @@
       --priority-high: #f9a15d;
       --priority-urgent: #ff7b80;
       --accent: #c2c2c2;
+      --accent-hover: #d9d9d9;
       --accent-contrast: #181818;
       --danger: #ff9c91;
       --overlay: rgba(0, 0, 0, 0.75);
@@ -300,6 +302,19 @@
   }
   .ui-button-secondary {
     background: var(--surface-muted);
+  }
+  /* Only the page's single main action and a dialog's confirm. The :hover
+     selector has the same specificity as .ui-button:hover and must stay after
+     it, so a disabled one keeps its fill. */
+  .ui-button-emphasis,
+  .ui-button-emphasis:hover {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent);
+  }
+  .ui-button-emphasis:hover:not(:disabled, [aria-disabled="true"]) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
   }
   .ui-button-ghost,
   .ui-button-link {
@@ -724,6 +739,52 @@
     right: 0;
     height: 100dvh;
     width: min(var(--ui-dialog-width), 100vw);
+  }
+  /* A dialog with DialogFooter keeps its header and button row in place; only
+     DialogBody scrolls. The parts may sit directly in the panel or in one form. */
+  .ui-dialog:not(.ui-sheet):has(
+    > .ui-dialog-footer,
+    > form > .ui-dialog-footer
+  ),
+  .ui-dialog:not(.ui-sheet) > form:has(> .ui-dialog-footer) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+  }
+  .ui-dialog:not(.ui-sheet) > form:has(> .ui-dialog-footer) {
+    flex: 1 1 auto;
+    margin: 0;
+    border: 0;
+  }
+  .ui-dialog-header {
+    flex: none;
+    padding: var(--ui-panel-padding) var(--ui-panel-padding) 0;
+  }
+  .ui-dialog-header > .ui-dialog-title {
+    margin: 0;
+  }
+  .ui-dialog-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--ui-panel-padding);
+  }
+  .ui-dialog-footer {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--ui-space-2);
+    padding: var(--ui-space-3) var(--ui-panel-padding);
+    border-top: var(--ui-stroke) solid var(--border);
+  }
+  @media (max-width: 760px) {
+    .ui-dialog-footer > * {
+      flex: 1 1 0;
+      min-width: 0;
+    }
   }
   .ui-dialog-title {
     font-size: var(--ui-text-section);
