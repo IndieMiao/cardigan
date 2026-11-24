@@ -81,8 +81,13 @@ export type AttachmentTarget = Pick<
   "card_id" | "mime" | "kind" | "attach_to"
 > &
   Partial<
-    Pick<Attachment, "basis" | "supersedes" | "original_filename" | "note">
+    Pick<
+      Attachment,
+      "basis" | "supersedes" | "original_filename" | "note" | "ref_slot"
+    >
   >;
+/** The most files one comment may name as `attachment-new-N`. */
+export const MAX_REF_SLOT = 100;
 function validateTarget(d: CommandDraft, p: AttachmentTarget) {
   d.card(p.card_id);
   text(p.mime, "mime");
@@ -128,6 +133,42 @@ function validateTarget(d: CommandDraft, p: AttachmentTarget) {
       "validation_failed",
       "Superseded attachment belongs to another card",
     );
+  if (p.ref_slot !== undefined) {
+    // C-615: a comment's `attachment-new-N` is bound to exactly one file of
+    // that comment's own author.
+    ensure(
+      Number.isInteger(p.ref_slot) &&
+        p.ref_slot >= 1 &&
+        p.ref_slot <= MAX_REF_SLOT,
+      "validation_failed",
+      `ref_slot must be an integer from 1 to ${MAX_REF_SLOT}`,
+    );
+    const target = p.attach_to;
+    const entry =
+      target.kind === "timeline_entry"
+        ? d.state.timeline.find((e) => e.id === target.id)
+        : undefined;
+    ensure(
+      entry !== undefined,
+      "validation_failed",
+      "ref_slot needs a timeline entry target",
+    );
+    ensure(
+      entry.author === d.author,
+      "unauthorized",
+      "Only the entry's author may fill its ref_slot",
+    );
+    ensure(
+      !d.state.attachments.some(
+        (a) =>
+          a.attach_to.kind === "timeline_entry" &&
+          a.attach_to.id === target.id &&
+          a.ref_slot === p.ref_slot,
+      ),
+      "validation_failed",
+      "This ref_slot of the entry is already filled",
+    );
+  }
   return { original_filename, note };
 }
 export function artifactUploadRun(
@@ -192,6 +233,7 @@ export function uploadAttachment(
       uploaded_by: d.author,
       attach_to: p.attach_to,
       ...(p.supersedes ? { supersedes: p.supersedes } : {}),
+      ...(p.ref_slot === undefined ? {} : { ref_slot: p.ref_slot }),
     };
     const attachment: Attachment =
       p.kind === "artifact"

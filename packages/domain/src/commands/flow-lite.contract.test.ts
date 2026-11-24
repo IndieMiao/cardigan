@@ -437,7 +437,14 @@ test.each(["delegated", "pm_office_chat"] as const)(
   },
 );
 
-test.each(["valid", "stale_sha", "stale_baseline"])(
+test.each([
+  "valid",
+  "merge_base",
+  "stale_sha",
+  "stale_baseline",
+  "malformed_baseline_tip",
+  "own_high_risk",
+] as const)(
   "B3: bound own-path evidence excludes unrelated main changes and fails closed on %s",
   async (mode) => {
     const { f, product } = await lite(1);
@@ -450,11 +457,20 @@ test.each(["valid", "stale_sha", "stale_baseline"])(
           sha: mode === "stale_sha" ? "f".repeat(40) : product.subject.value,
           tree_sha: "c".repeat(40),
           base_sha: "d".repeat(40),
+          // C-654: the card-baseline tip moved past the merge base (audit only).
+          ...(mode === "merge_base"
+            ? { baseline_sha: "a".repeat(40) }
+            : mode === "malformed_baseline_tip"
+              ? { baseline_sha: "main" }
+              : {}),
           assignment_base_sha: (mode === "stale_baseline" ? "e" : "b").repeat(
             40,
           ),
           complete: true,
-          paths: ["packages/domain/src/example.ts"],
+          paths:
+            mode === "own_high_risk"
+              ? ["packages/domain/src/example.ts", ".github/workflows/main.yml"]
+              : ["packages/domain/src/example.ts"],
         },
       },
     });
@@ -464,12 +480,13 @@ test.each(["valid", "stale_sha", "stale_baseline"])(
         v.id === product.id ? { ...v, evidence } : v,
       ),
     };
-    expect(highRiskProducts(state, f.card)).toHaveLength(
-      mode === "valid" ? 0 : 1,
-    );
+    const excluded = mode === "valid" || mode === "merge_base";
+    expect(highRiskProducts(state, f.card)).toHaveLength(excluded ? 0 : 1);
     const current = state.deliveries.find((v) => v.id === product.id);
     if (!current) throw new Error("Missing delivery");
-    expect(!!autoRiskPaths(current)).toBe(mode === "valid");
+    expect(!!autoRiskPaths(current)).toBe(excluded || mode === "own_high_risk");
+    if (mode === "own_high_risk")
+      expect(autoRiskPaths(current)).toContain(".github/workflows/main.yml");
   },
 );
 

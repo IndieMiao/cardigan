@@ -48,6 +48,9 @@ export function roleFromDocument(document: unknown): Role {
     ...(record.required_capabilities === undefined
       ? {}
       : { required_capabilities: record.required_capabilities }),
+    ...(record.default_overlay === undefined
+      ? {}
+      : { default_overlay: record.default_overlay }),
   };
 }
 

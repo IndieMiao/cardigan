@@ -16,8 +16,10 @@ import {
   authorPrecheckWaitHandled,
   canStartWork,
   cardTemplate,
+  decisionQuestionPayload,
   employeeNameKey,
   flowAtLeast,
+  followUpDraft,
   humanDecisionGroupKey,
   isCompletionVerifier,
   isPrecheckConflict,
@@ -339,6 +341,7 @@ function routeComment(input: RouteInput, draft: Draft): void {
       `new comment on ${item.id}`,
     );
   }
+  routeDecisionAnswer(input, draft, entry);
 
   if (mentions.length > 0) {
     routeMentions(input, draft, mentions, item?.card_id);
@@ -358,6 +361,40 @@ function routeComment(input: RouteInput, draft: Draft): void {
       `comment from the human on ${subject(input)}`,
     );
   }
+}
+
+/**
+ * C-619: the verifier's reply to a decision-bound question goes back to PM
+ * Ops, who holds the decision. Only the asked verifier's own reply counts.
+ */
+function routeDecisionAnswer(
+  input: RouteInput,
+  draft: Draft,
+  entry: TimelineEntry | undefined,
+): void {
+  if (!entry?.reply_to || input.event.actor.kind !== "assignment") return;
+  const asked = input.snapshot.timeline.find(
+    (t) => t.id === entry.reply_to && t.card_id === entry.card_id,
+  );
+  if (asked?.type !== "instruction") return;
+  const question = decisionQuestionPayload(
+    input.snapshot.events.find(
+      (e) => e.seq === asked.event_seq && e.card_id === asked.card_id,
+    ),
+  );
+  if (
+    !question ||
+    question.question.assignment_id !== input.event.actor.assignment_id
+  )
+    return;
+  note(
+    input,
+    draft,
+    recipient.pm_ops(),
+    "comment",
+    "6.4/decision question answered",
+    `${question.work_item_id} 的审核员已在 ${entry.id} 答复 ${question.decision_id} 的提问（${asked.id}），请据此处理该拍板。`,
+  );
 }
 
 /** §6.5: the four @mention cases. */
@@ -552,11 +589,24 @@ function routeMentions(
 function routeInstruction(input: RouteInput, draft: Draft): void {
   const work_item_id = payloadString(input.event.payload, "work_item_id");
   const item = itemOf(input, work_item_id as WorkItemId | undefined);
+  const question = decisionQuestionPayload(input.event);
   if (
-    payloadString(input.event.payload, "pause_recipient") &&
+    (payloadString(input.event.payload, "pause_recipient") || question) &&
     (!item || reviewWakeBlocked(input.snapshot, input.event, item.id))
   )
     return;
+  if (question && item) {
+    // C-619: a question bound to the decision this verifier waits on.
+    noteAssignment(
+      input,
+      draft,
+      item,
+      "instruction",
+      "6.4/instruction",
+      `${question.decision_id} 等待期间的提问：读取 ${item.id} 的指令后用 post_comment 回复该条（reply_to）答复；不能提交审核结论、处理拍板或推进合并。`,
+    );
+    return;
+  }
   if (item === undefined) {
     note(
       input,
@@ -844,6 +894,10 @@ function routeReview(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+
+  // C-618: pending platform evidence is neither a pass nor rework; the system
+  // asks the author once the platform blocker is over.
+  if (verdict !== "reject" && payload.evidence_pending) return;
 
   // deriveReview represents nonblocking conditions without a recheck as pass.
   // Add a PM Ops summary without suppressing the normal completion routing.
@@ -1782,6 +1836,8 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "host_role_upgrade_deferred":
+    case "host_role_upgraded":
+    case "host_role_overlay_migrated":
     case "session_maintenance_attention":
       note(
         input,
@@ -2618,9 +2674,64 @@ export function routeEvent(input: RouteInput): RouteResult {
     case NEEDS_YOU_ITEM_READY:
       routeReadiness(input, draft);
       break;
-    case "card_merged":
-      // The system timeline is the result; no PM retelling run.
+    case "card_merged": {
+      // The system timeline is the result; PM only hears about C-610 follow-ups.
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      const items = new Set(
+        input.snapshot.work_items
+          .filter((w) => w.card_id === card?.id)
+          .map((w) => w.id),
+      );
+      const followUps =
+        card &&
+        followUpDraft(
+          card,
+          input.snapshot.reviews.filter((r) => items.has(r.work_item_id)),
+        );
+      if (input.event.actor.kind === "system" && followUps)
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "card",
+          "6.4/card merged",
+          `${followUps.source_card_id} 已合并；审核中 ${followUps.items.length} 条意见记为后续跟进、未挡合并。后续卡草稿见 get_card.follow_up_draft，由你决定是否开卡。`,
+        );
       break;
+    }
+    case "review_alignment_agreed": {
+      if (input.event.actor.kind !== "system") break;
+      const producer =
+        payloadString(input.event.payload, "wake") === "producer";
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (
+        !card ||
+        ["done", "cancelled", "awaiting_merge"].includes(card.status)
+      )
+        break;
+      noteAssignment(
+        input,
+        draft,
+        itemOf(
+          input,
+          payloadString(
+            input.event.payload,
+            producer ? "producer_id" : "work_item_id",
+          ) as WorkItemId | undefined,
+        ),
+        "review",
+        "flow-v2/B2",
+        producer
+          ? "对齐回合已达成一致，请按不变量清单和通过条件修改后重新交付。"
+          : "对齐回合已达成一致，请审核当前交付。",
+        producer ? "rework" : "decision_resumed",
+      );
+      break;
+    }
     case "merge_failed":
       note(
         input,

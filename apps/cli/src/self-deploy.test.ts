@@ -21,8 +21,10 @@ import { gitSafetyArguments } from "@cardigan/git-transport";
 import {
   DeploymentServerUnavailable,
   deploymentRolePolicyHash,
+  knownDefaults,
   NodeDeploymentDriver,
   RunCapacityDeferred,
+  recordDefault,
 } from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
@@ -575,6 +577,104 @@ test("post-deploy starts the replacement Ops as host automation only when it has
         env: { ...io.env, CARDIGAN_TOKEN: "fixture-token" },
       }),
     ).rejects.toThrow("Agent 不可调用");
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("C-613 post-deploy role sync also migrates customised roles in other projects", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cg-self-deploy-overlay-"));
+  const dataDir = join(root, "data");
+  const store = Store.open({ dataDir });
+  const io: CliIo = {
+    env: {
+      CARDIGAN_DATA_DIR: dataDir,
+      CARDIGAN_CONFIG_DIR: root,
+      CARDIGAN_DEPLOYMENT_CHANGED_ROLES: "[]",
+      CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: "{}",
+    },
+    cwd: root,
+    platform: "linux",
+    stdout: () => {},
+    stderr: () => {},
+    signals: { on: () => {}, off: () => {} },
+    spawnInherit: () => {
+      throw new Error("No real launch");
+    },
+    captureCommand: async () => {
+      throw new Error("No real command");
+    },
+  };
+  try {
+    await writeFile(
+      join(root, "self-deploy.yaml"),
+      JSON.stringify({
+        initial_release: root,
+        initial_sha: "a".repeat(40),
+        ready_timeout_ms: 1000,
+        stop_timeout_ms: 1000,
+        build_timeout_ms: 1000,
+        poll_interval_ms: 1000,
+      }),
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(root, "launch.yaml"),
+      JSON.stringify({
+        profiles: { fixture: { harness: "codex", model: "m" } },
+      }),
+    );
+    store.createProject({ id: "cardigan" });
+    store.createProject({ id: "sensen" });
+    const pack = defaultRoleDefinition("reviewer", {
+      harness: "codex",
+      launch_profile_ref: "fixture",
+    });
+    // An earlier release recorded its reviewer default in sensen; the
+    // project appended its own rule on top of it.
+    const older = { ...pack, instructions: "Earlier reviewer default" };
+    store.uow.run((tx) => {
+      recordDefault(
+        tx,
+        "sensen",
+        "reviewer",
+        older,
+        "pack",
+        "2026-01-01T00:00:00.000Z",
+      );
+      writeRole(
+        tx,
+        "sensen",
+        {
+          ...older,
+          core_prompt: "",
+          instructions: `${older.instructions}\n\n时间点约束`,
+          version: 1,
+        },
+        { mode: "add" },
+      );
+    });
+    expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
+    expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
+    expect(
+      store.uow.read((tx) => getRoleVersion(tx, "sensen", "reviewer")),
+    ).toMatchObject({
+      version: 2,
+      instructions: `${pack.instructions}\n\n时间点约束`,
+      default_overlay: { append_instructions: "时间点约束" },
+    });
+    // Each project keeps its own record of the deployed pack.
+    for (const project of ["cardigan", "sensen"])
+      expect(
+        store.uow.read((tx) => knownDefaults(tx, project).get("reviewer")),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            policy_hash: deploymentRolePolicyHash(pack),
+          }),
+        ]),
+      );
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });

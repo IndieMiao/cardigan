@@ -399,9 +399,16 @@ export async function createMergeCheckLog(input: {
         : checkSummary;
       // This link is constructed solely from the verified run and numeric job id,
       // never from log text, a Location header or an exception message.
+      const logFailure = result.logFailure
+        ? `${result.logFailure}${
+            result.logFailureDetail
+              ? `：${clip(redactMetadata(result.logFailureDetail.replace(/\s+/gu, " ")), 300)}`
+              : ""
+          }`
+        : "";
       const locator =
         result.logFailure && result.logSource
-          ? `\n日志获取失败（${result.logFailure}）：${result.logSource.url}${result.logSource.jobId ? `/job/${result.logSource.jobId}` : ""}`
+          ? `\n日志获取失败（${logFailure}）：${result.logSource.url}${result.logSource.jobId ? `/job/${result.logSource.jobId}` : ""}`
           : "";
       const summary =
         clip(baseSummary, CHECK_SUMMARY_LIMIT - Buffer.byteLength(locator)) +
@@ -500,7 +507,7 @@ export async function createMergeCheckLog(input: {
             "install,build,test,lint,deps,e2e"
         )
           throw new Error(`检查日志写入失败 [${writeError}]`);
-        note = `本地日志保存失败（${writeError}，已尝试三次），可从远端重试读取；${result.logFailure ? `日志获取失败（${result.logFailure}）；` : ""}检查结论不变：${url}${result.logSource?.jobId ? `/job/${result.logSource.jobId}` : ""}`;
+        note = `本地日志保存失败（${writeError}，已尝试三次），可从远端重试读取；${logFailure ? `日志获取失败（${logFailure}）；` : ""}检查结论不变：${url}${result.logSource?.jobId ? `/job/${result.logSource.jobId}` : ""}`;
       } else {
         try {
           await pruneCheckLogs(directory);

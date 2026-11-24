@@ -2597,12 +2597,6 @@ body[data-lightbox="open"] .drawer-overlay {
   margin-bottom: 20px;
 }
 
-.card-tile-waiting {
-  border-left: 3px solid var(--status-wait);
-}
-.card-tile-blocked {
-  border-left: 3px solid var(--danger);
-}
 .card-tile > .id-tag {
   align-self: flex-start;
 }
@@ -3179,12 +3173,6 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .board-card-complete {
   color: var(--status-done);
-}
-.board-card-waiting {
-  color: var(--status-wait);
-}
-.board-card-blocked {
-  color: var(--danger);
 }
 .board-card .employee-owners {
   position: relative;

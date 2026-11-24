@@ -13,6 +13,7 @@ import {
 import {
   GithubExecutorError,
   type GithubJob,
+  GithubLogError,
   GithubNotFoundError,
   type GithubRun,
 } from "./github-client.js";
@@ -812,6 +813,69 @@ test("V-2081: 304 for a list skipped during backoff cannot certify an older term
   expect(f.client.cancel).not.toHaveBeenCalled();
 });
 
+test.each([
+  [
+    "network",
+    [
+      new GithubLogError("network", "TypeError: terminated（已接收 1.0 MB）"),
+      new GithubLogError(
+        "timeout",
+        "60 秒未收到新数据（已接收 2.0 MB）",
+        "idle",
+      ),
+      new GithubLogError("network", "TypeError: terminated（已接收 3.0 MB）"),
+    ],
+    3,
+    "TypeError: terminated（已接收 3.0 MB）",
+  ],
+  [
+    "timeout",
+    [
+      new GithubLogError(
+        "timeout",
+        "超过下载总时限 900 秒（已接收 3.9 MB）",
+        "total",
+      ),
+    ],
+    1,
+    "超过下载总时限 900 秒（已接收 3.9 MB）",
+  ],
+  [
+    "http",
+    [
+      new GithubLogError("http", "HTTP 502"),
+      new GithubLogError("http", "HTTP 502"),
+      new GithubLogError("http", "HTTP 503"),
+    ],
+    3,
+    "HTTP 503",
+  ],
+] as const)(
+  "C-658: job log %s failures reach the check result with their detail",
+  async (category, errors, calls, detail) => {
+    const f = setup(1);
+    f.complete();
+    const j = job(1);
+    f.client.jobs.mockResolvedValueOnce([
+      {
+        ...j,
+        conclusion: "failure",
+        steps: j.steps.map((s) =>
+          s.name === "test" ? { ...s, conclusion: "failure" } : s,
+        ),
+      },
+    ]);
+    for (const error of errors) f.client.jobLog.mockRejectedValueOnce(error);
+    const terminal = f.poller.poll(external(1));
+    await f.poller.tick();
+    await terminal;
+    await expect(
+      f.poller.fetchFailureLog(external(1), () => () => {}),
+    ).rejects.toMatchObject({ category, detail });
+    expect(f.client.jobLog).toHaveBeenCalledTimes(calls);
+  },
+);
+
 test.each([true, false])(
   "C-529: retry only the bound job log after a partial download and delayed availability (recovered=%s)",
   async (recovered) => {
@@ -954,3 +1018,29 @@ test.each([
     expect(f.client.jobLog).not.toHaveBeenCalled();
   },
 );
+
+test("C-658: generic provider diagnostics still never reach the log failure", async () => {
+  const f = setup(1);
+  f.complete();
+  const j = job(1);
+  f.client.jobs.mockResolvedValueOnce([
+    {
+      ...j,
+      conclusion: "failure",
+      steps: j.steps.map((s) =>
+        s.name === "test" ? { ...s, conclusion: "failure" } : s,
+      ),
+    },
+  ]);
+  const auth = new GithubExecutorError("auth");
+  auth.diagnostic = "do-not-record-provider-detail";
+  f.client.jobLog.mockRejectedValueOnce(auth);
+  const terminal = f.poller.poll(external(1));
+  await f.poller.tick();
+  await terminal;
+  const error = await f.poller
+    .fetchFailureLog(external(1), () => () => {})
+    .catch((e: unknown) => e);
+  expect(error).toMatchObject({ category: "auth" });
+  expect((error as { detail?: string }).detail).toBeUndefined();
+});

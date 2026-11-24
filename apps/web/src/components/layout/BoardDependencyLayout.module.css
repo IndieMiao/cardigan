@@ -1,0 +1,23 @@
+@layer legacy, theme, base, components, utilities;
+
+@layer components {
+  /* Covers the board's visible area; routes avoid the cards and may use half
+     a lane gap of the page padding at the board's edges. */
+  .lines {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+  /* The card hover border colour: faint in both themes. */
+  .line {
+    fill: none;
+    stroke: var(--ui-border-hover);
+    stroke-width: var(--ui-stroke);
+  }
+  .arrow {
+    fill: var(--ui-border-hover);
+  }
+}

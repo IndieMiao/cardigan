@@ -31,9 +31,10 @@ export interface ToolServerOptions {
   /**
    * M2 plan §4 step 8: runs on `tools/call`, never on `initialize` or
    * `tools/list`. A client that connects but has not acted must not make the
-   * Run look started.
+   * Run look started. C-635: may return the number of write transactions it
+   * attempted on the call's path, logged as `ack_writes`.
    */
-  readonly onToolCall?: () => void;
+  readonly onToolCall?: () => number | undefined;
   /**
    * C-600: runs on `tools/list`; a native harness lists tools at startup. A
    * failure answers the listing with a retryable error, never a list whose
@@ -154,9 +155,10 @@ export function createMcpServer(options: ToolServerOptions): Server {
     }
     // Any tool call counts as the Agent having started (even a forbidden one):
     // this is the first moment the Assignment proves it is awake.
+    let ackWrites: number | undefined;
     if (options.onToolCall !== undefined) {
       try {
-        options.onToolCall();
+        ackWrites = options.onToolCall();
       } catch (error) {
         log({
           event: "tool",
@@ -184,6 +186,7 @@ export function createMcpServer(options: ToolServerOptions): Server {
         code,
         duration_ms: performance.now() - startedAt,
         phases_ms: phases,
+        ...(ackWrites === undefined ? {} : { ack_writes: ackWrites }),
       });
       return result;
     };

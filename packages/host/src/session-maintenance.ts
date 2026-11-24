@@ -127,7 +127,7 @@ export function sessionMaintenanceScan(
                 (policy.role.version > a.role_version || a.role_upgrade)
               ) {
                 if (!policy.published) reason = "publication_pending";
-                else if (!policy.matches) reason = "role_conflict";
+                else if (policy.conflict) reason = "role_conflict";
               }
             }
             const effect = unwrap(

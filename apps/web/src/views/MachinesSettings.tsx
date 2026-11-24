@@ -41,6 +41,7 @@ import {
 import { CAPABILITY_TAGS } from "../components/MachineDetail.js";
 import { OffsiteStatusSection } from "../components/OffsiteStatus.js";
 import { CardLink } from "../components/Operations.js";
+import { ProcessHealthSection } from "../components/ProcessHealth.js";
 import {
   RequestFeedback,
   type RequestFeedbackProps,
@@ -513,6 +514,9 @@ function MachineDrawer({
         )}
         {machine?.id === "local" && client.offsiteStatus && (
           <OffsiteStatusSection client={client} />
+        )}
+        {machine?.id === "local" && client.processHealth && (
+          <ProcessHealthSection client={client} />
         )}
       </CardDetailLayout>
     </Drawer>

@@ -93,6 +93,7 @@ export {
   type CommandStateScope,
   commandStateScope,
   DEFAULT_DB_FILE,
+  type DeferredActivity,
   type GetUpdatesParams,
   type GetUpdatesResult,
   hashRequest,

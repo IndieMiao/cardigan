@@ -43,6 +43,7 @@ import {
   requestDecision,
   requestHumanAction,
   resolveDelegatedDecision,
+  resolvePendingAttachmentRefs,
   setProjectPreferences,
   submitDelivery,
   submitReview,
@@ -1188,6 +1189,62 @@ describe("inventory of §4.5 invariants", () => {
     expect(errorOf(stale).code).toBe("stale_target");
     expect(second).not.toBe(first);
     expect(reworkRun.assignment_id).toBe(s.coder.id);
+  });
+
+  test("C-615: ref_slot binds a comment's attachment-new-N to one file of its author", async () => {
+    const s = scenario();
+    const prepared = await prepareAttachment(
+      contentDigest,
+      new Uint8Array([1, 2, 3]),
+      attachmentStore(),
+    );
+    if (!prepared.ok) throw new Error("attachment preflight failed");
+    const receipt = prepared.value;
+    const comment = commit(
+      s.h,
+      postComment(
+        s.h.state,
+        human,
+        { card_id: s.card, body: "见 attachment-new-1", mentions: [] },
+        s.h.ports,
+      ),
+    );
+    if (!comment) throw new Error("comment missing");
+    const upload = (actor: Actor, ref_slot?: number) =>
+      uploadAttachment(
+        s.h.state,
+        actor,
+        {
+          card_id: s.card,
+          mime: "text/plain",
+          kind: "evidence",
+          attach_to: { kind: "timeline_entry", id: comment.id },
+          ...(ref_slot === undefined ? {} : { ref_slot }),
+        },
+        receipt,
+        s.h.ports,
+      );
+    // Another file on the same comment, without a slot, takes none.
+    const extra = commit(s.h, upload(human));
+    const first = commit(s.h, upload(human, 1));
+    expect(first.ref_slot).toBe(1);
+    expect(extra.ref_slot).toBeUndefined();
+    expect(
+      resolvePendingAttachmentRefs(
+        comment.body,
+        comment,
+        s.h.state.attachments,
+      ),
+    ).toBe(`见 ${first.id}`);
+    // A slot is filled once, by an integer in range, on a comment only.
+    expect(errorOf(upload(human, 1)).code).toBe("validation_failed");
+    expect(errorOf(upload(human, 0)).code).toBe("validation_failed");
+    expect(errorOf(upload(human, 1.5)).code).toBe("validation_failed");
+    expect(errorOf(upload(human, 101)).code).toBe("validation_failed");
+    // Only the comment's author fills its slots.
+    const coderRun = startRun(s.h, s.coder);
+    expect(errorOf(upload(s.coderActor, 2)).code).toBe("unauthorized");
+    endRun(s.h, s.coderActor, coderRun);
   });
 
   test("invariant 14: an artifact attachment requires a decision basis", async () => {

@@ -4,6 +4,8 @@ import {
   reviewImpactLabel,
   type WorkItem,
 } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
+import { streakAlignment } from "../review-convergence.js";
 import { originalRunTrigger } from "../run-trigger.js";
 import { sharedReviewers } from "../shared-findings.js";
 import { reviewDiscussionInstruction } from "../shared-review-wake.js";
@@ -57,6 +59,8 @@ export function requestReviewLimit(
 ) {
   if (!reviewRejectionsNeedAttention(d, item))
     return applyFlowReviewLimit(d, item);
+  if (!pendingReviewLimit(d, item) && openReviewAlignment(d, item))
+    return false;
   const group = sharedGroup(d, review);
   const sibling =
     group &&
@@ -100,6 +104,7 @@ export function requestReviewLimit(
   const impactSummary = impacts.length
     ? `影响程度：${impacts.join("、")}。`
     : "";
+  const alignment = streakAlignment(item, streak);
   const recommended = conflictRepair || !mustFix ? "raise_limit" : "pause";
   const reason = repeated
     ? "最近两次同类，推荐换做法或收窄范围；能独立跟进的部分可拆卡。"
@@ -125,6 +130,11 @@ export function requestReviewLimit(
         `最近三次驳回（从新到旧）：`,
         ...recent.map((r) => `${r.id}【${r.category}】${r.summary}`),
         ...(impactSummary ? [impactSummary] : []),
+        ...(alignment?.status === "disputed"
+          ? [
+              `作者与审核员对齐不变量未达成一致：提案 ${alignment.proposal?.entry_id ?? "无"}，分歧 ${alignment.reply_entry_id ?? "无"}。`,
+            ]
+          : []),
         reason,
         ...(group
           ? [
@@ -170,7 +180,7 @@ export function requestReviewLimit(
         !reviewDiscussionInstruction(
           item,
           originalRunTrigger(d.state, run),
-          d.state.decisions,
+          d.state,
         )
       )
         endRun(d, run, "blocked", decision.question, {
@@ -225,4 +235,61 @@ export function requestReviewLimit(
     },
   );
   return false;
+}
+
+/**
+ * C-610 (flow >= 5): the third consecutive rejection opens an alignment round
+ * between author and verifier instead of a PM decision. Only a disputed round
+ * falls through to PM.
+ */
+function openReviewAlignment(d: CommandDraft, item: WorkItem): boolean {
+  if (item.kind !== "verify" || !flowAtLeast(d.card(item.card_id), 5))
+    return false;
+  const streak = rejectionStreak(d, item);
+  const current = streakAlignment(item, streak);
+  if (current) return current.status === "open";
+  // Longer streaks without a round predate C-610 and keep the PM path.
+  if (streak.length !== 3) return false;
+  const latest = streak[0];
+  ensure(latest, "invariant_violation", "缺少连续驳回依据");
+  const producer = d.work(d.get("deliveries", latest.delivery_id).work_item_id);
+  const waiting =
+    item.status === "waiting_decision"
+      ? item
+      : d.move(item, "review_limit_exceeded");
+  ensure(waiting.kind === "verify", "invariant_violation", "需要验证项");
+  d.put("work_items", {
+    ...waiting,
+    review_alignment: { review_id: latest.id, status: "open" },
+  });
+  d.emit(
+    "review_alignment_opened",
+    item.card_id,
+    {
+      work_item_id: item.id,
+      producer_id: producer.id,
+      review_id: latest.id,
+      streak: streak.length,
+    },
+    {
+      type: "system",
+      author: "system",
+      work_item_id: item.id,
+      body: `${item.id} 已连续驳回 ${streak.length} 次，系统开启作者与审核员的对齐回合：先对齐不变量清单，再继续审核。`,
+    },
+    { kind: "system", project_id: d.state.project_id },
+  );
+  d.emit(
+    "instruction_issued",
+    item.card_id,
+    { work_item_id: producer.id, alignment_work_item_id: item.id },
+    {
+      type: "instruction",
+      author: "system",
+      work_item_id: producer.id,
+      body: `对齐回合：${item.id} 已连续驳回 ${streak.length} 次。先用 get_card 读最近的驳回，再用 post_comment 的 review_alignment={work_item_id:"${item.id}",step:"propose",invariants:[...]} 提出 1–10 条本卡必须守住的不变量；审核员确认后系统恢复审核，之后的必改项只能引用这些不变量或通过条件清单。可同时继续修改和交付。`,
+    },
+    { kind: "system", project_id: d.state.project_id },
+  );
+  return true;
 }
