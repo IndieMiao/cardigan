@@ -115,3 +115,29 @@ test("the migration backfills the owner's codes, then suggestions in creation or
     current.close();
   }
 });
+
+test("C-675: projectsHoldingId lists the projects that have a short number", () => {
+  withTempStore((store) => {
+    for (const id of ["alpha", "beta"])
+      expect(store.createProject({ id }).ok).toBe(true);
+    const card = (id: string) =>
+      ({
+        id,
+        title: id,
+        goal: "",
+        acceptance_criteria: [],
+        status: "todo",
+      }) as never;
+    store.uow.run((tx) => {
+      tx.cards.put("alpha", card("C-1"));
+      tx.cards.put("beta", card("C-1"));
+      tx.cards.put("beta", card("C-2"));
+    });
+    expect(store.projectsHoldingId("card", "C-1")).toEqual(["alpha", "beta"]);
+    expect(store.projectsHoldingId("card", "C-2")).toEqual(["beta"]);
+    expect(store.projectsHoldingId("card", "C-3")).toEqual([]);
+    expect(store.projectsHoldingId("decision", "C-1")).toEqual([]);
+    // Merge batches have no row table to look in.
+    expect(store.projectsHoldingId("merge_batch", "MB-1")).toEqual([]);
+  });
+});

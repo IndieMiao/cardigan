@@ -1,10 +1,14 @@
 import { expect, test } from "vitest";
 import {
+  describeQualifiedInputError,
   extractQualifiedReferences,
   isProjectCode,
+  localInputKind,
+  qualifiedInputProject,
   qualifyId,
   qualifyText,
   splitQualifiedId,
+  splitQualifiedInput,
   suggestProjectCode,
   validateProjectCode,
 } from "./project-code.js";
@@ -102,4 +106,65 @@ test("C-676: text leaving the project gets full numbers for short ones only", ()
   expect(qualifyText("CDG", kept)).toBe(kept);
   expect(qualifyText(undefined, "C-12")).toBe("C-12");
   expect(qualifyText("cdg", "C-12")).toBe("C-12");
+});
+
+test("C-675: input full numbers include attachments; global ids and text are not full numbers", () => {
+  expect(splitQualifiedInput("SEN-C-34")).toEqual({ code: "SEN", id: "C-34" });
+  expect(splitQualifiedInput("SEN-C-34#12")).toEqual({
+    code: "SEN",
+    id: "C-34#12",
+  });
+  expect(splitQualifiedInput("CDG-attachment-3")).toEqual({
+    code: "CDG",
+    id: "attachment-3",
+  });
+  expect(splitQualifiedInput("CDG-MB-2")).toEqual({ code: "CDG", id: "MB-2" });
+  for (const value of [
+    "C-34",
+    "CDG-E-5",
+    "CDG-M-2",
+    "cdg-C-1",
+    "CDG-C-0",
+    "CDG-C-1 ",
+    "CDG-C-1x",
+    "CDG-attachment-",
+  ])
+    expect(splitQualifiedInput(value), value).toBeUndefined();
+  expect(localInputKind("C-3")).toBe("card");
+  expect(localInputKind("C-3#4")).toBe("timeline_entry");
+  expect(localInputKind("Q-1")).toBe("decision");
+  expect(localInputKind("H-1")).toBe("human_action");
+  expect(localInputKind("attachment-9")).toBe("attachment");
+  expect(localInputKind("MB-1")).toBe("merge_batch");
+  for (const value of ["E-1", "M-1", "SEN-C-1", "C-x", "branch"])
+    expect(localInputKind(value), value).toBeUndefined();
+});
+
+test("C-675: full numbers pick one project; an unknown code, two projects or a disagreeing project are refused", () => {
+  const codes: Record<string, string> = { CDG: "cardigan", SEN: "sensen" };
+  const of = (code: string) => codes[code];
+  expect(qualifiedInputProject(["C-1", "text"], of)).toEqual({
+    ok: true,
+    value: undefined,
+  });
+  expect(qualifiedInputProject(["SEN-C-34", "SEN-Q-2", "C-1"], of)).toEqual({
+    ok: true,
+    value: "sensen",
+  });
+  expect(qualifiedInputProject(["SEN-C-34"], of, "sensen")).toEqual({
+    ok: true,
+    value: "sensen",
+  });
+  const mismatch = qualifiedInputProject(["SEN-C-34"], of, "cardigan");
+  expect(
+    mismatch.ok === false && describeQualifiedInputError(mismatch.error),
+  ).toBe("完整编号 SEN-C-34 属于项目 sensen，与指定的项目 cardigan 不一致");
+  const mixed = qualifiedInputProject(["CDG-C-1", "SEN-C-2"], of);
+  expect(mixed.ok === false && describeQualifiedInputError(mixed.error)).toBe(
+    "完整编号 CDG-C-1、SEN-C-2 属于不同项目，一次只能操作一个项目",
+  );
+  const unknown = qualifiedInputProject(["ZZZ-C-1"], of);
+  expect(
+    unknown.ok === false && describeQualifiedInputError(unknown.error),
+  ).toBe("完整编号 ZZZ-C-1 的代号 ZZZ 没有登记给任何项目");
 });

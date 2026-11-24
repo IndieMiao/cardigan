@@ -4,7 +4,11 @@ import type {
   ProjectId,
   TimelineEntry,
 } from "@cardigan/domain";
-import { extractReferences, fullEventHistory } from "@cardigan/domain";
+import {
+  extractReferences,
+  fullEventHistory,
+  streamEventsBy,
+} from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
@@ -23,9 +27,9 @@ function cardState(
   project_id: ProjectId,
   card_id?: CardId,
 ): CommandState {
-  const config = tx.events
-    .listAfter(project_id, undefined, 0)
-    .findLast((e) => e.type === "merge_queue_configured");
+  const config = streamEventsBy(tx.events, project_id, undefined, "type", [
+    "merge_queue_configured",
+  ]).at(-1);
   if (config) {
     const state = loadCommandState(
       tx,

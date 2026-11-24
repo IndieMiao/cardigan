@@ -130,7 +130,12 @@ export {
   pressureNotice,
 } from "./host-memory-pressure.js";
 export { HostOpsService } from "./host-ops.js";
-export { tryHelperConfirmationLock, tryHostOpsLock } from "./host-ops-lock.js";
+export {
+  type HostOpsLockHolder,
+  hostOpsLockHolder,
+  tryHelperConfirmationLock,
+  tryHostOpsLock,
+} from "./host-ops-lock.js";
 export {
   boundedRetirementError,
   idleRetirementPolicy,

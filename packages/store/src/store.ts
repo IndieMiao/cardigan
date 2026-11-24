@@ -13,6 +13,7 @@ import type {
   GlobalIdAllocator,
   GlobalRepositories,
   IdAllocator,
+  LocalInputKind,
   NotificationStatus,
   ProjectId,
   ReadMachinePlacement,
@@ -73,7 +74,11 @@ import {
   listMigrations,
   migrate,
 } from "./migrate.js";
-import { projectCodeSource, projectCodes } from "./project-codes.js";
+import {
+  projectCodeSource,
+  projectCodes,
+  projectsHoldingId,
+} from "./project-codes.js";
 import {
   listFindings,
   type ReconcileFindingInput,
@@ -951,6 +956,7 @@ export class Store {
       const repositories = createReadRepositories(this.#db, snapshots);
       const result = operation({
         ...repositories,
+        projectMergeEvents: events.projectMergeEvents,
         ...this.#cachedState(snapshots),
         ...(this.#testReviewTrust
           ? { test_review_trust: this.#testReviewTrust }
@@ -1267,6 +1273,11 @@ export class Store {
       .prepare(`SELECT ${this.#projectColumns()} FROM projects WHERE code = ?`)
       .get(code) as ProjectRow | undefined;
     return row === undefined ? undefined : projectRecord(row);
+  }
+
+  /** C-675: the projects that have this project-scoped number (`C-34`). */
+  projectsHoldingId(kind: LocalInputKind, id: string): ProjectId[] {
+    return projectsHoldingId(this.#db, kind, id);
   }
 
   /** C-674: display code of a project; undefined when none is registered. */

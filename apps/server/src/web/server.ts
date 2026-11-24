@@ -13,6 +13,7 @@ import type {
 } from "@cardigan/domain";
 import {
   decisionDelegation,
+  extractQualifiedReferences,
   highRiskPaths,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
@@ -90,6 +91,7 @@ import type { MachineHost } from "./machine-host.js";
 import { serveMachines } from "./machines.js";
 import { readMentionCandidates } from "./mention-candidates.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
+import { qualifiedReferenceResolver } from "./qualified-refs.js";
 import {
   contextUsageRevision,
   type ExecutionContexts,
@@ -746,6 +748,22 @@ async function handleApi(context: RequestContext): Promise<void> {
         code: project.code,
       })),
     });
+    return;
+  }
+
+  // C-675: a full number typed into a search box (`SEN-C-34`, `SEN-Q-12`,
+  // `SEN-H-46`), resolved in the project its code names; null when there is
+  // no such project or entity.
+  if (path === "/api/refs/resolve") {
+    if (req.method !== "GET") methodNotAllowed(["GET"]);
+    const id = (url.searchParams.get("id") ?? "").trim();
+    const refs = extractQualifiedReferences(id).filter(
+      (ref) => ref.qualified === id,
+    );
+    const [found] = qualifiedReferenceResolver(context.store)(refs).filter(
+      (ref) => ref.exists,
+    );
+    sendJson(res, 200, { reference: found ?? null });
     return;
   }
 

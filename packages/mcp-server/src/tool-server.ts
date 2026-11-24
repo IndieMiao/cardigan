@@ -13,6 +13,7 @@ import type { McpBackend } from "./backend.js";
 import { captureBellReceipt } from "./commands/bell-receipt.js";
 import { ToolError, toDomainError } from "./errors.js";
 import type { Logger } from "./log.js";
+import { resolveQualifiedToolArgs } from "./qualified-args.js";
 import {
   allowedTools,
   type ToolContext,
@@ -208,7 +209,14 @@ export function createMcpServer(options: ToolServerOptions): Server {
       return finish(error.code, errorResult(error));
     }
 
-    const parsed = definition.input.safeParse(request.params.arguments ?? {});
+    // C-675: full numbers of the token's project (`CDG-C-34`) work like short ones.
+    const qualified = resolveQualifiedToolArgs(request.params.arguments ?? {}, {
+      id: identity.actor.project_id,
+      code: () => store.getProject?.(identity.actor.project_id)?.code,
+    });
+    if (!qualified.ok)
+      return finish(qualified.error.code, errorResult(qualified.error));
+    const parsed = definition.input.safeParse(qualified.value);
     if (!parsed.success) {
       const error = {
         code: "validation_failed" as const,

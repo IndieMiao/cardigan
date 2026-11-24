@@ -18,6 +18,7 @@ import {
   type ReadRunCapacity,
   type Result,
   referenceProjectSnapshot,
+  streamEventsBy,
   uploadAttachment,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -97,10 +98,11 @@ export function readProjectSnapshot(
       ? undefined
       : safeReferenceQuery(() =>
           store.uow.read((tx) =>
-            tx.events.listAfter(project, undefined, 0).flatMap((e) => {
+            streamEventsBy(tx.events, project, undefined, "type", [
+              "cross_card_read",
+            ]).flatMap((e) => {
               const p = e.payload;
               if (
-                e.type !== "cross_card_read" ||
                 !p ||
                 typeof p !== "object" ||
                 Array.isArray(p) ||

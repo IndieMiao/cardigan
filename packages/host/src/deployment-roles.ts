@@ -11,6 +11,7 @@ import {
   roleUpgradeDiff,
   rotatePmAfterDeployment,
   rotateStandingAfterDeployment,
+  streamEventsBy,
   upgradeRoleAfterDeployment,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -121,12 +122,12 @@ export function idleRolePolicies(tx: ReadRepositories, project: ProjectId) {
 
 function rolePackPublication(tx: ReadRepositories, project: ProjectId) {
   // All receipts are in the project stream. Its sequence survives clock skew.
-  return tx.events
-    .listAfter(project, undefined, 0)
+  return streamEventsBy(tx.events, project, undefined, "type", [
+    "host_role_pack_published",
+  ])
     .filter(
       (e) =>
         e.card_id === undefined &&
-        e.type === "host_role_pack_published" &&
         e.actor.kind === "system" &&
         e.actor.project_id === project,
     )
@@ -325,12 +326,12 @@ function lastLaunchCheck(
   project: ProjectId,
   target: LaunchTarget,
 ): boolean | undefined {
-  const last = tx.events
-    .listAfter(project, undefined, 0)
+  const last = streamEventsBy(tx.events, project, undefined, "type", [
+    LAUNCH_CHECKED_EVENT,
+  ])
     .filter((e) => {
       const p = e.payload as Partial<LaunchTarget>;
       return (
-        e.type === LAUNCH_CHECKED_EVENT &&
         e.card_id === undefined &&
         e.actor.kind === "system" &&
         e.actor.project_id === project &&

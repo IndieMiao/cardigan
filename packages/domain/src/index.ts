@@ -55,6 +55,7 @@ export * from "./commands/flow.js";
 export { DEFAULT_FRAMEWORK_WAIT_REMINDER_MS } from "./commands/framework-dependencies.js";
 export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
+export * from "./commands/host-ops-attached-wait.js";
 export * from "./commands/host-ops-context-restart.js";
 export * from "./commands/host-ops-rotate.js";
 export { refreshHumanActionFollowUps } from "./commands/human-action-follow-ups.js";
@@ -239,6 +240,8 @@ export {
   EventLog,
   EventLogView,
   type HistoryFilter,
+  type IndexKeys,
+  indexKeysOf,
   streamHistory,
 } from "./event-log.js";
 export * from "./ext-interaction.js";
@@ -320,6 +323,7 @@ export * from "./standing.js";
 export * from "./states.js";
 export * from "./story.js";
 export * from "./story-discussion.js";
+export { type StreamEventReader, streamEventsBy } from "./stream-events.js";
 export * from "./system-review-limit.js";
 export * from "./templates.js";
 export * from "./test-review.js";

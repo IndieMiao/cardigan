@@ -36,6 +36,22 @@ const FIELDS = [
   "work_item_id",
 ] as const;
 
+/** Index keys to select: a list, or a predicate over the keys present. */
+export type IndexKeys = readonly unknown[] | ((key: unknown) => boolean);
+
+/** Keys `EventLog.append` indexes the event under for `kind`. */
+export function indexKeysOf(
+  event: Event,
+  kind: EventIndexKind,
+): readonly unknown[] {
+  if (kind === "type") return [event.type];
+  const payload = event.payload as Record<string, unknown> | null;
+  if (!payload || typeof payload !== "object") return [];
+  const value = payload[kind];
+  if (kind === "resume_work_items") return Array.isArray(value) ? value : [];
+  return typeof value === "string" ? [value] : [];
+}
+
 type Seg = { readonly events: Event[]; readonly ords: number[] };
 /**
  * Per-stream ordinals of one index key (events resolve through `EventLog.at`);
@@ -571,6 +587,44 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
       }
     }
     return events.length ? events : noEvents;
+  }
+
+  /**
+   * C-652: the stream's events indexed under `kind` with a key in `keys`, seq
+   * ascending, in a fresh array. Same as filtering `after(stream, 0)` with
+   * `indexKeysOf`, but touches only the matching events.
+   */
+  matching(stream: string, kind: EventIndexKind, keys: IndexKeys): Event[] {
+    const out: Event[] = [];
+    const take = (log: EventLog | undefined, limit: number) => {
+      const buckets = log?.buckets.get(kind);
+      if (!log || !buckets) return;
+      const lists: (readonly number[])[] = [];
+      const add = (bucket: Bucket | undefined) => {
+        const ords = bucket?.get(stream);
+        if (ords) lists.push(ords);
+      };
+      if (typeof keys === "function") {
+        for (const [key, bucket] of buckets) if (keys(key)) add(bucket);
+      } else for (const key of keys) add(buckets.get(key));
+      if (!lists.length) return;
+      const ords =
+        lists.length === 1
+          ? (lists[0] as readonly number[])
+          : lists.flat().sort((a, b) => a - b);
+      const n = below(ords, limit);
+      // One event can sit in a bucket twice (repeated resume_work_items).
+      let last = -1;
+      for (let i = 0; i < n; i++) {
+        const ord = ords[i] as number;
+        if (ord === last) continue;
+        last = ord;
+        out.push(log.at(ord) as Event);
+      }
+    };
+    take(this.base, this.baseEnd);
+    take(this.overlay, this.end);
+    return out;
   }
 
   /** The view's event with this id, if any (event ids are unique per project). */
