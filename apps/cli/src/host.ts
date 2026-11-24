@@ -210,7 +210,7 @@ export function resolveProject(
     const project = store.getProject(requested.trim());
     if (project === undefined) {
       throw new CliError(
-        `项目 ${requested} 不存在，先运行 cardigan project create ${requested}`,
+        `项目 ${requested} 不存在，先运行 cardigan project create ${requested} --code <代号>`,
         EXIT.usage,
       );
     }
@@ -224,8 +224,8 @@ export function resolveProject(
   }
   throw new CliError(
     projects.length === 0
-      ? "还没有项目，先运行 cardigan project create <project_id>"
-      : `有多个项目，请用 --project 指定：${projects.map((p) => p.id).join(", ")}`,
+      ? "还没有项目，先运行 cardigan project create <project_id> --code <代号>"
+      : `有多个项目，请用 --project 指定：${projects.map((p) => (p.code ? `${p.id}（${p.code}）` : p.id)).join(", ")}`,
     EXIT.usage,
   );
 }

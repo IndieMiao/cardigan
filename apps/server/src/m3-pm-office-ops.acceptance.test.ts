@@ -199,7 +199,7 @@ async function pmFixture(automaticOps = false) {
     if (args[0] === "pm" && args[1] === "start") standingReady = true;
     return output;
   };
-  await cli("project", "create", project);
+  await cli("project", "create", project, "--code", "PRO");
   for (const role_id of ["pm", "coder", "reviewer"] as const) {
     const file = join(root, `${role_id}.json`);
     await writeFile(

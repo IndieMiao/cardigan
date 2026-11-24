@@ -231,7 +231,7 @@ async function harness(): Promise<Harness> {
       return out.join("\n");
     };
     await cardigan("init");
-    await cardigan("project", "create", project);
+    await cardigan("project", "create", project, "--code", "PRO");
     await cardigan(
       "project",
       "set-repo",

@@ -92,7 +92,9 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 async function bootstrap() {
   expect(await main(["init"], io)).toBe(0);
-  expect(await main(["project", "create", "example"], io)).toBe(0);
+  expect(
+    await main(["project", "create", "example", "--code", "EXA"], io),
+  ).toBe(0);
   const input = {
     version: 1,
     uid: 2201,

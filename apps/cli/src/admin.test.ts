@@ -67,28 +67,89 @@ test("cardigan init creates the database and runs migrations", async () => {
 
 test("cardigan project create records a project", async () => {
   expect(
-    await run(["project", "create", "p-cli", "--name", "CLI project"]),
+    await run([
+      "project",
+      "create",
+      "p-cli",
+      "--name",
+      "CLI project",
+      "--code",
+      "CLI",
+    ]),
   ).toBe(0);
-  expect(out.join("\n")).toContain("已创建项目 p-cli（CLI project）");
+  expect(out.join("\n")).toContain("已创建项目 p-cli（CLI project），代号 CLI");
 
   const store = Store.open({ dataDir });
   try {
-    expect(store.getProject("p-cli")).toMatchObject({ name: "CLI project" });
+    expect(store.getProject("p-cli")).toMatchObject({
+      name: "CLI project",
+      code: "CLI",
+    });
   } finally {
     store.close();
   }
 });
 
+test("project create requires a code and suggests a free one", async () => {
+  expect(await run(["project", "create", "sensen-godot"])).toBe(2);
+  expect(err.join("\n")).toContain("建议：--code SEN");
+  expect(
+    await run(["project", "create", "sensen-godot", "--code", "SEN"]),
+  ).toBe(0);
+  // The three-character stem is taken: the suggestion moves to four.
+  expect(await run(["project", "create", "sensei"])).toBe(2);
+  expect(err.join("\n")).toContain("建议：--code SENS");
+  for (const code of ["SEN", "sen", "S1", "1SEN", "SENSE"])
+    expect(
+      await run(["project", "create", "sensei", "--code", code]),
+      code,
+    ).toBe(2);
+  expect(err.join("\n")).toContain("已被其它项目使用");
+  expect(err.join("\n")).toContain("3–4 位大写字母或数字");
+});
+
+test("project code shows the code and refuses to change it", async () => {
+  expect(await run(["project", "create", "p-cli", "--code", "CLI"])).toBe(0);
+  out = [];
+  expect(await run(["project", "code", "--project", "p-cli"])).toBe(0);
+  expect(out.join("\n")).toContain("项目 p-cli 的代号：CLI");
+  expect(
+    await run(["project", "code", "--set", "CLX", "--project", "p-cli"]),
+  ).toBe(2);
+  expect(err.join("\n")).toContain("登记后不可修改");
+
+  // A project without a code (pre-migration rows) can register one once.
+  const store = Store.open({ dataDir });
+  try {
+    store.database
+      .prepare(
+        "INSERT INTO projects (id, name, created_at) VALUES ('legacy', 'legacy', '2026-01-01T00:00:00.000Z')",
+      )
+      .run();
+  } finally {
+    store.close();
+  }
+  out = [];
+  expect(await run(["project", "code", "--project", "legacy"])).toBe(0);
+  expect(out.join("\n")).toContain(
+    "还没有登记代号；建议：cardigan project code --set LEG --project legacy",
+  );
+  expect(
+    await run(["project", "code", "--set", "LEG", "--project", "legacy"]),
+  ).toBe(0);
+  expect(out.join("\n")).toContain("项目 legacy 已登记代号 LEG");
+});
+
 test("creating the same project twice fails", async () => {
-  expect(await run(["project", "create", "p-cli"])).toBe(0);
-  expect(await run(["project", "create", "p-cli"])).toBe(2);
+  expect(await run(["project", "create", "p-cli", "--code", "CLI"])).toBe(0);
+  expect(await run(["project", "create", "p-cli", "--code", "CLI"])).toBe(2);
   expect(err.join("\n")).toContain(
     "无法创建项目 p-cli：项目已存在，不能重复创建（validation_failed）",
   );
 });
 
 test("cardigan role add writes allowed_tools and capabilities", async () => {
-  await run(["project", "create", "p-cli"]);
+  await run(["project", "create", "p-cli", "--code", "CLI"]);
   expect(
     await run([
       "role",
@@ -122,7 +183,7 @@ test("cardigan role add writes allowed_tools and capabilities", async () => {
 });
 
 test("role add rejects an unknown tool and lists the valid ones", async () => {
-  await run(["project", "create", "p-cli"]);
+  await run(["project", "create", "p-cli", "--code", "CLI"]);
   expect(
     await run([
       "role",
@@ -164,7 +225,7 @@ test.each([
 ])(
   "role rules report complete Chinese errors without changing history: $scenario",
   async ({ scenario, command, expected }) => {
-    await run(["project", "create", "p-cli"]);
+    await run(["project", "create", "p-cli", "--code", "CLI"]);
     const file = join(dataDir, "tester.yaml");
     writeFileSync(
       file,
@@ -206,7 +267,9 @@ test("invalid identifiers and flags are usage errors", async () => {
   expect(await run(["project", "create", "Bad Id"])).toBe(2);
   expect(err.join("\n")).toContain("不合法");
 
-  expect(await run(["project", "create", "p-cli", "--nope", "1"])).toBe(2);
+  expect(
+    await run(["project", "create", "p-cli", "--code", "CLI", "--nope", "1"]),
+  ).toBe(2);
   expect(err.join("\n")).toContain("不认识的选项");
 
   expect(await run(["role", "add", "p-cli", "coder", "--version", "0"])).toBe(

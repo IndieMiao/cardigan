@@ -143,7 +143,7 @@ describe("an Assignment may only acknowledge its own Run", () => {
     dataDir = mkdtempSync(join(tmpdir(), "cardigan-attribution-"));
     roleConfig(dataDir, "codex-agent");
     expect(await cardigan(["init"])).toBe(0);
-    expect(await cardigan(["project", "create", project_id])).toBe(0);
+    expect(await cardigan(["project", "create", project_id, "--code", "PRO"])).toBe(0);
     expect(
       await cardigan([
         "role",

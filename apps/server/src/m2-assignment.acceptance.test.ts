@@ -181,7 +181,7 @@ async function seedProject(
   repo: string,
   cardTitle: string,
 ): Promise<string> {
-  expect((await cardigan(["project", "create", project])).code).toBe(0);
+  expect((await cardigan(["project", "create", project, "--code", "PRO"])).code).toBe(0);
   expect(
     (
       await cardigan([

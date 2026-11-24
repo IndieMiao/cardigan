@@ -283,7 +283,7 @@ export async function createHarness(
   };
 
   await cardigan("init");
-  await cardigan("project", "create", PROJECT);
+  await cardigan("project", "create", PROJECT, "--code", "PRO");
   await cardigan(
     "project",
     "set-repo",

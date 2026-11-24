@@ -105,7 +105,7 @@ required_machine_tags: [gpu]
 
 async function bootstrap(): Promise<void> {
   expect(await run(["init"])).toBe(0);
-  expect(await run(["project", "create", project])).toBe(0);
+  expect(await run(["project", "create", project, "--code", "PRO"])).toBe(0);
   const file = join(root, "pm.yaml");
   writeFileSync(file, OLD_PM);
   expect(await run(["role", "add", "--file", file])).toBe(0);

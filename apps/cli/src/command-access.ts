@@ -20,6 +20,7 @@ export const CLI_TOOLS = {
   "deploy unpin": null,
   "project create": null,
   "project set-repo": null,
+  "project code": null,
   "role apply": null,
   "role export": null,
   "role list": null,

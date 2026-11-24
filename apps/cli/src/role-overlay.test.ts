@@ -36,7 +36,7 @@ beforeEach(async () => {
     captureCommand: async () => ({ code: 1, stdout: "", stderr: "" }),
   };
   await run(["init"]);
-  await run(["project", "create", PROJECT]);
+  await run(["project", "create", PROJECT, "--code", "PRO"]);
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
