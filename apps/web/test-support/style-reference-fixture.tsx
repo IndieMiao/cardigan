@@ -185,6 +185,7 @@ function StyleReference() {
                 variant="emphasis"
                 disabled={disabled}
                 data-reference-state={state}
+                data-reference-sample={key}
               >
                 {label}
               </Button>

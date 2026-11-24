@@ -293,8 +293,10 @@
   .ui-button-secondary {
     background: var(--surface-muted);
   }
-  /* Only the page's single main action and a dialog's confirm. */
-  .ui-button-emphasis {
+  /* Only the page's single main action and a dialog's confirm. The :hover
+     selector outranks .ui-button:hover so a disabled one keeps its fill. */
+  .ui-button-emphasis,
+  .ui-button-emphasis:hover {
     background: var(--accent);
     color: var(--accent-contrast);
     border-color: var(--accent);
@@ -726,14 +728,14 @@
     > .ui-dialog-footer,
     > form > .ui-dialog-footer
   ),
-  .ui-dialog > form:has(> .ui-dialog-footer) {
+  .ui-dialog:not(.ui-sheet) > form:has(> .ui-dialog-footer) {
     display: flex;
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
     padding: 0;
   }
-  .ui-dialog > form:has(> .ui-dialog-footer) {
+  .ui-dialog:not(.ui-sheet) > form:has(> .ui-dialog-footer) {
     flex: 1 1 auto;
     margin: 0;
     border: 0;

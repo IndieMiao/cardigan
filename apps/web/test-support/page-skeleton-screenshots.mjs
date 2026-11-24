@@ -258,6 +258,39 @@ try {
             "document.activeElement.getAttribute('role') === 'combobox'",
           );
         }
+        if (mode === "reference") {
+          // After the PNG: a disabled emphasis button keeps its fill on hover.
+          const look = () =>
+            run(() => {
+              const s = getComputedStyle(
+                document.querySelector('[data-reference-sample="disabled"]'),
+              );
+              return [s.backgroundColor, s.borderTopColor, s.color];
+            });
+          const before = await look();
+          const { root } = await send("DOM.getDocument", { depth: 0 });
+          const { nodeId } = await send("DOM.querySelector", {
+            nodeId: root.nodeId,
+            selector: '[data-reference-sample="disabled"]',
+          });
+          assert(nodeId, "Missing disabled sample");
+          await send("CSS.forcePseudoState", {
+            nodeId,
+            forcedPseudoClasses: ["hover"],
+          });
+          assert(
+            await evaluate(
+              "document.querySelector('[data-reference-sample=\"disabled\"]').matches(':hover')",
+            ),
+            "Disabled sample not hovered",
+          );
+          assert.deepEqual(
+            await look(),
+            before,
+            `${width}/${theme}: disabled emphasis changes on hover`,
+          );
+          metrics.disabledEmphasisHover = before;
+        }
         results.push({ name, ...metrics });
         console.log(`Captured ${name}`);
         await evaluate("localStorage.clear()");

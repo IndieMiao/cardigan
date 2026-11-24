@@ -34,8 +34,13 @@ test("emphasis is its own variant; primary keeps the selected fill", () => {
   expect(emphasis.className).not.toContain("ui-button-primary");
   expect(primary.className).toContain("ui-button-primary");
   expect(primary.className).not.toContain("ui-button-emphasis");
-  expect(rule(".ui-button-emphasis")).toMatch(
-    /background: var\(--accent\);\s+color: var\(--accent-contrast\);/,
+  // The fill rule also covers :hover so it outranks `.ui-button:hover`; a
+  // disabled emphasis button keeps the accent fill under the pointer.
+  expect(rule(".ui-button-emphasis,\n  .ui-button-emphasis:hover")).toMatch(
+    /background: var\(--accent\);\s+color: var\(--accent-contrast\);\s+border-color: var\(--accent\);/,
+  );
+  expect(theme).toContain(
+    '.ui-button-emphasis:hover:not(:disabled, [aria-disabled="true"]) {',
   );
   expect(rule(".ui-button-primary")).toMatch(
     /background: var\(--ui-selected\);\s+color: var\(--ui-selected-text\);/,
