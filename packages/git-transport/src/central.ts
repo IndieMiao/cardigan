@@ -141,10 +141,27 @@ export interface CentralGitOptions extends GitTimeoutOptions {
   onCommand?: (cwd: string, args: readonly string[]) => void;
 }
 /** Host Git never executes inside the source or an Agent repository. */
+/** Identity of a repository's own config file, or undefined when unreadable. */
+function configStamp(repository: string): string | undefined {
+  try {
+    const st = lstatSync(join(repository, "config"), { bigint: true });
+    if (!st.isFile()) return undefined;
+    return `${st.dev}:${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
+  } catch {
+    return undefined;
+  }
+}
 export class CentralGitTransport
   implements GitCentralPort, GitReviewAttributionPort
 {
   readonly root: string;
+  /**
+   * C-670: repository identity proven for an unchanged `config` file (same
+   * device, inode, mtime, ctime and size); any rewrite re-runs both reads.
+   */
+  readonly #verifiedSources = new Map<string, string>();
+  /** C-670: refs `git check-ref-format` already accepted (pure validation). */
+  readonly #validRefs = new Set<string>();
   constructor(private readonly options: CentralGitOptions) {
     this.root = resolve(
       options.centralRoot ?? join(options.dataDir, "central"),
@@ -466,6 +483,15 @@ export class CentralGitTransport
   async verifyBareSource(repository: string, canonicalSource: string) {
     if (dirname(repository) !== this.root)
       throw new Error("Unexpected central repository path");
+    const stamp = configStamp(repository);
+    const proven = stamp && `${canonicalSource}\u0000${stamp}`;
+    if (proven && this.#verifiedSources.get(repository) === proven) {
+      // The private-directory checks still run for every proven read.
+      await this.privateDirectory(this.root);
+      await this.privateDirectory(repository);
+      return;
+    }
+    this.#verifiedSources.delete(repository);
     const sourceRecord = await this.command(repository, [
       "config",
       "--local",
@@ -483,6 +509,7 @@ export class CentralGitTransport
       throw new Error(
         "Central repository source changed; explicit rebuild required",
       );
+    if (proven) this.#verifiedSources.set(repository, proven);
   }
   /** Host pushes only baseline snapshots and pinned deliveries, never Agent branches. */
   /**
@@ -972,7 +999,11 @@ export class CentralGitTransport
       : undefined;
   }
   async readRef(repository: string, ref: string) {
-    await this.checked(repository, ["check-ref-format", ref]);
+    if (!this.#validRefs.has(ref)) {
+      await this.checked(repository, ["check-ref-format", ref]);
+      if (this.#validRefs.size >= 4096) this.#validRefs.clear();
+      this.#validRefs.add(ref);
+    }
     const r = await this.command(repository, [
       "rev-parse",
       "--verify",
