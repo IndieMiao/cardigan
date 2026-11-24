@@ -453,7 +453,7 @@ export function CardListPage({
     >
       <PageTitle
         title="卡片"
-        actions={
+        status={
           // C-684: a standing entry, with or without cards and filters.
           <CreateCardButton
             key={projectId}

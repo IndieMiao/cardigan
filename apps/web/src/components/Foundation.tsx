@@ -9,11 +9,14 @@ export function PageTitle({
   title,
   count,
   actions,
+  status,
   showCapacity = true,
 }: {
   title: ReactNode;
   count?: ReactNode;
   actions?: ReactNode;
+  /** Right-aligned before the capacity summary (e.g. the cards page's 新建需求). */
+  status?: ReactNode;
   showCapacity?: boolean;
 }) {
   return (
@@ -21,6 +24,7 @@ export function PageTitle({
       title={title}
       count={count}
       actions={actions}
+      status={status}
       showCapacity={showCapacity}
     />
   );
