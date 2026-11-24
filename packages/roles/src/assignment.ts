@@ -51,6 +51,11 @@ import { parseWorkerEnvironment } from "./worker-environment.js";
  */
 
 export * from "./assignment-types.js";
+
+const ADB_SLOT_RULE =
+  "本次 Run 有自己的 adb 服务端口（ANDROID_ADB_SERVER_PORT）。adb 只用这个端口，不要用 -P 指定别的端口、默认 5037 或用户 USB 真机；Run 结束时系统会关闭它。";
+const ADB_EMULATOR_RULE =
+  "启动模拟器必须加 -port $CARDIGAN_EMULATOR_PORT，序列号是 $ANDROID_SERIAL；Run 结束时系统会关闭这个模拟器。";
 export function compileAssignmentLaunch(
   input: CompileAssignmentInput,
 ): CompiledAssignmentLaunch {
@@ -63,9 +68,11 @@ export function compileAssignmentLaunch(
   )
     throw new Error("Invalid MCP session key");
   const identity = employeeIdentityPrompt(input.employee?.identity);
-  const policyRule = input.resource_bindings
-    ? "\n\n只能使用本次 CARDIGAN_RESOURCE_BINDINGS 中分配的端口和设备。禁止裸 adb、默认 5037、未分配端口及用户 USB 真机。没有分配则不得操作设备。"
-    : "";
+  const policyRule = input.adb_slot
+    ? `\n\n${ADB_SLOT_RULE}${input.adb_slot.emulator_port ? ADB_EMULATOR_RULE : ""}`
+    : input.resource_bindings
+      ? "\n\n只能使用本次 CARDIGAN_RESOURCE_BINDINGS 中分配的端口和设备。禁止裸 adb、默认 5037、未分配端口及用户 USB 真机。没有分配则不得操作设备。"
+      : "";
   const rolePrompt =
     (input.role.instructions === undefined
       ? (input.role.core_prompt ?? "")
@@ -245,6 +252,22 @@ export function compileAssignmentLaunch(
     env.ANDROID_SERIAL =
       (devices.length === 1 ? devices[0] : undefined) ?? "cardigan-unassigned";
   }
+  if (input.adb_slot !== undefined) {
+    // C-679: the Run's own adb server; static bindings never coexist with it.
+    delete env.ADB_SERVER_SOCKET;
+    delete env.ANDROID_SERIAL;
+    if (input.adb_slot) {
+      env.ANDROID_ADB_SERVER_PORT = String(input.adb_slot.adb_port);
+      env.CARDIGAN_ADB_SLOT = String(input.adb_slot.slot);
+      if (input.adb_slot.emulator_port) {
+        env.CARDIGAN_EMULATOR_PORT = String(input.adb_slot.emulator_port);
+        env.ANDROID_SERIAL = `emulator-${input.adb_slot.emulator_port}`;
+      } else env.ANDROID_SERIAL = "cardigan-unassigned";
+    } else {
+      env.ADB_SERVER_SOCKET = "localfilesystem:/dev/null";
+      env.ANDROID_SERIAL = "cardigan-unassigned";
+    }
+  }
   const resourceFiles: CompiledFile[] = [];
   if (input.run_resources) {
     env.CARDIGAN_RESOURCE_SESSION = `${input.assignment.assignment_id}.${input.assignment.run_id}`;
@@ -278,6 +301,10 @@ export function compileAssignmentLaunch(
   for (const [key, value] of Object.entries(
     parseWorkerEnvironment(input.worker_env),
   )) {
+    // C-679: a fixed port from the worker binding must not override (or
+    // share) the Run's own; the host warns about it separately.
+    if (input.adb_slot !== undefined && key === "ANDROID_ADB_SERVER_PORT")
+      continue;
     if (
       Object.hasOwn(env, key) ||
       Object.hasOwn(resolved.provider?.definition.env ?? {}, key) ||

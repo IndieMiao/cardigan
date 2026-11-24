@@ -44,6 +44,7 @@ import {
   type WorkItemRequirements,
 } from "@cardigan/domain";
 import {
+  AdbSlots,
   checkRegisteredMachine,
   configureMachinePlacement,
   effectiveRunLimit,
@@ -971,6 +972,14 @@ async function machineCommand(
             max_assignments: limit(m.id),
             ...(sub === "show"
               ? readMachineObservations(store, project_id, m.id)
+              : {}),
+            // C-679: current adb port / emulator slots (host operators only).
+            ...(sub === "show" && config.adbSlots(m.id)
+              ? {
+                  adb_slots: new AdbSlots(store, config, undefined).diagnostics(
+                    m.id,
+                  ),
+                }
               : {}),
           })),
           null,

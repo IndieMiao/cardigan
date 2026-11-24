@@ -139,6 +139,16 @@ export interface CompileAssignmentInput {
     port?: number;
     device?: string;
   }[];
+  /**
+   * C-679: this Run's own adb server port and, with the emulator, console
+   * port. `null`: the machine hands out slots but this Run has none, so adb is
+   * disabled. Omitted: the machine does not manage adb ports.
+   */
+  readonly adb_slot?: {
+    readonly slot: number;
+    readonly adb_port: number;
+    readonly emulator_port?: number;
+  } | null;
   readonly test_max_workers?: number;
   /** Employee self-tests must not start real hc or end-to-end scenarios. */
   readonly agent_local_tests?: boolean;

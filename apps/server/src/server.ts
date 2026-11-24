@@ -7,6 +7,7 @@ import {
 } from "@cardigan/domain";
 import {
   acquireRepositoryFlock,
+  adbEnvironmentWarnings,
   CpuProfileController,
   configureMachinePlacement,
   defaultExtMessagePath,
@@ -396,7 +397,20 @@ async function assembleServer(
     runCapacity,
     () => options.dispatcher?.upstream,
   );
-  for (const message of [...mergeGate.errors, ...runCapacity.errors])
+  let adbWarnings: string[] = [];
+  try {
+    adbWarnings = adbEnvironmentWarnings(
+      loadRuntimeWorkers(config.dataDir, runtimeWorkersPath({ ...runtimeEnv })),
+      runCapacity,
+    );
+  } catch {
+    // An invalid worker file is reported where it is used.
+  }
+  for (const message of [
+    ...mergeGate.errors,
+    ...runCapacity.errors,
+    ...adbWarnings,
+  ])
     (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
       message,
     );

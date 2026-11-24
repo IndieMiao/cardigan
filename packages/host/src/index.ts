@@ -1,4 +1,16 @@
 export {
+  ADB_SLOT_SCRIPT,
+  type AdbProbe,
+  adbTargetProbe,
+} from "./adb-slot-probe.js";
+export {
+  type AdbSlotDiagnostic,
+  type AdbSlotPolicy,
+  AdbSlots,
+  adbEnvironmentWarnings,
+  parseAdbSlots,
+} from "./adb-slots.js";
+export {
   type AgentGitOptions,
   type AgentGitRunner,
   AgentGitTransport,

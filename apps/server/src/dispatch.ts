@@ -1299,7 +1299,9 @@ export class Dispatcher {
     // C-247: runtime status and snapshot IO were awaited; shutdown may have begun.
     if (this.closing) return skip("shutting_down");
     const inspection =
-      !continuing && this.options.leases?.configured(project, a.machine_id)
+      !continuing &&
+      (this.options.leases?.configured(project, a.machine_id) ||
+        this.options.leases?.adbNeeded(project, a))
         ? await this.options.leases?.inspect(project, a)
         : undefined;
     if (this.closing) return skip("shutting_down");
@@ -2097,7 +2099,7 @@ export class Dispatcher {
           ? undefined
           : this.availableResources(tx, state, a, run);
         if (!keys) {
-          if (leases?.configured(project, a.machine_id))
+          if (leases && (blocked || leases.configured(project, a.machine_id)))
             leases.wait(
               tx,
               project,

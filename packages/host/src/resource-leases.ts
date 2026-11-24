@@ -7,6 +7,7 @@ import {
   type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
+import { type AdbSlotAccess, AdbSlots } from "./adb-slots.js";
 import { BindingClearances } from "./resource-clearance.js";
 import { bindingIdentity, endpoints, fingerprint } from "./resource-policy.js";
 import type { ResourceProbe } from "./resource-probe.js";
@@ -42,6 +43,8 @@ export type ResourceAccess = {
     port?: number;
     device?: string;
   }[];
+  /** C-679: this Run's own adb server and emulator ports. */
+  adb?: AdbSlotAccess;
 };
 function event(
   tx: StoreTransactionContext,
@@ -84,6 +87,7 @@ const canonicalTime = (s: string) => {
 };
 export class MachineLeases {
   private clearances: BindingClearances;
+  readonly adb: AdbSlots;
   constructor(
     readonly store: Store,
     readonly config: RunCapacityConfiguration,
@@ -91,6 +95,7 @@ export class MachineLeases {
     private readonly publicationProbe: ResourceProbe = probe,
   ) {
     this.clearances = new BindingClearances(store, probe);
+    this.adb = new AdbSlots(store, config, probe.adb);
   }
   private rows(sql: string, ...args: string[]): Lease[] {
     return this.store.database
@@ -105,9 +110,21 @@ export class MachineLeases {
       (p) => p.bindings.size > 0,
     );
   }
+  /** C-679: this Assignment's Runs each get their own adb slot. */
+  adbNeeded(project: string, a: Assignment) {
+    return (
+      !!this.config.adbSlots(a.machine_id) &&
+      !!this.adb.applies(
+        a.machine_id,
+        this.store.uow.read((tx) => assignmentResourceKeys(tx, project, a)),
+      )
+    );
+  }
   freshSession(project: string, a: Assignment) {
     return (
       this.managed(a.machine_id) ||
+      // A new Run must not inherit the previous Run's released adb ports.
+      this.adbNeeded(project, a) ||
       !!this.store.database
         .prepare(
           "SELECT 1 FROM machine_resource_leases WHERE project=? AND assignment_id=? LIMIT 1",
@@ -332,6 +349,16 @@ export class MachineLeases {
         result.target = target;
       }
     }
+    if (this.adb.applies(machine, keys)) {
+      const target = await probe(
+        undefined,
+        { action: "available", project, machine, key: "adb" },
+        result.target,
+      );
+      if (!target || (result.target && result.target !== target))
+        return { ...result, failure: "adb：目标机不可用" };
+      result.target = target;
+    }
     return result;
   }
   blocked(
@@ -372,6 +399,7 @@ export class MachineLeases {
         } else if (l.binding && !l.verified_at) return `${key}：等待释放核验`;
       }
     }
+    if (!own?.adb) return this.adb.blocked(machine, keys);
   }
   private policySignature(
     machine: string,
@@ -379,14 +407,27 @@ export class MachineLeases {
     keys: readonly string[],
   ) {
     return fingerprint(
-      keys.map((key) => {
-        const policy = this.config.policies(machine)?.get(key);
-        return [
-          key,
-          [...(policy?.checks ?? [])],
-          policy?.bindings.get(project),
-        ];
-      }),
+      keys
+        .map((key) => {
+          const policy = this.config.policies(machine)?.get(key);
+          return [
+            key,
+            [...(policy?.checks ?? [])],
+            policy?.bindings.get(project),
+          ];
+        })
+        .concat(
+          this.adb.applies(machine, keys)
+            ? [
+                [
+                  "adb",
+                  JSON.stringify(this.config.adbSlots(machine), (_, v) =>
+                    v instanceof Set ? [...v] : v,
+                  ),
+                ],
+              ]
+            : [],
+        ),
     );
   }
   private probeTarget(project: string, run: Run) {
@@ -458,7 +499,8 @@ export class MachineLeases {
       keys.some(
         (key) =>
           policies?.get(key)?.checks.size || policies?.get(key)?.bindings.size,
-      )
+      ) ||
+      this.adb.applies(a.machine_id, keys)
     )
       return {
         keys,
@@ -559,6 +601,13 @@ export class MachineLeases {
       )
         return `${key}：尚未取得本代次归属`;
     }
+    if (this.adb.applies(a.machine_id, keys)) {
+      const slot = this.adb.launchSlot(project, a.machine_id, run.id);
+      if (!slot) return "adb：尚未取得端口槽位";
+      if (expected?.adb && expected.adb.generation !== slot.generation)
+        return "资源持有者已变化";
+      own.adb = slot;
+    }
     return this.blocked(project, a.machine_id, keys, now, undefined, own);
   }
   // Called after all other admission gates, inside the BellAttempt transaction.
@@ -590,10 +639,12 @@ export class MachineLeases {
           i.target,
           this.policySignature(machine, project, keys),
         );
+    const adb = this.adb.acquire(tx, project, a, run, keys, i.target, now);
     if (!this.managed(machine) && !i.target) return;
     const access: ResourceAccess = {
       ...(i.target ? { target: i.target } : {}),
       bindings: [],
+      ...(adb ? { adb } : {}),
     };
     for (const key of keys) {
       const b = this.policy(machine, project, key);
@@ -675,6 +726,7 @@ export class MachineLeases {
     );
   }
   async reconcile(project: string, clock: () => string) {
+    this.adb.kick(project, clock);
     if (
       !this.store.database
         .prepare(
