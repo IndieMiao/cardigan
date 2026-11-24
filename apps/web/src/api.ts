@@ -1292,6 +1292,13 @@ export interface MachineCapabilityView {
   readonly available: boolean;
   /** Older servers omit it; derive from `available` then. */
   readonly state?: "verified" | "expired" | "unverified";
+  /**
+   * C-708: how the host checks this built-in capability (machine detail,
+   * current project only); absent for private custom checks.
+   */
+  readonly probe?:
+    | { readonly kind: "command"; readonly argv: readonly string[] }
+    | { readonly kind: "search"; readonly locations: readonly string[] };
 }
 
 export interface ExecutionMachine {
@@ -1332,6 +1339,17 @@ export interface MachineBindingView {
   /** False when the host's private configuration could not be read. */
   readonly config_available: boolean;
   readonly capabilities: readonly MachineCapabilityView[];
+  /**
+   * C-708: what the latest machine check recorded for capabilities it could
+   * not verify (current project only; older servers omit it). Fixed host
+   * text and search labels, never command output.
+   */
+  readonly capability_failures?: readonly {
+    readonly key: string;
+    readonly search_locations: readonly string[];
+    readonly search_incomplete?: true;
+    readonly reason?: string;
+  }[];
   /** The latest machine check (health) for this project. */
   readonly machine_check: {
     readonly status: "checking" | "passed" | "failed";

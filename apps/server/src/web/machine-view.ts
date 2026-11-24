@@ -1,7 +1,17 @@
 import { DEFAULT_MAX_RUN_LIMIT, type Machine } from "@cardigan/domain";
-import { effectiveRunLimit, type ReadResourceLimits } from "@cardigan/host";
-import type { Store } from "@cardigan/store";
-import { machineObservationView } from "./execution-state.js";
+import {
+  effectiveRunLimit,
+  parseMachineCapabilityCatalog,
+  type ReadResourceLimits,
+} from "@cardigan/host";
+import {
+  readMachineObservationsInTransaction,
+  type Store,
+} from "@cardigan/store";
+import {
+  declaredCapabilities,
+  machineObservationView,
+} from "./execution-state.js";
 import type { MachineHost } from "./machine-host.js";
 import { inIds, readDocs } from "./sql-state.js";
 
@@ -11,6 +21,38 @@ export interface MachineViewOptions {
   readonly runLimitMaximum?: ((id: string) => number) | undefined;
   readonly resourceLimits?: ReadResourceLimits | undefined;
   readonly host?: MachineHost | undefined;
+  /** C-708: the host capability catalog (keys and platforms), as the execution read uses it. */
+  readonly capabilityCatalog?:
+    | (() => readonly {
+        readonly key: string;
+        readonly os: readonly string[];
+      }[])
+    | undefined;
+}
+/**
+ * C-708: how the host checks a built-in capability: the fixed argv, or the
+ * labels of the places the browser search looks. Checks from the private
+ * custom catalog are not shown.
+ */
+export type CapabilityProbeView =
+  | { readonly kind: "command"; readonly argv: readonly string[] }
+  | { readonly kind: "search"; readonly locations: readonly string[] };
+function builtinProbes(os: string): ReadonlyMap<string, CapabilityProbeView> {
+  try {
+    return new Map(
+      parseMachineCapabilityCatalog(undefined, undefined, os).map((c) => [
+        c.key,
+        "scopes" in c.check
+          ? {
+              kind: "search" as const,
+              locations: c.check.scopes.map((s) => s.label),
+            }
+          : { kind: "command" as const, argv: [...c.check] },
+      ]),
+    );
+  } catch {
+    return new Map();
+  }
 }
 export function machineView(
   store: Store,
@@ -28,6 +70,15 @@ export function machineView(
   } catch {
     configAvailable = false;
   }
+  const declared = declaredCapabilities(options.capabilityCatalog);
+  const probes = new Map<string, ReadonlyMap<string, CapabilityProbeView>>();
+  const probesFor = (os: string) => {
+    const known = probes.get(os);
+    if (known) return known;
+    const found = builtinProbes(os);
+    probes.set(os, found);
+    return found;
+  };
   const machines = store.uow.read((tx) => {
     const projects = store.listProjects();
     const rows = projects.flatMap((p) => {
@@ -54,7 +105,21 @@ export function machineView(
         ]).map((e) => [e.id, e.card_id]),
       );
       return registrations.map((m) => {
-        const observed = machineObservationView(store, p.id, m, now);
+        // C-708: only this project's binding lists the catalog keys not yet
+        // verified, with the host's probe and the last check's failures.
+        const mine = p.id === current;
+        const observed = machineObservationView(
+          store,
+          p.id,
+          m,
+          now,
+          mine ? declared?.(m) : undefined,
+        );
+        const failures = mine
+          ? (readMachineObservationsInTransaction(store, p.id, m.id, now).health
+              ?.capability_failures ?? [])
+          : [];
+        const probe = mine ? probesFor(m.os) : undefined;
         const assignments = active
           .filter((a) => a.machine_id === m.id)
           .map((a) => {
@@ -92,7 +157,16 @@ export function machineView(
           registered_max_assignments: m.max_assignments,
           runtime: binding?.(p.id, m.id) ?? null,
           config_available: configAvailable,
-          capabilities: observed.capabilities,
+          capabilities: observed.capabilities.map((c) => {
+            const how = probe?.get(c.key);
+            return how ? { ...c, probe: how } : c;
+          }),
+          capability_failures: failures.map((f) => ({
+            key: f.key,
+            search_locations: [...f.search_locations],
+            ...(f.search_incomplete ? { search_incomplete: true } : {}),
+            ...(f.reason ? { reason: f.reason } : {}),
+          })),
           machine_check: observed.health,
           last_requested_check: options.checks.latest(m.id, p.id),
           assignments,
