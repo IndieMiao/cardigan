@@ -61,6 +61,7 @@ import {
   serveVideoPoster,
 } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
+import { serveCapabilityGuides } from "./capability-guides.js";
 import type { CardsCacheOptions } from "./cards-cache.js";
 import {
   allowedHosts,
@@ -637,6 +638,13 @@ async function handleApi(context: RequestContext): Promise<void> {
       path.slice("/api/device-pairings".length),
     );
 
+  // C-725: an Agent's MCP Token is refused outright, not asked to log in.
+  if (
+    CAPABILITY_GUIDES_ROUTE.test(path) &&
+    req.headers.authorization !== undefined
+  )
+    throw new HttpRejection(403, "unauthorized", "仅限人类登录会话");
+
   // Everything below needs a session; an MCP Bearer token does not count.
   const session = requireSession(context);
 
@@ -826,6 +834,8 @@ async function handleApi(context: RequestContext): Promise<void> {
   throw new HttpRejection(404, "not_found", "not found");
 }
 
+const CAPABILITY_GUIDES_ROUTE = /^\/api\/projects\/[^/]+\/capability-guides$/;
+
 /** `/api/projects/<id><rest>`; the id is URL-encoded by the client. */
 const PROJECT_ROUTE = /^\/api\/projects\/([^/]+)(\/.*)$/;
 
@@ -845,6 +855,12 @@ async function serveProjectRoute(
   if (rest === "/worker-wizards" || rest.startsWith("/worker-wizards/"))
     return context.wizards.serve(req, res, project_id, rest, () =>
       requireSession(context),
+    );
+
+  if (rest === "/capability-guides")
+    return serveCapabilityGuides(
+      { ...context, authorize: () => requireSession(context) },
+      project_id,
     );
 
   if (rest === "/machines" || rest.startsWith("/machines/")) {

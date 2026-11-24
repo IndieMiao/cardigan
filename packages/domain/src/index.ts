@@ -4,6 +4,7 @@ export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";
 export * from "./bell-receipt.js";
+export * from "./capability-guide.js";
 export * from "./card-dependencies.js";
 export * from "./card-derived.js";
 export {
