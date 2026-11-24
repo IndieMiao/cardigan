@@ -1,4 +1,5 @@
 import type { Card, WorkItem } from "../entities.js";
+import { fullEventHistory } from "../event-index.js";
 import type { AssignmentId, WorkItemId } from "../ids.js";
 import type { CommandDraft, CommandState } from "./core.js";
 import { workCompleted } from "./work-status.js";
@@ -43,7 +44,8 @@ export function resumeAttention(state: CommandState) {
     managed.delete(id);
     return stopped.delete(id);
   };
-  for (const e of state.events) {
+  // Run queue and dispatch telemetry interleave with stops: keep array order.
+  for (const e of fullEventHistory(state.events)) {
     if (!e.card_id || e.actor.project_id !== state.project_id) continue;
     if (typeof e.payload !== "object" || !e.payload || Array.isArray(e.payload))
       continue;

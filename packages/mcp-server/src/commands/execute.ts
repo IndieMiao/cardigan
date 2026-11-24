@@ -14,7 +14,9 @@ import type {
 } from "@cardigan/domain";
 import {
   COLD_CARD_OMITTED_EVENT_TYPES,
+  commandEventHistory,
   commandRunIds,
+  commandStreamHistory,
   commandTargetCards,
   githubRunCards,
   hotCardIds,
@@ -22,7 +24,6 @@ import {
   liveTriggerEventIds,
   PROJECT_STREAM_RETENTION,
   projectStreamDropped,
-  streamHistory,
   waitedGithubRuns,
 } from "@cardigan/domain";
 import type {
@@ -43,7 +44,10 @@ const histories = new WeakMap<
  * Store log with its index). Entity-only revisions do not change immutable
  * event history or its indexes. `hot` (C-639) keeps whole streams only for
  * hot cards; other cards keep their events except the cold-omitted telemetry
- * types.
+ * types. C-643: telemetry (run lifecycle, GitHub dispatch journal, branch
+ * backups, session maintenance) stays out of the command-state stream; rules
+ * read it through the attached journal (`eventsOfType`, `eventById`,
+ * `fullEventHistory`).
  */
 function eventHistory(
   streams: CommandEventStreams,
@@ -64,7 +68,7 @@ function eventHistory(
   }
   const cached = cache.get(key);
   if (cached) return cached;
-  const events = streamHistory(
+  const events = commandStreamHistory(
     streams,
     ["", ...cards.map((c) => c.id)],
     hot
@@ -348,8 +352,10 @@ function readCommandState(
     timeline: tx.timeline.list(project_id),
     events: streams
       ? eventHistory(streams, cards, hotCards, leanInput)
-      : [undefined, ...cards.map((c) => c.id)].flatMap((id) =>
-          tx.events.listAfter(project_id, id, 0),
+      : commandEventHistory(
+          [undefined, ...cards.map((c) => c.id)].map((id) =>
+            tx.events.listAfter(project_id, id, 0),
+          ),
         ),
   };
   if (hotCards) hotSets.set(state, hotCards);

@@ -355,7 +355,7 @@ function completionAttachments(d: CommandDraft, card: Card, target: Delivery) {
 }
 /** Neither a system return nor explicit human rework releases a human handoff. */
 export function returnedHumanConfirmation(d: CommandDraft, card: Card) {
-  const returned = [...d.state.events, ...d.events]
+  const returned = appendEvents(d.state.events, d.events)
     .filter(
       (e) => e.card_id === card.id && e.type === "merge_changes_requested",
     )

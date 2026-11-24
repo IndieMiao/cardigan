@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import {
   compareHotState,
+  fullEventHistory,
   hotCardIds,
   hotCommandEvents,
   leanCommandEvents,
@@ -343,7 +344,12 @@ function shadow(db, scope = "hot") {
           ? leanCommandEvents(before, notified, new Set(notifiedEvents))
           : hotCommandEvents(before, notified);
       const hotCards = hotCardIds(before, notified).size;
+      // C-643: compare the complete histories (telemetry journal included).
+      const wanted = fullEventHistory(expected);
+      const loaded = fullEventHistory(after.events);
       const sameEvents =
+        wanted.length === loaded.length &&
+        wanted.every((e, i) => e.id === loaded[i]?.id) &&
         expected.length === after.events.length &&
         expected.every((e, i) => e.id === after.events[i]?.id);
       const checks = [
@@ -365,7 +371,11 @@ function shadow(db, scope = "hot") {
       ];
       report.push({
         project,
-        events: { full: before.events.length, hot: after.events.length },
+        events: {
+          full: fullEventHistory(before.events).length,
+          hot: fullEventHistory(after.events).length,
+          command: after.events.length,
+        },
         cards: { total: before.cards.length, hot: hotCards },
         loader_matches_definition: sameEvents,
         failed: checks.filter((c) => !c.equal),

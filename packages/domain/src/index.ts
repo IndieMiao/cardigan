@@ -221,12 +221,19 @@ export * from "./entities.js";
 export * from "./errors.js";
 export {
   appendEvents,
+  commandEventHistory,
+  commandStreamHistory,
   eventById,
   eventsAtSeq,
   eventsForDecision,
   eventsOfType,
   eventsOfTypes,
+  flatMapEvents,
+  fullEventHistory,
+  isTelemetryEvent,
   streamEvents,
+  TELEMETRY_EVENT_TYPES,
+  telemetryEvents,
 } from "./event-index.js";
 export {
   EventLog,

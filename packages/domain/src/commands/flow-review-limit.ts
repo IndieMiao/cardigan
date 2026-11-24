@@ -10,7 +10,7 @@ import {
 
 /** Shared lifetime budget: a flow upgrade never resets C-239 consumption. */
 export function systemReviewLimitRaises(d: CommandDraft, item: WorkItem) {
-  return [...d.state.events, ...d.events].filter(
+  return appendEvents(d.state.events, d.events).filter(
     (e) =>
       e.actor.kind === "system" &&
       ["system_review_limit_raised", "review_limit_raised_by_system"].includes(

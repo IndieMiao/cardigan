@@ -7,6 +7,7 @@ import type {
   Run,
   WorkItem,
 } from "./entities.js";
+import { commandEventHistory, fullEventHistory } from "./event-index.js";
 import type { CardId, EventId } from "./ids.js";
 
 /**
@@ -271,14 +272,14 @@ export function leanCommandEvents(
   state: HotCardInput & { readonly events: readonly Event[] },
   extra: Iterable<CardId | undefined> = [],
   protect: ReadonlySet<string> = new Set(),
-): Event[] {
+): readonly Event[] {
+  // C-643: decide over the complete history (telemetry included).
+  const all = fullEventHistory(state.events);
   const triggers = new Set<string>(liveTriggerEventIds(state.runs));
-  const triggerCards = state.events
+  const triggerCards = all
     .filter((e) => triggers.has(e.id))
     .map((e) => e.card_id);
-  const dispatches = state.events.filter(
-    (e) => e.type === "github_check_dispatch",
-  );
+  const dispatches = all.filter((e) => e.type === "github_check_dispatch");
   const hot = hotCardIds(state, [
     ...triggerCards,
     ...githubRunCards(dispatches, waitedGithubRuns(state.work_items)),
@@ -286,16 +287,15 @@ export function leanCommandEvents(
   ]);
   const keep = new Set([...protect, ...triggers]);
   const dropped = projectStreamDropped(
-    state.events.filter(
-      (e) => !e.card_id && PROJECT_STREAM_RETENTION.has(e.type),
-    ),
+    all.filter((e) => !e.card_id && PROJECT_STREAM_RETENTION.has(e.type)),
     keep,
   );
-  return state.events.filter((e) =>
+  const kept = all.filter((e) =>
     e.card_id
       ? hot.has(e.card_id) || !LEAN_COLD_CARD_OMITTED_EVENT_TYPES.has(e.type)
       : !dropped.has(e.id),
   );
+  return all === state.events ? kept : commandEventHistory([kept]);
 }
 
 /** The kept part of one card stream; hot streams are returned unchanged. */
@@ -348,22 +348,28 @@ export function commandTargetCards(
  * The hot command state as a pure function of the whole-history state; the
  * Store-backed loader must produce exactly these events. `extra` names cards
  * whose inbox notifications are still live or that a command targets.
+ *
+ * C-643: triggers (often `run_queued`) are found in the complete history. A
+ * telemetry-free command stream maps to a command stream (same events and
+ * journal as the loader's); a plain array maps to a plain array.
  */
 export function hotCommandEvents(
   state: HotCardInput & { readonly events: readonly Event[] },
   extra: Iterable<CardId | undefined> = [],
-): Event[] {
+): readonly Event[] {
+  const all = fullEventHistory(state.events);
   const triggers = new Set<string>(liveTriggerEventIds(state.runs));
-  const triggerCards = state.events
+  const triggerCards = all
     .filter((e) => triggers.has(e.id))
     .map((e) => e.card_id);
   const hot = hotCardIds(state, [...triggerCards, ...extra]);
-  return state.events.filter(
+  const kept = all.filter(
     (e) =>
       !e.card_id ||
       hot.has(e.card_id) ||
       !COLD_CARD_OMITTED_EVENT_TYPES.has(e.type),
   );
+  return all === state.events ? kept : commandEventHistory([kept]);
 }
 
 type TargetState = Parameters<typeof commandTargetCards>[0];

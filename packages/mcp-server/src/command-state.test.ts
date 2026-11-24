@@ -8,6 +8,7 @@ import {
   eventById,
   eventsForDecision,
   eventsOfType,
+  fullEventHistory,
   hotCommandEvents,
   leanCommandEvents,
 } from "@cardigan/domain";
@@ -255,12 +256,18 @@ test("C-639 hot scope keeps open and targeted cards whole and matches the domain
     });
     const whole = full.uow.read((tx) => loadCommandState(tx, project_id));
     const ids = (s: { events: readonly Event[] }) => s.events.map((e) => e.id);
+    // C-643: run_started is telemetry, so it is only in the journal.
+    const all = (s: { events: readonly Event[] }) =>
+      fullEventHistory(s.events).map((e) => e.id);
     expect(full.commandStateScope).toBe("full");
-    expect(ids(whole)).toEqual(["p1", "o1", "c1", "c2"]);
+    expect(ids(whole)).toEqual(["c1"]);
+    expect(all(whole)).toEqual(["p1", "o1", "c1", "c2"]);
     // Project stream and open cards stay whole; the cold card drops telemetry.
     const base = hot.uow.read((tx) => loadCommandState(tx, project_id));
-    expect(ids(base)).toEqual(["p1", "o1", "c1"]);
-    expect(ids(base)).toEqual(hotCommandEvents(whole).map((e) => e.id));
+    expect(all(base)).toEqual(["p1", "o1", "c1"]);
+    const expected = hotCommandEvents(whole);
+    expect(ids(base)).toEqual(expected.map((e) => e.id));
+    expect(all(base)).toEqual(fullEventHistory(expected).map((e) => e.id));
     // A command naming the closed card (directly or nested) restores it.
     const targeted = hot.uow.read((tx) =>
       loadCommandState(tx, project_id, undefined, {
@@ -268,12 +275,115 @@ test("C-639 hot scope keeps open and targeted cards whole and matches the domain
       }),
     );
     expect(ids(targeted)).toEqual(ids(whole));
+    expect(all(targeted)).toEqual(all(whole));
     expect(
       compareHotState(whole, base, { now: NOW }).filter((c) => !c.equal),
     ).toEqual([]);
   } finally {
     hot.close();
     full.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("C-643: command state leaves telemetry out of its stream and keeps it in the journal", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cg-telemetry-"));
+  const store = Store.open({ dataDir });
+  const event = (
+    id: string,
+    seq: number,
+    type: string,
+    card_id?: Event["card_id"],
+  ): Event => ({
+    id,
+    seq,
+    ...(card_id ? { card_id } : {}),
+    type,
+    actor: { kind: "system", project_id },
+    payload: { run_id: "R-1" },
+    created_at: NOW,
+  });
+  try {
+    store.createProject({ id: project_id });
+    store.uow.run((tx) => {
+      tx.cards.put(project_id, serverCard);
+      tx.events.append(project_id, event("p-1", 1, "pm_coordination_started"));
+      tx.events.append(
+        project_id,
+        event("p-2", 2, "session_maintenance_changed"),
+      );
+      tx.events.append(
+        project_id,
+        event("c-1", 1, "run_queued", serverCard.id),
+      );
+      tx.events.append(
+        project_id,
+        event("c-2", 2, "work_item_assigned", serverCard.id),
+      );
+      tx.events.append(
+        project_id,
+        event("c-3", 3, "run_dispatched", serverCard.id),
+      );
+      tx.events.append(
+        project_id,
+        event("c-4", 4, "github_check_dispatch", serverCard.id),
+      );
+      tx.events.append(
+        project_id,
+        event("c-5", 5, "assignment_branch_backed_up", serverCard.id),
+      );
+      tx.events.append(
+        project_id,
+        event("c-6", 6, "delivery_submitted", serverCard.id),
+      );
+    });
+    const full = ["p-1", "p-2", "c-1", "c-2", "c-3", "c-4", "c-5", "c-6"];
+    store.uow.read((tx) => {
+      for (const state of [
+        loadCommandState(tx, project_id),
+        // Backends without the bulk port split the same way.
+        loadCommandState(
+          { ...tx, events: { listAfter: tx.events.listAfter } },
+          project_id,
+        ),
+      ]) {
+        expect(state.events.map((e) => e.id)).toEqual(["p-1", "c-2", "c-6"]);
+        expect(fullEventHistory(state.events).map((e) => e.id)).toEqual(full);
+        expect(
+          eventsOfType(state.events, "run_dispatched").map((e) => e.id),
+        ).toEqual(["c-3"]);
+        expect(eventById(state.events, "c-1")?.type).toBe("run_queued");
+      }
+      // The raw streams (timeline, activity, get_updates) are unchanged.
+      expect(
+        [
+          ...tx.events.listAfter(project_id, undefined, 0),
+          ...tx.events.listAfter(project_id, serverCard.id, 0),
+        ].map((e) => e.id),
+      ).toEqual(full);
+    });
+    // C-640 log: telemetry of a rolled-back transaction never reaches later snapshots.
+    const read = () => store.uow.read((tx) => loadCommandState(tx, project_id));
+    const before = read();
+    expect(() =>
+      store.uow.run((tx) => {
+        tx.events.append(
+          project_id,
+          event("c-7", 7, "run_started", serverCard.id),
+        );
+        const held = loadCommandState(tx, project_id);
+        expect(held.events).toEqual(before.events);
+        expect(eventById(held.events, "c-7")?.type).toBe("run_started");
+        throw new Error("rollback");
+      }),
+    ).toThrow("rollback");
+    const after = read();
+    expect(after.events).toBe(before.events);
+    expect(eventById(after.events, "c-7")).toBeUndefined();
+    expect(eventsOfType(after.events, "run_started")).toEqual([]);
+    expect(fullEventHistory(after.events).map((e) => e.id)).toEqual(full);
+  } finally {
+    store.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
@@ -345,15 +455,19 @@ test("C-649 lean scope retains the project stream by type, drops cold dispatch r
       )
       .run(project_id);
     const whole = full.uow.read((tx) => loadCommandState(tx, project_id));
-    const ids = (s: { events: readonly Event[] }) => s.events.map((e) => e.id);
+    // C-643: telemetry (backups, dispatch records) lives in the journal.
+    const ids = (s: { events: readonly Event[] }) =>
+      fullEventHistory(s.events).map((e) => e.id);
     expect(lean.commandStateScope).toBe("lean");
     const base = lean.uow.read((tx) => loadCommandState(tx, project_id));
     expect(ids(base)).toEqual(["b2", "x2", "p1", "o1", "c1"]);
     expect(ids(base)).toEqual(
-      leanCommandEvents(whole, [], new Set(["x2"])).map((e) => e.id),
+      ids({ events: leanCommandEvents(whole, [], new Set(["x2"])) }),
     );
+    // The command stream itself carries business events only.
+    expect(base.events.map((e) => e.id)).toEqual(["x2", "p1", "c1"]);
     // The hot scope keeps every project-stream event and cold dispatch records.
-    expect(ids(whole)).toEqual(hotCommandEvents(whole).map((e) => e.id));
+    expect(ids(whole)).toEqual(ids({ events: hotCommandEvents(whole) }));
     expect(
       compareHotState(whole, base, { now: NOW }).filter((c) => !c.equal),
     ).toEqual([]);

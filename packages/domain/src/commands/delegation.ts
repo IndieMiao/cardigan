@@ -288,7 +288,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
   );
 }
 function preferenceAudit(d: CommandDraft, preference: string) {
-  return [...d.state.events, ...d.events]
+  return appendEvents(d.state.events, d.events)
     .filter(
       (e) =>
         e.type === "project_preferences_updated" &&

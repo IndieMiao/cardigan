@@ -251,12 +251,25 @@ test("options come from the environment; 0 workers keeps reads inline", () => {
     { CARDIGAN_WORKBENCH_READ_WORKERS: "-1" },
     { CARDIGAN_WORKBENCH_READ_WORKERS: "17" },
     { CARDIGAN_WORKBENCH_READ_QUEUE: "1.5" },
-    { CARDIGAN_WORKBENCH_READ_QUEUE: "0" },
+    { CARDIGAN_WORKBENCH_READ_QUEUE: "-1.5" },
+    { CARDIGAN_WORKBENCH_READ_QUEUE: "x" },
     { CARDIGAN_WORKBENCH_READ_TIMEOUT_MS: "0" },
   ])
     expect(() => workbenchReadOptionsFromEnv(env)).toThrow();
   expect(() => new WorkbenchReadPool({ dbPath: "x", workers: 0 })).toThrow();
-  expect(() => new WorkbenchReadPool({ dbPath: "x", maxQueue: 0 })).toThrow();
+  expect(() => new WorkbenchReadPool({ dbPath: "x", maxQueue: 1.5 })).toThrow();
+});
+
+test("a queue limit of 0 or below is read as 1", async () => {
+  for (const value of ["0", "-1", " -20 "])
+    expect(
+      workbenchReadOptionsFromEnv({ CARDIGAN_WORKBENCH_READ_QUEUE: value }),
+    ).toEqual({ ...WORKBENCH_READ_DEFAULTS, maxQueue: 1 });
+  for (const maxQueue of [0, -3]) {
+    const p = pool({ workers: 1, maxQueue });
+    expect(body(await p.read(op("ok"))).project).toBe("p1");
+    expect(body(await p.read(op("ok"))).seen).toBe(2);
+  }
 });
 
 test("only machines named by open helper notices are asked for host facts", () => {
