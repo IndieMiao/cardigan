@@ -167,6 +167,25 @@ try {
             "!document.querySelector('[role=menu]') && document.activeElement.matches('.card-display-trigger')",
           );
         }
+        if (mode === "reference") {
+          // Emphasis samples labelled 悬停 / 聚焦 show those states without
+          // moving the mouse or the page focus.
+          await send("DOM.enable");
+          await send("CSS.enable");
+          const { root } = await send("DOM.getDocument", { depth: 0 });
+          for (const state of ["hover", "focus-visible"]) {
+            const { nodeId } = await send("DOM.querySelector", {
+              nodeId: root.nodeId,
+              selector: `[data-reference-state="${state}"]`,
+            });
+            assert(nodeId, `Missing ${state} sample`);
+            await send("CSS.forcePseudoState", {
+              nodeId,
+              forcedPseudoClasses:
+                state === "hover" ? ["hover"] : ["focus", "focus-visible"],
+            });
+          }
+        }
         if (mode === "reference-focus") {
           await press("Tab", "Tab", 9);
           assert(await evaluate("document.activeElement !== document.body"));
@@ -241,6 +260,57 @@ try {
         }
         results.push({ name, ...metrics });
         console.log(`Captured ${name}`);
+        await evaluate("localStorage.clear()");
+      }
+      if (reference) {
+        // Not a PNG scene: a dialog taller than the viewport keeps its button
+        // row on screen while only the body scrolls.
+        await send("Page.navigate", { url: "about:blank" });
+        await until("location.href === 'about:blank'");
+        await send("Page.navigate", {
+          url: `${server.resolvedUrls.local[0]}__skeleton#/p/p-1/cards?view=board&dialog=tall`,
+        });
+        await until("!!document.querySelector('.ui-dialog-footer')");
+        await evaluate("document.fonts.ready.then(() => true)");
+        const dialog = await run(async () => {
+          const frame = () =>
+            new Promise((r) =>
+              requestAnimationFrame(() => requestAnimationFrame(r)),
+            );
+          await frame();
+          const panel = document.querySelector("[data-ui=dialog]");
+          const body = panel.querySelector(".ui-dialog-body");
+          const footer = panel.querySelector(".ui-dialog-footer");
+          const confirm = [...footer.querySelectorAll("button")].at(-1);
+          const read = () => ({
+            panel: panel.getBoundingClientRect().toJSON(),
+            footer: footer.getBoundingClientRect().toJSON(),
+            confirm: confirm.getBoundingClientRect().toJSON(),
+            scrollTop: body.scrollTop,
+          });
+          const top = read();
+          body.scrollTop = body.scrollHeight;
+          await frame();
+          return {
+            viewport: innerHeight,
+            panelScrolls: panel.scrollHeight > panel.clientHeight,
+            bodyScrolls: body.scrollHeight > body.clientHeight,
+            confirmBackground: getComputedStyle(confirm).backgroundColor,
+            top,
+            bottom: read(),
+          };
+        });
+        assert(dialog.bodyScrolls && !dialog.panelScrolls, "Dialog scroll");
+        assert(dialog.bottom.scrollTop > 0, "Dialog body did not scroll");
+        for (const state of [dialog.top, dialog.bottom])
+          assert(
+            state.confirm.bottom <= dialog.viewport &&
+              state.footer.bottom <= state.panel.bottom + 0.5,
+            "Dialog footer left the viewport",
+          );
+        assert.deepEqual(dialog.bottom.footer, dialog.top.footer);
+        results.push({ name: `dialog-${width}-${theme}`, dialog });
+        console.log(`Checked dialog-${width}-${theme}`);
         await evaluate("localStorage.clear()");
       }
     }

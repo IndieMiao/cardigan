@@ -1,0 +1,98 @@
+{
+  "reference-1440-dark.png": {
+    "hash": "0b3ccb5430022de3648bce91ce29612b7f3986ee71f6a646254a5f137cd136aa",
+    "replaces": [
+      "d02561f824b1b295087f599be83db55d057bd3da973f832ee8ac07586727cb11"
+    ]
+  },
+  "reference-1440-light.png": {
+    "hash": "d2f328e586dda9226572a68b4c35ae3d856ee22d02cb2857211525e3265347a4",
+    "replaces": [
+      "5b06346a21ebcb0bfe887b60a51cef164e13155f8091f7c2f1cfbe816bb63a65"
+    ]
+  },
+  "reference-390-dark.png": {
+    "hash": "5369b04fd5bb7e6d30e0707a47bf70628c31f68a74bcffbd0d08de85921834db",
+    "replaces": [
+      "f1f048a1706007da680bdb787f12a0f327185b6be7e189ab018fa0d0767efcea"
+    ]
+  },
+  "reference-390-light.png": {
+    "hash": "be7e4c2016a86f599c1ceabce4ee6a321aca33f3b917fa7da6f1a0f7cc49755b",
+    "replaces": [
+      "8b750d09de33d5d9548292d0d0f41d1099deb3750ad54185c9e6a16dbee78179"
+    ]
+  },
+  "reference-filter-1440-dark.png": {
+    "hash": "70a143e74f59cda567bb2048f702ff3a3b6291decc4284408653dce3d104e2b6",
+    "replaces": [
+      "5ebf77658938d9f393412562ff6894f11f90e45cdf71d8d20ed440e5b6445868"
+    ]
+  },
+  "reference-filter-1440-light.png": {
+    "hash": "034cb379a1df639f5ad8020d8892ee29aabc0ad6cd6bba3093b8752ecdba5733",
+    "replaces": [
+      "b8758853a9d43c70e7b6912252efde189c13ee38dd9766baf36c6f7a283db671"
+    ]
+  },
+  "reference-filter-390-dark.png": {
+    "hash": "bb9335ffb6362e6ad45ac23ce9af4ef648d57cac13c77fb043f82cd478fd60d9",
+    "replaces": [
+      "876dddafef01738f23f81814b7e7a2458c847889ddc823a4106847dfe5b3d8f8"
+    ]
+  },
+  "reference-filter-390-light.png": {
+    "hash": "2aa3f0d139a65242f54f0218dd670d1fd094579f4ee81778e82d7e82599a4fc5",
+    "replaces": [
+      "bbfde1484aefe296569bdbc65f4aca7ddcb9b5a5f626e53df078d96c1dc8e2da"
+    ]
+  },
+  "reference-focus-1440-dark.png": {
+    "hash": "dd658b566ca4e3cec65f960767e305c03d82130710d00411d1544501905ded60",
+    "replaces": [
+      "0b5437165d371f71eeaf52f7a76c19b3deaae78c861b31048062f8e8312d57ad"
+    ]
+  },
+  "reference-focus-1440-light.png": {
+    "hash": "1a2c0d6c9283e87ed55d2cf53f53bc348a269ca46b35f37c183405ee9625e9cc",
+    "replaces": [
+      "dcb56a7fca0d52a353daec586d1d84e4c4f2575fe00f002ace527f1eef7436b1"
+    ]
+  },
+  "reference-focus-390-dark.png": {
+    "hash": "ad37e81b324b00f0c3ec668ebb1a0733fddffd54082e7df6a320c1ea669cb2d7",
+    "replaces": [
+      "346739dc5f2168fbf7e387c36a6f4f696daf20bb7324494d1e31b19f768e56d3"
+    ]
+  },
+  "reference-focus-390-light.png": {
+    "hash": "3e63fbb9ef201843c5a219e39e0008596a53701ea3966c0bf0a20b659971b323",
+    "replaces": [
+      "c345d742842f021634e57473473d7b534661d0c7f283b2d9d1999a469ec046d8"
+    ]
+  },
+  "reference-refresh-1440-dark.png": {
+    "hash": "f80dc7b958b9536c409c7b3967f811bd655ef7b4bddab00d18673fb982215527",
+    "replaces": [
+      "b595b6057e46d8c5995c77e3fd93bf13c4daf720f1871434188192107f6b86fc"
+    ]
+  },
+  "reference-refresh-1440-light.png": {
+    "hash": "f7e50790f74e866dd79819def19dc85bf6522914087ffca9061a95d55f6020b1",
+    "replaces": [
+      "91e85924ece405baabaa44f46243d43b3ea3d057b750782ed5a529eb6459fe00"
+    ]
+  },
+  "reference-refresh-390-dark.png": {
+    "hash": "9bdd2e8f15895c95b741326226afcad7cd656ef4c473b20d2ab2225f4b352306",
+    "replaces": [
+      "03c383b4bac7ee2151cf6347e3fdf1e91ceb1f8e2ada3ca88127ab8aa72f5038"
+    ]
+  },
+  "reference-refresh-390-light.png": {
+    "hash": "ed36c6a177754b3daf67c16969915bde48780d2a260116f6c52a40ce65cb7fe9",
+    "replaces": [
+      "cb6e254d7888a5010403fe6ece88c5ef37f896a2bc38ee987376f369912976ad"
+    ]
+  }
+}
