@@ -20,6 +20,7 @@ import {
   DEFAULT_MAX_RUN_LIMIT,
   type DomainError,
   deactivateRole,
+  isDecisionOther,
   issueInstruction,
   latestCardTemplate,
   MAX_REF_SLOT,
@@ -1507,8 +1508,11 @@ export async function serveWrite(
           ["narrow_scope", "split_card"].includes(p.option) &&
           s.decisions.find((q) => q.id === decision_id)?.trigger ===
             "review_limit";
+        // C-682: "其他" is the owner's own words; never substitute a default.
         const raw_quote =
-          (p.option === "hold" && returning) || scopeRequired
+          (p.option === "hold" && returning) ||
+          scopeRequired ||
+          isDecisionOther(p.option)
             ? p.raw_quote?.trim() || p.rationale?.trim() || ""
             : p.raw_quote?.trim() || returning
               ? (p.raw_quote ?? "")

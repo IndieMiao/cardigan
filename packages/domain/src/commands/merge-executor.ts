@@ -7,9 +7,20 @@ import {
   ensure,
 } from "./core.js";
 
+/** C-681: host-observed cause of one unreachable attempt; fixed fields only. */
+export type MergeExecutorFailure = {
+  readonly category: string;
+  /** Which dispatch_unknown branch: not_sent, push_incomplete or run_not_found. */
+  readonly stage?: "not_sent" | "push_incomplete" | "run_not_found";
+  /** Latest provider HTTP status observed by the attempt. */
+  readonly http_status?: number;
+  readonly request_id?: string;
+};
 interface Outage {
   readonly executor: string;
   readonly attempt_id: string;
+  /** Cause of the latest unreachable attempt, when the host could classify it. */
+  readonly failure?: MergeExecutorFailure;
   readonly failure_count: number;
   readonly first_failed_at: string;
   readonly next_retry_at: string;
@@ -42,7 +53,11 @@ export function recordMergeExecutor(
   state: CommandState,
   actor: Actor,
   p: { executor: string } & (
-    | { status: "unreachable"; attempt_id: string }
+    | {
+        status: "unreachable";
+        attempt_id: string;
+        failure?: MergeExecutorFailure;
+      }
     | { status: "reachable" | "poll" }
   ),
   ports: CommandPorts,
@@ -83,6 +98,23 @@ export function recordMergeExecutor(
         "validation_failed",
         "Invalid merge executor attempt",
       );
+      const failure = p.failure;
+      ensure(
+        failure === undefined ||
+          (/^[a-z][a-z0-9_]{0,39}$/u.test(failure.category) &&
+            (failure.stage === undefined ||
+              ["not_sent", "push_incomplete", "run_not_found"].includes(
+                failure.stage,
+              )) &&
+            (failure.http_status === undefined ||
+              (Number.isSafeInteger(failure.http_status) &&
+                failure.http_status >= 100 &&
+                failure.http_status <= 599)) &&
+            (failure.request_id === undefined ||
+              /^[A-Za-z0-9:._-]{1,80}$/u.test(failure.request_id))),
+        "validation_failed",
+        "Invalid merge executor failure",
+      );
       // Replaying a finished attempt must not consume another retry or reopen
       // an outage already recovered by a later connection.
       if (
@@ -96,10 +128,25 @@ export function recordMergeExecutor(
       )
         return previous;
       const count = (previous?.failure_count ?? 0) + 1;
+      const { failure: _previousFailure, ...rest } = previous ?? {};
       outage = {
-        ...previous,
+        ...rest,
         executor: p.executor,
         attempt_id: p.attempt_id,
+        ...(failure
+          ? {
+              failure: {
+                category: failure.category,
+                ...(failure.stage ? { stage: failure.stage } : {}),
+                ...(failure.http_status !== undefined
+                  ? { http_status: failure.http_status }
+                  : {}),
+                ...(failure.request_id
+                  ? { request_id: failure.request_id }
+                  : {}),
+              },
+            }
+          : {}),
         failure_count: count,
         first_failed_at: previous?.first_failed_at ?? d.now,
         next_retry_at: new Date(

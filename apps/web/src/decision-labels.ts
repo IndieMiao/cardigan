@@ -1,3 +1,4 @@
+import { decisionOtherOption, isDecisionOther } from "@cardigan/domain";
 import type { DecisionView } from "./api.js";
 
 export function decisionTitle(
@@ -8,6 +9,7 @@ export function decisionTitle(
   return match ? `确认把 ${match[1]} 合并到 ${match[2]}？` : q.question;
 }
 export function decisionOption(q: DecisionView, key: string): string {
+  if (isDecisionOther(key)) return decisionOtherOption.description;
   if (q.trigger === "merge_confirmation") {
     if (key === "merge") return "确认合并";
     if (key === "hold") return "暂不合并";
