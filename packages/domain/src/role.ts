@@ -109,6 +109,8 @@ export const STANDING_ROLE_TOOLS = [
   "triage_human_action",
   "complete_host_action",
   "publish_artifact",
+  "write_release_note",
+  "list_release_notes",
 ] as const satisfies readonly ToolName[];
 
 /** Standing PM tools; rework additionally requires Ops at issuance and execution. */
@@ -121,6 +123,9 @@ export const STANDING_ONLY_TOOLS = [
   "request_delivery_rework",
   "list_templates",
   "list_roles",
+  // C-712: release notes are written by the standing PM (or the human).
+  "write_release_note",
+  "list_release_notes",
 ] as const satisfies readonly ToolName[];
 /**
  * Who may hold a standing-only tool: the project's standing PM (Office or

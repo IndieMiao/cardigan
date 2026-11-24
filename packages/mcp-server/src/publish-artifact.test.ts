@@ -377,3 +377,133 @@ test("C-609: only a run without an outcome is interrupted", () => {
   // Claims written before C-609 have no request record: never continued.
   expect(interruptedPublication([e("claimed")])).toBe(false);
 });
+
+/** C-712: register the publishing role so its note write is authorized. */
+function releaseRole(store: Store) {
+  store.uow.run((tx) =>
+    tx.roles.put(project_id, {
+      role_id: "release_ops",
+      role_version: 1,
+      allowed_tools: ["publish_artifact"],
+      capabilities: [],
+    }),
+  );
+}
+const projectNotes = (store: Store) =>
+  store.uow.read((tx) =>
+    tx.events
+      .listAfter(project_id, undefined, 0)
+      .filter((e) => e.type === "release_note_written"),
+  );
+const publishOnce = (digest: string, url: string) =>
+  vi.fn(async (_p, _a, _r, claim: (url: string) => void) => {
+    claim(url);
+    return { url, size: 6, sha256: digest };
+  });
+
+test("C-712: without a release note the publication is unchanged and the result says the note is missing", async () => {
+  const digest = "d".repeat(64);
+  const f = approved(digest, "Q-4" as Decision["id"], "attachment-4");
+  try {
+    releaseRole(f.store);
+    const result = await publicationTool({
+      publishArtifact: publishOnce(digest, f.url),
+    }).handler(f.request, f.ctx);
+    expect(result).toMatchObject({
+      url: f.url,
+      size: 6,
+      sha256: digest,
+      release_note: null,
+      release_note_hint: "本版本还没有发版说明，可用 write_release_note 补写",
+      merged_cards: { basis: "recent", cards: [] },
+    });
+    expect(f.events().map((e) => e.type)).toEqual([
+      "artifact_publication_requested",
+      "artifact_publication_claimed",
+      "artifact_publication_verified",
+    ]);
+    // The audit payload carries exactly the publication request.
+    expect(Object.keys(f.events()[0]?.payload as object).sort()).toEqual(
+      [
+        "attachment_id",
+        "decision_id",
+        "result",
+        "version",
+        "versionCode",
+      ].sort(),
+    );
+    expect(projectNotes(f.store)).toEqual([]);
+  } finally {
+    f.store.close();
+  }
+});
+
+test("C-712: a release note given with publish_artifact is saved for the verified version only", async () => {
+  const digest = "e".repeat(64);
+  const f = approved(digest, "Q-5" as Decision["id"], "attachment-5");
+  try {
+    releaseRole(f.store);
+    const pub = publishOnce(digest, f.url);
+    const tool = publicationTool({ publishArtifact: pub });
+    // An unusable note is rejected before any host IO.
+    for (const release_note of ["  ", "x".repeat(4001)])
+      await expect(
+        tool.handler({ ...f.request, release_note }, f.ctx),
+      ).rejects.toThrow();
+    expect(pub).not.toHaveBeenCalled();
+    expect(f.events()).toEqual([]);
+    const result = await tool.handler(
+      { ...f.request, release_note: "修复了闪退" },
+      f.ctx,
+    );
+    expect(result).toMatchObject({
+      url: f.url,
+      release_note: {
+        version: "1.0",
+        version_code: 1,
+        decision_id: "Q-5",
+        body: "修复了闪退",
+        revision: 1,
+      },
+      merged_cards: { basis: "recent" },
+    });
+    expect(result).not.toHaveProperty("release_note_hint");
+    expect(projectNotes(f.store).map((e) => e.payload)).toEqual([
+      {
+        version: "1.0",
+        version_code: 1,
+        decision_id: "Q-5",
+        body: "修复了闪退",
+        revision: 1,
+        source: "publish_artifact",
+      },
+    ]);
+  } finally {
+    f.store.close();
+  }
+});
+
+test("C-712: a note that cannot be saved never turns a verified publication into a failure", async () => {
+  const digest = "f".repeat(64);
+  const f = approved(digest, "Q-6" as Decision["id"], "attachment-6");
+  try {
+    // No stored role version grants the tool, so the note write is refused.
+    const result = await publicationTool({
+      publishArtifact: publishOnce(digest, f.url),
+    }).handler({ ...f.request, release_note: "说明" }, f.ctx);
+    expect(result).toMatchObject({
+      url: f.url,
+      sha256: digest,
+      release_note: null,
+    });
+    expect(
+      String((result as { release_note_hint: string }).release_note_hint),
+    ).toContain("发布不受影响");
+    expect(f.events().map((e) => e.type)).toContain(
+      "artifact_publication_verified",
+    );
+    expect(projectNotes(f.store)).toEqual([]);
+  } finally {
+    f.store.close();
+  }
+});

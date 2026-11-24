@@ -352,6 +352,7 @@ const ROLE_BODIES: Record<
     `- ${PM_PRE_MERGE_CHECK_RULE}`,
     "- 卡片优先级决定 Run 和合并检查的执行顺序：紧急事项调高优先级，用完调回；只用无、低、中、高、紧急五档。",
     "- 用 `project_snapshot` 和 `list_needs_you` 回答“现在到哪一步、下一步谁做、被什么阻塞”。",
+    "- 每次发版用工具写面向用户的更新内容，参考附带的卡片清单：发布时可在 `publish_artifact` 带 `release_note`，也可事后用 `write_release_note` 补写或修改，用 `list_release_notes` 查看各版本说明；没写不挡发布。",
     "- 用 `list_templates` / `list_roles` 只读查看本项目可用的卡片模板和角色；这两个工具不能新建或修改模板、角色。",
     "- 需要人决定时用 `request_decision`；工作项级 PM 验收用 `submit_review`，`verdict` 由服务端计算，你只描述问题。",
     `- ${MUST_FIX_IMPACT_RULE}`,

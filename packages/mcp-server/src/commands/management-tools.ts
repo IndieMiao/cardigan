@@ -16,6 +16,8 @@ import {
   parseId,
   postComment,
   projectFlowVersion,
+  RELEASE_NOTE_MAX_LENGTH,
+  RELEASE_NOTE_VERSION,
   type Result,
   recordDecision,
   releaseAssignment,
@@ -33,6 +35,7 @@ import {
   updateWorkItem,
   validateWorkItemRequirements,
   validationFailed,
+  writeReleaseNote,
 } from "@cardigan/domain";
 import { z } from "zod";
 import { agentCard } from "../tools/shared.js";
@@ -748,6 +751,38 @@ const schemas = {
     assignment_id: id("assignment"),
     cancel_queued_run_id: id("run").optional(),
   },
+  write_release_note: {
+    version: z
+      .string()
+      .max(80)
+      .regex(RELEASE_NOTE_VERSION)
+      .describe("Published version, the same as publish_artifact's version"),
+    body: z
+      .string()
+      .describe(
+        `User-facing release notes for this version, plain text, at most ${RELEASE_NOTE_MAX_LENGTH} characters`,
+      ),
+    decision_id: id("decision")
+      .optional()
+      .describe(
+        "Publish decision of this version; inferred from its publication when omitted",
+      ),
+    version_code: z
+      .number()
+      .int()
+      .positive()
+      .max(2100000000)
+      .optional()
+      .describe("Only for a version that has not been published yet"),
+    base_revision: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        "Revision you edited (0 for a new note); rejected if the note changed since",
+      ),
+  },
 };
 
 function assignPending(...args: Parameters<typeof assignOrDefer>) {
@@ -1004,6 +1039,11 @@ export function managementTools(clock?: Clock) {
       "assign",
       "Assign work; omitted machine selects automatically. A deferred response has no Assignment or token. Credentials must be provisioned by the host.",
       assignPending,
+    ),
+    wire(
+      "write_release_note",
+      "Standing PM: create or revise the user-facing release note of one published version (one note per version; every revision is kept). Returns the note and the cards merged since the previous successful publication (card ID and title) as reference. Notes never block a publication or merge.",
+      writeReleaseNote,
     ),
     wire(
       "replace_verification_work_item",

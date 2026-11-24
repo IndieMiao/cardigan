@@ -3172,3 +3172,85 @@ test("C-619: issue_instruction passes decision_id to the domain and validates it
     ).toMatchObject({ error: { code } });
   expect(rows()).toEqual(before);
 });
+
+test("C-712 standing PM writes, revises and lists release notes; work-item roles do not see the tools", async () => {
+  const tools = (await office.listTools()).tools.map((t) => t.name);
+  expect(tools).toEqual(
+    expect.arrayContaining(["write_release_note", "list_release_notes"]),
+  );
+  const first = await ok<{
+    note: { revision: number; body: string };
+    changed: boolean;
+    merged_cards: { basis: string; note: string };
+  }>(office, "write_release_note", { version: "0.4.2", body: "修复闪退" });
+  expect(first).toMatchObject({
+    note: { revision: 1, body: "修复闪退" },
+    changed: true,
+    merged_cards: { basis: "recent" },
+  });
+  const stale = await raw(office, "write_release_note", {
+    version: "0.4.2",
+    body: "覆盖",
+    base_revision: 0,
+  });
+  expect(stale.isError).toBe(true);
+  const empty = await raw(office, "write_release_note", {
+    version: "0.4.2",
+    body: " ",
+  });
+  expect(empty.isError).toBe(true);
+  await ok(office, "write_release_note", {
+    version: "0.4.2",
+    body: "修复闪退，优化加载",
+    base_revision: 1,
+  });
+  const listed = await ok<{
+    entries: { version: string; note: { body: string; revision: number } }[];
+  }>(office, "list_release_notes", {});
+  expect(listed.entries).toMatchObject([
+    { version: "0.4.2", note: { body: "修复闪退，优化加载", revision: 2 } },
+  ]);
+  const history = await ok<{ history: { revision: number; body: string }[] }>(
+    office,
+    "list_release_notes",
+    { version: "0.4.2" },
+  );
+  expect(history.history.map((r) => [r.revision, r.body])).toEqual([
+    [1, "修复闪退"],
+    [2, "修复闪退，优化加载"],
+  ]);
+  // Project stream only: nothing on the card, nothing addressed to anyone.
+  expect(
+    store.uow
+      .read((tx) => tx.events.listAfter(project, undefined, 0))
+      .filter((e) => e.type === "release_note_written"),
+  ).toHaveLength(2);
+  expect(
+    store.uow
+      .read((tx) => tx.events.listAfter(project, card.id, 0))
+      .some((e) => e.type === "release_note_written"),
+  ).toBe(false);
+  const coderItem = work("coder").id;
+  const coder = await connect(
+    store.uow.run((tx): Assignment => {
+      const assignment: Assignment = {
+        id: tx.ids.next(project, "assignment"),
+        scope: "work_item",
+        work_item_id: coderItem,
+        role_id: "coder",
+        role_version: 1,
+        status: "active",
+        runtime_state: "idle",
+        runtime_ref: null,
+        machine_id: "local",
+        mcp_token_id: "release-note-coder",
+        created_at: "2026-01-01T00:00:00Z",
+      };
+      tx.assignments.put(project, assignment);
+      return assignment;
+    }),
+  );
+  const visible = (await coder.listTools()).tools.map((t) => t.name);
+  expect(visible).not.toContain("write_release_note");
+  expect(visible).not.toContain("list_release_notes");
+});
