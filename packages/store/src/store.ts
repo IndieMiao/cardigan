@@ -640,7 +640,11 @@ export class Store {
         ...(this.#testReviewTrust
           ? { test_review_trust: this.#testReviewTrust }
           : {}),
-        events: { ...repositories.events, listStreams: events.listStreams },
+        events: {
+          ...repositories.events,
+          listAfter: events.listAfter,
+          listStreams: events.listStreams,
+        },
         command_state_scope: this.#commandStateScope,
         hot_state_hints: hotStateHints(this.#db),
         platformDeployments: platformDeploymentReader(this.#db),
@@ -701,7 +705,11 @@ export class Store {
         ...(this.#testReviewTrust
           ? { test_review_trust: this.#testReviewTrust }
           : {}),
-        events: { ...repositories.events, listStreams: events.listStreams },
+        events: {
+          ...repositories.events,
+          listAfter: events.listAfter,
+          listStreams: events.listStreams,
+        },
         command_state_scope: this.#commandStateScope,
         hot_state_hints: hotStateHints(this.#db),
       });

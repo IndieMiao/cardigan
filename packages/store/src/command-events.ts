@@ -1,248 +1,153 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { Event, ProjectId } from "@cardigan/domain";
+import {
+  type CardId,
+  type Event,
+  EventLog,
+  EventLogView,
+  type ProjectId,
+} from "@cardigan/domain";
 import { prepare } from "./statements.js";
 
-/**
- * Streams not read for this many snapshot generations are dropped from the
- * decoded cache; a later read decodes them again from SQLite (C-639).
- */
-const IDLE_GENERATIONS = 64;
+/** C-639: the Store's `listStreams` result (an immutable log view). */
+export type EventStreams = EventLogView;
 
-/** Event streams of one project at one committed (or pending) `through` rowid. */
-export interface EventStreams extends ReadonlyMap<string, readonly Event[]> {
-  /** Highest events rowid this snapshot covers. */
-  readonly through: number;
-  /**
-   * Events whose type is in `types` (or, with `exclude`, not in it), grouped
-   * by stream in seq order. Built once per type set and maintained
-   * incrementally; never decodes other rows.
-   */
-  ofTypes(
-    types: ReadonlySet<string>,
-    exclude?: boolean,
-  ): ReadonlyMap<string, readonly Event[]>;
-}
-
-type Owner = {
-  readonly db: DatabaseSync;
-  readonly project: ProjectId;
-  generation: number;
-  readonly touched: Map<string, number>;
+type Snapshot = {
+  /** Global events rowid watermark this snapshot has read through. */
+  through: number;
+  /** Shared append-only log; only COMMIT appends to it. */
+  log: EventLog;
+  /** Transaction-local rows (other connections' and our own) not yet published. */
+  overlay?: EventLog;
+  view: EventLogView;
 };
-type Subset = {
-  readonly types: ReadonlySet<string>;
-  readonly exclude: boolean;
-  readonly streams: Map<string, readonly Event[]>;
-};
-
-const none: readonly Event[] = Object.freeze([]);
-
-function decode(doc: unknown): Event {
-  return JSON.parse(doc as string) as Event;
-}
-type Row = Record<string, unknown> & { event?: Event };
-/** One decoded object per row, shared by full streams and type subsets. */
-const eventOf = (row: Row) => {
-  row.event ??= decode(row.doc);
-  return row.event;
-};
-
-/** Append rows read in rowid order; sort only when a writer interleaved seqs. */
-function appendTo(
-  streams: Map<string, readonly Event[]>,
-  added: ReadonlyMap<string, Event[]>,
-) {
-  for (const [key, events] of added) {
-    const before = streams.get(key) ?? none;
-    const merged = [...before, ...events];
-    let ordered = true;
-    for (let i = Math.max(1, before.length); i < merged.length; i++)
-      if ((merged[i - 1] as Event).seq > (merged[i] as Event).seq) {
-        ordered = false;
-        break;
-      }
-    streams.set(key, ordered ? merged : merged.sort((a, b) => a.seq - b.seq));
-  }
-}
-
-function group(rows: readonly Row[], keep: (row: Row) => boolean) {
-  const added = new Map<string, Event[]>();
-  for (const row of rows) {
-    if (!keep(row)) continue;
-    const key = String(row.stream);
-    let events = added.get(key);
-    if (!events) {
-      events = [];
-      added.set(key, events);
-    }
-    events.push(eventOf(row));
-  }
-  return added;
-}
-
-class Snapshot implements EventStreams, ReadonlyMap<string, readonly Event[]> {
-  readonly [Symbol.toStringTag] = "EventStreams";
-  constructor(
-    private readonly owner: Owner,
-    readonly through: number,
-    /** Decoded full streams; a cache of immutable rows at or below `through`. */
-    readonly loaded: Map<string, readonly Event[]>,
-    readonly subsets: Subset[],
-  ) {}
-
-  /** Same contract as the former eager map: absent when a stream has no events. */
-  get(key: string): readonly Event[] | undefined {
-    const { owner } = this;
-    owner.touched.set(key, owner.generation);
-    let events = this.loaded.get(key);
-    if (!events) {
-      const rows = prepare(
-        owner.db,
-        "SELECT doc FROM events WHERE project_id = ? AND stream = ? AND rowid <= ? ORDER BY seq",
-      ).all(owner.project, key, this.through);
-      events = rows.length ? rows.map((row) => decode(row.doc)) : none;
-      this.loaded.set(key, events);
-    }
-    return events.length ? events : undefined;
-  }
-  has(key: string): boolean {
-    return this.get(key) !== undefined;
-  }
-  /** Streams in first-append order, like the former eager map. */
-  keys(): MapIterator<string> {
-    return prepare(
-      this.owner.db,
-      "SELECT stream FROM events WHERE project_id = ? AND rowid <= ? GROUP BY stream ORDER BY MIN(rowid)",
-    )
-      .all(this.owner.project, this.through)
-      .map((row) => String(row.stream))
-      .values();
-  }
-  get size(): number {
-    return [...this.keys()].length;
-  }
-  *entries(): MapIterator<[string, readonly Event[]]> {
-    for (const key of this.keys())
-      yield [key, this.get(key) as readonly Event[]];
-  }
-  *values(): MapIterator<readonly Event[]> {
-    for (const [, events] of this.entries()) yield events;
-  }
-  [Symbol.iterator]() {
-    return this.entries();
-  }
-  forEach(
-    fn: (
-      value: readonly Event[],
-      key: string,
-      map: ReadonlyMap<string, readonly Event[]>,
-    ) => void,
-  ): void {
-    for (const [key, events] of this.entries()) fn(events, key, this);
-  }
-
-  ofTypes(
-    types: ReadonlySet<string>,
-    exclude = false,
-  ): ReadonlyMap<string, readonly Event[]> {
-    const existing = this.subsets.find(
-      (s) => s.exclude === exclude && sameTypes(s.types, types),
-    );
-    if (existing) return existing.streams;
-    const list = [...types];
-    const streams = new Map<string, readonly Event[]>();
-    if (list.length || exclude) {
-      const rows = prepare(
-        this.owner.db,
-        `SELECT stream, doc FROM events WHERE project_id = ? AND type ${exclude ? "NOT IN" : "IN"} (${list.map(() => "?").join(",")}) AND rowid <= ? ORDER BY stream, seq`,
-      ).all(this.owner.project, ...list, this.through) as Row[];
-      appendTo(
-        streams,
-        group(rows, () => true),
-      );
-    }
-    this.subsets.push({ types: new Set(types), exclude, streams });
-    return streams;
-  }
-}
-
-function sameTypes(a: ReadonlySet<string>, b: ReadonlySet<string>) {
-  if (a.size !== b.size) return false;
-  for (const type of a) if (!b.has(type)) return false;
-  return true;
-}
 
 /**
- * Events are append-only. Keep decoded streams lazily per stream, but publish
- * a new snapshot only on COMMIT (C-639: no eager decode of closed history).
+ * Events are append-only. C-640: decoded history and its indexes are kept in a
+ * per-project `EventLog` that grows in place, so a new event costs O(Δ): no
+ * stream is copied or re-sorted. Rows read inside a transaction go to a
+ * transaction-local overlay; COMMIT folds it into the shared log, ROLLBACK
+ * drops it. Every `listStreams` result is an immutable `EventLogView`.
  */
 export class CommandEvents {
   private committed = new Map<ProjectId, Snapshot>();
-  private owners = new Map<ProjectId, Owner>();
-
-  private owner(db: DatabaseSync, project: ProjectId): Owner {
-    let owner = this.owners.get(project);
-    if (!owner || owner.db !== db) {
-      owner = { db, project, generation: 0, touched: new Map() };
-      this.owners.set(project, owner);
-    }
-    return owner;
-  }
 
   transaction(db: DatabaseSync) {
     const pending = new Map<ProjectId, Snapshot>();
+    const listStreams = (project: ProjectId): EventLogView => {
+      const through = Number(
+        (
+          db
+            .prepare("SELECT COALESCE(MAX(rowid), 0) AS n FROM events")
+            .get() as { n: number }
+        ).n,
+      );
+      const previous = pending.get(project) ?? this.committed.get(project);
+      if (previous?.through === through) return previous.view;
+      const rows = db
+        .prepare(
+          "SELECT doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid",
+        )
+        .all(previous?.through ?? 0, through, project);
+      // Another project's rows move the watermark without changing this view.
+      if (previous && rows.length === 0) {
+        pending.set(project, { ...previous, through });
+        return previous.view;
+      }
+      const added = rows.map((row) => JSON.parse(row.doc as string) as Event);
+      const next = previous
+        ? extend(previous, added, through)
+        : rebuild([], added, through);
+      pending.set(project, next);
+      return next.view;
+    };
     return {
-      listStreams: (project: ProjectId): EventStreams => {
-        const through = Number(
-          (
-            prepare(
-              db,
-              "SELECT COALESCE(MAX(rowid), 0) AS n FROM events",
-            ).get() as { n: number }
-          ).n,
-        );
-        const previous = pending.get(project) ?? this.committed.get(project);
-        if (previous?.through === through) return previous;
-        const owner = this.owner(db, project);
-        owner.generation++;
-        const loaded = new Map<string, readonly Event[]>();
-        const subsets: Subset[] = [];
-        if (previous && previous.through < through) {
-          for (const [key, events] of previous.loaded) {
-            const seen = owner.touched.get(key) ?? 0;
-            if (owner.generation - seen <= IDLE_GENERATIONS)
-              loaded.set(key, events);
-            else owner.touched.delete(key);
-          }
-          for (const subset of previous.subsets)
-            subsets.push({ ...subset, streams: new Map(subset.streams) });
-          const rows = prepare(
-            db,
-            "SELECT stream, type, doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid",
-          ).all(previous.through, through, project) as Row[];
-          appendTo(
-            loaded,
-            group(rows, (row) => loaded.has(String(row.stream))),
-          );
-          for (const subset of subsets)
-            appendTo(
-              subset.streams,
-              group(
-                rows,
-                (row) => subset.types.has(String(row.type)) !== subset.exclude,
-              ),
-            );
-        }
-        const snapshot = new Snapshot(owner, through, loaded, subsets);
-        pending.set(project, snapshot);
-        return snapshot;
-      },
+      listStreams: (project: ProjectId): EventStreams => listStreams(project),
+      /**
+       * C-640: the transaction's `events.listAfter` answered from the same
+       * view (own writes included): no SQL scan or per-row JSON.parse.
+       */
+      listAfter: (
+        project: ProjectId,
+        card: CardId | undefined,
+        since: number,
+      ): readonly Event[] => listStreams(project).after(card ?? "", since),
       commit: () => {
         for (const [project, snapshot] of pending)
-          this.committed.set(project, snapshot);
+          this.committed.set(project, publish(snapshot));
       },
     };
   }
+}
+
+/** Append to the transaction overlay, or rebuild when a stream's seq goes back. */
+function extend(
+  previous: Snapshot,
+  added: readonly Event[],
+  through: number,
+): Snapshot {
+  const overlay = previous.overlay ?? new EventLog(previous.log.end);
+  const last = new Map<string, number | undefined>();
+  const lastSeq = (stream: string) => {
+    if (!last.has(stream))
+      last.set(stream, overlay.lastSeq(stream) ?? previous.log.lastSeq(stream));
+    return last.get(stream);
+  };
+  for (const event of added) {
+    const stream = event.card_id ?? "";
+    const seq = lastSeq(stream);
+    if (seq !== undefined && event.seq <= seq)
+      return rebuild([previous.view], added, through);
+    last.set(stream, event.seq);
+  }
+  for (const event of added) overlay.append(event);
+  return {
+    through,
+    log: previous.log,
+    overlay,
+    view: new EventLogView(
+      previous.log,
+      previous.log.end,
+      overlay,
+      overlay.end,
+    ),
+  };
+}
+
+/**
+ * Rare path (fixtures, out-of-order seq): a fresh log in stream/seq order.
+ * The new log is private to this transaction until COMMIT publishes it.
+ */
+function rebuild(
+  views: readonly EventLogView[],
+  added: readonly Event[],
+  through: number,
+): Snapshot {
+  const streams = new Map<string, Event[]>();
+  for (const view of views)
+    for (const [key, events] of view) streams.set(key, [...events]);
+  for (const event of added) {
+    const key = event.card_id ?? "";
+    const events = streams.get(key);
+    if (events) events.push(event);
+    else streams.set(key, [event]);
+  }
+  const log = new EventLog();
+  for (const events of streams.values())
+    for (const event of events.sort((a, b) => a.seq - b.seq)) log.append(event);
+  return { through, log, view: new EventLogView(log, log.end) };
+}
+
+/** Fold a committed overlay into the shared log; older views keep their watermarks. */
+function publish(snapshot: Snapshot): Snapshot {
+  const { log, overlay } = snapshot;
+  if (!overlay) return snapshot;
+  if (log.end !== overlay.start) {
+    // Defensive: never splice an overlay onto a log that moved underneath it.
+    return rebuild([snapshot.view], [], snapshot.through);
+  }
+  for (const event of overlay.all) log.append(event);
+  // Keep the transaction's view: base(< start) + overlay equals base(< end).
+  return { through: snapshot.through, log, view: snapshot.view };
 }
 
 /** C-639 host facts for the hot command state that live outside entity lists. */

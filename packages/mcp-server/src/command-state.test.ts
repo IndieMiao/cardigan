@@ -2,8 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  type CommandState,
   compareHotState,
   type Event,
+  eventById,
+  eventsForDecision,
+  eventsOfType,
   hotCommandEvents,
 } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
@@ -129,6 +133,84 @@ test("bulk event history preserves stream order, isolates projects and survives 
     store.close();
     store = Store.open({ dataDir });
     expect(read()).toEqual(committed);
+  } finally {
+    other.close();
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("C-640: Store log indexes stay isolated across rollback and grow without re-sorting", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cg-state-log-"));
+  const store = Store.open({ dataDir });
+  const other = Store.open({ dataDir });
+  const audit = (
+    id: string,
+    seq: number,
+    type: string,
+    card_id?: Event["card_id"],
+  ): Event => ({
+    id,
+    seq,
+    ...(card_id ? { card_id } : {}),
+    type,
+    actor: { kind: "system", project_id },
+    payload: { decision_id: "Q-1" },
+    created_at: NOW,
+  });
+  const read = () => store.uow.read((tx) => loadCommandState(tx, project_id));
+  try {
+    store.createProject({ id: project_id });
+    store.uow.run((tx) => {
+      tx.cards.put(project_id, serverCard);
+      tx.events.append(project_id, audit("project-1", 1, "base"));
+      tx.events.append(project_id, audit("card-1", 1, "base", serverCard.id));
+    });
+    const first = read();
+    expect(eventsOfType(first.events, "base")).toHaveLength(2);
+    let held: CommandState | undefined;
+    expect(() =>
+      store.uow.run((tx) => {
+        tx.events.append(
+          project_id,
+          audit("secret", 2, "secret", serverCard.id),
+        );
+        held = loadCommandState(tx, project_id);
+        expect(eventsOfType(held.events, "secret")).toHaveLength(1);
+        expect(eventById(held.events, "secret")?.type).toBe("secret");
+        throw new Error("rollback");
+      }),
+    ).toThrow("rollback");
+    const afterRollback = read();
+    expect(afterRollback.events).toBe(first.events);
+    expect(eventsOfType(afterRollback.events, "secret")).toEqual([]);
+    expect(eventById(afterRollback.events, "secret")).toBeUndefined();
+    expect(eventsForDecision(afterRollback.events, "Q-1")).toHaveLength(2);
+    // The same seq/rowid is reused by a committed event from another connection.
+    other.uow.run((tx) =>
+      tx.events.append(project_id, audit("public", 2, "public", serverCard.id)),
+    );
+    const sort = vi.spyOn(Array.prototype, "sort");
+    let next: CommandState;
+    try {
+      next = read();
+      expect(sort).not.toHaveBeenCalled();
+    } finally {
+      sort.mockRestore();
+    }
+    expect(next.events.map((e) => e.id)).toEqual([
+      "project-1",
+      "card-1",
+      "public",
+    ]);
+    expect(eventsOfType(next.events, "secret")).toEqual([]);
+    expect(eventsOfType(next.events, "public")).toHaveLength(1);
+    expect(eventsForDecision(next.events, "Q-1")).toHaveLength(3);
+    // Earlier snapshots, including the rolled-back one, keep their own answers.
+    expect(eventsOfType(first.events, "public")).toEqual([]);
+    expect(eventsOfType(held?.events ?? [], "public")).toEqual([]);
+    expect(eventsOfType(held?.events ?? [], "secret")).toHaveLength(1);
+    expect(first.events.map((e) => e.id)).toEqual(["project-1", "card-1"]);
   } finally {
     other.close();
     store.close();

@@ -1,7 +1,85 @@
 import type { CardId, Event } from "@cardigan/domain";
-import { expect, test, vi } from "vitest";
-import { commandStateScope } from "./store.js";
-import { card, project_id, withTempStore } from "./test-support.js";
+import { expect, test } from "vitest";
+import { eventRepository } from "./repositories.js";
+import { commandStateScope, Store } from "./store.js";
+import { card, project_id as P, withTempStore } from "./test-support.js";
+
+const cardId = card().id;
+const audit = (id: string, seq: number, card_id?: CardId): Event => ({
+  id: id as Event["id"],
+  seq,
+  ...(card_id ? { card_id } : {}),
+  type: "fixture",
+  actor: { kind: "system", project_id: P },
+  payload: { n: seq },
+  created_at: "2026-11-23T00:00:00.000Z",
+});
+type Reader = {
+  events: {
+    listAfter(
+      project: typeof P,
+      card: CardId | undefined,
+      since: number,
+    ): readonly Event[];
+  };
+};
+
+test("C-640: transaction listAfter matches the SQL stream read, own writes and rollback included", () => {
+  withTempStore((store, dataDir) => {
+    const other = Store.open({ dataDir });
+    const sql = eventRepository(store.database, "read");
+    const compare = (tx: Reader) => {
+      for (const stream of [undefined, cardId, "C-404" as CardId])
+        for (const since of [0, 1, 2, 3, 99]) {
+          const actual = tx.events.listAfter(P, stream, since);
+          expect(actual).toEqual(sql.listAfter(P, stream, since));
+          // A fresh array each call: callers may sort or splice it.
+          if (actual.length)
+            expect(tx.events.listAfter(P, stream, since)).not.toBe(actual);
+        }
+    };
+    try {
+      store.createProject({ id: P });
+      store.uow.run((tx) => {
+        tx.cards.put(P, card());
+        // Out-of-order seq inside a stream still reads back seq ascending.
+        tx.events.append(P, audit("p-1", 1));
+        tx.events.append(P, audit("p-3", 3));
+        tx.events.append(P, audit("p-2", 2));
+        tx.events.append(P, audit("c-1", 1, cardId));
+      });
+      store.uow.read(compare);
+      // Own uncommitted writes are visible inside the transaction only.
+      expect(() =>
+        store.uow.run((tx) => {
+          compare(tx);
+          tx.events.append(P, audit("p-4", 4));
+          tx.events.append(P, audit("c-2", 2, cardId));
+          compare(tx);
+          expect(tx.events.listAfter(P, undefined, 3).map((e) => e.id)).toEqual(
+            ["p-4"],
+          );
+          throw new Error("rollback");
+        }),
+      ).toThrow("rollback");
+      store.uow.read((tx) => {
+        compare(tx);
+        expect(tx.events.listAfter(P, undefined, 3)).toEqual([]);
+        expect(tx.events.listAfter(P, cardId, 1)).toEqual([]);
+      });
+      // Another connection reuses the rolled-back seq.
+      other.uow.run((tx) => tx.events.append(P, audit("p-4b", 4)));
+      store.uow.read((tx) => {
+        compare(tx);
+        expect(tx.events.listAfter(P, undefined, 3).map((e) => e.id)).toEqual([
+          "p-4b",
+        ]);
+      });
+    } finally {
+      other.close();
+    }
+  });
+});
 
 const at = "2026-01-01T00:00:00.000Z";
 const event = (
@@ -14,89 +92,85 @@ const event = (
   seq,
   ...(card_id ? { card_id } : {}),
   type,
-  actor: { kind: "system", project_id },
+  actor: { kind: "system", P },
   payload: {},
   created_at: at,
 });
 
-test("C-639 streams decode lazily per stream and keep type subsets incremental", () => {
+test("C-639 type subsets come from the log index and never see later rows", () => {
   withTempStore((store) => {
-    store.createProject({ id: project_id });
+    store.createProject({ id: P });
     const a = "C-1" as CardId;
     const b = "C-2" as CardId;
     store.uow.run((tx) => {
-      tx.cards.put(project_id, card({ id: a }));
-      tx.cards.put(project_id, card({ id: b }));
-      tx.events.append(project_id, event("s1", 1, "noise"));
-      tx.events.append(project_id, event("a1", 1, "card_merged", a));
-      tx.events.append(project_id, event("b1", 1, "noise", b));
-      tx.events.append(project_id, event("a2", 2, "noise", a));
+      tx.cards.put(P, card({ id: a }));
+      tx.cards.put(P, card({ id: b }));
+      tx.events.append(P, event("s1", 1, "noise"));
+      tx.events.append(P, event("a1", 1, "card_merged", a));
+      tx.events.append(P, event("b1", 1, "noise", b));
+      tx.events.append(P, event("a2", 2, "noise", a));
+      tx.events.append(P, event("b2", 2, "card_closed", b));
     });
-    const parse = vi.spyOn(JSON, "parse");
     const first = store.uow.read((tx) => {
-      const streams = tx.events.listStreams?.(project_id);
+      const streams = tx.events.listStreams?.(P);
       if (!streams) throw new Error("missing bulk port");
-      expect(parse).not.toHaveBeenCalled();
       expect(streams.get(a)?.map((e) => e.id)).toEqual(["a1", "a2"]);
-      expect(parse).toHaveBeenCalledTimes(2);
       const merged = streams.ofTypes(new Set(["card_merged"]));
       expect([...merged.keys()]).toEqual([a]);
       expect(merged.get(a)?.map((e) => e.id)).toEqual(["a1"]);
+      expect(streams.ofTypes(new Set(["card_merged"]))).toBe(merged);
+      // Several types interleave in seq order inside each stream.
+      const both = streams.ofTypes(new Set(["noise", "card_closed"]));
+      expect(both.get(b)?.map((e) => e.id)).toEqual(["b1", "b2"]);
+      expect(both.get("")?.map((e) => e.id)).toEqual(["s1"]);
       // Iteration keeps the former eager map's first-append order.
       expect([...streams.keys()]).toEqual(["", a, b]);
       expect(streams.get("missing")).toBeUndefined();
       expect(streams.has(b)).toBe(true);
       return streams;
     });
-    parse.mockClear();
-    // A later append decodes only rows of loaded streams or tracked types.
     store.uow.run((tx) => {
-      tx.events.append(project_id, event("b2", 2, "noise", b));
-      tx.events.append(project_id, event("a3", 3, "card_merged", a));
+      tx.events.append(P, event("a3", 3, "card_merged", a));
     });
     store.uow.read((tx) => {
-      const streams = tx.events.listStreams?.(project_id);
+      const streams = tx.events.listStreams?.(P);
       if (!streams) throw new Error("missing bulk port");
       expect(streams).not.toBe(first);
       const merged = streams.ofTypes(new Set(["card_merged"]));
       expect(merged.get(a)?.map((e) => e.id)).toEqual(["a1", "a3"]);
-      expect(streams.get(a)?.map((e) => e.id)).toEqual(["a1", "a2", "a3"]);
       // The previous snapshot never sees later rows.
+      expect(
+        first
+          .ofTypes(new Set(["card_merged"]))
+          .get(a)
+          ?.map((e) => e.id),
+      ).toEqual(["a1"]);
       expect(first.get(a)?.map((e) => e.id)).toEqual(["a1", "a2"]);
     });
-    // b was loaded by the first snapshot's iteration and stays current.
-    expect(
-      store.uow.read((tx) =>
-        tx.events
-          .listStreams?.(project_id)
-          .get(b)
-          ?.map((e) => e.id),
-      ),
-    ).toEqual(["b1", "b2"]);
   });
 });
 
 test("C-639 rolled-back appends never reach committed streams or subsets", () => {
   withTempStore((store) => {
-    store.createProject({ id: project_id });
+    store.createProject({ id: P });
     const a = "C-1" as CardId;
     store.uow.run((tx) => {
-      tx.cards.put(project_id, card({ id: a }));
-      tx.events.append(project_id, event("a1", 1, "card_merged", a));
+      tx.cards.put(P, card({ id: a }));
+      tx.events.append(P, event("a1", 1, "card_merged", a));
     });
     const types = new Set(["card_merged"]);
-    store.uow.read((tx) => tx.events.listStreams?.(project_id).ofTypes(types));
+    store.uow.read((tx) => tx.events.listStreams?.(P).ofTypes(types));
     expect(() =>
       store.uow.run((tx) => {
-        tx.events.append(project_id, event("a2", 2, "card_merged", a));
-        const streams = tx.events.listStreams?.(project_id);
+        tx.events.append(P, event("a2", 2, "card_merged", a));
+        const streams = tx.events.listStreams?.(P);
         expect(streams?.get(a)?.map((e) => e.id)).toEqual(["a1", "a2"]);
         expect(streams?.ofTypes(types).get(a)).toHaveLength(2);
         throw new Error("rollback");
       }),
     ).toThrow("rollback");
     store.uow.read((tx) => {
-      const streams = tx.events.listStreams?.(project_id);
+      const streams = tx.events.listStreams?.(P);
       expect(streams?.get(a)?.map((e) => e.id)).toEqual(["a1"]);
       expect(
         streams
@@ -110,21 +184,21 @@ test("C-639 rolled-back appends never reach committed streams or subsets", () =>
 
 test("C-639 out-of-order seqs from interleaved writers stay sorted per stream", () => {
   withTempStore((store) => {
-    store.createProject({ id: project_id });
+    store.createProject({ id: P });
     const a = "C-1" as CardId;
     store.uow.run((tx) => {
-      tx.cards.put(project_id, card({ id: a }));
-      tx.events.append(project_id, event("a1", 1, "x", a));
+      tx.cards.put(P, card({ id: a }));
+      tx.events.append(P, event("a1", 1, "x", a));
     });
-    store.uow.read((tx) => tx.events.listStreams?.(project_id).get(a));
+    store.uow.read((tx) => tx.events.listStreams?.(P).get(a));
     store.uow.run((tx) => {
-      tx.events.append(project_id, event("a3", 3, "x", a));
-      tx.events.append(project_id, event("a2", 2, "x", a));
+      tx.events.append(P, event("a3", 3, "x", a));
+      tx.events.append(P, event("a2", 2, "x", a));
     });
     expect(
       store.uow.read((tx) =>
         tx.events
-          .listStreams?.(project_id)
+          .listStreams?.(P)
           .get(a)
           ?.map((e) => e.id),
       ),

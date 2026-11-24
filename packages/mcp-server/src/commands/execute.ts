@@ -14,10 +14,10 @@ import type {
 } from "@cardigan/domain";
 import {
   COLD_CARD_OMITTED_EVENT_TYPES,
-  coldCardEvents,
   commandTargetCards,
   hotCardIds,
   liveTriggerEventIds,
+  streamHistory,
 } from "@cardigan/domain";
 import type {
   CommandEventStreams,
@@ -33,16 +33,21 @@ const histories = new WeakMap<
 >();
 
 /**
- * Entity-only revisions do not change immutable event history or its indexes.
- * `hot` (C-639) keeps whole streams only for hot cards; other cards keep their
- * events except the cold-omitted telemetry types.
+ * Project stream, then card streams in card order (C-640: built from the
+ * Store log with its index). Entity-only revisions do not change immutable
+ * event history or its indexes. `hot` (C-639) keeps whole streams only for
+ * hot cards; other cards keep their events except the cold-omitted telemetry
+ * types.
  */
 function eventHistory(
   streams: CommandEventStreams,
   cards: readonly { id: string }[],
   hot?: ReadonlySet<string>,
 ) {
-  const key = `${hot ? [...hot].sort().join(",") : "*"}|${cards.map((c) => c.id).join(",")}`;
+  // Only which cards are hot matters, in card order: no sort on this path.
+  const key = cards
+    .map((c) => (hot === undefined ? "*" : hot.has(c.id) ? "+" : "-") + c.id)
+    .join(",");
   let cache = histories.get(streams);
   if (!cache) {
     cache = new Map();
@@ -50,14 +55,11 @@ function eventHistory(
   }
   const cached = cache.get(key);
   if (cached) return cached;
-  const cold =
-    hot && streams.ofTypes
-      ? streams.ofTypes(COLD_CARD_OMITTED_EVENT_TYPES, true)
-      : undefined;
-  const events = ["", ...cards.map((c) => c.id)].flatMap((id) => {
-    if (!hot || id === "" || hot.has(id)) return streams.get(id) ?? [];
-    return cold ? (cold.get(id) ?? []) : coldCardEvents(streams.get(id) ?? []);
-  });
+  const events = streamHistory(
+    streams,
+    ["", ...cards.map((c) => c.id)],
+    hot ? { full: hot, omit: COLD_CARD_OMITTED_EVENT_TYPES } : undefined,
+  );
   // Base state plus a few target extensions share one immutable snapshot.
   if (cache.size >= 8) cache.delete(cache.keys().next().value as string);
   cache.set(key, events);

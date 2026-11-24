@@ -143,12 +143,9 @@ export interface McpReadContext {
   };
 }
 
-/** Bulk streams; `ofTypes` is the Store's incremental per-type subset. */
+/** Bulk streams; `ofTypes` is the Store log's per-type subset (C-639). */
 export type CommandEventStreams = ReadonlyMap<string, readonly Event[]> & {
-  ofTypes?(
-    types: ReadonlySet<string>,
-    exclude?: boolean,
-  ): ReadonlyMap<string, readonly Event[]>;
+  ofTypes?(types: ReadonlySet<string>): ReadonlyMap<string, readonly Event[]>;
 };
 
 /**

@@ -1,0 +1,343 @@
+import { expect, test, vi } from "vitest";
+import { id, value } from "./commands/test-fixtures.js";
+import type { Event, JsonValue } from "./entities.js";
+import {
+  appendEvents,
+  cardEventsOfType,
+  eventById,
+  eventsForCompletion,
+  eventsForDecision,
+  eventsForWorkItem,
+  eventsOfType,
+  resumeEventsForItem,
+} from "./event-index.js";
+import { EventLog, EventLogView, streamHistory } from "./event-log.js";
+import { parseEventId } from "./index.js";
+
+const eventId = (n: number) =>
+  value(parseEventId(n.toString().padStart(26, "0")));
+const cards = [1, 2, 3, 4].map((n) => id("card", n));
+const types = ["run_started", "decision_requested", "__proto__", "noise"];
+
+function rng(seed: number) {
+  let s = seed >>> 0;
+  return (n: number) => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s % n;
+  };
+}
+
+/** Random events in commit order with per-stream ascending seq. */
+function randomBatch(
+  pick: (n: number) => number,
+  seqs: Map<string, number>,
+  next: { id: number },
+  count: number,
+): Event[] {
+  return Array.from({ length: count }, () => {
+    const stream = pick(5);
+    const card_id = stream ? cards[stream - 1] : undefined;
+    const key = card_id ?? "";
+    const seq = (seqs.get(key) ?? 0) + 1;
+    seqs.set(key, seq);
+    const payloads: JsonValue[] = [
+      null,
+      { decision_id: `Q-${pick(3)}` },
+      { completion_id: `CR-${pick(3)}`, work_item_id: `W-${pick(3)}` },
+      { resume_work_items: [`W-${pick(3)}`, `W-${pick(3)}`, 7] },
+      { decision_id: 3, work_item_id: ["W-1"] },
+      ["Q-1"],
+    ];
+    return {
+      id: eventId(next.id++),
+      seq,
+      ...(card_id ? { card_id } : {}),
+      type: types[pick(types.length)] as string,
+      actor: { kind: "system", project_id: "fixture-project" },
+      payload: payloads[pick(payloads.length)] as JsonValue,
+      created_at: "2026-01-01T00:00:00.000Z",
+    };
+  });
+}
+
+/** Linear reference: the legacy `["", ...cards].flatMap(streams.get)` history. */
+function legacyHistory(all: readonly Event[], order: readonly string[]) {
+  return order.flatMap((stream) =>
+    all
+      .filter((e) => (e.card_id ?? "") === stream)
+      .sort((a, b) => a.seq - b.seq),
+  );
+}
+
+function expectSameLookups(indexed: readonly Event[], copy: readonly Event[]) {
+  expect(indexed).toEqual(copy);
+  for (const type of [...types, "absent"]) {
+    expect(eventsOfType(indexed, type)).toEqual(eventsOfType(copy, type));
+    for (const card of ["", ...cards, id("card", 9)])
+      expect(cardEventsOfType(indexed, card, type)).toEqual(
+        cardEventsOfType(copy, card, type),
+      );
+  }
+  for (let n = 0; n < 4; n++) {
+    expect(eventsForDecision(indexed, `Q-${n}`)).toEqual(
+      eventsForDecision(copy, `Q-${n}`),
+    );
+    expect(eventsForCompletion(indexed, `CR-${n}`)).toEqual(
+      eventsForCompletion(copy, `CR-${n}`),
+    );
+    expect(eventsForWorkItem(indexed, `W-${n}`)).toEqual(
+      eventsForWorkItem(copy, `W-${n}`),
+    );
+    expect(resumeEventsForItem(indexed, `W-${n}`)).toEqual(
+      resumeEventsForItem(copy, `W-${n}`),
+    );
+  }
+  for (let n = 0; n < 80; n++)
+    expect(eventById(indexed, eventId(n))).toBe(eventById(copy, eventId(n)));
+  expect(eventById(indexed, undefined)).toBeUndefined();
+}
+
+test("C-640: log views and indexes match the legacy history and per-array scans", () => {
+  for (let seed = 1; seed <= 120; seed++) {
+    const pick = rng(seed);
+    const seqs = new Map<string, number>();
+    const next = { id: 1 };
+    const log = new EventLog();
+    const committed: Event[] = [];
+    const views: { view: EventLogView; all: readonly Event[] }[] = [];
+    for (let round = 0; round < 4; round++) {
+      // A transaction overlay: visible to its own views, published on commit.
+      const overlay = new EventLog(log.end);
+      const added = randomBatch(pick, seqs, next, pick(12));
+      for (const event of added) overlay.append(event);
+      const view = new EventLogView(log, log.end, overlay, overlay.end);
+      const all = [...committed, ...added];
+      views.push({ view, all });
+      if (pick(3) === 0) {
+        // ROLLBACK: drop the overlay; reuse its seqs/ids later.
+        for (const event of added) {
+          const key = event.card_id ?? "";
+          seqs.set(key, (seqs.get(key) ?? 0) - 1);
+        }
+        next.id -= added.length;
+        continue;
+      }
+      for (const event of overlay.all) log.append(event);
+      committed.push(...added);
+    }
+    views.push({ view: new EventLogView(log, log.end), all: [...committed] });
+    // Every view, including rolled-back and pre-commit ones, keeps its contents.
+    for (const { view, all } of views) {
+      const order = pick(2)
+        ? ["", ...cards]
+        : ["", cards[2] as string, cards[0] as string];
+      const history = view.history(order);
+      expect(view.history([...order])).toBe(history);
+      expect(streamHistory(view, order)).toBe(history);
+      expectSameLookups(history, legacyHistory(all, order));
+      for (const stream of ["", ...cards]) {
+        const expected = legacyHistory(all, [stream]);
+        expect(view.get(stream) ?? []).toEqual(expected);
+        expect(view.has(stream)).toBe(expected.length > 0);
+      }
+      expect(new Map(view)).toEqual(
+        new Map(
+          [...view.keys()].map((key) => [key, legacyHistory(all, [key])]),
+        ),
+      );
+      expect(view.size).toBe(new Set(all.map((e) => e.card_id ?? "")).size);
+      // appendEvents reuses the base index and indexes only the tail.
+      const tail = randomBatch(pick, new Map(seqs), { id: 1000 }, 3);
+      const appended = appendEvents(history, tail);
+      expectSameLookups(appended, [...history, ...tail]);
+      expectSameLookups(appendEvents(appended, tail), [
+        ...history,
+        ...tail,
+        ...tail,
+      ]);
+    }
+  }
+});
+
+test("C-640: appending never copies or re-sorts a stream and unchanged streams keep identity", () => {
+  const log = new EventLog();
+  const seqs = new Map<string, number>();
+  const next = { id: 1 };
+  const pick = rng(7);
+  for (const event of randomBatch(pick, seqs, next, 200)) log.append(event);
+  const first = new EventLogView(log, log.end);
+  const before = new Map([...first.keys()].map((k) => [k, first.get(k)]));
+  const segments = new Map(log.streams);
+  const sort = vi.spyOn(Array.prototype, "sort");
+  const slice = vi.spyOn(Array.prototype, "slice");
+  try {
+    const event: Event = {
+      id: eventId(next.id++),
+      seq: (seqs.get(cards[0] as string) ?? 0) + 1,
+      card_id: cards[0] as NonNullable<Event["card_id"]>,
+      type: "noise",
+      actor: { kind: "system", project_id: "fixture-project" },
+      payload: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+    };
+    log.append(event);
+    expect(sort).not.toHaveBeenCalled();
+    expect(slice).not.toHaveBeenCalled();
+    // Storage grows in place; no segment was replaced.
+    for (const [key, seg] of segments) expect(log.streams.get(key)).toBe(seg);
+    const second = new EventLogView(log, log.end);
+    for (const [key, events] of before)
+      if (key !== cards[0]) expect(second.get(key)).toBe(events);
+    expect(second.get(cards[0] as string)?.at(-1)).toBe(event);
+    // The earlier view and its arrays are unchanged.
+    expect(first.get(cards[0] as string)).toBe(before.get(cards[0] as string));
+    expect(first.get(cards[0] as string)).not.toContain(event);
+    expect(eventById(first.history(["", ...cards]), event.id)).toBeUndefined();
+  } finally {
+    sort.mockRestore();
+    slice.mockRestore();
+  }
+});
+
+test("C-640: a dropped overlay never leaks into later views or reused ordinals", () => {
+  const event = (n: number, type: string, card?: string): Event => ({
+    id: eventId(n),
+    seq: n,
+    ...(card ? { card_id: card as NonNullable<Event["card_id"]> } : {}),
+    type,
+    actor: { kind: "system", project_id: "fixture-project" },
+    payload: { decision_id: "Q-1" },
+    created_at: "2026-01-01T00:00:00.000Z",
+  });
+  const log = new EventLog();
+  log.append(event(1, "base"));
+  const order = ["", cards[0] as string];
+  const rolledBack = new EventLog(log.end);
+  rolledBack.append(event(2, "secret", cards[0]));
+  const stale = new EventLogView(log, log.end, rolledBack, rolledBack.end);
+  const staleHistory = stale.history(order);
+  expect(eventsOfType(staleHistory, "secret")).toHaveLength(1);
+  // ROLLBACK drops the overlay; the next transaction reuses ordinal 1.
+  const fresh = new EventLogView(log, log.end);
+  const history = fresh.history(order);
+  expect(eventsOfType(history, "secret")).toEqual([]);
+  expect(eventsForDecision(history, "Q-1").map((e) => e.type)).toEqual([
+    "base",
+  ]);
+  expect(eventById(history, eventId(2))).toBeUndefined();
+  const committed = new EventLog(log.end);
+  committed.append(event(3, "public", cards[0]));
+  for (const e of committed.all) log.append(e);
+  const after = new EventLogView(log, log.end).history(order);
+  expect(eventsOfType(after, "secret")).toEqual([]);
+  expect(eventsOfType(after, "public")).toHaveLength(1);
+  // The stale view still answers only for its own snapshot.
+  expect(eventsOfType(stale.history(order), "public")).toEqual([]);
+  expect(eventsOfType(staleHistory, "secret")).toHaveLength(1);
+  expect(eventsOfType(history, "public")).toEqual([]);
+});
+
+test("C-639: filtered history and its index match the plain filter; ofTypes matches per-stream grouping", () => {
+  const omit = new Set(["run_started", "__proto__"]);
+  for (let seed = 1; seed <= 80; seed++) {
+    const pick = rng(seed);
+    const seqs = new Map<string, number>();
+    const next = { id: 1 };
+    const log = new EventLog();
+    const committed: Event[] = [];
+    for (let round = 0; round < 4; round++) {
+      const overlay = new EventLog(log.end);
+      const added = randomBatch(pick, seqs, next, pick(14));
+      for (const event of added) overlay.append(event);
+      const all = [...committed, ...added];
+      const views = [
+        { view: new EventLogView(log, log.end, overlay, overlay.end), all },
+        { view: new EventLogView(log, log.end), all: [...committed] },
+      ];
+      for (const { view, all: events } of views) {
+        const full = new Set(cards.filter(() => pick(2) === 0));
+        const filter = { full, omit };
+        const order = ["", ...cards];
+        const expected = legacyHistory(events, order).filter(
+          (e) => !e.card_id || full.has(e.card_id) || !omit.has(e.type),
+        );
+        const history = view.history(order, filter);
+        expect(view.history(order, { full: new Set(full), omit })).toBe(
+          history,
+        );
+        expect(streamHistory(view, order, filter)).toBe(history);
+        expectSameLookups(history, expected);
+        // A plain map (no Store log) gives the same events.
+        expect(streamHistory(new Map(view), order, filter)).toEqual(expected);
+        // Unfiltered history of the same view is unaffected.
+        expectSameLookups(view.history(order), legacyHistory(events, order));
+        const tail = randomBatch(pick, new Map(seqs), { id: 1000 }, 3);
+        expectSameLookups(appendEvents(history, tail), [...expected, ...tail]);
+        for (const set of [
+          new Set(["run_started"]),
+          new Set(["noise", "decision_requested"]),
+          new Set(["absent"]),
+        ]) {
+          const grouped = new Map<string, Event[]>();
+          for (const stream of view.keys()) {
+            const kept = (view.get(stream) ?? []).filter((e) =>
+              set.has(e.type),
+            );
+            if (kept.length) grouped.set(stream, kept);
+          }
+          const subset = view.ofTypes(set);
+          expect(view.ofTypes(new Set(set))).toBe(subset);
+          expect(new Map(subset)).toEqual(grouped);
+        }
+      }
+      if (pick(3) === 0) {
+        for (const event of added) {
+          const key = event.card_id ?? "";
+          seqs.set(key, (seqs.get(key) ?? 0) - 1);
+        }
+        next.id -= added.length;
+        continue;
+      }
+      for (const event of overlay.all) log.append(event);
+      committed.push(...added);
+    }
+  }
+});
+
+test("C-639: a stream moving between full and filtered never reuses the other's answers", () => {
+  const event = (n: number, type: string, card?: string): Event => ({
+    id: eventId(n),
+    seq: n,
+    ...(card ? { card_id: card as NonNullable<Event["card_id"]> } : {}),
+    type,
+    actor: { kind: "system", project_id: "fixture-project" },
+    payload: { work_item_id: "W-1" },
+    created_at: "2026-01-01T00:00:00.000Z",
+  });
+  const card = cards[0] as string;
+  const log = new EventLog();
+  log.append(event(1, "run_started", card));
+  log.append(event(2, "card_merged", card));
+  const order = ["", card];
+  const omit = new Set(["run_started"]);
+  const view = new EventLogView(log, log.end);
+  const cold = view.history(order, { full: new Set(), omit });
+  expect(cold.map((e) => e.type)).toEqual(["card_merged"]);
+  expect(eventsForWorkItem(cold, "W-1")).toHaveLength(1);
+  expect(eventsOfType(cold, "run_started")).toEqual([]);
+  expect(cardEventsOfType(cold, card, "run_started")).toEqual([]);
+  expect(eventById(cold, eventId(1))).toBeUndefined();
+  const hot = new EventLogView(log, log.end).history(order, {
+    full: new Set([card]),
+    omit,
+  });
+  expect(eventsForWorkItem(hot, "W-1")).toHaveLength(2);
+  expect(eventsOfType(hot, "run_started")).toHaveLength(1);
+  // Back to cold on a later view: the shared answers follow the filter.
+  const again = new EventLogView(log, log.end).history(order, {
+    full: new Set(),
+    omit,
+  });
+  expect(eventsForWorkItem(again, "W-1")).toHaveLength(1);
+  expect(eventById(again, eventId(1))).toBeUndefined();
+});
