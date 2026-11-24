@@ -9,6 +9,7 @@ import {
   eventsForDecision,
   eventsOfType,
   hotCommandEvents,
+  leanCommandEvents,
 } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
@@ -272,6 +273,109 @@ test("C-639 hot scope keeps open and targeted cards whole and matches the domain
     ).toEqual([]);
   } finally {
     hot.close();
+    full.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("C-649 lean scope retains the project stream by type, drops cold dispatch records and matches the domain definition", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cg-lean-state-"));
+  const full = Store.open({ dataDir, commandState: "full" });
+  const lean = Store.open({ dataDir, commandState: "lean" });
+  const event = (
+    id: string,
+    seq: number,
+    type: string,
+    card_id?: Event["card_id"],
+    payload: Event["payload"] = {},
+  ): Event => ({
+    id,
+    seq,
+    ...(card_id ? { card_id } : {}),
+    type,
+    actor: { kind: "system", project_id },
+    payload,
+    created_at: NOW,
+  });
+  const backup = { assignment_id: "A-1", machine_id: "local", branch: "b" };
+  const closed = {
+    ...serverCard,
+    // Not C-2: earlier tests in this file pin that id into the hot set.
+    id: "C-649" as Event["card_id"] & string,
+    status: "done" as const,
+  };
+  try {
+    full.createProject({ id: project_id });
+    full.uow.run((tx) => {
+      tx.cards.put(project_id, serverCard);
+      tx.cards.put(project_id, closed);
+      tx.events.append(
+        project_id,
+        event("b1", 1, "assignment_branch_backed_up", undefined, {
+          ...backup,
+          sha: "1",
+        }),
+      );
+      tx.events.append(project_id, event("x1", 2, "cross_card_read"));
+      tx.events.append(
+        project_id,
+        event("b2", 3, "assignment_branch_backed_up", undefined, {
+          ...backup,
+          sha: "2",
+        }),
+      );
+      tx.events.append(project_id, event("x2", 4, "cross_card_read"));
+      tx.events.append(project_id, event("p1", 5, "merge_push_queued"));
+      tx.events.append(
+        project_id,
+        event("o1", 1, "github_check_dispatch", serverCard.id),
+      );
+      tx.events.append(project_id, event("c1", 1, "card_merged", closed.id));
+      tx.events.append(
+        project_id,
+        event("c2", 2, "github_check_dispatch", closed.id, {
+          externalRun: { run_id: 777 },
+        }),
+      );
+    });
+    // A live notification keeps its project-stream subject.
+    full.database
+      .prepare(
+        "INSERT INTO notifications (project_id, id, event_id, recipient_kind, assignment_id, card_id, seq, kind, status, doc) VALUES (?, 'ntf-1', 'x2', 'pm_ops', '', NULL, 4, 'event', 'pending', '{}')",
+      )
+      .run(project_id);
+    const whole = full.uow.read((tx) => loadCommandState(tx, project_id));
+    const ids = (s: { events: readonly Event[] }) => s.events.map((e) => e.id);
+    expect(lean.commandStateScope).toBe("lean");
+    const base = lean.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(ids(base)).toEqual(["b2", "x2", "p1", "o1", "c1"]);
+    expect(ids(base)).toEqual(
+      leanCommandEvents(whole, [], new Set(["x2"])).map((e) => e.id),
+    );
+    // The hot scope keeps every project-stream event and cold dispatch records.
+    expect(ids(whole)).toEqual(hotCommandEvents(whole).map((e) => e.id));
+    expect(
+      compareHotState(whole, base, { now: NOW }).filter((c) => !c.equal),
+    ).toEqual([]);
+    // Settling the notification lets its subject go on the next state.
+    full.database
+      .prepare("UPDATE notifications SET status = 'acked' WHERE id = 'ntf-1'")
+      .run();
+    expect(
+      ids(lean.uow.read((tx) => loadCommandState(tx, project_id))),
+    ).toEqual(["b2", "p1", "o1", "c1"]);
+    // Last: targets pin their cards into later hot sets (C-639).
+    // A command naming the GitHub run (as a resume target) restores its card.
+    const targeted = lean.uow.read((tx) =>
+      loadCommandState(tx, project_id, undefined, {
+        targets: [
+          { resume_when: { kind: "github_run_completed", target_id: "777" } },
+        ],
+      }),
+    );
+    expect(ids(targeted)).toEqual(["b2", "p1", "o1", "c1", "c2"]);
+  } finally {
+    lean.close();
     full.close();
     rmSync(dataDir, { recursive: true, force: true });
   }

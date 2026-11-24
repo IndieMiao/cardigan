@@ -401,9 +401,60 @@ test("C-649: multi-type, stream and seq lookups match plain filters on full, fil
         expectGroupLookups(history, expected);
         const tail = randomBatch(pick, new Map(seqs), { id: 1000 }, 3);
         expectGroupLookups(appendEvents(history, tail), [...expected, ...tail]);
+        // Project-stream retention by id: history and every lookup agree.
+        const dropped = new Set(
+          events.filter((e) => !e.card_id && pick(2) === 0).map((e) => e.id),
+        );
+        const retained = expected.filter((e) => !dropped.has(e.id));
+        const kept = view.history(order, { full, omit, dropped });
+        expect(view.history(order, { full, omit, dropped })).toBe(kept);
+        expectGroupLookups(kept, retained);
+        expectSameLookups(kept, retained);
+        expect(
+          streamHistory(new Map(view), order, { full, omit, dropped }),
+        ).toEqual(retained);
       }
       for (const event of overlay.all) log.append(event);
       committed.push(...added);
     }
   }
+});
+
+test("C-649: histories with different dropped sets never share index answers", () => {
+  const log = new EventLog();
+  const at = "2026-01-01T00:00:00.000Z";
+  const actor = { kind: "system", project_id: "fixture-project" } as const;
+  const p = (n: number): Event => ({
+    id: eventId(n),
+    seq: n,
+    type: "noise",
+    actor,
+    payload: { decision_id: "Q-1" },
+    created_at: at,
+  });
+  for (const n of [1, 2, 3]) log.append(p(n));
+  const order = [""];
+  const omit = new Set<string>();
+  const full = new Set<string>();
+  const ids = (events: readonly Event[]) => events.map((e) => e.seq);
+  const first = new EventLogView(log, log.end).history(order, {
+    full,
+    omit,
+    dropped: new Set([eventId(1)]),
+  });
+  expect(ids(eventsOfType(first, "noise"))).toEqual([2, 3]);
+  expect(ids(eventsForDecision(first, "Q-1"))).toEqual([2, 3]);
+  const second = new EventLogView(log, log.end).history(order, {
+    full,
+    omit,
+    dropped: new Set([eventId(2)]),
+  });
+  expect(ids(eventsOfType(second, "noise"))).toEqual([1, 3]);
+  expect(ids(eventsForDecision(second, "Q-1"))).toEqual([1, 3]);
+  const none = new EventLogView(log, log.end).history(order, {
+    full,
+    omit,
+    dropped: new Set(),
+  });
+  expect(ids(eventsOfType(none, "noise"))).toEqual([1, 2, 3]);
 });

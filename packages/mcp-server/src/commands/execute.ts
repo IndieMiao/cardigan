@@ -14,10 +14,16 @@ import type {
 } from "@cardigan/domain";
 import {
   COLD_CARD_OMITTED_EVENT_TYPES,
+  commandRunIds,
   commandTargetCards,
+  githubRunCards,
   hotCardIds,
+  LEAN_COLD_CARD_OMITTED_EVENT_TYPES,
   liveTriggerEventIds,
+  PROJECT_STREAM_RETENTION,
+  projectStreamDropped,
   streamHistory,
+  waitedGithubRuns,
 } from "@cardigan/domain";
 import type {
   CommandEventStreams,
@@ -43,11 +49,14 @@ function eventHistory(
   streams: CommandEventStreams,
   cards: readonly { id: string }[],
   hot?: ReadonlySet<string>,
+  lean?: Lean,
 ) {
   // Only which cards are hot matters, in card order: no sort on this path.
-  const key = cards
-    .map((c) => (hot === undefined ? "*" : hot.has(c.id) ? "+" : "-") + c.id)
-    .join(",");
+  const key =
+    (lean ? `L${lean.serial}:` : "") +
+    cards
+      .map((c) => (hot === undefined ? "*" : hot.has(c.id) ? "+" : "-") + c.id)
+      .join(",");
   let cache = histories.get(streams);
   if (!cache) {
     cache = new Map();
@@ -58,7 +67,15 @@ function eventHistory(
   const events = streamHistory(
     streams,
     ["", ...cards.map((c) => c.id)],
-    hot ? { full: hot, omit: COLD_CARD_OMITTED_EVENT_TYPES } : undefined,
+    hot
+      ? lean
+        ? {
+            full: hot,
+            omit: LEAN_COLD_CARD_OMITTED_EVENT_TYPES,
+            dropped: lean.dropped,
+          }
+        : { full: hot, omit: COLD_CARD_OMITTED_EVENT_TYPES }
+      : undefined,
   );
   // Base state plus a few target extensions share one immutable snapshot.
   if (cache.size >= 8) cache.delete(cache.keys().next().value as string);
@@ -68,6 +85,56 @@ function eventHistory(
 
 /** Hot cards each cached state was built for; extensions rebuild events only. */
 const hotSets = new WeakMap<CommandState, ReadonlySet<string>>();
+/** C-649: the `lean` inputs each cached state was built with. */
+const leanInputs = new WeakMap<CommandState, Lean>();
+
+/**
+ * C-649 `lean` scope: project-stream retention (`dropped`, one stable object
+ * while its inputs do not change, so histories and index answers are shared)
+ * and the project's GitHub dispatch records from the full log index.
+ */
+interface Lean {
+  readonly serial: number;
+  readonly dropped: ReadonlySet<string>;
+  readonly dispatches: readonly Event[];
+}
+const DISPATCH_TYPES: ReadonlySet<string> = new Set(["github_check_dispatch"]);
+// One subset per type (rules are per type), so no cross-type merge or sort.
+const retainedTypes = [...PROJECT_STREAM_RETENTION.keys()].map(
+  (type) => new Set([type]),
+);
+let leanSerial = 0;
+const leanCache = new Map<string, { key: string; lean: Lean }>();
+function leanInputsFor(
+  project: string,
+  streams: CommandEventStreams,
+  protect: ReadonlySet<string>,
+): Lean | undefined {
+  if (!streams.ofTypes) return undefined;
+  const { ofTypes } = streams;
+  const typed = retainedTypes.flatMap(
+    (t) => ofTypes.call(streams, t).get("") ?? [],
+  );
+  const dispatches = [...ofTypes.call(streams, DISPATCH_TYPES).values()].flat();
+  // Appends only grow these lists; ids are unique, so count + last id + the
+  // protected ids identify the inputs.
+  const key = [
+    typed.length,
+    typed.at(-1)?.id ?? "",
+    dispatches.length,
+    dispatches.at(-1)?.id ?? "",
+    [...protect].join(","),
+  ].join("\u0000");
+  const cached = leanCache.get(project);
+  if (cached?.key === key) return cached.lean;
+  const lean = {
+    serial: ++leanSerial,
+    dropped: projectStreamDropped(typed, protect),
+    dispatches,
+  };
+  leanCache.set(project, { key, lean });
+  return lean;
+}
 const extensions = new WeakMap<
   CommandState,
   { key: string; state: CommandState }
@@ -122,11 +189,13 @@ export function loadCommandState(
   // Resolve the transaction's event history even on a state cache hit. A
   // backend without this bulk port keeps the original per-stream read path.
   const streams = tx.events.listStreams?.(project_id);
-  const hot = tx.command_state_scope === "hot" && streams !== undefined;
-  const build = () => readCommandState(tx, project_id, streams, hot);
+  const scope = tx.command_state_scope;
+  const hot = (scope === "hot" || scope === "lean") && streams !== undefined;
+  const lean = scope === "lean" && hot;
+  const build = () => readCommandState(tx, project_id, streams, hot, lean);
   let state =
     (streams && tx.cachedCommandState?.(project_id, build)) || build();
-  if (hot && streams) state = extendHot(tx, state, streams, options);
+  if (hot && streams) state = extendHot(tx, state, streams, options, lean);
   if (!project_settings && !tx.test_review_trust && !tx.read_machine_placement)
     return state;
   // Attach live authority AFTER the data cache; revoked/restarted sources must
@@ -152,6 +221,7 @@ function extendHot(
   state: CommandState,
   streams: CommandEventStreams,
   options: CommandStateOptions,
+  lean = false,
 ): CommandState {
   const base = hotSets.get(state);
   if (!base) return state;
@@ -160,23 +230,54 @@ function extendHot(
   );
   if (options.targets?.length)
     for (const id of commandTargetCards(state, options.targets)) extra.add(id);
+  // C-649: notifications are outside the cached state's version, so lean
+  // retention inputs are rechecked here; a GitHub run id among the command
+  // parameters keeps its dispatch cards whole.
+  const built = leanInputs.get(state);
+  const current =
+    lean && built
+      ? (leanInputsFor(
+          state.project_id,
+          streams,
+          leanProtect(tx, state.project_id, state.runs),
+        ) ?? built)
+      : built;
+  if (current && options.targets?.length)
+    for (const id of githubRunCards(
+      current.dispatches,
+      commandRunIds(options.targets),
+    ))
+      extra.add(id);
   const pins = stickyPins(state.project_id);
   for (const id of extra) pins.used.set(id, pins.generation);
   const missing = [...extra].filter(
     (id) => !base.has(id) && state.cards.some((c) => c.id === id),
   );
-  if (!missing.length) return state;
+  if (!missing.length && current === built) return state;
   const hot = new Set([...base, ...missing]);
-  const key = [...missing].sort().join(",");
+  const key = `${[...missing].sort().join(",")}|${current?.serial ?? ""}`;
   const cached = extensions.get(state);
   if (cached?.key === key) return cached.state;
   const extended = {
     ...state,
-    events: eventHistory(streams, state.cards, hot),
+    events: eventHistory(streams, state.cards, hot, current),
   };
   hotSets.set(extended, hot);
+  if (current) leanInputs.set(extended, current);
   extensions.set(state, { key, state: extended });
   return extended;
+}
+
+/** C-649: live Run triggers and live notification subjects are never retained away. */
+function leanProtect(
+  tx: McpReadContext,
+  project: ProjectId,
+  runs: CommandState["runs"],
+): ReadonlySet<string> {
+  return new Set<string>([
+    ...liveTriggerEventIds(runs),
+    ...(tx.hot_state_hints?.liveNotificationEvents?.(project) ?? []),
+  ]);
 }
 
 function readCommandState(
@@ -184,6 +285,7 @@ function readCommandState(
   project_id: ProjectId,
   streams: CommandEventStreams | undefined,
   hot = false,
+  lean = false,
 ): CommandState {
   const cards = tx.cards.list(project_id);
   const entities = {
@@ -195,6 +297,7 @@ function readCommandState(
     human_actions: tx.human_actions.list(project_id),
   };
   let hotCards: Set<string> | undefined;
+  let leanInput: Lean | undefined;
   if (hot && streams) {
     // Triggers of unfinished Runs may live on a closed card's stream.
     const triggers = tx.hot_state_hints?.eventCards(
@@ -207,9 +310,23 @@ function readCommandState(
     pins.generation++;
     for (const [id, used] of pins.used)
       if (pins.generation - used > STICKY_GENERATIONS) pins.used.delete(id);
+    // C-649: lean keeps the dispatch cards of waited GitHub runs whole.
+    leanInput = lean
+      ? leanInputsFor(
+          project_id,
+          streams,
+          leanProtect(tx, project_id, entities.runs),
+        )
+      : undefined;
     hotCards = hotCardIds(entities, [
       ...((triggers?.values() ?? []) as Iterable<CardId | undefined>),
       ...(pins.used.keys() as Iterable<CardId>),
+      ...(leanInput
+        ? githubRunCards(
+            leanInput.dispatches,
+            waitedGithubRuns(entities.work_items),
+          )
+        : []),
     ]);
   }
   // Store reads only newly appended rows. Keep the original project/card/seq
@@ -230,12 +347,13 @@ function readCommandState(
     cursors: tx.cursors.list(project_id),
     timeline: tx.timeline.list(project_id),
     events: streams
-      ? eventHistory(streams, cards, hotCards)
+      ? eventHistory(streams, cards, hotCards, leanInput)
       : [undefined, ...cards.map((c) => c.id)].flatMap((id) =>
           tx.events.listAfter(project_id, id, 0),
         ),
   };
   if (hotCards) hotSets.set(state, hotCards);
+  if (leanInput) leanInputs.set(state, leanInput);
   return state;
 }
 

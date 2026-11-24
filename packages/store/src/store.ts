@@ -174,14 +174,18 @@ export interface StoreOptions {
   readonly commandState?: CommandStateScope;
 }
 
-/** `hot`: open cards' streams plus durable closed-card facts; `full`: all history. */
-export type CommandStateScope = "full" | "hot";
+/**
+ * `hot`: open cards' streams plus durable closed-card facts; `full`: all
+ * history; `lean` (C-649): hot, plus closed-card GitHub dispatch records left
+ * out and project-stream retention by type.
+ */
+export type CommandStateScope = "full" | "hot" | "lean";
 export function commandStateScope(
   value: string | undefined,
 ): CommandStateScope {
   if (value === undefined || value === "" || value === "hot") return "hot";
-  if (value === "full") return "full";
-  throw new Error("CARDIGAN_COMMAND_STATE must be hot or full");
+  if (value === "full" || value === "lean") return value;
+  throw new Error("CARDIGAN_COMMAND_STATE must be hot, lean or full");
 }
 
 export interface GetUpdatesParams {

@@ -211,7 +211,8 @@ test("C-639 command state scope defaults to hot and rejects unknown values", () 
   expect(commandStateScope("")).toBe("hot");
   expect(commandStateScope("hot")).toBe("hot");
   expect(commandStateScope("full")).toBe("full");
-  expect(() => commandStateScope("cold")).toThrow("hot or full");
+  expect(commandStateScope("lean")).toBe("lean");
+  expect(() => commandStateScope("cold")).toThrow("hot, lean or full");
   withTempStore((store) => {
     expect(store.commandStateScope).toBe(
       commandStateScope(process.env.CARDIGAN_COMMAND_STATE),

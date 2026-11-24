@@ -240,6 +240,8 @@ export interface HotStateHints {
   ): ReadonlyMap<string, string | undefined>;
   /** Cards with an undelivered or unresolved inbox notification. */
   liveNotificationCards(project: ProjectId): readonly string[];
+  /** C-649: project-stream events with an undelivered or unresolved notification. */
+  liveNotificationEvents(project: ProjectId): readonly string[];
 }
 
 export function hotStateHints(db: DatabaseSync): HotStateHints {
@@ -263,5 +265,12 @@ export function hotStateHints(db: DatabaseSync): HotStateHints {
       )
         .all(project)
         .map((row) => String(row.card_id)),
+    liveNotificationEvents: (project) =>
+      prepare(
+        db,
+        "SELECT DISTINCT event_id FROM notifications WHERE project_id = ? AND status IN ('pending','belled','delivery_failed','needs_attention') AND card_id IS NULL",
+      )
+        .all(project)
+        .map((row) => String(row.event_id)),
   };
 }

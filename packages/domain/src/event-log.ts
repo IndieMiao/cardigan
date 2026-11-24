@@ -48,6 +48,11 @@ const noEvents: readonly Event[] = Object.freeze([]);
 export interface HistoryFilter {
   readonly full: ReadonlySet<string>;
   readonly omit: ReadonlySet<string>;
+  /**
+   * C-649: project-stream events left out by id (retention). Reuse the same
+   * set object while it does not change: views share answers by its identity.
+   */
+  readonly dropped?: ReadonlySet<string>;
 }
 
 /**
@@ -55,24 +60,36 @@ export interface HistoryFilter {
  * different order only miss the cache, distinct sets never share a key.
  */
 const typesKey = (values: Iterable<string>) => [...values].join("\u0000");
+const droppedSets = new WeakMap<ReadonlySet<string>, number>();
+let droppedSerial = 0;
+/** Identity token of a dropped-id set; empty sets drop nothing and share one. */
+const droppedKey = (dropped: ReadonlySet<string> | undefined) => {
+  if (!dropped?.size) return "";
+  let serial = droppedSets.get(dropped);
+  if (serial === undefined) {
+    serial = ++droppedSerial;
+    droppedSets.set(dropped, serial);
+  }
+  return String(serial);
+};
 /** Which streams of `order` the filter trims, plus its omitted types. */
 const filterKey = (order: readonly string[], filter?: HistoryFilter) => {
   if (!filter) return "";
   let flags = "";
   for (const stream of order)
     flags += stream !== "" && !filter.full.has(stream) ? "1" : "0";
-  return `${flags}\u0001${typesKey(filter.omit)}`;
+  return `${flags}\u0001${typesKey(filter.omit)}\u0003${droppedKey(filter.dropped)}`;
 };
 /** Whether `filter` removes `event` (on stream `stream`) from a history. */
 const filtered = (
   filter: HistoryFilter | undefined,
   stream: string,
-  type: string,
+  event: Event,
 ) =>
   filter !== undefined &&
-  stream !== "" &&
-  !filter.full.has(stream) &&
-  filter.omit.has(type);
+  (stream === ""
+    ? filter.dropped?.has(event.id) === true
+    : !filter.full.has(stream) && filter.omit.has(event.type));
 
 function push(
   segments: Map<string, Seg>,
@@ -372,6 +389,25 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
         trim(this.overlay?.streams.get(stream), this.end);
         continue;
       }
+      const dropped = stream === "" ? filter?.dropped : undefined;
+      if (dropped?.size) {
+        // C-649: project-stream retention removes these events by id.
+        for (const [log, limit] of [
+          [this.base, this.baseEnd],
+          [this.overlay, this.end],
+        ] as const) {
+          const seg = log?.streams.get(stream);
+          if (!seg) continue;
+          const n = below(seg.ords, limit);
+          const kept: Event[] = [];
+          for (let i = 0; i < n; i++) {
+            const event = seg.events[i] as Event;
+            if (!dropped.has(event.id)) kept.push(event);
+          }
+          if (kept.length) parts.push(kept);
+        }
+        continue;
+      }
       part(this.base.streams.get(stream), this.baseEnd);
       part(this.overlay?.streams.get(stream), this.end);
     }
@@ -493,7 +529,7 @@ class ViewIndex implements HistoryIndex {
     let out: Event[] | undefined;
     for (let i = 0; i < events.length; i++) {
       const event = events[i] as Event;
-      if (filtered(filter, streamOf(event), event.type)) {
+      if (filtered(filter, streamOf(event), event)) {
         out ??= events.slice(0, i);
       } else out?.push(event);
     }
@@ -556,7 +592,12 @@ class ViewIndex implements HistoryIndex {
 
   card(card: string, type: string): readonly Event[] {
     // Same as filtering the type bucket by a truthy card_id.
-    if (!card || !this.#rank.has(card) || filtered(this.filter, card, type))
+    const { filter } = this;
+    if (
+      !card ||
+      !this.#rank.has(card) ||
+      (filter && !filter.full.has(card) && filter.omit.has(type))
+    )
       return noEvents;
     return this.#memo(`card:${type}`, card, () => {
       const one = new Map([[card, 0]]);
@@ -607,7 +648,7 @@ class ViewIndex implements HistoryIndex {
         const n = below(seg.ords, limit);
         for (let i = 0; i < n; i++) {
           const event = seg.events[i] as Event;
-          if (!filtered(this.filter, stream, event.type)) out.push(event);
+          if (!filtered(this.filter, stream, event)) out.push(event);
         }
       };
       take(this.view.base, this.view.baseEnd);
@@ -634,7 +675,7 @@ class ViewIndex implements HistoryIndex {
       for (let i = lo; i < n; i++) {
         const event = seg.events[i] as Event;
         if (event.seq !== seq) break;
-        if (!filtered(this.filter, stream, event.type)) out.push(event);
+        if (!filtered(this.filter, stream, event)) out.push(event);
       }
     };
     take(this.view.base, this.view.baseEnd);
@@ -646,7 +687,7 @@ class ViewIndex implements HistoryIndex {
     const event = this.view.eventWithId(id);
     return event &&
       this.#rank.has(streamOf(event)) &&
-      !filtered(this.filter, streamOf(event), event.type)
+      !filtered(this.filter, streamOf(event), event)
       ? event
       : undefined;
   }
@@ -680,8 +721,6 @@ export function streamHistory(
   if (streams instanceof EventLogView) return streams.history(order, filter);
   return order.flatMap((stream) => {
     const events = streams.get(stream) ?? [];
-    return filter
-      ? events.filter((e) => !filtered(filter, stream, e.type))
-      : events;
+    return filter ? events.filter((e) => !filtered(filter, stream, e)) : events;
   });
 }

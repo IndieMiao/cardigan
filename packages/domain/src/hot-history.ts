@@ -33,6 +33,139 @@ export const COLD_CARD_OMITTED_EVENT_TYPES: ReadonlySet<string> = new Set([
   "github_check_progress",
 ]);
 
+/**
+ * C-649 `lean` scope: cold cards also drop GitHub dispatch records (about a
+ * sixth of daily events). Their only command-state reader is a
+ * `github_run_completed` wait or resume target, whose dispatch cards are made
+ * hot through the full log index (`githubRunCards`).
+ */
+export const LEAN_COLD_CARD_OMITTED_EVENT_TYPES: ReadonlySet<string> = new Set([
+  ...COLD_CARD_OMITTED_EVENT_TYPES,
+  "github_check_dispatch",
+  "github_probe_dispatch",
+]);
+
+/**
+ * C-649 project-stream retention in the `lean` scope, by event type; any
+ * other type keeps its whole history. `latest` keeps the newest event per key
+ * (every reader takes the last match of exactly these fields); `none` keeps no
+ * event (no command-state reader, only the Store log, SQL or `listAfter`).
+ * Events that are still a live Run trigger or the subject of a live
+ * notification are always kept.
+ */
+export type ProjectStreamRetention =
+  | { readonly kind: "none" }
+  | { readonly kind: "latest"; readonly key: (event: Event) => string };
+export const PROJECT_STREAM_RETENTION: ReadonlyMap<
+  string,
+  ProjectStreamRetention
+> = new Map<string, ProjectStreamRetention>([
+  // apps/server worker-backup.ts lastSuccessfulWorkerBackup: findLast by
+  // actor, assignment, machine and branch.
+  [
+    "assignment_branch_backed_up",
+    {
+      kind: "latest",
+      key: (e) => {
+        const p = (e.payload ?? {}) as Record<string, unknown>;
+        return JSON.stringify([
+          e.actor.kind,
+          e.actor.project_id,
+          Array.isArray(e.payload),
+          p.assignment_id,
+          p.machine_id,
+          p.branch,
+        ]);
+      },
+    },
+  ],
+  // Audit rows: read by the reference-read audit through listAfter and by the
+  // activity page through SQL, never from the command state.
+  ["cross_card_read", { kind: "none" }],
+]);
+
+/**
+ * Ids of project-stream events the retention rules leave out. `typed` are
+ * the project stream's events of the retained types, in stream order.
+ */
+export function projectStreamDropped(
+  typed: readonly Event[],
+  protect: ReadonlySet<string>,
+): Set<string> {
+  const dropped = new Set<string>();
+  const latest = new Map<string, Event>();
+  for (const e of typed) {
+    if (e.card_id) continue;
+    const rule = PROJECT_STREAM_RETENTION.get(e.type);
+    if (!rule) continue;
+    if (rule.kind === "none") {
+      if (!protect.has(e.id)) dropped.add(e.id);
+      continue;
+    }
+    const key = `${e.type}\u0000${rule.key(e)}`;
+    const previous = latest.get(key);
+    if (previous && !protect.has(previous.id)) dropped.add(previous.id);
+    latest.set(key, e);
+  }
+  return dropped;
+}
+
+/** Positive GitHub run ids, as `github_run_completed` targets carry them. */
+const RUN_ID = /^[1-9][0-9]*$/u;
+const externalRunId = (e: Event) => {
+  const run = (e.payload as { externalRun?: { run_id?: unknown } } | null)
+    ?.externalRun;
+  return run === undefined ? undefined : String(run.run_id);
+};
+
+/**
+ * C-649: cards holding the dispatch records of these GitHub run ids (from
+ * the full log's type index), so `lean` keeps them whole. `dispatches` are
+ * every `github_check_dispatch` event of the project.
+ */
+export function githubRunCards(
+  dispatches: readonly Event[],
+  runIds: Iterable<string>,
+): Set<CardId> {
+  const wanted = new Set<string>();
+  for (const id of runIds) if (RUN_ID.test(id)) wanted.add(id);
+  const cards = new Set<CardId>();
+  if (!wanted.size) return cards;
+  for (const e of dispatches) {
+    const run = externalRunId(e);
+    if (e.card_id && run !== undefined && wanted.has(run)) cards.add(e.card_id);
+  }
+  return cards;
+}
+
+/** GitHub run ids that live blocker waits name, on any work item. */
+export function waitedGithubRuns(work_items: readonly WorkItem[]): string[] {
+  const runs: string[] = [];
+  for (const w of work_items) {
+    const c = w.reported_blocker?.resume_when;
+    if (c?.kind === "github_run_completed") runs.push(c.target_id);
+  }
+  return runs;
+}
+
+/** Strings among command parameters that look like GitHub run ids. */
+export function commandRunIds(values: readonly unknown[]): string[] {
+  const found: string[] = [];
+  const visit = (value: unknown, depth: number) => {
+    if (typeof value === "string") {
+      if (RUN_ID.test(value)) found.push(value);
+    } else if (typeof value === "number") {
+      if (Number.isSafeInteger(value) && value > 0) found.push(String(value));
+    } else if (depth < 4 && Array.isArray(value)) {
+      for (const v of value) visit(v, depth + 1);
+    } else if (depth < 4 && value && typeof value === "object") {
+      for (const v of Object.values(value)) visit(v, depth + 1);
+    }
+  };
+  for (const value of values) visit(value, 0);
+  return found;
+}
+
 const CLOSED: ReadonlySet<Card["status"]> = new Set(["done", "cancelled"]);
 const FINISHED_RUN: ReadonlySet<Run["status"]> = new Set([
   "completed",
@@ -125,6 +258,44 @@ export function hotCardIds(
   }
   for (const id of extra) add(id);
   return hot;
+}
+
+/**
+ * C-649 `lean` command state as a pure function of the whole-history state:
+ * hot cards (plus the dispatch cards of waited GitHub runs) keep whole
+ * streams, other cards drop the lean cold types, and the project stream
+ * follows `PROJECT_STREAM_RETENTION`. `protect` holds live trigger and
+ * notification event ids the host resolved.
+ */
+export function leanCommandEvents(
+  state: HotCardInput & { readonly events: readonly Event[] },
+  extra: Iterable<CardId | undefined> = [],
+  protect: ReadonlySet<string> = new Set(),
+): Event[] {
+  const triggers = new Set<string>(liveTriggerEventIds(state.runs));
+  const triggerCards = state.events
+    .filter((e) => triggers.has(e.id))
+    .map((e) => e.card_id);
+  const dispatches = state.events.filter(
+    (e) => e.type === "github_check_dispatch",
+  );
+  const hot = hotCardIds(state, [
+    ...triggerCards,
+    ...githubRunCards(dispatches, waitedGithubRuns(state.work_items)),
+    ...extra,
+  ]);
+  const keep = new Set([...protect, ...triggers]);
+  const dropped = projectStreamDropped(
+    state.events.filter(
+      (e) => !e.card_id && PROJECT_STREAM_RETENTION.has(e.type),
+    ),
+    keep,
+  );
+  return state.events.filter((e) =>
+    e.card_id
+      ? hot.has(e.card_id) || !LEAN_COLD_CARD_OMITTED_EVENT_TYPES.has(e.type)
+      : !dropped.has(e.id),
+  );
 }
 
 /** The kept part of one card stream; hot streams are returned unchanged. */

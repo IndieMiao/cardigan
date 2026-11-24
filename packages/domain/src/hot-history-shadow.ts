@@ -6,16 +6,31 @@ import {
   remindDecisionFollowups,
 } from "./commands/decision-followup.js";
 import { refreshCancelledHumanActions } from "./commands/human-action-lifecycle.js";
+import { mergeQueue } from "./commands/merge-batch.js";
 import { recordMergeCheckBlockers } from "./commands/merge-check-blockers.js";
 import { recordAutomaticMergeWaits } from "./commands/merge-observation.js";
+import { beginMergePush } from "./commands/merge-push.js";
 import { notices } from "./commands/notices.js";
 import { maintainPmCoordination } from "./commands/pm-coordination.js";
+import { pmRecoveryEligible } from "./commands/pm-recovery.js";
+import { projectPreferences } from "./commands/preferences.js";
 import { listNeedsYou, projectSnapshot } from "./commands/queries.js";
+import { deploymentAuditedVersion } from "./commands/standing-deployment.js";
+import { standingPmStallEvents } from "./commands/standing-pm-stall.js";
+import { stoppedByHuman } from "./commands/stop-state.js";
 import { resumeWorkWaits } from "./commands/work-waits.js";
+import {
+  categoryAuthorization,
+  categoryDelegated,
+} from "./decision-authorization.js";
 import type { Actor } from "./entities.js";
 import { extMessageItems } from "./ext-message.js";
 import { hostOpsPending, pendingHostOpsActions } from "./host-ops.js";
+import { mergeBatches } from "./merge-batch.js";
 import type { IdAllocator } from "./ports.js";
+import { delegationCategories } from "./preferences.js";
+import { remoteWorkerLosses } from "./remote-worker-loss.js";
+import { sessionMaintenanceBasis } from "./session-maintenance.js";
 
 /** One shadow comparison; `path` locates the first difference, never values. */
 export interface HotShadowCheck {
@@ -43,6 +58,32 @@ function shadowIds(): IdAllocator {
     nextAttachmentId: (project) =>
       `attachment-shadow-${next(`${project}:attachment`)}` as never,
   };
+}
+
+/** Distinct push destinations named by queued merge pushes (project stream). */
+function mergePushDestinations(state: CommandState) {
+  const seen = new Map<
+    string,
+    { target: string; branch: string; base_branch?: string }
+  >();
+  for (const e of state.events) {
+    if (e.card_id || e.type !== "merge_push_queued") continue;
+    const p = e.payload as {
+      target?: unknown;
+      branch?: unknown;
+      base_branch?: unknown;
+    } | null;
+    if (typeof p?.target !== "string" || typeof p.branch !== "string") continue;
+    const destination = {
+      target: p.target,
+      branch: p.branch,
+      ...(typeof p.base_branch === "string"
+        ? { base_branch: p.base_branch }
+        : {}),
+    };
+    seen.set(JSON.stringify(destination), destination);
+  }
+  return [...seen.values()];
 }
 
 /** First differing JSON path; values are never reported. */
@@ -152,6 +193,53 @@ export function compareHotState(
     [
       "host_ops_fences",
       (s) => s.assignments.map((a) => [a.id, hostOpsPending(s.events, a.id)]),
+    ],
+    // C-649: the categories the system-stream retention must not change.
+    ["project_preferences", (s) => projectPreferences(s)],
+    [
+      "delegation",
+      (s) =>
+        delegationCategories.map((c) => [
+          c,
+          categoryDelegated(projectPreferences(s), s.events, c),
+          categoryAuthorization(s.events, c)?.id,
+        ]),
+    ],
+    [
+      "deployment_audits",
+      (s) =>
+        s.roles.map((r) => [
+          r.role_id,
+          r.role_version,
+          deploymentAuditedVersion(s, r.role_id, r.role_version),
+        ]),
+    ],
+    [
+      "standing_runs",
+      (s) =>
+        s.assignments
+          .filter((a) => a.scope === "standing")
+          .map((a) => [
+            a.id,
+            pmRecoveryEligible(s, a),
+            stoppedByHuman(s.events, a.id),
+            standingPmStallEvents(s, a.id).map((e) => e.id),
+            sessionMaintenanceBasis(s, a),
+          ]),
+    ],
+    ["remote_worker_losses", (s) => remoteWorkerLosses(s.events)],
+    ["merge_queue", (s) => [mergeQueue(s), mergeBatches(s.events)]],
+    [
+      "merge_push",
+      (s) =>
+        mergePushDestinations(full).map((destination) =>
+          beginMergePush(
+            s,
+            system,
+            { ...destination, attempt_id: "shadow-attempt" },
+            ports(),
+          ),
+        ),
     ],
   ];
   return checks.map(([name, run]) => {

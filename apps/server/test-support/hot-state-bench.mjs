@@ -1,9 +1,9 @@
 /** C-639 hot command state: synthetic benchmark and shadow replay.
  *
  *   node test-support/hot-state-bench.mjs generate NEW_DIR [events-per-project] [system-share]
- *   node test-support/hot-state-bench.mjs bench DB full|hot [iterations]
- *   node test-support/hot-state-bench.mjs shadow DB
- *   node test-support/hot-state-bench.mjs background DB full|hot [seconds]
+ *   node test-support/hot-state-bench.mjs bench DB full|hot|lean [iterations]
+ *   node test-support/hot-state-bench.mjs shadow DB [hot|lean]
+ *   node test-support/hot-state-bench.mjs background DB full|hot|lean [seconds]
  *
  * `generate` only creates a new directory. `bench` and `shadow` open the given
  * database; for production replay pass a read-only COPY, never the live file:
@@ -18,14 +18,21 @@ import {
   compareHotState,
   hotCardIds,
   hotCommandEvents,
+  leanCommandEvents,
   listNeedsYou,
   postComment,
   projectSnapshot,
 } from "@cardigan/domain";
-import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
+import {
+  getCardTool,
+  getUpdatesTool,
+  loadCommandState,
+  persistEffect,
+} from "@cardigan/mcp-server";
 import { PROJECT_EVENT_STREAM, Store } from "@cardigan/store";
 import { Dispatcher } from "../dist/dispatch.js";
 import { MergeExecutor } from "../dist/merge-loop.js";
+import { lastSuccessfulWorkerBackup } from "../dist/worker-backup.js";
 import { seedScenarios } from "./synthetic-scenarios.mjs";
 
 const [mode, target, ...rest] = process.argv.slice(2);
@@ -181,9 +188,9 @@ const quantile = (values, q) => {
     : null;
 };
 
-function bench(db, scope, iterations = 20) {
-  if (!db || !["full", "hot"].includes(scope))
-    throw new Error("Expected DB full|hot");
+async function bench(db, scope, iterations = 20) {
+  if (!db || !["full", "hot", "lean"].includes(scope))
+    throw new Error("Expected DB full|hot|lean");
   const startedOpen = performance.now();
   const store = Store.open({ dbPath: db, migrate: false, commandState: scope });
   const projects = store.listProjects().map((p) => p.id);
@@ -201,20 +208,25 @@ function bench(db, scope, iterations = 20) {
   }
   const ready_ms = Math.round(performance.now() - startedOpen);
   const timings = {};
-  const time = (name, run) => {
+  const time = async (name, run) => {
     const t = performance.now();
-    const value = run();
+    const value = await run();
     timings[name] ??= [];
     timings[name].push(performance.now() - t);
     return value;
   };
+  // C-649: agent read tools through their MCP handlers, as an active work
+  // item Assignment on an open card (the synthetic seed has some per project).
+  const agents = new Map(
+    projects.map((project) => [project, agentContext(store, project)]),
+  );
   for (let i = 0; i < iterations; i++)
     for (const project of projects) {
       const card = store.uow.read((tx) =>
         tx.cards.list(project).find((c) => c.status !== "done"),
       );
       // A write command: state, reducer and persistence in one transaction.
-      time("post_comment", () =>
+      await time("post_comment", () =>
         store.uow.run((tx) => {
           const state = loadCommandState(tx, project, undefined, {
             targets: [card.id],
@@ -229,11 +241,24 @@ function bench(db, scope, iterations = 20) {
           persistEffect(tx, project, effect.value);
         }),
       );
-      const state = time("command_state", () =>
+      const state = await time("command_state", () =>
         store.uow.read((tx) => loadCommandState(tx, project)),
       );
-      time("list_needs_you", () => listNeedsYou(state, human(project), clock));
-      time("project_snapshot", () => projectSnapshot(state, human(project)));
+      await time("list_needs_you", () =>
+        listNeedsYou(state, human(project), clock),
+      );
+      await time("project_snapshot", () =>
+        projectSnapshot(state, human(project)),
+      );
+      const agent = agents.get(project);
+      if (agent) {
+        await time("get_card", () =>
+          getCardTool.handler({ card_id: agent.card }, agent.context),
+        );
+        await time("get_updates", () =>
+          getUpdatesTool.handler({ card_id: agent.card }, agent.context),
+        );
+      }
     }
   const memory = process.memoryUsage();
   store.close();
@@ -254,10 +279,53 @@ function bench(db, scope, iterations = 20) {
   });
 }
 
-function shadow(db) {
-  if (!db) throw new Error("Expected DB");
+/** An active work item Assignment on an open card, as an MCP tool context. */
+function agentContext(store, project) {
+  return store.uow.read((tx) => {
+    const open = new Set(
+      tx.cards
+        .list(project)
+        .filter((c) => !["done", "cancelled"].includes(c.status))
+        .map((c) => c.id),
+    );
+    const items = new Map(tx.work_items.list(project).map((w) => [w.id, w]));
+    const assignment = tx.assignments
+      .list(project)
+      .find(
+        (a) =>
+          a.status === "active" &&
+          a.scope === "work_item" &&
+          open.has(items.get(a.work_item_id)?.card_id),
+      );
+    const role =
+      assignment &&
+      tx.roles.list(project).find((r) => r.role_id === assignment.role_id);
+    if (!assignment || !role) return undefined;
+    return {
+      card: items.get(assignment.work_item_id).card_id,
+      context: {
+        store,
+        identity: {
+          actor: {
+            kind: "assignment",
+            project_id: project,
+            assignment_id: assignment.id,
+            role_id: assignment.role_id,
+          },
+          assignment,
+          role,
+          token: { role_version: assignment.role_version },
+        },
+      },
+    };
+  });
+}
+
+function shadow(db, scope = "hot") {
+  if (!db || !["hot", "lean"].includes(scope))
+    throw new Error("Expected DB [hot|lean]");
   const full = Store.open({ dbPath: db, migrate: false, commandState: "full" });
-  const hot = Store.open({ dbPath: db, migrate: false, commandState: "hot" });
+  const hot = Store.open({ dbPath: db, migrate: false, commandState: scope });
   const report = [];
   try {
     for (const { id: project } of full.listProjects()) {
@@ -265,13 +333,36 @@ function shadow(db) {
       const notified = hot.uow.read(
         (tx) => tx.hot_state_hints?.liveNotificationCards(project) ?? [],
       );
+      const notifiedEvents = hot.uow.read(
+        (tx) => tx.hot_state_hints?.liveNotificationEvents(project) ?? [],
+      );
       const after = hot.uow.read((tx) => loadCommandState(tx, project));
-      const expected = hotCommandEvents(before, notified);
+      // C-649: lean keeps the subjects of live notifications on the project stream.
+      const expected =
+        scope === "lean"
+          ? leanCommandEvents(before, notified, new Set(notifiedEvents))
+          : hotCommandEvents(before, notified);
       const hotCards = hotCardIds(before, notified).size;
       const sameEvents =
         expected.length === after.events.length &&
         expected.every((e, i) => e.id === after.events[i]?.id);
-      const checks = compareHotState(before, after, { now: NOW });
+      const checks = [
+        ...compareHotState(before, after, { now: NOW }),
+        // C-649: the host's reader of retained branch-backup records.
+        (() => {
+          const backups = (s) =>
+            JSON.stringify(
+              s.assignments.map((a) => [
+                a.id,
+                lastSuccessfulWorkerBackup(s, a),
+              ]),
+            );
+          return {
+            name: "worker_backups",
+            equal: backups(before) === backups(after),
+          };
+        })(),
+      ];
       report.push({
         project,
         events: { full: before.events.length, hot: after.events.length },
@@ -292,8 +383,8 @@ function shadow(db) {
 
 /** Idle background loops (no external IO) at production cadence: CPU, pauses, RSS. */
 async function background(db, scope, seconds = 60) {
-  if (!db || !["full", "hot"].includes(scope))
-    throw new Error("Expected DB full|hot");
+  if (!db || !["full", "hot", "lean"].includes(scope))
+    throw new Error("Expected DB full|hot|lean");
   const setup = Store.open({
     dbPath: db,
     migrate: false,
@@ -396,8 +487,8 @@ if (mode === "generate")
     rest[1] ? Number(rest[1]) : undefined,
   );
 else if (mode === "bench")
-  bench(target, rest[0], rest[1] ? Number(rest[1]) : undefined);
-else if (mode === "shadow") shadow(target);
+  await bench(target, rest[0], rest[1] ? Number(rest[1]) : undefined);
+else if (mode === "shadow") shadow(target, rest[0]);
 else if (mode === "background")
   await background(target, rest[0], rest[1] ? Number(rest[1]) : undefined);
 else throw new Error("Expected generate|bench|shadow|background");

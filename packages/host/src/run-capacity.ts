@@ -102,7 +102,9 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       deliveries: tx.deliveries.list(project.id),
       // C-639: in hot scope reuse the hot command history (same rule inputs).
       events:
-        tx.command_state_scope === "hot" && tx.events.listStreams
+        tx.command_state_scope !== "full" &&
+        tx.command_state_scope !== undefined &&
+        tx.events.listStreams
           ? loadCommandState(tx, project.id).events
           : tx.events.listStreams?.(project.id),
     };
@@ -380,7 +382,9 @@ export function runCapacitySnapshot(
     // C-230: with the cache, also reuse the result while the stream map and
     // card list are the same immutable snapshots (see `queueCache`).
     const hot =
-      tx.command_state_scope === "hot" && tx.events.listStreams
+      tx.command_state_scope !== "full" &&
+      tx.command_state_scope !== undefined &&
+      tx.events.listStreams
         ? loadCommandState(tx, project.id).events
         : undefined;
     const streams = tx.events.listStreams?.(project.id);
