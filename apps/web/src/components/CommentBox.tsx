@@ -30,6 +30,7 @@ import {
   insertAttachmentRef,
   numberPendingRefs,
   pendingToken,
+  toBase64,
   UPLOAD_ACCEPT,
   uploadFilename,
   uploadMime,
@@ -1214,13 +1215,6 @@ export function mentionsIn(body: string): string[] {
 }
 
 /** Canonical padded base64 of a pasted image (the API decodes it strictly). */
-export async function toBase64(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
 /** A drag carries files (not text or a link). */
 function hasFiles(transfer: DataTransfer | null): boolean {
   return Array.from(transfer?.types ?? []).includes("Files");

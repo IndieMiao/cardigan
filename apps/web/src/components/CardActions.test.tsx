@@ -771,6 +771,11 @@ test("a lost create response reuses its key after reopening the child form and r
     .mockResolvedValue({ id: "C-9" });
   const client = fakeClient({
     createCard,
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: false,
+      human_card_templates: ["story", "dev"],
+    }),
     templates: async () => ({
       templates: [
         {
@@ -816,7 +821,10 @@ test("a lost create response reuses its key after reopening the child form and r
   }
   await submit();
   await screen.findByRole("alert");
+  // C-684: the typed content asks before it is discarded.
   fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  fireEvent.click(await screen.findByRole("button", { name: "放弃修改" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   await submit();
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(createCard.mock.calls[1]).toEqual(createCard.mock.calls[0]);

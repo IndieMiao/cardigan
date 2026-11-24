@@ -133,6 +133,11 @@ export interface StoryChildChoice {
   action: "cancel" | "detach";
   ids: readonly string[];
 }
+export interface CreatedCard {
+  readonly id: string;
+  /** Older servers omit it; files then cannot be attached. */
+  readonly entry_id?: string | null;
+}
 export interface CreateCardInput {
   title: string;
   goal: string;
@@ -1642,6 +1647,8 @@ export interface PreferencesView extends SystemRulesPreferences {
   readonly review_max_rounds_ceiling?: number;
   /** Lanes the human folded (true) or unfolded (false); missing = default. */
   readonly board_collapsed_lanes?: Readonly<Record<string, boolean>>;
+  /** C-684: templates people may open cards from; older servers omit it. */
+  readonly human_card_templates?: readonly string[];
 }
 
 export type RoleKind = "produce" | "verify" | "standing";
@@ -2309,6 +2316,12 @@ export interface CardiganClient {
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
+  /** C-684: open or close one template to people; only that entry is sent. */
+  setHumanCardTemplates(
+    projectId: string,
+    changes: Readonly<Record<string, boolean>>,
+    idempotencyKey: string,
+  ): Promise<void>;
   setCrossCardRead(
     projectId: string,
     enabled: boolean,
@@ -2401,11 +2414,12 @@ export interface CardiganClient {
       | { hold: Pick<CardHold, "reason" | "resume_condition"> | null },
     idempotencyKey?: string,
   ): Promise<void>;
+  /** `entry_id` is the creation timeline entry the dialog attaches files to. */
   createCard(
     projectId: string,
     input: CreateCardInput,
     key: string,
-  ): Promise<{ id: string }>;
+  ): Promise<CreatedCard>;
   cancelCard(
     projectId: string,
     cardId: string,
@@ -3081,6 +3095,18 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { decision_delegation: { [category]: enabled } },
+      idempotencyKey,
+    );
+  }
+  async setHumanCardTemplates(
+    projectId: string,
+    changes: Readonly<Record<string, boolean>>,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { human_card_templates: changes },
       idempotencyKey,
     );
   }
@@ -3782,7 +3808,7 @@ export class HttpCardiganClient implements CardiganClient {
     projectId: string,
     input: CreateCardInput,
     idempotencyKey: string,
-  ): Promise<{ id: string }> {
+  ): Promise<CreatedCard> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/cards`,
       { method: "POST", body: JSON.stringify(input), idempotencyKey },

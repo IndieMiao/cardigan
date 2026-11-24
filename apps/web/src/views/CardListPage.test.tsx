@@ -447,10 +447,30 @@ test("an empty project says so, and active filters have their own empty text", a
   }));
   render(<CardListPage client={api} projectId="p-1" view="list" />);
   expect(await screen.findByText("没有卡片")).toBeTruthy();
+  // C-684: the header entry is the only one; the empty state is just the fact.
+  expect(screen.getAllByRole("button", { name: "新建需求" })).toHaveLength(1);
   fireEvent.click(screen.getByRole("button", { name: "状态：全部" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "进行中" }));
   expect(await screen.findByText("没有匹配的卡片")).toBeTruthy();
+  expect(screen.getAllByRole("button", { name: "新建需求" })).toHaveLength(1);
 });
+
+test.each(["list", "board"] as const)(
+  "C-684: the %s keeps a standing 新建需求 entry with cards and with filters",
+  async (view) => {
+    const api = client(async () => page());
+    render(<CardListPage client={api} projectId="p-1" view={view} />);
+    const entry = await screen.findByRole("button", { name: "新建需求" });
+    expect(entry.closest(".ui-page-header")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
+      target: { value: "no such card" },
+    });
+    await waitFor(() =>
+      expect(new URL(window.location.href).hash).toContain("q="),
+    );
+    expect(screen.getByRole("button", { name: "新建需求" })).toBe(entry);
+  },
+);
 
 test("U6a only the search box takes the remaining width of the filter row", async () => {
   const api = client(async () => page());

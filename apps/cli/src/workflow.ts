@@ -15,8 +15,8 @@ import {
   assignOrDefer,
   autoMergeSchedule,
   completeHumanAction,
-  createCard,
   createHostOpsAssignment,
+  createHumanCard,
   createWorkItem,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   getWorkItem,
@@ -95,6 +95,7 @@ const USAGE = [
   "    card create 可用 --work-item-requirements <JSON> 按模板 key 追加机器要求；能力版本只接受无版本、=、>=。",
   "  cardigan card create [--template <id>] [--parent-card <C-id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
   "    界面或设计模板需加 --state-and-save 无写入，或传含 save_timing、leave_behavior、failure_feedback、consistency 的 JSON 对象。",
+  "    人（不带 Token）只能用项目放开的模板，默认只有需求卡（story），不写 --template 时即为需求卡；放开见 cardigan preference set human-card-templates。",
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--deadline <YYYY-MM-DD>|none] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "    create/update 支持 --is-ui-framework on|off、--depends-on-cards C-1,C-2（none 清空）、--wait-for-dependencies on|off、--early-start on|off --dependency-reason <理由>。",
@@ -783,7 +784,6 @@ async function cardCreate(args: readonly string[], io: CliIo): Promise<number> {
       : parseId("card", required(parsed.flags, "parent-card"));
   if (parent && !parent.ok)
     throw new CliError("--parent-card 须为需求卡编号", EXIT.usage, [USAGE]);
-  const template = optional(parsed.flags, "template") ?? "dev";
   const acceptance = list(optional(parsed.flags, "acceptance") ?? "");
   const repo = optional(parsed.flags, "repo");
   const base =
@@ -796,13 +796,18 @@ async function cardCreate(args: readonly string[], io: CliIo): Promise<number> {
       io,
       optional(parsed.flags, "project"),
     );
+    const actor = resolveActor(io, project_id, store);
+    // C-684: a person opens a story by default; Agents keep the dev default.
+    const template =
+      optional(parsed.flags, "template") ??
+      (actor.kind === "human" ? "story" : "dev");
     const card = runCommand(store, {
       operation: "创建卡片",
       target: required(parsed.flags, "title"),
       project_id,
-      actor: resolveActor(io, project_id, store),
+      actor,
       reduce: (state, actor, ports) =>
-        createCard(
+        createHumanCard(
           state,
           actor,
           {

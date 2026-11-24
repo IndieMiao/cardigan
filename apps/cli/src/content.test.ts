@@ -20,7 +20,10 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { humanActor, runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
-import { registerTemplateRoles } from "./template-fixtures.js";
+import {
+  openHumanCardTemplates,
+  registerTemplateRoles,
+} from "./template-fixtures.js";
 
 const TEST_PLAIN_SUMMARY = {
   changed: "测试用的改动说明",
@@ -42,6 +45,7 @@ async function createCard(id = project) {
   const setup = Store.open({ dataDir });
   try {
     registerTemplateRoles(setup, id);
+    openHumanCardTemplates(setup, id);
   } finally {
     setup.close();
   }

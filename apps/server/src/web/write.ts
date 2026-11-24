@@ -15,7 +15,7 @@ import {
   confirmSourceMergeUnrelated,
   confirmStoryProposal,
   copyRole,
-  createCard,
+  createHumanCard,
   createRole,
   DEFAULT_MAX_RUN_LIMIT,
   type DomainError,
@@ -782,7 +782,8 @@ export async function serveWrite(
         const project = template?.requires_repo
           ? c.store.getProject(c.project_id)
           : undefined;
-        return createCard(
+        // C-684: the person may only use templates the project opened to people.
+        const result = createHumanCard(
           state,
           actor,
           {
@@ -803,9 +804,26 @@ export async function serveWrite(
           },
           ports,
         );
+        if (!result.ok) return result;
+        // The creation entry, so the dialog can attach its files to it.
+        const created = result.value.events.find(
+          (e) =>
+            e.type === "card_created" && e.card_id === result.value.data.id,
+        );
+        const entry = result.value.timeline.find(
+          (e) =>
+            e.card_id === result.value.data.id && e.event_seq === created?.seq,
+        );
+        return {
+          ok: true as const,
+          value: {
+            ...result.value,
+            data: { id: result.value.data.id, entry_id: entry?.id ?? null },
+          },
+        };
       },
     );
-    sendJson(c.res, 201, { id: card.id });
+    sendJson(c.res, 201, card);
     return true;
   }
   if (rest === "/card-templates" || rest === "/card-templates/validate") {
@@ -1012,6 +1030,9 @@ export async function serveWrite(
           board_collapsed_lanes: z
             .record(z.string().max(64), z.boolean().nullable())
             .optional(),
+          human_card_templates: z
+            .record(z.string().max(64), z.boolean())
+            .optional(),
         })
         .strict(),
       body,
@@ -1092,6 +1113,9 @@ export async function serveWrite(
             : {}),
           ...(input.board_collapsed_lanes !== undefined
             ? { board_collapsed_lanes: input.board_collapsed_lanes }
+            : {}),
+          ...(input.human_card_templates !== undefined
+            ? { human_card_templates: input.human_card_templates }
             : {}),
           ...(input.review_max_rounds !== undefined
             ? { review_max_rounds: input.review_max_rounds }
