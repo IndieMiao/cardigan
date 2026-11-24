@@ -233,6 +233,20 @@ export function fakeClient(
       waiting: { human: [], agent: [] },
       recent_deliveries: [],
     }),
+    releaseNotes: async () => ({ entries: [] }),
+    writeReleaseNote: async (_project, input) => ({
+      note: {
+        version: input.version,
+        version_code: null,
+        decision_id: null,
+        body: input.body,
+        author: "human",
+        created_at: NOW,
+        updated_at: NOW,
+        revision: input.base_revision + 1,
+      },
+      changed: true,
+    }),
     executionCapacity: async () => ({
       agents: [],
       merge_checks: [],

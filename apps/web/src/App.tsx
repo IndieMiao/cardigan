@@ -28,6 +28,7 @@ import {
   ExecutionPage,
   HelpPage,
   NeedsYouPage,
+  ReleaseNotesPage,
   SettingsPage,
   SharedFilesPage,
   SnapshotPage,
@@ -437,6 +438,14 @@ function Workbench({
               )}
               {selected && route?.kind === "activity" && (
                 <ActivityPage
+                  key={selected.id}
+                  client={client}
+                  projectId={selected.id}
+                  revision={live.revision}
+                />
+              )}
+              {selected && route?.kind === "release-notes" && (
+                <ReleaseNotesPage
                   key={selected.id}
                   client={client}
                   projectId={selected.id}

@@ -54,6 +54,7 @@ const iconPaths = {
       <path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4M12 16h.01" />
     </>
   ),
+  releaseNotes: <path d="M6 3h9l4 4v14H6V3ZM14 3v5h5M9 12h6M9 16h6" />,
   folder: (
     <path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6Z" />
   ),
@@ -84,6 +85,7 @@ type ViewKind =
   | "activity"
   | "decision-history"
   | "snapshot"
+  | "release-notes"
   | "settings"
   | "help"
   | "shared-files";
@@ -93,6 +95,8 @@ const observeLinks: readonly (readonly [ViewKind, string, NavIconName])[] = [
   ["activity", "项目动态", "activity"],
   ["decision-history", "拍板记录", "decisions"],
   ["snapshot", "项目快照", "snapshot"],
+  // C-713: each project's release notes, one page per project.
+  ["release-notes", "发版说明", "releaseNotes"],
 ];
 
 export interface SidebarNavProps {
