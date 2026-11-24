@@ -9,10 +9,10 @@
 新设备可以不手敲第 2 节的命令：
 
 1. 控制主机配置目录里要有 `worker-key` 及其公钥 `worker-key.pub`（Ed25519，见第 1 节）。
-2. 在设备上用普通账号运行 `curl -fsS https://<Workbench>/pair-device.py | python3 - https://<Workbench>`，在 Workbench 输入显示的配对码，核对并点“确认写入配置”。
+2. 在设备上用普通账号运行 `curl -fsS https://<Workbench>/pair-device.py | python3 - https://<Workbench>`，在 Workbench 输入显示的配对码，核对并点“确认写入配置”。命令同时显示控制主机 `worker-known-hosts` 需要的一行 `<机器编号> ssh-ed25519 <公钥>`，核对后加入（见第 1 节）；本机没有 SSH 服务或在用电池时只给提示。
 3. 设备端随后取得为这份配置生成的一次性初始化脚本，先列出将做的操作，输入 `yes` 后用 `sudo python3 -IB -` 从标准输入运行（脚本不落盘），跑完把结果报给 Workbench，向导自动复查。
 
-初始化脚本只做以下操作（HOME 为 `/home/cg_<项目>`，工作根为 `/srv/cardigan-workers/<项目>`；根分区只读的设备（如 SteamOS）工作根改为 `/home/cardigan-workers/<项目>`，工具也装在 `/home` 下。）：
+初始化脚本只做以下操作（HOME 为 `/home/cg_<项目>`，工作根为 `/srv/cardigan-workers/<项目>`；根分区只读的设备（如 SteamOS）工作根改为 `/home/cardigan-workers/<项目>`，发行文件和工具也放在 `/home` 下，见 [SteamOS 设备接入](steamos-worker.md)。）：
 
 - 建专用组和账号（向导给定的 UID/GID，无密码、shell `/bin/sh`、不加入其它组）；
 - 建 HOME、工作根及固定的私有目录，属主和权限同第 2 节；

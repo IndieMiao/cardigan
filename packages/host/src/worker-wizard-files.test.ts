@@ -16,6 +16,7 @@ import { Document, stringify } from "yaml";
 import { CpuProfileDirectory } from "./cpu-profile-files.js";
 import { loadRuntimeWorkers } from "./runtime-workers-config.js";
 import { onboardWorker } from "./worker-onboarding.js";
+import { workerNextAction } from "./worker-onboarding-probes.js";
 import { commitWorkerFile, planWorkerFile } from "./worker-wizard-files.js";
 import { workerWizardForm } from "./worker-wizard-form.js";
 
@@ -110,6 +111,44 @@ test("C-706: a read-only-root Linux device keeps its work root under /home", () 
       }),
     ).toThrow("worker_form_invalid");
 });
+test.each([
+  ["linux", undefined, "/opt/cardigan/deploy"],
+  ["macos", undefined, "/opt/cardigan/deploy"],
+  ["linux", "home", "/home/cardigan-release/deploy"],
+] as const)(
+  "C-709: %s layout=%s target commands read the release from %s",
+  (os, layout, deploy) => {
+    const d = workerWizardForm("/private/config", data, "example", {
+      ...form,
+      os,
+      arch: "arm64",
+      ...(layout ? { layout } : {}),
+    });
+    const other =
+      deploy === "/opt/cardigan/deploy"
+        ? "/home/cardigan-release"
+        : "/opt/cardigan";
+    const helpers = workerNextAction("helpers", d.config);
+    for (const text of [
+      d.commands.directories,
+      d.commands.helpers,
+      os === "linux" ? d.commands.tools : deploy,
+      helpers,
+    ]) {
+      expect(text).toContain(deploy);
+      expect(text).not.toContain(other);
+    }
+    expect(workerNextAction("directories", d.config)).toBe(
+      d.commands.directories,
+    );
+    // A read-only root cannot take a global npm install.
+    const tools = workerNextAction("tools", d.config);
+    if (layout) {
+      expect(tools).toContain("docs/steamos-worker.md");
+      expect(tools).not.toContain("npm install --global");
+    } else if (os === "linux") expect(tools).toContain("npm install --global");
+  },
+);
 test.runIf(process.platform === "linux")(
   "private CAS: changed source, unsafe mode/link or staging failure leaves exact original; successful replace keeps private backup",
   () => {

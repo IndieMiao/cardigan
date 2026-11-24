@@ -72,13 +72,13 @@ const base = (paired: boolean): WorkerWizardView => ({
     account:
       "sudo groupadd --gid 2000 cg_p_1 && sudo useradd --uid 2000 --gid 2000 --home-dir /home/cg_p_1 --no-create-home --shell /bin/sh cg_p_1",
     directories:
-      "sudo /usr/bin/python3 /opt/cardigan/deploy/install-linux-worker.py --config /etc/cardigan/worker.json --check",
+      "sudo /usr/bin/python3 /home/cardigan-release/deploy/install-linux-worker.py --config /etc/cardigan/worker.json --check",
     tools:
       "sudo /usr/bin/python3 -I - <<'PY'\nimport os, pathlib, platform, runpy\n…\nPY",
     helpers:
-      "sudo install -o root -g cg_p_1 -m 0750 /opt/cardigan/deploy/worker-files.py /home/cardigan-workers/p-1/libexec/worker-files.py",
+      "sudo install -o root -g cg_p_1 -m 0750 /home/cardigan-release/deploy/worker-files.py /home/cardigan-workers/p-1/libexec/worker-files.py",
   },
-  command_guide: "docs/linux-worker.md",
+  command_guide: "docs/steamos-worker.md",
   command_prerequisites:
     "仅在目标机管理员终端执行。新建账号前核对名称和数字身份均空闲；按操作手册准备受保护的安装包、目录、认领标记和本机安装配置。已有冲突请停下核对。",
   ...(paired
