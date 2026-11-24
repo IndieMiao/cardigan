@@ -81,9 +81,15 @@
     --ui-selected-text: #262626;
     --ui-focus: #757575;
     --ui-border-hover: #bcbcbc;
-    /* C-668: a faint overlay line in --ui-border-hover keeps the darker of
-       itself and what lies under it, so text it crosses stays intact. */
+    /* C-668: an overlay line keeps the darker (light theme) or lighter
+       (dark theme) of itself and what lies under it, so text it crosses
+       stays intact. */
     --ui-faint-line-blend: darken;
+    /* C-689: board dependency lines (cyan, with a soft glow) and the dots
+       flowing along them, brighter than the line with a halo. */
+    --ui-dependency-line: #3d9caf;
+    --ui-dependency-dot: #0c8aa3;
+    --ui-dependency-glow: #29c4dd;
     --radius: var(--ui-panel-radius);
     --id-card-fg: #123a8e;
     --id-card-bg: #e3edff;
@@ -155,6 +161,9 @@
       --ui-focus: #858585;
       --ui-border-hover: #505050;
       --ui-faint-line-blend: lighten;
+      --ui-dependency-line: #79b8c2;
+      --ui-dependency-dot: #c8f9ff;
+      --ui-dependency-glow: #3fdcf3;
       --id-card-fg: #9ab8f0;
       --id-card-bg: #202c43;
       --id-work-item-fg: #d1a4ef;
