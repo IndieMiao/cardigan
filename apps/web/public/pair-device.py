@@ -9,13 +9,21 @@ It reports this device's hostname, system, CPU architecture, tailnet address
 and a free numeric account id to the Workbench, then shows a one-time pairing
 code and a QR code of the confirmation link. The code is valid for ten
 minutes and works once; the owner confirms it in the Workbench, which only
-opens a draft of the add-worker wizard. Nothing here needs sudo or changes
-this device.
+opens a draft of the add-worker wizard. Pairing itself needs no sudo and
+changes nothing on this device.
+
+C-706: after the owner confirms the draft's configuration, this fetches the
+one-time initialisation script generated for it, lists what the script will
+do, asks for "yes" and only then runs it with `sudo python3 -IB -` from
+standard input, so the script is never written to disk. The result is
+reported to the Workbench, which starts the wizard's recheck. `--no-init`
+stops after the code is confirmed, as before.
 """
 
 import argparse
 import grp
 import json
+import os
 import platform
 import pwd
 import re
@@ -141,28 +149,119 @@ def device_facts(address):
     system = system_name()
     if system:
         facts["system"] = system
+    try:
+        # SteamOS and similar systems mount / read-only; the work root then
+        # goes under /home.
+        if os_name == "linux" and os.statvfs("/").f_flag & os.ST_RDONLY:
+            facts["root_readonly"] = True
+    except OSError:
+        pass
     return facts
 
 
-def post(origin, path, body):
-    request = urllib.request.Request(
+class Rejected(Exception):
+    def __init__(self, status, code, message):
+        super().__init__(message)
+        self.status, self.code, self.message = status, code, message
+
+
+def request(origin, path, body):
+    """POST JSON; a Workbench error becomes `Rejected`, no connection exits."""
+    req = urllib.request.Request(
         origin + path,
         data=json.dumps(body).encode("utf-8"),
         method="POST",
         headers={"Content-Type": "application/json", "Origin": origin},
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(req, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         try:
             detail = json.loads(error.read().decode("utf-8"))["error"]
-            message = "%s（%s）" % (detail.get("message"), detail.get("code"))
+            raise Rejected(error.code, detail.get("code"), "%s（%s）" % (detail.get("message"), detail.get("code")))
         except (ValueError, KeyError, TypeError, AttributeError):
-            message = "HTTP %s" % error.code
-        fail("Workbench 拒绝了请求：%s" % message)
+            raise Rejected(error.code, None, "HTTP %s" % error.code)
     except (urllib.error.URLError, OSError) as error:
         fail("连不上 Workbench：%s" % getattr(error, "reason", error))
+
+
+def post(origin, path, body):
+    try:
+        return request(origin, path, body)
+    except Rejected as error:
+        fail("Workbench 拒绝了请求：%s" % error.message)
+
+
+def confirm():
+    try:
+        with open("/dev/tty", "r+", encoding="utf-8") as tty:
+            tty.write("确认在本机用 sudo 执行以上操作？输入 yes 继续：")
+            tty.flush()
+            return tty.readline().strip().lower() == "yes"
+    except OSError:
+        print("没有可用的终端来确认；核对上面的清单后可加 --yes 重新配对。", file=sys.stderr)
+        return False
+
+
+def initialise(origin, token, args):
+    """C-706: fetch, show, confirm, run with sudo from stdin, report."""
+    print("请在 Workbench 向导里核对并确认写入配置；确认后本机继续初始化……")
+    sys.stdout.flush()
+    shown = None
+    script = None
+    while script is None:
+        try:
+            state = request(origin, "/api/device-pairings/status", {"device_token": token})
+        except Rejected:
+            print("配对已失效，请重新运行本命令。", file=sys.stderr)
+            return 1
+        init = state.get("init")
+        if init == "succeeded":
+            print("本机已完成初始化。")
+            return 0
+        if init == "unavailable":
+            print("向导草稿已取消或过期，请重新运行本命令。", file=sys.stderr)
+            return 1
+        if init == "ready":
+            try:
+                script = request(origin, "/api/device-pairings/init-script", {"device_token": token})["script"]
+                break
+            except Rejected as error:
+                if error.status == 410:
+                    print("向导草稿已取消或过期，请重新运行本命令。", file=sys.stderr)
+                    return 1
+                if error.message != shown:
+                    print("暂时取不到初始化脚本：%s" % error.message, file=sys.stderr)
+                    shown = error.message
+        time.sleep(POLL_SECONDS)
+    data = script.encode("utf-8")
+    python = args.python or ("/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable)
+    listing = subprocess.run([python, "-IB", "-", "--list"], input=data, stdout=subprocess.PIPE)
+    if listing.returncode != 0:
+        print("初始化脚本无法读取，请重新运行本命令。", file=sys.stderr)
+        return 1
+    print("初始化脚本将在本机做以下操作（已有账号或文件冲突时停下，不做改动）：")
+    print(listing.stdout.decode("utf-8", "replace").rstrip())
+    sys.stdout.flush()
+    if not args.yes and not confirm():
+        print("已取消，本机未做改动。", file=sys.stderr)
+        return 1
+    result = subprocess.run([args.sudo, python, "-IB", "-"], input=data)
+    ok = result.returncode == 0
+    try:
+        reply = request(origin, "/api/device-pairings/initialized", {"device_token": token, "ok": ok})
+    except Rejected as error:
+        print("未能通知 Workbench：%s。请在向导里点“继续检查”。" % error.message, file=sys.stderr)
+        return 0 if ok else 1
+    if not ok:
+        print("初始化未完成（退出码 %d），已告知 Workbench。按上面的提示处理后重新配对。" % result.returncode, file=sys.stderr)
+        return 1
+    if reply.get("recheck") == "started":
+        print("初始化完成，已通知 Workbench 开始复查。")
+    else:
+        print("初始化完成，已通知 Workbench。请在向导里点“继续检查”。")
+    return 0
 
 
 def main(argv):
@@ -176,6 +275,14 @@ def main(argv):
     parser.add_argument(
         "--no-wait", action="store_true", help="显示配对码后立即退出，不等待确认"
     )
+    parser.add_argument(
+        "--no-init", action="store_true", help="确认配对后退出，不做本机初始化"
+    )
+    parser.add_argument(
+        "--yes", action="store_true", help="列出初始化操作后不再询问，直接用 sudo 运行"
+    )
+    parser.add_argument("--sudo", default="sudo", help=argparse.SUPPRESS)
+    parser.add_argument("--python", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     origin = origin_of(args.workbench)
     address = args.address or tailnet_address(args.tailscale)
@@ -203,8 +310,11 @@ def main(argv):
             time.sleep(POLL_SECONDS)
             state = post(origin, "/api/device-pairings/status", {"device_token": token})
             if state.get("status") == "claimed":
-                print("已在 Workbench 确认。请回到 Workbench 的“添加 worker”向导继续预览和确认。")
-                return 0
+                print("已在 Workbench 确认。")
+                if args.no_init or "init" not in state:
+                    print("请回到 Workbench 的“添加 worker”向导继续预览和确认。")
+                    return 0
+                return initialise(origin, token, args)
             if state.get("status") == "expired":
                 print("配对码已过期，请重新运行本命令。", file=sys.stderr)
                 return 1

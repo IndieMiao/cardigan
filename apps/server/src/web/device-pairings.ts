@@ -24,12 +24,19 @@ import { encodeQr, qrTerminalRows } from "./qr.js";
  * Codes and tokens live only in this process and only as SHA-256 digests;
  * they travel in request bodies and the URL fragment, never in a path, query,
  * log line, event or timeline entry. A restart forgets every pairing.
+ *
+ * C-706: once claimed, the device keeps its token for `PAIRING_INIT_WINDOW_MS`
+ * to fetch the one-time initialisation script of its wizard draft (after the
+ * owner confirmed it) and to report the result, which triggers the wizard's
+ * recheck. The token is never part of the script.
  */
 
 export const PAIRING_TTL_MS = 10 * 60_000;
 /** How long a used or expired code is still recognised as such. */
 export const PAIRING_RETENTION_MS = 30 * 60_000;
 export const PAIRING_MAX_PENDING = 16;
+/** How long after the claim the device may fetch its script and report. */
+export const PAIRING_INIT_WINDOW_MS = 60 * 60_000;
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 const CODE = new RegExp(`^[${ALPHABET}]{8}$`, "u");
 
@@ -42,6 +49,17 @@ export interface PairingDevice {
   /** A numeric id free as both user and group id on the device. */
   readonly free_id: number;
   readonly system?: string;
+  /** C-706: `/` is mounted read-only (SteamOS); the work root goes to /home. */
+  readonly root_readonly?: boolean;
+}
+/** C-706: what the wizard says about a claimed device's initialisation. */
+export type DeviceInitState = "waiting" | "ready" | "succeeded" | "unavailable";
+export interface DeviceInitHooks {
+  state(wizard: string): DeviceInitState;
+  /** The script; throws an `HttpRejection` when it cannot be generated. */
+  script(wizard: string): string;
+  /** Records the device's report; whether a wizard recheck started. */
+  completed(wizard: string, ok: boolean): "started" | "skipped";
 }
 export interface Pairing {
   /** Random id for audit records; unrelated to the code. */
@@ -54,6 +72,9 @@ export interface Pairing {
 interface Entry extends Pairing {
   readonly code: string;
   readonly token: string;
+  /** The wizard draft it became, and when. */
+  wizard?: string;
+  claimed?: number;
 }
 
 const digest = (value: string) =>
@@ -65,9 +86,17 @@ export function parseDevice(value: unknown): PairingDevice {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw invalidDevice();
   const v = value as Record<string, unknown>;
-  const keys = ["hostname", "os", "arch", "address", "free_id", "system"];
+  const keys = [
+    "hostname",
+    "os",
+    "arch",
+    "address",
+    "free_id",
+    "system",
+    "root_readonly",
+  ];
   if (Object.keys(v).some((k) => !keys.includes(k))) throw invalidDevice();
-  const { hostname, os, arch, address, free_id, system } = v;
+  const { hostname, os, arch, address, free_id, system, root_readonly } = v;
   if (
     typeof hostname !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/u.test(hostname) ||
@@ -83,7 +112,8 @@ export function parseDevice(value: unknown): PairingDevice {
       (typeof system !== "string" ||
         !system.trim() ||
         system.length > 80 ||
-        /\p{C}/u.test(system)))
+        /\p{C}/u.test(system))) ||
+    (root_readonly !== undefined && typeof root_readonly !== "boolean")
   )
     throw invalidDevice();
   return {
@@ -93,6 +123,7 @@ export function parseDevice(value: unknown): PairingDevice {
     address,
     free_id,
     ...(system === undefined ? {} : { system: system.trim() }),
+    ...(root_readonly === true ? { root_readonly } : {}),
   };
 }
 /** `ABCD-EFGH` style input to the stored form, or undefined when malformed. */
@@ -108,6 +139,7 @@ export class DevicePairings {
   private readonly byToken = new Map<string, Entry>();
   /** Wrong codes per member, with the login lockout rules. */
   private readonly guesses = new LoginLimiter();
+  private hooks: DeviceInitHooks | undefined;
   constructor(
     private readonly clock: Clock,
     private readonly enabled: boolean,
@@ -115,9 +147,16 @@ export class DevicePairings {
   private now() {
     return Date.parse(this.clock.now());
   }
+  /** C-706: the wizard answers for claimed devices. */
+  attach(hooks: DeviceInitHooks) {
+    this.hooks = hooks;
+  }
   private prune(now: number) {
     for (const [key, e] of this.byCode)
-      if (e.created + PAIRING_RETENTION_MS <= now) {
+      if (
+        e.created + PAIRING_RETENTION_MS <= now &&
+        (e.claimed === undefined || e.claimed + PAIRING_INIT_WINDOW_MS <= now)
+      ) {
         this.byCode.delete(key);
         this.byToken.delete(e.token);
       }
@@ -190,7 +229,22 @@ export class DevicePairings {
             ? "expired"
             : "pending",
       expires_at: new Date(entry.expires).toISOString(),
+      ...(entry.state === "claimed" && entry.wizard && this.hooks
+        ? { init: this.hooks.state(entry.wizard) }
+        : {}),
     };
+  }
+  /** The claimed entry for a device token, with its wizard. */
+  private claimedBy(token: unknown) {
+    this.prune(this.now());
+    const entry =
+      typeof token === "string" && token.length <= 128
+        ? this.byToken.get(digest(token))
+        : undefined;
+    if (!entry) throw new HttpRejection(404, "pairing_not_found", "没有此配对");
+    if (entry.state !== "claimed" || !entry.wizard || !this.hooks)
+      throw new HttpRejection(409, "device_init_not_ready", "尚未确认配对");
+    return { wizard: entry.wizard, hooks: this.hooks };
   }
 
   /**
@@ -224,15 +278,17 @@ export class DevicePairings {
     this.guesses.recordSuccess(key);
     return entry;
   }
-  claim(pairing: Pairing) {
-    if (pairing.state !== "pending" || pairing.expires <= this.now())
+  claim(pairing: Pairing, wizard: string) {
+    const now = this.now();
+    if (pairing.state !== "pending" || pairing.expires <= now)
       throw new HttpRejection(409, "pairing_code_used", "配对码已使用");
     pairing.state = "claimed";
+    Object.assign(pairing as Entry, { wizard, claimed: now });
   }
 
-  /** `POST /api/device-pairings[/status]`, called by the device itself. */
+  /** `POST /api/device-pairings[/status|/init-script|/initialized]`, called by the device itself. */
   async serveDevice(req: IncomingMessage, res: ServerResponse, rest: string) {
-    if (rest !== "" && rest !== "/status")
+    if (!["", "/status", "/init-script", "/initialized"].includes(rest))
       throw new HttpRejection(404, "not_found", "not found");
     if (req.method !== "POST") methodNotAllowed(["POST"]);
     if (!this.enabled)
@@ -242,6 +298,26 @@ export class DevicePairings {
       if (Object.keys(body).some((k) => k !== "device_token"))
         throw invalidDevice();
       return sendJson(res, 200, this.status(body.device_token));
+    }
+    if (rest === "/init-script") {
+      if (Object.keys(body).some((k) => k !== "device_token"))
+        throw invalidDevice();
+      const { wizard, hooks } = this.claimedBy(body.device_token);
+      return sendJson(
+        res,
+        200,
+        { script: hooks.script(wizard) },
+        { "Cache-Control": "no-store" },
+      );
+    }
+    if (rest === "/initialized") {
+      if (
+        Object.keys(body).some((k) => k !== "device_token" && k !== "ok") ||
+        typeof body.ok !== "boolean"
+      )
+        throw invalidDevice();
+      const { wizard, hooks } = this.claimedBy(body.device_token);
+      return sendJson(res, 200, { recheck: hooks.completed(wizard, body.ok) });
     }
     if (Object.keys(body).some((k) => k !== "device")) throw invalidDevice();
     // `requireOrigin` already accepted it: the address the device used.
@@ -262,6 +338,9 @@ export function pairingForm(
   mcpUrl: string | undefined,
 ) {
   // `parseDevice` admits only `[A-Za-z0-9][A-Za-z0-9-]*`; `local` is reserved.
+  const home =
+    device.os === "linux" &&
+    (device.root_readonly === true || /steamos/iu.test(device.system ?? ""));
   const host = device.hostname.toLowerCase();
   const machine = host === "local" ? "device-local" : host;
   const account =
@@ -277,5 +356,6 @@ export function pairingForm(
     uid: device.free_id,
     gid: device.free_id,
     ...(mcpUrl === undefined ? {} : { mcp_url: mcpUrl }),
+    ...(home ? { layout: "home" } : {}),
   };
 }

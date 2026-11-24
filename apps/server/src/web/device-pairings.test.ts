@@ -1,10 +1,17 @@
 import { spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test, vi } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 import {
+  PAIRING_INIT_WINDOW_MS,
   PAIRING_MAX_PENDING,
   PAIRING_RETENTION_MS,
   PAIRING_TTL_MS,
@@ -20,9 +27,17 @@ const device = {
 };
 const MCP = "https://private.example.ts.net/mcp";
 const SCRIPT = resolve(__dirname, "../../../web/public/pair-device.py");
+const KEY_BLOB = Buffer.concat([
+  Buffer.from("\0\0\0\x0bssh-ed25519\0\0\0\x20", "latin1"),
+  Buffer.alloc(32, 9),
+]).toString("base64");
 
 async function fixture(env: NodeJS.ProcessEnv = { CARDIGAN_MCP_URL: MCP }) {
   const root = mkdtempSync(join(tmpdir(), "pairing-"));
+  writeFileSync(
+    join(root, "worker-key.pub"),
+    `ssh-ed25519 ${KEY_BLOB} operator@control\n`,
+  );
   const f = await m5Cross({
     machineHost: {
       bindings: () => () => null,
@@ -54,6 +69,12 @@ async function fixture(env: NodeJS.ProcessEnv = { CARDIGAN_MCP_URL: MCP }) {
       method: "POST",
       body: { code, ...extra },
     });
+  const device$ = (path: string, body: unknown) =>
+    f.call(`/api/device-pairings/${path}`, {
+      method: "POST",
+      body,
+      anonymous: true,
+    });
   const created = async () => {
     const r = await pair();
     expect(r.status, r.text).toBe(201);
@@ -72,6 +93,7 @@ async function fixture(env: NodeJS.ProcessEnv = { CARDIGAN_MCP_URL: MCP }) {
     status,
     claim,
     created,
+    device$,
     close: async () => {
       try {
         await f.close();
@@ -259,6 +281,7 @@ test.runIf(process.platform === "linux")(
         { device: { ...device, address: "a b" } },
         { device: { ...device, free_id: 0 } },
         { device: { ...device, system: "a\nb" } },
+        { device: { ...device, root_readonly: "yes" } },
         { device: { ...device, token: "x" } },
         { device, extra: true },
       ]) {
@@ -316,6 +339,198 @@ test.runIf(process.platform === "linux")(
   },
 );
 
+interface WizardView {
+  id: string;
+  phase: string;
+  preview?: { preview_id: string };
+  device_init?: { state: string; at?: string };
+}
+const planOf = (script: string) =>
+  JSON.parse(
+    Buffer.from(
+      /^PLAN = json\.loads\(base64\.b64decode\("([A-Za-z0-9+/=]+)"\)/mu.exec(
+        script,
+      )?.[1] ?? "",
+      "base64",
+    ).toString(),
+  ) as Record<string, unknown>;
+async function claimAndConfirm(f: Awaited<ReturnType<typeof fixture>>) {
+  const p = await f.created();
+  const claimed = await f.claim(p.code);
+  expect(claimed.status, claimed.text).toBe(201);
+  const w = (claimed.json as { wizard: WizardView }).wizard;
+  const path = f.projectPath(`/worker-wizards/${w.id}`);
+  const read = async () =>
+    ((await f.call(path)).json as { wizard: WizardView }).wizard;
+  const confirm = () =>
+    f.call(`${path}/confirm`, {
+      method: "POST",
+      body: { preview_id: w.preview?.preview_id },
+    });
+  return { p, w, path, read, confirm };
+}
+
+test.runIf(process.platform === "linux")(
+  "a confirmed draft gives the claimed device its init script; the report is recorded and starts the recheck",
+  async () => {
+    const f = await fixture();
+    try {
+      const early = await f.created();
+      const before = await f.device$("init-script", {
+        device_token: early.device_token,
+      });
+      expect(before.status).toBe(409);
+      expect(errorCode(before)).toBe("device_init_not_ready");
+
+      const { p, w, read, confirm } = await claimAndConfirm(f);
+      const token = { device_token: p.device_token };
+      expect(w.device_init).toEqual({ state: "waiting" });
+      expect((await f.status(p.device_token)).json).toMatchObject({
+        status: "claimed",
+        init: "waiting",
+      });
+      // Nothing before the owner confirmed the configuration.
+      const unconfirmed = await f.device$("init-script", token);
+      expect(unconfirmed.status).toBe(409);
+      expect(errorCode(unconfirmed)).toBe("device_init_not_ready");
+      expect(
+        errorCode(await f.device$("initialized", { ...token, ok: true })),
+      ).toBe("device_init_not_ready");
+
+      expect((await confirm()).status).toBe(200);
+      expect((await f.status(p.device_token)).json).toMatchObject({
+        init: "ready",
+      });
+      const got = await f.device$("init-script", token);
+      expect(got.status, got.text).toBe(200);
+      expect(got.headers["cache-control"]).toBe("no-store");
+      const script = (got.json as { script: string }).script;
+      const project = f.project.project_id;
+      const account =
+        `cg_${project.toLowerCase().replace(/[^a-z0-9_]/gu, "_")}`.slice(0, 29);
+      // SteamOS: the work root is under /home; only fixed, non-secret values.
+      expect(planOf(script)).toEqual({
+        version: 1,
+        os: "linux",
+        project,
+        account,
+        uid: 2000,
+        gid: 2000,
+        home: `/home/${account}`,
+        work: `/home/cardigan-workers/${project}`,
+        public_key: `restrict ssh-ed25519 ${KEY_BLOB}`,
+      });
+      for (const secret of [
+        p.device_token,
+        p.code,
+        p.code.replace("-", ""),
+        "operator@control",
+        MCP,
+        f.root,
+      ])
+        expect(script.includes(secret)).toBe(false);
+      expect((await read()).device_init).toEqual({ state: "fetched" });
+
+      for (const bad of [
+        { ...token, ok: "yes" },
+        { ...token },
+        { ...token, ok: true, extra: 1 },
+      ])
+        expect((await f.device$("initialized", bad)).status).toBe(400);
+      expect(
+        (await f.device$("initialized", { device_token: "x", ok: true }))
+          .status,
+      ).toBe(404);
+
+      const report = await f.device$("initialized", { ...token, ok: true });
+      expect(report.status, report.text).toBe(200);
+      expect(report.json).toEqual({ recheck: "started" });
+      const after = await read();
+      expect(after.device_init).toEqual({
+        state: "succeeded",
+        at: expect.any(String),
+      });
+      expect(after.phase).not.toBe("ready");
+      await vi.waitFor(async () =>
+        expect((await read()).phase).not.toBe("running"),
+      );
+      expect((await f.status(p.device_token)).json).toMatchObject({
+        init: "succeeded",
+      });
+      for (const again of [
+        await f.device$("init-script", token),
+        await f.device$("initialized", { ...token, ok: true }),
+      ]) {
+        expect(again.status).toBe(409);
+        expect(errorCode(again)).toBe("device_init_reported");
+      }
+      const audit = JSON.stringify(
+        f.store().database.prepare("SELECT doc FROM global_events").all(),
+      );
+      expect(audit).toContain("worker_wizard_device_initialized");
+      expect(audit).toContain("worker_wizard_check_requested");
+      secretsAbsent(f, [p.code, p.code.replace("-", ""), p.device_token]);
+
+      f.advance(PAIRING_INIT_WINDOW_MS);
+      expect((await f.status(p.device_token)).status).toBe(404);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.runIf(process.platform === "linux")(
+  "a failed run starts no recheck and may be retried; a missing host key or cancelled draft is refused",
+  async () => {
+    const f = await fixture();
+    try {
+      const { p, path, read, confirm } = await claimAndConfirm(f);
+      const token = { device_token: p.device_token };
+      expect((await confirm()).status).toBe(200);
+      rmSync(join(f.root, "worker-key.pub"));
+      const missing = await f.device$("init-script", token);
+      expect(missing.status).toBe(409);
+      expect(errorCode(missing)).toBe("device_init_public_key_missing");
+      writeFileSync(
+        join(f.root, "worker-key.pub"),
+        `ssh-ed25519 ${KEY_BLOB}\n`,
+      );
+      expect((await f.device$("init-script", token)).status).toBe(200);
+      const failed = await f.device$("initialized", { ...token, ok: false });
+      expect(failed.json).toEqual({ recheck: "skipped" });
+      expect(await read()).toMatchObject({
+        phase: "ready",
+        device_init: { state: "failed" },
+      });
+      expect((await f.device$("init-script", token)).status).toBe(200);
+      expect(
+        (await f.device$("initialized", { ...token, ok: true })).json,
+      ).toEqual({ recheck: "started" });
+      await vi.waitFor(async () =>
+        expect((await read()).phase).not.toBe("running"),
+      );
+
+      const second = await claimAndConfirm(f);
+      expect((await second.confirm()).status).toBe(200);
+      expect(
+        (await f.call(`${second.path}/cancel`, { method: "POST", body: {} }))
+          .status,
+      ).toBe(200);
+      expect((await f.status(second.p.device_token)).json).toMatchObject({
+        init: "unavailable",
+      });
+      const gone = await f.device$("init-script", {
+        device_token: second.p.device_token,
+      });
+      expect(gone.status).toBe(410);
+      expect(errorCode(gone)).toBe("device_init_unavailable");
+      expect(path).not.toBe(second.path);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
 function run(args: string[], env: NodeJS.ProcessEnv) {
   const child = spawn("python3", ["-I", SCRIPT, ...args], {
     env: { PATH: env.PATH ?? "/usr/bin:/bin", LANG: "C.UTF-8" },
@@ -353,7 +568,7 @@ test.runIf(process.platform === "linux")(
       expect(offline.err()).toContain("tailscale up");
 
       tailscale("Running");
-      const waiting = run([f.web.url], { PATH });
+      const waiting = run([f.web.url, "--no-init"], { PATH });
       await vi.waitFor(() => expect(waiting.out()).toContain("等待"), {
         timeout: 10_000,
       });
@@ -385,6 +600,84 @@ test.runIf(process.platform === "linux")(
     }
   },
   30_000,
+);
+
+test.runIf(process.platform === "linux")(
+  "after the owner confirms, the device lists the script's actions, runs it with sudo from stdin and reports",
+  async () => {
+    const f = await fixture();
+    const bin = mkdtempSync(join(tmpdir(), "pairing-bin-"));
+    try {
+      writeFileSync(
+        join(bin, "tailscale"),
+        `#!/bin/sh\necho '${JSON.stringify({ BackendState: "Running", Self: { DNSName: "deck.example.ts.net." } })}'\n`,
+      );
+      const sudo = (code: number) => {
+        writeFileSync(
+          join(bin, "sudo"),
+          `#!/bin/sh\necho "$@" > '${bin}/argv'\ncat > '${bin}/stdin'\nexit ${code}\n`,
+        );
+        chmodSync(join(bin, "sudo"), 0o755);
+      };
+      chmodSync(join(bin, "tailscale"), 0o755);
+      const PATH = `${bin}:/usr/bin:/bin`;
+      const device = async (code: number) => {
+        sudo(code);
+        const args = [f.web.url, "--yes", "--sudo", join(bin, "sudo")];
+        const proc = run([...args, "--python", "python3"], { PATH });
+        await vi.waitFor(() => expect(proc.out()).toContain("等待"), {
+          timeout: 10_000,
+        });
+        const pairCode = /配对码：(\S+)/u.exec(proc.out())?.[1] ?? "";
+        const claimed = await f.claim(pairCode);
+        expect(claimed.status, claimed.text).toBe(201);
+        const w = (claimed.json as { wizard: WizardView }).wizard;
+        await vi.waitFor(() => expect(proc.out()).toContain("确认写入配置"), {
+          timeout: 10_000,
+        });
+        const path = f.projectPath(`/worker-wizards/${w.id}`);
+        const confirmed = await f.call(`${path}/confirm`, {
+          method: "POST",
+          body: { preview_id: w.preview?.preview_id },
+        });
+        expect(confirmed.status).toBe(200);
+        const exit = await proc.done;
+        const wizard = ((await f.call(path)).json as { wizard: WizardView })
+          .wizard;
+        return { proc, exit, wizard };
+      };
+
+      const ok = await device(0);
+      expect(ok.exit, ok.proc.err()).toBe(0);
+      expect(ok.proc.out()).toContain("初始化脚本将在本机做以下操作");
+      expect(ok.proc.out()).toMatch(/1\. 创建组 cg_/u);
+      expect(ok.proc.out()).toContain("初始化完成，已通知 Workbench 开始复查");
+      expect(readFileSync(join(bin, "argv"), "utf8").trim()).toBe(
+        "python3 -IB -",
+      );
+      const piped = readFileSync(join(bin, "stdin"), "utf8");
+      expect(piped).toContain('"""Cardigan one-time device initialisation');
+      expect(planOf(piped).public_key).toBe(`restrict ssh-ed25519 ${KEY_BLOB}`);
+      expect(ok.wizard.device_init?.state).toBe("succeeded");
+      await vi.waitFor(async () =>
+        expect(
+          (
+            (await f.call(f.projectPath(`/worker-wizards/${ok.wizard.id}`)))
+              .json as { wizard: WizardView }
+          ).wizard.phase,
+        ).not.toBe("running"),
+      );
+
+      const bad = await device(3);
+      expect(bad.exit).toBe(1);
+      expect(bad.proc.err()).toContain("初始化未完成（退出码 3）");
+      expect(bad.wizard.device_init?.state).toBe("failed");
+    } finally {
+      rmSync(bin, { force: true, recursive: true });
+      await f.close();
+    }
+  },
+  60_000,
 );
 
 test("the pairing script is served as a static file", async () => {
