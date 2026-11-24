@@ -4836,6 +4836,29 @@ test.each([false, true])(
 
 test("C-375: discovery expiry reports unknown through the original outage path without replacing its attempt", async () => {
   const h = await reworkGithubFixture({ noRunId: true });
+  // C-681: the fake transport records what the real client observes.
+  const { recordGithubHttp } = await import("@cardigan/host");
+  const dispatch = h.client.dispatch.getMockImplementation()!;
+  h.client.dispatch.mockImplementation(async (ref, value) => {
+    recordGithubHttp({
+      operation: "dispatch",
+      method: "POST",
+      status: 204,
+      requestId: "0400:2222:BBBB",
+      summary: "无正文",
+    });
+    return dispatch(ref, value);
+  });
+  h.client.runs.mockImplementation(async () => {
+    recordGithubHttp({
+      operation: "runs",
+      method: "GET",
+      status: 200,
+      requestId: "0400:3333:CCCC",
+      summary: "total_count=0 workflow_runs=0",
+    });
+    return [];
+  });
   h.c.setConfig({
     ...h.c.options.configuration.forProject(),
     executor: { ...h.config, waitStartMs: 40_000 },
@@ -4852,11 +4875,19 @@ test("C-375: discovery expiry reports unknown through the original outage path w
       attempt_id: original.attempt_id,
       status: "queued",
     });
-    expect(
-      h.f
-        .state()
-        .events.filter((event) => event.type === "merge_executor_unreachable"),
-    ).toHaveLength(1);
+    const outages = h.f
+      .state()
+      .events.filter((event) => event.type === "merge_executor_unreachable");
+    expect(outages).toHaveLength(1);
+    expect(outages[0]?.payload).toMatchObject({
+      attempt_id: original.attempt_id,
+      failure: {
+        category: "dispatch_unknown",
+        stage: "run_not_found",
+        http_status: 200,
+        request_id: "0400:3333:CCCC",
+      },
+    });
     expect(h.client.dispatch).toHaveBeenCalledOnce();
     expect(h.client.cancel).not.toHaveBeenCalled();
   } finally {

@@ -103,6 +103,12 @@ export {
   type LaunchStep,
   messageOf,
 } from "./errors.js";
+export {
+  type DispatchUnknownStage,
+  type ExecutorFailure,
+  type ExecutorHttpObservation,
+  recordGithubHttp,
+} from "./executor-diagnostics.js";
 export { classifyExecutorFailure } from "./executor-failure.js";
 export * from "./ext-message.js";
 export * from "./ext-message-config.js";

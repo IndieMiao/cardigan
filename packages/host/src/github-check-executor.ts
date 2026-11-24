@@ -11,6 +11,12 @@ import {
   CheckExecutorSuspended,
   checkoutSupervisionMs,
 } from "./checkout-deadline.js";
+import {
+  type DispatchUnknownStage,
+  GithubHttpTrace,
+  githubHttpTrace,
+  validObservation,
+} from "./executor-diagnostics.js";
 import { githubScopedRequest } from "./github-check-scope.js";
 import {
   type GithubClient,
@@ -167,7 +173,10 @@ export class GithubCheckExecutor implements CheckExecutor {
         if (existing.key !== key) throw new GithubExecutorError("security");
         return existing.work;
       }
-      const work = this.start(request, context, inputs, key, abandoned);
+      const trace = new GithubHttpTrace();
+      const work = githubHttpTrace.run(trace, () =>
+        this.start(request, context, inputs, key, trace, abandoned),
+      );
       this.pending.set(id, { key, work });
       void work.catch(() => {
         if (this.pending.get(id)?.work === work) this.pending.delete(id);
@@ -186,10 +195,25 @@ export class GithubCheckExecutor implements CheckExecutor {
     context: GithubCheckContext,
     inputs: Record<string, string>,
     key: string,
+    trace: GithubHttpTrace,
     abandoned?: GithubDispatchIntent,
   ): Promise<CheckHandle | undefined> {
     let claimedIntent: GithubDispatchIntent | undefined;
     let dispatchToken = "";
+    // C-681: every dispatch_unknown names its branch and the latest redacted
+    // GitHub exchange of this call, plus the persisted POST response if any.
+    const dispatchUnknown = (stage: DispatchUnknownStage) => {
+      const error = new GithubExecutorError("dispatch_unknown");
+      const persisted = claimedIntent?.dispatchResponse;
+      const post =
+        trace.dispatch ?? (validObservation(persisted) ? persisted : undefined);
+      error.dispatch = {
+        stage,
+        ...(trace.last ? { last: trace.last } : {}),
+        ...(post ? { post } : {}),
+      };
+      return error;
+    };
     try {
       const registeredAt = this.options.now?.() ?? Date.now();
       const startedAt = new Date(
@@ -245,8 +269,7 @@ export class GithubCheckExecutor implements CheckExecutor {
           throw new GithubExecutorError("recovery_incomplete");
         let runId = intent.dispatchedRunId;
         if (intent.phase === "reserved") {
-          if (request.signal?.aborted)
-            throw new GithubExecutorError("dispatch_unknown");
+          if (request.signal?.aborted) throw dispatchUnknown("not_sent");
           const token = await this.options.client.token();
           dispatchToken = token;
           // Claim the IO boundary before push: abandonment/cleanup must not
@@ -278,7 +301,7 @@ export class GithubCheckExecutor implements CheckExecutor {
               // Only a successful, still-current publication may cross POST.
               dispatch = this.options.journal.beginDispatch(intent, outcome);
             }
-            if (!dispatch) throw new GithubExecutorError("dispatch_unknown");
+            if (!dispatch) throw dispatchUnknown("push_incomplete");
             try {
               runId = await this.options.client.dispatch(
                 context.baselineBranch,
@@ -289,6 +312,7 @@ export class GithubCheckExecutor implements CheckExecutor {
                 intent,
                 runId,
                 this.options.now?.() ?? Date.now(),
+                trace.dispatch,
               );
             }
           } else throw new GithubExecutorError("recovery_incomplete");
@@ -310,7 +334,7 @@ export class GithubCheckExecutor implements CheckExecutor {
                   ))
           )
             throw new GithubRetryLater(now + interval, "attempt");
-          throw new GithubExecutorError("dispatch_unknown");
+          throw dispatchUnknown("run_not_found");
         };
         if (runId !== undefined) {
           this.options.journal.beginDiscovery(intent, now, interval, runId);
@@ -344,9 +368,9 @@ export class GithubCheckExecutor implements CheckExecutor {
           const match = matches[0];
           if (!matches.length) deferDiscovery();
           if (matches.length !== 1 || !match)
-            throw new GithubExecutorError(
-              matches.length ? "security" : "dispatch_unknown",
-            );
+            throw matches.length
+              ? new GithubExecutorError("security")
+              : dispatchUnknown("run_not_found");
           if (request.signal?.aborted)
             throw new GithubExecutorError("recovery_incomplete");
           // A list is discovery evidence. Re-read the exact ID before binding;
