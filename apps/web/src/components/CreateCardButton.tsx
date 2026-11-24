@@ -9,13 +9,13 @@ import {
 } from "../api.js";
 import {
   attachmentRefKind,
+  checkUpload,
+  fileLabel,
   formatBytes,
   isVideoType,
   toBase64,
   UPLOAD_ACCEPT,
   uploadFilename,
-  uploadMime,
-  uploadProblem,
 } from "../attachment-refs.js";
 import { useResource } from "../useResource.js";
 import { type MeasuredVideo, measureVideo } from "../video-probe.js";
@@ -167,13 +167,12 @@ export function CreateCardDialog({
     const accepted: PendingFile[] = [];
     const rejected: { name: string; reason: string }[] = [];
     for (const file of chosen) {
-      const mime = uploadMime(file);
-      const problem =
-        mime && isVideoType(mime) && !client.uploadVideo
-          ? "不支持上传视频"
-          : uploadProblem(file, attachmentLimit ?? null, videoLimit ?? null);
-      if (problem || !mime)
-        rejected.push({ name: file.name || file.type, reason: problem ?? "" });
+      const { mime, reason } = checkUpload(file, {
+        maxBytes: attachmentLimit ?? null,
+        videoMaxBytes: videoLimit ?? null,
+        video: !!client.uploadVideo,
+      });
+      if (mime === undefined) rejected.push({ name: fileLabel(file), reason });
       else
         accepted.push({
           id: crypto.randomUUID(),

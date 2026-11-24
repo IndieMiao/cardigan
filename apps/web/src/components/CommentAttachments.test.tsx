@@ -145,6 +145,81 @@ test("files over 10 MiB or of other types are refused in place with the reason",
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
+test("C-717: the open file chooser taking focus keeps the picker, so an empty-type .txt still lands in the list", async () => {
+  const { input, uploads } = setup();
+  const button = screen.getByRole("button", { name: "上传附件" });
+  // Pressing the button leaves focus in the field (Safari would blur it).
+  expect(fireEvent.mouseDown(button)).toBe(false);
+  fireEvent.mouseUp(button);
+  fireEvent.click(button);
+  const picker = document.querySelector(
+    'input[type="file"]',
+  ) as HTMLInputElement;
+  // The chooser takes focus from the page while it is open.
+  act(() => input.blur());
+  expect(picker.isConnected).toBe(true);
+  expect(screen.getByRole("button", { name: "上传附件" })).toBeTruthy();
+  fireEvent.change(picker, {
+    target: {
+      files: [
+        new File(["hello"], "notes.txt", { type: "" }),
+        new File(["line"], "run.log", { type: "" }),
+      ],
+    },
+  });
+  expect(chips()).toEqual([
+    expect.stringContaining("notes.txt5 B"),
+    expect.stringContaining("run.log4 B"),
+  ]);
+  type(input, "日志");
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await waitFor(() => expect(uploads).toHaveLength(2));
+  expect(uploads.map((u) => [u.original_filename, u.mime, u.file])).toEqual([
+    ["notes.txt", "text/plain", btoa("hello")],
+    ["run.log", "text/plain", btoa("line")],
+  ]);
+  await waitFor(() =>
+    expect(screen.queryByRole("list", { name: "待上传的附件" })).toBeNull(),
+  );
+});
+
+test("C-717: cancelling the chooser lets an empty box fold again", () => {
+  const { input } = setup();
+  fireEvent.click(screen.getByRole("button", { name: "上传附件" }));
+  const picker = document.querySelector(
+    'input[type="file"]',
+  ) as HTMLInputElement;
+  act(() => input.blur());
+  expect(screen.getByRole("button", { name: "上传附件" })).toBeTruthy();
+  fireEvent(picker, new Event("cancel"));
+  expect(screen.queryByRole("button", { name: "上传附件" })).toBeNull();
+});
+
+test("C-717: every refused file shows its reason in place; other files and the body stay", () => {
+  const { input } = setup();
+  type(input, "正文");
+  choose(new File(["ok"], "keep.txt", { type: "" }));
+  const big = new File(["x"], "big.log", { type: "" });
+  Object.defineProperty(big, "size", { value: 10 * 1024 * 1024 + 1 });
+  choose(
+    new File(["?"], "README", { type: "" }),
+    new File(["?"], "", { type: "" }),
+    new File(["MZ"], "tool.exe", { type: "application/x-msdownload" }),
+    big,
+  );
+  const lines = within(screen.getByRole("alert"))
+    .getAllByRole("listitem")
+    .map((item) => item.textContent);
+  expect(lines).toEqual([
+    expect.stringMatching(/^README：不支持这种类型/u),
+    expect.stringMatching(/^未命名文件：不支持这种类型/u),
+    expect.stringMatching(/^tool\.exe：不支持这种类型/u),
+    "big.log：超过 10 MiB",
+  ]);
+  expect(chips()).toEqual([expect.stringContaining("keep.txt")]);
+  expect(input.value).toBe("正文");
+});
+
 test("pasting an image still adds it", () => {
   const { input } = setup();
   fireEvent.paste(input, {

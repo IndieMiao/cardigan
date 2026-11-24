@@ -266,6 +266,31 @@ test("files the server would refuse are listed with the reason and not added", a
   expect(dialog.queryByRole("list", { name: "待上传的附件" })).toBeNull();
 });
 
+test("C-717: the attachment button adds an empty-type .txt or .log and names every refusal", async () => {
+  setup();
+  const dialog = await open();
+  fireEvent.change(dialog.getByLabelText("添加附件"), {
+    target: {
+      files: [
+        new File(["a"], "notes.txt", { type: "" }),
+        new File(["b"], "run.log", { type: "" }),
+        new File(["c"], "README", { type: "" }),
+      ],
+    },
+  });
+  expect(
+    within(dialog.getByRole("list", { name: "待上传的附件" }))
+      .getAllByRole("listitem")
+      .map((item) => item.textContent),
+  ).toEqual([
+    expect.stringContaining("notes.txt"),
+    expect.stringContaining("run.log"),
+  ]);
+  expect(dialog.getByRole("alert").textContent).toMatch(
+    /README：不支持这种类型/u,
+  );
+});
+
 test("C-683: a video goes through the resumable upload, and a retry resumes it", async () => {
   const createCard = vi.fn<CardiganClient["createCard"]>(async () => ({
     id: "C-10",

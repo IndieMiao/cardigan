@@ -102,6 +102,35 @@ export function uploadProblem(
   return undefined;
 }
 
+/**
+ * C-717: a chosen file as the form adds it, or why it was left out. Every
+ * refusal carries a reason to show; nothing is dropped silently.
+ */
+export function checkUpload(
+  file: Pick<File, "name" | "type" | "size">,
+  limits: {
+    readonly maxBytes: number | null;
+    readonly videoMaxBytes: number | null;
+    /** False when this client cannot send videos. */
+    readonly video: boolean;
+  },
+):
+  | { readonly mime: string; readonly reason?: undefined }
+  | { readonly mime?: undefined; readonly reason: string } {
+  const mime = uploadMime(file);
+  const reason =
+    mime && isVideoType(mime) && !limits.video
+      ? "不支持上传视频"
+      : uploadProblem(file, limits.maxBytes, limits.videoMaxBytes);
+  if (reason) return { reason };
+  if (!mime) return { reason: "不支持这种类型" };
+  return { mime };
+}
+
+/** How a file is named in a refusal, even with no name or type. */
+export const fileLabel = (file: Pick<File, "name" | "type">) =>
+  file.name || file.type || "未命名文件";
+
 /** The name sent as `original_filename`: its last path part, if not blank. */
 export function uploadFilename(name: string): string {
   const base = name.split(/[\\/]/u).at(-1) ?? "";

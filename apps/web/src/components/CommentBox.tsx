@@ -25,6 +25,8 @@ import {
   attachmentQuery,
   attachmentRefKind,
   attachmentTarget,
+  checkUpload,
+  fileLabel,
   formatBytes,
   formatMiB,
   insertAttachmentRef,
@@ -34,8 +36,6 @@ import {
   toBase64,
   UPLOAD_ACCEPT,
   uploadFilename,
-  uploadMime,
-  uploadProblem,
 } from "../attachment-refs.js";
 import { renderMarkdown } from "../markdown.js";
 import { useAttachmentRefs } from "../useAttachmentRefs.js";
@@ -201,8 +201,14 @@ export function CommentBox({
       })),
     );
   };
+  // C-717: the file chooser takes focus while open; the picker must stay.
+  const [choosing, setChoosing] = useState(false);
   const expanded =
-    focused || body.length > 0 || files.length > 0 || problems.length > 0;
+    focused ||
+    choosing ||
+    body.length > 0 ||
+    files.length > 0 ||
+    problems.length > 0;
 
   useImperativeHandle(
     ref,
@@ -484,19 +490,18 @@ export function CommentBox({
     const accepted: PendingFile[] = [];
     const rejected: { name: string; reason: string }[] = [];
     for (const file of chosen) {
-      const mime = uploadMime(file);
-      const problem =
-        mime && isVideoType(mime) && !client.uploadVideo
-          ? "不支持上传视频"
-          : uploadProblem(file, attachmentLimit ?? null, videoLimit ?? null);
-      if (problem || !mime)
-        rejected.push({ name: file.name || file.type, reason: problem ?? "" });
+      const { mime, reason } = checkUpload(file, {
+        maxBytes: attachmentLimit ?? null,
+        videoMaxBytes: videoLimit ?? null,
+        video: !!client.uploadVideo,
+      });
+      if (mime === undefined) rejected.push({ name: fileLabel(file), reason });
       else
         accepted.push({
           id: crypto.randomUUID(),
           draft: nextDraft.current++,
           idempotencyKey: crypto.randomUUID(),
-          name: file.name || file.type,
+          name: fileLabel(file),
           mime,
           file,
           note: "",
@@ -730,7 +735,10 @@ export function CommentBox({
       className="comment-box ui-drop-target"
       aria-label="写评论"
       data-dragging={dragging ? "" : undefined}
-      onFocus={() => setFocused(true)}
+      onFocus={() => {
+        setFocused(true);
+        setChoosing(false);
+      }}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
           setFocused(false);
@@ -793,6 +801,7 @@ export function CommentBox({
             accept={UPLOAD_ACCEPT}
             disabled={submitting}
             onFiles={addFiles}
+            onChoosing={setChoosing}
           />
         </div>
       )}
