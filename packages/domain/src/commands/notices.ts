@@ -7,6 +7,7 @@ import {
   command,
   ensure,
 } from "./core.js";
+import { ATTACHED_HUMAN_WAIT_OVERDUE } from "./host-ops-attached-wait.js";
 
 /**
  * Needs You "知会" (§7.4): every delegated resolution (PM Ops on project
@@ -100,6 +101,8 @@ const systemNoticeEvents = new Map([
   ["office_wait_overdue", "PM Office 等待超时"],
   // C-600: a rebuilt session still had no native Card tools.
   ["mcp_session_failed", "会话 MCP 初始化失败"],
+  // C-678: a session-ending host action waits for an attached human.
+  [ATTACHED_HUMAN_WAIT_OVERDUE, "Agent 终端有人连着，动作在等待断开"],
 ]);
 /** Newest first; one notice per delegated resolution, even for multi-card decisions. */
 export function notices(state: CommandState): readonly Notice[] {
