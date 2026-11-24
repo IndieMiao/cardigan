@@ -2023,6 +2023,13 @@ test("C-715: Web submits a whole checklist once: answers and blank defaults shar
       { body: "提交回答", story_discussion: action },
       { "idempotency-key": key },
     );
+  const comments = () =>
+    s
+      .state()
+      .events.filter(
+        (e) => e.type === "comment_posted" && e.card_id === s.card.id,
+      );
+  const before = comments().length;
   const submit = {
     action: "submit_answers",
     group_id,
@@ -2045,6 +2052,17 @@ test("C-715: Web submits a whole checklist once: answers and blank defaults shar
   expect(await post(submit, "whole-list-again")).toMatchObject({
     status: 409,
   });
+  // Refused attempts, the replay and the second submission add nothing: the
+  // Office is woken once, by the one entry carrying the whole checklist.
+  const posted = comments().slice(before);
+  expect(posted).toHaveLength(1);
+  const [event] = posted;
+  if (!event) throw new Error("Missing submission event");
+  expect(
+    routeEvent({ event, snapshot: s.state() })
+      .notifications.map((n) => n.recipient.kind)
+      .filter((kind) => kind === "pm_office"),
+  ).toEqual(["pm_office"]);
   const read = await fetch(web.url + path(`/cards/${s.card.id}`), {
     headers: { cookie },
   });

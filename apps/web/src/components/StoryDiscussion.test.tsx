@@ -54,6 +54,9 @@ test("C-715: inputs only, one submit for the whole checklist; blanks are counted
   fireEvent.change(field(3), { target: { value: "蓝" } });
   fireEvent.change(field(2), { target: { value: "  " } });
   expect(screen.getByText("1 题按推荐")).toBeDefined();
+  // Typing writes nothing: no entry, no Office wake until "提交".
+  fireEvent.keyDown(field(3), { key: "Enter" });
+  expect(addComment).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "提交" }));
   await screen.findByRole("alert");
   expect([field(1).value, field(2).value, field(3).value]).toEqual([
