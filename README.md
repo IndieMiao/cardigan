@@ -21,6 +21,24 @@ Phase 0（预研与零代码验证）。技术栈已确定：TypeScript + pnpm w
 - [开发方案](docs/development-plan.md)：选型、架构、领域模型、协议、部署、路线图、待定决策
 - [AGENTS.md](AGENTS.md)：参与开发的 Agent 必须遵守的规则
 - [接入一台 Linux worker](docs/linux-worker.md)：人专属接入命令、私有配置与逐步检查
+- [接入一台 macOS worker](docs/macos-worker.md)、[接入 SteamOS 设备](docs/steamos-worker.md)
+
+## 快速上手：接入一台 worker 设备
+
+在新设备上用普通账号运行一行命令（不要 sudo），`<Workbench>` 换成你的 Workbench 地址：
+
+```sh
+curl -fsS https://<Workbench>/pair-device.py | python3 - https://<Workbench>
+```
+
+1. **设备**显示配对码、二维码，以及控制主机 `worker-known-hosts` 需要的一行主机公钥。把这一行加进控制主机的私有配置（不要 sudo）。
+2. **Workbench** 扫码，或在“设置 → 机器”点“新设备接入（配对码）”输入配对码；选项目和名额，点“确认接入”，核对后“确认写入配置”。
+3. **设备**列出一次性初始化要做的操作，输入 `yes` 和 sudo 密码后建专用账号和目录（**要 sudo**）。
+4. **设备**管理员按手册装 hc、helper 和基础工具、配资源限额（**要 sudo**）；Workbench 自动复查九项检查。
+5. 检查通过后看体检报告，在向导最后一步开启远程派发，再在控制主机运行 `cardigan machine update <机器> --project <项目> --status online` 上线（不要 sudo）。
+6. 之后用到哪个工具，在机器详情的“能力”表点“安装”，复制命令到设备上执行，再点“复查”。
+
+每一步的细节、哪一步要 sudo、出错怎么办，见 [Linux](docs/linux-worker.md#快速上手一行命令配对接入)、[macOS](docs/macos-worker.md#快速上手一行命令配对接入)、[SteamOS](docs/steamos-worker.md) 手册。不走配对的手工接入和排障在各手册的“进阶/排障：手工接入”。
 
 ## 本地开发
 

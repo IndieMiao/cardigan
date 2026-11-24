@@ -43,7 +43,7 @@ sudo systemctl enable --now sshd      # 启用 SSH；首次启动时生成主机
 
 ## 2. 配对、初始化和体检报告
 
-步骤与 [Linux 手册的快速接入](linux-worker.md#快速接入配对和一次性初始化) 相同：
+步骤与 [Linux 手册的快速上手](linux-worker.md#快速上手一行命令配对接入) 相同：
 
 1. 设备上运行 `curl -fsS https://<Workbench>/pair-device.py | python3 - https://<Workbench>`。它会显示配对码、二维码，以及控制主机 `worker-known-hosts` 需要的一行 `steamdeck ssh-ed25519 <公钥>`；sshd 没启用、在用电池时会给出提示，但不会因此停下。
 2. 把这一行（在向导里改了机器编号时，把开头换成新编号）加到控制主机私有的 `worker-known-hosts`（0600）。这一行是在设备自己的屏幕上读到的，相当于第 1 节要求的“从可信渠道取得主机公钥”。

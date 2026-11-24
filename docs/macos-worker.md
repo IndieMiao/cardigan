@@ -1,28 +1,116 @@
 # 接入一台 macOS worker
 
-在已运行 Cardigan 的 **Linux 控制主机**上使用 `cardigan worker add/check/status/resume`，接入 Darwin arm64（Apple Silicon）worker。向导只读探测，不安装软件、不执行特权操作、不请求密码、不签发 Token。Intel Mac 返回 `worker_macos_arm64_required`；不使用 Rosetta。
+新的 Mac（Apple Silicon）按下面的“快速上手”接入：在 Mac 上跑一行命令，在 Workbench 确认，Mac 自己完成初始化，检查通过后上线，用到哪个工具再装哪个。后面的“进阶/排障：手工接入”是原来的逐步手工路径，用于不走配对的接入、核对现场或排障。
 
-以下 `example`、`worker-a`、`cg_example`、UID/GID、域名及目录都是示例，实际值写私有配置。每个项目使用独立非管理员账号、组、HOME、工作根和 hc 状态，不复用个人桌面或 CI 账号。控制主机与 worker 使用同一版本 Cardigan 发行文件；Mac 上 root 持有的发行目录以下为 `/opt/cardigan`。
+以下 `example`、`worker-a`、`cg_example`、UID/GID、域名及目录都是示例，实际值写私有配置。每个项目使用独立非管理员账号、组、HOME、工作根和 hc 状态，不复用个人桌面或 CI 账号。控制主机与 worker 使用同一版本 Cardigan 发行文件；Mac 上 root 持有的发行目录以下为 `/opt/cardigan`。快速上手里的 `<Workbench>`、`<机器>`、`<项目>` 换成自己的 Workbench 地址、机器编号和项目编号。
 
-## 快速接入：配对和一次性初始化
+## 快速上手：一行命令配对接入
 
-新设备可以不手敲第 2 节的命令：
+只支持 Apple Silicon（arm64）；Intel Mac 不支持，也不使用 Rosetta。
 
-1. 控制主机配置目录里要有 `worker-key` 及其公钥 `worker-key.pub`（Ed25519，见第 1 节）。
-2. 在设备上用普通账号运行 `curl -fsS https://<Workbench>/pair-device.py | python3 - https://<Workbench>`，在 Workbench 输入显示的配对码，核对并点“确认写入配置”。
-3. 设备端随后取得为这份配置生成的一次性初始化脚本，先列出将做的操作，输入 `yes` 后用 `sudo python3 -IB -` 从标准输入运行（脚本不落盘），跑完把结果报给 Workbench，向导自动复查。
+| 步骤 | 在哪里 | 做什么 | 要 sudo |
+|---|---|---|---|
+| 0 | 控制主机、Mac | 一次性准备 | 打开“远程登录”要管理员 |
+| 1 | Mac | 运行配对命令 | 不要 |
+| 2 | 控制主机 | 登记 Mac 的 SSH 主机公钥 | 不要 |
+| 3 | Workbench | 确认接入、确认写入配置 | 不要 |
+| 4 | Mac | 运行一次性初始化脚本 | **要**（输入一次密码） |
+| 5 | Mac、控制主机 | 准备签名 App、hc、helper、基础工具和并发配置 | Mac 上**要**；控制主机不要 |
+| 6 | Workbench、控制主机 | 检查通过、开启远程派发、上线 | 不要 |
+| 7 | Workbench、Mac | 按需装工具 | 见第 7 步 |
+
+### 0. 准备（一次性）
+
+控制主机（运行 Cardigan 的 Linux 机器）：
+
+- Workbench 经 Tailscale Serve 在 tailnet 内可以访问，下文写作 `https://<Workbench>`；MCP 地址同样对 tailnet 可见（见[第 4 节](#4-worker核心所有权资源与-mcp)）。
+- 配置目录（默认 `~/.config/cardigan`）里有控制主机专用的 SSH 密钥 `worker-key` 及公钥 `worker-key.pub`，必须是 Ed25519。还没有时按[第 1 节](#1-控制主机预览与私有配置)的 `ssh-keygen` 命令生成，不需要 sudo。
+
+Mac：
+
+- 有 `python3`（Apple Command Line Tools 自带）和 `curl`。
+- 装好 Tailscale 并登录同一个 tailnet；tailnet 访问规则放行控制主机 → Mac 的 TCP 22，以及 Mac → 控制主机的 Serve 端口。
+- 在“系统设置 → 通用 → 共享”打开“远程登录”（需要管理员）；如果限制了允许的用户，初始化后把专用账号加进去。
+- 你在 Mac 上的账号是管理员，能用 sudo（第 4、5 步用）。
+
+### 1. Mac：运行配对命令（不要 sudo）
+
+用普通账号在“终端”运行，不要加 sudo：
+
+```sh
+curl -fsS https://<Workbench>/pair-device.py | python3 - https://<Workbench>
+```
+
+命令上报主机名、系统、架构、tailnet 地址、一个空闲的账号编号和硬件概况，然后显示二维码、配对码（`XXXX-XXXX`，10 分钟内有效，只能用一次）、确认页链接，以及控制主机 `worker-known-hosts` 需要的一行 `<机器> ssh-ed25519 <公钥>`；本机 22 端口没有 SSH 服务时只给提示。浅色背景的终端加 `--light`。找不到 `tailscale` 命令或没有登录时给出指引后退出，这时可以用 `--address <地址>` 指定控制主机连这台 Mac 用的 tailnet 地址。配对这一步不改动 Mac。
+
+### 2. 控制主机：登记 Mac 的 SSH 主机公钥（不要 sudo）
+
+把上一步显示的那一行追加到控制主机配置目录里的 `worker-known-hosts`（权限 0600）。在向导里改了机器编号时，把开头换成新编号。这一行是在 Mac 自己的屏幕上读到的，相当于[第 1 节](#1-控制主机预览与私有配置)要求的“通过可信渠道取得主机公钥”；不要用 `ssh-keyscan` 的输出代替。
+
+### 3. Workbench：确认接入（不要 sudo）
+
+1. 用手机扫二维码或打开确认页链接；也可以在“设置 → 机器”点“新设备接入（配对码）”，手动输入配对码。
+2. 选项目和名额（这台机器同时跑几个 Agent，默认 1），点“确认接入”。一个配对码只接入一个项目；其它项目在接入完成后用“添加 worker”追加。
+3. 核对生成的配置预览，点“确认写入配置”。
+
+只有所有者的人类登录会话能确认。不确认就离开不会写入任何东西，配对码到期自动作废。
+
+### 4. Mac：一次性初始化（要 sudo）
+
+确认写入配置后，Mac 上的命令自动取得为这份配置生成的初始化脚本，先列出将做的操作。核对后输入 `yes`，再输入你的 sudo 密码；脚本用 `sudo python3 -IB -` 从标准输入运行，不写入磁盘。sudo 验证没通过时不做任何改动，按回车可以重试。跑完后结果报给 Workbench，向导自动开始九项检查。
+
+脚本具体做什么、遇到冲突怎么办，见下文“初始化脚本做什么”。
+
+### 5. Mac 和控制主机：工具、helper 与并发配置
+
+初始化脚本只建账号和目录，不装软件。下面几项仍要人准备：
+
+- Mac（**要 sudo**）：原生 arm64 的 Python 3.12 或更新版本、Git、Node 24、pnpm 11；按[第 3 节](#3-worker工具和-helper)在 Mac 现场安装并验证固定版本的 Herdr Core 签名 App，为专用账号建 `hc` 链接、装 helper。App 首装和首次局域网许可要在专用账号的现场会话里完成。
+- 控制主机（不要 sudo）：按[第 4 节](#4-worker核心所有权资源与-mcp)在私有 `run-capacity.yaml` 里写这台机器的 `limit` 和 `max_limit`，并重载控制主机配置。
+
+Workbench 向导的“目标机命令”列出这台机器要执行的命令，可以逐条复制。检查停在工具、helper 这几步时页面每 15 秒自动复查，做完会自动往下走；停在其它步骤时点“继续检查”。
+
+### 6. 检查通过、开启远程派发、上线（不要 sudo）
+
+九项检查全部通过后，向导显示体检报告：Mac 自报的系统、CPU、内存、磁盘、GPU，已验证的能力，以及建议安装的工具。然后：
+
+1. 在向导最后一步“开启远程派发”：点“预览开启”，核对只给这台机器的绑定开启远程派发，勾选确认后开启。也可以先不开，直接点“完成”。
+2. 新登记的机器状态是离线。在控制主机的人类终端把它设为在线，再检查一次：
+
+   ```sh
+   cardigan machine update <机器> --project <项目> --status online
+   cardigan machine check <机器> --project <项目>
+   ```
+
+   检查通过后，这台机器按名额接收派发。之后在 Workbench 机器详情里可以“立即检查”“排空/恢复”和修改名额。
+
+### 7. 按需装工具
+
+在“设置 → 机器”打开这台机器，“能力”表列出主机能力目录里适用于它的能力及状态（已验证、已过期、未验证）。`node`、`godot`、`blender`、`android.sdk`、`android.emulator`、`browser.chromium` 未验证时，行末有“安装”：
+
+1. 点“安装”，点“复制命令”。
+2. 在 Mac 上执行复制的命令。命令写的是专用账号用户目录下的位置（`~/.local`、`~/Android/Sdk`）。
+3. 回到对话框点“复查”；验证通过后该行的“安装”按钮消失。
+
+一次性初始化建的账号里，HOME、`~/.local` 和 `~/.local/bin` 由 root 持有（0750），专用账号自己写不进去，所以对话框里往这几处写的命令目前会因权限失败。在这一点修好之前，按[第 3 节](#3-worker工具和-helper)由管理员（**要 sudo**）把工具装到 root 持有的位置，再链接进 `~/.local/bin` 或加进绑定的 `path`，然后点“复查”。某个工具检测不到只是不登记这项能力，不影响机器健康和其它派发。
+
+### 初始化脚本做什么
 
 初始化脚本只做以下操作（HOME 为 `/Users/cg_<项目>`，工作根为 `/Users/cardigan-workers/<项目>`，安装配置写在 `/Library/Cardigan`。）：
 
 - 建专用组和账号（向导给定的 UID/GID，无密码、shell `/bin/sh`、不加入其它组）；
-- 建 HOME、工作根及固定的私有目录，属主和权限同第 2 节；
+- 建 HOME、工作根及固定的私有目录，属主和权限同[第 2 节](#2-worker专用账号和安装布局进阶排障手工命令)；
 - 把控制主机公钥写成 `.ssh/authorized_keys`（root:项目组 0640，带 `restrict`）；
 - 写认领标记和安装配置，用随附的安装器先 `--check` 再 `--apply`（私有目录、锁文件和 `worker-primitives.py`）；
 - 只有专用账号执行 `sudo -n -l` 被要求输入密码时，才写入 `cardigan-worker-<账号>`，内容仅 `Defaults:<账号> listpw=never`（经 `visudo -cf` 校验，不授予任何命令）。
 
 账号、组、UID/GID、目录或文件已存在时，它列出冲突后停下，不做任何改动，也不接管已有账号。中途失败时列出已创建的内容和删除命令，不自动撤销。它不装其它软件、不改 `/etc/sudoers`、不含凭据；hc、helper、Node 等工具和资源配置仍按第 3、4 节准备。只想配对、不在设备上初始化时，给 `pair-device.py` 加 `--no-init`。
 
-## 1. 控制主机：预览与私有配置
+## 进阶/排障：手工接入
+
+在已运行 Cardigan 的 **Linux 控制主机**上使用 `cardigan worker add/check/status/resume`，接入 Darwin arm64（Apple Silicon）worker。向导只读探测，不安装软件、不执行特权操作、不请求密码、不签发 Token。Intel Mac 返回 `worker_macos_arm64_required`；不使用 Rosetta。
+
+### 1. 控制主机：预览与私有配置
 
 CLI 安装见 [部署说明](../deploy/README.md#安装-cardigan-命令)。在人类终端运行，不设置 `CARDIGAN_TOKEN`、`MCP_TOKEN` 或 `--token-file`：
 
@@ -117,7 +205,7 @@ machines:
 
 若同一台机器还能同时运行几个任务，可由人在该机器配置下增加 `resources`，例如 `resources: { ios.simulator: 1, blender: 2 }`。键为能力名（不带版本），值为正整数；未列出的资源不限。资源在同一物理机上跨项目共用。一个工作项即使多次声明同一能力，也只占一个名额；所需资源有一个已满，整个 Run 就留在原机排队，不会先占其它资源。显式启动也不能越过资源上限。修改后重载控制主机；不会抢占已开始的 Run。升级前已启动的任务没有资源快照时，按本次启动可能用到的资源保守计数。若同一任务撤回后重试，旧记录没有精确的撤回时点：上一轮派发后到本轮派发前出现过的需求都可能计入；重试尚未派发时也会保留名额。缺少可核对的记录时，该任务在本机每种已配置资源上各占一个名额，直到原占用结束。
 
-## 2. worker：专用账号和安装布局（进阶/排障：手工命令）
+### 2. worker：专用账号和安装布局（进阶/排障：手工命令）
 
 以下是一次性初始化脚本所做操作的手工版本，用于不走配对的接入、核对现场或排障。
 
@@ -183,7 +271,7 @@ sudo /opt/homebrew/bin/python3 /opt/cardigan/deploy/install-macos-worker.py --pr
 
 `mount` 必须是工作根实际所在卷的挂载点，可先用 `/sbin/mount` 核对；`volume` 填在本机对该挂载点读取的 `str(os.statvfs(mount).f_fsid)`，不要照搬其它机器或卷的值。APFS firmlink 下 `/`、`/System/Volumes/Data` 与 `/Users` 的 `st_dev` 可能相同，Python `os.path.ismount('/System/Volumes/Data')` 也可能返回假；安装器和运行时路径检查因此在打开的目录上核对系统报告的挂载点及 `f_fsid`。**工作根和 HOME 用 `/Users/...`，只有 `mount` 填 `/System/Volumes/Data`**；不能用 `/` 和系统卷编号来绕过检查。外置卷也须已挂载且确为工作根所在卷；卷身份不符或根盘、工作盘任一空间不足都会停止。
 
-## 3. worker：工具和 helper
+### 3. worker：工具和 helper
 
 在专用账号的显式 PATH 下核验 Node 24、pnpm 11、Git、Python、hc；向导先用 Apple `lipo` 核对 arm64，再运行版本检查。允许 arm64、Apple 原生 arm64e，以及包含这两类切片的 universal 二进制；拒绝 x86-only、未知脚本解释器或 Node 实际架构不符。不要从个人 shell rc 借 PATH。
 
@@ -219,7 +307,7 @@ sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /U
 
 `worker-primitives.py` 由安装器安装，三个 helper 必须为不同路径且与控制主机发行文件摘要一致。App 首装及首次局域网许可必须由人在**专用账号**的现场会话完成；允许局域网访问后再验证无头服务。原因码 `worker_macos_app_setup_required` / `worker_macos_local_network_required` 指向这一步。向导不点击许可、不关闭 Gatekeeper/SIP、不申请无关的录屏或辅助功能权限；检查通过不表示模型账号已登录。
 
-## 4. worker：核心所有权、资源与 MCP
+### 4. worker：核心所有权、资源与 MCP
 
 固定采用 **hc 经 SSH 自管核心**，不再安装系统 LaunchDaemon。控制主机的 Darwin hc 注册入口只执行签名 App 内的 `connect --session <绑定会话>`，保留真实 `SSH_CONNECTION`，清理其它继承环境。hc 自己负责脱离 SSH 进程、会话锁和核心恢复；控制主机不另行 `serve`、删除 socket/lock 或接管旧进程。没有图形会话也不伪造一个图形登录。首装/许可、注销/重启后的实际可用性仍需现场核验。
 
@@ -237,7 +325,7 @@ hc **v0.1.21** 源码固定提交为 `1b0393f80c35b1dae34f37934d33d0144a8fc8d7`�
 
 `launchd.label` 现在表示需要撤下的旧服务，须与绑定 `retired_launchd_label` 相同；绑定未填时默认 `dev.cardigan.<项目编号>`。新机器也保留这一检查，防止以后误装旧示例。自定义旧服务须填写实际 label；其它同账号的外部 hc 启动服务也由操作员撤下。机器检查连接的是本项目独立账号和绑定 session；Linux 入口与已有 alias 原样保留。
 
-### 从旧 LaunchDaemon 迁移（张良现场执行）
+#### 从旧 LaunchDaemon 迁移（张良现场执行）
 
 以下全部为示例值，替换成私有配置实际值。先在控制主机执行 `cardigan machine drain worker-a --project example`，等待本机全部活跃 Run/会话按正常流程结束；有未确认退出的会话时不要继续。停用远程派发，保存旧配置。迁移会改变 Darwin 目标指纹，不能把旧 runtime_ref 改绑到新会话。
 
@@ -262,7 +350,7 @@ HC_SESSION=cg HC_SOCKET="$HOME/.local/state/herdr-core/cg/cg.sock" \
 
 控制主机用**与服务相同的本地 hc 环境**查看 `hc machine ls --json`。旧 Darwin alias 的 target 与新入口不同，会故意报 `invalid_launch`，不会自动覆盖。确认该 alias 没有任何活跃引用后执行 `hc machine rm example-worker-a`（仅忘记连接登记，不停止远端终端），重载控制主机配置，再执行 `cardigan machine check worker-a --project example`，由新入口登记。不要执行 `hc machine update`，它会尝试安装/升级远端二进制；本卡没有更改 hc 版本。
 
-#### 迁移收尾
+##### 迁移收尾
 
 1. 确认第 5 节的配置核对已完成。由人本人在控制主机私有 `runtime-workers.yaml` 中，给本机对应的项目绑定加回迁移期间删除的 `allow_remote_launch: true`，然后重载配置。向导不写这个字段；自 C-451 起，单独加回它不会触发 `worker_config_conflict`。
 2. 在控制主机恢复接单并依次检查（沿用本节示例机器和项目）：
@@ -275,7 +363,7 @@ HC_SESSION=cg HC_SOCKET="$HOME/.local/state/herdr-core/cg/cg.sock" \
 
 3. `worker check` 的九项检查全部通过且 `machine check` 显示 `launch_enabled=true` 后，用一张真实小卡验证远程派发、提交回传、预检、审核与合并。小卡通过且无活跃 Run 后，再由人在 Mac 前分别锁屏、注销、重启各一次；每次从控制主机重跑上面的 `machine check`，确认无须桌面登录或手工启动核心。
 
-### 现场验收与预期输出
+#### 现场验收与预期输出
 
 1. `cardigan worker check --project example --machine worker-a`：九步均 passed；resources 不再要求常驻 LaunchDaemon。`launchctl print system/<旧 label>` 仍是明确的 113。保留失败原始日志供排查，不把任意非零当成服务不存在。
 2. 恢复接单后，连续执行三次 `cardigan machine check worker-a --project example`：均 `launch_enabled=true`，不出现 runtime_timeout/runtime_unavailable。关闭所有管理 SSH 连接再检查一次；用专用账号 `ps -u <账号> -o pid,ppid,command` 核对该 session 只有一个 serve 核心（connect 可有多个，holder 不是重复核心），core.log 没有本次新增 GUI bootstrap 125。不同 session 不算同一核心。
@@ -289,7 +377,7 @@ macOS 没有 Linux cgroup 的 CPU/内存硬隔离。Run 并发上限及 Backgrou
 
 MCP 与 [Linux worker](linux-worker.md#4-worker资源与-mcp) 相同：worker 与控制主机加入同一 tailnet，管理员核对 Tailscale Serve 的 HTTPS `/mcp` 转发及来源权限。向导从 worker 发无 Token 请求，要求 TLS 验证成功且返回 401；启动时另做真实鉴权。200/403/重定向/证书错误/超时都不能算通过，不降低为 HTTP。首次局域网许可失败请现场处理，不把 401 等同于 GUI/TCC 已验收。
 
-## 5. 控制主机：add、续跑、check 和 status
+### 5. 控制主机：add、续跑、check 和 status
 
 ```sh
 cardigan worker add --project example --machine worker-a --host worker.invalid
@@ -302,13 +390,13 @@ cardigan worker check --project example --machine worker-a
 
 journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录 0700、文件 0600，沿用 [Linux 向导的恢复合同](linux-worker.md#5-控制主机add续跑check-和-status)。管理员核对草案后才合入 `runtime-workers.yaml`，保留其它机器/项目；`allow_remote_launch` 仍须按远程启动门禁显式启用。检查通过不会自动启用机器或改变 Assignment。
 
-### 检查浏览器能力
+#### 检查浏览器能力
 
 运行 `cardigan machine check worker-a --project example` 刷新，`cardigan machine show worker-a --project example` 查看上次结果。`browser.chromium` 优先在控制主机 `launch.yaml` 的 `browser.browsers_path` 中查找 Playwright 安装的 Chromium 或无头浏览器。目录名指 **Run 所在机器**的路径；该账号能执行浏览器并读到版本号即可，不需要向缓存建链接。CLI 只查服务已接受的配置目录；配置无法读取、尚未生效，或候选程序超时、没有返回可解析版本时，继续检查后续位置，不影响其它能力。再查项目账号 `PATH` 中的 `chromium`、`chromium-browser`、`google-chrome`，然后查 `/Applications/Google Chrome.app` 和该账号的 `$HOME/Library/Caches/ms-playwright`。
 
 本机采用 `agent-ssh` 时以本机 Agent 账号检查，远程以项目 worker 账号检查；只有 Run 本身采用 `local` 模式才用当前运行账号。未验证浏览器时，`health.capability_failures` 只列出能确认尝试过的范围（配置键、命令名和账号缓存），不会回显私有目录或命令报错。`search_incomplete: true` 表示未能完成或确认本次检查，可再运行 `machine check`。若机器健康检查本身失败，先处理 `health.blockers`，能力探测此时尚未执行。
 
-### 从 Data 卷旧路径原地迁移（现有 Mac）
+#### 从 Data 卷旧路径原地迁移（现有 Mac）
 
 1. **控制主机停派发。** `cardigan machine drain worker-a --project example`，等旧 Assignment、Run、终端、清理和 Git 操作全部结束；不能确认退出就停在这里。关闭此绑定的远程启动，备份私有向导 YAML 和正式配置。用旧 HOME/session 正常停止空闲的 hc 核心（见第 4 节）；不删除锁、仓库、工作树或上次失败的 `.clone-*`。如仍有旧路径绑定的工作树，先按原流程收尾，不手改 Git 注册记录。
 2. **唯一需 Mac 管理员用 sudo 完成的一项：同步账号、标记、安装配置和 helper。** 在一次维护窗口内，按实际账号、组和目录替换下例。先核对两种拼法的 HOME 和工作根各自是同一目录（`test "$old" -ef "$new"`），从新路径运行 `/bin/pwd -P` 应原样返回；备份下面的原值、root 所有的文件和旧 helper 到受保护目录。任何不符均停止，不搬目录或递归改权限。
@@ -317,7 +405,7 @@ journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录
 3. **控制主机同步绑定。** 在向导 YAML 中改 `home`、`launchd.hc_path`、项目 `root`、`path` 中的账号 bin、`file_helper` 和 `git_helper`；在 `runtime-workers.yaml` 同步该项目对应字段，其它机器/项目和容量不动。若有独立的路径采样清单，也把目录及 `common_dir` 改为规范路径，保留真实 `mount` 和 `volume`。重载配置；若本地 hc 登记仍指向旧入口，按第 4 节在无活跃引用后移除旧 alias 再检查，不改绑旧 Run。
 4. **验证后再试派。** 按第 5 节用新摘要确认 `worker resume` 并跑 `cardigan worker check --project example --machine worker-a`、`cardigan machine check worker-a --project example`。目录或 helper 阻塞时保持停派，回查 `pwd -P`、保护权限及发行版本；回退须成组还原备份，不混用两套配置。停派期间预期仍提示机器未就绪或不允许启动。目录、helper 等检查通过后，按既有门禁仅为试点恢复显式绑定，由张良用 C-472 记录服务端首发收到基线、建立工作树及 Run 的证据。检查绿灯不等于实机派发通过，不据此开放自动分流。
 
-## 5a. 用 Workbench 向导接入
+### 5a. 用 Workbench 向导接入
 
 不想在终端里逐条运行时，可以在 Workbench 的“设置 → 机器”点“添加 worker”。它和第 5 节的 `worker add/resume` 用同一个接入引擎和同一套私有文件，只限当前所有者的人类登录会话；Agent Token 和其它成员不能调用。
 
@@ -331,7 +419,7 @@ journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录
 
 页面上的“机器”详情还可以对单台机器“立即检查”（进行中按钮显示“检查中…”，不能重复启动，结束后刷新列表和详情）、“排空/恢复”（点击即提交，不重启或移动运行中的任务），并在“资源上限”里即时保存 Agent 并发上限（原“并发与容量”入口跳到这里）。这些操作与向导一样只对人类登录会话显示，由服务端按当前所有者授权。
 
-## 6. 常见阻塞与现场跟进
+### 6. 常见阻塞与现场跟进
 
 | 原因码 | 处理 |
 |---|---|
@@ -349,7 +437,7 @@ journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录
 
 Godot 项目可在私有任务流程中用 `deploy/godot-import.py` 替代**新可写工作区的第一次** `godot --headless --import`。不在机器登记或普通 worktree 检出时自动运行。预热、只读包发布、损坏回退和计时口径见 [C-498](plans/C-498.md)。
 
-### 可选：为已登记的 Mac 接入受限 helper 升级
+#### 可选：为已登记的 Mac 接入受限 helper 升级
 
 旧安装器只可用向导维护唯一且能核实的 `worker.json`。出现命名配置时先核验并更新安装器，不要手改命令指向旧绑定。人工升级复用已匹配的共享发行目录；不同版本只作原子交换，不支持则停止。若有中断留下的备份或暂存目录，保留现场，按 `docs/plans/C-551.md` 核对。
 
