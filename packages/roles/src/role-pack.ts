@@ -12,6 +12,7 @@ import {
   BROWSER_CAPABILITY,
   BROWSER_ROLES,
 } from "./assignment.js";
+import { CAPABILITY_GUIDE_TOOL } from "./capability-notes.js";
 import type { Harness } from "./harness.js";
 import { composeRolePrompt } from "./prompt.js";
 
@@ -755,6 +756,8 @@ export function defaultRoleDefinition(
     "upload_attachment",
     "read_attachment",
     "project_snapshot",
+    // C-726: read-only usage notes of the machine capability catalog.
+    CAPABILITY_GUIDE_TOOL,
     // C-685: every role reads and writes the shared library by default.
     ...SHARED_FILE_TOOLS,
   ];

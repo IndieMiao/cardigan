@@ -51,7 +51,12 @@ import {
   secureDataDirectory,
   writeRegisteredRuntime,
 } from "@cardigan/runtime-herdr";
-import { getRoleVersion, Store, tokensForAssignment } from "@cardigan/store";
+import {
+  getRoleVersion,
+  listCapabilityGuides,
+  Store,
+  tokensForAssignment,
+} from "@cardigan/store";
 import { beginActivity, StallWatch } from "./activity.js";
 import {
   type ControlPlane,
@@ -606,6 +611,9 @@ async function assembleServer(
               macosCheckHost: macosChecks,
               // C-685: shared file library; signs OSS URLs, never relays bytes.
               sharedFiles: sharedFileLibrary(store, config.dataDir),
+              // C-726: read-only capability usage notes of the caller's project.
+              capabilityGuides: (project) =>
+                listCapabilityGuides(store, project),
               ...(publisher ? { publishArtifact: publisher } : {}),
               ...(mobileSigning
                 ? {

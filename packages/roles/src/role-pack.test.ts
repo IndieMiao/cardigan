@@ -230,6 +230,8 @@ const BASE_TOOLS = [
   "get_shared_file",
   "upload_shared_file",
   "commit_shared_file",
+  // C-726: read-only capability usage notes.
+  "get_capability_guide",
 ];
 
 test("C-293 PM Ops assigns ready work and leaves capacity enforcement to the scheduler", () => {

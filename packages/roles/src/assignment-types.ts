@@ -1,4 +1,5 @@
 import type { Employee, Harness } from "@cardigan/domain";
+import type { CapabilityNoteInput } from "./capability-notes.js";
 import type { CompiledFile } from "./launch-types.js";
 import type { LaunchConfig } from "./schema-definition.js";
 export const RUN_RESOURCE_RULE =
@@ -151,6 +152,12 @@ export interface CompileAssignmentInput {
     readonly adb_port: number;
     readonly emulator_port?: number;
   } | null;
+  /**
+   * C-726: usage notes of the capabilities this work item requires
+   * (`requirements.capabilities`), merged for the Run's machine. Condensed
+   * and quoted at the end of the Core Prompt; omitted or empty adds nothing.
+   */
+  readonly capability_notes?: readonly CapabilityNoteInput[];
   readonly test_max_workers?: number;
   /**
    * C-686: values only the host knows for the Claude status line: the

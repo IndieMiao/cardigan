@@ -74,6 +74,7 @@ import {
 } from "@cardigan/store";
 import { loadAgentTestWorkers } from "./agent-test-config.js";
 import { agentToolsDirectoryFor } from "./agent-tools.js";
+import { launchCapabilityNotes } from "./capability-notes.js";
 import {
   applyCommand,
   issueAssignmentToken,
@@ -1113,6 +1114,13 @@ async function launch(
       : undefined;
     // C-676: the session learns its project's code for full numbers.
     const projectCode = host.store.projectCode(project);
+    // C-726: usage notes of the capabilities this work item requires.
+    const capabilityNotes = launchCapabilityNotes(
+      host.store,
+      project,
+      assignment.machine_id,
+      workItem?.requirements,
+    );
     const compiled = compileAssignmentLaunch({
       ...(employee !== undefined
         ? { employee: { launch_profile_ref: profileRef, identity: employee } }
@@ -1162,6 +1170,9 @@ async function launch(
               ) ?? null,
           }
         : {}),
+      ...(capabilityNotes === undefined
+        ? {}
+        : { capability_notes: capabilityNotes }),
       ...(execution.mode === "agent-ssh" && execution.env
         ? { worker_env: execution.env }
         : {}),

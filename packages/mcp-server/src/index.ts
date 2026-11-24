@@ -141,6 +141,11 @@ export {
   type ToolServerOptions,
   toolCatalogFingerprint,
 } from "./tool-server.js";
+export {
+  CAPABILITY_GUIDE_NOTICE,
+  type CapabilityGuideToolOptions,
+  capabilityGuideTool,
+} from "./tools/capability-guide.js";
 export { CheckLogReadLimitError } from "./tools/get-check-log.js";
 export {
   ackEventsTool,
