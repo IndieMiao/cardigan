@@ -17,6 +17,14 @@ import {
 import { fakeClient } from "../testing/fixtures.js";
 import { CreateCardButton } from "./CreateCardButton.js";
 
+vi.mock("../video-probe.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../video-probe.js")>()),
+  measureVideo: vi.fn(async () => ({
+    video: { duration_seconds: 12, width: 1280, height: 720 },
+    poster: "/9j/4AAQ",
+  })),
+}));
+
 beforeEach(() => {
   // jsdom has no layout or pointer capture for the Radix select.
   HTMLElement.prototype.scrollIntoView ??= () => {};
@@ -256,4 +264,67 @@ test("files the server would refuse are listed with the reason and not added", a
     "sketch.png：超过",
   );
   expect(dialog.queryByRole("list", { name: "待上传的附件" })).toBeNull();
+});
+
+test("C-683: a video goes through the resumable upload, and a retry resumes it", async () => {
+  const createCard = vi.fn<CardiganClient["createCard"]>(async () => ({
+    id: "C-10",
+    entry_id: "C-10#1",
+  }));
+  const uploadVideo = vi
+    .fn<NonNullable<CardiganClient["uploadVideo"]>>()
+    .mockImplementationOnce(async (_p, file, _m, options) => {
+      options?.onStarted?.("up-1");
+      options?.onProgress?.(file.size / 2, file.size);
+      throw new ApiError(503, "unavailable", "断开");
+    })
+    .mockImplementation(async () => "up-1");
+  const uploadAttachment = vi.fn<CardiganClient["uploadAttachment"]>(
+    async () => ({ id: "attachment-3" }),
+  );
+  const { onCreated } = setup({
+    createCard,
+    uploadAttachment,
+    uploadVideo,
+    videoMaxBytes: () => 1024 * 1024 * 1024,
+  });
+  const dialog = await open();
+  fill(dialog, "标题", "Recording");
+  fill(dialog, "描述", "See the clip");
+  fireEvent.change(dialog.getByLabelText("添加附件"), {
+    target: { files: [new File(["0123"], "clip.mp4", { type: "video/mp4" })] },
+  });
+  fireEvent.click(dialog.getByRole("button", { name: "创建" }));
+  expect((await dialog.findByRole("alert")).textContent).toContain(
+    "卡片 C-10 已创建，附件上传失败",
+  );
+  expect(
+    dialog.getByRole("list", { name: "待上传的附件" }).textContent,
+  ).toContain("50%");
+  expect(uploadAttachment).not.toHaveBeenCalled();
+  fireEvent.click(dialog.getByRole("button", { name: "重试上传" }));
+  await waitFor(() => expect(onCreated).toHaveBeenCalledWith("C-10"));
+  expect(createCard).toHaveBeenCalledTimes(1);
+  expect(uploadVideo.mock.calls[1]?.[3]?.uploadId).toBe("up-1");
+  const input = uploadAttachment.mock.calls[0]?.[2];
+  expect(input).toMatchObject({
+    upload_id: "up-1",
+    mime: "video/mp4",
+    original_filename: "clip.mp4",
+    video: { duration_seconds: 12, width: 1280, height: 720 },
+    poster: "/9j/4AAQ",
+    attach_to: { kind: "timeline_entry", id: "C-10#1" },
+  });
+  expect(input).not.toHaveProperty("file");
+});
+
+test("C-683: a server without video uploads refuses a video", async () => {
+  setup();
+  const dialog = await open();
+  fireEvent.change(dialog.getByLabelText("添加附件"), {
+    target: { files: [new File(["0"], "clip.mp4", { type: "video/mp4" })] },
+  });
+  expect((await dialog.findByRole("alert")).textContent).toContain(
+    "clip.mp4：不支持上传视频",
+  );
 });

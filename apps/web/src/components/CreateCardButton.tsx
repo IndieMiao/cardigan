@@ -10,6 +10,7 @@ import {
 import {
   attachmentRefKind,
   formatBytes,
+  isVideoType,
   toBase64,
   UPLOAD_ACCEPT,
   uploadFilename,
@@ -17,6 +18,8 @@ import {
   uploadProblem,
 } from "../attachment-refs.js";
 import { useResource } from "../useResource.js";
+import { type MeasuredVideo, measureVideo } from "../video-probe.js";
+import { uploadPercent } from "./CommentBox.js";
 import { SettingsDiscardDialog } from "./layout/SettingsLayout.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
@@ -50,6 +53,12 @@ interface PendingFile {
   readonly mime: string;
   /** The attachment it became; a retry skips it. */
   readonly uploaded?: string;
+  /** C-683: the video's resumable upload; a retry continues it. */
+  readonly uploadId?: string;
+  /** C-683: bytes of the video the server has, while it is being sent. */
+  readonly sent?: number;
+  /** C-683: what the browser measured and drew, kept for a retry. */
+  readonly measured?: MeasuredVideo;
 }
 
 /** C-684: the cards page's standing entry; a person opens a story by default. */
@@ -126,6 +135,7 @@ export function CreateCardDialog({
   const form = useRef<HTMLFormElement>(null);
   const keys = useRef(new Map<string, string>());
   const attachmentLimit = client.attachmentMaxBytes?.();
+  const videoLimit = client.videoMaxBytes?.();
   const reset = () => {
     setTemplate(undefined);
     setReadOnly(false);
@@ -157,8 +167,11 @@ export function CreateCardDialog({
     const accepted: PendingFile[] = [];
     const rejected: { name: string; reason: string }[] = [];
     for (const file of chosen) {
-      const problem = uploadProblem(file, attachmentLimit ?? null);
       const mime = uploadMime(file);
+      const problem =
+        mime && isVideoType(mime) && !client.uploadVideo
+          ? "不支持上传视频"
+          : uploadProblem(file, attachmentLimit ?? null, videoLimit ?? null);
       if (problem || !mime)
         rejected.push({ name: file.name || file.type, reason: problem ?? "" });
       else
@@ -179,11 +192,37 @@ export function CreateCardDialog({
       if (!card.entry_id)
         throw new Error("服务器没有返回卡片的创建记录，请在卡片里上传附件。");
       const filename = uploadFilename(file.file.name);
+      const update = (patch: Partial<PendingFile>) =>
+        setFiles((current) =>
+          current.map((item) =>
+            item.id === file.id ? { ...item, ...patch } : item,
+          ),
+        );
+      // C-683: as the comment box, a video is measured once, then sent in
+      // chunks; a retry resumes the upload.
+      const measured = isVideoType(file.mime)
+        ? (file.measured ?? (await measureVideo(file.file, file.mime)))
+        : undefined;
+      if (measured && !file.measured) update({ measured });
+      const uploadId =
+        isVideoType(file.mime) && client.uploadVideo
+          ? await client.uploadVideo(projectId, file.file, file.mime, {
+              uploadId: file.uploadId,
+              onStarted: (id) => update({ uploadId: id }),
+              onProgress: (received) => update({ sent: received }),
+            })
+          : undefined;
       const receipt = await client.uploadAttachment(
         projectId,
         card.id,
         {
-          file: await toBase64(file.file),
+          ...(uploadId
+            ? { upload_id: uploadId }
+            : { file: await toBase64(file.file) }),
+          ...(measured && Object.keys(measured.video).length
+            ? { video: measured.video }
+            : {}),
+          ...(measured?.poster ? { poster: measured.poster } : {}),
           ...(filename ? { original_filename: filename } : {}),
           mime: file.mime,
           kind: "evidence",
@@ -191,11 +230,7 @@ export function CreateCardDialog({
         },
         file.idempotencyKey,
       );
-      setFiles((current) =>
-        current.map((item) =>
-          item.id === file.id ? { ...item, uploaded: receipt.id } : item,
-        ),
-      );
+      update({ uploaded: receipt.id });
     }
   }
   return (
@@ -391,7 +426,11 @@ export function CreateCardDialog({
                   <FileChip
                     key={file.id}
                     name={file.file.name || file.mime}
-                    size={formatBytes(file.file.size)}
+                    size={
+                      file.sent !== undefined && !file.uploaded
+                        ? `${formatBytes(file.file.size)} · ${uploadPercent(file.sent, file.file.size)}%`
+                        : formatBytes(file.file.size)
+                    }
                     kind={attachmentRefKind(file.mime)}
                     removeDisabled={pending || !!file.uploaded}
                     onRemove={() =>
