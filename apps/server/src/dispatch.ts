@@ -55,6 +55,7 @@ import {
   runsOf,
   standingRunDormant,
   stoppedByHuman,
+  supersededRetirement,
   trackRetirementDispatch,
   unreadableCommentTrigger,
   untouchedStallSuccessor,
@@ -867,7 +868,13 @@ export class Dispatcher {
   }
   private busy(state: CommandState, a: Assignment, continuing?: RunId) {
     if (a.role_upgrade) return "role_upgrade";
-    if (a.idle_retirement?.handoff || a.idle_retirement?.phase === "stopping")
+    // C-690: a handoff left behind by an earlier session (released by a
+    // human stop, then started anew) does not fence the current session;
+    // maintenance clears it.
+    if (
+      (a.idle_retirement?.handoff && !supersededRetirement(a)) ||
+      a.idle_retirement?.phase === "stopping"
+    )
       return "idle_retirement";
     if (hostOpsPending(state.events, a.id)) return "host_operation";
     // C-211: a stopped Assignment waits for the human's start; its bells stay

@@ -18,7 +18,9 @@ import {
 import { idleRolePolicy } from "./deployment-roles.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import {
+  clearSupersededRetirements,
   releaseExitedAgents,
+  releaseRetainedForWork,
   retireIdleSessions,
 } from "./idle-session-retirement.js";
 import {
@@ -56,6 +58,9 @@ export async function upgradeIdleAssignmentRoles(
     Boolean(runtime.retire_idle),
   );
   try {
+    // C-690: a retirement left behind by an earlier session no longer
+    // fences this one (dispatch, stall recovery and host operations).
+    clearSupersededRetirements(store, project, clock);
     // C-667/C-672: an exited CLI whose terminal stayed live (a kept shell or
     // a launcher that outlived it) first becomes "no session", so the upgrade
     // below and the next dispatch start its replacement.
@@ -67,6 +72,8 @@ export async function upgradeIdleAssignmentRoles(
       MAX_IDLE_ROLE_UPGRADES,
       scan.note,
     );
+    // C-690: notifications for a session retained for dispatch wake it.
+    await releaseRetainedForWork(store, project, clock);
     const retired = await retireIdleSessions(
       store,
       project,

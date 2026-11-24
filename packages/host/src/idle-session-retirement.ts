@@ -5,6 +5,7 @@ import {
   type Clock,
   type CommandEffect,
   type CommandState,
+  clearSupersededRetirement,
   confirmKeptShellExit,
   confirmWaitingRetirementExit,
   darwinWorker,
@@ -19,12 +20,14 @@ import {
   type RunId,
   type Runtime,
   type RuntimeErrorCode,
+  releaseRetainedRetirement,
   retirementOwnsSession,
   runsOf,
   runtimeErrorCodes,
   sessionMaintenanceCandidate,
   settleIdleSessionRetirement,
   stoppedByHuman,
+  supersededRetirement,
   trackRetirementDispatch,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -299,6 +302,114 @@ export async function releaseExitedAgent(
   } finally {
     await unlock();
   }
+}
+
+/**
+ * C-690: a waiting retirement of a session the Assignment no longer runs
+ * (typically: retained for dispatch, then a human stop released that terminal
+ * and a start launched a new one) fenced the new session's dispatch, stall
+ * recovery and host operations. Drop it; no runtime IO, no signal.
+ */
+export function clearSupersededRetirements(
+  store: Store,
+  project: ProjectId,
+  clock: Clock,
+) {
+  const stale = store.uow.read((tx) =>
+    tx.assignments
+      .list(project)
+      .filter((a) => a.scope === "work_item" && supersededRetirement(a))
+      .map((a) => a.id),
+  );
+  for (const id of stale)
+    store.uow.run((tx) => {
+      const effect = clearSupersededRetirement(
+        loadCommandState(tx, project),
+        { kind: "system", project_id: project },
+        id,
+        { ids: tx.ids, clock },
+      );
+      if (effect.ok) persistEffect(tx, project, effect.value);
+    });
+  return stale.length;
+}
+
+/**
+ * C-690: a session the idle patrol retained for dispatch (handoff, nothing
+ * signalled) kept every later notification pending, because the dispatcher
+ * treats a handoff as busy and no host operation consumes a handoff without a
+ * queued Run. When notifications are waiting for it (and no Run is queued,
+ * running or being stopped or woken), withdraw that retirement under both
+ * host-ops locks; the dispatcher then wakes the session through its ordinary
+ * guarded path, or replaces it when its CLI is proven gone (C-672).
+ */
+export async function releaseRetainedForWork(
+  store: Store,
+  project: ProjectId,
+  clock: Clock,
+) {
+  const candidates = store.uow.read((tx) =>
+    tx.assignments
+      .list(project)
+      .filter(
+        (a) =>
+          a.scope === "work_item" &&
+          a.status === "active" &&
+          !a.external &&
+          a.idle_retirement?.phase === "waiting" &&
+          a.idle_retirement.handoff === true &&
+          retirementOwnsSession(a),
+      ),
+  );
+  let released = 0;
+  for (const a of candidates) {
+    if (
+      !store.listNotifications({
+        project_id: project,
+        assignment_id: a.id,
+        statuses: LIVE_NOTIFICATION_STATUSES,
+      }).length ||
+      unfinishedBellAttempts(store.database, project, a.id).length
+    )
+      continue;
+    const unlock = await tryHostOpsLock(store, project, a.id);
+    if (!unlock) continue;
+    try {
+      const unlockLaunch = await tryHostOpsLock(store, project, a.id, "launch");
+      if (!unlockLaunch) continue;
+      try {
+        const done = store.uow.run((tx) => {
+          const state = loadCommandState(tx, project);
+          const current = state.assignments.find((v) => v.id === a.id);
+          // Queued work belongs to the C-575 handoff consumer.
+          if (
+            !current ||
+            JSON.stringify(current.idle_retirement) !==
+              JSON.stringify(a.idle_retirement) ||
+            JSON.stringify(current.runtime_ref) !==
+              JSON.stringify(a.runtime_ref) ||
+            runsOf(state.runs, a.id).some((r) => r.status === "queued")
+          )
+            return false;
+          const effect = releaseRetainedRetirement(
+            state,
+            { kind: "system", project_id: project },
+            a.id,
+            { ids: tx.ids, clock },
+          );
+          if (!effect.ok) return false;
+          persistEffect(tx, project, effect.value);
+          return true;
+        });
+        if (done) released++;
+      } finally {
+        await unlockLaunch();
+      }
+    } finally {
+      await unlock();
+    }
+  }
+  return released;
 }
 
 /** C-667/C-672: every eligible owner of this project, bounded per pass. */
