@@ -910,6 +910,116 @@ test("one scheduling pass distributes a batch across available slots before any 
   ).toBe(0);
 });
 
+test("C-716 one scheduling pass counts the project's own quota, not just machine room", async () => {
+  const dir = required(f.dataDir);
+  const worker = "z-worker";
+  const batch = Array.from(
+    { length: 3 },
+    (_, i) =>
+      f.apply((s, a, p) =>
+        createCard(
+          s,
+          a,
+          {
+            title: `Quota ${i}`,
+            repo: "fixture/repo",
+            goal: "Schedule within the project quota",
+            acceptance_criteria: ["Starts"],
+            source: { kind: "quote", text: "Schedule" },
+            base_branch: "main",
+          },
+          p,
+        ),
+      ).data,
+  );
+  f.store.uow.run((tx) => {
+    for (const card of batch) tx.cards.put(f.id, { ...card, status: "todo" });
+    tx.employees.put({
+      id: "E-101",
+      name: "Quota coder",
+      title: "Coder",
+      bio: "",
+      avatar: null,
+      role_id: "coder",
+      launch_profile_ref: null,
+      status: "active",
+      created_at: f.clock.now(),
+      updated_at: f.clock.now(),
+    } as Employee);
+    tx.machines.put(f.id, {
+      ...required(tx.machines.get(f.id, "local")),
+      id: worker,
+      label: "Quota worker",
+      herdr_machine: worker,
+    });
+  });
+  configureMachinePlacement(
+    f.store,
+    dir,
+    { CARDIGAN_CONFIG_DIR: dir },
+    {
+      ...(await loadRunCapacityConfig({ configDir: dir })),
+      forMachine: () => 12,
+      projectQuota: (machine, project) =>
+        machine === worker && project === f.id
+          ? { limit: 1, resources: new Map() }
+          : undefined,
+    },
+    () => undefined,
+  );
+  runSystemRules(f.store, f.id, f.clock, (tx, project) => {
+    const state = loadCommandState(tx, project);
+    return {
+      ...state,
+      read_machine_placement: (...args) => {
+        const { machines } = required(state.read_machine_placement)(...args);
+        return {
+          harness: "pi",
+          machines: new Map(machines).set(worker, {
+            ...required(machines.get(worker)),
+            remote_binding: "allowed",
+            observation_target_matches: true,
+            health: { available: true, status: "passed" },
+            capabilities: [
+              { key: "harness.pi", available: true, version: "1" },
+            ],
+          }),
+        };
+      },
+    };
+  });
+  const events = batch.map(
+    (c) =>
+      required(
+        f
+          .state()
+          .events.find(
+            (e) => e.type === "machine_selected" && e.card_id === c.id,
+          ),
+      ).payload,
+  );
+  // The worker keeps 11 of 12 machine slots free after the first pick, but
+  // this project's quota there is 1: the rest go to local, which has room.
+  expect(events).toMatchObject([
+    { machine_id: worker },
+    {
+      machine_id: "local",
+      candidates: [
+        { machine_id: "local" },
+        {
+          machine_id: worker,
+          occupied: 1,
+          project_limit: { limit: 1, occupied: 1 },
+          remaining_ratio: 0,
+          full: ["项目上限 1/1"],
+        },
+      ],
+    },
+    { machine_id: "local" },
+  ]);
+  expect(events.some((e) => "queued_on" in (e as object))).toBe(false);
+});
+
 test("C-384 first producer is assigned before routing and routine delivery readiness is emitted once", async () => {
   const card = f.apply((s, a, p) =>
     createCard(

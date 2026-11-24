@@ -368,6 +368,18 @@ export interface MachineSelectionCandidate {
     readonly limit: number;
     readonly occupied: number;
   }[];
+  /** C-716: this project's own ceilings on the machine at selection time. */
+  readonly project_limit?: {
+    readonly limit: number;
+    readonly occupied: number;
+  };
+  readonly project_resources?: readonly {
+    readonly key: string;
+    readonly limit: number;
+    readonly occupied: number;
+  }[];
+  /** C-716: limits already full on this machine at selection time. */
+  readonly full?: readonly string[];
 }
 
 export type MachineSelection =
@@ -383,6 +395,8 @@ export type MachineSelection =
       readonly machine_id: string;
       readonly assignment_id?: string;
       readonly candidates?: readonly MachineSelectionCandidate[];
+      /** C-716: every eligible machine was full; the Run queues on these limits. */
+      readonly queued_on?: readonly string[];
       readonly excluded?: readonly {
         readonly machine_id: string;
         readonly reasons: readonly string[];

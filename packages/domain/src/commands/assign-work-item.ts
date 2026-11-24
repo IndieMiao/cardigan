@@ -276,6 +276,7 @@ export function assignWorkItem(
       profile: employee?.launch_profile_ref ?? role.launch_profile_ref,
     },
   );
+  const queued_on = audit?.queued_on;
   const id = d.ids.next(d.state.project_id, "assignment");
   const token_id = `assignment:${JSON.stringify([d.state.project_id, id])}`;
   const assignment: Assignment = {
@@ -341,11 +342,13 @@ export function assignWorkItem(
     },
     {
       type: "status_change",
-      body: automaticTarget
-        ? `系统按角色 ${role.role_id} 自动指派 ${item.id} 给 ${employee?.id}（${automaticTarget === "first_producer" ? "首个产出项" : `交付 ${automaticTarget}`}；活跃 Assignment 数 ${selection ?? 0}，负载最少、员工编号依次优先）`
-        : confirmSameMachine
-          ? `${d.author} 确认 ${item.id} 在原机器 ${machine_id} 从 ${source} 恢复：${previous?.id} → ${id}`
-          : `Assigned ${item.id} to ${role.role_id}`,
+      body: `${
+        automaticTarget
+          ? `系统按角色 ${role.role_id} 自动指派 ${item.id} 给 ${employee?.id}（${automaticTarget === "first_producer" ? "首个产出项" : `交付 ${automaticTarget}`}；活跃 Assignment 数 ${selection ?? 0}，负载最少、员工编号依次优先）`
+          : confirmSameMachine
+            ? `${d.author} 确认 ${item.id} 在原机器 ${machine_id} 从 ${source} 恢复：${previous?.id} → ${id}`
+            : `Assigned ${item.id} to ${role.role_id}`
+      }${queued_on ? `；合格机器均已满，在 ${machine_id} 排队（${queued_on.join("，")}）` : ""}`,
       work_item_id: item.id,
     },
   );

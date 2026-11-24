@@ -680,6 +680,148 @@ test("MC-4 ranks by the tightest required slot without moving an existing assign
   ).toBe(remote.id);
 });
 
+test("C-716 ranks a machine whose project quota is full after a free eligible one", () => {
+  const s = state();
+  const slots = (limit: number, occupied: number) => ({ limit, occupied });
+  const at = (
+    local: Partial<MachinePlacement>,
+    worker: Partial<MachinePlacement>,
+  ): CommandState => ({
+    ...s,
+    machines: [machine(), remote],
+    roles: s.roles.map((r) => ({ ...r, required_capabilities: ["godot>=4"] })),
+    read_machine_placement: () =>
+      placement([
+        ["local", { ...healthy, limit: 12, occupied: 3, ...local }],
+        [remote.id, { ...healthy, limit: 6, occupied: 4, ...worker }],
+      ]),
+  });
+  // Project limit: local has far more machine room, but the project's own 3 are used.
+  const projectFull = value(
+    select(at({ project_quota: { limit: slots(3, 3) } }, {})),
+  );
+  expect(projectFull.data.machine_id).toBe(remote.id);
+  expect(projectFull.events.at(-1)?.payload).toMatchObject({
+    machine_id: remote.id,
+    candidates: [
+      { machine_id: remote.id },
+      {
+        machine_id: "local",
+        project_limit: { limit: 3, occupied: 3 },
+        remaining_ratio: 0,
+        full: ["项目上限 3/3"],
+      },
+    ],
+  });
+  expect(projectFull.events.at(-1)?.payload).not.toHaveProperty("queued_on");
+  // A project-level resource ceiling and a machine-level slot rank the same way.
+  for (const local of [
+    { project_quota: { resources: new Map([["godot", slots(1, 1)]]) } },
+    { resources: new Map([["godot", slots(2, 2)]]) },
+  ]) {
+    const effect = value(select(at(local, {})));
+    expect(effect.data.machine_id).toBe(remote.id);
+    expect(effect.events.at(-1)?.payload).toMatchObject({
+      candidates: [
+        { machine_id: remote.id },
+        {
+          machine_id: "local",
+          remaining_ratio: 0,
+          full: [expect.stringMatching(/godot 名额 (1\/1|2\/2)$/)],
+        },
+      ],
+    });
+  }
+  // An unrelated resource ceiling does not count against this item.
+  expect(
+    value(
+      select(
+        at(
+          { project_quota: { resources: new Map([["blender", slots(1, 1)]]) } },
+          {},
+        ),
+      ),
+    ).data.machine_id,
+  ).toBe("local");
+  // A zero project ceiling is full, never NaN.
+  expect(
+    value(select(at({ project_quota: { limit: slots(0, 0) } }, {}))).data
+      .machine_id,
+  ).toBe(remote.id);
+});
+
+test("C-716 queues on the best full machine and names the limit when all are full", () => {
+  const s = state();
+  const full: CommandState = {
+    ...s,
+    machines: [machine(), remote],
+    read_machine_placement: () =>
+      placement([
+        [
+          "local",
+          {
+            ...healthy,
+            limit: 12,
+            occupied: 3,
+            project_quota: { limit: { limit: 3, occupied: 3 } },
+          },
+        ],
+        [remote.id, { ...healthy, limit: 4, occupied: 4 }],
+      ]),
+  };
+  const effect = value(select(full));
+  // Unchanged ordering among full machines: registry order breaks the tie.
+  expect(effect.data.machine_id).toBe("local");
+  const selected = effect.events.find((e) => e.type === "machine_selected");
+  expect(selected?.payload).toMatchObject({
+    machine_id: "local",
+    queued_on: ["项目上限 3/3"],
+    candidates: [
+      { machine_id: "local", full: ["项目上限 3/3"] },
+      { machine_id: remote.id, full: ["机器上限 4/4"] },
+    ],
+  });
+  expect(effect.timeline.at(-1)?.body).toContain(
+    "合格机器均已满，在 local 排队（项目上限 3/3）",
+  );
+});
+
+test("C-716 an existing assignment stays on its machine when that machine's project quota fills", () => {
+  const s = state();
+  const multi: CommandState = {
+    ...s,
+    machines: [machine(), remote],
+    read_machine_placement: () =>
+      placement([
+        ["local", { ...healthy, limit: 12, occupied: 3 }],
+        [remote.id, { ...healthy, limit: 6, occupied: 4 }],
+      ]),
+  };
+  const first = value(select(multi));
+  expect(first.data.machine_id).toBe("local");
+  const bound = apply(multi, first);
+  const repeated = value(
+    select({
+      ...bound,
+      read_machine_placement: () =>
+        placement([
+          [
+            "local",
+            {
+              ...healthy,
+              limit: 12,
+              occupied: 3,
+              project_quota: { limit: { limit: 3, occupied: 3 } },
+            },
+          ],
+          [remote.id, { ...healthy, limit: 6, occupied: 0 }],
+        ]),
+    }),
+  );
+  expect(repeated.data).toEqual(first.data);
+  expect(repeated.events).toEqual([]);
+});
+
 test.each([
   [undefined, [], "启动配置未知"],
   ["claude-code", [], "harness.claude-code：未验证"],

@@ -552,6 +552,14 @@ export function runCapacitySnapshot(
   }
   return {
     withinProjectQuota,
+    /** C-716: a quota project's current usage on one machine (Runs only). */
+    projectUsage: (project: string, machine: string) => {
+      const usage = projectUsage.get(project)?.get(machine);
+      return {
+        occupied: usage?.occupied ?? 0,
+        resources: usage?.resources ?? new Map<string, number>(),
+      };
+    },
     occupied,
     agentOccupied,
     allAgentOccupied,
