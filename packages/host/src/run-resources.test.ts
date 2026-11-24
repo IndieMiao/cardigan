@@ -23,7 +23,7 @@ import {
 import { MachineLeases } from "./resource-leases.js";
 import type { ResourceProbe } from "./resource-probe.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
-import { runResourceKeys } from "./run-resources.js";
+import { runResourceKeys, unclaimedResourceKeys } from "./run-resources.js";
 
 const project = "first";
 const at = "2032-02-01T00:00:00.000Z";
@@ -263,21 +263,6 @@ test("C-721 one heavy notice in the same bell keeps every resource", () => {
       { kind: "review", event: review },
     ]),
   ).toEqual(FULL);
-  // New notices for a running Run are judged on their own.
-  expect(
-    store.uow.read((tx) =>
-      runResourceKeys(tx, project, owner, [reply, order], undefined, [
-        { kind: "instruction", event_id: order.id },
-      ]),
-    ),
-  ).toEqual(FULL);
-  expect(
-    store.uow.read((tx) =>
-      runResourceKeys(tx, project, owner, [reply], undefined, [
-        { kind: "comment", event_id: reply.id },
-      ]),
-    ),
-  ).toEqual([]);
 });
 
 test("C-721 a light Run gets no adb slot or emulator next to a slot holder, and its empty claim inspects cleanly", async () => {
@@ -364,4 +349,16 @@ test("C-721 a light Run gets no adb slot or emulator next to a slot holder, and 
   expect(
     leases.startBlocked(project, owner, { ...heavy, resource_keys: FULL }, at),
   ).toEqual(expect.any(String));
+});
+
+test("C-721 an admitted Run reports the work item's resources it does not hold", () => {
+  const { owner } = seed();
+  const unclaimed = (run: Pick<Run, "resource_keys"> | undefined) =>
+    store.uow.read((tx) => unclaimedResourceKeys(tx, project, owner, run));
+  expect(unclaimed({ resource_keys: [] })).toEqual(FULL);
+  expect(unclaimed({ resource_keys: ["godot"] })).toEqual(["android.emulator"]);
+  expect(unclaimed({ resource_keys: FULL })).toEqual([]);
+  // No admission snapshot (legacy) or no Run: nothing is known to be missing.
+  expect(unclaimed({})).toEqual([]);
+  expect(unclaimed(undefined)).toEqual([]);
 });

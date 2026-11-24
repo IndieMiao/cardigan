@@ -16,6 +16,7 @@ import {
 } from "@cardigan/host";
 import {
   type BellAttempt,
+  PROJECT_EVENT_STREAM,
   recordNotification,
   type Store,
   type StoreTransactionContext,
@@ -109,11 +110,22 @@ export class QueuedRunPatrol {
               a,
               state.events,
               run,
-              store.listNotifications({
-                project_id: project,
-                status: "pending",
-                assignment_id: a.id,
-              }),
+              // Notices the owner already acknowledged ride on no bell.
+              store
+                .listNotifications({
+                  project_id: project,
+                  status: "pending",
+                  assignment_id: a.id,
+                })
+                .filter(
+                  (n) =>
+                    !state.cursors.some(
+                      (c) =>
+                        c.assignment_id === a.id &&
+                        c.card_id === (n.card_id ?? PROJECT_EVENT_STREAM) &&
+                        c.acked_seq >= n.seq,
+                    ),
+                ),
             ),
           );
       }

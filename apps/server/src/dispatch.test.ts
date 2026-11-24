@@ -1870,10 +1870,13 @@ test("C-721 a submit/reply follow-up starts while godot and the emulator are ful
   await new Dispatcher(settings).tick();
   expect(readRunQueue(f.store)).toEqual([]);
   expect(own("dispatched")).toMatchObject([{ resource_keys: [] }]);
-  expect(runtime.wake).toHaveBeenCalledOnce();
-  expect(vi.mocked(runtime.wake).mock.calls[0]?.[1]).toContain(
-    "未占用 godot、android.emulator 名额",
-  );
+  // A fresh session: never the idle one that may carry device access.
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(options.startRun).toHaveBeenCalledOnce();
+  expect(vi.mocked(options.startRun).mock.calls[0]?.[0]).toMatchObject({
+    bell: expect.stringContaining("未占用 godot、android.emulator 名额"),
+    replacement: { reason: "tool_catalog_changed" },
+  });
   expect(occupied("godot")).toBe(1);
   expect(occupied("android.emulator")).toBe(1);
 });
@@ -1937,7 +1940,7 @@ test.each(["rework", "fix", "decision_resumed"] as const)(
   },
 );
 
-test("C-721 work that needs resources is never handed to a running follow-up that holds none", async () => {
+test("C-721 a running follow-up that holds no resources is told so with every notice; the next Run claims them in a new session", async () => {
   const { busy, own, settings } = fullDevices();
   const light = f.session(target.assignment, false);
   f.store.uow.run((tx) => {
@@ -1947,17 +1950,17 @@ test("C-721 work that needs resources is never handed to a running follow-up tha
   });
   comment("Thanks, one more reply please");
   await new Dispatcher(settings).tick();
-  expect(runtime.wake).toHaveBeenCalledOnce(); // a reply continues the turn
   f.advance(1);
   instruct("Record the video again");
   await new Dispatcher(settings).tick();
-  expect(runtime.wake).toHaveBeenCalledOnce();
-  expect(ownNotes().find((n) => n.kind === "instruction")?.status).toBe(
-    "pending",
-  );
+  const bells = vi.mocked(runtime.wake).mock.calls.map(([, bell]) => bell);
+  expect(bells).toHaveLength(2);
+  for (const bell of bells)
+    expect(bell).toContain("未占用 godot、android.emulator 名额");
+  expect(own("running").map((r) => r.id)).toEqual([light.id]);
   finish(target.assignment);
+  instruct("Now record it");
   await new Dispatcher(settings).tick();
-  expect(runtime.wake).toHaveBeenCalledOnce();
   expect(readRunQueue(f.store)).toMatchObject([
     { assignment_id: target.assignment.id },
   ]);
@@ -1966,6 +1969,11 @@ test("C-721 work that needs resources is never handed to a running follow-up tha
   expect(own("dispatched")).toMatchObject([
     { resource_keys: ["godot", "android.emulator"] },
   ]);
+  expect(options.startRun).toHaveBeenCalledOnce();
+  expect(vi.mocked(options.startRun).mock.calls[0]?.[0]).toMatchObject({
+    bell: expect.not.stringContaining("未占用"),
+    replacement: { reason: "tool_catalog_changed" },
+  });
 });
 
 test("MC-4 a withdrawn legacy Run holds its retry's resources before and after redispatch", async () => {
@@ -3984,7 +3992,7 @@ test("C-721 a follow-up inspected for its own empty claim passes admission besid
   }).tick();
   expect(inspect).toHaveBeenCalledWith(f.project, expect.anything(), []);
   expect(readRunQueue(f.store)).toEqual([]);
-  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(options.startRun).toHaveBeenCalledOnce();
   expect(
     f.state().events.filter((e) => e.type === "machine_resource_waiting"),
   ).toEqual([]);

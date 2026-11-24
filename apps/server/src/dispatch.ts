@@ -97,6 +97,7 @@ import {
   settleTestReviewLimits,
   testReviewRunPrompt,
   tryHostOpsLock,
+  unclaimedResourceKeys,
   upgradeIdleAssignmentRoles,
   WORKTREE_LAUNCH_LEASE_MS,
   wakeIsCurrent,
@@ -297,7 +298,7 @@ const sameRef = (a: Assignment, b: Assignment) =>
 /** C-721: a submit/reply follow-up runs without its work item's resources. */
 const unclaimedResourcesRule = (keys: readonly string[]) =>
   keys.length
-    ? `本次 Run 只处理提交和回帖，未占用 ${keys.join("、")} 名额：不要启动或操作这些资源；确需使用时用 report_blocker（needs=role）说明所需资源后结束本次 Run，恢复后的 Run 会按工作项占用名额。`
+    ? `本次 Run 未占用 ${keys.join("、")} 名额，只做提交和回帖：不要启动或操作这些资源；需要它们的工作（包括本次 Run 新收到的通知）用 report_blocker（needs=role）说明所需资源后结束本次 Run，恢复后的 Run 会按工作项占用名额。`
     : undefined;
 const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
   s.cursors.some(
@@ -1225,7 +1226,11 @@ export class Dispatcher {
     const catalog = this.catalog(a, project);
     const replaceCatalog =
       live &&
-      ((!continuing && this.options.leases?.freshSession(project, a)) ||
+      ((!continuing &&
+        (this.options.leases?.freshSession(project, a) ||
+          // C-721: a Run without some of its work item's resources never
+          // shares a session (and its device environment) with one that has them.
+          this.admissionKeys(project, a, notes, prior).restricted)) ||
         (catalog !== undefined &&
           prior?.tool_catalog !== undefined &&
           prior.tool_catalog !== catalog));
@@ -1325,24 +1330,7 @@ export class Dispatcher {
         ? await this.options.leases?.inspect(
             project,
             a,
-            this.options.store.uow.read((tx) => {
-              const fresh = this.loadState(tx, project);
-              const ready = this.readyNotes(fresh, a, notes);
-              const cause = inboxCause(fresh, a, ready);
-              return this.runKeys(
-                tx,
-                fresh,
-                a,
-                this.queued(fresh, a) ??
-                  fresh.runs.find(
-                    (r) =>
-                      r.assignment_id === a.id &&
-                      (r.id === cause?.run_id ||
-                        r.trigger_event_id === cause?.event_id),
-                  ),
-                ready,
-              );
-            }),
+            this.admissionKeys(project, a, notes).keys,
           )
         : undefined;
     if (this.closing) return skip("shutting_down");
@@ -1894,6 +1882,42 @@ export class Dispatcher {
       ready,
     );
   }
+  /**
+   * C-721: before the claim, the keys the addressed Run would claim, computed
+   * exactly as inside the claim. `restricted`: this Run or the session's
+   * prior Run holds fewer than the work item's resources.
+   */
+  private admissionKeys(
+    project: ProjectId,
+    a: Assignment,
+    notes: readonly Notification[],
+    prior?: Run,
+  ) {
+    return this.options.store.uow.read((tx) => {
+      const state = this.loadState(tx, project);
+      const ready = this.readyNotes(state, a, notes);
+      const cause = inboxCause(state, a, ready);
+      const keys = this.runKeys(
+        tx,
+        state,
+        a,
+        this.queued(state, a) ??
+          state.runs.find(
+            (r) =>
+              r.assignment_id === a.id &&
+              (r.id === cause?.run_id ||
+                r.trigger_event_id === cause?.event_id),
+          ),
+        ready,
+      );
+      return {
+        keys,
+        restricted: [{ resource_keys: keys }, prior].some(
+          (r) => unclaimedResourceKeys(tx, project, a, r).length > 0,
+        ),
+      };
+    });
+  }
   /** C-721: an earlier waiter is judged by what its own Run would claim. */
   private waiterKeys(tx: ReadRepositories) {
     const pending = new Map<string, readonly Notification[]>();
@@ -2103,16 +2127,6 @@ export class Dispatcher {
         if (!sameInboxTarget(expectedTarget, target))
           return skip("inbox_target_changed");
       }
-      // C-721: never hand work that needs resources to a running Run that
-      // holds none; it starts its own Run once this one ends.
-      const held = continuing?.resource_keys;
-      if (
-        held &&
-        runResourceKeys(tx, project, a, state.events, undefined, ready).some(
-          (k) => !held.includes(k),
-        )
-      )
-        return skip("unclaimed_resources");
       const previous = continuing
         ? undefined
         : previousInboxTurn(state, a, ready);
@@ -2354,12 +2368,7 @@ export class Dispatcher {
       } else if (live) attempt = bindRepairAttempt(store, state, run, attempt);
 
       // C-721: every bell of a Run admitted without some resources says so.
-      const claimed = run.resource_keys;
-      const unclaimed = claimed
-        ? assignmentResourceKeys(tx, project, a).filter(
-            (k) => !claimed.includes(k),
-          )
-        : [];
+      const unclaimed = unclaimedResourceKeys(tx, project, a, run);
       const followup = decisionFollowupPrompt(
         state,
         [...new Set([run.trigger_event_id, ...ready.map((n) => n.event_id)])],

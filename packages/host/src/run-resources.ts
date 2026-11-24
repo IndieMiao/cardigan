@@ -111,25 +111,18 @@ function lightEvent(
  * C-721: the physical resources this Run claims. A producer follow-up whose
  * trigger and every pending notice only ask it to submit or reply claims none;
  * any other Run claims the work item's and role's resources. Pass the notices
- * the Run's bell will carry: a single heavy notice keeps the full set. Without
- * a Run, only the notices are judged (new work for an already running Run).
+ * the Run's bell will carry: a single heavy notice keeps the full set.
  */
 export function runResourceKeys(
   tx: ReadRepositories,
   project: string,
   owner: Assignment,
   events: readonly Event[],
-  run:
-    | { readonly kind: Run["kind"]; readonly trigger_event_id?: string }
-    | undefined,
+  run: { readonly kind: Run["kind"]; readonly trigger_event_id?: string },
   notes: readonly Pick<Notification, "kind" | "event_id">[],
 ): string[] {
   const keys = assignmentResourceKeys(tx, project, owner);
-  if (
-    !keys.length ||
-    (run && run.kind !== "followup") ||
-    owner.scope !== "work_item"
-  )
+  if (!keys.length || run.kind !== "followup" || owner.scope !== "work_item")
     return keys;
   const item = owner.work_item_id
     ? tx.work_items.get(project, owner.work_item_id)
@@ -137,10 +130,29 @@ export function runResourceKeys(
   if (item?.kind !== "produce") return keys;
   const light = (id: string | undefined) =>
     lightEvent(tx, project, owner, item, eventById(events, id));
-  return (!run || light(run.trigger_event_id)) &&
+  return light(run.trigger_event_id) &&
     notes.every((n) => LIGHT_NOTE_KINDS.has(n.kind) && light(n.event_id))
     ? []
     : keys;
+}
+
+/**
+ * C-721: the work item's resources this admitted Run does not hold. Such a Run
+ * gets no device at launch and is told so in every bell. Legacy Runs without
+ * an admission snapshot report none.
+ */
+export function unclaimedResourceKeys(
+  tx: ReadRepositories,
+  project: string,
+  owner: Assignment,
+  run: Pick<Run, "resource_keys"> | undefined,
+): string[] {
+  const held = run?.resource_keys;
+  return held
+    ? assignmentResourceKeys(tx, project, owner).filter(
+        (k) => !held.includes(k),
+      )
+    : [];
 }
 
 function runEvent(history: readonly Event[], run: Run, type: string) {

@@ -2,7 +2,7 @@ import type { Assignment, Runtime } from "@cardigan/domain";
 import {
   dispatchRun,
   finishRun,
-  postComment,
+  issueInstruction,
   queueRun,
   stoppedByHuman,
   stopWorkItemAssignment,
@@ -106,9 +106,10 @@ const finish = (owner: Assignment) => {
     f.actorFor(owner),
   );
 };
-const comment = (owner: ReturnType<typeof f.create>) =>
+// C-721: godot work is an instruction; a comment would claim no resources.
+const instruct = (owner: ReturnType<typeof f.create>) =>
   f.apply((s, a, p) =>
-    postComment(
+    issueInstruction(
       s,
       a,
       { card_id: owner.card.id, work_item_id: owner.item.id, body: "Go" },
@@ -211,7 +212,7 @@ test("C-624 a start queued after a human stop dispatches once the emulator frees
   for (const owner of later) {
     requireCapabilities(owner.item, ["godot"]);
     f.session(owner.assignment);
-    comment(owner);
+    instruct(owner);
   }
   const dispatcher = new Dispatcher({ ...options, ...limits });
   await dispatcher.tick();
@@ -264,7 +265,7 @@ test("C-624 a stopped owner's leftover queue never blocks others; a human start 
   const later = f.create();
   requireCapabilities(later.item, ["godot"]);
   f.session(later.assignment);
-  comment(later);
+  instruct(later);
   const dispatcher = new Dispatcher({ ...options, ...limits });
   await dispatcher.tick();
   expect(
