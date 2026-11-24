@@ -926,3 +926,103 @@ test("C-599: the real host shows the tools command only after every check and si
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("C-708: this project's binding lists unverified catalog keys with the built-in probe and the last check's failures", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    for (const id of ["example", "peer"]) store.createProject({ id });
+    const now = new Date().toISOString();
+    for (const project of ["example", "peer"]) {
+      const system = { kind: "system" as const, project_id: project };
+      beginMachineObservation(store, system, project, "local", "obs", now);
+      completeMachineObservation(
+        store,
+        system,
+        project,
+        "local",
+        "obs",
+        {
+          status: "passed",
+          checked_at: now,
+          blockers: [],
+          launch_enabled: true,
+          capability_failures: [
+            {
+              key: "browser.chromium",
+              search_locations: ["PATH:chromium"],
+              search_incomplete: true,
+            },
+          ],
+        },
+        [
+          {
+            key: "node",
+            version: "24.11.0",
+            verified_at: now,
+            evidence_ref: "private-ref",
+          },
+        ],
+      );
+    }
+    const clock = { now: () => now };
+    const checks = new MachineChecks(
+      store,
+      clock,
+      new AbortController().signal,
+    );
+    const os = store.uow.read((tx) => tx.machines.get("example", "local")?.os);
+    const [machine] = machineView(
+      store,
+      "example",
+      {
+        checks,
+        capabilityCatalog: () => [
+          { key: "node", os: ["linux", "darwin"] },
+          { key: "godot", os: ["linux", "darwin"] },
+          { key: "browser.chromium", os: ["linux", "darwin"] },
+          { key: "private-tool", os: ["linux", "darwin"] },
+          { key: "other-os", os: [os === "linux" ? "darwin" : "linux"] },
+        ],
+      },
+      now,
+      "local",
+    );
+    const mine = machine?.bindings.find((b) => b.is_current);
+    const peer = machine?.bindings.find((b) => !b.is_current);
+    expect(
+      mine?.capabilities.map((c) => [c.key, c.state, "probe" in c && c.probe]),
+    ).toEqual([
+      ["node", "verified", { kind: "command", argv: ["node", "--version"] }],
+      [
+        "godot",
+        "unverified",
+        { kind: "command", argv: ["godot", "--version"] },
+      ],
+      [
+        "browser.chromium",
+        "unverified",
+        {
+          kind: "search",
+          locations: expect.arrayContaining(["PATH:chromium"]),
+        },
+      ],
+      // A private custom check is never shown.
+      ["private-tool", "unverified", false],
+    ]);
+    expect(mine?.capability_failures).toEqual([
+      {
+        key: "browser.chromium",
+        search_locations: ["PATH:chromium"],
+        search_incomplete: true,
+      },
+    ]);
+    // Another project's binding keeps only its own records.
+    expect(peer?.capabilities.map((c) => [c.key, "probe" in c])).toEqual([
+      ["node", false],
+    ]);
+    expect(peer?.capability_failures).toEqual([]);
+    expect(JSON.stringify(machine)).not.toContain("private-ref");
+  } finally {
+    store.close();
+  }
+});
