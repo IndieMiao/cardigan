@@ -65,7 +65,12 @@ export interface CheckoutResult {
     | "security"
     | "rate_limited"
     | "job_unavailable"
-    | "timeout_or_cancel";
+    | "timeout_or_cancel"
+    | "timeout"
+    | "network"
+    | "http";
+  /** Fixed-shape summary of the log download error (limit, bytes, code). */
+  readonly logFailureDetail?: string;
 }
 export interface CheckoutInput {
   readonly execution: ExecutionConfig;

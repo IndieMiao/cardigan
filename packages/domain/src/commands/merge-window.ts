@@ -1,4 +1,5 @@
 import type { Actor, Card, Event } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import type { CardId } from "../ids.js";
 import {
   type CommandDraft,
@@ -140,7 +141,7 @@ export function setMergeWindow(
 export function openConflictWindow(d: CommandDraft, card: Card) {
   const config = d.state.project_settings?.merge_queue;
   if (!config) return;
-  const events = [...d.state.events, ...d.events];
+  const events = appendEvents(d.state.events, d.events);
   if (mergeWindows(events).some((w) => w.card_id === card.id && w.open)) return;
   if (
     events.filter((e) => e.card_id === card.id && e.type === "merge_conflicted")

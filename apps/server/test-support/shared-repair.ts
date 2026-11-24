@@ -39,7 +39,21 @@ export async function sharedRepairStore() {
     for (const kind of ["run", "review", "delivery", "decision"] as const)
       for (let i = 0; i < 128; i++) tx.ids.next(project, kind);
     for (const c of state.cards) tx.cards.put(project, c);
-    for (const w of state.work_items) tx.work_items.put(project, w);
+    // C-610: this lane's alignment round was already disputed, so its third
+    // rejection keeps the PM path these repair scenarios exercise.
+    for (const w of state.work_items)
+      tx.work_items.put(
+        project,
+        w.kind === "verify" && w.id === id("work_item", 3)
+          ? {
+              ...w,
+              review_alignment: {
+                review_id: id("review", 31),
+                status: "disputed",
+              },
+            }
+          : w,
+      );
     for (const r of state.roles) tx.roles.put(project, r);
     for (const r of state.reviews) tx.reviews.put(project, r);
     for (const d of state.deliveries) tx.deliveries.put(project, d);
@@ -92,6 +106,7 @@ export async function sharedRepairStore() {
             kind: "code",
             issues: n === 2 ? [first] : [],
             issue_refs: n === 2 ? [] : refs,
+            pass_conditions: [{ description: "补上校验", basis: "AC1" }],
           },
           { clock, ids: tx.ids },
         ),

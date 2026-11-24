@@ -25,6 +25,7 @@ export const parallelBug = {
   severity: "major" as const,
   description: "Synthetic missing validation",
   impact: "functional" as const,
+  basis: "AC1",
   must_fix: true,
   pre_existing: false,
 };

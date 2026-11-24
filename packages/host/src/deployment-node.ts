@@ -850,14 +850,23 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     this.serverLog = new DeploymentBuildLog();
     this.spawnFailed = false;
     this.serverFailureRecorded = false;
-    const { server_log_max_bytes: maxBytes, server_log_max_files: maxFiles } =
-      this.options.config;
+    const {
+      server_log_max_bytes: maxBytes,
+      server_log_max_files: maxFiles,
+      server_log_retention_hours: hours,
+    } = this.options.config;
     const log =
       maxBytes !== undefined && maxFiles !== undefined
         ? new DeploymentServerLog(
             this.directory,
             build.sha,
-            { maxBytes, maxFiles },
+            {
+              maxBytes,
+              maxFiles,
+              ...(hours === undefined
+                ? {}
+                : { retentionMs: hours * 3_600_000 }),
+            },
             (entry) => writeServerLogAudit(this.options.store, entry),
             this.serverLogFinished,
           )

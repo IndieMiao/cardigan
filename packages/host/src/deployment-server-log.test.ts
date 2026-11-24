@@ -10,6 +10,7 @@ import {
   rename,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -48,11 +49,16 @@ async function fixture() {
   const audit = (entry: ServerLogAudit) => {
     entries.push(entry);
   };
-  const create = (maxBytes = 8, maxFiles = 3, previous?: Promise<void>) =>
+  const create = (
+    maxBytes = 8,
+    maxFiles = 3,
+    previous?: Promise<void>,
+    retentionMs?: number,
+  ) =>
     new DeploymentServerLog(
       dir,
       "a".repeat(40),
-      { maxBytes, maxFiles },
+      { maxBytes, maxFiles, ...(retentionMs ? { retentionMs } : {}) },
       audit,
       previous,
     );
@@ -107,6 +113,53 @@ test("rotates raw bytes at exact boundaries and retains a bounded private histor
   expect(await readFile(join(f.path, reduced[0] ?? "missing"), "utf8")).toBe(
     "tail",
   );
+});
+
+test("C-638: restarts no longer push out recent logs; age and the byte budget do", async () => {
+  const f = await fixture();
+  // Ten short generations (restarts) of 2 bytes each, far more files than
+  // `maxFiles`, all well inside the 8 * 4 byte budget: every one is kept.
+  let previous: Promise<void> | undefined;
+  for (let i = 0; i < 10; i++) {
+    const log = f.create(8, 4, previous);
+    log.append(Buffer.from(String(i).padStart(2, "0")));
+    await log.close();
+    previous = log.finished;
+  }
+  const logs = async () =>
+    (await readdir(f.path)).filter((n) => n.endsWith(".log")).sort();
+  expect(await logs()).toHaveLength(10);
+  // Files older than the retention window go at the next rotation.
+  const old = (await logs()).slice(0, 3);
+  const past = new Date(Date.now() - 49 * 60 * 60 * 1000);
+  for (const name of old) await utimes(join(f.path, name), past, past);
+  const next = f.create(8, 4, previous);
+  next.append(Buffer.from("x"));
+  await next.close();
+  const kept = await logs();
+  expect(kept).toHaveLength(8);
+  for (const name of old) expect(kept).not.toContain(name);
+  // A shorter window from the host configuration applies too.
+  await new Promise((done) => setTimeout(done, 5));
+  const recent = f.create(8, 4, next.finished, 1);
+  recent.append(Buffer.from("y"));
+  await recent.close();
+  expect(await logs()).toHaveLength(1);
+  const small = await logs();
+  // Over the byte budget the oldest go first: closed files stay within
+  // 8 * (4 - 1) bytes, so the directory never exceeds 8 * 4.
+  const full = f.create(8, 4, recent.finished);
+  full.append(Buffer.alloc(8 * 3, 0x61));
+  await full.close();
+  const fuller = f.create(8, 4, full.finished);
+  fuller.append(Buffer.alloc(8 * 2, 0x62));
+  await fuller.close();
+  const bounded = await logs();
+  expect(bounded).toHaveLength(4);
+  expect(bounded).not.toContain(small[0]);
+  let total = 0;
+  for (const name of bounded) total += (await lstat(join(f.path, name))).size;
+  expect(total).toBe(8 * 4);
 });
 
 test.each(["symlink", "permissions", "replacement", "hardlink"])(

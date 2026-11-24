@@ -31,6 +31,7 @@ export const CLI_TOOLS = {
   "role activate": null,
   "role rollback": null,
   "role upgrade": null,
+  "role overlay": null,
   "machine register": null,
   "machine update": null,
   "machine list": null,

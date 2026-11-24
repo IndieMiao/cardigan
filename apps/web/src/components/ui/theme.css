@@ -994,3 +994,188 @@
     }
   }
 }
+
+/* C-615: attachments named in a Markdown body (`attachment-123`) render as a
+   compact chip: type icon and file name on the body's line. An image chip
+   shows its thumbnail while hovered or focused. */
+@layer components {
+  .ui-attachment-ref {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    max-width: 100%;
+    padding: 0 var(--ui-space-1);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-radius);
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    text-decoration: none;
+    vertical-align: baseline;
+  }
+  a.ui-attachment-ref:hover {
+    border-color: var(--ui-border-hover);
+    background: var(--surface-muted);
+  }
+  a.ui-attachment-ref:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: var(--ui-stroke);
+  }
+  .ui-attachment-ref[data-pending] {
+    border-style: dashed;
+    color: var(--text-muted);
+  }
+  .ui-attachment-ref-icon {
+    flex: none;
+    width: var(--ui-arrow);
+    height: var(--ui-arrow);
+    color: var(--text-muted);
+  }
+  /* A long name is cut short so the chip never widens the body: a percentage
+     cap does not shrink an inline box's min-content (V-3069). */
+  .ui-attachment-ref-name {
+    min-width: 0;
+    max-width: min(var(--ui-search-max), 50vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ui-attachment-ref-peek {
+    display: none;
+    position: absolute;
+    z-index: 5;
+    top: calc(100% + var(--ui-space-1));
+    left: 0;
+    padding: var(--ui-space-1);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+    background: var(--surface);
+    box-shadow: 0 var(--ui-space-1) var(--ui-space-3) rgb(0 0 0 / 0.16);
+  }
+  /* Near the right edge the preview opens leftwards (AttachmentRefBody). */
+  .ui-attachment-ref[data-peek-align="end"] > .ui-attachment-ref-peek {
+    right: 0;
+    left: auto;
+  }
+  .ui-attachment-ref-peek > img {
+    display: block;
+    width: min(
+      calc(var(--ui-graph-node) * 1.25),
+      calc(100vw - var(--ui-space-4))
+    );
+    height: var(--ui-graph-node);
+    object-fit: contain;
+  }
+  a.ui-attachment-ref:is(:hover, :focus-visible) > .ui-attachment-ref-peek {
+    display: block;
+  }
+
+  /* Files waiting to be sent with a comment. */
+  .ui-file-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ui-space-1);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .ui-file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    min-width: 0;
+    max-width: 100%;
+    height: var(--ui-control);
+    padding-inline: var(--ui-space-2) 0;
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-radius);
+    background: var(--surface);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .ui-file-chip-icon {
+    flex: none;
+    width: var(--ui-arrow);
+    height: var(--ui-arrow);
+    color: var(--text-muted);
+  }
+  .ui-file-chip-name {
+    min-width: 0;
+    max-width: min(var(--ui-search-max), 30vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ui-file-chip-size {
+    flex: none;
+    color: var(--text-muted);
+    font-size: var(--ui-text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .ui-file-chip > .ui-input {
+    width: var(--ui-search-min);
+    height: calc(var(--ui-control) - var(--ui-space-1));
+    font-size: var(--ui-text-xs);
+  }
+  .ui-file-chip-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: var(--ui-control);
+    /* A full 28px target: it overlaps the chip's top and bottom border. */
+    height: var(--ui-control);
+    margin-block: calc(-1 * var(--ui-stroke));
+    padding: 0;
+    border: 0;
+    border-radius: 0 var(--ui-radius) var(--ui-radius) 0;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .ui-file-chip-remove:hover:not(:disabled) {
+    background: var(--surface-muted);
+    color: var(--text);
+  }
+  .ui-file-chip-remove:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: calc(-1 * var(--ui-focus-width));
+  }
+  .ui-file-chip-remove:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+  .ui-file-chip-remove > svg {
+    width: var(--ui-arrow);
+    height: var(--ui-arrow);
+  }
+  .ui-file-problems {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    color: var(--danger);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  /* The comment box's tabs, with the upload button at the far end. */
+  .ui-comment-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+  }
+  button.ui-file-picker {
+    margin-inline-start: auto;
+    gap: var(--ui-space-1);
+  }
+  .ui-file-picker > svg {
+    width: var(--ui-icon);
+    height: var(--ui-icon);
+  }
+  /* A box files can be dropped on: outlined while a file is dragged over. */
+  .ui-drop-target[data-dragging] {
+    outline: calc(var(--ui-stroke) * 2) dashed var(--ui-focus);
+    outline-offset: calc(-1 * var(--ui-stroke) * 2);
+  }
+}

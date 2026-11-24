@@ -11,31 +11,17 @@ import type {
   ToolName,
   TransactionContext,
 } from "@cardigan/domain";
+import { streamHistory } from "@cardigan/domain";
 import type { McpBackend, McpReadContext } from "../backend.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import type { ToolContext } from "../tools/types.js";
 
-const histories = new WeakMap<
-  ReadonlyMap<string, readonly Event[]>,
-  { cards: readonly string[]; events: readonly Event[] }
->();
-
-/** Entity-only revisions do not change immutable event history or its indexes. */
+/** Project stream, then card streams in card order (C-640: built from the Store log). */
 function eventHistory(
   streams: ReadonlyMap<string, readonly Event[]>,
   cards: readonly { id: string }[],
 ) {
-  const cached = histories.get(streams);
-  if (
-    cached?.cards.length === cards.length &&
-    cached.cards.every((id, i) => id === cards[i]?.id)
-  )
-    return cached.events;
-  const events = ["", ...cards.map((c) => c.id)].flatMap(
-    (id) => streams.get(id) ?? [],
-  );
-  histories.set(streams, { cards: cards.map((c) => c.id), events });
-  return events;
+  return streamHistory(streams, ["", ...cards.map((c) => c.id)]);
 }
 
 export function unwrap<T>(result: Result<T>): T {
@@ -197,6 +183,9 @@ export function executeCommand<P, T>(
                   ids: tx.ids,
                   ...(tx.unreservedAssignment
                     ? { unreservedAssignment: tx.unreservedAssignment }
+                    : {}),
+                  ...(tx.platformDeployments
+                    ? { platform_deployments: tx.platformDeployments }
                     : {}),
                 }),
               ),

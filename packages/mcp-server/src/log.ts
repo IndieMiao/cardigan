@@ -5,7 +5,7 @@ export type LogEntry = {
   readonly pid?: number;
   readonly request_id?: string;
   readonly phases_ms?: Readonly<Record<string, number>>;
-  readonly event: "http" | "tool" | "auth";
+  readonly event: "http" | "tool" | "auth" | "tool_bookkeeping";
   readonly method?: string | undefined;
   readonly tool?: string | undefined;
   readonly assignment_id?: string | undefined;
@@ -13,6 +13,11 @@ export type LogEntry = {
   readonly code: string;
   readonly status?: number | undefined;
   readonly duration_ms?: number | undefined;
+  /** C-635: write transactions a tool call attempted before its handler. */
+  readonly ack_writes?: number | undefined;
+  /** C-635: write transactions of one deferred flush, and what still waits. */
+  readonly writes?: number | undefined;
+  readonly pending?: number | undefined;
 };
 
 export type Logger = (entry: LogEntry) => void;

@@ -79,6 +79,30 @@ test("server logs are opt-in and require a complete, finite retention budget", (
     }),
   ).toThrow();
 });
+test("C-638: server log retention is whole hours and needs the log limits", () => {
+  const limits = { server_log_max_bytes: 16, server_log_max_files: 2 };
+  expect(
+    parseDeploymentConfig({ ...config, ...limits }).server_log_retention_hours,
+  ).toBeUndefined();
+  expect(
+    parseDeploymentConfig({
+      ...config,
+      ...limits,
+      server_log_retention_hours: 48,
+    }),
+  ).toMatchObject({ server_log_retention_hours: 48 });
+  for (const value of [0, -1, 1.5, "48", null, 24 * 365 + 1])
+    expect(() =>
+      parseDeploymentConfig({
+        ...config,
+        ...limits,
+        server_log_retention_hours: value,
+      }),
+    ).toThrow();
+  expect(() =>
+    parseDeploymentConfig({ ...config, server_log_retention_hours: 48 }),
+  ).toThrow();
+});
 test("only a private host config is accepted; errors cannot echo config secrets", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cg-deployment-config-"));
   try {

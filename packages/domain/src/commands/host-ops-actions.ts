@@ -160,7 +160,7 @@ export function retirementStallHandoff(
     reviewWakeBlocked(state, trigger, item.id) ||
     (!(
       item.status === "waiting_decision" &&
-      reviewDiscussionInstruction(item, trigger, state.decisions)
+      reviewDiscussionInstruction(item, trigger, state)
     ) &&
       !["in_progress", "ready", "todo", "changes_requested"].includes(
         item.status,
@@ -293,7 +293,7 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
         reviewDiscussionInstruction(
           wait,
           eventById(d.state.events, p.review_trigger_id),
-          d.state.decisions,
+          d.state,
         )),
     "illegal_transition",
     "审核正在等待拍板，不能重启",
@@ -673,8 +673,7 @@ export function finishHostOpsAction(
     if (
       action.tool !== "host_ops_cancel_run" &&
       (!action.dispatch_stall_id || currentStall) &&
-      (!wait ||
-        reviewDiscussionInstruction(wait, trigger, d.state.decisions)) &&
+      (!wait || reviewDiscussionInstruction(wait, trigger, d.state)) &&
       a.status !== "released" &&
       hasRunTarget(a, d.state) &&
       (!card || (!card.hold && !["done", "cancelled"].includes(card.status))) &&

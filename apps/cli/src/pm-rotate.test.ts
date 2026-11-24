@@ -134,8 +134,9 @@ test("role upgrade --from-default appends the pack policy and keeps project fiel
 
   expect(await run(["role", "upgrade", "pm", "--from-default"])).toBe(0);
   expect(printed()).toContain("已按默认角色包升级 pm 到 v2");
-  // The dry run consumed no event sequence: the real write is the next one.
-  expect(lastSeq()).toBe(seqBefore + 1);
+  // The dry run consumed no event sequence: the real write is the next one,
+  // followed by the record of the default it took (C-613).
+  expect(lastSeq()).toBe(seqBefore + 2);
   const pack = defaultRoleDefinition("pm", {
     harness: "claude-code",
     launch_profile_ref: "claude-pm",

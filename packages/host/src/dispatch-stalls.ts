@@ -259,8 +259,10 @@ export function dispatchStallCauses(
         w &&
         !(
           w.status === "waiting_decision" &&
-          reviewDiscussionInstruction(w, trigger, state.decisions)
+          reviewDiscussionInstruction(w, trigger, state)
         ) &&
+        // C-618: a delivered author is asked to supply unblocked evidence.
+        !(w.status === "delivered" && evidenceUnblockedInstruction(trigger)) &&
         !["in_progress", "ready", "todo", "changes_requested"].includes(
           w.status,
         )
@@ -289,7 +291,7 @@ export function dispatchStallCauses(
       ...(trigger &&
       (trigger.type === "review_submitted" ||
         trigger.type === "decision_resolved" ||
-        (w && reviewDiscussionInstruction(w, trigger, state.decisions)))
+        (w && reviewDiscussionInstruction(w, trigger, state)))
         ? { review_trigger_id: trigger.id }
         : {}),
       age_ms: age,
@@ -586,5 +588,17 @@ export function dispatchStallCauses(
       s.restart_blocked ||
       s.system_finished_run_id ||
       s.retirement_handoff,
+  );
+}
+
+/** C-618: the system's one-time request to supply evidence after a platform blocker. */
+function evidenceUnblockedInstruction(trigger: Event | undefined): boolean {
+  return (
+    trigger?.type === "instruction_issued" &&
+    trigger.actor.kind === "system" &&
+    Array.isArray(
+      (trigger.payload as { evidence_unblocked?: unknown } | null)
+        ?.evidence_unblocked,
+    )
   );
 }

@@ -1,5 +1,5 @@
 import { lstat, realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type {
   Assignment,
   Delivery,
@@ -7,6 +7,7 @@ import type {
   DeliverySubject,
   DeliveryVerifier,
   GitPublicationGuard,
+  GitRef,
   MergeBatch,
   MergePlan,
   MergePushCommit,
@@ -15,7 +16,7 @@ import type {
   SystemReviewLimitFailure,
   SystemReviewLimitOutcome,
 } from "@cardigan/domain";
-import { validationFailed } from "@cardigan/domain";
+import { CheckHeadFailure, validationFailed } from "@cardigan/domain";
 import {
   type CentralProject,
   CentralRepositoryService,
@@ -29,6 +30,7 @@ import {
   type RemoveWorktreeInput,
   type RemoveWorktreeOutcome,
   type RepositoryLock,
+  type RepositoryLockSample,
   RepositoryLockTimeoutError,
   reconcile,
   reconcileExecutorChecks,
@@ -41,12 +43,14 @@ import {
   type CandidateDeleteRequest,
   type CandidatePushRequest,
   CentralGitTransport,
+  type CentralRepackMode,
   LocalGitTransport,
   type PushResult,
   type WorkspaceGit as WorkspaceGitPort,
   withGitTimeout,
 } from "@cardigan/git-transport";
 import {
+  acquireRepositoryFlock,
   type CandidateTestSnapshot,
   candidateTestPath,
   HostTestReviewTrust,
@@ -60,6 +64,7 @@ import {
   proveSystemReviewLimit,
   RuntimeTargetError,
   type RuntimeTargets,
+  repositoryLockPath,
   safeTargetReason,
   systemReviewLimitFailure,
   type TestIsolationSource,
@@ -86,6 +91,7 @@ import type {
   Store,
   StoreTransactionContext,
 } from "@cardigan/store";
+import type { CentralMaintenanceGit } from "./central-maintenance-loop.js";
 import { backupBranches, backupWriter } from "./git-backup.js";
 import type { SnapshotOrphan } from "./orphan-cleanup.js";
 
@@ -159,6 +165,8 @@ export interface ServerGitOptions {
   readonly onSourceError?: (entry: DeliverySourceErrorEntry) => void;
   /** C-642: one line per delivery source publication, with lock wait and hold. */
   readonly onSourceLock?: (entry: DeliverySourceLockEntry) => void;
+  /** C-636: wait/hold time of each project repository lock use. */
+  readonly onLockSample?: (sample: RepositoryLockSample) => void;
   /** Test seam for the SSH listing; production uses `agentListChecks`. */
   readonly listChecks?: (
     execution: AgentExecution,
@@ -424,7 +432,8 @@ function agentWorkspace(
 
 /** What the control plane's phase loops need: merge plus cleanup/reconcile. */
 export type GitPhases = MergeGit &
-  ReconcileGit & {
+  ReconcileGit &
+  CentralMaintenanceGit & {
     snapshotOrphan?: SnapshotOrphan;
   };
 
@@ -549,7 +558,10 @@ export class ServerGit implements GitBinding {
           })
         : undefined,
     );
-    this.lock = hostRepositoryLock(options.dataDir);
+    this.lock = hostRepositoryLock(
+      options.dataDir,
+      options.onLockSample ? { observe: options.onLockSample } : {},
+    );
     const workspace =
       execution.mode === "agent-ssh" && options.captureAgent !== undefined
         ? agentWorkspace(options.captureAgent)
@@ -616,11 +628,11 @@ export class ServerGit implements GitBinding {
             assignment,
             "verify",
             (central) =>
-              new GitDeliveryVerifier(central, project).prepareVerify(
-                subject,
-                assignment,
-                previous,
-              ),
+              new GitDeliveryVerifier(
+                central,
+                project,
+                this.cardBaselineOf(project, assignment),
+              ).prepareVerify(subject, assignment, previous),
           );
         } catch (error) {
           const failure = classifyDeliverySourceError(error);
@@ -640,15 +652,53 @@ export class ServerGit implements GitBinding {
     } satisfies DeliveryVerifier;
   };
 
+  /**
+   * C-654: the card's own baseline branch (C-589), against which the author's
+   * own changes are measured. Undefined means the project baseline.
+   */
+  private cardBaselineOf(
+    project: CentralProject,
+    assignment: Assignment,
+  ): string | undefined {
+    const uow = this.options.store.uow;
+    if (!uow || assignment.scope !== "work_item") return undefined;
+    const branch = uow.read((tx) => {
+      const item = tx.work_items.get(
+        project.project_id as ProjectId,
+        assignment.work_item_id,
+      );
+      return item
+        ? tx.cards.get(project.project_id as ProjectId, item.card_id)
+            ?.base_branch
+        : undefined;
+    });
+    return branch && branch !== project.base_branch ? branch : undefined;
+  }
+
   async checkHead(
     projectId: ProjectId,
     assignment: Assignment,
   ): Promise<string> {
     const project = this.projectOf(projectId);
-    if (!project) throw new Error("No registered repository");
-    return this.withAssignmentSource(project, assignment, "head", (central) =>
-      new GitDeliveryVerifier(central, project).prepareHead(assignment),
-    );
+    if (!project) throw new CheckHeadFailure("environment_unavailable");
+    try {
+      return await this.withAssignmentSource(
+        project,
+        assignment,
+        "head",
+        (central) =>
+          new GitDeliveryVerifier(central, project).prepareHead(assignment),
+      );
+    } catch (error) {
+      // Lock timeouts stay retryable for every caller; the remaining setup
+      // failures (worker target or helper resolution) name the environment.
+      if (
+        error instanceof RepositoryLockTimeoutError ||
+        error instanceof CheckHeadFailure
+      )
+        throw error;
+      throw new CheckHeadFailure("environment_unavailable", { cause: error });
+    }
   }
   preparePrecheck(
     project: CentralProject,
@@ -720,19 +770,34 @@ export class ServerGit implements GitBinding {
     input: CandidatePushRequest,
   ): Promise<PushResult> {
     const repository = await this.central.ensureCentral(project);
-    return this.withCandidateLock(project, repository, () =>
-      this.transport.pushCandidateCommit(repository, input),
+    // C-636: only the local check of the candidate commit holds the project
+    // lock. The GitHub push only reads that immutable object (the center is
+    // never pruned), so it runs outside and no longer blocks worktree
+    // preparation, delivery reads or other candidates for its whole transfer.
+    const present = await this.withCandidateLock(
+      project,
+      repository,
+      "candidate.check",
+      // Like the transport, an unreadable or invalid object is a failed push.
+      async () =>
+        (await this.transport
+          .objectType(repository, input.sha)
+          .catch(() => undefined)) === "commit",
     );
+    if (!present) return { status: "failed", reason: "other" };
+    return this.transport.pushCandidateCommit(repository, input);
   }
+  /** A lock timeout before `transfer` started proves nothing was sent. */
   private async withCandidateLock<T>(
     project: CentralProject,
     repository: string,
+    operation: string,
     transfer: () => Promise<T>,
   ): Promise<T> {
     let started = false;
     try {
       return await this.lock(
-        { project_id: project.project_id, repository },
+        { project_id: project.project_id, repository, operation },
         () => {
           started = true;
           return transfer();
@@ -768,36 +833,35 @@ export class ServerGit implements GitBinding {
       await this.baseline(project),
     );
   }
-  /** Read-only fixed-object validation under the ORIGINAL project repository lock. */
+  /**
+   * Read-only fixed-object validation. C-636: no project lock: it only reads
+   * immutable objects and one ref, and a ref read is atomic, so a concurrent
+   * baseline update yields the old or the new value, never a torn one.
+   */
   async verifyCheckCandidate(
     project: CentralProject,
     candidate: { sha: string; tree: string; base: string },
   ): Promise<void> {
     const repository = this.central.repositoryPath(project);
-    await this.lock(
-      { project_id: project.project_id, repository },
-      async () => {
-        if (
-          ![candidate.sha, candidate.tree, candidate.base].every((s) =>
-            /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(s),
-          ) ||
-          (await this.transport.objectType(repository, candidate.sha)) !==
-            "commit" ||
-          (await this.transport.treeOfCommit(repository, candidate.sha)) !==
-            candidate.tree ||
-          (await this.transport.readRef(
-            repository,
-            `refs/heads/${project.base_branch}`,
-          )) !== candidate.base ||
-          !(await this.transport.isAncestor(
-            repository,
-            candidate.base,
-            candidate.sha,
-          ))
-        )
-          throw new Error("固定候选或基线已改变");
-      },
-    );
+    if (
+      ![candidate.sha, candidate.tree, candidate.base].every((s) =>
+        /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(s),
+      ) ||
+      (await this.transport.objectType(repository, candidate.sha)) !==
+        "commit" ||
+      (await this.transport.treeOfCommit(repository, candidate.sha)) !==
+        candidate.tree ||
+      (await this.transport.readRef(
+        repository,
+        `refs/heads/${project.base_branch}`,
+      )) !== candidate.base ||
+      !(await this.transport.isAncestor(
+        repository,
+        candidate.base,
+        candidate.sha,
+      ))
+    )
+      throw new Error("固定候选或基线已改变");
   }
   prepareBatch(project: CentralProject, plans: readonly MergePlan[]) {
     return this.central.prepareBatch(project, plans);
@@ -931,8 +995,11 @@ export class ServerGit implements GitBinding {
     );
     // Candidate distribution updates the base clone's refs: it shares the
     // wake path's project lock, held only for the transfer, not the checks.
-    await this.withCandidateLock(project, repository, () =>
-      this.transfer(execution, source, repository),
+    await this.withCandidateLock(
+      project,
+      repository,
+      "candidate.distribute",
+      () => this.transfer(execution, source, repository),
     );
   }
   private async transfer(
@@ -1043,17 +1110,19 @@ export class ServerGit implements GitBinding {
     if (!tip) throw new Error("Stall branch backup missing");
     const git = source.central.git,
       repo = await source.central.ensureCentral(project);
-    return this.lock({ project_id: id, repository: repo }, () =>
-      pinStallBackup(
-        {
-          create: (ref, sha) => git.compareAndSwapRef(repo, ref, sha, null),
-          read: (ref) => git.readRef(repo, ref),
-          tree: (sha) => git.treeOfCommit(repo, sha),
-        },
-        assignment.id,
-        action,
-        tip.sha,
-      ),
+    return this.lock(
+      { project_id: id, repository: repo, operation: "backup.stall_pin" },
+      () =>
+        pinStallBackup(
+          {
+            create: (ref, sha) => git.compareAndSwapRef(repo, ref, sha, null),
+            read: (ref) => git.readRef(repo, ref),
+            tree: (sha) => git.treeOfCommit(repo, sha),
+          },
+          assignment.id,
+          action,
+          tip.sha,
+        ),
     );
   }
   async snapshotOrphan(
@@ -1115,6 +1184,49 @@ export class ServerGit implements GitBinding {
       throw new Error("Snapshot verification failed");
     validateTarget?.();
     return sha;
+  }
+  /**
+   * C-637: the existing central repository for off-peak maintenance. It never
+   * creates one and never takes the repository lock; a separate per-project
+   * flock only keeps two host processes from repacking at the same time.
+   */
+  async centralMaintenance(project: CentralProject) {
+    const repository = this.central.repositoryPath(project);
+    const present = await lstat(repository).then(
+      (entry) => entry.isDirectory(),
+      (error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      },
+    );
+    if (!present) return undefined;
+    let release = async () => {};
+    if (process.platform === "linux")
+      try {
+        release = await acquireRepositoryFlock(
+          join(
+            dirname(
+              repositoryLockPath(this.options.dataDir, project.project_id),
+            ),
+            `maintenance-${project.project_id}.lock`,
+          ),
+          1,
+        );
+      } catch (error) {
+        if (error instanceof RepositoryLockTimeoutError) return undefined;
+        throw error;
+      }
+    const transport = this.transport;
+    return {
+      target: {
+        lastCruftPack: () => transport.lastCruftPack(repository),
+        repack: (mode: CentralRepackMode) => transport.repack(repository, mode),
+        listRefs: (prefix: string) => transport.listRefs(repository, prefix),
+        deleteRefs: (refs: readonly GitRef[]) =>
+          transport.deleteRetainedRefs(repository, refs),
+      },
+      release,
+    };
   }
   async backup(project: CentralProject): Promise<void> {
     const projectId = project.project_id as ProjectId;
@@ -1201,7 +1313,11 @@ export class ServerGit implements GitBinding {
       project.project_id,
     );
     await this.lock(
-      { project_id: project.project_id, repository },
+      {
+        project_id: project.project_id,
+        repository,
+        operation: "mirror.refresh",
+      },
       async () => {
         const leaf = await lstat(repository).catch((error) => {
           if ((error as NodeJS.ErrnoException).code === "ENOENT")
@@ -1383,6 +1499,7 @@ export class ServerGit implements GitBinding {
         {
           project_id: project.project_id,
           repository: this.central.repositoryPath(project),
+          operation: "delivery.source",
         },
         () => {
           entered = performance.now();

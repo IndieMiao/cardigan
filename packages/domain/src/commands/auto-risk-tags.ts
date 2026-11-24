@@ -1,5 +1,6 @@
 import { autoRiskPathEvidence } from "../auto-risk.js";
 import type { Actor } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import { highRiskProducts } from "../high-risk.js";
 import type { DeliveryId } from "../ids.js";
 import {
@@ -162,7 +163,7 @@ export function applyDeliveryAutoRiskTags(
     "Only delivery settlement derives risk tags",
   );
   const system = new CommandDraft(
-    { ...d.state, events: [...d.state.events, ...d.events] },
+    { ...d.state, events: appendEvents(d.state.events, d.events) },
     { kind: "system", project_id: d.state.project_id },
     "apply_auto_risk_tags",
     d.ports,

@@ -6,7 +6,7 @@ import {
   standingRunDormant,
 } from "../card-hold.js";
 import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
-import { eventById } from "../event-index.js";
+import { appendEvents, eventById } from "../event-index.js";
 import { HARNESSES, isHarness } from "../harness.js";
 import {
   automaticContextActionForRun,
@@ -129,7 +129,7 @@ function requireTestReviewBudget(
   const item = d.work(assignment.work_item_id);
   if (item.kind === "verify" && item.status === "waiting_decision") {
     ensure(
-      reviewDiscussionInstruction(item, trigger, d.state.decisions),
+      reviewDiscussionInstruction(item, trigger, d.state),
       "illegal_transition",
       "Review budget is waiting for a decision",
     );
@@ -425,7 +425,7 @@ export function createQueuedRun(
   const policy = newRecoveryPolicy(
     {
       ...d.state,
-      events: [...d.state.events, ...d.events],
+      events: appendEvents(d.state.events, d.events),
       work_items: d.list("work_items"),
       deliveries: d.list("deliveries"),
     },
