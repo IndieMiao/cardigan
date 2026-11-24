@@ -491,6 +491,9 @@ try {
       await settle();
       await hoverCard("C-23");
       if (before) {
+        // As long as the after run spends before its shot: the title
+        // tooltip has opened in both.
+        await delay(1000);
         result.steps.hover = { shot: await shot(`hover-${tag}.png`) };
         continue;
       }
