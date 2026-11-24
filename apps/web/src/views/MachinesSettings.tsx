@@ -62,6 +62,11 @@ import {
   type MachineCheckRow,
   machineActiveRuns,
 } from "../machine-labels.js";
+import {
+  pendingPairingCode,
+  subscribePairingCode,
+  takePairingCode,
+} from "../pairing-link.js";
 import { settingKey, trackSettingsRead } from "../settings-clock.js";
 import { statusLabel } from "../status.js";
 import { useResource } from "../useResource.js";
@@ -255,12 +260,24 @@ export function MachinesSettings({
     reloadList();
     reloadCapacity?.();
   }, [reloadList, reloadCapacity]);
-  const [wizard, setWizard] = useState(false);
+  /** The add-worker drawer; C-707: started from a pairing code or not. */
+  const [wizard, setWizard] = useState<
+    false | { pairing?: { code: string | undefined } }
+  >(false);
   const [resumable, setResumable] = useState(() => !!storedWizard(projectId));
   const [notice, setNotice] = useNotice();
-  const wizardFocus = useDrawerReturnFocus(wizard, () =>
+  const wizardFocus = useDrawerReturnFocus(wizard !== false, () =>
     document.getElementById("machines"),
   );
+  // C-707: a QR pairing link opens the pairing step with its code filled in.
+  const pairable = canEdit && !!client.pairWorkerDevice;
+  const linked = useSyncExternalStore(subscribePairingCode, pendingPairingCode);
+  useEffect(() => {
+    if (!linked || !pairable || wizard) return;
+    // Taken once (StrictMode runs this twice): only a real code opens it.
+    const code = takePairingCode();
+    if (code) setWizard({ pairing: { code } });
+  }, [linked, pairable, wizard]);
   const closeWizard = (exit: WizardExit) => {
     setWizard(false);
     setResumable(!!storedWizard(projectId));
@@ -276,16 +293,29 @@ export function MachinesSettings({
       help={MACHINES_HELP}
       actions={
         canEdit && client.createWorkerWizard ? (
-          <Button
-            variant="primary"
-            aria-haspopup="dialog"
-            onClick={() => {
-              wizardFocus.remember();
-              setWizard(true);
-            }}
-          >
-            {resumable ? "继续添加 worker" : "添加 worker"}
-          </Button>
+          <>
+            {pairable && (
+              <Button
+                aria-haspopup="dialog"
+                onClick={() => {
+                  wizardFocus.remember();
+                  setWizard({ pairing: { code: undefined } });
+                }}
+              >
+                新设备接入（配对码）
+              </Button>
+            )}
+            <Button
+              variant="primary"
+              aria-haspopup="dialog"
+              onClick={() => {
+                wizardFocus.remember();
+                setWizard({});
+              }}
+            >
+              {resumable ? "继续添加 worker" : "添加 worker"}
+            </Button>
+          </>
         ) : undefined
       }
     >
@@ -375,6 +405,7 @@ export function MachinesSettings({
         <WorkerWizardDrawer
           client={client}
           projectId={projectId}
+          pairing={wizard.pairing}
           pollMs={pollMs}
           onChanged={changed}
           onClose={closeWizard}

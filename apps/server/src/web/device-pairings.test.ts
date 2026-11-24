@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { readRunLimit } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 import {
@@ -288,6 +289,23 @@ test.runIf(process.platform === "linux")(
         const r = await f.pair(bad);
         expect(r.status, JSON.stringify(bad)).toBe(400);
       }
+      // C-707: a malformed hardware fact is dropped, not a refusal.
+      const odd = await f.pair({
+        device: {
+          ...device,
+          cpu: "a\u0007b",
+          cpu_cores: 0,
+          memory_bytes: 1.5,
+          gpu: " ",
+          disk_path: "/tmp",
+          disk_total_bytes: 10,
+          disk_free_bytes: 11,
+        },
+      });
+      expect(odd.status, odd.text).toBe(201);
+      const kept = await f.claim((odd.json as { code: string }).code);
+      expect(kept.status, kept.text).toBe(201);
+      expect((kept.json as { device: unknown }).device).toEqual(device);
       const foreign = await f.call("/api/device-pairings", {
         method: "POST",
         body: { device },
@@ -525,6 +543,125 @@ test.runIf(process.platform === "linux")(
       expect(gone.status).toBe(410);
       expect(errorCode(gone)).toBe("device_init_unavailable");
       expect(path).not.toBe(second.path);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+const hardware = {
+  cpu: "AMD Custom APU 0405",
+  cpu_cores: 8,
+  memory_bytes: 16 * 1024 ** 3,
+  disk_path: "/home",
+  disk_total_bytes: 512 * 1024 ** 3,
+  disk_free_bytes: 400 * 1024 ** 3,
+  gpu: "AMD Custom GPU 0405",
+};
+interface ReportView extends WizardView {
+  device?: Record<string, unknown>;
+  run_limit?: { value: number; state: string };
+  report?: {
+    capabilities: { key: string; state: string }[];
+    suggested: string[];
+  };
+}
+test.runIf(process.platform === "linux")(
+  "C-707: the chosen Agent limit is set when a new machine registers; the report comes with the passed wizard",
+  async () => {
+    const f = await fixture();
+    try {
+      const r = await f.pair({ device: { ...device, ...hardware } });
+      expect(r.status, r.text).toBe(201);
+      const { code } = r.json as { code: string };
+      const path = (id: string) => f.projectPath(`/worker-wizards/${id}`);
+      const read = async (id: string) =>
+        ((await f.call(path(id))).json as { wizard: ReportView }).wizard;
+
+      // A bad limit is refused before the code is used.
+      for (const run_limit of [0, -1, 1.5, "2", null]) {
+        const bad = await f.claim(code, { run_limit });
+        expect(bad.status, JSON.stringify(run_limit)).toBe(400);
+        expect(errorCode(bad)).toBe("worker_run_limit_invalid");
+      }
+      const tooMany = await f.claim(code, { run_limit: 17 });
+      expect(tooMany.status).toBe(400);
+      expect(
+        (tooMany.json as { error: { details: unknown } }).error.details,
+      ).toEqual({ maximum: 16 });
+      const bearer = await f.call(f.projectPath("/worker-wizards/pairing"), {
+        method: "POST",
+        body: { code, run_limit: 1 },
+        headers: { authorization: `Bearer ${f.token(f.primary.owner)}` },
+      });
+      expect(bearer.status).toBe(403);
+
+      const claimed = await f.claim(code, { run_limit: 2 });
+      expect(claimed.status, claimed.text).toBe(201);
+      const w = (claimed.json as { wizard: ReportView & WizardView }).wizard;
+      expect(w.device).toEqual({ ...device, ...hardware });
+      expect(w.run_limit).toEqual({ value: 2, state: "pending" });
+      expect(w.report).toBeUndefined();
+      // Nothing is set before the machine registers.
+      expect(readRunLimit(f.store().database, "steamdeck")).toBeUndefined();
+      expect(
+        (
+          await f.call(`${path(w.id)}/confirm`, {
+            method: "POST",
+            body: { preview_id: w.preview?.preview_id },
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (await f.call(`${path(w.id)}/run`, { method: "POST", body: {} }))
+          .status,
+      ).toBe(202);
+      await vi.waitFor(async () =>
+        expect((await read(w.id)).phase).toBe("passed"),
+      );
+      const passed = await read(w.id);
+      expect(passed.run_limit).toEqual({ value: 2, state: "applied" });
+      expect(readRunLimit(f.store().database, "steamdeck")).toMatchObject({
+        machine_id: "steamdeck",
+        limit: 2,
+      });
+      // Host facts only: catalog tools for Linux not verified yet.
+      expect(passed.report?.suggested).toEqual(
+        expect.arrayContaining(["node", "godot", "blender"]),
+      );
+      expect(passed.report?.suggested).not.toContain("xcode");
+      expect(passed.report?.capabilities).toContainEqual(
+        expect.objectContaining({ key: "node", state: "unverified" }),
+      );
+      // Owner-only like the rest of the wizard.
+      const other = await f.call(path(w.id), {
+        headers: { authorization: `Bearer ${f.token(f.primary.owner)}` },
+      });
+      expect(other.status).toBe(403);
+      expect(other.text).not.toContain("AMD Custom");
+
+      // Pairing a machine this host already has never changes its limit.
+      const again = await f.pair({ device: { ...device, ...hardware } });
+      const second = await f.claim((again.json as { code: string }).code, {
+        run_limit: 5,
+      });
+      expect(second.status, second.text).toBe(201);
+      const s2 = (second.json as { wizard: ReportView & WizardView }).wizard;
+      await f.call(`${path(s2.id)}/confirm`, {
+        method: "POST",
+        body: { preview_id: s2.preview?.preview_id },
+      });
+      await f.call(`${path(s2.id)}/run`, { method: "POST", body: {} });
+      await vi.waitFor(async () =>
+        expect((await read(s2.id)).phase).toBe("passed"),
+      );
+      expect((await read(s2.id)).run_limit).toEqual({
+        value: 5,
+        state: "kept",
+      });
+      expect(readRunLimit(f.store().database, "steamdeck")).toMatchObject({
+        limit: 2,
+      });
     } finally {
       await f.close();
     }

@@ -6,7 +6,8 @@ Run on a new device, standard library only:
     curl -fsS https://<workbench>/pair-device.py | python3 - https://<workbench>
 
 It reports this device's hostname, system, CPU architecture, tailnet address
-and a free numeric account id to the Workbench, then shows a one-time pairing
+and a free numeric account id to the Workbench (C-707: plus CPU, memory, disk
+and GPU for the onboarding report), then shows a one-time pairing
 code and a QR code of the confirmation link. The code is valid for ten
 minutes and works once; the owner confirms it in the Workbench, which only
 opens a draft of the add-worker wizard. Pairing itself needs no sudo and
@@ -124,6 +125,107 @@ def system_name():
     return None
 
 
+def run_text(command, timeout=10):
+    """A command's output, or None when it is missing or fails."""
+    try:
+        out = subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        ).stdout
+        return out.decode("utf-8", "replace").strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def printable(value, limit):
+    if not value:
+        return None
+    value = re.sub(r"\s+", " ", value).strip()[:limit].strip()
+    return value if value and value.isprintable() else None
+
+
+def cpu_model():
+    if sys.platform == "darwin":
+        return printable(run_text(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"]), 120)
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key, _, value = line.partition(":")
+                if key.strip() in ("model name", "Hardware", "Model"):
+                    return printable(value, 120)
+    except OSError:
+        pass
+    return None
+
+
+def memory_bytes():
+    if sys.platform == "darwin":
+        value = run_text(["/usr/sbin/sysctl", "-n", "hw.memsize"])
+        return int(value) if value and value.isdigit() else None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def gpu_names():
+    if sys.platform == "darwin":
+        out = run_text(["/usr/sbin/system_profiler", "SPDisplaysDataType", "-json"], 20)
+        try:
+            names = [d.get("sppci_model") for d in json.loads(out or "{}").get("SPDisplaysDataType", [])]
+        except (ValueError, AttributeError):
+            names = []
+    else:
+        out = run_text(["lspci"]) or ""
+        names = [
+            line.split(": ", 1)[1]
+            for line in out.splitlines()
+            if ": " in line and re.search(r"VGA|3D|Display", line.split(": ", 1)[0])
+        ]
+    return printable("; ".join(n for n in names if n), 160)
+
+
+def hardware_facts(os_name, root_readonly):
+    """C-707: for the Workbench's onboarding report only; best effort, so
+    nothing here can stop the pairing."""
+    try:
+        return collect_hardware(os_name, root_readonly)
+    except Exception:
+        return {}
+
+
+def collect_hardware(os_name, root_readonly):
+    facts = {}
+    cpu = cpu_model()
+    if cpu:
+        facts["cpu"] = cpu
+    cores = os.cpu_count()
+    if cores and 0 < cores <= 4096:
+        facts["cpu_cores"] = cores
+    memory = memory_bytes()
+    if memory and memory > 0:
+        facts["memory_bytes"] = memory
+    # The volume the worker's work root goes on.
+    disk = "/Users" if os_name == "darwin" else ("/home" if root_readonly else "/")
+    try:
+        usage = shutil.disk_usage(disk)
+        if usage.total > 0:
+            facts.update(disk_path=disk, disk_total_bytes=usage.total, disk_free_bytes=min(usage.free, usage.total))
+    except OSError:
+        pass
+    gpu = gpu_names()
+    if gpu:
+        facts["gpu"] = gpu
+    return facts
+
+
 def device_facts(address):
     if sys.platform.startswith("linux"):
         os_name = "linux"
@@ -156,6 +258,7 @@ def device_facts(address):
             facts["root_readonly"] = True
     except OSError:
         pass
+    facts.update(hardware_facts(os_name, facts.get("root_readonly", False)))
     return facts
 
 
