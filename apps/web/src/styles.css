@@ -3853,20 +3853,6 @@ body[data-lightbox="open"] .drawer-overlay {
 .card-hold-tag {
   color: var(--accent);
 }
-.card-hold-form {
-  display: grid;
-  gap: 12px;
-  margin-top: 12px;
-}
-.card-hold-form label {
-  display: grid;
-  gap: 6px;
-}
-.card-hold-form textarea {
-  min-height: 88px;
-  width: 100%;
-  box-sizing: border-box;
-}
 .card-hold button,
 .board-held summary {
   min-height: 44px;
@@ -4069,9 +4055,6 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .menu-item .danger {
   color: var(--danger);
-}
-.card-menu-chevron {
-  margin-inline-start: 4px;
 }
 
 /* The source relationship is a separate action from merge approval. */

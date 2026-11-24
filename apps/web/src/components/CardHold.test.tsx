@@ -96,7 +96,7 @@ test("server lane totals count all held cards beyond the loaded page", () => {
   expect(within(lane).getByText("已暂停 · 8 张")).toBeTruthy();
 });
 
-test("hold form requires both fields, preserves idempotency on retry and restores focus", async () => {
+test("C-700: hold actions only resume a paused card; pausing lives in the ⋯ menu", async () => {
   const updateCard = vi
     .fn()
     .mockRejectedValueOnce(new Error("temporary failure"))
@@ -111,36 +111,7 @@ test("hold form requires both fields, preserves idempotency on retry and restore
       onSaved={onSaved}
     />,
   );
-  fireEvent.click(screen.getByRole("button", { name: "暂停卡片" }));
-  expect(document.activeElement).toBe(screen.getByLabelText("暂停原因"));
-  fireEvent.submit(required(screen.getByLabelText("暂停原因").closest("form")));
-  expect(updateCard).not.toHaveBeenCalled();
-  fireEvent.change(screen.getByLabelText("暂停原因"), {
-    target: { value: "等待现场" },
-  });
-  fireEvent.change(screen.getByLabelText("恢复条件"), {
-    target: { value: "证据齐备" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "保存暂停信息" }));
-  await waitFor(() =>
-    expect(
-      screen
-        .getByRole("button", { name: "保存暂停信息" })
-        .hasAttribute("disabled"),
-    ).toBe(false),
-  );
-  fireEvent.click(screen.getByRole("button", { name: "保存暂停信息" }));
-  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
-  expect(updateCard.mock.calls[0]).toEqual(updateCard.mock.calls[1]);
-  expect(updateCard.mock.calls[0]?.[2]).toEqual({
-    hold: { reason: "等待现场", resume_condition: "证据齐备" },
-  });
-  // The save callback precedes the effect that restores the trigger's focus.
-  await waitFor(() =>
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "暂停卡片" }),
-    ),
-  );
+  expect(screen.queryByRole("button")).toBeNull();
   view.rerender(
     <CardHoldActions
       card={{ ...card, hold }}
@@ -149,9 +120,17 @@ test("hold form requires both fields, preserves idempotency on retry and restore
       onSaved={onSaved}
     />,
   );
-  fireEvent.click(screen.getByRole("button", { name: "解除暂停" }));
-  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(2));
-  expect(updateCard.mock.calls[2]?.[2]).toEqual({ hold: null });
+  expect(screen.queryByRole("button", { name: "暂停卡片" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "修改暂停信息" })).toBeNull();
+  const resume = screen.getByRole("button", { name: "解除暂停" });
+  fireEvent.click(resume);
+  await waitFor(() => expect(resume.hasAttribute("disabled")).toBe(false));
+  expect(onSaved).not.toHaveBeenCalled();
+  fireEvent.click(resume);
+  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+  // A retry after an uncertain failure reuses the idempotency key.
+  expect(updateCard.mock.calls[0]).toEqual(updateCard.mock.calls[1]);
+  expect(updateCard.mock.calls[0]?.[2]).toEqual({ hold: null });
 });
 
 test("held detail status points to the full explanation without repeating its prose", () => {
@@ -183,22 +162,17 @@ test("held detail status points to the full explanation without repeating its pr
 });
 
 test.each(["done", "cancelled"] as const)(
-  "closing the card while holding releases the shared action state (%s)",
+  "a closed paused card (%s) shows the pause without a resume action",
   (status) => {
-    const onEditingChange = vi.fn(),
-      updateCard = vi.fn();
-    const props = {
-      client: fakeClient({ updateCard }),
-      projectId: "p-1",
-      onSaved: vi.fn(),
-      onEditingChange,
-    };
-    const view = render(<CardHoldActions {...props} card={card} />);
-    fireEvent.click(screen.getByRole("button", { name: "暂停卡片" }));
-    expect(onEditingChange).toHaveBeenLastCalledWith(true);
-    view.rerender(<CardHoldActions {...props} card={{ ...card, status }} />);
-    expect(screen.queryByLabelText("暂停原因")).toBeNull();
-    expect(onEditingChange).toHaveBeenLastCalledWith(false);
-    expect(updateCard).not.toHaveBeenCalled();
+    render(
+      <CardHoldActions
+        card={{ ...card, status, hold }}
+        client={fakeClient()}
+        projectId="p-1"
+        onSaved={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(`恢复条件：${hold.resume_condition}`)).toBeTruthy();
+    expect(screen.queryByRole("button")).toBeNull();
   },
 );

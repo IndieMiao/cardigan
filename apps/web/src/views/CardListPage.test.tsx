@@ -788,10 +788,20 @@ test("clicking a card opens the detail drawer on the route and returns focus on 
     value: { writeText: clipboard },
     configurable: true,
   });
-  await selectMenu(/^更多$/, "复制链接");
+  await selectMenu(/^更多卡片操作$/, "复制链接");
   await waitFor(() =>
     expect(clipboard).toHaveBeenCalledWith(expect.stringContaining("card=C-1")),
   );
+  // C-700: focus is back on ⋯, whose tooltip takes the first Escape.
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "更多卡片操作" }),
+    ),
+  );
+  if (screen.queryByRole("tooltip")) {
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+  }
   fireEvent.keyDown(document, { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(document.activeElement).toBe(link);
