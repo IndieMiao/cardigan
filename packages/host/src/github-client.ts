@@ -8,6 +8,13 @@ import {
 } from "./check-executor.js";
 import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import {
+  type ExecutorHttpObservation,
+  recordGithubHttp,
+  safeRequestId,
+  summarizeErrorText,
+  summarizeProviderBody,
+} from "./executor-diagnostics.js";
+import {
   GithubProgressTimeout,
   githubDeadline,
   githubProgressDeadline,
@@ -116,6 +123,38 @@ function transportFailure(category: GithubFailureCategory, cause: unknown) {
     if (detail) error.diagnostic = detail;
   }
   return error;
+}
+function githubOperation(path: string): ExecutorHttpObservation["operation"] {
+  const bare = path.split("?")[0] ?? "";
+  if (bare.startsWith("app/installations/")) return "token";
+  if (bare.endsWith("/dispatches")) return "dispatch";
+  if (/\/actions\/runs\/\d+$/u.test(bare)) return "run";
+  if (bare.endsWith("/runs")) return "runs";
+  if (bare.endsWith("/jobs")) return "jobs";
+  return "other";
+}
+const ERROR_BODY_LIMIT = 4096;
+/** Reads at most a few KiB of an error body; failures become fixed text. */
+async function errorSummary(response: Response): Promise<string> {
+  try {
+    const reader = response.body?.getReader();
+    if (!reader) return "无正文";
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    while (size < ERROR_BODY_LIMIT) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      size += value.byteLength;
+    }
+    if (size >= ERROR_BODY_LIMIT) void reader.cancel().catch(() => {});
+    const text = Buffer.concat(chunks)
+      .subarray(0, ERROR_BODY_LIMIT)
+      .toString("utf8");
+    return summarizeErrorText(text);
+  } catch {
+    return "响应正文不可读";
+  }
 }
 export interface GithubRun {
   readonly id: number;
@@ -309,46 +348,76 @@ export class GithubClient {
     try {
       return await githubDeadline(async (deadline) => {
         const refund = this.rate.reserve();
-        const response = await (this.options.fetch ?? fetch)(
-          `https://api.github.com/${path}`,
-          {
-            method,
-            redirect: "error",
-            signal: deadline,
-            headers: {
-              ...(etag ? { "If-None-Match": etag } : {}),
-              Authorization: `Bearer ${token}`,
-              Accept: "application/vnd.github+json",
-              "X-GitHub-Api-Version": "2022-11-28",
-              "Content-Type": "application/json",
+        const operation = githubOperation(path);
+        let response: Response;
+        try {
+          response = await (this.options.fetch ?? fetch)(
+            `https://api.github.com/${path}`,
+            {
+              method,
+              redirect: "error",
+              signal: deadline,
+              headers: {
+                ...(etag ? { "If-None-Match": etag } : {}),
+                Authorization: `Bearer ${token}`,
+                Accept: "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "Content-Type": "application/json",
+              },
+              ...(body === undefined ? {} : { body: JSON.stringify(body) }),
             },
-            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-          },
+          );
+        } catch (cause) {
+          // C-681: only a fixed transport code, never the error text.
+          recordGithubHttp({
+            operation,
+            method,
+            summary:
+              transportFailure("api", cause).diagnostic ?? "请求未得到响应",
+          });
+          throw cause;
+        }
+        const requestId = safeRequestId(
+          response.headers.get("x-github-request-id"),
         );
+        const observe = (summary: string) =>
+          recordGithubHttp({
+            operation,
+            method,
+            status: response.status,
+            ...(requestId ? { requestId } : {}),
+            summary,
+          });
         deadline.throwIfAborted();
         if (response.status === 304) {
+          observe("未变更");
           refund();
           return { body: {}, link: null, unchanged: true };
         }
         if (response.status === 403 || response.status === 429)
           this.rate.backoff(response.headers.get("retry-after"));
-        if (response.status === 404) throw new GithubNotFoundError();
         if (!response.ok) {
+          observe(await errorSummary(response));
+          if (response.status === 404) throw new GithubNotFoundError();
           const error = new GithubExecutorError("api");
           error.diagnostic = `HTTP ${response.status}`;
           throw error;
         }
-        if (response.status === 204 || response.status === 202)
+        if (response.status === 204 || response.status === 202) {
+          observe("无正文");
           return { body: {}, link: null };
+        }
         let result: unknown;
         try {
           result = await response.json();
         } catch (cause) {
           if (!(cause instanceof SyntaxError)) throw cause;
+          observe("响应 JSON 无效");
           const error = new GithubExecutorError("api");
           error.diagnostic = "Invalid GitHub response JSON";
           throw error;
         }
+        observe(summarizeProviderBody(result));
         if (!result || typeof result !== "object" || Array.isArray(result)) {
           const error = new GithubExecutorError("api");
           error.diagnostic = "Invalid GitHub response object";

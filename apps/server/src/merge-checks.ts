@@ -51,6 +51,7 @@ import {
   CHECKOUT_LIMITS,
   type CheckExecutor,
   CheckExecutorSuspended,
+  type CheckoutResult,
   CheckRecovery,
   type CheckRequest,
   classifyExecutorFailure,
@@ -1488,6 +1489,7 @@ export class MergeChecks {
     task: Task,
     status: "reachable" | "poll" | "unreachable",
     attempt?: string,
+    failure?: CheckoutResult["executorFailure"],
   ) {
     const executor = task.settings.executor;
     if (!executor) return undefined;
@@ -1496,7 +1498,25 @@ export class MergeChecks {
         s,
         a,
         status === "unreachable"
-          ? { executor: executor.name, status, attempt_id: attempt ?? "" }
+          ? {
+              executor: executor.name,
+              status,
+              attempt_id: attempt ?? "",
+              ...(failure
+                ? {
+                    failure: {
+                      category: failure.category,
+                      ...(failure.stage ? { stage: failure.stage } : {}),
+                      ...(failure.httpStatus !== undefined
+                        ? { http_status: failure.httpStatus }
+                        : {}),
+                      ...(failure.requestId
+                        ? { request_id: failure.requestId }
+                        : {}),
+                    },
+                  }
+                : {}),
+            }
           : { executor: executor.name, status },
         p,
       ),
@@ -2106,9 +2126,12 @@ export class MergeChecks {
     const transientDiscovery =
       result.status === "interrupted" ||
       (result.status === "executor_unreachable" &&
-        ["api", "dispatch_unknown", "recovery_incomplete"].some(
+        (["api", "dispatch_unknown", "recovery_incomplete"].some(
           (category) => result.reason === `检查执行器不可用：${category}`,
-        ));
+        ) ||
+          // C-681: dispatch_unknown now carries its branch and HTTP evidence
+          // in the reason; the structured category keeps it transient.
+          result.executorFailure?.category === "dispatch_unknown"));
     const cardBusy =
       executedOn?.type === "github" &&
       !bound &&
@@ -2118,7 +2141,12 @@ export class MergeChecks {
       result.status === "executor_unreachable" &&
       (executedOn?.type !== "github" || bound || transientDiscovery)
     )
-      this.executor(task, "unreachable", check.attempt_id);
+      this.executor(
+        task,
+        "unreachable",
+        check.attempt_id,
+        result.executorFailure,
+      );
     else if (!cardBusy && connected && !this.abort.signal.aborted)
       this.executor(task, "reachable");
     let finished: {

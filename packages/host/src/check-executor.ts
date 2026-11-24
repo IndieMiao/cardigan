@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { withCheckoutDeadline } from "./checkout-deadline.js";
+import {
+  type DispatchUnknownDetail,
+  dispatchFailure,
+  formatDispatchUnknown,
+} from "./executor-diagnostics.js";
 import { githubJobLog, type StepTime } from "./github-job-log.js";
 import {
   type CheckoutInput,
@@ -17,6 +22,8 @@ export {
 export class CheckExecutorUnavailable extends Error {
   /** Only a redacted, bounded host diagnostic may be attached here. */
   diagnostic?: string;
+  /** C-681: which dispatch_unknown branch was taken, with redacted HTTP evidence. */
+  dispatch?: DispatchUnknownDetail;
   constructor(
     readonly category:
       | "auth"
@@ -236,13 +243,14 @@ export async function runCheckExecutor(
     return result;
   } catch (error) {
     if (!(error instanceof CheckExecutorUnavailable)) throw error;
-    const reason = `检查执行器不可用：${error.category}${error.diagnostic ? ` (${error.diagnostic})` : ""}`;
+    const reason = `检查执行器不可用：${error.category}${error.diagnostic ? ` (${error.diagnostic})` : ""}${error.dispatch ? `（${formatDispatchUnknown(error.dispatch)}）` : ""}`;
     diagnostic(reason);
     return {
       status: "executor_unreachable",
       checks: [],
       cleanup_errors: [],
       reason,
+      executorFailure: dispatchFailure(error.category, error.dispatch),
     };
   } finally {
     closed = true;
