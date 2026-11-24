@@ -20,6 +20,7 @@ import {
   type WorkerWizardView,
 } from "../api.js";
 import { CapacityProvider } from "../components/Capacity.js";
+import { changeControl } from "../testing/controls.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { fixtureMachines } from "../testing/machines-fixture.js";
 import { MachinesSettings } from "./MachinesSettings.js";
@@ -1309,4 +1310,293 @@ test("C-565: the commands-step mark never touches another project's session, eve
   expect(storedWizard("demo.commands")).toBe(
     "6f1c2a7e-0000-4000-8000-0000000000aa",
   );
+});
+
+// C-707: device pairing (C-705 code, C-706 init script) in the wizard.
+const deviceFacts = {
+  hostname: "steamdeck",
+  os: "linux" as const,
+  arch: "x64" as const,
+  address: "steamdeck.example.ts.net",
+  free_id: 2000,
+  system: "SteamOS 3.8",
+  cpu: "AMD Custom APU 0405",
+  cpu_cores: 8,
+  memory_bytes: 16 * 1024 ** 3,
+  disk_path: "/home",
+  disk_total_bytes: 512 * 1024 ** 3,
+  disk_free_bytes: 400 * 1024 ** 3,
+};
+function pairingBackend(runs: (WorkerWizardStep["step"] | "passed")[] = []) {
+  const fake = backend(runs);
+  const pairWorkerDevice = vi.fn(
+    async (project: string, body: { code: string; run_limit: number }) => {
+      if (body.code === "EXP2RED2")
+        throw new ApiError(410, "pairing_code_expired", "配对码已过期");
+      if (body.code === "MANY2222")
+        throw new ApiError(429, "pairing_rate_limited", "错误次数过多");
+      if (body.run_limit > 16)
+        throw new ApiError(
+          400,
+          "worker_run_limit_invalid",
+          "名额须为 1～16 的整数",
+          false,
+          { maximum: 16 },
+        );
+      await fake.client.createWorkerWizard(project, {
+        ...input,
+        machine_id: "steamdeck",
+        label: "steamdeck",
+      });
+      fake.mutate((w) => ({
+        ...w,
+        project_id: project,
+        device_init: { state: "waiting" },
+        device: deviceFacts,
+        run_limit: { value: body.run_limit, state: "pending" },
+      }));
+      return {
+        wizard: fake.current() as WorkerWizardView,
+        device: deviceFacts,
+      };
+    },
+  );
+  const read = fake.client.workerWizard;
+  const workerWizard = vi.fn(async (p: string, id: string) => {
+    const reply = await read(p, id);
+    return reply.wizard.phase === "passed"
+      ? {
+          wizard: {
+            ...reply.wizard,
+            run_limit: { value: 1, state: "applied" as const },
+            report: {
+              capabilities: [
+                {
+                  key: "node",
+                  version: "24.1.0",
+                  verified_at: "2026-01-01T00:00:00.000Z",
+                  state: "verified" as const,
+                },
+                {
+                  key: "godot",
+                  version: null,
+                  verified_at: null,
+                  state: "unverified" as const,
+                },
+              ],
+              suggested: ["godot", "blender"],
+            },
+          },
+        }
+      : reply;
+  });
+  return {
+    ...fake,
+    client: { ...fake.client, pairWorkerDevice, workerWizard },
+    pairWorkerDevice,
+  };
+}
+const field = (dialog: ReturnType<typeof within>, name: string) =>
+  dialog.getByRole("textbox", { name }) as HTMLInputElement;
+
+test("C-707: pairing shows its steps and field hints first; code, project and limit go together with 确认接入", async () => {
+  const fake = pairingBackend(["passed"]);
+  page(fake.client);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "新设备接入（配对码）" }),
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  const steps = dialog.getByRole("list", { name: "添加 worker 的步骤" });
+  expect(within(steps).getAllByRole("listitem")[0]?.textContent).toBe(
+    "1配对确认",
+  );
+  expect(
+    within(steps).getAllByRole("listitem")[0]?.getAttribute("aria-current"),
+  ).toBe("step");
+  expect(field(dialog, "配对码").value).toBe("");
+  expect(field(dialog, "名额").value).toBe("1");
+  expect(dialog.getByRole("combobox", { name: /项目/u }).textContent).toContain(
+    "Cardigan 自己",
+  );
+  // Each field says what it is; the device command is right there.
+  expect(field(dialog, "配对码").getAttribute("aria-describedby")).toBeTruthy();
+  expect(dialog.getByText(/pair-device\.py \| python3 -/u)).toBeTruthy();
+  dialog.getByText(/之后可在机器详情修改/u);
+
+  // A malformed code or limit is shown beside its field; nothing is sent.
+  fireEvent.change(field(dialog, "配对码"), { target: { value: "abc" } });
+  fireEvent.change(field(dialog, "名额"), { target: { value: "0" } });
+  fireEvent.click(dialog.getByRole("button", { name: "确认接入" }));
+  await dialog.findByText(
+    "配对码为设备上显示的 8 位字母和数字，如 ABCD-EFGH。",
+  );
+  dialog.getByText("名额须为正整数。");
+  expect(fake.pairWorkerDevice).not.toHaveBeenCalled();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(field(dialog, "配对码")),
+  );
+
+  fireEvent.change(field(dialog, "配对码"), { target: { value: "abcd efgh" } });
+  fireEvent.change(field(dialog, "名额"), { target: { value: "1" } });
+  fireEvent.click(dialog.getByRole("button", { name: "确认接入" }));
+  await dialog.findByRole("button", { name: "确认写入配置" });
+  expect(fake.pairWorkerDevice).toHaveBeenCalledWith("p-1", {
+    code: "ABCDEFGH",
+    run_limit: 1,
+  });
+  expect(storedWizard("p-1")).toBe(fake.current()?.id);
+  const done = within(steps).getAllByRole("listitem")[0];
+  expect(done?.getAttribute("data-state")).toBe("done");
+  dialog.getByText("等待设备");
+  dialog.getByText("1 个（登记后生效）");
+  // Remote launch is not offered before the checks pass.
+  expect(dialog.queryByText("远程派发")).toBeNull();
+});
+
+test("C-707: the device's init report starts the recheck; the passed wizard shows the report before the separate remote-launch step", async () => {
+  const fake = pairingBackend(["passed"]);
+  render(
+    <WorkerWizardDrawer
+      client={fakeClient(fake.client)}
+      projectId="p-1"
+      pairing={{ code: "ABCD-EFGH" }}
+      onClose={() => undefined}
+      onChanged={() => undefined}
+      pollMs={5}
+      devicePollMs={5}
+    />,
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  expect(field(dialog, "配对码").value).toBe("ABCD-EFGH");
+  fireEvent.click(dialog.getByRole("button", { name: "确认接入" }));
+  fireEvent.click(await dialog.findByRole("button", { name: "确认写入配置" }));
+  await dialog.findByRole("button", { name: "开始检查" });
+  // The device fetched and ran its script; the server started the recheck.
+  fake.mutate((w) => ({
+    ...w,
+    device_init: { state: "succeeded", at: "2026-01-01T00:00:00.000Z" },
+    phase: "running",
+    check_id: "check-device",
+  }));
+  await dialog.findByRole("button", { name: "复查" });
+  const report = await dialog.findByRole("table", { name: "体检报告" });
+  const rows = within(report)
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) =>
+      within(row)
+        .getAllByRole("cell")
+        .map((cell) => cell.textContent),
+    );
+  expect(rows).toEqual([
+    ["系统", "SteamOS 3.8 · linux / x64", "设备自报"],
+    ["CPU", "AMD Custom APU 0405 · 8 核", "设备自报"],
+    ["内存", "16.0 GiB", "设备自报"],
+    ["磁盘", "可用 400 GiB / 共 512 GiB（/home）", "设备自报"],
+    ["GPU", "—", "设备未上报"],
+    ["已验证能力", "node 24.1.0", "接入检查"],
+    ["建议安装的工具", "godot、blender", "能力目录"],
+  ]);
+  dialog.getByText("已完成");
+  dialog.getByText("1 个");
+  // The report comes before the remote-launch group, which stays last.
+  const launch = dialog.getByText("需谨慎");
+  expect(
+    report.compareDocumentPosition(launch) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(dialog.getByText("未开启")).toBeTruthy();
+  expect(fake.writes).not.toContain("enable");
+});
+
+test("C-707: refused codes and limits are explained beside their fields with what to do next", async () => {
+  const fake = pairingBackend();
+  render(
+    <WorkerWizardDrawer
+      client={fakeClient(fake.client)}
+      projectId="p-1"
+      pairing={{ code: undefined }}
+      onClose={() => undefined}
+      onChanged={() => undefined}
+    />,
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  const send = (code: string, limit = "1") => {
+    fireEvent.change(field(dialog, "配对码"), { target: { value: code } });
+    fireEvent.change(field(dialog, "名额"), { target: { value: limit } });
+    fireEvent.click(dialog.getByRole("button", { name: "确认接入" }));
+  };
+  send("EXP2-RED2");
+  await dialog.findByText(
+    "配对码已过期（10 分钟内有效），请在设备上重新运行命令获取新码。",
+  );
+  expect(field(dialog, "配对码").getAttribute("aria-invalid")).toBe("true");
+  send("ABCD-EFGH", "17");
+  await dialog.findByText("名额须为 1～16 的整数。");
+  send("MANY-2222");
+  await screen.findByText("配对码错误次数过多，请稍后再试。");
+  // Still the pairing step: nothing became a draft.
+  expect(dialog.getByRole("button", { name: "确认接入" })).toBeTruthy();
+  expect(storedWizard("p-1")).toBeUndefined();
+});
+
+test("C-707: a code confirmed for another project continues that project's session", async () => {
+  const fake = pairingBackend();
+  const other = { id: "p-2", name: "另一个项目", created_at: "", code: "OT" };
+  window.localStorage.setItem("cardigan.worker-wizard.p-1", "kept-session");
+  render(
+    <WorkerWizardDrawer
+      client={fakeClient({
+        ...fake.client,
+        projects: async () => [
+          { id: "p-1", name: "Cardigan 自己", created_at: "" },
+          other,
+        ],
+      })}
+      projectId="p-1"
+      pairing={{ code: "ABCD-EFGH" }}
+      onClose={() => undefined}
+      onChanged={() => undefined}
+    />,
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  // The held session of this project would be replaced: said before sending.
+  dialog.getByText("确认后将替换这个项目未完成的添加 worker 进度。");
+  await dialog.findByText("另一个项目（OT）", { selector: "option" });
+  changeControl(dialog.getByRole("combobox", { name: /项目/u }), {
+    target: { value: "p-2" },
+  });
+  await waitFor(() =>
+    expect(
+      dialog.queryByText("确认后将替换这个项目未完成的添加 worker 进度。"),
+    ).toBeNull(),
+  );
+  fireEvent.click(dialog.getByRole("button", { name: "确认接入" }));
+  fireEvent.click(await dialog.findByRole("button", { name: "确认写入配置" }));
+  await dialog.findByRole("button", { name: "开始检查" });
+  expect(fake.pairWorkerDevice.mock.calls[0]?.[0]).toBe("p-2");
+  expect(fake.client.workerWizardAction.mock.calls.at(-1)?.[0]).toBe("p-2");
+  expect(storedWizard("p-2")).toBe(fake.current()?.id);
+  expect(storedWizard("p-1")).toBe("kept-session");
+});
+
+test("C-707: a QR link's code leaves the address bar at once and opens the pairing step filled in", async () => {
+  const { capturePairingLink, pendingPairingCode } = await import(
+    "../pairing-link.js"
+  );
+  window.history.replaceState(null, "", "/#/pair/ABCD-EFGH");
+  const push = vi.spyOn(window.history, "pushState");
+  const length = window.history.length;
+  capturePairingLink();
+  expect(window.location.hash).toBe("");
+  expect(window.history.length).toBe(length);
+  expect(push).not.toHaveBeenCalled();
+  expect(pendingPairingCode()).toBe("ABCD-EFGH");
+  const fake = pairingBackend();
+  page(fake.client);
+  const dialog = within(await screen.findByRole("dialog"));
+  expect(field(dialog, "配对码").value).toBe("ABCD-EFGH");
+  // Taken once; confirming is still the reader's own step.
+  expect(pendingPairingCode()).toBeUndefined();
+  expect(fake.pairWorkerDevice).not.toHaveBeenCalled();
+  push.mockRestore();
 });

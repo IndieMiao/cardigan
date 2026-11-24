@@ -51,7 +51,29 @@ export interface PairingDevice {
   readonly system?: string;
   /** C-706: `/` is mounted read-only (SteamOS); the work root goes to /home. */
   readonly root_readonly?: boolean;
+  /**
+   * C-707: hardware the device reports about itself, for the onboarding
+   * report only. Self-reported and unverified; nothing is decided on it.
+   */
+  readonly cpu?: string;
+  readonly cpu_cores?: number;
+  readonly memory_bytes?: number;
+  /** The volume the work root goes on. */
+  readonly disk_path?: DiskPath;
+  readonly disk_total_bytes?: number;
+  readonly disk_free_bytes?: number;
+  readonly gpu?: string;
 }
+const DISK_PATHS = ["/", "/home", "/Users"] as const;
+type DiskPath = (typeof DISK_PATHS)[number];
+/** Printable text of at most `max` characters, trimmed. */
+const factText = (value: unknown, max: number) =>
+  typeof value === "string" &&
+  !!value.trim() &&
+  value.length <= max &&
+  !/\p{C}/u.test(value);
+const factCount = (value: unknown, min: number) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= min;
 /** C-706: what the wizard says about a claimed device's initialisation. */
 export type DeviceInitState = "waiting" | "ready" | "succeeded" | "unavailable";
 export interface DeviceInitHooks {
@@ -94,9 +116,35 @@ export function parseDevice(value: unknown): PairingDevice {
     "free_id",
     "system",
     "root_readonly",
+    "cpu",
+    "cpu_cores",
+    "memory_bytes",
+    "disk_path",
+    "disk_total_bytes",
+    "disk_free_bytes",
+    "gpu",
   ];
   if (Object.keys(v).some((k) => !keys.includes(k))) throw invalidDevice();
   const { hostname, os, arch, address, free_id, system, root_readonly } = v;
+  const { cpu, cpu_cores, memory_bytes, gpu } = v;
+  const { disk_path, disk_total_bytes, disk_free_bytes } = v;
+  if (
+    (cpu !== undefined && !factText(cpu, 120)) ||
+    (cpu_cores !== undefined &&
+      (!factCount(cpu_cores, 1) || (cpu_cores as number) > 4096)) ||
+    (memory_bytes !== undefined && !factCount(memory_bytes, 1)) ||
+    (gpu !== undefined && !factText(gpu, 160)) ||
+    // The disk comes whole: where, how big and how much is free.
+    (disk_path !== undefined ||
+    disk_total_bytes !== undefined ||
+    disk_free_bytes !== undefined
+      ? !DISK_PATHS.includes(disk_path as DiskPath) ||
+        !factCount(disk_total_bytes, 1) ||
+        !factCount(disk_free_bytes, 0) ||
+        (disk_free_bytes as number) > (disk_total_bytes as number)
+      : false)
+  )
+    throw invalidDevice();
   if (
     typeof hostname !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/u.test(hostname) ||
@@ -124,6 +172,18 @@ export function parseDevice(value: unknown): PairingDevice {
     free_id,
     ...(system === undefined ? {} : { system: system.trim() }),
     ...(root_readonly === true ? { root_readonly } : {}),
+    ...(typeof cpu === "string" ? { cpu: cpu.trim() } : {}),
+    ...(typeof cpu_cores === "number" ? { cpu_cores } : {}),
+    ...(typeof memory_bytes === "number" ? { memory_bytes } : {}),
+    ...(typeof disk_total_bytes === "number" &&
+    typeof disk_free_bytes === "number"
+      ? {
+          disk_path: disk_path as DiskPath,
+          disk_total_bytes,
+          disk_free_bytes,
+        }
+      : {}),
+    ...(typeof gpu === "string" ? { gpu: gpu.trim() } : {}),
   };
 }
 /** `ABCD-EFGH` style input to the stored form, or undefined when malformed. */

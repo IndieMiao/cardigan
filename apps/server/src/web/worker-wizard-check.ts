@@ -52,8 +52,19 @@ function registry(store: Store, tx: ReadRepositories, draft: Draft) {
     ),
     label: peers[0]?.label ?? draft.label,
     registered: !!tx.machines.get(w.project_id, id),
+    /** No project has registered this machine yet. */
+    unknown: peers.length === 0,
   };
 }
+/**
+ * C-707: called in the registration's own transaction when the check
+ * registers the machine for the draft's project; `first` when no project had
+ * it before (a new machine on this host).
+ */
+export type OnRegistered = (
+  tx: StoreTransactionContext,
+  first: boolean,
+) => void;
 export function checkRegistryCompatibility(
   store: Store,
   tx: ReadRepositories,
@@ -73,6 +84,7 @@ function registration(
   draft: Draft,
   create: boolean,
   limit: number,
+  onRegistered: OnRegistered | undefined,
 ) {
   const w = draft.config.worker,
     id = w.machine_id,
@@ -101,6 +113,7 @@ function registration(
   );
   if (!result.ok) return false;
   persistEffect(tx, project, result.value);
+  onRegistered?.(tx, r.unknown);
   return true;
 }
 export function checkWizard(options: {
@@ -115,6 +128,7 @@ export function checkWizard(options: {
   authorize: (tx?: ReadRepositories) => string;
   limit: number;
   id: string;
+  onRegistered?: OnRegistered;
 }) {
   const {
     store,
@@ -127,6 +141,7 @@ export function checkWizard(options: {
     authorize,
     limit,
     id,
+    onRegistered,
   } = options;
   const config = draft.config,
     { project_id: project, machine_id: machine } = config.worker;
@@ -237,7 +252,15 @@ export function checkWizard(options: {
           registration: async (create) =>
             store.uow.run((tx) => {
               authorize(tx);
-              return registration(store, tx, clock, draft, create, limit);
+              return registration(
+                store,
+                tx,
+                clock,
+                draft,
+                create,
+                limit,
+                onRegistered,
+              );
             }),
           ...(host.probe ? { probe: host.probe } : {}),
           beforeStep: begin,

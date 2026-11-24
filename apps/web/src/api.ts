@@ -1446,6 +1446,23 @@ export interface WorkerWizardStep {
   readonly next?: string;
   readonly command_key?: WorkerWizardCommandKey;
 }
+/** C-705/C-707: a paired device's own report of itself. */
+export interface WorkerPairingDevice {
+  readonly hostname: string;
+  readonly os: "linux" | "darwin";
+  readonly arch: "x64" | "arm64";
+  readonly address: string;
+  readonly free_id: number;
+  readonly system?: string;
+  readonly root_readonly?: boolean;
+  readonly cpu?: string;
+  readonly cpu_cores?: number;
+  readonly memory_bytes?: number;
+  readonly disk_path?: string;
+  readonly disk_total_bytes?: number;
+  readonly disk_free_bytes?: number;
+  readonly gpu?: string;
+}
 /** A server-side wizard session; it lives 24 hours in the Web process. */
 export interface WorkerWizardView {
   readonly id: string;
@@ -1468,6 +1485,32 @@ export interface WorkerWizardView {
   readonly command_prerequisites: string;
   readonly check_id?: string;
   readonly error?: string;
+  /** C-706: a draft from a device pairing: the device's one-time init script. */
+  readonly device_init?: {
+    readonly state: "waiting" | "fetched" | "succeeded" | "failed";
+    readonly at?: string;
+  };
+  /** C-707: what a paired device reported about itself (unverified). */
+  readonly device?: WorkerPairingDevice;
+  /**
+   * C-707: the Agent limit chosen when pairing; set when the check first
+   * registers the machine (`applied`), unchanged for a known one (`kept`).
+   */
+  readonly run_limit?: {
+    readonly value: number;
+    readonly state: "pending" | "applied" | "kept";
+  };
+  /** C-707: host facts for the onboarding report, once the checks passed. */
+  readonly report?: {
+    readonly capabilities: readonly {
+      readonly key: string;
+      readonly version: string | null;
+      readonly verified_at: string | null;
+      readonly state: "verified" | "expired" | "unverified";
+    }[];
+    /** Catalog tools for this system not verified yet. */
+    readonly suggested: readonly string[];
+  };
   /** The pending file change; private values are redacted by the server. */
   readonly preview?: {
     readonly preview_id: string;
@@ -2518,6 +2561,14 @@ export interface CardiganClient {
     input: WorkerWizardInput,
   ): Promise<{ wizard: WorkerWizardView }>;
   /** C-565: values the host can suggest for a new worker form. */
+  /**
+   * C-707: a device pairing code becomes a wizard draft in this project, with
+   * the Agent limit for the new machine. Owner's human session only.
+   */
+  pairWorkerDevice?(
+    projectId: string,
+    input: { readonly code: string; readonly run_limit: number },
+  ): Promise<{ wizard: WorkerWizardView; device: WorkerPairingDevice }>;
   workerWizardDefaults?(
     projectId: string,
   ): Promise<{ defaults: WorkerWizardDefaults }>;
@@ -3178,6 +3229,16 @@ export class HttpCardiganClient implements CardiganClient {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/worker-wizards`,
       { method: "POST", body: JSON.stringify(input) },
+    );
+  }
+  pairWorkerDevice(
+    projectId: string,
+    input: { readonly code: string; readonly run_limit: number },
+  ): Promise<{ wizard: WorkerWizardView; device: WorkerPairingDevice }> {
+    // Never resent: a code works once, so a lost reply is not retried.
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/worker-wizards/pairing`,
+      { method: "POST", body: JSON.stringify(input), resend: false },
     );
   }
   workerWizardDefaults(

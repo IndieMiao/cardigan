@@ -31,6 +31,7 @@ import {
   SettingsPage,
   SnapshotPage,
 } from "./lazy-pages.js";
+import { pendingPairingCode } from "./pairing-link.js";
 import { routeHash, useRoute } from "./route.js";
 import {
   type ServiceUpdatingNotice,
@@ -209,7 +210,16 @@ function Workbench({
     if (route !== undefined && selected !== undefined) return;
     const first = projects.projects[0];
     if (first !== undefined) {
-      navigate({ kind: "cards", projectId: first.id });
+      // C-707: a pairing link (already cleared) opens the machine panel.
+      navigate(
+        pendingPairingCode()
+          ? {
+              kind: "settings",
+              projectId: first.id,
+              filters: { tab: "machines" },
+            }
+          : { kind: "cards", projectId: first.id },
+      );
     }
   }, [projects, route, selected, navigate, invalidHash]);
 
