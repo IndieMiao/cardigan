@@ -5,6 +5,7 @@ import {
   type CommandPorts,
   type CommandState,
   commandEventHistory,
+  commandStreamHistory,
   type Event,
   type ProjectId,
   type Repository,
@@ -16,32 +17,18 @@ import type { McpBackend, McpReadContext } from "../backend.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import type { ToolContext } from "../tools/types.js";
 
-const histories = new WeakMap<
-  ReadonlyMap<string, readonly Event[]>,
-  { cards: readonly string[]; events: readonly Event[] }
->();
-
 /**
- * Entity-only revisions do not change immutable event history or its indexes.
- * C-643: telemetry (run lifecycle, GitHub dispatch journal, branch backups,
- * session maintenance) stays out of the command-state stream; rules read it
- * through the attached journal (`eventsOfType`, `eventById`, `fullEventHistory`).
+ * Project stream, then card streams in card order (C-640: built from the Store
+ * log). C-643: telemetry (run lifecycle, GitHub dispatch journal, branch
+ * backups, session maintenance) stays out of the command-state stream; rules
+ * read it through the attached journal (`eventsOfType`, `eventById`,
+ * `fullEventHistory`).
  */
 function eventHistory(
   streams: ReadonlyMap<string, readonly Event[]>,
   cards: readonly { id: string }[],
 ) {
-  const cached = histories.get(streams);
-  if (
-    cached?.cards.length === cards.length &&
-    cached.cards.every((id, i) => id === cards[i]?.id)
-  )
-    return cached.events;
-  const events = commandEventHistory(
-    ["", ...cards.map((c) => c.id)].map((id) => streams.get(id) ?? []),
-  );
-  histories.set(streams, { cards: cards.map((c) => c.id), events });
-  return events;
+  return commandStreamHistory(streams, ["", ...cards.map((c) => c.id)]);
 }
 
 export function unwrap<T>(result: Result<T>): T {

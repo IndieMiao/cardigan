@@ -1,10 +1,30 @@
 import type { Event } from "./entities.js";
+import {
+  attachEventIndex,
+  type EventIndexKind,
+  EventLogView,
+  type HistoryIndex,
+  historyIndex,
+} from "./event-log.js";
+import { isTelemetryEvent, TELEMETRY_EVENT_TYPES } from "./telemetry.js";
+
+export { isTelemetryEvent, TELEMETRY_EVENT_TYPES };
 
 /**
  * C-221: keyed event lookup. Event collections are immutable snapshots (every
  * appended event yields a new array: Store stream caches, command drafts and
  * fixtures all copy), so an index keyed by the array's identity cannot go
  * stale; a rolled-back snapshot keeps its own index. Weak keys free unused ones.
+ *
+ * C-640: a Store history array (`EventLogView.history`) and an
+ * `appendEvents` result carry an attached index maintained on append, so
+ * lookups on them never rebuild over the whole array. Any other array keeps
+ * the lazy per-array index below with identical results.
+ *
+ * C-643: the command-state stream leaves telemetry (`TELEMETRY_EVENT_TYPES`)
+ * out and keeps it in a journal attached to the array. Every lookup below
+ * still answers over the complete history: a Store command history carries the
+ * full history's index, other arrays consult their journal.
  */
 const byId = new WeakMap<readonly Event[], ReadonlyMap<string, Event>>();
 const byType = new WeakMap<
@@ -13,29 +33,9 @@ const byType = new WeakMap<
 >();
 const noEvents: readonly Event[] = Object.freeze([]);
 
-/**
- * C-643: high-volume host telemetry. These events stay in the event table
- * (timeline, activity, get_updates and bells read them as before), but the
- * command-state event stream excludes them, so generic projections that scan
- * `state.events` no longer walk them. Rules that need them read the journal
- * through the indexed lookups below or `fullEventHistory`.
- */
-export const TELEMETRY_EVENT_TYPES: ReadonlySet<string> = new Set([
-  "github_check_dispatch",
-  "github_probe_dispatch",
-  "run_queued",
-  "run_dispatched",
-  "run_started",
-  "run_finished",
-  "assignment_branch_backed_up",
-  "session_maintenance_changed",
-]);
-export const isTelemetryEvent = (event: Pick<Event, "type">) =>
-  TELEMETRY_EVENT_TYPES.has(event.type);
-
 interface TelemetryJournal {
   /** Telemetry events, in the order of the full history. */
-  readonly telemetry: readonly Event[];
+  readonly telemetry: () => readonly Event[];
   readonly full: () => readonly Event[];
 }
 // Keyed by the command-state event array, like every index in this module.
@@ -43,11 +43,15 @@ const journals = new WeakMap<readonly Event[], TelemetryJournal>();
 
 function attach(
   events: readonly Event[],
-  telemetry: readonly Event[],
+  telemetry: () => readonly Event[],
   build: () => readonly Event[],
 ) {
+  let journal: readonly Event[] | undefined;
   let full: readonly Event[] | undefined;
-  journals.set(events, { telemetry, full: () => (full ??= build()) });
+  journals.set(events, {
+    telemetry: () => (journal ??= telemetry()),
+    full: () => (full ??= build()),
+  });
   return events;
 }
 
@@ -77,16 +81,39 @@ export function commandEventHistory(
   parts: readonly (readonly Event[])[],
 ): readonly Event[] {
   const split = parts.map(splitPart);
+  const telemetry = split.flatMap((s) => s.telemetry);
   return attach(
     split.flatMap((s) => s.business),
-    split.flatMap((s) => s.telemetry),
+    () => telemetry,
     () => parts.flat(),
   );
 }
 
+/**
+ * C-643 + C-640: the command-state stream for `order` (project stream "" plus
+ * card ids). A Store view concatenates its business segments and attaches the
+ * full history's index; the full history and the telemetry journal are only
+ * materialized when a rule asks for them. Other maps split their streams.
+ */
+export function commandStreamHistory(
+  streams: ReadonlyMap<string, readonly Event[]>,
+  order: readonly string[],
+): readonly Event[] {
+  if (!(streams instanceof EventLogView))
+    return commandEventHistory(order.map((id) => streams.get(id) ?? []));
+  const events = streams.commandHistory(order);
+  if (!journals.has(events))
+    attach(
+      events,
+      () => streams.telemetryHistory(order),
+      () => streams.history(order),
+    );
+  return events;
+}
+
 /** Telemetry journal of a command-state event array; empty for plain arrays. */
 export function telemetryEvents(events: readonly Event[]): readonly Event[] {
-  return journals.get(events)?.telemetry ?? noEvents;
+  return journals.get(events)?.telemetry() ?? noEvents;
 }
 
 /**
@@ -95,22 +122,6 @@ export function telemetryEvents(events: readonly Event[]): readonly Event[] {
  */
 export function fullEventHistory(events: readonly Event[]): readonly Event[] {
   return journals.get(events)?.full() ?? events;
-}
-
-/** `[...events, ...added]`, keeping the telemetry journal of `events`. */
-export function appendEvents(
-  events: readonly Event[],
-  added: readonly Event[],
-): readonly Event[] {
-  const next = [...events, ...added];
-  const journal = journals.get(events);
-  if (!journal) return next;
-  const extra = added.filter(isTelemetryEvent);
-  return attach(
-    next,
-    extra.length ? [...journal.telemetry, ...extra] : journal.telemetry,
-    () => [...journal.full(), ...added],
-  );
 }
 
 /**
@@ -124,17 +135,14 @@ export function flatMapEvents(
   const next = events.flatMap(each);
   const journal = journals.get(events);
   if (!journal) return next;
-  return attach(next, journal.telemetry.flatMap(each), () =>
-    journal.full().flatMap(each),
+  return attach(
+    next,
+    () => journal.telemetry().flatMap(each),
+    () => journal.full().flatMap(each),
   );
 }
 
-/** Same order and duplicates as filter; never cache a clock-dependent answer. */
-export function eventsOfType(events: readonly Event[], type: string) {
-  const journal = TELEMETRY_EVENT_TYPES.has(type)
-    ? journals.get(events)
-    : undefined;
-  if (journal) events = journal.telemetry;
+function typeBucket(events: readonly Event[], type: string) {
   let index = byType.get(events);
   if (!index) {
     const map = new Map<string, Event[]>();
@@ -148,11 +156,16 @@ export function eventsOfType(events: readonly Event[], type: string) {
   }
   return index.get(type) ?? noEvents;
 }
+
+/** Same order and duplicates as filter; never cache a clock-dependent answer. */
+export function eventsOfType(events: readonly Event[], type: string) {
+  return query(events, "type", type);
+}
 // Immutable snapshots retain the original order within every bucket. Build
 // each requested lookup once, including when many candidates share one card.
 function keyedEvents(keys: (e: Event) => readonly unknown[]) {
   const cache = new WeakMap<readonly Event[], Map<unknown, Event[]>>();
-  return (events: readonly Event[], key: string): readonly Event[] => {
+  return (events: readonly Event[], key: unknown): readonly Event[] => {
     events = fullEventHistory(events);
     let index = cache.get(events);
     if (!index) {
@@ -169,29 +182,62 @@ function keyedEvents(keys: (e: Event) => readonly unknown[]) {
     return index.get(key) ?? noEvents;
   };
 }
-const byField = (field: string) =>
+const fieldIndex = (field: string) =>
   keyedEvents((e) => {
     const value = (e.payload as Record<string, unknown> | null)?.[field];
     return typeof value === "string" ? [value] : [];
   });
-export const eventsForDecision = byField("decision_id");
-export const eventsForCompletion = byField("completion_id");
-export const eventsForWorkItem = byField("work_item_id");
-export const resumeEventsForItem = keyedEvents((e) => {
-  const p = e.payload;
-  return p &&
-    typeof p === "object" &&
-    "resume_work_items" in p &&
-    Array.isArray(p.resume_work_items)
-    ? p.resume_work_items
-    : [];
-});
+const plain: Record<
+  Exclude<EventIndexKind, "type">,
+  (events: readonly Event[], key: unknown) => readonly Event[]
+> = {
+  decision_id: fieldIndex("decision_id"),
+  completion_id: fieldIndex("completion_id"),
+  work_item_id: fieldIndex("work_item_id"),
+  resume_work_items: keyedEvents((e) => {
+    const p = e.payload;
+    return p &&
+      typeof p === "object" &&
+      "resume_work_items" in p &&
+      Array.isArray(p.resume_work_items)
+      ? p.resume_work_items
+      : [];
+  }),
+};
 const forCard = keyedEvents((e) => (e.card_id ? [e.card_id] : []));
+
+function query(
+  events: readonly Event[],
+  kind: EventIndexKind,
+  key: unknown,
+): readonly Event[] {
+  const index = historyIndex(events);
+  if (index) return index.query(kind, key);
+  if (kind !== "type") return plain[kind](events, key);
+  if (typeof key !== "string") return noEvents;
+  const journal = TELEMETRY_EVENT_TYPES.has(key)
+    ? journals.get(events)
+    : undefined;
+  return typeBucket(journal ? journal.telemetry() : events, key);
+}
+
+export const eventsForDecision = (events: readonly Event[], key: string) =>
+  query(events, "decision_id", key);
+export const eventsForCompletion = (events: readonly Event[], key: string) =>
+  query(events, "completion_id", key);
+export const eventsForWorkItem = (events: readonly Event[], key: string) =>
+  query(events, "work_item_id", key);
+export const resumeEventsForItem = (events: readonly Event[], key: string) =>
+  query(events, "resume_work_items", key);
 export const cardEventsOfType = (
   events: readonly Event[],
   card: string,
   type: string,
-) => forCard(eventsOfType(events, type), card);
+): readonly Event[] => {
+  const index = historyIndex(events);
+  if (index) return index.card(card, type);
+  return forCard(eventsOfType(events, type), card);
+};
 
 /** Same result as `events.find((e) => e.id === id)`: the first match wins. */
 export function eventById(
@@ -199,10 +245,12 @@ export function eventById(
   id: string | undefined,
 ): Event | undefined {
   if (id === undefined) return undefined;
+  const attached = historyIndex(events);
+  if (attached) return attached.byId(id);
   const found = idIndex(events).get(id);
   if (found) return found;
   const journal = journals.get(events);
-  return journal && idIndex(journal.telemetry).get(id);
+  return journal && idIndex(journal.telemetry()).get(id);
 }
 function idIndex(events: readonly Event[]): ReadonlyMap<string, Event> {
   let index = byId.get(events);
@@ -213,4 +261,84 @@ function idIndex(events: readonly Event[]): ReadonlyMap<string, Event> {
     byId.set(events, index);
   }
   return index;
+}
+
+/**
+ * Derived history `[...base, ...tail]`: answers combine the base's index with
+ * a small index over the tail instead of re-indexing the whole array.
+ */
+class AppendedIndex implements HistoryIndex {
+  readonly #cache = new Map<string, Map<unknown, readonly Event[]>>();
+  constructor(
+    private readonly base: readonly Event[],
+    private readonly tail: readonly Event[],
+  ) {}
+
+  #memo(space: string, key: unknown, build: () => readonly Event[]) {
+    let cache = this.#cache.get(space);
+    if (!cache) {
+      cache = new Map();
+      this.#cache.set(space, cache);
+    }
+    let events = cache.get(key);
+    if (!events) {
+      events = build();
+      cache.set(key, events);
+    }
+    return events;
+  }
+
+  #join(head: readonly Event[], tail: readonly Event[]) {
+    if (!tail.length) return head;
+    if (!head.length) return tail;
+    return [...head, ...tail];
+  }
+
+  query(kind: EventIndexKind, key: unknown): readonly Event[] {
+    return this.#memo(kind, key, () =>
+      this.#join(query(this.base, kind, key), query(this.tail, kind, key)),
+    );
+  }
+
+  card(card: string, type: string): readonly Event[] {
+    return this.#memo(`card:${type}`, card, () =>
+      this.#join(
+        cardEventsOfType(this.base, card, type),
+        cardEventsOfType(this.tail, card, type),
+      ),
+    );
+  }
+
+  byId(id: string): Event | undefined {
+    return eventById(this.base, id) ?? eventById(this.tail, id);
+  }
+}
+
+/**
+ * `[...base, ...tail]` whose lookups reuse the base's index (a Store history
+ * or an earlier `appendEvents` result) and index only the tail. The tail is
+ * copied, so later pushes to a draft's event list do not leak in. C-643: the
+ * result keeps the base's telemetry journal, extended by telemetry in the tail.
+ */
+export function appendEvents(
+  base: readonly Event[],
+  tail: readonly Event[],
+): readonly Event[] {
+  if (!tail.length) return base;
+  const added = [...tail];
+  const events = [...base, ...added];
+  attachEventIndex(events, new AppendedIndex(base, added));
+  const journal = journals.get(base);
+  if (journal)
+    attach(
+      events,
+      () => {
+        const extra = added.filter(isTelemetryEvent);
+        return extra.length
+          ? [...journal.telemetry(), ...extra]
+          : journal.telemetry();
+      },
+      () => [...journal.full(), ...added],
+    );
+  return events;
 }

@@ -221,6 +221,7 @@ export * from "./errors.js";
 export {
   appendEvents,
   commandEventHistory,
+  commandStreamHistory,
   eventById,
   eventsForDecision,
   eventsOfType,
@@ -230,6 +231,7 @@ export {
   TELEMETRY_EVENT_TYPES,
   telemetryEvents,
 } from "./event-index.js";
+export { EventLog, EventLogView, streamHistory } from "./event-log.js";
 export * from "./ext-interaction.js";
 export * from "./ext-message.js";
 export * from "./flow.js";
