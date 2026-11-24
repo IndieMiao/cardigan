@@ -736,7 +736,7 @@ test("R09 §3.3: a new stream without after starts at now and emits subsequent c
 });
 
 test("R10 §8.1: project reads isolate card numbers and return empty collections for a new project", async () => {
-  await f.cli("project", "create", "empty-project");
+  await f.cli("project", "create", "empty-project", "--code", "EMP");
   const projects = await f.call("/api/projects");
   expect(projects.status).toBe(200);
   expect(
@@ -842,7 +842,7 @@ test.each([
         "sandbox",
       );
     expect((await f.call(path, { anonymous: true })).status).toBe(401);
-    await f.cli("project", "create", "attachment-other");
+    await f.cli("project", "create", "attachment-other", "--code", "ATT");
     expect(
       (
         await f.call(

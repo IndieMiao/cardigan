@@ -85,7 +85,18 @@ beforeEach(async () => {
       throw new Error("must not spawn");
     },
   };
-  expect(await run(["project", "create", project])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      project,
+      "--code",
+      `T${project
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   await createCard();
   store = Store.open({ dataDir });
 });
@@ -429,7 +440,18 @@ test("rejects corrupted existing blobs without posting a second comment", async 
 
 test("uses explicit project/data directory before env, and env project before sole-project fallback", async () => {
   const other = "p-other" as ProjectId;
-  expect(await run(["project", "create", other])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      other,
+      "--code",
+      `T${other
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   await createCard(other);
   io.env.CARDIGAN_PROJECT = other;
   expect(await run(["comment", "add", "C-1", "--text=env"])).toBe(0);

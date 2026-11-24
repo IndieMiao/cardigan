@@ -742,6 +742,8 @@ async function handleApi(context: RequestContext): Promise<void> {
         id: project.id,
         name: project.name,
         created_at: project.created_at,
+        // C-674: the display code full numbers are written with (`SEN-C-34`).
+        code: project.code,
       })),
     });
     return;

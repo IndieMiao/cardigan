@@ -1182,6 +1182,33 @@ test("Needs You is reachable through the hash navigation and preserves project s
   expect(screen.queryByText("Second project decision")).toBeNull();
 });
 
+test("C-674: Needs You shows full numbers with the project code", async () => {
+  window.location.hash = "#/p/sensen-godot/needs-you";
+  render(
+    <App
+      client={fakeClient({
+        needsYou: async () => ({
+          ...page([q({ id: "Q-7", card_id: "C-34", trigger: null })]),
+          human_actions: [],
+        }),
+        projects: async () => [
+          {
+            id: "sensen-godot",
+            name: "Sensen",
+            created_at: "now",
+            code: "SEN",
+          },
+        ],
+      })}
+    />,
+  );
+  const card = await screen.findByRole("article", { name: "拍板 Q-7" });
+  expect(within(card).getByText("SEN-Q-7")).toBeTruthy();
+  expect(within(card).getAllByText("SEN-C-34").length).toBeGreaterThan(0);
+  expect(within(card).queryByText("Q-7")).toBeNull();
+  expect(screen.getByLabelText("项目").textContent).toContain("Sensen（SEN）");
+});
+
 test("waiting durations advance without changing the decision draft", async () => {
   vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
   render(

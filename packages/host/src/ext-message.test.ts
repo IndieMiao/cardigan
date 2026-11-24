@@ -960,6 +960,8 @@ const matrixEntry = (n: number) => ({
   item: `H-${n}`,
   kind: "human_action",
   title: `Fixture ${n}`,
+  // C-674: the store registers a code for the fixture project.
+  ref: "FIC-C-1",
   url: `${config.workbench_url}/#/p/${project_id}/cards/C-1?at=human-action-H-${n}`,
 });
 // Return a release function so the source time stays distinct from its readiness.

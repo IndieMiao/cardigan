@@ -70,7 +70,7 @@ function setup({ upgrade = false } = {}) {
             },
           },
     ),
-    observe_kept_shell: vi.fn(async () => ({
+    observe_agent_exit: vi.fn(async () => ({
       ok: true as const,
       value: shell,
     })),
@@ -259,7 +259,7 @@ test("a human stop keeps the kept shell and its bell for the human start", async
   f.comment();
   await host.upgradeIdleAssignmentRoles(f.store, f.project, f.runtime, f.clock);
   await f.dispatcher.tick([f.project]);
-  expect(f.runtime.observe_kept_shell).not.toHaveBeenCalled();
+  expect(f.runtime.observe_agent_exit).not.toHaveBeenCalled();
   expect(f.runtime.release).not.toHaveBeenCalled();
   expect(f.owner().runtime_ref).toEqual(a.runtime_ref);
   expect(f.startRun).not.toHaveBeenCalled();

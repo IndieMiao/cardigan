@@ -72,7 +72,7 @@ export interface ReadRepositories extends ReadGlobalRepositories {
   readonly test_review_trust?: import("@cardigan/domain").TestReviewTrust;
   readonly cachedCommandState?: SnapshotTransaction["state"];
   /** C-639: process-wide command state scope chosen when the Store opened. */
-  readonly command_state_scope?: "full" | "hot";
+  readonly command_state_scope?: "full" | "hot" | "lean";
   readonly hot_state_hints?: HotStateHints;
   readonly project_preferences: ReadRepository<ProjectPreferences, ProjectId>;
   readonly card_templates: ReadRepository<

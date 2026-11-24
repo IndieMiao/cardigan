@@ -116,10 +116,12 @@ export interface Runtime {
       readonly idle_prompt?: TurnIdlePrompt;
     },
   ): Promise<RuntimeResult<RuntimeObservation["process"]>>;
-  /** C-667: read-only. True only when this exact kept terminal is live with
-   * an idle replacement shell while the launched CLI's native identity and its
-   * whole process group are gone. Never a stop capability by itself. */
-  observe_kept_shell?(
+  /** C-667/C-672: read-only. True only when this exact terminal is still
+   * live but no longer runs its launched CLI: a kept terminal with an idle
+   * replacement shell while the CLI's native identity and whole process group
+   * are gone, or a plain terminal whose launcher outlived the CLI's native
+   * identity. Never a stop capability by itself. */
+  observe_agent_exit?(
     ref: RuntimeRef,
     owner: RetirementIdentity,
   ): Promise<RuntimeResult<boolean>>;

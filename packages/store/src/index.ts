@@ -51,6 +51,12 @@ export {
   migrate,
 } from "./migrate.js";
 export {
+  backfillProjectCodes,
+  PROJECT_CODES_MIGRATION_NAME,
+  projectCodeSource,
+  REGISTERED_PROJECT_CODES,
+} from "./project-codes.js";
+export {
   findingKey,
   listFindings,
   type ReconcileFindingInput,

@@ -15,6 +15,10 @@ import {
 import { seedLocalMachine } from "./machines.js";
 import { persistMemberEffect } from "./members.js";
 import { migrateCardPriorities } from "./priority-migration.js";
+import {
+  backfillProjectCodes,
+  PROJECT_CODES_MIGRATION_NAME,
+} from "./project-codes.js";
 import { installSnapshotTriggers } from "./snapshot-migration.js";
 import {
   seedCardTemplates,
@@ -124,6 +128,8 @@ export function migrate(
       if (migration.version === 21 && migration.name === "design_template")
         seedDesignTemplate(db);
       if (migration.name === "story_template") seedStoryTemplates(db);
+      if (migration.name === PROJECT_CODES_MIGRATION_NAME)
+        backfillProjectCodes(db);
       if (migration.version === 39 && migration.name === "ui_template")
         seedUiTemplates(db);
       if (migration.version === 26 && migration.name === "machine_registry")

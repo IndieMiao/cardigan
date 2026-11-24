@@ -59,7 +59,11 @@ test("upgrading a v27 database applies handoff once and repeated reopen preserve
       store.close();
       store = Store.open({ dataDir });
       expect(store.migrate()).toEqual([]);
-      expect(store.getProject("p" as ProjectId)).toEqual(project);
+      // C-674: the project-code migration backfills the suggested code.
+      expect(store.getProject("p" as ProjectId)).toEqual({
+        ...project,
+        code: "HIS",
+      });
       expect(
         new CheckHandoffs(store, "fixture-controller").read("p", "executor"),
       ).toEqual(fence);

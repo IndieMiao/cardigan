@@ -54,7 +54,7 @@ pnpm build
 
 # 1. 数据库、项目、角色（角色定义 allowed_tools 和 capabilities）
 pnpm --filter @cardigan/cli exec cardigan init
-pnpm --filter @cardigan/cli exec cardigan project create p-demo
+pnpm --filter @cardigan/cli exec cardigan project create p-demo --code DEM
 pnpm --filter @cardigan/cli exec cardigan role add p-demo pm \
   --allowed-tools create_card,update_card,create_work_item,update_work_item,assign,submit_review,record_decision,post_comment,request_decision,request_human_action,project_snapshot,list_needs_you,get_card,get_updates,ack_events,whoami,heartbeat,finish_run \
   --capabilities manage

@@ -20,6 +20,7 @@ import {
   cardDependencyDispatchOrder,
   compareDispatchOrder,
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+  darwinWorker,
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
@@ -333,6 +334,8 @@ export class Dispatcher {
   private serial: Promise<void> = Promise.resolve();
   /** C-244: per project; survives ticks, a restart starts empty and re-evaluates once. */
   private readonly followups = new Map<ProjectId, DecisionFollowupSchedule>();
+  /** C-649: projects whose state was warmed in a read slice after start. */
+  private readonly warmed = new Set<ProjectId>();
   private readonly nextRoleUpgrade = new Map<ProjectId, number>();
   /** C-244: candidate lists per project, kept across ticks (memory only). */
   private candidateIndex: CandidateIndex | undefined;
@@ -531,6 +534,24 @@ export class Dispatcher {
     const step = <T>(name: string, run: () => T) =>
       profileSpanSync(`route.${name}`, run);
     await this.options.leases?.reconcile(project, () => this.clock.now());
+    // C-649: after a restart, decode the project's history and build its first
+    // state in a read slice of its own, then yield, so the first write
+    // transaction does not add that work to one long main-thread pause.
+    if (!this.warmed.has(project)) {
+      try {
+        while (!step("warm_events", () => store.warmCommandEvents(project)))
+          await yieldToLoop();
+        await yieldToLoop();
+        step("warm_state", () =>
+          store.uow.read((tx) => this.loadState(tx, project)),
+        );
+      } catch {
+        // Best effort: the first reader decodes whatever is left.
+      } finally {
+        this.warmed.add(project);
+      }
+      await yieldToLoop();
+    }
     step("patrol_host_ops", () =>
       patrolHostOps(
         store,
@@ -1050,22 +1071,24 @@ export class Dispatcher {
       observation = observed?.ok
         ? `${observed.value.process}/${observed.value.agent}`
         : (observed?.error.code ?? "unavailable");
-      // C-667: never type a bell into the shell a kept terminal left behind.
-      // Keep it pending; maintenance closes the proven shell and the next
-      // pass starts a fresh session (on the latest role version).
+      // C-667/C-672: never type a bell into a live terminal whose CLI is
+      // gone (the shell of a kept terminal, or a launcher such as the macOS
+      // idle owner that outlived the CLI). Keep it pending; maintenance
+      // closes the proven terminal and the next pass starts a fresh session
+      // (on the latest role version). A continuing turn just reported in.
       if (
         observed?.ok &&
         observed.value.process === "alive" &&
-        observed.value.kept &&
+        (observed.value.kept || (!continuing && darwinWorker(state, a))) &&
         (await this.options.runtime
-          .observe_kept_shell?.(runtimeRef, {
+          .observe_agent_exit?.(runtimeRef, {
             project_id: project,
             assignment_id: a.id,
           })
-          .then((shell) => shell.ok && shell.value)
+          .then((exited) => exited.ok && exited.value)
           .catch(() => false))
       )
-        return skip("kept_shell");
+        return skip(observed.value.kept ? "kept_shell" : "agent_exited");
       const systemTurn = guardedTurn?.reason === "system_finished_turn";
       const sessionLoss = observed?.ok
         ? observed.value.process === "exited"

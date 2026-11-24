@@ -517,6 +517,24 @@ export async function stallEvidence(
         )
       : undefined,
   ]);
+  // C-672: a worker terminal that is still live but no longer runs its
+  // launched CLI (proven by the worker from the CLI's native identity) is not
+  // a live session. There is nothing to stop: the managed restart closes that
+  // terminal and settles the session (see releaseExitedAgent).
+  const agent_exited =
+    bound &&
+    !!a.runtime_ref &&
+    a.scope === "work_item" &&
+    a.machine_id !== "local" &&
+    observed?.ok === true &&
+    observed.value.process === "alive" &&
+    (await runtime
+      .observe_agent_exit?.(a.runtime_ref, {
+        project_id: state.project_id,
+        assignment_id: a.id,
+      })
+      .then((exited) => exited.ok && exited.value)
+      .catch(() => false)) === true;
   // C-626: hc reports no activity (null/unknown) for a live terminal whose
   // strict owner check could not confirm it. The bound CLI's own empty editor
   // and idle footer, read around the same owner proof, is the equivalent idle
@@ -613,32 +631,36 @@ export async function stallEvidence(
     terminal_owner: ownerConfirmed ? "confirmed" : "unconfirmed",
     workspace,
     terminal_state,
-    process_state: observed?.ok
-      ? observed.value.process
-      : owner?.ok
-        ? owner.value
-        : null,
+    agent_exited,
+    process_state: agent_exited
+      ? ("agent_exited" as const)
+      : observed?.ok
+        ? observed.value.process
+        : owner?.ok
+          ? owner.value
+          : null,
     can_restart:
-      bound &&
-      (!exitOnly ||
-        unboundLocal ||
-        (owner?.ok &&
-          owner.value === "exited" &&
-          (!observed?.ok || observed.value.process === "exited"))) &&
-      (transfer
-        ? owner?.ok === true && owner.value === "alive"
-          ? transfer.phase === "waiting" &&
-            !transfer.observe_only &&
-            a.machine_id === "local" &&
-            !!a.runtime_ref?.local_process_receipt &&
-            !!observed?.ok &&
-            idleWakeGuard(observed.value)
-          : // C-663: also when the terminal is no longer listed at all.
-            await transferredSessionExited(state, a, runtime, execution)
-        : (systemTurn
-            ? (!!ownerConfirmed && unknownOrIdle) || unboundLocal
-            : await ordinaryRestartable()) &&
-          (a.machine_id === "local" || !!remoteExited || remoteTurnStop)) &&
-      (writableInPlace(workspace) || workspace === "no_worktree"),
+      agent_exited ||
+      (bound &&
+        (!exitOnly ||
+          unboundLocal ||
+          (owner?.ok &&
+            owner.value === "exited" &&
+            (!observed?.ok || observed.value.process === "exited"))) &&
+        (transfer
+          ? owner?.ok === true && owner.value === "alive"
+            ? transfer.phase === "waiting" &&
+              !transfer.observe_only &&
+              a.machine_id === "local" &&
+              !!a.runtime_ref?.local_process_receipt &&
+              !!observed?.ok &&
+              idleWakeGuard(observed.value)
+            : // C-663: also when the terminal is no longer listed at all.
+              await transferredSessionExited(state, a, runtime, execution)
+          : (systemTurn
+              ? (!!ownerConfirmed && unknownOrIdle) || unboundLocal
+              : await ordinaryRestartable()) &&
+            (a.machine_id === "local" || !!remoteExited || remoteTurnStop)) &&
+        (writableInPlace(workspace) || workspace === "no_worktree")),
   };
 }

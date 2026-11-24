@@ -8,6 +8,7 @@ import type {
   ReviewIssue,
   WorkItem,
 } from "./entities.js";
+import { eventsOfType } from "./event-index.js";
 import type { CardId, ReviewId, WorkItemId } from "./ids.js";
 import { evidenceWait } from "./review-evidence.js";
 
@@ -275,7 +276,10 @@ export function rejectionStreakEpisodes(state: {
   const streaks = new Map<WorkItemId, number>();
   const open = new Map<WorkItemId, number>();
   const episodes: RejectionStreakEpisode[] = [];
-  for (const e of [...state.events].sort((a, b) => a.seq - b.seq)) {
+  // C-649: stable sort of the type subsequence equals filtering the sorted whole.
+  for (const e of [...eventsOfType(state.events, "review_submitted")].sort(
+    (a, b) => a.seq - b.seq,
+  )) {
     if (e.type !== "review_submitted" || !e.card_id) continue;
     const p = e.payload as { review_id?: unknown; verdict?: unknown } | null;
     const item =

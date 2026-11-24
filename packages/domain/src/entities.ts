@@ -317,6 +317,9 @@ export interface MergeStage {
   readonly peers?: readonly string[];
   readonly position?: number;
   readonly protecting_card_id?: string;
+  /** C-677: files shared with the protecting card; empty while paths are unknown. */
+  readonly protecting_files?: readonly string[];
+  readonly protecting_card_held?: boolean;
   readonly card_check?: MergeCheckView;
   readonly batch_check?: MergeCheckView;
   readonly color?: number;

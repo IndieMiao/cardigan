@@ -10,7 +10,7 @@ CLI 安装见 [部署说明](../deploy/README.md#安装-cardigan-命令)。在�
 
 ```sh
 # 项目已存在时不重复创建
-cardigan project create example
+cardigan project create example --code EXA
 cardigan worker add --project example --machine worker-a --host worker.invalid --dry-run
 export CARDIGAN_CONFIG_DIR="$HOME/.config/cardigan"
 install -d -m 0700 "$CARDIGAN_CONFIG_DIR"

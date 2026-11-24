@@ -48,21 +48,74 @@ export class CommandEvents {
         .prepare(
           "SELECT doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid",
         )
-        .all(previous?.through ?? 0, through, project);
+        .iterate(previous?.through ?? 0, through, project);
+      // C-649: the first read decodes straight into a fresh log (no row array
+      // or per-stream copy), which keeps the restart peak and RSS down.
+      if (!previous) {
+        const next = load(rows, through);
+        pending.set(project, next);
+        return next.view;
+      }
+      const added: Event[] = [];
+      for (const row of rows)
+        added.push(JSON.parse(row.doc as string) as Event);
       // Another project's rows move the watermark without changing this view.
-      if (previous && rows.length === 0) {
+      if (added.length === 0) {
         pending.set(project, { ...previous, through });
         return previous.view;
       }
-      const added = rows.map((row) => JSON.parse(row.doc as string) as Event);
-      const next = previous
-        ? extend(previous, added, through)
-        : rebuild([], added, through);
+      const next = extend(previous, added, through);
       pending.set(project, next);
       return next.view;
     };
+    /**
+     * C-649: decode at most `limit` more rows of this project, so a restart
+     * can warm a large history in short slices. True once caught up with the
+     * transaction's newest row.
+     */
+    const warm = (project: ProjectId, limit: number): boolean => {
+      const max = Number(
+        (
+          db
+            .prepare("SELECT COALESCE(MAX(rowid), 0) AS n FROM events")
+            .get() as { n: number }
+        ).n,
+      );
+      const previous = pending.get(project) ?? this.committed.get(project);
+      const from = previous?.through ?? 0;
+      if (from >= max) return true;
+      let last = from;
+      let count = 0;
+      const rows = (function* () {
+        for (const row of db
+          .prepare(
+            "SELECT rowid AS r, doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid LIMIT ?",
+          )
+          .iterate(from, max, project, limit)) {
+          last = Number(row.r);
+          count++;
+          yield row;
+        }
+      })();
+      let next: Snapshot;
+      if (previous) {
+        const added: Event[] = [];
+        for (const row of rows)
+          added.push(JSON.parse(row.doc as string) as Event);
+        const through = count < limit ? max : last;
+        next = added.length
+          ? extend(previous, added, through)
+          : { ...previous, through };
+      } else {
+        next = load(rows, max);
+        if (count >= limit) next = { ...next, through: last };
+      }
+      pending.set(project, next);
+      return count < limit;
+    };
     return {
       listStreams: (project: ProjectId): EventStreams => listStreams(project),
+      warm,
       /**
        * C-640: the transaction's `events.listAfter` answered from the same
        * view (own writes included): no SQL scan or per-row JSON.parse.
@@ -84,6 +137,34 @@ export class CommandEvents {
       },
     };
   }
+}
+
+/**
+ * First read of a project: append rows in commit order while every stream's
+ * seq ascends (the normal case); otherwise fall back to the sorted rebuild.
+ * The fresh log is private to this transaction until COMMIT publishes it.
+ */
+function load(
+  rows: Iterable<Record<string, unknown>>,
+  through: number,
+): Snapshot {
+  const log = new EventLog();
+  let disordered: Event[] | undefined;
+  for (const row of rows) {
+    const event = JSON.parse(row.doc as string) as Event;
+    if (disordered) {
+      disordered.push(event);
+      continue;
+    }
+    const seq = log.lastSeq(event.card_id ?? "");
+    if (seq !== undefined && event.seq <= seq) {
+      disordered = [...log.all, event];
+      continue;
+    }
+    log.append(event);
+  }
+  if (disordered) return rebuild([], disordered, through);
+  return { through, log, view: new EventLogView(log, log.end) };
 }
 
 /** Append to the transaction overlay, or rebuild when a stream's seq goes back. */
@@ -166,6 +247,8 @@ export interface HotStateHints {
   ): ReadonlyMap<string, string | undefined>;
   /** Cards with an undelivered or unresolved inbox notification. */
   liveNotificationCards(project: ProjectId): readonly string[];
+  /** C-649: project-stream events with an undelivered or unresolved notification. */
+  liveNotificationEvents(project: ProjectId): readonly string[];
 }
 
 export function hotStateHints(db: DatabaseSync): HotStateHints {
@@ -189,5 +272,12 @@ export function hotStateHints(db: DatabaseSync): HotStateHints {
       )
         .all(project)
         .map((row) => String(row.card_id)),
+    liveNotificationEvents: (project) =>
+      prepare(
+        db,
+        "SELECT DISTINCT event_id FROM notifications WHERE project_id = ? AND status IN ('pending','belled','delivery_failed','needs_attention') AND card_id IS NULL",
+      )
+        .all(project)
+        .map((row) => String(row.event_id)),
   };
 }

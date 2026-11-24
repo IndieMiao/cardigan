@@ -14,6 +14,8 @@ type Owner = RetirementIdentity & {
   readonly unknown_activity?: true;
   /** C-667: ask the worker to name an idle replacement shell of a kept terminal. */
   readonly kept_shell?: true;
+  /** C-672: ask the worker to name a plain live terminal whose CLI is gone. */
+  readonly agent_exit?: true;
 };
 
 /** The pinned worker binding; undefined when any part is missing or foreign. */
@@ -50,6 +52,7 @@ function binding(execution: Ssh, ref: RuntimeRef, owner: Owner) {
       ? { unknown_activity: true }
       : {}),
     ...(owner.kept_shell ? { kept_shell: true } : {}),
+    ...(owner.agent_exit ? { agent_exit: true } : {}),
     primitive: posix.join(
       posix.dirname(execution.fileHelper.path),
       "worker-primitives.py",
@@ -63,11 +66,13 @@ export async function darwinRetirementObservation(
   ref: RuntimeRef,
   owner: Owner,
   probe = workerTerminalProbe,
-): Promise<"alive" | "exited" | "kept" | "shell" | "unknown"> {
+): Promise<"alive" | "exited" | "kept" | "shell" | "agent_exited" | "unknown"> {
   const bound = binding(execution, ref, owner);
   if (!bound) return "unknown";
   const observed: unknown = await probe(execution, bound);
   if (observed === "shell") return owner.kept_shell ? "shell" : "kept";
+  if (observed === "agent_exited")
+    return owner.agent_exit ? "agent_exited" : "unknown";
   return observed === "exited" || observed === "alive" || observed === "kept"
     ? observed
     : "unknown";

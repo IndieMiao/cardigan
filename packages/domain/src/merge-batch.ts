@@ -1,5 +1,10 @@
 import type { Event, MergeCheckView } from "./entities.js";
-import { eventsForCompletion } from "./event-index.js";
+import {
+  cardEventsOfType,
+  eventsForCompletion,
+  eventsOfType,
+  streamEvents,
+} from "./event-index.js";
 import type { CardId, DeliveryId, MergeBatchId, ProjectId } from "./ids.js";
 
 export interface MergeBatchMember {
@@ -46,7 +51,7 @@ export function batchQueueWait(events: readonly Event[], batch: MergeBatch) {
     return undefined;
   const owner = batch.members.at(-1)?.card_id;
   if (!owner) return undefined;
-  const wait = events.findLast((e) => {
+  const wait = eventsOfType(events, "merge_check_waiting").findLast((e) => {
     if (
       e.type !== "merge_check_waiting" ||
       e.card_id !== owner ||
@@ -80,7 +85,11 @@ export function deferredMergeBatch(
   card: CardId,
   completion: DeliveryId,
 ) {
-  const deferred = events.findLast(
+  const deferred = cardEventsOfType(
+    events,
+    card,
+    "merge_batch_member_deferred",
+  ).findLast(
     (e) =>
       e.card_id === card &&
       e.actor.kind === "system" &&
@@ -89,7 +98,11 @@ export function deferredMergeBatch(
   );
   if (!deferred) return undefined;
   const { batch_id } = deferred.payload as { batch_id: MergeBatchId };
-  const resumed = events.some(
+  const resumed = cardEventsOfType(
+    events,
+    card,
+    "merge_batch_member_resumed",
+  ).some(
     (e) =>
       e.card_id === card &&
       e.seq > deferred.seq &&
@@ -126,7 +139,8 @@ export function mergeBatches(events: readonly Event[]): readonly MergeBatch[] {
   const cached = batchCache.get(events);
   if (cached) return cached;
   const batches = new Map<MergeBatchId, MergeBatch>();
-  for (const e of events
+  // C-649: only the project stream can hold batch facts (see the filter).
+  for (const e of streamEvents(events, undefined)
     .filter(
       (e) =>
         !e.card_id &&

@@ -1,4 +1,5 @@
 import type { Event, MergeCheckView } from "../entities.js";
+import { eventsOfTypes } from "../event-index.js";
 import type { CardId, DeliveryId } from "../ids.js";
 export const MERGE_CHECK_EVENTS = [
   "merge_check_queued",
@@ -23,7 +24,11 @@ function targetIndex(events: readonly Event[]) {
   const cached = indexes.get(events);
   if (cached) return cached;
   const targets = new Map<string, TargetChecks>();
-  for (const e of events) {
+  // C-649: only these types are indexed; the type index keeps history order.
+  for (const e of eventsOfTypes(events, [
+    ...MERGE_CHECK_EVENTS,
+    "merge_check_waiting",
+  ])) {
     const waiting =
       e.type === "merge_check_waiting" && e.actor.kind === "system";
     if (!e.card_id || (!waiting && !MERGE_CHECK_EVENTS.includes(e.type)))

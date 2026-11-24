@@ -333,11 +333,12 @@ test("merge status lists the card, the confirmation and the plan", async () => {
   await seatAwaitingMerge();
   const result = await cardigan("merge", "status");
   expect(result.code).toBe(0);
+  // C-674: full numbers, so the output means the same outside the project.
   expect(result.out).toContain(
-    `${card_id} awaiting_merge merge_policy=confirm`,
+    `MER-${card_id} awaiting_merge merge_policy=confirm`,
   );
-  expect(result.out).toContain("confirmation: Q-1 open");
-  expect(result.out).toContain("delivery: D-1 W-1 git_head=");
+  expect(result.out).toContain("confirmation: MER-Q-1 open");
+  expect(result.out).toContain("delivery: MER-D-1 MER-W-1 git_head=");
   expect(result.out).toContain("plan: not ready");
   expect(result.out).toContain(
     `无法生成合并计划 ${card_id}：本次完成申请尚未获得合并确认（illegal_transition）`,
@@ -799,7 +800,7 @@ test.each([
     await seatAwaitingMerge();
     holdWithPm();
     expect((await cardigan("merge", "status", card_id)).out).toContain(
-      "confirmation: Q-1 open decider=PM（可直接处理）",
+      "confirmation: MER-Q-1 open decider=PM（可直接处理）",
     );
     const needs = await cardigan("needs-you");
     expect(needs.out).toContain("PM 代确认中的合并（1");

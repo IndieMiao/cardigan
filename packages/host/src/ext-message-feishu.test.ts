@@ -18,6 +18,7 @@ import {
   sendExtMessage,
 } from "./ext-message.js";
 import { createFeishuAdapter } from "./ext-message-feishu.js";
+import { feishuCard } from "./feishu-card.js";
 
 const webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic-only";
 const credential = JSON.stringify({
@@ -145,6 +146,18 @@ test("sensitive content is generic; unsigned mode and untrusted title text canno
   expect(JSON.stringify(payloads[1])).not.toContain('"tag":"at"');
   expect(JSON.stringify(payloads[1])).toContain("&lt;at");
   expect(JSON.stringify(payloads[1])).not.toContain("<at");
+});
+
+test("C-674: pushes name the card by its full number when the project has a code", async () => {
+  const coded = buildExtMessage(item, "https://workbench.invalid", 120, "SEN");
+  expect(await sendExtMessage(adapter(false), coded, 10000)).toBe("sent");
+  expect(JSON.stringify(payloads[0])).toContain(
+    "[Cardigan] fictional SEN-C-1 拍板：请确认",
+  );
+  const card = JSON.parse(feishuCard(coded, "", [])) as {
+    header: { title: { content: string } };
+  };
+  expect(card.header.title.content).toBe("SEN-C-1 请确认😀");
 });
 
 test.each([

@@ -23,6 +23,7 @@ import type {
   TransactionContext,
   UnitOfWork,
 } from "@cardigan/domain";
+import { suggestProjectCode, validateProjectCode } from "@cardigan/domain";
 import {
   type ChangeCursor,
   type ChangeSet,
@@ -72,6 +73,7 @@ import {
   listMigrations,
   migrate,
 } from "./migrate.js";
+import { projectCodeSource, projectCodes } from "./project-codes.js";
 import {
   listFindings,
   type ReconcileFindingInput,
@@ -211,19 +213,23 @@ type Planned<T> =
     }
   | { readonly kind: "pessimistic" };
 
-function projectRecord(row: {
+interface ProjectRow {
   id: string;
   name: string;
   created_at: string;
   repo_path: string | null;
   base_branch: string | null;
-}): ProjectRecord {
+  code?: string | null;
+}
+
+function projectRecord(row: ProjectRow): ProjectRecord {
   return {
     id: row.id as ProjectId,
     name: row.name,
     created_at: row.created_at,
     repo_path: row.repo_path,
     base_branch: row.base_branch,
+    code: row.code ?? null,
   };
 }
 
@@ -244,14 +250,18 @@ export interface StoreOptions {
   readonly commandState?: CommandStateScope;
 }
 
-/** `hot`: open cards' streams plus durable closed-card facts; `full`: all history. */
-export type CommandStateScope = "full" | "hot";
+/**
+ * `hot`: open cards' streams plus durable closed-card facts; `full`: all
+ * history; `lean` (C-649): hot, plus closed-card GitHub dispatch records left
+ * out and project-stream retention by type.
+ */
+export type CommandStateScope = "full" | "hot" | "lean";
 export function commandStateScope(
   value: string | undefined,
 ): CommandStateScope {
   if (value === undefined || value === "" || value === "hot") return "hot";
-  if (value === "full") return "full";
-  throw new Error("CARDIGAN_COMMAND_STATE must be hot or full");
+  if (value === "full" || value === "lean") return value;
+  throw new Error("CARDIGAN_COMMAND_STATE must be hot, lean or full");
 }
 
 export interface GetUpdatesParams {
@@ -299,11 +309,23 @@ export interface ProjectRecord {
   readonly repo_path: string | null;
   /** Branch a worktree starts from when the card does not say otherwise. */
   readonly base_branch: string | null;
+  /**
+   * C-674: globally unique display code (`SEN`), immutable once registered.
+   * Null only before the project-code migration or for a project that has
+   * not registered one yet.
+   */
+  readonly code: string | null;
 }
 
 export interface ProjectCreateInput {
   readonly id: ProjectId;
   readonly name?: string;
+  /**
+   * C-674: the project code. Human entry points (`project create`) require
+   * it; omitted here, the suggested code for the name is registered, so
+   * fixtures need no code of their own.
+   */
+  readonly code?: string;
 }
 
 export interface IdempotentResult<T> {
@@ -956,6 +978,32 @@ export class Store {
   }
 
   /**
+   * C-649: decode up to `rows` more of a project's events into the shared
+   * command-event log in a short read transaction. Returns true once the log
+   * is current; callers yield between calls to keep restart pauses short.
+   */
+  warmCommandEvents(project: ProjectId, rows = 50_000): boolean {
+    if (this.#inTransaction) {
+      throw new Error("nested UnitOfWork is not supported");
+    }
+    this.#db.exec("BEGIN DEFERRED");
+    this.#inTransaction = true;
+    const events = this.#commandEvents.transaction(this.#db);
+    try {
+      const done = events.warm(project, rows);
+      this.#db.exec("COMMIT");
+      events.commit();
+      return done;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      this.#rollbacks++;
+      throw error;
+    } finally {
+      this.#inTransaction = false;
+    }
+  }
+
+  /**
    * Events after `since_seq` plus the timeline entries they carry, ordered by
    * `seq` (development plan §6.1 step 4).
    */
@@ -1155,17 +1203,50 @@ export class Store {
         },
       };
     }
+    const name = input.name ?? input.id;
+    let code: string | null = null;
+    if (this.#hasProjectCodes()) {
+      const taken = projectCodes(this.#db);
+      if (input.code === undefined)
+        code = suggestProjectCode(
+          projectCodeSource({ id: input.id, name }),
+          taken,
+        );
+      else {
+        const valid = validateProjectCode(input.code, taken);
+        if (!valid.ok) return valid;
+        code = valid.value;
+      }
+    } else if (input.code !== undefined) {
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: "this database has no project codes yet",
+        },
+      };
+    }
     const record: ProjectRecord = {
       id: input.id,
-      name: input.name ?? input.id,
+      name,
       created_at: this.#clock.now(),
       repo_path: null,
       base_branch: null,
+      code,
     };
     this.uow.run(() => {
-      this.#db
-        .prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)")
-        .run(record.id, record.name, record.created_at);
+      if (code === null)
+        this.#db
+          .prepare(
+            "INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)",
+          )
+          .run(record.id, record.name, record.created_at);
+      else
+        this.#db
+          .prepare(
+            "INSERT INTO projects (id, name, created_at, code) VALUES (?, ?, ?, ?)",
+          )
+          .run(record.id, record.name, record.created_at, code);
       seedCardTemplates(this.#db, record.id);
       if (this.schemaVersion() >= 26)
         seedLocalMachine(this.#db, record.id, record.created_at);
@@ -1175,19 +1256,93 @@ export class Store {
 
   getProject(id: ProjectId): ProjectRecord | undefined {
     const row = this.#db
-      .prepare(
-        "SELECT id, name, created_at, repo_path, base_branch FROM projects WHERE id = ?",
-      )
-      .get(id) as
-      | {
-          id: string;
-          name: string;
-          created_at: string;
-          repo_path: string | null;
-          base_branch: string | null;
-        }
-      | undefined;
+      .prepare(`SELECT ${this.#projectColumns()} FROM projects WHERE id = ?`)
+      .get(id) as ProjectRow | undefined;
     return row === undefined ? undefined : projectRecord(row);
+  }
+
+  /** C-674: the project a full number's code names, if any. */
+  projectByCode(code: string): ProjectRecord | undefined {
+    if (!this.#hasProjectCodes()) return undefined;
+    const row = this.#db
+      .prepare(`SELECT ${this.#projectColumns()} FROM projects WHERE code = ?`)
+      .get(code) as ProjectRow | undefined;
+    return row === undefined ? undefined : projectRecord(row);
+  }
+
+  /** C-674: display code of a project; undefined when none is registered. */
+  projectCode(id: ProjectId): string | undefined {
+    return this.getProject(id)?.code ?? undefined;
+  }
+
+  /**
+   * C-674: register the code of a project that has none. A registered code
+   * never changes, even to the same project's own suggestion.
+   */
+  setProjectCode(input: {
+    readonly project_id: ProjectId;
+    readonly code: string;
+  }): Result<ProjectRecord> {
+    const project = this.getProject(input.project_id);
+    if (project === undefined)
+      return {
+        ok: false,
+        error: {
+          code: "not_found",
+          message: `project ${input.project_id} not found`,
+        },
+      };
+    if (!this.#hasProjectCodes())
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: "this database has no project codes yet",
+        },
+      };
+    if (project.code !== null)
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: `项目 ${project.id} 已登记代号 ${project.code}，登记后不可修改`,
+          details: { project_id: project.id, code: project.code },
+        },
+      };
+    const valid = validateProjectCode(input.code, projectCodes(this.#db));
+    if (!valid.ok) return valid;
+    const changed = this.#db
+      .prepare("UPDATE projects SET code = ? WHERE id = ? AND code IS NULL")
+      .run(valid.value, project.id);
+    if (Number(changed.changes) !== 1) {
+      // Another registration won the race; report the code actually stored.
+      const stored = this.getProject(project.id)?.code ?? null;
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: `项目 ${project.id} 已登记代号 ${stored}，登记后不可修改`,
+          details: { project_id: project.id, code: stored },
+        },
+      };
+    }
+    return { ok: true, value: { ...project, code: valid.value } };
+  }
+
+  #projectCodeColumn = false;
+  #hasProjectCodes(): boolean {
+    if (this.#projectCodeColumn) return true;
+    this.#projectCodeColumn =
+      this.#db
+        .prepare(
+          "SELECT 1 FROM pragma_table_info('projects') WHERE name = 'code'",
+        )
+        .get() !== undefined;
+    return this.#projectCodeColumn;
+  }
+
+  #projectColumns(): string {
+    return `id, name, created_at, repo_path, base_branch${this.#hasProjectCodes() ? ", code" : ""}`;
   }
 
   /**
@@ -1231,20 +1386,10 @@ export class Store {
   listProjects(): ProjectRecord[] {
     return this.#db
       .prepare(
-        "SELECT id, name, created_at, repo_path, base_branch FROM projects ORDER BY created_at, id",
+        `SELECT ${this.#projectColumns()} FROM projects ORDER BY created_at, id`,
       )
       .all()
-      .map((row) =>
-        projectRecord(
-          row as {
-            id: string;
-            name: string;
-            created_at: string;
-            repo_path: string | null;
-            base_branch: string | null;
-          },
-        ),
-      );
+      .map((row) => projectRecord(row as unknown as ProjectRow));
   }
 
   /**

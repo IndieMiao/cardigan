@@ -1,5 +1,10 @@
 import type { Actor, Decision, Event, TimelineEntry } from "../entities.js";
-import { eventById } from "../event-index.js";
+import {
+  eventById,
+  eventsAtSeq,
+  eventsOfType,
+  eventsOfTypes,
+} from "../event-index.js";
 import type { DecisionId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import { pauseLabel, pendingPause } from "../review-pause.js";
@@ -14,7 +19,7 @@ const field = (e: Event, key: string) =>
   typeof e.payload === "object" && e.payload !== null && key in e.payload
     ? (e.payload as Record<string, unknown>)[key]
     : undefined;
-const progressTypes = new Set([
+const PROGRESS_TYPES = [
   "card_updated",
   "card_superseded",
   "card_marked_done",
@@ -26,7 +31,7 @@ const progressTypes = new Set([
   "delivery_submitted",
   "review_submitted",
   "human_action_completed",
-]);
+];
 /** A resolution becomes due for a follow-up reminder this long after it. */
 export const DECISION_FOLLOWUP_DELAY_MS = 30 * 60_000;
 
@@ -37,12 +42,8 @@ interface FollowupEventIndex {
   readonly resolutions: ReadonlyMap<unknown, readonly Event[]>;
   /** Progress events per (truthy) card id, in event order. */
   readonly progress: ReadonlyMap<string, readonly Event[]>;
-  /** Events per (card id, seq); project-stream events use an undefined card. */
-  readonly bySeq: ReadonlyMap<string, readonly Event[]>;
 }
 
-const seqKey = (card: string | undefined, seq: number) =>
-  `${card === undefined ? "-" : `+${card}`}\0${seq}`;
 const remindedKey = (decision: unknown, at: unknown) =>
   JSON.stringify([decision, at]);
 
@@ -50,6 +51,8 @@ const remindedKey = (decision: unknown, at: unknown) =>
  * C-244: per-snapshot indexes. Event and timeline collections are immutable
  * snapshots (C-221 §6.3: every append yields a new array), so an index keyed by
  * the array's identity cannot go stale; weak keys free unused snapshots.
+ * C-649: built from the type index (only the relevant events), and events at
+ * a (card, seq) are looked up per comment instead of indexing every event.
  */
 const eventIndexes = new WeakMap<readonly Event[], FollowupEventIndex>();
 const commentIndexes = new WeakMap<
@@ -69,18 +72,13 @@ function followupEventIndex(events: readonly Event[]): FollowupEventIndex {
   const reminded = new Set<string>();
   const resolutions = new Map<unknown, Event[]>();
   const progress = new Map<string, Event[]>();
-  const bySeq = new Map<string, Event[]>();
-  for (const e of events) {
-    if (e.type === "decision_followup_due")
-      reminded.add(
-        remindedKey(field(e, "decision_id"), field(e, "resolved_at")),
-      );
-    if (e.type === "decision_resolved")
-      push(resolutions, field(e, "decision_id"), e);
-    if (progressTypes.has(e.type) && e.card_id) push(progress, e.card_id, e);
-    push(bySeq, seqKey(e.card_id, e.seq), e);
-  }
-  const index = { reminded, resolutions, progress, bySeq };
+  for (const e of eventsOfType(events, "decision_followup_due"))
+    reminded.add(remindedKey(field(e, "decision_id"), field(e, "resolved_at")));
+  for (const e of eventsOfType(events, "decision_resolved"))
+    push(resolutions, field(e, "decision_id"), e);
+  for (const e of eventsOfTypes(events, PROGRESS_TYPES))
+    if (e.card_id) push(progress, e.card_id, e);
+  const index = { reminded, resolutions, progress };
   eventIndexes.set(events, index);
   return index;
 }
@@ -153,11 +151,7 @@ function decisionImplementationEvidence(
         ))
     )
       continue;
-    if (
-      !(index.bySeq.get(seqKey(entry.card_id, entry.event_seq)) ?? []).some(
-        after,
-      )
-    )
+    if (!eventsAtSeq(state.events, entry.card_id, entry.event_seq).some(after))
       continue;
     if (durable) return "durable";
     ops = true;

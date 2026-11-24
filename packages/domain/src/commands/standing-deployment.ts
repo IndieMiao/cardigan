@@ -1,5 +1,6 @@
 import type { Actor, Assignment, Event, RoleReference } from "../entities.js";
 import type { Result } from "../errors.js";
+import { eventsOfType } from "../event-index.js";
 import type { AssignmentId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
@@ -47,7 +48,8 @@ export function deploymentAuditedVersion(
     state.roles.find((r) => r.role_id === roleId && r.role_version === v);
   let current = version;
   for (;;) {
-    const audit = state.events.find((e) => {
+    // C-649: first match from the type index, same as scanning every event.
+    const audit = eventsOfType(state.events, "host_role_upgraded").find((e) => {
       const p = e.payload as Record<string, unknown>;
       return (
         e.type === "host_role_upgraded" &&

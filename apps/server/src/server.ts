@@ -100,6 +100,7 @@ import {
   tickProfileEnabled,
   tickStoreObserver,
 } from "./tick-profile.js";
+import { warmCommandEvents } from "./warm-command-events.js";
 import type { WebConfig } from "./web/config.js";
 import { machineHost } from "./web/machine-host.js";
 import { readMergeCheckLogRange } from "./web/merge-check-log.js";
@@ -1184,9 +1185,13 @@ async function assembleServer(
   }
   // runServer releases this only after handlers are installed and stdout reports ready.
   // Embedded servers without a supervisor use completion of their own initialization.
+  // C-649: decode histories in short slices before the loops' first ticks.
+  const warmed = warmCommandEvents(store);
   if (options.backgroundReady)
-    void options.backgroundReady.then(() => startup.resolve(true));
-  else startup.resolve(true);
+    void Promise.all([options.backgroundReady, warmed]).then(() =>
+      startup.resolve(true),
+    );
+  else void warmed.then(() => startup.resolve(true));
   // C-609: publications a restart cut off continue without their caller.
   if (publisher) void resumeInterruptedPublications(store, publisher);
   return {

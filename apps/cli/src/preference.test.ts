@@ -29,7 +29,9 @@ beforeEach(async () => {
       throw new Error("No Git needed");
     },
   };
-  expect(await main(["project", "create", "preferences"], io)).toBe(0);
+  expect(
+    await main(["project", "create", "preferences", "--code", "PRE"], io),
+  ).toBe(0);
   store = Store.open({ dataDir });
 });
 afterEach(() => {
@@ -138,7 +140,7 @@ test("preference get/set persists minutes and off, with project isolation", asyn
     ]),
   ).toBe(0);
   expect(output).toContain("auto-merge-after: 10");
-  expect(await run(["project", "create", "other"])).toBe(0);
+  expect(await run(["project", "create", "other", "--code", "OTH"])).toBe(0);
   expect(
     await run(["preference", "get", "auto-merge-after", "--project", "other"]),
   ).toBe(0);

@@ -136,12 +136,14 @@ function finishRetirement(
 }
 
 /**
- * C-667: the host proved that the launched CLI of this exact ref is gone and
- * only the replacement shell of a kept terminal remained, then closed that
- * terminal. Settle the session like a retirement: the Assignment, worktree,
- * branch and any untouched queued Run stay; the next legal wake starts a new
- * session. A human stop, pending host operation, role upgrade, in-flight stop
- * or any started Run keeps the reference untouched.
+ * C-667/C-672: the host proved that the launched CLI of this exact ref is gone
+ * while its terminal stayed live (the replacement shell of a kept terminal, or
+ * a launcher that outlived the CLI), then closed that terminal. Settle the
+ * session like a retirement: the Assignment, worktree, branch and any
+ * untouched queued Run stay; the next legal wake starts a new session. A
+ * pending retirement (waiting, handed off, or a stop whose exit was never
+ * confirmed) is finished by this proof. A human stop, pending host operation,
+ * role upgrade, Run stop or any started Run keeps the reference untouched.
  */
 export function confirmKeptShellExit(
   state: CommandState,
@@ -162,9 +164,6 @@ export function confirmKeptShellExit(
         !a.external &&
         a.status === "active" &&
         !a.role_upgrade &&
-        !(
-          a.idle_retirement?.phase === "stopping" && !a.idle_retirement.handoff
-        ) &&
         !stoppedByHuman(state.events, a.id) &&
         !hostOpsPending(state.events, a.id) &&
         JSON.stringify(a.runtime_ref) === JSON.stringify(releasedRef),
@@ -182,7 +181,7 @@ export function confirmKeptShellExit(
     return finishRetirement(d, state, a, {
       reason: "agent_exited",
       handoff:
-        "Agent 已退出，终端只剩保留的 shell；已关闭该终端，保留身份、工作区和分支，下次合法唤醒创建新会话。",
+        "Agent 已退出，终端仍在；已关闭该终端，保留身份、工作区和分支，下次合法唤醒创建新会话。",
     });
   });
 }
