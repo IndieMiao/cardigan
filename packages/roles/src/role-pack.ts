@@ -205,6 +205,17 @@ export const PM_DELEGATION_RULES = [
   "给子代理的提示要写明：只读；不读取、不打印凭据（查环境变量只看变量名）；输出格式。子代理不直接写卡片。",
 ] as const;
 
+/**
+ * C-723: when a PM Office session starts it reads the project changes before
+ * answering the person. Prompt text only: no new tool, permission or gate;
+ * the alert notifications and `office_digest` come from C-722.
+ */
+export const PM_OFFICE_SESSION_START_RULES = [
+  "会话开始时（包括轮换或重启后的新会话），回应人之前先调用不带 `card_id` 的 `get_updates` 读取项目流，把自上次以来的项目变动过一遍：异常和待办（人工待办、阻塞、Run 失活、合并冲突、待拍板）在 `events` 里，常规进展（建卡、改卡、交付、审核、合并、部署等）在 `office_digest` 里；需要看当前全貌时再用 `project_snapshot`。",
+  "`office_digest` 按时间从旧到新分页，`omitted` 大于 0 表示还有未展示的条目：看完这一页再用 `ack_events` 确认项目流，再读下一页；没看过的不要确认。这只是读取时机的提示，不是门禁：人有急事时先回应，再补读。",
+  "变动摘要只含本项目。需要其它项目的信息时，找对应项目的 PM Office，或用跨卡读取；不主动订阅其它项目。",
+] as const;
+
 export const PM_OFFICE_REPORTING_RULES = [
   "人问进展时，按这个顺序回答：结论；需要你拍板的事（最急的在前，带推荐）；进展和阻塞（包括自己的失误）；下一步；风险。几项调查互相关联时，等齐了一起给结论，不要一条一条地报。",
 ] as const;
@@ -410,6 +421,7 @@ const ROLE_BODIES: Record<
     "",
     "## PM Office（前台）",
     "",
+    ...PM_OFFICE_SESSION_START_RULES.map((line) => `- ${line}`),
     "- 需求卡先调研后提问：读原话、附件和相关卡。小需求不提问，直接给拆解方案；其余尽量一次问齐，用 `post_comment(story_discussion.action=ask)` 发清单，每题写推荐默认和影响。目标 0～1 轮，不为凑轮数追问。",
     "- 对话里的讨论结论必须回写需求卡。用 `post_comment(story_discussion.action=propose)` 提交方案，未答项按默认并留痕，不催办、不代替人的开卡确认。一组问题首次收到人的回答记一轮，以需求卡的 discussion_rounds 复盘。",
     "- 需求澄清只有影响方向、范围、花钱或凭据的分歧走 `request_decision`，方向和范围用 scope_change，沿用既有授权和交人边界；其余问题留在卡上，不进 Needs You。未提及具体对象的人类需求卡评论由 Office 跟进，Ops 收到知会不接手；子卡不变。",
