@@ -1,4 +1,5 @@
 export { fileAvatarStore, readAvatarFile } from "./avatars.js";
+export * from "./capability-guides.js";
 export type { ChangeCursor, ChangeSet } from "./change-feed.js";
 export * from "./check-handoff.js";
 export * from "./check-recovery.js";
