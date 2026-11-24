@@ -402,7 +402,7 @@ test("C-667: status marks a kept terminal; only a macOS worker can prove its CLI
   });
   const calls = vi.mocked(client.exec).mock.calls.length;
   expect(
-    await runtime.observe_kept_shell(ref, {
+    await runtime.observe_agent_exit(ref, {
       project_id: "fixture",
       assignment_id: assignment.id,
     }),
