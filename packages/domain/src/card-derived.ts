@@ -288,6 +288,21 @@ function completionReviewer(input: CardDerivedInput): Decider | undefined {
     : undefined;
 }
 
+// C-648: one immutable snapshot list serves every card in a project view.
+const NO_ASSIGNMENTS: readonly Assignment[] = [];
+const assignmentIndexes = new WeakMap<
+  readonly Assignment[],
+  ReadonlyMap<string, Assignment>
+>();
+function assignmentIndex(list: readonly Assignment[]) {
+  let index = assignmentIndexes.get(list);
+  if (!index) {
+    index = new Map(list.map((assignment) => [assignment.id, assignment]));
+    assignmentIndexes.set(list, index);
+  }
+  return index;
+}
+
 /**
  * Who acts next, highest priority first and de-duplicated:
  * blocking decisions and pending human actions, then active work items, then
@@ -332,9 +347,7 @@ export function deriveNextOwners(input: CardDerivedInput): NextOwnerItem[] {
   }
   if (unresolvedBlockingDecisions(input).some((q) => pendingPause(q)))
     return owners;
-  const assignments = new Map(
-    (input.assignments ?? []).map((assignment) => [assignment.id, assignment]),
-  );
+  const assignments = assignmentIndex(input.assignments ?? NO_ASSIGNMENTS);
   const pendingIds = new Set(pendingReviews(input).map((p) => p.work_item.id));
   for (const item of input.work_items) {
     if (!ACTIVE_WORK_ITEM.has(item.status)) {

@@ -1,4 +1,5 @@
 export * from "./artifact-publication.js";
+export * from "./attachment-refs.js";
 export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";
@@ -168,7 +169,10 @@ export {
   sourceMergeSuggestionView,
 } from "./commands/source-merge.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
-export { rotateStandingAfterDeployment } from "./commands/standing-deployment.js";
+export {
+  deploymentAuditedVersion,
+  rotateStandingAfterDeployment,
+} from "./commands/standing-deployment.js";
 export * from "./commands/standing-pm-stall.js";
 export {
   humanStopRecorded,
@@ -207,6 +211,7 @@ export {
   categoryDelegated,
 } from "./decision-authorization.js";
 export * from "./decision-groups.js";
+export * from "./decision-question.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
 export * from "./dispatch-tier.js";
@@ -269,6 +274,8 @@ export * from "./provider-start.js";
 export * from "./readiness.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
 export * from "./remote-worker-loss.js";
+export * from "./review-convergence.js";
+export * from "./review-evidence.js";
 export {
   type ReviewLimitAttention,
   reviewLimitAttention,

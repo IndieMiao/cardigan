@@ -65,6 +65,58 @@ test("card streams and the project-level stream have independent seq", () => {
   });
 });
 
+test("C-634: latest seq per stream and stream counters come from one query each", () => {
+  withTempStore((store) => {
+    seedCard(store);
+    const other = "other" as typeof project_id;
+    store.createProject({ id: other });
+    expect(store.latestEventSeqs(project_id)).toEqual(new Map());
+    store.uow.run((tx) => {
+      for (const [project, stream, count] of [
+        [project_id, undefined, 2],
+        [project_id, card().id, 3],
+        [other, undefined, 5],
+      ] as const)
+        for (let i = 0; i < count; i += 1)
+          tx.events.append(project, {
+            ...event({
+              id: tx.ids.nextEventId(),
+              seq: tx.ids.nextEventSequence(project, stream),
+            }),
+            card_id: stream,
+          });
+    });
+    expect(store.latestEventSeqs(project_id)).toEqual(
+      new Map([
+        ["", 2],
+        [card().id, 3],
+      ]),
+    );
+    expect(store.eventStreamCounters(project_id)).toEqual(
+      new Map([
+        ["", 2],
+        [card().id, 3],
+      ]),
+    );
+    expect(store.latestEventSeqs(other)).toEqual(new Map([["", 5]]));
+    // A rolled-back append takes its counter with it.
+    expect(() =>
+      store.uow.run((tx) => {
+        tx.events.append(project_id, {
+          ...event({
+            id: tx.ids.nextEventId(),
+            seq: tx.ids.nextEventSequence(project_id),
+          }),
+          card_id: undefined,
+        });
+        throw new Error("rollback");
+      }),
+    ).toThrow("rollback");
+    expect(store.eventStreamCounters(project_id).get("")).toBe(2);
+    expect(store.latestEventSeqs(project_id).get("")).toBe(2);
+  });
+});
+
 test("a duplicate seq cannot be persisted", () => {
   withTempStore((store) => {
     seedCard(store);

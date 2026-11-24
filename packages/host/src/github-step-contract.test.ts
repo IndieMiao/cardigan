@@ -134,7 +134,7 @@ function inspect(
 const rejected = {
   status: "failed",
   checks: [],
-  reason: "GitHub 检查步骤合同不符，拒绝通过",
+  reason: expect.stringMatching(/^GitHub 检查步骤合同不符，拒绝通过：/u),
 };
 
 describe("C-592: Cardigan default contract is unchanged", () => {
@@ -617,5 +617,332 @@ describe("C-592: step_contract validation", () => {
         stepContract: SENSEN,
       }).key,
     ).toBe(githubDispatchIdentity(checkRequest, context, config).key);
+  });
+});
+
+describe("C-661: per-baseline contracts and optional main steps", () => {
+  /** sensen: integration/dynamicfarm added dynamic_farm between lint and deps. */
+  const withStep = (main: readonly string[], step: string, after = "lint") =>
+    main.flatMap((s) => (s === after ? [s, step] : [s]));
+  const DYNAMIC_MAIN = withStep(SENSEN_MAIN, "dynamic_farm");
+  const DYNAMIC_RAW = {
+    steps: withStep(SENSEN_RAW.steps as string[], "dynamic_farm"),
+    post_steps: SENSEN_RAW.post_steps,
+  };
+  const MULTI = parseGithubStepContract({
+    ...DYNAMIC_RAW,
+    branches: { "farm-dev": SENSEN_RAW },
+  });
+  const OPTIONAL = parseGithubStepContract({
+    steps: withStep(
+      SENSEN_RAW.steps as string[],
+      {
+        name: "dynamic_farm",
+        optional: true,
+      } as never,
+    ),
+    post_steps: SENSEN_RAW.post_steps,
+  });
+  function onBranch(
+    branch: string,
+    main: readonly string[],
+    contract: GithubStepContract,
+    post: readonly string[] = SENSEN_POST,
+  ) {
+    const bound = { ...run, head_branch: branch };
+    return inspectGithubCheckRun({
+      client: {
+        run: vi.fn(async () => bound),
+        jobs: vi.fn(async () => [jobOf(main, post)]),
+      },
+      runId: RUN_ID,
+      expectedRun: bound,
+      request,
+      stepContract: contract,
+    });
+  }
+
+  test("one executor accepts both baselines' workflows with their own shapes", async () => {
+    expect(
+      (await onBranch("integration/dynamicfarm", DYNAMIC_MAIN, MULTI)).status,
+    ).toBe("passed");
+    expect((await onBranch("farm-dev", SENSEN_MAIN, MULTI)).status).toBe(
+      "passed",
+    );
+    // Unlisted baselines use the executor's default shape.
+    expect((await onBranch("main", DYNAMIC_MAIN, MULTI)).status).toBe("passed");
+  });
+
+  test("each baseline still rejects the other baseline's shape", async () => {
+    expect(
+      await onBranch("integration/dynamicfarm", SENSEN_MAIN, MULTI),
+    ).toMatchObject(rejected);
+    expect(await onBranch("farm-dev", DYNAMIC_MAIN, MULTI)).toMatchObject(
+      rejected,
+    );
+  });
+
+  test("an optional main step may be absent or present at its place", async () => {
+    expect((await onBranch("farm-dev", SENSEN_MAIN, OPTIONAL)).status).toBe(
+      "passed",
+    );
+    const present = await onBranch(
+      "integration/dynamicfarm",
+      DYNAMIC_MAIN,
+      OPTIONAL,
+    );
+    expect(present.status).toBe("passed");
+    expect(present.checks.map((c) => c.status)).toEqual(
+      GITHUB_CHECK_NAMES.map(() => "passed"),
+    );
+    // Absent optional step: post-step numbering after the gap still validates.
+    expect((await onBranch("farm-dev", SENSEN_MAIN, OPTIONAL, [])).status).toBe(
+      "passed",
+    );
+  });
+
+  test("a failed optional step fails the check and is named", async () => {
+    const bound = { ...run, head_branch: "integration/dynamicfarm" };
+    const result = await inspectGithubCheckRun({
+      client: {
+        run: vi.fn(async () => ({ ...bound, conclusion: "failure" })),
+        jobs: vi.fn(async () => [
+          jobOf(DYNAMIC_MAIN, SENSEN_POST, {
+            dynamic_farm: "failure",
+            deps: "skipped",
+            e2e: "skipped",
+          }),
+        ]),
+      },
+      runId: RUN_ID,
+      expectedRun: { ...bound, conclusion: "failure" },
+      request,
+      stepContract: OPTIONAL,
+    });
+    expect(result).toMatchObject({
+      status: "failed",
+      failedGithubStep: "dynamic_farm",
+    });
+  });
+
+  test.each([
+    [
+      "optional step out of place",
+      withStep(SENSEN_MAIN, "dynamic_farm", "deps"),
+    ],
+    ["optional step after the checks", [...SENSEN_MAIN, "dynamic_farm"]],
+    ["optional step twice", withStep(DYNAMIC_MAIN, "dynamic_farm", "deps")],
+    [
+      "checks reordered around the optional step",
+      DYNAMIC_MAIN.map((s) =>
+        s === "lint" ? "deps" : s === "deps" ? "lint" : s,
+      ),
+    ],
+    ["missing check", DYNAMIC_MAIN.filter((s) => s !== "deps")],
+    ["undeclared step", withStep(SENSEN_MAIN, "dynamic_town")],
+  ])("optional contract rejects %s", async (_label, main) => {
+    expect(await onBranch("farm-dev", main, OPTIONAL)).toMatchObject(rejected);
+  });
+
+  test("an absent optional uses step admits no cleanup step", () => {
+    const contract = parseGithubStepContract({
+      steps: [{ uses: "actions/cache", optional: true }, ...GITHUB_CHECK_NAMES],
+      post_steps: [{ uses: "actions/cache" }],
+    });
+    expect(matchesGithubStepContract([...GITHUB_CHECK_NAMES], contract)).toBe(
+      true,
+    );
+    expect(
+      matchesGithubStepContract(
+        [
+          "Run actions/cache@v4",
+          ...GITHUB_CHECK_NAMES,
+          "Post Run actions/cache@v4",
+        ],
+        contract,
+      ),
+    ).toBe(true);
+    for (const ref of ["undefined", "v4"])
+      expect(
+        matchesGithubStepContract(
+          [...GITHUB_CHECK_NAMES, `Post Run actions/cache@${ref}`],
+          contract,
+        ),
+      ).toBe(false);
+  });
+
+  test("a mismatch names the expected and actual steps and the first difference", async () => {
+    const result = await onBranch("farm-dev", DYNAMIC_MAIN, MULTI);
+    const lines = (result.reason ?? "").split("\n");
+    expect(lines[0]).toBe(
+      "GitHub 检查步骤合同不符，拒绝通过：基线 farm-dev 的步骤合同第 10 步期望 deps，实际 dynamic_farm",
+    );
+    expect(lines[1]).toBe(
+      `期望步骤：Set up job（可缺省）、Initialize containers、Run actions/checkout@<ref>、Run pnpm/action-setup@<ref>、Run actions/setup-node@<ref>、${GITHUB_CHECK_NAMES.join("、")}`,
+    );
+    expect(lines[2]).toBe(
+      "期望收尾（按序，均可缺省）：Post Run actions/setup-node@<ref>、Post Run pnpm/action-setup@<ref>、Post Run actions/checkout@<ref>、Stop containers、Complete job",
+    );
+    expect(lines[3]).toBe(
+      `实际步骤：${[...DYNAMIC_MAIN, ...SENSEN_POST].join("、")}`,
+    );
+
+    const missing = await onBranch(
+      "integration/dynamicfarm",
+      SENSEN_MAIN,
+      MULTI,
+    );
+    expect(missing.reason?.split("\n")[0]).toBe(
+      "GitHub 检查步骤合同不符，拒绝通过：执行器默认步骤合同（基线 integration/dynamicfarm）第 10 步期望 dynamic_farm，实际 deps",
+    );
+    const optional = await onBranch(
+      "farm-dev",
+      withStep(SENSEN_MAIN, "dynamic_farm", "deps"),
+      OPTIONAL,
+    );
+    expect(optional.reason?.split("\n")[1]).toContain("dynamic_farm（可选）");
+    const extraPost = await onBranch("farm-dev", SENSEN_MAIN, MULTI, [
+      "Stop containers",
+      "Post Run actions/checkout@v4",
+    ]);
+    expect(extraPost.reason?.split("\n")[0]).toBe(
+      "GitHub 检查步骤合同不符，拒绝通过：基线 farm-dev 的步骤合同第 13 步期望 没有更多步骤，实际 Post Run actions/checkout@v4",
+    );
+    const truncated = await onBranch(
+      "farm-dev",
+      SENSEN_MAIN.slice(0, -1),
+      MULTI,
+      [],
+    );
+    expect(truncated.reason?.split("\n")[0]).toContain(
+      "第 11 步期望 e2e，实际 （无）",
+    );
+  });
+
+  test("other rejections say what is wrong", async () => {
+    const job = jobOf(SENSEN_MAIN, SENSEN_POST);
+    const gap = {
+      ...job,
+      steps: job.steps.map((s, i) => (i === 3 ? { ...s, number: 99 } : s)),
+    };
+    expect((await inspect(gap, SENSEN)).reason).toContain(
+      "第 4 步 Run pnpm/action-setup@v4 的编号不连续",
+    );
+    expect(
+      (
+        await inspect(
+          jobOf(SENSEN_MAIN, SENSEN_POST, {}, { name: "build" }),
+          SENSEN,
+        )
+      ).reason,
+    ).toContain("名为 build");
+    const names = await inspect(
+      jobOf(
+        SENSEN_MAIN.map((s) =>
+          s === "deps" ? `x\u0000${"y".repeat(200)}` : s,
+        ),
+        [],
+      ),
+      SENSEN,
+    );
+    expect(names.reason).not.toContain("\u0000");
+    expect(names.reason).toContain(`实际 x?${"y".repeat(118)}…`);
+  });
+
+  test("the poller writes the contract diagnostic as the failure log", async () => {
+    const external = {
+      provider: "github" as const,
+      run_id: RUN_ID,
+      run_attempt: 1 as const,
+      html_url: run.html_url,
+      workflow_sha: run.head_sha,
+    };
+    const bound = { ...run, head_branch: "farm-dev" };
+    const client = {
+      pollRuns: vi.fn(async () => ({
+        unchanged: false,
+        runs: [bound],
+        etag: '"e"',
+      })),
+      run: vi.fn(async () => bound),
+      jobs: vi.fn(async () => [jobOf(DYNAMIC_MAIN, SENSEN_POST)]),
+      cancel: vi.fn(async () => {}),
+      jobLog: vi.fn(async () => {}),
+    };
+    const poller = new GithubCheckPoller({
+      client: client as never,
+      stepContract: MULTI,
+    });
+    poller.register(external, request, bound);
+    const pending = poller.poll(external);
+    await poller.tick();
+    const result = await pending;
+    expect(result).toMatchObject(rejected);
+    const written: string[] = [];
+    const open = vi.fn(() => (text: string) => written.push(text));
+    await poller.fetchFailureLog(external, open);
+    expect(client.jobLog).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(written.join("")).toBe(`${result.reason}\n`);
+  });
+
+  test("validation", () => {
+    expect(MULTI.branches?.get("farm-dev")?.steps).toHaveLength(10);
+    expect(MULTI.steps).toHaveLength(11);
+    expect(OPTIONAL.steps[8]).toEqual({ name: "dynamic_farm", optional: true });
+    expect(
+      parseGithubStepContract({
+        steps: [
+          { name: "x" },
+          { uses: "a/b", optional: true },
+          ...GITHUB_CHECK_NAMES,
+        ],
+      }).steps.slice(0, 2),
+    ).toEqual([{ name: "x" }, { uses: "a/b", optional: true }]);
+    for (const raw of [
+      { ...SENSEN_RAW, branches: {} },
+      { ...SENSEN_RAW, branches: [] },
+      { ...SENSEN_RAW, branches: null },
+      { ...SENSEN_RAW, branches: { "bad branch": SENSEN_RAW } },
+      { ...SENSEN_RAW, branches: { "ci/x": SENSEN_RAW } },
+      { ...SENSEN_RAW, branches: { a: "steps" } },
+      { ...SENSEN_RAW, branches: { a: { ...SENSEN_RAW, branches: {} } } },
+      { ...SENSEN_RAW, branches: { a: { steps: ["install"] } } },
+      {
+        ...SENSEN_RAW,
+        branches: Object.fromEntries(
+          Array.from({ length: 17 }, (_, i) => [`b${i}`, SENSEN_RAW]),
+        ),
+      },
+      { branches: { a: SENSEN_RAW } },
+      {
+        steps: [
+          ...GITHUB_CHECK_NAMES.slice(1),
+          { name: "install", optional: true },
+        ],
+      },
+      { steps: [{ name: "x", optional: false }, ...GITHUB_CHECK_NAMES] },
+      { steps: [{ name: "x", optional: "yes" }, ...GITHUB_CHECK_NAMES] },
+      { steps: [{ name: "x", uses: "a/b" }, ...GITHUB_CHECK_NAMES] },
+      { steps: [{ optional: true }, ...GITHUB_CHECK_NAMES] },
+      { steps: [{ name: " x" }, ...GITHUB_CHECK_NAMES] },
+      { steps: [{ name: "x", other: 1 }, ...GITHUB_CHECK_NAMES] },
+      {
+        steps: [...GITHUB_CHECK_NAMES],
+        post_steps: [{ name: "x", optional: true }],
+      },
+      { steps: [{ name: "x", optional: true }, "x", ...GITHUB_CHECK_NAMES] },
+    ])
+      expect(() => parseGithubStepContract(raw)).toThrow(/step_contract/u);
+    expect(() =>
+      parseGithubStepContract({
+        ...SENSEN_RAW,
+        branches: { "secret-branch value": SENSEN_RAW },
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        message: expect.not.stringContaining("secret"),
+      }),
+    );
   });
 });

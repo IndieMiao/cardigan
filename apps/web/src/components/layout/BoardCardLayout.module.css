@@ -20,9 +20,49 @@
   .card:has(> :global(.template-marker)) :global(.card-tile-head) {
     padding-inline-end: calc(var(--ui-control) + var(--ui-space-2));
   }
+  /* C-659: the other end of a hover dependency line, as faint as hover. */
+  .card[data-dependency-related] {
+    border-color: var(--ui-border-hover);
+  }
   .card > :global(.template-marker) {
     position: absolute;
     top: calc(var(--ui-space-3) + (var(--ui-leading) - var(--ui-control)) / 2);
     right: var(--ui-space-3);
+  }
+}
+
+/* C-660: a short text tag replaces the old colored left edge. */
+@layer components {
+  .signal {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex: none;
+    padding: var(--ui-stroke) var(--ui-space-2);
+    border-radius: var(--ui-radius);
+    color: var(--surface);
+    background: var(--status-wait);
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+    font-weight: 600;
+    white-space: nowrap;
+    text-decoration: none;
+  }
+  .signal[data-card-signal="blocked"] {
+    background: var(--danger);
+  }
+  .signal[href]:hover {
+    text-decoration: underline;
+  }
+  /* Last item of the metadata row, flush with the card's bottom-right corner. */
+  .card .signal {
+    align-self: flex-end;
+    margin-inline-start: auto;
+    margin-inline-end: calc(var(--ui-space-3) * -1);
+    margin-block-end: calc(var(--ui-space-3) * -1);
+    border-radius: var(--ui-radius) 0 calc(var(--radius) - var(--ui-stroke)) 0;
+  }
+  .card .signal:focus-visible {
+    outline-offset: calc(var(--ui-focus-width) * -2);
   }
 }

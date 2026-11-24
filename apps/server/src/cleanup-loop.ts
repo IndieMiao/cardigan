@@ -20,7 +20,11 @@ import type { ReconcileGit } from "./git.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
 import { MaintenanceBatch, projectCycle } from "./maintenance-batch.js";
 import { runSystemCommand, systemClock } from "./merge-loop.js";
-import { profileSpan, profileSpanSync } from "./tick-profile.js";
+import {
+  profileProject,
+  profileSpan,
+  profileSpanSync,
+} from "./tick-profile.js";
 
 /**
  * M4.4 release and worktree cleanup (plan §3.6, development plan §12.6).
@@ -84,7 +88,7 @@ export class CleanupExecutor {
       for (const project of project_id
         ? [project_id]
         : this.options.store.listProjects().map((entry) => entry.id))
-        await this.project(project as ProjectId);
+        await profileProject(project, () => this.project(project as ProjectId));
     });
     this.serial = next.catch(() => {});
     return next;

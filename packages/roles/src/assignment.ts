@@ -498,7 +498,13 @@ while [ ! -f "$start_file" ]; do
   waited=$((waited + 1))
 done
 rm -f "$start_file"
-${options.localSetup}exec nice -n ${options.agentNice} ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
+${options.localSetup}${
+  options.env.CARDIGAN_RUN_COMMAND
+    ? `# C-656: a private TMPDIR on disk and a systemd scope for this session; both
+# are removed with everything still running in it once the CLI exits.
+exec /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" session -- `
+    : "exec "
+}nice -n ${options.agentNice} ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
 `;
 }
 

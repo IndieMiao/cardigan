@@ -1,10 +1,21 @@
-import type { Actor, Assignment, Event, WorkItem } from "../entities.js";
+import type {
+  Actor,
+  Assignment,
+  Event,
+  PlatformBlocker,
+  Review,
+  WorkItem,
+} from "../entities.js";
 import { eventsOfType } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
 import {
   latestPrecheckConflict,
   pendingPrecheckConflict,
 } from "../precheck.js";
+import {
+  outstandingEvidence,
+  platformBlockerLabel,
+} from "../review-evidence.js";
 import { hasRunTarget } from "../run-target.js";
 import type { ResumeCondition, RunWait } from "../work-wait.js";
 import {
@@ -202,6 +213,14 @@ function deploymentEvidence(d: CommandDraft, sha: string): string | undefined {
     )
       latest.set(e.actor.project_id, e);
   for (const [project, e] of latest) if (ready(e)) return `${project}/${e.id}`;
+}
+
+/** C-618: the system record proving a platform blocker is over, if any. */
+export function platformBlockerResolved(
+  d: CommandDraft,
+  blocker: PlatformBlocker,
+): string | undefined {
+  return satisfied(d, blocker);
 }
 
 function satisfied(
@@ -670,6 +689,7 @@ export function resumeWorkWaits(
         d.put("runs", { ...last, wait_for: { ...wait, resumed_by: event.id } });
       resumed.push(item.id);
     }
+    notifyEvidenceUnblocked(d);
     if (resumed.length)
       d.emit("work_waits_resumed", undefined, {
         work_item_ids: resumed,
@@ -677,4 +697,99 @@ export function resumeWorkWaits(
       });
     return resumed;
   });
+}
+
+export const REVIEW_EVIDENCE_UNBLOCKED = "review_evidence_unblocked";
+
+/**
+ * C-618: once a platform blocker is over, ask the original author once to
+ * supply the evidence still pending. Reviews of several verifiers waiting on
+ * the same resolution share one notice; a recorded notice is never repeated.
+ */
+function notifyEvidenceUnblocked(d: CommandDraft) {
+  const reviews = d.list("reviews");
+  if (!reviews.some((r) => r.evidence_pending)) return;
+  const notified = new Set(
+    trusted(d)
+      .filter((e) => e.type === REVIEW_EVIDENCE_UNBLOCKED)
+      .flatMap((e) => {
+        const ids = payload(e).review_ids;
+        return Array.isArray(ids) ? ids.map(String) : [];
+      }),
+  );
+  const groups = new Map<
+    string,
+    {
+      producer: WorkItem;
+      condition: PlatformBlocker;
+      evidence: string;
+      reviews: Review[];
+    }
+  >();
+  for (const item of d.list("work_items")) {
+    if (
+      item.kind !== "verify" ||
+      !item.target_work_item_id ||
+      item.replaced_by_work_item_id ||
+      item.status === "cancelled"
+    )
+      continue;
+    const review = outstandingEvidence(reviews, item.id);
+    const pending = review?.evidence_pending;
+    if (!review || !pending || notified.has(review.id)) continue;
+    if (["done", "cancelled"].includes(d.card(item.card_id).status)) continue;
+    const evidence = satisfied(d, pending.blocker);
+    if (!evidence) continue;
+    const producer = d.work(item.target_work_item_id);
+    const key = `${producer.id}\u0000${evidence}`;
+    const group = groups.get(key) ?? {
+      producer,
+      condition: pending.blocker,
+      evidence,
+      reviews: [],
+    };
+    group.reviews.push(review);
+    groups.set(key, group);
+  }
+  for (const {
+    producer,
+    condition,
+    evidence,
+    reviews: waiting,
+  } of groups.values()) {
+    const items = waiting.flatMap((r) =>
+      (r.evidence_pending?.items ?? []).map(
+        (c) => `${r.work_item_id}（${r.id}）：${c.description}【${c.basis}】`,
+      ),
+    );
+    const body = `平台阻塞已解除：${platformBlockerLabel(condition)}（依据 ${evidence}）。${waiting.map((r) => r.id).join("、")} 标的证据待补现在可以取得。`;
+    d.emit(
+      REVIEW_EVIDENCE_UNBLOCKED,
+      producer.card_id,
+      {
+        work_item_id: producer.id,
+        review_ids: waiting.map((r) => r.id),
+        verifier_work_item_ids: waiting.map((r) => r.work_item_id),
+        condition: { ...condition },
+        evidence,
+        body,
+      },
+      { type: "system", author: "system", work_item_id: producer.id, body },
+    );
+    d.emit(
+      "instruction_issued",
+      producer.card_id,
+      {
+        work_item_id: producer.id,
+        evidence_unblocked: waiting.map((r) => r.id),
+      },
+      {
+        type: "instruction",
+        author: "system",
+        work_item_id: producer.id,
+        body: `补证：${platformBlockerLabel(condition)}已完成，请只补仍适用的待补证据，取得后提交新交付，把证据附件绑定到新交付（upload_attachment 的 attach_to 指向新交付），旧版本证据不能沿用；对应审核员只核对这些证据。待补项：${items.join("；")}`,
+      },
+      { kind: "system", project_id: d.state.project_id },
+    );
+  }
 }

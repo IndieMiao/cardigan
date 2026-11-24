@@ -124,6 +124,11 @@ export {
 } from "./github-dispatch-journal.js";
 export * from "./github-probe.js";
 export * from "./github-rate-limit.js";
+export {
+  HostMemoryPressureMonitor,
+  linuxPressureProbe,
+  pressureNotice,
+} from "./host-memory-pressure.js";
 export { HostOpsService } from "./host-ops.js";
 export { tryHelperConfirmationLock, tryHostOpsLock } from "./host-ops-lock.js";
 export {
@@ -208,6 +213,7 @@ export {
   mergeCheckAttemptRunning,
   mergeCheckAttemptRunningInTransaction,
   mergeCheckCapacityAvailable,
+  runningMergeChecks,
 } from "./merge-check-capacity.js";
 export {
   loadMergeGateConfig,
@@ -290,6 +296,18 @@ export {
   RoleDocumentError,
 } from "./role-document.js";
 export {
+  composeOverlaySource,
+  deriveOverlayRules,
+  overlayEditedByHand,
+  overlaySummary,
+  syncProjectOverlayRoles,
+} from "./role-overlay.js";
+export {
+  DEFAULTS_EVENT,
+  knownDefaults,
+  recordDefault,
+} from "./role-provenance.js";
+export {
   effectiveRunLimit,
   hasEarlierCapacityWait,
   MERGE_CHECK_RUN_SLOTS,
@@ -316,6 +334,7 @@ export { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 export * from "./runtime-targets.js";
 export * from "./runtime-workers-config.js";
 export { pinStallBackup } from "./stall-backup.js";
+export type { SessionExitVerdict } from "./stall-evidence.js";
 export {
   StandingPmRecovery,
   standingPmStallPolicy,
@@ -332,6 +351,7 @@ export {
   stoppedSessionExited,
   stoppedSessionLive,
   stopRunRuntime,
+  storedSessionExitProof,
 } from "./stop-run.js";
 export {
   proveSystemReviewLimit,

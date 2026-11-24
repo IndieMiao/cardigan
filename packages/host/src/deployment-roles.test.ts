@@ -10,8 +10,17 @@ import {
   rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
+import { recordDefault } from "./role-provenance.js";
 
-test.each(["manual", "missing", "launch_only", "already_default"] as const)(
+const now = "2026-01-01T00:00:00.000Z";
+
+test.each([
+  "manual",
+  "unrecorded",
+  "missing",
+  "launch_only",
+  "already_default",
+] as const)(
   "deployment preserves hand-written rules and only compares managed policy fields: %s",
   async (mode) => {
     const dataDir = await mkdtemp(join(tmpdir(), "cg-role-manual-"));
@@ -27,7 +36,8 @@ test.each(["manual", "missing", "launch_only", "already_default"] as const)(
         ...nextDefault,
         instructions: "Earlier default instructions",
       };
-      const manual = mode === "manual" || mode === "missing";
+      const manual =
+        mode === "manual" || mode === "unrecorded" || mode === "missing";
       const current =
         mode === "already_default"
           ? nextDefault
@@ -70,6 +80,10 @@ test.each(["manual", "missing", "launch_only", "already_default"] as const)(
           { mode: "update" },
         );
         tx.assignments.put(project, a);
+        // C-603/C-613: an earlier deployment recorded its default; only then
+        // is a mismatch a manual edit for a person to review.
+        if (mode === "manual")
+          recordDefault(tx, project, "host_ops", oldDefault, "pack", now);
         return tx.issueToken({
           project_id: project,
           assignment_id: a.id,
@@ -115,12 +129,19 @@ test.each(["manual", "missing", "launch_only", "already_default"] as const)(
         else expect(tx.assignments.get(project, a.id)).toEqual(a);
         const actions = tx.human_actions.list(project);
         expect(actions).toHaveLength(mode === "manual" ? 1 : 0);
-        if (mode === "missing")
+        if (mode === "missing" || mode === "unrecorded")
           expect(
             tx.events
               .listAfter(project, undefined, 0)
-              .filter((e) => e.type === "host_role_upgrade_deferred"),
-          ).toHaveLength(1);
+              .filter((e) => e.type === "host_role_upgrade_deferred")
+              .map((e) => (e.payload as { notice: string }).notice),
+          ).toEqual([
+            expect.stringContaining(
+              mode === "missing"
+                ? "缺少上一默认包指纹"
+                : "没有可核对的已记录默认包",
+            ),
+          ]);
         if (mode === "manual") {
           expect(actions[0]).toMatchObject({ status: "open", triage: "human" });
           expect(actions[0]?.instructions).toContain(
@@ -235,6 +256,7 @@ test.each(["safe", "widening", "manual"] as const)(
           { mode: "add" },
         );
         tx.assignments.put(project, previous);
+        if (blocked) recordDefault(tx, project, "pm", oldDefault, "pack", now);
         tx.issueToken({
           project_id: project,
           assignment_id: previous.id,

@@ -1,4 +1,8 @@
 import { categoryDelegated } from "../decision-authorization.js";
+import {
+  decisionQuestionBinding,
+  heldByReviewDecision,
+} from "../decision-question.js";
 import type {
   Actor,
   Assignment,
@@ -84,6 +88,10 @@ import { bindOwnerRecord, type OwnerRecordInput } from "./owner-record.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { authorPrecheckWait } from "./precheck-wait.js";
 import {
+  type ReviewAlignmentComment,
+  recordReviewAlignment,
+} from "./review-alignment.js";
+import {
   isReviewLimitOption,
   resolveReviewLimit,
 } from "./review-limit-resolution.js";
@@ -151,7 +159,13 @@ import { activeWork } from "./workflow.js";
 export function issueInstruction(
   state: CommandState,
   actor: Actor,
-  p: { card_id: CardId; work_item_id: WorkItemId; body: string },
+  p: {
+    card_id: CardId;
+    work_item_id: WorkItemId;
+    body: string;
+    /** C-619: ask the verifier held by this pending review-limit decision. */
+    decision_id?: DecisionId | undefined;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "issue_instruction", ports, (d) => {
@@ -177,19 +191,43 @@ export function issueInstruction(
       "Cannot instruct closed work or a card awaiting merge",
     );
     text(p.body, "body");
+    const question =
+      p.decision_id === undefined
+        ? undefined
+        : decisionQuestion(d, item, d.get("decisions", p.decision_id));
     d.emit(
       "instruction_issued",
       card.id,
-      { work_item_id: item.id },
+      {
+        work_item_id: item.id,
+        ...(question
+          ? {
+              decision_id: question.decision,
+              decision_question: question.binding,
+            }
+          : {}),
+      },
       {
         type: "instruction",
         body: p.body,
         work_item_id: item.id,
+        ...(question ? { decision_id: question.decision } : {}),
         refs: extractReferences(p.body),
       },
     );
     return d.timeline[0];
   });
+}
+/** C-619: only the verifier held by this pending decision can be asked. */
+function decisionQuestion(d: CommandDraft, item: WorkItem, q: Decision) {
+  ensure(
+    !!heldByReviewDecision(d.list("decisions"), item, q.id),
+    "illegal_transition",
+    `${item.id} 没有在等待 ${q.id}：只能向正在等待该审核拍板的审核项提问`,
+  );
+  const binding = decisionQuestionBinding(item, d.list("deliveries"));
+  ensure(!!binding, "illegal_transition", `${item.id} 尚无负责的审核员`);
+  return { decision: q.id, binding };
 }
 export function postComment(
   state: CommandState,
@@ -200,6 +238,7 @@ export function postComment(
     host_result_for?: HumanActionId;
     host_report_for?: HumanActionId;
     review_plan?: ReviewPlanComment;
+    review_alignment?: ReviewAlignmentComment;
   } & Partial<
       Pick<
         TimelineEntry,
@@ -218,6 +257,7 @@ export function postComment(
           p.host_report_for ||
           p.host_result_for ||
           p.review_plan ||
+          p.review_alignment ||
           p.work_item_id ||
           p.supersedes
         ),
@@ -367,6 +407,14 @@ export function postComment(
     }
     if (p.review_plan && d.timeline[0])
       recordReviewPlan(d, d.timeline[0], p.review_plan);
+    if (p.review_alignment && d.timeline[0]) {
+      ensure(
+        !p.review_plan,
+        "validation_failed",
+        "review_alignment 与 review_plan 不能同时提交",
+      );
+      recordReviewAlignment(d, d.timeline[0], p.review_alignment);
+    }
     if (p.host_result_for) {
       const action = d.get("human_actions", p.host_result_for);
       ensure(

@@ -25,6 +25,12 @@ interface StopIndex {
   readonly episode: ReadonlyMap<unknown, number>;
   /** Session whose exit this unreleased episode has already proven. */
   readonly exited: ReadonlyMap<unknown, unknown>;
+  /**
+   * C-645: session the latest stop was recorded for, until its release
+   * settles. Unlike the fence, a later start or dispatch does not clear it:
+   * the host has already started releasing that terminal.
+   */
+  readonly releasing: ReadonlyMap<unknown, string>;
 }
 // One index per immutable event snapshot. Array order (not timestamps or
 // per-card sequence numbers) remains the authority, exactly as in the scan.
@@ -42,6 +48,7 @@ function stopIndex(events: readonly Event[]): StopIndex {
     const recorded = new Map<unknown, boolean>();
     const episode = new Map<unknown, number>();
     const exited = new Map<unknown, unknown>();
+    const releasing = new Map<unknown, string>();
     const close = (id: unknown) => {
       episode.delete(id);
       exited.delete(id);
@@ -57,6 +64,10 @@ function stopIndex(events: readonly Event[]): StopIndex {
         recorded.set(id, true);
         // A retried stop continues the same episode.
         if (!episode.has(id)) episode.set(id, at);
+        const session = field(event.payload, "runtime_ref");
+        if (session !== undefined && session !== null)
+          releasing.set(id, JSON.stringify(session));
+        else releasing.delete(id);
       } else if (
         event.type === "run_dispatched" ||
         (event.type === ASSIGNMENT_START_REQUESTED &&
@@ -67,6 +78,7 @@ function stopIndex(events: readonly Event[]): StopIndex {
         close(id);
       } else if (event.type === ASSIGNMENT_STOP_RELEASED) {
         if (state.get(id) === "stopping") state.set(id, "released");
+        releasing.delete(id);
         close(id);
       } else if (
         event.type === ASSIGNMENT_STOP_EXIT_CONFIRMED &&
@@ -74,7 +86,7 @@ function stopIndex(events: readonly Event[]): StopIndex {
       )
         exited.set(id, JSON.stringify(field(event.payload, "runtime_ref")));
     }
-    index = { state, recorded, episode, exited };
+    index = { state, recorded, episode, exited, releasing };
     stoppedAssignments.set(events, index);
   }
   return index;
@@ -139,6 +151,19 @@ export function stopExitConfirmed(
   ref: RuntimeRef,
 ): boolean {
   return stopIndex(events).exited.get(assignment_id) === JSON.stringify(ref);
+}
+
+/**
+ * C-645: the latest human stop was recorded for session `ref` and has not
+ * settled yet, even if a human start or a dispatch ended the stop since. Its
+ * terminal release is under way, so the settlement still applies.
+ */
+export function stopReleasePending(
+  events: readonly Event[],
+  assignment_id: AssignmentId,
+  ref: RuntimeRef,
+): boolean {
+  return stopIndex(events).releasing.get(assignment_id) === JSON.stringify(ref);
 }
 
 /**

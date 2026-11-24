@@ -310,6 +310,27 @@ export class GithubDispatchJournal {
         );
     });
   }
+  /**
+   * C-634: executor of every unfinished intent, for counting only. It reads
+   * the shared per-stream projection instead of cloning each card's intents,
+   * so nothing it returns may reach a writer.
+   */
+  unfinishedExecutorsAt(tx: Parameters<GithubDispatchJournal["allAt"]>[0]) {
+    return this.store.listProjects().flatMap((project) => {
+      const streams = this.probeCard
+        ? undefined
+        : tx.events.listStreams?.(project.id);
+      return tx.cards
+        .list(project.id)
+        .filter((card) => !this.probeCard || card.id === this.probeCard)
+        .flatMap((card) =>
+          (streams
+            ? intentsFrom(streams.get(card.id) ?? [])
+            : this.current(tx, project.id, card.id)
+          ).flatMap((intent) => (intent.finished ? [] : [intent.executor])),
+        );
+    });
+  }
   unfinished(): GithubDispatchIntent[] {
     return this.all().filter((intent) => !intent.finished);
   }

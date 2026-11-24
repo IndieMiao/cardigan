@@ -102,10 +102,10 @@ try {
       assert.equal(badge.decoration, "none");
       assert.equal(badge.border, "0px");
       const waiting = await evaluate(
-        `(() => {const e=document.querySelector('.card-tile-waiting[data-batch-id]'); const c=getComputedStyle(e); return {actual:c.borderLeftColor,expected:c.getPropertyValue('--status-wait').trim()};})()`,
+        `(() => {const e=document.querySelector('[data-batch-id] [data-card-signal="decision"]'); const c=getComputedStyle(e); return {actual:c.color,expected:c.getPropertyValue('--status-wait').trim()};})()`,
       );
       const borderUnchanged = await evaluate(
-        `(() => {const e=document.querySelector('.card-tile-waiting[data-batch-id]'),before=getComputedStyle(e).borderLeftColor; e.removeAttribute('data-batch-id'); const after=getComputedStyle(e).borderLeftColor; e.dataset.batchId='MB-7'; return before===after;})()`,
+        `(() => {const e=document.querySelector('[data-batch-id]:has([data-card-signal="decision"])'),s=e.querySelector('[data-card-signal]'),before=getComputedStyle(s).color; e.removeAttribute('data-batch-id'); const after=getComputedStyle(s).color; e.dataset.batchId='MB-7'; return before===after;})()`,
       );
       assert(borderUnchanged);
       await capture(`${width}-${theme}-board`);

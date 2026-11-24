@@ -129,7 +129,7 @@ function requireTestReviewBudget(
   const item = d.work(assignment.work_item_id);
   if (item.kind === "verify" && item.status === "waiting_decision") {
     ensure(
-      reviewDiscussionInstruction(item, trigger, d.state.decisions),
+      reviewDiscussionInstruction(item, trigger, d.state),
       "illegal_transition",
       "Review budget is waiting for a decision",
     );
