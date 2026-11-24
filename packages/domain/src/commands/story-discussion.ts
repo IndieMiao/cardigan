@@ -293,6 +293,65 @@ export function storyDiscussionChange(
         update(settleStoryQuestionDefaults(group, id, "accepted_default")),
     };
   }
+  if (action.action === "submit_answers") {
+    ensure(
+      group.questions.some((q) => !q.resolution),
+      "illegal_transition",
+      "该清单已全部回答或按默认处理",
+    );
+    ensure(
+      Array.isArray(action.answers),
+      "validation_failed",
+      "answers is required",
+    );
+    const answers = new Map<number, string>();
+    for (const { number, answer } of action.answers) {
+      const question = group.questions[number - 1];
+      ensure(
+        Number.isSafeInteger(number) && question,
+        "validation_failed",
+        "题号不存在",
+      );
+      ensure(!answers.has(number), "validation_failed", `第 ${number} 题重复`);
+      ensure(
+        !question.resolution,
+        "illegal_transition",
+        `第 ${number} 题已回答或按默认处理`,
+      );
+      text(answer, "answer");
+      answers.set(number, answer);
+    }
+    return {
+      lines: group.questions.flatMap((q, i) => {
+        if (q.resolution) return [];
+        const answer = answers.get(i + 1);
+        return [
+          answer === undefined
+            ? `${group.id} 第 ${i + 1} 题按默认：${q.recommended}`
+            : `${group.id} 第 ${i + 1} 题：${answer}`,
+        ];
+      }),
+      apply: (entry_id: TimelineEntryId) =>
+        update({
+          ...group,
+          questions: group.questions.map((q, i) => {
+            if (q.resolution) return q;
+            const answer = answers.get(i + 1);
+            return {
+              ...q,
+              resolution:
+                answer === undefined
+                  ? {
+                      source: "accepted_default" as const,
+                      value: q.recommended,
+                      entry_id,
+                    }
+                  : { source: "answer" as const, value: answer, entry_id },
+            };
+          }),
+        }),
+    };
+  }
   const index = action.number - 1;
   ensure(
     Number.isSafeInteger(index) && group.questions[index],

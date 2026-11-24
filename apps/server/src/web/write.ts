@@ -201,6 +201,17 @@ const cardComment = comment.extend({
       z
         .object({ action: z.literal("accept_defaults"), group_id: entryId })
         .strict(),
+      z
+        .object({
+          action: z.literal("submit_answers"),
+          group_id: entryId,
+          answers: z.array(
+            z
+              .object({ number: z.number().int().positive(), answer: text })
+              .strict(),
+          ),
+        })
+        .strict(),
     ])
     .optional(),
 });
