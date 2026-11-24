@@ -3178,6 +3178,22 @@ test("C-712 standing PM writes, revises and lists release notes; work-item roles
   expect(tools).toEqual(
     expect.arrayContaining(["write_release_note", "list_release_notes"]),
   );
+  const early = await raw(office, "write_release_note", {
+    version: "0.4.2",
+    body: "未发布",
+  });
+  expect(early.isError).toBe(true);
+  store.uow.run((tx) =>
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      card_id: card.id,
+      seq: tx.ids.nextEventSequence(project, card.id),
+      type: "artifact_publication_verified",
+      actor: { kind: "system", project_id: project },
+      payload: { version: "0.4.2", versionCode: 42, decision_id: "Q-1" },
+      created_at: "2026-01-02T00:00:00.000Z",
+    }),
+  );
   const first = await ok<{
     note: { revision: number; body: string };
     changed: boolean;
@@ -3208,7 +3224,11 @@ test("C-712 standing PM writes, revises and lists release notes; work-item roles
     entries: { version: string; note: { body: string; revision: number } }[];
   }>(office, "list_release_notes", {});
   expect(listed.entries).toMatchObject([
-    { version: "0.4.2", note: { body: "修复闪退，优化加载", revision: 2 } },
+    {
+      version: "0.4.2",
+      version_code: 42,
+      note: { body: "修复闪退，优化加载", revision: 2, version_code: 42 },
+    },
   ]);
   const history = await ok<{ history: { revision: number; body: string }[] }>(
     office,

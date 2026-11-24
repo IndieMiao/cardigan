@@ -57,6 +57,22 @@ afterEach(async () => {
 
 test("C-712 the human saves and revises a release note through the Workbench API and reads it back", async () => {
   expect(await list()).toEqual({ status: 200, body: { entries: [] } });
+  expect((await save({ version: "0.4.2", body: "未发布" })).status).toBe(400);
+  s.store().uow.run((tx) => {
+    for (const [version, at] of [
+      ["0.4.2", "2026-01-02T00:00:00.000Z"],
+      ["0.5.0", "2026-01-03T00:00:00.000Z"],
+    ] as const)
+      tx.events.append(s.project.project_id, {
+        id: tx.ids.nextEventId(),
+        card_id: s.card.id,
+        seq: tx.ids.nextEventSequence(s.project.project_id, s.card.id),
+        type: "artifact_publication_verified",
+        actor: { kind: "system", project_id: s.project.project_id },
+        payload: { version, versionCode: 1, decision_id: "Q-1" },
+        created_at: at,
+      });
+  });
   const created = await save({ version: "0.4.2", body: "新增设置页" });
   expect(created).toMatchObject({
     status: 200,
@@ -91,9 +107,10 @@ test("C-712 the human saves and revises a release note through the Workbench API
   const listed = await list();
   expect(listed.body).toMatchObject({
     entries: [
+      { version: "0.5.0", note: null },
       {
         version: "0.4.2",
-        published_at: null,
+        published_at: "2026-01-02T00:00:00.000Z",
         note: {
           body: "新增设置页，修复闪退",
           revision: 2,

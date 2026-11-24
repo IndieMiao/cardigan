@@ -136,17 +136,26 @@ test("one note per project and version: a second write revises it and keeps ever
 });
 
 test("a stale base revision is rejected instead of overwriting", () => {
-  let s = state();
+  const published = () =>
+    state([
+      verified("1.0.0", 1, "2026-02-01T00:00:00.000Z"),
+      verified("2.0", 2, "2026-02-02T00:00:00.000Z"),
+    ]);
+  let s = published();
   s = apply(s, value(write(s, { version: "2.0", body: "a" })));
   const stale = write(s, { version: "2.0", body: "b", base_revision: 0 });
   expect(stale.ok).toBe(false);
   if (!stale.ok) expect(stale.error.code).toBe("stale_target");
-  const fresh = write(state(), { version: "2.0", body: "b", base_revision: 1 });
+  const fresh = write(published(), {
+    version: "2.0",
+    body: "b",
+    base_revision: 1,
+  });
   expect(fresh.ok).toBe(false);
 });
 
 test("the body is required and has a length ceiling; the version keeps the publish format", () => {
-  const s = state();
+  const s = state([verified("1.0.0", 1, "2026-02-01T00:00:00.000Z")]);
   for (const body of [
     "",
     "   \n",
@@ -167,7 +176,7 @@ test("the body is required and has a length ceiling; the version keeps the publi
 });
 
 test("only the standing PM and the human write or list notes", () => {
-  const s = state();
+  const s = state([verified("1.0.0", 1, "2026-02-01T00:00:00.000Z")]);
   for (const who of [actor(1, "coder"), actor(3, "pm"), actor(2, "reviewer")]) {
     expect(write(s, { version: "1.0.0", body: "x" }, who).ok).toBe(false);
     expect(listReleaseNotes(s, who).ok).toBe(false);
@@ -219,19 +228,25 @@ test("the publication decision is inferred, and an explicit one must be a matchi
   expect(write(s, { version: "1.0.0", body: "x", version_code: 2 }).ok).toBe(
     false,
   );
-  // Unpublished: links and version code are taken as given.
-  const early = value(
-    write(s, {
-      version: "1.1.0",
-      body: "x",
-      decision_id: id("decision", 2),
-      version_code: 5,
-    }),
-  );
-  expect(early.data.note).toMatchObject({
-    decision_id: id("decision", 2),
-    version_code: 5,
-  });
+});
+
+test("only versions this project has published get a note", () => {
+  const s = state([verified("1.0.0", 1, "2026-02-01T00:00:00.000Z")]);
+  for (const who of [office, human]) {
+    const early = write(s, { version: "1.1.0", body: "草稿" }, who);
+    expect(early.ok).toBe(false);
+    if (!early.ok) expect(early.error.message).toContain("还没有成功发布");
+  }
+  // A failed or merely requested publication does not count.
+  const failed = state([
+    event(
+      "artifact_publication_failed",
+      "2026-02-01T00:00:00.000Z",
+      { version: "1.2.0", decision_id: id("decision", 2), versionCode: 2 },
+      id("card", 1),
+    ),
+  ]);
+  expect(write(failed, { version: "1.2.0", body: "x" }).ok).toBe(false);
 });
 
 test("merged cards: since the previous successful publication up to this one, else the most recent", () => {
@@ -285,10 +300,6 @@ test("the list has published versions without notes and is newest first", () => 
     verified("1.1.0", 2, "2026-03-01T00:00:00.000Z", 2),
   ]);
   s = apply(s, value(write(s, { version: "1.0.0", body: "旧版本说明" })));
-  s = apply(
-    s,
-    value(write(s, { version: "1.2.0", body: "下一版草稿", version_code: 3 })),
-  );
   const listing = value(listReleaseNotes(s, office)).data;
   expect("entries" in listing).toBe(true);
   if (!("entries" in listing)) return;
@@ -301,8 +312,6 @@ test("the list has published versions without notes and is newest first", () => 
   ).toEqual([
     ["1.1.0", "2026-03-01T00:00:00.000Z", null],
     ["1.0.0", "2026-02-01T00:00:00.000Z", "旧版本说明"],
-    // Unpublished notes sort by when they were written (the fixture clock).
-    ["1.2.0", null, "下一版草稿"],
   ]);
   const one = value(listReleaseNotes(s, office, { version: "1.0.0" })).data;
   expect(one).toMatchObject({
@@ -312,34 +321,32 @@ test("the list has published versions without notes and is newest first", () => 
   });
 });
 
-test("a draft linked before publishing follows the actual publication, and another version's decision is refused", () => {
-  let s = state();
-  s = apply(
-    s,
-    value(
-      write(s, {
-        version: "2.0.0",
-        body: "草稿",
-        decision_id: id("decision", 1),
-        version_code: 4,
-      }),
-    ),
-  );
-  s = {
-    ...s,
-    events: [...s.events, verified("2.0.0", 2, "2026-02-01T00:00:00.000Z", 5)],
-  };
-  const revised = value(write(s, { version: "2.0.0", body: "正式说明" }));
-  expect(revised.data.note).toMatchObject({
+test("a version published again under another decision keeps an explicit link to either", () => {
+  let s = state([
+    verified("2.0.0", 1, "2026-02-01T00:00:00.000Z", 4),
+    verified("2.0.0", 2, "2026-02-02T00:00:00.000Z", 5),
+  ]);
+  const inferred = value(write(s, { version: "2.0.0", body: "说明" }));
+  expect(inferred.data.note).toMatchObject({
     decision_id: id("decision", 2),
     version_code: 5,
   });
-  expect(releaseNoteEntries(apply(s, revised).events)[0]).toMatchObject({
-    decision_id: id("decision", 2),
+  s = apply(s, inferred);
+  const pinned = value(
+    write(s, {
+      version: "2.0.0",
+      body: "说明",
+      decision_id: id("decision", 1),
+    }),
+  );
+  expect(pinned.data.note).toMatchObject({
+    decision_id: id("decision", 1),
+    version_code: 4,
+    revision: 2,
   });
-  // Decision 2 already published 2.0.0; it cannot label an unpublished version.
+  // An edit without a decision keeps the pinned link.
+  s = apply(s, pinned);
   expect(
-    write(s, { version: "2.1.0", body: "x", decision_id: id("decision", 2) })
-      .ok,
-  ).toBe(false);
+    value(write(s, { version: "2.0.0", body: "说明二" })).data.note,
+  ).toMatchObject({ decision_id: id("decision", 1), revision: 3 });
 });

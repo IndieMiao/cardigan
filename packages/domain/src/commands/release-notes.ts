@@ -30,7 +30,7 @@ export interface WriteReleaseNoteInput {
   readonly body: string;
   /** Publication decision of this version; inferred from its publication. */
   readonly decision_id?: string | undefined;
-  /** Only for a version that has no verified publication yet. */
+  /** Must match the version's publication when given. */
   readonly version_code?: number | undefined;
   /** Revision the writer edited (0 for a new note); a mismatch is rejected. */
   readonly base_revision?: number | undefined;
@@ -71,6 +71,12 @@ export function writeReleaseNote(
       );
     const versionError = releaseNoteVersionError(input.version);
     ensure(!versionError, "validation_failed", versionError ?? "");
+    // Notes belong to versions this project has actually published.
+    ensure(
+      publications.length > 0,
+      "validation_failed",
+      "这个版本还没有成功发布，发布后再写发版说明（也可在 publish_artifact 时附带）",
+    );
     const bodyError = releaseNoteBodyError(input.body);
     ensure(!bodyError, "validation_failed", bodyError ?? "");
     ensure(
@@ -89,10 +95,9 @@ export function writeReleaseNote(
         : "这个版本还没有发版说明，请刷新后再写",
     );
     const linked = (id: DecisionId | null) =>
-      publications.length === 0 ||
       publications.some((p) => p.decision_id === id);
-    // An inherited link that no publication of this version confirms (a draft
-    // linked before publishing) follows the actual publication.
+    // An inherited link that no publication of this version confirms follows
+    // the version's latest publication.
     let decision_id: DecisionId | null =
       current?.decision_id && linked(current.decision_id)
         ? current.decision_id
@@ -107,10 +112,7 @@ export function writeReleaseNote(
         "关联的拍板必须是发布拍板",
       );
       ensure(
-        linked(q.id) &&
-          !verifiedPublications(d.state.events).some(
-            (p) => p.decision_id === q.id && p.version !== input.version,
-          ),
+        linked(q.id),
         "validation_failed",
         "关联的拍板与这个版本的发布记录不一致",
       );
@@ -119,11 +121,7 @@ export function writeReleaseNote(
       decision_id = publications.at(-1)?.decision_id ?? null;
     const published = publications.find((p) => p.decision_id === decision_id);
     const version_code =
-      published?.version_code ??
-      publications.at(-1)?.version_code ??
-      input.version_code ??
-      current?.version_code ??
-      null;
+      published?.version_code ?? publications.at(-1)?.version_code ?? null;
     ensure(
       input.version_code === undefined || input.version_code === version_code,
       "validation_failed",

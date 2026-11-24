@@ -767,13 +767,6 @@ const schemas = {
       .describe(
         "Publish decision of this version; inferred from its publication when omitted",
       ),
-    version_code: z
-      .number()
-      .int()
-      .positive()
-      .max(2100000000)
-      .optional()
-      .describe("Only for a version that has not been published yet"),
     base_revision: z
       .number()
       .int()

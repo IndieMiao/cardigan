@@ -909,7 +909,6 @@ export async function serveWrite(
           version: z.string(),
           body: z.string(),
           decision_id: z.string().optional(),
-          version_code: z.number().int().optional(),
           base_revision: z.number().int().min(0).optional(),
         })
         .strict(),
