@@ -1,3 +1,4 @@
+import { fullEventHistory } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import type { CardDetail, CardPage } from "../../../web/src/api.js";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
@@ -56,9 +57,8 @@ test("U3 detail binds authors and reviews to their own events and reports the la
       },
     );
     expect(after.updated_at).toBe(
-      f
-        .state()
-        .events.filter((e) => e.card_id === f.card.id)
+      fullEventHistory(f.state().events)
+        .filter((e) => e.card_id === f.card.id)
         .map((e) => e.created_at)
         .sort()
         .at(-1),

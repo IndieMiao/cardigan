@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import type { Assignment, Event, Run } from "../entities.js";
 import {
   sessionMaintenanceBasis,
   sessionMaintenanceCandidate,
@@ -8,6 +9,7 @@ import {
 import type { CommandState } from "./core.js";
 import {
   beginIdleSessionRetirement,
+  confirmKeptShellExit,
   confirmWaitingRetirementExit,
   handoffIdleSessionRetirement,
   settleIdleSessionRetirement,
@@ -757,3 +759,116 @@ test.each(["timeout", "uncertain", "withdrawn"] as const)(
     );
   },
 );
+
+test("C-667: a closed kept shell settles only the exact idle session and keeps queued work", () => {
+  const s = setup(),
+    a = s.assignments[0]!,
+    io = { ...ports(), clock: { now: () => now } };
+  const ref = a.runtime_ref!;
+  const waiting = {
+    phase: "waiting" as const,
+    runtime_ref: ref,
+    started_at: now,
+    threshold_minutes: 60,
+    failures: 3,
+    evidence: { stage: "probe" as const, reason: "kept_terminal" as const },
+  };
+  const handed: Assignment = {
+    ...a,
+    runtime_state: "running",
+    idle_retirement: { ...waiting, handoff: true },
+  };
+  const queued: Run = {
+    ...s.runs[0]!,
+    id: "R-9" as Run["id"],
+    status: "queued",
+  };
+  const base: CommandState = {
+    ...s,
+    assignments: [handed],
+    runs: [...s.runs, queued],
+  };
+  const settled = value(confirmKeptShellExit(base, system, a.id, ref, io));
+  expect(settled.data.runtime_ref).toBeNull();
+  expect(settled.data.idle_retirement).toBeUndefined();
+  expect(settled.data.runtime_state).toBe("idle");
+  expect(settled.changes.filter((c) => c.collection === "runs")).toEqual([]);
+  expect(
+    settled.events.filter((e) => e.type === "session_replaced"),
+  ).toMatchObject([
+    {
+      payload: {
+        assignment_id: a.id,
+        reason: "agent_exited",
+        old_runtime_ref: ref,
+      },
+    },
+  ]);
+  const owner = (patch: Partial<Assignment>): CommandState => ({
+    ...base,
+    assignments: [{ ...handed, ...patch } as Assignment],
+  });
+  const stopped: Event = {
+    id: io.ids.nextEventId(),
+    seq: 99,
+    card_id: s.cards[0]!.id,
+    type: "assignment_stopped",
+    actor: human,
+    payload: { assignment_id: a.id },
+    created_at: now,
+  };
+  // Only the system, only this exact reference, never with started or
+  // stopping work, a human stop, an in-flight retirement stop or an upgrade.
+  const refused = [
+    confirmKeptShellExit(base, actor(), a.id, ref, io),
+    confirmKeptShellExit(
+      base,
+      system,
+      a.id,
+      { ...ref, terminal_ref: "t2" },
+      io,
+    ),
+    confirmKeptShellExit(
+      { ...base, runs: [{ ...queued, status: "running" }] },
+      system,
+      a.id,
+      ref,
+      io,
+    ),
+    confirmKeptShellExit(
+      { ...base, runs: [{ ...s.runs[0]!, dispatch_stop: {} } as Run] },
+      system,
+      a.id,
+      ref,
+      io,
+    ),
+    confirmKeptShellExit(
+      owner({ idle_retirement: { ...waiting, phase: "stopping" } }),
+      system,
+      a.id,
+      ref,
+      io,
+    ),
+    confirmKeptShellExit(
+      owner({
+        role_upgrade: {
+          role_version: 2,
+          previous_runtime_ref: ref,
+          started_at: now,
+        },
+      }),
+      system,
+      a.id,
+      ref,
+      io,
+    ),
+    confirmKeptShellExit(
+      { ...base, events: [...base.events, stopped] },
+      system,
+      a.id,
+      ref,
+      io,
+    ),
+  ];
+  for (const effect of refused) expect(effect.ok).toBe(false);
+});

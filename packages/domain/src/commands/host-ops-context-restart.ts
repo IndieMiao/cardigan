@@ -290,13 +290,18 @@ export function beginStalledPatrolRestart(
       "主机运维还有未结操作",
     );
     text(p.cause_id, "cause_id");
-    return beginHostOpsActionInDraft(d, {
-      tool: "host_ops_restart_assignment",
-      target_id: a.id,
-      reason: "主机运维通知积压，系统在空闲时换会话。",
-      dispatch_stall_id: p.cause_id,
-      snapshot: p.snapshot,
-    });
+    return beginHostOpsActionInDraft(
+      d,
+      {
+        tool: "host_ops_restart_assignment",
+        target_id: a.id,
+        reason: "主机运维通知积压，系统在空闲时换会话。",
+        dispatch_stall_id: p.cause_id,
+        snapshot: p.snapshot,
+      },
+      // C-669: the host retries only once the old session is proven gone.
+      { retry_withdrawn: true },
+    );
   });
 }
 

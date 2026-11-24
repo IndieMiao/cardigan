@@ -1,4 +1,5 @@
 import type { RunOutcome } from "@cardigan/domain";
+import { fullEventHistory } from "@cardigan/domain";
 import { issueTokenInTransaction } from "@cardigan/host";
 import { authenticate, serverTools, unwrap } from "@cardigan/mcp-server";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -468,13 +469,11 @@ test.each(["completed", "blocked", "failed"] as const)(
     alive(2);
     await flush();
     expect(
-      f
-        .state()
-        .events.filter(
-          (e) =>
-            e.type === "run_finished" &&
-            (e.payload as { run_id?: string }).run_id === run.id,
-        ),
+      fullEventHistory(f.state().events).filter(
+        (e) =>
+          e.type === "run_finished" &&
+          (e.payload as { run_id?: string }).run_id === run.id,
+      ),
     ).toHaveLength(1);
     expect(f.state().work_items).toEqual(work);
   },
@@ -609,13 +608,11 @@ test.each(["rotate", "revoke"])(
     expect(f.latest().pending_finish?.token_id).toBe(token.record.id);
     expect(f.latest().finished_at).toBeUndefined();
     expect(
-      f
-        .state()
-        .events.filter(
-          (e) =>
-            e.type === "run_finished" &&
-            (e.payload as { run_id?: string }).run_id === run.id,
-        ),
+      fullEventHistory(f.state().events).filter(
+        (e) =>
+          e.type === "run_finished" &&
+          (e.payload as { run_id?: string }).run_id === run.id,
+      ),
     ).toHaveLength(0);
   },
 );

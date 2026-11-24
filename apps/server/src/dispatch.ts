@@ -25,6 +25,7 @@ import {
   dispatchRun,
   dispatchRunKind,
   dispatchTier,
+  eventById,
   expireMergeSnoozes,
   type HarnessActivity,
   hasRunTarget,
@@ -1035,6 +1036,22 @@ export class Dispatcher {
       observation = observed?.ok
         ? `${observed.value.process}/${observed.value.agent}`
         : (observed?.error.code ?? "unavailable");
+      // C-667: never type a bell into the shell a kept terminal left behind.
+      // Keep it pending; maintenance closes the proven shell and the next
+      // pass starts a fresh session (on the latest role version).
+      if (
+        observed?.ok &&
+        observed.value.process === "alive" &&
+        observed.value.kept &&
+        (await this.options.runtime
+          .observe_kept_shell?.(runtimeRef, {
+            project_id: project,
+            assignment_id: a.id,
+          })
+          .then((shell) => shell.ok && shell.value)
+          .catch(() => false))
+      )
+        return skip("kept_shell");
       const systemTurn = guardedTurn?.reason === "system_finished_turn";
       const sessionLoss = observed?.ok
         ? observed.value.process === "exited"
@@ -1758,7 +1775,7 @@ export class Dispatcher {
     const slots = capacity.resourcesForMachine(a.machine_id);
     const keys = assignmentResourceKeys(tx, project, a);
     if (!capacity.withinProjectQuota(project, a, keys)) return undefined;
-    const trigger = state.events.find((e) => e.id === run.trigger_event_id);
+    const trigger = eventById(state.events, run.trigger_event_id);
     const order = {
       ...dispatchTier(state, a, run, trigger),
       priority: cardPriority(state, a),
@@ -1973,7 +1990,7 @@ export class Dispatcher {
         ports = { clock: { now: () => at }, ids: tx.ids },
         actor = { kind: "system" as const, project_id: project };
       if (!run && cause) {
-        const event = state.events.find((e) => e.id === cause.event_id);
+        const event = eventById(state.events, cause.event_id);
         // §6.4: merge conflicts and returned merges wake the coder for a fix Run.
         // The router marks this as run_kind=fix; the trigger event is
         // the only place it survives, because notifications store no run kind.

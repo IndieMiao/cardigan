@@ -64,6 +64,7 @@ export {
 } from "./commands/human-action-lifecycle.js";
 export {
   beginIdleSessionRetirement,
+  confirmKeptShellExit,
   confirmWaitingRetirementExit,
   handoffIdleSessionRetirement,
   settleIdleSessionRetirement,
@@ -220,13 +221,21 @@ export * from "./entities.js";
 export * from "./errors.js";
 export {
   appendEvents,
+  commandEventHistory,
+  commandStreamHistory,
   eventById,
   eventsForDecision,
   eventsOfType,
+  flatMapEvents,
+  fullEventHistory,
+  isTelemetryEvent,
+  TELEMETRY_EVENT_TYPES,
+  telemetryEvents,
 } from "./event-index.js";
 export {
   EventLog,
   EventLogView,
+  type HistoryFilter,
   type IndexKeys,
   indexKeysOf,
   type StreamEventReader,
@@ -248,6 +257,8 @@ export {
 export * from "./harness-activity.js";
 export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
+export * from "./hot-history.js";
+export * from "./hot-history-shadow.js";
 export * from "./ids.js";
 export {
   currentInteraction,

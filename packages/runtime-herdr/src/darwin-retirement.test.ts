@@ -82,6 +82,26 @@ test("native observation uses only the pinned generation and worker account", as
     ).toBe("unknown");
   expect(probe).not.toHaveBeenCalled();
 });
+test("C-667: only the kept-shell probe asks for and accepts the shell verdict", async () => {
+  const probe = vi.fn(async () => "shell");
+  expect(
+    await darwinRetirementObservation(
+      execution,
+      ref,
+      { ...owner, kept_shell: true },
+      probe,
+    ),
+  ).toBe("shell");
+  // Every other caller keeps the conservative kept answer.
+  expect(await darwinRetirementObservation(execution, ref, owner, probe)).toBe(
+    "kept",
+  );
+  expect(probe.mock.calls.map(([, c]) => c)).toMatchObject([
+    { kept_shell: true, require_idle: false },
+    { require_idle: false },
+  ]);
+  expect(probe.mock.calls[1]?.[1]).not.toHaveProperty("kept_shell");
+});
 test("Darwin kernel identity, PID reuse, kept shell, permission, timeout and changed generation", () => {
   execFileSync("python3", [
     "-IB",

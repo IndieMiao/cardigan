@@ -75,7 +75,7 @@ function apply(d: CommandDraft, deliveryId: DeliveryId) {
     !willClassify &&
     highRisk &&
     !covered &&
-    ![...d.state.events, ...d.events].some(
+    !appendEvents(d.state.events, d.events).some(
       (e) =>
         ["high_risk_review_required", "auto_risk_tags_applied"].includes(
           e.type,

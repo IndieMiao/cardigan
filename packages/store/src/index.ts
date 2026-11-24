@@ -2,6 +2,7 @@ export { fileAvatarStore, readAvatarFile } from "./avatars.js";
 export type { ChangeCursor, ChangeSet } from "./change-feed.js";
 export * from "./check-handoff.js";
 export * from "./check-recovery.js";
+export type { EventStreams, HotStateHints } from "./command-events.js";
 export { readContextSamples, writeContextSamples } from "./context-samples.js";
 export {
   type BeginBellAttempt,
@@ -89,6 +90,8 @@ export {
 export {
   type AckEventsParams,
   type AckEventsResult,
+  type CommandStateScope,
+  commandStateScope,
   DEFAULT_DB_FILE,
   type DeferredActivity,
   type GetUpdatesParams,

@@ -14,6 +14,7 @@ import {
   decisionFollowupBlocked,
   dispatchRunKind,
   dispatchTier,
+  eventById,
   hasRunTarget,
   type Notification,
   type ProjectId,
@@ -73,7 +74,7 @@ function referenceCandidates(
     if (q && unreadableCommentTrigger(state, q)) return;
     const cause = notes.find((n) => !n.run_id) ?? notes[0];
     const trigger = q?.trigger_event_id ?? cause?.event_id;
-    const event = state.events.find((e) => e.id === trigger);
+    const event = eventById(state.events, trigger);
     if (!event) return;
     candidates.push({
       project,
@@ -104,8 +105,8 @@ function referenceCandidates(
   };
   for (const notes of groups.values()) {
     notes.sort((a, b) => {
-      const left = state.events.find((e) => e.id === a.event_id);
-      const right = state.events.find((e) => e.id === b.event_id);
+      const left = eventById(state.events, a.event_id);
+      const right = eventById(state.events, b.event_id);
       return (
         (left?.created_at ?? a.created_at).localeCompare(
           right?.created_at ?? b.created_at,
