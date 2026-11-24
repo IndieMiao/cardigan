@@ -246,7 +246,7 @@ async function upgradeRoles(
           )
         )
           return;
-        if (!policy.matches) {
+        if (policy.conflict) {
           const notice = requestDeploymentAction(
             state,
             { kind: "system", project_id: project },

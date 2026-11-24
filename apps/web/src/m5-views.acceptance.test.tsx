@@ -526,7 +526,9 @@ test("§8.2: a comment with a pasted image posts the entry first and attaches th
     type: "image/png",
   });
   fireEvent.paste(field, { clipboardData: { files: [image] } });
-  await screen.findByText(/已捕获 1 张图片/);
+  expect(
+    (await screen.findByRole("list", { name: "待上传的附件" })).textContent,
+  ).toContain("shot.png");
   fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
   await waitFor(() => expect(server.posts()).toHaveLength(2));
   expect(server.posts()[0]).toMatchObject({

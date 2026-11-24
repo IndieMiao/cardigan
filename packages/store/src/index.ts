@@ -91,6 +91,7 @@ export {
   type AckEventsResult,
   DEFAULT_DB_FILE,
   DEFAULT_OPTIMISTIC_ATTEMPTS,
+  type DeferredActivity,
   type GetUpdatesParams,
   type GetUpdatesResult,
   hashRequest,

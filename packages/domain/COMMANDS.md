@@ -96,7 +96,7 @@ CLI 的 `cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acce
 
 ## M5.2 人的操作与编号
 
-`issueInstruction(state, actor, {card_id, work_item_id, body}, ports)` 仅接受人或常驻 PM Ops（持久 standing_mode=ops），校验工具许可、同卡和未结束状态；closed/awaiting_merge 卡片不能下指令。输出 instruction_issued 事件及 instruction 时间线；不直接排 Run，复用 Router 指令规则。MCP 名称为 issue_instruction，复用幂等事务；Office、工作项 Assignment 不显示且不能调用。
+`issueInstruction(state, actor, {card_id, work_item_id, body}, ports)` 仅接受人或常驻 PM Ops（持久 standing_mode=ops），校验工具许可、同卡和未结束状态；closed/awaiting_merge 卡片不能下指令。输出 instruction_issued 事件及 instruction 时间线；不直接排 Run，复用 Router 指令规则。MCP 名称为 issue_instruction，复用幂等事务；Office、工作项 Assignment 不显示且不能调用。C-619：可选 `decision_id` 把指令绑定为“等待拍板期间的提问”：只接受正在等待该拍板（`trigger=review_limit`，open/snoozed/provisional，未被替换，`affected_work_items` 含本项）的 waiting_decision 审核项；事件带 `decision_id` 和 `decision_question={assignment_id, delivery_id?, target_sha?}`。路由、排队、派发按 `decisionQuestionCurrent` 重核：拍板仍待处理、审核项仍在等它、负责 Assignment 与最新交付版本未变才唤醒，否则视为过期；讨论 Run 不开审核轮次，`submit_review` 与拍板处理照旧被拒。审核员回复该指令（reply_to）时 Router 通知 PM Ops。
 
 `recordDecision` 允许人记录所有 decider=human 的决策，via=needs_you；原话和理由仍必填。MCP 的 PM Office 路径不变。`submitDelivery` 的 pr_url 若提供必须是合法绝对 HTTP/HTTPS URL；预检和事务内归约均拒绝其他协议/相对地址（validation_failed），不会为无效 URL 做 Git 预检。
 

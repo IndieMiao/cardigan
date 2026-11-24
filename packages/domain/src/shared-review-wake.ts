@@ -1,4 +1,8 @@
 import type { CommandState } from "./commands/core.js";
+import {
+  decisionQuestionCurrent,
+  decisionQuestionPayload,
+} from "./decision-question.js";
 import type {
   Assignment,
   Decision,
@@ -117,7 +121,7 @@ export function pauseDiscussionDecision(
   const p = event.payload as { pause_recipient?: string; decision_id?: string };
   if (p?.pause_recipient !== owner.id) return;
   const item = state.work_items.find((w) => w.id === owner.work_item_id);
-  if (item && reviewDiscussionInstruction(item, event, state.decisions))
+  if (item && reviewDiscussionInstruction(item, event, state))
     return p.decision_id;
 }
 
@@ -144,14 +148,18 @@ export function canParkForDiscussion(
 }
 
 /** Only domain-issued, item-addressed instructions can start a discussion. A
- * proposal request must belong to the assigned strategy, not match prose. */
+ * proposal request must belong to the assigned strategy, not match prose. A
+ * decision-bound question (C-619) must still be current for this verifier. */
 export function reviewDiscussionInstruction(
   item: WorkItem,
   event?: Event,
-  decisions?: readonly Decision[],
+  state?: Pick<State, "decisions" | "deliveries">,
 ) {
   if (event?.type !== "instruction_issued" || event.card_id !== item.card_id)
     return false;
+  const decisions = state?.decisions;
+  if (decisionQuestionPayload(event))
+    return !!state && decisionQuestionCurrent(item, event, state);
   const p = event.payload as {
     work_item_id?: string;
     decision_id?: string;
@@ -187,18 +195,20 @@ function reviewWakeDisposition(
 ): "paused" | "obsolete" | undefined {
   if (!itemId) return;
   const verifier = state.work_items.find((w) => w.id === itemId);
+  // A pause discussion or decision-bound question is only valid while its
+  // binding holds; once settled or retargeted it never wakes anyone.
   if (
     event?.type === "instruction_issued" &&
-    (event.payload as Record<string, unknown> | null)?.pause_recipient
+    ((event.payload as Record<string, unknown> | null)?.pause_recipient ||
+      decisionQuestionPayload(event))
   )
-    return verifier &&
-      reviewDiscussionInstruction(verifier, event, state.decisions)
+    return verifier && reviewDiscussionInstruction(verifier, event, state)
       ? undefined
       : "obsolete";
   if (
     verifier?.kind === "verify" &&
     verifier.status === "waiting_decision" &&
-    !reviewDiscussionInstruction(verifier, event)
+    !reviewDiscussionInstruction(verifier, event, state)
   )
     return "paused";
   if (!event) return;

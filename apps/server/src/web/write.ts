@@ -22,6 +22,7 @@ import {
   deactivateRole,
   issueInstruction,
   latestCardTemplate,
+  MAX_REF_SLOT,
   manageCardTemplate,
   markCardDone,
   markNoticesRead,
@@ -195,7 +196,11 @@ const cardComment = comment.extend({
     ])
     .optional(),
 });
-const instruction = z.object({ body: text, work_item_id: id("work_item") });
+const instruction = z.object({
+  body: text,
+  work_item_id: id("work_item"),
+  decision_id: id("decision").optional(),
+});
 const cardUpdate = z
   .object({
     hold: z
@@ -273,6 +278,8 @@ const attachment = z.object({
     .regex(/^[a-f0-9]{64}$/u)
     .optional(),
   supersedes: text.optional(),
+  // C-615: the `attachment-new-N` of the comment this file fills.
+  ref_slot: z.number().int().min(1).max(MAX_REF_SLOT).optional(),
 });
 // Zod's optional fields include undefined in their inferred value types; domain omits them.
 function defined<T extends object>(

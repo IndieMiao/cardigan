@@ -42,6 +42,7 @@ import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
 import { DEFAULT_MERGE_WATCHDOG_MS, watchMergePass } from "./merge-watchdog.js";
 import { tryPublication } from "./publication-lock.js";
+import { profileProject, profileProjectSync } from "./tick-profile.js";
 
 /** Default cadence: one pass is cheap when no card is ready. */
 export const DEFAULT_MERGE_INTERVAL_MS = 5_000;
@@ -155,10 +156,10 @@ export class MergeExecutor {
         const direct: Promise<void>[] = [];
         for (const id of projects) {
           if (this.stopped) break;
-          this.confirmDue(id);
+          profileProjectSync(id, () => this.confirmDue(id));
           let pass = this.direct.get(id);
           if (!pass && !this.checks?.configured(id)) {
-            pass = this.project(id)
+            pass = profileProject(id, () => this.project(id))
               .catch((error: unknown) => this.options.onError?.(error))
               .finally(() => this.direct.delete(id));
             this.direct.set(id, pass);

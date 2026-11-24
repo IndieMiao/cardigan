@@ -149,6 +149,8 @@ export function applyFlowReviewLimit(d: CommandDraft, item: WorkItem): boolean {
       "submit_review",
       "upgrade_card_flow",
       "request_recheck",
+      // C-610: an agreed alignment round settles its rejection streak.
+      "post_comment",
     ].includes(d.tool) ||
       (["system_complete_card", "refresh_test_review_limits"].includes(
         d.tool,

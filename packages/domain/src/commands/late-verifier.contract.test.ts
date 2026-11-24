@@ -728,6 +728,7 @@ test("a late required verifier can cite a solo review on the same accepted deliv
             must_fix: true,
             pre_existing: false,
             impact: "ux_only",
+            basis: "AC1",
           },
         ],
         followup_card_id: id("card", 2),

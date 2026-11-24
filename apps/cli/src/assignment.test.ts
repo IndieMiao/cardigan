@@ -43,6 +43,7 @@ import {
   runDirectory,
   startAssignment,
   stopAssignment,
+  unconfirmedExitMessage,
 } from "./assignment.js";
 import { humanActor, runCommand } from "./host.js";
 import type { CapturedOutput, CliIo } from "./io.js";
@@ -943,6 +944,10 @@ describe("stopAssignment and attachAssignment", () => {
       value: { process: "exited", agent: "unknown", observed_seq: 1 },
     } as never;
     await expect(stop()).rejects.toThrow(/未能确认 A-\d+ 的原会话已退出/);
+    // C-663: the hint names why, and when --hold then start is safe.
+    await expect(stop()).rejects.toThrow(
+      /没有可核对的进程登记.*核实该指派的终端和进程都已不在后.*--hold 再 cardigan assignment start/,
+    );
     // A missing row (runtime_not_found) is no proof either.
     runtime.releaseResult = {
       ok: false,
@@ -1098,6 +1103,79 @@ describe("stopAssignment and attachAssignment", () => {
     });
     expect(readFileSync(join(runDir, "start"), "utf8")).toBe("successor\n");
   });
+
+  test.each([false, true])(
+    "C-645 a human start while the stop holds the launch lock (hold=%s): the release still clears the old ref, the start launches once afterwards",
+    async (hold) => {
+      const assignment = assignWorkItem("none");
+      const runtime = new FakeRuntime();
+      const first = await startFor(assignment.id, runtime);
+      // Between Runs: the previous Run finished, its terminal idles.
+      store.uow.run((tx) => {
+        const run = tx.runs.get(project_id, first.run_id as never);
+        const current = tx.assignments.get(project_id, assignment.id);
+        if (!run || !current) throw new Error("missing fixture");
+        tx.runs.put(project_id, {
+          ...run,
+          status: "completed",
+          outcome: "completed" as never,
+          finished_at: new Date().toISOString(),
+        });
+        tx.assignments.put(project_id, { ...current, runtime_state: "idle" });
+      });
+      let open = () => {};
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const release = runtime.release.bind(runtime);
+      runtime.release = async (ref) => {
+        const result = await release(ref);
+        await gate;
+        return result;
+      };
+      const stopping = stopAssignment({
+        store,
+        project_id,
+        assignment_id: assignment.id,
+        runtime,
+        execution: { mode: "local", dataDir },
+        ...(hold ? { hold } : {}),
+      });
+      await expect.poll(() => runtime.released.length).toBe(1);
+      // The human start queues its Run (ending the stop) while the stop
+      // still holds the launch lock, so it cannot launch yet.
+      await expect(startFor(assignment.id, runtime)).rejects.toThrow(
+        /保留执行排队等待/,
+      );
+      expect(stopFacts(assignment.id).stopped).toBe(false);
+      open();
+      await expect(stopping).resolves.toMatchObject({ released: true });
+      // No dangling ref to the released terminal; the start's Run is kept.
+      expect(stopFacts(assignment.id)).toMatchObject({
+        ref: null,
+        stopped: false,
+        released: 1,
+      });
+      const runs = () =>
+        store.uow.read((tx) =>
+          tx.runs
+            .list(project_id)
+            .filter((r) => r.assignment_id === assignment.id),
+        );
+      const queued = runs().filter((r) => r.status === "queued");
+      expect(queued).toHaveLength(1);
+      // The queued start launches exactly one fresh session.
+      runtime.release = release;
+      const second = await startFor(assignment.id, runtime);
+      expect(second.run_id).toBe(queued[0]?.id);
+      expect(runtime.provisions).toHaveLength(2);
+      expect(runtime.live.size).toBe(1);
+      expect(stopFacts(assignment.id).ref).toEqual(second.runtime_ref);
+      expect(
+        runs().filter((r) => ["dispatched", "running"].includes(r.status)),
+      ).toHaveLength(1);
+    },
+  );
 
   test("C-211 a failed release keeps the running Run's slot and the ref, and the stop can be retried", async () => {
     const assignment = assignWorkItem("none");
@@ -1301,7 +1379,8 @@ test.each([
       agent_cli_version: "codex fixture-version",
     });
     expect(readFileSync(join(first.run_dir, "launch.sh"), "utf8")).toContain(
-      `exec nice -n ${expectedNice} 'codex'`,
+      // C-656: host launches start the CLI through the session wrapper.
+      `session -- nice -n ${expectedNice} 'codex'`,
     );
     store.uow.run((tx) => {
       const employee = tx.employees.list()[0];
@@ -1329,7 +1408,8 @@ test.each([
       agent_cli_version: "pi fixture-version",
     });
     expect(readFileSync(join(second.run_dir, "launch.sh"), "utf8")).toContain(
-      `exec nice -n ${expectedNice} 'pi'`,
+      // C-656: host launches start the CLI through the session wrapper.
+      `session -- nice -n ${expectedNice} 'pi'`,
     );
     expect(
       store.uow.read((tx) => tx.runs.list(project_id))[0]?.launch_profile_ref,
@@ -1672,4 +1752,32 @@ describe("C-624 stop without a terminal", () => {
       }),
     ).rejects.toThrow(/没有在运行的终端，也没有排队的 Run/);
   });
+});
+
+test("C-663 an unconfirmed stop says why and whether --hold then start is safe", () => {
+  const id = "A-7" as Assignment["id"];
+  const unsafe = /不要用 --hold 再 start/;
+  expect(unconfirmedExitMessage(id, "terminal_alive")).toMatch(
+    /原终端仍在运行.*重试 cardigan assignment stop A-7/,
+  );
+  expect(unconfirmedExitMessage(id, "terminal_alive")).toMatch(unsafe);
+  expect(unconfirmedExitMessage(id, "process_alive")).toMatch(
+    /worker 上仍有该指派登记的进程/,
+  );
+  expect(unconfirmedExitMessage(id, "process_alive")).toMatch(unsafe);
+  expect(unconfirmedExitMessage(id, "unreachable")).toMatch(
+    /worker 暂时无法连接.*恢复 worker 连接后重试.*连接恢复前不要用 --hold 再 start/,
+  );
+  expect(unconfirmedExitMessage(id, "unproven")).toMatch(
+    /核实该指派的终端和进程都已不在后，执行 cardigan assignment stop A-7 --hold 再 cardigan assignment start A-7 是安全的/,
+  );
+  for (const verdict of [
+    "terminal_alive",
+    "process_alive",
+    "unreachable",
+    "unproven",
+  ] as const)
+    expect(unconfirmedExitMessage(id, verdict)).toMatch(
+      /^未能确认 A-7 的原会话已退出：.*停止状态和终端引用均已保留，不会另起会话。/,
+    );
 });

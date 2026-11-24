@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import {
   type ProfileLine,
+  profileProject,
+  profileProjectSync,
   profileSpan,
   profileSpanSync,
   profileTick,
@@ -103,6 +105,7 @@ test("when on, a tick logs numbers only: wall, UnitOfWork, state builds and span
       "state_build_ms",
       "state_builds",
       "uow_count",
+      "uow_lock_wait_ms",
       "uow_max_ms",
       "uow_ms",
       "ts",
@@ -442,4 +445,81 @@ test("C-265: releaseSha reads a detached or branch HEAD and never returns anythi
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("C-638: a tick is split by project: wall, UnitOfWork and lock wait each", async () => {
+  const { profiler, lines } = install();
+  await profileTick("dispatcher", async () => {
+    await profileProject("alpha", async () => {
+      profiler.storeObserver.writeLock(1, 3);
+      profiler.storeObserver.transaction("run", 4);
+      // Nested for the same project counts once.
+      await profileProject("alpha", async () => {
+        profiler.storeObserver.transaction("read", 2);
+      });
+    });
+    profileProjectSync("beta", () => {
+      profiler.storeObserver.transaction("read", 5);
+    });
+    // Outside any project: in the tick totals only.
+    profiler.storeObserver.transaction("read", 7);
+  });
+  const line = lines[0] ?? {};
+  expect(line).toMatchObject({
+    uow_ms: 18,
+    uow_count: 4,
+    uow_lock_wait_ms: 1,
+    projects: {
+      alpha: { uow_ms: 6, uow_count: 2, uow_lock_wait_ms: 1 },
+      beta: { uow_ms: 5, uow_count: 1, uow_lock_wait_ms: 0 },
+    },
+  });
+  const projects = line.projects as Record<string, Record<string, unknown>>;
+  expect(Object.keys(projects)).toEqual(["alpha", "beta"]);
+  for (const entry of Object.values(projects)) {
+    expect(Object.keys(entry).sort()).toEqual(
+      ["uow_count", "uow_lock_wait_ms", "uow_ms", "wall_ms"].sort(),
+    );
+    expect(typeof entry.wall_ms).toBe("number");
+  }
+});
+
+test("C-638: projects are pass-throughs when off or outside a profiled tick", async () => {
+  expect(await profileProject("alpha", async () => 1)).toBe(1);
+  expect(profileProjectSync("alpha", () => 2)).toBe(2);
+  const { lines } = install();
+  expect(await profileProject("alpha", async () => 3)).toBe(3);
+  await profileTick("cleanup", async () => undefined);
+  expect(lines[0]).not.toHaveProperty("projects");
+});
+
+test("C-638: SQLite write-lock waits and holds are summarized by operation in the report", async () => {
+  const { profiler, lines } = install();
+  await profileTick("merge", async () => {
+    tickStoreObserver.writeLock(2, 10);
+    tickStoreObserver.writeLock(4, 30);
+  });
+  // A request has no owning tick; its locks still count, by operation.
+  tickStoreObserver.writeLock(5000, undefined);
+  profiler.report();
+  const locks = lines.filter((l) => l.event === "lock_profile");
+  expect(locks).toEqual([
+    expect.objectContaining({
+      lock: "sqlite",
+      op: "merge",
+      wait: expect.objectContaining({ n: 2, max_ms: 4, total_ms: 6 }),
+      hold: expect.objectContaining({ n: 2, max_ms: 30, total_ms: 40 }),
+    }),
+    expect.objectContaining({
+      lock: "sqlite",
+      op: "other",
+      timeouts: 1,
+      wait: expect.objectContaining({ n: 1, max_ms: 5000 }),
+      hold: { n: 0, total_ms: 0 },
+    }),
+  ]);
+  expect(locks[0]).not.toHaveProperty("timeouts");
+  // The window resets; nothing about locks is repeated.
+  profiler.report();
+  expect(lines.filter((l) => l.event === "lock_profile")).toHaveLength(2);
 });
