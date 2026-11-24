@@ -238,8 +238,6 @@ export {
   type HistoryFilter,
   type IndexKeys,
   indexKeysOf,
-  type StreamEventReader,
-  streamEventsBy,
   streamHistory,
 } from "./event-log.js";
 export * from "./ext-interaction.js";
@@ -320,6 +318,7 @@ export * from "./standing.js";
 export * from "./states.js";
 export * from "./story.js";
 export * from "./story-discussion.js";
+export { type StreamEventReader, streamEventsBy } from "./stream-events.js";
 export * from "./system-review-limit.js";
 export * from "./templates.js";
 export * from "./test-review.js";

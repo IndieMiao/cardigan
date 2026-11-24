@@ -24,11 +24,11 @@ import {
   type HistoryFilter,
   type IndexKeys,
   indexKeysOf,
-  streamEventsBy,
   streamHistory,
 } from "./event-log.js";
 import type { CardId } from "./ids.js";
 import { parseEventId } from "./index.js";
+import { streamEventsBy } from "./stream-events.js";
 
 const eventId = (n: number) =>
   value(parseEventId(n.toString().padStart(26, "0")));
