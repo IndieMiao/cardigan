@@ -97,7 +97,12 @@ import {
   WORKTREE_LAUNCH_LEASE_MS,
   wakeIsCurrent,
 } from "@cardigan/host";
-import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import {
+  effectWrites,
+  loadCommandState,
+  persistEffect,
+  unwrap,
+} from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
 import type { HerdrRuntime } from "@cardigan/runtime-herdr";
 import {
@@ -546,7 +551,10 @@ export class Dispatcher {
         this.followups.set(project, schedule);
       }
       const plan = schedule;
-      const { planned, statuses } = store.uow.run((tx) => {
+      // C-641: evaluated in a read snapshot; only due reminders take the
+      // writer lock. The feed is the `decisions` collection, which the
+      // command-state version revalidates.
+      const { planned, statuses } = store.uow.optimistic(project, (tx) => {
         const changes = store.changesSince(
           project,
           DECISION_FOLLOWUP_FEED,
@@ -565,22 +573,27 @@ export class Dispatcher {
             .filter(([, status]) => status.kind === "due")
             .map(([q]) => q.id),
         );
-        if (due.size)
-          step("decision_followups.persist", () =>
-            persistEffect(
-              tx,
-              project,
-              unwrap(
-                remindDecisionFollowups(
-                  state,
-                  { kind: "system", project_id: project },
-                  { clock: { now: () => at }, ids: tx.ids },
-                  { decision_ids: due },
-                ),
+        const effect = due.size
+          ? unwrap(
+              remindDecisionFollowups(
+                state,
+                { kind: "system", project_id: project },
+                { clock: { now: () => at }, ids: tx.ids },
+                { decision_ids: due },
               ),
-            ),
-          );
-        return { planned, statuses };
+            )
+          : undefined;
+        return {
+          value: { planned, statuses },
+          ...(effect && effectWrites(effect)
+            ? {
+                write: (w) =>
+                  step("decision_followups.persist", () =>
+                    persistEffect(w, project, effect),
+                  ),
+              }
+            : {}),
+        };
       });
       plan.record(planned, statuses);
     });
@@ -588,19 +601,20 @@ export class Dispatcher {
       this.options.mergeShadowTick?.(project),
     );
     step("suggestion_progress", () =>
-      store.uow.run((tx) => {
-        const state = this.loadState(tx, project);
-        persistEffect(
-          tx,
-          project,
-          unwrap(
-            remindSuggestionProgress(
-              state,
-              { kind: "system", project_id: project },
-              { clock: this.clock, ids: tx.ids },
-            ),
+      store.uow.optimistic(project, (tx) => {
+        const effect = unwrap(
+          remindSuggestionProgress(
+            this.loadState(tx, project),
+            { kind: "system", project_id: project },
+            { clock: this.clock, ids: tx.ids },
           ),
         );
+        return {
+          value: undefined,
+          ...(effectWrites(effect)
+            ? { write: (w) => persistEffect(w, project, effect) }
+            : {}),
+        };
       }),
     );
     const now = Date.parse(this.clock.now());

@@ -67,6 +67,8 @@ import { acquireRepositoryFlock } from "./repository-lock.js";
 
 const exec = promisify(execFile);
 const PROJECT = "cardigan";
+/** Backoff for a failing supervisor comparison of one unchanged main. */
+const SUPERVISOR_RETRY_MS = 10 * 60_000;
 class DeploymentCommandUnavailable extends Error {}
 interface State {
   current: DeploymentBuild;
@@ -104,6 +106,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private supervisorSha: string | null | undefined;
   private checkedSupervisorMain?: string;
   private failedSupervisorMain?: string;
+  private supervisorRetry?: { sha: string; at: number };
   private lastOperationWait: string | undefined;
   private notedOperations = new Set<string>();
   constructor(
@@ -544,6 +547,12 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     if (
       supervisor &&
       this.checkedSupervisorMain !== sha &&
+      // C-670: a failing comparison of the same main retries at most every
+      // SUPERVISOR_RETRY_MS instead of re-reading Git and lockfiles each tick.
+      !(
+        this.supervisorRetry?.sha === sha &&
+        performance.now() < this.supervisorRetry.at
+      ) &&
       (supervisor === sha || (await this.isFastForward(supervisor, sha)))
     ) {
       try {
@@ -558,6 +567,10 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         );
         this.checkedSupervisorMain = sha;
       } catch {
+        this.supervisorRetry = {
+          sha,
+          at: performance.now() + SUPERVISOR_RETRY_MS,
+        };
         // An unavailable comparison is neither upgrade evidence nor proof that an open notice is obsolete.
         if (this.failedSupervisorMain !== sha) {
           console.warn("未能核对部署监督器差异；保留现有提醒，下轮重试");

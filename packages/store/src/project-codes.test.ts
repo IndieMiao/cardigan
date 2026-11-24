@@ -18,25 +18,33 @@ afterEach(() => {
 });
 
 test("a new project registers a valid, unique code; omitted codes are suggested", () => {
-  withTempStore((store) => {
-    expect(
-      store.createProject({ id: "sensen-godot", code: "SEN" }),
-    ).toMatchObject({ ok: true, value: { code: "SEN" } });
-    // Suggested from the name; the taken three-character stem moves to four.
-    expect(store.createProject({ id: "sensei" })).toMatchObject({
-      ok: true,
-      value: { code: "SENS" },
-    });
-    expect(store.createProject({ id: "cardigan" }).ok).toBe(true);
-    expect(store.getProject("cardigan")?.code).toBe("CAR");
-    expect(store.projectByCode("SEN")?.id).toBe("sensen-godot");
-    expect(store.projectCode("sensei")).toBe("SENS");
-    expect(store.listProjects().map((p) => p.code)).toEqual([
-      "SEN",
-      "SENS",
-      "CAR",
-    ]);
-  });
+  // Distinct creation times keep `listProjects()` in creation order.
+  let tick = 0;
+  const clock = {
+    now: () => `2026-11-24T00:00:00.${String(tick++).padStart(3, "0")}Z`,
+  };
+  withTempStore(
+    (store) => {
+      expect(
+        store.createProject({ id: "sensen-godot", code: "SEN" }),
+      ).toMatchObject({ ok: true, value: { code: "SEN" } });
+      // Suggested from the name; the taken three-character stem moves to four.
+      expect(store.createProject({ id: "sensei" })).toMatchObject({
+        ok: true,
+        value: { code: "SENS" },
+      });
+      expect(store.createProject({ id: "cardigan" }).ok).toBe(true);
+      expect(store.getProject("cardigan")?.code).toBe("CAR");
+      expect(store.projectByCode("SEN")?.id).toBe("sensen-godot");
+      expect(store.projectCode("sensei")).toBe("SENS");
+      expect(store.listProjects().map((p) => p.code)).toEqual([
+        "SEN",
+        "SENS",
+        "CAR",
+      ]);
+    },
+    { clock },
+  );
 });
 
 test("project codes are validated and globally unique", () => {
@@ -81,7 +89,9 @@ test("the migration backfills the owner's codes, then suggestions in creation or
       copyFileSync(join(defaultMigrationsDir, file), join(migrationsDir, file));
   const dbPath = join(dataDir, "cardigan.db");
   let tick = 0;
-  const clock = { now: () => `2026-11-24T00:00:0${tick++}.000Z` };
+  const clock = {
+    now: () => `2026-11-24T00:00:00.${String(tick++).padStart(3, "0")}Z`,
+  };
   const old = Store.open({ dbPath, migrationsDir, clock });
   for (const id of ["cardigan", "car-wash", "sensen-godot", "senate"])
     expect(old.createProject({ id }).ok).toBe(true);

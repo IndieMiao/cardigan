@@ -12,6 +12,7 @@ import type {
   Event,
   GlobalIdAllocator,
   GlobalRepositories,
+  IdAllocator,
   NotificationStatus,
   ProjectId,
   ReadMachinePlacement,
@@ -47,7 +48,12 @@ import {
   ID_FORMAT_MIGRATION_NAME,
   legacyRequest,
 } from "./id-format-migration.js";
-import { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
+import {
+  type BufferedIdAllocator,
+  createBufferedIdAllocator,
+  createIdAllocator,
+  PROJECT_EVENT_STREAM,
+} from "./ids.js";
 import {
   acknowledgeNotifications,
   advanceRouterCursor,
@@ -141,7 +147,71 @@ export interface StoreUnitOfWork extends UnitOfWork {
    * working while another process is writing.
    */
   read<T>(operation: (transaction: ReadRepositories) => T): T;
+  /**
+   * C-641: compute in a read snapshot, then commit in a short write
+   * transaction. See `Store.optimistic`.
+   */
+  optimistic<T>(
+    project: ProjectId,
+    plan: (transaction: OptimisticContext) => OptimisticPlan<T>,
+    options?: OptimisticOptions,
+  ): T;
 }
+
+/**
+ * C-641: what an optimistic plan may read. Repositories are read-only; IDs are
+ * numbered in memory and only written if the plan commits.
+ */
+export interface OptimisticContext extends ReadRepositories {
+  readonly ids: IdAllocator;
+  readonly read_machine_placement?: ReadMachinePlacement;
+}
+
+export interface OptimisticPlan<T> {
+  readonly value: T;
+  /**
+   * Persist the plan. Runs under the writer lock only after the project's
+   * command-state version and every used ID counter are unchanged since the
+   * snapshot. Omit when there is nothing to write: no writer lock is taken.
+   */
+  readonly write?: (transaction: StoreTransactionContext) => void;
+}
+
+export interface OptimisticOptions {
+  /** Snapshot attempts before the pessimistic fallback; `0` goes straight to it. */
+  readonly attempts?: number;
+}
+
+/** Conflicting snapshots retried before falling back to `BEGIN IMMEDIATE`. */
+export const DEFAULT_OPTIMISTIC_ATTEMPTS = 3;
+const MAX_OPTIMISTIC_ATTEMPTS = 20;
+
+export interface OptimisticStats {
+  /** Committed from a snapshot plan. */
+  readonly committed: number;
+  /** A snapshot plan with nothing to write; no writer lock taken. */
+  readonly unchanged: number;
+  /** Snapshot plans discarded because the read set changed before commit. */
+  readonly conflicts: number;
+  /** Plans run pessimistically (attempt limit, port outside the read set, no version table). */
+  readonly fallbacks: number;
+}
+
+/** Thrown into a snapshot plan that reads a port outside the validated read set. */
+class PessimisticRequired extends Error {
+  constructor() {
+    super("This read requires the pessimistic write transaction");
+  }
+}
+
+type Planned<T> =
+  | {
+      readonly kind: "planned";
+      readonly plan: OptimisticPlan<T>;
+      readonly version: string;
+      readonly ids: BufferedIdAllocator;
+    }
+  | { readonly kind: "pessimistic" };
 
 interface ProjectRow {
   id: string;
@@ -531,7 +601,165 @@ export class Store {
         this.#timed("run", () => this.#run(operation)),
       read: <T>(operation: (transaction: ReadRepositories) => T): T =>
         this.#timed("read", () => this.#read(operation)),
+      optimistic: (project, plan, options) =>
+        this.optimistic(project, plan, options),
     };
+  }
+
+  #optimisticStats = { committed: 0, unchanged: 0, conflicts: 0, fallbacks: 0 };
+  get optimisticStats(): OptimisticStats {
+    return { ...this.#optimisticStats };
+  }
+
+  /**
+   * C-641: optimistic command commit. `plan` computes in a `BEGIN DEFERRED`
+   * snapshot without the writer lock. Its read set is the project's
+   * command-state version (the key of the command-state cache: project
+   * collections, global identities and all Assignments) plus the ID counters
+   * it used. Under `BEGIN IMMEDIATE` both are compared with the snapshot; only
+   * if unchanged does `write` run, so the lock covers persistence alone.
+   *
+   * A changed read set discards the plan and recomputes, at most `attempts`
+   * times; then (or when the plan reads machine placement or other projects'
+   * deployment records, which lie outside the project version) the plan and
+   * its write run in one `BEGIN IMMEDIATE`
+   * transaction exactly like `uow.run`. Plans must therefore be repeatable:
+   * no side effects outside the transaction they are given.
+   */
+  optimistic<T>(
+    project: ProjectId,
+    plan: (transaction: OptimisticContext) => OptimisticPlan<T>,
+    options: OptimisticOptions = {},
+  ): T {
+    if (this.#inTransaction)
+      throw new Error("nested UnitOfWork is not supported");
+    const attempts = options.attempts ?? DEFAULT_OPTIMISTIC_ATTEMPTS;
+    if (
+      !Number.isSafeInteger(attempts) ||
+      attempts < 0 ||
+      attempts > MAX_OPTIMISTIC_ATTEMPTS
+    )
+      throw new Error("Invalid optimistic attempt limit");
+    const snapshots = this.#snapshots;
+    if (snapshots)
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        const planned = this.#planInSnapshot(project, snapshots, plan);
+        if (planned.kind === "pessimistic") break;
+        const write = planned.plan.write;
+        if (!write) {
+          this.#optimisticStats.unchanged++;
+          return planned.plan.value;
+        }
+        if (this.#commitPlanned(project, snapshots, planned, write)) {
+          this.#optimisticStats.committed++;
+          return planned.plan.value;
+        }
+        this.#optimisticStats.conflicts++;
+      }
+    this.#optimisticStats.fallbacks++;
+    return this.#timed("run", () =>
+      this.#run((tx) => {
+        const planned = plan(tx);
+        planned.write?.(tx);
+        return planned.value;
+      }),
+    );
+  }
+
+  #planInSnapshot<T>(
+    project: ProjectId,
+    snapshots: CommandSnapshots,
+    plan: (transaction: OptimisticContext) => OptimisticPlan<T>,
+  ): Planned<T> {
+    const db = this.#db;
+    const started = performance.now();
+    db.exec("BEGIN DEFERRED");
+    this.#inTransaction = true;
+    let finished = false;
+    const events = this.#commandEvents.transaction(db);
+    const cache = snapshots.transaction();
+    try {
+      // The first read pins the snapshot the plan and its version share.
+      const version = snapshots.version(project);
+      const trust = this.#testReviewTrust;
+      const ids = createBufferedIdAllocator(db);
+      let outside = false;
+      const repositories = createReadRepositories(db, cache);
+      const context: OptimisticContext = {
+        ...repositories,
+        ...this.#cachedState(cache),
+        ...(trust ? { test_review_trust: trust } : {}),
+        ...(this.#placement
+          ? {
+              read_machine_placement: () => {
+                outside = true;
+                throw new PessimisticRequired();
+              },
+            }
+          : {}),
+        // Other projects' deployment records are outside the project version.
+        platformDeployments: () => {
+          outside = true;
+          throw new PessimisticRequired();
+        },
+        // Same history view and scope as `#run` and `#read` (C-639, C-640).
+        events: {
+          ...repositories.events,
+          listAfter: events.listAfter,
+          listStreams: events.listStreams,
+        },
+        command_state_scope: this.#commandStateScope,
+        hot_state_hints: hotStateHints(this.#db),
+        ids: ids.ids,
+      };
+      let result: OptimisticPlan<T>;
+      try {
+        result = plan(context);
+      } catch (error) {
+        // A domain wrapper may have converted the signal; the flag still holds.
+        if (outside) return { kind: "pessimistic" };
+        throw error;
+      }
+      if (outside || trust !== this.#testReviewTrust)
+        return { kind: "pessimistic" };
+      db.exec("COMMIT");
+      finished = true;
+      events.commit();
+      cache.commit();
+      return { kind: "planned", plan: result, version, ids };
+    } finally {
+      if (!finished) db.exec("ROLLBACK");
+      this.#inTransaction = false;
+      this.#observer?.transaction?.("read", performance.now() - started);
+    }
+  }
+
+  #commitPlanned<T>(
+    project: ProjectId,
+    snapshots: CommandSnapshots,
+    planned: Extract<Planned<T>, { kind: "planned" }>,
+    write: (transaction: StoreTransactionContext) => void,
+  ): boolean {
+    const db = this.#db;
+    const started = performance.now();
+    db.exec("BEGIN IMMEDIATE");
+    let handedOff = false;
+    try {
+      if (
+        snapshots.version(project) !== planned.version ||
+        !planned.ids.unchanged()
+      )
+        return false;
+      handedOff = true;
+      this.#writeAndCommit((tx) => {
+        planned.ids.flush();
+        write(tx);
+      });
+      return true;
+    } finally {
+      if (!handedOff) db.exec("ROLLBACK");
+      this.#observer?.transaction?.("run", performance.now() - started);
+    }
   }
 
   /** Recheck a single external-evidence-dependent write in a pinned read snapshot.
@@ -1052,9 +1280,21 @@ export class Store {
       };
     const valid = validateProjectCode(input.code, projectCodes(this.#db));
     if (!valid.ok) return valid;
-    this.#db
+    const changed = this.#db
       .prepare("UPDATE projects SET code = ? WHERE id = ? AND code IS NULL")
       .run(valid.value, project.id);
+    if (Number(changed.changes) !== 1) {
+      // Another registration won the race; report the code actually stored.
+      const stored = this.getProject(project.id)?.code ?? null;
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: `项目 ${project.id} 已登记代号 ${stored}，登记后不可修改`,
+          details: { project_id: project.id, code: stored },
+        },
+      };
+    }
     return { ok: true, value: { ...project, code: valid.value } };
   }
 
