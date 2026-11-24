@@ -1,28 +1,56 @@
 import type { CommandState } from "./commands/core.js";
 import { mergeQueue } from "./commands/merge-batch.js";
 import { heldByMergeWindow } from "./commands/merge-window.js";
-import type { Card, MergeStage } from "./entities.js";
+import type { Card, Delivery, MergeStage, WorkItem } from "./entities.js";
+import type { CardId } from "./ids.js";
 import {
   batchQueueWait,
   mergeBatches,
   passedCardCheck,
 } from "./merge-batch.js";
 
+// C-648: immutable collections (see event-index.ts), so one pass per snapshot
+// replaces a deliveries × work items scan for every card.
+const completions = new WeakMap<
+  readonly Delivery[],
+  WeakMap<readonly WorkItem[], ReadonlyMap<CardId, Delivery>>
+>();
+/** Same answer as filtering open completions of the card, sorting by number and taking the last. */
+function latestCompletion(state: CommandState, card: CardId) {
+  let byItems = completions.get(state.deliveries);
+  if (!byItems) {
+    byItems = new WeakMap();
+    completions.set(state.deliveries, byItems);
+  }
+  let latest = byItems.get(state.work_items);
+  if (!latest) {
+    const owners = new Map<string, Set<CardId>>();
+    for (const w of state.work_items) {
+      const cards = owners.get(w.id);
+      if (cards) cards.add(w.card_id);
+      else owners.set(w.id, new Set([w.card_id]));
+    }
+    const map = new Map<CardId, Delivery>();
+    for (const v of state.deliveries) {
+      if (v.kind !== "card_completion" || v.status === "superseded") continue;
+      for (const owner of owners.get(v.work_item_id) ?? []) {
+        const previous = map.get(owner);
+        // A stable ascending sort keeps the later of equal numbers last.
+        if (!previous || Number(v.id.slice(2)) >= Number(previous.id.slice(2)))
+          map.set(owner, v);
+      }
+    }
+    latest = map;
+    byItems.set(state.work_items, latest);
+  }
+  return latest.get(card);
+}
+
 export function mergeStage(
   state: CommandState,
   card: Card,
 ): MergeStage | undefined {
-  const completion = state.deliveries
-    .filter(
-      (v) =>
-        v.kind === "card_completion" &&
-        v.status !== "superseded" &&
-        state.work_items.some(
-          (w) => w.id === v.work_item_id && w.card_id === card.id,
-        ),
-    )
-    .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))
-    .at(-1);
+  const completion = latestCompletion(state, card.id);
   const batches = mergeBatches(state.events).filter((b) =>
     b.members.some(
       (m) =>

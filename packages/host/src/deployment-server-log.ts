@@ -13,8 +13,13 @@ import { requireHostDirectory } from "./deployment-config.js";
 
 export interface ServerLogLimits {
   maxBytes: number;
+  /** C-638: with `maxBytes`, only the byte budget of the whole directory. */
   maxFiles: number;
+  /** C-638: retained files older than this are removed; default 48 hours. */
+  retentionMs?: number;
 }
+
+export const DEFAULT_SERVER_LOG_RETENTION_MS = 48 * 60 * 60 * 1000;
 export type ServerLogAudit =
   | { status: "opened"; file_name: string }
   | { status: "failed"; reason: "io" | "capacity"; file_name?: string };
@@ -103,7 +108,9 @@ export class DeploymentServerLog {
       limits.maxBytes < 1 ||
       !Number.isSafeInteger(limits.maxFiles) ||
       limits.maxFiles < 1 ||
-      !Number.isSafeInteger(limits.maxBytes * limits.maxFiles)
+      !Number.isSafeInteger(limits.maxBytes * limits.maxFiles) ||
+      (limits.retentionMs !== undefined &&
+        (!Number.isSafeInteger(limits.retentionMs) || limits.retentionMs < 1))
     )
       this.fail("io");
     this.kick();
@@ -265,20 +272,33 @@ export class DeploymentServerLog {
           ? 1
           : a.name.localeCompare(b.name),
     );
+    // C-638: retention is by age, not by file count, so restarts (each a
+    // new, often small file) no longer push out recent history. The byte
+    // budget still bounds the directory: retained files plus the new one
+    // stay within `maxBytes * maxFiles`; the oldest go first when over.
+    const cutoff =
+      BigInt(
+        Date.now() -
+          (this.limits.retentionMs ?? DEFAULT_SERVER_LOG_RETENTION_MS),
+      ) * 1_000_000n;
+    // An empty file (a generation that never wrote) carries nothing.
     const retained = entries.filter(
-      (e) => e.stat.size <= BigInt(this.limits.maxBytes),
+      (e) =>
+        e.stat.size > 0n &&
+        e.stat.size <= BigInt(this.limits.maxBytes) &&
+        e.stat.mtimeNs >= cutoff,
     );
-    const remove = new Set(
-      retained
-        .slice(0, Math.max(0, retained.length - this.limits.maxFiles + 1))
-        .map((e) => e.name),
-    );
+    let bytes = retained.reduce((sum, e) => sum + e.stat.size, 0n);
+    const budget =
+      BigInt(this.limits.maxBytes) * BigInt(this.limits.maxFiles - 1);
+    const keep = new Set(retained.map((e) => e.name));
+    for (const entry of retained) {
+      if (bytes <= budget) break;
+      keep.delete(entry.name);
+      bytes -= entry.stat.size;
+    }
     for (const entry of entries)
-      if (
-        entry.stat.size > BigInt(this.limits.maxBytes) ||
-        remove.has(entry.name)
-      )
-        await unlink(join(directory, entry.name));
+      if (!keep.has(entry.name)) await unlink(join(directory, entry.name));
     this.fileName = `${this.prefix}-${String(this.segment++).padStart(16, "0")}.log`;
     this.file = await open(
       join(directory, this.fileName),

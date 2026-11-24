@@ -50,6 +50,7 @@ export interface HarnessOptions {
   readonly mergeGate?: WebServerOptions["mergeGate"];
   readonly clock?: WebServerOptions["clock"];
   readonly contextUsage?: WebServerOptions["contextUsage"];
+  readonly processRole?: WebServerOptions["processRole"];
   readonly log?: (event: Readonly<Record<string, unknown>>) => void;
   readonly env?: WebEnv;
   readonly overrides?: WebConfigOverrides;
@@ -110,6 +111,7 @@ export async function webHarness(
         }
       : {}),
     ...(options.contextUsage ? { contextUsage: options.contextUsage } : {}),
+    ...(options.processRole ? { processRole: options.processRole } : {}),
     ...(options.executionDiagnostics
       ? { executionDiagnostics: options.executionDiagnostics }
       : {}),

@@ -62,6 +62,20 @@ test("session maintenance alerts only PM; ordinary observations do not ring", ()
   ).toEqual([]);
 });
 
+test("C-613: role upgrades, overlay migrations and deferrals notify PM Ops", () => {
+  for (const type of [
+    "host_role_upgraded",
+    "host_role_overlay_migrated",
+    "host_role_upgrade_deferred",
+  ]) {
+    const result = routeEvent({
+      event: event(type, { role_id: "reviewer", notice: `${type} notice` }),
+      snapshot: snapshot(),
+    });
+    expect(recipients(result)).toEqual(["pm_ops"]);
+  }
+});
+
 test("D6: system risk classification requests missing independent review from PM Ops only", () => {
   const input = event(
     "auto_risk_tags_applied",

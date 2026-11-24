@@ -8054,3 +8054,99 @@ test("C-647: merge_solo in queue mode isolates the card without cutting off the 
     await gate.idle();
   }
 });
+
+async function mutexWaitingQueue(count: number) {
+  const h = await parallelGithub(count);
+  const cards = h.cards.map((c) => c.scenario.card.id);
+  setPriority(h.f, 4, required(cards[0]));
+  for (const card of cards.slice(1)) setPriority(h.f, 2, card);
+  const first = h.create();
+  await h.startPair(first);
+  const before = [h.check(0), h.check(1)];
+  first.stop();
+  await first.idle();
+  h.c.advance(true);
+  const gate = h.create();
+  const project = [h.f.project_id];
+  await vi.waitFor(async () => {
+    await gate.schedule(project);
+    expect(h.check(0).attempt_id).not.toBe(before[0]?.attempt_id);
+    expect(h.check(0).queue_wait?.reason).toBe("等待同卡检查释放互斥");
+  });
+  // The lower card's old run settles: every other card now ranks behind the
+  // first one, which still waits for its own mutex.
+  required(h.runs.get(required(before[1]?.external_run).run_id)).conclusion =
+    "cancelled";
+  h.advance();
+  await vi.waitFor(async () => {
+    h.advance(5000);
+    await gate.schedule(project);
+    for (let i = 1; i < count; i++)
+      expect(h.check(i).queue_wait?.reason).toBe(
+        "等待更高优先级的检查先取得名额",
+      );
+  });
+  await gate.idle();
+  return { h, gate };
+}
+
+/** Scans, state loads and per-card check reads of one author-check reservation. */
+async function reservationLoads(count: number) {
+  const { h, gate } = await mutexWaitingQueue(count);
+  const internals = MergeChecks.prototype as unknown as Record<
+    string,
+    (...args: unknown[]) => unknown
+  >;
+  const spies = {
+    scans: vi.spyOn(internals, "scanProject"),
+    states: vi.spyOn(internals, "state"),
+    cardChecks: vi.spyOn(internals, "cardCheck"),
+    capacity: vi.spyOn(internals, "capacity"),
+  };
+  try {
+    const reserved = await (
+      gate as unknown as {
+        reservePrecheck(settings: unknown): Promise<unknown>;
+      }
+    ).reservePrecheck(h.c.options.configuration.forProject());
+    return {
+      reserved,
+      waits: h.cards.map((_, i) => h.check(i).queue_wait?.reason),
+      ...Object.fromEntries(
+        Object.entries(spies).map(([name, spy]) => [
+          name,
+          spy.mock.calls.length,
+        ]),
+      ),
+    } as {
+      reserved: unknown;
+      waits: (string | undefined)[];
+    } & Record<keyof typeof spies, number>;
+  } finally {
+    for (const spy of Object.values(spies)) spy.mockRestore();
+    gate.stop();
+    await gate.idle();
+  }
+}
+
+test("C-651: one author-check reservation scans the queue once, so its loads grow linearly with the cards waiting", async () => {
+  const [small, large] = [await reservationLoads(3), await reservationLoads(6)];
+  for (const [loads, count] of [
+    [small, 3],
+    [large, 6],
+  ] as const) {
+    // The waiting merge work keeps the slot; nothing about the decision moved.
+    expect(loads.reserved).toBeUndefined();
+    expect(loads.waits).toEqual([
+      "等待同卡检查释放互斥",
+      ...Array(count - 1).fill("等待更高优先级的检查先取得名额"),
+    ]);
+    // Every card's capacity is asked once, all from the same single scan.
+    expect(loads.capacity).toBe(count);
+    expect(loads.scans).toBe(1);
+  }
+  // Before C-651 each capacity() rebuilt the queue: 3 → 6 cards took 3 → 6
+  // scans, 6 → 12 state loads and 9 → 27 per-card check reads.
+  expect(large.states).toBe(small.states);
+  expect(large.cardChecks).toBe(2 * small.cardChecks);
+});

@@ -19,6 +19,7 @@ import type {
   WorkItem,
 } from "@cardigan/domain";
 import {
+  attachmentReferenceIdsIn,
   authorView,
   autoMergeSchedule,
   builtinCardTemplates,
@@ -53,6 +54,7 @@ import {
   type Role,
   remoteExitAction,
   requiresUiStateAndSave,
+  resolvePendingAttachmentRefs,
   resolveReferences,
   roleKind,
   runAuthorView,
@@ -706,6 +708,62 @@ export function decisionAttachmentViews(
   });
 }
 
+/**
+ * C-615: other cards' attachments the card's bodies mention, so the browser
+ * can show them as chips. The current card's own attachments are already in
+ * `attachments`. An attachment of a sensitive card, or any other card while
+ * the project turned cross-card reading off, is left out like a missing one:
+ * the body keeps the number as text.
+ */
+export function referencedAttachmentViews(
+  state: CommandState,
+  card_id: CardId,
+  bodies: readonly string[],
+  attachmentEntryCards?: ReadonlyMap<string, CardId>,
+): (AttachmentView & { readonly card_id: string })[] {
+  // Each body is parsed on its own (V-3068): one comment's open code block
+  // must not hide the numbers of the next.
+  const ids = attachmentReferenceIdsIn(bodies);
+  if (!ids.length || projectPreferences(state).cross_card_read === false)
+    return [];
+  const entryCard = new Map([
+    ...(attachmentEntryCards ?? []),
+    ...state.timeline.map((entry) => [entry.id, entry.card_id] as const),
+  ]);
+  const owner = (attachment: Attachment): CardId | undefined => {
+    if (attachment.card_id) return attachment.card_id;
+    const target = attachment.attach_to;
+    if (target.kind === "timeline_entry") return entryCard.get(target.id);
+    const delivery = state.deliveries.find((d) => d.id === target.id);
+    return state.work_items.find((w) => w.id === delivery?.work_item_id)
+      ?.card_id;
+  };
+  const view = attachmentViewMapper(state);
+  // V-3070: the chip's file, thumbnail and preview go through the referencing
+  // card, which rechecks this rule on every read; a link kept on an open page
+  // stops working once the source card turns sensitive.
+  const base = `/api/projects/${encodeURIComponent(state.project_id)}/cards/${encodeURIComponent(card_id)}/attachment-refs`;
+  return ids.flatMap((id) => {
+    const attachment = state.attachments.find((a) => a.id === id);
+    if (!attachment || attachment.streamed_artifact?.expired) return [];
+    const card = owner(attachment);
+    if (!card || card === card_id) return [];
+    const other = state.cards.find((c) => c.id === card);
+    if (!other || other.sensitive) return [];
+    const plain = view(attachment);
+    const download_path = `${base}/${encodeURIComponent(attachment.id)}`;
+    return [
+      {
+        ...plain,
+        card_id: card,
+        download_path,
+        thumbnail_path: plain.thumbnail_path && `${download_path}/thumbnail`,
+        preview_path: plain.preview_path && `${download_path}/preview`,
+      },
+    ];
+  });
+}
+
 const SELECTION_EVENTS = new Set([
   "work_item_assigned",
   "machine_selected",
@@ -1016,8 +1074,15 @@ export function cardDetail(
               r.work_item_id === entry.work_item_id,
           )?.id
         : undefined;
+    // C-615: a comment's `attachment-new-N` reads as the number it got.
+    const body = resolvePendingAttachmentRefs(
+      entry.body,
+      entry,
+      state.attachments,
+    );
     return {
       ...entry,
+      body,
       ...webAuthorView(state, entry.author),
       event_type: event?.type ?? null,
       ...(event?.type === "merge_check_blocked"
@@ -1059,7 +1124,7 @@ export function cardDetail(
         ? (roles.get(entry.author.slice(11)) ?? null)
         : null,
       ...(review_id ? { review_id } : {}),
-      references: references(entry.body),
+      references: references(body),
     };
   };
   const source = card.source;
@@ -1201,6 +1266,18 @@ export function cardDetail(
     })),
     attachments: timeRead(options.recordTiming, "attachment_views", () =>
       attachmentViews(state, card_id, options.attachmentEntryCards),
+    ),
+    referenced_attachments: referencedAttachmentViews(
+      state,
+      card_id,
+      [
+        card.title,
+        card.goal,
+        ...card.acceptance_criteria,
+        ...card.out_of_scope,
+        ...timeline.map((e) => e.body),
+      ],
+      options.attachmentEntryCards,
     ),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.
     relations: {

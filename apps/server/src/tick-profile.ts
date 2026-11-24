@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import type { StoreObserver } from "@cardigan/store";
+import { currentActivity, trackActivity } from "./activity.js";
 
 /**
  * C-216: opt-in measurement of the periodic loops (dispatcher, merge, cleanup,
@@ -11,9 +12,18 @@ import type { StoreObserver } from "@cardigan/store";
  * pass-through. Output carries loop names, span names and numbers only — never
  * SQL, card text, prompts, tokens or request bodies. C-265: every line also
  * carries `ts` (ISO time) and `sha` (the running release commit, or
- * "unknown"), so a window can be cut by time and version.
+ * "unknown"), so a window can be cut by time and version. C-638: ticks are
+ * also split by project, and SQLite write-lock waits and holds are
+ * summarized by operation (`lock_profile`); project ids and names only.
  */
 export type ProfileLine = Readonly<Record<string, unknown>>;
+
+interface ProjectSample {
+  wallMs: number;
+  uowMs: number;
+  uowCount: number;
+  lockWaitMs: number;
+}
 
 interface TickSample {
   uowMs: number;
@@ -21,7 +31,17 @@ interface TickSample {
   uowMaxMs: number;
   stateMs: number;
   stateCount: number;
+  /** C-638: SQLite write-lock wait inside `uowMs`. */
+  lockWaitMs: number;
   readonly spans: Map<string, number>;
+  readonly projects: Map<string, ProjectSample>;
+}
+
+interface LockSamples {
+  readonly op: string;
+  readonly wait: number[];
+  readonly hold: number[];
+  timeouts: number;
 }
 
 interface Latencies {
@@ -46,6 +66,9 @@ function summary(values: readonly number[]) {
     max_ms: round(sorted[sorted.length - 1] ?? 0),
   };
 }
+
+const total = (values: readonly number[]) =>
+  round(values.reduce((sum, v) => sum + v, 0));
 
 export interface TickProfilerOptions {
   readonly log: (line: ProfileLine) => void;
@@ -74,10 +97,14 @@ export const tickStoreObserver: Required<StoreObserver> = {
   transaction: (kind, ms) =>
     owner.getStore()?.storeObserver.transaction(kind, ms),
   stateBuild: (ms) => owner.getStore()?.storeObserver.stateBuild(ms),
+  // C-638: requests have no owning tick; their locks go to the current one.
+  writeLock: (waitMs, holdMs) =>
+    (owner.getStore() ?? current)?.storeObserver.writeLock(waitMs, holdMs),
 };
 
 export class TickProfiler {
   readonly #als = new AsyncLocalStorage<TickSample>();
+  readonly #project = new AsyncLocalStorage<ProjectSample>();
   readonly #log: (line: ProfileLine) => void;
   readonly #resolution: number;
   readonly #window: ReturnType<typeof monitorEventLoopDelay>;
@@ -85,6 +112,7 @@ export class TickProfiler {
   #active = new Map<string, number>();
   #lastTickEnd = Number.NEGATIVE_INFINITY;
   #requests = new Map<string, Latencies>();
+  #locks = new Map<string, LockSamples>();
   #inFlight = 0;
   #retired: (() => void) | undefined;
   #finished = false;
@@ -112,6 +140,11 @@ export class TickProfiler {
       sample.uowMs += ms;
       sample.uowCount++;
       if (ms > sample.uowMaxMs) sample.uowMaxMs = ms;
+      const project = this.#project.getStore();
+      if (project) {
+        project.uowMs += ms;
+        project.uowCount++;
+      }
     },
     stateBuild: (ms) => {
       const sample = this.#als.getStore();
@@ -119,7 +152,32 @@ export class TickProfiler {
       sample.stateMs += ms;
       sample.stateCount++;
     },
+    writeLock: (waitMs, holdMs) => {
+      const sample = this.#als.getStore();
+      if (sample) sample.lockWaitMs += waitMs;
+      const project = this.#project.getStore();
+      if (project) project.lockWaitMs += waitMs;
+      this.#writeLock(waitMs, holdMs);
+    },
   };
+
+  /**
+   * C-638: one SQLite write-lock use, grouped by the current loop or request
+   * (`currentActivity`), else "other". The repository lock has its own
+   * always-on `repository_lock` lines (C-636).
+   */
+  #writeLock(waitMs: number, holdMs: number | undefined): void {
+    if (this.#finished) return;
+    const op = currentActivity()?.name ?? "other";
+    let samples = this.#locks.get(op);
+    if (!samples) {
+      samples = { op, wait: [], hold: [], timeouts: 0 };
+      this.#locks.set(op, samples);
+    }
+    samples.wait.push(waitMs);
+    if (holdMs === undefined) samples.timeouts++;
+    else samples.hold.push(holdMs);
+  }
 
   /** Loops whose tick is running right now. */
   activeLoops(): string[] {
@@ -133,7 +191,9 @@ export class TickProfiler {
       uowMaxMs: 0,
       stateMs: 0,
       stateCount: 0,
+      lockWaitMs: 0,
       spans: new Map(),
+      projects: new Map(),
     };
     // Event-loop utilization over the tick: 1.0 means the loop never got to
     // serve a timer or socket while this tick ran (it may include other
@@ -157,6 +217,7 @@ export class TickProfiler {
         uow_max_ms: round(sample.uowMaxMs),
         state_build_ms: round(sample.stateMs),
         state_builds: sample.stateCount,
+        uow_lock_wait_ms: round(sample.lockWaitMs),
         // Wall time outside UnitOfWork: awaited IO (Git/subprocess, runtime,
         // files, timers) plus unattributed synchronous code between them.
         outside_uow_ms: round(Math.max(0, wall - sample.uowMs)),
@@ -167,6 +228,21 @@ export class TickProfiler {
           ? {
               spans: Object.fromEntries(
                 [...sample.spans].map(([k, v]) => [k, round(v)]),
+              ),
+            }
+          : {}),
+        ...(sample.projects.size
+          ? {
+              projects: Object.fromEntries(
+                [...sample.projects].map(([id, p]) => [
+                  id,
+                  {
+                    wall_ms: round(p.wallMs),
+                    uow_ms: round(p.uowMs),
+                    uow_count: p.uowCount,
+                    uow_lock_wait_ms: round(p.lockWaitMs),
+                  },
+                ]),
               ),
             }
           : {}),
@@ -189,6 +265,45 @@ export class TickProfiler {
           (sample.spans.get(name) ?? 0) + performance.now() - started,
         );
     }
+  }
+
+  /**
+   * C-638: attribute a part of the current tick to `project`; wall time and
+   * UnitOfWork time add up per project on the `tick_profile` line. Nested
+   * calls for the same project count once.
+   */
+  async project<T>(project: string, run: () => Promise<T> | T): Promise<T> {
+    const entry = this.#enterProject(project);
+    if (!entry) return run();
+    const started = performance.now();
+    try {
+      return await this.#project.run(entry, run);
+    } finally {
+      entry.wallMs += performance.now() - started;
+    }
+  }
+
+  /** Synchronous `project`: adds no await. */
+  projectSync<T>(project: string, run: () => T): T {
+    const entry = this.#enterProject(project);
+    if (!entry) return run();
+    const started = performance.now();
+    try {
+      return this.#project.run(entry, run);
+    } finally {
+      entry.wallMs += performance.now() - started;
+    }
+  }
+
+  #enterProject(project: string): ProjectSample | undefined {
+    const sample = this.#als.getStore();
+    if (!sample) return undefined;
+    let entry = sample.projects.get(project);
+    if (!entry) {
+      entry = { wallMs: 0, uowMs: 0, uowCount: 0, lockWaitMs: 0 };
+      sample.projects.set(project, entry);
+    }
+    return this.#project.getStore() === entry ? undefined : entry;
   }
 
   /** Synchronous `span`: adds no await, so callers keep their interleaving. */
@@ -237,6 +352,16 @@ export class TickProfiler {
         idle: summary(bucket.idle),
       });
     this.#requests.clear();
+    for (const samples of this.#locks.values())
+      this.#log({
+        event: "lock_profile",
+        lock: "sqlite",
+        op: samples.op,
+        ...(samples.timeouts ? { timeouts: samples.timeouts } : {}),
+        wait: { ...summary(samples.wait), total_ms: total(samples.wait) },
+        hold: { ...summary(samples.hold), total_ms: total(samples.hold) },
+      });
+    this.#locks.clear();
   }
 
   stop(): void {
@@ -296,10 +421,16 @@ export function clearTickProfileSync(hook: () => void): void {
   if (sync === hook) sync = undefined;
 }
 
-/** Pass-through unless profiling is on. */
+/**
+ * Pass-through unless profiling is on. C-638: the tick is always tracked as
+ * a running activity, so a stall names it even with profiling off.
+ */
 export function profileTick<T>(loop: string, run: () => Promise<T>) {
   sync?.();
-  return current ? current.tick(loop, run) : run();
+  const profiler = current;
+  return trackActivity("loop", loop, () =>
+    profiler ? profiler.tick(loop, run) : run(),
+  );
 }
 
 export function profileSpan<T>(
@@ -314,6 +445,21 @@ export function profileSpan<T>(
 export function profileSpanSync<T>(name: string, run: () => T): T {
   const profiler = owner.getStore() ?? current;
   return profiler ? profiler.spanSync(name, run) : run();
+}
+
+/** C-638: pass-through unless the running tick is profiled; see `project`. */
+export function profileProject<T>(
+  project: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const profiler = owner.getStore();
+  return profiler ? profiler.project(project, run) : run();
+}
+
+/** Synchronous `profileProject`; never yields to the event loop. */
+export function profileProjectSync<T>(project: string, run: () => T): T {
+  const profiler = owner.getStore();
+  return profiler ? profiler.projectSync(project, run) : run();
 }
 
 /** `CARDIGAN_TICK_PROFILE=1` turns measurement on; anything else keeps it off. */

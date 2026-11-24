@@ -131,7 +131,12 @@ import {
   repositoryCheckWait,
   repositoryRetryDelays,
 } from "./repository-check-wait.js";
-import { profileSpan, profileSpanSync, tickProfiler } from "./tick-profile.js";
+import {
+  profileProject,
+  profileSpan,
+  profileSpanSync,
+  tickProfiler,
+} from "./tick-profile.js";
 
 class StaleCheckTarget extends CheckExecutorSuspended {}
 /** C-609: fixed summary when central main moved under a queued or running check. */
@@ -214,6 +219,23 @@ interface Task {
   /** Admission hint from the task scan, revalidated under the writer lock. */
   publishable?: boolean;
 }
+
+/**
+ * C-651: one synchronous scheduling decision. Each project is scanned once,
+ * each project set is ranked once, and the admitted dispatch journal, executor
+ * backoff and every task's slot need are read once; all capacity()/ahead()
+ * calls in the decision share them. Never held across an await: a wait
+ * recorded inside a pass only adds a queue reason; it changes neither the
+ * task list nor which work needs a slot.
+ */
+interface MergePass {
+  readonly scans: Map<ProjectId, readonly Task[]>;
+  readonly ranked: Map<string, readonly Task[]>;
+  readonly slotNeeds: Map<readonly GithubDispatchIntent[], Map<Task, boolean>>;
+  admitted?: GithubDispatchIntent[];
+  backoff?: (task: Task) => boolean;
+}
+const NO_INTENTS: readonly GithubDispatchIntent[] = [];
 
 function repositoryTarget(task: Task): RepositoryTarget {
   return (
@@ -298,6 +320,7 @@ export class MergeChecks {
   private readonly repositoryCalls: RepositoryCheckCalls;
   private readonly lockBackoff: readonly number[];
   private readonly gitPasses = new Map<string, Promise<void>>();
+  private pass: MergePass | undefined;
   private readonly prepared = new Map<
     string,
     { key: string; value: PreparedMerge }
@@ -401,11 +424,27 @@ export class MergeChecks {
     await this.prechecks.idle();
     await Promise.all(this.polling);
   }
+  /** C-651: run one synchronous scheduling decision on a single shared view. */
+  private within<T>(decide: () => T): T {
+    if (this.pass) return decide();
+    this.pass = { scans: new Map(), ranked: new Map(), slotNeeds: new Map() };
+    try {
+      return decide();
+    } finally {
+      this.pass = undefined;
+    }
+  }
+  private admitted(): GithubDispatchIntent[] {
+    if (this.pass?.admitted) return this.pass.admitted;
+    const admitted = new GithubDispatchJournal(this.options.store).admitted();
+    if (this.pass) this.pass.admitted = admitted;
+    return admitted;
+  }
   private async serial<T>(project: string, work: () => Promise<T>): Promise<T> {
     const writer = this.writers.get(project) ?? new MergeMutex();
     this.writers.set(project, writer);
     try {
-      return await writer.run(work);
+      return await writer.run(() => profileProject(project, work));
     } finally {
       if (!writer.busy && this.writers.get(project) === writer)
         this.writers.delete(project);
@@ -1105,24 +1144,25 @@ export class MergeChecks {
       release: () => {
         if (released) return;
         released = true;
-        const ranked = held.waiting
-          .map((waiter) => {
+        // C-651: waiters of one project share a single task scan.
+        const ranked = this.within(() =>
+          held.waiting.map((waiter) => {
             try {
               return { waiter, task: waiter.next() };
             } catch (error) {
               this.report(error);
               return { waiter, task: undefined };
             }
-          })
-          .sort((a, b) =>
-            a.task && b.task
-              ? this.compare(a.task, b.task)
-              : a.task
-                ? -1
-                : b.task
-                  ? 1
-                  : 0,
-          );
+          }),
+        ).sort((a, b) =>
+          a.task && b.task
+            ? this.compare(a.task, b.task)
+            : a.task
+              ? -1
+              : b.task
+                ? 1
+                : 0,
+        );
         held.waiting = ranked.map(({ waiter }) => waiter);
         const next = held.waiting.shift();
         if (next) next.wake(taken);
@@ -1134,6 +1174,14 @@ export class MergeChecks {
   private async reservePrecheck(settings: Settings) {
     const target = settings.executor;
     if (!target || this.abort.signal.aborted) return;
+    const limit = target.type === "github" ? target.maxConcurrent : 1;
+    if (!this.within(() => this.precheckSlotFree(target, limit))) return;
+    return this.slot({ settings }, () => undefined);
+  }
+  private precheckSlotFree(
+    target: NonNullable<Settings["executor"]>,
+    limit: number,
+  ): boolean {
     const tasks = this.tasks(
       this.options.store.listProjects().map((p) => p.id),
     );
@@ -1154,19 +1202,13 @@ export class MergeChecks {
         );
       })
     )
-      return;
-    const limit = target.type === "github" ? target.maxConcurrent : 1;
+      return false;
     // C-647: merge work still waiting for a slot (for example on the same-card
     // mutex after a restart) keeps its capacity ahead of author checks.
-    const intents =
-      target.type === "github"
-        ? new GithubDispatchJournal(this.options.store).admitted()
-        : [];
+    const intents = target.type === "github" ? this.admitted() : NO_INTENTS;
     const backoff = this.backoff();
-    const pending = tasks.filter(
-      (task) =>
-        (task.settings.executor?.name ?? LOCAL_EXECUTOR) === target.name &&
-        this.needsSlot(task, intents, backoff),
+    const pending = this.tasks(this.executorProjects(target.name)).filter(
+      (task) => this.waitsForSlot(task, intents, backoff),
     ).length;
     if (
       pending &&
@@ -1174,15 +1216,13 @@ export class MergeChecks {
         pending >=
         limit
     )
-      return;
+      return false;
     const pool = this.slots.get(target.name);
-    if (
+    return !(
       pool?.waiting.length ||
       (pool?.used.filter(Boolean).length ?? 0) >= limit ||
       !mergeCheckCapacityAvailable(this.options.store, target.name, limit)
-    )
-      return;
-    return this.slot({ settings }, () => undefined);
+    );
   }
   /** Persist only actual waits; observations never acquire or release capacity. */
   private waiting(task: Task, reason: string, check?: MergeCheckView): false {
@@ -1255,6 +1295,9 @@ export class MergeChecks {
     return "本地候选发布未结算，待恢复";
   }
   private capacity(task: Task): boolean {
+    return this.within(() => this.admits(task));
+  }
+  private admits(task: Task): boolean {
     if (task.repositoryCooling) return false;
     if (this.fenced(task.project.project_id))
       return this.waiting(task, "等待检查移交恢复准入");
@@ -1271,9 +1314,7 @@ export class MergeChecks {
         (this.github.get(executor.name)?.retryAt ?? 0)
       )
         return this.waiting(task, "等待 GitHub API 限额恢复");
-      const unfinished = new GithubDispatchJournal(
-        this.options.store,
-      ).admitted();
+      const unfinished = this.admitted();
       const inFlight = unfinished.filter(
         (intent) => intent.executor === executor.name,
       );
@@ -1327,7 +1368,7 @@ export class MergeChecks {
     if (
       executor &&
       executor.type !== "github" &&
-      this.ahead(task, executor.name, []) > 0
+      this.ahead(task, executor.name, NO_INTENTS) > 0
     )
       return this.waiting(task, PRIORITY_WAIT);
     return true;
@@ -1340,13 +1381,32 @@ export class MergeChecks {
    * is not handed to lower-ranked work meanwhile. A task whose current attempt
    * already owns a dispatch intent is counted in flight, not here. Cooling,
    * held, failed and passed work needs no slot now and reserves nothing.
+   *
+   * C-651: a task waiting for its same-card mutex is counted twice on purpose:
+   * its older intent is a run still occupying the executor (in flight), and
+   * its new attempt keeps one more slot for when that run ends. This only
+   * lengthens the wait of lower-ranked work; it never admits more than
+   * `max_concurrent`. Dropping either count would let lower-ranked work take
+   * the slot the waiting card needs next (C-647, 11-23 18:04).
    */
   private ahead(
     task: Task,
     executor: string,
     intents: readonly GithubDispatchIntent[],
   ): number {
-    const projects = this.options.store
+    const key = this.key(task);
+    const backoff = this.backoff();
+    let count = 0;
+    // Ranked by `compare`: everything before `task` outranks it.
+    for (const other of this.tasks(this.executorProjects(executor))) {
+      if (this.compare(other, task) >= 0) break;
+      if (this.key(other) !== key && this.waitsForSlot(other, intents, backoff))
+        count++;
+    }
+    return count;
+  }
+  private executorProjects(executor: string): ProjectId[] {
+    return this.options.store
       .listProjects()
       .map((p) => p.id)
       .filter((id) => {
@@ -1356,20 +1416,30 @@ export class MergeChecks {
           (settings.executor?.name ?? LOCAL_EXECUTOR) === executor
         );
       });
-    const key = this.key(task);
-    const backoff = this.backoff();
-    return this.tasks(projects).filter(
-      (other) =>
-        this.key(other) !== key &&
-        this.compare(other, task) < 0 &&
-        this.needsSlot(other, intents, backoff),
-    ).length;
+  }
+  /** C-651: `needsSlot`, evaluated once per task and intent view in a pass. */
+  private waitsForSlot(
+    task: Task,
+    intents: readonly GithubDispatchIntent[],
+    backoff: (task: Task) => boolean,
+  ): boolean {
+    let needs = this.pass?.slotNeeds.get(intents);
+    if (this.pass && !needs) {
+      needs = new Map();
+      this.pass.slotNeeds.set(intents, needs);
+    }
+    const known = needs?.get(task);
+    if (known !== undefined) return known;
+    const result = this.needsSlot(task, intents, backoff);
+    needs?.set(task, result);
+    return result;
   }
   /** A project's own executor backoff keeps its work out of every slot. */
   private backoff(): (task: Task) => boolean {
+    if (this.pass?.backoff) return this.pass.backoff;
     const seen = new Map<string, boolean>();
     const now = Date.parse(this.options.clock.now());
-    return (task) => {
+    const backoff = (task: Task) => {
       const executor = task.settings.executor?.name;
       if (!executor) return false;
       const id = `${task.project.project_id}/${executor}`;
@@ -1384,6 +1454,8 @@ export class MergeChecks {
       }
       return cooling;
     };
+    if (this.pass) this.pass.backoff = backoff;
+    return backoff;
   }
   private needsSlot(
     task: Task,
@@ -2420,7 +2492,7 @@ export class MergeChecks {
   }
   private async startCards(projects: readonly ProjectId[]): Promise<void> {
     if (this.abort.signal.aborted || !projects.length) return;
-    let tasks: Task[];
+    let tasks: readonly Task[];
     try {
       tasks = profileSpanSync("merge.tasks", () => this.tasks(projects));
     } catch (error) {
@@ -2641,211 +2713,223 @@ export class MergeChecks {
   private key(task: Task): string {
     return `${task.project.project_id}/${task.batch?.id ?? task.plan.card_id}`;
   }
-  private tasks(projects: readonly ProjectId[]): Task[] {
+  /** Merge work of `projects` ranked by `compare`; once per pass (C-651). */
+  private tasks(projects: readonly ProjectId[]): readonly Task[] {
+    const key = projects.join("\0");
+    const cached = this.pass?.ranked.get(key);
+    if (cached) return cached;
+    const ranked = projects
+      .flatMap((id) => this.projectTasks(id))
+      .sort((a, b) => this.compare(a, b));
+    this.pass?.ranked.set(key, ranked);
+    return ranked;
+  }
+  private projectTasks(id: ProjectId): readonly Task[] {
+    const cached = this.pass?.scans.get(id);
+    if (cached) return cached;
+    const tasks = this.scanProject(id);
+    this.pass?.scans.set(id, tasks);
+    return tasks;
+  }
+  private scanProject(id: ProjectId): Task[] {
     const tasks: Task[] = [];
-    for (const id of projects) {
-      if (this.fenced(id)) {
-        // A fenced project never reaches capacity()/execute(). Observe its
-        // existing queue without preparing candidates or admitting any work.
-        const state = this.state(id);
-        const awaiting = new Set(
-          state.cards
-            .filter((c) => c.status === "awaiting_merge")
-            .map((c) => c.id),
-        );
-        const items = new Map(state.work_items.map((w) => [w.id, w.card_id]));
-        for (const completion of state.deliveries) {
-          const card = items.get(completion.work_item_id);
-          if (
-            completion.kind !== "card_completion" ||
-            completion.status !== "accepted" ||
-            !card ||
-            !awaiting.has(card)
-          )
-            continue;
-          this.waitingFor(id, card, completion.id, "等待检查移交恢复准入");
-        }
-        continue;
-      }
-      const settings = this.options.configuration.forProject(id),
-        project = this.options.git.projectOf(id);
-      if (settings.status !== "disabled")
-        this.command(id, (s, a, p) =>
-          recordMergeCheckBlockers(
-            s,
-            a,
-            settings.status === "invalid" ||
-              (settings.status === "enabled" &&
-                settings.executor?.type === "github" &&
-                (!this.options.git.pushCheckCandidate ||
-                  !this.options.git.isBaselineAncestor))
-              ? { unavailable: "configuration" }
-              : !project
-                ? { unavailable: "repository" }
-                : {},
-            p,
-          ),
-        );
-      if (settings.status !== "enabled" || !project) continue;
-      if (
-        settings.executor?.type === "github" &&
-        (!this.options.git.pushCheckCandidate ||
-          !this.options.git.isBaselineAncestor)
-      )
-        continue;
+    if (this.fenced(id)) {
+      // A fenced project never reaches capacity()/execute(). Observe its
+      // existing queue without preparing candidates or admitting any work.
       const state = this.state(id);
-      const observeCooldown = (
-        check: MergeCheckView | undefined,
-        target: RepositoryTarget,
-      ) => {
-        const { retryAt, timeouts } = repositoryCheckWait(
-          state.events,
-          check,
-          target,
-        );
-        const batch = "members" in target ? target : undefined;
-        const cooling =
-          retryAt !== undefined &&
-          Date.parse(this.options.clock.now()) < Date.parse(retryAt);
-        const card = repositoryCard(target);
-        if (cooling && card && check) {
-          const reason = repositoryWaitReason(timeouts, retryAt);
-          // A regrouped attempt can inherit a deadline without making a call.
-          // Report the existing wait; do not charge another repository timeout.
-          const wait = batch
-            ? batchQueueWait(state.events, batch)
-            : check.queue_wait;
-          if (wait?.reason !== reason)
-            this.waitingFor(
-              id,
-              card,
-              check.completion_id,
-              reason,
-              check,
-              batch?.id,
-            );
-        }
-        return cooling;
-      };
-      if (settings.queue) {
-        for (const batch of mergeBatches(state.events).filter(
-          (b) => b.status === "checking",
-        )) {
-          const last = batch.members.at(-1);
-          const plan = last && mergePlan(state, last.card_id);
-          if (plan?.ok)
-            tasks.push({
-              ...branchView(project, plan.value),
-              plan: plan.value,
-              settings,
-              batch,
-              repositoryCooling: observeCooldown(batch.check, batch),
-              entered: batch.formed_at,
-              priority: batch.priority,
-            });
-        }
-      }
       const awaiting = new Set(
         state.cards
           .filter((c) => c.status === "awaiting_merge")
           .map((c) => c.id),
       );
-      this.skips.retain(id, awaiting);
-      this.publishSkips.retain(id, awaiting);
-      for (const card of state.cards) {
-        if (card.status !== "awaiting_merge") continue;
-        const plan = prepareMergePlan(state, card.id);
-        if (!plan.ok) {
-          this.skips.skipped(id, card.id, plan.error);
-          continue;
-        }
+      const items = new Map(state.work_items.map((w) => [w.id, w.card_id]));
+      for (const completion of state.deliveries) {
+        const card = items.get(completion.work_item_id);
         if (
-          settings.queue &&
-          passedCardCheck(state.events, card.id, plan.value.completion_id)
+          completion.kind !== "card_completion" ||
+          completion.status !== "accepted" ||
+          !card ||
+          !awaiting.has(card)
         )
           continue;
-        const check = latestMergeCheck(
-          state.events,
-          card.id,
-          plan.value.completion_id,
-        );
-        if (
-          card.hold &&
-          check?.status !== "running" &&
-          !check?.external_run &&
-          !new GithubDispatchJournal(this.options.store)
-            .unfinished()
-            .some(
-              (i) =>
-                i.project === id &&
-                i.card === card.id &&
-                i.attempt === check?.attempt_id &&
-                i.phase === "dispatching",
-            )
-        ) {
+        this.waitingFor(id, card, completion.id, "等待检查移交恢复准入");
+      }
+      return tasks;
+    }
+    const settings = this.options.configuration.forProject(id),
+      project = this.options.git.projectOf(id);
+    if (settings.status !== "disabled")
+      this.command(id, (s, a, p) =>
+        recordMergeCheckBlockers(
+          s,
+          a,
+          settings.status === "invalid" ||
+            (settings.status === "enabled" &&
+              settings.executor?.type === "github" &&
+              (!this.options.git.pushCheckCandidate ||
+                !this.options.git.isBaselineAncestor))
+            ? { unavailable: "configuration" }
+            : !project
+              ? { unavailable: "repository" }
+              : {},
+          p,
+        ),
+      );
+    if (settings.status !== "enabled" || !project) return tasks;
+    if (
+      settings.executor?.type === "github" &&
+      (!this.options.git.pushCheckCandidate ||
+        !this.options.git.isBaselineAncestor)
+    )
+      return tasks;
+    const state = this.state(id);
+    const observeCooldown = (
+      check: MergeCheckView | undefined,
+      target: RepositoryTarget,
+    ) => {
+      const { retryAt, timeouts } = repositoryCheckWait(
+        state.events,
+        check,
+        target,
+      );
+      const batch = "members" in target ? target : undefined;
+      const cooling =
+        retryAt !== undefined &&
+        Date.parse(this.options.clock.now()) < Date.parse(retryAt);
+      const card = repositoryCard(target);
+      if (cooling && card && check) {
+        const reason = repositoryWaitReason(timeouts, retryAt);
+        // A regrouped attempt can inherit a deadline without making a call.
+        // Report the existing wait; do not charge another repository timeout.
+        const wait = batch
+          ? batchQueueWait(state.events, batch)
+          : check.queue_wait;
+        if (wait?.reason !== reason)
           this.waitingFor(
             id,
-            card.id,
-            plan.value.completion_id,
-            "卡片已暂停，等待恢复检查",
+            card,
+            check.completion_id,
+            reason,
+            check,
+            batch?.id,
           );
-          continue;
-        }
-        // A1b applies to legacy cards too: advancing main cannot retry a
-        // failed current completion. Only explicit recheck/new completion can.
-        if (
-          check &&
-          ["failed", "timed_out"].includes(check.status) &&
-          !check.recheck_requested
-        )
-          continue;
-        this.skips.ready(id, card.id);
-        const completion = state.deliveries.find(
-          (v) => v.id === plan.value.completion_id,
-        );
-        const template = cardTemplate(card, state.card_templates);
-        // A validated system completion without an acceptance work item enters
-        // the queue when submitted. No synthetic Review is needed or created.
-        const systemCompleted =
-          flowAtLeast(card, 5) &&
-          completion?.status === "accepted" &&
-          !!completion.system_completion &&
-          completion.requested_verifiers.length === 0 &&
-          template?.completion.mode === "review" &&
-          template.completion.reviewer === "system";
-        const entered = state.events
-          .filter(
-            (e) =>
-              e.card_id === card.id &&
-              (["review_submitted", "review_reused"].includes(e.type) ||
-                (systemCompleted &&
-                  e.type === "delivery_submitted" &&
-                  e.actor.kind === "system")) &&
-              (e.payload as { delivery_id?: string } | null)?.delivery_id ===
-                plan.value.completion_id,
-          )
-          .at(-1)?.created_at;
-        if (!entered) {
-          this.options.onError(
-            new Error("待合并卡片缺少完成审核或系统完成事件"),
-          );
-          continue;
-        }
-        tasks.push({
-          ...branchView(project, plan.value),
-          plan: plan.value,
-          settings,
-          entered,
-          repositoryCooling: observeCooldown(check, {
-            project_id: id,
-            card_id: card.id,
-          }),
-          publishable: !settings.queue && check?.status === "passed",
-          priority: card.priority,
-        });
+      }
+      return cooling;
+    };
+    if (settings.queue) {
+      for (const batch of mergeBatches(state.events).filter(
+        (b) => b.status === "checking",
+      )) {
+        const last = batch.members.at(-1);
+        const plan = last && mergePlan(state, last.card_id);
+        if (plan?.ok)
+          tasks.push({
+            ...branchView(project, plan.value),
+            plan: plan.value,
+            settings,
+            batch,
+            repositoryCooling: observeCooldown(batch.check, batch),
+            entered: batch.formed_at,
+            priority: batch.priority,
+          });
       }
     }
-    return tasks.sort((a, b) => this.compare(a, b));
+    const awaiting = new Set(
+      state.cards.filter((c) => c.status === "awaiting_merge").map((c) => c.id),
+    );
+    this.skips.retain(id, awaiting);
+    this.publishSkips.retain(id, awaiting);
+    for (const card of state.cards) {
+      if (card.status !== "awaiting_merge") continue;
+      const plan = prepareMergePlan(state, card.id);
+      if (!plan.ok) {
+        this.skips.skipped(id, card.id, plan.error);
+        continue;
+      }
+      if (
+        settings.queue &&
+        passedCardCheck(state.events, card.id, plan.value.completion_id)
+      )
+        continue;
+      const check = latestMergeCheck(
+        state.events,
+        card.id,
+        plan.value.completion_id,
+      );
+      if (
+        card.hold &&
+        check?.status !== "running" &&
+        !check?.external_run &&
+        !new GithubDispatchJournal(this.options.store)
+          .unfinished()
+          .some(
+            (i) =>
+              i.project === id &&
+              i.card === card.id &&
+              i.attempt === check?.attempt_id &&
+              i.phase === "dispatching",
+          )
+      ) {
+        this.waitingFor(
+          id,
+          card.id,
+          plan.value.completion_id,
+          "卡片已暂停，等待恢复检查",
+        );
+        continue;
+      }
+      // A1b applies to legacy cards too: advancing main cannot retry a
+      // failed current completion. Only explicit recheck/new completion can.
+      if (
+        check &&
+        ["failed", "timed_out"].includes(check.status) &&
+        !check.recheck_requested
+      )
+        continue;
+      this.skips.ready(id, card.id);
+      const completion = state.deliveries.find(
+        (v) => v.id === plan.value.completion_id,
+      );
+      const template = cardTemplate(card, state.card_templates);
+      // A validated system completion without an acceptance work item enters
+      // the queue when submitted. No synthetic Review is needed or created.
+      const systemCompleted =
+        flowAtLeast(card, 5) &&
+        completion?.status === "accepted" &&
+        !!completion.system_completion &&
+        completion.requested_verifiers.length === 0 &&
+        template?.completion.mode === "review" &&
+        template.completion.reviewer === "system";
+      const entered = state.events
+        .filter(
+          (e) =>
+            e.card_id === card.id &&
+            (["review_submitted", "review_reused"].includes(e.type) ||
+              (systemCompleted &&
+                e.type === "delivery_submitted" &&
+                e.actor.kind === "system")) &&
+            (e.payload as { delivery_id?: string } | null)?.delivery_id ===
+              plan.value.completion_id,
+        )
+        .at(-1)?.created_at;
+      if (!entered) {
+        this.options.onError(new Error("待合并卡片缺少完成审核或系统完成事件"));
+        continue;
+      }
+      tasks.push({
+        ...branchView(project, plan.value),
+        plan: plan.value,
+        settings,
+        entered,
+        repositoryCooling: observeCooldown(check, {
+          project_id: id,
+          card_id: card.id,
+        }),
+        publishable: !settings.queue && check?.status === "passed",
+        priority: card.priority,
+      });
+    }
+    return tasks;
   }
   private compare(a: Task, b: Task): number {
     return (

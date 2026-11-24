@@ -1,7 +1,9 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { expect, test } from "vitest";
 import { verifiedLocalLaunch } from "./run-resource-worker.js";
 
@@ -39,3 +41,19 @@ test("local startup runs only the bytes authenticated by runtime argv; credentia
     rmSync(base, { force: true, recursive: true });
   }
 });
+
+// C-656: private TMPDIR, scope stop of setsid descendants, waiter and sweeps.
+// The scope part runs only where a systemd user manager is reachable.
+test.skipIf(process.platform !== "linux")(
+  "local sessions get a private TMPDIR that is reaped with every process left in the session",
+  async () => {
+    const fixture = fileURLToPath(
+      new URL("../../../test-support/run-session.py", import.meta.url),
+    );
+    const result = await promisify(execFile)("python3", ["-IB", fixture], {
+      timeout: 85_000,
+    });
+    expect(result.stdout).toContain("session lifecycle passed");
+  },
+  90_000,
+);

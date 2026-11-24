@@ -1,5 +1,6 @@
 import type { SQLInputValue } from "node:sqlite";
 import {
+  attachmentRefMatches,
   type CommandState,
   extractReferences,
   type ProjectId,
@@ -368,6 +369,31 @@ export function withReferences(
     readDocs(store, state.project_id, table, inIds("id"), [
       JSON.stringify(ids),
     ]);
+  // C-615: `attachment-N` in a body, with the card it belongs to, so its
+  // sensitivity can be checked before the browser gets its metadata.
+  // `text` joins many bodies, so code is not masked here (one body's open
+  // fence would hide the rest): this only loads candidates, and
+  // `referencedAttachmentViews` decides per body which ones are references.
+  const attachmentIds = [
+    ...new Set(
+      attachmentRefMatches(text, { literals: false })
+        .filter((m) => !m.pending)
+        .map((m) => m.token),
+    ),
+  ];
+  if (attachmentIds.length) {
+    next.attachments = unique([
+      ...next.attachments,
+      ...query("attachments", attachmentIds),
+    ]);
+    next.cards = unique([
+      ...next.cards,
+      ...query(
+        "cards",
+        next.attachments.flatMap((a) => (a.card_id ? [a.card_id] : [])),
+      ),
+    ]);
+  }
   next.deliveries = unique([
     ...next.deliveries,
     ...query(

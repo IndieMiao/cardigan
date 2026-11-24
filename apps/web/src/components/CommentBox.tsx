@@ -1,5 +1,4 @@
-// biome-ignore-all lint/security/noDangerouslySetInnerHtml: the preview is
-// `renderMarkdown` output (html off, filtered links), not raw user HTML.
+import { File as FileIcon, FileText, Image } from "lucide-react";
 import {
   type KeyboardEvent,
   type Ref,
@@ -13,16 +12,37 @@ import {
 } from "react";
 import {
   ApiError,
+  type AttachmentView,
   type CardiganClient,
   describeError,
   describeWriteError,
   type MentionCandidate,
   type PostedComment,
 } from "../api.js";
+import {
+  type AttachmentQuery,
+  type AttachmentRefTarget,
+  attachmentQuery,
+  attachmentRefKind,
+  attachmentTarget,
+  formatBytes,
+  formatMiB,
+  insertAttachmentRef,
+  numberPendingRefs,
+  pendingToken,
+  UPLOAD_ACCEPT,
+  uploadFilename,
+  uploadMime,
+  uploadProblem,
+} from "../attachment-refs.js";
 import { renderMarkdown } from "../markdown.js";
+import { useAttachmentRefs } from "../useAttachmentRefs.js";
+import { AttachmentRefBody } from "./AttachmentRefBody.js";
 import { EmployeeFace } from "./EmployeeIdentity.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
+import { FileChip, FileChipList, FileProblems } from "./ui/file-chip.js";
+import { FilePicker } from "./ui/file-picker.js";
 import { Input } from "./ui/input.js";
 import {
   SuggestionList,
@@ -37,11 +57,17 @@ import { Textarea } from "./ui/textarea.js";
  * A plain Markdown textarea with a preview — not a WYSIWYG editor. Typing `@`
  * suggests the project's employees (C-514; the card's own people first) and
  * inserts `@<name>`, which the server routes like any typed employee name;
- * hand-typed `@role` / `@A-n` keep working. Pasted images are uploaded and
- * attached to the comment's timeline entry, and the send button is live: the
- * comment is posted as the human, through `POST /cards/:card/comments`, and
- * every pasted image goes to `POST /cards/:card/attachments` attached to that
- * entry.
+ * hand-typed `@role` / `@A-n` keep working. Files (chosen, dropped or pasted
+ * images) are uploaded and attached to the comment's timeline entry, and the
+ * send button is live: the comment is posted as the human, through
+ * `POST /cards/:card/comments`, and every file goes to
+ * `POST /cards/:card/attachments` attached to that entry.
+ *
+ * C-615: typing `#` offers the card's attachments and the files in the box,
+ * and inserts `attachment-123` or, for a file not sent yet, `attachment-new-K`
+ * (K numbers the box's files). The posted body numbers those by the order the
+ * files are sent (see attachment-refs.ts), and the timeline shows each as the
+ * attachment its upload became.
  */
 
 export interface CommentBoxProps {
@@ -50,7 +76,13 @@ export interface CommentBoxProps {
   readonly projectId: string;
   readonly cardId: string;
   readonly hasPmOps?: boolean | undefined;
-  /** Called after the comment and its images were accepted. */
+  /** The card's attachments, offered after `#`. */
+  readonly attachments?: readonly AttachmentView[];
+  /** Other cards' attachments the server let this page see, for the preview. */
+  readonly referencedAttachments?:
+    | readonly (AttachmentView & { readonly card_id: string })[]
+    | undefined;
+  /** Called after the comment and its files were accepted. */
   readonly onPosted?: (comment: PostedComment) => void | Promise<void>;
   /** Refresh the timeline when a previous comment was accepted with different text. */
   readonly onConflict?: () => void | Promise<void>;
@@ -60,14 +92,31 @@ export interface CommentBoxHandle {
   focus(onFocused: (input: HTMLTextAreaElement) => void): void;
 }
 
-interface PastedImage {
+interface PendingFile {
   readonly id: string;
+  /** The `K` of the draft's `attachment-new-K`; never reused in a draft. */
+  readonly draft: number;
   readonly idempotencyKey: string;
   readonly name: string;
   readonly mime: string;
   readonly file: File;
   readonly note: string;
+  /**
+   * The attachment this file became on the accepted comment. A retry skips it:
+   * sending it again (say with a changed note, so a new key) would add a
+   * second copy and shift what `attachment-new-N` names.
+   */
+  readonly uploaded?: string;
 }
+
+interface AttachmentCandidate {
+  readonly token: string;
+  readonly name: string;
+  readonly meta: string;
+  readonly kind: AttachmentRefTarget["kind"];
+}
+
+const NO_ATTACHMENTS: readonly AttachmentView[] = [];
 
 export function CommentBox({
   ref,
@@ -75,6 +124,8 @@ export function CommentBox({
   projectId,
   cardId,
   hasPmOps,
+  attachments = NO_ATTACHMENTS,
+  referencedAttachments,
   onPosted,
   onConflict,
 }: CommentBoxProps) {
@@ -82,7 +133,18 @@ export function CommentBox({
   const listId = useId();
   const [body, setBody] = useState("");
   const [tab, setTab] = useState<"write" | "preview">("write");
-  const [images, setImages] = useState<readonly PastedImage[]>([]);
+  const [files, setFiles] = useState<readonly PendingFile[]>([]);
+  const nextDraft = useRef(1);
+  const [problems, setProblems] = useState<
+    readonly { readonly name: string; readonly reason: string }[]
+  >([]);
+  const [dragging, setDragging] = useState(false);
+  // The comment of this draft was accepted but some files are not uploaded:
+  // the files keep their order, as the body numbers them by it.
+  const [posted, setPosted] = useState(false);
+  const [attachmentActive, setAttachmentActive] = useState(0);
+  // Escape closes the `#` list for the `#` it was opened at, until a new `#`.
+  const [attachmentDismissedAt, setAttachmentDismissedAt] = useState<number>();
   // The caret the `@query` is read at; cleared once a name is inserted.
   const [cursor, setCursor] = useState<number>();
   // Escape closes the list for the `@` it was opened at, until a new `@`.
@@ -119,15 +181,17 @@ export function CommentBox({
   const startDraft = () => (draftKey.current ??= crypto.randomUUID());
   const resetDraftKey = () => {
     draftKey.current = undefined;
+    setPosted(false);
     // Retained files will attach to a new comment, so they need new keys too.
-    setImages((current) =>
-      current.map((image) => ({
-        ...image,
+    setFiles((current) =>
+      current.map(({ uploaded: _uploaded, ...file }) => ({
+        ...file,
         idempotencyKey: crypto.randomUUID(),
       })),
     );
   };
-  const expanded = focused || body.length > 0 || images.length > 0;
+  const expanded =
+    focused || body.length > 0 || files.length > 0 || problems.length > 0;
 
   useImperativeHandle(
     ref,
@@ -149,7 +213,51 @@ export function CommentBox({
     afterFocus.current = undefined;
   }, [focusRequest]);
 
-  const preview = useMemo(() => renderMarkdown(body), [body]);
+  const ownRefs = useMemo(() => {
+    const refs = new Map<string, AttachmentRefTarget>(
+      [...attachments, ...(referencedAttachments ?? [])].map((a) => [
+        a.id,
+        attachmentTarget(a, cardId),
+      ]),
+    );
+    for (const file of files)
+      refs.set(pendingToken(file.draft), {
+        id: pendingToken(file.draft),
+        name: file.name,
+        mime: file.mime,
+        size: file.file.size,
+        kind: attachmentRefKind(file.mime),
+      });
+    return refs;
+  }, [attachments, referencedAttachments, files, cardId]);
+  const knownIds = useMemo(() => new Set(ownRefs.keys()), [ownRefs]);
+  // Numbers the page has not seen yet (another card's file named for the
+  // first time) are read when the preview shows them.
+  const previewTexts = useMemo(
+    () => (tab === "preview" ? [body] : []),
+    [tab, body],
+  );
+  const draftRefs = useAttachmentRefs(
+    client,
+    projectId,
+    cardId,
+    previewTexts,
+    knownIds,
+    knownIds,
+  );
+  const previewRefs = useMemo(() => {
+    if (!draftRefs.length) return ownRefs;
+    const refs = new Map(ownRefs);
+    for (const a of draftRefs) refs.set(a.id, attachmentTarget(a, cardId));
+    return refs;
+  }, [ownRefs, draftRefs, cardId]);
+  const preview = useMemo(
+    () =>
+      tab === "preview"
+        ? renderMarkdown(body, { attachments: previewRefs })
+        : "",
+    [body, previewRefs, tab],
+  );
   const canSubmit = body.trim().length > 0 && !submitting;
 
   const loaded = candidates?.cardId === cardId ? candidates : undefined;
@@ -163,10 +271,38 @@ export function CommentBox({
       ? undefined
       : mentionQuery(body, cursor, ordered, typed, memory);
   const matches = mention ? matchMentionCandidates(ordered, mention.query) : [];
+  // The trigger nearest the caret wins when both an `@` and a `#` are open.
+  const reference =
+    cursor === undefined ? undefined : attachmentQuery(body, cursor);
+  const referenceFirst =
+    reference !== undefined &&
+    (mention === undefined || reference.start > mention.start);
+  const attachmentMatches = useMemo(
+    () =>
+      reference && referenceFirst
+        ? matchAttachmentCandidates(
+            attachmentCandidates(files, attachments),
+            reference.query,
+          )
+        : [],
+    [reference, referenceFirst, files, attachments],
+  );
+  const attachmentListOpen =
+    expanded &&
+    tab === "write" &&
+    !submitting &&
+    referenceFirst &&
+    reference.start !== attachmentDismissedAt &&
+    attachmentMatches.length > 0;
+  const attachmentCurrent = Math.min(
+    attachmentActive,
+    Math.max(attachmentMatches.length - 1, 0),
+  );
   const suggesting =
     expanded &&
     tab === "write" &&
     !submitting &&
+    !referenceFirst &&
     mention !== undefined &&
     mention.start !== dismissedAt;
   const listOpen =
@@ -233,9 +369,9 @@ export function CommentBox({
     caret.current = undefined;
   });
   useEffect(() => {
-    if (!listOpen) return;
+    if (!listOpen && !attachmentListOpen) return;
     document
-      .getElementById(optionId(current))
+      .getElementById(optionId(listOpen ? current : attachmentCurrent))
       ?.scrollIntoView?.({ block: "nearest" });
   });
 
@@ -251,6 +387,12 @@ export function CommentBox({
     // text in the same key event (Enter), which would undo the choice.
     if (caret.current !== undefined) return;
     const { value, selectionStart } = field;
+    const hash = attachmentQuery(value, selectionStart)?.start;
+    if (hash !== reference?.start) {
+      setAttachmentDismissedAt(undefined);
+      setAttachmentActive(0);
+    } else if (value.slice(0, selectionStart) !== body.slice(0, cursor))
+      setAttachmentActive(0);
     const start = mentionAt(value, selectionStart);
     if (start !== occurrence) {
       if (start !== undefined) loadCandidates();
@@ -302,8 +444,85 @@ export function CommentBox({
     textarea.current?.focus();
   }
 
+  function chooseAttachment(
+    query: AttachmentQuery,
+    candidate: AttachmentCandidate,
+  ): void {
+    startDraft();
+    const next = insertAttachmentRef(body, query, candidate.token);
+    caret.current = next.caret;
+    setBody(next.body);
+    setMemory((current) =>
+      followChosen(
+        current,
+        {
+          start: query.start,
+          end: query.end,
+          inserted: next.body.length - body.length + query.end - query.start,
+        },
+        next.body,
+      ),
+    );
+    setTyped(undefined);
+    setCursor(next.caret);
+    textarea.current?.focus();
+  }
+
+  /** Add the files the server takes; say why the others were left out. */
+  function addFiles(chosen: readonly File[]): void {
+    const accepted: PendingFile[] = [];
+    const rejected: { name: string; reason: string }[] = [];
+    for (const file of chosen) {
+      const problem = uploadProblem(file, attachmentLimit ?? null);
+      const mime = uploadMime(file);
+      if (problem || !mime)
+        rejected.push({ name: file.name || file.type, reason: problem ?? "" });
+      else
+        accepted.push({
+          id: crypto.randomUUID(),
+          draft: nextDraft.current++,
+          idempotencyKey: crypto.randomUUID(),
+          name: file.name || file.type,
+          mime,
+          file,
+          note: "",
+        });
+    }
+    setProblems(rejected);
+    if (!accepted.length) return;
+    startDraft();
+    setFiles((current) => [...current, ...accepted]);
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    if (!listOpen || event.nativeEvent.isComposing) return;
+    if (event.nativeEvent.isComposing) return;
+    if (attachmentListOpen && reference) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setAttachmentDismissedAt(reference.start);
+      } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        setAttachmentActive(
+          (attachmentCurrent + step + attachmentMatches.length) %
+            attachmentMatches.length,
+        );
+      } else if (
+        (event.key === "Enter" || event.key === "Tab") &&
+        !event.shiftKey &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey
+      ) {
+        const candidate = attachmentMatches[attachmentCurrent];
+        if (!candidate) return;
+        event.preventDefault();
+        chooseAttachment(reference, candidate);
+      }
+      return;
+    }
+    if (!listOpen) return;
     if (event.key === "Escape") {
       // Close the list only; an enclosing drawer stays open.
       event.preventDefault();
@@ -333,10 +552,10 @@ export function CommentBox({
   async function submit(): Promise<void> {
     if (!canSubmit || sending.current) return;
     if (
-      images.some(
-        (image) =>
-          [...image.note].length > 200 ||
-          /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(image.note),
+      files.some(
+        (file) =>
+          [...file.note].length > 200 ||
+          /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(file.note),
       )
     ) {
       setError("附件说明最多 200 字符，不能包含控制字符或换行。");
@@ -345,9 +564,17 @@ export function CommentBox({
     // Refuse before posting: the comment is created first, attachments follow.
     if (
       attachmentLimit !== undefined &&
-      images.some((image) => image.file.size > attachmentLimit)
+      files.some((pending) => pending.file.size > attachmentLimit)
     ) {
       setError(`附件不能超过 ${formatMiB(attachmentLimit)}。`);
+      return;
+    }
+    const sent = numberPendingRefs(
+      body,
+      files.map((file) => file.draft),
+    );
+    if (sent.missing.length) {
+      setError(`正文引用的文件已移除：${sent.missing.join("、")}`);
       return;
     }
     sending.current = true;
@@ -359,30 +586,45 @@ export function CommentBox({
         projectId,
         cardId,
         {
-          body,
-          ...(mentionsIn(body).length > 0
-            ? { mentions: mentionsIn(body) }
+          body: sent.body,
+          ...(mentionsIn(sent.body).length > 0
+            ? { mentions: mentionsIn(sent.body) }
             : {}),
         },
         startDraft(),
       );
-      for (const image of images) {
-        await client.uploadAttachment(
+      if (files.length) setPosted(true);
+      // One at a time, in the box's order. Each file fills its own slot N of
+      // the body's `attachment-new-N`, so a retry or another upload to the
+      // comment never shifts what N names.
+      for (const [index, file] of files.entries()) {
+        if (file.uploaded) continue;
+        const filename = uploadFilename(file.file.name);
+        const receipt = await client.uploadAttachment(
           projectId,
           cardId,
           {
-            file: await toBase64(image.file),
-            ...(image.file.name ? { original_filename: image.file.name } : {}),
-            ...(image.note.trim() ? { note: image.note } : {}),
-            mime: image.mime,
+            file: await toBase64(file.file),
+            ...(filename ? { original_filename: filename } : {}),
+            ...(file.note.trim() ? { note: file.note } : {}),
+            mime: file.mime,
             kind: "evidence",
             attach_to: { kind: "timeline_entry", id: comment.id },
+            ref_slot: index + 1,
           },
-          image.idempotencyKey,
+          file.idempotencyKey,
+        );
+        setFiles((current) =>
+          current.map((item) =>
+            item.id === file.id ? { ...item, uploaded: receipt.id } : item,
+          ),
         );
       }
       setBody("");
-      setImages([]);
+      setFiles([]);
+      setProblems([]);
+      setPosted(false);
+      nextDraft.current = 1;
       draftKey.current = undefined;
       setTab("write");
       setCursor(undefined);
@@ -430,14 +672,36 @@ export function CommentBox({
   return (
     <section
       ref={section}
-      className="comment-box"
+      className="comment-box ui-drop-target"
       aria-label="写评论"
+      data-dragging={dragging ? "" : undefined}
       onFocus={() => setFocused(true)}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
           setFocused(false);
-          if (!body.length && !images.length) setTab("write");
+          if (!body.length && !files.length) setTab("write");
         }
+      }}
+      onDragEnter={(event) => {
+        if (submitting || !hasFiles(event.dataTransfer)) return;
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDragOver={(event) => {
+        if (submitting || !hasFiles(event.dataTransfer)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        setDragging(true);
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+          setDragging(false);
+      }}
+      onDrop={(event) => {
+        setDragging(false);
+        if (submitting || !hasFiles(event.dataTransfer)) return;
+        event.preventDefault();
+        addFiles(Array.from(event.dataTransfer.files));
       }}
     >
       {hasPmOps === false && (
@@ -446,23 +710,35 @@ export function CommentBox({
         </p>
       )}
       {expanded && (
-        <div className="comment-tabs" role="tablist" aria-label="评论编辑方式">
-          <Button
-            type="button"
-            role="tab"
-            aria-selected={tab === "write"}
-            onClick={() => setTab("write")}
+        <div className="ui-comment-toolbar">
+          <div
+            className="comment-tabs"
+            role="tablist"
+            aria-label="评论编辑方式"
           >
-            编写
-          </Button>
-          <Button
-            type="button"
-            role="tab"
-            aria-selected={tab === "preview"}
-            onClick={() => setTab("preview")}
-          >
-            预览
-          </Button>
+            <Button
+              type="button"
+              role="tab"
+              aria-selected={tab === "write"}
+              onClick={() => setTab("write")}
+            >
+              编写
+            </Button>
+            <Button
+              type="button"
+              role="tab"
+              aria-selected={tab === "preview"}
+              onClick={() => setTab("preview")}
+            >
+              预览
+            </Button>
+          </div>
+          <FilePicker
+            label="上传附件"
+            accept={UPLOAD_ACCEPT}
+            disabled={submitting}
+            onFiles={addFiles}
+          />
         </div>
       )}
 
@@ -474,15 +750,21 @@ export function CommentBox({
             aria-label="评论正文"
             aria-describedby={hasPmOps === false ? routingHintId : undefined}
             aria-autocomplete="list"
-            data-escape-handled={listOpen ? "" : undefined}
-            aria-controls={listOpen ? listId : undefined}
+            data-escape-handled={
+              listOpen || attachmentListOpen ? "" : undefined
+            }
+            aria-controls={listOpen || attachmentListOpen ? listId : undefined}
             aria-activedescendant={
-              listOpen && matches.length > 0 ? optionId(current) : undefined
+              listOpen && matches.length > 0
+                ? optionId(current)
+                : attachmentListOpen
+                  ? optionId(attachmentCurrent)
+                  : undefined
             }
             placeholder={
               attachmentLimit === undefined
-                ? "支持 Markdown；@ 提及员工；可以直接粘贴图片"
-                : `支持 Markdown；@ 提及员工；可以直接粘贴图片，单张不超过 ${formatMiB(attachmentLimit)}`
+                ? "支持 Markdown；@ 提及员工；# 引用附件；可以粘贴图片或拖入文件"
+                : `支持 Markdown；@ 提及；# 引用附件；单个文件不超过 ${formatMiB(attachmentLimit)}`
             }
             rows={expanded ? 6 : 2}
             value={body}
@@ -503,46 +785,39 @@ export function CommentBox({
             onSelect={(event) => trackMention(event.currentTarget)}
             onKeyDown={onKeyDown}
             onPaste={(event) => {
-              const files = Array.from(event.clipboardData.files).filter(
+              const pasted = Array.from(event.clipboardData.files).filter(
                 (file) => file.type.startsWith("image/"),
               );
-              if (files.length === 0) return;
-              // Refuse an oversized image here: once listed it could not be
-              // removed and would block the comment (C-616).
-              const accepted =
-                attachmentLimit === undefined
-                  ? files
-                  : files.filter((file) => file.size <= attachmentLimit);
-              if (
-                attachmentLimit !== undefined &&
-                accepted.length < files.length
-              )
-                setError(`附件不能超过 ${formatMiB(attachmentLimit)}。`);
-              if (accepted.length === 0) return;
-              startDraft();
-              setImages((current) => [
-                ...current,
-                ...accepted.map((file) => ({
-                  id: crypto.randomUUID(),
-                  idempotencyKey: crypto.randomUUID(),
-                  name: file.name || file.type,
-                  mime: file.type,
-                  file,
-                  note: "",
-                })),
-              ]);
+              if (pasted.length === 0) return;
+              addFiles(pasted);
             }}
           />
           <SuggestionList
-            open={listOpen}
+            open={listOpen || attachmentListOpen}
             onOpenChange={(open) => {
-              if (!open) setDismissedAt(mention?.start);
+              if (open) return;
+              if (attachmentListOpen)
+                setAttachmentDismissedAt(reference?.start);
+              else setDismissedAt(mention?.start);
             }}
             field={textarea}
             id={listId}
-            label="提及员工"
+            label={attachmentListOpen ? "引用附件" : "提及员工"}
           >
-            {loaded?.error !== undefined ? (
+            {attachmentListOpen && reference ? (
+              attachmentMatches.map((candidate, index) => (
+                <SuggestionOption
+                  key={candidate.token}
+                  id={optionId(index)}
+                  active={index === attachmentCurrent}
+                  icon={<AttachmentKindIcon kind={candidate.kind} />}
+                  label={candidate.name}
+                  meta={candidate.meta}
+                  onActivate={() => setAttachmentActive(index)}
+                  onSelect={() => chooseAttachment(reference, candidate)}
+                />
+              ))
+            ) : loaded?.error !== undefined ? (
               <SuggestionStatus>未能加载员工：{loaded.error}</SuggestionStatus>
             ) : loaded?.employees === undefined ? (
               <SuggestionStatus>正在加载员工…</SuggestionStatus>
@@ -563,42 +838,49 @@ export function CommentBox({
           </SuggestionList>
         </>
       ) : (
-        <div
+        <AttachmentRefBody
           className="comment-preview markdown"
-          dangerouslySetInnerHTML={{
-            __html:
-              body.trim().length === 0 ? "<p>（还没有内容）</p>" : preview,
-          }}
+          html={body.trim().length === 0 ? "<p>（还没有内容）</p>" : preview}
         />
       )}
 
-      {images.length > 0 && (
-        <div className="notice">
-          <p>已捕获 {images.length} 张图片，随评论一起作为证据附件上传。</p>
-          {images.map((image) => (
-            <label className="attachment-caption" key={image.id}>
-              <span>{image.name}</span>
+      {files.length > 0 && (
+        <FileChipList label="待上传的附件">
+          {files.map((file) => (
+            <FileChip
+              key={file.id}
+              name={file.name}
+              size={formatBytes(file.file.size)}
+              kind={attachmentRefKind(file.mime)}
+              removeDisabled={submitting || posted}
+              onRemove={() =>
+                setFiles((current) =>
+                  current.filter((item) => item.id !== file.id),
+                )
+              }
+            >
               <Input
                 type="text"
-                aria-label={`${image.name} 的说明`}
-                placeholder="附件说明（可选，最多 200 字符）"
-                value={image.note}
-                disabled={submitting}
+                aria-label={`${file.name} 的说明`}
+                placeholder="说明（可选）"
+                value={file.note}
+                disabled={submitting || posted}
                 onChange={(event) => {
                   const note = event.target.value;
-                  setImages((current) =>
+                  setFiles((current) =>
                     current.map((item) =>
-                      item.id === image.id
+                      item.id === file.id
                         ? { ...item, note, idempotencyKey: crypto.randomUUID() }
                         : item,
                     ),
                   );
                 }}
               />
-            </label>
+            </FileChip>
           ))}
-        </div>
+        </FileChipList>
       )}
+      <FileProblems problems={problems} />
 
       <RequestFeedback
         interactive
@@ -616,9 +898,6 @@ export function CommentBox({
           >
             发表评论
           </Button>
-          <span className="hint">
-            以你的身份发表；正文支持 Markdown，编号由服务端识别成链接。
-          </span>
         </div>
       )}
     </section>
@@ -934,15 +1213,53 @@ export function mentionsIn(body: string): string[] {
   return [...found];
 }
 
-const formatMiB = (bytes: number) =>
-  bytes % 1048576 === 0
-    ? `${bytes / 1048576} MiB`
-    : `${(bytes / 1048576).toFixed(1)} MiB`;
-
 /** Canonical padded base64 of a pasted image (the API decodes it strictly). */
 export async function toBase64(file: File): Promise<string> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
+}
+
+/** A drag carries files (not text or a link). */
+function hasFiles(transfer: DataTransfer | null): boolean {
+  return Array.from(transfer?.types ?? []).includes("Files");
+}
+
+/** The box's files first (by draft number), then the card's newest first. */
+export function attachmentCandidates(
+  files: readonly Pick<PendingFile, "draft" | "name" | "mime" | "file">[],
+  attachments: readonly AttachmentView[],
+): AttachmentCandidate[] {
+  return [
+    ...files.map((file) => ({
+      token: pendingToken(file.draft),
+      name: file.name,
+      meta: `待上传 · ${formatBytes(file.file.size)}`,
+      kind: attachmentRefKind(file.mime),
+    })),
+    ...[...attachments].reverse().map((attachment) => ({
+      token: attachment.id,
+      name: attachment.original_filename || attachment.id,
+      meta: attachment.id,
+      kind: attachmentRefKind(attachment.mime, attachment.inline),
+    })),
+  ];
+}
+
+/** Candidates whose name or number contains the query, ignoring case. */
+export function matchAttachmentCandidates(
+  candidates: readonly AttachmentCandidate[],
+  query: string,
+): AttachmentCandidate[] {
+  const key = query.toLowerCase();
+  return candidates.filter(
+    (c) =>
+      c.name.toLowerCase().includes(key) || c.token.toLowerCase().includes(key),
+  );
+}
+
+function AttachmentKindIcon({ kind }: { kind: AttachmentRefTarget["kind"] }) {
+  const Icon = kind === "image" ? Image : kind === "file" ? FileIcon : FileText;
+  return <Icon className="ui-file-chip-icon" aria-hidden="true" />;
 }

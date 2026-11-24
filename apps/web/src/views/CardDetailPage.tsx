@@ -1,7 +1,10 @@
 import {
+  type Dispatch,
+  type SetStateAction,
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -63,6 +66,7 @@ import { Button } from "../components/ui/button.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
+import { useAttachmentRefsState } from "../useAttachmentRefs.js";
 import { useResource } from "../useResource.js";
 import { MergeConfirmation, SuggestedDecision } from "./NeedsYouPage.js";
 
@@ -89,6 +93,15 @@ const mergeTimeline = (
   [...new Map(pages.flat().map((entry) => [entry.id, entry])).values()].sort(
     (a, b) => b.event_seq - a.event_seq,
   );
+/** Other cards' attachments of two pages, the newer read winning. */
+const mergeReferenced = (
+  current: CardDetail["referenced_attachments"],
+  older: CardDetail["referenced_attachments"],
+): NonNullable<CardDetail["referenced_attachments"]> => [
+  ...new Map(
+    [...(older ?? []), ...(current ?? [])].map((a) => [a.id, a]),
+  ).values(),
+];
 
 export interface CardDetailPageProps {
   readonly client: CardiganClient;
@@ -117,6 +130,9 @@ export function CardDetailPage(props: CardDetailPageProps) {
     onTitleChange,
   } = props;
   const [affectedCards, setAffectedCards] = useState<readonly string[]>([]);
+  // C-615: cards whose attachments this page shows as chips; their events
+  // (say, turning sensitive) refresh this page too.
+  const [referencedCards, setReferencedCards] = useState<readonly string[]>([]);
   const [routeFilters] = useRouteFilters({ kind: "card", projectId, cardId });
   const routeLocation = `${projectId}/${cardId}/${routeAnchor ?? ""}/${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
   const [localAnchor, setLocalAnchor] = useState<{
@@ -268,6 +284,11 @@ export function CardDetailPage(props: CardDetailPageProps) {
             ...latest.detail,
             timeline: mergeTimeline(latest.detail.timeline, detail.timeline),
             timeline_next_cursor: detail.timeline_next_cursor ?? null,
+            // C-615: the older page's other-card attachments come with it.
+            referenced_attachments: mergeReferenced(
+              latest.detail.referenced_attachments,
+              detail.referenced_attachments,
+            ),
           };
           history.current = { key, detail: merged };
           replace(merged);
@@ -311,6 +332,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
             ),
             // C-567: another card's precheck ending settles this card's wait.
             ...(data.card.checking?.precheck?.cards ?? []),
+            ...referencedCards,
           ]),
       ),
     ].sort();
@@ -319,7 +341,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
         ? current
         : ids,
     );
-  }, [data, cardId]);
+  }, [data, cardId, referencedCards]);
   useEffect(() => {
     const filterKey = `${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
     if (query.current.at === anchor && previousFilters.current === filterKey)
@@ -357,6 +379,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
         <CardContent
           key={`${projectId}/${cardId}`}
           detail={data}
+          onReferencedCards={setReferencedCards}
           revision={
             cardRevision ? cardRevision(cardId, affectedCards) : revision
           }
@@ -418,8 +441,10 @@ function CardContent({
   pagerReady,
   loadOlder,
   anchorReady,
+  onReferencedCards,
 }: {
   detail: CardDetail;
+  onReferencedCards?: Dispatch<SetStateAction<readonly string[]>>;
   revision: number;
   client: CardiganClient;
   projectId: string;
@@ -475,6 +500,49 @@ function CardContent({
   );
   const detail = head.overview ? { ...head, ...panelData.data } : head;
   const panelReady = !head.overview || !!panelData.data;
+  // C-615: numbers on timeline pages the head read did not cover (older
+  // pages, rows kept across a refresh) are read on their own.
+  const knownAttachments = useMemo(
+    () =>
+      new Set(
+        [...detail.attachments, ...(detail.referenced_attachments ?? [])].map(
+          (a) => a.id,
+        ),
+      ),
+    [detail.attachments, detail.referenced_attachments],
+  );
+  const timelineBodies = useMemo(
+    () => detail.timeline.map((entry) => entry.body),
+    [detail.timeline],
+  );
+  const later = useAttachmentRefsState(
+    client,
+    projectId,
+    cardId,
+    timelineBodies,
+    knownAttachments,
+    detail.timeline,
+  );
+  const laterRefs = later.attachments;
+  const referencedAttachments = useMemo(
+    () => [...(detail.referenced_attachments ?? []), ...laterRefs],
+    [detail.referenced_attachments, laterRefs],
+  );
+  useEffect(() => {
+    const shown = referencedAttachments.map((a) => a.card_id);
+    onReferencedCards?.((current) => {
+      // While the follow-up read is out, its cards are unknown rather than
+      // gone: keep following them, or the page's revision drops, it reloads,
+      // asks again and never settles (V-3096). The answer sets the exact list.
+      const cards = [
+        ...new Set(later.settled ? shown : [...current, ...shown]),
+      ].sort();
+      return current.length === cards.length &&
+        current.every((id, i) => id === cards[i])
+        ? current
+        : cards;
+    });
+  }, [referencedAttachments, later.settled, onReferencedCards]);
   const storyAttachments = useStoryAttachments({
     detail: head,
     client,
@@ -930,6 +998,8 @@ function CardContent({
             projectId={projectId}
             cardId={cardId}
             hasPmOps={detail.card.story ? undefined : detail.has_pm_ops}
+            attachments={detail.attachments}
+            referencedAttachments={referencedAttachments}
             onPosted={onPosted}
             onConflict={onCommentConflict}
           />
@@ -950,6 +1020,7 @@ function CardContent({
                 entries={detail.timeline}
                 attachments={detail.attachments}
                 detail={detail}
+                referencedAttachments={referencedAttachments}
                 typeFilter={filters.type ?? ""}
                 authorFilter={filters.author ?? ""}
                 anchor={anchor}

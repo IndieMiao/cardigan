@@ -1111,3 +1111,58 @@ test.each(["install", "test"])(
     }
   },
 );
+
+test("C-658: the summary names the log download failure and its detail", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "log-timeout",
+  });
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 134 }],
+    cleanup_errors: [],
+    logSource: {
+      url: "https://github.com/fixture/project/actions/runs/1",
+      jobId: 2,
+    },
+    logFailure: "timeout",
+    logFailureDetail: "60 秒未收到新数据（已接收 3.9 MB，用时 75 秒）",
+  });
+  expect(result.summary).toContain(
+    "日志获取失败（timeout：60 秒未收到新数据（已接收 3.9 MB，用时 75 秒））：https://github.com/fixture/project/actions/runs/1/job/2",
+  );
+});
+
+test("C-658: a log larger than the retained limit keeps its tail and marks the cut", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "large-log",
+  });
+  const line = `${"case passed ".repeat(80)}\n`;
+  const block = line.repeat(Math.ceil((64 * 1024) / line.length));
+  // ~4 MB, twice the retained limit, ending with the crash that failed the job.
+  for (let sent = 0; sent < 2 * CHECK_OUTPUT_LIMIT; sent += block.length)
+    log.append("test", block);
+  log.append(
+    "test",
+    "2242 passed\ncorrupted size vs. prev_size in fastbins\nexit code 134\n",
+  );
+  await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 134 }],
+    cleanup_errors: [],
+  });
+  const text = await readFile(
+    join(dataDir, "merge-gate/logs/p", log.log_ref),
+    "utf8",
+  );
+  expect(text).toContain("[中间输出已截断]");
+  expect(text).toMatch(
+    /2242 passed\ncorrupted size vs\. prev_size in fastbins\nexit code 134\n/u,
+  );
+  expect(Buffer.byteLength(text)).toBeLessThan(CHECK_OUTPUT_LIMIT + 4096);
+});

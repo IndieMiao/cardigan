@@ -7,6 +7,7 @@ test.each([
   "launch_model_changed",
   "launch_reload_failed",
   "host_disk_space_low",
+  "host_memory_pressure",
 ])("%s is a host-only, nonblocking notice with durable read state", (type) => {
   const state = fixture(),
     io = ports();

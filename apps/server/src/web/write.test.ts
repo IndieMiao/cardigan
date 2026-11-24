@@ -190,6 +190,24 @@ test("human instruction commits one typed event and rejects a closed card withou
   expect(snapshot()).toBe(before);
 });
 
+test("C-619: a human question bound to a decision reaches the domain checks without partial writes", async () => {
+  const p = {
+    work_item_id: s.primary.owner.work_item_id,
+    body: "请确认方向",
+  };
+  const before = snapshot();
+  expect(
+    await request(cardPath("instructions"), { ...p, decision_id: "Q-999" }),
+  ).toMatchObject({ status: 404, body: { error: { code: "not_found" } } });
+  expect(
+    await request(cardPath("instructions"), { ...p, decision_id: "bad id" }),
+  ).toMatchObject({
+    status: 400,
+    body: { error: { code: "validation_failed" } },
+  });
+  expect(snapshot()).toBe(before);
+});
+
 test("Needs You decisions preserve a human quote, supply a default, and reject wrong deciders or options", async () => {
   const q = s.command((state, actor, ports) =>
     requestDecision(state, actor, { ...question, card_id: s.card.id }, ports),

@@ -4,6 +4,7 @@ import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { createQueuedRun, launchSettings } from "./launch.js";
 import { closedResumeTarget, deferResume } from "./resume-attention.js";
+import { openAlignment } from "./review-round.js";
 import { openStopEpisodeStart, pausedByHuman } from "./stop-state.js";
 import { reviewRound } from "./workflow.js";
 
@@ -77,6 +78,7 @@ export function resumeBlockReason(
         h.blocked_work_items.includes(item.id),
     );
   if (action) return `合并前置操作 ${action.id} 尚未完成`;
+  if (openAlignment(d, item)) return "对齐回合尚未完成";
   if (item.kind === "verify" && reviewRound(d, item) > item.max_review_rounds)
     return "审核轮数已达上限";
 }

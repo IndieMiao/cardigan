@@ -151,6 +151,12 @@ export interface GitCentralPort {
     ancestor: string,
     descendant: string,
   ): Promise<boolean>;
+  /** Every best common ancestor of two commits (`merge-base --all`); empty when unrelated. */
+  mergeBases?(
+    repository: string,
+    left: string,
+    right: string,
+  ): Promise<readonly string[]>;
   compareAndSwapRef(
     repository: string,
     ref: string,
