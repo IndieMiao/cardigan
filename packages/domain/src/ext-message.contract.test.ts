@@ -767,11 +767,7 @@ test("source approvals trace the target delivery's card for merge cards; unknown
 test("a merge action issued before its source approval's target becomes sensitive loses its version and choices", async () => {
   const { s, other, input } = await sourceApproval();
   const issued = extInteraction(s, input);
-  expect(issued.options.map((o) => o.key)).toEqual([
-    "merge",
-    "hold",
-    "_other",
-  ]);
+  expect(issued.options.map((o) => o.key)).toEqual(["merge", "hold", "_other"]);
   const fresh = extInteraction(
     {
       ...s,

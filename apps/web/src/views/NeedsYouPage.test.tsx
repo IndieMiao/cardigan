@@ -412,7 +412,8 @@ test("decision cards collapse the background, do not preselect an option and exp
   const background = within(card).getByText("背景").closest("details");
   expect(background?.open).toBe(false);
   const radios = within(card).getAllByRole("radio");
-  expect(radios).toHaveLength(2);
+  expect(radios).toHaveLength(3);
+  expect((radios[2] as HTMLInputElement).value).toBe("_other");
   for (const radio of radios)
     expect((radio as HTMLInputElement).checked).toBe(false);
   expect(within(card).getByText("推荐")).toBeTruthy();
@@ -522,7 +523,7 @@ test.each(["approve", "reject", "merge", "keep", "force_clean"])(
       />,
     );
     await screen.findByRole("article", { name: "拍板 Q-1" });
-    fireEvent.click(screen.getByRole("radio"));
+    fireEvent.click(screen.getAllByRole("radio")[0] as HTMLElement);
     changeControl(screen.getByLabelText("Q-1 原话或补充说明"), {
       target: { value: "  我选这个  " },
     });
@@ -538,6 +539,99 @@ test.each(["approve", "reject", "merge", "keep", "force_clean"])(
     expect(needsYou).toHaveBeenCalledTimes(2);
   },
 );
+
+test.each([
+  null,
+  "review_limit",
+  "worktree_cleanup",
+  "accepted_delivery_rework",
+  "completion_review",
+] as const)(
+  "C-682: %s decisions end with 其他, which needs the owner's words and records them as-is",
+  async (trigger) => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: vi.fn().mockResolvedValue(
+            page([
+              q({
+                trigger,
+                options: [{ key: "go", description: "继续", impact: "结果" }],
+                recommended: "go",
+              }),
+            ]),
+          ),
+          recordDecision,
+        })}
+        projectId="p-1"
+      />,
+    );
+    const card = await screen.findByRole("article", { name: "拍板 Q-1" });
+    const radios = within(card).getAllByRole("radio");
+    expect(radios.map((r) => (r as HTMLInputElement).value)).toEqual([
+      "go",
+      "_other",
+    ]);
+    fireEvent.click(radios[1] as HTMLElement);
+    expect(within(card).getByText("其他（自己填写）")).toBeTruthy();
+    fireEvent.click(within(card).getByRole("button", { name: "按所选拍板" }));
+    expect(recordDecision).not.toHaveBeenCalled();
+    changeControl(within(card).getByLabelText("Q-1 原话或补充说明"), {
+      target: { value: "把仓库转为公开" },
+    });
+    fireEvent.click(within(card).getByRole("button", { name: "按所选拍板" }));
+    await waitFor(() =>
+      expect(recordDecision).toHaveBeenCalledWith(
+        "p-1",
+        "Q-1",
+        "_other",
+        "把仓库转为公开",
+        expect.any(String),
+      ),
+    );
+  },
+);
+
+test("C-682: merge confirmations offer 其他 with required words and never merge", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: vi.fn().mockResolvedValue(page([merge()])),
+        recordDecision,
+      })}
+      projectId="p-1"
+    />,
+  );
+  const card = await screen.findByRole("article", { name: "合并确认 Q-3" });
+  fireEvent.click(
+    within(card).getByRole("button", { name: "其他（自己填写）" }),
+  );
+  const form = within(card).getByRole("form", { name: "Q-3 其他（自己填写）" });
+  const submit = within(form).getByRole("button", { name: "提交" });
+  expect((submit as HTMLButtonElement).disabled).toBe(true);
+  changeControl(within(form).getByLabelText("Q-3 其他决定"), {
+    target: { value: "先别合并，等我和客户确认" },
+  });
+  fireEvent.click(submit);
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "Q-3",
+      "_other",
+      "先别合并，等我和客户确认",
+      expect.any(String),
+    ),
+  );
+  expect(recordDecision).not.toHaveBeenCalledWith(
+    "p-1",
+    "Q-3",
+    "merge",
+    expect.anything(),
+    expect.anything(),
+  );
+});
 
 test("merge confirmation lists the deliveries, reviews and known gaps and records merge", async () => {
   const recordDecision = vi.fn().mockResolvedValue(undefined);
@@ -1356,7 +1450,8 @@ test.each([
     ).toBe("#/p/p-1/settings?tab=authorization");
     expect(article.getByText(/每项累计最多代批 3 次/)).toBeTruthy();
     expect(article.getByText(/重新开启也不接回已交人的事项/)).toBeTruthy();
-    if (status !== "provisional") fireEvent.click(article.getByRole("radio"));
+    if (status !== "provisional")
+      fireEvent.click(article.getAllByRole("radio")[0] as HTMLElement);
     fireEvent.click(
       article.getByRole("button", {
         name: status === "provisional" ? "增加一轮审核额度" : "按所选拍板",
@@ -1399,7 +1494,7 @@ test("a category checkbox selected before refresh cannot grant an independent re
   fireEvent.click(
     await screen.findByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
   );
-  fireEvent.click(screen.getByRole("radio"));
+  fireEvent.click(screen.getAllByRole("radio")[0] as HTMLElement);
   rendered.rerender(
     view({
       ...decision,
@@ -1442,7 +1537,9 @@ test("a paused review-limit decision keeps only raise_limit and explains its aut
     await screen.findByRole("article", { name: "拍板 Q-1" }),
   );
   expect(article.getByText("已暂停（临时决定）")).toBeTruthy();
-  expect(article.getAllByRole("radio")).toHaveLength(1);
+  expect(
+    article.getAllByRole("radio").map((r) => (r as HTMLInputElement).value),
+  ).toEqual(["raise_limit", "_other"]);
   // C-459: besides the row disclosure and "处理", the details hold one button.
   const body = within(
     (await screen.findByRole("article", { name: "拍板 Q-1" })).querySelector(

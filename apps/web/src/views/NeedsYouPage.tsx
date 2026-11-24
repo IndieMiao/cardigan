@@ -874,14 +874,13 @@ export function MergeConfirmation({
         退回修改
       </button>
       {!confirmed && (
-        <button
-          type="button"
-          className="quiet"
+        <Button
+          variant="ghost"
           disabled={action.busy}
           onClick={() => setAnsweringOther(true)}
         >
           {decisionOtherOption.description}
-        </button>
+        </Button>
       )}
     </>
   );
@@ -1259,17 +1258,20 @@ export function MergeConfirmation({
             />
           </label>
           <div className="action-row">
-            <button type="submit" disabled={action.busy || !otherWords.trim()}>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={action.busy || !otherWords.trim()}
+            >
               提交
-            </button>
-            <button
-              type="button"
-              className="quiet"
+            </Button>
+            <Button
+              variant="ghost"
               disabled={action.busy}
               onClick={() => setAnsweringOther(false)}
             >
               取消
-            </button>
+            </Button>
           </div>
         </form>
       )}

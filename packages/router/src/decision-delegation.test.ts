@@ -1,4 +1,4 @@
-import { mergeRequiresHuman } from "@cardigan/domain";
+import { DECISION_OTHER_OPTION, mergeRequiresHuman } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   assignment,
@@ -392,4 +392,57 @@ test("A3: system-held merge confirmations never request a human or PM decision",
     },
   });
   expect(resolved.notifications).toEqual([]);
+});
+
+test("C-682: 其他 hands the owner's words to the raiser, or to PM Ops for system rules", () => {
+  const words = "把仓库转为公开";
+  const resolved = (overrides: Parameters<typeof decision>[0]) =>
+    decision({
+      status: "resolved",
+      blocking: false,
+      affected_work_items: [],
+      options: [
+        { key: "raise_limit", description: "提高上限", impact: "花钱" },
+      ],
+      resolution: {
+        option: DECISION_OTHER_OPTION,
+        raw_quote: words,
+        rationale: words,
+      },
+      ...overrides,
+    });
+  const route = (q: ReturnType<typeof decision>) =>
+    routeEvent({
+      event: event("decision_resolved", {
+        decision_id: q.id,
+        resume_work_items: [],
+      }),
+      snapshot: snapshot({
+        decisions: [q],
+        assignments: [
+          assignment("A-8", {
+            scope: "standing",
+            role_id: "pm",
+            standing_mode: "office",
+          }),
+        ],
+      }),
+    }).notifications;
+  const agent = route(resolved({ raised_by: "assignment:A-8" }));
+  expect(agent).toMatchObject([
+    { recipient: { kind: "assignment", assignment_id: "A-8" } },
+  ]);
+  expect(agent[0]?.summary).toContain(`原话：${words}`);
+  expect(agent[0]?.summary).not.toContain("提高上限");
+  const merge = route(
+    resolved({ raised_by: "system", trigger: "merge_confirmation" }),
+  );
+  expect(merge).toMatchObject([{ recipient: { kind: "pm_ops" } }]);
+  expect(merge[0]?.summary).toContain("卡片保持未合并");
+  expect(merge[0]?.summary).toContain(words);
+  const rule = route(
+    resolved({ raised_by: "system", trigger: "review_limit" }),
+  );
+  expect(rule).toMatchObject([{ recipient: { kind: "pm_ops" } }]);
+  expect(rule[0]?.summary).toContain(words);
 });
