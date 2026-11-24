@@ -67,10 +67,13 @@ test("a card link clears its header, remeasures on reopening and flips at the vi
   vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(
     1440,
   );
+  // C-691: the 5px the arrow used to add is part of the offset now. jsdom
+  // measured the arrow as 0px, so these jsdom positions move by 5px; in a
+  // browser the hint opens where it did (see test-support/c691-capture.mjs).
   for (const [headerTop, anchorTop, side, hintTop] of [
-    [200, 300, "top", 194],
-    [170, 300, "top", 164],
-    [-20, 30, "bottom", 118],
+    [200, 300, "top", 189],
+    [170, 300, "top", 159],
+    [-20, 30, "bottom", 123],
   ] as const) {
     top = headerTop;
     linkTop = anchorTop;
@@ -106,6 +109,8 @@ test("hover waits 1000ms, leaving cancels it and reopening never skips the delay
   expect(screen.queryByRole("tooltip")).toBeNull();
   act(() => vi.advanceTimersByTime(1));
   expect(screen.getByRole("tooltip").textContent).toBe("查看详情");
+  // C-691: tips share the avatar card's edge, which has no arrow.
+  expect(document.querySelector(".ui-tooltip svg")).toBeNull();
   fireEvent.keyDown(trigger, { key: "Escape" });
   fireEvent.pointerLeave(trigger);
   fireEvent.pointerMove(trigger);

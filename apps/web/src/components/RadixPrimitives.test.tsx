@@ -360,24 +360,67 @@ test("radix primitive styles use shared tokens, focus styles and the dark theme"
   expect(close).toContain("z-index: 1;");
   expect(close).toContain("background: var(--surface);");
   expect(close).toContain("color: var(--text);");
-  expect(layer(".tooltip-content")).toContain("z-index: 120;");
+  // C-691: the tip edge lives only in theme.css; legacy rules keep geometry.
   const tooltip = layer(".tooltip-content");
-  expect(tooltip).toContain("background: var(--tooltip-bg);");
-  expect(tooltip).toContain("color: var(--tooltip-text);");
-  expect(tooltip).toContain("border: 1px solid var(--tooltip-border);");
-  expect(tooltip).toContain("box-shadow:");
+  expect(tooltip).toContain("z-index: 120;");
   expect(tooltip).toContain(
     "max-width: min(280px, calc(100vw - var(--gap) * 2));",
   );
-  expect(layer(".tooltip-arrow")).toContain("fill: var(--tooltip-bg);");
+  for (const rule of [
+    tooltip,
+    layer(".capacity-tooltip"),
+    layer(".employee-card"),
+  ])
+    expect(rule).not.toMatch(/background|border|box-shadow/);
+  expect(css).not.toContain(".tooltip-arrow");
   expect(css).toContain('body[data-lightbox="open"] .drawer-overlay {');
 });
 
-test("tooltip colors remain dark with AA text contrast and a visible edge in both themes", () => {
-  const css = readFileSync(
-    new NodeURL("./ui/theme.css", import.meta.url),
-    "utf8",
-  );
+test("every tip shares the avatar card's edge with AA text contrast in both themes", () => {
+  const read = (path: string) =>
+    readFileSync(new NodeURL(path, import.meta.url), "utf8");
+  const css = read("./ui/theme.css");
+  // C-691: tooltips, hover cards and peeks reference one set of tokens, the
+  // avatar card's surface, text, border, panel radius and shadow.
+  for (const token of [
+    "--ui-tip-bg: var(--surface);",
+    "--ui-tip-text: var(--text);",
+    "--ui-tip-border: var(--border);",
+    "--ui-tip-radius: var(--ui-panel-radius);",
+    "--ui-tip-shadow: var(--ui-shadow);",
+  ])
+    expect(css).toContain(token);
+  const start = css.indexOf(".ui-tooltip,\n  .ui-popover,\n  .ui-tip {");
+  expect(start).toBeGreaterThanOrEqual(0);
+  const edge = css.slice(start, css.indexOf("}", start));
+  for (const declaration of [
+    "background: var(--ui-tip-bg);",
+    "color: var(--ui-tip-text);",
+    "border: var(--ui-stroke) solid var(--ui-tip-border);",
+    "border-radius: var(--ui-tip-radius);",
+    "box-shadow: var(--ui-tip-shadow);",
+  ])
+    expect(edge).toContain(declaration);
+  // No tip writes its own edge or keeps the old dark-hint tokens.
+  for (const file of [
+    "../styles.css",
+    "./TemplateMarker.css",
+    "./ui/theme.css",
+  ])
+    expect(read(file)).not.toContain("--tooltip-");
+  for (const [file, selector] of [
+    ["./ui/theme.css", ".ui-tooltip {"],
+    ["./ui/theme.css", ".ui-attachment-ref-peek {"],
+    ["./TemplateMarker.css", ".template-marker-tip {"],
+  ] as const) {
+    const source = read(file);
+    const rule = source.slice(
+      source.indexOf(selector),
+      source.indexOf("}", source.indexOf(selector)),
+    );
+    expect(rule).toContain(selector);
+    expect(rule).not.toMatch(/background|border|box-shadow/);
+  }
   const themes = [...css.matchAll(/:root\s*\{([^}]+)\}/g)];
   expect(themes).toHaveLength(2);
   for (const theme of themes) {
@@ -399,16 +442,11 @@ test("tooltip colors remain dark with AA text contrast and a visible edge in bot
         0,
       );
     };
-    const background = luminance("tooltip-bg");
-    const text = luminance("tooltip-text");
-    const border = luminance("tooltip-border");
-    expect(background).toBeLessThan(0.1);
-    expect(text).toBeGreaterThan(0.8);
-    expect((text + 0.05) / (background + 0.05)).toBeGreaterThanOrEqual(4.5);
-    expect((border + 0.05) / (background + 0.05)).toBeGreaterThanOrEqual(3);
-    if (theme[1]?.includes("color-scheme: dark"))
-      expect((border + 0.05) / (luminance("bg") + 0.05)).toBeGreaterThanOrEqual(
-        3,
-      );
+    const [light, dark] = [luminance("surface"), luminance("text")].sort(
+      (a, b) => a - b,
+    );
+    expect(((dark ?? 0) + 0.05) / ((light ?? 0) + 0.05)).toBeGreaterThanOrEqual(
+      4.5,
+    );
   }
 });
