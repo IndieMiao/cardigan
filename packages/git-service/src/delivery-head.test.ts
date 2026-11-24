@@ -1,4 +1,4 @@
-import type { Assignment } from "@cardigan/domain";
+import { type Assignment, CheckHeadFailure } from "@cardigan/domain";
 import { expect, test, vi } from "vitest";
 import type { CentralProject, CentralRepositoryService } from "./central.js";
 import { GitDeliveryVerifier } from "./delivery.js";
@@ -21,11 +21,10 @@ const assignment = {
 
 function central(overrides: Record<string, unknown> = {}) {
   const git = {
-    readRef: vi.fn(async (_repo: string, ref: string) =>
-      ref.startsWith("refs/cardigan/incoming/") ? head : undefined,
-    ),
-    fetchRefs: vi.fn(async () => {}),
-    objectType: vi.fn(async () => "commit"),
+    readRef: vi.fn(async (_repo: string, _ref: string) => undefined),
+    fetchBranchTip: vi.fn(async () => head),
+    isAncestor: vi.fn(async () => false),
+    compareAndSwapRef: vi.fn(async () => {}),
     ...overrides,
   };
   const service = {
@@ -51,6 +50,12 @@ const failure = (error: unknown) =>
 test("reads and pins the recorded branch HEAD", async () => {
   const { verifier, service } = central();
   expect(await verifier.head(assignment)).toBe(head);
+  expect(service.git.compareAndSwapRef).toHaveBeenCalledWith(
+    "/synthetic/central.git",
+    "refs/cardigan/incoming/A-1",
+    head,
+    null,
+  );
   expect(service.createRef).toHaveBeenCalledWith(
     "/synthetic/central.git",
     `refs/cardigan/prechecks/A-1/${head}`,
@@ -62,7 +67,7 @@ test.each([
   [
     "a remote ref absent on the worker is a missing branch",
     {
-      fetchRefs: vi.fn(async () => {
+      fetchBranchTip: vi.fn(async () => {
         throw Object.assign(new Error("Git command failed"), {
           stderr: "fatal: couldn't find remote ref refs/heads/agent/c632",
         });
@@ -73,7 +78,7 @@ test.each([
   [
     "a transport failure is a fetch failure",
     {
-      fetchRefs: vi.fn(async () => {
+      fetchBranchTip: vi.fn(async () => {
         throw new Error("ssh: connect to host example.invalid: refused");
       }),
     },
@@ -81,12 +86,20 @@ test.each([
   ],
   [
     "an empty fetched ref is a missing branch",
-    { readRef: vi.fn(async () => undefined) },
+    {
+      fetchBranchTip: vi.fn(async () => {
+        throw new CheckHeadFailure("branch_missing");
+      }),
+    },
     "branch_missing",
   ],
   [
     "a non-commit HEAD is an object mismatch",
-    { objectType: vi.fn(async () => "tree") },
+    {
+      fetchBranchTip: vi.fn(async () => {
+        throw new CheckHeadFailure("object_mismatch");
+      }),
+    },
     "object_mismatch",
   ],
   [
