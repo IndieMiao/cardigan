@@ -6,6 +6,7 @@ import {
   delegationCategories,
   FLOW_VERSION_MAX,
   highRiskPaths,
+  humanCardTemplates,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   type MergeShadowPolicy,
@@ -25,6 +26,7 @@ import {
   tickProfileOn,
   validAutoSecurityPaths,
   validFlowVersion,
+  validHumanCardTemplateId,
   validIndependentReviewDelegationMax,
   validMergePathList,
   validRoleRulePaths,
@@ -43,7 +45,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get machine-preference | set machine-preference <JSON机器编号数组> | get auto-merge | set auto-merge <on|off> | get high-risk-paths | set high-risk-paths <JSON路径数组> | get cross-card-read | set cross-card-read <on|off> | get auto-merge-paused | set auto-merge-paused <on|off> | get flow-version | set flow-version <版本> | get auto-security-paths | set auto-security-paths <JSON路径数组> | get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-confirm-role-rule-implementations | set pm-confirm-role-rule-implementations <on|off> | get pm-confirm-human-decided-merges | set pm-confirm-human-decided-merges <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> | get system-review-limit-raise | set system-review-limit-raise <on|off> | get system-review-limit-max-raises | set system-review-limit-max-raises <次数|off> | get role-rule-paths | set role-rule-paths <JSON路径数组|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get machine-preference | set machine-preference <JSON机器编号数组> | get auto-merge | set auto-merge <on|off> | get high-risk-paths | set high-risk-paths <JSON路径数组> | get cross-card-read | set cross-card-read <on|off> | get auto-merge-paused | set auto-merge-paused <on|off> | get flow-version | set flow-version <版本> | get auto-security-paths | set auto-security-paths <JSON路径数组> | get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-confirm-role-rule-implementations | set pm-confirm-role-rule-implementations <on|off> | get pm-confirm-human-decided-merges | set pm-confirm-human-decided-merges <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> | get system-review-limit-raise | set system-review-limit-raise <on|off> | get system-review-limit-max-raises | set system-review-limit-max-raises <次数|off> | get role-rule-paths | set role-rule-paths <JSON路径数组|off> | get human-card-templates | set human-card-templates <模板编号> <on|off> [--project <p>] [--data-dir <目录>]";
 export async function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -143,6 +145,37 @@ export async function runPreferenceCommand(
             );
       io.stdout(
         `flow-version: ${projectFlowVersion(pref)} (只影响之后新建的卡片)`,
+      );
+      return EXIT.ok;
+    } finally {
+      store.close();
+    }
+  }
+  // C-684: templates a person may open cards from (story is always open).
+  if (preference === "human-card-templates") {
+    if (
+      !["get", "set"].includes(action ?? "") ||
+      positions.length !== (action === "get" ? 2 : 4) ||
+      (action === "set" &&
+        (!validHumanCardTemplateId(raw) ||
+          !["on", "off"].includes(toggle ?? "")))
+    )
+      fail();
+    const store = openStore({
+      dataDir: announceDataDir(io, flags["data-dir"]),
+    });
+    try {
+      const project = resolveProject(store, io, flags.project);
+      const pref =
+        action === "set"
+          ? await writePreferences(store, project, "设置人可开的卡片模板", {
+              human_card_templates: { [raw as string]: toggle === "on" },
+            })
+          : store.uow.read((tx) =>
+              projectPreferences(loadCommandState(tx, project)),
+            );
+      io.stdout(
+        `human-card-templates: ${JSON.stringify(humanCardTemplates(pref))}`,
       );
       return EXIT.ok;
     } finally {

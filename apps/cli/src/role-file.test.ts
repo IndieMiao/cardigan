@@ -466,6 +466,10 @@ test("deactivation blocks new work and standing assignments but preserves existi
       ]),
     ).toBe(0);
   }
+  // C-684: a person opens dev cards only once the project allows it.
+  expect(
+    await run(["preference", "set", "human-card-templates", "dev", "on"]),
+  ).toBe(0);
   expect(
     await run([
       "card",

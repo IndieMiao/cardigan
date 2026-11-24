@@ -13,6 +13,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { stringify } from "yaml";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
+import { openHumanCardTemplates } from "./template-fixtures.js";
 
 let dataDir: string,
   io: CliIo,
@@ -41,6 +42,7 @@ beforeEach(async () => {
     await main(["project", "create", "templates", "--code", "TEM"], io),
   ).toBe(0);
   store = Store.open({ dataDir });
+  openHumanCardTemplates(store, "templates", ["general", "notes"]);
 });
 afterEach(() => {
   store.close();
