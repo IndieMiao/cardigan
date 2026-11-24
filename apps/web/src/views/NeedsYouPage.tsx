@@ -1,4 +1,10 @@
-import { reviewImpactLabel } from "@cardigan/domain";
+import {
+  DECISION_OTHER_OPTION,
+  decisionOptionOf,
+  decisionOtherOption,
+  humanDecisionOptions,
+  reviewImpactLabel,
+} from "@cardigan/domain";
 import { mergeOverrideReasonError } from "@cardigan/domain/merge-override";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -294,17 +300,20 @@ function Decision({
     !q.human_required_reason &&
     !independentLimit &&
     delegableCategories.includes(q.category);
-  const grantCategory = canDelegate && delegateFuture;
   const paused = isPausedReview(q);
-  const options = paused
+  const raised = paused
     ? q.options.filter((o) => o.key !== "pause")
     : q.options;
+  const options = humanDecisionOptions(raised);
+  const otherChosen = option === DECISION_OTHER_OPTION;
   const resumeOnly =
-    paused && options.length === 1 && options[0]?.key === "raise_limit";
-  const selected = resumeOnly ? "raise_limit" : option;
+    paused && raised.length === 1 && raised[0]?.key === "raise_limit";
+  const selected = resumeOnly && !otherChosen ? "raise_limit" : option;
+  const grantCategory = canDelegate && delegateFuture && !otherChosen;
   const scopeRequired =
     q.trigger === "review_limit" &&
     ["split_card", "narrow_scope"].includes(selected);
+  const noteRequired = scopeRequired || otherChosen;
   const rowHead = {
     ids: (
       <>
@@ -323,12 +332,10 @@ function Decision({
         <p>{q.followup_notice}</p>
         <p>
           已选方案：
-          {q.options.find((o) => o.key === q.resolution?.option)?.description ??
+          {decisionOptionOf(q, q.resolution?.option)?.description ??
             q.resolution?.option}
         </p>
-        <p>
-          影响：{q.options.find((o) => o.key === q.resolution?.option)?.impact}
-        </p>
+        <p>影响：{decisionOptionOf(q, q.resolution?.option)?.impact}</p>
         <p>请安排落实，并在卡片时间线引用 {q.id} 记录执行结果。</p>
       </NeedsRow>
     );
@@ -404,7 +411,7 @@ function Decision({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (selected === "" || (scopeRequired && !quote.trim())) return;
+          if (selected === "" || (noteRequired && !quote.trim())) return;
           void action.run(
             [projectId, q.id, "resolve", selected, quote, grantCategory],
             (key) =>
@@ -440,17 +447,21 @@ function Decision({
               <span>
                 <span className="needs-option-head">
                   <strong>
-                    {q.trigger === "review_limit"
-                      ? (reviewOptionLabels[o.key] ?? o.key)
-                      : q.trigger === "accepted_delivery_rework"
-                        ? (reworkOptionLabels[o.key] ?? o.description)
-                        : o.key}
+                    {o.key === DECISION_OTHER_OPTION
+                      ? o.description
+                      : q.trigger === "review_limit"
+                        ? (reviewOptionLabels[o.key] ?? o.key)
+                        : q.trigger === "accepted_delivery_rework"
+                          ? (reworkOptionLabels[o.key] ?? o.description)
+                          : o.key}
                   </strong>
-                  <span>
-                    {q.trigger === "review_limit" && o.key === "raise_limit"
-                      ? "增加一轮审核额度"
-                      : o.description}
-                  </span>
+                  {o.key !== DECISION_OTHER_OPTION && (
+                    <span>
+                      {q.trigger === "review_limit" && o.key === "raise_limit"
+                        ? "增加一轮审核额度"
+                        : o.description}
+                    </span>
+                  )}
                   {q.recommended === o.key && (
                     <span className="needs-recommended">推荐</span>
                   )}
@@ -465,7 +476,7 @@ function Decision({
             </label>
           ))}
         </fieldset>
-        {canDelegate && (
+        {canDelegate && !otherChosen && (
           <label>
             <input
               type="checkbox"
@@ -495,9 +506,11 @@ function Decision({
         <label>
           {scopeRequired
             ? "本轮移出的范围（必填）"
-            : "补充说明（可选，会作为你的原话记录）"}
+            : otherChosen
+              ? "你的决定（必填，会作为你的原话记录）"
+              : "补充说明（可选，会作为你的原话记录）"}
           <Textarea
-            required={scopeRequired}
+            required={noteRequired}
             aria-label={`${q.id} 原话或补充说明`}
             value={quote}
             onChange={(e) => setQuote(e.target.value)}
@@ -506,10 +519,10 @@ function Decision({
         <div className="action-row">
           <button type="submit" disabled={action.busy || selected === ""}>
             {q.grouped_decisions
-              ? resumeOnly
+              ? resumeOnly && !otherChosen
                 ? `为 ${q.id} 增加一轮审核额度`
                 : `按所选回答 ${q.id}`
-              : resumeOnly
+              : resumeOnly && !otherChosen
                 ? "增加一轮审核额度"
                 : "按所选拍板"}
           </button>
@@ -722,6 +735,8 @@ export function MergeConfirmation({
   const [holdUntil, setHoldUntil] = useState("");
   const [overriding, setOverriding] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
+  const [answeringOther, setAnsweringOther] = useState(false);
+  const [otherWords, setOtherWords] = useState("");
   const overrideError = mergeOverrideReasonError(overrideReason);
   const overrideTrigger = useRef<HTMLButtonElement>(null);
   const overrideCancel = useRef<HTMLButtonElement>(null);
@@ -858,6 +873,16 @@ export function MergeConfirmation({
       >
         退回修改
       </button>
+      {!confirmed && (
+        <button
+          type="button"
+          className="quiet"
+          disabled={action.busy}
+          onClick={() => setAnsweringOther(true)}
+        >
+          {decisionOtherOption.description}
+        </button>
+      )}
     </>
   );
   const content = (
@@ -1205,6 +1230,49 @@ export function MergeConfirmation({
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+      {answeringOther && !confirmed && !needsTakeover && (
+        <form
+          aria-label={`${q.id} ${decisionOtherOption.description}`}
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!otherWords.trim()) return;
+            void action.run(
+              [projectId, q.id, "resolve", DECISION_OTHER_OPTION, otherWords],
+              (key) =>
+                client.recordDecision(
+                  projectId,
+                  q.id,
+                  DECISION_OTHER_OPTION,
+                  otherWords,
+                  key,
+                ),
+            );
+          }}
+        >
+          <label>
+            你的决定（必填，会作为你的原话记录）
+            <Textarea
+              aria-label={`${q.id} 其他决定`}
+              required
+              value={otherWords}
+              onChange={(e) => setOtherWords(e.target.value)}
+            />
+          </label>
+          <div className="action-row">
+            <button type="submit" disabled={action.busy || !otherWords.trim()}>
+              提交
+            </button>
+            <button
+              type="button"
+              className="quiet"
+              disabled={action.busy}
+              onClick={() => setAnsweringOther(false)}
+            >
+              取消
+            </button>
+          </div>
+        </form>
+      )}
       {returning && !needsTakeover && (
         <form
           onSubmit={(e) => {

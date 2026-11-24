@@ -101,6 +101,7 @@ export const CLI_TOOLS = {
   "rework request": "request_delivery_rework",
   "rework confirm": null,
   "rework keep": null,
+  "decision answer": null,
   "merge status": null,
   "merge confirm": null,
   "merge hold": null,

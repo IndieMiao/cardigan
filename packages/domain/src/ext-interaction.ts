@@ -4,6 +4,10 @@ import {
   currentMergeConfirmations,
   humanMergeBlockers,
 } from "./commands/merge-delegation.js";
+import {
+  DECISION_OTHER_OPTION,
+  humanDecisionOptions,
+} from "./decision-other.js";
 import { fullEventHistory } from "./event-index.js";
 import type { ExtMessageItem } from "./ext-message.js";
 import type { CardId, WorkItemId } from "./ids.js";
@@ -129,13 +133,15 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
   )
     return readOnly();
   const blockers = merge ? humanMergeBlockers(s, q) : [];
+  // C-682: "其他" follows the raiser's options; the Feishu note is its words.
   const options = h
     ? [{ key: "complete", label: "标记完成" }]
-    : (q?.options ?? [])
+    : humanDecisionOptions(q?.options ?? [])
         .filter(
           (o) =>
             !merge ||
             o.key === "hold" ||
+            o.key === DECISION_OTHER_OPTION ||
             (o.key === "merge" && !blockers.length),
         )
         .map((o) => ({ key: o.key, label: o.description }));

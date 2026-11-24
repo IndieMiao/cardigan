@@ -1,3 +1,8 @@
+import {
+  DECISION_OTHER_LABEL,
+  decisionOptionOf,
+  isDecisionOther,
+} from "../decision-other.js";
 import type { Decision, ReviewPauseInput, WorkItem } from "../entities.js";
 import { eventById, eventsForDecision } from "../event-index.js";
 import type { DecisionId } from "../ids.js";
@@ -249,7 +254,8 @@ export function recordDecisionResolution(
       `${q.id} 的暂停方案尚未全部确认；无法继续时请升级给人`,
     );
   // Validate the transition before incrementing; repeat resolutions cannot add rounds.
-  if (q.trigger === "review_limit" && resolution.option !== "pause") {
+  const other = isDecisionOther(resolution.option);
+  if (q.trigger === "review_limit" && resolution.option !== "pause" && !other) {
     ensure(
       isReviewLimitOption(resolution.option),
       "validation_failed",
@@ -388,10 +394,11 @@ export function recordDecisionResolution(
           : {}),
         option: resolution.option,
         option_description:
-          q.options.find((o) => o.key === resolution.option)?.description ?? "",
-        impact:
-          q.options.find((o) => o.key === resolution.option)?.impact ?? "",
+          decisionOptionOf(q, resolution.option)?.description ?? "",
+        impact: decisionOptionOf(q, resolution.option)?.impact ?? "",
         rationale: resolution.rationale,
+        // C-682: the owner's own words, verbatim, when "其他" was chosen.
+        ...(other ? { other: true, other_text: resolution.raw_quote } : {}),
         raised_by: q.raised_by,
         via: resolution.via,
         ...(resolution.review_limit_target
@@ -441,17 +448,20 @@ export function recordDecisionResolution(
         ...(reviewItemId ? { work_item_id: reviewItemId } : {}),
         body: withOwnerEvidence(
           resolution.owner_record,
-          resolution.human_decided_merge_basis
-            ? `${resolution.notice ?? resolution.raw_quote}\n\n拍板对应依据：\n${resolution.human_decided_merge_basis.entries.map((e) => `- ${e.decision_id} / ${e.option} → ${e.completion_id} / ${e.delivery_id} / ${e.target_sha}：${e.evidence}`).join("\n")}`
-            : resolution.merge_override
-              ? `强行确认合并；理由：${resolution.merge_override.reason}\n当时缺项：${resolution.merge_override.blockers.length ? `\n${resolution.merge_override.blockers.map((b) => `- ${b}`).join("\n")}` : "无"}\n${resolution.raw_quote}`
-              : resolution.review_limit_target && resolution.via === "delegated"
-                ? (resolution.notice ?? resolution.raw_quote)
-                : resolution.via === "delegated" &&
-                    q.category &&
-                    highRiskCategories.includes(q.category)
+          other
+            ? `${DECISION_OTHER_LABEL}：${resolution.raw_quote}`
+            : resolution.human_decided_merge_basis
+              ? `${resolution.notice ?? resolution.raw_quote}\n\n拍板对应依据：\n${resolution.human_decided_merge_basis.entries.map((e) => `- ${e.decision_id} / ${e.option} → ${e.completion_id} / ${e.delivery_id} / ${e.target_sha}：${e.evidence}`).join("\n")}`
+              : resolution.merge_override
+                ? `强行确认合并；理由：${resolution.merge_override.reason}\n当时缺项：${resolution.merge_override.blockers.length ? `\n${resolution.merge_override.blockers.map((b) => `- ${b}`).join("\n")}` : "无"}\n${resolution.raw_quote}`
+                : resolution.review_limit_target &&
+                    resolution.via === "delegated"
                   ? (resolution.notice ?? resolution.raw_quote)
-                  : resolution.raw_quote,
+                  : resolution.via === "delegated" &&
+                      q.category &&
+                      highRiskCategories.includes(q.category)
+                    ? (resolution.notice ?? resolution.raw_quote)
+                    : resolution.raw_quote,
         ),
       },
     );
