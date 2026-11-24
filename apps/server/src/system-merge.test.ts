@@ -572,9 +572,10 @@ test("C-405: unexpected confirmation exceptions are logged and counted; later ti
     const errors = vi.fn();
     const unit = f.store.uow;
     const access = vi.spyOn(f.store, "uow", "get").mockReturnValue(unit);
-    const original = unit.run.bind(unit);
+    // C-641: system commands commit through the optimistic unit of work.
+    const original = unit.optimistic.bind(unit);
     const failure = vi
-      .spyOn(unit, "run")
+      .spyOn(unit, "optimistic")
       .mockImplementationOnce(original)
       .mockImplementationOnce(() => {
         throw new Error("Synthetic confirmation storage failure");

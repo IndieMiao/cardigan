@@ -817,8 +817,27 @@ test("C-667: a closed kept shell settles only the exact idle session and keeps q
     payload: { assignment_id: a.id },
     created_at: now,
   };
+  // C-672: a retirement stop whose exit was never confirmed (the terminal
+  // stayed live) is finished by the same proof; nothing else is signalled.
+  for (const pending of [
+    { ...waiting, phase: "stopping" as const },
+    { ...waiting, phase: "stopping" as const, observe_only: true as const },
+    waiting,
+  ]) {
+    const finished = value(
+      confirmKeptShellExit(
+        owner({ idle_retirement: pending }),
+        system,
+        a.id,
+        ref,
+        io,
+      ),
+    );
+    expect(finished.data.runtime_ref).toBeNull();
+    expect(finished.data.idle_retirement).toBeUndefined();
+  }
   // Only the system, only this exact reference, never with started or
-  // stopping work, a human stop, an in-flight retirement stop or an upgrade.
+  // stopping Runs, a human stop or an upgrade.
   const refused = [
     confirmKeptShellExit(base, actor(), a.id, ref, io),
     confirmKeptShellExit(
@@ -837,13 +856,6 @@ test("C-667: a closed kept shell settles only the exact idle session and keeps q
     ),
     confirmKeptShellExit(
       { ...base, runs: [{ ...s.runs[0]!, dispatch_stop: {} } as Run] },
-      system,
-      a.id,
-      ref,
-      io,
-    ),
-    confirmKeptShellExit(
-      owner({ idle_retirement: { ...waiting, phase: "stopping" } }),
       system,
       a.id,
       ref,

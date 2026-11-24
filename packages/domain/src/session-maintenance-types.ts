@@ -27,6 +27,7 @@ export const sessionMaintenanceReasons = {
   upgrade_pending: "等待角色升级收尾",
   upgrade_capacity: "等待角色维护名额",
   exited: "终端已退出",
+  agent_exited: "Agent 已退出，终端仍在",
   stale: "状态已变，等待重新评估",
 } as const;
 export type SessionMaintenanceReason = keyof typeof sessionMaintenanceReasons;
@@ -45,6 +46,8 @@ export function sessionMaintenanceNeedsAttention(
     "no_session",
     "recent_activity",
     "retained_for_dispatch",
+    // C-672: the system closes the terminal and resumes on its own.
+    "agent_exited",
   ].includes(reason);
 }
 export interface SessionMaintenanceView {

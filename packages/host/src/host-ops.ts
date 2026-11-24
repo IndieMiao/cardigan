@@ -89,6 +89,7 @@ import {
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { hostOpsLockHolder, tryHostOpsLock } from "./host-ops-lock.js";
+import { releaseExitedAgent } from "./idle-session-retirement.js";
 import {
   incidentIdentity,
   settlementIdentityHolds,
@@ -551,6 +552,22 @@ export class HostOpsService {
           return effect.data;
         }),
       ).value;
+    // C-672: a worker terminal still live after its Agent CLI exited has
+    // nothing left to stop. Close it and settle the session through the same
+    // guarded path as maintenance (both host-ops locks, kernel exit proof, no
+    // human stop, host operation, upgrade or started Run); dispatch then
+    // starts the new session through the managed launch.
+    if (
+      tool === "host_ops_restart_assignment" &&
+      p.context_session_id === undefined
+    ) {
+      const settled = await this.settleExitedAgent(
+        project,
+        p.target_id as AssignmentId,
+      );
+      if (settled)
+        return unwrap(store.runIdempotent(invocation, () => settled)).value;
+    }
     const contextUsage =
       p.context_session_id === undefined
         ? undefined
@@ -726,6 +743,25 @@ export class HostOpsService {
         return effect.data;
       }),
     ).value;
+  }
+  private async settleExitedAgent(project: ProjectId, id: AssignmentId) {
+    const { store } = this.options;
+    const a = store.uow.read((tx) => tx.assignments.get(project, id));
+    if (!a || a.scope !== "work_item" || !a.runtime_ref) return;
+    const outcome = await releaseExitedAgent(
+      store,
+      project,
+      a,
+      this.options.runtime,
+      this.clock,
+    );
+    if (outcome !== "settled") return;
+    return {
+      assignment_id: a.id,
+      result: "agent_exited" as const,
+      message:
+        "Agent 已退出：已关闭仍在的终端并结算会话，系统按受管入口新起会话续办。",
+    };
   }
   private async observeUpstream(
     project: ProjectId,

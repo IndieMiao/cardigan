@@ -18,7 +18,7 @@ import {
 import { idleRolePolicy } from "./deployment-roles.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import {
-  releaseKeptShells,
+  releaseExitedAgents,
   retireIdleSessions,
 } from "./idle-session-retirement.js";
 import {
@@ -56,14 +56,16 @@ export async function upgradeIdleAssignmentRoles(
     Boolean(runtime.retire_idle),
   );
   try {
-    // C-667: an exited CLI in a kept terminal first becomes "no session", so
-    // the upgrade below and the next dispatch start its replacement.
-    await releaseKeptShells(
+    // C-667/C-672: an exited CLI whose terminal stayed live (a kept shell or
+    // a launcher that outlived it) first becomes "no session", so the upgrade
+    // below and the next dispatch start its replacement.
+    await releaseExitedAgents(
       store,
       project,
       runtime,
       clock,
       MAX_IDLE_ROLE_UPGRADES,
+      scan.note,
     );
     const retired = await retireIdleSessions(
       store,

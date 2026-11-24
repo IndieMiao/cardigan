@@ -31,6 +31,7 @@ import {
   dispatchHandoffs,
   dispatchStallCauses,
 } from "./dispatch-stalls.js";
+import { releaseExitedAgent } from "./idle-session-retirement.js";
 import { sessionExitProof, stallEvidence } from "./stall-evidence.js";
 import { overdueStallHandoffs } from "./stall-handoff.js";
 import { StandingPmRecovery } from "./standing-pm-recovery.js";
@@ -281,6 +282,14 @@ const withdrawnNextStep = (reason: string, exhausted: boolean) =>
       : "系统每轮巡检复查，终端和进程都确认已退出后自动续起；"
   }旧会话仍在或无法确认时保持不动，请主机运维从派发停滞核对终端归属和进程，确认已退出或空闲后用 host_ops_restart_assignment 续办。`;
 
+/** C-672: only the maintenance fence yields to a proven exited Agent. */
+function exitedAgentRow(
+  stall: Pick<DispatchStall, "restart_blocked">,
+  view: { readonly agent_exited: boolean },
+) {
+  return view.agent_exited && stall.restart_blocked === "session_maintenance";
+}
+
 /** Called by the existing host service's tick. Reads never publish or start a recovery. */
 export class StallPatrol {
   private readonly standingPm: StandingPmRecovery;
@@ -445,8 +454,11 @@ export class StallPatrol {
           ? { next_step: turnNextStep }
           : {}),
         ...view,
+        // C-672: an exited Agent in a live terminal is not held by the
+        // session maintenance fence: the managed restart settles it.
+        ...(exitedAgentRow(s, view) ? { restart_blocked: null } : {}),
         can_restart:
-          actionable.has(s) &&
+          (actionable.has(s) || exitedAgentRow(s, view)) &&
           view.can_restart &&
           !hostOpsPending(state.events, a.id) &&
           !unfinishedBellAttempts(this.store.database, project, a.id).length,
@@ -598,6 +610,22 @@ export class StallPatrol {
       return;
     }
     const view = await this.evidence(state, a, stall);
+    // C-672: the session's CLI is gone while its terminal stays live. Close
+    // that terminal and settle the session (guarded like maintenance); the
+    // dispatcher then starts a new session for the original notification.
+    if (
+      view.agent_exited &&
+      (!stall.restart_blocked || exitedAgentRow(stall, view))
+    ) {
+      await releaseExitedAgent(
+        this.store,
+        project,
+        a,
+        this.runtime,
+        this.clock,
+      );
+      return;
+    }
     // The bound empty editor must persist across the window; until then
     // keep the session and the original queue untouched, without an alert.
     if (

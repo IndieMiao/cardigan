@@ -1314,11 +1314,11 @@ export class RuntimeTargets implements Runtime {
       ...(enrolled ? { enrolled_process: enrolled } : {}),
     } as T;
   }
-  observe_kept_shell(ref: RuntimeRef, owner: RetirementIdentity) {
+  observe_agent_exit(ref: RuntimeRef, owner: RetirementIdentity) {
     return this.invoke(
       () => this.targetForRef(ref, owner.project_id),
       (runtime, target) =>
-        runtime.observe_kept_shell?.(
+        runtime.observe_agent_exit?.(
           ref,
           this.withEnrollment(ref, owner, target.execution),
         ) ?? Promise.resolve({ ok: true as const, value: false }),

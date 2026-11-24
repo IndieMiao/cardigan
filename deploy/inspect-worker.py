@@ -225,6 +225,13 @@ def darwin_retirement(c, terminal_owner=None):
             if c.get('kept_shell') is True and observed == 'exited' and kept_shell(t, p):
                 return 'shell'
             return 'kept'
+        if (c.get('agent_exit') is True and t['state'] == 'live' and t.get('keep') is False
+                and observed == 'exited' and exited_launcher(t, c)):
+            # C-672: a plain terminal can outlive its CLI (the macOS idle
+            # owner or another launcher process is still its program). Only on
+            # request, and only when the launched CLI's native birth identity
+            # is gone, report that this exact terminal no longer runs it.
+            return 'agent_exited'
         def idle(t):
             status = t.get('status')
             if status is not None and type(status) is not dict:
@@ -301,6 +308,14 @@ def kept_shell(t, p):
     except PermissionError:
         return False
     return False
+
+
+def exited_launcher(t, c):
+    # The exact named, non-removable terminal of this generation, with a
+    # positive program PID. Exit itself is proven by the CLI's birth identity.
+    pid = t.get('pid')
+    return (type(pid) is int and pid > 1 and t.get('rm') is False
+            and t.get('name') == c.get('agent_name') and type(c.get('agent_name')) is str)
 
 
 def darwin_execution(p, native):
