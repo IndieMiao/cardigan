@@ -345,7 +345,10 @@ export function eventsOfTypes(
   if (index) return index.ofTypes(types);
   const unique = [...new Set(types)];
   if (unique.length === 1) return eventsOfType(events, unique[0] as string);
-  events = fullEventHistory(events);
+  // Business types are all in the command-state array itself; only telemetry
+  // needs the complete history (and its C-655 guard on derived arrays).
+  if (unique.some((type) => TELEMETRY_EVENT_TYPES.has(type)))
+    events = fullEventHistory(events);
   let cache = byTypes.get(events);
   if (!cache) {
     cache = new Map();
@@ -375,7 +378,7 @@ export function streamEvents(
   const stream = card ?? "";
   const index = historyIndex(events);
   if (index) return index.stream(stream);
-  events = fullEventHistory(events);
+  events = completeHistory(events);
   let cache = byStream.get(events);
   if (!cache) {
     cache = new Map();

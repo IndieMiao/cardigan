@@ -7,7 +7,11 @@ import type {
   Run,
   WorkItem,
 } from "./entities.js";
-import { commandEventHistory, fullEventHistory } from "./event-index.js";
+import {
+  commandEventHistory,
+  eventsOfType,
+  fullEventHistory,
+} from "./event-index.js";
 import type { CardId, EventId } from "./ids.js";
 
 /**
@@ -285,7 +289,7 @@ export function leanCommandEvents(
   const triggerCards = all
     .filter((e) => triggers.has(e.id))
     .map((e) => e.card_id);
-  const dispatches = all.filter((e) => e.type === "github_check_dispatch");
+  const dispatches = eventsOfType(state.events, "github_check_dispatch");
   const hot = hotCardIds(state, [
     ...triggerCards,
     ...githubRunCards(dispatches, waitedGithubRuns(state.work_items)),
