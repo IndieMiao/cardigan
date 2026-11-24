@@ -9,6 +9,7 @@ import type {
 } from "@cardigan/domain";
 import {
   abortDispatch,
+  assign,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   pausedByHuman,
   pauseStandingAssignment,
@@ -47,6 +48,7 @@ import {
   type WorktreeProvider,
   worktreeProvider,
 } from "@cardigan/host";
+import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { type LaunchConfig, resolveProfile } from "@cardigan/roles";
 import {
   DEFAULT_HC_SESSION,
@@ -1020,10 +1022,12 @@ const USAGE = [
   "  cardigan assignment start <A-n> [--project <p>] [--mcp-url <url>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment stop <A-n> [--hold] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment release <A-n> [--cancel-queued-run <R-n>] [--project <p>] [--data-dir <目录>]",
+  "  cardigan assignment move <A-n> --machine <机器编号> [--cancel-queued-run <R-n>] [--project <p>] [--data-dir <目录>]",
   "  cardigan assignment attach <A-n> [--print] [--interactive] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
   "  stop：释放终端并结束正在进行的 Run（worktree 和未开始的排队 Run 保留）；确认释放后，有新通知、新指派或工作项状态变化时自动起新会话。",
   "  stop --hold：人工暂停，同时取消排队的 Run；之后不会自动起新会话，门铃排队，用 assignment start 恢复。已暂停的指派再执行 stop 仍保持暂停。",
   "  主机运维操作待处理时拒绝 stop；终端释放失败可直接重试，释放确认前不会另起会话。",
+  "  move：把尚未开始的指派一步换到另一台合格机器（取消它唯一的排队 Run、释放并以同一员工和角色重新指派），任一步失败则都不生效。",
   "  attach：输入和输出均为终端（TTY）时直接只读观察；--interactive 允许输入，--print 或非 TTY 只打印命令（默认带 --observe）。",
   "  按 Ctrl+\\ 分离退出；--interactive 下你的输入会直接发给正在工作的 Agent。",
 ].join("\n");
@@ -1034,10 +1038,11 @@ function parseArgs(args: readonly string[]) {
     sub !== "start" &&
     sub !== "stop" &&
     sub !== "attach" &&
-    sub !== "release"
+    sub !== "release" &&
+    sub !== "move"
   ) {
     throw new CliError(
-      "用法：cardigan assignment start|stop|attach|release",
+      "用法：cardigan assignment start|stop|attach|release|move",
       EXIT.usage,
       [USAGE],
     );
@@ -1071,7 +1076,96 @@ function parseArgs(args: readonly string[]) {
   return { sub, assignmentId: assignmentId as Assignment["id"], flags };
 }
 
-/** `cardigan assignment start|stop|attach|release`. */
+/**
+ * C-716 `cardigan assignment move`: release an assignment that never started
+ * and reassign its work item to a named machine with the same employee and
+ * role, in one transaction so the dispatcher cannot start it in between. The
+ * domain commands keep every check (who may release, that the queue never
+ * dispatched, that the target machine qualifies); any refusal rolls back both.
+ */
+function moveAssignment(
+  store: Store,
+  io: CliIo,
+  assignmentId: Assignment["id"],
+  flags: Readonly<Record<string, string>>,
+) {
+  const machine = flags.machine;
+  if (!machine)
+    throw new CliError(
+      "assignment move 需要 --machine <机器编号>",
+      EXIT.usage,
+      [USAGE],
+    );
+  const project_id = resolveProject(store, io, flags.project);
+  const identity = resolveCommandIdentity(io, project_id, store);
+  const fail = (error: Parameters<typeof formatCommandError>[2]) =>
+    new CliError(formatCommandError("换机", assignmentId, error), EXIT.usage);
+  return store.uow.run((tx) => {
+    const actor = identity.revalidateActor?.() ?? identity.actor;
+    const ports = {
+      clock: systemClock,
+      ids: tx.ids,
+      ...(tx.unreservedAssignment
+        ? { unreservedAssignment: tx.unreservedAssignment }
+        : {}),
+    };
+    const state = loadCommandState(tx, project_id);
+    const current = state.assignments.find((a) => a.id === assignmentId);
+    if (current?.scope !== "work_item" || current.status !== "active")
+      throw new CliError(
+        `${assignmentId} 不是在岗的工作项指派，不能换机。`,
+        EXIT.usage,
+      );
+    if (current.machine_id === machine)
+      throw new CliError(`${assignmentId} 已在 ${machine} 上。`, EXIT.usage);
+    const runs = state.runs.filter((r) => r.assignment_id === current.id);
+    if (
+      current.runtime_ref ||
+      current.session_ref ||
+      current.worktree_path ||
+      runs.some((r) => r.started_at || r.status !== "queued")
+    )
+      throw new CliError(
+        `${assignmentId} 已开始过，不跨机迁移；只有尚未开始的指派可以换机。`,
+        EXIT.usage,
+      );
+    const queued = flags["cancel-queued-run"] ?? runs[0]?.id;
+    if (flags["cancel-queued-run"] === undefined && runs.length > 1)
+      throw new CliError(
+        `${assignmentId} 有多个排队 Run，请用 --cancel-queued-run 指定要取消的那个。`,
+        EXIT.usage,
+      );
+    const released = releaseAssignment(
+      state,
+      actor,
+      {
+        assignment_id: current.id,
+        ...(queued ? { cancel_queued_run_id: queued as RunId } : {}),
+      },
+      ports,
+    );
+    if (!released.ok) throw fail(released.error);
+    persistEffect(tx, project_id, released.value);
+    const moved = assign(
+      loadCommandState(tx, project_id),
+      actor,
+      {
+        work_item_id: current.work_item_id,
+        role_id: current.role_id,
+        role_version: current.role_version,
+        ...(current.employee_id ? { employee_id: current.employee_id } : {}),
+        machine_id: machine,
+      },
+      ports,
+    );
+    // Throwing rolls back the release persisted above.
+    if (!moved.ok) throw fail(moved.error);
+    persistEffect(tx, project_id, moved.value);
+    return { from: current, to: moved.value.data };
+  });
+}
+
+/** `cardigan assignment start|stop|attach|release|move`. */
 export async function runAssignmentCommand(
   args: readonly string[],
   io: CliIo,
@@ -1082,6 +1176,18 @@ export async function runAssignmentCommand(
   }
   const { sub, assignmentId, flags } = parseArgs(args);
   const dataDir = announceDataDir(io, flags["data-dir"]);
+  if (sub === "move") {
+    const store = Store.open({ dataDir });
+    try {
+      const { from, to } = moveAssignment(store, io, assignmentId, flags);
+      io.stdout(
+        `已把 ${from.work_item_id} 从 ${from.machine_id}（${from.id}）换到 ${to.machine_id}（${to.id}）；员工和角色不变。`,
+      );
+      return EXIT.ok;
+    } finally {
+      store.close();
+    }
+  }
   if (sub === "release") {
     const store = Store.open({ dataDir });
     try {

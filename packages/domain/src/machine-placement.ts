@@ -45,6 +45,15 @@ export interface MachinePlacement {
     readonly available: boolean;
   }[];
   readonly resources?: MachineResources;
+  /**
+   * C-716: this project's private ceilings on this machine (run-capacity
+   * `projects.<id>`) with its current usage. They only rank placement; dispatch
+   * enforces the same quota separately.
+   */
+  readonly project_quota?: {
+    readonly limit?: { readonly limit: number; readonly occupied: number };
+    readonly resources?: MachineResources;
+  };
   readonly limit: number;
   /** Portion of occupied from assigned work not already holding a physical slot. */
   readonly pending_assignments?: number;

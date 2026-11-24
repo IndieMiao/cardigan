@@ -45,10 +45,17 @@ export function configureMachinePlacement(
     const preparation = allowed.size
       ? readWorktreePreparation(env, now)
       : undefined;
-    const { occupied, occupiedOwners, resourcesForMachine } =
-      runCapacitySnapshot(store, tx, limits.resourcesForMachine);
+    const { occupied, occupiedOwners, resourcesForMachine, projectUsage } =
+      runCapacitySnapshot(
+        store,
+        tx,
+        limits.resourcesForMachine,
+        limits.projectQuota,
+      );
     // Placement predicts demand; dispatch still admits these owners using physical slots only.
     const pending = new Map<string, number>();
+    // C-716: the same prediction, restricted to this project, for its own quota.
+    const pendingHere = new Map<string, number>();
     for (const [p, holding] of occupiedOwners) {
       const work = p === project ? draft : undefined;
       const runs = work?.runs ?? tx.runs.list(p);
@@ -84,8 +91,39 @@ export function configureMachinePlacement(
         )
           continue;
         pending.set(a.machine_id, (pending.get(a.machine_id) ?? 0) + 1);
+        if (p === project)
+          pendingHere.set(
+            a.machine_id,
+            (pendingHere.get(a.machine_id) ?? 0) + 1,
+          );
       }
     }
+    const projectQuota = (
+      machine: string,
+    ): Pick<MachinePlacement, "project_quota"> => {
+      const quota = limits.projectQuota(machine, project);
+      if (!quota) return {};
+      const usage = projectUsage(project, machine);
+      const resources = new Map(
+        [...quota.resources].map(([key, limit]) => [
+          key,
+          { limit, occupied: usage.resources.get(key) ?? 0 },
+        ]),
+      );
+      return {
+        project_quota: {
+          ...(quota.limit === undefined
+            ? {}
+            : {
+                limit: {
+                  limit: quota.limit,
+                  occupied: usage.occupied + (pendingHere.get(machine) ?? 0),
+                },
+              }),
+          ...(resources.size ? { resources } : {}),
+        },
+      };
+    };
     let harness: Harness | undefined;
     if (hasRemote && profile) {
       try {
@@ -143,6 +181,7 @@ export function configureMachinePlacement(
               occupied: (occupied.get(id) ?? 0) + (pending.get(id) ?? 0),
               pending_assignments: pending.get(id) ?? 0,
               resources: resourcesForMachine(id),
+              ...projectQuota(id),
             } satisfies MachinePlacement,
           ];
         }),
