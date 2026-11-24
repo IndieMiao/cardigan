@@ -173,10 +173,24 @@ try {
             y > r.top + 0.5 &&
             y < r.bottom - 0.5;
           const total = p.getTotalLength();
+          // Gaps between neighbouring lanes, as x ranges (C-668 V-3201: a
+          // line must not run down a gap).
+          const lanes = [...document.querySelectorAll(".board > *")]
+            .map((e) => e.getBoundingClientRect())
+            .filter((r) => r.width > 0);
+          const gaps = lanes
+            .slice(1)
+            .map((r, i) => [lanes[i].right - 2, r.left + 2]);
+          const samples = [];
+          let gapRun = 0,
+            run = 0;
           for (let at = 0; at <= total; at += 2) {
             const q = p.getPointAtLength(at);
             const x = q.x + origin.left,
               y = q.y + origin.top;
+            samples.push([r2(x), r2(y)]);
+            run = gaps.some(([a, b]) => x >= a && x <= b) ? run + 2 : 0;
+            gapRun = Math.max(gapRun, run);
             for (const tile of document.querySelectorAll("[data-card-id]")) {
               if (ends.includes(tile.dataset.cardId)) continue;
               if (!inside(tile.getBoundingClientRect(), x, y)) continue;
@@ -209,6 +223,8 @@ try {
             length: r2(total),
             crosses: [...crosses],
             crossesTitleLines: [...textHits],
+            gapRun,
+            samples,
             start: { x: r2(a.x + origin.left), y: r2(a.y + origin.top) },
             end: { x: r2(b.x + origin.left), y: r2(b.y + origin.top) },
             stroke: s.stroke,
@@ -299,6 +315,30 @@ try {
    * The other end sits at its card's middle; at the hovered card lines on
    * one side start at distinct heights within the spread round its middle.
    */
+  /**
+   * The longest stretch (px) of `a`, away from its ends, lying within 6px of
+   * `b`, ignoring the 24px next to every end where lines meet or cross.
+   */
+  const closeRun = (a, b) => {
+    const skip = 12;
+    const ends = [
+      a.samples[0],
+      a.samples.at(-1),
+      b.samples[0],
+      b.samples.at(-1),
+    ];
+    let best = 0,
+      run = 0;
+    for (const [x, y] of a.samples.slice(skip, -skip)) {
+      const nearEnd = ends.some(([ex, ey]) => Math.hypot(x - ex, y - ey) < 24);
+      const near =
+        !nearEnd &&
+        b.samples.some(([bx, by]) => Math.hypot(x - bx, y - by) <= 6);
+      run = near ? run + 2 : 0;
+      best = Math.max(best, run);
+    }
+    return best;
+  };
   const checkLines = (m, active, label) => {
     const near = (a, b) => Math.abs(a - b) <= 0.6;
     const atHub = { left: [], right: [] };
@@ -342,6 +382,20 @@ try {
         `${label} ${line.key}: hub end inside the card side`,
       );
     }
+    // No line runs down a lane gap, and no two lines run side by side.
+    for (const line of m.lines)
+      assert(
+        line.gapRun <= MAX_GAP_RUN,
+        `${label} ${line.key}: ${line.gapRun}px down a lane gap`,
+      );
+    for (const [i, a] of m.lines.entries())
+      for (const b of m.lines.slice(i + 1)) {
+        const run = closeRun(a, b);
+        assert(
+          run <= MAX_CLOSE_RUN,
+          `${label} ${a.key} / ${b.key}: ${run}px within 6px`,
+        );
+      }
     for (const [side, ys] of Object.entries(atHub)) {
       const mid = ys.length && ys.reduce((x, y) => x + y) / ys.length;
       const sorted = [...ys].sort((x, y) => x - y);
@@ -442,6 +496,14 @@ try {
       theme === "dark",
     ).then((r) => ({ ...r, rect }));
   };
+  /**
+   * Longest stretch a line may run inside a lane gap: enough to cross it
+   * at a slant where the board's edge limits the swing (390), far short of
+   * running down it (265–510px before V-3201).
+   */
+  const MAX_GAP_RUN = 80;
+  /** Longest stretch two lines may run within 6px of each other. */
+  const MAX_CLOSE_RUN = 40;
   const cardStatus = {
     "C-51": "done",
     "C-52": "done",

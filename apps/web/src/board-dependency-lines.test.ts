@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   curvePath,
+  handleLength,
   hubPaths,
   intersectBoxes,
   LINE_ARROW,
@@ -33,22 +34,6 @@ const cubic = (d: string) => {
   return { x0, y0, x1, y1, x2, y2, x3, y3 };
 };
 
-test("between lanes: facing edges, horizontal handles half the span apart", () => {
-  // Right edge of the left card to one arrow before the right card's left
-  // edge; handles reach half the horizontal distance out of each card.
-  expect(curvePath([330, 350], "right", [704, 550], "left")).toBe(
-    `M330 350C514 350 ${698 - 184} 550 ${704 - LINE_ARROW} 550`,
-  );
-  // Right to left: the arrow stops one arrow right of the target's edge.
-  expect(curvePath([704, 550], "left", [330, 350], "right")).toBe(
-    `M704 550C520 550 520 350 ${330 + LINE_ARROW} 350`,
-  );
-  // Nearly level, close cards still curve: the handle is at least 24px.
-  expect(cubic(curvePath([330, 100], "right", [354, 300], "left")).x1).toBe(
-    354,
-  );
-});
-
 /** The cubic's farthest x on either side, sampled every 1%. */
 const reach = (d: string) => {
   const { x0, x1, x2, x3 } = cubic(d);
@@ -60,30 +45,70 @@ const reach = (d: string) => {
   return { min: Math.min(...xs), max: Math.max(...xs) };
 };
 
-test("one lane: both ends on the same side, bowing out inside the lane gap", () => {
-  // A 16px handle; the end leaves room for the arrow.
+test("handles: half the horizontal or a share of the vertical span, capped", () => {
+  // Between lanes: ½ of the horizontal or ½ of the vertical distance, the
+  // vertical share capped at 200px; at least 24px.
+  expect(handleLength(368, 200, false)).toBe(184);
+  expect(handleLength(18, 200, false)).toBe(100);
+  expect(handleLength(18, 1000, false)).toBe(200);
+  expect(handleLength(18, 10, false)).toBe(24);
+  // One lane: 0.35 of the vertical distance, within 24–180px.
+  expect(handleLength(0, 100, true)).toBe(35);
+  expect(handleLength(0, 20, true)).toBe(24);
+  expect(handleLength(0, 1000, true)).toBe(180);
+});
+
+test("between lanes: facing edges, horizontal handles", () => {
+  // Right edge of the left card to one arrow before the right card's left
+  // edge; handles reach half the horizontal distance out of each card.
+  expect(curvePath([330, 350], "right", [704, 550], "left")).toBe(
+    `M330 350C514 350 514 550 ${704 - LINE_ARROW} 550`,
+  );
+  // Right to left: the arrow stops one arrow right of the target's edge.
+  expect(curvePath([704, 550], "left", [330, 350], "right")).toBe(
+    `M704 550C520 550 520 350 ${330 + LINE_ARROW} 350`,
+  );
+  // Neighbouring lanes far apart vertically: the handles follow the
+  // vertical distance, so the curve swings out over the cards on both
+  // sides of the gap (an S) instead of running down the gap.
+  const d = curvePath([330, 100], "right", [354, 600], "left");
+  expect([cubic(d).x1, cubic(d).x2]).toEqual([530, 348 - 200]);
+  expect(reach(d).max).toBeGreaterThan(354 + 30);
+  expect(reach(d).min).toBeLessThan(330 - 30);
+});
+
+test("handles stop at the bounds, so the curve stays inside them", () => {
+  const d = curvePath([330, 350], "right", [354, 850], "left", {
+    left: 0,
+    right: 400,
+  });
+  expect(cubic(d).x1).toBe(400);
+  expect(reach(d).min).toBeGreaterThanOrEqual(0);
+  expect(reach(d).max).toBeLessThanOrEqual(400);
+});
+
+test("one lane: both ends on the same side, arcing out over the next lane", () => {
+  // 100px apart: a 35px handle; the end leaves room for the arrow.
   expect(cubic(curvePath([680, 150], "right", [680, 250], "right"))).toEqual({
     x0: 680,
     y0: 150,
-    x1: 696,
+    x1: 715,
     y1: 150,
-    x2: 702,
+    x2: 721,
     y2: 250,
     x3: 686,
     y3: 250,
   });
-  // Near or far, the bow stays under the 16px gap between lanes.
-  for (const y of [170, 400, 900]) {
-    expect(
-      reach(curvePath([680, 150], "right", [680, y], "right")).max,
-    ).toBeLessThanOrEqual(680 + 16);
-    expect(
-      reach(curvePath([354, 150], "left", [354, y], "left")).min,
-    ).toBeGreaterThanOrEqual(354 - 16);
-  }
+  // Far apart: well past the 16px gap, at most ¾ of 180px plus the arrow.
+  const far = reach(curvePath([680, 150], "right", [680, 650], "right")).max;
+  expect(far - 680).toBeGreaterThan(100);
+  expect(far - 680).toBeLessThanOrEqual(135 + LINE_ARROW);
+  expect(
+    reach(curvePath([354, 150], "left", [354, 650], "left")).min,
+  ).toBeLessThan(354 - 100);
 });
 
-test("sides: lanes face each other; one lane bows on the preferred side if it fits", () => {
+test("sides: lanes face each other; one lane bows where it has room", () => {
   expect(linkSides(card(0, 100), card(700, 100), viewport)).toEqual({
     hub: "right",
     other: "left",
@@ -110,10 +135,13 @@ test("sides: lanes face each other; one lane bows on the preferred side if it fi
   expect(
     linkSides(card(0, 100), card(0, 500), box(10, 0, 900, 900), "left"),
   ).toEqual({ hub: "right", other: "right" });
-  // Neither side fits: keep the preferred one.
+  // Neither side fits the bow: the side with more room.
+  expect(
+    linkSides(card(0, 100), card(0, 500), box(0, 0, 400, 900), "left"),
+  ).toEqual({ hub: "right", other: "right" });
   expect(linkSides(card(0, 100), card(0, 500), box(10, 0, 300, 900))).toEqual({
-    hub: "right",
-    other: "right",
+    hub: "left",
+    other: "left",
   });
 });
 

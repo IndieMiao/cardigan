@@ -7,7 +7,11 @@
  * sides (the right edge of the left card, the left edge of the right card);
  * cards in one lane bow out of the same side. Both ends leave the edge
  * horizontally, so the curve bends smoothly and the arrow points into the
- * card. Lines that meet the hovered card on one side are spread along it.
+ * card. The handles grow with the vertical distance too (design review
+ * V-3201): neighbouring lanes swing out over the cards in an S, and one lane
+ * arcs out over its neighbour, instead of running down the narrow gap
+ * between lanes. Lines that meet the hovered card on one side are spread
+ * along it.
  */
 export interface LineBox {
   readonly left: number;
@@ -36,14 +40,16 @@ export const LINE_ARROW = 6;
 export const LINE_SPREAD = 6;
 /** Spread lines keep this far from the card's top and bottom corners. */
 const SPREAD_INSET = 12;
-/** Shortest handle between lanes, so a near-level link still curves. */
-const MIN_HANDLE = 24;
 /**
- * A same-lane link's handle. The loop bows out by ¾ of it plus half an
- * arrow (15px), inside the 16px lane gap.
+ * Handle length: the larger of half the horizontal span (between lanes
+ * only) and a share of the vertical one, within [min, max]. A same-lane
+ * loop bows out by ¾ of its handle; an S between neighbouring lanes swings
+ * about ⅓ of its handle to either side.
  */
-const LOOP_HANDLE = 16;
-const LOOP_BOW = (LOOP_HANDLE * 3) / 4 + LINE_ARROW / 2;
+const HANDLE = {
+  across: { min: 24, perHeight: 0.5, max: 200 },
+  loop: { min: 24, perHeight: 0.35, max: 180 },
+} as const;
 /** A sliver smaller than this is treated as scrolled out of view. */
 const MIN_VISIBLE = 8;
 
@@ -69,11 +75,21 @@ const edge = (box: LineBox, side: Side) =>
 const sameLane = (a: LineEnd, b: LineEnd) =>
   Math.abs(a.column.left - b.column.left) < 1;
 
+/** See `HANDLE`. */
+export function handleLength(dx: number, dy: number, loop: boolean): number {
+  const rule = loop ? HANDLE.loop : HANDLE.across;
+  const wanted = Math.max(
+    loop ? 0 : Math.abs(dx) / 2,
+    Math.min(Math.abs(dy) * rule.perHeight, rule.max),
+  );
+  return Math.max(wanted, rule.min);
+}
+
 /**
  * Which side of each card the line uses. Different lanes face each other;
  * one lane bows out on the `prefer`red side, or on the other one when the
  * preferred bow would leave the board's visible area and the other would
- * not.
+ * not; when neither fits, on the side with more room.
  */
 export function linkSides(
   hub: LineEnd,
@@ -82,13 +98,18 @@ export function linkSides(
   prefer: Side = "right",
 ): { readonly hub: Side; readonly other: Side } {
   if (sameLane(hub, other)) {
-    const fits = {
-      right:
-        Math.max(hub.box.right, other.box.right) + LOOP_BOW <= viewport.right,
-      left: Math.min(hub.box.left, other.box.left) - LOOP_BOW >= viewport.left,
+    const bow =
+      (handleLength(0, middle(hub.box) - middle(other.box), true) * 3) / 4 +
+      LINE_ARROW / 2;
+    const room = {
+      right: viewport.right - Math.max(hub.box.right, other.box.right),
+      left: Math.min(hub.box.left, other.box.left) - viewport.left,
     };
+    const spare = opposite(prefer);
     const side =
-      fits[prefer] || !fits[opposite(prefer)] ? prefer : opposite(prefer);
+      room[prefer] >= bow || (room[spare] < bow && room[prefer] >= room[spare])
+        ? prefer
+        : spare;
     return { hub: side, other: side };
   }
   return hub.column.left < other.column.left
@@ -116,23 +137,24 @@ type Point = readonly [number, number];
 /**
  * A cubic from `start` (on a card edge facing `startSide`) to one arrow
  * short of `end` (on an edge facing `endSide`). Both handles are horizontal
- * and point out of their card.
+ * and point out of their card. Handles are cut back at the edges of
+ * `bounds`, so the curve (inside its control points' hull) never leaves it.
  */
 export function curvePath(
   start: Point,
   startSide: Side,
   end: Point,
   endSide: Side,
+  bounds?: { readonly left: number; readonly right: number },
 ): string {
   const [x0, y0] = start;
   const x3 = end[0] + outward(endSide) * LINE_ARROW,
     y3 = end[1];
-  const handle =
-    startSide === endSide
-      ? LOOP_HANDLE
-      : Math.max(Math.abs(x3 - x0) / 2, MIN_HANDLE);
-  const x1 = x0 + outward(startSide) * handle,
-    x2 = x3 + outward(endSide) * handle;
+  const handle = handleLength(x3 - x0, y3 - y0, startSide === endSide);
+  const clamp = (x: number) =>
+    bounds ? Math.min(Math.max(x, bounds.left), bounds.right) : x;
+  const x1 = clamp(x0 + outward(startSide) * handle),
+    x2 = clamp(x3 + outward(endSide) * handle);
   const p = (x: number, y: number) => `${round(x)} ${round(y)}`;
   return `M${p(x0, y0)}C${p(x1, y0)} ${p(x2, y3)} ${p(x3, y3)}`;
 }
@@ -140,7 +162,7 @@ export function curvePath(
 /**
  * The path of every link of the hovered card `hub`, in the given order.
  * Same-lane links bow out on the side fewer other-lane links use (the right
- * on a tie), so they share a gap with as few lines as possible. Links
+ * on a tie), so they cross as few other lines as possible. Links
  * meeting the hub on one side are spread along it, ordered by the other
  * end's height so that neighbouring lines do not cross at the hub; the
  * other end always takes the middle of its card's side.
@@ -177,7 +199,7 @@ export function hubPaths(
         middle(link.other.box),
       ];
     return link.outgoing
-      ? curvePath(atHub, side.hub, atOther, side.other)
-      : curvePath(atOther, side.other, atHub, side.hub);
+      ? curvePath(atHub, side.hub, atOther, side.other, viewport)
+      : curvePath(atOther, side.other, atHub, side.hub, viewport);
   });
 }
