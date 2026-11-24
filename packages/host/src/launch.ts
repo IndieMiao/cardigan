@@ -882,7 +882,8 @@ async function launch(
         });
       let run: Run | undefined =
         workItem?.kind === "verify" ||
-        host.leases?.configured(project, assignment.machine_id)
+        host.leases?.configured(project, assignment.machine_id) ||
+        host.leases?.adbNeeded(project, assignment)
           ? undefined
           : dispatch();
       let waking = false;
@@ -1130,8 +1131,22 @@ async function launch(
         capabilities: role.capabilities,
       },
       launch: host.launch.config,
-      ...(input.resourceAccess
+      // An adb slot alone is not a static binding: keep the Run's port
+      // allocations (such as a private Vite port) unrestricted.
+      ...(input.resourceAccess &&
+      (input.resourceAccess.bindings.length || !input.resourceAccess.adb)
         ? { resource_bindings: input.resourceAccess.bindings }
+        : {}),
+      // C-679: read the held slot back, so a retried launch of this Run keeps it.
+      ...(host.leases?.config.adbSlots(assignment.machine_id)
+        ? {
+            adb_slot:
+              host.leases.adb.launchSlot(
+                project,
+                assignment.machine_id,
+                input.run.id,
+              ) ?? null,
+          }
         : {}),
       ...(execution.mode === "agent-ssh" && execution.env
         ? { worker_env: execution.env }

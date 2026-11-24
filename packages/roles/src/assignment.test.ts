@@ -1307,6 +1307,49 @@ describe.each([
   });
 });
 
+test("C-679 a Run's own adb slot sets its port and emulator; a pinned worker port never overrides it; no slot disables adb", () => {
+  const input = {
+    assignment: { assignment_id: "A-1", run_id: "R-1", project_id: "demo" },
+    role: roleFor("codex", "codex-agent", "coder"),
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: WORK_DIR,
+    first_prompt: "test",
+    secrets,
+    worker_env: { ANDROID_ADB_SERVER_PORT: "5137", ANDROID_HOME: "/sdk" },
+  };
+  const emulator = compileAssignmentLaunch({
+    ...input,
+    adb_slot: { slot: 1, adb_port: 15101, emulator_port: 5602 },
+  });
+  expect(emulator.env).toMatchObject({
+    ANDROID_ADB_SERVER_PORT: "15101",
+    CARDIGAN_ADB_SLOT: "1",
+    CARDIGAN_EMULATOR_PORT: "5602",
+    ANDROID_SERIAL: "emulator-5602",
+    ANDROID_HOME: "/sdk",
+  });
+  expect(emulator.env.ADB_SERVER_SOCKET).toBeUndefined();
+  expect(surface(emulator)).toContain("-port $CARDIGAN_EMULATOR_PORT");
+  const godot = compileAssignmentLaunch({
+    ...input,
+    adb_slot: { slot: 2, adb_port: 15102 },
+  });
+  expect(godot.env.ANDROID_ADB_SERVER_PORT).toBe("15102");
+  expect(godot.env.CARDIGAN_EMULATOR_PORT).toBeUndefined();
+  expect(godot.env.ANDROID_SERIAL).toBe("cardigan-unassigned");
+  expect(surface(godot)).not.toContain("CARDIGAN_EMULATOR_PORT");
+  const none = compileAssignmentLaunch({ ...input, adb_slot: null });
+  expect(none.env.ANDROID_ADB_SERVER_PORT).toBeUndefined();
+  expect(none.env.ADB_SERVER_SOCKET).toBe("localfilesystem:/dev/null");
+  expect(surface(none)).not.toContain("adb");
+  // Machines without slots keep the worker binding unchanged.
+  expect(compileAssignmentLaunch(input).env.ANDROID_ADB_SERVER_PORT).toBe(
+    "5137",
+  );
+});
+
 test("C-497 role and environment expose only this admission; no assigned device never selects user USB", () => {
   const input = {
     assignment: { assignment_id: "A-1", run_id: "R-1", project_id: "demo" },

@@ -77,8 +77,9 @@ Android 项目可在私有 `runtime-workers.yaml` 对应的 `machines[].projects
 env:
   ANDROID_HOME: /home/cg_example/Android/Sdk
   ANDROID_AVD_HOME: /home/cg_example/.android/avd
-  ANDROID_ADB_SERVER_PORT: "15037"  # 示例：换成分配给本项目的端口，不用默认 5037
 ```
+
+不要在这里写 `ANDROID_ADB_SERVER_PORT`：同一台机器上的多个 Run 会共用一个 adb 服务，一个 Run 关掉 adb 会断开别人的模拟器。改在 `run-capacity.yaml` 的机器条目里配置 `adb_slots`，系统给每个 Run 分配自己的 adb 端口和模拟器端口，Run 结束后关闭（见 [C-679 计划](plans/C-679.md)）。机器配了 `adb_slots` 而绑定仍写着这一项时，启动时忽略它，控制面启动日志会给出警告。
 
 `env` 只传给该项目在该机器上新启动的 Run 和能力检查命令，不修改账号的登录环境，也不分配端口或设备。用工具的绝对路径；如需按名称找到 `adb`，把 SDK 的 `platform-tools` 目录加到绑定的 `path`，不要设置 `env.PATH`。变更前先清退使用旧绑定的会话，再重新检查机器能力。省略 `env` 或填写 `{}` 保持原行为。
 
