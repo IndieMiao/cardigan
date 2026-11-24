@@ -54,7 +54,79 @@ function attach(
     telemetry: () => (journal ??= telemetry()),
     full: () => (full ??= build()),
   });
+  if (guarded()) for (const event of events) sources.set(event, events);
   return events;
+}
+
+/**
+ * C-655: a `filter`, `map` or spread of a command-state array is a new array
+ * without the journal, so a telemetry lookup on it silently answers without
+ * telemetry. While the guard is on (the test setup turns it on; production
+ * never pays for it), such a lookup throws instead. An array counts as derived
+ * when it has no journal or index, holds no telemetry, and every event came
+ * from a command-state array; it throws only if that source's journal has the
+ * telemetry asked for (same type on the same cards, or the same id). Fixtures
+ * and raw stream reads keep telemetry inline and stay unchecked.
+ */
+const GUARD = Symbol.for("cardigan.telemetryQueryGuard");
+type GuardHost = { [GUARD]?: boolean };
+export function setTelemetryQueryGuard(on: boolean): void {
+  (globalThis as GuardHost)[GUARD] = on;
+}
+const guarded = () => (globalThis as GuardHost)[GUARD] === true;
+// Guard only: the latest command-state array each event was seen in.
+const sources = new WeakMap<Event, readonly Event[]>();
+interface Derivation {
+  readonly source: readonly Event[];
+  readonly cards: ReadonlySet<string | undefined>;
+}
+const derivations = new WeakMap<readonly Event[], Derivation | null>();
+
+function derivation(events: readonly Event[]): Derivation | undefined {
+  if (!events.length || journals.has(events) || historyIndex(events)) return;
+  let found = derivations.get(events);
+  if (found === undefined) {
+    const source = events[0] && sources.get(events[0]);
+    found =
+      source && events.every((e) => !isTelemetryEvent(e) && sources.has(e))
+        ? { source, cards: new Set(events.map((e) => e.card_id)) }
+        : null;
+    derivations.set(events, found);
+  }
+  return found ?? undefined;
+}
+
+function lostTelemetry(what: string): never {
+  throw new Error(
+    `C-655: ${what} on an array derived from command-state events misses telemetry; derive it with flatMapEvents or appendEvents, or query the command-state array`,
+  );
+}
+
+function guardType(events: readonly Event[], type: string) {
+  if (!guarded()) return;
+  const from = derivation(events);
+  if (
+    from &&
+    eventsOfType(from.source, type).some((e) => from.cards.has(e.card_id))
+  )
+    lostTelemetry(`eventsOfType(…, "${type}")`);
+}
+
+function guardId(events: readonly Event[], id: string) {
+  if (!guarded()) return;
+  const from = derivation(events);
+  if (from && idIndex(telemetryEvents(from.source)).has(id))
+    lostTelemetry(`eventById(…, "${id}")`);
+}
+
+function guardJournal(events: readonly Event[], what: string) {
+  if (!guarded()) return;
+  const from = derivation(events);
+  if (
+    from &&
+    telemetryEvents(from.source).some((e) => from.cards.has(e.card_id))
+  )
+    lostTelemetry(what);
 }
 
 const splitParts = new WeakMap<
@@ -121,7 +193,10 @@ export function commandStreamHistory(
 
 /** Telemetry journal of a command-state event array; empty for plain arrays. */
 export function telemetryEvents(events: readonly Event[]): readonly Event[] {
-  return journals.get(events)?.telemetry() ?? noEvents;
+  const journal = journals.get(events);
+  if (journal) return journal.telemetry();
+  guardJournal(events, "telemetryEvents(…)");
+  return noEvents;
 }
 
 /**
@@ -129,8 +204,13 @@ export function telemetryEvents(events: readonly Event[]): readonly Event[] {
  * arrays (fixtures, raw stream reads) already are complete.
  */
 export function fullEventHistory(events: readonly Event[]): readonly Event[] {
-  return journals.get(events)?.full() ?? events;
+  const journal = journals.get(events);
+  if (journal) return journal.full();
+  guardJournal(events, "fullEventHistory(…)");
+  return events;
 }
+const completeHistory = (events: readonly Event[]) =>
+  journals.get(events)?.full() ?? events;
 
 /**
  * `events.flatMap(each)` (scoping, redaction, filtering), applying the same
@@ -174,7 +254,7 @@ export function eventsOfType(events: readonly Event[], type: string) {
 function keyedEvents(keys: (e: Event) => readonly unknown[]) {
   const cache = new WeakMap<readonly Event[], Map<unknown, Event[]>>();
   return (events: readonly Event[], key: unknown): readonly Event[] => {
-    events = fullEventHistory(events);
+    events = completeHistory(events);
     let index = cache.get(events);
     if (!index) {
       index = new Map();
@@ -200,6 +280,7 @@ const plain: Record<
   (events: readonly Event[], key: unknown) => readonly Event[]
 > = {
   decision_id: fieldIndex("decision_id"),
+  human_action_id: fieldIndex("human_action_id"),
   completion_id: fieldIndex("completion_id"),
   work_item_id: fieldIndex("work_item_id"),
   resume_work_items: keyedEvents((e) => {
@@ -223,14 +304,17 @@ function query(
   if (index) return index.query(kind, key);
   if (kind !== "type") return plain[kind](events, key);
   if (typeof key !== "string") return noEvents;
-  const journal = TELEMETRY_EVENT_TYPES.has(key)
-    ? journals.get(events)
-    : undefined;
-  return typeBucket(journal ? journal.telemetry() : events, key);
+  if (!TELEMETRY_EVENT_TYPES.has(key)) return typeBucket(events, key);
+  const journal = journals.get(events);
+  if (journal) return typeBucket(journal.telemetry(), key);
+  guardType(events, key);
+  return typeBucket(events, key);
 }
 
 export const eventsForDecision = (events: readonly Event[], key: string) =>
   query(events, "decision_id", key);
+export const eventsForHumanAction = (events: readonly Event[], key: string) =>
+  query(events, "human_action_id", key);
 export const eventsForCompletion = (events: readonly Event[], key: string) =>
   query(events, "completion_id", key);
 export const eventsForWorkItem = (events: readonly Event[], key: string) =>
@@ -258,7 +342,9 @@ export function eventById(
   const found = idIndex(events).get(id);
   if (found) return found;
   const journal = journals.get(events);
-  return journal && idIndex(journal.telemetry()).get(id);
+  if (journal) return idIndex(journal.telemetry()).get(id);
+  guardId(events, id);
+  return undefined;
 }
 function idIndex(events: readonly Event[]): ReadonlyMap<string, Event> {
   let index = byId.get(events);
@@ -334,6 +420,8 @@ export function appendEvents(
 ): readonly Event[] {
   if (!tail.length) return base;
   const added = [...tail];
+  // C-655: the tail copy is part of this history, not derived from it.
+  if (guarded()) derivations.set(added, null);
   const events = [...base, ...added];
   attachEventIndex(events, new AppendedIndex(base, added));
   const journal = journals.get(base);

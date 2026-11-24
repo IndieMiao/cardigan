@@ -9,6 +9,7 @@ import {
   eventById,
   eventsForCompletion,
   eventsForDecision,
+  eventsForHumanAction,
   eventsForWorkItem,
   eventsOfType,
   fullEventHistory,
@@ -58,9 +59,10 @@ function randomBatch(
     const payloads: JsonValue[] = [
       null,
       { decision_id: `Q-${pick(3)}` },
+      { human_action_id: `H-${pick(3)}`, decision_id: `Q-${pick(3)}` },
       { completion_id: `CR-${pick(3)}`, work_item_id: `W-${pick(3)}` },
       { resume_work_items: [`W-${pick(3)}`, `W-${pick(3)}`, 7] },
-      { decision_id: 3, work_item_id: ["W-1"] },
+      { decision_id: 3, human_action_id: 4, work_item_id: ["W-1"] },
       ["Q-1"],
     ];
     return {
@@ -100,6 +102,9 @@ function expectSameLookups(
   for (let n = 0; n < 4; n++) {
     expect(eventsForDecision(indexed, `Q-${n}`)).toEqual(
       eventsForDecision(copy, `Q-${n}`),
+    );
+    expect(eventsForHumanAction(indexed, `H-${n}`)).toEqual(
+      eventsForHumanAction(copy, `H-${n}`),
     );
     expect(eventsForCompletion(indexed, `CR-${n}`)).toEqual(
       eventsForCompletion(copy, `CR-${n}`),

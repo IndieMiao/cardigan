@@ -26,11 +26,17 @@ import { isTelemetryEvent } from "./telemetry.js";
 export type EventIndexKind =
   | "type"
   | "decision_id"
+  | "human_action_id"
   | "completion_id"
   | "work_item_id"
   | "resume_work_items";
 
-const FIELDS = ["decision_id", "completion_id", "work_item_id"] as const;
+const FIELDS = [
+  "decision_id",
+  "human_action_id",
+  "completion_id",
+  "work_item_id",
+] as const;
 
 /** Index keys to select: a list, or a predicate over the keys present. */
 export type IndexKeys = readonly unknown[] | ((key: unknown) => boolean);

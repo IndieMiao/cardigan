@@ -1,5 +1,6 @@
 import type { CommandState } from "./commands/core.js";
 import type { Assignment, Event, Run } from "./entities.js";
+import { eventById, eventsOfType } from "./event-index.js";
 import type { AssignmentId } from "./ids.js";
 
 const eventKeys = {
@@ -23,14 +24,13 @@ type CombinedEvent =
   | "run_inactive|run_dispatch_stalled"
   | "bell_delivery_failed|bell_delivery_attempt_failed";
 
-/** Owned by one analysis/command invocation. Never retained on CommandState or globally. */
+/**
+ * Owned by one analysis/command invocation. Never retained on CommandState or
+ * globally; event buckets are keyed by the immutable events array itself.
+ */
 export class UpstreamHealthSnapshot {
   private assignments?: Map<AssignmentId, Assignment>;
   private runs?: Map<AssignmentId, { all: Run[]; first: Map<unknown, Run> }>;
-  private events?: {
-    first: Map<unknown, Event>;
-    buckets: Map<string, Map<unknown, Event[]>>;
-  };
 
   constructor(
     private readonly state: Pick<CommandState, "events"> &
@@ -71,57 +71,65 @@ export class UpstreamHealthSnapshot {
     return this.assignmentRuns(id)?.all ?? [];
   }
 
-  private eventIndex() {
-    if (!this.events) {
-      this.events = { first: new Map(), buckets: new Map() };
-      for (const event of this.state.events) {
-        if (!this.events.first.has(event.id))
-          this.events.first.set(event.id, event);
-        if (!Object.hasOwn(eventKeys, event.type)) continue;
-        const key = eventKeys[event.type as IndexedEvent];
-        const value = (event.payload as Record<string, unknown>)[key];
-        let byValue = this.events.buckets.get(event.type);
-        if (!byValue) {
-          byValue = new Map();
-          this.events.buckets.set(event.type, byValue);
-        }
-        let bucket = byValue.get(value);
-        if (!bucket) {
-          bucket = [];
-          byValue.set(value, bucket);
-        }
-        // Preserve input order: sequence and timestamp are not ordering keys here.
-        bucket.push(event);
-        const pair =
-          event.type === "run_inactive" || event.type === "run_dispatch_stalled"
-            ? "run_inactive|run_dispatch_stalled"
-            : event.type === "bell_delivery_failed" ||
-                event.type === "bell_delivery_attempt_failed"
-              ? "bell_delivery_failed|bell_delivery_attempt_failed"
-              : undefined;
-        if (pair) {
-          let combined = this.events.buckets.get(pair);
-          if (!combined) {
-            combined = new Map();
-            this.events.buckets.set(pair, combined);
-          }
-          const ordered = combined.get(value) ?? [];
-          ordered.push(event);
-          combined.set(value, ordered);
-        }
-      }
-    }
-    return this.events;
-  }
-
   event(id: unknown) {
-    return this.eventIndex().first.get(id);
+    return typeof id === "string"
+      ? eventById(this.state.events, id)
+      : undefined;
   }
 
   matching(
     type: IndexedEvent | CombinedEvent,
     value: unknown,
   ): readonly Event[] {
-    return this.eventIndex().buckets.get(type)?.get(value) ?? [];
+    return eventBuckets(this.state.events, type).get(value) ?? noEvents;
   }
+}
+
+const noEvents: readonly Event[] = Object.freeze([]);
+/**
+ * C-670: buckets keyed by the immutable events array (C-221), shared by every
+ * snapshot of the same history. Single types read the typed index, so no
+ * lookup walks the whole history; a combined pair keeps input order.
+ */
+const bucketCache = new WeakMap<
+  readonly Event[],
+  Map<string, ReadonlyMap<unknown, readonly Event[]>>
+>();
+function eventBuckets(
+  events: readonly Event[],
+  type: IndexedEvent | CombinedEvent,
+): ReadonlyMap<unknown, readonly Event[]> {
+  let cache = bucketCache.get(events);
+  if (!cache) {
+    cache = new Map();
+    bucketCache.set(events, cache);
+  }
+  let buckets = cache.get(type);
+  if (!buckets) {
+    const map = new Map<unknown, Event[]>();
+    for (const event of typedEvents(events, type)) {
+      const key = eventKeys[event.type as IndexedEvent];
+      const value = (event.payload as Record<string, unknown>)[key];
+      const bucket = map.get(value);
+      if (bucket) bucket.push(event);
+      else map.set(value, [event]);
+    }
+    buckets = map;
+    cache.set(type, buckets);
+  }
+  return buckets;
+}
+function typedEvents(
+  events: readonly Event[],
+  type: IndexedEvent | CombinedEvent,
+): readonly Event[] {
+  const [first, second] = type.split("|") as [IndexedEvent, IndexedEvent?];
+  const head = eventsOfType(events, first);
+  if (!second) return head;
+  const tail = eventsOfType(events, second);
+  if (!head.length) return tail;
+  if (!tail.length) return head;
+  // Both types occur: interleave in input order (one identity pass).
+  const wanted = new Set<Event>([...head, ...tail]);
+  return events.filter((e) => wanted.has(e));
 }

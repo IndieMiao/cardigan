@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  type Assignment,
   type CommandState,
   deploymentAuditedVersion,
   eventsOfType,
@@ -368,17 +369,85 @@ function recordLaunchCheck(
   });
 }
 
+/**
+ * The newest role version a standing Assignment should rotate to: only one an
+ * audited system upgrade reaches (V-3037:1), an upgrade audit to exactly that
+ * version or a metadata-only audit carrying one with the same policy and
+ * launch fields. Launchability and idleness are judged by the caller.
+ */
+function rotationTarget(state: CommandState, previous: Assignment) {
+  if (
+    previous.scope !== "standing" ||
+    previous.status !== "active" ||
+    previous.external
+  )
+    return undefined;
+  const latest = state.roles
+    .filter((r) => r.role_id === previous.role_id)
+    .sort((a, b) => b.role_version - a.role_version)[0];
+  if (!latest || latest.role_version <= previous.role_version) return undefined;
+  const audited = deploymentAuditedVersion(
+    state,
+    previous.role_id,
+    latest.role_version,
+  );
+  if (audited === undefined || audited <= previous.role_version)
+    return undefined;
+  return latest;
+}
+
+/** A session with an unfinished Run keeps its pinned version until idle. */
+function rotationBusy(state: CommandState, previous: Assignment) {
+  return state.runs.some(
+    (r) =>
+      r.assignment_id === previous.id &&
+      !["completed", "failed", "cancelled"].includes(r.status),
+  );
+}
+
+function rotatedPm(state: CommandState) {
+  return state.assignments.find(
+    (a) =>
+      a.role_id === "pm" &&
+      a.standing_mode === "ops" &&
+      a.status === "active" &&
+      !state.runs.some((r) => r.assignment_id === a.id) &&
+      eventsOfType(state.events, "standing_pm_rotated").some(
+        (e) =>
+          e.actor.kind === "system" &&
+          (e.payload as { assignment_id?: string }).assignment_id === a.id,
+      ),
+  )?.id;
+}
+
 /** Retry every maintenance tick; busy sessions retain their pinned version until idle. */
 export function rotateIdleDeployedRoles(
   store: Store,
   project: ProjectId,
   loadState: (
-    tx: StoreTransactionContext,
+    tx: Parameters<typeof loadCommandState>[0],
     project: ProjectId,
   ) => CommandState = loadCommandState,
   /** Valid launch profiles, known in a deployment only. */
   profiles?: () => ReadonlySet<string>,
 ) {
+  // C-641: decide in a read snapshot; only pending work takes the writer lock,
+  // and the locked pass below re-evaluates everything.
+  const settled = store.uow.optimistic(project, (tx) => {
+    const state = loadState(tx, project);
+    return {
+      value:
+        pendingRoleConflictActions(state).length ||
+        // A deployment records launch checks for busy sessions too.
+        state.assignments.some(
+          (a) =>
+            rotationTarget(state, a) && (profiles || !rotationBusy(state, a)),
+        )
+          ? undefined
+          : { pm: rotatedPm(state) },
+    };
+  });
+  if (settled) return settled.pm;
   return store.uow.run((tx) => {
     let state = loadState(tx, project);
     const actor = { kind: "system" as const, project_id: project };
@@ -399,28 +468,8 @@ export function rotateIdleDeployedRoles(
       if (effect.changes.length) state = loadState(tx, project);
     }
     for (const previous of state.assignments) {
-      if (
-        previous.scope !== "standing" ||
-        previous.status !== "active" ||
-        previous.external
-      )
-        continue;
-      const latest = state.roles
-        .filter((r) => r.role_id === previous.role_id)
-        .sort((a, b) => b.role_version - a.role_version)[0];
-      // Only to a version an audited system upgrade reaches (V-3037:1): an
-      // upgrade audit to exactly that version, or a metadata-only audit that
-      // carries one with the same policy and launch fields.
-      const audited =
-        latest &&
-        deploymentAuditedVersion(state, previous.role_id, latest.role_version);
-      if (
-        !latest ||
-        latest.role_version <= previous.role_version ||
-        audited === undefined ||
-        audited <= previous.role_version
-      )
-        continue;
+      const latest = rotationTarget(state, previous);
+      if (!latest) continue;
       // The new session must be launchable. A deployment checks the profile
       // and records its conclusion, busy session or not; between deployments
       // that conclusion stands (V-3073:1), else only an unchanged profile is
@@ -465,14 +514,7 @@ export function rotateIdleDeployedRoles(
         );
         continue;
       }
-      if (
-        state.runs.some(
-          (r) =>
-            r.assignment_id === previous.id &&
-            !["completed", "failed", "cancelled"].includes(r.status),
-        )
-      )
-        continue;
+      if (rotationBusy(state, previous)) continue;
       const rotated =
         previous.role_id === "pm"
           ? rotatePmAfterDeployment(
@@ -496,17 +538,6 @@ export function rotateIdleDeployedRoles(
       persistPmRotation(store, tx, project, rotated.value, clock.now());
       state = loadState(tx, project);
     }
-    return state.assignments.find(
-      (a) =>
-        a.role_id === "pm" &&
-        a.standing_mode === "ops" &&
-        a.status === "active" &&
-        !state.runs.some((r) => r.assignment_id === a.id) &&
-        eventsOfType(state.events, "standing_pm_rotated").some(
-          (e) =>
-            e.actor.kind === "system" &&
-            (e.payload as { assignment_id?: string }).assignment_id === a.id,
-        ),
-    )?.id;
+    return rotatedPm(state);
   });
 }
