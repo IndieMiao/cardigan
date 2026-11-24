@@ -280,3 +280,57 @@ describe("C-663 local session exit proof", () => {
     ).toBe("unproven");
   });
 });
+
+describe("C-672 exited Agent in a live terminal", () => {
+  const owner = { ...a, scope: "work_item" } as Assignment;
+  const owned = { ...state, assignments: [owner] } as unknown as CommandState;
+  const live = (exited: boolean) => ({
+    ...runtimeWith(
+      { ok: true, value: { process: "alive", agent: "unknown" } },
+      { ok: true, value: "unknown" },
+    ),
+    observe_agent_exit: vi.fn(async () => ({ ok: true, value: exited })),
+  });
+
+  test("the worker's proof shows the Agent exited and lets Ops restart without stopping anything", async () => {
+    remoteWorker(() => true);
+    const runtime = live(true) as unknown as Runtime;
+    const view = await stallEvidence(owned, owner, runtime, execution);
+    expect(view).toMatchObject({
+      agent_exited: true,
+      process_state: "agent_exited",
+      can_restart: true,
+    });
+    expect(runtime.observe_agent_exit).toHaveBeenCalledWith(ref, {
+      project_id: "fixture",
+      assignment_id: owner.id,
+    });
+    expect(runtime.release).not.toHaveBeenCalled();
+    expect(runtime.retire_idle).not.toHaveBeenCalled();
+  });
+
+  test("a running CLI, a local or unbound session and a failed probe stay live sessions", async () => {
+    remoteWorker(() => true);
+    const alive = live(false) as unknown as Runtime;
+    expect(await stallEvidence(owned, owner, alive, execution)).toMatchObject({
+      agent_exited: false,
+      process_state: "alive",
+      can_restart: false,
+    });
+    const failing = {
+      ...live(true),
+      observe_agent_exit: vi.fn(async () => {
+        throw new Error("worker unavailable");
+      }),
+    } as unknown as Runtime;
+    expect(await stallEvidence(owned, owner, failing, execution)).toMatchObject(
+      { agent_exited: false, can_restart: false },
+    );
+    // Without the pinned worker binding nothing is asked.
+    const unbound = live(true) as unknown as Runtime;
+    expect(await stallEvidence(owned, owner, unbound, undefined)).toMatchObject(
+      { agent_exited: false, can_restart: false },
+    );
+    expect(unbound.observe_agent_exit).not.toHaveBeenCalled();
+  });
+});

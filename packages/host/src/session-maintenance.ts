@@ -103,6 +103,22 @@ export function sessionMaintenanceScan(
             let reason = candidate.reason;
             if (reason === "idle_candidate" && !supported)
               reason = "unsupported_capability";
+            // C-672: a proven exited Agent in a live terminal is not a live
+            // session, whatever window or retirement fence was reported.
+            if (
+              observation === "agent_exited" &&
+              [
+                "recent_activity",
+                "activity_unknown",
+                "identity_unproven",
+                "unsupported_capability",
+                "idle_candidate",
+                "observation_incomplete",
+                "retained_for_dispatch",
+                "retirement_pending",
+              ].includes(reason)
+            )
+              reason = "agent_exited";
             // Busy/excluded facts outrank runtime or policy observations.
             if (
               [

@@ -202,6 +202,39 @@ with contextlib.ExitStack() as stack:
     t.clear(); t.update(cli_view)
     t['keep'] = False
     assert observe() == 'unknown'
+    # C-672: a plain terminal whose program (the idle owner) outlived the
+    # launched CLI. Only an opted-in probe names it, only for this exact named
+    # terminal, and only after the CLI's birth identity is gone.
+    c['agent_exit'] = 'yes'
+    assert observe() == 'unknown'  # the opt-in is a literal True only
+    c['agent_exit'] = True
+    assert observe() == 'agent_exited'
+    t['pid'] = 41
+    assert observe() == 'agent_exited'  # the owner is still the terminal program
+    for changed in (dict(rm=True), dict(rm=None), dict(name='other'), dict(pid=None), dict(pid=1), dict(pid='41')):
+        saved_view = dict(t)
+        t.update(changed)
+        assert observe() == 'unknown', changed
+        t.clear(); t.update(saved_view)
+    named, c['agent_name'] = c['agent_name'], None
+    t['name'] = None
+    assert observe() == 'unknown'  # an unnamed binding never matches
+    c['agent_name'] = t['name'] = named
+    native.return_value = ('boot', 1234, '1:2', 42)
+    assert observe() != 'agent_exited'  # the launched CLI itself is still alive
+    native.side_effect = ValueError('identity_unknown')
+    poll.side_effect = PermissionError()
+    assert observe() == 'unknown'  # an unreadable identity is not exit
+    native.side_effect = None
+    poll.side_effect = None
+    poll.reset_mock()
+    native.return_value = ('boot', 1234, '2:3', 42)
+    t['keep'] = True
+    assert observe() == 'kept'  # a kept terminal keeps its own shell rule
+    t['keep'] = False
+    del c['agent_exit']
+    assert observe() == 'unknown'  # other callers keep the conservative answer
+    t['pid'] = 42
     poll.assert_not_called()
     t['state'] = 'finished'
     native.side_effect = ValueError('identity_unknown')

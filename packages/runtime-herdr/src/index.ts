@@ -1156,18 +1156,20 @@ export class HerdrRuntime implements Runtime {
       basis: "bound_idle_prompt" as const,
     };
   }
-  /** C-667: only a macOS worker can prove a kept terminal's CLI is gone. */
-  observe_kept_shell(ref: RuntimeRef, owner: RetirementIdentity) {
+  /** C-667/C-672: only a macOS worker can prove that a still-live terminal
+   * no longer runs its launched CLI: the idle shell of a kept terminal, or a
+   * plain terminal whose launcher (the idle owner) outlived the CLI. */
+  observe_agent_exit(ref: RuntimeRef, owner: RetirementIdentity) {
     return result(async () => {
       this.checkRef(ref);
       if (this.execution.mode !== "agent-ssh" || !this.execution.macosCore)
         return false;
-      return (
-        (await darwinRetirementObservation(this.execution, ref, {
-          ...owner,
-          kept_shell: true,
-        })) === "shell"
-      );
+      const observed = await darwinRetirementObservation(this.execution, ref, {
+        ...owner,
+        kept_shell: true,
+        agent_exit: true,
+      });
+      return observed === "shell" || observed === "agent_exited";
     });
   }
   observe_retirement(
@@ -1181,7 +1183,9 @@ export class HerdrRuntime implements Runtime {
       this.checkRef(ref);
       if (this.execution.mode === "agent-ssh" && this.execution.macosCore) {
         const { observed } = await this.darwinTurn(ref, identity);
-        return observed === "kept" || observed === "shell"
+        return observed === "kept" ||
+          observed === "shell" ||
+          observed === "agent_exited"
           ? "unknown"
           : observed;
       }

@@ -176,18 +176,19 @@ export async function observeRetirementForDispatch(
   }
 }
 
-/** C-667: a kept terminal whose CLI exited may be closed only while nothing
- * of this owner runs or is being stopped, started or woken. */
-function keptShellOwner(store: Store, state: CommandState, a: Assignment) {
+/** C-667/C-672: a live terminal whose CLI exited may be closed only while
+ * nothing of this owner runs or is being stopped, started or woken. A pending
+ * retirement (waiting, handed off, or a stop whose exit was never confirmed)
+ * does not keep it: the proof finishes that retirement. */
+function exitedAgentOwner(store: Store, state: CommandState, a: Assignment) {
   if (
     a.scope !== "work_item" ||
     a.external ||
     a.status !== "active" ||
     !a.runtime_ref ||
-    // Only a macOS worker can prove the launched CLI left a shell.
+    // Only a macOS worker can prove the launched CLI is gone.
     !darwinWorker(state, a) ||
     a.role_upgrade ||
-    (a.idle_retirement?.phase === "stopping" && !a.idle_retirement.handoff) ||
     stoppedByHuman(state.events, a.id) ||
     hostOpsPending(state.events, a.id) ||
     runsOf(state.runs, a.id).some(
@@ -220,87 +221,106 @@ function keptShellOwner(store: Store, state: CommandState, a: Assignment) {
   );
 }
 
+export type ExitedAgentRelease =
+  /** The terminal was closed and the session settled; dispatch starts anew. */
+  | "settled"
+  /** Proven exited, but the terminal could not be closed or settled now. */
+  | "proven"
+  /** Not eligible, not live, not proven or locked: nothing was changed. */
+  | "skipped";
+
 /**
- * C-667: before C-667 a replaced session was started with hc --keep. When its
- * CLI exits, the terminal stays live with a shell: bells, idle retirement and
- * role upgrades all saw a live session and nothing resumed until a human
- * stop/start. Once the worker proves the launched CLI and its process group
- * are gone and only an idle shell remains, close that terminal and settle the
- * session so the existing upgrade and dispatch paths start a fresh one.
+ * C-667/C-672: one owner. When the worker proves that this exact live
+ * terminal no longer runs its launched CLI (an idle shell of a kept terminal,
+ * or a launcher such as the macOS idle owner that outlived the CLI), close
+ * that terminal and settle the session so the existing upgrade and dispatch
+ * paths start a fresh one. Holds both host-ops locks and re-reads the owner
+ * before closing; never signals a live CLI.
  */
-export async function releaseKeptShells(
+export async function releaseExitedAgent(
+  store: Store,
+  project: ProjectId,
+  a: Assignment,
+  runtime: Runtime,
+  clock: Clock,
+): Promise<ExitedAgentRelease> {
+  const ref = a.runtime_ref;
+  if (!ref || !runtime.observe_agent_exit) return "skipped";
+  const observed = await runtime.status(ref).catch(() => undefined);
+  if (!observed?.ok || observed.value.process !== "alive") return "skipped";
+  const unlock = await tryHostOpsLock(store, project, a.id);
+  if (!unlock) return "skipped";
+  try {
+    const unlockLaunch = await tryHostOpsLock(store, project, a.id, "launch");
+    if (!unlockLaunch) return "skipped";
+    try {
+      const current = () =>
+        store.uow.read((tx) => {
+          const state = loadCommandState(tx, project);
+          const owner = state.assignments.find((v) => v.id === a.id);
+          return owner &&
+            JSON.stringify(owner.runtime_ref) === JSON.stringify(ref) &&
+            exitedAgentOwner(store, state, owner)
+            ? owner
+            : undefined;
+        });
+      if (!current()) return "skipped";
+      const owner = { project_id: project, assignment_id: a.id };
+      const exited = await runtime
+        .observe_agent_exit(ref, owner)
+        .catch(() => undefined);
+      if (!exited?.ok || !exited.value) return "skipped";
+      if (!current()) return "proven";
+      const closed = await runtime
+        .release(ref, { force: true })
+        .catch(() => undefined);
+      if (!closed?.ok) return "proven";
+      return store.uow.run((tx) => {
+        const effect = confirmKeptShellExit(
+          loadCommandState(tx, project),
+          { kind: "system", project_id: project },
+          a.id,
+          ref,
+          { ids: tx.ids, clock },
+        );
+        // A changed owner keeps its reference; the closed terminal then
+        // reads as not found and takes the ordinary replacement path.
+        if (!effect.ok) return "proven" as const;
+        persistEffect(tx, project, effect.value);
+        revokeRetiredTokens(tx, project, a.id);
+        return "settled" as const;
+      });
+    } finally {
+      await unlockLaunch();
+    }
+  } catch {
+    console.error("Terminal of an exited Agent could not be settled");
+    return "skipped";
+  } finally {
+    await unlock();
+  }
+}
+
+/** C-667/C-672: every eligible owner of this project, bounded per pass. */
+export async function releaseExitedAgents(
   store: Store,
   project: ProjectId,
   runtime: Runtime,
   clock: Clock,
   limit: number,
+  note?: ReturnType<typeof sessionMaintenanceScan>["note"],
 ) {
-  if (!runtime.observe_kept_shell) return 0;
+  if (!runtime.observe_agent_exit) return 0;
   const candidates = store.uow.read((tx) => {
     const state = loadCommandState(tx, project);
-    return state.assignments.filter((a) => keptShellOwner(store, state, a));
+    return state.assignments.filter((a) => exitedAgentOwner(store, state, a));
   });
   let released = 0;
   for (const a of candidates) {
     if (released >= limit) break;
-    const ref = a.runtime_ref;
-    if (!ref) continue;
-    const observed = await runtime.status(ref).catch(() => undefined);
-    if (
-      !observed?.ok ||
-      observed.value.process !== "alive" ||
-      !observed.value.kept
-    )
-      continue;
-    const unlock = await tryHostOpsLock(store, project, a.id);
-    if (!unlock) continue;
-    try {
-      const unlockLaunch = await tryHostOpsLock(store, project, a.id, "launch");
-      if (!unlockLaunch) continue;
-      try {
-        const current = () =>
-          store.uow.read((tx) => {
-            const state = loadCommandState(tx, project);
-            const owner = state.assignments.find((v) => v.id === a.id);
-            return owner &&
-              JSON.stringify(owner.runtime_ref) === JSON.stringify(ref) &&
-              keptShellOwner(store, state, owner)
-              ? owner
-              : undefined;
-          });
-        if (!current()) continue;
-        const owner = { project_id: project, assignment_id: a.id };
-        const shell = await runtime
-          .observe_kept_shell(ref, owner)
-          .catch(() => undefined);
-        if (!shell?.ok || !shell.value || !current()) continue;
-        const closed = await runtime
-          .release(ref, { force: true })
-          .catch(() => undefined);
-        if (!closed?.ok) continue;
-        released++;
-        store.uow.run((tx) => {
-          const effect = confirmKeptShellExit(
-            loadCommandState(tx, project),
-            { kind: "system", project_id: project },
-            a.id,
-            ref,
-            { ids: tx.ids, clock },
-          );
-          // A changed owner keeps its reference; the closed terminal then
-          // reads as not found and takes the ordinary replacement path.
-          if (!effect.ok) return;
-          persistEffect(tx, project, effect.value);
-          revokeRetiredTokens(tx, project, a.id);
-        });
-      } finally {
-        await unlockLaunch();
-      }
-    } catch {
-      console.error("Kept terminal of an exited Agent could not be settled");
-    } finally {
-      await unlock();
-    }
+    const outcome = await releaseExitedAgent(store, project, a, runtime, clock);
+    if (outcome === "settled") released++;
+    else if (outcome === "proven") note?.(a.id, "agent_exited");
   }
   return released;
 }

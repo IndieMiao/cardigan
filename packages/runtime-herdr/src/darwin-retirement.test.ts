@@ -102,6 +102,26 @@ test("C-667: only the kept-shell probe asks for and accepts the shell verdict", 
   ]);
   expect(probe.mock.calls[1]?.[1]).not.toHaveProperty("kept_shell");
 });
+test("C-672: only the agent-exit probe asks for and accepts the exited-CLI verdict", async () => {
+  const probe = vi.fn(async () => "agent_exited");
+  expect(
+    await darwinRetirementObservation(
+      execution,
+      ref,
+      { ...owner, agent_exit: true },
+      probe,
+    ),
+  ).toBe("agent_exited");
+  // Every other caller (owner stop, retirement, wake) sees no proof.
+  expect(await darwinRetirementObservation(execution, ref, owner, probe)).toBe(
+    "unknown",
+  );
+  expect(probe.mock.calls.map(([, c]) => c)).toMatchObject([
+    { agent_exit: true, require_idle: false },
+    { require_idle: false },
+  ]);
+  expect(probe.mock.calls[1]?.[1]).not.toHaveProperty("agent_exit");
+});
 test("Darwin kernel identity, PID reuse, kept shell, permission, timeout and changed generation", () => {
   execFileSync("python3", [
     "-IB",
