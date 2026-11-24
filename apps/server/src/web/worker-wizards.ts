@@ -82,6 +82,8 @@ interface Session {
      * was already known on this host (its limit stays as it is).
      */
     run_limit: { value: number; state: "pending" | "applied" | "kept" };
+    /** The registration wrote the limit (checked again when the check ends). */
+    limit_written?: boolean;
   };
 }
 /**
@@ -325,10 +327,21 @@ export class WorkerWizards {
    */
   private registered(s: Session) {
     return (tx: StoreTransactionContext, first: boolean) => {
-      const wanted = s.pairing?.run_limit;
-      if (wanted?.state !== "pending") return;
-      wanted.state = "kept";
-      if (!first || readRunLimit(this.store.database, s.machine)) return;
+      const pairing = s.pairing;
+      const wanted = pairing?.run_limit;
+      if (!pairing || wanted?.state !== "pending") return;
+      // Also a machine some project ran work on without registering it
+      // (a legacy executor) keeps its limit.
+      if (
+        !first ||
+        readRunLimit(this.store.database, s.machine) ||
+        this.store
+          .listProjects()
+          .some((p) =>
+            tx.assignments.list(p.id).some((a) => a.machine_id === s.machine),
+          )
+      )
+        return;
       const result = setRunLimit(
         { kind: "human", project_id: s.project },
         { machine_id: s.machine, limit: wanted.value },
@@ -349,7 +362,9 @@ export class WorkerWizards {
       // Only a hint: a limit the host refuses leaves its default in place.
       if (!result.ok) return;
       persistRunLimitEffect(this.store.database, tx, result.value);
-      wanted.state = "applied";
+      // The outcome is read back once the check ends: this transaction may
+      // still roll back.
+      pairing.limit_written = true;
     };
   }
   /** C-707: the report once the checks passed; owner-only like the view. */
@@ -422,9 +437,17 @@ export class WorkerWizards {
     const done = check.done.then(
       (ok) => {
         s.phase = ok ? "passed" : "failed";
-        // Registered before this wizard (another project or round): unchanged.
-        if (ok && s.pairing?.run_limit.state === "pending")
-          s.pairing.run_limit.state = "kept";
+        // Applied only when the registration that wrote it committed;
+        // otherwise the machine was known before and keeps its limit. A
+        // failed round leaves it pending for the next one.
+        const pairing = s.pairing;
+        if (ok && pairing?.run_limit.state === "pending")
+          pairing.run_limit.state =
+            pairing.limit_written &&
+            readRunLimit(this.store.database, s.machine)?.limit ===
+              pairing.run_limit.value
+              ? "applied"
+              : "kept";
       },
       (e) => {
         s.phase = "failed";

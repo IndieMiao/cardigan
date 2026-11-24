@@ -193,7 +193,15 @@ def gpu_names():
 
 
 def hardware_facts(os_name, root_readonly):
-    """C-707: for the Workbench's onboarding report only; best effort."""
+    """C-707: for the Workbench's onboarding report only; best effort, so
+    nothing here can stop the pairing."""
+    try:
+        return collect_hardware(os_name, root_readonly)
+    except Exception:
+        return {}
+
+
+def collect_hardware(os_name, root_readonly):
     facts = {}
     cpu = cpu_model()
     if cpu:

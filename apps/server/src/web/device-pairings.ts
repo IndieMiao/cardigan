@@ -126,25 +126,15 @@ export function parseDevice(value: unknown): PairingDevice {
   ];
   if (Object.keys(v).some((k) => !keys.includes(k))) throw invalidDevice();
   const { hostname, os, arch, address, free_id, system, root_readonly } = v;
+  // C-707: a malformed hardware fact is dropped, never a reason to refuse
+  // the pairing: the report only shows it as not reported.
   const { cpu, cpu_cores, memory_bytes, gpu } = v;
   const { disk_path, disk_total_bytes, disk_free_bytes } = v;
-  if (
-    (cpu !== undefined && !factText(cpu, 120)) ||
-    (cpu_cores !== undefined &&
-      (!factCount(cpu_cores, 1) || (cpu_cores as number) > 4096)) ||
-    (memory_bytes !== undefined && !factCount(memory_bytes, 1)) ||
-    (gpu !== undefined && !factText(gpu, 160)) ||
-    // The disk comes whole: where, how big and how much is free.
-    (disk_path !== undefined ||
-    disk_total_bytes !== undefined ||
-    disk_free_bytes !== undefined
-      ? !DISK_PATHS.includes(disk_path as DiskPath) ||
-        !factCount(disk_total_bytes, 1) ||
-        !factCount(disk_free_bytes, 0) ||
-        (disk_free_bytes as number) > (disk_total_bytes as number)
-      : false)
-  )
-    throw invalidDevice();
+  const disk =
+    DISK_PATHS.includes(disk_path as DiskPath) &&
+    factCount(disk_total_bytes, 1) &&
+    factCount(disk_free_bytes, 0) &&
+    (disk_free_bytes as number) <= (disk_total_bytes as number);
   if (
     typeof hostname !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/u.test(hostname) ||
@@ -172,18 +162,21 @@ export function parseDevice(value: unknown): PairingDevice {
     free_id,
     ...(system === undefined ? {} : { system: system.trim() }),
     ...(root_readonly === true ? { root_readonly } : {}),
-    ...(typeof cpu === "string" ? { cpu: cpu.trim() } : {}),
-    ...(typeof cpu_cores === "number" ? { cpu_cores } : {}),
-    ...(typeof memory_bytes === "number" ? { memory_bytes } : {}),
-    ...(typeof disk_total_bytes === "number" &&
-    typeof disk_free_bytes === "number"
+    ...(factText(cpu, 120) ? { cpu: (cpu as string).trim() } : {}),
+    ...(factCount(cpu_cores, 1) && (cpu_cores as number) <= 4096
+      ? { cpu_cores: cpu_cores as number }
+      : {}),
+    ...(factCount(memory_bytes, 1)
+      ? { memory_bytes: memory_bytes as number }
+      : {}),
+    ...(disk
       ? {
           disk_path: disk_path as DiskPath,
-          disk_total_bytes,
-          disk_free_bytes,
+          disk_total_bytes: disk_total_bytes as number,
+          disk_free_bytes: disk_free_bytes as number,
         }
       : {}),
-    ...(typeof gpu === "string" ? { gpu: gpu.trim() } : {}),
+    ...(factText(gpu, 160) ? { gpu: (gpu as string).trim() } : {}),
   };
 }
 /** `ABCD-EFGH` style input to the stored form, or undefined when malformed. */

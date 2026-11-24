@@ -274,7 +274,9 @@ export function MachinesSettings({
   const linked = useSyncExternalStore(subscribePairingCode, pendingPairingCode);
   useEffect(() => {
     if (!linked || !pairable || wizard) return;
-    setWizard({ pairing: { code: takePairingCode() } });
+    // Taken once (StrictMode runs this twice): only a real code opens it.
+    const code = takePairingCode();
+    if (code) setWizard({ pairing: { code } });
   }, [linked, pairable, wizard]);
   const closeWizard = (exit: WizardExit) => {
     setWizard(false);

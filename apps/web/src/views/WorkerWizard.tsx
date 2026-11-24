@@ -427,6 +427,8 @@ export function WorkerWizardDrawer({
   >(() => (!pairingStart && storedWizard(projectId) ? "loading" : "ok"));
   const [busy, setBusy] = useState<string>();
   const sending = useRef(false);
+  /** Steps sent so far: a read begun before the latest one is outdated. */
+  const sends = useRef(0);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState<(() => void) | undefined>();
   const [message, setMessage] = useNotice();
@@ -480,9 +482,15 @@ export function WorkerWizardDrawer({
     async (id: string, keep = false): Promise<void> => {
       const get = client.workerWizard;
       if (!get) return;
+      // A step sent after this read began answers for itself (C-707).
+      const sent = sends.current;
       try {
         const { wizard: next } = await get.call(client, projectId, id);
         if (!alive.current || current.current !== id) return;
+        if (sends.current !== sent) {
+          setTick((n) => n + 1);
+          return;
+        }
         setReadState("ok");
         if (!keep) setError("");
         setRetry(undefined);
@@ -584,6 +592,7 @@ export function WorkerWizardDrawer({
   ) => {
     if (sending.current) return;
     sending.current = true;
+    sends.current += 1;
     setBusy(name);
     setError("");
     setRetry(undefined);

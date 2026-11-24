@@ -285,33 +285,27 @@ test.runIf(process.platform === "linux")(
         { device: { ...device, root_readonly: "yes" } },
         { device: { ...device, token: "x" } },
         { device, extra: true },
-        // C-707: hardware facts are optional, but well formed when sent.
-        { device: { ...device, cpu: "a\u0007b" } },
-        { device: { ...device, cpu: "x".repeat(121) } },
-        { device: { ...device, cpu_cores: 0 } },
-        { device: { ...device, memory_bytes: 1.5 } },
-        { device: { ...device, gpu: " " } },
-        { device: { ...device, disk_total_bytes: 10, disk_free_bytes: 1 } },
-        {
-          device: {
-            ...device,
-            disk_path: "/tmp",
-            disk_total_bytes: 10,
-            disk_free_bytes: 1,
-          },
-        },
-        {
-          device: {
-            ...device,
-            disk_path: "/",
-            disk_total_bytes: 10,
-            disk_free_bytes: 11,
-          },
-        },
       ]) {
         const r = await f.pair(bad);
         expect(r.status, JSON.stringify(bad)).toBe(400);
       }
+      // C-707: a malformed hardware fact is dropped, not a refusal.
+      const odd = await f.pair({
+        device: {
+          ...device,
+          cpu: "a\u0007b",
+          cpu_cores: 0,
+          memory_bytes: 1.5,
+          gpu: " ",
+          disk_path: "/tmp",
+          disk_total_bytes: 10,
+          disk_free_bytes: 11,
+        },
+      });
+      expect(odd.status, odd.text).toBe(201);
+      const kept = await f.claim((odd.json as { code: string }).code);
+      expect(kept.status, kept.text).toBe(201);
+      expect((kept.json as { device: unknown }).device).toEqual(device);
       const foreign = await f.call("/api/device-pairings", {
         method: "POST",
         body: { device },
