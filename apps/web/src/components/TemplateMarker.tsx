@@ -190,7 +190,7 @@ export function TemplateMarker({
         createPortal(
           <span
             ref={tip}
-            className="template-marker-tip"
+            className="template-marker-tip ui-tip"
             style={position}
             aria-hidden="true"
           >
