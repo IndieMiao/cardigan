@@ -222,8 +222,11 @@ export * from "./errors.js";
 export {
   appendEvents,
   eventById,
+  eventsAtSeq,
   eventsForDecision,
   eventsOfType,
+  eventsOfTypes,
+  streamEvents,
 } from "./event-index.js";
 export {
   EventLog,

@@ -1,5 +1,6 @@
 import { isReviewStale } from "./derived.js";
 import type { Delivery, Event, Review, Run, WorkItem } from "./entities.js";
+import { eventsOfType } from "./event-index.js";
 import { evidenceWait } from "./review-evidence.js";
 
 export interface VerificationActivity {
@@ -81,17 +82,14 @@ export function verificationActivity(
     )
     .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))
     .at(-1);
-  const submitted = input.events.find(
-    (e) =>
-      e.type === "delivery_submitted" &&
-      (e.payload as { delivery_id?: string }).delivery_id === target.id,
+  // C-649: first match from the type index, same as scanning every event.
+  const submitted = eventsOfType(input.events, "delivery_submitted").find(
+    (e) => (e.payload as { delivery_id?: string }).delivery_id === target.id,
   );
   const started =
     run &&
-    input.events.find(
-      (e) =>
-        e.type === "run_started" &&
-        (e.payload as { run_id?: string }).run_id === run.id,
+    eventsOfType(input.events, "run_started").find(
+      (e) => (e.payload as { run_id?: string }).run_id === run.id,
     );
   const current =
     run &&

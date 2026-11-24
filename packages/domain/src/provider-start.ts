@@ -1,5 +1,6 @@
 import type { CommandDraft, CommandState } from "./commands/core.js";
 import type { Event, Run } from "./entities.js";
+import { eventsOfTypes } from "./event-index.js";
 import {
   associatedHarnessActivity,
   type HarnessActivity,
@@ -20,7 +21,11 @@ export function providerIncidents(events: readonly Event[]) {
   const hit = cache.get(events);
   if (hit) return hit;
   const current = new Map<string, Incident>();
-  for (const e of events) {
+  // C-649: the two breaker types, in history order, from the type index.
+  for (const e of eventsOfTypes(events, [
+    "provider_start_failed",
+    "provider_start_restored",
+  ])) {
     if (
       e.card_id ||
       !["provider_start_failed", "provider_start_restored"].includes(e.type)

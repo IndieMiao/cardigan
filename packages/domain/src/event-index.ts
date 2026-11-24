@@ -119,6 +119,71 @@ export const cardEventsOfType = (
   return forCard(typeBucket(events, type), card);
 };
 
+const byTypes = new WeakMap<readonly Event[], Map<string, readonly Event[]>>();
+/**
+ * C-649: same as `events.filter((e) => types.includes(e.type))`, answered
+ * from an attached index when there is one.
+ */
+export function eventsOfTypes(
+  events: readonly Event[],
+  types: readonly string[],
+): readonly Event[] {
+  const index = historyIndex(events);
+  if (index) return index.ofTypes(types);
+  const unique = [...new Set(types)];
+  if (unique.length === 1) return typeBucket(events, unique[0] as string);
+  let cache = byTypes.get(events);
+  if (!cache) {
+    cache = new Map();
+    byTypes.set(events, cache);
+  }
+  const key = unique.join("\u0000");
+  let found = cache.get(key);
+  if (!found) {
+    const wanted = new Set(unique);
+    const kept = events.filter((e) => wanted.has(e.type));
+    found = kept.length ? kept : noEvents;
+    cache.set(key, found);
+  }
+  return found;
+}
+
+const byStream = new WeakMap<readonly Event[], Map<string, readonly Event[]>>();
+/**
+ * C-649: same as `events.filter((e) => (e.card_id ?? "") === (card ?? ""))`:
+ * one stream (the project stream for `undefined`), in history order.
+ */
+export function streamEvents(
+  events: readonly Event[],
+  card: string | undefined,
+): readonly Event[] {
+  const stream = card ?? "";
+  const index = historyIndex(events);
+  if (index) return index.stream(stream);
+  let cache = byStream.get(events);
+  if (!cache) {
+    cache = new Map();
+    byStream.set(events, cache);
+  }
+  let found = cache.get(stream);
+  if (!found) {
+    const kept = events.filter((e) => (e.card_id ?? "") === stream);
+    found = kept.length ? kept : noEvents;
+    cache.set(stream, found);
+  }
+  return found;
+}
+
+const bySeq = keyedEvents((e) => [`${e.card_id ?? ""}\u0000${e.seq}`]);
+/** C-649: same as filtering one stream (see `streamEvents`) by `seq`. */
+export const eventsAtSeq = (
+  events: readonly Event[],
+  card: string | undefined,
+  seq: number,
+): readonly Event[] =>
+  historyIndex(events)?.atSeq(card ?? "", seq) ??
+  bySeq(events, `${card ?? ""}\u0000${seq}`);
+
 /** Same result as `events.find((e) => e.id === id)`: the first match wins. */
 export function eventById(
   events: readonly Event[],
@@ -185,6 +250,31 @@ class AppendedIndex implements HistoryIndex {
 
   byId(id: string): Event | undefined {
     return eventById(this.base, id) ?? eventById(this.tail, id);
+  }
+
+  ofTypes(types: readonly string[]): readonly Event[] {
+    return this.#memo("types", [...new Set(types)].join("\u0000"), () =>
+      this.#join(
+        eventsOfTypes(this.base, types),
+        eventsOfTypes(this.tail, types),
+      ),
+    );
+  }
+
+  stream(stream: string): readonly Event[] {
+    return this.#memo("stream", stream, () =>
+      this.#join(
+        streamEvents(this.base, stream),
+        streamEvents(this.tail, stream),
+      ),
+    );
+  }
+
+  atSeq(stream: string, seq: number): readonly Event[] {
+    return this.#join(
+      eventsAtSeq(this.base, stream, seq),
+      eventsAtSeq(this.tail, stream, seq),
+    );
   }
 }
 

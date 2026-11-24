@@ -187,6 +187,12 @@ export interface HistoryIndex {
   query(kind: EventIndexKind, key: unknown): readonly Event[];
   card(card: string, type: string): readonly Event[];
   byId(id: string): Event | undefined;
+  /** C-649: events of any of `types`, in history order (duplicates ignored). */
+  ofTypes(types: readonly string[]): readonly Event[];
+  /** C-649: the events of one stream ("" is the project stream), in history order. */
+  stream(stream: string): readonly Event[];
+  /** C-649: the events of one stream with this seq, in history order. */
+  atSeq(stream: string, seq: number): readonly Event[];
 }
 
 /**
@@ -559,6 +565,81 @@ class ViewIndex implements HistoryIndex {
         return seg ? new Map([[card, seg]]) : undefined;
       });
     });
+  }
+
+  ofTypes(types: readonly string[]): readonly Event[] {
+    const unique = [...new Set(types)];
+    if (unique.length === 1) return this.query("type", unique[0]);
+    return this.#memo("types", typesKey(unique), () =>
+      this.#kept(
+        this.view.collect(this.#rank, (log) => {
+          const index = log.buckets.get("type");
+          let merged: Map<string, number[]> | undefined;
+          for (const type of unique) {
+            const bucket = index?.get(type);
+            if (!bucket) continue;
+            merged ??= new Map();
+            for (const [stream, ords] of bucket) {
+              let into = merged.get(stream);
+              if (!into) {
+                into = [];
+                merged.set(stream, into);
+              }
+              for (const ord of ords) into.push(ord);
+            }
+          }
+          // Ordinals ascend with seq inside a stream; several types interleave.
+          if (merged && unique.length > 1)
+            for (const ords of merged.values()) ords.sort((a, b) => a - b);
+          return merged;
+        }),
+      ),
+    );
+  }
+
+  stream(stream: string): readonly Event[] {
+    if (!this.#rank.has(stream)) return noEvents;
+    return this.#memo("stream", stream, () => {
+      const out: Event[] = [];
+      const take = (log: EventLog | undefined, limit: number) => {
+        const seg = log?.streams.get(stream);
+        if (!seg) return;
+        const n = below(seg.ords, limit);
+        for (let i = 0; i < n; i++) {
+          const event = seg.events[i] as Event;
+          if (!filtered(this.filter, stream, event.type)) out.push(event);
+        }
+      };
+      take(this.view.base, this.view.baseEnd);
+      take(this.view.overlay, this.view.end);
+      return out.length ? out : noEvents;
+    });
+  }
+
+  atSeq(stream: string, seq: number): readonly Event[] {
+    if (!this.#rank.has(stream)) return noEvents;
+    const out: Event[] = [];
+    const take = (log: EventLog | undefined, limit: number) => {
+      const seg = log?.streams.get(stream);
+      if (!seg) return;
+      const n = below(seg.ords, limit);
+      // Seq ascends inside a stream (the Store rebuilds otherwise).
+      let lo = 0;
+      let hi = n;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if ((seg.events[mid] as Event).seq < seq) lo = mid + 1;
+        else hi = mid;
+      }
+      for (let i = lo; i < n; i++) {
+        const event = seg.events[i] as Event;
+        if (event.seq !== seq) break;
+        if (!filtered(this.filter, stream, event.type)) out.push(event);
+      }
+    };
+    take(this.view.base, this.view.baseEnd);
+    take(this.view.overlay, this.view.end);
+    return out.length ? out : noEvents;
   }
 
   byId(id: string): Event | undefined {

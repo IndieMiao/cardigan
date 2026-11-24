@@ -5,11 +5,14 @@ import {
   appendEvents,
   cardEventsOfType,
   eventById,
+  eventsAtSeq,
   eventsForCompletion,
   eventsForDecision,
   eventsForWorkItem,
   eventsOfType,
+  eventsOfTypes,
   resumeEventsForItem,
+  streamEvents,
 } from "./event-index.js";
 import { EventLog, EventLogView, streamHistory } from "./event-log.js";
 import { parseEventId } from "./index.js";
@@ -95,6 +98,32 @@ function expectSameLookups(indexed: readonly Event[], copy: readonly Event[]) {
   for (let n = 0; n < 80; n++)
     expect(eventById(indexed, eventId(n))).toBe(eventById(copy, eventId(n)));
   expect(eventById(indexed, undefined)).toBeUndefined();
+}
+
+/** C-649: multi-type, per-stream and per-seq lookups equal the plain filters. */
+function expectGroupLookups(indexed: readonly Event[], copy: readonly Event[]) {
+  expect(indexed).toEqual(copy);
+  for (const set of [
+    ["run_started", "noise"],
+    ["noise", "run_started", "noise"],
+    ["decision_requested", "__proto__", "absent"],
+    ["absent"],
+    [],
+  ]) {
+    const expected = copy.filter((e) => set.includes(e.type));
+    expect(eventsOfTypes(indexed, set)).toEqual(expected);
+    expect(eventsOfTypes(copy, set)).toEqual(expected);
+  }
+  for (const card of [undefined, ...cards, id("card", 9)]) {
+    const stream = copy.filter((e) => (e.card_id ?? "") === (card ?? ""));
+    expect(streamEvents(indexed, card)).toEqual(stream);
+    expect(streamEvents(copy, card)).toEqual(stream);
+    for (const seq of new Set([0, ...stream.map((e) => e.seq), 99])) {
+      const at = stream.filter((e) => e.seq === seq);
+      expect(eventsAtSeq(indexed, card, seq)).toEqual(at);
+      expect(eventsAtSeq(copy, card, seq)).toEqual(at);
+    }
+  }
 }
 
 test("C-640: log views and indexes match the legacy history and per-array scans", () => {
@@ -340,4 +369,41 @@ test("C-639: a stream moving between full and filtered never reuses the other's 
   });
   expect(eventsForWorkItem(again, "W-1")).toHaveLength(1);
   expect(eventById(again, eventId(1))).toBeUndefined();
+});
+
+test("C-649: multi-type, stream and seq lookups match plain filters on full, filtered and appended histories", () => {
+  const omit = new Set(["run_started", "__proto__"]);
+  for (let seed = 1; seed <= 40; seed++) {
+    const pick = rng(seed);
+    const seqs = new Map<string, number>();
+    const next = { id: 1 };
+    const log = new EventLog();
+    const committed: Event[] = [];
+    for (let round = 0; round < 3; round++) {
+      const overlay = new EventLog(log.end);
+      const added = randomBatch(pick, seqs, next, pick(14));
+      for (const event of added) overlay.append(event);
+      const all = [...committed, ...added];
+      const order = ["", ...cards.slice(0, 3)];
+      for (const { view, events } of [
+        {
+          view: new EventLogView(log, log.end, overlay, overlay.end),
+          events: all,
+        },
+        { view: new EventLogView(log, log.end), events: [...committed] },
+      ]) {
+        expectGroupLookups(view.history(order), legacyHistory(events, order));
+        const full = new Set(cards.filter(() => pick(2) === 0));
+        const expected = legacyHistory(events, order).filter(
+          (e) => !e.card_id || full.has(e.card_id) || !omit.has(e.type),
+        );
+        const history = view.history(order, { full, omit });
+        expectGroupLookups(history, expected);
+        const tail = randomBatch(pick, new Map(seqs), { id: 1000 }, 3);
+        expectGroupLookups(appendEvents(history, tail), [...expected, ...tail]);
+      }
+      for (const event of overlay.all) log.append(event);
+      committed.push(...added);
+    }
+  }
 });
