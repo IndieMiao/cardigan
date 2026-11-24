@@ -79,13 +79,15 @@ export async function startFakeOss(
     if (!given || query["x-oss-signature-version"] !== "OSS4-HMAC-SHA256")
       return false;
     const { "x-oss-signature": __, ...rest } = query;
+    // C-685: a signed PUT also covers the content-type and x-oss-* headers
+    // it is sent with (the canonical request picks them out).
     if (
       given !==
       signature(credentials, {
         method: req.method ?? "",
         key,
         query: rest,
-        headers: {},
+        headers,
         at: parseStamp(stamp),
       })
     )
@@ -114,8 +116,9 @@ export async function startFakeOss(
       const body = Buffer.concat(chunks);
       if (req.method === "PUT") {
         if (
+          (how === "header" || req.headers["content-md5"] !== undefined) &&
           req.headers["content-md5"] !==
-          createHash("md5").update(body).digest("base64")
+            createHash("md5").update(body).digest("base64")
         ) {
           res.writeHead(400).end();
           return;

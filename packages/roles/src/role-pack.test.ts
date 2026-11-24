@@ -223,6 +223,11 @@ const BASE_TOOLS = [
   "request_human_action",
   "request_decision",
   "upload_attachment",
+  // C-685: every role reads and writes the shared file library by default.
+  "list_shared_files",
+  "get_shared_file",
+  "upload_shared_file",
+  "commit_shared_file",
 ];
 
 test("C-293 PM Ops assigns ready work and leaves capacity enforcement to the scheduler", () => {

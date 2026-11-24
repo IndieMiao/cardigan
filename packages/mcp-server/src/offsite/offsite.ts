@@ -9,6 +9,7 @@ import {
 } from "./loop-delay.js";
 import {
   bucketOrigin,
+  type ObjectHead,
   OssClient,
   type OssCredentials,
   OssError,
@@ -274,6 +275,97 @@ export class Offsite {
     }
   }
 
+  /**
+   * C-685: the shared library's client, or a refusal. The library lives only
+   * in OSS, so without a valid configuration (or while OSS is known to be
+   * down) there is nothing to sign.
+   */
+  private sharedClient(): { client: OssClient; ttl: number } {
+    const config = this.config();
+    const client = this.client();
+    if (config.state !== "ready" || !client)
+      throw new OffsiteUnavailable("not_configured");
+    if (!this.reachable()) throw new OffsiteUnavailable("unreachable");
+    return { client, ttl: config.settings.signed_url_ttl_seconds };
+  }
+
+  /** Whether shared-library URLs can be signed right now. */
+  sharedAvailable(): "ready" | "not_configured" | "unreachable" {
+    try {
+      this.sharedClient();
+      return "ready";
+    } catch (error) {
+      return (error as OffsiteUnavailable).reason;
+    }
+  }
+
+  /**
+   * C-685: a signed PUT for one new shared-library object. The uploader sends
+   * the bytes straight to OSS with exactly `headers`; the host never sees
+   * them. The URL must be used within `SHARED_UPLOAD_URL_SECONDS`.
+   */
+  sharedUploadUrl(
+    key: string,
+    contentType: string,
+  ): {
+    readonly url: string;
+    readonly headers: Readonly<Record<string, string>>;
+    readonly expires_at: string;
+  } {
+    const { client } = this.sharedClient();
+    const at = this.now();
+    const headers = {
+      "content-type": contentType,
+      "x-oss-forbid-overwrite": "true",
+    };
+    const url = client.presignPut(
+      key,
+      { expires: SHARED_UPLOAD_URL_SECONDS, at },
+      headers,
+    );
+    this.usage.add({ requests: 1 });
+    return {
+      url,
+      headers,
+      expires_at: new Date(
+        at.getTime() + SHARED_UPLOAD_URL_SECONDS * 1000,
+      ).toISOString(),
+    };
+  }
+
+  /** C-685: a signed GET that downloads one shared-library version as `filename`. */
+  sharedDownloadUrl(
+    key: string,
+    file: { filename: string; contentType: string; size: number },
+  ): SignedLink & { readonly expires_at: string } {
+    const { client, ttl } = this.sharedClient();
+    const at = this.now();
+    const url = client.presign(key, {
+      expires: ttl,
+      at,
+      query: {
+        "response-content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}`,
+        "response-content-type": file.contentType,
+      },
+    });
+    this.usage.add({ requests: 1, egress_bytes: file.size });
+    return {
+      url,
+      valid_for_seconds: ttl,
+      expires_at: new Date(at.getTime() + ttl * 1000).toISOString(),
+    };
+  }
+
+  /** C-685: size of an uploaded shared object (HEAD only, no body), or undefined. */
+  async sharedHead(key: string): Promise<ObjectHead | undefined> {
+    const { client } = this.sharedClient();
+    try {
+      return await client.head(key);
+    } finally {
+      this.usage.add({ requests: 1 });
+    }
+  }
+
   thumbnailUrl(digest: string): SignedLink | undefined {
     const entry = this.synced(attachmentKey(digest));
     return entry
@@ -473,6 +565,16 @@ export class Offsite {
       ...(delay.sync || delay.server ? { loop_delay: delay } : {}),
       alerts,
     };
+  }
+}
+
+/** C-685: a signed upload URL stays usable this long (the upload may run longer). */
+export const SHARED_UPLOAD_URL_SECONDS = 3600;
+
+export class OffsiteUnavailable extends Error {
+  constructor(readonly reason: "not_configured" | "unreachable") {
+    super(`off-site storage ${reason}`);
+    this.name = "OffsiteUnavailable";
   }
 }
 

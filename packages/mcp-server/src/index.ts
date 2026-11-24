@@ -96,7 +96,12 @@ export {
   registerOffsite,
   type SignedLink,
 } from "./offsite/offsite.js";
-export { OssClient, OssError, type OssTransport } from "./offsite/oss.js";
+export {
+  nodeTransport,
+  OssClient,
+  OssError,
+  type OssTransport,
+} from "./offsite/oss.js";
 export {
   type SyncedLedger,
   type SyncStatus,
@@ -110,6 +115,13 @@ export {
   serverTools,
   startMcpServer,
 } from "./server.js";
+export {
+  SHARED_FILES_NOTICE,
+  type SharedDownload,
+  SharedFileLibrary,
+  type SharedFilesRepository,
+  type SharedUploadTicket,
+} from "./shared-files/library.js";
 export {
   createMcpServer,
   type ToolServerOptions,
@@ -140,3 +152,7 @@ export {
   type PublishInput,
 } from "./tools/publish-artifact.js";
 export { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";
+export {
+  type SharedFileToolOptions,
+  sharedFileTools,
+} from "./tools/shared-files.js";

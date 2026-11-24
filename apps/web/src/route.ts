@@ -24,7 +24,8 @@ export type Route = (
         | "activity"
         | "settings"
         | "help"
-        | "decision-history";
+        | "decision-history"
+        | "shared-files";
       readonly projectId: string;
     }
   | {
@@ -93,7 +94,8 @@ export function parseRoute(hash: string): Route | undefined {
       segments[2] === "activity" ||
       segments[2] === "settings" ||
       segments[2] === "help" ||
-      segments[2] === "decision-history")
+      segments[2] === "decision-history" ||
+      segments[2] === "shared-files")
   ) {
     return { kind: segments[2], projectId, ...filtered };
   }

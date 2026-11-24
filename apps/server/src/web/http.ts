@@ -48,7 +48,7 @@ export const SESSION_COOKIE = "cardigan_session";
 /** Fixed templates only: neither identifiers nor query strings reach logs. */
 export function requestRoute(path: string): string {
   if (
-    /^\/api\/(login|logout|session|me|projects|offsite|process-health)$/.test(
+    /^\/api\/(login|logout|session|me|projects|offsite|process-health|shared-files(?:\/(?:versions|download|dirs|uploads|uploads\/commit|delete))?)$/.test(
       path,
     )
   )
@@ -154,16 +154,20 @@ export function unauthorized(message = "login required"): never {
  */
 export function applySecurityHeaders(
   res: ServerResponse,
-  imageOrigin?: string,
+  bucketOrigin?: string,
 ): void {
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
     res.setHeader(
       name,
-      imageOrigin && name === "Content-Security-Policy"
-        ? value.replace(
-            "img-src 'self' data: blob:",
-            `img-src 'self' data: blob: ${imageOrigin}`,
-          )
+      bucketOrigin && name === "Content-Security-Policy"
+        ? value
+            .replace(
+              "img-src 'self' data: blob:",
+              `img-src 'self' data: blob: ${bucketOrigin}`,
+            )
+            // C-685: shared-library uploads go from the browser straight to
+            // the private bucket with a signed PUT.
+            .replace("connect-src 'self'", `connect-src 'self' ${bucketOrigin}`)
         : value,
     );
   }
