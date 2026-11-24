@@ -1,0 +1,281 @@
+import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Clock } from "@cardigan/domain";
+import {
+  HttpRejection,
+  methodNotAllowed,
+  readJsonBody,
+  sendJson,
+} from "./http.js";
+import { LoginLimiter } from "./login-limiter.js";
+import { encodeQr, qrTerminalRows } from "./qr.js";
+
+/**
+ * C-705: one-time pairing codes for a new device that has no account yet.
+ *
+ * The device posts what it knows about itself to `POST /api/device-pairings`
+ * (no session; reached over the tailnet like the Workbench itself) and gets a
+ * code that is valid for ten minutes, a QR code of the Workbench confirmation
+ * link and a token to poll its own status. The owner submits the code from a
+ * signed-in session; a valid code only becomes a draft of the existing
+ * add-worker wizard (`WorkerWizards`), which then goes through its usual
+ * preview, confirmation and checks.
+ *
+ * Codes and tokens live only in this process and only as SHA-256 digests;
+ * they travel in request bodies and the URL fragment, never in a path, query,
+ * log line, event or timeline entry. A restart forgets every pairing.
+ */
+
+export const PAIRING_TTL_MS = 10 * 60_000;
+/** How long a used or expired code is still recognised as such. */
+export const PAIRING_RETENTION_MS = 30 * 60_000;
+export const PAIRING_MAX_PENDING = 16;
+const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+const CODE = new RegExp(`^[${ALPHABET}]{8}$`, "u");
+
+export interface PairingDevice {
+  readonly hostname: string;
+  readonly os: "linux" | "darwin";
+  readonly arch: "x64" | "arm64";
+  /** Tailnet DNS name or address the control host reaches it by. */
+  readonly address: string;
+  /** A numeric id free as both user and group id on the device. */
+  readonly free_id: number;
+  readonly system?: string;
+}
+export interface Pairing {
+  /** Random id for audit records; unrelated to the code. */
+  readonly id: string;
+  readonly device: PairingDevice;
+  readonly created: number;
+  readonly expires: number;
+  state: "pending" | "claimed";
+}
+interface Entry extends Pairing {
+  readonly code: string;
+  readonly token: string;
+}
+
+const digest = (value: string) =>
+  createHash("sha256").update(`device-pairing:${value}`).digest("hex");
+const invalidDevice = () =>
+  new HttpRejection(400, "validation_failed", "设备信息无效");
+
+export function parseDevice(value: unknown): PairingDevice {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw invalidDevice();
+  const v = value as Record<string, unknown>;
+  const keys = ["hostname", "os", "arch", "address", "free_id", "system"];
+  if (Object.keys(v).some((k) => !keys.includes(k))) throw invalidDevice();
+  const { hostname, os, arch, address, free_id, system } = v;
+  if (
+    typeof hostname !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/u.test(hostname) ||
+    (os !== "linux" && os !== "darwin") ||
+    (arch !== "x64" && arch !== "arm64") ||
+    typeof address !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$/u.test(address) ||
+    typeof free_id !== "number" ||
+    !Number.isSafeInteger(free_id) ||
+    free_id < 501 ||
+    free_id > 2147483647 ||
+    (system !== undefined &&
+      (typeof system !== "string" ||
+        !system.trim() ||
+        system.length > 80 ||
+        /\p{C}/u.test(system)))
+  )
+    throw invalidDevice();
+  return {
+    hostname,
+    os,
+    arch,
+    address,
+    free_id,
+    ...(system === undefined ? {} : { system: system.trim() }),
+  };
+}
+/** `ABCD-EFGH` style input to the stored form, or undefined when malformed. */
+export function normalizeCode(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 32) return undefined;
+  const code = value.replace(/[\s-]/gu, "").toUpperCase();
+  return CODE.test(code) ? code : undefined;
+}
+const display = (code: string) => `${code.slice(0, 4)}-${code.slice(4)}`;
+
+export class DevicePairings {
+  private readonly byCode = new Map<string, Entry>();
+  private readonly byToken = new Map<string, Entry>();
+  /** Wrong codes per member, with the login lockout rules. */
+  private readonly guesses = new LoginLimiter();
+  constructor(
+    private readonly clock: Clock,
+    private readonly enabled: boolean,
+  ) {}
+  private now() {
+    return Date.parse(this.clock.now());
+  }
+  private prune(now: number) {
+    for (const [key, e] of this.byCode)
+      if (e.created + PAIRING_RETENTION_MS <= now) {
+        this.byCode.delete(key);
+        this.byToken.delete(e.token);
+      }
+  }
+  /** Number of pending, unexpired pairings (tests). */
+  pending(): number {
+    const now = this.now();
+    return [...this.byCode.values()].filter(
+      (e) => e.state === "pending" && e.expires > now,
+    ).length;
+  }
+
+  create(device: PairingDevice, origin: string) {
+    const now = this.now();
+    this.prune(now);
+    if (
+      [...this.byCode.values()].filter(
+        (e) => e.state === "pending" && e.expires > now,
+      ).length >= PAIRING_MAX_PENDING
+    )
+      throw new HttpRejection(
+        429,
+        "pairing_capacity",
+        "待确认的配对过多，请稍后再试",
+      );
+    let code: string;
+    do
+      code = Array.from(
+        { length: 8 },
+        () => ALPHABET[randomInt(ALPHABET.length)],
+      ).join("");
+    while (this.byCode.has(digest(code)));
+    const token = randomBytes(32).toString("base64url");
+    const entry: Entry = {
+      id: randomUUID(),
+      device,
+      created: now,
+      expires: now + PAIRING_TTL_MS,
+      state: "pending",
+      code: digest(code),
+      token: digest(token),
+    };
+    this.byCode.set(entry.code, entry);
+    this.byToken.set(entry.token, entry);
+    // The code sits in the fragment, which browsers never send to a server.
+    const confirm_url = `${origin}/#/pair/${display(code)}`;
+    const qr = encodeQr(confirm_url);
+    return {
+      code: display(code),
+      device_token: token,
+      expires_at: new Date(entry.expires).toISOString(),
+      confirm_url,
+      qr: qr ? qrTerminalRows(qr) : null,
+    };
+  }
+
+  status(token: unknown) {
+    const now = this.now();
+    this.prune(now);
+    const entry =
+      typeof token === "string" && token.length <= 128
+        ? this.byToken.get(digest(token))
+        : undefined;
+    if (!entry) throw new HttpRejection(404, "pairing_not_found", "没有此配对");
+    return {
+      status:
+        entry.state === "claimed"
+          ? "claimed"
+          : entry.expires <= now
+            ? "expired"
+            : "pending",
+      expires_at: new Date(entry.expires).toISOString(),
+    };
+  }
+
+  /**
+   * The pending pairing for `code`, without using it. Callers that act on it
+   * must call `claim` in the same synchronous turn, so two concurrent
+   * submissions of one code cannot both succeed.
+   */
+  lookup(code: unknown, member: string): Pairing {
+    const now = this.now();
+    this.prune(now);
+    const key = `pair:${member}`;
+    const wait = this.guesses.retryAfterSeconds(key, now);
+    if (wait !== undefined)
+      throw new HttpRejection(
+        429,
+        "pairing_rate_limited",
+        "配对码错误次数过多，请稍后再试",
+        undefined,
+        { "Retry-After": String(wait) },
+      );
+    const normalized = normalizeCode(code);
+    const entry = normalized ? this.byCode.get(digest(normalized)) : undefined;
+    if (!entry) {
+      this.guesses.recordFailure(key, now);
+      throw new HttpRejection(404, "pairing_code_invalid", "配对码不存在");
+    }
+    if (entry.state === "claimed")
+      throw new HttpRejection(409, "pairing_code_used", "配对码已使用");
+    if (entry.expires <= now)
+      throw new HttpRejection(410, "pairing_code_expired", "配对码已过期");
+    this.guesses.recordSuccess(key);
+    return entry;
+  }
+  claim(pairing: Pairing) {
+    if (pairing.state !== "pending" || pairing.expires <= this.now())
+      throw new HttpRejection(409, "pairing_code_used", "配对码已使用");
+    pairing.state = "claimed";
+  }
+
+  /** `POST /api/device-pairings[/status]`, called by the device itself. */
+  async serveDevice(req: IncomingMessage, res: ServerResponse, rest: string) {
+    if (rest !== "" && rest !== "/status")
+      throw new HttpRejection(404, "not_found", "not found");
+    if (req.method !== "POST") methodNotAllowed(["POST"]);
+    if (!this.enabled)
+      throw new HttpRejection(503, "unavailable", "配对服务不可用");
+    const body = await readJsonBody(req, 4096);
+    if (rest === "/status") {
+      if (Object.keys(body).some((k) => k !== "device_token"))
+        throw invalidDevice();
+      return sendJson(res, 200, this.status(body.device_token));
+    }
+    if (Object.keys(body).some((k) => k !== "device")) throw invalidDevice();
+    // `requireOrigin` already accepted it: the address the device used.
+    const origin = req.headers.origin as string;
+    return sendJson(res, 201, this.create(parseDevice(body.device), origin), {
+      "Cache-Control": "no-store",
+    });
+  }
+}
+
+/**
+ * Wizard form fields from a paired device. The owner still reviews them in the
+ * wizard's preview; nothing here bypasses its validation.
+ */
+export function pairingForm(
+  device: PairingDevice,
+  project: string,
+  mcpUrl: string | undefined,
+) {
+  // `parseDevice` admits only `[A-Za-z0-9][A-Za-z0-9-]*`; `local` is reserved.
+  const host = device.hostname.toLowerCase();
+  const machine = host === "local" ? "device-local" : host;
+  const account =
+    `cg_${project.toLowerCase().replace(/[^a-z0-9_]/gu, "_")}`.slice(0, 29);
+  return {
+    machine_id: machine,
+    label: device.hostname,
+    os: device.os,
+    arch: device.arch,
+    host: device.address,
+    port: 22,
+    account,
+    uid: device.free_id,
+    gid: device.free_id,
+    ...(mcpUrl === undefined ? {} : { mcp_url: mcpUrl }),
+  };
+}

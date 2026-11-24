@@ -68,6 +68,7 @@ import {
   type WebConfig,
 } from "./config.js";
 import { readDecisionHistory } from "./decision-history-state.js";
+import { DevicePairings } from "./device-pairings.js";
 import { drainTasks } from "./drain-tasks.js";
 import {
   ExecutionCapacityCache,
@@ -234,6 +235,7 @@ interface RequestContext {
   readonly feishuSettings: FeishuSettings | undefined;
   readonly launchSettings: LaunchSettings | undefined;
   readonly wizards: WorkerWizards;
+  readonly pairings: DevicePairings;
   readonly checks: MachineChecks;
   readonly host: MachineHost | undefined;
   readonly recordTiming: (stage: string, ms: number) => void;
@@ -393,6 +395,8 @@ export async function startWebServer(
     return result;
   };
 
+  // C-705: one-time device pairing codes feed the add-worker wizard.
+  const pairings = new DevicePairings(clock, !!options.machineHost?.wizard);
   const wizards = new WorkerWizards(
     store,
     clock,
@@ -401,6 +405,7 @@ export async function startWebServer(
     options.machineHost?.wizard,
     options.runLimit,
     options.runLimitMaximum,
+    pairings,
   );
 
   const http = createServer((req, res) => {
@@ -508,6 +513,7 @@ export async function startWebServer(
       await handleApi({
         checks,
         wizards,
+        pairings,
         host: options.machineHost,
         recordTiming,
         buildInfo,
@@ -614,6 +620,14 @@ async function handleApi(context: RequestContext): Promise<void> {
     if (req.method !== "GET") methodNotAllowed(["GET"]);
     return sessionStatus(context);
   }
+
+  // C-705: a new device has no account; it only gets a one-time pairing code.
+  if (path === "/api/device-pairings" || path === "/api/device-pairings/status")
+    return context.pairings.serveDevice(
+      req,
+      context.res,
+      path.slice("/api/device-pairings".length),
+    );
 
   // Everything below needs a session; an MCP Bearer token does not count.
   const session = requireSession(context);
