@@ -401,7 +401,9 @@ export {
   releaseUnresponsiveAgent,
   releaseUnresponsiveAgents,
   type UnresponsiveOutcome,
+  type UnresponsiveProof,
   unresponsiveProbeLimit,
+  workerProof,
 } from "./unresponsive-session.js";
 export * from "./upstream-health.js";
 export {

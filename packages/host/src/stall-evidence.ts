@@ -313,6 +313,13 @@ export async function registeredLaunchState(
   state: CommandState,
   a: Assignment,
   execution?: ExecutionConfig,
+  /**
+   * C-730: report the registered CLI itself. "exited" then means the worker
+   * journal was read, matched this exact registration and observed the CLI's
+   * birth identity gone, while its process group (for example a launcher that
+   * outlived it) may still run. Every failure or mismatch stays "unknown".
+   */
+  cliOnly = false,
 ): Promise<"exited" | "alive" | "unreachable" | "unknown"> {
   const ref = a.runtime_ref,
     gen = ref?.launch_generation;
@@ -366,6 +373,7 @@ export async function registeredLaunchState(
     return "unknown";
   if (evidence.observed === "alive") return "alive";
   if (evidence.observed !== "exited") return "unknown";
+  if (cliOnly) return "exited";
   try {
     const cmd = await agentProcessCommand(execution, [
       "/usr/bin/python3",

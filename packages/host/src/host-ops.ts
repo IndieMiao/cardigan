@@ -26,6 +26,7 @@ import {
   type HostOpsExecution,
   type HostOpsExecutionTool,
   hostOpsExitConfirmation,
+  hostOpsPending,
   hostOpsReadDiagnostics,
   lastRunActivity,
   observedLocalExitCause,
@@ -119,7 +120,10 @@ import {
   stopRunRuntime,
   stopSystemTurn,
 } from "./stop-run.js";
-import { releaseUnresponsiveAgent } from "./unresponsive-session.js";
+import {
+  releaseUnresponsiveAgent,
+  type UnresponsiveProof,
+} from "./unresponsive-session.js";
 import {
   UpstreamHealthMonitor,
   upstreamHoldReason,
@@ -174,6 +178,8 @@ interface Options {
   standingExit?: StandingExitPolicy;
   /** C-678: Needs You notice after an attached human held an action this long. */
   attachedHumanNoticeMs?: number;
+  /** C-730: worker evidence for remote releases; tests substitute it. */
+  unresponsiveProof?: UnresponsiveProof;
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
@@ -785,14 +791,27 @@ export class HostOpsService {
     p: { target_id: string; reason?: string; context_session_id?: string },
     actor: ToolContext["identity"]["actor"],
   ) {
+    const reason = p.reason?.trim();
     if (
       (tool !== "host_ops_restart_assignment" &&
         tool !== "host_ops_cancel_run") ||
       p.context_session_id !== undefined ||
-      actor.kind !== "assignment"
+      actor.kind !== "assignment" ||
+      // The ordinary path reports a missing reason or the operator's own
+      // pending operation, exactly as before.
+      !reason
     )
       return;
     const { store } = this.options;
+    if (
+      store.uow.read((tx) =>
+        hostOpsPending(
+          loadCommandState(tx, project).events,
+          actor.assignment_id,
+        ),
+      )
+    )
+      return;
     const found = store.uow.read((tx) => {
       const run =
         tool === "host_ops_cancel_run"
@@ -824,9 +843,10 @@ export class HostOpsService {
         trigger: "host_ops",
         requested_by: actor.assignment_id,
         tool,
-        reason: p.reason?.trim() || tool,
+        reason,
         ...(found?.run ? { run_id: found.run.id } : {}),
       },
+      this.options.unresponsiveProof,
     );
     if (outcome.outcome === "refused") return { refusal: outcome.reason };
     await this.options
@@ -2344,7 +2364,6 @@ const OPERATION: Record<HostOpsExecution["tool"], string> = {
   host_ops_cancel_run: "取消 Run",
 };
 
-/** Numbered steps for the human; the terminal is never touched by the server. */
 /** C-730: why a remote restart or cancel did not release the session. */
 export function remoteRefusalText(reason: string) {
   return (
@@ -2372,6 +2391,7 @@ export function remoteRefusalText(reason: string) {
   );
 }
 
+/** Numbered steps for the human; the terminal is never touched by the server. */
 export function exitConfirmationText(
   action: Pick<
     HostOpsExecution,

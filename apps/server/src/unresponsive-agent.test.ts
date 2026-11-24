@@ -62,6 +62,9 @@ function setup(machine: "worker" | "local") {
   skip();
   let agentAlive = false;
   let closed = false;
+  // The worker launch journal: the registered CLI's birth identity is gone,
+  // still there, or the read failed (timeout, ssh error, mismatch).
+  let journal: "exited" | "alive" | "unreadable" = "exited";
   const result = <T>(value: T) => ({ ok: true as const, value });
   const runtime: DispatcherOptions["runtime"] = {
     // The terminal stays live: hc only sees the wrapper program.
@@ -142,6 +145,23 @@ function setup(machine: "worker" | "local") {
         p,
       ),
     );
+  // Remote: the substituted worker evidence (the real one is covered in
+  // packages/host unresponsive-proof.test.ts). Local: the kernel receipt checks.
+  const proof: host.UnresponsiveProof =
+    machine === "local"
+      ? host.workerProof
+      : {
+          agent: async (rt, _state, a, ref) => {
+            const seen = await rt.observe_retirement!(ref, {
+              project_id: f.project,
+              assignment_id: a.id,
+            });
+            if (!seen.ok) return "unknown";
+            if (seen.value === "alive" || journal === "alive") return "alive";
+            return journal === "exited" ? "gone" : "unknown";
+          },
+          sessionGone: async () => closed && journal === "exited",
+        };
   const replaced = () =>
     f
       .state()
@@ -155,6 +175,7 @@ function setup(machine: "worker" | "local") {
         f.project,
         runtime,
         f.clock,
+        proof,
       );
       if (replaced().length) return i;
       f.advance(60_000);
@@ -171,7 +192,11 @@ function setup(machine: "worker" | "local") {
     comment,
     replaced,
     maintain,
+    unreadable: () => {
+      journal = "unreadable";
+    },
     agentAlive: () => {
+      journal = "alive";
       agentAlive = true;
     },
   };
@@ -231,6 +256,24 @@ test.each(["worker", "local"] as const)(
   },
 );
 
+test("a failed or timed-out worker read is never taken as an exit, and the probes back off", async () => {
+  // V-3320: e.g. Godot import load on mac-mini: ps and the worker helper
+  // time out while the CLI is alive with uncommitted changes.
+  const f = setup("worker");
+  f.unreadable();
+  const old = f.owner().runtime_ref;
+  f.advance(61 * 60_000);
+  expect(await f.maintain(40)).toBeUndefined();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.replaced()).toEqual([]);
+  expect(f.owner().runtime_ref).toEqual(old);
+  // Refused at 3 withdrawals, then again after 5, 10 and 20 minutes.
+  expect(
+    (f.runtime.observe_retirement as ReturnType<typeof vi.fn>).mock.calls
+      .length,
+  ).toBeLessThanOrEqual(4);
+});
+
 test("an MCP call after the withdrawals is a sign of life and restarts the count", async () => {
   const f = setup("worker");
   f.advance(61 * 60_000);
@@ -251,8 +294,25 @@ test("an MCP call after the withdrawals is a sign of life and restarts the count
 
 // Host Ops: restart and cancel on a remote managed Assignment.
 
-function remote(cliAlive = false) {
-  const f = stalls("worker");
+function remote(cliAlive = false, journal: "exited" | "unreadable" = "exited") {
+  const f = stalls("worker", {
+    // The substituted worker evidence (see unresponsive-proof.test.ts).
+    unresponsiveProof: {
+      agent: async (rt, _state, a, ref) => {
+        const seen = await rt.observe_retirement!(ref, {
+          project_id: f.project,
+          assignment_id: a.id,
+        });
+        if (!seen.ok) return "unknown";
+        if (seen.value === "alive") return "alive";
+        return journal === "exited" ? "gone" : "unknown";
+      },
+      sessionGone: async (rt, _state, _a, ref) => {
+        const seen = await rt.status(ref);
+        return seen.ok && seen.value.process === "exited";
+      },
+    },
+  });
   f.runtime.observe_retirement = vi.fn(async (ref) => {
     const seen = await f.runtime.status(ref);
     return {
@@ -270,11 +330,12 @@ function remote(cliAlive = false) {
   const execute = (
     tool: "host_ops_restart_assignment" | "host_ops_cancel_run",
     target_id: string,
+    reason = "Agent 进程已退出，终端残留",
   ) =>
     f.service.tools.execute(f.context, tool, {
       target_id,
-      reason: "Agent 进程已退出，终端残留",
-      idempotency_key: `${tool}:${target_id}`,
+      reason,
+      idempotency_key: `${tool}:${target_id}:${reason}`,
     });
   return { ...f, owner, execute };
 }
@@ -351,5 +412,21 @@ test("Host Ops never closes the terminal of a remote Agent that is still running
     message: expect.stringContaining("worker 显示 Agent 进程仍在运行"),
   });
   expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.owner().runtime_ref).toEqual(old);
+});
+
+test("Host Ops does not close a remote terminal on an unreadable worker journal or without a reason", async () => {
+  const f = remote(false, "unreadable");
+  const old = f.owner().runtime_ref;
+  await expect(
+    f.execute("host_ops_restart_assignment", f.owner().id),
+  ).rejects.toMatchObject({
+    message: expect.stringContaining("无法从 worker 确认 Agent 进程状态"),
+  });
+  const g = remote();
+  await expect(
+    g.execute("host_ops_restart_assignment", g.owner().id, " "),
+  ).rejects.toBeDefined();
+  for (const x of [f, g]) expect(x.runtime.release).not.toHaveBeenCalled();
   expect(f.owner().runtime_ref).toEqual(old);
 });

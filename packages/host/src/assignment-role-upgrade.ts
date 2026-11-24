@@ -27,7 +27,10 @@ import {
   sessionIdleMinutes,
   sessionMaintenanceScan,
 } from "./session-maintenance.js";
-import { releaseUnresponsiveAgents } from "./unresponsive-session.js";
+import {
+  releaseUnresponsiveAgents,
+  type UnresponsiveProof,
+} from "./unresponsive-session.js";
 
 export const IDLE_ROLE_UPGRADE_INTERVAL_MS = 60_000;
 export const MAX_IDLE_ROLE_UPGRADES = 2;
@@ -38,6 +41,8 @@ export async function upgradeIdleAssignmentRoles(
   project: ProjectId,
   runtime: Runtime,
   clock: Clock,
+  /** C-730: tests substitute the worker evidence. */
+  unresponsiveProof?: UnresponsiveProof,
 ) {
   // No full state loads for projects without managed work-item sessions.
   if (
@@ -82,6 +87,7 @@ export async function upgradeIdleAssignmentRoles(
       runtime,
       clock,
       MAX_IDLE_ROLE_UPGRADES,
+      unresponsiveProof,
     );
     // C-690: notifications for a session retained for dispatch wake it.
     await releaseRetainedForWork(store, project, clock);
