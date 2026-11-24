@@ -91,12 +91,13 @@ import { launchExecution, terminalExecution } from "./runtime-check.js";
 const USAGE = [
   "用法：",
   "  cardigan work-item create <C-n> --title <标题> --role <角色> --kind produce|verify [--required on|off] [--acceptance <标准>] [--target <W-n>] [--requirements <JSON>]",
-  "  cardigan work-item update <W-n> --requirements <JSON> | work-item show <W-n>",
+  "  cardigan work-item update <W-n> [--requirements <JSON>] [--start-point <完整SHA|分支|none>] | work-item show <W-n>",
   "    card create 可用 --work-item-requirements <JSON> 按模板 key 追加机器要求；能力版本只接受无版本、=、>=。",
   "  cardigan card create [--template <id>] [--parent-card <C-id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
   "    界面或设计模板需加 --state-and-save 无写入，或传含 save_timing、leave_behavior、failure_feedback、consistency 的 JSON 对象。",
   "    人（不带 Token）只能用项目放开的模板，默认只有需求卡（story），不写 --template 时即为需求卡；放开见 cardigan preference set human-card-templates。",
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--deadline <YYYY-MM-DD>|none] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
+  "  cardigan card update <C-n> [--repo <仓库>] [--base-branch <分支>] [--start-point <完整SHA|分支|none>]  补登记仓库；起点只用于不合并的卡，产出项按起点 detached 检出",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "    create/update 支持 --is-ui-framework on|off、--depends-on-cards C-1,C-2（none 清空）、--wait-for-dependencies on|off、--early-start on|off --dependency-reason <理由>。",
   "    --risk-tags 用逗号分隔 security、permission、numeric_rule；传 none 清空。",
@@ -459,6 +460,9 @@ async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
     "dependency-reason",
     "superseded-by",
     "merge-classification",
+    "repo",
+    "base-branch",
+    "start-point",
   ];
   for (const name of Object.keys(flags)) {
     if (![...fields, "project", "data-dir"].includes(name)) {
@@ -552,6 +556,11 @@ async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
       : { deadline: deadline === "none" ? null : deadline }),
     ...(status === undefined ? {} : { status }),
     ...(riskTags === undefined ? {} : { risk_tags: riskTags }),
+    ...(flags.repo === undefined ? {} : { repo: required(flags, "repo") }),
+    ...(flags["base-branch"] === undefined
+      ? {}
+      : { base_branch: required(flags, "base-branch") }),
+    ...startPointFlag(flags),
   };
   const cardId = parsedId.value.id;
   const store = await openPlacementStore(io, flags);
@@ -559,7 +568,11 @@ async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
     const project_id = resolveProject(store, io, optional(flags, "project"));
     const actor = resolveActor(io, project_id, store);
     store.uow.run((tx) => {
-      const ports = { clock: systemClock, ids: tx.ids };
+      const ports = {
+        clock: systemClock,
+        ids: tx.ids,
+        project_repositories: projectRepositories(store, project_id),
+      };
       let state = loadCommandState(tx, project_id);
       if (changed.some((name) => name !== "superseded-by")) {
         const result = updateCard(
@@ -598,6 +611,30 @@ async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
   } finally {
     store.close();
   }
+}
+
+/** C-728: `none` clears; otherwise a full commit SHA or a branch name. */
+function startPointFlag(
+  flags: Args["flags"],
+): Pick<Parameters<typeof updateCard>[2], "start_point"> {
+  if (flags["start-point"] === undefined) return {};
+  const value = required(flags, "start-point");
+  return { start_point: value === "none" ? null : value };
+}
+
+/** The project's registered repository supplies defaults; never a CLI flag. */
+function projectRepositories(
+  store: {
+    getProject(
+      id: string,
+    ): { repo_path: string | null; base_branch: string | null } | undefined;
+  },
+  project_id: string,
+) {
+  const project = store.getProject(project_id);
+  return project?.repo_path
+    ? [{ repo: project.repo_path, base_branch: project.base_branch }]
+    : [];
 }
 
 function cardDependencyFlags(
@@ -684,7 +721,7 @@ async function workItemCommand(
           "requirements",
         ]
       : action === "update"
-        ? ["requirements"]
+        ? ["requirements", "start-point"]
         : []),
   ];
   if (
@@ -714,8 +751,9 @@ async function workItemCommand(
         ? undefined
         : (jsonFlag(flags, "requirements") as WorkItemRequirements);
     if (action === "update") {
-      if (requirements === undefined)
-        throw new CliError("需要 --requirements", EXIT.usage);
+      const start = startPointFlag(flags);
+      if (requirements === undefined && start.start_point === undefined)
+        throw new CliError("需要 --requirements 或 --start-point", EXIT.usage);
       const item = runCommand(store, {
         operation: "更新工作项",
         target: positionals[0] as string,
@@ -725,7 +763,11 @@ async function workItemCommand(
           updateWorkItem(
             s,
             a,
-            { work_item_id: parseWorkItem(positionals[0]), requirements },
+            {
+              work_item_id: parseWorkItem(positionals[0]),
+              ...(requirements === undefined ? {} : { requirements }),
+              ...start,
+            },
             p,
           ),
       });
