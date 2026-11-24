@@ -27,7 +27,19 @@ export const UPLOAD_TYPES: Readonly<Record<string, string>> = {
   "text/plain": "txt",
   "application/json": "json",
   "application/pdf": "pdf",
+  // C-683: videos go through the resumable upload, with their own limit.
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+  "video/webm": "webm",
+  "video/x-m4v": "m4v",
 };
+/** Video types, sent with `CardiganClient.uploadVideo` (C-683). */
+export const isVideoType = (mime: string) =>
+  /^video\/(mp4|quicktime|webm|x-m4v)$/u.test(
+    mime.toLowerCase().split(";")[0]?.trim() ?? "",
+  );
+/** The server's default video limit (`CARDIGAN_VIDEO_MAX_MIB`). */
+export const MAX_VIDEO_BYTES = 1024 * 1024 * 1024;
 /** Other spellings of an extension, as `attachmentMimeForExtension`. */
 const EXTENSION_ALIASES: Readonly<Record<string, string>> = {
   jpeg: "jpg",
@@ -77,11 +89,13 @@ export const formatMiB = (bytes: number) =>
 export function uploadProblem(
   file: Pick<File, "name" | "type" | "size">,
   maxBytes: number | null = MAX_UPLOAD_BYTES,
+  videoMaxBytes: number | null = MAX_VIDEO_BYTES,
 ): string | undefined {
-  if (uploadMime(file) === undefined)
-    return "不支持这种类型，可以上传图片、PDF、txt/log、md、json、html";
-  if (maxBytes !== null && file.size > maxBytes)
-    return `超过 ${formatMiB(maxBytes)}`;
+  const mime = uploadMime(file);
+  if (mime === undefined)
+    return "不支持这种类型，可以上传图片、视频（mp4、mov、webm、m4v）、PDF、txt/log、md、json、html";
+  const limit = isVideoType(mime) ? videoMaxBytes : maxBytes;
+  if (limit !== null && file.size > limit) return `超过 ${formatMiB(limit)}`;
   // The server's `original_filename` rules (domain `displayText`).
   if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(file.name)) return "文件名含控制字符";
   if ([...uploadFilename(file.name)].length > 200) return "文件名超过 200 字符";
@@ -102,8 +116,8 @@ export function formatBytes(bytes: number): string {
       : `${(bytes / 1048576).toFixed(1)} MiB`;
 }
 
-/** How a reference opens: an image previews, pdf/text open in a tab. */
-export type AttachmentRefKind = "image" | "pdf" | "text" | "file";
+/** How a reference opens: an image previews, video/pdf/text open in a tab. */
+export type AttachmentRefKind = "image" | "video" | "pdf" | "text" | "file";
 
 export function attachmentRefKind(
   mime: string,
@@ -111,6 +125,8 @@ export function attachmentRefKind(
 ): AttachmentRefKind {
   const type = mime.toLowerCase().split(";")[0]?.trim() ?? "";
   if (inline && /^image\/(png|jpeg|gif|webp|avif)$/u.test(type)) return "image";
+  // C-683: the browser's own player opens it in a tab.
+  if (isVideoType(type)) return "video";
   if (type === "application/pdf") return "pdf";
   if (["text/plain", "text/markdown", "application/json"].includes(type))
     return "text";

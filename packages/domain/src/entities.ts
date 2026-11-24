@@ -1384,8 +1384,26 @@ export interface StreamedArtifact {
     readonly reason: "age" | "capacity";
   };
 }
+/**
+ * C-683: what the uploader measured about a video (the Workbench's browser,
+ * or an Agent); the host never decodes it. Every field is optional.
+ */
+export interface VideoMetadata {
+  readonly duration_seconds?: number;
+  readonly width?: number;
+  readonly height?: number;
+  readonly video_codec?: string;
+  readonly audio_codec?: string;
+}
+export interface VideoInfo extends VideoMetadata {
+  /** Cover frame (JPEG) made by the uploader's browser, stored by digest. */
+  readonly poster_sha256?: string;
+  readonly poster_size?: number;
+}
 interface AttachmentFields {
   readonly streamed_artifact?: StreamedArtifact;
+  /** C-683: video attachments only. */
+  readonly video?: VideoInfo;
   readonly id: AttachmentId;
   /** Display metadata only; storage is addressed by sha256. */
   readonly original_filename?: string;

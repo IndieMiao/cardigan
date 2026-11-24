@@ -1,4 +1,4 @@
-import { File as FileIcon, FileText, Image, X } from "lucide-react";
+import { File as FileIcon, FileText, Film, Image, X } from "lucide-react";
 import type { ReactNode } from "react";
 
 /**
@@ -30,13 +30,20 @@ export function FileChip({
   name: string;
   /** Already formatted, e.g. `1.2 MiB`. */
   size: string;
-  kind: "image" | "pdf" | "text" | "file";
+  kind: "image" | "video" | "pdf" | "text" | "file";
   onRemove: () => void;
   removeDisabled?: boolean;
   /** Extra controls, e.g. a note field. */
   children?: ReactNode;
 }) {
-  const Icon = kind === "image" ? Image : kind === "file" ? FileIcon : FileText;
+  const Icon =
+    kind === "image"
+      ? Image
+      : kind === "video"
+        ? Film
+        : kind === "file"
+          ? FileIcon
+          : FileText;
   return (
     <li className="ui-file-chip" title={`${name} · ${size}`}>
       <Icon className="ui-file-chip-icon" aria-hidden="true" />

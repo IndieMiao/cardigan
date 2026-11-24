@@ -1,12 +1,18 @@
 import { join } from "node:path";
-import { HARNESS_CATALOG } from "@cardigan/domain";
+import {
+  contextUsageThresholds,
+  employeeDisplayName,
+  HARNESS_CATALOG,
+} from "@cardigan/domain";
 import {
   BROWSER_MCP_SERVER_NAME,
   BROWSER_TOOL_PATTERN,
   MCP_SESSION_HEADER,
   TOKEN_ENV_VAR,
 } from "../assignment-types.js";
+import { DEFAULT_MCP_BRIDGE_PYTHON } from "../mcp-bridge.js";
 import { readClaudeContext } from "./claude-context.js";
+import { claudeStatusLineSetting, relayHostname } from "./claude-statusline.js";
 import { plain } from "./effort.js";
 import { onlyKey } from "./provider.js";
 import type { HarnessAdapter } from "./types.js";
@@ -161,6 +167,34 @@ export const claudeCode: HarnessAdapter = {
   useStatuslineCache: true,
   allowWorktreeDescendant: true,
   assignmentSettings: { autoMemoryEnabled: false },
+  assignmentSettingsFor(input, env) {
+    // C-686: the same interpreter the worker already runs Cardigan helpers with.
+    const python = input.mcp.bridge_python ?? DEFAULT_MCP_BRIDGE_PYTHON;
+    if (!python.startsWith("/") && python !== "python3")
+      throw new Error("Status line interpreter must be an absolute path");
+    const name = input.employee?.identity?.name;
+    const relay = relayHostname(env.ANTHROPIC_BASE_URL);
+    const { card_id, work_item_id } = input.assignment;
+    const defaults = contextUsageThresholds();
+    return {
+      statusLine: claudeStatusLineSetting(python, {
+        ...(name ? { employee: employeeDisplayName(name) } : {}),
+        assignment: input.assignment.assignment_id,
+        role: input.role.role_id,
+        ...(card_id ? { card: card_id } : {}),
+        ...(work_item_id ? { work_item: work_item_id } : {}),
+        run: input.assignment.run_id,
+        ...(input.status_line?.base_ref
+          ? { base_ref: input.status_line.base_ref }
+          : {}),
+        handoff_remaining_pct:
+          input.status_line?.handoff_remaining_pct ?? defaults.handoff,
+        restart_remaining_pct:
+          input.status_line?.restart_remaining_pct ?? defaults.restart,
+        ...(relay ? { relay } : {}),
+      }),
+    };
+  },
   localSetup(input, quote) {
     return `# Session state belongs to this Assignment, not to the user's home.
 claude_config_dir=${quote(join(input.run_dir, "claude"))}

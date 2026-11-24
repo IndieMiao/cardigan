@@ -84,6 +84,11 @@ export function requestRoute(path: string): string {
       return `${prefix}/attachments/:id/thumbnail`;
     if (/^\/attachments\/[^/]+\/preview$/.test(rest))
       return `${prefix}/attachments/:id/preview`;
+    // C-683: video cover and resumable uploads.
+    if (/^\/attachments\/[^/]+\/poster$/.test(rest))
+      return `${prefix}/attachments/:id/poster`;
+    if (rest === "/uploads") return prefix + rest;
+    if (/^\/uploads\/[^/]+$/.test(rest)) return `${prefix}/uploads/:id`;
     const entity = /^\/(cards|attachments)\/[^/]+$/.exec(rest);
     if (entity) return `${prefix}/${entity[1]}/:id`;
     const write =
