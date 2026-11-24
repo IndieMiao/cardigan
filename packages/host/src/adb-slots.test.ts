@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createServer, Socket } from "node:net";
-import { tmpdir } from "node:os";
+import { Socket } from "node:net";
+import { arch, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Machine, Run } from "@cardigan/domain";
 import { beginLaunchAttempt, Store } from "@cardigan/store";
@@ -34,8 +34,9 @@ beforeEach(async () => {
         id: "local",
         label: "local",
         herdr_machine: "local",
-        os: "linux",
-        arch: "x64",
+        // createProject registers this host as "local"; match its identity.
+        os: platform(),
+        arch: arch(),
         tags: [],
         max_assignments: 4,
         status: "online",
@@ -389,21 +390,18 @@ test("a pinned ANDROID_ADB_SERVER_PORT on a slot machine is reported, without it
 
 // ---- The real cleanup script against loopback stand-ins -----------------
 
-async function freePort(): Promise<number> {
-  for (;;) {
-    const port = await new Promise<number>((resolve) => {
-      const s = createServer().listen(0, "127.0.0.1", () => {
-        const p = (s.address() as { port: number }).port;
-        s.close(() => resolve(p));
-      });
-    });
-    if (port < 65000) return port;
-  }
-}
+// Port 0 lets each stand-in bind its own port, so no other test can take it
+// between choosing and binding. Like a real emulator, the console stand-in
+// also listens on its adb port (console + 1), which the script inspects too.
 const STANDIN = `import socket,sys,threading
 kind,port=sys.argv[1],int(sys.argv[2])
-ls=socket.socket(); ls.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); ls.bind(('127.0.0.1',port)); ls.listen(8)
-print('ready',flush=True)
+def bound(p):
+ s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',p)); s.listen(8); return s
+def drain(s):
+ while True: s.accept()[0].close()
+ls=bound(port)
+if kind=='console': threading.Thread(target=drain,args=(bound(ls.getsockname()[1]+1),),daemon=True).start()
+print('ready',ls.getsockname()[1],flush=True)
 while True:
  c,_=ls.accept(); c.settimeout(2)
  try:
@@ -430,20 +428,25 @@ const children: ChildProcess[] = [];
 afterEach(() => {
   for (const c of children.splice(0)) c.kill("SIGKILL");
 });
-async function standIn(kind: "adb" | "console", port: number) {
-  const child = spawn(
-    "/usr/bin/python3",
-    ["-I", "-c", STANDIN, kind, String(port)],
-    {
-      stdio: ["ignore", "pipe", "inherit"],
-    },
-  );
+async function standIn(kind: "adb" | "console") {
+  const child = spawn("/usr/bin/python3", ["-I", "-c", STANDIN, kind, "0"], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
   children.push(child);
-  await new Promise<void>((resolve, reject) => {
-    child.stdout?.once("data", () => resolve());
+  return new Promise<number>((resolve, reject) => {
+    child.stdout?.once("data", (data: Buffer) =>
+      resolve(Number(String(data).split(" ")[1])),
+    );
     child.once("exit", () => reject(new Error("stand-in exited")));
   });
-  return child;
+}
+async function emulatorStandIn(): Promise<number> {
+  // Retry when the port after an ephemeral console port is already taken.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const port = await standIn("console").catch(() => undefined);
+    if (port) return port;
+  }
+  throw new Error("no free emulator port pair");
 }
 const listening = (port: number) =>
   new Promise<boolean>((resolve) => {
@@ -460,14 +463,9 @@ test("the real script closes only this slot's adb server and emulator; the other
   const probe = targetProbe(() => ({ mode: "local", dataDir: dir }));
   expect(probe.adb).toBeDefined();
   const adb = probe.adb as AdbProbe;
-  const [mine, theirs, emulator] = [
-    await freePort(),
-    await freePort(),
-    await freePort(),
-  ];
-  await standIn("adb", mine);
-  await standIn("adb", theirs);
-  await standIn("console", emulator);
+  const mine = await standIn("adb"),
+    theirs = await standIn("adb"),
+    emulator = await emulatorStandIn();
   const context = {
     project: "first",
     machine: "local",
@@ -478,16 +476,17 @@ test("the real script closes only this slot's adb server and emulator; the other
   // A check only looks; nothing is closed.
   expect(await adb({ ...context, action: "check" })).toEqual({
     target: "local",
-    found: 2,
-    left: 2,
+    found: 3,
+    left: 3,
   });
   expect(await adb({ ...context, action: "release" }, "local")).toEqual({
     target: "local",
-    found: 2,
+    found: 3,
     left: 0,
   });
   expect(await listening(mine)).toBe(false);
   expect(await listening(emulator)).toBe(false);
+  expect(await listening(emulator + 1)).toBe(false);
   expect(await listening(theirs)).toBe(true);
   // Nothing left: a second release is a clean no-op.
   expect(await adb({ ...context, action: "release" }, "local")).toMatchObject({
