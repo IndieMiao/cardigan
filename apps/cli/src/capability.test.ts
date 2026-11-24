@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { USAGE_NOTE_MAX_LENGTH } from "@cardigan/domain";
 import { listCapabilityGuides, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { runCapabilityCommand } from "./capability.js";
@@ -155,7 +156,7 @@ test("credential-like notes, oversized notes and malformed targets are refused",
       "--note",
       "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
     ],
-    ["set", "godot", "--note", "x".repeat(4001)],
+    ["set", "godot", "--note", "x".repeat(USAGE_NOTE_MAX_LENGTH + 1)],
     ["set", "Godot", "--note", "ok"],
     ["set", "godot"],
     ["set", "godot", "--note", "a", "--note-file", "b"],

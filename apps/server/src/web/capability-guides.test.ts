@@ -1,3 +1,4 @@
+import { USAGE_NOTE_MAX_LENGTH } from "@cardigan/domain";
 import { listCapabilityGuides } from "@cardigan/store";
 import { expect, test } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
@@ -93,7 +94,7 @@ test("human session reads and writes usage notes; any Agent Token gets 403", asy
       (
         await f.call(path, {
           method: "PUT",
-          body: { ...note, usage_note: "x".repeat(4001) },
+          body: { ...note, usage_note: "x".repeat(USAGE_NOTE_MAX_LENGTH + 1) },
         })
       ).status,
     ).toBe(400);

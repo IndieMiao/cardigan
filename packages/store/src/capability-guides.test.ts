@@ -1,4 +1,4 @@
-import type { Actor } from "@cardigan/domain";
+import { type Actor, USAGE_NOTE_MAX_LENGTH } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   CapabilityGuideError,
@@ -176,7 +176,14 @@ test("Agent actors, other projects, credential-like notes and bad targets never 
     ).toBe("validation_failed");
     expect(
       refusal(() =>
-        setCapabilityGuide(store, human, "a", target, "x".repeat(4001), now),
+        setCapabilityGuide(
+          store,
+          human,
+          "a",
+          target,
+          "x".repeat(USAGE_NOTE_MAX_LENGTH + 1),
+          now,
+        ),
       ),
     ).toBe("validation_failed");
     expect(

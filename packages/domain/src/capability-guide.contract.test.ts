@@ -61,7 +61,8 @@ describe("usage_note refuses credential-like content", () => {
     ["lark.app_secret=correcthorsebatterystaple"],
     ["export ANDROID_KEYSTORE_PASSWORD=s3cretPass"],
     ["凭据 dGhpcyBpcyBhIHNlY3JldCB2YWx1ZTEyMw== 放这里"],
-    ["9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"],
+    ["API_TOKEN=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b"],
+    ["凭据 Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZg 放这里"],
   ])("%s", (note) => {
     expect(credentialLikeContent(note)).not.toBeNull();
     expect(failure(validateUsageNote(note))).toContain("看起来包含凭据");
@@ -84,6 +85,20 @@ describe("usage_note refuses credential-like content", () => {
     ["模拟器 Pixel_7_API_34，镜像 system-images;android-34;google_apis;x86_64"],
     ["工作目录 3f2a8c1e-9b7d-4e6f-a5c3-1d2e3f4a5b6c 是随机生成的"],
     ["Godot 4.3 在 /Applications/Godot.app/Contents/MacOS/Godot"],
+    // C-724 seed guide: public certificate fingerprints and commit SHAs are digests.
+    [
+      "证书 SHA-256 是 `298a6ad8ec805eb2a4c92015ad20c437c52984b35ce554694ad5958655fa4034`（这是公开指纹）",
+    ],
+    ["证书指纹 29:8A:6A:D8:EC:80:5E:B2:A4:C9:20:15:AD:20:C4:37"],
+    ["对照 healthz 的 git_sha 03c8a57ac11cb3aa2eca4487b2191da609aafc2f"],
+    ["测试账号 qa-c@sensen-test.invalid，键 `accounts.first`"],
+    [
+      '结构是 `{"base_url", "accounts": {<键>: {"email","password","display_name"}}}`',
+    ],
+    ["`CARDIGAN_MAPBOX_PUBLIC_FILE=<见 §9.4>`，只传路径，不打印内容"],
+    [
+      "`ANDROID_ADB_SERVER_PORT=5137`，`ADB_SERVER_SOCKET=localfilesystem:/dev/null`",
+    ],
   ])("%s", (note) => {
     expect(credentialLikeContent(note)).toBeNull();
     expect(validateUsageNote(note).ok).toBe(true);

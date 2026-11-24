@@ -17,8 +17,11 @@ import { type Result, validationFailed } from "./errors.js";
  * Agent Tokens never do. Pure rules only (§20.2): no IO here.
  */
 
-/** Default upper bound of one note, in characters (code points). */
-export const USAGE_NOTE_MAX_LENGTH = 4000;
+/**
+ * Default upper bound of one note, in characters (code points). The longest
+ * section of the sensen-godot tool guide (C-724) is about 4400 characters.
+ */
+export const USAGE_NOTE_MAX_LENGTH = 8000;
 const KEY_MAX_LENGTH = 64;
 
 export const CAPABILITY_GUIDE_SCOPES = [
@@ -120,9 +123,14 @@ const FORMATS: readonly (readonly [RegExp, string])[] = [
   [/[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/i, "带密码的地址"],
 ];
 
-/** Values separated by `/`, `_`, `-`, `.` are identifiers and paths, not secrets. */
+/**
+ * Values separated by `/`, `_`, `-`, `.` are identifiers and paths, not
+ * secrets; pure hex runs are digests (certificate fingerprints, commit SHAs).
+ * A hex secret written as `TOKEN=…` is still caught by the name rule.
+ */
 function opaqueRun(text: string): boolean {
   for (const [run] of text.matchAll(/[A-Za-z0-9+=]{24,}/g)) {
+    if (/^(?:[0-9a-f]+|[0-9A-F]+)$/.test(run)) continue;
     const digits = run.replace(/[^0-9]/g, "").length;
     const letters = run.replace(/[^A-Za-z]/g, "").length;
     if (digits >= 3 && letters >= 3) return true;
