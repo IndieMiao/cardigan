@@ -70,12 +70,15 @@ export function useBoardDependencyFlow(
     }
   }, [svg]);
 
-  // Before the browser paints a redraw: new lines start at their start,
-  // lines that stay keep their phase on the new length.
+  // Before the browser paints a redraw: new lines start with their dots half
+  // a gap in (n dots, none on the card edge or the arrow); lines that stay
+  // keep their phase on the new length.
   useLayoutEffect(() => {
     current.current = gaps;
     for (const key of [...phases.current.keys()])
       if (!gaps.has(key)) phases.current.delete(key);
+    for (const [key, gap] of gaps)
+      if (!phases.current.has(key)) phases.current.set(key, gap / 2);
     paint();
   }, [gaps, paint]);
 

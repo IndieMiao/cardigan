@@ -64,20 +64,20 @@ const flows = (container: HTMLElement) =>
     dashoffset: Number(p.getAttribute("stroke-dashoffset")),
   }));
 
-test("every line carries dots on its own path, starting at its start", () => {
+test("every line carries dots on its own path, starting half a gap in", () => {
   const { container } = render(<BoardDependencyLines lines={LINES} />);
   expect(flows(container)).toEqual([
     {
       key: "C-1>C-2",
       d: LINES[0]?.d,
       dasharray: "0 300",
-      dashoffset: 300,
+      dashoffset: 150,
     },
     {
       key: "C-2>C-3",
       d: LINES[1]?.d,
       dasharray: "0 200",
-      dashoffset: 200,
+      dashoffset: 100,
     },
   ]);
   // The dots paint over their line; the line keeps its arrow.
@@ -102,17 +102,17 @@ test("dots move from the start towards the arrow at one speed on every line", ()
   const step = (FLOW_SPEED * 50) / 1000;
   // A shrinking offset moves the dash pattern towards the path's end.
   expect(flows(container).map((f) => f.dashoffset)).toEqual([
-    300 - step,
-    200 - step,
+    150 - step,
+    100 - step,
   ]);
   frame(1100);
   expect(flows(container).map((f) => f.dashoffset)).toEqual([
-    300 - 2 * step,
-    200 - 2 * step,
+    150 - 2 * step,
+    100 - 2 * step,
   ]);
 });
 
-test("a redraw keeps the phase of lines that stay; new lines start at their start", () => {
+test("a redraw keeps the phase of lines that stay; new lines start half a gap in", () => {
   const view = render(<BoardDependencyLines lines={LINES} />);
   frame(0);
   frame(100);
@@ -126,9 +126,9 @@ test("a redraw keeps the phase of lines that stay; new lines start at their star
   view.rerender(<BoardDependencyLines lines={longer} />);
   const gap = flowGap(curveLength(longer[0]?.d ?? ""));
   expect(flows(view.container).map((f) => [f.key, f.dashoffset])).toEqual([
-    ["C-1>C-2", Number((gap - step).toFixed(2))],
-    ["C-2>C-3", 200 - step],
-    ["C-2>C-4", 90],
+    ["C-1>C-2", Number((gap - 150 - step).toFixed(2))],
+    ["C-2>C-3", 100 - step],
+    ["C-2>C-4", 45],
   ]);
 });
 
