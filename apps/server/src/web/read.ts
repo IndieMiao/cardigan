@@ -17,6 +17,7 @@ import type {
   Run,
   RunQueuePosition,
   TimelineEntry,
+  VideoMetadata,
   WorkItem,
 } from "@cardigan/domain";
 import {
@@ -72,6 +73,7 @@ import {
 } from "@cardigan/domain";
 import { type ProjectMergeGate, previewPorts } from "@cardigan/host";
 import {
+  isVideoMime,
   loadCommandState,
   type RecordReadTiming,
   timeRead,
@@ -608,6 +610,9 @@ export interface AttachmentView extends WebAuthorView {
   readonly thumbnail_path: string | null;
   /** C-614: lightbox image for inline bitmaps (may come from OSS); null otherwise. */
   readonly preview_path: string | null;
+  /** C-683: videos only — what the uploader measured, and its cover frame. */
+  readonly video?: VideoMetadata;
+  readonly poster_path?: string;
 }
 
 /** MIME types safe enough for `<img src>` (§3.2); SVG and HTML are not. */
@@ -674,7 +679,22 @@ function attachmentViewMapper(state: CommandState) {
       download_path,
       thumbnail_path: inline ? `${download_path}/thumbnail` : null,
       preview_path: inline ? `${download_path}/preview` : null,
+      ...videoView(attachment, download_path),
     };
+  };
+}
+
+/** C-683: a video's measurements (no poster digest) and its cover route. */
+function videoView(attachment: Attachment, download_path: string) {
+  if (attachment.streamed_artifact || !isVideoMime(attachment.mime)) return {};
+  const {
+    poster_sha256,
+    poster_size: _size,
+    ...video
+  } = attachment.video ?? {};
+  return {
+    video,
+    ...(poster_sha256 ? { poster_path: `${download_path}/poster` } : {}),
   };
 }
 
@@ -765,6 +785,9 @@ export function referencedAttachmentViews(
         download_path,
         thumbnail_path: plain.thumbnail_path && `${download_path}/thumbnail`,
         preview_path: plain.preview_path && `${download_path}/preview`,
+        ...(plain.poster_path
+          ? { poster_path: `${download_path}/poster` }
+          : {}),
       },
     ];
   });

@@ -544,8 +544,11 @@ export class OffsiteSync {
       for (const a of this.options.store.uow.read((tx) =>
         tx.attachments.list(project.id),
       )) {
-        if (!a.streamed_artifact) attachments.add(a.sha256);
-        else if (!a.streamed_artifact.expired)
+        if (!a.streamed_artifact) {
+          attachments.add(a.sha256);
+          // C-683: a video's cover frame is a blob of its own.
+          if (a.video?.poster_sha256) attachments.add(a.video.poster_sha256);
+        } else if (!a.streamed_artifact.expired)
           artifacts.set(a.streamed_artifact.blob_id, {
             sha256: a.sha256,
             size: a.size,

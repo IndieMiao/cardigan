@@ -94,6 +94,12 @@ cardigan --help
 
 普通附件上限由主机环境变量 `CARDIGAN_ATTACHMENT_MAX_MIB` 决定（整数 MiB，1–64，默认 10）；非法值拒绝启动。server 和 CLI 都按它校验，建议写进两者共同加载的 runtime.env（或 server 的服务单元与 CLI 的环境保持一致），改完重启 server 生效。base64 长度、MCP 与 Workbench 请求体上限随之推出；Workbench 登录后从会话读取上限，worker 上的 upload-evidence 助手从 `upload_attachment` 公布的长度上限读取，download-attachment 接受不超过 64 MiB 的普通附件。前面若有反向代理，请求体上限需不小于 `4 × ⌈上限 / 3⌉ + 1 MiB`（30 MiB 约 41 MiB）。更大的文件走制品上传通道。
 
+## 视频附件（C-683）
+
+mp4、mov、webm、m4v 视频单独限额：`CARDIGAN_VIDEO_MAX_MIB`（整数 MiB，1–2048，默认 1024），和上面一样写进 server 与 CLI 共同加载的环境。视频不走 base64 JSON：Workbench 和 Agent 按 8 MiB 分块续传（`<数据目录>/uploads`，一天未动的上传自动清理），CLI 直接流式拷入附件目录；三者都按文件头核对格式。前面若有反向代理，请求体上限需不小于 8 MiB 加少量头部。
+
+主机不做任何视频解码、抽帧、转码或缩略图：封面帧、时长和分辨率由上传者的浏览器在上传前生成（video + canvas），编码名取自容器记录，随附件一起提交；服务端只读文件开头核对格式。CLI 和 Agent 上传的视频没有封面，时间线显示通用图标。Agent 要看画面时，在自己的 worker 上运行 `download-attachment.mjs <地址> <附件编号> <新文件> --frames <新目录> [--every 秒 | --at 秒,秒]`，用 worker 本机的 ffmpeg（含 ffprobe）抽帧；没有 ffmpeg 时助手照常保存视频并明确提示。需要 Agent 看视频的 worker 请预装 ffmpeg。
+
 ## 使用隔离模式启动 Assignment
 
 安装并重新登录后，在启动 server 的主机终端加载 Agent 安装器生成的 runtime.env（按安装器打印的路径；用 `set -a` / `. <runtime.env>` / `set +a` 导出）。CLI 使用上文安装的 `cardigan` 命令，自动加载同一配置。随后沿用已登记的项目、Role 和 launch.yaml：
