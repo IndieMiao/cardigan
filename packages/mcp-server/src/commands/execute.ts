@@ -1,5 +1,6 @@
 import type {
   Actor,
+  CardId,
   Clock,
   CommandEffect,
   CommandPorts,
@@ -11,17 +12,88 @@ import type {
   ToolName,
   TransactionContext,
 } from "@cardigan/domain";
-import { streamHistory } from "@cardigan/domain";
-import type { McpBackend, McpReadContext } from "../backend.js";
+import {
+  COLD_CARD_OMITTED_EVENT_TYPES,
+  commandTargetCards,
+  hotCardIds,
+  liveTriggerEventIds,
+  streamHistory,
+} from "@cardigan/domain";
+import type {
+  CommandEventStreams,
+  McpBackend,
+  McpReadContext,
+} from "../backend.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import type { ToolContext } from "../tools/types.js";
 
-/** Project stream, then card streams in card order (C-640: built from the Store log). */
+const histories = new WeakMap<
+  ReadonlyMap<string, readonly Event[]>,
+  Map<string, readonly Event[]>
+>();
+
+/**
+ * Project stream, then card streams in card order (C-640: built from the
+ * Store log with its index). Entity-only revisions do not change immutable
+ * event history or its indexes. `hot` (C-639) keeps whole streams only for
+ * hot cards; other cards keep their events except the cold-omitted telemetry
+ * types.
+ */
 function eventHistory(
-  streams: ReadonlyMap<string, readonly Event[]>,
+  streams: CommandEventStreams,
   cards: readonly { id: string }[],
+  hot?: ReadonlySet<string>,
 ) {
-  return streamHistory(streams, ["", ...cards.map((c) => c.id)]);
+  // Only which cards are hot matters, in card order: no sort on this path.
+  const key = cards
+    .map((c) => (hot === undefined ? "*" : hot.has(c.id) ? "+" : "-") + c.id)
+    .join(",");
+  let cache = histories.get(streams);
+  if (!cache) {
+    cache = new Map();
+    histories.set(streams, cache);
+  }
+  const cached = cache.get(key);
+  if (cached) return cached;
+  const events = streamHistory(
+    streams,
+    ["", ...cards.map((c) => c.id)],
+    hot ? { full: hot, omit: COLD_CARD_OMITTED_EVENT_TYPES } : undefined,
+  );
+  // Base state plus a few target extensions share one immutable snapshot.
+  if (cache.size >= 8) cache.delete(cache.keys().next().value as string);
+  cache.set(key, events);
+  return events;
+}
+
+/** Hot cards each cached state was built for; extensions rebuild events only. */
+const hotSets = new WeakMap<CommandState, ReadonlySet<string>>();
+const extensions = new WeakMap<
+  CommandState,
+  { key: string; state: CommandState }
+>();
+
+/**
+ * Pins only widen the hot set (more history is always correct); they expire
+ * after this many base rebuilds without a target or notification naming them.
+ */
+const STICKY_GENERATIONS = 512;
+const sticky = new Map<
+  string,
+  { generation: number; used: Map<string, number> }
+>();
+function stickyPins(project: string) {
+  let pins = sticky.get(project);
+  if (!pins) {
+    pins = { generation: 0, used: new Map() };
+    sticky.set(project, pins);
+  }
+  return pins;
+}
+
+export interface CommandStateOptions {
+  /** Command parameters (or ids) naming the cards a command is about. */
+  readonly targets?: readonly unknown[];
 }
 
 export function unwrap<T>(result: Result<T>): T {
@@ -45,13 +117,16 @@ export function loadCommandState(
   tx: McpReadContext,
   project_id: ProjectId,
   project_settings?: CommandState["project_settings"],
+  options: CommandStateOptions = {},
 ): CommandState {
   // Resolve the transaction's event history even on a state cache hit. A
   // backend without this bulk port keeps the original per-stream read path.
   const streams = tx.events.listStreams?.(project_id);
-  const build = () => readCommandState(tx, project_id, streams);
-  const state =
+  const hot = tx.command_state_scope === "hot" && streams !== undefined;
+  const build = () => readCommandState(tx, project_id, streams, hot);
+  let state =
     (streams && tx.cachedCommandState?.(project_id, build)) || build();
+  if (hot && streams) state = extendHot(tx, state, streams, options);
   if (!project_settings && !tx.test_review_trust && !tx.read_machine_placement)
     return state;
   // Attach live authority AFTER the data cache; revoked/restarted sources must
@@ -68,15 +143,78 @@ export function loadCommandState(
   };
 }
 
+/**
+ * Inbox notifications and command targets are not part of the cached state's
+ * version; when they name a cold card, rebuild only the event history.
+ */
+function extendHot(
+  tx: McpReadContext,
+  state: CommandState,
+  streams: CommandEventStreams,
+  options: CommandStateOptions,
+): CommandState {
+  const base = hotSets.get(state);
+  if (!base) return state;
+  const extra = new Set<string>(
+    tx.hot_state_hints?.liveNotificationCards(state.project_id) ?? [],
+  );
+  if (options.targets?.length)
+    for (const id of commandTargetCards(state, options.targets)) extra.add(id);
+  const pins = stickyPins(state.project_id);
+  for (const id of extra) pins.used.set(id, pins.generation);
+  const missing = [...extra].filter(
+    (id) => !base.has(id) && state.cards.some((c) => c.id === id),
+  );
+  if (!missing.length) return state;
+  const hot = new Set([...base, ...missing]);
+  const key = [...missing].sort().join(",");
+  const cached = extensions.get(state);
+  if (cached?.key === key) return cached.state;
+  const extended = {
+    ...state,
+    events: eventHistory(streams, state.cards, hot),
+  };
+  hotSets.set(extended, hot);
+  extensions.set(state, { key, state: extended });
+  return extended;
+}
+
 function readCommandState(
   tx: McpReadContext,
   project_id: ProjectId,
-  streams: ReadonlyMap<string, readonly Event[]> | undefined,
+  streams: CommandEventStreams | undefined,
+  hot = false,
 ): CommandState {
   const cards = tx.cards.list(project_id);
+  const entities = {
+    cards,
+    work_items: tx.work_items.list(project_id),
+    assignments: tx.assignments.list(project_id),
+    runs: tx.runs.list(project_id),
+    decisions: tx.decisions.list(project_id),
+    human_actions: tx.human_actions.list(project_id),
+  };
+  let hotCards: Set<string> | undefined;
+  if (hot && streams) {
+    // Triggers of unfinished Runs may live on a closed card's stream.
+    const triggers = tx.hot_state_hints?.eventCards(
+      project_id,
+      liveTriggerEventIds(entities.runs),
+    );
+    // Recently targeted or notified cold cards join the base hot set, so
+    // repeated targets reuse one history (and its indexes) per snapshot.
+    const pins = stickyPins(project_id);
+    pins.generation++;
+    for (const [id, used] of pins.used)
+      if (pins.generation - used > STICKY_GENERATIONS) pins.used.delete(id);
+    hotCards = hotCardIds(entities, [
+      ...((triggers?.values() ?? []) as Iterable<CardId | undefined>),
+      ...(pins.used.keys() as Iterable<CardId>),
+    ]);
+  }
   // Store reads only newly appended rows. Keep the original project/card/seq
   // order, including filtering out streams whose card is absent from this snapshot.
-  return {
+  const state: CommandState = {
     project_id,
     project_preferences: tx.project_preferences?.list(project_id) ?? [],
     card_templates: tx.card_templates?.list(project_id) ?? [],
@@ -84,24 +222,21 @@ function readCommandState(
     members: tx.members?.list() ?? [],
     employee_activity: tx.employees?.assignmentActivity?.() ?? [],
     machines: tx.machines.list(project_id),
-    cards,
-    work_items: tx.work_items.list(project_id),
-    assignments: tx.assignments.list(project_id),
-    runs: tx.runs.list(project_id),
+    ...entities,
     deliveries: tx.deliveries.list(project_id),
     reviews: tx.reviews.list(project_id),
-    decisions: tx.decisions.list(project_id),
-    human_actions: tx.human_actions.list(project_id),
     attachments: tx.attachments.list(project_id),
     roles: tx.roles.list(project_id),
     cursors: tx.cursors.list(project_id),
     timeline: tx.timeline.list(project_id),
     events: streams
-      ? eventHistory(streams, cards)
+      ? eventHistory(streams, cards, hotCards)
       : [undefined, ...cards.map((c) => c.id)].flatMap((id) =>
           tx.events.listAfter(project_id, id, 0),
         ),
   };
+  if (hotCards) hotSets.set(state, hotCards);
+  return state;
 }
 
 /** Persist a command effect inside an open transaction (shared with the CLI). */
@@ -174,6 +309,14 @@ export function executeCommand<P, T>(
                 tx,
                 actor.project_id,
                 context.projectSettings?.(actor.project_id),
+                {
+                  targets: [
+                    params,
+                    actor.kind === "assignment"
+                      ? actor.assignment_id
+                      : undefined,
+                  ],
+                },
               ),
             );
             const effect = timed(context, "command_reduce", () =>
@@ -241,6 +384,12 @@ export async function executePreparedCommand<P, Prepared, T>(
         tx,
         actor.project_id,
         context.projectSettings?.(actor.project_id),
+        {
+          targets: [
+            params,
+            actor.kind === "assignment" ? actor.assignment_id : undefined,
+          ],
+        },
       ),
     ),
   );

@@ -17,21 +17,31 @@ import { cardDetail, cardListViews } from "./read.js";
 import { withSuggestionProgress } from "./sql-state.js";
 
 /** Only collections used by card views; command-only activity/cursors stay out. */
-function cardState(tx: ReadRepositories, project_id: ProjectId): CommandState {
+function cardState(
+  tx: ReadRepositories,
+  project_id: ProjectId,
+  card_id?: CardId,
+): CommandState {
   const config = tx.events
     .listAfter(project_id, undefined, 0)
     .findLast((e) => e.type === "merge_queue_configured");
   if (config)
-    return loadCommandState(tx, project_id, {
-      merge_gate_enabled: true,
-      ...(config.payload
-        ? {
-            merge_queue: config.payload as unknown as NonNullable<
-              NonNullable<CommandState["project_settings"]>["merge_queue"]
-            >,
-          }
-        : {}),
-    });
+    return loadCommandState(
+      tx,
+      project_id,
+      {
+        merge_gate_enabled: true,
+        ...(config.payload
+          ? {
+              merge_queue: config.payload as unknown as NonNullable<
+                NonNullable<CommandState["project_settings"]>["merge_queue"]
+              >,
+            }
+          : {}),
+      },
+      // C-639: a closed card's own detail keeps its whole history.
+      { targets: card_id ? [card_id] : [] },
+    );
   return {
     project_id,
     project_preferences: tx.project_preferences.list(project_id),
@@ -111,7 +121,7 @@ export function readCardDetail(
   options: Parameters<typeof cardDetail>[2] = {},
 ) {
   return store.uow.read((tx) => {
-    const state = cardState(tx, project_id);
+    const state = cardState(tx, project_id, card_id);
     const card = state.cards.find((c) => c.id === card_id);
     if (!card) return undefined;
     const timeline = store.database

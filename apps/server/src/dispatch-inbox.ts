@@ -286,7 +286,13 @@ export function routeStreamEvents(
       .all(project, stream, store.routerCursor(project, stream), size)
       .map((row) => JSON.parse(String(row.doc)) as Event);
     if (events.length === 0) return 0;
-    const snapshot = (options.loadState ?? loadCommandState)(tx, project),
+    // C-639: routing reads the routed stream's own history even once closed.
+    const snapshot = (options.loadState ?? loadCommandState)(
+        tx,
+        project,
+        undefined,
+        { targets: stream ? [stream] : [] },
+      ),
       at = (options.clock ?? dispatcherClock).now();
     const announced = new Set<string>();
     for (const event of events) {

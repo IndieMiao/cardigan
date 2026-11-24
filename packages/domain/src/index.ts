@@ -225,7 +225,12 @@ export {
   eventsForDecision,
   eventsOfType,
 } from "./event-index.js";
-export { EventLog, EventLogView, streamHistory } from "./event-log.js";
+export {
+  EventLog,
+  EventLogView,
+  type HistoryFilter,
+  streamHistory,
+} from "./event-log.js";
 export * from "./ext-interaction.js";
 export * from "./ext-message.js";
 export * from "./flow.js";
@@ -241,6 +246,8 @@ export {
 export * from "./harness-activity.js";
 export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
+export * from "./hot-history.js";
+export * from "./hot-history-shadow.js";
 export * from "./ids.js";
 export {
   currentInteraction,

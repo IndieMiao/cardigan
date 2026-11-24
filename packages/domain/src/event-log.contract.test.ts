@@ -236,3 +236,108 @@ test("C-640: a dropped overlay never leaks into later views or reused ordinals",
   expect(eventsOfType(staleHistory, "secret")).toHaveLength(1);
   expect(eventsOfType(history, "public")).toEqual([]);
 });
+
+test("C-639: filtered history and its index match the plain filter; ofTypes matches per-stream grouping", () => {
+  const omit = new Set(["run_started", "__proto__"]);
+  for (let seed = 1; seed <= 80; seed++) {
+    const pick = rng(seed);
+    const seqs = new Map<string, number>();
+    const next = { id: 1 };
+    const log = new EventLog();
+    const committed: Event[] = [];
+    for (let round = 0; round < 4; round++) {
+      const overlay = new EventLog(log.end);
+      const added = randomBatch(pick, seqs, next, pick(14));
+      for (const event of added) overlay.append(event);
+      const all = [...committed, ...added];
+      const views = [
+        { view: new EventLogView(log, log.end, overlay, overlay.end), all },
+        { view: new EventLogView(log, log.end), all: [...committed] },
+      ];
+      for (const { view, all: events } of views) {
+        const full = new Set(cards.filter(() => pick(2) === 0));
+        const filter = { full, omit };
+        const order = ["", ...cards];
+        const expected = legacyHistory(events, order).filter(
+          (e) => !e.card_id || full.has(e.card_id) || !omit.has(e.type),
+        );
+        const history = view.history(order, filter);
+        expect(view.history(order, { full: new Set(full), omit })).toBe(
+          history,
+        );
+        expect(streamHistory(view, order, filter)).toBe(history);
+        expectSameLookups(history, expected);
+        // A plain map (no Store log) gives the same events.
+        expect(streamHistory(new Map(view), order, filter)).toEqual(expected);
+        // Unfiltered history of the same view is unaffected.
+        expectSameLookups(view.history(order), legacyHistory(events, order));
+        const tail = randomBatch(pick, new Map(seqs), { id: 1000 }, 3);
+        expectSameLookups(appendEvents(history, tail), [...expected, ...tail]);
+        for (const set of [
+          new Set(["run_started"]),
+          new Set(["noise", "decision_requested"]),
+          new Set(["absent"]),
+        ]) {
+          const grouped = new Map<string, Event[]>();
+          for (const stream of view.keys()) {
+            const kept = (view.get(stream) ?? []).filter((e) =>
+              set.has(e.type),
+            );
+            if (kept.length) grouped.set(stream, kept);
+          }
+          const subset = view.ofTypes(set);
+          expect(view.ofTypes(new Set(set))).toBe(subset);
+          expect(new Map(subset)).toEqual(grouped);
+        }
+      }
+      if (pick(3) === 0) {
+        for (const event of added) {
+          const key = event.card_id ?? "";
+          seqs.set(key, (seqs.get(key) ?? 0) - 1);
+        }
+        next.id -= added.length;
+        continue;
+      }
+      for (const event of overlay.all) log.append(event);
+      committed.push(...added);
+    }
+  }
+});
+
+test("C-639: a stream moving between full and filtered never reuses the other's answers", () => {
+  const event = (n: number, type: string, card?: string): Event => ({
+    id: eventId(n),
+    seq: n,
+    ...(card ? { card_id: card as NonNullable<Event["card_id"]> } : {}),
+    type,
+    actor: { kind: "system", project_id: "fixture-project" },
+    payload: { work_item_id: "W-1" },
+    created_at: "2026-01-01T00:00:00.000Z",
+  });
+  const card = cards[0] as string;
+  const log = new EventLog();
+  log.append(event(1, "run_started", card));
+  log.append(event(2, "card_merged", card));
+  const order = ["", card];
+  const omit = new Set(["run_started"]);
+  const view = new EventLogView(log, log.end);
+  const cold = view.history(order, { full: new Set(), omit });
+  expect(cold.map((e) => e.type)).toEqual(["card_merged"]);
+  expect(eventsForWorkItem(cold, "W-1")).toHaveLength(1);
+  expect(eventsOfType(cold, "run_started")).toEqual([]);
+  expect(cardEventsOfType(cold, card, "run_started")).toEqual([]);
+  expect(eventById(cold, eventId(1))).toBeUndefined();
+  const hot = new EventLogView(log, log.end).history(order, {
+    full: new Set([card]),
+    omit,
+  });
+  expect(eventsForWorkItem(hot, "W-1")).toHaveLength(2);
+  expect(eventsOfType(hot, "run_started")).toHaveLength(1);
+  // Back to cold on a later view: the shared answers follow the filter.
+  const again = new EventLogView(log, log.end).history(order, {
+    full: new Set(),
+    omit,
+  });
+  expect(eventsForWorkItem(again, "W-1")).toHaveLength(1);
+  expect(eventById(again, eventId(1))).toBeUndefined();
+});
