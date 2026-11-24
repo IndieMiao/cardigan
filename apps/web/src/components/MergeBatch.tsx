@@ -27,7 +27,7 @@ export function mergeStageLabel(stage: MergeStageView): string {
     case "queued":
       return `排队中 · 第 ${stage.position ?? 1} 位`;
     case "held_by_window":
-      return `等待合并窗口：保护 ${stage.protecting_card_id}`;
+      return `等待合并窗口：保护 ${stage.protecting_card_id}${stage.protecting_card_held ? "（已暂停）" : ""}`;
     case "batch_checking":
       return `${stage.batch_id} 批次检查中`;
     case "bisecting":
@@ -62,7 +62,13 @@ export function MergeStageBadge({
             {mergeStageLabel(stage)}
           </MergeBatchStage>
         ) : (
-          <MergeBatchStage>{mergeStageLabel(stage)}</MergeBatchStage>
+          <MergeBatchStage
+            {...(stage.protecting_files?.length
+              ? { title: stage.protecting_files.join("\n") }
+              : {})}
+          >
+            {mergeStageLabel(stage)}
+          </MergeBatchStage>
         ))}
       {card.merge_solo && <MergeBatchStage>单独批次</MergeBatchStage>}
     </>

@@ -42,6 +42,25 @@ test.each([
   expect(screen.getByText("单独批次")).toBeTruthy();
 });
 
+test("C-677: a window hold names a held protecting card and lists the shared files on hover", () => {
+  render(
+    <MergeStageBadge
+      projectId="p"
+      card={{
+        merge_stage: {
+          stage: "held_by_window",
+          protecting_card_id: "C-3",
+          protecting_files: ["a.ts", "b.ts"],
+          protecting_card_held: true,
+        },
+      }}
+    />,
+  );
+  expect(
+    screen.getByText("等待合并窗口：保护 C-3（已暂停）").getAttribute("title"),
+  ).toBe("a.ts\nb.ts");
+});
+
 test("groups batch peers without reordering unrelated cards, and highlights only those peers", () => {
   const stage: MergeStageView = {
     stage: "batch_checking",

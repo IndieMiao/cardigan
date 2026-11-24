@@ -2536,6 +2536,21 @@ export function routeEvent(input: RouteInput): RouteResult {
         );
       break;
     }
+    case "merge_window_changed":
+      // C-677: a hold closed the card's window; PM Ops learns who was released.
+      if (
+        (input.event.payload as { closed_by_hold?: unknown } | null)
+          ?.closed_by_hold === true
+      )
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "card",
+          "6.4/merge window closed by hold",
+          `${subject(input)} 已暂停，系统已关闭它的合并窗口；解除暂停后再冲突时按原规则重开。`,
+        );
+      break;
     case PRE_MERGE_CHECK_REMINDED:
       routePreMergeCheckReminder(input, draft);
       break;

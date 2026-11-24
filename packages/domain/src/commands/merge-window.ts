@@ -133,21 +133,48 @@ export function setMergeSolo(
     return next;
   });
 }
-function write(d: CommandDraft, window: MergeWindow, reason: string) {
+function write(
+  d: CommandDraft,
+  window: MergeWindow,
+  reason: string,
+  byHold = false,
+) {
   d.emit(
     "merge_window_changed",
     window.card_id,
     {
-      ...window,
+      card_id: window.card_id,
+      opened_at: window.opened_at,
+      refreshed_at: window.refreshed_at,
       files: [...window.files],
       versions: [...window.versions],
+      open: window.open,
       reason,
+      ...(byHold ? { closed_by_hold: true } : {}),
     },
     {
       type: "status_change",
-      body: `${window.open ? "开启" : "关闭"}合并窗口：${reason}`,
+      body: byHold
+        ? "因暂停关闭合并窗口"
+        : `${window.open ? "开启" : "关闭"}合并窗口：${reason}`,
     },
   );
+}
+/**
+ * C-677: a held card cannot merge, so its window stops protecting it. Only the
+ * human may close a sensitive card's window, so a sensitive card's window
+ * yields only to a hold the human set.
+ */
+export function windowYieldsToHold(card: Card) {
+  return !!card.hold && (!card.sensitive || card.hold.set_by === "human");
+}
+/** C-677: close the card's open window in the same transaction as its hold. */
+export function closeHeldWindow(d: CommandDraft, card: Card) {
+  if (!windowYieldsToHold(card)) return;
+  const window = mergeWindows(appendEvents(d.state.events, d.events)).find(
+    (w) => w.card_id === card.id && w.open,
+  );
+  if (window) write(d, { ...window, open: false }, "卡片已暂停", true);
 }
 export function setMergeWindow(
   state: CommandState,
@@ -186,6 +213,8 @@ export function setMergeWindow(
 export function openConflictWindow(d: CommandDraft, card: Card) {
   const config = d.state.project_settings?.merge_queue;
   if (!config) return;
+  // C-677: a held card cannot merge; its next conflict after release reopens.
+  if (card.hold) return;
   const events = appendEvents(d.state.events, d.events);
   if (mergeWindows(events).some((w) => w.card_id === card.id && w.open)) return;
   if (
@@ -256,7 +285,10 @@ export function refreshMergeWindows(
           p.card_id === card.id &&
           JSON.stringify(p.files) !== JSON.stringify(window.files),
       );
-      if (
+      // C-677: windows held before this rule shipped close on the first refresh.
+      if (windowYieldsToHold(card))
+        write(d, { ...window, open: false }, "卡片已暂停", true);
+      else if (
         ["done", "cancelled"].includes(card.status) ||
         (!changed &&
           Date.parse(d.now) - Date.parse(window.refreshed_at) >=
@@ -281,27 +313,36 @@ export function refreshMergeWindows(
     }
   });
 }
-export function heldByMergeWindow(
+/** C-677: which window holds a card, the overlapping files and whether its card is held. */
+export interface MergeWindowHold {
+  readonly card_id: CardId;
+  /** Empty when either side's paths are not known yet, which fails closed. */
+  readonly files: readonly string[];
+  readonly held: boolean;
+}
+export function mergeWindowHold(
   state: CommandState,
   card: CardId,
-): CardId | undefined {
-  const windows = mergeWindows(state.events)
-    .filter(
-      (w) =>
-        w.open &&
-        state.cards.some(
-          (c) =>
-            c.id === w.card_id && !["done", "cancelled"].includes(c.status),
-        ),
-    )
+): MergeWindowHold | undefined {
+  const open = mergeWindows(state.events).filter((w) => w.open);
+  if (!open.length) return undefined;
+  const cards = new Map(state.cards.map((c) => [c.id, c]));
+  const windows = open
+    .filter((w) => {
+      const owner = cards.get(w.card_id);
+      return (
+        !!owner &&
+        !["done", "cancelled"].includes(owner.status) &&
+        !windowYieldsToHold(owner)
+      );
+    })
     .sort(
       (a, b) =>
         a.opened_at.localeCompare(b.opened_at) ||
         a.card_id.localeCompare(b.card_id),
     );
   // Windows protect files of one baseline branch; other branches never collide.
-  const branch = (id: CardId) =>
-    state.cards.find((c) => c.id === id)?.base_branch;
+  const branch = (id: CardId) => cards.get(id)?.base_branch;
   const active: MergeWindow[] = [];
   for (const window of windows) {
     if (
@@ -317,14 +358,32 @@ export function heldByMergeWindow(
   }
   const paths = cardEventsOfType(state.events, card, "merge_queue_paths").at(-1)
     ?.payload as unknown as { versions: string[]; files: string[] } | undefined;
-  return active.find(
+  // Paths of an older version are unknown, like missing paths.
+  const known =
+    paths &&
+    JSON.stringify(paths.versions) ===
+      JSON.stringify(mergeWindowVersions(state, card))
+      ? paths.files
+      : undefined;
+  const window = active.find(
     (w) =>
       w.card_id !== card &&
       branch(w.card_id) === branch(card) &&
-      (!paths ||
-        !w.versions.length ||
-        JSON.stringify(paths.versions) !==
-          JSON.stringify(mergeWindowVersions(state, card)) ||
-        paths.files.some((f) => w.files.includes(f))),
-  )?.card_id;
+      (!known || !w.versions.length || known.some((f) => w.files.includes(f))),
+  );
+  if (!window) return undefined;
+  return {
+    card_id: window.card_id,
+    files:
+      known && window.versions.length
+        ? known.filter((f) => window.files.includes(f))
+        : [],
+    held: !!cards.get(window.card_id)?.hold,
+  };
+}
+export function heldByMergeWindow(
+  state: CommandState,
+  card: CardId,
+): CardId | undefined {
+  return mergeWindowHold(state, card)?.card_id;
 }
