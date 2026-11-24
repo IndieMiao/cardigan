@@ -33,7 +33,7 @@ import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
 import { CardStatusLine } from "../components/CardStatusLine.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { CardTemplate } from "../components/CardTemplate.js";
-import { CommentBox, type CommentBoxHandle } from "../components/CommentBox.js";
+import { CommentBox } from "../components/CommentBox.js";
 import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   EmptyState,
@@ -62,7 +62,6 @@ import {
   TimelineControls,
   TimelinePager,
 } from "../components/TimelineControls.js";
-import { Button } from "../components/ui/button.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
@@ -471,12 +470,9 @@ function CardContent({
     projectId,
     cardId,
   });
-  const [activeAction, setActiveAction] = useState<
-    "card" | "hold" | "completion"
-  >();
+  const [activeAction, setActiveAction] = useState<"card" | "completion">();
   const [primaryPanels, setPrimaryPanels] = useState<HTMLElement | null>(null);
   const article = useRef<HTMLElement>(null);
-  const commentBox = useRef<CommentBoxHandle>(null);
   const scroll = useRef<HTMLElement>(null),
     lastAnchor = useRef<string | undefined>(undefined);
   const [selectedSection, setSelectedSection] = useState<string>();
@@ -767,11 +763,7 @@ function CardContent({
           primaryActions={
             <>
               <CardHoldActions
-                disabled={!!activeAction && activeAction !== "hold"}
-                formContainer={primaryPanels}
-                onEditingChange={(editing) =>
-                  setActiveAction(editing ? "hold" : undefined)
-                }
+                disabled={!!activeAction}
                 card={card}
                 client={client}
                 projectId={projectId}
@@ -969,19 +961,6 @@ function CardContent({
           className="card-section card-timeline"
           aria-label="时间线"
         >
-          <div className="card-timeline-heading">
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() =>
-                commentBox.current?.focus((target) =>
-                  target.scrollIntoView?.({ block: "nearest" }),
-                )
-              }
-            >
-              写评论
-            </Button>
-          </div>
           <TimelineControls
             filters={filters}
             onChange={setFilters}
@@ -999,7 +978,6 @@ function CardContent({
             />
           )}
           <CommentBox
-            ref={commentBox}
             client={client}
             projectId={projectId}
             cardId={cardId}

@@ -124,11 +124,12 @@ test.each([false, true])(
     );
     expect(screen.getByRole("region", { name: "工作项" })).toBeTruthy();
     fireEvent.click(within(nav).getByRole("tab", { name: /^时间线/ }));
-    fireEvent.click(screen.getByRole("button", { name: "写评论" }));
+    // C-700: the timeline has no "写评论" button; the comment box stays put.
+    expect(screen.queryByRole("button", { name: "写评论" })).toBeNull();
     const input = screen.getByRole<HTMLTextAreaElement>("textbox", {
       name: "评论正文",
     });
-    expect(document.activeElement).toBe(input);
+    expect(input.closest('[aria-label="时间线"]')).toBeTruthy();
     fireEvent.change(input, { target: { value: "Keep draft" } });
     fireEvent.click(overview);
     expect(screen.queryByRole("textbox", { name: "评论正文" })).toBeNull();

@@ -337,6 +337,7 @@ export {
   MERGE_CHECK_RUN_SLOTS,
   machineRunCapacity,
   type ReadResourceLimits,
+  type RunCapacityBlock,
   readRunQueue,
   runCapacityMachines,
   runCapacitySnapshot,
