@@ -53,6 +53,39 @@ test("central clone is private, bare, independent and bound to its registered so
     ),
   ).toBe(true);
 });
+test("an unchanged center reuses its identity proof and ref validation; a rewritten config re-verifies", async () => {
+  const repo = await f.central.ensureCentral(f.project);
+  const count = (arg: string) =>
+    f.calls.filter((c) => c.cwd === repo && c.args.includes(arg)).length;
+  const identity = count("cardigan.source"),
+    bare = count("--is-bare-repository");
+  await f.transport.verifyBareSource(repo, f.source);
+  await f.transport.verifyBareSource(repo, f.source);
+  expect([count("cardigan.source"), count("--is-bare-repository")]).toEqual([
+    identity,
+    bare,
+  ]);
+  // A different expected source is never answered from the proof.
+  await expect(f.transport.verifyBareSource(repo, f.root)).rejects.toThrow(
+    /source changed/,
+  );
+  await git(repo, "config", "--local", "cardigan.source", f.root);
+  await expect(f.transport.verifyBareSource(repo, f.source)).rejects.toThrow(
+    /source changed/,
+  );
+  await git(repo, "config", "--local", "cardigan.source", f.source);
+  await f.transport.verifyBareSource(repo, f.source);
+  const formats = count("check-ref-format");
+  expect(await f.transport.readRef(repo, "refs/heads/main")).toBe(f.initial);
+  expect(await f.transport.readRef(repo, "refs/heads/main")).toBe(f.initial);
+  expect(count("check-ref-format")).toBeLessThanOrEqual(formats + 1);
+  await expect(
+    f.transport.readRef(repo, "refs/heads/bad..ref"),
+  ).rejects.toThrow();
+  await expect(
+    f.transport.readRef(repo, "refs/heads/bad..ref"),
+  ).rejects.toThrow();
+});
 test("source synchronization fast-forwards, preserves a leading center and refuses divergence", async () => {
   const repo = await f.central.ensureCentral(f.project);
   expect(await f.central.syncFromSource(f.project)).toBe("up_to_date");

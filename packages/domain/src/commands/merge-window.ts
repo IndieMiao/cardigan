@@ -1,5 +1,9 @@
-import type { Actor, Card, Event } from "../entities.js";
-import { appendEvents } from "../event-index.js";
+import type { Actor, Card, Delivery, Event, WorkItem } from "../entities.js";
+import {
+  appendEvents,
+  cardEventsOfType,
+  eventsOfType,
+} from "../event-index.js";
 import type { CardId } from "../ids.js";
 import {
   type CommandDraft,
@@ -23,11 +27,9 @@ export function mergeWindows(events: readonly Event[]) {
   const cached = windowCache.get(events);
   if (cached) return cached;
   const windows = new Map<CardId, MergeWindow>();
-  for (const e of events
-    .filter((e) => e.type === "merge_window_changed")
-    .sort(
-      (a, b) => a.created_at.localeCompare(b.created_at) || a.seq - b.seq,
-    )) {
+  for (const e of [...eventsOfType(events, "merge_window_changed")].sort(
+    (a, b) => a.created_at.localeCompare(b.created_at) || a.seq - b.seq,
+  )) {
     if (e.type !== "merge_window_changed" || !e.card_id) continue;
     windows.set(e.card_id, e.payload as unknown as MergeWindow);
   }
@@ -35,19 +37,62 @@ export function mergeWindows(events: readonly Event[]) {
   windowCache.set(events, result);
   return result;
 }
-export function mergeWindowVersions(state: CommandState, card: CardId) {
-  return state.deliveries
-    .filter(
-      (v) =>
-        v.kind !== "card_completion" &&
-        v.subject.kind === "git_head" &&
-        v.status !== "superseded" &&
-        state.work_items.some(
-          (w) => w.id === v.work_item_id && w.card_id === card,
-        ),
-    )
-    .map((v) => v.id)
-    .sort();
+// C-670: one pass per (deliveries, work_items) snapshot instead of a
+// deliveries x work_items scan per card. Both arrays are immutable snapshots.
+const versionCache = new WeakMap<
+  readonly Delivery[],
+  WeakMap<readonly WorkItem[], ReadonlyMap<CardId, readonly string[]>>
+>();
+const noVersions: readonly string[] = Object.freeze([]);
+function versionsByCard(
+  deliveries: readonly Delivery[],
+  items: readonly WorkItem[],
+) {
+  let byItems = versionCache.get(deliveries);
+  if (!byItems) {
+    byItems = new WeakMap();
+    versionCache.set(deliveries, byItems);
+  }
+  let index = byItems.get(items);
+  if (!index) {
+    // A delivery belongs to a card when any work item with its ID is on it.
+    const cardsOf = new Map<string, Set<CardId>>();
+    for (const w of items) {
+      let cards = cardsOf.get(w.id);
+      if (!cards) {
+        cards = new Set();
+        cardsOf.set(w.id, cards);
+      }
+      cards.add(w.card_id);
+    }
+    const map = new Map<CardId, string[]>();
+    for (const v of deliveries) {
+      if (
+        v.kind === "card_completion" ||
+        v.subject.kind !== "git_head" ||
+        v.status === "superseded"
+      )
+        continue;
+      for (const card of cardsOf.get(v.work_item_id) ?? []) {
+        const list = map.get(card);
+        if (list) list.push(v.id);
+        else map.set(card, [v.id]);
+      }
+    }
+    for (const list of map.values()) list.sort();
+    index = map;
+    byItems.set(items, index);
+  }
+  return index;
+}
+export function mergeWindowVersions(
+  state: Pick<CommandState, "deliveries" | "work_items">,
+  card: CardId,
+): string[] {
+  return [
+    ...(versionsByCard(state.deliveries, state.work_items).get(card) ??
+      noVersions),
+  ];
 }
 function authority(d: CommandDraft, reason: string) {
   ensure(
@@ -173,8 +218,8 @@ export function openConflictWindow(d: CommandDraft, card: Card) {
   const events = appendEvents(d.state.events, d.events);
   if (mergeWindows(events).some((w) => w.card_id === card.id && w.open)) return;
   if (
-    events.filter((e) => e.card_id === card.id && e.type === "merge_conflicted")
-      .length < (config.conflict_threshold ?? 2)
+    cardEventsOfType(events, card.id, "merge_conflicted").length <
+    (config.conflict_threshold ?? 2)
   )
     return;
   write(
@@ -216,9 +261,11 @@ export function refreshMergeWindows(
         "stale_target",
         "Merge window paths do not match current deliveries",
       );
-      const old = state.events.findLast(
-        (e) => e.card_id === path.card_id && e.type === "merge_queue_paths",
-      );
+      const old = cardEventsOfType(
+        state.events,
+        path.card_id,
+        "merge_queue_paths",
+      ).at(-1);
       if (JSON.stringify(old?.payload) !== JSON.stringify(path))
         d.emit("merge_queue_paths", path.card_id, {
           ...path,
@@ -309,9 +356,8 @@ export function mergeWindowHold(
     )
       active.push(window);
   }
-  const paths = state.events.findLast(
-    (e) => e.card_id === card && e.type === "merge_queue_paths",
-  )?.payload as unknown as { versions: string[]; files: string[] } | undefined;
+  const paths = cardEventsOfType(state.events, card, "merge_queue_paths").at(-1)
+    ?.payload as unknown as { versions: string[]; files: string[] } | undefined;
   // Paths of an older version are unknown, like missing paths.
   const known =
     paths &&

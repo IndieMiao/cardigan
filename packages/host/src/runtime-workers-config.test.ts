@@ -503,6 +503,31 @@ test("missing config is compatible; malformed, permissive and symlink files are 
   );
 });
 
+test("unchanged content reuses one parse; edits, data directory and permissions still apply", () => {
+  const root = mkdtempSync(join(tmpdir(), "cg-workers-"));
+  roots.push(root);
+  const file = join(root, "workers.yaml");
+  writeFileSync(file, JSON.stringify(workerConfig()), { mode: 0o600 });
+  const first = loadRuntimeWorkers("/private/data", file);
+  expect(loadRuntimeWorkers("/private/data", file)).toBe(first);
+  expect(Object.isFrozen(first)).toBe(true);
+  // Same file, another data directory: parsed separately.
+  expect(loadRuntimeWorkers("/other/data", file)).not.toBe(first);
+  const edited = workerConfig();
+  edited.machines[0]!.id = "worker-b";
+  writeFileSync(file, JSON.stringify(edited), { mode: 0o600 });
+  expect(JSON.stringify(loadRuntimeWorkers("/private/data", file))).toContain(
+    "worker-b",
+  );
+  chmodSync(file, 0o644);
+  expect(() => loadRuntimeWorkers("/private/data", file)).toThrow(
+    "configuration invalid",
+  );
+  chmodSync(file, 0o600);
+  rmSync(file);
+  expect(loadRuntimeWorkers("/private/data", file)).toEqual([]);
+});
+
 test("loopback spellings cannot split the same physical machine into separate buckets", () => {
   const original = workerConfig().machines[0];
   for (const host of ["127.0.0.1", "::1", "LOCALHOST"])
