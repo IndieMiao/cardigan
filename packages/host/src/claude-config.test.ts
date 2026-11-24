@@ -289,7 +289,7 @@ describe.skipIf(process.platform !== "linux")(
         await expect(stat(join(f.home, ".claude.json"))).rejects.toMatchObject({
           code: "ENOENT",
         });
-        expect(f.launches[1]).toContain("--keep");
+        expect(f.launches[1]).not.toContain("--keep"); // C-667
         if (mode === "agent-ssh")
           for (const args of f.launches)
             expect(args.slice(1, 3)).toEqual(["--on", "cardigan-agent"]);

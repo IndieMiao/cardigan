@@ -10,6 +10,12 @@ import type {
   JsonValue,
   ReadyCondition,
 } from "./entities.js";
+import {
+  commandEventHistory,
+  commandStreamHistory,
+  fullEventHistory,
+  isTelemetryEvent,
+} from "./event-index.js";
 import { EventLog, EventLogView } from "./event-log.js";
 import { type ExtMessageItem, extMessageItems } from "./ext-message.js";
 import type { CardId, ProjectId } from "./ids.js";
@@ -19,7 +25,9 @@ import { NEEDS_YOU_ITEM_READY, needsYouItemReady } from "./readiness.js";
 /*
  * C-653 oracle: the projection exactly as it was before keyed lookups, with
  * its two whole-history passes (id -> time map, then a payload field scan).
- * Only the name changed; it stays frozen so equality proves no drift.
+ * Only the name changed; it stays frozen so equality proves no drift. It
+ * follows the C-643 baseline: both passes walk the full history, telemetry
+ * included.
  */
 function sameGate(gate: ReadyCondition | undefined, recorded: unknown) {
   if (
@@ -74,12 +82,14 @@ function legacyExtMessageItems(
       item.ready_when,
     ]),
   );
+  // Sources and decision touches include telemetry (run starts and ends).
+  const events = fullEventHistory(state.events);
   const eventTimes = new Map<string, string>(
-    state.events.map((e) => [e.id, e.created_at]),
+    events.map((e) => [e.id, e.created_at]),
   );
   // A handoff or reissue never erases an earlier quiet touch. The readiness
   // notification and the source change it references can straddle quiet hours.
-  for (const e of state.events) {
+  for (const e of events) {
     const p = e.payload;
     if (!p || typeof p !== "object") continue;
     const trigger =
@@ -311,6 +321,10 @@ function randomState(seed: number, noise = 0) {
               { decision_id: q, condition, source_event_id: source },
             ],
             ["decision_rerouted", { decision_id: q, source_event_id: source }],
+            // C-643 telemetry: left out of command-state streams.
+            ["run_started", { decision_id: q }],
+            ["run_finished", { human_action_id: h, source_event_id: source }],
+            ["run_queued", {}],
             ["card_merged", { card_id: "C-2" }],
             ["legacy", { decision_id: 3, human_action_id: null }],
             ["legacy", null],
@@ -344,8 +358,18 @@ function indexed(events: readonly Event[]) {
   return new EventLogView(log, log.end).history([...streams]);
 }
 
+/** C-643 command-state streams (telemetry in the journal), plain and Store. */
+function commandHistories(events: readonly Event[]) {
+  const log = new EventLog();
+  for (const e of events) log.append(e);
+  return [
+    commandEventHistory([events]),
+    commandStreamHistory(new EventLogView(log, log.end), [...streams]),
+  ];
+}
+
 test("C-653: keyed projection equals the pre-change full scan for plain and Store histories", () => {
-  const seen = { items: 0, touches: 0, dated: 0, undated: 0 };
+  const seen = { items: 0, touches: 0, dated: 0, undated: 0, telemetry: 0 };
   for (let seed = 1; seed <= 300; seed++) {
     const { base, events } = randomState(seed);
     const gated = new Set(
@@ -353,7 +377,9 @@ test("C-653: keyed projection equals the pre-change full scan for plain and Stor
         .filter((x) => x.ready_when && !("ready_released" in x))
         .map((x) => x.id as string),
     );
-    for (const history of [events, indexed(events)]) {
+    const telemetry = new Set(events.filter(isTelemetryEvent).map((e) => e.id));
+    const histories = [events, indexed(events), ...commandHistories(events)];
+    for (const history of histories) {
       const state = { ...base, events: history };
       const expected = legacyExtMessageItems(state, state.project_id);
       expect(extMessageItems(state, state.project_id)).toEqual(expected);
@@ -361,12 +387,14 @@ test("C-653: keyed projection equals the pre-change full scan for plain and Stor
         if (i.kind === "notice") continue;
         seen.items++;
         if ((i.activity_at?.length ?? 0) > 2) seen.touches++;
+        if (telemetry.has(i.event_id)) seen.telemetry++;
         if (i.ready && gated.has(i.item_id))
           seen[i.undated_ready ? "undated" : "dated"]++;
       }
     }
   }
-  // The generator exercises repeated touches and both release outcomes.
+  // The generator exercises repeated touches, both release outcomes and
+  // telemetry sources that only the journal holds.
   for (const count of Object.values(seen)) expect(count).toBeGreaterThan(20);
 });
 

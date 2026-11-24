@@ -287,7 +287,7 @@ function assignVerifier(d: CommandDraft, workItemId: WorkItemId) {
     ...candidates.map((c) => `${c.employee_id}：${c.reason}`),
   ].join("；");
   if (
-    ![...d.state.events, ...d.events].some(
+    !appendEvents(d.state.events, d.events).some(
       (e) =>
         e.type === "system_assignment_deferred" &&
         payload(e).work_item_id === item.id &&

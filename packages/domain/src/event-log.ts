@@ -1,4 +1,5 @@
 import type { Event } from "./entities.js";
+import { isTelemetryEvent } from "./telemetry.js";
 
 /**
  * C-640: append-only project event log with incremental indexes.
@@ -13,6 +14,10 @@ import type { Event } from "./entities.js";
  *
  * History order is the CommandState contract: project stream first, then each
  * card stream in the caller's card order, seq ascending inside a stream.
+ *
+ * C-643: every stream is also kept split into business and telemetry segments,
+ * so the telemetry-free command-state stream (`commandHistory`) and the
+ * telemetry journal are concatenations like `history`, with the same filter.
  */
 
 /** Index kinds kept per event; `type` is the event type, the rest payload fields. */
@@ -47,6 +52,39 @@ type Results = Map<
 const streamOf = (event: Event) => event.card_id ?? "";
 const noEvents: readonly Event[] = Object.freeze([]);
 
+/**
+ * C-639 hot history: the project stream and streams in `full` keep every
+ * event; any other stream drops events whose type is in `omit`.
+ */
+export interface HistoryFilter {
+  readonly full: ReadonlySet<string>;
+  readonly omit: ReadonlySet<string>;
+}
+
+/**
+ * Cache key of a type set; insertion order, no sort. Equal sets built in a
+ * different order only miss the cache, distinct sets never share a key.
+ */
+const typesKey = (values: Iterable<string>) => [...values].join("\u0000");
+/** Which streams of `order` the filter trims, plus its omitted types. */
+const filterKey = (order: readonly string[], filter?: HistoryFilter) => {
+  if (!filter) return "";
+  let flags = "";
+  for (const stream of order)
+    flags += stream !== "" && !filter.full.has(stream) ? "1" : "0";
+  return `${flags}\u0001${typesKey(filter.omit)}`;
+};
+/** Whether `filter` removes `event` (on stream `stream`) from a history. */
+const filtered = (
+  filter: HistoryFilter | undefined,
+  stream: string,
+  type: string,
+) =>
+  filter !== undefined &&
+  stream !== "" &&
+  !filter.full.has(stream) &&
+  filter.omit.has(type);
+
 function push(
   segments: Map<string, Seg>,
   stream: string,
@@ -80,6 +118,10 @@ function below(ords: readonly number[], limit: number): number {
  */
 export class EventLog {
   readonly streams = new Map<string, Seg>();
+  /** C-643: the same streams without telemetry. */
+  readonly commandStreams = new Map<string, Seg>();
+  /** C-643: only the telemetry of each stream. */
+  readonly telemetryStreams = new Map<string, Seg>();
   readonly ids = new Map<string, number>();
   readonly all: Event[] = [];
   readonly buckets = new Map<EventIndexKind, Map<unknown, Bucket>>();
@@ -87,6 +129,18 @@ export class EventLog {
   readonly materialized = new Map<
     string,
     { count: number; events: readonly Event[] }
+  >();
+  /**
+   * C-639: base-only stream prefixes without one omitted type set, per C-643
+   * partition (keyed by partition, then stream).
+   */
+  readonly trimmed = new Map<
+    string,
+    {
+      count: number;
+      omit: ReadonlySet<string>;
+      events: readonly Event[];
+    }
   >();
   /**
    * Answers computed by head views for the latest history order, reused while
@@ -108,6 +162,12 @@ export class EventLog {
     const stream = streamOf(event);
     this.all.push(event);
     push(this.streams, stream, event, ord);
+    push(
+      isTelemetryEvent(event) ? this.telemetryStreams : this.commandStreams,
+      stream,
+      event,
+      ord,
+    );
     if (!this.ids.has(event.id)) this.ids.set(event.id, ord);
     this.#index("type", event.type, stream, ord);
     const payload = event.payload as Record<string, unknown> | null;
@@ -146,6 +206,12 @@ export class EventLog {
   }
 }
 
+/** Stream segments of one log: all events, or one C-643 partition of them. */
+type Partition = "streams" | "commandStreams" | "telemetryStreams";
+
+const sameOrder = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((id, i) => id === b[i]);
+
 /** Indexed lookups over one materialized history array (see `attachEventIndex`). */
 export interface HistoryIndex {
   query(kind: EventIndexKind, key: unknown): readonly Event[];
@@ -160,7 +226,14 @@ export interface HistoryIndex {
 export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
   readonly #streams = new Map<string, readonly Event[]>();
   #keys: readonly string[] | undefined;
-  #history: { order: readonly string[]; events: readonly Event[] } | undefined;
+  readonly #histories = new Map<
+    Partition,
+    { order: readonly string[]; filter: string; events: readonly Event[] }
+  >();
+  #index:
+    | { order: readonly string[]; filter: string; index: ViewIndex }
+    | undefined;
+  #subsets: Map<string, ReadonlyMap<string, readonly Event[]>> | undefined;
   constructor(
     readonly base: EventLog,
     readonly baseEnd: number,
@@ -273,14 +346,40 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
   /**
    * Flat history in `order` (one pass, no sort) with its index attached, so
    * `eventsOfType` and friends answer from the log instead of rebuilding.
-   * The same order returns the same array.
+   * The same order (and filter) returns the same array. C-639: `filter`
+   * drops omitted types from streams outside `filter.full`, index included.
    */
-  history(order: readonly string[]): readonly Event[] {
-    const cached = this.#history;
-    if (
-      cached?.order.length === order.length &&
-      cached.order.every((id, i) => id === order[i])
-    )
+  history(order: readonly string[], filter?: HistoryFilter): readonly Event[] {
+    return this.#history("streams", order, filter);
+  }
+
+  /**
+   * C-643: `history(order, filter)` without telemetry. It carries the same
+   * index as that history, so lookups keep answering over every kept event.
+   */
+  commandHistory(
+    order: readonly string[],
+    filter?: HistoryFilter,
+  ): readonly Event[] {
+    return this.#history("commandStreams", order, filter);
+  }
+
+  /** C-643: only the telemetry of `history(order, filter)`, in the same order. */
+  telemetryHistory(
+    order: readonly string[],
+    filter?: HistoryFilter,
+  ): readonly Event[] {
+    return this.#history("telemetryStreams", order, filter);
+  }
+
+  #history(
+    partition: Partition,
+    order: readonly string[],
+    filter?: HistoryFilter,
+  ): readonly Event[] {
+    const key = filterKey(order, filter);
+    const cached = this.#histories.get(partition);
+    if (cached?.filter === key && sameOrder(cached.order, order))
       return cached.events;
     // One exact-size concat over the segments; no per-event push or sort.
     const parts: (readonly Event[])[] = [];
@@ -292,14 +391,109 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
           n === seg.events.length ? seg.events : seg.events.slice(0, n),
         );
     };
+    const omit = filter?.omit;
+    const trim = (seg: Seg | undefined, limit: number) => {
+      if (!seg || !omit) return;
+      const n = below(seg.ords, limit);
+      const kept: Event[] = [];
+      for (let i = 0; i < n; i++) {
+        const event = seg.events[i] as Event;
+        if (!omit.has(event.type)) kept.push(event);
+      }
+      if (kept.length) parts.push(kept);
+    };
     for (const stream of order) {
-      part(this.base.streams.get(stream), this.baseEnd);
-      part(this.overlay?.streams.get(stream), this.end);
+      if (filter && stream !== "" && !filter.full.has(stream)) {
+        // Base prefix is shared across views while the stream does not grow.
+        const seg = this.base[partition].get(stream);
+        const own = seg ? below(seg.ords, this.baseEnd) : 0;
+        const trimmedKey =
+          partition === "streams" ? stream : `${partition}\u0000${stream}`;
+        const shared = this.base.trimmed.get(trimmedKey);
+        if (shared && shared.count === own && shared.omit === filter.omit) {
+          if (shared.events.length) parts.push(shared.events);
+        } else if (own) {
+          const before = parts.length;
+          trim(seg, this.baseEnd);
+          this.base.trimmed.set(trimmedKey, {
+            count: own,
+            omit: filter.omit,
+            events:
+              parts.length > before ? (parts.at(-1) as Event[]) : noEvents,
+          });
+        }
+        trim(this.overlay?.[partition].get(stream), this.end);
+        continue;
+      }
+      part(this.base[partition].get(stream), this.baseEnd);
+      part(this.overlay?.[partition].get(stream), this.end);
     }
     const events = ([] as Event[]).concat(...parts);
-    attachEventIndex(events, new ViewIndex(this, order));
-    this.#history = { order: [...order], events };
+    // The telemetry list is a plain journal; lookups go through the others.
+    if (partition !== "telemetryStreams")
+      attachEventIndex(events, this.#indexFor(order, filter, key));
+    this.#histories.set(partition, { order: [...order], filter: key, events });
     return events;
+  }
+
+  /** One index per order and filter, shared by the full and partitioned histories. */
+  #indexFor(
+    order: readonly string[],
+    filter: HistoryFilter | undefined,
+    key: string,
+  ): ViewIndex {
+    const cached = this.#index;
+    if (cached?.filter === key && sameOrder(cached.order, order))
+      return cached.index;
+    const index = new ViewIndex(this, order, filter, key);
+    this.#index = { order: [...order], filter: key, index };
+    return index;
+  }
+
+  /**
+   * C-639: events whose type is in `types`, grouped by stream in seq order;
+   * streams without one are absent. Answered from the type index.
+   */
+  ofTypes(types: ReadonlySet<string>): ReadonlyMap<string, readonly Event[]> {
+    const key = typesKey(types);
+    this.#subsets ??= new Map();
+    const known = this.#subsets.get(key);
+    if (known) return known;
+    const ords = (log: EventLog | undefined, limit: number) => {
+      const found = new Map<string, number[]>();
+      if (!log) return found;
+      const index = log.buckets.get("type");
+      for (const type of types) {
+        const bucket = index?.get(type);
+        if (!bucket) continue;
+        for (const [stream, list] of bucket) {
+          const n = below(list, limit);
+          if (!n) continue;
+          const into = found.get(stream);
+          if (into) for (let i = 0; i < n; i++) into.push(list[i] as number);
+          else found.set(stream, list.slice(0, n));
+        }
+      }
+      return found;
+    };
+    const own = ords(this.base, this.baseEnd);
+    const extra = ords(this.overlay, this.end);
+    const streams = new Map<string, readonly Event[]>();
+    for (const stream of new Set([...own.keys(), ...extra.keys()])) {
+      // Ordinals ascend with seq inside a stream; several types interleave.
+      const events: Event[] = [];
+      const a = own.get(stream);
+      if (a)
+        for (const ord of types.size > 1 ? a.sort((x, y) => x - y) : a)
+          events.push(this.base.at(ord) as Event);
+      const b = extra.get(stream);
+      if (b && this.overlay)
+        for (const ord of types.size > 1 ? b.sort((x, y) => x - y) : b)
+          events.push(this.overlay.at(ord) as Event);
+      streams.set(stream, events);
+    }
+    this.#subsets.set(key, streams);
+    return streams;
   }
 
   /** Bucket segments of this view in history `rank` order. */
@@ -354,9 +548,26 @@ class ViewIndex implements HistoryIndex {
   constructor(
     private readonly view: EventLogView,
     order: readonly string[],
+    private readonly filter?: HistoryFilter,
+    private readonly filterKey = "",
   ) {
     for (const [i, stream] of order.entries())
       if (!this.#rank.has(stream)) this.#rank.set(stream, i);
+  }
+
+  /** C-639: the same events without those the history filter dropped. */
+  #kept(events: readonly Event[]): readonly Event[] {
+    const { filter } = this;
+    if (!filter || !events.length) return events;
+    let out: Event[] | undefined;
+    for (let i = 0; i < events.length; i++) {
+      const event = events[i] as Event;
+      if (filtered(filter, streamOf(event), event.type)) {
+        out ??= events.slice(0, i);
+      } else out?.push(event);
+    }
+    if (!out) return events;
+    return out.length ? out : noEvents;
   }
 
   #memo(space: string, key: unknown, build: () => readonly Event[]) {
@@ -389,8 +600,8 @@ class ViewIndex implements HistoryIndex {
           : undefined;
       const hit = answers?.get(key);
       if (hit && hit.total === total) return hit.events;
-      const events = view.collect(this.#rank, (log) =>
-        log.buckets.get(kind)?.get(key),
+      const events = this.#kept(
+        view.collect(this.#rank, (log) => log.buckets.get(kind)?.get(key)),
       );
       answers?.set(key, { total, events });
       return events;
@@ -399,7 +610,7 @@ class ViewIndex implements HistoryIndex {
 
   #answers(kind: EventIndexKind) {
     if (this.#order === undefined)
-      this.#order = [...this.#rank.keys()].join("\u0000");
+      this.#order = `${[...this.#rank.keys()].join("\u0000")}\u0002${this.filterKey}`;
     const order = this.#order;
     const base = this.view.base;
     if (base.results?.order !== order)
@@ -414,7 +625,8 @@ class ViewIndex implements HistoryIndex {
 
   card(card: string, type: string): readonly Event[] {
     // Same as filtering the type bucket by a truthy card_id.
-    if (!card || !this.#rank.has(card)) return noEvents;
+    if (!card || !this.#rank.has(card) || filtered(this.filter, card, type))
+      return noEvents;
     return this.#memo(`card:${type}`, card, () => {
       const one = new Map([[card, 0]]);
       return this.view.collect(one, (log) => {
@@ -426,7 +638,11 @@ class ViewIndex implements HistoryIndex {
 
   byId(id: string): Event | undefined {
     const event = this.view.eventWithId(id);
-    return event && this.#rank.has(streamOf(event)) ? event : undefined;
+    return event &&
+      this.#rank.has(streamOf(event)) &&
+      !filtered(this.filter, streamOf(event), event.type)
+      ? event
+      : undefined;
   }
 }
 
@@ -453,7 +669,13 @@ export function historyIndex(
 export function streamHistory(
   streams: ReadonlyMap<string, readonly Event[]>,
   order: readonly string[],
+  filter?: HistoryFilter,
 ): readonly Event[] {
-  if (streams instanceof EventLogView) return streams.history(order);
-  return order.flatMap((id) => streams.get(id) ?? []);
+  if (streams instanceof EventLogView) return streams.history(order, filter);
+  return order.flatMap((stream) => {
+    const events = streams.get(stream) ?? [];
+    return filter
+      ? events.filter((e) => !filtered(filter, stream, e.type))
+      : events;
+  });
 }

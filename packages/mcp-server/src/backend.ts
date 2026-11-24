@@ -130,9 +130,23 @@ export interface McpReadContext {
     Pick<Cursor, "assignment_id" | "card_id">
   >;
   readonly events: Pick<EventRepository, "listAfter"> & {
-    listStreams?(project: ProjectId): ReadonlyMap<string, readonly Event[]>;
+    listStreams?(project: ProjectId): CommandEventStreams;
+  };
+  /** C-639: process-wide scope; absent keeps the whole-history state. */
+  readonly command_state_scope?: "full" | "hot";
+  readonly hot_state_hints?: {
+    eventCards(
+      project: ProjectId,
+      ids: readonly string[],
+    ): ReadonlyMap<string, string | undefined>;
+    liveNotificationCards(project: ProjectId): readonly string[];
   };
 }
+
+/** Bulk streams; `ofTypes` is the Store log's per-type subset (C-639). */
+export type CommandEventStreams = ReadonlyMap<string, readonly Event[]> & {
+  ofTypes?(types: ReadonlySet<string>): ReadonlyMap<string, readonly Event[]>;
+};
 
 /**
  * Everything the MCP layer needs from the control plane's store.

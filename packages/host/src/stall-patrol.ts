@@ -15,6 +15,7 @@ import {
   type Runtime,
   type RuntimeRef,
   STANDING_PM_STALL_EVENTS,
+  stoppedByHuman,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
@@ -30,7 +31,7 @@ import {
   dispatchHandoffs,
   dispatchStallCauses,
 } from "./dispatch-stalls.js";
-import { stallEvidence } from "./stall-evidence.js";
+import { sessionExitProof, stallEvidence } from "./stall-evidence.js";
 import { overdueStallHandoffs } from "./stall-handoff.js";
 import { StandingPmRecovery } from "./standing-pm-recovery.js";
 
@@ -184,6 +185,102 @@ export function turnIdlePromptMs() {
   return value;
 }
 
+/**
+ * C-669: the patrol's own automatic restart that was withdrawn before any
+ * signal is retried, at most this many more times per incident and no sooner
+ * than the interval after the last withdrawal, and only once its session is
+ * kernel-proven gone. Invalid values fail host startup.
+ */
+export const DEFAULT_PATROL_RESTART_RETRIES = 3;
+export const DEFAULT_PATROL_RESTART_RETRY_MS = 60_000;
+export function patrolRestartRetryPolicy(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const read = (name: string, fallback: number, max: number) => {
+    const raw = env[name];
+    if (raw === undefined || raw === "") return fallback;
+    const value = Number(raw);
+    if (!/^\d+$/u.test(raw) || !Number.isSafeInteger(value) || value > max)
+      throw new Error(`Invalid ${name}`);
+    return value;
+  };
+  return {
+    retries: read(
+      "CARDIGAN_PATROL_RESTART_RETRIES",
+      DEFAULT_PATROL_RESTART_RETRIES,
+      100,
+    ),
+    interval_ms: read(
+      "CARDIGAN_PATROL_RESTART_RETRY_MS",
+      DEFAULT_PATROL_RESTART_RETRY_MS,
+      3_600_000,
+    ),
+  };
+}
+type PatrolAttempts =
+  /** A system attempt reached a signal, a deferred stop or another outcome. */
+  | { readonly settled: true }
+  | {
+      readonly settled: false;
+      readonly withdrawn: number;
+      readonly last_at?: string;
+      readonly reason?: string;
+    };
+/** C-669: this incident's system attempts, when every one of them was
+ * withdrawn before touching the terminal (`withdrawn_stall_changed`). */
+export function patrolAttempts(
+  state: CommandState,
+  assignment: Assignment["id"],
+  cause: string,
+): PatrolAttempts {
+  const attempts = eventsOfType(state.events, "host_ops_action_taken").filter(
+    (e) => {
+      const p = e.payload as {
+        assignment_id?: string;
+        dispatch_stall_id?: string;
+      };
+      return (
+        e.actor.kind === "system" &&
+        p.assignment_id === assignment &&
+        p.dispatch_stall_id === cause
+      );
+    },
+  );
+  let last: Event | undefined;
+  for (const attempt of attempts) {
+    const finished = eventsOfType(
+      state.events,
+      "host_ops_action_finished",
+    ).find(
+      (e) => (e.payload as { action_id?: string }).action_id === attempt.id,
+    );
+    if (
+      (finished?.payload as { result?: string } | undefined)?.result !==
+      "withdrawn_stall_changed"
+    )
+      return { settled: true };
+    last = finished;
+  }
+  return {
+    settled: false,
+    withdrawn: attempts.length,
+    ...(last
+      ? {
+          last_at: last.created_at,
+          reason:
+            (last.payload as { reason?: string }).reason ??
+            "automatic_recovery_withdrawn",
+        }
+      : {}),
+  };
+}
+const withdrawnNextStep = (reason: string, exhausted: boolean) =>
+  `自动换会话已撤回（${reason}），旧会话未被停止。${
+    exhausted
+      ? "自动重试次数已用完；"
+      : "系统每轮巡检复查，终端和进程都确认已退出后自动续起；"
+  }旧会话仍在或无法确认时保持不动，请主机运维从派发停滞核对终端归属和进程，确认已退出或空闲后用 host_ops_restart_assignment 续办。`;
+
 /** Called by the existing host service's tick. Reads never publish or start a recovery. */
 export class StallPatrol {
   private readonly standingPm: StandingPmRecovery;
@@ -191,6 +288,7 @@ export class StallPatrol {
    * a restarted host simply observes the full window again). */
   private readonly idlePromptSince = new Map<string, number>();
   private readonly idlePromptMs = turnIdlePromptMs();
+  private readonly retry = patrolRestartRetryPolicy();
   constructor(
     private store: Store,
     private clock: Clock,
@@ -286,6 +384,19 @@ export class StallPatrol {
         (!hasTurn || turnKey(s)) && s.cause_id === cause && !s.restart_blocked,
     );
   }
+  /** C-669: nothing of this session is left: never provisioned, or its
+   * terminal is gone and the kernel shows no process of its launch. */
+  private async sessionGone(state: CommandState, a: Assignment) {
+    if (!a.runtime_ref) return !a.session_ref;
+    return (
+      (await sessionExitProof(
+        state,
+        a,
+        this.runtime,
+        this.execution(state.project_id, a.machine_id),
+      )) === "exited"
+    );
+  }
   async evidence(state: CommandState, a: Assignment, stall?: DispatchStall) {
     return stallEvidence(
       state,
@@ -311,8 +422,20 @@ export class StallPatrol {
       if (!a) continue;
       const view = evidence.get(a.id) ?? (await this.evidence(state, a, s));
       evidence.set(a.id, view);
+      const prior = turnKey(s)
+        ? undefined
+        : patrolAttempts(state, a.id, s.cause_id);
       result.push({
         ...s,
+        ...(prior && !prior.settled && prior.withdrawn
+          ? {
+              withdrawn_reason: prior.reason,
+              next_step: withdrawnNextStep(
+                prior.reason ?? "automatic_recovery_withdrawn",
+                prior.withdrawn > this.retry.retries,
+              ),
+            }
+          : {}),
         ...(s.system_finished_run_id &&
         eventsOfType(state.events, "bell_turn_recovery_failed").some(
           (e) =>
@@ -623,22 +746,45 @@ export class StallPatrol {
     }
     if (!this.signal.aborted) await this.standingPm.tick(project, snapshot);
     if (!patrol || hostOpsPending(state.events, patrol.id)) return;
-    // A withdrawn automatic attempt is left to Ops; never retry it here.
-    const attempted = new Set(
-      eventsOfType(state.events, "host_ops_action_taken").map(
-        (e) => (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
-      ),
+    // An attempt by anyone else (Ops, a human) is never repeated here. C-669:
+    // a system attempt withdrawn before any signal is retried, bounded, once
+    // the old session is proven gone; while it may still live it stays put.
+    const foreign = new Set(
+      eventsOfType(state.events, "host_ops_action_taken")
+        .filter((e) => e.actor.kind !== "system")
+        .map(
+          (e) =>
+            (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
+        ),
     );
-    const own = [...actionable].find(
-      (s) =>
-        s.assignment_id === patrol.id &&
-        s.kind === "standing_backlog" &&
-        !s.system_finished_run_id &&
-        !attempted.has(s.cause_id),
-    );
-    if (!own) return;
+    const now = Date.parse(this.clock.now());
+    const candidates = [...actionable]
+      .filter(
+        (s) =>
+          s.assignment_id === patrol.id &&
+          s.kind === "standing_backlog" &&
+          !s.system_finished_run_id &&
+          !foreign.has(s.cause_id),
+      )
+      .map((s) => ({ s, prior: patrolAttempts(state, patrol.id, s.cause_id) }))
+      .filter(
+        (c): c is typeof c & { prior: { settled: false } } =>
+          !c.prior.settled &&
+          (!c.prior.withdrawn ||
+            (c.prior.withdrawn <= this.retry.retries &&
+              now - Date.parse(c.prior.last_at ?? "") >=
+                this.retry.interval_ms)),
+      )
+      // A fresh incident first: a retry needs stronger evidence.
+      .sort((x, y) => x.prior.withdrawn - y.prior.withdrawn);
+    const next = candidates[0];
+    if (!next) return;
+    const own = next.s;
     if (
-      !(await this.evidence(state, patrol)).can_restart ||
+      !(next.prior.withdrawn
+        ? !stoppedByHuman(state.events, patrol.id) &&
+          (await this.sessionGone(state, patrol))
+        : (await this.evidence(state, patrol)).can_restart) ||
       this.signal.aborted
     )
       return;

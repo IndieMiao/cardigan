@@ -20,6 +20,28 @@ import { RepositoryLockTimeoutError } from "./lock.js";
 import { reviewEquivalence } from "./review-equivalence.js";
 import { collectRoleRuleInventory } from "./role-rule-inventory.js";
 
+/**
+ * C-642: a delivery source read in two phases. Everything remote or slow has
+ * already happened; `publish` only writes local refs and is the one step a
+ * caller runs under the project repository lock. A `value` is already the
+ * answer; its optional `record` is a best-effort ref write under the same lock
+ * whose failure (including a lock timeout) never changes that answer.
+ */
+export type StagedDeliverySource<T> =
+  | { readonly value: T; readonly record?: () => Promise<void> }
+  | { readonly publish: () => Promise<T> };
+
+/** Run both phases without a lock (single-process callers and tests). */
+async function settleDeliverySource<T>(
+  staged: StagedDeliverySource<T>,
+): Promise<T> {
+  if (!("value" in staged)) return staged.publish();
+  await staged.record?.().catch(() => undefined);
+  return staged.value;
+}
+
+const failureMessage = (error: unknown) =>
+  `Git delivery verification failed: ${error instanceof Error ? error.message : "Git operation failed"}`;
 /** Label a failed precheck HEAD stage; lock timeouts stay retryable as-is. */
 async function stage<T>(
   reason: CheckHeadFailureReason | ((error: unknown) => CheckHeadFailureReason),
@@ -39,6 +61,10 @@ async function stage<T>(
     );
   }
 }
+type StageLabel = typeof stage;
+/** Verification keeps the Git error text in its own rejection message. */
+const unlabelled: StageLabel = (_reason, operation) =>
+  Promise.resolve().then(operation);
 /** Git reports a branch absent on the worker as a missing remote ref. */
 const fetchFailure = (error: unknown): CheckHeadFailureReason => {
   const text = [
@@ -76,10 +102,63 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       : `refs/cardigan/incoming/${a.machine_id}/${a.id}`;
   }
   /**
+   * Fetch exactly the recorded Assignment branch into a private stage; no ref
+   * is written. `label` names the failed stage for a precheck HEAD.
+   */
+  private async fetchTip(
+    a: Assignment & { branch: string },
+    repository: string,
+    label: StageLabel = unlabelled,
+  ) {
+    const source = await label("environment_unavailable", () =>
+      this.central.agentSource(this.project, a.machine_id),
+    );
+    // Validate the full ref before building the refspec; never trust a submitted branch.
+    await label("ownership_mismatch", () =>
+      this.central.git.readRef(repository, `refs/heads/${a.branch}`),
+    );
+    const head = await label(fetchFailure, () =>
+      this.central.git.fetchBranchTip(
+        repository,
+        source.address,
+        a.branch,
+        source.uploadPack,
+      ),
+    );
+    await label("environment_unavailable", () => this.central.validateSource());
+    return head;
+  }
+  /**
+   * The fetched tip of this Assignment. Reads overlap outside the lock, so an
+   * older tip published late never moves the ref back onto its ancestor.
+   */
+  private async publishIncoming(
+    repository: string,
+    a: Assignment,
+    head: string,
+    label: StageLabel = unlabelled,
+  ) {
+    await label("environment_unavailable", () => this.central.validateSource());
+    const git = this.central.git,
+      ref = this.incoming(a);
+    await label("repository_failed", async () => {
+      const current = await git.readRef(repository, ref);
+      if (
+        current !== head &&
+        !(current && (await git.isAncestor(repository, head, current)))
+      )
+        await git.compareAndSwapRef(repository, ref, head, current ?? null);
+    });
+  }
+  /**
    * Fetch exactly the recorded Assignment branch, with the same transport as
    * delivery. Failures are {@link CheckHeadFailure}s naming the failed stage.
    */
   async head(a: Assignment): Promise<string> {
+    return settleDeliverySource(await this.prepareHead(a));
+  }
+  /** Same transport as delivery; the precheck ref is published by the caller. */
+  async prepareHead(a: Assignment): Promise<StagedDeliverySource<string>> {
     if (
       !parseId("assignment", a.id).ok ||
       a.status !== "active" ||
@@ -90,56 +169,53 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       !isAbsolute(a.worktree_path)
     )
       throw new CheckHeadFailure("ownership_mismatch");
-    const branch = a.branch;
     const repository = await stage("repository_failed", () =>
       this.central.ensureCentral(this.project),
     );
-    const source = await stage("environment_unavailable", () =>
-      this.central.agentSource(this.project, a.machine_id),
+    const head = await this.fetchTip(
+      { ...a, branch: a.branch },
+      repository,
+      stage,
     );
-    const incoming = this.incoming(a);
-    await stage("ownership_mismatch", () =>
-      this.central.git.readRef(repository, `refs/heads/${branch}`),
-    );
-    await stage(fetchFailure, () =>
-      this.central.git.fetchRefs(
-        repository,
-        source.address,
-        [`+refs/heads/${branch}:${incoming}`],
-        source.uploadPack,
-      ),
-    );
-    await stage("environment_unavailable", () => this.central.validateSource());
-    const head = await stage("repository_failed", () =>
-      this.central.git.readRef(repository, incoming),
-    );
-    if (!head) throw new CheckHeadFailure("branch_missing");
-    const type = await stage("repository_failed", () =>
-      this.central.git.objectType(repository, head),
-    );
-    if (type !== "commit") throw new CheckHeadFailure("object_mismatch");
-    await stage("repository_failed", () =>
-      this.central.createRef(
-        repository,
-        `refs/cardigan/prechecks/${a.id}/${head}`,
-        head,
-      ),
-    );
-    return head;
+    return {
+      publish: async () => {
+        await this.publishIncoming(repository, a, head, stage);
+        await stage("repository_failed", () =>
+          this.central.createRef(
+            repository,
+            `refs/cardigan/prechecks/${a.id}/${head}`,
+            head,
+          ),
+        );
+        return head;
+      },
+    };
   }
   async verify(
     subject: DeliverySubject,
     assignment: Assignment,
     previous?: Delivery,
   ): Promise<Result<readonly DeliveryEvidence[]>> {
-    if (subject.kind !== "git_head") return { ok: true, value: [] };
+    return settleDeliverySource(
+      await this.prepareVerify(subject, assignment, previous),
+    );
+  }
+  /** All Git reads and the remote fetch; `publish` writes the incoming and candidate refs. */
+  async prepareVerify(
+    subject: DeliverySubject,
+    assignment: Assignment,
+    previous?: Delivery,
+  ): Promise<StagedDeliverySource<Result<readonly DeliveryEvidence[]>>> {
+    if (subject.kind !== "git_head") return { value: { ok: true, value: [] } };
     const sha = subject.value,
       a = assignment,
       git = this.central.git;
     if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(sha))
-      return validationFailed(
-        "Delivery SHA must be full lowercase hexadecimal",
-      );
+      return {
+        value: validationFailed(
+          "Delivery SHA must be full lowercase hexadecimal",
+        ),
+      };
     if (
       !parseId("assignment", a.id).ok ||
       !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(a.machine_id) ||
@@ -148,42 +224,54 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       !a.worktree_path ||
       !isAbsolute(a.worktree_path)
     )
-      return validationFailed(
-        "Git delivery requires a writing Assignment with a recorded branch and worktree",
-      );
+      return {
+        value: validationFailed(
+          "Git delivery requires a writing Assignment with a recorded branch and worktree",
+        ),
+      };
+    let staged: { repository: string; head: string } | undefined;
+    // A rejected delivery still records the fetched tip, as before C-642.
+    const rejected = (
+      failure: Result<readonly DeliveryEvidence[]>,
+    ): StagedDeliverySource<Result<readonly DeliveryEvidence[]>> => {
+      const fetched = staged;
+      return fetched
+        ? {
+            value: failure,
+            record: () =>
+              this.publishIncoming(fetched.repository, a, fetched.head),
+          }
+        : { value: failure };
+    };
     try {
       const repository = await this.central.ensureCentral(this.project);
       if (
         sha.length !==
         ((await git.objectFormat(repository)) === "sha1" ? 40 : 64)
       )
-        return validationFailed(
-          "Delivery SHA length does not match the repository object format",
+        return rejected(
+          validationFailed(
+            "Delivery SHA length does not match the repository object format",
+          ),
         );
-      const incoming = this.incoming(a),
-        source = await this.central.agentSource(this.project, a.machine_id);
-      // Validate the full ref before building the refspec; never trust a submitted branch.
-      await git.readRef(repository, `refs/heads/${a.branch}`);
-      await git.fetchRefs(
-        repository,
-        source.address,
-        [`+refs/heads/${a.branch}:${incoming}`],
-        source.uploadPack,
-      );
-      this.central.validateSource();
-      const head = await git.readRef(repository, incoming);
+      const head = await this.fetchTip({ ...a, branch: a.branch }, repository);
+      staged = { repository, head };
       if ((await git.objectType(repository, sha)) !== "commit")
-        return validationFailed(
-          "Delivery SHA is not a commit (missing, tree, blob or tag)",
+        return rejected(
+          validationFailed(
+            "Delivery SHA is not a commit (missing, tree, blob or tag)",
+          ),
         );
-      if (!head || !(await git.isAncestor(repository, sha, head)))
-        return validationFailed(
-          "Delivery SHA is not on the recorded Assignment branch",
+      if (!(await git.isAncestor(repository, sha, head)))
+        return rejected(
+          validationFailed(
+            "Delivery SHA is not on the recorded Assignment branch",
+          ),
         );
       const base_sha =
         a.base_sha ?? (await git.readRef(repository, this.baselineRef));
       if (!base_sha)
-        return validationFailed("Delivery base SHA is unavailable");
+        return rejected(validationFailed("Delivery base SHA is unavailable"));
       const inventory = await collectRoleRuleInventory(
         git,
         repository,
@@ -192,11 +280,6 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       );
       const commits_ahead = await git.countCommits(repository, base_sha, sha);
       const tree_sha = await git.treeOfCommit(repository, sha);
-      await this.central.createRef(
-        repository,
-        `refs/cardigan/candidates/${a.id}/${sha}`,
-        sha,
-      );
       const baseline = await git.readRef(repository, this.baselineRef);
       // Card-baseline changes already merged into the branch are not this
       // author's risk. Start from the newest baseline commit the branch
@@ -234,34 +317,44 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         previous && baseline
           ? await reviewEquivalence(git, repository, baseline, previous, sha)
           : undefined;
+      const evidence: readonly DeliveryEvidence[] = [
+        ...(equivalence ? [equivalence] : []),
+        {
+          kind: "diff",
+          details: {
+            role_rule_inventory: JSON.parse(JSON.stringify(inventory)),
+          },
+        },
+        ...(ownPaths ? [ownPaths] : []),
+        {
+          kind: "commit",
+          details: {
+            sha,
+            tree_sha,
+            branch_head_sha: head,
+            branch: a.branch,
+            base_sha,
+            commits_ahead,
+          },
+        },
+      ];
       return {
-        ok: true,
-        value: [
-          ...(equivalence ? [equivalence] : []),
-          {
-            kind: "diff",
-            details: {
-              role_rule_inventory: JSON.parse(JSON.stringify(inventory)),
-            },
-          },
-          ...(ownPaths ? [ownPaths] : []),
-          {
-            kind: "commit",
-            details: {
+        publish: async () => {
+          try {
+            await this.publishIncoming(repository, a, head);
+            await this.central.createRef(
+              repository,
+              `refs/cardigan/candidates/${a.id}/${sha}`,
               sha,
-              tree_sha,
-              branch_head_sha: head,
-              branch: a.branch,
-              base_sha,
-              commits_ahead,
-            },
-          },
-        ],
+            );
+            return { ok: true, value: evidence };
+          } catch (error) {
+            return validationFailed(failureMessage(error));
+          }
+        },
       };
     } catch (error) {
-      return validationFailed(
-        `Git delivery verification failed: ${error instanceof Error ? error.message : "Git operation failed"}`,
-      );
+      return rejected(validationFailed(failureMessage(error)));
     }
   }
 }

@@ -1,5 +1,6 @@
 import type { CommandDraft, CommandState } from "./commands/core.js";
 import type { Event, Run } from "./entities.js";
+import { eventsOfType } from "./event-index.js";
 import {
   associatedHarnessActivity,
   type HarnessActivity,
@@ -140,10 +141,8 @@ export function providerStartFailed(
     activity.model_silent_since === undefined
   )
     return false;
-  const start = state.events.findLast(
-    (e) =>
-      e.type === "run_dispatched" &&
-      (e.payload as { run_id?: string }).run_id === run.id,
+  const start = eventsOfType(state.events, "run_dispatched").findLast(
+    (e) => (e.payload as { run_id?: string }).run_id === run.id,
   )?.created_at;
   return (
     !!start &&

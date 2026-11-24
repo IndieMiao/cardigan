@@ -4,6 +4,7 @@ import {
   currentMergeConfirmations,
   humanMergeBlockers,
 } from "./commands/merge-delegation.js";
+import { fullEventHistory } from "./event-index.js";
 import type { ExtMessageItem } from "./ext-message.js";
 import type { CardId, WorkItemId } from "./ids.js";
 
@@ -138,7 +139,8 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
             (o.key === "merge" && !blockers.length),
         )
         .map((o) => ({ key: o.key, label: o.description }));
-  const relevantEvents = s.events.filter(
+  // A system Run ending can carry the decision ID (C-643: telemetry).
+  const relevantEvents = fullEventHistory(s.events).filter(
     (e) =>
       !e.type.startsWith("ext_message_") &&
       ((e.type === "card_sensitivity_changed" &&

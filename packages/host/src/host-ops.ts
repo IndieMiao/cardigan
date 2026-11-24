@@ -94,6 +94,7 @@ import {
   darwinTurnTarget,
   localTurnExitProof,
   remoteStallExit,
+  sessionExitProof,
   stallWorkspace,
   transferredSessionExited,
   turnIdlePrompt,
@@ -1950,23 +1951,33 @@ export class HostOpsService {
                 : "terminal_exit_unconfirmed"
               : !a || remote
                 ? "terminal_exit_unconfirmed"
-                : await stopSystemTurn(
-                    runtime,
-                    action.runtime_ref,
-                    { project_id: project, assignment_id: a.id },
-                    stopStarted,
-                    checkWorkspace,
-                    beforeSignal,
-                    async () =>
-                      !!action.runtime_ref &&
-                      (await localTurnExitProof(
-                        read(),
-                        a,
-                        runtime,
-                        action.runtime_ref,
-                        this.stallExecution(project, a.machine_id),
-                      )),
-                  );
+                : // C-669: a session already proven gone is settled as is;
+                  // probing its stale terminal address only withdraws again.
+                  isDeepStrictEqual(a.runtime_ref, action.runtime_ref) &&
+                    (await sessionExitProof(
+                      read(),
+                      a,
+                      runtime,
+                      this.stallExecution(project, a.machine_id),
+                    )) === "exited"
+                  ? "exited"
+                  : await stopSystemTurn(
+                      runtime,
+                      action.runtime_ref,
+                      { project_id: project, assignment_id: a.id },
+                      stopStarted,
+                      checkWorkspace,
+                      beforeSignal,
+                      async () =>
+                        !!action.runtime_ref &&
+                        (await localTurnExitProof(
+                          read(),
+                          a,
+                          runtime,
+                          action.runtime_ref,
+                          this.stallExecution(project, a.machine_id),
+                        )),
+                    );
           }
           // Exit can also be observed without sending anything. Exit alone
           // does not authorize clearing the session and queuing its successor.

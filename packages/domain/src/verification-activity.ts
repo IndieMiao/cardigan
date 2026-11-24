@@ -1,5 +1,6 @@
 import { isReviewStale } from "./derived.js";
 import type { Delivery, Event, Review, Run, WorkItem } from "./entities.js";
+import { eventsOfType } from "./event-index.js";
 import { evidenceWait } from "./review-evidence.js";
 
 export interface VerificationActivity {
@@ -88,10 +89,8 @@ export function verificationActivity(
   );
   const started =
     run &&
-    input.events.find(
-      (e) =>
-        e.type === "run_started" &&
-        (e.payload as { run_id?: string }).run_id === run.id,
+    eventsOfType(input.events, "run_started").find(
+      (e) => (e.payload as { run_id?: string }).run_id === run.id,
     );
   const current =
     run &&

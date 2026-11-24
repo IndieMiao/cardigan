@@ -51,12 +51,7 @@ import { readActivity } from "./activity-state.js";
 import { readAttachmentRefs } from "./attachment-ref-read.js";
 import { serveAttachment, serveAttachmentPreview } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
-import { cardSectionPayload } from "./card-sections.js";
-import {
-  type CardsCacheOptions,
-  readCachedCardsPage,
-  readCardsVersion,
-} from "./cards-cache.js";
+import type { CardsCacheOptions } from "./cards-cache.js";
 import {
   allowedHosts,
   bracket,
@@ -70,11 +65,6 @@ import {
   executionCapacity,
   executionCapacityInputs,
 } from "./execution-capacity.js";
-import {
-  declaredCapabilities,
-  readExecution,
-  readExecutionRuns,
-} from "./execution-state.js";
 import { FeishuSettings } from "./feishu-settings.js";
 import {
   applySecurityHeaders,
@@ -89,6 +79,7 @@ import {
   SESSION_COOKIE,
   sendError,
   sendJson,
+  sendJsonText,
   sessionCookie,
   unauthorized,
 } from "./http.js";
@@ -99,15 +90,9 @@ import type { MachineHost } from "./machine-host.js";
 import { serveMachines } from "./machines.js";
 import { readMentionCandidates } from "./mention-candidates.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
-import { readNeedsState } from "./needs-state.js";
-import { readNeedsVersion } from "./needs-version.js";
 import {
   contextUsageRevision,
   type ExecutionContexts,
-  InvalidQuery,
-  needsYou,
-  needsYouCounts,
-  noticePage,
   projectSnapshotView,
   projectState,
   roleDetail,
@@ -117,11 +102,20 @@ import {
   templateList,
   webMemberView,
 } from "./read.js";
+import {
+  fromReadError,
+  type HostFacts,
+  type HostFactsReader,
+  runWorkbenchRead,
+  toReadError,
+  type WorkbenchReadOp,
+  type WorkbenchReadResult,
+} from "./read-ops.js";
+import { type WorkbenchReadOptions, WorkbenchReadPool } from "./read-pool.js";
 import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
 import { serveAttachmentThumbnail } from "./thumbnails.js";
-import { readPagedCard } from "./timeline-state.js";
 import { WorkerWizards } from "./worker-wizards.js";
 import { serveWrite } from "./write.js";
 
@@ -158,6 +152,12 @@ export interface WebServerOptions {
   readonly launchProfiles?: () => readonly string[];
   readonly executionDiagnostics?: HostOpsService["executionDiagnostics"];
   readonly cardsCache?: CardsCacheOptions;
+  /**
+   * C-644: run the heavy Workbench reads (cards, card detail, Needs You,
+   * execution, check-log lookups) in read workers with a private query-only
+   * connection. Absent: they run inline on this thread, as before.
+   */
+  readonly workbenchReads?: WorkbenchReadOptions;
   readonly runLimit?: (machine: string) => number;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly machineDisplayName?: (machine: string) => string | undefined;
@@ -231,6 +231,11 @@ interface RequestContext {
   readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
   readonly buildInfo: BuildInfo;
   readonly cardsCache: CardsCacheOptions | undefined;
+  /** C-644: one heavy read, in its worker when configured, else inline. */
+  readonly read: (
+    op: WorkbenchReadOp,
+    recordTiming?: (stage: string, ms: number) => void,
+  ) => Promise<WorkbenchReadResult>;
   readonly needsReadEpoch: string;
   readonly capacity: ExecutionCapacityCache;
   readonly runLimit: WebServerOptions["runLimit"];
@@ -329,6 +334,53 @@ export async function startWebServer(
     shutdown.signal,
     options.machineHost,
   );
+
+  // Host facts stay on this thread: they read private runtime files and
+  // in-memory check jobs. Only machines named by open notices are asked.
+  const hostFacts: HostFactsReader = async ({ project, machines, purpose }) => {
+    const records = store.uow.read((tx) =>
+      machines.map((id) => [id, tx.machines.get(project, id)] as const),
+    );
+    const facts: Record<string, HostFacts[string]> = {};
+    for (const [id, machine] of records) {
+      if (purpose === "needs_version") {
+        facts[id] = {
+          manual: checks.currentBinding(project, machine, "manual-upgrade"),
+          ...(machine
+            ? { tools: checks.currentToolsCommand(project, machine) }
+            : {}),
+        };
+        continue;
+      }
+      const binding = checks.currentBinding(project, machine);
+      facts[id] = {
+        binding,
+        ...(machine && binding
+          ? { upgrade: checks.currentUpgradeCommand(project, machine, binding) }
+          : {}),
+        ...(machine
+          ? { tools: checks.currentToolsCommand(project, machine) }
+          : {}),
+      };
+    }
+    return facts;
+  };
+  const pool = options.workbenchReads
+    ? new WorkbenchReadPool(options.workbenchReads)
+    : undefined;
+  const read: RequestContext["read"] = async (op, recordTiming) => {
+    if (pool) return pool.read(op, hostFacts, recordTiming);
+    let result: WorkbenchReadResult;
+    try {
+      result = await runWorkbenchRead(store, op, hostFacts);
+    } catch (error) {
+      const rejection = toReadError(error);
+      throw rejection ? fromReadError(rejection) : error;
+    }
+    for (const [stage, ms] of Object.entries(result.timings))
+      recordTiming?.(stage, ms);
+    return result;
+  };
 
   const wizards = new WorkerWizards(
     store,
@@ -449,6 +501,7 @@ export async function startWebServer(
         recordTiming,
         buildInfo,
         cardsCache: options.cardsCache,
+        read,
         needsReadEpoch,
         capacity,
         req,
@@ -521,6 +574,7 @@ export async function startWebServer(
         http.close((error) => {
           cancel();
           void drainTasks([
+            pool?.close(),
             checks.settled(),
             wizards.settled(),
             launchSettings?.checks.drain(),
@@ -813,34 +867,13 @@ async function serveProjectRoute(
       projectId: project_id,
       attempt: rest.slice("/prechecks/".length),
       precheck: true,
-      hasAttempt: (attempt) => {
-        const event = projectState(store, project_id)
-          .events.filter((event) => {
-            const payload = event.payload;
-            return (
-              event.card_id &&
-              event.actor.kind === "system" &&
-              event.actor.project_id === project_id &&
-              [
-                "precheck_queued",
-                "precheck_started",
-                "precheck_finished",
-              ].includes(event.type) &&
-              payload !== null &&
-              typeof payload === "object" &&
-              "attempt_id" in payload &&
-              payload.attempt_id === attempt &&
-              "card_id" in payload &&
-              payload.card_id === event.card_id &&
-              "head_sha" in payload &&
-              typeof payload.head_sha === "string" &&
-              /^[a-f0-9]{40}$/u.test(payload.head_sha)
-            );
-          })
-          .sort((a, b) => b.seq - a.seq)[0];
-        if (!event) return false;
-        const payload = event.payload as { head_sha: string };
-        header = `作者预检查\n被检提交：${payload.head_sha}\n更新时间：${event.created_at}\n\n`;
+      hasAttempt: async (attempt) => {
+        const { value } = await context.read(
+          { kind: "precheck_attempt", project: project_id, attempt },
+          context.recordTiming,
+        );
+        if (typeof value !== "string") return false;
+        header = value;
         return true;
       },
       logHeader: () => header,
@@ -871,32 +904,13 @@ async function serveProjectRoute(
       dataDir: context.dataDir,
       projectId: project_id,
       attempt: rest.slice("/merge-checks/".length),
-      hasAttempt: (attempt) =>
-        projectState(store, project_id).events.some((event) => {
-          const payload = event.payload;
-          if (
-            !event.card_id &&
-            event.actor.kind === "system" &&
-            event.type.startsWith("merge_batch_check_") &&
-            (payload as { check?: { attempt_id?: string } } | null)?.check
-              ?.attempt_id === attempt
+      hasAttempt: async (attempt) =>
+        (
+          await context.read(
+            { kind: "merge_check_attempt", project: project_id, attempt },
+            context.recordTiming,
           )
-            return true;
-          return (
-            event.card_id &&
-            event.actor.project_id === project_id &&
-            [
-              "merge_check_queued",
-              "merge_check_started",
-              "merge_check_finished",
-              "merge_check_requeued",
-            ].includes(event.type) &&
-            payload !== null &&
-            typeof payload === "object" &&
-            "attempt_id" in payload &&
-            payload.attempt_id === attempt
-          );
-        }),
+        ).value === true,
       authorize: () => requireSession(context),
     });
   }
@@ -950,27 +964,24 @@ async function serveProjectRoute(
   }
 
   if (rest === "/cards" || rest === "/cards/version") {
-    try {
-      const token = sessionToken(req);
-      if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
-      const options = {
-        ...context.cardsCache,
-        readScope: createHash("sha256")
-          .update(`needs-you-read-scope:${token}`)
-          .digest("hex"),
-      };
-      sendJson(
-        res,
-        200,
-        rest === "/cards/version"
-          ? readCardsVersion(store, project_id, url, options)
-          : readCachedCardsPage(store, project_id, url, options),
-      );
-    } catch (error) {
-      if (error instanceof InvalidQuery)
-        throw new HttpRejection(400, "validation_failed", error.message);
-      throw error;
-    }
+    const token = sessionToken(req);
+    if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
+    const { body } = await context.read(
+      {
+        kind: "cards",
+        project: project_id,
+        url: url.href,
+        version: rest === "/cards/version",
+        cache: {
+          ...context.cardsCache,
+          readScope: createHash("sha256")
+            .update(`needs-you-read-scope:${token}`)
+            .digest("hex"),
+        },
+      },
+      context.recordTiming,
+    );
+    sendJsonText(res, 200, body ?? "null");
     return;
   }
 
@@ -1040,23 +1051,19 @@ async function serveProjectRoute(
 
   const card = /^\/cards\/([^/]+)$/.exec(rest);
   if (card !== null) {
-    const card_id = decodeURIComponent(card[1] ?? "") as CardId;
-    const detail = readPagedCard(store, project_id, card_id, url, {
-      recordTiming: context.recordTiming,
-      mergeGateStatus:
-        context.mergeGate?.forProject(project_id).status ?? "disabled",
-      now,
-      ...(url.searchParams.get("at")
-        ? { timelineAnchor: url.searchParams.get("at") ?? "" }
-        : {}),
-    });
-    if (detail === undefined) {
-      throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
-    }
-    sendJson(res, 200, {
-      project_id,
-      ...cardSectionPayload(detail, url.searchParams.get("section")),
-    });
+    const { body } = await context.read(
+      {
+        kind: "card",
+        project: project_id,
+        card: decodeURIComponent(card[1] ?? "") as CardId,
+        url: url.href,
+        mergeGateStatus:
+          context.mergeGate?.forProject(project_id).status ?? "disabled",
+        now,
+      },
+      context.recordTiming,
+    );
+    sendJsonText(res, 200, body ?? "null");
     return;
   }
 
@@ -1086,19 +1093,19 @@ async function serveProjectRoute(
     return;
   }
   if (rest === "/execution") {
-    sendJson(
-      res,
-      200,
-      readExecution(
-        store,
-        project_id,
-        url,
+    const { body } = await context.read(
+      {
+        kind: "execution",
+        project: project_id,
+        url: url.href,
         now,
-        context.queueWarningMinutes,
-        context.contextUsage?.(project_id),
-        declaredCapabilities(context.capabilityCatalog),
-      ),
+        queueWarningMinutes: context.queueWarningMinutes,
+        contexts: context.contextUsage?.(project_id),
+        capabilityCatalog: capabilityCatalog(context),
+      },
+      context.recordTiming,
     );
+    sendJsonText(res, 200, body ?? "null");
     return;
   }
   const runPage = /^\/execution\/assignments\/([^/]+)\/runs$/u.exec(rest);
@@ -1109,118 +1116,90 @@ async function serveProjectRoute(
     } catch {
       throw new HttpRejection(404, "not_found", "Assignment 不存在");
     }
-    const page = readExecutionRuns(
-      store,
-      project_id,
-      assignmentId,
-      url.searchParams.get("before") ?? undefined,
+    const { body } = await context.read(
+      {
+        kind: "execution_runs",
+        project: project_id,
+        assignment: assignmentId,
+        before: url.searchParams.get("before") ?? undefined,
+      },
+      context.recordTiming,
     );
-    if (!page) throw new HttpRejection(404, "not_found", "Assignment 不存在");
-    sendJson(res, 200, { project_id, ...page });
+    sendJsonText(res, 200, body ?? "null");
     return;
   }
   if (rest === "/needs-you/version") {
     requireSession(context);
     const token = sessionToken(req);
     if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
-    sendJson(res, 200, {
-      project_id,
-      at: now,
-      read_scope: createHash("sha256")
-        .update(`needs-you-read-scope:${token}`)
-        .digest("hex"),
-      revision: readNeedsVersion(
-        store,
-        project_id,
-        JSON.stringify([
+    const { body } = await context.read(
+      {
+        kind: "needs_version",
+        project: project_id,
+        now,
+        readScope: createHash("sha256")
+          .update(`needs-you-read-scope:${token}`)
+          .digest("hex"),
+        context: JSON.stringify([
           context.needsReadEpoch,
           context.mergeGate?.forProject(project_id).status ?? "disabled",
           context.hostOpsPatrolIntervalMs ?? null,
           context.hcSession ?? null,
           context.runtimeUnknownGraceMs ?? null,
         ]),
-        now,
-        context.runtimeUnknownGraceMs,
-        (project, machine) =>
-          context.checks.currentBinding(project, machine, "manual-upgrade"),
-        (project, machine) =>
-          context.checks.currentToolsCommand(project, machine),
-      ),
-    });
+        runtimeUnknownGraceMs: context.runtimeUnknownGraceMs,
+      },
+      context.recordTiming,
+    );
+    sendJsonText(res, 200, body ?? "null");
     return;
   }
   if (rest === "/needs-you" || rest === "/needs-you/counts") {
     requireSession(context);
     const token = sessionToken(req);
     if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
-    res.setHeader("X-Cardigan-Read-At", now);
-    res.setHeader(
-      "X-Cardigan-Read-Scope",
-      createHash("sha256")
-        .update(`needs-you-read-scope:${token}`)
-        .digest("hex"),
-    );
     const section = url.searchParams.get("section");
     if (
       section !== null &&
       !["decisions", "merges", "actions", "later", "notices"].includes(section)
     )
       throw new HttpRejection(400, "validation_failed", "Needs You 标签无效");
-    const state = {
-      ...readNeedsState(store, project_id),
-      ...(context.mergeGate
-        ? {
-            project_settings:
-              mergeProjectSettings(context.mergeGate, project_id) ?? {},
-          }
-        : {}),
-    };
-    if (rest === "/needs-you/counts") {
-      sendJson(res, 200, {
-        project_id,
-        ...needsYouCounts(
-          state,
-          now,
-          context.mergeGate?.forProject(project_id).status,
-          context.runtimeUnknownGraceMs,
-        ),
-      });
-      return;
-    }
-    sendJson(res, 200, {
-      project_id,
-      ...needsYou(
-        state,
+    const { body } = await context.read(
+      {
+        kind: "needs",
+        project: project_id,
+        counts: rest === "/needs-you/counts",
+        section: (section ?? undefined) as NeedsYouSection | undefined,
         now,
-        context.mergeGate?.forProject(project_id).status,
-        context.hostOpsPatrolIntervalMs,
-        context.hcSession,
-        context.runtimeUnknownGraceMs,
-        (section ?? undefined) as NeedsYouSection | undefined,
-        (project, machine, binding) =>
-          context.checks.currentUpgradeCommand(project, machine, binding),
-        (project, machine) =>
-          context.checks.currentToolsCommand(project, machine),
-      ),
+        mergeGateStatus: context.mergeGate?.forProject(project_id).status,
+        projectSettings: context.mergeGate
+          ? (mergeProjectSettings(context.mergeGate, project_id) ?? {})
+          : undefined,
+        hostOpsPatrolIntervalMs: context.hostOpsPatrolIntervalMs,
+        hcSession: context.hcSession,
+        runtimeUnknownGraceMs: context.runtimeUnknownGraceMs,
+      },
+      context.recordTiming,
+    );
+    sendJsonText(res, 200, body ?? "null", {
+      "X-Cardigan-Read-At": now,
+      "X-Cardigan-Read-Scope": createHash("sha256")
+        .update(`needs-you-read-scope:${token}`)
+        .digest("hex"),
     });
     return;
   }
 
   if (rest === "/notices") {
-    try {
-      sendJson(
-        res,
-        200,
-        noticePage(
-          readNeedsState(store, project_id),
-          url.searchParams.get("before") ?? undefined,
-        ),
-      );
-    } catch (error) {
-      if (error instanceof InvalidQuery)
-        throw new HttpRejection(400, "validation_failed", error.message);
-      throw error;
-    }
+    const { body } = await context.read(
+      {
+        kind: "notices",
+        project: project_id,
+        before: url.searchParams.get("before") ?? undefined,
+      },
+      context.recordTiming,
+    );
+    sendJsonText(res, 200, body ?? "null");
     return;
   }
 
@@ -1428,4 +1407,17 @@ function requireSession(context: RequestContext): WebSession {
     unauthorized("session expired or revoked");
   }
   return session;
+}
+
+/** An unreadable catalog declares nothing rather than failing the read. */
+function capabilityCatalog(context: RequestContext) {
+  if (!context.capabilityCatalog) return undefined;
+  try {
+    // Keys and platforms only: entries also carry parsers, which never clone.
+    return context
+      .capabilityCatalog()
+      .map(({ key, os }) => ({ key, os: [...os] }));
+  } catch {
+    return undefined;
+  }
 }
