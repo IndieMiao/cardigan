@@ -177,7 +177,12 @@ function view(s: Session, report?: Report) {
     command_guide:
       s.draft.config.worker.os === "darwin"
         ? "docs/macos-worker.md"
-        : "docs/linux-worker.md",
+        : // C-709: a read-only root (SteamOS) keeps the work root and release under /home.
+          s.draft.config.worker.execution.agentRoot.startsWith(
+              "/home/cardigan-workers/",
+            )
+          ? "docs/steamos-worker.md"
+          : "docs/linux-worker.md",
     command_prerequisites:
       "仅在目标机管理员终端执行。新建账号前核对名称和数字身份均空闲；按操作手册准备受保护的安装包、目录、认领标记和本机安装配置，Mac 先安装并核验签名 App。已有冲突请停下核对。",
     check_id: s.check_id,

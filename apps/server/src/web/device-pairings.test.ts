@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -362,6 +363,8 @@ interface WizardView {
   phase: string;
   preview?: { preview_id: string };
   device_init?: { state: string; at?: string };
+  command_guide?: string;
+  commands?: Record<string, string>;
 }
 const planOf = (script: string) =>
   JSON.parse(
@@ -403,6 +406,12 @@ test.runIf(process.platform === "linux")(
       const { p, w, read, confirm } = await claimAndConfirm(f);
       const token = { device_token: p.device_token };
       expect(w.device_init).toEqual({ state: "waiting" });
+      // C-709: /opt is read-only on SteamOS; the release stays under /home.
+      expect(w.command_guide).toBe("docs/steamos-worker.md");
+      expect(JSON.stringify(w.commands)).toContain(
+        "/home/cardigan-release/deploy/",
+      );
+      expect(JSON.stringify(w.commands)).not.toContain("/opt/cardigan");
       expect((await f.status(p.device_token)).json).toMatchObject({
         status: "claimed",
         init: "waiting",
@@ -721,14 +730,32 @@ test.runIf(process.platform === "linux")(
       expect(await waiting.done).toBe(0);
       expect(waiting.out()).toContain("已在 Workbench 确认");
 
+      // C-709: the device prints its host key as a worker-known-hosts line.
+      const hostKey = join(bin, "ssh_host_ed25519_key.pub");
+      writeFileSync(hostKey, `ssh-ed25519 ${KEY_BLOB} root@deck\n`);
       const quick = run(
-        [f.web.url, "--no-wait", "--light", "--address", "100.64.0.9"],
+        [
+          f.web.url,
+          "--no-wait",
+          "--light",
+          "--address",
+          "100.64.0.9",
+          "--host-key",
+          hostKey,
+        ],
         {
           PATH: "/usr/bin:/bin",
         },
       );
       expect(await quick.done).toBe(0);
       expect(quick.out()).toContain("100.64.0.9");
+      expect(quick.out()).toMatch(
+        new RegExp(
+          `\\n  [a-z0-9-]+ ssh-ed25519 ${KEY_BLOB.replaceAll("+", "\\+")}\\n`,
+          "u",
+        ),
+      );
+      expect(quick.out()).not.toContain("root@deck");
       const bad = run(["https://host.invalid/path"], { PATH });
       expect(await bad.done).toBe(2);
     } finally {
@@ -749,17 +776,17 @@ test.runIf(process.platform === "linux")(
         join(bin, "tailscale"),
         `#!/bin/sh\necho '${JSON.stringify({ BackendState: "Running", Self: { DNSName: "deck.example.ts.net." } })}'\n`,
       );
-      const sudo = (code: number) => {
+      const sudo = (code: number, auth = 0) => {
         writeFileSync(
           join(bin, "sudo"),
-          `#!/bin/sh\necho "$@" > '${bin}/argv'\ncat > '${bin}/stdin'\nexit ${code}\n`,
+          `#!/bin/sh\nif [ "$1" = -v ]; then exit ${auth}; fi\necho "$@" > '${bin}/argv'\ncat > '${bin}/stdin'\nexit ${code}\n`,
         );
         chmodSync(join(bin, "sudo"), 0o755);
       };
       chmodSync(join(bin, "tailscale"), 0o755);
       const PATH = `${bin}:/usr/bin:/bin`;
-      const device = async (code: number) => {
-        sudo(code);
+      const device = async (code: number, auth = 0) => {
+        sudo(code, auth);
         const args = [f.web.url, "--yes", "--sudo", join(bin, "sudo")];
         const proc = run([...args, "--python", "python3"], { PATH });
         await vi.waitFor(() => expect(proc.out()).toContain("等待"), {
@@ -809,6 +836,15 @@ test.runIf(process.platform === "linux")(
       expect(bad.exit).toBe(1);
       expect(bad.proc.err()).toContain("初始化未完成（退出码 3）");
       expect(bad.wizard.device_init?.state).toBe("failed");
+
+      // C-709: sudo that cannot authenticate (SteamOS deck has no password by
+      // default) changes nothing and is not reported as a failed run.
+      rmSync(join(bin, "argv"));
+      const locked = await device(0, 1);
+      expect(locked.exit).toBe(1);
+      expect(locked.proc.err()).toContain("passwd");
+      expect(existsSync(join(bin, "argv"))).toBe(false);
+      expect(locked.wizard.device_init?.state).toBe("fetched");
     } finally {
       rmSync(bin, { force: true, recursive: true });
       await f.close();
