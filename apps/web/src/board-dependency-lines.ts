@@ -1,11 +1,17 @@
 /**
- * C-659: geometry for the board's hover dependency lines. Boxes are in the
- * overlay's coordinate space.
+ * C-659 / C-668: geometry for the board's hover dependency lines. Boxes are
+ * in the overlay's coordinate space.
  *
- * Lines never pass under a card: every line leaves its `from` card's right
- * edge and enters its `to` card's left edge (prerequisite → card →
- * dependent), runs vertically only in the gaps between lanes, and crosses
- * lanes only in the band above the lane headings, well clear of any card.
+ * Every line is one cubic Bézier from the edge of one card straight to the
+ * edge of the other. Cards in different lanes connect through their facing
+ * sides (the right edge of the left card, the left edge of the right card);
+ * cards in one lane bow out of the same side. Both ends leave the edge
+ * horizontally, so the curve bends smoothly and the arrow points into the
+ * card. The handles grow with the vertical distance too (design review
+ * V-3201): neighbouring lanes swing out over the cards in an S, and one lane
+ * arcs out over its neighbour, instead of running down the narrow gap
+ * between lanes. Lines that meet the hovered card on one side are spread
+ * along it.
  */
 export interface LineBox {
   readonly left: number;
@@ -20,27 +26,30 @@ export interface LineEnd {
   readonly column: { readonly left: number; readonly right: number };
 }
 
-export interface LineFrame {
-  /** Middle of the band above the lane headings (the lanes' top padding). */
-  readonly band: number;
-  /** The board's visible area; vertical runs stay within half a gap of it. */
-  readonly viewport: LineBox;
+/** One line at the hovered card: to `other` when `outgoing`, else from it. */
+export interface HubLink {
+  readonly other: LineEnd;
+  readonly outgoing: boolean;
 }
+
+export type Side = "left" | "right";
 
 /** Arrowhead length; the path stops short so the tip touches the box edge. */
 export const LINE_ARROW = 6;
-/** Half of the 16px lane gap: the gap's centre from a column edge. */
-const GAP_HALF = 8;
+/** Spacing between lines that meet the hovered card on the same side. */
+export const LINE_SPREAD = 6;
+/** Spread lines keep this far from the card's top and bottom corners. */
+const SPREAD_INSET = 12;
 /**
- * Offsets from a gap's centre: exits left of it, entries right of it. Lines
- * out of the hovered card keep the inner runs and lines into it the outer
- * ones, so lines of opposite direction never share a run; all lines leaving
- * one card share its exit run and branch off at each target's height.
+ * Handle length: the larger of half the horizontal span (between lanes
+ * only) and a share of the vertical one, within [min, max]. A same-lane
+ * loop bows out by ¾ of its handle; an S between neighbouring lanes swings
+ * about ⅓ of its handle to either side.
  */
-const TRACK = { out: { exit: -2, entry: 2 }, in: { exit: -5, entry: 5 } };
-/** Lines out of the hovered card above lines into it, inside the band. */
-const BAND_TRACK = 1.5;
-const RADIUS = 4;
+const HANDLE = {
+  across: { min: 24, perHeight: 0.5, max: 200 },
+  loop: { min: 24, perHeight: 0.35, max: 180 },
+} as const;
 /** A sliver smaller than this is treated as scrolled out of view. */
 const MIN_VISIBLE = 8;
 
@@ -59,94 +68,138 @@ export function intersectBoxes(a: LineBox, b: LineBox): LineBox | null {
 
 const middle = (box: LineBox) => (box.top + box.bottom) / 2;
 const round = (value: number) => Math.round(value * 10) / 10;
-type Point = readonly [number, number];
+const outward = (side: Side) => (side === "right" ? 1 : -1);
+const opposite = (side: Side): Side => (side === "right" ? "left" : "right");
+const edge = (box: LineBox, side: Side) =>
+  side === "right" ? box.right : box.left;
+const sameLane = (a: LineEnd, b: LineEnd) =>
+  Math.abs(a.column.left - b.column.left) < 1;
 
-/** Polyline with rounded corners; repeated and collinear points dropped. */
-export function roundedPath(points: readonly Point[], radius = RADIUS) {
-  const p: Point[] = [];
-  for (const point of points.map(([x, y]) => [round(x), round(y)] as const)) {
-    const last = p.at(-1);
-    if (last && last[0] === point[0] && last[1] === point[1]) continue;
-    const before = p.at(-2);
-    if (
-      before &&
-      last &&
-      ((before[0] === last[0] && last[0] === point[0]) ||
-        (before[1] === last[1] && last[1] === point[1]))
-    )
-      p.pop();
-    p.push(point);
-  }
-  const [first] = p;
-  if (!first) return "";
-  let d = `M${first[0]} ${first[1]}`;
-  for (let i = 1; i < p.length; i++) {
-    const [x, y] = p[i] as Point;
-    const next = p[i + 1];
-    if (!next) {
-      d += `L${x} ${y}`;
-      break;
-    }
-    const [px, py] = p[i - 1] as Point;
-    const lengthIn = Math.hypot(x - px, y - py),
-      lengthOut = Math.hypot(next[0] - x, next[1] - y),
-      r = Math.min(radius, lengthIn / 2, lengthOut / 2);
-    const ax = round(x - ((x - px) / lengthIn) * r),
-      ay = round(y - ((y - py) / lengthIn) * r),
-      bx = round(x + ((next[0] - x) / lengthOut) * r),
-      by = round(y + ((next[1] - y) / lengthOut) * r);
-    d += `L${ax} ${ay}Q${x} ${y} ${bx} ${by}`;
-  }
-  return d;
+/** See `HANDLE`. */
+export function handleLength(dx: number, dy: number, loop: boolean): number {
+  const rule = loop ? HANDLE.loop : HANDLE.across;
+  const wanted = Math.max(
+    loop ? 0 : Math.abs(dx) / 2,
+    Math.min(Math.abs(dy) * rule.perHeight, rule.max),
+  );
+  return Math.max(wanted, rule.min);
 }
 
 /**
- * The route from `from` to `to`. In neighbouring lanes it is a step on the
- * exit run of the gap between them; otherwise it climbs the gap right of
- * `from`, crosses in the band and drops in the gap left of `to`. `outgoing` marks lines that
- * leave the hovered card, so they keep their own band track.
+ * Which side of each card the line uses. Different lanes face each other;
+ * one lane bows out on the `prefer`red side, or on the other one when the
+ * preferred bow would leave the board's visible area and the other would
+ * not; when neither fits, on the side with more room.
  */
-export function connectorPath(
-  from: LineEnd,
-  to: LineEnd,
-  frame: LineFrame,
-  outgoing: boolean,
-): string {
-  // A gap off screen (a lane cut by sideways scrolling) is pulled back to
-  // the board's edge; the page padding leaves room for half a gap there.
-  const clamp = (x: number) =>
-    Math.min(
-      Math.max(x, frame.viewport.left - GAP_HALF),
-      frame.viewport.right + GAP_HALF,
-    );
-  const x1 = from.box.right,
-    y1 = middle(from.box),
-    x2 = to.box.left - LINE_ARROW,
-    y2 = middle(to.box);
-  const exit = from.column.right + GAP_HALF,
-    entry = to.column.left - GAP_HALF;
-  // Keep a short horizontal stub at both ends so the arrow points into `to`.
-  const leave = (x: number) => Math.max(clamp(x), x1 + 2),
-    arrive = (x: number) => Math.min(clamp(x), x2 - 2);
-  const track = outgoing ? TRACK.out : TRACK.in;
-  if (Math.abs(exit - entry) < 1) {
-    const x = Math.min(leave(exit + track.exit), x2 - 2);
-    return roundedPath([
-      [x1, y1],
-      [x, y1],
-      [x, y2],
-      [x2, y2],
-    ]);
+export function linkSides(
+  hub: LineEnd,
+  other: LineEnd,
+  viewport: LineBox,
+  prefer: Side = "right",
+): { readonly hub: Side; readonly other: Side } {
+  if (sameLane(hub, other)) {
+    const bow =
+      (handleLength(0, middle(hub.box) - middle(other.box), true) * 3) / 4 +
+      LINE_ARROW / 2;
+    const room = {
+      right: viewport.right - Math.max(hub.box.right, other.box.right),
+      left: Math.min(hub.box.left, other.box.left) - viewport.left,
+    };
+    const spare = opposite(prefer);
+    const side =
+      room[prefer] >= bow || (room[spare] < bow && room[prefer] >= room[spare])
+        ? prefer
+        : spare;
+    return { hub: side, other: side };
   }
-  const out = leave(exit + track.exit),
-    into = arrive(entry + track.entry),
-    band = frame.band + (outgoing ? -BAND_TRACK : BAND_TRACK);
-  return roundedPath([
-    [x1, y1],
-    [out, y1],
-    [out, band],
-    [into, band],
-    [into, y2],
-    [x2, y2],
-  ]);
+  return hub.column.left < other.column.left
+    ? { hub: "right", other: "left" }
+    : { hub: "left", other: "right" };
+}
+
+/**
+ * `count` heights along a box's side, `LINE_SPREAD` apart and centred on its
+ * middle; squeezed together when the box is too short to fit them.
+ */
+export function spreadAnchors(box: LineBox, count: number): number[] {
+  const centre = middle(box);
+  if (count <= 1) return [centre];
+  const room = Math.max(box.bottom - box.top - 2 * SPREAD_INSET, 0);
+  const step = Math.min(LINE_SPREAD, room / (count - 1));
+  return Array.from(
+    { length: count },
+    (_, i) => centre + (i - (count - 1) / 2) * step,
+  );
+}
+
+type Point = readonly [number, number];
+
+/**
+ * A cubic from `start` (on a card edge facing `startSide`) to one arrow
+ * short of `end` (on an edge facing `endSide`). Both handles are horizontal
+ * and point out of their card. Handles are cut back at the edges of
+ * `bounds`, so the curve (inside its control points' hull) never leaves it.
+ */
+export function curvePath(
+  start: Point,
+  startSide: Side,
+  end: Point,
+  endSide: Side,
+  bounds?: { readonly left: number; readonly right: number },
+): string {
+  const [x0, y0] = start;
+  const x3 = end[0] + outward(endSide) * LINE_ARROW,
+    y3 = end[1];
+  const handle = handleLength(x3 - x0, y3 - y0, startSide === endSide);
+  const clamp = (x: number) =>
+    bounds ? Math.min(Math.max(x, bounds.left), bounds.right) : x;
+  const x1 = clamp(x0 + outward(startSide) * handle),
+    x2 = clamp(x3 + outward(endSide) * handle);
+  const p = (x: number, y: number) => `${round(x)} ${round(y)}`;
+  return `M${p(x0, y0)}C${p(x1, y0)} ${p(x2, y3)} ${p(x3, y3)}`;
+}
+
+/**
+ * The path of every link of the hovered card `hub`, in the given order.
+ * Same-lane links bow out on the side fewer other-lane links use (the right
+ * on a tie), so they cross as few other lines as possible. Links
+ * meeting the hub on one side are spread along it, ordered by the other
+ * end's height so that neighbouring lines do not cross at the hub; the
+ * other end always takes the middle of its card's side.
+ */
+export function hubPaths(
+  hub: LineEnd,
+  links: readonly HubLink[],
+  viewport: LineBox,
+): string[] {
+  const across = links
+    .filter((link) => !sameLane(hub, link.other))
+    .map((link) => linkSides(hub, link.other, viewport).hub);
+  const count = (side: Side) => across.filter((s) => s === side).length;
+  const prefer = count("left") < count("right") ? "left" : "right";
+  const sides = links.map((link) =>
+    linkSides(hub, link.other, viewport, prefer),
+  );
+  const anchors = new Array<number>(links.length);
+  for (const side of ["left", "right"] as const) {
+    const at = links
+      .map((link, i) => ({ i, y: middle(link.other.box) }))
+      .filter(({ i }) => sides[i]?.hub === side)
+      .sort((a, b) => a.y - b.y);
+    const ys = spreadAnchors(hub.box, at.length);
+    at.forEach(({ i }, n) => {
+      anchors[i] = ys[n] as number;
+    });
+  }
+  return links.map((link, i) => {
+    const side = sides[i] as { hub: Side; other: Side };
+    const atHub: Point = [edge(hub.box, side.hub), anchors[i] as number],
+      atOther: Point = [
+        edge(link.other.box, side.other),
+        middle(link.other.box),
+      ];
+    return link.outgoing
+      ? curvePath(atHub, side.hub, atOther, side.other, viewport)
+      : curvePath(atOther, side.other, atHub, side.hub, viewport);
+  });
 }
