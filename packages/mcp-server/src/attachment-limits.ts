@@ -65,3 +65,32 @@ export function limitFromBase64Length(maxLength: number): number {
   const bytes = Math.floor(maxLength / 4) * 3;
   return bytes >= MIB ? Math.floor(bytes / MIB) * MIB : bytes;
 }
+
+/**
+ * C-683: videos have their own limit (`CARDIGAN_VIDEO_MAX_MIB`, whole MiB).
+ * They never travel as one base64 JSON request: every client sends them in
+ * chunks of `VIDEO_CHUNK_BYTES` (Workbench, Agents) or streams a local file
+ * (CLI), and reads stream from disk instead of loading the blob.
+ */
+export const VIDEO_MAX_MIB_ENV = "CARDIGAN_VIDEO_MAX_MIB";
+export const DEFAULT_VIDEO_MAX_MIB = 1024;
+/** Same ceiling as streamed artifacts (`MAX_ARTIFACT_BYTES`). */
+export const VIDEO_MAX_MIB_CEILING = 2048;
+/** Largest stored video any reader accepts, whatever the current limit. */
+export const MAX_STORED_VIDEO_BYTES = VIDEO_MAX_MIB_CEILING * MIB;
+/** One chunk of a resumable upload. */
+export const VIDEO_CHUNK_BYTES = 8 * MIB;
+
+/** Unset or blank means the default; anything but a plain integer is refused. */
+export function resolveVideoMaxBytes(
+  env: Readonly<Record<string, string | undefined>>,
+): number {
+  const text = env[VIDEO_MAX_MIB_ENV]?.trim();
+  if (!text) return DEFAULT_VIDEO_MAX_MIB * MIB;
+  const mib = /^\d{1,4}$/u.test(text) ? Number(text) : Number.NaN;
+  if (!Number.isSafeInteger(mib) || mib < 1 || mib > VIDEO_MAX_MIB_CEILING)
+    throw new Error(
+      `${VIDEO_MAX_MIB_ENV} must be an integer from 1 to ${VIDEO_MAX_MIB_CEILING}`,
+    );
+  return mib * MIB;
+}

@@ -34,7 +34,11 @@ import type {
   MergeGateConfiguration,
   ReadResourceLimits,
 } from "@cardigan/host";
-import { MAX_ATTACHMENT_BYTES, offsiteFor } from "@cardigan/mcp-server";
+import {
+  MAX_ATTACHMENT_BYTES,
+  offsiteFor,
+  uploadSessionsFor,
+} from "@cardigan/mcp-server";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import {
   feishuStatus,
@@ -51,7 +55,11 @@ import { mergeProjectSettings } from "../merge-push-loop.js";
 import { type ProcessRole, processHealthView } from "../process-health.js";
 import { readActivity } from "./activity-state.js";
 import { readAttachmentRefs } from "./attachment-ref-read.js";
-import { serveAttachment, serveAttachmentPreview } from "./attachments.js";
+import {
+  serveAttachment,
+  serveAttachmentPreview,
+  serveVideoPoster,
+} from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
 import type { CardsCacheOptions } from "./cards-cache.js";
 import {
@@ -119,6 +127,7 @@ import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
 import { serveAttachmentThumbnail } from "./thumbnails.js";
+import { serveUploads } from "./uploads.js";
 import { WorkerWizards } from "./worker-wizards.js";
 import { serveWrite } from "./write.js";
 
@@ -852,6 +861,21 @@ async function serveProjectRoute(
   }
 
   if (
+    await serveUploads(
+      {
+        req,
+        res,
+        url,
+        project_id,
+        dataDir: context.dataDir,
+        authorize: () => requireSession(context),
+      },
+      rest,
+    )
+  )
+    return;
+
+  if (
     await serveWrite(
       {
         checks: context.checks,
@@ -952,6 +976,22 @@ async function serveProjectRoute(
     return;
   }
 
+  const poster = /^\/attachments\/([^/]+)\/poster$/.exec(rest);
+  if (poster !== null) {
+    const served = await serveVideoPoster({
+      store,
+      project_id,
+      attachment_id: decodeURIComponent(poster[1] ?? ""),
+      req,
+      res,
+      dataDir: context.dataDir,
+    });
+    if (!served) {
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    }
+    return;
+  }
+
   const preview = /^\/attachments\/([^/]+)\/preview$/.exec(rest);
   if (preview !== null) {
     const served = await serveAttachmentPreview({
@@ -1010,7 +1050,7 @@ async function serveProjectRoute(
   // reference is rechecked on every read (sensitive source card, cross-card
   // reading off); the plain /attachments routes keep their own rules.
   const refFile =
-    /^\/cards\/([^/]+)\/attachment-refs\/([^/]+)(\/thumbnail|\/preview)?$/.exec(
+    /^\/cards\/([^/]+)\/attachment-refs\/([^/]+)(\/thumbnail|\/preview|\/poster)?$/.exec(
       rest,
     );
   if (refFile !== null) {
@@ -1024,12 +1064,15 @@ async function serveProjectRoute(
     )?.attachments.some((a) => a.id === attachment_id);
     if (!allowed)
       throw new HttpRejection(404, "not_found", "attachment not found");
+    const part = refFile[3];
     const serve =
-      refFile[3] === "/thumbnail"
+      part === "/thumbnail"
         ? serveAttachmentThumbnail
-        : refFile[3] === "/preview"
+        : part === "/preview"
           ? serveAttachmentPreview
-          : serveAttachment;
+          : part === "/poster"
+            ? serveVideoPoster
+            : serveAttachment;
     const served = await serve({
       store,
       project_id,
@@ -1345,6 +1388,9 @@ function sessionStatus(context: RequestContext): void {
           build: context.buildInfo,
           // C-616: lets the comment box refuse an oversized file before posting.
           attachment_max_bytes: MAX_ATTACHMENT_BYTES,
+          // C-683: videos go through resumable uploads with their own limit.
+          video_max_bytes: uploadSessionsFor(context.dataDir).maxBytes,
+          video_chunk_bytes: uploadSessionsFor(context.dataDir).chunkBytes,
           read_scope: createHash("sha256")
             .update(`needs-you-read-scope:${token}`)
             .digest("hex"),

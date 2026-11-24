@@ -1,4 +1,4 @@
-import { File as FileIcon, FileText, Image } from "lucide-react";
+import { File as FileIcon, FileText, Film, Image } from "lucide-react";
 import {
   type KeyboardEvent,
   type Ref,
@@ -28,6 +28,7 @@ import {
   formatBytes,
   formatMiB,
   insertAttachmentRef,
+  isVideoType,
   numberPendingRefs,
   pendingToken,
   toBase64,
@@ -38,6 +39,7 @@ import {
 } from "../attachment-refs.js";
 import { renderMarkdown } from "../markdown.js";
 import { useAttachmentRefs } from "../useAttachmentRefs.js";
+import { type MeasuredVideo, measureVideo } from "../video-probe.js";
 import { AttachmentRefBody } from "./AttachmentRefBody.js";
 import { EmployeeFace } from "./EmployeeIdentity.js";
 import { RequestFeedback } from "./RequestFeedback.js";
@@ -108,6 +110,12 @@ interface PendingFile {
    * second copy and shift what `attachment-new-N` names.
    */
   readonly uploaded?: string;
+  /** C-683: the video's resumable upload; a retry continues it. */
+  readonly uploadId?: string;
+  /** C-683: bytes of the video the server has, while it is being sent. */
+  readonly sent?: number;
+  /** C-683: what the browser measured and drew, kept for a retry. */
+  readonly measured?: MeasuredVideo;
 }
 
 interface AttachmentCandidate {
@@ -170,6 +178,8 @@ export function CommentBox({
   const [error, setError] = useState<string>();
   /** Host attachment limit from the session; unknown on older servers. */
   const attachmentLimit = client.attachmentMaxBytes?.();
+  /** C-683: host video limit; unknown on older servers. */
+  const videoLimit = client.videoMaxBytes?.();
   const [focused, setFocused] = useState(false);
   const [focusRequest, setFocusRequest] = useState(0);
   const afterFocus = useRef<((input: HTMLTextAreaElement) => void) | undefined>(
@@ -474,8 +484,11 @@ export function CommentBox({
     const accepted: PendingFile[] = [];
     const rejected: { name: string; reason: string }[] = [];
     for (const file of chosen) {
-      const problem = uploadProblem(file, attachmentLimit ?? null);
       const mime = uploadMime(file);
+      const problem =
+        mime && isVideoType(mime) && !client.uploadVideo
+          ? "不支持上传视频"
+          : uploadProblem(file, attachmentLimit ?? null, videoLimit ?? null);
       if (problem || !mime)
         rejected.push({ name: file.name || file.type, reason: problem ?? "" });
       else
@@ -565,9 +578,22 @@ export function CommentBox({
     // Refuse before posting: the comment is created first, attachments follow.
     if (
       attachmentLimit !== undefined &&
-      files.some((pending) => pending.file.size > attachmentLimit)
+      files.some(
+        (pending) =>
+          !isVideoType(pending.mime) && pending.file.size > attachmentLimit,
+      )
     ) {
       setError(`附件不能超过 ${formatMiB(attachmentLimit)}。`);
+      return;
+    }
+    if (
+      videoLimit !== undefined &&
+      files.some(
+        (pending) =>
+          isVideoType(pending.mime) && pending.file.size > videoLimit,
+      )
+    ) {
+      setError(`视频不能超过 ${formatMiB(videoLimit)}。`);
       return;
     }
     const sent = numberPendingRefs(
@@ -601,11 +627,39 @@ export function CommentBox({
       for (const [index, file] of files.entries()) {
         if (file.uploaded) continue;
         const filename = uploadFilename(file.file.name);
+        const update = (patch: Partial<PendingFile>) =>
+          setFiles((current) =>
+            current.map((item) =>
+              item.id === file.id ? { ...item, ...patch } : item,
+            ),
+          );
+        // C-683: the browser measures a video and draws its cover once (a
+        // retry resends the same request), then sends it in chunks; a retry
+        // resumes the upload.
+        const video = isVideoType(file.mime);
+        const measured = video
+          ? (file.measured ?? (await measureVideo(file.file, file.mime)))
+          : undefined;
+        if (measured && !file.measured) update({ measured });
+        const uploadId =
+          isVideoType(file.mime) && client.uploadVideo
+            ? await client.uploadVideo(projectId, file.file, file.mime, {
+                uploadId: file.uploadId,
+                onStarted: (id) => update({ uploadId: id }),
+                onProgress: (received) => update({ sent: received }),
+              })
+            : undefined;
         const receipt = await client.uploadAttachment(
           projectId,
           cardId,
           {
-            file: await toBase64(file.file),
+            ...(uploadId
+              ? { upload_id: uploadId }
+              : { file: await toBase64(file.file) }),
+            ...(measured && Object.keys(measured.video).length
+              ? { video: measured.video }
+              : {}),
+            ...(measured?.poster ? { poster: measured.poster } : {}),
             ...(filename ? { original_filename: filename } : {}),
             ...(file.note.trim() ? { note: file.note } : {}),
             mime: file.mime,
@@ -851,7 +905,11 @@ export function CommentBox({
             <FileChip
               key={file.id}
               name={file.name}
-              size={formatBytes(file.file.size)}
+              size={
+                file.sent !== undefined && !file.uploaded
+                  ? `${formatBytes(file.file.size)} · ${uploadPercent(file.sent, file.file.size)}%`
+                  : formatBytes(file.file.size)
+              }
               kind={attachmentRefKind(file.mime)}
               removeDisabled={submitting || posted}
               onRemove={() =>
@@ -1214,7 +1272,12 @@ export function mentionsIn(body: string): string[] {
   return [...found];
 }
 
-/** Canonical padded base64 of a pasted image (the API decodes it strictly). */
+/** Whole percent of a video sent; 100 only once every byte is there. */
+export function uploadPercent(sent: number, size: number): number {
+  if (size <= 0 || sent >= size) return 100;
+  return Math.min(99, Math.floor((sent * 100) / size));
+}
+
 /** A drag carries files (not text or a link). */
 function hasFiles(transfer: DataTransfer | null): boolean {
   return Array.from(transfer?.types ?? []).includes("Files");
@@ -1254,6 +1317,13 @@ export function matchAttachmentCandidates(
 }
 
 function AttachmentKindIcon({ kind }: { kind: AttachmentRefTarget["kind"] }) {
-  const Icon = kind === "image" ? Image : kind === "file" ? FileIcon : FileText;
+  const Icon =
+    kind === "image"
+      ? Image
+      : kind === "video"
+        ? Film
+        : kind === "file"
+          ? FileIcon
+          : FileText;
   return <Icon className="ui-file-chip-icon" aria-hidden="true" />;
 }

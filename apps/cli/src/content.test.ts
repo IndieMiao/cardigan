@@ -17,6 +17,7 @@ import {
 import { routeEvent } from "@cardigan/router";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { videoBytes } from "../../../packages/mcp-server/test-support/video-fixtures.js";
 import { humanActor, runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
@@ -500,3 +501,60 @@ test.each([["--help"], ["comment", "--help"], ["attachment", "add", "--help"]])(
       expect(output.join("\n")).toContain(text);
   },
 );
+
+test("C-683: videos stream into storage with progress; wrong content and the video limit are refused", async () => {
+  const video = videoBytes("mov", 300_000);
+  expect(
+    await run([
+      "attachment",
+      "add",
+      "C-1",
+      "--file",
+      file("演示.MOV", video),
+      "--note=概念稿演示",
+    ]),
+  ).toBe(0);
+  const digest = createHash("sha256").update(video).digest("hex");
+  const [attachment] = snapshot().attachments;
+  expect(attachment).toMatchObject({
+    mime: "video/quicktime",
+    size: video.length,
+    sha256: digest,
+    original_filename: "演示.MOV",
+    note: "概念稿演示",
+    storage_path: `attachments/${digest}`,
+  });
+  expect(readFileSync(join(dataDir, "attachments", digest)).equals(video)).toBe(
+    true,
+  );
+  expect(errors).toContain("上传 演示.MOV：100%");
+  const before = snapshot();
+  for (const [name, content, env, message] of [
+    [
+      "fake.mp4",
+      videoBytes("png", 1000),
+      {},
+      "文件内容与扩展名不符，不是 mp4 视频",
+    ],
+    [
+      "big.webm",
+      videoBytes("webm", 1024 * 1024 + 1),
+      { CARDIGAN_VIDEO_MAX_MIB: "1" },
+      "视频超过 1 MiB",
+    ],
+  ] as const) {
+    io = { ...io, env: { ...io.env, ...env } };
+    expect(
+      await run([
+        "comment",
+        "add",
+        "C-1",
+        "--text=x",
+        "--file",
+        file(name, content),
+      ]),
+    ).toBe(2);
+    expect(errors.join("\n")).toContain(message);
+    expect(snapshot()).toEqual(before);
+  }
+});

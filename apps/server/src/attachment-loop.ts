@@ -2,7 +2,7 @@ import type { Dirent, Stats } from "node:fs";
 import { lstatSync, unlinkSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { Clock } from "@cardigan/domain";
+import type { Attachment, Clock } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 import { artifactPages } from "./artifact-retention.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
@@ -97,7 +97,7 @@ export class AttachmentGc {
         tx.attachments.list(project.id),
       );
       for (const attachment of attachments)
-        if (!attachment.streamed_artifact) digests.add(attachment.sha256);
+        for (const digest of blobDigests(attachment)) digests.add(digest);
     }
     return digests;
   }
@@ -130,10 +130,7 @@ export class AttachmentGc {
         if (
           tx.attachments
             .list(project.id)
-            .some(
-              (attachment) =>
-                !attachment.streamed_artifact && attachment.sha256 === digest,
-            )
+            .some((attachment) => blobDigests(attachment).includes(digest))
         )
           return false;
       try {
@@ -275,4 +272,14 @@ export function startAttachmentLoop(
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
   return { executor, loop };
+}
+
+/**
+ * The content-addressed blobs one record keeps: its own (not a streamed
+ * artifact's) and, for a video, its cover frame (C-683).
+ */
+export function blobDigests(attachment: Attachment): string[] {
+  if (attachment.streamed_artifact) return [];
+  const poster = attachment.video?.poster_sha256;
+  return poster ? [attachment.sha256, poster] : [attachment.sha256];
 }
