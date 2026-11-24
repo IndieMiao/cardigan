@@ -856,7 +856,18 @@ test("one record builds each index only once and later calls re-read mutated sna
     events: events.count(),
     runs: runs.count(),
     assignments: assignments.count(),
-  }).toEqual({ events: 1, runs: 1, assignments: 1 });
+    // C-670: the type and ID indexes are each built once per events array.
+  }).toEqual({ events: 2, runs: 1, assignments: 1 });
+  // A later record on the same immutable history reuses them: no new scan.
+  expect(
+    recordUpstreamHealth(
+      state,
+      { kind: "system", project_id: state.project_id },
+      { targets, activity: {}, probes: [], policy: DEFAULT_UPSTREAM_POLICY },
+      ports(),
+    ).ok,
+  ).toBe(true);
+  expect(events.count()).toBe(2);
   const before = indexed.lastUpstreamInactivity(state, id("assignment", 1));
   expect(before).toBeDefined();
   const mutable = { ...base, runs: [...base.runs] };

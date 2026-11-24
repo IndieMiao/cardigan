@@ -1,6 +1,7 @@
 import { autoRiskMergeReason, autoRiskPaths } from "../auto-risk.js";
 import { categoryDelegated } from "../decision-authorization.js";
 import type { Decision } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import {
   autoMergeOn,
   mergePathMatches,
@@ -10,13 +11,16 @@ import type { CommandState } from "./core.js";
 import { mergeNeedsHuman } from "./delegation.js";
 import { roleRuleDeliveries } from "./role-rule-implementation.js";
 
+// C-670: read only preference updates through the typed index, never a scan
+// over the whole history on every merge decision.
+const preferenceEvents = (state: CommandState) =>
+  eventsOfType(state.events, "project_preferences_updated");
 /** Bind the current human opt-in; legacy A3 retains its original audited policy. */
 export function systemMergeAuthority(state: CommandState): string | undefined {
   const p = state.project_preferences?.find((p) => p.id === state.project_id);
   if (autoMergeOn(p)) {
-    const audit = state.events.findLast(
+    const audit = preferenceEvents(state).findLast(
       (e) =>
-        e.type === "project_preferences_updated" &&
         e.actor.project_id === state.project_id &&
         (e.payload as { preference?: string })?.preference === "auto_merge",
     );
@@ -35,10 +39,9 @@ export function systemMergeAuthority(state: CommandState): string | undefined {
   const paths = p?.system_merge_shadow_policy?.release_paths;
   if ((p?.flow_version ?? 1) < 4 || !validMergePathList(paths)) return;
   const audit = (key: string) =>
-    state.events.findLast(
+    preferenceEvents(state).findLast(
       (e) =>
         e.actor.project_id === state.project_id &&
-        e.type === "project_preferences_updated" &&
         (e.payload as { preference?: string } | null)?.preference === key,
     );
   const flow = audit("flow_version"),

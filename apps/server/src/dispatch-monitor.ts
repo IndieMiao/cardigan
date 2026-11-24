@@ -5,6 +5,7 @@ import type {
   Event,
   ProjectId,
   RemoteWorkerLoss,
+  Run,
   Runtime,
   RuntimeObservation,
   RuntimeRef,
@@ -12,6 +13,7 @@ import type {
 } from "@cardigan/domain";
 import {
   DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
+  eventsOfType,
   hostOpsExitConfirmation,
   MAX_RUNTIME_FAILURE_LIMIT,
   MIN_RUNTIME_FAILURE_LIMIT,
@@ -84,15 +86,52 @@ interface Subscription {
   done: boolean;
 }
 const keyOf = (ref: RuntimeRef | null) => JSON.stringify(ref);
-const activeRuns = (state: CommandState, a: Assignment) =>
-  state.runs.filter(
-    (r) =>
-      r.assignment_id === a.id && unfinishedRun(r) && r.status !== "queued",
+// C-670: every pass visits each assignment; index the immutable snapshot
+// arrays once instead of scanning runs, losses and events per assignment.
+const runIndex = new WeakMap<
+  readonly Run[],
+  ReadonlyMap<Assignment["id"], readonly Run[]>
+>();
+const noRuns: readonly Run[] = Object.freeze([]);
+const activeRuns = (state: CommandState, a: Assignment): readonly Run[] => {
+  let index = runIndex.get(state.runs);
+  if (!index) {
+    const map = new Map<Assignment["id"], Run[]>();
+    for (const r of state.runs)
+      if (unfinishedRun(r) && r.status !== "queued") {
+        const list = map.get(r.assignment_id);
+        if (list) list.push(r);
+        else map.set(r.assignment_id, [r]);
+      }
+    index = map;
+    runIndex.set(state.runs, index);
+  }
+  return index.get(a.id) ?? noRuns;
+};
+const lossIndex = new WeakMap<
+  readonly RemoteWorkerLoss[],
+  ReadonlyMap<string, RemoteWorkerLoss>
+>();
+/** Same as `remoteWorkerLosses(events).find(...)` for one assignment. */
+const lossOf = (state: CommandState, id: Assignment["id"]) => {
+  const losses = remoteWorkerLosses(state.events);
+  let index = lossIndex.get(losses);
+  if (!index) {
+    const map = new Map<string, RemoteWorkerLoss>();
+    for (const loss of losses)
+      if (!map.has(loss.assignment_id)) map.set(loss.assignment_id, loss);
+    index = map;
+    lossIndex.set(losses, index);
+  }
+  return index.get(id);
+};
+const exitObserved = (state: CommandState, action: string) =>
+  eventsOfType(state.events, "remote_worker_exit_observed").some(
+    (e) => payloadString(e.payload, "action_id") === action,
   );
 const lostFact = (state: CommandState, a: Assignment) =>
-  state.events.findLast(
+  eventsOfType(state.events, "runtime_disconnected").findLast(
     (e) =>
-      e.type === "runtime_disconnected" &&
       payloadString(e.payload, "assignment_id") === a.id &&
       payloadString(e.payload, "runtime_key") === keyOf(a.runtime_ref),
   );
@@ -158,16 +197,8 @@ export class RuntimeMonitor {
         loadCommandState(tx, project),
       );
       for (const a of state.assignments) {
-        const loss = remoteWorkerLosses(state.events).find(
-          (loss) => loss.assignment_id === a.id,
-        );
-        const watchLoss =
-          loss &&
-          !state.events.some(
-            (e) =>
-              e.type === "remote_worker_exit_observed" &&
-              payloadString(e.payload, "action_id") === loss.action_id,
-          );
+        const loss = lossOf(state, a.id);
+        const watchLoss = loss && !exitObserved(state, loss.action_id);
         const ref = watchLoss ? loss.runtime_ref : a.runtime_ref;
         if (
           !ref ||
@@ -367,11 +398,7 @@ export class RuntimeMonitor {
           process === "exited" &&
           remoteWorkerLossReleased(state.events, loss.action_id) &&
           a &&
-          !state.events.some(
-            (e) =>
-              e.type === "remote_worker_exit_observed" &&
-              payloadString(e.payload, "action_id") === loss.action_id,
-          )
+          !exitObserved(state, loss.action_id)
         )
           this.fact(tx, state, a, "remote_worker_exit_observed", {
             action_id: loss.action_id,
@@ -579,18 +606,9 @@ export class RuntimeMonitor {
       const state = loadCommandState(tx, project),
         at = this.clock.now();
       for (const a of state.assignments) {
-        const loss = remoteWorkerLosses(state.events).find(
-          (loss) => loss.assignment_id === a.id,
-        );
         if (checked && checked.id !== a.id) continue;
-        if (
-          loss?.runtime_ref &&
-          !state.events.some(
-            (e) =>
-              e.type === "remote_worker_exit_observed" &&
-              payloadString(e.payload, "action_id") === loss.action_id,
-          )
-        )
+        const loss = lossOf(state, a.id);
+        if (loss?.runtime_ref && !exitObserved(state, loss.action_id))
           this.probe(project, state, a, loss.runtime_ref, loss);
         if (a.status === "active" && a.runtime_state === "lost") {
           this.recoverLost(tx, project, a);
@@ -630,9 +648,11 @@ export class RuntimeMonitor {
           }
           if (this.probeKey(state, a, a.runtime_ref) !== checked.stamp)
             continue;
-          const last = state.events.findLast(
+          const last = eventsOfType(
+            state.events,
+            "remote_worker_process_checked",
+          ).findLast(
             (e) =>
-              e.type === "remote_worker_process_checked" &&
               payloadString(e.payload, "assignment_id") === a.id &&
               payloadString(e.payload, "disconnect_id") === since.id,
           );
