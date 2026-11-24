@@ -22,17 +22,18 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
-import type {
-  GitBackupSelection,
-  GitCentralPort,
-  GitCommitTreeInput,
-  GitFileDiff,
-  GitPreparedBackup,
-  GitPublicationGuard,
-  GitRef,
-  GitRepositoryAddress,
-  GitReviewAttributionPort,
-  GitTreeMerge,
+import {
+  CheckHeadFailure,
+  type GitBackupSelection,
+  type GitCentralPort,
+  type GitCommitTreeInput,
+  type GitFileDiff,
+  type GitPreparedBackup,
+  type GitPublicationGuard,
+  type GitRef,
+  type GitRepositoryAddress,
+  type GitReviewAttributionPort,
+  type GitTreeMerge,
 } from "@cardigan/domain";
 import {
   type CandidateDeleteRequest,
@@ -661,6 +662,42 @@ export class CentralGitTransport
           throw new Error("Invalid backup ref record");
         return { ref, sha, type };
       });
+  }
+  /** C-642: the same private stage as a backup, for one delivery branch. The
+   * remote transfer needs no project lock; only the caller's ref write does. */
+  async fetchBranchTip(
+    repository: string,
+    source: GitRepositoryAddress,
+    branch: string,
+    uploadPack?: string,
+  ): Promise<string> {
+    if (dirname(repository) !== this.root)
+      throw new Error("Unexpected central repository path");
+    const head = `refs/heads/${branch}`;
+    await this.checked(repository, ["check-ref-format", head]);
+    const format = await this.objectFormat(repository);
+    const stage = await mkdtemp(join(this.root, ".incoming-"));
+    try {
+      await this.checked(stage, [
+        "init",
+        "--bare",
+        "--template=",
+        `--object-format=${format}`,
+      ]);
+      await writeFile(
+        join(stage, "objects/info/alternates"),
+        `../../${basename(repository)}/objects\n`,
+      );
+      await this.fetchRefs(stage, source, [`+${head}:${head}`], uploadPack);
+      const tip = await this.readRef(stage, head);
+      if (!tip) throw new CheckHeadFailure("branch_missing");
+      if ((await this.objectType(stage, tip)) !== "commit")
+        throw new CheckHeadFailure("object_mismatch");
+      await this.fetchRefs(repository, stage, [tip]);
+      return tip;
+    } finally {
+      await rm(stage, { recursive: true, force: true });
+    }
   }
   /** Private refs per transfer. Borrow center objects for negotiation; import
    * only the validated tips, without creating any ref (including FETCH_HEAD).

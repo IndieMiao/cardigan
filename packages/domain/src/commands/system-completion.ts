@@ -1,4 +1,5 @@
 import type { Actor, Delivery, PlainSummary } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
 import {
@@ -90,7 +91,7 @@ function aggregateCompletion(d: CommandDraft, cardId: CardId): Delivery | null {
         .sort();
       const key = JSON.stringify(products);
       if (
-        ![...d.state.events, ...d.events].some(
+        !appendEvents(d.state.events, d.events).some(
           (e) =>
             e.type === "system_completion_deferred" &&
             e.card_id === card.id &&

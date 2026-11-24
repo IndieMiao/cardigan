@@ -6,7 +6,8 @@ import { BoardDependencyLines } from "./layout/BoardDependencyLayout.js";
 /**
  * C-659: the hover/focus dependency lines. Owns the hover state, so moving the
  * pointer across cards re-renders only this overlay, not the board. Render
- * it before the board inside the board's frame.
+ * it right after the board inside the board's frame, so the lines paint over
+ * the cards (C-668).
  */
 export const BoardDependencies = memo(function BoardDependencies({
   board,

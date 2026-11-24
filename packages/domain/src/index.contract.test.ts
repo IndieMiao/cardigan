@@ -185,6 +185,15 @@ test("invariants 9, 14: central ref writes require an expected value and expose 
   >();
 });
 
+test("invariants 9, 14: staging a delivery branch returns a commit and publishes no ref", () => {
+  expectTypeOf<GitCentralPort["fetchBranchTip"]>().parameters.toEqualTypeOf<
+    [string, GitRepositoryAddress, string, string?]
+  >();
+  expectTypeOf<GitCentralPort["fetchBranchTip"]>().returns.toEqualTypeOf<
+    Promise<string>
+  >();
+});
+
 test("invariants 9, 14: backup preparation yields a synchronous, local publication only", () => {
   expectTypeOf<
     GitCentralPort["prepareBranchBackup"]

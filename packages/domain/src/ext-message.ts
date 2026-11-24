@@ -2,6 +2,7 @@ import { type CommandState, command } from "./commands/core.js";
 import { notices } from "./commands/notices.js";
 import { selectNeedsYouDecisions } from "./commands/queries.js";
 import type { Event, ReadyCondition } from "./entities.js";
+import { fullEventHistory } from "./event-index.js";
 import type { CardId, EventId, ProjectId } from "./ids.js";
 import { NEEDS_YOU_ITEM_READY, needsYouItemReady } from "./readiness.js";
 
@@ -214,12 +215,14 @@ export function extMessageItems(
       item.ready_when,
     ]),
   );
+  // Sources and decision touches include telemetry (run starts and ends).
+  const events = fullEventHistory(state.events);
   const eventTimes = new Map<string, string>(
-    state.events.map((e) => [e.id, e.created_at]),
+    events.map((e) => [e.id, e.created_at]),
   );
   // A handoff or reissue never erases an earlier quiet touch. The readiness
   // notification and the source change it references can straddle quiet hours.
-  for (const e of state.events) {
+  for (const e of events) {
     const p = e.payload;
     if (!p || typeof p !== "object") continue;
     const trigger =

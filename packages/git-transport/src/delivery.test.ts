@@ -1,4 +1,5 @@
-import { rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Assignment } from "@cardigan/domain";
 import {
@@ -96,6 +97,54 @@ test("verification creates a candidate from the recorded branch and produces imm
   });
   expect((await refs("candidates")).split("\n")).toHaveLength(2);
   expect(await git(f.source, "rev-parse", "main")).toBe(f.initial);
+});
+test("C-642: staging a branch imports its tip without any ref or leftover stage", async () => {
+  const sha = await commit(work, "staged");
+  const before = await git(repo, "for-each-ref", "--format=%(refname)");
+  const address = { kind: "host-local" as const, path: base };
+  expect(await f.transport.fetchBranchTip(repo, address, "agent/C-1/W-1")).toBe(
+    sha,
+  );
+  expect(await f.transport.objectType(repo, sha)).toBe("commit");
+  expect(await git(repo, "for-each-ref", "--format=%(refname)")).toBe(before);
+  expect(existsSync(join(repo, "FETCH_HEAD"))).toBe(false);
+  for (const branch of ["missing", "main:refs/heads/evil", "../escape"])
+    await expect(
+      f.transport.fetchBranchTip(repo, address, branch),
+    ).rejects.toThrow();
+  expect(
+    (await readdir(join(repo, ".."))).filter((name) => name.startsWith(".")),
+  ).toEqual([]);
+});
+test("C-642: a late publication of an older read never moves the incoming tip back", async () => {
+  const first = await commit(work, "first");
+  const late = await verifier.prepareVerify(
+    { kind: "git_head", value: first },
+    assignment,
+  );
+  const second = await commit(work, "second");
+  expect((await verify(second)).ok).toBe(true);
+  expect(await f.transport.readRef(repo, "refs/cardigan/incoming/A-1")).toBe(
+    second,
+  );
+  if ("value" in late) throw new Error("Expected a publication");
+  const result = await late.publish();
+  expect(result.ok).toBe(true);
+  if (result.ok)
+    expect(
+      result.value.find((e) => e.kind === "commit")?.details.branch_head_sha,
+    ).toBe(first);
+  expect(await f.transport.readRef(repo, "refs/cardigan/incoming/A-1")).toBe(
+    second,
+  );
+  expect(await refs("candidates")).toBe(
+    [
+      `refs/cardigan/candidates/A-1/${first}:${first}`,
+      `refs/cardigan/candidates/A-1/${second}:${second}`,
+    ]
+      .sort()
+      .join("\n"),
+  );
 });
 test.each(["missing", "tree", "blob", "foreign", "tag"])(
   "rejects %s objects without candidate or delivery refs",

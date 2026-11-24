@@ -1,6 +1,6 @@
 import { cardDependenciesAllowStart } from "../card-dependencies.js";
 import type { Actor, Delivery, Event, WorkItem } from "../entities.js";
-import { eventsOfType } from "../event-index.js";
+import { appendEvents, eventsOfType } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type { WorkItemId } from "../ids.js";
 import { validSystemReminderPolicy } from "../preferences.js";
@@ -234,7 +234,7 @@ export function assignReadyVerifiers(d: CommandDraft): void {
   if (!ready.length) return;
   // Keep the triggering actor on its events; only these derived actions use system authority.
   const system = new CommandDraft(
-    { ...d.state, events: [...d.state.events, ...d.events] },
+    { ...d.state, events: appendEvents(d.state.events, d.events) },
     { kind: "system", project_id: d.state.project_id },
     "auto_assign_verifier",
     d.ports,
@@ -287,7 +287,7 @@ function assignVerifier(d: CommandDraft, workItemId: WorkItemId) {
     ...candidates.map((c) => `${c.employee_id}：${c.reason}`),
   ].join("；");
   if (
-    ![...d.state.events, ...d.events].some(
+    !appendEvents(d.state.events, d.events).some(
       (e) =>
         e.type === "system_assignment_deferred" &&
         payload(e).work_item_id === item.id &&

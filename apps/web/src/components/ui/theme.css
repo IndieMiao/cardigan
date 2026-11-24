@@ -81,6 +81,9 @@
     --ui-selected-text: #262626;
     --ui-focus: #757575;
     --ui-border-hover: #bcbcbc;
+    /* C-668: a faint overlay line in --ui-border-hover keeps the darker of
+       itself and what lies under it, so text it crosses stays intact. */
+    --ui-faint-line-blend: darken;
     --radius: var(--ui-panel-radius);
     --id-card-fg: #123a8e;
     --id-card-bg: #e3edff;
@@ -151,6 +154,7 @@
       --ui-selected-text: #f0f0f0;
       --ui-focus: #858585;
       --ui-border-hover: #505050;
+      --ui-faint-line-blend: lighten;
       --id-card-fg: #9ab8f0;
       --id-card-bg: #202c43;
       --id-work-item-fg: #d1a4ef;

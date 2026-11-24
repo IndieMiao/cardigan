@@ -1,4 +1,5 @@
 import type { Assignment, Event, Run, WorkItem } from "../entities.js";
+import { eventById, fullEventHistory } from "../event-index.js";
 import { isMergePrerequisite } from "../human-action.js";
 import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
@@ -211,7 +212,8 @@ export function replayStopDeferredResume(
   assignment: Assignment,
 ) {
   if (assignment.scope !== "work_item") return;
-  const events = d.state.events;
+  // The episode start indexes the full history (C-643: telemetry included).
+  const events = fullEventHistory(d.state.events);
   // From the first stop of this episode: a retried stop records another
   // `assignment_stopped`, but the resume deferred before it still counts.
   const stopAt = openStopEpisodeStart(events, assignment.id);
@@ -226,7 +228,7 @@ export function replayStopDeferredResume(
     );
   const trigger =
     deferred &&
-    events.find((e) => e.id === field(deferred.payload, "evidence"));
+    eventById(events, field(deferred.payload, "evidence") as string);
   if (!trigger) return;
   const item = d.get("work_items", assignment.work_item_id);
   if (

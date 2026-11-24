@@ -410,6 +410,11 @@ export function beginHostOpsAction(
 export function beginHostOpsActionInDraft(
   d: CommandDraft,
   p: HostOpsActionParams,
+  options: {
+    /** C-669: the system's own stalled-patrol restart may follow its earlier
+     * attempts on this incident when each was withdrawn before any signal. */
+    readonly retry_withdrawn?: boolean;
+  } = {},
 ) {
   const state = d.state;
   ensure(
@@ -462,13 +467,25 @@ export function beginHostOpsActionInDraft(
         .filter((e) => e.actor.kind === "system")
         .map((e) => (e.payload as { action_id?: string }).action_id),
     ]);
+    const withdrawnBeforeSignal = new Set(
+      eventsOfType(state.events, "host_ops_action_finished")
+        .filter(
+          (e) =>
+            (e.payload as { result?: string }).result ===
+            "withdrawn_stall_changed",
+        )
+        .map((e) => (e.payload as { action_id?: string }).action_id),
+    );
     ensure(
       !eventsOfType(state.events, "host_ops_action_taken").some((e) => {
-        // Only Ops may take it over; the system never retries its own attempt.
+        // Ops may take it over. The system retries its own attempt only on
+        // the explicit stalled-patrol entry, and only an unsignalled withdrawal.
         if (
-          d.actor.kind !== "system" &&
           e.actor.kind === "system" &&
-          withdrawnUnsignalled.has(e.id)
+          (d.actor.kind !== "system"
+            ? withdrawnUnsignalled.has(e.id)
+            : options.retry_withdrawn === true &&
+              withdrawnBeforeSignal.has(e.id))
         )
           return false;
         const prior = e.payload as {

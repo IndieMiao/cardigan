@@ -4,9 +4,12 @@ import {
   beginIdleSessionRetirement,
   type Clock,
   type CommandEffect,
+  type CommandState,
+  confirmKeptShellExit,
   confirmWaitingRetirementExit,
   darwinWorker,
   handoffIdleSessionRetirement,
+  hostOpsPending,
   humanStopRecorded,
   needsRetirementHandoff,
   type ProjectId,
@@ -17,9 +20,11 @@ import {
   type Runtime,
   type RuntimeErrorCode,
   retirementOwnsSession,
+  runsOf,
   runtimeErrorCodes,
   sessionMaintenanceCandidate,
   settleIdleSessionRetirement,
+  stoppedByHuman,
   trackRetirementDispatch,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -28,6 +33,7 @@ import {
   recordNotification,
   type Store,
   type StoreTransactionContext,
+  unfinishedBellAttempts,
 } from "@cardigan/store";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import type { sessionMaintenanceScan } from "./session-maintenance.js";
@@ -168,6 +174,135 @@ export async function observeRetirementForDispatch(
   } finally {
     await unlock();
   }
+}
+
+/** C-667: a kept terminal whose CLI exited may be closed only while nothing
+ * of this owner runs or is being stopped, started or woken. */
+function keptShellOwner(store: Store, state: CommandState, a: Assignment) {
+  if (
+    a.scope !== "work_item" ||
+    a.external ||
+    a.status !== "active" ||
+    !a.runtime_ref ||
+    // Only a macOS worker can prove the launched CLI left a shell.
+    !darwinWorker(state, a) ||
+    a.role_upgrade ||
+    (a.idle_retirement?.phase === "stopping" && !a.idle_retirement.handoff) ||
+    stoppedByHuman(state.events, a.id) ||
+    hostOpsPending(state.events, a.id) ||
+    runsOf(state.runs, a.id).some(
+      (r) =>
+        !["queued", "completed", "failed", "cancelled"].includes(r.status) ||
+        r.dispatch_stop ||
+        r.inactivity_stop ||
+        (r.launch_publication &&
+          !["started", "exited"].includes(r.launch_publication.phase)),
+    ) ||
+    unfinishedBellAttempts(store.database, state.project_id, a.id).length
+  )
+    return false;
+  // Only owners with work for a new session (or a retirement to finish).
+  const latest = Math.max(
+    0,
+    ...state.roles
+      .filter((r) => r.role_id === a.role_id && r.status !== "inactive")
+      .map((r) => r.role_version),
+  );
+  return (
+    !!a.idle_retirement ||
+    latest > a.role_version ||
+    runsOf(state.runs, a.id).some((r) => r.status === "queued") ||
+    store.listNotifications({
+      project_id: state.project_id,
+      assignment_id: a.id,
+      statuses: LIVE_NOTIFICATION_STATUSES,
+    }).length > 0
+  );
+}
+
+/**
+ * C-667: before C-667 a replaced session was started with hc --keep. When its
+ * CLI exits, the terminal stays live with a shell: bells, idle retirement and
+ * role upgrades all saw a live session and nothing resumed until a human
+ * stop/start. Once the worker proves the launched CLI and its process group
+ * are gone and only an idle shell remains, close that terminal and settle the
+ * session so the existing upgrade and dispatch paths start a fresh one.
+ */
+export async function releaseKeptShells(
+  store: Store,
+  project: ProjectId,
+  runtime: Runtime,
+  clock: Clock,
+  limit: number,
+) {
+  if (!runtime.observe_kept_shell) return 0;
+  const candidates = store.uow.read((tx) => {
+    const state = loadCommandState(tx, project);
+    return state.assignments.filter((a) => keptShellOwner(store, state, a));
+  });
+  let released = 0;
+  for (const a of candidates) {
+    if (released >= limit) break;
+    const ref = a.runtime_ref;
+    if (!ref) continue;
+    const observed = await runtime.status(ref).catch(() => undefined);
+    if (
+      !observed?.ok ||
+      observed.value.process !== "alive" ||
+      !observed.value.kept
+    )
+      continue;
+    const unlock = await tryHostOpsLock(store, project, a.id);
+    if (!unlock) continue;
+    try {
+      const unlockLaunch = await tryHostOpsLock(store, project, a.id, "launch");
+      if (!unlockLaunch) continue;
+      try {
+        const current = () =>
+          store.uow.read((tx) => {
+            const state = loadCommandState(tx, project);
+            const owner = state.assignments.find((v) => v.id === a.id);
+            return owner &&
+              JSON.stringify(owner.runtime_ref) === JSON.stringify(ref) &&
+              keptShellOwner(store, state, owner)
+              ? owner
+              : undefined;
+          });
+        if (!current()) continue;
+        const owner = { project_id: project, assignment_id: a.id };
+        const shell = await runtime
+          .observe_kept_shell(ref, owner)
+          .catch(() => undefined);
+        if (!shell?.ok || !shell.value || !current()) continue;
+        const closed = await runtime
+          .release(ref, { force: true })
+          .catch(() => undefined);
+        if (!closed?.ok) continue;
+        released++;
+        store.uow.run((tx) => {
+          const effect = confirmKeptShellExit(
+            loadCommandState(tx, project),
+            { kind: "system", project_id: project },
+            a.id,
+            ref,
+            { ids: tx.ids, clock },
+          );
+          // A changed owner keeps its reference; the closed terminal then
+          // reads as not found and takes the ordinary replacement path.
+          if (!effect.ok) return;
+          persistEffect(tx, project, effect.value);
+          revokeRetiredTokens(tx, project, a.id);
+        });
+      } finally {
+        await unlockLaunch();
+      }
+    } catch {
+      console.error("Kept terminal of an exited Agent could not be settled");
+    } finally {
+      await unlock();
+    }
+  }
+  return released;
 }
 
 /** Shares both existing lock domains with attach/stop and launch/wake. */

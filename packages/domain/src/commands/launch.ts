@@ -6,7 +6,7 @@ import {
   standingRunDormant,
 } from "../card-hold.js";
 import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
-import { eventById } from "../event-index.js";
+import { appendEvents, eventById } from "../event-index.js";
 import { HARNESSES, isHarness } from "../harness.js";
 import {
   automaticContextActionForRun,
@@ -425,7 +425,7 @@ export function createQueuedRun(
   const policy = newRecoveryPolicy(
     {
       ...d.state,
-      events: [...d.state.events, ...d.events],
+      events: appendEvents(d.state.events, d.events),
       work_items: d.list("work_items"),
       deliveries: d.list("deliveries"),
     },

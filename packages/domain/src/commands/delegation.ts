@@ -11,6 +11,7 @@ import type {
   PlainSummary,
   ToolName,
 } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import { highRiskProducts } from "../high-risk.js";
 import type { CardId } from "../ids.js";
@@ -212,7 +213,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     d.list("cards").some((c) => c.id === q.card_id && c.sensitive) &&
     !categoryDelegated(
       projectPreference(d),
-      [...d.state.events, ...d.events],
+      appendEvents(d.state.events, d.events),
       "sensitive",
     )
   )
@@ -226,7 +227,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
       !["done", "cancelled"].includes(d.get("cards", q.card_id).status) &&
       categoryDelegated(
         projectPreference(d),
-        [...d.state.events, ...d.events],
+        appendEvents(d.state.events, d.events),
         "general",
       )
     );
@@ -258,7 +259,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
         d.list("cards"),
         q.card_id,
         projectPreference(d),
-        [...d.state.events, ...d.events],
+        appendEvents(d.state.events, d.events),
       ) &&
       riskTagAutoMergeAllowed(
         {
@@ -269,7 +270,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
           work_items: d.list("work_items"),
           deliveries: d.list("deliveries"),
           reviews: d.list("reviews"),
-          events: [...d.state.events, ...d.events],
+          events: appendEvents(d.state.events, d.events),
         },
         q,
       )
@@ -281,13 +282,13 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     !!q.category &&
     categoryDelegated(
       projectPreference(d),
-      [...d.state.events, ...d.events],
+      appendEvents(d.state.events, d.events),
       q.category,
     )
   );
 }
 function preferenceAudit(d: CommandDraft, preference: string) {
-  return [...d.state.events, ...d.events]
+  return appendEvents(d.state.events, d.events)
     .filter(
       (e) =>
         e.type === "project_preferences_updated" &&
@@ -314,7 +315,7 @@ export function delegationAuthority(
 ) {
   const preference = projectPreference(d);
   const audit = highRiskCategories.includes(category)
-    ? categoryAuthorization([...d.state.events, ...d.events], category)
+    ? categoryAuthorization(appendEvents(d.state.events, d.events), category)
     : preferenceAudit(d, "decision_delegation");
   return preference?.decision_delegation?.[category] !== undefined
     ? `project:${d.state.project_id}/decision_delegation/${category}${audit ? `/event:${audit.id}` : ""}`

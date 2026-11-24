@@ -48,6 +48,7 @@ export {
   type PinDeliveryRequest,
 } from "./commands/delivery-tools.js";
 export {
+  type CommandStateOptions,
   effectWrites,
   loadCommandState,
   persistEffect,

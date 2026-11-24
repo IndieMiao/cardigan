@@ -22,6 +22,7 @@ import { join } from "node:path";
 import type { Assignment, Card, Role, WorkItem } from "@cardigan/domain";
 import {
   CentralRepositoryService,
+  GitDeliveryVerifier,
   type RepositoryLock,
   type RepositoryLockSample,
   RepositoryLockTimeoutError,
@@ -589,23 +590,41 @@ test("C-632: checkHead keeps lock timeouts retryable and classifies setup failur
     machine_id: "local",
     scope: "work_item",
   } as Assignment;
+  // C-642: the lock covers only the publication of an already fetched HEAD.
+  const sha = "a".repeat(40);
+  const prepare = vi
+    .spyOn(GitDeliveryVerifier.prototype, "prepareHead")
+    .mockResolvedValue({ publish: async () => sha });
   const lock = vi.spyOn(binding as unknown as { lock: RepositoryLock }, "lock");
   try {
     lock.mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
     await expect(
       binding.checkHead(f.project_id, assignment),
     ).rejects.toBeInstanceOf(RepositoryLockTimeoutError);
-    lock.mockRejectedValueOnce(new Error("Worker target is not configured"));
-    const failure = await binding
-      .checkHead(f.project_id, assignment)
-      .catch((error: unknown) => error);
-    expect(failure).toMatchObject({
-      name: "CheckHeadFailure",
-      reason: "environment_unavailable",
-    });
-    expect((failure as Error).message).not.toContain("Worker target");
+    for (const fail of [
+      () =>
+        lock.mockRejectedValueOnce(
+          new Error("Worker target is not configured"),
+        ),
+      () =>
+        prepare.mockRejectedValueOnce(
+          new Error("Worker target is not configured"),
+        ),
+    ]) {
+      fail();
+      const failure = await binding
+        .checkHead(f.project_id, assignment)
+        .catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        name: "CheckHeadFailure",
+        reason: "environment_unavailable",
+      });
+      expect((failure as Error).message).not.toContain("Worker target");
+    }
+    expect(await binding.checkHead(f.project_id, assignment)).toBe(sha);
   } finally {
     lock.mockRestore();
+    prepare.mockRestore();
   }
   await expect(
     binding.checkHead("unregistered" as never, assignment),

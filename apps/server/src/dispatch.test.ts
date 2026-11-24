@@ -17,6 +17,7 @@ import {
   createCard,
   dispatchRun,
   finishRun,
+  fullEventHistory,
   HOST_OPS_ROLE_TOOLS,
   postComment,
   queueRun,
@@ -621,7 +622,7 @@ test.each([false, true])(
 test("C-475: a failed project-stream bell on a running standing session retries after backoff", async () => {
   const owner = standingSession("host_ops");
   const run = f.session(owner, false);
-  const event = f.state().events.findLast((e) => !e.card_id);
+  const event = fullEventHistory(f.state().events).findLast((e) => !e.card_id);
   if (!event) throw new Error("missing project event");
   const { notification } = f.store.recordNotification({
     project_id: f.project,
@@ -2088,13 +2089,11 @@ async function checkStandingDecision(refuses: boolean) {
     f.actorFor(pm),
   );
   const endings = () =>
-    f
-      .state()
-      .events.filter(
-        (e) =>
-          e.type === "run_finished" &&
-          (e.payload as { run_id?: string }).run_id === previous.id,
-      );
+    fullEventHistory(f.state().events).filter(
+      (e) =>
+        e.type === "run_finished" &&
+        (e.payload as { run_id?: string }).run_id === previous.id,
+    );
   expect(endings()).toHaveLength(1);
   expect(endings()[0]).toMatchObject({
     payload: {

@@ -1,4 +1,5 @@
 import type { Actor, HumanAction } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import type { CardId, HumanActionId } from "../ids.js";
 import { remoteExitAction } from "../remote-worker-loss.js";
 import { transition } from "../transitions.js";
@@ -74,7 +75,10 @@ export function cancelCardHumanActions(d: CommandDraft, cardId: CardId) {
     if (
       action.card_id === cardId &&
       action.status === "open" &&
-      !remoteExitAction({ events: [...d.state.events, ...d.events] }, action.id)
+      !remoteExitAction(
+        { events: appendEvents(d.state.events, d.events) },
+        action.id,
+      )
     )
       cancelActionDraft(
         d,

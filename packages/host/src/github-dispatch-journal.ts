@@ -134,6 +134,7 @@ export function canFinishUndispatched(
     !intent.postOwner
   );
 }
+const DISPATCH_TYPES: ReadonlySet<string> = new Set(["github_check_dispatch"]);
 const projectedIntents = new WeakMap<
   readonly Event[],
   readonly GithubDispatchIntent[]
@@ -297,9 +298,11 @@ export class GithubDispatchJournal {
     cards: Pick<StoreTransactionContext["cards"], "list">;
   }): GithubDispatchIntent[] {
     return this.store.listProjects().flatMap((project) => {
-      const streams = this.probeCard
+      const all = this.probeCard
         ? undefined
         : tx.events.listStreams?.(project.id);
+      // C-639: intents read only dispatch records; never decode whole streams.
+      const streams = all?.ofTypes ? all.ofTypes(DISPATCH_TYPES) : all;
       return tx.cards
         .list(project.id)
         .filter((card) => !this.probeCard || card.id === this.probeCard)
@@ -317,9 +320,11 @@ export class GithubDispatchJournal {
    */
   unfinishedExecutorsAt(tx: Parameters<GithubDispatchJournal["allAt"]>[0]) {
     return this.store.listProjects().flatMap((project) => {
-      const streams = this.probeCard
+      const all = this.probeCard
         ? undefined
         : tx.events.listStreams?.(project.id);
+      // C-639: same dispatch-only subset as `allAt`.
+      const streams = all?.ofTypes ? all.ofTypes(DISPATCH_TYPES) : all;
       return tx.cards
         .list(project.id)
         .filter((card) => !this.probeCard || card.id === this.probeCard)

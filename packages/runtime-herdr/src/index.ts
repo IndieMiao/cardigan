@@ -377,7 +377,7 @@ export class HerdrRuntime implements Runtime {
     )
       fail("invalid_launch", "Remote worker launch is not enabled");
   }
-  private async launch(launch: RuntimeLaunch, keep: boolean) {
+  private async launch(launch: RuntimeLaunch) {
     this.checkLaunchEnabled();
     this.validateLaunch(launch);
     // An explicit launch may bootstrap hc; probes must not do so. SSH aliases
@@ -403,7 +403,6 @@ export class HerdrRuntime implements Runtime {
       "--cwd",
       launch.cwd,
     ];
-    if (keep) args.push("--keep");
     for (const [key, value] of Object.entries(launch.labels))
       args.push("--label", `${key}=${value}`);
     // run stops parsing options at the program: all hc options must precede it.
@@ -552,22 +551,14 @@ export class HerdrRuntime implements Runtime {
         !launch.labels.run
       )
         fail("invalid_launch", "Launch identity or labels do not match");
-      const terminal_ref = await this.launch(
-        {
-          ...(await enrollDarwinOwner(
-            this.execution,
-            assignment,
-            role,
-            launch,
-          )),
-          labels: {
-            ...launch.labels,
-            cardigan: "1",
-            assignment: assignment.id,
-          },
+      const terminal_ref = await this.launch({
+        ...(await enrollDarwinOwner(this.execution, assignment, role, launch)),
+        labels: {
+          ...launch.labels,
+          cardigan: "1",
+          assignment: assignment.id,
         },
-        false,
-      );
+      });
       const ref: RuntimeRef = {
         machine_id: machine.id,
         runtime_machine:
@@ -824,14 +815,19 @@ export class HerdrRuntime implements Runtime {
     if (pending) return pending;
     const request = result(async () => {
       this.checkRef(ref);
-      this.checkTerminal(ref, await this.json(["get", ref.terminal_ref]));
+      const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      this.checkTerminal(ref, terminal);
       // The shared source refresh starts after get. Existing consumers keep
       // their subscription and observe the new source's own sequence.
       const event = await this.hub.snapshot(Math.max(this.timeoutMs, 20_000));
       const found = event.observations.find(
         (t) => t.terminal_ref === ref.terminal_ref,
       );
-      if (found) return found.status;
+      // C-667: a kept terminal stays live with a shell after its CLI exits.
+      if (found)
+        return terminal.keep === true
+          ? { ...found.status, kept: true as const }
+          : found.status;
       fail("runtime_not_found", "Terminal is absent from the runtime snapshot");
     });
     this.statusRequests.set(key, request);
@@ -990,10 +986,13 @@ export class HerdrRuntime implements Runtime {
       } = ref;
       return {
         ...previous,
-        terminal_ref: await this.launch(
-          { ...launch, labels: { ...launch.labels, cardigan: "1" } },
-          true,
-        ),
+        // C-667: never --keep. A kept terminal turns a lost CLI into a live
+        // shell, which every wake, retirement and upgrade must treat as alive;
+        // a plain terminal finishes, so the existing exit paths replace it.
+        terminal_ref: await this.launch({
+          ...launch,
+          labels: { ...launch.labels, cardigan: "1" },
+        }),
         agent_name: launch.agent_name,
         ...(launch.labels.generation
           ? {
@@ -1157,6 +1156,20 @@ export class HerdrRuntime implements Runtime {
       basis: "bound_idle_prompt" as const,
     };
   }
+  /** C-667: only a macOS worker can prove a kept terminal's CLI is gone. */
+  observe_kept_shell(ref: RuntimeRef, owner: RetirementIdentity) {
+    return result(async () => {
+      this.checkRef(ref);
+      if (this.execution.mode !== "agent-ssh" || !this.execution.macosCore)
+        return false;
+      return (
+        (await darwinRetirementObservation(this.execution, ref, {
+          ...owner,
+          kept_shell: true,
+        })) === "shell"
+      );
+    });
+  }
   observe_retirement(
     ref: RuntimeRef,
     identity: RetirementIdentity & {
@@ -1168,7 +1181,9 @@ export class HerdrRuntime implements Runtime {
       this.checkRef(ref);
       if (this.execution.mode === "agent-ssh" && this.execution.macosCore) {
         const { observed } = await this.darwinTurn(ref, identity);
-        return observed === "kept" ? "unknown" : observed;
+        return observed === "kept" || observed === "shell"
+          ? "unknown"
+          : observed;
       }
       const { idle_prompt: prompt, ...owner } = identity;
       const terminal: Terminal = owner.system_finished_turn
