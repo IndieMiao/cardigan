@@ -345,6 +345,37 @@ export type ReadResourceLimits = (
   machine: string,
 ) => ReadonlyMap<string, number>;
 
+/**
+ * C-714: diagnosis only. Names the full ceiling that keeps an owner waiting
+ * although its machine still has Run slots, with the Runs holding it. Mirrors
+ * `withinProjectQuota` and `remainingResourceRatio`; admission never reads it.
+ */
+export type RunCapacityBlock =
+  | {
+      readonly kind: "project_limit";
+      readonly project_id: string;
+      readonly machine_id: string;
+      readonly limit: number;
+      readonly run_ids: readonly string[];
+    }
+  | {
+      readonly kind: "project_resource";
+      readonly project_id: string;
+      readonly machine_id: string;
+      readonly resource: string;
+      readonly limit: number;
+      readonly run_ids: readonly string[];
+    }
+  | {
+      readonly kind: "machine_resource";
+      readonly machine_id: string;
+      readonly resource: string;
+      readonly limit: number;
+      /** Only the asking project's Runs; other projects are a bare count. */
+      readonly run_ids: readonly string[];
+      readonly other_project_runs: number;
+    };
+
 /** Read under the caller's transaction so counting and claiming share a snapshot. */
 export function runCapacitySnapshot(
   store: Store,
@@ -356,6 +387,19 @@ export function runCapacitySnapshot(
     string,
     Map<string, { limit: number; occupied: number }>
   >();
+  // C-714: which Runs hold each machine resource slot (diagnosis only).
+  const slotRuns = new Map<
+    string,
+    Map<string, { project: string; run: string }[]>
+  >();
+  const holders = <T>(byKey: Map<string, T[]>, key: string) => {
+    let runs = byKey.get(key);
+    if (!runs) {
+      runs = [];
+      byKey.set(key, runs);
+    }
+    return runs;
+  };
   const resourceSlots = (machine: string) => {
     let slots = machines.get(machine);
     if (!slots) {
@@ -368,7 +412,12 @@ export function runCapacitySnapshot(
   };
   // Both views share the exact same effective Run/reservation set. Only the
   // trusted Assignment scope and role determine exemption, never Run labels.
-  type Usage = { occupied: number; resources: Map<string, number> };
+  type Usage = {
+    occupied: number;
+    resources: Map<string, number>;
+    runs: string[];
+    resourceRuns: Map<string, string[]>;
+  };
   const projectUsage = new Map<string, Map<string, Usage>>();
   const agentOccupied = new Map<string, number>();
   const allAgentOccupied = new Map<string, number>();
@@ -441,10 +490,18 @@ export function runCapacitySnapshot(
         agentOccupied.set(machine, (agentOccupied.get(machine) ?? 0) + 1);
       let usage = usageByMachine.get(machine);
       if (!usage && quotas?.(machine, project.id)) {
-        usage = { occupied: 0, resources: new Map() };
+        usage = {
+          occupied: 0,
+          resources: new Map(),
+          runs: [],
+          resourceRuns: new Map(),
+        };
         usageByMachine.set(machine, usage);
       }
-      if (usage && !isRunCapacityExempt(owner)) usage.occupied++;
+      if (usage && !isRunCapacityExempt(owner)) {
+        usage.occupied++;
+        if (run) usage.runs.push(run.id);
+      }
       const slots = resourceSlots(machine);
       // A pending stop of a possibly executing session keeps its machine slot.
       // An idle terminal is not proof that its queued follow-up acquired any
@@ -469,6 +526,13 @@ export function runCapacitySnapshot(
           if (slot) {
             slot.occupied++;
             usage?.resources.set(key, (usage.resources.get(key) ?? 0) + 1);
+            let byKey = slotRuns.get(machine);
+            if (!byKey) {
+              byKey = new Map();
+              slotRuns.set(machine, byKey);
+            }
+            holders(byKey, key).push({ project: project.id, run: run.id });
+            if (usage) holders(usage.resourceRuns, key).push(run.id);
           }
         }
       }
@@ -529,29 +593,79 @@ export function runCapacitySnapshot(
     (occupied.get(LOCAL_EXECUTOR) ?? 0) +
       (mergeChecks.get(LOCAL_EXECUTOR) ?? 0) * MERGE_CHECK_RUN_SLOTS,
   );
-  function withinProjectQuota(
+  function projectQuotaBlock(
     project: string,
     owner: Assignment,
     keys?: readonly string[],
-  ): boolean {
+  ): RunCapacityBlock | undefined {
     const quota = quotas?.(owner.machine_id, project);
-    if (!quota) return true;
-    const usage = projectUsage.get(project)?.get(owner.machine_id);
+    if (!quota) return undefined;
+    const machine = owner.machine_id;
+    const usage = projectUsage.get(project)?.get(machine);
     if (
       quota.limit !== undefined &&
       !isRunCapacityExempt(owner) &&
       (usage?.occupied ?? 0) >= quota.limit
     )
-      return false;
+      return {
+        kind: "project_limit",
+        project_id: project,
+        machine_id: machine,
+        limit: quota.limit,
+        run_ids: [...(usage?.runs ?? [])],
+      };
     for (const key of keys ?? assignmentResourceKeys(tx, project, owner)) {
       const ceiling = quota.resources.get(key);
       if (ceiling !== undefined && (usage?.resources.get(key) ?? 0) >= ceiling)
-        return false;
+        return {
+          kind: "project_resource",
+          project_id: project,
+          machine_id: machine,
+          resource: key,
+          limit: ceiling,
+          run_ids: [...(usage?.resourceRuns.get(key) ?? [])],
+        };
     }
-    return true;
+    return undefined;
+  }
+  function withinProjectQuota(
+    project: string,
+    owner: Assignment,
+    keys?: readonly string[],
+  ): boolean {
+    return projectQuotaBlock(project, owner, keys) === undefined;
+  }
+  /** C-714: the first full project or machine ceiling for this owner, if any. */
+  function capacityBlock(
+    project: string,
+    owner: Assignment,
+    keys: readonly string[] = assignmentResourceKeys(tx, project, owner),
+  ): RunCapacityBlock | undefined {
+    const blocked = projectQuotaBlock(project, owner, keys);
+    if (blocked) return blocked;
+    const machine = owner.machine_id;
+    const slots = resourceSlots(machine);
+    for (const key of keys) {
+      const slot = slots.get(key);
+      // Same test as `remainingResourceRatio(...) <= 0`.
+      if (slot && (slot.limit - slot.occupied) / slot.limit <= 0) {
+        const held = slotRuns.get(machine)?.get(key) ?? [];
+        const own = held.filter((h) => h.project === project);
+        return {
+          kind: "machine_resource",
+          machine_id: machine,
+          resource: key,
+          limit: slot.limit,
+          run_ids: own.map((h) => h.run),
+          other_project_runs: held.length - own.length,
+        };
+      }
+    }
+    return undefined;
   }
   return {
     withinProjectQuota,
+    capacityBlock,
     occupied,
     agentOccupied,
     allAgentOccupied,
