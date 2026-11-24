@@ -217,6 +217,13 @@ test("hovering a card draws lines to visible prerequisites and dependents, leavi
       BOARD,
     ),
   );
+  // C-673: each line carries its flowing dots on a path of the same shape.
+  expect(
+    [...container.querySelectorAll("[data-flow]")].map((e) => [
+      e.getAttribute("data-flow"),
+      e.getAttribute("d"),
+    ]),
+  ).toEqual(edges(container).map((key) => [key, d(key ?? "")]));
   // Every line is a single cubic Bézier: no straight runs, no corners.
   for (const key of edges(container) as string[])
     expect(d(key)).toMatch(/^M-?[\d.]+ -?[\d.]+C(-?[\d.]+ -?[\d.]+ ?){3}$/);

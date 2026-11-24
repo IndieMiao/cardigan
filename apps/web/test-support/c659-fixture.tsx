@@ -26,6 +26,17 @@ const edges: [string, string][] = [
   ["C-23", "C-41"],
   ["C-23", "C-27"],
   ["C-12", "C-22"],
+  // C-673 performance run (`?dense`): C-23 gets ten visible lines at 1440.
+  ...((new URLSearchParams(location.search).has("dense")
+    ? [
+        ["C-12", "C-23"],
+        ["C-13", "C-23"],
+        ["C-21", "C-23"],
+        ["C-23", "C-31"],
+        ["C-23", "C-42"],
+        ["C-23", "C-25"],
+      ]
+    : []) as [string, string][]),
 ];
 const titles: Record<string, string> = {
   "C-11": "设置页管理飞书机器人配置：开关、免打扰、限速",
