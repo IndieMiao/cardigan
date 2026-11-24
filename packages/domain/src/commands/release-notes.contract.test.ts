@@ -286,7 +286,7 @@ test("merged cards: since the previous successful publication up to this one, el
     ),
     RELEASE_NOTE_RECENT_CARDS + 5,
   );
-  const recent = releaseMergedCards(many, "0.1.0");
+  const recent = releaseMergedCards(many, "0.9.0");
   expect(recent.cards).toHaveLength(RELEASE_NOTE_RECENT_CARDS);
   expect(recent.cards[0]?.id).toBe(id("card", RELEASE_NOTE_RECENT_CARDS + 5));
   // The write result carries the same reference list.
