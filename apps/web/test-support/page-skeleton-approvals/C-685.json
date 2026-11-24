@@ -1,26 +1,26 @@
 {
   "board-1440-dark.png": {
-    "hash": "f9511e6a3ea81800e06ef17dee627d126194339ca25c961eb6bf0a36bae5e160",
+    "hash": "ca7298b342592b95a9e012ca22ee0691dd9c1a0eb611b6f92677d009bf7fd9f9",
     "replaces": [
-      "050ed2c9ac7c64c403dff25ebe72cbc1f7500ea5c381663d9c2ff5c802e18163"
+      "794c4063f27d0f9779079e6b7a2ae176acb97fb8cf6dbb98e5e77207dc2408dc"
     ]
   },
   "board-1440-light.png": {
-    "hash": "416981fe3a9bec2d2c937e537d8274d848f51d9294d573c407feb5260fef5c15",
+    "hash": "a50f5702f9c438afe54f9ce1ca5199120fbfc5f0b8d61d5cecede060c13816c7",
     "replaces": [
-      "3115869ab65c54ea2c27827ba8b1e92b1e339258535aa19ffea685add85347d6"
+      "3a88826a11760bbe74832bfe6b2631fc36d8d65748ab7ee5c1db8e0b9691beb0"
     ]
   },
   "capacity-1440-dark.png": {
-    "hash": "5b877bc4b436a72b8ff61ec2a5ea18e54e5b9a40508ff2d9bd5e20741a7c0328",
+    "hash": "65fdb7083b71e1c61f4cd5c6843e02422365aa82de5c667aec22ae5c5c93283c",
     "replaces": [
-      "7b7dab66fabbdadeb43f57b2ad571a211e19b5d1a2ea251f9b3cd3194b7d51af"
+      "8c9cc89337828cf9b98c2fb801ead0d44bf47c6c0e5fce498a923f02d6667ddc"
     ]
   },
   "capacity-1440-light.png": {
-    "hash": "28fa47f7d483add5a2d34e816ce813f9c5988829ac2219516ca074f564513e04",
+    "hash": "59abd4a97b74d48827a1e95e2b824862d064cdd22b5daec2b2c4ede207d55e04",
     "replaces": [
-      "ed4114279064e0eb609eb7102a09ff0e544c3219584c93427c4fab578032b070"
+      "b4e4716a0321ce1196c65e820ea7cbacc0a55821ed0b9a28a84897baf4f7b9fb"
     ]
   },
   "detail-1440-dark.png": {
@@ -36,51 +36,51 @@
     ]
   },
   "filter-1440-dark.png": {
-    "hash": "27a2219efa4ec8b3efe5276c1bc03098542761fc0d91ec22c3b07fc70951351c",
+    "hash": "af1e301bf12a36744a5e88ad2a3c7077efda12f0b4d3f31afec2eee9104a4f73",
     "replaces": [
-      "4a8d5ab68470d50352fd662e006a26a8321a55a3b551c6e21e6cd4a64dd4215f"
+      "95324695f08e4deed8a2ca62a05201898144e23a81695d29a42e902d2cd32543"
     ]
   },
   "filter-1440-light.png": {
-    "hash": "eef250e299fcfa917d37cb90598f3d6f3ef641692be5a9e8f4302189171c7766",
+    "hash": "a8c40f864e0ae3d3796b8d3ac1453f2124cb8a75c1abf86abf4a1b2cea9d3d12",
     "replaces": [
-      "a144e3cefd8b0417dc038f39b28d7ebdf8c1303d0ebadb94d3726c81bb9eea6e"
+      "050f4ce2a260cb877e384a73d4488810b0e791b411d8d518691e9969c08c703f"
     ]
   },
   "grouped-1440-dark.png": {
-    "hash": "07c2454e600542159a0e7c258c33332bbdf9a871f578f8ad8719b09f1131fd61",
+    "hash": "1a81f8c9147d9f74bd158b1fe75440297cf88c74959925774b36cae22c591f8a",
     "replaces": [
-      "b0585e1cb3ce769bb64c1282036486e1f5df60d9f1d6f127f04362313cb92222"
+      "4a194b7d21692a17e4d097eef6ae4342bef6d7cfc23a06ec02415f8f79838cfd"
     ]
   },
   "grouped-1440-light.png": {
-    "hash": "083e5784fc4f4b21b4e0a1ee6c5390a9b734747903b4bea251caa23ffc74cc73",
+    "hash": "e335c24f9f345a0441e7786348257a43df7682d3aee39152af18bbad7e53da4f",
     "replaces": [
-      "57511b82d057735494f2d648a0eb06e2b9dd7bbfd5aa03be07ff36d4894d3025"
+      "36a29aea0e2a9998b9b90dccb1ee2c3c0f5a67ba28210cb69de4577131c13120"
     ]
   },
   "list-1440-dark.png": {
-    "hash": "47d0ec56b6630882159da8957e32e7259e7e02732261090534e78b86c6068623",
+    "hash": "f7b14474aba1ddf7d7f1d09d16849457202d90cb60b27024abbc23611dcb77c3",
     "replaces": [
-      "983d27230c870ebdd1ab0067b7f4ca6ebcc7398a6b759a97e9cbabd6177363b3"
+      "30220c0095ab77338aefdd931031a52a7a2be11fc53a404ceec2fd581823a208"
     ]
   },
   "list-1440-light.png": {
-    "hash": "203ede77b4adacb07a16475bed00afc641f602194266bbb23274aa32014d942b",
+    "hash": "a9f484b27326d9d9f2a735aee0d29923eea06ae21a62295b4be2b6f7f3da8c32",
     "replaces": [
-      "ffa6e54e9e5e193e73520ca6b34d5999e1124d9ca66a5b784ef32f4275cd1053"
+      "61862cf9533f518a9d91fe2d5b9a1348ff4a1d92273049ed33ef3f9f07970935"
     ]
   },
   "minimal-1440-dark.png": {
-    "hash": "4ac1e9522e8314b9e2ae37cae6d5a7c0899c7223dbb5917d3014f0f67b1e3ab5",
+    "hash": "3a35d1fd275a52b63954b74250fda36a2410ccd41ad21c912f123fd7c6976f67",
     "replaces": [
-      "c75cd2c6415bc944bf3965f14279f2a10ea62621a1344a5beec75e57b4d01197"
+      "b5b61d4ef2ddb227c9fd54588950abf85312c52999f145aa36e36b9ea4058150"
     ]
   },
   "minimal-1440-light.png": {
-    "hash": "9eda4e4e5730b14f1feea7baccf26af573f2d09329386cf2ece84a10edb8aa10",
+    "hash": "6c787c0fc72a055f0b507d3cc6d0d978383f93bb6ab3fb9f282db9a653422386",
     "replaces": [
-      "b0b0598bcf62254c64c071deca13b224d2fce6aebb4a21bac055fae928453f32"
+      "51e96261694c8d1e73db725d94f760ef678eb4502e225f282f362310ac0ee07c"
     ]
   }
 }
