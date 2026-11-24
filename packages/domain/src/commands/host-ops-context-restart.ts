@@ -27,7 +27,7 @@ import {
   beginHostOpsActionInDraft,
   retirementStallHandoff,
 } from "./host-ops-actions.js";
-import { settingsValid } from "./launch.js";
+import { queueRunInDraft, settingsValid } from "./launch.js";
 import { projectPreferences } from "./preferences.js";
 import { stoppedByHuman } from "./stop-state.js";
 
@@ -301,6 +301,99 @@ export function beginStalledPatrolRestart(
       },
       // C-669: the host retries only once the old session is proven gone.
       { retry_withdrawn: true },
+    );
+  });
+}
+
+/**
+ * C-680: after an automatic restart of the patrol's own backlog was withdrawn
+ * while its idle session stays live, the lightest recovery is the same as a
+ * human `assignment start`: queue a Run for the original session. Nothing is
+ * stopped or released; the dispatcher wakes the session through its normal
+ * checks. System only; the host bounds the attempts per incident.
+ */
+export function nudgeStalledPatrol(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    assignment_id: HostOpsExecution["assignment_id"];
+    cause_id: string;
+    snapshot: NonNullable<HostOpsExecution["snapshot"]>;
+    attempt: number;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "manage_host_ops_action", ports, (d) => {
+    ensure(
+      actor.kind === "system",
+      "unauthorized",
+      "只有系统能在原会话续排主机运维的 Run",
+    );
+    text(p.cause_id, "cause_id");
+    ensure(
+      Number.isSafeInteger(p.attempt) && p.attempt > 0,
+      "validation_failed",
+      "attempt must be a positive integer",
+    );
+    const a = d.get("assignments", p.assignment_id);
+    ensure(
+      a.scope === "standing" &&
+        a.role_id === "host_ops" &&
+        a.status === "active" &&
+        !a.external &&
+        a.runtime_ref !== null,
+      "illegal_transition",
+      "只能在在岗主机运维的原会话续排 Run",
+    );
+    ensure(
+      !stoppedByHuman(state.events, a.id) &&
+        !hostOpsPending(state.events, a.id),
+      "illegal_transition",
+      "主机运维已被人工停止或还有未结操作",
+    );
+    ensure(
+      !runsOf(state.runs, a.id).some(
+        (r) => !["completed", "failed", "cancelled"].includes(r.status),
+      ),
+      "illegal_transition",
+      "主机运维还有未结束的 Run",
+    );
+    const run = queueRunInDraft(d, {
+      assignment_id: a.id,
+      kind: "initial",
+      model: p.snapshot.model,
+      agent_cli_version: p.snapshot.agent_cli_version,
+      ...(p.snapshot.launch_profile_ref
+        ? { launch_profile_ref: p.snapshot.launch_profile_ref }
+        : {}),
+      ...(p.snapshot.harness ? { harness: p.snapshot.harness } : {}),
+      ...(p.snapshot.effort ? { effort: p.snapshot.effort } : {}),
+    });
+    d.emit("dispatch_stall_nudged", undefined, {
+      assignment_id: a.id,
+      dispatch_stall_id: p.cause_id,
+      run_id: run.id,
+      attempt: p.attempt,
+    });
+    return run;
+  });
+}
+
+/** C-680: the light recoveries already queued for this incident. */
+export function patrolNudges(
+  state: Pick<CommandState, "events">,
+  assignment: HostOpsExecution["assignment_id"],
+  cause: string,
+) {
+  return eventsOfType(state.events, "dispatch_stall_nudged").filter((e) => {
+    const p = e.payload as {
+      assignment_id?: string;
+      dispatch_stall_id?: string;
+    };
+    return (
+      e.actor.kind === "system" &&
+      p.assignment_id === assignment &&
+      p.dispatch_stall_id === cause
     );
   });
 }

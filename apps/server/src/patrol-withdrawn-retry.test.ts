@@ -110,13 +110,6 @@ test("C-669: after a withdrawn restart, a patrol whose terminal and processes ar
 
 test("C-669: an old session that is still alive keeps the withdrawal; diagnostics give the reason and the next step", async () => {
   const { f, a, ref, retire, events, queued, rounds } = await withdrawnPatrol();
-  await rounds();
-  expect(events("host_ops_action_taken")).toHaveLength(1);
-  expect(retire).toHaveBeenCalledOnce();
-  expect(queued()).toEqual([]);
-  expect(f.state().assignments.find((v) => v.id === a.id)?.runtime_ref).toEqual(
-    ref,
-  );
   const [row] = (await f.view()).dispatch_stalls.filter(
     (s) => s.assignment_id === a.id,
   );
@@ -126,6 +119,15 @@ test("C-669: an old session that is still alive keeps the withdrawal; diagnostic
     next_step: expect.stringContaining("identity_changed"),
   });
   expect((row as { next_step?: string }).next_step).toContain("主机运维");
+  await rounds();
+  expect(events("host_ops_action_taken")).toHaveLength(1);
+  expect(retire).toHaveBeenCalledOnce();
+  // C-680: never stopped again; only a Run is queued for the same session.
+  expect(queued()).toMatchObject([{ kind: "initial" }]);
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.state().assignments.find((v) => v.id === a.id)?.runtime_ref).toEqual(
+    ref,
+  );
 });
 
 test("C-669: a listed-gone terminal whose process group the kernel still sees is not resumed", async () => {

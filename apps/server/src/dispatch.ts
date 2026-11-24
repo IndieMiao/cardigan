@@ -2635,7 +2635,9 @@ export class Dispatcher {
             ...(failedContinuation ? {} : { run_id: attempt.run_id }),
             attempts: n.attempts + 1,
             ...(bell ? { bell } : {}),
-            ...(failedContinuation || (sent && n.card_id)
+            // C-680: a project-stream bell is retried like a card one; the
+            // project cursor tells whether it was read.
+            ...(failedContinuation || sent
               ? {
                   next_attempt_at: new Date(
                     Date.parse(at) + this.retryDelay(n.attempts + 1),
@@ -2953,12 +2955,7 @@ export class Dispatcher {
           project_id: project,
           statuses: ["belled", "delivery_failed"],
         })) {
-          if (
-            (!n.card_id && n.status === "belled") ||
-            !n.next_attempt_at ||
-            n.next_attempt_at > at
-          )
-            continue;
+          if (!n.next_attempt_at || n.next_attempt_at > at) continue;
           const owner = notificationOwner(n, state, standingOnce),
             a = state.assignments.find((a) => a.id === owner);
           if (
@@ -2983,6 +2980,11 @@ export class Dispatcher {
             id: n.id,
             event: exhausted ? "needs_attention" : "retry",
             at,
+            // C-680: a standing session's ended turn does not own the unread
+            // bell (it may have been typed into another Run's turn): it is
+            // new inbox work, so the dispatcher queues a fresh Run for it.
+            unbind_continuation:
+              !exhausted && a.scope === "standing" && n.status === "belled",
           });
           if (exhausted)
             dispatchAlert(tx, store, state, at, {
