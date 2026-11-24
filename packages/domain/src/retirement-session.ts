@@ -20,6 +20,21 @@ export function retirementOwnsSession(a: Assignment): boolean {
   );
 }
 
+/**
+ * C-690: a waiting retirement (no signal in flight) of an earlier session,
+ * while the Assignment is already bound to a newer one (a human stop released
+ * the old terminal, then a start launched this one). It must not fence the
+ * current session. Without a current binding the record stays: only an
+ * explicit start or a host operation supersedes it.
+ */
+export function supersededRetirement(a: Assignment): boolean {
+  return (
+    a.idle_retirement?.phase === "waiting" &&
+    !!a.runtime_ref &&
+    !retirementOwnsSession(a)
+  );
+}
+
 /** Correlate settlement with a specific wait without publishing a runtime address. */
 export function retirementWaitReceipt(a: Assignment) {
   const eventId = a.idle_retirement?.dispatch_wait?.event_id;

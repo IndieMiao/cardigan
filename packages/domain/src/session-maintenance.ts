@@ -16,7 +16,10 @@ import {
   type SessionMaintenanceView,
 } from "./session-maintenance-types.js";
 
-export { retirementOwnsSession } from "./retirement-session.js";
+export {
+  retirementOwnsSession,
+  supersededRetirement,
+} from "./retirement-session.js";
 export * from "./session-maintenance-types.js";
 
 export function darwinWorker(state: CommandState, a: Assignment) {

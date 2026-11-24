@@ -308,12 +308,20 @@ const withdrawnNextStep = (
       : "系统每轮巡检复查：会话仍在时先在原会话续排 Run，终端和进程都确认已退出后自动续起；"
   }旧会话仍在或无法确认时保持不动，请主机运维从派发停滞核对终端归属和进程，确认已退出或空闲后用 host_ops_restart_assignment 续办。`;
 
-/** C-672: only the maintenance fence yields to a proven exited Agent. */
-function exitedAgentRow(
+/** C-672/C-690: only the maintenance and retirement fences yield to a proven
+ * exited Agent; the guarded release re-checks stops, host operations and Runs. */
+const EXITED_AGENT_FENCES = new Set([
+  "session_maintenance",
+  "retirement_handoff_changed",
+  "retirement_exit_unconfirmed",
+]);
+export function exitedAgentRow(
   stall: Pick<DispatchStall, "restart_blocked">,
   view: { readonly agent_exited: boolean },
 ) {
-  return view.agent_exited && stall.restart_blocked === "session_maintenance";
+  return (
+    view.agent_exited && EXITED_AGENT_FENCES.has(stall.restart_blocked ?? "")
+  );
 }
 
 /** Called by the existing host service's tick. Reads never publish or start a recovery. */
