@@ -2573,6 +2573,8 @@ export interface CardiganClient {
   login(password: string): Promise<void>;
   logout(): Promise<void>;
   projects(): Promise<readonly ProjectSummary[]>;
+  /** C-675: where a full number (`SEN-C-34`) points; null when nothing has it. */
+  resolveFullId?(id: string): Promise<ResolvedReference | null>;
   cards(
     projectId: string,
     filter: CardFilter,
@@ -2762,6 +2764,13 @@ export class HttpCardiganClient implements CardiganClient {
       "/api/projects",
     );
     return body.projects;
+  }
+
+  async resolveFullId(id: string): Promise<ResolvedReference | null> {
+    const body = await this.request<{ reference: ResolvedReference | null }>(
+      `/api/refs/resolve?id=${encodeURIComponent(id)}`,
+    );
+    return body.reference;
   }
 
   async cards(

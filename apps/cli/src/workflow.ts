@@ -1821,7 +1821,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
               ...snoozeLines(q),
               ...(q.card_id
                 ? [
-                    `    直接处理：cardigan merge confirm|hold ${q.card_id}（hold 须加 --reason <原因>），或 cardigan merge request-changes ${q.card_id} --reason <原因>`,
+                    `    直接处理：cardigan merge confirm|hold ${full(q.card_id)}（hold 须加 --reason <原因>），或 cardigan merge request-changes ${full(q.card_id)} --reason <原因>`,
                   ]
                 : []),
             ].join("\n"),
@@ -1851,7 +1851,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       lines.push(`拍板落实（${followups.length}）`);
       for (const q of followups)
         lines.push(
-          `  ${full(q.id)}  ${q.card_id ? full(q.card_id) : "项目"}\n    ${q.followup_notice}\n    已选方案：${q.resolution?.option}\n    请安排落实，并在时间线引用 ${q.id} 记录结果。`,
+          `  ${full(q.id)}  ${q.card_id ? full(q.card_id) : "项目"}\n    ${q.followup_notice}\n    已选方案：${q.resolution?.option}\n    请安排落实，并在时间线引用 ${full(q.id)} 记录结果。`,
         );
     }
     if (pending.length > 0) {
@@ -1879,7 +1879,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
                   check &&
                   ["failed", "timed_out"].includes(check.status)
                     ? [
-                        `    检查未通过，不会自己变成通过：cardigan merge request-changes ${decision.card_id} --reason <原因>，偶发失败可 cardigan merge recheck ${decision.card_id}`,
+                        `    检查未通过，不会自己变成通过：cardigan merge request-changes ${full(decision.card_id)} --reason <原因>，偶发失败可 cardigan merge recheck ${full(decision.card_id)}`,
                       ]
                     : []),
                 ]

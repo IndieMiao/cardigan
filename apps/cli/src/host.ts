@@ -146,22 +146,29 @@ export function authorizeCliInvocation(
   const command = cliCommand(argv);
   if (cliTool(command) === null)
     throw new CliError("此命令仅限人类操作，Token 模式不可用。", EXIT.usage);
-  const flag = (name: string): string | undefined => {
-    let value: string | undefined;
-    for (let i = 0; i < argv.length; i++) {
-      const arg = argv[i] as string;
-      if (arg === `--${name}`) value = argv[++i];
-      else if (arg.startsWith(`--${name}=`)) value = arg.slice(name.length + 3);
-    }
-    return value;
-  };
-  const store = openStore({ dataDir: resolveDataDir(io, flag("data-dir")) });
+  const store = openCliStore(argv, io);
   try {
-    const project = resolveProject(store, io, flag("project"));
+    const project = resolveProject(store, io, cliFlag(argv, "project"));
     requireCliTool(resolveActor(io, project, store), command);
   } finally {
     store.close();
   }
+}
+
+/** The last value of `--name <v>` / `--name=<v>` anywhere in argv. */
+function cliFlag(argv: readonly string[], name: string): string | undefined {
+  let value: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] as string;
+    if (arg === `--${name}`) value = argv[++i];
+    else if (arg.startsWith(`--${name}=`)) value = arg.slice(name.length + 3);
+  }
+  return value;
+}
+
+/** The store an invocation's `--data-dir` (or the environment) names. */
+export function openCliStore(argv: readonly string[], io: CliIo): Store {
+  return openStore({ dataDir: resolveDataDir(io, cliFlag(argv, "data-dir")) });
 }
 
 export async function loadProjectMergeGate(

@@ -10,13 +10,14 @@ import { runDeployCommand } from "./deploy.js";
 import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
 import { runExtMessageCommand } from "./ext-message.js";
-import { authorizeCliInvocation } from "./host.js";
+import { authorizeCliInvocation, openCliStore } from "./host.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
 import { runMemberCommand } from "./member.js";
 import { runMergeCommand } from "./merge.js";
 import { runPreferenceCommand } from "./preference.js";
+import { resolveQualifiedArgs } from "./qualified-args.js";
 import { runReworkCommand } from "./rework.js";
 import { runSelfDeployCommand } from "./self-deploy.js";
 import { runTemplateCommand } from "./template.js";
@@ -67,6 +68,7 @@ const TOP_LEVEL_USAGE = [
   "",
   "用法：cardigan <命令>",
   "身份：CARDIGAN_TOKEN 或全局 --token-file <0600 文件>（二选一）；不提供时以人类身份操作。",
+  "编号：短号（C-34）按 --project / CARDIGAN_PROJECT 解析；完整编号（CDG-C-34、CDG-C-34#2）由代号决定项目，与 --project 不一致时报错。",
   "",
   "命令：",
   "  init             建库并执行迁移",
@@ -237,12 +239,14 @@ export async function main(
 ): Promise<number> {
   try {
     ({ argv, io } = tokenFileOption(argv, io));
-    const [command, ...rest] = argv;
-    if (command === undefined || command === "--help" || command === "-h") {
+    if (argv[0] === undefined || argv[0] === "--help" || argv[0] === "-h") {
       io.stdout(TOP_LEVEL_USAGE);
       return EXIT.ok;
     }
+    // C-675: full numbers (`SEN-C-34`) pick the project; see qualified-args.
+    argv = resolveQualifiedArgs(argv, io, () => openCliStore(argv, io));
     authorizeCliInvocation(argv, io);
+    const [command, ...rest] = argv as [string, ...string[]];
     if (command === "worker") return await runWorkerCommand(rest, io);
     if (command === "ext-message") return await runExtMessageCommand(rest, io);
     if (command === "launch") {
