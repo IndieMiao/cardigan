@@ -8,16 +8,27 @@ export {
   ATTACHMENT_MAX_MIB_ENV,
   type AttachmentLimits,
   attachmentLimits,
+  base64Length,
   formatAttachmentLimit,
   MAX_STORED_ATTACHMENT_BYTES,
+  MAX_STORED_VIDEO_BYTES,
   resolveAttachmentLimits,
+  resolveVideoMaxBytes,
+  VIDEO_CHUNK_BYTES,
+  VIDEO_MAX_MIB_ENV,
 } from "./attachment-limits.js";
 export { resolveAttachmentInlineBytes } from "./attachment-preview.js";
+export {
+  byteRange,
+  hashAttachmentFile,
+  sendFileRange,
+} from "./attachment-stream.js";
 // M5.1: the Workbench serves attachment downloads from the same content-
 // addressed store the MCP upload path writes to.
 export {
   ATTACHMENT_EXTENSIONS,
   ATTACHMENT_LIMITS,
+  attachmentBlobPath,
   attachmentMimeForExtension,
   attachmentTooLargeMessage,
   decodeAttachment,
@@ -26,7 +37,10 @@ export {
   MAX_ATTACHMENT_BYTES,
   MAX_MCP_BODY_BYTES,
   mcpBodyTooLargeMessage,
+  openAttachmentFile,
   prepareAttachmentFile,
+  preparePoster,
+  publishAttachmentFile,
 } from "./attachments.js";
 export {
   authenticate,
@@ -140,3 +154,19 @@ export {
   type PublishInput,
 } from "./tools/publish-artifact.js";
 export { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";
+// C-683: video attachments (chunked uploads, streamed reads, host ffmpeg).
+export {
+  importVideoFile,
+  type UploadInput,
+  UploadSessions,
+  type UploadStatus,
+  uploadSessionsFor,
+  videoTooLargeMessage,
+} from "./upload-sessions.js";
+export {
+  checkVideoContent,
+  isVideoMime,
+  sniffVideo,
+  VIDEO_EXTENSIONS,
+  VIDEO_SNIFF_BYTES,
+} from "./video-format.js";

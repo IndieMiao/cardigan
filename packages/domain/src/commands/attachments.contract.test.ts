@@ -1,8 +1,11 @@
 import { expect, test } from "vitest";
 import {
   artifactUploadRun,
+  isVideoMimeType,
+  MAX_VIDEO_POSTER_BYTES,
   prepareAttachment,
   prepareStreamedArtifact,
+  prepareStreamedAttachment,
   uploadAttachment,
 } from "./attachments.js";
 import { postComment } from "./coordination.js";
@@ -153,4 +156,157 @@ test("streamed evidence binds its original run and cannot publish after the run 
     artifactUploadRun(current, actor(), { ...target, card_id: id("card", 2) })
       .ok,
   ).toBe(false);
+});
+
+test("C-683: a streamed file receipt records the adapter's size and blob, never a run", async () => {
+  const io = ports();
+  const posted = value(
+    postComment(
+      fixture(),
+      actor(),
+      { card_id: id("card", 1), body: "Video" },
+      io,
+    ),
+  );
+  if (!posted.data) throw new Error("Missing comment");
+  const state = apply(fixture(), posted);
+  let puts = 0;
+  const receipt = value(
+    await prepareStreamedAttachment(
+      "b".repeat(64),
+      600 * 1024 * 1024,
+      async () => {
+        puts += 1;
+        return { storage_path: `attachments/${"b".repeat(64)}` };
+      },
+    ),
+  );
+  expect(puts).toBe(1);
+  const effect = value(
+    uploadAttachment(
+      state,
+      actor(),
+      {
+        card_id: id("card", 1),
+        mime: "video/mp4",
+        kind: "evidence",
+        attach_to: { kind: "timeline_entry", id: posted.data.id },
+      },
+      receipt,
+      io,
+    ),
+  );
+  expect(effect.data).toMatchObject({
+    sha256: "b".repeat(64),
+    size: 600 * 1024 * 1024,
+    storage_path: `attachments/${"b".repeat(64)}`,
+    mime: "video/mp4",
+  });
+  expect(effect.data).not.toHaveProperty("streamed_artifact");
+  // A malformed digest or size never reaches the store; a failing store is a
+  // validation failure, not a receipt.
+  expect(
+    (
+      await prepareStreamedAttachment("x", 1, async () => ({
+        storage_path: "",
+      }))
+    ).ok,
+  ).toBe(false);
+  expect(
+    (
+      await prepareStreamedAttachment("b".repeat(64), -1, async () => ({
+        storage_path: "",
+      }))
+    ).ok,
+  ).toBe(false);
+  expect(
+    await prepareStreamedAttachment("b".repeat(64), 1, async () => {
+      throw new Error("disk full");
+    }),
+  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+});
+
+test("C-683: a video record keeps the uploader's measurements and the stored poster; other types refuse them", async () => {
+  const io = ports();
+  const posted = value(
+    postComment(
+      fixture(),
+      actor(),
+      { card_id: id("card", 1), body: "Video" },
+      io,
+    ),
+  );
+  if (!posted.data) throw new Error("Missing comment");
+  const state = apply(fixture(), posted);
+  const store = {
+    put: async (sha256: string) => ({ storage_path: `attachments/${sha256}` }),
+    get: async () => undefined,
+  };
+  const receipt = value(
+    await prepareAttachment("c".repeat(64), new Uint8Array(10), store),
+  );
+  const poster = value(
+    await prepareAttachment("d".repeat(64), new Uint8Array(2048), store),
+  );
+  const target = {
+    card_id: id("card", 1),
+    mime: "video/webm",
+    kind: "evidence" as const,
+    attach_to: { kind: "timeline_entry" as const, id: posted.data.id },
+  };
+  const video = {
+    duration_seconds: 74.12345,
+    width: 1920,
+    height: 1080,
+    video_codec: "vp9",
+    audio_codec: "opus",
+  };
+  expect(
+    value(
+      uploadAttachment(
+        state,
+        actor(),
+        { ...target, video },
+        receipt,
+        io,
+        poster,
+      ),
+    ).data?.video,
+  ).toEqual({
+    ...video,
+    duration_seconds: 74.123,
+    poster_sha256: "d".repeat(64),
+    poster_size: 2048,
+  });
+  // Neither metadata nor a poster: no video field (CLI and Agent uploads).
+  expect(
+    value(uploadAttachment(state, actor(), target, receipt, io)).data,
+  ).not.toHaveProperty("video");
+  for (const [params, cover] of [
+    [{ ...target, mime: "image/png", video }, undefined],
+    [{ ...target, mime: "image/png" }, poster],
+    [{ ...target, video: { ...video, width: 1.5 } }, undefined],
+    [{ ...target, video: { ...video, duration_seconds: -1 } }, undefined],
+    [
+      { ...target, video: { ...video, duration_seconds: Number.NaN } },
+      undefined,
+    ],
+    [{ ...target, video: { ...video, video_codec: "<script>" } }, undefined],
+  ] as const) {
+    expect(
+      uploadAttachment(state, actor(), params, receipt, io, cover),
+    ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  }
+  const huge = value(
+    await prepareAttachment(
+      "e".repeat(64),
+      new Uint8Array(MAX_VIDEO_POSTER_BYTES + 1),
+      store,
+    ),
+  );
+  expect(
+    uploadAttachment(state, actor(), target, receipt, io, huge),
+  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  expect(isVideoMimeType("video/x-m4v")).toBe(true);
+  expect(isVideoMimeType("video/x-msvideo")).toBe(false);
 });

@@ -41,6 +41,8 @@ import {
   safeReferenceQuery,
 } from "../tools/reference-read.js";
 import { defineTool, type ToolContext } from "../tools/types.js";
+import { checkVideoContent, isVideoMime } from "../video-format.js";
+import type { VideoUploads } from "../video-uploads.js";
 import {
   executeCommand,
   executePreparedCommand,
@@ -52,6 +54,8 @@ import { entryId, id, idempotency_key } from "./schemas.js";
 export interface SupportToolOptions {
   readonly dataDir?: string;
   readonly artifactUploads?: ArtifactUploads;
+  /** C-683: chunked, durable video uploads. */
+  readonly videoUploads?: VideoUploads;
   /** Trusted host setting; never taken from tool arguments. */
   readonly attachmentInlineBytes?: number;
   readonly attachmentStore?: AttachmentStore;
@@ -163,7 +167,7 @@ export function supportTools(options: SupportToolOptions = {}) {
     ),
     defineTool({
       name: "upload_attachment",
-      description: `Upload a base64 attachment (${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint.`,
+      description: `Upload a base64 attachment (${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint. Videos (video/mp4, video/quicktime, video/webm, video/x-m4v) with artifact_size and sha256 get a resumable chunked upload and become ordinary attachments; their content must match the type.`,
       input: z.object({
         idempotency_key,
         card_id: id("card"),
@@ -202,6 +206,19 @@ export function supportTools(options: SupportToolOptions = {}) {
         ]),
         basis: id("decision").optional(),
         supersedes: z.string().min(1).optional(),
+        video: z
+          .object({
+            duration_seconds: z.number().min(0).optional(),
+            width: z.number().int().min(0).optional(),
+            height: z.number().int().min(0).optional(),
+            video_codec: z.string().max(32).optional(),
+            audio_codec: z.string().max(32).optional(),
+          })
+          .strict()
+          .optional()
+          .describe(
+            "Videos only: what you measured (e.g. ffprobe on your worker); shown to readers.",
+          ),
       }),
       handler: (
         { idempotency_key, artifact_size, file, ...target },
@@ -212,6 +229,12 @@ export function supportTools(options: SupportToolOptions = {}) {
             throw ToolError.validation(
               "Provide artifact_size and sha256 without file",
             );
+          if (isVideoMime(target.mime) && options.videoUploads)
+            return options.videoUploads.reserve(context, idempotency_key, {
+              ...(target as AttachmentTarget),
+              sha256: target.sha256,
+              artifact_size,
+            });
           return options.artifactUploads.reserve(context, idempotency_key, {
             ...(target as AttachmentTarget),
             sha256: target.sha256,
@@ -228,6 +251,7 @@ export function supportTools(options: SupportToolOptions = {}) {
           params,
           async (_state, _actor, p) => {
             const { content, digest } = decodeAttachment(p.file, p.sha256);
+            checkVideoContent(p.mime, content);
             return unwrap(
               await prepareAttachment(digest, content, attachments),
             );

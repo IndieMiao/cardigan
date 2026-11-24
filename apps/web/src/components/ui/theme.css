@@ -1182,4 +1182,25 @@
     outline: calc(var(--ui-stroke) * 2) dashed var(--ui-focus);
     outline-offset: calc(-1 * var(--ui-stroke) * 2);
   }
+  /* C-683: a video tile — cover frame with duration and size over it. */
+  .ui-video-tile {
+    position: relative;
+    overflow: hidden;
+  }
+  .ui-video-tile-icon {
+    width: calc(var(--ui-icon) * 2);
+    height: calc(var(--ui-icon) * 2);
+  }
+  .ui-video-tile-facts {
+    position: absolute;
+    right: var(--ui-space-1);
+    bottom: var(--ui-space-1);
+    padding: 0 var(--ui-space-1);
+    border-radius: var(--ui-radius);
+    background: rgb(0 0 0 / 60%);
+    color: #fff;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    white-space: nowrap;
+  }
 }
