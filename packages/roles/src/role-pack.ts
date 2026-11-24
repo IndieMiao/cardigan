@@ -2,6 +2,7 @@ import {
   HOST_OPS_ROLE_TOOLS,
   type RoleDefinition,
   type RoleKind,
+  SHARED_FILE_TOOLS,
   STANDING_ROLE_TOOLS,
   type ToolName,
 } from "@cardigan/domain";
@@ -754,6 +755,8 @@ export function defaultRoleDefinition(
     "upload_attachment",
     "read_attachment",
     "project_snapshot",
+    // C-685: every role reads and writes the shared library by default.
+    ...SHARED_FILE_TOOLS,
   ];
   return {
     role_id: role,

@@ -96,6 +96,7 @@ export {
   rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
+export * from "./device-init.js";
 export { turnSessionKey } from "./dispatch-stalls.js";
 export {
   HostLaunchError,

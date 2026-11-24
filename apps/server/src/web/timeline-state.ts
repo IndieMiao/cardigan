@@ -213,13 +213,9 @@ export function readPagedCard(
         ...(card.story
           ? {
               storyProgress: storyProgress(
-                readDocs(
-                  store,
-                  project,
-                  "cards",
-                  "json_extract(doc, '$.parent_card_id') = ?",
-                  [card.id],
-                ),
+                tx.cards
+                  .list(project)
+                  .filter((c) => c.parent_card_id === card.id),
                 card,
               ),
             }

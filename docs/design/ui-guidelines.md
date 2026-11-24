@@ -52,6 +52,8 @@
 | 刷新 | 默认 **30 秒**；选项顺序 **10 秒、30 秒、60 秒、5 分钟、关闭**；按钮“立即刷新”。pending 时 `aria-disabled=true`，仍可聚焦，不能触发第二个请求 | 图 1、6；刷新选项参考（`reference-refresh-1440-light.png`） |
 | 视图 | `CardsViewSwitch` 固定“看板 / 列表”、既定图标、可见文字和 `aria-pressed`；不能改成“卡片 / 表格”。其它数据模型的模式须在共享组件定义专用预设 | 图 1、2 |
 | 尺寸 | 默认/sm 控件 28px；regular 32px；icon 命中区 28×28px，icon-regular 32×32px。工具栏不改 regular；横向内边距 8px，图标文字间距 4px | 图 1、3、5 |
+| 强调按钮（C-694） | `Button variant="emphasis"`：`--accent` 底、`--accent-contrast` 字（亮 #525252/#fff，暗 #c2c2c2/#181818），悬停 `--accent-hover`（亮 #3d3d3d，暗 #d9d9d9），禁用沿用 50% 不透明且悬停不变色，聚焦沿用全站外轮廓。只用于页面上唯一的主操作和对话框的确认；`primary`（`--ui-selected` 浅灰底）保持原样 | 样式参考“强调按钮” |
+| 对话框底栏（C-694） | `DialogContent` 里直接（或在唯一的 `<form>` 里）依次放 `DialogHeader`（可选）、`DialogBody`、`DialogFooter`：只有正文滚动，标题与底部按钮行固定在视口内。底栏右对齐，“取消”在前、确认（`emphasis`，32px）在后，按钮间 8px，内边距 12px 16px、上边 1px 分隔线；≤760px 按钮平分整行。不放底栏的旧对话框不变 | 样式参考“对话框” |
 | 空值与空态 | 缺失字段沿用组件的“—”；无卡片“没有卡片”，筛选无结果“没有匹配的卡片”；时间非法用“时间未知”，不能把未知当作 0 | 图 2、7；空状态参考（`reference-1440-light.png`） |
 
 卡片页默认排序的未显式选择态仍显示“排序：全部”，请求端沿用更新时间排序。本次不借规范改变既有行为。业务表单仍可用 `SelectControl`；旧 `FilterBar` 的历史字段兼容分支仅供迁移，不作为新页面的筛选写法。
@@ -197,7 +199,7 @@ C-459 起，Needs You 各标签页（待拍板、合并确认、待你执行、�
 
 ## 视觉回归和基准更新
 
-开发样式参考页为 `test-support/style-reference-fixture.tsx`，由截图脚本的临时 Vite 路由 `/__skeleton` 加载，`--reference` 选择该入口；不加入产品导航。它覆盖默认/已选择筛选、刷新关闭/刷新中、选中视图、禁用按钮、状态/编号、空态、展开筛选/周期选项、键盘焦点。
+开发样式参考页为 `test-support/style-reference-fixture.tsx`，由截图脚本的临时 Vite 路由 `/__skeleton` 加载，`--reference` 选择该入口；不加入产品导航。它覆盖默认/已选择筛选、刷新关闭/刷新中、选中视图、禁用按钮、状态/编号、空态、展开筛选/周期选项、键盘焦点，以及强调按钮的默认、悬停、不可用、聚焦（`reference` 场景用 CDP 强制悬停/聚焦样式，不移动鼠标和页面焦点）。超高对话框（`#…&dialog=tall`）不另存基准图：`--reference` 每个宽度和主题都打开它，断言正文可滚动、面板本身不滚动、滚到底前后底栏位置不变且按钮在视口内。
 
 ```sh
 # CHROMIUM_PATH 指向上述版本的 Linux x64 chrome-headless-shell。

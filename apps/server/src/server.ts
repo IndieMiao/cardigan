@@ -111,6 +111,7 @@ import {
   startWebServer,
   type WebServerOptions,
 } from "./web/server.js";
+import { sharedFileLibrary } from "./web/shared-files.js";
 
 /**
  * Signing helpers get the shutdown grace minus this margin to finish on their
@@ -603,6 +604,8 @@ async function assembleServer(
               beginRequest: () => beginActivity("request", "mcp"),
               probeHost: probes,
               macosCheckHost: macosChecks,
+              // C-685: shared file library; signs OSS URLs, never relays bytes.
+              sharedFiles: sharedFileLibrary(store, config.dataDir),
               ...(publisher ? { publishArtifact: publisher } : {}),
               ...(mobileSigning
                 ? {

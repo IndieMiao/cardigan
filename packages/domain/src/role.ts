@@ -8,6 +8,7 @@ import {
 import type { Harness } from "./harness.js";
 import { HOST_OPS_TOOLS } from "./host-ops.js";
 import type { ProjectId } from "./ids.js";
+import { SHARED_FILE_TOOLS } from "./shared-files.js";
 
 export type RoleKind = "produce" | "verify" | "standing";
 
@@ -83,6 +84,7 @@ export const STANDING_ROLE_TOOLS = [
   "request_decision",
   "upload_attachment",
   "read_attachment",
+  ...SHARED_FILE_TOOLS,
   "heartbeat",
   "finish_run",
   "submit_delivery",

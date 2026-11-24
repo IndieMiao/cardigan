@@ -54,6 +54,9 @@ const iconPaths = {
       <path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4M12 16h.01" />
     </>
   ),
+  folder: (
+    <path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6Z" />
+  ),
   logout: <path d="M10 4H4v16h6M9 12h12m-4-4 4 4-4 4" />,
   menu: <path d="M4 6h16M4 12h16M4 18h16" />,
   close: <path d="m6 6 12 12M6 18 18 6" />,
@@ -82,7 +85,8 @@ type ViewKind =
   | "decision-history"
   | "snapshot"
   | "settings"
-  | "help";
+  | "help"
+  | "shared-files";
 
 const observeLinks: readonly (readonly [ViewKind, string, NavIconName])[] = [
   ["execution", "执行视图", "execution"],
@@ -173,6 +177,7 @@ export function SidebarNav({
       <div className="sidebar-footer">
         {feedback}
         <nav className="nav-links nav-tools" aria-label="工具">
+          {link("shared-files", "共享文件", "folder")}
           {link("settings", "设置", "settings")}
           {link("help", "帮助", "help")}
           <button

@@ -8,6 +8,7 @@ import type {
 import { workerAgentToolsAction, workerHelperAction } from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
 import type { Store } from "@cardigan/store";
+import { readCardDetailCached } from "./card-detail-cache.js";
 import { cardSectionPayload } from "./card-sections.js";
 import {
   type CardsCacheOptions,
@@ -53,6 +54,10 @@ export type WorkbenchReadOp =
       readonly url: string;
       readonly mergeGateStatus: ProjectMergeGate["status"];
       readonly now: string;
+      /** C-688: the client's `If-None-Match`; a match answers `notModified`. */
+      readonly ifNoneMatch?: string | undefined;
+      /** C-688: the client accepts a gzip-encoded body. */
+      readonly acceptGzip?: boolean | undefined;
     }
   | {
       readonly kind: "needs_version";
@@ -111,6 +116,11 @@ export type WorkbenchReadOp =
 export interface WorkbenchReadResult {
   readonly body?: string;
   readonly value?: unknown;
+  /** C-688: card detail validator; `notModified` answers carry no body. */
+  readonly etag?: string;
+  readonly notModified?: boolean;
+  /** C-688: the body gzip-encoded (instead of `body`) for a client that accepts it. */
+  readonly gzip?: Uint8Array;
   readonly timings: Readonly<Record<string, number>>;
 }
 
@@ -222,20 +232,33 @@ export async function runWorkbenchRead(
     case "card": {
       const url = new URL(op.url);
       const at = url.searchParams.get("at");
-      const detail = readPagedCard(store, op.project, op.card, url, {
-        recordTiming: (stage, ms) => {
-          timings[stage] = ms;
-        },
-        mergeGateStatus: op.mergeGateStatus,
-        now: op.now,
-        ...(at ? { timelineAnchor: at } : {}),
+      const answer = readCardDetailCached(store, op, () => {
+        const detail = readPagedCard(store, op.project, op.card, url, {
+          recordTiming: (stage, ms) => {
+            timings[stage] = ms;
+          },
+          mergeGateStatus: op.mergeGateStatus,
+          now: op.now,
+          ...(at ? { timelineAnchor: at } : {}),
+        });
+        if (detail === undefined)
+          throw new HttpRejection(
+            404,
+            "not_found",
+            `card ${op.card} not found`,
+          );
+        return {
+          project_id: op.project,
+          ...cardSectionPayload(detail, url.searchParams.get("section")),
+        };
       });
-      if (detail === undefined)
-        throw new HttpRejection(404, "not_found", `card ${op.card} not found`);
-      return json({
-        project_id: op.project,
-        ...cardSectionPayload(detail, url.searchParams.get("section")),
-      });
+      return {
+        ...(answer.body === undefined ? {} : { body: answer.body }),
+        ...(answer.gzip === undefined ? {} : { gzip: answer.gzip }),
+        etag: answer.etag,
+        notModified: answer.notModified,
+        timings,
+      };
     }
     case "needs_version": {
       const state = projectState(store, op.project);

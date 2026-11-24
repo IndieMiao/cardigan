@@ -125,6 +125,7 @@ import {
 } from "./read-ops.js";
 import { type WorkbenchReadOptions, WorkbenchReadPool } from "./read-pool.js";
 import { releaseNotesView } from "./release-notes.js";
+import { serveSharedFiles } from "./shared-files.js";
 import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
@@ -624,7 +625,12 @@ async function handleApi(context: RequestContext): Promise<void> {
   }
 
   // C-705: a new device has no account; it only gets a one-time pairing code.
-  if (path === "/api/device-pairings" || path === "/api/device-pairings/status")
+  // C-706: the claimed device fetches its init script and reports the result.
+  if (
+    /^\/api\/device-pairings(?:\/(?:status|init-script|initialized))?$/.test(
+      path,
+    )
+  )
     return context.pairings.serveDevice(
       req,
       context.res,
@@ -719,6 +725,17 @@ async function handleApi(context: RequestContext): Promise<void> {
     sendJson(res, 200, offsiteFor(context.dataDir)?.status() ?? null);
     return;
   }
+
+  // C-685: the cross-project shared file library; a human session acts here.
+  if (path === "/api/shared-files" || path.startsWith("/api/shared-files/"))
+    return serveSharedFiles({
+      req,
+      res,
+      url,
+      store: context.store,
+      dataDir: context.dataDir,
+      human: { kind: "human", member_id: session.member_id ?? null },
+    });
 
   // C-638: heap use and limit of the server processes; numbers only.
   if (path === "/api/process-health") {
@@ -1130,7 +1147,11 @@ async function serveProjectRoute(
 
   const card = /^\/cards\/([^/]+)$/.exec(rest);
   if (card !== null) {
-    const { body } = await context.read(
+    const ifNoneMatch = req.headers["if-none-match"];
+    const acceptGzip = /\bgzip\b/.test(
+      String(req.headers["accept-encoding"] ?? ""),
+    );
+    const { body, gzip, etag, notModified } = await context.read(
       {
         kind: "card",
         project: project_id,
@@ -1139,10 +1160,34 @@ async function serveProjectRoute(
         mergeGateStatus:
           context.mergeGate?.forProject(project_id).status ?? "disabled",
         now,
+        ...(ifNoneMatch ? { ifNoneMatch } : {}),
+        ...(acceptGzip ? { acceptGzip } : {}),
       },
       context.recordTiming,
     );
-    sendJsonText(res, 200, body ?? "null");
+    // C-688: an open detail revalidates; an unchanged card answers 304.
+    const validator = etag ? { ETag: etag } : {};
+    if (notModified) {
+      res.writeHead(304, { "Cache-Control": "no-store", ...validator });
+      res.end();
+      return;
+    }
+    if (gzip) {
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Encoding": "gzip",
+        "Content-Length": gzip.byteLength,
+        "Cache-Control": "no-store",
+        Vary: "Accept-Encoding",
+        ...validator,
+      });
+      res.end(gzip);
+      return;
+    }
+    sendJsonText(res, 200, body ?? "null", {
+      Vary: "Accept-Encoding",
+      ...validator,
+    });
     return;
   }
 
