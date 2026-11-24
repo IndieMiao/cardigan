@@ -194,6 +194,11 @@ export interface Card {
   };
   readonly repo?: string;
   readonly base_branch?: string;
+  /**
+   * C-728: full commit SHA or branch a no-merge card's producers check out
+   * (detached). Ignored for merge cards; a work item's own value wins.
+   */
+  readonly start_point?: string;
   readonly priority: CardPriority;
   readonly status: CardStatus;
   /** Scheduling fence, independent of lifecycle and historical evidence. */
@@ -458,6 +463,8 @@ interface WorkItemFields {
   readonly completion_criteria: readonly string[];
   readonly assignment_id?: AssignmentId;
   readonly template_key?: string;
+  /** C-728: this producer's start point on a no-merge card; overrides the card's. */
+  readonly start_point?: string;
   /** Historical verifier retained after an atomic replacement. */
   readonly replaced_by_work_item_id?: WorkItemId;
   readonly reported_blocker?: {

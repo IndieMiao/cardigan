@@ -4,6 +4,7 @@ export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";
 export * from "./bell-receipt.js";
+export * from "./capability-guide.js";
 export * from "./card-dependencies.js";
 export * from "./card-derived.js";
 export {
@@ -284,6 +285,7 @@ export * from "./merge-override.js";
 export * from "./merge-stage.js";
 export { needsYouReadPhase } from "./needs-read-phase.js";
 export * from "./notification.js";
+export * from "./office-changes.js";
 export * from "./owner-message.js";
 export * from "./pm-merge-stall-attention.js";
 export * from "./pm-notification.js";
@@ -329,6 +331,7 @@ export {
   reviewWakeBlocked,
 } from "./shared-review-wake.js";
 export * from "./standing.js";
+export * from "./start-point.js";
 export * from "./states.js";
 export * from "./story.js";
 export * from "./story-discussion.js";

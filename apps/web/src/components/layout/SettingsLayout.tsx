@@ -292,6 +292,12 @@ export function SettingsHelp({
 
 /** Settings dialogs keep request feedback in their own flow, below the actions. */
 export const settingsDialogClassName = styles.dialog;
+/**
+ * C-708: a dialog opened from inside a settings drawer (such as a tool's
+ * install commands) sits above it on the confirmation layer.
+ */
+export const settingsDrawerDialogClassName = cn(styles.dialog, styles.confirm);
+export const settingsDrawerOverlayClassName = styles.confirm;
 
 /** Dialog body fields for multi-value settings that save together. */
 export function SettingsDialogFields({ children }: { children: ReactNode }) {

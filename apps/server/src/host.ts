@@ -11,6 +11,7 @@ import {
   isAcceptedLaunchRevision,
   launchFilesStamp,
   launchFingerprint,
+  missingWorktreePrompt,
   type PreparationRetryOptions,
   parseCachedLaunchConfig,
   prepareRoleWorktree,
@@ -278,7 +279,12 @@ export async function createHostWiring(options: {
             options.preparationRetry ?? {},
           ),
       );
-      return worktreeBaselinePrompt(worktree);
+      return (
+        worktreeBaselinePrompt(worktree) ??
+        (worktree === undefined
+          ? missingWorktreePrompt(options.store, project, assignment.id)
+          : undefined)
+      );
     },
     standing: standingResolver(options.store),
     snapshot: async (assignment, project) => {

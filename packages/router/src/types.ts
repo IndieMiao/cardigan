@@ -69,6 +69,7 @@ export type RuleId =
   | "flow-v2/B3a"
   | "D6/missing independent reviewer"
   | "6.4/system rules"
+  | "C-722/office alert"
   // §6.4 rows
   | "story/discuss"
   | "story/decompose"

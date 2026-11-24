@@ -30,6 +30,7 @@ import {
   mergeRequiresHuman,
   NEEDS_YOU_ITEM_READY,
   needsYouItemReady,
+  officeAlertRecipient,
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   precheckConflictHandling,
@@ -2797,7 +2798,54 @@ export function routeEvent(input: RouteInput): RouteResult {
       // attachments and the run lifecycle events do not change who acts next.
       break;
   }
+  routeOfficeAlert(input, draft);
   return draft;
+}
+
+const OFFICE_ALERT_KIND: Readonly<Record<string, RoutedNotification["kind"]>> =
+  {
+    human_action_requested: "human_action",
+    decision_requested: "decision",
+    run_inactive: "run_attention",
+    blocker_reported: "escalation",
+    merge_conflicted: "escalation",
+  };
+
+/**
+ * C-722: exceptions and pending work also reach this project's PM Office on
+ * duty. Appended after every other rule, so the original recipients stay as
+ * they were and an Office already notified keeps its single notification
+ * (one per event and recipient). It only informs; nothing waits on it.
+ */
+function routeOfficeAlert(input: RouteInput, draft: Draft): void {
+  const { event, snapshot } = input;
+  if (!officeAlertRecipient(snapshot.project_id, event, snapshot.assignments))
+    return;
+  const decision_id = payloadString(event.payload, "decision_id");
+  const action_id = payloadString(event.payload, "human_action_id");
+  if (event.type === "decision_requested") {
+    const q = snapshot.decisions.find((d) => d.id === decision_id);
+    // Unknown, system-only or already settled questions are no pending work.
+    if (
+      !q ||
+      q.decider === "system" ||
+      !["open", "provisional", "snoozed"].includes(q.status)
+    )
+      return;
+  }
+  if (event.type === "human_action_requested") {
+    const h = snapshot.human_actions.find((a) => a.id === action_id);
+    if (h && h.status !== "open") return;
+  }
+  const what = decision_id ?? action_id ?? event.type;
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    OFFICE_ALERT_KIND[event.type] ?? "escalation",
+    "C-722/office alert",
+    `知会 Office：${subject(input)} ${what}`,
+  );
 }
 
 /** §6.4: failures that cannot be recovered go to PM Ops. */
