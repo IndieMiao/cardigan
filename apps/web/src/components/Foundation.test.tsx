@@ -262,6 +262,8 @@ test("U1/C-209 shell orders Needs You first with its count, then 卡片, 观察 
     "项目动态",
     "拍板记录",
     "项目快照",
+    // C-685: the shared file library sits with the tools.
+    "共享文件",
     "设置",
     "帮助",
   ]);
@@ -277,10 +279,10 @@ test("U1/C-209 shell orders Needs You first with its count, then 卡片, 观察 
     within(tools)
       .getAllByRole("link")
       .map((a) => a.textContent),
-  ).toEqual(["设置", "帮助"]);
+  ).toEqual(["共享文件", "设置", "帮助"]);
   expect(within(tools).getByRole("button", { name: "登出" })).toBeTruthy();
   expect(needsLink.className).toContain("needs-link");
-  expect(sidebar.querySelectorAll("a svg.nav-icon")).toHaveLength(8);
+  expect(sidebar.querySelectorAll("a svg.nav-icon")).toHaveLength(9);
   expect(await screen.findByRole("heading", { name: /卡片/u })).toBeTruthy();
 });
 

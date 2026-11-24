@@ -29,6 +29,7 @@ import {
   HelpPage,
   NeedsYouPage,
   SettingsPage,
+  SharedFilesPage,
   SnapshotPage,
 } from "./lazy-pages.js";
 import { routeHash, useRoute } from "./route.js";
@@ -414,6 +415,9 @@ function Workbench({
             <PageLoader key={`${selected?.id}/${route?.kind}`}>
               {selected && route?.kind === "help" && (
                 <HelpPage projectId={selected.id} />
+              )}
+              {selected && route?.kind === "shared-files" && (
+                <SharedFilesPage projectId={selected.id} />
               )}
               {selected && route?.kind === "decision-history" && (
                 <DecisionHistoryPage

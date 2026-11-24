@@ -6,6 +6,7 @@ import {
   remoteWorkerLosses,
   remoteWorkerLossReleased,
 } from "./remote-worker-loss.js";
+import { SHARED_FILE_TOOLS } from "./shared-files.js";
 
 /** Reserved domain names; MCP execution is wired separately from the role policy. */
 export const HOST_OPS_TOOLS = [
@@ -48,6 +49,7 @@ export const HOST_OPS_ROLE_TOOLS = [
   "request_human_action",
   "request_decision",
   "upload_attachment",
+  ...SHARED_FILE_TOOLS,
   "heartbeat",
   "finish_run",
   ...HOST_OPS_TOOLS,
