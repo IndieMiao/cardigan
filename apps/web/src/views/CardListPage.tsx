@@ -61,6 +61,7 @@ import {
   TableHeader,
   TableRow,
 } from "../components/ui/table.js";
+import { fullIdHref } from "../full-id-jump.js";
 import { CardDetailPage } from "../lazy-pages.js";
 import { guardLeave } from "../leave-guard.js";
 import { routeHash, useRouteFilters } from "../route.js";
@@ -572,6 +573,17 @@ export function CardListPage({
                 placeholder="搜索标题或编号"
                 value={value}
                 onChange={(event) => setValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  // C-675: Enter on a full number (`SEN-C-34`) opens it, in any project.
+                  const typed = event.currentTarget.value;
+                  void fullIdHref(client, typed).then(
+                    (href) => {
+                      if (href !== undefined) window.location.hash = href;
+                    },
+                    () => undefined,
+                  );
+                }}
               />
             ),
           },

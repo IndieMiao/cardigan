@@ -477,7 +477,8 @@ test("uses explicit project/data directory before env, and env project before so
   delete io.env.CARDIGAN_PROJECT;
   const before = snapshot();
   expect(await run(["comment", "add", "C-1", "--text=ambiguous"])).toBe(2);
-  expect(errors.join("\n")).toContain("有多个项目");
+  // C-675: both projects have C-1, so the refusal names the full numbers.
+  expect(errors.join("\n")).toContain("C-1 在多个项目里都有");
   expect(snapshot()).toEqual(before);
 });
 
