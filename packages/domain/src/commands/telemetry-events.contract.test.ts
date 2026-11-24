@@ -1,8 +1,12 @@
 import { expect, test } from "vitest";
+import { cardEventsOfType, setTelemetryQueryGuard } from "../event-index.js";
 import {
   appendEvents,
   commandEventHistory,
+  commandStreamHistory,
   type Event,
+  EventLog,
+  EventLogView,
   eventById,
   eventsForDecision,
   eventsOfType,
@@ -155,4 +159,65 @@ test("C-643: scoped read states keep the journal through flatMapEvents", () => {
   expect(flatMapEvents(history.flat(), onCard)).toEqual(
     history.flat().flatMap(onCard),
   );
+});
+
+test("C-655: telemetry lookups on arrays derived from command-state events throw in tests", () => {
+  const history = parts();
+  const full = history.flat();
+  const events = commandEventHistory(history);
+  const started = full.find((e) => e.type === "run_started");
+  const submitted = full.find((e) => e.type === "delivery_submitted");
+  // Deliberately wrong: filter and spread drop the journal.
+  const mine = events.filter((e) => e.card_id === card);
+  for (const derived of [mine, [...events]]) {
+    expect(() => eventsOfType(derived, "run_started")).toThrow(/C-655/);
+    expect(() => cardEventsOfType(derived, card, "run_started")).toThrow(
+      /C-655/,
+    );
+    expect(() => eventById(derived, started?.id)).toThrow(/C-655/);
+    expect(() => fullEventHistory(derived)).toThrow(/C-655/);
+    expect(() => telemetryEvents(derived)).toThrow(/C-655/);
+    // Business lookups stay as before.
+    expect(eventsOfType(derived, "delivery_submitted")).toEqual([submitted]);
+    expect(eventById(derived, submitted?.id)).toBe(submitted);
+    expect(eventById(derived, eventId(999))).toBeUndefined();
+  }
+  // The supported derivations keep the journal.
+  const scoped = flatMapEvents(events, (e) => (e.card_id === card ? [e] : []));
+  expect(eventsOfType(scoped, "run_started")).toEqual([started]);
+  expect(eventsOfType(appendEvents(events, []), "run_started")).toEqual([
+    started,
+  ]);
+  // Telemetry that the source does not hold for these cards is legitimately absent.
+  const project = events.filter((e) => !e.card_id);
+  expect(eventsOfType(project, "run_started")).toEqual([]);
+  expect(() => eventsOfType(project, "run_queued")).toThrow(/C-655/);
+  // Complete arrays and fresh fixtures stay unchecked.
+  expect(eventsOfType(full, "run_started")).toEqual([started]);
+  expect(eventsOfType([event("delivery_submitted")], "run_started")).toEqual(
+    [],
+  );
+  setTelemetryQueryGuard(false);
+  try {
+    expect(eventsOfType(mine, "run_started")).toEqual([]);
+    expect(eventById(mine, started?.id)).toBeUndefined();
+  } finally {
+    setTelemetryQueryGuard(true);
+  }
+});
+
+test("C-655: derived Store command histories are guarded too", () => {
+  const log = new EventLog();
+  for (const e of parts().flat()) log.append(e);
+  const view = new EventLogView(log, log.end);
+  const events = commandStreamHistory(view, ["", card]);
+  const started = view
+    .history(["", card])
+    .find((e) => e.type === "run_started");
+  expect(eventsOfType(events, "run_started")).toEqual([started]);
+  const mine = events.filter((e) => e.card_id === card);
+  expect(() => eventsOfType(mine, "run_started")).toThrow(/C-655/);
+  expect(() => eventById(mine, started?.id)).toThrow(/C-655/);
+  // Raw stream reads keep telemetry inline.
+  expect(eventsOfType(view.get(card) ?? [], "run_started")).toEqual([started]);
 });
