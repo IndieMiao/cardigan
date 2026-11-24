@@ -1,6 +1,6 @@
 import type { CommandState } from "./commands/core.js";
 import { mergeQueue } from "./commands/merge-batch.js";
-import { heldByMergeWindow } from "./commands/merge-window.js";
+import { mergeWindowHold } from "./commands/merge-window.js";
 import type { Card, Delivery, MergeStage, WorkItem } from "./entities.js";
 import type { CardId } from "./ids.js";
 import {
@@ -93,9 +93,14 @@ export function mergeStage(
     !mergeQueue(state).some((q) => q.plan.card_id === card.id)
   )
     return { ...detail, stage: "culprit" };
-  const protecting = heldByMergeWindow(state, card.id);
+  const protecting = mergeWindowHold(state, card.id);
   if (protecting)
-    return { stage: "held_by_window", protecting_card_id: protecting };
+    return {
+      stage: "held_by_window",
+      protecting_card_id: protecting.card_id,
+      protecting_files: protecting.files,
+      protecting_card_held: protecting.held,
+    };
   const position = mergeQueue(state).findIndex(
     (q) => q.plan.card_id === card.id,
   );

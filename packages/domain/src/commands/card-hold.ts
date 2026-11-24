@@ -1,5 +1,6 @@
 import type { Card, CardHold } from "../entities.js";
 import { type CommandDraft, ensure, text } from "./core.js";
+import { closeHeldWindow } from "./merge-window.js";
 
 export type CardHoldInput = Pick<
   CardHold,
@@ -65,5 +66,6 @@ export function applyCardHold(
       body: notice,
     },
   );
+  closeHeldWindow(d, result);
   return result;
 }
