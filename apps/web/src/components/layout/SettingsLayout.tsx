@@ -307,6 +307,11 @@ export function SettingsDialogActions({ children }: { children: ReactNode }) {
   return <div className={styles.dialogActions}>{children}</div>;
 }
 
+/** C-727: a table row's buttons (安装, 编辑说明) side by side, 8px apart. */
+export function SettingsRowActions({ children }: { children: ReactNode }) {
+  return <span className={styles.rowActions}>{children}</span>;
+}
+
 /**
  * List settings (roles, templates, people) use the shared data table, fitted
  * to the settings column instead of the cards list's 48rem minimum; ≤640px
