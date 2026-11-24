@@ -86,6 +86,12 @@ test.each(
       store.uow.run((tx) => {
         writeRole(tx, project, role, { mode: "add" });
         tx.employees.put(employee);
+        tx.project_preferences.put(project, {
+          id: project,
+          auto_merge_after_minutes: null,
+          context_handoff_remaining_pct: 25,
+          context_restart_remaining_pct: 20,
+        });
       });
       for (const named of [false, true]) {
         if (named)
@@ -171,6 +177,24 @@ test.each(
         );
         expect(script).toContain("export NODE_OPTIONS=");
         expect(script).toContain("export CARDIGAN_AGENT_LOCAL_TESTS='1'");
+        if (harness === "claude-code") {
+          // C-686: the status line gets the employee and project thresholds.
+          const settings = JSON.parse(
+            await readFile(
+              join(
+                launched.run_dir,
+                "cardigan-assignment.fixture.claude-settings.json",
+              ),
+              "utf8",
+            ),
+          ) as { statusLine: { command: string } };
+          const command = settings.statusLine.command;
+          expect(command).toContain(
+            `"handoff_remaining_pct":25,"restart_remaining_pct":20`,
+          );
+          expect(command).toContain(`"assignment":"${assignment.id}"`);
+          expect(command.includes('"employee":"诸葛亮 Mary"')).toBe(named);
+        }
         if (harness === "pi") {
           expect(
             await readFile(

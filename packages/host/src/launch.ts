@@ -18,6 +18,7 @@ import {
   abortDispatch,
   canDispatchRun,
   canParkForDiscussion,
+  contextUsageThresholds,
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   idleWakeGuard,
@@ -1165,6 +1166,7 @@ async function launch(
       ...(assignment.machine_id === "local"
         ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
         : {}),
+      status_line: statusLineContext(host.store, project, card?.base_branch),
       mcp: {
         url: mcpUrl,
         ...(mcpSessionKey ? { session_key: mcpSessionKey } : {}),
@@ -1669,4 +1671,21 @@ function sessionToolCatalog(
   } catch {
     return undefined;
   }
+}
+
+/** C-686: baseline ref and the project's context thresholds for the status line. */
+export function statusLineContext(
+  store: Store,
+  project: ProjectId,
+  baseBranch: string | undefined,
+) {
+  const { handoff, restart } = contextUsageThresholds(
+    store.uow.read((tx) => tx.project_preferences.get(project, project)) ??
+      undefined,
+  );
+  return {
+    ...(baseBranch ? { base_ref: `origin/${baseBranch}` } : {}),
+    handoff_remaining_pct: handoff,
+    restart_remaining_pct: restart,
+  };
 }

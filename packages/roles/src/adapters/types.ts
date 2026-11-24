@@ -66,6 +66,11 @@ export interface HarnessAdapter {
   configureAssignment(context: AssignmentContext): void;
   /** Non-secret additions to compiled settings, applied after credential extraction. */
   readonly assignmentSettings?: Readonly<Record<string, boolean>>;
+  /** Per-launch settings, given the settings file's non-secret env only. */
+  assignmentSettingsFor?(
+    input: CompileAssignmentInput,
+    env: Readonly<Record<string, string>>,
+  ): Readonly<Record<string, unknown>>;
   localSetup?(
     input: CompileAssignmentInput,
     quote: (value: string) => string,

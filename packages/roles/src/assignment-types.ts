@@ -150,6 +150,16 @@ export interface CompileAssignmentInput {
     readonly emulator_port?: number;
   } | null;
   readonly test_max_workers?: number;
+  /**
+   * C-686: values only the host knows for the Claude status line: the
+   * baseline ref (`origin/<base_branch>`) and the project's remaining-context
+   * thresholds (`context_handoff_remaining_pct` / `context_restart_remaining_pct`).
+   */
+  readonly status_line?: {
+    readonly base_ref?: string;
+    readonly handoff_remaining_pct: number;
+    readonly restart_remaining_pct: number;
+  };
   /** Employee self-tests must not start real hc or end-to-end scenarios. */
   readonly agent_local_tests?: boolean;
   /** Read-only directory of the prebuilt attachment tools on this machine. */

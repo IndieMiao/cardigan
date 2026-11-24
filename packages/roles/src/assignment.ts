@@ -217,24 +217,31 @@ export function compileAssignmentLaunch(
     }
   }
   const strippedBaseFiles = base.files.map((file) => {
-    if (secretKeys.size === 0 && !adapter.assignmentSettings) return file;
+    if (
+      secretKeys.size === 0 &&
+      !adapter.assignmentSettings &&
+      !adapter.assignmentSettingsFor
+    )
+      return file;
+    let parsed: { env?: Record<string, string> };
     try {
-      const parsed = JSON.parse(file.content) as {
-        env?: Record<string, string>;
-      };
-      if (parsed.env === undefined) return file;
-      const keptEnv = Object.fromEntries(
-        Object.entries(parsed.env).filter(([name]) => !secretKeys.has(name)),
-      );
-      return {
-        ...file,
-        // D7: the per-launch --settings file also overrides an existing Claude
-        // config without editing its session history or remembered files.
-        content: `${JSON.stringify({ ...parsed, env: keptEnv, ...adapter.assignmentSettings }, null, 2)}\n`,
-      };
+      parsed = JSON.parse(file.content) as { env?: Record<string, string> };
     } catch {
       return file;
     }
+    if (parsed.env === undefined) return file;
+    const keptEnv = Object.fromEntries(
+      Object.entries(parsed.env).filter(([name]) => !secretKeys.has(name)),
+    );
+    // Outside the parse guard: an invalid per-launch setting fails the launch
+    // instead of keeping the unstripped file.
+    const settings = adapter.assignmentSettingsFor?.(input, keptEnv);
+    return {
+      ...file,
+      // D7: the per-launch --settings file also overrides an existing Claude
+      // config without editing its session history or remembered files.
+      content: `${JSON.stringify({ ...parsed, env: keptEnv, ...adapter.assignmentSettings, ...settings }, null, 2)}\n`,
+    };
   });
   const startFile = join(input.run_dir, START_FILE_NAME);
   if (input.resource_bindings) {
