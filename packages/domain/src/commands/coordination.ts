@@ -1,4 +1,5 @@
 import { categoryDelegated } from "../decision-authorization.js";
+import { DECISION_OTHER_OPTION, isDecisionOther } from "../decision-other.js";
 import {
   decisionQuestionBinding,
   heldByReviewDecision,
@@ -649,6 +650,12 @@ export function requestDecision(
       "validation_failed",
       "Options and recommendation must be explicit",
     );
+    // C-682: the system appends "其他" itself; raisers cannot claim its key.
+    ensure(
+      p.options.every((o) => o.key !== DECISION_OTHER_OPTION),
+      "validation_failed",
+      `选项编号 ${DECISION_OTHER_OPTION} 由系统保留给“其他”，请换一个编号`,
+    );
     ensure(
       !p.suggestion || p.suggestion.option === p.recommended,
       "validation_failed",
@@ -991,6 +998,32 @@ export function recordDecision(
   return command(state, actor, "record_decision", ports, (d) => {
     const held = d.get("decisions", input.decision_id);
     let p = input;
+    // C-682: "其他" is the human's own words; it binds no preset effect.
+    const other = isDecisionOther(p.option);
+    if (other) {
+      ensure(
+        actor.kind === "human",
+        "forbidden_tool",
+        "“其他”只能由人亲自填写，Agent 和 PM 不能代选",
+      );
+      ensure(
+        !p.via_suggestion &&
+          p.merge_override_reason === undefined &&
+          p.pause_plan === undefined &&
+          p.snooze_until === undefined &&
+          !p.delegate_future,
+        "validation_failed",
+        "选“其他”时只填写说明，不能同时按建议处理、强行合并、暂缓、暂停或授权同类事项",
+      );
+      ensure(
+        pendingDecision(held),
+        "illegal_transition",
+        "这条拍板已结项，不能再选“其他”",
+      );
+      const words = p.raw_quote.trim();
+      ensure(words.length > 0, "validation_failed", "选“其他”时必须填写说明");
+      p = { ...p, raw_quote: words, rationale: words };
+    }
     if (p.merge_override_reason !== undefined) {
       ensure(
         actor.kind === "human",
@@ -1168,7 +1201,7 @@ export function recordDecision(
     text(p.raw_quote, "raw_quote");
     text(p.rationale, "rationale");
     ensure(
-      decision.options.some((o) => o.key === p.option),
+      other || decision.options.some((o) => o.key === p.option),
       "validation_failed",
       "Option is not part of this decision",
     );
@@ -1355,9 +1388,11 @@ function resolveDecisionDraft(
       undefined,
       !!p.via_suggestion && !delegated,
     );
-  if (decision.trigger === "accepted_delivery_rework")
+  // C-682: "其他" resolves only the question; follow-up is the raiser's (or PM's).
+  const preset = !isDecisionOther(p.option);
+  if (preset && decision.trigger === "accepted_delivery_rework")
     resolveDeliveryRework(d, decision, p.option);
-  if (decision.trigger === "completion_review")
+  if (preset && decision.trigger === "completion_review")
     resolveHumanCompletionReview(d, decision, p.option);
   if (
     decision.category === "scope_change" ||

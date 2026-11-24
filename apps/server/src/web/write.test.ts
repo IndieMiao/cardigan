@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import {
   type Card,
+  DECISION_OTHER_OPTION,
   type Decision,
   listNeedsYou,
   pauseStandingAssignment,
@@ -257,6 +258,40 @@ test("Needs You decisions preserve a human quote, supply a default, and reject w
     body: { error: { code: "forbidden_tool" } },
   });
   expect(snapshot()).toBe(before);
+});
+
+test("C-682: Needs You 其他 requires the owner's own words and never substitutes a default", async () => {
+  const q = s.command((state, actor, ports) =>
+    requestDecision(state, actor, { ...question, card_id: s.card.id }, ports),
+  );
+  const before = snapshot();
+  for (const raw_quote of [undefined, "", "   "])
+    expect(
+      await request(resolvePath(q), {
+        option: DECISION_OTHER_OPTION,
+        ...(raw_quote === undefined ? {} : { raw_quote }),
+      }),
+    ).toMatchObject({
+      status: 400,
+      body: { error: { code: "validation_failed" } },
+    });
+  expect(snapshot()).toBe(before);
+  expect(
+    await request(resolvePath(q), {
+      option: DECISION_OTHER_OPTION,
+      raw_quote: " 把仓库转为公开 ",
+    }),
+  ).toMatchObject({
+    status: 200,
+    body: {
+      status: "resolved",
+      resolution: {
+        option: DECISION_OTHER_OPTION,
+        raw_quote: "把仓库转为公开",
+        resolved_by: "human",
+      },
+    },
+  });
 });
 
 test("human action completion validates result, completes once, and rejects a terminal replay", async () => {

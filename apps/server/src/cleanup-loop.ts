@@ -10,6 +10,7 @@ import type {
 } from "@cardigan/domain";
 import {
   clearReleasedRuntimeRefs,
+  isDecisionOther,
   releaseAssignment,
   requestWorktreeCleanup,
 } from "@cardigan/domain";
@@ -361,8 +362,12 @@ export class CleanupExecutor {
         ),
     );
     if (decision?.status === "resolved") {
-      if (decision.resolution?.option === "keep") {
+      if (
+        decision.resolution?.option === "keep" ||
+        isDecisionOther(decision.resolution?.option)
+      ) {
         // §3.6: after `keep` the worktree stays and is never asked about again.
+        // C-682: "其他" binds no cleanup; PM follows the owner's words.
         return;
       }
       if (decision.resolution?.option === "force_clean") {

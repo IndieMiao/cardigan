@@ -22,6 +22,7 @@ import {
   followUpDraft,
   humanDecisionGroupKey,
   isCompletionVerifier,
+  isDecisionOther,
   isPrecheckConflict,
   isReviewStale,
   latestMergeCheck,
@@ -1172,6 +1173,25 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
         `${subject(input)} 已确认合并，但合并检查结果 ${check.status}，${mergeRequiresHuman(input.snapshot, q) ? "仅可重新检查超时，不能退回或代确认合并" : "请判断后退回修改或重新检查"}（${q.id}）。`,
       );
   }
+  // C-682: "其他" carries the owner's own words; a system or human raiser has
+  // no Assignment to follow up, so PM Ops handles it (a merge stays unmerged).
+  const otherWords =
+    input.event.type === "decision_resolved" &&
+    q?.resolution &&
+    isDecisionOther(q.resolution.option)
+      ? q.resolution.raw_quote
+      : undefined;
+  if (otherWords !== undefined && !q?.raised_by?.startsWith("assignment:"))
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "decision",
+      "6.4/decision resolved",
+      q?.trigger === "merge_confirmation"
+        ? `${q.id}：所有者对合并确认选择了“其他”，卡片保持未合并，请 PM 按原话处理（需要时再请求合并确认）。原话：${otherWords}`
+        : `${q?.id}：所有者选择了“其他”，未执行任何预设选项，请 PM 按原话跟进。原话：${otherWords}`,
+    );
   if (
     input.event.type === "decision_resolved" &&
     !q?.review_limit_group &&
@@ -1202,7 +1222,9 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
       to,
       to.kind === "needs_you" ? "needs_you" : "decision",
       "6.4/decision resolved",
-      `${q.id} 已选择 ${q.resolution.option}：${option?.description ?? ""}。影响：${option?.impact ?? ""}。请发起人落实，并在时间线引用 ${q.id} 记录执行结果。`,
+      otherWords !== undefined
+        ? `${q.id} 所有者选择了“其他”，未执行任何预设选项。原话：${otherWords}\n请发起人按原话跟进，并在时间线引用 ${q.id} 记录执行结果。`
+        : `${q.id} 已选择 ${q.resolution.option}：${option?.description ?? ""}。影响：${option?.impact ?? ""}。请发起人落实，并在时间线引用 ${q.id} 记录执行结果。`,
     );
   }
   const rework = payloadString(input.event.payload, "rework_work_item_id");
