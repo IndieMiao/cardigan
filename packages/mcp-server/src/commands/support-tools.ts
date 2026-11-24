@@ -12,9 +12,11 @@ import {
   finishRun,
   heartbeat,
   listNeedsYou,
+  listReleaseNotes,
   listRoles,
   listTemplates,
   prepareAttachment,
+  RELEASE_NOTE_VERSION,
   type ReadRunCapacity,
   type Result,
   referenceProjectSnapshot,
@@ -388,6 +390,27 @@ export function supportTools(options: SupportToolOptions = {}) {
         "List the latest active card templates of this project with their work items (PM only, read-only).",
       input: z.object({}),
       handler: (_params, context) => readProject(context, listTemplates),
+    }),
+    defineTool({
+      name: "list_release_notes",
+      description:
+        "List this project's release notes by version, newest first, including published versions without a note (note: null). Pass version for one version's full revision history and the cards merged for it (read-only).",
+      input: z.object({
+        version: z
+          .string()
+          .max(80)
+          .regex(RELEASE_NOTE_VERSION)
+          .optional()
+          .describe("One version: its revisions and merged cards"),
+      }),
+      handler: (params, context) =>
+        readProject(context, (state, actor) =>
+          listReleaseNotes(
+            state,
+            actor,
+            params.version === undefined ? {} : { version: params.version },
+          ),
+        ),
     }),
     defineTool({
       name: "list_roles",

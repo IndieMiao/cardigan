@@ -124,6 +124,7 @@ import {
   type WorkbenchReadResult,
 } from "./read-ops.js";
 import { type WorkbenchReadOptions, WorkbenchReadPool } from "./read-pool.js";
+import { releaseNotesView } from "./release-notes.js";
 import { serveSharedFiles } from "./shared-files.js";
 import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
@@ -1389,6 +1390,10 @@ async function serveProjectRoute(
   }
   if (rest === "/snapshot") {
     sendJson(res, 200, projectSnapshotView(state, now));
+    return;
+  }
+  if (rest === "/release-notes") {
+    sendJson(res, 200, releaseNotesView(state, url));
     return;
   }
 

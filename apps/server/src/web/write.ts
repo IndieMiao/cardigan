@@ -57,6 +57,7 @@ import {
   updateWorkItem,
   uploadAttachment,
   workerHelperAction,
+  writeReleaseNote,
 } from "@cardigan/domain";
 import {
   applyRoleDocument,
@@ -889,6 +890,39 @@ export async function serveWrite(
       );
       sendJson(c.res, 200, output);
     }
+    return true;
+  }
+  if (rest === "/release-notes") {
+    if (c.req.method === "GET") return false;
+    if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);
+    c.authorize();
+    const body = await readJsonBody(c.req);
+    const key = parsed(
+      requiredKey,
+      c.req.headers["idempotency-key"],
+      "保存发版说明需要 Idempotency-Key",
+    );
+    // Shapes only; the domain checks the version, body length and links.
+    const input = parsed(
+      z
+        .object({
+          version: z.string(),
+          body: z.string(),
+          decision_id: z.string().optional(),
+          base_revision: z.number().int().min(0).optional(),
+        })
+        .strict(),
+      body,
+      "发版说明字段格式不正确",
+    );
+    sendJson(
+      c.res,
+      200,
+      run(
+        { ...c, idempotency: { key, request: { method: "POST", rest, body } } },
+        (s, a, ports) => writeReleaseNote(s, a, input, ports),
+      ),
+    );
     return true;
   }
   if (rest === "/roles" || rest.startsWith("/roles/"))

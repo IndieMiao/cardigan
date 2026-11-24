@@ -70,6 +70,8 @@ export const toolNames = [
   "request_macos_check",
   "request_mobile_signature",
   "publish_artifact",
+  "write_release_note",
+  "list_release_notes",
   "submit_review",
   "withdraw_review",
   "request_delivery_rework",

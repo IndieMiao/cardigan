@@ -72,7 +72,7 @@ export function requestRoute(path: string): string {
       return `${prefix}/machines/:id${machine[1] ? `/${machine[1].startsWith("checks/") ? "checks/:check_id" : machine[1]}` : ""}`;
     if (/^\/employees(?:\/options)?$/.test(rest)) return prefix + rest;
     if (
-      /^\/(cards|needs-you|notices|snapshot|execution|activity|stream|preferences)$/.test(
+      /^\/(cards|needs-you|notices|snapshot|execution|activity|stream|preferences|release-notes)$/.test(
         rest,
       )
     )
