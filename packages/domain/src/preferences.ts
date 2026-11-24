@@ -60,6 +60,13 @@ export interface ProjectPreferences {
   readonly machine_preference?: readonly string[];
   /** Same-project reference reads; only the human may change this default-on switch. */
   readonly cross_card_read?: boolean;
+  /**
+   * C-685: narrows what this project's Agents may do in the shared file
+   * library, by role id (`*` for every other role). Absent means read_write.
+   */
+  readonly shared_files_access?: Readonly<
+    Record<string, "read_write" | "read" | "none">
+  >;
   /** Flow v2 A3b: human-only brake; absent means false. Consumed by A3a. */
   readonly auto_merge_paused?: boolean;
   /** Flow Lite: human-only, audited; applies to every existing card. */

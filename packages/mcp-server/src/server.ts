@@ -70,6 +70,10 @@ import {
   reservationTool,
 } from "./tools/resource-reservation.js";
 import { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";
+import {
+  type SharedFileToolOptions,
+  sharedFileTools,
+} from "./tools/shared-files.js";
 import type { ToolDefinition } from "./tools/types.js";
 
 export interface McpServerOptions
@@ -82,7 +86,8 @@ export interface McpServerOptions
     MobileSigningOptions,
     PublicationOptions,
     ProbeToolOptions,
-    MacosCheckToolOptions {
+    MacosCheckToolOptions,
+    SharedFileToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
   readonly bodyTimeoutMs?: number;
@@ -157,13 +162,15 @@ export function serverTools(
     MobileSigningOptions &
     PublicationOptions &
     ProbeToolOptions &
-    MacosCheckToolOptions,
+    MacosCheckToolOptions &
+    SharedFileToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
     runProbeTool(options),
     macosCheckTool(options),
+    ...sharedFileTools(options),
     mobileSigningTool(options),
     publicationTool(options),
     reservationTool(options),

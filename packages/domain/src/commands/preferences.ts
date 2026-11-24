@@ -38,6 +38,10 @@ import {
   validReviewMaxRounds,
   validSystemReminderPolicy,
 } from "../preferences.js";
+import {
+  type SharedFilesAccess,
+  validSharedFilesAccess,
+} from "../shared-files.js";
 import { states } from "../states.js";
 import {
   validRoleRulePaths,
@@ -75,6 +79,8 @@ export function setProjectPreferences(
   actor: Actor,
   input: {
     cross_card_read?: boolean;
+    /** C-685: per-role narrowing of the shared file library; `{}` restores the default. */
+    shared_files_access?: Readonly<Record<string, SharedFilesAccess>>;
     auto_merge_paused?: boolean;
     auto_merge?: "off" | "on";
     machine_preference?: readonly string[];
@@ -125,6 +131,12 @@ export function setProjectPreferences(
         typeof input.cross_card_read === "boolean",
       "validation_failed",
       "cross_card_read must be a boolean",
+    );
+    ensure(
+      input.shared_files_access === undefined ||
+        validSharedFilesAccess(input.shared_files_access),
+      "validation_failed",
+      "shared_files_access 须为 角色→read_write|read|none 的映射（* 表示其余角色）",
     );
     ensure(
       input.auto_merge_paused === undefined ||
@@ -292,6 +304,7 @@ export function setProjectPreferences(
         input.machine_preference !== undefined ||
         input.high_risk_paths !== undefined ||
         input.cross_card_read !== undefined ||
+        input.shared_files_access !== undefined ||
         input.auto_merge_paused !== undefined ||
         input.auto_security_paths !== undefined ||
         input.flow_version !== undefined ||
@@ -389,6 +402,9 @@ export function setProjectPreferences(
         : {}),
       ...(input.cross_card_read !== undefined
         ? { cross_card_read: input.cross_card_read }
+        : {}),
+      ...(input.shared_files_access !== undefined
+        ? { shared_files_access: { ...input.shared_files_access } }
         : {}),
       ...(input.auto_merge_paused !== undefined
         ? { auto_merge_paused: input.auto_merge_paused }
@@ -523,6 +539,7 @@ export function setProjectPreferences(
       "role_rule_paths",
       "system_merge_shadow",
       "system_merge_shadow_policy",
+      "shared_files_access",
     ] as const;
     const encodeSystemPreference = (value: unknown) =>
       JSON.stringify(
@@ -542,6 +559,7 @@ export function setProjectPreferences(
                 "system_merge_shadow_policy",
                 "system_review_limit_max_raises",
                 "role_rule_paths",
+                "shared_files_access",
               ].includes(key)
                 ? null
                 : false),
@@ -554,6 +572,7 @@ export function setProjectPreferences(
                 "system_merge_shadow_policy",
                 "system_review_limit_max_raises",
                 "role_rule_paths",
+                "shared_files_access",
               ].includes(key)
                 ? null
                 : false),

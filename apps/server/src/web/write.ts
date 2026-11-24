@@ -970,6 +970,10 @@ export async function serveWrite(
           pm_owner_messages: z.boolean().optional(),
           system_reminder_policy: z.unknown().optional(),
           cross_card_read: z.boolean().optional(),
+          // C-685: values are checked by the domain.
+          shared_files_access: z
+            .record(z.string().max(64), z.enum(["read_write", "read", "none"]))
+            .optional(),
           auto_merge_paused: z.boolean().optional(),
           auto_merge: z.enum(["off", "on"]).optional(),
           high_risk_paths: z.array(z.string()).optional(),
@@ -1042,6 +1046,9 @@ export async function serveWrite(
             : {}),
           ...(input.cross_card_read !== undefined
             ? { cross_card_read: input.cross_card_read }
+            : {}),
+          ...(input.shared_files_access !== undefined
+            ? { shared_files_access: input.shared_files_access }
             : {}),
           ...(input.auto_merge !== undefined
             ? { auto_merge: input.auto_merge }

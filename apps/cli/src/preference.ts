@@ -28,6 +28,7 @@ import {
   validIndependentReviewDelegationMax,
   validMergePathList,
   validRoleRulePaths,
+  validSharedFilesAccess,
   validSystemReviewLimitMax,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -43,7 +44,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get machine-preference | set machine-preference <JSON机器编号数组> | get auto-merge | set auto-merge <on|off> | get high-risk-paths | set high-risk-paths <JSON路径数组> | get cross-card-read | set cross-card-read <on|off> | get auto-merge-paused | set auto-merge-paused <on|off> | get flow-version | set flow-version <版本> | get auto-security-paths | set auto-security-paths <JSON路径数组> | get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-confirm-role-rule-implementations | set pm-confirm-role-rule-implementations <on|off> | get pm-confirm-human-decided-merges | set pm-confirm-human-decided-merges <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> | get system-review-limit-raise | set system-review-limit-raise <on|off> | get system-review-limit-max-raises | set system-review-limit-max-raises <次数|off> | get role-rule-paths | set role-rule-paths <JSON路径数组|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get machine-preference | set machine-preference <JSON机器编号数组> | get auto-merge | set auto-merge <on|off> | get high-risk-paths | set high-risk-paths <JSON路径数组> | get cross-card-read | set cross-card-read <on|off> | get auto-merge-paused | set auto-merge-paused <on|off> | get flow-version | set flow-version <版本> | get auto-security-paths | set auto-security-paths <JSON路径数组> | get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-confirm-role-rule-implementations | set pm-confirm-role-rule-implementations <on|off> | get pm-confirm-human-decided-merges | set pm-confirm-human-decided-merges <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> | get system-review-limit-raise | set system-review-limit-raise <on|off> | get system-review-limit-max-raises | set system-review-limit-max-raises <次数|off> | get role-rule-paths | set role-rule-paths <JSON路径数组|off> | get shared-files-access | set shared-files-access <JSON 角色→read_write|read|none 映射|off> [--project <p>] [--data-dir <目录>]";
 export async function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -168,15 +169,23 @@ export async function runPreferenceCommand(
                     ? "system_review_limit_max_raises"
                     : preference === "role-rule-paths"
                       ? "role_rule_paths"
-                      : undefined;
+                      : preference === "shared-files-access"
+                        ? "shared_files_access"
+                        : undefined;
   if (systemKey) {
     if (
       !["get", "set"].includes(action ?? "") ||
       positions.length !== (action === "get" ? 2 : 3)
     )
       fail();
-    let setting: "off" | "on" | boolean | number | readonly string[] | null =
-      null;
+    let setting:
+      | "off"
+      | "on"
+      | boolean
+      | number
+      | readonly string[]
+      | Readonly<Record<string, string>>
+      | null = null;
     if (action === "set") {
       if (systemKey === "auto_merge") {
         if (raw !== "on" && raw !== "off") fail();
@@ -195,6 +204,14 @@ export async function runPreferenceCommand(
           !validSystemReviewLimitMax(setting)
         )
           fail();
+      } else if (systemKey === "shared_files_access") {
+        // C-685: `off` restores read_write for every role.
+        try {
+          setting = raw === "off" ? {} : JSON.parse(raw ?? "");
+        } catch {
+          fail();
+        }
+        if (!validSharedFilesAccess(setting)) fail();
       } else {
         try {
           setting = raw === "off" ? null : JSON.parse(raw ?? "");

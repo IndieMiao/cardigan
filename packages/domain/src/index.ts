@@ -308,6 +308,7 @@ export * from "./run-recovery.js";
 export { hasRunTarget } from "./run-target.js";
 export * from "./runtime-port.js";
 export * from "./session-maintenance.js";
+export * from "./shared-files.js";
 export { sharedMustFixes } from "./shared-findings.js";
 export {
   canParkForDiscussion,

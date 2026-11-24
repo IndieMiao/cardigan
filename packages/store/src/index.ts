@@ -89,6 +89,7 @@ export {
   writeRole,
 } from "./roles.js";
 export * from "./run-capacity.js";
+export { SharedFileStore } from "./shared-files.js";
 export {
   backfillStandingModesInTransaction,
   standingResolver,
