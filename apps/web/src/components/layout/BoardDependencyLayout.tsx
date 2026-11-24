@@ -9,9 +9,10 @@ export interface BoardDependencyLine {
 }
 
 /**
- * C-659: faint lines between the hovered card and its prerequisites and
- * dependents. Rendered before the board so the cards paint over it: the
- * lines only show in the gaps and never cover card text.
+ * C-659 / C-668: faint curves between the hovered card and its
+ * prerequisites and dependents. Rendered after the board, so a curve stays
+ * whole where it passes over an unrelated card; the 1px hover-border colour
+ * keeps the text under it readable.
  */
 export function BoardDependencyLines({
   lines,

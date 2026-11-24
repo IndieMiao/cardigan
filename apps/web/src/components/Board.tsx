@@ -244,7 +244,6 @@ export function Board({
         {announcement}
       </p>
       <div className="board-scroll" ref={frame}>
-        <BoardDependencies board={scroller} frame={frame} cards={cards} />
         <section
           className="board"
           ref={scroller}
@@ -406,6 +405,7 @@ export function Board({
             );
           })}
         </section>
+        <BoardDependencies board={scroller} frame={frame} cards={cards} />
         {more && <span className="board-fade" aria-hidden="true" />}
       </div>
     </>

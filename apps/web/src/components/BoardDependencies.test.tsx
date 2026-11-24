@@ -10,8 +10,9 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { CardListItem, CardStatus, DependencyCard } from "../api.js";
 import {
-  connectorPath,
+  hubPaths,
   LINE_ARROW,
+  LINE_SPREAD,
   type LineEnd,
 } from "../board-dependency-lines.js";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
@@ -42,8 +43,6 @@ const COLUMNS: Record<string, Rect> = {
   review: { left: 696, top: 0, right: 1030, bottom: 900 },
   done: { left: 1292, top: 0, right: 1348, bottom: 900 },
 };
-/** Board top 0: the band above the lane headings is centred at 4.5. */
-const FRAME = { band: 4.5, viewport: BOARD };
 
 beforeEach(() => {
   lane = { left: 0, top: 40, right: 1400, bottom: 900 };
@@ -166,35 +165,6 @@ const endOf = (id: string, status: string): LineEnd => {
   const { left, right } = COLUMNS[status] as Rect;
   return { box: rects[id] as Rect, column: { left, right } };
 };
-/** Every point of the path's polyline (corner controls included). */
-const points = (d: string) =>
-  [...d.matchAll(/(-?[\d.]+) (-?[\d.]+)/g)].map(
-    ([, x, y]) => [Number(x), Number(y)] as const,
-  );
-/** Cards a path's visible run would cross, other than its own two ends. */
-function crossed(d: string, ends: readonly string[]) {
-  const hit = new Set<string>();
-  const p = points(d);
-  for (let i = 1; i < p.length; i++) {
-    const [ax, ay] = p[i - 1] as readonly [number, number],
-      [bx, by] = p[i] as readonly [number, number];
-    const steps = Math.ceil(Math.hypot(bx - ax, by - ay));
-    for (let t = 0; t <= steps; t++) {
-      const x = ax + ((bx - ax) * t) / (steps || 1),
-        y = ay + ((by - ay) * t) / (steps || 1);
-      for (const [id, r] of Object.entries(rects))
-        if (
-          !ends.includes(id) &&
-          x > r.left + 0.5 &&
-          x < r.right - 0.5 &&
-          y > r.top + 0.5 &&
-          y < r.bottom - 0.5
-        )
-          hit.add(id);
-    }
-  }
-  return [...hit];
-}
 const related = (board: HTMLElement) =>
   [...board.querySelectorAll("[data-dependency-related]")].map(
     (e) => (e as HTMLElement).dataset.cardId,
@@ -219,51 +189,53 @@ test("hovering a card draws lines to visible prerequisites and dependents, leavi
     "C-2>C-5",
   ]);
   expect(related(board).sort()).toEqual(["C-1", "C-3", "C-5"]);
-  // Rendered before the board in its frame (the cards paint above).
-  expect(lines?.nextElementSibling).toBe(board);
+  // Rendered after the board in its frame: the curves paint over the cards.
+  expect(board.nextElementSibling).toBe(lines);
   const d = (key: string) =>
     container.querySelector(`[data-edge="${key}"]`)?.getAttribute("d") ?? "";
-  // Into the hovered card: a step in the gap between the neighbouring lanes.
-  expect(d("C-1>C-2")).toBe(
-    connectorPath(
-      endOf("C-1", "todo"),
+  const strip: LineEnd = {
+    box: {
+      left: STRIP.left,
+      right: STRIP.right,
+      top: COUNT.top,
+      bottom: COUNT.bottom,
+    },
+    column: {
+      left: COLUMNS.done?.left ?? 0,
+      right: COLUMNS.done?.right ?? 0,
+    },
+  };
+  expect(edges(container).map(d)).toEqual(
+    hubPaths(
       endOf("C-2", "in_progress"),
-      FRAME,
-      false,
+      [
+        { other: endOf("C-1", "todo"), outgoing: false },
+        { other: endOf("C-3", "review"), outgoing: true },
+        { other: strip, outgoing: true },
+        { other: endOf("C-5", "in_progress"), outgoing: true },
+      ],
+      BOARD,
     ),
   );
-  expect(d("C-1>C-2")).toMatch(/^M326 150L/);
-  expect(d("C-1>C-2")).toMatch(new RegExp(`L${350 - LINE_ARROW} 150$`));
-  // To the folded lane: round through the band, into the strip by its count.
-  expect(d("C-2>C-6")).toBe(
-    connectorPath(
-      endOf("C-2", "in_progress"),
-      {
-        box: {
-          left: STRIP.left,
-          right: STRIP.right,
-          top: COUNT.top,
-          bottom: COUNT.bottom,
-        },
-        column: {
-          left: COLUMNS.done?.left ?? 0,
-          right: COLUMNS.done?.right ?? 0,
-        },
-      },
-      FRAME,
-      true,
-    ),
-  );
-  expect(d("C-2>C-6")).toMatch(new RegExp(`L${STRIP.left - LINE_ARROW} 50$`));
-  // Same lane: out of C-2's right edge, over the top, into C-5's left edge.
-  expect(d("C-2>C-5")).toMatch(/^M676 150L/);
-  expect(d("C-2>C-5")).toMatch(new RegExp(`L${350 - LINE_ARROW} 550$`));
-  // No visible run passes over a card other than its own two ends: C-4 sits
-  // between C-2 and C-5, C-3 between C-2 and the folded lane.
-  // (The check itself: a straight run across the lanes would hit C-4.)
-  expect(crossed("M0 250L1400 250", [])).toEqual(["C-4"]);
+  // Every line is a single cubic Bézier: no straight runs, no corners.
   for (const key of edges(container) as string[])
-    expect([key, crossed(d(key), key.split(">"))]).toEqual([key, []]);
+    expect(d(key)).toMatch(/^M-?[\d.]+ -?[\d.]+C(-?[\d.]+ -?[\d.]+ ?){3}$/);
+  // From the prerequisite's facing edge into the hovered card's left edge.
+  expect(d("C-1>C-2")).toMatch(/^M326 150C/);
+  expect(d("C-1>C-2")).toMatch(new RegExp(` ${350 - LINE_ARROW} -?[\\d.]+$`));
+  // C-1 comes in on C-2's left, C-3 and the folded strip leave on its right,
+  // so the same-lane C-5 bows out on the quieter left. Lines on one side
+  // start apart, top to bottom in the order of the other ends' heights:
+  // left C-1 (150), C-5 (550); right the strip (count at 50), C-3 (350).
+  expect(d("C-1>C-2")).toMatch(new RegExp(` ${150 - LINE_SPREAD / 2}$`));
+  expect(d("C-2>C-5")).toMatch(new RegExp(`^M350 ${150 + LINE_SPREAD / 2}C`));
+  expect(d("C-2>C-6")).toMatch(new RegExp(`^M676 ${150 - LINE_SPREAD / 2}C`));
+  expect(d("C-2>C-3")).toMatch(new RegExp(`^M676 ${150 + LINE_SPREAD / 2}C`));
+  // Into the strip by its count, into C-3's left edge, round into C-5's
+  // left edge.
+  expect(d("C-2>C-6")).toMatch(new RegExp(` ${STRIP.left - LINE_ARROW} 50$`));
+  expect(d("C-2>C-3")).toMatch(new RegExp(` ${700 - LINE_ARROW} 350$`));
+  expect(d("C-2>C-5")).toMatch(new RegExp(` ${350 - LINE_ARROW} 550$`));
   // Moving to the gap or off the board removes every line and highlight.
   hover(board);
   expect(svg(container)).toBeNull();

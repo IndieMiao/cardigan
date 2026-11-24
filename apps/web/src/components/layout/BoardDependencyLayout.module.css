@@ -1,8 +1,8 @@
 @layer legacy, theme, base, components, utilities;
 
 @layer components {
-  /* Covers the board's visible area; routes avoid the cards and may use half
-     a lane gap of the page padding at the board's edges. */
+  /* Covers the board's visible area, over the cards; never takes the
+     pointer, so hovering and clicking cards are unchanged. */
   .lines {
     position: absolute;
     inset: 0;
