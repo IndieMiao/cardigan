@@ -271,6 +271,7 @@ try {
         svgAfterBoard:
           document.querySelector(".board").nextElementSibling === svg,
         svgPointerEvents: svg ? getComputedStyle(svg).pointerEvents : null,
+        svgBlend: svg ? getComputedStyle(svg).mixBlendMode : null,
         typography: {
           title: title && {
             size: getComputedStyle(title).fontSize,
@@ -356,6 +357,90 @@ try {
           `${label}: ${side} spread centred`,
         );
     }
+  };
+  /**
+   * The crossed title line of `id`, captured with the lines shown and with
+   * the overlay hidden: ink pixels (darker than the line in light, lighter
+   * in dark) must be identical; only background pixels may change.
+   */
+  const textUnderLine = async (id, theme, tag) => {
+    const rect = await run((id) => {
+      const range = document.createRange();
+      range.selectNodeContents(
+        document.querySelector(`[data-card-id="${id}"] .card-title`),
+      );
+      const r = range.getClientRects()[0];
+      return { x: r.left, y: r.top, width: r.width, height: r.height };
+    }, id);
+    const clip = { ...rect, scale: 1 };
+    const grab = async () =>
+      (
+        await send("Page.captureScreenshot", {
+          format: "png",
+          clip,
+          captureBeyondViewport: false,
+        })
+      ).data;
+    const withLine = await grab();
+    await run(() => {
+      document.querySelector("[data-board-dependencies]").style.visibility =
+        "hidden";
+    });
+    await settle();
+    const without = await grab();
+    await run(() => {
+      document.querySelector("[data-board-dependencies]").style.visibility = "";
+    });
+    await settle();
+    await writeFile(
+      resolve(output, `text-under-line-${tag}.png`),
+      Buffer.from(withLine, "base64"),
+    );
+    await writeFile(
+      resolve(output, `text-without-line-${tag}.png`),
+      Buffer.from(without, "base64"),
+    );
+    return run(
+      async (a, b, dark) => {
+        const load = (src) =>
+          new Promise((ok, fail) => {
+            const i = new Image();
+            i.onload = () => ok(i);
+            i.onerror = fail;
+            i.src = `data:image/png;base64,${src}`;
+          });
+        const pixels = (img) => {
+          const c = document.createElement("canvas");
+          c.width = img.width;
+          c.height = img.height;
+          const x = c.getContext("2d");
+          x.drawImage(img, 0, 0);
+          return x.getImageData(0, 0, img.width, img.height).data;
+        };
+        const [pa, pb] = (await Promise.all([load(a), load(b)])).map(pixels);
+        const line = dark ? 0x50 : 0xbc;
+        let changed = 0,
+          ink = 0,
+          inkChanged = 0;
+        for (let i = 0; i < pb.length; i += 4) {
+          const rgb = [pb[i], pb[i + 1], pb[i + 2]];
+          const isInk = dark
+            ? rgb.every((v) => v >= line)
+            : rgb.every((v) => v <= line);
+          const differs =
+            pa[i] !== pb[i] ||
+            pa[i + 1] !== pb[i + 1] ||
+            pa[i + 2] !== pb[i + 2];
+          if (isInk) ink++;
+          if (differs) changed++;
+          if (isInk && differs) inkChanged++;
+        }
+        return { changed, ink, inkChanged };
+      },
+      withLine,
+      without,
+      theme === "dark",
+    ).then((r) => ({ ...r, rect }));
   };
   const cardStatus = {
     "C-51": "done",
@@ -494,6 +579,11 @@ try {
         shot: await shot(`folded-${tag}.png`),
         ...(await measure()),
       };
+      result.steps.folded.textUnderLine = await textUnderLine(
+        "C-41",
+        theme,
+        tag,
+      );
       await mouse(1, 999);
       await settle();
       result.steps.foldedLeave = await measure();
@@ -519,6 +609,11 @@ try {
     assert(hover.lines.length > 0, `${label}: hover draws lines`);
     assert(hover.svgAfterBoard, `${label}: lines paint over the cards`);
     assert.equal(hover.svgPointerEvents, "none", `${label}: no hit area`);
+    assert.equal(
+      hover.svgBlend,
+      c.theme === "dark" ? "lighten" : "darken",
+      `${label}: text under a line stays intact`,
+    );
     // Filtered-out C-99 never gets a line.
     assert(!hover.lines.some((l) => l.key.includes("C-99")), `${label}: C-99`);
     for (const line of hover.lines) {
@@ -583,6 +678,10 @@ try {
       `${label}: folded lane strip gets the line`,
     );
     assert.equal(c.steps.foldedLeave.lines.length, 0, `${label}: folded leave`);
+    const text = c.steps.folded.textUnderLine;
+    assert(text.changed > 0, `${label}: the line crosses C-41's title`);
+    assert(text.ink > 0, `${label}: C-41's title has ink`);
+    assert.equal(text.inkChanged, 0, `${label}: no title ink changed`);
   }
   if (compareDir) {
     // Pixel diff of the default shots, then side-by-side before | after hover.

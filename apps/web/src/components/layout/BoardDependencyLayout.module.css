@@ -10,6 +10,8 @@
     height: 100%;
     overflow: visible;
     pointer-events: none;
+    /* Over a card the line never paints across its text. */
+    mix-blend-mode: var(--ui-faint-line-blend);
   }
   /* The card hover border colour: faint in both themes. */
   .line {
