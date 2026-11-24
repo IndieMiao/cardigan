@@ -220,8 +220,10 @@ test.each(
           expect(core).not.toContain("旧显示名");
           expect(first).toContain(bell);
         } else {
+          // C-676: the host injects the project's registered code.
+          expect(store.projectCode(project)).toBe("LAU");
           expect(core).toBe(
-            `${corePromptFor("pm", "旧显示名")}\n\n${RUN_RESOURCE_RULE}\n`,
+            `${corePromptFor("pm", "旧显示名")}\n\n项目资料：本项目 ${JSON.stringify(project)} 的代号是 LAU，本项目卡片 C-12 的完整编号写作 LAU-C-12；引用其它项目或写给所有者时用完整编号。\n\n${RUN_RESOURCE_RULE}\n`,
           );
           expect(first).not.toContain(employee.name);
           expect(first).toContain("kind=initial");

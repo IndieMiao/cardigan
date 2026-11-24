@@ -4,6 +4,8 @@ import {
   type Employee,
   employeeDisplayName,
   employeeTextError,
+  isProjectCode,
+  qualifyId,
 } from "@cardigan/domain";
 import { getHarnessAdapter } from "./adapters/registry.js";
 import {
@@ -77,6 +79,7 @@ export function compileAssignmentLaunch(
     (input.role.instructions === undefined
       ? (input.role.core_prompt ?? "")
       : composeRolePrompt(input.role.instructions)) + policyRule;
+  const projectRule = projectCodePrompt(input.assignment);
   const resourceRule = input.run_resources ? `\n\n${RUN_RESOURCE_RULE}` : "";
   const corePrompt =
     identity === undefined
@@ -339,7 +342,7 @@ export function compileAssignmentLaunch(
     files: [
       {
         path: coreFile,
-        content: withTrailingNewline(corePrompt + resourceRule),
+        content: withTrailingNewline(corePrompt + projectRule + resourceRule),
         mode: 0o600,
       },
       {
@@ -437,6 +440,21 @@ function employeeIdentityPrompt(
     ...(identity.bio.trim() ? [`简介：${plain(identity.bio)}`] : []),
     "请在评论和交付摘要里用上述员工名字称呼自己；权限和作者身份仍以 Token 为准。",
   ].join("\n");
+}
+
+/**
+ * C-676: every session, including legacy core prompts, learns its project's
+ * code so it can write full numbers (`CDG-C-12`) for other projects and the
+ * owner. A missing or malformed code adds nothing.
+ */
+function projectCodePrompt(assignment: CompileAssignmentInput["assignment"]) {
+  const code = assignment.project_code;
+  if (code === undefined || !isProjectCode(code)) return "";
+  const project =
+    assignment.project_id === undefined
+      ? ""
+      : `本项目 ${JSON.stringify(assignment.project_id)} 的`;
+  return `\n\n项目资料：${project}代号是 ${code}，本项目卡片 C-12 的完整编号写作 ${qualifyId(code, "C-12")}；引用其它项目或写给所有者时用完整编号。`;
 }
 
 function withTrailingNewline(text: string): string {

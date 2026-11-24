@@ -6,6 +6,7 @@ import {
   localInputKind,
   qualifiedInputProject,
   qualifyId,
+  qualifyText,
   splitQualifiedId,
   splitQualifiedInput,
   suggestProjectCode,
@@ -88,6 +89,23 @@ test("C-674: bodies yield full numbers, which never resolve as the short number"
   ]);
   // Old comments are unchanged: short numbers still resolve in this project.
   expect(extractReferences(body)).toEqual([{ kind: "card", id: "C-34" }]);
+});
+
+test("C-676: text leaving the project gets full numbers for short ones only", () => {
+  expect(
+    qualifyText(
+      "CDG",
+      "C-12、C-12#3、Q-4、H-5、W-6、D-7、A-8、R-9、V-10、MB-11 已处理",
+    ),
+  ).toBe(
+    "CDG-C-12、CDG-C-12#3、CDG-Q-4、CDG-H-5、CDG-W-6、CDG-D-7、CDG-A-8、CDG-R-9、CDG-V-10、CDG-MB-11 已处理",
+  );
+  // Full numbers, global ids, paths, links and look-alikes stay as written.
+  const kept =
+    "SEN-C-34、SEN-C-34#2、E-2、M-1、docs/plans/C-12.md、https://w.invalid/#/p/x/cards/C-12?at=C-12%231、C-0、XC-1、C-1a、C-1-b";
+  expect(qualifyText("CDG", kept)).toBe(kept);
+  expect(qualifyText(undefined, "C-12")).toBe("C-12");
+  expect(qualifyText("cdg", "C-12")).toBe("C-12");
 });
 
 test("C-675: input full numbers include attachments; global ids and text are not full numbers", () => {

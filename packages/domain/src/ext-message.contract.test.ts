@@ -800,3 +800,19 @@ test("C-674: with the project code the message carries the full number; sensitiv
     ).sort(),
   ).toEqual(["project", "title", "url"]);
 });
+
+test("C-676: short numbers in a decision or handoff title become full numbers", () => {
+  expect(
+    buildExtMessage(
+      { ...item, title: "C-12 合并前请确认 Q-3，参见 SEN-C-34" },
+      "https://workbench.invalid",
+      120,
+      "CDG",
+    ).title,
+  ).toBe("CDG-C-12 合并前请确认 CDG-Q-3，参见 SEN-C-34");
+  // Without a code, or for fixed labels, the title is unchanged.
+  expect(
+    buildExtMessage({ ...item, title: "C-12 请确认" }, "https://w.invalid")
+      .title,
+  ).toBe("C-12 请确认");
+});

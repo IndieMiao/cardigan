@@ -73,6 +73,8 @@ export interface AssignmentIdentity {
   readonly card_id?: string;
   readonly work_item_id?: string;
   readonly project_id?: string;
+  /** C-676: the project's code (`CDG`); the session learns its full numbers. */
+  readonly project_code?: string;
 }
 
 export interface AssignmentMcpEndpoint {
