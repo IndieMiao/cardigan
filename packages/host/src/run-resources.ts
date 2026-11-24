@@ -1,9 +1,13 @@
 import {
   type Assignment,
+  type DeliveryId,
   type Event,
+  eventById,
   eventsOfType,
+  type Notification,
   parseCapabilityRequirement,
   type Run,
+  type WorkItem,
   type WorkItemRequirements,
 } from "@cardigan/domain";
 import type { ReadRepositories } from "@cardigan/store";
@@ -31,6 +35,124 @@ export function assignmentResourceKeys(
     ...(item?.requirements?.capabilities ?? []),
     ...(role?.required_capabilities ?? []),
   ]);
+}
+
+/**
+ * C-721: notices that only ask the producer to submit or reply. Everything
+ * else (rework, fix, decision or blocker resume, instructions, dependency
+ * wakes) keeps the work item's resources.
+ */
+const LIGHT_NOTE_KINDS: ReadonlySet<string> = new Set([
+  "comment",
+  "completion",
+  "instruction",
+]);
+
+function lightEvent(
+  tx: ReadRepositories,
+  project: string,
+  owner: Assignment,
+  item: WorkItem,
+  event: Event | undefined,
+): boolean {
+  if (
+    !event ||
+    event.actor.project_id !== project ||
+    event.card_id !== item.card_id
+  )
+    return false;
+  const p = (event.payload ?? {}) as Record<string, unknown>;
+  // A pass routes exactly like an accepted delivery. A passed upstream item
+  // starts this item's own work instead.
+  const accepted = () => {
+    const delivery =
+      typeof p.delivery_id === "string"
+        ? tx.deliveries.get(project, p.delivery_id as DeliveryId)
+        : undefined;
+    return (
+      delivery !== undefined && !item.depends_on.includes(delivery.work_item_id)
+    );
+  };
+  switch (event.type) {
+    case "comment_posted":
+      return true;
+    case "precheck_finished":
+      return (
+        event.actor.kind === "system" &&
+        p.status === "passed" &&
+        p.assignment_id === owner.id &&
+        p.work_item_id === item.id
+      );
+    case "review_submitted":
+    case "completion_reviewed":
+      return (
+        p.verdict === "pass" &&
+        p.rework_allowed !== true &&
+        p.recheck_required !== true &&
+        p.evidence_pending === undefined &&
+        p.parallel_late !== true &&
+        p.review_limit_wait !== true &&
+        !(
+          Array.isArray(p.issues) &&
+          p.issues.some(
+            (i) => (i as { must_fix?: unknown } | null)?.must_fix === true,
+          )
+        ) &&
+        accepted()
+      );
+    case "delivery_accepted":
+      return accepted();
+    default:
+      return false;
+  }
+}
+
+/**
+ * C-721: the physical resources this Run claims. A producer follow-up whose
+ * trigger and every pending notice only ask it to submit or reply claims none;
+ * any other Run claims the work item's and role's resources. Pass the notices
+ * the Run's bell will carry: a single heavy notice keeps the full set.
+ */
+export function runResourceKeys(
+  tx: ReadRepositories,
+  project: string,
+  owner: Assignment,
+  events: readonly Event[],
+  run: { readonly kind: Run["kind"]; readonly trigger_event_id?: string },
+  notes: readonly Pick<Notification, "kind" | "event_id">[],
+): string[] {
+  const keys = assignmentResourceKeys(tx, project, owner);
+  if (!keys.length || run.kind !== "followup" || owner.scope !== "work_item")
+    return keys;
+  const item = owner.work_item_id
+    ? tx.work_items.get(project, owner.work_item_id)
+    : undefined;
+  if (item?.kind !== "produce") return keys;
+  const light = (id: string | undefined) =>
+    lightEvent(tx, project, owner, item, eventById(events, id));
+  return light(run.trigger_event_id) &&
+    notes.every((n) => LIGHT_NOTE_KINDS.has(n.kind) && light(n.event_id))
+    ? []
+    : keys;
+}
+
+/**
+ * C-721: the work item's resources this admitted Run does not hold. Such a Run
+ * gets no device at launch and is told so in every bell. Legacy Runs without
+ * an admission snapshot report none.
+ */
+export function unclaimedResourceKeys(
+  tx: ReadRepositories,
+  project: string,
+  owner: Assignment,
+  run: Pick<Run, "resource_keys"> | undefined,
+): string[] {
+  const held = run?.resource_keys;
+  return held
+    ? assignmentResourceKeys(tx, project, owner).filter(
+        (k) => !held.includes(k),
+      )
+    : [];
 }
 
 function runEvent(history: readonly Event[], run: Run, type: string) {

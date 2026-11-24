@@ -7,6 +7,7 @@ import type {
   DispatchRunParams,
   Notification,
   ProjectId,
+  QueuedRun,
   Run,
   RunId,
   Runtime,
@@ -92,9 +93,11 @@ import {
   redactFailureLine,
   retainedWriterRefusal,
   runCapacitySnapshot,
+  runResourceKeys,
   settleTestReviewLimits,
   testReviewRunPrompt,
   tryHostOpsLock,
+  unclaimedResourceKeys,
   upgradeIdleAssignmentRoles,
   WORKTREE_LAUNCH_LEASE_MS,
   wakeIsCurrent,
@@ -292,6 +295,11 @@ export interface DispatcherOptions {
 }
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
+/** C-721: a submit/reply follow-up runs without its work item's resources. */
+const unclaimedResourcesRule = (keys: readonly string[]) =>
+  keys.length
+    ? `本次 Run 未占用 ${keys.join("、")} 名额，只做提交和回帖：不要启动或操作这些资源；需要它们的工作（包括本次 Run 新收到的通知）用 report_blocker（needs=role）说明所需资源后结束本次 Run，恢复后的 Run 会按工作项占用名额。`
+    : undefined;
 const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
   s.cursors.some(
     (c) =>
@@ -950,7 +958,13 @@ export class Dispatcher {
       !this.options.leases?.configured(project, a.machine_id) &&
       queued?.queue_reason === "concurrency_limit" &&
       !this.options.store.uow.read((tx) =>
-        this.availableResources(tx, state, a, queued),
+        this.availableResources(
+          tx,
+          state,
+          a,
+          queued,
+          this.runKeys(tx, state, a, queued, this.readyNotes(state, a, notes)),
+        ),
       )
     )
       return skip("concurrency_limit");
@@ -1212,7 +1226,11 @@ export class Dispatcher {
     const catalog = this.catalog(a, project);
     const replaceCatalog =
       live &&
-      ((!continuing && this.options.leases?.freshSession(project, a)) ||
+      ((!continuing &&
+        (this.options.leases?.freshSession(project, a) ||
+          // C-721: a Run without some of its work item's resources never
+          // shares a session (and its device environment) with one that has them.
+          this.admissionKeys(project, a, notes, prior).restricted)) ||
         (catalog !== undefined &&
           prior?.tool_catalog !== undefined &&
           prior.tool_catalog !== catalog));
@@ -1309,7 +1327,11 @@ export class Dispatcher {
       !continuing &&
       (this.options.leases?.configured(project, a.machine_id) ||
         this.options.leases?.adbNeeded(project, a))
-        ? await this.options.leases?.inspect(project, a)
+        ? await this.options.leases?.inspect(
+            project,
+            a,
+            this.admissionKeys(project, a, notes).keys,
+          )
         : undefined;
     if (this.closing) return skip("shutting_down");
     let job: Job | undefined;
@@ -1805,11 +1827,137 @@ export class Dispatcher {
         });
     });
   }
+  /** C-216: fetch only the requested pending rows instead of decoding the
+   * project's whole notification history on every claim. */
+  private readyNotes(
+    state: CommandState,
+    a: Assignment,
+    notes: readonly Notification[],
+  ) {
+    return this.options.store
+      .listNotifications({
+        project_id: state.project_id,
+        status: "pending",
+        ids: notes.map((n) => n.id),
+      })
+      .filter(
+        (n) =>
+          this.owner(n, state) === a.id &&
+          !covered(n, state, a.id) &&
+          !notificationBlocked(state, n.event_id, a.id) &&
+          !(
+            a.standing_mode === "ops" &&
+            newPmNotification(state, n) &&
+            pmNotificationState(state, n) === "obsolete"
+          ),
+      );
+  }
+  /**
+   * C-721: the resources the Run addressed by these ready notices would claim:
+   * its own queued Run, else the one the first notice would queue. Computed
+   * the same way before inspection and inside the claim, so the inspected
+   * signature matches unless the notices really changed.
+   */
+  private runKeys(
+    tx: ReadRepositories,
+    state: CommandState,
+    a: Assignment,
+    run: Run | undefined,
+    ready: readonly Notification[],
+  ) {
+    const cause = run ? undefined : inboxCause(state, a, ready);
+    return runResourceKeys(
+      tx,
+      state.project_id,
+      a,
+      state.events,
+      run ?? {
+        kind: dispatchRunKind(
+          eventById(state.events, cause?.event_id),
+          a,
+          cause?.kind === "review",
+        ),
+        ...(cause ? { trigger_event_id: cause.event_id } : {}),
+      },
+      ready,
+    );
+  }
+  /**
+   * C-721: before the claim, the keys the addressed Run would claim, computed
+   * exactly as inside the claim. `restricted`: this Run or the session's
+   * prior Run holds fewer than the work item's resources.
+   */
+  private admissionKeys(
+    project: ProjectId,
+    a: Assignment,
+    notes: readonly Notification[],
+    prior?: Run,
+  ) {
+    return this.options.store.uow.read((tx) => {
+      const state = this.loadState(tx, project);
+      const ready = this.readyNotes(state, a, notes);
+      const cause = inboxCause(state, a, ready);
+      const keys = this.runKeys(
+        tx,
+        state,
+        a,
+        this.queued(state, a) ??
+          state.runs.find(
+            (r) =>
+              r.assignment_id === a.id &&
+              (r.id === cause?.run_id ||
+                r.trigger_event_id === cause?.event_id),
+          ),
+        ready,
+      );
+      return {
+        keys,
+        restricted: [{ resource_keys: keys }, prior].some(
+          (r) => unclaimedResourceKeys(tx, project, a, r).length > 0,
+        ),
+      };
+    });
+  }
+  /** C-721: an earlier waiter is judged by what its own Run would claim. */
+  private waiterKeys(tx: ReadRepositories) {
+    const pending = new Map<string, readonly Notification[]>();
+    return (entry: QueuedRun, owner: Assignment) => {
+      const state = this.loadState(tx, entry.project_id);
+      const run = state.runs.find((r) => r.id === entry.run_id);
+      if (!run) return assignmentResourceKeys(tx, entry.project_id, owner);
+      // Only a light trigger can lighten the Run; skip the notice read otherwise.
+      if (
+        runResourceKeys(tx, entry.project_id, owner, state.events, run, [])
+          .length
+      )
+        return assignmentResourceKeys(tx, entry.project_id, owner);
+      let notes = pending.get(entry.project_id);
+      if (!notes) {
+        notes = this.options.store.listNotifications({
+          project_id: entry.project_id,
+          status: "pending",
+        });
+        pending.set(entry.project_id, notes);
+      }
+      return this.runKeys(
+        tx,
+        state,
+        owner,
+        run,
+        this.readyNotes(
+          state,
+          owner,
+          notes.filter((n) => this.owner(n, state) === owner.id),
+        ),
+      );
+    };
+  }
   private availableResources(
     tx: ReadRepositories,
     state: CommandState,
     a: Assignment,
     run: Run,
+    keys: readonly string[],
   ) {
     const project = state.project_id;
     const capacity = runCapacitySnapshot(
@@ -1819,7 +1967,6 @@ export class Dispatcher {
       this.options.projectQuota,
     );
     const slots = capacity.resourcesForMachine(a.machine_id);
-    const keys = assignmentResourceKeys(tx, project, a);
     if (!capacity.withinProjectQuota(project, a, keys)) return undefined;
     const trigger = eventById(state.events, run.trigger_event_id);
     const order = {
@@ -1838,19 +1985,21 @@ export class Dispatcher {
       a.machine_id,
       slots,
       this.clock.now(),
-      (p, owner) =>
+      (p, owner, ownerKeys) =>
         !this.options.leases?.waitingElsewhere(
           p,
           owner,
           this.clock.now(),
           tx,
+          ownerKeys,
         ) &&
-        capacity.withinProjectQuota(p, owner) &&
+        capacity.withinProjectQuota(p, owner, ownerKeys) &&
         hasRunTarget(owner, {
           work_items: tx.work_items.list(p),
           deliveries: tx.deliveries.list(p),
         }),
       this.options.leases?.config.preferred(a.machine_id),
+      this.waiterKeys(tx),
     );
     if (
       remainingResourceRatio(keys, slots) <= 0 ||
@@ -1867,7 +2016,7 @@ export class Dispatcher {
       )
     )
       return undefined;
-    return keys;
+    return [...keys];
   }
   private claim(
     project: ProjectId,
@@ -1971,25 +2120,7 @@ export class Dispatcher {
         }
       }
       const requested = new Set(notes.map((n) => n.id));
-      // C-216: fetch only the requested pending rows instead of decoding the
-      // project's whole notification history on every claim.
-      const ready = store
-        .listNotifications({
-          project_id: project,
-          status: "pending",
-          ids: [...requested],
-        })
-        .filter(
-          (n) =>
-            this.owner(n, state) === a.id &&
-            !covered(n, state, a.id) &&
-            !notificationBlocked(state, n.event_id, a.id) &&
-            !(
-              a.standing_mode === "ops" &&
-              newPmNotification(state, n) &&
-              pmNotificationState(state, n) === "obsolete"
-            ),
-        );
+      const ready = this.readyNotes(state, a, notes);
       {
         const target = inboxTarget(state, a, ready);
         if ("reason" in target) return skip(target.reason);
@@ -2094,7 +2225,7 @@ export class Dispatcher {
           return skip("provider_unavailable");
         }
         const leases = this.options.leases;
-        const keysNeeded = assignmentResourceKeys(tx, project, a);
+        const keysNeeded = this.runKeys(tx, state, a, run, ready);
         const blocked = leases?.blocked(
           project,
           a.machine_id,
@@ -2104,7 +2235,7 @@ export class Dispatcher {
         );
         const keys = blocked
           ? undefined
-          : this.availableResources(tx, state, a, run);
+          : this.availableResources(tx, state, a, run, keysNeeded);
         if (!keys) {
           if (leases && (blocked || leases.configured(project, a.machine_id)))
             leases.wait(
@@ -2236,6 +2367,8 @@ export class Dispatcher {
         attempt = bindRepairAttempt(store, state, effect.data, attempt);
       } else if (live) attempt = bindRepairAttempt(store, state, run, attempt);
 
+      // C-721: every bell of a Run admitted without some resources says so.
+      const unclaimed = unclaimedResourceKeys(tx, project, a, run);
       const followup = decisionFollowupPrompt(
         state,
         [...new Set([run.trigger_event_id, ...ready.map((n) => n.event_id)])],
@@ -2246,7 +2379,9 @@ export class Dispatcher {
         attempt,
         run,
         assignment: a,
-        bell: [bell, followup].filter(Boolean).join("\n"),
+        bell: [bell, followup, unclaimedResourcesRule(unclaimed)]
+          .filter(Boolean)
+          .join("\n"),
       };
     });
   }

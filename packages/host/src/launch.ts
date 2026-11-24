@@ -104,7 +104,10 @@ import {
   runCapacitySnapshot,
 } from "./run-capacity.js";
 import { resourceEntry, verifiedLocalLaunch } from "./run-resource-worker.js";
-import { assignmentResourceKeys } from "./run-resources.js";
+import {
+  assignmentResourceKeys,
+  unclaimedResourceKeys,
+} from "./run-resources.js";
 import {
   deferTargetAttempt,
   RunTargetDeferred,
@@ -1057,6 +1060,9 @@ async function launch(
       tx.runs.get(project, input.run.id),
     );
     if (fresh?.status !== "queued") throw new RunPreparationDeferred();
+    const unclaimed = host.store.uow.read(
+      (tx) => unclaimedResourceKeys(tx, project, assignment, fresh).length > 0,
+    );
     workDir = worktree?.path ?? workDir;
     publication?.update("preparing", {
       work_dir: workDir,
@@ -1140,7 +1146,11 @@ async function launch(
       ...(input.resourceAccess &&
       (input.resourceAccess.bindings.length || !input.resourceAccess.adb)
         ? { resource_bindings: input.resourceAccess.bindings }
-        : {}),
+        : // C-721: a Run admitted without some of its work item's resources
+          // gets no device either; slot machines already give it none.
+          unclaimed && !host.leases?.config.adbSlots(assignment.machine_id)
+          ? { resource_bindings: [] }
+          : {}),
       // C-679: read the held slot back, so a retried launch of this Run keeps it.
       ...(host.leases?.config.adbSlots(assignment.machine_id)
         ? {

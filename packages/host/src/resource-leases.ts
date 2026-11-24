@@ -149,6 +149,7 @@ export class MachineLeases {
     owner: Assignment,
     now: string,
     tx: ReadRepositories,
+    keys: readonly string[] = assignmentResourceKeys(tx, project, owner),
   ) {
     const queued = tx.runs
       .list(project)
@@ -159,15 +160,7 @@ export class MachineLeases {
         "SELECT policy_wait FROM machine_resource_waits WHERE project=? AND run_id=?",
       )
       .get(project, queued.id)?.policy_wait;
-    return (
-      reason === 1 ||
-      !!this.blocked(
-        project,
-        owner.machine_id,
-        assignmentResourceKeys(tx, project, owner),
-        now,
-      )
-    );
+    return reason === 1 || !!this.blocked(project, owner.machine_id, keys, now);
   }
   private active(machine: string, now: string) {
     return this.rows(
@@ -294,12 +287,15 @@ export class MachineLeases {
     });
   }
   // Only host-private policy can select a program. Recompute the key signature inside the later claim.
-  async inspect(project: string, a: Assignment): Promise<ResourceAdmission> {
-    const keys = this.store.uow.read((tx) =>
-        assignmentResourceKeys(tx, project, a),
-      ),
-      machine = a.machine_id;
-    return this.inspectKeys(project, machine, keys);
+  // C-721: the dispatcher passes the Run's own keys; a submit/reply follow-up may claim none.
+  async inspect(
+    project: string,
+    a: Assignment,
+    keys: readonly string[] = this.store.uow.read((tx) =>
+      assignmentResourceKeys(tx, project, a),
+    ),
+  ): Promise<ResourceAdmission> {
+    return this.inspectKeys(project, a.machine_id, keys);
   }
   private async inspectKeys(
     project: string,

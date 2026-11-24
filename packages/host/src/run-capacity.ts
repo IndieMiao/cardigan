@@ -304,7 +304,11 @@ function ownerFenced(
   return hostOpsPending(events, owner.id) || stoppedByHuman(events, owner.id);
 }
 
-/** Keep the existing order among runnable waiters, without blocking other resources. */
+/**
+ * Keep the existing order among runnable waiters, without blocking other resources.
+ * C-721: `keysFor` names the resources a waiter's Run would claim; by default
+ * its work item's, so a waiter that may need fewer is judged conservatively.
+ */
 export function hasEarlierCapacityWait(
   tx: ReadRepositories,
   queue: readonly QueuedRun[],
@@ -312,8 +316,16 @@ export function hasEarlierCapacityWait(
   machine: string,
   resources: MachineResources,
   now: string,
-  eligible?: (project: string, owner: Assignment) => boolean,
+  eligible?: (
+    project: string,
+    owner: Assignment,
+    keys: readonly string[],
+  ) => boolean,
   preferredProject?: string,
+  keysFor: (entry: QueuedRun, owner: Assignment) => readonly string[] = (
+    entry,
+    owner,
+  ) => assignmentResourceKeys(tx, entry.project_id, owner),
 ): boolean {
   return queue.some((entry) => {
     const priority =
@@ -327,16 +339,16 @@ export function hasEarlierCapacityWait(
     const owner = tx.assignments
       .list(entry.project_id)
       .find((a) => a.id === entry.assignment_id);
+    if (
+      !owner ||
+      (owner.snapshot_retry && owner.snapshot_retry.ready_at > now) ||
+      ownerFenced(tx, entry.project_id, owner, entry.run_id)
+    )
+      return false;
+    const keys = keysFor(entry, owner);
     return (
-      !!owner &&
-      (!owner.snapshot_retry || owner.snapshot_retry.ready_at <= now) &&
-      !ownerFenced(tx, entry.project_id, owner, entry.run_id) &&
-      (!eligible || eligible(entry.project_id, owner)) &&
-      (!resources.size ||
-        remainingResourceRatio(
-          assignmentResourceKeys(tx, entry.project_id, owner),
-          resources,
-        ) > 0)
+      (!eligible || eligible(entry.project_id, owner, keys)) &&
+      (!resources.size || remainingResourceRatio(keys, resources) > 0)
     );
   });
 }
