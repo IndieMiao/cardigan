@@ -22,6 +22,7 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { m3Fixture } from "../test-support/m3-acceptance.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
+import { runSystemCommand } from "./merge-loop.js";
 import { runSystemRules } from "./system-rules.js";
 import { needsYou } from "./web/read.js";
 
@@ -670,10 +671,18 @@ test("B3a: internal submission errors fail the scan without partially persisting
   expect(() => runSystemRules(f.store, f.id, f.clock)).toThrow(
     "missing-attachment",
   );
-  expect(f.state().deliveries).toEqual(before.deliveries);
-  expect(f.state().events).toEqual(before.events);
-  expect(f.state().timeline).toEqual(before.timeline);
-  expect(f.state().work_items).toEqual(before.work_items);
+  // C-641: each rule commits on its own, so the independent PM coordination
+  // rule that ran before the failing completion stays; nothing of the
+  // completion is persisted.
+  const after = f.state();
+  expect(after.deliveries).toEqual(before.deliveries);
+  const known = new Set(before.events.map((e) => e.id));
+  expect(after.events.filter((e) => known.has(e.id))).toEqual(before.events);
+  expect(
+    after.events.filter((e) => !known.has(e.id)).map((e) => e.type),
+  ).toEqual(["pm_coordination_started"]);
+  expect(after.timeline).toEqual(before.timeline);
+  expect(after.work_items).toEqual(before.work_items);
 });
 
 test("B3a: persistence failure rolls back completion, event and acceptance readiness together", async () => {
@@ -1107,4 +1116,67 @@ test("C-384 real implementation comments notify current owners once across routi
       .state()
       .events.filter((e) => e.type === "decision_implementation_recorded"),
   ).toHaveLength(1);
+});
+
+test("C-641: settled system rules take no writer lock; system commands reduce outside it", async () => {
+  await ready();
+  f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
+  const before = f.store.optimisticStats;
+  cycle();
+  expect(f.store.optimisticStats.committed).toBeGreaterThan(before.committed);
+  const other = Store.open({ dataDir: required(f.dataDir) });
+  try {
+    // A verifier assigned late in one scan is ready on the next.
+    let settled = f.state();
+    for (let scan = 0; scan < 5; scan++) {
+      cycle();
+      if (f.state().events.length === settled.events.length) break;
+      settled = f.state();
+    }
+    f.store.database.exec("PRAGMA busy_timeout = 50");
+    other.database.exec("BEGIN IMMEDIATE");
+    try {
+      runSystemRules(f.store, f.id, f.clock);
+    } finally {
+      other.database.exec("ROLLBACK");
+    }
+    expect(f.state().events).toEqual(settled.events);
+    f.store.database.exec("PRAGMA busy_timeout = 5000");
+    other.database.exec("PRAGMA busy_timeout = 0");
+    let free: boolean | undefined;
+    const posted = runSystemCommand(
+      f.store,
+      f.id,
+      (state, actor, ports) => {
+        other.database.exec("BEGIN IMMEDIATE");
+        other.database.exec("ROLLBACK");
+        free = true;
+        return {
+          ok: true,
+          value: {
+            data: state.cards.length,
+            changes: [],
+            timeline: [],
+            token_requests: [],
+            events: [
+              {
+                id: ports.ids.nextEventId(),
+                seq: ports.ids.nextEventSequence(f.id),
+                type: "pm_coordination_started",
+                actor,
+                created_at: ports.clock.now(),
+                payload: {},
+              },
+            ],
+          },
+        };
+      },
+      f.clock,
+    );
+    expect(free).toBe(true);
+    expect(posted).toEqual({ ok: true, value: 1 });
+    expect(f.state().events).toHaveLength(settled.events.length + 1);
+  } finally {
+    other.close();
+  }
 });
