@@ -68,14 +68,20 @@ export const PROJECT_STREAM_RETENTION: ReadonlyMap<
     {
       kind: "latest",
       key: (e) => {
-        const p = (e.payload ?? {}) as Record<string, unknown>;
+        const p =
+          e.payload && typeof e.payload === "object"
+            ? (e.payload as Record<string, unknown>)
+            : {};
+        // Presence is part of the key: the reader compares with ===, so a
+        // missing field and an explicit null must never share a key.
+        const field = (name: string) => [name in p, p[name]];
         return JSON.stringify([
           e.actor.kind,
           e.actor.project_id,
           Array.isArray(e.payload),
-          p.assignment_id,
-          p.machine_id,
-          p.branch,
+          field("assignment_id"),
+          field("machine_id"),
+          field("branch"),
         ]);
       },
     },

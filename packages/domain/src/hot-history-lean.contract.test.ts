@@ -242,6 +242,17 @@ test("retention rules only name project-stream types and protect what they must"
   const onCard = { ...backup("A-1", "b", "3"), card_id: c1 };
   expect([...projectStreamDropped([a, b, onCard], new Set())]).toEqual([a.id]);
   expect([...projectStreamDropped([a, b], new Set([a.id]))]).toEqual([]);
+  // A missing field and an explicit null never share a key (the reader uses ===).
+  const missing = event("assignment_branch_backed_up", undefined, {
+    assignment_id: "A-1",
+    machine_id: "local",
+  });
+  const nulled = event("assignment_branch_backed_up", undefined, {
+    assignment_id: "A-1",
+    machine_id: "local",
+    branch: null,
+  });
+  expect([...projectStreamDropped([missing, nulled], new Set())]).toEqual([]);
   expect(
     commandRunIds([{ resume_when: { target_id: "77" } }, 5, "x", 0]),
   ).toEqual(["77", "5"]);

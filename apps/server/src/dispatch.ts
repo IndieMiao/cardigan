@@ -532,13 +532,18 @@ export class Dispatcher {
     // state in a read slice of its own, then yield, so the first write
     // transaction does not add that work to one long main-thread pause.
     if (!this.warmed.has(project)) {
-      this.warmed.add(project);
-      while (!step("warm_events", () => store.warmCommandEvents(project)))
+      try {
+        while (!step("warm_events", () => store.warmCommandEvents(project)))
+          await yieldToLoop();
         await yieldToLoop();
-      await yieldToLoop();
-      step("warm_state", () =>
-        store.uow.read((tx) => this.loadState(tx, project)),
-      );
+        step("warm_state", () =>
+          store.uow.read((tx) => this.loadState(tx, project)),
+        );
+      } catch {
+        // Best effort: the first reader decodes whatever is left.
+      } finally {
+        this.warmed.add(project);
+      }
       await yieldToLoop();
     }
     step("patrol_host_ops", () =>
