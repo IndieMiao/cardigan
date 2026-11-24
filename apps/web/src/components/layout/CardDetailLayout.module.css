@@ -187,11 +187,6 @@
   .page :global(.long-body) {
     line-height: var(--ui-leading);
   }
-  .page :global(.card-timeline-heading) {
-    display: flex;
-    justify-content: flex-end;
-    margin-bottom: var(--ui-space-2);
-  }
   .page :global(.timeline-controls) {
     display: flex;
     flex-wrap: wrap;

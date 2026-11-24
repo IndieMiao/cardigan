@@ -1,0 +1,12 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  .feedback :global(.request-feedback-region) {
+    position: static;
+    align-items: stretch;
+    max-width: none;
+    max-height: none;
+  }
+  .feedback:has(:global(.request-feedback):not(:empty)) {
+    margin-top: var(--ui-space-3);
+  }
+}
