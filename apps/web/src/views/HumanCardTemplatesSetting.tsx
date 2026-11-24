@@ -36,12 +36,15 @@ function changesOf(from: readonly string[], next: readonly string[]) {
  */
 export function HumanCardTemplatesSetting({
   allowed,
+  active,
   client,
   projectId,
   saved,
   source,
 }: {
   allowed: readonly string[] | undefined;
+  /** The panel is shown: template titles are read only then. */
+  active: boolean;
   client: CardiganClient;
   projectId: string;
   saved: () => void;
@@ -49,6 +52,8 @@ export function HumanCardTemplatesSetting({
 }) {
   const templates = useResource(
     useCallback(() => client.templates(projectId), [client, projectId]),
+    0,
+    active,
   );
   // The list the dialog's draft started from: the save is a diff against it.
   const basis = useRef<readonly string[]>(allowed ?? DEFAULT);

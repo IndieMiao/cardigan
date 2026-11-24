@@ -355,6 +355,7 @@ export function SettingsPage({
                 <HumanCardTemplatesSetting
                   key={`human-card-templates:${projectId}`}
                   allowed={data.human_card_templates}
+                  active={tab === "preferences"}
                   {...common}
                 />
                 <AutoMergeSetting
