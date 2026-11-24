@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
+import { FullIdProvider } from "../full-id.js";
 import { ID_TYPES, UNKNOWN_ID_TYPE } from "../id-types.js";
 import { linkifyReferences } from "../refs.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
@@ -136,4 +137,34 @@ test("every shared palette meets normal-text AA in both themes", () => {
       ).toBeGreaterThanOrEqual(4.5);
     }
   }
+});
+
+test("C-674: full numbers keep their type, and Needs You pages show them", () => {
+  render(
+    <>
+      <IdTag id="SEN-C-34" />
+      <IdTag id="SEN-C-34#2" />
+      <FullIdProvider code="CDG">
+        <IdTag id="Q-12" />
+        <IdTag id="E-2" />
+      </FullIdProvider>
+      <IdTag id="H-3" />
+    </>,
+  );
+  expect(screen.getByText("SEN-C-34").className).toBe("id-badge id-type-card");
+  expect(screen.getByText("SEN-C-34#2").parentElement?.textContent).toBe(
+    "SEN-C-34#2 时间线条目",
+  );
+  expect(screen.getByText("CDG-Q-12").className).toBe(
+    "id-badge id-type-decision",
+  );
+  // Global numbers never get a project prefix; outside the provider ids stay short.
+  expect(screen.getByText("E-2")).toBeTruthy();
+  expect(screen.getByText("H-3")).toBeTruthy();
+  const { container } = render(
+    <Markdown body="[SEN-C-34 卡片](#/p/sensen-godot/cards/C-34)" />,
+  );
+  expect(container.querySelector(".id-type-card")?.textContent).toBe(
+    "SEN-C-34",
+  );
 });

@@ -13,6 +13,7 @@ import type {
   MergeCheckBlocker,
   MergeCheckView,
   ProjectId,
+  ResolvedReference,
   Run,
   RunQueuePosition,
   TimelineEntry,
@@ -35,6 +36,7 @@ import {
   deriveReviewMatrix,
   effectivePreMergeChecks,
   eventById,
+  extractQualifiedReferences,
   extractReferences,
   hasVerifiedMergeNoop,
   humanMergeBlockers,
@@ -91,6 +93,10 @@ import {
 } from "./card-checking.js";
 import { cardDependencyGraph } from "./card-dependencies.js";
 import { PAGE_LIMITS } from "./pagination.js";
+import type {
+  QualifiedReferenceResolver,
+  QualifiedResolvedReference,
+} from "./qualified-refs.js";
 import {
   assignmentPresence,
   precheckIndex,
@@ -863,6 +869,8 @@ export function cardDetail(
     readonly mergeState?: CommandState | undefined;
     /** C-567: other cards' precheck events that this card's waits point to. */
     readonly precheckEvents?: readonly Event[];
+    /** C-674: resolves full numbers (`SEN-C-34`) in other projects. */
+    readonly qualifiedReferences?: QualifiedReferenceResolver;
   } = {},
 ) {
   if (options.dependencyState) {
@@ -1014,12 +1022,34 @@ export function cardDetail(
       ].join("\n"),
     ).map((ref) => [`${ref.kind}:${ref.id}`, ref]),
   );
-  const references = (body: string) =>
-    extractReferences(body).flatMap((ref) => {
+  const qualified = new Map(
+    (
+      options.qualifiedReferences?.(
+        extractQualifiedReferences(
+          [
+            description,
+            ...timeline.map((e) => e.body),
+            ...conclusionEntries.map((e) => e.body),
+          ].join("\n"),
+        ),
+      ) ?? []
+    ).map((ref) => [ref.id, ref]),
+  );
+  const references = (
+    body: string,
+  ): readonly (ResolvedReference | QualifiedResolvedReference)[] => [
+    ...extractReferences(body).flatMap((ref) => {
       const value =
         ref.kind === "pr" ? undefined : resolved.get(`${ref.kind}:${ref.id}`);
       return value ? [value] : [];
-    });
+    }),
+    ...(qualified.size
+      ? extractQualifiedReferences(body).flatMap((ref) => {
+          const value = qualified.get(ref.qualified);
+          return value ? [value] : [];
+        })
+      : []),
+  ];
   const events = state.events.filter((event) => event.card_id === card_id);
   const eventBySeq = new Map(events.map((event) => [event.seq, event]));
   // C-136: deliveries and reviews carry no timestamp; read it off the event

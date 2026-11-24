@@ -68,7 +68,18 @@ beforeEach(async () => {
       throw new Error("card commands must not spawn");
     },
   };
-  expect(await run(["project", "create", project])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      project,
+      "--code",
+      `T${project
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   await createCard();
   store = Store.open({ dataDir });
 });
@@ -370,7 +381,18 @@ test.each([{ ids: [] }, { ids: ["W-1"] }, { ids: ["C-99"] }])(
 
 test("explicit project overrides the environment and ambiguous projects fail", async () => {
   const otherProject = "p-other" as ProjectId;
-  expect(await run(["project", "create", otherProject])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      otherProject,
+      "--code",
+      `T${otherProject
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   await createCard(otherProject);
   io.env.CARDIGAN_PROJECT = otherProject;
   expect(
@@ -554,7 +576,18 @@ test.each([
 
 test("does not resolve a replacement from another project and rolls back cancellation", async () => {
   const otherProject = "p-other" as ProjectId;
-  expect(await run(["project", "create", otherProject])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      otherProject,
+      "--code",
+      `T${otherProject
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   await createCard(otherProject);
   await createCard(otherProject);
   const before = snapshot(),

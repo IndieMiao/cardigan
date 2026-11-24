@@ -120,7 +120,18 @@ function tokenFromOutput(): string {
 
 async function bootstrap(project = "p-work"): Promise<void> {
   expect(await run(["init"])).toBe(0);
-  expect(await run(["project", "create", project])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      project,
+      "--code",
+      `T${project
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   expect(
     await run([
       "role",
@@ -505,7 +516,9 @@ test("machine show reads persisted versions, verification times and health; MCP 
 
 test("machine updates atomically share physical descriptions while preserving each project's policy and audit", async () => {
   await bootstrap("project-a");
-  expect(await run(["project", "create", "project-b"])).toBe(0);
+  expect(await run(["project", "create", "project-b", "--code", "PRO0"])).toBe(
+    0,
+  );
   const store = Store.open({ dataDir });
   try {
     store.uow.run((tx) => {
@@ -1036,7 +1049,7 @@ test("office and ops are separate standing assignments with independent tokens",
 
 test("pm create only binds active project members, including when selected by name", async () => {
   await run(["init"]);
-  await run(["project", "create", "p-work"]);
+  await run(["project", "create", "p-work", "--code", "PWO"]);
   await run([
     "role",
     "add",
@@ -1077,7 +1090,7 @@ test("pm create only binds active project members, including when selected by na
 
 test("pm create --ops drops record_decision and needs the role to have it", async () => {
   expect(await run(["init"])).toBe(0);
-  await run(["project", "create", "p-work"]);
+  await run(["project", "create", "p-work", "--code", "PWO"]);
   await run([
     "role",
     "add",
@@ -1249,7 +1262,7 @@ test("assign --start hands off without printing a token", async () => {
 /** Create the two standing PM assignments (Office and Ops). */
 async function createPmPair(): Promise<void> {
   await run(["init"]);
-  await run(["project", "create", "p-work"]);
+  await run(["project", "create", "p-work", "--code", "PWO"]);
   await run([
     "role",
     "add",
@@ -1335,7 +1348,7 @@ test("pm start can start one mode and refuses when no PM exists", async () => {
   expect(calls).toEqual(["A-2"]);
 
   // A fresh project has no standing PM assignments yet.
-  expect(await run(["project", "create", "p-other"])).toBe(0);
+  expect(await run(["project", "create", "p-other", "--code", "POT"])).toBe(0);
   expect(await run(["pm", "start", "--project", "p-other"])).toBe(2);
   expect(errors.join("\n")).toContain("pm create");
 });
@@ -1630,7 +1643,8 @@ test("needs-you lists 知会 newest first and marks them read like the Workbench
     expect(text).toContain("方案 A。理由：second reason");
     expect(text.indexOf(newer)).toBeLessThan(text.indexOf(older));
     const ids = [
-      ...text.matchAll(/\[未读\] (\S+) {2}PM 代拍 {2}(\S+) {2}C-1/g),
+      // C-674: needs-you prints full numbers (`TPWO-Q-2  TPWO-C-1`).
+      ...text.matchAll(/\[未读\] (\S+) {2}PM 代拍 {2}TPWO-(\S+) {2}TPWO-C-1/g),
     ].map((m) => ({ id: m[1] as string, decision: m[2] }));
     expect(ids.map((n) => n.decision)).toEqual([newer, older]);
 
@@ -1723,17 +1737,17 @@ test("needs-you lists 知会 newest first and marks them read like the Workbench
       "超时自动合并",
       "PM 合并确认停留",
     ])
-      expect(printed()).toContain(`  ${label}  ${newer}`);
+      expect(printed()).toContain(`  ${label}  TPWO-${newer}`);
     const lines = printed().split("\n");
     const stallLine = lines.findIndex((line) =>
-      line.includes(`  PM 合并确认停留  ${newer}`),
+      line.includes(`  PM 合并确认停留  TPWO-${newer}`),
     );
     expect(lines[stallLine]).not.toContain("超时自动合并");
     expect(lines.slice(stallLine, stallLine + 3).join("\n")).toContain(
       "PM 持有的合并确认已停留 65 分钟（C-1）",
     );
     expect(
-      lines.filter((line) => line.includes(`超时自动合并  ${newer}`)),
+      lines.filter((line) => line.includes(`超时自动合并  TPWO-${newer}`)),
     ).toHaveLength(1);
   } finally {
     store.close();
@@ -1978,7 +1992,15 @@ test("assign excludes external Office employees while external rotation and ordi
 test("creating internal PM Ops excludes an unreleased external Office employee in another project", async () => {
   expect(await run(["init"])).toBe(0);
   for (const p of ["office", "ops"]) {
-    expect(await run(["project", "create", p])).toBe(0);
+    expect(
+      await run([
+        "project",
+        "create",
+        p,
+        "--code",
+        p.slice(0, 3).toUpperCase(),
+      ]),
+    ).toBe(0);
     expect(
       await run([
         "role",

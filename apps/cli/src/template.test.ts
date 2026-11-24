@@ -37,7 +37,9 @@ beforeEach(async () => {
       throw new Error("No Git needed");
     },
   };
-  expect(await main(["project", "create", "templates"], io)).toBe(0);
+  expect(
+    await main(["project", "create", "templates", "--code", "TEM"], io),
+  ).toBe(0);
   store = Store.open({ dataDir });
 });
 afterEach(() => {

@@ -23,7 +23,7 @@ import {
 } from "../../store/src/test-support.js";
 import { ExtMessageSender } from "./ext-message.js";
 import { FeishuApp } from "./feishu-app.js";
-import { enqueueOwnerMessage } from "./owner-message.js";
+import { enqueueOwnerMessage, ownerMessageText } from "./owner-message.js";
 
 const sample = [
   "Android 0.4.3 测试版",
@@ -190,7 +190,7 @@ test("release notes go from MCP to owner-only plain text after quiet hours, with
   await sender.tick();
   await sender.tick();
   expect(remote.text.mock.calls).toEqual([
-    ["owner-private", result.message_id, sample],
+    ["owner-private", result.message_id, `[FIX-C-1] ${sample}`],
   ]);
   expect(remote.create).not.toHaveBeenCalled();
   const s = store.uow.read((tx) => loadCommandState(tx, p));
@@ -268,7 +268,7 @@ test("the same release note is delivered with an HTTPS download and refused befo
   now += 8 * 3_600_000;
   await sender.tick();
   expect(remote.text.mock.calls).toEqual([
-    ["owner-private", result.message_id, https],
+    ["owner-private", result.message_id, `[FIX-C-1] ${https}`],
   ]);
   expect(statuses()).toEqual(["sent"]);
 });
@@ -334,4 +334,16 @@ test("a crash after the durable claim cannot cause a second dispatch", async () 
   await sender.tick();
   expect(statuses()).toEqual(["unknown"]);
   expect(remote.text).toHaveBeenCalledTimes(1);
+});
+
+test("C-674: owner messages lead with the card's full number once", () => {
+  expect(ownerMessageText("SEN", "C-34" as never, "发布了")).toBe(
+    "[SEN-C-34] 发布了",
+  );
+  expect(ownerMessageText("SEN", "C-34" as never, "SEN-C-34 发布了")).toBe(
+    "SEN-C-34 发布了",
+  );
+  expect(ownerMessageText(undefined, "C-34" as never, "发布了")).toBe(
+    "[C-34] 发布了",
+  );
 });

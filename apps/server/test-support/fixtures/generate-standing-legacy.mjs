@@ -49,7 +49,7 @@ try {
     }),
   );
   for (const args of [
-    ["project", "create", "legacy"],
+    ["project", "create", "legacy", "--code", "LEG"],
     ["role", "add", "--file", role],
     ["pm", "create", "--office"],
     ["pm", "create", "--ops"],

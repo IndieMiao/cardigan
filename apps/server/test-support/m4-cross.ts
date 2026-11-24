@@ -650,7 +650,16 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
     await writeFile(join(source, "shared.txt"), "base\n");
     git(source, "add", ".");
     git(source, "commit", "-qm", "Initial");
-    await cli("project", "create", project_id);
+    await cli(
+      "project",
+      "create",
+      project_id,
+      "--code",
+      `T${project_id
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    );
     await cli("project", "set-repo", "--path", source);
     for (const role_id of ["coder", "reviewer", "pm"] as const) {
       const file = join(root, `${role_id}.json`);

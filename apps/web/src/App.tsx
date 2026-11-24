@@ -20,6 +20,7 @@ import { ServiceUpdatingFeedback } from "./components/ServiceUpdatingFeedback.js
 import { NavIcon, SidebarNav } from "./components/SidebarNav.js";
 import * as Dialog from "./components/ui/dialog.js";
 import { SelectControl } from "./components/ui/select-control.js";
+import { FullIdProvider } from "./full-id.js";
 import {
   ActivityPage,
   CardDetailPage,
@@ -258,7 +259,9 @@ function Workbench({
         >
           {projects.projects.map((project) => (
             <option key={project.id} value={project.id}>
-              {project.name}
+              {project.code
+                ? `${project.name}（${project.code}）`
+                : project.name}
             </option>
           ))}
         </SelectControl>
@@ -454,14 +457,16 @@ function Workbench({
                 />
               )}
               {selected !== undefined && route?.kind === "needs-you" && (
-                <NeedsYouPage
-                  counts={needs}
-                  key={selected.id}
-                  client={client}
-                  projectId={selected.id}
-                  revision={live.revision}
-                  invalidation={live.needsKey}
-                />
+                <FullIdProvider code={selected.code}>
+                  <NeedsYouPage
+                    counts={needs}
+                    key={selected.id}
+                    client={client}
+                    projectId={selected.id}
+                    revision={live.revision}
+                    invalidation={live.needsKey}
+                  />
+                </FullIdProvider>
               )}
               {selected !== undefined && route?.kind === "merge-batch" && (
                 <MergeBatchPage

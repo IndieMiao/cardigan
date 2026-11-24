@@ -32,6 +32,7 @@ import {
   parseRuntimeUnknownGraceMs,
   projectPreferences,
   projectSnapshot,
+  qualifyId,
   runtimeUnknownDeferred,
   saveMachine,
   selectStandingEmployee,
@@ -1782,6 +1783,9 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
         };
       });
 
+    // C-674: numbers read outside the project carry its code (`CDG-C-34`).
+    const code = store.projectCode(project_id);
+    const full = (id: string) => qualifyId(code, id);
     const gateWarnings =
       gate.status === "invalid"
         ? ["合并闸门配置无效，请查看 server 启动日志"]
@@ -1792,7 +1796,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
           `还有 ${waiting.length} 条合并确认的检查在排队或运行中，检查结束后会出现在这里：${waiting
             .map(
               (w) =>
-                `${w.card_id ? `${w.card_id} ` : ""}${w.decision_id}${w.check_status ? `（${checkLabels[w.check_status]}）` : ""}`,
+                `${w.card_id ? `${full(w.card_id)} ` : ""}${full(w.decision_id)}${w.check_status ? `（${checkLabels[w.check_status]}）` : ""}`,
             )
             .join("、")}`,
         ]
@@ -1812,7 +1816,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
           `PM 代确认中的合并（${held.length}，不需要你处理；也可以直接处理）`,
           ...held.map((q) =>
             [
-              `  ${q.id}  ${q.card_id ?? "项目"}`,
+              `  ${full(q.id)}  ${q.card_id ? full(q.card_id) : "项目"}`,
               `    ${q.question}`,
               ...snoozeLines(q),
               ...(q.card_id
@@ -1847,7 +1851,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       lines.push(`拍板落实（${followups.length}）`);
       for (const q of followups)
         lines.push(
-          `  ${q.id}  ${q.card_id ?? "项目"}\n    ${q.followup_notice}\n    已选方案：${q.resolution?.option}\n    请安排落实，并在时间线引用 ${q.id} 记录结果。`,
+          `  ${full(q.id)}  ${q.card_id ? full(q.card_id) : "项目"}\n    ${q.followup_notice}\n    已选方案：${q.resolution?.option}\n    请安排落实，并在时间线引用 ${q.id} 记录结果。`,
         );
     }
     if (pending.length > 0) {
@@ -1858,7 +1862,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
           : undefined;
         lines.push(
           [
-            `  ${decision.id}${decision.card_id === undefined ? "" : `  ${decision.card_id}`}`,
+            `  ${full(decision.id)}${decision.card_id === undefined ? "" : `  ${full(decision.card_id)}`}`,
             `    ${decision.question}`,
             ...(decision.human_required_reason
               ? [`    须由你亲自决定：${decision.human_required_reason}`]
@@ -1895,7 +1899,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       lines.push(`运行环境失联（${incidents.length}，需要你决定是否接管）`);
       for (const assignment of incidents)
         lines.push(
-          `  ${assignment.id}  ${assignment.role_id} v${assignment.role_version}  runtime=${assignment.runtime_state}${assignment.worktree_path === undefined ? "" : `  worktree=${assignment.worktree_path}`}`,
+          `  ${full(assignment.id)}  ${assignment.role_id} v${assignment.role_version}  runtime=${assignment.runtime_state}${assignment.worktree_path === undefined ? "" : `  worktree=${assignment.worktree_path}`}`,
         );
     }
     if (actions.length > 0) {
@@ -1903,13 +1907,13 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       for (const action of actions) {
         if (action.completion_notice !== undefined) {
           lines.push(
-            `  ${action.id}  ${action.card_id ?? "项目"}\n    ${action.why}\n    执行结果：${action.completion_notice}\n    请恢复发起方或启动项目的 PM Ops。`,
+            `  ${full(action.id)}  ${action.card_id ? full(action.card_id) : "项目"}\n    ${action.why}\n    执行结果：${action.completion_notice}\n    请恢复发起方或启动项目的 PM Ops。`,
           );
           continue;
         }
         lines.push(
           [
-            `  ${action.id}${action.card_id === undefined ? "" : `  ${action.card_id}`}`,
+            `  ${full(action.id)}${action.card_id === undefined ? "" : `  ${full(action.card_id)}`}`,
             ...(action.handoff
               ? [
                   `    ${action.triage === "host" ? (action.host_operator === "external" ? "主机操作（外接操作员）：" : "主机操作：") : ""}${action.handoff.title}（项目经理已改写）`,
@@ -1930,10 +1934,10 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
     }
     if (later.length > 0)
       lines.push(
-        `稍后（${later.length}，还没到时机）：${later.map((item) => `${item.id}（${item.waiting_for}）`).join("、")}`,
+        `稍后（${later.length}，还没到时机）：${later.map((item) => `${full(item.id)}（${item.waiting_for}）`).join("、")}`,
       );
     lines.push(...heldLines);
-    if (noticeList.length > 0) lines.push(...noticeLines(noticeList));
+    if (noticeList.length > 0) lines.push(...noticeLines(noticeList, full));
     io.stdout(lines.join("\n"));
     return EXIT.ok;
   } finally {
@@ -1947,7 +1951,10 @@ type NoticeList = ReturnType<typeof notices>;
 const NOTICE_LIMIT = 50;
 
 /** §7.4 知会 section: delegated merges and decisions, informational only. */
-function noticeLines(all: NoticeList): string[] {
+function noticeLines(
+  all: NoticeList,
+  full: (id: string) => string = (id) => id,
+): string[] {
   const unread = all.filter((n) => !n.read).length;
   const shown = all.slice(0, NOTICE_LIMIT);
   const lines = [
@@ -1970,7 +1977,7 @@ function noticeLines(all: NoticeList): string[] {
           : "PM 代拍";
     lines.push(
       [
-        `  ${n.read ? "[已读]" : "[未读]"} ${n.id}  ${label}  ${n.decision_id}${n.card_id ? `  ${n.card_id}` : ""}  ${n.at}`,
+        `  ${n.read ? "[已读]" : "[未读]"} ${n.id}  ${label}  ${n.decision_id ? full(n.decision_id) : n.decision_id}${n.card_id ? `  ${full(n.card_id)}` : ""}  ${n.at}`,
         ...(n.question ? [`    ${n.question}`] : []),
         `    ${n.body}`,
       ].join("\n"),

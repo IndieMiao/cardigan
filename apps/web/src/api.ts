@@ -65,6 +65,8 @@ export interface ProjectSummary {
   readonly id: string;
   readonly name: string;
   readonly created_at: string;
+  /** C-674: display code full numbers are written with (`SEN-C-34`). */
+  readonly code?: string | null;
 }
 
 export interface WaitingOnItem {
@@ -291,6 +293,12 @@ export interface ResolvedReference {
   readonly exists: boolean;
   readonly status: string | null;
   readonly card_id?: string;
+  /**
+   * C-674: a full number (`SEN-C-34`) names its project; `id` is the text as
+   * written and `local_id` the project-scoped number the link points at.
+   */
+  readonly project_id?: string;
+  readonly local_id?: string;
 }
 
 /** A reference an Agent put in a body, as stored on the entry itself. */

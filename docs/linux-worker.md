@@ -9,7 +9,7 @@
 CLI 安装见 [部署说明](../deploy/README.md#安装-cardigan-命令)。使用人类终端，不设置 `CARDIGAN_TOKEN`、`MCP_TOKEN` 或 `--token-file`。项目需已存在：
 
 ```sh
-cardigan project create example
+cardigan project create example --code EXA
 cardigan worker add --project example --machine worker-a --host worker.invalid --dry-run
 ```
 

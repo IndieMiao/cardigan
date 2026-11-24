@@ -13,6 +13,7 @@ import {
   readPrecheckAttempts,
 } from "./card-checking.js";
 import { readCardDependencies } from "./card-dependencies.js";
+import { qualifiedReferenceResolver } from "./qualified-refs.js";
 import { cardDetail, cardListViews } from "./read.js";
 import { withSuggestionProgress } from "./sql-state.js";
 
@@ -176,6 +177,7 @@ export function readCardDetail(
         : [...events, ...relatedEvents],
     });
     return cardDetail(detailState, card_id, {
+      qualifiedReferences: qualifiedReferenceResolver(store),
       ...options,
       dependencyState: readCardDependencies(store, tx, project_id),
       precheckEvents: readPrecheckAttempts(
