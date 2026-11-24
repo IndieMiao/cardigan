@@ -1103,6 +1103,8 @@ async function launch(
     const mcpSessionKey = host.verifyMcpSession
       ? randomBytes(24).toString("base64url")
       : undefined;
+    // C-676: the session learns its project's code for full numbers.
+    const projectCode = host.store.projectCode(project);
     const compiled = compileAssignmentLaunch({
       ...(employee !== undefined
         ? { employee: { launch_profile_ref: profileRef, identity: employee } }
@@ -1111,6 +1113,7 @@ async function launch(
         assignment_id: assignment.id,
         run_id: input.run.id,
         project_id: project,
+        ...(projectCode === undefined ? {} : { project_code: projectCode }),
         ...(card?.id === undefined ? {} : { card_id: card.id }),
         ...(workItem?.id === undefined ? {} : { work_item_id: workItem.id }),
       },

@@ -245,6 +245,8 @@ test("R02: whoami ignores forged identity and returns the Token's complete conte
     machine_id: "local",
     worktree_path: "/fixture/alpha/1",
     branch: "agent/C-1/W-1",
+    // C-676: the session can write its project's full numbers (`ALP-C-1`).
+    project_code: "ALP",
   });
   expect(JSON.stringify(identity)).not.toContain(token);
 });

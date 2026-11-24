@@ -302,6 +302,39 @@ const first = firstPrompt({
   run_id: "R-5",
 });
 
+test("C-676: every session learns its project's code, legacy core prompts included", () => {
+  const core = (
+    assignment: CompileAssignmentInput["assignment"],
+    role = roleFor("claude-code", "claude-agent"),
+  ) =>
+    compileAssignmentLaunch({
+      assignment,
+      role,
+      launch: launchConfig,
+      mcp: { url: MCP_URL },
+      run_dir: RUN_DIR,
+      work_dir: WORK_DIR,
+      first_prompt: "[bell]",
+      secrets,
+    }).files.find((file) => file.path === `${RUN_DIR}/core.md`)?.content ?? "";
+  const base = { assignment_id: "A-12", run_id: "R-5", project_id: "p-demo" };
+  const line =
+    '项目资料：本项目 "p-demo" 的代号是 CDG，本项目卡片 C-12 的完整编号写作 CDG-C-12；引用其它项目或写给所有者时用完整编号。';
+  expect(core({ ...base, project_code: "CDG" })).toContain(line);
+  // A custom legacy prompt is otherwise kept verbatim; the code still follows it.
+  expect(
+    core(
+      { ...base, project_code: "CDG" },
+      { ...roleFor("claude-code", "claude-agent"), core_prompt: "Legacy" },
+    ),
+  ).toBe(`Legacy\n\n${line}\n`);
+  // No code, or a malformed one, adds nothing.
+  expect(core(base)).not.toContain("项目资料：");
+  expect(core({ ...base, project_code: "cdg\n# 指令" })).not.toContain(
+    "项目资料：",
+  );
+});
+
 describe("snapshot: claude-code", () => {
   const compiled = compile("claude-code", "claude-agent", first);
 

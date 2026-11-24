@@ -8,7 +8,7 @@ import {
   eventsForHumanAction,
 } from "./event-index.js";
 import type { CardId, EventId, ProjectId } from "./ids.js";
-import { qualifyId } from "./project-code.js";
+import { qualifyId, qualifyText } from "./project-code.js";
 import { NEEDS_YOU_ITEM_READY, needsYouItemReady } from "./readiness.js";
 
 export const EXT_MESSAGE_DEFAULTS = {
@@ -148,9 +148,10 @@ export function buildExtMessage(
     human_action: "有新的待你执行事项",
     notice: "有新的知会",
   };
-  const title = (item.title?.trim() || labels[item.kind]).replace(
-    /[\p{Cc}\p{Cf}]/gu,
-    " ",
+  // C-676: short numbers in the title read as this project's full numbers.
+  const title = qualifyText(
+    code,
+    (item.title?.trim() || labels[item.kind]).replace(/[\p{Cc}\p{Cf}]/gu, " "),
   );
   const local = item.card_id ?? item.item_id;
   const ref = qualifyId(code, local);

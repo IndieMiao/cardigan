@@ -8,6 +8,7 @@ import {
   ownerTextError,
   type ProjectId,
   qualifyId,
+  qualifyText,
 } from "@cardigan/domain";
 import {
   digestFeishu,
@@ -30,7 +31,7 @@ const hour = 3_600_000;
 /**
  * C-674: the owner reads messages from every project in one chat, so each
  * one leads with the card's full number (`[SEN-C-34]`) unless the author
- * already put it first.
+ * already put it first. C-676: short numbers in the body become full numbers.
  */
 export function ownerMessageText(
   code: string | undefined,
@@ -38,10 +39,11 @@ export function ownerMessageText(
   body: string,
 ): string {
   const ref = qualifyId(code, card);
-  return body.trimStart().startsWith(ref) ||
-    body.trimStart().startsWith(`[${ref}]`)
-    ? body
-    : `[${ref}] ${body}`;
+  const text = qualifyText(code, body);
+  return text.trimStart().startsWith(ref) ||
+    text.trimStart().startsWith(`[${ref}]`)
+    ? text
+    : `[${ref}] ${text}`;
 }
 const limit = 6;
 type Row = {

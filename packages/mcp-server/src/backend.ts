@@ -177,6 +177,8 @@ export interface McpBackend {
     | {
         readonly repo_path: string | null;
         readonly base_branch: string | null;
+        /** C-674: the project's code (`CDG`); null before one is registered. */
+        readonly code?: string | null;
       }
     | undefined;
   /** Cache lookup, command and response recording share one write transaction. */

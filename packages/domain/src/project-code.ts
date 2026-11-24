@@ -147,3 +147,20 @@ export function extractQualifiedReferences(
   }
   return [...refs.values()];
 }
+
+/**
+ * C-676: text that leaves its project (owner messages, Feishu titles) loses
+ * the project context, so short numbers get the project's code: `C-34` →
+ * `SEN-C-34`. Full numbers, global ids (`E-n`, `M-n`) and ids inside paths or
+ * URLs (`docs/plans/C-34.md`, `?at=C-34`) stay as written.
+ */
+export function qualifyText(
+  code: string | null | undefined,
+  text: string,
+): string {
+  if (!code || !isProjectCode(code)) return text;
+  return text.replace(
+    /(?<![A-Za-z0-9_/=-])(?:C-[1-9][0-9]*(?:#[1-9][0-9]*)?|(?:MB|[WDARVQH])-[1-9][0-9]*)(?![A-Za-z0-9_#-])/gu,
+    (id) => `${code}-${id}`,
+  );
+}
