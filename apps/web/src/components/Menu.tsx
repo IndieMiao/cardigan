@@ -16,6 +16,11 @@ export type MenuItem =
       readonly checked: boolean;
       readonly onCheckedChange: (checked: boolean) => void;
       readonly disabled?: boolean;
+    }
+  | {
+      /** A divider before a group, e.g. ahead of a destructive item. */
+      readonly id: string;
+      readonly kind: "separator";
     };
 
 export interface MenuProps {
@@ -54,7 +59,9 @@ export function Menu({
             </DropdownMenu.Label>
           )}
           {items.map((item) =>
-            item.kind === "checkbox" ? (
+            item.kind === "separator" ? (
+              <DropdownMenu.Separator key={item.id} />
+            ) : item.kind === "checkbox" ? (
               <DropdownMenu.CheckboxItem
                 key={item.id}
                 className="menu-checkbox"

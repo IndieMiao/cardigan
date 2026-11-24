@@ -15,10 +15,7 @@ import {
 } from "../components/layout/DataTableLayout.js";
 import { DialogFeedback } from "../components/layout/DialogFeedbackLayout.js";
 import { PageHeader } from "../components/layout/PageHeader.js";
-import {
-  SettingsDialogFields,
-  useDiscardGuard,
-} from "../components/layout/SettingsLayout.js";
+import { useDiscardGuard } from "../components/layout/SettingsLayout.js";
 import { Feedback, Markdown } from "../components/Operations.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Button } from "../components/ui/button.js";
@@ -26,6 +23,7 @@ import {
   Dialog,
   DialogBody,
   DialogContent,
+  DialogFields,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -285,7 +283,7 @@ function ReleaseNoteEditor({
             </DialogTitle>
           </DialogHeader>
           <DialogBody>
-            <SettingsDialogFields>
+            <DialogFields>
               <label>
                 正文
                 <Textarea
@@ -305,17 +303,17 @@ function ReleaseNoteEditor({
                   onChange={(event) => setDraft(event.target.value)}
                 />
               </label>
-            </SettingsDialogFields>
+            </DialogFields>
+            <DialogFeedback>
+              <RequestFeedback
+                pending={saving}
+                interactive
+                pendingMessage="正在保存…"
+                error={error}
+                retry={saving ? undefined : () => void save()}
+              />
+            </DialogFeedback>
           </DialogBody>
-          <DialogFeedback>
-            <RequestFeedback
-              pending={saving}
-              interactive
-              pendingMessage="正在保存…"
-              error={error}
-              retry={saving ? undefined : () => void save()}
-            />
-          </DialogFeedback>
           <DialogFooter>
             <Button
               type="button"
