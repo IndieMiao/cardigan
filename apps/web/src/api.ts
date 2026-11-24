@@ -1136,6 +1136,46 @@ export interface NeedsCounts {
   >;
 }
 
+/** C-712 release note for one published version, as the Workbench reads it. */
+export interface ReleaseNoteView {
+  readonly version: string;
+  readonly version_code: number | null;
+  readonly decision_id: string | null;
+  readonly body: string;
+  /** Raw author of the current revision (`human`, `assignment:A-1`…). */
+  readonly author: string;
+  /** Present on reads; a write's returned note carries only `author`. */
+  readonly author_view?: AuthorView;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly revision: number;
+}
+
+/** One version on the release-note list; `note: null` is not written yet. */
+export interface ReleaseNoteEntryView {
+  readonly version: string;
+  readonly version_code: number | null;
+  readonly decision_id: string | null;
+  readonly published_at: string | null;
+  readonly note: ReleaseNoteView | null;
+}
+
+export interface ReleaseNotesData {
+  readonly entries: readonly ReleaseNoteEntryView[];
+}
+
+export interface WriteReleaseNoteInput {
+  readonly version: string;
+  readonly body: string;
+  /** Revision the person edited (0 for a new note); a mismatch is rejected. */
+  readonly base_revision: number;
+}
+
+export interface WriteReleaseNoteResult {
+  readonly note: ReleaseNoteView;
+  readonly changed: boolean;
+}
+
 export interface SnapshotData {
   readonly cards: readonly CardView[];
   readonly in_progress: readonly CardView[];
@@ -2529,6 +2569,13 @@ export interface CardiganClient {
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void;
   activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
   snapshot(projectId: string): Promise<SnapshotData>;
+  /** C-713: every published version and its release note, newest first. */
+  releaseNotes(projectId: string): Promise<ReleaseNotesData>;
+  writeReleaseNote(
+    projectId: string,
+    input: WriteReleaseNoteInput,
+    idempotencyKey: string,
+  ): Promise<WriteReleaseNoteResult>;
   executionCapacity(projectId: string): Promise<ExecutionCapacity>;
   setRunLimit(
     projectId: string,
@@ -3164,6 +3211,21 @@ export class HttpCardiganClient implements CardiganClient {
   snapshot(projectId: string): Promise<SnapshotData> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/snapshot`,
+    );
+  }
+  releaseNotes(projectId: string): Promise<ReleaseNotesData> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/release-notes`,
+    );
+  }
+  writeReleaseNote(
+    projectId: string,
+    input: WriteReleaseNoteInput,
+    idempotencyKey: string,
+  ): Promise<WriteReleaseNoteResult> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/release-notes`,
+      { method: "POST", body: JSON.stringify(input), idempotencyKey },
     );
   }
   executionCapacity(projectId: string): Promise<ExecutionCapacity> {

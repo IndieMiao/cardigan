@@ -88,6 +88,7 @@ test("wide sidebar: Needs You first with its count, then 卡片, 观察 and tool
     "项目动态",
     "拍板记录",
     "项目快照",
+    "发版说明",
   ]);
   // Every entry carries one decorative line icon next to its label.
   for (const link of links) {
@@ -99,7 +100,7 @@ test("wide sidebar: Needs You first with its count, then 卡片, 观察 and tool
   const headings = within(sidebar).getAllByRole("heading");
   expect(headings.map((heading) => heading.textContent)).toEqual(["观察"]);
   const group = headings[0]?.closest(".nav-group") as HTMLElement;
-  expect(within(group).getAllByRole("link")).toHaveLength(4);
+  expect(within(group).getAllByRole("link")).toHaveLength(5);
 
   const tools = within(sidebar).getByRole("navigation", { name: "工具" });
   expect(within(tools).getByRole("link", { name: "设置" })).toBeTruthy();

@@ -25,6 +25,9 @@ import {
   attachmentQuery,
   attachmentRefKind,
   attachmentTarget,
+  checkUpload,
+  type FileProblem,
+  fileLabel,
   formatBytes,
   formatMiB,
   insertAttachmentRef,
@@ -34,14 +37,13 @@ import {
   toBase64,
   UPLOAD_ACCEPT,
   uploadFilename,
-  uploadMime,
-  uploadProblem,
 } from "../attachment-refs.js";
 import { renderMarkdown } from "../markdown.js";
 import { useAttachmentRefs } from "../useAttachmentRefs.js";
 import { type MeasuredVideo, measureVideo } from "../video-probe.js";
 import { AttachmentRefBody } from "./AttachmentRefBody.js";
 import { EmployeeFace } from "./EmployeeIdentity.js";
+import { LargeFileRoute } from "./LargeFileRoute.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
 import { FileChip, FileChipList, FileProblems } from "./ui/file-chip.js";
@@ -144,9 +146,7 @@ export function CommentBox({
   const [tab, setTab] = useState<"write" | "preview">("write");
   const [files, setFiles] = useState<readonly PendingFile[]>([]);
   const nextDraft = useRef(1);
-  const [problems, setProblems] = useState<
-    readonly { readonly name: string; readonly reason: string }[]
-  >([]);
+  const [problems, setProblems] = useState<readonly FileProblem[]>([]);
   const [dragging, setDragging] = useState(false);
   // The comment of this draft was accepted but some files are not uploaded:
   // the files keep their order, as the body numbers them by it.
@@ -201,8 +201,14 @@ export function CommentBox({
       })),
     );
   };
+  // C-717: the file chooser takes focus while open; the picker must stay.
+  const [choosing, setChoosing] = useState(false);
   const expanded =
-    focused || body.length > 0 || files.length > 0 || problems.length > 0;
+    focused ||
+    choosing ||
+    body.length > 0 ||
+    files.length > 0 ||
+    problems.length > 0;
 
   useImperativeHandle(
     ref,
@@ -482,21 +488,26 @@ export function CommentBox({
   /** Add the files the server takes; say why the others were left out. */
   function addFiles(chosen: readonly File[]): void {
     const accepted: PendingFile[] = [];
-    const rejected: { name: string; reason: string }[] = [];
+    const rejected: FileProblem[] = [];
     for (const file of chosen) {
-      const mime = uploadMime(file);
-      const problem =
-        mime && isVideoType(mime) && !client.uploadVideo
-          ? "不支持上传视频"
-          : uploadProblem(file, attachmentLimit ?? null, videoLimit ?? null);
-      if (problem || !mime)
-        rejected.push({ name: file.name || file.type, reason: problem ?? "" });
+      const checked = checkUpload(file, {
+        maxBytes: attachmentLimit ?? null,
+        videoMaxBytes: videoLimit ?? null,
+        video: !!client.uploadVideo,
+      });
+      const { mime } = checked;
+      if (mime === undefined)
+        rejected.push({
+          name: fileLabel(file),
+          reason: checked.reason,
+          ...(checked.oversize ? { oversize: true } : {}),
+        });
       else
         accepted.push({
           id: crypto.randomUUID(),
           draft: nextDraft.current++,
           idempotencyKey: crypto.randomUUID(),
-          name: file.name || file.type,
+          name: fileLabel(file),
           mime,
           file,
           note: "",
@@ -730,7 +741,10 @@ export function CommentBox({
       className="comment-box ui-drop-target"
       aria-label="写评论"
       data-dragging={dragging ? "" : undefined}
-      onFocus={() => setFocused(true)}
+      onFocus={() => {
+        setFocused(true);
+        setChoosing(false);
+      }}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
           setFocused(false);
@@ -793,6 +807,7 @@ export function CommentBox({
             accept={UPLOAD_ACCEPT}
             disabled={submitting}
             onFiles={addFiles}
+            onChoosing={setChoosing}
           />
         </div>
       )}
@@ -939,7 +954,10 @@ export function CommentBox({
           ))}
         </FileChipList>
       )}
-      <FileProblems problems={problems} />
+      <FileProblems
+        problems={problems}
+        oversize={<LargeFileRoute projectId={projectId} />}
+      />
 
       <RequestFeedback
         interactive

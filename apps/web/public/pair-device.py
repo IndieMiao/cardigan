@@ -19,6 +19,10 @@ do, asks for "yes" and only then runs it with `sudo python3 -IB -` from
 standard input, so the script is never written to disk. The result is
 reported to the Workbench, which starts the wizard's recheck. `--no-init`
 stops after the code is confirmed, as before.
+
+C-709: it also prints this device's SSH host key as the control host's
+worker-known-hosts line, hints when no SSH server listens or the device runs
+on battery, and authenticates sudo before running the script.
 """
 
 import argparse
@@ -262,6 +266,51 @@ def device_facts(address):
     return facts
 
 
+def readiness_hints(facts):
+    """C-709: things a new worker commonly lacks (SteamOS ships with sshd off);
+    printed as hints only, never stop the pairing."""
+    hints = []
+    try:
+        with socket.create_connection(("127.0.0.1", 22), timeout=2):
+            pass
+    except OSError:
+        hints.append(
+            "本机 22 端口没有 SSH 服务，控制主机要经 SSH 连接这台设备。"
+            "SteamOS 等默认关闭 sshd 的系统可运行：sudo systemctl enable --now sshd"
+        )
+    if facts["os"] == "linux":
+        mains = []
+        try:
+            for name in os.listdir("/sys/class/power_supply"):
+                base = os.path.join("/sys/class/power_supply", name)
+                with open(os.path.join(base, "type"), encoding="utf-8") as f:
+                    if f.read().strip() != "Mains":
+                        continue
+                with open(os.path.join(base, "online"), encoding="utf-8") as f:
+                    mains.append(f.read().strip() == "1")
+        except (OSError, ValueError):
+            mains = []
+        if mains and not any(mains):
+            hints.append("本机正在用电池供电。作为 worker 请接上电源，并关闭自动休眠。")
+    return hints
+
+
+def known_hosts_line(facts, path):
+    """C-709: the control host checks this device's SSH host key against its
+    private worker-known-hosts under the wizard's machine id (the lowercased
+    hostname, as the Workbench derives it). Show the public line here, on the
+    device's own console, so the owner can copy and check it."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            parts = f.read().split()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if len(parts) < 2 or parts[0] != "ssh-ed25519" or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", parts[1]):
+        return None
+    machine = facts["hostname"].lower()
+    return "%s ssh-ed25519 %s" % ("device-local" if machine == "local" else machine, parts[1])
+
+
 class Rejected(Exception):
     def __init__(self, status, code, message):
         super().__init__(message)
@@ -296,15 +345,44 @@ def post(origin, path, body):
         fail("Workbench 拒绝了请求：%s" % error.message)
 
 
-def confirm():
+def ask(prompt):
+    """A line typed on the terminal, or None without one."""
     try:
         with open("/dev/tty", "r+", encoding="utf-8") as tty:
-            tty.write("确认在本机用 sudo 执行以上操作？输入 yes 继续：")
+            tty.write(prompt)
             tty.flush()
-            return tty.readline().strip().lower() == "yes"
+            return tty.readline().strip().lower()
     except OSError:
+        return None
+
+
+def confirm():
+    answer = ask("确认在本机用 sudo 执行以上操作？输入 yes 继续：")
+    if answer is None:
         print("没有可用的终端来确认；核对上面的清单后可加 --yes 重新配对。", file=sys.stderr)
-        return False
+    return answer == "yes"
+
+
+def sudo_ready(args):
+    """C-709: authenticate sudo before running the script, so a missing
+    password (SteamOS's deck account has none by default) is not reported to
+    the Workbench as a failed initialisation. The device token stays valid,
+    so the owner can set one and retry here without pairing again."""
+    while True:
+        try:
+            ok = subprocess.run([args.sudo, "-v"], stdin=subprocess.DEVNULL).returncode == 0
+        except OSError:
+            ok = False
+        if ok:
+            return True
+        print(
+            "sudo 验证没有通过，本机未做改动。请确认当前账号能用 sudo；"
+            "SteamOS 的 deck 账号默认没有密码，先在另一个终端运行 passwd 设置。",
+            file=sys.stderr,
+        )
+        if args.yes or ask("设置好后按回车重试，输入 q 放弃：") in (None, "q"):
+            print("已放弃，本机未做改动；稍后重新运行本命令。", file=sys.stderr)
+            return False
 
 
 def initialise(origin, token, args):
@@ -350,6 +428,8 @@ def initialise(origin, token, args):
     if not args.yes and not confirm():
         print("已取消，本机未做改动。", file=sys.stderr)
         return 1
+    if not sudo_ready(args):
+        return 1
     result = subprocess.run([args.sudo, python, "-IB", "-"], input=data)
     ok = result.returncode == 0
     try:
@@ -385,6 +465,7 @@ def main(argv):
         "--yes", action="store_true", help="列出初始化操作后不再询问，直接用 sudo 运行"
     )
     parser.add_argument("--sudo", default="sudo", help=argparse.SUPPRESS)
+    parser.add_argument("--host-key", default="/etc/ssh/ssh_host_ed25519_key.pub", help=argparse.SUPPRESS)
     parser.add_argument("--python", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     origin = origin_of(args.workbench)
@@ -402,6 +483,12 @@ def main(argv):
         "设备：%s · %s/%s · %s · 账号编号 %s"
         % (facts["hostname"], facts["os"], facts["arch"], facts["address"], facts["free_id"])
     )
+    line = known_hosts_line(facts, args.host_key)
+    if line:
+        print("控制主机 worker-known-hosts 需要的一行（在向导里改了机器编号时，把开头换成新编号）：")
+        print("  %s" % line)
+    for hint in readiness_hints(facts):
+        print("提示：%s" % hint)
     sys.stdout.flush()
     if args.no_wait:
         return 0

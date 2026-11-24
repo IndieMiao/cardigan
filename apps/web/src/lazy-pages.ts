@@ -25,6 +25,11 @@ export const HelpPage = lazy(() =>
 export const NeedsYouPage = lazy(() =>
   import("./views/NeedsYouPage.js").then((m) => ({ default: m.NeedsYouPage })),
 );
+export const ReleaseNotesPage = lazy(() =>
+  import("./views/ReleaseNotesPage.js").then((m) => ({
+    default: m.ReleaseNotesPage,
+  })),
+);
 export const SharedFilesPage = lazy(() =>
   import("./views/SharedFilesPage.js").then((m) => ({
     default: m.SharedFilesPage,

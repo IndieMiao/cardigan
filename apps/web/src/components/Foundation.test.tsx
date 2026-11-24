@@ -262,6 +262,8 @@ test("U1/C-209 shell orders Needs You first with its count, then 卡片, 观察 
     "项目动态",
     "拍板记录",
     "项目快照",
+    // C-713: each project's release notes close the 观察 group.
+    "发版说明",
     // C-685: the shared file library sits with the tools.
     "共享文件",
     "设置",
@@ -282,7 +284,7 @@ test("U1/C-209 shell orders Needs You first with its count, then 卡片, 观察 
   ).toEqual(["共享文件", "设置", "帮助"]);
   expect(within(tools).getByRole("button", { name: "登出" })).toBeTruthy();
   expect(needsLink.className).toContain("needs-link");
-  expect(sidebar.querySelectorAll("a svg.nav-icon")).toHaveLength(9);
+  expect(sidebar.querySelectorAll("a svg.nav-icon")).toHaveLength(10);
   expect(await screen.findByRole("heading", { name: /卡片/u })).toBeTruthy();
 });
 
