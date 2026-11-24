@@ -1772,6 +1772,7 @@ const size = (n: number) =>
 const SOURCE = {
   device: "设备自报",
   missing: "设备未上报",
+  none: "未采集",
   wizard: "向导配置",
   check: "接入检查",
   catalog: "能力目录",
@@ -1785,7 +1786,7 @@ function deviceRows(
   const fact = (item: string, value: string | undefined): ReportRow =>
     value
       ? { item, value, source: SOURCE.device }
-      : { item, value: "—", source: d ? SOURCE.missing : SOURCE.wizard };
+      : { item, value: "—", source: d ? SOURCE.missing : SOURCE.none };
   const platform = [wizard.os, wizard.arch].join(" / ");
   return [
     d?.system

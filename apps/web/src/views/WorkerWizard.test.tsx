@@ -1600,3 +1600,29 @@ test("C-707: a QR link's code leaves the address bar at once and opens the pairi
   expect(fake.pairWorkerDevice).not.toHaveBeenCalled();
   push.mockRestore();
 });
+
+test("C-707: a hand-filled wizard's report names what was not collected", async () => {
+  const dialog = await toPassed(backend(["passed"]));
+  const report = await dialog.findByRole("table", { name: "体检报告" });
+  const rows = within(report)
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) =>
+      within(row)
+        .getAllByRole("cell")
+        .map((cell) => cell.textContent),
+    );
+  expect(rows).toEqual([
+    ["系统", "linux / x64", "向导配置"],
+    ["CPU", "—", "未采集"],
+    ["内存", "—", "未采集"],
+    ["磁盘", "—", "未采集"],
+    ["GPU", "—", "未采集"],
+    ["已验证能力", "—", "接入检查"],
+    ["建议安装的工具", "—", "能力目录"],
+  ]);
+  // Not a paired draft: the first step stays 填写.
+  expect(
+    dialog.getByRole("list", { name: "添加 worker 的步骤" }).textContent,
+  ).toContain("填写");
+});
