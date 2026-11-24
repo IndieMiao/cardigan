@@ -15,6 +15,7 @@ import {
   type MachineBindingView,
   type MachineView,
 } from "../api.js";
+import { hasInstallGuide } from "../capability-install.js";
 import { runLimitSetting, useCapacity } from "../components/Capacity.js";
 import { Drawer } from "../components/Drawer.js";
 import {
@@ -71,6 +72,7 @@ import { settingKey, trackSettingsRead } from "../settings-clock.js";
 import { statusLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 import { MachineAgentLimit, MergeCheckCapacity } from "./AgentLimit.js";
+import { CapabilityInstallDialog } from "./CapabilityInstall.js";
 import {
   checkingWithoutId,
   machineActions,
@@ -485,6 +487,8 @@ function MachineDrawer({
     pollMs,
     onChanged: changed,
   });
+  /** C-708: the capability whose install commands are open. */
+  const [installing, setInstalling] = useState<string>();
   return (
     <Drawer
       className={settingsDrawerClassName}
@@ -529,6 +533,7 @@ function MachineDrawer({
           <MachineFacts
             machine={machine}
             capacity={capacity}
+            onInstall={setInstalling}
             limit={
               detail.data && (
                 <MachineAgentLimit
@@ -541,6 +546,22 @@ function MachineDrawer({
                 />
               )
             }
+          />
+        )}
+        {machine && installing && (
+          <CapabilityInstallDialog
+            machine={machine}
+            capabilityKey={installing}
+            recheck={{
+              available: canEdit && actions.checkable,
+              locked: actions.checkLocked,
+              following: !!actions.following,
+              againable: actions.againable,
+              start: actions.start,
+              ask: actions.ask,
+              feedback: actions.checkFeedback,
+            }}
+            onClose={() => setInstalling(undefined)}
           />
         )}
         {machine?.id === "local" && client.offsiteStatus && (
@@ -558,11 +579,14 @@ function MachineFacts({
   machine,
   capacity: shared,
   limit,
+  onInstall,
 }: {
   machine: MachineView;
   capacity: MachineCapacity;
   /** The Agent limit: editable when the shared capacity read has it. */
   limit: ReactNode;
+  /** C-708: open a first-batch tool's install commands. */
+  onInstall?: (key: string) => void;
 }) {
   const capacity = shared.of(machine.id);
   const bindings = [...machine.bindings].sort(
@@ -578,6 +602,19 @@ function MachineFacts({
           a.key.localeCompare(b.key),
       )
       .map((capability) => ({ binding, capability })),
+  );
+  // C-708: tools of the first batch this project has not verified here.
+  const installable = (
+    binding: MachineBindingView,
+    key: string,
+    state: string,
+  ) =>
+    !!onInstall &&
+    binding.is_current &&
+    state !== "verified" &&
+    hasInstallGuide(key);
+  const installColumn = capabilities.some(({ binding, capability }) =>
+    installable(binding, capability.key, capability.state),
   );
   const runs = bindings.flatMap((b) =>
     b.assignments.flatMap((a) =>
@@ -627,11 +664,11 @@ function MachineFacts({
           </SettingsFacts>
         )}
       </SettingsSection>
-      <SettingsSection title="已验证能力">
+      <SettingsSection title="能力">
         {capabilities.length === 0 ? (
           <p>没有能力记录</p>
         ) : (
-          <SettingsTable aria-label="已验证能力">
+          <SettingsTable aria-label="能力">
             <TableHeader>
               <TableRow>
                 <TableHead>能力</TableHead>
@@ -639,6 +676,7 @@ function MachineFacts({
                 <TableHead>版本</TableHead>
                 <TableHead>验证时间</TableHead>
                 <TableHead>状态</TableHead>
+                {installColumn && <TableHead>操作</TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -665,6 +703,19 @@ function MachineFacts({
                         subdued={c.state !== "verified"}
                       />
                     </DataTableCell>
+                    {installColumn && (
+                      <DataTableCell nowrap>
+                        {installable(binding, c.key, c.state) && (
+                          <Button
+                            aria-haspopup="dialog"
+                            aria-label={`安装 ${c.key}`}
+                            onClick={() => onInstall?.(c.key)}
+                          >
+                            安装
+                          </Button>
+                        )}
+                      </DataTableCell>
+                    )}
                   </TableRow>
                 );
               })}
