@@ -14,8 +14,15 @@ import {
   MAX_ATTACHMENT_PAGE_BYTES,
   resolveAttachmentInlineBytes,
 } from "../attachment-preview.js";
-import { sha256 } from "../attachments.js";
+import { hashAttachmentFile } from "../attachment-stream.js";
+import { openAttachmentFile, sha256 } from "../attachments.js";
 import { ToolError } from "../errors.js";
+import {
+  isVideoMime,
+  sniffVideo,
+  VIDEO_EXTENSIONS,
+  VIDEO_SNIFF_BYTES,
+} from "../video-format.js";
 import {
   auditReferenceRead,
   referenceCard,
@@ -169,6 +176,113 @@ export async function readVerifiedAttachment(
   return { attachment, content, provenance: read.provenance };
 }
 
+/** Token and Assignment are still valid after slow IO (same as the blob read). */
+export function revalidate(context: ToolContext) {
+  try {
+    context.revalidateToken?.();
+  } catch {
+    throw new ToolError("unauthorized", "Token 已失效。");
+  }
+  const assignment = safeReferenceQuery(() =>
+    context.store.uow.read((tx) =>
+      tx.assignments.get(
+        context.identity.actor.project_id,
+        context.identity.assignment.id,
+      ),
+    ),
+  );
+  if (assignment?.status !== "active")
+    throw new ToolError("unauthorized", "Assignment is no longer active");
+  return assignment;
+}
+
+/** How an Agent sees frames: on its own worker, never on the host (C-683). */
+export const VIDEO_FRAMES_GUIDE =
+  'Frames are made on your own worker, never on the host: node "$CARDIGAN_AGENT_TOOLS/download-attachment.mjs" <configured Card MCP URL> <attachment id> <new local file> --frames <new directory> [--every <seconds> | --at <s,s,...>] [--max <n>] [--width <px>] saves the verified video and JPEG frames there (default 6 spread over the video). It needs ffmpeg on the worker and says so when it is missing.';
+
+/**
+ * C-683: a video never loads into memory and is never decoded on the host.
+ * The reply carries what the uploader measured (duration, resolution,
+ * codecs), the container its first bytes show, and how to take frames on
+ * the Agent's own worker. The bytes themselves are a streamed download.
+ */
+async function readVideo(
+  a: ReturnType<typeof accessibleAttachment>,
+  context: ToolContext,
+  dataDir: string,
+  verify: string | undefined,
+) {
+  if (verify !== undefined) {
+    if (
+      verify !== a.sha256 ||
+      !(await hashAttachmentFile(dataDir, a.sha256, a.size))
+    )
+      throw ToolError.validation("Attachment sha256 mismatch");
+  }
+  // Only the first bytes: enough to name the container, no decoding.
+  let container: string | null = null;
+  const file = await openAttachmentFile(dataDir, a.sha256, a.size).catch(
+    () => undefined,
+  );
+  if (file) {
+    try {
+      const head = Buffer.alloc(VIDEO_SNIFF_BYTES);
+      const { bytesRead } = await file.read(head, 0, head.length, 0);
+      const found = sniffVideo(head.subarray(0, bytesRead));
+      container =
+        found === "webm"
+          ? "webm"
+          : found === "iso"
+            ? (VIDEO_EXTENSIONS[a.mime.toLowerCase()] ?? "mp4")
+            : null;
+    } finally {
+      await file.close();
+    }
+  }
+  const assignment = revalidate(context);
+  accessibleAttachment(a.id, {
+    ...context,
+    identity: { ...context.identity, assignment },
+  });
+  const read = context.store.uow.read((tx) =>
+    referenceCard(tx, context, a.card_id),
+  );
+  auditReferenceRead(context, [a.card_id], "read_attachment");
+  const {
+    poster_sha256: _poster,
+    poster_size: _posterSize,
+    ...measured
+  } = a.video ?? {};
+  return {
+    ...(verify ? { verified: true } : {}),
+    ...read.provenance,
+    attachment_id: a.id,
+    card_id: a.card_id,
+    attach_to: a.attach_to,
+    filename: a.original_filename,
+    size: a.size,
+    mime: a.mime,
+    sha256: a.sha256,
+    content_mode: "metadata",
+    video: {
+      container,
+      duration_seconds: measured.duration_seconds ?? null,
+      width: measured.width ?? null,
+      height: measured.height ?? null,
+      video_codec: measured.video_codec ?? null,
+      audio_codec: measured.audio_codec ?? null,
+      has_poster: a.video?.poster_sha256 !== undefined,
+    },
+    frames: VIDEO_FRAMES_GUIDE,
+    download: {
+      method: "GET",
+      query: { attachment_id: a.id },
+      instructions:
+        "Stream from the configured MCP URL with this query and the current Bearer. Check the downloaded SHA-256.",
+    },
+  };
+}
+
 export function readAttachmentTool(
   attachments: Pick<AttachmentStore, "get">,
   inlineBytes?: number,
@@ -178,7 +292,7 @@ export function readAttachmentTool(
   return defineTool({
     name: "read_attachment",
     description:
-      "Read verified attachment metadata. Binary files and text above the host inline threshold (default 64 KiB) omit content and include authenticated download instructions. Small UTF-8 text retains base64 file. Explicit byte offset/limit pages UTF-8 text (max 65536 bytes); follow next_offset. For a streamed artifact supply verify_sha256 to rehash stored bytes. Metadata alone is not evidence review.",
+      "Read verified attachment metadata. Binary files and text above the host inline threshold (default 64 KiB) omit content and include authenticated download instructions. Small UTF-8 text retains base64 file. Explicit byte offset/limit pages UTF-8 text (max 65536 bytes); follow next_offset. For a streamed artifact supply verify_sha256 to rehash stored bytes. A video returns the duration, resolution and codecs its uploader measured and how to take frames on your own worker (never on the host). Metadata alone is not evidence review.",
     input: z.object({
       attachment_id: z.string().min(1),
       verify_sha256: z
@@ -207,6 +321,16 @@ export function readAttachmentTool(
       context,
     ) => {
       const a = accessibleAttachment(attachment_id as AttachmentId, context);
+      if (!a.streamed_artifact && isVideoMime(a.mime)) {
+        if (offset !== undefined || limit !== undefined)
+          throw ToolError.validation("Videos do not support text pages");
+        return readVideo(
+          a,
+          context,
+          dataDir ?? process.env.CARDIGAN_DATA_DIR ?? ".data",
+          verify_sha256,
+        );
+      }
       if (a.streamed_artifact) {
         if (offset !== undefined || limit !== undefined)
           throw ToolError.validation(

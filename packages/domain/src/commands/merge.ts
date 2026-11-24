@@ -1,5 +1,6 @@
 import { autoRiskMergeReason } from "../auto-risk.js";
 import { categoryDelegated } from "../decision-authorization.js";
+import { isDecisionOther } from "../decision-other.js";
 import { isReviewStale } from "../derived.js";
 import type {
   Actor,
@@ -854,8 +855,11 @@ export function requestMerge(
     );
     const target = completion(state, card);
     const q = confirmation(state.decisions, card, target);
+    // C-682: after the human answered "其他", PM may ask again once handled.
     ensure(
-      q?.status === "resolved" && q.resolution?.option === "hold",
+      q?.status === "resolved" &&
+        (q.resolution?.option === "hold" ||
+          isDecisionOther(q.resolution?.option)),
       "illegal_transition",
       "Only a held merge can be requested again",
     );

@@ -6,6 +6,7 @@ import { runAvatarCommand } from "./avatar.js";
 import { tokenFileOption } from "./command-access.js";
 import { runContentCommand } from "./content.js";
 import { runCpuProfileCommand } from "./cpu-profile.js";
+import { runDecisionCommand } from "./decision.js";
 import { runDeployCommand } from "./deploy.js";
 import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
@@ -86,6 +87,7 @@ const TOP_LEVEL_USAGE = [
   "  preference get|set merge-confirm-stall-after  查看或修改 PM 合并确认停留告警分钟数（默认 60）",
   "  template list|show|add|copy|update|deactivate|activate|rollback  管理项目模板",
   "  rework request|confirm|keep  请求或由人逐次确认正式返工（精确绑定交付和本人撤回的审核）",
+  "  decision answer <Q-n> --other <你的决定>  以“其他”回答任一待处理拍板（仅人类）",
   "  card create      按模板建卡（默认 dev）",
   "  card done        用 --result 记录结果并完成人工完成的卡片，可重复 --file 附证据",
   "  card update      修改或取消卡片；--risk-tags 设置风险标签；--superseded-by <C-m> 标记取代（已完成卡片不能取消；见 cardigan card --help）",
@@ -270,6 +272,7 @@ export async function main(
       return await runContentCommand(command, rest, io);
     }
     if (command === "rework") return await runReworkCommand(rest, io);
+    if (command === "decision") return await runDecisionCommand(rest, io);
     if (command === "merge") return await runMergeCommand(rest, io);
     if (command === "web") return await runWebCommand(rest, io);
     if (command === "worktree") return await runWorktreeCommand(rest, io);

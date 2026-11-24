@@ -1,3 +1,4 @@
+import { decisionOptionOf, isDecisionOther } from "../decision-other.js";
 import type { Actor, Decision, Event, TimelineEntry } from "../entities.js";
 import {
   eventById,
@@ -302,8 +303,7 @@ export function remindDecisionFollowups(
           raised_by: q.raised_by,
           option: q.resolution.option,
           question: q.question,
-          impact:
-            q.options.find((o) => o.key === q.resolution?.option)?.impact ?? "",
+          impact: decisionOptionOf(q, q.resolution.option)?.impact ?? "",
           rationale: q.resolution.rationale,
         },
         {
@@ -382,6 +382,10 @@ export function decisionFollowupPrompt(
       const q = state.decisions.find((q) => q.id === field(e, "decision_id"));
       if (!q?.resolution || q.raised_by !== `assignment:${assignmentId}`)
         return [];
+      if (isDecisionOther(q.resolution.option))
+        return [
+          `拍板落实：${q.id} 所有者选择了“其他”，原话：${q.resolution.raw_quote}\n请按原话跟进，并在卡片时间线引用 ${q.id} 写一句执行结果。`,
+        ];
       const option = q.options.find((o) => o.key === q.resolution?.option);
       return [
         `拍板落实：${q.id} 已选择 ${q.resolution.option}（${option?.description ?? ""}）。影响：${option?.impact ?? ""}。请执行所选方案，并在卡片时间线引用 ${q.id} 写一句执行结果。`,

@@ -1,4 +1,5 @@
 import {
+  composeRoleOverlay,
   HOST_OPS_ROLE_TOOLS,
   ROLE_TOOL_ALLOWLISTS,
   STANDING_INVARIANTS,
@@ -6,6 +7,7 @@ import {
   validateRole,
 } from "@cardigan/domain";
 import { describe, expect, test } from "vitest";
+import { composeRolePrompt } from "./prompt.js";
 import {
   corePromptFor,
   DEFAULT_ROLE_KINDS,
@@ -1001,3 +1003,24 @@ test.each(["coder", "reviewer", "tester"] as const)(
     expect(instructionsFor(role)).toContain("不要设法绕过");
   },
 );
+
+test("C-676: every default role, and a project role built on one, writes full numbers across projects", () => {
+  const rule = (prompt: string) =>
+    prompt
+      .split("\n")
+      .find((line) => line.startsWith("- 编号：") && line.includes("SEN-C-34"));
+  for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[]) {
+    const line = rule(corePromptFor(role, "显示名"));
+    expect(line, role).toContain("给所有者的消息、交人的待办和拍板说明");
+    expect(line, role).toContain("`project_code`");
+  }
+  // C-613 overlays keep instructions only; the shared rule joins at launch.
+  const overlay = composeRoleOverlay(defaultRoleDefinition("coder", launch), {
+    append_instructions: "项目定制：只改 game/ 目录。",
+    extra_tools: [],
+    removed_tools: [],
+  });
+  expect(rule(composeRolePrompt(overlay.instructions))).toBe(
+    rule(corePromptFor("coder")),
+  );
+});

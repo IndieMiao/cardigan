@@ -75,6 +75,7 @@ import {
   sharedFileTools,
 } from "./tools/shared-files.js";
 import type { ToolDefinition } from "./tools/types.js";
+import { VideoUploads } from "./video-uploads.js";
 
 export interface McpServerOptions
   extends DeliveryToolOptions,
@@ -214,8 +215,102 @@ export async function startMcpServer(
   const host = options.host ?? "127.0.0.1";
   const sink = options.log ?? stdoutLogger;
   const artifactUploads = new ArtifactUploads(options.dataDir, options.clock);
+  const videoUploads = new VideoUploads(
+    options.dataDir ?? process.env.CARDIGAN_DATA_DIR ?? ".data",
+    options.clock,
+  );
   const tools =
-    options.tools ?? serverTools({ ...options, artifactUploads, log: sink });
+    options.tools ??
+    serverTools({ ...options, artifactUploads, videoUploads, log: sink });
+
+  /**
+   * C-683: one chunk (`PUT ?attachment_upload=<id>&offset=<n>`) or the
+   * status (`GET ?attachment_upload=<id>`) of an Agent's video upload.
+   */
+  async function serveVideoUpload(
+    req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+    identity: Identity,
+    allowedHosts: readonly string[],
+    noteProgress: () => void,
+  ) {
+    res.setHeader("Cache-Control", "private, no-store");
+    const send = (status: number, body: unknown) =>
+      res
+        .writeHead(status, { "Content-Type": "application/json" })
+        .end(JSON.stringify(body));
+    if (
+      !allowedHosts.includes(req.headers.host ?? "") ||
+      (req.headers.origin !== undefined && req.headers.origin !== url.origin)
+    ) {
+      res.writeHead(403).end();
+      return;
+    }
+    if (
+      !identity.actor.allowed_tools.includes("upload_attachment") ||
+      !tools.some((t) => t.name === "upload_attachment")
+    ) {
+      res.writeHead(403).end();
+      return;
+    }
+    const context = {
+      store: options.store,
+      identity,
+      revalidateToken: () => {
+        const token = bearerToken(req.headers.authorization);
+        const fresh = token ? options.store.verifyToken(token) : undefined;
+        if (
+          fresh?.id !== identity.token.id ||
+          !fresh.allowed_tools.includes("upload_attachment")
+        )
+          throw new ToolError("unauthorized", "Token is no longer valid");
+      },
+    };
+    try {
+      const id = url.searchParams.get("attachment_upload") ?? "";
+      const keys = [...url.searchParams.keys()];
+      if (req.method === "GET") {
+        if (keys.length !== 1)
+          throw ToolError.validation("Expected only attachment_upload");
+        send(200, await videoUploads.status(id, context));
+        return;
+      }
+      const offsetText = url.searchParams.get("offset") ?? "";
+      if (
+        keys.length !== 2 ||
+        !keys.includes("offset") ||
+        !/^\d{1,12}$/u.test(offsetText)
+      )
+        throw ToolError.validation("Expected attachment_upload and offset");
+      const result = await videoUploads.accept(
+        id,
+        Number(offsetText),
+        req,
+        context,
+        noteProgress,
+      );
+      if (result.complete) send(201, result.attachment);
+      else send(200, result.status);
+    } catch (err) {
+      if (res.headersSent || res.destroyed) return;
+      const safe =
+        err instanceof ToolError
+          ? err
+          : ToolError.validation("Video upload failed; retry the chunk");
+      send(
+        safe.code === "not_found"
+          ? 404
+          : safe.code === "unauthorized"
+            ? 401
+            : safe.code === "stale_target" ||
+                safe.code === "idempotency_conflict"
+              ? 409
+              : 400,
+        { error: safe.toDomainError() },
+      );
+    }
+  }
 
   const catalogs = new Map<string, string>();
   const bookkeeping = new ToolCallBookkeeping({
@@ -504,6 +599,20 @@ export async function startMcpServer(
           )
           .end(JSON.stringify({ error: safe.toDomainError() }));
       }
+      return;
+    }
+    if (
+      (req.method === "PUT" || req.method === "GET") &&
+      url.searchParams.has("attachment_upload")
+    ) {
+      await serveVideoUpload(
+        req,
+        res,
+        url,
+        identity.value,
+        allowedHosts,
+        noteProgress,
+      );
       return;
     }
     if (req.method === "GET" && url.searchParams.has("attachment_id")) {

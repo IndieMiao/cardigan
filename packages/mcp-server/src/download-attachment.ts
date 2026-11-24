@@ -4,10 +4,11 @@ import { dirname, join } from "node:path";
 import { MAX_STORED_ATTACHMENT_BYTES } from "./attachment-limits.js";
 import { isCliEntry } from "./cli-entry.js";
 import { MAX_ARTIFACT_BYTES } from "./limits.js";
+import { extractFrames, FrameError, parseFrameArgs } from "./video-frames.js";
 
 const messages = {
   arguments:
-    "Usage: download-attachment <configured Card MCP URL> <attachment ID> <new local file> (MCP_TOKEN from the environment).",
+    "Usage: download-attachment <configured Card MCP URL> <attachment ID> <new local file> [--frames <new directory> [--every <seconds> | --at <s,s>] [--max <n>] [--width <px>]] (MCP_TOKEN from the environment).",
   credential: "The current session MCP_TOKEN is required.",
   endpoint:
     "Use the configured HTTP(S) Card MCP URL without credentials, query or fragment.",
@@ -255,21 +256,32 @@ export async function downloadAttachment(
 
 async function main() {
   const [endpoint, id, file, ...rest] = process.argv.slice(2);
-  if (!endpoint || !id || !file || rest.length)
+  if (!endpoint || !id || !file) throw new AttachmentDownloadError("arguments");
+  // C-683: optional frames of a video, made here with this worker's ffmpeg.
+  let frames: ReturnType<typeof parseFrameArgs>;
+  try {
+    frames = parseFrameArgs(rest);
+  } catch {
     throw new AttachmentDownloadError("arguments");
+  }
   const result = await downloadAttachment(
     endpoint,
     id,
     file,
     process.env.MCP_TOKEN ?? "",
   );
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (!frames) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  const made = await extractFrames(file, frames.directory, frames.request);
+  process.stdout.write(`${JSON.stringify({ ...result, ...made })}\n`);
 }
 /** Runs the command line tool; also the entry of the prebuilt agent tool. */
 export function runDownloadAttachmentCli() {
   main().catch((error: unknown) => {
     process.stderr.write(
-      `${error instanceof AttachmentDownloadError ? error.message : new AttachmentDownloadError("download").message}\n`,
+      `${error instanceof AttachmentDownloadError || error instanceof FrameError ? error.message : new AttachmentDownloadError("download").message}\n`,
     );
     process.exitCode = 1;
   });

@@ -31,6 +31,8 @@ export const whoamiTool = defineTool({
       employee_name: employee?.name ?? null,
       employee_title: employee?.title ?? null,
       project_id: actor.project_id,
+      // C-676: full numbers are `<project_code>-C-12`; null before registration.
+      project_code: store.getProject?.(actor.project_id)?.code ?? null,
       assignment_id: assignment.id,
       role_id: role.role_id,
       role_version: role.role_version,

@@ -13,6 +13,7 @@ import type {
   StoreTransactionContext,
 } from "@cardigan/store";
 import { CheckExecutorSuspended } from "./checkout-deadline.js";
+import type { ExecutorHttpObservation } from "./executor-diagnostics.js";
 import { GithubExecutorError, type GithubRun } from "./github-client.js";
 import {
   GITHUB_POLL_DEFAULTS,
@@ -71,6 +72,8 @@ export interface GithubDispatchIntent {
   readonly discoveryDeadlineAt?: number;
   /** Unverified dispatch response ID; only a lookup hint until full binding. */
   readonly dispatchedRunId?: number;
+  /** C-681: redacted POST response evidence for a later dispatch_unknown diagnosis. */
+  readonly dispatchResponse?: ExecutorHttpObservation;
   /** Only the validated response ID permits ignoring the provider's run title. */
   readonly boundByDispatchId?: boolean;
   readonly externalRun?: ExternalGithubRun;
@@ -1136,6 +1139,7 @@ export class GithubDispatchJournal {
     intent: GithubDispatchIntent,
     id: number | undefined,
     at: number,
+    response?: ExecutorHttpObservation,
   ): void {
     this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
@@ -1151,6 +1155,7 @@ export class GithubDispatchJournal {
       const { postOwner: _owner, ...settled } = current;
       this.save(tx, {
         ...settled,
+        ...(response ? { dispatchResponse: response } : {}),
         ...(id !== undefined
           ? { dispatchedRunId: id }
           : { absenceNotBefore: absenceDeadline(current, at) }),

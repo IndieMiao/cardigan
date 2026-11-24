@@ -86,6 +86,12 @@ test.each(
       store.uow.run((tx) => {
         writeRole(tx, project, role, { mode: "add" });
         tx.employees.put(employee);
+        tx.project_preferences.put(project, {
+          id: project,
+          auto_merge_after_minutes: null,
+          context_handoff_remaining_pct: 25,
+          context_restart_remaining_pct: 20,
+        });
       });
       for (const named of [false, true]) {
         if (named)
@@ -171,6 +177,24 @@ test.each(
         );
         expect(script).toContain("export NODE_OPTIONS=");
         expect(script).toContain("export CARDIGAN_AGENT_LOCAL_TESTS='1'");
+        if (harness === "claude-code") {
+          // C-686: the status line gets the employee and project thresholds.
+          const settings = JSON.parse(
+            await readFile(
+              join(
+                launched.run_dir,
+                "cardigan-assignment.fixture.claude-settings.json",
+              ),
+              "utf8",
+            ),
+          ) as { statusLine: { command: string } };
+          const command = settings.statusLine.command;
+          expect(command).toContain(
+            `"handoff_remaining_pct":25,"restart_remaining_pct":20`,
+          );
+          expect(command).toContain(`"assignment":"${assignment.id}"`);
+          expect(command.includes('"employee":"诸葛亮 Mary"')).toBe(named);
+        }
         if (harness === "pi") {
           expect(
             await readFile(
@@ -220,8 +244,10 @@ test.each(
           expect(core).not.toContain("旧显示名");
           expect(first).toContain(bell);
         } else {
+          // C-676: the host injects the project's registered code.
+          expect(store.projectCode(project)).toBe("LAU");
           expect(core).toBe(
-            `${corePromptFor("pm", "旧显示名")}\n\n${RUN_RESOURCE_RULE}\n`,
+            `${corePromptFor("pm", "旧显示名")}\n\n项目资料：本项目 ${JSON.stringify(project)} 的代号是 LAU，本项目卡片 C-12 的完整编号写作 LAU-C-12；引用其它项目或写给所有者时用完整编号。\n\n${RUN_RESOURCE_RULE}\n`,
           );
           expect(first).not.toContain(employee.name);
           expect(first).toContain("kind=initial");

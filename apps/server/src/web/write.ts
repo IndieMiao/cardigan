@@ -20,9 +20,11 @@ import {
   DEFAULT_MAX_RUN_LIMIT,
   type DomainError,
   deactivateRole,
+  isDecisionOther,
   issueInstruction,
   latestCardTemplate,
   MAX_REF_SLOT,
+  MAX_VIDEO_POSTER_BYTES,
   manageCardTemplate,
   markCardDone,
   markNoticesRead,
@@ -31,6 +33,7 @@ import {
   parseTimelineEntryId,
   postComment,
   prepareMergePlan,
+  prepareStreamedAttachment,
   type ReadableIdKind,
   type Result,
   type RoleDefinition,
@@ -66,13 +69,16 @@ import {
 } from "@cardigan/host";
 import {
   attachmentTooLargeMessage,
+  base64Length,
   loadCommandState,
   MAX_ATTACHMENT_BASE64,
   MAX_MCP_BODY_BYTES,
   persistEffect,
   prepareAttachmentFile,
+  preparePoster,
   projectRepositories,
   ToolError,
+  uploadSessionsFor,
 } from "@cardigan/mcp-server";
 import {
   defaultRoleDefinition,
@@ -89,6 +95,7 @@ import {
   type ReadRepositories,
   type Store,
   type StoreTransactionContext,
+  type WebSession,
 } from "@cardigan/store";
 import { z } from "zod";
 import { requireEmployeeOwner, serveEmployees } from "./employees.js";
@@ -99,6 +106,7 @@ import {
   readJsonBody,
   sendJson,
 } from "./http.js";
+import { uploadError, uploadOwner } from "./uploads.js";
 
 const text = z
   .string()
@@ -263,7 +271,24 @@ const action = z
   })
   .strict();
 const attachment = z.object({
-  file: z.string().max(MAX_ATTACHMENT_BASE64, attachmentTooLargeMessage()),
+  file: z
+    .string()
+    .max(MAX_ATTACHMENT_BASE64, attachmentTooLargeMessage())
+    .optional(),
+  // C-683: a complete resumable upload (videos) instead of `file`.
+  upload_id: z.string().min(1).max(64).optional(),
+  // C-683: what the browser measured and its cover frame (base64 JPEG).
+  video: z
+    .object({
+      duration_seconds: z.number().min(0).optional(),
+      width: z.number().int().min(0).optional(),
+      height: z.number().int().min(0).optional(),
+      video_codec: z.string().max(32).optional(),
+      audio_codec: z.string().max(32).optional(),
+    })
+    .strict()
+    .optional(),
+  poster: z.string().max(base64Length(MAX_VIDEO_POSTER_BYTES)).optional(),
   mime: text,
   original_filename: z.string().optional(),
   note: z.string().optional(),
@@ -1445,18 +1470,94 @@ export async function serveWrite(
           "payload_too_large",
           attachmentTooLargeMessage(),
         );
-      const { file, sha256, ...p } = defined(parsed(attachment, body));
-      let receipt: Awaited<ReturnType<typeof prepareAttachmentFile>>;
-      try {
-        receipt = await prepareAttachmentFile(file, c.dataDir, sha256);
-      } catch (error) {
-        if (error instanceof ToolError) rejected(error.toDomainError());
-        throw error;
-      }
-      // Published content-addressed blobs remain on rejection: another upload may already share them.
-      output = run(context, (s, a, ports) =>
-        uploadAttachment(s, a, { ...p, card_id }, receipt, ports),
+      const { file, upload_id, sha256, poster, video, ...rest } = defined(
+        parsed(attachment, body),
       );
+      const p = { ...rest, ...(video ? { video: defined(video) } : {}) };
+      if ((file === undefined) === (upload_id === undefined))
+        throw new HttpRejection(
+          400,
+          "validation_failed",
+          "Provide exactly one of file and upload_id",
+        );
+      // C-683: the cover frame is stored first, as its own blob; the host
+      // only checks it is a JPEG of bounded size, never decodes it.
+      let cover: Awaited<ReturnType<typeof prepareAttachmentFile>> | undefined;
+      if (poster !== undefined)
+        try {
+          cover = await preparePoster(poster, c.dataDir);
+        } catch (error) {
+          if (error instanceof ToolError) rejected(error.toDomainError());
+          throw error;
+        }
+      if (upload_id !== undefined) {
+        // The upload stays until the record is written, so a retry of this
+        // request (same Idempotency-Key) can still find it.
+        const owner = uploadOwner(c.project_id, c.authorize() as WebSession);
+        const sessions = uploadSessionsFor(c.dataDir);
+        let receipt:
+          | Awaited<ReturnType<typeof prepareAttachmentFile>>
+          | undefined;
+        try {
+          const status = await sessions.status(owner, upload_id);
+          if (!status.complete || status.sha256 === undefined)
+            throw ToolError.validation("Upload is not complete yet", {
+              received: status.received,
+              size: status.size,
+            });
+          if (
+            status.mime !== p.mime ||
+            (sha256 !== undefined && sha256 !== status.sha256)
+          )
+            throw ToolError.validation(
+              "The upload's type or sha256 differs from this request",
+            );
+          receipt = must(
+            await prepareStreamedAttachment(
+              status.sha256,
+              status.size,
+              async () => sessions.publish(owner, upload_id),
+            ),
+          );
+        } catch (error) {
+          // A keyed retry after the record was written (and the upload
+          // removed) gets the recorded reply; anything else is refused.
+          if (
+            !(error instanceof ToolError) ||
+            error.code !== "not_found" ||
+            !context.idempotency
+          ) {
+            if (error instanceof ToolError) uploadError(error);
+            throw error;
+          }
+          const missing = error.toDomainError();
+          output = run(context, () => ({ ok: false, error: missing }));
+        }
+        if (receipt) {
+          const stored = receipt;
+          output = run(context, (s, a, ports) =>
+            uploadAttachment(s, a, { ...p, card_id }, stored, ports, cover),
+          );
+          await sessions.remove(owner, upload_id).catch(() => undefined);
+        }
+      } else {
+        let receipt: Awaited<ReturnType<typeof prepareAttachmentFile>>;
+        try {
+          receipt = await prepareAttachmentFile(
+            file as string,
+            c.dataDir,
+            sha256,
+            p.mime,
+          );
+        } catch (error) {
+          if (error instanceof ToolError) rejected(error.toDomainError());
+          throw error;
+        }
+        // Published content-addressed blobs remain on rejection: another upload may already share them.
+        output = run(context, (s, a, ports) =>
+          uploadAttachment(s, a, { ...p, card_id }, receipt, ports, cover),
+        );
+      }
     }
   } else if (group === "decisions") {
     const decision_id = parsed(id("decision"), key);
@@ -1490,8 +1591,11 @@ export async function serveWrite(
           ["narrow_scope", "split_card"].includes(p.option) &&
           s.decisions.find((q) => q.id === decision_id)?.trigger ===
             "review_limit";
+        // C-682: "其他" is the owner's own words; never substitute a default.
         const raw_quote =
-          (p.option === "hold" && returning) || scopeRequired
+          (p.option === "hold" && returning) ||
+          scopeRequired ||
+          isDecisionOther(p.option)
             ? p.raw_quote?.trim() || p.rationale?.trim() || ""
             : p.raw_quote?.trim() || returning
               ? (p.raw_quote ?? "")

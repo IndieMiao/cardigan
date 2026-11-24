@@ -177,7 +177,7 @@ export interface McpBackend {
     | {
         readonly repo_path: string | null;
         readonly base_branch: string | null;
-        /** C-674: the project's code, for full numbers in tool arguments. */
+        /** C-674: the project's code (`CDG`); null before one is registered. */
         readonly code?: string | null;
       }
     | undefined;

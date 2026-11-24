@@ -347,3 +347,13 @@ test("C-674: owner messages lead with the card's full number once", () => {
     "[C-34] 发布了",
   );
 });
+
+test("C-676: short numbers in the owner's message body become full numbers", () => {
+  expect(
+    ownerMessageText("SEN", "C-34" as never, "C-35 依赖 C-34，拍板见 Q-7"),
+  ).toBe("[SEN-C-34] SEN-C-35 依赖 SEN-C-34，拍板见 SEN-Q-7");
+  // A body that starts with the card's short number is not prefixed twice.
+  expect(ownerMessageText("SEN", "C-34" as never, "C-34 已发布")).toBe(
+    "SEN-C-34 已发布",
+  );
+});

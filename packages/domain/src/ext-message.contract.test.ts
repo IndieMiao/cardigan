@@ -580,7 +580,7 @@ test("interactive eligibility is lost when a linked item is restricted, held by 
   const input = { ...item, project_id: base.project_id, card_id: q.card_id! };
   const s = { ...base, decisions: [q] };
   const before = extInteraction(s, input);
-  expect(before.options.map((o) => o.key)).toEqual(["a"]);
+  expect(before.options.map((o) => o.key)).toEqual(["a", "_other"]);
   expect(
     extInteraction({ ...s, decisions: [{ ...q, question: "Other" }] }, input)
       .basis,
@@ -617,7 +617,7 @@ test("real merge confirmation only offers merge/hold against the current complet
     item_id: q.id,
   };
   const ops = extInteraction(s, input);
-  expect(ops.options.map((o) => o.key)).toEqual(["merge", "hold"]);
+  expect(ops.options.map((o) => o.key)).toEqual(["merge", "hold", "_other"]);
   for (const option of ["merge", "hold"]) {
     const result = recordDecision(
       s,
@@ -767,7 +767,7 @@ test("source approvals trace the target delivery's card for merge cards; unknown
 test("a merge action issued before its source approval's target becomes sensitive loses its version and choices", async () => {
   const { s, other, input } = await sourceApproval();
   const issued = extInteraction(s, input);
-  expect(issued.options.map((o) => o.key)).toEqual(["merge", "hold"]);
+  expect(issued.options.map((o) => o.key)).toEqual(["merge", "hold", "_other"]);
   const fresh = extInteraction(
     {
       ...s,
@@ -799,4 +799,20 @@ test("C-674: with the project code the message carries the full number; sensitiv
       ),
     ).sort(),
   ).toEqual(["project", "title", "url"]);
+});
+
+test("C-676: short numbers in a decision or handoff title become full numbers", () => {
+  expect(
+    buildExtMessage(
+      { ...item, title: "C-12 合并前请确认 Q-3，参见 SEN-C-34" },
+      "https://workbench.invalid",
+      120,
+      "CDG",
+    ).title,
+  ).toBe("CDG-C-12 合并前请确认 CDG-Q-3，参见 SEN-C-34");
+  // Without a code, or for fixed labels, the title is unchanged.
+  expect(
+    buildExtMessage({ ...item, title: "C-12 请确认" }, "https://w.invalid")
+      .title,
+  ).toBe("C-12 请确认");
 });

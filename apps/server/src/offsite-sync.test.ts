@@ -362,3 +362,33 @@ test("an idle, fully synced copy still notices an outage or a refused key, and r
     expect(h.offsite.thumbnailUrl(one.digest)).toBeDefined();
   }
 });
+
+test("C-683: a video's cover frame is copied off-site with its record, and a big video restores by streaming", async () => {
+  const video = await attachment("video bytes", false);
+  const poster = await attachment("poster bytes", false);
+  records.push({
+    id: "F-9",
+    sha256: video.digest,
+    size: video.body.length,
+    mime: "video/mp4",
+    video: { poster_sha256: poster.digest, poster_size: poster.body.length },
+  } as unknown as Attachment);
+  const h = await harness();
+  await h.sync.tick();
+  expect(fake.objects.get(attachmentKey(video.digest))?.body).toEqual(
+    video.body,
+  );
+  expect(fake.objects.get(attachmentKey(poster.digest))?.body).toEqual(
+    poster.body,
+  );
+  // Gone locally: the file is restored from the verified copy in place.
+  const path = join(dataDir, "attachments", video.digest);
+  await rm(path);
+  expect(
+    await h.offsite.restoreAttachment(path, video.digest, video.body.length),
+  ).toBe(true);
+  expect(await readFile(path)).toEqual(video.body);
+  // A copy that does not match the record is refused.
+  await rm(path);
+  expect(await h.offsite.restoreAttachment(path, video.digest, 1)).toBe(false);
+});
