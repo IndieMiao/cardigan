@@ -418,3 +418,34 @@ test("an empty timeline shows no pager row", async () => {
   expect(screen.queryByText("已到最早的记录")).toBeNull();
   expect(live()).toHaveLength(0);
 });
+
+test("C-688: a revalidated, unchanged head keeps the loaded older pages without asking again", async () => {
+  const { client, card, page } = server(45);
+  // A 304 hands back the very object the client already holds.
+  const head = page({ limit: 20 });
+  card.mockImplementation(async (_p, _c, options) =>
+    options?.before ? page(options) : head,
+  );
+  const mounted = render(
+    <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
+  );
+  await selectCardTab(/^时间线/);
+  await screen.findByText("已加载 20 / 45 条");
+  reachBottom();
+  await screen.findByText("已加载 40 / 45 条");
+  const older = olderCalls(card).length;
+  mounted.rerender(
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      revision={1}
+    />,
+  );
+  await waitFor(() =>
+    expect(card.mock.calls.filter((c) => !c[2]?.before)).toHaveLength(2),
+  );
+  expect(screen.getByText("已加载 40 / 45 条")).toBeTruthy();
+  expect(new Set(rows()).size).toBe(40);
+  expect(olderCalls(card)).toHaveLength(older);
+});

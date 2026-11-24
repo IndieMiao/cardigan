@@ -1129,7 +1129,11 @@ async function serveProjectRoute(
 
   const card = /^\/cards\/([^/]+)$/.exec(rest);
   if (card !== null) {
-    const { body } = await context.read(
+    const ifNoneMatch = req.headers["if-none-match"];
+    const acceptGzip = /\bgzip\b/.test(
+      String(req.headers["accept-encoding"] ?? ""),
+    );
+    const { body, gzip, etag, notModified } = await context.read(
       {
         kind: "card",
         project: project_id,
@@ -1138,10 +1142,34 @@ async function serveProjectRoute(
         mergeGateStatus:
           context.mergeGate?.forProject(project_id).status ?? "disabled",
         now,
+        ...(ifNoneMatch ? { ifNoneMatch } : {}),
+        ...(acceptGzip ? { acceptGzip } : {}),
       },
       context.recordTiming,
     );
-    sendJsonText(res, 200, body ?? "null");
+    // C-688: an open detail revalidates; an unchanged card answers 304.
+    const validator = etag ? { ETag: etag } : {};
+    if (notModified) {
+      res.writeHead(304, { "Cache-Control": "no-store", ...validator });
+      res.end();
+      return;
+    }
+    if (gzip) {
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Encoding": "gzip",
+        "Content-Length": gzip.byteLength,
+        "Cache-Control": "no-store",
+        Vary: "Accept-Encoding",
+        ...validator,
+      });
+      res.end(gzip);
+      return;
+    }
+    sendJsonText(res, 200, body ?? "null", {
+      Vary: "Accept-Encoding",
+      ...validator,
+    });
     return;
   }
 

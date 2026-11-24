@@ -85,6 +85,11 @@ export interface CardListPageProps {
   readonly revision?: number;
   readonly changedCards?: readonly string[];
   readonly changedCardsSince?: (revision: number) => readonly string[];
+  /** C-688: the open drawer re-reads on its own cards' changes only. */
+  readonly cardRevision?: (
+    id: string,
+    affectedCards: readonly string[],
+  ) => number;
 }
 
 type LoadState =
@@ -182,6 +187,7 @@ export function CardListPage({
   projectId,
   view: fallbackView = "board",
   revision = 0,
+  cardRevision,
 }: CardListPageProps) {
   const [filters, setFilters] = useRouteFilters({
     kind: "cards",
@@ -797,6 +803,7 @@ export function CardListPage({
               inDrawer
               onTitleChange={onTitleChange}
               revision={revision}
+              {...(cardRevision ? { cardRevision } : {})}
             />
           </PageLoader>
         )}

@@ -496,6 +496,7 @@ function Workbench({
                   revision={live.revision}
                   changedCards={live.changedCards}
                   changedCardsSince={live.changedCardsSince}
+                  cardRevision={live.cardRevision}
                 />
               )}
             </PageLoader>
