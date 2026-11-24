@@ -4,6 +4,7 @@ import {
   type Event,
   EventLog,
   EventLogView,
+  isProjectMergeEventType,
   type ProjectId,
 } from "@cardigan/domain";
 
@@ -69,6 +70,12 @@ export class CommandEvents {
         card: CardId | undefined,
         since: number,
       ): readonly Event[] => listStreams(project).after(card ?? "", since),
+      /**
+       * C-652: `projectMergeEvents` from the same view's type index, the same
+       * rows as the SQL `type GLOB 'merge_batch_*'` read without parsing them.
+       */
+      projectMergeEvents: (project: ProjectId): Event[] =>
+        listStreams(project).matching("", "type", isProjectMergeEventType),
       commit: () => {
         for (const [project, snapshot] of pending)
           this.committed.set(project, publish(snapshot));

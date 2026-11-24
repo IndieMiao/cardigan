@@ -4,7 +4,7 @@ import type {
   ProjectId,
   TimelineEntry,
 } from "@cardigan/domain";
-import { extractReferences } from "@cardigan/domain";
+import { extractReferences, streamEventsBy } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
@@ -18,9 +18,9 @@ import { withSuggestionProgress } from "./sql-state.js";
 
 /** Only collections used by card views; command-only activity/cursors stay out. */
 function cardState(tx: ReadRepositories, project_id: ProjectId): CommandState {
-  const config = tx.events
-    .listAfter(project_id, undefined, 0)
-    .findLast((e) => e.type === "merge_queue_configured");
+  const config = streamEventsBy(tx.events, project_id, undefined, "type", [
+    "merge_queue_configured",
+  ]).at(-1);
   if (config)
     return loadCommandState(tx, project_id, {
       merge_gate_enabled: true,

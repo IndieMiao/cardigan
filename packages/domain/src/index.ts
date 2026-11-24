@@ -224,7 +224,15 @@ export {
   eventsForDecision,
   eventsOfType,
 } from "./event-index.js";
-export { EventLog, EventLogView, streamHistory } from "./event-log.js";
+export {
+  EventLog,
+  EventLogView,
+  type IndexKeys,
+  indexKeysOf,
+  type StreamEventReader,
+  streamEventsBy,
+  streamHistory,
+} from "./event-log.js";
 export * from "./ext-interaction.js";
 export * from "./ext-message.js";
 export * from "./flow.js";

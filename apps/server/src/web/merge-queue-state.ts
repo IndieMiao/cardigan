@@ -1,4 +1,10 @@
-import type { Card, CommandState, ProjectId } from "@cardigan/domain";
+import {
+  type Card,
+  type CommandState,
+  isProjectMergeEventType,
+  type ProjectId,
+  streamEventsBy,
+} from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories } from "@cardigan/store";
 
@@ -12,7 +18,13 @@ export function readMergeQueueState(
     return undefined;
   const events =
     tx.projectMergeEvents?.(project) ??
-    tx.events.listAfter(project, undefined, 0);
+    streamEventsBy(
+      tx.events,
+      project,
+      undefined,
+      "type",
+      isProjectMergeEventType,
+    );
   const config = events.findLast(
     (e) => e.actor.kind === "system" && e.type === "merge_queue_configured",
   );

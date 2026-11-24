@@ -111,6 +111,14 @@ export function batchStartupFailure(family: readonly MergeBatch[]) {
   );
 }
 
+/**
+ * C-652: the project-stream event types of merge queue reads
+ * (`merge_queue_configured` or `merge_batch_*`, as the Store's SQL GLOB).
+ */
+export const isProjectMergeEventType = (type: unknown): boolean =>
+  type === "merge_queue_configured" ||
+  (typeof type === "string" && type.startsWith("merge_batch_"));
+
 const batchCache = new WeakMap<readonly Event[], readonly MergeBatch[]>();
 
 /** Only host events in this project's stream can establish batch evidence. */

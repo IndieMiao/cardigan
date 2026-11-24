@@ -671,6 +671,7 @@ export class Store {
       const repositories = createReadRepositories(this.#db, snapshots);
       const result = operation({
         ...repositories,
+        projectMergeEvents: events.projectMergeEvents,
         ...this.#cachedState(snapshots),
         ...(this.#testReviewTrust
           ? { test_review_trust: this.#testReviewTrust }

@@ -11,7 +11,16 @@ import {
   eventsOfType,
   resumeEventsForItem,
 } from "./event-index.js";
-import { EventLog, EventLogView, streamHistory } from "./event-log.js";
+import {
+  type EventIndexKind,
+  EventLog,
+  EventLogView,
+  type IndexKeys,
+  indexKeysOf,
+  streamEventsBy,
+  streamHistory,
+} from "./event-log.js";
+import type { CardId } from "./ids.js";
 import { parseEventId } from "./index.js";
 
 const eventId = (n: number) =>
@@ -235,4 +244,78 @@ test("C-640: a dropped overlay never leaks into later views or reused ordinals",
   expect(eventsOfType(stale.history(order), "public")).toEqual([]);
   expect(eventsOfType(staleHistory, "secret")).toHaveLength(1);
   expect(eventsOfType(history, "public")).toEqual([]);
+});
+
+/** Independent oracle: the callers' former `listAfter(...).filter` scans. */
+function legacyMatch(event: Event, kind: EventIndexKind, key: unknown) {
+  const p = event.payload as Record<string, unknown> | null;
+  if (kind === "type") return event.type === key;
+  if (kind === "resume_work_items")
+    return (
+      Array.isArray(p?.resume_work_items) && p.resume_work_items.includes(key)
+    );
+  return typeof key === "string" && p?.[kind] === key;
+}
+
+test("C-652: matching and streamEventsBy equal filtering the stream read", () => {
+  const selections: [EventIndexKind, IndexKeys][] = [
+    ["type", ["run_started"]],
+    ["type", ["noise", "__proto__", "noise"]],
+    ["type", ["absent"]],
+    ["type", []],
+    ["type", (key) => typeof key === "string" && key.startsWith("d")],
+    ["decision_id", ["Q-0", "Q-2"]],
+    ["decision_id", [3]],
+    ["completion_id", ["CR-1"]],
+    ["work_item_id", ["W-1"]],
+    ["resume_work_items", ["W-0", "W-1"]],
+    ["resume_work_items", [7]],
+    ["resume_work_items", () => true],
+  ];
+  for (let seed = 1; seed <= 60; seed++) {
+    const pick = rng(seed);
+    const seqs = new Map<string, number>();
+    const next = { id: 1 };
+    const log = new EventLog();
+    for (const event of randomBatch(pick, seqs, next, pick(40)))
+      log.append(event);
+    const overlay = new EventLog(log.end);
+    for (const event of randomBatch(pick, seqs, next, pick(12)))
+      overlay.append(event);
+    // A committed head, an overlay view and a stale view behind later appends.
+    const stale = new EventLogView(log, log.end);
+    const views = [stale, new EventLogView(log, log.end, overlay, overlay.end)];
+    for (const event of randomBatch(pick, seqs, next, pick(6)))
+      log.append(event);
+    views.push(new EventLogView(log, log.end));
+    for (const view of views)
+      for (const stream of ["", ...cards, id("card", 9)])
+        for (const [kind, keys] of selections) {
+          const match = (e: Event) =>
+            typeof keys === "function"
+              ? indexKeysOf(e, kind).some(keys)
+              : keys.some((key) => legacyMatch(e, kind, key));
+          const expected = view.after(stream, 0).filter(match);
+          const actual = view.matching(stream, kind, keys);
+          expect(actual).toEqual(expected);
+          if (actual.length)
+            expect(view.matching(stream, kind, keys)).not.toBe(actual);
+          const card = (stream || undefined) as CardId | undefined;
+          const reader = (streams?: ReadonlyMap<string, readonly Event[]>) => ({
+            listAfter: (_: string, c: CardId | undefined, since: number) =>
+              view.after(c ?? "", since),
+            ...(streams ? { listStreams: () => streams } : {}),
+          });
+          // Store view, a reader without listStreams and a plain map agree.
+          expect(streamEventsBy(reader(view), "P", card, kind, keys)).toEqual(
+            expected,
+          );
+          expect(streamEventsBy(reader(), "P", card, kind, keys)).toEqual(
+            expected,
+          );
+          expect(
+            streamEventsBy(reader(new Map(view)), "P", card, kind, keys),
+          ).toEqual(expected);
+        }
+  }
 });

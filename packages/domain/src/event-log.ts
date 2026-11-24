@@ -1,4 +1,6 @@
 import type { Event } from "./entities.js";
+import type { CardId, ProjectId } from "./ids.js";
+import type { EventRepository } from "./ports.js";
 
 /**
  * C-640: append-only project event log with incremental indexes.
@@ -24,6 +26,22 @@ export type EventIndexKind =
   | "resume_work_items";
 
 const FIELDS = ["decision_id", "completion_id", "work_item_id"] as const;
+
+/** Index keys to select: a list, or a predicate over the keys present. */
+export type IndexKeys = readonly unknown[] | ((key: unknown) => boolean);
+
+/** Keys `EventLog.append` indexes the event under for `kind`. */
+export function indexKeysOf(
+  event: Event,
+  kind: EventIndexKind,
+): readonly unknown[] {
+  if (kind === "type") return [event.type];
+  const payload = event.payload as Record<string, unknown> | null;
+  if (!payload || typeof payload !== "object") return [];
+  const value = payload[kind];
+  if (kind === "resume_work_items") return Array.isArray(value) ? value : [];
+  return typeof value === "string" ? [value] : [];
+}
 
 type Seg = { readonly events: Event[]; readonly ords: number[] };
 /**
@@ -331,6 +349,44 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
     return events.length ? events : noEvents;
   }
 
+  /**
+   * C-652: the stream's events indexed under `kind` with a key in `keys`, seq
+   * ascending, in a fresh array. Same as filtering `after(stream, 0)` with
+   * `indexKeysOf`, but touches only the matching events.
+   */
+  matching(stream: string, kind: EventIndexKind, keys: IndexKeys): Event[] {
+    const out: Event[] = [];
+    const take = (log: EventLog | undefined, limit: number) => {
+      const buckets = log?.buckets.get(kind);
+      if (!log || !buckets) return;
+      const lists: (readonly number[])[] = [];
+      const add = (bucket: Bucket | undefined) => {
+        const ords = bucket?.get(stream);
+        if (ords) lists.push(ords);
+      };
+      if (typeof keys === "function") {
+        for (const [key, bucket] of buckets) if (keys(key)) add(bucket);
+      } else for (const key of keys) add(buckets.get(key));
+      if (!lists.length) return;
+      const ords =
+        lists.length === 1
+          ? (lists[0] as readonly number[])
+          : lists.flat().sort((a, b) => a - b);
+      const n = below(ords, limit);
+      // One event can sit in a bucket twice (repeated resume_work_items).
+      let last = -1;
+      for (let i = 0; i < n; i++) {
+        const ord = ords[i] as number;
+        if (ord === last) continue;
+        last = ord;
+        out.push(log.at(ord) as Event);
+      }
+    };
+    take(this.base, this.baseEnd);
+    take(this.overlay, this.end);
+    return out;
+  }
+
   /** The view's event with this id, if any (event ids are unique per project). */
   eventWithId(id: string): Event | undefined {
     const ord = this.base.ids.get(id);
@@ -450,4 +506,31 @@ export function streamHistory(
 ): readonly Event[] {
   if (streams instanceof EventLogView) return streams.history(order);
   return order.flatMap((id) => streams.get(id) ?? []);
+}
+
+/** The event reader of a transaction (`tx.events`). */
+export type StreamEventReader = Pick<EventRepository, "listAfter"> & {
+  listStreams?(project: ProjectId): ReadonlyMap<string, readonly Event[]>;
+};
+
+/**
+ * C-652: one stream's events (`card` absent: the project stream) indexed
+ * under `kind` with a key in `keys`, seq ascending. A Store view answers from
+ * its index; any other reader filters `listAfter(project, card, 0)` the same.
+ */
+export function streamEventsBy(
+  events: StreamEventReader,
+  project: ProjectId,
+  card: CardId | undefined,
+  kind: EventIndexKind,
+  keys: IndexKeys,
+): readonly Event[] {
+  const view = events.listStreams?.(project);
+  if (view instanceof EventLogView)
+    return view.matching(card ?? "", kind, keys);
+  const match =
+    typeof keys === "function" ? keys : (key: unknown) => keys.includes(key);
+  return events
+    .listAfter(project, card, 0)
+    .filter((event) => indexKeysOf(event, kind).some(match));
 }
