@@ -39,6 +39,14 @@ export {
   TOKEN_FILE_NAME,
 } from "./assignment.js";
 export {
+  CAPABILITY_GUIDE_TOOL,
+  CAPABILITY_NOTE_PROMPT_MAX_ENTRIES,
+  CAPABILITY_NOTE_PROMPT_MAX_LENGTH,
+  type CapabilityNoteInput,
+  capabilityNotesPrompt,
+  condenseCapabilityNote,
+} from "./capability-notes.js";
+export {
   type CompiledFile,
   type CompiledLaunch,
   type CompileLaunchInput,

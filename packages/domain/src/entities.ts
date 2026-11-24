@@ -57,6 +57,8 @@ export const toolNames = [
   "request_decision",
   "upload_attachment",
   "read_attachment",
+  // C-726: read-only capability usage notes (C-725) for the Run's machine.
+  "get_capability_guide",
   "list_shared_files",
   "get_shared_file",
   "upload_shared_file",

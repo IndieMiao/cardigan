@@ -47,6 +47,10 @@ import { freshResourceNonce, runResourceState } from "./run-resource-state.js";
 import { ToolCallBookkeeping } from "./tool-call-bookkeeping.js";
 import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
 import {
+  type CapabilityGuideToolOptions,
+  capabilityGuideTool,
+} from "./tools/capability-guide.js";
+import {
   type CheckLogOptions,
   getCheckLogTool,
 } from "./tools/get-check-log.js";
@@ -88,7 +92,8 @@ export interface McpServerOptions
     PublicationOptions,
     ProbeToolOptions,
     MacosCheckToolOptions,
-    SharedFileToolOptions {
+    SharedFileToolOptions,
+    CapabilityGuideToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
   readonly bodyTimeoutMs?: number;
@@ -164,7 +169,8 @@ export function serverTools(
     PublicationOptions &
     ProbeToolOptions &
     MacosCheckToolOptions &
-    SharedFileToolOptions,
+    SharedFileToolOptions &
+    CapabilityGuideToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
@@ -172,6 +178,7 @@ export function serverTools(
     runProbeTool(options),
     macosCheckTool(options),
     ...sharedFileTools(options),
+    capabilityGuideTool(options),
     mobileSigningTool(options),
     publicationTool(options),
     reservationTool(options),

@@ -25,6 +25,7 @@ import {
   START_FILE_NAME,
   TOKEN_FILE_NAME,
 } from "./assignment-types.js";
+import { capabilityNotesPrompt } from "./capability-notes.js";
 import {
   type CompiledFile,
   type CompiledLaunch,
@@ -81,6 +82,12 @@ export function compileAssignmentLaunch(
       : composeRolePrompt(input.role.instructions)) + policyRule;
   const projectRule = projectCodePrompt(input.assignment);
   const resourceRule = input.run_resources ? `\n\n${RUN_RESOURCE_RULE}` : "";
+  // C-726: last, and outside `corePrompt`, so no note can satisfy a rule
+  // check such as the browser boundary below.
+  const capabilityRule = capabilityNotesPrompt(
+    input.capability_notes,
+    input.role.allowed_tools,
+  );
   const corePrompt =
     identity === undefined
       ? rolePrompt
@@ -349,7 +356,9 @@ export function compileAssignmentLaunch(
     files: [
       {
         path: coreFile,
-        content: withTrailingNewline(corePrompt + projectRule + resourceRule),
+        content: withTrailingNewline(
+          corePrompt + projectRule + resourceRule + capabilityRule,
+        ),
         mode: 0o600,
       },
       {
