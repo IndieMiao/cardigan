@@ -221,3 +221,64 @@ test("C-639 command state scope defaults to hot and rejects unknown values", () 
     );
   });
 });
+
+test("C-649 chunked warm-up gives the same streams as one full read, then reads only new rows", () => {
+  withTempStore((store, dataDir) => {
+    const Q = "warm-other" as typeof P;
+    store.createProject({ id: P });
+    store.createProject({ id: Q });
+    const a = "C-1" as CardId;
+    const b = "C-2" as CardId;
+    store.uow.run((tx) => {
+      tx.cards.put(P, card({ id: a }));
+      tx.cards.put(P, card({ id: b }));
+      tx.cards.put(Q, card({ id: a }));
+      for (let n = 1; n <= 7; n++) {
+        tx.events.append(P, event(`p${n}`, n, "x"));
+        tx.events.append(Q, event(`q${n}`, n, "x", a));
+        tx.events.append(P, event(`a${n}`, n, n % 2 ? "x" : "y", a));
+      }
+      // Out of order inside one stream: the first chunk falls back to a rebuild.
+      tx.events.append(P, event("b2", 2, "x", b));
+      tx.events.append(P, event("b1", 1, "x", b));
+    });
+    const read = (s: Store) =>
+      s.uow.read((tx) => {
+        const streams = tx.events.listStreams?.(P);
+        if (!streams) throw new Error("missing bulk port");
+        return [...streams].map(([key, events]) => [
+          key,
+          events.map((e) => e.id),
+        ]);
+      });
+    const reference = Store.open({ dataDir });
+    const warmed = Store.open({ dataDir });
+    try {
+      const expected = read(reference);
+      expect(expected).toContainEqual([b, ["b1", "b2"]]);
+      let calls = 1;
+      while (!warmed.warmCommandEvents(P, 3)) calls++;
+      expect(calls).toBeGreaterThan(3);
+      expect(warmed.warmCommandEvents(P, 3)).toBe(true);
+      expect(read(warmed)).toEqual(expected);
+      // A partial warm-up is completed by the next full read, new rows included.
+      const partial = Store.open({ dataDir });
+      try {
+        expect(partial.warmCommandEvents(P, 4)).toBe(false);
+        store.uow.run((tx) => tx.events.append(P, event("a8", 8, "x", a)));
+        const after = read(reference);
+        expect(after).toContainEqual([
+          a,
+          [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `a${n}`),
+        ]);
+        expect(read(partial)).toEqual(after);
+        expect(read(warmed)).toEqual(after);
+      } finally {
+        partial.close();
+      }
+    } finally {
+      reference.close();
+      warmed.close();
+    }
+  });
+});

@@ -13,7 +13,7 @@
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { performance } from "node:perf_hooks";
+import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import {
   compareHotState,
   hotCardIds,
@@ -340,6 +340,10 @@ async function background(db, scope, seconds = 60) {
   });
   const merger = new MergeExecutor({ store, clock, git, onError: () => {} });
   // Restart: the first ticks warm every project's state on the main thread.
+  // C-649: the event-loop delay histogram measures the longest real pause
+  // (a tick may span several synchronous slices with yields in between).
+  const loop = monitorEventLoopDelay({ resolution: 10 });
+  loop.enable();
   const pauses = [];
   const tick = async (run) => {
     const t = performance.now();
@@ -350,6 +354,8 @@ async function background(db, scope, seconds = 60) {
   await tick(() => merger.tick());
   const recovered_ms = Math.round(performance.now() - started);
   const warmup_max_ms = Math.round(Math.max(...pauses));
+  const warmup_loop_max_ms = Math.round(loop.max / 1e6);
+  loop.reset();
   pauses.length = 0;
   const cpu = process.cpuUsage();
   const from = performance.now();
@@ -360,6 +366,8 @@ async function background(db, scope, seconds = 60) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   const used = process.cpuUsage(cpu);
+  const idle_loop_max_ms = Math.round(loop.max / 1e6);
+  loop.disable();
   const wall = performance.now() - from;
   const memory = process.memoryUsage();
   store.close();
@@ -367,7 +375,12 @@ async function background(db, scope, seconds = 60) {
     mode: "background",
     scope,
     seconds,
-    restart: { recovered_ms, warmup_max_tick_ms: warmup_max_ms },
+    restart: {
+      recovered_ms,
+      warmup_max_tick_ms: warmup_max_ms,
+      warmup_loop_max_ms,
+    },
+    loop_max_ms: idle_loop_max_ms,
     idle_cpu_percent:
       Math.round(((used.user + used.system) / 1000 / wall) * 1000) / 10,
     tick_ms: { p95: quantile(pauses, 0.95), max: quantile(pauses, 1) },

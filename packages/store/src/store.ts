@@ -727,6 +727,32 @@ export class Store {
   }
 
   /**
+   * C-649: decode up to `rows` more of a project's events into the shared
+   * command-event log in a short read transaction. Returns true once the log
+   * is current; callers yield between calls to keep restart pauses short.
+   */
+  warmCommandEvents(project: ProjectId, rows = 50_000): boolean {
+    if (this.#inTransaction) {
+      throw new Error("nested UnitOfWork is not supported");
+    }
+    this.#db.exec("BEGIN DEFERRED");
+    this.#inTransaction = true;
+    const events = this.#commandEvents.transaction(this.#db);
+    try {
+      const done = events.warm(project, rows);
+      this.#db.exec("COMMIT");
+      events.commit();
+      return done;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      this.#rollbacks++;
+      throw error;
+    } finally {
+      this.#inTransaction = false;
+    }
+  }
+
+  /**
    * Events after `since_seq` plus the timeline entries they carry, ordered by
    * `seq` (development plan §6.1 step 4).
    */
