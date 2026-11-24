@@ -309,7 +309,7 @@ async function registeredLaunchExited(
 }
 /** C-663: the registered worker launch's kernel state. `unreachable` is a
  * failed worker transport; every other failure or mismatch is `unknown`. */
-async function registeredLaunchState(
+export async function registeredLaunchState(
   state: CommandState,
   a: Assignment,
   execution?: ExecutionConfig,

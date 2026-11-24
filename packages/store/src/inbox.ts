@@ -364,7 +364,7 @@ export function resolveRetirementNotifications(
           AND json_extract(done.doc,'$.payload.retirement_wait_event_id')=alert.id) OR
           (json_extract(alert.doc,'$.payload.reason') IN ('retirement_pending','retirement_unavailable','retirement_timeout')
           AND (done.type='assignment_stop_released' OR (done.type='session_replaced'
-          AND (json_extract(done.doc,'$.payload.reason')='idle_session_retired' OR
+          AND (json_extract(done.doc,'$.payload.reason') IN ('idle_session_retired','agent_unresponsive') OR
                (json_extract(done.doc,'$.payload.reason')='default_role_upgraded' AND json_extract(done.doc,'$.payload.idle_retirement_confirmed')=1))))))
         AND json_extract(done.doc,'$.payload.assignment_id')=json_extract(alert.doc,'$.payload.assignment_id'))`)
     .all(project);

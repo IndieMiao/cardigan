@@ -119,6 +119,7 @@ import {
   stopRunRuntime,
   stopSystemTurn,
 } from "./stop-run.js";
+import { releaseUnresponsiveAgent } from "./unresponsive-session.js";
 import {
   UpstreamHealthMonitor,
   upstreamHoldReason,
@@ -572,6 +573,12 @@ export class HostOpsService {
       if (settled)
         return unwrap(store.runIdempotent(invocation, () => settled)).value;
     }
+    // C-730: a remote managed Assignment whose Agent the worker does not see
+    // alive is released like a managed `assignment stop` (terminal closed,
+    // exit proven, session settled); dispatch then starts a new session.
+    const remote = await this.releaseRemoteSession(project, tool, p, actor);
+    if (remote && "result" in remote)
+      return unwrap(store.runIdempotent(invocation, () => remote.result)).value;
     const contextUsage =
       p.context_session_id === undefined
         ? undefined
@@ -627,18 +634,36 @@ export class HostOpsService {
       tool === "host_ops_cancel_run"
         ? undefined
         : await this.observeUpstream(project, p.target_id as AssignmentId);
-    const preflight = store.uow.read((tx) => {
-      const state = loadCommandState(tx, project);
-      if (tool !== "host_ops_cancel_run")
-        this.checkUpstream(
-          state,
-          p.target_id as AssignmentId,
-          Boolean(contextUsage),
-          undefined,
-          activity,
-        );
-      return unwrap(prepareHostOpsAction(state, actor, paramsFor(state))).data;
-    });
+    const preflight = (() => {
+      try {
+        return store.uow.read((tx) => {
+          const state = loadCommandState(tx, project);
+          if (tool !== "host_ops_cancel_run")
+            this.checkUpstream(
+              state,
+              p.target_id as AssignmentId,
+              Boolean(contextUsage),
+              undefined,
+              activity,
+            );
+          return unwrap(prepareHostOpsAction(state, actor, paramsFor(state)))
+            .data;
+        });
+      } catch (error) {
+        // C-730: say why the remote release did not apply instead.
+        if (
+          remote &&
+          (error as { message?: unknown } | null)?.message ===
+            "Target must be a local managed Assignment"
+        )
+          throw new ToolError(
+            "illegal_transition",
+            `远程会话未释放：${remoteRefusalText(remote.refusal)}`,
+            { reason: remote.refusal },
+          );
+        throw error;
+      }
+    })();
     if (p.dispatch_stall_id) {
       const state = store.uow.read((tx) => loadCommandState(tx, project));
       const stall = this.stallPatrol.current(
@@ -747,6 +772,75 @@ export class HostOpsService {
         return effect.data;
       }),
     ).value;
+  }
+  /**
+   * C-730: restart or cancel on a remote managed Assignment. Only a session
+   * whose terminal is live while the worker does not see its Agent CLI alive
+   * is released; anything else returns the refusal and the ordinary path
+   * (which handles remote exit-only recoveries) decides.
+   */
+  private async releaseRemoteSession(
+    project: ProjectId,
+    tool: HostOpsExecutionTool | "host_ops_recheck_merge",
+    p: { target_id: string; reason?: string; context_session_id?: string },
+    actor: ToolContext["identity"]["actor"],
+  ) {
+    if (
+      (tool !== "host_ops_restart_assignment" &&
+        tool !== "host_ops_cancel_run") ||
+      p.context_session_id !== undefined ||
+      actor.kind !== "assignment"
+    )
+      return;
+    const { store } = this.options;
+    const found = store.uow.read((tx) => {
+      const run =
+        tool === "host_ops_cancel_run"
+          ? tx.runs.get(project, p.target_id as RunId)
+          : undefined;
+      const a = tx.assignments.get(
+        project,
+        (run?.assignment_id ?? p.target_id) as AssignmentId,
+      );
+      return a ? { a, run } : undefined;
+    });
+    const a = found?.a;
+    if (
+      !a?.runtime_ref ||
+      a.scope !== "work_item" ||
+      a.external ||
+      a.machine_id === "local" ||
+      (tool === "host_ops_cancel_run" && !found?.run)
+    )
+      return;
+    const ref = a.runtime_ref;
+    const outcome = await releaseUnresponsiveAgent(
+      store,
+      project,
+      a,
+      this.options.runtime,
+      this.clock,
+      {
+        trigger: "host_ops",
+        requested_by: actor.assignment_id,
+        tool,
+        reason: p.reason?.trim() || tool,
+        ...(found?.run ? { run_id: found.run.id } : {}),
+      },
+    );
+    if (outcome.outcome === "refused") return { refusal: outcome.reason };
+    await this.options
+      .scrubCredentials?.(project, a.id, ref)
+      .catch(() => undefined);
+    return {
+      result: {
+        assignment_id: a.id,
+        ...(found?.run ? { run_id: found.run.id } : {}),
+        result: "session_released" as const,
+        message:
+          "远程会话的 Agent 进程未见存活：已关闭残留终端、确认会话退出并结算；有待办时系统按受管入口新起会话。",
+      },
+    };
   }
   private async settleExitedAgent(project: ProjectId, id: AssignmentId) {
     const { store } = this.options;
@@ -2251,6 +2345,33 @@ const OPERATION: Record<HostOpsExecution["tool"], string> = {
 };
 
 /** Numbered steps for the human; the terminal is never touched by the server. */
+/** C-730: why a remote restart or cancel did not release the session. */
+export function remoteRefusalText(reason: string) {
+  return (
+    (
+      {
+        agent_alive: "worker 显示 Agent 进程仍在运行，不关闭终端",
+        agent_unobserved:
+          "无法从 worker 确认 Agent 进程状态（连接失败或观测不完整），不关闭终端",
+        terminal_not_live: "终端已不在运行，按原退出核对路径处理",
+        stopped_by_human:
+          "该指派已被人工停止，请用 cardigan assignment start 恢复",
+        operation_pending: "还有会话操作或 Run 停止、启动在进行，稍后重试",
+        upgrade_pending: "角色升级尚未收尾，稍后重试",
+        shared_registration: "终端或工作区存在其它登记，不能释放",
+        run_changed: "目标 Run 已结束",
+        delivery_in_progress: "通知正在投递，稍后重试",
+        locked: "会话正在接入或维护，稍后重试",
+        release_failed: "关闭终端失败，稍后重试",
+        exit_unconfirmed: "终端已关闭，但未能确认会话退出，保留引用等待核对",
+        session_changed: "会话已更换，请重新读取诊断",
+        not_managed: "目标不是受管的工作项指派",
+        no_session: "没有在运行的会话",
+      } as Record<string, string>
+    )[reason] ?? "未满足释放条件"
+  );
+}
+
 export function exitConfirmationText(
   action: Pick<
     HostOpsExecution,

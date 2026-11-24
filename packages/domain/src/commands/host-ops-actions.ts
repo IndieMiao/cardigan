@@ -33,6 +33,8 @@ import {
 } from "../retirement-session.js";
 import { runById } from "../run-index.js";
 import { hasRunTarget } from "../run-target.js";
+// C-730: moved next to session maintenance, which must not import this module.
+import { sharedStallRegistration } from "../session-maintenance.js";
 import {
   reviewDiscussionInstruction,
   reviewWakeBlocked,
@@ -174,21 +176,6 @@ export function retirementStallHandoff(
     queue_id: queue.id,
     ...(h.observe_only ? { observe_only: true } : {}),
   };
-}
-
-export function sharedStallRegistration(state: CommandState, a: Assignment) {
-  const ref = a.runtime_ref;
-  return state.assignments.some(
-    (other) =>
-      other.id !== a.id &&
-      other.status !== "released" &&
-      other.machine_id === a.machine_id &&
-      ((!!a.worktree_path && other.worktree_path === a.worktree_path) ||
-        (!!ref &&
-          other.runtime_ref?.runtime_machine === ref.runtime_machine &&
-          (other.runtime_ref.terminal_ref === ref.terminal_ref ||
-            other.runtime_ref.agent_name === ref.agent_name))),
-  );
 }
 
 export interface HostOpsActionParams {
