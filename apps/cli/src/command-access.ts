@@ -97,6 +97,8 @@ export const CLI_TOOLS = {
   "assignment start": null,
   "assignment stop": null,
   "assignment release": "release_assignment",
+  // C-716: release + reassign in one transaction; the domain also checks `assign`.
+  "assignment move": "release_assignment",
   "assignment attach": null,
   "rework request": "request_delivery_rework",
   "rework confirm": null,

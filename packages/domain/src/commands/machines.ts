@@ -21,6 +21,12 @@ export interface MachineRequirements {
   readonly required_tags?: readonly string[];
 }
 
+/** Free fraction of a quota slot; a zero ceiling is full, never NaN. */
+const freeRatio = (slot: {
+  readonly limit: number;
+  readonly occupied: number;
+}) => (slot.limit > 0 ? (slot.limit - slot.occupied) / slot.limit : 0);
+
 // MC-2 accepts numeric dotted components only. Compare without floating-point rounding.
 function versionMatches(
   actual: string | null,
@@ -201,6 +207,28 @@ export function selectMachine(
       const slot = f?.resources?.get(key);
       return slot ? [{ key, ...slot }] : [];
     });
+    // C-716: this project's own ceilings on the machine rank like its slots.
+    const quota = f?.project_quota;
+    const project_resources = keys.flatMap((key) => {
+      const slot = quota?.resources?.get(key);
+      return slot ? [{ key, ...slot }] : [];
+    });
+    const full = f
+      ? [
+          ...(f.occupied >= f.limit
+            ? [`机器上限 ${f.occupied}/${f.limit}`]
+            : []),
+          ...(quota?.limit && quota.limit.occupied >= quota.limit.limit
+            ? [`项目上限 ${quota.limit.occupied}/${quota.limit.limit}`]
+            : []),
+          ...resources
+            .filter((r) => r.occupied >= r.limit)
+            .map((r) => `${r.key} 名额 ${r.occupied}/${r.limit}`),
+          ...project_resources
+            .filter((r) => r.occupied >= r.limit)
+            .map((r) => `项目 ${r.key} 名额 ${r.occupied}/${r.limit}`),
+        ]
+      : [];
     candidates.push({
       machine_id,
       affinity: item.kind === "produce" && affinity.has(machine_id),
@@ -210,13 +238,18 @@ export function selectMachine(
       ...(f?.pending_assignments
         ? { pending_assignments: f.pending_assignments }
         : {}),
+      ...(quota?.limit ? { project_limit: { ...quota.limit } } : {}),
       remaining_ratio: f
         ? Math.min(
             (f.limit - f.occupied) / f.limit,
+            quota?.limit ? freeRatio(quota.limit) : 1,
             remainingResourceRatio(keys, f.resources),
+            ...project_resources.map(freeRatio),
           )
         : null,
       ...(resources.length ? { resources } : {}),
+      ...(project_resources.length ? { project_resources } : {}),
+      ...(full.length ? { full } : {}),
       preference_rank: rank < 0 ? null : rank,
     });
   }
@@ -237,11 +270,15 @@ export function selectMachine(
     `没有满足条件的机器：${excluded.map((m) => `${m.machine_id} (${m.reasons.join(", ")})`).join("; ")}`,
     { no_matching_machine: true },
   );
+  // Every eligible machine is full: the Run queues there; name the limits.
+  const queued_on =
+    (first.remaining_ratio ?? 1) <= 0 && first.full ? first.full : undefined;
   return {
     machine_id: first.machine_id,
     audit: {
       candidates,
       excluded,
+      ...(queued_on ? { queued_on } : {}),
       selection_order: [
         "has_capacity",
         "control_host",

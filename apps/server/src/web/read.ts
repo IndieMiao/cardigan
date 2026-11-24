@@ -820,6 +820,19 @@ export function machineSelection(
   const text = (value: unknown) =>
     typeof value === "string" ? value : undefined;
   const list = (value: unknown) => (Array.isArray(value) ? value : []);
+  const strings = (value: unknown) =>
+    list(value).filter((r): r is string => typeof r === "string");
+  const slot = (r: unknown) => {
+    const v = r as Record<string, unknown> | null | undefined;
+    return typeof v?.limit === "number" && typeof v.occupied === "number"
+      ? { limit: v.limit, occupied: v.occupied }
+      : undefined;
+  };
+  const slots = (value: unknown) =>
+    list(value).flatMap((r: Record<string, unknown>) => {
+      const s = slot(r);
+      return typeof r?.key === "string" && s ? [{ key: r.key, ...s }] : [];
+    });
   if (latest.type === "system_assignment_deferred")
     return {
       status: "deferred" as const,
@@ -850,15 +863,19 @@ export function machineSelection(
             preference_rank:
               typeof c.preference_rank === "number" ? c.preference_rank : null,
             // MC-4 snapshot at selection time; never substituted by live capacity.
-            resources: list(c.resources).flatMap(
-              (r: Record<string, unknown>) =>
-                typeof r?.key === "string" &&
-                typeof r.limit === "number" &&
-                typeof r.occupied === "number"
-                  ? [{ key: r.key, limit: r.limit, occupied: r.occupied }]
-                  : [],
-            ),
+            resources: slots(c.resources),
+            // C-716: this project's own ceilings, same snapshot rule.
+            ...(slot(c.project_limit)
+              ? { project_limit: slot(c.project_limit) }
+              : {}),
+            ...(list(c.project_resources).length
+              ? { project_resources: slots(c.project_resources) }
+              : {}),
+            ...(list(c.full).length ? { full: strings(c.full) } : {}),
           })),
+          ...(list(p.queued_on).length
+            ? { queued_on: strings(p.queued_on) }
+            : {}),
           excluded: list(p.excluded).map((m: Record<string, unknown>) => ({
             machine_id: text(m.machine_id) ?? "",
             reasons: list(m.reasons).filter(
