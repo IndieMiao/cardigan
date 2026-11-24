@@ -19,6 +19,7 @@ import {
   finishRun,
   fullEventHistory,
   HOST_OPS_ROLE_TOOLS,
+  issueInstruction,
   postComment,
   queueRun,
   recordLaunchPublication,
@@ -131,6 +132,17 @@ afterEach(() => f.close());
 const comment = (body = "Read the card") =>
   f.apply((s, a, p) =>
     postComment(
+      s,
+      a,
+      { card_id: target.card.id, work_item_id: target.item.id, body },
+      p,
+    ),
+  );
+// C-721: a comment only asks for a reply and claims no resources; resource
+// admission tests wake the producer with an instruction instead.
+const instruct = (body = "Do the work") =>
+  f.apply((s, a, p) =>
+    issueInstruction(
       s,
       a,
       { card_id: target.card.id, work_item_id: target.item.id, body },
@@ -1702,7 +1714,7 @@ test("MC-4 a missing slot holds the entire Run without reserving an unrelated fr
         ["blender", 1],
       ]),
   };
-  comment();
+  instruct();
   await new Dispatcher(settings).tick();
   const [waiting] = readRunQueue(f.store);
   expect(waiting).toMatchObject({
@@ -1720,7 +1732,7 @@ test("MC-4 a missing slot holds the entire Run without reserving an unrelated fr
   expect(readRunQueue(f.store)).toEqual([waiting]);
   f.advance(100);
   f.apply((s, a, p) =>
-    postComment(
+    issueInstruction(
       s,
       a,
       {
@@ -1775,7 +1787,7 @@ test("C-620 a head waiting on an occupied emulator does not hold back later godo
   f.session(holder.assignment, false);
   // R-715 (C-14 smoke) is queued first and needs the emulator and godot.
   requireCapabilities(target.item, ["android.emulator", "godot"]);
-  comment();
+  instruct();
   await new Dispatcher(settings).tick();
   const [head] = readRunQueue(f.store);
   expect(head).toMatchObject({ assignment_id: target.assignment.id });
@@ -1792,7 +1804,7 @@ test("C-620 a head waiting on an occupied emulator does not hold back later godo
   for (const t of [...later, emulatorLater]) {
     f.advance(100);
     f.apply((s, a, p) =>
-      postComment(
+      issueInstruction(
         s,
         a,
         { card_id: t.card.id, work_item_id: t.item.id, body: "work" },
@@ -1817,6 +1829,142 @@ test("C-620 a head waiting on an occupied emulator does not hold back later godo
   expect(status(target.assignment)).toContain("dispatched");
   expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
     emulatorLater.assignment.id,
+  ]);
+});
+
+/** C-721: a recording Run holds the only godot and emulator slots. */
+function fullDevices() {
+  const busy = f.create();
+  requireCapabilities(busy.item, ["godot", "android.emulator"]);
+  f.session(busy.assignment, false);
+  requireCapabilities(target.item, ["godot", "android.emulator"]);
+  const resourceLimits = () =>
+    new Map([
+      ["godot", 1],
+      ["android.emulator", 1],
+    ]);
+  const occupied = (key: string) =>
+    f.store.uow.read(
+      (tx) =>
+        runCapacitySnapshot(f.store, tx, resourceLimits)
+          .resourcesForMachine("local")
+          .get(key)?.occupied,
+    );
+  const own = (status: Run["status"]) =>
+    f
+      .state()
+      .runs.filter(
+        (r) => r.assignment_id === target.assignment.id && r.status === status,
+      );
+  return {
+    busy,
+    occupied,
+    own,
+    settings: { ...options, runLimit: () => 4, resourceLimits },
+  };
+}
+
+test("C-721 a submit/reply follow-up starts while godot and the emulator are full, claiming neither", async () => {
+  const { occupied, own, settings } = fullDevices();
+  comment("Reviews passed; please submit the completion request");
+  await new Dispatcher(settings).tick();
+  expect(readRunQueue(f.store)).toEqual([]);
+  expect(own("dispatched")).toMatchObject([{ resource_keys: [] }]);
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(vi.mocked(runtime.wake).mock.calls[0]?.[1]).toContain(
+    "未占用 godot、android.emulator 名额",
+  );
+  expect(occupied("godot")).toBe(1);
+  expect(occupied("android.emulator")).toBe(1);
+});
+
+test.each(["instruction", "comment followed by an instruction"])(
+  "C-721 an %s keeps the work item's resources and waits while they are full",
+  async (mode) => {
+    const { busy, own, settings } = fullDevices();
+    if (mode !== "instruction") {
+      comment();
+      f.advance(1);
+    }
+    instruct();
+    await new Dispatcher(settings).tick();
+    expect(readRunQueue(f.store)).toMatchObject([
+      { assignment_id: target.assignment.id },
+    ]);
+    expect(runtime.wake).not.toHaveBeenCalled();
+    finish(busy.assignment);
+    await new Dispatcher(settings).tick();
+    expect(own("dispatched")).toMatchObject([
+      { resource_keys: ["godot", "android.emulator"] },
+    ]);
+    expect(vi.mocked(runtime.wake).mock.calls[0]?.[1]).not.toContain("未占用");
+  },
+);
+
+test.each(["rework", "fix", "decision_resumed"] as const)(
+  "C-721 a %s Run keeps the work item's resources and waits while they are full",
+  async (kind) => {
+    const { busy, own, settings } = fullDevices();
+    comment();
+    const trigger = f
+      .state()
+      .events.findLast(
+        (e) => e.type === "comment_posted" && e.card_id === target.card.id,
+      );
+    if (!trigger) throw new Error("Missing comment");
+    f.apply((s, a, p) =>
+      queueRun(
+        s,
+        a,
+        {
+          assignment_id: target.assignment.id,
+          trigger_event_id: trigger.id,
+          kind,
+          model: "fixture",
+          agent_cli_version: "1",
+        },
+        p,
+      ),
+    );
+    await new Dispatcher(settings).tick();
+    expect(own("queued")).toMatchObject([{ kind }]);
+    expect(runtime.wake).not.toHaveBeenCalled();
+    finish(busy.assignment);
+    await new Dispatcher(settings).tick();
+    expect(own("dispatched")).toMatchObject([
+      { kind, resource_keys: ["godot", "android.emulator"] },
+    ]);
+  },
+);
+
+test("C-721 work that needs resources is never handed to a running follow-up that holds none", async () => {
+  const { busy, own, settings } = fullDevices();
+  const light = f.session(target.assignment, false);
+  f.store.uow.run((tx) => {
+    const current = tx.runs.get(f.project, light.id);
+    if (!current) throw new Error("Missing Run");
+    tx.runs.put(f.project, { ...current, resource_keys: [] });
+  });
+  comment("Thanks, one more reply please");
+  await new Dispatcher(settings).tick();
+  expect(runtime.wake).toHaveBeenCalledOnce(); // a reply continues the turn
+  f.advance(1);
+  instruct("Record the video again");
+  await new Dispatcher(settings).tick();
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(ownNotes().find((n) => n.kind === "instruction")?.status).toBe(
+    "pending",
+  );
+  finish(target.assignment);
+  await new Dispatcher(settings).tick();
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(readRunQueue(f.store)).toMatchObject([
+    { assignment_id: target.assignment.id },
+  ]);
+  finish(busy.assignment);
+  await new Dispatcher(settings).tick();
+  expect(own("dispatched")).toMatchObject([
+    { resource_keys: ["godot", "android.emulator"] },
   ]);
 });
 
@@ -1941,7 +2089,7 @@ test("MC-4 a withdrawn legacy Run holds its retry's resources before and after r
   requireCapabilities(owner.item, ["ios.simulator"]);
   expect(occupied("ios.simulator")).toBe(0); // added only after this dispatch
   expect(occupied("blender")).toBe(1);
-  comment();
+  instruct();
   const dispatcher = new Dispatcher({
     ...options,
     runLimit: () => 3,
@@ -1984,7 +2132,7 @@ test("MC-4 stopping a queued follow-up holds neither its unclaimed resources nor
     runLimit: () => 4,
     resourceLimits,
   });
-  comment();
+  instruct();
   await dispatcher.tick();
   const wait = f
     .state()
@@ -2015,7 +2163,7 @@ test("MC-4 stopping a queued follow-up holds neither its unclaimed resources nor
     0,
   );
   f.apply((s, a, p) =>
-    postComment(
+    issueInstruction(
       s,
       a,
       {
@@ -2701,10 +2849,10 @@ test.each(["machine", "resource"])(
     if (kind === "resource")
       for (const item of [target.item, extra.item])
         requireCapabilities(item, ["godot", "godot>=4"]);
-    comment();
+    instruct();
     f.advance(1);
     f.apply((s, a, p) =>
-      postComment(
+      issueInstruction(
         s,
         a,
         { card_id: extra.card.id, work_item_id: extra.item.id, body: "second" },
@@ -3672,7 +3820,7 @@ test.each(["total", "resource"])(
         ),
       ).toBe(true);
     });
-    comment();
+    instruct();
     const dispatcher = new Dispatcher({ ...options, ...limits });
     await dispatcher.tick();
     const run = f
@@ -3741,7 +3889,7 @@ test.each(["mount", "memory"])(
       leases,
       resourceLimits: cfg.resourcesForMachine,
     });
-    comment();
+    instruct();
     await dispatcher.tick();
     const [wait] = readRunQueue(f.store);
     expect(wait?.assignment_id).toBe(target.assignment.id);
@@ -3793,7 +3941,7 @@ test("C-497 another project reservation blocks a live wake, hard deadline unbloc
     leases,
     resourceLimits: cfg.resourcesForMachine,
   });
-  comment();
+  instruct();
   await d.tick();
   const [wait] = readRunQueue(f.store);
   expect(wait?.assignment_id).toBe(target.assignment.id);
@@ -3803,6 +3951,43 @@ test("C-497 another project reservation blocks a live wake, hard deadline unbloc
   expect(f.state().runs.find((r) => r.id === wait?.run_id)?.status).toBe(
     "dispatched",
   );
+});
+
+test("C-721 a follow-up inspected for its own empty claim passes admission beside another project's reservation", async () => {
+  requireCapabilities(target.item, ["godot"]);
+  f.store.createProject({ id: "priority" });
+  await writeFile(
+    join(f.dataDir, "run-capacity.yaml"),
+    JSON.stringify({ machines: { local: { resources: { godot: 1 } } } }),
+    { mode: 0o600 },
+  );
+  const { loadRunCapacityConfig, MachineLeases } = await import(
+    "@cardigan/host"
+  );
+  const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+  const leases = new MachineLeases(f.store, cfg, vi.fn());
+  const at = f.clock.now();
+  await leases.reserve(
+    { kind: "human", project_id: "priority" },
+    "local",
+    "godot",
+    at,
+    new Date(Date.parse(at) + 60_000).toISOString(),
+    () => at,
+  );
+  const inspect = vi.spyOn(leases, "inspect");
+  comment();
+  await new Dispatcher({
+    ...options,
+    leases,
+    resourceLimits: cfg.resourcesForMachine,
+  }).tick();
+  expect(inspect).toHaveBeenCalledWith(f.project, expect.anything(), []);
+  expect(readRunQueue(f.store)).toEqual([]);
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(
+    f.state().events.filter((e) => e.type === "machine_resource_waiting"),
+  ).toEqual([]);
 });
 
 test("C-497 a bound admission replaces a legacy live session and passes only that owner generation to start", async () => {
@@ -3835,7 +4020,7 @@ test("C-497 a bound admission replaces a legacy live session and passes only tha
   );
   const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
   const leases = new MachineLeases(f.store, cfg, async () => "local");
-  comment();
+  instruct();
   await new Dispatcher({
     ...options,
     leases,
@@ -3948,7 +4133,7 @@ test.each(["preparation", "backoff", "send slot"])(
         return undefined;
       },
     });
-    comment();
+    instruct();
     await d.tick();
     if (stage === "backoff") {
       mounted = false;

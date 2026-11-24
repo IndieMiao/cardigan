@@ -12,6 +12,7 @@ import {
   type ReadResourceLimits,
   type RunCapacityBlock,
   runCapacitySnapshot,
+  runResourceKeys,
 } from "@cardigan/host";
 import {
   type BellAttempt,
@@ -97,7 +98,24 @@ export class QueuedRunPatrol {
           (capacity.occupied.get(a.machine_id) ?? 0) <
           effectiveRunLimit(store, a.machine_id, runLimit, runLimitMaximum);
         // C-714: free machine slots alone do not mean this Run can start.
-        if (spare) block = capacity.capacityBlock(project, a);
+        // C-721: name only the resources this Run itself would claim.
+        if (spare)
+          block = capacity.capacityBlock(
+            project,
+            a,
+            runResourceKeys(
+              tx,
+              project,
+              a,
+              state.events,
+              run,
+              store.listNotifications({
+                project_id: project,
+                status: "pending",
+                assignment_id: a.id,
+              }),
+            ),
+          );
       }
       if (!recheck && !spare) continue;
       const minutes = Math.floor((now - Date.parse(queuedAt)) / 60_000);

@@ -7,6 +7,7 @@ import type {
   DispatchRunParams,
   Notification,
   ProjectId,
+  QueuedRun,
   Run,
   RunId,
   Runtime,
@@ -92,6 +93,7 @@ import {
   redactFailureLine,
   retainedWriterRefusal,
   runCapacitySnapshot,
+  runResourceKeys,
   settleTestReviewLimits,
   testReviewRunPrompt,
   tryHostOpsLock,
@@ -292,6 +294,11 @@ export interface DispatcherOptions {
 }
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
+/** C-721: a submit/reply follow-up runs without its work item's resources. */
+const unclaimedResourcesRule = (keys: readonly string[]) =>
+  keys.length
+    ? `本次 Run 只处理提交和回帖，未占用 ${keys.join("、")} 名额：不要启动或操作这些资源；确需使用时用 report_blocker（needs=role）说明所需资源后结束本次 Run，恢复后的 Run 会按工作项占用名额。`
+    : undefined;
 const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
   s.cursors.some(
     (c) =>
@@ -950,7 +957,13 @@ export class Dispatcher {
       !this.options.leases?.configured(project, a.machine_id) &&
       queued?.queue_reason === "concurrency_limit" &&
       !this.options.store.uow.read((tx) =>
-        this.availableResources(tx, state, a, queued),
+        this.availableResources(
+          tx,
+          state,
+          a,
+          queued,
+          this.runKeys(tx, state, a, queued, this.readyNotes(state, a, notes)),
+        ),
       )
     )
       return skip("concurrency_limit");
@@ -1309,7 +1322,28 @@ export class Dispatcher {
       !continuing &&
       (this.options.leases?.configured(project, a.machine_id) ||
         this.options.leases?.adbNeeded(project, a))
-        ? await this.options.leases?.inspect(project, a)
+        ? await this.options.leases?.inspect(
+            project,
+            a,
+            this.options.store.uow.read((tx) => {
+              const fresh = this.loadState(tx, project);
+              const ready = this.readyNotes(fresh, a, notes);
+              const cause = inboxCause(fresh, a, ready);
+              return this.runKeys(
+                tx,
+                fresh,
+                a,
+                this.queued(fresh, a) ??
+                  fresh.runs.find(
+                    (r) =>
+                      r.assignment_id === a.id &&
+                      (r.id === cause?.run_id ||
+                        r.trigger_event_id === cause?.event_id),
+                  ),
+                ready,
+              );
+            }),
+          )
         : undefined;
     if (this.closing) return skip("shutting_down");
     let job: Job | undefined;
@@ -1805,11 +1839,101 @@ export class Dispatcher {
         });
     });
   }
+  /** C-216: fetch only the requested pending rows instead of decoding the
+   * project's whole notification history on every claim. */
+  private readyNotes(
+    state: CommandState,
+    a: Assignment,
+    notes: readonly Notification[],
+  ) {
+    return this.options.store
+      .listNotifications({
+        project_id: state.project_id,
+        status: "pending",
+        ids: notes.map((n) => n.id),
+      })
+      .filter(
+        (n) =>
+          this.owner(n, state) === a.id &&
+          !covered(n, state, a.id) &&
+          !notificationBlocked(state, n.event_id, a.id) &&
+          !(
+            a.standing_mode === "ops" &&
+            newPmNotification(state, n) &&
+            pmNotificationState(state, n) === "obsolete"
+          ),
+      );
+  }
+  /**
+   * C-721: the resources the Run addressed by these ready notices would claim:
+   * its own queued Run, else the one the first notice would queue. Computed
+   * the same way before inspection and inside the claim, so the inspected
+   * signature matches unless the notices really changed.
+   */
+  private runKeys(
+    tx: ReadRepositories,
+    state: CommandState,
+    a: Assignment,
+    run: Run | undefined,
+    ready: readonly Notification[],
+  ) {
+    const cause = run ? undefined : inboxCause(state, a, ready);
+    return runResourceKeys(
+      tx,
+      state.project_id,
+      a,
+      state.events,
+      run ?? {
+        kind: dispatchRunKind(
+          eventById(state.events, cause?.event_id),
+          a,
+          cause?.kind === "review",
+        ),
+        ...(cause ? { trigger_event_id: cause.event_id } : {}),
+      },
+      ready,
+    );
+  }
+  /** C-721: an earlier waiter is judged by what its own Run would claim. */
+  private waiterKeys(tx: ReadRepositories) {
+    const pending = new Map<string, readonly Notification[]>();
+    return (entry: QueuedRun, owner: Assignment) => {
+      const state = this.loadState(tx, entry.project_id);
+      const run = state.runs.find((r) => r.id === entry.run_id);
+      if (!run) return assignmentResourceKeys(tx, entry.project_id, owner);
+      // Only a light trigger can lighten the Run; skip the notice read otherwise.
+      if (
+        runResourceKeys(tx, entry.project_id, owner, state.events, run, [])
+          .length
+      )
+        return assignmentResourceKeys(tx, entry.project_id, owner);
+      let notes = pending.get(entry.project_id);
+      if (!notes) {
+        notes = this.options.store.listNotifications({
+          project_id: entry.project_id,
+          status: "pending",
+        });
+        pending.set(entry.project_id, notes);
+      }
+      return this.runKeys(
+        tx,
+        state,
+        owner,
+        run,
+        this.readyNotes(
+          state,
+          owner,
+          notes.filter((n) => this.owner(n, state) === owner.id),
+        ),
+      );
+    };
+  }
   private availableResources(
     tx: ReadRepositories,
     state: CommandState,
     a: Assignment,
     run: Run,
+    keys: readonly string[],
   ) {
     const project = state.project_id;
     const capacity = runCapacitySnapshot(
@@ -1819,7 +1943,6 @@ export class Dispatcher {
       this.options.projectQuota,
     );
     const slots = capacity.resourcesForMachine(a.machine_id);
-    const keys = assignmentResourceKeys(tx, project, a);
     if (!capacity.withinProjectQuota(project, a, keys)) return undefined;
     const trigger = eventById(state.events, run.trigger_event_id);
     const order = {
@@ -1838,19 +1961,21 @@ export class Dispatcher {
       a.machine_id,
       slots,
       this.clock.now(),
-      (p, owner) =>
+      (p, owner, ownerKeys) =>
         !this.options.leases?.waitingElsewhere(
           p,
           owner,
           this.clock.now(),
           tx,
+          ownerKeys,
         ) &&
-        capacity.withinProjectQuota(p, owner) &&
+        capacity.withinProjectQuota(p, owner, ownerKeys) &&
         hasRunTarget(owner, {
           work_items: tx.work_items.list(p),
           deliveries: tx.deliveries.list(p),
         }),
       this.options.leases?.config.preferred(a.machine_id),
+      this.waiterKeys(tx),
     );
     if (
       remainingResourceRatio(keys, slots) <= 0 ||
@@ -1867,7 +1992,7 @@ export class Dispatcher {
       )
     )
       return undefined;
-    return keys;
+    return [...keys];
   }
   private claim(
     project: ProjectId,
@@ -1971,31 +2096,23 @@ export class Dispatcher {
         }
       }
       const requested = new Set(notes.map((n) => n.id));
-      // C-216: fetch only the requested pending rows instead of decoding the
-      // project's whole notification history on every claim.
-      const ready = store
-        .listNotifications({
-          project_id: project,
-          status: "pending",
-          ids: [...requested],
-        })
-        .filter(
-          (n) =>
-            this.owner(n, state) === a.id &&
-            !covered(n, state, a.id) &&
-            !notificationBlocked(state, n.event_id, a.id) &&
-            !(
-              a.standing_mode === "ops" &&
-              newPmNotification(state, n) &&
-              pmNotificationState(state, n) === "obsolete"
-            ),
-        );
+      const ready = this.readyNotes(state, a, notes);
       {
         const target = inboxTarget(state, a, ready);
         if ("reason" in target) return skip(target.reason);
         if (!sameInboxTarget(expectedTarget, target))
           return skip("inbox_target_changed");
       }
+      // C-721: never hand work that needs resources to a running Run that
+      // holds none; it starts its own Run once this one ends.
+      const held = continuing?.resource_keys;
+      if (
+        held &&
+        runResourceKeys(tx, project, a, state.events, undefined, ready).some(
+          (k) => !held.includes(k),
+        )
+      )
+        return skip("unclaimed_resources");
       const previous = continuing
         ? undefined
         : previousInboxTurn(state, a, ready);
@@ -2094,7 +2211,7 @@ export class Dispatcher {
           return skip("provider_unavailable");
         }
         const leases = this.options.leases;
-        const keysNeeded = assignmentResourceKeys(tx, project, a);
+        const keysNeeded = this.runKeys(tx, state, a, run, ready);
         const blocked = leases?.blocked(
           project,
           a.machine_id,
@@ -2104,7 +2221,7 @@ export class Dispatcher {
         );
         const keys = blocked
           ? undefined
-          : this.availableResources(tx, state, a, run);
+          : this.availableResources(tx, state, a, run, keysNeeded);
         if (!keys) {
           if (leases && (blocked || leases.configured(project, a.machine_id)))
             leases.wait(
@@ -2236,6 +2353,13 @@ export class Dispatcher {
         attempt = bindRepairAttempt(store, state, effect.data, attempt);
       } else if (live) attempt = bindRepairAttempt(store, state, run, attempt);
 
+      // C-721: every bell of a Run admitted without some resources says so.
+      const claimed = run.resource_keys;
+      const unclaimed = claimed
+        ? assignmentResourceKeys(tx, project, a).filter(
+            (k) => !claimed.includes(k),
+          )
+        : [];
       const followup = decisionFollowupPrompt(
         state,
         [...new Set([run.trigger_event_id, ...ready.map((n) => n.event_id)])],
@@ -2246,7 +2370,9 @@ export class Dispatcher {
         attempt,
         run,
         assignment: a,
-        bell: [bell, followup].filter(Boolean).join("\n"),
+        bell: [bell, followup, unclaimedResourcesRule(unclaimed)]
+          .filter(Boolean)
+          .join("\n"),
       };
     });
   }

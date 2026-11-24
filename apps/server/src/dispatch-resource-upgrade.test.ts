@@ -1,7 +1,7 @@
 import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { updateWorkItem } from "@cardigan/domain";
+import { issueInstruction, updateWorkItem } from "@cardigan/domain";
 import {
   loadRunCapacityConfig,
   MachineLeases,
@@ -45,7 +45,19 @@ test.each(["snapshot", "historical", "exit_unconfirmed"] as const)(
       dispatchTimeoutMs: 60_000,
       deliveryRetryBaseMs: 100,
     };
-    f.comment();
+    // C-721: an instruction is real work; a comment would claim no resources.
+    f.apply((s, a, p) =>
+      issueInstruction(
+        s,
+        a,
+        {
+          card_id: f.target.card.id,
+          work_item_id: f.target.item.id,
+          body: "Do the work",
+        },
+        p,
+      ),
+    );
     await new Dispatcher(settings).tick();
     const old = f.latest();
     expect(old).toMatchObject({
