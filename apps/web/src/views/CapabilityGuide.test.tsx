@@ -189,6 +189,8 @@ test("保存 sends only the changed note, then shows the server's value", async 
   const save = dialog.getByRole("button", { name: "保存使用说明" });
   expect(save).toHaveProperty("disabled", true);
   fireEvent.change(main, { target: { value: "  新说明\r\n第二行  " } });
+  // A double click writes once.
+  fireEvent.click(save);
   fireEvent.click(save);
   await waitFor(() =>
     expect(

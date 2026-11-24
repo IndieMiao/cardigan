@@ -174,8 +174,11 @@ export function CapabilityGuideDialog({
     field === "usage_note"
       ? { scope: "capability", key: capabilityKey, machine_id: null }
       : { scope: "machine", key: capabilityKey, machine_id: machine.id };
+  // A second click before the first re-render must not write twice.
+  const sending = useRef(false);
   const save = async () => {
-    if (pending || locked || !dirty) return;
+    if (sending.current || locked || !dirty) return;
+    sending.current = true;
     setPending(true);
     setError("");
     let failed: string | undefined;
@@ -191,6 +194,7 @@ export function CapabilityGuideDialog({
         break;
       }
     }
+    sending.current = false;
     onWritten();
     if (!alive.current) return;
     setPending(false);
