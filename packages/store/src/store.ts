@@ -612,7 +612,11 @@ export class Store {
         ...(this.#testReviewTrust
           ? { test_review_trust: this.#testReviewTrust }
           : {}),
-        events: { ...repositories.events, listStreams: events.listStreams },
+        events: {
+          ...repositories.events,
+          listAfter: events.listAfter,
+          listStreams: events.listStreams,
+        },
         platformDeployments: platformDeploymentReader(this.#db),
         ...createGlobalRepositories(this.#db, "write", snapshots),
         global_ids: createGlobalIdAllocator(this.#db),
@@ -671,7 +675,11 @@ export class Store {
         ...(this.#testReviewTrust
           ? { test_review_trust: this.#testReviewTrust }
           : {}),
-        events: { ...repositories.events, listStreams: events.listStreams },
+        events: {
+          ...repositories.events,
+          listAfter: events.listAfter,
+          listStreams: events.listStreams,
+        },
       });
       this.#db.exec("COMMIT");
       events.commit();

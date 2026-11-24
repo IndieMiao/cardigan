@@ -1,4 +1,5 @@
 import type { Actor, Decision } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import type { CardId, DecisionId } from "../ids.js";
 import { sourceMergeBasis, sourceMergeConfirmation } from "../source-merge.js";
 import {
@@ -218,7 +219,7 @@ export function confirmSourceMergeUnrelated(
       {
         ...state,
         decisions: d.list("decisions"),
-        events: [...state.events, ...d.events],
+        events: appendEvents(state.events, d.events),
       },
       d.get("decisions", q.id),
     );
