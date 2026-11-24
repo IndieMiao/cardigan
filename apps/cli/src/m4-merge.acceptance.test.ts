@@ -1492,7 +1492,12 @@ test("§4/§6.4 merge_conflicted wakes the conflicting work item's producer for 
     system,
   );
   const result = route(eventOf("merge_conflicted"));
-  expect(result.notifications).toHaveLength(1);
+  // C-722: the original recipient is unchanged; the Office on duty is told too.
+  expect(result.notifications).toHaveLength(2);
+  expect(result.notifications[1]).toMatchObject({
+    recipient: { kind: "pm_office" },
+    rule: "C-722/office alert",
+  });
   expect(result.notifications[0]).toMatchObject({
     recipient: { kind: "assignment", assignment_id: s.coder.id },
     rule: "6.4/merge conflicted",
@@ -1529,7 +1534,12 @@ test("§4/§6.4 merge_conflicted without an active producer goes to PM Ops", asy
     system,
   );
   const result = route(eventOf("merge_conflicted"));
-  expect(result.notifications).toHaveLength(1);
+  // C-722: the original recipient is unchanged; the Office on duty is told too.
+  expect(result.notifications).toHaveLength(2);
+  expect(result.notifications[1]).toMatchObject({
+    recipient: { kind: "pm_office" },
+    rule: "C-722/office alert",
+  });
   expect(result.notifications[0]).toMatchObject({
     recipient: { kind: "pm_ops" },
     rule: "6.4/merge conflicted",
