@@ -1,7 +1,11 @@
 import type { Actor, Assignment, RuntimeRef } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { AssignmentId, RunId } from "../ids.js";
-import { retirementWaitReceipt } from "../retirement-session.js";
+import {
+  canonicalSessionFacts,
+  retirementWaitReceipt,
+} from "../retirement-session.js";
+import { runsOf } from "../run-index.js";
 import {
   type RetirementDispatchWait,
   type RetirementSettlement,
@@ -11,8 +15,10 @@ import {
 import {
   darwinWorker,
   needsRetirementHandoff,
+  probeInvalidStreak,
   retirementOwnsSession,
   sessionMaintenanceCandidate,
+  sharedStallRegistration,
   supersededRetirement,
 } from "../session-maintenance.js";
 import { transition } from "../transitions.js";
@@ -22,6 +28,7 @@ import {
   type CommandState,
   command,
   ensure,
+  text,
   unwrap,
 } from "./core.js";
 import { humanStopRecorded, stoppedByHuman } from "./stop-state.js";
@@ -184,6 +191,191 @@ export function confirmKeptShellExit(
       handoff:
         "Agent 已退出，终端仍在；已关闭该终端，保留身份、工作区和分支，下次合法唤醒创建新会话。",
     });
+  });
+}
+
+/** C-730: what asked for a stale session to be released. */
+export type UnresponsiveRelease =
+  /** Session maintenance: this many `probe_invalid` withdrawals in a row. */
+  | { readonly trigger: "probe_invalid"; readonly limit: number }
+  /** A host operator's restart or cancel of a remote managed Assignment. */
+  | {
+      readonly trigger: "host_ops";
+      readonly requested_by: AssignmentId;
+      readonly tool: "host_ops_restart_assignment" | "host_ops_cancel_run";
+      readonly reason: string;
+      /** host_ops_cancel_run: also cancel this Run when it never started. */
+      readonly run_id?: RunId;
+    };
+
+const unfinishedRun = (status: string) =>
+  !["completed", "failed", "cancelled"].includes(status);
+
+/**
+ * C-730: why this session may not be released as unresponsive now
+ * (undefined: it may). The host additionally proves that the Agent CLI is not
+ * observed alive before, and that the session exited after, it closes the
+ * terminal. A human stop, a pending host operation, a role upgrade, a Run
+ * stop or launch in flight, or another registration on the same terminal or
+ * worktree always keeps the session. The maintenance trigger also needs a
+ * session between Runs and the `probe_invalid` streak.
+ */
+export function unresponsiveReleaseBlocker(
+  state: CommandState,
+  a: Assignment,
+  p: UnresponsiveRelease,
+):
+  | "not_managed"
+  | "no_session"
+  | "stopped_by_human"
+  | "operation_pending"
+  | "upgrade_pending"
+  | "shared_registration"
+  | "run_busy"
+  | "run_changed"
+  | "probe_streak"
+  | undefined {
+  if (a.scope !== "work_item" || a.external || a.status !== "active")
+    return "not_managed";
+  if (!a.runtime_ref) return "no_session";
+  if (stoppedByHuman(state.events, a.id)) return "stopped_by_human";
+  if (a.role_upgrade) return "upgrade_pending";
+  const runs = runsOf(state.runs, a.id);
+  if (
+    hostOpsPending(state.events, a.id) ||
+    runs.some(
+      (r) =>
+        r.dispatch_stop ||
+        r.inactivity_stop ||
+        (r.launch_publication &&
+          !["started", "exited"].includes(r.launch_publication.phase)),
+    )
+  )
+    return "operation_pending";
+  if (sharedStallRegistration(state, a)) return "shared_registration";
+  if (p.trigger === "host_ops") {
+    if (
+      p.run_id !== undefined &&
+      !runs.some((r) => r.id === p.run_id && unfinishedRun(r.status))
+    )
+      return "run_changed";
+    return undefined;
+  }
+  if (runs.some((r) => r.status !== "queued" && unfinishedRun(r.status)))
+    return "run_busy";
+  return probeInvalidStreak(state, a) >= p.limit ? undefined : "probe_streak";
+}
+
+/**
+ * C-730: the host closed the terminal of this exact session after the Agent
+ * CLI was not observed alive, and proved the session exited. Settle it like a
+ * managed `cardigan assignment stop`: Runs that had started on it are
+ * cancelled, never-started queued Runs stay as pending work (except the Run a
+ * host operator asked to cancel), the ref, session and any idle retirement
+ * are cleared, and the next legal wake starts a new session. Identity,
+ * worktree and branch stay. Recorded on the card timeline.
+ */
+export function releaseUnresponsiveSession(
+  state: CommandState,
+  actor: Actor,
+  id: AssignmentId,
+  releasedRef: RuntimeRef,
+  p: UnresponsiveRelease,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "upgrade_idle_assignment_role", ports, (d) => {
+    ensure(
+      actor.kind === "system",
+      "unauthorized",
+      "Only the system may release an unresponsive session",
+    );
+    if (p.trigger === "probe_invalid")
+      ensure(
+        Number.isSafeInteger(p.limit) && p.limit >= 1 && p.limit <= 100,
+        "validation_failed",
+        "Invalid probe limit",
+      );
+    else text(p.reason, "reason");
+    const a = d.get("assignments", id);
+    ensure(
+      JSON.stringify(canonicalSessionFacts(a.runtime_ref)) ===
+        JSON.stringify(canonicalSessionFacts(releasedRef)),
+      "illegal_transition",
+      "Session changed while closing its terminal",
+    );
+    const blocker = unresponsiveReleaseBlocker(state, a, p);
+    ensure(
+      !blocker,
+      "illegal_transition",
+      `Session cannot be released: ${blocker}`,
+    );
+    const card = d.work(a.work_item_id!).card_id;
+    const summary =
+      p.trigger === "host_ops"
+        ? `released by host operations (${p.requested_by})`
+        : "released after the Agent stopped responding";
+    const cancelled = d
+      .list("runs")
+      .filter(
+        (r) =>
+          r.assignment_id === a.id &&
+          unfinishedRun(r.status) &&
+          !(
+            r.status === "queued" &&
+            !r.started_at &&
+            !(p.trigger === "host_ops" && r.id === p.run_id)
+          ),
+      );
+    for (const r of cancelled)
+      d.put("runs", {
+        ...r,
+        status: unwrap(transition("run", r.status, "cancel")),
+        outcome: "failed",
+        summary,
+        finished_at: d.now,
+      });
+    const { idle_retirement: _retirement, session_ref: _session, ...rest } = a;
+    const next: Assignment = {
+      ...rest,
+      runtime_ref: null,
+      runtime_state: ["unknown", "lost"].includes(a.runtime_state)
+        ? unwrap(transition("runtime", a.runtime_state, "session_replaced"))
+        : a.runtime_state === "running"
+          ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
+          : a.runtime_state,
+    };
+    d.put("assignments", next);
+    const streak = probeInvalidStreak(state, a);
+    const runsNote = cancelled.length
+      ? `，已取消在该会话上的 ${cancelled.map((r) => r.id).join("、")}`
+      : "";
+    const handoff =
+      p.trigger === "host_ops"
+        ? `主机运维 ${p.requested_by} 请求${p.tool === "host_ops_cancel_run" ? "取消 Run" : "重启"}：${a.id}（${a.machine_id}）的 Agent 进程未见存活，已关闭残留终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`
+        : `${a.id}（${a.machine_id}）的 Agent 进程已不在、终端仍残留：空闲回收连续 ${streak} 次未取得有效进程身份。系统已关闭该终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`;
+    d.emit(
+      "session_replaced",
+      card,
+      {
+        assignment_id: a.id,
+        reason: "agent_unresponsive",
+        trigger: p.trigger,
+        ...(p.trigger === "host_ops"
+          ? {
+              requested_by: p.requested_by,
+              tool: p.tool,
+              ...(p.run_id ? { run_id: p.run_id } : {}),
+            }
+          : {}),
+        probe_invalid: streak,
+        cancelled_run_ids: cancelled.map((r) => r.id),
+        old_runtime_ref: a.runtime_ref ? { ...a.runtime_ref } : null,
+        ...retirementWaitReceipt(a),
+        handoff,
+      },
+      { type: "handoff", body: handoff },
+    );
+    return next;
   });
 }
 
@@ -506,6 +698,8 @@ export function settleIdleSessionRetirement(
       d.emit("idle_session_retirement_withdrawn", card, {
         assignment_id: id,
         machine_id: a.machine_id,
+        // C-730: binds the withdrawal to its session (probeInvalidStreak).
+        runtime_ref: { ...pending.runtime_ref },
         evidence: result.evidence,
         retry,
       });

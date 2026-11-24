@@ -71,8 +71,11 @@ export {
   confirmWaitingRetirementExit,
   handoffIdleSessionRetirement,
   releaseRetainedRetirement,
+  releaseUnresponsiveSession,
   settleIdleSessionRetirement,
   trackRetirementDispatch,
+  type UnresponsiveRelease,
+  unresponsiveReleaseBlocker,
 } from "./commands/idle-session-retirement.js";
 export * from "./commands/inactive-run.js";
 export { refreshRequiredVerifiers } from "./commands/late-verifier.js";

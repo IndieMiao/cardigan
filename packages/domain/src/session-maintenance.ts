@@ -221,6 +221,64 @@ export function sessionMaintenanceCandidate(
   };
 }
 
+/** Another live registration on the same terminal or worktree of this machine. */
+export function sharedStallRegistration(state: CommandState, a: Assignment) {
+  const ref = a.runtime_ref;
+  return state.assignments.some(
+    (other) =>
+      other.id !== a.id &&
+      other.status !== "released" &&
+      other.machine_id === a.machine_id &&
+      ((!!a.worktree_path && other.worktree_path === a.worktree_path) ||
+        (!!ref &&
+          other.runtime_ref?.runtime_machine === ref.runtime_machine &&
+          (other.runtime_ref.terminal_ref === ref.terminal_ref ||
+            other.runtime_ref.agent_name === ref.agent_name))),
+  );
+}
+
+/** C-730: default for `probeInvalidStreak` before a stale terminal is released. */
+export const UNRESPONSIVE_PROBE_LIMIT = 3;
+
+/**
+ * C-730: how many idle retirements of this exact session were withdrawn in a
+ * row because the process proof was invalid (`probe_invalid`: the macOS idle
+ * owner refused to serve its CLI, or the worker helper read no identity).
+ * Any other withdrawal reason ends the streak. Only withdrawals after the last
+ * MCP call and after the latest Run of this Assignment started or finished
+ * count, so an Agent that showed any sign of life starts again from zero.
+ */
+export function probeInvalidStreak(state: CommandState, a: Assignment): number {
+  if (!a.runtime_ref) return 0;
+  const ref = JSON.stringify(canonicalSessionFacts(a.runtime_ref));
+  const since = Math.max(
+    0,
+    Date.parse(a.last_mcp_activity_at ?? "") || 0,
+    ...runsOf(state.runs, a.id).flatMap((r) =>
+      [r.started_at, r.finished_at].map((at) => Date.parse(at ?? "") || 0),
+    ),
+  );
+  let streak = 0;
+  for (const e of eventsOfType(
+    state.events,
+    "idle_session_retirement_withdrawn",
+  )) {
+    const p = e.payload as {
+      assignment_id?: string;
+      runtime_ref?: unknown;
+      evidence?: { reason?: string };
+    } | null;
+    if (
+      p?.assignment_id !== a.id ||
+      JSON.stringify(canonicalSessionFacts(p.runtime_ref)) !== ref ||
+      !(Date.parse(e.created_at) > since)
+    )
+      continue;
+    streak = p.evidence?.reason === "probe_invalid" ? streak + 1 : 0;
+  }
+  return streak;
+}
+
 /** Obsolete observations remain historical facts, never presented as current reasons. */
 export function sessionMaintenanceView(
   state: CommandState,

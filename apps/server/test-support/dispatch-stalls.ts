@@ -16,7 +16,10 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
-export function setup(machine_id = "local") {
+export function setup(
+  machine_id = "local",
+  serviceOptions: Partial<ConstructorParameters<typeof HostOpsService>[0]> = {},
+) {
   const f = recoveryFixture(machine_id);
   const { store, project, clock } = f;
   store.uow.run((tx) =>
@@ -39,6 +42,7 @@ export function setup(machine_id = "local") {
   const service = new HostOpsService({
     ...f.options,
     contextUsage: { execution: { mode: "local", dataDir: f.dataDir } },
+    ...serviceOptions,
   });
   cleanup.push(async () => {
     await service.close();

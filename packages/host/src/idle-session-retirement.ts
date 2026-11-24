@@ -66,7 +66,7 @@ export function idleRetirementPolicy() {
   return policy;
 }
 
-function revokeRetiredTokens(
+export function revokeRetiredTokens(
   tx: StoreTransactionContext,
   project: ProjectId,
   id: AssignmentId,

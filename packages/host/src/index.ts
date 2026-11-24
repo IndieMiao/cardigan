@@ -397,6 +397,14 @@ export {
 export * from "./test-review.js";
 export { settleTestReviewLimits } from "./test-review-limits.js";
 export { testReviewRunPrompt } from "./test-review-prompt.js";
+export {
+  releaseUnresponsiveAgent,
+  releaseUnresponsiveAgents,
+  type UnresponsiveOutcome,
+  type UnresponsiveProof,
+  unresponsiveProbeLimit,
+  workerProof,
+} from "./unresponsive-session.js";
 export * from "./upstream-health.js";
 export {
   type AgentBinary,
