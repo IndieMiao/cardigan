@@ -1,11 +1,24 @@
-import type { CapabilityGuideEntry, ToolName } from "@cardigan/domain";
-import { Store } from "@cardigan/store";
+import {
+  type Assignment,
+  type CapabilityGuideEntry,
+  HOST_OPS_ROLE_TOOLS,
+  STANDING_ROLE_TOOLS,
+  standingTools,
+  type ToolName,
+} from "@cardigan/domain";
+import {
+  listCapabilityGuides,
+  readCapabilityGuides,
+  Store,
+  setCapabilityGuide,
+} from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { expect, test, vi } from "vitest";
 import { startMcpServer } from "./server.js";
 import {
   acceptingVerifierFor,
+  NOW,
   project_id,
   seedProject,
 } from "./test-support.js";
@@ -188,6 +201,132 @@ test("C-726 get_capability_guide fails closed when the host has no notes source"
     ).toBe(true);
   } finally {
     await c.close();
+    await server.close();
+    store.close();
+  }
+});
+
+/**
+ * C-731: the standing PM (Office and Ops) carries `get_capability_guide` in
+ * its default tools, reads the same note `cardigan capability guide get`
+ * prints, and still cannot write notes; host_ops does not gain the tool.
+ */
+test("C-731 standing PM Office and Ops read the current capability note and cannot write it", async () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  store.createProject({ id: project_id });
+  seedProject(store, { allowed_tools: STANDING_ROLE_TOOLS });
+  setCapabilityGuide(
+    store,
+    { kind: "human", project_id },
+    project_id,
+    { scope: "capability", key: "android.emulator" },
+    "主说明：先读 README。",
+    "2026-11-25T00:00:00.000Z",
+  );
+  setCapabilityGuide(
+    store,
+    { kind: "human", project_id },
+    project_id,
+    { scope: "machine", key: "android.emulator", machine_id: "local" },
+    "本机 SDK 在 ~/Sdk。",
+    "2026-11-25T00:00:00.000Z",
+  );
+  const server = await startMcpServer({
+    store,
+    deliveryVerifier: acceptingVerifierFor,
+    port: 0,
+    capabilityGuides: (project) => listCapabilityGuides(store, project),
+    acknowledgeRuns: false,
+    log: () => {},
+  });
+  const clients: Client[] = [];
+  const connect = async (mode: "office" | "ops", id: string) => {
+    const assignment: Assignment = {
+      id: id as never,
+      scope: "standing",
+      standing_mode: mode,
+      role_id: "pm",
+      role_version: 1,
+      status: "active",
+      runtime_state: "idle",
+      runtime_ref: null,
+      machine_id: "local" as never,
+      mcp_token_id: `fixture-${mode}`,
+      created_at: NOW,
+    };
+    store.uow.run((tx) => tx.assignments.put(project_id, assignment));
+    const { token } = store.issueToken({
+      project_id,
+      assignment_id: assignment.id,
+      role: {
+        role_version: 1,
+        allowed_tools: standingTools(STANDING_ROLE_TOOLS, mode),
+      },
+    });
+    const c = new Client({ name: "capability-guide-pm-test", version: "1" });
+    clients.push(c);
+    await c.connect(
+      new StreamableHTTPClientTransport(new URL(server.url), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      }),
+    );
+    return { c, assignment };
+  };
+  try {
+    expect(HOST_OPS_ROLE_TOOLS).not.toContain("get_capability_guide");
+    const cli = readCapabilityGuides(store, project_id, {
+      machine_id: "local",
+      capabilities: ["android.emulator"],
+    }).capabilities[0];
+    for (const [mode, id] of [
+      ["office", "A-2"],
+      ["ops", "A-3"],
+    ] as const) {
+      const { c, assignment } = await connect(mode, id);
+      const listed = (await c.listTools()).tools.map((t) => t.name);
+      // The read tool is listed; no MCP tool writes capability notes.
+      expect(listed.filter((name) => name.includes("capability"))).toEqual([
+        "get_capability_guide",
+      ]);
+      const whoami = await c.callTool({ name: "whoami", arguments: {} });
+      expect(JSON.stringify(whoami.content)).toContain("get_capability_guide");
+      const result = await c.callTool({
+        name: "get_capability_guide",
+        arguments: { capability: "android.emulator" },
+      });
+      expect(result.isError).not.toBe(true);
+      const content = result.content as { type: string; text: string }[];
+      expect(JSON.parse(content[0]?.text ?? "null")).toEqual({
+        machine_id: "local",
+        key: "android.emulator",
+        usage_note: cli?.usage_note,
+        machine_note: cli?.machine_note,
+        notice: CAPABILITY_GUIDE_NOTICE,
+      });
+      // The write path stays human/host only for the PM's own identity.
+      expect(() =>
+        setCapabilityGuide(
+          store,
+          {
+            kind: "assignment",
+            project_id,
+            assignment_id: assignment.id,
+            role_id: "pm",
+          } as never,
+          project_id,
+          { scope: "capability", key: "android.emulator" },
+          "PM 改写",
+          "2026-11-25T01:00:00.000Z",
+        ),
+      ).toThrow(/Agent Token 不可写/);
+    }
+    expect(
+      readCapabilityGuides(store, project_id, {
+        capabilities: ["android.emulator"],
+      }).capabilities[0]?.usage_note,
+    ).toBe("主说明：先读 README。");
+  } finally {
+    await Promise.all(clients.map((c) => c.close()));
     await server.close();
     store.close();
   }

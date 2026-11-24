@@ -4,7 +4,11 @@ import {
   authorizeCapabilityGuideWrite,
   type CapabilityGuideEntry,
   credentialLikeContent,
+  HOST_OPS_ROLE_TOOLS,
   mergeCapabilityGuides,
+  ROLE_TOOL_ALLOWLISTS,
+  STANDING_ROLE_TOOLS,
+  standingTools,
   USAGE_NOTE_MAX_LENGTH,
   validateCapabilityGuideTarget,
   validateUsageNote,
@@ -178,6 +182,23 @@ describe("write authorization", () => {
     expect(
       authorizeCapabilityGuideWrite({ kind: "human", project_id: "q" }, "p").ok,
     ).toBe(false);
+  });
+});
+
+describe("C-731 standing PM reads capability notes", () => {
+  test("Office and Ops hold the read tool; host_ops and writes do not change", () => {
+    expect(STANDING_ROLE_TOOLS).toContain("get_capability_guide");
+    expect(ROLE_TOOL_ALLOWLISTS.standing).toContain("get_capability_guide");
+    for (const mode of ["office", "ops"] as const)
+      expect(standingTools(STANDING_ROLE_TOOLS, mode)).toContain(
+        "get_capability_guide",
+      );
+    expect(HOST_OPS_ROLE_TOOLS).not.toContain("get_capability_guide");
+    // The only capability-note tool any role can hold is the read one.
+    for (const tools of Object.values(ROLE_TOOL_ALLOWLISTS))
+      expect(tools.filter((tool) => tool.includes("capability"))).toEqual([
+        "get_capability_guide",
+      ]);
   });
 });
 

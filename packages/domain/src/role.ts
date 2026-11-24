@@ -85,6 +85,8 @@ export const STANDING_ROLE_TOOLS = [
   "upload_attachment",
   "read_attachment",
   ...SHARED_FILE_TOOLS,
+  // C-731: read-only capability usage notes, so PM can cite the current note.
+  "get_capability_guide",
   "heartbeat",
   "finish_run",
   "submit_delivery",

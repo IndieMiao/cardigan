@@ -260,6 +260,15 @@ test("C-293 PM Ops assigns ready work and leaves capacity enforcement to the sch
   expect(body).toContain("角色规则改动等其它事项由你或系统处理");
 });
 
+test("C-731 only the pm default pack gains get_capability_guide among standing roles", () => {
+  expect(defaultRoleDefinition("pm", launch).allowed_tools).toContain(
+    "get_capability_guide",
+  );
+  expect(defaultRoleDefinition("host_ops", launch).allowed_tools).not.toContain(
+    "get_capability_guide",
+  );
+});
+
 describe("C-226 PM Ops read-only subagent checks", () => {
   const body = instructionsFor("pm");
   const ops = body.split("## PM Ops（后台）")[1] ?? "";
