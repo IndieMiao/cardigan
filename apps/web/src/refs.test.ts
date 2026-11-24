@@ -117,3 +117,42 @@ test.each([false, true])(
     expect(linkifyReferences(result, refs, "p-m5s", "C-1")).toBe(result);
   },
 );
+
+test("C-674: a full number links into its own project; the short number stays local", () => {
+  const foreign = {
+    kind: "card",
+    id: "SEN-C-34",
+    local_id: "C-34",
+    card_id: "C-34",
+    project_id: "sensen-godot",
+  } as const;
+  expect(referenceHref(foreign, "cardigan", "C-1")).toBe(
+    "#/p/sensen-godot/cards/C-34",
+  );
+  // A foreign decision without a card never borrows the open card.
+  expect(
+    referenceHref(
+      {
+        kind: "decision",
+        id: "SEN-Q-5",
+        local_id: "Q-5",
+        project_id: "sensen-godot",
+      },
+      "cardigan",
+      "C-1",
+    ),
+  ).toBeUndefined();
+  const body = linkifyReferences(
+    "见 SEN-C-34 和 C-34；`SEN-C-34` 不改",
+    [foreign, { kind: "card", id: "C-34" }],
+    "cardigan",
+    "C-1",
+  );
+  expect(body).toBe(
+    "见 [SEN-C-34 卡片](#/p/sensen-godot/cards/C-34) 和 [C-34 卡片](#/p/cardigan/cards/C-34)；`SEN-C-34` 不改",
+  );
+  // An unresolved full number never lends its short tail to a local link.
+  expect(
+    linkifyReferences("SEN-C-34", [{ kind: "card", id: "C-34" }], "cardigan"),
+  ).toBe("SEN-C-34");
+});
