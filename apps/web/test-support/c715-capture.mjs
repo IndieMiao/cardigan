@@ -160,7 +160,7 @@ try {
   // Below the sticky tab bar, with the section heading in view.
   const reveal = () =>
     evaluate(
-      `(() => { document.querySelector('[aria-label="需求澄清"]').scrollIntoView({ block: 'start' }); scrollBy(0, -64); })()`,
+      `(() => { const section = document.querySelector('[aria-label="需求澄清"]'); const tabs = document.querySelector('[id$="timeline-tab"]')?.parentElement; section.scrollIntoView({ block: 'start' }); scrollBy(0, -((tabs?.getBoundingClientRect().bottom ?? 48) + 16)); })()`,
     );
   const blur = () => evaluate("document.activeElement?.blur()");
   for (const width of [1440, 390]) {
@@ -239,13 +239,21 @@ try {
       await click(await center('[aria-label="第 3 题回答"]'));
       await type("朝左下");
       await blur();
-      // Any link to another page: the first sidebar/top navigation link.
-      const link = await evaluate(`(() => {
-        const a = Array.from(document.querySelectorAll('a[href^="#/p/p-1/"]')).find((a) => !a.closest('[aria-label="需求澄清"]') && !/cards\\/C-1/.test(a.getAttribute('href')) && a.getBoundingClientRect().width > 0 && a.getBoundingClientRect().top >= 0);
+      // Any visible link to another page; at 390 the nav is folded, so look
+      // from the top of the card (header links) when none is in view.
+      const findLink = () =>
+        evaluate(`(() => {
+        const a = Array.from(document.querySelectorAll('a[href^="#/p/p-1/"]')).find((a) => { const r = a.getBoundingClientRect(); return !a.closest('[aria-label="需求澄清"]') && !/cards\\/C-1(\\?|$)|card=C-1/.test(a.getAttribute('href')) && r.width > 0 && r.top >= 0 && r.bottom <= innerHeight; });
         if (!a) return null;
         a.setAttribute('data-c715-link', '');
         return a.getAttribute('href');
       })()`);
+      let link = await findLink();
+      if (!link) {
+        await evaluate("scrollTo(0, 0)");
+        await delay(200);
+        link = await findLink();
+      }
       assert(link, "a link to another page");
       record.leaveLink = link;
       await click(await center("[data-c715-link]"));
