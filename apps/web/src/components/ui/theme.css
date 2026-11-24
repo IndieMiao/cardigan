@@ -295,7 +295,8 @@
     background: var(--surface-muted);
   }
   /* Only the page's single main action and a dialog's confirm. The :hover
-     selector outranks .ui-button:hover so a disabled one keeps its fill. */
+     selector has the same specificity as .ui-button:hover and must stay after
+     it, so a disabled one keeps its fill. */
   .ui-button-emphasis,
   .ui-button-emphasis:hover {
     background: var(--accent);
