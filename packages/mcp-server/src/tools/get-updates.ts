@@ -1,10 +1,17 @@
 import {
   authorView,
   type CardId,
+  type Event,
+  isOfficeOnDuty,
   mergeBatchReadScope,
+  OFFICE_DIGEST_EVENT_TYPES,
+  type OfficeDigest,
+  officeDigest,
+  officeDigestSince,
   resolvePendingAttachmentRefs,
 } from "@cardigan/domain";
 import { z } from "zod";
+import type { McpReadContext } from "../backend.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import { PROJECT_STREAM, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
@@ -20,6 +27,11 @@ import { defineTool } from "./types.js";
  * cursor for that card, so an agent that already acknowledged does not re-read
  * the same events. Only the caller's own cursor is used: the assignment comes
  * from the token, never from the arguments.
+ *
+ * C-722: the project-stream read of this project's PM Office on duty also
+ * carries `office_digest`, the routine card progress that does not ring the
+ * Office (see `officeDigest`). It is derived from events and the Office's own
+ * ACK cursors; reading it changes nothing.
  */
 export const getUpdatesTool = defineTool({
   name: "get_updates",
@@ -99,7 +111,14 @@ export const getUpdatesTool = defineTool({
         : [],
     );
     const uploads = (card: CardId) => attachments.get(card) ?? [];
+    const digest =
+      cardId === undefined
+        ? store.uow.read((tx) =>
+            readOfficeDigest(tx, project_id, identity.actor.assignment_id),
+          )
+        : undefined;
     return publicSourceMergeData({
+      ...(digest ? { office_digest: digest } : {}),
       card_id: cardId ?? null,
       since_seq: start,
       latest_seq: updates.latest_seq,
@@ -124,3 +143,41 @@ export const getUpdatesTool = defineTool({
     });
   },
 });
+
+/** C-722: only the caller's own project, and only when it is the Office on duty. */
+function readOfficeDigest(
+  tx: McpReadContext,
+  project_id: Parameters<McpReadContext["cards"]["list"]>[0],
+  assignment_id: Parameters<McpReadContext["assignments"]["get"]>[1],
+): OfficeDigest | undefined {
+  const office = tx.assignments.get(project_id, assignment_id);
+  const streams = tx.events.listStreams?.(project_id);
+  if (!office || !isOfficeOnDuty(office) || !streams) return undefined;
+  const cursors = tx.cursors
+    .list(project_id)
+    .filter((c) => c.assignment_id === office.id);
+  const projectCursor =
+    cursors.find((c) => (c.card_id as string) === "")?.acked_seq ?? 0;
+  const projectEvents =
+    projectCursor > 0 ? (streams.get("") ?? []) : ([] as readonly Event[]);
+  const since = officeDigestSince(office, projectEvents, projectCursor);
+  const byStream = streams.ofTypes
+    ? streams.ofTypes(OFFICE_DIGEST_EVENT_TYPES)
+    : streams;
+  function* cardEvents(): Generator<Event> {
+    for (const [stream, events] of byStream) {
+      if (stream === "") continue;
+      // Streams are in seq order; skip whole streams older than the window.
+      if ((events.at(-1)?.created_at ?? "") < since) continue;
+      yield* events;
+    }
+  }
+  return officeDigest({
+    project_id,
+    office,
+    events: cardEvents(),
+    since,
+    cursors,
+    cards: tx.cards.list(project_id),
+  });
+}
