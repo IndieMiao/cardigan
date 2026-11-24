@@ -154,9 +154,10 @@ export function CardDetailPage(props: CardDetailPageProps) {
     ...(routeFilters.type ? { type: routeFilters.type } : {}),
     ...(routeFilters.author ? { author: routeFilters.author } : {}),
   });
-  const history = useRef<{ key: string; detail: CardDetail } | undefined>(
-    undefined,
-  );
+  const history = useRef<
+    | { key: string; detail: CardDetail; head?: CardDetail | undefined }
+    | undefined
+  >(undefined);
   const loadGeneration = useRef(0);
   // Older pages follow only a head read for the current query; after a filter,
   // anchor or card change the old snapshot's cursor must not be paged.
@@ -180,6 +181,11 @@ export function CardDetailPage(props: CardDetailPageProps) {
       // Read after the response: an older page may have landed meanwhile.
       const previous =
         history.current?.key === key ? history.current.detail : undefined;
+      // C-688: an unchanged head (304) keeps the shown history as it is.
+      if (previous && history.current?.head === detail) {
+        if (request === loadGeneration.current) setPagerReady(true);
+        return previous;
+      }
       // A disconnected refresh can skip an entire page. Keep cached history only
       // when the new window connects to it; otherwise restart from its cursor.
       const connected = detail.timeline.some((entry) =>
@@ -194,7 +200,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
             }
           : detail;
       if (request === loadGeneration.current) {
-        history.current = { key, detail: merged };
+        history.current = { key, detail: merged, head: detail };
         setPagerReady(true);
       }
       return merged;
@@ -290,7 +296,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
               detail.referenced_attachments,
             ),
           };
-          history.current = { key, detail: merged };
+          history.current = { key, detail: merged, head: latest.head };
           replace(merged);
         }
         paging.current = undefined;

@@ -2652,9 +2652,48 @@ export class HttpCardiganClient implements CardiganClient {
     string,
     { page: CardPage; request: number }
   >();
+  /**
+   * C-688: the last card detail answer per exact URL with its validator. An
+   * open detail revalidates; a 304 hands back the very same object.
+   */
+  private readonly validated = new Map<
+    string,
+    { readonly etag: string; readonly value: unknown }
+  >();
   private clearCards() {
     this.cardsGeneration++;
     this.cardPages.clear();
+    this.validated.clear();
+  }
+  private async conditional<T>(
+    path: string,
+    shape: (value: T) => T = (value) => value,
+  ): Promise<T> {
+    const known = this.validated.get(path);
+    const answer: { etag?: string | null } = {};
+    const value = await this.request<T | undefined>(
+      path,
+      known ? { ifNoneMatch: known.etag } : {},
+      (response) => {
+        answer.etag = response.headers?.get("ETag");
+      },
+    );
+    const etag = answer.etag;
+    if (value === undefined && known && etag === known.etag)
+      return known.value as T;
+    if (value === undefined) {
+      // A 304 for a validator this client no longer holds: read in full.
+      this.validated.delete(path);
+      return this.conditional(path, shape);
+    }
+    const shaped = shape(value);
+    this.validated.delete(path);
+    if (etag) {
+      this.validated.set(path, { etag, value: shaped });
+      while (this.validated.size > 32)
+        this.validated.delete(this.validated.keys().next().value as string);
+    }
+    return shaped;
   }
   cardPreferenceScope() {
     return this.readScope;
@@ -2858,18 +2897,20 @@ export class HttpCardiganClient implements CardiganClient {
     if (options.type) params.set("type", options.type);
     if (options.author) params.set("author", options.author);
     const query = params.size ? `?${params}` : "";
-    const detail = await this.request<CardDetail>(
+    return this.conditional<CardDetail>(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}${query}`,
+      (detail) =>
+        detail.overview
+          ? {
+              ...detail,
+              work_items: [],
+              deliveries: [],
+              reviews: [],
+              review_matrix: [],
+              attachments: [],
+            }
+          : detail,
     );
-    if (!detail.overview) return detail;
-    return {
-      ...detail,
-      work_items: [],
-      deliveries: [],
-      reviews: [],
-      review_matrix: [],
-      attachments: [],
-    };
   }
 
   cardPanel(
@@ -2877,7 +2918,7 @@ export class HttpCardiganClient implements CardiganClient {
     cardId: string,
     panel: CardPanel,
   ): Promise<Partial<CardDetail>> {
-    return this.request(
+    return this.conditional(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}?section=${panel}`,
     );
   }
@@ -3867,6 +3908,8 @@ export class HttpCardiganClient implements CardiganClient {
        * sends its key as an identifier only (`resend: false`).
        */
       resend?: boolean;
+      /** C-688: a 304 answer then resolves to `undefined`. */
+      ifNoneMatch?: string;
     } = {},
     observe?: (response: Response) => void,
   ): Promise<T> {
@@ -3883,6 +3926,9 @@ export class HttpCardiganClient implements CardiganClient {
           ...(init.idempotencyKey === undefined
             ? {}
             : { "Idempotency-Key": init.idempotencyKey }),
+          ...(init.ifNoneMatch === undefined
+            ? {}
+            : { "If-None-Match": init.ifNoneMatch }),
         },
         ...(init.body === undefined ? {} : { body: init.body }),
       });
@@ -3890,6 +3936,10 @@ export class HttpCardiganClient implements CardiganClient {
       send,
       init.resend ?? isRetryableRequest(method, init.idempotencyKey),
     );
+    if (response.status === 304 && init.ifNoneMatch !== undefined) {
+      observe?.(response);
+      return undefined as T;
+    }
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         this.clearCards();

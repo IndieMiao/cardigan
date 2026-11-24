@@ -896,3 +896,35 @@ test("stale role and status values from an old link stay visible in their dropdo
   expect(filters.role ?? "").toBe("");
   expect(filters.status ?? "").toBe("");
 });
+
+test("C-688: the open drawer re-reads on its own card's changes, not on every project event", async () => {
+  window.location.hash = "#/p/p-1/cards?view=list&card=C-1";
+  const read = vi.fn(async () => cardDetail());
+  const api = fakeClient({ cards: async () => page(), card: read });
+  const streams = new Map<string, number>([["C-1", 1]]);
+  const cardRevision = (id: string, affected: readonly string[]) =>
+    Math.max(...[id, ...affected].map((card) => streams.get(card) ?? 0));
+  const view = (revision: number) => (
+    <CardListPage
+      client={api}
+      projectId="p-1"
+      view="list"
+      revision={revision}
+      changedCards={[]}
+      cardRevision={cardRevision}
+    />
+  );
+  const mounted = render(view(1));
+  await screen.findByRole("dialog", { name: "C-1 准备发布" });
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  // Another card's events move the project revision only.
+  streams.set("C-7", 2);
+  mounted.rerender(view(2));
+  streams.set("C-8", 3);
+  mounted.rerender(view(3));
+  await act(async () => {});
+  expect(read).toHaveBeenCalledTimes(1);
+  streams.set("C-1", 4);
+  mounted.rerender(view(4));
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+});
