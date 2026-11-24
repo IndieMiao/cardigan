@@ -14,8 +14,11 @@ import {
 import { afterEach, expect, test, vi } from "vitest";
 import {
   attachmentQuery,
+  attachmentRefKind,
   attachmentTarget,
+  checkUpload,
   entryAttachmentRefs,
+  fileLabel,
   insertAttachmentRef,
   numberPendingRefs,
   uploadMime,
@@ -275,6 +278,56 @@ test("upload rules follow the server's types and 10 MiB limit", () => {
   expect(
     uploadProblem(file("max.pdf", "application/pdf", 10 * 1024 * 1024)),
   ).toBeUndefined();
+});
+
+test("C-717: every chosen file is either added with a type or refused with a reason", () => {
+  const limits = { maxBytes: 10, videoMaxBytes: 100, video: true };
+  const file = (name: string, type: string, size = 1) => ({ name, type, size });
+  // Browsers may give .txt/.log no type, or a vendor one.
+  expect(checkUpload(file("a.txt", ""), limits)).toEqual({
+    mime: "text/plain",
+  });
+  expect(checkUpload(file("b.log", ""), limits)).toEqual({
+    mime: "text/plain",
+  });
+  expect(
+    checkUpload(file("c.txt", "application/octet-stream"), limits),
+  ).toEqual({ mime: "text/plain" });
+  expect(checkUpload(file("d.LOG", "text/x-log"), limits)).toEqual({
+    mime: "text/plain",
+  });
+  // zip, under its Windows/legacy types too; it only downloads.
+  for (const type of ["application/zip", "application/x-zip-compressed", ""])
+    expect(checkUpload(file("pack.zip", type), limits)).toEqual({
+      mime: "application/zip",
+    });
+  expect(attachmentRefKind("application/zip")).toBe("file");
+  const refused = [
+    checkUpload(file("README", ""), limits),
+    checkUpload(file("tool.exe", "application/x-msdownload"), limits),
+    checkUpload(file("big.txt", "", 11), limits),
+    checkUpload(file("clip.mp4", "video/mp4"), { ...limits, video: false }),
+  ];
+  expect(refused.map((r) => r.mime)).toEqual([
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  ]);
+  expect(refused.map((r) => r.oversize)).toEqual([
+    undefined,
+    undefined,
+    true,
+    undefined,
+  ]);
+  expect(refused.map((r) => r.reason)).toEqual([
+    expect.stringContaining("不支持这种类型"),
+    expect.stringContaining("、zip"),
+    "超过 0.0 MiB",
+    "不支持上传视频",
+  ]);
+  expect(fileLabel({ name: "", type: "" })).toBe("未命名文件");
+  expect(fileLabel({ name: "", type: "text/plain" })).toBe("text/plain");
 });
 
 test("`#` opens at a word start only, and pending numbers follow the files sent", () => {

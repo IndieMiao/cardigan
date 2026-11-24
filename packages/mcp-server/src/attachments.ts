@@ -50,6 +50,8 @@ export const ATTACHMENT_EXTENSIONS: Readonly<Record<string, string>> = {
   "text/plain": "txt",
   "application/json": "json",
   "application/pdf": "pdf",
+  // C-717: downloads as .zip and the CLI takes .zip; never inline.
+  "application/zip": "zip",
   // C-683: videos (own limit, chunked or streamed uploads).
   ...VIDEO_EXTENSIONS,
 };
