@@ -1,17 +1,21 @@
 import {
+  type AssignmentId,
   authorView,
   type CardId,
   type Event,
   isOfficeOnDuty,
   mergeBatchReadScope,
   OFFICE_DIGEST_EVENT_TYPES,
+  OFFICE_DIGEST_SHOWN_STREAM,
+  OFFICE_DIGEST_SINCE_STREAM,
   type OfficeDigest,
   officeDigest,
-  officeDigestSince,
+  officeDigestInitialSince,
+  type ProjectId,
   resolvePendingAttachmentRefs,
 } from "@cardigan/domain";
 import { z } from "zod";
-import type { McpReadContext } from "../backend.js";
+import type { McpBackend, McpReadContext } from "../backend.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import { PROJECT_STREAM, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
@@ -30,8 +34,10 @@ import { defineTool } from "./types.js";
  *
  * C-722: the project-stream read of this project's PM Office on duty also
  * carries `office_digest`, the routine card progress that does not ring the
- * Office (see `officeDigest`). It is derived from events and the Office's own
- * ACK cursors; reading it changes nothing.
+ * Office (see `officeDigest`), one page oldest first. The read records how far
+ * the page reached (and pins the window start on the very first read); only
+ * the Office's next project-stream ACK moves the window, and never past what
+ * a read has shown.
  */
 export const getUpdatesTool = defineTool({
   name: "get_updates",
@@ -113,8 +119,11 @@ export const getUpdatesTool = defineTool({
     const uploads = (card: CardId) => attachments.get(card) ?? [];
     const digest =
       cardId === undefined
-        ? store.uow.read((tx) =>
-            readOfficeDigest(tx, project_id, identity.actor.assignment_id),
+        ? readOfficeDigest(
+            store,
+            project_id,
+            identity.actor.assignment_id,
+            store.now?.() ?? new Date().toISOString(),
           )
         : undefined;
     return publicSourceMergeData({
@@ -144,40 +153,85 @@ export const getUpdatesTool = defineTool({
   },
 });
 
+type DigestRead = { digest: OfficeDigest; pinned: boolean };
+
 /** C-722: only the caller's own project, and only when it is the Office on duty. */
 function readOfficeDigest(
-  tx: McpReadContext,
-  project_id: Parameters<McpReadContext["cards"]["list"]>[0],
-  assignment_id: Parameters<McpReadContext["assignments"]["get"]>[1],
+  store: McpBackend,
+  project_id: ProjectId,
+  assignment_id: AssignmentId,
+  now: string,
 ): OfficeDigest | undefined {
+  const read = store.uow.read((tx) =>
+    computeOfficeDigest(tx, project_id, assignment_id, now),
+  );
+  if (!read) return undefined;
+  const cursor = (stream: string, at: string) => ({
+    assignment_id,
+    card_id: stream as CardId,
+    acked_seq: Date.parse(at),
+  });
+  // Record the page reached; the next project ACK may move the window here.
+  store.uow.run((tx) => {
+    if (!read.pinned)
+      tx.cursors.put(
+        project_id,
+        cursor(OFFICE_DIGEST_SINCE_STREAM, read.digest.since),
+      );
+    tx.cursors.put(
+      project_id,
+      cursor(OFFICE_DIGEST_SHOWN_STREAM, read.digest.through),
+    );
+  });
+  return read.digest;
+}
+
+function computeOfficeDigest(
+  tx: McpReadContext,
+  project_id: ProjectId,
+  assignment_id: AssignmentId,
+  now: string,
+): DigestRead | undefined {
   const office = tx.assignments.get(project_id, assignment_id);
   const streams = tx.events.listStreams?.(project_id);
   if (!office || !isOfficeOnDuty(office) || !streams) return undefined;
   const cursors = tx.cursors
     .list(project_id)
     .filter((c) => c.assignment_id === office.id);
+  const stored = cursors.find(
+    (c) => (c.card_id as string) === OFFICE_DIGEST_SINCE_STREAM,
+  )?.acked_seq;
   const projectCursor =
     cursors.find((c) => (c.card_id as string) === "")?.acked_seq ?? 0;
-  const projectEvents =
-    projectCursor > 0 ? (streams.get("") ?? []) : ([] as readonly Event[]);
-  const since = officeDigestSince(office, projectEvents, projectCursor);
+  const since =
+    stored === undefined
+      ? officeDigestInitialSince(
+          office,
+          projectCursor > 0 ? (streams.get("") ?? []) : [],
+          projectCursor,
+        )
+      : new Date(stored).toISOString();
   const byStream = streams.ofTypes
     ? streams.ofTypes(OFFICE_DIGEST_EVENT_TYPES)
     : streams;
   function* cardEvents(): Generator<Event> {
     for (const [stream, events] of byStream) {
-      if (stream === "") continue;
+      if (stream === "" || stream.startsWith("#")) continue;
       // Streams are in seq order; skip whole streams older than the window.
       if ((events.at(-1)?.created_at ?? "") < since) continue;
       yield* events;
     }
   }
-  return officeDigest({
-    project_id,
-    office,
-    events: cardEvents(),
-    since,
-    cursors,
-    cards: tx.cards.list(project_id),
-  });
+  return {
+    pinned: stored !== undefined,
+    digest: officeDigest({
+      project_id,
+      office,
+      events: cardEvents(),
+      since,
+      now,
+      cursors,
+      cards: tx.cards.list(project_id),
+    }),
+  };
 }

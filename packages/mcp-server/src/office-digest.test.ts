@@ -165,6 +165,26 @@ function seed(project: never, title: string) {
   });
 }
 
+function append(
+  project: never,
+  card: string,
+  seq: number,
+  type: string,
+  created_at: string,
+) {
+  store.uow.run((tx) =>
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      card_id: card as never,
+      seq,
+      type,
+      actor: { kind: "system", project_id: project },
+      payload: {},
+      created_at,
+    }),
+  );
+}
+
 beforeEach(async () => {
   dataDir = mkdtempSync(join(tmpdir(), "cardigan-office-digest-"));
   store = Store.open({ dataDir });
@@ -190,15 +210,15 @@ afterEach(async () => {
   rmSync(dataDir, { recursive: true, force: true });
 });
 
-test("the Office reads routine card progress, newest first, from the project stream", async () => {
+test("the Office reads routine card progress, oldest first, from the project stream", async () => {
   const read = await call(tokens.office as string, "get_updates");
   expect(digestOf(read)?.since).toBe(CREATED);
   expect(entries(read)).toEqual([
-    "C-2#3:card_merged",
-    "C-2#2:review_submitted",
-    "C-2#1:card_created",
-    "C-1#2:delivery_submitted",
     "C-1#1:card_created",
+    "C-1#2:delivery_submitted",
+    "C-2#1:card_created",
+    "C-2#2:review_submitted",
+    "C-2#3:card_merged",
   ]);
   // The project-level routine event is in the same read's own events.
   expect((read.events as { type: string }[]).map((e) => e.type)).toEqual([
@@ -212,30 +232,53 @@ test("the Office reads routine card progress, newest first, from the project str
   ).toBeUndefined();
 });
 
-test("reading changes nothing; the Office's ACK cursors advance it (a new session still sees the rest)", async () => {
-  await call(tokens.office as string, "get_updates");
+test("reading alone moves nothing; the project ACK moves the window only to what was shown", async () => {
+  const office = tokens.office as string;
+  await call(office, "get_updates");
   // Nothing was acknowledged: the next session reads the same digest.
-  expect(
-    entries(await call(tokens.office as string, "get_updates")),
-  ).toHaveLength(5);
+  expect(entries(await call(office, "get_updates"))).toHaveLength(5);
   // Acknowledging one card stream hides what the Office read there.
-  await call(tokens.office as string, "ack_events", {
-    card_id: "C-1",
-    up_to_seq: 3,
-  });
-  expect(entries(await call(tokens.office as string, "get_updates"))).toEqual([
-    "C-2#3:card_merged",
-    "C-2#2:review_submitted",
+  await call(office, "ack_events", { card_id: "C-1", up_to_seq: 3 });
+  expect(entries(await call(office, "get_updates"))).toEqual([
     "C-2#1:card_created",
-  ]);
-  // Acknowledging the project stream moves the window to that event's time.
-  await call(tokens.office as string, "ack_events", { up_to_seq: 1 });
-  const after = await call(tokens.office as string, "get_updates");
-  expect(digestOf(after)?.since).toBe(at(5));
-  expect(entries(after)).toEqual([
-    "C-2#3:card_merged",
     "C-2#2:review_submitted",
+    "C-2#3:card_merged",
   ]);
+  // The project ACK moves the window past what the last read showed.
+  await call(office, "ack_events", { up_to_seq: 1 });
+  const after = await call(office, "get_updates");
+  expect(entries(after)).toEqual([]);
+  // Later progress still arrives, even with no new project-stream event.
+  append(HOME, "C-2", 4, "card_updated", new Date().toISOString());
+  expect(entries(await call(office, "get_updates"))).toEqual([
+    "C-2#4:card_updated",
+  ]);
+});
+
+test("beyond one page, a project ACK never skips entries the Office was not shown", async () => {
+  const office = tokens.office as string;
+  // 60 more merges after the 5 seeded changes: 65 in all, one page is 50.
+  for (let i = 0; i < 60; i++)
+    append(
+      HOME,
+      "C-2",
+      4 + i,
+      "card_merged",
+      new Date(Date.parse(at(10)) + i * 1000).toISOString(),
+    );
+  const first = await call(office, "get_updates");
+  expect(entries(first)).toHaveLength(50);
+  expect(digestOf(first)?.omitted).toBe(15);
+  const shown = new Set(entries(first));
+  // ACK the project stream twice without reading again: still no skip.
+  await call(office, "ack_events", { up_to_seq: 1 });
+  await call(office, "ack_events", { up_to_seq: 1 });
+  const second = await call(office, "get_updates");
+  expect(digestOf(second)?.omitted).toBe(0);
+  const rest = entries(second) ?? [];
+  expect(rest).toHaveLength(15);
+  expect(rest.filter((e) => shown.has(e))).toEqual([]);
+  expect(rest.at(-1)).toBe("C-2#63:card_merged");
 });
 
 test("only this project's Office on duty gets a digest, never another project's events", async () => {
@@ -260,9 +303,9 @@ test("only this project's Office on duty gets a digest, never another project's 
   expect(
     entries(await call(tokens.awayOffice as string, "get_updates")),
   ).toEqual(entries(away));
-  expect(entries(await call(tokens.office as string, "get_updates"))?.[0]).toBe(
-    "C-1#4:card_merged",
-  );
+  expect(
+    entries(await call(tokens.office as string, "get_updates"))?.at(-1),
+  ).toBe("C-1#4:card_merged");
 });
 
 test("a legacy PM row without standing_mode=office gets no digest and no error", async () => {

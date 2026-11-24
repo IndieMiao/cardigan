@@ -2,13 +2,18 @@ import { describe, expect, test } from "vitest";
 import type { Assignment, Cursor, Event } from "./entities.js";
 import type { CardId, ProjectId } from "./ids.js";
 import {
+  advanceOfficeDigestSince,
   DEFAULT_OFFICE_DIGEST_LIMIT,
+  isOfficeDigestStream,
   OFFICE_ALERT_EVENT_TYPES,
   OFFICE_DIGEST_EVENT_TYPES,
+  OFFICE_DIGEST_SETTLE_MS,
+  OFFICE_DIGEST_SHOWN_STREAM,
+  OFFICE_DIGEST_SINCE_STREAM,
   officeAlertRecipient,
   officeChangeTier,
   officeDigest,
-  officeDigestSince,
+  officeDigestInitialSince,
   officeOnDuty,
 } from "./index.js";
 
@@ -165,7 +170,7 @@ describe("C-722 office alert recipient", () => {
 });
 
 describe("C-722 office digest", () => {
-  test("the watermark is the Office's project-stream ACK, else its creation", () => {
+  test("before any read, the window starts at the Office's project-stream ACK, else its creation", () => {
     const project = [
       event("host_deployment_recorded", {
         card: null,
@@ -178,13 +183,13 @@ describe("C-722 office digest", () => {
         at: "2026-11-22T00:00:00.000Z",
       }),
     ];
-    expect(officeDigestSince(office, project, 0)).toBe(T0);
-    expect(officeDigestSince(office, project, 2)).toBe(
+    expect(officeDigestInitialSince(office, project, 0)).toBe(T0);
+    expect(officeDigestInitialSince(office, project, 2)).toBe(
       "2026-11-22T00:00:00.000Z",
     );
     // An ACK older than the Office itself does not widen the window.
-    expect(officeDigestSince(office, project, 1)).toBe(T0);
-    expect(officeDigestSince(office, [], 7)).toBe(T0);
+    expect(officeDigestInitialSince(office, project, 1)).toBe(T0);
+    expect(officeDigestInitialSince(office, [], 7)).toBe(T0);
   });
 
   test("routine card progress since the watermark, minus what the Office acknowledged", () => {
@@ -254,11 +259,13 @@ describe("C-722 office digest", () => {
       // Somebody else's cursor does not hide anything from the Office.
       { assignment_id: ops.id, card_id: "C-1" as CardId, acked_seq: 99 },
     ];
+    const now = "2026-11-21T10:00:00.000Z";
     const digest = officeDigest({
       project_id: P,
       office,
       events,
       since,
+      now,
       cursors,
       cards: [
         { id: "C-1" as CardId, title: "First" },
@@ -268,13 +275,19 @@ describe("C-722 office digest", () => {
     expect(digest).toEqual({
       since,
       omitted: 0,
+      // A full read reaches a little before its own time (late commits repeat).
+      through: new Date(
+        Date.parse(now) - OFFICE_DIGEST_SETTLE_MS,
+      ).toISOString(),
       entries: [
+        { card_id: "C-3", seq: 1, type: "card_created", created_at: since },
         {
-          card_id: "C-2",
-          card_title: "Second",
-          seq: 9,
-          type: "card_merged",
-          created_at: "2026-11-21T03:00:00.000Z",
+          card_id: "C-1",
+          card_title: "First",
+          seq: 3,
+          type: "delivery_submitted",
+          created_at: "2026-11-21T01:00:00.000Z",
+          detail: { delivery_id: "D-1", work_item_id: "W-1" },
         },
         {
           card_id: "C-1",
@@ -285,53 +298,88 @@ describe("C-722 office digest", () => {
           detail: { review_id: "V-1", verdict: "pass" },
         },
         {
-          card_id: "C-1",
-          card_title: "First",
-          seq: 3,
-          type: "delivery_submitted",
-          created_at: "2026-11-21T01:00:00.000Z",
-          detail: { delivery_id: "D-1", work_item_id: "W-1" },
+          card_id: "C-2",
+          card_title: "Second",
+          seq: 9,
+          type: "card_merged",
+          created_at: "2026-11-21T03:00:00.000Z",
         },
-        { card_id: "C-3", seq: 1, type: "card_created", created_at: since },
       ],
     });
+    // A read right at the window start never moves it backwards.
+    expect(
+      officeDigest({ ...digestInput(events), since, now: since }).through,
+    ).toBe(since);
   });
 
-  test("beyond the limit the newest entries are kept and the rest counted", () => {
-    const events = Array.from(
-      { length: DEFAULT_OFFICE_DIGEST_LIMIT + 3 },
-      (_, i) =>
-        event("card_merged", {
-          card: `C-${i + 1}`,
-          seq: 1,
-          at: new Date(
-            Date.parse("2026-11-21T00:00:00.000Z") + i * 1000,
-          ).toISOString(),
-        }),
+  test("a full page is the oldest entries; the window only moves to the first one not shown", () => {
+    // The reviewer's case: 60 merges, then a project-stream event after them.
+    const at = (i: number) =>
+      new Date(Date.parse("2026-11-21T00:00:00.000Z") + i * 1000).toISOString();
+    const events = Array.from({ length: 60 }, (_, i) =>
+      event("card_merged", { card: `C-${i}`, seq: 1, at: at(i) }),
     );
-    const digest = officeDigest({
-      project_id: P,
-      office,
-      events,
-      since: T0,
-      cursors: [],
-      cards: [],
+    const now = at(61);
+    const first = officeDigest({ ...digestInput(events), since: T0, now });
+    expect(first.entries.map((e) => e.card_id)).toEqual(
+      Array.from({ length: DEFAULT_OFFICE_DIGEST_LIMIT }, (_, i) => `C-${i}`),
+    );
+    expect(first.omitted).toBe(10);
+    expect(first.through).toBe(at(50));
+    // The project ACK moves the start only to what was shown.
+    const since = advanceOfficeDigestSince(
+      Date.parse(T0),
+      Date.parse(first.through),
+    );
+    const second = officeDigest({
+      ...digestInput(events),
+      since: new Date(since).toISOString(),
+      now,
     });
-    expect(digest.entries).toHaveLength(DEFAULT_OFFICE_DIGEST_LIMIT);
-    expect(digest.omitted).toBe(3);
-    expect(digest.entries[0]?.card_id).toBe(
-      `C-${DEFAULT_OFFICE_DIGEST_LIMIT + 3}`,
+    expect(second.entries.map((e) => e.card_id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `C-${i + 50}`),
     );
+    expect(second.omitted).toBe(0);
+    // Without a read nothing moves; a stale shown point never moves it back.
+    expect(advanceOfficeDigestSince(since, undefined)).toBe(since);
+    expect(advanceOfficeDigestSince(since, Date.parse(T0))).toBe(since);
     expect(
-      officeDigest({
-        project_id: P,
-        office,
-        events,
-        since: T0,
-        cursors: [],
-        cards: [],
-        limit: 2,
-      }).omitted,
-    ).toBe(DEFAULT_OFFICE_DIGEST_LIMIT + 1);
+      officeDigest({ ...digestInput(events), since: T0, now, limit: 2 })
+        .omitted,
+    ).toBe(58);
+  });
+
+  test("a page never splits one millisecond, so nothing on the boundary is skipped", () => {
+    const same = "2026-11-21T00:00:00.000Z";
+    const events = [
+      ...Array.from({ length: 3 }, (_, i) =>
+        event("card_updated", { card: `C-${i}`, seq: 1, at: same }),
+      ),
+      event("card_merged", {
+        card: "C-9",
+        seq: 1,
+        at: "2026-11-21T00:00:01.000Z",
+      }),
+    ];
+    const page = officeDigest({
+      ...digestInput(events),
+      since: T0,
+      now: "2026-11-22T00:00:00.000Z",
+      limit: 2,
+    });
+    expect(page.entries.map((e) => e.card_id)).toEqual(["C-0", "C-1", "C-2"]);
+    expect(page.omitted).toBe(1);
+    expect(page.through).toBe("2026-11-21T00:00:01.000Z");
   });
 });
+
+test("the digest window rows never collide with a card or the project stream", () => {
+  for (const stream of [OFFICE_DIGEST_SINCE_STREAM, OFFICE_DIGEST_SHOWN_STREAM])
+    expect(isOfficeDigestStream(stream)).toBe(true);
+  for (const stream of ["", "C-1", "C-722"])
+    expect(isOfficeDigestStream(stream)).toBe(false);
+});
+
+function digestInput(events: Event[]) {
+  return { project_id: P, office, events, cursors: [], cards: [] };
+}

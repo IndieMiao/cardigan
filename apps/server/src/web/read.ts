@@ -42,6 +42,7 @@ import {
   hasVerifiedMergeNoop,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
+  isOfficeDigestStream,
   latestCardTemplate,
   listNeedsYou,
   listNeedsYouCounts,
@@ -2174,7 +2175,12 @@ export function executionView<M extends Machine = Machine>(
                 ...withContext(run),
               },
         cursors: state.cursors
-          .filter((cursor) => cursor.assignment_id === assignment.id)
+          .filter(
+            (cursor) =>
+              cursor.assignment_id === assignment.id &&
+              // C-722: the Office digest window is not a stream cursor.
+              !isOfficeDigestStream(cursor.card_id),
+          )
           .map((cursor) => ({
             card_id: cursor.card_id,
             acked_seq: cursor.acked_seq,
