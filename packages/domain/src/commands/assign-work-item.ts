@@ -21,6 +21,7 @@ import {
 } from "./employee-assignment.js";
 import {
   continuesConfirmedTakeover,
+  firstLaunchFailed,
   releasedBeforeFirstLaunch,
 } from "./failed-placement.js";
 import { hostOpsExitConfirmation } from "./host-ops-actions.js";
@@ -100,10 +101,22 @@ export function assignWorkItem(
       : undefined;
   const recovery = confirmedLoss(previous);
   const confirmSameMachine = p.confirm_same_machine === true;
+  // C-716: a confirmed same-machine retry of a first launch, or its repeat.
+  const prior = previous?.recovery
+    ? existing.find((a) => a.id === previous.recovery?.previous_assignment_id)
+    : undefined;
+  const sameMachineRetry =
+    confirmSameMachine &&
+    (!!retry ||
+      (previous?.status === "active" &&
+        !!previous.recovery?.same_machine_confirmed_by &&
+        !!prior &&
+        releasedBeforeFirstLaunch(d, prior, item.card_id)));
   if (confirmSameMachine) {
     // A repeat may return the already-created successor, but cannot turn an ordinary assign into a recovery.
     ensure(
       recovery ||
+        retry ||
         (previous?.status === "active" &&
           previous.recovery?.same_machine_confirmed_by &&
           !hostOpsPending(d.state.events, previous.id)),
@@ -116,7 +129,7 @@ export function assignWorkItem(
       "确认同机恢复时必须显式指定原机器",
     );
   }
-  if (recovery || confirmSameMachine)
+  if (recovery || (confirmSameMachine && !sameMachineRetry))
     ensure(
       !automaticTarget &&
         (p.recovery_source === "main" || p.recovery_source === "backup"),
@@ -137,12 +150,21 @@ export function assignWorkItem(
     if (retry) {
       ensure(
         !automaticTarget &&
-          p.machine_id === undefined &&
           p.recovery_source === undefined &&
           p.role_id === retry.role_id &&
           version === retry.role_version,
         "validation_failed",
-        "首发失败恢复须保留原工作项和角色，不指定机器重新指派",
+        "首发失败恢复须保留原工作项和角色",
+      );
+      // C-716: a human or PM may name any eligible machine. Only the machine
+      // where the first launch really failed needs an explicit confirmation;
+      // a released queue that never started is not a failure.
+      ensure(
+        p.machine_id !== retry.machine_id ||
+          confirmSameMachine ||
+          !firstLaunchFailed(d, retry),
+        "validation_failed",
+        `首发在 ${retry.machine_id} 上失败；请指定另一台机器，或确认同机重试（CLI：--confirm-same-machine；MCP：confirm_same_machine=true）`,
       );
       ensure(
         canStartWork({ item, work_items: d.list("work_items") }) ||
@@ -345,9 +367,11 @@ export function assignWorkItem(
       body: `${
         automaticTarget
           ? `系统按角色 ${role.role_id} 自动指派 ${item.id} 给 ${employee?.id}（${automaticTarget === "first_producer" ? "首个产出项" : `交付 ${automaticTarget}`}；活跃 Assignment 数 ${selection ?? 0}，负载最少、员工编号依次优先）`
-          : confirmSameMachine
-            ? `${d.author} 确认 ${item.id} 在原机器 ${machine_id} 从 ${source} 恢复：${previous?.id} → ${id}`
-            : `Assigned ${item.id} to ${role.role_id}`
+          : confirmSameMachine && retry
+            ? `${d.author} 确认 ${item.id} 在首发失败的原机器 ${machine_id} 重试：${previous?.id} → ${id}`
+            : confirmSameMachine
+              ? `${d.author} 确认 ${item.id} 在原机器 ${machine_id} 从 ${source} 恢复：${previous?.id} → ${id}`
+              : `Assigned ${item.id} to ${role.role_id}`
       }${queued_on ? `；合格机器均已满，在 ${machine_id} 排队（${queued_on.join("，")}）` : ""}`,
       work_item_id: item.id,
     },

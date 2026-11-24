@@ -920,8 +920,62 @@ test("only a released pre-Run snapshot failure can reselect a different machine 
       runs: [{ ...run(), assignment_id: first.data.id, status: "completed" }],
     }).ok,
   ).toBe(false);
+  // C-716: a human or PM may name another eligible machine directly; the
+  // machine where the first launch failed needs an explicit confirmation.
   expect(
-    assign(released, human, { ...params, machine_id: "local" }, io).ok,
+    value(assign(released, ops, { ...params, machine_id: "local" }, io)).data,
+  ).toMatchObject({
+    machine_id: "local",
+    recovery: { previous_assignment_id: first.data.id },
+  });
+  const sameMachine = assign(
+    released,
+    human,
+    { ...params, machine_id: remote.id },
+    io,
+  );
+  expect(!sameMachine.ok && sameMachine.error.message).toContain(
+    `首发在 ${remote.id} 上失败`,
+  );
+  expect(
+    assign(released, human, { ...params, machine_id: "unknown-machine" }, io)
+      .ok,
+  ).toBe(false);
+  const confirmed = value(
+    assign(
+      released,
+      human,
+      { ...params, machine_id: remote.id, confirm_same_machine: true },
+      io,
+    ),
+  );
+  expect(confirmed.data).toMatchObject({
+    machine_id: remote.id,
+    recovery: {
+      previous_assignment_id: first.data.id,
+      same_machine_confirmed_by: "human",
+    },
+  });
+  expect(confirmed.timeline.at(-1)?.body).toContain("首发失败的原机器");
+  // A repeat returns the successor instead of creating another one.
+  expect(
+    value(
+      assign(
+        apply(released, confirmed),
+        human,
+        { ...params, machine_id: remote.id, confirm_same_machine: true },
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+  // Confirmation never turns an assignment that has not been released into a retry.
+  expect(
+    assign(
+      failed,
+      human,
+      { ...params, machine_id: remote.id, confirm_same_machine: true },
+      io,
+    ).ok,
   ).toBe(false);
   expect(
     value(assignOrDefer({ ...released, machines: [remote] }, human, params, io))
@@ -1104,6 +1158,25 @@ test.each([false, true])(
       work_item_id: work.work_item_id,
       role_version: first.data.role_version,
     });
+    // C-716: an explicit machine is accepted. Only a preparation failure makes
+    // the original machine need a same-machine confirmation; a cancelled queue
+    // that never started is not a failed first launch.
+    expect(
+      value(assign(after, human, { ...work, machine_id: "local" }, io)).data
+        .machine_id,
+    ).toBe("local");
+    const back = assign(after, human, { ...work, machine_id: remote.id }, io);
+    expect(back.ok).toBe(!retry);
+    expect(
+      value(
+        assign(
+          after,
+          human,
+          { ...work, machine_id: remote.id, confirm_same_machine: true },
+          io,
+        ),
+      ).data,
+    ).toMatchObject({ machine_id: remote.id });
   },
 );
 
