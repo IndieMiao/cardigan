@@ -1997,6 +1997,105 @@ test("Web answers bind to a story group, retry exactly once, and leave the rest 
   });
 });
 
+test("C-715: Web submits a whole checklist once: answers and blank defaults share one entry, replays return it, a second submission is refused", async () => {
+  const group_id =
+    `${s.card.id}#1` as import("@cardigan/domain").TimelineEntryId;
+  s.store().uow.run((tx) =>
+    tx.cards.put(s.project.project_id, {
+      ...s.card,
+      story: {
+        question_groups: [
+          {
+            id: group_id,
+            questions: ["布局", "顺序"].map((question) => ({
+              question,
+              recommended: "原样",
+              impact: "少改动",
+            })),
+          },
+        ],
+      },
+    }),
+  );
+  const post = (action: Record<string, unknown>, key: string) =>
+    request(
+      cardPath("comments"),
+      { body: "提交回答", story_discussion: action },
+      { "idempotency-key": key },
+    );
+  const comments = () =>
+    s
+      .state()
+      .events.filter(
+        (e) => e.type === "comment_posted" && e.card_id === s.card.id,
+      );
+  const before = comments().length;
+  const submit = {
+    action: "submit_answers",
+    group_id,
+    answers: [{ number: 2, answer: "倒序" }],
+  };
+  const bad = [
+    { ...submit, answers: [{ number: 2, answer: " " }] },
+    { ...submit, answers: [{ number: 0, answer: "倒序" }] },
+    { ...submit, answers: [{ number: 2, answer: "倒序", extra: 1 }] },
+    { action: "submit_answers", group_id },
+  ];
+  for (const [i, action] of bad.entries())
+    expect((await post(action, `bad-${i}`)).status).toBe(400);
+  const first = await post(submit, "whole-list");
+  expect(first.status).toBe(200);
+  expect(first.body.body).toBe(
+    `提交回答\n\n${group_id} 第 1 题按默认：原样\n\n${group_id} 第 2 题：倒序`,
+  );
+  expect(await post(submit, "whole-list")).toEqual(first);
+  expect(await post(submit, "whole-list-again")).toMatchObject({
+    status: 409,
+  });
+  // Refused attempts, the replay and the second submission add nothing: the
+  // Office is woken once, by the one entry carrying the whole checklist.
+  const posted = comments().slice(before);
+  expect(posted).toHaveLength(1);
+  const [event] = posted;
+  if (!event) throw new Error("Missing submission event");
+  expect(
+    routeEvent({ event, snapshot: s.state() })
+      .notifications.map((n) => n.recipient.kind)
+      .filter((kind) => kind === "pm_office"),
+  ).toEqual(["pm_office"]);
+  const read = await fetch(web.url + path(`/cards/${s.card.id}`), {
+    headers: { cookie },
+  });
+  expect(await read.json()).toMatchObject({
+    card: {
+      story: {
+        discussion_rounds: 1,
+        question_groups: [
+          {
+            id: group_id,
+            questions: [
+              {
+                resolution: {
+                  value: "原样",
+                  source: "accepted_default",
+                  entry_id: first.body.id,
+                },
+              },
+              {
+                resolution: {
+                  value: "倒序",
+                  source: "answer",
+                  entry_id: first.body.id,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+});
+
 test("Web confirms the current story proposal once: every child opens in one transaction, stale versions and retries open nothing more", async () => {
   const entry_id =
     `${s.card.id}#1` as import("@cardigan/domain").TimelineEntryId;

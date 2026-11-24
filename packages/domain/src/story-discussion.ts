@@ -13,7 +13,19 @@ export type StoryReply =
       readonly number: number;
       readonly answer: string;
     }
-  | { readonly action: "accept_defaults"; readonly group_id: TimelineEntryId };
+  | { readonly action: "accept_defaults"; readonly group_id: TimelineEntryId }
+  | {
+      /**
+       * C-715: the whole checklist in one entry. Every open question not in
+       * `answers` takes its recommended default, as with "accept_defaults".
+       */
+      readonly action: "submit_answers";
+      readonly group_id: TimelineEntryId;
+      readonly answers: readonly {
+        readonly number: number;
+        readonly answer: string;
+      }[];
+    };
 
 export type StoryDiscussion =
   | { readonly action: "ask"; readonly questions: readonly StoryQuestion[] }

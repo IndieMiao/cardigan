@@ -154,7 +154,7 @@ test("C-581 typing in question 4 while a live refresh lands keeps position, focu
   expect((input as HTMLInputElement).value).toBe("两列布局");
 });
 
-test("C-581 answering question 4 and accepting the group reload without jumping to the anchor", async () => {
+test("C-581 submitting the checklist (C-715) and accepting the group reload without jumping to the anchor", async () => {
   let answered = false;
   const addComment = vi.fn(async () => {
     answered = true;
@@ -169,27 +169,32 @@ test("C-581 answering question 4 and accepting the group reload without jumping 
               timelineEntry({
                 id: "C-1#10" as TimelineEntryId,
                 event_seq: 10,
-                body: "回答问题",
+                body: "提交回答",
                 author: "human",
               }),
             ]
           : [],
       ),
   });
-  const { input, before } = await openAtAnchor(client);
+  const { view, input, before } = await openAtAnchor(client);
   // Clicking the button needs no pointer or key event to stay put.
   fireEvent.change(input, { target: { value: "两列" } });
-  const form = input.closest("form");
-  if (!form) throw new Error("Missing answer form");
-  fireEvent.submit(form);
+  fireEvent.click(screen.getByRole("button", { name: "提交" }));
   await waitFor(() => expect(addComment).toHaveBeenCalledTimes(1));
-  await screen.findByText("回答问题");
+  await screen.findByText("提交回答");
+  await landed();
   relayout();
+  expect(scroll.mock.calls.length).toBe(before);
+  expect(document.documentElement.scrollTop).toBe(320);
+  // A second checklist with nothing typed: accepting it reloads in place too.
+  view.unmount();
+  answered = false;
+  const next = await openAtAnchor(client);
   fireEvent.click(screen.getByRole("button", { name: "整组按默认" }));
   await waitFor(() => expect(addComment).toHaveBeenCalledTimes(2));
   await landed();
   relayout();
-  expect(scroll.mock.calls.length).toBe(before);
+  expect(scroll.mock.calls.length).toBe(next.before);
   expect(document.documentElement.scrollTop).toBe(320);
 });
 

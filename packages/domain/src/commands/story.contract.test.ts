@@ -457,6 +457,103 @@ test("partial answer then accepting the remainder counts once and preserves the 
   expect(storyDiscussionRounds(story())).toBe(1);
 });
 
+test("C-715: one submission answers the filled questions, defaults the blank ones, and writes one timeline entry", () => {
+  const { f, office, send, post, story } = discussionFixture();
+  const group_id = send(office, {
+    action: "ask",
+    questions: [
+      ...ask.questions,
+      { question: "颜色？", recommended: "灰", impact: "沿用主题" },
+    ],
+  }).id;
+  const before = f.state.timeline.length;
+  const submit = {
+    action: "submit_answers",
+    group_id,
+    answers: [{ number: 3, answer: "蓝 @薛宝钗" }],
+  } as const;
+  const entry = send(human, submit);
+  expect(f.state.timeline.length - before).toBe(1);
+  expect(entry.body).toBe(
+    [
+      "讨论",
+      `${group_id} 第 1 题按默认：单列`,
+      `${group_id} 第 2 题按默认：按时间`,
+      `${group_id} 第 3 题：蓝 @薛宝钗`,
+    ].join("\n\n"),
+  );
+  expect(
+    story().question_groups?.[0]?.questions.map((q) => q.resolution),
+  ).toEqual([
+    { source: "accepted_default", value: "单列", entry_id: entry.id },
+    { source: "accepted_default", value: "按时间", entry_id: entry.id },
+    { source: "answer", value: "蓝 @薛宝钗", entry_id: entry.id },
+  ]);
+  expect(storyDiscussionRounds(story())).toBe(1);
+  // The settled checklist refuses a second submission, partial or whole.
+  expect(post(human, submit)).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+  expect(post(human, { ...submit, answers: [] }).ok).toBe(false);
+  expect(post(human, { action: "accept_defaults", group_id }).ok).toBe(false);
+  expect(
+    post(human, { action: "answer", group_id, number: 1, answer: "两列" }).ok,
+  ).toBe(false);
+});
+
+test("C-715: submission covers only open questions and rejects non-human, bad or repeated numbers atomically", () => {
+  const { f, office, send, post, story } = discussionFixture();
+  const group_id = send(office, ask).id;
+  const all = (answers: { number: number; answer: string }[]) =>
+    ({ action: "submit_answers", group_id, answers }) as const;
+  const refused = (a: typeof human, answers: Parameters<typeof all>[0]) =>
+    expect(post(a, all(answers)).ok).toBe(false);
+  refused(office, [{ number: 1, answer: "两列" }]);
+  refused(actor(3, "pm"), []);
+  refused(human, [{ number: 3, answer: "x" }]);
+  refused(human, [{ number: 0, answer: "x" }]);
+  refused(human, [{ number: 1.5, answer: "x" }]);
+  refused(human, [{ number: 1, answer: " " }]);
+  refused(human, [
+    { number: 1, answer: "两列" },
+    { number: 1, answer: "三列" },
+  ]);
+  expect(
+    story().question_groups?.[0]?.questions.some((q) => q.resolution),
+  ).toBe(false);
+  // A question answered on its own (compatible single action) is closed.
+  const single = send(human, {
+    action: "answer",
+    group_id,
+    number: 1,
+    answer: "两列",
+  });
+  refused(human, [{ number: 1, answer: "三列" }]);
+  const entry = send(human, all([]));
+  expect(entry.body).toBe(`讨论\n\n${group_id} 第 2 题按默认：按时间`);
+  expect(
+    story().question_groups?.[0]?.questions.map((q) => q.resolution),
+  ).toEqual([
+    { source: "answer", value: "两列", entry_id: single.id },
+    { source: "accepted_default", value: "按时间", entry_id: entry.id },
+  ]);
+  expect(storyDiscussionRounds(story())).toBe(1);
+  const child = f.create("general", f.parent.id);
+  const next = send(office, ask).id;
+  expect(
+    post(
+      human,
+      { action: "submit_answers", group_id: next, answers: [] },
+      child.id,
+    ).ok,
+  ).toBe(false);
+  f.apply(f.done(f.parent));
+  expect(
+    post(human, { action: "submit_answers", group_id: next, answers: [] }).ok,
+  ).toBe(false);
+});
+
 test("discussion commands enforce same-story scope, author, open state and valid questions", () => {
   const { f, office, post, send } = discussionFixture();
   expect(post(human, ask).ok).toBe(false);

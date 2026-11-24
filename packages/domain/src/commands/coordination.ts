@@ -352,7 +352,12 @@ export function postComment(
         mentions: commentMentions(
           p.story_discussion?.action === "answer"
             ? `${p.body}\n${p.story_discussion.answer}`
-            : p.body,
+            : p.story_discussion?.action === "submit_answers"
+              ? [
+                  p.body,
+                  ...p.story_discussion.answers.map((a) => a.answer),
+                ].join("\n")
+              : p.body,
           p.mentions ?? [],
           state.employees ?? [],
           state.roles.map((role) => role.role_id),
