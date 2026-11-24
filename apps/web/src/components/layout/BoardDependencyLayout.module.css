@@ -22,4 +22,17 @@
   .arrow {
     fill: var(--ui-border-hover);
   }
+  /* C-673: round dots (zero-length dashes) a little stronger than the line;
+     still between background and text, so the blend keeps text intact. */
+  .flow {
+    fill: none;
+    stroke: color-mix(in srgb, var(--ui-border-hover) 60%, var(--text));
+    stroke-width: calc(4 * var(--ui-stroke));
+    stroke-linecap: round;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .flow {
+      display: none;
+    }
+  }
 }

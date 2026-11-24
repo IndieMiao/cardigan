@@ -1,5 +1,9 @@
-import { useId } from "react";
+import { useId, useRef } from "react";
 import { LINE_ARROW } from "../../board-dependency-lines.js";
+import {
+  useBoardDependencyFlow,
+  useReducedMotion,
+} from "../../useBoardDependencyFlow.js";
 import styles from "./BoardDependencyLayout.module.css";
 
 export interface BoardDependencyLine {
@@ -12,7 +16,8 @@ export interface BoardDependencyLine {
  * C-659 / C-668: faint curves between the hovered card and its
  * prerequisites and dependents. Rendered after the board, so a curve stays
  * whole where it passes over an unrelated card; the 1px hover-border colour
- * keeps the text under it readable.
+ * keeps the text under it readable. C-673: dots flow along every line the
+ * way its arrow points; with reduced motion only the still lines show.
  */
 export function BoardDependencyLines({
   lines,
@@ -20,8 +25,12 @@ export function BoardDependencyLines({
   lines: readonly BoardDependencyLine[];
 }) {
   const marker = `${useId()}-arrow`;
+  const svg = useRef<SVGSVGElement>(null);
+  const flowing = !useReducedMotion();
+  useBoardDependencyFlow(svg, lines, flowing);
   return (
     <svg
+      ref={svg}
       className={styles.lines}
       aria-hidden="true"
       focusable="false"
@@ -53,6 +62,16 @@ export function BoardDependencyLines({
           markerEnd={`url(#${marker})`}
         />
       ))}
+      {flowing
+        ? lines.map((line) => (
+            <path
+              key={line.key}
+              data-flow={line.key}
+              className={styles.flow}
+              d={line.d}
+            />
+          ))
+        : null}
     </svg>
   );
 }
