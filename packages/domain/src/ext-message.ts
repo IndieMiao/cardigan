@@ -4,6 +4,7 @@ import { selectNeedsYouDecisions } from "./commands/queries.js";
 import type { Event, ReadyCondition } from "./entities.js";
 import { fullEventHistory } from "./event-index.js";
 import type { CardId, EventId, ProjectId } from "./ids.js";
+import { qualifyId } from "./project-code.js";
 import { NEEDS_YOU_ITEM_READY, needsYouItemReady } from "./readiness.js";
 
 export const EXT_MESSAGE_DEFAULTS = {
@@ -83,6 +84,8 @@ export type ExtMessageEntry =
       readonly card: string | null;
       readonly item: string;
       readonly kind: ExtMessageKind;
+      /** C-674: full number of the card (or project-level item), e.g. `SEN-C-34`. */
+      readonly ref?: string;
     };
 export type ExtMessage = ExtMessageEntry;
 
@@ -120,6 +123,8 @@ export function buildExtMessage(
   item: ExtMessageItem,
   base: string,
   titleLimit = EXT_MESSAGE_DEFAULTS.title_limit,
+  /** C-674: the project's code; numbers in the message get it as prefix. */
+  code?: string,
 ): ExtMessageEntry {
   if (!Number.isSafeInteger(titleLimit) || titleLimit < 1)
     throw new Error("Invalid title limit");
@@ -143,6 +148,8 @@ export function buildExtMessage(
     /[\p{Cc}\p{Cf}]/gu,
     " ",
   );
+  const local = item.card_id ?? item.item_id;
+  const ref = qualifyId(code, local);
   return {
     project: item.project_id,
     card: item.card_id ?? null,
@@ -150,6 +157,7 @@ export function buildExtMessage(
     kind: item.kind,
     title: Array.from(title).slice(0, titleLimit).join(""),
     url,
+    ...(ref === local ? {} : { ref }),
   };
 }
 

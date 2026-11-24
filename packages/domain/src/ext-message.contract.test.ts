@@ -780,3 +780,23 @@ test("a merge action issued before its source approval's target becomes sensitiv
   expect(fresh.basis).not.toEqual(issued.basis);
   expect(fresh.options).toEqual([]);
 });
+
+test("C-674: with the project code the message carries the full number; sensitive items do not", () => {
+  expect(
+    buildExtMessage(item, "https://workbench.invalid", 120, "SEN"),
+  ).toMatchObject({ card: "C-1", item: "Q-1", ref: "SEN-C-1" });
+  const { card_id: _card, ...projectItem } = item;
+  expect(
+    buildExtMessage(projectItem, "https://workbench.invalid", 120, "SEN").ref,
+  ).toBe("SEN-Q-1");
+  expect(
+    Object.keys(
+      buildExtMessage(
+        { ...item, sensitive: true },
+        "https://workbench.invalid",
+        120,
+        "SEN",
+      ),
+    ).sort(),
+  ).toEqual(["project", "title", "url"]);
+});

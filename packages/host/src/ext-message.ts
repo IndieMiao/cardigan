@@ -946,6 +946,7 @@ export class ExtMessageSender {
             first,
             config.workbench_url,
             config.policy.title_limit,
+            store.projectCode(first.project_id),
           )
         : buildExtMessageDigest(eligible.length, config.workbench_url);
     const claimed = store.uow.run((tx) => {
