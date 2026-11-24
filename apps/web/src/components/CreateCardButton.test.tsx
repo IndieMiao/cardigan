@@ -14,6 +14,7 @@ import {
   type PreferencesView,
   type TemplateView,
 } from "../api.js";
+import { httpSharedFiles } from "../shared-files-api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { CreateCardButton } from "./CreateCardButton.js";
 
@@ -288,6 +289,33 @@ test("C-717: the attachment button adds an empty-type .txt or .log and names eve
   ]);
   expect(dialog.getByRole("alert").textContent).toMatch(
     /README：不支持这种类型/u,
+  );
+});
+
+test("C-717: the dialog takes a zip and points an oversize file to the shared library", async () => {
+  vi.spyOn(httpSharedFiles, "list").mockResolvedValue({
+    availability: "ready",
+    notice: "",
+    path: "",
+    dirs: [],
+    files: [],
+  });
+  setup({ attachmentMaxBytes: () => 4 });
+  const dialog = await open();
+  const big = new File(["12345"], "big.txt", { type: "text/plain" });
+  fireEvent.change(dialog.getByLabelText("添加附件"), {
+    target: {
+      files: [new File(["PK"], "logs.zip", { type: "application/zip" }), big],
+    },
+  });
+  expect(
+    within(dialog.getByRole("list", { name: "待上传的附件" }))
+      .getAllByRole("listitem")
+      .map((item) => item.textContent),
+  ).toEqual([expect.stringContaining("logs.zip")]);
+  const link = await dialog.findByRole("link", { name: "共享文件库" });
+  expect(link.closest("li")?.textContent).toMatch(
+    /^big\.txt：超过 .+ MiB，可以改传到共享文件库$/u,
   );
 });
 

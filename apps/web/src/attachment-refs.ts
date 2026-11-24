@@ -27,6 +27,8 @@ export const UPLOAD_TYPES: Readonly<Record<string, string>> = {
   "text/plain": "txt",
   "application/json": "json",
   "application/pdf": "pdf",
+  // C-717: as MCP uploads; only downloads, never previews.
+  "application/zip": "zip",
   // C-683: videos go through the resumable upload, with their own limit.
   "video/mp4": "mp4",
   "video/quicktime": "mov",
@@ -93,7 +95,7 @@ export function uploadProblem(
 ): string | undefined {
   const mime = uploadMime(file);
   if (mime === undefined)
-    return "不支持这种类型，可以上传图片、视频（mp4、mov、webm、m4v）、PDF、txt/log、md、json、html";
+    return "不支持这种类型，可以上传图片、视频（mp4、mov、webm、m4v）、PDF、txt/log、md、json、html、zip";
   const limit = isVideoType(mime) ? videoMaxBytes : maxBytes;
   if (limit !== null && file.size > limit) return `超过 ${formatMiB(limit)}`;
   // The server's `original_filename` rules (domain `displayText`).
@@ -104,7 +106,8 @@ export function uploadProblem(
 
 /**
  * C-717: a chosen file as the form adds it, or why it was left out. Every
- * refusal carries a reason to show; nothing is dropped silently.
+ * refusal carries a reason to show; nothing is dropped silently. `oversize`
+ * marks a file over the limit, for the form to name another way to share it.
  */
 export function checkUpload(
   file: Pick<File, "name" | "type" | "size">,
@@ -116,15 +119,31 @@ export function checkUpload(
   },
 ):
   | { readonly mime: string; readonly reason?: undefined }
-  | { readonly mime?: undefined; readonly reason: string } {
+  | {
+      readonly mime?: undefined;
+      readonly reason: string;
+      readonly oversize?: true;
+    } {
   const mime = uploadMime(file);
-  const reason =
-    mime && isVideoType(mime) && !limits.video
-      ? "不支持上传视频"
-      : uploadProblem(file, limits.maxBytes, limits.videoMaxBytes);
-  if (reason) return { reason };
+  if (mime && isVideoType(mime) && !limits.video)
+    return { reason: "不支持上传视频" };
+  const reason = uploadProblem(file, limits.maxBytes, limits.videoMaxBytes);
+  if (reason) {
+    const limit =
+      mime && isVideoType(mime) ? limits.videoMaxBytes : limits.maxBytes;
+    return mime && limit !== null && file.size > limit
+      ? { reason, oversize: true }
+      : { reason };
+  }
   if (!mime) return { reason: "不支持这种类型" };
   return { mime };
+}
+
+/** A file left out of a form, as `FileProblems` lists it. */
+export interface FileProblem {
+  readonly name: string;
+  readonly reason: string;
+  readonly oversize?: true;
 }
 
 /** How a file is named in a refusal, even with no name or type. */

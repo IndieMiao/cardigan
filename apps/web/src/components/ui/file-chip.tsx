@@ -63,11 +63,20 @@ export function FileChip({
   );
 }
 
-/** One line per file that was not added, with the reason. */
+/**
+ * One line per file that was not added, with the reason. A file over the
+ * limit also gets `oversize`: another way to share it (C-717).
+ */
 export function FileProblems({
   problems,
+  oversize,
 }: {
-  problems: readonly { readonly name: string; readonly reason: string }[];
+  problems: readonly {
+    readonly name: string;
+    readonly reason: string;
+    readonly oversize?: boolean;
+  }[];
+  oversize?: ReactNode;
 }) {
   if (!problems.length) return null;
   return (
@@ -76,6 +85,7 @@ export function FileProblems({
         // biome-ignore lint/suspicious/noArrayIndexKey: one report, never reordered.
         <li key={index}>
           {problem.name}：{problem.reason}
+          {problem.oversize && oversize ? <>，{oversize}</> : null}
         </li>
       ))}
     </ul>

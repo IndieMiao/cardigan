@@ -14,6 +14,7 @@ import {
 import { afterEach, expect, test, vi } from "vitest";
 import {
   attachmentQuery,
+  attachmentRefKind,
   attachmentTarget,
   checkUpload,
   entryAttachmentRefs,
@@ -295,6 +296,12 @@ test("C-717: every chosen file is either added with a type or refused with a rea
   expect(checkUpload(file("d.LOG", "text/x-log"), limits)).toEqual({
     mime: "text/plain",
   });
+  // zip, under its Windows/legacy types too; it only downloads.
+  for (const type of ["application/zip", "application/x-zip-compressed", ""])
+    expect(checkUpload(file("pack.zip", type), limits)).toEqual({
+      mime: "application/zip",
+    });
+  expect(attachmentRefKind("application/zip")).toBe("file");
   const refused = [
     checkUpload(file("README", ""), limits),
     checkUpload(file("tool.exe", "application/x-msdownload"), limits),
@@ -307,9 +314,15 @@ test("C-717: every chosen file is either added with a type or refused with a rea
     undefined,
     undefined,
   ]);
+  expect(refused.map((r) => r.oversize)).toEqual([
+    undefined,
+    undefined,
+    true,
+    undefined,
+  ]);
   expect(refused.map((r) => r.reason)).toEqual([
     expect.stringContaining("不支持这种类型"),
-    expect.stringContaining("不支持这种类型"),
+    expect.stringContaining("、zip"),
     "超过 0.0 MiB",
     "不支持上传视频",
   ]);

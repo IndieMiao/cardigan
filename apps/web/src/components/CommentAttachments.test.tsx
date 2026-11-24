@@ -19,10 +19,27 @@ import type {
   CommentInput,
   UploadAttachmentInput,
 } from "../api.js";
+import {
+  httpSharedFiles,
+  type SharedListingView,
+} from "../shared-files-api.js";
 import { attachment, fakeClient } from "../testing/fixtures.js";
 import { CommentBox } from "./CommentBox.js";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+const library = (
+  availability: SharedListingView["availability"],
+): SharedListingView => ({
+  availability,
+  notice: "",
+  path: "",
+  dirs: [],
+  files: [],
+});
 
 const review = attachment({
   id: "attachment-3",
@@ -195,7 +212,8 @@ test("C-717: cancelling the chooser lets an empty box fold again", () => {
   expect(screen.queryByRole("button", { name: "上传附件" })).toBeNull();
 });
 
-test("C-717: every refused file shows its reason in place; other files and the body stay", () => {
+test("C-717: every refused file shows its reason in place; other files and the body stay", async () => {
+  vi.spyOn(httpSharedFiles, "list").mockResolvedValue(library("ready"));
   const { input } = setup();
   type(input, "正文");
   choose(new File(["ok"], "keep.txt", { type: "" }));
@@ -214,10 +232,53 @@ test("C-717: every refused file shows its reason in place; other files and the b
     expect.stringMatching(/^README：不支持这种类型/u),
     expect.stringMatching(/^未命名文件：不支持这种类型/u),
     expect.stringMatching(/^tool\.exe：不支持这种类型/u),
-    "big.log：超过 10 MiB",
+    expect.stringMatching(/^big\.log：超过 10 MiB/u),
   ]);
+  // A file over the limit names where it can go instead.
+  const link = await screen.findByRole("link", { name: "共享文件库" });
+  expect(link.closest("li")?.textContent).toBe(
+    "big.log：超过 10 MiB，可以改传到共享文件库",
+  );
+  expect(link.getAttribute("href")).toBe("#/p/p-1/shared-files");
+  expect(link.getAttribute("target")).toBe("_blank");
   expect(chips()).toEqual([expect.stringContaining("keep.txt")]);
   expect(input.value).toBe("正文");
+});
+
+test("C-717: without a configured shared library, an oversize file is sent to the host operator", async () => {
+  const list = vi
+    .spyOn(httpSharedFiles, "list")
+    .mockResolvedValue(library("not_configured"));
+  setup();
+  choose(new File(["%PDF"], "small.pdf", { type: "application/pdf" }));
+  expect(list).not.toHaveBeenCalled();
+  const big = new File(["x"], "dump.zip", { type: "" });
+  Object.defineProperty(big, "size", { value: 10 * 1024 * 1024 + 1 });
+  choose(big);
+  await waitFor(() =>
+    expect(screen.getByRole("alert").textContent).toBe(
+      "dump.zip：超过 10 MiB，请找主机运维放到 worker 受管目录",
+    ),
+  );
+  expect(screen.queryByRole("link", { name: "共享文件库" })).toBeNull();
+});
+
+test("C-717: a zip is added and uploaded as application/zip", async () => {
+  const { input, uploads } = setup();
+  choose(
+    new File(["PK"], "bugreport.zip", { type: "application/x-zip-compressed" }),
+  );
+  expect(chips()).toEqual([expect.stringContaining("bugreport.zip2 B")]);
+  type(input, "日志包");
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await waitFor(() => expect(uploads).toHaveLength(1));
+  expect([uploads[0]?.original_filename, uploads[0]?.mime]).toEqual([
+    "bugreport.zip",
+    "application/zip",
+  ]);
+  await waitFor(() =>
+    expect(screen.queryByRole("list", { name: "待上传的附件" })).toBeNull(),
+  );
 });
 
 test("pasting an image still adds it", () => {

@@ -10,6 +10,7 @@ import {
 import {
   attachmentRefKind,
   checkUpload,
+  type FileProblem,
   fileLabel,
   formatBytes,
   isVideoType,
@@ -20,6 +21,7 @@ import {
 import { useResource } from "../useResource.js";
 import { type MeasuredVideo, measureVideo } from "../video-probe.js";
 import { uploadPercent } from "./CommentBox.js";
+import { LargeFileRoute } from "./LargeFileRoute.js";
 import { SettingsDiscardDialog } from "./layout/SettingsLayout.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
@@ -126,9 +128,7 @@ export function CreateCardDialog({
   const choosing = parentId ? templates.length > 0 : templates.length > 1;
   const [readOnly, setReadOnly] = useState(false);
   const [files, setFiles] = useState<readonly PendingFile[]>([]);
-  const [problems, setProblems] = useState<
-    readonly { readonly name: string; readonly reason: string }[]
-  >([]);
+  const [problems, setProblems] = useState<readonly FileProblem[]>([]);
   // The card exists but some files are not uploaded yet: the form is fixed.
   const [created, setCreated] = useState<CreatedCard>();
   const [discarding, setDiscarding] = useState(false);
@@ -165,14 +165,20 @@ export function CreateCardDialog({
       ));
   function addFiles(chosen: readonly File[]) {
     const accepted: PendingFile[] = [];
-    const rejected: { name: string; reason: string }[] = [];
+    const rejected: FileProblem[] = [];
     for (const file of chosen) {
-      const { mime, reason } = checkUpload(file, {
+      const checked = checkUpload(file, {
         maxBytes: attachmentLimit ?? null,
         videoMaxBytes: videoLimit ?? null,
         video: !!client.uploadVideo,
       });
-      if (mime === undefined) rejected.push({ name: fileLabel(file), reason });
+      const { mime } = checked;
+      if (mime === undefined)
+        rejected.push({
+          name: fileLabel(file),
+          reason: checked.reason,
+          ...(checked.oversize ? { oversize: true } : {}),
+        });
       else
         accepted.push({
           id: crypto.randomUUID(),
@@ -441,7 +447,10 @@ export function CreateCardDialog({
                 ))}
               </FileChipList>
             )}
-            <FileProblems problems={problems} />
+            <FileProblems
+              problems={problems}
+              oversize={<LargeFileRoute projectId={projectId} />}
+            />
             <div className="card-action-buttons">
               <Button type="submit" disabled={!selected}>
                 {created ? "重试上传" : "创建"}

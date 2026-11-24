@@ -26,6 +26,7 @@ import {
   attachmentRefKind,
   attachmentTarget,
   checkUpload,
+  type FileProblem,
   fileLabel,
   formatBytes,
   formatMiB,
@@ -42,6 +43,7 @@ import { useAttachmentRefs } from "../useAttachmentRefs.js";
 import { type MeasuredVideo, measureVideo } from "../video-probe.js";
 import { AttachmentRefBody } from "./AttachmentRefBody.js";
 import { EmployeeFace } from "./EmployeeIdentity.js";
+import { LargeFileRoute } from "./LargeFileRoute.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
 import { FileChip, FileChipList, FileProblems } from "./ui/file-chip.js";
@@ -144,9 +146,7 @@ export function CommentBox({
   const [tab, setTab] = useState<"write" | "preview">("write");
   const [files, setFiles] = useState<readonly PendingFile[]>([]);
   const nextDraft = useRef(1);
-  const [problems, setProblems] = useState<
-    readonly { readonly name: string; readonly reason: string }[]
-  >([]);
+  const [problems, setProblems] = useState<readonly FileProblem[]>([]);
   const [dragging, setDragging] = useState(false);
   // The comment of this draft was accepted but some files are not uploaded:
   // the files keep their order, as the body numbers them by it.
@@ -488,14 +488,20 @@ export function CommentBox({
   /** Add the files the server takes; say why the others were left out. */
   function addFiles(chosen: readonly File[]): void {
     const accepted: PendingFile[] = [];
-    const rejected: { name: string; reason: string }[] = [];
+    const rejected: FileProblem[] = [];
     for (const file of chosen) {
-      const { mime, reason } = checkUpload(file, {
+      const checked = checkUpload(file, {
         maxBytes: attachmentLimit ?? null,
         videoMaxBytes: videoLimit ?? null,
         video: !!client.uploadVideo,
       });
-      if (mime === undefined) rejected.push({ name: fileLabel(file), reason });
+      const { mime } = checked;
+      if (mime === undefined)
+        rejected.push({
+          name: fileLabel(file),
+          reason: checked.reason,
+          ...(checked.oversize ? { oversize: true } : {}),
+        });
       else
         accepted.push({
           id: crypto.randomUUID(),
@@ -948,7 +954,10 @@ export function CommentBox({
           ))}
         </FileChipList>
       )}
-      <FileProblems problems={problems} />
+      <FileProblems
+        problems={problems}
+        oversize={<LargeFileRoute projectId={projectId} />}
+      />
 
       <RequestFeedback
         interactive
