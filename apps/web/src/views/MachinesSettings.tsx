@@ -1,4 +1,5 @@
 import {
+  Fragment,
   type ReactNode,
   useCallback,
   useEffect,
@@ -27,13 +28,17 @@ import {
 } from "../components/Foundation.js";
 import { IdTag } from "../components/IdTag.js";
 import { CardDetailLayout } from "../components/layout/CardDetailLayout.js";
-import { DataTableCell } from "../components/layout/DataTableLayout.js";
+import {
+  DataTableCell,
+  DataTableRowDetail,
+} from "../components/layout/DataTableLayout.js";
 import {
   SettingsConfirmDialog,
   SettingsDrawerFeedback,
   SettingsFact,
   SettingsFacts,
   SettingsPanel,
+  SettingsRowActions,
   SettingsSection,
   SettingsTable,
   settingsDrawerClassName,
@@ -72,6 +77,12 @@ import { settingKey, trackSettingsRead } from "../settings-clock.js";
 import { statusLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 import { MachineAgentLimit, MergeCheckCapacity } from "./AgentLimit.js";
+import {
+  CapabilityGuideDialog,
+  type CapabilityNote,
+  CapabilityNotes,
+  useCapabilityGuides,
+} from "./CapabilityGuide.js";
 import { CapabilityInstallDialog } from "./CapabilityInstall.js";
 import {
   checkingWithoutId,
@@ -489,6 +500,10 @@ function MachineDrawer({
   });
   /** C-708: the capability whose install commands are open. */
   const [installing, setInstalling] = useState<string>();
+  /** C-727: the capability usage notes and the one being edited. */
+  const guides = useCapabilityGuides(client, projectId, summary.id, revision);
+  const [editing, setEditing] = useState<string>();
+  const [guideNotice, setGuideNotice] = useNotice();
   return (
     <Drawer
       className={settingsDrawerClassName}
@@ -528,12 +543,21 @@ function MachineDrawer({
           <CapacityFeedback capacity={capacity} />
           <RequestFeedback interactive {...actions.checkFeedback} />
           <RequestFeedback interactive {...actions.drainFeedback} />
+          <RequestFeedback {...guides.feedback} />
+          <RequestFeedback message={guideNotice} />
         </SettingsDrawerFeedback>
         {machine && (
           <MachineFacts
             machine={machine}
             capacity={capacity}
             onInstall={setInstalling}
+            notes={guides.supported ? guides.notes : undefined}
+            onEditNote={
+              canEdit && client.setCapabilityGuide && guides.supported
+                ? setEditing
+                : undefined
+            }
+            noteLocked={!guides.fresh}
             limit={
               detail.data && (
                 <MachineAgentLimit
@@ -564,6 +588,22 @@ function MachineDrawer({
             onClose={() => setInstalling(undefined)}
           />
         )}
+        {machine && editing && (
+          <CapabilityGuideDialog
+            client={client}
+            projectId={projectId}
+            machine={machine}
+            capabilityKey={editing}
+            note={guides.note(editing)}
+            locked={!guides.fresh}
+            onWritten={guides.written}
+            onSaved={() => {
+              setEditing(undefined);
+              setGuideNotice(`已保存 ${editing} 使用说明`);
+            }}
+            onClose={() => setEditing(undefined)}
+          />
+        )}
         {machine?.id === "local" && client.offsiteStatus && (
           <OffsiteStatusSection client={client} />
         )}
@@ -580,6 +620,9 @@ function MachineFacts({
   capacity: shared,
   limit,
   onInstall,
+  notes,
+  onEditNote,
+  noteLocked = false,
 }: {
   machine: MachineView;
   capacity: MachineCapacity;
@@ -587,6 +630,12 @@ function MachineFacts({
   limit: ReactNode;
   /** C-708: open a first-batch tool's install commands. */
   onInstall?: (key: string) => void;
+  /** C-727: the current project's usage notes by capability key. */
+  notes?: ReadonlyMap<string, CapabilityNote> | undefined;
+  /** C-727: open a capability's notes for editing (owner's session). */
+  onEditNote?: ((key: string) => void) | undefined;
+  /** C-727: the notes were not read again after the last write yet. */
+  noteLocked?: boolean;
 }) {
   const capacity = shared.of(machine.id);
   const bindings = [...machine.bindings].sort(
@@ -613,9 +662,15 @@ function MachineFacts({
     binding.is_current &&
     state !== "verified" &&
     hasInstallGuide(key);
-  const installColumn = capabilities.some(({ binding, capability }) =>
-    installable(binding, capability.key, capability.state),
+  // C-727: notes belong to the current project, like the install entry.
+  const editable = (binding: MachineBindingView) =>
+    !!onEditNote && binding.is_current;
+  const actionColumn = capabilities.some(
+    ({ binding, capability }) =>
+      editable(binding) ||
+      installable(binding, capability.key, capability.state),
   );
+  const columns = actionColumn ? 6 : 5;
   const runs = bindings.flatMap((b) =>
     b.assignments.flatMap((a) =>
       a.runs.map((run) => ({
@@ -676,47 +731,75 @@ function MachineFacts({
                 <TableHead>版本</TableHead>
                 <TableHead>验证时间</TableHead>
                 <TableHead>状态</TableHead>
-                {installColumn && <TableHead>操作</TableHead>}
+                {actionColumn && <TableHead>操作</TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
               {capabilities.map(({ binding, capability: c }) => {
                 const tag = CAPABILITY_TAGS[c.state];
+                const note = binding.is_current ? notes?.get(c.key) : undefined;
+                const install = installable(binding, c.key, c.state);
                 return (
-                  <TableRow key={`${binding.project_id}:${c.key}`}>
-                    <DataTableCell nowrap data-record="lead">
-                      <code>{c.key}</code>
-                    </DataTableCell>
-                    <DataTableCell data-label="项目">
-                      {binding.project_name}
-                    </DataTableCell>
-                    <DataTableCell nowrap data-label="版本">
-                      {c.version ?? "—"}
-                    </DataTableCell>
-                    <DataTableCell nowrap data-label="验证时间">
-                      {c.verified_at ? <Time value={c.verified_at} /> : "—"}
-                    </DataTableCell>
-                    <DataTableCell nowrap data-record="aside">
-                      <StatusTag
-                        status={tag.status}
-                        label={tag.label}
-                        subdued={c.state !== "verified"}
-                      />
-                    </DataTableCell>
-                    {installColumn && (
-                      <DataTableCell nowrap>
-                        {installable(binding, c.key, c.state) && (
-                          <Button
-                            aria-haspopup="dialog"
-                            aria-label={`安装 ${c.key}`}
-                            onClick={() => onInstall?.(c.key)}
-                          >
-                            安装
-                          </Button>
-                        )}
+                  <Fragment key={`${binding.project_id}:${c.key}`}>
+                    <TableRow>
+                      <DataTableCell nowrap data-record="lead">
+                        <code>{c.key}</code>
                       </DataTableCell>
+                      <DataTableCell data-label="项目">
+                        {binding.project_name}
+                      </DataTableCell>
+                      <DataTableCell nowrap data-label="版本">
+                        {c.version ?? "—"}
+                      </DataTableCell>
+                      <DataTableCell nowrap data-label="验证时间">
+                        {c.verified_at ? <Time value={c.verified_at} /> : "—"}
+                      </DataTableCell>
+                      <DataTableCell nowrap data-record="aside">
+                        <StatusTag
+                          status={tag.status}
+                          label={tag.label}
+                          subdued={c.state !== "verified"}
+                        />
+                      </DataTableCell>
+                      {actionColumn && (
+                        <DataTableCell nowrap>
+                          {(install || editable(binding)) && (
+                            <SettingsRowActions>
+                              {install && (
+                                <Button
+                                  aria-haspopup="dialog"
+                                  aria-label={`安装 ${c.key}`}
+                                  onClick={() => onInstall?.(c.key)}
+                                >
+                                  安装
+                                </Button>
+                              )}
+                              {editable(binding) && (
+                                <Button
+                                  aria-haspopup="dialog"
+                                  aria-label={`编辑 ${c.key} 使用说明`}
+                                  aria-disabled={noteLocked || undefined}
+                                  onClick={() => {
+                                    if (!noteLocked) onEditNote?.(c.key);
+                                  }}
+                                >
+                                  编辑说明
+                                </Button>
+                              )}
+                            </SettingsRowActions>
+                          )}
+                        </DataTableCell>
+                      )}
+                    </TableRow>
+                    {note && (
+                      <DataTableRowDetail
+                        columns={columns}
+                        aria-label={`${c.key} 使用说明`}
+                      >
+                        <CapabilityNotes note={note} />
+                      </DataTableRowDetail>
                     )}
-                  </TableRow>
+                  </Fragment>
                 );
               })}
             </TableBody>

@@ -1457,6 +1457,34 @@ export interface MachineView {
   readonly bindings: readonly MachineBindingView[];
 }
 
+/**
+ * C-725/C-727: which usage note of the current project's capability catalog:
+ * a capability key's main note, or its supplement for one machine.
+ */
+export type CapabilityGuideTarget =
+  | {
+      readonly scope: "capability";
+      readonly key: string;
+      readonly machine_id: null;
+    }
+  | {
+      readonly scope: "machine";
+      readonly key: string;
+      readonly machine_id: string;
+    };
+
+/** C-727: the notes of one machine's capabilities, merged by the server. */
+export interface CapabilityGuidesView {
+  readonly merged: {
+    readonly machine_id: string | null;
+    readonly capabilities: readonly {
+      readonly key: string;
+      readonly usage_note: string | null;
+      readonly machine_note: string | null;
+    }[];
+  };
+}
+
 /** C-511: one explicit machine check (C-509), polled until it ends. */
 export interface MachineCheckJob {
   readonly id: string;
@@ -2648,6 +2676,25 @@ export interface CardiganClient {
     projectId: string,
     input: { readonly code: string; readonly run_limit: number },
   ): Promise<{ wizard: WorkerWizardView; device: WorkerPairingDevice }>;
+  /**
+   * C-727: the capability usage notes (C-725) merged for one machine. Writes
+   * are the owner's human session only; any Agent Token is refused (403).
+   * Optional so fixtures without notes need not provide them.
+   */
+  capabilityGuides?(
+    projectId: string,
+    machineId: string,
+  ): Promise<CapabilityGuidesView>;
+  setCapabilityGuide?(
+    projectId: string,
+    target: CapabilityGuideTarget,
+    note: string,
+  ): Promise<void>;
+  /** Resolves when the entry is gone, also when it was already gone. */
+  deleteCapabilityGuide?(
+    projectId: string,
+    target: CapabilityGuideTarget,
+  ): Promise<void>;
   workerWizardDefaults?(
     projectId: string,
   ): Promise<{ defaults: WorkerWizardDefaults }>;
@@ -3334,6 +3381,42 @@ export class HttpCardiganClient implements CardiganClient {
       `/api/projects/${encodeURIComponent(projectId)}/worker-wizards/pairing`,
       { method: "POST", body: JSON.stringify(input), resend: false },
     );
+  }
+  capabilityGuides(
+    projectId: string,
+    machineId: string,
+  ): Promise<CapabilityGuidesView> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/capability-guides?machine=${encodeURIComponent(machineId)}`,
+    );
+  }
+  async setCapabilityGuide(
+    projectId: string,
+    target: CapabilityGuideTarget,
+    note: string,
+  ): Promise<void> {
+    // Not resent automatically: the page reads the notes back after a failure.
+    await this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/capability-guides`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ ...target, usage_note: note }),
+      },
+    );
+  }
+  async deleteCapabilityGuide(
+    projectId: string,
+    target: CapabilityGuideTarget,
+  ): Promise<void> {
+    try {
+      await this.request(
+        `/api/projects/${encodeURIComponent(projectId)}/capability-guides`,
+        { method: "DELETE", body: JSON.stringify(target) },
+      );
+    } catch (error) {
+      // Already gone (an earlier attempt whose reply was lost): done.
+      if (!(error instanceof ApiError && error.status === 404)) throw error;
+    }
   }
   workerWizardDefaults(
     projectId: string,
