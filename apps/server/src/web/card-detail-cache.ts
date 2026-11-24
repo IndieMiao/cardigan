@@ -46,7 +46,7 @@ export interface CardDetailAnswer {
   readonly notModified: boolean;
 }
 
-/** Every committed write changes it; undefined without command versions. */
+/** Every committed entity write changes it; undefined without command versions. */
 function storeVersion(store: Store, project: ProjectId): string | undefined {
   return store.uow.read(() => {
     const revision = store.snapshotVersion(project);
@@ -61,7 +61,9 @@ function storeVersion(store: Store, project: ProjectId): string | undefined {
       revision,
       store.database
         .prepare(
-          "SELECT project_id, collection, version FROM command_versions ORDER BY project_id, collection",
+          // Bell delivery bookkeeping is written all the time and never read
+          // by a card detail, as in the Store's own command-state version.
+          "SELECT project_id, collection, version FROM command_versions WHERE collection NOT IN ('notifications', 'bell_attempts') ORDER BY project_id, collection",
         )
         .all(),
     ]);

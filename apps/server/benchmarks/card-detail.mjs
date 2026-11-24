@@ -160,9 +160,11 @@ try {
   profiler.disconnect();
   for (const node of profile.nodes) {
     const url = node.callFrame.url;
-    if (url.startsWith("file://"))
-      node.callFrame.url = relative(root, new URL(url).pathname);
-    else if (url.startsWith(root)) node.callFrame.url = relative(root, url);
+    const path = url.startsWith("file://") ? new URL(url).pathname : url;
+    // Keep machine paths out of the export, including this script's own.
+    if (path.startsWith(root)) node.callFrame.url = relative(root, path);
+    else if (path.startsWith("/"))
+      node.callFrame.url = `benchmarks/${path.split("/").at(-1)}`;
   }
   const parents = new Map();
   for (const node of profile.nodes)
