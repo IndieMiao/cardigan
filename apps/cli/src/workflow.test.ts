@@ -162,6 +162,19 @@ async function bootstrap(project = "p-work"): Promise<void> {
       "submit_review",
     ]),
   ).toBe(0);
+  // C-684: a person opens other templates only once the project allows them.
+  for (const template of ["dev", "design", "general"])
+    expect(
+      await run([
+        "preference",
+        "set",
+        "human-card-templates",
+        template,
+        "on",
+        "--project",
+        project,
+      ]),
+    ).toBe(0);
 }
 
 test("machine CLI is human-only, audits metadata and cannot enable remote execution", async () => {

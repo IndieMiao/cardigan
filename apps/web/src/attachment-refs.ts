@@ -108,6 +108,14 @@ export function uploadFilename(name: string): string {
   return base.trim() ? base : "";
 }
 
+/** A file's bytes as the base64 the upload endpoint takes. */
+export async function toBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 export function formatBytes(bytes: number): string {
   return bytes < 1024
     ? `${bytes} B`

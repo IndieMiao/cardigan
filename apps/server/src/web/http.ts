@@ -53,6 +53,8 @@ export function requestRoute(path: string): string {
     )
   )
     return path;
+  // C-705: the device pairing code travels in the body, never in the path.
+  if (/^\/api\/device-pairings(?:\/status)?$/.test(path)) return path;
   if (/^\/api\/avatars\/[^/]+$/.test(path)) return "/api/avatars/:sha256";
   const project = /^\/api\/projects\/[^/]+(\/.*)$/.exec(path);
   const rest = project?.[1];

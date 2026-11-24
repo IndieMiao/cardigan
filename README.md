@@ -69,6 +69,8 @@ pnpm --filter @cardigan/cli exec cardigan role add p-demo reviewer \
 pnpm --filter @cardigan/cli exec cardigan pm create --office   # 打印 Token，只显示一次
 
 # 3. 建卡、指派、签发 Token（Token 只在终端打印一次，数据库只存哈希）
+#    人默认只能开需求卡（story），先放开 dev 模板才能直接开开发卡
+pnpm --filter @cardigan/cli exec cardigan preference set human-card-templates dev on
 pnpm --filter @cardigan/cli exec cardigan card create --template dev \
   --title "示例卡" --goal "跑通一条流程" --acceptance "测试通过" --repo example/repo
 pnpm --filter @cardigan/cli exec cardigan assign W-1 --role coder

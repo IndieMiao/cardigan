@@ -1,3 +1,5 @@
+import { type ProjectId, setProjectPreferences } from "@cardigan/domain";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 
 /** Legacy launch/CLI fixtures must register every role referenced by dev. */
@@ -14,5 +16,31 @@ export function registerTemplateRoles(store: Store, project: string): void {
         ],
       });
     }
+  });
+}
+
+/**
+ * C-684: a person (no Token) may only open story cards until the project opens
+ * other templates; fixtures that create dev and other cards open them first.
+ */
+export function openHumanCardTemplates(
+  store: Store,
+  project: string,
+  templates: readonly string[] = ["dev", "general", "design", "artifact"],
+): void {
+  store.uow.run((tx) => {
+    const effect = unwrap(
+      setProjectPreferences(
+        loadCommandState(tx, project as ProjectId),
+        { kind: "human", project_id: project as ProjectId },
+        {
+          human_card_templates: Object.fromEntries(
+            templates.map((id) => [id, true]),
+          ),
+        },
+        { clock: { now: () => new Date().toISOString() }, ids: tx.ids },
+      ),
+    );
+    persistEffect(tx, project as ProjectId, effect);
   });
 }

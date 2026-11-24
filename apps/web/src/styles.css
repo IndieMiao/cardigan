@@ -517,13 +517,8 @@ button.build-version[data-feedback] {
   overflow: auto;
   overflow-wrap: anywhere;
   padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
   font-size: var(--text-sm);
   line-height: 1.6;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 15%);
 }
 .capacity-tooltip p {
   margin: 8px 0 0;
@@ -2492,15 +2487,7 @@ body[data-lightbox="open"] .drawer-overlay {
   z-index: 120;
   max-width: min(280px, calc(100vw - var(--gap) * 2));
   padding: 4px 8px;
-  background: var(--tooltip-bg);
-  color: var(--tooltip-text);
-  border: 1px solid var(--tooltip-border);
-  box-shadow: 0 4px 12px var(--overlay);
-  border-radius: 4px;
   font-size: var(--text-xs);
-}
-.tooltip-arrow {
-  fill: var(--tooltip-bg);
 }
 
 .merge-check {
@@ -3033,8 +3020,6 @@ body[data-lightbox="open"] .drawer-overlay {
   width: 300px;
   max-width: calc(100vw - 24px);
   padding: 10px 12px;
-  border-radius: var(--radius);
-  box-shadow: 0 4px 12px var(--overlay);
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
   z-index: 210;

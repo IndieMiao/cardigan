@@ -13,25 +13,53 @@
     /* Over a card the line never paints across its text. */
     mix-blend-mode: var(--ui-faint-line-blend);
   }
-  /* The card hover border colour: faint in both themes. */
+  /* C-689: a cyan line over a soft glow of its own shape and colour (never
+     beyond the line, so the blend still keeps text intact); the arrow takes
+     the line's colour. */
+  .glow {
+    fill: none;
+    stroke: var(--ui-dependency-line);
+    stroke-width: calc(4 * var(--ui-stroke));
+    stroke-opacity: 0.25;
+  }
   .line {
     fill: none;
-    stroke: var(--ui-border-hover);
-    stroke-width: var(--ui-stroke);
+    stroke: var(--ui-dependency-line);
+    stroke-width: calc(1.5 * var(--ui-stroke));
   }
   .arrow {
-    fill: var(--ui-border-hover);
+    fill: var(--ui-dependency-line);
   }
-  /* C-673: round dots (zero-length dashes) a little stronger than the line;
-     still between background and text, so the blend keeps text intact. */
-  .flow {
+  /* C-673: round dots (zero-length dashes). C-689: brighter than the line,
+     each over three glow rings that move with it (same dashes, wider caps):
+     stacked, they fade out from the dot like a soft halo. */
+  .flow,
+  .halo {
     fill: none;
-    stroke: color-mix(in srgb, var(--ui-border-hover) 60%, var(--text));
-    stroke-width: calc(4 * var(--ui-stroke));
     stroke-linecap: round;
   }
+  .flow {
+    stroke: var(--ui-dependency-dot);
+    stroke-width: calc(4 * var(--ui-stroke));
+  }
+  .halo {
+    stroke: var(--ui-dependency-glow);
+  }
+  .halo[data-ring="outer"] {
+    stroke-width: calc(18 * var(--ui-stroke));
+    stroke-opacity: 0.1;
+  }
+  .halo[data-ring="middle"] {
+    stroke-width: calc(12 * var(--ui-stroke));
+    stroke-opacity: 0.2;
+  }
+  .halo[data-ring="inner"] {
+    stroke-width: calc(8 * var(--ui-stroke));
+    stroke-opacity: 0.5;
+  }
   @media (prefers-reduced-motion: reduce) {
-    .flow {
+    .flow,
+    .halo {
       display: none;
     }
   }

@@ -38,9 +38,10 @@ export function useReducedMotion(): boolean {
 
 /**
  * C-673: moves the dots of every `[data-flow]` path under `svg` (see
- * `board-dependency-flow.ts`). One animation frame loop runs only while the
- * lines are mounted and `running`; unmounting the lines stops it. Each frame
- * writes two attributes per line and reads no layout.
+ * `board-dependency-flow.ts`), and with them (C-689) their halo rings, the
+ * `[data-flow-glow]` paths of the same line. One animation frame loop runs
+ * only while the lines are mounted and `running`; unmounting the lines stops
+ * it. Each frame writes two attributes per path and reads no layout.
  */
 export function useBoardDependencyFlow(
   svg: RefObject<SVGSVGElement | null>,
@@ -58,8 +59,10 @@ export function useBoardDependencyFlow(
   const paint = useCallback(() => {
     const root = svg.current;
     if (!root) return;
-    for (const path of root.querySelectorAll<SVGPathElement>("[data-flow]")) {
-      const key = path.dataset.flow ?? "";
+    for (const path of root.querySelectorAll<SVGPathElement>(
+      "[data-flow], [data-flow-glow]",
+    )) {
+      const key = path.dataset.flow ?? path.dataset.flowGlow ?? "";
       const dash = flowDash(
         current.current.get(key) ?? 0,
         phases.current.get(key) ?? 0,

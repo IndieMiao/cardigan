@@ -16,6 +16,7 @@ import {
   type WorkItemRequirements,
 } from "../machine-requirements.js";
 import {
+  humanCardTemplates,
   independentReviewMaxRounds,
   initialReviewMaxRounds,
   reviewMaxRounds,
@@ -176,6 +177,44 @@ export function createCard(
   return command(state, actor, "create_card", ports, (d) =>
     createCardInDraft(d, p),
   );
+}
+
+/**
+ * C-684: `create_card` from the people's entry points (Workbench and the local
+ * CLI). A person may only use the templates the project opened to people
+ * (story by default); Agents, PM and the system keep `createCard`, and story
+ * children opened from a confirmed proposal go through `createCardInDraft`.
+ */
+export function createHumanCard(
+  state: CommandState,
+  actor: Actor,
+  p: CreateCardParams,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "create_card", ports, (d) => {
+    if (actor.kind === "human") {
+      const template = creatableCardTemplate(
+        d,
+        p.template_id ?? p.template ?? "dev",
+      );
+      const allowed = humanCardTemplates(projectPreferences(d.state));
+      if (!allowed.includes(template.id)) {
+        const titles = allowed.map((id) => {
+          try {
+            return creatableCardTemplate(d, id).title;
+          } catch {
+            return id;
+          }
+        });
+        ensure(
+          false,
+          "validation_failed",
+          `人只能开${titles.join("、")}；“${template.title}”需由所有者在设置 → 偏好 → 人可开的卡片模板中放开`,
+        );
+      }
+    }
+    return createCardInDraft(d, p);
+  });
 }
 
 export interface CardCreationOptions {

@@ -165,7 +165,9 @@ test("an image chip previews the C-614 preview image and falls back to the local
 test("an image chip near the right edge opens its hover preview leftwards", () => {
   const body = timeline("看 attachment-5");
   const chip = within(body).getByRole("link", { name: /shot\.png/u });
-  const peek = chip.querySelector(".ui-attachment-ref-peek") as HTMLElement;
+  const peek = chip.querySelector(
+    ".ui-attachment-ref-peek.ui-tip",
+  ) as HTMLElement;
   Object.defineProperty(peek, "scrollWidth", { value: 230 });
   Object.defineProperty(document.documentElement, "clientWidth", {
     value: 390,

@@ -1,10 +1,13 @@
-import { useId, useRef } from "react";
+import { Fragment, useId, useRef } from "react";
 import { LINE_ARROW } from "../../board-dependency-lines.js";
 import {
   useBoardDependencyFlow,
   useReducedMotion,
 } from "../../useBoardDependencyFlow.js";
 import styles from "./BoardDependencyLayout.module.css";
+
+/** C-689: glow rings under every dot, painted outermost first. */
+const HALO_RINGS = ["outer", "middle", "inner"] as const;
 
 export interface BoardDependencyLine {
   /** `from>to`, matching the dependency order. */
@@ -13,11 +16,12 @@ export interface BoardDependencyLine {
 }
 
 /**
- * C-659 / C-668: faint curves between the hovered card and its
- * prerequisites and dependents. Rendered after the board, so a curve stays
- * whole where it passes over an unrelated card; the 1px hover-border colour
- * keeps the text under it readable. C-673: dots flow along every line the
- * way its arrow points; with reduced motion only the still lines show.
+ * C-659 / C-668: curves between the hovered card and its prerequisites and
+ * dependents. Rendered after the board, so a curve stays whole where it
+ * passes over an unrelated card; the theme blend keeps the text under it
+ * readable. C-673: dots flow along every line the way its arrow points;
+ * with reduced motion only the still lines show. C-689: cyan lines over a
+ * soft glow, brighter dots each with three halo rings that move with it.
  */
 export function BoardDependencyLines({
   lines,
@@ -56,6 +60,14 @@ export function BoardDependencyLines({
       {lines.map((line) => (
         <path
           key={line.key}
+          data-edge-glow={line.key}
+          className={styles.glow}
+          d={line.d}
+        />
+      ))}
+      {lines.map((line) => (
+        <path
+          key={line.key}
           data-edge={line.key}
           className={styles.line}
           d={line.d}
@@ -64,12 +76,18 @@ export function BoardDependencyLines({
       ))}
       {flowing
         ? lines.map((line) => (
-            <path
-              key={line.key}
-              data-flow={line.key}
-              className={styles.flow}
-              d={line.d}
-            />
+            <Fragment key={line.key}>
+              {HALO_RINGS.map((ring) => (
+                <path
+                  key={ring}
+                  data-flow-glow={line.key}
+                  data-ring={ring}
+                  className={styles.halo}
+                  d={line.d}
+                />
+              ))}
+              <path data-flow={line.key} className={styles.flow} d={line.d} />
+            </Fragment>
           ))
         : null}
     </svg>

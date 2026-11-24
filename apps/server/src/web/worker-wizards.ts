@@ -15,6 +15,7 @@ import {
   workerWizardForm,
 } from "@cardigan/host";
 import type { ReadRepositories, Store, WebSession } from "@cardigan/store";
+import { type DevicePairings, pairingForm } from "./device-pairings.js";
 import {
   HttpRejection,
   methodNotAllowed,
@@ -144,6 +145,7 @@ export class WorkerWizards {
     private host: WizardHost | undefined,
     private limit?: ((id: string) => number) | undefined,
     private max?: ((id: string) => number) | undefined,
+    private pairings?: DevicePairings | undefined,
   ) {}
   async settled() {
     await Promise.allSettled(this.pending);
@@ -179,10 +181,13 @@ export class WorkerWizards {
         defaults: knownMcpUrl(host, project) ?? {},
       });
     }
-    const match =
-      /^\/worker-wizards(?:\/([a-f0-9-]{36})(?:\/(confirm|run|cancel|launch-preview|enable))?)?$/.exec(
-        rest,
-      );
+    // C-705: `/worker-wizards/pairing` turns a device pairing code into a draft.
+    const pairing = rest === "/worker-wizards/pairing";
+    const match = pairing
+      ? []
+      : /^\/worker-wizards(?:\/([a-f0-9-]{36})(?:\/(confirm|run|cancel|launch-preview|enable))?)?$/.exec(
+          rest,
+        );
     if (!match) throw missing();
     const [, id, action] = match,
       read = !!id && !action;
@@ -202,49 +207,95 @@ export class WorkerWizards {
           wizard_id: s.id,
         }),
       );
+    // The same draft, checks and preview as a form typed into the wizard.
+    const create = (form: Record<string, unknown>) => {
+      const draft = workerWizardForm(host.root, host.dataDir, project, form),
+        machine = draft.config.worker.machine_id;
+      this.store.uow.read((tx) =>
+        checkRegistryCompatibility(this.store, tx, draft),
+      );
+      const plan = planWorkerFile(
+        host.root,
+        host.dataDir,
+        draft.raw,
+        draft.config,
+      );
+      const { priorDigest } = plan.binding;
+      if (priorDigest && priorDigest !== draft.config.digest)
+        plan.diff.push({ field: "completed_checks", change: "reset" });
+      for (const s of this.sessions.values())
+        if (
+          s.project === project &&
+          s.machine === machine &&
+          s.member === member
+        ) {
+          if (s.phase === "running") throw stale();
+          this.sessions.delete(s.id);
+        }
+      if (this.sessions.size >= 64)
+        throw new HttpRejection(429, "capacity", "向导会话已满");
+      const s: Session = {
+        id: randomUUID(),
+        machine,
+        project,
+        member,
+        draft,
+        priorDigest,
+        expires: now + 86400_000,
+        phase: "preview",
+        steps: initialSteps(),
+        preview: preview(plan, now),
+      };
+      audit("previewed", s);
+      this.sessions.set(s.id, s);
+      return s;
+    };
     try {
-      if (!id) {
-        const draft = workerWizardForm(host.root, host.dataDir, project, body),
-          machine = draft.config.worker.machine_id;
-        this.store.uow.read((tx) =>
-          checkRegistryCompatibility(this.store, tx, draft),
-        );
-        const plan = planWorkerFile(
-          host.root,
-          host.dataDir,
-          draft.raw,
-          draft.config,
-        );
-        const { priorDigest } = plan.binding;
-        if (priorDigest && priorDigest !== draft.config.digest)
-          plan.diff.push({ field: "completed_checks", change: "reset" });
-        for (const s of this.sessions.values())
-          if (
-            s.project === project &&
-            s.machine === machine &&
-            s.member === member
-          ) {
-            if (s.phase === "running") throw stale();
-            this.sessions.delete(s.id);
-          }
-        if (this.sessions.size >= 64)
-          throw new HttpRejection(429, "capacity", "向导会话已满");
-        const s: Session = {
-          id: randomUUID(),
-          machine,
+      if (pairing) {
+        if (!this.pairings || Object.keys(body).some((k) => k !== "code"))
+          throw invalid();
+        // Look up, create and claim in one synchronous turn: of two
+        // submissions of one code only the first gets a draft.
+        const found = this.pairings.lookup(body.code, member);
+        const form = pairingForm(
+          found.device,
           project,
-          member,
-          draft,
-          priorDigest,
-          expires: now + 86400_000,
-          phase: "preview",
-          steps: initialSteps(),
-          preview: preview(plan, now),
-        };
-        audit("previewed", s);
-        this.sessions.set(s.id, s);
-        return sendJson(res, 201, { wizard: view(s) });
+          knownMcpUrl(host, project)?.mcp_url,
+        );
+        let s: Session;
+        try {
+          s = create(form);
+        } catch (e) {
+          // The code stays usable; the device facts let the owner fill the
+          // wizard by hand instead.
+          const code = safeError(e);
+          throw new HttpRejection(
+            e instanceof HttpRejection
+              ? e.status
+              : code === "worker_form_invalid" ||
+                  code === "worker_config_invalid"
+                ? 400
+                : 409,
+            e instanceof HttpRejection ? e.code : code,
+            e instanceof HttpRejection
+              ? e.message
+              : "配对设备的信息不能直接生成向导草稿，请在向导里补全后预览。",
+            { form },
+          );
+        }
+        this.pairings.claim(found);
+        this.store.uow.run((tx) =>
+          machineAudit(tx, this.clock, "worker_wizard_pairing_claimed", {
+            member_id: member,
+            project_id: project,
+            machine_id: s.machine,
+            wizard_id: s.id,
+            pairing_id: found.id,
+          }),
+        );
+        return sendJson(res, 201, { wizard: view(s), device: found.device });
       }
+      if (!id) return sendJson(res, 201, { wizard: view(create(body)) });
       const s = this.sessions.get(id);
       if (!s || s.member !== member || s.project !== project) throw missing();
       if (read) return sendJson(res, 200, { wizard: view(s) });

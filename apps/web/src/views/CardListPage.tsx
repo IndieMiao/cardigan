@@ -451,7 +451,21 @@ export function CardListPage({
       className={`cards-page ui-workspace${view === "board" ? " cards-page-board" : ""}`}
       aria-label="卡片"
     >
-      <PageTitle title="卡片" />
+      <PageTitle
+        title="卡片"
+        status={
+          // C-684: a standing entry, with or without cards and filters.
+          <CreateCardButton
+            key={projectId}
+            projectId={projectId}
+            client={client}
+            onCreated={(id) => {
+              reload();
+              openCard(id);
+            }}
+          />
+        }
+      />
       <div
         className="cards-refresh-status ui-refresh-feedback"
         role={error ? "alert" : "status"}
@@ -623,23 +637,7 @@ export function CardListPage({
       </PageToolbar>
 
       {state.kind === "ready" && cards.length === 0 && (
-        <EmptyState
-          action={
-            !activeFilters && (
-              <CreateCardButton
-                key={projectId}
-                projectId={projectId}
-                client={client}
-                onCreated={(id) => {
-                  reload();
-                  openCard(id);
-                }}
-              />
-            )
-          }
-        >
-          {activeFilters ? "没有匹配的卡片" : "没有卡片"}
-        </EmptyState>
+        <EmptyState>{activeFilters ? "没有匹配的卡片" : "没有卡片"}</EmptyState>
       )}
       {state.kind === "ready" &&
         (view === "board" ? (

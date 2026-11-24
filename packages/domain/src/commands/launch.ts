@@ -17,6 +17,7 @@ import {
 import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { MCP_SESSION_FAILURE } from "../mcp-session.js";
 import { providerStarted } from "../provider-start.js";
+import { supersededRetirement } from "../retirement-session.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { originalRunTrigger } from "../run-trigger.js";
@@ -37,6 +38,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { dropWaitingRetirement } from "./idle-session-retirement.js";
 import { currentReviewTarget, reviewRound } from "./review-round.js";
 import { restartStandingSession, resumeStanding } from "./standing.js";
 import { recordHumanStart } from "./stop-state.js";
@@ -764,7 +766,15 @@ export function dispatchRun(
     if (runtime === "provisioning")
       runtime = unwrap(transition("runtime", runtime, "provisioned"));
     runtime = unwrap(transition("runtime", runtime, "run_started"));
-    const nextAssignment = { ...assignment };
+    // C-690: a new session supersedes a waiting retirement of an earlier one
+    // (target() already refuses a stopping one). Left in place, its handoff
+    // would fence every later bell of the new session.
+    const current =
+      p.runtime_ref !== undefined &&
+      supersededRetirement({ ...assignment, runtime_ref: ref })
+        ? dropWaitingRetirement(d, assignment, "superseded")
+        : assignment;
+    const nextAssignment = { ...current };
     if (p.replacement) delete nextAssignment.session_ref;
     // C-600: the handshake belongs to the session; a reused one keeps it.
     if (p.runtime_ref !== undefined) {

@@ -266,6 +266,7 @@ export function fakeClient(
       review_max_rounds_ceiling: 20,
     }),
     setPreferences: async () => {},
+    setHumanCardTemplates: async () => {},
     setSystemRules: async () => {},
     setManualAssign: async () => {},
     templates: async () => ({ templates: [] }),
@@ -277,7 +278,7 @@ export function fakeClient(
     manageTemplate: async () => {
       throw new Error("Missing template fixture");
     },
-    createCard: async () => ({ id: "C-1" }),
+    createCard: async () => ({ id: "C-1", entry_id: "C-1#1" }),
     markCardDone: async () => {},
     confirmStoryProposal: async (_projectId, card_id, version) => ({
       card_id,

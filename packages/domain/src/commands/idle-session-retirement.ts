@@ -13,6 +13,7 @@ import {
   needsRetirementHandoff,
   retirementOwnsSession,
   sessionMaintenanceCandidate,
+  supersededRetirement,
 } from "../session-maintenance.js";
 import { transition } from "../transitions.js";
 import {
@@ -184,6 +185,105 @@ export function confirmKeptShellExit(
         "Agent 已退出，终端仍在；已关闭该终端，保留身份、工作区和分支，下次合法唤醒创建新会话。",
     });
   });
+}
+
+/**
+ * C-690: drop a waiting retirement left behind by a session this Assignment no
+ * longer runs (see `supersededRetirement`): the human started a new session
+ * after a stop released the old one. Nothing was signalled and its ref is not
+ * the current binding, so it owns neither an exit nor a credential decision.
+ * The current session, worktree, branch and queued Runs are kept; a stopping
+ * retirement (a signal may be in flight) is never dropped here.
+ */
+export function clearSupersededRetirement(
+  state: CommandState,
+  actor: Actor,
+  id: AssignmentId,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "upgrade_idle_assignment_role", ports, (d) => {
+    ensure(
+      actor.kind === "system",
+      "unauthorized",
+      "Only the system may clear a superseded retirement",
+    );
+    const a = d.get("assignments", id);
+    if (a.scope !== "work_item" || !supersededRetirement(a)) return a;
+    return dropWaitingRetirement(d, a, "superseded");
+  });
+}
+
+/**
+ * C-690: an idle retirement that gave up on this session (handed off, still
+ * `waiting`: nothing was signalled) retained it for dispatch. When new work
+ * arrives for it as notifications only, no host operation consumes that
+ * handoff (C-575 takes over queued successors), so it fenced the live session
+ * indefinitely. Withdraw it so the dispatcher wakes the session through its
+ * ordinary guarded path. A queued Run, any unfinished Run or Run stop, a human
+ * stop, a pending host operation or a role upgrade keeps the handoff.
+ */
+export function releaseRetainedRetirement(
+  state: CommandState,
+  actor: Actor,
+  id: AssignmentId,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "upgrade_idle_assignment_role", ports, (d) => {
+    ensure(
+      actor.kind === "system",
+      "unauthorized",
+      "Only the system may release a retained retirement",
+    );
+    const a = d.get("assignments", id);
+    ensure(
+      a.scope === "work_item" &&
+        !a.external &&
+        a.status === "active" &&
+        a.idle_retirement?.phase === "waiting" &&
+        a.idle_retirement.handoff === true &&
+        retirementOwnsSession(a) &&
+        !a.role_upgrade &&
+        !stoppedByHuman(state.events, a.id) &&
+        !hostOpsPending(state.events, a.id) &&
+        !state.runs.some(
+          (r) =>
+            r.assignment_id === a.id &&
+            (!["completed", "failed", "cancelled"].includes(r.status) ||
+              r.dispatch_stop ||
+              r.inactivity_stop),
+        ),
+      "illegal_transition",
+      "Retained retirement changed",
+    );
+    return dropWaitingRetirement(d, a, "business_work");
+  });
+}
+
+/** Shared by the cleanups above and a new session's dispatch. */
+export function dropWaitingRetirement(
+  d: CommandDraft,
+  a: Assignment,
+  reason: "superseded" | "business_work",
+): Assignment {
+  const { idle_retirement: p, ...identity } = a;
+  if (!p || p.phase !== "waiting") return a;
+  const rest: Assignment = identity;
+  d.put("assignments", rest);
+  d.emit(
+    reason === "superseded"
+      ? "idle_session_retirement_superseded"
+      : "idle_session_retirement_released",
+    d.work(a.work_item_id!).card_id,
+    {
+      assignment_id: a.id,
+      machine_id: a.machine_id,
+      reason,
+      handoff: p.handoff === true,
+      failures: p.failures,
+      started_at: p.started_at,
+    },
+  );
+  return rest;
 }
 
 /** A queued Run prevents a new idle claim. Dispatch may present positive exit

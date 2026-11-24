@@ -185,6 +185,16 @@ describe("an Assignment may only acknowledge its own Run", () => {
         "submit_review",
       ]),
     ).toBe(0);
+    // C-684: a person opens dev cards only once the project allows them.
+    expect(
+      await cardigan([
+        "preference",
+        "set",
+        "human-card-templates",
+        "dev",
+        "on",
+      ]),
+    ).toBe(0);
     expect(
       await cardigan([
         "card",

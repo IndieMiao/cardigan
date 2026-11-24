@@ -143,7 +143,25 @@ export interface ProjectPreferences {
    * `CARDIGAN_TICK_PROFILE=1` forces it on.
    */
   readonly tick_profile?: boolean;
+  /**
+   * C-684: templates a person may open cards from in Workbench or the local
+   * CLI. Absent means only the story template; Agents, PM and the system are
+   * not limited, nor are story children opened from a confirmed proposal.
+   */
+  readonly human_card_templates?: readonly string[];
 }
+/** C-684: the story template is always open to people. */
+export const STORY_TEMPLATE_ID = "story";
+export const DEFAULT_HUMAN_CARD_TEMPLATES: readonly string[] = [
+  STORY_TEMPLATE_ID,
+];
+export const humanCardTemplates = (p?: ProjectPreferences): readonly string[] =>
+  p?.human_card_templates ?? DEFAULT_HUMAN_CARD_TEMPLATES;
+/** Template IDs as `manage_card_template` accepts them. */
+export const validHumanCardTemplateId = (value: unknown): value is string =>
+  typeof value === "string" &&
+  value.length <= 64 &&
+  (value === "fast_patch" || /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(value));
 /** Lane status keys accepted in `board_collapsed_lanes`. */
 export function isBoardLane(value: string): value is CardStatus {
   return (states.card as readonly string[]).includes(value);

@@ -7,7 +7,10 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
-import { registerTemplateRoles } from "./template-fixtures.js";
+import {
+  openHumanCardTemplates,
+  registerTemplateRoles,
+} from "./template-fixtures.js";
 
 const alpha = "alpha" as ProjectId;
 const beta = "beta" as ProjectId;
@@ -83,6 +86,7 @@ beforeEach(async () => {
     const setup = Store.open({ dataDir });
     try {
       registerTemplateRoles(setup, project);
+      openHumanCardTemplates(setup, project);
     } finally {
       setup.close();
     }

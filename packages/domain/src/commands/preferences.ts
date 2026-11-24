@@ -12,6 +12,7 @@ import {
   decisionDelegation,
   delegationCategories,
   highRiskPaths,
+  humanCardTemplates,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   isBoardLane,
@@ -25,11 +26,13 @@ import {
   REVIEW_MAX_ROUNDS_CEILING,
   reviewerBrowserEnabled,
   reviewMaxRounds,
+  STORY_TEMPLATE_ID,
   type SystemReminderPolicy,
   tickProfileOn,
   validAutoMergeMinutes,
   validAutoSecurityPaths,
   validContextPercentage,
+  validHumanCardTemplateId,
   validIndependentReviewDelegationMax,
   validMergeConfirmSnoozeMaxMinutes,
   validMergeConfirmStallMinutes,
@@ -117,6 +120,8 @@ export function setProjectPreferences(
     independent_review_limit_delegation_max?: number | null;
     /** C-265: host loop timing switch; see `ProjectPreferences.tick_profile`. */
     tick_profile?: boolean;
+    /** C-684: a patch; only the listed templates open or close to people. */
+    human_card_templates?: Readonly<Record<string, boolean>>;
   },
   ports: CommandPorts,
 ) {
@@ -333,7 +338,8 @@ export function setProjectPreferences(
         input.independent_review_max_rounds !== undefined ||
         input.independent_review_limit_delegation !== undefined ||
         input.independent_review_limit_delegation_max !== undefined ||
-        input.tick_profile !== undefined,
+        input.tick_profile !== undefined ||
+        input.human_card_templates !== undefined,
       "validation_failed",
       "No preference supplied",
     );
@@ -388,6 +394,24 @@ export function setProjectPreferences(
       );
       if (collapsed === null) delete lanes[lane];
       else lanes[lane] = collapsed;
+    }
+    const humanTemplates = [...humanCardTemplates(old)];
+    for (const [template, open] of Object.entries(
+      input.human_card_templates ?? {},
+    )) {
+      ensure(
+        validHumanCardTemplateId(template) && typeof open === "boolean",
+        "validation_failed",
+        "人可开的卡片模板须为模板编号和开关",
+      );
+      ensure(
+        template !== STORY_TEMPLATE_ID || open,
+        "validation_failed",
+        "需求卡始终可以由人开卡",
+      );
+      const at = humanTemplates.indexOf(template);
+      if (open && at < 0) humanTemplates.push(template);
+      if (!open && at >= 0) humanTemplates.splice(at, 1);
     }
     const next = {
       ...old,
@@ -504,6 +528,9 @@ export function setProjectPreferences(
       ...(input.tick_profile !== undefined
         ? { tick_profile: input.tick_profile }
         : {}),
+      ...(input.human_card_templates
+        ? { human_card_templates: humanTemplates }
+        : {}),
       ...(input.independent_review_limit_delegation !== undefined
         ? {
             independent_review_limit_delegation:
@@ -614,6 +641,9 @@ export function setProjectPreferences(
     const pauseChanged = autoMergePaused(old) !== autoMergePaused(next);
     const flowChanged = projectFlowVersion(old) !== projectFlowVersion(next);
     const tickProfileChanged = tickProfileOn(old) !== tickProfileOn(next);
+    const humanTemplatesChanged =
+      JSON.stringify(humanCardTemplates(old)) !==
+      JSON.stringify(humanCardTemplates(next));
     const independentChanged = (
       [
         "independent_review_limit_delegation",
@@ -647,6 +677,7 @@ export function setProjectPreferences(
       !reviewRoundsChanged.length &&
       !independentChanged.length &&
       !tickProfileChanged &&
+      !humanTemplatesChanged &&
       !flowChanged &&
       !pauseChanged &&
       !crossReadChanged
@@ -752,6 +783,12 @@ export function setProjectPreferences(
         old_value: tickProfileOn(old),
         new_value: tickProfileOn(next),
         preference: "tick_profile",
+      });
+    if (humanTemplatesChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: [...humanCardTemplates(old)],
+        new_value: [...humanCardTemplates(next)],
+        preference: "human_card_templates",
       });
     if (delegationChanged) {
       d.emit("project_preferences_updated", undefined, {

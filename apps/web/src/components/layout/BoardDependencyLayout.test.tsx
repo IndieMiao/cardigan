@@ -132,6 +132,53 @@ test("a redraw keeps the phase of lines that stay; new lines start half a gap in
   ]);
 });
 
+test("C-689: a glow under every line; three halo rings move with its dots", () => {
+  const { container } = render(<BoardDependencyLines lines={LINES} />);
+  const paths = [...container.querySelectorAll("path")];
+  for (const { key, d } of LINES) {
+    const line = container.querySelector(`[data-edge="${key}"]`);
+    const glow = container.querySelector(`[data-edge-glow="${key}"]`);
+    // Same shape, painted under the line, without an arrow.
+    expect(glow?.getAttribute("d")).toBe(d);
+    expect(glow?.hasAttribute("marker-end")).toBe(false);
+    expect(paths.indexOf(glow as SVGPathElement)).toBeLessThan(
+      paths.indexOf(line as SVGPathElement),
+    );
+    const dots = container.querySelector(`[data-flow="${key}"]`);
+    const halos = [...container.querySelectorAll(`[data-flow-glow="${key}"]`)];
+    expect(halos.map((h) => h.getAttribute("data-ring"))).toEqual([
+      "outer",
+      "middle",
+      "inner",
+    ]);
+    for (const h of halos) {
+      expect(h.getAttribute("d")).toBe(d);
+      expect(h.hasAttribute("marker-end")).toBe(false);
+      expect(paths.indexOf(h as SVGPathElement)).toBeLessThan(
+        paths.indexOf(dots as SVGPathElement),
+      );
+    }
+  }
+  const rings = () =>
+    [...container.querySelectorAll("[data-flow-glow]")].map((h) => [
+      h.getAttribute("data-flow-glow"),
+      h.getAttribute("stroke-dasharray"),
+      Number(h.getAttribute("stroke-dashoffset")),
+    ]);
+  const expected = () =>
+    flows(container).flatMap((f) =>
+      [0, 1, 2].map(() => [f.key, f.dasharray, f.dashoffset]),
+    );
+  expect(rings()).toEqual(expected());
+  frame(1000);
+  frame(1050);
+  expect(rings()).toEqual(expected());
+  expect(flows(container).map((f) => f.dashoffset)).toEqual([
+    150 - (FLOW_SPEED * 50) / 1000,
+    100 - (FLOW_SPEED * 50) / 1000,
+  ]);
+});
+
 test("unmounting the lines stops the animation", () => {
   const { unmount } = render(<BoardDependencyLines lines={LINES} />);
   frame(0);
@@ -145,7 +192,9 @@ test("reduced motion shows the still lines and arrows only", () => {
   reduced = true;
   const { container } = render(<BoardDependencyLines lines={LINES} />);
   expect(container.querySelectorAll("[data-edge]")).toHaveLength(2);
+  expect(container.querySelectorAll("[data-edge-glow]")).toHaveLength(2);
   expect(container.querySelectorAll("[data-flow]")).toHaveLength(0);
+  expect(container.querySelectorAll("[data-flow-glow]")).toHaveLength(0);
   expect(frames.size).toBe(0);
   // Turning reduced motion off later starts the dots; on again stops them.
   reduced = false;

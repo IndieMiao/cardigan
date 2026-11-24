@@ -31,6 +31,7 @@ import {
   isVideoType,
   numberPendingRefs,
   pendingToken,
+  toBase64,
   UPLOAD_ACCEPT,
   uploadFilename,
   uploadMime,
@@ -1269,14 +1270,6 @@ export function mentionsIn(body: string): string[] {
     if (match[2] !== undefined) found.add(match[2]);
   }
   return [...found];
-}
-
-/** Canonical padded base64 of a pasted image (the API decodes it strictly). */
-export async function toBase64(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
 }
 
 /** Whole percent of a video sent; 100 only once every byte is there. */

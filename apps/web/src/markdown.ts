@@ -245,7 +245,7 @@ export function attachmentChip(target: AttachmentRefTarget): string {
       : ' target="_blank" rel="noopener noreferrer"';
   const peek =
     target.kind === "image" && target.thumbnail?.startsWith("/")
-      ? `<span class="ui-attachment-ref-peek" aria-hidden="true"><img src="${esc(target.thumbnail)}" alt="" loading="lazy"></span>`
+      ? `<span class="ui-attachment-ref-peek ui-tip" aria-hidden="true"><img src="${esc(target.thumbnail)}" alt="" loading="lazy"></span>`
       : "";
   const preview =
     target.kind === "image" && target.preview?.startsWith("/")
