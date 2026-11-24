@@ -649,6 +649,92 @@ test("only the system may replace a stalled patrol, once per cause and never wit
   ).not.toHaveProperty("session_ref");
 });
 
+test("C-669: a stalled patrol restart withdrawn before any signal may be retried by the system only", () => {
+  const f = setup();
+  const params = { assignment_id: f.ops.id, cause_id: "pending-1", snapshot };
+  const begin = (
+    state: CommandState,
+    who: Parameters<typeof beginStalledPatrolRestart>[1] = system,
+  ) => beginStalledPatrolRestart(state, who, params, f.io);
+  const first = value(begin(f.state));
+  const pending = apply(f.state, first);
+  const withdrawn = apply(
+    pending,
+    value(
+      withdrawUnstartedStallRestart(
+        pending,
+        system,
+        first.data.action_id,
+        f.io,
+        "identity_changed",
+      ),
+    ),
+  );
+  expect(pendingHostOpsActions(withdrawn.events)).toHaveLength(0);
+  // Only the system entry retries; an agent or human still cannot use it.
+  expect(begin(withdrawn, human).ok).toBe(false);
+  expect(begin(withdrawn, actor(10, "host_ops")).ok).toBe(false);
+  const retry = value(begin(withdrawn));
+  expect(retry.events).toMatchObject([
+    {
+      type: "host_ops_action_taken",
+      payload: { assignment_id: f.ops.id, dispatch_stall_id: "pending-1" },
+    },
+  ]);
+  // One executor: never beside the retry's own pending intent.
+  expect(begin(apply(withdrawn, retry)).ok).toBe(false);
+  // A started stop is not withdrawn: its incident is never retried.
+  const stopping: CommandState = {
+    ...pending,
+    events: [
+      ...pending.events,
+      {
+        id: f.io.ids.nextEventId(),
+        seq: 99,
+        type: "host_ops_action_deferred",
+        actor: system,
+        created_at: now,
+        payload: {
+          action_id: first.data.action_id,
+          reason: "automatic_context_stop_started",
+        },
+      },
+    ],
+  };
+  expect(
+    value(
+      withdrawUnstartedStallRestart(
+        stopping,
+        system,
+        first.data.action_id,
+        f.io,
+        "identity_changed",
+      ),
+    ).events,
+  ).toEqual([]);
+  // Any other outcome of the earlier attempt still consumes the incident.
+  const failed: CommandState = {
+    ...pending,
+    events: [
+      ...pending.events,
+      {
+        id: f.io.ids.nextEventId(),
+        seq: 100,
+        type: "host_ops_action_finished",
+        actor: system,
+        created_at: now,
+        payload: {
+          action_id: first.data.action_id,
+          assignment_id: f.ops.id,
+          result: "failed",
+        },
+      },
+    ],
+  };
+  expect(pendingHostOpsActions(failed.events)).toHaveLength(0);
+  expect(begin(failed).ok).toBe(false);
+});
+
 test.each(["card", "project"] as const)(
   "standing stall settlement keeps its %s stream and rechecks the card hold",
   (stream) => {

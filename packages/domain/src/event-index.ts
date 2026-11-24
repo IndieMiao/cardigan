@@ -3,8 +3,10 @@ import {
   attachEventIndex,
   type EventIndexKind,
   EventLogView,
+  type HistoryFilter,
   type HistoryIndex,
   historyIndex,
+  streamHistory,
 } from "./event-log.js";
 import { isTelemetryEvent, TELEMETRY_EVENT_TYPES } from "./telemetry.js";
 
@@ -91,22 +93,28 @@ export function commandEventHistory(
 
 /**
  * C-643 + C-640: the command-state stream for `order` (project stream "" plus
- * card ids). A Store view concatenates its business segments and attaches the
- * full history's index; the full history and the telemetry journal are only
+ * card ids), optionally trimmed by the C-639 hot `filter`. A Store view
+ * concatenates its business segments and attaches the index of
+ * `history(order, filter)`; that history and the telemetry journal are only
  * materialized when a rule asks for them. Other maps split their streams.
  */
 export function commandStreamHistory(
   streams: ReadonlyMap<string, readonly Event[]>,
   order: readonly string[],
+  filter?: HistoryFilter,
 ): readonly Event[] {
   if (!(streams instanceof EventLogView))
-    return commandEventHistory(order.map((id) => streams.get(id) ?? []));
-  const events = streams.commandHistory(order);
+    return commandEventHistory(
+      order.map((id) =>
+        filter ? streamHistory(streams, [id], filter) : (streams.get(id) ?? []),
+      ),
+    );
+  const events = streams.commandHistory(order, filter);
   if (!journals.has(events))
     attach(
       events,
-      () => streams.telemetryHistory(order),
-      () => streams.history(order),
+      () => streams.telemetryHistory(order, filter),
+      () => streams.history(order, filter),
     );
   return events;
 }

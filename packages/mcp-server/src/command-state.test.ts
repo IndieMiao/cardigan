@@ -3,11 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type CommandState,
+  compareHotState,
   type Event,
   eventById,
   eventsForDecision,
   eventsOfType,
   fullEventHistory,
+  hotCommandEvents,
 } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
@@ -213,6 +215,72 @@ test("C-640: Store log indexes stay isolated across rollback and grow without re
   } finally {
     other.close();
     store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("C-639 hot scope keeps open and targeted cards whole and matches the domain definition", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cg-hot-state-"));
+  const full = Store.open({ dataDir, commandState: "full" });
+  const hot = Store.open({ dataDir, commandState: "hot" });
+  const event = (
+    id: string,
+    seq: number,
+    type: string,
+    card_id?: Event["card_id"],
+  ): Event => ({
+    id,
+    seq,
+    ...(card_id ? { card_id } : {}),
+    type,
+    actor: { kind: "system", project_id },
+    payload: {},
+    created_at: NOW,
+  });
+  const open = serverCard;
+  const closed = {
+    ...serverCard,
+    id: "C-2" as Event["card_id"] & string,
+    status: "done" as const,
+  };
+  try {
+    full.createProject({ id: project_id });
+    full.uow.run((tx) => {
+      tx.cards.put(project_id, open);
+      tx.cards.put(project_id, closed);
+      tx.events.append(project_id, event("p1", 1, "run_started"));
+      tx.events.append(project_id, event("o1", 1, "run_started", open.id));
+      tx.events.append(project_id, event("c1", 1, "card_merged", closed.id));
+      tx.events.append(project_id, event("c2", 2, "run_started", closed.id));
+    });
+    const whole = full.uow.read((tx) => loadCommandState(tx, project_id));
+    const ids = (s: { events: readonly Event[] }) => s.events.map((e) => e.id);
+    // C-643: run_started is telemetry, so it is only in the journal.
+    const all = (s: { events: readonly Event[] }) =>
+      fullEventHistory(s.events).map((e) => e.id);
+    expect(full.commandStateScope).toBe("full");
+    expect(ids(whole)).toEqual(["c1"]);
+    expect(all(whole)).toEqual(["p1", "o1", "c1", "c2"]);
+    // Project stream and open cards stay whole; the cold card drops telemetry.
+    const base = hot.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(all(base)).toEqual(["p1", "o1", "c1"]);
+    const expected = hotCommandEvents(whole);
+    expect(ids(base)).toEqual(expected.map((e) => e.id));
+    expect(all(base)).toEqual(fullEventHistory(expected).map((e) => e.id));
+    // A command naming the closed card (directly or nested) restores it.
+    const targeted = hot.uow.read((tx) =>
+      loadCommandState(tx, project_id, undefined, {
+        targets: [{ nested: { card_id: closed.id } }],
+      }),
+    );
+    expect(ids(targeted)).toEqual(ids(whole));
+    expect(all(targeted)).toEqual(all(whole));
+    expect(
+      compareHotState(whole, base, { now: NOW }).filter((c) => !c.equal),
+    ).toEqual([]);
+  } finally {
+    hot.close();
+    full.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });

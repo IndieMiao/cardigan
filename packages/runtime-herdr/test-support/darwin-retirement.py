@@ -167,6 +167,39 @@ with contextlib.ExitStack() as stack:
     assert observe() == 'exited'
     t.update(state='live', keep=True)
     assert observe() == 'kept'  # the process exit did not end the retained shell
+    # C-667: only an opted-in probe names the idle replacement shell, and only
+    # when the CLI's birth identity and its whole process group are gone.
+    c['kept_shell'] = True
+    assert observe() == 'kept'  # the terminal still runs the launched PID
+    groups = stack.enter_context(patch.object(worker.os, 'killpg', side_effect=ProcessLookupError()))
+    cli_view = dict(t)
+    t.update(pid=43)
+    t.pop('foreground')
+    assert observe() == 'shell'
+    groups.assert_called_with(42, 0)
+    for changed in (dict(foreground={'pid': 43}), dict(foreground=None)):
+        t.update(changed)
+        assert observe() == 'shell', changed  # the shell itself in the foreground
+    for changed in (dict(foreground={'pid': 44}), dict(foreground={}), dict(foreground=[]), dict(rm=True),
+                    dict(pid=None), dict(pid=1), dict(pid=42)):
+        saved_view = dict(t)
+        t.update(changed)
+        assert observe() == 'kept', changed  # a job, a foreign or the launched process
+        t.clear(); t.update(saved_view)
+    groups.side_effect = None
+    assert observe() == 'kept'  # a process of the launch group remains
+    groups.side_effect = PermissionError()
+    assert observe() == 'kept'
+    groups.side_effect = ProcessLookupError()
+    p['process_group'] = 0
+    assert observe() == 'kept'
+    p['process_group'] = 42
+    native.return_value = ('boot', 1234, '1:2', 42)
+    assert observe() == 'kept'  # the launched CLI itself is still alive
+    native.return_value = ('boot', 1234, '2:3', 42)
+    del c['kept_shell']
+    assert observe() == 'kept'  # other callers keep the conservative answer
+    t.clear(); t.update(cli_view)
     t['keep'] = False
     assert observe() == 'unknown'
     poll.assert_not_called()

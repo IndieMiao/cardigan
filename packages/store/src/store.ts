@@ -27,7 +27,11 @@ import {
   type ChangeSet,
   changesSince,
 } from "./change-feed.js";
-import { CommandEvents } from "./command-events.js";
+import {
+  CommandEvents,
+  type HotStateHints,
+  hotStateHints,
+} from "./command-events.js";
 import {
   CommandSnapshots,
   type SnapshotTransaction,
@@ -111,6 +115,8 @@ export interface StoreTransactionContext
   readonly employees: GlobalRepositories["employees"];
   readonly members: GlobalRepositories["members"];
   readonly cachedCommandState?: SnapshotTransaction["state"];
+  readonly command_state_scope?: CommandStateScope;
+  readonly hot_state_hints?: HotStateHints;
   readonly platformDeployments: (project: ProjectId, sha: string) => Event[];
   readonly global_ids: GlobalIdAllocator;
   /** Issue a token inside this transaction (assignment and token commit together). */
@@ -161,6 +167,21 @@ export interface StoreOptions {
   readonly migrate?: boolean;
   /** Override the migrations directory (tests). */
   readonly migrationsDir?: string;
+  /**
+   * C-639 command state scope; defaults to `$CARDIGAN_COMMAND_STATE`, else
+   * `hot`. `full` restores the former whole-history command state.
+   */
+  readonly commandState?: CommandStateScope;
+}
+
+/** `hot`: open cards' streams plus durable closed-card facts; `full`: all history. */
+export type CommandStateScope = "full" | "hot";
+export function commandStateScope(
+  value: string | undefined,
+): CommandStateScope {
+  if (value === undefined || value === "" || value === "hot") return "hot";
+  if (value === "full") return "full";
+  throw new Error("CARDIGAN_COMMAND_STATE must be hot or full");
 }
 
 export interface GetUpdatesParams {
@@ -282,6 +303,10 @@ export class Store {
   }
   #snapshots: CommandSnapshots | undefined;
   readonly #commandEvents = new CommandEvents();
+  #commandStateScope: CommandStateScope = "hot";
+  get commandStateScope(): CommandStateScope {
+    return this.#commandStateScope;
+  }
   /** C-635: deferred MCP activity, keyed by project, Assignment and Token. */
   readonly #deferredActivity = new Map<string, DeferredActivity>();
 
@@ -327,6 +352,9 @@ export class Store {
       options.clock ?? systemClock,
       options.migrationsDir,
     );
+    store.#commandStateScope =
+      options.commandState ??
+      commandStateScope(process.env.CARDIGAN_COMMAND_STATE);
     try {
       // Opening/configuring the database can contend with another process too.
       db.exec("PRAGMA busy_timeout = 5000");
@@ -617,6 +645,8 @@ export class Store {
           listAfter: events.listAfter,
           listStreams: events.listStreams,
         },
+        command_state_scope: this.#commandStateScope,
+        hot_state_hints: hotStateHints(this.#db),
         platformDeployments: platformDeploymentReader(this.#db),
         ...createGlobalRepositories(this.#db, "write", snapshots),
         global_ids: createGlobalIdAllocator(this.#db),
@@ -680,6 +710,8 @@ export class Store {
           listAfter: events.listAfter,
           listStreams: events.listStreams,
         },
+        command_state_scope: this.#commandStateScope,
+        hot_state_hints: hotStateHints(this.#db),
       });
       this.#db.exec("COMMIT");
       events.commit();

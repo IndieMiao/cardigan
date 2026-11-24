@@ -8,15 +8,14 @@ import {
 } from "react";
 import type { CardListItem } from "./api.js";
 import {
-  connectorPath,
+  type HubLink,
+  hubPaths,
   intersectBoxes,
   type LineBox,
   type LineEnd,
 } from "./board-dependency-lines.js";
 import type { BoardDependencyLine } from "./components/layout/BoardDependencyLayout.js";
 
-/** The crossing band's centre below the board's top edge (tracks at 3 and 6). */
-const BAND_OFFSET = 4.5;
 /** Set on the card at the other end of a drawn line. */
 export const RELATED_ATTRIBUTE = "data-dependency-related";
 
@@ -37,8 +36,8 @@ const cardElement = (target: EventTarget | null) =>
  * A related card is "visible" when part of it shows inside its lane and the
  * board's scroll viewport. A card in a folded lane points at that lane's
  * strip; a card scrolled out of view, filtered out or not yet loaded gets no
- * line, so no line ever ends in empty space. Routes avoid every card (see
- * `connectorPath`), so no visible piece of a line touches an unrelated card.
+ * line, so no line ever ends in empty space. Each line is one curve from
+ * edge to edge (see `hubPaths`), drawn over the board.
  *
  * Call it from a component of its own: hovering then re-renders only the
  * lines, not the board.
@@ -110,14 +109,9 @@ export function useBoardDependencies(
     };
     const shown = visible(source);
     if (!shown) return commit([]);
-    const from = end(shown, source.closest(".board-column"));
-    // The band in the lanes' 10px top padding, above the headings and the
-    // folded strips (which start 8px down).
-    const frameBox = {
-      band: viewport.top - origin.top + BAND_OFFSET,
-      viewport: local(viewport),
-    };
-    const next: BoardDependencyLine[] = [];
+    const hub = end(shown, source.closest(".board-column"));
+    const keys: string[] = [],
+      links: HubLink[] = [];
     const edges = [
       ...dependency.predecessors.map((c) => [c.id, true] as const),
       ...dependency.successors.map((c) => [c.id, false] as const),
@@ -151,14 +145,11 @@ export function useBoardDependencies(
         }
       }
       if (!other) continue;
-      next.push({
-        key: before ? `${id}>${active}` : `${active}>${id}`,
-        d: before
-          ? connectorPath(other, from, frameBox, false)
-          : connectorPath(from, other, frameBox, true),
-      });
+      keys.push(before ? `${id}>${active}` : `${active}>${id}`);
+      links.push({ other, outgoing: !before });
     }
-    commit(next);
+    const paths = hubPaths(hub, links, local(viewport));
+    commit(keys.map((key, i) => ({ key, d: paths[i] as string })));
   }, [active, board, frame]);
 
   // A new hover target or new card data re-measures; a no-op while nothing

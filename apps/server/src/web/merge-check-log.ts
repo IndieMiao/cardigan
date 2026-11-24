@@ -137,7 +137,7 @@ export async function serveMergeCheckLog(input: {
   readonly dataDir: string;
   readonly projectId: string;
   readonly attempt: string;
-  readonly hasAttempt: (attempt: string) => boolean;
+  readonly hasAttempt: (attempt: string) => boolean | Promise<boolean>;
   readonly precheck?: boolean;
   readonly logHeader?: () => string;
   readonly authorize: () => unknown;
@@ -155,7 +155,7 @@ export async function serveMergeCheckLog(input: {
       "validation_failed",
       input.precheck ? "预检查编号无效。" : "检查编号必须为小写 UUID。",
     );
-  if (!input.hasAttempt(input.attempt))
+  if (!(await input.hasAttempt(input.attempt)))
     throw new HttpRejection(404, "not_found", "检查日志不存在或已清理。");
   const contents = await withLogFile(input, readLog);
   input.authorize();

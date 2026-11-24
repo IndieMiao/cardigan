@@ -594,6 +594,13 @@ export async function stallEvidence(
           ? !!observed?.ok && !!idleWakeGuard(observed.value)
           : owner.value === "exited" &&
             localTurnExitProof(state, a, runtime, a.runtime_ref, execution));
+  // C-669: an ordinary row whose session is already gone (terminal finished
+  // or no longer listed, and the kernel shows no process of this launch) has
+  // nothing left to stop. A missing terminal alone never counts.
+  const ordinaryRestartable = async () =>
+    (!!safeTerminal && (await ordinaryOwned())) ||
+    (!!a.runtime_ref &&
+      (await sessionExitProof(state, a, runtime, execution)) === "exited");
   const unknownOrIdle =
     (!observed?.ok &&
       observed?.error.code !== "runtime_conflict" &&
@@ -630,7 +637,7 @@ export async function stallEvidence(
             await transferredSessionExited(state, a, runtime, execution)
         : (systemTurn
             ? (!!ownerConfirmed && unknownOrIdle) || unboundLocal
-            : !!safeTerminal && (await ordinaryOwned())) &&
+            : await ordinaryRestartable()) &&
           (a.machine_id === "local" || !!remoteExited || remoteTurnStop)) &&
       (writableInPlace(workspace) || workspace === "no_worktree"),
   };

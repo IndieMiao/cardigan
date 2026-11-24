@@ -6,6 +6,10 @@ import {
   EventLogView,
   type ProjectId,
 } from "@cardigan/domain";
+import { prepare } from "./statements.js";
+
+/** C-639: the Store's `listStreams` result (an immutable log view). */
+export type EventStreams = EventLogView;
 
 type Snapshot = {
   /** Global events rowid watermark this snapshot has read through. */
@@ -57,9 +61,7 @@ export class CommandEvents {
       return next.view;
     };
     return {
-      listStreams: (
-        project: ProjectId,
-      ): ReadonlyMap<string, readonly Event[]> => listStreams(project),
+      listStreams: (project: ProjectId): EventStreams => listStreams(project),
       /**
        * C-640: the transaction's `events.listAfter` answered from the same
        * view (own writes included): no SQL scan or per-row JSON.parse.
@@ -146,4 +148,39 @@ function publish(snapshot: Snapshot): Snapshot {
   for (const event of overlay.all) log.append(event);
   // Keep the transaction's view: base(< start) + overlay equals base(< end).
   return { through: snapshot.through, log, view: snapshot.view };
+}
+
+/** C-639 host facts for the hot command state that live outside entity lists. */
+export interface HotStateHints {
+  /** The stream card of each existing event id; project-stream events map to undefined. */
+  eventCards(
+    project: ProjectId,
+    ids: readonly string[],
+  ): ReadonlyMap<string, string | undefined>;
+  /** Cards with an undelivered or unresolved inbox notification. */
+  liveNotificationCards(project: ProjectId): readonly string[];
+}
+
+export function hotStateHints(db: DatabaseSync): HotStateHints {
+  return {
+    eventCards: (project, ids) => {
+      const found = new Map<string, string | undefined>();
+      const byId = prepare(
+        db,
+        "SELECT card_id FROM events WHERE project_id = ? AND id = ?",
+      );
+      for (const id of ids) {
+        const row = byId.get(project, id);
+        if (row) found.set(id, (row.card_id as string | null) ?? undefined);
+      }
+      return found;
+    },
+    liveNotificationCards: (project) =>
+      prepare(
+        db,
+        "SELECT DISTINCT card_id FROM notifications WHERE project_id = ? AND status IN ('pending','belled','delivery_failed','needs_attention') AND card_id IS NOT NULL",
+      )
+        .all(project)
+        .map((row) => String(row.card_id)),
+  };
 }
