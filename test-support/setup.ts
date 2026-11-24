@@ -25,6 +25,11 @@ process.env.COREPACK_ENABLE_NETWORK = "0";
 process.env.TMPDIR = root;
 process.env.TEMP = root;
 process.env.TMP = root;
+// C-655: telemetry lookups on arrays derived from command-state events throw
+// (`setTelemetryQueryGuard` in packages/domain/src/event-index.ts).
+(globalThis as { [key: symbol]: unknown })[
+  Symbol.for("cardigan.telemetryQueryGuard")
+] = true;
 const cleanup = () => {
   for (const path of [configDir, configHome, dataDir, root])
     removeEmptyTestRoot(path);
