@@ -4,7 +4,7 @@ import type {
   ProjectId,
   TimelineEntry,
 } from "@cardigan/domain";
-import { extractReferences } from "@cardigan/domain";
+import { extractReferences, fullEventHistory } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
@@ -25,8 +25,8 @@ function cardState(
   const config = tx.events
     .listAfter(project_id, undefined, 0)
     .findLast((e) => e.type === "merge_queue_configured");
-  if (config)
-    return loadCommandState(
+  if (config) {
+    const state = loadCommandState(
       tx,
       project_id,
       {
@@ -42,6 +42,9 @@ function cardState(
       // C-639: a closed card's own detail keeps its whole history.
       { targets: card_id ? [card_id] : [] },
     );
+    // C-643: card views show the complete history, telemetry included.
+    return { ...state, events: fullEventHistory(state.events) };
+  }
   return {
     project_id,
     project_preferences: tx.project_preferences.list(project_id),

@@ -1,5 +1,6 @@
 import { heldStandingRun, standingRunDormant } from "../card-hold.js";
 import type { Actor, Assignment, Run } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
 import { restartStandingSession } from "./standing.js";
@@ -57,12 +58,9 @@ export function pmRecoveryEligible(
   // One recovery until an actual new run starts: failed launches cannot spin.
   return (
     !previous ||
-    state.events.some(
+    eventsOfType(state.events, "run_started").some(
       (e) =>
-        e.type === "run_started" &&
-        payload(e).assignment_id === a.id &&
-        e.seq > previous.seq &&
-        !e.card_id,
+        payload(e).assignment_id === a.id && e.seq > previous.seq && !e.card_id,
     )
   );
 }

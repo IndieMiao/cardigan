@@ -7,6 +7,7 @@ import type {
   Run,
   WorkItem,
 } from "./entities.js";
+import { commandEventHistory, fullEventHistory } from "./event-index.js";
 import type { CardId, EventId } from "./ids.js";
 
 /**
@@ -177,22 +178,28 @@ export function commandTargetCards(
  * The hot command state as a pure function of the whole-history state; the
  * Store-backed loader must produce exactly these events. `extra` names cards
  * whose inbox notifications are still live or that a command targets.
+ *
+ * C-643: triggers (often `run_queued`) are found in the complete history. A
+ * telemetry-free command stream maps to a command stream (same events and
+ * journal as the loader's); a plain array maps to a plain array.
  */
 export function hotCommandEvents(
   state: HotCardInput & { readonly events: readonly Event[] },
   extra: Iterable<CardId | undefined> = [],
-): Event[] {
+): readonly Event[] {
+  const all = fullEventHistory(state.events);
   const triggers = new Set<string>(liveTriggerEventIds(state.runs));
-  const triggerCards = state.events
+  const triggerCards = all
     .filter((e) => triggers.has(e.id))
     .map((e) => e.card_id);
   const hot = hotCardIds(state, [...triggerCards, ...extra]);
-  return state.events.filter(
+  const kept = all.filter(
     (e) =>
       !e.card_id ||
       hot.has(e.card_id) ||
       !COLD_CARD_OMITTED_EVENT_TYPES.has(e.type),
   );
+  return all === state.events ? kept : commandEventHistory([kept]);
 }
 
 type TargetState = Parameters<typeof commandTargetCards>[0];

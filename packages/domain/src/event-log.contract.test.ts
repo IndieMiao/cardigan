@@ -4,14 +4,24 @@ import type { Event, JsonValue } from "./entities.js";
 import {
   appendEvents,
   cardEventsOfType,
+  commandEventHistory,
+  commandStreamHistory,
   eventById,
   eventsForCompletion,
   eventsForDecision,
   eventsForWorkItem,
   eventsOfType,
+  fullEventHistory,
+  isTelemetryEvent,
   resumeEventsForItem,
+  telemetryEvents,
 } from "./event-index.js";
-import { EventLog, EventLogView, streamHistory } from "./event-log.js";
+import {
+  EventLog,
+  EventLogView,
+  type HistoryFilter,
+  streamHistory,
+} from "./event-log.js";
 import { parseEventId } from "./index.js";
 
 const eventId = (n: number) =>
@@ -69,8 +79,12 @@ function legacyHistory(all: readonly Event[], order: readonly string[]) {
   );
 }
 
-function expectSameLookups(indexed: readonly Event[], copy: readonly Event[]) {
-  expect(indexed).toEqual(copy);
+function expectSameLookups(
+  indexed: readonly Event[],
+  copy: readonly Event[],
+  sameArray = true,
+) {
+  if (sameArray) expect(indexed).toEqual(copy);
   for (const type of [...types, "absent"]) {
     expect(eventsOfType(indexed, type)).toEqual(eventsOfType(copy, type));
     for (const card of ["", ...cards, id("card", 9)])
@@ -340,4 +354,83 @@ test("C-639: a stream moving between full and filtered never reuses the other's 
   });
   expect(eventsForWorkItem(again, "W-1")).toHaveLength(1);
   expect(eventById(again, eventId(1))).toBeUndefined();
+});
+
+test("C-643: the Store command stream drops telemetry but answers every lookup over the (hot) history", () => {
+  // `types` includes run_started (telemetry) and noise (business); the C-639
+  // filter may trim either from cold streams.
+  for (let seed = 1; seed <= 60; seed++) {
+    const pick = rng(seed);
+    const seqs = new Map<string, number>();
+    const next = { id: 1 };
+    const log = new EventLog();
+    const committed: Event[] = [];
+    for (let round = 0; round < 3; round++) {
+      const overlay = new EventLog(log.end);
+      const added = randomBatch(pick, seqs, next, pick(12));
+      for (const event of added) overlay.append(event);
+      const view = new EventLogView(log, log.end, overlay, overlay.end);
+      const all = [...committed, ...added];
+      const order = pick(2)
+        ? ["", ...cards]
+        : ["", cards[2] as string, cards[0] as string];
+      const filters: (HistoryFilter | undefined)[] = [
+        undefined,
+        {
+          full: new Set(cards.filter(() => pick(2) === 0)),
+          omit: new Set(["run_started", "noise"]),
+        },
+      ];
+      for (const filter of filters) {
+        const kept = (stream: string) =>
+          legacyHistory(all, [stream]).filter(
+            (e) =>
+              !filter ||
+              stream === "" ||
+              filter.full.has(stream) ||
+              !filter.omit.has(e.type),
+          );
+        const full = order.flatMap(kept);
+        const history = vi.spyOn(view, "history");
+        const events = commandStreamHistory(view, order, filter);
+        expect(commandStreamHistory(view, [...order], filter)).toBe(events);
+        expect(events).toEqual(full.filter((e) => !isTelemetryEvent(e)));
+        // Lookups come from the shared index, without materializing the history.
+        expectSameLookups(events, full, false);
+        expect(history).not.toHaveBeenCalled();
+        history.mockRestore();
+        expect(telemetryEvents(events)).toEqual(full.filter(isTelemetryEvent));
+        expect(fullEventHistory(events)).toBe(view.history(order, filter));
+        // Maps without the Store log split their streams with the same answers.
+        const split = commandEventHistory(order.map(kept));
+        expect(split).toEqual(events);
+        expect(telemetryEvents(split)).toEqual(telemetryEvents(events));
+        expectSameLookups(split, full, false);
+        const plain = commandStreamHistory(new Map(view), order, filter);
+        expect(plain).toEqual(events);
+        expect(fullEventHistory(plain)).toEqual(full);
+        // Draft histories keep the journal and see telemetry emitted in the tail.
+        const tail = randomBatch(pick, new Map(seqs), { id: 1000 }, 3);
+        for (const base of [events, split]) {
+          const appended = appendEvents(base, tail);
+          expect(appended).toEqual([...base, ...tail]);
+          expectSameLookups(appended, [...full, ...tail], false);
+          expect(fullEventHistory(appended)).toEqual([...full, ...tail]);
+          expect(telemetryEvents(appended)).toEqual(
+            [...full, ...tail].filter(isTelemetryEvent),
+          );
+        }
+      }
+      if (pick(3) === 0) {
+        for (const event of added) {
+          const key = event.card_id ?? "";
+          seqs.set(key, (seqs.get(key) ?? 0) - 1);
+        }
+        next.id -= added.length;
+        continue;
+      }
+      for (const event of overlay.all) log.append(event);
+      committed.push(...added);
+    }
+  }
 });

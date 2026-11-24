@@ -23,6 +23,7 @@ import type {
 import {
   assign,
   createCard,
+  eventsOfType,
   occupiedRunSlots,
   providerAdmission,
   queueRun,
@@ -331,10 +332,11 @@ describe("startAssignment", () => {
       expect(run?.model).toBe("fictional-model");
       expect(run?.agent_cli_version).toBe("pi 1.5.0-fictional");
       const queued = store.uow.read((tx) =>
-        loadCommandState(tx, project_id).events.find(
-          (e) =>
-            e.type === "run_queued" &&
-            (e.payload as { run_id?: string }).run_id === started.run_id,
+        eventsOfType(
+          loadCommandState(tx, project_id).events,
+          "run_queued",
+        ).find(
+          (e) => (e.payload as { run_id?: string }).run_id === started.run_id,
         ),
       );
       expect(queued?.actor.kind).toBe(automatic ? "system" : "human");

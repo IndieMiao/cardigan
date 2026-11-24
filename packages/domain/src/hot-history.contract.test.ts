@@ -17,6 +17,11 @@ import type {
   WorkItem,
 } from "./entities.js";
 import {
+  commandEventHistory,
+  fullEventHistory,
+  isTelemetryEvent,
+} from "./event-index.js";
+import {
   COLD_CARD_OMITTED_EVENT_TYPES,
   cardClosed,
   commandTargetCards,
@@ -55,13 +60,13 @@ const telemetry = (c: CardId) =>
  * references, C4 is done but has an open human action, C5 is cancelled and
  * holds the trigger of C1's queued Run, C6 is done with a released assignment.
  */
-function scenario(): CommandState {
+function scenario(triggerType = "comment_posted"): CommandState {
   serial = 0;
   const base = fixture();
   const [c1, c2, c3, c4, c5, c6] = [1, 2, 3, 4, 5, 6].map((n) =>
     id("card", n),
   ) as [CardId, CardId, CardId, CardId, CardId, CardId];
-  const trigger = event("comment_posted", c5);
+  const trigger = event(triggerType, c5);
   const taken = event("host_ops_action_taken", undefined, {
     execution: true,
     assignment_id: id("assignment", 1),
@@ -177,6 +182,23 @@ describe("C-639 hot command state", () => {
     );
     expect(failed.map((c) => c.name)).toContain("pending_host_ops");
     for (const c of failed) expect(c.path).toMatch(/^\$/);
+  });
+
+  test("C-643: a telemetry-free command stream maps to the same hot history, triggers read from the journal", () => {
+    // The live Run's trigger is a run_queued (telemetry) on cancelled C5.
+    const plain = scenario("run_queued");
+    const whole = { ...plain, events: commandEventHistory([plain.events]) };
+    expect(whole.events.some((e) => e.type === "run_queued")).toBe(false);
+    const expected = hotCommandEvents(plain);
+    const events = hotCommandEvents(whole);
+    // C5 stays hot although its trigger is only in the journal.
+    expect(
+      fullEventHistory(events).filter((e) => e.card_id === id("card", 5)),
+    ).toEqual(plain.events.filter((e) => e.card_id === id("card", 5)));
+    expect(events).toEqual(expected.filter((e) => !isTelemetryEvent(e)));
+    expect(fullEventHistory(events)).toEqual(expected);
+    const checks = compareHotState(whole, { ...whole, events }, { now });
+    expect(checks.filter((c) => !c.equal)).toEqual([]);
   });
 
   test("command targets resolve cards through indirect ids", () => {

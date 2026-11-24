@@ -1,4 +1,5 @@
 import type { Decision, DecisionSuggestion } from "../entities.js";
+import { fullEventHistory } from "../event-index.js";
 import {
   attempt,
   type CommandDraft,
@@ -119,7 +120,7 @@ export function buildSuggestion(
         .filter((id): id is NonNullable<typeof id> => !!id)
         .map((id) => [
           id,
-          d.state.events.reduce(
+          fullEventHistory(d.state.events).reduce(
             (seq, e) => (e.card_id === id ? Math.max(seq, e.seq) : seq),
             0,
           ),
