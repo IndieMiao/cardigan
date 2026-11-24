@@ -1468,7 +1468,8 @@ test.each([false, true])(
       (await (
         await fetch(web.url + path("/needs-you"), { headers: { cookie } })
       ).json()) as { decisions: { id: string }[] };
-    expect(recipients()).toEqual(["pm_ops"]);
+    // C-722: the Office on duty is told about the request; Needs You is not.
+    expect(recipients()).toEqual(["pm_ops", "pm_office"]);
     expect((await needsYou()).decisions.some((d) => d.id === q.id)).toBe(false);
     const before = snapshot();
     expect(

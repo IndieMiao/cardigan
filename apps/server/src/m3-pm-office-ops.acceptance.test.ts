@@ -772,7 +772,9 @@ test("P06 §7.2/§6.7: Ops escalations wait while busy, then merge into one deli
   expect(bells[0]?.text).toContain(
     `..${Math.max(...delivered.map((n) => n.seq))}`,
   );
-  expect(notices(s, s.office)).toEqual([]);
+  // Ops escalations never reach the Office; only the C-722 notice of the
+  // decision request Ops raised does.
+  expect(notices(s, s.office).map((n) => n.kind)).toEqual(["decision"]);
 });
 
 test("P07 §6.4/§7.3: decisions and human actions appear in needs-you, Office gets only a brief hint", async () => {
