@@ -24,15 +24,15 @@
     ]
   },
   "detail-1440-dark.png": {
-    "hash": "51de0202439b63d93d69fc901e39a0a4f03dcd3d9a102fe174bf51ee2f88a8ad",
+    "hash": "d538e7e8bb81ce9bce2596913be8eb40c7289c892e6d35ccbba849c98aee9051",
     "replaces": [
-      "09bb9dd9f6bec21f5732d466dee5f23116c97eca0a8e961798dfdb9ef3011121"
+      "ad3eb1ca9d0d4f6f788c1a97b1ecf4a774777e4ed76451e77643f0000e863b52"
     ]
   },
   "detail-1440-light.png": {
-    "hash": "b375540e5f83b74d888477a50a1f0d95e131a7246c167f466415f4637bc51f3c",
+    "hash": "991f682b0b93545ef4fbbaea42f0782be30f3f7dac4de575b8bbf940f1c74e08",
     "replaces": [
-      "015db63267c7831cfc37f0ced3fa6926a17a2ae371d31f4630f7efc936ef7191"
+      "b69ea76d8c64fc6a22a1d85cd427d96cbea953d7ee0c72bc8dde44647027f540"
     ]
   },
   "filter-1440-dark.png": {
