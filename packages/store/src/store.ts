@@ -684,7 +684,14 @@ export class Store {
           outside = true;
           throw new PessimisticRequired();
         },
-        events: { ...repositories.events, listStreams: events.listStreams },
+        // Same history view and scope as `#run` and `#read` (C-639, C-640).
+        events: {
+          ...repositories.events,
+          listAfter: events.listAfter,
+          listStreams: events.listStreams,
+        },
+        command_state_scope: this.#commandStateScope,
+        hot_state_hints: hotStateHints(this.#db),
         ids: ids.ids,
       };
       let result: OptimisticPlan<T>;

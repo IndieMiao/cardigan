@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CardId, ProjectId } from "@cardigan/domain";
 import { expect, test, vi } from "vitest";
 import { ReadOnlyTransactionError } from "./read-only.js";
@@ -271,4 +274,34 @@ test("C-641: plan and write failures persist nothing; nesting is rejected", () =
       ),
     ).toThrow("nested UnitOfWork is not supported");
   });
+});
+
+test("C-641: the plan sees the same command state scope and history view as a locked transaction", () => {
+  for (const commandState of ["hot", "full"] as const) {
+    const dataDir = mkdtempSync(join(tmpdir(), "cardigan-store-"));
+    const store = Store.open({ dataDir, commandState });
+    try {
+      store.createProject({ id: project_id });
+      const view = (tx: OptimisticContext) => ({
+        scope: tx.command_state_scope,
+        hints: typeof tx.hot_state_hints,
+        listAfter: typeof tx.events.listAfter,
+        listStreams: typeof tx.events.listStreams,
+      });
+      const locked = store.uow.run((tx) => view({ ...tx, ids: tx.ids }));
+      const planned = store.uow.optimistic(project_id, (tx) => ({
+        value: view(tx),
+      }));
+      expect(locked).toEqual({
+        scope: commandState,
+        hints: "object",
+        listAfter: "function",
+        listStreams: "function",
+      });
+      expect(planned).toEqual(locked);
+    } finally {
+      store.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  }
 });
