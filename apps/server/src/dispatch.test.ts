@@ -64,6 +64,7 @@ import {
   mergeConfirmation,
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
+import { capacityBlockText } from "./queued-run-patrol.js";
 import { readCardList } from "./web/card-state.js";
 import { executionCapacity } from "./web/execution-capacity.js";
 import { executionView } from "./web/read.js";
@@ -1495,6 +1496,153 @@ test("C-527: the patrol does not compete with a reserved startup", async () => {
   expect(f.state().runs.find((r) => r.id === run.id)).toEqual(run);
   expect(pmQueueNotices(run)).toHaveLength(0);
   expect(runtime.wake).not.toHaveBeenCalled();
+});
+
+const spareNotice = (run: Run) =>
+  f
+    .state()
+    .events.find(
+      (e) =>
+        ["queued_run_rechecked", "queued_run_spare_capacity"].includes(
+          e.type,
+        ) &&
+        (e.payload as { run_id?: unknown }).run_id === run.id &&
+        (e.payload as { notified_pm_ops?: unknown }).notified_pm_ops === true,
+    )?.payload as { body?: string; capacity_block?: unknown } | undefined;
+
+test.each([
+  {
+    name: "a full project limit",
+    limits: {
+      projectQuota: () => ({ limit: 1, resources: new Map<string, number>() }),
+    },
+    block: (busy: string) => ({
+      kind: "project_limit",
+      machine_id: "local",
+      limit: 1,
+      run_ids: [busy],
+    }),
+    text: (busy: string, project: string) =>
+      `项目 ${project} 在 local 的上限 1 已用满（占用：${busy}）；整机名额未满。`,
+  },
+  {
+    name: "a full project resource",
+    limits: {
+      resourceLimits: () => new Map([["godot", 3]]),
+      projectQuota: () => ({ resources: new Map([["godot", 1]]) }),
+    },
+    block: (busy: string) => ({
+      kind: "project_resource",
+      machine_id: "local",
+      resource: "godot",
+      limit: 1,
+      run_ids: [busy],
+    }),
+    text: (busy: string, project: string) =>
+      `项目 ${project} 在 local 的资源 godot 上限 1 已用满（占用：${busy}）；整机名额未满。`,
+  },
+  {
+    name: "a full machine resource",
+    limits: { resourceLimits: () => new Map([["godot", 1]]) },
+    block: (busy: string) => ({
+      kind: "machine_resource",
+      machine_id: "local",
+      resource: "godot",
+      limit: 1,
+      run_ids: [busy],
+      other_project_runs: 0,
+    }),
+    text: (busy: string) =>
+      `local 的资源 godot 名额 1 已用满（占用：${busy}）；整机名额未满。`,
+  },
+])(
+  "C-714: spare machine slots behind $name name that ceiling, not spare capacity",
+  async ({ limits, block, text }) => {
+    const busy = f.create();
+    for (const item of [busy.item, target.item])
+      requireCapabilities(item, ["godot"]);
+    const holder = f.session(busy.assignment, false);
+    const run = legacyQueued();
+    const dispatcher = new Dispatcher({
+      ...options,
+      ...limits,
+      queuedRecheckAfterMs: 60_000,
+      runLimit: () => 4,
+    });
+    f.advance(60_000);
+    await dispatcher.tick();
+    // Admission is unchanged: the ceiling still holds the Run.
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("queued");
+    expect(runtime.wake).not.toHaveBeenCalled();
+    const notice = spareNotice(run);
+    expect(notice?.capacity_block).toEqual({
+      ...block(holder.id),
+      ...(block(holder.id).kind === "machine_resource"
+        ? {}
+        : { project_id: f.project }),
+    });
+    expect(notice?.body).toBe(
+      `${run.id} 已排队 1 分钟，${text(holder.id, f.project)}`,
+    );
+    expect(notice?.body).not.toContain("仍有并发名额");
+    expect(pmQueueNotices(run)).toHaveLength(1);
+    finish(busy.assignment);
+    await dispatcher.tick();
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+      "dispatched",
+    );
+  },
+);
+
+test("C-714: a shared machine resource names only this project's Runs", () => {
+  expect(
+    capacityBlockText({
+      kind: "machine_resource",
+      machine_id: "worker",
+      resource: "android.emulator",
+      limit: 2,
+      run_ids: ["R-7"],
+      other_project_runs: 1,
+    }),
+  ).toBe(
+    "worker 的资源 android.emulator 名额 2 已用满（占用：R-7；其它项目 1 个）；整机名额未满。",
+  );
+  expect(
+    capacityBlockText({
+      kind: "machine_resource",
+      machine_id: "worker",
+      resource: "blender",
+      limit: 1,
+      run_ids: [],
+      other_project_runs: 1,
+    }),
+  ).toBe(
+    "worker 的资源 blender 名额 1 已用满（占用：其它项目 1 个）；整机名额未满。",
+  );
+});
+
+test("C-714: genuinely spare capacity keeps the spare-capacity notice", async () => {
+  const busy = f.create();
+  for (const item of [busy.item, target.item])
+    requireCapabilities(item, ["godot"]);
+  f.session(busy.assignment, false);
+  const run = legacyQueued();
+  f.advance(60_000);
+  const dispatcher = new Dispatcher({
+    ...options,
+    resourceLimits: () => new Map([["godot", 3]]),
+    projectQuota: () => ({ limit: 3, resources: new Map([["godot", 2]]) }),
+    queuedRecheckAfterMs: 60_000,
+    runLimit: () => 4,
+  });
+  await dispatcher.tick();
+  const notice = spareNotice(run);
+  expect(notice?.capacity_block).toBeUndefined();
+  expect(notice?.body).toBe(`${run.id} 已排队 1 分钟，local 仍有并发名额。`);
+  expect(pmQueueNotices(run)).toHaveLength(1);
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+    "dispatched",
+  );
 });
 
 test("capacity preserves queued Run identity and notifications, then dispatches after a slot frees", async () => {

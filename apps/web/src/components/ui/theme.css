@@ -786,6 +786,30 @@
       min-width: 0;
     }
   }
+  .ui-dialog-fields {
+    display: grid;
+    gap: var(--ui-space-4);
+  }
+  .ui-dialog-fields > label,
+  .ui-dialog-fields > fieldset {
+    display: grid;
+    gap: var(--ui-space-1);
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    font-weight: 600;
+  }
+  .ui-dialog-fields > fieldset > legend {
+    padding: 0;
+    margin-block-end: var(--ui-space-1);
+  }
+  .ui-dialog-fields > label > *,
+  .ui-dialog-fields > fieldset > :not(legend) {
+    font-weight: 400;
+  }
   .ui-dialog-title {
     font-size: var(--ui-text-section);
     line-height: var(--ui-leading-section);
