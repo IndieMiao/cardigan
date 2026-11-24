@@ -1,4 +1,4 @@
-import type { CardId, Event } from "@cardigan/domain";
+import { type CardId, type Event, streamEventsBy } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { eventRepository } from "./repositories.js";
 import { commandStateScope, Store } from "./store.js";
@@ -220,6 +220,67 @@ test("C-639 command state scope defaults to hot and rejects unknown values", () 
     store.uow.read((tx) =>
       expect(tx.command_state_scope).toBe(store.commandStateScope),
     );
+  });
+});
+
+test("C-652: projectMergeEvents and streamEventsBy match the SQL reads they replace", () => {
+  withTempStore((store) => {
+    const event = (
+      id: string,
+      seq: number,
+      type: string,
+      card_id?: CardId,
+    ): Event => ({ ...audit(id, seq, card_id), type });
+    // The Store's former SQL read (`events_by_type` index, then JSON.parse).
+    const sqlMerge = () =>
+      store.database
+        .prepare(
+          "SELECT doc FROM events WHERE project_id = ? AND stream = '' AND (type = 'merge_queue_configured' OR type GLOB 'merge_batch_*') ORDER BY seq",
+        )
+        .all(P)
+        .map((r) => JSON.parse(String(r.doc)) as Event);
+    const sql = eventRepository(store.database, "read");
+    const byType = (card: CardId | undefined, types: readonly string[]) =>
+      sql.listAfter(P, card, 0).filter((e) => types.includes(e.type));
+    const compare = (
+      tx: Parameters<Parameters<Store["uow"]["read"]>[0]>[0],
+    ) => {
+      expect(tx.projectMergeEvents?.(P)).toEqual(sqlMerge());
+      for (const card of [undefined, cardId])
+        for (const types of [
+          ["merge_push_queued"],
+          ["merge_queue_configured", "merge_batch_formed"],
+          ["absent"],
+        ])
+          expect(streamEventsBy(tx.events, P, card, "type", types)).toEqual(
+            byType(card, types),
+          );
+    };
+    store.createProject({ id: P });
+    store.uow.run((tx) => {
+      tx.cards.put(P, card());
+      tx.events.append(P, event("p-1", 1, "merge_queue_configured"));
+      tx.events.append(P, event("p-3", 3, "merge_batch_formed"));
+      tx.events.append(P, event("p-2", 2, "merge_push_queued"));
+      tx.events.append(P, event("p-4", 4, "merge_batchless"));
+      tx.events.append(P, event("p-5", 5, "Merge_batch_formed"));
+      // A card stream's merge-typed events are not project merge events.
+      tx.events.append(P, event("c-1", 1, "merge_batch_formed", cardId));
+      tx.events.append(P, event("c-2", 2, "merge_push_queued", cardId));
+    });
+    store.uow.read(compare);
+    store.uow.run((tx) => {
+      tx.events.append(P, event("p-6", 6, "merge_batch_finished"));
+      tx.events.append(P, event("p-7", 7, "merge_push_queued"));
+      // Own uncommitted writes are included, the same as the SQL read sees them.
+      expect(
+        streamEventsBy(tx.events, P, undefined, "type", ["merge_push_queued"]),
+      ).toEqual(byType(undefined, ["merge_push_queued"]));
+    });
+    store.uow.read(compare);
+    expect(
+      store.uow.read((tx) => tx.projectMergeEvents?.(P).map((e) => e.id)),
+    ).toEqual(["p-1", "p-3", "p-6"]);
   });
 });
 

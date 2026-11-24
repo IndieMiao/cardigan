@@ -1,6 +1,7 @@
 import {
   completeVerifiedHelperAction,
   matchesOpenHelperAction,
+  streamEventsBy,
 } from "@cardigan/domain";
 import { manualUpgradeKey, tryHelperConfirmationLock } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -24,7 +25,10 @@ export async function reconcileHelperActions(
   };
   const origins = (tx: ReadRepositories) => ({
     project_id: project,
-    events: tx.events.listAfter(project, undefined, 0),
+    // Only these requests identify a helper action (`workerHelperAction`).
+    events: streamEventsBy(tx.events, project, undefined, "type", [
+      "host_deployment_action_requested",
+    ]),
   });
   const candidates = store.uow.read((tx) => {
     const open = tx.human_actions

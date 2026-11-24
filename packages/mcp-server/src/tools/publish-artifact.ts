@@ -9,6 +9,7 @@ import {
   type DecisionId,
   holdsPublicationTool,
   type ProjectId,
+  streamEventsBy,
   type TransactionContext,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -153,8 +154,11 @@ function authorize(
       a,
       q,
       tx.project_preferences?.get(p, p),
+      // Delegation audits are the only events it reads (`categoryAuthorization`).
       q?.resolution?.via === "delegated"
-        ? tx.events.listAfter(p, undefined, 0)
+        ? streamEventsBy(tx.events, p, undefined, "type", [
+            "project_preferences_updated",
+          ])
         : [],
     )
   )
@@ -226,13 +230,9 @@ async function runPublication(
           )
         )
           throw new PublicationError("approval");
-        const mine = tx.events
-          .listAfter(p, a.card_id, 0)
-          .filter(
-            (e) =>
-              (e.payload as { decision_id?: string })?.decision_id ===
-              request.decision_id,
-          );
+        const mine = streamEventsBy(tx.events, p, a.card_id, "decision_id", [
+          request.decision_id,
+        ]);
         const claimed = mine.find(
           (e) => e.type === "artifact_publication_claimed",
         );
