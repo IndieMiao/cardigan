@@ -442,6 +442,7 @@ export { upgradeKey } from "./worker-upgrade-gate.js";
 export * from "./worker-wizard-files.js";
 export * from "./worker-wizard-form.js";
 export {
+  missingWorktreePrompt,
   prepareReadonlyWorktree,
   prepareRoleWorktree,
   readonlyWorktreeTarget,

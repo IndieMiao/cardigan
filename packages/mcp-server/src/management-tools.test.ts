@@ -3274,3 +3274,51 @@ test("C-712 standing PM writes, revises and lists release notes; work-item roles
   expect(visible).not.toContain("write_release_note");
   expect(visible).not.toContain("list_release_notes");
 });
+
+test("C-728: PM registers a no-merge card's repository and start points over MCP", async () => {
+  const sha = "9172f56f".padEnd(40, "0");
+  expect(
+    (await raw(office, "update_card", { card_id: card.id, start_point: sha }))
+      .isError,
+  ).toBe(true);
+  store.setProjectRepo({ project_id: project, repo_path: "/srv/source/p" });
+  store.uow.run((tx) => {
+    const {
+      repo: _r,
+      base_branch: _b,
+      ...bare
+    } = tx.cards.get(project, card.id) as Card;
+    tx.cards.put(project, { ...bare, merge_policy: "none" });
+  });
+  const updated = await ok<Card>(office, "update_card", {
+    card_id: card.id,
+    start_point: sha,
+  });
+  // The host repository path stays out of Agent replies.
+  expect(updated).not.toHaveProperty("repo");
+  expect(updated).toMatchObject({ base_branch: "main", start_point: sha });
+  expect(store.uow.read((tx) => tx.cards.get(project, card.id))).toMatchObject({
+    repo: "/srv/source/p",
+    base_branch: "main",
+    start_point: sha,
+  });
+  const item = await ok<WorkItem>(office, "update_work_item", {
+    work_item_id: work("coder").id,
+    start_point: "release/0.4",
+  });
+  expect(item.start_point).toBe("release/0.4");
+  expect(
+    (
+      await raw(office, "update_work_item", {
+        work_item_id: work("coder").id,
+        start_point: "HEAD~1",
+      })
+    ).isError,
+  ).toBe(true);
+  expect(
+    await ok<WorkItem>(office, "update_work_item", {
+      work_item_id: work("coder").id,
+      start_point: null,
+    }),
+  ).not.toHaveProperty("start_point");
+});

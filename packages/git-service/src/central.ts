@@ -747,6 +747,60 @@ export class CentralRepositoryService {
   validateSource(): void {
     this.options.validateSource?.();
   }
+  /**
+   * C-728: resolve a no-merge card's start point in the central repository and
+   * pin it at `refs/cardigan/candidates/start/<assignment>`, a prefix every
+   * base clone already receives from the host (local fetch, Agent push, worker
+   * helper), so the target machine never contacts a remote itself. A branch is
+   * synced from the source like a card baseline (fast-forward only); a commit
+   * missing in the central repository is looked up among the source's branches
+   * and tags. The pin follows the latest resolution with compare-and-swap.
+   */
+  async pinStartPoint(
+    project: CentralProject,
+    start: string,
+    assignment_id: string,
+  ): Promise<string> {
+    if (!parseId("assignment", assignment_id).ok)
+      throw new Error("Invalid Assignment id");
+    const repository = await this.ensureCentral(project);
+    let sha: string | undefined;
+    if (fullSha.test(start)) {
+      const isCommit = async () =>
+        (await this.git.objectType(repository, start)) === "commit";
+      if (!(await isCommit()))
+        await this.git.fetchRefs(repository, project.source_repo, [
+          "+refs/heads/*:refs/cardigan/start-source/heads/*",
+          "+refs/tags/*:refs/cardigan/start-source/tags/*",
+        ]);
+      if (
+        start.length !==
+          ((await this.git.objectFormat(repository)) === "sha1" ? 40 : 64) ||
+        !(await isCommit())
+      )
+        throw new Error(
+          `Start point commit ${start} is in neither the central repository nor the source`,
+        );
+      sha = start;
+    } else {
+      if (!validCentralBranch(start))
+        throw new Error("Invalid start point branch name");
+      try {
+        await this.syncFromSource(centralBranch(project, start));
+      } catch (error) {
+        throw new Error(
+          `Start point branch ${start} is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      sha = await this.git.readRef(repository, `refs/heads/${start}`);
+      if (!sha) throw new Error(`Start point branch ${start} is missing`);
+    }
+    const ref = `refs/cardigan/candidates/start/${assignment_id}`;
+    const current = await this.git.readRef(repository, ref);
+    if (current !== sha)
+      await this.git.compareAndSwapRef(repository, ref, sha, current ?? null);
+    return sha;
+  }
   /** Only creates; same SHA is an idempotent success, including concurrent creation. */
   async createRef(repository: string, ref: string, sha: string) {
     const current = await this.git.readRef(repository, ref);

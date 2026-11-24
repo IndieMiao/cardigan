@@ -769,3 +769,60 @@ test("CLI preserves explicit framework classification on create and update", asy
     false,
   );
 });
+
+test("C-728: PM registers a no-merge card's repository and start point", async () => {
+  const sha = "9172f56f".padEnd(40, "0");
+  expect(await run(["card", "update", "C-1", "--start-point", sha])).toBe(2);
+  expect(errors.join("\n")).toContain("merge_policy=none");
+  store.setProjectRepo({ project_id: project, repo_path: "/srv/source/p" });
+  store.uow.run((tx) => {
+    const card = tx.cards.list(project).find((c) => c.id === "C-1");
+    if (!card) throw new Error("missing fixture card");
+    const { repo: _repo, base_branch: _base, ...bare } = card;
+    tx.cards.put(project, { ...bare, merge_policy: "none" });
+  });
+  expect(
+    await run(["card", "update", "C-1", "--start-point", sha.toUpperCase()]),
+  ).toBe(0);
+  expect(output.join("\n")).toBe("已更新卡片 C-1：start-point");
+  expect(snapshot().cards[0]).toMatchObject({
+    repo: "/srv/source/p",
+    base_branch: "main",
+    start_point: sha,
+  });
+  expect(snapshot().timeline.at(-1)?.body).toContain(`起点：${sha}`);
+  expect(await run(["card", "update", "C-1", "--start-point", "HEAD~1"])).toBe(
+    2,
+  );
+  const item = snapshot().work_items.find((w) => w.kind === "produce");
+  expect(
+    await run([
+      "work-item",
+      "update",
+      item?.id as string,
+      "--start-point",
+      "release/0.4",
+    ]),
+  ).toBe(0);
+  expect(
+    snapshot().work_items.find((w) => w.id === item?.id)?.start_point,
+  ).toBe("release/0.4");
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-1",
+      "--repo",
+      "other/repo",
+      "--base-branch",
+      "release",
+      "--start-point",
+      "none",
+    ]),
+  ).toBe(0);
+  expect(snapshot().cards[0]).toMatchObject({
+    repo: "other/repo",
+    base_branch: "release",
+  });
+  expect(snapshot().cards[0]).not.toHaveProperty("start_point");
+});

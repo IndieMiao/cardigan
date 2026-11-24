@@ -32,6 +32,7 @@ test("Q-1233: every candidate and precheck ref form resolves to its card", () =>
     [`refs/cardigan/prechecks/A-1/${a}`, "C-1"],
     [`refs/cardigan/candidates/A-2/${long}`, "C-2"],
     ["refs/cardigan/candidates/recovery/A-1", "C-1"],
+    ["refs/cardigan/candidates/start/A-2", "C-2"],
     ["refs/cardigan/candidates/precheck-06H0ATTEMPT2", "C-2"],
     [`refs/cardigan/candidates/macos-D-1-${b}`, "C-1"],
     ["refs/cardigan/candidates/D-2", "C-2"],

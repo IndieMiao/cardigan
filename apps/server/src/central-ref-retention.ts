@@ -29,7 +29,8 @@ const assignmentHead = new RegExp(
   `^refs/cardigan/(?:prechecks|candidates)/([^/]+)/(${sha})$`,
   "u",
 );
-const recovery = /^refs\/cardigan\/candidates\/recovery\/([^/]+)$/u;
+/** Recovery backups and C-728 no-merge start points, keyed by Assignment. */
+const recovery = /^refs\/cardigan\/candidates\/(?:recovery|start)\/([^/]+)$/u;
 const precheck = /^refs\/cardigan\/candidates\/precheck-([A-Za-z0-9_-]+)$/u;
 const macos = new RegExp(
   `^refs/cardigan/candidates/macos-([^/]+)-(${sha})$`,

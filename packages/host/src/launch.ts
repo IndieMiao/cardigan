@@ -30,6 +30,8 @@ import {
   reviewRunWakeDisposition,
   standingModeOf,
   standingRunDormant,
+  worktreeUnavailablePrompt,
+  worktreeUnavailableReason,
 } from "@cardigan/domain";
 import {
   defaultToolCatalog,
@@ -1218,6 +1220,15 @@ async function launch(
         preparedReviewPrompt,
         standingModeLine(currentAssignment, standingModeOf(currentAssignment)),
         worktreeBaselinePrompt(worktree),
+        worktree === undefined
+          ? worktreeUnavailablePrompt(
+              worktreeUnavailableReason(
+                role,
+                { scope: assignment.scope },
+                card,
+              ),
+            )
+          : undefined,
       ]
         .filter((line): line is string => line !== undefined)
         .join("\n"),

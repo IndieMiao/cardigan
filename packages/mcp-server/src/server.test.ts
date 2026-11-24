@@ -25,6 +25,7 @@ import {
   project_id,
   type SeededRows,
   seedProject,
+  serverCard,
   workItems,
 } from "./test-support.js";
 
@@ -386,6 +387,35 @@ describe("whoami", () => {
       worktree_path: "/srv/agent/worktrees/A-1",
       branch: "agent/C-1/W-1",
       allowed_tools: ["whoami", "get_updates", "ack_events"],
+      worktree_unavailable_reason: null,
+    });
+  });
+
+  test("C-728 names the missing registration when a source role has no worktree", async () => {
+    fixture.store.uow.run((tx) => {
+      const { repo: _r, base_branch: _b, ...bare } = serverCard;
+      tx.cards.put(project_id, bare);
+      const {
+        worktree_path: _w,
+        branch: _br,
+        base_sha: _s,
+        ...clean
+      } = fixture.assignment;
+      tx.assignments.put(project_id, clean);
+      tx.roles.put(project_id, {
+        role_id: "coder",
+        role_version: 1,
+        allowed_tools: ["whoami", "get_updates", "ack_events"],
+        capabilities: ["code"],
+        worktree: "write",
+      });
+    });
+    const client = await connect(fixture.token);
+    expect(
+      textOf(await client.callTool({ name: "whoami", arguments: {} })),
+    ).toMatchObject({
+      worktree_path: null,
+      worktree_unavailable_reason: "本卡未登记仓库/起点",
     });
   });
 

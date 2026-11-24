@@ -604,6 +604,20 @@ const schemas = {
       .describe("设置或清除提前开工，须有排期权限并填写理由"),
     dependency_reason: text.optional(),
     card_id: id("card"),
+    repo: text
+      .optional()
+      .describe(
+        "补登记仓库；省略时沿用卡上的，再缺省为项目唯一登记的仓库。已有 worktree 后不能改",
+      ),
+    base_branch: text
+      .optional()
+      .describe("基线分支；省略时沿用卡上的或登记仓库的默认基线"),
+    start_point: text
+      .nullable()
+      .optional()
+      .describe(
+        "不合并卡（merge_policy=none）产出项的起点：完整提交 SHA 或分支名，检出为 detached worktree；传 null 清除。已有 worktree 后不能改",
+      ),
     hold: z
       .object({ reason: text, resume_condition: text })
       .strict()
@@ -703,6 +717,12 @@ const schemas = {
     required: z.boolean().optional(),
     status: z.enum([...states.produce, ...states.verify]).optional(),
     max_review_rounds: z.number().int().positive().optional(),
+    start_point: text
+      .nullable()
+      .optional()
+      .describe(
+        "不合并卡上本产出项的起点（完整提交 SHA 或分支名），优先于卡上的起点；传 null 清除。已有 worktree 后不能改",
+      ),
     review_limit_decision: z
       .object({
         pause_plan: pausePlan,
@@ -1012,12 +1032,30 @@ export function managementTools(clock?: Clock) {
       "Standing PM Ops: open or close a merge window; reason required. Sensitive windows can only be closed by the human.",
       setMergeWindow,
     ),
-    wire(
-      "update_card",
-      "Update card metadata or planning state, or one pre-merge check (pre_merge_check).",
-      (...args: Parameters<typeof updateCard>) =>
-        cardReply(updateCard(...args)),
-    ),
+    defineTool({
+      name: "update_card",
+      description:
+        "Update card metadata or planning state, register its repository and no-merge start point, or one pre-merge check (pre_merge_check).",
+      input: z.object({ ...schemas.update_card, idempotency_key }),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executeCommand(
+          context,
+          "update_card",
+          idempotency_key,
+          params as Parameters<typeof updateCard>[2],
+          (s, a, p, ports) =>
+            cardReply(
+              updateCard(s, a, p, {
+                ...ports,
+                project_repositories: projectRepositories(
+                  context.store,
+                  a.project_id,
+                ),
+              }),
+            ),
+          clock,
+        ),
+    }),
     wire(
       "create_work_item",
       "Create a producing or verifying work item.",
