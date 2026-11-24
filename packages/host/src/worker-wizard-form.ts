@@ -25,6 +25,7 @@ export function workerWizardForm(
     host,
     port = 22,
     mcp_url,
+    layout,
   } = form;
   if (
     Object.keys(form).some(
@@ -40,6 +41,7 @@ export function workerWizardForm(
           "host",
           "port",
           "mcp_url",
+          "layout",
         ].includes(k),
     ) ||
     typeof machine !== "string" ||
@@ -56,13 +58,15 @@ export function workerWizardForm(
         v >= 501 &&
         v <= 2147483647,
     ) ||
-    (os !== "linux" && os !== "macos" && os !== "darwin")
+    (os !== "linux" && os !== "macos" && os !== "darwin") ||
+    // C-706: a read-only root (SteamOS) keeps the work root under /home.
+    (layout !== undefined && (layout !== "home" || os !== "linux"))
   )
     return onboardingFail("worker_form_invalid");
   workerJournalId(project, machine);
   const mac = os !== "linux",
     home = `${mac ? "/Users" : "/home"}/${account}`,
-    work = `${mac ? "/Users" : "/srv"}/cardigan-workers/${project}`;
+    work = `${mac ? "/Users" : layout === "home" ? "/home" : "/srv"}/cardigan-workers/${project}`;
   const alias = `cg-${onboardingDigest([project, machine]).slice(0, 20)}`;
   const raw = {
     version: 1,

@@ -88,6 +88,28 @@ test.each(["linux", "macos"])(
       ).toThrow();
   },
 );
+test("C-706: a read-only-root Linux device keeps its work root under /home", () => {
+  const d = workerWizardForm("/private/config", data, "example", {
+    ...form,
+    layout: "home",
+  });
+  expect(d.config.worker.execution.agentRoot).toBe(
+    "/home/cardigan-workers/example",
+  );
+  expect(d.config.home).toBe("/home/cg_example");
+  expect(d.commands.directories).toContain("/home/cardigan-workers/example");
+  for (const fields of [
+    { layout: "srv" },
+    { layout: "/tmp" },
+    { layout: "home", os: "macos", arch: "arm64" },
+  ])
+    expect(() =>
+      workerWizardForm("/private/config", data, "example", {
+        ...form,
+        ...fields,
+      }),
+    ).toThrow("worker_form_invalid");
+});
 test.runIf(process.platform === "linux")(
   "private CAS: changed source, unsafe mode/link or staging failure leaves exact original; successful replace keeps private backup",
   () => {

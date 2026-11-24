@@ -622,7 +622,12 @@ async function handleApi(context: RequestContext): Promise<void> {
   }
 
   // C-705: a new device has no account; it only gets a one-time pairing code.
-  if (path === "/api/device-pairings" || path === "/api/device-pairings/status")
+  // C-706: the claimed device fetches its init script and reports the result.
+  if (
+    /^\/api\/device-pairings(?:\/(?:status|init-script|initialized))?$/.test(
+      path,
+    )
+  )
     return context.pairings.serveDevice(
       req,
       context.res,

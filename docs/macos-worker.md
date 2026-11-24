@@ -4,6 +4,24 @@
 
 以下 `example`、`worker-a`、`cg_example`、UID/GID、域名及目录都是示例，实际值写私有配置。每个项目使用独立非管理员账号、组、HOME、工作根和 hc 状态，不复用个人桌面或 CI 账号。控制主机与 worker 使用同一版本 Cardigan 发行文件；Mac 上 root 持有的发行目录以下为 `/opt/cardigan`。
 
+## 快速接入：配对和一次性初始化
+
+新设备可以不手敲第 2 节的命令：
+
+1. 控制主机配置目录里要有 `worker-key` 及其公钥 `worker-key.pub`（Ed25519，见第 1 节）。
+2. 在设备上用普通账号运行 `curl -fsS https://<Workbench>/pair-device.py | python3 - https://<Workbench>`，在 Workbench 输入显示的配对码，核对并点“确认写入配置”。
+3. 设备端随后取得为这份配置生成的一次性初始化脚本，先列出将做的操作，输入 `yes` 后用 `sudo python3 -IB -` 从标准输入运行（脚本不落盘），跑完把结果报给 Workbench，向导自动复查。
+
+初始化脚本只做以下操作（HOME 为 `/Users/cg_<项目>`，工作根为 `/Users/cardigan-workers/<项目>`，安装配置写在 `/Library/Cardigan`。）：
+
+- 建专用组和账号（向导给定的 UID/GID，无密码、shell `/bin/sh`、不加入其它组）；
+- 建 HOME、工作根及固定的私有目录，属主和权限同第 2 节；
+- 把控制主机公钥写成 `.ssh/authorized_keys`（root:项目组 0640，带 `restrict`）；
+- 写认领标记和安装配置，用随附的安装器先 `--check` 再 `--apply`（私有目录、锁文件和 `worker-primitives.py`）；
+- 只有专用账号执行 `sudo -n -l` 被要求输入密码时，才写入 `cardigan-worker-<账号>`，内容仅 `Defaults:<账号> listpw=never`（经 `visudo -cf` 校验，不授予任何命令）。
+
+账号、组、UID/GID、目录或文件已存在时，它列出冲突后停下，不做任何改动，也不接管已有账号。中途失败时列出已创建的内容和删除命令，不自动撤销。它不装其它软件、不改 `/etc/sudoers`、不含凭据；hc、helper、Node 等工具和资源配置仍按第 3、4 节准备。只想配对、不在设备上初始化时，给 `pair-device.py` 加 `--no-init`。
+
 ## 1. 控制主机：预览与私有配置
 
 CLI 安装见 [部署说明](../deploy/README.md#安装-cardigan-命令)。在人类终端运行，不设置 `CARDIGAN_TOKEN`、`MCP_TOKEN` 或 `--token-file`：
@@ -99,7 +117,9 @@ machines:
 
 若同一台机器还能同时运行几个任务，可由人在该机器配置下增加 `resources`，例如 `resources: { ios.simulator: 1, blender: 2 }`。键为能力名（不带版本），值为正整数；未列出的资源不限。资源在同一物理机上跨项目共用。一个工作项即使多次声明同一能力，也只占一个名额；所需资源有一个已满，整个 Run 就留在原机排队，不会先占其它资源。显式启动也不能越过资源上限。修改后重载控制主机；不会抢占已开始的 Run。升级前已启动的任务没有资源快照时，按本次启动可能用到的资源保守计数。若同一任务撤回后重试，旧记录没有精确的撤回时点：上一轮派发后到本轮派发前出现过的需求都可能计入；重试尚未派发时也会保留名额。缺少可核对的记录时，该任务在本机每种已配置资源上各占一个名额，直到原占用结束。
 
-## 2. worker：专用账号和安装布局
+## 2. worker：专用账号和安装布局（进阶/排障：手工命令）
+
+以下是一次性初始化脚本所做操作的手工版本，用于不走配对的接入、核对现场或排障。
 
 **同机第二个项目**沿用机器编号，不复用第一个项目的账号、UID、主组、HOME、工作根或认领标记。逐项替换下例的 `example`、`cg_example` 和 UID/GID，在 `/Library/Cardigan/worker-<项目>.json` 建 root 所有、0600 的新文件；文件名中的项目必须和正文、两份认领标记一致。同机已有 `worker.json` 的绑定原样保留，不复制为同项目的新文件，不覆盖它的内容。
 
