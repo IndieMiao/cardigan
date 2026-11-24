@@ -17,7 +17,10 @@ import {
 } from "@cardigan/store";
 import { idleRolePolicy } from "./deployment-roles.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { retireIdleSessions } from "./idle-session-retirement.js";
+import {
+  releaseKeptShells,
+  retireIdleSessions,
+} from "./idle-session-retirement.js";
 import {
   sessionIdleMinutes,
   sessionMaintenanceScan,
@@ -53,6 +56,15 @@ export async function upgradeIdleAssignmentRoles(
     Boolean(runtime.retire_idle),
   );
   try {
+    // C-667: an exited CLI in a kept terminal first becomes "no session", so
+    // the upgrade below and the next dispatch start its replacement.
+    await releaseKeptShells(
+      store,
+      project,
+      runtime,
+      clock,
+      MAX_IDLE_ROLE_UPGRADES,
+    );
     const retired = await retireIdleSessions(
       store,
       project,

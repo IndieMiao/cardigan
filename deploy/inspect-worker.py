@@ -218,6 +218,12 @@ def darwin_retirement(c, terminal_owner=None):
         if t['state'] == 'finished' and observed == 'exited':
             return 'exited'
         if t['state'] == 'live' and t.get('keep') is True:
+            # C-667: hc --keep replaced the lost program with a shell and never
+            # reruns the original command. Only on request, report that shell
+            # when the launched CLI's birth identity and whole process group
+            # are gone and the shell itself is idle (no foreground job).
+            if c.get('kept_shell') is True and observed == 'exited' and kept_shell(t, p):
+                return 'shell'
             return 'kept'
         def idle(t):
             status = t.get('status')
@@ -279,6 +285,22 @@ def darwin_retirement(c, terminal_owner=None):
                 and all(again['labels'].get(k) == v for k, v in labels.items())):
             return 'alive'
         return 'unknown'
+
+
+def kept_shell(t, p):
+    pid, group = t.get('pid'), p.get('process_group')
+    foreground = t.get('foreground')
+    if (type(pid) is not int or pid <= 1 or pid == p['pid'] or type(group) is not int or group <= 1
+            or t.get('rm') is True
+            or (foreground is not None and (type(foreground) is not dict or foreground.get('pid') != pid))):
+        return False
+    try:
+        os.killpg(group, 0)  # existence only; permission denied is NOT exit
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
 
 
 def darwin_execution(p, native):

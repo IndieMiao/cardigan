@@ -1,4 +1,5 @@
 import type { Actor, Assignment, RuntimeRef } from "../entities.js";
+import { hostOpsPending } from "../host-ops.js";
 import type { AssignmentId, RunId } from "../ids.js";
 import { retirementWaitReceipt } from "../retirement-session.js";
 import {
@@ -22,7 +23,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
-import { humanStopRecorded } from "./stop-state.js";
+import { humanStopRecorded, stoppedByHuman } from "./stop-state.js";
 
 export function beginIdleSessionRetirement(
   state: CommandState,
@@ -91,7 +92,15 @@ export function beginIdleSessionRetirement(
   });
 }
 
-function finishRetirement(d: CommandDraft, state: CommandState, a: Assignment) {
+function finishRetirement(
+  d: CommandDraft,
+  state: CommandState,
+  a: Assignment,
+  replaced: { reason: string; handoff: string } = {
+    reason: "idle_session_retired",
+    handoff: "空闲会话已回收；保留身份、工作区和分支，下次合法唤醒创建新会话。",
+  },
+) {
   // A resumption may enqueue during shutdown, but the fence prevents dispatch.
   // Preserve that queued Run and its original launch snapshot for the new session.
   ensure(
@@ -116,11 +125,66 @@ function finishRetirement(d: CommandDraft, state: CommandState, a: Assignment) {
   d.put("assignments", next);
   d.emit("session_replaced", d.work(a.work_item_id!).card_id, {
     assignment_id: a.id,
-    reason: "idle_session_retired",
+    reason: replaced.reason,
+    ...(replaced.reason === "idle_session_retired"
+      ? {}
+      : { old_runtime_ref: a.runtime_ref ? { ...a.runtime_ref } : null }),
     ...retirementWaitReceipt(a),
-    handoff: "空闲会话已回收；保留身份、工作区和分支，下次合法唤醒创建新会话。",
+    handoff: replaced.handoff,
   });
   return next;
+}
+
+/**
+ * C-667: the host proved that the launched CLI of this exact ref is gone and
+ * only the replacement shell of a kept terminal remained, then closed that
+ * terminal. Settle the session like a retirement: the Assignment, worktree,
+ * branch and any untouched queued Run stay; the next legal wake starts a new
+ * session. A human stop, pending host operation, role upgrade, in-flight stop
+ * or any started Run keeps the reference untouched.
+ */
+export function confirmKeptShellExit(
+  state: CommandState,
+  actor: Actor,
+  id: AssignmentId,
+  releasedRef: RuntimeRef,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "upgrade_idle_assignment_role", ports, (d) => {
+    ensure(
+      actor.kind === "system",
+      "unauthorized",
+      "Only the system may settle an exited Agent session",
+    );
+    const a = d.get("assignments", id);
+    ensure(
+      a.scope === "work_item" &&
+        !a.external &&
+        a.status === "active" &&
+        !a.role_upgrade &&
+        !(
+          a.idle_retirement?.phase === "stopping" && !a.idle_retirement.handoff
+        ) &&
+        !stoppedByHuman(state.events, a.id) &&
+        !hostOpsPending(state.events, a.id) &&
+        JSON.stringify(a.runtime_ref) === JSON.stringify(releasedRef),
+      "illegal_transition",
+      "Session changed while closing the exited Agent terminal",
+    );
+    ensure(
+      !state.runs.some(
+        (r) =>
+          r.assignment_id === a.id && (r.dispatch_stop || r.inactivity_stop),
+      ),
+      "illegal_transition",
+      "A Run stop is still in flight",
+    );
+    return finishRetirement(d, state, a, {
+      reason: "agent_exited",
+      handoff:
+        "Agent 已退出，终端只剩保留的 shell；已关闭该终端，保留身份、工作区和分支，下次合法唤醒创建新会话。",
+    });
+  });
 }
 
 /** A queued Run prevents a new idle claim. Dispatch may present positive exit

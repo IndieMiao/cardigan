@@ -1035,6 +1035,22 @@ export class Dispatcher {
       observation = observed?.ok
         ? `${observed.value.process}/${observed.value.agent}`
         : (observed?.error.code ?? "unavailable");
+      // C-667: never type a bell into the shell a kept terminal left behind.
+      // Keep it pending; maintenance closes the proven shell and the next
+      // pass starts a fresh session (on the latest role version).
+      if (
+        observed?.ok &&
+        observed.value.process === "alive" &&
+        observed.value.kept &&
+        (await this.options.runtime
+          .observe_kept_shell?.(runtimeRef, {
+            project_id: project,
+            assignment_id: a.id,
+          })
+          .then((shell) => shell.ok && shell.value)
+          .catch(() => false))
+      )
+        return skip("kept_shell");
       const systemTurn = guardedTurn?.reason === "system_finished_turn";
       const sessionLoss = observed?.ok
         ? observed.value.process === "exited"
