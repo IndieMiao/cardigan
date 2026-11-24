@@ -103,6 +103,7 @@ import {
 import type { WebConfig } from "./web/config.js";
 import { machineHost } from "./web/machine-host.js";
 import { readMergeCheckLogRange } from "./web/merge-check-log.js";
+import { workbenchReadOptionsFromEnv } from "./web/read-pool.js";
 import {
   type RunningWebServer,
   startWebServer,
@@ -723,12 +724,29 @@ async function assembleServer(
     () => options.dispatcher?.upstream?.browser?.browsers_path,
   );
   const webOptions = options.web;
+  // C-644: heavy Workbench reads leave this event loop when the store is a file.
+  let workbenchReads: WebServerOptions["workbenchReads"];
+  try {
+    const reads =
+      webOptions !== undefined && options.role !== "background" && databaseFile
+        ? workbenchReadOptionsFromEnv({ ...runtimeEnv })
+        : undefined;
+    workbenchReads = reads && { dbPath: databaseFile, ...reads };
+  } catch (error) {
+    await diagnostics?.close();
+    await hostOps?.close();
+    await mcp.close();
+    stopProfiler();
+    if (ownsStore) store.close();
+    throw error;
+  }
   if (webOptions !== undefined && options.role !== "background") {
     try {
       web = await listen(webOptions.config.port, () =>
         startWebServer({
           store,
           mergeGate,
+          ...(workbenchReads ? { workbenchReads } : {}),
           processRole: options.role === "web" ? "web" : "server",
           ...(hostOps
             ? {
