@@ -41,6 +41,7 @@ import {
   reviewRestartStopStarted,
   type SessionActivity,
   systemTurnOwner,
+  type UpstreamDiagnosis,
   type WorkerInspectionRequest,
   withdrawRecoveredHostOpsAction,
   withdrawUnstartedStallRestart,
@@ -114,7 +115,10 @@ import {
   stopRunRuntime,
   stopSystemTurn,
 } from "./stop-run.js";
-import { UpstreamHealthMonitor } from "./upstream-health.js";
+import {
+  UpstreamHealthMonitor,
+  upstreamHoldReason,
+} from "./upstream-health.js";
 
 import { inspectWorker } from "./worker-inspection.js";
 
@@ -1394,7 +1398,7 @@ export class HostOpsService {
           ? undefined
           : false;
       let standingExitReason = "standing_exit_pending";
-      const fail = (reason: string) => {
+      const fail = (reason: string, blockedBy?: UpstreamDiagnosis) => {
         standingExitReason = reason;
         if (action.dispatch_stall_id) {
           const withdrawn = store.uow.run((tx) => {
@@ -1406,6 +1410,7 @@ export class HostOpsService {
                 { clock: this.clock, ids: tx.ids },
                 reason,
                 receiptRecorded,
+                blockedBy,
               ),
             );
             persistEffect(tx, project, effect);
@@ -1668,7 +1673,15 @@ export class HostOpsService {
           return true;
         } catch {
           if (idleOverdue) return true;
-          fail("upstream_recovery_not_ready");
+          // C-680: name the condition that actually held the stop; only a
+          // line fault is "upstream not recovered".
+          const held = this.upstream?.diagnosis(
+            read(),
+            action.assignment_id,
+            action.action_id,
+            activity,
+          );
+          fail(upstreamHoldReason(held), held);
           return false;
         }
       };

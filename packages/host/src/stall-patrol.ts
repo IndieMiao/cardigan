@@ -10,12 +10,16 @@ import {
   eventsOfType,
   type HostOpsExecution,
   hostOpsPending,
+  nudgeStalledPatrol,
   observedLocalExitCause,
   type ProjectId,
+  patrolNudges,
   type Runtime,
   type RuntimeRef,
+  runsOf,
   STANDING_PM_STALL_EVENTS,
   stoppedByHuman,
+  type WithdrawnRecoveryDiagnosis,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
@@ -226,6 +230,8 @@ type PatrolAttempts =
       readonly withdrawn: number;
       readonly last_at?: string;
       readonly reason?: string;
+      /** C-680: the diagnosis that held the last withdrawn attempt. */
+      readonly blocked_by?: WithdrawnRecoveryDiagnosis;
     };
 /** C-669: this incident's system attempts, when every one of them was
  * withdrawn before touching the terminal (`withdrawn_stall_changed`). */
@@ -271,15 +277,35 @@ export function patrolAttempts(
           reason:
             (last.payload as { reason?: string }).reason ??
             "automatic_recovery_withdrawn",
+          ...withdrawnBlockedBy(last),
         }
       : {}),
   };
 }
-const withdrawnNextStep = (reason: string, exhausted: boolean) =>
-  `自动换会话已撤回（${reason}），旧会话未被停止。${
+function withdrawnBlockedBy(e: Event) {
+  const blocked = (
+    e.payload as unknown as { blocked_by?: WithdrawnRecoveryDiagnosis }
+  ).blocked_by;
+  return blocked ? { blocked_by: blocked } : {};
+}
+const withdrawnNextStep = (
+  reason: string,
+  exhausted: boolean,
+  blocked?: WithdrawnRecoveryDiagnosis,
+  nudges?: { attempts: number; limit: number },
+) =>
+  `自动换会话已撤回（${reason}${
+    blocked?.evidence.length ? `：${blocked.evidence.join(", ")}` : ""
+  }），旧会话未被停止。${
+    nudges
+      ? `已在原会话续排 Run ${nudges.attempts}/${nudges.limit} 次${
+          nudges.attempts >= nudges.limit ? "，次数已用完" : ""
+        }；`
+      : ""
+  }${
     exhausted
       ? "自动重试次数已用完；"
-      : "系统每轮巡检复查，终端和进程都确认已退出后自动续起；"
+      : "系统每轮巡检复查：会话仍在时先在原会话续排 Run，终端和进程都确认已退出后自动续起；"
   }旧会话仍在或无法确认时保持不动，请主机运维从派发停滞核对终端归属和进程，确认已退出或空闲后用 host_ops_restart_assignment 续办。`;
 
 /** C-672: only the maintenance fence yields to a proven exited Agent. */
@@ -434,14 +460,28 @@ export class StallPatrol {
       const prior = turnKey(s)
         ? undefined
         : patrolAttempts(state, a.id, s.cause_id);
+      const nudges = patrolNudges(state, a.id, s.cause_id);
+      const light = nudges.length
+        ? {
+            attempts: nudges.length,
+            limit: this.retry.retries,
+            last_at: nudges.at(-1)?.created_at,
+          }
+        : undefined;
       result.push({
         ...s,
         ...(prior && !prior.settled && prior.withdrawn
           ? {
               withdrawn_reason: prior.reason,
+              ...(prior.blocked_by
+                ? { withdrawn_blocked_by: prior.blocked_by }
+                : {}),
+              ...(light ? { light_recovery: light } : {}),
               next_step: withdrawnNextStep(
                 prior.reason ?? "automatic_recovery_withdrawn",
                 prior.withdrawn > this.retry.retries,
+                prior.blocked_by,
+                light,
               ),
             }
           : {}),
@@ -749,6 +789,67 @@ export class StallPatrol {
     if (retry && !this.signal.aborted)
       await this.recoverTurn(retry.state, retry.stall, snapshot, false);
   }
+  private async nudge(
+    project: ProjectId,
+    state: CommandState,
+    patrol: Assignment,
+    stall: DispatchStall,
+    snapshot: (
+      a: Assignment,
+      p: ProjectId,
+    ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
+  ) {
+    const done = patrolNudges(state, patrol.id, stall.cause_id);
+    const last = done.at(-1)?.created_at;
+    if (
+      !patrol.runtime_ref ||
+      done.length >= this.retry.retries ||
+      (last &&
+        Date.parse(this.clock.now()) - Date.parse(last) <
+          this.retry.interval_ms) ||
+      runsOf(state.runs, patrol.id).some(
+        (r) => !["completed", "failed", "cancelled"].includes(r.status),
+      )
+    )
+      return;
+    // Only a session positively seen live gets the Run: a terminal that is
+    // no longer listed would make dispatch start a second session while its
+    // processes may still run.
+    const seen = await this.runtime
+      .status(patrol.runtime_ref)
+      .catch(() => undefined);
+    if (
+      !seen?.ok ||
+      seen.value.process !== "alive" ||
+      seen.value.kept ||
+      this.signal.aborted
+    )
+      return;
+    const launch = await snapshot(patrol, project);
+    if (this.signal.aborted) return;
+    this.store.uow.run((tx) => {
+      const fresh = loadCommandState(tx, project);
+      if (
+        JSON.stringify(fresh.assignments.find((a) => a.id === patrol.id)) !==
+          JSON.stringify(patrol) ||
+        !this.current(fresh, patrol.id, stall.cause_id) ||
+        patrolNudges(fresh, patrol.id, stall.cause_id).length !== done.length
+      )
+        return;
+      const effect = nudgeStalledPatrol(
+        fresh,
+        { kind: "system", project_id: project },
+        {
+          assignment_id: patrol.id,
+          cause_id: stall.cause_id,
+          snapshot: launch,
+          attempt: done.length + 1,
+        },
+        { clock: this.clock, ids: tx.ids },
+      );
+      if (effect.ok) persistEffect(tx, project, effect.value);
+    });
+  }
   async tick(
     project: ProjectId,
     snapshot: (
@@ -808,14 +909,22 @@ export class StallPatrol {
     const next = candidates[0];
     if (!next) return;
     const own = next.s;
-    if (
-      !(next.prior.withdrawn
-        ? !stoppedByHuman(state.events, patrol.id) &&
-          (await this.sessionGone(state, patrol))
-        : (await this.evidence(state, patrol)).can_restart) ||
-      this.signal.aborted
+    if (next.prior.withdrawn && !stoppedByHuman(state.events, patrol.id)) {
+      const gone = await this.sessionGone(state, patrol);
+      if (this.signal.aborted) return;
+      // C-680: a withdrawn restart whose session is still there is resumed
+      // the lightest way, as a human `assignment start` would: queue a Run
+      // for the original session, bounded per incident; nothing is stopped.
+      if (!gone) {
+        await this.nudge(project, state, patrol, own, snapshot);
+        return;
+      }
+    } else if (
+      next.prior.withdrawn ||
+      !(await this.evidence(state, patrol)).can_restart
     )
       return;
+    if (this.signal.aborted) return;
     const launch = await snapshot(patrol, project);
     if (this.signal.aborted) return;
     this.store.uow.run((tx) => {

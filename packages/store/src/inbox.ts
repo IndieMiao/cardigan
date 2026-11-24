@@ -192,7 +192,8 @@ export interface MoveNotificationInput {
   readonly id: string;
   readonly event: NotificationEvent;
   readonly at?: string;
-  /** A failed in-turn send is an undelivered inbox item, not a Run-owned incident. */
+  /** A failed in-turn send is an undelivered inbox item, not a Run-owned incident.
+   * C-680: also honoured on `retry`, when an ended standing turn left it unread. */
   readonly unbind_continuation?: boolean;
   /** Extra facts the dispatcher writes in the same step (attempts, bell…). */
   readonly patch?: Partial<
@@ -224,7 +225,10 @@ export function moveNotification(
   const next: Notification = {
     ...rest,
     ...(run_id &&
-    !(input.event === "deliver_failed" && input.unbind_continuation)
+    !(
+      (input.event === "deliver_failed" || input.event === "retry") &&
+      input.unbind_continuation
+    )
       ? { run_id }
       : {}),
     ...input.patch,

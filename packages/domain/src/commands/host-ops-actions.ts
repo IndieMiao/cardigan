@@ -1056,6 +1056,12 @@ export function requestExitConfirmationInDraft(
 }
 
 /** Evidence changed before a stall recovery touched the terminal. Drop only this intent; never release a stop already in flight. */
+/** C-680: the upstream diagnosis that withdrew an automatic recovery. */
+export interface WithdrawnRecoveryDiagnosis {
+  readonly cause: string;
+  readonly action: string;
+  readonly evidence: readonly string[];
+}
 export function withdrawUnstartedStallRestart(
   state: CommandState,
   actor: Actor,
@@ -1066,6 +1072,8 @@ export function withdrawUnstartedStallRestart(
    * A later receipt can stand for the incident only after earlier attempts
    * are positively known not to have written one. */
   backupRecorded?: boolean,
+  /** C-680: the diagnosis that actually held the stop, as recorded facts. */
+  blockedBy?: WithdrawnRecoveryDiagnosis,
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
     const action = pendingHostOpsActions(state.events).find(
@@ -1091,6 +1099,15 @@ export function withdrawUnstartedStallRestart(
       ...(backupRecorded === undefined
         ? {}
         : { backup_recorded: backupRecorded }),
+      ...(blockedBy
+        ? {
+            blocked_by: {
+              cause: blockedBy.cause,
+              action: blockedBy.action,
+              evidence: [...blockedBy.evidence],
+            },
+          }
+        : {}),
       body: "派发积压、终端或工作区证据已改变；未停止旧会话，请 PM 核对。",
     });
   });

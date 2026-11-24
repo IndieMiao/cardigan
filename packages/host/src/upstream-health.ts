@@ -627,3 +627,28 @@ export class UpstreamHealthMonitor {
     this.classificationFailures.add(project);
   }
 }
+
+/**
+ * C-680: the reason an automatic recovery was held by the upstream check.
+ * Only a line fault (an open incident, a failed probe or a harness-reported
+ * API error) is "upstream not recovered"; anything else names the session
+ * condition the diagnosis actually reported (for example `agent_busy`).
+ */
+export function upstreamHoldReason(diagnosis: UpstreamDiagnosis | undefined) {
+  if (!diagnosis) return "upstream_diagnosis_unavailable";
+  if (
+    diagnosis.incident_id ||
+    diagnosis.cause === "upstream_unreachable" ||
+    diagnosis.cause === "upstream_suspected"
+  )
+    return "upstream_recovery_not_ready";
+  if (
+    diagnosis.evidence.some((e) =>
+      ["classification_failed", "provider_not_resolved"].includes(e),
+    )
+  )
+    return "upstream_diagnosis_unavailable";
+  return diagnosis.cause === "unknown"
+    ? "session_state_unconfirmed"
+    : diagnosis.cause;
+}

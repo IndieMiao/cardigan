@@ -469,14 +469,13 @@ test("an inconclusive interaction holds an idle session only until the threshold
   expect(runtime.retire_idle).not.toHaveBeenCalled();
   expect(hostOpsPending(f.state().events, pm.id)).toBe(true);
   expect(
-    f
-      .state()
-      .events.some(
-        (e) =>
-          e.type === "host_ops_action_deferred" &&
-          (e.payload as { reason?: string }).reason ===
-            "upstream_recovery_not_ready",
-      ),
+    f.state().events.some(
+      (e) =>
+        e.type === "host_ops_action_deferred" &&
+        // C-680: an inconclusive interaction is no upstream fault.
+        (e.payload as { reason?: string }).reason ===
+          "session_state_unconfirmed",
+    ),
   ).toBe(true);
   f.advance(150_000);
   await service.tick();
