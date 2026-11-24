@@ -88,7 +88,7 @@ const [c1, c2, c3, c4] = [1, 2, 3, 4].map((n) => id("card", n)) as [
  * merge. C3 also holds a restricted batch check and the finish of a
  * system-stream host action. C4 is done with an open human-only action.
  */
-function scenario(define: (s: CommandState) => Event[]): {
+function scenario(define: (s: CommandState) => readonly Event[]): {
   full: CommandState;
   hot: CommandState;
 } {
