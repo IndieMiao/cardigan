@@ -200,6 +200,7 @@ const plain: Record<
   (events: readonly Event[], key: unknown) => readonly Event[]
 > = {
   decision_id: fieldIndex("decision_id"),
+  human_action_id: fieldIndex("human_action_id"),
   completion_id: fieldIndex("completion_id"),
   work_item_id: fieldIndex("work_item_id"),
   resume_work_items: keyedEvents((e) => {
@@ -231,6 +232,8 @@ function query(
 
 export const eventsForDecision = (events: readonly Event[], key: string) =>
   query(events, "decision_id", key);
+export const eventsForHumanAction = (events: readonly Event[], key: string) =>
+  query(events, "human_action_id", key);
 export const eventsForCompletion = (events: readonly Event[], key: string) =>
   query(events, "completion_id", key);
 export const eventsForWorkItem = (events: readonly Event[], key: string) =>

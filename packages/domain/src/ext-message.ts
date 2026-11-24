@@ -2,7 +2,11 @@ import { type CommandState, command } from "./commands/core.js";
 import { notices } from "./commands/notices.js";
 import { selectNeedsYouDecisions } from "./commands/queries.js";
 import type { Event, ReadyCondition } from "./entities.js";
-import { fullEventHistory } from "./event-index.js";
+import {
+  eventById,
+  eventsForDecision,
+  eventsForHumanAction,
+} from "./event-index.js";
 import type { CardId, EventId, ProjectId } from "./ids.js";
 import { NEEDS_YOU_ITEM_READY, needsYouItemReady } from "./readiness.js";
 
@@ -179,6 +183,42 @@ function sameGate(gate: ReadyCondition | undefined, recorded: unknown) {
   );
 }
 
+/**
+ * Facts of one Needs You item from the events naming it, in history order:
+ * the first is the source, including legacy events with both references.
+ * C-653: keyed lookups (decision and human action ids never share a prefix),
+ * never a scan of the whole history.
+ */
+function itemHistory(
+  history: readonly Event[],
+  events: readonly Event[],
+  gate: ReadyCondition | undefined,
+) {
+  const [source] = events;
+  if (!source) return undefined;
+  const times = new Set<string>();
+  let datedRelease = false;
+  // A handoff or reissue never erases an earlier quiet touch. The readiness
+  // notification and the source change it references can straddle quiet hours.
+  for (const e of events) {
+    const p = e.payload as Record<string, unknown>;
+    times.add(e.created_at);
+    const trigger =
+      typeof p.source_event_id === "string"
+        ? eventById(history, p.source_event_id)?.created_at
+        : undefined;
+    if (!trigger) continue;
+    times.add(trigger);
+    if (
+      e.type === NEEDS_YOU_ITEM_READY &&
+      "condition" in p &&
+      sameGate(gate, p.condition)
+    )
+      datedRelease = true;
+  }
+  return { source, times, datedRelease };
+}
+
 /** Replayable projection of canonical Needs You facts, including handled items for skip auditing. */
 export function extMessageItems(
   state: CommandState,
@@ -204,58 +244,14 @@ export function extMessageItems(
     ids.some(
       (id) => !id || !cards.has(id) || cards.get(id)?.sensitive === true,
     );
-  // Preserve first-match stream order, including legacy events with both references.
-  const history = new Map<
-    string,
-    { source: Event; times: Set<string>; datedRelease: boolean }
-  >();
-  const gates = new Map<string, ReadyCondition | undefined>(
-    [...state.decisions, ...state.human_actions].map((item) => [
-      item.id,
-      item.ready_when,
-    ]),
-  );
-  // Sources and decision touches include telemetry (run starts and ends).
-  const events = fullEventHistory(state.events);
-  const eventTimes = new Map<string, string>(
-    events.map((e) => [e.id, e.created_at]),
-  );
-  // A handoff or reissue never erases an earlier quiet touch. The readiness
-  // notification and the source change it references can straddle quiet hours.
-  for (const e of events) {
-    const p = e.payload;
-    if (!p || typeof p !== "object") continue;
-    const trigger =
-      "source_event_id" in p && typeof p.source_event_id === "string"
-        ? eventTimes.get(p.source_event_id)
-        : undefined;
-    for (const id of [
-      "decision_id" in p && p.decision_id,
-      "human_action_id" in p && p.human_action_id,
-    ]) {
-      if (typeof id !== "string") continue;
-      const entry = history.get(id) ?? {
-        source: e,
-        times: new Set<string>(),
-        datedRelease: false,
-      };
-      entry.times.add(e.created_at);
-      if (trigger) {
-        entry.times.add(trigger);
-        if (
-          e.type === NEEDS_YOU_ITEM_READY &&
-          "condition" in p &&
-          sameGate(gates.get(id), p.condition)
-        )
-          entry.datedRelease = true;
-      }
-      history.set(id, entry);
-    }
-  }
   const out: ExtMessageItem[] = [];
   for (const q of state.decisions) {
     if (q.decider !== "human") continue;
-    const facts = history.get(q.id);
+    const facts = itemHistory(
+      state.events,
+      eventsForDecision(state.events, q.id),
+      q.ready_when,
+    );
     if (!facts) continue;
     const { source: event, times, datedRelease } = facts;
     const ready = needsYouItemReady(state, q);
@@ -286,7 +282,11 @@ export function extMessageItems(
   }
   for (const h of state.human_actions) {
     if (h.triage === "pm_ops") continue;
-    const facts = history.get(h.id);
+    const facts = itemHistory(
+      state.events,
+      eventsForHumanAction(state.events, h.id),
+      h.ready_when,
+    );
     if (!facts) continue;
     const { source: event, times, datedRelease } = facts;
     if (h.ready_released) times.add(h.ready_released.at);
