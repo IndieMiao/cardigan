@@ -65,6 +65,7 @@ import {
   unfinishedBellAttempts,
   writeRole,
 } from "@cardigan/store";
+import { watchAttachNotices } from "./attach-notice.js";
 import { loadConfig, loadSecrets } from "./config.js";
 import {
   CliError,
@@ -1205,10 +1206,16 @@ export async function runAssignmentCommand(
     if (sub === "attach") {
       const printOnly =
         flags.print === "true" || !io.stdinIsTTY || !io.stdoutIsTTY;
-      // Hold the retirement lock while a human observes or controls this session.
+      const interactive = flags.interactive === "true";
+      // Hold the retirement lock while a human observes or controls this
+      // session; C-678 records who holds it so a waiting action can say why.
       const unlock = printOnly
         ? undefined
-        : await tryHostOpsLock(store, project_id, assignmentId);
+        : await tryHostOpsLock(store, project_id, assignmentId, "host-ops", {
+            kind: "attach",
+            mode: interactive ? "interactive" : "observe",
+            started_at: new Date().toISOString(),
+          });
       if (!printOnly && !unlock)
         throw attachFailure(assignmentId, "会话维护中，请稍后重试");
       try {
@@ -1219,18 +1226,27 @@ export async function runAssignmentCommand(
           runtime,
           printOnly,
         });
-        const interactive = flags.interactive === "true";
         if (printOnly) {
           io.stdout(`${entry}${interactive ? "" : " --observe"}`);
           return EXIT.ok;
         }
-        return await enterAssignment(
-          io,
-          runtime,
-          ref,
-          assignmentId,
-          interactive,
-        );
+        const stopNotices = watchAttachNotices({
+          store,
+          project_id,
+          assignment_id: assignmentId,
+          write: (text) => io.stderr(text),
+        });
+        try {
+          return await enterAssignment(
+            io,
+            runtime,
+            ref,
+            assignmentId,
+            interactive,
+          );
+        } finally {
+          stopNotices();
+        }
       } finally {
         await unlock?.();
       }

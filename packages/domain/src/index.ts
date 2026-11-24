@@ -55,6 +55,7 @@ export * from "./commands/flow.js";
 export { DEFAULT_FRAMEWORK_WAIT_REMINDER_MS } from "./commands/framework-dependencies.js";
 export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
+export * from "./commands/host-ops-attached-wait.js";
 export * from "./commands/host-ops-context-restart.js";
 export * from "./commands/host-ops-rotate.js";
 export { refreshHumanActionFollowUps } from "./commands/human-action-follow-ups.js";

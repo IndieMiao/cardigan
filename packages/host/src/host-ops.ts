@@ -2,7 +2,9 @@ import { isDeepStrictEqual } from "node:util";
 import {
   type Assignment,
   type AssignmentId,
+  ATTACHED_HUMAN_WAIT_OVERDUE,
   admitWorkerInspection,
+  attachedHumanWaits,
   automaticContextActionForRun,
   automaticContextRestartReady,
   beginAutomaticContextRestart,
@@ -15,6 +17,7 @@ import {
   claimHostOpsAction,
   contextUsageFresh,
   currentHarnessActivity,
+  DEFAULT_ATTACHED_HUMAN_NOTICE_MS,
   dispatchRecoveryQueuedAt,
   eventById,
   finishHostOpsAction,
@@ -34,6 +37,7 @@ import {
   type Runtime,
   type RuntimeRef,
   recheckMerge,
+  recordAttachedHumanWait,
   recordAutomaticContextRestartResult,
   recordContextUsageNotices,
   requestHostOpsExitConfirmation,
@@ -84,7 +88,7 @@ import {
   type SessionContextDiagnostic,
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
-import { tryHostOpsLock } from "./host-ops-lock.js";
+import { hostOpsLockHolder, tryHostOpsLock } from "./host-ops-lock.js";
 import {
   incidentIdentity,
   settlementIdentityHolds,
@@ -162,6 +166,8 @@ interface Options {
   onError?: (error: unknown) => void;
   /** C-625: standing PM exit timings; defaults read the environment. */
   standingExit?: StandingExitPolicy;
+  /** C-678: Needs You notice after an attached human held an action this long. */
+  attachedHumanNoticeMs?: number;
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
@@ -182,6 +188,11 @@ export class HostOpsService {
     }
   >();
   private readonly actionWorkers = new Map<string, Promise<void>>();
+  /** C-678: last recorded attached-human wait per action; skips idle writes. */
+  private readonly attachedWaits = new Map<
+    string,
+    { started_at: string; since: number; overdue: boolean }
+  >();
   private readonly contextAbort = new AbortController();
   private contextPoll: Promise<void> | undefined;
   private closing = false;
@@ -1193,6 +1204,98 @@ export class HostOpsService {
       });
     });
   }
+  /**
+   * C-678: the session-ending action stays queued while a human is attached
+   * (that protection is unchanged). Record why, with when the connection
+   * began, so the attached human, the requester and PM see it at once; a
+   * Needs You notice follows once the wait is overdue. After detaching, the
+   * next drain takes the lock and the action continues without a new request.
+   */
+  private async noteAttachedHuman(
+    project: ProjectId,
+    action: HostOpsExecution,
+  ) {
+    const { store } = this.options;
+    const holder = await hostOpsLockHolder(
+      store,
+      project,
+      action.assignment_id,
+    );
+    if (!holder) return;
+    const after =
+      this.options.attachedHumanNoticeMs ?? DEFAULT_ATTACHED_HUMAN_NOTICE_MS;
+    const seen = this.attachedWaits.get(action.action_id);
+    if (
+      seen?.started_at === holder.started_at &&
+      (seen.overdue || Date.parse(this.clock.now()) < seen.since + after)
+    )
+      return;
+    store.uow.run((tx) => {
+      const state = loadCommandState(tx, project);
+      const earlier = attachedHumanWaits(state.events, action.action_id);
+      const effect = unwrap(
+        recordAttachedHumanWait(
+          state,
+          { kind: "system", project_id: project },
+          {
+            action_id: action.action_id,
+            attached: { mode: holder.mode, started_at: holder.started_at },
+            notice_after_ms: after,
+          },
+          { clock: this.clock, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, project, effect);
+      const { waiting, overdue } = effect.data;
+      if (waiting && earlier.length === 0) {
+        const target = state.assignments.find(
+          (a) => a.id === action.assignment_id,
+        );
+        const requester = state.events.find(
+          (e) => e.id === action.action_id,
+        )?.actor;
+        const recipients: Parameters<
+          typeof recordNotification
+        >[1]["recipient"][] = [];
+        // Never bell the attached session itself: it would type into the
+        // terminal the human is using.
+        if (
+          requester?.kind === "assignment" &&
+          requester.assignment_id !== action.assignment_id &&
+          state.assignments.find((a) => a.id === requester.assignment_id)
+            ?.status === "active"
+        )
+          recipients.push({
+            kind: "assignment",
+            assignment_id: requester.assignment_id,
+          });
+        // A standing PM target is the attached session itself.
+        if (!(target?.scope === "standing" && target.role_id === "pm"))
+          recipients.push({ kind: recoveryPm(target) });
+        for (const recipient of recipients)
+          recordNotification(store.database, {
+            project_id: project,
+            event_id: waiting.id,
+            seq: waiting.seq,
+            kind: "run_attention",
+            at: waiting.created_at,
+            recipient,
+          });
+      }
+      this.attachedWaits.set(action.action_id, {
+        started_at: holder.started_at,
+        since: Date.parse(earlier[0]?.created_at ?? this.clock.now()),
+        overdue:
+          !!overdue ||
+          state.events.some(
+            (e) =>
+              e.type === ATTACHED_HUMAN_WAIT_OVERDUE &&
+              (e.payload as { action_id?: string }).action_id ===
+                action.action_id,
+          ),
+      });
+    });
+  }
   private defer(project: ProjectId, action: string, reason: string) {
     this.options.store.uow.run((tx) => {
       const events = loadCommandState(tx, project).events;
@@ -1310,7 +1413,11 @@ export class HostOpsService {
     // and proves exit the same way before its successor is queued.
     const preserve = turnRecovery || !!action.dispatch_stall_id;
     const unlock = await tryHostOpsLock(store, project, action.assignment_id);
-    if (!unlock) return;
+    if (!unlock) {
+      await this.noteAttachedHuman(project, action);
+      return;
+    }
+    this.attachedWaits.delete(action.action_id);
     let unlockLaunch: Awaited<ReturnType<typeof tryHostOpsLock>>;
     try {
       if (action.retirement_handoff) {

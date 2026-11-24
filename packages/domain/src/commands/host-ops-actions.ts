@@ -49,6 +49,7 @@ import {
   unwrap,
 } from "./core.js";
 import { decisionFollowupBlocked } from "./decision-followup.js";
+import { hostOpsActionWaitStatus } from "./host-ops-attached-wait.js";
 import { cancelRunDispatch, queueRunInDraft, settingsValid } from "./launch.js";
 import { projectPreferences } from "./preferences.js";
 import { stoppedByHuman } from "./stop-state.js";
@@ -844,14 +845,8 @@ export function hostOpsReadDiagnostics(state: CommandState, actor: Actor) {
         action_id: a.action_id,
         tool: a.tool,
         target_id: a.target_id,
-        status_reason:
-          (
-            state.events.findLast(
-              (e) =>
-                e.type === "host_ops_action_deferred" &&
-                (e.payload as { action_id: string }).action_id === a.action_id,
-            )?.payload as { reason?: string } | undefined
-          )?.reason ?? "pending",
+        // C-678: an attached human's wait names when the connection began.
+        ...hostOpsActionWaitStatus(state.events, a.action_id),
       })),
     };
   });
