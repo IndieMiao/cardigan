@@ -19,11 +19,17 @@ import type { Event } from "./entities.js";
 export type EventIndexKind =
   | "type"
   | "decision_id"
+  | "human_action_id"
   | "completion_id"
   | "work_item_id"
   | "resume_work_items";
 
-const FIELDS = ["decision_id", "completion_id", "work_item_id"] as const;
+const FIELDS = [
+  "decision_id",
+  "human_action_id",
+  "completion_id",
+  "work_item_id",
+] as const;
 
 type Seg = { readonly events: Event[]; readonly ords: number[] };
 /**
