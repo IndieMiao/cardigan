@@ -403,6 +403,20 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
         ).code,
       ).toBe(0);
     }
+    // C-684: a person opens dev cards only once the project allows them.
+    expect(
+      (
+        await cardigan([
+          "preference",
+          "set",
+          "human-card-templates",
+          "dev",
+          "on",
+          "--project",
+          project_id,
+        ])
+      ).code,
+    ).toBe(0);
     expect(
       (
         await cardigan([
