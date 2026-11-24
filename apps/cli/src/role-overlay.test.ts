@@ -36,7 +36,15 @@ beforeEach(async () => {
     captureCommand: async () => ({ code: 1, stdout: "", stderr: "" }),
   };
   await run(["init"]);
-  await run(["project", "create", PROJECT, "--code", "PRO"]);
+  await run([
+    "project",
+    "create",
+    PROJECT,
+    "--code",
+    `T${PROJECT.replace(/[^a-z0-9]/gu, "")
+      .slice(0, 3)
+      .toUpperCase()}`,
+  ]);
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 

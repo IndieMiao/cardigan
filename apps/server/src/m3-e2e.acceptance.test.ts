@@ -324,7 +324,20 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
 
     roleConfig(root, "pi-agent");
     expect((await cardigan(["init"])).code).toBe(0);
-    expect((await cardigan(["project", "create", project_id, "--code", "PRO"])).code).toBe(0);
+    expect(
+      (
+        await cardigan([
+          "project",
+          "create",
+          project_id,
+          "--code",
+          `T${project_id
+            .replace(/[^a-z0-9]/gu, "")
+            .slice(0, 3)
+            .toUpperCase()}`,
+        ])
+      ).code,
+    ).toBe(0);
     expect(
       (
         await cardigan([
