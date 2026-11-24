@@ -334,6 +334,8 @@ export class Dispatcher {
   private serial: Promise<void> = Promise.resolve();
   /** C-244: per project; survives ticks, a restart starts empty and re-evaluates once. */
   private readonly followups = new Map<ProjectId, DecisionFollowupSchedule>();
+  /** C-649: projects whose state was warmed in a read slice after start. */
+  private readonly warmed = new Set<ProjectId>();
   private readonly nextRoleUpgrade = new Map<ProjectId, number>();
   /** C-244: candidate lists per project, kept across ticks (memory only). */
   private candidateIndex: CandidateIndex | undefined;
@@ -532,6 +534,24 @@ export class Dispatcher {
     const step = <T>(name: string, run: () => T) =>
       profileSpanSync(`route.${name}`, run);
     await this.options.leases?.reconcile(project, () => this.clock.now());
+    // C-649: after a restart, decode the project's history and build its first
+    // state in a read slice of its own, then yield, so the first write
+    // transaction does not add that work to one long main-thread pause.
+    if (!this.warmed.has(project)) {
+      try {
+        while (!step("warm_events", () => store.warmCommandEvents(project)))
+          await yieldToLoop();
+        await yieldToLoop();
+        step("warm_state", () =>
+          store.uow.read((tx) => this.loadState(tx, project)),
+        );
+      } catch {
+        // Best effort: the first reader decodes whatever is left.
+      } finally {
+        this.warmed.add(project);
+      }
+      await yieldToLoop();
+    }
     step("patrol_host_ops", () =>
       patrolHostOps(
         store,

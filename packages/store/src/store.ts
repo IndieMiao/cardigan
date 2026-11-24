@@ -244,14 +244,18 @@ export interface StoreOptions {
   readonly commandState?: CommandStateScope;
 }
 
-/** `hot`: open cards' streams plus durable closed-card facts; `full`: all history. */
-export type CommandStateScope = "full" | "hot";
+/**
+ * `hot`: open cards' streams plus durable closed-card facts; `full`: all
+ * history; `lean` (C-649): hot, plus closed-card GitHub dispatch records left
+ * out and project-stream retention by type.
+ */
+export type CommandStateScope = "full" | "hot" | "lean";
 export function commandStateScope(
   value: string | undefined,
 ): CommandStateScope {
   if (value === undefined || value === "" || value === "hot") return "hot";
-  if (value === "full") return "full";
-  throw new Error("CARDIGAN_COMMAND_STATE must be hot or full");
+  if (value === "full" || value === "lean") return value;
+  throw new Error("CARDIGAN_COMMAND_STATE must be hot, lean or full");
 }
 
 export interface GetUpdatesParams {
@@ -945,6 +949,32 @@ export class Store {
       events.commit();
       snapshots?.commit();
       return result;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      this.#rollbacks++;
+      throw error;
+    } finally {
+      this.#inTransaction = false;
+    }
+  }
+
+  /**
+   * C-649: decode up to `rows` more of a project's events into the shared
+   * command-event log in a short read transaction. Returns true once the log
+   * is current; callers yield between calls to keep restart pauses short.
+   */
+  warmCommandEvents(project: ProjectId, rows = 50_000): boolean {
+    if (this.#inTransaction) {
+      throw new Error("nested UnitOfWork is not supported");
+    }
+    this.#db.exec("BEGIN DEFERRED");
+    this.#inTransaction = true;
+    const events = this.#commandEvents.transaction(this.#db);
+    try {
+      const done = events.warm(project, rows);
+      this.#db.exec("COMMIT");
+      events.commit();
+      return done;
     } catch (error) {
       this.#db.exec("ROLLBACK");
       this.#rollbacks++;

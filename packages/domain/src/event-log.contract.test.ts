@@ -7,14 +7,17 @@ import {
   commandEventHistory,
   commandStreamHistory,
   eventById,
+  eventsAtSeq,
   eventsForCompletion,
   eventsForDecision,
   eventsForHumanAction,
   eventsForWorkItem,
   eventsOfType,
+  eventsOfTypes,
   fullEventHistory,
   isTelemetryEvent,
   resumeEventsForItem,
+  streamEvents,
   telemetryEvents,
 } from "./event-index.js";
 import {
@@ -114,6 +117,32 @@ function expectSameLookups(
   for (let n = 0; n < 80; n++)
     expect(eventById(indexed, eventId(n))).toBe(eventById(copy, eventId(n)));
   expect(eventById(indexed, undefined)).toBeUndefined();
+}
+
+/** C-649: multi-type, per-stream and per-seq lookups equal the plain filters. */
+function expectGroupLookups(indexed: readonly Event[], copy: readonly Event[]) {
+  expect(indexed).toEqual(copy);
+  for (const set of [
+    ["run_started", "noise"],
+    ["noise", "run_started", "noise"],
+    ["decision_requested", "__proto__", "absent"],
+    ["absent"],
+    [],
+  ]) {
+    const expected = copy.filter((e) => set.includes(e.type));
+    expect(eventsOfTypes(indexed, set)).toEqual(expected);
+    expect(eventsOfTypes(copy, set)).toEqual(expected);
+  }
+  for (const card of [undefined, ...cards, id("card", 9)]) {
+    const stream = copy.filter((e) => (e.card_id ?? "") === (card ?? ""));
+    expect(streamEvents(indexed, card)).toEqual(stream);
+    expect(streamEvents(copy, card)).toEqual(stream);
+    for (const seq of new Set([0, ...stream.map((e) => e.seq), 99])) {
+      const at = stream.filter((e) => e.seq === seq);
+      expect(eventsAtSeq(indexed, card, seq)).toEqual(at);
+      expect(eventsAtSeq(copy, card, seq)).toEqual(at);
+    }
+  }
 }
 
 test("C-640: log views and indexes match the legacy history and per-array scans", () => {
@@ -438,4 +467,92 @@ test("C-643: the Store command stream drops telemetry but answers every lookup o
       committed.push(...added);
     }
   }
+});
+
+test("C-649: multi-type, stream and seq lookups match plain filters on full, filtered and appended histories", () => {
+  const omit = new Set(["run_started", "__proto__"]);
+  for (let seed = 1; seed <= 40; seed++) {
+    const pick = rng(seed);
+    const seqs = new Map<string, number>();
+    const next = { id: 1 };
+    const log = new EventLog();
+    const committed: Event[] = [];
+    for (let round = 0; round < 3; round++) {
+      const overlay = new EventLog(log.end);
+      const added = randomBatch(pick, seqs, next, pick(14));
+      for (const event of added) overlay.append(event);
+      const all = [...committed, ...added];
+      const order = ["", ...cards.slice(0, 3)];
+      for (const { view, events } of [
+        {
+          view: new EventLogView(log, log.end, overlay, overlay.end),
+          events: all,
+        },
+        { view: new EventLogView(log, log.end), events: [...committed] },
+      ]) {
+        expectGroupLookups(view.history(order), legacyHistory(events, order));
+        const full = new Set(cards.filter(() => pick(2) === 0));
+        const expected = legacyHistory(events, order).filter(
+          (e) => !e.card_id || full.has(e.card_id) || !omit.has(e.type),
+        );
+        const history = view.history(order, { full, omit });
+        expectGroupLookups(history, expected);
+        const tail = randomBatch(pick, new Map(seqs), { id: 1000 }, 3);
+        expectGroupLookups(appendEvents(history, tail), [...expected, ...tail]);
+        // Project-stream retention by id: history and every lookup agree.
+        const dropped = new Set(
+          events.filter((e) => !e.card_id && pick(2) === 0).map((e) => e.id),
+        );
+        const retained = expected.filter((e) => !dropped.has(e.id));
+        const kept = view.history(order, { full, omit, dropped });
+        expect(view.history(order, { full, omit, dropped })).toBe(kept);
+        expectGroupLookups(kept, retained);
+        expectSameLookups(kept, retained);
+        expect(
+          streamHistory(new Map(view), order, { full, omit, dropped }),
+        ).toEqual(retained);
+      }
+      for (const event of overlay.all) log.append(event);
+      committed.push(...added);
+    }
+  }
+});
+
+test("C-649: histories with different dropped sets never share index answers", () => {
+  const log = new EventLog();
+  const at = "2026-01-01T00:00:00.000Z";
+  const actor = { kind: "system", project_id: "fixture-project" } as const;
+  const p = (n: number): Event => ({
+    id: eventId(n),
+    seq: n,
+    type: "noise",
+    actor,
+    payload: { decision_id: "Q-1" },
+    created_at: at,
+  });
+  for (const n of [1, 2, 3]) log.append(p(n));
+  const order = [""];
+  const omit = new Set<string>();
+  const full = new Set<string>();
+  const ids = (events: readonly Event[]) => events.map((e) => e.seq);
+  const first = new EventLogView(log, log.end).history(order, {
+    full,
+    omit,
+    dropped: new Set([eventId(1)]),
+  });
+  expect(ids(eventsOfType(first, "noise"))).toEqual([2, 3]);
+  expect(ids(eventsForDecision(first, "Q-1"))).toEqual([2, 3]);
+  const second = new EventLogView(log, log.end).history(order, {
+    full,
+    omit,
+    dropped: new Set([eventId(2)]),
+  });
+  expect(ids(eventsOfType(second, "noise"))).toEqual([1, 3]);
+  expect(ids(eventsForDecision(second, "Q-1"))).toEqual([1, 3]);
+  const none = new EventLogView(log, log.end).history(order, {
+    full,
+    omit,
+    dropped: new Set(),
+  });
+  expect(ids(eventsOfType(none, "noise"))).toEqual([1, 2, 3]);
 });
