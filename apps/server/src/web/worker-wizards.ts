@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { activeOwner, type Clock } from "@cardigan/domain";
 import {
   commitWorkerFile,
+  deviceInitPlan,
+  deviceInitScript,
   effectiveRunLimit,
   explicitMcpUrl,
   loadRuntimeWorkers,
@@ -12,6 +14,7 @@ import {
   type WizardFilePlan,
   WorkerOnboardingError,
   workerMcpConfig,
+  workerPublicKey,
   workerWizardForm,
 } from "@cardigan/host";
 import type { ReadRepositories, Store, WebSession } from "@cardigan/store";
@@ -46,6 +49,12 @@ interface Session {
   steps: StepRecord[];
   check_id?: string;
   error?: string;
+  /** C-706: the device pairing this draft came from and its initialisation. */
+  pairing?: {
+    id: string;
+    init: "waiting" | "fetched" | "succeeded" | "failed";
+    at?: string;
+  };
 }
 const stale = () =>
   new HttpRejection(
@@ -122,6 +131,9 @@ function view(s: Session) {
       "仅在目标机管理员终端执行。新建账号前核对名称和数字身份均空闲；按操作手册准备受保护的安装包、目录、认领标记和本机安装配置，Mac 先安装并核验签名 App。已有冲突请停下核对。",
     check_id: s.check_id,
     error: s.error,
+    ...(s.pairing
+      ? { device_init: { state: s.pairing.init, at: s.pairing.at } }
+      : {}),
     ...(s.preview
       ? {
           preview: {
@@ -146,7 +158,147 @@ export class WorkerWizards {
     private limit?: ((id: string) => number) | undefined,
     private max?: ((id: string) => number) | undefined,
     private pairings?: DevicePairings | undefined,
-  ) {}
+  ) {
+    pairings?.attach({
+      state: (id) => {
+        const s = this.sessions.get(id);
+        if (!s?.pairing || this.signal.aborted) return "unavailable";
+        if (s.pairing.init === "succeeded") return "succeeded";
+        return s.phase === "preview" ? "waiting" : "ready";
+      },
+      script: (id) => this.deviceScript(id),
+      completed: (id, ok) => this.deviceCompleted(id, ok),
+    });
+  }
+  /** A live paired session, or the device's view of why not. */
+  private paired(id: string) {
+    const s = this.sessions.get(id);
+    if (
+      !s?.pairing ||
+      !this.host ||
+      this.signal.aborted ||
+      (s.expires <= Date.parse(this.clock.now()) && s.phase !== "running")
+    )
+      throw new HttpRejection(
+        410,
+        "device_init_unavailable",
+        "向导草稿已取消或过期，请重新配对。",
+      );
+    return { s, pairing: s.pairing, host: this.host };
+  }
+  /**
+   * C-706: the one-time init script of a confirmed draft. Only the confirmed
+   * configuration and the host's public key go in; no token or credential.
+   */
+  private deviceScript(id: string) {
+    const { s, pairing, host } = this.paired(id);
+    if (s.phase === "preview")
+      throw new HttpRejection(
+        409,
+        "device_init_not_ready",
+        "请先在 Workbench 向导里确认写入配置。",
+      );
+    if (pairing.init === "succeeded")
+      throw new HttpRejection(409, "device_init_reported", "本机已完成初始化");
+    let script: string;
+    try {
+      script = deviceInitScript(
+        deviceInitPlan(s.draft.config, workerPublicKey(host.root)),
+      );
+    } catch (e) {
+      const code = safeError(e);
+      throw new HttpRejection(
+        409,
+        code === "worker_public_key_invalid"
+          ? "device_init_public_key_missing"
+          : "device_init_unsupported",
+        code === "worker_public_key_invalid"
+          ? "控制主机配置目录里没有可用的 worker-key.pub（Ed25519 公钥），请在控制主机补上后重试。"
+          : "这份向导配置不能生成初始化脚本，请按操作手册手工准备。",
+      );
+    }
+    if (pairing.init === "waiting") pairing.init = "fetched";
+    return script;
+  }
+  /**
+   * C-706: the device ran its script. Record it and, on success, start the
+   * wizard's recheck as the owner who confirmed the draft (still checked to
+   * be the active owner); the check itself verifies everything over SSH.
+   */
+  private deviceCompleted(id: string, ok: boolean): "started" | "skipped" {
+    const { s, pairing } = this.paired(id);
+    if (pairing.init === "succeeded")
+      throw new HttpRejection(409, "device_init_reported", "本机已完成初始化");
+    if (pairing.init === "waiting")
+      throw new HttpRejection(
+        409,
+        "device_init_not_ready",
+        "尚未取得初始化脚本",
+      );
+    pairing.init = ok ? "succeeded" : "failed";
+    pairing.at = this.clock.now();
+    this.store.uow.run((tx) =>
+      machineAudit(tx, this.clock, "worker_wizard_device_initialized", {
+        member_id: s.member,
+        project_id: s.project,
+        machine_id: s.machine,
+        wizard_id: s.id,
+        pairing_id: pairing.id,
+        ok,
+      }),
+    );
+    if (!ok || (s.phase !== "ready" && s.phase !== "failed")) return "skipped";
+    const owner = (tx?: ReadRepositories) => {
+      const current = tx
+        ? activeOwner(tx.members.list())?.id
+        : this.store.uow.read((t) => activeOwner(t.members.list())?.id);
+      if (current !== s.member)
+        throw new HttpRejection(403, "unauthorized", "仅限当前所有者");
+      return s.member;
+    };
+    try {
+      this.startCheck(s, owner);
+      return "started";
+    } catch {
+      return "skipped";
+    }
+  }
+  /** Start the wizard's checks for a ready, failed or passed session. */
+  private startCheck(s: Session, authorize: (tx?: ReadRepositories) => string) {
+    const host = this.host;
+    if (!host || !["ready", "failed", "passed"].includes(s.phase))
+      throw stale();
+    const steps = s.phase === "passed" ? initialSteps() : s.steps;
+    const check = checkWizard({
+      store: this.store,
+      checks: this.checks,
+      clock: this.clock,
+      host,
+      signal: this.signal,
+      draft: s.draft,
+      steps,
+      priorDigest: s.priorDigest,
+      authorize,
+      limit: effectiveRunLimit(this.store, s.machine, this.limit, this.max),
+      id: s.id,
+    });
+    s.steps = steps;
+    s.check_id = check.id;
+    s.phase = "running";
+    delete s.preview;
+    delete s.error;
+    const done = check.done.then(
+      (ok) => {
+        s.phase = ok ? "passed" : "failed";
+      },
+      (e) => {
+        s.phase = "failed";
+        s.error = safeError(e);
+      },
+    );
+    this.pending.add(done);
+    void done.then(() => this.pending.delete(done));
+  }
   async settled() {
     await Promise.allSettled(this.pending);
   }
@@ -283,7 +435,8 @@ export class WorkerWizards {
             { form },
           );
         }
-        this.pairings.claim(found);
+        this.pairings.claim(found, s.id);
+        s.pairing = { id: found.id, init: "waiting" };
         this.store.uow.run((tx) =>
           machineAudit(tx, this.clock, "worker_wizard_pairing_claimed", {
             member_id: member,
@@ -392,37 +545,7 @@ export class WorkerWizards {
         delete s.preview;
         s.phase = action === "enable" ? "enabled" : "ready";
       } else if (action === "run") {
-        if (!["ready", "failed", "passed"].includes(s.phase)) throw stale();
-        const steps = s.phase === "passed" ? initialSteps() : s.steps;
-        const check = checkWizard({
-          store: this.store,
-          checks: this.checks,
-          clock: this.clock,
-          host,
-          signal: this.signal,
-          draft: s.draft,
-          steps,
-          priorDigest: s.priorDigest,
-          authorize,
-          limit: effectiveRunLimit(this.store, s.machine, this.limit, this.max),
-          id,
-        });
-        s.steps = steps;
-        s.check_id = check.id;
-        s.phase = "running";
-        delete s.preview;
-        delete s.error;
-        const done = check.done.then(
-          (ok) => {
-            s.phase = ok ? "passed" : "failed";
-          },
-          (e) => {
-            s.phase = "failed";
-            s.error = safeError(e);
-          },
-        );
-        this.pending.add(done);
-        void done.then(() => this.pending.delete(done));
+        this.startCheck(s, authorize);
         return sendJson(res, 202, { wizard: view(s) });
       }
       return sendJson(res, 200, { wizard: view(s) });

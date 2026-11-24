@@ -124,6 +124,7 @@ import {
   type WorkbenchReadResult,
 } from "./read-ops.js";
 import { type WorkbenchReadOptions, WorkbenchReadPool } from "./read-pool.js";
+import { serveSharedFiles } from "./shared-files.js";
 import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
@@ -623,7 +624,12 @@ async function handleApi(context: RequestContext): Promise<void> {
   }
 
   // C-705: a new device has no account; it only gets a one-time pairing code.
-  if (path === "/api/device-pairings" || path === "/api/device-pairings/status")
+  // C-706: the claimed device fetches its init script and reports the result.
+  if (
+    /^\/api\/device-pairings(?:\/(?:status|init-script|initialized))?$/.test(
+      path,
+    )
+  )
     return context.pairings.serveDevice(
       req,
       context.res,
@@ -718,6 +724,17 @@ async function handleApi(context: RequestContext): Promise<void> {
     sendJson(res, 200, offsiteFor(context.dataDir)?.status() ?? null);
     return;
   }
+
+  // C-685: the cross-project shared file library; a human session acts here.
+  if (path === "/api/shared-files" || path.startsWith("/api/shared-files/"))
+    return serveSharedFiles({
+      req,
+      res,
+      url,
+      store: context.store,
+      dataDir: context.dataDir,
+      human: { kind: "human", member_id: session.member_id ?? null },
+    });
 
   // C-638: heap use and limit of the server processes; numbers only.
   if (path === "/api/process-health") {
