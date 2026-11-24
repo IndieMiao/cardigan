@@ -787,8 +787,8 @@ test("C-674: with the project code the message carries the full number; sensitiv
   ).toMatchObject({ card: "C-1", item: "Q-1", ref: "SEN-C-1" });
   const { card_id: _card, ...projectItem } = item;
   expect(
-    buildExtMessage(projectItem, "https://workbench.invalid", 120, "SEN").ref,
-  ).toBe("SEN-Q-1");
+    buildExtMessage(projectItem, "https://workbench.invalid", 120, "SEN"),
+  ).toMatchObject({ card: null, ref: "SEN-Q-1" });
   expect(
     Object.keys(
       buildExtMessage(
