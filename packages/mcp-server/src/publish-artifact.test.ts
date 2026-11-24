@@ -495,6 +495,7 @@ test("C-712: a note that cannot be saved never turns a verified publication into
       url: f.url,
       sha256: digest,
       release_note: null,
+      merged_cards: { basis: "recent" },
     });
     expect(
       String((result as { release_note_hint: string }).release_note_hint),

@@ -311,3 +311,35 @@ test("the list has published versions without notes and is newest first", () => 
     merged_cards: { basis: "recent" },
   });
 });
+
+test("a draft linked before publishing follows the actual publication, and another version's decision is refused", () => {
+  let s = state();
+  s = apply(
+    s,
+    value(
+      write(s, {
+        version: "2.0.0",
+        body: "草稿",
+        decision_id: id("decision", 1),
+        version_code: 4,
+      }),
+    ),
+  );
+  s = {
+    ...s,
+    events: [...s.events, verified("2.0.0", 2, "2026-02-01T00:00:00.000Z", 5)],
+  };
+  const revised = value(write(s, { version: "2.0.0", body: "正式说明" }));
+  expect(revised.data.note).toMatchObject({
+    decision_id: id("decision", 2),
+    version_code: 5,
+  });
+  expect(releaseNoteEntries(apply(s, revised).events)[0]).toMatchObject({
+    decision_id: id("decision", 2),
+  });
+  // Decision 2 already published 2.0.0; it cannot label an unpublished version.
+  expect(
+    write(s, { version: "2.1.0", body: "x", decision_id: id("decision", 2) })
+      .ok,
+  ).toBe(false);
+});

@@ -88,7 +88,15 @@ export function writeReleaseNote(
         ? `发版说明已被改为第 ${current.revision} 版，请刷新后再改`
         : "这个版本还没有发版说明，请刷新后再写",
     );
-    let decision_id: DecisionId | null = current?.decision_id ?? null;
+    const linked = (id: DecisionId | null) =>
+      publications.length === 0 ||
+      publications.some((p) => p.decision_id === id);
+    // An inherited link that no publication of this version confirms (a draft
+    // linked before publishing) follows the actual publication.
+    let decision_id: DecisionId | null =
+      current?.decision_id && linked(current.decision_id)
+        ? current.decision_id
+        : null;
     if (input.decision_id !== undefined) {
       const parsed = parseId("decision", input.decision_id);
       ensure(parsed.ok, "validation_failed", "发布拍板编号无效");
@@ -99,8 +107,10 @@ export function writeReleaseNote(
         "关联的拍板必须是发布拍板",
       );
       ensure(
-        publications.length === 0 ||
-          publications.some((p) => p.decision_id === q.id),
+        linked(q.id) &&
+          !verifiedPublications(d.state.events).some(
+            (p) => p.decision_id === q.id && p.version !== input.version,
+          ),
         "validation_failed",
         "关联的拍板与这个版本的发布记录不一致",
       );

@@ -312,7 +312,8 @@ async function runPublication(
  * C-712: the optional release note of a verified publication, and the cards
  * merged for it. Runs only after the publication's own outcome is recorded,
  * in its own transaction: a note never changes whether or how the artifact
- * is published, and a note that cannot be saved only yields a hint.
+ * is published, and a note that cannot be saved only yields a hint. (An
+ * unusable note body is rejected by the handler before anything is published.)
  */
 function releaseNoteOutcome(
   ctx: ToolContext,
@@ -321,9 +322,10 @@ function releaseNoteOutcome(
 ) {
   const { actor } = ctx.identity,
     p = actor.project_id;
-  try {
-    if (body !== undefined) {
-      const data = ctx.store.uow.run((tx) => {
+  let saved = false;
+  if (body !== undefined)
+    try {
+      ctx.store.uow.run((tx) => {
         ctx.revalidateToken?.();
         const effect = unwrap(
           writeReleaseNote(
@@ -340,16 +342,22 @@ function releaseNoteOutcome(
           ),
         );
         persistEffect(tx, p, effect);
-        return effect.data;
       });
-      return { release_note: data.note, merged_cards: data.merged_cards };
+      saved = true;
+    } catch {
+      saved = false;
     }
+  try {
     return ctx.store.uow.read((tx) => {
       const state = loadCommandState(tx, p);
       const note = releaseNotes(state.events).get(request.version) ?? null;
       return {
         release_note: note,
-        ...(note ? {} : { release_note_hint: RELEASE_NOTE_MISSING_HINT }),
+        ...(body !== undefined && !saved
+          ? { release_note_hint: RELEASE_NOTE_NOT_SAVED_HINT }
+          : note
+            ? {}
+            : { release_note_hint: RELEASE_NOTE_MISSING_HINT }),
         merged_cards: releaseMergedCards(state, request.version),
       };
     });
@@ -357,12 +365,15 @@ function releaseNoteOutcome(
     return {
       release_note: null,
       release_note_hint:
-        body === undefined
-          ? RELEASE_NOTE_MISSING_HINT
-          : "发版说明没有保存成功，发布不受影响，可用 write_release_note 补写",
+        body !== undefined && !saved
+          ? RELEASE_NOTE_NOT_SAVED_HINT
+          : RELEASE_NOTE_MISSING_HINT,
     };
   }
 }
+
+const RELEASE_NOTE_NOT_SAVED_HINT =
+  "发版说明没有保存成功，发布不受影响，可用 write_release_note 补写";
 
 export function publicationTool(options: PublicationOptions) {
   return defineTool({
