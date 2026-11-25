@@ -17,6 +17,7 @@ import {
   authorPrecheckWaitHandled,
   canStartWork,
   cardTemplate,
+  currentPreMergeVersions,
   decisionQuestionPayload,
   employeeNameKey,
   eventsAtSeq,
@@ -38,14 +39,20 @@ import {
   mergeRequiresHuman,
   NEEDS_YOU_ITEM_READY,
   needsYouItemReady,
+  type OfficePreMergeMoment,
   officeAlertRecipient,
+  officeOnDuty,
+  officePendingPreMergeChecks,
+  officePreMergePromptText,
   officeResolutionRecipient,
+  PRE_MERGE_CHECK_OFFICE_PROMPTED,
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   precheckConflictHandling,
   requesterNotificationRecipient,
   reviewPassed,
   reviewWakeBlocked,
+  screenshotCheckEnforced,
   storyTerminal,
   verificationTarget,
 } from "@cardigan/domain";
@@ -1297,6 +1304,66 @@ function routePreMergeCheckReminder(input: RouteInput, draft: Draft): void {
       "7.4/pre-merge check passed",
       lines.join("\n"),
     );
+}
+
+/**
+ * C-744: the domain asked the PM Office on duty to record the pre-merge checks
+ * it owns (after acceptance, or once only those checks hold the automatic
+ * merge). Ring only that Office, with the card, delivery IDs and SHAs and the
+ * labels still waiting. Checks recorded, versions replaced, a closed card or
+ * no Office on duty before routing ring nobody; no other role is told.
+ */
+function routeOfficePreMergePrompt(input: RouteInput, draft: Draft): void {
+  const { event, snapshot } = input;
+  if (
+    event.actor.kind !== "system" ||
+    event.actor.project_id !== snapshot.project_id ||
+    !officeOnDuty(snapshot.assignments)
+  )
+    return;
+  const card = snapshot.cards.find((c) => c.id === event.card_id);
+  if (!card || card.status === "done" || card.status === "cancelled") return;
+  const p = payloadObject(event.payload);
+  const moment = p.moment as OfficePreMergeMoment;
+  if (moment !== "accepted" && moment !== "merge_check_passed") return;
+  const versions = currentPreMergeVersions(
+    card,
+    snapshot.work_items,
+    snapshot.deliveries,
+  );
+  const sent = Array.isArray(p.versions) ? p.versions : [];
+  if (
+    sent.length !== versions.length ||
+    !versions.every((v, i) => {
+      const x = payloadObject(sent[i]);
+      return (
+        x.work_item_id === v.work_item_id &&
+        x.delivery_id === v.delivery_id &&
+        x.subject === v.subject
+      );
+    })
+  )
+    return;
+  const waiting = new Set(
+    officePendingPreMergeChecks(
+      card,
+      snapshot.work_items,
+      snapshot.deliveries,
+      screenshotCheckEnforced(snapshot),
+    ).map((c) => c.label),
+  );
+  const labels = payloadStrings(event.payload, "checks").filter((l) =>
+    waiting.has(l),
+  );
+  if (!labels.length) return;
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "card",
+    "C-744/office pre-merge checks",
+    officePreMergePromptText(card.id, moment, labels, versions),
+  );
 }
 
 function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
@@ -2629,6 +2696,9 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     case PRE_MERGE_CHECK_REMINDED:
       routePreMergeCheckReminder(input, draft);
+      break;
+    case PRE_MERGE_CHECK_OFFICE_PROMPTED:
+      routeOfficePreMergePrompt(input, draft);
       break;
     case "merge_conflicted":
     case "merge_changes_requested": {

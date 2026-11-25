@@ -11,6 +11,7 @@ import { isOperatorAction } from "../human-action-executor.js";
 import type { CardId, HumanActionId, ProjectId } from "../ids.js";
 import { type CommandDraft, ensure, text } from "./core.js";
 import { mergeBlockingHumanActions, syncScreenshotMerge } from "./merge.js";
+import { promptOfficePreMergeChecks } from "./office-pre-merge-prompt.js";
 import {
   currentPreMergeVersions,
   INDEPENDENT_REVIEW_CHECK_LABEL,
@@ -164,11 +165,19 @@ export function applyPreMergeCheck(
     "forbidden_tool",
     "只有 PM Office 或人可以撤销“有问题”的合并前核对项",
   );
-  return writePreMergeCheck(d, card, {
+  const result = writePreMergeCheck(d, card, {
     label,
     status: input.status,
     ...(note === undefined ? {} : { note }),
   });
+  // C-744: a check left for the Office after acceptance already passed.
+  if (
+    input.status === "pending" &&
+    !office &&
+    result.status === "awaiting_merge"
+  )
+    promptOfficePreMergeChecks(d, result, "accepted");
+  return result;
 }
 
 /** Only submitReview calls this, after validating and recording the Review. */

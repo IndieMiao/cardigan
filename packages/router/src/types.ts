@@ -71,6 +71,7 @@ export type RuleId =
   | "6.4/system rules"
   | "C-722/office alert"
   | "C-740/office decision closed"
+  | "C-744/office pre-merge checks"
   // §6.4 rows
   | "story/discuss"
   | "story/decompose"

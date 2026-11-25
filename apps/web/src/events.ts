@@ -34,6 +34,7 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   merge_check_waiting: "合并检查排队原因",
   pre_merge_check_updated: PRE_MERGE_COPY.eventLabel,
   pre_merge_check_reminded: PRE_MERGE_COPY.reminderEventLabel,
+  pre_merge_check_office_prompted: "提醒 PM Office 核对合并前核对项",
   work_item_created: "创建了工作项",
   work_item_updated: "更新了工作项",
   work_item_assigned: "指派了工作项",
