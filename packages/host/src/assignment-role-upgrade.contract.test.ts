@@ -17,6 +17,7 @@ import {
   deploymentRolePolicyHash,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
+import { recordDefault } from "./role-provenance.js";
 
 test.each([false, true])(
   "maintenance upgrades an exited owner after confirming its fence; manual conflict=%s",
@@ -51,17 +52,26 @@ test.each([false, true])(
         tx.work_items.put(human.project_id, state.work_items[0]!);
         tx.assignments.put(human.project_id, owner);
         tx.runs.put(human.project_id, state.runs[0]!);
+        const previous = {
+          ...source,
+          allowed_tools: source.allowed_tools.filter(
+            (t) => t !== "request_check",
+          ),
+        };
         writeRole(
           tx,
           human.project_id,
-          {
-            ...source,
-            version: 1,
-            allowed_tools: source.allowed_tools.filter(
-              (t) => t !== "request_check",
-            ),
-          },
+          { ...previous, version: 1 },
           { mode: "add" },
+        );
+        // An earlier deployment recorded v1 as its default.
+        recordDefault(
+          tx,
+          human.project_id,
+          "coder",
+          previous,
+          "pack",
+          clock.now(),
         );
         writeRole(
           tx,

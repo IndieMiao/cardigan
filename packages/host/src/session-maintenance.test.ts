@@ -20,6 +20,7 @@ import {
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
+import { recordDefault } from "./role-provenance.js";
 import {
   sessionIdleMinutes,
   sessionMaintenanceScan,
@@ -230,6 +231,17 @@ test("the deployment project without a receipt defers a suspected conflict; no-o
     expect(f.state().human_actions).toHaveLength(0);
     expect(f.state().assignments[0]?.session_maintenance?.reason).toBe(
       "publication_pending",
+    );
+    // An earlier deployment recorded a default the manual rule differs from.
+    f.store.uow.run((tx) =>
+      recordDefault(
+        tx,
+        f.project,
+        "coder",
+        { ...f.source, instructions: "Earlier default" },
+        "pack",
+        "2030-01-01T00:00:00Z",
+      ),
     );
     upgradeDeployedRoles(
       f.store,
@@ -778,6 +790,18 @@ test("an interrupted earlier publication stays unverified even when the next pac
       "publication_pending",
     );
     expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+    // The default this version equals is recorded later, e.g. by
+    // `role upgrade --from-default`; only then can a publication prove it.
+    f.store.uow.run((tx) =>
+      recordDefault(
+        tx,
+        f.project,
+        "coder",
+        previousDefault,
+        "cli",
+        "2030-01-01T00:00:00Z",
+      ),
+    );
     // A later successful publication fixes the DB and receipt atomically.
     upgradeDeployedRoles(
       f.store,
