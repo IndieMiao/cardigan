@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import type { Actor, Assignment, HumanAction } from "../entities.js";
 import {
+  classifyHumanActionExecutor,
   completeHumanAction,
   deriveCardFields,
   extMessageItems,
@@ -111,8 +112,14 @@ test("rule 1: the 张良 title prefix or an operator-only reason defaults to ope
   ])
     expect(inferHumanActionExecutor({ ...owner, why_human })).toBe("owner");
 
+  expect(
+    classifyHumanActionExecutor({ ...owner, why_human: "要用云助手" }),
+  ).toEqual({ executor: "operator", basis: "keyword:云助手" });
   const base = setup();
   expect(request(base).action.executor).toBe("operator");
+  expect(
+    request(base, { executor: "owner" }).effect.events[0]?.payload,
+  ).toMatchObject({ executor: "owner", executor_basis: "explicit" });
   expect(request(base, { executor: "owner" }).action.executor).toBeUndefined();
   expect(
     request(base, { instructions: "请登录", executor: "operator" }).action
@@ -145,11 +152,15 @@ test("an operator action writes the operator's event and never reaches the owner
     "human_action_requested",
     "operator_action_requested",
   ]);
-  expect(effect.events[0]?.payload).toMatchObject({ executor: "operator" });
+  expect(effect.events[0]?.payload).toMatchObject({
+    executor: "operator",
+    executor_basis: "title",
+  });
   expect(effect.events[1]?.payload).toMatchObject({
     human_action_id: action.id,
     executor: "operator",
     reason: "requested",
+    executor_basis: "title",
     title: "张良：换主机运维会话",
     expected_return: "新会话编号",
   });
@@ -159,6 +170,10 @@ test("an operator action writes the operator's event and never reaches the owner
   expect(owner.effect.events.map((e) => e.type)).toEqual([
     "human_action_requested",
   ]);
+  expect(owner.effect.events[0]?.payload).toMatchObject({
+    executor: "owner",
+    executor_basis: "default",
+  });
 
   const items = extMessageItems(both, both.project_id).filter(
     (i) => i.kind === "human_action",
@@ -393,7 +408,10 @@ test("the owner can take an operator action back, and handing it to the operator
     "human_action_reassigned",
     "operator_action_requested",
   ]);
-  expect(again.events[1]?.payload).toMatchObject({ reason: "reassigned" });
+  expect(again.events[1]?.payload).toMatchObject({
+    reason: "reassigned",
+    executor_basis: "reassigned",
+  });
 
   const done = apply(owned, value(complete(owned, human, action)));
   expect(reassign(done, "operator").ok).toBe(false);

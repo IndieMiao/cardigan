@@ -21,8 +21,8 @@ import type {
 import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import {
+  classifyHumanActionExecutor,
   HUMAN_ACTION_OPERATOR_NAME,
-  inferHumanActionExecutor,
   isOperatorAction,
   isOperatorIdentity,
 } from "../human-action-executor.js";
@@ -1911,7 +1911,10 @@ export function requestHumanAction(
       : undefined;
     if (blocks) for (const item of items) paused(d, item, "blocked");
     const id = d.ids.next(state.project_id, "human_action");
-    const executor = p.executor ?? inferHumanActionExecutor(p);
+    const classified = p.executor
+      ? { executor: p.executor, basis: "explicit" as const }
+      : classifyHumanActionExecutor(p);
+    const executor = classified.executor;
     const action: HumanAction = {
       id,
       key: id,
@@ -1945,7 +1948,8 @@ export function requestHumanAction(
         ...(action.blocks_merge
           ? { blocks_merge: true, prerequisite: action.prerequisite }
           : {}),
-        ...(action.executor ? { executor: action.executor } : {}),
+        executor,
+        executor_basis: classified.basis,
       },
       {
         type: "human_action",
@@ -1957,7 +1961,7 @@ export function requestHumanAction(
       },
     );
     if (executor === "operator")
-      emitOperatorActionRequested(d, action, "requested");
+      emitOperatorActionRequested(d, action, "requested", classified.basis);
     return action;
   });
 }

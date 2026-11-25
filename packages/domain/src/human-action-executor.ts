@@ -43,21 +43,35 @@ function mentions(text: string, keyword: string) {
   return new RegExp(`(?<![A-Za-z])${keyword}(?![A-Za-z])`, "iu").test(text);
 }
 
-/** Rule 1 of C-742: the title prefix or an operator-only reason. */
-export function inferHumanActionExecutor(p: {
+/** Audit trail: why an action got its executor. */
+export type HumanActionExecutorBasis =
+  | "explicit"
+  | "title"
+  | `keyword:${string}`
+  | "default";
+
+/** Rule 1 of C-742 with its basis: the title prefix or an operator-only reason. */
+export function classifyHumanActionExecutor(p: {
   readonly instructions: string;
   readonly why_human: string;
   readonly title?: string;
-}): HumanActionExecutor {
+}): { executor: HumanActionExecutor; basis: HumanActionExecutorBasis } {
   if (
     [p.title ?? "", requestTitle(p.instructions)].some((t) =>
       OPERATOR_TITLE.test(t),
     )
   )
-    return "operator";
-  return OPERATOR_ONLY_KEYWORDS.some((k) => mentions(p.why_human, k))
-    ? "operator"
-    : "owner";
+    return { executor: "operator", basis: "title" };
+  const keyword = OPERATOR_ONLY_KEYWORDS.find((k) => mentions(p.why_human, k));
+  return keyword
+    ? { executor: "operator", basis: `keyword:${keyword}` }
+    : { executor: "owner", basis: "default" };
+}
+
+export function inferHumanActionExecutor(
+  p: Parameters<typeof classifyHumanActionExecutor>[0],
+): HumanActionExecutor {
+  return classifyHumanActionExecutor(p).executor;
 }
 
 export function humanActionExecutor(

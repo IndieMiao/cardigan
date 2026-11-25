@@ -1,6 +1,7 @@
 import type { Actor, HumanAction, HumanActionExecutor } from "../entities.js";
 import {
   HUMAN_ACTION_OPERATOR_NAME,
+  type HumanActionExecutorBasis,
   humanActionExecutor,
 } from "../human-action-executor.js";
 import type { HumanActionId } from "../ids.js";
@@ -27,11 +28,13 @@ export function emitOperatorActionRequested(
   d: CommandDraft,
   action: HumanAction,
   reason: "requested" | "reassigned",
+  basis: HumanActionExecutorBasis | "reassigned",
 ) {
   d.emit("operator_action_requested", action.card_id, {
     human_action_id: action.id,
     executor: "operator",
     reason,
+    executor_basis: basis,
     title:
       action.handoff?.title ??
       action.instructions.split(/\r?\n/u)[0] ??
@@ -117,7 +120,7 @@ export function reassignHumanAction(
       },
     );
     if (p.executor === "operator")
-      emitOperatorActionRequested(d, next, "reassigned");
+      emitOperatorActionRequested(d, next, "reassigned", "reassigned");
     return next;
   });
 }
