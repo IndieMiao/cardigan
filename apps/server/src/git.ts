@@ -341,6 +341,10 @@ export interface MergeGit {
   }>;
 }
 export type ReconcilePages = AsyncGenerator<void, readonly ReconcileFinding[]>;
+export interface MachineDirectories {
+  readonly builds: readonly string[];
+  readonly worktrees: readonly string[];
+}
 export interface ReconcileGit {
   reconcilePages?(
     ...args: Parameters<ReconcileGit["reconcile"]>
@@ -359,6 +363,16 @@ export interface ReconcileGit {
   listBuildCheckouts?(
     project: CentralProject,
   ): Promise<readonly string[] | undefined>;
+  /**
+   * C-664: Assignment ids under one machine's `builds/<project>` and
+   * `worktrees/<project>` roots, read through that machine's file and Git
+   * port (a worker's helper, never host `access()`). `undefined` while a
+   * preparation runs; throws when the machine cannot be read.
+   */
+  listMachineDirectories?(
+    project: CentralProject,
+    machine_id: string,
+  ): Promise<MachineDirectories | undefined>;
   /** P2a-3: `idle` is re-checked under the project's repository lock. */
   removeBuildCheckout?(input: {
     readonly project: CentralProject;
@@ -1742,6 +1756,41 @@ export class ServerGit implements GitBinding {
       if (this.buildQueries.get(project.project_id)?.query === query)
         this.buildQueries.delete(project.project_id);
     }
+  }
+  async listMachineDirectories(
+    project: CentralProject,
+    machine_id: string,
+  ): Promise<MachineDirectories | undefined> {
+    if (await preparationBusy(this.options.dataDir)) return undefined;
+    const project_id = project.project_id as ProjectId;
+    // The helper binds every request to one Assignment; listing the project
+    // roots is allowed for any of them, removal only for the owner's leaf.
+    const probe =
+      machine_id === "local"
+        ? undefined
+        : this.options.store.uow?.read((tx) =>
+            tx.assignments
+              .list(project_id)
+              .find((a) => a.machine_id === machine_id),
+          );
+    if (machine_id !== "local" && probe === undefined)
+      return { builds: [], worktrees: [] };
+    return withPreparationQueue(
+      this.options.dataDir,
+      project.project_id,
+      async () => {
+        const service =
+          probe === undefined
+            ? this.worktrees
+            : this.workspaceServices(project, probe, "repository").worktrees;
+        return {
+          builds: await service.listBuildCheckouts(project.project_id),
+          worktrees: await service.listWorktreeOwners(project.project_id),
+        };
+      },
+      undefined,
+      true,
+    );
   }
   async removeBuildCheckout(input: {
     readonly project: CentralProject;

@@ -189,17 +189,42 @@ export function clearReleasedRuntimeRefs(
 export function requestWorktreeCleanup(
   state: CommandState,
   actor: Actor,
-  p: { assignment_id: AssignmentId; reason: string },
+  p: {
+    assignment_id: AssignmentId;
+    reason: string;
+    /**
+     * C-664: the host-observed directory of a released work-item record that
+     * lost its path, located by project, machine and id. It is recorded so
+     * the decision and every later round name the same worktree.
+     */
+    worktree_path?: string;
+  },
   ports: CommandPorts,
 ): Result<CommandEffect<Decision>> {
   return command(state, actor, "request_worktree_cleanup", ports, (d) => {
-    const a = d.get("assignments", p.assignment_id);
+    let a = d.get("assignments", p.assignment_id);
     ensure(
-      a.status === "released" && a.worktree_path,
+      a.status === "released" && (a.worktree_path || p.worktree_path),
       "illegal_transition",
       "Cleanup requires a released Assignment with a worktree",
     );
     text(p.reason, "reason");
+    if (p.worktree_path !== undefined) {
+      const path = p.worktree_path;
+      ensure(
+        a.scope === "work_item" &&
+          path.startsWith("/") &&
+          !path.split("/").some((part) => part === "." || part === "..") &&
+          path.split("/").at(-1) === a.id &&
+          (a.worktree_path === undefined || a.worktree_path === path),
+        "invariant_violation",
+        "Observed worktree must be this work-item Assignment's own directory",
+      );
+      if (a.worktree_path === undefined) {
+        a = { ...a, worktree_path: path };
+        d.put("assignments", a);
+      }
+    }
     const old = d
       .list("decisions")
       .find(
