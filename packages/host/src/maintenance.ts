@@ -272,10 +272,12 @@ export class MaintenanceRunner {
           throw new Error(
             "维护需要人工恢复：按 maintenance status 的恢复说明处理后执行 maintenance end 重新核对",
           );
+        // Keep `error`: it records that the window failed, so a passing
+        // re-check still ends as rolled_back, never as completed.
         this.save(
           "starting",
           (r) => {
-            const { recovery: _r, error: _e, ...rest } = r;
+            const { recovery: _r, ...rest } = r;
             return rest;
           },
           "人工恢复后重新核对",
@@ -573,7 +575,12 @@ export class MaintenanceRunner {
   private async start(work: MaintenanceWork) {
     const r = this.row.record;
     const rolledBack = r.steps.operation === "failed";
-    const expected = rolledBack ? beforeVersions(r) : work.expected_hc;
+    // Only an applied operation is checked against its targets. Before it
+    // ran (stopping failed, manual window) or after it was put back, each
+    // switched target must be on its version from before the window and the
+    // rest only compatible.
+    const expected =
+      r.steps.operation === "done" ? work.expected_hc : beforeVersions(r);
     const problems = await this.startServices(expected);
     if (!problems.length) {
       const failed = rolledBack || !!r.error;

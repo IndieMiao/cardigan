@@ -62,7 +62,7 @@ function release(version: string, bytes: Uint8Array, sha?: string): HcRelease {
   };
 }
 
-function setup(layout: "symlink" | "file", shell = false) {
+function setup(layout: "symlink" | "file", shell = false, ports = false) {
   const root = mkdtempSync(join(tmpdir(), "cg-hc-upgrade-"));
   mkdirSync(join(root, "bin"));
   mkdirSync(join(root, "old"));
@@ -85,22 +85,34 @@ function setup(layout: "symlink" | "file", shell = false) {
     ...(shell ? { via: [ssh], via_shell: true } : {}),
   };
   const config = parseMaintenanceConfig({
-    server: { stop: ["/fake/server-stop"], start: ["/fake/server-start"] },
+    server: {
+      stop: ["/fake/server-stop"],
+      start: ["/fake/server-start"],
+      ...(ports ? { ports: [65000], ready_timeout_seconds: 1 } : {}),
+    },
     hc: { targets: [target] },
   });
   const store = Store.open({ dataDir: root, dbPath: ":memory:" });
   store.createProject({ id: "cardigan" });
   const calls: string[] = [];
-  let failStart = 0;
+  // Synthetic commands that fail the given number of times.
+  const failing = new Map<string, number>();
+  let portsStuck = false;
+  // Waits advance a fake clock instead of spinning on the real one.
+  let skew = 0;
   const driver: MaintenanceDriver = {
-    now: () => new Date().toISOString(),
-    sleep: async () => {},
+    now: () => new Date(Date.now() + skew).toISOString(),
+    sleep: async (ms) => {
+      skew += ms;
+    },
     run: async (argv, options) => {
-      if (argv[0]?.startsWith("/fake/")) {
-        calls.push(argv[0]);
-        if (argv[0] === "/fake/server-start" && failStart > 0) {
-          failStart--;
-          return { code: 1, stdout: "", stderr: "" };
+      const command = argv[0];
+      if (command?.startsWith("/fake/")) {
+        calls.push(command);
+        const left = failing.get(command) ?? 0;
+        if (left > 0) {
+          failing.set(command, left - 1);
+          return { code: 1, stdout: "", stderr: "synthetic" };
         }
         return { code: 0, stdout: "", stderr: "" };
       }
@@ -108,7 +120,7 @@ function setup(layout: "symlink" | "file", shell = false) {
     },
     activity: () => ({ busy: [], standing: [] }),
     software: async () => ({ sha: null, process: null, ready: false }),
-    portOpen: async () => false,
+    portOpen: async () => portsStuck,
     deployPin: () => null,
     audit: (record, phase, note, notice) =>
       appendMaintenanceAudit(store, record, phase, note, notice),
@@ -121,8 +133,10 @@ function setup(layout: "symlink" | "file", shell = false) {
     store,
     driver,
     calls,
-    failNextStart: () => {
-      failStart = 1;
+    failNextStart: () => failing.set("/fake/server-start", 1),
+    fail: (command: string, times = 1) => failing.set(command, times),
+    stickPorts: (stuck: boolean) => {
+      portsStuck = stuck;
     },
     target: config.hc_targets[0] as MaintenanceHcTarget,
   };
@@ -256,4 +270,75 @@ test("an unofficial manifest URL is refused", async () => {
     },
   };
   await expect(upgrade(f, bad, bytes)).rejects.toThrow("官方版本化地址");
+});
+
+// V-3341: stopping failed before the upgrade switched anything, so the window
+// must come back on the old version and end as rolled_back, not wait for the
+// new version forever with the gate closed.
+test.each([
+  ["server stop exits non-zero", "server"],
+  ["server ports stay open", "ports"],
+  ["hc stop exits non-zero", "hc"],
+] as const)(
+  "a stop failure before the switch rolls back on the old version (%s)",
+  async (_name, failure) => {
+    const f = setup("symlink", false, failure === "ports");
+    if (failure === "server") f.fail("/fake/server-stop");
+    if (failure === "hc") f.fail("/fake/hc-stop");
+    if (failure === "ports") {
+      f.stickPorts(true);
+      // Ports close again once the server is restarted and checked.
+      const run = f.driver.run;
+      f.driver.run = async (argv, options) => {
+        if (argv[0] === "/fake/server-start") f.stickPorts(false);
+        const result = await run(argv, options);
+        if (argv[0] === "/fake/server-start") f.stickPorts(true);
+        return result;
+      };
+    }
+    const bytes = archive(f.root, "7.1.22");
+    const { outcome } = await upgrade(f, release("7.1.22", bytes), bytes);
+    const row = readMaintenance(f.store);
+    expect(row?.record.steps.switched).toBeUndefined();
+    expect(row?.record.steps.operation).toBeUndefined();
+    expect(row?.record.error).toBeTruthy();
+    expect(outcome).toBe("rolled_back");
+    expect(row?.phase).toBe("rolled_back");
+    expect(maintenanceActive(f.store)).toBe(false);
+    expect(readlinkSync(f.link)).toBe(join(f.root, "old", "hc"));
+    expect(version(f.link)).toBe("hc 7.1.21");
+    if (failure === "server") expect(f.calls).toEqual(["/fake/server-stop"]);
+    if (failure === "hc")
+      expect(f.calls).toEqual([
+        "/fake/server-stop",
+        "/fake/hc-stop",
+        "/fake/server-start",
+      ]);
+  },
+);
+
+test("end after a stop failure needing recovery re-checks the old version and stays rolled_back", async () => {
+  const f = setup("symlink");
+  f.fail("/fake/hc-stop");
+  // Restarting the server also fails once, so the window needs a human.
+  f.fail("/fake/server-start");
+  const bytes = archive(f.root, "7.1.22");
+  const { plan, outcome } = await upgrade(f, release("7.1.22", bytes), bytes);
+  expect(outcome).toBe("recovery_required");
+  expect(maintenanceActive(f.store)).toBe(true);
+  expect(readMaintenance(f.store)?.record.recovery?.join("\n")).toContain(
+    "server 启动失败",
+  );
+  const runner = new MaintenanceRunner(
+    f.store,
+    f.config,
+    f.driver,
+    () => plan.work,
+  );
+  expect(await runner.resume("end")).toBe("rolled_back");
+  const row = readMaintenance(f.store);
+  expect(row?.record.error).toContain("停止 hc host");
+  expect(row?.record.recovery).toBeUndefined();
+  expect(maintenanceActive(f.store)).toBe(false);
+  expect(version(f.link)).toBe("hc 7.1.21");
 });
