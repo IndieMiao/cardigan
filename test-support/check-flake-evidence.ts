@@ -24,6 +24,13 @@ export function matchesFailure(id: CheckFlakeId, value: unknown): boolean {
           e.message,
         )
       );
+    case "vitest-20000ms":
+      return (
+        e.name === "Error" &&
+        /^Test timed out in 20000ms\.\nIf this is a long-running test,/u.test(
+          e.message,
+        )
+      );
     case "corepack-pnpm-download":
       return (
         e.name === "Error" &&

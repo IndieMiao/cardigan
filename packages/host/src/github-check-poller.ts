@@ -4,7 +4,11 @@ import {
   FailureLogError,
   type OpenFailureLog,
 } from "./check-executor.js";
-import { checkFlakeCases, checkFlakeIds } from "./check-flake-cases.js";
+import {
+  type CheckFlakeId,
+  checkFlakeCases,
+  checkFlakeIds,
+} from "./check-flake-cases.js";
 import type { GithubCheckLifecycle } from "./github-check-executor.js";
 import { githubCheckScope } from "./github-check-scope.js";
 import {
@@ -78,8 +82,16 @@ const CARDIGAN_CONTRACT: GithubStepContract = {
   steps: GITHUB_WORKFLOW_STEPS.map((name) => ({ name })),
   postSteps: CARDIGAN_POST_STEPS,
 };
+// C-757: receipts added after the case contract shipped. Their absence is
+// accepted so an upgraded host still reads runs on an older baseline
+// workflow; when present they must be at their declared place.
+const LATER_RECEIPTS = new Set<string>(
+  (["agent_git"] satisfies CheckFlakeId[]).map((id) => `Recovered ${id}`),
+);
 const CARDIGAN_CASE_CONTRACT: GithubStepContract = {
-  steps: CASE_WORKFLOW_STEPS.map((name) => ({ name })),
+  steps: CASE_WORKFLOW_STEPS.map((name) =>
+    LATER_RECEIPTS.has(name) ? { name, optional: true } : { name },
+  ),
   postSteps: CARDIGAN_POST_STEPS,
 };
 interface Pending {
