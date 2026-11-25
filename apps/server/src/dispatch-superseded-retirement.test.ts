@@ -416,7 +416,9 @@ test("a live session retained for dispatch (no Run queued) is woken by a notific
   expect(f.owner().runtime_ref).toEqual(f.old);
 });
 
-test("a retained session with a queued Run keeps its handoff for the host-ops takeover", async () => {
+// C-739 (sensen A-317): the C-575 takeover needs exit proof a macOS worker
+// never gives, so the handoff fenced the queued Run until a managed stop.
+test("a retained session with a never-started queued Run is handed back and the Run dispatched within 2 minutes", async () => {
   const f = setup();
   f.settle();
   f.cliAlive();
@@ -437,12 +439,55 @@ test("a retained session with a queued Run keeps its handoff for the host-ops ta
       queue_reason: "runtime_unavailable",
     }),
   );
-  f.notify();
-  await within(f, 120_000, () => false);
-  expect(f.runtime.wake).not.toHaveBeenCalled();
+  const elapsed = await within(
+    f,
+    120_000,
+    () => f.state().runs.find((r) => r.id === queued.id)?.status !== "queued",
+  );
+  expect(elapsed).toBeDefined();
+  expect(elapsed).toBeLessThanOrEqual(120_000);
+  expect(f.owner().idle_retirement).toBeUndefined();
+  expect(
+    f
+      .state()
+      .events.filter((e) => e.type === "idle_session_retirement_released")
+      .map((e) => e.payload),
+  ).toMatchObject([{ reason: "business_work", handoff: true }]);
   expect(f.runtime.release).not.toHaveBeenCalled();
-  expect(f.owner().idle_retirement).toMatchObject({ handoff: true });
-  expect(f.state().runs.find((r) => r.id === queued.id)?.status).toBe("queued");
+});
+
+// C-739 (sensen A-327, A-316): long idle, so the patrol reclaimed the session
+// right after handing it back (released -> started -> withdrawn -> handed
+// off), and the waiting work was never dispatched.
+test("an idle retained session handed back for work is not reclaimed before it is woken", async () => {
+  const f = setup();
+  f.settle();
+  f.cliAlive();
+  // As on mac-mini: the idle owner refuses every probe.
+  f.runtime.retire_idle = vi.fn(async () => ({
+    ok: true as const,
+    value: {
+      outcome: "withdrawn" as const,
+      evidence: { stage: "probe" as const, reason: "probe_invalid" as const },
+    },
+  }));
+  f.patch({ last_mcp_activity_at: f.clock.now() });
+  f.advance(2 * 60 * 60_000);
+  f.notify();
+  const elapsed = await within(
+    f,
+    120_000,
+    () => vi.mocked(f.runtime.wake).mock.calls.length > 0,
+  );
+  expect(elapsed).toBeDefined();
+  expect(elapsed).toBeLessThanOrEqual(120_000);
+  const types = f
+    .state()
+    .events.map((e) => e.type)
+    .filter((t) => t.startsWith("idle_session_retirement_"));
+  expect(types).toEqual(["idle_session_retirement_released"]);
+  expect(f.runtime.retire_idle).not.toHaveBeenCalled();
+  expect(f.runtime.release).not.toHaveBeenCalled();
 });
 
 test("a human stop keeps a retained session's handoff; nothing is woken", async () => {

@@ -17,6 +17,7 @@ import {
   needsRetirementHandoff,
   probeInvalidStreak,
   retirementOwnsSession,
+  retirementWithdrawals,
   sessionMaintenanceCandidate,
   sharedStallRegistration,
   supersededRetirement,
@@ -32,6 +33,7 @@ import {
   unwrap,
 } from "./core.js";
 import { humanStopRecorded, stoppedByHuman } from "./stop-state.js";
+import { systemEndedTurn } from "./system-ended-turn.js";
 
 export function beginIdleSessionRetirement(
   state: CommandState,
@@ -206,6 +208,28 @@ export type UnresponsiveRelease =
       readonly reason: string;
       /** host_ops_cancel_run: also cancel this Run when it never started. */
       readonly run_id?: RunId;
+    }
+  /**
+   * C-739: the system finished this Run, work is waiting for the Assignment,
+   * and the old turn still could not be confirmed ended after `waited_ms`
+   * while the checkout was clean.
+   */
+  | {
+      readonly trigger: "system_turn";
+      readonly system_finished_run_id: RunId;
+      readonly waited_ms: number;
+      readonly workspace: "clean" | "no_worktree";
+    }
+  /**
+   * C-739: work waited `waited_ms` without a new Run while idle retirement of
+   * this live session kept being given up (`withdrawals` times, at least 2),
+   * and the checkout was clean.
+   */
+  | {
+      readonly trigger: "retirement_withdrawn";
+      readonly withdrawals: number;
+      readonly waited_ms: number;
+      readonly workspace: "clean" | "no_worktree";
     };
 
 const unfinishedRun = (status: string) =>
@@ -234,6 +258,8 @@ export function unresponsiveReleaseBlocker(
   | "run_busy"
   | "run_changed"
   | "probe_streak"
+  | "session_maintenance"
+  | "withdrawal_streak"
   | undefined {
   if (a.scope !== "work_item" || a.external || a.status !== "active")
     return "not_managed";
@@ -263,6 +289,21 @@ export function unresponsiveReleaseBlocker(
   }
   if (runs.some((r) => r.status !== "queued" && unfinishedRun(r.status)))
     return "run_busy";
+  if (p.trigger === "system_turn") {
+    // An idle retirement owns its session; the release would race it.
+    if (a.idle_retirement) return "session_maintenance";
+    return systemEndedTurn(state, a)?.id === p.system_finished_run_id
+      ? undefined
+      : "run_changed";
+  }
+  if (p.trigger === "retirement_withdrawn") {
+    // Only a retirement that signals nothing (waiting) may be dropped here.
+    if (a.idle_retirement && a.idle_retirement.phase !== "waiting")
+      return "session_maintenance";
+    return retirementWithdrawals(state, a) >= p.withdrawals
+      ? undefined
+      : "withdrawal_streak";
+  }
   return probeInvalidStreak(state, a) >= p.limit ? undefined : "probe_streak";
 }
 
@@ -295,6 +336,21 @@ export function releaseUnresponsiveSession(
         "validation_failed",
         "Invalid probe limit",
       );
+    else if (
+      p.trigger === "system_turn" ||
+      p.trigger === "retirement_withdrawn"
+    )
+      ensure(
+        Number.isSafeInteger(p.waited_ms) &&
+          p.waited_ms >= 0 &&
+          ["clean", "no_worktree"].includes(p.workspace) &&
+          (p.trigger === "system_turn" ||
+            (Number.isSafeInteger(p.withdrawals) &&
+              p.withdrawals >= 2 &&
+              p.withdrawals <= 1000)),
+        "validation_failed",
+        "Invalid stalled session release",
+      );
     else text(p.reason, "reason");
     const a = d.get("assignments", id);
     ensure(
@@ -313,7 +369,11 @@ export function releaseUnresponsiveSession(
     const summary =
       p.trigger === "host_ops"
         ? `released by host operations (${p.requested_by})`
-        : "released after the Agent stopped responding";
+        : p.trigger === "system_turn"
+          ? `released after the system-ended turn of ${p.system_finished_run_id} stayed unconfirmed`
+          : p.trigger === "retirement_withdrawn"
+            ? "released after work waited while idle retirement kept withdrawing"
+            : "released after the Agent stopped responding";
     const cancelled = d
       .list("runs")
       .filter(
@@ -350,16 +410,39 @@ export function releaseUnresponsiveSession(
       ? `，已取消在该会话上的 ${cancelled.map((r) => r.id).join("、")}`
       : "";
     const handoff =
-      p.trigger === "host_ops"
-        ? `主机运维 ${p.requested_by} 请求${p.tool === "host_ops_cancel_run" ? "取消 Run" : "重启"}：${a.id}（${a.machine_id}）的 Agent 进程未见存活，已关闭残留终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`
-        : `${a.id}（${a.machine_id}）的 Agent 进程已不在、终端仍残留：空闲回收连续 ${streak} 次未取得有效进程身份。系统已关闭该终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`;
+      p.trigger === "retirement_withdrawn"
+        ? `${a.id}（${a.machine_id}）有待办 ${Math.round(p.waited_ms / 60_000)} 分钟仍派不出新 Run，空闲回收已 ${p.withdrawals} 次被撤回，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，待办在新会话中派发。`
+        : p.trigger === "system_turn"
+          ? `系统代为结束 ${p.system_finished_run_id} 后，${a.id}（${a.machine_id}）的旧回合 ${Math.round(p.waited_ms / 60_000)} 分钟仍确认不了是否结束，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，排队的工作在新会话中派发。`
+          : p.trigger === "host_ops"
+            ? `主机运维 ${p.requested_by} 请求${p.tool === "host_ops_cancel_run" ? "取消 Run" : "重启"}：${a.id}（${a.machine_id}）的 Agent 进程未见存活，已关闭残留终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`
+            : `${a.id}（${a.machine_id}）的 Agent 进程已不在、终端仍残留：空闲回收连续 ${streak} 次未取得有效进程身份。系统已关闭该终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`;
     d.emit(
       "session_replaced",
       card,
       {
         assignment_id: a.id,
-        reason: "agent_unresponsive",
+        reason:
+          p.trigger === "system_turn"
+            ? "system_turn_unconfirmed"
+            : p.trigger === "retirement_withdrawn"
+              ? "retirement_withdrawn"
+              : "agent_unresponsive",
         trigger: p.trigger,
+        ...(p.trigger === "system_turn"
+          ? {
+              system_finished_run_id: p.system_finished_run_id,
+              waited_ms: p.waited_ms,
+              workspace: p.workspace,
+            }
+          : {}),
+        ...(p.trigger === "retirement_withdrawn"
+          ? {
+              withdrawals: p.withdrawals,
+              waited_ms: p.waited_ms,
+              workspace: p.workspace,
+            }
+          : {}),
         ...(p.trigger === "host_ops"
           ? {
               requested_by: p.requested_by,
@@ -411,8 +494,13 @@ export function clearSupersededRetirement(
  * arrives for it as notifications only, no host operation consumes that
  * handoff (C-575 takes over queued successors), so it fenced the live session
  * indefinitely. Withdraw it so the dispatcher wakes the session through its
- * ordinary guarded path. A queued Run, any unfinished Run or Run stop, a human
- * stop, a pending host operation or a role upgrade keeps the handoff.
+ * ordinary guarded path. A started or running Run, a Run stop, a human stop,
+ * a pending host operation or a role upgrade keeps the handoff.
+ *
+ * C-739: a queued Run that never started is waiting work like a
+ * notification. A remote worker never gives C-575 the exit proof it needs,
+ * so that handoff fenced the queued Run until someone stopped the session
+ * (sensen A-317).
  */
 export function releaseRetainedRetirement(
   state: CommandState,
@@ -440,7 +528,8 @@ export function releaseRetainedRetirement(
         !state.runs.some(
           (r) =>
             r.assignment_id === a.id &&
-            (!["completed", "failed", "cancelled"].includes(r.status) ||
+            ((!["completed", "failed", "cancelled"].includes(r.status) &&
+              !(r.status === "queued" && !r.started_at)) ||
               r.dispatch_stop ||
               r.inactivity_stop),
         ),
