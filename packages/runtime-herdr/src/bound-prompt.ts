@@ -10,6 +10,9 @@ interface Terminal {
   created_ms?: number;
 }
 
+/** C-746: lines Claude Code's status line may occupy under the editor. */
+const STATUS_LINES = 4;
+
 // The controller snapshot can have no OSC state for these clients. Accept
 // only an empty editor and its own idle footer. Plain text cannot distinguish
 // a stock placeholder from a draft containing those same words.
@@ -31,7 +34,20 @@ function editor(screen: string, binding: PromptObservation) {
   )
     return false;
   const bottom = lines.slice(0, -1);
-  if (!codex && /^─+$/u.test(bottom.at(-1) ?? "")) bottom.pop();
+  if (!codex) {
+    // C-746: Claude Code draws the session's status line (Cardigan's
+    // statusLine setting) between the editor's bottom rule and the footer.
+    // Skip at most STATUS_LINES of them, only when a rule closes them off
+    // and another rule tops the empty editor (same rule as the worker).
+    const rule = (line?: string) => /^─+$/u.test(line ?? "");
+    for (let n = 1; n <= STATUS_LINES; n++)
+      if (bottom.length > n + 2 && rule(bottom.at(-1 - n))) {
+        if (bottom.at(-2 - n) === "❯" && rule(bottom.at(-3 - n)))
+          bottom.splice(-n);
+        break;
+      }
+    if (rule(bottom.at(-1))) bottom.pop();
+  }
   if (bottom.pop() !== (codex ? "›" : "❯")) return false;
   if (
     /esc to (?:interrupt|cancel)|press enter to confirm/iu.test(
