@@ -167,6 +167,21 @@ describe("C-179 pre-merge check passed → remind the triage owner", () => {
     ]);
   });
 
+  it("C-742: 张良's merge-blocking actions are not reminded to the owner", () => {
+    const { state, office } = setup([
+      action(1, { triage: "human", executor: "operator" }),
+      action(2, { triage: "human" }),
+    ]);
+    const passed = check(state, office, "passed");
+    expect(reminders(passed)[0]).toMatchObject({
+      payload: {
+        reminders: [{ human_action_id: id("human_action", 2) }],
+      },
+    });
+    const only = setup([action(1, { triage: "human", executor: "operator" })]);
+    expect(reminders(check(only.state, only.office, "passed"))).toEqual([]);
+  });
+
   it("counts actions that block one of the card's work items (C-112 rule)", () => {
     const { state, office } = setup([
       action(1, {

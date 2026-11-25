@@ -91,6 +91,7 @@ test("rule 1: the 张良 title prefix or an operator-only reason defaults to ope
     "要在主机上执行",
     "要替换凭据文件",
     "需要 oss 上传",
+    "上传到 OSS。",
     "送签批准只能人操作",
     "要用云助手",
   ])
@@ -101,6 +102,14 @@ test("rule 1: the 张良 title prefix or an operator-only reason defaults to ope
   expect(
     inferHumanActionExecutor({ ...owner, instructions: "请张良：中间不算" }),
   ).toBe("owner");
+  // Latin keywords must stand alone.
+  for (const why_human of [
+    "Not possible for agents",
+    "loss of data",
+    "across machines",
+    "Bossy",
+  ])
+    expect(inferHumanActionExecutor({ ...owner, why_human })).toBe("owner");
 
   const base = setup();
   expect(request(base).action.executor).toBe("operator");
@@ -237,14 +246,80 @@ test("PM Ops cannot close an operator action through triage", () => {
   const { state: next, action } = request(state);
   expect(action.triage).toBe("pm_ops");
   expect(action.executor).toBe("operator");
+  const ops5 = actor(5, "pm");
   expect(
     triageHumanAction(
       next,
-      actor(5, "pm"),
+      ops5,
       { human_action_id: action.id, disposition: "done", rationale: "已处理" },
       ports(),
     ).ok,
   ).toBe(false);
+
+  // Rewrites keep the executor unless PM Ops hands it to internal host ops.
+  const rewrite = {
+    human_action_id: action.id,
+    rationale: "改写",
+    title: "张良：换会话",
+    summary: "换会话",
+    why_human: "要在主机上执行",
+    instructions: "换会话",
+    expected_outcome: "新会话",
+    expected_return: "新会话编号",
+  };
+  const toHuman = value(
+    triageHumanAction(
+      next,
+      ops5,
+      { ...rewrite, disposition: "human" },
+      ports(),
+    ),
+  );
+  expect(toHuman.data.executor).toBe("operator");
+  const external = value(
+    triageHumanAction(
+      next,
+      ops5,
+      {
+        ...rewrite,
+        disposition: "host",
+        host_operator: "external",
+        host_assignment_id: id("assignment", 4),
+      },
+      ports(),
+    ),
+  );
+  expect(external.data.executor).toBe("operator");
+  const internal = value(
+    triageHumanAction(
+      next,
+      ops5,
+      { ...rewrite, disposition: "host", host_operator: "host_ops" },
+      ports(),
+    ),
+  );
+  expect(internal.data.executor).toBeUndefined();
+  expect(internal.events[0]?.payload).toMatchObject({
+    previous_executor: "operator",
+  });
+});
+
+test("system-raised actions cannot be reassigned", () => {
+  const { state, action } = request(setup());
+  const system: CommandState = {
+    ...state,
+    human_actions: state.human_actions.map((h) =>
+      h.id === action.id ? { ...h, requested_by: "system" } : h,
+    ),
+  };
+  expect(
+    reassignHumanAction(
+      system,
+      human,
+      { human_action_id: action.id, executor: "owner", reason: "自己来" },
+      ports(),
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
 });
 
 test("the owner can take an operator action back, and handing it to the operator notifies again", () => {

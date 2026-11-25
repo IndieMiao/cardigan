@@ -73,6 +73,12 @@ export function reassignHumanAction(
     text(p.reason, "reason");
     const action = d.get("human_actions", p.human_action_id);
     ensure(action.status === "open", "illegal_transition", "只能改派未结待办");
+    // System-raised actions carry their own completion checks and owners.
+    ensure(
+      action.requested_by !== "system",
+      "illegal_transition",
+      "系统发起的待办不能改派执行人",
+    );
     if (action.card_id)
       ensure(
         d.card(action.card_id).status !== "cancelled",

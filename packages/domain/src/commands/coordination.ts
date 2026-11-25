@@ -2337,14 +2337,20 @@ export function triageHumanAction(
       rewritten_by: d.author,
       rewritten_at: d.now,
     };
+    // C-742: an internal host handoff is no longer 张良's; the external
+    // operator and a human handoff keep the executor.
+    const internalHost =
+      p.disposition === "host" && p.host_operator !== "external";
     const {
       host_operator: _operator,
       host_diagnostic: _diagnostic,
       host_assignment_id: _owner,
       ready_when: _ready,
       ready_released: _released,
+      executor,
       ...rest
     } = classified;
+    const keptExecutor = executor && !internalHost ? { executor } : {};
     let owner = p.host_assignment_id;
     if (p.host_diagnostic) {
       ensure(
@@ -2362,6 +2368,7 @@ export function triageHumanAction(
     }
     const next: HumanAction = {
       ...rest,
+      ...keptExecutor,
       triage: p.disposition,
       ...(p.disposition === "host"
         ? {
@@ -2398,6 +2405,7 @@ export function triageHumanAction(
         host_assignment_id: next.host_assignment_id ?? null,
         ...(next.host_operator ? { host_operator: next.host_operator } : {}),
         ...(next.host_diagnostic ? { host_diagnostic: true } : {}),
+        ...(executor && !next.executor ? { previous_executor: executor } : {}),
         ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,
         handoff,

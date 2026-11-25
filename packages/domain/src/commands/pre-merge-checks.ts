@@ -7,6 +7,7 @@ import type {
   PreMergeCheckStatus,
   Review,
 } from "../entities.js";
+import { isOperatorAction } from "../human-action-executor.js";
 import type { CardId, HumanActionId, ProjectId } from "../ids.js";
 import { type CommandDraft, ensure, text } from "./core.js";
 import { mergeBlockingHumanActions, syncScreenshotMerge } from "./merge.js";
@@ -432,7 +433,8 @@ function remindMergeBlockingActions(
       work_items: d.list("work_items"),
     },
     card,
-  );
+    // C-742: 张良's actions never remind the owner.
+  ).filter((action) => !isOperatorAction(action));
   if (actions.length === 0) return;
   const reminders: PreMergeCheckReminder[] = actions.map((action) => {
     const title = humanActionTitle(action);

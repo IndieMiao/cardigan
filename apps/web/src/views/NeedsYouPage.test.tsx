@@ -3397,6 +3397,7 @@ test("张良's actions sit in their own group without a complete form and can be
   expect(screen.queryByRole("region", { name: "待你执行" })).toBeNull();
   expect(screen.queryByText(/件事等你处理/)).toBeNull();
   expect(within(article).getByText("待张良执行")).toBeTruthy();
+  expect(screen.queryByText("没有需要你处理的事")).toBeNull();
   expect(
     within(article).queryByRole("button", { name: "确认已完成" }),
   ).toBeNull();

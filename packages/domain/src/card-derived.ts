@@ -164,6 +164,16 @@ function unresolvedBlockingDecisions(input: CardDerivedInput): Decision[] {
     .sort(byId);
 }
 
+/** C-742: 张良's actions name him instead of the owner. */
+function waitingLabel(action: HumanAction) {
+  return action.triage === "pm_ops"
+    ? "等待 PM 分拣"
+    : isOperatorAction(action)
+      ? `等待${HUMAN_ACTION_OPERATOR_NAME}执行`
+      : action.triage === "host"
+        ? "等待主机操作"
+        : "等你执行";
+}
 function pendingHumanActions(input: CardDerivedInput): HumanAction[] {
   const workItemIds = new Set(input.work_items.map((item) => item.id));
   return input.human_actions
@@ -253,7 +263,7 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
     waiting.push({
       kind: "human_action",
       ref: action.id,
-      label: `${action.triage === "pm_ops" ? "等待 PM 分拣" : isOperatorAction(action) ? `等待${HUMAN_ACTION_OPERATOR_NAME}执行` : action.triage === "host" ? "等待主机操作" : "等你执行"} ${action.id}`,
+      label: `${waitingLabel(action)} ${action.id}`,
     });
   }
 
@@ -421,7 +431,7 @@ export function deriveWhy(input: CardDerivedInput): string {
   const actions = pendingHumanActions(input);
   if (actions.length > 0) {
     return clamp(
-      `${actions[0]?.triage === "pm_ops" ? "等待 PM 分拣" : actions[0]?.triage === "host" ? "等待主机操作" : "等你执行"} ${actions[0]?.id ?? ""}`,
+      `${actions[0] ? waitingLabel(actions[0]) : ""} ${actions[0]?.id ?? ""}`,
     );
   }
 

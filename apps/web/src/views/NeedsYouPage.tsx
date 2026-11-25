@@ -2231,15 +2231,16 @@ function NeedsContent({
   const props = { client, projectId, done: reload, elapsed };
   // C-212: host actions are for the host operator; they sit in their own
   // folded group and never count as waiting on the human.
-  // C-742: 张良's actions are listed apart and never count as the owner's.
-  const operator = (data?.human_actions ?? []).filter(
-    (a) => a.executor === "operator",
-  );
+  // C-742: 张良's open actions are listed apart and never count as the
+  // owner's; unclaimed completion notices stay with the owner's actions.
+  const forOperator = (a: NeedsAction) =>
+    a.executor === "operator" && a.completion_notice === undefined;
+  const operator = (data?.human_actions ?? []).filter(forOperator);
   const mine = (data?.human_actions ?? []).filter(
-    (a) => a.triage !== "host" && a.executor !== "operator",
+    (a) => !forOperator(a) && a.triage !== "host",
   );
   const host = (data?.human_actions ?? []).filter(
-    (a) => a.triage === "host" && a.executor !== "operator",
+    (a) => !forOperator(a) && a.triage === "host",
   );
   const proposals = data?.story_proposals ?? [];
   const total = data
@@ -2341,6 +2342,7 @@ function NeedsContent({
             !closedMessage &&
             !data.notices?.length &&
             !host.length &&
+            !operator.length &&
             !data.system_rule_attention?.length && (
               <EmptyState>没有需要你处理的事</EmptyState>
             )}

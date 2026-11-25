@@ -1280,7 +1280,7 @@ function routePreMergeCheckReminder(input: RouteInput, draft: Draft): void {
     const r = payloadObject(raw);
     const id = typeof r.human_action_id === "string" ? r.human_action_id : "";
     const open = input.snapshot.human_actions.some(
-      (h) => h.id === id && h.status === "open",
+      (h) => h.id === id && h.status === "open" && !isOperatorAction(h),
     );
     if (!open || typeof r.text !== "string" || typeof r.link !== "string")
       continue;

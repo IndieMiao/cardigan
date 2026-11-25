@@ -37,6 +37,12 @@ function requestTitle(instructions: string) {
   return instructions.split(/\r?\n/u).find((line) => line.trim()) ?? "";
 }
 
+/** Latin keywords (OSS) must stand alone: “loss” or “across” are not OSS. */
+function mentions(text: string, keyword: string) {
+  if (!/^[A-Za-z]+$/u.test(keyword)) return text.includes(keyword);
+  return new RegExp(`(?<![A-Za-z])${keyword}(?![A-Za-z])`, "iu").test(text);
+}
+
 /** Rule 1 of C-742: the title prefix or an operator-only reason. */
 export function inferHumanActionExecutor(p: {
   readonly instructions: string;
@@ -49,8 +55,7 @@ export function inferHumanActionExecutor(p: {
     )
   )
     return "operator";
-  const reason = p.why_human.toLowerCase();
-  return OPERATOR_ONLY_KEYWORDS.some((k) => reason.includes(k.toLowerCase()))
+  return OPERATOR_ONLY_KEYWORDS.some((k) => mentions(p.why_human, k))
     ? "operator"
     : "owner";
 }
