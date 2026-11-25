@@ -182,6 +182,7 @@ export function CardNextStep({
   onReveal,
   markDone,
   completionId,
+  busy = false,
 }: {
   readonly detail: CardDetail;
   readonly client: CardiganClient;
@@ -191,6 +192,8 @@ export function CardNextStep({
   /** The existing “标记完成” action; emphasised when it is the main one. */
   readonly markDone: (emphasis: boolean) => ReactNode;
   readonly completionId?: string | undefined;
+  /** Another card form (edit, mark done) is open: panel writes wait. */
+  readonly busy?: boolean;
 }) {
   const { card } = detail;
   const { current, more, markDoneLater } = cardNextSteps(detail);
@@ -299,7 +302,7 @@ export function CardNextStep({
           <Button
             size="regular"
             variant="emphasis"
-            disabled={resume.pending}
+            disabled={resume.pending || busy}
             onClick={() => void resume.resume()}
           >
             恢复卡片

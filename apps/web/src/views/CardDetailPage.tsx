@@ -673,29 +673,39 @@ function CardContent({
     const root = article.current;
     if (!revealing || !root) return;
     setRevealing(undefined);
-    const region = {
-      merge: `#card-${cardId}-merge`,
-      decisions: `#card-${cardId}-suggested`,
-      proposal: "section[aria-label='拆解方案']",
-      questions: "section[aria-label='需求澄清'], .card-timeline",
-      comment: "section.comment-box",
-    }[revealing.target];
-    const control = {
-      merge: "button[type=submit][form]:not(:disabled), button:not(:disabled)",
-      decisions: "button:not(:disabled)",
-      proposal: "button:not(:disabled)",
-      questions: "textarea:not(:disabled)",
-      comment: "textarea:not(:disabled)",
-    }[revealing.target];
-    const area = root.querySelector<HTMLElement>(region);
-    if (!area) return;
-    const target =
-      control
-        .split(", ")
-        .map((selector) => area.querySelector<HTMLElement>(selector))
-        .find(Boolean) ?? area;
-    target.scrollIntoView?.({ block: "center" });
-    target.focus({ preventScroll: true });
+    // Ordered [region, control] candidates: the first region present wins;
+    // inside it the first enabled control, else the region itself.
+    const answer = "[aria-label$='题回答']:is(input, textarea):not(:disabled)";
+    const button = "button:not(:disabled)";
+    const candidates: Record<NextStepTarget, [string, string[]][]> = {
+      merge: [
+        [
+          `#card-${cardId}-merge`,
+          ["button[type=submit][form]:not(:disabled)", button],
+        ],
+      ],
+      decisions: [[`#card-${cardId}-suggested`, [button]]],
+      proposal: [["section[aria-label='拆解方案']", [button]]],
+      // The first open question; with none left, the comment box.
+      questions: [
+        ["section[aria-label='需求澄清']", [answer]],
+        ["section.comment-box", ["textarea:not(:disabled)"]],
+      ],
+      comment: [["section.comment-box", ["textarea:not(:disabled)"]]],
+    };
+    const list = candidates[revealing.target];
+    for (const [index, [region, controls]] of list.entries()) {
+      const area = root.querySelector<HTMLElement>(region);
+      const control = controls
+        .map((selector) => area?.querySelector<HTMLElement>(selector))
+        .find(Boolean);
+      // A region without a usable control falls through to the next one.
+      if (!area || (!control && index < list.length - 1)) continue;
+      const target = control ?? area;
+      target.scrollIntoView?.({ block: "center" });
+      target.focus({ preventScroll: true });
+      return;
+    }
   }, [revealing, cardId]);
   const card = detail.card;
   const cardPageClass = inDrawer ? "card-page card-page-drawer" : "card-page";
@@ -813,6 +823,7 @@ function CardContent({
           onSaved={reload}
           onReveal={revealTarget}
           completionId={completionId}
+          busy={!!activeAction}
           markDone={(emphasis) => (
             <CardTemplate
               disabled={!!activeAction && activeAction !== "completion"}

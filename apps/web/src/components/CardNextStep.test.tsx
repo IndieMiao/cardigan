@@ -614,3 +614,88 @@ test("C-695: 写评论 opens the timeline and focuses the comment box", async ()
   ).toBe("true");
   vi.unstubAllGlobals();
 });
+
+const storyDetail = (answered: boolean) =>
+  cardDetail({
+    card: {
+      ...card,
+      waiting_on: [],
+      next_owners: [{ kind: "human", ref: "human" }],
+      story: {
+        question_groups: [
+          {
+            id: "C-1#3",
+            questions: [
+              {
+                question: "格式？",
+                recommended: "CSV",
+                impact: "",
+                ...(answered
+                  ? {
+                      resolution: {
+                        source: "answer" as const,
+                        value: "CSV",
+                        entry_id: "C-1#4",
+                      },
+                    }
+                  : {}),
+              },
+              { question: "范围？", recommended: "全部", impact: "" },
+            ],
+          },
+        ],
+      },
+    },
+    template: { ...general, id: "story", story: true },
+    mark_done: { allowed: false, reason: "子卡未全部结束" },
+  });
+
+test.each([
+  [false, "第 1 题回答"],
+  [true, "第 2 题回答"],
+])(
+  "C-695 V-3335: 回答问题 focuses the first open answer, not the comment box (first answered: %s)",
+  async (answered, label) => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    render(
+      <CardDetailPage
+        client={fakeClient({ card: async () => storyDetail(answered) })}
+        projectId="p-1"
+        cardId="C-1"
+      />,
+    );
+    const next = await screen.findByRole("region", { name: "下一步" });
+    fireEvent.click(within(next).getByRole("button", { name: "回答问题" }));
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("aria-label")).toBe(label),
+    );
+    expect(
+      screen.getByRole("tab", { name: /时间线/ }).getAttribute("aria-selected"),
+    ).toBe("true");
+    vi.unstubAllGlobals();
+  },
+);
+
+test("C-695: 恢复卡片 waits while another card form is open", () => {
+  render(
+    <CardNextStep
+      detail={cardDetail({ card: { ...card, hold, waiting_on: [] } })}
+      client={fakeClient()}
+      projectId="p-1"
+      onSaved={() => {}}
+      onReveal={() => {}}
+      markDone={() => null}
+      busy
+    />,
+  );
+  expect(
+    screen.getByRole("button", { name: "恢复卡片" }).hasAttribute("disabled"),
+  ).toBe(true);
+});

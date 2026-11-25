@@ -55,8 +55,9 @@
     padding: 0 var(--ui-space-6) var(--ui-space-6);
     scrollbar-gutter: stable;
   }
+  /* C-695: with the tab bar padding, space-6 between “下一步” and the tabs. */
   .page :global(.card-header) {
-    padding: 0;
+    padding: 0 0 var(--ui-space-4);
   }
   .page :global(.card-header .page-title) {
     margin: 0;
