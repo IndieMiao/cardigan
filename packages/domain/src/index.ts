@@ -60,6 +60,7 @@ export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-attached-wait.js";
 export * from "./commands/host-ops-context-restart.js";
 export * from "./commands/host-ops-rotate.js";
+export { reassignHumanAction } from "./commands/human-action-executor.js";
 export { refreshHumanActionFollowUps } from "./commands/human-action-follow-ups.js";
 export {
   cancelHumanAction,
@@ -280,6 +281,7 @@ export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
 export * from "./hot-history.js";
 export * from "./hot-history-shadow.js";
+export * from "./human-action-executor.js";
 export * from "./ids.js";
 export * from "./image-generation.js";
 export {

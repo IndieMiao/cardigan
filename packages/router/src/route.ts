@@ -25,10 +25,12 @@ import {
   eventsOfTypes,
   flowAtLeast,
   followUpDraft,
+  HUMAN_ACTION_OPERATOR_NAME,
   heldReleaseNotice,
   humanDecisionGroupKey,
   isCompletionVerifier,
   isDecisionOther,
+  isOperatorAction,
   isPrecheckConflict,
   isReviewStale,
   latestMergeCheck,
@@ -1510,6 +1512,18 @@ function notifyHumanAction(
   rule: "6.4/human action requested" | "6.4/needs you item ready",
 ): void {
   const title = action.handoff?.title ?? action.instructions;
+  // C-742: the operator reads `operator_action_requested`; never ring the owner.
+  if (isOperatorAction(action)) {
+    note(
+      input,
+      draft,
+      recipient.pm_office(),
+      "human_action",
+      rule,
+      `${action.id} 等${HUMAN_ACTION_OPERATOR_NAME}执行：${title}`,
+    );
+    return;
+  }
   if (action.triage === "host") {
     note(
       input,
@@ -2541,6 +2555,20 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "human_action_requested":
       routeHumanAction(input, draft);
       break;
+    case "human_action_reassigned": {
+      // C-742: handing an action back to the owner rings them once it is ready.
+      const action = input.snapshot.human_actions.find(
+        (h) => h.id === payloadString(input.event.payload, "human_action_id"),
+      );
+      if (
+        action?.status === "open" &&
+        action.triage !== "pm_ops" &&
+        !isOperatorAction(action) &&
+        needsYouItemReady(input.snapshot, action)
+      )
+        notifyHumanAction(input, draft, action, "6.4/human action requested");
+      break;
+    }
     case "human_action_cancelled":
     case "human_action_completed":
       routeHumanActionCompleted(input, draft);

@@ -977,6 +977,8 @@ export interface NeedsAction
   readonly triage?: "pm_ops" | "human" | "host";
   /** C-212: host actions only; external operators never wake host_ops. */
   readonly host_operator?: "external" | "host_ops";
+  /** C-742: `operator` actions belong to 张良; absent on older servers means owner. */
+  readonly executor?: "owner" | "operator";
   readonly handoff?: HumanActionHandoffView;
   readonly original_request?: {
     readonly instructions: string;
@@ -2774,6 +2776,14 @@ export interface CardiganClient {
     reason: string,
     idempotencyKey?: string,
   ): Promise<void>;
+  /** C-742: hand a human action to the owner or to 张良. */
+  reassignAction(
+    projectId: string,
+    id: string,
+    executor: "owner" | "operator",
+    reason: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
   completeAction(
     projectId: string,
     id: string,
@@ -4150,6 +4160,20 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       `human-actions/${encodeURIComponent(id)}/cancel`,
       { reason },
+      idempotencyKey,
+    );
+  }
+  async reassignAction(
+    projectId: string,
+    id: string,
+    executor: "owner" | "operator",
+    reason: string,
+    idempotencyKey: string = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `human-actions/${encodeURIComponent(id)}/reassign`,
+      { executor, reason },
       idempotencyKey,
     );
   }

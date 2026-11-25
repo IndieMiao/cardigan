@@ -1808,6 +1808,7 @@ export function needsYou(
       ...(action.triage === "host"
         ? { host_operator: action.host_operator ?? "host_ops" }
         : {}),
+      executor: action.executor ?? "owner",
       triage_rationale: action.triage_rationale ?? null,
       blocked_work_items: action.blocked_work_items,
       ...(action.completion_notice !== undefined

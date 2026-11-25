@@ -13,6 +13,10 @@ import type {
   WorkItem,
 } from "./entities.js";
 import { eventById, eventsForDecision } from "./event-index.js";
+import {
+  HUMAN_ACTION_OPERATOR_NAME,
+  isOperatorAction,
+} from "./human-action-executor.js";
 import { pauseLabel, pauseOwners, pendingPause } from "./review-pause.js";
 import type { CardStatus, DecisionStatus } from "./states.js";
 import { type CardTemplate, cardTemplate } from "./templates.js";
@@ -249,7 +253,7 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
     waiting.push({
       kind: "human_action",
       ref: action.id,
-      label: `${action.triage === "pm_ops" ? "等待 PM 分拣" : action.triage === "host" ? "等待主机操作" : "等你执行"} ${action.id}`,
+      label: `${action.triage === "pm_ops" ? "等待 PM 分拣" : isOperatorAction(action) ? `等待${HUMAN_ACTION_OPERATOR_NAME}执行` : action.triage === "host" ? "等待主机操作" : "等你执行"} ${action.id}`,
     });
   }
 

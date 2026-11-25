@@ -1,5 +1,10 @@
 import type { HumanAction, WorkItem } from "../entities.js";
 import { eventsOfType } from "../event-index.js";
+import {
+  HUMAN_ACTION_OPERATOR_NAME,
+  isOperatorAction,
+  isOperatorIdentity,
+} from "../human-action-executor.js";
 import type { HumanActionId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
 import { extractReferences } from "../references.js";
@@ -68,10 +73,22 @@ export function completeActionDraft(
     text: string;
     conclusion?: "exited" | "false_alarm" | "unconfirmed";
     attachments?: readonly string[];
+    as_operator?: true;
   },
   helperVerified = false,
 ) {
   const action = d.get("human_actions", p.human_action_id);
+  ensure(
+    !isOperatorAction(action) ||
+      // Host-observed resolutions (deployment, context usage) stay automatic.
+      d.actor.kind === "system" ||
+      (d.actor.kind === "human"
+        ? p.as_operator === true
+        : d.actor.kind === "assignment" &&
+          isOperatorIdentity(d.state, d.assignment)),
+    "unauthorized",
+    `交给${HUMAN_ACTION_OPERATOR_NAME}的待办只能由${HUMAN_ACTION_OPERATOR_NAME}的身份或带 --operator 的人类 CLI 结项；要由所有者处理请先改派给所有者`,
+  );
   ensure(
     !workerHelperAction(d.state, action) || helperVerified,
     "illegal_transition",

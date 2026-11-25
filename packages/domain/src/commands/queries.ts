@@ -28,6 +28,7 @@ import type {
 } from "../entities.js";
 import { eventsForDecision, eventsOfType } from "../event-index.js";
 import { cardFlowVersion } from "../flow.js";
+import { isOperatorAction } from "../human-action-executor.js";
 import type { CardId, WorkItemId } from "../ids.js";
 import { effectiveWorkItemRequirements } from "../machine-requirements.js";
 import { mergeBatches } from "../merge-batch.js";
@@ -773,8 +774,9 @@ export function listNeedsYouCounts(
     // Story proposals count with decisions and never against merges.
     const decisionCount = decisionsOnly + data.story_proposals.length;
     const mergeCount = data.decisions.length - decisionsOnly;
+    // C-742: operator actions are listed apart and never count as the owner's.
     const humanActions = data.human_actions.filter(
-      (h) => h.triage !== "host",
+      (h) => h.triage !== "host" && !isOperatorAction(h),
     ).length;
     const attention = data.incidents.length + data.attention.length;
     const noticeList = notices(state);

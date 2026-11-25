@@ -696,6 +696,7 @@ test("every write route enforces cookie authentication, Origin and JSON before a
       "/decisions/Q-1/comments",
       "/human-actions/H-1/complete",
       "/human-actions/H-1/cancel",
+      "/human-actions/H-1/reassign",
     ],
     before = snapshot();
   for (const url of routes) {
@@ -1925,6 +1926,77 @@ test("C-383 human closes a deferred action with a reason, refreshes later counts
   expect(
     await request(`/human-actions/${action.id}/complete`, { text: "Late" }),
   ).toMatchObject({ status: 409 });
+});
+
+test("C-742 the owner cannot complete 张良's action on the web but can take it back", async () => {
+  const action = s.command((state, actor, ports) =>
+    requestHumanAction(
+      state,
+      actor,
+      {
+        card_id: s.card.id,
+        instructions: "张良：换主机运维会话",
+        why_human: "Needs the operator",
+        expected_return: "New session",
+        blocked_work_items: [],
+      },
+      ports,
+    ),
+  );
+  expect(action.executor).toBe("operator");
+  // PM triage keeps the executor.
+  s.command((state, actor, ports) =>
+    triageHumanAction(
+      state,
+      actor,
+      {
+        human_action_id: action.id,
+        disposition: "human",
+        rationale: "交给张良",
+        title: "张良：换主机运维会话",
+        summary: "换会话",
+        why_human: "Needs the operator",
+        instructions: "换会话",
+        expected_outcome: "新会话",
+        expected_return: "New session",
+      },
+      ports,
+    ),
+  );
+  const readNeeds = async () =>
+    (await fetch(web.url + path("/needs-you"), { headers: { cookie } })).json();
+  const listed = await readNeeds();
+  expect(listed.human_actions).toContainEqual(
+    expect.objectContaining({ id: action.id, executor: "operator" }),
+  );
+  const complete = `/human-actions/${action.id}/complete`;
+  const reassign = `/human-actions/${action.id}/reassign`;
+  const before = snapshot();
+  expect(await request(complete, { text: "Done" })).toMatchObject({
+    status: 403,
+  });
+  // The operator flag belongs to the human CLI only.
+  expect(
+    await request(complete, { text: "Done", as_operator: true }),
+  ).toMatchObject({ status: 400 });
+  expect(
+    await request(reassign, { executor: "nobody", reason: "x" }),
+  ).toMatchObject({ status: 400 });
+  expect(snapshot()).toBe(before);
+  const back = await request(reassign, {
+    executor: "owner",
+    reason: "所有者改为自己处理",
+  });
+  expect(back).toMatchObject({ status: 200 });
+  expect(back.body.executor).toBeUndefined();
+  const owned = await readNeeds();
+  expect(owned.human_actions).toContainEqual(
+    expect.objectContaining({ id: action.id, executor: "owner" }),
+  );
+  expect(await request(complete, { text: "Done" })).toMatchObject({
+    status: 200,
+    body: { status: "done" },
+  });
 });
 
 test("Web answers bind to a story group, retry exactly once, and leave the rest to the human default choice", async () => {

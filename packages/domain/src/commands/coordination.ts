@@ -10,6 +10,7 @@ import type {
   Author,
   Decision,
   HumanAction,
+  HumanActionExecutor,
   HumanDecidedMergeBasis,
   MergeDecisionEvidence,
   PlainSummary,
@@ -19,6 +20,12 @@ import type {
 } from "../entities.js";
 import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
+import {
+  HUMAN_ACTION_OPERATOR_NAME,
+  inferHumanActionExecutor,
+  isOperatorAction,
+  isOperatorIdentity,
+} from "../human-action-executor.js";
 import type {
   AssignmentId,
   AttachmentId,
@@ -74,6 +81,10 @@ import {
   applyHeldResumeAnswer,
   checkHeldResumeAnswer,
 } from "./held-assignment-resume.js";
+import {
+  emitOperatorActionRequested,
+  validExecutor,
+} from "./human-action-executor.js";
 import {
   buildHumanDecidedMergeBasis,
   humanDecidedMergeQuestions,
@@ -1835,10 +1846,17 @@ export function requestHumanAction(
     prerequisite?: HumanAction["prerequisite"];
     /** C-212: defer when the action is shown in Needs You. */
     ready_when?: ReadyConditionInput;
+    /** C-742: absent infers operator from the title prefix or reason. */
+    executor?: HumanActionExecutor;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "request_human_action", ports, (d) => {
+    ensure(
+      p.executor === undefined || validExecutor(p.executor),
+      "validation_failed",
+      "executor 须为 owner 或 operator",
+    );
     ensure(
       d.card(p.card_id).status !== "cancelled",
       "illegal_transition",
@@ -1893,11 +1911,13 @@ export function requestHumanAction(
       : undefined;
     if (blocks) for (const item of items) paused(d, item, "blocked");
     const id = d.ids.next(state.project_id, "human_action");
+    const executor = p.executor ?? inferHumanActionExecutor(p);
     const action: HumanAction = {
       id,
       key: id,
       card_id: p.card_id,
       requested_by: d.author,
+      ...(executor === "operator" ? { executor } : {}),
       ...(p.terminal ? { terminal: p.terminal } : {}),
       ...(p.category ? { category: p.category } : {}),
       instructions: p.instructions,
@@ -1925,9 +1945,19 @@ export function requestHumanAction(
         ...(action.blocks_merge
           ? { blocks_merge: true, prerequisite: action.prerequisite }
           : {}),
+        ...(action.executor ? { executor: action.executor } : {}),
       },
-      { type: "human_action", body: p.instructions, human_action_id: id },
+      {
+        type: "human_action",
+        body:
+          executor === "operator"
+            ? `交给${HUMAN_ACTION_OPERATOR_NAME}：${p.instructions}`
+            : p.instructions,
+        human_action_id: id,
+      },
     );
+    if (executor === "operator")
+      emitOperatorActionRequested(d, action, "requested");
     return action;
   });
 }
@@ -2001,6 +2031,8 @@ export function completeHumanAction(
     conclusion?: "exited" | "false_alarm" | "unconfirmed";
     text: string;
     attachments?: readonly string[];
+    /** C-742: set only by the operator-marked human CLI, never by web or Feishu. */
+    as_operator?: true;
   },
   ports: CommandPorts,
 ) {
@@ -2010,8 +2042,18 @@ export function completeHumanAction(
     actor.kind === "human" ? "request_human_action" : "complete_host_action",
     ports,
     (d) => {
+      ensure(
+        p.as_operator === undefined || actor.kind === "human",
+        "validation_failed",
+        "as_operator 仅用于人类 CLI",
+      );
       if (actor.kind !== "human") {
         const action = d.get("human_actions", p.human_action_id);
+        if (
+          isOperatorAction(action) &&
+          isOperatorIdentity(d.state, d.assignment)
+        )
+          return completeActionDraft(d, p);
         ensure(
           actor.kind === "assignment" &&
             action.triage === "host" &&
