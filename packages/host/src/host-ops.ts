@@ -225,6 +225,7 @@ export class HostOpsService {
       (project, machine) => this.stallExecution(project, machine),
       this.contextAbort.signal,
       (ref) => options.ownsRuntimeRef?.(ref) !== false,
+      options.scrubCredentials,
     );
   }
   /** A project-local worker may have a different account and workspace root

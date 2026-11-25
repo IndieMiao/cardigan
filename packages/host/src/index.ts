@@ -372,6 +372,12 @@ export * from "./runtime-workers-config.js";
 export { pinStallBackup } from "./stall-backup.js";
 export type { SessionExitVerdict } from "./stall-evidence.js";
 export {
+  DEFAULT_STALLED_SESSION_RELEASE_MS,
+  managedReleaseCommand,
+  SESSION_RELEASE_HELD,
+  stalledSessionReleaseMs,
+} from "./stalled-session-release.js";
+export {
   StandingPmRecovery,
   standingPmStallPolicy,
 } from "./standing-pm-recovery.js";

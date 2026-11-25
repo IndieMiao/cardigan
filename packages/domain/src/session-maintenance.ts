@@ -279,6 +279,57 @@ export function probeInvalidStreak(state: CommandState, a: Assignment): number {
   return streak;
 }
 
+/**
+ * C-739: how many idle retirements of this session were given up since its
+ * last sign of life (an MCP call, a Run start or finish): withdrawn attempts
+ * of this exact session, whatever the reason, and retained retirements
+ * released because business work arrived (C-690). A session that keeps
+ * being reclaimed and handed back without ever being woken shows up here.
+ */
+export function retirementWithdrawals(
+  state: CommandState,
+  a: Assignment,
+): number {
+  if (!a.runtime_ref) return 0;
+  const ref = JSON.stringify(canonicalSessionFacts(a.runtime_ref));
+  const since = Math.max(
+    0,
+    Date.parse(a.last_mcp_activity_at ?? "") || 0,
+    ...runsOf(state.runs, a.id).flatMap((r) =>
+      [r.started_at, r.finished_at].map((at) => Date.parse(at ?? "") || 0),
+    ),
+  );
+  let count = 0;
+  for (const e of eventsOfType(
+    state.events,
+    "idle_session_retirement_withdrawn",
+  )) {
+    const p = e.payload as {
+      assignment_id?: string;
+      runtime_ref?: unknown;
+    } | null;
+    if (
+      p?.assignment_id === a.id &&
+      JSON.stringify(canonicalSessionFacts(p.runtime_ref)) === ref &&
+      Date.parse(e.created_at) > since
+    )
+      count++;
+  }
+  for (const e of eventsOfType(
+    state.events,
+    "idle_session_retirement_released",
+  )) {
+    const p = e.payload as { assignment_id?: string; reason?: string } | null;
+    if (
+      p?.assignment_id === a.id &&
+      p.reason === "business_work" &&
+      Date.parse(e.created_at) > since
+    )
+      count++;
+  }
+  return count;
+}
+
 /** Obsolete observations remain historical facts, never presented as current reasons. */
 export function sessionMaintenanceView(
   state: CommandState,
