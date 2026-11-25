@@ -185,20 +185,31 @@ test("C-681: an abort before push records not_sent with no POST evidence", async
 
 test("C-681/C-758: a persistently unreachable push records push_unreachable and the latest request", async () => {
   const f = setup();
-  f.push.mockResolvedValue({ status: "failed", reason: "network" });
+  f.push.mockResolvedValue({
+    status: "failed",
+    reason: "network",
+    exit_code: 128,
+  });
   const error = await unknown(new GithubCheckExecutor(f.options), f.request);
   expect(error.dispatch).toEqual({
     stage: "push_unreachable",
     pushFailure: "network",
+    pushExitCode: 128,
+    pushAttempts: 3,
+    pushDurationMs: expect.any(Number),
     last: tokenExchange,
   });
+  expect(Number.isSafeInteger(error.dispatch?.pushDurationMs)).toBe(true);
   // Two bounded retries inside the same publication fence, then the real cause.
   expect(f.push).toHaveBeenCalledTimes(3);
   expect(f.client.dispatch).not.toHaveBeenCalled();
   expect(f.journal.unfinished()).toMatchObject([{ phase: "reserved" }]);
-  const text = formatDispatchUnknown(error.dispatch!);
+  const text = formatDispatchUnknown({
+    ...error.dispatch!,
+    pushDurationMs: 20_140,
+  });
   expect(text).toBe(
-    "分类：候选推送连不上 GitHub；推送结果：网络连接失败；最近一次 GitHub 请求：POST 安装令牌，HTTP 201，请求 id 0400:1111:AAAA，响应：正文已省略",
+    "分类：候选推送连不上 GitHub；推送结果：网络连接失败，退出码 128；推送 3 次，用时 20.1 秒；最近一次 GitHub 请求：POST 安装令牌，HTTP 201，请求 id 0400:1111:AAAA，响应：正文已省略",
   );
   expectRedacted(text);
 });
@@ -317,6 +328,10 @@ test.each([
     };
     const error = await unknown(new GithubCheckExecutor(options), request);
     expect(error.dispatch?.stage).toBe("push_cancelled");
+    expect(error.dispatch?.pushFailure).toBe(
+      when === "transport" ? "cancelled" : undefined,
+    );
+    expect(error.dispatch?.pushAttempts).toBe(1);
     expect(f.push).toHaveBeenCalledOnce();
     expect(f.client.dispatch).not.toHaveBeenCalled();
     expect(formatDispatchUnknown(error.dispatch!)).toContain(

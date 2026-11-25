@@ -52,6 +52,12 @@ export interface DispatchUnknownDetail {
   readonly stage: DispatchUnknownStage;
   /** C-758: the candidate transport's fixed reason, when a push failed. */
   readonly pushFailure?: CandidatePushReason;
+  /** C-758: Git's numeric exit status of the last failed push, if any. */
+  readonly pushExitCode?: number;
+  /** C-758: pushes that entered transport, including in-fence retries. */
+  readonly pushAttempts?: number;
+  /** C-758: from the first push start to the last push end, retry waits included. */
+  readonly pushDurationMs?: number;
   /** Latest GitHub request made by this attempt's executor call. */
   readonly last?: ExecutorHttpObservation;
   /** The persisted workflow dispatch POST response, possibly from an earlier pass. */
@@ -62,6 +68,9 @@ export interface ExecutorFailure {
   readonly category: string;
   readonly stage?: DispatchUnknownStage;
   readonly pushFailure?: CandidatePushReason;
+  readonly pushExitCode?: number;
+  readonly pushAttempts?: number;
+  readonly pushDurationMs?: number;
   readonly httpStatus?: number;
   readonly requestId?: string;
 }
@@ -221,7 +230,14 @@ export function formatDispatchUnknown(detail: DispatchUnknownDetail): string {
   const parts = [
     `分类：${DISPATCH_STAGE_LABEL[detail.stage]}`,
     ...(detail.pushFailure
-      ? [`推送结果：${PUSH_REASON_LABEL[detail.pushFailure]}`]
+      ? [
+          `推送结果：${PUSH_REASON_LABEL[detail.pushFailure]}${detail.pushExitCode !== undefined ? `，退出码 ${detail.pushExitCode}` : ""}`,
+        ]
+      : []),
+    ...(detail.pushAttempts !== undefined && detail.pushDurationMs !== undefined
+      ? [
+          `推送 ${detail.pushAttempts} 次，用时 ${(detail.pushDurationMs / 1000).toFixed(1)} 秒`,
+        ]
       : []),
     `最近一次 GitHub 请求：${describe(detail.last)}`,
   ];
@@ -238,6 +254,15 @@ export function dispatchFailure(
     category,
     ...(detail ? { stage: detail.stage } : {}),
     ...(detail?.pushFailure ? { pushFailure: detail.pushFailure } : {}),
+    ...(detail?.pushExitCode !== undefined
+      ? { pushExitCode: detail.pushExitCode }
+      : {}),
+    ...(detail?.pushAttempts !== undefined
+      ? { pushAttempts: detail.pushAttempts }
+      : {}),
+    ...(detail?.pushDurationMs !== undefined
+      ? { pushDurationMs: detail.pushDurationMs }
+      : {}),
     ...(last?.status !== undefined ? { httpStatus: last.status } : {}),
     ...(last?.requestId ? { requestId: last.requestId } : {}),
   };

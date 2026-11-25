@@ -1510,6 +1510,15 @@ export class MergeChecks {
                       ...(failure.pushFailure
                         ? { push_failure: failure.pushFailure }
                         : {}),
+                      ...(failure.pushExitCode !== undefined
+                        ? { push_exit_code: failure.pushExitCode }
+                        : {}),
+                      ...(failure.pushAttempts !== undefined
+                        ? { push_attempts: failure.pushAttempts }
+                        : {}),
+                      ...(failure.pushDurationMs !== undefined
+                        ? { push_duration_ms: failure.pushDurationMs }
+                        : {}),
                       ...(failure.httpStatus !== undefined
                         ? { http_status: failure.httpStatus }
                         : {}),

@@ -58,6 +58,14 @@ export {
   type GithubCheckContext,
   githubCheckRunName,
 } from "./github-dispatch-discovery.js";
+
+/** C-758: what the candidate pushes of one dispatch did, fixed fields only. */
+interface PushEvidence {
+  readonly reason?: CandidatePushFailure;
+  readonly exitCode?: number;
+  readonly attempts: number;
+  readonly durationMs: number;
+}
 /** C-758: pauses before each retry of a transient candidate push (20 s total). */
 export const CANDIDATE_PUSH_RETRY_DELAYS_MS: readonly number[] = [
   5_000, 15_000,
@@ -229,7 +237,7 @@ export class GithubCheckExecutor implements CheckExecutor {
     // GitHub exchange of this call, plus the persisted POST response if any.
     const dispatchUnknown = (
       stage: DispatchUnknownStage,
-      pushFailure?: CandidatePushFailure,
+      push?: PushEvidence,
     ) => {
       const error = new GithubExecutorError("dispatch_unknown");
       const persisted = claimedIntent?.dispatchResponse;
@@ -237,7 +245,12 @@ export class GithubCheckExecutor implements CheckExecutor {
         trace.dispatch ?? (validObservation(persisted) ? persisted : undefined);
       error.dispatch = {
         stage,
-        ...(pushFailure ? { pushFailure } : {}),
+        ...(push?.reason ? { pushFailure: push.reason } : {}),
+        ...(push?.exitCode !== undefined
+          ? { pushExitCode: push.exitCode }
+          : {}),
+        ...(push ? { pushAttempts: push.attempts } : {}),
+        ...(push ? { pushDurationMs: push.durationMs } : {}),
         ...(trace.last ? { last: trace.last } : {}),
         ...(post ? { post } : {}),
       };
@@ -308,6 +321,10 @@ export class GithubCheckExecutor implements CheckExecutor {
           ) {
             let outcome: "pushed" | "not_started" | "cancelled" = "cancelled";
             let failed: CandidatePushFailure | undefined;
+            let exitCode: number | undefined;
+            let attempts = 0;
+            let started: number | undefined;
+            let ended: number | undefined;
             let dispatch: boolean;
             try {
               const candidate = {
@@ -317,7 +334,18 @@ export class GithubCheckExecutor implements CheckExecutor {
                 token,
                 ...(request.signal ? { signal: request.signal } : {}),
               };
-              let result = await this.options.push(candidate);
+              // C-758: every push is timed and counted for the diagnosis.
+              const push = async () => {
+                started ??= performance.now();
+                try {
+                  const pushed = await this.options.push(candidate);
+                  if (pushed.status !== "not_started") attempts++;
+                  return pushed;
+                } finally {
+                  ended = performance.now();
+                }
+              };
+              let result = await push();
               // C-758: bounded retries inside the same publication fence for a
               // transient answer (e.g. a just-minted installation token that
               // GitHub's Git frontend does not accept yet). Timeouts, rejected
@@ -332,7 +360,7 @@ export class GithubCheckExecutor implements CheckExecutor {
                   break;
                 await abortableDelay(delay, request.signal);
                 if (request.signal?.aborted) break;
-                const retried = await this.options.push(candidate);
+                const retried = await push();
                 // An earlier attempt entered transport: a busy lock on a retry
                 // is not proof that nothing was ever sent. Keep that failure.
                 if (retried.status === "not_started") break;
@@ -342,7 +370,10 @@ export class GithubCheckExecutor implements CheckExecutor {
                 outcome = "not_started";
                 throw new CandidateRepositoryBusy();
               }
-              if (result.status === "failed") failed = result.reason;
+              if (result.status === "failed") {
+                failed = result.reason;
+                exitCode = result.exit_code;
+              }
               if (result.status === "pushed" && !request.signal?.aborted) {
                 if (request.kind === "merge_check")
                   await request.beforeDispatch?.();
@@ -355,10 +386,26 @@ export class GithubCheckExecutor implements CheckExecutor {
             }
             // C-758: name the real cause. A local abort, or a pushed candidate
             // whose fence was taken by abandonment, is a local cancellation.
-            if (!dispatch)
+            if (!dispatch) {
+              const evidence: PushEvidence | undefined =
+                started === undefined
+                  ? undefined
+                  : {
+                      attempts,
+                      durationMs: Math.max(
+                        0,
+                        Math.round((ended ?? started) - started),
+                      ),
+                    };
               throw request.signal?.aborted || failed === undefined
-                ? dispatchUnknown("push_cancelled")
-                : dispatchUnknown(pushFailureStage(failed), failed);
+                ? dispatchUnknown("push_cancelled", evidence)
+                : dispatchUnknown(pushFailureStage(failed), {
+                    attempts,
+                    durationMs: evidence?.durationMs ?? 0,
+                    reason: failed,
+                    ...(exitCode !== undefined ? { exitCode } : {}),
+                  });
+            }
             try {
               runId = await this.options.client.dispatch(
                 context.baselineBranch,

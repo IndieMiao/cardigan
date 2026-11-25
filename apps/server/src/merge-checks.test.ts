@@ -4901,6 +4901,7 @@ test("C-758: a timed-out candidate push is recorded as a push failure with the u
   h.git.pushCheckCandidate.mockResolvedValueOnce({
     status: "failed",
     reason: "timeout",
+    exit_code: 137,
   } as never);
   const checks = h.create();
   try {
@@ -4921,6 +4922,9 @@ test("C-758: a timed-out candidate push is recorded as a push failure with the u
         category: "dispatch_unknown",
         stage: "push_timeout",
         push_failure: "timeout",
+        push_exit_code: 137,
+        push_attempts: 1,
+        push_duration_ms: expect.any(Number),
       },
       description: "候选推送超时，合并检查排队等待并按退避重试",
     });

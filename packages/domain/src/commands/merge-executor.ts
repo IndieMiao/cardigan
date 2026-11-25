@@ -59,10 +59,19 @@ export type MergeExecutorFailure = {
   readonly stage?: MergeExecutorStage;
   /** C-758: the candidate transport's fixed reason for a failed push. */
   readonly push_failure?: MergeExecutorPushFailure;
+  /** C-758: Git's exit status, push tries and total push time of the attempt. */
+  readonly push_exit_code?: number;
+  readonly push_attempts?: number;
+  readonly push_duration_ms?: number;
   /** Latest provider HTTP status observed by the attempt. */
   readonly http_status?: number;
   readonly request_id?: string;
 };
+const boundedInteger = (value: unknown, max: number) =>
+  value === undefined ||
+  (Number.isSafeInteger(value) &&
+    (value as number) >= 0 &&
+    (value as number) <= max);
 const pushFailed = (failure: MergeExecutorFailure | undefined) =>
   failure?.stage !== undefined && Object.hasOwn(PUSH_FAILED, failure.stage);
 const OUTAGE_EVENTS = [
@@ -167,6 +176,9 @@ export function recordMergeExecutor(
             (failure.stage === undefined || STAGES.includes(failure.stage)) &&
             (failure.push_failure === undefined ||
               PUSH_FAILURES.includes(failure.push_failure)) &&
+            boundedInteger(failure.push_exit_code, 255) &&
+            boundedInteger(failure.push_attempts, 16) &&
+            boundedInteger(failure.push_duration_ms, 24 * 60 * 60_000) &&
             (failure.http_status === undefined ||
               (Number.isSafeInteger(failure.http_status) &&
                 failure.http_status >= 100 &&
@@ -205,6 +217,15 @@ export function recordMergeExecutor(
                 ...(failure.stage ? { stage: failure.stage } : {}),
                 ...(failure.push_failure
                   ? { push_failure: failure.push_failure }
+                  : {}),
+                ...(failure.push_exit_code !== undefined
+                  ? { push_exit_code: failure.push_exit_code }
+                  : {}),
+                ...(failure.push_attempts !== undefined
+                  ? { push_attempts: failure.push_attempts }
+                  : {}),
+                ...(failure.push_duration_ms !== undefined
+                  ? { push_duration_ms: failure.push_duration_ms }
                   : {}),
                 ...(failure.http_status !== undefined
                   ? { http_status: failure.http_status }

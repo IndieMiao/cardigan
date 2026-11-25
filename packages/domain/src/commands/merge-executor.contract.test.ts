@@ -196,7 +196,14 @@ test.each([
   (stage, push_failure, label) => {
     const f = setup();
     const executor = "github-actions";
-    const failure = { category: "dispatch_unknown", stage, push_failure };
+    const failure = {
+      category: "dispatch_unknown",
+      stage,
+      push_failure,
+      push_exit_code: 128,
+      push_attempts: 3,
+      push_duration_ms: 20_140,
+    };
     const first = f.record({
       executor,
       status: "unreachable",
@@ -322,6 +329,15 @@ test.each(["not_sent", "push_cancelled"] as const)(
 
 test.each([
   { category: "dispatch_unknown", stage: "push_failed", push_failure: "boom" },
+  { category: "dispatch_unknown", stage: "push_failed", push_exit_code: 256 },
+  { category: "dispatch_unknown", stage: "push_failed", push_exit_code: -1 },
+  { category: "dispatch_unknown", stage: "push_failed", push_attempts: 1.5 },
+  { category: "dispatch_unknown", stage: "push_failed", push_attempts: 17 },
+  {
+    category: "dispatch_unknown",
+    stage: "push_failed",
+    push_duration_ms: "20s",
+  },
   {
     category: "dispatch_unknown",
     stage: "push_failed",
