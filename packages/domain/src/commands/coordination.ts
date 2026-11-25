@@ -1,3 +1,8 @@
+import {
+  isPublishApprovalRequest,
+  PUBLISH_APPROVAL_FORMAT,
+  publishApprovalShape,
+} from "../artifact-publication.js";
 import { categoryDelegated } from "../decision-authorization.js";
 import { DECISION_OTHER_OPTION, isDecisionOther } from "../decision-other.js";
 import {
@@ -705,19 +710,37 @@ export function requestDecision(
       p.decider === "human" || p.plain_summary !== undefined
         ? buildPlainSummary(p.plain_summary)
         : undefined;
+    // C-754: a publish approval must be one publish_artifact can honour once
+    // the owner says yes; the target is derived from its single attachment.
+    let target = p.target;
+    if (isPublishApprovalRequest(p)) {
+      const shape = publishApprovalShape(p, (id) =>
+        d
+          .list("attachments")
+          .find((a) => a.id === id && !a.streamed_artifact?.expired),
+      );
+      ensure(
+        shape.ok,
+        "validation_failed",
+        shape.ok
+          ? ""
+          : `外发拍板格式不对：${shape.problems.map((m, i) => `${i + 1}) ${m}`).join("；")}。${PUBLISH_APPROVAL_FORMAT}`,
+      );
+      target = shape.target;
+    }
     if (p.kind === "approve") {
       ensure(
-        p.target,
+        target,
         "validation_failed",
         "Approval must bind to a delivery or subject",
       );
-      if ("delivery_id" in p.target)
-        d.work(d.get("deliveries", p.target.delivery_id).work_item_id);
+      if ("delivery_id" in target)
+        d.work(d.get("deliveries", target.delivery_id).work_item_id);
       else {
-        text(p.target.subject.value, "approval subject");
+        text(target.subject.value, "approval subject");
         ensure(
           ["git_head", "artifact_sha256", "doc_version"].includes(
-            p.target.subject.kind,
+            target.subject.kind,
           ),
           "validation_failed",
           "Invalid approval subject",
@@ -793,7 +816,7 @@ export function requestDecision(
       );
       ensure(
         highRiskCategories.includes(p.category) &&
-          !p.target &&
+          !target &&
           items.every((w) => w.kind !== "produce"),
         "validation_failed",
         "只有不涉及产出工作项、也不绑定审批对象的高风险拍板（花钱、账号、权限、删除数据）才能标为与合并无关",
@@ -841,9 +864,7 @@ export function requestDecision(
                 ...(p.card_id ? { card_id: p.card_id } : {}),
                 affected_cards: cards,
                 affected_work_items: items.map((w) => w.id),
-                ...(p.kind === "approve" && p.target
-                  ? { target: p.target }
-                  : {}),
+                ...(p.kind === "approve" && target ? { target } : {}),
               },
               p.suggestion,
             ),
@@ -879,7 +900,7 @@ export function requestDecision(
         ? {
             ...base,
             kind: "approve",
-            target: p.target as NonNullable<typeof p.target>,
+            target: target as NonNullable<typeof target>,
           }
         : { ...base, kind: "choose" },
     );

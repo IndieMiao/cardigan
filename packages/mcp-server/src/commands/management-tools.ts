@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import {
   type Actor,
   assignOrDefer,
   builtinCardTemplatesForFlow,
+  type CardId,
   type Clock,
   type CommandEffect,
   type CommandPorts,
@@ -10,14 +12,19 @@ import {
   createCard,
   createWorkItem,
   decisionCategories,
+  HUMAN_ACTION_OPERATOR_NAME,
+  isPublishApprovalRequest,
   issueInstruction,
   latestCardTemplate,
   MAX_DECISION_ATTACHMENTS,
+  PUBLISH_APPROVAL_FORMAT,
   parseId,
   postComment,
   projectFlowVersion,
+  publishApprovalShape,
   RELEASE_NOTE_MAX_LENGTH,
   RELEASE_NOTE_VERSION,
+  type RequestDecisionParams,
   type Result,
   recordDecision,
   releaseAssignment,
@@ -38,9 +45,15 @@ import {
   writeReleaseNote,
 } from "@cardigan/domain";
 import { z } from "zod";
+import { ToolError } from "../errors.js";
+import type { PublicationOptions } from "../tools/publish-artifact.js";
 import { agentCard } from "../tools/shared.js";
-import { defineTool } from "../tools/types.js";
-import { executeCommand, projectRepositories } from "./execute.js";
+import { defineTool, type ToolContext } from "../tools/types.js";
+import {
+  executeCommand,
+  executePreparedCommand,
+  projectRepositories,
+} from "./execute.js";
 import { entryId, id, idempotency_key, plainSummary } from "./schemas.js";
 
 const text = z.string().min(1);
@@ -863,7 +876,89 @@ function cardReply(result: ReturnType<typeof createCard>) {
   };
 }
 
-export function managementTools(clock?: Clock) {
+/**
+ * C-754: tell the host operator once per open item why a publish approval was
+ * not raised. Best effort: the caller still gets the refusal and its reasons.
+ * True when an open item for these reasons exists afterwards.
+ */
+function notifyPublishPrecheck(
+  context: ToolContext,
+  card: CardId,
+  failures: readonly string[],
+  clock: Clock | undefined,
+) {
+  const project = context.identity.actor.project_id;
+  const instructions = `${project} 的测试包外发主机预检未通过，外发拍板没有发起：${numbered(failures)}。修好后用 publish-precheck 命令核对全部 ok，再告知 PM 重新发起外发拍板。`;
+  try {
+    const open = context.store.uow.read((tx) =>
+      tx.human_actions
+        .list(project)
+        .some(
+          (h) =>
+            h.card_id === card &&
+            h.status === "open" &&
+            h.executor === "operator" &&
+            h.instructions === instructions,
+        ),
+    );
+    if (open) return true;
+    executeCommand(
+      context,
+      "request_human_action",
+      `c754-publish-precheck:${card}:${randomUUID()}`,
+      {
+        card_id: card,
+        executor: "operator",
+        instructions,
+        why_human: "主机发布配置和凭据文件只能由主机操作员修改",
+        expected_return: "publish-precheck 全部 ok，或说明无法修复的原因",
+        blocked_work_items: [],
+      },
+      requestHumanAction,
+      clock,
+    );
+    return true;
+  } catch {
+    // The refusal already carries the reasons to the caller.
+    return false;
+  }
+}
+const numbered = (items: readonly string[]) =>
+  items.map((f, i) => `${i + 1}) ${f}`).join("；");
+
+/** C-754: a publish approval reaches no one before this host could honour it. */
+async function precheckPublishApproval(
+  publication: PublicationOptions,
+  context: ToolContext,
+  state: CommandState,
+  p: RequestDecisionParams,
+  clock: Clock | undefined,
+) {
+  const precheck = publication.precheckPublication;
+  if (!precheck || !isPublishApprovalRequest(p) || !p.card_id) return;
+  const shape = publishApprovalShape(p, (id) =>
+    state.attachments.find((a) => a.id === id && !a.streamed_artifact?.expired),
+  );
+  // A malformed request is refused by the command itself, naming what is missing.
+  if (!shape.ok) return;
+  let failures: readonly string[];
+  try {
+    failures = await precheck(state.project_id, shape.attachment, shape.url);
+  } catch {
+    failures = ["主机预检无法完成"];
+  }
+  if (failures.length === 0) return;
+  const notified = notifyPublishPrecheck(context, p.card_id, failures, clock);
+  throw new ToolError(
+    "validation_failed",
+    `外发拍板没有发起：主机发布预检未通过（${numbered(failures)}）。${notified ? `已交${HUMAN_ACTION_OPERATOR_NAME}处理` : `请用 request_human_action（executor=operator）把原因交给${HUMAN_ACTION_OPERATOR_NAME}`}；修好后重新发起。`,
+  );
+}
+
+export function managementTools(
+  clock?: Clock,
+  publication: PublicationOptions = {},
+) {
   function wire<P, T>(
     name: keyof typeof schemas & ToolName,
     description: string,
@@ -946,7 +1041,23 @@ export function managementTools(clock?: Clock) {
       "Complete your assigned external host action as PM Office, with a required execution result. This does not grant host execution authority.",
       completeHumanAction,
     ),
-    wire("request_decision", "Request a scoped decision.", requestDecision),
+    defineTool({
+      name: "request_decision",
+      description: `Request a scoped decision. Publish approvals (category=publish with a publish option) are checked when raised. ${PUBLISH_APPROVAL_FORMAT}. A malformed one is refused naming what is missing; then this host's read-only publish precheck (configuration, credentials file, tools, OSS read access, and the attachment's signature, package name and version against the URL) must pass, otherwise the decision is not raised, the host operator is notified and the reasons are returned.`,
+      input: z.object({ ...schemas.request_decision, idempotency_key }),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executePreparedCommand(
+          context,
+          "request_decision",
+          idempotency_key,
+          params as RequestDecisionParams,
+          (state, _actor, p) =>
+            precheckPublishApproval(publication, context, state, p, clock),
+          (state, actor, p, _prepared, ports) =>
+            requestDecision(state, actor, p, ports),
+          clock,
+        ),
+    }),
     wire(
       "record_decision",
       "Record a decision through PM Office. A system-held merge confirmation (decider=system) accepts only hold or request_changes, with the rationale and raw_quote citing the basis.",

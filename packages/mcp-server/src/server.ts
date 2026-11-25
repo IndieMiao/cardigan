@@ -191,7 +191,7 @@ export function serverTools(
     reservationTool(options),
     ownerMessageTool(options),
     ...deliveryTools(options),
-    ...managementTools(options.clock),
+    ...managementTools(options.clock, options),
     ...supportTools(options),
     ...hostOpsTools(options),
   ];

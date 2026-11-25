@@ -3,12 +3,13 @@ import {
   type Assignment,
   type AssignmentId,
   type Attachment,
-  approvesPublication,
   type CardId,
   cardReadAccess,
   type DecisionId,
   holdsPublicationTool,
   type ProjectId,
+  PUBLISH_APPROVAL_FORMAT,
+  publicationApprovalProblem,
   RELEASE_NOTE_MISSING_HINT,
   releaseMergedCards,
   releaseNoteBodyError,
@@ -53,6 +54,16 @@ export interface PublicationOptions {
     claim: (url: string, existing?: boolean) => void,
     current: () => void,
   ) => Promise<{ url: string; size: number; sha256: string }>;
+  /**
+   * C-754: read-only readiness of this host for publishing `a` to `url`,
+   * run before a publish approval reaches anyone. Returns fixed-wording
+   * failures (never configuration values or credentials); empty when ready.
+   */
+  precheckPublication?: (
+    project: string,
+    a: Attachment,
+    url: string,
+  ) => Promise<readonly string[]>;
 }
 /** Never put raw tool/SDK errors, paths or configuration into responses or audits. */
 export class PublicationError extends Error {
@@ -72,8 +83,10 @@ export class PublicationError extends Error {
       | "host_error"
       /** C-609: cut off by the server's shutdown; no outcome is recorded. */
       | "interrupted",
+    /** C-754: fixed wording of the sub-reason; never paths, values or credentials. */
+    readonly reason?: string,
   ) {
-    super(category);
+    super(reason ? `${category}（${reason}）` : category);
   }
 }
 type Phase =
@@ -158,21 +171,19 @@ function authorize(
     throw new PublicationError("scope");
   onCard(a.card_id);
   const q = tx.decisions.get(p, request.decision_id as DecisionId);
-  if (
-    !approvesPublication(
-      p,
-      a,
-      q,
-      tx.project_preferences?.get(p, p),
-      // Delegation audits are the only events it reads (`categoryAuthorization`).
-      q?.resolution?.via === "delegated"
-        ? streamEventsBy(tx.events, p, undefined, "type", [
-            "project_preferences_updated",
-          ])
-        : [],
-    )
-  )
-    throw new PublicationError("approval");
+  const problem = publicationApprovalProblem(
+    p,
+    a,
+    q,
+    tx.project_preferences?.get(p, p),
+    // Delegation audits are the only events it reads (`categoryAuthorization`).
+    q?.resolution?.via === "delegated"
+      ? streamEventsBy(tx.events, p, undefined, "type", [
+          "project_preferences_updated",
+        ])
+      : [],
+  );
+  if (problem) throw new PublicationError("approval", problem);
   return a;
 }
 
@@ -239,7 +250,10 @@ async function runPublication(
             (o) => o.key === "publish" && o.description === `发布到 ${url}`,
           )
         )
-          throw new PublicationError("approval");
+          throw new PublicationError(
+            "approval",
+            "publish 选项说明与本次发布地址不符",
+          );
         const mine = streamEventsBy(tx.events, p, a.card_id, "decision_id", [
           request.decision_id,
         ]);
@@ -259,7 +273,8 @@ async function runPublication(
             throw new PublicationError("already_claimed");
           audit(tx, run.actor, a.card_id, request, "resumed", target);
         } else {
-          if (existing) throw new PublicationError("immutable_prefix");
+          if (existing)
+            throw new PublicationError("immutable_prefix", "目标目录已有对象");
           audit(tx, run.actor, a.card_id, request, "claimed", target);
         }
         inFlight.add(flight);
@@ -285,13 +300,14 @@ async function runPublication(
     return result;
   } catch (e) {
     const category = e instanceof PublicationError ? e.category : "host_error";
+    const failure = e instanceof PublicationError ? e.message : category;
     // C-609: a run cut off by the server's own shutdown records no outcome;
     // the next server continues it.
     if (card && category !== "interrupted") {
       const id = card;
       try {
         store.uow.run((tx) =>
-          audit(tx, run.actor, id, request, "failed", category),
+          audit(tx, run.actor, id, request, "failed", failure),
         );
       } catch {
         throw new ToolError("validation_failed", "测试包外发审计不可用");
@@ -301,7 +317,7 @@ async function runPublication(
       category === "scope" || category === "approval"
         ? "forbidden_tool"
         : "validation_failed",
-      `测试包外发未放行：${category}`,
+      `测试包外发未放行：${failure}${category === "approval" ? `。${PUBLISH_APPROVAL_FORMAT}` : ""}`,
     );
   } finally {
     if (flying) inFlight.delete(flight);
@@ -379,7 +395,7 @@ export function publicationTool(options: PublicationOptions) {
   return defineTool({
     name: "publish_artifact",
     description:
-      "Publish one signed test APK to this project's configured HTTPS destination. Requires a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths. Optional release_note saves the user-facing notes of this version after it is verified; without it the publication is unchanged and the result says the note is still missing. Also returns the cards merged since the previous successful publication as reference.",
+      "Publish one signed test APK to this project's configured HTTPS destination. Requires a same-card resolved publish approval raised with request_decision as category=publish, kind=approve, attachment_ids=[this one APK], target={subject:{kind:artifact_sha256,value:its full SHA-256}} (derived automatically when omitted with one attachment), and the publish option description exactly `发布到 <final HTTPS APK URL>`. Failures name the step and a fixed-wording sub-reason (e.g. approval kind or target mismatch, configuration unreadable, credential profile count, package name mismatch). Returns verified URL, size and SHA-256; never accepts credentials, commands or paths. Optional release_note saves the user-facing notes of this version after it is verified; without it the publication is unchanged and the result says the note is still missing. Also returns the cards merged since the previous successful publication as reference.",
     input: input.extend({
       release_note: z
         .string()

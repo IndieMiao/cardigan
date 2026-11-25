@@ -21,7 +21,7 @@ import {
 } from "./publication-target.js";
 
 const digest = (b: Buffer) => createHash("sha256").update(b).digest("hex");
-async function stageApk(data: string, a: Attachment, dest: string) {
+export async function stageApk(data: string, a: Attachment, dest: string) {
   try {
     if (
       !Number.isSafeInteger(a.size) ||
@@ -310,12 +310,21 @@ export function apkPublisher(
         ["verify", "--verbose", "--print-certs", apk],
         dir,
       );
-      if (!signedOnlyBy(certs, t.test_certificate_sha256)) throw Error();
+      if (!signedOnlyBy(certs, t.test_certificate_sha256))
+        throw new PublicationError("signature", "签名证书与配置不符或签名无效");
       stage = "manifest";
-      for (const [field, value] of [
-        ["application-id", t.package_name],
-        ["version-name", request.version],
-        ["version-code", String(request.versionCode)],
+      for (const [field, value, reason] of [
+        [
+          "application-id",
+          t.package_name,
+          "APK 包名与配置的 package_name 不符",
+        ],
+        ["version-name", request.version, "APK 版本名与请求的 version 不符"],
+        [
+          "version-code",
+          String(request.versionCode),
+          "APK 版本号与请求的 versionCode 不符",
+        ],
       ] as const) {
         if (
           (await execute(t.apkanalyzer, ["manifest", field, apk], dir)).replace(
@@ -323,7 +332,7 @@ export function apkPublisher(
             "",
           ) !== value
         )
-          throw Error();
+          throw new PublicationError("manifest", reason);
       }
       const prefix = t.prefix_template
         .replace("<version>", request.version)
@@ -362,7 +371,10 @@ export function apkPublisher(
           await oss("get-bucket-versioning", "--output-format", "raw"),
         )
       )
-        throw Error();
+        throw new PublicationError(
+          "immutable_prefix",
+          "OSS 版本控制已开启或暂停",
+        );
       const listed = JSON.parse(
         await oss(
           "list-objects-v2",
