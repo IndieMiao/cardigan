@@ -123,6 +123,7 @@ type DelegationSubject = Pick<
   Decision,
   "category" | "trigger" | "card_id" | "human_required_reason"
 > &
+  Partial<Pick<Decision, "owner_required">> &
   Partial<
     Pick<
       Decision,
@@ -207,6 +208,8 @@ function projectPreference(d: CommandDraft) {
 }
 /** Old uncategorized decisions remain human-only until explicitly classified. */
 export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
+  // C-753: PM declared, with its basis, that only the owner may decide.
+  if (q.owner_required) return false;
   if (
     (!q.trigger || q.trigger === "worktree_cleanup") &&
     q.card_id &&

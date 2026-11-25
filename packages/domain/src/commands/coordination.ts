@@ -13,6 +13,7 @@ import type {
   HumanActionExecutor,
   HumanDecidedMergeBasis,
   MergeDecisionEvidence,
+  OwnerRequiredDeclaration,
   PlainSummary,
   ReviewPauseInput,
   TimelineEntry,
@@ -602,6 +603,11 @@ export type RequestDecisionParams = Pick<
   readonly plain_summary?: PlainSummary;
   /** C-304: explicit human-only reason; requires decider=human. */
   readonly human_required_reason?: string;
+  /**
+   * C-753: PM only. The owner must decide personally: skips category
+   * delegation; both the reason and its basis are required.
+   */
+  readonly owner_required?: { readonly reason: string; readonly basis: string };
   /** C-212: defer when a human decision is shown in Needs You. */
   readonly ready_when?: ReadyConditionInput;
 };
@@ -623,6 +629,20 @@ export function requestDecision(
         p.decider === "human",
         "validation_failed",
         "强制交人理由只能用于 decider=human 的拍板",
+      );
+    }
+    if (p.owner_required !== undefined) {
+      ensure(
+        d.assignment?.scope === "standing" && d.assignment.role_id === "pm",
+        "unauthorized",
+        "只有 PM Office 或 PM Ops 可以声明此拍板须由所有者本人决定",
+      );
+      text(p.owner_required.reason, "owner_required.reason");
+      text(p.owner_required.basis, "owner_required.basis");
+      ensure(
+        p.decider === "human",
+        "validation_failed",
+        "声明须由所有者本人决定的拍板，decider 必须是 human",
       );
     }
     ensure(
@@ -784,6 +804,15 @@ export function requestDecision(
       for (const item of items) paused(d, item, "waiting_decision");
       endForDecision(d, id, p.question, items);
     }
+    const ownerRequired: OwnerRequiredDeclaration | undefined =
+      p.owner_required && d.assignment
+        ? {
+            reason: p.owner_required.reason.trim(),
+            basis: p.owner_required.basis.trim(),
+            declared_by: d.assignment.id,
+            declared_at: d.now,
+          }
+        : undefined;
     const base = {
       ...(d.assignment?.scope === "work_item"
         ? { pm_triage: true as const }
@@ -827,9 +856,16 @@ export function requestDecision(
       p.decider === "human"
         ? { handoff_group: `${p.card_id}/${p.category}` }
         : {}),
-      ...(p.human_required_reason !== undefined
-        ? { human_required_reason: p.human_required_reason.trim() }
-        : {}),
+      ...(ownerRequired
+        ? {
+            owner_required: ownerRequired,
+            human_required_reason:
+              p.human_required_reason?.trim() ||
+              `${ownerRequired.reason}（依据：${ownerRequired.basis}）`,
+          }
+        : p.human_required_reason !== undefined
+          ? { human_required_reason: p.human_required_reason.trim() }
+          : {}),
       ...(readyWhen ? { ready_when: readyWhen } : {}),
       blocking: p.blocking,
       decider:
@@ -870,6 +906,14 @@ export function requestDecision(
           decision_id: id,
           affected_work_items: decision.affected_work_items,
           ...routing,
+          ...(ownerRequired
+            ? {
+                owner_required: {
+                  reason: ownerRequired.reason,
+                  basis: ownerRequired.basis,
+                },
+              }
+            : {}),
         },
         {
           type: "decision_request",
@@ -877,7 +921,9 @@ export function requestDecision(
             ? `${p.question}\n已进入 PM 待办，尚未授权处理或交人`
             : decision.delegation_authority
               ? `${p.question}\n已按常驻授权转给 PM`
-              : p.question,
+              : ownerRequired
+                ? `${p.question}\n须由所有者本人决定：${ownerRequired.reason}（依据：${ownerRequired.basis}）`
+                : p.question,
           decision_id: id,
         },
       );

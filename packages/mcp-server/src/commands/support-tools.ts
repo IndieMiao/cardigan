@@ -86,6 +86,8 @@ export function readProjectSnapshot(
   store: Pick<McpBackend, "uow">,
   actor: AssignmentActor,
   { read_audit_employee_id }: ProjectSnapshotInput,
+  /** C-753: end of the seven-day owner-required window. */
+  now: string = new Date().toISOString(),
 ) {
   const project = actor.project_id;
   const snapshot = safeReferenceQuery(() =>
@@ -93,6 +95,7 @@ export function readProjectSnapshot(
       const result = referenceProjectSnapshot(
         loadCommandState(tx, project),
         actor,
+        now,
       );
       if (!result.ok)
         throw new ToolError(result.error.code, result.error.message);
@@ -380,7 +383,12 @@ export function supportTools(options: SupportToolOptions = {}) {
         return options.readProjectSnapshot
           ? options.readProjectSnapshot(context, input).then(respond)
           : respond(
-              readProjectSnapshot(context.store, context.identity.actor, input),
+              readProjectSnapshot(
+                context.store,
+                context.identity.actor,
+                input,
+                options.clock?.now(),
+              ),
             );
       },
     }),

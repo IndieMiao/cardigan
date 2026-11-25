@@ -279,7 +279,14 @@ const schemas = {
     human_required_reason: text
       .optional()
       .describe(
-        "With decider=human: explicit reason this decision must be made personally by the human (numeric, behavior or role rules, scope changes required by AGENTS.md). Overrides standing delegation; PM cannot approve or transcribe it. Omit to keep category delegation. Delegated responses include routed_to and routing_reason and the timeline says 已按常驻授权转给 PM.",
+        "With decider=human: note why the human should decide, shown to the human. On its own it does not override category delegation: a delegated category still goes to PM Ops (the response includes routed_to and routing_reason and the timeline says 已按常驻授权转给 PM). PM declares an owner-only question with owner_required.",
+      ),
+    owner_required: z
+      .object({ reason: text, basis: text })
+      .strict()
+      .optional()
+      .describe(
+        "PM Office/Ops only, with decider=human: the owner must decide personally. reason = why; basis = the project rule, acceptance criterion or quoted owner words requiring it. Skips category delegation and goes straight to the owner; audited and counted in project_snapshot.owner_required_decisions. Only for rules or acceptance that require the owner's own confirmation (e.g. the owner checking artwork, publishing); ordinary feature details stay with delegation.",
       ),
     ready_when: readyWhen(false),
     card_id: id("card")

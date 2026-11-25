@@ -24,6 +24,7 @@ import type {
   Delivery,
   HumanAction,
   Review,
+  Timestamp,
   WorkItem,
 } from "../entities.js";
 import { eventsForDecision, eventsOfType } from "../event-index.js";
@@ -34,6 +35,7 @@ import { effectiveWorkItemRequirements } from "../machine-requirements.js";
 import { mergeBatches } from "../merge-batch.js";
 import { mergeStage } from "../merge-stage.js";
 import { requesterNotificationRecipient } from "../notification.js";
+import { ownerRequiredDeclarations } from "../owner-required.js";
 import type { Clock } from "../ports.js";
 import { prechecks, precheckView } from "../precheck.js";
 import { crossCardRead } from "../preferences.js";
@@ -220,13 +222,22 @@ function cardView(
     ...fields,
   };
 }
-export function projectSnapshot(state: CommandState, actor: Actor) {
+export function projectSnapshot(
+  state: CommandState,
+  actor: Actor,
+  /** C-753: end of the owner-required window; defaults to the last event. */
+  now?: Timestamp,
+) {
   return command(state, actor, "project_snapshot", undefined, (d) => {
     d.pm();
     d.projectAccess();
     return {
       project_id: state.project_id,
       merge_batches: mergeBatches(state.events),
+      owner_required_decisions: ownerRequiredDeclarations(
+        state.decisions,
+        now ?? state.events.at(-1)?.created_at,
+      ),
       // C-610 metric: compare counts before and after the deployment time.
       review_convergence: {
         rejection_streak_episodes: rejectionStreakEpisodes(state),
@@ -268,7 +279,12 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
 }
 
 /** Agent reference view; writes and the human project view retain their own gates. */
-export function referenceProjectSnapshot(state: CommandState, actor: Actor) {
+export function referenceProjectSnapshot(
+  state: CommandState,
+  actor: Actor,
+  /** C-753: end of the owner-required window; defaults to the last event. */
+  now?: Timestamp,
+) {
   const assignment =
     actor.kind === "assignment"
       ? state.assignments.find((a) => a.id === actor.assignment_id)
@@ -335,6 +351,10 @@ export function referenceProjectSnapshot(state: CommandState, actor: Actor) {
           ? (priority.get(b.id) ?? 0) - (priority.get(a.id) ?? 0) ||
             (lengths.get(b.id) ?? 0) - (lengths.get(a.id) ?? 0)
           : 0,
+      ),
+      owner_required_decisions: ownerRequiredDeclarations(
+        visibleState.decisions,
+        now ?? state.events.at(-1)?.created_at,
       ),
       // C-610 metric: compare counts before and after the deployment time.
       review_convergence: {

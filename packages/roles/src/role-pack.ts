@@ -309,6 +309,13 @@ export const P2A_PM_DECISION_RULES = [
   "收到 30 分钟未落实异常时再跟进；实质变更或引用原决定的结果回帖是落实记录，ACK 不是。已有记录由系统汇总，不另写重复确认。",
 ] as const;
 
+/**
+ * C-753: PM declares an owner-only question; the server skips category
+ * delegation, audits the basis and counts recent declarations.
+ */
+export const PM_OWNER_REQUIRED_RULE =
+  "项目规则或验收标准明确要求所有者本人确认的拍板（例如所有者看图确认、对外发布），用 `request_decision` 的 `owner_required` 声明（`decider=human`，`reason` 写为什么必须本人定，`basis` 写依据：项目规则条目、验收标准或所有者原话的引用），系统跳过类别常驻授权直接交给所有者；只有 PM Office 和 PM Ops 能声明，声明留审计，近 7 天的条数和依据在 `project_snapshot` 的 `owner_required_decisions` 可查。普通功能细节、数值和界面文字仍按类别授权处理，不用它绕开授权；单写 `human_required_reason` 不改变路由。";
+
 export const P2A_PM_OPS_RULES = [
   "流程版本 ≥5 的就绪验证项始终由系统自动指派，不受 `system_auto_assign_verifiers` 开关影响；流程版本 ≤4 才按该开关处理，未设置时关闭，关闭时由 PM Ops 先用 `get_card` 确认可审交付已存在再指派。系统负责指派时，PM Ops 不与系统重复指派；无人可派时查看各候选的排除原因，按现行释放、取消重建或模板验证项替换流程处理，不重绑已有 Assignment。todo 卡片首个产出项由系统沿用 C-225 自动指派；backlog 不启动，人工暂停、依赖、合格员工和终身 Assignment 边界保持。PM 只处理自动指派异常及后续需要规划的产出项。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。催办仍按人的 `system_reminders` 开关与完整策略执行，不自行配置次数、时间或手工重复催办。",
   "卡片上出现没有提醒自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理提醒自己的事件。",
@@ -428,6 +435,7 @@ const ROLE_BODIES: Record<
     "## 交人边界（Flow Lite）",
     "",
     ...PM_FLOW_LITE_RULES.map((line) => `- ${line}`),
+    `- ${PM_OWNER_REQUIRED_RULE}`,
     "",
     "## 核实（两个上下文都要遵守）",
     "",
