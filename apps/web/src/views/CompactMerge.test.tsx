@@ -213,14 +213,18 @@ test.each(["review", "human_action", "blocked"] as const)(
     );
     const status = await screen.findByRole("region", { name: "卡片状态" });
     expect(status.textContent).toContain("审核中");
-    expect(status.textContent).toContain("等谁");
-    expect(status.textContent).toContain(
+    // C-695: who and what come once, in the “下一步” panel.
+    const next = screen.getByRole("region", { name: "下一步" });
+    expect(
+      within(next).getByRole("heading", { level: 2 }).textContent,
+    ).toContain(
       {
-        review: "下一步：完成审核",
-        human_action: "下一步：处理人工事项",
-        blocked: "下一步：解除阻塞",
+        review: "完成审核",
+        human_action: "等你执行W-2",
+        blocked: "被阻塞",
       }[kind],
     );
+    if (kind === "blocked") expect(next.textContent).toContain("待办原文");
     expect(screen.queryByRole("button", { name: "确认合并" })).toBeNull();
     const overview = screen.getByRole("region", {
       name: "目标和验收标准",
@@ -253,7 +257,13 @@ test("C-205: card refresh preserves the folded quote across snooze/check updates
   );
   await screen.findByRole("article", { name: "合并确认 Q-1" });
   expect(screen.getAllByText("需要补齐截图")).toHaveLength(1);
-  expect(document.querySelectorAll(".decision-status-line")).toHaveLength(1);
+  // C-695: the merge facts appear once, in the “下一步” panel.
+  expect(
+    screen
+      .getByRole("region", { name: "下一步" })
+      .querySelectorAll(".decision-check"),
+  ).toHaveLength(1);
+  expect(document.querySelectorAll(".decision-check")).toHaveLength(1);
   const quote = screen.getByLabelText(
     "Q-1 原话或补充说明",
   ) as HTMLTextAreaElement;
