@@ -181,6 +181,12 @@ const schemas = {
                       .array(id("card"))
                       .optional()
                       .describe("依赖的已有卡片"),
+                    wait_for_dependencies: z
+                      .boolean()
+                      .optional()
+                      .describe(
+                        "有前置时默认 true：前置全部完成后自动转 todo；false 保持 backlog 由 PM 排期",
+                      ),
                     priority: z.number().int().min(0).max(4).optional(),
                     owner_role: text.describe("负责角色编号"),
                     state_and_save: z
@@ -542,7 +548,9 @@ const schemas = {
     wait_for_dependencies: z
       .boolean()
       .optional()
-      .describe("仅明确等待且仍 backlog 的卡在前置完成后自动转 todo"),
+      .describe(
+        "仅明确等待且仍 backlog 的卡在前置完成后自动转 todo；来源为拍板且前置未完成时默认 true",
+      ),
     early_start: z
       .boolean()
       .optional()

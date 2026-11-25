@@ -163,6 +163,11 @@ export {
   prepareHcUpgrade,
 } from "./hc-upgrade.js";
 export {
+  DEFAULT_HELD_BACKLOG_MS,
+  heldBacklogMs,
+  heldBacklogs,
+} from "./held-backlog.js";
+export {
   HostMemoryPressureMonitor,
   linuxPressureProbe,
   pressureNotice,

@@ -312,6 +312,19 @@ export function refreshCardDependencies(
           "card_dependencies_ready",
           "前置卡已全部正常完成，请提前开工的负责人同步基线后继续。",
         );
+      // C-733: a backlog card that never asked to wait would otherwise sit
+      // unnoticed. Tell PM Ops once; scheduling stays PM's call.
+      if (
+        card.status === "backlog" &&
+        !card.wait_for_dependencies &&
+        !card.early_start &&
+        !card.hold &&
+        card.depends_on_cards?.length
+      )
+        once(
+          "card_dependencies_backlog_ready",
+          `${card.id} 的前置卡已全部正常完成（${card.depends_on_cards.join("、")}），卡片仍在 backlog 且未设等前置，请决定开工还是继续搁置。`,
+        );
       if (card.status !== "backlog" || !card.wait_for_dependencies || card.hold)
         continue;
       const next = {

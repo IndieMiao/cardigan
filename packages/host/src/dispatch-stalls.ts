@@ -238,13 +238,15 @@ export function dispatchStallCauses(
           systemEndedTurn(state, a)?.id !== binding.run_id)
       )
         return "turn_binding_changed";
-      if (stoppedByHuman(state.events, a.id)) return "human_stopped";
-      if (a.role_upgrade || (a.idle_retirement && !transfer))
-        return "session_maintenance";
+      // C-732: a closed or held card explains the wait before a human pause
+      // does; only a pause on an open, unheld card is the pause's to resolve.
       const parent = card && cards.get(card);
       if (parent && ["done", "cancelled"].includes(parent.status))
         return "closed_card";
       if (parent?.hold || assignmentCardHeld(a, state)) return "card_held";
+      if (stoppedByHuman(state.events, a.id)) return "human_stopped";
+      if (a.role_upgrade || (a.idle_retirement && !transfer))
+        return "session_maintenance";
       if (!assignmentDependenciesAllowStart(state, a)) return "dependencies";
       if (
         trigger &&
