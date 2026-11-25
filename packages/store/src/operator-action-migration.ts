@@ -5,8 +5,8 @@ export const OPERATOR_ACTIONS_MIGRATION_NAME = "operator_human_actions";
 
 /**
  * C-742 rule 5: open human actions written before `executor` existed follow
- * rule 1. System-raised host actions keep their own flows; an explicit
- * executor is never overwritten. Returns the migrated ids per project.
+ * rule 1. System-raised host actions and actions already handed to internal
+ * host ops keep their own flows; an explicit executor is never overwritten. Returns the migrated ids per project.
  */
 export function migrateOperatorHumanActions(db: DatabaseSync) {
   const update = db.prepare(
@@ -21,6 +21,8 @@ export function migrateOperatorHumanActions(db: DatabaseSync) {
       action.status !== "open" ||
       action.executor !== undefined ||
       action.requested_by === "system" ||
+      // Already handed to internal host ops: not 张良's (as in triage).
+      (action.triage === "host" && action.host_operator !== "external") ||
       inferHumanActionExecutor({
         instructions: action.instructions,
         why_human: action.why_human,

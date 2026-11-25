@@ -85,6 +85,14 @@ export function reassignHumanAction(
         "illegal_transition",
         "已取消卡片的待办不能改派",
       );
+    // Internal host ops close their own handoffs; 张良 would lock them out.
+    ensure(
+      p.executor !== "operator" ||
+        action.triage !== "host" ||
+        action.host_operator === "external",
+      "illegal_transition",
+      `已交给内部主机运维的待办不能改派给${HUMAN_ACTION_OPERATOR_NAME}，请先改写分拣`,
+    );
     const previous = humanActionExecutor(action);
     if (previous === p.executor) return action;
     const { executor: _previous, ...rest } = action;

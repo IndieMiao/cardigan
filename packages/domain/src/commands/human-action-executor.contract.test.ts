@@ -304,6 +304,30 @@ test("PM Ops cannot close an operator action through triage", () => {
   });
 });
 
+test("an internal host-ops handoff cannot be reassigned to 张良", () => {
+  const { state, action } = request(setup(), { executor: "owner" });
+  const handed = (patch: Partial<HumanAction>): CommandState => ({
+    ...state,
+    human_actions: state.human_actions.map((h) =>
+      h.id === action.id ? { ...h, triage: "host", ...patch } : h,
+    ),
+  });
+  const toOperator = (s: CommandState) =>
+    reassignHumanAction(
+      s,
+      human,
+      { human_action_id: action.id, executor: "operator", reason: "交给张良" },
+      ports(),
+    );
+  expect(toOperator(handed({ host_operator: "host_ops" }))).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+  expect(
+    value(toOperator(handed({ host_operator: "external" }))).data.executor,
+  ).toBe("operator");
+});
+
 test("system-raised actions cannot be reassigned", () => {
   const { state, action } = request(setup());
   const system: CommandState = {

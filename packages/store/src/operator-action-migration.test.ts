@@ -40,6 +40,17 @@ test("C-742: upgrading marks open 张良 actions as operator and leaves the rest
       action("H-5", { instructions: "张良：已完成", status: "done" }),
       action("H-6", { instructions: "张良：系统", requested_by: "system" }),
       action("H-7", { instructions: "张良：显式", executor: "owner" }),
+      action("H-8", {
+        why_human: "要在主机上换会话",
+        triage: "host",
+        host_operator: "host_ops",
+        host_assignment_id: "A-9" as HumanAction["host_assignment_id"],
+      }),
+      action("H-9", {
+        why_human: "要在主机上换会话",
+        triage: "host",
+        host_operator: "external",
+      }),
     ];
     store.uow.run((tx) => {
       for (const a of actions) tx.human_actions.put("cardigan", a);
@@ -61,6 +72,8 @@ test("C-742: upgrading marks open 张良 actions as operator and leaves the rest
       ["H-5", undefined],
       ["H-6", undefined],
       ["H-7", "owner"],
+      ["H-8", undefined],
+      ["H-9", "operator"],
     ]);
     expect(migrate(store.database)).toEqual([]);
   } finally {
