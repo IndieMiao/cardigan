@@ -88,6 +88,15 @@ export interface MaintenanceRecord {
   readonly error?: string;
   /** Present while the gate stays closed after a failed restore. */
   readonly recovery?: readonly string[];
+  /**
+   * C-755: the last `continue` / `end` could not prepare its work (for
+   * example the new hc could not be downloaded); the phase is unchanged.
+   */
+  readonly blocked?: {
+    readonly at: string;
+    readonly reason: string;
+    readonly recovery: readonly string[];
+  };
   readonly history: readonly {
     readonly at: string;
     readonly phase: MaintenancePhase;

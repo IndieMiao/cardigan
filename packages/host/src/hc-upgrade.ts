@@ -6,6 +6,7 @@ import type { HcLinkState } from "./deployment-maintenance.js";
 import {
   type MaintenanceDriver,
   type MaintenanceWork,
+  message,
   shellQuote,
 } from "./maintenance.js";
 import type {
@@ -84,6 +85,8 @@ export interface HcUpgradePlan {
   readonly targets: readonly MaintenanceHcTarget[];
   /** Path of the staged `hc` per target. */
   readonly staged: Readonly<Record<string, string>>;
+  /** Targets whose already staged directory passed the check (no download). */
+  readonly reused: readonly string[];
   readonly work: MaintenanceWork;
 }
 
@@ -100,6 +103,11 @@ export async function prepareHcUpgrade(options: {
   readonly targetIds?: readonly string[];
   readonly driver: MaintenanceDriver;
   readonly fetchArchive?: FetchArchive;
+  /**
+   * C-755: reuse a target's staged directory when it passes the same check a
+   * fresh stage ends with; anything else is downloaded and staged again.
+   */
+  readonly reuseStaged?: boolean;
 }): Promise<HcUpgradePlan> {
   const release = options.release ?? HC_RELEASE;
   if (options.version !== release.version)
@@ -118,6 +126,7 @@ export async function prepareHcUpgrade(options: {
     );
   const archives = new Map<string, Uint8Array>();
   const staged: Record<string, string> = {};
+  const reused: string[] = [];
   for (const t of targets) {
     const platform = t.platform as string;
     const pinned = release.targets[platform];
@@ -127,26 +136,41 @@ export async function prepareHcUpgrade(options: {
       `https://releases.herdr.dev/core/${release.version}/herdr-core-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`
     )
       throw new Error(`hc 清单中 ${platform} 的下载地址不是官方版本化地址`);
-    let archive = archives.get(platform);
-    if (!archive) {
-      archive = await (options.fetchArchive ?? fetchHcArchive)(pinned.url);
-      if (createHash("sha256").update(archive).digest("hex") !== pinned.sha256)
-        throw new Error(`hc ${platform} 归档 SHA-256 不符，未做任何切换`);
-      archives.set(platform, archive);
+    const request = {
+      install_root: t.install_root,
+      version: release.version,
+      sha256: pinned.sha256,
+    };
+    const existing = options.reuseStaged
+      ? await hcHelper(options.driver, t, { op: "check", ...request })
+      : undefined;
+    if (existing?.valid === true) {
+      staged[t.id] = String(existing.hc);
+      reused.push(t.id);
+    } else {
+      let archive = archives.get(platform);
+      if (!archive) {
+        try {
+          archive = await (options.fetchArchive ?? fetchHcArchive)(pinned.url);
+        } catch (error) {
+          throw new Error(
+            `${existing ? `hc 目标 ${t.id} 没有可复用的预置目录（${String(existing.problem)}），` : ""}下载 ${pinned.url} 失败：${message(error)}`,
+          );
+        }
+        if (
+          createHash("sha256").update(archive).digest("hex") !== pinned.sha256
+        )
+          throw new Error(`hc ${platform} 归档 SHA-256 不符，未做任何切换`);
+        archives.set(platform, archive);
+      }
+      const result = await hcHelper(
+        options.driver,
+        t,
+        { op: "stage", ...request, platform },
+        archive,
+      );
+      staged[t.id] = String(result.hc);
     }
-    const result = await hcHelper(
-      options.driver,
-      t,
-      {
-        op: "stage",
-        install_root: t.install_root,
-        version: release.version,
-        sha256: pinned.sha256,
-        platform,
-      },
-      archive,
-    );
-    staged[t.id] = String(result.hc);
     const current = await hcHelper(options.driver, t, {
       op: "inspect",
       link: t.link,
@@ -156,7 +180,7 @@ export async function prepareHcUpgrade(options: {
   }
   const version = release.version;
   const work = hcUpgradeWork(version, targets, staged);
-  return { version, targets, staged, work };
+  return { version, targets, staged, reused, work };
 }
 
 const HC_UPGRADE_SCOPE =
@@ -241,4 +265,26 @@ export function hcUpgradeRecoveryWork(
 /** Phases from which an hc upgrade window can still reach its switch. */
 export function hcUpgradeNeedsStaging(phase: string): boolean {
   return ["draining", "drain_timeout", "stopping", "operating"].includes(phase);
+}
+
+/**
+ * C-755: recovery steps when `continue` / `end` cannot get the new version
+ * staged before its switch (for example the download fails offline).
+ */
+export function hcStagingRecovery(
+  phase: string,
+  version: string,
+  release: HcRelease = HC_RELEASE,
+): string[] {
+  const urls = [
+    ...new Set(Object.values(release.targets).map((t) => t.url)),
+  ].filter((url) => url.includes(`/${version}/`));
+  return [
+    `已预置且校验通过的目标不再下载；其余目标需要重新下载 hc ${version}${urls.length ? `（${urls.join("、")}）` : ""}`,
+    "排除上述原因（例如恢复主机网络、确认 hc 目标机器可达）后执行 cardigan maintenance continue 或 cardigan maintenance end 重试",
+    ...(["draining", "drain_timeout"].includes(phase)
+      ? ["服务尚未停止，也可以执行 cardigan maintenance abandon 放弃"]
+      : []),
+    "维护结束前派活、检查和自动部署保持暂停。",
+  ];
 }

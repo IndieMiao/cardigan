@@ -219,12 +219,51 @@ export class MaintenanceRunner {
     }
   }
 
+  /**
+   * C-755: `continue` / `end` could not prepare the window's work. Nothing
+   * advances: the phase stays, the gate stays closed and the reason with its
+   * recovery steps goes to the status and the human.
+   */
+  block(reason: string, recovery: readonly string[]): MaintenancePhase {
+    this.row = claimMaintenance(this.store, this.driver.now());
+    try {
+      const at = this.driver.now();
+      const phase = this.row.phase;
+      if (MAINTENANCE_TERMINAL.includes(phase))
+        throw new Error(`维护 ${this.row.record.id} 已结束（${phase}）`);
+      this.save(
+        phase,
+        (r) => ({ ...r, blocked: { at, reason, recovery } }),
+        `未能继续：${reason}`,
+        `主机维护 ${this.row.record.id} 未能继续（仍在 ${phase}），派活、检查和自动部署保持暂停：${reason}。${recovery.join(" ")}`,
+      );
+      return phase;
+    } finally {
+      releaseMaintenanceHolder(this.store);
+    }
+  }
+
+  /** A command that got past preparing clears the previous block. */
+  private unblock(note: string) {
+    if (!this.row.record.blocked) return;
+    this.save(
+      this.row.phase,
+      (r) => {
+        const { blocked: _b, ...rest } = r;
+        return rest;
+      },
+      note,
+    );
+  }
+
   /** Pick up an open window: `proceed`/`wait` answer a drain timeout. */
   async resume(
     choice: "resume" | "proceed" | "wait" | "end",
   ): Promise<MaintenanceOutcome> {
     this.row = claimMaintenance(this.store, this.driver.now());
     try {
+      if (!MAINTENANCE_TERMINAL.includes(this.row.phase))
+        this.unblock("已准备好维护操作，继续");
       const work = this.workFor(this.row.record.operation);
       const phase = this.row.phase;
       if (MAINTENANCE_TERMINAL.includes(phase))
@@ -300,7 +339,10 @@ export class MaintenanceRunner {
         );
       this.save(
         "abandoned",
-        (r) => r,
+        (r) => {
+          const { blocked: _b, ...rest } = r;
+          return rest;
+        },
         "人放弃维护，未停服务，已恢复派活和自动部署",
         `主机维护 ${this.row.record.id} 已放弃：服务未停，派活、检查和自动部署已恢复。`,
       );
@@ -690,6 +732,12 @@ export function maintenanceStatus(store: Store): string {
     );
   if (r.error) lines.push(`错误：${r.error}`);
   if (r.recovery) lines.push("恢复说明：", ...r.recovery);
+  if (r.blocked)
+    lines.push(
+      `未能继续（${r.blocked.at}）：${r.blocked.reason}`,
+      "恢复说明：",
+      ...r.blocked.recovery,
+    );
   const last = r.history.at(-1);
   if (last) lines.push(`最近：${last.at} ${last.note}`);
   return lines.join("\n");

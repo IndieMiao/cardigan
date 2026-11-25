@@ -160,6 +160,7 @@ export {
   type HcRelease,
   type HcUpgradePlan,
   hcHelper,
+  hcStagingRecovery,
   hcUpgradeNeedsStaging,
   hcUpgradeRecoveryWork,
   prepareHcUpgrade,

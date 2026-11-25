@@ -60,12 +60,63 @@ def extract(archive, platform, target):
             fail("hc archive has no app binary")
         os.symlink(binary, os.path.join(target, "hc"))
 
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+# C-755: every entry of a staged directory, so a reused directory is checked
+# against what was extracted from the verified archive, not only its marker.
+def listing(root):
+    entries = {}
+    for current, dirs, files in os.walk(root):
+        for name in dirs + files:
+            path = os.path.join(current, name)
+            relative = os.path.relpath(path, root)
+            if relative in (".sha256", ".files"):
+                continue
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode):
+                entries[relative] = "l " + os.readlink(path)
+            elif stat.S_ISDIR(info.st_mode):
+                entries[relative] = "d"
+            elif stat.S_ISREG(info.st_mode):
+                entries[relative] = "f %o %s" % (info.st_mode & 0o7777, file_sha256(path))
+            else:
+                entries[relative] = "?"
+    return entries
+
+def staged_problem(directory, digest, version):
+    """The one check of a staged version: after a fresh stage and on reuse."""
+    if not os.path.isdir(directory):
+        return "missing"
+    marker = os.path.join(directory, ".sha256")
+    if not os.path.isfile(marker) or open(marker).read().strip() != digest:
+        return "archive sha256 marker does not match"
+    try:
+        with open(os.path.join(directory, ".files")) as source:
+            recorded = json.load(source)
+    except (OSError, ValueError):
+        return "file list is missing or unreadable"
+    if recorded != listing(directory):
+        return "files differ from the verified archive"
+    if version_of(os.path.join(directory, "hc")) != "hc " + version:
+        return "staged hc does not report version " + version
+    return None
+
+def check(request):
+    final = os.path.join(request["install_root"], request["version"])
+    problem = staged_problem(final, request["sha256"], request["version"])
+    if problem:
+        return {"valid": False, "problem": problem}
+    return {"valid": True, "hc": os.path.join(final, "hc")}
+
 def stage(request, archive):
     root, version, digest = request["install_root"], request["version"], request["sha256"]
     final = os.path.join(root, version)
-    marker = os.path.join(final, ".sha256")
-    if os.path.isfile(marker) and open(marker).read().strip() == digest \
-            and version_of(os.path.join(final, "hc")) == "hc " + version:
+    if staged_problem(final, digest, version) is None:
         return {"hc": os.path.join(final, "hc"), "staged": False}
     if hashlib.sha256(archive).hexdigest() != digest:
         fail("hc archive sha256 mismatch")
@@ -76,8 +127,14 @@ def stage(request, archive):
     if version_of(os.path.join(work, "hc")) != "hc " + version:
         shutil.rmtree(work, ignore_errors=True)
         fail("staged hc does not report version " + version)
+    with open(os.path.join(work, ".files"), "w") as out:
+        json.dump(listing(work), out, sort_keys=True)
     with open(os.path.join(work, ".sha256"), "w") as out:
         out.write(digest + "\n")
+    problem = staged_problem(work, digest, version)
+    if problem:
+        shutil.rmtree(work, ignore_errors=True)
+        fail("staged hc failed its check: " + problem)
     if os.path.lexists(final):
         os.rename(final, os.path.join(root, ".stale-%s-%d" % (version, int(time.time() * 1000))))
     os.rename(work, final)
@@ -137,6 +194,8 @@ def main():
     op = request.get("op")
     if op == "stage":
         result = stage(request, sys.stdin.buffer.read())
+    elif op == "check":
+        result = check(request)
     elif op == "inspect":
         result = inspect(request)
     elif op == "switch":

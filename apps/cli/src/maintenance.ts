@@ -1,6 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  type HcRelease,
+  hcStagingRecovery,
   hcUpgradeNeedsStaging,
   hcUpgradeRecoveryWork,
   loadMaintenanceConfig,
@@ -35,6 +37,7 @@ export interface MaintenanceHooks {
   readonly driver?: (store: Store, dataDir: string) => MaintenanceDriver;
   readonly config?: MaintenanceConfig;
   readonly fetchArchive?: (url: string) => Promise<Uint8Array>;
+  readonly release?: HcRelease;
 }
 
 interface Options {
@@ -177,14 +180,16 @@ export async function runMaintenanceCommand(
   if (sub === "continue")
     return withRunner(io, hooks, async (runner, context) =>
       exitFor(
-        await (await resumable(runner, context, hooks)).resume(
+        await (await resumable(runner, context, hooks, io)).resume(
           options.choice ?? "resume",
         ),
       ),
     );
   if (sub === "end" && !options.choice)
     return withRunner(io, hooks, async (runner, context) =>
-      exitFor(await (await resumable(runner, context, hooks)).resume("end")),
+      exitFor(
+        await (await resumable(runner, context, hooks, io)).resume("end"),
+      ),
     );
   if (sub === "abandon" && !options.choice)
     return withRunner(io, hooks, async (runner) =>
@@ -195,10 +200,12 @@ export async function runMaintenanceCommand(
 
 /**
  * An hc upgrade resumed before its switch needs its work again: the staged
- * paths are re-derived (staging is idempotent) for the same version. Past the
- * switch only the recorded recovery points are needed, so nothing is
- * downloaded or staged and an unreachable network or worker cannot block
- * `end` (V-3343).
+ * paths are re-derived for the same version, reusing every staged directory
+ * that passes the stage check so an outage after staging needs no download
+ * (C-755). When staging still fails the window keeps its phase and records
+ * why, with recovery steps. Past the switch only the recorded recovery points
+ * are needed, so nothing is downloaded or staged and an unreachable network
+ * or worker cannot block `end` (V-3343).
  */
 async function resumable(
   runner: MaintenanceRunner,
@@ -208,6 +215,7 @@ async function resumable(
     driver: MaintenanceDriver;
   },
   hooks: MaintenanceHooks,
+  io: CliIo,
 ): Promise<MaintenanceRunner> {
   const row = readMaintenance(context.store);
   const operation = row?.record.operation;
@@ -225,13 +233,40 @@ async function resumable(
       () => work,
     );
   }
-  const plan = await prepareHcUpgrade({
-    config: context.config,
-    version: operation.version,
-    targetIds: operation.targets,
-    driver: context.driver,
-    ...(hooks.fetchArchive ? { fetchArchive: hooks.fetchArchive } : {}),
-  });
+  let plan: Awaited<ReturnType<typeof prepareHcUpgrade>>;
+  try {
+    plan = await prepareHcUpgrade({
+      config: context.config,
+      version: operation.version,
+      targetIds: operation.targets,
+      driver: context.driver,
+      reuseStaged: true,
+      ...(hooks.fetchArchive ? { fetchArchive: hooks.fetchArchive } : {}),
+      ...(hooks.release ? { release: hooks.release } : {}),
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const recovery = hcStagingRecovery(
+      row?.phase ?? "",
+      operation.version,
+      hooks.release,
+    );
+    const phase = runner.block(
+      `hc ${operation.version} 预置失败：${reason}`,
+      recovery,
+    );
+    throw new CliError(
+      [
+        `维护 ${row?.record.id} 未能继续（仍在 ${phase}）：hc ${operation.version} 预置失败：${reason}`,
+        ...recovery,
+      ].join("\n"),
+      EXIT.failure,
+    );
+  }
+  for (const id of plan.reused)
+    io.stdout(
+      `已复用 ${id} 上已预置并校验通过的 hc ${plan.version}：${plan.staged[id]}`,
+    );
   return new MaintenanceRunner(
     context.store,
     context.config,
