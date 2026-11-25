@@ -36,17 +36,9 @@ export function FileChip({
   /** Extra controls, e.g. a note field. */
   children?: ReactNode;
 }) {
-  const Icon =
-    kind === "image"
-      ? Image
-      : kind === "video"
-        ? Film
-        : kind === "file"
-          ? FileIcon
-          : FileText;
   return (
     <li className="ui-file-chip" title={`${name} · ${size}`}>
-      <Icon className="ui-file-chip-icon" aria-hidden="true" />
+      <FileKindIcon kind={kind} className="ui-file-chip-icon" />
       <span className="ui-file-chip-name">{name}</span>
       <span className="ui-file-chip-size">{size}</span>
       {children}
@@ -61,6 +53,25 @@ export function FileChip({
       </button>
     </li>
   );
+}
+
+/** C-696: the type icon of a file chip, also used by file lists. */
+export function FileKindIcon({
+  kind,
+  className,
+}: {
+  kind: "image" | "video" | "pdf" | "text" | "file";
+  className?: string | undefined;
+}) {
+  const Icon =
+    kind === "image"
+      ? Image
+      : kind === "video"
+        ? Film
+        : kind === "file"
+          ? FileIcon
+          : FileText;
+  return <Icon className={className} aria-hidden="true" />;
 }
 
 /**
