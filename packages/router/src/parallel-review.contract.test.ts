@@ -257,7 +257,8 @@ test.each([2, 3])(
 test.each([1, 2])(
   "the decision owns the next wake, including delayed bells (%i prior rejections in first lane)",
   async (prior) => {
-    const f = await sharedReviewFixture(prior, [sharedBug], 2);
+    // C-610: the independent lane's fourth rejection predates alignment rounds.
+    const f = await sharedReviewFixture(prior, [sharedBug], 3);
     const author = id("assignment", 1);
     const system = { kind: "system" as const, project_id: f.state.project_id };
     f.review(2, [sharedBug]);

@@ -7,6 +7,7 @@ import {
 import { useResource } from "../useResource.js";
 import { CardFormOutlet } from "./CardFormOutlet.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { Tooltip } from "./Tooltip.js";
 import { Button } from "./ui/button.js";
 import { Checkbox } from "./ui/checkbox.js";
 import { Textarea } from "./ui/textarea.js";
@@ -21,6 +22,7 @@ export function CardTemplate({
   disabled = false,
   formContainer,
   onEditingChange,
+  emphasis = false,
 }: {
   detail: CardDetail;
   client: CardiganClient;
@@ -31,6 +33,8 @@ export function CardTemplate({
   disabled?: boolean;
   formContainer?: HTMLElement | null;
   onEditingChange?: (editing: boolean) => void;
+  /** C-695: the “下一步” panel's main action (32px, emphasis). */
+  emphasis?: boolean;
 }) {
   const [open, setOpenState] = useState(false);
   const setOpen = (next: boolean) => {
@@ -74,19 +78,29 @@ export function CardTemplate({
       {template.completion.mode === "human_mark_done" && (
         <>
           {!open && (
-            <Button
-              ref={toggle}
-              type="button"
-              disabled={!allowed || busy || disabled}
-              onClick={() => setOpen(true)}
+            // C-695: a refused mark stays focusable; why is in the tooltip.
+            <Tooltip
+              content={
+                allowed
+                  ? undefined
+                  : (detail.mark_done?.reason ?? "当前会话不能标记完成。")
+              }
             >
-              标记完成
-            </Button>
-          )}
-          {!allowed && (
-            <p className="hint">
-              {detail.mark_done?.reason ?? "当前会话不能标记完成。"}
-            </p>
+              <Button
+                ref={toggle}
+                type="button"
+                size="regular"
+                variant={emphasis && allowed ? "emphasis" : "default"}
+                aria-disabled={!allowed || undefined}
+                data-disabled={!allowed || undefined}
+                disabled={allowed && (busy || disabled)}
+                onClick={() => {
+                  if (allowed) setOpen(true);
+                }}
+              >
+                标记完成
+              </Button>
+            </Tooltip>
           )}
           {open && (
             <CardFormOutlet container={formContainer}>

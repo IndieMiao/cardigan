@@ -759,6 +759,7 @@ test.each([
                   severity: "major",
                   description: "Synthetic fix",
                   impact: "functional" as const,
+                  basis: "AC1",
                   must_fix: true,
                   pre_existing: false,
                 },

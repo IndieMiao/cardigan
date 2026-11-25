@@ -602,11 +602,41 @@ test("Web creates parented cards once, reads paged progress, and rejects a stale
   expect((await write("/cards", input, "story-create")).json).toEqual(
     parent.json,
   );
-  const child = await write("/cards", {
-    ...input,
-    template_id: "general",
-    parent_card_id: id,
+  expect(parent.json.entry_id).toMatch(new RegExp(`^${id}#\\d+$`));
+  // The dialog attaches its files to the story's creation entry.
+  const upload = await write(`/cards/${id}/attachments`, {
+    file: Buffer.from("%PDF-1.4").toString("base64"),
+    mime: "application/pdf",
+    original_filename: "need.pdf",
+    kind: "evidence",
+    attach_to: { kind: "timeline_entry", id: parent.json.entry_id },
   });
+  expect(upload.status).toBe(200);
+  expect(
+    (await read(`/cards/${id}`)).json.attachments.map(
+      (a: { id: string }) => a.id,
+    ),
+  ).toEqual([upload.json.id]);
+  // C-684: a person opens only story cards until the human opens others.
+  const childInput = { ...input, template_id: "general", parent_card_id: id };
+  expect((await write("/cards", childInput)).json).toMatchObject({
+    error: {
+      code: "validation_failed",
+      message: expect.stringContaining("人只能开需求卡"),
+    },
+  });
+  expect((await read("/preferences")).json.human_card_templates).toEqual([
+    "story",
+  ]);
+  expect(
+    (await write("/preferences", { human_card_templates: { general: true } }))
+      .status,
+  ).toBe(200);
+  expect((await read("/preferences")).json.human_card_templates).toEqual([
+    "story",
+    "general",
+  ]);
+  const child = await write("/cards", childInput);
   expect(child.status).toBe(201);
   for (const suffix of ["", "?limit=1", "?limit=1&section=overview"])
     expect(

@@ -139,7 +139,7 @@ test("every icon label has an accessible name and its own keyboard tooltip; wait
   const badges = [
     ...container.querySelectorAll<HTMLAnchorElement>(".board-card-badge"),
   ];
-  expect(badges).toHaveLength(9);
+  expect(badges).toHaveLength(6);
   for (const badge of badges) {
     const label = badge.getAttribute("aria-label");
     expect(label).toBeTruthy();
@@ -152,7 +152,11 @@ test("every icon label has an accessible name and its own keyboard tooltip; wait
     act(() => badge.blur());
     await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
   }
-  expect(screen.getAllByRole("link", { name: /^等你拍板：/ })).toHaveLength(1);
+  // C-660: one corner tag replaces the per-kind waiting icons and the left edge.
+  expect(container.querySelectorAll("[data-card-signal]")).toHaveLength(1);
+  expect(container.querySelector(".board-card")?.className).not.toMatch(
+    /card-tile-(blocked|waiting)/,
+  );
   expect(screen.getByRole("link", { name: "附件：4 个" }).textContent).toBe(
     "4",
   );
@@ -224,9 +228,14 @@ test("display preferences hide tags while keyboard tooltip retains the full titl
   );
   expect(container.querySelectorAll(".board-card-badge")).toHaveLength(0);
   expect(container.querySelector(".card-id")).toBeNull();
-  act(() => screen.getByRole("link").focus());
+  // C-660: like the left edge it replaces, the corner tag ignores display fields.
+  expect(container.querySelector("[data-card-signal]")?.textContent).toBe(
+    "阻塞",
+  );
+  const title = screen.getByRole("link", { name: example.title });
+  act(() => title.focus());
   expect((await screen.findByRole("tooltip")).textContent).toBe(example.title);
-  act(() => screen.getByRole("link").blur());
+  act(() => title.blur());
   rerender(
     <BoardCard
       card={{
@@ -433,8 +442,7 @@ test.each(["queued", "running"] as const)(
       "预检中",
     );
     expect(screen.queryByRole("link", { name: /^阻塞：/ })).toBeNull();
-    expect(container.querySelector(".card-tile-blocked")).toBeNull();
-    expect(container.querySelector(".board-card-blocked")).toBeNull();
+    expect(container.querySelector("[data-card-signal]")).toBeNull();
   },
 );
 
@@ -446,8 +454,10 @@ test.each(["passed", "failed"] as const)(
       prechecks: [{ attempt_id: "P-1", head_sha: "a".repeat(40), status }],
     });
     expect(screen.queryByRole("link", { name: "预检中" })).toBeNull();
-    expect(screen.getByRole("link", { name: "阻塞：W-1 阻塞" })).toBeTruthy();
-    expect(container.querySelector(".card-tile-blocked")).toBeTruthy();
+    const signal = screen.getByRole("link", { name: "阻塞：W-1 阻塞" });
+    expect(signal.textContent).toBe("阻塞");
+    expect(signal.getAttribute("data-card-signal")).toBe("blocked");
+    expect(container.querySelectorAll("[data-card-signal]")).toHaveLength(1);
   },
 );
 
@@ -460,8 +470,10 @@ test("a real blocker beside a running precheck stays 阻塞", () => {
     ],
   });
   expect(screen.getByRole("link", { name: "预检中" })).toBeTruthy();
-  expect(screen.getByRole("link", { name: "阻塞：W-2 阻塞" })).toBeTruthy();
-  expect(container.querySelector(".card-tile-blocked")).toBeTruthy();
+  expect(screen.getByRole("link", { name: "阻塞：W-2 阻塞" }).textContent).toBe(
+    "阻塞",
+  );
+  expect(container.querySelectorAll("[data-card-signal]")).toHaveLength(1);
 });
 
 test("a queued or running merge check shows 合并检查中 and nothing after it ends", () => {
@@ -500,7 +512,7 @@ test.each([
   ["已允许返工但未派发", false],
 ] as const)(
   "shows %s on the default board without a misleading decision badge",
-  (phase, needsDecision) => {
+  (phase, closeout) => {
     const label = `${phase} Q-1`;
     const { container } = renderCard({
       ...example,
@@ -513,13 +525,101 @@ test.each([
         },
       ],
     });
-    expect(screen.getByRole("link", { name: label }).textContent).toContain(
-      phase,
-    );
-    expect(!!container.querySelector(".card-tile-waiting")).toBe(needsDecision);
-    expect(screen.queryByRole("link", { name: /等你拍板/ })).toBeNull();
+    const signal = container.querySelector("[data-card-signal]");
+    if (closeout) {
+      // C-660: closeout phases move from the metadata row to the corner tag.
+      expect(signal?.textContent).toBe("待结案");
+      expect(signal?.getAttribute("aria-label")).toBe(`待结案：${label}`);
+      expect(container.querySelector(".review-phase-badge")).toBeNull();
+    } else {
+      expect(signal).toBeNull();
+      expect(screen.getByRole("link", { name: label }).textContent).toContain(
+        phase,
+      );
+    }
+    expect(screen.queryByRole("link", { name: /等你拍板|待拍板/ })).toBeNull();
   },
 );
+
+test.each([
+  [["human_action", "decision"], "decision", "待拍板"],
+  [["human_action"], "human_action", "待人工"],
+  [["decision", "blocked"], "blocked", "阻塞"],
+] as const)(
+  "C-660 corner tag for %j shows only the highest-priority reason (%s)",
+  async (kinds, kind, text) => {
+    const { container } = renderCard({
+      ...example,
+      waiting_on: kinds.map((k, i) => ({ kind: k, ref: `X-${i}`, label: k })),
+    });
+    const signals =
+      container.querySelectorAll<HTMLElement>("[data-card-signal]");
+    expect(signals).toHaveLength(1);
+    const signal = signals[0] as HTMLElement;
+    expect(signal.getAttribute("data-card-signal")).toBe(kind);
+    expect(signal.textContent).toBe(text);
+    // Visible text starts the accessible name (label in name).
+    expect(signal.getAttribute("aria-label")?.startsWith(`${text}：`)).toBe(
+      true,
+    );
+    expect(signal.getAttribute("href")).toBe("#/p/p-1/cards/C-1");
+    expect(
+      signal.closest(".board-card-meta")?.lastElementChild?.contains(signal),
+    ).toBe(true);
+  },
+);
+
+test("C-660 corner tag tooltip lists every reason, highest priority first", async () => {
+  const onOpenCard = vi.fn();
+  const { container } = renderCard(
+    {
+      ...example,
+      waiting_on: [
+        ...example.waiting_on,
+        {
+          kind: "decision",
+          ref: "Q-9",
+          review_phase: "待 PM 结案恢复",
+          label: "待 PM 结案恢复 Q-9",
+        },
+      ],
+    },
+    onOpenCard,
+  );
+  const lines = [
+    "阻塞：需要访问权限",
+    "待拍板：选择发布窗口；确定版本",
+    "待人工：连接设备",
+    "待结案：待 PM 结案恢复 Q-9",
+  ];
+  const signal = screen.getByRole("link", { name: lines.join("。") });
+  expect(signal.textContent).toBe("阻塞");
+  expect(container.querySelector(".review-phase-badge")).toBeNull();
+  act(() => signal.focus());
+  const tooltip = await screen.findByRole("tooltip");
+  expect(
+    [...tooltip.querySelectorAll(".ui-tooltip-details p")].map(
+      (p) => p.textContent,
+    ),
+  ).toEqual(lines);
+  fireEvent.keyDown(signal, { key: "Escape" });
+  act(() => signal.blur());
+  fireEvent.click(signal);
+  expect(onOpenCard).toHaveBeenLastCalledWith(example.id, signal);
+});
+
+test("C-660 cards without blocked or waiting reasons have no corner tag", () => {
+  const { container } = renderCard({
+    ...example,
+    waiting_on: [{ kind: "review", ref: "W-2", label: "等待审核" }],
+    resolution: "superseded",
+    superseded_by: "C-8",
+    progress: { completed: 3, total: 3 },
+  });
+  expect(container.querySelector("[data-card-signal]")).toBeNull();
+  expect(container.querySelector(".card-superseded")).toBeTruthy();
+  expect(container.querySelector(".board-card-complete")).toBeTruthy();
+});
 
 test("a precheck and a paused review keep their own badges on the same card", () => {
   const checking = runningPrecheck("running");
@@ -538,5 +638,5 @@ test("a precheck and a paused review keep their own badges on the same card", ()
   expect(screen.getByRole("link", { name: "预检中" })).toBeTruthy();
   expect(screen.getByRole("link", { name: "待确认 Q-1" })).toBeTruthy();
   expect(screen.queryByRole("link", { name: /等你拍板|^阻塞：/ })).toBeNull();
-  expect(container.querySelector(".card-tile-blocked")).toBeNull();
+  expect(container.querySelector("[data-card-signal]")).toBeNull();
 });

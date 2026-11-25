@@ -1,5 +1,6 @@
 import { autoRiskMergeReason } from "../auto-risk.js";
 import { categoryDelegated } from "../decision-authorization.js";
+import { isDecisionOther } from "../decision-other.js";
 import { isReviewStale } from "../derived.js";
 import type {
   Actor,
@@ -9,6 +10,7 @@ import type {
   HumanAction,
 } from "../entities.js";
 import type { Result } from "../errors.js";
+import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import { isMergePrerequisite } from "../human-action.js";
 import type { CardId } from "../ids.js";
@@ -354,7 +356,7 @@ function completionAttachments(d: CommandDraft, card: Card, target: Delivery) {
 }
 /** Neither a system return nor explicit human rework releases a human handoff. */
 export function returnedHumanConfirmation(d: CommandDraft, card: Card) {
-  const returned = [...d.state.events, ...d.events]
+  const returned = appendEvents(d.state.events, d.events)
     .filter(
       (e) => e.card_id === card.id && e.type === "merge_changes_requested",
     )
@@ -428,7 +430,7 @@ function requestConfirmation(
       d.list("cards"),
       card.id,
       d.list("project_preferences").find((p) => p.id === d.state.project_id),
-      [...d.state.events, ...d.events],
+      appendEvents(d.state.events, d.events),
     );
   const draft: Decision = {
     id,
@@ -605,7 +607,7 @@ export function completionPassed(
       d.list("cards"),
       card.id,
       d.list("project_preferences").find((p) => p.id === d.state.project_id),
-      [...d.state.events, ...d.events],
+      appendEvents(d.state.events, d.events),
     ) ||
     returnedHumanConfirmation(d, card) ||
     autoRiskMergeReason(
@@ -652,7 +654,7 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
     card.sensitive &&
     !categoryDelegated(
       d.list("project_preferences").find((p) => p.id === d.state.project_id),
-      [...d.state.events, ...d.events],
+      appendEvents(d.state.events, d.events),
       "sensitive",
     )
   ) {
@@ -714,7 +716,7 @@ export function syncRiskTagMerge(d: CommandDraft, card: Card) {
     work_items: d.list("work_items"),
     deliveries: d.list("deliveries"),
     reviews: d.list("reviews"),
-    events: [...d.state.events, ...d.events],
+    events: appendEvents(d.state.events, d.events),
   };
   const target = attempt(() => completion(state, card));
   if (!target.ok) return;
@@ -853,8 +855,11 @@ export function requestMerge(
     );
     const target = completion(state, card);
     const q = confirmation(state.decisions, card, target);
+    // C-682: after the human answered "其他", PM may ask again once handled.
     ensure(
-      q?.status === "resolved" && q.resolution?.option === "hold",
+      q?.status === "resolved" &&
+        (q.resolution?.option === "hold" ||
+          isDecisionOther(q.resolution?.option)),
       "illegal_transition",
       "Only a held merge can be requested again",
     );
@@ -871,7 +876,7 @@ function draftState(d: CommandDraft): CommandState {
     work_items: d.list("work_items"),
     reviews: d.list("reviews"),
     project_preferences: d.list("project_preferences"),
-    events: [...d.state.events, ...d.events],
+    events: appendEvents(d.state.events, d.events),
   };
 }
 /** Preserve authorization history while adopting the current project and risk policy. */

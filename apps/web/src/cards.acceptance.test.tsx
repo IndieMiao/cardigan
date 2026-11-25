@@ -268,7 +268,7 @@ test.each(["board", "list"] as const)(
     });
     await screen.findByRole("link", { name: new RegExp(f.card.title) });
     cleanup();
-    await f.cli("project", "create", "empty-board");
+    await f.cli("project", "create", "empty-board", "--code", "EMB");
     render(
       <CardListPage projectId="empty-board" view={view} client={f.client} />,
     );

@@ -238,13 +238,15 @@ export function dispatchStallCauses(
           systemEndedTurn(state, a)?.id !== binding.run_id)
       )
         return "turn_binding_changed";
-      if (stoppedByHuman(state.events, a.id)) return "human_stopped";
-      if (a.role_upgrade || (a.idle_retirement && !transfer))
-        return "session_maintenance";
+      // C-732: a closed or held card explains the wait before a human pause
+      // does; only a pause on an open, unheld card is the pause's to resolve.
       const parent = card && cards.get(card);
       if (parent && ["done", "cancelled"].includes(parent.status))
         return "closed_card";
       if (parent?.hold || assignmentCardHeld(a, state)) return "card_held";
+      if (stoppedByHuman(state.events, a.id)) return "human_stopped";
+      if (a.role_upgrade || (a.idle_retirement && !transfer))
+        return "session_maintenance";
       if (!assignmentDependenciesAllowStart(state, a)) return "dependencies";
       if (
         trigger &&
@@ -259,8 +261,10 @@ export function dispatchStallCauses(
         w &&
         !(
           w.status === "waiting_decision" &&
-          reviewDiscussionInstruction(w, trigger, state.decisions)
+          reviewDiscussionInstruction(w, trigger, state)
         ) &&
+        // C-618: a delivered author is asked to supply unblocked evidence.
+        !(w.status === "delivered" && evidenceUnblockedInstruction(trigger)) &&
         !["in_progress", "ready", "todo", "changes_requested"].includes(
           w.status,
         )
@@ -289,7 +293,7 @@ export function dispatchStallCauses(
       ...(trigger &&
       (trigger.type === "review_submitted" ||
         trigger.type === "decision_resolved" ||
-        (w && reviewDiscussionInstruction(w, trigger, state.decisions)))
+        (w && reviewDiscussionInstruction(w, trigger, state)))
         ? { review_trigger_id: trigger.id }
         : {}),
       age_ms: age,
@@ -586,5 +590,17 @@ export function dispatchStallCauses(
       s.restart_blocked ||
       s.system_finished_run_id ||
       s.retirement_handoff,
+  );
+}
+
+/** C-618: the system's one-time request to supply evidence after a platform blocker. */
+function evidenceUnblockedInstruction(trigger: Event | undefined): boolean {
+  return (
+    trigger?.type === "instruction_issued" &&
+    trigger.actor.kind === "system" &&
+    Array.isArray(
+      (trigger.payload as { evidence_unblocked?: unknown } | null)
+        ?.evidence_unblocked,
+    )
   );
 }

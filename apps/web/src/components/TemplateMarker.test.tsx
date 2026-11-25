@@ -213,7 +213,7 @@ test("hover, focus and tap expose the name without duplicate screen-reader descr
   expect(button.closest("a")).toBeNull();
   fireEvent.pointerEnter(button, { pointerType: "mouse" });
   expect(
-    document.querySelector('.template-marker-tip[aria-hidden="true"]')
+    document.querySelector('.template-marker-tip.ui-tip[aria-hidden="true"]')
       ?.textContent,
   ).toBe(button.getAttribute("aria-label"));
   expect(button.hasAttribute("aria-describedby")).toBe(false);

@@ -66,6 +66,10 @@
     --ui-markdown-label: 5em;
     /* C-504: a thin meter track under its value text. */
     --ui-meter: 3px;
+    /* C-695: leading line of a panel that waits on you (“下一步”). */
+    --ui-attention-line: 3px;
+    /* C-695: the panel's text column wraps its buttons below under this. */
+    --ui-next-step-body: 360px;
     --ui-pill-radius: 999px;
     --ui-panel-padding: 16px;
     --ui-shadow: 0 4px 16px #0003;
@@ -81,6 +85,15 @@
     --ui-selected-text: #262626;
     --ui-focus: #757575;
     --ui-border-hover: #bcbcbc;
+    /* C-668: an overlay line keeps the darker (light theme) or lighter
+       (dark theme) of itself and what lies under it, so text it crosses
+       stays intact. */
+    --ui-faint-line-blend: darken;
+    /* C-689: board dependency lines (cyan, with a soft glow) and the dots
+       flowing along them, brighter than the line with a halo. */
+    --ui-dependency-line: #3d9caf;
+    --ui-dependency-dot: #0c8aa3;
+    --ui-dependency-glow: #29c4dd;
     --radius: var(--ui-panel-radius);
     --id-card-fg: #123a8e;
     --id-card-bg: #e3edff;
@@ -111,14 +124,19 @@
     --priority-high: #bf560c;
     --priority-urgent: #c93135;
     --accent: #525252;
+    --accent-hover: #3d3d3d;
     --accent-contrast: #ffffff;
     --danger: #b42318;
     --danger-surface: var(--surface);
     --overlay: rgba(0, 0, 0, 0.55);
     --overlay-text: #ffffff;
-    --tooltip-bg: #262626;
-    --tooltip-text: #f6f6f6;
-    --tooltip-border: #757575;
+    /* C-691: every tip (tooltip, hover card, peek) uses the avatar card's
+       surface and edge; the dark theme follows through the referenced tokens. */
+    --ui-tip-bg: var(--surface);
+    --ui-tip-text: var(--text);
+    --ui-tip-border: var(--border);
+    --ui-tip-radius: var(--ui-panel-radius);
+    --ui-tip-shadow: var(--ui-shadow);
     --status-wait: #b45309;
     --status-progress: #225fbc;
     --status-review: #6b4fb3;
@@ -151,6 +169,10 @@
       --ui-selected-text: #f0f0f0;
       --ui-focus: #858585;
       --ui-border-hover: #505050;
+      --ui-faint-line-blend: lighten;
+      --ui-dependency-line: #79b8c2;
+      --ui-dependency-dot: #c8f9ff;
+      --ui-dependency-glow: #3fdcf3;
       --id-card-fg: #9ab8f0;
       --id-card-bg: #202c43;
       --id-work-item-fg: #d1a4ef;
@@ -174,13 +196,11 @@
       --priority-high: #f9a15d;
       --priority-urgent: #ff7b80;
       --accent: #c2c2c2;
+      --accent-hover: #d9d9d9;
       --accent-contrast: #181818;
       --danger: #ff9c91;
       --overlay: rgba(0, 0, 0, 0.75);
       --overlay-text: #f5f5f5;
-      --tooltip-bg: #222222;
-      --tooltip-text: #f5f5f5;
-      --tooltip-border: #777777;
       --status-wait: #edb96d;
       --status-progress: #8bb8ff;
       --status-review: #c5b0f1;
@@ -287,6 +307,19 @@
   .ui-button-secondary {
     background: var(--surface-muted);
   }
+  /* Only the page's single main action and a dialog's confirm. The :hover
+     selector has the same specificity as .ui-button:hover and must stay after
+     it, so a disabled one keeps its fill. */
+  .ui-button-emphasis,
+  .ui-button-emphasis:hover {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent);
+  }
+  .ui-button-emphasis:hover:not(:disabled, [aria-disabled="true"]) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
   .ui-button-ghost,
   .ui-button-link {
     border: 0;
@@ -363,6 +396,17 @@
     border: var(--ui-stroke) solid var(--control-border);
     box-shadow: var(--ui-shadow);
     font-size: var(--ui-text-sm);
+  }
+  /* C-691: one edge for every tip: Tooltip, Popover hover cards and peeks,
+     and hand-positioned tips that add `ui-tip`. Pages only reference this. */
+  .ui-tooltip,
+  .ui-popover,
+  .ui-tip {
+    background: var(--ui-tip-bg);
+    color: var(--ui-tip-text);
+    border: var(--ui-stroke) solid var(--ui-tip-border);
+    border-radius: var(--ui-tip-radius);
+    box-shadow: var(--ui-tip-shadow);
   }
   .ui-select-content {
     min-width: var(--radix-select-trigger-width);
@@ -666,10 +710,6 @@
   }
   .ui-tooltip {
     z-index: 220;
-    border-radius: var(--ui-panel-radius);
-    background: var(--tooltip-bg);
-    color: var(--tooltip-text);
-    border: var(--ui-stroke) solid var(--tooltip-border);
     padding: var(--ui-space-2);
     font-size: var(--ui-text-sm);
     max-width: min(var(--ui-menu-max), calc(100vw - var(--ui-space-4)));
@@ -703,6 +743,76 @@
     right: 0;
     height: 100dvh;
     width: min(var(--ui-dialog-width), 100vw);
+  }
+  /* A dialog with DialogFooter keeps its header and button row in place; only
+     DialogBody scrolls. The parts may sit directly in the panel or in one form. */
+  .ui-dialog:not(.ui-sheet):has(
+    > .ui-dialog-footer,
+    > form > .ui-dialog-footer
+  ),
+  .ui-dialog:not(.ui-sheet) > form:has(> .ui-dialog-footer) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+  }
+  .ui-dialog:not(.ui-sheet) > form:has(> .ui-dialog-footer) {
+    flex: 1 1 auto;
+    margin: 0;
+    border: 0;
+  }
+  .ui-dialog-header {
+    flex: none;
+    padding: var(--ui-panel-padding) var(--ui-panel-padding) 0;
+  }
+  .ui-dialog-header > .ui-dialog-title {
+    margin: 0;
+  }
+  .ui-dialog-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--ui-panel-padding);
+  }
+  .ui-dialog-footer {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--ui-space-2);
+    padding: var(--ui-space-3) var(--ui-panel-padding);
+    border-top: var(--ui-stroke) solid var(--border);
+  }
+  @media (max-width: 760px) {
+    .ui-dialog-footer > * {
+      flex: 1 1 0;
+      min-width: 0;
+    }
+  }
+  .ui-dialog-fields {
+    display: grid;
+    gap: var(--ui-space-4);
+  }
+  .ui-dialog-fields > label,
+  .ui-dialog-fields > fieldset {
+    display: grid;
+    gap: var(--ui-space-1);
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    font-weight: 600;
+  }
+  .ui-dialog-fields > fieldset > legend {
+    padding: 0;
+    margin-block-end: var(--ui-space-1);
+  }
+  .ui-dialog-fields > label > *,
+  .ui-dialog-fields > fieldset > :not(legend) {
+    font-weight: 400;
   }
   .ui-dialog-title {
     font-size: var(--ui-text-section);
@@ -992,5 +1102,207 @@
       margin-inline: calc(-1 * (var(--ui-markdown-label) + var(--ui-space-2)))
         var(--ui-space-2);
     }
+  }
+}
+
+/* C-615: attachments named in a Markdown body (`attachment-123`) render as a
+   compact chip: type icon and file name on the body's line. An image chip
+   shows its thumbnail while hovered or focused. */
+@layer components {
+  .ui-attachment-ref {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    max-width: 100%;
+    padding: 0 var(--ui-space-1);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-radius);
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    text-decoration: none;
+    vertical-align: baseline;
+  }
+  a.ui-attachment-ref:hover {
+    border-color: var(--ui-border-hover);
+    background: var(--surface-muted);
+  }
+  a.ui-attachment-ref:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: var(--ui-stroke);
+  }
+  .ui-attachment-ref[data-pending] {
+    border-style: dashed;
+    color: var(--text-muted);
+  }
+  .ui-attachment-ref-icon {
+    flex: none;
+    width: var(--ui-arrow);
+    height: var(--ui-arrow);
+    color: var(--text-muted);
+  }
+  /* A long name is cut short so the chip never widens the body: a percentage
+     cap does not shrink an inline box's min-content (V-3069). */
+  .ui-attachment-ref-name {
+    min-width: 0;
+    max-width: min(var(--ui-search-max), 50vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ui-attachment-ref-peek {
+    display: none;
+    position: absolute;
+    z-index: 5;
+    top: calc(100% + var(--ui-space-1));
+    left: 0;
+    padding: var(--ui-space-1);
+  }
+  /* Near the right edge the preview opens leftwards (AttachmentRefBody). */
+  .ui-attachment-ref[data-peek-align="end"] > .ui-attachment-ref-peek {
+    right: 0;
+    left: auto;
+  }
+  .ui-attachment-ref-peek > img {
+    display: block;
+    width: min(
+      calc(var(--ui-graph-node) * 1.25),
+      calc(100vw - var(--ui-space-4))
+    );
+    height: var(--ui-graph-node);
+    object-fit: contain;
+  }
+  a.ui-attachment-ref:is(:hover, :focus-visible) > .ui-attachment-ref-peek {
+    display: block;
+  }
+
+  /* Files waiting to be sent with a comment. */
+  .ui-file-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ui-space-1);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .ui-file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    min-width: 0;
+    max-width: 100%;
+    height: var(--ui-control);
+    padding-inline: var(--ui-space-2) 0;
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-radius);
+    background: var(--surface);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .ui-file-chip-icon {
+    flex: none;
+    width: var(--ui-arrow);
+    height: var(--ui-arrow);
+    color: var(--text-muted);
+  }
+  .ui-file-chip-name {
+    min-width: 0;
+    max-width: min(var(--ui-search-max), 30vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ui-file-chip-size {
+    flex: none;
+    color: var(--text-muted);
+    font-size: var(--ui-text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .ui-file-chip > .ui-input {
+    width: var(--ui-search-min);
+    height: calc(var(--ui-control) - var(--ui-space-1));
+    font-size: var(--ui-text-xs);
+  }
+  .ui-file-chip-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: var(--ui-control);
+    /* A full 28px target: it overlaps the chip's top and bottom border. */
+    height: var(--ui-control);
+    margin-block: calc(-1 * var(--ui-stroke));
+    padding: 0;
+    border: 0;
+    border-radius: 0 var(--ui-radius) var(--ui-radius) 0;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .ui-file-chip-remove:hover:not(:disabled) {
+    background: var(--surface-muted);
+    color: var(--text);
+  }
+  .ui-file-chip-remove:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: calc(-1 * var(--ui-focus-width));
+  }
+  .ui-file-chip-remove:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+  .ui-file-chip-remove > svg {
+    width: var(--ui-arrow);
+    height: var(--ui-arrow);
+  }
+  .ui-file-problems {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    color: var(--danger);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  /* The comment box's tabs, with the upload button at the far end. */
+  .ui-comment-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+  }
+  button.ui-file-picker {
+    margin-inline-start: auto;
+    gap: var(--ui-space-1);
+  }
+  .ui-file-picker > svg {
+    width: var(--ui-icon);
+    height: var(--ui-icon);
+  }
+  /* A box files can be dropped on: outlined while a file is dragged over. */
+  .ui-drop-target[data-dragging] {
+    outline: calc(var(--ui-stroke) * 2) dashed var(--ui-focus);
+    outline-offset: calc(-1 * var(--ui-stroke) * 2);
+  }
+  /* C-683: a video tile — cover frame with duration and size over it. */
+  .ui-video-tile {
+    position: relative;
+    overflow: hidden;
+  }
+  .ui-video-tile-icon {
+    width: calc(var(--ui-icon) * 2);
+    height: calc(var(--ui-icon) * 2);
+  }
+  .ui-video-tile-facts {
+    position: absolute;
+    right: var(--ui-space-1);
+    bottom: var(--ui-space-1);
+    padding: 0 var(--ui-space-1);
+    border-radius: var(--ui-radius);
+    background: rgb(0 0 0 / 60%);
+    color: #fff;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    white-space: nowrap;
   }
 }

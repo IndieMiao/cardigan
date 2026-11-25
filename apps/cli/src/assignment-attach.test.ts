@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Assignment, Role } from "@cardigan/domain";
-import { tryHostOpsLock } from "@cardigan/host";
+import { hostOpsLockHolder, tryHostOpsLock } from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
 import {
@@ -821,11 +821,22 @@ test.skipIf(process.platform !== "linux")(
         expect(
           await tryHostOpsLock(store, "fixture", "A-1" as never),
         ).toBeUndefined();
+        // C-678: another process can tell a waiting action who holds it.
+        expect(
+          await hostOpsLockHolder(store, "fixture", "A-1" as never),
+        ).toMatchObject({
+          kind: "attach",
+          mode: "observe",
+          started_at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/u),
+        });
       } finally {
         peer.end(); // Detach only after the competing lock attempt has finished.
         await attaching;
       }
       expect((await attaching).code).toBe(0);
+      expect(
+        await hostOpsLockHolder(store, "fixture", "A-1" as never),
+      ).toBeUndefined();
       const unlock = await tryHostOpsLock(store, "fixture", "A-1" as never);
       expect(unlock).toBeDefined();
       await unlock?.();

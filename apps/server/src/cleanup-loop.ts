@@ -10,6 +10,7 @@ import type {
 } from "@cardigan/domain";
 import {
   clearReleasedRuntimeRefs,
+  isDecisionOther,
   releaseAssignment,
   requestWorktreeCleanup,
 } from "@cardigan/domain";
@@ -20,7 +21,11 @@ import type { ReconcileGit } from "./git.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
 import { MaintenanceBatch, projectCycle } from "./maintenance-batch.js";
 import { runSystemCommand, systemClock } from "./merge-loop.js";
-import { profileSpan, profileSpanSync } from "./tick-profile.js";
+import {
+  profileProject,
+  profileSpan,
+  profileSpanSync,
+} from "./tick-profile.js";
 
 /**
  * M4.4 release and worktree cleanup (plan §3.6, development plan §12.6).
@@ -84,7 +89,7 @@ export class CleanupExecutor {
       for (const project of project_id
         ? [project_id]
         : this.options.store.listProjects().map((entry) => entry.id))
-        await this.project(project as ProjectId);
+        await profileProject(project, () => this.project(project as ProjectId));
     });
     this.serial = next.catch(() => {});
     return next;
@@ -357,8 +362,12 @@ export class CleanupExecutor {
         ),
     );
     if (decision?.status === "resolved") {
-      if (decision.resolution?.option === "keep") {
+      if (
+        decision.resolution?.option === "keep" ||
+        isDecisionOther(decision.resolution?.option)
+      ) {
         // §3.6: after `keep` the worktree stays and is never asked about again.
+        // C-682: "其他" binds no cleanup; PM follows the owner's words.
         return;
       }
       if (decision.resolution?.option === "force_clean") {

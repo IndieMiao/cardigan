@@ -192,7 +192,8 @@ export interface MoveNotificationInput {
   readonly id: string;
   readonly event: NotificationEvent;
   readonly at?: string;
-  /** A failed in-turn send is an undelivered inbox item, not a Run-owned incident. */
+  /** A failed in-turn send is an undelivered inbox item, not a Run-owned incident.
+   * C-680: also honoured on `retry`, when an ended standing turn left it unread. */
   readonly unbind_continuation?: boolean;
   /** Extra facts the dispatcher writes in the same step (attempts, bell…). */
   readonly patch?: Partial<
@@ -224,7 +225,10 @@ export function moveNotification(
   const next: Notification = {
     ...rest,
     ...(run_id &&
-    !(input.event === "deliver_failed" && input.unbind_continuation)
+    !(
+      (input.event === "deliver_failed" || input.event === "retry") &&
+      input.unbind_continuation
+    )
       ? { run_id }
       : {}),
     ...input.patch,
@@ -360,7 +364,7 @@ export function resolveRetirementNotifications(
           AND json_extract(done.doc,'$.payload.retirement_wait_event_id')=alert.id) OR
           (json_extract(alert.doc,'$.payload.reason') IN ('retirement_pending','retirement_unavailable','retirement_timeout')
           AND (done.type='assignment_stop_released' OR (done.type='session_replaced'
-          AND (json_extract(done.doc,'$.payload.reason')='idle_session_retired' OR
+          AND (json_extract(done.doc,'$.payload.reason') IN ('idle_session_retired','agent_unresponsive') OR
                (json_extract(done.doc,'$.payload.reason')='default_role_upgraded' AND json_extract(done.doc,'$.payload.idle_retirement_confirmed')=1))))))
         AND json_extract(done.doc,'$.payload.assignment_id')=json_extract(alert.doc,'$.payload.assignment_id'))`)
     .all(project);

@@ -93,32 +93,42 @@ test.runIf(process.platform === "linux").each(["MCP", "Web"])(
       );
     const closePort = () =>
       new Promise<void>((resolve) => occupied.close(() => resolve()));
-    const driver = new NodeDeploymentDriver({
-      store,
-      dataDir,
-      config: {
-        enabled: false,
-        initial_release: release,
-        initial_sha: sha,
-        ready_timeout_ms: 3000,
-        stop_timeout_ms: 3000,
-        build_timeout_ms: 3000,
-        poll_interval_ms: 1000,
-        server_log_max_bytes: 65536,
-        server_log_max_files: 2,
-      },
-      env: {
-        PATH: `${bin}:${process.env.PATH}`,
-        NODE_OPTIONS: process.env.NODE_OPTIONS,
-        CARDIGAN_CONFIG_DIR: root,
-        CARDIGAN_RUNTIME_MODE: "local",
-        CARDIGAN_HC_SESSION: "synthetic-startup",
-        CARDIGAN_MCP_PORT: String(mcp),
-        CARDIGAN_WEB_PORT: String(web),
-        CARDIGAN_LISTEN_RETRY_INTERVAL_MS: "20",
-        CARDIGAN_LISTEN_RETRY_TIMEOUT_MS: "1000",
-      },
-    });
+    // Each phase ends on an observed event (the Web role exiting after its
+    // EADDRINUSE retries, or both roles reporting ready), never on a clock.
+    // These limits only bound a hang: ready() shares one budget across two
+    // cold production-role boots, which exceeded 3s under the parallel suite.
+    const guardMs = 10_000;
+    const driverFor = (listenRetryTimeoutMs: number) =>
+      new NodeDeploymentDriver({
+        store,
+        dataDir,
+        config: {
+          enabled: false,
+          initial_release: release,
+          initial_sha: sha,
+          ready_timeout_ms: guardMs,
+          stop_timeout_ms: 3000,
+          build_timeout_ms: 3000,
+          poll_interval_ms: 1000,
+          server_log_max_bytes: 65536,
+          server_log_max_files: 2,
+        },
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          NODE_OPTIONS: process.env.NODE_OPTIONS,
+          CARDIGAN_CONFIG_DIR: root,
+          CARDIGAN_RUNTIME_MODE: "local",
+          CARDIGAN_HC_SESSION: "synthetic-startup",
+          CARDIGAN_MCP_PORT: String(mcp),
+          CARDIGAN_WEB_PORT: String(web),
+          CARDIGAN_LISTEN_RETRY_INTERVAL_MS: "20",
+          CARDIGAN_LISTEN_RETRY_TIMEOUT_MS: String(listenRetryTimeoutMs),
+        },
+      });
+    // The first supervisor gives up after a short retry window; the restarted
+    // one keeps retrying until the test releases the port.
+    const driver = driverFor(1000),
+      retrying = driverFor(guardMs);
     const state = async () =>
       JSON.parse(
         await readFile(join(dataDir, "self-deploy/state.json"), "utf8"),
@@ -126,30 +136,43 @@ test.runIf(process.platform === "linux").each(["MCP", "Web"])(
     let unlock: (() => Promise<void>) | undefined;
     try {
       await occupy();
-      await expect(driver.initialize()).rejects.toThrow("did not become ready");
+      const failure = await driver.initialize().then(
+        () => "",
+        (error: Error) => error.message,
+      );
+      expect(failure).toContain("did not become ready");
+      // The Web role exited on the occupied port; the ready guard never expired.
+      expect(failure).toMatch(/\nweb: \d+\n/u);
       expect((await state()).background).toBeUndefined();
       expect(handoff.read("cardigan", "local")?.generation).toBe(1);
       await expect(
         lstat(join(dataDir, "check-control/controller.sock")),
       ).rejects.toThrow();
-      const logs = async () =>
+      const logDir = join(dataDir, "self-deploy/logs");
+      const read = async (names: string[]) =>
         (
           await Promise.all(
-            (
-              await readdir(join(dataDir, "self-deploy/logs"))
-            ).map((name) =>
-              readFile(join(dataDir, "self-deploy/logs", name), "utf8"),
-            ),
+            names.map((name) => readFile(join(logDir, name), "utf8")),
           )
         ).join("");
+      const logs = async () => read(await readdir(logDir));
       expect(await logs()).not.toContain("[background]");
       expect(await logs()).toContain("EADDRINUSE");
-      // Retrying the same pair is still gated. Releasing the listener lets the
-      // production Web role bind, after which the background role may start.
-      const starting = driver.initialize();
-      await vi.waitFor(async () =>
-        expect((await state()).process).toBeDefined(),
+      // Retrying the same pair is still gated. Release the listener only once
+      // this Web incarnation is observably retrying it; after the production
+      // Web role binds, the background role may start.
+      const earlier = new Set(await readdir(logDir));
+      const starting = retrying.initialize();
+      await vi.waitFor(
+        async () => {
+          const fresh = (await readdir(logDir)).filter(
+            (name) => !earlier.has(name),
+          );
+          expect(await read(fresh)).toContain("EADDRINUSE");
+        },
+        { timeout: guardMs, interval: 20 },
       );
+      expect((await state()).process).toBeDefined();
       expect((await state()).background).toBeUndefined();
       await closePort();
       unlock = await starting;
@@ -186,14 +209,16 @@ test.runIf(process.platform === "linux").each(["MCP", "Web"])(
       expect(() =>
         store.uow.run(() => assertCheckAdmission(store, "cardigan", "local")),
       ).toThrow();
-      await driver.stop();
+      await retrying.stop();
       expect(handoff.read("cardigan", "local")).toMatchObject({
         generation: 2,
         phase: "held",
       });
     } finally {
-      await driver.stop();
-      await driver.finishServerLogs();
+      for (const supervisor of [driver, retrying]) {
+        await supervisor.stop();
+        await supervisor.finishServerLogs();
+      }
       await unlock?.();
       if (occupied.listening) await closePort();
       store.close();

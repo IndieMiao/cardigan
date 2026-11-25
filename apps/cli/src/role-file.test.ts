@@ -62,7 +62,7 @@ beforeEach(async () => {
   roleFile = join(root, "coder.yaml");
   writeFileSync(roleFile, ROLE_YAML);
   await run(["init"]);
-  await run(["project", "create", "p-roles"]);
+  await run(["project", "create", "p-roles", "--code", "PRO"]);
 });
 
 afterEach(() => {
@@ -351,7 +351,9 @@ test("role CLI copies defaults and project versions, filters inactive roles and 
   expect(
     JSON.parse(printed()).map((role: { version: number }) => role.version),
   ).toEqual([1, 2, 3, 4]);
-  expect(await run(["project", "create", "destination"])).toBe(0);
+  expect(await run(["project", "create", "destination", "--code", "DES"])).toBe(
+    0,
+  );
   expect(
     await run([
       "role",
@@ -464,6 +466,10 @@ test("deactivation blocks new work and standing assignments but preserves existi
       ]),
     ).toBe(0);
   }
+  // C-684: a person opens dev cards only once the project allows it.
+  expect(
+    await run(["preference", "set", "human-card-templates", "dev", "on"]),
+  ).toBe(0);
   expect(
     await run([
       "card",
@@ -619,7 +625,7 @@ test("project role apply binds imported staff locally and rejects the same name 
     file,
     "---\nrole_id: author\nbased_on: default:coder\nlaunch_profile: fixture\nemployees: [{name: First, title: Writer}]\n---\nWrite.\n",
   );
-  expect(await run(["project", "create", "p-other"])).toBe(0);
+  expect(await run(["project", "create", "p-other", "--code", "POT"])).toBe(0);
   const apply = (project: string) =>
     run(["role", "apply", file, "--yes", "--project", project]);
   expect(await apply("p-roles")).toBe(0);

@@ -25,7 +25,7 @@ import {
   startFakeOss,
   writeStorageConfig,
 } from "../../../packages/mcp-server/test-support/fake-oss.js";
-import { OffsiteSync } from "./offsite-sync.js";
+import { OFFSITE_RESCAN_MS, OffsiteSync } from "./offsite-sync.js";
 
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 let root: string, dataDir: string, configDir: string;
@@ -262,6 +262,9 @@ test("an outage with nothing left to retry clears once OSS answers again", async
   expect(await h.status()).toMatchObject({ reachable: false });
   await rm(join(dataDir, "attachments", gone.digest));
   fake.mode = "up";
+  // C-628: the listing is reused until the next rescan; a removed file
+  // leaves the queue then (or as soon as its upload finds it gone).
+  clock = new Date(clock.getTime() + OFFSITE_RESCAN_MS);
   await h.sync.tick();
   expect(await h.status()).toMatchObject({
     reachable: true,
@@ -358,4 +361,34 @@ test("an idle, fully synced copy still notices an outage or a refused key, and r
     expect(h.offsite.status().alerts).toEqual([]);
     expect(h.offsite.thumbnailUrl(one.digest)).toBeDefined();
   }
+});
+
+test("C-683: a video's cover frame is copied off-site with its record, and a big video restores by streaming", async () => {
+  const video = await attachment("video bytes", false);
+  const poster = await attachment("poster bytes", false);
+  records.push({
+    id: "F-9",
+    sha256: video.digest,
+    size: video.body.length,
+    mime: "video/mp4",
+    video: { poster_sha256: poster.digest, poster_size: poster.body.length },
+  } as unknown as Attachment);
+  const h = await harness();
+  await h.sync.tick();
+  expect(fake.objects.get(attachmentKey(video.digest))?.body).toEqual(
+    video.body,
+  );
+  expect(fake.objects.get(attachmentKey(poster.digest))?.body).toEqual(
+    poster.body,
+  );
+  // Gone locally: the file is restored from the verified copy in place.
+  const path = join(dataDir, "attachments", video.digest);
+  await rm(path);
+  expect(
+    await h.offsite.restoreAttachment(path, video.digest, video.body.length),
+  ).toBe(true);
+  expect(await readFile(path)).toEqual(video.body);
+  // A copy that does not match the record is refused.
+  await rm(path);
+  expect(await h.offsite.restoreAttachment(path, video.digest, 1)).toBe(false);
 });

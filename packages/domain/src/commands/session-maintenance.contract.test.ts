@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import type { Assignment, Event, Run } from "../entities.js";
 import {
   sessionMaintenanceBasis,
   sessionMaintenanceCandidate,
@@ -8,12 +9,15 @@ import {
 import type { CommandState } from "./core.js";
 import {
   beginIdleSessionRetirement,
+  clearSupersededRetirement,
+  confirmKeptShellExit,
   confirmWaitingRetirementExit,
   handoffIdleSessionRetirement,
+  releaseRetainedRetirement,
   settleIdleSessionRetirement,
   trackRetirementDispatch,
 } from "./idle-session-retirement.js";
-import { queueRun } from "./launch.js";
+import { dispatchRun, queueRun } from "./launch.js";
 import { recordSessionMaintenance } from "./session-maintenance.js";
 import { actor, apply, fixture, human, ports, value } from "./test-fixtures.js";
 
@@ -757,3 +761,356 @@ test.each(["timeout", "uncertain", "withdrawn"] as const)(
     );
   },
 );
+
+test("C-667: a closed kept shell settles only the exact idle session and keeps queued work", () => {
+  const s = setup(),
+    a = s.assignments[0]!,
+    io = { ...ports(), clock: { now: () => now } };
+  const ref = a.runtime_ref!;
+  const waiting = {
+    phase: "waiting" as const,
+    runtime_ref: ref,
+    started_at: now,
+    threshold_minutes: 60,
+    failures: 3,
+    evidence: { stage: "probe" as const, reason: "kept_terminal" as const },
+  };
+  const handed: Assignment = {
+    ...a,
+    runtime_state: "running",
+    idle_retirement: { ...waiting, handoff: true },
+  };
+  const queued: Run = {
+    ...s.runs[0]!,
+    id: "R-9" as Run["id"],
+    status: "queued",
+  };
+  const base: CommandState = {
+    ...s,
+    assignments: [handed],
+    runs: [...s.runs, queued],
+  };
+  const settled = value(confirmKeptShellExit(base, system, a.id, ref, io));
+  expect(settled.data.runtime_ref).toBeNull();
+  expect(settled.data.idle_retirement).toBeUndefined();
+  expect(settled.data.runtime_state).toBe("idle");
+  expect(settled.changes.filter((c) => c.collection === "runs")).toEqual([]);
+  expect(
+    settled.events.filter((e) => e.type === "session_replaced"),
+  ).toMatchObject([
+    {
+      payload: {
+        assignment_id: a.id,
+        reason: "agent_exited",
+        old_runtime_ref: ref,
+      },
+    },
+  ]);
+  const owner = (patch: Partial<Assignment>): CommandState => ({
+    ...base,
+    assignments: [{ ...handed, ...patch } as Assignment],
+  });
+  const stopped: Event = {
+    id: io.ids.nextEventId(),
+    seq: 99,
+    card_id: s.cards[0]!.id,
+    type: "assignment_stopped",
+    actor: human,
+    payload: { assignment_id: a.id },
+    created_at: now,
+  };
+  // C-672: a retirement stop whose exit was never confirmed (the terminal
+  // stayed live) is finished by the same proof; nothing else is signalled.
+  for (const pending of [
+    { ...waiting, phase: "stopping" as const },
+    { ...waiting, phase: "stopping" as const, observe_only: true as const },
+    waiting,
+  ]) {
+    const finished = value(
+      confirmKeptShellExit(
+        owner({ idle_retirement: pending }),
+        system,
+        a.id,
+        ref,
+        io,
+      ),
+    );
+    expect(finished.data.runtime_ref).toBeNull();
+    expect(finished.data.idle_retirement).toBeUndefined();
+  }
+  // Only the system, only this exact reference, never with started or
+  // stopping Runs, a human stop or an upgrade.
+  const refused = [
+    confirmKeptShellExit(base, actor(), a.id, ref, io),
+    confirmKeptShellExit(
+      base,
+      system,
+      a.id,
+      { ...ref, terminal_ref: "t2" },
+      io,
+    ),
+    confirmKeptShellExit(
+      { ...base, runs: [{ ...queued, status: "running" }] },
+      system,
+      a.id,
+      ref,
+      io,
+    ),
+    confirmKeptShellExit(
+      { ...base, runs: [{ ...s.runs[0]!, dispatch_stop: {} } as Run] },
+      system,
+      a.id,
+      ref,
+      io,
+    ),
+    confirmKeptShellExit(
+      owner({
+        role_upgrade: {
+          role_version: 2,
+          previous_runtime_ref: ref,
+          started_at: now,
+        },
+      }),
+      system,
+      a.id,
+      ref,
+      io,
+    ),
+    confirmKeptShellExit(
+      { ...base, events: [...base.events, stopped] },
+      system,
+      a.id,
+      ref,
+      io,
+    ),
+  ];
+  for (const effect of refused) expect(effect.ok).toBe(false);
+});
+
+test("C-690: only a waiting retirement of an earlier session is cleared once a newer one is bound", () => {
+  const s = setup(),
+    a = s.assignments[0]!,
+    io = { ...ports(), clock: { now: () => now } };
+  const old = a.runtime_ref!;
+  const fresh = { ...old, terminal_ref: "t7b" };
+  const handoff = {
+    phase: "waiting" as const,
+    handoff: true as const,
+    runtime_ref: old,
+    started_at: now,
+    threshold_minutes: 60,
+    failures: 3,
+    evidence: { stage: "probe" as const, reason: "terminal_busy" as const },
+  };
+  const owner = (patch: Partial<Assignment>): CommandState => ({
+    ...s,
+    assignments: [{ ...a, ...patch } as Assignment],
+  });
+  const cleared = value(
+    clearSupersededRetirement(
+      owner({ runtime_ref: fresh, idle_retirement: handoff }),
+      system,
+      a.id,
+      io,
+    ),
+  );
+  expect(cleared.data.idle_retirement).toBeUndefined();
+  expect(cleared.data.runtime_ref).toEqual(fresh);
+  expect(cleared.changes.filter((c) => c.collection === "runs")).toEqual([]);
+  expect(
+    cleared.events.filter(
+      (e) => e.type === "idle_session_retirement_superseded",
+    ),
+  ).toMatchObject([
+    {
+      payload: {
+        assignment_id: a.id,
+        reason: "superseded",
+        handoff: true,
+        failures: 3,
+      },
+    },
+  ]);
+  // Unchanged: the retirement still owns the bound session, a signal may be
+  // in flight (stopping), or nothing is bound yet (only a start supersedes).
+  for (const kept of [
+    owner({ idle_retirement: handoff }),
+    owner({
+      runtime_ref: fresh,
+      idle_retirement: { ...handoff, phase: "stopping" },
+    }),
+    owner({ runtime_ref: null, idle_retirement: handoff }),
+  ]) {
+    const effect = value(clearSupersededRetirement(kept, system, a.id, io));
+    expect(effect.data.idle_retirement).toEqual(
+      kept.assignments[0]!.idle_retirement,
+    );
+    expect(effect.events).toEqual([]);
+  }
+  expect(
+    clearSupersededRetirement(
+      owner({ runtime_ref: fresh, idle_retirement: handoff }),
+      actor(),
+      a.id,
+      io,
+    ).ok,
+  ).toBe(false);
+});
+
+test("C-690: a new session's dispatch supersedes the earlier session's waiting retirement", () => {
+  const s = setup(),
+    a = s.assignments[0]!,
+    io = { ...ports(), clock: { now: () => now } };
+  const old = a.runtime_ref!;
+  const handoff = {
+    phase: "waiting" as const,
+    handoff: true as const,
+    runtime_ref: old,
+    started_at: now,
+    threshold_minutes: 60,
+    failures: 3,
+  };
+  // A human stop's release cleared the binding; the record stayed.
+  let state: CommandState = {
+    ...s,
+    assignments: [{ ...a, runtime_ref: null, idle_retirement: handoff }],
+  };
+  const queued = value(
+    queueRun(
+      state,
+      human,
+      { assignment_id: a.id, model: "m", agent_cli_version: "1" },
+      io,
+    ),
+  );
+  state = apply(state, queued);
+  const runId = (queued.data as Run).id;
+  const fresh = { ...old, terminal_ref: "t7b" };
+  const started = value(
+    dispatchRun(state, human, { run_id: runId, runtime_ref: fresh }, io),
+  );
+  const owner = started.changes.find((c) => c.collection === "assignments")
+    ?.entity as Assignment;
+  expect(owner.runtime_ref).toEqual(fresh);
+  expect(owner.idle_retirement).toBeUndefined();
+  expect(
+    started.events.filter(
+      (e) => e.type === "idle_session_retirement_superseded",
+    ),
+  ).toHaveLength(1);
+  // A stopping retirement still refuses the start.
+  const stopping: CommandState = {
+    ...state,
+    assignments: [
+      {
+        ...state.assignments[0]!,
+        idle_retirement: { ...handoff, phase: "stopping" },
+      },
+    ],
+  };
+  expect(
+    dispatchRun(stopping, human, { run_id: runId, runtime_ref: fresh }, io).ok,
+  ).toBe(false);
+});
+
+test("C-690: notifications release a live session retained for dispatch unless work is queued, running or fenced", () => {
+  const s = setup(),
+    a = s.assignments[0]!,
+    io = { ...ports(), clock: { now: () => now } };
+  const ref = a.runtime_ref!;
+  const handoff = {
+    phase: "waiting" as const,
+    handoff: true as const,
+    runtime_ref: ref,
+    started_at: now,
+    threshold_minutes: 60,
+    failures: 3,
+  };
+  const base: CommandState = {
+    ...s,
+    assignments: [{ ...a, idle_retirement: handoff }],
+  };
+  const released = value(releaseRetainedRetirement(base, system, a.id, io));
+  expect(released.data.idle_retirement).toBeUndefined();
+  expect(released.data.runtime_ref).toEqual(ref);
+  expect(
+    released.events.filter(
+      (e) => e.type === "idle_session_retirement_released",
+    ),
+  ).toMatchObject([{ payload: { reason: "business_work", handoff: true } }]);
+  const owner = (patch: Partial<Assignment>): CommandState => ({
+    ...base,
+    assignments: [{ ...base.assignments[0]!, ...patch } as Assignment],
+  });
+  const stopped: Event = {
+    id: io.ids.nextEventId(),
+    seq: 99,
+    card_id: s.cards[0]!.id,
+    type: "assignment_stopped",
+    actor: human,
+    payload: { assignment_id: a.id },
+    created_at: now,
+  };
+  const refused = [
+    releaseRetainedRetirement(base, actor(), a.id, io),
+    // A signal may be in flight, or nothing was handed off.
+    releaseRetainedRetirement(
+      owner({ idle_retirement: { ...handoff, phase: "stopping" } }),
+      system,
+      a.id,
+      io,
+    ),
+    releaseRetainedRetirement(
+      owner({
+        idle_retirement: (({ handoff: _h, ...rest }) => rest)(handoff),
+      }),
+      system,
+      a.id,
+      io,
+    ),
+    // Another session's record is superseded, not released.
+    releaseRetainedRetirement(
+      owner({ runtime_ref: { ...ref, terminal_ref: "t7b" } }),
+      system,
+      a.id,
+      io,
+    ),
+    releaseRetainedRetirement(
+      {
+        ...base,
+        runs: [
+          ...base.runs,
+          { ...s.runs[0]!, id: "R-9" as Run["id"], status: "queued" },
+        ],
+      },
+      system,
+      a.id,
+      io,
+    ),
+    releaseRetainedRetirement(
+      { ...base, runs: [{ ...s.runs[0]!, status: "running" }] },
+      system,
+      a.id,
+      io,
+    ),
+    releaseRetainedRetirement(
+      { ...base, events: [...base.events, stopped] },
+      system,
+      a.id,
+      io,
+    ),
+    releaseRetainedRetirement(
+      owner({
+        role_upgrade: {
+          role_version: 2,
+          previous_runtime_ref: ref,
+          started_at: now,
+        },
+      }),
+      system,
+      a.id,
+      io,
+    ),
+  ];
+  for (const effect of refused) expect(effect.ok).toBe(false);
+});

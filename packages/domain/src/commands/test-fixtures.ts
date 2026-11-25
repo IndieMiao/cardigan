@@ -220,3 +220,23 @@ export function apply(
   }
   return next;
 }
+
+/**
+ * C-610: fields that keep a flow-5 rejection blocking under review
+ * convergence — a basis (the checklist once one exists) and a checklist.
+ */
+export function convergent(state: CommandState, workItemId: string) {
+  const reviews = state.reviews
+    .filter((r) => r.work_item_id === workItemId)
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
+  const end = reviews.findIndex((r) => r.verdict !== "reject");
+  const streak = end === -1 ? reviews : reviews.slice(0, end);
+  return {
+    basis: streak.slice(0, -1).some((r) => r.pass_conditions?.length)
+      ? "PC1"
+      : "AC1",
+    pass_conditions: [
+      { description: "The required check passes", basis: "AC1" },
+    ],
+  };
+}

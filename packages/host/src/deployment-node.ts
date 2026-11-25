@@ -30,6 +30,7 @@ import type { Store } from "@cardigan/store";
 import {
   deploymentMergeSegments,
   readInterruptedDeployment,
+  readReadyRetry,
   writeDeferredOperations,
   writeDeploymentRecord,
   writeDeploymentStop,
@@ -67,6 +68,21 @@ import { acquireRepositoryFlock } from "./repository-lock.js";
 
 const exec = promisify(execFile);
 const PROJECT = "cardigan";
+/** Backoff for a failing supervisor comparison of one unchanged main. */
+const SUPERVISOR_RETRY_MS = 10 * 60_000;
+/** Must hash exactly like deploymentRolePolicyHash, or every default looks hand-edited. */
+export const ROLE_PACK_SNAPSHOT_SCRIPT = `import { pathToFileURL } from 'node:url';
+  import { createHash } from 'node:crypto';
+  const m = await import(pathToFileURL(process.argv[1]).href);
+  const values = Object.fromEntries(Object.keys(m.DEFAULT_ROLE_KINDS).map(id => {
+    const r = m.defaultRoleDefinition(id, { harness: 'codex', launch_profile_ref: 'deployment' });
+    const p = { instructions: r.instructions, allowed_tools: [...r.allowed_tools].sort(),
+      capabilities: [...r.capabilities].sort(), kind: r.kind, worktree: r.worktree,
+      ...(r.required_capabilities?.length
+        ? { required_capabilities: [...r.required_capabilities].sort() } : {}) };
+    return [id, createHash('sha256').update(JSON.stringify(p)).digest('hex')];
+  }));
+  process.stdout.write(JSON.stringify(values));`;
 class DeploymentCommandUnavailable extends Error {}
 interface State {
   current: DeploymentBuild;
@@ -85,6 +101,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   readonly enabled: boolean;
   readonly batchWindowMs: number;
   readonly operationWaitMs: number;
+  readonly readyRetryMax: number | undefined;
+  readonly readyRetryIntervalMs: number | undefined;
   private state!: State;
   private readonly retention?: DeploymentRetention;
   private readyMessage = false;
@@ -104,6 +122,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private supervisorSha: string | null | undefined;
   private checkedSupervisorMain?: string;
   private failedSupervisorMain?: string;
+  private supervisorRetry?: { sha: string; at: number };
   private lastOperationWait: string | undefined;
   private notedOperations = new Set<string>();
   constructor(
@@ -118,6 +137,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     // Defaults are applied by parseDeploymentConfig; a hand-built config opts out.
     this.batchWindowMs = options.config.batch_window_ms ?? 0;
     this.operationWaitMs = options.config.operation_wait_timeout_ms ?? 0;
+    // C-650: likewise, a hand-built config keeps the legacy in-memory failure.
+    this.readyRetryMax = options.config.ready_retry_max;
+    this.readyRetryIntervalMs = options.config.ready_retry_interval_ms;
     this.directory = deploymentDirectory(options.dataDir);
     if (options.config.retention)
       this.retention = new DeploymentRetention(
@@ -544,6 +566,12 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     if (
       supervisor &&
       this.checkedSupervisorMain !== sha &&
+      // C-670: a failing comparison of the same main retries at most every
+      // SUPERVISOR_RETRY_MS instead of re-reading Git and lockfiles each tick.
+      !(
+        this.supervisorRetry?.sha === sha &&
+        performance.now() < this.supervisorRetry.at
+      ) &&
       (supervisor === sha || (await this.isFastForward(supervisor, sha)))
     ) {
       try {
@@ -558,6 +586,10 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         );
         this.checkedSupervisorMain = sha;
       } catch {
+        this.supervisorRetry = {
+          sha,
+          at: performance.now() + SUPERVISOR_RETRY_MS,
+        };
         // An unavailable comparison is neither upgrade evidence nor proof that an open notice is obsolete.
         if (this.failedSupervisorMain !== sha) {
           console.warn("未能核对部署监督器差异；保留现有提醒，下轮重试");
@@ -850,14 +882,23 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     this.serverLog = new DeploymentBuildLog();
     this.spawnFailed = false;
     this.serverFailureRecorded = false;
-    const { server_log_max_bytes: maxBytes, server_log_max_files: maxFiles } =
-      this.options.config;
+    const {
+      server_log_max_bytes: maxBytes,
+      server_log_max_files: maxFiles,
+      server_log_retention_hours: hours,
+    } = this.options.config;
     const log =
       maxBytes !== undefined && maxFiles !== undefined
         ? new DeploymentServerLog(
             this.directory,
             build.sha,
-            { maxBytes, maxFiles },
+            {
+              maxBytes,
+              maxFiles,
+              ...(hours === undefined
+                ? {}
+                : { retentionMs: hours * 3_600_000 }),
+            },
             (entry) => writeServerLogAudit(this.options.store, entry),
             this.serverLogFinished,
           )
@@ -1064,6 +1105,13 @@ export class NodeDeploymentDriver implements DeploymentDriver {
             (this.child?.signalCode ? null : "not_exited")),
     );
   }
+  serverFailureCause() {
+    const causes = this.serverLog.causes();
+    return causes.length ? causes.join("、") : undefined;
+  }
+  async readyRetryState(to: string, controlEventId?: string) {
+    return readReadyRetry(this.options.store, PROJECT, to, controlEventId);
+  }
   private portReady(port: number) {
     return new Promise<boolean>((resolve) => {
       const socket = connect({
@@ -1099,22 +1147,12 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     const previous = this.state.previous;
     if (!previous) throw new Error("Previous role pack unavailable");
     const snapshot = async (release: string) => {
-      const script = `import { pathToFileURL } from 'node:url';
-        import { createHash } from 'node:crypto';
-        const m = await import(pathToFileURL(process.argv[1]).href);
-        const values = Object.fromEntries(Object.keys(m.DEFAULT_ROLE_KINDS).map(id => {
-          const r = m.defaultRoleDefinition(id, { harness: 'codex', launch_profile_ref: 'deployment' });
-          const p = { instructions: r.instructions, allowed_tools: [...r.allowed_tools].sort(),
-            capabilities: [...r.capabilities].sort(), kind: r.kind, worktree: r.worktree };
-          return [id, createHash('sha256').update(JSON.stringify(p)).digest('hex')];
-        }));
-        process.stdout.write(JSON.stringify(values));`;
       const result = await this.command(
         process.execPath,
         [
           "--input-type=module",
           "-e",
-          script,
+          ROLE_PACK_SNAPSHOT_SCRIPT,
           join(release, "packages/roles/dist/index.js"),
         ],
         release,

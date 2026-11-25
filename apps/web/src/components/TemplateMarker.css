@@ -47,10 +47,6 @@
   width: max-content;
   max-width: min(280px, calc(100vw - 24px));
   padding: 8px 12px;
-  border: 1px solid var(--tooltip-border);
-  border-radius: var(--control-radius, var(--radius));
-  background: var(--tooltip-bg);
-  color: var(--tooltip-text);
   font-size: var(--text-sm);
   line-height: 1.6;
   overflow-wrap: anywhere;

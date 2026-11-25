@@ -1,4 +1,5 @@
 import type { Employee, Harness } from "@cardigan/domain";
+import type { CapabilityNoteInput } from "./capability-notes.js";
 import type { CompiledFile } from "./launch-types.js";
 import type { LaunchConfig } from "./schema-definition.js";
 export const RUN_RESOURCE_RULE =
@@ -73,6 +74,8 @@ export interface AssignmentIdentity {
   readonly card_id?: string;
   readonly work_item_id?: string;
   readonly project_id?: string;
+  /** C-676: the project's code (`CDG`); the session learns its full numbers. */
+  readonly project_code?: string;
 }
 
 export interface AssignmentMcpEndpoint {
@@ -139,7 +142,33 @@ export interface CompileAssignmentInput {
     port?: number;
     device?: string;
   }[];
+  /**
+   * C-679: this Run's own adb server port and, with the emulator, console
+   * port. `null`: the machine hands out slots but this Run has none, so adb is
+   * disabled. Omitted: the machine does not manage adb ports.
+   */
+  readonly adb_slot?: {
+    readonly slot: number;
+    readonly adb_port: number;
+    readonly emulator_port?: number;
+  } | null;
+  /**
+   * C-726: usage notes of the capabilities this work item requires
+   * (`requirements.capabilities`), merged for the Run's machine. Condensed
+   * and quoted at the end of the Core Prompt; omitted or empty adds nothing.
+   */
+  readonly capability_notes?: readonly CapabilityNoteInput[];
   readonly test_max_workers?: number;
+  /**
+   * C-686: values only the host knows for the Claude status line: the
+   * baseline ref (`origin/<base_branch>`) and the project's remaining-context
+   * thresholds (`context_handoff_remaining_pct` / `context_restart_remaining_pct`).
+   */
+  readonly status_line?: {
+    readonly base_ref?: string;
+    readonly handoff_remaining_pct: number;
+    readonly restart_remaining_pct: number;
+  };
   /** Employee self-tests must not start real hc or end-to-end scenarios. */
   readonly agent_local_tests?: boolean;
   /** Read-only directory of the prebuilt attachment tools on this machine. */

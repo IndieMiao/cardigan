@@ -17,6 +17,13 @@
     font-size: var(--ui-text-xs);
     line-height: var(--ui-leading-xs);
   }
+  /* `DataTableRowDetail`: the row above and its detail share one divider. */
+  .records tr:has(+ tr[data-row-detail]) > td {
+    border-bottom-style: none;
+  }
+  .records .rowDetail {
+    padding-block-start: 0;
+  }
   /* Same narrow record layout as the cards list: one labelled line per cell. */
   @media (max-width: 640px) {
     .stacked {
@@ -75,6 +82,12 @@
     .records td[data-record="lead"] {
       grid-column: 1;
       grid-row: 1;
+    }
+    .records tr:has(+ tr[data-row-detail]) {
+      border-bottom-style: none;
+    }
+    .records tr[data-row-detail] {
+      padding-block-start: 0;
     }
   }
   /* `recordsAlways`: the record layout at every width, for tables whose

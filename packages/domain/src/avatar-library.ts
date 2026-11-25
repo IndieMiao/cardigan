@@ -69,4 +69,6 @@ export const AVATAR_LIBRARY = [
   ["di-renjie", "狄仁杰", "历史人物"],
   ["zhuang-zhou", "庄周", "历史人物"],
   ["lu-ban", "鲁班", "历史人物"],
+  ["gu-kaizhi", "顾恺之", "历史人物"],
+  ["wu-daozi", "吴道子", "历史人物"],
 ] as const;

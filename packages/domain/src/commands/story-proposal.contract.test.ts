@@ -721,3 +721,33 @@ test("V-2625: a current summary with every child ended confirms the story done",
     ).ok,
   ).toBe(true);
 });
+
+test("C-733: children with prerequisites wait for them by default; an explicit false keeps the child in backlog", () => {
+  const f = setup();
+  f.commit(
+    f.propose([
+      child("First"),
+      child("Waits", { depends_on: [1] }),
+      child("Parked", { depends_on: [1], wait_for_dependencies: false }),
+    ]),
+  );
+  f.state = apply(f.state, value(f.confirm(1)));
+  const byTitle = (title: string) => {
+    const found = f.children().find((c) => c.title === title);
+    if (!found) throw new Error(title);
+    return found;
+  };
+  expect(byTitle("First").status).toBe("todo");
+  expect(byTitle("First").wait_for_dependencies).toBeUndefined();
+  expect(byTitle("Waits")).toMatchObject({
+    status: "backlog",
+    wait_for_dependencies: true,
+  });
+  expect(byTitle("Parked")).toMatchObject({
+    status: "backlog",
+    wait_for_dependencies: false,
+  });
+  expect(
+    f.propose([child("Bad", { wait_for_dependencies: "yes" as never })]).ok,
+  ).toBe(false);
+});

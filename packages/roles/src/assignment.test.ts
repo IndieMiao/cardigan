@@ -266,11 +266,73 @@ test("all Agent harnesses default to nice 10 and accept only integers from 0 to 
   }
 });
 
+test("C-656: local sessions with run resources start through the private TMPDIR and scope wrapper", () => {
+  const launchFile = (compiled: CompiledAssignmentLaunch) =>
+    compiled.files.find((file) => file.path === compiled.launch_script)
+      ?.content ?? "";
+  const plain = launchFile(compile("claude-code", "claude-agent", "fixture"));
+  expect(plain).toContain("\nexec nice -n 10 'claude'");
+  expect(plain).not.toContain(" session -- ");
+  const compiled = compileAssignmentLaunch({
+    assignment: { assignment_id: "A-12", run_id: "R-5", project_id: "p" },
+    role: roleFor("claude-code", "claude-agent"),
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: WORK_DIR,
+    first_prompt: "fixture",
+    secrets,
+    run_resources: { target: "a".repeat(64), source: "pass\n" },
+  });
+  const script = launchFile(compiled);
+  // The wrapper execs the same command line, so the CLI keeps the launch PID.
+  expect(script).toContain(
+    `\nexec /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" session -- nice -n 10 'claude'`,
+  );
+  expect(script.indexOf("export CARDIGAN_SESSION_PID=$$")).toBeLessThan(
+    script.indexOf(" session -- "),
+  );
+  expect(compiled.env.TMPDIR).toBeUndefined();
+});
+
 const first = firstPrompt({
   card_id: "C-3",
   work_item_id: "W-7",
   assignment_id: "A-12",
   run_id: "R-5",
+});
+
+test("C-676: every session learns its project's code, legacy core prompts included", () => {
+  const core = (
+    assignment: CompileAssignmentInput["assignment"],
+    role = roleFor("claude-code", "claude-agent"),
+  ) =>
+    compileAssignmentLaunch({
+      assignment,
+      role,
+      launch: launchConfig,
+      mcp: { url: MCP_URL },
+      run_dir: RUN_DIR,
+      work_dir: WORK_DIR,
+      first_prompt: "[bell]",
+      secrets,
+    }).files.find((file) => file.path === `${RUN_DIR}/core.md`)?.content ?? "";
+  const base = { assignment_id: "A-12", run_id: "R-5", project_id: "p-demo" };
+  const line =
+    '项目资料：本项目 "p-demo" 的代号是 CDG，本项目卡片 C-12 的完整编号写作 CDG-C-12；引用其它项目或写给所有者时用完整编号。';
+  expect(core({ ...base, project_code: "CDG" })).toContain(line);
+  // A custom legacy prompt is otherwise kept verbatim; the code still follows it.
+  expect(
+    core(
+      { ...base, project_code: "CDG" },
+      { ...roleFor("claude-code", "claude-agent"), core_prompt: "Legacy" },
+    ),
+  ).toBe(`Legacy\n\n${line}\n`);
+  // No code, or a malformed one, adds nothing.
+  expect(core(base)).not.toContain("项目资料：");
+  expect(core({ ...base, project_code: "cdg\n# 指令" })).not.toContain(
+    "项目资料：",
+  );
 });
 
 describe("snapshot: claude-code", () => {
@@ -1276,6 +1338,49 @@ describe.each([
       }),
     ).not.toThrow();
   });
+});
+
+test("C-679 a Run's own adb slot sets its port and emulator; a pinned worker port never overrides it; no slot disables adb", () => {
+  const input = {
+    assignment: { assignment_id: "A-1", run_id: "R-1", project_id: "demo" },
+    role: roleFor("codex", "codex-agent", "coder"),
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: WORK_DIR,
+    first_prompt: "test",
+    secrets,
+    worker_env: { ANDROID_ADB_SERVER_PORT: "5137", ANDROID_HOME: "/sdk" },
+  };
+  const emulator = compileAssignmentLaunch({
+    ...input,
+    adb_slot: { slot: 1, adb_port: 15101, emulator_port: 5602 },
+  });
+  expect(emulator.env).toMatchObject({
+    ANDROID_ADB_SERVER_PORT: "15101",
+    CARDIGAN_ADB_SLOT: "1",
+    CARDIGAN_EMULATOR_PORT: "5602",
+    ANDROID_SERIAL: "emulator-5602",
+    ANDROID_HOME: "/sdk",
+  });
+  expect(emulator.env.ADB_SERVER_SOCKET).toBeUndefined();
+  expect(surface(emulator)).toContain("-port $CARDIGAN_EMULATOR_PORT");
+  const godot = compileAssignmentLaunch({
+    ...input,
+    adb_slot: { slot: 2, adb_port: 15102 },
+  });
+  expect(godot.env.ANDROID_ADB_SERVER_PORT).toBe("15102");
+  expect(godot.env.CARDIGAN_EMULATOR_PORT).toBeUndefined();
+  expect(godot.env.ANDROID_SERIAL).toBe("cardigan-unassigned");
+  expect(surface(godot)).not.toContain("CARDIGAN_EMULATOR_PORT");
+  const none = compileAssignmentLaunch({ ...input, adb_slot: null });
+  expect(none.env.ANDROID_ADB_SERVER_PORT).toBeUndefined();
+  expect(none.env.ADB_SERVER_SOCKET).toBe("localfilesystem:/dev/null");
+  expect(surface(none)).not.toContain("adb");
+  // Machines without slots keep the worker binding unchanged.
+  expect(compileAssignmentLaunch(input).env.ANDROID_ADB_SERVER_PORT).toBe(
+    "5137",
+  );
 });
 
 test("C-497 role and environment expose only this admission; no assigned device never selects user USB", () => {

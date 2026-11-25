@@ -11,8 +11,16 @@ import { routeHash } from "./route.js";
  * text instead of offering a dead link.
  */
 
-/** A body reference plus the card the server says it belongs to. */
-export type LinkableReference = Reference & { readonly card_id?: string };
+/**
+ * A body reference plus the card the server says it belongs to. A full
+ * number (`SEN-C-34`, C-674) also carries the project it names and its
+ * project-scoped `local_id`; `id` stays the text as written.
+ */
+export type LinkableReference = Reference & {
+  readonly card_id?: string;
+  readonly project_id?: string;
+  readonly local_id?: string;
+};
 
 /** Only the entries a link may point at: resolved and existing. */
 export function linkableReferences(
@@ -27,6 +35,12 @@ export function linkableReferences(
             ...(reference.card_id === undefined
               ? {}
               : { card_id: reference.card_id }),
+            ...(reference.project_id === undefined
+              ? {}
+              : { project_id: reference.project_id }),
+            ...(reference.local_id === undefined
+              ? {}
+              : { local_id: reference.local_id }),
           } as LinkableReference,
         ]
       : [],
@@ -45,12 +59,23 @@ export function referenceHref(
   projectId: string,
   cardId?: string,
 ): string | undefined {
+  // C-674: a full number links into the project its code names; the open
+  // card only stands in for a missing card within the same project.
+  const foreign =
+    reference.kind !== "pr" &&
+    reference.project_id !== undefined &&
+    reference.project_id !== projectId;
+  if (reference.kind !== "pr" && reference.project_id !== undefined)
+    projectId = reference.project_id;
+  if (foreign) cardId = undefined;
+  const id =
+    reference.kind === "pr" ? "" : (reference.local_id ?? reference.id);
   switch (reference.kind) {
     case "card":
       return routeHash({
         kind: "card",
         projectId,
-        cardId: reference.id,
+        cardId: id,
       });
     case "decision":
     case "human_action":
@@ -60,12 +85,12 @@ export function referenceHref(
       if (target === undefined) return undefined;
       const anchor =
         reference.kind === "decision"
-          ? `decision-${reference.id}`
+          ? `decision-${id}`
           : reference.kind === "human_action"
-            ? `human-action-${reference.id}`
+            ? `human-action-${id}`
             : reference.kind === "delivery"
-              ? `delivery-${reference.id}`
-              : `entry-${reference.id}`;
+              ? `delivery-${id}`
+              : `entry-${id}`;
       return routeHash({
         kind: "card",
         projectId,
@@ -129,7 +154,8 @@ export function linkifyReferences(
 
   const byId = new Map(replacements);
   const token = new RegExp(
-    `(?<![\\[\\w/#])(?:${[...byId.keys()]
+    // `-` too: `C-34` inside `SEN-C-34` is another project's number (C-674).
+    `(?<![\\[\\w/#-])(?:${[...byId.keys()]
       .sort((a, b) => b.length - a.length)
       .map(escapeRegExp)
       .join("|")})(?![\\]\\w#])`,

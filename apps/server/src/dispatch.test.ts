@@ -17,13 +17,16 @@ import {
   createCard,
   dispatchRun,
   finishRun,
+  fullEventHistory,
   HOST_OPS_ROLE_TOOLS,
+  issueInstruction,
   postComment,
   queueRun,
   recordLaunchPublication,
   releaseAssignment,
   requestDecision,
   setRunLimit,
+  stoppedByHuman,
   stopWorkItemAssignment,
   updateCard,
   updateWorkItem,
@@ -62,6 +65,7 @@ import {
   mergeConfirmation,
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
+import { capacityBlockText } from "./queued-run-patrol.js";
 import { readCardList } from "./web/card-state.js";
 import { executionCapacity } from "./web/execution-capacity.js";
 import { executionView } from "./web/read.js";
@@ -128,6 +132,17 @@ afterEach(() => f.close());
 const comment = (body = "Read the card") =>
   f.apply((s, a, p) =>
     postComment(
+      s,
+      a,
+      { card_id: target.card.id, work_item_id: target.item.id, body },
+      p,
+    ),
+  );
+// C-721: a comment only asks for a reply and claims no resources; resource
+// admission tests wake the producer with an instruction instead.
+const instruct = (body = "Do the work") =>
+  f.apply((s, a, p) =>
+    issueInstruction(
       s,
       a,
       { card_id: target.card.id, work_item_id: target.item.id, body },
@@ -620,7 +635,7 @@ test.each([false, true])(
 test("C-475: a failed project-stream bell on a running standing session retries after backoff", async () => {
   const owner = standingSession("host_ops");
   const run = f.session(owner, false);
-  const event = f.state().events.findLast((e) => !e.card_id);
+  const event = fullEventHistory(f.state().events).findLast((e) => !e.card_id);
   if (!event) throw new Error("missing project event");
   const { notification } = f.store.recordNotification({
     project_id: f.project,
@@ -1060,6 +1075,99 @@ test("C-211 a stopped Assignment gets no new session from queued Runs or later b
   await new Dispatcher(options).tick();
   expect(runtime.wake).toHaveBeenCalled();
 });
+test("C-620 a managed stop starts a fresh session for new work only after its release is confirmed, once for repeated bells", async () => {
+  const owner = () =>
+    f.state().assignments.find((a) => a.id === target.assignment.id);
+  const ref = owner()?.runtime_ref;
+  if (!ref) throw new Error("Missing session");
+  f.apply((s, a, p) =>
+    stopWorkItemAssignment(
+      s,
+      a,
+      {
+        assignment_id: target.assignment.id,
+        reason: "stopped by host",
+        hold: false,
+      },
+      p,
+    ),
+  );
+  comment();
+  // Exit not confirmed yet: never a second executor.
+  await new Dispatcher(options).tick();
+  expect(options.startRun).not.toHaveBeenCalled();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(ownNotes().map((n) => n.status)).toEqual(["pending"]);
+  f.apply((s, a, p) =>
+    stopWorkItemAssignment(
+      s,
+      a,
+      {
+        assignment_id: target.assignment.id,
+        reason: "stopped by host",
+        released_runtime_ref: ref,
+      },
+      p,
+    ),
+  );
+  expect(owner()?.runtime_ref).toBeNull();
+  expect(stoppedByHuman(f.state().events, target.assignment.id)).toBe(false);
+  comment("Another bell for the same work");
+  const dispatcher = new Dispatcher(options);
+  await Promise.all([dispatcher.tick(), new Dispatcher(options).tick()]);
+  await dispatcher.tick();
+  expect(options.startRun).toHaveBeenCalledOnce();
+  expect(
+    f
+      .state()
+      .runs.filter(
+        (r) =>
+          r.assignment_id === target.assignment.id &&
+          !["completed", "failed", "cancelled"].includes(r.status),
+      ),
+  ).toHaveLength(1);
+  // Same Assignment and work item; nothing was released or reassigned.
+  expect(owner()?.status).toBe("active");
+  expect(
+    f.state().work_items.find((w) => w.id === target.item.id)?.assignment_id,
+  ).toBe(target.assignment.id);
+});
+
+test("C-620 a system-recycled Assignment starts a fresh session for new work; an unconfirmed recycle does not", async () => {
+  const owner = () =>
+    f.store.uow.read((tx) =>
+      tx.assignments.get(f.project, target.assignment.id),
+    ) as Assignment;
+  const ref = owner().runtime_ref;
+  if (!ref) throw new Error("Missing session");
+  const recycling = owner();
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project, {
+      ...recycling,
+      idle_retirement: {
+        phase: "stopping",
+        runtime_ref: ref,
+        started_at: f.clock.now(),
+        threshold_minutes: 30,
+        failures: 0,
+      },
+    }),
+  );
+  comment();
+  await new Dispatcher(options).tick();
+  expect(options.startRun).not.toHaveBeenCalled();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  // Recycle confirmed: the session is gone and its fence settled.
+  const { idle_retirement: _r, session_ref: _s, ...rest } = owner();
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project, { ...rest, runtime_ref: null }),
+  );
+  comment("New work");
+  await new Dispatcher(options).tick();
+  await new Dispatcher(options).tick();
+  expect(options.startRun).toHaveBeenCalledOnce();
+});
+
 test("C-56 wake failure retries the same Run after backoff without immediate escalation", async () => {
   comment();
   vi.mocked(runtime.wake).mockResolvedValue({
@@ -1402,6 +1510,153 @@ test("C-527: the patrol does not compete with a reserved startup", async () => {
   expect(runtime.wake).not.toHaveBeenCalled();
 });
 
+const spareNotice = (run: Run) =>
+  f
+    .state()
+    .events.find(
+      (e) =>
+        ["queued_run_rechecked", "queued_run_spare_capacity"].includes(
+          e.type,
+        ) &&
+        (e.payload as { run_id?: unknown }).run_id === run.id &&
+        (e.payload as { notified_pm_ops?: unknown }).notified_pm_ops === true,
+    )?.payload as { body?: string; capacity_block?: unknown } | undefined;
+
+test.each([
+  {
+    name: "a full project limit",
+    limits: {
+      projectQuota: () => ({ limit: 1, resources: new Map<string, number>() }),
+    },
+    block: (busy: string) => ({
+      kind: "project_limit",
+      machine_id: "local",
+      limit: 1,
+      run_ids: [busy],
+    }),
+    text: (busy: string, project: string) =>
+      `项目 ${project} 在 local 的上限 1 已用满（占用：${busy}）；整机名额未满。`,
+  },
+  {
+    name: "a full project resource",
+    limits: {
+      resourceLimits: () => new Map([["godot", 3]]),
+      projectQuota: () => ({ resources: new Map([["godot", 1]]) }),
+    },
+    block: (busy: string) => ({
+      kind: "project_resource",
+      machine_id: "local",
+      resource: "godot",
+      limit: 1,
+      run_ids: [busy],
+    }),
+    text: (busy: string, project: string) =>
+      `项目 ${project} 在 local 的资源 godot 上限 1 已用满（占用：${busy}）；整机名额未满。`,
+  },
+  {
+    name: "a full machine resource",
+    limits: { resourceLimits: () => new Map([["godot", 1]]) },
+    block: (busy: string) => ({
+      kind: "machine_resource",
+      machine_id: "local",
+      resource: "godot",
+      limit: 1,
+      run_ids: [busy],
+      other_project_runs: 0,
+    }),
+    text: (busy: string) =>
+      `local 的资源 godot 名额 1 已用满（占用：${busy}）；整机名额未满。`,
+  },
+])(
+  "C-714: spare machine slots behind $name name that ceiling, not spare capacity",
+  async ({ limits, block, text }) => {
+    const busy = f.create();
+    for (const item of [busy.item, target.item])
+      requireCapabilities(item, ["godot"]);
+    const holder = f.session(busy.assignment, false);
+    const run = legacyQueued();
+    const dispatcher = new Dispatcher({
+      ...options,
+      ...limits,
+      queuedRecheckAfterMs: 60_000,
+      runLimit: () => 4,
+    });
+    f.advance(60_000);
+    await dispatcher.tick();
+    // Admission is unchanged: the ceiling still holds the Run.
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("queued");
+    expect(runtime.wake).not.toHaveBeenCalled();
+    const notice = spareNotice(run);
+    expect(notice?.capacity_block).toEqual({
+      ...block(holder.id),
+      ...(block(holder.id).kind === "machine_resource"
+        ? {}
+        : { project_id: f.project }),
+    });
+    expect(notice?.body).toBe(
+      `${run.id} 已排队 1 分钟，${text(holder.id, f.project)}`,
+    );
+    expect(notice?.body).not.toContain("仍有并发名额");
+    expect(pmQueueNotices(run)).toHaveLength(1);
+    finish(busy.assignment);
+    await dispatcher.tick();
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+      "dispatched",
+    );
+  },
+);
+
+test("C-714: a shared machine resource names only this project's Runs", () => {
+  expect(
+    capacityBlockText({
+      kind: "machine_resource",
+      machine_id: "worker",
+      resource: "android.emulator",
+      limit: 2,
+      run_ids: ["R-7"],
+      other_project_runs: 1,
+    }),
+  ).toBe(
+    "worker 的资源 android.emulator 名额 2 已用满（占用：R-7；其它项目 1 个）；整机名额未满。",
+  );
+  expect(
+    capacityBlockText({
+      kind: "machine_resource",
+      machine_id: "worker",
+      resource: "blender",
+      limit: 1,
+      run_ids: [],
+      other_project_runs: 1,
+    }),
+  ).toBe(
+    "worker 的资源 blender 名额 1 已用满（占用：其它项目 1 个）；整机名额未满。",
+  );
+});
+
+test("C-714: genuinely spare capacity keeps the spare-capacity notice", async () => {
+  const busy = f.create();
+  for (const item of [busy.item, target.item])
+    requireCapabilities(item, ["godot"]);
+  f.session(busy.assignment, false);
+  const run = legacyQueued();
+  f.advance(60_000);
+  const dispatcher = new Dispatcher({
+    ...options,
+    resourceLimits: () => new Map([["godot", 3]]),
+    projectQuota: () => ({ limit: 3, resources: new Map([["godot", 2]]) }),
+    queuedRecheckAfterMs: 60_000,
+    runLimit: () => 4,
+  });
+  await dispatcher.tick();
+  const notice = spareNotice(run);
+  expect(notice?.capacity_block).toBeUndefined();
+  expect(notice?.body).toBe(`${run.id} 已排队 1 分钟，local 仍有并发名额。`);
+  expect(pmQueueNotices(run)).toHaveLength(1);
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+    "dispatched",
+  );
+});
+
 test("capacity preserves queued Run identity and notifications, then dispatches after a slot frees", async () => {
   const busy = f.create();
   f.session(busy.assignment, false);
@@ -1459,7 +1714,7 @@ test("MC-4 a missing slot holds the entire Run without reserving an unrelated fr
         ["blender", 1],
       ]),
   };
-  comment();
+  instruct();
   await new Dispatcher(settings).tick();
   const [waiting] = readRunQueue(f.store);
   expect(waiting).toMatchObject({
@@ -1477,7 +1732,7 @@ test("MC-4 a missing slot holds the entire Run without reserving an unrelated fr
   expect(readRunQueue(f.store)).toEqual([waiting]);
   f.advance(100);
   f.apply((s, a, p) =>
-    postComment(
+    issueInstruction(
       s,
       a,
       {
@@ -1513,6 +1768,211 @@ test("MC-4 a missing slot holds the entire Run without reserving an unrelated fr
     status: "dispatched",
     resource_keys: ["godot", "blender"],
     assignment_id: target.assignment.id,
+  });
+});
+
+test("C-620 a head waiting on an occupied emulator does not hold back later godot-only Runs; the emulator stays FIFO", async () => {
+  const settings = {
+    ...options,
+    runLimit: () => 6,
+    resourceLimits: () =>
+      new Map([
+        ["android.emulator", 1],
+        ["godot", 3],
+      ]),
+  };
+  // R-726 (C-28) holds the only emulator.
+  const holder = f.create();
+  requireCapabilities(holder.item, ["android.emulator"]);
+  f.session(holder.assignment, false);
+  // R-715 (C-14 smoke) is queued first and needs the emulator and godot.
+  requireCapabilities(target.item, ["android.emulator", "godot"]);
+  instruct();
+  await new Dispatcher(settings).tick();
+  const [head] = readRunQueue(f.store);
+  expect(head).toMatchObject({ assignment_id: target.assignment.id });
+  // Later godot-only work (C-32, C-33) arrives behind it.
+  const later = [f.create(), f.create()];
+  for (const t of later) {
+    requireCapabilities(t.item, ["godot"]);
+    f.session(t.assignment);
+  }
+  // A later emulator user must keep waiting behind the head.
+  const emulatorLater = f.create();
+  requireCapabilities(emulatorLater.item, ["android.emulator"]);
+  f.session(emulatorLater.assignment);
+  for (const t of [...later, emulatorLater]) {
+    f.advance(100);
+    f.apply((s, a, p) =>
+      issueInstruction(
+        s,
+        a,
+        { card_id: t.card.id, work_item_id: t.item.id, body: "work" },
+        p,
+      ),
+    );
+  }
+  await new Dispatcher(settings).tick();
+  const status = (a: Assignment) =>
+    f
+      .state()
+      .runs.filter((r) => r.assignment_id === a.id)
+      .map((r) => r.status);
+  for (const t of later) expect(status(t.assignment)).toContain("dispatched");
+  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+    target.assignment.id,
+    emulatorLater.assignment.id,
+  ]);
+  // The emulator is released: the head gets it before the later emulator user.
+  finish(holder.assignment);
+  await new Dispatcher(settings).tick();
+  expect(status(target.assignment)).toContain("dispatched");
+  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+    emulatorLater.assignment.id,
+  ]);
+});
+
+/** C-721: a recording Run holds the only godot and emulator slots. */
+function fullDevices() {
+  const busy = f.create();
+  requireCapabilities(busy.item, ["godot", "android.emulator"]);
+  f.session(busy.assignment, false);
+  requireCapabilities(target.item, ["godot", "android.emulator"]);
+  const resourceLimits = () =>
+    new Map([
+      ["godot", 1],
+      ["android.emulator", 1],
+    ]);
+  const occupied = (key: string) =>
+    f.store.uow.read(
+      (tx) =>
+        runCapacitySnapshot(f.store, tx, resourceLimits)
+          .resourcesForMachine("local")
+          .get(key)?.occupied,
+    );
+  const own = (status: Run["status"]) =>
+    f
+      .state()
+      .runs.filter(
+        (r) => r.assignment_id === target.assignment.id && r.status === status,
+      );
+  return {
+    busy,
+    occupied,
+    own,
+    settings: { ...options, runLimit: () => 4, resourceLimits },
+  };
+}
+
+test("C-721 a submit/reply follow-up starts while godot and the emulator are full, claiming neither", async () => {
+  const { occupied, own, settings } = fullDevices();
+  comment("Reviews passed; please submit the completion request");
+  await new Dispatcher(settings).tick();
+  expect(readRunQueue(f.store)).toEqual([]);
+  expect(own("dispatched")).toMatchObject([{ resource_keys: [] }]);
+  // A fresh session: never the idle one that may carry device access.
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(options.startRun).toHaveBeenCalledOnce();
+  expect(vi.mocked(options.startRun).mock.calls[0]?.[0]).toMatchObject({
+    bell: expect.stringContaining("未占用 godot、android.emulator 名额"),
+    replacement: { reason: "tool_catalog_changed" },
+  });
+  expect(occupied("godot")).toBe(1);
+  expect(occupied("android.emulator")).toBe(1);
+});
+
+test.each(["instruction", "comment followed by an instruction"])(
+  "C-721 an %s keeps the work item's resources and waits while they are full",
+  async (mode) => {
+    const { busy, own, settings } = fullDevices();
+    if (mode !== "instruction") {
+      comment();
+      f.advance(1);
+    }
+    instruct();
+    await new Dispatcher(settings).tick();
+    expect(readRunQueue(f.store)).toMatchObject([
+      { assignment_id: target.assignment.id },
+    ]);
+    expect(runtime.wake).not.toHaveBeenCalled();
+    finish(busy.assignment);
+    await new Dispatcher(settings).tick();
+    expect(own("dispatched")).toMatchObject([
+      { resource_keys: ["godot", "android.emulator"] },
+    ]);
+    expect(vi.mocked(runtime.wake).mock.calls[0]?.[1]).not.toContain("未占用");
+  },
+);
+
+test.each(["rework", "fix", "decision_resumed"] as const)(
+  "C-721 a %s Run keeps the work item's resources and waits while they are full",
+  async (kind) => {
+    const { busy, own, settings } = fullDevices();
+    comment();
+    const trigger = f
+      .state()
+      .events.findLast(
+        (e) => e.type === "comment_posted" && e.card_id === target.card.id,
+      );
+    if (!trigger) throw new Error("Missing comment");
+    f.apply((s, a, p) =>
+      queueRun(
+        s,
+        a,
+        {
+          assignment_id: target.assignment.id,
+          trigger_event_id: trigger.id,
+          kind,
+          model: "fixture",
+          agent_cli_version: "1",
+        },
+        p,
+      ),
+    );
+    await new Dispatcher(settings).tick();
+    expect(own("queued")).toMatchObject([{ kind }]);
+    expect(runtime.wake).not.toHaveBeenCalled();
+    finish(busy.assignment);
+    await new Dispatcher(settings).tick();
+    expect(own("dispatched")).toMatchObject([
+      { kind, resource_keys: ["godot", "android.emulator"] },
+    ]);
+  },
+);
+
+test("C-721 a running follow-up that holds no resources is told so with every notice; the next Run claims them in a new session", async () => {
+  const { busy, own, settings } = fullDevices();
+  const light = f.session(target.assignment, false);
+  f.store.uow.run((tx) => {
+    const current = tx.runs.get(f.project, light.id);
+    if (!current) throw new Error("Missing Run");
+    tx.runs.put(f.project, { ...current, resource_keys: [] });
+  });
+  comment("Thanks, one more reply please");
+  await new Dispatcher(settings).tick();
+  f.advance(1);
+  instruct("Record the video again");
+  await new Dispatcher(settings).tick();
+  const bells = vi.mocked(runtime.wake).mock.calls.map(([, bell]) => bell);
+  expect(bells).toHaveLength(2);
+  for (const bell of bells)
+    expect(bell).toContain("未占用 godot、android.emulator 名额");
+  expect(own("running").map((r) => r.id)).toEqual([light.id]);
+  finish(target.assignment);
+  instruct("Now record it");
+  await new Dispatcher(settings).tick();
+  expect(readRunQueue(f.store)).toMatchObject([
+    { assignment_id: target.assignment.id },
+  ]);
+  finish(busy.assignment);
+  await new Dispatcher(settings).tick();
+  expect(own("dispatched")).toMatchObject([
+    { resource_keys: ["godot", "android.emulator"] },
+  ]);
+  expect(options.startRun).toHaveBeenCalledOnce();
+  expect(vi.mocked(options.startRun).mock.calls[0]?.[0]).toMatchObject({
+    bell: expect.not.stringContaining("未占用"),
+    replacement: { reason: "tool_catalog_changed" },
   });
 });
 
@@ -1637,7 +2097,7 @@ test("MC-4 a withdrawn legacy Run holds its retry's resources before and after r
   requireCapabilities(owner.item, ["ios.simulator"]);
   expect(occupied("ios.simulator")).toBe(0); // added only after this dispatch
   expect(occupied("blender")).toBe(1);
-  comment();
+  instruct();
   const dispatcher = new Dispatcher({
     ...options,
     runLimit: () => 3,
@@ -1656,7 +2116,7 @@ test("MC-4 a withdrawn legacy Run holds its retry's resources before and after r
   });
 });
 
-test("MC-4 stopping a queued follow-up reserves the terminal but not its unclaimed resources", async () => {
+test("MC-4 stopping a queued follow-up holds neither its unclaimed resources nor (C-620) the idle terminal's slot", async () => {
   const busy = f.create();
   requireCapabilities(busy.item, ["godot"]);
   f.session(busy.assignment, false);
@@ -1680,7 +2140,7 @@ test("MC-4 stopping a queued follow-up reserves the terminal but not its unclaim
     runLimit: () => 4,
     resourceLimits,
   });
-  comment();
+  instruct();
   await dispatcher.tick();
   const wait = f
     .state()
@@ -1705,12 +2165,13 @@ test("MC-4 stopping a queued follow-up reserves the terminal but not its unclaim
   const capacity = f.store.uow.read((tx) =>
     runCapacitySnapshot(f.store, tx, resourceLimits),
   );
-  expect(capacity.occupied.get("local")).toBe(2); // busy Run + terminal stop reservation
+  // C-620: only the busy Run counts; the idle terminal being stopped does not.
+  expect(capacity.occupied.get("local")).toBe(1);
   expect(capacity.resourcesForMachine("local").get("blender")?.occupied).toBe(
     0,
   );
   f.apply((s, a, p) =>
-    postComment(
+    issueInstruction(
       s,
       a,
       {
@@ -1932,13 +2393,11 @@ async function checkStandingDecision(refuses: boolean) {
     f.actorFor(pm),
   );
   const endings = () =>
-    f
-      .state()
-      .events.filter(
-        (e) =>
-          e.type === "run_finished" &&
-          (e.payload as { run_id?: string }).run_id === previous.id,
-      );
+    fullEventHistory(f.state().events).filter(
+      (e) =>
+        e.type === "run_finished" &&
+        (e.payload as { run_id?: string }).run_id === previous.id,
+    );
   expect(endings()).toHaveLength(1);
   expect(endings()[0]).toMatchObject({
     payload: {
@@ -2398,10 +2857,10 @@ test.each(["machine", "resource"])(
     if (kind === "resource")
       for (const item of [target.item, extra.item])
         requireCapabilities(item, ["godot", "godot>=4"]);
-    comment();
+    instruct();
     f.advance(1);
     f.apply((s, a, p) =>
-      postComment(
+      issueInstruction(
         s,
         a,
         { card_id: extra.card.id, work_item_id: extra.item.id, body: "second" },
@@ -3051,8 +3510,11 @@ test("Q-86 an in-flight stop fences concurrent dispatchers and preserves a Run t
     finish(t.busy.assignment);
     await new Dispatcher(t.settings).tick();
     expect(runtime.release).toHaveBeenCalledOnce();
+    // C-620: the finished turn's session is idle while its stop is still in
+    // flight, so it holds no slot and the waiting Run is admitted at once.
+    // The stopping Assignment itself still gets no second session.
     expect(slots()).toBe(1);
-    expect(runtime.wake).not.toHaveBeenCalled();
+    expect(runtime.wake).toHaveBeenCalledOnce();
     release();
     await first;
     expect(f.state().runs.find((r) => r.id === t.run.id)).toMatchObject({
@@ -3366,7 +3828,7 @@ test.each(["total", "resource"])(
         ),
       ).toBe(true);
     });
-    comment();
+    instruct();
     const dispatcher = new Dispatcher({ ...options, ...limits });
     await dispatcher.tick();
     const run = f
@@ -3435,7 +3897,7 @@ test.each(["mount", "memory"])(
       leases,
       resourceLimits: cfg.resourcesForMachine,
     });
-    comment();
+    instruct();
     await dispatcher.tick();
     const [wait] = readRunQueue(f.store);
     expect(wait?.assignment_id).toBe(target.assignment.id);
@@ -3487,7 +3949,7 @@ test("C-497 another project reservation blocks a live wake, hard deadline unbloc
     leases,
     resourceLimits: cfg.resourcesForMachine,
   });
-  comment();
+  instruct();
   await d.tick();
   const [wait] = readRunQueue(f.store);
   expect(wait?.assignment_id).toBe(target.assignment.id);
@@ -3497,6 +3959,43 @@ test("C-497 another project reservation blocks a live wake, hard deadline unbloc
   expect(f.state().runs.find((r) => r.id === wait?.run_id)?.status).toBe(
     "dispatched",
   );
+});
+
+test("C-721 a follow-up inspected for its own empty claim passes admission beside another project's reservation", async () => {
+  requireCapabilities(target.item, ["godot"]);
+  f.store.createProject({ id: "priority" });
+  await writeFile(
+    join(f.dataDir, "run-capacity.yaml"),
+    JSON.stringify({ machines: { local: { resources: { godot: 1 } } } }),
+    { mode: 0o600 },
+  );
+  const { loadRunCapacityConfig, MachineLeases } = await import(
+    "@cardigan/host"
+  );
+  const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+  const leases = new MachineLeases(f.store, cfg, vi.fn());
+  const at = f.clock.now();
+  await leases.reserve(
+    { kind: "human", project_id: "priority" },
+    "local",
+    "godot",
+    at,
+    new Date(Date.parse(at) + 60_000).toISOString(),
+    () => at,
+  );
+  const inspect = vi.spyOn(leases, "inspect");
+  comment();
+  await new Dispatcher({
+    ...options,
+    leases,
+    resourceLimits: cfg.resourcesForMachine,
+  }).tick();
+  expect(inspect).toHaveBeenCalledWith(f.project, expect.anything(), []);
+  expect(readRunQueue(f.store)).toEqual([]);
+  expect(options.startRun).toHaveBeenCalledOnce();
+  expect(
+    f.state().events.filter((e) => e.type === "machine_resource_waiting"),
+  ).toEqual([]);
 });
 
 test("C-497 a bound admission replaces a legacy live session and passes only that owner generation to start", async () => {
@@ -3529,7 +4028,7 @@ test("C-497 a bound admission replaces a legacy live session and passes only tha
   );
   const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
   const leases = new MachineLeases(f.store, cfg, async () => "local");
-  comment();
+  instruct();
   await new Dispatcher({
     ...options,
     leases,
@@ -3642,7 +4141,7 @@ test.each(["preparation", "backoff", "send slot"])(
         return undefined;
       },
     });
-    comment();
+    instruct();
     await d.tick();
     if (stage === "backoff") {
       mounted = false;

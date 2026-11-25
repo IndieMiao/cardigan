@@ -5,4 +5,12 @@
     color: var(--text);
     font: 600 var(--ui-text-xs) / var(--ui-leading-xs) var(--font-code);
   }
+  /* C-660: the corner tag is item 1, numbered just before it. */
+  .preview [data-card-signal]::before {
+    content: "1";
+    position: absolute;
+    inset-inline-end: calc(100% + var(--ui-space-1));
+    color: var(--text);
+    font: 600 var(--ui-text-xs) / var(--ui-leading-xs) var(--font-code);
+  }
 }

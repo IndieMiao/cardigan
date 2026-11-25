@@ -1,4 +1,5 @@
 import type { Assignment, Event } from "./entities.js";
+import { eventsOfType } from "./event-index.js";
 import type { AgentBinary } from "./harness.js";
 import type { AssignmentId } from "./ids.js";
 import {
@@ -91,24 +92,22 @@ export function contextObservationCurrent(
   return Date.parse(usage.updated_at) >= contextGenerationStart(a, events);
 }
 
+const GENERATION_EVENTS = [
+  "session_replaced",
+  "standing_session_restarted",
+  "assignment_resumed",
+  "host_ops_action_finished",
+] as const;
 /** Earliest attributable observation for the current assignment generation (epoch ms). */
 export function contextGenerationStart(
   a: Assignment,
   events: readonly Event[],
 ) {
-  return events
-    .filter(
-      (e) =>
-        [
-          "session_replaced",
-          "standing_session_restarted",
-          "assignment_resumed",
-          "host_ops_action_finished",
-        ].includes(e.type) &&
-        (e.payload as { assignment_id?: string }).assignment_id === a.id,
-    )
-    .reduce(
-      (latest, e) => Math.max(latest, Date.parse(e.created_at)),
-      Date.parse(a.created_at),
-    );
+  // C-670: only the four generation types, through the typed index.
+  let latest = Date.parse(a.created_at);
+  for (const type of GENERATION_EVENTS)
+    for (const e of eventsOfType(events, type))
+      if ((e.payload as { assignment_id?: string }).assignment_id === a.id)
+        latest = Math.max(latest, Date.parse(e.created_at));
+  return latest;
 }

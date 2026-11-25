@@ -28,7 +28,6 @@ import {
   recordIdentity,
 } from "./auth.js";
 import type { McpBackend } from "./backend.js";
-import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import {
   type DeliveryToolOptions,
   deliveryTools,
@@ -45,12 +44,25 @@ import {
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
 import { freshResourceNonce, runResourceState } from "./run-resource-state.js";
+import { ToolCallBookkeeping } from "./tool-call-bookkeeping.js";
 import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
+import {
+  type CapabilityGuideToolOptions,
+  capabilityGuideTool,
+} from "./tools/capability-guide.js";
+import {
+  type GenerateImageToolOptions,
+  generateImageTool,
+} from "./tools/generate-image.js";
 import {
   type CheckLogOptions,
   getCheckLogTool,
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
+import {
+  type MacosCheckToolOptions,
+  macosCheckTool,
+} from "./tools/macos-check.js";
 import {
   type MobileSigningOptions,
   mobileAccess,
@@ -66,7 +78,12 @@ import {
   reservationTool,
 } from "./tools/resource-reservation.js";
 import { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";
+import {
+  type SharedFileToolOptions,
+  sharedFileTools,
+} from "./tools/shared-files.js";
 import type { ToolDefinition } from "./tools/types.js";
+import { VideoUploads } from "./video-uploads.js";
 
 export interface McpServerOptions
   extends DeliveryToolOptions,
@@ -77,7 +94,11 @@ export interface McpServerOptions
     ReservationOptions,
     MobileSigningOptions,
     PublicationOptions,
-    ProbeToolOptions {
+    ProbeToolOptions,
+    MacosCheckToolOptions,
+    GenerateImageToolOptions,
+    SharedFileToolOptions,
+    CapabilityGuideToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
   readonly bodyTimeoutMs?: number;
@@ -91,7 +112,20 @@ export interface McpServerOptions
   readonly tools?: readonly ToolDefinition[];
   /** `false` disables the M2.6 acknowledge hook (tests of pure tool routing). */
   readonly acknowledgeRuns?: boolean;
+  /** C-635: minimum spacing of one session's activity writes (default 30 s). */
+  readonly activityWriteIntervalMs?: number;
   readonly auditProbeCall?: (actor: Identity["actor"], code: string) => void;
+  /**
+   * C-638: called when a request arrives; the request is handled inside
+   * `run` and `end` is called once its response closes. Timing only.
+   */
+  readonly beginRequest?: () => RequestActivity;
+}
+
+/** C-638: a request as seen by the host's stall and lock timing. */
+export interface RequestActivity {
+  run<T>(fn: () => T): T;
+  end(): void;
 }
 
 export interface RunningServer {
@@ -138,12 +172,20 @@ export function serverTools(
     ReservationOptions &
     MobileSigningOptions &
     PublicationOptions &
-    ProbeToolOptions,
+    ProbeToolOptions &
+    MacosCheckToolOptions &
+    GenerateImageToolOptions &
+    SharedFileToolOptions &
+    CapabilityGuideToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
     runProbeTool(options),
+    macosCheckTool(options),
+    generateImageTool(options),
+    ...sharedFileTools(options),
+    capabilityGuideTool(options),
     mobileSigningTool(options),
     publicationTool(options),
     reservationTool(options),
@@ -187,10 +229,118 @@ export async function startMcpServer(
   const host = options.host ?? "127.0.0.1";
   const sink = options.log ?? stdoutLogger;
   const artifactUploads = new ArtifactUploads(options.dataDir, options.clock);
+  const videoUploads = new VideoUploads(
+    options.dataDir ?? process.env.CARDIGAN_DATA_DIR ?? ".data",
+    options.clock,
+  );
   const tools =
-    options.tools ?? serverTools({ ...options, artifactUploads, log: sink });
+    options.tools ??
+    serverTools({ ...options, artifactUploads, videoUploads, log: sink });
+
+  /**
+   * C-683: one chunk (`PUT ?attachment_upload=<id>&offset=<n>`) or the
+   * status (`GET ?attachment_upload=<id>`) of an Agent's video upload.
+   */
+  async function serveVideoUpload(
+    req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+    identity: Identity,
+    allowedHosts: readonly string[],
+    noteProgress: () => void,
+  ) {
+    res.setHeader("Cache-Control", "private, no-store");
+    const send = (status: number, body: unknown) =>
+      res
+        .writeHead(status, { "Content-Type": "application/json" })
+        .end(JSON.stringify(body));
+    if (
+      !allowedHosts.includes(req.headers.host ?? "") ||
+      (req.headers.origin !== undefined && req.headers.origin !== url.origin)
+    ) {
+      res.writeHead(403).end();
+      return;
+    }
+    if (
+      !identity.actor.allowed_tools.includes("upload_attachment") ||
+      !tools.some((t) => t.name === "upload_attachment")
+    ) {
+      res.writeHead(403).end();
+      return;
+    }
+    const context = {
+      store: options.store,
+      identity,
+      revalidateToken: () => {
+        const token = bearerToken(req.headers.authorization);
+        const fresh = token ? options.store.verifyToken(token) : undefined;
+        if (
+          fresh?.id !== identity.token.id ||
+          !fresh.allowed_tools.includes("upload_attachment")
+        )
+          throw new ToolError("unauthorized", "Token is no longer valid");
+      },
+    };
+    try {
+      const id = url.searchParams.get("attachment_upload") ?? "";
+      const keys = [...url.searchParams.keys()];
+      if (req.method === "GET") {
+        if (keys.length !== 1)
+          throw ToolError.validation("Expected only attachment_upload");
+        send(200, await videoUploads.status(id, context));
+        return;
+      }
+      const offsetText = url.searchParams.get("offset") ?? "";
+      if (
+        keys.length !== 2 ||
+        !keys.includes("offset") ||
+        !/^\d{1,12}$/u.test(offsetText)
+      )
+        throw ToolError.validation("Expected attachment_upload and offset");
+      const result = await videoUploads.accept(
+        id,
+        Number(offsetText),
+        req,
+        context,
+        noteProgress,
+      );
+      if (result.complete) send(201, result.attachment);
+      else send(200, result.status);
+    } catch (err) {
+      if (res.headersSent || res.destroyed) return;
+      const safe =
+        err instanceof ToolError
+          ? err
+          : ToolError.validation("Video upload failed; retry the chunk");
+      send(
+        safe.code === "not_found"
+          ? 404
+          : safe.code === "unauthorized"
+            ? 401
+            : safe.code === "stale_target" ||
+                safe.code === "idempotency_conflict"
+              ? 409
+              : 400,
+        { error: safe.toDomainError() },
+      );
+    }
+  }
 
   const catalogs = new Map<string, string>();
+  const bookkeeping = new ToolCallBookkeeping({
+    store: options.store,
+    acknowledgeRuns: options.acknowledgeRuns !== false,
+    ...(options.activityWriteIntervalMs === undefined
+      ? {}
+      : { activityWriteIntervalMs: options.activityWriteIntervalMs }),
+    log: (entry) =>
+      sink({
+        ...entry,
+        timestamp: new Date().toISOString(),
+        role: "web",
+        pid: process.pid,
+      }),
+  });
 
   // Filled in once the socket is bound; the DNS rebinding check needs the port.
   let boundPort = 0;
@@ -206,21 +356,29 @@ export async function startMcpServer(
         pid: process.pid,
         request_id: requestId,
       });
-    void handleRequest(req, res, startedAt, log).catch((error: unknown) => {
-      log({
-        event: "http",
-        method: req.method,
-        code: "internal_error",
-        duration_ms: Date.now() - startedAt,
-      });
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: { code: "internal_error" } }));
-        return;
-      }
-      res.end();
-      void error;
-    });
+    const activity = options.beginRequest?.();
+    if (activity) {
+      res.once("finish", activity.end);
+      res.once("close", activity.end);
+    }
+    const handled = () => handleRequest(req, res, startedAt, log);
+    void (activity ? activity.run(handled) : handled()).catch(
+      (error: unknown) => {
+        log({
+          event: "http",
+          method: req.method,
+          code: "internal_error",
+          duration_ms: Date.now() - startedAt,
+        });
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { code: "internal_error" } }));
+          return;
+        }
+        res.end();
+        void error;
+      },
+    );
   });
 
   async function handleRequest(
@@ -457,6 +615,20 @@ export async function startMcpServer(
       }
       return;
     }
+    if (
+      (req.method === "PUT" || req.method === "GET") &&
+      url.searchParams.has("attachment_upload")
+    ) {
+      await serveVideoUpload(
+        req,
+        res,
+        url,
+        identity.value,
+        allowedHosts,
+        noteProgress,
+      );
+      return;
+    }
     if (req.method === "GET" && url.searchParams.has("attachment_id")) {
       if (!tools.some((tool) => tool.name === "read_attachment")) {
         res.writeHead(404).end();
@@ -508,7 +680,16 @@ export async function startMcpServer(
     }
 
     const authenticatedAt = Date.now();
-    await serveMcp(req, res, identity.value, options, tools, log, allowedHosts);
+    await serveMcp(
+      req,
+      res,
+      identity.value,
+      options,
+      tools,
+      log,
+      allowedHosts,
+      bookkeeping,
+    );
     log({
       event: "http",
       method: req.method,
@@ -555,7 +736,12 @@ export async function startMcpServer(
     },
     close: () =>
       new Promise<void>((resolve, reject) => {
-        http.close((error) => (error ? reject(error) : resolve()));
+        http.close((error) => {
+          // C-635: one last attempt at deferred writes once requests stopped.
+          bookkeeping.close();
+          if (error) reject(error);
+          else resolve();
+        });
         http.closeAllConnections();
       }),
   };
@@ -645,6 +831,7 @@ async function serveMcp(
   tools: readonly ToolDefinition[],
   log: Logger,
   allowedHosts: string[],
+  bookkeeping: ToolCallBookkeeping,
 ): Promise<void> {
   // C-616: the MCP transport's own 413 names only the body bound. Refuse an
   // oversized body here instead, so both a declared length and a chunked body
@@ -687,19 +874,10 @@ async function serveMcp(
     // The hooks belong to the tool call, not to the connection: `initialize`
     // and `tools/list` must not start the Run (§4 step 8) or make an idle Agent
     // look busy (M3 plan §3.3).
-    onToolCall: () => {
-      // C-600: both are bound to this request's Token, so a late call of a
-      // replaced session neither starts nor keeps alive the new session.
-      options.store.touchAssignmentActivity?.(
-        identity.actor.project_id,
-        identity.actor.assignment_id,
-        undefined,
-        identity.token.id,
-      );
-      if (options.acknowledgeRuns !== false) {
-        acknowledgeDispatchedRun(options.store, identity);
-      }
-    },
+    // C-600: both are bound to this request's Token, so a late call of a
+    // replaced session neither starts nor keeps alive the new session.
+    // C-635: neither waits for another process's write lock.
+    onToolCall: () => bookkeeping.toolCalled(identity),
     // C-600: a native listing must be recorded before it is answered; a
     // briefly busy database is retried, then the client gets an error.
     onToolList: async () => {
@@ -720,13 +898,7 @@ async function serveMcp(
       }
     },
     refuseToolCall: () => {
-      const handshake = options.store.advanceMcpHandshake?.(
-        identity.actor.project_id,
-        identity.actor.assignment_id,
-        "tool_called",
-        sessionKeyDigest(req),
-        identity.token.id,
-      );
+      const handshake = bookkeeping.handshake(identity, sessionKeyDigest(req));
       return handshake === "missing"
         ? {
             code: "illegal_transition",

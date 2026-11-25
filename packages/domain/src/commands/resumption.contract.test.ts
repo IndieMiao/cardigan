@@ -333,6 +333,210 @@ test("a stopped upgraded owner retains a fresh-role notice AND one PM stop reaso
   ).toMatchObject([{ work_item_id: producer, reason: "指派已被人工停止" }]);
 });
 
+test.each([false, true])(
+  "C-620 a work item status change after a released managed stop queues new work; a pause (hold=%s) defers it",
+  (hold) => {
+    const owner = id("assignment", 1);
+    const ref = {
+      machine_id: "local" as never,
+      runtime_machine: "local",
+      terminal_ref: "t1",
+      agent_name: "a1",
+    };
+    let state = fixture();
+    state = apply(
+      state,
+      value(
+        reportBlocker(
+          state,
+          actor(),
+          { work_item_id: producer, reason: "Wait", needs: "role" },
+          io,
+        ),
+      ),
+    );
+    state = apply(
+      state,
+      value(
+        finishRun(
+          state,
+          actor(),
+          { run_id: id("run", 1), outcome: "blocked", summary: "Waiting" },
+          io,
+        ),
+      ),
+    );
+    state = {
+      ...state,
+      assignments: state.assignments.map((a) =>
+        a.id === owner ? { ...a, runtime_ref: ref } : a,
+      ),
+    };
+    for (const extra of [{ hold }, { released_runtime_ref: ref }])
+      state = apply(
+        state,
+        value(
+          stopWorkItemAssignment(
+            state,
+            human,
+            { assignment_id: owner, reason: "stopped by host", ...extra },
+            io,
+          ),
+        ),
+      );
+    const before = state.runs.length;
+    state = apply(
+      state,
+      value(
+        updateWorkItem(
+          state,
+          office,
+          { work_item_id: producer, status: "in_progress" },
+          io,
+        ),
+      ),
+    );
+    const queued = state.runs
+      .slice(before)
+      .filter((r) => r.assignment_id === owner && r.status === "queued");
+    const deferred = state.events.filter(
+      (e) => e.type === "work_item_resume_deferred",
+    );
+    if (hold) {
+      expect(queued).toEqual([]);
+      expect(deferred).toMatchObject([
+        { payload: { reason: "指派已被人工停止" } },
+      ]);
+    } else {
+      expect(queued).toHaveLength(1);
+      expect(deferred).toEqual([]);
+    }
+  },
+);
+
+test.each([
+  ["idle session", false, false, false],
+  ["Run still being stopped", true, false, false],
+  ["pause", false, true, false],
+  // V-3074:3 / V-3077:1: the same stop command retried before its release.
+  ["idle session, retried stop", false, false, true],
+  ["Run still being stopped, retried stop", true, false, true],
+  ["pause, retried stop", false, true, true],
+] as const)(
+  "C-620 a work item unblocked between a managed stop and its release gets one Run after the release (%s)",
+  (_name, running, hold, retried) => {
+    const owner = id("assignment", 1);
+    const ref = {
+      machine_id: "local" as never,
+      runtime_machine: "local",
+      terminal_ref: "t1",
+      agent_name: "a1",
+    };
+    let state = fixture();
+    state = apply(
+      state,
+      value(
+        reportBlocker(
+          state,
+          actor(),
+          { work_item_id: producer, reason: "Wait", needs: "role" },
+          io,
+        ),
+      ),
+    );
+    if (!running)
+      state = apply(
+        state,
+        value(
+          finishRun(
+            state,
+            actor(),
+            { run_id: id("run", 1), outcome: "blocked", summary: "Waiting" },
+            io,
+          ),
+        ),
+      );
+    // An earlier blocked turn to resume from; the current one still runs.
+    else
+      state = {
+        ...state,
+        runs: [
+          ...state.runs,
+          {
+            ...state.runs.find((r) => r.id === id("run", 1))!,
+            id: id("run", 8),
+            status: "completed",
+            outcome: "blocked",
+          },
+        ],
+      };
+    state = {
+      ...state,
+      assignments: state.assignments.map((a) =>
+        a.id === owner ? { ...a, runtime_ref: ref } : a,
+      ),
+    };
+    const stop = (extra: object) =>
+      (state = apply(
+        state,
+        value(
+          stopWorkItemAssignment(
+            state,
+            human,
+            { assignment_id: owner, reason: "stopped by host", ...extra },
+            io,
+          ),
+        ),
+      ));
+    stop({ hold });
+    // The work item is unblocked while the terminal is still being released.
+    state = apply(
+      state,
+      value(
+        updateWorkItem(
+          state,
+          office,
+          { work_item_id: producer, status: "in_progress" },
+          io,
+        ),
+      ),
+    );
+    if (retried) {
+      stop({ hold });
+      stop({ exit_confirmed_ref: ref });
+      // A repeated confirmation is not recorded twice.
+      stop({ exit_confirmed_ref: ref });
+    }
+    stop({ released_runtime_ref: ref });
+    const pending = state.runs.filter(
+      (r) =>
+        r.assignment_id === owner &&
+        !["completed", "failed", "cancelled"].includes(r.status),
+    );
+    expect(state.work_items.find((w) => w.id === producer)?.status).toBe(
+      "in_progress",
+    );
+    if (hold) {
+      expect(pending).toEqual([]);
+      expect(
+        state.events.filter((e) => e.type === "work_item_resume_deferred"),
+      ).toMatchObject([{ payload: { reason: "指派已被人工停止" } }]);
+    } else expect(pending.map((r) => r.status)).toEqual(["queued"]);
+    // Replaying the release changes nothing: still exactly one Run.
+    const again = stopWorkItemAssignment(
+      state,
+      human,
+      {
+        assignment_id: owner,
+        reason: "stopped by host",
+        released_runtime_ref: ref,
+      },
+      io,
+    );
+    expect(again.ok && again.value.changes).toEqual([]);
+  },
+);
+
 test.each(["triage", "legacy"] as const)(
   "an upgraded human action resumed by %s persists a fresh-session request",
   (entry) => {

@@ -1,4 +1,5 @@
 import type { WorkItem } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import { CommandDraft, ensure } from "./core.js";
 import { resumeWork } from "./resumption.js";
 import {
@@ -9,7 +10,7 @@ import {
 
 /** Shared lifetime budget: a flow upgrade never resets C-239 consumption. */
 export function systemReviewLimitRaises(d: CommandDraft, item: WorkItem) {
-  return [...d.state.events, ...d.events].filter(
+  return appendEvents(d.state.events, d.events).filter(
     (e) =>
       e.actor.kind === "system" &&
       ["system_review_limit_raised", "review_limit_raised_by_system"].includes(
@@ -149,6 +150,8 @@ export function applyFlowReviewLimit(d: CommandDraft, item: WorkItem): boolean {
       "submit_review",
       "upgrade_card_flow",
       "request_recheck",
+      // C-610: an agreed alignment round settles its rejection streak.
+      "post_comment",
     ].includes(d.tool) ||
       (["system_complete_card", "refresh_test_review_limits"].includes(
         d.tool,
@@ -158,7 +161,7 @@ export function applyFlowReviewLimit(d: CommandDraft, item: WorkItem): boolean {
     "Only workflow settlement derives review budgets",
   );
   const system = new CommandDraft(
-    { ...d.state, events: [...d.state.events, ...d.events] },
+    { ...d.state, events: appendEvents(d.state.events, d.events) },
     { kind: "system", project_id: d.state.project_id },
     "system_review_limit",
     d.ports,

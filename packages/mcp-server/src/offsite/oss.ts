@@ -67,7 +67,8 @@ export function bucketOrigin(c: Pick<OssCredentials, "bucket" | "region">) {
 }
 
 function validKey(key: string) {
-  if (!/^(?:attachments|artifacts)\/[a-z0-9-]{36,64}$/u.test(key))
+  // C-685: `shared/<uuid>` holds one immutable version of a shared file.
+  if (!/^(?:attachments|artifacts|shared)\/[a-z0-9-]{36,64}$/u.test(key))
     throw new OssError("rejected");
   return key;
 }
@@ -144,6 +145,31 @@ export function presignGet(
   key: string,
   options: PresignOptions,
 ) {
+  return presignRequest(c, "GET", key, options, {});
+}
+
+/**
+ * C-685: a query-signed PUT URL for a direct upload. `headers` (lower-case;
+ * `content-type` and `x-oss-*`) are part of the signature, so the uploader
+ * must send exactly these values; `x-oss-forbid-overwrite: true` makes a
+ * replayed URL unable to replace the object once it exists.
+ */
+export function presignPut(
+  c: OssCredentials,
+  key: string,
+  options: PresignOptions,
+  headers: Readonly<Record<string, string>>,
+) {
+  return presignRequest(c, "PUT", key, options, headers);
+}
+
+function presignRequest(
+  c: OssCredentials,
+  method: "GET" | "PUT",
+  key: string,
+  options: PresignOptions,
+  headers: Readonly<Record<string, string>>,
+) {
   validKey(key);
   const stamp = ossTimestamp(options.at);
   const query: Record<string, string> = {
@@ -154,10 +180,10 @@ export function presignGet(
     "x-oss-signature-version": "OSS4-HMAC-SHA256",
   };
   query["x-oss-signature"] = signature(c, {
-    method: "GET",
+    method,
     key,
     query,
-    headers: {},
+    headers,
     at: options.at,
   });
   return objectUrl(
@@ -330,5 +356,13 @@ export class OssClient {
 
   presign(key: string, options: PresignOptions) {
     return presignGet(this.credentials, key, options);
+  }
+
+  presignPut(
+    key: string,
+    options: PresignOptions,
+    headers: Readonly<Record<string, string>>,
+  ) {
+    return presignPut(this.credentials, key, options, headers);
   }
 }

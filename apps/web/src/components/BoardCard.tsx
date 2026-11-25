@@ -9,9 +9,14 @@ import type { CardDisplay } from "../card-display.js";
 import { routeHash } from "../route.js";
 import { nextOwnersLabel } from "../status.js";
 import { CardHoldTip, CardMergeTip, CardStatusTip } from "./CardStatusTip.js";
+import { DetailsTip } from "./DetailsTip.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
+import {
+  BoardCardSignal,
+  type BoardCardSignalKind,
+} from "./layout/BoardCardLayout.js";
 import boardCardStyles from "./layout/BoardCardLayout.module.css";
 import { MergeBatchCard } from "./layout/MergeBatchLayout.js";
 import { highlightBatch } from "./MergeBatch.js";
@@ -26,8 +31,6 @@ const paths = {
   next: "M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM1 17v-2a4 4 0 0 1 4-4h2m4 0h7m-3-3 3 3-3 3",
   clock: "M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 3v5l3 2",
   attachment: "m7 11 6-6a2 2 0 0 1 3 3l-7 7a4 4 0 0 1-6-6l7-7m-5 11 7-7",
-  human_action:
-    "M5 9V5a1 1 0 0 1 2 0v4-6a1 1 0 0 1 2 0v6-5a1 1 0 0 1 2 0v5-3a1 1 0 0 1 2 0v6l2-2a1 1 0 0 1 2 2l-4 5H7L3 12a1 1 0 0 1 2-1l2 2",
   review_phase: "M3 5h1m3 0h10M3 10h1m3 0h10M3 15h1m3 0h10",
   reason: "M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 6v6m0-9v.1",
 } as const;
@@ -66,6 +69,45 @@ export function ProgressPie({ completed, total }: CardListItem["progress"]) {
   );
 }
 
+/** C-660: corner tag text, in priority order (阻塞 first). */
+export const BOARD_CARD_SIGNALS = [
+  { kind: "blocked", text: "阻塞" },
+  { kind: "decision", text: "待拍板" },
+  { kind: "human_action", text: "待人工" },
+  { kind: "closeout", text: "待结案" },
+] as const satisfies readonly { kind: BoardCardSignalKind; text: string }[];
+
+/** Review-pause phases that wait for someone to close out and resume. */
+const CLOSEOUT_PHASES: ReadonlySet<string> = new Set([
+  "待你结案恢复",
+  "待 PM 结案恢复",
+]);
+
+/**
+ * C-660: every blocked/waiting reason as one tooltip line per kind, highest
+ * priority first. A blocker that only waits for a running precheck is not
+ * listed (C-567); ordinary review phases keep their own metadata badge.
+ */
+export function boardCardSignals(
+  card: Pick<CardListItem, "waiting_on" | "checking">,
+) {
+  const waiting = cardChecking(card).waiting;
+  return BOARD_CARD_SIGNALS.map(({ kind, text }) => {
+    const items = waiting.filter((item) =>
+      kind === "closeout"
+        ? !!item.review_phase && CLOSEOUT_PHASES.has(item.review_phase)
+        : !item.review_phase && item.kind === kind,
+    );
+    return {
+      kind,
+      text,
+      line: items.length
+        ? `${text}：${items.map((item) => item.label).join("；")}`
+        : "",
+    };
+  }).filter((signal) => signal.line);
+}
+
 /**
  * Read-only card navigation; employee profile buttons are siblings of links.
  * When adding/changing signals, update CardLegend and its coverage test (C-410).
@@ -96,19 +138,8 @@ export function BoardCard({
   };
   // C-567: a blocker that only waits for a running precheck is not red.
   const checks = cardChecking(card);
-  const reasons = new Set(
-    checks.waiting
-      .filter((item) => !item.review_phase)
-      .map((item) => item.kind),
-  );
-  const blocked = reasons.has("blocked");
-  const waiting =
-    reasons.has("decision") ||
-    reasons.has("human_action") ||
-    checks.waiting.some(
-      ({ review_phase }) =>
-        review_phase === "待你结案恢复" || review_phase === "待 PM 结案恢复",
-    );
+  const signals = boardCardSignals(card);
+  const signal = signals[0];
   const complete =
     card.progress.total > 0 && card.progress.completed === card.progress.total;
   const queuedAhead = card.queued_runs?.length
@@ -141,9 +172,10 @@ export function BoardCard({
         card.merge_stage?.batch_id ? (card.merge_stage.color ?? 0) : undefined
       }
       data-batch-id={card.merge_stage?.batch_id}
+      data-card-id={card.id}
       onMouseEnter={(e) => highlightBatch(e.currentTarget, true)}
       onMouseLeave={(e) => highlightBatch(e.currentTarget, false)}
-      className={`${boardCardStyles.card} card-tile board-card ui-surface-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
+      className={`${boardCardStyles.card} card-tile board-card ui-surface-card${superseded ? " card-superseded" : ""}`}
     >
       <span className="card-tile-head ui-inline-items">
         {display.number && (
@@ -211,7 +243,10 @@ export function BoardCard({
         )}
         {display.waiting &&
           checks.waiting
-            .filter((item) => item.review_phase)
+            .filter(
+              (item) =>
+                item.review_phase && !CLOSEOUT_PHASES.has(item.review_phase),
+            )
             .map((item) =>
               badge(
                 item.label,
@@ -220,34 +255,6 @@ export function BoardCard({
                 "review-phase-badge",
               ),
             )}
-        {display.waiting &&
-          (["decision", "human_action", "blocked"] as const)
-            .filter((kind) => reasons.has(kind))
-            .map((kind) => {
-              const label = {
-                decision: "等你拍板",
-                human_action: "待你执行",
-                blocked: "阻塞",
-              }[kind];
-              return badge(
-                `${label}：${checks.waiting
-                  .filter((item) => !item.review_phase && item.kind === kind)
-                  .map((item) => item.label)
-                  .join("；")}`,
-                kind === "human_action" ? (
-                  <BoardCardIcon name={kind} />
-                ) : (
-                  <StatusIcon
-                    status={kind === "blocked" ? "blocked" : "waiting_decision"}
-                    decorative
-                  />
-                ),
-                <span className="visually-hidden">{label}</span>,
-                kind === "blocked"
-                  ? "board-card-blocked"
-                  : "board-card-waiting",
-              );
-            })}
         {display.waiting &&
           checks.precheck &&
           badge(
@@ -270,6 +277,18 @@ export function BoardCard({
           )}
         {display.reason &&
           badge(`原因：${card.why}`, <BoardCardIcon name="reason" />)}
+        {signal && (
+          <DetailsTip lines={signals.map(({ line }) => line)}>
+            <BoardCardSignal
+              kind={signal.kind}
+              href={href}
+              onClick={openCard}
+              aria-label={signals.map(({ line }) => line).join("。")}
+            >
+              {signal.text}
+            </BoardCardSignal>
+          </DetailsTip>
+        )}
       </div>
     </MergeBatchCard>
   );

@@ -4,6 +4,8 @@ import {
   type Employee,
   employeeDisplayName,
   employeeTextError,
+  isProjectCode,
+  qualifyId,
 } from "@cardigan/domain";
 import { getHarnessAdapter } from "./adapters/registry.js";
 import {
@@ -23,6 +25,7 @@ import {
   START_FILE_NAME,
   TOKEN_FILE_NAME,
 } from "./assignment-types.js";
+import { capabilityNotesPrompt } from "./capability-notes.js";
 import {
   type CompiledFile,
   type CompiledLaunch,
@@ -51,6 +54,11 @@ import { parseWorkerEnvironment } from "./worker-environment.js";
  */
 
 export * from "./assignment-types.js";
+
+const ADB_SLOT_RULE =
+  "本次 Run 有自己的 adb 服务端口（ANDROID_ADB_SERVER_PORT）。adb 只用这个端口，不要用 -P 指定别的端口、默认 5037 或用户 USB 真机；Run 结束时系统会关闭它。";
+const ADB_EMULATOR_RULE =
+  "启动模拟器必须加 -port $CARDIGAN_EMULATOR_PORT，序列号是 $ANDROID_SERIAL；Run 结束时系统会关闭这个模拟器。";
 export function compileAssignmentLaunch(
   input: CompileAssignmentInput,
 ): CompiledAssignmentLaunch {
@@ -63,14 +71,23 @@ export function compileAssignmentLaunch(
   )
     throw new Error("Invalid MCP session key");
   const identity = employeeIdentityPrompt(input.employee?.identity);
-  const policyRule = input.resource_bindings
-    ? "\n\n只能使用本次 CARDIGAN_RESOURCE_BINDINGS 中分配的端口和设备。禁止裸 adb、默认 5037、未分配端口及用户 USB 真机。没有分配则不得操作设备。"
-    : "";
+  const policyRule = input.adb_slot
+    ? `\n\n${ADB_SLOT_RULE}${input.adb_slot.emulator_port ? ADB_EMULATOR_RULE : ""}`
+    : input.resource_bindings
+      ? "\n\n只能使用本次 CARDIGAN_RESOURCE_BINDINGS 中分配的端口和设备。禁止裸 adb、默认 5037、未分配端口及用户 USB 真机。没有分配则不得操作设备。"
+      : "";
   const rolePrompt =
     (input.role.instructions === undefined
       ? (input.role.core_prompt ?? "")
       : composeRolePrompt(input.role.instructions)) + policyRule;
+  const projectRule = projectCodePrompt(input.assignment);
   const resourceRule = input.run_resources ? `\n\n${RUN_RESOURCE_RULE}` : "";
+  // C-726: last, and outside `corePrompt`, so no note can satisfy a rule
+  // check such as the browser boundary below.
+  const capabilityRule = capabilityNotesPrompt(
+    input.capability_notes,
+    input.role.allowed_tools,
+  );
   const corePrompt =
     identity === undefined
       ? rolePrompt
@@ -210,24 +227,31 @@ export function compileAssignmentLaunch(
     }
   }
   const strippedBaseFiles = base.files.map((file) => {
-    if (secretKeys.size === 0 && !adapter.assignmentSettings) return file;
+    if (
+      secretKeys.size === 0 &&
+      !adapter.assignmentSettings &&
+      !adapter.assignmentSettingsFor
+    )
+      return file;
+    let parsed: { env?: Record<string, string> };
     try {
-      const parsed = JSON.parse(file.content) as {
-        env?: Record<string, string>;
-      };
-      if (parsed.env === undefined) return file;
-      const keptEnv = Object.fromEntries(
-        Object.entries(parsed.env).filter(([name]) => !secretKeys.has(name)),
-      );
-      return {
-        ...file,
-        // D7: the per-launch --settings file also overrides an existing Claude
-        // config without editing its session history or remembered files.
-        content: `${JSON.stringify({ ...parsed, env: keptEnv, ...adapter.assignmentSettings }, null, 2)}\n`,
-      };
+      parsed = JSON.parse(file.content) as { env?: Record<string, string> };
     } catch {
       return file;
     }
+    if (parsed.env === undefined) return file;
+    const keptEnv = Object.fromEntries(
+      Object.entries(parsed.env).filter(([name]) => !secretKeys.has(name)),
+    );
+    // Outside the parse guard: an invalid per-launch setting fails the launch
+    // instead of keeping the unstripped file.
+    const settings = adapter.assignmentSettingsFor?.(input, keptEnv);
+    return {
+      ...file,
+      // D7: the per-launch --settings file also overrides an existing Claude
+      // config without editing its session history or remembered files.
+      content: `${JSON.stringify({ ...parsed, env: keptEnv, ...adapter.assignmentSettings, ...settings }, null, 2)}\n`,
+    };
   });
   const startFile = join(input.run_dir, START_FILE_NAME);
   if (input.resource_bindings) {
@@ -244,6 +268,22 @@ export function compileAssignmentLaunch(
     );
     env.ANDROID_SERIAL =
       (devices.length === 1 ? devices[0] : undefined) ?? "cardigan-unassigned";
+  }
+  if (input.adb_slot !== undefined) {
+    // C-679: the Run's own adb server; static bindings never coexist with it.
+    delete env.ADB_SERVER_SOCKET;
+    delete env.ANDROID_SERIAL;
+    if (input.adb_slot) {
+      env.ANDROID_ADB_SERVER_PORT = String(input.adb_slot.adb_port);
+      env.CARDIGAN_ADB_SLOT = String(input.adb_slot.slot);
+      if (input.adb_slot.emulator_port) {
+        env.CARDIGAN_EMULATOR_PORT = String(input.adb_slot.emulator_port);
+        env.ANDROID_SERIAL = `emulator-${input.adb_slot.emulator_port}`;
+      } else env.ANDROID_SERIAL = "cardigan-unassigned";
+    } else {
+      env.ADB_SERVER_SOCKET = "localfilesystem:/dev/null";
+      env.ANDROID_SERIAL = "cardigan-unassigned";
+    }
   }
   const resourceFiles: CompiledFile[] = [];
   if (input.run_resources) {
@@ -278,6 +318,10 @@ export function compileAssignmentLaunch(
   for (const [key, value] of Object.entries(
     parseWorkerEnvironment(input.worker_env),
   )) {
+    // C-679: a fixed port from the worker binding must not override (or
+    // share) the Run's own; the host warns about it separately.
+    if (input.adb_slot !== undefined && key === "ANDROID_ADB_SERVER_PORT")
+      continue;
     if (
       Object.hasOwn(env, key) ||
       Object.hasOwn(resolved.provider?.definition.env ?? {}, key) ||
@@ -312,7 +356,9 @@ export function compileAssignmentLaunch(
     files: [
       {
         path: coreFile,
-        content: withTrailingNewline(corePrompt + resourceRule),
+        content: withTrailingNewline(
+          corePrompt + projectRule + resourceRule + capabilityRule,
+        ),
         mode: 0o600,
       },
       {
@@ -412,6 +458,21 @@ function employeeIdentityPrompt(
   ].join("\n");
 }
 
+/**
+ * C-676: every session, including legacy core prompts, learns its project's
+ * code so it can write full numbers (`CDG-C-12`) for other projects and the
+ * owner. A missing or malformed code adds nothing.
+ */
+function projectCodePrompt(assignment: CompileAssignmentInput["assignment"]) {
+  const code = assignment.project_code;
+  if (code === undefined || !isProjectCode(code)) return "";
+  const project =
+    assignment.project_id === undefined
+      ? ""
+      : `本项目 ${JSON.stringify(assignment.project_id)} 的`;
+  return `\n\n项目资料：${project}代号是 ${code}，本项目卡片 C-12 的完整编号写作 ${qualifyId(code, "C-12")}；引用其它项目或写给所有者时用完整编号。`;
+}
+
 function withTrailingNewline(text: string): string {
   return text.endsWith("\n") ? text : `${text}\n`;
 }
@@ -498,7 +559,13 @@ while [ ! -f "$start_file" ]; do
   waited=$((waited + 1))
 done
 rm -f "$start_file"
-${options.localSetup}exec nice -n ${options.agentNice} ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
+${options.localSetup}${
+  options.env.CARDIGAN_RUN_COMMAND
+    ? `# C-656: a private TMPDIR on disk and a systemd scope for this session; both
+# are removed with everything still running in it once the CLI exits.
+exec /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" session -- `
+    : "exec "
+}nice -n ${options.agentNice} ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
 `;
 }
 

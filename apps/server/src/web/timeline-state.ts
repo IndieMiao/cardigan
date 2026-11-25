@@ -11,6 +11,7 @@ import { readCardDependencies } from "./card-dependencies.js";
 import { HttpRejection } from "./http.js";
 import { readMergeQueueState } from "./merge-queue-state.js";
 import { decodeCursor, encodeCursor, pageLimit } from "./pagination.js";
+import { qualifiedReferenceResolver } from "./qualified-refs.js";
 import { cardDetail } from "./read.js";
 import {
   inIds,
@@ -208,16 +209,13 @@ export function readPagedCard(
     return timed("assemble", () =>
       cardDetail(state, cardId, {
         precheckEvents,
+        qualifiedReferences: qualifiedReferenceResolver(store),
         ...(card.story
           ? {
               storyProgress: storyProgress(
-                readDocs(
-                  store,
-                  project,
-                  "cards",
-                  "json_extract(doc, '$.parent_card_id') = ?",
-                  [card.id],
-                ),
+                tx.cards
+                  .list(project)
+                  .filter((c) => c.parent_card_id === card.id),
                 card,
               ),
             }

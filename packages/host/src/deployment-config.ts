@@ -1,8 +1,8 @@
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { MAX_DEPLOYMENT_READY_RETRIES } from "@cardigan/domain";
 import { parseDocument } from "yaml";
-
 import {
   parseRetention,
   type RetentionPolicy,
@@ -22,13 +22,29 @@ export interface DeploymentConfig {
   readonly batch_window_ms?: number;
   /** C-609: bounded wait for managed long operations; 0 disables it. */
   readonly operation_wait_timeout_ms?: number;
+  /** C-650: automatic retries of a target whose start/ready was rolled back. */
+  readonly ready_retry_max?: number;
+  /** C-650: minimum gap between those retries. */
+  readonly ready_retry_interval_ms?: number;
   readonly retention?: RetentionPolicy;
   readonly disk_low_percent?: number;
+  /** C-656: alert when /tmp use exceeds this percent. */
+  readonly tmp_high_percent?: number;
+  /** C-656: alert when swap use exceeds this percent. */
+  readonly swap_high_percent?: number;
   readonly server_log_max_bytes?: number;
+  /** C-638: with `server_log_max_bytes`, the directory's byte budget only. */
   readonly server_log_max_files?: number;
+  /** C-638: server logs older than this are removed; default 48. */
+  readonly server_log_retention_hours?: number;
 }
 
 export const DEFAULT_DISK_LOW_PERCENT = 15;
+/** C-638: a year; retention is still bounded by the log byte budget. */
+const MAX_SERVER_LOG_RETENTION_HOURS = 24 * 365;
+/** C-656: /tmp is a memory disk; what does not fit is swapped out. */
+export const DEFAULT_TMP_HIGH_PERCENT = 70;
+export const DEFAULT_SWAP_HIGH_PERCENT = 80;
 
 /** Capacity waiting only raises attention; it never releases an unknown execution. */
 export const DEFAULT_CAPACITY_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -38,6 +54,10 @@ export const DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
 export const DEFAULT_BATCH_WINDOW_MS = 5 * 60 * 1000;
 /** C-609: the wait for long operations ends in a deployment after 15 minutes. */
 export const DEFAULT_OPERATION_WAIT_TIMEOUT_MS = 15 * 60 * 1000;
+/** C-650: two retries after a rolled-back start/ready (three attempts in all). */
+export const DEFAULT_READY_RETRY_MAX = 2;
+/** C-650: a transient write lock is long gone two minutes later. */
+export const DEFAULT_READY_RETRY_INTERVAL_MS = 2 * 60 * 1000;
 /** Optional keys where 0 turns the C-609 behavior off. */
 const DISABLEABLE = ["batch_window_ms", "operation_wait_timeout_ms"];
 
@@ -90,10 +110,15 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     "capacity_wait_timeout_ms",
     "batch_window_ms",
     "operation_wait_timeout_ms",
+    "ready_retry_max",
+    "ready_retry_interval_ms",
     "retention",
     "disk_low_percent",
+    "tmp_high_percent",
+    "swap_high_percent",
     "server_log_max_bytes",
     "server_log_max_files",
+    "server_log_retention_hours",
   ];
   if (
     Object.keys(value).some((k) => !keys.includes(k)) ||
@@ -119,9 +144,11 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
   ))
     if (
       !(
-        ["evidence_wait_timeout_ms", "capacity_wait_timeout_ms"].includes(
-          key,
-        ) && value[key] === undefined
+        [
+          "evidence_wait_timeout_ms",
+          "capacity_wait_timeout_ms",
+          "ready_retry_interval_ms",
+        ].includes(key) && value[key] === undefined
       ) &&
       (!Number.isSafeInteger(value[key]) ||
         Number(value[key]) < 1 ||
@@ -143,18 +170,43 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
       throw new Error("Invalid server log capacity");
   }
   if (
+    value.server_log_retention_hours !== undefined &&
+    (value.server_log_max_bytes === undefined ||
+      !Number.isSafeInteger(value.server_log_retention_hours) ||
+      Number(value.server_log_retention_hours) < 1 ||
+      Number(value.server_log_retention_hours) > MAX_SERVER_LOG_RETENTION_HOURS)
+  )
+    throw new Error("Invalid server log retention");
+  if (
+    value.ready_retry_max !== undefined &&
+    (!Number.isSafeInteger(value.ready_retry_max) ||
+      Number(value.ready_retry_max) < 0 ||
+      Number(value.ready_retry_max) > MAX_DEPLOYMENT_READY_RETRIES)
+  )
+    throw new Error("Invalid deployment retry count");
+  if (
     value.disk_low_percent !== undefined &&
     (!Number.isInteger(value.disk_low_percent) ||
       Number(value.disk_low_percent) < 1 ||
       Number(value.disk_low_percent) > 100)
   )
     throw new Error("Invalid disk warning threshold");
+  for (const key of ["tmp_high_percent", "swap_high_percent"])
+    if (
+      value[key] !== undefined &&
+      (!Number.isInteger(value[key]) ||
+        Number(value[key]) < 1 ||
+        Number(value[key]) > 99)
+    )
+      throw new Error("Invalid memory pressure threshold");
   return {
     ...value,
     retention: parseRetention(
       value.retention === undefined ? {} : value.retention,
     ),
     disk_low_percent: value.disk_low_percent ?? DEFAULT_DISK_LOW_PERCENT,
+    tmp_high_percent: value.tmp_high_percent ?? DEFAULT_TMP_HIGH_PERCENT,
+    swap_high_percent: value.swap_high_percent ?? DEFAULT_SWAP_HIGH_PERCENT,
     enabled: value.enabled ?? true,
     capacity_wait_timeout_ms:
       value.capacity_wait_timeout_ms ?? DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
@@ -163,6 +215,9 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     batch_window_ms: value.batch_window_ms ?? DEFAULT_BATCH_WINDOW_MS,
     operation_wait_timeout_ms:
       value.operation_wait_timeout_ms ?? DEFAULT_OPERATION_WAIT_TIMEOUT_MS,
+    ready_retry_max: value.ready_retry_max ?? DEFAULT_READY_RETRY_MAX,
+    ready_retry_interval_ms:
+      value.ready_retry_interval_ms ?? DEFAULT_READY_RETRY_INTERVAL_MS,
   } as unknown as DeploymentConfig;
 }
 

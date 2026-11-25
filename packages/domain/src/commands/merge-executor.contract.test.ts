@@ -108,3 +108,81 @@ test("connectivity records reject non-system and cross-project actors without ef
     ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
   expect(f.state().events).toEqual([]);
 });
+
+test("C-681: an unreachable event carries its own failure class and latest HTTP status", () => {
+  const f = setup();
+  const executor = "github-actions";
+  const first = f.record({
+    executor,
+    status: "unreachable",
+    attempt_id: "attempt-1",
+    failure: {
+      category: "dispatch_unknown",
+      stage: "run_not_found",
+      http_status: 200,
+      request_id: "0400:3333:CCCC",
+    },
+  });
+  expect(first.events).toHaveLength(1);
+  expect(first.events[0]).toMatchObject({
+    type: "merge_executor_unreachable",
+    payload: {
+      executor,
+      attempt_id: "attempt-1",
+      failure: {
+        category: "dispatch_unknown",
+        stage: "run_not_found",
+        http_status: 200,
+        request_id: "0400:3333:CCCC",
+      },
+    },
+  });
+  expect(mergeExecutorOutage(f.state(), executor)?.failure?.stage).toBe(
+    "run_not_found",
+  );
+  // A later attempt without classified evidence must not inherit a stale cause.
+  f.advance(60_000);
+  const second = f.record({
+    executor,
+    status: "unreachable",
+    attempt_id: "attempt-2",
+  });
+  expect(second.events[0]?.payload).not.toHaveProperty("failure");
+  expect(second.data?.failure_count).toBe(2);
+  f.advance(60_000);
+  const third = f.record({
+    executor,
+    status: "unreachable",
+    attempt_id: "attempt-3",
+    failure: { category: "dispatch_unknown", stage: "push_incomplete" },
+  });
+  expect(third.events[0]?.payload).toMatchObject({
+    failure: { category: "dispatch_unknown", stage: "push_incomplete" },
+  });
+  expect(third.events[0]?.payload).not.toHaveProperty("failure.http_status");
+});
+
+test.each([
+  { category: "Dispatch Unknown" },
+  { category: "dispatch_unknown", stage: "other" },
+  { category: "dispatch_unknown", http_status: 99 },
+  { category: "dispatch_unknown", http_status: 200.5 },
+  { category: "dispatch_unknown", request_id: "Bearer ghs_secret" },
+])("C-681: malformed failure evidence is rejected (%o)", (failure) => {
+  const state = fixture();
+  const result = recordMergeExecutor(
+    state,
+    { kind: "system", project_id: state.project_id },
+    {
+      executor: "ci",
+      status: "unreachable",
+      attempt_id: "attempt-1",
+      failure: failure as never,
+    },
+    ports(),
+  );
+  expect(result).toMatchObject({
+    ok: false,
+    error: { code: "validation_failed" },
+  });
+});

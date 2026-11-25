@@ -13,12 +13,15 @@ import type {
   MergeCheckBlocker,
   MergeCheckView,
   ProjectId,
+  ResolvedReference,
   Run,
   RunQueuePosition,
   TimelineEntry,
+  VideoMetadata,
   WorkItem,
 } from "@cardigan/domain";
 import {
+  attachmentReferenceIdsIn,
   authorView,
   autoMergeSchedule,
   builtinCardTemplates,
@@ -34,10 +37,12 @@ import {
   deriveReviewMatrix,
   effectivePreMergeChecks,
   eventById,
+  extractQualifiedReferences,
   extractReferences,
   hasVerifiedMergeNoop,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
+  isOfficeDigestStream,
   latestCardTemplate,
   listNeedsYou,
   listNeedsYouCounts,
@@ -53,6 +58,7 @@ import {
   type Role,
   remoteExitAction,
   requiresUiStateAndSave,
+  resolvePendingAttachmentRefs,
   resolveReferences,
   roleKind,
   runAuthorView,
@@ -68,6 +74,7 @@ import {
 } from "@cardigan/domain";
 import { type ProjectMergeGate, previewPorts } from "@cardigan/host";
 import {
+  isVideoMime,
   loadCommandState,
   type RecordReadTiming,
   timeRead,
@@ -89,6 +96,10 @@ import {
 } from "./card-checking.js";
 import { cardDependencyGraph } from "./card-dependencies.js";
 import { PAGE_LIMITS } from "./pagination.js";
+import type {
+  QualifiedReferenceResolver,
+  QualifiedResolvedReference,
+} from "./qualified-refs.js";
 import {
   assignmentPresence,
   precheckIndex,
@@ -600,6 +611,9 @@ export interface AttachmentView extends WebAuthorView {
   readonly thumbnail_path: string | null;
   /** C-614: lightbox image for inline bitmaps (may come from OSS); null otherwise. */
   readonly preview_path: string | null;
+  /** C-683: videos only — what the uploader measured, and its cover frame. */
+  readonly video?: VideoMetadata;
+  readonly poster_path?: string;
 }
 
 /** MIME types safe enough for `<img src>` (§3.2); SVG and HTML are not. */
@@ -666,7 +680,22 @@ function attachmentViewMapper(state: CommandState) {
       download_path,
       thumbnail_path: inline ? `${download_path}/thumbnail` : null,
       preview_path: inline ? `${download_path}/preview` : null,
+      ...videoView(attachment, download_path),
     };
+  };
+}
+
+/** C-683: a video's measurements (no poster digest) and its cover route. */
+function videoView(attachment: Attachment, download_path: string) {
+  if (attachment.streamed_artifact || !isVideoMime(attachment.mime)) return {};
+  const {
+    poster_sha256,
+    poster_size: _size,
+    ...video
+  } = attachment.video ?? {};
+  return {
+    video,
+    ...(poster_sha256 ? { poster_path: `${download_path}/poster` } : {}),
   };
 }
 
@@ -706,6 +735,65 @@ export function decisionAttachmentViews(
   });
 }
 
+/**
+ * C-615: other cards' attachments the card's bodies mention, so the browser
+ * can show them as chips. The current card's own attachments are already in
+ * `attachments`. An attachment of a sensitive card, or any other card while
+ * the project turned cross-card reading off, is left out like a missing one:
+ * the body keeps the number as text.
+ */
+export function referencedAttachmentViews(
+  state: CommandState,
+  card_id: CardId,
+  bodies: readonly string[],
+  attachmentEntryCards?: ReadonlyMap<string, CardId>,
+): (AttachmentView & { readonly card_id: string })[] {
+  // Each body is parsed on its own (V-3068): one comment's open code block
+  // must not hide the numbers of the next.
+  const ids = attachmentReferenceIdsIn(bodies);
+  if (!ids.length || projectPreferences(state).cross_card_read === false)
+    return [];
+  const entryCard = new Map([
+    ...(attachmentEntryCards ?? []),
+    ...state.timeline.map((entry) => [entry.id, entry.card_id] as const),
+  ]);
+  const owner = (attachment: Attachment): CardId | undefined => {
+    if (attachment.card_id) return attachment.card_id;
+    const target = attachment.attach_to;
+    if (target.kind === "timeline_entry") return entryCard.get(target.id);
+    const delivery = state.deliveries.find((d) => d.id === target.id);
+    return state.work_items.find((w) => w.id === delivery?.work_item_id)
+      ?.card_id;
+  };
+  const view = attachmentViewMapper(state);
+  // V-3070: the chip's file, thumbnail and preview go through the referencing
+  // card, which rechecks this rule on every read; a link kept on an open page
+  // stops working once the source card turns sensitive.
+  const base = `/api/projects/${encodeURIComponent(state.project_id)}/cards/${encodeURIComponent(card_id)}/attachment-refs`;
+  return ids.flatMap((id) => {
+    const attachment = state.attachments.find((a) => a.id === id);
+    if (!attachment || attachment.streamed_artifact?.expired) return [];
+    const card = owner(attachment);
+    if (!card || card === card_id) return [];
+    const other = state.cards.find((c) => c.id === card);
+    if (!other || other.sensitive) return [];
+    const plain = view(attachment);
+    const download_path = `${base}/${encodeURIComponent(attachment.id)}`;
+    return [
+      {
+        ...plain,
+        card_id: card,
+        download_path,
+        thumbnail_path: plain.thumbnail_path && `${download_path}/thumbnail`,
+        preview_path: plain.preview_path && `${download_path}/preview`,
+        ...(plain.poster_path
+          ? { poster_path: `${download_path}/poster` }
+          : {}),
+      },
+    ];
+  });
+}
+
 const SELECTION_EVENTS = new Set([
   "work_item_assigned",
   "machine_selected",
@@ -733,6 +821,19 @@ export function machineSelection(
   const text = (value: unknown) =>
     typeof value === "string" ? value : undefined;
   const list = (value: unknown) => (Array.isArray(value) ? value : []);
+  const strings = (value: unknown) =>
+    list(value).filter((r): r is string => typeof r === "string");
+  const slot = (r: unknown) => {
+    const v = r as Record<string, unknown> | null | undefined;
+    return typeof v?.limit === "number" && typeof v.occupied === "number"
+      ? { limit: v.limit, occupied: v.occupied }
+      : undefined;
+  };
+  const slots = (value: unknown) =>
+    list(value).flatMap((r: Record<string, unknown>) => {
+      const s = slot(r);
+      return typeof r?.key === "string" && s ? [{ key: r.key, ...s }] : [];
+    });
   if (latest.type === "system_assignment_deferred")
     return {
       status: "deferred" as const,
@@ -763,15 +864,19 @@ export function machineSelection(
             preference_rank:
               typeof c.preference_rank === "number" ? c.preference_rank : null,
             // MC-4 snapshot at selection time; never substituted by live capacity.
-            resources: list(c.resources).flatMap(
-              (r: Record<string, unknown>) =>
-                typeof r?.key === "string" &&
-                typeof r.limit === "number" &&
-                typeof r.occupied === "number"
-                  ? [{ key: r.key, limit: r.limit, occupied: r.occupied }]
-                  : [],
-            ),
+            resources: slots(c.resources),
+            // C-716: this project's own ceilings, same snapshot rule.
+            ...(slot(c.project_limit)
+              ? { project_limit: slot(c.project_limit) }
+              : {}),
+            ...(list(c.project_resources).length
+              ? { project_resources: slots(c.project_resources) }
+              : {}),
+            ...(list(c.full).length ? { full: strings(c.full) } : {}),
           })),
+          ...(list(p.queued_on).length
+            ? { queued_on: strings(p.queued_on) }
+            : {}),
           excluded: list(p.excluded).map((m: Record<string, unknown>) => ({
             machine_id: text(m.machine_id) ?? "",
             reasons: list(m.reasons).filter(
@@ -805,6 +910,8 @@ export function cardDetail(
     readonly mergeState?: CommandState | undefined;
     /** C-567: other cards' precheck events that this card's waits point to. */
     readonly precheckEvents?: readonly Event[];
+    /** C-674: resolves full numbers (`SEN-C-34`) in other projects. */
+    readonly qualifiedReferences?: QualifiedReferenceResolver;
   } = {},
 ) {
   if (options.dependencyState) {
@@ -956,12 +1063,34 @@ export function cardDetail(
       ].join("\n"),
     ).map((ref) => [`${ref.kind}:${ref.id}`, ref]),
   );
-  const references = (body: string) =>
-    extractReferences(body).flatMap((ref) => {
+  const qualified = new Map(
+    (
+      options.qualifiedReferences?.(
+        extractQualifiedReferences(
+          [
+            description,
+            ...timeline.map((e) => e.body),
+            ...conclusionEntries.map((e) => e.body),
+          ].join("\n"),
+        ),
+      ) ?? []
+    ).map((ref) => [ref.id, ref]),
+  );
+  const references = (
+    body: string,
+  ): readonly (ResolvedReference | QualifiedResolvedReference)[] => [
+    ...extractReferences(body).flatMap((ref) => {
       const value =
         ref.kind === "pr" ? undefined : resolved.get(`${ref.kind}:${ref.id}`);
       return value ? [value] : [];
-    });
+    }),
+    ...(qualified.size
+      ? extractQualifiedReferences(body).flatMap((ref) => {
+          const value = qualified.get(ref.qualified);
+          return value ? [value] : [];
+        })
+      : []),
+  ];
   const events = state.events.filter((event) => event.card_id === card_id);
   const eventBySeq = new Map(events.map((event) => [event.seq, event]));
   // C-136: deliveries and reviews carry no timestamp; read it off the event
@@ -1016,8 +1145,15 @@ export function cardDetail(
               r.work_item_id === entry.work_item_id,
           )?.id
         : undefined;
+    // C-615: a comment's `attachment-new-N` reads as the number it got.
+    const body = resolvePendingAttachmentRefs(
+      entry.body,
+      entry,
+      state.attachments,
+    );
     return {
       ...entry,
+      body,
       ...webAuthorView(state, entry.author),
       event_type: event?.type ?? null,
       ...(event?.type === "merge_check_blocked"
@@ -1059,7 +1195,7 @@ export function cardDetail(
         ? (roles.get(entry.author.slice(11)) ?? null)
         : null,
       ...(review_id ? { review_id } : {}),
-      references: references(entry.body),
+      references: references(body),
     };
   };
   const source = card.source;
@@ -1201,6 +1337,18 @@ export function cardDetail(
     })),
     attachments: timeRead(options.recordTiming, "attachment_views", () =>
       attachmentViews(state, card_id, options.attachmentEntryCards),
+    ),
+    referenced_attachments: referencedAttachmentViews(
+      state,
+      card_id,
+      [
+        card.title,
+        card.goal,
+        ...card.acceptance_criteria,
+        ...card.out_of_scope,
+        ...timeline.map((e) => e.body),
+      ],
+      options.attachmentEntryCards,
     ),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.
     relations: {
@@ -2027,7 +2175,12 @@ export function executionView<M extends Machine = Machine>(
                 ...withContext(run),
               },
         cursors: state.cursors
-          .filter((cursor) => cursor.assignment_id === assignment.id)
+          .filter(
+            (cursor) =>
+              cursor.assignment_id === assignment.id &&
+              // C-722: the Office digest window is not a stream cursor.
+              !isOfficeDigestStream(cursor.card_id),
+          )
           .map((cursor) => ({
             card_id: cursor.card_id,
             acked_seq: cursor.acked_seq,

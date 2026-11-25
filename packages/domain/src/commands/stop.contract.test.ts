@@ -9,8 +9,15 @@ import { HOST_OPS_ROLE_TOOLS } from "../host-ops.js";
 import { occupiedRunSlots } from "../run-capacity.js";
 import type { CommandState } from "./core.js";
 import { beginHostOpsAction } from "./host-ops-actions.js";
-import { dispatchRun } from "./launch.js";
-import { stoppedByHuman, stopWorkItemAssignment } from "./stop.js";
+import { dispatchRun, queueRun } from "./launch.js";
+import {
+  humanStopRecorded,
+  openStopEpisodeStart,
+  pausedByHuman,
+  stopExitConfirmed,
+  stoppedByHuman,
+  stopWorkItemAssignment,
+} from "./stop.js";
 import {
   actor,
   apply,
@@ -48,7 +55,11 @@ function base(): CommandState {
 }
 const stop = (
   s: CommandState,
-  extra: { released_runtime_ref?: RuntimeRef } = {},
+  extra: {
+    released_runtime_ref?: RuntimeRef;
+    exit_confirmed_ref?: RuntimeRef;
+    hold?: boolean;
+  } = {},
 ) =>
   stopWorkItemAssignment(
     s,
@@ -342,4 +353,458 @@ test("C-235 a wake dispatched before the stop is cancelled and its terminal rele
   // The cancelled Run cannot be dispatched again by a late wake either.
   expect(dispatch(next).ok).toBe(false);
   expect(dispatch(next, freshRef).ok).toBe(false);
+});
+
+/**
+ * C-620: a managed stop (`hold: false`, the CLI default) fences dispatch only
+ * until its terminal release is confirmed; an explicit pause (`hold`, and
+ * every legacy stop) keeps holding until the human starts it again.
+ */
+test("C-620 a managed stop keeps unstarted queued work and stops fencing once its release is confirmed", () => {
+  const A1 = id("assignment", 1);
+  const s = base();
+  const first = stop(s, { hold: false });
+  expect(first.ok && first.value.data.cancelled).toBe(0);
+  const stopping = apply(s, (first as { ok: true; value: never }).value);
+  expect(stopping.events.at(-1)).toMatchObject({
+    type: "assignment_stopped",
+    payload: { assignment_id: A1, hold: false, cancelled_run_ids: [] },
+  });
+  // Release not yet confirmed: still fenced, exactly like a pause.
+  expect(stoppedByHuman(stopping.events, A1)).toBe(true);
+  expect(pausedByHuman(stopping.events, A1)).toBe(false);
+  expect(stopping.runs.find((r) => r.id === id("run", 9))?.status).toBe(
+    "queued",
+  );
+  // A release of another terminal settles nothing and keeps the fence.
+  const wrong = stop(stopping, {
+    released_runtime_ref: { ...ref, terminal_ref: "t2" },
+  });
+  expect(wrong.ok && wrong.value.changes).toEqual([]);
+  const settled = stop(stopping, { released_runtime_ref: ref });
+  expect(settled.ok && settled.value.data.cancelled).toBe(1);
+  const next = apply(stopping, (settled as { ok: true; value: never }).value);
+  const status = (n: number) =>
+    next.runs.find((r) => r.id === id("run", n))?.status;
+  expect(status(1)).toBe("cancelled");
+  expect(status(9)).toBe("queued");
+  expect(next.assignments.find((a) => a.id === A1)).toMatchObject({
+    runtime_ref: null,
+  });
+  // Released: no longer stopped, so new work starts a fresh session.
+  expect(stoppedByHuman(next.events, A1)).toBe(false);
+  expect(pausedByHuman(next.events, A1)).toBe(false);
+  // The stop itself is still on record until the next dispatch.
+  expect(humanStopRecorded(next.events, A1)).toBe(true);
+  // The queued work dispatches onto a fresh terminal.
+  expect(dispatch(next, freshRef).ok).toBe(true);
+});
+
+test("C-620 a pause and every legacy stop keep holding after release; a managed stop never downgrades a pause", () => {
+  const A1 = id("assignment", 1);
+  for (const hold of [true, undefined]) {
+    const s = base();
+    const paused = apply(
+      s,
+      (
+        stop(s, hold === undefined ? {} : { hold }) as {
+          ok: true;
+          value: never;
+        }
+      ).value,
+    );
+    expect(paused.events.at(-1)).toMatchObject({
+      payload: { hold: true, cancelled_run_ids: [id("run", 9)] },
+    });
+    // Retrying a stop without --hold keeps the pause.
+    const retried = apply(
+      paused,
+      (stop(paused, { hold: false }) as { ok: true; value: never }).value,
+    );
+    expect(retried.events.at(-1)).toMatchObject({ payload: { hold: true } });
+    const next = apply(
+      retried,
+      (
+        stop(retried, { released_runtime_ref: ref }) as {
+          ok: true;
+          value: never;
+        }
+      ).value,
+    );
+    expect(stoppedByHuman(next.events, A1)).toBe(true);
+    expect(pausedByHuman(next.events, A1)).toBe(true);
+  }
+  // A legacy event without `hold` is a pause.
+  const legacy = (type: string, seq: number, payload = {}): Event => ({
+    id: String(seq).padStart(26, "0") as never,
+    seq,
+    type,
+    actor: human,
+    payload: { assignment_id: A1, ...payload },
+    created_at: "2026-01-01T00:00:00.000Z",
+  });
+  const events = [
+    legacy("assignment_stopped", 1),
+    legacy("assignment_stop_released", 2),
+  ];
+  expect(stoppedByHuman(events, A1)).toBe(true);
+  expect(pausedByHuman(events, A1)).toBe(true);
+  // A managed stop released, then a new dispatch, then a pause: paused again.
+  const replay = [
+    legacy("assignment_stopped", 1, { hold: false }),
+    legacy("assignment_stop_released", 2),
+    legacy("run_dispatched", 3),
+    legacy("assignment_stopped", 4, { hold: true }),
+    legacy("assignment_stop_released", 5),
+  ];
+  expect(stoppedByHuman(replay.slice(0, 2), A1)).toBe(false);
+  expect(humanStopRecorded(replay.slice(0, 3), A1)).toBe(false);
+  expect(stoppedByHuman(replay, A1)).toBe(true);
+  // A duplicated release event cannot lift a later pause.
+  expect(
+    stoppedByHuman([...replay, legacy("assignment_stop_released", 6)], A1),
+  ).toBe(true);
+});
+
+test("C-620 host_ops can restart a released managed stop, but not one whose release is pending", () => {
+  const { work_item_id: _w, ...opsFields } = assignment(10, "host_ops");
+  const s0 = { ...base(), runs: fixture().runs };
+  const s = {
+    ...s0,
+    roles: [
+      ...s0.roles,
+      { ...role("host_ops"), allowed_tools: HOST_OPS_ROLE_TOOLS },
+    ],
+    assignments: [
+      ...s0.assignments,
+      { ...opsFields, scope: "standing" } as Assignment,
+    ],
+  };
+  const caller = {
+    ...actor(10, "host_ops"),
+    allowed_tools: HOST_OPS_ROLE_TOOLS,
+  } as never;
+  const restart = {
+    tool: "host_ops_restart_assignment" as const,
+    target_id: id("assignment", 1),
+    reason: "Recover",
+    snapshot: { model: "test", agent_cli_version: "test" },
+  };
+  const stopping = apply(
+    s,
+    (stop(s, { hold: false }) as { ok: true; value: never }).value,
+  );
+  expect(beginHostOpsAction(stopping, caller, restart, ports()).ok).toBe(false);
+  const released = apply(
+    stopping,
+    (
+      stop(stopping, { released_runtime_ref: ref }) as {
+        ok: true;
+        value: never;
+      }
+    ).value,
+  );
+  const allowed = beginHostOpsAction(released, caller, restart, ports());
+  expect(allowed.ok ? "ok" : allowed.error.message).toBe("ok");
+});
+
+test("C-620 a stop episode spans retries; its proven exit is recorded once for the exact session and ends with the release", () => {
+  const A1 = id("assignment", 1);
+  const step = (
+    s: CommandState,
+    extra: Parameters<typeof stop>[1],
+  ): CommandState => {
+    const result = stop(s, extra);
+    if (!result.ok) throw new Error(result.error.message);
+    return apply(s, result.value);
+  };
+  const base0 = base();
+  // Without a stop there is nothing to confirm.
+  expect(stop(base0, { exit_confirmed_ref: ref })).toMatchObject({
+    ok: true,
+    value: { changes: [] },
+  });
+  let s = step(base0, { hold: false });
+  const first = s.events.length - 1;
+  expect(openStopEpisodeStart(s.events, A1)).toBe(first);
+  // A retry continues the same episode.
+  s = step(s, { hold: false });
+  expect(openStopEpisodeStart(s.events, A1)).toBe(first);
+  // Only the exact current session can be confirmed, and only once.
+  const other = { ...ref, terminal_ref: "t2" };
+  expect(stop(s, { exit_confirmed_ref: other })).toMatchObject({
+    ok: true,
+    value: { changes: [] },
+  });
+  expect(stopExitConfirmed(s.events, A1, ref)).toBe(false);
+  s = step(s, { exit_confirmed_ref: ref });
+  expect(s.events.at(-1)).toMatchObject({
+    type: "assignment_stop_exit_confirmed",
+    payload: { assignment_id: A1, runtime_ref: ref },
+  });
+  expect(stopExitConfirmed(s.events, A1, ref)).toBe(true);
+  expect(stopExitConfirmed(s.events, A1, other)).toBe(false);
+  expect(stop(s, { exit_confirmed_ref: ref })).toMatchObject({
+    ok: true,
+    value: { changes: [] },
+  });
+  // Confirmation alone neither clears the session nor lifts the fence.
+  expect(stoppedByHuman(s.events, A1)).toBe(true);
+  expect(s.assignments.find((a) => a.id === A1)?.runtime_ref).toEqual(ref);
+  s = step(s, { released_runtime_ref: ref });
+  expect(openStopEpisodeStart(s.events, A1)).toBeUndefined();
+  expect(stopExitConfirmed(s.events, A1, ref)).toBe(false);
+});
+
+/**
+ * C-624: a human start that has to queue for capacity is the human's start.
+ * Before, only a dispatch lifted the stop, so the Dispatcher skipped the
+ * queued Run forever (R-715) and it held the head of the machine queue.
+ */
+const start = (s: CommandState, caller = human) =>
+  queueRun(
+    s,
+    caller,
+    {
+      assignment_id: id("assignment", 1),
+      reuse_queued: true,
+      model: "test",
+      agent_cli_version: "test",
+    },
+    ports(),
+  );
+
+test("C-624 a queued human start lifts the stop and records it once", () => {
+  const s = idle();
+  const stopped = apply(s, (stop(s) as { ok: true; value: never }).value);
+  expect(stoppedByHuman(stopped.events, id("assignment", 1))).toBe(true);
+  const started = start(stopped);
+  if (!started.ok) throw new Error(started.error.message);
+  const next = apply(stopped, started.value);
+  const run = started.value.data;
+  expect(run.status).toBe("queued");
+  const recorded = next.events.filter(
+    (e) => e.type === "assignment_start_requested",
+  );
+  expect(recorded).toHaveLength(1);
+  expect(recorded[0]).toMatchObject({
+    actor: { kind: "human" },
+    payload: { assignment_id: id("assignment", 1), run_id: run.id },
+  });
+  expect(stoppedByHuman(next.events, id("assignment", 1))).toBe(false);
+  // C-620: the start ends the pause and its stop episode, like a dispatch.
+  expect(pausedByHuman(next.events, id("assignment", 1))).toBe(false);
+  expect(humanStopRecorded(next.events, id("assignment", 1))).toBe(false);
+  expect(
+    openStopEpisodeStart(next.events, id("assignment", 1)),
+  ).toBeUndefined();
+
+  // A repeated start reuses the same queued Run and records nothing more.
+  const again = start(next);
+  if (!again.ok) throw new Error(again.error.message);
+  expect(again.value.data.id).toBe(run.id);
+  expect(
+    again.value.events.some((e) => e.type === "assignment_start_requested"),
+  ).toBe(false);
+
+  // A later stop wins again and cancels the queued start.
+  const restopped = apply(
+    next,
+    (stop(next) as { ok: true; value: never }).value,
+  );
+  expect(stoppedByHuman(restopped.events, id("assignment", 1))).toBe(true);
+  expect(restopped.runs.find((r) => r.id === run.id)?.status).toBe("cancelled");
+});
+
+test("C-624 only a human start event lifts the stop", () => {
+  const s = idle();
+  const stopped = apply(s, (stop(s) as { ok: true; value: never }).value);
+  const system = { kind: "system", project_id: human.project_id } as const;
+  const queued = start(stopped, system);
+  if (!queued.ok) throw new Error(queued.error.message);
+  expect(
+    queued.value.events.some((e) => e.type === "assignment_start_requested"),
+  ).toBe(false);
+  const next = apply(stopped, queued.value);
+  expect(stoppedByHuman(next.events, id("assignment", 1))).toBe(true);
+
+  // The index ignores a forged non-human start event.
+  const forged: Event = {
+    id: "9".repeat(26) as never,
+    seq: 999,
+    type: "assignment_start_requested",
+    actor: system,
+    payload: { assignment_id: id("assignment", 1), run_id: "R-1" },
+    created_at: "2026-01-01T00:00:00.000Z",
+  };
+  expect(stoppedByHuman([...stopped.events, forged], id("assignment", 1))).toBe(
+    true,
+  );
+
+  // A start on an Assignment that is not stopped records nothing.
+  const plain = start(s);
+  if (!plain.ok) throw new Error(plain.error.message);
+  expect(
+    plain.value.events.some((e) => e.type === "assignment_start_requested"),
+  ).toBe(false);
+});
+
+/**
+ * C-645: a human start or a dispatch can land between the stop's two steps
+ * (the start's queueRun is not under the host's launch lock). Either one ends
+ * the stop, but the host is already releasing the terminal step 1 was
+ * recorded for: the settlement must still clear that ref and cancel the
+ * session's Runs, and keep the start's never-started queued Run.
+ */
+test.each([true, false])(
+  "C-645 a human start between the two steps (hold=%s) still settles the released terminal and keeps the start",
+  (hold) => {
+    const A1 = id("assignment", 1);
+    const s = idle();
+    const first = stop(s, { hold });
+    const stopped = apply(s, (first as { ok: true; value: never }).value);
+    expect(stopped.events.at(-1)).toMatchObject({
+      type: "assignment_stopped",
+      payload: { assignment_id: A1, hold, runtime_ref: ref },
+    });
+    const started = start(stopped);
+    if (!started.ok) throw new Error(started.error.message);
+    const racing = apply(stopped, started.value);
+    const startRun = started.value.data.id;
+    expect(stoppedByHuman(racing.events, A1)).toBe(false);
+
+    // Another terminal's release still settles nothing.
+    const wrong = stop(racing, {
+      released_runtime_ref: { ...ref, terminal_ref: "t2" },
+    });
+    expect(wrong.ok && wrong.value.changes).toEqual([]);
+
+    const settled = stop(racing, { released_runtime_ref: ref });
+    if (!settled.ok) throw new Error(settled.error.message);
+    expect(settled.value.changes).not.toEqual([]);
+    const next = apply(racing, settled.value);
+    expect(next.assignments.find((a) => a.id === A1)).toMatchObject({
+      runtime_state: "idle",
+      runtime_ref: null,
+    });
+    // The human start survives and the stop stays ended.
+    expect(next.runs.find((r) => r.id === startRun)?.status).toBe("queued");
+    expect(stoppedByHuman(next.events, A1)).toBe(false);
+    expect(pausedByHuman(next.events, A1)).toBe(false);
+    expect(next.events.at(-1)).toMatchObject({
+      type: "assignment_stop_released",
+      payload: { assignment_id: A1, superseded: true },
+    });
+    // Settled once: a retried settlement changes nothing.
+    const again = stop(next, { released_runtime_ref: ref });
+    expect(again.ok && again.value.changes).toEqual([]);
+    // The start runs on a fresh terminal: one executor, no stale ref.
+    const fresh = dispatchRun(
+      next,
+      human,
+      {
+        run_id: startRun,
+        launch_snapshot: { model: "test", agent_cli_version: "test" },
+        runtime_ref: freshRef,
+      },
+      ports(),
+    );
+    if (!fresh.ok) throw new Error(fresh.error.message);
+    const running = apply(next, fresh.value);
+    expect(running.assignments.find((a) => a.id === A1)?.runtime_ref).toEqual(
+      freshRef,
+    );
+    expect(
+      occupiedRunSlots(
+        running.assignments.filter((a) => a.id === A1),
+        running.runs,
+        "local",
+      ),
+    ).toBe(1);
+  },
+);
+
+test("C-645 a dispatch onto the same terminal between the two steps is cancelled with that terminal's release", () => {
+  const A1 = id("assignment", 1);
+  const s = idle();
+  // A managed stop keeps the queued Run, which a wake then dispatches onto
+  // the terminal the host is releasing.
+  const stopped = apply(
+    s,
+    (stop(s, { hold: false }) as { ok: true; value: never }).value,
+  );
+  const woken = apply(
+    stopped,
+    (dispatch(stopped) as { ok: true; value: never }).value,
+  );
+  expect(woken.runs.find((r) => r.id === id("run", 9))?.status).toBe(
+    "dispatched",
+  );
+  expect(stoppedByHuman(woken.events, A1)).toBe(false);
+  const settled = stop(woken, { released_runtime_ref: ref });
+  expect(settled.ok && settled.value.data.cancelled).toBe(1);
+  const next = apply(woken, (settled as { ok: true; value: never }).value);
+  expect(next.runs.find((r) => r.id === id("run", 9))).toMatchObject({
+    status: "cancelled",
+    summary: "stopped by host",
+  });
+  expect(next.assignments.find((a) => a.id === A1)).toMatchObject({
+    runtime_ref: null,
+  });
+  expect(
+    occupiedRunSlots(
+      next.assignments.filter((a) => a.id === A1),
+      next.runs,
+      "local",
+    ),
+  ).toBe(0);
+});
+
+test("C-645 a dispatch onto a new terminal between the two steps takes over; the old release settles nothing", () => {
+  const A1 = id("assignment", 1);
+  const s = idle();
+  const stopped = apply(
+    s,
+    (stop(s, { hold: false }) as { ok: true; value: never }).value,
+  );
+  const replaced = apply(
+    stopped,
+    (dispatch(stopped, freshRef) as { ok: true; value: never }).value,
+  );
+  const settled = stop(replaced, { released_runtime_ref: ref });
+  expect(settled.ok && settled.value.changes).toEqual([]);
+  expect(replaced.assignments.find((a) => a.id === A1)?.runtime_ref).toEqual(
+    freshRef,
+  );
+  expect(replaced.runs.find((r) => r.id === id("run", 9))?.status).toBe(
+    "dispatched",
+  );
+});
+
+test("C-645 a release without a stop for that session, or after a stop without a terminal, settles nothing", () => {
+  const A1 = id("assignment", 1);
+  // A stop recorded before the C-645 field (no runtime_ref) keeps the old
+  // rule: once a start ends it, the release step changes nothing.
+  const s = idle();
+  const stopped = apply(s, (stop(s) as { ok: true; value: never }).value);
+  const legacy: CommandState = {
+    ...stopped,
+    events: stopped.events.map((e) => {
+      if (e.type !== "assignment_stopped") return e;
+      const { runtime_ref: _ref, ...payload } = e.payload as Record<
+        string,
+        Event["payload"]
+      >;
+      return { ...e, payload };
+    }),
+  };
+  const started = start(legacy);
+  if (!started.ok) throw new Error(started.error.message);
+  const racing = apply(legacy, started.value);
+  const settled = stop(racing, { released_runtime_ref: ref });
+  expect(settled.ok && settled.value.changes).toEqual([]);
+  // Never stopped: nothing to settle.
+  const unstopped = stop(s, { released_runtime_ref: ref });
+  expect(unstopped.ok && unstopped.value.changes).toEqual([]);
+  expect(stoppedByHuman(racing.events, A1)).toBe(false);
 });

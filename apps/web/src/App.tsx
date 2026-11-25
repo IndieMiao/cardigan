@@ -20,6 +20,7 @@ import { ServiceUpdatingFeedback } from "./components/ServiceUpdatingFeedback.js
 import { NavIcon, SidebarNav } from "./components/SidebarNav.js";
 import * as Dialog from "./components/ui/dialog.js";
 import { SelectControl } from "./components/ui/select-control.js";
+import { FullIdProvider } from "./full-id.js";
 import {
   ActivityPage,
   CardDetailPage,
@@ -27,9 +28,12 @@ import {
   ExecutionPage,
   HelpPage,
   NeedsYouPage,
+  ReleaseNotesPage,
   SettingsPage,
+  SharedFilesPage,
   SnapshotPage,
 } from "./lazy-pages.js";
+import { pendingPairingCode } from "./pairing-link.js";
 import { routeHash, useRoute } from "./route.js";
 import {
   type ServiceUpdatingNotice,
@@ -208,7 +212,16 @@ function Workbench({
     if (route !== undefined && selected !== undefined) return;
     const first = projects.projects[0];
     if (first !== undefined) {
-      navigate({ kind: "cards", projectId: first.id });
+      // C-707: a pairing link (already cleared) opens the machine panel.
+      navigate(
+        pendingPairingCode()
+          ? {
+              kind: "settings",
+              projectId: first.id,
+              filters: { tab: "machines" },
+            }
+          : { kind: "cards", projectId: first.id },
+      );
     }
   }, [projects, route, selected, navigate, invalidHash]);
 
@@ -258,7 +271,9 @@ function Workbench({
         >
           {projects.projects.map((project) => (
             <option key={project.id} value={project.id}>
-              {project.name}
+              {project.code
+                ? `${project.name}（${project.code}）`
+                : project.name}
             </option>
           ))}
         </SelectControl>
@@ -412,6 +427,9 @@ function Workbench({
               {selected && route?.kind === "help" && (
                 <HelpPage projectId={selected.id} />
               )}
+              {selected && route?.kind === "shared-files" && (
+                <SharedFilesPage projectId={selected.id} />
+              )}
               {selected && route?.kind === "decision-history" && (
                 <DecisionHistoryPage
                   client={client}
@@ -436,6 +454,14 @@ function Workbench({
                   revision={live.revision}
                 />
               )}
+              {selected && route?.kind === "release-notes" && (
+                <ReleaseNotesPage
+                  key={selected.id}
+                  client={client}
+                  projectId={selected.id}
+                  revision={live.revision}
+                />
+              )}
               {selected && route?.kind === "snapshot" && (
                 <SnapshotPage
                   key={selected.id}
@@ -454,14 +480,16 @@ function Workbench({
                 />
               )}
               {selected !== undefined && route?.kind === "needs-you" && (
-                <NeedsYouPage
-                  counts={needs}
-                  key={selected.id}
-                  client={client}
-                  projectId={selected.id}
-                  revision={live.revision}
-                  invalidation={live.needsKey}
-                />
+                <FullIdProvider code={selected.code}>
+                  <NeedsYouPage
+                    counts={needs}
+                    key={selected.id}
+                    client={client}
+                    projectId={selected.id}
+                    revision={live.revision}
+                    invalidation={live.needsKey}
+                  />
+                </FullIdProvider>
               )}
               {selected !== undefined && route?.kind === "merge-batch" && (
                 <MergeBatchPage
@@ -491,6 +519,7 @@ function Workbench({
                   revision={live.revision}
                   changedCards={live.changedCards}
                   changedCardsSince={live.changedCardsSince}
+                  cardRevision={live.cardRevision}
                 />
               )}
             </PageLoader>

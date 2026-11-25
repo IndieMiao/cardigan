@@ -103,6 +103,17 @@ export function releasedBeforeFirstLaunch(
   );
 }
 
+/**
+ * C-716: for an assignment already proven `releasedBeforeFirstLaunch`, did its
+ * first launch actually fail on that machine? A snapshot failure (no Run) or a
+ * host-recovered preparation failure did; a released queue that was simply
+ * never dispatched did not.
+ */
+export function firstLaunchFailed(d: CommandDraft, a: Assignment) {
+  const runs = d.list("runs").filter((r) => r.assignment_id === a.id);
+  return !runs.length || runs.some((r) => r.preparation_retry);
+}
+
 /** Follow this takeover's predecessors, not an unrelated loss on the same item. */
 export function continuesConfirmedTakeover(
   d: CommandDraft,

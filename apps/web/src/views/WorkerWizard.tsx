@@ -12,6 +12,7 @@ import {
   type CardiganClient,
   describeError,
   describeWriteError,
+  type WorkerPairingDevice,
   type WorkerWizardAction,
   type WorkerWizardCommandKey,
   type WorkerWizardInput,
@@ -53,6 +54,7 @@ import {
 } from "../components/ui/table.js";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group.js";
 import { checkStepLabel, wizardStepLabel } from "../machine-labels.js";
+import { useResource } from "../useResource.js";
 import { useNotice } from "./useSettingWrite.js";
 
 /**
@@ -159,6 +161,15 @@ const WIZARD_ERRORS: Readonly<Record<string, string>> = {
   worker_private_file_invalid:
     "主机私有配置文件的权限或归属不符，请在控制主机上核对后重试。",
   worker_check_changed: "向导状态已改变，已重新读取。",
+  // C-707: device pairing.
+  pairing_code_invalid:
+    "配对码不存在。请核对设备上显示的码；服务重启后旧码作废，请在设备上重新运行命令。",
+  pairing_code_expired:
+    "配对码已过期（10 分钟内有效），请在设备上重新运行命令获取新码。",
+  pairing_code_used:
+    "配对码已使用，每个码只能用一次。需要重新接入时，请在设备上重新运行命令。",
+  pairing_rate_limited: "配对码错误次数过多，请稍后再试。",
+  capacity: "向导会话已满，请先完成或放弃其它添加 worker 的进度。",
 };
 /** Refusals the server ties to one field: shown beside it, not on top. */
 const FIELD_ERRORS: Readonly<Record<string, keyof Form>> = {
@@ -170,6 +181,13 @@ const FIELD_ERRORS: Readonly<Record<string, keyof Form>> = {
 function wizardError(error: unknown): string {
   if (error instanceof ApiError) {
     const known = WIZARD_ERRORS[error.code];
+    // C-707: a paired device the host cannot draft keeps its code.
+    if (
+      typeof error.details === "object" &&
+      error.details !== null &&
+      "form" in error.details
+    )
+      return `${known ?? error.message}配对码仍可使用，处理后再确认接入。`;
     if (known) return known;
     if (error.status === 404)
       return "向导已失效（服务重启或超过 24 小时），请重新填写。";
@@ -300,6 +318,8 @@ const WIZARD_STEPS = [
   "目标机命令",
   "开启远程派发",
 ] as const;
+/** C-707: a paired device starts with the code instead of the form. */
+const PAIRING_STEPS = ["配对确认", ...WIZARD_STEPS.slice(1)] as const;
 /**
  * Checks an administrator fixes on the target machine with the commands:
  * SSH too, since a first onboarding logs in as the account not yet created.
@@ -346,19 +366,32 @@ const elapsed = (step: WorkerWizardStep) =>
 
 export function WorkerWizardDrawer({
   client,
-  projectId,
+  projectId: pageProject,
+  pairing: pairingStart,
   onClose,
   onChanged,
   pollMs = 1000,
+  devicePollMs = 3000,
   autoRecheckMs = 15_000,
   autoRecheckMax = 20,
 }: {
   client: CardiganClient;
   projectId: string;
+  /**
+   * C-707: start from a device pairing code (prefilled from the QR link)
+   * instead of the form. The draft may go to another project; the drawer
+   * then continues that project's session.
+   */
+  pairing?: { readonly code: string | undefined } | undefined;
   onClose: (exit: WizardExit) => void;
   /** The host's machine registry may have changed (registered, enabled). */
   onChanged: () => void;
   pollMs?: number;
+  /**
+   * C-707: how often a paired draft is read while its device fetches and
+   * runs the init script, which starts the recheck by itself.
+   */
+  devicePollMs?: number;
   /**
    * C-565: after a check stops at a step the target-machine commands fix,
    * check again this often, at most `autoRecheckMax` times for that step;
@@ -367,15 +400,21 @@ export function WorkerWizardDrawer({
   autoRecheckMs?: number;
   autoRecheckMax?: number;
 }) {
+  /** C-707: the project the session belongs to (a pairing may choose another). */
+  const [projectId, setProjectId] = useState(pageProject);
+  /** C-707: the pairing form is shown until a code became a draft. */
+  const [pairingForm, setPairingForm] = useState(pairingStart !== undefined);
   const [wizard, setWizard] = useState<WorkerWizardView>();
   /** The session this browser holds for the project (also before it loads). */
-  const [held, setHeld] = useState(() => storedWizard(projectId));
+  const [held, setHeld] = useState(() =>
+    pairingStart ? undefined : storedWizard(projectId),
+  );
   /**
    * The only session a read may still change. A reply for any other id (a
    * session given up, cancelled or replaced meanwhile) is dropped, so it
    * cannot clear or replace the current one.
    */
-  const current = useRef(storedWizard(projectId));
+  const current = useRef(pairingStart ? undefined : storedWizard(projectId));
   /** Previews the server refused as stale: never sent again. */
   const [rejected, setRejected] = useState<readonly string[]>([]);
   /**
@@ -385,9 +424,11 @@ export function WorkerWizardDrawer({
    */
   const [readState, setReadState] = useState<
     "ok" | "loading" | "failed" | "refused"
-  >(() => (storedWizard(projectId) ? "loading" : "ok"));
+  >(() => (!pairingStart && storedWizard(projectId) ? "loading" : "ok"));
   const [busy, setBusy] = useState<string>();
   const sending = useRef(false);
+  /** Steps sent so far: a read begun before the latest one is outdated. */
+  const sends = useRef(0);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState<(() => void) | undefined>();
   const [message, setMessage] = useNotice();
@@ -441,9 +482,15 @@ export function WorkerWizardDrawer({
     async (id: string, keep = false): Promise<void> => {
       const get = client.workerWizard;
       if (!get) return;
+      // A step sent after this read began answers for itself (C-707).
+      const sent = sends.current;
       try {
         const { wizard: next } = await get.call(client, projectId, id);
         if (!alive.current || current.current !== id) return;
+        if (sends.current !== sent) {
+          setTick((n) => n + 1);
+          return;
+        }
         setReadState("ok");
         if (!keep) setError("");
         setRetry(undefined);
@@ -482,7 +529,10 @@ export function WorkerWizardDrawer({
     [client, projectId, show],
   );
   // Continue a session left earlier (also after reloading the page).
+  const fresh = useRef(pairingStart !== undefined);
   useEffect(() => {
+    // C-707: a pairing starts its own session; the one held is left as is.
+    if (fresh.current) return;
     const id = storedWizard(projectId);
     if (id) void read(id);
   }, [projectId, read]);
@@ -514,6 +564,24 @@ export function WorkerWizardDrawer({
     const timer = window.setTimeout(() => void read(runningId), pollMs);
     return () => window.clearTimeout(timer);
   }, [runningId, read, pollMs, tick]);
+  // C-707: a paired draft waits for its device's init script, whose report
+  // starts the recheck on the server; read it until that happens.
+  const deviceId =
+    readState === "ok" &&
+    (wizard?.phase === "ready" || wizard?.phase === "failed") &&
+    wizard.device_init &&
+    wizard.device_init.state !== "succeeded"
+      ? wizard.id
+      : undefined;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: tick schedules the next read.
+  useEffect(() => {
+    if (!deviceId) return;
+    const timer = window.setTimeout(
+      () => void read(deviceId, true),
+      devicePollMs,
+    );
+    return () => window.clearTimeout(timer);
+  }, [deviceId, read, devicePollMs, tick]);
 
   const act = async (
     name: string,
@@ -524,6 +592,7 @@ export function WorkerWizardDrawer({
   ) => {
     if (sending.current) return;
     sending.current = true;
+    sends.current += 1;
     setBusy(name);
     setError("");
     setRetry(undefined);
@@ -613,6 +682,30 @@ export function WorkerWizardDrawer({
         setFieldErrors({ [key]: wizardError(cause) });
         return true;
       },
+    );
+  };
+  /** C-707: the code becomes a draft of the chosen project, with its limit. */
+  const pair = (input: PairingInput, explain: (cause: unknown) => boolean) => {
+    const claim = client.pairWorkerDevice;
+    if (!claim) return;
+    void act(
+      "pair",
+      async () => {
+        const { wizard: created } = await claim.call(client, input.project, {
+          code: input.code,
+          run_limit: input.run_limit,
+        });
+        // Kept even if the reader left meanwhile: the code is used now.
+        rememberWizard(input.project, created.id);
+        current.current = created.id;
+        return created;
+      },
+      () => {
+        fresh.current = false;
+        setProjectId(input.project);
+        setPairingForm(false);
+      },
+      explain,
     );
   };
   const cancel = () => {
@@ -712,8 +805,10 @@ export function WorkerWizardDrawer({
   const phase = wizard?.phase;
   const loading = readState === "loading";
   const refused = readState === "refused";
+  // C-707: until the code became a draft, the pairing form stands in for it.
+  const showPairing = pairingForm && !wizard;
   // A held session that cannot be read is not replaced by a blank form.
-  const showForm = !refused && (editing || (!wizard && !held));
+  const showForm = !showPairing && !refused && (editing || (!wizard && !held));
   const content = !refused && !showForm ? wizard : undefined;
   const waiting = busy !== undefined || undefined;
   const run = (label: string, variant?: "primary") => (
@@ -777,8 +872,14 @@ export function WorkerWizardDrawer({
       onOpenChange={(next) => {
         if (!next) close();
       }}
-      title={content ? `添加 worker：${content.label}` : "添加 worker"}
-      description="新建 worker 向导"
+      title={
+        content
+          ? `添加 worker：${content.label}`
+          : showPairing
+            ? "新设备接入"
+            : "添加 worker"
+      }
+      description={showPairing ? "用配对码接入新设备" : "新建 worker 向导"}
       initialFocus="close"
       actions={actions}
     >
@@ -794,7 +895,9 @@ export function WorkerWizardDrawer({
                   ? "正在开始检查…"
                   : busy === "cancel"
                     ? "正在放弃…"
-                    : "正在提交…"
+                    : busy === "pair"
+                      ? "正在确认配对…"
+                      : "正在提交…"
             }
             error={error}
             retry={retry}
@@ -814,11 +917,13 @@ export function WorkerWizardDrawer({
             <RequestFeedback interactive message={recheckNotice} />
           )}
         </SettingsDrawerFeedback>
-        {(showForm || content) && (
+        {(showForm || showPairing || content) && (
           <SettingsSteps
             label="添加 worker 的步骤"
-            steps={WIZARD_STEPS}
-            current={showForm ? 0 : wizardStep(content)}
+            steps={
+              showPairing || content?.device_init ? PAIRING_STEPS : WIZARD_STEPS
+            }
+            current={showForm || showPairing ? 0 : wizardStep(content)}
             failed={
               !showForm && content?.phase === "failed" ? CHECKS_STEP : undefined
             }
@@ -827,6 +932,16 @@ export function WorkerWizardDrawer({
                 ? COMMANDS_STEP
                 : undefined
             }
+          />
+        )}
+        {showPairing && (
+          <PairingForm
+            client={client}
+            initialCode={pairingStart?.code ?? ""}
+            pageProject={pageProject}
+            busy={busy !== undefined}
+            onSubmit={pair}
+            onCancel={() => onClose("empty")}
           />
         )}
         {showForm && (
@@ -866,6 +981,25 @@ export function WorkerWizardDrawer({
                     label={PHASES[content.phase].label}
                   />
                 </SettingsFact>
+                {content.device_init && (
+                  <SettingsFact label="设备初始化">
+                    <StatusTag
+                      status={DEVICE_INIT[content.device_init.state].status}
+                      label={DEVICE_INIT[content.device_init.state].label}
+                    />
+                  </SettingsFact>
+                )}
+                {content.run_limit && (
+                  <SettingsFact label="名额">
+                    {content.run_limit.state === "kept"
+                      ? "沿用机器现有上限"
+                      : `${content.run_limit.value} 个${
+                          content.run_limit.state === "pending"
+                            ? "（登记后生效）"
+                            : ""
+                        }`}
+                  </SettingsFact>
+                )}
                 {content.error && (
                   <SettingsFact label="中断原因">
                     <code>{content.error}</code>
@@ -899,6 +1033,10 @@ export function WorkerWizardDrawer({
               <>
                 <Steps wizard={content} onCopy={(key) => void copy(key)} />
                 <Commands wizard={content} onCopy={(key) => void copy(key)} />
+                {(content.phase === "passed" ||
+                  content.phase === "enabled") && (
+                  <HealthReport wizard={content} />
+                )}
                 {(content.phase === "passed" ||
                   content.phase === "enabled") && (
                   <RemoteLaunch
@@ -1460,5 +1598,275 @@ function RemoteLaunch({
         </SettingsSection>
       )}
     </>
+  );
+}
+
+/** C-707: what the pairing form sends. */
+interface PairingInput {
+  project: string;
+  code: string;
+  run_limit: number;
+}
+const PAIRING_CODE = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{8}$/u;
+/** Refusals shown beside the code field. */
+const CODE_ERRORS = [
+  "pairing_code_invalid",
+  "pairing_code_expired",
+  "pairing_code_used",
+];
+type PairingErrors = Partial<Record<"code" | "run_limit", string>>;
+
+/**
+ * C-707: the first step of a device pairing. The code (prefilled from the QR
+ * link), the project and the new machine's Agent limit are sent together
+ * with “确认接入”; nothing is written before that, and a code left unused
+ * expires on its own.
+ */
+function PairingForm({
+  client,
+  initialCode,
+  pageProject,
+  busy,
+  onSubmit,
+  onCancel,
+}: {
+  client: CardiganClient;
+  initialCode: string;
+  pageProject: string;
+  busy: boolean;
+  onSubmit: (input: PairingInput, explain: (cause: unknown) => boolean) => void;
+  onCancel: () => void;
+}) {
+  const [code, setCode] = useState(initialCode);
+  const [project, setProject] = useState(pageProject);
+  const [runLimit, setRunLimit] = useState("1");
+  const [errors, setErrors] = useState<PairingErrors>({});
+  const loadProjects = useCallback(() => client.projects(), [client]);
+  const projects = useResource(loadProjects);
+  const options = projects.data?.some((p) => p.id === pageProject)
+    ? projects.data
+    : [{ id: pageProject, name: pageProject, code: null }];
+  const origin = window.location.origin;
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalized = code.replace(/[\s-]/gu, "").toUpperCase();
+    const limit = integer(runLimit);
+    const next: PairingErrors = {};
+    if (!PAIRING_CODE.test(normalized))
+      next.code = "配对码为设备上显示的 8 位字母和数字，如 ABCD-EFGH。";
+    if (!(limit >= 1)) next.run_limit = "名额须为正整数。";
+    setErrors(next);
+    const target = event.currentTarget;
+    if (Object.keys(next).length > 0) {
+      window.setTimeout(() =>
+        target.querySelector<HTMLElement>("[aria-invalid='true']")?.focus(),
+      );
+      return;
+    }
+    onSubmit({ project, code: normalized, run_limit: limit }, (cause) => {
+      if (!(cause instanceof ApiError)) return false;
+      if (CODE_ERRORS.includes(cause.code))
+        setErrors({ code: WIZARD_ERRORS[cause.code] ?? cause.message });
+      else if (cause.code === "worker_run_limit_invalid")
+        setErrors({ run_limit: `${cause.message}。` });
+      else return false;
+      window.setTimeout(() =>
+        target.querySelector<HTMLElement>("[aria-invalid='true']")?.focus(),
+      );
+      return true;
+    });
+  };
+  return (
+    <form aria-label="配对确认" noValidate onSubmit={submit}>
+      <SettingsDialogFields>
+        <fieldset disabled={busy}>
+          <SettingsField
+            label="配对码"
+            error={errors.code}
+            hint={
+              <>
+                {"在新设备上运行 "}
+                <code>{`curl -fsS ${origin}/pair-device.py | python3 - ${origin}`}</code>
+                {"，填它显示的 8 位码。10 分钟内有效，只能用一次。"}
+              </>
+            }
+          >
+            {({ invalid, describedBy }) => (
+              <Input
+                value={code}
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={invalid}
+                aria-describedby={describedBy}
+                onChange={(event) => {
+                  setCode(event.target.value);
+                  setErrors(({ code: _, ...rest }) => rest);
+                }}
+              />
+            )}
+          </SettingsField>
+          <SettingsField
+            label="项目"
+            hint="设备接入这个项目，并为它新建专用账号。"
+          >
+            {({ describedBy }) => (
+              <SelectControl
+                value={project}
+                aria-describedby={describedBy}
+                onValueChange={setProject}
+              >
+                {options.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.code ? `${p.name}（${p.code}）` : p.name}
+                  </option>
+                ))}
+              </SelectControl>
+            )}
+          </SettingsField>
+          <SettingsField
+            label="名额"
+            error={errors.run_limit}
+            hint="这台设备同时运行的 Agent 数，默认 1，之后可在机器详情修改；已接入的机器保持原上限。"
+          >
+            {({ invalid, describedBy }) => (
+              <Input
+                value={runLimit}
+                inputMode="numeric"
+                aria-invalid={invalid}
+                aria-describedby={describedBy}
+                onChange={(event) => {
+                  setRunLimit(event.target.value);
+                  setErrors(({ run_limit: _, ...rest }) => rest);
+                }}
+              />
+            )}
+          </SettingsField>
+        </fieldset>
+        {storedWizard(project) && (
+          <SettingsWarning>
+            确认后将替换这个项目未完成的添加 worker 进度。
+          </SettingsWarning>
+        )}
+      </SettingsDialogFields>
+      <SettingsDialogActions>
+        <Button onClick={onCancel} disabled={busy}>
+          取消
+        </Button>
+        <Button type="submit" variant="primary" disabled={busy}>
+          确认接入
+        </Button>
+      </SettingsDialogActions>
+    </form>
+  );
+}
+
+const DEVICE_INIT: Readonly<
+  Record<
+    NonNullable<WorkerWizardView["device_init"]>["state"],
+    { status: string; label: string }
+  >
+> = {
+  waiting: { status: "waiting", label: "等待设备" },
+  fetched: { status: "running", label: "设备执行中" },
+  succeeded: { status: "passed", label: "已完成" },
+  failed: { status: "failed", label: "未完成" },
+};
+
+const GIB = 1024 ** 3;
+const size = (n: number) =>
+  n >= GIB
+    ? `${(n / GIB).toFixed(n >= 100 * GIB ? 0 : 1)} GiB`
+    : `${Math.max(1, Math.round(n / 1024 ** 2))} MiB`;
+/** Where each report value comes from, in words. */
+const SOURCE = {
+  device: "设备自报",
+  missing: "设备未上报",
+  none: "未采集",
+  wizard: "向导配置",
+  check: "接入检查",
+  catalog: "能力目录",
+} as const;
+type ReportRow = { item: string; value: string; source: string };
+
+function deviceRows(
+  wizard: WorkerWizardView,
+  d: WorkerPairingDevice | undefined,
+): ReportRow[] {
+  const fact = (item: string, value: string | undefined): ReportRow =>
+    value
+      ? { item, value, source: SOURCE.device }
+      : { item, value: "—", source: d ? SOURCE.missing : SOURCE.none };
+  const platform = [wizard.os, wizard.arch].join(" / ");
+  return [
+    d?.system
+      ? {
+          item: "系统",
+          value: `${d.system} · ${platform}`,
+          source: SOURCE.device,
+        }
+      : { item: "系统", value: platform, source: SOURCE.wizard },
+    fact(
+      "CPU",
+      [d?.cpu, d?.cpu_cores && `${d.cpu_cores} 核`].filter(Boolean).join(" · "),
+    ),
+    fact("内存", d?.memory_bytes ? size(d.memory_bytes) : undefined),
+    fact(
+      "磁盘",
+      d?.disk_total_bytes !== undefined && d.disk_free_bytes !== undefined
+        ? `可用 ${size(d.disk_free_bytes)} / 共 ${size(d.disk_total_bytes)}（${d.disk_path ?? "—"}）`
+        : undefined,
+    ),
+    fact("GPU", d?.gpu),
+  ];
+}
+
+/**
+ * C-707: the onboarding report once the checks passed. Every value names its
+ * source: the device's own report when pairing (unverified), the wizard's
+ * configuration, the checks, or the host's capability catalog.
+ */
+function HealthReport({ wizard }: { wizard: WorkerWizardView }) {
+  const report = wizard.report;
+  const verified = report?.capabilities
+    .filter((c) => c.state === "verified")
+    .map((c) => (c.version ? `${c.key} ${c.version}` : c.key));
+  const rows: ReportRow[] = [
+    ...deviceRows(wizard, wizard.device),
+    {
+      item: "已验证能力",
+      value: verified ? verified.join("、") || "没有" : "—",
+      source: SOURCE.check,
+    },
+    {
+      item: "建议安装的工具",
+      value: report ? report.suggested.join("、") || "没有" : "—",
+      source: SOURCE.catalog,
+    },
+  ];
+  return (
+    <SettingsSection title="体检报告">
+      <SettingsTable aria-label="体检报告">
+        <TableHeader>
+          <TableRow>
+            <TableHead>项目</TableHead>
+            <TableHead>结果</TableHead>
+            <TableHead>来源</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <TableRow key={row.item}>
+              <DataTableCell nowrap data-record="lead">
+                {row.item}
+              </DataTableCell>
+              <DataTableCell data-label="结果">{row.value}</DataTableCell>
+              <DataTableCell nowrap data-record="aside">
+                {row.source}
+              </DataTableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </SettingsTable>
+    </SettingsSection>
   );
 }

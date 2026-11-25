@@ -86,8 +86,73 @@ const reviewInput = z.object({
         .describe("Required for every must_fix issue"),
       pre_existing: z.boolean(),
       proof: z.string().optional(),
+      basis: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe(
+          "必改项的依据：ACn（本卡第 n 条验收标准）、INVn（card.invariants 第 n 条）、PCn（当前通过条件清单第 n 条）或常驻不变量 lost_work、dual_executor、security、check_failed、ui_copy。流程版本 ≥5 缺依据的必改项改记为后续跟进，不挡合并",
+        ),
     }),
   ),
+  pass_conditions: z
+    .array(
+      z
+        .object({
+          description: z.string().trim().min(1).max(500),
+          basis: z.string().trim().min(1),
+        })
+        .strict(),
+    )
+    .min(1)
+    .max(10)
+    .optional()
+    .describe(
+      "通过条件清单：同一验证项第 2 次驳回时必填，1–10 条可验证的条件，每条的 basis 为 ACn、INVn 或常驻不变量；之后的审核只核对这份清单，必改项用 PCn 引用",
+    ),
+  evidence_pending: z
+    .object({
+      items: z
+        .array(
+          z
+            .object({
+              description: z.string().trim().min(1).max(500),
+              basis: z.string().trim().min(1),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(10),
+      blocker: z
+        .object({
+          kind: z.enum(["card_merged", "deployment_ready"]),
+          target_id: z.string().trim().min(1).max(100),
+        })
+        .strict(),
+    })
+    .strict()
+    .optional()
+    .describe(
+      "流程版本 ≥5：必需验收证据只因可核查的平台阻塞暂时拿不到时填写。items 写缺的证据和它对应的 ACn/INVn/PCn；blocker 为 {kind:card_merged, target_id:本项目未完成的平台卡} 或 {kind:deployment_ready, target_id:平台修复的完整提交 SHA}。没有代码必改时结论为不通过的 conditional，不算驳回、不消耗轮数、不重置连续驳回；代码或功能必改照常写进 issues。阻塞解除后系统通知作者补证",
+    ),
+  evidence_attachments: z
+    .array(z.string().min(1))
+    .min(1)
+    .max(10)
+    .optional()
+    .describe(
+      "核对本验证项此前标为待补的证据：引用绑定当前交付的证据附件。待补证据未核对时不能通过；旧版本上的附件不能沿用",
+    ),
+  evidence_not_applicable: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .optional()
+    .describe(
+      "此前待补的证据对当前版本已不适用时写明理由，代替 evidence_attachments",
+    ),
   issue_refs: z
     .array(
       z.union([

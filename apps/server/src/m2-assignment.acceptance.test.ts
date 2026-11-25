@@ -181,7 +181,20 @@ async function seedProject(
   repo: string,
   cardTitle: string,
 ): Promise<string> {
-  expect((await cardigan(["project", "create", project])).code).toBe(0);
+  expect(
+    (
+      await cardigan([
+        "project",
+        "create",
+        project,
+        "--code",
+        `T${project
+          .replace(/[^a-z0-9]/gu, "")
+          .slice(0, 3)
+          .toUpperCase()}`,
+      ])
+    ).code,
+  ).toBe(0);
   expect(
     (
       await cardigan([
@@ -234,6 +247,20 @@ async function seedProject(
         ])
       ).code,
     ).toBe(0);
+  // C-684: a person opens dev cards only once the project allows them.
+  expect(
+    (
+      await cardigan([
+        "preference",
+        "set",
+        "human-card-templates",
+        "dev",
+        "on",
+        "--project",
+        project,
+      ])
+    ).code,
+  ).toBe(0);
   expect(
     (
       await cardigan([

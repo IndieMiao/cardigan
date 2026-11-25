@@ -498,14 +498,16 @@ def prepare(tag, key, base, confirmation, cancellation, exited):
             os.close(scope)
     finally:
         os.close(root)
-    # Q-1011: no recursive inspection, unlink, rename, or transfer of scratch.
+    # Q-1011: the supervisor never inspects, unlinks or transfers scratch. C-656:
+    # in a local session root, the session waiter deletes it with the session.
     audit(key, 'shared_directory_retained')
     return os.path.join(parent, scope_name(key), 'tmp'), ''
 
 
-def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, project_vite=False, on_demand_port=None):
+def command(tag, key, pid, argv, base=None, expected=None, confirmation=None, project_vite=False, on_demand_port=None):
     global status_pipe
     require(KEY.fullmatch(key) and argv)
+    base = private_base() if base is None else base
     expected = expected or birth(pid)
     require(birth(pid) == expected)
     token = None if confirmation else hashlib.sha256(os.environ['MCP_TOKEN'].encode()).digest()
@@ -571,6 +573,373 @@ def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, 
     return data[0]
 
 
+# C-656: a local agent session gets a private temporary root on disk and, on a
+# Linux user manager, its own systemd scope. When the CLI exits (any end:
+# managed stop, idle retirement, release, crash), a small waiter stops the
+# scope -- the whole cgroup, including setsid daemons -- then deletes the root.
+# Entries are named <Assignment>.<Run>.<CLI pid>; the owner file binds the
+# birth stamp, so a later launch can sweep sessions whose waiter is gone.
+SESSION_BASE = '/var/tmp'
+SESSION_KEY = re.compile(r'A-[1-9][0-9]{0,15}\.R-[1-9][0-9]{0,15}')
+SWEEP_LIMIT = 1024
+UNOWNED_GRACE = 60  # seconds a just-created entry may lack its owner file
+CLAIM_RETRY = 600  # seconds before a stale claimed tree is removed again
+
+# Executed here and, alone, by the waiter (`python3 -IBS -c`), so the
+# long-lived process imports nothing it does not need.
+REAP_SOURCE = r'''
+import json, os, re, shutil, subprocess, syslog
+SESSION_ENTRY = re.compile(r'A-[1-9][0-9]{0,15}\.R-[1-9][0-9]{0,15}\.[1-9][0-9]{0,9}')
+SCOPE_STOP_SECONDS = 10
+
+
+def session_unit(name):
+    return 'cardigan-session-' + name.replace('.', '-') + '.scope'
+
+
+def user_manager(args, timeout):
+    """Exit code, None without the tool, -1 on timeout or other failure."""
+    env = {'PATH': '/usr/bin:/bin', 'XDG_RUNTIME_DIR': '/run/user/%d' % os.getuid()}
+    try:
+        return subprocess.run(args, env=env, cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=timeout).returncode
+    except FileNotFoundError:
+        return None
+    except (OSError, subprocess.SubprocessError):
+        return -1
+
+
+def reap_entry(root, name, systemctl='/usr/bin/systemctl'):
+    """Stop the session scope (every process left in it), then delete the tree."""
+    if not SESSION_ENTRY.fullmatch(name):
+        return False
+    path = os.path.join(root, name)
+    try:
+        with open(os.path.join(path, 'owner'), 'rb') as f:
+            scoped = json.loads(f.read(512)).get('scoped') is not False
+    except (OSError, ValueError, AttributeError):
+        # Unknown: with a user manager, stopping a unit that is not loaded is harmless.
+        scoped = os.path.isdir('/run/user/%d/systemd' % os.getuid())
+    if scoped:
+        # 5: unit not loaded (already empty and collected). The unit name is
+        # derived from the entry name, never read from the agent-writable file.
+        code = user_manager([systemctl, '--user', 'stop', session_unit(name)], SCOPE_STOP_SECONDS + 20)
+        if code not in (0, 5, None):
+            syslog.syslog(syslog.LOG_NOTICE, 'cardigan run_resource ' + name + ' session_scope_stop_failed')
+            return False
+    claimed = '.reaping.%s.%d' % (name, os.getpid())
+    try:
+        os.rename(path, os.path.join(root, claimed))
+    except FileNotFoundError:
+        return True  # another sweeper claimed it
+    shutil.rmtree(os.path.join(root, claimed), ignore_errors=True)
+    syslog.syslog(syslog.LOG_NOTICE, 'cardigan run_resource ' + name + ' session_reaped')
+    return True
+'''
+exec(REAP_SOURCE)
+
+# Linux waiter: the inherited pidfd turns readable when the CLI exits.
+WAIT_SOURCE = REAP_SOURCE + r'''
+import select, sys
+root, name, fd = sys.argv[1], sys.argv[2], int(sys.argv[3])
+poll = select.poll()
+poll.register(fd, select.POLLIN)
+while not poll.poll():
+    pass
+os.close(fd)
+reap_entry(root, name)
+'''
+
+
+def session_root(create, base=SESSION_BASE):
+    """Per-account root on disk (not tmpfs): <base>/cardigan-<uid>, 0700."""
+    real = os.path.realpath(base)
+    parent = os.open(real, DIR)
+    try:
+        return directory(parent, f'cardigan-{os.getuid()}', create), os.path.join(real, f'cardigan-{os.getuid()}')
+    finally:
+        os.close(parent)
+
+
+def alive(pid, stamp):
+    try:
+        return birth(pid) == stamp
+    except (OSError, ValueError):
+        return False
+
+
+def alive_any(pid):
+    try:
+        birth(pid)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def sweep(base=SESSION_BASE, now=None):
+    """Reap entries whose CLI is gone and whose waiter never finished."""
+    now = time.time() if now is None else now
+    try:
+        root, path = session_root(False, base)
+    except (FileNotFoundError, ValueError):
+        return 0
+    reaped = 0
+    try:
+        with os.scandir(root) as entries:
+            rows = [e for _, e in zip(range(SWEEP_LIMIT), entries)]
+        for entry in rows:
+            try:
+                info = entry.stat(follow_symlinks=False)
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                    continue
+                if entry.name.startswith('.reaping.'):
+                    if now - info.st_mtime > CLAIM_RETRY:
+                        shutil.rmtree(os.path.join(path, entry.name), ignore_errors=True)
+                    continue
+                if not SESSION_ENTRY.fullmatch(entry.name):
+                    continue
+                pid = int(entry.name.rsplit('.', 1)[1])
+                try:
+                    with open(os.path.join(path, entry.name, 'owner'), 'rb') as f:
+                        stamp = json.loads(f.read(512)).get('birth')
+                except (OSError, ValueError, AttributeError):
+                    stamp = None
+                if stamp is None and (now - info.st_mtime < UNOWNED_GRACE or alive_any(pid)):
+                    continue  # still being created, or unknown while that PID runs
+                if isinstance(stamp, str) and alive(pid, stamp):
+                    continue
+                reaped += bool(reap_entry(path, entry.name))
+            except OSError:
+                continue
+    finally:
+        os.close(root)
+    return reaped
+
+
+TMP_AGE = 24 * 3600  # seconds a whole /tmp entry must be untouched
+TMP_SWEEP_INTERVAL = 3600
+TMP_ENTRY_LIMIT = 4096
+TMP_NODE_LIMIT = 20000  # per entry; a larger tree is left for the operator
+TMP_KEEP = re.compile(r'claude-.*|\.X.*|\.ICE-unix|systemd-.*|snap-private-tmp')
+
+
+def open_paths(prefix):
+    """Paths under prefix held open (cwd, root or fd) by this account's processes."""
+    held = set()
+    for pid in os.listdir('/proc'):
+        if not pid.isdecimal():
+            continue
+        try:
+            if os.stat(f'/proc/{pid}').st_uid != os.getuid():
+                continue
+            links = [f'/proc/{pid}/cwd', f'/proc/{pid}/root']
+            links += [f'/proc/{pid}/fd/{fd}' for fd in os.listdir(f'/proc/{pid}/fd')]
+        except OSError:
+            continue
+        for link in links:
+            try:
+                target = os.readlink(link)
+            except OSError:
+                continue
+            if target.startswith(prefix):
+                held.add(target.removesuffix(' (deleted)'))
+    return held
+
+
+def newest(path, budget):
+    """Newest mtime in a tree without following links, or None past the budget."""
+    top = os.lstat(path)
+    latest = max(top.st_mtime, top.st_ctime)
+    stack = [path] if stat.S_ISDIR(top.st_mode) else []
+    while stack:
+        with os.scandir(stack.pop()) as entries:
+            for entry in entries:
+                budget -= 1
+                if budget < 0:
+                    return None
+                info = entry.stat(follow_symlinks=False)
+                latest = max(latest, info.st_mtime, info.st_ctime)
+                if stat.S_ISDIR(info.st_mode):
+                    stack.append(entry.path)
+    return latest
+
+
+def tmp_sweep(stamp_dir, base='/tmp', now=None, age=TMP_AGE):
+    """Backstop for the shared /tmp: remove only this account's entries whose
+    whole tree is older than `age` and that no process of the account holds."""
+    now = time.time() if now is None else now
+    if sys.platform != 'linux':
+        return 0
+    stamp = os.path.join(stamp_dir, '.tmp-sweep')
+    try:
+        if abs(now - os.lstat(stamp).st_mtime) < TMP_SWEEP_INTERVAL:
+            return 0
+    except FileNotFoundError:
+        pass
+    with open(stamp, 'w'):
+        pass
+    os.utime(stamp, (now, now))
+    real = os.path.realpath(base)
+    held = open_paths(real + '/')
+    removed = 0
+    candidates = []
+    with os.scandir(real) as entries:
+        for _, entry in zip(range(TMP_ENTRY_LIMIT), entries):
+            if TMP_KEEP.fullmatch(entry.name):
+                continue
+            # The pre-C-656 private-task root holds one tree per task.
+            if entry.name.startswith('cr-') and entry.is_dir(follow_symlinks=False):
+                try:
+                    with os.scandir(entry.path) as tasks:
+                        candidates += [t for _, t in zip(range(TMP_ENTRY_LIMIT), tasks)]
+                except OSError:
+                    pass
+                continue
+            candidates.append(entry)
+    for entry in candidates:
+        try:
+            info = entry.stat(follow_symlinks=False)
+            if info.st_uid != os.getuid():
+                continue
+            if any(h == entry.path or h.startswith(entry.path + '/') for h in held):
+                continue
+            latest = newest(entry.path, TMP_NODE_LIMIT)
+            if latest is None or now - latest < age:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                shutil.rmtree(entry.path, ignore_errors=True)
+            else:
+                os.unlink(entry.path)
+            removed += 1
+        except OSError:
+            continue
+    audit('tmp', f'tmp_sweep_removed {removed}')
+    return removed
+
+
+def enter_scope(unit, pid, busctl='/usr/bin/busctl'):
+    """Move the launcher (same PID as the CLI after exec) into its own scope."""
+    code = user_manager([busctl, '--user', 'call', 'org.freedesktop.systemd1', '/org/freedesktop/systemd1',
+                         'org.freedesktop.systemd1.Manager', 'StartTransientUnit', 'ssa(sv)a(sa(sv))',
+                         unit, 'fail', '4', 'PIDs', 'au', '1', str(pid),
+                         'CollectMode', 's', 'inactive-or-failed',
+                         'TimeoutStopUSec', 't', str(SCOPE_STOP_SECONDS * 1_000_000),
+                         'Description', 's', 'Cardigan agent session', '0'], 10)
+    if code != 0:
+        return False
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if any(line.endswith('/' + unit) for line in Path(f'/proc/{pid}/cgroup').read_text().splitlines()):
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def start_waiter(pid, stamp, path, name, base, tmp_base='/tmp'):
+    """Detached waiter outside the session scope and process group."""
+    ready_read, ready_write = os.pipe()
+    child = os.fork()
+    if child == 0:
+        try:
+            os.setsid()
+            if os.fork():
+                os._exit(0)
+            syslog.closelog()
+            retain_fds({ready_write})
+            disown_stdio()
+            if sys.platform == 'linux':
+                fd = os.pidfd_open(pid)
+                require(birth(pid) == stamp)
+                os.set_inheritable(fd, True)
+                os.write(ready_write, b'1')
+                os.close(ready_write)
+                for backstop in (lambda: sweep(base), lambda: tmp_sweep(path, tmp_base)):
+                    try:
+                        backstop()
+                    except Exception:
+                        pass
+                os.execv('/usr/bin/python3', ['python3', '-IBS', '-c', WAIT_SOURCE, path, name, str(fd)])
+            exited = session_watch(pid, stamp)
+            os.write(ready_write, b'1')
+            os.close(ready_write)
+            try:
+                sweep(base)
+            except Exception:
+                pass
+            while not exited():
+                time.sleep(1)
+            reap_entry(path, name)
+        except BaseException:
+            pass
+        os._exit(0)
+    os.close(ready_write)
+    try:
+        ready = select.select([ready_read], [], [], 5)[0] and os.read(ready_read, 1) == b'1'
+    finally:
+        os.close(ready_read)
+        os.waitpid(child, 0)
+    return bool(ready)
+
+
+def write_owner(entry, stamp, scoped):
+    temporary = f'.owner.{os.getpid()}'
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600, dir_fd=entry)
+    with os.fdopen(fd, 'w') as f:
+        json.dump({'birth': stamp, 'scoped': scoped}, f)
+    os.replace(temporary, 'owner', src_dir_fd=entry, dst_dir_fd=entry)
+
+
+def session(argv, base=SESSION_BASE, execute=os.execvpe, tmp_base='/tmp'):
+    """launch.sh's last step. Setup problems never block the CLI start."""
+    env = dict(os.environ)
+    key = env.get('CARDIGAN_RESOURCE_SESSION', '')
+    pid = os.getpid()
+    try:
+        require(SESSION_KEY.fullmatch(key))
+        stamp = birth(pid)
+        name = f'{key}.{pid}'
+        scoped = sys.platform == 'linux' and os.path.exists('/usr/bin/busctl')
+        root, path = session_root(True, base)
+        try:
+            entry = directory(root, name, True)
+            try:
+                os.close(directory(entry, 'tmp', True))
+                write_owner(entry, stamp, scoped)
+                # Start the waiter first so it stays outside the scope.
+                watched = start_waiter(pid, stamp, path, name, base, tmp_base)
+                if scoped and not enter_scope(session_unit(name), pid):
+                    scoped = False
+                    write_owner(entry, stamp, scoped)
+            finally:
+                os.close(entry)
+        finally:
+            os.close(root)
+        tmp = os.path.join(path, name, 'tmp')
+        env.update(TMPDIR=tmp, TMP=tmp, TEMP=tmp)
+        audit(key, 'session_private_tmp' + ('' if scoped else ' unscoped') + ('' if watched else ' unwatched'))
+    except Exception as exc:
+        try:
+            audit(key if SESSION_KEY.fullmatch(key) else 'unknown', 'session_setup_failed ' + describe(exc))
+        except Exception:
+            pass
+    execute(argv[0], argv, env)
+
+
+def private_base(base=SESSION_BASE):
+    """Private task scratch lives in the session root when there is one."""
+    try:
+        name = os.environ['CARDIGAN_RESOURCE_SESSION'] + '.' + os.environ['CARDIGAN_SESSION_PID']
+        require(SESSION_ENTRY.fullmatch(name))
+        root, path = session_root(False, base)
+        try:
+            os.close(directory(root, name))
+        finally:
+            os.close(root)
+        return os.path.join(path, name)
+    except (KeyError, OSError, ValueError):
+        return '/tmp'
+
+
 def dead(fd):
     poll = select.poll()
     poll.register(fd, select.POLLIN)
@@ -632,6 +1001,8 @@ def main():
         print(json.dumps(preview(request['tag'], request['age'], time.time())))
     elif len(sys.argv) == 4 and sys.argv[1] == 'observe-session':
         print(install_observer(int(sys.argv[2]), sys.argv[3]))
+    elif len(sys.argv) > 3 and sys.argv[1:3] == ['session', '--']:
+        session(sys.argv[3:])
     else:
         project_vite = len(sys.argv) == 4 and sys.argv[2] in ('--private-vite', '--private-vite-on-demand')
         if project_vite:

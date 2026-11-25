@@ -42,9 +42,11 @@ test("human uploads use the Workbench download types and common aliases", () => 
     ["htm", "text/html"],
     ["markdown", "text/markdown"],
     ["log", "text/plain"],
+    // C-717: zip, as Workbench and MCP uploads take it.
+    [".zip", "application/zip"],
   ])
     expect(attachmentMimeForExtension(extension as string)).toBe(mime);
-  for (const extension of ["", ".exe", ".zip", ".unknown"])
+  for (const extension of ["", ".exe", ".7z", ".unknown"])
     expect(attachmentMimeForExtension(extension)).toBeUndefined();
 });
 

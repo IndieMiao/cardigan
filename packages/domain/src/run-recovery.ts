@@ -1,7 +1,8 @@
 import type { CommandState } from "./commands/core.js";
-import { stoppedByHuman } from "./commands/stop.js";
+import { stoppedByHuman } from "./commands/stop-state.js";
 import { canStartWork } from "./commands/workflow.js";
 import type { Assignment, Run, RuntimeRef, WorkItem } from "./entities.js";
+import { eventById } from "./event-index.js";
 import { flowAtLeast } from "./flow.js";
 import { automaticContextActionForRun, hostOpsPending } from "./host-ops.js";
 import { verificationTarget } from "./verification-activity.js";
@@ -48,7 +49,7 @@ export function newRecoveryPolicy(
 ): Run["recovery_policy"] {
   const item = state.work_items.find((w) => w.id === a.work_item_id);
   const card = state.cards.find((c) => c.id === item?.card_id);
-  const event = state.events.find((e) => e.id === run.trigger_event_id);
+  const event = eventById(state.events, run.trigger_event_id);
   if (
     !event ||
     event.actor.project_id !== state.project_id ||

@@ -13,6 +13,7 @@ import type { McpBackend } from "./backend.js";
 import { captureBellReceipt } from "./commands/bell-receipt.js";
 import { ToolError, toDomainError } from "./errors.js";
 import type { Logger } from "./log.js";
+import { resolveQualifiedToolArgs } from "./qualified-args.js";
 import {
   allowedTools,
   type ToolContext,
@@ -31,9 +32,10 @@ export interface ToolServerOptions {
   /**
    * M2 plan §4 step 8: runs on `tools/call`, never on `initialize` or
    * `tools/list`. A client that connects but has not acted must not make the
-   * Run look started.
+   * Run look started. C-635: may return the number of write transactions it
+   * attempted on the call's path, logged as `ack_writes`.
    */
-  readonly onToolCall?: () => void;
+  readonly onToolCall?: () => number | undefined;
   /**
    * C-600: runs on `tools/list`; a native harness lists tools at startup. A
    * failure answers the listing with a retryable error, never a list whose
@@ -154,9 +156,10 @@ export function createMcpServer(options: ToolServerOptions): Server {
     }
     // Any tool call counts as the Agent having started (even a forbidden one):
     // this is the first moment the Assignment proves it is awake.
+    let ackWrites: number | undefined;
     if (options.onToolCall !== undefined) {
       try {
-        options.onToolCall();
+        ackWrites = options.onToolCall();
       } catch (error) {
         log({
           event: "tool",
@@ -184,6 +187,7 @@ export function createMcpServer(options: ToolServerOptions): Server {
         code,
         duration_ms: performance.now() - startedAt,
         phases_ms: phases,
+        ...(ackWrites === undefined ? {} : { ack_writes: ackWrites }),
       });
       return result;
     };
@@ -205,7 +209,14 @@ export function createMcpServer(options: ToolServerOptions): Server {
       return finish(error.code, errorResult(error));
     }
 
-    const parsed = definition.input.safeParse(request.params.arguments ?? {});
+    // C-675: full numbers of the token's project (`CDG-C-34`) work like short ones.
+    const qualified = resolveQualifiedToolArgs(request.params.arguments ?? {}, {
+      id: identity.actor.project_id,
+      code: () => store.getProject?.(identity.actor.project_id)?.code,
+    });
+    if (!qualified.ok)
+      return finish(qualified.error.code, errorResult(qualified.error));
+    const parsed = definition.input.safeParse(qualified.value);
     if (!parsed.success) {
       const error = {
         code: "validation_failed" as const,

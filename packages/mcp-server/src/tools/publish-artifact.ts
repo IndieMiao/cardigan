@@ -11,14 +11,25 @@ import {
   holdsPublicationTool,
   type ProjectId,
   RELEASE_CHAIN_OPTION,
+  RELEASE_NOTE_MISSING_HINT,
   releaseChainSmoked,
   releaseChainUrl,
+  releaseMergedCards,
+  releaseNoteBodyError,
+  releaseNotes,
+  streamEventsBy,
   type TransactionContext,
+  writeReleaseNote,
 } from "@cardigan/domain";
 import { z } from "zod";
 import type { McpBackend, McpReadContext } from "../backend.js";
+import {
+  loadCommandState,
+  persistEffect,
+  unwrap,
+} from "../commands/execute.js";
 import { ToolError } from "../errors.js";
-import { defineTool } from "./types.js";
+import { defineTool, type ToolContext } from "./types.js";
 
 const input = z
   .object({
@@ -97,17 +108,13 @@ const BEFORE_WRITE = new Set<string>([
  */
 function verified(
   tx: McpReadContext,
-  p: string,
+  p: ProjectId,
   card: CardId,
   decision: string,
 ) {
-  return tx.events
-    .listAfter(p, card, 0)
-    .some(
-      (e) =>
-        e.type === "artifact_publication_verified" &&
-        (e.payload as { decision_id?: string })?.decision_id === decision,
-    );
+  return streamEventsBy(tx.events, p, card, "decision_id", [decision]).some(
+    (e) => e.type === "artifact_publication_verified",
+  );
 }
 /**
  * A release chain publishes one APK to one place: once it claimed a URL and
@@ -115,22 +122,23 @@ function verified(
  */
 function chainClaimedElsewhere(
   tx: McpReadContext,
-  p: string,
+  p: ProjectId,
   card: CardId,
   decision: string,
   receipt: string | undefined,
   sha256: string,
 ) {
-  return tx.events.listAfter(p, card, 0).some((e) => {
-    const payload = e.payload as { decision_id?: string; result?: string };
-    return (
-      e.type === "artifact_publication_claimed" &&
-      payload?.decision_id === decision &&
-      (receipt === undefined
-        ? !payload.result?.endsWith(` · ${sha256}`)
-        : payload.result !== receipt)
-    );
-  });
+  return streamEventsBy(tx.events, p, card, "decision_id", [decision]).some(
+    (e) => {
+      const payload = e.payload as { result?: string };
+      return (
+        e.type === "artifact_publication_claimed" &&
+        (receipt === undefined
+          ? !payload?.result?.endsWith(` · ${sha256}`)
+          : payload?.result !== receipt)
+      );
+    },
+  );
 }
 /**
  * One executor per approval and per APK: a second concurrent call for either
@@ -219,8 +227,11 @@ function authorize(
       a,
       q,
       tx.project_preferences?.get(p, p),
+      // Delegation audits are the only events it reads (`categoryAuthorization`).
       q?.resolution?.via === "delegated"
-        ? tx.events.listAfter(p, undefined, 0)
+        ? streamEventsBy(tx.events, p, undefined, "type", [
+            "project_preferences_updated",
+          ])
         : [],
       q?.resolution?.option === RELEASE_CHAIN_OPTION
         ? tx.events.listAfter(p, a.card_id, 0)
@@ -342,7 +353,9 @@ async function runPublication(
                   decision,
                   tx.project_preferences?.get(p, p),
                   decision.resolution.via === "delegated"
-                    ? tx.events.listAfter(p, undefined, 0)
+                    ? streamEventsBy(tx.events, p, undefined, "type", [
+                        "project_preferences_updated",
+                      ])
                     : [],
                 )
               : undefined;
@@ -355,12 +368,9 @@ async function runPublication(
                 )
           )
             throw new PublicationError("approval");
-          const events = tx.events.listAfter(p, a.card_id, 0);
-          const mine = events.filter(
-            (e) =>
-              (e.payload as { decision_id?: string })?.decision_id ===
-              request.decision_id,
-          );
+          const mine = streamEventsBy(tx.events, p, a.card_id, "decision_id", [
+            request.decision_id,
+          ]);
           const target = `${url} · ${a.sha256}`;
           if (
             mine.some((e) => e.type === "artifact_publication_verified") ||
@@ -397,10 +407,10 @@ async function runPublication(
             // existing files.
             if (
               existing &&
-              !events.some(
-                (e) =>
-                  e.type === "artifact_publication_claimed" &&
-                  (e.payload as { result?: string })?.result === target,
+              !streamEventsBy(tx.events, p, a.card_id, "type", [
+                "artifact_publication_claimed",
+              ]).some(
+                (e) => (e.payload as { result?: string })?.result === target,
               )
             )
               throw new PublicationError("immutable_prefix");
@@ -462,19 +472,97 @@ async function runPublication(
   }
 }
 
+/**
+ * C-712: the optional release note of a verified publication, and the cards
+ * merged for it. Runs only after the publication's own outcome is recorded,
+ * in its own transaction: a note never changes whether or how the artifact
+ * is published, and a note that cannot be saved only yields a hint. (An
+ * unusable note body is rejected by the handler before anything is published.)
+ */
+function releaseNoteOutcome(
+  ctx: ToolContext,
+  request: PublishInput,
+  body: string | undefined,
+) {
+  const { actor } = ctx.identity,
+    p = actor.project_id;
+  let saved = false;
+  if (body !== undefined)
+    try {
+      ctx.store.uow.run((tx) => {
+        ctx.revalidateToken?.();
+        const effect = unwrap(
+          writeReleaseNote(
+            loadCommandState(tx, p),
+            actor,
+            {
+              version: request.version,
+              body,
+              decision_id: request.decision_id,
+              version_code: request.versionCode,
+            },
+            { clock: { now: () => new Date().toISOString() }, ids: tx.ids },
+            "publish_artifact",
+          ),
+        );
+        persistEffect(tx, p, effect);
+      });
+      saved = true;
+    } catch {
+      saved = false;
+    }
+  try {
+    return ctx.store.uow.read((tx) => {
+      const state = loadCommandState(tx, p);
+      const note = releaseNotes(state.events).get(request.version) ?? null;
+      return {
+        release_note: note,
+        ...(body !== undefined && !saved
+          ? { release_note_hint: RELEASE_NOTE_NOT_SAVED_HINT }
+          : note
+            ? {}
+            : { release_note_hint: RELEASE_NOTE_MISSING_HINT }),
+        merged_cards: releaseMergedCards(state, request.version),
+      };
+    });
+  } catch {
+    return {
+      release_note: null,
+      release_note_hint:
+        body !== undefined && !saved
+          ? RELEASE_NOTE_NOT_SAVED_HINT
+          : RELEASE_NOTE_MISSING_HINT,
+    };
+  }
+}
+
+const RELEASE_NOTE_NOT_SAVED_HINT =
+  "发版说明没有保存成功，发布不受影响，可用 write_release_note 补写";
+
 export function publicationTool(options: PublicationOptions) {
   return defineTool({
     name: "publish_artifact",
     description:
-      "Publish one signed test APK to this project's configured HTTPS destination. Approval is either a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`, or the card's approved release chain, which covers the signed APK the system bound from the signing receipt and, when the card has a smoke step, only the one whose accepted smoke delivery names it (subject artifact_sha256). A release chain is one publish approval for intake, signing, signed intake and publication: kind approve, target.subject artifact_sha256 = the unsigned APK digest, and one option `release_chain` described exactly `发布链 <40-hex source commit> 发布到 <https APK URL template>`, where the template may use `<version>` (versionName) and `<sha12>` (first 12 hex of the signed APK digest). Use the chain decision as the basis for the unsigned intake. A failure before any OSS write consumes nothing: fix it and call again with the same decision. After a failure once writing began, calling again with the same (or a new) approval resumes: the files this release already wrote are read back and verified, only the missing ones are written, and nothing is overwritten. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths.",
-    input,
-    handler: async (request, ctx) => {
+      "Publish one signed test APK to this project's configured HTTPS destination. Approval is either a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`, or the card's approved release chain, which covers the signed APK the system bound from the signing receipt and, when the card has a smoke step, only the one whose accepted smoke delivery names it (subject artifact_sha256). A release chain is one publish approval for intake, signing, signed intake and publication: kind approve, target.subject artifact_sha256 = the unsigned APK digest, and one option `release_chain` described exactly `发布链 <40-hex source commit> 发布到 <https APK URL template>`, where the template may use `<version>` (versionName) and `<sha12>` (first 12 hex of the signed APK digest). Use the chain decision as the basis for the unsigned intake. A failure before any OSS write consumes nothing: fix it and call again with the same decision. After a failure once writing began, calling again with the same (or a new) approval resumes: the files this release already wrote are read back and verified, only the missing ones are written, and nothing is overwritten. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths. Optional release_note saves the user-facing notes of this version after it is verified; without it the publication is unchanged and the result says the note is still missing. Also returns the cards merged since the previous successful publication as reference.",
+    input: input.extend({
+      release_note: z
+        .string()
+        .optional()
+        .describe(
+          "Optional user-facing release notes of this version (plain text); can be written or revised later with write_release_note",
+        ),
+    }),
+    handler: async ({ release_note, ...request }, ctx) => {
       const { actor, token } = ctx.identity,
         p = actor.project_id;
       if (!ctx.revalidateToken)
         throw new ToolError("forbidden_tool", "测试包外发未放行：scope");
+      if (release_note !== undefined) {
+        const error = releaseNoteBodyError(release_note);
+        if (error) throw ToolError.validation(error);
+      }
       const revalidateToken = ctx.revalidateToken;
-      return runPublication(options, ctx.store, {
+      const published = await runPublication(options, ctx.store, {
         project: p,
         request,
         actor,
@@ -494,6 +582,10 @@ export function publicationTool(options: PublicationOptions) {
           );
         },
       });
+      return {
+        ...published,
+        ...releaseNoteOutcome(ctx, request, release_note),
+      };
     },
   });
 }

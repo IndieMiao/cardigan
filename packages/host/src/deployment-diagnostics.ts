@@ -56,6 +56,17 @@ export async function readDeploymentDiagnostics(
           ...(record.log_tail === undefined
             ? {}
             : { log_tail: record.log_tail }),
+          ...(record.ready_retry
+            ? {
+                ready_retry: {
+                  failures: record.ready_retry.failures,
+                  max: record.ready_retry.max,
+                  ...(record.ready_retry.next_at
+                    ? { next_at: record.ready_retry.next_at }
+                    : {}),
+                },
+              }
+            : {}),
           ...(record.post_deploy_failed === undefined
             ? {}
             : { post_deploy_failed: record.post_deploy_failed }),

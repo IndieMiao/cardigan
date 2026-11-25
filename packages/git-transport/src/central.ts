@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   realpath,
   rename,
   rm,
@@ -21,17 +22,18 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
-import type {
-  GitBackupSelection,
-  GitCentralPort,
-  GitCommitTreeInput,
-  GitFileDiff,
-  GitPreparedBackup,
-  GitPublicationGuard,
-  GitRef,
-  GitRepositoryAddress,
-  GitReviewAttributionPort,
-  GitTreeMerge,
+import {
+  CheckHeadFailure,
+  type GitBackupSelection,
+  type GitCentralPort,
+  type GitCommitTreeInput,
+  type GitFileDiff,
+  type GitPreparedBackup,
+  type GitPublicationGuard,
+  type GitRef,
+  type GitRepositoryAddress,
+  type GitReviewAttributionPort,
+  type GitTreeMerge,
 } from "@cardigan/domain";
 import {
   type CandidateDeleteRequest,
@@ -114,6 +116,23 @@ export interface FirstParentCommit {
   readonly committer: string;
   readonly subject: string;
 }
+/** C-637: `geometric` rolls up small packs; `cruft` also separates unreachable objects. */
+export type CentralRepackMode = "geometric" | "cruft";
+export interface CentralObjectStats {
+  readonly packs: number;
+  readonly loose: number;
+  readonly size_pack_kib: number;
+}
+export interface CentralRepackResult {
+  readonly mode: CentralRepackMode;
+  readonly before: CentralObjectStats;
+  readonly after: CentralObjectStats;
+  readonly duration_ms: number;
+}
+/** Only these namespaces have a retention period (Q-1233). */
+const retainedRef =
+  /^refs\/cardigan\/(?:candidates|prechecks)\/[A-Za-z0-9._/-]+$/u;
+const cruftIndex = /^pack-[a-f0-9]{40}(?:[a-f0-9]{24})?\.mtimes$/u;
 export interface CentralGitOptions extends GitTimeoutOptions {
   dataDir: string;
   centralRoot?: string;
@@ -122,10 +141,27 @@ export interface CentralGitOptions extends GitTimeoutOptions {
   onCommand?: (cwd: string, args: readonly string[]) => void;
 }
 /** Host Git never executes inside the source or an Agent repository. */
+/** Identity of a repository's own config file, or undefined when unreadable. */
+function configStamp(repository: string): string | undefined {
+  try {
+    const st = lstatSync(join(repository, "config"), { bigint: true });
+    if (!st.isFile()) return undefined;
+    return `${st.dev}:${st.ino}:${st.mtimeNs}:${st.ctimeNs}:${st.size}`;
+  } catch {
+    return undefined;
+  }
+}
 export class CentralGitTransport
   implements GitCentralPort, GitReviewAttributionPort
 {
   readonly root: string;
+  /**
+   * C-670: repository identity proven for an unchanged `config` file (same
+   * device, inode, mtime, ctime and size); any rewrite re-runs both reads.
+   */
+  readonly #verifiedSources = new Map<string, string>();
+  /** C-670: refs `git check-ref-format` already accepted (pure validation). */
+  readonly #validRefs = new Set<string>();
   constructor(private readonly options: CentralGitOptions) {
     this.root = resolve(
       options.centralRoot ?? join(options.dataDir, "central"),
@@ -447,6 +483,15 @@ export class CentralGitTransport
   async verifyBareSource(repository: string, canonicalSource: string) {
     if (dirname(repository) !== this.root)
       throw new Error("Unexpected central repository path");
+    const stamp = configStamp(repository);
+    const proven = stamp && `${canonicalSource}\u0000${stamp}`;
+    if (proven && this.#verifiedSources.get(repository) === proven) {
+      // The private-directory checks still run for every proven read.
+      await this.privateDirectory(this.root);
+      await this.privateDirectory(repository);
+      return;
+    }
+    this.#verifiedSources.delete(repository);
     const sourceRecord = await this.command(repository, [
       "config",
       "--local",
@@ -464,6 +509,7 @@ export class CentralGitTransport
       throw new Error(
         "Central repository source changed; explicit rebuild required",
       );
+    if (proven) this.#verifiedSources.set(repository, proven);
   }
   /** Host pushes only baseline snapshots and pinned deliveries, never Agent branches. */
   /**
@@ -643,6 +689,42 @@ export class CentralGitTransport
           throw new Error("Invalid backup ref record");
         return { ref, sha, type };
       });
+  }
+  /** C-642: the same private stage as a backup, for one delivery branch. The
+   * remote transfer needs no project lock; only the caller's ref write does. */
+  async fetchBranchTip(
+    repository: string,
+    source: GitRepositoryAddress,
+    branch: string,
+    uploadPack?: string,
+  ): Promise<string> {
+    if (dirname(repository) !== this.root)
+      throw new Error("Unexpected central repository path");
+    const head = `refs/heads/${branch}`;
+    await this.checked(repository, ["check-ref-format", head]);
+    const format = await this.objectFormat(repository);
+    const stage = await mkdtemp(join(this.root, ".incoming-"));
+    try {
+      await this.checked(stage, [
+        "init",
+        "--bare",
+        "--template=",
+        `--object-format=${format}`,
+      ]);
+      await writeFile(
+        join(stage, "objects/info/alternates"),
+        `../../${basename(repository)}/objects\n`,
+      );
+      await this.fetchRefs(stage, source, [`+${head}:${head}`], uploadPack);
+      const tip = await this.readRef(stage, head);
+      if (!tip) throw new CheckHeadFailure("branch_missing");
+      if ((await this.objectType(stage, tip)) !== "commit")
+        throw new CheckHeadFailure("object_mismatch");
+      await this.fetchRefs(repository, stage, [tip]);
+      return tip;
+    } finally {
+      await rm(stage, { recursive: true, force: true });
+    }
   }
   /** Private refs per transfer. Borrow center objects for negotiation; import
    * only the validated tips, without creating any ref (including FETCH_HEAD).
@@ -917,7 +999,11 @@ export class CentralGitTransport
       : undefined;
   }
   async readRef(repository: string, ref: string) {
-    await this.checked(repository, ["check-ref-format", ref]);
+    if (!this.#validRefs.has(ref)) {
+      await this.checked(repository, ["check-ref-format", ref]);
+      if (this.#validRefs.size >= 4096) this.#validRefs.clear();
+      this.#validRefs.add(ref);
+    }
     const r = await this.command(repository, [
       "rev-parse",
       "--verify",
@@ -990,6 +1076,21 @@ export class CentralGitTransport
     ]);
     if (r.code > 1) throw new Error(r.stderr);
     return r.code === 0;
+  }
+  async mergeBases(repository: string, left: string, right: string) {
+    const r = await this.command(repository, [
+      "merge-base",
+      "--all",
+      "--",
+      left,
+      right,
+    ]);
+    if (r.code === 1) return [];
+    if (r.code !== 0) throw new Error(r.stderr);
+    const bases = r.stdout.split("\n").filter(Boolean);
+    if (!bases.every((sha) => fullSha.test(sha)))
+      throw new Error("Invalid merge base");
+    return bases;
   }
   async objectFormat(repository: string) {
     const format = await this.checked(repository, [
@@ -1498,5 +1599,115 @@ export class CentralGitTransport
           throw new Error("Unsupported Git ref record");
         return { ref, sha };
       });
+  }
+  /** C-637: object counts from `git count-objects -v`. */
+  async objectStats(repository: string): Promise<CentralObjectStats> {
+    const raw = await this.checked(repository, ["count-objects", "-v"]);
+    const field = (name: string) => {
+      const value = new RegExp(`^${name}: (\\d+)$`, "mu").exec(raw)?.[1];
+      if (value === undefined) throw new Error("Unsupported count-objects");
+      return Number(value);
+    };
+    return {
+      packs: field("packs"),
+      loose: field("count"),
+      size_pack_kib: field("size-pack"),
+    };
+  }
+  /**
+   * C-637: incremental object maintenance of a central repository. Repack is
+   * safe beside concurrent fetches and ref updates: it removes only the packs
+   * it rewrote and loose objects already packed. Nothing expires (no
+   * `--cruft-expiration`): unreachable objects move into a cruft pack, so no
+   * object is deleted. Callers do not hold the host repository lock.
+   */
+  async repack(
+    repository: string,
+    mode: CentralRepackMode,
+  ): Promise<CentralRepackResult> {
+    if (dirname(repository) !== this.root)
+      throw new Error("Unexpected central repository path");
+    const before = await this.objectStats(repository);
+    const started = performance.now();
+    await this.checked(repository, [
+      "repack",
+      ...(mode === "cruft" ? ["--cruft"] : ["--geometric=2"]),
+      "-d",
+      "-q",
+    ]);
+    const duration_ms = Math.round(performance.now() - started);
+    return {
+      mode,
+      before,
+      after: await this.objectStats(repository),
+      duration_ms,
+    };
+  }
+  /**
+   * C-637 / Q-1233: compare-and-delete expired candidate and precheck refs.
+   * Each chunk is one update-ref transaction; a chunk whose refs moved
+   * meanwhile fails as a whole and is left for the next run.
+   */
+  async deleteRetainedRefs(
+    repository: string,
+    refs: readonly GitRef[],
+    chunk = 500,
+  ): Promise<{ readonly deleted: number; readonly failed: number }> {
+    if (dirname(repository) !== this.root)
+      throw new Error("Unexpected central repository path");
+    for (const { ref, sha } of refs)
+      if (!retainedRef.test(ref) || ref.includes("..") || !fullSha.test(sha))
+        throw new Error("Invalid retained ref deletion");
+    await this.privateDirectory(this.root);
+    await this.privateDirectory(repository);
+    let deleted = 0,
+      failed = 0;
+    for (let at = 0; at < refs.length; at += chunk) {
+      const part = refs.slice(at, at + chunk);
+      const args = [
+        ...gitSafetyArguments,
+        "-C",
+        repository,
+        "update-ref",
+        "--no-deref",
+        "--stdin",
+        "-z",
+      ];
+      this.options.onCommand?.(repository, args);
+      try {
+        await withGitTimeout("update-ref", this.options, (timeout) => {
+          const run = exec("git", args, {
+            env: gitEnvironment(),
+            timeout,
+            killSignal: "SIGKILL",
+            maxBuffer: 1024 * 1024,
+          });
+          run.child.stdin?.end(
+            part.map(({ ref, sha }) => `delete ${ref}\0${sha}\0`).join(""),
+          );
+          return run;
+        });
+        deleted += part.length;
+      } catch {
+        failed += part.length;
+      }
+    }
+    return { deleted, failed };
+  }
+  /** C-637: when the newest cruft pack was written (its `.mtimes` file). */
+  async lastCruftPack(repository: string): Promise<number | undefined> {
+    if (dirname(repository) !== this.root)
+      throw new Error("Unexpected central repository path");
+    await this.privateDirectory(this.root);
+    await this.privateDirectory(repository);
+    const packs = join(repository, "objects", "pack");
+    let latest: number | undefined;
+    for (const name of await readdir(packs)) {
+      if (!cruftIndex.test(name)) continue;
+      const entry = await lstat(join(packs, name));
+      if (entry.isFile() && (latest === undefined || entry.mtimeMs > latest))
+        latest = entry.mtimeMs;
+    }
+    return latest;
   }
 }

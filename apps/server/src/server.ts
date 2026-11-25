@@ -7,6 +7,7 @@ import {
 } from "@cardigan/domain";
 import {
   acquireRepositoryFlock,
+  adbEnvironmentWarnings,
   CpuProfileController,
   configureMachinePlacement,
   defaultExtMessagePath,
@@ -50,7 +51,13 @@ import {
   secureDataDirectory,
   writeRegisteredRuntime,
 } from "@cardigan/runtime-herdr";
-import { getRoleVersion, Store, tokensForAssignment } from "@cardigan/store";
+import {
+  getRoleVersion,
+  listCapabilityGuides,
+  Store,
+  tokensForAssignment,
+} from "@cardigan/store";
+import { beginActivity, StallWatch } from "./activity.js";
 import {
   type ControlPlane,
   type ControlPlaneOptions,
@@ -58,6 +65,7 @@ import {
 } from "./assembly.js";
 import { checkArtifact, readCheckApproval } from "./check-handoff-artifact.js";
 import { startCheckControl } from "./check-handoff-control.js";
+import { retryingCheckHeadReader } from "./check-head-retry.js";
 import {
   DEFAULT_LISTEN_RETRY_INTERVAL_MS,
   DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
@@ -69,9 +77,15 @@ import {
 import { DiagnosticsReader } from "./diagnostics-reader.js";
 import { type GitBinding, ServerGit } from "./git.js";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
+import {
+  ImageGenerationService,
+  imageGenerationConfigLoader,
+} from "./image-generation.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
+import { serverMacosChecks } from "./macos-checks.js";
+import { McpReader } from "./mcp-reader.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import {
   drainMobileSigning,
@@ -81,11 +95,13 @@ import {
 } from "./mobile-signing.js";
 import { OFFSITE_SYNC_INTERVAL_MS, OffsiteSync } from "./offsite-sync.js";
 import { serverProbes } from "./probes.js";
+import { publishProcessHealth } from "./process-health.js";
 import {
   resumeInterruptedPublications,
   trackedPublisher,
 } from "./publication-recovery.js";
 import { apkPublisher } from "./publish-artifact.js";
+import { RepositoryLockMetrics } from "./repository-lock-metrics.js";
 import {
   clearTickProfileSync,
   releaseSha,
@@ -95,14 +111,17 @@ import {
   tickProfileEnabled,
   tickStoreObserver,
 } from "./tick-profile.js";
+import { warmCommandEvents } from "./warm-command-events.js";
 import type { WebConfig } from "./web/config.js";
 import { machineHost } from "./web/machine-host.js";
 import { readMergeCheckLogRange } from "./web/merge-check-log.js";
+import { workbenchReadOptionsFromEnv } from "./web/read-pool.js";
 import {
   type RunningWebServer,
   startWebServer,
   type WebServerOptions,
 } from "./web/server.js";
+import { sharedFileLibrary } from "./web/shared-files.js";
 
 /**
  * Signing helpers get the shutdown grace minus this margin to finish on their
@@ -315,12 +334,31 @@ async function assembleServer(
   };
   setTickProfileSync(syncProfiles);
   profiles.sync();
+  // C-638: always on, independent of the switch above: an event-loop stall of
+  // 2 s or more logs the loops and requests that were running.
+  const stalls = new StallWatch({
+    log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+    sha,
+  });
+  // C-638: the web process reads this for the health page (heap vs limit).
+  const stopHealth =
+    options.role === "background"
+      ? publishProcessHealth(config.dataDir, "background")
+      : undefined;
+  // C-636: always-on repository lock wait/hold times, by operation.
+  const lockMetrics = new RepositoryLockMetrics({
+    log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+    sha,
+  });
   let profilerStopped = false;
   const stopProfiler = () => {
     if (profilerStopped) return;
     profilerStopped = true;
     clearTickProfileSync(syncProfiles);
     profiles.close();
+    stalls.stop();
+    stopHealth?.();
+    lockMetrics.stop();
   };
   // Request latencies go to whichever profiler is installed right now.
   const mcpLog: Logger = (entry) => {
@@ -370,7 +408,20 @@ async function assembleServer(
     runCapacity,
     () => options.dispatcher?.upstream,
   );
-  for (const message of [...mergeGate.errors, ...runCapacity.errors])
+  let adbWarnings: string[] = [];
+  try {
+    adbWarnings = adbEnvironmentWarnings(
+      loadRuntimeWorkers(config.dataDir, runtimeWorkersPath({ ...runtimeEnv })),
+      runCapacity,
+    );
+  } catch {
+    // An invalid worker file is reported where it is used.
+  }
+  for (const message of [
+    ...mergeGate.errors,
+    ...runCapacity.errors,
+    ...adbWarnings,
+  ])
     (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
       message,
     );
@@ -400,6 +451,11 @@ async function assembleServer(
       ...(options.captureAgent === undefined
         ? {}
         : { captureAgent: options.captureAgent }),
+      onSourceError: (entry) =>
+        process.stdout.write(`${JSON.stringify(entry)}\n`),
+      onSourceLock: (entry) =>
+        process.stdout.write(`${JSON.stringify(entry)}\n`),
+      onLockSample: lockMetrics.record,
     });
 
   const probes = serverProbes({
@@ -410,6 +466,32 @@ async function assembleServer(
     configuration: mergeGate,
     releaseSha: sha,
   });
+  const macosChecks = serverMacosChecks({
+    store,
+    dataDir: config.dataDir,
+    env: runtimeEnv,
+    git,
+    configuration: mergeGate,
+  });
+  // C-734: host-run image generation. The provider key is read from the
+  // host-only file named in image-generation.yaml at call time; it never
+  // reaches Agent environments, events or logs.
+  const imageGeneration = new ImageGenerationService({
+    store,
+    dataDir: config.dataDir,
+    config: imageGenerationConfigLoader(
+      runtimeEnv.CARDIGAN_CONFIG_DIR ??
+        join(
+          process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
+          "cardigan",
+        ),
+    ),
+  });
+  // A job cut off by a restart is reported failed, never re-billed.
+  if (options.role !== "background")
+    try {
+      imageGeneration.recover();
+    } catch {}
 
   // Assigned once, read from `close()`; the compiler cannot see through the
   // callback, so use `let` with a definite type.
@@ -509,6 +591,11 @@ async function assembleServer(
           hostOpsOptions.clock,
         )
       : undefined;
+  // C-648: project_snapshot reads off the Web event loop.
+  const reader =
+    options.role !== "background" && databaseFile
+      ? new McpReader({ dbPath: databaseFile })
+      : undefined;
   const listen = createListenRetry({
     intervalMs:
       config.listenRetryIntervalMs ?? DEFAULT_LISTEN_RETRY_INTERVAL_MS,
@@ -542,7 +629,16 @@ async function assembleServer(
               // The store satisfies McpBackend structurally; this keeps mcp-server
               // depending on domain only (§20.2).
               store: store as McpBackend,
+              // C-638: stall attribution and lock timing by channel.
+              beginRequest: () => beginActivity("request", "mcp"),
               probeHost: probes,
+              macosCheckHost: macosChecks,
+              imageGenerator: imageGeneration,
+              // C-685: shared file library; signs OSS URLs, never relays bytes.
+              sharedFiles: sharedFileLibrary(store, config.dataDir),
+              // C-726: read-only capability usage notes of the caller's project.
+              capabilityGuides: (project) =>
+                listCapabilityGuides(store, project),
               ...(publisher ? { publishArtifact: publisher } : {}),
               ...(mobileSigning
                 ? {
@@ -640,13 +736,9 @@ async function assembleServer(
               // §3.3: production always verifies against the real Git service, and the
               // verifier follows the project the request belongs to.
               deliveryVerifier: git.verifierFor,
-              checkHead: (project) => ({
-                head: async (assignment) => {
-                  if (!git.checkHead)
-                    throw new Error("Check HEAD reader unavailable");
-                  return git.checkHead(project, assignment);
-                },
-              }),
+              // C-632: a busy repository lock is retried before failing.
+              checkHead: (project) =>
+                retryingCheckHeadReader(git, project, config.checkHeadRetry),
               ...(hostOps
                 ? {
                     hostOps: {
@@ -661,11 +753,18 @@ async function assembleServer(
                   }
                 : {}),
               pinDelivery: (request) => git.pinDelivery(request),
+              ...(reader
+                ? {
+                    readProjectSnapshot: (context, input) =>
+                      reader.projectSnapshot(context, input),
+                  }
+                : {}),
               log: mcpLog,
             }),
           );
   } catch (error) {
     await diagnostics?.close();
+    await reader?.close();
     await hostOps?.close();
     stopProfiler();
     if (ownsStore) {
@@ -686,12 +785,30 @@ async function assembleServer(
     () => options.dispatcher?.upstream?.browser?.browsers_path,
   );
   const webOptions = options.web;
+  // C-644: heavy Workbench reads leave this event loop when the store is a file.
+  let workbenchReads: WebServerOptions["workbenchReads"];
+  try {
+    const reads =
+      webOptions !== undefined && options.role !== "background" && databaseFile
+        ? workbenchReadOptionsFromEnv({ ...runtimeEnv })
+        : undefined;
+    workbenchReads = reads && { dbPath: databaseFile, ...reads };
+  } catch (error) {
+    await diagnostics?.close();
+    await hostOps?.close();
+    await mcp.close();
+    stopProfiler();
+    if (ownsStore) store.close();
+    throw error;
+  }
   if (webOptions !== undefined && options.role !== "background") {
     try {
       web = await listen(webOptions.config.port, () =>
         startWebServer({
           store,
           mergeGate,
+          ...(workbenchReads ? { workbenchReads } : {}),
+          processRole: options.role === "web" ? "web" : "server",
           ...(hostOps
             ? {
                 contextUsage: (project) => hostOps.contextUsage(project),
@@ -749,6 +866,7 @@ async function assembleServer(
       );
     } catch (error) {
       await diagnostics?.close();
+      await reader?.close();
       await hostOps?.close();
       await mcp.close();
       stopProfiler();
@@ -785,6 +903,7 @@ async function assembleServer(
   let plane: ControlPlane | undefined;
   let extLoop: TimerLoop | undefined;
   let probeLoop: TimerLoop | undefined;
+  let macosLoop: TimerLoop | undefined;
   let extSender: LiveExtMessageSender | undefined;
   if (options.dispatcher !== undefined && options.role !== "web") {
     try {
@@ -796,6 +915,15 @@ async function assembleServer(
         slowTickMs: 60000,
         tick: () => probes.tick(),
         onError: () => warnLine("集成探针执行或清理未完成，将重试"),
+      });
+      macosLoop = startTimerLoop({
+        name: "macos-checks",
+        startup: startup.promise,
+        initialDelayMs: 2000,
+        intervalMs: 15000,
+        slowTickMs: 120000,
+        tick: () => macosChecks.tick(),
+        onError: () => warnLine("macOS 检查执行或清理未完成，将重试"),
       });
       const mergeIntervalMs =
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
@@ -813,6 +941,18 @@ async function assembleServer(
           options.dispatcher.reconcileIntervalMs ?? config.reconcileIntervalMs,
         backupIntervalMs =
           options.dispatcher.backupIntervalMs ?? config.backupIntervalMs,
+        centralMaintenanceWindow =
+          options.dispatcher.centralMaintenanceWindow ??
+          config.centralMaintenanceWindow,
+        centralMaintenanceIntervalMs =
+          options.dispatcher.centralMaintenanceIntervalMs ??
+          config.centralMaintenanceIntervalMs,
+        centralCruftIntervalMs =
+          options.dispatcher.centralCruftIntervalMs ??
+          config.centralCruftIntervalMs,
+        centralRefRetentionMs =
+          options.dispatcher.centralRefRetentionMs ??
+          config.centralRefRetentionMs,
         attachmentIntervalMs =
           options.dispatcher.attachmentIntervalMs ??
           config.attachmentIntervalMs;
@@ -936,12 +1076,34 @@ async function assembleServer(
         ...(cleanupIntervalMs === undefined ? {} : { cleanupIntervalMs }),
         ...(reconcileIntervalMs === undefined ? {} : { reconcileIntervalMs }),
         ...(backupIntervalMs === undefined ? {} : { backupIntervalMs }),
+        ...(centralMaintenanceWindow === undefined
+          ? {}
+          : { centralMaintenanceWindow }),
+        ...(centralMaintenanceIntervalMs === undefined
+          ? {}
+          : { centralMaintenanceIntervalMs }),
+        ...(centralCruftIntervalMs === undefined
+          ? {}
+          : { centralCruftIntervalMs }),
+        ...(centralRefRetentionMs === undefined
+          ? {}
+          : { centralRefRetentionMs }),
+        centralMaintenanceLog: (line) =>
+          process.stdout.write(`${JSON.stringify(line)}\n`),
         ...(attachmentIntervalMs === undefined ? {} : { attachmentIntervalMs }),
         // The blob GC sweeps `<dataDir>/attachments`; §9.3.
         dataDir: config.dataDir,
       });
       if (offsite) {
-        const sync = new OffsiteSync({ offsite, store });
+        // C-628: only this (background) role syncs; the flock inside each
+        // tick keeps any other process on standby, so one host never scans
+        // and hashes twice at the same time.
+        const sync = new OffsiteSync({
+          offsite,
+          store,
+          role: options.role ?? "server",
+          log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+        });
         offsiteSync = sync;
         offsiteLoop = startTimerLoop({
           name: "offsite-sync",
@@ -984,12 +1146,14 @@ async function assembleServer(
         extSender?.stop(),
         extLoop?.stop(),
         probeLoop?.stop(),
+        macosLoop?.stop(),
         offsiteLoop?.stop(),
         plane?.stop(),
       ]);
       unregisterOffsite?.();
       await web?.close();
       await diagnostics?.close();
+      await reader?.close();
       await hostOps?.close();
       await mcp.close();
       stopProfiler();
@@ -1049,11 +1213,13 @@ async function assembleServer(
       extSender?.stop(),
       extLoop?.stop(),
       probeLoop?.stop(),
+      macosLoop?.stop(),
       offsiteLoop?.stop(),
       plane?.stop(),
     ]);
     unregisterOffsite?.();
     await diagnostics?.close();
+    await reader?.close();
     await hostOps?.close();
     await mcp.close();
     stopProfiler();
@@ -1077,9 +1243,13 @@ async function assembleServer(
   }
   // runServer releases this only after handlers are installed and stdout reports ready.
   // Embedded servers without a supervisor use completion of their own initialization.
+  // C-649: decode histories in short slices before the loops' first ticks.
+  const warmed = warmCommandEvents(store);
   if (options.backgroundReady)
-    void options.backgroundReady.then(() => startup.resolve(true));
-  else startup.resolve(true);
+    void Promise.all([options.backgroundReady, warmed]).then(() =>
+      startup.resolve(true),
+    );
+  else void warmed.then(() => startup.resolve(true));
   // C-609: publications a restart cut off continue without their caller.
   if (publisher) void resumeInterruptedPublications(store, publisher);
   return {
@@ -1104,6 +1274,7 @@ async function assembleServer(
         extSender?.stop(),
         extLoop?.stop(),
         probeLoop?.stop(),
+        macosLoop?.stop(),
         (offsiteSync?.stop(), offsiteLoop?.stop()),
         // C-601: in-flight signing helpers end inside the shutdown grace (a
         // margin before the forced exit), never as orphans of this process.
@@ -1117,6 +1288,7 @@ async function assembleServer(
           : undefined,
       ]);
       await diagnostics?.close();
+      await reader?.close();
       await hostOps?.close();
       await mcp.close();
       unregisterOffsite?.();

@@ -1249,6 +1249,35 @@ test("D5: retention configuration changes preserve a bound dispatch identity", a
   expect(f.client.run).toHaveBeenCalledTimes(2);
 });
 
+test("C-647: a restart that only changes max_concurrent resumes the bound run under its original key", async () => {
+  const f = setup();
+  await f.executor.dispatch(f.request);
+  const before = f.journal.unfinished()[0]?.key;
+  const restored = new GithubCheckExecutor({
+    ...f.options,
+    config: { ...config, maxConcurrent: 16 },
+  });
+  await restored.dispatch(f.request);
+  expect(f.journal.unfinished()[0]?.key).toBe(before);
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.push).toHaveBeenCalledOnce();
+  expect(f.client.run).toHaveBeenCalledTimes(2);
+});
+
+test("C-647: a restart that changes the workflow still rejects the bound run", async () => {
+  const f = setup();
+  await f.executor.dispatch(f.request);
+  const restored = new GithubCheckExecutor({
+    ...f.options,
+    config: { ...config, maxConcurrent: 16, workflow: "other.yml" },
+  });
+  await expect(restored.dispatch(f.request)).rejects.toMatchObject({
+    category: "security",
+  });
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.push).toHaveBeenCalledOnce();
+});
+
 test.each([false, true])(
   "explicit scopedChecks false preserves the durable dispatch fingerprint (explicit first=%s)",
   async (explicitFirst) => {

@@ -3,7 +3,8 @@ import {
   cardDependenciesAllowStart,
   unmetCardDependencies,
 } from "../card-dependencies.js";
-import type { Actor, Card } from "../entities.js";
+import type { Actor, Card, Event } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import type { CardId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
@@ -48,10 +49,37 @@ export function dependencyChangeNotice(
   return notes.join("\n");
 }
 
+/**
+ * C-631: historyFor caches per event array identity, so a fresh concatenation
+ * on every call never hits. Return the stored history itself when the draft
+ * emitted nothing, and otherwise reuse the joined array until the draft's
+ * events change (length or the last entry, which precheck replaces in place).
+ */
+const joinedEvents = new WeakMap<
+  CommandDraft,
+  {
+    readonly base: readonly Event[];
+    readonly n: number;
+    readonly last: Event | undefined;
+    readonly events: readonly Event[];
+  }
+>();
+function draftEvents(d: CommandDraft): readonly Event[] {
+  if (!d.events.length) return d.state.events;
+  const n = d.events.length;
+  const last = d.events[n - 1];
+  const hit = joinedEvents.get(d);
+  if (hit && hit.base === d.state.events && hit.n === n && hit.last === last)
+    return hit.events;
+  const events = appendEvents(d.state.events, d.events);
+  joinedEvents.set(d, { base: d.state.events, n, last, events });
+  return events;
+}
+
 export function dependencyState(d: CommandDraft): CardDependencyState {
   return {
     cards: d.list("cards"),
-    events: [...d.state.events, ...d.events],
+    events: draftEvents(d),
     card_templates: [
       ...(d.ports?.templates ?? []),
       ...d.list("card_templates"),
@@ -283,6 +311,19 @@ export function refreshCardDependencies(
         once(
           "card_dependencies_ready",
           "前置卡已全部正常完成，请提前开工的负责人同步基线后继续。",
+        );
+      // C-733: a backlog card that never asked to wait would otherwise sit
+      // unnoticed. Tell PM Ops once; scheduling stays PM's call.
+      if (
+        card.status === "backlog" &&
+        !card.wait_for_dependencies &&
+        !card.early_start &&
+        !card.hold &&
+        card.depends_on_cards?.length
+      )
+        once(
+          "card_dependencies_backlog_ready",
+          `${card.id} 的前置卡已全部正常完成（${card.depends_on_cards.join("、")}），卡片仍在 backlog 且未设等前置，请决定开工还是继续搁置。`,
         );
       if (card.status !== "backlog" || !card.wait_for_dependencies || card.hold)
         continue;

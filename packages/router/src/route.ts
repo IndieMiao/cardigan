@@ -5,6 +5,7 @@ import type {
   Decision,
   EventId,
   HumanAction,
+  JsonValue,
   Precheck,
   RoleId,
   TimelineEntry,
@@ -16,10 +17,14 @@ import {
   authorPrecheckWaitHandled,
   canStartWork,
   cardTemplate,
+  decisionQuestionPayload,
   employeeNameKey,
   flowAtLeast,
+  followUpDraft,
+  heldReleaseNotice,
   humanDecisionGroupKey,
   isCompletionVerifier,
+  isDecisionOther,
   isPrecheckConflict,
   isReviewStale,
   latestMergeCheck,
@@ -28,6 +33,7 @@ import {
   mergeRequiresHuman,
   NEEDS_YOU_ITEM_READY,
   needsYouItemReady,
+  officeAlertRecipient,
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   precheckConflictHandling,
@@ -341,6 +347,7 @@ function routeComment(input: RouteInput, draft: Draft): void {
       `new comment on ${item.id}`,
     );
   }
+  routeDecisionAnswer(input, draft, entry);
 
   if (mentions.length > 0) {
     routeMentions(input, draft, mentions, item?.card_id);
@@ -360,6 +367,40 @@ function routeComment(input: RouteInput, draft: Draft): void {
       `comment from the human on ${subject(input)}`,
     );
   }
+}
+
+/**
+ * C-619: the verifier's reply to a decision-bound question goes back to PM
+ * Ops, who holds the decision. Only the asked verifier's own reply counts.
+ */
+function routeDecisionAnswer(
+  input: RouteInput,
+  draft: Draft,
+  entry: TimelineEntry | undefined,
+): void {
+  if (!entry?.reply_to || input.event.actor.kind !== "assignment") return;
+  const asked = input.snapshot.timeline.find(
+    (t) => t.id === entry.reply_to && t.card_id === entry.card_id,
+  );
+  if (asked?.type !== "instruction") return;
+  const question = decisionQuestionPayload(
+    input.snapshot.events.find(
+      (e) => e.seq === asked.event_seq && e.card_id === asked.card_id,
+    ),
+  );
+  if (
+    !question ||
+    question.question.assignment_id !== input.event.actor.assignment_id
+  )
+    return;
+  note(
+    input,
+    draft,
+    recipient.pm_ops(),
+    "comment",
+    "6.4/decision question answered",
+    `${question.work_item_id} 的审核员已在 ${entry.id} 答复 ${question.decision_id} 的提问（${asked.id}），请据此处理该拍板。`,
+  );
 }
 
 /** §6.5: the four @mention cases. */
@@ -554,11 +595,24 @@ function routeMentions(
 function routeInstruction(input: RouteInput, draft: Draft): void {
   const work_item_id = payloadString(input.event.payload, "work_item_id");
   const item = itemOf(input, work_item_id as WorkItemId | undefined);
+  const question = decisionQuestionPayload(input.event);
   if (
-    payloadString(input.event.payload, "pause_recipient") &&
+    (payloadString(input.event.payload, "pause_recipient") || question) &&
     (!item || reviewWakeBlocked(input.snapshot, input.event, item.id))
   )
     return;
+  if (question && item) {
+    // C-619: a question bound to the decision this verifier waits on.
+    noteAssignment(
+      input,
+      draft,
+      item,
+      "instruction",
+      "6.4/instruction",
+      `${question.decision_id} 等待期间的提问：读取 ${item.id} 的指令后用 post_comment 回复该条（reply_to）答复；不能提交审核结论、处理拍板或推进合并。`,
+    );
+    return;
+  }
   if (item === undefined) {
     note(
       input,
@@ -895,6 +949,10 @@ function routeReview(input: RouteInput, draft: Draft): void {
     return;
   }
 
+  // C-618: pending platform evidence is neither a pass nor rework; the system
+  // asks the author once the platform blocker is over.
+  if (verdict !== "reject" && payload.evidence_pending) return;
+
   // deriveReview represents nonblocking conditions without a recheck as pass.
   // Add a PM Ops summary without suppressing the normal completion routing.
   if (
@@ -1168,6 +1226,25 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
         `${subject(input)} 已确认合并，但合并检查结果 ${check.status}，${mergeRequiresHuman(input.snapshot, q) ? "仅可重新检查超时，不能退回或代确认合并" : "请判断后退回修改或重新检查"}（${q.id}）。`,
       );
   }
+  // C-682: "其他" carries the owner's own words; a system or human raiser has
+  // no Assignment to follow up, so PM Ops handles it (a merge stays unmerged).
+  const otherWords =
+    input.event.type === "decision_resolved" &&
+    q?.resolution &&
+    isDecisionOther(q.resolution.option)
+      ? q.resolution.raw_quote
+      : undefined;
+  if (otherWords !== undefined && !q?.raised_by?.startsWith("assignment:"))
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "decision",
+      "6.4/decision resolved",
+      q?.trigger === "merge_confirmation"
+        ? `${q.id}：所有者对合并确认选择了“其他”，卡片保持未合并，请 PM 按原话处理（需要时再请求合并确认）。原话：${otherWords}`
+        : `${q?.id}：所有者选择了“其他”，未执行任何预设选项，请 PM 按原话跟进。原话：${otherWords}`,
+    );
   if (
     input.event.type === "decision_resolved" &&
     !q?.review_limit_group &&
@@ -1198,7 +1275,9 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
       to,
       to.kind === "needs_you" ? "needs_you" : "decision",
       "6.4/decision resolved",
-      `${q.id} 已选择 ${q.resolution.option}：${option?.description ?? ""}。影响：${option?.impact ?? ""}。请发起人落实，并在时间线引用 ${q.id} 记录执行结果。`,
+      otherWords !== undefined
+        ? `${q.id} 所有者选择了“其他”，未执行任何预设选项。原话：${otherWords}\n请发起人按原话跟进，并在时间线引用 ${q.id} 记录执行结果。`
+        : `${q.id} 已选择 ${q.resolution.option}：${option?.description ?? ""}。影响：${option?.impact ?? ""}。请发起人落实，并在时间线引用 ${q.id} 记录执行结果。`,
     );
   }
   const rework = payloadString(input.event.payload, "rework_work_item_id");
@@ -1667,6 +1746,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "card_dependencies_attention":
+    case "card_dependencies_backlog_ready":
     case "card_dependencies_released":
     case "card_dependencies_ready": {
       if (input.event.actor.kind !== "system") break;
@@ -1832,6 +1912,8 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "host_role_upgrade_deferred":
+    case "host_role_upgraded":
+    case "host_role_overlay_migrated":
     case "session_maintenance_attention":
       note(
         input,
@@ -2210,7 +2292,9 @@ export function routeEvent(input: RouteInput): RouteResult {
         "6.4/system rules",
         input.event.type === "card_hold_set"
           ? `${subject(input)} 已暂停，原因和恢复条件见卡片。`
-          : `${subject(input)} 已解除暂停，按当前依赖和原有门禁继续。`,
+          : `${subject(input)} 已解除暂停，按当前依赖和原有门禁继续。${heldReleaseNotice(
+              heldReleaseRows(input.event.payload),
+            )}`,
       );
       if (input.event.type === "card_hold_released") {
         const card = input.snapshot.cards.find(
@@ -2262,6 +2346,18 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     case "decision_implementation_recorded":
       routeDecisionImplementation(input, draft);
+      break;
+    case "assignment_hold_resumed":
+      // C-732: a pause ended on the human's behalf is reported to the human.
+      if (input.event.actor.kind !== "human")
+        note(
+          input,
+          draft,
+          recipient.needs_you(),
+          "needs_you",
+          "6.4/system rules",
+          `${payloadString(input.event.payload, "assignment_id")} 的人工暂停（${payloadString(input.event.payload, "paused_by")} 于 ${payloadString(input.event.payload, "paused_at")} 暂停）已由 ${payloadString(input.event.payload, "resumed_by")} 按 ${payloadString(input.event.payload, "decision_id")} 恢复，系统将按排队的待办起新 Run。`,
+        );
       break;
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
@@ -2530,6 +2626,21 @@ export function routeEvent(input: RouteInput): RouteResult {
         );
       break;
     }
+    case "merge_window_changed":
+      // C-677: a hold closed the card's window; PM Ops learns who was released.
+      if (
+        (input.event.payload as { closed_by_hold?: unknown } | null)
+          ?.closed_by_hold === true
+      )
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "card",
+          "6.4/merge window closed by hold",
+          `${subject(input)} 已暂停，系统已关闭它的合并窗口；解除暂停后再冲突时按原规则重开。`,
+        );
+      break;
     case PRE_MERGE_CHECK_REMINDED:
       routePreMergeCheckReminder(input, draft);
       break;
@@ -2668,9 +2779,64 @@ export function routeEvent(input: RouteInput): RouteResult {
     case NEEDS_YOU_ITEM_READY:
       routeReadiness(input, draft);
       break;
-    case "card_merged":
-      // The system timeline is the result; no PM retelling run.
+    case "card_merged": {
+      // The system timeline is the result; PM only hears about C-610 follow-ups.
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      const items = new Set(
+        input.snapshot.work_items
+          .filter((w) => w.card_id === card?.id)
+          .map((w) => w.id),
+      );
+      const followUps =
+        card &&
+        followUpDraft(
+          card,
+          input.snapshot.reviews.filter((r) => items.has(r.work_item_id)),
+        );
+      if (input.event.actor.kind === "system" && followUps)
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "card",
+          "6.4/card merged",
+          `${followUps.source_card_id} 已合并；审核中 ${followUps.items.length} 条意见记为后续跟进、未挡合并。后续卡草稿见 get_card.follow_up_draft，由你决定是否开卡。`,
+        );
       break;
+    }
+    case "review_alignment_agreed": {
+      if (input.event.actor.kind !== "system") break;
+      const producer =
+        payloadString(input.event.payload, "wake") === "producer";
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (
+        !card ||
+        ["done", "cancelled", "awaiting_merge"].includes(card.status)
+      )
+        break;
+      noteAssignment(
+        input,
+        draft,
+        itemOf(
+          input,
+          payloadString(
+            input.event.payload,
+            producer ? "producer_id" : "work_item_id",
+          ) as WorkItemId | undefined,
+        ),
+        "review",
+        "flow-v2/B2",
+        producer
+          ? "对齐回合已达成一致，请按不变量清单和通过条件修改后重新交付。"
+          : "对齐回合已达成一致，请审核当前交付。",
+        producer ? "rework" : "decision_resumed",
+      );
+      break;
+    }
     case "merge_failed":
       note(
         input,
@@ -2699,7 +2865,54 @@ export function routeEvent(input: RouteInput): RouteResult {
       // attachments and the run lifecycle events do not change who acts next.
       break;
   }
+  routeOfficeAlert(input, draft);
   return draft;
+}
+
+const OFFICE_ALERT_KIND: Readonly<Record<string, RoutedNotification["kind"]>> =
+  {
+    human_action_requested: "human_action",
+    decision_requested: "decision",
+    run_inactive: "run_attention",
+    blocker_reported: "escalation",
+    merge_conflicted: "escalation",
+  };
+
+/**
+ * C-722: exceptions and pending work also reach this project's PM Office on
+ * duty. Appended after every other rule, so the original recipients stay as
+ * they were and an Office already notified keeps its single notification
+ * (one per event and recipient). It only informs; nothing waits on it.
+ */
+function routeOfficeAlert(input: RouteInput, draft: Draft): void {
+  const { event, snapshot } = input;
+  if (!officeAlertRecipient(snapshot.project_id, event, snapshot.assignments))
+    return;
+  const decision_id = payloadString(event.payload, "decision_id");
+  const action_id = payloadString(event.payload, "human_action_id");
+  if (event.type === "decision_requested") {
+    const q = snapshot.decisions.find((d) => d.id === decision_id);
+    // Unknown, system-only or already settled questions are no pending work.
+    if (
+      !q ||
+      q.decider === "system" ||
+      !["open", "provisional", "snoozed"].includes(q.status)
+    )
+      return;
+  }
+  if (event.type === "human_action_requested") {
+    const h = snapshot.human_actions.find((a) => a.id === action_id);
+    if (h && h.status !== "open") return;
+  }
+  const what = decision_id ?? action_id ?? event.type;
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    OFFICE_ALERT_KIND[event.type] ?? "escalation",
+    "C-722/office alert",
+    `知会 Office：${subject(input)} ${what}`,
+  );
 }
 
 /** §6.4: failures that cannot be recovered go to PM Ops. */
@@ -2757,4 +2970,28 @@ export function routeRuntimeLost(input: {
     card_id: input.card_id,
     summary: `${input.assignment_id} lost its runtime ${input.lost_minutes} minutes ago; decide whether to take over`,
   };
+}
+
+/** C-732: the paused Assignments recorded on a card hold release. */
+function heldReleaseRows(
+  payload: JsonValue,
+): Parameters<typeof heldReleaseNotice>[0] {
+  const rows = payloadObject(payload).paused_assignments;
+  return Array.isArray(rows)
+    ? rows.flatMap((raw) => {
+        const r = payloadObject(raw);
+        const text = (k: string) => (typeof r[k] === "string" ? r[k] : "");
+        return text("assignment_id")
+          ? [
+              {
+                assignment_id: text("assignment_id"),
+                work_item_id: text("work_item_id"),
+                paused_by: text("paused_by"),
+                paused_at: text("paused_at"),
+                resume_decision_id: text("resume_decision_id") || null,
+              },
+            ]
+          : [];
+      })
+    : [];
 }

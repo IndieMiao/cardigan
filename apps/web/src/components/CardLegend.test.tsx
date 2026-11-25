@@ -12,7 +12,7 @@ import { afterEach, expect, test } from "vitest";
 import { CARD_DISPLAY_FIELDS, DEFAULT_CARD_DISPLAY } from "../card-display.js";
 import { BOARD_STATUSES } from "../status.js";
 import { HelpPage } from "../views/HelpPage.js";
-import { BoardCard } from "./BoardCard.js";
+import { BOARD_CARD_SIGNALS, BoardCard } from "./BoardCard.js";
 import {
   CARD_GUIDE_SLUG,
   CARD_LEGEND_GROUPS,
@@ -38,15 +38,21 @@ test("the help directory opens the real annotated card without linking example d
     CARD_LEGEND_GROUPS.length,
   );
   const preview = article.querySelector(".card-guide-preview[inert]");
-  expect(preview?.querySelector(".board-card.card-tile-waiting")).toBeTruthy();
+  expect(
+    preview?.querySelector('.board-card [data-card-signal="decision"]')
+      ?.textContent,
+  ).toBe("待拍板");
   expect(preview?.querySelector(".board-progress")).toBeTruthy();
   expect(within(article).queryByRole("link", { name: /示例/ })).toBeNull();
-  expect(article.querySelectorAll("figcaption li")).toHaveLength(12);
+  expect(article.querySelectorAll("figcaption li")).toHaveLength(11);
+  expect(article.querySelector("figcaption li")?.textContent).toBe(
+    "右下角角标",
+  );
   expect(article.querySelector("figcaption li:last-child")?.textContent).toBe(
     "模板标记",
   );
   expect(source("./CardLegend.css")).toMatch(
-    /\.template-marker::before\s*\{\s*content: "12"/,
+    /\.template-marker::before\s*\{\s*content: "11"/,
   );
   for (const row of rows) {
     const entry = article.querySelector(`[data-legend-signal="${row.id}"]`);
@@ -63,14 +69,7 @@ test("all card statuses, priorities, display settings and state classes have leg
   for (const { key } of CARD_DISPLAY_FIELDS) {
     const ids =
       key === "waiting"
-        ? [
-            "decision",
-            "human_action",
-            "review-phase",
-            "blocked",
-            "precheck",
-            "merge_check",
-          ]
+        ? ["review-phase", "precheck", "merge_check"]
         : key === "progress"
           ? [
               "progress-empty",
@@ -171,7 +170,7 @@ test("every rendered card signal and metadata badge is explained across normal, 
     )),
   );
   const signals = container.querySelectorAll(
-    ".card-id, .status, .card-title, [data-card-status-tip], .card-hold-tag, .priority-glyph, .board-card-badge, .employee-owners, .template-marker",
+    ".card-id, .status, .card-title, [data-card-status-tip], .card-hold-tag, .priority-glyph, .board-card-badge, .employee-owners, .template-marker, [data-card-signal]",
   );
   expect(signals.length).toBeGreaterThan(40);
   for (const signal of signals)
@@ -179,9 +178,13 @@ test("every rendered card signal and metadata badge is explained across normal, 
       selectors.some((selector) => signal.matches(selector)),
       signal.outerHTML,
     ).toBe(true);
-  expect(
-    container.querySelector(".card-tile-blocked.card-tile-waiting"),
-  ).toBeNull();
+  // C-660: each signal kind is documented and at most one tag shows per card.
+  for (const { kind } of BOARD_CARD_SIGNALS)
+    expect(selectors).toContain(`[data-card-signal="${kind}"]`);
+  for (const tile of container.querySelectorAll(".board-card"))
+    expect(
+      tile.querySelectorAll("[data-card-signal]").length,
+    ).toBeLessThanOrEqual(1);
   expect(
     container
       .querySelector(".card-hold-tag")

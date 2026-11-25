@@ -2,7 +2,9 @@ import { isDeepStrictEqual } from "node:util";
 import {
   type Assignment,
   type AssignmentId,
+  ATTACHED_HUMAN_WAIT_OVERDUE,
   admitWorkerInspection,
+  attachedHumanWaits,
   automaticContextActionForRun,
   automaticContextRestartReady,
   beginAutomaticContextRestart,
@@ -15,6 +17,7 @@ import {
   claimHostOpsAction,
   contextUsageFresh,
   currentHarnessActivity,
+  DEFAULT_ATTACHED_HUMAN_NOTICE_MS,
   dispatchRecoveryQueuedAt,
   eventById,
   finishHostOpsAction,
@@ -23,16 +26,19 @@ import {
   type HostOpsExecution,
   type HostOpsExecutionTool,
   hostOpsExitConfirmation,
+  hostOpsPending,
   hostOpsReadDiagnostics,
   lastRunActivity,
   observedLocalExitCause,
   type ProjectId,
   pendingHostOpsActions,
   prepareHostOpsAction,
+  type RetirementStop,
   type RunId,
   type Runtime,
   type RuntimeRef,
   recheckMerge,
+  recordAttachedHumanWait,
   recordAutomaticContextRestartResult,
   recordContextUsageNotices,
   requestHostOpsExitConfirmation,
@@ -40,6 +46,7 @@ import {
   reviewRestartStopStarted,
   type SessionActivity,
   systemTurnOwner,
+  type UpstreamDiagnosis,
   type WorkerInspectionRequest,
   withdrawRecoveredHostOpsAction,
   withdrawUnstartedStallRestart,
@@ -73,6 +80,7 @@ import {
   recoveryPm,
 } from "./automatic-context-restart.js";
 import {
+  assignmentActivityScope,
   type ContextUsageOptions,
   contextThresholdView,
   DEFAULT_CONTEXT_STALE_AFTER_MS,
@@ -82,26 +90,44 @@ import {
   type SessionContextDiagnostic,
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
-import { tryHostOpsLock } from "./host-ops-lock.js";
+import { hostOpsLockHolder, tryHostOpsLock } from "./host-ops-lock.js";
+import { releaseExitedAgent } from "./idle-session-retirement.js";
 import {
   incidentIdentity,
   settlementIdentityHolds,
   writerPlacementSeal,
 } from "./retained-writer.js";
 import {
+  darwinTurnTarget,
   localTurnExitProof,
   remoteStallExit,
+  sessionExitProof,
   stallWorkspace,
   transferredSessionExited,
+  turnIdlePrompt,
   writableInPlace,
 } from "./stall-evidence.js";
 import { recoveryBasis, StallPatrol } from "./stall-patrol.js";
+import {
+  exitStandingSession,
+  remindStandingExitOverdue,
+  type StandingExitOutcome,
+  type StandingExitPolicy,
+  standingExitPolicy,
+} from "./standing-session-exit.js";
 import {
   revokeStoppedRunTokens,
   stopRunRuntime,
   stopSystemTurn,
 } from "./stop-run.js";
-import { UpstreamHealthMonitor } from "./upstream-health.js";
+import {
+  releaseUnresponsiveAgent,
+  type UnresponsiveProof,
+} from "./unresponsive-session.js";
+import {
+  UpstreamHealthMonitor,
+  upstreamHoldReason,
+} from "./upstream-health.js";
 
 import { inspectWorker } from "./worker-inspection.js";
 
@@ -148,6 +174,12 @@ interface Options {
   hcSession?: string;
   /** Host observation/publication failures are reported here; drain still runs. */
   onError?: (error: unknown) => void;
+  /** C-625: standing PM exit timings; defaults read the environment. */
+  standingExit?: StandingExitPolicy;
+  /** C-678: Needs You notice after an attached human held an action this long. */
+  attachedHumanNoticeMs?: number;
+  /** C-730: worker evidence for remote releases; tests substitute it. */
+  unresponsiveProof?: UnresponsiveProof;
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
@@ -168,6 +200,11 @@ export class HostOpsService {
     }
   >();
   private readonly actionWorkers = new Map<string, Promise<void>>();
+  /** C-678: last recorded attached-human wait per action; skips idle writes. */
+  private readonly attachedWaits = new Map<
+    string,
+    { started_at: string; since: number; overdue: boolean }
+  >();
   private readonly contextAbort = new AbortController();
   private contextPoll: Promise<void> | undefined;
   private closing = false;
@@ -176,8 +213,10 @@ export class HostOpsService {
   private lastStallPoll = Number.NEGATIVE_INFINITY;
   private lastContextPoll = Number.NEGATIVE_INFINITY;
   private serial: Promise<void> = Promise.resolve();
+  private readonly standingExitPolicy: StandingExitPolicy;
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
+    this.standingExitPolicy = options.standingExit ?? standingExitPolicy();
     this.stallPatrol = new StallPatrol(
       options.store,
       this.clock,
@@ -524,6 +563,28 @@ export class HostOpsService {
           return effect.data;
         }),
       ).value;
+    // C-672: a worker terminal still live after its Agent CLI exited has
+    // nothing left to stop. Close it and settle the session through the same
+    // guarded path as maintenance (both host-ops locks, kernel exit proof, no
+    // human stop, host operation, upgrade or started Run); dispatch then
+    // starts the new session through the managed launch.
+    if (
+      tool === "host_ops_restart_assignment" &&
+      p.context_session_id === undefined
+    ) {
+      const settled = await this.settleExitedAgent(
+        project,
+        p.target_id as AssignmentId,
+      );
+      if (settled)
+        return unwrap(store.runIdempotent(invocation, () => settled)).value;
+    }
+    // C-730: a remote managed Assignment whose Agent the worker does not see
+    // alive is released like a managed `assignment stop` (terminal closed,
+    // exit proven, session settled); dispatch then starts a new session.
+    const remote = await this.releaseRemoteSession(project, tool, p, actor);
+    if (remote && "result" in remote)
+      return unwrap(store.runIdempotent(invocation, () => remote.result)).value;
     const contextUsage =
       p.context_session_id === undefined
         ? undefined
@@ -579,18 +640,36 @@ export class HostOpsService {
       tool === "host_ops_cancel_run"
         ? undefined
         : await this.observeUpstream(project, p.target_id as AssignmentId);
-    const preflight = store.uow.read((tx) => {
-      const state = loadCommandState(tx, project);
-      if (tool !== "host_ops_cancel_run")
-        this.checkUpstream(
-          state,
-          p.target_id as AssignmentId,
-          Boolean(contextUsage),
-          undefined,
-          activity,
-        );
-      return unwrap(prepareHostOpsAction(state, actor, paramsFor(state))).data;
-    });
+    const preflight = (() => {
+      try {
+        return store.uow.read((tx) => {
+          const state = loadCommandState(tx, project);
+          if (tool !== "host_ops_cancel_run")
+            this.checkUpstream(
+              state,
+              p.target_id as AssignmentId,
+              Boolean(contextUsage),
+              undefined,
+              activity,
+            );
+          return unwrap(prepareHostOpsAction(state, actor, paramsFor(state)))
+            .data;
+        });
+      } catch (error) {
+        // C-730: say why the remote release did not apply instead.
+        if (
+          remote &&
+          (error as { message?: unknown } | null)?.message ===
+            "Target must be a local managed Assignment"
+        )
+          throw new ToolError(
+            "illegal_transition",
+            `远程会话未释放：${remoteRefusalText(remote.refusal)}`,
+            { reason: remote.refusal },
+          );
+        throw error;
+      }
+    })();
     if (p.dispatch_stall_id) {
       const state = store.uow.read((tx) => loadCommandState(tx, project));
       const stall = this.stallPatrol.current(
@@ -700,6 +779,108 @@ export class HostOpsService {
       }),
     ).value;
   }
+  /**
+   * C-730: restart or cancel on a remote managed Assignment. Only a session
+   * whose terminal is live while the worker does not see its Agent CLI alive
+   * is released; anything else returns the refusal and the ordinary path
+   * (which handles remote exit-only recoveries) decides.
+   */
+  private async releaseRemoteSession(
+    project: ProjectId,
+    tool: HostOpsExecutionTool | "host_ops_recheck_merge",
+    p: { target_id: string; reason?: string; context_session_id?: string },
+    actor: ToolContext["identity"]["actor"],
+  ) {
+    const reason = p.reason?.trim();
+    if (
+      (tool !== "host_ops_restart_assignment" &&
+        tool !== "host_ops_cancel_run") ||
+      p.context_session_id !== undefined ||
+      actor.kind !== "assignment" ||
+      // The ordinary path reports a missing reason or the operator's own
+      // pending operation, exactly as before.
+      !reason
+    )
+      return;
+    const { store } = this.options;
+    if (
+      store.uow.read((tx) =>
+        hostOpsPending(
+          loadCommandState(tx, project).events,
+          actor.assignment_id,
+        ),
+      )
+    )
+      return;
+    const found = store.uow.read((tx) => {
+      const run =
+        tool === "host_ops_cancel_run"
+          ? tx.runs.get(project, p.target_id as RunId)
+          : undefined;
+      const a = tx.assignments.get(
+        project,
+        (run?.assignment_id ?? p.target_id) as AssignmentId,
+      );
+      return a ? { a, run } : undefined;
+    });
+    const a = found?.a;
+    if (
+      !a?.runtime_ref ||
+      a.scope !== "work_item" ||
+      a.external ||
+      a.machine_id === "local" ||
+      (tool === "host_ops_cancel_run" && !found?.run)
+    )
+      return;
+    const ref = a.runtime_ref;
+    const outcome = await releaseUnresponsiveAgent(
+      store,
+      project,
+      a,
+      this.options.runtime,
+      this.clock,
+      {
+        trigger: "host_ops",
+        requested_by: actor.assignment_id,
+        tool,
+        reason,
+        ...(found?.run ? { run_id: found.run.id } : {}),
+      },
+      this.options.unresponsiveProof,
+    );
+    if (outcome.outcome === "refused") return { refusal: outcome.reason };
+    await this.options
+      .scrubCredentials?.(project, a.id, ref)
+      .catch(() => undefined);
+    return {
+      result: {
+        assignment_id: a.id,
+        ...(found?.run ? { run_id: found.run.id } : {}),
+        result: "session_released" as const,
+        message:
+          "远程会话的 Agent 进程未见存活：已关闭残留终端、确认会话退出并结算；有待办时系统按受管入口新起会话。",
+      },
+    };
+  }
+  private async settleExitedAgent(project: ProjectId, id: AssignmentId) {
+    const { store } = this.options;
+    const a = store.uow.read((tx) => tx.assignments.get(project, id));
+    if (!a || a.scope !== "work_item" || !a.runtime_ref) return;
+    const outcome = await releaseExitedAgent(
+      store,
+      project,
+      a,
+      this.options.runtime,
+      this.clock,
+    );
+    if (outcome !== "settled") return;
+    return {
+      assignment_id: a.id,
+      result: "agent_exited" as const,
+      message:
+        "Agent 已退出：已关闭仍在的终端并结算会话，系统按受管入口新起会话续办。",
+    };
+  }
   private async observeUpstream(
     project: ProjectId,
     only?: AssignmentId,
@@ -738,6 +919,7 @@ export class HostOpsService {
           "活动采样期间会话已更换，请重新读取诊断",
         );
     }
+    const scope = assignmentActivityScope(current);
     for (const session of sessions) {
       if (!session.assignment_id) continue;
       const assignment = current.assignments.find(
@@ -746,7 +928,7 @@ export class HostOpsService {
       const sample =
         assignment &&
         currentHarnessActivity(
-          current,
+          scope(assignment),
           assignment,
           this.clock.now(),
           session.activity,
@@ -1137,6 +1319,137 @@ export class HostOpsService {
     this.serial = next.catch(() => {});
     return next;
   }
+  /**
+   * C-626: evidence of a system-ended turn's owner-bound stop: the idle basis
+   * (hc status or the bound empty editor), the stop path, PID and signal, the
+   * result and (as the event time) when. Bounded facts only, never screen text.
+   */
+  private recordTurnExit(
+    project: ProjectId,
+    action: HostOpsExecution,
+    facts: {
+      idle_basis: string | null;
+      result: string;
+    } & Partial<RetirementStop>,
+  ) {
+    this.options.store.uow.run((tx) => {
+      const state = loadCommandState(tx, project);
+      const a = state.assignments.find((v) => v.id === action.assignment_id);
+      const card = state.work_items.find(
+        (w) => w.id === a?.work_item_id,
+      )?.card_id;
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project, card),
+        ...(card ? { card_id: card } : {}),
+        actor: { kind: "system", project_id: project },
+        type: "dispatch_stall_turn_exit",
+        created_at: this.clock.now(),
+        payload: {
+          action_id: action.action_id,
+          assignment_id: action.assignment_id,
+          system_finished_run_id: action.system_finished_run_id ?? null,
+          idle_basis: facts.idle_basis,
+          exit_path: facts.path ?? null,
+          signal: facts.signal ?? null,
+          pid: facts.pid ?? null,
+          result: facts.result,
+        },
+      });
+    });
+  }
+  /**
+   * C-678: the session-ending action stays queued while a human is attached
+   * (that protection is unchanged). Record why, with when the connection
+   * began, so the attached human, the requester and PM see it at once; a
+   * Needs You notice follows once the wait is overdue. After detaching, the
+   * next drain takes the lock and the action continues without a new request.
+   */
+  private async noteAttachedHuman(
+    project: ProjectId,
+    action: HostOpsExecution,
+  ) {
+    const { store } = this.options;
+    const holder = await hostOpsLockHolder(
+      store,
+      project,
+      action.assignment_id,
+    );
+    if (!holder) return;
+    const after =
+      this.options.attachedHumanNoticeMs ?? DEFAULT_ATTACHED_HUMAN_NOTICE_MS;
+    const seen = this.attachedWaits.get(action.action_id);
+    if (
+      seen?.started_at === holder.started_at &&
+      (seen.overdue || Date.parse(this.clock.now()) < seen.since + after)
+    )
+      return;
+    store.uow.run((tx) => {
+      const state = loadCommandState(tx, project);
+      const earlier = attachedHumanWaits(state.events, action.action_id);
+      const effect = unwrap(
+        recordAttachedHumanWait(
+          state,
+          { kind: "system", project_id: project },
+          {
+            action_id: action.action_id,
+            attached: { mode: holder.mode, started_at: holder.started_at },
+            notice_after_ms: after,
+          },
+          { clock: this.clock, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, project, effect);
+      const { waiting, overdue } = effect.data;
+      if (waiting && earlier.length === 0) {
+        const target = state.assignments.find(
+          (a) => a.id === action.assignment_id,
+        );
+        const requester = state.events.find(
+          (e) => e.id === action.action_id,
+        )?.actor;
+        const recipients: Parameters<
+          typeof recordNotification
+        >[1]["recipient"][] = [];
+        // Never bell the attached session itself: it would type into the
+        // terminal the human is using.
+        if (
+          requester?.kind === "assignment" &&
+          requester.assignment_id !== action.assignment_id &&
+          state.assignments.find((a) => a.id === requester.assignment_id)
+            ?.status === "active"
+        )
+          recipients.push({
+            kind: "assignment",
+            assignment_id: requester.assignment_id,
+          });
+        // A standing PM target is the attached session itself.
+        if (!(target?.scope === "standing" && target.role_id === "pm"))
+          recipients.push({ kind: recoveryPm(target) });
+        for (const recipient of recipients)
+          recordNotification(store.database, {
+            project_id: project,
+            event_id: waiting.id,
+            seq: waiting.seq,
+            kind: "run_attention",
+            at: waiting.created_at,
+            recipient,
+          });
+      }
+      this.attachedWaits.set(action.action_id, {
+        started_at: holder.started_at,
+        since: Date.parse(earlier[0]?.created_at ?? this.clock.now()),
+        overdue:
+          !!overdue ||
+          state.events.some(
+            (e) =>
+              e.type === ATTACHED_HUMAN_WAIT_OVERDUE &&
+              (e.payload as { action_id?: string }).action_id ===
+                action.action_id,
+          ),
+      });
+    });
+  }
   private defer(project: ProjectId, action: string, reason: string) {
     this.options.store.uow.run((tx) => {
       const events = loadCommandState(tx, project).events;
@@ -1254,7 +1567,11 @@ export class HostOpsService {
     // and proves exit the same way before its successor is queued.
     const preserve = turnRecovery || !!action.dispatch_stall_id;
     const unlock = await tryHostOpsLock(store, project, action.assignment_id);
-    if (!unlock) return;
+    if (!unlock) {
+      await this.noteAttachedHuman(project, action);
+      return;
+    }
+    this.attachedWaits.delete(action.action_id);
     let unlockLaunch: Awaited<ReturnType<typeof tryHostOpsLock>>;
     try {
       if (action.retirement_handoff) {
@@ -1301,7 +1618,9 @@ export class HostOpsService {
         : priorLease
           ? undefined
           : false;
-      const fail = (reason: string) => {
+      let standingExitReason = "standing_exit_pending";
+      const fail = (reason: string, blockedBy?: UpstreamDiagnosis) => {
+        standingExitReason = reason;
         if (action.dispatch_stall_id) {
           const withdrawn = store.uow.run((tx) => {
             const effect = unwrap(
@@ -1312,6 +1631,7 @@ export class HostOpsService {
                 { clock: this.clock, ids: tx.ids },
                 reason,
                 receiptRecorded,
+                blockedBy,
               ),
             );
             persistEffect(tx, project, effect);
@@ -1419,10 +1739,18 @@ export class HostOpsService {
           if (this.upstream === observationMonitor)
             observationMonitor?.observationFailed(project);
           fail("upstream_observation_failed");
-          return;
+          // C-625: a standing PM restart still observes its own terminal; the
+          // upstream gate below then decides (bypassed only for confirmed idle).
+          if (
+            action.tool !== "host_ops_restart_standing_pm" ||
+            action.automatic_context_restart ||
+            preserve
+          )
+            return;
         }
       }
       let evidenceFailure: string | undefined;
+      let idleBasis: string | null | undefined;
       const checkStall = async () => {
         if (!action.dispatch_stall_id) return;
         const state = read();
@@ -1431,6 +1759,7 @@ export class HostOpsService {
           a && this.stallPatrol.current(state, a.id, action.dispatch_stall_id);
         const view =
           a && stall && (await this.stallPatrol.evidence(state, a, stall));
+        idleBasis = view ? view.idle_basis : undefined;
         evidenceFailure = !view
           ? "stall_not_current"
           : !view.can_restart
@@ -1495,7 +1824,9 @@ export class HostOpsService {
           persistEffect(tx, project, effect);
           return effect.data;
         });
-      const mayStop = () => {
+      // C-625: a confirmed idle standing PM past the threshold no longer
+      // waits on the upstream diagnosis; nothing else is relaxed.
+      const mayStop = (idleOverdue = false) => {
         if (this.closing || !current()) return false;
         if (
           action.dispatch_stall_id &&
@@ -1562,7 +1893,16 @@ export class HostOpsService {
           );
           return true;
         } catch {
-          fail("upstream_recovery_not_ready");
+          if (idleOverdue) return true;
+          // C-680: name the condition that actually held the stop; only a
+          // line fault is "upstream not recovered".
+          const held = this.upstream?.diagnosis(
+            read(),
+            action.assignment_id,
+            action.action_id,
+            activity,
+          );
+          fail(upstreamHoldReason(held), held);
           return false;
         }
       };
@@ -1585,10 +1925,63 @@ export class HostOpsService {
               (e.payload as { reason?: string }).reason ===
                 "automatic_context_stop_started",
           ));
+      // C-625: an ordinary standing PM restart first lets an idle session
+      // leave on its own, then signals it once; a busy turn is never stopped.
+      const standingRef =
+        action.tool === "host_ops_restart_standing_pm" &&
+        !preserve &&
+        !foreign &&
+        !action.automatic_context_restart
+          ? action.runtime_ref
+          : null;
+      const remindStanding = () => {
+        if (standingRef && !this.closing)
+          remindStandingExitOverdue(
+            store,
+            project,
+            this.clock,
+            action,
+            this.standingExitPolicy,
+            standingExitReason,
+          );
+      };
+      let standing: StandingExitOutcome | undefined;
+      if (standingRef) {
+        const last = read().runs.findLast(
+          (r) => r.assignment_id === action.assignment_id && r.started_at,
+        );
+        standing = await exitStandingSession({
+          store,
+          project,
+          clock: this.clock,
+          runtime,
+          action: { ...action, runtime_ref: standingRef },
+          harness:
+            last?.harness ??
+            (last?.launch_profile_ref
+              ? this.options.upstream?.profiles[last.launch_profile_ref]
+                  ?.harness
+              : undefined),
+          policy: this.standingExitPolicy,
+          mayStop,
+          defer: (reason) => {
+            standingExitReason = reason;
+            this.defer(project, action.action_id, reason);
+          },
+        });
+        if (standing === "waiting") {
+          remindStanding();
+          return;
+        }
+      }
       // A started stop can only observe its exit. The original notice may
       // already be ACKed; settlement rechecks it before allowing a new Run.
-      if (!(turnRecovery && stopStarted) && !mayStop()) return;
-      if (foreign) {
+      if (standing === "exited") {
+        // Exit observed above; continue to the shared settlement.
+      } else if (!(turnRecovery && stopStarted) && !mayStop()) {
+        remindStanding();
+        return;
+      } else if (foreign) {
         // Automatic sources never ask the human to confirm the exit: a
         // C-596 restart stays pending (one executor) and the standing-PM
         // patrol hands it to host operations.
@@ -1768,13 +2161,17 @@ export class HostOpsService {
             // Settled by an earlier recovery: no session left to stop.
             result = "exited";
           } else if (action.system_finished_run_id) {
+            const execution = a && this.stallExecution(project, a.machine_id);
+            // C-626: a macOS worker's live turn is stopped through its idle
+            // owner or enrolled PID; other remote targets only settle an exit.
+            const darwin = !!a && darwinTurnTarget(a, execution);
+            const ended = action.system_finished_run_id;
+            let stop: RetirementStop | undefined;
+            let signalled = false;
             result =
               remote &&
-              !(await remoteStallExit(
-                read(),
-                a,
-                this.stallExecution(project, a.machine_id),
-              ))
+              !darwin &&
+              !(await remoteStallExit(read(), a, execution))
                 ? "terminal_exit_unconfirmed"
                 : await stopSystemTurn(
                     runtime,
@@ -1783,22 +2180,37 @@ export class HostOpsService {
                       read(),
                       action.assignment_id,
                       action.runtime_ref,
-                      action.system_finished_run_id,
+                      ended,
                     ),
-                    !!remote || stopStarted || exitOnly,
+                    (!!remote && !darwin) || stopStarted || exitOnly,
                     checkWorkspace,
-                    beforeSignal,
+                    () => (signalled = beforeSignal()),
                     async () =>
                       !!a &&
                       !!action.runtime_ref &&
-                      (await localTurnExitProof(
-                        read(),
-                        a,
-                        runtime,
-                        action.runtime_ref,
-                        this.stallExecution(project, a.machine_id),
-                      )),
+                      (remote
+                        ? await remoteStallExit(read(), a, execution)
+                        : await localTurnExitProof(
+                            read(),
+                            a,
+                            runtime,
+                            action.runtime_ref,
+                            execution,
+                          )),
+                    {
+                      idlePrompt: a && turnIdlePrompt(read(), a, ended),
+                      remoteSignal: darwin,
+                      report: (value) => {
+                        stop = value;
+                      },
+                    },
                   );
+            if (signalled || stop)
+              this.recordTurnExit(project, action, {
+                idle_basis: idleBasis ?? null,
+                ...(stop ?? {}),
+                result,
+              });
           } else {
             // Ordinary stall rows use the same guards: the evidence recheck and
             // writer backup above, one owner-bound idle stop and kernel exit
@@ -1809,23 +2221,33 @@ export class HostOpsService {
                 : "terminal_exit_unconfirmed"
               : !a || remote
                 ? "terminal_exit_unconfirmed"
-                : await stopSystemTurn(
-                    runtime,
-                    action.runtime_ref,
-                    { project_id: project, assignment_id: a.id },
-                    stopStarted,
-                    checkWorkspace,
-                    beforeSignal,
-                    async () =>
-                      !!action.runtime_ref &&
-                      (await localTurnExitProof(
-                        read(),
-                        a,
-                        runtime,
-                        action.runtime_ref,
-                        this.stallExecution(project, a.machine_id),
-                      )),
-                  );
+                : // C-669: a session already proven gone is settled as is;
+                  // probing its stale terminal address only withdraws again.
+                  isDeepStrictEqual(a.runtime_ref, action.runtime_ref) &&
+                    (await sessionExitProof(
+                      read(),
+                      a,
+                      runtime,
+                      this.stallExecution(project, a.machine_id),
+                    )) === "exited"
+                  ? "exited"
+                  : await stopSystemTurn(
+                      runtime,
+                      action.runtime_ref,
+                      { project_id: project, assignment_id: a.id },
+                      stopStarted,
+                      checkWorkspace,
+                      beforeSignal,
+                      async () =>
+                        !!action.runtime_ref &&
+                        (await localTurnExitProof(
+                          read(),
+                          a,
+                          runtime,
+                          action.runtime_ref,
+                          this.stallExecution(project, a.machine_id),
+                        )),
+                    );
           }
           // Exit can also be observed without sending anything. Exit alone
           // does not authorize clearing the session and queuing its successor.
@@ -1844,6 +2266,7 @@ export class HostOpsService {
         }
         if (result !== "exited") {
           if (!this.closing) fail(result);
+          remindStanding();
           return;
         }
       }
@@ -1940,6 +2363,33 @@ const OPERATION: Record<HostOpsExecution["tool"], string> = {
   host_ops_restart_standing_pm: "重启常驻 PM",
   host_ops_cancel_run: "取消 Run",
 };
+
+/** C-730: why a remote restart or cancel did not release the session. */
+export function remoteRefusalText(reason: string) {
+  return (
+    (
+      {
+        agent_alive: "worker 显示 Agent 进程仍在运行，不关闭终端",
+        agent_unobserved:
+          "无法从 worker 确认 Agent 进程状态（连接失败或观测不完整），不关闭终端",
+        terminal_not_live: "终端已不在运行，按原退出核对路径处理",
+        stopped_by_human:
+          "该指派已被人工停止，请用 cardigan assignment start 恢复",
+        operation_pending: "还有会话操作或 Run 停止、启动在进行，稍后重试",
+        upgrade_pending: "角色升级尚未收尾，稍后重试",
+        shared_registration: "终端或工作区存在其它登记，不能释放",
+        run_changed: "目标 Run 已结束",
+        delivery_in_progress: "通知正在投递，稍后重试",
+        locked: "会话正在接入或维护，稍后重试",
+        release_failed: "关闭终端失败，稍后重试",
+        exit_unconfirmed: "终端已关闭，但未能确认会话退出，保留引用等待核对",
+        session_changed: "会话已更换，请重新读取诊断",
+        not_managed: "目标不是受管的工作项指派",
+        no_session: "没有在运行的会话",
+      } as Record<string, string>
+    )[reason] ?? "未满足释放条件"
+  );
+}
 
 /** Numbered steps for the human; the terminal is never touched by the server. */
 export function exitConfirmationText(

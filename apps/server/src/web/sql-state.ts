@@ -1,5 +1,6 @@
 import type { SQLInputValue } from "node:sqlite";
 import {
+  attachmentRefMatches,
   type CommandState,
   extractReferences,
   type ProjectId,
@@ -166,21 +167,33 @@ export function scopedCardState(
     ...query("cards", inIds("id"), [JSON.stringify(related)]),
   ]);
   const cardIds = JSON.stringify(cards.map((c) => c.id));
+  const cardSet = new Set(cards.map((c) => c.id));
   let work_items = query("work_items", inIds("card_id"), [cardIds]);
   const itemIds = JSON.stringify(work_items.map((w) => w.id));
+  const itemSet = new Set(work_items.map((w) => w.id));
+  // C-688: array membership and OR across keys cannot seek an index, so SQL
+  // parsed every decision, human action, assignment and attachment document
+  // of the project on each read. Filter the transaction's cached collections
+  // instead: same rows, same (primary/activity index) order, and only changed
+  // rows are decoded again.
   const decisions = unique([
     ...sourceDecisions,
-    ...query(
-      "decisions",
-      `${inIds("json_extract(doc, '$.card_id')")} OR EXISTS (SELECT 1 FROM json_each(doc, '$.affected_cards') WHERE ${inIds("value")}) OR EXISTS (SELECT 1 FROM json_each(doc, '$.affected_work_items') WHERE ${inIds("value")})`,
-      [cardIds, cardIds, itemIds],
-    ),
+    ...tx.decisions
+      .list(project)
+      .filter(
+        (q) =>
+          (q.card_id != null && cardSet.has(q.card_id)) ||
+          (q.affected_cards ?? []).some((id) => cardSet.has(id)) ||
+          (q.affected_work_items ?? []).some((id) => itemSet.has(id)),
+      ),
   ]);
-  const human_actions = query(
-    "human_actions",
-    `${inIds("json_extract(doc, '$.card_id')")} OR EXISTS (SELECT 1 FROM json_each(doc, '$.blocked_work_items') WHERE ${inIds("value")})`,
-    [cardIds, itemIds],
-  );
+  const human_actions = tx.human_actions
+    .list(project)
+    .filter(
+      (h) =>
+        (h.card_id != null && cardSet.has(h.card_id)) ||
+        (h.blocked_work_items ?? []).some((id) => itemSet.has(id)),
+    );
   // affects() resolves every explicitly affected work item, even on another card.
   work_items = unique([
     ...work_items,
@@ -267,21 +280,46 @@ export function scopedCardState(
     ...decisions.map((q) => q.raised_by),
     ...human_actions.map((h) => h.requested_by),
   ].flatMap((a) => (a?.startsWith("assignment:") ? [a.slice(11)] : []));
-  const assignments = query(
-    "assignments",
-    `${inIds("json_extract(doc, '$.work_item_id')")} OR ${inIds("id")} OR (json_extract(doc, '$.scope') = 'standing' AND json_extract(doc, '$.status') = 'active')`,
-    [
-      JSON.stringify(work_items.map((w) => w.id)),
-      JSON.stringify([...runs.map((r) => r.assignment_id), ...authors]),
-    ],
-  );
-  const attachmentIds = JSON.stringify(
+  const assignmentItems = new Set(work_items.map((w) => w.id));
+  const assignmentIds = new Set([
+    ...runs.map((r) => r.assignment_id),
+    ...authors,
+  ]);
+  const assignments = tx.assignments
+    .list(project)
+    .filter(
+      (a) =>
+        (a.work_item_id != null && assignmentItems.has(a.work_item_id)) ||
+        assignmentIds.has(a.id) ||
+        (a.scope === "standing" && a.status === "active"),
+    );
+  const attachmentIds = new Set(
     decisions.flatMap((q) => q.attachment_ids ?? []),
   );
-  const attachments = query(
-    "attachments",
-    `${inIds("json_extract(doc, '$.card_id')")} OR ${inIds("id")} OR (json_extract(doc, '$.card_id') IS NULL AND json_extract(doc, '$.attach_to.kind') = 'timeline_entry' AND json_extract(doc, '$.attach_to.id') IN (SELECT id FROM timeline WHERE project_id = ? AND ${inIds("card_id")}))`,
-    [cardIds, attachmentIds, project, cardIds],
+  const projectAttachments = tx.attachments.list(project);
+  // Legacy attachments have no card_id: they belong to a card through the
+  // timeline entry they are attached to.
+  const legacyEntries = projectAttachments.flatMap((a) =>
+    a.card_id == null && a.attach_to.kind === "timeline_entry"
+      ? [a.attach_to.id]
+      : [],
+  );
+  const legacyOwned = new Set(
+    legacyEntries.length
+      ? store.database
+          .prepare(
+            `SELECT id FROM timeline WHERE project_id = ? AND ${inIds("id")} AND ${inIds("card_id")}`,
+          )
+          .all(project, JSON.stringify(legacyEntries), cardIds)
+          .map((row) => String(row.id))
+      : [],
+  );
+  const attachments = projectAttachments.filter((a) =>
+    a.card_id == null
+      ? attachmentIds.has(a.id) ||
+        (a.attach_to.kind === "timeline_entry" &&
+          legacyOwned.has(a.attach_to.id))
+      : cardSet.has(a.card_id) || attachmentIds.has(a.id),
   );
   // Separate object selectors let SQLite seek each index by project AND object.
   // A single OR across these keys otherwise scans all events in the project.
@@ -368,6 +406,31 @@ export function withReferences(
     readDocs(store, state.project_id, table, inIds("id"), [
       JSON.stringify(ids),
     ]);
+  // C-615: `attachment-N` in a body, with the card it belongs to, so its
+  // sensitivity can be checked before the browser gets its metadata.
+  // `text` joins many bodies, so code is not masked here (one body's open
+  // fence would hide the rest): this only loads candidates, and
+  // `referencedAttachmentViews` decides per body which ones are references.
+  const attachmentIds = [
+    ...new Set(
+      attachmentRefMatches(text, { literals: false })
+        .filter((m) => !m.pending)
+        .map((m) => m.token),
+    ),
+  ];
+  if (attachmentIds.length) {
+    next.attachments = unique([
+      ...next.attachments,
+      ...query("attachments", attachmentIds),
+    ]);
+    next.cards = unique([
+      ...next.cards,
+      ...query(
+        "cards",
+        next.attachments.flatMap((a) => (a.card_id ? [a.card_id] : [])),
+      ),
+    ]);
+  }
   next.deliveries = unique([
     ...next.deliveries,
     ...query(

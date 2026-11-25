@@ -61,6 +61,7 @@ import {
   TableHeader,
   TableRow,
 } from "../components/ui/table.js";
+import { fullIdHref } from "../full-id-jump.js";
 import { CardDetailPage } from "../lazy-pages.js";
 import { guardLeave } from "../leave-guard.js";
 import { routeHash, useRouteFilters } from "../route.js";
@@ -84,6 +85,11 @@ export interface CardListPageProps {
   readonly revision?: number;
   readonly changedCards?: readonly string[];
   readonly changedCardsSince?: (revision: number) => readonly string[];
+  /** C-688: the open drawer re-reads on its own cards' changes only. */
+  readonly cardRevision?: (
+    id: string,
+    affectedCards: readonly string[],
+  ) => number;
 }
 
 type LoadState =
@@ -181,6 +187,7 @@ export function CardListPage({
   projectId,
   view: fallbackView = "board",
   revision = 0,
+  cardRevision,
 }: CardListPageProps) {
   const [filters, setFilters] = useRouteFilters({
     kind: "cards",
@@ -450,7 +457,21 @@ export function CardListPage({
       className={`cards-page ui-workspace${view === "board" ? " cards-page-board" : ""}`}
       aria-label="卡片"
     >
-      <PageTitle title="卡片" />
+      <PageTitle
+        title="卡片"
+        status={
+          // C-684: a standing entry, with or without cards and filters.
+          <CreateCardButton
+            key={projectId}
+            projectId={projectId}
+            client={client}
+            onCreated={(id) => {
+              reload();
+              openCard(id);
+            }}
+          />
+        }
+      />
       <div
         className="cards-refresh-status ui-refresh-feedback"
         role={error ? "alert" : "status"}
@@ -572,6 +593,17 @@ export function CardListPage({
                 placeholder="搜索标题或编号"
                 value={value}
                 onChange={(event) => setValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  // C-675: Enter on a full number (`SEN-C-34`) opens it, in any project.
+                  const typed = event.currentTarget.value;
+                  void fullIdHref(client, typed).then(
+                    (href) => {
+                      if (href !== undefined) window.location.hash = href;
+                    },
+                    () => undefined,
+                  );
+                }}
               />
             ),
           },
@@ -611,23 +643,7 @@ export function CardListPage({
       </PageToolbar>
 
       {state.kind === "ready" && cards.length === 0 && (
-        <EmptyState
-          action={
-            !activeFilters && (
-              <CreateCardButton
-                key={projectId}
-                projectId={projectId}
-                client={client}
-                onCreated={(id) => {
-                  reload();
-                  openCard(id);
-                }}
-              />
-            )
-          }
-        >
-          {activeFilters ? "没有匹配的卡片" : "没有卡片"}
-        </EmptyState>
+        <EmptyState>{activeFilters ? "没有匹配的卡片" : "没有卡片"}</EmptyState>
       )}
       {state.kind === "ready" &&
         (view === "board" ? (
@@ -787,6 +803,7 @@ export function CardListPage({
               inDrawer
               onTitleChange={onTitleChange}
               revision={revision}
+              {...(cardRevision ? { cardRevision } : {})}
             />
           </PageLoader>
         )}

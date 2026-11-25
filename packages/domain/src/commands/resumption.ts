@@ -1,10 +1,12 @@
 import type { Assignment, Event, Run, WorkItem } from "../entities.js";
+import { eventById, fullEventHistory } from "../event-index.js";
 import { isMergePrerequisite } from "../human-action.js";
 import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { createQueuedRun, launchSettings } from "./launch.js";
 import { closedResumeTarget, deferResume } from "./resume-attention.js";
-import { stoppedByHuman } from "./stop.js";
+import { openAlignment } from "./review-round.js";
+import { openStopEpisodeStart, pausedByHuman } from "./stop-state.js";
 import { reviewRound } from "./workflow.js";
 
 function upgradedSinceRun(
@@ -77,6 +79,7 @@ export function resumeBlockReason(
         h.blocked_work_items.includes(item.id),
     );
   if (action) return `合并前置操作 ${action.id} 尚未完成`;
+  if (openAlignment(d, item)) return "对齐回合尚未完成";
   if (item.kind === "verify" && reviewRound(d, item) > item.max_review_rounds)
     return "审核轮数已达上限";
 }
@@ -108,7 +111,10 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
   if (card.hold) return deferResume(d, item, "卡片已暂停", event.id);
   if (!item.assignment_id) return deferResume(d, item, "没有负责人", event.id);
   const assignment = d.get("assignments", item.assignment_id);
-  const stop = stoppedByHuman(d.state.events, assignment.id)
+  // C-620: only a pause defers for the stop itself. A managed stop that is
+  // still releasing its terminal keeps the queued Run; the Dispatcher fences
+  // it until the release is confirmed and then starts a fresh session.
+  const stop = pausedByHuman(d.state.events, assignment.id)
     ? "指派已被人工停止"
     : undefined;
   const deferred = (reason: string) =>
@@ -188,4 +194,54 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     ...launchSettings(previous),
     agent_cli_version: previous.agent_cli_version,
   });
+}
+
+const field = (payload: unknown, key: string): unknown =>
+  payload !== null && typeof payload === "object"
+    ? (payload as Record<string, unknown>)[key]
+    : undefined;
+
+/**
+ * C-620: when a managed stop's release is confirmed, replay the resume its
+ * stop window deferred (for example because the Run being stopped was still
+ * unfinished), so the unblocked work item gets one Run and needs no human.
+ * Call after the stopped Runs are cancelled and the terminal is cleared.
+ */
+export function replayStopDeferredResume(
+  d: CommandDraft,
+  assignment: Assignment,
+) {
+  if (assignment.scope !== "work_item") return;
+  // The episode start indexes the full history (C-643: telemetry included).
+  const events = fullEventHistory(d.state.events);
+  // From the first stop of this episode: a retried stop records another
+  // `assignment_stopped`, but the resume deferred before it still counts.
+  const stopAt = openStopEpisodeStart(events, assignment.id);
+  if (stopAt === undefined) return;
+  const deferred = events
+    .slice(stopAt + 1)
+    .findLast(
+      (e) =>
+        e.type === "work_item_resume_deferred" &&
+        field(e.payload, "work_item_id") === assignment.work_item_id &&
+        field(e.payload, "assignment_id") === assignment.id,
+    );
+  const trigger =
+    deferred &&
+    eventById(events, field(deferred.payload, "evidence") as string);
+  if (!trigger) return;
+  const item = d.get("work_items", assignment.work_item_id);
+  if (
+    item.assignment_id !== assignment.id ||
+    ["blocked", "waiting_decision"].includes(item.status) ||
+    d
+      .list("runs")
+      .some(
+        (r) =>
+          r.assignment_id === assignment.id &&
+          !["completed", "failed", "cancelled"].includes(r.status),
+      )
+  )
+    return;
+  queueResumedRun(d, item, trigger);
 }

@@ -1,6 +1,11 @@
 import type { AddressInfo } from "node:net";
 import { createServer } from "node:net";
-import type { Runtime } from "@cardigan/domain";
+import type {
+  AssignmentId,
+  EventId,
+  Runtime,
+  UpstreamDiagnosis,
+} from "@cardigan/domain";
 import { parseLaunchConfig } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
@@ -13,6 +18,7 @@ import {
 import {
   probeUpstreamConnection,
   UpstreamHealthMonitor,
+  upstreamHoldReason,
 } from "./upstream-health.js";
 
 const configuration = () =>
@@ -388,3 +394,48 @@ test.each(["expired", "replaced"] as const)(
       });
   },
 );
+
+test("C-680: only a line fault holds a recovery as upstream not recovered", () => {
+  const d = (
+    cause: UpstreamDiagnosis["cause"],
+    evidence: string[] = [],
+    incident = false,
+  ): UpstreamDiagnosis => ({
+    assignment_id: "A-1" as AssignmentId,
+    provider: "deepseek",
+    group: "deepseek",
+    cause,
+    action: "wait",
+    evidence,
+    ...(incident ? { incident_id: "E-1" as EventId } : {}),
+  });
+  expect(upstreamHoldReason(d("upstream_unreachable"))).toBe(
+    "upstream_recovery_not_ready",
+  );
+  expect(upstreamHoldReason(d("upstream_suspected"))).toBe(
+    "upstream_recovery_not_ready",
+  );
+  expect(upstreamHoldReason(d("runtime_exited", [], true))).toBe(
+    "upstream_recovery_not_ready",
+  );
+  // No incident, no failed probe, no API error: name the real condition.
+  expect(upstreamHoldReason(d("agent_busy", ["harness_working"]))).toBe(
+    "agent_busy",
+  );
+  expect(upstreamHoldReason(d("waiting_interaction"))).toBe(
+    "waiting_interaction",
+  );
+  expect(upstreamHoldReason(d("server_problem"))).toBe("server_problem");
+  expect(
+    upstreamHoldReason(
+      d("unknown", ["multiple_inactive_sessions_require_investigation"]),
+    ),
+  ).toBe("session_state_unconfirmed");
+  expect(upstreamHoldReason(d("unknown", ["classification_failed"]))).toBe(
+    "upstream_diagnosis_unavailable",
+  );
+  expect(upstreamHoldReason(d("unknown", ["provider_not_resolved"]))).toBe(
+    "upstream_diagnosis_unavailable",
+  );
+  expect(upstreamHoldReason(undefined)).toBe("upstream_diagnosis_unavailable");
+});

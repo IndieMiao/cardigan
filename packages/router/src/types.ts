@@ -69,6 +69,7 @@ export type RuleId =
   | "flow-v2/B3a"
   | "D6/missing independent reviewer"
   | "6.4/system rules"
+  | "C-722/office alert"
   // §6.4 rows
   | "story/discuss"
   | "C-612/release notes"
@@ -79,6 +80,7 @@ export type RuleId =
   | "6.4/work-item comment"
   | "6.4/card comment without mention"
   | "6.4/instruction"
+  | "6.4/decision question answered"
   | "6.4/work item assigned"
   | "6.4/work item resumed"
   | "6.4/delivery submitted"
@@ -106,6 +108,7 @@ export type RuleId =
   | "6.4/merge changes requested"
   | "6.4/merge check finished"
   | "6.4/automatic merge blocked"
+  | "6.4/merge window closed by hold"
   | "6.4/card merged"
   | "6.4/merge failed"
   | "6.4/reconcile finding"

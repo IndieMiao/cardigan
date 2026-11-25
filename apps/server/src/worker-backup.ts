@@ -1,7 +1,8 @@
-import type {
-  Assignment,
-  CommandState,
-  WorkerRecoveryBackup,
+import {
+  type Assignment,
+  type CommandState,
+  eventsOfType,
+  type WorkerRecoveryBackup,
 } from "@cardigan/domain";
 
 /** RW-1 success evidence is project-scoped and written only after a verified fetch. */
@@ -10,9 +11,11 @@ export function lastSuccessfulWorkerBackup(
   assignment: Pick<Assignment, "id" | "machine_id" | "branch">,
 ): WorkerRecoveryBackup | undefined {
   if (!assignment.branch) return;
-  const event = state.events.findLast((e) => {
+  const event = eventsOfType(
+    state.events,
+    "assignment_branch_backed_up",
+  ).findLast((e) => {
     if (
-      e.type !== "assignment_branch_backed_up" ||
       e.actor.kind !== "system" ||
       e.actor.project_id !== state.project_id ||
       e.card_id !== undefined ||

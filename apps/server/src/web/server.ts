@@ -13,7 +13,9 @@ import type {
 } from "@cardigan/domain";
 import {
   decisionDelegation,
+  extractQualifiedReferences,
   highRiskPaths,
+  humanCardTemplates,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   mergeBatches,
@@ -32,7 +34,11 @@ import type {
   MergeGateConfiguration,
   ReadResourceLimits,
 } from "@cardigan/host";
-import { MAX_ATTACHMENT_BYTES, offsiteFor } from "@cardigan/mcp-server";
+import {
+  MAX_ATTACHMENT_BYTES,
+  offsiteFor,
+  uploadSessionsFor,
+} from "@cardigan/mcp-server";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import {
   feishuStatus,
@@ -41,19 +47,22 @@ import {
   type Store,
   type WebSession,
 } from "@cardigan/store";
+import { beginActivity } from "../activity.js";
 import { type BuildInfo, readBuildInfo } from "../build-info.js";
 import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { mergeProjectSettings } from "../merge-push-loop.js";
+import { type ProcessRole, processHealthView } from "../process-health.js";
 import { readActivity } from "./activity-state.js";
-import { serveAttachment, serveAttachmentPreview } from "./attachments.js";
-import { serveAvatar } from "./avatars.js";
-import { cardSectionPayload } from "./card-sections.js";
+import { readAttachmentRefs } from "./attachment-ref-read.js";
 import {
-  type CardsCacheOptions,
-  readCachedCardsPage,
-  readCardsVersion,
-} from "./cards-cache.js";
+  serveAttachment,
+  serveAttachmentPreview,
+  serveVideoPoster,
+} from "./attachments.js";
+import { serveAvatar } from "./avatars.js";
+import { serveCapabilityGuides } from "./capability-guides.js";
+import type { CardsCacheOptions } from "./cards-cache.js";
 import {
   allowedHosts,
   bracket,
@@ -61,16 +70,13 @@ import {
   type WebConfig,
 } from "./config.js";
 import { readDecisionHistory } from "./decision-history-state.js";
+import { DevicePairings } from "./device-pairings.js";
 import { drainTasks } from "./drain-tasks.js";
 import {
+  ExecutionCapacityCache,
   executionCapacity,
-  executionCapacityRevision,
+  executionCapacityInputs,
 } from "./execution-capacity.js";
-import {
-  declaredCapabilities,
-  readExecution,
-  readExecutionRuns,
-} from "./execution-state.js";
 import { FeishuSettings } from "./feishu-settings.js";
 import {
   applySecurityHeaders,
@@ -85,6 +91,7 @@ import {
   SESSION_COOKIE,
   sendError,
   sendJson,
+  sendJsonText,
   sessionCookie,
   unauthorized,
 } from "./http.js";
@@ -95,15 +102,10 @@ import type { MachineHost } from "./machine-host.js";
 import { serveMachines } from "./machines.js";
 import { readMentionCandidates } from "./mention-candidates.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
-import { readNeedsState } from "./needs-state.js";
-import { readNeedsVersion } from "./needs-version.js";
+import { qualifiedReferenceResolver } from "./qualified-refs.js";
 import {
   contextUsageRevision,
   type ExecutionContexts,
-  InvalidQuery,
-  needsYou,
-  needsYouCounts,
-  noticePage,
   projectSnapshotView,
   projectState,
   roleDetail,
@@ -113,13 +115,35 @@ import {
   templateList,
   webMemberView,
 } from "./read.js";
+import {
+  fromReadError,
+  type HostFacts,
+  type HostFactsReader,
+  runWorkbenchRead,
+  toReadError,
+  type WorkbenchReadOp,
+  type WorkbenchReadResult,
+} from "./read-ops.js";
+import { type WorkbenchReadOptions, WorkbenchReadPool } from "./read-pool.js";
+import { releaseNotesView } from "./release-notes.js";
+import { serveSharedFiles } from "./shared-files.js";
 import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
 import { serveAttachmentThumbnail } from "./thumbnails.js";
-import { readPagedCard } from "./timeline-state.js";
+import { serveUploads } from "./uploads.js";
 import { WorkerWizards } from "./worker-wizards.js";
 import { serveWrite } from "./write.js";
+
+const HTTP_METHODS = new Set([
+  "GET",
+  "HEAD",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OPTIONS",
+]);
 
 /**
  * The Workbench listener (M5 plan §3.1).
@@ -144,6 +168,12 @@ export interface WebServerOptions {
   readonly launchProfiles?: () => readonly string[];
   readonly executionDiagnostics?: HostOpsService["executionDiagnostics"];
   readonly cardsCache?: CardsCacheOptions;
+  /**
+   * C-644: run the heavy Workbench reads (cards, card detail, Needs You,
+   * execution, check-log lookups) in read workers with a private query-only
+   * connection. Absent: they run inline on this thread, as before.
+   */
+  readonly workbenchReads?: WorkbenchReadOptions;
   readonly runLimit?: (machine: string) => number;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly machineDisplayName?: (machine: string) => string | undefined;
@@ -172,6 +202,8 @@ export interface WebServerOptions {
   readonly loginLimiter?: LoginLimiter;
   /** Attachment blobs live beside the database (§9.3). */
   readonly dataDir?: string;
+  /** C-638: this process on the health page; "web" also shows the background one. */
+  readonly processRole?: ProcessRole;
   readonly mergeGate?: MergeGateConfiguration;
   /** C-153: the host_ops patrol cadence Needs You quotes to the human. */
   readonly hostOpsPatrolIntervalMs?: number;
@@ -207,6 +239,7 @@ interface RequestContext {
   readonly feishuSettings: FeishuSettings | undefined;
   readonly launchSettings: LaunchSettings | undefined;
   readonly wizards: WorkerWizards;
+  readonly pairings: DevicePairings;
   readonly checks: MachineChecks;
   readonly host: MachineHost | undefined;
   readonly recordTiming: (stage: string, ms: number) => void;
@@ -215,7 +248,13 @@ interface RequestContext {
   readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
   readonly buildInfo: BuildInfo;
   readonly cardsCache: CardsCacheOptions | undefined;
+  /** C-644: one heavy read, in its worker when configured, else inline. */
+  readonly read: (
+    op: WorkbenchReadOp,
+    recordTiming?: (stage: string, ms: number) => void,
+  ) => Promise<WorkbenchReadResult>;
   readonly needsReadEpoch: string;
+  readonly capacity: ExecutionCapacityCache;
   readonly runLimit: WebServerOptions["runLimit"];
   readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
   readonly machineDisplayName: WebServerOptions["machineDisplayName"];
@@ -231,6 +270,7 @@ interface RequestContext {
   readonly clock: Clock;
   readonly limiter: LoginLimiter;
   readonly dataDir: string;
+  readonly processRole: ProcessRole;
   readonly mergeGate: MergeGateConfiguration | undefined;
   readonly hostOpsPatrolIntervalMs: number | undefined;
   readonly hcSession: string | undefined;
@@ -262,6 +302,22 @@ export async function startWebServer(
     );
   const clock = options.clock ?? systemClock;
   const needsReadEpoch = randomUUID();
+  // C-634: every SSE connection and the GET share one view per project.
+  const capacity = new ExecutionCapacityCache({
+    now: () => clock.now(),
+    inputs: (now) => executionCapacityInputs(store, now),
+    build: (project, now) =>
+      executionCapacity(
+        store,
+        options.runLimit,
+        options.mergeGate,
+        options.runLimitMaximum,
+        options.machineDisplayName,
+        options.resourceLimits,
+        project,
+        now,
+      ),
+  });
   const limiter = options.loginLimiter ?? new LoginLimiter();
   const log =
     options.log ??
@@ -296,6 +352,55 @@ export async function startWebServer(
     options.machineHost,
   );
 
+  // Host facts stay on this thread: they read private runtime files and
+  // in-memory check jobs. Only machines named by open notices are asked.
+  const hostFacts: HostFactsReader = async ({ project, machines, purpose }) => {
+    const records = store.uow.read((tx) =>
+      machines.map((id) => [id, tx.machines.get(project, id)] as const),
+    );
+    const facts: Record<string, HostFacts[string]> = {};
+    for (const [id, machine] of records) {
+      if (purpose === "needs_version") {
+        facts[id] = {
+          manual: checks.currentBinding(project, machine, "manual-upgrade"),
+          ...(machine
+            ? { tools: checks.currentToolsCommand(project, machine) }
+            : {}),
+        };
+        continue;
+      }
+      const binding = checks.currentBinding(project, machine);
+      facts[id] = {
+        binding,
+        ...(machine && binding
+          ? { upgrade: checks.currentUpgradeCommand(project, machine, binding) }
+          : {}),
+        ...(machine
+          ? { tools: checks.currentToolsCommand(project, machine) }
+          : {}),
+      };
+    }
+    return facts;
+  };
+  const pool = options.workbenchReads
+    ? new WorkbenchReadPool(options.workbenchReads)
+    : undefined;
+  const read: RequestContext["read"] = async (op, recordTiming) => {
+    if (pool) return pool.read(op, hostFacts, recordTiming);
+    let result: WorkbenchReadResult;
+    try {
+      result = await runWorkbenchRead(store, op, hostFacts);
+    } catch (error) {
+      const rejection = toReadError(error);
+      throw rejection ? fromReadError(rejection) : error;
+    }
+    for (const [stage, ms] of Object.entries(result.timings))
+      recordTiming?.(stage, ms);
+    return result;
+  };
+
+  // C-705: one-time device pairing codes feed the add-worker wizard.
+  const pairings = new DevicePairings(clock, !!options.machineHost?.wizard);
   const wizards = new WorkerWizards(
     store,
     clock,
@@ -304,6 +409,7 @@ export async function startWebServer(
     options.machineHost?.wizard,
     options.runLimit,
     options.runLimitMaximum,
+    pairings,
   );
 
   const http = createServer((req, res) => {
@@ -335,8 +441,14 @@ export async function startWebServer(
       /* Invalid URLs are handled below. */
     }
     const phases: Record<string, number> = {};
+    // C-638: named by method and route template only, for stall attribution.
+    const activity = beginActivity(
+      "request",
+      `web ${HTTP_METHODS.has(req.method ?? "") ? req.method : "OTHER"} ${route}`,
+    );
     let logged = false;
     const completed = () => {
+      activity.end();
       if (logged) return;
       logged = true;
       log({
@@ -359,27 +471,31 @@ export async function startWebServer(
     };
     res.once("finish", completed);
     res.once("close", completed);
-    void handle(req, res, (stage, ms) => {
-      phases[stage] = ms;
-    }).catch((error: unknown) => {
-      code = error instanceof HttpRejection ? error.code : "internal_error";
-      if (!(error instanceof HttpRejection)) {
+    void activity
+      .run(() =>
+        handle(req, res, (stage, ms) => {
+          phases[stage] = ms;
+        }),
+      )
+      .catch((error: unknown) => {
+        code = error instanceof HttpRejection ? error.code : "internal_error";
+        if (!(error instanceof HttpRejection)) {
+          if (!res.headersSent) {
+            sendError(res, 500, "internal_error", "internal error");
+          } else {
+            res.end();
+          }
+          return;
+        }
         if (!res.headersSent) {
-          sendError(res, 500, "internal_error", "internal error");
+          sendError(res, error.status, error.code, error.message, {
+            ...(error.details === undefined ? {} : { details: error.details }),
+            headers: error.headers,
+          });
         } else {
           res.end();
         }
-        return;
-      }
-      if (!res.headersSent) {
-        sendError(res, error.status, error.code, error.message, {
-          ...(error.details === undefined ? {} : { details: error.details }),
-          headers: error.headers,
-        });
-      } else {
-        res.end();
-      }
-    });
+      });
   });
 
   async function handle(
@@ -401,11 +517,14 @@ export async function startWebServer(
       await handleApi({
         checks,
         wizards,
+        pairings,
         host: options.machineHost,
         recordTiming,
         buildInfo,
         cardsCache: options.cardsCache,
+        read,
         needsReadEpoch,
+        capacity,
         req,
         res,
         url,
@@ -414,6 +533,7 @@ export async function startWebServer(
         clock,
         limiter,
         dataDir,
+        processRole: options.processRole ?? "server",
         mergeGate: options.mergeGate,
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
         hcSession: options.hcSession,
@@ -475,6 +595,7 @@ export async function startWebServer(
         http.close((error) => {
           cancel();
           void drainTasks([
+            pool?.close(),
             checks.settled(),
             wizards.settled(),
             launchSettings?.checks.drain(),
@@ -503,6 +624,26 @@ async function handleApi(context: RequestContext): Promise<void> {
     if (req.method !== "GET") methodNotAllowed(["GET"]);
     return sessionStatus(context);
   }
+
+  // C-705: a new device has no account; it only gets a one-time pairing code.
+  // C-706: the claimed device fetches its init script and reports the result.
+  if (
+    /^\/api\/device-pairings(?:\/(?:status|init-script|initialized))?$/.test(
+      path,
+    )
+  )
+    return context.pairings.serveDevice(
+      req,
+      context.res,
+      path.slice("/api/device-pairings".length),
+    );
+
+  // C-725: an Agent's MCP Token is refused outright, not asked to log in.
+  if (
+    CAPABILITY_GUIDES_ROUTE.test(path) &&
+    req.headers.authorization !== undefined
+  )
+    throw new HttpRejection(403, "unauthorized", "仅限人类登录会话");
 
   // Everything below needs a session; an MCP Bearer token does not count.
   const session = requireSession(context);
@@ -593,6 +734,24 @@ async function handleApi(context: RequestContext): Promise<void> {
     return;
   }
 
+  // C-685: the cross-project shared file library; a human session acts here.
+  if (path === "/api/shared-files" || path.startsWith("/api/shared-files/"))
+    return serveSharedFiles({
+      req,
+      res,
+      url,
+      store: context.store,
+      dataDir: context.dataDir,
+      human: { kind: "human", member_id: session.member_id ?? null },
+    });
+
+  // C-638: heap use and limit of the server processes; numbers only.
+  if (path === "/api/process-health") {
+    if (req.method !== "GET") methodNotAllowed(["GET"]);
+    sendJson(res, 200, processHealthView(context.dataDir, context.processRole));
+    return;
+  }
+
   if (path === "/api/me") {
     if (req.method !== "GET") methodNotAllowed(["GET"]);
     sendJson(res, 200, {
@@ -635,8 +794,26 @@ async function handleApi(context: RequestContext): Promise<void> {
         id: project.id,
         name: project.name,
         created_at: project.created_at,
+        // C-674: the display code full numbers are written with (`SEN-C-34`).
+        code: project.code,
       })),
     });
+    return;
+  }
+
+  // C-675: a full number typed into a search box (`SEN-C-34`, `SEN-Q-12`,
+  // `SEN-H-46`), resolved in the project its code names; null when there is
+  // no such project or entity.
+  if (path === "/api/refs/resolve") {
+    if (req.method !== "GET") methodNotAllowed(["GET"]);
+    const id = (url.searchParams.get("id") ?? "").trim();
+    const refs = extractQualifiedReferences(id).filter(
+      (ref) => ref.qualified === id,
+    );
+    const [found] = qualifiedReferenceResolver(context.store)(refs).filter(
+      (ref) => ref.exists,
+    );
+    sendJson(res, 200, { reference: found ?? null });
     return;
   }
 
@@ -657,6 +834,8 @@ async function handleApi(context: RequestContext): Promise<void> {
   throw new HttpRejection(404, "not_found", "not found");
 }
 
+const CAPABILITY_GUIDES_ROUTE = /^\/api\/projects\/[^/]+\/capability-guides$/;
+
 /** `/api/projects/<id><rest>`; the id is URL-encoded by the client. */
 const PROJECT_ROUTE = /^\/api\/projects\/([^/]+)(\/.*)$/;
 
@@ -676,6 +855,12 @@ async function serveProjectRoute(
   if (rest === "/worker-wizards" || rest.startsWith("/worker-wizards/"))
     return context.wizards.serve(req, res, project_id, rest, () =>
       requireSession(context),
+    );
+
+  if (rest === "/capability-guides")
+    return serveCapabilityGuides(
+      { ...context, authorize: () => requireSession(context) },
+      project_id,
     );
 
   if (rest === "/machines" || rest.startsWith("/machines/")) {
@@ -704,17 +889,7 @@ async function serveProjectRoute(
       req,
       res,
       after,
-      capacityRevision: () =>
-        executionCapacityRevision(
-          store,
-          context.runLimit,
-          context.mergeGate,
-          context.runLimitMaximum,
-          context.machineDisplayName,
-          context.resourceLimits,
-          project_id,
-          clock.now(),
-        ),
+      capacityRevision: () => context.capacity.revision(project_id),
       ...(context.stream?.pollMs === undefined
         ? {}
         : { pollMs: context.stream.pollMs }),
@@ -732,6 +907,21 @@ async function serveProjectRoute(
     });
     return;
   }
+
+  if (
+    await serveUploads(
+      {
+        req,
+        res,
+        url,
+        project_id,
+        dataDir: context.dataDir,
+        authorize: () => requireSession(context),
+      },
+      rest,
+    )
+  )
+    return;
 
   if (
     await serveWrite(
@@ -758,20 +948,7 @@ async function serveProjectRoute(
   if (req.method !== "GET") methodNotAllowed(["GET"]);
 
   if (rest === "/execution/capacity") {
-    sendJson(
-      res,
-      200,
-      executionCapacity(
-        store,
-        context.runLimit,
-        context.mergeGate,
-        context.runLimitMaximum,
-        context.machineDisplayName,
-        context.resourceLimits,
-        project_id,
-        clock.now(),
-      ),
-    );
+    sendJson(res, 200, context.capacity.read(project_id).view);
     return;
   }
 
@@ -783,34 +960,13 @@ async function serveProjectRoute(
       projectId: project_id,
       attempt: rest.slice("/prechecks/".length),
       precheck: true,
-      hasAttempt: (attempt) => {
-        const event = projectState(store, project_id)
-          .events.filter((event) => {
-            const payload = event.payload;
-            return (
-              event.card_id &&
-              event.actor.kind === "system" &&
-              event.actor.project_id === project_id &&
-              [
-                "precheck_queued",
-                "precheck_started",
-                "precheck_finished",
-              ].includes(event.type) &&
-              payload !== null &&
-              typeof payload === "object" &&
-              "attempt_id" in payload &&
-              payload.attempt_id === attempt &&
-              "card_id" in payload &&
-              payload.card_id === event.card_id &&
-              "head_sha" in payload &&
-              typeof payload.head_sha === "string" &&
-              /^[a-f0-9]{40}$/u.test(payload.head_sha)
-            );
-          })
-          .sort((a, b) => b.seq - a.seq)[0];
-        if (!event) return false;
-        const payload = event.payload as { head_sha: string };
-        header = `作者预检查\n被检提交：${payload.head_sha}\n更新时间：${event.created_at}\n\n`;
+      hasAttempt: async (attempt) => {
+        const { value } = await context.read(
+          { kind: "precheck_attempt", project: project_id, attempt },
+          context.recordTiming,
+        );
+        if (typeof value !== "string") return false;
+        header = value;
         return true;
       },
       logHeader: () => header,
@@ -841,32 +997,13 @@ async function serveProjectRoute(
       dataDir: context.dataDir,
       projectId: project_id,
       attempt: rest.slice("/merge-checks/".length),
-      hasAttempt: (attempt) =>
-        projectState(store, project_id).events.some((event) => {
-          const payload = event.payload;
-          if (
-            !event.card_id &&
-            event.actor.kind === "system" &&
-            event.type.startsWith("merge_batch_check_") &&
-            (payload as { check?: { attempt_id?: string } } | null)?.check
-              ?.attempt_id === attempt
+      hasAttempt: async (attempt) =>
+        (
+          await context.read(
+            { kind: "merge_check_attempt", project: project_id, attempt },
+            context.recordTiming,
           )
-            return true;
-          return (
-            event.card_id &&
-            event.actor.project_id === project_id &&
-            [
-              "merge_check_queued",
-              "merge_check_started",
-              "merge_check_finished",
-              "merge_check_requeued",
-            ].includes(event.type) &&
-            payload !== null &&
-            typeof payload === "object" &&
-            "attempt_id" in payload &&
-            payload.attempt_id === attempt
-          );
-        }),
+        ).value === true,
       authorize: () => requireSession(context),
     });
   }
@@ -877,6 +1014,22 @@ async function serveProjectRoute(
       store,
       project_id,
       attachment_id: decodeURIComponent(thumbnail[1] ?? ""),
+      req,
+      res,
+      dataDir: context.dataDir,
+    });
+    if (!served) {
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    }
+    return;
+  }
+
+  const poster = /^\/attachments\/([^/]+)\/poster$/.exec(rest);
+  if (poster !== null) {
+    const served = await serveVideoPoster({
+      store,
+      project_id,
+      attachment_id: decodeURIComponent(poster[1] ?? ""),
       req,
       res,
       dataDir: context.dataDir,
@@ -920,27 +1073,80 @@ async function serveProjectRoute(
   }
 
   if (rest === "/cards" || rest === "/cards/version") {
-    try {
-      const token = sessionToken(req);
-      if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
-      const options = {
-        ...context.cardsCache,
-        readScope: createHash("sha256")
-          .update(`needs-you-read-scope:${token}`)
-          .digest("hex"),
-      };
-      sendJson(
-        res,
-        200,
-        rest === "/cards/version"
-          ? readCardsVersion(store, project_id, url, options)
-          : readCachedCardsPage(store, project_id, url, options),
-      );
-    } catch (error) {
-      if (error instanceof InvalidQuery)
-        throw new HttpRejection(400, "validation_failed", error.message);
-      throw error;
+    const token = sessionToken(req);
+    if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
+    const { body } = await context.read(
+      {
+        kind: "cards",
+        project: project_id,
+        url: url.href,
+        version: rest === "/cards/version",
+        cache: {
+          ...context.cardsCache,
+          readScope: createHash("sha256")
+            .update(`needs-you-read-scope:${token}`)
+            .digest("hex"),
+        },
+      },
+      context.recordTiming,
+    );
+    sendJsonText(res, 200, body ?? "null");
+    return;
+  }
+
+  // C-615 / V-3070: another card's attachment as a chip of this card. The
+  // reference is rechecked on every read (sensitive source card, cross-card
+  // reading off); the plain /attachments routes keep their own rules.
+  const refFile =
+    /^\/cards\/([^/]+)\/attachment-refs\/([^/]+)(\/thumbnail|\/preview|\/poster)?$/.exec(
+      rest,
+    );
+  if (refFile !== null) {
+    const card_id = decodeURIComponent(refFile[1] ?? "") as CardId;
+    const attachment_id = decodeURIComponent(refFile[2] ?? "");
+    const allowed = readAttachmentRefs(
+      store,
+      project_id,
+      card_id,
+      attachment_id,
+    )?.attachments.some((a) => a.id === attachment_id);
+    if (!allowed)
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    const part = refFile[3];
+    const serve =
+      part === "/thumbnail"
+        ? serveAttachmentThumbnail
+        : part === "/preview"
+          ? serveAttachmentPreview
+          : part === "/poster"
+            ? serveVideoPoster
+            : serveAttachment;
+    const served = await serve({
+      store,
+      project_id,
+      attachment_id,
+      req,
+      res,
+      dataDir: context.dataDir,
+    });
+    if (!served)
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    return;
+  }
+
+  const attachmentRefs = /^\/cards\/([^/]+)\/attachment-refs$/.exec(rest);
+  if (attachmentRefs !== null) {
+    const card_id = decodeURIComponent(attachmentRefs[1] ?? "") as CardId;
+    const refs = readAttachmentRefs(
+      store,
+      project_id,
+      card_id,
+      url.searchParams.get("ids"),
+    );
+    if (refs === undefined) {
+      throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
     }
+    sendJson(res, 200, refs);
     return;
   }
 
@@ -957,22 +1163,46 @@ async function serveProjectRoute(
 
   const card = /^\/cards\/([^/]+)$/.exec(rest);
   if (card !== null) {
-    const card_id = decodeURIComponent(card[1] ?? "") as CardId;
-    const detail = readPagedCard(store, project_id, card_id, url, {
-      recordTiming: context.recordTiming,
-      mergeGateStatus:
-        context.mergeGate?.forProject(project_id).status ?? "disabled",
-      now,
-      ...(url.searchParams.get("at")
-        ? { timelineAnchor: url.searchParams.get("at") ?? "" }
-        : {}),
-    });
-    if (detail === undefined) {
-      throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
+    const ifNoneMatch = req.headers["if-none-match"];
+    const acceptGzip = /\bgzip\b/.test(
+      String(req.headers["accept-encoding"] ?? ""),
+    );
+    const { body, gzip, etag, notModified } = await context.read(
+      {
+        kind: "card",
+        project: project_id,
+        card: decodeURIComponent(card[1] ?? "") as CardId,
+        url: url.href,
+        mergeGateStatus:
+          context.mergeGate?.forProject(project_id).status ?? "disabled",
+        now,
+        ...(ifNoneMatch ? { ifNoneMatch } : {}),
+        ...(acceptGzip ? { acceptGzip } : {}),
+      },
+      context.recordTiming,
+    );
+    // C-688: an open detail revalidates; an unchanged card answers 304.
+    const validator = etag ? { ETag: etag } : {};
+    if (notModified) {
+      res.writeHead(304, { "Cache-Control": "no-store", ...validator });
+      res.end();
+      return;
     }
-    sendJson(res, 200, {
-      project_id,
-      ...cardSectionPayload(detail, url.searchParams.get("section")),
+    if (gzip) {
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Encoding": "gzip",
+        "Content-Length": gzip.byteLength,
+        "Cache-Control": "no-store",
+        Vary: "Accept-Encoding",
+        ...validator,
+      });
+      res.end(gzip);
+      return;
+    }
+    sendJsonText(res, 200, body ?? "null", {
+      Vary: "Accept-Encoding",
+      ...validator,
     });
     return;
   }
@@ -1003,19 +1233,19 @@ async function serveProjectRoute(
     return;
   }
   if (rest === "/execution") {
-    sendJson(
-      res,
-      200,
-      readExecution(
-        store,
-        project_id,
-        url,
+    const { body } = await context.read(
+      {
+        kind: "execution",
+        project: project_id,
+        url: url.href,
         now,
-        context.queueWarningMinutes,
-        context.contextUsage?.(project_id),
-        declaredCapabilities(context.capabilityCatalog),
-      ),
+        queueWarningMinutes: context.queueWarningMinutes,
+        contexts: context.contextUsage?.(project_id),
+        capabilityCatalog: capabilityCatalog(context),
+      },
+      context.recordTiming,
     );
+    sendJsonText(res, 200, body ?? "null");
     return;
   }
   const runPage = /^\/execution\/assignments\/([^/]+)\/runs$/u.exec(rest);
@@ -1026,118 +1256,90 @@ async function serveProjectRoute(
     } catch {
       throw new HttpRejection(404, "not_found", "Assignment 不存在");
     }
-    const page = readExecutionRuns(
-      store,
-      project_id,
-      assignmentId,
-      url.searchParams.get("before") ?? undefined,
+    const { body } = await context.read(
+      {
+        kind: "execution_runs",
+        project: project_id,
+        assignment: assignmentId,
+        before: url.searchParams.get("before") ?? undefined,
+      },
+      context.recordTiming,
     );
-    if (!page) throw new HttpRejection(404, "not_found", "Assignment 不存在");
-    sendJson(res, 200, { project_id, ...page });
+    sendJsonText(res, 200, body ?? "null");
     return;
   }
   if (rest === "/needs-you/version") {
     requireSession(context);
     const token = sessionToken(req);
     if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
-    sendJson(res, 200, {
-      project_id,
-      at: now,
-      read_scope: createHash("sha256")
-        .update(`needs-you-read-scope:${token}`)
-        .digest("hex"),
-      revision: readNeedsVersion(
-        store,
-        project_id,
-        JSON.stringify([
+    const { body } = await context.read(
+      {
+        kind: "needs_version",
+        project: project_id,
+        now,
+        readScope: createHash("sha256")
+          .update(`needs-you-read-scope:${token}`)
+          .digest("hex"),
+        context: JSON.stringify([
           context.needsReadEpoch,
           context.mergeGate?.forProject(project_id).status ?? "disabled",
           context.hostOpsPatrolIntervalMs ?? null,
           context.hcSession ?? null,
           context.runtimeUnknownGraceMs ?? null,
         ]),
-        now,
-        context.runtimeUnknownGraceMs,
-        (project, machine) =>
-          context.checks.currentBinding(project, machine, "manual-upgrade"),
-        (project, machine) =>
-          context.checks.currentToolsCommand(project, machine),
-      ),
-    });
+        runtimeUnknownGraceMs: context.runtimeUnknownGraceMs,
+      },
+      context.recordTiming,
+    );
+    sendJsonText(res, 200, body ?? "null");
     return;
   }
   if (rest === "/needs-you" || rest === "/needs-you/counts") {
     requireSession(context);
     const token = sessionToken(req);
     if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
-    res.setHeader("X-Cardigan-Read-At", now);
-    res.setHeader(
-      "X-Cardigan-Read-Scope",
-      createHash("sha256")
-        .update(`needs-you-read-scope:${token}`)
-        .digest("hex"),
-    );
     const section = url.searchParams.get("section");
     if (
       section !== null &&
       !["decisions", "merges", "actions", "later", "notices"].includes(section)
     )
       throw new HttpRejection(400, "validation_failed", "Needs You 标签无效");
-    const state = {
-      ...readNeedsState(store, project_id),
-      ...(context.mergeGate
-        ? {
-            project_settings:
-              mergeProjectSettings(context.mergeGate, project_id) ?? {},
-          }
-        : {}),
-    };
-    if (rest === "/needs-you/counts") {
-      sendJson(res, 200, {
-        project_id,
-        ...needsYouCounts(
-          state,
-          now,
-          context.mergeGate?.forProject(project_id).status,
-          context.runtimeUnknownGraceMs,
-        ),
-      });
-      return;
-    }
-    sendJson(res, 200, {
-      project_id,
-      ...needsYou(
-        state,
+    const { body } = await context.read(
+      {
+        kind: "needs",
+        project: project_id,
+        counts: rest === "/needs-you/counts",
+        section: (section ?? undefined) as NeedsYouSection | undefined,
         now,
-        context.mergeGate?.forProject(project_id).status,
-        context.hostOpsPatrolIntervalMs,
-        context.hcSession,
-        context.runtimeUnknownGraceMs,
-        (section ?? undefined) as NeedsYouSection | undefined,
-        (project, machine, binding) =>
-          context.checks.currentUpgradeCommand(project, machine, binding),
-        (project, machine) =>
-          context.checks.currentToolsCommand(project, machine),
-      ),
+        mergeGateStatus: context.mergeGate?.forProject(project_id).status,
+        projectSettings: context.mergeGate
+          ? (mergeProjectSettings(context.mergeGate, project_id) ?? {})
+          : undefined,
+        hostOpsPatrolIntervalMs: context.hostOpsPatrolIntervalMs,
+        hcSession: context.hcSession,
+        runtimeUnknownGraceMs: context.runtimeUnknownGraceMs,
+      },
+      context.recordTiming,
+    );
+    sendJsonText(res, 200, body ?? "null", {
+      "X-Cardigan-Read-At": now,
+      "X-Cardigan-Read-Scope": createHash("sha256")
+        .update(`needs-you-read-scope:${token}`)
+        .digest("hex"),
     });
     return;
   }
 
   if (rest === "/notices") {
-    try {
-      sendJson(
-        res,
-        200,
-        noticePage(
-          readNeedsState(store, project_id),
-          url.searchParams.get("before") ?? undefined,
-        ),
-      );
-    } catch (error) {
-      if (error instanceof InvalidQuery)
-        throw new HttpRejection(400, "validation_failed", error.message);
-      throw error;
-    }
+    const { body } = await context.read(
+      {
+        kind: "notices",
+        project: project_id,
+        before: url.searchParams.get("before") ?? undefined,
+      },
+      context.recordTiming,
+    );
+    sendJsonText(res, 200, body ?? "null");
     return;
   }
 
@@ -1148,6 +1350,7 @@ async function serveProjectRoute(
       ...projectPreferences(state),
       cross_card_read: projectPreferences(state).cross_card_read !== false,
       high_risk_paths: highRiskPaths(projectPreferences(state)),
+      human_card_templates: humanCardTemplates(projectPreferences(state)),
       auto_merge_paused: projectPreferences(state).auto_merge_paused === true,
       decision_delegation: decisionDelegation(projectPreferences(state)),
       pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),
@@ -1203,6 +1406,10 @@ async function serveProjectRoute(
   }
   if (rest === "/snapshot") {
     sendJson(res, 200, projectSnapshotView(state, now));
+    return;
+  }
+  if (rest === "/release-notes") {
+    sendJson(res, 200, releaseNotesView(state, url));
     return;
   }
 
@@ -1261,6 +1468,9 @@ function sessionStatus(context: RequestContext): void {
           build: context.buildInfo,
           // C-616: lets the comment box refuse an oversized file before posting.
           attachment_max_bytes: MAX_ATTACHMENT_BYTES,
+          // C-683: videos go through resumable uploads with their own limit.
+          video_max_bytes: uploadSessionsFor(context.dataDir).maxBytes,
+          video_chunk_bytes: uploadSessionsFor(context.dataDir).chunkBytes,
           read_scope: createHash("sha256")
             .update(`needs-you-read-scope:${token}`)
             .digest("hex"),
@@ -1345,4 +1555,17 @@ function requireSession(context: RequestContext): WebSession {
     unauthorized("session expired or revoked");
   }
   return session;
+}
+
+/** An unreadable catalog declares nothing rather than failing the read. */
+function capabilityCatalog(context: RequestContext) {
+  if (!context.capabilityCatalog) return undefined;
+  try {
+    // Keys and platforms only: entries also carry parsers, which never clone.
+    return context
+      .capabilityCatalog()
+      .map(({ key, os }) => ({ key, os: [...os] }));
+  } catch {
+    return undefined;
+  }
 }

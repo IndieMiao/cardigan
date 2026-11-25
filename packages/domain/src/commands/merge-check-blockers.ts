@@ -4,6 +4,7 @@ import type {
   MergeCheckBlocker,
   Reference,
 } from "../entities.js";
+import { eventsOfTypes } from "../event-index.js";
 import type { CardId, DeliveryId } from "../ids.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
 import {
@@ -49,13 +50,12 @@ function reasons(state: CommandState, card_id: CardId): Reason[] {
 /** Card streams are ordered by seq; other event types do not reset the clock. */
 function recorded(events: readonly Event[], card_id?: CardId) {
   const cards = new Map<CardId, Map<string, MergeCheckBlocker>>();
-  for (const e of events
-    .filter(
-      (e) =>
-        (!card_id || e.card_id === card_id) &&
-        (e.type === "merge_check_blocked" ||
-          e.type === "merge_check_unblocked"),
-    )
+  // C-649: the two types from the type index, in history order.
+  for (const e of eventsOfTypes(events, [
+    "merge_check_blocked",
+    "merge_check_unblocked",
+  ])
+    .filter((e) => !card_id || e.card_id === card_id)
     .sort((a, b) => a.seq - b.seq)) {
     if (e.actor.kind !== "system" || !e.card_id) continue;
     let active = cards.get(e.card_id);

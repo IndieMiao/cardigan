@@ -8,7 +8,7 @@ export const DEFAULT_MAX_RUN_LIMIT = 16;
 export interface MachineRunCapacity {
   readonly machine_id: string;
   readonly label: string;
-  /** Non-exempt Agent occupancy, including startup/stop reservations. */
+  /** Non-exempt Agent occupancy of unfinished Runs, including startup/stop reservations. */
   readonly running: number;
   /** Absolute Agent occupancy, including standing PMs and host_ops. */
   readonly total_running: number;
@@ -64,6 +64,24 @@ export const runOccupiesSlot = (run: Run): boolean =>
         !["started", "exited"].includes(run.launch_publication.phase)) ||
       ["dispatched", "acked", "running"].includes(run.status),
   );
+
+/**
+ * C-620: the turn ended with a business result (finish_run, or a system
+ * ending of a blocking decision or review limit). Its session is idle. A
+ * cancelled Run is not: the human, host or system ended it from outside and
+ * its process may still be executing until exit is confirmed.
+ */
+export const runEndedByBusiness = (run: Run): boolean =>
+  run.status === "completed" || run.status === "failed";
+
+/**
+ * C-620: admission, quota and resource slots. An idle session left by a
+ * business-ended turn holds none, even while it is still being stopped or
+ * recycled. Physical leases, helper upgrades and the per-Assignment launch
+ * fence keep using `runOccupiesSlot` until exit is confirmed.
+ */
+export const runHoldsCapacity = (run: Run): boolean =>
+  !runEndedByBusiness(run) && runOccupiesSlot(run);
 
 /** Absolute Run occupancy; capacity callers must also classify the owner. */
 export function occupiedRunSlots(

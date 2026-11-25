@@ -762,3 +762,67 @@ import {
   workerCooldown,
   workerPreparationOutcome,
 } from "./worker-maintenance.js";
+
+test("C-708: a tool the probe cannot find leaves the machine's other capabilities and its launch eligibility intact", async () => {
+  const store = Store.open({ dataDir: temp() });
+  try {
+    store.createProject({ id: "a" });
+    const machine = () => {
+      const registered = store.uow.read((tx) => tx.machines.get("a", "local"));
+      if (!registered) throw new Error("Missing fixture machine");
+      return registered;
+    };
+    const execution: ExecutionConfig = { mode: "local", dataDir: temp() };
+    const installed = new Set(["node", "adb"]);
+    const probe = vi.fn(
+      async (_e: ExecutionConfig, _os: string, command: CapabilityCommand) => {
+        const binary = Array.isArray(command) ? command[0] : undefined;
+        return binary && installed.has(binary)
+          ? { ok: true, output: `${binary} 24.11.0` }
+          : { ok: false, output: "" };
+      },
+    );
+    const catalog = () =>
+      BUILTIN_MACHINE_CAPABILITIES.filter((c) =>
+        [
+          "node",
+          "godot",
+          "blender",
+          "android.sdk",
+          "android.emulator",
+        ].includes(c.key),
+      );
+    const options = {
+      store,
+      project: "a",
+      machine: "local",
+      target: () => ({ execution, machine: machine() }),
+      check: async () => ({ blockers: [], launch_enabled: true }),
+      catalog,
+      probe,
+      now: () => "2026-11-25T00:00:00.000Z",
+    };
+    const first = await refreshMachineObservations(options);
+    expect(first.health).toMatchObject({
+      status: "passed",
+      blockers: [],
+      launch_enabled: true,
+      available: true,
+    });
+    expect(first.capabilities.map((c) => c.key).sort()).toEqual([
+      "android.sdk",
+      "node",
+    ]);
+    // Installed on the device afterwards: the next check registers it too.
+    installed.add("godot");
+    const second = await refreshMachineObservations(options);
+    expect(second.health).toMatchObject({ status: "passed", blockers: [] });
+    expect(second.capabilities.map((c) => c.key).sort()).toEqual([
+      "android.sdk",
+      "godot",
+      "node",
+    ]);
+  } finally {
+    store.close();
+  }
+});
