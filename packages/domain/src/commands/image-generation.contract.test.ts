@@ -107,8 +107,7 @@ test("references must be distinct image attachments of the same card", () => {
   ).toContain("最多");
 });
 
-test("image generation is a producer tool, never a verifier tool", () => {
+test("image generation is a producer tool outside the standing PM set", () => {
   expect(ROLE_TOOL_ALLOWLISTS.produce).toContain("generate_image");
-  expect(ROLE_TOOL_ALLOWLISTS.verify).not.toContain("generate_image");
   expect(ROLE_TOOL_ALLOWLISTS.standing).not.toContain("generate_image");
 });

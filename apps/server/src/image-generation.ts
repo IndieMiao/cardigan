@@ -8,6 +8,7 @@ import {
   type ImageQuality,
   imageReferencesOnCard,
 } from "@cardigan/domain";
+import { readPrivateConfig } from "@cardigan/host";
 import {
   fileAttachmentStore,
   type GenerateImageInput,
@@ -25,7 +26,6 @@ import {
   IMAGE_GENERATION_DEFAULT_CONTACT,
   loadImageGenerationConfig,
 } from "./image-generation-config.js";
-import { readPrivateConfig } from "./probe-config.js";
 
 export const IMAGE_GENERATION_EVENT = "image_generation";
 export interface ImageGenerationRequest {

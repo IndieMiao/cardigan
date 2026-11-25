@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { readPrivateConfig } from "@cardigan/host";
 import { parse } from "yaml";
-import { readPrivateConfig } from "./probe-config.js";
 
 /**
  * C-734: host-only image generation settings. The credential is named by a

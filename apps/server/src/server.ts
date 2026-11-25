@@ -15,8 +15,6 @@ import {
   executorExecution,
   HostOpsService,
   holdLongOperation,
-  ImageGenerationService,
-  imageGenerationConfigLoader,
   LiveExtMessageSender,
   loadMachineCapabilityCatalog,
   loadMergeGateConfig,
@@ -79,6 +77,10 @@ import {
 import { DiagnosticsReader } from "./diagnostics-reader.js";
 import { type GitBinding, ServerGit } from "./git.js";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
+import {
+  ImageGenerationService,
+  imageGenerationConfigLoader,
+} from "./image-generation.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";

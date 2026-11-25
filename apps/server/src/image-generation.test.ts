@@ -15,17 +15,17 @@ import {
   card_id,
   project_id,
   seedProject,
-} from "../../mcp-server/src/test-support.js";
+} from "../../../packages/mcp-server/src/test-support.js";
+import {
+  IMAGE_GENERATION_EVENT,
+  ImageGenerationService,
+  redactImageError,
+} from "./image-generation.js";
 import {
   type ImageGenerationConfig,
   type LoadedImageGenerationConfig,
   parseImageGenerationConfig,
 } from "./image-generation-config.js";
-import {
-  IMAGE_GENERATION_EVENT,
-  ImageGenerationService,
-  redactImageError,
-} from "./image-generation-service.js";
 
 vi.setConfig({ testTimeout: 20_000 });
 const roots: string[] = [],

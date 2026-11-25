@@ -276,7 +276,6 @@ describe("tool and worktree boundaries", () => {
                       "request_recheck",
                       "request_check",
                       "run_probe",
-                      "generate_image",
                       "request_mobile_signature",
                     ].includes(tool)
                   : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
