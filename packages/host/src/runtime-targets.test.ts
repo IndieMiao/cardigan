@@ -942,8 +942,9 @@ test("C-608: an enrolled worker upgrades through the patrol path before launch, 
   expect(refresh).toHaveBeenCalledOnce();
   expect(refresh).toHaveBeenCalledWith("fixture", "worker-a");
   readiness.mockResolvedValue([protocolMismatch(1)]);
+  // The final check before an adapter starts probes live (C-642 cache bypassed).
   await expect(
-    enrolled.forLaunch("fixture", assignment("worker-a")),
+    enrolled.forLaunch("fixture", assignment("worker-a"), undefined, false),
   ).rejects.toThrow(protocolMismatch(1));
   expect(refresh).toHaveBeenCalledOnce();
   resetLaunchRefreshes();
