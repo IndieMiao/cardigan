@@ -2259,6 +2259,26 @@ test("Web confirms the current story proposal once: every child opens in one tra
   });
   expect(childrenOf()).toHaveLength(2);
   expect((await readNeeds()).story_proposals).toEqual([]);
+  // C-748: one confirmation event, however often it is retried; it rings the
+  // Office with the version and children, and tells Ops.
+  const confirmations = s
+    .state()
+    .events.filter(
+      (e) => e.type === "story_proposal_confirmed" && e.card_id === s.card.id,
+    );
+  expect(confirmations).toHaveLength(1);
+  const [confirmation] = confirmations;
+  if (!confirmation) throw new Error("Missing confirmation event");
+  const notes = routeEvent({
+    event: confirmation,
+    snapshot: s.state(),
+  }).notifications;
+  expect(notes.map((n) => [n.recipient.kind, n.kind, n.rule])).toEqual([
+    ["pm_office", "card", "story/proposal confirmed"],
+    ["pm_ops", "story_fyi", "story/proposal confirmed"],
+  ]);
+  expect(notes[0]?.summary).toContain(`第 1 版`);
+  expect(notes[0]?.summary).toContain(`${a}、${b}`);
 });
 
 test("V-2625: mark-done carries the story summary the person saw and refuses a stale one", async () => {

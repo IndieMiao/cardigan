@@ -366,6 +366,7 @@ function routeComment(input: RouteInput, draft: Draft): void {
 
   if (mentions.length > 0) {
     routeMentions(input, draft, mentions, item?.card_id);
+    routeStoryReplyWithMentions(input, draft, entry);
     return;
   }
   if (item !== undefined) return;
@@ -382,6 +383,117 @@ function routeComment(input: RouteInput, draft: Draft): void {
       `comment from the human on ${subject(input)}`,
     );
   }
+}
+
+/**
+ * C-748: the human's reply to the Office's own story discussion (a change
+ * request on a proposal, or answers to its question checklist) still reaches
+ * the Office when the comment @mentions someone else. The mentioned targets
+ * keep their notifications; nobody else is added.
+ */
+function routeStoryReplyWithMentions(
+  input: RouteInput,
+  draft: Draft,
+  entry: TimelineEntry | undefined,
+): void {
+  if (input.event.actor.kind !== "human" || !entry) return;
+  const story = input.snapshot.cards.find(
+    (c) => c.id === input.event.card_id,
+  )?.story;
+  if (!story) return;
+  const replied =
+    entry.reply_to !== undefined &&
+    ((story.proposals ?? []).some((p) => p.entry_id === entry.reply_to) ||
+      (story.question_groups ?? []).some((g) => g.id === entry.reply_to));
+  const answered = (story.question_groups ?? []).some((g) =>
+    g.questions.some((q) => q.resolution?.entry_id === entry.id),
+  );
+  if (!replied && !answered) return;
+  if (officeAlreadyTold(input, draft)) return;
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "comment",
+    "story/discuss",
+    `需求卡 ${subject(input)} 有人对拆解讨论的回复，请 Office 跟进。`,
+  );
+}
+
+/** The Office already has a note on this event, logically or as itself. */
+function officeAlreadyTold(input: RouteInput, draft: Draft): boolean {
+  const office = officeOnDuty(input.snapshot.assignments);
+  return draft.notifications.some(
+    (n) =>
+      n.recipient.kind === "pm_office" ||
+      (office !== undefined &&
+        n.recipient.kind === "assignment" &&
+        n.recipient.assignment_id === office.id),
+  );
+}
+
+/**
+ * C-748: the human confirmed a story proposal. Ring the Office at once with
+ * the version and the children it opened, so it stops asking the owner to
+ * confirm; PM Ops gets an FYI. A replayed confirmation emits no event.
+ */
+function routeStoryProposalConfirmed(input: RouteInput, draft: Draft): void {
+  if (input.event.actor.kind !== "human") return;
+  const story = input.snapshot.cards.find(
+    (c) => c.id === input.event.card_id && c.story,
+  );
+  if (!story) return;
+  const version = payloadObject(input.event.payload).version;
+  const card_ids = payloadStrings(input.event.payload, "card_ids");
+  const what = `需求卡 ${story.id} 拆解方案第 ${String(version)} 版已由所有者确认，开出 ${card_ids.length} 张子卡：${card_ids.join("、") || "无"}`;
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "card",
+    "story/proposal confirmed",
+    `${what}。不再等待确认，勿再催所有者。`,
+  );
+  note(
+    input,
+    draft,
+    recipient.pm_ops(),
+    "story_fyi",
+    "story/proposal confirmed",
+    `知会：${what}。`,
+  );
+}
+
+/**
+ * C-748: the human cancelled a story card, which also drops its proposal.
+ * Ring the Office so it stops asking the owner about it. Children cancelled
+ * with it are not story cards and route as before.
+ */
+function routeStoryCancelled(input: RouteInput, draft: Draft): void {
+  if (input.event.actor.kind !== "human") return;
+  const story = input.snapshot.cards.find(
+    (c) => c.id === input.event.card_id && c.story,
+  );
+  if (!story) return;
+  const previous = input.snapshot.events
+    .filter(
+      (e) =>
+        e.card_id === input.event.card_id &&
+        e.seq < input.event.seq &&
+        ["card_created", "card_updated"].includes(e.type),
+    )
+    .sort((a, b) => b.seq - a.seq)[0];
+  if (previous && payloadString(previous.payload, "status") === "cancelled")
+    return;
+  if (officeAlreadyTold(input, draft)) return;
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "card",
+    "story/cancelled",
+    `需求卡 ${story.id} 已由所有者取消，拆解方案不再等待确认，勿再催所有者。`,
+  );
 }
 
 /**
@@ -1865,10 +1977,15 @@ export function routeEvent(input: RouteInput): RouteResult {
       );
       break;
     }
+    case "story_proposal_confirmed":
+      routeStoryProposalConfirmed(input, draft);
+      break;
     case "card_created":
       routeCardPlanning(input, draft);
       break;
     case "card_updated":
+      if (payloadString(input.event.payload, "status") === "cancelled")
+        routeStoryCancelled(input, draft);
       if (payloadString(input.event.payload, "status") === "todo") {
         // updateCard also emits status on title-only edits. Compare the last
         // planning event in this card's stream, not the current snapshot.

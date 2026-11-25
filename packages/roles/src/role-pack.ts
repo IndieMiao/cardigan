@@ -226,6 +226,15 @@ export const PM_OFFICE_NUDGE_RULES = [
 ] as const;
 
 /**
+ * C-748: before saying a story proposal waits for the owner, the Office reads
+ * the story card's latest state. Prompt text only: `get_card` is already a PM
+ * tool and nothing else changes.
+ */
+export const PM_OFFICE_STORY_PROPOSAL_RULES = [
+  "对所有者说“某拆解方案在等你确认”之前，先用 `get_card` 读需求卡最新状态：时间线已有“已确认拆解方案第 N 版”（`story_proposal_confirmed`）或该版方案已带确认记录的，不再催，改为转述开出的子卡；需求卡已取消的也不再催。",
+] as const;
+
+/**
  * C-744: the Office records the pre-merge checks it owns in the same turn
  * reviews and acceptance pass. Prompt text only: `update_card` is already a
  * PM tool and its permissions are unchanged.
@@ -450,6 +459,7 @@ const ROLE_BODIES: Record<
     "- 拍板解决后必须执行所选方案，并在卡片时间线写一句执行结果，引用对应 Q-n；此职责同时适用于 Office 和 Ops，不以收到通知或 ACK 代替落实。",
     "- 收到 Needs You 提示时只做“一句话摘要 + 建议”，把决策卡摆到人面前，不替人做决定。",
     ...PM_OFFICE_NUDGE_RULES.map((line) => `- ${line}`),
+    ...PM_OFFICE_STORY_PROPOSAL_RULES.map((line) => `- ${line}`),
     ...PM_OFFICE_PRE_MERGE_RULES.map((line) => `- ${line}`),
     ...PM_OFFICE_REPORTING_RULES.map((line) => `- ${line}`),
     "",
