@@ -62,9 +62,8 @@ export function contextNoticeRecorded(
   observation: ContextObservation,
   level: ContextLevel,
 ) {
-  return events.some(
+  return eventsOfType(events, "context_usage_notice").some(
     (e) =>
-      e.type === "context_usage_notice" &&
       (e.payload as { assignment_id?: string }).assignment_id ===
         observation.assignment_id &&
       (e.payload as { session_id?: string }).session_id ===

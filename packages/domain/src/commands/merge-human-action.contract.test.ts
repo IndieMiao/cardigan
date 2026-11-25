@@ -56,6 +56,8 @@ function ask(
         card_id: f.card.id,
         instructions: "请在主机上查看合并检查日志",
         why_human: "只有主机能看日志",
+        // C-742: these merge rules are about the owner's own actions.
+        executor: "owner",
         expected_return: "日志摘要",
         blocked_work_items: [],
         ...extra,

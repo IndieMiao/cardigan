@@ -342,6 +342,9 @@ export function clearSupersededRetirements(
  * running or being stopped or woken), withdraw that retirement under both
  * host-ops locks; the dispatcher then wakes the session through its ordinary
  * guarded path, or replaces it when its CLI is proven gone (C-672).
+ *
+ * C-739: a never-started queued Run is waiting work too (sensen A-317); the
+ * domain command refuses any Run that started or is being stopped.
  */
 export async function releaseRetainedForWork(
   store: Store,
@@ -363,12 +366,21 @@ export async function releaseRetainedForWork(
   );
   let released = 0;
   for (const a of candidates) {
+    const queued = store.uow.read((tx) =>
+      tx.runs
+        .list(project)
+        .some(
+          (r) =>
+            r.assignment_id === a.id && r.status === "queued" && !r.started_at,
+        ),
+    );
     if (
-      !store.listNotifications({
-        project_id: project,
-        assignment_id: a.id,
-        statuses: LIVE_NOTIFICATION_STATUSES,
-      }).length ||
+      (!queued &&
+        !store.listNotifications({
+          project_id: project,
+          assignment_id: a.id,
+          statuses: LIVE_NOTIFICATION_STATUSES,
+        }).length) ||
       unfinishedBellAttempts(store.database, project, a.id).length
     )
       continue;
@@ -381,14 +393,12 @@ export async function releaseRetainedForWork(
         const done = store.uow.run((tx) => {
           const state = loadCommandState(tx, project);
           const current = state.assignments.find((v) => v.id === a.id);
-          // Queued work belongs to the C-575 handoff consumer.
           if (
             !current ||
             JSON.stringify(current.idle_retirement) !==
               JSON.stringify(a.idle_retirement) ||
             JSON.stringify(current.runtime_ref) !==
-              JSON.stringify(a.runtime_ref) ||
-            runsOf(state.runs, a.id).some((r) => r.status === "queued")
+              JSON.stringify(a.runtime_ref)
           )
             return false;
           const effect = releaseRetainedRetirement(

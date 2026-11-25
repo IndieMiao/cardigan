@@ -4,6 +4,7 @@ import {
   capacityMachine,
   capacityOwnerState,
 } from "./capacity-owner.js";
+import { maintenanceActive } from "./deployment-maintenance.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 
 function activeFence(store: Store) {
@@ -26,8 +27,20 @@ function occupied(row: CapacityOwnerRow | undefined) {
   return !!row && capacityOwnerState(row) !== "dead";
 }
 
-/** Caller holds the transaction. Pending deployment also closes new admission. */
+/**
+ * Caller holds the transaction. Pending deployment also closes new admission;
+ * so does an open host maintenance window (C-390).
+ */
 export function deploymentInProgress(store: Store): boolean {
+  return (
+    occupied(activeFence(store)) ||
+    occupied(waitingFence(store)) ||
+    maintenanceActive(store)
+  );
+}
+
+/** Only the deployment fence itself, without the maintenance window. */
+export function deploymentFenceOccupied(store: Store): boolean {
   return occupied(activeFence(store)) || occupied(waitingFence(store));
 }
 

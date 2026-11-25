@@ -6,6 +6,7 @@ import {
   type HistoryFilter,
   type HistoryIndex,
   historyIndex,
+  indexKeysOf,
   streamHistory,
 } from "./event-log.js";
 import { isTelemetryEvent, TELEMETRY_EVENT_TYPES } from "./telemetry.js";
@@ -215,19 +216,120 @@ const completeHistory = (events: readonly Event[]) =>
 /**
  * `events.flatMap(each)` (scoping, redaction, filtering), applying the same
  * function to the telemetry journal so derived read states keep it.
+ *
+ * C-671: on an indexed history the result's lookups map the source's answers
+ * through `each` (each event is mapped once, so identities match the array).
+ * `each` may drop events or fields, but must never add a type, card, seq or
+ * index key the source event lacks; then a mapped answer equals scanning the
+ * mapped history, and over a `slim` history it still sees every event.
  */
 export function flatMapEvents(
   events: readonly Event[],
   each: (event: Event) => readonly Event[],
 ): readonly Event[] {
-  const next = events.flatMap(each);
+  const mapped = new WeakMap<Event, readonly Event[]>();
+  const map = (event: Event) => {
+    let out = mapped.get(event);
+    if (!out) {
+      out = each(event);
+      mapped.set(event, out);
+    }
+    return out;
+  };
+  const next = events.flatMap(map);
+  if (historyIndex(events))
+    attachEventIndex(next, new MappedIndex(events, map));
   const journal = journals.get(events);
   if (!journal) return next;
   return attach(
     next,
-    () => journal.telemetry().flatMap(each),
-    () => journal.full().flatMap(each),
+    () => journal.telemetry().flatMap(map),
+    () => journal.full().flatMap(map),
   );
+}
+
+/** C-671: lookups of `flatMapEvents(source, map)`, answered through the source's index. */
+class MappedIndex implements HistoryIndex {
+  readonly #cache = new Map<string, Map<unknown, readonly Event[]>>();
+  constructor(
+    private readonly source: readonly Event[],
+    private readonly map: (event: Event) => readonly Event[],
+  ) {}
+
+  #memo(space: string, key: unknown, build: () => readonly Event[]) {
+    let cache = this.#cache.get(space);
+    if (!cache) {
+      cache = new Map();
+      this.#cache.set(space, cache);
+    }
+    let events = cache.get(key);
+    if (!events) {
+      events = build();
+      cache.set(key, events);
+    }
+    return events;
+  }
+
+  #through(events: readonly Event[], keep: (event: Event) => boolean) {
+    const out = events.flatMap(this.map).filter(keep);
+    return out.length ? out : noEvents;
+  }
+
+  query(kind: EventIndexKind, key: unknown): readonly Event[] {
+    return this.#memo(kind, key, () =>
+      this.#through(query(this.source, kind, key), (e) =>
+        indexKeysOf(e, kind).includes(key),
+      ),
+    );
+  }
+
+  card(card: string, type: string): readonly Event[] {
+    return this.#memo(`card:${type}`, card, () =>
+      this.#through(
+        cardEventsOfType(this.source, card, type),
+        (e) => e.type === type && e.card_id === card,
+      ),
+    );
+  }
+
+  byId(id: string): Event | undefined {
+    const event = eventById(this.source, id);
+    return event ? this.map(event).find((e) => e.id === id) : undefined;
+  }
+
+  ofTypes(types: readonly string[]): readonly Event[] {
+    const unique = [...new Set(types)];
+    return this.#memo("types", unique.join("\u0000"), () =>
+      this.#through(eventsOfTypes(this.source, unique), (e) =>
+        unique.includes(e.type),
+      ),
+    );
+  }
+
+  stream(stream: string): readonly Event[] {
+    return this.#memo("stream", stream, () =>
+      this.#through(
+        streamEvents(this.source, stream || undefined),
+        (e) => (e.card_id ?? "") === stream,
+      ),
+    );
+  }
+
+  keyed(kind: EventIndexKind): readonly Event[] {
+    return this.#memo("keyed", kind, () =>
+      this.#through(
+        eventsWithKey(this.source, kind),
+        (e) => indexKeysOf(e, kind).length > 0,
+      ),
+    );
+  }
+
+  atSeq(stream: string, seq: number): readonly Event[] {
+    return this.#through(
+      eventsAtSeq(this.source, stream || undefined, seq),
+      (e) => (e.card_id ?? "") === stream && e.seq === seq,
+    );
+  }
 }
 
 function typeBucket(events: readonly Event[], type: string) {
@@ -283,6 +385,7 @@ const plain: Record<
   human_action_id: fieldIndex("human_action_id"),
   completion_id: fieldIndex("completion_id"),
   work_item_id: fieldIndex("work_item_id"),
+  batch: keyedEvents((e) => indexKeysOf(e, "batch")),
   resume_work_items: keyedEvents((e) => {
     const p = e.payload;
     return p &&
@@ -403,6 +506,35 @@ export const eventsAtSeq = (
   historyIndex(events)?.atSeq(card ?? "", seq) ??
   bySeq(events, `${card ?? ""}\u0000${seq}`);
 
+const byKeyKind = new WeakMap<
+  readonly Event[],
+  Map<string, readonly Event[]>
+>();
+/**
+ * C-671: every event with any `kind` index key (`indexKeysOf`), in the order
+ * of `fullEventHistory(events)` (telemetry included).
+ */
+export function eventsWithKey(
+  events: readonly Event[],
+  kind: EventIndexKind,
+): readonly Event[] {
+  const index = historyIndex(events);
+  if (index) return index.keyed(kind);
+  events = completeHistory(events);
+  let cache = byKeyKind.get(events);
+  if (!cache) {
+    cache = new Map();
+    byKeyKind.set(events, cache);
+  }
+  let found = cache.get(kind);
+  if (!found) {
+    const kept = events.filter((e) => indexKeysOf(e, kind).length > 0);
+    found = kept.length ? kept : noEvents;
+    cache.set(kind, found);
+  }
+  return found;
+}
+
 /** Same result as `events.find((e) => e.id === id)`: the first match wins. */
 export function eventById(
   events: readonly Event[],
@@ -493,6 +625,15 @@ class AppendedIndex implements HistoryIndex {
       this.#join(
         streamEvents(this.base, stream),
         streamEvents(this.tail, stream),
+      ),
+    );
+  }
+
+  keyed(kind: EventIndexKind): readonly Event[] {
+    return this.#memo("keyed", kind, () =>
+      this.#join(
+        eventsWithKey(this.base, kind),
+        eventsWithKey(this.tail, kind),
       ),
     );
   }

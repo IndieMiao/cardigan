@@ -1,6 +1,8 @@
 import {
   type CardId,
   type Event,
+  eventsOfType,
+  eventsOfTypes,
   type MergeBatch,
   type MergeCheckView,
   mergeBatches,
@@ -80,18 +82,16 @@ export function batchWaitEpoch(events: readonly Event[], batch: MergeBatch) {
   const lineage = interruptedPredecessors(events, batch.id);
   const root = [...lineage].at(-1) ?? batch.id;
   lineage.add(batch.id);
-  const confirmation = events.findLast(
+  const confirmation = eventsOfType(events, "merge_batch_requeued").findLast(
     (e) =>
-      e.type === "merge_batch_requeued" &&
       e.actor.kind === "system" &&
       lineage.has((e.payload as { batch_id: string }).batch_id),
   );
   const resumes = batch.members.map(
     (m) =>
-      events.findLast(
+      eventsOfType(events, "merge_batch_member_resumed").findLast(
         (e) =>
           e.card_id === m.card_id &&
-          e.type === "merge_batch_member_resumed" &&
           (e.actor.kind === "human" ||
             (e.actor.kind === "assignment" &&
               e.actor.role_id === "host_ops")) &&
@@ -203,16 +203,13 @@ export function repositoryCheckWait(
   if (check?.status === "queued" && !check.recheck_requested) {
     const predecessors =
       check.batch_id && interruptedPredecessors(events, check.batch_id);
-    for (const e of events) {
-      if (
-        ("card_id" in target && e.card_id !== target.card_id) ||
-        ![
-          "merge_check_waiting",
-          "merge_check_requeued",
-          "merge_batch_requeued",
-        ].includes(e.type)
-      )
-        continue;
+    // C-671: from the type index (a cancelled member card counts in `slim`).
+    for (const e of eventsOfTypes(events, [
+      "merge_check_waiting",
+      "merge_check_requeued",
+      "merge_batch_requeued",
+    ])) {
+      if ("card_id" in target && e.card_id !== target.card_id) continue;
       const p = e.payload as {
         completion_id?: string;
         batch_id?: string;

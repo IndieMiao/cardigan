@@ -39,6 +39,16 @@ on:
         required: false
         type: string
         default: ''
+      # C-390: candidate hc trial. Empty keeps the pinned installer version;
+      # a human dispatch may name a newer hc with its archive SHA-256.
+      hc_version:
+        required: false
+        type: string
+        default: ''
+      hc_sha256:
+        required: false
+        type: string
+        default: ''
 permissions:
   contents: read
 # Cardigan's dispatch journal owns capacity, per-card exclusion and cancellation.
@@ -143,9 +153,12 @@ jobs:
         run: pnpm install --frozen-lockfile
       # pnpm test also contains real-hc suites, so install before both test steps.
       - name: Install and verify hc
+        env:
+          CANDIDATE_HC_VERSION: ${{ inputs.hc_version }}
+          CANDIDATE_HC_SHA256: ${{ inputs.hc_sha256 }}
         run: |
           python3 - <<'PY'
-          import ast, hashlib, io, os, pathlib, platform, subprocess, tarfile, urllib.request
+          import ast, hashlib, io, os, pathlib, platform, re, subprocess, tarfile, urllib.request
           source = ast.parse(pathlib.Path('deploy/install-agent.py').read_text())
           constants = {node.targets[0].id: ast.literal_eval(node.value)
                        for node in source.body if isinstance(node, ast.Assign)
@@ -153,6 +166,13 @@ jobs:
                        and node.targets[0].id in ('VERSION', 'CHECKSUMS', 'DOWNLOAD_USER_AGENT')}
           version, arch = constants['VERSION'], platform.machine()
           checksum = constants['CHECKSUMS'][arch]
+          candidate = os.environ.get('CANDIDATE_HC_VERSION', '')
+          candidate_sha = os.environ.get('CANDIDATE_HC_SHA256', '')
+          if candidate or candidate_sha:
+              if not re.fullmatch(r'\d+\.\d+\.\d+', candidate) or not re.fullmatch(r'[a-f0-9]{64}', candidate_sha):
+                  raise RuntimeError('candidate hc needs hc_version and its linux archive hc_sha256')
+              version, checksum = candidate, candidate_sha
+              print(f'candidate hc trial: {version}')
           url = f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{arch}.tar.gz'
           request = urllib.request.Request(url, headers={'User-Agent': constants['DOWNLOAD_USER_AGENT']})
           with urllib.request.urlopen(request, timeout=60) as response:
@@ -224,6 +244,9 @@ jobs:
         run: 'true'
       - name: build
         id: build
+        env:
+          # Names the receipt a failing page-skeleton comparison prints.
+          CARDIGAN_CHECK_CARD: ${{ inputs.card }}
         run: |
           pnpm build
           sh apps/web/test-support/ci-page-skeleton.sh

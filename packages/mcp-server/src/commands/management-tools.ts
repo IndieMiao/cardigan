@@ -279,7 +279,14 @@ const schemas = {
     human_required_reason: text
       .optional()
       .describe(
-        "With decider=human: explicit reason this decision must be made personally by the human (numeric, behavior or role rules, scope changes required by AGENTS.md). Overrides standing delegation; PM cannot approve or transcribe it. Omit to keep category delegation. Delegated responses include routed_to and routing_reason and the timeline says 已按常驻授权转给 PM.",
+        "With decider=human: note why the human should decide, shown to the human. On its own it does not override category delegation: a delegated category still goes to PM Ops (the response includes routed_to and routing_reason and the timeline says 已按常驻授权转给 PM). PM declares an owner-only question with owner_required.",
+      ),
+    owner_required: z
+      .object({ reason: text, basis: text })
+      .strict()
+      .optional()
+      .describe(
+        "PM Office/Ops only, with decider=human: the owner must decide personally. reason = why; basis = the project rule, acceptance criterion or quoted owner words requiring it. Skips category delegation and goes straight to the owner; audited and counted in project_snapshot.owner_required_decisions. Only for rules or acceptance that require the owner's own confirmation (e.g. the owner checking artwork, publishing); ordinary feature details stay with delegation.",
       ),
     ready_when: readyWhen(false),
     card_id: id("card")
@@ -514,6 +521,12 @@ const schemas = {
         "Only credential or external-account prerequisites may block merge; prerequisite is required with true. Field verification is post-merge follow-up by default.",
       ),
     due: text.optional(),
+    executor: z
+      .enum(["owner", "operator"])
+      .optional()
+      .describe(
+        "执行人：owner 为所有者本人，operator 为主机操作员张良（主机、凭据文件、OSS 上传、送签批准、云助手）。不填时标题以“张良：”开头或 why_human 写明这类操作即为 operator；operator 待办不推给所有者，只能由张良结项。",
+      ),
   },
   create_card: {
     parent_card_id: id("card").optional(),
@@ -625,6 +638,22 @@ const schemas = {
       .optional()
       .describe(
         "不合并卡（merge_policy=none）产出项的起点：完整提交 SHA 或分支名，检出为 detached worktree；传 null 清除。已有 worktree 后不能改",
+      ),
+    keep_run_dirs: z
+      .object({ reason: text })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "PM 点名保护：保留本卡已释放指派的运行目录，不自动回收（已完成的卡也可设）；传 null 解除。不能与其它字段混用",
+      ),
+    close_request: z
+      .object({ reason: text })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "请所有者结卡：人标记完成模板的非需求卡做完后，写明理由，进所有者 Needs You 的“待你标记完成”；只在卡现在就能标记完成时可用，不代为完成；传 null 撤回。不能与其它字段混用",
       ),
     hold: z
       .object({ reason: text, resume_condition: text })
@@ -868,7 +897,8 @@ export function managementTools(clock?: Clock) {
     ),
     defineTool({
       name: "post_comment",
-      description: "Post a comment and references.",
+      description:
+        "Post a comment and references. 系统只按点名通知：需要别人行动、决定或回复的内容必须点名具体对象，在 `mentions` 填 Assignment 编号（A-n）或员工名，或在正文写 @A-n、@员工名；不点名的评论只是记录，不保证有人看到。被阻塞用 report_blocker，需要人操作用 request_human_action。写在代码块（含行内代码）或引用块（以 > 开头的行）里的 @ 不生效。",
       input: z.object({ ...schemas.post_comment, idempotency_key }),
       handler: ({ idempotency_key, ...params }, context) =>
         executeCommand(
@@ -1043,7 +1073,7 @@ export function managementTools(clock?: Clock) {
     defineTool({
       name: "update_card",
       description:
-        "Update card metadata or planning state, register its repository and no-merge start point, or one pre-merge check (pre_merge_check).",
+        "Update card metadata or planning state, register its repository and no-merge start point, or one pre-merge check (pre_merge_check); close_request asks the owner to mark a finished card done.",
       input: z.object({ ...schemas.update_card, idempotency_key }),
       handler: ({ idempotency_key, ...params }, context) =>
         executeCommand(

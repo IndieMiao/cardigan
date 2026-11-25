@@ -50,7 +50,10 @@ export function notifyAutomaticContextResult(
           ),
         ]
       : (event.payload as { result?: string }).result === "failed"
-        ? (["pm_ops", "pm_office", "needs_you"] as const)
+        ? // C-741: retries exhausted on a temporary hold go to PM, not the owner.
+          (event.payload as { disposition?: string }).disposition === "pm_ops"
+          ? (["pm_ops", "pm_office"] as const)
+          : (["pm_ops", "pm_office", "needs_you"] as const)
         : (event.payload as { dispatch_stall_id?: string }).dispatch_stall_id
           ? (["pm_ops", "pm_office"] as const)
           : (["pm_ops"] as const);

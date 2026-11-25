@@ -14,6 +14,7 @@ import type {
   Card,
   DecisionId,
   Delivery,
+  DeliveryId,
   GitWorkspaceFiles,
   GitWorktree,
   GitWorktreePort,
@@ -99,6 +100,11 @@ export interface EnsureWorktreeInput {
   readonly review_plan?: DecisionId;
   /** The delivery commit being reviewed; required for ordinary readonly work. */
   readonly target_sha?: string;
+  /**
+   * C-630: the current artifact delivery under review has no Git commit and
+   * no recorded source commit, so the readonly checkout is the card baseline.
+   */
+  readonly artifact_delivery?: DeliveryId;
 }
 export interface WorktreeOptions {
   /** Fixed by the trusted target factory, never selected by a request path. */
@@ -283,8 +289,21 @@ export class GitWorktreeService {
         "Plan checkout requires the assigned verifier's pending plan and no delivery SHA",
       );
     if (
+      input.artifact_delivery !== undefined &&
+      (!readonly ||
+        item.kind !== "verify" ||
+        item.status === "cancelled" ||
+        !parseId("delivery", input.artifact_delivery).ok ||
+        input.review_plan !== undefined ||
+        input.target_sha !== undefined)
+    )
+      throw new Error(
+        "Artifact baseline checkout requires the assigned verifier and no delivery SHA or plan",
+      );
+    if (
       readonly &&
       !input.review_plan &&
+      !input.artifact_delivery &&
       !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/iu.test(input.target_sha ?? "")
     )
       throw new Error("Readonly worktree requires a delivery commit SHA");
@@ -367,9 +386,11 @@ export class GitWorktreeService {
           base_sha: a.base_sha ?? existing.head,
           start_point: { point: start, sha: a.base_sha ?? existing.head },
         };
+      let artifactBaseline: string | undefined;
       if (
         readonly &&
         (input.review_plan ||
+          input.artifact_delivery ||
           existing.head.toLowerCase() !== input.target_sha?.toLowerCase())
       ) {
         if ((await this.git.changes(path)).tracked.length > 0)
@@ -378,10 +399,13 @@ export class GitWorktreeService {
         const target = await this.git.resolveCommit(repository, checkoutRef);
         if (target.toLowerCase() !== existing.head.toLowerCase())
           await this.git.checkoutDetached(path, target);
+        if (input.artifact_delivery) artifactBaseline = target;
       }
       // Refresh the shared clone before every writer Run without touching its
       // branch, original base or uncommitted work. Agent mode pushes from host.
-      let baseline: WorktreePlacement["baseline"];
+      let baseline: WorktreePlacement["baseline"] = artifactBaseline
+        ? { ref: baselineRef, sha: artifactBaseline }
+        : undefined;
       if (!readonly) {
         await this.git.fetch(repository, central);
         baseline = {
@@ -450,6 +474,9 @@ export class GitWorktreeService {
       worktree_path: path,
       ...(branch ? { branch } : {}),
       base_sha,
+      ...(readonly && input.artifact_delivery
+        ? { baseline: { ref: baselineRef, sha: base_sha } }
+        : {}),
       ...(!readonly
         ? {
             baseline: {
@@ -566,6 +593,26 @@ export class GitWorktreeService {
   }
 
   /**
+   * C-664: Assignment ids with a write/review worktree directory or a Git
+   * registration under this machine's `worktrees/<project>` root. Used by the
+   * cleanup loop instead of host-side `access()`, which cannot see a worker.
+   */
+  async listWorktreeOwners(project_id: string): Promise<readonly string[]> {
+    if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project_id))
+      throw new Error("Invalid project path component");
+    const root = join(this.worktrees, project_id),
+      repository = join(this.repositories, project_id);
+    const found = new Set(
+      (await this.files.directories(root)).map((path) => basename(path)),
+    );
+    if (await this.files.exists(repository))
+      for (const entry of await this.git.listWorktrees(repository))
+        if (dirname(resolve(entry.path)) === root)
+          found.add(basename(entry.path));
+    return [...found].filter((name) => parseId("assignment", name).ok).sort();
+  }
+
+  /**
    * P2a-3: remove a build checkout without asking — it holds no work. `idle`
    * is re-evaluated under the repository lock, after any concurrent
    * preparation finished, so a Run that just started keeps its checkout.
@@ -627,6 +674,9 @@ export class GitWorktreeService {
         await this.git.removeWorktree(repository, path, { force: true });
     }
     await this.pruneBuild(path);
+    // C-664: drop registrations whose directories are already gone, as a
+    // manual `rm` + `git worktree prune` would; Git keeps locked entries.
+    await this.git.pruneWorktrees?.(repository);
   }
   private async pruneBuild(path: string): Promise<void> {
     await this.files.removeEmpty(path).catch((error) => {
@@ -646,14 +696,19 @@ export class GitWorktreeService {
       assignment.machine_id !== this.machineId ||
       !parseId("assignment", assignment.id).ok ||
       assignment.scope !== "work_item" ||
-      !assignment.worktree_path ||
-      !isAbsolute(assignment.worktree_path)
+      (assignment.worktree_path !== undefined &&
+        !isAbsolute(assignment.worktree_path))
     )
       throw new Error(
-        "Cleanup requires a work-item Assignment with an absolute worktree path",
+        "Cleanup requires a work-item Assignment of this machine; a recorded worktree path must be absolute",
       );
+    // C-664: the only directory an Assignment may own is fixed by project,
+    // machine and id. A released record that lost its path still locates it.
     const path = join(this.worktrees, project_id, assignment.id);
-    if (resolve(assignment.worktree_path) !== path)
+    if (
+      assignment.worktree_path !== undefined &&
+      resolve(assignment.worktree_path) !== path
+    )
       throw new Error("Assignment worktree is outside its project root");
     return {
       path,

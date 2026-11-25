@@ -40,6 +40,7 @@ export const retirementReasons = {
   still_live: "等待结束后终端仍存活",
   confirmation_pending: "尚未确认原会话退出",
   prompt_not_idle: "hc 未报告活动，绑定的提示符也不是空闲的空输入框",
+  workspace_not_clean: "工作区有未提交改动，或无法证明工作区干净",
 } as const;
 
 /** C-626: which owner-bound stop a system-ended turn used. Bounded facts only. */
@@ -64,6 +65,13 @@ export type RetirementEvidence = {
   readonly exit_code?: number;
   readonly observation?: "alive" | "exited" | "unknown" | RuntimeErrorCode;
   readonly stop?: RetirementStop;
+  /** C-746: the macOS idle owner's bounded refusal code (`workspace_cwd`,
+   * `worktree_dirty`, `terminal_not_idle`, `terminal_unreadable`, `no_reply`,
+   * ...). Names the failed proof; never a path, file name or screen text. */
+  readonly owner_reason?: string;
+  /** C-746: set when `owner_reason` was re-derived read-only from the worker
+   * because the owner (enrolled before C-746) closed without naming it. */
+  readonly owner_reason_source?: "worker_probe";
 };
 export type RetirementSignalEvidence = {
   readonly pid: number;

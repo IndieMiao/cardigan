@@ -779,9 +779,10 @@ test("C-701: the page dock shows the card and the main action once the panel scr
         .contains(document.activeElement),
     ).toBe(true),
   );
+  // The modal dialog hides the page from the accessibility tree.
   expect(
     within(dock)
-      .getByRole("button", { name: "标记完成" })
+      .getByRole("button", { name: "标记完成", hidden: true })
       .hasAttribute("disabled"),
   ).toBe(true);
   move("in view");

@@ -1,5 +1,6 @@
 import { deriveReviewMatrix, reviewPassed } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import { pmConfirmRoleRuleImplementations } from "../preferences.js";
 import { type RoleRuleInventory, supportedRoleBodyEdit } from "../role-rule.js";
 import type { CommandState } from "./core.js";
@@ -171,9 +172,10 @@ export function roleRuleMergeReason(
     return "角色正文逐处对应缺项或重复，须交人确认。";
   for (const m of basis.mappings) {
     const source = state.decisions.find((d) => d.id === m.decision_id);
-    const audit = state.events?.some(
+    const audit = (
+      state.events && eventsOfType(state.events, "decision_resolved")
+    )?.some(
       (e) =>
-        e.type === "decision_resolved" &&
         e.actor.kind === "human" &&
         (e.payload as { decision_id?: string }).decision_id === source?.id &&
         (e.payload as { option?: string }).option ===

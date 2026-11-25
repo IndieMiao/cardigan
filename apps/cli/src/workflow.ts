@@ -33,6 +33,7 @@ import {
   projectPreferences,
   projectSnapshot,
   qualifyId,
+  reassignHumanAction,
   runtimeUnknownDeferred,
   saveMachine,
   selectStandingEmployee,
@@ -116,6 +117,7 @@ const USAGE = [
   "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维，启动时自动签发凭据",
   "  cardigan host-ops start [--project <p>]  启动常驻主机运维（已在运行就跳过）",
   "  cardigan host-ops rotate [--project <p>] [--employee <编号或名字>]  切换到最新角色版本并启动，默认保留原员工",
+  "  cardigan host-ops restart [--project <p>]  重开常驻主机运维会话（已是最新版本或正在运行也换，不转交事项）",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
   "  cardigan pm rotate --office|--ops [--external] [--employee <E-n 或名字>] [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
   "  cardigan pm restart --office|--ops [--project <p>]     重开常驻 PM 会话（不暂停、不转交事项、不换版本）",
@@ -123,7 +125,9 @@ const USAGE = [
   "    已是最新版本时不做改动。先用 cardigan role upgrade pm --from-default 追加新版本。",
   "  cardigan needs-you [--project <p>]                   看待你拍板、待你执行的事项和知会",
   "  cardigan needs-you read <知会编号...>|--all [--project <p>]  把知会标为已读",
-  "  cardigan human-action done <H-n> --text <结果> [--conclusion exited|false_alarm|unconfirmed] [--project <p>]",
+  "  cardigan human-action done <H-n> --text <结果> [--conclusion exited|false_alarm|unconfirmed] [--operator] [--project <p>]",
+  "    --operator：以主机操作员（张良）身份结项交给张良的待办",
+  "  cardigan human-action reassign <H-n> --to owner|operator --reason <理由> [--project <p>]",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
   "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
@@ -252,7 +256,9 @@ export async function runWorkflowCommand(
     case "needs-you":
       return needsYou(rest, io);
     case "human-action":
-      return humanActionDone(rest, io);
+      return rest[0] === "reassign"
+        ? humanActionReassign(rest.slice(1), io)
+        : humanActionDone(rest, io);
     default:
       throw new CliError(`不认识的命令：${args.join(" ")}`, EXIT.usage, [
         USAGE,
@@ -1372,12 +1378,12 @@ async function hostOpsCommand(
           ...(sub === "rotate" ? ["employee"] : []),
         ];
   if (
-    !["create", "start", "rotate"].includes(sub ?? "") ||
+    !["create", "start", "rotate", "restart"].includes(sub ?? "") ||
     parsed.positionals.length ||
     Object.keys(parsed.flags).some((key) => !allowed.includes(key))
   )
     throw new CliError(
-      "请使用 host-ops create、start 或 rotate 及其支持的选项",
+      "请使用 host-ops create、start、rotate 或 restart 及其支持的选项",
       EXIT.usage,
       [USAGE],
     );
@@ -1414,6 +1420,8 @@ async function hostOpsCommand(
       );
       return EXIT.ok;
     }
+    if (sub === "restart")
+      return await hostOpsRestart(store, io, hooks, project_id, parsed.flags);
     if (sub === "rotate") {
       const employee = optional(parsed.flags, "employee");
       await rotateHostOps({
@@ -1446,7 +1454,9 @@ async function hostOpsCommand(
         EXIT.usage,
       );
     if (hasUnfinishedRun(store, project_id, assignment.id)) {
-      io.stdout(`主机运维（${assignment.id}）已在运行，跳过`);
+      io.stdout(
+        `主机运维（${assignment.id}）已在运行，跳过${sub === "rotate" ? `。只想换个新会话请用 cardigan host-ops restart --project ${project_id}` : ""}`,
+      );
       return EXIT.ok;
     }
     try {
@@ -1481,6 +1491,66 @@ async function hostOpsCommand(
   } finally {
     store.close();
   }
+}
+
+/**
+ * C-741 `cardigan host-ops restart`: a fresh session for the same standing
+ * host operator, even when its role version is current and it is running.
+ * Like `pm restart`, the old terminal must be proven exited first; the
+ * Assignment, its employee and pending items stay. A failed automatic context
+ * restart's human item closes in the same transaction.
+ */
+async function hostOpsRestart(
+  store: Store,
+  io: CliIo,
+  hooks: CliHooks,
+  project_id: ProjectId,
+  flags: Args["flags"],
+): Promise<number> {
+  const active = store.uow.read((tx) =>
+    tx.assignments
+      .list(project_id)
+      .filter(
+        (a) =>
+          a.scope === "standing" &&
+          a.role_id === "host_ops" &&
+          a.status === "active",
+      ),
+  );
+  const assignment = active[0];
+  if (active.length !== 1 || !assignment)
+    throw new CliError(
+      active.length
+        ? "有多个在岗的常驻主机运维，无法确定要重开哪一个"
+        : "没有在岗的常驻主机运维，先运行 cardigan host-ops create",
+      active.length ? EXIT.failure : EXIT.usage,
+    );
+  if (assignment.external)
+    throw new CliError(
+      `主机运维（${assignment.id}）是外接身份，没有主机终端可重开。`,
+      EXIT.usage,
+    );
+  const result = await (hooks.start ?? startAssignmentById)({
+    store,
+    io,
+    project_id,
+    assignment_id: assignment.id,
+    restart_session: true,
+    ...(optional(flags, "data-dir") === undefined
+      ? {}
+      : { dataDir: optional(flags, "data-dir") as string }),
+    ...(optional(flags, "mcp-url") === undefined
+      ? {}
+      : { mcpUrl: optional(flags, "mcp-url") as string }),
+    ...(optional(flags, "hc-session") === undefined
+      ? {}
+      : { session: optional(flags, "hc-session") as string }),
+  });
+  if (result === EXIT.ok)
+    io.stdout(
+      `已重开主机运维（${assignment.id}）的会话：Assignment 不变，待处理事项没有转交。`,
+    );
+  return result;
 }
 
 /** `cardigan pm create|start|rotate`: the two standing PM assignments (§7.1). */
@@ -1803,41 +1873,47 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       throw new CliError((error as Error).message, EXIT.usage);
     }
     const now = systemClock.now();
-    const { decisions, actions, later, incidents, noticeList, held, waiting } =
-      store.uow.read((tx) => {
-        const state = loadCommandState(tx, project_id, {
-          merge_gate_enabled: gate.status !== "disabled",
-        });
-        const needs = unwrap(listNeedsYou(state, actor)).data;
-        return {
-          held: needs.pm_held_merges,
-          waiting: needs.waiting_merge_check_items,
-          decisions: needs.decisions.map((q) => ({
-            ...q,
-            merge_noop:
-              !!q.card_id &&
-              q.kind === "approve" &&
-              "delivery_id" in q.target &&
-              hasVerifiedMergeNoop(
-                state.events,
-                q.card_id,
-                q.target.delivery_id,
-              ),
-          })),
-          actions: needs.human_actions,
-          // C-212: deferred items, listed only as one folded line.
-          later: needs.later,
-          // Same source as the Workbench 知会 section (§7.4): newest first.
-          noticeList: notices(state),
-          incidents: tx.assignments.list(project_id).filter(
-            (a) =>
-              a.status === "active" &&
-              ["lost", "unknown"].includes(a.runtime_state) &&
-              // C-228: same grace period as the Workbench Needs You.
-              !runtimeUnknownDeferred(state.events, a, now, unknownGraceMs),
-          ),
-        };
+    const {
+      decisions,
+      actions,
+      toClose,
+      later,
+      incidents,
+      noticeList,
+      held,
+      waiting,
+    } = store.uow.read((tx) => {
+      const state = loadCommandState(tx, project_id, {
+        merge_gate_enabled: gate.status !== "disabled",
       });
+      const needs = unwrap(listNeedsYou(state, actor)).data;
+      return {
+        held: needs.pm_held_merges,
+        waiting: needs.waiting_merge_check_items,
+        decisions: needs.decisions.map((q) => ({
+          ...q,
+          merge_noop:
+            !!q.card_id &&
+            q.kind === "approve" &&
+            "delivery_id" in q.target &&
+            hasVerifiedMergeNoop(state.events, q.card_id, q.target.delivery_id),
+        })),
+        actions: needs.human_actions,
+        // C-750: finished cards waiting for the owner to mark done.
+        toClose: needs.cards_to_close,
+        // C-212: deferred items, listed only as one folded line.
+        later: needs.later,
+        // Same source as the Workbench 知会 section (§7.4): newest first.
+        noticeList: notices(state),
+        incidents: tx.assignments.list(project_id).filter(
+          (a) =>
+            a.status === "active" &&
+            ["lost", "unknown"].includes(a.runtime_state) &&
+            // C-228: same grace period as the Workbench Needs You.
+            !runtimeUnknownDeferred(state.events, a, now, unknownGraceMs),
+        ),
+      };
+    });
 
     // C-674: numbers read outside the project carry its code (`CDG-C-34`).
     const code = store.projectCode(project_id);
@@ -1887,6 +1963,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
     if (
       decisions.length === 0 &&
       actions.length === 0 &&
+      toClose.length === 0 &&
       incidents.length === 0 &&
       noticeList.length === 0
     ) {
@@ -1970,6 +2047,9 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
         lines.push(
           [
             `  ${full(action.id)}${action.card_id === undefined ? "" : `  ${full(action.card_id)}`}`,
+            ...(action.executor === "operator"
+              ? ["    交给张良（所有者不能结项，可改派给所有者）"]
+              : []),
             ...(action.handoff
               ? [
                   `    ${action.triage === "host" ? (action.host_operator === "external" ? "主机操作（外接操作员）：" : "主机操作：") : ""}${action.handoff.title}（项目经理已改写）`,
@@ -1987,6 +2067,19 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
           ].join("\n"),
         );
       }
+    }
+    if (toClose.length > 0) {
+      lines.push(`待你标记完成（${toClose.length}）`);
+      for (const item of toClose)
+        lines.push(
+          [
+            `  ${full(item.card_id)}  ${item.card_title}`,
+            item.close_request
+              ? `    结项说明：${item.close_request.reason}`
+              : `    ${item.required_work_items} 个必需工作项已全部通过`,
+            `    标记完成：cardigan card done ${full(item.card_id)} --result <文字>`,
+          ].join("\n"),
+        );
     }
     if (later.length > 0)
       lines.push(
@@ -2259,8 +2352,9 @@ async function humanActionDone(
       [USAGE],
     );
   }
-  const parsed = parseArgs(rest, []);
+  const parsed = parseArgs(rest, ["operator"]);
   const humanActionId = parseHumanAction(parsed.positionals[0]);
+  const asOperator = parsed.flags.operator === true;
   const conclusion = optional(parsed.flags, "conclusion");
   if (
     conclusion &&
@@ -2293,6 +2387,7 @@ async function humanActionDone(
           {
             human_action_id: humanActionId,
             text,
+            ...(asOperator ? { as_operator: true as const } : {}),
             ...(conclusion === "exited" ||
             conclusion === "false_alarm" ||
             conclusion === "unconfirmed"
@@ -2304,6 +2399,48 @@ async function humanActionDone(
     });
     io.stdout(
       `${action.status === "open" ? "已记录" : "已完成"} ${humanActionId}：${action.status}`,
+    );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+/** C-742: the human hands a human action to the owner or the operator. */
+async function humanActionReassign(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const usage =
+    "用法：cardigan human-action reassign <H-n> --to owner|operator --reason <理由>";
+  const parsed = parseArgs(args, []);
+  const humanActionId = parseHumanAction(parsed.positionals[0]);
+  const executor = optional(parsed.flags, "to");
+  if (executor !== "owner" && executor !== "operator")
+    throw new CliError(`--to 须为 owner 或 operator\n${usage}`, EXIT.usage);
+  const reason = required(parsed.flags, "reason");
+  const store = await openPlacementStore(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    runCommand(store, {
+      operation: "改派待办执行人",
+      target: humanActionId,
+      project_id,
+      ...resolveCommandIdentity(io, project_id, store),
+      reduce: (state, actor, ports) =>
+        reassignHumanAction(
+          state,
+          actor,
+          { human_action_id: humanActionId, executor, reason },
+          ports,
+        ),
+    });
+    io.stdout(
+      `已改派 ${humanActionId}：由${executor === "operator" ? "张良" : "所有者"}执行`,
     );
     return EXIT.ok;
   } finally {

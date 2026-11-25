@@ -6,7 +6,7 @@ import type {
   Review,
   WorkItem,
 } from "../entities.js";
-import { eventsOfType } from "../event-index.js";
+import { eventsOfType, eventsOfTypes } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
 import {
   latestPrecheckConflict,
@@ -31,8 +31,12 @@ import { resumeBlockReason, resumeWork } from "./resumption.js";
 import { stoppedByHuman } from "./stop-state.js";
 
 const payload = (e: Event) => e.payload as Record<string, unknown>;
-const trusted = (d: CommandDraft) =>
-  d.state.events.filter(
+/**
+ * System events of these types, in history order. C-671: from the type
+ * index, so a waited-on card that has closed still answers in `slim`.
+ */
+const trusted = (d: CommandDraft, types: readonly string[]) =>
+  eventsOfTypes(d.state.events, types).filter(
     (e) =>
       e.actor.kind === "system" && e.actor.project_id === d.state.project_id,
   );
@@ -65,12 +69,9 @@ export const baselineBlockerReason = (reason: string) =>
     reason,
   );
 function targetEvent(d: CommandDraft, c: ResumeCondition): Event | undefined {
-  const events = trusted(d);
   if (c.kind === "precheck_finished" || c.kind === "merge_check_finished")
-    return events.findLast(
-      (e) =>
-        checkTypes[c.kind as keyof typeof checkTypes].includes(e.type) &&
-        payload(e).attempt_id === c.target_id,
+    return trusted(d, checkTypes[c.kind]).findLast(
+      (e) => payload(e).attempt_id === c.target_id,
     );
   if (c.kind === "github_run_completed" && /^[1-9][0-9]*$/u.test(c.target_id))
     return eventsOfType(d.state.events, "github_check_dispatch").findLast(
@@ -82,13 +83,12 @@ function targetEvent(d: CommandDraft, c: ResumeCondition): Event | undefined {
         ) === c.target_id,
     );
   if (c.kind === "card_merged")
-    return events.findLast(
-      (e) => e.type === "card_merged" && e.card_id === c.target_id,
+    return trusted(d, ["card_merged"]).findLast(
+      (e) => e.card_id === c.target_id,
     );
   if (c.kind === "deployment_ready")
-    return events.findLast(
-      (e) =>
-        e.type === "host_deployment_recorded" && payload(e).to === c.target_id,
+    return trusted(d, ["host_deployment_recorded"]).findLast(
+      (e) => payload(e).to === c.target_id,
     );
   return undefined;
 }
@@ -192,14 +192,25 @@ export function autoResumeUsed(
 
 /** A ready deployment of exactly this SHA, here or on the control plane's platform project. */
 function deploymentEvidence(d: CommandDraft, sha: string): string | undefined {
+  return readyDeployment(d, sha)?.key;
+}
+
+/**
+ * C-738: the trusted record (key and time) of a ready deployment of exactly
+ * this SHA, here or on the control plane's platform project.
+ */
+export function readyDeployment(
+  d: CommandDraft,
+  sha: string,
+): { readonly key: string; readonly at: string } | undefined {
   const ready = (e: Event | undefined) => {
     const p = e && payload(e);
     return p?.to === sha && p.status === "deployed" && p.ready === true;
   };
-  const local = trusted(d).findLast(
-    (e) => e.type === "host_deployment_recorded" && payload(e).to === sha,
+  const local = trusted(d, ["host_deployment_recorded"]).findLast(
+    (e) => payload(e).to === sha,
   );
-  if (ready(local)) return local?.id;
+  if (local && ready(local)) return { key: local.id, at: local.created_at };
   const latest = new Map<string, Event>();
   for (const e of d.ports?.platform_deployments?.(d.state.project_id, sha) ??
     [])
@@ -212,7 +223,8 @@ function deploymentEvidence(d: CommandDraft, sha: string): string | undefined {
       (latest.get(e.actor.project_id)?.seq ?? -1) < e.seq
     )
       latest.set(e.actor.project_id, e);
-  for (const [project, e] of latest) if (ready(e)) return `${project}/${e.id}`;
+  for (const [project, e] of latest)
+    if (ready(e)) return { key: `${project}/${e.id}`, at: e.created_at };
 }
 
 /** C-618: the system record proving a platform blocker is over, if any. */
@@ -596,9 +608,13 @@ export function resumeWorkWaits(
         | { attempt_id: string; head_sha: string; retry: number }
         | undefined;
       if (conflictWait) {
-        const history = trusted(d).filter(
+        // The waiting item's own (open) card: the array holds its stream.
+        const history = d.state.events.filter(
           (e) =>
-            e.card_id === item.card_id && payload(e).work_item_id === item.id,
+            e.actor.kind === "system" &&
+            e.actor.project_id === d.state.project_id &&
+            e.card_id === item.card_id &&
+            payload(e).work_item_id === item.id,
         );
         const attempts = history.filter(
           (e) =>
@@ -710,12 +726,10 @@ function notifyEvidenceUnblocked(d: CommandDraft) {
   const reviews = d.list("reviews");
   if (!reviews.some((r) => r.evidence_pending)) return;
   const notified = new Set(
-    trusted(d)
-      .filter((e) => e.type === REVIEW_EVIDENCE_UNBLOCKED)
-      .flatMap((e) => {
-        const ids = payload(e).review_ids;
-        return Array.isArray(ids) ? ids.map(String) : [];
-      }),
+    trusted(d, [REVIEW_EVIDENCE_UNBLOCKED]).flatMap((e) => {
+      const ids = payload(e).review_ids;
+      return Array.isArray(ids) ? ids.map(String) : [];
+    }),
   );
   const groups = new Map<
     string,

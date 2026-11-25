@@ -93,6 +93,8 @@ describe("trusted GitHub check workflow", () => {
       "scope",
       "affected_paths",
       "skip_checks",
+      "hc_version",
+      "hc_sha256",
     ]);
     expect(candidate.permissions).toEqual({ contents: "read" });
     expect(warm.permissions).toEqual({ contents: "read" });
@@ -134,6 +136,13 @@ describe("trusted GitHub check workflow", () => {
       "if-no-files-found": "error",
     });
     expect(archive.if).toBeUndefined();
+  });
+
+  test("a failing page-skeleton comparison names the checked card's receipt", () => {
+    const build = steps.find((step: { id?: string }) => step.id === "build");
+    expect(build.env).toEqual({
+      CARDIGAN_CHECK_CARD: `\${{ inputs.card }}`,
+    });
   });
 
   test("candidate cache is restore only; only main push warms it", () => {
@@ -211,7 +220,9 @@ root = pathlib.Path(sys.argv[1])
 os.chdir(root)
 (root / 'deploy').mkdir()
 mode = sys.argv[2]
-data = b'#!/bin/sh\\nprintf "hc 1.2.3\\n"\\n'
+candidate = mode.startswith('candidate')
+shown = '2.0.0' if candidate else '1.2.3'
+data = ('#!/bin/sh\\nprintf "hc %s\\\\n"\\n' % shown).encode()
 archive = io.BytesIO()
 with tarfile.open(fileobj=archive, mode='w:gz') as bundle:
     member = tarfile.TarInfo('herdr-core')
@@ -227,14 +238,20 @@ with tarfile.open(fileobj=archive, mode='w:gz') as bundle:
     bundle.addfile(extra, io.BytesIO(b'ignored'))
 payload = archive.getvalue()
 checksum = hashlib.sha256(payload).hexdigest()
+if candidate:
+    # The pinned installer checksum must not be what verifies a candidate.
+    os.environ['CANDIDATE_HC_VERSION'] = '2.0.0'
+    os.environ['CANDIDATE_HC_SHA256'] = checksum if mode == 'candidate' else ''
+    checksum = '0' * 64
 if mode == 'checksum': checksum = '0' * 64
 version = '9.9.9' if mode == 'version' else '1.2.3'
+fetched = '2.0.0' if candidate else version
 # This statement must never execute: workflow reads constants with ast only.
 source = 'raise RuntimeError("must not execute installer")\\nVERSION = ' + repr(version) + '\\nCHECKSUMS = ' + repr({platform.machine(): checksum}) + '\\nDOWNLOAD_USER_AGENT = ' + repr(user_agent)
 (root / 'deploy/install-agent.py').write_text(source)
 def urlopen(request, **kwargs):
     assert isinstance(request, urllib.request.Request)
-    assert request.full_url == f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{platform.machine()}.tar.gz'
+    assert request.full_url == f'https://releases.herdr.dev/core/{fetched}/herdr-core-linux-{platform.machine()}.tar.gz'
     assert request.get_method() == 'GET' and request.data is None
     assert dict(request.header_items()) == {'User-agent': user_agent}
     assert kwargs == {'timeout': 60}
@@ -246,6 +263,8 @@ exec(json.loads(sys.argv[3]))
       );
       for (const mode of [
         "success",
+        "candidate",
+        "candidate_unpinned",
         "checksum",
         "version",
         "symlink",
@@ -265,7 +284,7 @@ exec(json.loads(sys.argv[3]))
           ],
           { encoding: "utf8" },
         );
-        if (mode === "success") {
+        if (mode === "success" || mode === "candidate") {
           expect(result.stderr).toBe("");
           expect(result.status).toBe(0);
           expect(readFileSync(join(fixture, "env"), "utf8")).toContain(
@@ -274,11 +293,13 @@ exec(json.loads(sys.argv[3]))
         } else {
           expect(result.status).not.toBe(0);
           const error =
-            mode === "checksum"
-              ? "sha256 mismatch"
-              : mode === "version"
-                ? "hc 缺失或版本不符"
-                : "regular binary";
+            mode === "candidate_unpinned"
+              ? "candidate hc needs hc_version"
+              : mode === "checksum"
+                ? "sha256 mismatch"
+                : mode === "version"
+                  ? "hc 缺失或版本不符"
+                  : "regular binary";
           expect(result.stderr).toContain(error);
           expect(() => readFileSync(join(fixture, "env"))).toThrow();
           expect(() => readFileSync(join(fixture, "path"))).toThrow();

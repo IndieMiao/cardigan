@@ -80,7 +80,10 @@ export {
   type ProjectSnapshotReader,
   readProjectSnapshot,
 } from "./commands/support-tools.js";
-export { workerEvidence } from "./commands/worker-evidence.js";
+export {
+  type WorkerUnavailableReason,
+  workerEvidence,
+} from "./commands/worker-evidence.js";
 export {
   ERROR_CODES,
   ToolError,
@@ -146,6 +149,11 @@ export {
   type CapabilityGuideToolOptions,
   capabilityGuideTool,
 } from "./tools/capability-guide.js";
+export {
+  type GenerateImageInput,
+  type GenerateImageToolOptions,
+  generateImageTool,
+} from "./tools/generate-image.js";
 export { CheckLogReadLimitError } from "./tools/get-check-log.js";
 export {
   ackEventsTool,

@@ -8,8 +8,16 @@ import {
   DECISION_OTHER_OPTION,
   humanDecisionOptions,
 } from "./decision-other.js";
-import { fullEventHistory } from "./event-index.js";
+import type { Event } from "./entities.js";
+import {
+  eventsForDecision,
+  eventsForHumanAction,
+  fullEventHistory,
+  streamEvents,
+} from "./event-index.js";
+import { historyIndex } from "./event-log.js";
 import type { ExtMessageItem } from "./ext-message.js";
+import { isOperatorAction } from "./human-action-executor.js";
 import type { CardId, WorkItemId } from "./ids.js";
 
 /** The basis is host-only input to a digest. Never put it on an external card. */
@@ -123,7 +131,12 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
       (target && target.status === "superseded"))
   )
     return readOnly();
-  if (h && (h.status !== "open" || (h.triage && h.triage !== "human")))
+  if (
+    h &&
+    (h.status !== "open" ||
+      (h.triage && h.triage !== "human") ||
+      isOperatorAction(h))
+  )
     return readOnly();
   const merge = q?.trigger === "merge_confirmation";
   if (
@@ -146,24 +159,26 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
         )
         .map((o) => ({ key: o.key, label: o.description }));
   // A system Run ending can carry the decision ID (C-643: telemetry).
-  const relevantEvents = fullEventHistory(s.events).filter(
-    (e) =>
-      !e.type.startsWith("ext_message_") &&
-      ((e.type === "card_sensitivity_changed" &&
-        e.card_id &&
-        ids.has(e.card_id)) ||
-        (merge &&
-          e.card_id &&
-          ids.has(e.card_id) &&
-          /decision|merge|review|sensitive|human_action|delivery/u.test(
-            e.type,
-          )) ||
-        (e.payload &&
-          typeof e.payload === "object" &&
-          (("decision_id" in e.payload && e.payload.decision_id === q?.id) ||
-            ("human_action_id" in e.payload &&
-              e.payload.human_action_id === h?.id)))),
-  );
+  // C-671: the related cards' streams and the item's own events come from
+  // the indexes, so a closed related card still counts in `slim`.
+  const relevant = new Set<Event>();
+  for (const id of ids)
+    for (const e of streamEvents(s.events, id))
+      if (
+        !e.type.startsWith("ext_message_") &&
+        (e.type === "card_sensitivity_changed" ||
+          (merge &&
+            /decision|merge|review|sensitive|human_action|delivery/u.test(
+              e.type,
+            )))
+      )
+        relevant.add(e);
+  for (const e of [
+    ...(q ? eventsForDecision(s.events, q.id) : []),
+    ...(h ? eventsForHumanAction(s.events, h.id) : []),
+  ])
+    if (!e.type.startsWith("ext_message_")) relevant.add(e);
+  const relevantEvents = historyOrdered(s, relevant);
   return {
     sensitive,
     options,
@@ -178,4 +193,17 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
       merge ? s.project_preferences : null,
     ]),
   };
+}
+
+/**
+ * `subset` in the order of `fullEventHistory(s.events)`. A Store history is
+ * the project stream, then each card's stream (seq ascending) in card order;
+ * other arrays keep their own order.
+ */
+function historyOrdered(s: CommandState, subset: ReadonlySet<Event>) {
+  if (!historyIndex(s.events))
+    return fullEventHistory(s.events).filter((e) => subset.has(e));
+  const rank = new Map<string, number>(s.cards.map((c, i) => [c.id, i + 1]));
+  const at = (e: Event) => (e.card_id ? (rank.get(e.card_id) ?? -1) : 0);
+  return [...subset].sort((a, b) => at(a) - at(b) || a.seq - b.seq);
 }

@@ -77,6 +77,8 @@ import { MergeConfirmation, SuggestedDecision } from "./NeedsYouPage.js";
 
 /** Timeline entries per read; older pages load as the reader scrolls. */
 const PAGE_SIZE = 20;
+/** C-696: how long “C-xx 已完成” stays after marking a card done. */
+const DONE_NOTICE_MS = 4000;
 type PagerStatus = { loading: true } | { error: string } | undefined;
 const historyKey = (
   projectId: string,
@@ -479,6 +481,14 @@ function CardContent({
   const [activeAction, setActiveAction] = useState<"card" | "completion">();
   const [primaryPanels, setPrimaryPanels] = useState<HTMLElement | null>(null);
   const [dock, setDock] = useState<HTMLElement | null>(null);
+  // C-696: “C-48 已完成” stays 4 seconds in the shared feedback stack; the
+  // panel that held “标记完成” is gone after the reload.
+  const [doneNotice, setDoneNotice] = useState("");
+  useEffect(() => {
+    if (!doneNotice) return;
+    const timer = window.setTimeout(() => setDoneNotice(""), DONE_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [doneNotice]);
   const article = useRef<HTMLElement>(null);
   const scroll = useRef<HTMLElement>(null),
     lastAnchor = useRef<string | undefined>(undefined);
@@ -832,7 +842,7 @@ function CardContent({
           markDone={(emphasis) => (
             <CardTemplate
               disabled={!!activeAction && activeAction !== "completion"}
-              formContainer={primaryPanels}
+              onDone={setDoneNotice}
               onEditingChange={(editing) =>
                 setActiveAction(editing ? "completion" : undefined)
               }
@@ -847,6 +857,7 @@ function CardContent({
           )}
         />
         <DetailNextStepForms ref={setPrimaryPanels} />
+        <RequestFeedback message={doneNotice} />
       </header>
       <div className="card-main">
         <AuthorPrechecks checks={card.prechecks ?? []} projectId={projectId} />

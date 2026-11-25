@@ -2,7 +2,11 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Assignment, ProjectId, Run, Runtime } from "@cardigan/domain";
-import { ToolError, workerEvidence } from "@cardigan/mcp-server";
+import {
+  ToolError,
+  type WorkerUnavailableReason,
+  workerEvidence,
+} from "@cardigan/mcp-server";
 import {
   agentProcessCommand,
   type ExecutionConfig,
@@ -26,6 +30,33 @@ const unavailable = (reason: string) =>
     `Worker inspection unavailable: ${reason}`,
     { reason },
   );
+
+/**
+ * C-746: why each live field is null. Without live facts (the query named a
+ * Run that does not hold the session, or no session is bound) the collector
+ * was never asked; otherwise the collector names its failed read.
+ */
+type LiveField = "terminals" | "processes" | "events";
+function unavailableFields(
+  evidence: Record<LiveField, unknown> & {
+    unavailable?:
+      | { [K in LiveField]?: WorkerUnavailableReason | undefined }
+      | undefined;
+  },
+  live: boolean,
+  current: boolean,
+) {
+  const host: WorkerUnavailableReason | undefined = live
+    ? undefined
+    : current
+      ? "session_not_bound"
+      : "run_not_current";
+  const reasons: Partial<Record<LiveField, WorkerUnavailableReason>> = {};
+  for (const field of ["terminals", "processes", "events"] as const)
+    if (host || evidence[field] === null)
+      reasons[field] = host ?? evidence.unavailable?.[field] ?? "other";
+  return reasons;
+}
 
 /** Collect files/processes only via the selected isolated account; native
  * local diagnostics may project the exact hc observation, not controller data. */
@@ -108,6 +139,10 @@ export async function inspectWorker(
       markers: null,
       helpers: [],
       free_bytes: null,
+      unavailable: {
+        processes: "local_runtime_only",
+        events: "local_runtime_only",
+      },
     };
   }
   if (execution.mode !== "agent-ssh")
@@ -232,6 +267,7 @@ export async function inspectWorker(
       ...evidence,
       session_launch_run_id: launchRun ?? null,
       ...(!live ? { terminals: null, processes: null, events: null } : {}),
+      unavailable: unavailableFields(evidence, live, current),
       helpers: await Promise.all(
         names.map(async (name, i) => ({
           name,
