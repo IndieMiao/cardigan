@@ -1599,6 +1599,7 @@ test("release wakes only actionable assigned work, even if old delivery notifica
 test("C-370 dependency events notify PM; ready early work also notifies its actual producer", () => {
   for (const type of [
     "card_dependencies_attention",
+    "card_dependencies_backlog_ready",
     "card_dependencies_released",
   ])
     expect(

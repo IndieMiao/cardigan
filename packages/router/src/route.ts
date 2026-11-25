@@ -1694,6 +1694,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "card_dependencies_attention":
+    case "card_dependencies_backlog_ready":
     case "card_dependencies_released":
     case "card_dependencies_ready": {
       if (input.event.actor.kind !== "system") break;

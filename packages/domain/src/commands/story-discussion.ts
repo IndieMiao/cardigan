@@ -47,6 +47,9 @@ export function storyChildForm(
     acceptance_criteria: child.acceptance_criteria,
     source: { kind: "quote", text: sourceText },
     ...(child.priority === undefined ? {} : { priority: child.priority }),
+    ...(child.wait_for_dependencies === undefined
+      ? {}
+      : { wait_for_dependencies: child.wait_for_dependencies }),
     ...(child.state_and_save === undefined
       ? {}
       : {
@@ -128,6 +131,12 @@ function proposalChildren(
       `第 ${n} 张子卡的依赖须为方案内其它子卡的序号`,
     );
     const cards = [...new Set<CardId>(c.depends_on_cards ?? [])];
+    ensure(
+      c.wait_for_dependencies === undefined ||
+        typeof c.wait_for_dependencies === "boolean",
+      "validation_failed",
+      `第 ${n} 张子卡的等待前置标记必须为布尔值`,
+    );
     checkStoryChild(n, c.title, () => {
       prepareCardCreation(d, storyChildForm(story.id, c), {
         registered_repo_only: true,
@@ -141,6 +150,9 @@ function proposalChildren(
       acceptance_criteria: [...acceptance],
       depends_on,
       ...(cards.length ? { depends_on_cards: cards } : {}),
+      ...(c.wait_for_dependencies === undefined
+        ? {}
+        : { wait_for_dependencies: c.wait_for_dependencies }),
       priority,
       owner_role: c.owner_role,
       ...(c.state_and_save === undefined
