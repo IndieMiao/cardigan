@@ -9,6 +9,8 @@ import {
   eventById,
   eventsOfType,
   type HostOpsExecution,
+  heldPause,
+  heldPauseHandler,
   hostOpsPending,
   nudgeStalledPatrol,
   observedLocalExitCause,
@@ -16,6 +18,7 @@ import {
   patrolNudges,
   type Runtime,
   type RuntimeRef,
+  requestHeldAssignmentResume,
   runsOf,
   STANDING_PM_STALL_EVENTS,
   stoppedByHuman,
@@ -35,6 +38,7 @@ import {
   dispatchHandoffs,
   dispatchStallCauses,
 } from "./dispatch-stalls.js";
+import { heldBacklogMs, heldBacklogs } from "./held-backlog.js";
 import { releaseExitedAgent } from "./idle-session-retirement.js";
 import { sessionExitProof, stallEvidence } from "./stall-evidence.js";
 import { overdueStallHandoffs } from "./stall-handoff.js";
@@ -121,17 +125,47 @@ function publishStallHandoff(
     type: "dispatch_stall_attention",
   };
   tx.events.append(project, event);
+  const held = heldStallRecipient(state, stall);
   recordNotification(store.database, {
     project_id: project,
     event_id: event.id,
     card_id: stall.card_id ?? undefined,
     seq: event.seq,
     at: event.created_at,
-    recipient: ops
-      ? { kind: "assignment", assignment_id: ops.id }
-      : { kind: "pm_office" },
-    kind: "run_attention",
+    recipient:
+      held ??
+      (ops
+        ? { kind: "assignment", assignment_id: ops.id }
+        : { kind: "pm_office" }),
+    kind: held?.kind === "needs_you" ? "needs_you" : "run_attention",
   });
+}
+/**
+ * C-732: host operations cannot end a human pause. A stall held only by one
+ * goes to whoever can resume it (PM Ops under the `permission` delegation,
+ * else the human), never to the host_ops patrol.
+ */
+function heldStallRecipient(
+  state: CommandState,
+  stall: Pick<DispatchStall, "restart_blocked" | "assignment_id">,
+): { kind: "pm_ops" } | { kind: "needs_you" } | undefined {
+  // A managed stop still releasing its terminal is transient, not a pause.
+  return stall.restart_blocked === "human_stopped" &&
+    heldPause(state.events, stall.assignment_id)
+    ? { kind: heldPauseHandler(state) }
+    : undefined;
+}
+/** C-732: who paused the Assignment and when, on a `human_stopped` stall. */
+function heldStallDetails(state: CommandState, stall: DispatchStall) {
+  const pause = heldPause(state.events, stall.assignment_id);
+  if (stall.restart_blocked !== "human_stopped" || !pause) return {};
+  const handler = heldPauseHandler(state);
+  return {
+    paused_by: pause.by,
+    paused_at: pause.at,
+    handled_by: handler,
+    next_step: `${stall.assignment_id} 处于人工暂停（${pause.by} 于 ${pause.at} 暂停），主机运维不能解除。卡片未暂停且待办排队超过阈值时，系统会请${handler === "pm_ops" ? "项目经理" : "人"}在恢复拍板中一键恢复；也可用 cardigan assignment start ${stall.assignment_id} 恢复。`,
+  };
 }
 export function recoveryBasis({
   session_maintenance: _maintenance,
@@ -332,6 +366,7 @@ export class StallPatrol {
   private readonly idlePromptSince = new Map<string, number>();
   private readonly idlePromptMs = turnIdlePromptMs();
   private readonly retry = patrolRestartRetryPolicy();
+  private readonly heldBacklogMs = heldBacklogMs();
   constructor(
     private store: Store,
     private clock: Clock,
@@ -566,13 +601,14 @@ export class StallPatrol {
       }
       for (const stall of rows) {
         if (turnKey(stall) || sent.has(key(stall))) continue;
+        const held = heldStallRecipient(state, stall);
         const event = {
           id: tx.ids.nextEventId(),
           seq: tx.ids.nextEventSequence(project),
           actor: { kind: "system" as const, project_id: project },
           type: "dispatch_stall_attention",
           created_at: this.clock.now(),
-          payload: { ...stall },
+          payload: { ...stall, ...heldStallDetails(state, stall) },
         };
         tx.events.append(project, event);
         // Reuse the handoff's (event, recipient) key; the dispatcher already rang operations.
@@ -585,12 +621,13 @@ export class StallPatrol {
           event_id: notice.id,
           card_id: "card_id" in notice ? notice.card_id : undefined,
           seq: notice.seq,
-          kind: "run_attention",
+          kind: held?.kind === "needs_you" ? "needs_you" : "run_attention",
           at: event.created_at,
           recipient:
-            patrol && patrol.id !== stall.assignment_id
+            held ??
+            (patrol && patrol.id !== stall.assignment_id
               ? { kind: "assignment", assignment_id: patrol.id }
-              : { kind: "pm_office" },
+              : { kind: "pm_office" }),
         });
       }
       return { state, actionable, patrol, turns };
@@ -645,6 +682,7 @@ export class StallPatrol {
           if (!row) return; // Original notification already delivered.
           publishStallHandoff(tx, this.store, fresh, a, stall, this.clock, {
             ...row,
+            ...heldStallDetails(fresh, row),
             can_restart: false,
             reason: failure,
             next_step: turnNextStep,
@@ -753,6 +791,7 @@ export class StallPatrol {
           can_restart: false,
           reason,
           next_step: turnNextStep,
+          ...heldStallDetails(fresh, row),
         },
       };
       const publish = (
@@ -858,6 +897,34 @@ export class StallPatrol {
       if (effect.ok) persistEffect(tx, project, effect.value);
     });
   }
+  /**
+   * C-732: a human pause with work waiting past the threshold, on an open and
+   * unheld card, gets one resume question per pause for whoever may answer.
+   */
+  private askHeldResume(project: ProjectId) {
+    const state = this.store.uow.read((tx) => loadCommandState(tx, project));
+    const notes = this.store.listNotifications({
+      project_id: project,
+      statuses: ["pending", "belled", "delivery_failed"],
+    });
+    for (const ask of heldBacklogs(
+      state,
+      notes,
+      this.clock.now(),
+      this.heldBacklogMs,
+    ))
+      this.store.uow.run((tx) => {
+        const fresh = loadCommandState(tx, project);
+        const effect = requestHeldAssignmentResume(
+          fresh,
+          { kind: "system", project_id: project },
+          ask,
+          { clock: this.clock, ids: tx.ids },
+        );
+        if (effect.ok && effect.value.data)
+          persistEffect(tx, project, effect.value);
+      });
+  }
   async tick(
     project: ProjectId,
     snapshot: (
@@ -865,6 +932,7 @@ export class StallPatrol {
       p: ProjectId,
     ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
   ) {
+    this.askHeldResume(project);
     const { state, actionable, patrol, turns } = this.publish(project);
     const open = new Set(
       turns.map((s) => `${project}/${s.assignment_id}/${turnKey(s)}`),

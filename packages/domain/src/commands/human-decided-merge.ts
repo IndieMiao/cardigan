@@ -24,6 +24,7 @@ export function mergeContentDecisions(
     (q) =>
       q.trigger !== "merge_confirmation" &&
       q.trigger !== "worktree_cleanup" &&
+      q.trigger !== "held_assignment_resume" &&
       ((q.id === source && !sourceMergeConfirmation(card, q, events)) ||
         (q.id !== source &&
           !(q.merge_related === false && q.raised_by === "human") &&

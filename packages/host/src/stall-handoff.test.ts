@@ -61,3 +61,15 @@ test("only unresolved, unclaimed incidents escalate once, fifteen minutes after 
     ]),
   ).toEqual([alert]);
 });
+
+test("C-732: a stall held by a human pause is no Ops handoff and never escalates as one", () => {
+  const paused = {
+    ...alert,
+    payload: {
+      ...incident,
+      restart_blocked: "human_stopped",
+      paused_by: "human",
+    },
+  } as Event;
+  expect(overdueStallHandoffs([paused], [incident], at(3_600_000))).toEqual([]);
+});
