@@ -519,6 +519,24 @@ export function readCardDependencyEvents(db: DatabaseSync, project: ProjectId) {
     .map((r) => JSON.parse(String(r.doc)) as Event);
 }
 
+/**
+ * C-738: the SHA of the newest ready host deployment recorded in any project
+ * of this control plane (the platform project records its own deployments).
+ */
+export function latestReadyDeploymentSha(db: DatabaseSync): string | undefined {
+  const row = prepare(
+    db,
+    "SELECT e.doc FROM projects p JOIN events e ON e.project_id = p.id AND e.type = 'host_deployment_recorded' WHERE e.stream = '' AND e.card_id IS NULL AND json_extract(e.doc, '$.actor.kind') = 'system' AND json_extract(e.doc, '$.payload.status') = 'deployed' AND json_extract(e.doc, '$.payload.ready') = 1 ORDER BY json_extract(e.doc, '$.created_at') DESC, e.seq DESC LIMIT 1",
+  ).get();
+  if (!row) return undefined;
+  const to = (JSON.parse(String(row.doc)) as Event).payload as {
+    to?: unknown;
+  } | null;
+  return typeof to?.to === "string" && /^[a-f0-9]{40}$/u.test(to.to)
+    ? to.to
+    : undefined;
+}
+
 const platformReaders = new WeakMap<
   DatabaseSync,
   (project: ProjectId, sha: string) => Event[]

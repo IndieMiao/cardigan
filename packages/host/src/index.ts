@@ -459,6 +459,7 @@ export * from "./worker-wizard-form.js";
 export {
   type ArtifactCheckout,
   missingWorktreePrompt,
+  PreparationNotStarted,
   prepareReadonlyWorktree,
   prepareRoleWorktree,
   readonlyWorktreeTarget,
