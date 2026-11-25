@@ -104,6 +104,8 @@ export const toolNames = [
   "host_ops_cancel_run",
   "host_ops_recheck_merge",
   "host_ops_restart_standing_pm",
+  // C-759: managed stop of a session whose previous turn ended and is idle.
+  "host_ops_stop_assignment",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 export type RoleWorktree = "none" | "write" | "readonly";

@@ -1,7 +1,9 @@
 import type { RuntimeObservation } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
+  DEFAULT_DONE_SESSION_RELEASE_MS,
   DEFAULT_STALLED_SESSION_RELEASE_MS,
+  doneSessionReleaseMs,
   managedReleaseCommand,
   stalledSessionDecision,
   stalledSessionReleaseMs,
@@ -87,4 +89,48 @@ test("C-739: only a live, unconfirmed turn of this Assignment with a clean check
     expect(
       stalledSessionDecision({ ...base, ...patch } as typeof base),
     ).toEqual({ action: "skip", reason });
+});
+
+test("C-759: the idle done-session threshold defaults to 10 minutes, 0 turns it off, invalid values fail", () => {
+  expect(DEFAULT_DONE_SESSION_RELEASE_MS).toBe(600_000);
+  expect(doneSessionReleaseMs({})).toBe(600_000);
+  expect(doneSessionReleaseMs({ CARDIGAN_DONE_SESSION_RELEASE_MS: "" })).toBe(
+    600_000,
+  );
+  expect(
+    doneSessionReleaseMs({ CARDIGAN_DONE_SESSION_RELEASE_MS: "1800000" }),
+  ).toBe(1_800_000);
+  expect(doneSessionReleaseMs({ CARDIGAN_DONE_SESSION_RELEASE_MS: "0" })).toBe(
+    0,
+  );
+  for (const bad of ["-1", "1.5", "10m", "3600001"])
+    expect(() =>
+      doneSessionReleaseMs({ CARDIGAN_DONE_SESSION_RELEASE_MS: bad }),
+    ).toThrow("Invalid CARDIGAN_DONE_SESSION_RELEASE_MS");
+});
+
+test("C-759: an ended turn is released only on the CLI's own done", () => {
+  const base = {
+    trigger: "turn_done" as const,
+    can_restart: false,
+    status: live("done"),
+    owner: "alive" as const,
+    workspace: "clean" as const,
+  };
+  expect(stalledSessionDecision(base)).toEqual({
+    action: "release",
+    workspace: "clean",
+  });
+  for (const agent of ["idle", "unknown", "working", "blocked"] as const)
+    expect(stalledSessionDecision({ ...base, status: live(agent) })).toEqual({
+      action: "skip",
+      reason: `terminal_state=${agent}`,
+    });
+  expect(
+    stalledSessionDecision({ ...base, status: live("done", { kept: true }) }),
+  ).toEqual({ action: "skip", reason: "terminal_not_live" });
+  expect(stalledSessionDecision({ ...base, workspace: "dirty" })).toEqual({
+    action: "hand_off",
+    reason: "workspace=dirty",
+  });
 });

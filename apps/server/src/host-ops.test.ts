@@ -200,6 +200,7 @@ test("C-137: diagnostics stay within P2a-10 categories and omit Needs You decisi
       "context_thresholds",
       "escalated",
       "findings",
+      "idle_scarce_sessions",
       "lost",
       "merge_stalls",
       "patrol_runs",

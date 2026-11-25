@@ -17,7 +17,10 @@ export interface HostOpsToolOptions {
     read(context: ToolContext, project?: string): unknown;
     execute(
       context: ToolContext,
-      tool: HostOpsExecutionTool | "host_ops_recheck_merge",
+      tool:
+        | HostOpsExecutionTool
+        | "host_ops_recheck_merge"
+        | "host_ops_stop_assignment",
       params: {
         target_id: string;
         reason?: string;
@@ -86,11 +89,27 @@ export function hostOpsTools(options: HostOpsToolOptions = {}) {
     defineTool({
       name: "host_ops_cancel_run",
       description:
-        "Request cancellation of a numbered Run after the host confirms terminal exit.",
+        "Cancel a numbered Run. A queued Run that never started is cancelled at once without touching any terminal or live session; a started Run is cancelled after the host confirms terminal exit.",
       input: z.object({ run_id: id("run"), reason, idempotency_key }),
       handler: (p, c) =>
         host().execute(c, "host_ops_cancel_run", {
           target_id: p.run_id,
+          reason: p.reason,
+          idempotency_key: p.idempotency_key,
+        }),
+    }),
+    defineTool({
+      name: "host_ops_stop_assignment",
+      description:
+        "Managed stop of a work-item session whose previous turn ended and that is idle (CLI reports done, or its Agent CLI is gone), like `cardigan assignment stop`: closes the terminal, confirms the exit and keeps the worktree, branch and queued work. Never queues a Run.",
+      input: z.object({
+        assignment_id: id("assignment"),
+        reason,
+        idempotency_key,
+      }),
+      handler: (p, c) =>
+        host().execute(c, "host_ops_stop_assignment", {
+          target_id: p.assignment_id,
           reason: p.reason,
           idempotency_key: p.idempotency_key,
         }),

@@ -17,6 +17,7 @@ export const HOST_OPS_TOOLS = [
   "host_ops_cancel_run",
   "host_ops_recheck_merge",
   "host_ops_restart_standing_pm",
+  "host_ops_stop_assignment",
 ] as const satisfies readonly ToolName[];
 
 export const HOST_OPS_FORBIDDEN_TOOLS = [

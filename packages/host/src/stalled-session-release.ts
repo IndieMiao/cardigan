@@ -16,6 +16,7 @@ import {
   releaseUnresponsiveSession,
   retirementWithdrawals,
   runsOf,
+  sessionTurnEnded,
   systemEndedTurn,
   type UnresponsiveRelease,
   unresponsiveReleaseBlocker,
@@ -49,6 +50,25 @@ export function stalledSessionReleaseMs(
   return value;
 }
 
+/**
+ * C-759: how long a never-started queued Run may wait on a live session whose
+ * previous turn ended and whose CLI reports `done` before the stall patrol
+ * releases that session (clean checkout only). Resource machines need a fresh
+ * session for each Run, so such a session blocks the queue until it ends
+ * (sensen A-461 on cardigan-ci: 30 minutes). `0` turns it off.
+ */
+export const DEFAULT_DONE_SESSION_RELEASE_MS = 600_000;
+export function doneSessionReleaseMs(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const raw = env.CARDIGAN_DONE_SESSION_RELEASE_MS;
+  if (raw === undefined || raw === "") return DEFAULT_DONE_SESSION_RELEASE_MS;
+  const value = Number(raw);
+  if (!/^\d+$/u.test(raw) || !Number.isSafeInteger(value) || value > 3_600_000)
+    throw new Error("Invalid CARDIGAN_DONE_SESSION_RELEASE_MS");
+  return value;
+}
+
 /** C-739: retirements given up (withdrawn or handed back) before releasing. */
 export const RETIREMENT_WITHDRAWAL_LIMIT = 2;
 
@@ -61,7 +81,7 @@ export function managedReleaseCommand(id: Assignment["id"]) {
 }
 
 export interface StalledSession {
-  readonly trigger: "system_turn" | "retirement_withdrawn";
+  readonly trigger: "system_turn" | "retirement_withdrawn" | "turn_done";
   readonly assignment: Assignment;
   readonly card_id: CardId | null;
   /** One key per incident: handoff dedupe and patrol backoff. */
@@ -104,12 +124,19 @@ const unfinished = (r: Run) =>
  *   idle retirement of this session was given up at least twice since its
  *   last sign of life (C-690 hands the session back for business work, the
  *   session is reclaimed, and nothing ever wakes it).
+ * - C-759 `turn_done` (threshold `doneMs`, `0` off): the session's previous
+ *   turn ended (no Run on it is unfinished except untouched queued ones it
+ *   was not launched for), and a never-started queued Run has waited since
+ *   both its queueing and the session's last sign of life. The patrol also
+ *   requires the CLI to report `done` before releasing.
+ * `ms` of `0` turns the first two triggers off.
  */
 export function stalledSessions(
   state: CommandState,
   notes: readonly Notification[],
   now: string,
   ms: number,
+  doneMs = 0,
 ): StalledSession[] {
   const live = notes.filter((n) => LIVE.has(n.status));
   const liveIds = new Set(live.map((n) => n.id));
@@ -139,6 +166,7 @@ export function stalledSessions(
     const queued = runs.find((r) => untouchedStallSuccessor(state, a, r));
     const turn = systemEndedTurn(state, a);
     if (turn) {
+      if (!(ms > 0)) continue;
       if (due.has(`${a.id}/${turn.id}`)) continue;
       const own = deferrals.filter((e) => {
         const p = e.payload as { assignment_id?: string; run_id?: string };
@@ -185,7 +213,21 @@ export function stalledSessions(
     )
       continue;
     const withdrawals = retirementWithdrawals(state, a);
-    if (withdrawals < RETIREMENT_WITHDRAWAL_LIMIT) continue;
+    if (!(ms > 0) || withdrawals < RETIREMENT_WITHDRAWAL_LIMIT) {
+      const done = doneMs > 0 && queued && turnDone(state, a, queued, now);
+      if (done && done.waited_ms >= doneMs)
+        found.push({
+          trigger: "turn_done",
+          assignment: a,
+          card_id,
+          incident: `${a.runtime_ref.terminal_ref}@${queued.id}`,
+          since: done.since,
+          waited_ms: done.waited_ms,
+          queued_run_id: queued.id,
+          notification_ids: [],
+        });
+      continue;
+    }
     const waiting = live.filter(
       (n) =>
         n.recipient.kind === "assignment" &&
@@ -213,6 +255,27 @@ export function stalledSessions(
   }
   return found;
 }
+/** C-759: since when `queued` waits on this ended turn's idle session. */
+function turnDone(
+  state: CommandState,
+  a: Assignment,
+  queued: Run,
+  now: string,
+) {
+  if (!sessionTurnEnded(state, a)) return;
+  const since = Math.max(
+    Date.parse(queued.queue_entered_at ?? "") || 0,
+    Date.parse(a.last_mcp_activity_at ?? "") || 0,
+    ...runsOf(state.runs, a.id).flatMap((r) =>
+      [r.started_at, r.finished_at].map((at) => Date.parse(at ?? "") || 0),
+    ),
+  );
+  if (!since) return;
+  return {
+    since: new Date(since).toISOString(),
+    waited_ms: Date.parse(now) - since,
+  };
+}
 function earliest(times: readonly string[]) {
   let min: string | undefined;
   for (const t of times) if (min === undefined || t < min) min = t;
@@ -237,6 +300,7 @@ export type StalledSessionDecision =
  *   else goes to PM with the reason instead.
  */
 export function stalledSessionDecision(input: {
+  readonly trigger?: StalledSession["trigger"];
   readonly can_restart: boolean;
   readonly status: RuntimeObservation | undefined;
   readonly owner: "alive" | "unknown" | "exited" | "unobserved";
@@ -248,6 +312,9 @@ export function stalledSessionDecision(input: {
   if (!s || s.process !== "alive" || s.kept)
     return { action: "skip", reason: "terminal_not_live" };
   if (!["unknown", "idle", "done"].includes(s.agent))
+    return { action: "skip", reason: `terminal_state=${s.agent}` };
+  // C-759: an ended turn is released only on the CLI's own `done`.
+  if (input.trigger === "turn_done" && s.agent !== "done")
     return { action: "skip", reason: `terminal_state=${s.agent}` };
   if (input.owner !== "alive" && input.owner !== "unknown")
     return { action: "skip", reason: `terminal_owner=${input.owner}` };
@@ -261,6 +328,13 @@ export function stalledSessionRequest(
   s: StalledSession,
   workspace: "clean" | "no_worktree",
 ): UnresponsiveRelease {
+  if (s.trigger === "turn_done" && s.queued_run_id)
+    return {
+      trigger: "turn_done",
+      queued_run_id: s.queued_run_id,
+      waited_ms: s.waited_ms,
+      workspace,
+    };
   return s.trigger === "system_turn" && s.turn
     ? {
         trigger: "system_turn",
@@ -290,6 +364,7 @@ export const TRANSIENT_RELEASE_REFUSALS = new Set([
   "withdrawal_streak",
   "session_maintenance",
   "no_longer_waiting",
+  "terminal_not_done",
 ]);
 
 const refused = (reason: string): StalledSessionRelease => ({
@@ -372,6 +447,17 @@ export async function releaseStalledSession(
       const checked = current();
       if ("reason" in checked) return refused(checked.reason);
       if (deps.signal?.aborted) return refused("aborted");
+      if (stalled.trigger === "turn_done") {
+        // C-759: the CLI must still report `done` right before closing.
+        const again = await runtime.status(ref).catch(() => undefined);
+        if (
+          !again?.ok ||
+          again.value.process !== "alive" ||
+          again.value.agent !== "done" ||
+          again.value.kept
+        )
+          return refused("terminal_not_done");
+      }
       const closed = await runtime
         .release(ref, { force: true })
         .catch(() => undefined);
