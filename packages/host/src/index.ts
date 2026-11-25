@@ -160,6 +160,8 @@ export {
   type HcRelease,
   type HcUpgradePlan,
   hcHelper,
+  hcUpgradeNeedsStaging,
+  hcUpgradeRecoveryWork,
   prepareHcUpgrade,
 } from "./hc-upgrade.js";
 export {

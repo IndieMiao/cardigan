@@ -155,11 +155,24 @@ export async function prepareHcUpgrade(options: {
       throw new Error(`hc 目标 ${t.id} 的 ${t.link} 不存在，不新建布局`);
   }
   const version = release.version;
-  const work: MaintenanceWork = {
-    rollback_scope:
-      "hc 升级：失败时把每个已切换目标的 hc 入口恢复为维护前的软链或文件备份，重新启动服务并核对旧版本；新版本目录保留不删",
+  const work = hcUpgradeWork(version, targets, staged);
+  return { version, targets, staged, work };
+}
+
+const HC_UPGRADE_SCOPE =
+  "hc 升级：失败时把每个已切换目标的 hc 入口恢复为维护前的软链或文件备份，重新启动服务并核对旧版本；新版本目录保留不删";
+
+function hcUpgradeWork(
+  version: string,
+  targets: readonly MaintenanceHcTarget[],
+  staged: Readonly<Record<string, string>> | undefined,
+): MaintenanceWork {
+  return {
+    rollback_scope: HC_UPGRADE_SCOPE,
     expected_hc: Object.fromEntries(targets.map((t) => [t.id, version])),
     async apply({ record, save, driver }) {
+      if (!staged)
+        throw new Error("hc 升级尚未预置新版本，不能在恢复阶段执行切换");
       for (const t of targets) {
         const dest = staged[t.id] as string;
         const known = record().steps.switched?.[t.id];
@@ -205,5 +218,27 @@ export async function prepareHcUpgrade(options: {
       }
     },
   };
-  return { version, targets, staged, work };
+}
+
+/**
+ * V-3343: an upgrade window past its switch (starting, rolling back or
+ * waiting for recovery) needs only the recorded recovery points and the
+ * version to check. Nothing is downloaded or staged, so an unreachable
+ * network or worker cannot keep the window from ending.
+ */
+export function hcUpgradeRecoveryWork(
+  config: MaintenanceConfig,
+  version: string,
+  targetIds: readonly string[],
+): MaintenanceWork {
+  return hcUpgradeWork(
+    version,
+    config.hc_targets.filter((t) => t.link && targetIds.includes(t.id)),
+    undefined,
+  );
+}
+
+/** Phases from which an hc upgrade window can still reach its switch. */
+export function hcUpgradeNeedsStaging(phase: string): boolean {
+  return ["draining", "drain_timeout", "stopping", "operating"].includes(phase);
 }

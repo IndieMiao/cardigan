@@ -124,3 +124,98 @@ test("a human opens, inspects and ends a manual window", async () => {
   await runMaintenanceCommand(["status"], human, hooks);
   expect(human.out.at(-1)).toContain("completed");
 });
+
+// V-3343: past the switch an hc upgrade window needs only its recovery
+// points; `end` must not download or stage again, so a network outage or an
+// unreachable worker cannot keep the gate closed.
+test("end of an hc upgrade needing recovery never downloads or stages again", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cg-maintenance-cli-hc-"));
+  Store.open({ dataDir }).close();
+  const link = "/srv/hc/bin/hc";
+  const hcConfig = parseMaintenanceConfig({
+    server: { stop: ["/fake/stop"], start: ["/fake/start"] },
+    hc: {
+      targets: [
+        {
+          id: "host",
+          link,
+          install_root: "/srv/hc/versions",
+          platform: "linux-x86_64",
+          stop: ["/fake/hc-stop"],
+          start: ["/fake/hc-start"],
+        },
+      ],
+    },
+  });
+  const ran: string[] = [];
+  const base = driver();
+  const hooks = {
+    config: hcConfig,
+    driver: (): MaintenanceDriver => ({
+      ...base,
+      run: async (argv, options) => {
+        ran.push(argv[0] as string);
+        // The human already put the old entry point back.
+        if (argv[0] === link)
+          return { code: 0, stdout: "hc 7.1.21\n", stderr: "" };
+        return base.run(argv, options);
+      },
+    }),
+    fetchArchive: async (): Promise<Uint8Array> => {
+      throw new Error("network down");
+    },
+  };
+  const now = new Date().toISOString();
+  const record = {
+    id: "M-20261125000000-deadbeef",
+    reason: "hc 升级到 7.1.22",
+    operation: { kind: "hc_upgrade", version: "7.1.22", targets: ["host"] },
+    stop_hc: ["host"],
+    started_at: now,
+    wait: { timeout_ms: 60_000, deadline: now },
+    before: {
+      software_sha: null,
+      server_process: null,
+      deploy_pin: null,
+      hc: { host: "7.1.21" },
+    },
+    rollback_scope: "hc 升级",
+    steps: {
+      server_stopped: true,
+      hc_stopped: ["host"],
+      operation: "failed",
+      switched: { host: { kind: "symlink", target: "/srv/hc/old/hc" } },
+    },
+    busy: [],
+    error: "升级后核对未通过：server 启动失败（退出码 1）",
+    recovery: ["回退失败：hc 目标 host restore 失败：ssh unreachable"],
+    history: [{ at: now, phase: "recovery_required", note: "需要人工恢复" }],
+  };
+  const seed = Store.open({ dataDir, migrate: false });
+  try {
+    seed.database
+      .prepare(`INSERT INTO host_maintenance
+        (singleton, id, phase, record, revision, holder_pid, holder_start, holder_machine, updated_at)
+        VALUES (1, ?, 'recovery_required', ?, 1, NULL, NULL, NULL, ?)`)
+      .run(record.id, JSON.stringify(record), now);
+    expect(maintenanceActive(seed)).toBe(true);
+  } finally {
+    seed.close();
+  }
+  const human = io({ CARDIGAN_DATA_DIR: dataDir });
+  // A failed window ends rolled_back, which is a non-zero exit.
+  expect(await runMaintenanceCommand(["end"], human, hooks)).toBe(1);
+  // No helper call (python) and no download: only services and the version.
+  expect(ran).not.toContain("/usr/bin/python3");
+  expect(ran).toEqual(
+    expect.arrayContaining(["/fake/hc-start", "/fake/start", link]),
+  );
+  const after = Store.open({ dataDir, migrate: false });
+  try {
+    expect(maintenanceActive(after)).toBe(false);
+  } finally {
+    after.close();
+  }
+  await runMaintenanceCommand(["status"], human, hooks);
+  expect(human.out.join("\n")).toContain("rolled_back");
+});

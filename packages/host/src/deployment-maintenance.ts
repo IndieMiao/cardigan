@@ -120,7 +120,11 @@ export class MaintenanceConflict extends Error {
 
 const HISTORY_LIMIT = 100;
 
-/** Never throws: an older schema or an unreadable row means no gate. */
+/**
+ * Never throws. Only an older schema without the table means no gate; any
+ * other read error (for example a busy database) keeps new work out for this
+ * attempt (V-3343).
+ */
 export function maintenanceActive(store: Pick<Store, "database">): boolean {
   try {
     const row = store.database
@@ -129,8 +133,10 @@ export function maintenanceActive(store: Pick<Store, "database">): boolean {
     return (
       !!row && !MAINTENANCE_TERMINAL.includes(row.phase as MaintenancePhase)
     );
-  } catch {
-    return false;
+  } catch (error) {
+    return !/no such table/u.test(
+      error instanceof Error ? error.message : String(error),
+    );
   }
 }
 

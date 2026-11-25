@@ -1,6 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  hcUpgradeNeedsStaging,
+  hcUpgradeRecoveryWork,
   loadMaintenanceConfig,
   type MaintenanceConfig,
   type MaintenanceDriver,
@@ -192,8 +194,11 @@ export async function runMaintenanceCommand(
 }
 
 /**
- * An hc upgrade resumed after an interruption needs its work again: the
- * staged paths are re-derived (staging is idempotent) for the same version.
+ * An hc upgrade resumed before its switch needs its work again: the staged
+ * paths are re-derived (staging is idempotent) for the same version. Past the
+ * switch only the recorded recovery points are needed, so nothing is
+ * downloaded or staged and an unreachable network or worker cannot block
+ * `end` (V-3343).
  */
 async function resumable(
   runner: MaintenanceRunner,
@@ -207,6 +212,19 @@ async function resumable(
   const row = readMaintenance(context.store);
   const operation = row?.record.operation;
   if (operation?.kind !== "hc_upgrade") return runner;
+  if (!hcUpgradeNeedsStaging(row?.phase ?? "")) {
+    const work = hcUpgradeRecoveryWork(
+      context.config,
+      operation.version,
+      operation.targets,
+    );
+    return new MaintenanceRunner(
+      context.store,
+      context.config,
+      context.driver,
+      () => work,
+    );
+  }
   const plan = await prepareHcUpgrade({
     config: context.config,
     version: operation.version,

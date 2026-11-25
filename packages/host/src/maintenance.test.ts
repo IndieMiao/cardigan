@@ -381,6 +381,17 @@ test("an older schema has no gate and refuses to open a window", async () => {
   expect(() => readMaintenance(store)).toThrow("维护表");
 });
 
+test("any other read error keeps the gate closed (V-3343)", () => {
+  const busy = {
+    database: {
+      prepare: () => {
+        throw new Error("database is locked");
+      },
+    },
+  } as unknown as Parameters<typeof maintenanceActive>[0];
+  expect(maintenanceActive(busy)).toBe(true);
+});
+
 test("config: absolute argv, paired stop/start and the 30 minute default", () => {
   const minimal = parseMaintenanceConfig({
     server: { stop: ["/bin/a"], start: ["/bin/b"] },
