@@ -201,9 +201,7 @@ test("C-202: card details show the plain summary on the merge confirmation and i
       cardId="C-1"
     />,
   );
-  const region = within(
-    await screen.findByRole("region", { name: "下一步" }),
-  );
+  const region = within(await screen.findByRole("region", { name: "下一步" }));
   expect(
     region.getByRole("region", { name: `Q-3 ${PLAIN_SUMMARY_COPY.region}` }),
   ).toBeTruthy();
