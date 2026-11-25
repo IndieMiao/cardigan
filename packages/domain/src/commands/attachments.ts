@@ -1,3 +1,8 @@
+import {
+  approvedReleaseChain,
+  releaseChainOf,
+  releaseChainSigned,
+} from "../artifact-publication.js";
 import type {
   Actor,
   Attachment,
@@ -271,6 +276,43 @@ function validateTarget(d: CommandDraft, p: AttachmentTarget) {
   }
   return { original_filename, note, video: videoMetadata(p) };
 }
+/**
+ * C-612: an artifact stored on a release-chain approval is a chain step. It is
+ * accepted only under the approved, live chain of this card and only for the
+ * bytes the chain binds: the approved unsigned digest, or a signed digest the
+ * control plane bound from a host-verified signing receipt. Other bases keep
+ * their existing use.
+ */
+function releaseChainIntake(
+  d: CommandDraft,
+  p: AttachmentTarget,
+  sha256: string,
+) {
+  if (p.kind !== "artifact") return;
+  const q = d.list("decisions").find((x) => x.key === p.basis);
+  if (!releaseChainOf(q)) return;
+  const events = [...d.state.events, ...d.events];
+  const chain = approvedReleaseChain(
+    d.state.project_id,
+    q,
+    d.list("project_preferences").find((x) => x.id === d.state.project_id),
+    events,
+  );
+  ensure(
+    chain !== undefined && chain.card_id === p.card_id,
+    "illegal_transition",
+    "发布链尚未批准、已失效或不属于本卡",
+  );
+  ensure(
+    sha256 === chain.unsigned_sha256 ||
+      releaseChainSigned(
+        chain,
+        events.filter((e) => e.card_id === chain.card_id),
+      ).some((s) => s.sha256 === sha256),
+    "validation_failed",
+    "入库摘要与发布链绑定的未签名摘要或签后摘要不符",
+  );
+}
 export function artifactUploadRun(
   state: CommandState,
   actor: Actor,
@@ -339,6 +381,7 @@ export function uploadAttachment(
       "validation_failed",
       "A stored attachment receipt is required",
     );
+    releaseChainIntake(d, p, receipt.sha256);
     const stream = "stream" in receipt ? receipt.stream : undefined;
     if (stream)
       ensure(

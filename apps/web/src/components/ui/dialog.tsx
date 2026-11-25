@@ -85,11 +85,14 @@ export function DialogFields({
 export function DialogContent({
   children,
   inlineFeedback = false,
+  narrowSheet = false,
   overlayClassName,
   className,
   ...props
 }: React.ComponentProps<typeof DialogPanel> & {
   inlineFeedback?: boolean;
+  /** C-696: at narrow widths the panel rises from the bottom (bottom sheet). */
+  narrowSheet?: boolean;
   overlayClassName?: string | undefined;
 }) {
   return (
@@ -98,6 +101,7 @@ export function DialogContent({
       <DialogPanel
         {...props}
         className={cn(
+          narrowSheet && "ui-dialog-narrow-sheet",
           inlineFeedback &&
             "[&>form]:border-0 [&>form]:p-0 [&>.request-feedback-region:has([role=alert])]:mt-3 [&>.request-feedback-region]:static [&>.request-feedback-region]:max-w-none [&>.request-feedback-region]:items-stretch",
           className,

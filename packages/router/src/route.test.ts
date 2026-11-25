@@ -1806,3 +1806,56 @@ test("an author precheck wait routes only its settlement, not an early or duplic
     ]);
   }
 });
+
+test("C-612: delivered release notes go to the managed PM Office, or warn PM Ops when nobody can send", () => {
+  const route = (options: {
+    enabled?: boolean;
+    office?: boolean;
+    template?: string;
+    key?: string;
+  }) =>
+    routeEvent({
+      event: event("delivery_submitted", { delivery_id: "D-9" }),
+      snapshot: snapshot({
+        cards: [card({ template: options.template ?? "release" })],
+        work_items: [
+          workItem("W-9", {
+            role_id: "release_ops",
+            template_key: options.key ?? "release_notes",
+          }),
+        ],
+        assignments: [
+          assignment("A-3", {
+            scope: "standing",
+            role_id: "pm",
+            standing_mode: "ops",
+          }),
+          ...(options.office === false
+            ? []
+            : [
+                assignment("A-4", {
+                  scope: "standing",
+                  role_id: "pm",
+                  standing_mode: "office",
+                }),
+              ]),
+        ],
+        project_preferences: [
+          { id: project_id, pm_owner_messages: options.enabled ?? true },
+        ],
+        deliveries: [delivery("D-9", { work_item_id: "W-9", kind: "doc" })],
+      }),
+    });
+  const sent = route({});
+  expect(recipients(sent)).toEqual(["pm_office"]);
+  expect(rules(sent)).toEqual(["C-612/release notes"]);
+  expect(sent.notifications[0]?.summary).toContain("send_owner_message");
+  for (const blocked of [{ enabled: false }, { office: false }]) {
+    const warned = route(blocked);
+    expect(recipients(warned)).toEqual(["pm_ops"]);
+    expect(warned.notifications[0]?.summary).toContain("未自动发送");
+  }
+  // Other items or other templates are not release notes.
+  expect(route({ key: "publish" }).notifications).toEqual([]);
+  expect(route({ template: "dev" }).notifications).toEqual([]);
+});

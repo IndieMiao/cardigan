@@ -144,6 +144,47 @@ export const ossApi =
       stdout.replace(/\n[0-9]+(?:\.[0-9]+)?\(s\) elapsed\s*$/u, ""),
     );
 
+/**
+ * The objects already under this release's prefix, if each one is a file this
+ * publication itself writes (`app.apk`, `SHA256SUMS`, `release.json`) at its
+ * exact size and the APK is among them; an empty directory gives an empty set.
+ * Anything else (a stranger, a wrong size, a manifest without the APK, a
+ * truncated listing) is undefined: the directory is sealed, never repaired.
+ * ossutil renders a single listed object as an object, several as an array.
+ */
+export function ownObjects(
+  listed: Record<string, unknown>,
+  prefix: string,
+  sizes: ReadonlyMap<string, number>,
+): Set<string> | undefined {
+  const contents = Array.isArray(listed.Contents)
+    ? listed.Contents
+    : listed.Contents
+      ? [listed.Contents]
+      : [];
+  if (
+    ![false, "false"].includes(listed.IsTruncated as never) ||
+    String(listed.KeyCount) !== String(contents.length)
+  )
+    return undefined;
+  const names = new Set<string>();
+  for (const o of contents as { Key?: unknown; Size?: unknown }[]) {
+    const name =
+      typeof o?.Key === "string" && o.Key.startsWith(prefix)
+        ? o.Key.slice(prefix.length)
+        : undefined;
+    const size = name === undefined ? undefined : sizes.get(name);
+    if (
+      size === undefined ||
+      String(o.Size) !== String(size) ||
+      names.has(name as string)
+    )
+      return undefined;
+    names.add(name as string);
+  }
+  return names.size === 0 || names.has("app.apk") ? names : undefined;
+}
+
 export const run: Execute = async (
   tool: string,
   args: string[],
@@ -251,44 +292,6 @@ async function readBack(
   }
 }
 
-/**
- * The release objects already under `prefix`, or a refusal when the listing
- * holds anything else or cannot be read with certainty. Fails closed.
- */
-function presentObjects(
-  listed: {
-    KeyCount?: unknown;
-    IsTruncated?: unknown;
-    Contents?: unknown;
-  },
-  prefix: string,
-  names: readonly string[],
-): Set<string> {
-  if (![false, "false"].includes(listed.IsTruncated as never)) throw Error();
-  const count = Number(listed.KeyCount);
-  const contents =
-    listed.Contents === undefined
-      ? []
-      : Array.isArray(listed.Contents)
-        ? listed.Contents
-        : [listed.Contents];
-  if (!Number.isSafeInteger(count) || count !== contents.length) throw Error();
-  const present = new Set<string>();
-  for (const entry of contents) {
-    const key = (entry as { Key?: unknown } | null)?.Key;
-    const name = typeof key === "string" ? key.slice(prefix.length) : "";
-    if (
-      typeof key !== "string" ||
-      !key.startsWith(prefix) ||
-      !names.includes(name) ||
-      present.has(name)
-    )
-      throw Error();
-    present.add(name);
-  }
-  return present;
-}
-
 export function apkPublisher(
   dataDir: string,
   root = join(homedir(), ".config", "cardigan"),
@@ -386,19 +389,24 @@ export function apkPublisher(
           "json",
         ),
       );
-      const names = [filename, "SHA256SUMS", "release.json"] as const;
-      const existing = presentObjects(listed, prefix, names);
-      // C-609: an empty prefix takes a fresh claim. A prefix holding only this
-      // release's own objects is accepted solely to continue this decision's
-      // interrupted claim (same URL and artifact); `claim` refuses otherwise.
-      claim(url, existing.size > 0);
-      // APK is the first conditional write for every contender. A partial
-      // directory is never repaired by overwrite: an object already there is
-      // only read back and must match this release byte for byte.
+      const present = ownObjects(
+        listed,
+        prefix,
+        new Map([
+          [filename, a.size],
+          ["SHA256SUMS", sums.length],
+          ["release.json", release.length],
+        ]),
+      );
+      if (!present) throw Error();
+      // A directory holding only this release's own files is resumed only against this
+      // card's earlier claim of this URL and digest; every existing object is then proven
+      // by its public SHA-256 read-back below, and only the missing ones are written.
+      claim(url, present.size > 0);
+      // APK is the first conditional write for every contender. A partial directory is sealed, never repaired by overwrite.
       const put = async (name: string) => {
         current();
         stage = "upload";
-        if (existing.has(name)) return;
         await oss(
           "put-object",
           "--key",
@@ -414,14 +422,18 @@ export function apkPublisher(
               : "text/plain",
         );
       };
-      await put(filename);
+      const write = async (name: string) => {
+        if (present.has(name)) stage = "download";
+        else await put(name);
+      };
+      await write(filename);
       await readBack(get, delays, url, a.size, a.sha256);
       await readBack(get, delays, url, 1, a.sha256, { total: a.size, first });
       for (const [name, body] of [
         ["SHA256SUMS", sums],
         ["release.json", release],
       ] as const) {
-        await put(name);
+        await write(name);
         await readBack(get, delays, base + name, body.length, digest(body));
       }
       return { url, size: a.size, sha256: a.sha256 };

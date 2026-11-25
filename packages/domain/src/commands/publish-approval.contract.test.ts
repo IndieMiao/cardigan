@@ -192,4 +192,14 @@ test("C-754: publication refusals name the approval sub-reason", () => {
       resolution: { ...resolution, via: "pm_office_chat" },
     } as Decision),
   ).toBe("拍板不是所有者在 Needs You 批准，也没有有效的外发代批授权");
+  // C-612 release chain: an unapproved or malformed chain is named as such.
+  expect(
+    why({
+      ...resolved,
+      options: [
+        { key: "release_chain", description: "发布链", impact: "公开" },
+      ],
+      resolution: { ...resolution, option: "release_chain" },
+    }),
+  ).toBe("发布链拍板未批准、已失效或没有有效授权");
 });

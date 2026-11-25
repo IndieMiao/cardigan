@@ -14,6 +14,11 @@ export interface DeploymentDriver {
   readonly enabled: boolean;
   /** Check the owned service even when deployment is disabled or main is unchanged. */
   checkServer(): Promise<void>;
+  /**
+   * C-390, optional for legacy adapters: a human maintenance window is open;
+   * no automatic deployment starts until it ends.
+   */
+  maintenanceActive?(): Promise<boolean>;
   current(): Promise<DeploymentBuild>;
   main(): Promise<string>;
   /** Host-verified human pin; optional for legacy adapters. */

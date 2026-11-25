@@ -135,6 +135,21 @@ export function validateCardTemplate(
         "验证目标必须是同模板的产出项",
       );
   }
+  // C-612: dependencies name earlier items, so the order is acyclic.
+  const earlier = new Set<string>();
+  for (const w of definition.work_items) {
+    ensure(
+      w.depends_on === undefined ||
+        (Array.isArray(w.depends_on) &&
+          new Set(w.depends_on).size === w.depends_on.length &&
+          w.depends_on.every(
+            (k: unknown) => typeof k === "string" && earlier.has(k),
+          )),
+      "validation_failed",
+      "工作项依赖只能指向模板中排在前面的工作项",
+    );
+    earlier.add(w.key);
+  }
   ensure(
     definition.primary_work_item_key === null ||
       definition.work_items.some(
