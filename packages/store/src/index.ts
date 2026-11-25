@@ -68,6 +68,7 @@ export {
   createReadRepositories,
   createRepositories,
   jsonRepository,
+  latestReadyDeploymentSha,
   type ReadEventRepository,
   ReadOnlyTransactionError,
   type ReadRepositories,

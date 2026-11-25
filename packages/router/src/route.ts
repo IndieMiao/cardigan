@@ -1821,6 +1821,13 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "run_preparation_stalled": {
+      // C-738: a used-up retry budget goes to PM through its pm_ops handoff,
+      // never to host ops.
+      if (
+        (input.event.payload as { exhausted?: unknown } | null)?.exhausted ===
+        true
+      )
+        break;
       if (payloadString(input.event.payload, "recovery_root_run_id"))
         note(
           input,

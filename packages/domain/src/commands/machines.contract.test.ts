@@ -1019,9 +1019,11 @@ test("only a released pre-Run snapshot failure can reselect a different machine 
   expect(value(reassign(next)).events).toEqual([]);
 });
 
-test.each([false, true])(
-  "C-527: explicit prelaunch cancellation allows checked reassignment (cleaned preparation retry: %s)",
-  (retry) => {
+// C-738: a chain of cleaned preparation retries is still a never-dispatched queue.
+test.each([0, 1, 2])(
+  "C-527: explicit prelaunch cancellation allows checked reassignment (cleaned preparation retries: %s)",
+  (retries) => {
+    const retry = retries > 0;
     const io = ports(),
       base = preferRemote();
     const s: CommandState = {
@@ -1043,7 +1045,7 @@ test.each([false, true])(
     );
     let before = apply(placed, pending);
     let target = pending.data;
-    if (retry) {
+    for (let n = 0; n < retries; n++) {
       const system = { kind: "system" as const, project_id: s.project_id };
       before = apply(
         before,
@@ -1137,7 +1139,7 @@ test.each([false, true])(
       "assignment_released",
     ]);
     expect(after.runs.map((r) => r.status)).toEqual(
-      retry ? ["cancelled", "cancelled"] : ["cancelled"],
+      Array(retries + 1).fill("cancelled"),
     );
     if (retry)
       expect(

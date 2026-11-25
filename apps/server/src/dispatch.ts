@@ -43,6 +43,7 @@ import {
   parkedPauseRepair,
   pendingPrecheckConflict,
   pmNotificationState,
+  preparationRetryWaiting,
   providerAdmission,
   queueRun,
   type RetirementDispatchWait,
@@ -2214,11 +2215,7 @@ export class Dispatcher {
         state = this.loadState(tx, project);
       }
       if (!run) return skip("run_missing");
-      if (
-        run.preparation_retry &&
-        Date.parse(this.clock.now()) <
-          Date.parse(run.preparation_retry.ready_at)
-      )
+      if (preparationRetryWaiting(run, this.clock.now()))
         return skip("preparation_backoff");
       if (unreadableCommentTrigger(state, run))
         return skip("unreadable_trigger");
