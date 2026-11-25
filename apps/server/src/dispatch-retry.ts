@@ -831,8 +831,9 @@ export async function retryDispatchedRuns(
       const used =
         dispatchRecoveryUsed(observed.state.events, observed.a.id) ||
         recoveryChainUsed(observed.state, observed.run);
+      // C-735: a refused start acknowledgement is reported, never restarted.
       if (
-        used &&
+        (used || observed.run.ack_refusal) &&
         !unreadableCommentTrigger(observed.state, observed.run) &&
         reviewRunWakeDisposition(observed.state, observed.a, observed.run) !==
           "obsolete"

@@ -43,7 +43,7 @@ import { currentReviewTarget, reviewRound } from "./review-round.js";
 import { restartStandingSession, resumeStanding } from "./standing.js";
 import { recordHumanStart } from "./stop-state.js";
 import { incrementalTestReview } from "./test-review.js";
-import { activeWork } from "./workflow.js";
+import { activeWork, workDependencyWait } from "./workflow.js";
 
 const unfinished = (run: Run) =>
   !["completed", "failed", "cancelled"].includes(run.status);
@@ -906,8 +906,10 @@ export function acknowledgeRun(
     if (status !== "acked")
       status = unwrap(transition("run", status, "acknowledge"));
     status = unwrap(transition("run", status, "start"));
-    const next = { ...run, status, started_at: d.now };
+    const { ack_refusal: _refusal, ...started } = run;
+    const next = { ...started, status, started_at: d.now };
     d.put("runs", next);
+    let dependencyWait: ReturnType<typeof workDependencyWait>;
     if (assignment.scope === "work_item") {
       const item = d.ownWork(assignment.work_item_id);
       // A directed pause discussion does not start the repair or spend a review round.
@@ -916,17 +918,66 @@ export function acknowledgeRun(
         trigger?.type === "instruction_issued" &&
         (trigger.payload as { pause_recipient?: string })?.pause_recipient ===
           assignment.id;
-      const active = discussion ? item : activeWork(d, item);
+      // C-735: woken before its prerequisites finish, the Run starts as a
+      // discussion and leaves the item waiting. Delivery and every other
+      // activation still go through activeWork's dependency checks.
+      dependencyWait = discussion ? undefined : workDependencyWait(d, item);
+      const active = discussion || dependencyWait ? item : activeWork(d, item);
       if (active.status !== item.status) d.put("work_items", active);
     }
     providerStarted(d, run);
     d.emit("run_started", cardId(d, assignment), {
       run_id: run.id,
       assignment_id: assignment.id,
+      ...(dependencyWait
+        ? {
+            dependency_wait: {
+              cards: [...dependencyWait.cards],
+              work_items: [...dependencyWait.work_items],
+            },
+          }
+        : {}),
       ...(run.recovery_policy && run.recovery_policy.root_run_id !== run.id
         ? { recovery_root_run_id: run.recovery_policy.root_run_id }
         : {}),
     });
+    return next;
+  });
+}
+
+/** C-735: longest refusal message kept on the Run and its event. */
+export const ACK_REFUSAL_MESSAGE_MAX = 500;
+
+/**
+ * C-735: record why the caller's own dispatched Run could not be acknowledged,
+ * so dispatch patrol, host ops and PM see the cause instead of a silent
+ * startup failure. A repeat of the same refusal changes nothing.
+ */
+export function recordRunAckRefusal(
+  state: CommandState,
+  actor: Actor,
+  p: { run_id: RunId; code: string; message: string },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "acknowledge_run", ports, (d) => {
+    const run = d.ownRun(p.run_id);
+    if (!["dispatched", "acked"].includes(run.status) || run.started_at)
+      return run;
+    const code = String(p.code).slice(0, 64) || "unknown";
+    const message =
+      String(p.message).trim().slice(0, ACK_REFUSAL_MESSAGE_MAX) || code;
+    if (run.ack_refusal?.code === code && run.ack_refusal.message === message)
+      return run;
+    const next: Run = { ...run, ack_refusal: { code, message, at: d.now } };
+    d.put("runs", next);
+    const assignment = d.get("assignments", run.assignment_id);
+    const body = `${assignment.id}（${run.id}）已连上 Card 工具，但启动确认被拒（${code}）：${message}`;
+    d.emit(
+      "run_ack_refused",
+      cardId(d, assignment),
+      { run_id: run.id, assignment_id: assignment.id, code, message },
+      { type: "system", body, run_id: run.id },
+    );
     return next;
   });
 }

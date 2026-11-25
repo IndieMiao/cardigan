@@ -12,6 +12,7 @@ import {
   queueRun,
   type Result,
   type Run,
+  recordRunAckRefusal,
   submitDelivery,
   submitReview,
   toolNames,
@@ -284,7 +285,7 @@ test("invalid Run/runtime transitions, changed worktree/branch and blank abort r
     reject(dispatch(next, { ...ref, ...patch }), "invariant_violation");
 });
 
-test("acknowledgeRun reuses dependency checks and returns no partial Run or work changes", () => {
+function dependentAssignment() {
   const dependent = commit(
     createWorkItem(
       f.state,
@@ -301,7 +302,7 @@ test("acknowledgeRun reuses dependency checks and returns no partial Run or work
       f.io,
     ),
   );
-  const a = commit(
+  return commit(
     assign(
       f.state,
       human,
@@ -309,10 +310,165 @@ test("acknowledgeRun reuses dependency checks and returns no partial Run or work
       f.io,
     ),
   );
-  const r = commit(dispatch(commit(queue(a))));
-  const before = JSON.stringify(f.state);
-  reject(ack(r, a), "invariant_violation");
-  expect(JSON.stringify(f.state)).toBe(before);
+}
+const dependentRef = {
+  ...ref,
+  worktree_path: "/fixture/dependent",
+  branch: "dependent",
+};
+
+test("C-735: a Run woken before its dependencies finish starts as a discussion and leaves the item todo", async () => {
+  const a = dependentAssignment();
+  const r = commit(dispatch(commit(queue(a)), dependentRef));
+  const acknowledged = value(ack(r, a));
+  expect(acknowledged.data).toMatchObject({ status: "running" });
+  expect(acknowledged.events).toEqual([
+    expect.objectContaining({
+      type: "run_started",
+      payload: expect.objectContaining({
+        run_id: r.id,
+        dependency_wait: { cards: [], work_items: [item().id] },
+      }),
+    }),
+  ]);
+  expect(acknowledged.changes.map((c) => c.collection)).toEqual(["runs"]);
+  f.state = apply(f.state, acknowledged);
+  expect(item(a).status).toBe("todo");
+  // Dependency rules are unchanged: the waiting item still cannot deliver.
+  const p = {
+    work_item_id: item(a).id,
+    kind: "code" as const,
+    summary: "Early",
+    subject,
+    requested_verifiers: [],
+  };
+  const receipt = await prepareDelivery(f.state, actor(a), p, {
+    verify: async () => ({ ok: true, value: [] }),
+  });
+  if (receipt.ok)
+    reject(
+      submitDelivery(f.state, actor(a), p, receipt.value, f.io),
+      "invariant_violation",
+    );
+  else expect(receipt.error.code).toBe("invariant_violation");
+  expect(item(a).status).toBe("todo");
+  stop(r, a);
+  expect(f.state.runs.find((x) => x.id === r.id)).toMatchObject({
+    status: "completed",
+    outcome: "completed",
+  });
+  expect(item(a).status).toBe("todo");
+});
+
+test("C-735: once the dependency is accepted the same Assignment's next Run starts the item", async () => {
+  const a = dependentAssignment();
+  stop(start(a, dependentRef), a);
+  expect(item(a).status).toBe("todo");
+  const producing = start();
+  const delivery = await deliver();
+  stop(producing);
+  const reviewing = start(f.reviewer, {
+    ...ref,
+    worktree_path: "/fixture/review",
+    branch: "review",
+  });
+  commit(
+    submitReview(
+      f.state,
+      actor(f.reviewer),
+      {
+        delivery_id: delivery.id,
+        target_sha: subject.value,
+        kind: "code",
+        issues: [],
+      },
+      f.io,
+    ),
+  );
+  stop(reviewing, f.reviewer);
+  expect(item().status).toBe("accepted");
+  const r = commit(dispatch(commit(queue(a)), dependentRef));
+  const acknowledged = value(ack(r, a));
+  expect(acknowledged.events.at(-1)?.payload).not.toHaveProperty(
+    "dependency_wait",
+  );
+  f.state = apply(f.state, acknowledged);
+  expect(item(a).status).toBe("in_progress");
+});
+
+test("C-735: a prerequisite card added after dispatch also starts the Run as a discussion", () => {
+  const other = commit(
+    createCard(
+      f.state,
+      human,
+      {
+        title: "Prerequisite",
+        goal: "First",
+        acceptance_criteria: ["Pass"],
+        source: { kind: "quote", text: "Build" },
+        repo: "example/repo",
+        base_branch: "main",
+      },
+      f.io,
+    ),
+  );
+  // Queueing already waits for prerequisite cards; one added after dispatch
+  // reaches the acknowledgement.
+  const r = commit(dispatch(commit(queue())));
+  commit(
+    updateCard(
+      f.state,
+      human,
+      { card_id: item().card_id, depends_on_cards: [other.id] },
+      f.io,
+    ),
+  );
+  const acknowledged = value(ack(r));
+  expect(acknowledged.events.at(-1)?.payload).toMatchObject({
+    dependency_wait: { cards: [other.id], work_items: [] },
+  });
+  f.state = apply(f.state, acknowledged);
+  expect(item().status).toBe("todo");
+  expect(f.state.runs.find((x) => x.id === r.id)?.status).toBe("running");
+});
+
+test("C-735: a refused acknowledgement is recorded once with its reason and cleared when the Run starts", () => {
+  const r = commit(dispatch(commit(queue())));
+  const refusal = { run_id: r.id, code: "illegal_transition", message: "Why" };
+  const recorded = value(recordRunAckRefusal(f.state, actor(), refusal, f.io));
+  expect(recorded.data.ack_refusal).toEqual({
+    code: "illegal_transition",
+    message: "Why",
+    at: now,
+  });
+  expect(recorded.events).toEqual([
+    expect.objectContaining({
+      type: "run_ack_refused",
+      card_id: item().card_id,
+      payload: {
+        run_id: r.id,
+        assignment_id: f.coder.id,
+        code: "illegal_transition",
+        message: "Why",
+      },
+    }),
+  ]);
+  expect(recorded.timeline[0]?.body).toContain("Why");
+  f.state = apply(f.state, recorded);
+  expect(
+    value(recordRunAckRefusal(f.state, actor(), refusal, f.io)),
+  ).toMatchObject({ changes: [], events: [], timeline: [] });
+  reject(
+    recordRunAckRefusal(f.state, actor(f.reviewer), refusal, f.io),
+    "unauthorized",
+  );
+  commit(ack(r));
+  const started = f.state.runs.find((x) => x.id === r.id);
+  expect(started?.status).toBe("running");
+  expect(started).not.toHaveProperty("ack_refusal");
+  expect(
+    value(recordRunAckRefusal(f.state, actor(), refusal, f.io)).changes,
+  ).toEqual([]);
 });
 
 test("acknowledgement activates a reviewer made ready by a real delivery; rework starts through the same path", async () => {

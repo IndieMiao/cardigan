@@ -81,6 +81,15 @@ export function claimDispatchStop(
       return;
     }
     if (run.inactivity_stop) return;
+    // C-735: a refused start acknowledgement proves the session is alive;
+    // the watchdog reports its reason instead of stopping the terminal.
+    if (
+      !old &&
+      run.ack_refusal &&
+      (p.reason === "dispatch_timeout" ||
+        p.reason === "delivery_retry_exhausted")
+    )
+      return;
     const card = cardOf(d, run);
     const closed =
       card && ["done", "cancelled"].includes(d.get("cards", card).status);

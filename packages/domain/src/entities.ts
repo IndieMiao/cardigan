@@ -744,6 +744,16 @@ export interface Run {
       | "runtime_exited"
       | "mcp_unavailable";
   };
+  /**
+   * C-735: why the Run's last start acknowledgement was refused. Proves the
+   * session is up and calling Card tools, so the dispatch watchdog reports the
+   * reason instead of restarting a healthy terminal. Cleared once it starts.
+   */
+  readonly ack_refusal?: {
+    readonly code: string;
+    readonly message: string;
+    readonly at: Timestamp;
+  };
   /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
   readonly inactivity_stop?: {
     readonly attempt_id: string;

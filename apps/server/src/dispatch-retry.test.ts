@@ -9,6 +9,7 @@ import {
   listNeedsYou,
   queueRun,
   type Run,
+  recordRunAckRefusal,
   startDispatchStop,
 } from "@cardigan/domain";
 import { runCapacitySnapshot } from "@cardigan/host";
@@ -447,6 +448,48 @@ test("successful send without run_started times out once; second timeout creates
   await d.tick();
   expect(f.state().human_actions[0]?.status).toBe("cancelled");
   expect(f.notes().some((n) => n.status === "needs_attention")).toBe(false);
+});
+
+test("C-735: a refused start acknowledgement escalates once with its reason and never stops or requeues", async () => {
+  f.comment();
+  const d = dispatcher({ dispatchTimeoutMs: 100 });
+  await d.tick();
+  const original = f.latest();
+  f.apply(
+    (s, a, p) =>
+      recordRunAckRefusal(
+        s,
+        a,
+        {
+          run_id: original.id,
+          code: "invariant_violation",
+          message: "Dependencies are not complete for W-1",
+        },
+        p,
+      ),
+    f.actorFor(f.target.assignment),
+  );
+  f.advance(100);
+  await d.tick();
+  await d.tick();
+  expect(f.latest()).toMatchObject({ id: original.id, status: "dispatched" });
+  expect(f.latest().dispatch_stop).toBeUndefined();
+  expect(f.runtime.interrupt).not.toHaveBeenCalled();
+  expect(count("run_dispatch_stop_requested")).toBe(0);
+  expect(count("run_dispatch_recovered")).toBe(0);
+  expect(count("run_dispatch_stalled")).toBe(1);
+  const alert = f.state().events.find((e) => e.type === "run_dispatch_stalled");
+  expect(alert?.payload).toMatchObject({
+    run_id: original.id,
+    reason: "ack_refused",
+  });
+  expect(
+    f
+      .state()
+      .timeline.some((e) =>
+        e.body.includes("Dependencies are not complete for W-1"),
+      ),
+  ).toBe(true);
 });
 
 test.each(["exited", "unknown"] as const)(
