@@ -236,6 +236,7 @@ export {
   eventsAtSeq,
   eventsForDecision,
   eventsForHumanAction,
+  eventsForWorkItem,
   eventsOfType,
   eventsOfTypes,
   eventsWithKey,

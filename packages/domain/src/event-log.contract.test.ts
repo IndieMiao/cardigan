@@ -723,7 +723,9 @@ test("C-671: dormant entries answer like decoded ones and decode only when a kep
           expect(streamEvents(cold, card)).toEqual(
             streamEvents(unlisted, card),
           );
-        expect(loads.every((stream) => closed.has(stream))).toBe(true);
+        expect(loads.every((stream) => closed.has(stream as CardId))).toBe(
+          true,
+        );
         // Everything else reads decoded events, identical to the plain log.
         expectSameLookups(view.history(order), expectedView.history(order));
         expectGroupLookups(view.history(order), expectedView.history(order));

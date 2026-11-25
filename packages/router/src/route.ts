@@ -19,6 +19,7 @@ import {
   decisionQuestionPayload,
   employeeNameKey,
   eventsAtSeq,
+  eventsForWorkItem,
   eventsOfType,
   eventsOfTypes,
   flowAtLeast,
@@ -149,16 +150,16 @@ function note(
   if (
     to.kind === "assignment" &&
     resumed.length &&
-    eventsOfType(input.snapshot.events, "work_item_resume_requested").some(
-      (event) => {
+    // C-671: by work item from the index (the resumed card may be closed).
+    resumed.some((work_item_id) =>
+      eventsForWorkItem(input.snapshot.events, work_item_id).some((event) => {
         const p = payloadObject(event.payload);
         return (
+          event.type === "work_item_resume_requested" &&
           p.trigger_event_id === input.event.id &&
-          p.assignment_id === to.assignment_id &&
-          typeof p.work_item_id === "string" &&
-          resumed.includes(p.work_item_id)
+          p.assignment_id === to.assignment_id
         );
-      },
+      }),
     )
   )
     return;

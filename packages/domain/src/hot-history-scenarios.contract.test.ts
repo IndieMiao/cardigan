@@ -1,3 +1,4 @@
+import { fullEventHistory } from "./event-index.js";
 import { describe, expect, test } from "vitest";
 import {
   assignmentDependenciesAllowStart,
@@ -32,6 +33,8 @@ import {
   hotCommandEvents,
   LEAN_COLD_CARD_OMITTED_EVENT_TYPES,
   leanCommandEvents,
+  SLIM_COLD_CARD_EVENT_TYPES,
+  slimCommandEvents,
 } from "./hot-history.js";
 import { type CardId, parseEventId } from "./ids.js";
 
@@ -41,6 +44,8 @@ import { type CardId, parseEventId } from "./ids.js";
  * also carries the cold-omitted telemetry, so a wrongly cold card would show.
  * C-649: the same scenarios hold for the `lean` scope (cold cards also lose
  * GitHub dispatch records; the project stream follows retention rules).
+ * C-671: and for the `slim` scope, whose cold cards keep only the whitelisted
+ * facts in the array while indexed lookups still see the rest.
  */
 let serial = 0;
 const project_id = fixture().project_id;
@@ -74,6 +79,11 @@ const scopes = [
     "lean",
     LEAN_COLD_CARD_OMITTED_EVENT_TYPES,
     (s: CommandState) => leanCommandEvents(s),
+  ],
+  [
+    "slim",
+    LEAN_COLD_CARD_OMITTED_EVENT_TYPES,
+    (s: CommandState) => slimCommandEvents(s),
   ],
 ] as const;
 const [c1, c2, c3, c4] = [1, 2, 3, 4].map((n) => id("card", n)) as [
@@ -176,12 +186,21 @@ function scenario(define: (s: CommandState) => readonly Event[]): {
   return { full, hot: { ...full, events: define(full) } };
 }
 
-describe.each(scopes)("%s scope", (_scope, omitted, define) => {
+describe.each(scopes)("%s scope", (scope, omitted, define) => {
   test("only cold cards lose telemetry; referenced closed cards stay whole", () => {
     const { full, hot } = scenario(define);
     expect([...hotCardIds(full)].sort()).toEqual([c1, c2, c4].sort());
-    const dropped = full.events.filter((e) => !hot.events.includes(e));
-    expect(dropped.length).toBe(omitted.size);
+    const kept = fullEventHistory(hot.events);
+    const dropped = full.events.filter((e) => !kept.includes(e));
+    // C-671: a slim cold card also loses every non-whitelisted fact.
+    const whitelisted = (e: Event) =>
+      scope !== "slim" || SLIM_COLD_CARD_EVENT_TYPES.has(e.type);
+    expect(dropped.length).toBe(
+      omitted.size +
+        full.events.filter(
+          (e) => e.card_id === c3 && !omitted.has(e.type) && !whitelisted(e),
+        ).length,
+    );
     for (const e of dropped) expect(e.card_id).toBe(c3);
   });
 

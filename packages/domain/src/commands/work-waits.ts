@@ -596,12 +596,13 @@ export function resumeWorkWaits(
         | { attempt_id: string; head_sha: string; retry: number }
         | undefined;
       if (conflictWait) {
-        const history = trusted(d, [
-          "work_item_resume_requested",
-          "baseline_conflict_limit_reached",
-        ]).filter(
+        // The waiting item's own (open) card: the array holds its stream.
+        const history = d.state.events.filter(
           (e) =>
-            e.card_id === item.card_id && payload(e).work_item_id === item.id,
+            e.actor.kind === "system" &&
+            e.actor.project_id === d.state.project_id &&
+            e.card_id === item.card_id &&
+            payload(e).work_item_id === item.id,
         );
         const attempts = history.filter(
           (e) =>

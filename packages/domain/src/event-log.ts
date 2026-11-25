@@ -80,9 +80,22 @@ export class DormantEvent {
     readonly type: string,
     readonly card_id: string | undefined,
     /** Payload index keys, in `append` order, so another log can re-index it. */
-    readonly keys: readonly (readonly [EventIndexKind, unknown])[],
+    readonly keys:
+      | readonly (readonly [EventIndexKind, unknown])[]
+      | undefined,
   ) {}
 }
+/**
+ * One shared string per type and stream: a dormant entry keeps only its id
+ * and seq of its own, so it stays a small fraction of the decoded event.
+ */
+const shared = new Map<string, string>();
+const share = (value: string) => {
+  const known = shared.get(value);
+  if (known !== undefined) return known;
+  shared.set(value, value);
+  return value;
+};
 type Entry = Event | DormantEvent;
 /** What history filters and stream lookups read: decoded or dormant alike. */
 type Head = {
@@ -302,7 +315,13 @@ export class EventLog {
       keys.push(["resume_work_items", key]);
     for (const key of indexKeysOf(event, "batch")) keys.push(["batch", key]);
     this.#addDormant(
-      new DormantEvent(event.id, event.seq, event.type, event.card_id, keys),
+      new DormantEvent(
+        event.id,
+        event.seq,
+        share(event.type),
+        event.card_id === undefined ? undefined : share(event.card_id),
+        keys.length ? keys : undefined,
+      ),
     );
   }
 
@@ -317,7 +336,8 @@ export class EventLog {
   #addDormant(entry: DormantEvent) {
     const ord = this.#add(entry);
     const stream = streamOf(entry);
-    for (const [kind, key] of entry.keys) this.#index(kind, key, stream, ord);
+    for (const [kind, key] of entry.keys ?? [])
+      this.#index(kind, key, stream, ord);
     this.#dormant.set(stream, (this.#dormant.get(stream) ?? 0) + 1);
   }
 
@@ -360,6 +380,16 @@ export class EventLog {
     let n = 0;
     for (const count of this.#dormant.values()) n += count;
     return n;
+  }
+
+  /** C-671: dormant entries per event type (diagnostics and benchmarks). */
+  dormantTypes(): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const stream of this.#dormant.keys())
+      for (const entry of (this.streams.get(stream) as Seg).events)
+        if (entry instanceof DormantEvent)
+          counts.set(entry.type, (counts.get(entry.type) ?? 0) + 1);
+    return counts;
   }
 
   /** C-671: whether `stream` still holds dormant entries. */

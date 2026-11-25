@@ -193,10 +193,26 @@ const quantile = (values, q) => {
 const SCOPES = ["full", "hot", "lean", "slim"];
 
 /** C-671: decoded and dormant (not kept decoded) rows of a project's Store log. */
-function storeLog(store, project) {
+function storeLog(store, project, types = false) {
   const view = store.uow.read((tx) => tx.events.listStreams?.(project));
   const log = view?.base;
-  return log ? { rows: log.end, dormant: log.dormant } : undefined;
+  if (!log) return undefined;
+  return {
+    rows: log.end,
+    dormant: log.dormant,
+    ...(types ? { dormant_types: Object.fromEntries(log.dormantTypes()) } : {}),
+  };
+}
+
+/** Heap and RSS after a full collection when `--expose-gc` is on. */
+function memory_() {
+  globalThis.gc?.();
+  const m = process.memoryUsage();
+  return {
+    rss_mb: Math.round(m.rss / 2 ** 20),
+    heap_mb: Math.round(m.heapUsed / 2 ** 20),
+    collected: typeof globalThis.gc === "function",
+  };
 }
 
 async function bench(db, scope, iterations = 20) {
@@ -273,13 +289,15 @@ async function bench(db, scope, iterations = 20) {
       }
     }
   const memory = process.memoryUsage();
+  const collected = memory_();
   const logs = Object.fromEntries(
-    projects.map((project) => [project, storeLog(store, project)]),
+    projects.map((project) => [project, storeLog(store, project, true)]),
   );
   store.close();
   out({
     mode: "bench",
     logs,
+    after_gc: collected,
     scope,
     iterations,
     ready_ms,
@@ -489,13 +507,15 @@ async function background(db, scope, seconds = 60) {
   loop.disable();
   const wall = performance.now() - from;
   const memory = process.memoryUsage();
+  const collected = memory_();
   const logs = Object.fromEntries(
-    store.listProjects().map(({ id }) => [id, storeLog(store, id)]),
+    store.listProjects().map(({ id }) => [id, storeLog(store, id, true)]),
   );
   store.close();
   out({
     mode: "background",
     logs,
+    after_gc: collected,
     scope,
     seconds,
     restart: {

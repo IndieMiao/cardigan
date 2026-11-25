@@ -419,19 +419,41 @@ function applyCommand<T>(
   c.authorize();
   const effect = must(
     reduce(
-      loadCommandState(tx, c.project_id, {
-        ...(c.mergeGate?.status === "enabled" && c.mergeGate.queue
-          ? { merge_queue: { max_batch_size: c.mergeGate.queue.maxBatchSize } }
-          : {}),
-        merge_gate_enabled:
-          c.mergeGate !== undefined && c.mergeGate.status !== "disabled",
-      }),
+      loadCommandState(
+        tx,
+        c.project_id,
+        {
+          ...(c.mergeGate?.status === "enabled" && c.mergeGate.queue
+            ? {
+                merge_queue: { max_batch_size: c.mergeGate.queue.maxBatchSize },
+              }
+            : {}),
+          merge_gate_enabled:
+            c.mergeGate !== undefined && c.mergeGate.status !== "disabled",
+        },
+        // C-639/C-671: like MCP commands, the cards the request names (path
+        // segments and the idempotent body) keep their whole history.
+        { targets: [requestPath(c.req.url), c.idempotency?.request] },
+      ),
       { kind: "human", project_id: c.project_id },
       { clock: c.clock, ids: tx.ids },
     ),
   );
   persistEffect(tx, c.project_id, effect);
   return effect.data;
+}
+/** Decoded path segments of a request URL (query excluded). */
+function requestPath(url: string | undefined): string[] {
+  return (url ?? "")
+    .replace(/\?.*$/su, "")
+    .split("/")
+    .flatMap((segment) => {
+      try {
+        return [decodeURIComponent(segment)];
+      } catch {
+        return [];
+      }
+    });
 }
 function cardResult<T>(result: Result<T>, operation: string): Result<T> {
   if (
