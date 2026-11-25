@@ -268,6 +268,17 @@ export function recoverDispatch(
               ? "delivery_retry_exhausted"
               : undefined;
     if (!reason) return;
+    // C-735: a session whose start acknowledgement was refused is up and
+    // calling Card tools; restarting it cannot help. Report the reason once.
+    const refusal =
+      !stopping &&
+      !startupFailed &&
+      (reason === "dispatch_timeout" ||
+        reason === "delivery_retry_exhausted") &&
+      reviewWake !== "obsolete" &&
+      !unreadableCommentTrigger(state, run)
+        ? run.ack_refusal
+        : undefined;
     // C-600: a session without Card tools settles only through its own stop
     // fence and exit proof, never by escalation that leaves it running.
     if (reason === "mcp_unavailable" && !stopping) return;
@@ -303,6 +314,7 @@ export function recoverDispatch(
     const minutes = Math.max(0, Math.floor(waitedMs / 60000));
     const context = `${card ? `${card.id}「${card.title}」` : "项目常驻任务"}的 ${a.id}（${run.id}）派发后已等待 ${minutes} 分钟，${exitRecovery ? "原终端已异常退出" : startupFailed ? "自动恢复后的启动失败" : "仍未开始工作"}`;
     if (
+      !refusal &&
       (!recovered ||
         unreadable ||
         reviewWake === "obsolete" ||
@@ -474,7 +486,9 @@ export function recoverDispatch(
         return next;
       }
     }
-    const body = `${context}；${mcp ? `${MCP_SESSION_FAILURE}，${stopped && !p.stop_failed ? "已确认终端退出并记为启动失败，" : ""}` : ""}${p.stop_failed ? "无法确认旧终端已停止，已保留原 Run 和凭据，暂不重排" : "已自动恢复过一次，仍未成功"}。请检查${mcp ? "该机器到 Card MCP 的网络路径（可运行机器检查，含系统代理）、" : ""}终端与服务，必要时执行 cardigan assignment stop ${a.id}，再执行 cardigan assignment start ${a.id}，并回报处理结果。`;
+    const body = refusal
+      ? `${context}；会话已连上 Card 工具，但启动确认被拒（${refusal.code}）：${refusal.message}。这不是终端启动故障，重启不能解决，请按原因处理。`
+      : `${context}；${mcp ? `${MCP_SESSION_FAILURE}，${stopped && !p.stop_failed ? "已确认终端退出并记为启动失败，" : ""}` : ""}${p.stop_failed ? "无法确认旧终端已停止，已保留原 Run 和凭据，暂不重排" : "已自动恢复过一次，仍未成功"}。请检查${mcp ? "该机器到 Card MCP 的网络路径（可运行机器检查，含系统代理）、" : ""}终端与服务，必要时执行 cardigan assignment stop ${a.id}，再执行 cardigan assignment start ${a.id}，并回报处理结果。`;
     // C-600: settling a session without Card tools after an earlier report
     // for this Run (e.g. an unconfirmed stop) reports nothing twice.
     if (
@@ -498,7 +512,10 @@ export function recoverDispatch(
       {
         assignment_id: a.id,
         run_id: run.id,
-        reason,
+        reason: refusal ? "ack_refused" : reason,
+        ...(refusal
+          ? { ack_refusal: { code: refusal.code, message: refusal.message } }
+          : {}),
         waited_ms: waitedMs,
         body,
         audience: ops ? "pm_ops" : "needs_you",
@@ -535,7 +552,7 @@ export function recoverDispatch(
           human_action_id: id,
           blocked_work_items: [],
           dispatch_run_id: run.id,
-          dispatch_reason: reason,
+          dispatch_reason: refusal ? "ack_refused" : reason,
           ...(policy ? { recovery_root_run_id: policy.root_run_id } : {}),
         },
         { type: "human_action", body, human_action_id: id },

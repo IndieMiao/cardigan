@@ -12,6 +12,7 @@ import {
   obsoleteDispatchAttention,
   occupiedRunSlots,
   type Run,
+  recordRunAckRefusal,
   recoverDispatch,
   releaseAssignment,
   resolveDispatchAttention,
@@ -229,6 +230,47 @@ const recover = (target = run, failed_attempts = 0) => {
     f.io,
   );
 };
+
+test("C-735: a refused start acknowledgement is reported once with its reason, never stopped or requeued", () => {
+  commit(
+    recordRunAckRefusal(
+      f.state,
+      actor(),
+      { run_id: run.id, code: "illegal_transition", message: "等待当前任务" },
+      f.io,
+    ),
+  );
+  now += 600000;
+  expect(
+    commit(
+      claimDispatchStop(
+        f.state,
+        system,
+        { run_id: run.id, reason: "dispatch_timeout", lease_ms: 60000 },
+        f.io,
+      ),
+    ),
+  ).toBeUndefined();
+  const before = f.state.events.length;
+  commit(recover());
+  const current = f.state.runs.find((r) => r.id === run.id);
+  expect(current?.status).toBe("dispatched");
+  expect(current?.dispatch_stop).toBeUndefined();
+  const added = f.state.events.slice(before);
+  expect(added.map((e) => e.type)).not.toContain("run_dispatch_recovered");
+  const alert = added.find((e) => e.type === "run_dispatch_stalled");
+  expect(alert?.payload).toMatchObject({
+    run_id: run.id,
+    reason: "ack_refused",
+    ack_refusal: { code: "illegal_transition", message: "等待当前任务" },
+  });
+  const body = String((alert?.payload as { body?: string } | undefined)?.body);
+  expect(body).toContain("等待当前任务");
+  expect(body).not.toContain("assignment stop");
+  const after = f.state.events.length;
+  commit(recover());
+  expect(f.state.events.length).toBe(after);
+});
 
 test("timeout cancels and queues atomically, preserves snapshot and spends the Assignment's only recovery", () => {
   now += 599999;
