@@ -405,6 +405,8 @@
   .facts {
     display: grid;
     grid-template-columns: var(--ui-detail-facts-label) minmax(0, 1fr);
+    /* A label sits on its value's first line, however tall the value's tags. */
+    align-items: baseline;
     gap: var(--ui-space-2) var(--ui-space-3);
     margin: 0;
     font-size: var(--ui-text-sm);
