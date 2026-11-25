@@ -1,4 +1,4 @@
-import type { PushResult } from "@cardigan/git-transport";
+import type { CandidatePushResult } from "@cardigan/git-transport";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { fixture, human } from "../../domain/src/commands/test-fixtures.js";
@@ -112,7 +112,11 @@ function setup() {
       return [];
     }),
   };
-  const push = vi.fn(async (): Promise<PushResult> => ({ status: "pushed" }));
+  const push = vi.fn(
+    async (): Promise<CandidatePushResult | { status: "not_started" }> => ({
+      status: "pushed",
+    }),
+  );
   const journal = new GithubDispatchJournal(store);
   const options = {
     config,
@@ -127,6 +131,7 @@ function setup() {
       fetchFailureLog: vi.fn(async () => undefined),
     },
     now: () => now,
+    pushRetryDelayMs: 0,
   };
   const request: CheckRequest = {
     kind: "merge_check",
@@ -177,20 +182,162 @@ test("C-681: an abort before push records not_sent with no POST evidence", async
   );
 });
 
-test("C-681: an unfinished candidate push records push_incomplete and the latest request", async () => {
+test("C-681/C-758: a persistently unreachable push records push_unreachable and the latest request", async () => {
   const f = setup();
-  f.push.mockResolvedValueOnce({ status: "failed", reason: "network" });
+  f.push.mockResolvedValue({ status: "failed", reason: "network" });
   const error = await unknown(new GithubCheckExecutor(f.options), f.request);
   expect(error.dispatch).toEqual({
-    stage: "push_incomplete",
+    stage: "push_unreachable",
+    pushFailure: "network",
     last: tokenExchange,
   });
+  // One bounded retry inside the same publication fence, then the real cause.
+  expect(f.push).toHaveBeenCalledTimes(2);
   expect(f.client.dispatch).not.toHaveBeenCalled();
+  expect(f.journal.unfinished()).toMatchObject([{ phase: "reserved" }]);
   const text = formatDispatchUnknown(error.dispatch!);
   expect(text).toBe(
-    "分类：候选推送未完成；最近一次 GitHub 请求：POST 安装令牌，HTTP 201，请求 id 0400:1111:AAAA，响应：正文已省略",
+    "分类：候选推送连不上 GitHub；推送结果：网络连接失败；最近一次 GitHub 请求：POST 安装令牌，HTTP 201，请求 id 0400:1111:AAAA，响应：正文已省略",
   );
   expectRedacted(text);
+});
+
+test.each([
+  ["timeout", "push_timeout", 1, "候选推送超时；推送结果：超过传输时限"],
+  [
+    "rejected",
+    "push_rejected",
+    1,
+    "GitHub 拒绝或报错候选推送；推送结果：引用更新被拒",
+  ],
+  [
+    "auth",
+    "push_rejected",
+    2,
+    "GitHub 拒绝或报错候选推送；推送结果：认证或权限被拒",
+  ],
+  [
+    "github_error",
+    "push_rejected",
+    2,
+    "GitHub 拒绝或报错候选推送；推送结果：GitHub 服务端错误",
+  ],
+  [
+    "local",
+    "push_failed",
+    1,
+    "候选推送在本机失败；推送结果：传输前本机校验失败",
+  ],
+  ["other", "push_failed", 2, "候选推送在本机失败；推送结果：未识别的推送错误"],
+] as const)(
+  "C-758: a failed push (%s) is classified as %s, not as an unreachable executor",
+  async (reason, stage, pushes, label) => {
+    const f = setup();
+    f.push.mockResolvedValue({ status: "failed", reason });
+    const error = await unknown(new GithubCheckExecutor(f.options), f.request);
+    expect(error.dispatch).toMatchObject({ stage, pushFailure: reason });
+    expect(f.push).toHaveBeenCalledTimes(pushes);
+    expect(f.client.dispatch).not.toHaveBeenCalled();
+    expect(f.journal.unfinished()).toMatchObject([{ phase: "reserved" }]);
+    expect(formatDispatchUnknown(error.dispatch!)).toContain(`分类：${label}`);
+    // The same attempt is retried later through the unchanged recovery path.
+    f.push.mockResolvedValue({ status: "pushed" });
+    // This fixture's POST returns no run id: discovery waits for the run.
+    await expect(
+      new GithubCheckExecutor(f.options).dispatch(f.request),
+    ).rejects.toMatchObject({ scope: "attempt" });
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+  },
+);
+
+test("C-758: a transient push failure (fresh token not yet accepted) succeeds on the in-fence retry", async () => {
+  const f = setup();
+  f.push.mockResolvedValueOnce({ status: "failed", reason: "auth" });
+  await expect(
+    new GithubCheckExecutor(f.options).dispatch(f.request),
+  ).rejects.toMatchObject({ scope: "attempt" });
+  expect(f.push).toHaveBeenCalledTimes(2);
+  expect(f.push.mock.calls[1]).toEqual(f.push.mock.calls[0]);
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+});
+
+test("C-758: a retry that cannot take the repository lock keeps the first failure, never not_started", async () => {
+  const f = setup();
+  f.push
+    .mockResolvedValueOnce({ status: "failed", reason: "network" })
+    .mockResolvedValueOnce({ status: "not_started" });
+  const error = await unknown(new GithubCheckExecutor(f.options), f.request);
+  expect(error.dispatch).toMatchObject({
+    stage: "push_unreachable",
+    pushFailure: "network",
+  });
+  expect(f.journal.unfinished()[0]).not.toHaveProperty("admission_suspended");
+});
+
+test.each([
+  "during push",
+  "during retry wait",
+  "before POST",
+  "transport",
+] as const)(
+  "C-758: a local abort %s is push_cancelled and never retried",
+  async (when) => {
+    const f = setup();
+    const abort = new AbortController();
+    const options = {
+      ...f.options,
+      pushRetryDelayMs: when === "during retry wait" ? 60_000 : 0,
+    };
+    f.push.mockImplementationOnce(async () => {
+      if (when === "during push") abort.abort();
+      if (when === "during retry wait") setTimeout(() => abort.abort(), 1);
+      if (when === "before POST") return { status: "pushed" };
+      return {
+        status: "failed",
+        reason: when === "transport" ? "cancelled" : "network",
+      };
+    });
+    const request = {
+      ...f.request,
+      signal: abort.signal,
+      ...(when === "before POST"
+        ? { beforeDispatch: () => abort.abort() }
+        : {}),
+    };
+    const error = await unknown(new GithubCheckExecutor(options), request);
+    expect(error.dispatch?.stage).toBe("push_cancelled");
+    expect(f.push).toHaveBeenCalledOnce();
+    expect(f.client.dispatch).not.toHaveBeenCalled();
+    expect(formatDispatchUnknown(error.dispatch!)).toContain(
+      "分类：候选推送被本地取消或中止",
+    );
+  },
+);
+
+test("C-758: a pushed candidate whose fence was taken by abandonment is push_cancelled", async () => {
+  const f = setup();
+  f.push.mockImplementationOnce(async () => {
+    const intent = f.journal.unfinished()[0]!;
+    f.store.uow.run((tx) =>
+      tx.events.append(human.project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(human.project_id, card.id),
+        card_id: card.id,
+        actor: { kind: "system", project_id: human.project_id },
+        type: "github_check_dispatch",
+        payload: JSON.parse(
+          JSON.stringify({ ...intent, abandoned: "superseded" }),
+        ),
+        created_at: new Date(now).toISOString(),
+      }),
+    );
+    return { status: "pushed" };
+  });
+  const error = await unknown(new GithubCheckExecutor(f.options), f.request);
+  expect(error.dispatch?.stage).toBe("push_cancelled");
+  expect(error.dispatch).not.toHaveProperty("pushFailure");
+  expect(f.client.dispatch).not.toHaveBeenCalled();
+  expect(f.journal.unfinished()).toEqual([]);
 });
 
 test("C-681: a dispatched run that never appears records run_not_found with the persisted POST response", async () => {

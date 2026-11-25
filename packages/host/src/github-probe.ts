@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   CandidateDeleteRequest,
   CandidatePushRequest,
-  PushResult,
+  CandidatePushResult,
 } from "@cardigan/git-transport";
 import type { Store } from "@cardigan/store";
 import type { CheckHandle } from "./check-executor.js";
@@ -71,7 +71,7 @@ export class GithubProbe implements ProbeAdapter {
       push: (
         project: string,
         input: CandidatePushRequest,
-      ) => Promise<PushResult>;
+      ) => Promise<CandidatePushResult>;
       remove: (
         project: string,
         input: CandidateDeleteRequest,

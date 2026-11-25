@@ -41,7 +41,9 @@ import {
 } from "./candidate-delete.js";
 import {
   type CandidatePushRequest,
+  type CandidatePushResult,
   candidatePushCommand,
+  classifyCandidatePushFailure,
 } from "./candidate-push.js";
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
 import {
@@ -292,19 +294,31 @@ export class CentralGitTransport
       return { status: "failed", reason: "other" };
     }
   }
-  /** Host-only GitHub App publication, restricted to a single non-force ci ref. */
+  /**
+   * Host-only GitHub App publication, restricted to a single non-force ci ref.
+   * C-758: the failure reason separates local abort, the transfer budget, a
+   * failure before transport and GitHub's answer; raw output never leaves.
+   */
   async pushCandidateCommit(
     repository: string,
     input: CandidatePushRequest,
-  ): Promise<PushResult> {
+  ): Promise<CandidatePushResult> {
+    let command: ReturnType<typeof candidatePushCommand>;
     try {
       if (dirname(repository) !== this.root)
         throw new Error("Unexpected center");
       await this.privateDirectory(this.root);
       await this.privateDirectory(repository);
-      const command = candidatePushCommand(repository, input);
+      command = candidatePushCommand(repository, input);
       if ((await this.objectType(repository, input.sha)) !== "commit")
         throw new Error("Missing commit");
+    } catch {
+      return {
+        status: "failed",
+        reason: input.signal?.aborted ? "cancelled" : "local",
+      };
+    }
+    try {
       await withGitTimeout("push", this.options, (timeout) =>
         exec("git", command.args, {
           env: command.env,
@@ -315,8 +329,32 @@ export class CentralGitTransport
         }),
       );
       return { status: "pushed" };
-    } catch {
-      return { status: "failed", reason: "other" };
+    } catch (error) {
+      const e = error as {
+        code?: unknown;
+        stdout?: unknown;
+        stderr?: unknown;
+        name?: unknown;
+        message?: unknown;
+      };
+      const reason =
+        input.signal?.aborted || e.name === "AbortError"
+          ? "cancelled"
+          : typeof e.message === "string" &&
+              e.message.startsWith("Git push timed out")
+            ? "timeout"
+            : classifyCandidatePushFailure(
+                `${typeof e.stdout === "string" ? e.stdout : ""}\n${typeof e.stderr === "string" ? e.stderr : ""}`,
+              );
+      return {
+        status: "failed",
+        reason,
+        ...(typeof e.code === "number" &&
+        Number.isSafeInteger(e.code) &&
+        e.code >= 0
+          ? { exit_code: e.code }
+          : {}),
+      };
     }
   }
   /** Host-only compare-and-delete; no generic branch deletion entry point. */

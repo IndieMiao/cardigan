@@ -1507,6 +1507,9 @@ export class MergeChecks {
                     failure: {
                       category: failure.category,
                       ...(failure.stage ? { stage: failure.stage } : {}),
+                      ...(failure.pushFailure
+                        ? { push_failure: failure.pushFailure }
+                        : {}),
                       ...(failure.httpStatus !== undefined
                         ? { http_status: failure.httpStatus }
                         : {}),

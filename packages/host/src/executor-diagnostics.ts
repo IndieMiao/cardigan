@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { CandidatePushFailure } from "@cardigan/git-transport";
 
 /**
  * C-681: fixed-shape evidence about the provider HTTP exchanges of one check
@@ -14,13 +15,43 @@ export interface ExecutorHttpObservation {
   /** Redacted, bounded response projection. */
   readonly summary: string;
 }
-/** Which of the three dispatch_unknown branches was taken. */
+/**
+ * Which dispatch_unknown branch was taken. C-758 splits the former
+ * `push_incomplete` (kept only for old records) by the real cause.
+ */
 export type DispatchUnknownStage =
   | "not_sent"
   | "push_incomplete"
+  | "push_cancelled"
+  | "push_timeout"
+  | "push_rejected"
+  | "push_unreachable"
+  | "push_failed"
   | "run_not_found";
+/** C-758: transport reason of a candidate push that did not settle as pushed. */
+export type CandidatePushReason = CandidatePushFailure;
+export function pushFailureStage(
+  reason: CandidatePushReason,
+): DispatchUnknownStage {
+  switch (reason) {
+    case "cancelled":
+      return "push_cancelled";
+    case "timeout":
+      return "push_timeout";
+    case "network":
+      return "push_unreachable";
+    case "auth":
+    case "rejected":
+    case "github_error":
+      return "push_rejected";
+    default:
+      return "push_failed";
+  }
+}
 export interface DispatchUnknownDetail {
   readonly stage: DispatchUnknownStage;
+  /** C-758: the candidate transport's fixed reason, when a push failed. */
+  readonly pushFailure?: CandidatePushReason;
   /** Latest GitHub request made by this attempt's executor call. */
   readonly last?: ExecutorHttpObservation;
   /** The persisted workflow dispatch POST response, possibly from an earlier pass. */
@@ -30,6 +61,7 @@ export interface DispatchUnknownDetail {
 export interface ExecutorFailure {
   readonly category: string;
   readonly stage?: DispatchUnknownStage;
+  readonly pushFailure?: CandidatePushReason;
   readonly httpStatus?: number;
   readonly requestId?: string;
 }
@@ -39,7 +71,22 @@ export const DISPATCH_STAGE_LABEL: Readonly<
 > = {
   not_sent: "未发出",
   push_incomplete: "候选推送未完成",
+  push_cancelled: "候选推送被本地取消或中止",
+  push_timeout: "候选推送超时",
+  push_rejected: "GitHub 拒绝或报错候选推送",
+  push_unreachable: "候选推送连不上 GitHub",
+  push_failed: "候选推送在本机失败",
   run_not_found: "已发出但超时找不到运行",
+};
+const PUSH_REASON_LABEL: Readonly<Record<CandidatePushReason, string>> = {
+  cancelled: "本地取消",
+  timeout: "超过传输时限",
+  local: "传输前本机校验失败",
+  network: "网络连接失败",
+  auth: "认证或权限被拒",
+  rejected: "引用更新被拒",
+  github_error: "GitHub 服务端错误",
+  other: "未识别的推送错误",
 };
 const OPERATION_LABEL: Readonly<
   Record<ExecutorHttpObservation["operation"], string>
@@ -173,6 +220,9 @@ function describe(observation: ExecutorHttpObservation | undefined): string {
 export function formatDispatchUnknown(detail: DispatchUnknownDetail): string {
   const parts = [
     `分类：${DISPATCH_STAGE_LABEL[detail.stage]}`,
+    ...(detail.pushFailure
+      ? [`推送结果：${PUSH_REASON_LABEL[detail.pushFailure]}`]
+      : []),
     `最近一次 GitHub 请求：${describe(detail.last)}`,
   ];
   if (detail.post && detail.post !== detail.last)
@@ -187,6 +237,7 @@ export function dispatchFailure(
   return {
     category,
     ...(detail ? { stage: detail.stage } : {}),
+    ...(detail?.pushFailure ? { pushFailure: detail.pushFailure } : {}),
     ...(last?.status !== undefined ? { httpStatus: last.status } : {}),
     ...(last?.requestId ? { requestId: last.requestId } : {}),
   };

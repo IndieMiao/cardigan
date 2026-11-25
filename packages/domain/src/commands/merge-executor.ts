@@ -7,15 +7,70 @@ import {
   ensure,
 } from "./core.js";
 
-/** C-681: host-observed cause of one unreachable attempt; fixed fields only. */
+/**
+ * Which dispatch_unknown branch. C-758 splits the former `push_incomplete`
+ * (still accepted for old hosts) by the real cause of the candidate push.
+ */
+export type MergeExecutorStage =
+  | "not_sent"
+  | "push_incomplete"
+  | "push_cancelled"
+  | "push_timeout"
+  | "push_rejected"
+  | "push_unreachable"
+  | "push_failed"
+  | "run_not_found";
+const STAGES: readonly MergeExecutorStage[] = [
+  "not_sent",
+  "push_incomplete",
+  "push_cancelled",
+  "push_timeout",
+  "push_rejected",
+  "push_unreachable",
+  "push_failed",
+  "run_not_found",
+];
+/** Candidate transport reasons the host reports with a failed push. */
+const PUSH_FAILURES = [
+  "cancelled",
+  "timeout",
+  "local",
+  "network",
+  "auth",
+  "rejected",
+  "github_error",
+  "other",
+] as const;
+export type MergeExecutorPushFailure = (typeof PUSH_FAILURES)[number];
+/** C-758: a local abort says nothing about the executor; it is not recorded. */
+const LOCAL_CANCEL: readonly MergeExecutorStage[] = [
+  "not_sent",
+  "push_cancelled",
+];
+/** C-758: GitHub answered (or the host's own transfer failed): not unreachable. */
+const PUSH_FAILED: Readonly<Partial<Record<MergeExecutorStage, string>>> = {
+  push_timeout: "候选推送超时",
+  push_rejected: "GitHub 拒绝或报错候选推送",
+  push_failed: "候选推送在本机失败",
+};
+/** C-681: host-observed cause of one failed attempt; fixed fields only. */
 export type MergeExecutorFailure = {
   readonly category: string;
-  /** Which dispatch_unknown branch: not_sent, push_incomplete or run_not_found. */
-  readonly stage?: "not_sent" | "push_incomplete" | "run_not_found";
+  readonly stage?: MergeExecutorStage;
+  /** C-758: the candidate transport's fixed reason for a failed push. */
+  readonly push_failure?: MergeExecutorPushFailure;
   /** Latest provider HTTP status observed by the attempt. */
   readonly http_status?: number;
   readonly request_id?: string;
 };
+const pushFailed = (failure: MergeExecutorFailure | undefined) =>
+  failure?.stage !== undefined && Object.hasOwn(PUSH_FAILED, failure.stage);
+const OUTAGE_EVENTS = [
+  "merge_executor_unreachable",
+  "merge_executor_push_failed",
+  "merge_executor_attention_required",
+  "merge_executor_recovered",
+];
 interface Outage {
   readonly executor: string;
   readonly attempt_id: string;
@@ -34,11 +89,7 @@ export function mergeExecutorOutage(state: CommandState, executor: string) {
       (e) =>
         !e.card_id &&
         e.actor.kind === "system" &&
-        [
-          "merge_executor_unreachable",
-          "merge_executor_attention_required",
-          "merge_executor_recovered",
-        ].includes(e.type) &&
+        OUTAGE_EVENTS.includes(e.type) &&
         (e.payload as { executor?: string } | null)?.executor === executor,
     )
     .sort((a, b) => a.seq - b.seq)
@@ -48,7 +99,13 @@ export function mergeExecutorOutage(state: CommandState, executor: string) {
     : undefined;
 }
 
-/** Host-only connectivity evidence and timer polling, independent of card state. */
+/**
+ * Host-only connectivity evidence and timer polling, independent of card state.
+ * C-758: one backoff state per executor, recorded by cause. Only a failure that
+ * could not reach GitHub is `merge_executor_unreachable`; a timed-out, rejected
+ * or locally failed candidate push is `merge_executor_push_failed` with the same
+ * backoff; a local cancellation is not an executor observation at all.
+ */
 export function recordMergeExecutor(
   state: CommandState,
   actor: Actor,
@@ -70,6 +127,7 @@ export function recordMergeExecutor(
       "Invalid merge executor observation",
     );
     const previous = mergeExecutorOutage(state, p.executor);
+    const pushOutage = pushFailed(previous?.failure);
     if (p.status === "reachable") {
       if (!previous) return undefined;
       const action = state.human_actions.find(
@@ -79,13 +137,17 @@ export function recordMergeExecutor(
         d.put("human_actions", { ...action, status: "cancelled" });
         d.emit("human_action_cancelled", undefined, {
           human_action_id: action.id,
-          reason: "远程检查机已恢复连接，合并检查自动继续，无需处理",
+          reason: pushOutage
+            ? "候选推送已恢复，合并检查自动继续，无需处理"
+            : "远程检查机已恢复连接，合并检查自动继续，无需处理",
         });
       }
       d.emit("merge_executor_recovered", undefined, {
         executor: p.executor,
         first_failed_at: previous.first_failed_at,
-        description: "远程检查机已恢复连接，合并检查自动继续",
+        description: pushOutage
+          ? "候选推送已恢复，合并检查自动继续"
+          : "远程检查机已恢复连接，合并检查自动继续",
       });
       return undefined;
     }
@@ -102,10 +164,9 @@ export function recordMergeExecutor(
       ensure(
         failure === undefined ||
           (/^[a-z][a-z0-9_]{0,39}$/u.test(failure.category) &&
-            (failure.stage === undefined ||
-              ["not_sent", "push_incomplete", "run_not_found"].includes(
-                failure.stage,
-              )) &&
+            (failure.stage === undefined || STAGES.includes(failure.stage)) &&
+            (failure.push_failure === undefined ||
+              PUSH_FAILURES.includes(failure.push_failure)) &&
             (failure.http_status === undefined ||
               (Number.isSafeInteger(failure.http_status) &&
                 failure.http_status >= 100 &&
@@ -115,13 +176,17 @@ export function recordMergeExecutor(
         "validation_failed",
         "Invalid merge executor failure",
       );
+      // A local cancellation is neither a failure nor a recovery.
+      if (failure?.stage && LOCAL_CANCEL.includes(failure.stage))
+        return previous;
       // Replaying a finished attempt must not consume another retry or reopen
       // an outage already recovered by a later connection.
       if (
         state.events.some(
           (e) =>
             !e.card_id &&
-            e.type === "merge_executor_unreachable" &&
+            (e.type === "merge_executor_unreachable" ||
+              e.type === "merge_executor_push_failed") &&
             (e.payload as unknown as Outage).executor === p.executor &&
             (e.payload as unknown as Outage).attempt_id === p.attempt_id,
         )
@@ -138,6 +203,9 @@ export function recordMergeExecutor(
               failure: {
                 category: failure.category,
                 ...(failure.stage ? { stage: failure.stage } : {}),
+                ...(failure.push_failure
+                  ? { push_failure: failure.push_failure }
+                  : {}),
                 ...(failure.http_status !== undefined
                   ? { http_status: failure.http_status }
                   : {}),
@@ -162,15 +230,24 @@ export function recordMergeExecutor(
       now - Date.parse(outage.first_failed_at) > 30 * 60_000
     ) {
       const id = d.ids.next(state.project_id, "human_action");
+      const pushLabel = PUSH_FAILED[outage.failure?.stage ?? "not_sent"];
       const action: HumanAction = {
         id,
         key: id,
         requested_by: "system",
         status: "open",
         blocked_work_items: [],
-        instructions: `远程检查机 ${p.executor} 不可达，合并检查正在排队等待。请检查机器、网络和 SSH 连接；系统会继续重试，恢复后自动继续检查，此事项自动失效，无需手动重排。`,
-        why_human: "远程检查机已连续不可达超过 30 分钟",
-        expected_return: "恢复远程检查机连接；无需手动重排合并检查",
+        ...(pushLabel
+          ? {
+              instructions: `合并检查执行器 ${p.executor} 的候选推送持续失败（${pushLabel}），合并检查正在排队等待。请检查 GitHub App 的仓库权限和推送规则、主机到 GitHub 的传输时限以及中心仓库；系统会继续重试，恢复后自动继续检查，此事项自动失效，无需手动重排。`,
+              why_human: "候选推送已连续失败超过 30 分钟",
+              expected_return: "恢复候选推送；无需手动重排合并检查",
+            }
+          : {
+              instructions: `远程检查机 ${p.executor} 不可达，合并检查正在排队等待。请检查机器、网络和 SSH 连接；系统会继续重试，恢复后自动继续检查，此事项自动失效，无需手动重排。`,
+              why_human: "远程检查机已连续不可达超过 30 分钟",
+              expected_return: "恢复远程检查机连接；无需手动重排合并检查",
+            }),
       };
       d.put("human_actions", action);
       d.emit("human_action_requested", undefined, {
@@ -179,17 +256,23 @@ export function recordMergeExecutor(
       });
       outage = { ...outage, human_action_id: id };
     }
-    if (p.status === "unreachable" || outage !== previous)
+    if (p.status === "unreachable" || outage !== previous) {
+      const pushLabel = PUSH_FAILED[outage.failure?.stage ?? "not_sent"];
       d.emit(
-        p.status === "unreachable"
-          ? "merge_executor_unreachable"
-          : "merge_executor_attention_required",
+        p.status !== "unreachable"
+          ? "merge_executor_attention_required"
+          : pushLabel
+            ? "merge_executor_push_failed"
+            : "merge_executor_unreachable",
         undefined,
         {
           ...outage,
-          description: "远程检查机不可达，合并检查排队等待并按退避重试",
+          description: pushLabel
+            ? `${pushLabel}，合并检查排队等待并按退避重试`
+            : "远程检查机不可达，合并检查排队等待并按退避重试",
         },
       );
+    }
     return outage;
   });
 }
