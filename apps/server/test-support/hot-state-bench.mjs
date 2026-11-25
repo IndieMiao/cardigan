@@ -1,9 +1,9 @@
 /** C-639 hot command state: synthetic benchmark and shadow replay.
  *
  *   node test-support/hot-state-bench.mjs generate NEW_DIR [events-per-project] [system-share]
- *   node test-support/hot-state-bench.mjs bench DB full|hot|lean [iterations]
- *   node test-support/hot-state-bench.mjs shadow DB [hot|lean]
- *   node test-support/hot-state-bench.mjs background DB full|hot|lean [seconds]
+ *   node test-support/hot-state-bench.mjs bench DB full|hot|lean|slim [iterations]
+ *   node test-support/hot-state-bench.mjs shadow DB [hot|lean|slim]
+ *   node test-support/hot-state-bench.mjs background DB full|hot|lean|slim [seconds]
  *
  * `generate` only creates a new directory. `bench` and `shadow` open the given
  * database; for production replay pass a read-only COPY, never the live file:
@@ -23,6 +23,7 @@ import {
   listNeedsYou,
   postComment,
   projectSnapshot,
+  slimCommandEvents,
 } from "@cardigan/domain";
 import {
   getCardTool,
@@ -189,9 +190,18 @@ const quantile = (values, q) => {
     : null;
 };
 
+const SCOPES = ["full", "hot", "lean", "slim"];
+
+/** C-671: decoded and dormant (not kept decoded) rows of a project's Store log. */
+function storeLog(store, project) {
+  const view = store.uow.read((tx) => tx.events.listStreams?.(project));
+  const log = view?.base;
+  return log ? { rows: log.end, dormant: log.dormant } : undefined;
+}
+
 async function bench(db, scope, iterations = 20) {
-  if (!db || !["full", "hot", "lean"].includes(scope))
-    throw new Error("Expected DB full|hot|lean");
+  if (!db || !SCOPES.includes(scope))
+    throw new Error("Expected DB full|hot|lean|slim");
   const startedOpen = performance.now();
   const store = Store.open({ dbPath: db, migrate: false, commandState: scope });
   const projects = store.listProjects().map((p) => p.id);
@@ -205,6 +215,7 @@ async function bench(db, scope, iterations = 20) {
     startup[project] = {
       ms: Math.round(performance.now() - t),
       events: state.events.length,
+      log: storeLog(store, project),
     };
   }
   const ready_ms = Math.round(performance.now() - startedOpen);
@@ -262,9 +273,13 @@ async function bench(db, scope, iterations = 20) {
       }
     }
   const memory = process.memoryUsage();
+  const logs = Object.fromEntries(
+    projects.map((project) => [project, storeLog(store, project)]),
+  );
   store.close();
   out({
     mode: "bench",
+    logs,
     scope,
     iterations,
     ready_ms,
@@ -323,8 +338,8 @@ function agentContext(store, project) {
 }
 
 function shadow(db, scope = "hot") {
-  if (!db || !["hot", "lean"].includes(scope))
-    throw new Error("Expected DB [hot|lean]");
+  if (!db || !["hot", "lean", "slim"].includes(scope))
+    throw new Error("Expected DB [hot|lean|slim]");
   const full = Store.open({ dbPath: db, migrate: false, commandState: "full" });
   const hot = Store.open({ dbPath: db, migrate: false, commandState: scope });
   const report = [];
@@ -340,9 +355,11 @@ function shadow(db, scope = "hot") {
       const after = hot.uow.read((tx) => loadCommandState(tx, project));
       // C-649: lean keeps the subjects of live notifications on the project stream.
       const expected =
-        scope === "lean"
-          ? leanCommandEvents(before, notified, new Set(notifiedEvents))
-          : hotCommandEvents(before, notified);
+        scope === "slim"
+          ? slimCommandEvents(before, notified, new Set(notifiedEvents))
+          : scope === "lean"
+            ? leanCommandEvents(before, notified, new Set(notifiedEvents))
+            : hotCommandEvents(before, notified);
       const hotCards = hotCardIds(before, notified).size;
       // C-643: compare the complete histories (telemetry journal included).
       const wanted = fullEventHistory(expected);
@@ -376,6 +393,7 @@ function shadow(db, scope = "hot") {
           hot: fullEventHistory(after.events).length,
           command: after.events.length,
         },
+        log: storeLog(hot, project),
         cards: { total: before.cards.length, hot: hotCards },
         loader_matches_definition: sameEvents,
         failed: checks.filter((c) => !c.equal),
@@ -393,8 +411,8 @@ function shadow(db, scope = "hot") {
 
 /** Idle background loops (no external IO) at production cadence: CPU, pauses, RSS. */
 async function background(db, scope, seconds = 60) {
-  if (!db || !["full", "hot", "lean"].includes(scope))
-    throw new Error("Expected DB full|hot|lean");
+  if (!db || !SCOPES.includes(scope))
+    throw new Error("Expected DB full|hot|lean|slim");
   const setup = Store.open({
     dbPath: db,
     migrate: false,
@@ -471,9 +489,13 @@ async function background(db, scope, seconds = 60) {
   loop.disable();
   const wall = performance.now() - from;
   const memory = process.memoryUsage();
+  const logs = Object.fromEntries(
+    store.listProjects().map(({ id }) => [id, storeLog(store, id)]),
+  );
   store.close();
   out({
     mode: "background",
+    logs,
     scope,
     seconds,
     restart: {

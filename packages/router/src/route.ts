@@ -18,6 +18,9 @@ import {
   cardTemplate,
   decisionQuestionPayload,
   employeeNameKey,
+  eventsAtSeq,
+  eventsOfType,
+  eventsOfTypes,
   flowAtLeast,
   followUpDraft,
   humanDecisionGroupKey,
@@ -146,16 +149,17 @@ function note(
   if (
     to.kind === "assignment" &&
     resumed.length &&
-    input.snapshot.events.some((event) => {
-      if (event.type !== "work_item_resume_requested") return false;
-      const p = payloadObject(event.payload);
-      return (
-        p.trigger_event_id === input.event.id &&
-        p.assignment_id === to.assignment_id &&
-        typeof p.work_item_id === "string" &&
-        resumed.includes(p.work_item_id)
-      );
-    })
+    eventsOfType(input.snapshot.events, "work_item_resume_requested").some(
+      (event) => {
+        const p = payloadObject(event.payload);
+        return (
+          p.trigger_event_id === input.event.id &&
+          p.assignment_id === to.assignment_id &&
+          typeof p.work_item_id === "string" &&
+          resumed.includes(p.work_item_id)
+        );
+      },
+    )
   )
     return;
   // One event produces at most one notification per recipient (M3.3 unique
@@ -211,9 +215,11 @@ function noteAssignment(
         input.snapshot.project_preferences?.find(
           (p) => p.id === input.snapshot.project_id,
         )?.system_auto_assign_verifiers === true) &&
-      input.snapshot.events?.some(
+      (
+        input.snapshot.events &&
+        eventsOfType(input.snapshot.events, "system_assignment_deferred")
+      )?.some(
         (e) =>
-          e.type === "system_assignment_deferred" &&
           payloadString(e.payload, "work_item_id") === item.id &&
           payloadString(e.payload, "delivery_id") ===
             payloadString(input.event.payload, "delivery_id"),
@@ -379,10 +385,9 @@ function routeDecisionAnswer(
     (t) => t.id === entry.reply_to && t.card_id === entry.card_id,
   );
   if (asked?.type !== "instruction") return;
+  // C-671: by (card, seq) from the index; the asking card may have closed.
   const question = decisionQuestionPayload(
-    input.snapshot.events.find(
-      (e) => e.seq === asked.event_seq && e.card_id === asked.card_id,
-    ),
+    eventsAtSeq(input.snapshot.events, asked.card_id, asked.event_seq)[0],
   );
   if (
     !question ||
@@ -1616,16 +1621,12 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
   // that event carries no run_id, so reviews are matched on their own row
   // (M5.S S25).
   const produced = [
-    ...input.snapshot.events.filter(
-      (event) =>
-        payloadString(event.payload, "run_id") === run_id &&
-        [
-          "delivery_submitted",
-          "blocker_reported",
-          "decision_requested",
-          "human_action_requested",
-        ].includes(event.type),
-    ),
+    ...eventsOfTypes(input.snapshot.events, [
+      "delivery_submitted",
+      "blocker_reported",
+      "decision_requested",
+      "human_action_requested",
+    ]).filter((event) => payloadString(event.payload, "run_id") === run_id),
     ...input.snapshot.deliveries.filter(
       (delivery) => delivery.run_id === run_id,
     ),
@@ -2160,13 +2161,12 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "office_wait_overdue": {
       if (
         input.event.actor.kind !== "system" ||
-        input.snapshot.events.some(
+        eventsOfType(input.snapshot.events, "office_wait_closed").some(
           (e) =>
-            e.type === "office_wait_closed" &&
             (payloadString(e.payload, "wait_key") ??
               payloadString(e.payload, "source_entry_id")) ===
-              (payloadString(input.event.payload, "wait_key") ??
-                payloadString(input.event.payload, "source_entry_id")),
+            (payloadString(input.event.payload, "wait_key") ??
+              payloadString(input.event.payload, "source_entry_id")),
         )
       )
         break;
@@ -2471,11 +2471,10 @@ export function routeEvent(input: RouteInput): RouteResult {
         break;
       if (
         input.event.type === "system_wait_reminded" &&
-        input.snapshot.events.some(
+        eventsOfType(input.snapshot.events, "system_wait_closed").some(
           (e) =>
-            e.type === "system_wait_closed" &&
             payloadString(e.payload, "wait_id") ===
-              payloadString(input.event.payload, "wait_id"),
+            payloadString(input.event.payload, "wait_id"),
         )
       )
         break;

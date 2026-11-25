@@ -136,10 +136,8 @@ export const dispatchedAt = (state: CommandState, run: Run) =>
     (e) => field(e.payload, "run_id") === run.id,
   )?.created_at;
 export const dispatchRecoveryQueuedAt = (state: CommandState, run: Run) =>
-  state.events.find(
-    (e) =>
-      e.type === "run_dispatch_recovered" &&
-      field(e.payload, "replacement_run_id") === run.id,
+  eventsOfType(state.events, "run_dispatch_recovered").find(
+    (e) => field(e.payload, "replacement_run_id") === run.id,
   )?.created_at;
 
 /**
@@ -151,9 +149,8 @@ export const dispatchRecoveryUsed = (
   events: CommandState["events"],
   assignment: string,
 ) =>
-  events.some(
+  eventsOfType(events, "run_dispatch_recovered").some(
     (e) =>
-      e.type === "run_dispatch_recovered" &&
       field(e.payload, "assignment_id") === assignment &&
       !["server_restart", "provider_unavailable"].includes(
         String(field(e.payload, "reason")),
@@ -165,10 +162,8 @@ export const dispatchRecoveryFailed = (state: CommandState, run: Run) =>
   run.failure_reason !== "provider_unavailable" &&
   ["cancelled", "failed"].includes(run.status) &&
   !!dispatchRecoveryQueuedAt(state, run) &&
-  state.events.some(
-    (e) =>
-      e.type === "run_dispatch_aborted" &&
-      field(e.payload, "run_id") === run.id,
+  eventsOfType(state.events, "run_dispatch_aborted").some(
+    (e) => field(e.payload, "run_id") === run.id,
   );
 
 function startupFailureResolved(state: CommandState, run: Run): boolean {
@@ -279,10 +274,8 @@ export function recoverDispatch(
     // A prior unconfirmed-stop alert cannot prevent later exit settlement.
     if (
       !stopped &&
-      state.events.some(
-        (e) =>
-          e.type === "run_dispatch_stalled" &&
-          field(e.payload, "run_id") === run.id,
+      eventsOfType(state.events, "run_dispatch_stalled").some(
+        (e) => field(e.payload, "run_id") === run.id,
       )
     )
       return;
@@ -298,10 +291,8 @@ export function recoverDispatch(
     // start before the escalation below.
     const mcp = reason === "mcp_unavailable";
     // Report the whole recovery episode without changing this Run's timeout.
-    const recovery = state.events.find(
-      (e) =>
-        e.type === "run_dispatch_recovered" &&
-        field(e.payload, "replacement_run_id") === run.id,
+    const recovery = eventsOfType(state.events, "run_dispatch_recovered").find(
+      (e) => field(e.payload, "replacement_run_id") === run.id,
     );
     const original = state.runs.find(
       (r) =>
@@ -488,10 +479,8 @@ export function recoverDispatch(
     // for this Run (e.g. an unconfirmed stop) reports nothing twice.
     if (
       mcp &&
-      state.events.some(
-        (e) =>
-          e.type === "run_dispatch_stalled" &&
-          field(e.payload, "run_id") === run.id,
+      eventsOfType(state.events, "run_dispatch_stalled").some(
+        (e) => field(e.payload, "run_id") === run.id,
       )
     )
       return;
@@ -615,10 +604,8 @@ export function resolveDispatchAttention(
     for (const action of state.human_actions) {
       if (action.requested_by !== "system" || action.status !== "open")
         continue;
-      const source = state.events.find(
-        (e) =>
-          e.type === "human_action_requested" &&
-          field(e.payload, "human_action_id") === action.id,
+      const source = eventsOfType(state.events, "human_action_requested").find(
+        (e) => field(e.payload, "human_action_id") === action.id,
       );
       const run = state.runs.find(
         (r) => r.id === field(source?.payload, "dispatch_run_id"),

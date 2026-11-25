@@ -5,6 +5,8 @@ import {
   type DeploymentOperation,
   type DeploymentRecord,
   type Event,
+  eventsOfType,
+  eventsOfTypes,
   hasPassedMergeCheck,
   mergeBatches,
   type ProjectId,
@@ -356,7 +358,11 @@ export async function deploymentMergeSegments(
       string,
       { sha: string; previous: string; tree: string }
     >();
-    for (const event of state.events) {
+    // C-671: merged cards are closed; read them through the type index.
+    for (const event of eventsOfTypes(state.events, [
+      "host_deployment_controlled",
+      "card_merged",
+    ])) {
       if (
         event.type === "host_deployment_controlled" &&
         event.actor.kind === "human" &&
@@ -417,7 +423,7 @@ export async function deploymentMergeSegments(
       )
         continue;
       const complete = batch.members.every((m) =>
-        state.events.some((e) => {
+        eventsOfType(state.events, "card_merged").some((e) => {
           if (
             e.actor.kind !== "system" ||
             e.card_id !== m.card_id ||

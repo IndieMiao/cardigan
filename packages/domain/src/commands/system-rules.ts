@@ -170,9 +170,8 @@ export function autoAssignProducer(
       ...candidates.map((c) => `${c.employee_id}：${c.reason}`),
     ].join("；");
     if (
-      !state.events.some(
+      !eventsOfType(state.events, "system_assignment_deferred").some(
         (e) =>
-          e.type === "system_assignment_deferred" &&
           payload(e).work_item_id === item.id &&
           payload(e).first_producer === true &&
           payload(e).reason === reason,
@@ -599,9 +598,8 @@ function systemWaits(d: CommandDraft, at: string): Wait[] {
           );
           for (const reviewer of recipients) {
             const hold = reviewer
-              ? state.events.findLast(
+              ? eventsOfType(state.events, "work_item_updated").findLast(
                   (e) =>
-                    e.type === "work_item_updated" &&
                     payload(e).work_item_id === reviewer.id &&
                     payload(e).manual_assign !== undefined,
                 )

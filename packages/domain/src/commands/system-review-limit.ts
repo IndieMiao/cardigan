@@ -1,4 +1,5 @@
 import type { Actor, Decision } from "../entities.js";
+import { eventById, eventsOfType } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type { DecisionId, EventId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
@@ -161,10 +162,8 @@ export function beginSystemReviewLimitRaise(
     const q = d.list("decisions").find((q) => q.id === p.decision_id);
     if (
       !q ||
-      d.state.events.some(
-        (e) =>
-          e.type === "system_review_limit_attempted" &&
-          (e.payload as Record<string, unknown>).decision_id === q.id,
+      eventsOfType(d.state.events, "system_review_limit_attempted").some(
+        (e) => (e.payload as Record<string, unknown>).decision_id === q.id,
       )
     )
       return null;
@@ -189,18 +188,16 @@ export function finishSystemReviewLimitRaise(
   ports: CommandPorts,
 ) {
   return command(state, actor, "system_review_limit", ports, (d) => {
-    const attempt = d.state.events.find(
-      (e) =>
-        e.id === p.attempt_id &&
-        e.type === "system_review_limit_attempted" &&
-        e.actor.kind === "system",
-    );
+    const found = eventById(d.state.events, p.attempt_id);
+    const attempt =
+      found?.type === "system_review_limit_attempted" &&
+      found.actor.kind === "system"
+        ? found
+        : undefined;
     if (
       !attempt ||
-      d.state.events.some(
-        (e) =>
-          e.type === "system_review_limit_checked" &&
-          (e.payload as Record<string, unknown>).attempt_id === attempt.id,
+      eventsOfType(d.state.events, "system_review_limit_checked").some(
+        (e) => (e.payload as Record<string, unknown>).attempt_id === attempt.id,
       )
     )
       return null;

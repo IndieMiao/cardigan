@@ -14,6 +14,7 @@ import {
   eventsForWorkItem,
   eventsOfType,
   eventsOfTypes,
+  flatMapEvents,
   fullEventHistory,
   isTelemetryEvent,
   resumeEventsForItem,
@@ -786,4 +787,76 @@ test("C-671: a dormant entry whose row changed fails loudly instead of answering
   lost.loader = () => [];
   lost.appendDormant(event);
   expect(() => lost.at(0)).toThrow(/C-671/);
+});
+
+/** Every lookup of `indexed` equals the plain lookup of `copy` (by value). */
+function expectEqualLookups(indexed: readonly Event[], copy: readonly Event[]) {
+  for (const type of [...types, "absent"]) {
+    expect(eventsOfType(indexed, type)).toEqual(eventsOfType(copy, type));
+    for (const card of ["", ...cards])
+      expect(cardEventsOfType(indexed, card, type)).toEqual(
+        cardEventsOfType(copy, card, type),
+      );
+  }
+  for (let n = 0; n < 4; n++) {
+    expect(eventsForDecision(indexed, `Q-${n}`)).toEqual(
+      eventsForDecision(copy, `Q-${n}`),
+    );
+    expect(eventsForCompletion(indexed, `CR-${n}`)).toEqual(
+      eventsForCompletion(copy, `CR-${n}`),
+    );
+    expect(eventsForWorkItem(indexed, `W-${n}`)).toEqual(
+      eventsForWorkItem(copy, `W-${n}`),
+    );
+    expect(resumeEventsForItem(indexed, `W-${n}`)).toEqual(
+      resumeEventsForItem(copy, `W-${n}`),
+    );
+  }
+  for (const set of [["noise", "run_started"], ["decision_requested"], []])
+    expect(eventsOfTypes(indexed, set)).toEqual(eventsOfTypes(copy, set));
+  for (const card of [undefined, ...cards]) {
+    expect(streamEvents(indexed, card)).toEqual(streamEvents(copy, card));
+    for (const seq of [1, 2, 3])
+      expect(eventsAtSeq(indexed, card, seq)).toEqual(
+        eventsAtSeq(copy, card, seq),
+      );
+  }
+  for (let n = 0; n < 60; n++)
+    expect(eventById(indexed, eventId(n))).toEqual(eventById(copy, eventId(n)));
+}
+
+test("C-671: flatMapEvents lookups go through the source index and equal scanning the mapped history", () => {
+  const keep = new Set(["decision_requested"]);
+  // Drops some events and strips fields; never adds a type or index key.
+  const each = (e: Event): Event[] =>
+    e.seq % 3 === 0 ? [] : e.type === "noise" ? [{ ...e, payload: null }] : [e];
+  for (let seed = 1; seed <= 40; seed++) {
+    const pick = rng(seed);
+    const log = new EventLog();
+    for (const event of randomBatch(pick, new Map(), { id: 1 }, 40))
+      log.append(event);
+    const view = new EventLogView(log, log.end);
+    const order = ["", ...cards];
+    const full = new Set(cards.filter(() => pick(2) === 0));
+    const omit = new Set(["__proto__"]);
+    for (const [base, lookups] of [
+      [view.history(order), view.history(order)],
+      [
+        commandStreamHistory(view, order, { full, omit }),
+        view.history(order, { full, omit }),
+      ],
+      // A whitelisted history: lookups still see the unlisted events.
+      [
+        view.history(order, { full, omit, keep }),
+        view.history(order, { full, omit }),
+      ],
+    ] as const) {
+      const derived = flatMapEvents(base, each);
+      expect(derived).toEqual(base.flatMap(each));
+      // Lookups answer with the very objects of the mapped history.
+      for (const event of derived)
+        expect(eventById(derived, event.id)).toBe(event);
+      expectEqualLookups(derived, structuredClone(lookups.flatMap(each)));
+    }
+  }
 });

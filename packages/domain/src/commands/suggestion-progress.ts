@@ -1,5 +1,6 @@
 import { authorView } from "../author-view.js";
 import type { Author, Decision, Event } from "../entities.js";
+import { eventsOfTypes } from "../event-index.js";
 import type { CommandState } from "./core.js";
 
 export const SUGGESTION_REMINDER_WINDOW_MS = 5 * 60_000;
@@ -25,13 +26,23 @@ function progressEvent(event: Event): boolean {
   }
 }
 
+/** Every type `progressEvent` can accept. */
+const PROGRESS_TYPES = [
+  "comment_posted",
+  "merge_check_finished",
+  "delivery_submitted",
+  "review_submitted",
+  "completion_reviewed",
+  "human_action_completed",
+];
 const indexes = new WeakMap<readonly Event[], Map<string, Event[]>>();
 function progressIndex(events: readonly Event[]) {
   let index = indexes.get(events);
   if (!index) {
     index = new Map();
     const seen = new Set<string>();
-    for (const event of events) {
+    // C-671: from the type index, the same events in the same order.
+    for (const event of eventsOfTypes(events, PROGRESS_TYPES)) {
       if (!event.card_id || !progressEvent(event) || seen.has(event.id))
         continue;
       seen.add(event.id);

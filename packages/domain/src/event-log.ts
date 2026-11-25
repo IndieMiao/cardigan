@@ -27,7 +27,14 @@ export type EventIndexKind =
   | "human_action_id"
   | "completion_id"
   | "work_item_id"
-  | "resume_work_items";
+  | "resume_work_items"
+  | "batch";
+
+/**
+ * C-671: the `batch` index key of an event at batch level that names no
+ * batch (`payload.level === "batch"` without `batch_id`).
+ */
+export const BATCH_LEVEL_KEY = "\u0000level";
 
 const FIELDS = [
   "decision_id",
@@ -47,6 +54,13 @@ export function indexKeysOf(
   if (kind === "type") return [event.type];
   const payload = event.payload as Record<string, unknown> | null;
   if (!payload || typeof payload !== "object") return [];
+  // C-671: merge batch evidence, for batch read scopes (any `batch_id` value).
+  if (kind === "batch")
+    return payload.batch_id !== undefined
+      ? [payload.batch_id]
+      : payload.level === "batch"
+        ? [BATCH_LEVEL_KEY]
+        : [];
   const value = payload[kind];
   if (kind === "resume_work_items") return Array.isArray(value) ? value : [];
   return typeof value === "string" ? [value] : [];
@@ -271,6 +285,8 @@ export class EventLog {
       if (Array.isArray(resume))
         for (const value of resume)
           this.#index("resume_work_items", value, stream, ord);
+      for (const key of indexKeysOf(event, "batch"))
+        this.#index("batch", key, stream, ord);
     }
   }
 
@@ -284,6 +300,7 @@ export class EventLog {
       for (const key of indexKeysOf(event, kind)) keys.push([kind, key]);
     for (const key of indexKeysOf(event, "resume_work_items"))
       keys.push(["resume_work_items", key]);
+    for (const key of indexKeysOf(event, "batch")) keys.push(["batch", key]);
     this.#addDormant(
       new DormantEvent(event.id, event.seq, event.type, event.card_id, keys),
     );
@@ -456,6 +473,8 @@ export interface HistoryIndex {
   stream(stream: string): readonly Event[];
   /** C-649: the events of one stream with this seq, in history order. */
   atSeq(stream: string, seq: number): readonly Event[];
+  /** C-671: the events with any key of `kind`, in history order. */
+  keyed(kind: EventIndexKind): readonly Event[];
 }
 
 /**
@@ -1065,6 +1084,35 @@ class ViewIndex implements HistoryIndex {
       take(this.view.overlay, this.view.end);
       return out.length ? out : noEvents;
     });
+  }
+
+  keyed(kind: EventIndexKind): readonly Event[] {
+    return this.#memo("keyed", kind, () =>
+      this.#kept(
+        this.view.collect(
+          this.#rank,
+          (log) => {
+            const buckets = log.buckets.get(kind);
+            if (!buckets) return undefined;
+            const merged = new Map<string, number[]>();
+            for (const bucket of buckets.values())
+              for (const [stream, ords] of bucket) {
+                const into = merged.get(stream);
+                if (into) into.push(...ords);
+                else merged.set(stream, [...ords]);
+              }
+            // One event under several keys of `kind` counts once.
+            for (const [stream, ords] of merged)
+              merged.set(
+                stream,
+                [...new Set(ords)].sort((a, b) => a - b),
+              );
+            return merged;
+          },
+          this.#skip,
+        ),
+      ),
+    );
   }
 
   atSeq(stream: string, seq: number): readonly Event[] {

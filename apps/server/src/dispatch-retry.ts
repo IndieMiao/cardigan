@@ -13,6 +13,7 @@ import {
   dispatchRecoveryUsed,
   dispatchTargetWaitMs,
   eventById,
+  eventsOfTypes,
   type HarnessActivity,
   hasRunTarget,
   hostOpsPending,
@@ -129,7 +130,11 @@ function failedRecoveryRuns(
   if (!failed) {
     const recovered = new Set<unknown>();
     const aborted = new Set<unknown>();
-    for (const event of events) {
+    // C-671: from the type index (recoveries on closed cards count in `slim`).
+    for (const event of eventsOfTypes(events, [
+      "run_dispatch_recovered",
+      "run_dispatch_aborted",
+    ])) {
       if (typeof event.payload !== "object" || event.payload === null) continue;
       if (
         event.type === "run_dispatch_recovered" &&

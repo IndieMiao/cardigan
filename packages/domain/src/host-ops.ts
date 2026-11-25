@@ -1,5 +1,6 @@
 import type { ContextObservation } from "./context-usage.js";
 import type { Event, Run, RuntimeRef, ToolName } from "./entities.js";
+import { eventsOfType, eventsOfTypes } from "./event-index.js";
 import type { AssignmentId, CardId, RunId } from "./ids.js";
 import {
   remoteWorkerExitPending,
@@ -112,24 +113,24 @@ export function observedLocalExitCause(e: Event | undefined) {
       "observed_local_exit"
   );
 }
+/**
+ * C-671: every read below goes through the type index, so a finish written
+ * on a closed card (a standing assignment's trigger card) still counts in the
+ * `slim` command state.
+ */
 export function pendingHostOpsActions(
   events: readonly Event[],
 ): HostOpsExecution[] {
   const finished = new Set(
-    events
-      .filter(
-        (e) =>
-          e.type === "host_ops_action_finished" ||
-          e.type === "context_session_restart_result",
-      )
-      .map((e) => (e.payload as { action_id: string }).action_id),
+    eventsOfTypes(events, [
+      "host_ops_action_finished",
+      "context_session_restart_result",
+    ]).map((e) => (e.payload as { action_id: string }).action_id),
   );
-  return events
+  return eventsOfType(events, "host_ops_action_taken")
     .filter(
       (e) =>
-        e.type === "host_ops_action_taken" &&
-        (e.payload as { execution?: boolean }).execution &&
-        !finished.has(e.id),
+        (e.payload as { execution?: boolean }).execution && !finished.has(e.id),
     )
     .map((e) => ({
       ...(e.payload as unknown as HostOpsExecution),
@@ -156,11 +157,10 @@ export function hostOpsPending(
         remoteWorkerExitPending(events, loss)
       ) {
         (pending as Set<unknown>).add(loss.assignment_id);
-        const assigned = events.findLast(
+        const assigned = eventsOfType(events, "work_item_assigned").findLast(
           (e) =>
-            e.type === "work_item_assigned" &&
             (e.payload as { work_item_id?: string }).work_item_id ===
-              loss.work_item_id,
+            loss.work_item_id,
         );
         if (assigned)
           (pending as Set<unknown>).add(
@@ -168,17 +168,15 @@ export function hostOpsPending(
           );
       }
     }
-    for (const event of events) {
-      if (
-        event.type !== "context_session_restart_result" ||
-        (event.payload as { result?: string }).result !== "failed"
-      )
-        continue;
+    for (const event of eventsOfType(
+      events,
+      "context_session_restart_result",
+    )) {
+      if ((event.payload as { result?: string }).result !== "failed") continue;
       // Only an actual human confirmation releases the failure fence.
       if (
-        !events.some(
+        !eventsOfType(events, "human_action_completed").some(
           (e) =>
-            e.type === "human_action_completed" &&
             e.actor.kind === "human" &&
             (e.payload as { human_action_id?: string }).human_action_id ===
               (event.payload as { human_action_id?: string }).human_action_id,
@@ -205,15 +203,14 @@ export function automaticContextActionForRun(
   let launches = automaticLaunches.get(events);
   if (!launches) {
     const results = new Set(
-      events
-        .filter((e) => e.type === "context_session_restart_result")
-        .map((e) => (e.payload as { action_id: string }).action_id),
+      eventsOfType(events, "context_session_restart_result").map(
+        (e) => (e.payload as { action_id: string }).action_id,
+      ),
     );
     const intents = new Map(
-      events
+      eventsOfType(events, "host_ops_action_taken")
         .filter(
           (e) =>
-            e.type === "host_ops_action_taken" &&
             ((e.payload as { automatic_context_restart?: boolean })
               .automatic_context_restart ||
               (e.payload as { dispatch_stall_id?: string })
@@ -226,8 +223,7 @@ export function automaticContextActionForRun(
         ]),
     );
     const indexed = new Map<unknown, HostOpsExecution>();
-    for (const e of events) {
-      if (e.type !== "host_ops_action_finished") continue;
+    for (const e of eventsOfType(events, "host_ops_action_finished")) {
       const action = intents.get(
         (e.payload as { action_id: Event["id"] }).action_id,
       );

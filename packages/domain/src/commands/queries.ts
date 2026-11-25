@@ -26,7 +26,7 @@ import type {
   Review,
   WorkItem,
 } from "../entities.js";
-import { eventsForDecision } from "../event-index.js";
+import { eventsForDecision, eventsOfType } from "../event-index.js";
 import { cardFlowVersion } from "../flow.js";
 import type { CardId, WorkItemId } from "../ids.js";
 import { effectiveWorkItemRequirements } from "../machine-requirements.js";
@@ -1034,9 +1034,8 @@ function selectNeedsYou<T>(
           )
           .map((a) => {
             const fact = (type: string) =>
-              state.events.findLast(
+              eventsOfType(state.events, type).findLast(
                 (e) =>
-                  e.type === type &&
                   typeof e.payload === "object" &&
                   e.payload !== null &&
                   "assignment_id" in e.payload &&

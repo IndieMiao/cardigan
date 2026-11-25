@@ -493,9 +493,8 @@ export function beginHostOpsActionInDraft(
   }
   if (p.upstream_incident_id)
     ensure(
-      !state.events.some(
+      !eventsOfType(state.events, "host_ops_action_taken").some(
         (e) =>
-          e.type === "host_ops_action_taken" &&
           (e.payload as { upstream_incident_id?: string })
             .upstream_incident_id === p.upstream_incident_id &&
           (e.payload as { assignment_id?: string }).assignment_id === a.id,
@@ -514,9 +513,8 @@ export function beginHostOpsActionInDraft(
       "上下文未到换会话档，或用量已过期、会话已更换",
     );
     ensure(
-      !state.events.some(
+      !eventsOfType(state.events, "host_ops_action_taken").some(
         (e) =>
-          e.type === "host_ops_action_taken" &&
           (e.payload as { assignment_id?: string }).assignment_id === a.id &&
           (e.payload as { context_usage?: ContextObservation }).context_usage
             ?.session_id === usage.session_id,
@@ -863,10 +861,8 @@ export function withdrawRecoveredHostOpsAction(
     const changed =
       new_incident_id &&
       new_incident_id !== action.upstream_incident_id &&
-      state.events.some(
-        (e) =>
-          e.id === new_incident_id && e.type === "upstream_incident_started",
-      );
+      eventById(state.events, new_incident_id)?.type ===
+        "upstream_incident_started";
     if (!changed) {
       if (
         !action.upstream_incident_id ||
@@ -905,10 +901,8 @@ export function claimHostOpsAction(
       )
     )
       return undefined;
-    const last = state.events.findLast(
-      (e) =>
-        e.type === "host_ops_action_claimed" &&
-        (e.payload as { action_id: string }).action_id === action_id,
+    const last = eventsOfType(state.events, "host_ops_action_claimed").findLast(
+      (e) => (e.payload as { action_id: string }).action_id === action_id,
     );
     if (last && (last.payload as { lease_until: string }).lease_until > d.now)
       return undefined;
@@ -934,21 +928,24 @@ export function hostOpsExitConfirmation(
   state: Pick<CommandState, "events" | "human_actions">,
   action_id: HostOpsExecution["action_id"],
 ): HostOpsExitConfirmation {
-  const requested = state.events.findLast(
+  const requested = eventsOfType(
+    state.events,
+    "human_action_requested",
+  ).findLast(
     (e) =>
-      e.type === "human_action_requested" &&
       (e.payload as { host_ops_action_id?: string }).host_ops_action_id ===
-        action_id,
+      action_id,
   );
   if (!requested) return { status: "none" };
   const id = (requested.payload as { human_action_id: HumanActionId })
     .human_action_id;
   const action = state.human_actions.find((h) => h.id === id);
   if (action?.status === "open") return { status: "open", human_action_id: id };
-  const completed = state.events.findLast(
-    (e) =>
-      e.type === "human_action_completed" &&
-      (e.payload as { human_action_id?: string }).human_action_id === id,
+  const completed = eventsOfType(
+    state.events,
+    "human_action_completed",
+  ).findLast(
+    (e) => (e.payload as { human_action_id?: string }).human_action_id === id,
   );
   return action?.status === "done" &&
     completed?.actor.kind === "human" &&
