@@ -3413,3 +3413,61 @@ test("张良's actions sit in their own group without a complete form and can be
     ),
   );
 });
+
+test("C-750: finished cards wait in 待你标记完成 with PM's note and a link to mark done", async () => {
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          decisions: [],
+          human_actions: [],
+          incidents: [],
+          cards_to_close: [
+            {
+              card_id: "C-23",
+              card_title: "整理发布规则",
+              template: "general",
+              required_work_items: 0,
+              close_request: {
+                reason: "规则已写进文档",
+                set_by: "assignment:A-4",
+                set_at: "2026-01-01T00:00:00.000Z",
+              },
+              since: "2026-01-01T00:00:00.000Z",
+              waited_ms: 2 * 3600000,
+            },
+            {
+              card_id: "C-24",
+              card_title: "调查卡",
+              template: "investigation",
+              required_work_items: 2,
+              close_request: null,
+              since: null,
+              waited_ms: null,
+            },
+          ],
+        }),
+      })}
+    />,
+  );
+  const group = await screen.findByRole("region", { name: "待你标记完成" });
+  expect(
+    within(group).getByRole("heading", { name: "待你标记完成（2）" }),
+  ).toBeTruthy();
+  const asked = within(group).getByRole("article", {
+    name: "待你标记完成 C-23",
+  });
+  expect(within(asked).getByText("规则已写进文档")).toBeTruthy();
+  expect(within(asked).getByText("已等待 2 小时")).toBeTruthy();
+  expect(
+    within(asked)
+      .getByRole("link", { name: "标记完成 C-23" })
+      .getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-23");
+  const auto = within(group).getByRole("article", {
+    name: "待你标记完成 C-24",
+  });
+  expect(within(auto).getByText("2 个必需工作项已全部通过")).toBeTruthy();
+  expect(screen.queryByText("没有需要你处理的事")).toBeNull();
+});

@@ -15,6 +15,7 @@ import {
   type IncidentHandling,
   type MergeConfirmationReview,
   type NeedsAction,
+  type NeedsCardToClose,
   type NeedsDecision,
   type NeedsPage,
   type NeedsStoryProposal,
@@ -1729,6 +1730,45 @@ function StoryProposalRow({
     </NeedsRow>
   );
 }
+/** C-750: a finished card the owner marks done on its card page. */
+function CardToCloseRow({
+  item,
+  projectId,
+  elapsed,
+}: {
+  readonly item: NeedsCardToClose;
+  readonly projectId: string;
+  readonly elapsed: number;
+}) {
+  return (
+    <NeedsRow
+      label={`待你标记完成 ${item.card_id}`}
+      ids={<RowCard projectId={projectId} id={item.card_id} />}
+      title={item.card_title}
+      summary={
+        item.close_request
+          ? noticeLine(item.close_request.reason)
+          : `${item.required_work_items} 个必需工作项已全部通过`
+      }
+      time={waitLabel(item.waited_ms, elapsed)}
+      status={<StatusTag status="open" label="待标记完成" />}
+      action={
+        <Button asChild variant="primary">
+          <a
+            aria-label={`标记完成 ${item.card_id}`}
+            href={routeHash({
+              kind: "card",
+              projectId,
+              cardId: item.card_id,
+            })}
+          >
+            标记完成
+          </a>
+        </Button>
+      }
+    />
+  );
+}
 function HumanAction({
   item,
   client,
@@ -2243,10 +2283,12 @@ function NeedsContent({
     (a) => !forOperator(a) && a.triage === "host",
   );
   const proposals = data?.story_proposals ?? [];
+  const toClose = data?.cards_to_close ?? [];
   const total = data
     ? data.decisions.length +
       proposals.length +
       mine.length +
+      toClose.length +
       data.incidents.length +
       (data.attention?.length ?? 0)
     : 0;
@@ -2469,6 +2511,21 @@ function NeedsContent({
             <NeedsList label="待你执行" title={`待你执行（${mine.length}）`}>
               {mine.map((item) => (
                 <HumanAction key={item.id} item={item} {...props} />
+              ))}
+            </NeedsList>
+          )}
+          {!!toClose.length && (
+            <NeedsList
+              label="待你标记完成"
+              title={`待你标记完成（${toClose.length}）`}
+            >
+              {toClose.map((item) => (
+                <CardToCloseRow
+                  key={item.card_id}
+                  item={item}
+                  projectId={projectId}
+                  elapsed={elapsed}
+                />
               ))}
             </NeedsList>
           )}

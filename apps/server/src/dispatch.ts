@@ -57,6 +57,7 @@ import {
   reviewRunWakeDisposition,
   runnableQueuedRun,
   runsOf,
+  settledHumanActionNeedsYou,
   standingRunDormant,
   stoppedByHuman,
   supersededRetirement,
@@ -3104,7 +3105,11 @@ export class Dispatcher {
           project_id: project,
           statuses: UNSETTLED_NOTIFICATION_STATUSES,
         })) {
-          if (obsoleteDispatchAttention(state, n))
+          // C-750: owner notices of completed or cancelled human actions.
+          if (
+            obsoleteDispatchAttention(state, n) ||
+            settledHumanActionNeedsYou(state, n)
+          )
             moveNotification(store.database, {
               project_id: project,
               id: n.id,
