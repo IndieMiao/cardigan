@@ -6,7 +6,10 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
-import { registerTemplateRoles } from "./template-fixtures.js";
+import {
+  openHumanCardTemplates,
+  registerTemplateRoles,
+} from "./template-fixtures.js";
 
 const project = "flow-fixture";
 let dir: string, store: Store, io: CliIo, output: string[], errors: string[];
@@ -22,6 +25,7 @@ beforeEach(async () => {
   store = Store.open({ dataDir: dir });
   store.createProject({ id: project });
   registerTemplateRoles(store, project);
+  openHumanCardTemplates(store, project);
   io = {
     env: { CARDIGAN_DATA_DIR: dir },
     cwd: dir,
@@ -41,6 +45,8 @@ beforeEach(async () => {
       await run([
         "card",
         "create",
+        "--template",
+        "dev",
         "--title",
         "Flow",
         "--goal",
@@ -152,6 +158,8 @@ test("human selects version 2 for new cards and explicitly upgrades an old card"
     await run([
       "card",
       "create",
+      "--template",
+      "dev",
       "--title",
       "Version 2",
       "--goal",

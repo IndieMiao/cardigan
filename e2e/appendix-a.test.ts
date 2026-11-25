@@ -1344,14 +1344,23 @@ describe.skipIf(!hcAvailable)(
             (e.payload as { routed_to?: string }).routed_to !== "role:pm",
         );
         expect(requests).toHaveLength(2);
-        for (const kind of ["pm_office", "needs_you"])
-          expect(
-            h.store
-              .listNotifications({ project_id: PROJECT })
-              .filter((n) => n.recipient.kind === kind)
-              .map((n) => n.event_id)
-              .sort(),
-          ).toEqual(requests.map((e) => e.id).sort());
+        const recipients = (kind: string) =>
+          h.store
+            .listNotifications({ project_id: PROJECT })
+            .filter((n) => n.recipient.kind === kind)
+            .map((n) => n.event_id)
+            .sort();
+        // Only the two card decisions reach the human.
+        expect(recipients("needs_you")).toEqual(
+          requests.map((e) => e.id).sort(),
+        );
+        // C-722: the Office on duty is also told about decision requests
+        // handed to PM under standing authorization (unless already settled
+        // when routed); the two human decisions always reach it.
+        const office = recipients("pm_office");
+        expect(office).toEqual(expect.arrayContaining(recipients("needs_you")));
+        const requestIds = new Set(pendingRequests.map((e) => e.id));
+        expect(office.filter((id) => !requestIds.has(id))).toEqual([]);
       } catch (error) {
         await printInterruptionFailure(h, observed);
         throw error;

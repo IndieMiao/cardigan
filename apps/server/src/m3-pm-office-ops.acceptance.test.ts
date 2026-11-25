@@ -199,7 +199,16 @@ async function pmFixture(automaticOps = false) {
     if (args[0] === "pm" && args[1] === "start") standingReady = true;
     return output;
   };
-  await cli("project", "create", project);
+  await cli(
+    "project",
+    "create",
+    project,
+    "--code",
+    `T${project
+      .replace(/[^a-z0-9]/gu, "")
+      .slice(0, 3)
+      .toUpperCase()}`,
+  );
   for (const role_id of ["pm", "coder", "reviewer"] as const) {
     const file = join(root, `${role_id}.json`);
     await writeFile(
@@ -763,7 +772,9 @@ test("P06 §7.2/§6.7: Ops escalations wait while busy, then merge into one deli
   expect(bells[0]?.text).toContain(
     `..${Math.max(...delivered.map((n) => n.seq))}`,
   );
-  expect(notices(s, s.office)).toEqual([]);
+  // Ops escalations never reach the Office; only the C-722 notice of the
+  // decision request Ops raised does.
+  expect(notices(s, s.office).map((n) => n.kind)).toEqual(["decision"]);
 });
 
 test("P07 §6.4/§7.3: decisions and human actions appear in needs-you, Office gets only a brief hint", async () => {

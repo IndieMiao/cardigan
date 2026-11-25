@@ -349,3 +349,29 @@ test("bounds scan work, resumes past young blobs, and honors a reference added b
   while (gc.pending) expect((await gc.tick()).scanned).toBeLessThanOrEqual(128);
   expect(existsSync(join(f.directory, kept))).toBe(true);
 });
+
+test("C-683: a video's cover frame is kept with its record and swept without it", async () => {
+  const f = fixture();
+  const video = digest("d"),
+    poster = digest("e"),
+    stray = digest("f");
+  for (const name of [video, poster, stray]) blob(f.directory, name, 30 * DAY);
+  f.store.uow.run((tx) =>
+    tx.attachments.put("p-1" as never, {
+      id: "F-9" as never,
+      sha256: video,
+      mime: "video/mp4",
+      size: 12,
+      card_id: "C-1" as never,
+      uploaded_by: "human",
+      storage_path: `attachments/${video}`,
+      attach_to: { kind: "timeline_entry", id: "C-1#1" as never },
+      kind: "evidence",
+      video: { duration_seconds: 3, poster_sha256: poster, poster_size: 12 },
+    }),
+  );
+  const result = await sweep(f);
+  expect(result.deleted).toEqual([stray]);
+  expect(existsSync(join(f.directory, video))).toBe(true);
+  expect(existsSync(join(f.directory, poster))).toBe(true);
+});

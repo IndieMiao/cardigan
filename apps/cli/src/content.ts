@@ -6,15 +6,20 @@ import {
   parseId,
   parseTimelineEntryId,
   postComment,
+  prepareStreamedAttachment,
   type Result,
   uploadAttachment,
 } from "@cardigan/domain";
 import {
   attachmentMimeForExtension,
+  formatAttachmentLimit,
+  importVideoFile,
+  isVideoMime,
   loadCommandState,
   MAX_ATTACHMENT_BYTES,
   persistEffect,
   prepareAttachmentFile,
+  resolveVideoMaxBytes,
   ToolError,
 } from "@cardigan/mcp-server";
 import { openStore } from "@cardigan/store";
@@ -38,7 +43,8 @@ const USAGE = [
   "--note 为本次所有附件的一句话说明，最多 200 字符；文件名自动取本地文件名。",
   "单独上传默认 evidence；artifact 必须带 --basis（拍板编号形如 Q-3；旧写法 q(3) 需加引号）。",
   "省略 --entry 时创建一条“上传附件”评论；指定时挂到当前卡片的已有条目。",
-  "附件每个不超过 10 MiB，按扩展名识别：png、jpg/jpeg、gif、webp、avif、svg、html/htm、md/markdown、txt/log、json、pdf。",
+  `附件每个不超过 ${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}（主机 CARDIGAN_ATTACHMENT_MAX_MIB 配置），按扩展名识别：png、jpg/jpeg、gif、webp、avif、svg、html/htm、md/markdown、txt/log、json、pdf。`,
+  "视频 mp4、mov、webm、m4v 单独限额（主机 CARDIGAN_VIDEO_MAX_MIB 配置，默认 1024 MiB），按文件头核对格式，上传进度写到标准错误。",
   "通用：--project <p> 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
   "      --data-dir <路径> 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
 ].join("\n");
@@ -126,7 +132,10 @@ async function readFile(path: string, io: CliIo, attachment: boolean) {
       if (!stat.isFile())
         throw new CliError(`不是普通文件：${path}`, EXIT.usage);
       if (attachment && stat.size > MAX_ATTACHMENT_BYTES)
-        throw new CliError(`附件超过 10 MiB：${path}`, EXIT.usage);
+        throw new CliError(
+          `附件超过 ${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}：${path}`,
+          EXIT.usage,
+        );
       return await file.readFile();
     } finally {
       await file.close();
@@ -138,6 +147,62 @@ async function readFile(path: string, io: CliIo, attachment: boolean) {
       EXIT.usage,
     );
   }
+}
+
+/**
+ * C-683: a video streams from disk into the store (own limit), with its
+ * progress on stderr; it is never read whole or sent as base64.
+ */
+async function importVideo(
+  path: string,
+  mime: string,
+  dataDir: string,
+  io: CliIo,
+) {
+  const limit = resolveVideoMaxBytes(io.env);
+  let shown = -1;
+  let stored: Awaited<ReturnType<typeof importVideoFile>>;
+  try {
+    stored = await importVideoFile(
+      dataDir,
+      resolve(io.cwd, path),
+      mime,
+      limit,
+      (copied, size) => {
+        const percent = size ? Math.floor((copied * 100) / size) : 100;
+        if (percent >= shown + 10 || copied === size) {
+          shown = percent;
+          io.stderr(`上传 ${basename(path)}：${percent}%`);
+        }
+      },
+    );
+  } catch (error) {
+    if (error instanceof ToolError) {
+      if (error.message.startsWith("Video exceeds"))
+        throw new CliError(
+          `视频超过 ${formatAttachmentLimit(limit)}（主机 CARDIGAN_VIDEO_MAX_MIB 配置）：${path}`,
+          EXIT.usage,
+        );
+      if (error.message.startsWith("File content is not"))
+        throw new CliError(
+          `文件内容与扩展名不符，不是 ${extname(path).slice(1)} 视频：${path}`,
+          EXIT.usage,
+        );
+      throw error;
+    }
+    throw new CliError(
+      `无法读取文件：${path}，请检查文件是否存在及读取权限`,
+      EXIT.usage,
+    );
+  }
+  const receipt = await prepareStreamedAttachment(
+    stored.sha256,
+    stored.size,
+    async () => ({ storage_path: stored.storage_path }),
+  );
+  if (!receipt.ok)
+    throw new ToolError(receipt.error.code, receipt.error.message);
+  return receipt.value;
 }
 
 export async function runContentCommand(
@@ -188,8 +253,16 @@ export async function runContentCommand(
       const mime = attachmentMimeForExtension(extname(path));
       if (mime === undefined)
         usage(`不支持的附件类型：${extname(path) || "无扩展名"}`);
-      const content = await readFile(path, io, true);
       try {
+        if (isVideoMime(mime)) {
+          prepared.push({
+            mime,
+            original_filename: basename(path),
+            receipt: await importVideo(path, mime, dataDir, io),
+          });
+          continue;
+        }
+        const content = await readFile(path, io, true);
         prepared.push({
           mime,
           original_filename: basename(path),

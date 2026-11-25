@@ -159,6 +159,8 @@ test("projects are listed and an unknown project is a 404", async () => {
           id: project_id,
           name: "Fixture project",
           created_at: expect.any(String),
+          // C-674: the code full numbers are written with.
+          code: "FIX",
         },
       ],
     });

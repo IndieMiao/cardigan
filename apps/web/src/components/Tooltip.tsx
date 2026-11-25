@@ -14,6 +14,13 @@ export interface TooltipProps {
   readonly clearAbove?: string | undefined;
 }
 
+/**
+ * Gap between trigger and hint. C-691 dropped the arrow (tips share the avatar
+ * card's edge, which has none); Radix used to add its 5px height to the offset,
+ * so it is kept here and the hint opens exactly where it did.
+ */
+const OFFSET = 6 + 5;
+
 /** Small text hint for icon buttons and metadata. */
 export function Tooltip({
   content,
@@ -27,7 +34,7 @@ export function Tooltip({
   const trigger = useRef<HTMLButtonElement>(null);
   const scrollArea = useRef<HTMLElement>(null);
   const [open, setOpen] = useState(false);
-  const [sideOffset, setSideOffset] = useState(6);
+  const [sideOffset, setSideOffset] = useState(OFFSET);
   const [collisionPadding, setCollisionPadding] = useState(0);
   if (content === undefined || content === null || content === "")
     return children;
@@ -55,7 +62,7 @@ export function Tooltip({
             );
           const boundary = clearAbove && anchor?.closest(clearAbove);
           setSideOffset(
-            6 +
+            OFFSET +
               (side === "top" && anchor && boundary
                 ? Math.max(
                     0,
@@ -172,7 +179,6 @@ export function Tooltip({
             ) : (
               content
             )}
-            <TooltipPrimitive.Arrow className="tooltip-arrow" />
           </TooltipPrimitive.Content>
         </TooltipPrimitive.Portal>
       </TooltipPrimitive.Root>

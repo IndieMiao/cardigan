@@ -15,13 +15,16 @@ import {
   confirmSourceMergeUnrelated,
   confirmStoryProposal,
   copyRole,
-  createCard,
+  createHumanCard,
   createRole,
   DEFAULT_MAX_RUN_LIMIT,
   type DomainError,
   deactivateRole,
+  isDecisionOther,
   issueInstruction,
   latestCardTemplate,
+  MAX_REF_SLOT,
+  MAX_VIDEO_POSTER_BYTES,
   manageCardTemplate,
   markCardDone,
   markNoticesRead,
@@ -30,6 +33,7 @@ import {
   parseTimelineEntryId,
   postComment,
   prepareMergePlan,
+  prepareStreamedAttachment,
   type ReadableIdKind,
   type Result,
   type RoleDefinition,
@@ -53,6 +57,7 @@ import {
   updateWorkItem,
   uploadAttachment,
   workerHelperAction,
+  writeReleaseNote,
 } from "@cardigan/domain";
 import {
   applyRoleDocument,
@@ -64,13 +69,17 @@ import {
   runCapacityMachines,
 } from "@cardigan/host";
 import {
+  attachmentTooLargeMessage,
+  base64Length,
   loadCommandState,
   MAX_ATTACHMENT_BASE64,
   MAX_MCP_BODY_BYTES,
   persistEffect,
   prepareAttachmentFile,
+  preparePoster,
   projectRepositories,
   ToolError,
+  uploadSessionsFor,
 } from "@cardigan/mcp-server";
 import {
   defaultRoleDefinition,
@@ -87,6 +96,7 @@ import {
   type ReadRepositories,
   type Store,
   type StoreTransactionContext,
+  type WebSession,
 } from "@cardigan/store";
 import { z } from "zod";
 import { requireEmployeeOwner, serveEmployees } from "./employees.js";
@@ -97,6 +107,7 @@ import {
   readJsonBody,
   sendJson,
 } from "./http.js";
+import { uploadError, uploadOwner } from "./uploads.js";
 
 const text = z
   .string()
@@ -191,10 +202,25 @@ const cardComment = comment.extend({
       z
         .object({ action: z.literal("accept_defaults"), group_id: entryId })
         .strict(),
+      z
+        .object({
+          action: z.literal("submit_answers"),
+          group_id: entryId,
+          answers: z.array(
+            z
+              .object({ number: z.number().int().positive(), answer: text })
+              .strict(),
+          ),
+        })
+        .strict(),
     ])
     .optional(),
 });
-const instruction = z.object({ body: text, work_item_id: id("work_item") });
+const instruction = z.object({
+  body: text,
+  work_item_id: id("work_item"),
+  decision_id: id("decision").optional(),
+});
 const cardUpdate = z
   .object({
     hold: z
@@ -257,7 +283,24 @@ const action = z
   })
   .strict();
 const attachment = z.object({
-  file: z.string().max(MAX_ATTACHMENT_BASE64),
+  file: z
+    .string()
+    .max(MAX_ATTACHMENT_BASE64, attachmentTooLargeMessage())
+    .optional(),
+  // C-683: a complete resumable upload (videos) instead of `file`.
+  upload_id: z.string().min(1).max(64).optional(),
+  // C-683: what the browser measured and its cover frame (base64 JPEG).
+  video: z
+    .object({
+      duration_seconds: z.number().min(0).optional(),
+      width: z.number().int().min(0).optional(),
+      height: z.number().int().min(0).optional(),
+      video_codec: z.string().max(32).optional(),
+      audio_codec: z.string().max(32).optional(),
+    })
+    .strict()
+    .optional(),
+  poster: z.string().max(base64Length(MAX_VIDEO_POSTER_BYTES)).optional(),
   mime: text,
   original_filename: z.string().optional(),
   note: z.string().optional(),
@@ -272,6 +315,8 @@ const attachment = z.object({
     .regex(/^[a-f0-9]{64}$/u)
     .optional(),
   supersedes: text.optional(),
+  // C-615: the `attachment-new-N` of the comment this file fills.
+  ref_slot: z.number().int().min(1).max(MAX_REF_SLOT).optional(),
 });
 // Zod's optional fields include undefined in their inferred value types; domain omits them.
 function defined<T extends object>(
@@ -774,7 +819,8 @@ export async function serveWrite(
         const project = template?.requires_repo
           ? c.store.getProject(c.project_id)
           : undefined;
-        return createCard(
+        // C-684: the person may only use templates the project opened to people.
+        const result = createHumanCard(
           state,
           actor,
           {
@@ -795,9 +841,26 @@ export async function serveWrite(
           },
           ports,
         );
+        if (!result.ok) return result;
+        // The creation entry, so the dialog can attach its files to it.
+        const created = result.value.events.find(
+          (e) =>
+            e.type === "card_created" && e.card_id === result.value.data.id,
+        );
+        const entry = result.value.timeline.find(
+          (e) =>
+            e.card_id === result.value.data.id && e.event_seq === created?.seq,
+        );
+        return {
+          ok: true as const,
+          value: {
+            ...result.value,
+            data: { id: result.value.data.id, entry_id: entry?.id ?? null },
+          },
+        };
       },
     );
-    sendJson(c.res, 201, { id: card.id });
+    sendJson(c.res, 201, card);
     return true;
   }
   if (rest === "/card-templates" || rest === "/card-templates/validate") {
@@ -838,6 +901,39 @@ export async function serveWrite(
       );
       sendJson(c.res, 200, output);
     }
+    return true;
+  }
+  if (rest === "/release-notes") {
+    if (c.req.method === "GET") return false;
+    if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);
+    c.authorize();
+    const body = await readJsonBody(c.req);
+    const key = parsed(
+      requiredKey,
+      c.req.headers["idempotency-key"],
+      "保存发版说明需要 Idempotency-Key",
+    );
+    // Shapes only; the domain checks the version, body length and links.
+    const input = parsed(
+      z
+        .object({
+          version: z.string(),
+          body: z.string(),
+          decision_id: z.string().optional(),
+          base_revision: z.number().int().min(0).optional(),
+        })
+        .strict(),
+      body,
+      "发版说明字段格式不正确",
+    );
+    sendJson(
+      c.res,
+      200,
+      run(
+        { ...c, idempotency: { key, request: { method: "POST", rest, body } } },
+        (s, a, ports) => writeReleaseNote(s, a, input, ports),
+      ),
+    );
     return true;
   }
   if (rest === "/roles" || rest.startsWith("/roles/"))
@@ -961,6 +1057,10 @@ export async function serveWrite(
           pm_owner_messages: z.boolean().optional(),
           system_reminder_policy: z.unknown().optional(),
           cross_card_read: z.boolean().optional(),
+          // C-685: values are checked by the domain.
+          shared_files_access: z
+            .record(z.string().max(64), z.enum(["read_write", "read", "none"]))
+            .optional(),
           auto_merge_paused: z.boolean().optional(),
           auto_merge: z.enum(["off", "on"]).optional(),
           high_risk_paths: z.array(z.string()).optional(),
@@ -1004,6 +1104,9 @@ export async function serveWrite(
           board_collapsed_lanes: z
             .record(z.string().max(64), z.boolean().nullable())
             .optional(),
+          human_card_templates: z
+            .record(z.string().max(64), z.boolean())
+            .optional(),
         })
         .strict(),
       body,
@@ -1033,6 +1136,9 @@ export async function serveWrite(
             : {}),
           ...(input.cross_card_read !== undefined
             ? { cross_card_read: input.cross_card_read }
+            : {}),
+          ...(input.shared_files_access !== undefined
+            ? { shared_files_access: input.shared_files_access }
             : {}),
           ...(input.auto_merge !== undefined
             ? { auto_merge: input.auto_merge }
@@ -1084,6 +1190,9 @@ export async function serveWrite(
             : {}),
           ...(input.board_collapsed_lanes !== undefined
             ? { board_collapsed_lanes: input.board_collapsed_lanes }
+            : {}),
+          ...(input.human_card_templates !== undefined
+            ? { human_card_templates: input.human_card_templates }
             : {}),
           ...(input.review_max_rounds !== undefined
             ? { review_max_rounds: input.review_max_rounds }
@@ -1164,10 +1273,14 @@ export async function serveWrite(
   if (!supported.includes(operation ?? "")) return false;
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
   c.authorize();
-  const body = await readJsonBody(
-    c.req,
-    operation === "attachments" ? MAX_MCP_BODY_BYTES : undefined,
-  );
+  const body =
+    operation === "attachments"
+      ? await readJsonBody(
+          c.req,
+          MAX_MCP_BODY_BYTES,
+          attachmentTooLargeMessage(),
+        )
+      : await readJsonBody(c.req);
   c.authorize();
   const header = c.req.headers["idempotency-key"];
   if (operation === "mark-done")
@@ -1416,18 +1529,104 @@ export async function serveWrite(
         issueInstruction(s, a, { ...p, card_id }, ports),
       );
     } else {
-      const { file, sha256, ...p } = defined(parsed(attachment, body));
-      let receipt: Awaited<ReturnType<typeof prepareAttachmentFile>>;
-      try {
-        receipt = await prepareAttachmentFile(file, c.dataDir, sha256);
-      } catch (error) {
-        if (error instanceof ToolError) rejected(error.toDomainError());
-        throw error;
-      }
-      // Published content-addressed blobs remain on rejection: another upload may already share them.
-      output = run(context, (s, a, ports) =>
-        uploadAttachment(s, a, { ...p, card_id }, receipt, ports),
+      // Name the configured limit instead of a generic schema failure (C-616).
+      if (
+        typeof body.file === "string" &&
+        body.file.length > MAX_ATTACHMENT_BASE64
+      )
+        throw new HttpRejection(
+          413,
+          "payload_too_large",
+          attachmentTooLargeMessage(),
+        );
+      const { file, upload_id, sha256, poster, video, ...rest } = defined(
+        parsed(attachment, body),
       );
+      const p = { ...rest, ...(video ? { video: defined(video) } : {}) };
+      if ((file === undefined) === (upload_id === undefined))
+        throw new HttpRejection(
+          400,
+          "validation_failed",
+          "Provide exactly one of file and upload_id",
+        );
+      // C-683: the cover frame is stored first, as its own blob; the host
+      // only checks it is a JPEG of bounded size, never decodes it.
+      let cover: Awaited<ReturnType<typeof prepareAttachmentFile>> | undefined;
+      if (poster !== undefined)
+        try {
+          cover = await preparePoster(poster, c.dataDir);
+        } catch (error) {
+          if (error instanceof ToolError) rejected(error.toDomainError());
+          throw error;
+        }
+      if (upload_id !== undefined) {
+        // The upload stays until the record is written, so a retry of this
+        // request (same Idempotency-Key) can still find it.
+        const owner = uploadOwner(c.project_id, c.authorize() as WebSession);
+        const sessions = uploadSessionsFor(c.dataDir);
+        let receipt:
+          | Awaited<ReturnType<typeof prepareAttachmentFile>>
+          | undefined;
+        try {
+          const status = await sessions.status(owner, upload_id);
+          if (!status.complete || status.sha256 === undefined)
+            throw ToolError.validation("Upload is not complete yet", {
+              received: status.received,
+              size: status.size,
+            });
+          if (
+            status.mime !== p.mime ||
+            (sha256 !== undefined && sha256 !== status.sha256)
+          )
+            throw ToolError.validation(
+              "The upload's type or sha256 differs from this request",
+            );
+          receipt = must(
+            await prepareStreamedAttachment(
+              status.sha256,
+              status.size,
+              async () => sessions.publish(owner, upload_id),
+            ),
+          );
+        } catch (error) {
+          // A keyed retry after the record was written (and the upload
+          // removed) gets the recorded reply; anything else is refused.
+          if (
+            !(error instanceof ToolError) ||
+            error.code !== "not_found" ||
+            !context.idempotency
+          ) {
+            if (error instanceof ToolError) uploadError(error);
+            throw error;
+          }
+          const missing = error.toDomainError();
+          output = run(context, () => ({ ok: false, error: missing }));
+        }
+        if (receipt) {
+          const stored = receipt;
+          output = run(context, (s, a, ports) =>
+            uploadAttachment(s, a, { ...p, card_id }, stored, ports, cover),
+          );
+          await sessions.remove(owner, upload_id).catch(() => undefined);
+        }
+      } else {
+        let receipt: Awaited<ReturnType<typeof prepareAttachmentFile>>;
+        try {
+          receipt = await prepareAttachmentFile(
+            file as string,
+            c.dataDir,
+            sha256,
+            p.mime,
+          );
+        } catch (error) {
+          if (error instanceof ToolError) rejected(error.toDomainError());
+          throw error;
+        }
+        // Published content-addressed blobs remain on rejection: another upload may already share them.
+        output = run(context, (s, a, ports) =>
+          uploadAttachment(s, a, { ...p, card_id }, receipt, ports, cover),
+        );
+      }
     }
   } else if (group === "decisions") {
     const decision_id = parsed(id("decision"), key);
@@ -1461,8 +1660,11 @@ export async function serveWrite(
           ["narrow_scope", "split_card"].includes(p.option) &&
           s.decisions.find((q) => q.id === decision_id)?.trigger ===
             "review_limit";
+        // C-682: "其他" is the owner's own words; never substitute a default.
         const raw_quote =
-          (p.option === "hold" && returning) || scopeRequired
+          (p.option === "hold" && returning) ||
+          scopeRequired ||
+          isDecisionOther(p.option)
             ? p.raw_quote?.trim() || p.rationale?.trim() || ""
             : p.raw_quote?.trim() || returning
               ? (p.raw_quote ?? "")

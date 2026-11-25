@@ -25,7 +25,7 @@ import type { ProbeAdapter, ProbeJob } from "./probe-service.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 
 /** One REST request consumes both the existing executor quota and the probe quota. */
-class ProbeBudget extends GithubRateLimit {
+export class ProbeBudget extends GithubRateLimit {
   constructor(
     private readonly shared: GithubRateLimit,
     budget: number,

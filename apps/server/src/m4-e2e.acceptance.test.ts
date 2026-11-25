@@ -231,7 +231,16 @@ async function harness(): Promise<Harness> {
       return out.join("\n");
     };
     await cardigan("init");
-    await cardigan("project", "create", project);
+    await cardigan(
+      "project",
+      "create",
+      project,
+      "--code",
+      `T${project
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    );
     await cardigan(
       "project",
       "set-repo",
@@ -263,6 +272,8 @@ async function harness(): Promise<Harness> {
       );
       await cardigan("role", "add", "--file", file);
     }
+    // C-684: a person opens dev cards only once the project allows them.
+    await cardigan("preference", "set", "human-card-templates", "dev", "on");
     await cardigan(
       "card",
       "create",

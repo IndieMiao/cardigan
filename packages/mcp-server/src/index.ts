@@ -4,18 +4,43 @@ export {
   openArtifact,
   sendArtifact,
 } from "./artifact-files.js";
+export {
+  ATTACHMENT_MAX_MIB_ENV,
+  type AttachmentLimits,
+  attachmentLimits,
+  base64Length,
+  formatAttachmentLimit,
+  MAX_STORED_ATTACHMENT_BYTES,
+  MAX_STORED_VIDEO_BYTES,
+  resolveAttachmentLimits,
+  resolveVideoMaxBytes,
+  VIDEO_CHUNK_BYTES,
+  VIDEO_MAX_MIB_ENV,
+} from "./attachment-limits.js";
 export { resolveAttachmentInlineBytes } from "./attachment-preview.js";
+export {
+  byteRange,
+  hashAttachmentFile,
+  sendFileRange,
+} from "./attachment-stream.js";
 // M5.1: the Workbench serves attachment downloads from the same content-
 // addressed store the MCP upload path writes to.
 export {
   ATTACHMENT_EXTENSIONS,
+  ATTACHMENT_LIMITS,
+  attachmentBlobPath,
   attachmentMimeForExtension,
+  attachmentTooLargeMessage,
   decodeAttachment,
   fileAttachmentStore,
   MAX_ATTACHMENT_BASE64,
   MAX_ATTACHMENT_BYTES,
   MAX_MCP_BODY_BYTES,
+  mcpBodyTooLargeMessage,
+  openAttachmentFile,
   prepareAttachmentFile,
+  preparePoster,
+  publishAttachmentFile,
 } from "./attachments.js";
 export {
   authenticate,
@@ -37,6 +62,8 @@ export {
   type PinDeliveryRequest,
 } from "./commands/delivery-tools.js";
 export {
+  type CommandStateOptions,
+  effectWrites,
   loadCommandState,
   persistEffect,
   projectRepositories,
@@ -47,6 +74,12 @@ export {
   hostOpsTools,
 } from "./commands/host-ops-tools.js";
 export { managementTools } from "./commands/management-tools.js";
+export {
+  type ProjectSnapshotInput,
+  type ProjectSnapshotRead,
+  type ProjectSnapshotReader,
+  readProjectSnapshot,
+} from "./commands/support-tools.js";
 export { workerEvidence } from "./commands/worker-evidence.js";
 export {
   ERROR_CODES,
@@ -59,6 +92,35 @@ export {
   memoryLogger,
   stdoutLogger,
 } from "./log.js";
+export {
+  LOOP_DELAY_LIMIT_MS,
+  type LoopDelay,
+  processLoopDelay,
+} from "./offsite/loop-delay.js";
+// C-614: off-site copy of attachments and artifacts in a private OSS bucket.
+export {
+  artifactKey,
+  attachmentKey,
+  Offsite,
+  type OffsiteAlert,
+  type OffsiteOptions,
+  type OffsiteStatusView,
+  offsiteFor,
+  offsiteTarget,
+  registerOffsite,
+  type SignedLink,
+} from "./offsite/offsite.js";
+export {
+  nodeTransport,
+  OssClient,
+  OssError,
+  type OssTransport,
+} from "./offsite/oss.js";
+export {
+  type SyncedLedger,
+  type SyncStatus,
+  writeSyncStatus,
+} from "./offsite/state.js";
 export { type RecordReadTiming, timeRead } from "./read-timing.js";
 export {
   defaultToolCatalog,
@@ -68,10 +130,22 @@ export {
   startMcpServer,
 } from "./server.js";
 export {
+  SHARED_FILES_NOTICE,
+  type SharedDownload,
+  SharedFileLibrary,
+  type SharedFilesRepository,
+  type SharedUploadTicket,
+} from "./shared-files/library.js";
+export {
   createMcpServer,
   type ToolServerOptions,
   toolCatalogFingerprint,
 } from "./tool-server.js";
+export {
+  CAPABILITY_GUIDE_NOTICE,
+  type CapabilityGuideToolOptions,
+  capabilityGuideTool,
+} from "./tools/capability-guide.js";
 export { CheckLogReadLimitError } from "./tools/get-check-log.js";
 export {
   ackEventsTool,
@@ -83,10 +157,37 @@ export {
   type ToolDefinition,
   whoamiTool,
 } from "./tools/index.js";
+export {
+  type MacosCheckToolOptions,
+  macosCheckTool,
+} from "./tools/macos-check.js";
 export type { SigningScope } from "./tools/mobile-signing.js";
 export {
+  continuePublication,
+  interruptedPublication,
+  MAX_PUBLICATION_CONTINUATIONS,
   PublicationError,
   type PublicationOptions,
   type PublishInput,
 } from "./tools/publish-artifact.js";
 export { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";
+export {
+  type SharedFileToolOptions,
+  sharedFileTools,
+} from "./tools/shared-files.js";
+// C-683: video attachments (chunked uploads, streamed reads, host ffmpeg).
+export {
+  importVideoFile,
+  type UploadInput,
+  UploadSessions,
+  type UploadStatus,
+  uploadSessionsFor,
+  videoTooLargeMessage,
+} from "./upload-sessions.js";
+export {
+  checkVideoContent,
+  isVideoMime,
+  sniffVideo,
+  VIDEO_EXTENSIONS,
+  VIDEO_SNIFF_BYTES,
+} from "./video-format.js";

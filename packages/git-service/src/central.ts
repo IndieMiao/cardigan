@@ -617,6 +617,53 @@ export class CentralRepositoryService {
       base_sha: base,
     };
   }
+  /**
+   * C-611: the pinned delivery merged onto the current baseline, for a macOS
+   * check. One candidate per delivery and baseline: while neither moves, every
+   * rerun tests the same commit.
+   */
+  async prepareDeliveryCandidate(
+    project: CentralProject,
+    delivery: string,
+    headSha: string,
+  ) {
+    if (!parseId("delivery", delivery).ok || !fullSha.test(headSha))
+      throw new Error("Invalid macOS check candidate identity");
+    const repository = await this.ensureCentral(project);
+    if (
+      (await this.git.readRef(
+        repository,
+        `refs/cardigan/deliveries/${delivery}`,
+      )) !== headSha
+    )
+      throw new Error("Unpinned delivery HEAD");
+    const base = await this.git.readRef(
+      repository,
+      `refs/heads/${project.base_branch}`,
+    );
+    if (!base) throw new Error("Missing baseline");
+    // A delivery's pinned HEAD never changes, so delivery plus baseline names
+    // exactly one merge; an existing ref is that candidate.
+    const ref = `refs/cardigan/candidates/macos-${delivery}-${base}`;
+    let candidate = await this.git.readRef(repository, ref);
+    if (!candidate) {
+      const merged = await this.mergeCandidate(
+        repository,
+        base,
+        headSha,
+        `macOS check ${delivery}`,
+        this.options.identity ?? DEFAULT_MERGE_IDENTITY,
+      );
+      if (merged.conflicts.length) throw new PrecheckMergeConflict(base);
+      candidate = merged.sha;
+      await this.git.compareAndSwapRef(repository, ref, candidate, null);
+    }
+    return {
+      candidate_sha: candidate,
+      tree_sha: await this.git.treeOfCommit(repository, candidate),
+      base_sha: base,
+    };
+  }
   /** Publish only by CAS, after the caller has checked this exact candidate tree. */
   async publishMerge(
     project: CentralProject,
@@ -699,6 +746,60 @@ export class CentralRepositoryService {
   }
   validateSource(): void {
     this.options.validateSource?.();
+  }
+  /**
+   * C-728: resolve a no-merge card's start point in the central repository and
+   * pin it at `refs/cardigan/candidates/start/<assignment>`, a prefix every
+   * base clone already receives from the host (local fetch, Agent push, worker
+   * helper), so the target machine never contacts a remote itself. A branch is
+   * synced from the source like a card baseline (fast-forward only); a commit
+   * missing in the central repository is looked up among the source's branches
+   * and tags. The pin follows the latest resolution with compare-and-swap.
+   */
+  async pinStartPoint(
+    project: CentralProject,
+    start: string,
+    assignment_id: string,
+  ): Promise<string> {
+    if (!parseId("assignment", assignment_id).ok)
+      throw new Error("Invalid Assignment id");
+    const repository = await this.ensureCentral(project);
+    let sha: string | undefined;
+    if (fullSha.test(start)) {
+      const isCommit = async () =>
+        (await this.git.objectType(repository, start)) === "commit";
+      if (!(await isCommit()))
+        await this.git.fetchRefs(repository, project.source_repo, [
+          "+refs/heads/*:refs/cardigan/start-source/heads/*",
+          "+refs/tags/*:refs/cardigan/start-source/tags/*",
+        ]);
+      if (
+        start.length !==
+          ((await this.git.objectFormat(repository)) === "sha1" ? 40 : 64) ||
+        !(await isCommit())
+      )
+        throw new Error(
+          `Start point commit ${start} is in neither the central repository nor the source`,
+        );
+      sha = start;
+    } else {
+      if (!validCentralBranch(start))
+        throw new Error("Invalid start point branch name");
+      try {
+        await this.syncFromSource(centralBranch(project, start));
+      } catch (error) {
+        throw new Error(
+          `Start point branch ${start} is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      sha = await this.git.readRef(repository, `refs/heads/${start}`);
+      if (!sha) throw new Error(`Start point branch ${start} is missing`);
+    }
+    const ref = `refs/cardigan/candidates/start/${assignment_id}`;
+    const current = await this.git.readRef(repository, ref);
+    if (current !== sha)
+      await this.git.compareAndSwapRef(repository, ref, sha, current ?? null);
+    return sha;
   }
   /** Only creates; same SHA is an idempotent success, including concurrent creation. */
   async createRef(repository: string, ref: string, sha: string) {

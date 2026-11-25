@@ -28,6 +28,7 @@ import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
 import { FeishuSettings } from "./FeishuSettings.js";
+import { HumanCardTemplatesSetting } from "./HumanCardTemplatesSetting.js";
 import { MachinesSettings } from "./MachinesSettings.js";
 import { ModelsSettings } from "./ModelsSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
@@ -349,6 +350,12 @@ export function SettingsPage({
                 <CrossCardReadSetting
                   key={`cross-card-read:${projectId}`}
                   enabled={data.cross_card_read !== false}
+                  {...common}
+                />
+                <HumanCardTemplatesSetting
+                  key={`human-card-templates:${projectId}`}
+                  allowed={data.human_card_templates}
+                  active={tab === "preferences"}
                   {...common}
                 />
                 <AutoMergeSetting

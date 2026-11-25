@@ -25,6 +25,7 @@ test("dispatcher interval is optional, defaults in the loop to 1000ms and accept
 
 test("S10 defaults to loopback, port 3004 and the same user data directory as the CLI", () => {
   expect(resolveServerConfig({ HOME: "/fixture/home" })).toEqual({
+    mcpSessionCheck: true,
     dataDir: "/fixture/home/.local/share/cardigan",
     execution: {
       mode: "local",
@@ -43,6 +44,10 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     runtimeUnknownGraceMs: 60_000,
     checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
+    centralMaintenanceWindow: { start: 180, end: 360 },
+    centralMaintenanceIntervalMs: 900_000,
+    centralCruftIntervalMs: 604_800_000,
+    centralRefRetentionMs: 1_209_600_000,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
     dispatchTimeoutMs: 600_000,
     providerFailureThreshold: 2,
@@ -109,6 +114,7 @@ test("reads data dir and port from the environment", () => {
       CARDIGAN_PROVIDER_COOLDOWN_MS: "1000",
     }),
   ).toEqual({
+    mcpSessionCheck: true,
     dataDir: "/srv/cardigan/data",
     execution: { mode: "local", dataDir: "/srv/cardigan/data" },
     host: DEFAULT_MCP_HOST,
@@ -124,6 +130,10 @@ test("reads data dir and port from the environment", () => {
     runtimeUnknownGraceMs: 60_000,
     checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
+    centralMaintenanceWindow: { start: 180, end: 360 },
+    centralMaintenanceIntervalMs: 900_000,
+    centralCruftIntervalMs: 604_800_000,
+    centralRefRetentionMs: 1_209_600_000,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
     dispatchTimeoutMs: 600_000,
     providerFailureThreshold: 3,
@@ -381,4 +391,82 @@ test("worker inspection cadence accepts only a positive deployment interval", ()
   expect(() =>
     resolveServerConfig({ CARDIGAN_WORKER_INSPECTION_INTERVAL_MS: "0" }),
   ).toThrow("positive");
+});
+
+test("C-600 the MCP session check is on unless explicitly turned off", () => {
+  expect(resolveServerConfig({}).mcpSessionCheck).toBe(true);
+  expect(
+    resolveServerConfig({ CARDIGAN_MCP_SESSION_CHECK: "1" }).mcpSessionCheck,
+  ).toBe(true);
+  expect(
+    resolveServerConfig({ CARDIGAN_MCP_SESSION_CHECK: "0" }).mcpSessionCheck,
+  ).toBe(false);
+  for (const value of ["off", "true", "2"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_MCP_SESSION_CHECK: value }),
+    ).toThrow("CARDIGAN_MCP_SESSION_CHECK");
+});
+
+test("C-600 the MCP handshake deadline is a positive millisecond setting", () => {
+  expect(resolveServerConfig({}).mcpHandshakeTimeoutMs).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS: "90000" })
+      .mcpHandshakeTimeoutMs,
+  ).toBe(90000);
+  for (const value of ["0", "-1", "1.5", "soon"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS: value }),
+    ).toThrow("CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS");
+});
+
+test("C-632: request_check busy-lock retry is host-configured with defaults", () => {
+  expect(resolveServerConfig({}).checkHeadRetry).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_CHECK_HEAD_RETRY_TOTAL_MS: "60000" })
+      .checkHeadRetry,
+  ).toEqual({ attempts: 3, totalMs: 60000, backoffMs: 1000 });
+  expect(
+    resolveServerConfig({
+      CARDIGAN_CHECK_HEAD_RETRY_ATTEMPTS: "5",
+      CARDIGAN_CHECK_HEAD_RETRY_BACKOFF_MS: "500",
+    }).checkHeadRetry,
+  ).toEqual({ attempts: 5, totalMs: 90000, backoffMs: 500 });
+  for (const value of ["0", "11", "1.5", "many"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_CHECK_HEAD_RETRY_ATTEMPTS: value }),
+    ).toThrow("CARDIGAN_CHECK_HEAD_RETRY_ATTEMPTS");
+  for (const key of [
+    "CARDIGAN_CHECK_HEAD_RETRY_TOTAL_MS",
+    "CARDIGAN_CHECK_HEAD_RETRY_BACKOFF_MS",
+  ])
+    for (const value of ["0", "-1", "1.5", "soon"])
+      expect(() => resolveServerConfig({ [key]: value })).toThrow(key);
+});
+
+test("C-637: central maintenance runs 03:00-06:00 host time by default, is configurable and can be turned off", () => {
+  const config = resolveServerConfig({
+    CARDIGAN_CENTRAL_MAINTENANCE_WINDOW: "22:30-01:00",
+    CARDIGAN_CENTRAL_MAINTENANCE_INTERVAL_MS: "60000",
+    CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS: "86400000",
+    CARDIGAN_CENTRAL_REF_RETENTION_DAYS: "30",
+  });
+  expect(config).toMatchObject({
+    centralMaintenanceWindow: { start: 22 * 60 + 30, end: 60 },
+    centralMaintenanceIntervalMs: 60_000,
+    centralCruftIntervalMs: 86_400_000,
+    centralRefRetentionMs: 2_592_000_000,
+  });
+  expect(
+    resolveServerConfig({ CARDIGAN_CENTRAL_MAINTENANCE_WINDOW: "off" }),
+  ).not.toHaveProperty("centralMaintenanceWindow");
+  expect(() =>
+    resolveServerConfig({ CARDIGAN_CENTRAL_MAINTENANCE_WINDOW: "3-6" }),
+  ).toThrow(/CARDIGAN_CENTRAL_MAINTENANCE_WINDOW must be HH:MM-HH:MM/);
+  expect(() =>
+    resolveServerConfig({ CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS: "0" }),
+  ).toThrow(/CARDIGAN_CENTRAL_CRUFT_INTERVAL_MS/);
+  for (const days of ["0", "1.5", "-14"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_CENTRAL_REF_RETENTION_DAYS: days }),
+    ).toThrow(/CARDIGAN_CENTRAL_REF_RETENTION_DAYS/);
 });

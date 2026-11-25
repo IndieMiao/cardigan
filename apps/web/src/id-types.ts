@@ -1,3 +1,5 @@
+import { splitQualifiedId } from "@cardigan/domain";
+
 /** C-204: shared by number tags, prose references and the help page. */
 export const ID_TYPES = [
   { prefix: "C", label: "卡片", token: "card" },
@@ -21,7 +23,9 @@ export const UNKNOWN_ID_TYPE = {
 
 /** Presentation only: this must never resolve an entity or grant a link. */
 export function idType(id: string) {
-  const match = /^([A-Z]+)-[1-9][0-9]*(#[1-9][0-9]*)?$/u.exec(id);
+  // C-674: a full number (`SEN-C-34`) has the type of its project-scoped part.
+  const local = splitQualifiedId(id)?.id ?? id;
+  const match = /^([A-Z]+)-[1-9][0-9]*(#[1-9][0-9]*)?$/u.exec(local);
   if (!match || (match[2] && match[1] !== "C")) return undefined;
   const type = ID_TYPES.find((type) => type.prefix === match[1]);
   return match[2]

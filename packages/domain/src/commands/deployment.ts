@@ -88,6 +88,62 @@ export function currentDeploymentPin(events: readonly Event[]) {
     : undefined;
 }
 
+/**
+ * C-609: a host-registered managed long operation. Host-internal only: it
+ * names another project's card, so it never enters the deployment project's
+ * record; the record carries `DeploymentOperationCount` instead and the
+ * detail goes to the source card's own timeline.
+ */
+export type DeploymentOperation = {
+  readonly id: string;
+  readonly kind: string;
+  readonly project_id: string;
+  readonly card_id: string | null;
+  readonly label: string;
+  readonly started_at: string;
+};
+
+/** C-609: how many operations of one kind; carries no project or card. */
+export type DeploymentOperationCount = {
+  readonly kind: string;
+  readonly count: number;
+};
+
+/** Distinct kinds per record; the host registers a handful of fixed kinds. */
+export const MAX_DEPLOYMENT_OPERATION_KINDS = 20;
+
+/** Group by kind; counts are exact, never truncated. */
+export function countDeploymentOperations(
+  ops: readonly Pick<DeploymentOperation, "kind">[],
+): DeploymentOperationCount[] {
+  const counts = new Map<string, number>();
+  for (const op of ops) counts.set(op.kind, (counts.get(op.kind) ?? 0) + 1);
+  return [...counts]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([kind, count]) => ({ kind, count }));
+}
+
+function validOperationCounts(list: unknown): boolean {
+  return (
+    Array.isArray(list) &&
+    list.length <= MAX_DEPLOYMENT_OPERATION_KINDS &&
+    new Set(list.map((c) => c?.kind)).size === list.length &&
+    list.every(
+      (c) =>
+        !!c &&
+        typeof c === "object" &&
+        Object.keys(c).length === 2 &&
+        typeof c.kind === "string" &&
+        /^[a-z][a-z0-9_]{0,63}$/u.test(c.kind) &&
+        Number.isSafeInteger(c.count) &&
+        c.count > 0,
+    )
+  );
+}
+
+const copyCounts = (list: readonly DeploymentOperationCount[]) =>
+  list.map(({ kind, count }) => ({ kind, count }));
+
 /** Host-supplied, already redacted deployment evidence; never an execution request. */
 export interface DeploymentRecord {
   readonly control_event_id?: string;
@@ -98,6 +154,10 @@ export interface DeploymentRecord {
     | "started"
     | "waiting_for_evidence"
     | "waiting_for_capacity"
+    /** C-609: main moved again soon after a deployment; only the latest is deployed. */
+    | "waiting_for_batch"
+    /** C-609: managed long operations are still running; bounded wait. */
+    | "waiting_for_operations"
     | "stopping"
     | "deployed"
     | "failed"
@@ -113,6 +173,13 @@ export interface DeploymentRecord {
   readonly evidence_wait_exceeded?: boolean;
   readonly capacity_wait_exceeded?: boolean;
   readonly blocking_checks?: readonly { project: string; attempt: string }[];
+  /** C-609: operations this deployment waited for (bounded), by kind. */
+  readonly deferred_operations?: readonly DeploymentOperationCount[];
+  readonly operations_wait_exceeded?: boolean;
+  /** C-609: operations still running when the server was stopped anyway, by kind. */
+  readonly interrupted_operations?: readonly DeploymentOperationCount[];
+  /** C-609: deployments are at least this far apart; later merges are batched. */
+  readonly batch_window_ms?: number;
   readonly failure_stage?: "build" | "start" | "ready" | "host";
   /** Same-project runs observed immediately before requesting server shutdown. */
   readonly stop_snapshot?: {
@@ -151,6 +218,16 @@ export function recordDeployment(
       "validation_failed",
       "部署备份标识必须是主机生成的文件名",
     );
+    ensure(
+      [record.deferred_operations, record.interrupted_operations].every(
+        (list) => list === undefined || validOperationCounts(list),
+      ) &&
+        (record.batch_window_ms === undefined ||
+          (Number.isSafeInteger(record.batch_window_ms) &&
+            record.batch_window_ms > 0)),
+      "validation_failed",
+      "部署等待记录无效",
+    );
     d.emit("host_deployment_recorded", undefined, {
       ...record,
       ...(record.stop_snapshot
@@ -159,6 +236,14 @@ export function recordDeployment(
               captured_at: record.stop_snapshot.captured_at,
               runs: record.stop_snapshot.runs.map((r) => ({ ...r })),
             },
+          }
+        : {}),
+      ...(record.deferred_operations
+        ? { deferred_operations: copyCounts(record.deferred_operations) }
+        : {}),
+      ...(record.interrupted_operations
+        ? {
+            interrupted_operations: copyCounts(record.interrupted_operations),
           }
         : {}),
     });
@@ -351,6 +436,62 @@ export function retireVerifiedHelperAction(
           action,
           "该绑定和版本已通过自动升级核验，不再需要人工安装",
         );
+    }
+  });
+}
+
+/** C-599: one namespace of host-refreshed worker notices per machine. */
+const REFRESHABLE_PREFIX = /^worker-agent-tools:[a-zA-Z0-9][a-zA-Z0-9._-]*:$/u;
+
+/**
+ * Internal system handoff: cancel the open worker maintenance notices of one
+ * refreshable namespace whose command no longer matches the current binding
+ * and release (`keep` is the current key, if any). Never reports them done.
+ */
+export function retireWorkerMaintenanceActions(
+  state: CommandState,
+  actor: Actor,
+  target: { prefix: string; keep?: string; reason: string },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "record_deployment", ports, (d) => {
+    ensure(
+      REFRESHABLE_PREFIX.test(target.prefix) &&
+        (target.keep === undefined || target.keep.startsWith(target.prefix)) &&
+        target.reason.trim().length > 0,
+      "validation_failed",
+      "只能淘汰同一台机器的可刷新维护待办",
+    );
+    const actions = new Map(d.list("human_actions").map((h) => [h.id, h]));
+    for (const e of eventsOfType(
+      state.events,
+      "host_deployment_action_requested",
+    )) {
+      const p = e.payload as {
+        key?: unknown;
+        reason?: unknown;
+        human_action_id?: unknown;
+      };
+      if (
+        e.actor.kind !== "system" ||
+        e.actor.project_id !== state.project_id ||
+        e.card_id ||
+        p.reason !== "worker_maintenance" ||
+        typeof p.key !== "string" ||
+        !p.key.startsWith(target.prefix) ||
+        p.key === target.keep
+      )
+        continue;
+      const action = actions.get(p.human_action_id as HumanActionId);
+      if (
+        action?.status !== "open" ||
+        action.requested_by !== "system" ||
+        action.card_id ||
+        action.blocked_work_items.length
+      )
+        continue;
+      supersedeHelperAction(d, action, target.reason);
+      actions.delete(action.id);
     }
   });
 }

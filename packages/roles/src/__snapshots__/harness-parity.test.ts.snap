@@ -41,7 +41,7 @@ exports[`claude-code LP-2 launch parity 1`] = `
     {
       "mode": 384,
       "path": "/fixture/run/cardigan-assignment.selected.claude-settings.json",
-      "sha256": "8fb9ceeb5b7f2715a1eb9817f8aa8091f3eb018a2ea39637a8e927add87d81fc",
+      "sha256": "ae50eb0ccaaf59a2245491e583bc2b808cce7b54a772df717a51a66c75332009",
     },
     {
       "mode": 384,
@@ -96,7 +96,7 @@ exports[`codex LP-2 launch parity 1`] = `
     {
       "mode": 384,
       "path": "/fixture/run/codex/config.toml",
-      "sha256": "2da31d0a0f7d44040a6fb62c173b4cfba1f5887199737f634c9dac885dc32da4",
+      "sha256": "8a1c02e74b0a5e85c2e8b0963213d98be0521b6de903d1e0065cc0aa66173190",
     },
     {
       "mode": 448,

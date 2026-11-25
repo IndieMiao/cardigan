@@ -1,4 +1,9 @@
 import { categoryDelegated } from "../decision-authorization.js";
+import { DECISION_OTHER_OPTION, isDecisionOther } from "../decision-other.js";
+import {
+  decisionQuestionBinding,
+  heldByReviewDecision,
+} from "../decision-question.js";
 import type {
   Actor,
   Assignment,
@@ -12,6 +17,7 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type {
   AssignmentId,
@@ -39,7 +45,10 @@ import type { RoleRuleBasis } from "../role-rule.js";
 import { storyProgress, storyTerminal } from "../story.js";
 import type { StoryDiscussion } from "../story-discussion.js";
 import type { ResumeCondition } from "../work-wait.js";
-import { workerHelperAction } from "../worker-helper-action.js";
+import {
+  workerAgentToolsAction,
+  workerHelperAction,
+} from "../worker-helper-action.js";
 import { requireCardDependencyStart } from "./card-dependencies.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
@@ -76,8 +85,13 @@ import {
   pmSystemMergeReturnAuthority,
 } from "./merge-delegation.js";
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
+import { bindOwnerRecord, type OwnerRecordInput } from "./owner-record.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { authorPrecheckWait } from "./precheck-wait.js";
+import {
+  type ReviewAlignmentComment,
+  recordReviewAlignment,
+} from "./review-alignment.js";
 import {
   isReviewLimitOption,
   resolveReviewLimit,
@@ -146,7 +160,13 @@ import { activeWork } from "./workflow.js";
 export function issueInstruction(
   state: CommandState,
   actor: Actor,
-  p: { card_id: CardId; work_item_id: WorkItemId; body: string },
+  p: {
+    card_id: CardId;
+    work_item_id: WorkItemId;
+    body: string;
+    /** C-619: ask the verifier held by this pending review-limit decision. */
+    decision_id?: DecisionId | undefined;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "issue_instruction", ports, (d) => {
@@ -172,19 +192,43 @@ export function issueInstruction(
       "Cannot instruct closed work or a card awaiting merge",
     );
     text(p.body, "body");
+    const question =
+      p.decision_id === undefined
+        ? undefined
+        : decisionQuestion(d, item, d.get("decisions", p.decision_id));
     d.emit(
       "instruction_issued",
       card.id,
-      { work_item_id: item.id },
+      {
+        work_item_id: item.id,
+        ...(question
+          ? {
+              decision_id: question.decision,
+              decision_question: question.binding,
+            }
+          : {}),
+      },
       {
         type: "instruction",
         body: p.body,
         work_item_id: item.id,
+        ...(question ? { decision_id: question.decision } : {}),
         refs: extractReferences(p.body),
       },
     );
     return d.timeline[0];
   });
+}
+/** C-619: only the verifier held by this pending decision can be asked. */
+function decisionQuestion(d: CommandDraft, item: WorkItem, q: Decision) {
+  ensure(
+    !!heldByReviewDecision(d.list("decisions"), item, q.id),
+    "illegal_transition",
+    `${item.id} 没有在等待 ${q.id}：只能向正在等待该审核拍板的审核项提问`,
+  );
+  const binding = decisionQuestionBinding(item, d.list("deliveries"));
+  ensure(!!binding, "illegal_transition", `${item.id} 尚无负责的审核员`);
+  return { decision: q.id, binding };
 }
 export function postComment(
   state: CommandState,
@@ -195,6 +239,7 @@ export function postComment(
     host_result_for?: HumanActionId;
     host_report_for?: HumanActionId;
     review_plan?: ReviewPlanComment;
+    review_alignment?: ReviewAlignmentComment;
   } & Partial<
       Pick<
         TimelineEntry,
@@ -213,6 +258,7 @@ export function postComment(
           p.host_report_for ||
           p.host_result_for ||
           p.review_plan ||
+          p.review_alignment ||
           p.work_item_id ||
           p.supersedes
         ),
@@ -306,7 +352,12 @@ export function postComment(
         mentions: commentMentions(
           p.story_discussion?.action === "answer"
             ? `${p.body}\n${p.story_discussion.answer}`
-            : p.body,
+            : p.story_discussion?.action === "submit_answers"
+              ? [
+                  p.body,
+                  ...p.story_discussion.answers.map((a) => a.answer),
+                ].join("\n")
+              : p.body,
           p.mentions ?? [],
           state.employees ?? [],
           state.roles.map((role) => role.role_id),
@@ -362,6 +413,14 @@ export function postComment(
     }
     if (p.review_plan && d.timeline[0])
       recordReviewPlan(d, d.timeline[0], p.review_plan);
+    if (p.review_alignment && d.timeline[0]) {
+      ensure(
+        !p.review_plan,
+        "validation_failed",
+        "review_alignment 与 review_plan 不能同时提交",
+      );
+      recordReviewAlignment(d, d.timeline[0], p.review_alignment);
+    }
     if (p.host_result_for) {
       const action = d.get("human_actions", p.host_result_for);
       ensure(
@@ -596,6 +655,12 @@ export function requestDecision(
       "validation_failed",
       "Options and recommendation must be explicit",
     );
+    // C-682: the system appends "其他" itself; raisers cannot claim its key.
+    ensure(
+      p.options.every((o) => o.key !== DECISION_OTHER_OPTION),
+      "validation_failed",
+      `选项编号 ${DECISION_OTHER_OPTION} 由系统保留给“其他”，请换一个编号`,
+    );
     ensure(
       !p.suggestion || p.suggestion.option === p.recommended,
       "validation_failed",
@@ -813,7 +878,7 @@ export function requestDecision(
       highRiskCategories.includes(p.category) &&
       !categoryDelegated(
         d.list("project_preferences").find((p) => p.id === d.state.project_id),
-        [...d.state.events, ...d.events],
+        appendEvents(d.state.events, d.events),
         p.category,
       )
     ) {
@@ -938,6 +1003,32 @@ export function recordDecision(
   return command(state, actor, "record_decision", ports, (d) => {
     const held = d.get("decisions", input.decision_id);
     let p = input;
+    // C-682: "其他" is the human's own words; it binds no preset effect.
+    const other = isDecisionOther(p.option);
+    if (other) {
+      ensure(
+        actor.kind === "human",
+        "forbidden_tool",
+        "“其他”只能由人亲自填写，Agent 和 PM 不能代选",
+      );
+      ensure(
+        !p.via_suggestion &&
+          p.merge_override_reason === undefined &&
+          p.pause_plan === undefined &&
+          p.snooze_until === undefined &&
+          !p.delegate_future,
+        "validation_failed",
+        "选“其他”时只填写说明，不能同时按建议处理、强行合并、暂缓、暂停或授权同类事项",
+      );
+      ensure(
+        pendingDecision(held),
+        "illegal_transition",
+        "这条拍板已结项，不能再选“其他”",
+      );
+      const words = p.raw_quote.trim();
+      ensure(words.length > 0, "validation_failed", "选“其他”时必须填写说明");
+      p = { ...p, raw_quote: words, rationale: words };
+    }
     if (p.merge_override_reason !== undefined) {
       ensure(
         actor.kind === "human",
@@ -1080,7 +1171,9 @@ export function recordDecision(
           !highRiskCategories.includes(decision.category ?? "general") &&
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
-      "Only PM Office or the designated human can record decisions",
+      actor.kind === "assignment" && decision.decider === "role:pm"
+        ? "这条拍板路由给 PM Ops，PM Office 不能代记；所有者已在卡上答复时，由 PM Ops 在授权范围内自行决定并引用原话作依据（resolve_delegated_decision 的 owner_record）"
+        : "Only PM Office or the designated human can record decisions",
     );
     // §7.4: a sensitive or PM-escalated merge needs a human Actor; PM Office
     // transcription would record resolved_by=human without one.
@@ -1113,7 +1206,7 @@ export function recordDecision(
     text(p.raw_quote, "raw_quote");
     text(p.rationale, "rationale");
     ensure(
-      decision.options.some((o) => o.key === p.option),
+      other || decision.options.some((o) => o.key === p.option),
       "validation_failed",
       "Option is not part of this decision",
     );
@@ -1211,6 +1304,8 @@ function resolveDecisionDraft(
     human_decided_merge_basis?: HumanDecidedMergeBasis;
     /** C-591: delegated authority other than the PM merge preference. */
     proxy_authority?: string;
+    /** C-617: validated owner answer cited as evidence; never the formal answer. */
+    owner_record?: import("../entities.js").OwnerEvidence;
     delegated_merge?: {
       readonly notice: string;
       readonly proxy_authority: string;
@@ -1278,6 +1373,7 @@ function resolveDecisionDraft(
       ...(p.human_decided_merge_basis
         ? { human_decided_merge_basis: p.human_decided_merge_basis }
         : {}),
+      ...(p.owner_record ? { owner_record: p.owner_record } : {}),
       raw_quote: p.raw_quote,
       via_chain: [...(p.via_chain ?? []), d.author],
       ...(p.batch ? { batch: p.batch } : {}),
@@ -1297,9 +1393,11 @@ function resolveDecisionDraft(
       undefined,
       !!p.via_suggestion && !delegated,
     );
-  if (decision.trigger === "accepted_delivery_rework")
+  // C-682: "其他" resolves only the question; follow-up is the raiser's (or PM's).
+  const preset = !isDecisionOther(p.option);
+  if (preset && decision.trigger === "accepted_delivery_rework")
     resolveDeliveryRework(d, decision, p.option);
-  if (decision.trigger === "completion_review")
+  if (preset && decision.trigger === "completion_review")
     resolveHumanCompletionReview(d, decision, p.option);
   if (
     decision.category === "scope_change" ||
@@ -1333,6 +1431,11 @@ export function resolveDelegatedDecision(
      * the decision has none yet, otherwise an audited rewrite.
      */
     plain_summary?: PlainSummary;
+    /**
+     * C-617: the owner's answer already on the card. Requires the same
+     * authorization as a PM decision; it never adds authority.
+     */
+    owner_record?: OwnerRecordInput;
   },
   ports: CommandPorts,
 ) {
@@ -1343,6 +1446,28 @@ export function resolveDelegatedDecision(
       "Only standing PM Ops can decide under project authorization",
     );
     let q = d.get("decisions", p.decision_id);
+    if (p.owner_record !== undefined)
+      ensure(
+        !p.escalate &&
+          p.source_unrelated === undefined &&
+          p.role_rule_basis === undefined &&
+          p.decision_evidence === undefined &&
+          p.pause_plan === undefined &&
+          p.snooze_until === undefined &&
+          p.notice === undefined &&
+          p.attachment_ids === undefined &&
+          p.suggestion === undefined &&
+          p.plain_summary === undefined &&
+          !q.trigger,
+        "validation_failed",
+        "关联所有者原话只用于结案普通拍板，不能与交人、合并、暂停或其它依据一起提交",
+      );
+    if (p.owner_record !== undefined)
+      ensure(
+        ["open", "provisional"].includes(q.status) && !q.superseded_by,
+        "stale_target",
+        "拍板已结案或已被替换，不能重复结案",
+      );
     if (p.source_unrelated !== undefined) {
       ensure(
         p.escalate === true &&
@@ -1480,7 +1605,9 @@ export function resolveDelegatedDecision(
       "unauthorized",
       q.trigger === "merge_confirmation" && mergeRequiresHuman(state, q)
         ? "此合并确认须由人处理，PM 只能重新检查明确的超时失败，不能退回或代确认合并"
-        : "Decision is not authorized for PM Ops",
+        : p.owner_record
+          ? "这条拍板未授权 PM 处理；所有者原话不构成新的授权，请交给人（escalate）"
+          : "Decision is not authorized for PM Ops",
     );
     text(p.rationale, "rationale");
     ensure(
@@ -1634,13 +1761,17 @@ export function resolveDelegatedDecision(
       "validation_failed",
       "Option is not part of this decision",
     );
+    const { owner_record: ownerInput, ...input } = p;
+    const ownerRecord =
+      ownerInput && bindOwnerRecord(d, q, p.option, ownerInput);
     return resolveDecisionDraft(
       d,
       q,
       {
-        ...p,
+        ...input,
         raw_quote: p.rationale,
         ...(basis ? { human_decided_merge_basis: basis } : {}),
+        ...(ownerRecord ? { owner_record: ownerRecord } : {}),
       },
       true,
     );
@@ -2139,7 +2270,9 @@ export function triageHumanAction(
       : action.ready_when;
     validateTerminal(p.terminal);
     ensure(
-      !p.terminal || !workerHelperAction(d.state, action),
+      !p.terminal ||
+        (!workerHelperAction(d.state, action) &&
+          !workerAgentToolsAction(d.state, action)),
       "validation_failed",
       "系统升级命令不能改写",
     );

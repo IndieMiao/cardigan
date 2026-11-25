@@ -9,14 +9,22 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ProjectId, requestDecision } from "@cardigan/domain";
-import { loadCommandState, MAX_ATTACHMENT_BYTES } from "@cardigan/mcp-server";
+import {
+  formatAttachmentLimit,
+  loadCommandState,
+  MAX_ATTACHMENT_BYTES,
+} from "@cardigan/mcp-server";
 import { routeEvent } from "@cardigan/router";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { videoBytes } from "../../../packages/mcp-server/test-support/video-fixtures.js";
 import { humanActor, runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
-import { registerTemplateRoles } from "./template-fixtures.js";
+import {
+  openHumanCardTemplates,
+  registerTemplateRoles,
+} from "./template-fixtures.js";
 
 const TEST_PLAIN_SUMMARY = {
   changed: "测试用的改动说明",
@@ -38,6 +46,7 @@ async function createCard(id = project) {
   const setup = Store.open({ dataDir });
   try {
     registerTemplateRoles(setup, id);
+    openHumanCardTemplates(setup, id);
   } finally {
     setup.close();
   }
@@ -81,7 +90,18 @@ beforeEach(async () => {
       throw new Error("must not spawn");
     },
   };
-  expect(await run(["project", "create", project])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      project,
+      "--code",
+      `T${project
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   await createCard();
   store = Store.open({ dataDir });
 });
@@ -341,7 +361,7 @@ test("rejects missing, blank, unknown and oversized files before posting a comme
         "--text=x",
         `--file=${file("large.txt", Buffer.alloc(MAX_ATTACHMENT_BYTES + 1))}`,
       ],
-      "超过 10 MiB",
+      `超过 ${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}`,
     ],
     [
       ["--text=x", `--file=${file("valid.txt")}`, "--file=bad.exe"],
@@ -425,7 +445,18 @@ test("rejects corrupted existing blobs without posting a second comment", async 
 
 test("uses explicit project/data directory before env, and env project before sole-project fallback", async () => {
   const other = "p-other" as ProjectId;
-  expect(await run(["project", "create", other])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      other,
+      "--code",
+      `T${other
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   await createCard(other);
   io.env.CARDIGAN_PROJECT = other;
   expect(await run(["comment", "add", "C-1", "--text=env"])).toBe(0);
@@ -451,7 +482,8 @@ test("uses explicit project/data directory before env, and env project before so
   delete io.env.CARDIGAN_PROJECT;
   const before = snapshot();
   expect(await run(["comment", "add", "C-1", "--text=ambiguous"])).toBe(2);
-  expect(errors.join("\n")).toContain("有多个项目");
+  // C-675: both projects have C-1, so the refusal names the full numbers.
+  expect(errors.join("\n")).toContain("C-1 在多个项目里都有");
   expect(snapshot()).toEqual(before);
 });
 
@@ -469,3 +501,60 @@ test.each([["--help"], ["comment", "--help"], ["attachment", "add", "--help"]])(
       expect(output.join("\n")).toContain(text);
   },
 );
+
+test("C-683: videos stream into storage with progress; wrong content and the video limit are refused", async () => {
+  const video = videoBytes("mov", 300_000);
+  expect(
+    await run([
+      "attachment",
+      "add",
+      "C-1",
+      "--file",
+      file("演示.MOV", video),
+      "--note=概念稿演示",
+    ]),
+  ).toBe(0);
+  const digest = createHash("sha256").update(video).digest("hex");
+  const [attachment] = snapshot().attachments;
+  expect(attachment).toMatchObject({
+    mime: "video/quicktime",
+    size: video.length,
+    sha256: digest,
+    original_filename: "演示.MOV",
+    note: "概念稿演示",
+    storage_path: `attachments/${digest}`,
+  });
+  expect(readFileSync(join(dataDir, "attachments", digest)).equals(video)).toBe(
+    true,
+  );
+  expect(errors).toContain("上传 演示.MOV：100%");
+  const before = snapshot();
+  for (const [name, content, env, message] of [
+    [
+      "fake.mp4",
+      videoBytes("png", 1000),
+      {},
+      "文件内容与扩展名不符，不是 mp4 视频",
+    ],
+    [
+      "big.webm",
+      videoBytes("webm", 1024 * 1024 + 1),
+      { CARDIGAN_VIDEO_MAX_MIB: "1" },
+      "视频超过 1 MiB",
+    ],
+  ] as const) {
+    io = { ...io, env: { ...io.env, ...env } };
+    expect(
+      await run([
+        "comment",
+        "add",
+        "C-1",
+        "--text=x",
+        "--file",
+        file(name, content),
+      ]),
+    ).toBe(2);
+    expect(errors.join("\n")).toContain(message);
+    expect(snapshot()).toEqual(before);
+  }
+});

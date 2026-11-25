@@ -11,6 +11,7 @@ import {
   isAcceptedLaunchRevision,
   launchFilesStamp,
   launchFingerprint,
+  missingWorktreePrompt,
   type PreparationRetryOptions,
   parseCachedLaunchConfig,
   prepareRoleWorktree,
@@ -191,6 +192,8 @@ export async function createHostWiring(options: {
   readonly client?: HcClient;
   /** Tests shorten the in-delivery retry waits. */
   readonly preparationRetry?: PreparationRetryOptions;
+  /** C-600: verify that each new session's harness listed the Card tools. */
+  readonly verifyMcpSession?: boolean;
 }): Promise<HostWiring> {
   const env = options.env;
   const execution =
@@ -276,7 +279,12 @@ export async function createHostWiring(options: {
             options.preparationRetry ?? {},
           ),
       );
-      return worktreeBaselinePrompt(worktree);
+      return (
+        worktreeBaselinePrompt(worktree) ??
+        (worktree === undefined
+          ? missingWorktreePrompt(options.store, project, assignment.id)
+          : undefined)
+      );
     },
     standing: standingResolver(options.store),
     snapshot: async (assignment, project) => {
@@ -354,6 +362,7 @@ export async function createHostWiring(options: {
             (input.snapshot && generations.get(input.snapshot)) ??
             (await live.refresh()),
           mcpUrl: mcpUrl(),
+          ...(options.verifyMcpSession ? { verifyMcpSession: true } : {}),
           dataDir: options.dataDir,
           configDir: configDir(env),
           execution,

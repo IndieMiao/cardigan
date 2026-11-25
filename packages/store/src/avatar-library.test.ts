@@ -39,7 +39,7 @@ test("the avatar manifest matches the catalog and every bundled image", async ()
   expect(
     manifest.characters.map(({ id, name, novel }) => [id, name, novel]),
   ).toEqual(AVATAR_LIBRARY);
-  expect(manifest.characters).toHaveLength(69);
+  expect(manifest.characters).toHaveLength(71);
   for (const character of manifest.characters) {
     expect(Object.keys(character.files.head).sort()).toEqual([
       "128",

@@ -2,6 +2,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  MachineCheckJournal,
+  observationFingerprint,
+  upgradeKey,
+} from "@cardigan/host";
+import {
   beginMachineObservation,
   completeMachineObservation,
   Store,
@@ -19,6 +24,7 @@ import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 import { MachineChecks } from "./machine-checks.js";
 import { type MachineHost, machineHost } from "./machine-host.js";
 import { machineView } from "./machine-view.js";
+import { readNeedsVersion } from "./needs-version.js";
 
 test("global read, atomic drain/resume, authenticated single-flight checks and durable results", async () => {
   const gate = Promise.withResolvers<void>();
@@ -567,3 +573,456 @@ test.each([true, false])(
     }
   },
 );
+
+test("C-599: an attachment tools notice shows only the command the current binding and release give", async () => {
+  let binding: string | undefined = "pinned";
+  let command = "current release";
+  const f = await m5Cross({
+    machineHost: {
+      check: async () => ({ status: "passed", failed_steps: [] }),
+      bindings: () => () => null,
+      bindingFingerprint: () => binding,
+      toolsCommand: () => (binding === "pinned" ? command : "other binding"),
+      workerRecord: () => null,
+    },
+  });
+  try {
+    const project = f.project.project_id;
+    const id = f.store().uow.run((tx) => {
+      const local = tx.machines.get(project, "local");
+      if (!local) throw new Error("missing fixture");
+      tx.machines.put(project, {
+        ...local,
+        id: "remote",
+        label: "Remote",
+        herdr_machine: "remote",
+      });
+      const id = tx.ids.next(project, "human_action");
+      tx.human_actions.put(project, {
+        id,
+        key: id,
+        status: "open",
+        requested_by: "system",
+        instructions: "Install tools",
+        why_human: "Administrator",
+        expected_return: "Result",
+        blocked_work_items: [],
+        triage: "host",
+        terminal: {
+          target: "remote",
+          login: "owner",
+          command: "current release",
+          expected_output: "ok",
+          on_failure: "stop",
+        },
+        // A handoff can never substitute the administrator command.
+        handoff: {
+          terminal: {
+            target: "remote",
+            login: "owner",
+            command: "rewritten",
+            expected_output: "ok",
+            on_failure: "stop",
+          },
+          title: "t",
+          summary: "s",
+          why_human: "w",
+          instructions: "i",
+          expected_outcome: "o",
+          expected_return: "r",
+          rewritten_by: "system",
+          rewritten_at: new Date(f.now()).toISOString(),
+        },
+      });
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project),
+        created_at: new Date(f.now()).toISOString(),
+        actor: { kind: "system", project_id: project },
+        type: "host_deployment_action_requested",
+        payload: {
+          key: `worker-agent-tools:remote:${"b".repeat(64)}`,
+          reason: "worker_maintenance",
+          human_action_id: id,
+        },
+      });
+      return id;
+    });
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const shown = async () =>
+      (
+        (await f.call(f.projectPath("/needs-you"))).json as {
+          human_actions: {
+            id: string;
+            instructions: string;
+            terminal?: { command: string };
+          }[];
+        }
+      ).human_actions.find((h) => h.id === id);
+    const revision = async () =>
+      (
+        (await f.call(f.projectPath("/needs-you/version"))).json as {
+          revision: string;
+        }
+      ).revision;
+    expect((await shown())?.terminal?.command).toBe("current release");
+    // A new release: the stored command is hidden, not replaced.
+    command = "new release";
+    const hidden = await shown();
+    expect(hidden?.terminal).toBeUndefined();
+    expect(hidden?.instructions).toContain("当前升级命令不可用");
+    command = "current release";
+    const previous = await revision();
+    binding = "replaced";
+    expect(await revision()).not.toBe(previous);
+    expect((await shown())?.terminal).toBeUndefined();
+    binding = undefined;
+    expect((await shown())?.terminal).toBeUndefined();
+  } finally {
+    await f.close();
+  }
+});
+
+test("C-599: the real host shows the tools command only after every check and signed attempt settled on a reinstallable recheck", async () => {
+  const root = await mkdtemp(join(tmpdir(), "machine-tools-"));
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    await writeFile(
+      join(root, "runtime-workers.yaml"),
+      JSON.stringify({
+        version: 1,
+        machines: [
+          {
+            id: "worker",
+            os: "linux",
+            arch: "x64",
+            host: "private.invalid",
+            port: 22,
+            identity_file: "/private/identity",
+            known_hosts_file: "/private/known_hosts",
+            host_key_alias: "worker",
+            projects: [
+              {
+                project_id: "example",
+                user: "worker_user",
+                gid: 2300,
+                alias: "binding",
+                session: "bound",
+                root: "/worker/example",
+                path: "/bin:/usr/bin",
+                generation: "g1",
+                publication: {
+                  header_max_bytes: 65536,
+                  file_max_bytes: 1048576,
+                  batch_max_bytes: 8388608,
+                  timeout_ms: 30000,
+                },
+                python: "/usr/bin/python3",
+                file_helper: "/worker/example/libexec/worker-files.py",
+                git_helper: "/worker/example/libexec/worker-git.py",
+                mcp_url: "https://private.example.ts.net/mcp",
+              },
+            ],
+          },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    store.createProject({ id: "example" });
+    const host = machineHost(
+      store,
+      { mode: "local", dataDir: root },
+      "local-session",
+      { CARDIGAN_CONFIG_DIR: root },
+    );
+    const registration = {
+      ...machine(),
+      id: "worker",
+      label: "worker",
+      herdr_machine: "worker",
+    };
+    store.uow.run((tx) => tx.machines.put("example", registration));
+    const fingerprint = host.bindingFingerprint?.("example", registration);
+    if (!fingerprint) throw new Error("missing binding");
+    const expected = host.upgradeCommand?.("example", registration);
+    expect(expected).toContain("sha256sum");
+    const shown = () => host.toolsCommand?.("example", registration);
+    const system = { kind: "system", project_id: "example" } as const;
+    let n = 0;
+    const observe = (
+      reason: string | null,
+      at = fingerprint,
+      status: "passed" | "failed" = "passed",
+      platform = registration,
+    ) => {
+      const id = `obs-${n++}`;
+      const now = new Date().toISOString();
+      beginMachineObservation(store, system, "example", "worker", id, now);
+      completeMachineObservation(
+        store,
+        system,
+        "example",
+        "worker",
+        id,
+        {
+          status,
+          checked_at: now,
+          blockers: [],
+          launch_enabled: status === "passed",
+          ...(reason
+            ? {
+                capability_failures: [
+                  {
+                    key: "agent.attachment_tools",
+                    search_locations: [],
+                    reason,
+                  },
+                ],
+              }
+            : {}),
+        },
+        reason === null
+          ? [
+              {
+                key: "agent.attachment_tools",
+                version: null,
+                verified_at: now,
+                evidence_ref: `machine-observation:${id}#agent.attachment_tools`,
+              },
+            ]
+          : [],
+        observationFingerprint(at, platform),
+      );
+    };
+    const stale = "附件助手 download-attachment.mjs 缺失";
+    // Nothing has been observed for this binding yet.
+    expect(shown()).toBeUndefined();
+    observe(stale);
+    expect(shown()).toBe(expected);
+    // Needs You's version follows the same rule as the view.
+    const notice = store.uow.run((tx) => {
+      const id = tx.ids.next("example", "human_action");
+      tx.human_actions.put("example", {
+        id,
+        key: id,
+        status: "open",
+        requested_by: "system",
+        instructions: "Install tools",
+        why_human: "Administrator",
+        expected_return: "Result",
+        blocked_work_items: [],
+        triage: "host",
+        terminal: {
+          target: "worker",
+          login: "owner",
+          command: expected ?? "",
+          expected_output: "ok",
+          on_failure: "stop",
+        },
+      });
+      tx.events.append("example", {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence("example"),
+        created_at: new Date().toISOString(),
+        actor: system,
+        type: "host_deployment_action_requested",
+        payload: {
+          key: `worker-agent-tools:worker:${"b".repeat(64)}`,
+          reason: "worker_maintenance",
+          human_action_id: id,
+        },
+      });
+      return id;
+    });
+    const version = () =>
+      readNeedsVersion(
+        store,
+        "example" as never,
+        "ctx",
+        undefined,
+        undefined,
+        undefined,
+        (project, machine) => host.toolsCommand?.(project, machine),
+      );
+    const visibleVersion = version();
+    expect(notice).toBeTruthy();
+    // Any running check of the machine, of any kind, project or source, hides it
+    // even before it has replaced the observation.
+    const journal = new MachineCheckJournal(store);
+    for (const [project, kind, source] of [
+      ["example", "machine", "patrol"],
+      ["example", "worker", "web"],
+      ["peer", "machine", "cli"],
+    ] as const) {
+      const { job } = journal.claim(project, "worker", kind, source);
+      expect(shown()).toBeUndefined();
+      expect(version()).not.toBe(visibleVersion);
+      await journal.execute(
+        job,
+        async () => undefined,
+        () => ({ status: "failed", failed_steps: ["fixture"] }),
+      );
+      expect(shown()).toBe(expected);
+      expect(version()).toBe(visibleVersion);
+    }
+    // Only a settled, current, reinstallable observation of this binding counts.
+    for (const hide of [
+      () => observe(null),
+      () => observe(stale, fingerprint, "failed"),
+      () => observe("附件助手检查未完成"),
+      () => observe(stale, "rebound"),
+      () =>
+        observe(stale, fingerprint, "passed", {
+          ...registration,
+          arch: "arm64",
+        }),
+    ]) {
+      hide();
+      expect(shown()).toBeUndefined();
+      observe(stale);
+      expect(shown()).toBe(expected);
+    }
+    // Enrolled: the signed upgrade owns this release's first attempt.
+    await writeFile(join(root, "upgrade-6-worker-example.key"), "fixture", {
+      mode: 0o600,
+    });
+    expect(host.upgradeCommand?.("example", registration)).toBeUndefined();
+    expect(shown()).toBeUndefined();
+    const attempt = (
+      state: string,
+      key = upgradeKey(fingerprint),
+      pending: string | null = null,
+    ) =>
+      store.database
+        .prepare(
+          "INSERT INTO worker_helper_upgrades(project_id,machine_id,release_key,state,pending_final) VALUES ('example','worker',?,?,?) ON CONFLICT(project_id,machine_id) DO UPDATE SET release_key=excluded.release_key,state=excluded.state,pending_final=excluded.pending_final",
+        )
+        .run(key, state, pending);
+    // The signed attempt is running or awaiting its recheck: dispatch is paused,
+    // but an administrator must not write the same files now.
+    attempt("installing");
+    expect(shown()).toBeUndefined();
+    attempt("installing", upgradeKey(fingerprint), "{}");
+    expect(shown()).toBeUndefined();
+    // Held: follow the upgrade notice instead.
+    attempt("failed");
+    expect(shown()).toBeUndefined();
+    attempt("worker_checked");
+    expect(shown()).toBeUndefined();
+    // Another release's attempt is no evidence for this one.
+    attempt("verified", upgradeKey("other"));
+    expect(shown()).toBeUndefined();
+    // This release's attempt settled and its recheck still finds the tools stale.
+    attempt("verified");
+    expect(shown()).toBe(expected);
+    observe(null);
+    expect(shown()).toBeUndefined();
+    observe(stale);
+    expect(shown()).toBe(expected);
+    expect(host.toolsCommand?.("other", registration)).toBeUndefined();
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("C-708: this project's binding lists unverified catalog keys with the built-in probe and the last check's failures", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    for (const id of ["example", "peer"]) store.createProject({ id });
+    const now = new Date().toISOString();
+    for (const project of ["example", "peer"]) {
+      const system = { kind: "system" as const, project_id: project };
+      beginMachineObservation(store, system, project, "local", "obs", now);
+      completeMachineObservation(
+        store,
+        system,
+        project,
+        "local",
+        "obs",
+        {
+          status: "passed",
+          checked_at: now,
+          blockers: [],
+          launch_enabled: true,
+          capability_failures: [
+            {
+              key: "browser.chromium",
+              search_locations: ["PATH:chromium"],
+              search_incomplete: true,
+            },
+          ],
+        },
+        [
+          {
+            key: "node",
+            version: "24.11.0",
+            verified_at: now,
+            evidence_ref: "private-ref",
+          },
+        ],
+      );
+    }
+    const clock = { now: () => now };
+    const checks = new MachineChecks(
+      store,
+      clock,
+      new AbortController().signal,
+    );
+    const os = store.uow.read((tx) => tx.machines.get("example", "local")?.os);
+    const [machine] = machineView(
+      store,
+      "example",
+      {
+        checks,
+        capabilityCatalog: () => [
+          { key: "node", os: ["linux", "darwin"] },
+          { key: "godot", os: ["linux", "darwin"] },
+          { key: "browser.chromium", os: ["linux", "darwin"] },
+          { key: "private-tool", os: ["linux", "darwin"] },
+          { key: "other-os", os: [os === "linux" ? "darwin" : "linux"] },
+        ],
+      },
+      now,
+      "local",
+    );
+    const mine = machine?.bindings.find((b) => b.is_current);
+    const peer = machine?.bindings.find((b) => !b.is_current);
+    expect(
+      mine?.capabilities.map((c) => [c.key, c.state, "probe" in c && c.probe]),
+    ).toEqual([
+      ["node", "verified", { kind: "command", argv: ["node", "--version"] }],
+      [
+        "godot",
+        "unverified",
+        { kind: "command", argv: ["godot", "--version"] },
+      ],
+      [
+        "browser.chromium",
+        "unverified",
+        {
+          kind: "search",
+          locations: expect.arrayContaining(["PATH:chromium"]),
+        },
+      ],
+      // A private custom check is never shown.
+      ["private-tool", "unverified", false],
+    ]);
+    expect(mine?.capability_failures).toEqual([
+      {
+        key: "browser.chromium",
+        search_locations: ["PATH:chromium"],
+        search_incomplete: true,
+      },
+    ]);
+    // Another project's binding keeps only its own records.
+    expect(peer?.capabilities.map((c) => [c.key, "probe" in c])).toEqual([
+      ["node", false],
+    ]);
+    expect(peer?.capability_failures).toEqual([]);
+    expect(JSON.stringify(machine)).not.toContain("private-ref");
+  } finally {
+    store.close();
+  }
+});

@@ -7,6 +7,8 @@ import {
   type OwnerMessageInput,
   ownerTextError,
   type ProjectId,
+  qualifyId,
+  qualifyText,
 } from "@cardigan/domain";
 import {
   digestFeishu,
@@ -25,6 +27,24 @@ import {
 import type { FeishuApp } from "./feishu-app.js";
 
 const hour = 3_600_000;
+
+/**
+ * C-674: the owner reads messages from every project in one chat, so each
+ * one leads with the card's full number (`[SEN-C-34]`) unless the author
+ * already put it first. C-676: short numbers in the body become full numbers.
+ */
+export function ownerMessageText(
+  code: string | undefined,
+  card: CardId,
+  body: string,
+): string {
+  const ref = qualifyId(code, card);
+  const text = qualifyText(code, body);
+  return text.trimStart().startsWith(ref) ||
+    text.trimStart().startsWith(`[${ref}]`)
+    ? text
+    : `[${ref}] ${text}`;
+}
 const limit = 6;
 type Row = {
   project: ProjectId;
@@ -281,7 +301,15 @@ export async function drainOwnerMessage(
     try {
       status = await Promise.race([
         app.remote
-          .text(binding.open_id, row.id, row.body)
+          .text(
+            binding.open_id,
+            row.id,
+            ownerMessageText(
+              store.projectCode(row.project),
+              row.card,
+              row.body,
+            ),
+          )
           .then((ok) => (ok ? ("sent" as const) : ("failed" as const))),
         new Promise<"unknown">((resolve) => {
           timer = setTimeout(

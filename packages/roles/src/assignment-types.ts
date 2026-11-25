@@ -1,4 +1,5 @@
 import type { Employee, Harness } from "@cardigan/domain";
+import type { CapabilityNoteInput } from "./capability-notes.js";
 import type { CompiledFile } from "./launch-types.js";
 import type { LaunchConfig } from "./schema-definition.js";
 export const RUN_RESOURCE_RULE =
@@ -73,13 +74,30 @@ export interface AssignmentIdentity {
   readonly card_id?: string;
   readonly work_item_id?: string;
   readonly project_id?: string;
+  /** C-676: the project's code (`CDG`); the session learns its full numbers. */
+  readonly project_code?: string;
 }
 
 export interface AssignmentMcpEndpoint {
   /** Card MCP streamable HTTP endpoint, e.g. `http://127.0.0.1:3004/mcp`. */
   readonly url: string;
   readonly server_name?: string;
+  /**
+   * C-600: per-launch key the harness sends as `MCP_SESSION_HEADER` from its
+   * own MCP configuration (never the session's environment), so the endpoint
+   * can tell this harness's native requests from any other client of the
+   * Token. Codex hands it to its Card bridge only (`MCP_BRIDGE_SESSION_ENV`).
+   */
+  readonly session_key?: string;
+  /**
+   * C-600: interpreter that runs the Codex Card bridge where the harness
+   * starts (`DEFAULT_MCP_BRIDGE_PYTHON` when absent).
+   */
+  readonly bridge_python?: string;
 }
+
+/** C-600: header and key shape shared with the Card MCP endpoint. */
+export { MCP_SESSION_HEADER, MCP_SESSION_KEY_PATTERN } from "@cardigan/domain";
 
 export interface CompileAssignmentInput {
   readonly assignment: AssignmentIdentity;
@@ -124,7 +142,33 @@ export interface CompileAssignmentInput {
     port?: number;
     device?: string;
   }[];
+  /**
+   * C-679: this Run's own adb server port and, with the emulator, console
+   * port. `null`: the machine hands out slots but this Run has none, so adb is
+   * disabled. Omitted: the machine does not manage adb ports.
+   */
+  readonly adb_slot?: {
+    readonly slot: number;
+    readonly adb_port: number;
+    readonly emulator_port?: number;
+  } | null;
+  /**
+   * C-726: usage notes of the capabilities this work item requires
+   * (`requirements.capabilities`), merged for the Run's machine. Condensed
+   * and quoted at the end of the Core Prompt; omitted or empty adds nothing.
+   */
+  readonly capability_notes?: readonly CapabilityNoteInput[];
   readonly test_max_workers?: number;
+  /**
+   * C-686: values only the host knows for the Claude status line: the
+   * baseline ref (`origin/<base_branch>`) and the project's remaining-context
+   * thresholds (`context_handoff_remaining_pct` / `context_restart_remaining_pct`).
+   */
+  readonly status_line?: {
+    readonly base_ref?: string;
+    readonly handoff_remaining_pct: number;
+    readonly restart_remaining_pct: number;
+  };
   /** Employee self-tests must not start real hc or end-to-end scenarios. */
   readonly agent_local_tests?: boolean;
   /** Read-only directory of the prebuilt attachment tools on this machine. */

@@ -2,6 +2,7 @@ import type { CardHold, DispatchOrder, ReviewImpact } from "@cardigan/domain";
 import { needsAges } from "./needs-age.js";
 import type { RunPresence } from "./run-presence.js";
 import { clearSharedReads, sharePendingRead } from "./shared-read.js";
+import type { VideoMeasurements } from "./video-probe.js";
 export interface MemberView {
   readonly id: string;
   readonly name: string;
@@ -57,12 +58,19 @@ export interface SessionInfo {
   /** Non-authorizing, session-specific namespace for overlapping tab reads. */
   readonly read_scope?: string;
   readonly build?: BuildInfo;
+  /** Host attachment upload limit in bytes (C-616); only when authenticated. */
+  readonly attachment_max_bytes?: number;
+  /** C-683: host video limit and chunk size of resumable uploads. */
+  readonly video_max_bytes?: number;
+  readonly video_chunk_bytes?: number;
 }
 
 export interface ProjectSummary {
   readonly id: string;
   readonly name: string;
   readonly created_at: string;
+  /** C-674: display code full numbers are written with (`SEN-C-34`). */
+  readonly code?: string | null;
 }
 
 export interface WaitingOnItem {
@@ -102,6 +110,8 @@ export interface MergeStageView {
   readonly peers?: readonly string[];
   readonly position?: number;
   readonly protecting_card_id?: string;
+  readonly protecting_files?: readonly string[];
+  readonly protecting_card_held?: boolean;
   readonly card_check?: MergeCheckView;
   readonly batch_check?: MergeCheckView;
   readonly color?: number;
@@ -126,6 +136,11 @@ export interface MergeBatchView {
 export interface StoryChildChoice {
   action: "cancel" | "detach";
   ids: readonly string[];
+}
+export interface CreatedCard {
+  readonly id: string;
+  /** Older servers omit it; files then cannot be attached. */
+  readonly entry_id?: string | null;
 }
 export interface CreateCardInput {
   title: string;
@@ -287,6 +302,12 @@ export interface ResolvedReference {
   readonly exists: boolean;
   readonly status: string | null;
   readonly card_id?: string;
+  /**
+   * C-674: a full number (`SEN-C-34`) names its project; `id` is the text as
+   * written and `local_id` the project-scoped number the link points at.
+   */
+  readonly project_id?: string;
+  readonly local_id?: string;
 }
 
 /** A reference an Agent put in a body, as stored on the entry itself. */
@@ -347,6 +368,18 @@ export interface MachineSelectionCandidate {
     readonly limit: number;
     readonly occupied: number;
   }[];
+  /** C-716: this project's own ceilings on the machine at selection time. */
+  readonly project_limit?: {
+    readonly limit: number;
+    readonly occupied: number;
+  };
+  readonly project_resources?: readonly {
+    readonly key: string;
+    readonly limit: number;
+    readonly occupied: number;
+  }[];
+  /** C-716: limits already full on this machine at selection time. */
+  readonly full?: readonly string[];
 }
 
 export type MachineSelection =
@@ -362,6 +395,8 @@ export type MachineSelection =
       readonly machine_id: string;
       readonly assignment_id?: string;
       readonly candidates?: readonly MachineSelectionCandidate[];
+      /** C-716: every eligible machine was full; the Run queues on these limits. */
+      readonly queued_on?: readonly string[];
       readonly excluded?: readonly {
         readonly machine_id: string;
         readonly reasons: readonly string[];
@@ -605,6 +640,22 @@ export interface AttachmentView extends AuthorView {
   readonly download_path: string;
   /** Small server-rendered preview for inline bitmaps; null otherwise. */
   readonly thumbnail_path: string | null;
+  /** Lightbox image for inline bitmaps; older servers omit it. */
+  readonly preview_path?: string | null;
+  /** C-615: the `attachment-new-N` of its comment this file fills. */
+  readonly ref_slot?: number;
+  /** C-683: videos only — what the uploader measured, and its cover frame. */
+  readonly video?: VideoMeasurements;
+  readonly poster_path?: string;
+}
+
+/** C-683: a resumable upload, as the server reports it. */
+export interface UploadStatus {
+  readonly upload_id: string;
+  readonly size: number;
+  readonly received: number;
+  readonly chunk_bytes: number;
+  readonly complete: boolean;
 }
 
 export interface CardRelations {
@@ -677,6 +728,11 @@ export interface CardDetail {
   readonly decisions: readonly DecisionView[];
   readonly human_actions: readonly HumanActionView[];
   readonly attachments: readonly AttachmentView[];
+  /**
+   * C-615: other cards' attachments this page's bodies mention by number and
+   * the reader may see; anything else stays plain text.
+   */
+  readonly referenced_attachments?: readonly ReferencedAttachment[];
   readonly relations: CardRelations;
   readonly counts: {
     readonly timeline: number;
@@ -701,8 +757,12 @@ export interface PostedComment {
 }
 
 export interface UploadAttachmentInput {
-  /** Canonical padded base64. */
-  readonly file: string;
+  /** Canonical padded base64; or `upload_id` of a complete upload (video). */
+  readonly file?: string;
+  readonly upload_id?: string;
+  /** C-683: what the browser measured, and its cover frame (base64 JPEG). */
+  readonly video?: VideoMeasurements;
+  readonly poster?: string;
   readonly original_filename?: string;
   readonly note?: string;
   readonly mime: string;
@@ -712,6 +772,17 @@ export interface UploadAttachmentInput {
     | { readonly kind: "delivery"; readonly id: string };
   readonly basis?: string;
   readonly sha256?: string;
+  /** C-615: the `attachment-new-N` of the comment this file fills. */
+  readonly ref_slot?: number;
+}
+
+/** An attachment of another card, as `CardDetail.referenced_attachments`. */
+export type ReferencedAttachment = AttachmentView & {
+  readonly card_id: string;
+};
+
+export interface AttachmentRefsResponse {
+  readonly attachments: readonly ReferencedAttachment[];
 }
 
 export interface AttachmentReceipt {
@@ -1065,6 +1136,46 @@ export interface NeedsCounts {
   >;
 }
 
+/** C-712 release note for one published version, as the Workbench reads it. */
+export interface ReleaseNoteView {
+  readonly version: string;
+  readonly version_code: number | null;
+  readonly decision_id: string | null;
+  readonly body: string;
+  /** Raw author of the current revision (`human`, `assignment:A-1`…). */
+  readonly author: string;
+  /** Present on reads; a write's returned note carries only `author`. */
+  readonly author_view?: AuthorView;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly revision: number;
+}
+
+/** One version on the release-note list; `note: null` is not written yet. */
+export interface ReleaseNoteEntryView {
+  readonly version: string;
+  readonly version_code: number | null;
+  readonly decision_id: string | null;
+  readonly published_at: string | null;
+  readonly note: ReleaseNoteView | null;
+}
+
+export interface ReleaseNotesData {
+  readonly entries: readonly ReleaseNoteEntryView[];
+}
+
+export interface WriteReleaseNoteInput {
+  readonly version: string;
+  readonly body: string;
+  /** Revision the person edited (0 for a new note); a mismatch is rejected. */
+  readonly base_revision: number;
+}
+
+export interface WriteReleaseNoteResult {
+  readonly note: ReleaseNoteView;
+  readonly changed: boolean;
+}
+
 export interface SnapshotData {
   readonly cards: readonly CardView[];
   readonly in_progress: readonly CardView[];
@@ -1101,7 +1212,7 @@ export interface RunView {
     readonly after_minutes: number;
     readonly waited_ms: number;
   };
-  readonly failure_reason?: "provider_unavailable";
+  readonly failure_reason?: "provider_unavailable" | "mcp_unavailable";
   readonly queue_reason?:
     | "concurrency_limit"
     | "runtime_unavailable"
@@ -1235,6 +1346,13 @@ export interface MachineCapabilityView {
   readonly available: boolean;
   /** Older servers omit it; derive from `available` then. */
   readonly state?: "verified" | "expired" | "unverified";
+  /**
+   * C-708: how the host checks this built-in capability (machine detail,
+   * current project only); absent for private custom checks.
+   */
+  readonly probe?:
+    | { readonly kind: "command"; readonly argv: readonly string[] }
+    | { readonly kind: "search"; readonly locations: readonly string[] };
 }
 
 export interface ExecutionMachine {
@@ -1275,6 +1393,17 @@ export interface MachineBindingView {
   /** False when the host's private configuration could not be read. */
   readonly config_available: boolean;
   readonly capabilities: readonly MachineCapabilityView[];
+  /**
+   * C-708: what the latest machine check recorded for capabilities it could
+   * not verify (current project only; older servers omit it). Fixed host
+   * text and search labels, never command output.
+   */
+  readonly capability_failures?: readonly {
+    readonly key: string;
+    readonly search_locations: readonly string[];
+    readonly search_incomplete?: true;
+    readonly reason?: string;
+  }[];
   /** The latest machine check (health) for this project. */
   readonly machine_check: {
     readonly status: "checking" | "passed" | "failed";
@@ -1326,6 +1455,34 @@ export interface MachineView {
     readonly limit: number;
   }[];
   readonly bindings: readonly MachineBindingView[];
+}
+
+/**
+ * C-725/C-727: which usage note of the current project's capability catalog:
+ * a capability key's main note, or its supplement for one machine.
+ */
+export type CapabilityGuideTarget =
+  | {
+      readonly scope: "capability";
+      readonly key: string;
+      readonly machine_id: null;
+    }
+  | {
+      readonly scope: "machine";
+      readonly key: string;
+      readonly machine_id: string;
+    };
+
+/** C-727: the notes of one machine's capabilities, merged by the server. */
+export interface CapabilityGuidesView {
+  readonly merged: {
+    readonly machine_id: string | null;
+    readonly capabilities: readonly {
+      readonly key: string;
+      readonly usage_note: string | null;
+      readonly machine_note: string | null;
+    }[];
+  };
 }
 
 /** C-511: one explicit machine check (C-509), polled until it ends. */
@@ -1389,6 +1546,23 @@ export interface WorkerWizardStep {
   readonly next?: string;
   readonly command_key?: WorkerWizardCommandKey;
 }
+/** C-705/C-707: a paired device's own report of itself. */
+export interface WorkerPairingDevice {
+  readonly hostname: string;
+  readonly os: "linux" | "darwin";
+  readonly arch: "x64" | "arm64";
+  readonly address: string;
+  readonly free_id: number;
+  readonly system?: string;
+  readonly root_readonly?: boolean;
+  readonly cpu?: string;
+  readonly cpu_cores?: number;
+  readonly memory_bytes?: number;
+  readonly disk_path?: string;
+  readonly disk_total_bytes?: number;
+  readonly disk_free_bytes?: number;
+  readonly gpu?: string;
+}
 /** A server-side wizard session; it lives 24 hours in the Web process. */
 export interface WorkerWizardView {
   readonly id: string;
@@ -1411,6 +1585,32 @@ export interface WorkerWizardView {
   readonly command_prerequisites: string;
   readonly check_id?: string;
   readonly error?: string;
+  /** C-706: a draft from a device pairing: the device's one-time init script. */
+  readonly device_init?: {
+    readonly state: "waiting" | "fetched" | "succeeded" | "failed";
+    readonly at?: string;
+  };
+  /** C-707: what a paired device reported about itself (unverified). */
+  readonly device?: WorkerPairingDevice;
+  /**
+   * C-707: the Agent limit chosen when pairing; set when the check first
+   * registers the machine (`applied`), unchanged for a known one (`kept`).
+   */
+  readonly run_limit?: {
+    readonly value: number;
+    readonly state: "pending" | "applied" | "kept";
+  };
+  /** C-707: host facts for the onboarding report, once the checks passed. */
+  readonly report?: {
+    readonly capabilities: readonly {
+      readonly key: string;
+      readonly version: string | null;
+      readonly verified_at: string | null;
+      readonly state: "verified" | "expired" | "unverified";
+    }[];
+    /** Catalog tools for this system not verified yet. */
+    readonly suggested: readonly string[];
+  };
   /** The pending file change; private values are redacted by the server. */
   readonly preview?: {
     readonly preview_id: string;
@@ -1505,6 +1705,14 @@ export interface DecisionHistoryRecord extends DecisionView {
     resolved_by: string;
     via: string;
     proxy_authority?: string;
+    /** C-617 / Q-1198: the owner's answer cited as evidence for PM's decision. */
+    owner_record?: {
+      readonly card_id: string;
+      readonly timeline_entry_id: string;
+      readonly quote: string;
+      readonly at: string;
+      readonly attachment_id?: string;
+    };
   };
 }
 /** C-134: newest 10 first; pass `next_cursor` back to read the next 10. */
@@ -1602,6 +1810,8 @@ export interface PreferencesView extends SystemRulesPreferences {
   readonly review_max_rounds_ceiling?: number;
   /** Lanes the human folded (true) or unfolded (false); missing = default. */
   readonly board_collapsed_lanes?: Readonly<Record<string, boolean>>;
+  /** C-684: templates people may open cards from; older servers omit it. */
+  readonly human_card_templates?: readonly string[];
 }
 
 export type RoleKind = "produce" | "verify" | "standing";
@@ -2058,7 +2268,62 @@ export type FeishuTestResult =
   | "timeout"
   | "unknown";
 
+/** C-614: off-site copy health of the control host (counts only). */
+export interface OffsiteStatusView {
+  readonly configured: "absent" | "invalid" | "ready";
+  readonly bucket?: string;
+  readonly region?: string;
+  readonly synced: { readonly count: number; readonly bytes: number };
+  readonly pending: { readonly count: number; readonly bytes: number };
+  readonly failed: {
+    readonly count: number;
+    readonly last_code?: string;
+    readonly last_at?: string;
+  };
+  readonly last_success_at?: string;
+  readonly checked_at?: string;
+  readonly usage: {
+    readonly month: string;
+    readonly egress_bytes: number;
+    readonly process_bytes: number;
+    readonly requests: number;
+    readonly estimated_yuan: number;
+    readonly budget_yuan?: number;
+  };
+  /** C-628: event-loop delay of the syncing process and of the server. */
+  readonly loop_delay?: {
+    readonly sync?: OffsiteLoopDelay;
+    readonly server?: OffsiteLoopDelay;
+  };
+  readonly alerts: readonly (
+    | "config_invalid"
+    | "unreachable"
+    | "sync_failed"
+    | "over_budget"
+    | "loop_slow"
+  )[];
+}
+/** C-638: V8 heap use against its limit, per server process (numbers only). */
+export interface ProcessHealthView {
+  readonly processes: readonly {
+    readonly role: "web" | "background" | "server";
+    readonly heap_used_bytes: number;
+    readonly heap_limit_bytes: number;
+    readonly rss_bytes: number;
+    readonly checked_at: string;
+  }[];
+}
+export interface OffsiteLoopDelay {
+  readonly p99_ms: number;
+  readonly max_ms: number;
+  readonly window_ms: number;
+}
+
 export interface CardiganClient {
+  /** C-614: null when this server has no off-site copy wired. */
+  offsiteStatus?(): Promise<OffsiteStatusView | null>;
+  /** C-638: heap use and limit of the server processes. */
+  processHealth?(): Promise<ProcessHealthView>;
   feishuBinding?(action?: "code" | "unbind"): Promise<FeishuBindingView>;
   /** C-561: Feishu bot settings (human sessions only; 403 otherwise). */
   feishuSettings?(): Promise<FeishuSettingsView>;
@@ -2214,6 +2479,12 @@ export interface CardiganClient {
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
+  /** C-684: open or close one template to people; only that entry is sent. */
+  setHumanCardTemplates(
+    projectId: string,
+    changes: Readonly<Record<string, boolean>>,
+    idempotencyKey: string,
+  ): Promise<void>;
   setCrossCardRead(
     projectId: string,
     enabled: boolean,
@@ -2306,11 +2577,12 @@ export interface CardiganClient {
       | { hold: Pick<CardHold, "reason" | "resume_condition"> | null },
     idempotencyKey?: string,
   ): Promise<void>;
+  /** `entry_id` is the creation timeline entry the dialog attaches files to. */
   createCard(
     projectId: string,
     input: CreateCardInput,
     key: string,
-  ): Promise<{ id: string }>;
+  ): Promise<CreatedCard>;
   cancelCard(
     projectId: string,
     cardId: string,
@@ -2343,6 +2615,13 @@ export interface CardiganClient {
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void;
   activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
   snapshot(projectId: string): Promise<SnapshotData>;
+  /** C-713: every published version and its release note, newest first. */
+  releaseNotes(projectId: string): Promise<ReleaseNotesData>;
+  writeReleaseNote(
+    projectId: string,
+    input: WriteReleaseNoteInput,
+    idempotencyKey: string,
+  ): Promise<WriteReleaseNoteResult>;
   executionCapacity(projectId: string): Promise<ExecutionCapacity>;
   setRunLimit(
     projectId: string,
@@ -2389,6 +2668,33 @@ export interface CardiganClient {
     input: WorkerWizardInput,
   ): Promise<{ wizard: WorkerWizardView }>;
   /** C-565: values the host can suggest for a new worker form. */
+  /**
+   * C-707: a device pairing code becomes a wizard draft in this project, with
+   * the Agent limit for the new machine. Owner's human session only.
+   */
+  pairWorkerDevice?(
+    projectId: string,
+    input: { readonly code: string; readonly run_limit: number },
+  ): Promise<{ wizard: WorkerWizardView; device: WorkerPairingDevice }>;
+  /**
+   * C-727: the capability usage notes (C-725) merged for one machine. Writes
+   * are the owner's human session only; any Agent Token is refused (403).
+   * Optional so fixtures without notes need not provide them.
+   */
+  capabilityGuides?(
+    projectId: string,
+    machineId: string,
+  ): Promise<CapabilityGuidesView>;
+  setCapabilityGuide?(
+    projectId: string,
+    target: CapabilityGuideTarget,
+    note: string,
+  ): Promise<void>;
+  /** Resolves when the entry is gone, also when it was already gone. */
+  deleteCapabilityGuide?(
+    projectId: string,
+    target: CapabilityGuideTarget,
+  ): Promise<void>;
   workerWizardDefaults?(
     projectId: string,
   ): Promise<{ defaults: WorkerWizardDefaults }>;
@@ -2473,9 +2779,13 @@ export interface CardiganClient {
     conclusion?: "exited" | "false_alarm" | "unconfirmed",
   ): Promise<void>;
   session(): Promise<SessionInfo>;
+  /** Upload limit from the latest session read; unknown before it. */
+  attachmentMaxBytes?(): number | undefined;
   login(password: string): Promise<void>;
   logout(): Promise<void>;
   projects(): Promise<readonly ProjectSummary[]>;
+  /** C-675: where a full number (`SEN-C-34`) points; null when nothing has it. */
+  resolveFullId?(id: string): Promise<ResolvedReference | null>;
   cards(
     projectId: string,
     filter: CardFilter,
@@ -2496,6 +2806,15 @@ export interface CardiganClient {
     projectId: string,
     cardId: string,
   ): Promise<MentionCandidates>;
+  /**
+   * C-615: other cards' attachments the page names but did not receive (a
+   * draft, older timeline pages); unreadable or missing numbers are left out.
+   */
+  attachmentRefs?(
+    projectId: string,
+    cardId: string,
+    ids: readonly string[],
+  ): Promise<AttachmentRefsResponse>;
   addComment(
     projectId: string,
     cardId: string,
@@ -2508,6 +2827,23 @@ export interface CardiganClient {
     input: UploadAttachmentInput,
     idempotencyKey?: string,
   ): Promise<AttachmentReceipt>;
+  /** C-683: video limit from the latest session read; unknown before it. */
+  videoMaxBytes?(): number | undefined;
+  /**
+   * C-683: send a video in chunks, continuing `uploadId` when given (a retry
+   * resumes where the server is). Resolves with the complete upload's id,
+   * which `uploadAttachment` takes instead of `file`.
+   */
+  uploadVideo?(
+    projectId: string,
+    file: Blob,
+    mime: string,
+    options?: {
+      readonly uploadId?: string | undefined;
+      readonly onStarted?: (uploadId: string) => void;
+      readonly onProgress?: (received: number, size: number) => void;
+    },
+  ): Promise<string>;
 }
 
 interface ErrorBody {
@@ -2537,15 +2873,56 @@ export class HttpCardiganClient implements CardiganClient {
     return subscribeProject(projectId, callbacks, this.streamFactory);
   }
   private readScope: string | undefined;
+  private attachmentLimit: number | undefined;
+  private videoLimit: number | undefined;
   private cardsGeneration = 0;
   private cardsReadSequence = 0;
   private readonly cardPages = new Map<
     string,
     { page: CardPage; request: number }
   >();
+  /**
+   * C-688: the last card detail answer per exact URL with its validator. An
+   * open detail revalidates; a 304 hands back the very same object.
+   */
+  private readonly validated = new Map<
+    string,
+    { readonly etag: string; readonly value: unknown }
+  >();
   private clearCards() {
     this.cardsGeneration++;
     this.cardPages.clear();
+    this.validated.clear();
+  }
+  private async conditional<T>(
+    path: string,
+    shape: (value: T) => T = (value) => value,
+  ): Promise<T> {
+    const known = this.validated.get(path);
+    const answer: { etag?: string | null } = {};
+    const value = await this.request<T | undefined>(
+      path,
+      known ? { ifNoneMatch: known.etag } : {},
+      (response) => {
+        answer.etag = response.headers?.get("ETag");
+      },
+    );
+    const etag = answer.etag;
+    if (value === undefined && known && etag === known.etag)
+      return known.value as T;
+    if (value === undefined) {
+      // A 304 for a validator this client no longer holds: read in full.
+      this.validated.delete(path);
+      return this.conditional(path, shape);
+    }
+    const shaped = shape(value);
+    this.validated.delete(path);
+    if (etag) {
+      this.validated.set(path, { etag, value: shaped });
+      while (this.validated.size > 32)
+        this.validated.delete(this.validated.keys().next().value as string);
+    }
+    return shaped;
   }
   cardPreferenceScope() {
     return this.readScope;
@@ -2567,6 +2944,12 @@ export class HttpCardiganClient implements CardiganClient {
     options: Readonly<Record<string, string>>,
   ) {
     return this.cardPages.get(this.cardsKey(project, filter, options))?.page;
+  }
+  offsiteStatus(): Promise<OffsiteStatusView | null> {
+    return this.request("/api/offsite");
+  }
+  processHealth(): Promise<ProcessHealthView> {
+    return this.request("/api/process-health");
   }
   feishuBinding(action?: "code" | "unbind") {
     return this.request<FeishuBindingView>(
@@ -2614,8 +2997,87 @@ export class HttpCardiganClient implements CardiganClient {
     if (!session.authenticated || session.read_scope !== this.readScope)
       this.clearCards();
     this.readScope = session.authenticated ? session.read_scope : undefined;
+    this.attachmentLimit =
+      typeof session.attachment_max_bytes === "number" &&
+      Number.isSafeInteger(session.attachment_max_bytes) &&
+      session.attachment_max_bytes > 0
+        ? session.attachment_max_bytes
+        : undefined;
+    this.videoLimit =
+      typeof session.video_max_bytes === "number" &&
+      Number.isSafeInteger(session.video_max_bytes) &&
+      session.video_max_bytes > 0
+        ? session.video_max_bytes
+        : undefined;
     if (!this.readScope) clearSharedReads();
     return session;
+  }
+  attachmentMaxBytes() {
+    return this.attachmentLimit;
+  }
+
+  videoMaxBytes() {
+    return this.videoLimit;
+  }
+
+  async uploadVideo(
+    projectId: string,
+    file: Blob,
+    mime: string,
+    options: {
+      readonly uploadId?: string | undefined;
+      readonly onStarted?: (uploadId: string) => void;
+      readonly onProgress?: (received: number, size: number) => void;
+    } = {},
+  ): Promise<string> {
+    const base = `/api/projects/${encodeURIComponent(projectId)}/uploads`;
+    let status: UploadStatus | undefined;
+    if (options.uploadId) {
+      // An expired or unknown upload starts over; anything else is an error.
+      status = await this.request<UploadStatus>(
+        `${base}/${encodeURIComponent(options.uploadId)}`,
+      ).catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 404) return undefined;
+        throw error;
+      });
+      if (status && status.size !== file.size) status = undefined;
+    }
+    status ??= await this.request<UploadStatus>(base, {
+      method: "POST",
+      body: JSON.stringify({ size: file.size, mime }),
+      resend: false,
+    });
+    options.onStarted?.(status.upload_id);
+    const path = `${base}/${encodeURIComponent(status.upload_id)}`;
+    let failures = 0;
+    while (!status.complete) {
+      options.onProgress?.(status.received, status.size);
+      const offset: number = status.received;
+      const end: number = Math.min(offset + status.chunk_bytes, status.size);
+      try {
+        status = await this.request<UploadStatus>(`${path}?offset=${offset}`, {
+          method: "PUT",
+          body: file.slice(offset, end),
+          contentType: "application/octet-stream",
+          resend: false,
+        });
+        failures = 0;
+      } catch (error) {
+        // The server keeps what it has: ask for its offset and go on. A
+        // chunk that keeps failing is reported; a retry resumes from there.
+        if (error instanceof ApiError && error.status === 409)
+          status = await this.request<UploadStatus>(path);
+        else if (
+          ++failures <= 3 &&
+          (!(error instanceof ApiError) || error.status >= 500)
+        ) {
+          await this.retry.sleep(1000 * failures);
+          status = await this.request<UploadStatus>(path);
+        } else throw error;
+      }
+    }
+    options.onProgress?.(status.size, status.size);
+    return status.upload_id;
   }
 
   async login(password: string): Promise<void> {
@@ -2640,6 +3102,13 @@ export class HttpCardiganClient implements CardiganClient {
       "/api/projects",
     );
     return body.projects;
+  }
+
+  async resolveFullId(id: string): Promise<ResolvedReference | null> {
+    const body = await this.request<{ reference: ResolvedReference | null }>(
+      `/api/refs/resolve?id=${encodeURIComponent(id)}`,
+    );
+    return body.reference;
   }
 
   async cards(
@@ -2727,18 +3196,20 @@ export class HttpCardiganClient implements CardiganClient {
     if (options.type) params.set("type", options.type);
     if (options.author) params.set("author", options.author);
     const query = params.size ? `?${params}` : "";
-    const detail = await this.request<CardDetail>(
+    return this.conditional<CardDetail>(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}${query}`,
+      (detail) =>
+        detail.overview
+          ? {
+              ...detail,
+              work_items: [],
+              deliveries: [],
+              reviews: [],
+              review_matrix: [],
+              attachments: [],
+            }
+          : detail,
     );
-    if (!detail.overview) return detail;
-    return {
-      ...detail,
-      work_items: [],
-      deliveries: [],
-      reviews: [],
-      review_matrix: [],
-      attachments: [],
-    };
   }
 
   cardPanel(
@@ -2746,7 +3217,7 @@ export class HttpCardiganClient implements CardiganClient {
     cardId: string,
     panel: CardPanel,
   ): Promise<Partial<CardDetail>> {
-    return this.request(
+    return this.conditional(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}?section=${panel}`,
     );
   }
@@ -2757,6 +3228,16 @@ export class HttpCardiganClient implements CardiganClient {
   ): Promise<MentionCandidates> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/mentions`,
+    );
+  }
+
+  attachmentRefs(
+    projectId: string,
+    cardId: string,
+    ids: readonly string[],
+  ): Promise<AttachmentRefsResponse> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/attachment-refs?ids=${ids.map(encodeURIComponent).join(",")}`,
     );
   }
 
@@ -2795,6 +3276,21 @@ export class HttpCardiganClient implements CardiganClient {
   snapshot(projectId: string): Promise<SnapshotData> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/snapshot`,
+    );
+  }
+  releaseNotes(projectId: string): Promise<ReleaseNotesData> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/release-notes`,
+    );
+  }
+  writeReleaseNote(
+    projectId: string,
+    input: WriteReleaseNoteInput,
+    idempotencyKey: string,
+  ): Promise<WriteReleaseNoteResult> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/release-notes`,
+      { method: "POST", body: JSON.stringify(input), idempotencyKey },
     );
   }
   executionCapacity(projectId: string): Promise<ExecutionCapacity> {
@@ -2876,6 +3372,52 @@ export class HttpCardiganClient implements CardiganClient {
       { method: "POST", body: JSON.stringify(input) },
     );
   }
+  pairWorkerDevice(
+    projectId: string,
+    input: { readonly code: string; readonly run_limit: number },
+  ): Promise<{ wizard: WorkerWizardView; device: WorkerPairingDevice }> {
+    // Never resent: a code works once, so a lost reply is not retried.
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/worker-wizards/pairing`,
+      { method: "POST", body: JSON.stringify(input), resend: false },
+    );
+  }
+  capabilityGuides(
+    projectId: string,
+    machineId: string,
+  ): Promise<CapabilityGuidesView> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/capability-guides?machine=${encodeURIComponent(machineId)}`,
+    );
+  }
+  async setCapabilityGuide(
+    projectId: string,
+    target: CapabilityGuideTarget,
+    note: string,
+  ): Promise<void> {
+    // Not resent automatically: the page reads the notes back after a failure.
+    await this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/capability-guides`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ ...target, usage_note: note }),
+      },
+    );
+  }
+  async deleteCapabilityGuide(
+    projectId: string,
+    target: CapabilityGuideTarget,
+  ): Promise<void> {
+    try {
+      await this.request(
+        `/api/projects/${encodeURIComponent(projectId)}/capability-guides`,
+        { method: "DELETE", body: JSON.stringify(target) },
+      );
+    } catch (error) {
+      // Already gone (an earlier attempt whose reply was lost): done.
+      if (!(error instanceof ApiError && error.status === 404)) throw error;
+    }
+  }
   workerWizardDefaults(
     projectId: string,
   ): Promise<{ defaults: WorkerWizardDefaults }> {
@@ -2940,6 +3482,18 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { decision_delegation: { [category]: enabled } },
+      idempotencyKey,
+    );
+  }
+  async setHumanCardTemplates(
+    projectId: string,
+    changes: Readonly<Record<string, boolean>>,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { human_card_templates: changes },
       idempotencyKey,
     );
   }
@@ -3641,7 +4195,7 @@ export class HttpCardiganClient implements CardiganClient {
     projectId: string,
     input: CreateCardInput,
     idempotencyKey: string,
-  ): Promise<{ id: string }> {
+  ): Promise<CreatedCard> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/cards`,
       { method: "POST", body: JSON.stringify(input), idempotencyKey },
@@ -3718,7 +4272,9 @@ export class HttpCardiganClient implements CardiganClient {
     path: string,
     init: {
       method?: string;
-      body?: string;
+      body?: string | Blob;
+      /** Content type of a non-JSON body (C-683 upload chunks). */
+      contentType?: string;
       idempotencyKey?: string;
       /**
        * C-511: whether a transport failure may be resent automatically. By
@@ -3726,6 +4282,8 @@ export class HttpCardiganClient implements CardiganClient {
        * sends its key as an identifier only (`resend: false`).
        */
       resend?: boolean;
+      /** C-688: a 304 answer then resolves to `undefined`. */
+      ifNoneMatch?: string;
     } = {},
     observe?: (response: Response) => void,
   ): Promise<T> {
@@ -3738,10 +4296,13 @@ export class HttpCardiganClient implements CardiganClient {
           accept: "application/json",
           ...(init.body === undefined
             ? {}
-            : { "content-type": "application/json" }),
+            : { "content-type": init.contentType ?? "application/json" }),
           ...(init.idempotencyKey === undefined
             ? {}
             : { "Idempotency-Key": init.idempotencyKey }),
+          ...(init.ifNoneMatch === undefined
+            ? {}
+            : { "If-None-Match": init.ifNoneMatch }),
         },
         ...(init.body === undefined ? {} : { body: init.body }),
       });
@@ -3749,6 +4310,10 @@ export class HttpCardiganClient implements CardiganClient {
       send,
       init.resend ?? isRetryableRequest(method, init.idempotencyKey),
     );
+    if (response.status === 304 && init.ifNoneMatch !== undefined) {
+      observe?.(response);
+      return undefined as T;
+    }
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         this.clearCards();
@@ -3839,9 +4404,19 @@ async function toApiError(
  * (`cardigan preference set ...`); the Web points at the settings label instead.
  */
 function webErrorMessage(message: string): string {
-  return message.replace(
-    /^(暂缓到期时间距现在不能超过 \d+ 分钟)（merge-confirm-snooze-max）/u,
-    "$1（可在项目设置的“合并确认最长暂缓时长”中调整）",
+  return (
+    message
+      .replace(
+        /^(暂缓到期时间距现在不能超过 \d+ 分钟)（merge-confirm-snooze-max）/u,
+        "$1（可在项目设置的“合并确认最长暂缓时长”中调整）",
+      )
+      .replace(/^Attachment exceeds (\d+(?:\.\d)? MiB)$/u, "附件超过 $1")
+      // C-683: video limit and the server's format check.
+      .replace(/^Video exceeds (\d+(?:\.\d)? MiB)$/u, "视频超过 $1")
+      .replace(
+        /^File content is not (\w+) video; .*$/u,
+        "文件内容与扩展名不符，不是 $1 视频",
+      )
   );
 }
 

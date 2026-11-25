@@ -47,7 +47,19 @@ export const SESSION_COOKIE = "cardigan_session";
 
 /** Fixed templates only: neither identifiers nor query strings reach logs. */
 export function requestRoute(path: string): string {
-  if (/^\/api\/(login|logout|session|me|projects)$/.test(path)) return path;
+  if (
+    /^\/api\/(login|logout|session|me|projects|offsite|process-health|shared-files(?:\/(?:versions|download|dirs|uploads|uploads\/commit|delete))?)$/.test(
+      path,
+    )
+  )
+    return path;
+  // C-705: the device pairing code travels in the body, never in the path.
+  if (
+    /^\/api\/device-pairings(?:\/(?:status|init-script|initialized))?$/.test(
+      path,
+    )
+  )
+    return path;
   if (/^\/api\/avatars\/[^/]+$/.test(path)) return "/api/avatars/:sha256";
   const project = /^\/api\/projects\/[^/]+(\/.*)$/.exec(path);
   const rest = project?.[1];
@@ -60,7 +72,7 @@ export function requestRoute(path: string): string {
       return `${prefix}/machines/:id${machine[1] ? `/${machine[1].startsWith("checks/") ? "checks/:check_id" : machine[1]}` : ""}`;
     if (/^\/employees(?:\/options)?$/.test(rest)) return prefix + rest;
     if (
-      /^\/(cards|needs-you|notices|snapshot|execution|activity|stream|preferences)$/.test(
+      /^\/(cards|needs-you|notices|snapshot|execution|activity|stream|preferences|release-notes)$/.test(
         rest,
       )
     )
@@ -77,6 +89,13 @@ export function requestRoute(path: string): string {
       return `${prefix}/cards/:id/mentions`;
     if (/^\/attachments\/[^/]+\/thumbnail$/.test(rest))
       return `${prefix}/attachments/:id/thumbnail`;
+    if (/^\/attachments\/[^/]+\/preview$/.test(rest))
+      return `${prefix}/attachments/:id/preview`;
+    // C-683: video cover and resumable uploads.
+    if (/^\/attachments\/[^/]+\/poster$/.test(rest))
+      return `${prefix}/attachments/:id/poster`;
+    if (rest === "/uploads") return prefix + rest;
+    if (/^\/uploads\/[^/]+$/.test(rest)) return `${prefix}/uploads/:id`;
     const entity = /^\/(cards|attachments)\/[^/]+$/.exec(rest);
     if (entity) return `${prefix}/${entity[1]}/:id`;
     const write =
@@ -141,9 +160,28 @@ export function unauthorized(message = "login required"): never {
   });
 }
 
-export function applySecurityHeaders(res: ServerResponse): void {
+/**
+ * C-614: `imageOrigin` is the private OSS bucket origin that signed thumbnail
+ * and preview redirects point to; only images may load from it.
+ */
+export function applySecurityHeaders(
+  res: ServerResponse,
+  bucketOrigin?: string,
+): void {
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
-    res.setHeader(name, value);
+    res.setHeader(
+      name,
+      bucketOrigin && name === "Content-Security-Policy"
+        ? value
+            .replace(
+              "img-src 'self' data: blob:",
+              `img-src 'self' data: blob: ${bucketOrigin}`,
+            )
+            // C-685: shared-library uploads go from the browser straight to
+            // the private bucket with a signed PUT.
+            .replace("connect-src 'self'", `connect-src 'self' ${bucketOrigin}`)
+        : value,
+    );
   }
 }
 
@@ -155,6 +193,22 @@ export function sendJson(
   headers: Readonly<Record<string, string>> = {},
 ): void {
   const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(payload),
+    "Cache-Control": "no-store",
+    ...headers,
+  });
+  res.end(payload);
+}
+
+/** C-644: a JSON body a read worker already serialized. */
+export function sendJsonText(
+  res: ServerResponse,
+  status: number,
+  payload: string,
+  headers: Readonly<Record<string, string>> = {},
+): void {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(payload),
@@ -244,6 +298,7 @@ export function requireOrigin(
 export async function readJsonBody(
   req: IncomingMessage,
   limit = MAX_JSON_BODY_BYTES,
+  tooLarge = "request body is too large",
 ): Promise<Record<string, unknown>> {
   const contentType = req.headers["content-type"];
   const type = Array.isArray(contentType) ? contentType[0] : contentType;
@@ -256,11 +311,7 @@ export async function readJsonBody(
   }
   const declared = Number(req.headers["content-length"] ?? "0");
   if (Number.isFinite(declared) && declared > limit) {
-    throw new HttpRejection(
-      413,
-      "payload_too_large",
-      "request body is too large",
-    );
+    throw new HttpRejection(413, "payload_too_large", tooLarge);
   }
 
   const chunks: Buffer[] = [];
@@ -271,11 +322,7 @@ export async function readJsonBody(
       : Buffer.from(chunk as string);
     size += buffer.byteLength;
     if (size > limit) {
-      throw new HttpRejection(
-        413,
-        "payload_too_large",
-        "request body is too large",
-      );
+      throw new HttpRejection(413, "payload_too_large", tooLarge);
     }
     chunks.push(buffer);
   }

@@ -16,6 +16,8 @@ import {
   parseId,
   postComment,
   projectFlowVersion,
+  RELEASE_NOTE_MAX_LENGTH,
+  RELEASE_NOTE_VERSION,
   type Result,
   recordDecision,
   releaseAssignment,
@@ -33,6 +35,7 @@ import {
   updateWorkItem,
   validateWorkItemRequirements,
   validationFailed,
+  writeReleaseNote,
 } from "@cardigan/domain";
 import { z } from "zod";
 import { agentCard } from "../tools/shared.js";
@@ -139,6 +142,7 @@ const schemas = {
     card_id: id("card"),
     work_item_id: id("work_item"),
     body: text,
+    decision_id: id("decision").optional(),
   },
   post_comment: {
     story_discussion: z
@@ -217,6 +221,17 @@ const schemas = {
       .optional()
       .describe(
         "暂停或换做法：负责人提交方案，待确认人 reply_to 当前方案并确认方向，不等于审核通过",
+      ),
+    review_alignment: z
+      .object({
+        work_item_id: id("work_item"),
+        step: z.enum(["propose", "confirm", "dispute"]),
+        invariants: z.array(text).min(1).max(10).optional(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "对齐回合（连续第 3 次驳回后）：作者或审核员用 propose 提出 1–10 条不变量（invariants），对方 reply_to 该条后 confirm 同意或 dispute 写明分歧；同意后写入 card.invariants 并恢复审核，分歧交 PM 裁决",
       ),
     host_report_for: id("human_action")
       .optional()
@@ -378,6 +393,15 @@ const schemas = {
       .optional()
       .describe(
         "With escalate only: existing attachments on the decision's cards to show the human, in display order",
+      ),
+    owner_record: z
+      .strictObject({
+        timeline_entry_id: entryId,
+        attachment_id: text.optional(),
+      })
+      .optional()
+      .describe(
+        "所有者已在卡上明确答复这条 PM 拍板时，你在原有授权内作决定，并引用原话作依据（C-n#N），不必再请所有者重选；正式答复和理由仍是你的。原话须为所有者本人在本拍板所在卡片上的评论（拍板不涉及其它卡）：在拍板提出之后、只对应本拍板（引用本拍板或回复拍板请求，所回复的内容也不涉及其它拍板），整条只写一句明确选择（如“Q-1 选 X”），未撤回或改写、之后无新答复、交付未变。attachment_id 只认所有者上传在这条评论上的附件。服务端原样抄录原话作为依据，不算所有者亲自确认；不增加授权，不与 escalate、合并或其它依据同用。不满足时按现有途径处理。",
       ),
   },
   complete_host_action: {
@@ -580,6 +604,20 @@ const schemas = {
       .describe("设置或清除提前开工，须有排期权限并填写理由"),
     dependency_reason: text.optional(),
     card_id: id("card"),
+    repo: text
+      .optional()
+      .describe(
+        "补登记仓库；省略时沿用卡上的，再缺省为项目唯一登记的仓库。已有 worktree 后不能改",
+      ),
+    base_branch: text
+      .optional()
+      .describe("基线分支；省略时沿用卡上的或登记仓库的默认基线"),
+    start_point: text
+      .nullable()
+      .optional()
+      .describe(
+        "不合并卡（merge_policy=none）产出项的起点：完整提交 SHA 或分支名，检出为 detached worktree；传 null 清除。已有 worktree 后不能改",
+      ),
     hold: z
       .object({ reason: text, resume_condition: text })
       .strict()
@@ -679,6 +717,12 @@ const schemas = {
     required: z.boolean().optional(),
     status: z.enum([...states.produce, ...states.verify]).optional(),
     max_review_rounds: z.number().int().positive().optional(),
+    start_point: text
+      .nullable()
+      .optional()
+      .describe(
+        "不合并卡上本产出项的起点（完整提交 SHA 或分支名），优先于卡上的起点；传 null 清除。已有 worktree 后不能改",
+      ),
     review_limit_decision: z
       .object({
         pause_plan: pausePlan,
@@ -726,6 +770,31 @@ const schemas = {
   release_assignment: {
     assignment_id: id("assignment"),
     cancel_queued_run_id: id("run").optional(),
+  },
+  write_release_note: {
+    version: z
+      .string()
+      .max(80)
+      .regex(RELEASE_NOTE_VERSION)
+      .describe("Published version, the same as publish_artifact's version"),
+    body: z
+      .string()
+      .describe(
+        `User-facing release notes for this version, plain text, at most ${RELEASE_NOTE_MAX_LENGTH} characters`,
+      ),
+    decision_id: id("decision")
+      .optional()
+      .describe(
+        "Publish decision of this version; inferred from its publication when omitted",
+      ),
+    base_revision: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        "Revision you edited (0 for a new note); rejected if the note changed since",
+      ),
   },
 };
 
@@ -820,13 +889,13 @@ export function managementTools(clock?: Clock) {
     }),
     wire(
       "issue_instruction",
-      "Instruct an unfinished work item as PM Ops.",
+      "Instruct an unfinished work item as PM Ops. To ask a verifier held by a pending review-limit decision (confirm a direction, add an opinion) pass that decision_id: only that verifier's Assignment is woken, it may answer with post_comment (reply_to the instruction), its reply reaches PM Ops, and it still cannot submit a review, change the decision or advance the merge. Ordinary comments do not wake a waiting verifier.",
       issueInstruction,
     ),
     wire("report_blocker", "Report a work item blocker.", reportBlocker),
     wire(
       "resolve_delegated_decision",
-      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; human-decided scope/permission merges require decision_evidence when the human-only project preference is enabled; other human-only conditions remain enforced. A system-held merge confirmation (decider=system) accepts only hold or request_changes, with the rationale and a notice citing the basis (e.g. the human's answer or a review); merge stays with the system or the human.",
+      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; human-decided scope/permission merges require decision_evidence when the human-only project preference is enabled; other human-only conditions remain enforced. A system-held merge confirmation (decider=system) accepts only hold or request_changes, with the rationale and a notice citing the basis (e.g. the human's answer or a review); merge stays with the system or the human. When the owner already answered a PM-routed decision on the card, decide it yourself and pass owner_record to cite the owner's verbatim comment as evidence instead of asking again; your answer and rationale stay yours, and it adds no authority.",
       resolveDelegatedDecision,
     ),
     wire(
@@ -963,12 +1032,30 @@ export function managementTools(clock?: Clock) {
       "Standing PM Ops: open or close a merge window; reason required. Sensitive windows can only be closed by the human.",
       setMergeWindow,
     ),
-    wire(
-      "update_card",
-      "Update card metadata or planning state, or one pre-merge check (pre_merge_check).",
-      (...args: Parameters<typeof updateCard>) =>
-        cardReply(updateCard(...args)),
-    ),
+    defineTool({
+      name: "update_card",
+      description:
+        "Update card metadata or planning state, register its repository and no-merge start point, or one pre-merge check (pre_merge_check).",
+      input: z.object({ ...schemas.update_card, idempotency_key }),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executeCommand(
+          context,
+          "update_card",
+          idempotency_key,
+          params as Parameters<typeof updateCard>[2],
+          (s, a, p, ports) =>
+            cardReply(
+              updateCard(s, a, p, {
+                ...ports,
+                project_repositories: projectRepositories(
+                  context.store,
+                  a.project_id,
+                ),
+              }),
+            ),
+          clock,
+        ),
+    }),
     wire(
       "create_work_item",
       "Create a producing or verifying work item.",
@@ -983,6 +1070,11 @@ export function managementTools(clock?: Clock) {
       "assign",
       "Assign work; omitted machine selects automatically. A deferred response has no Assignment or token. Credentials must be provisioned by the host.",
       assignPending,
+    ),
+    wire(
+      "write_release_note",
+      "Standing PM: create or revise the user-facing release note of one published version (one note per version; every revision is kept). Returns the note and the cards merged since the previous successful publication (card ID and title) as reference. Notes never block a publication or merge.",
+      writeReleaseNote,
     ),
     wire(
       "replace_verification_work_item",

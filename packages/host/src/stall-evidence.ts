@@ -10,6 +10,7 @@ import {
   type RuntimeRef,
   sharedStallRegistration,
   systemTurnOwner,
+  type TurnIdlePrompt,
 } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import {
@@ -17,6 +18,7 @@ import {
   type ExecutionConfig,
   executionPaths,
   runtimeOwnsRef,
+  WorkerTransportUnavailable,
   workerFiles,
 } from "@cardigan/runtime-herdr";
 import { captureTranscript } from "./capture-transcript.js";
@@ -183,6 +185,33 @@ export async function stallWorkspace(
     return "unknown";
   }
 }
+/**
+ * C-626: the CLI of the system-ended turn, for the dispatcher's bound
+ * empty-editor observation. Only Claude Code and Codex draw a recognizable
+ * idle editor; any other harness keeps requiring an hc idle status.
+ */
+export function turnIdlePrompt(
+  state: CommandState,
+  a: Assignment,
+  systemTurn?: string,
+): TurnIdlePrompt | undefined {
+  const harness = state.runs.find(
+    (r) => r.id === systemTurn && r.assignment_id === a.id,
+  )?.harness;
+  return harness === "claude-code" || harness === "codex"
+    ? { project_id: state.project_id, assignment_id: a.id, harness }
+    : undefined;
+}
+/** C-626: a macOS worker generation whose system-ended turn the host may
+ * stop through its idle owner or the enrolled-PID fallback. */
+export function darwinTurnTarget(a: Assignment, execution?: ExecutionConfig) {
+  return (
+    a.machine_id !== "local" &&
+    execution?.mode === "agent-ssh" &&
+    !!execution.macosCore &&
+    !!a.runtime_ref?.launch_generation
+  );
+}
 /** Missing hc is not an exit. The native Linux adapter can independently
  * prove that this exact non-kept launch, its process group and socket are gone. */
 export async function observeTurnOwner(
@@ -190,11 +219,18 @@ export async function observeTurnOwner(
   ref: RuntimeRef,
   identity: RetirementIdentity,
   systemTurn = true,
+  idlePrompt?: TurnIdlePrompt,
 ) {
   const exact = await runtime
     .observe_retirement?.(
       ref,
-      systemTurn ? { ...identity, system_finished_turn: true } : identity,
+      systemTurn
+        ? {
+            ...identity,
+            system_finished_turn: true,
+            ...(idlePrompt ? { idle_prompt: idlePrompt } : {}),
+          }
+        : identity,
     )
     .catch(() => undefined);
   if (
@@ -269,6 +305,22 @@ async function registeredLaunchExited(
   a: Assignment,
   execution?: ExecutionConfig,
 ) {
+  return (await registeredLaunchState(state, a, execution)) === "exited";
+}
+/** C-663: the registered worker launch's kernel state. `unreachable` is a
+ * failed worker transport; every other failure or mismatch is `unknown`. */
+export async function registeredLaunchState(
+  state: CommandState,
+  a: Assignment,
+  execution?: ExecutionConfig,
+  /**
+   * C-730: report the registered CLI itself. "exited" then means the worker
+   * journal was read, matched this exact registration and observed the CLI's
+   * birth identity gone, while its process group (for example a launcher that
+   * outlived it) may still run. Every failure or mismatch stays "unknown".
+   */
+  cliOnly = false,
+): Promise<"exited" | "alive" | "unreachable" | "unknown"> {
   const ref = a.runtime_ref,
     gen = ref?.launch_generation;
   if (
@@ -278,7 +330,7 @@ async function registeredLaunchExited(
     !execution.target ||
     !boundWorkspaceTarget(state.project_id, a, execution)
   )
-    return false;
+    return "unknown";
   const launch = state.runs.find(
     (r) => r.id === gen.run_id && r.assignment_id === a.id,
   )?.launch_publication;
@@ -288,9 +340,10 @@ async function registeredLaunchExited(
     launch.generation !== gen.generation ||
     !isDeepStrictEqual(launch.runtime_ref, ref)
   )
-    return false;
+    return "unknown";
+  let evidence: Awaited<ReturnType<typeof workerFiles>>;
   try {
-    const evidence = await workerFiles(
+    evidence = await workerFiles(
       execution,
       {
         project: state.project_id,
@@ -301,19 +354,27 @@ async function registeredLaunchExited(
       },
       "status",
     );
-    const registered = launch.process;
-    if (
-      evidence.observed !== "exited" ||
-      !isDeepStrictEqual(registered, evidence.process) ||
-      registered.machine !== execution.target.fingerprint ||
-      registered.terminal !== gen.generation ||
-      ![registered.pid, registered.process_group].every(
-        (id) => Number.isSafeInteger(id) && id > 1,
-      ) ||
-      !Number.isSafeInteger(registered.uid) ||
-      registered.uid <= 0
-    )
-      return false;
+  } catch (error) {
+    return error instanceof WorkerTransportUnavailable
+      ? "unreachable"
+      : "unknown";
+  }
+  const registered = launch.process;
+  if (
+    !isDeepStrictEqual(registered, evidence.process) ||
+    registered.machine !== execution.target.fingerprint ||
+    registered.terminal !== gen.generation ||
+    ![registered.pid, registered.process_group].every(
+      (id) => Number.isSafeInteger(id) && id > 1,
+    ) ||
+    !Number.isSafeInteger(registered.uid) ||
+    registered.uid <= 0
+  )
+    return "unknown";
+  if (evidence.observed === "alive") return "alive";
+  if (evidence.observed !== "exited") return "unknown";
+  if (cliOnly) return "exited";
+  try {
     const cmd = await agentProcessCommand(execution, [
       "/usr/bin/python3",
       "-IB",
@@ -323,33 +384,104 @@ async function registeredLaunchExited(
       String(registered.process_group),
       String(registered.uid),
     ]);
-    return (await captureTranscript(cmd.file, cmd.args)).trimEnd() === "gone";
+    // A surviving group member (or an ambiguous probe) keeps the session.
+    return (await captureTranscript(cmd.file, cmd.args)).trimEnd() === "gone"
+      ? "exited"
+      : "unknown";
   } catch {
-    return false;
+    return "unknown";
   }
 }
-/** A retirement transfer is not exit evidence. Probe the captured generation
- * and the terminal independently; neither a retained shell nor ENOENT suffices. */
-export async function transferredSessionExited(
+/**
+ * C-663: whether this exact session is gone. Both halves are required:
+ * - its terminal: a finished row of this identity, or the row is absent from
+ *   the runtime (a removed terminal row alone is never proof);
+ * - its processes: the kernel shows no process of this launch. Local: the
+ *   launch receipt's process and group (or the core with its socket); remote:
+ *   the registered worker launch's process and whole group.
+ * `unreachable` means the worker transport failed: nothing is known.
+ */
+export type SessionExitVerdict =
+  | "exited"
+  | "terminal_alive"
+  | "process_alive"
+  | "unreachable"
+  | "unproven";
+export async function sessionExitProof(
   state: CommandState,
   a: Assignment,
   runtime: Runtime,
   execution?: ExecutionConfig,
-) {
+): Promise<SessionExitVerdict> {
   const ref = a.runtime_ref;
   if (
     !ref ||
     !boundWorkspaceTarget(state.project_id, a, execution) ||
     sharedStallRegistration(state, a)
   )
-    return false;
+    return "unproven";
   const owner = { project_id: state.project_id, assignment_id: a.id };
-  const observed = await runtime
+  const terminal = await terminalGone(runtime, ref, owner);
+  if (terminal === "alive") return "terminal_alive";
+  if (a.machine_id === "local") {
+    // The local receipt proofs read only the kernel (and the core socket).
+    if (await localTurnExitProof(state, a, runtime, ref, execution))
+      return terminal === "gone" || (await localCoreGone(runtime, ref, owner))
+        ? "exited"
+        : "unproven";
+    return "unproven";
+  }
+  if (terminal === "unreachable") return "unreachable";
+  const launch = await registeredLaunchState(state, a, execution);
+  if (launch === "alive") return "process_alive";
+  if (launch === "unreachable") return "unreachable";
+  return launch === "exited" && terminal === "gone" ? "exited" : "unproven";
+}
+async function terminalGone(
+  runtime: Runtime,
+  ref: RuntimeRef,
+  owner: RetirementIdentity,
+): Promise<"gone" | "alive" | "unreachable" | "unknown"> {
+  const exact = await runtime
     .observe_retirement?.(ref, owner)
     .catch(() => undefined);
-  if (!observed?.ok || observed.value !== "exited") return false;
-  if (a.machine_id !== "local") return remoteStallExit(state, a, execution);
-  return localTurnExitProof(state, a, runtime, ref, execution);
+  if (exact?.ok && exact.value === "exited") return "gone";
+  if (exact?.ok && exact.value === "alive") return "alive";
+  const observed = await runtime.status(ref).catch(() => undefined);
+  if (observed?.ok)
+    return observed.value.process === "exited"
+      ? "gone"
+      : observed.value.process === "alive"
+        ? "alive"
+        : "unknown";
+  if (observed?.error.code === "runtime_not_found") return "gone";
+  return observed?.error.code === "runtime_unavailable"
+    ? "unreachable"
+    : "unknown";
+}
+/** Local core and socket gone with the receipt's group: the terminal is gone too. */
+async function localCoreGone(
+  runtime: Runtime,
+  ref: RuntimeRef,
+  owner: RetirementIdentity,
+) {
+  if (!ref.local_process_receipt) return false;
+  const proof = await runtime
+    .confirm_local_exit?.(ref, owner)
+    .catch(() => undefined);
+  return proof?.ok === true && proof.value;
+}
+/** A retirement transfer is not exit evidence. Probe the captured generation
+ * and the terminal independently; neither a retained shell nor ENOENT suffices.
+ * C-663: a terminal that is no longer listed counts as gone only together with
+ * the kernel proof that no process of this launch is left. */
+export async function transferredSessionExited(
+  state: CommandState,
+  a: Assignment,
+  runtime: Runtime,
+  execution?: ExecutionConfig,
+) {
+  return (await sessionExitProof(state, a, runtime, execution)) === "exited";
 }
 export async function stallEvidence(
   state: CommandState,
@@ -366,7 +498,7 @@ export async function stallEvidence(
   const bound =
     !sharedStallRegistration(state, a) &&
     boundWorkspaceTarget(state.project_id, a, execution);
-  const [workspace, observed, owner] = await Promise.all([
+  const [workspace, observed, strictOwner] = await Promise.all([
     bound
       ? stallWorkspace(
           state,
@@ -393,6 +525,68 @@ export async function stallEvidence(
         )
       : undefined,
   ]);
+  // C-672: a worker terminal that is still live but no longer runs its
+  // launched CLI (proven by the worker from the CLI's native identity) is not
+  // a live session. There is nothing to stop: the managed restart closes that
+  // terminal and settles the session (see releaseExitedAgent).
+  const agent_exited =
+    bound &&
+    !!a.runtime_ref &&
+    a.scope === "work_item" &&
+    a.machine_id !== "local" &&
+    observed?.ok === true &&
+    observed.value.process === "alive" &&
+    (await runtime
+      .observe_agent_exit?.(a.runtime_ref, {
+        project_id: state.project_id,
+        assignment_id: a.id,
+      })
+      .then((exited) => exited.ok && exited.value)
+      .catch(() => false)) === true;
+  // C-626: hc reports no activity (null/unknown) for a live terminal whose
+  // strict owner check could not confirm it. The bound CLI's own empty editor
+  // and idle footer, read around the same owner proof, is the equivalent idle
+  // evidence. Busy, blocked or error statuses and every identity, generation
+  // and keep guard are unchanged.
+  const prompt =
+    systemTurn && !transfer ? turnIdlePrompt(state, a, systemTurn) : undefined;
+  const promptOwner =
+    prompt &&
+    systemTurn &&
+    a.runtime_ref &&
+    strictOwner?.ok &&
+    strictOwner.value === "unknown" &&
+    observed?.ok &&
+    observed.value.process === "alive" &&
+    observed.value.agent === "unknown"
+      ? await observeTurnOwner(
+          runtime,
+          a.runtime_ref,
+          systemTurnOwner(state, a.id, a.runtime_ref, systemTurn),
+          true,
+          prompt,
+        )
+      : undefined;
+  const owner =
+    promptOwner?.ok && promptOwner.value === "alive"
+      ? promptOwner
+      : strictOwner;
+  const idle_basis =
+    promptOwner && owner === promptOwner
+      ? ("bound_idle_prompt" as const)
+      : owner?.ok && owner.value === "alive"
+        ? ("terminal_status" as const)
+        : null;
+  // A macOS worker's confirmed, live system-ended turn may be stopped through
+  // its owner or enrolled PID; other remote targets still settle exits only.
+  const remoteTurnStop =
+    !!systemTurn &&
+    !transfer &&
+    darwinTurnTarget(a, execution) &&
+    owner?.ok === true &&
+    owner.value === "alive" &&
+    observed?.ok === true &&
+    observed.value.process === "alive";
   const remoteExited =
     systemTurn &&
     a.machine_id !== "local" &&
@@ -426,6 +620,13 @@ export async function stallEvidence(
           ? !!observed?.ok && !!idleWakeGuard(observed.value)
           : owner.value === "exited" &&
             localTurnExitProof(state, a, runtime, a.runtime_ref, execution));
+  // C-669: an ordinary row whose session is already gone (terminal finished
+  // or no longer listed, and the kernel shows no process of this launch) has
+  // nothing left to stop. A missing terminal alone never counts.
+  const ordinaryRestartable = async () =>
+    (!!safeTerminal && (await ordinaryOwned())) ||
+    (!!a.runtime_ref &&
+      (await sessionExitProof(state, a, runtime, execution)) === "exited");
   const unknownOrIdle =
     (!observed?.ok &&
       observed?.error.code !== "runtime_conflict" &&
@@ -434,36 +635,40 @@ export async function stallEvidence(
       (["unknown", "idle", "done"].includes(observed.value.agent) ||
         observed.value.process === "exited"));
   return {
+    idle_basis,
     terminal_owner: ownerConfirmed ? "confirmed" : "unconfirmed",
     workspace,
     terminal_state,
-    process_state: observed?.ok
-      ? observed.value.process
-      : owner?.ok
-        ? owner.value
-        : null,
+    agent_exited,
+    process_state: agent_exited
+      ? ("agent_exited" as const)
+      : observed?.ok
+        ? observed.value.process
+        : owner?.ok
+          ? owner.value
+          : null,
     can_restart:
-      bound &&
-      (!exitOnly ||
-        unboundLocal ||
-        (owner?.ok &&
-          owner.value === "exited" &&
-          (!observed?.ok || observed.value.process === "exited"))) &&
-      (transfer
-        ? owner?.ok && owner.value === "exited"
-          ? await transferredSessionExited(state, a, runtime, execution)
-          : transfer.phase === "waiting" &&
-            !transfer.observe_only &&
-            a.machine_id === "local" &&
-            !!a.runtime_ref?.local_process_receipt &&
-            owner?.ok === true &&
-            owner.value === "alive" &&
-            !!observed?.ok &&
-            idleWakeGuard(observed.value)
-        : (systemTurn
-            ? (!!ownerConfirmed && unknownOrIdle) || unboundLocal
-            : !!safeTerminal && (await ordinaryOwned())) &&
-          (a.machine_id === "local" || !!remoteExited)) &&
-      (writableInPlace(workspace) || workspace === "no_worktree"),
+      agent_exited ||
+      (bound &&
+        (!exitOnly ||
+          unboundLocal ||
+          (owner?.ok &&
+            owner.value === "exited" &&
+            (!observed?.ok || observed.value.process === "exited"))) &&
+        (transfer
+          ? owner?.ok === true && owner.value === "alive"
+            ? transfer.phase === "waiting" &&
+              !transfer.observe_only &&
+              a.machine_id === "local" &&
+              !!a.runtime_ref?.local_process_receipt &&
+              !!observed?.ok &&
+              idleWakeGuard(observed.value)
+            : // C-663: also when the terminal is no longer listed at all.
+              await transferredSessionExited(state, a, runtime, execution)
+          : (systemTurn
+              ? (!!ownerConfirmed && unknownOrIdle) || unboundLocal
+              : await ordinaryRestartable()) &&
+            (a.machine_id === "local" || !!remoteExited || remoteTurnStop)) &&
+        (writableInPlace(workspace) || workspace === "no_worktree")),
   };
 }

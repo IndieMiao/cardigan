@@ -34,7 +34,11 @@ sudo python3 deploy/install-agent.py --host-user <主机用户名> \
 
 `agent-tools/` 下的 `download-attachment.mjs`、`upload-evidence.mjs` 是只依赖 Node 内置模块的预构建单文件。受管 worker 上装在 `<工作根>/libexec/agent-tools/`（root 所有、项目组只读），由 worker 向导首装，并随人工升级和 `cardigan-helper-v2` 签名升级与 helper 一起更新。员工启动时通过 `CARDIGAN_AGENT_TOOLS` 找到它们。不要手改，修改源码后运行 `pnpm --filter @cardigan/mcp-server build:agent-tools` 重建。
 
-`cardigan machine check` 的 `agent.attachment_tools` 能力项会核对两个文件存在、可执行且与当前发布一致；不一致时只报原因和期望 SHA-256，不生成命令。在 C-595 之前登记签名升级的机器不会自动装上助手（自动补装另卡处理），这时按下面的固定步骤手动补装。每次补装都用新建的暂存目录，只删除这个目录，不碰管理员家目录或别处的同名文件；两份文件分别核对：每个期望值都必须是完整的 64 位十六进制 SHA-256 且与对应文件一致，任一不符即停止，暂存目录保留供排查，重试从第 1 步重新开始。macOS 把第 1 步的 `SUM=sha256sum` 改成 `SUM='shasum -a 256'`。
+`cardigan machine check` 的 `agent.attachment_tools` 能力项会核对两个文件存在、可执行且与当前发布一致；不一致时报原因和期望 SHA-256，`machine show` 与检查历史不含命令。
+
+helper 已是当前版、只有助手缺失或不一致时（C-599）：已登记签名升级的机器由巡检按当前发布自动安装一次，外层 machine check 复查通过才记为助手已装，同一版本不再自动安装；C-595 之前登记的 v1 入口只能更新三个 helper，会明确记为“需要迁移”。v1 入口、自动安装后复查仍未通过、以及未登记签名升级的机器，由系统暂存经核验的完整发行材料并发一条主机运维待办；命令核对摘要后更新 deploy 目录、装入助手，并把本项目已登记的 v1 入口迁移到 v2。暂存失败的待办没有命令，下次巡检或重跑 machine check 会重新备料并替换它；换发行版或换绑定后旧待办自动作废。显式 `cardigan machine check`（独立运行或加入正在进行的巡检）在输出的 `agent_tools_guidance` 里给出本次结论，只有当前绑定和发行材料重新核对一致时才附该待办的命令。
+
+不方便用待办命令时，也可按下面的固定步骤手动补装。每次补装都用新建的暂存目录，只删除这个目录，不碰管理员家目录或别处的同名文件；两份文件分别核对：每个期望值都必须是完整的 64 位十六进制 SHA-256 且与对应文件一致，任一不符即停止，暂存目录保留供排查，重试从第 1 步重新开始。macOS 把第 1 步的 `SUM=sha256sum` 改成 `SUM='shasum -a 256'`。
 
 ```sh
 # 1. 目标机，管理员：填入 machine check 报出的期望摘要和本机路径，新建本次暂存目录
@@ -85,6 +89,16 @@ cardigan --help
 可用 `--bin-dir <目录>` 更改安装目录、`--repo <已构建的仓库>` 指定仓库、`--runtime-env <文件>` 指定配置。默认配置为 Agent 安装器生成的 `~/.config/cardigan/agent-ssh/runtime.env`；相对路径在安装时解析。`--dry-run` 检查目标并打印生成内容，不创建或覆盖文件。生成命令第二行固定为 `# cardigan: managed by deploy/install-cli.sh`；已有普通文件仅在第二行以 `# cardigan:` 开头时才覆盖，其他文件和符号链接会被拒绝。
 
 每次执行时，包装命令先加载并导出存在的 runtime.env；文件缺失时跳过，不会因缺少该文件报错。`agent-ssh` 模式下，如果当前进程尚无 `cardigan-share` 组身份，使用 `sg cardigan-share -c` 运行 CLI，每个参数与入口路径分别做 shell 引用，保留空格、引号和特殊字符。已有组身份或使用 local 模式时直接运行 CLI。该脚本不创建组或添加成员；共享组由 Agent 安装器配置，`sg` 失败会直接返回错误。
+
+## 附件大小上限
+
+普通附件上限由主机环境变量 `CARDIGAN_ATTACHMENT_MAX_MIB` 决定（整数 MiB，1–64，默认 10）；非法值拒绝启动。server 和 CLI 都按它校验，建议写进两者共同加载的 runtime.env（或 server 的服务单元与 CLI 的环境保持一致），改完重启 server 生效。base64 长度、MCP 与 Workbench 请求体上限随之推出；Workbench 登录后从会话读取上限，worker 上的 upload-evidence 助手从 `upload_attachment` 公布的长度上限读取，download-attachment 接受不超过 64 MiB 的普通附件。前面若有反向代理，请求体上限需不小于 `4 × ⌈上限 / 3⌉ + 1 MiB`（30 MiB 约 41 MiB）。更大的文件走制品上传通道。
+
+## 视频附件（C-683）
+
+mp4、mov、webm、m4v 视频单独限额：`CARDIGAN_VIDEO_MAX_MIB`（整数 MiB，1–2048，默认 1024），和上面一样写进 server 与 CLI 共同加载的环境。视频不走 base64 JSON：Workbench 和 Agent 按 8 MiB 分块续传（`<数据目录>/uploads`，一天未动的上传自动清理），CLI 直接流式拷入附件目录；三者都按文件头核对格式。前面若有反向代理，请求体上限需不小于 8 MiB 加少量头部。
+
+主机不做任何视频解码、抽帧、转码或缩略图：封面帧、时长和分辨率由上传者的浏览器在上传前生成（video + canvas），编码名取自容器记录，随附件一起提交；服务端只读文件开头核对格式。CLI 和 Agent 上传的视频没有封面，时间线显示通用图标。Agent 要看画面时，在自己的 worker 上运行 `download-attachment.mjs <地址> <附件编号> <新文件> --frames <新目录> [--every 秒 | --at 秒,秒]`，用 worker 本机的 ffmpeg（含 ffprobe）抽帧；没有 ffmpeg 时助手照常保存视频并明确提示。需要 Agent 看视频的 worker 请预装 ffmpeg。
 
 ## 使用隔离模式启动 Assignment
 

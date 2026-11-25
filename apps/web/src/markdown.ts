@@ -1,4 +1,10 @@
+import { attachmentRefMatches } from "@cardigan/domain";
 import MarkdownIt from "markdown-it";
+import {
+  type AttachmentRefs,
+  type AttachmentRefTarget,
+  formatBytes,
+} from "./attachment-refs.js";
 import { idBadgeClass, idType } from "./id-types.js";
 
 /**
@@ -162,9 +168,108 @@ markdown.renderer.rules.table_open = (tokens, index, options, _env, self) =>
 markdown.renderer.rules.table_close = (tokens, index, options, _env, self) =>
   `${self.renderToken(tokens, index, options)}</div>\n`;
 
+/**
+ * C-615: `attachment-123` in body text becomes a chip when `env.attachments`
+ * knows it (the reader may see it); anything else stays text. Link labels and
+ * code are left alone. Runs after `text_join`, so the number is one text token.
+ */
+markdown.core.ruler.push("attachment_refs", (state) => {
+  const refs = (state.env as { attachments?: AttachmentRefs } | undefined)
+    ?.attachments;
+  if (!refs?.size) return;
+  for (const block of state.tokens) {
+    if (block.type !== "inline" || !block.children) continue;
+    let links = 0;
+    const children: typeof block.children = [];
+    for (const token of block.children) {
+      if (token.type === "link_open") links += 1;
+      if (token.type === "link_close") links -= 1;
+      if (token.type !== "text" || links > 0) {
+        children.push(token);
+        continue;
+      }
+      let last = 0;
+      // The parser already split off code and links: all of it is prose.
+      for (const match of attachmentRefMatches(token.content, {
+        literals: false,
+      })) {
+        const target = refs.get(match.token);
+        if (!target) continue;
+        const at = match.start;
+        if (at > last) {
+          const text = new state.Token("text", "", 0);
+          text.content = token.content.slice(last, at);
+          children.push(text);
+        }
+        const chip = new state.Token("attachment_ref", "", 0);
+        chip.meta = { target };
+        children.push(chip);
+        last = match.end;
+      }
+      if (last === 0) children.push(token);
+      else if (last < token.content.length) {
+        const text = new state.Token("text", "", 0);
+        text.content = token.content.slice(last);
+        children.push(text);
+      }
+    }
+    block.children = children;
+  }
+});
+
+const ICONS = {
+  image:
+    '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+  pdf: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h2.5a1.5 1.5 0 0 1 0 3H8v-3zm0 3v2"/>',
+  text: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>',
+  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+  video:
+    '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18"/><path d="M3 7.5h4"/><path d="M3 12h18"/><path d="M3 16.5h4"/><path d="M17 3v18"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/>',
+} as const;
+
+/** The chip's markup; every value is escaped, `href` is a same-site path. */
+export function attachmentChip(target: AttachmentRefTarget): string {
+  const esc = markdown.utils.escapeHtml;
+  const icon = `<svg class="ui-attachment-ref-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[target.kind]}</svg>`;
+  const name = `<span class="ui-attachment-ref-name">${esc(target.name)}</span>`;
+  const where = target.cardId ? ` · ${target.cardId}` : "";
+  const href = target.href;
+  if (href === undefined || !isAllowedLink(href) || !href.startsWith("/"))
+    return `<span class="ui-attachment-ref" data-kind="${target.kind}" data-pending="" title="${esc(`${target.name} · 待上传 · ${formatBytes(target.size)}`)}">${icon}${name}</span>`;
+  const title = esc(
+    `${target.name} · ${target.id}${where} · ${formatBytes(target.size)}`,
+  );
+  const open =
+    target.kind === "file"
+      ? " download"
+      : ' target="_blank" rel="noopener noreferrer"';
+  const peek =
+    target.kind === "image" && target.thumbnail?.startsWith("/")
+      ? `<span class="ui-attachment-ref-peek ui-tip" aria-hidden="true"><img src="${esc(target.thumbnail)}" alt="" loading="lazy"></span>`
+      : "";
+  const preview =
+    target.kind === "image" && target.preview?.startsWith("/")
+      ? ` data-preview="${esc(target.preview)}"`
+      : "";
+  return `<a class="ui-attachment-ref" href="${esc(href)}" data-attachment-ref="${esc(target.id)}" data-kind="${target.kind}" data-mime="${esc(target.mime)}"${preview} title="${title}"${open}>${icon}${name}${peek}</a>`;
+}
+
+markdown.renderer.rules.attachment_ref = (tokens, index) => {
+  const target = (
+    tokens[index]?.meta as { target?: AttachmentRefTarget } | undefined
+  )?.target;
+  return target ? attachmentChip(target) : "";
+};
+
 /** Render one body to HTML; the caller owns the container element. */
-export function renderMarkdown(source: string): string {
-  return markdown.render(source);
+export function renderMarkdown(
+  source: string,
+  options: { readonly attachments?: AttachmentRefs } = {},
+): string {
+  return markdown.render(
+    source,
+    options.attachments ? { attachments: options.attachments } : {},
+  );
 }
 
 /** Long paragraph-only prose is secondary; structured or short content stays prominent. */

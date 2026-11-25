@@ -1,4 +1,5 @@
 import {
+  Fragment,
   type ReactNode,
   useCallback,
   useEffect,
@@ -15,6 +16,7 @@ import {
   type MachineBindingView,
   type MachineView,
 } from "../api.js";
+import { hasInstallGuide } from "../capability-install.js";
 import { runLimitSetting, useCapacity } from "../components/Capacity.js";
 import { Drawer } from "../components/Drawer.js";
 import {
@@ -26,20 +28,26 @@ import {
 } from "../components/Foundation.js";
 import { IdTag } from "../components/IdTag.js";
 import { CardDetailLayout } from "../components/layout/CardDetailLayout.js";
-import { DataTableCell } from "../components/layout/DataTableLayout.js";
+import {
+  DataTableCell,
+  DataTableRowDetail,
+} from "../components/layout/DataTableLayout.js";
 import {
   SettingsConfirmDialog,
   SettingsDrawerFeedback,
   SettingsFact,
   SettingsFacts,
   SettingsPanel,
+  SettingsRowActions,
   SettingsSection,
   SettingsTable,
   settingsDrawerClassName,
   useDrawerReturnFocus,
 } from "../components/layout/SettingsLayout.js";
 import { CAPABILITY_TAGS } from "../components/MachineDetail.js";
+import { OffsiteStatusSection } from "../components/OffsiteStatus.js";
 import { CardLink } from "../components/Operations.js";
+import { ProcessHealthSection } from "../components/ProcessHealth.js";
 import {
   RequestFeedback,
   type RequestFeedbackProps,
@@ -60,10 +68,22 @@ import {
   type MachineCheckRow,
   machineActiveRuns,
 } from "../machine-labels.js";
+import {
+  pendingPairingCode,
+  subscribePairingCode,
+  takePairingCode,
+} from "../pairing-link.js";
 import { settingKey, trackSettingsRead } from "../settings-clock.js";
 import { statusLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 import { MachineAgentLimit, MergeCheckCapacity } from "./AgentLimit.js";
+import {
+  CapabilityGuideDialog,
+  type CapabilityNote,
+  CapabilityNotes,
+  useCapabilityGuides,
+} from "./CapabilityGuide.js";
+import { CapabilityInstallDialog } from "./CapabilityInstall.js";
 import {
   checkingWithoutId,
   machineActions,
@@ -253,12 +273,24 @@ export function MachinesSettings({
     reloadList();
     reloadCapacity?.();
   }, [reloadList, reloadCapacity]);
-  const [wizard, setWizard] = useState(false);
+  /** The add-worker drawer; C-707: started from a pairing code or not. */
+  const [wizard, setWizard] = useState<
+    false | { pairing?: { code: string | undefined } }
+  >(false);
   const [resumable, setResumable] = useState(() => !!storedWizard(projectId));
   const [notice, setNotice] = useNotice();
-  const wizardFocus = useDrawerReturnFocus(wizard, () =>
+  const wizardFocus = useDrawerReturnFocus(wizard !== false, () =>
     document.getElementById("machines"),
   );
+  // C-707: a QR pairing link opens the pairing step with its code filled in.
+  const pairable = canEdit && !!client.pairWorkerDevice;
+  const linked = useSyncExternalStore(subscribePairingCode, pendingPairingCode);
+  useEffect(() => {
+    if (!linked || !pairable || wizard) return;
+    // Taken once (StrictMode runs this twice): only a real code opens it.
+    const code = takePairingCode();
+    if (code) setWizard({ pairing: { code } });
+  }, [linked, pairable, wizard]);
   const closeWizard = (exit: WizardExit) => {
     setWizard(false);
     setResumable(!!storedWizard(projectId));
@@ -274,16 +306,29 @@ export function MachinesSettings({
       help={MACHINES_HELP}
       actions={
         canEdit && client.createWorkerWizard ? (
-          <Button
-            variant="primary"
-            aria-haspopup="dialog"
-            onClick={() => {
-              wizardFocus.remember();
-              setWizard(true);
-            }}
-          >
-            {resumable ? "继续添加 worker" : "添加 worker"}
-          </Button>
+          <>
+            {pairable && (
+              <Button
+                aria-haspopup="dialog"
+                onClick={() => {
+                  wizardFocus.remember();
+                  setWizard({ pairing: { code: undefined } });
+                }}
+              >
+                新设备接入（配对码）
+              </Button>
+            )}
+            <Button
+              variant="primary"
+              aria-haspopup="dialog"
+              onClick={() => {
+                wizardFocus.remember();
+                setWizard({});
+              }}
+            >
+              {resumable ? "继续添加 worker" : "添加 worker"}
+            </Button>
+          </>
         ) : undefined
       }
     >
@@ -373,6 +418,7 @@ export function MachinesSettings({
         <WorkerWizardDrawer
           client={client}
           projectId={projectId}
+          pairing={wizard.pairing}
           pollMs={pollMs}
           onChanged={changed}
           onClose={closeWizard}
@@ -452,6 +498,12 @@ function MachineDrawer({
     pollMs,
     onChanged: changed,
   });
+  /** C-708: the capability whose install commands are open. */
+  const [installing, setInstalling] = useState<string>();
+  /** C-727: the capability usage notes and the one being edited. */
+  const guides = useCapabilityGuides(client, projectId, summary.id, revision);
+  const [editing, setEditing] = useState<string>();
+  const [guideNotice, setGuideNotice] = useNotice();
   return (
     <Drawer
       className={settingsDrawerClassName}
@@ -491,11 +543,21 @@ function MachineDrawer({
           <CapacityFeedback capacity={capacity} />
           <RequestFeedback interactive {...actions.checkFeedback} />
           <RequestFeedback interactive {...actions.drainFeedback} />
+          <RequestFeedback {...guides.feedback} />
+          <RequestFeedback message={guideNotice} />
         </SettingsDrawerFeedback>
         {machine && (
           <MachineFacts
             machine={machine}
             capacity={capacity}
+            onInstall={setInstalling}
+            notes={guides.supported ? guides.notes : undefined}
+            onEditNote={
+              canEdit && client.setCapabilityGuide && guides.supported
+                ? setEditing
+                : undefined
+            }
+            noteLocked={!guides.fresh}
             limit={
               detail.data && (
                 <MachineAgentLimit
@@ -510,6 +572,44 @@ function MachineDrawer({
             }
           />
         )}
+        {machine && installing && (
+          <CapabilityInstallDialog
+            machine={machine}
+            capabilityKey={installing}
+            recheck={{
+              available: canEdit && actions.checkable,
+              locked: actions.checkLocked,
+              following: !!actions.following,
+              againable: actions.againable,
+              start: actions.start,
+              ask: actions.ask,
+              feedback: actions.checkFeedback,
+            }}
+            onClose={() => setInstalling(undefined)}
+          />
+        )}
+        {machine && editing && (
+          <CapabilityGuideDialog
+            client={client}
+            projectId={projectId}
+            machine={machine}
+            capabilityKey={editing}
+            note={guides.note(editing)}
+            locked={!guides.fresh}
+            onWritten={guides.written}
+            onSaved={() => {
+              setEditing(undefined);
+              setGuideNotice(`已保存 ${editing} 使用说明`);
+            }}
+            onClose={() => setEditing(undefined)}
+          />
+        )}
+        {machine?.id === "local" && client.offsiteStatus && (
+          <OffsiteStatusSection client={client} />
+        )}
+        {machine?.id === "local" && client.processHealth && (
+          <ProcessHealthSection client={client} />
+        )}
       </CardDetailLayout>
     </Drawer>
   );
@@ -519,11 +619,23 @@ function MachineFacts({
   machine,
   capacity: shared,
   limit,
+  onInstall,
+  notes,
+  onEditNote,
+  noteLocked = false,
 }: {
   machine: MachineView;
   capacity: MachineCapacity;
   /** The Agent limit: editable when the shared capacity read has it. */
   limit: ReactNode;
+  /** C-708: open a first-batch tool's install commands. */
+  onInstall?: (key: string) => void;
+  /** C-727: the current project's usage notes by capability key. */
+  notes?: ReadonlyMap<string, CapabilityNote> | undefined;
+  /** C-727: open a capability's notes for editing (owner's session). */
+  onEditNote?: ((key: string) => void) | undefined;
+  /** C-727: the notes were not read again after the last write yet. */
+  noteLocked?: boolean;
 }) {
   const capacity = shared.of(machine.id);
   const bindings = [...machine.bindings].sort(
@@ -540,6 +652,25 @@ function MachineFacts({
       )
       .map((capability) => ({ binding, capability })),
   );
+  // C-708: tools of the first batch this project has not verified here.
+  const installable = (
+    binding: MachineBindingView,
+    key: string,
+    state: string,
+  ) =>
+    !!onInstall &&
+    binding.is_current &&
+    state !== "verified" &&
+    hasInstallGuide(key);
+  // C-727: notes belong to the current project, like the install entry.
+  const editable = (binding: MachineBindingView) =>
+    !!onEditNote && binding.is_current;
+  const actionColumn = capabilities.some(
+    ({ binding, capability }) =>
+      editable(binding) ||
+      installable(binding, capability.key, capability.state),
+  );
+  const columns = actionColumn ? 6 : 5;
   const runs = bindings.flatMap((b) =>
     b.assignments.flatMap((a) =>
       a.runs.map((run) => ({
@@ -588,11 +719,11 @@ function MachineFacts({
           </SettingsFacts>
         )}
       </SettingsSection>
-      <SettingsSection title="已验证能力">
+      <SettingsSection title="能力">
         {capabilities.length === 0 ? (
           <p>没有能力记录</p>
         ) : (
-          <SettingsTable aria-label="已验证能力">
+          <SettingsTable aria-label="能力">
             <TableHeader>
               <TableRow>
                 <TableHead>能力</TableHead>
@@ -600,33 +731,75 @@ function MachineFacts({
                 <TableHead>版本</TableHead>
                 <TableHead>验证时间</TableHead>
                 <TableHead>状态</TableHead>
+                {actionColumn && <TableHead>操作</TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
               {capabilities.map(({ binding, capability: c }) => {
                 const tag = CAPABILITY_TAGS[c.state];
+                const note = binding.is_current ? notes?.get(c.key) : undefined;
+                const install = installable(binding, c.key, c.state);
                 return (
-                  <TableRow key={`${binding.project_id}:${c.key}`}>
-                    <DataTableCell nowrap data-record="lead">
-                      <code>{c.key}</code>
-                    </DataTableCell>
-                    <DataTableCell data-label="项目">
-                      {binding.project_name}
-                    </DataTableCell>
-                    <DataTableCell nowrap data-label="版本">
-                      {c.version ?? "—"}
-                    </DataTableCell>
-                    <DataTableCell nowrap data-label="验证时间">
-                      {c.verified_at ? <Time value={c.verified_at} /> : "—"}
-                    </DataTableCell>
-                    <DataTableCell nowrap data-record="aside">
-                      <StatusTag
-                        status={tag.status}
-                        label={tag.label}
-                        subdued={c.state !== "verified"}
-                      />
-                    </DataTableCell>
-                  </TableRow>
+                  <Fragment key={`${binding.project_id}:${c.key}`}>
+                    <TableRow>
+                      <DataTableCell nowrap data-record="lead">
+                        <code>{c.key}</code>
+                      </DataTableCell>
+                      <DataTableCell data-label="项目">
+                        {binding.project_name}
+                      </DataTableCell>
+                      <DataTableCell nowrap data-label="版本">
+                        {c.version ?? "—"}
+                      </DataTableCell>
+                      <DataTableCell nowrap data-label="验证时间">
+                        {c.verified_at ? <Time value={c.verified_at} /> : "—"}
+                      </DataTableCell>
+                      <DataTableCell nowrap data-record="aside">
+                        <StatusTag
+                          status={tag.status}
+                          label={tag.label}
+                          subdued={c.state !== "verified"}
+                        />
+                      </DataTableCell>
+                      {actionColumn && (
+                        <DataTableCell nowrap>
+                          {(install || editable(binding)) && (
+                            <SettingsRowActions>
+                              {install && (
+                                <Button
+                                  aria-haspopup="dialog"
+                                  aria-label={`安装 ${c.key}`}
+                                  onClick={() => onInstall?.(c.key)}
+                                >
+                                  安装
+                                </Button>
+                              )}
+                              {editable(binding) && (
+                                <Button
+                                  aria-haspopup="dialog"
+                                  aria-label={`编辑 ${c.key} 使用说明`}
+                                  aria-disabled={noteLocked || undefined}
+                                  onClick={() => {
+                                    if (!noteLocked) onEditNote?.(c.key);
+                                  }}
+                                >
+                                  编辑说明
+                                </Button>
+                              )}
+                            </SettingsRowActions>
+                          )}
+                        </DataTableCell>
+                      )}
+                    </TableRow>
+                    {note && (
+                      <DataTableRowDetail
+                        columns={columns}
+                        aria-label={`${c.key} 使用说明`}
+                      >
+                        <CapabilityNotes note={note} />
+                      </DataTableRowDetail>
+                    )}
+                  </Fragment>
                 );
               })}
             </TableBody>

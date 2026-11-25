@@ -73,10 +73,12 @@ const link = (value: string) => {
     throw new Error("Invalid notification link");
   return { tag: "a" as const, text: "打开工作台", href: url.href };
 };
-const line = (message: ExtMessageEntry) =>
-  "kind" in message
-    ? `${message.card ? `${message.card} ` : ""}${labels[message.kind]}：${message.title}`
-    : message.title;
+const line = (message: ExtMessageEntry) => {
+  if (!("kind" in message)) return message.title;
+  // C-674: the full number (`SEN-C-34`) when the project has a code.
+  const ref = message.ref ?? message.card;
+  return `${ref ? `${ref} ` : ""}${labels[message.kind]}：${message.title}`;
+};
 
 export function feishuPayload(message: ExtMessage) {
   const prefix = `[Cardigan]${message.project ? ` ${message.project}` : ""}`;

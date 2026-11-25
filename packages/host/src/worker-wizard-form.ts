@@ -1,5 +1,8 @@
 import { join } from "node:path";
-import { workerDirectoryCommand } from "./worker-directory-command.js";
+import {
+  workerDirectoryCommand,
+  workerReleaseRoot,
+} from "./worker-directory-command.js";
 import { workerJournalId } from "./worker-onboarding.js";
 import {
   onboardingDigest,
@@ -25,6 +28,7 @@ export function workerWizardForm(
     host,
     port = 22,
     mcp_url,
+    layout,
   } = form;
   if (
     Object.keys(form).some(
@@ -40,6 +44,7 @@ export function workerWizardForm(
           "host",
           "port",
           "mcp_url",
+          "layout",
         ].includes(k),
     ) ||
     typeof machine !== "string" ||
@@ -56,13 +61,15 @@ export function workerWizardForm(
         v >= 501 &&
         v <= 2147483647,
     ) ||
-    (os !== "linux" && os !== "macos" && os !== "darwin")
+    (os !== "linux" && os !== "macos" && os !== "darwin") ||
+    // C-706: a read-only root (SteamOS) keeps the work root under /home.
+    (layout !== undefined && (layout !== "home" || os !== "linux"))
   )
     return onboardingFail("worker_form_invalid");
   workerJournalId(project, machine);
   const mac = os !== "linux",
     home = `${mac ? "/Users" : "/home"}/${account}`,
-    work = `${mac ? "/Users" : "/srv"}/cardigan-workers/${project}`;
+    work = `${mac ? "/Users" : layout === "home" ? "/home" : "/srv"}/cardigan-workers/${project}`;
   const alias = `cg-${onboardingDigest([project, machine]).slice(0, 20)}`;
   const raw = {
     version: 1,
@@ -144,6 +151,7 @@ function targetCommands(
   work: string,
   project: string,
 ) {
+  const release = workerReleaseRoot(mac, work);
   return {
     account: mac
       ? [
@@ -165,7 +173,7 @@ function targetCommands(
     helpers: [
       ...["worker-files.py", "worker-git.py"].map(
         (file) =>
-          `sudo test ! -L ${work}/libexec/${file} && (sudo cmp -s /opt/cardigan/deploy/${file} ${work}/libexec/${file} || (sudo test ! -e ${work}/libexec/${file} && sudo install -o root -g ${user} -m 0750 /opt/cardigan/deploy/${file} ${work}/libexec/${file}))`,
+          `sudo test ! -L ${work}/libexec/${file} && (sudo cmp -s ${release}/deploy/${file} ${work}/libexec/${file} || (sudo test ! -e ${work}/libexec/${file} && sudo install -o root -g ${user} -m 0750 ${release}/deploy/${file} ${work}/libexec/${file}))`,
       ),
       `sudo test ! -L ${work}/libexec/agent-tools && sudo install -d -o root -g ${user} -m 0750 ${work}/libexec/agent-tools`,
       ...[
@@ -173,11 +181,11 @@ function targetCommands(
         "agent-tools/upload-evidence.mjs",
       ].map(
         (file) =>
-          `sudo test ! -L ${work}/libexec/${file} && sudo install -o root -g ${user} -m 0750 /opt/cardigan/deploy/${file} ${work}/libexec/${file}`,
+          `sudo test ! -L ${work}/libexec/${file} && sudo install -o root -g ${user} -m 0750 ${release}/deploy/${file} ${work}/libexec/${file}`,
       ),
     ].join(" && "),
     tools: mac
       ? `codesign --verify --deep --strict -R '=anchor apple generic and identifier "dev.herdr.core" and certificate leaf[subject.OU] = "2W9652Q7QR"' '/Applications/Herdr Core.app' && sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' ${home}/.local/bin/hc && sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' ${home}/.local/bin/herdr-core`
-      : `sudo /usr/bin/python3 -I - <<'PY'\nimport os, pathlib, platform, runpy\nbinary = runpy.run_path('/opt/cardigan/deploy/install-agent.py')['payload'](None, platform.machine())\nfor name in ('hc', 'herdr-core'):\n    path = pathlib.Path('${home}/.local/bin') / name\n    if path.exists():\n        if path.is_symlink() or path.read_bytes() != binary: raise SystemExit('installed binary conflict')\n        continue\n    with path.open('xb') as f:\n        os.fchmod(f.fileno(), 0o600)\n        f.write(binary)\n        os.fchown(f.fileno(), 0, ${gid})\n        os.fchmod(f.fileno(), 0o750)\nPY`,
+      : `sudo /usr/bin/python3 -I - <<'PY'\nimport os, pathlib, platform, runpy\nbinary = runpy.run_path('${release}/deploy/install-agent.py')['payload'](None, platform.machine())\nfor name in ('hc', 'herdr-core'):\n    path = pathlib.Path('${home}/.local/bin') / name\n    if path.exists():\n        if path.is_symlink() or path.read_bytes() != binary: raise SystemExit('installed binary conflict')\n        continue\n    with path.open('xb') as f:\n        os.fchmod(f.fileno(), 0o600)\n        f.write(binary)\n        os.fchown(f.fileno(), 0, ${gid})\n        os.fchmod(f.fileno(), 0o750)\nPY`,
   };
 }

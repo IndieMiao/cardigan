@@ -2,12 +2,20 @@ import type {
   AssignmentId,
   ProjectId,
   RetirementIdentity,
+  RetirementStop,
   Runtime,
   RuntimeRef,
+  TurnIdlePrompt,
 } from "@cardigan/domain";
-import type { StoreTransactionContext } from "@cardigan/store";
+import { loadCommandState } from "@cardigan/mcp-server";
+import type { ExecutionConfig } from "@cardigan/runtime-herdr";
+import type { Store, StoreTransactionContext } from "@cardigan/store";
 import { idleRetirementPolicy } from "./idle-session-retirement.js";
-import { observeTurnOwner } from "./stall-evidence.js";
+import {
+  observeTurnOwner,
+  type SessionExitVerdict,
+  sessionExitProof,
+} from "./stall-evidence.js";
 
 const exited = (result: Awaited<ReturnType<Runtime["status"]>> | undefined) =>
   result?.ok
@@ -45,6 +53,74 @@ export async function stopRunRuntime(
     : ("unconfirmed" as const);
 }
 
+/**
+ * C-620: a managed `assignment stop` may only treat its own release as exit
+ * when that release ended a live session: the adapter checked this session's
+ * identity and killed it. Observe before releasing; a finished or missing
+ * terminal row says nothing about the session's process group.
+ */
+export async function stoppedSessionLive(
+  runtime: Runtime,
+  ref: RuntimeRef,
+  owner: RetirementIdentity,
+): Promise<boolean> {
+  if (runtime.observe_retirement) {
+    const exact = await runtime
+      .observe_retirement(ref, owner)
+      .catch(() => undefined);
+    return exact?.ok === true && exact.value === "alive";
+  }
+  const observed = await runtime.status(ref).catch(() => undefined);
+  return observed?.ok === true && observed.value.process === "alive";
+}
+
+/**
+ * C-620: independent exit proof when the release did not end a live session
+ * (the row was already finished or gone). Removing or reading a terminal row
+ * is never proof. Locally only the kernel check that this session's launch
+ * receipt process and its whole group are gone counts.
+ *
+ * C-663: a remote session counts as exited when its terminal is no longer
+ * listed (or finished) and the worker shows that the registered launch's
+ * process and whole group are gone (`sessionExitProof`). An unreachable
+ * worker or an unregistered launch proves nothing; the caller keeps the
+ * reference and the stop.
+ */
+export async function stoppedSessionExited(
+  runtime: Runtime,
+  ref: RuntimeRef,
+  owner: RetirementIdentity,
+  remote?: () => Promise<SessionExitVerdict>,
+): Promise<SessionExitVerdict> {
+  if (ref.machine_id !== "local")
+    return remote ? remote().catch(() => "unproven" as const) : "unproven";
+  if (!ref.local_process_receipt) return "unproven";
+  for (const check of [
+    runtime.confirm_local_group_exit,
+    runtime.confirm_local_exit,
+  ]) {
+    const proof = await check?.call(runtime, ref, owner).catch(() => undefined);
+    if (proof?.ok === true && proof.value) return "exited";
+  }
+  return "unproven";
+}
+
+/** C-663: the remote half of `stoppedSessionExited`, on the stored session. */
+export async function storedSessionExitProof(
+  store: Store,
+  project: ProjectId,
+  assignment: AssignmentId,
+  ref: RuntimeRef,
+  runtime: Runtime,
+  execution?: ExecutionConfig,
+): Promise<SessionExitVerdict> {
+  const state = store.uow.read((tx) => loadCommandState(tx, project));
+  const a = state.assignments.find((v) => v.id === assignment);
+  if (!a || JSON.stringify(a.runtime_ref) !== JSON.stringify(ref))
+    return "unproven";
+  return sessionExitProof(state, a, runtime, execution);
+}
+
 /** System-ended bells never use address-based release, even for cleanup. A
  * previously started stop may only read exit evidence; no second signal.
  * A local "exited" needs process evidence beyond the finished terminal row:
@@ -57,18 +133,29 @@ export async function stopSystemTurn(
   checkWorkspace: () => Promise<boolean>,
   beforeSignal: () => boolean,
   processExited: () => Promise<boolean> = async () => false,
+  turn: {
+    /** C-626: the bound empty editor stands in for missing hc activity. */
+    readonly idlePrompt?: TurnIdlePrompt | undefined;
+    /** C-626: a macOS worker generation (idle owner, then enrolled PID).
+     * Its exit is proven by `processExited` (the registered group). */
+    readonly remoteSignal?: boolean;
+    /** Which owner-bound TERM was attempted, once the stop has an outcome. */
+    readonly report?: (stop: RetirementStop | undefined) => void;
+  } = {},
 ) {
   if (!ref) return "terminal_binding_changed";
+  const remote = ref.machine_id !== "local";
   const confirmed = async (groupExited = false) => {
     const exact = await observeTurnOwner(runtime, ref, owner);
     if (exact?.ok !== true || exact.value !== "exited") return false;
-    // Remote callers prove the registered group's exit before calling.
-    return ref.machine_id !== "local" || groupExited || processExited();
+    // Observe-only remote callers prove the registered group's exit before calling.
+    if (remote) return !turn.remoteSignal || processExited();
+    return groupExited || processExited();
   };
-  // Remote stall recovery observes an exit; it never acquires new signal authority.
-  if (alreadyStopping || ref.machine_id !== "local")
+  // Other remote stall recovery observes an exit; it never acquires new signal authority.
+  if (alreadyStopping || (remote && !turn.remoteSignal))
     return (await confirmed()) ? "exited" : "terminal_exit_unconfirmed";
-  if (ref.local_process_receipt) {
+  if (ref.local_process_receipt && !remote) {
     const before = await observeTurnOwner(runtime, ref, owner);
     if (before?.ok && before.value === "exited")
       return (await processExited()) ? "exited" : "terminal_exit_unconfirmed";
@@ -82,6 +169,7 @@ export async function stopSystemTurn(
       hangup_ms,
       terminate_ms,
       system_finished_turn: true,
+      ...(turn.idlePrompt ? { idle_prompt: turn.idlePrompt } : {}),
       workspace_preflight: async () =>
         (workspaceReady = await checkWorkspace()),
       before_signal: () => {
@@ -92,6 +180,12 @@ export async function stopSystemTurn(
       },
     })
     .catch(() => undefined);
+  if (result?.ok)
+    turn.report?.(
+      result.value.outcome === "exited"
+        ? result.value.stop
+        : result.value.evidence.stop,
+    );
   if (result?.ok && result.value.outcome === "withdrawn")
     return result.value.evidence.reason;
   const groupExited =

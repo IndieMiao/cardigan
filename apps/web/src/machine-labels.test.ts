@@ -152,6 +152,38 @@ test("MC-5 a resource that sets the remaining ratio is named with its selection-
   ).toEqual(["剩余容量 25%（占用 6/8）"]);
 });
 
+test("C-716 a full project quota is named, and an all-full selection says what it queues on", () => {
+  const candidate = {
+    machine_id: "cardigan-ci",
+    affinity: false,
+    control_host: false,
+    limit: 12,
+    occupied: 3,
+    remaining_ratio: 0,
+    preference_rank: null,
+    project_limit: { limit: 3, occupied: 3 },
+  };
+  expect(candidateReasons(candidate)).toEqual([
+    "剩余容量 0%（项目占用 3/3，机器占用 3/12）",
+  ]);
+  expect(
+    candidateReasons({
+      ...candidate,
+      project_limit: { limit: 3, occupied: 1 },
+      project_resources: [{ key: "godot", limit: 1, occupied: 1 }],
+    }),
+  ).toEqual(["剩余容量 0%（项目 godot 占用 1/1，机器占用 3/12）"]);
+  expect(
+    selectionSummary({
+      status: "selected",
+      at,
+      machine_id: "cardigan-ci",
+      candidates: [candidate],
+      queued_on: ["项目上限 3/3"],
+    }),
+  ).toBe("cardigan-ci（合格机器均已满，排队：项目上限 3/3）");
+});
+
 test("MC-5 capability state falls back to availability for older servers", () => {
   const base = { key: "node", version: null, verified_at: at };
   expect(capabilityState({ ...base, available: true })).toBe("verified");

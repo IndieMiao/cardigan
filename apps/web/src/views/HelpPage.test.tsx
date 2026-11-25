@@ -50,6 +50,7 @@ test("help opens from the shell, marks the sidebar and restores article navigati
   ).toBeTruthy();
   const sidebar = screen.getByRole("navigation", { name: "工具" });
   expect([...sidebar.children].map((child) => child.textContent)).toEqual([
+    "共享文件",
     "设置",
     "帮助",
     "登出",

@@ -9,6 +9,8 @@ const buttonVariants = cva("ui-button", {
     variant: {
       default: "ui-button-default",
       primary: "ui-button-primary",
+      /** The page's single main action or a dialog's confirm (--accent fill). */
+      emphasis: "ui-button-emphasis",
       secondary: "ui-button-secondary",
       outline: "ui-button-default",
       ghost: "ui-button-ghost",

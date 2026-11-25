@@ -28,6 +28,7 @@ import {
   isStandingPm,
   occupiedRunSlots,
   type QueuedRun,
+  runHoldsCapacity,
   runQueuePositions,
 } from "./run-capacity.js";
 
@@ -58,6 +59,38 @@ test("absolute occupancy retains exempt Runs; only dispatched/acked/running coun
       "cancelled",
     ] as const
   ).map((status): Run => ({ ...run, status }));
+  // C-620: the same unfinished statuses hold admission. A business-ended turn
+  // never does, even with a stop fence left behind; a cancelled Run under a
+  // stop fence may still execute and keeps it until exit is confirmed.
+  const fence = {
+    attempt_id: "stop",
+    runtime_ref: {
+      machine_id: "local",
+      runtime_machine: "local",
+      terminal_ref: "t",
+      agent_name: "a",
+    },
+    stopping: true,
+    lease_until: "2026-01-01T00:00:00.000Z",
+  } as NonNullable<Run["inactivity_stop"]>;
+  expect(runs.filter(runHoldsCapacity).map((r) => r.status)).toEqual([
+    "dispatched",
+    "acked",
+    "running",
+  ]);
+  expect(
+    runs
+      .map((r): Run => ({ ...r, inactivity_stop: fence }))
+      .filter(runHoldsCapacity)
+      .map((r) => r.status),
+  ).toEqual([
+    "queued",
+    "dispatched",
+    "acked",
+    "running",
+    "unknown",
+    "cancelled",
+  ]);
   expect(isStandingPm(pm)).toBe(true);
   expect(isStandingPm({ ...f.coder, role_id: "pm" })).toBe(false);
   expect(isStandingPm({ ...pm, role_id: "observer" })).toBe(false);
@@ -382,12 +415,16 @@ test("q(86) rejects unproven exit and Agent authority, and cancellation preserve
   });
 });
 
-test("q(86) holds capacity and launch exclusion during stop even if the Run finishes or becomes unknown", () => {
+test("q(86) keeps physical occupancy and launch exclusion during stop even if the Run finishes; C-620 the ended turn releases admission", () => {
   const t = inactiveFixture();
   t.advance(DEFAULT_INACTIVE_CANCEL_AFTER_MS);
   const stop = t.claim()?.inactivity_stop;
   if (!stop) throw new Error("Missing stop intent");
   t.start(stop.attempt_id);
+  // A running Run under a stop fence still holds its admission slot.
+  expect(f.state.runs.filter(runHoldsCapacity).map((r) => r.id)).toEqual([
+    t.run.id,
+  ]);
   commit(
     finishRun(
       f.state,
@@ -401,6 +438,9 @@ test("q(86) holds capacity and launch exclusion during stop even if the Run fini
     ),
   );
   expect(occupiedRunSlots(f.state.assignments, f.state.runs, "local")).toBe(1);
+  // C-620: the idle session being stopped no longer holds admission or
+  // resource slots, but the same Assignment still cannot launch a second one.
+  expect(f.state.runs.filter(runHoldsCapacity)).toEqual([]);
   expect(queue()).toMatchObject({
     ok: false,
     error: { code: "invariant_violation" },

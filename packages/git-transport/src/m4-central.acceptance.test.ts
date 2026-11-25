@@ -467,11 +467,17 @@ test("§3.4/§14 agent-ssh: upload-pack runs through the Agent entry and host Gi
     expect(call.args).toContain("core.hooksPath=/dev/null");
   }
   // ... and the Agent repository was only ever a fetch source.
+  // C-642: one streaming fetch into a private stage, then a ref-free local
+  // import of the staged tip from that stage.
   const fetches = f.calls.filter((call) => call.args.includes("fetch"));
-  expect(fetches).toHaveLength(1);
+  expect(fetches).toHaveLength(2);
   expect(fetches[0]?.args).toContain(f.base);
   expect(fetches[0]?.args.some((arg) => arg.startsWith("--upload-pack="))).toBe(
     true,
+  );
+  expect(fetches[1]?.args).not.toContain(f.base);
+  expect(fetches[1]?.args.some((arg) => arg.startsWith("--upload-pack="))).toBe(
+    false,
   );
 
   await f.central.backupAgentBranches(f.project, "local");

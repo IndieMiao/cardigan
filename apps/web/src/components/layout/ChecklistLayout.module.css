@@ -37,10 +37,8 @@
   .context {
     color: var(--text-muted);
   }
-  .panel form {
+  .field {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: var(--ui-space-2);
     margin: var(--ui-space-2) 0 0;
   }
   .panel > button {
@@ -74,12 +72,8 @@
     gap: var(--ui-space-2);
     margin-block-start: var(--ui-space-3);
   }
-  @media (max-width: 760px) {
-    .panel form {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .panel form > button {
-      justify-self: end;
-    }
+  .note {
+    align-self: center;
+    color: var(--text-muted);
   }
 }

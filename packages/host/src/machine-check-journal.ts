@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Clock } from "@cardigan/domain";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
+import { releaseSettlingHold } from "./long-operations.js";
 import type {
   CheckKind,
   CheckResult,
@@ -79,6 +80,15 @@ export class MachineCheckJournal {
       )
       .get(machine, project, ...(kind ? [kind] : []));
     return row ? projected(row) : null;
+  }
+  /** C-599: any check of this machine (any project or source) still owned by a live process. */
+  running(machine: string) {
+    return this.store.database
+      .prepare(
+        "SELECT * FROM machine_check_jobs WHERE machine_id=? AND status='running'",
+      )
+      .all(machine)
+      .some((row) => projected(row).status === "running");
   }
   claim(
     project: string,
@@ -180,7 +190,9 @@ export class MachineCheckJournal {
           settleUpgradeCheck(this.store, tx, final);
           finished?.(tx, final);
         });
+        releaseSettlingHold(job.id);
       } catch (error) {
+        releaseSettlingHold(job.id);
         // If the completion/audit transaction rolled back, don't leave a live
         // listener permanently occupying the slot or advertise success.
         this.store.uow.run(() =>

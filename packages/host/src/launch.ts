@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -18,6 +18,7 @@ import {
   abortDispatch,
   canDispatchRun,
   canParkForDiscussion,
+  contextUsageThresholds,
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   idleWakeGuard,
@@ -29,6 +30,8 @@ import {
   reviewRunWakeDisposition,
   standingModeOf,
   standingRunDormant,
+  worktreeUnavailablePrompt,
+  worktreeUnavailableReason,
 } from "@cardigan/domain";
 import {
   defaultToolCatalog,
@@ -41,6 +44,7 @@ import {
   compileAssignmentLaunch,
   compiledLaunchSettings,
   firstPrompt,
+  getHarnessAdapter,
   type LaunchConfig,
   resolveProfile,
   SECRETS_FILE_NAME,
@@ -72,6 +76,7 @@ import {
 } from "@cardigan/store";
 import { loadAgentTestWorkers } from "./agent-test-config.js";
 import { agentToolsDirectoryFor } from "./agent-tools.js";
+import { launchCapabilityNotes } from "./capability-notes.js";
 import {
   applyCommand,
   issueAssignmentToken,
@@ -102,7 +107,10 @@ import {
   runCapacitySnapshot,
 } from "./run-capacity.js";
 import { resourceEntry, verifiedLocalLaunch } from "./run-resource-worker.js";
-import { assignmentResourceKeys } from "./run-resources.js";
+import {
+  assignmentResourceKeys,
+  unclaimedResourceKeys,
+} from "./run-resources.js";
 import {
   deferTargetAttempt,
   RunTargetDeferred,
@@ -133,6 +141,7 @@ import {
   checkWorkerMcp,
   WorkerMcpError,
   workerMcpConfig,
+  workerMcpPython,
 } from "./worker-mcp.js";
 import {
   type PreparedWorktree,
@@ -189,6 +198,11 @@ export interface LaunchHost {
     readonly secrets: Readonly<Record<string, string>>;
   };
   readonly mcpUrl: string;
+  /**
+   * C-600: new sessions must list the Card MCP tools before their first tool
+   * call; a session without native tools is refused and rebuilt once.
+   */
+  readonly verifyMcpSession?: boolean;
   readonly dataDir: string;
   readonly execution?: ExecutionConfig | undefined;
   readonly clock?: Clock | undefined;
@@ -875,7 +889,8 @@ async function launch(
         });
       let run: Run | undefined =
         workItem?.kind === "verify" ||
-        host.leases?.configured(project, assignment.machine_id)
+        host.leases?.configured(project, assignment.machine_id) ||
+        host.leases?.adbNeeded(project, assignment)
           ? undefined
           : dispatch();
       let waking = false;
@@ -1048,6 +1063,9 @@ async function launch(
       tx.runs.get(project, input.run.id),
     );
     if (fresh?.status !== "queued") throw new RunPreparationDeferred();
+    const unclaimed = host.store.uow.read(
+      (tx) => unclaimedResourceKeys(tx, project, assignment, fresh).length > 0,
+    );
     workDir = worktree?.path ?? workDir;
     publication?.update("preparing", {
       work_dir: workDir,
@@ -1091,6 +1109,20 @@ async function launch(
     const compiledReview = reviewContext();
     preparedReviewPrompt = compiledReview?.prompt;
     compiledReviewScope = compiledReview?.scope;
+    // C-600: a per-launch key only this session's harness sends from its own
+    // MCP configuration; the endpoint keeps its digest on the Assignment.
+    const mcpSessionKey = host.verifyMcpSession
+      ? randomBytes(24).toString("base64url")
+      : undefined;
+    // C-676: the session learns its project's code for full numbers.
+    const projectCode = host.store.projectCode(project);
+    // C-726: usage notes of the capabilities this work item requires.
+    const capabilityNotes = launchCapabilityNotes(
+      host.store,
+      project,
+      assignment.machine_id,
+      workItem?.requirements,
+    );
     const compiled = compileAssignmentLaunch({
       ...(employee !== undefined
         ? { employee: { launch_profile_ref: profileRef, identity: employee } }
@@ -1099,6 +1131,7 @@ async function launch(
         assignment_id: assignment.id,
         run_id: input.run.id,
         project_id: project,
+        ...(projectCode === undefined ? {} : { project_code: projectCode }),
         ...(card?.id === undefined ? {} : { card_id: card.id }),
         ...(workItem?.id === undefined ? {} : { work_item_id: workItem.id }),
       },
@@ -1118,9 +1151,30 @@ async function launch(
         capabilities: role.capabilities,
       },
       launch: host.launch.config,
-      ...(input.resourceAccess
+      // An adb slot alone is not a static binding: keep the Run's port
+      // allocations (such as a private Vite port) unrestricted.
+      ...(input.resourceAccess &&
+      (input.resourceAccess.bindings.length || !input.resourceAccess.adb)
         ? { resource_bindings: input.resourceAccess.bindings }
+        : // C-721: a Run admitted without some of its work item's resources
+          // gets no device either; slot machines already give it none.
+          unclaimed && !host.leases?.config.adbSlots(assignment.machine_id)
+          ? { resource_bindings: [] }
+          : {}),
+      // C-679: read the held slot back, so a retried launch of this Run keeps it.
+      ...(host.leases?.config.adbSlots(assignment.machine_id)
+        ? {
+            adb_slot:
+              host.leases.adb.launchSlot(
+                project,
+                assignment.machine_id,
+                input.run.id,
+              ) ?? null,
+          }
         : {}),
+      ...(capabilityNotes === undefined
+        ? {}
+        : { capability_notes: capabilityNotes }),
       ...(execution.mode === "agent-ssh" && execution.env
         ? { worker_env: execution.env }
         : {}),
@@ -1138,7 +1192,16 @@ async function launch(
       ...(assignment.machine_id === "local"
         ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
         : {}),
-      mcp: { url: mcpUrl },
+      status_line: statusLineContext(host.store, project, card?.base_branch),
+      mcp: {
+        url: mcpUrl,
+        ...(mcpSessionKey ? { session_key: mcpSessionKey } : {}),
+        // C-600: the Codex Card bridge runs on the interpreter the MCP
+        // preflight and the machine check use on this worker.
+        ...(remote && execution.mode === "agent-ssh"
+          ? { bridge_python: workerMcpPython(execution) }
+          : {}),
+      },
       run_dir: runDir,
       work_dir: workDir,
       ...(publication ? { worker_launch: publication.wrapper() } : {}),
@@ -1168,6 +1231,15 @@ async function launch(
         preparedReviewPrompt,
         standingModeLine(currentAssignment, standingModeOf(currentAssignment)),
         worktreeBaselinePrompt(worktree),
+        worktree === undefined
+          ? worktreeUnavailablePrompt(
+              worktreeUnavailableReason(
+                role,
+                { scope: assignment.scope },
+                card,
+              ),
+            )
+          : undefined,
       ]
         .filter((line): line is string => line !== undefined)
         .join("\n"),
@@ -1333,6 +1405,17 @@ async function launch(
                 : { tool_catalog: toolCatalog }),
             },
             runtime_ref: dispatchRef,
+            ...(mcpSessionKey &&
+            getHarnessAdapter(compiled.harness).listsMcpToolsAtStartup
+              ? {
+                  verify_mcp_session: {
+                    key_sha256: createHash("sha256")
+                      .update(mcpSessionKey)
+                      .digest("hex"),
+                    token_id: issued.record.id,
+                  },
+                }
+              : {}),
             ...(baseSha === undefined ? {} : { base_sha: baseSha }),
             ...(input.replacement ? { replacement: input.replacement } : {}),
           },
@@ -1623,4 +1706,21 @@ function sessionToolCatalog(
   } catch {
     return undefined;
   }
+}
+
+/** C-686: baseline ref and the project's context thresholds for the status line. */
+export function statusLineContext(
+  store: Store,
+  project: ProjectId,
+  baseBranch: string | undefined,
+) {
+  const { handoff, restart } = contextUsageThresholds(
+    store.uow.read((tx) => tx.project_preferences.get(project, project)) ??
+      undefined,
+  );
+  return {
+    ...(baseBranch ? { base_ref: `origin/${baseBranch}` } : {}),
+    handoff_remaining_pct: handoff,
+    restart_remaining_pct: restart,
+  };
 }

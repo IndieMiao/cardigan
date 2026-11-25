@@ -1,4 +1,4 @@
-import { autoRiskPaths } from "../auto-risk.js";
+import { missingAutoRiskPathEvidence } from "../auto-risk.js";
 import { unmetCardDependencies } from "../card-dependencies.js";
 import { isReviewStale, reviewPassed, unresolvedMustFix } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
@@ -7,7 +7,7 @@ import { autoMergeOn } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
 import { mergeRiskBlockers } from "./delegation.js";
 import { latestMergeCheck } from "./merge-check-view.js";
-import { mergeContext } from "./merge-context.js";
+import { mergeContext, newestById } from "./merge-context.js";
 import { missingMergeCheckReason } from "./merge-failure-view.js";
 import { effectivePreMergeChecks } from "./pre-merge-check-view.js";
 import {
@@ -20,10 +20,32 @@ import {
   type TestReviewProofRead,
 } from "./test-review.js";
 
-const newest = (values: readonly Delivery[]) =>
-  [...values].sort(
-    (a, b) => Number(b.id.replace(/\D/g, "")) - Number(a.id.replace(/\D/g, "")),
-  )[0];
+/**
+ * C-631: newest non-superseded product delivery per work item, from one pass
+ * over deliveries instead of one scan per work item.
+ */
+function currentProducts(
+  deliveries: readonly Delivery[],
+  ids: ReadonlySet<string>,
+): Map<string, Delivery> {
+  const byItem = new Map<string, Delivery[]>();
+  for (const v of deliveries)
+    if (
+      ids.has(v.work_item_id) &&
+      v.kind !== "card_completion" &&
+      v.status !== "superseded"
+    ) {
+      const list = byItem.get(v.work_item_id);
+      if (list) list.push(v);
+      else byItem.set(v.work_item_id, [v]);
+    }
+  const current = new Map<string, Delivery>();
+  for (const [id, list] of byItem) {
+    const v = newestById(list);
+    if (v) current.set(id, v);
+  }
+  return current;
+}
 
 /**
  * §7.4: PM Ops may choose `merge` only when the merge gate passed for the
@@ -55,15 +77,14 @@ export function pmMergeBlockers(
   if (missing.length)
     blockers.push(`前置卡尚未正常完成：${missing.join("、")}`);
   if (context.value.card.hold) blockers.push("卡片已暂停，请先解除暂停");
+  const cardItemIds = new Set<string>();
+  for (const w of state.work_items)
+    if (w.card_id === q.card_id) cardItemIds.add(w.id);
   if (
     invalidTestReviewPasses(
       state,
       state.deliveries.filter(
-        (v) =>
-          v.status !== "superseded" &&
-          state.work_items.some(
-            (w) => w.id === v.work_item_id && w.card_id === q.card_id,
-          ),
+        (v) => v.status !== "superseded" && cardItemIds.has(v.work_item_id),
       ),
       proofReads,
     ).length
@@ -94,17 +115,12 @@ export function pmMergeBlockers(
   // is the human's call (escalate).
   for (const w of items.filter((w) => w.kind === "verify"))
     if (w.status !== "passed") blockers.push(`验证项 ${w.id} 未通过`);
+  const currentByItem = currentProducts(
+    state.deliveries,
+    new Set(items.map((w) => w.id)),
+  );
   const current = items
-    .map((w) =>
-      newest(
-        state.deliveries.filter(
-          (v) =>
-            v.work_item_id === w.id &&
-            v.kind !== "card_completion" &&
-            v.status !== "superseded",
-        ),
-      ),
-    )
+    .map((w) => currentByItem.get(w.id))
     .filter((v): v is Delivery => !!v);
   for (const w of items.filter((w) => w.kind === "produce" && w.required))
     if (
@@ -173,18 +189,13 @@ export function systemMergeBlockers(
         w.kind === "produce" &&
         w.status !== "cancelled",
     );
+    const currentByItem = currentProducts(
+      state.deliveries,
+      new Set(products.map((w) => w.id)),
+    );
+    // Artifact products are never merged, so they need no path evidence.
     if (
-      products.some((w) => {
-        const latest = newest(
-          state.deliveries.filter(
-            (v) =>
-              v.work_item_id === w.id &&
-              v.kind !== "card_completion" &&
-              v.status !== "superseded",
-          ),
-        );
-        return !latest || autoRiskPaths(latest) === undefined;
-      })
+      products.some((w) => missingAutoRiskPathEvidence(currentByItem.get(w.id)))
     )
       return [...blockers, "缺少完整的当前交付文件差异证据"];
   }

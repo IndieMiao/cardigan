@@ -13,6 +13,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -164,6 +165,30 @@ def core_rpc(home, session, system):
             yield rpc
 
 
+IDLE_FOOTERS = {True: re.compile(r'\? for shortcuts|\d+% context left', re.I),
+                False: re.compile(r'\? for shortcuts|shift\+tab to cycle', re.I)}
+BUSY = re.compile(r'esc to (?:interrupt|cancel)|press enter to confirm', re.I)
+# Longer than the once-a-second elapsed-time redraw of a running turn.
+SETTLE_SECONDS = 1.5
+
+
+def prompt_idle(screen, codex):
+    # Same rule as the controller's bound prompt for clients without OSC state:
+    # only an empty editor directly above its own idle footer, and no running
+    # turn or pending confirmation near the bottom. Never relays the text.
+    if len(screen.encode()) > 65536:
+        return False
+    lines = [line.strip() for line in re.split(r'\r?\n', screen) if line.strip()]
+    if not lines or not IDLE_FOOTERS[codex].search(lines[-1]):
+        return False
+    bottom = lines[:-1]
+    if not codex and bottom and re.fullmatch(r'─+', bottom[-1]):
+        bottom.pop()
+    if not bottom or bottom.pop() != ('›' if codex else '❯'):
+        return False
+    return not BUSY.search('\n'.join(lines[-8:]))
+
+
 def darwin_retirement(c, terminal_owner=None):
     # Both facts are read on the pinned SSH account. The native receipt comes
     # from the original host launch journal, never from this terminal listing.
@@ -193,10 +218,54 @@ def darwin_retirement(c, terminal_owner=None):
         if t['state'] == 'finished' and observed == 'exited':
             return 'exited'
         if t['state'] == 'live' and t.get('keep') is True:
+            # C-667: hc --keep replaced the lost program with a shell and never
+            # reruns the original command. Only on request, report that shell
+            # when the launched CLI's birth identity and whole process group
+            # are gone and the shell itself is idle (no foreground job).
+            if c.get('kept_shell') is True and observed == 'exited' and kept_shell(t, p):
+                return 'shell'
             return 'kept'
+        if (c.get('agent_exit') is True and t['state'] == 'live' and t.get('keep') is False
+                and observed == 'exited' and exited_launcher(t, c)):
+            # C-672: a plain terminal can outlive its CLI (the macOS idle
+            # owner or another launcher process is still its program). Only on
+            # request, and only when the launched CLI's native birth identity
+            # is gone, report that this exact terminal no longer runs it.
+            return 'agent_exited'
+        def idle(t):
+            status = t.get('status')
+            if status is not None and type(status) is not dict:
+                return False
+            activity = (status or {}).get('state')
+            if activity in ('idle', 'done'):
+                return True
+            # C-626: hc may report no activity for the CLI. Only a controller
+            # call that has just read the bound empty editor opts in; working,
+            # blocked or error never count. The idle owner never sets it.
+            if c.get('unknown_activity') is True and activity in (None, 'unknown'):
+                return True
+            if status is not None:
+                return False
+            # hc only relays OSC 7501. Claude Code and Codex never send it, so a
+            # null status says nothing about the turn. Require the client's own
+            # empty input prompt on this exact terminal generation, twice and
+            # byte-identical across an unchanged record: a running turn redraws
+            # its elapsed-time line at least every second. The last read is the
+            # last observation before any signal; anything else keeps the session.
+            def screen():
+                text = rpc('terminal.read', dict(terminal=c['terminal'], lines=0)).get('text')
+                return text if type(text) is str and (prompt_idle(text, True) or prompt_idle(text, False)) else None
+            first = screen()
+            if first is None:
+                return False
+            time.sleep(SETTLE_SECONDS)
+            again = rpc('terminal.get', dict(terminal=c['terminal']))
+            if not (all(again.get(k) == t.get(k) for k in ('address', 'created_ms', 'pid', 'state', 'keep', 'status', 'turn', 'labels'))
+                    and (again.get('foreground') or {}).get('pid') == (t.get('foreground') or {}).get('pid')):
+                return False
+            return screen() == first
         def live(t):
-            idle = (t.get('status') or {}).get('state') in ('idle', 'done')
-            return t.get('state') == 'live' and t.get('keep') is False and (idle or not c['require_idle'])
+            return t.get('state') == 'live' and t.get('keep') is False and (not c['require_idle'] or idle(t))
         if observed != 'alive' or not live(t):
             return 'unknown'
         if (terminal_owner or p['pid']) == t.get('pid'):
@@ -223,6 +292,30 @@ def darwin_retirement(c, terminal_owner=None):
                 and all(again['labels'].get(k) == v for k, v in labels.items())):
             return 'alive'
         return 'unknown'
+
+
+def kept_shell(t, p):
+    pid, group = t.get('pid'), p.get('process_group')
+    foreground = t.get('foreground')
+    if (type(pid) is not int or pid <= 1 or pid == p['pid'] or type(group) is not int or group <= 1
+            or t.get('rm') is True
+            or (foreground is not None and (type(foreground) is not dict or foreground.get('pid') != pid))):
+        return False
+    try:
+        os.killpg(group, 0)  # existence only; permission denied is NOT exit
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def exited_launcher(t, c):
+    # The exact named, non-removable terminal of this generation, with a
+    # positive program PID. Exit itself is proven by the CLI's birth identity.
+    pid = t.get('pid')
+    return (type(pid) is int and pid > 1 and t.get('rm') is False
+            and t.get('name') == c.get('agent_name') and type(c.get('agent_name')) is str)
 
 
 def darwin_execution(p, native):

@@ -1705,7 +1705,8 @@ test("C-248: rejected publication blocks Web preflight and an already accepted r
         expect.objectContaining({
           type: "host_ops_action_deferred",
           payload: expect.objectContaining({
-            reason: "upstream_recovery_not_ready",
+            // C-680: a classification fault is not an upstream outage.
+            reason: "upstream_diagnosis_unavailable",
           }),
         }),
       ),

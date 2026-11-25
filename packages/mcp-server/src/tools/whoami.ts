@@ -1,3 +1,4 @@
+import { worktreeUnavailableReason } from "@cardigan/domain";
 import { z } from "zod";
 import { defineTool } from "./types.js";
 
@@ -21,6 +22,11 @@ export const whoamiTool = defineTool({
           )
         : undefined;
 
+    const card = work_item
+      ? store.uow.read((tx) =>
+          tx.cards.get(actor.project_id, work_item.card_id),
+        )
+      : undefined;
     const employee = store.uow.read((tx) =>
       assignment.employee_id
         ? tx.employees?.get(assignment.employee_id)
@@ -31,6 +37,8 @@ export const whoamiTool = defineTool({
       employee_name: employee?.name ?? null,
       employee_title: employee?.title ?? null,
       project_id: actor.project_id,
+      // C-676: full numbers are `<project_code>-C-12`; null before registration.
+      project_code: store.getProject?.(actor.project_id)?.code ?? null,
       assignment_id: assignment.id,
       role_id: role.role_id,
       role_version: role.role_version,
@@ -44,6 +52,9 @@ export const whoamiTool = defineTool({
       worktree_path: assignment.worktree_path ?? null,
       branch: assignment.branch ?? null,
       base_sha: assignment.base_sha ?? null,
+      // C-728: why a work item that wants source has no worktree.
+      worktree_unavailable_reason:
+        worktreeUnavailableReason(role, assignment, card) ?? null,
       session_ref: assignment.session_ref ?? null,
     };
   },

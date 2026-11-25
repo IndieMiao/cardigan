@@ -53,6 +53,14 @@ export interface McpToken {
   readonly revoked_at: string | null;
 }
 
+/** C-635: an activity time waiting to be written (the store's shape). */
+export interface McpDeferredActivity {
+  readonly project_id: ProjectId;
+  readonly assignment_id: AssignmentId;
+  readonly at: string;
+  readonly token_id?: string;
+}
+
 export interface McpUpdates {
   readonly events: readonly Event[];
   readonly timeline: readonly TimelineEntry[];
@@ -78,6 +86,11 @@ export interface McpReadContext {
   ) => Pick<CommandState, "timeline" | "attachments">;
   readonly projectMergeEvents?: (project: ProjectId) => readonly Event[];
   readonly dependencyEvents?: (project: ProjectId) => readonly Event[];
+  /** Trusted host deployment records of a SHA in the control plane's other projects. */
+  readonly platformDeployments?: (
+    project: ProjectId,
+    sha: string,
+  ) => readonly Event[];
   readonly read_machine_placement?: import("@cardigan/domain").ReadMachinePlacement;
   readonly test_review_trust?: import("@cardigan/domain").TestReviewTrust;
   readonly cachedCommandState?: (
@@ -117,9 +130,25 @@ export interface McpReadContext {
     Pick<Cursor, "assignment_id" | "card_id">
   >;
   readonly events: Pick<EventRepository, "listAfter"> & {
-    listStreams?(project: ProjectId): ReadonlyMap<string, readonly Event[]>;
+    listStreams?(project: ProjectId): CommandEventStreams;
+  };
+  /** C-639: process-wide scope; absent keeps the whole-history state. */
+  readonly command_state_scope?: "full" | "hot" | "lean";
+  readonly hot_state_hints?: {
+    eventCards(
+      project: ProjectId,
+      ids: readonly string[],
+    ): ReadonlyMap<string, string | undefined>;
+    liveNotificationCards(project: ProjectId): readonly string[];
+    /** C-649: project-stream subjects of live notifications. */
+    liveNotificationEvents?(project: ProjectId): readonly string[];
   };
 }
+
+/** Bulk streams; `ofTypes` is the Store log's per-type subset (C-639). */
+export type CommandEventStreams = ReadonlyMap<string, readonly Event[]> & {
+  ofTypes?(types: ReadonlySet<string>): ReadonlyMap<string, readonly Event[]>;
+};
 
 /**
  * Everything the MCP layer needs from the control plane's store.
@@ -148,6 +177,8 @@ export interface McpBackend {
     | {
         readonly repo_path: string | null;
         readonly base_branch: string | null;
+        /** C-674: the project's code (`CDG`); null before one is registered. */
+        readonly code?: string | null;
       }
     | undefined;
   /** Cache lookup, command and response recording share one write transaction. */
@@ -177,7 +208,49 @@ export interface McpBackend {
     project_id: ProjectId,
     assignment_id: AssignmentId,
     at?: string,
+    /** C-600: the request's Token; another launch's Token is not activity. */
+    token_id?: string,
   ): boolean;
+  /** C-600: record the session's native `tools/list` or a premature tool call. */
+  advanceMcpHandshake?(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    observed: "tools_listed" | "tool_called",
+    key_sha256?: string,
+    token_id?: string,
+  ): string | undefined;
+  /**
+   * C-635: the hot-path variant of `advanceMcpHandshake`. It never waits for
+   * another process's write lock; `persisted: false` means the returned state
+   * was decided but must still be written.
+   */
+  tryAdvanceMcpHandshake?(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    observed: "tools_listed" | "tool_called",
+    key_sha256?: string,
+    token_id?: string,
+  ): { readonly state: string | undefined; readonly persisted: boolean };
+  /** C-635: the store's clock, which stamps MCP activity. */
+  now?(): string;
+  /** C-635: run `operation` without waiting for another process's write lock. */
+  withoutLockWait?<T>(
+    operation: () => T,
+  ): { readonly busy: false; readonly value: T } | { readonly busy: true };
+  /**
+   * C-635: defer an activity time; it rides along with this backend's next
+   * write transaction or `flushDeferredActivity`, rechecked there.
+   */
+  deferAssignmentActivity?(entry: McpDeferredActivity): void;
+  /** C-635: deferred activity times not yet written. */
+  deferredAssignmentActivity?(): readonly McpDeferredActivity[];
+  /** C-635: write every deferred activity time; no transaction when none. */
+  flushDeferredActivity?(): number;
+  /** C-635: the Assignment's dispatched Runs without a project-wide scan. */
+  dispatchedRunIds?(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+  ): readonly RunId[];
   /**
    * Transactions. Read-only paths use `read` (`BEGIN DEFERRED`), so they do not
    * take the write lock and keep working while another process writes.

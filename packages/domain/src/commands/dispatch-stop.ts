@@ -2,6 +2,7 @@ import type { Actor, Run } from "../entities.js";
 import type { HarnessActivity } from "../harness-activity.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
+import { mcpSessionMissing } from "../mcp-session.js";
 import { providerStartFailed } from "../provider-start.js";
 import { c3ExitCandidate } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
@@ -69,6 +70,14 @@ export function claimDispatchStop(
       )
     ) {
       if (old) clear(d, run, "provider_evidence_changed");
+      return;
+    }
+    if (
+      (old?.reason ?? p.reason) === "mcp_unavailable" &&
+      !old?.stopping &&
+      !mcpSessionMissing(a)
+    ) {
+      if (old) clear(d, run, "mcp_evidence_changed");
       return;
     }
     if (run.inactivity_stop) return;
@@ -188,6 +197,14 @@ export function startDispatchStop(
       )
     ) {
       clear(d, run, "provider_evidence_changed");
+      return false;
+    }
+    if (
+      !stop.stopping &&
+      stop.reason === "mcp_unavailable" &&
+      !mcpSessionMissing(a)
+    ) {
+      clear(d, run, "mcp_evidence_changed");
       return false;
     }
     if (!stop.stopping) {

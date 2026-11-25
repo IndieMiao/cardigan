@@ -4,10 +4,15 @@ import { PRE_MERGE_COPY } from "./pre-merge-copy.js";
 export const EVENT_LABELS: Readonly<Record<string, string>> = {
   cross_card_read: "读取了其它卡片",
   host_deployment_recorded: "记录了主机部署",
+  release_note_written: "写了发版说明",
+  host_deployment_operation_deferred: "部署正在等待本卡的操作",
+  host_deployment_operation_interrupted: "部署重启时操作仍在进行",
   host_deployment_supervisor_change: "确认部署监督器需要升级",
   host_deployment_supervisor_comparison_unavailable:
     "未能核实部署监督器差异，将重试",
   host_role_upgraded: "自动升级了角色",
+  host_role_overlay_migrated: "把定制角色迁移为默认包加附加规则",
+  host_role_launch_checked: "核对了常驻角色的启动配置",
   standing_pm_rotated: "轮换了常驻 PM",
   host_deployment_action_requested: "请求处理部署事项",
   project_preferences_updated: "更新了项目偏好",
@@ -39,6 +44,7 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   assignment_paused: "暂停了 Assignment",
   assignment_resumed: "恢复了 Assignment",
   standing_session_restarted: "重开了常驻 PM 会话",
+  standing_session_exit_step: "记录了常驻 PM 旧会话退出进展",
   comment_posted: "发表了评论",
   instruction_issued: "下达了指令",
   delivery_submitted: "提交了交付",

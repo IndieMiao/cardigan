@@ -16,6 +16,7 @@ import {
   type WorkItemRequirements,
 } from "../machine-requirements.js";
 import {
+  humanCardTemplates,
   independentReviewMaxRounds,
   initialReviewMaxRounds,
   reviewMaxRounds,
@@ -42,6 +43,12 @@ import {
   requireCardDependencyStart,
 } from "./card-dependencies.js";
 import { applyCardHold, type CardHoldInput } from "./card-hold.js";
+import {
+  type CardRepositoryInput,
+  cardRepositoryUpdate,
+  repositoryChangeNotes,
+  workItemStartPoint,
+} from "./card-repository.js";
 import {
   type CommandDraft,
   type CommandEffect,
@@ -176,6 +183,44 @@ export function createCard(
   return command(state, actor, "create_card", ports, (d) =>
     createCardInDraft(d, p),
   );
+}
+
+/**
+ * C-684: `create_card` from the people's entry points (Workbench and the local
+ * CLI). A person may only use the templates the project opened to people
+ * (story by default); Agents, PM and the system keep `createCard`, and story
+ * children opened from a confirmed proposal go through `createCardInDraft`.
+ */
+export function createHumanCard(
+  state: CommandState,
+  actor: Actor,
+  p: CreateCardParams,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "create_card", ports, (d) => {
+    if (actor.kind === "human") {
+      const template = creatableCardTemplate(
+        d,
+        p.template_id ?? p.template ?? "dev",
+      );
+      const allowed = humanCardTemplates(projectPreferences(d.state));
+      if (!allowed.includes(template.id)) {
+        const titles = allowed.map((id) => {
+          try {
+            return creatableCardTemplate(d, id).title;
+          } catch {
+            return id;
+          }
+        });
+        ensure(
+          false,
+          "validation_failed",
+          `人只能开${titles.join("、")}；“${template.title}”需由所有者在设置 → 偏好 → 人可开的卡片模板中放开`,
+        );
+      }
+    }
+    return createCardInDraft(d, p);
+  });
 }
 
 export interface CardCreationOptions {
@@ -578,7 +623,7 @@ export function updateCard(
     /** C-160: add or update one pre-merge check; not mixed with other edits. */
     pre_merge_check?: PreMergeCheckInput;
     merge_classification?: MergeClassificationInput;
-  },
+  } & CardRepositoryInput,
   ports: CommandPorts,
 ) {
   return command(state, actor, "update_card", ports, (d) => {
@@ -624,7 +669,10 @@ export function updateCard(
           p.early_start === undefined &&
           p.dependency_reason === undefined &&
           p.risk_tags === undefined &&
-          p.high_risk === undefined,
+          p.high_risk === undefined &&
+          p.repo === undefined &&
+          p.base_branch === undefined &&
+          p.start_point === undefined,
         "validation_failed",
         "pre_merge_check 不能与其他卡片修改混用",
       );
@@ -659,6 +707,7 @@ export function updateCard(
     const priority = parseCardPriority(p.priority);
     if (p.priority !== undefined)
       ensure(priority !== undefined, "validation_failed", "Invalid priority");
+    const repository = cardRepositoryUpdate(d, card, p);
     let status = card.status;
     const dependencyCard = applyCardDependencies(d, card, p);
     if (p.status !== undefined) {
@@ -684,10 +733,26 @@ export function updateCard(
     if (cancelling && card.story)
       settleStoryChildren(d, card, p.story_children);
     const cancelledRunIds = cancelling ? cancelCardWork(d, card) : [];
-    const { deadline: previousDeadline, ...base } = dependencyCard;
+    const {
+      deadline: previousDeadline,
+      repo: _repo,
+      base_branch: _base,
+      start_point: _start,
+      ...base
+    } = dependencyCard;
     const deadline = p.deadline === undefined ? previousDeadline : p.deadline;
+    const registration = repository ?? {
+      ...(card.repo === undefined ? {} : { repo: card.repo }),
+      ...(card.base_branch === undefined
+        ? {}
+        : { base_branch: card.base_branch }),
+      ...(card.start_point === undefined
+        ? {}
+        : { start_point: card.start_point }),
+    };
     const result: Card = {
       ...base,
+      ...registration,
       ...(deadline == null ? {} : { deadline }),
       status,
       ...(p.status !== undefined &&
@@ -708,7 +773,10 @@ export function updateCard(
     };
     d.put("cards", result);
     if (status === "cancelled") cancelCardHumanActions(d, card.id);
-    const notes = [dependencyChangeNotice(result, p)];
+    const notes = [
+      dependencyChangeNotice(result, p),
+      ...repositoryChangeNotes(card, result),
+    ];
     if (p.deadline !== undefined && p.deadline !== (previousDeadline ?? null))
       notes.push(
         p.deadline === null ? "截止日期已清除" : `截止日期：${p.deadline}`,
@@ -752,6 +820,20 @@ export function updateCard(
         ...(cancelledRunIds.length
           ? { cancelled_run_ids: cancelledRunIds }
           : {}),
+        ...(repository === undefined
+          ? {}
+          : {
+              repository: {
+                repo: result.repo ?? null,
+                base_branch: result.base_branch ?? null,
+                start_point: result.start_point ?? null,
+              },
+              previous_repository: {
+                repo: card.repo ?? null,
+                base_branch: card.base_branch ?? null,
+                start_point: card.start_point ?? null,
+              },
+            }),
         ...(p.risk_tags !== undefined
           ? {
               previous_risk_tags: card.risk_tags ?? [],
@@ -936,6 +1018,8 @@ export function updateWorkItem(
     manual_assign?: boolean;
     max_review_rounds?: number;
     review_limit_decision?: ReviewLimitResolution;
+    /** C-728: full commit SHA or branch on a no-merge card; null clears. */
+    start_point?: string | null;
   },
   ports: CommandPorts,
 ) {
@@ -1022,8 +1106,14 @@ export function updateWorkItem(
         `独立复核超过 ${independentLimit} 轮（项目偏好）只能由人确认放宽`,
       );
     }
+    const start_point =
+      p.start_point === undefined
+        ? item.start_point
+        : workItemStartPoint(d, card, item, p.start_point);
+    const { start_point: _start, ...unstarted } = item;
     let result: WorkItem = {
-      ...item,
+      ...unstarted,
+      ...(start_point === undefined ? {} : { start_point }),
       ...(p.requirements === undefined
         ? {}
         : {
@@ -1100,13 +1190,23 @@ export function updateWorkItem(
         ...(p.max_review_rounds !== undefined
           ? { max_review_rounds: p.max_review_rounds }
           : {}),
+        ...(p.start_point === undefined
+          ? {}
+          : {
+              start_point: start_point ?? null,
+              previous_start_point: item.start_point ?? null,
+            }),
       },
       {
         type: "status_change",
-        body:
+        body: [
           p.manual_assign === undefined
             ? result.title
             : `${result.title}：${p.manual_assign ? "设置手动指派标记" : "清除手动指派标记"}`,
+          ...(p.start_point === undefined
+            ? []
+            : [`起点：${start_point ?? "无"}`]),
+        ].join("\n"),
         work_item_id: item.id,
       },
     );

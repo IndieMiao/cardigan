@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { withCheckoutDeadline } from "./checkout-deadline.js";
+import {
+  type DispatchUnknownDetail,
+  dispatchFailure,
+  formatDispatchUnknown,
+} from "./executor-diagnostics.js";
 import { githubJobLog, type StepTime } from "./github-job-log.js";
 import {
   type CheckoutInput,
@@ -17,6 +22,8 @@ export {
 export class CheckExecutorUnavailable extends Error {
   /** Only a redacted, bounded host diagnostic may be attached here. */
   diagnostic?: string;
+  /** C-681: which dispatch_unknown branch was taken, with redacted HTTP evidence. */
+  dispatch?: DispatchUnknownDetail;
   constructor(
     readonly category:
       | "auth"
@@ -33,6 +40,8 @@ export class CheckExecutorUnavailable extends Error {
 export interface CheckRequest extends Omit<CheckoutInput, "execution"> {
   readonly mergeTier?: "card" | "batch";
   readonly kind: "merge_check" | "precheck";
+  /** C-611: host-validated test files for the macOS workflow; never a command. */
+  readonly workflowInputs?: { readonly files: string };
   /** Recheck scheduling after asynchronous preparation, immediately before execution. */
   readonly beforeDispatch?: () => void | Promise<void>;
   /** Host shutdown detaches supervision; business cancellation continues to use signal. */
@@ -51,7 +60,11 @@ export type OpenFailureLog = (
   steps?: readonly StepTime[],
 ) => (text: string) => void;
 export class FailureLogError extends Error {
-  constructor(readonly category: NonNullable<CheckoutResult["logFailure"]>) {
+  constructor(
+    readonly category: NonNullable<CheckoutResult["logFailure"]>,
+    /** Built by the provider client from fixed text, numbers and codes only. */
+    readonly detail?: string,
+  ) {
     super(category);
   }
 }
@@ -196,8 +209,16 @@ export async function runCheckExecutor(
                 : error instanceof FailureLogError
                   ? error.category
                   : "api";
+              const detail =
+                !signal?.aborted && error instanceof FailureLogError
+                  ? error.detail
+                  : undefined;
               if (terminal.logSource)
-                polled = { ...terminal, logFailure: category };
+                polled = {
+                  ...terminal,
+                  logFailure: category,
+                  ...(detail ? { logFailureDetail: detail } : {}),
+                };
               if (!closed && !signal?.aborted)
                 diagnostic("检查失败日志获取失败，保留原执行结果与清理提示");
             }
@@ -222,13 +243,14 @@ export async function runCheckExecutor(
     return result;
   } catch (error) {
     if (!(error instanceof CheckExecutorUnavailable)) throw error;
-    const reason = `检查执行器不可用：${error.category}${error.diagnostic ? ` (${error.diagnostic})` : ""}`;
+    const reason = `检查执行器不可用：${error.category}${error.diagnostic ? ` (${error.diagnostic})` : ""}${error.dispatch ? `（${formatDispatchUnknown(error.dispatch)}）` : ""}`;
     diagnostic(reason);
     return {
       status: "executor_unreachable",
       checks: [],
       cleanup_errors: [],
       reason,
+      executorFailure: dispatchFailure(error.category, error.dispatch),
     };
   } finally {
     closed = true;

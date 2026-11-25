@@ -1,4 +1,5 @@
 import type { Card, WorkItem } from "../entities.js";
+import { fullEventHistory } from "../event-index.js";
 import type { AssignmentId, WorkItemId } from "../ids.js";
 import type { CommandDraft, CommandState } from "./core.js";
 import { workCompleted } from "./work-status.js";
@@ -38,7 +39,13 @@ export function resumeAttention(state: CommandState) {
   const items = new Map(current.map((w) => [w.id, w]));
   const byOwner = new Map(current.map((w) => [w.assignment_id, w.id]));
   const stopped = new Set<AssignmentId>();
-  for (const e of state.events) {
+  const managed = new Set<AssignmentId>();
+  const clearStop = (id: AssignmentId) => {
+    managed.delete(id);
+    return stopped.delete(id);
+  };
+  // Run queue and dispatch telemetry interleave with stops: keep array order.
+  for (const e of fullEventHistory(state.events)) {
     if (!e.card_id || e.actor.project_id !== state.project_id) continue;
     if (typeof e.payload !== "object" || !e.payload || Array.isArray(e.payload))
       continue;
@@ -60,13 +67,24 @@ export function resumeAttention(state: CommandState) {
         if (row.card_id === e.card_id) open.delete(id);
       continue;
     }
-    if (e.type === "assignment_stopped" && p.assignment_id)
+    if (e.type === "assignment_stopped" && p.assignment_id) {
       stopped.add(p.assignment_id);
+      // C-620: a managed stop ends with its confirmed release; a pause does not.
+      if ((p as { hold?: unknown }).hold === false)
+        managed.add(p.assignment_id);
+      else managed.delete(p.assignment_id);
+    }
+    if (
+      e.type === "assignment_stop_released" &&
+      p.assignment_id &&
+      managed.delete(p.assignment_id)
+    )
+      stopped.delete(p.assignment_id);
     // A queue receipt is not an actual restart. Only dispatch ends a human stop.
     if (
       p.assignment_id &&
       ((e.type === "run_queued" && !stopped.has(p.assignment_id)) ||
-        (e.type === "run_dispatched" && stopped.delete(p.assignment_id)))
+        (e.type === "run_dispatched" && clearStop(p.assignment_id)))
     ) {
       const id = byOwner.get(p.assignment_id);
       if (id && items.get(id)?.card_id === e.card_id) open.delete(id);
@@ -84,6 +102,7 @@ export function resumeAttention(state: CommandState) {
       [
         "work_item_resume_requested",
         "precheck_wait_delivered",
+        "blocker_wait_delivered",
         "blocker_reported",
         "work_item_assigned",
         "work_item_replaced",

@@ -4,6 +4,7 @@ import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { StatusTag, Time } from "./Foundation.js";
 import { splitSuperseded } from "./Timeline.js";
+import { isVideo, VideoPreview } from "./VideoPreview.js";
 
 const size = (bytes: number) =>
   bytes < 1024
@@ -19,6 +20,8 @@ function Gallery({ attachments }: { attachments: readonly AttachmentView[] }) {
         <li key={a.id} id={`attachment-${a.id}`}>
           {isBitmap(a) ? (
             <AttachmentPreview attachment={a} images={images} />
+          ) : isVideo(a) ? (
+            <VideoPreview attachment={a} />
           ) : (
             <div
               className="attachment-file"

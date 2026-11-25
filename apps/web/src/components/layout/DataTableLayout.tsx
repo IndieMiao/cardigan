@@ -1,6 +1,6 @@
-import { type ComponentProps, Fragment } from "react";
+import { type ComponentProps, Fragment, type ReactNode } from "react";
 import { cn } from "../../lib/utils.js";
-import { Table, TableCell } from "../ui/table.js";
+import { Table, TableCell, TableRow } from "../ui/table.js";
 import styles from "./DataTableLayout.module.css";
 
 /**
@@ -90,4 +90,26 @@ export function DataTableDetail({
   ...props
 }: ComponentProps<"pre">) {
   return <pre {...props} className={cn(styles.detail, className)} />;
+}
+
+/**
+ * C-727: a full-width row that belongs to the row above it (a capability's
+ * usage notes in a `records` table): the two share one divider, and in the
+ * narrow record layout they read as one record.
+ */
+export function DataTableRowDetail({
+  columns,
+  children,
+  ...props
+}: Omit<ComponentProps<typeof TableRow>, "children"> & {
+  columns: number;
+  children: ReactNode;
+}) {
+  return (
+    <TableRow {...props} data-row-detail="">
+      <TableCell colSpan={columns} className={styles.rowDetail}>
+        {children}
+      </TableCell>
+    </TableRow>
+  );
 }

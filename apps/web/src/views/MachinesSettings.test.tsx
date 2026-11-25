@@ -182,7 +182,7 @@ test("the detail shows capabilities, limits, bindings with the current project, 
   expect(view.getByText("browser.chromium", { selector: "dt" })).toBeTruthy();
   // Capabilities per project, this one first: verified, expired, never
   // verified; the peer project's own evidence stays labelled as its own.
-  const capabilities = view.getByRole("table", { name: "已验证能力" });
+  const capabilities = view.getByRole("table", { name: "能力" });
   expect(
     within(capabilities)
       .getAllByRole("row")

@@ -79,6 +79,30 @@ test("server logs are opt-in and require a complete, finite retention budget", (
     }),
   ).toThrow();
 });
+test("C-638: server log retention is whole hours and needs the log limits", () => {
+  const limits = { server_log_max_bytes: 16, server_log_max_files: 2 };
+  expect(
+    parseDeploymentConfig({ ...config, ...limits }).server_log_retention_hours,
+  ).toBeUndefined();
+  expect(
+    parseDeploymentConfig({
+      ...config,
+      ...limits,
+      server_log_retention_hours: 48,
+    }),
+  ).toMatchObject({ server_log_retention_hours: 48 });
+  for (const value of [0, -1, 1.5, "48", null, 24 * 365 + 1])
+    expect(() =>
+      parseDeploymentConfig({
+        ...config,
+        ...limits,
+        server_log_retention_hours: value,
+      }),
+    ).toThrow();
+  expect(() =>
+    parseDeploymentConfig({ ...config, server_log_retention_hours: 48 }),
+  ).toThrow();
+});
 test("only a private host config is accepted; errors cannot echo config secrets", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cg-deployment-config-"));
   try {
@@ -110,6 +134,25 @@ test("capacity wait reminder has a configurable default and never accepts invali
     expect(() =>
       parseDeploymentConfig({ ...config, capacity_wait_timeout_ms: value }),
     ).toThrow();
+});
+
+test("C-609: batching and operation waits default to 5 and 15 minutes; 0 turns each off", () => {
+  expect(parseDeploymentConfig(config)).toMatchObject({
+    batch_window_ms: 300000,
+    operation_wait_timeout_ms: 900000,
+  });
+  expect(
+    parseDeploymentConfig({
+      ...config,
+      batch_window_ms: 0,
+      operation_wait_timeout_ms: 0,
+    }),
+  ).toMatchObject({ batch_window_ms: 0, operation_wait_timeout_ms: 0 });
+  for (const key of ["batch_window_ms", "operation_wait_timeout_ms"])
+    for (const value of [-1, 1.5, NaN, Infinity, "42", null, 2147483648])
+      expect(() =>
+        parseDeploymentConfig({ ...config, [key]: value }),
+      ).toThrow();
 });
 
 test("disk warning uses a strict private percent, defaulting to 15", () => {

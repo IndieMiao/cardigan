@@ -24,8 +24,17 @@ import {
   rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
+import { recordDefault } from "./role-provenance.js";
 
-test.each(["manual", "missing", "launch_only", "already_default"] as const)(
+const now = "2026-01-01T00:00:00.000Z";
+
+test.each([
+  "manual",
+  "unrecorded",
+  "missing",
+  "launch_only",
+  "already_default",
+] as const)(
   "deployment preserves hand-written rules and only compares managed policy fields: %s",
   async (mode) => {
     const dataDir = await mkdtemp(join(tmpdir(), "cg-role-manual-"));
@@ -41,7 +50,8 @@ test.each(["manual", "missing", "launch_only", "already_default"] as const)(
         ...nextDefault,
         instructions: "Earlier default instructions",
       };
-      const manual = mode === "manual" || mode === "missing";
+      const manual =
+        mode === "manual" || mode === "unrecorded" || mode === "missing";
       const current =
         mode === "already_default"
           ? nextDefault
@@ -84,6 +94,10 @@ test.each(["manual", "missing", "launch_only", "already_default"] as const)(
           { mode: "update" },
         );
         tx.assignments.put(project, a);
+        // C-603/C-613: an earlier deployment recorded its default; only then
+        // is a mismatch a manual edit for a person to review.
+        if (mode === "manual" || mode === "launch_only")
+          recordDefault(tx, project, "host_ops", oldDefault, "pack", now);
         return tx.issueToken({
           project_id: project,
           assignment_id: a.id,
@@ -129,12 +143,13 @@ test.each(["manual", "missing", "launch_only", "already_default"] as const)(
         else expect(tx.assignments.get(project, a.id)).toEqual(a);
         const actions = tx.human_actions.list(project);
         expect(actions).toHaveLength(mode === "manual" ? 1 : 0);
-        if (mode === "missing")
+        if (mode === "missing" || mode === "unrecorded")
           expect(
             tx.events
               .listAfter(project, undefined, 0)
-              .filter((e) => e.type === "host_role_upgrade_deferred"),
-          ).toHaveLength(1);
+              .filter((e) => e.type === "host_role_upgrade_deferred")
+              .map((e) => (e.payload as { notice: string }).notice),
+          ).toEqual([expect.stringContaining("没有可核对的已记录默认包")]);
         if (mode === "manual") {
           expect(actions[0]).toMatchObject({ status: "open", triage: "human" });
           expect(actions[0]?.instructions).toContain(
@@ -249,24 +264,28 @@ test.each(["safe", "widening", "manual"] as const)(
           { mode: "add" },
         );
         tx.assignments.put(project, previous);
+        recordDefault(tx, project, "pm", oldDefault, "pack", now);
         tx.issueToken({
           project_id: project,
           assignment_id: previous.id,
           role: { role_version: 1, allowed_tools: source.allowed_tools },
         });
       });
-      expect(
-        upgradeDeployedRoles(
-          store,
-          project,
-          [],
-          baseline,
-          new Set(["fixture", "project-host-ops"]),
-        ),
-      ).toBeUndefined();
-      expect(
-        store.uow.read((tx) => getRoleVersion(tx, project, "pm")?.version),
-      ).toBe(1);
+      // A hand edit the supervisor does not list is left alone.
+      if (blocked) {
+        expect(
+          upgradeDeployedRoles(
+            store,
+            project,
+            [],
+            baseline,
+            new Set(["fixture", "project-host-ops"]),
+          ),
+        ).toBeUndefined();
+        expect(
+          store.uow.read((tx) => getRoleVersion(tx, project, "pm")?.version),
+        ).toBe(1);
+      }
       const next = upgradeDeployedRoles(
         store,
         project,
@@ -361,6 +380,7 @@ test("MC-2 deployed machine capabilities append a role version while keeping wor
         { mode: "add" },
       );
       tx.assignments.put(project, assignment);
+      recordDefault(tx, project, "frontend_engineer", old, "pack", now);
       return tx.issueToken({
         project_id: project,
         assignment_id: assignment.id,
@@ -407,12 +427,12 @@ const deploymentCases: readonly {
     readonly required_capabilities?: Requirements;
   };
   readonly supervisor: "full" | "legacy";
-  readonly receipt:
-    | "default_hash"
-    | "legacy_matched"
-    | "legacy_conflict"
-    | "none";
-  readonly notice?: string;
+  /**
+   * What the trusted record knows of the previous default: the CLI recorded
+   * it, a pre-record receipt matched it (a seed), or nothing does.
+   */
+  readonly record: "cli" | "seed" | "receipt_conflict" | "none";
+  readonly outcome: "upgrade" | "conflict" | "unverified";
 }[] = [
   {
     name: "CLI upgrade, current supervisor",
@@ -421,26 +441,28 @@ const deploymentCases: readonly {
       required_capabilities: ["browser.chromium"],
     },
     supervisor: "full",
-    receipt: "none",
+    record: "cli",
+    outcome: "upgrade",
   },
   {
-    name: "CLI upgrade, older supervisor, published receipt",
+    name: "CLI upgrade, older supervisor",
     previous: {
       instructions: "Earlier default instructions",
       required_capabilities: ["browser.chromium"],
     },
     supervisor: "legacy",
-    receipt: "default_hash",
+    record: "cli",
+    outcome: "upgrade",
   },
   {
-    name: "CLI upgrade, older supervisor, receipt without defaults",
+    name: "CLI upgrade before the record existed",
     previous: {
       instructions: "Earlier default instructions",
       required_capabilities: ["browser.chromium"],
     },
     supervisor: "legacy",
-    receipt: "legacy_conflict",
-    notice: "无法确认当前机器要求是否为项目手改",
+    record: "receipt_conflict",
+    outcome: "unverified",
   },
   {
     name: "hand-edited instructions",
@@ -450,8 +472,8 @@ const deploymentCases: readonly {
     },
     edit: { instructions: "Earlier default instructions\nProject review rule" },
     supervisor: "full",
-    receipt: "default_hash",
-    notice: "当前版本有手工改动",
+    record: "cli",
+    outcome: "conflict",
   },
   {
     name: "hand-added requirement the next default also adds",
@@ -461,19 +483,30 @@ const deploymentCases: readonly {
     },
     edit: { required_capabilities: ["browser.chromium"] },
     supervisor: "full",
-    receipt: "default_hash",
-    notice: "当前版本有手工改动",
+    record: "cli",
+    outcome: "conflict",
   },
   {
-    name: "hand-added requirement the next default also adds, no receipt",
+    name: "hand-added requirement the next default also adds, no record",
     previous: {
       instructions: "Earlier default instructions",
       required_capabilities: [],
     },
     edit: { required_capabilities: ["browser.chromium"] },
     supervisor: "full",
-    receipt: "none",
-    notice: "无法确认当前机器要求是否为项目手改",
+    record: "none",
+    outcome: "unverified",
+  },
+  {
+    name: "requirements cleared by hand, older supervisor fingerprint equals the version",
+    previous: {
+      instructions: "Earlier default instructions",
+      required_capabilities: ["browser.chromium", "gpu"],
+    },
+    edit: { required_capabilities: [] },
+    supervisor: "legacy",
+    record: "seed",
+    outcome: "conflict",
   },
   {
     name: "next default drops a requirement, older supervisor",
@@ -482,25 +515,28 @@ const deploymentCases: readonly {
       required_capabilities: ["browser.chromium", "gpu"],
     },
     supervisor: "legacy",
-    receipt: "default_hash",
+    record: "cli",
+    outcome: "upgrade",
   },
   {
     name: "next default only adds a requirement, older supervisor",
     previous: { required_capabilities: [] },
     supervisor: "legacy",
-    receipt: "legacy_matched",
+    record: "seed",
+    outcome: "upgrade",
   },
   {
     name: "next default only adds a requirement, current supervisor",
     previous: { required_capabilities: [] },
     supervisor: "full",
-    receipt: "none",
+    record: "cli",
+    outcome: "upgrade",
   },
 ];
 
 test.each(deploymentCases)(
-  "a deployment upgrades only roles matching a published default: $name",
-  ({ previous, edit, supervisor, receipt, notice }) => {
+  "a deployment upgrades only roles equal to a recorded default, the same on a rerun: $name",
+  ({ previous, edit, supervisor, record, outcome }) => {
     const store = Store.open({ dbPath: ":memory:" });
     const project = "cli-upgrade";
     try {
@@ -532,7 +568,33 @@ test.each(deploymentCases)(
           { ...oldest, core_prompt: "", version: 1 },
           { mode: "add" },
         );
-        // Same write as `cardigan role upgrade design_director --from-default`.
+        // The receipt the previous release published, before the CLI upgrade.
+        if (record === "seed" || record === "receipt_conflict")
+          tx.events.append(project, {
+            id: tx.ids.nextEventId(),
+            seq: tx.ids.nextEventSequence(project),
+            type: "host_role_pack_published",
+            actor: { kind: "system", project_id: project },
+            created_at: "2026-11-18T00:00:00.000Z",
+            payload: {
+              pack_hash: "previous-release",
+              roles: {
+                design_director:
+                  record === "seed"
+                    ? {
+                        version: 1,
+                        policy_hash: deploymentRolePolicyHash(previousDefault),
+                        disposition: "matched",
+                      }
+                    : {
+                        version: 1,
+                        policy_hash: deploymentRolePolicyHash(oldest),
+                        disposition: "conflict",
+                      },
+              },
+            },
+          });
+        // Same writes as `cardigan role upgrade design_director --from-default`.
         const upgraded = upgradeRole(
           { project_id: project, roles: listRoleVersions(tx, project) },
           { kind: "human", project_id: project },
@@ -543,6 +605,15 @@ test.each(deploymentCases)(
         if (!upgraded.ok || upgraded.value.unchanged)
           throw new Error("Expected a CLI upgrade");
         persistRoleEffect(tx, project, upgraded.value.effect);
+        if (record === "cli")
+          recordDefault(
+            tx,
+            project,
+            "design_director",
+            previousDefault,
+            "cli",
+            "2026-11-19T00:00:00.000Z",
+          );
         if (edit)
           writeRole(
             tx,
@@ -559,38 +630,6 @@ test.each(deploymentCases)(
             },
             { mode: "update" },
           );
-        // The receipt the previous release published, before the CLI upgrade.
-        const published = {
-          default_hash: {
-            version: 1,
-            policy_hash: deploymentRolePolicyHash(oldest),
-            disposition: "conflict",
-            default_hash: deploymentRolePolicyHash(previousDefault),
-          },
-          legacy_matched: {
-            version: 2,
-            policy_hash: deploymentRolePolicyHash(previousDefault),
-            disposition: "matched",
-          },
-          legacy_conflict: {
-            version: 1,
-            policy_hash: deploymentRolePolicyHash(oldest),
-            disposition: "conflict",
-          },
-          none: undefined,
-        }[receipt];
-        if (published)
-          tx.events.append(project, {
-            id: tx.ids.nextEventId(),
-            seq: tx.ids.nextEventSequence(project),
-            type: "host_role_pack_published",
-            actor: { kind: "system", project_id: project },
-            created_at: "2026-11-18T00:00:00.000Z",
-            payload: {
-              pack_hash: "previous-release",
-              roles: { design_director: published },
-            },
-          });
         return listRoleVersions(tx, project).length;
       });
       const before = store.uow.read((tx) =>
@@ -600,41 +639,67 @@ test.each(deploymentCases)(
         snapshot(previousDefault) === snapshot(nextDefault)
           ? []
           : ["design_director"];
-      upgradeDeployedRoles(
-        store,
-        project,
-        changed,
-        { design_director: snapshot(previousDefault) },
-        new Set(["fixture"]),
-      );
-      store.uow.read((tx) => {
-        const after = getRoleVersion(tx, project, "design_director");
-        const events = tx.events.listAfter(project, undefined, 0);
-        const latest = events
-          .filter((e) => e.type === "host_role_pack_published")
-          .at(-1)?.payload as {
-          roles: Record<string, { disposition: string; default_hash: string }>;
-        };
-        const actions = tx.human_actions.list(project);
-        expect(latest.roles.design_director?.default_hash).toBe(
+      const deploy = () =>
+        upgradeDeployedRoles(
+          store,
+          project,
+          changed,
+          { design_director: snapshot(previousDefault) },
+          new Set(["fixture"]),
+        );
+      const observe = () =>
+        store.uow.read((tx) => {
+          const events = tx.events.listAfter(project, undefined, 0);
+          const latest = events
+            .filter((e) => e.type === "host_role_pack_published")
+            .at(-1)?.payload as {
+            roles: Record<string, { disposition: string }>;
+          };
+          return {
+            role: getRoleVersion(tx, project, "design_director"),
+            disposition: latest.roles.design_director?.disposition,
+            upgrades: events.filter((e) => e.type === "host_role_upgraded")
+              .length,
+            deferrals: events
+              .filter((e) => e.type === "host_role_upgrade_deferred")
+              .map((e) => (e.payload as { notice: string }).notice),
+            actions: tx.human_actions
+              .list(project)
+              .map((a) => ({ status: a.status, instructions: a.instructions })),
+          };
+        });
+      deploy();
+      const first = observe();
+      if (outcome === "upgrade") {
+        expect(first.role?.version).toBe(versions + 1);
+        expect(first.role && deploymentRolePolicyHash(first.role)).toBe(
           deploymentRolePolicyHash(nextDefault),
         );
-        if (notice === undefined) {
-          expect(after?.version).toBe(versions + 1);
-          expect(after && deploymentRolePolicyHash(after)).toBe(
-            deploymentRolePolicyHash(nextDefault),
-          );
-          expect(actions).toEqual([]);
-          expect(events.map((e) => e.type)).toContain("host_role_upgraded");
-          expect(latest.roles.design_director?.disposition).toBe("matched");
+        expect(first.upgrades).toBe(1);
+        expect(first.actions).toEqual([]);
+        expect(first.disposition).toBe("matched");
+      } else {
+        expect(first.role).toEqual(before);
+        expect(first.upgrades).toBe(0);
+        expect(first.disposition).toBe(outcome);
+        if (outcome === "conflict") {
+          expect(first.actions).toEqual([
+            {
+              status: "open",
+              instructions: expect.stringContaining("当前版本有手工改动"),
+            },
+          ]);
+          expect(first.deferrals).toEqual([]);
         } else {
-          expect(after).toEqual(before);
-          expect(actions).toHaveLength(1);
-          expect(actions[0]?.instructions).toContain(notice);
-          expect(events.map((e) => e.type)).not.toContain("host_role_upgraded");
-          expect(latest.roles.design_director?.disposition).toBe("conflict");
+          expect(first.actions).toEqual([]);
+          expect(first.deferrals).toEqual([
+            expect.stringContaining("没有可核对的已记录默认包"),
+          ]);
         }
-      });
+      }
+      // The same release run again reaches the same conclusion (V-3008).
+      deploy();
+      expect(observe()).toEqual(first);
     } finally {
       store.close();
     }

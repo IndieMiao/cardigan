@@ -1027,6 +1027,52 @@ test.each([false, true])(
   },
 );
 
+test("a project-customized role without publications replaces an exited session and resumes its pending bell on the project version", async () => {
+  // C-662: default role ids customized by the project itself never receive a
+  // deployment receipt; that must not pin the owner in publication_pending.
+  const f = setup(false);
+  f.store.uow.run((tx) =>
+    writeRole(
+      tx,
+      f.project,
+      {
+        ...defaultRoleDefinition("coder", {
+          harness: "pi",
+          launch_profile_ref: "fixture",
+        }),
+        instructions: "Project-specific coder rules",
+        version: 2,
+      },
+      { mode: "update" },
+    ),
+  );
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "exited", agent: "idle", observed_seq: 2 },
+  });
+  f.comment();
+  await f.dispatcher.tick([f.project]);
+  await f.dispatcher.tick([f.project]);
+  expect(f.owner().session_maintenance?.reason).not.toBe("publication_pending");
+  expect(f.state().human_actions).toEqual([]);
+  expect(
+    f
+      .state()
+      .events.filter((e) => e.type === "session_replaced")
+      .map((e) => e.payload),
+  ).toMatchObject([{ from_version: 1, to_version: 2 }]);
+  expect(f.startRun).toHaveBeenCalledOnce();
+  expect(f.snapshot).toHaveBeenCalledWith(
+    expect.objectContaining({ id: f.owner().id, role_version: 2 }),
+    f.project,
+  );
+  expect(f.state().runs.filter((r) => r.status === "dispatched")).toMatchObject(
+    [{ assignment_id: f.owner().id, role_version: 2 }],
+  );
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.onError).not.toHaveBeenCalled();
+});
+
 test("upgrade fences keep bells pending; human stop clears the old reference and start can resume after settlement", async () => {
   const f = setup();
   f.comment();

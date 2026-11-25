@@ -1,16 +1,17 @@
 import { createHash } from "node:crypto";
 import {
+  type Assignment,
   type CommandState,
+  deploymentAuditedVersion,
   eventsOfType,
   type ProjectId,
   pendingRoleConflictActions,
-  type RoleDefinition,
   requestDeploymentAction,
   resolveMatchedRoleActions,
   roleUpgradeDiff,
   rotatePmAfterDeployment,
   rotateStandingAfterDeployment,
-  upgradeRoleAfterDeployment,
+  streamEventsBy,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
@@ -20,55 +21,20 @@ import {
 } from "@cardigan/roles";
 import {
   listRoleVersions,
-  persistRoleEffect,
   type ReadRepositories,
   type Store,
   type StoreTransactionContext,
 } from "@cardigan/store";
 import { persistPmRotation } from "./pm-rotation.js";
+import {
+  deploymentRolePolicyHash,
+  expectedRolePolicy,
+  recordRoleDeferral,
+  syncOverlayRoles,
+} from "./role-overlay.js";
+import { knownDefaults } from "./role-provenance.js";
 
-function recordRoleDeferral(
-  tx: StoreTransactionContext,
-  project: ProjectId,
-  key: string,
-  notice: string,
-  at: string,
-) {
-  if (
-    tx.events
-      .listAfter(project, undefined, 0)
-      .some(
-        (e) =>
-          e.type === "host_role_upgrade_deferred" &&
-          (e.payload as { key?: string }).key === key,
-      )
-  )
-    return;
-  tx.events.append(project, {
-    id: tx.ids.nextEventId(),
-    seq: tx.ids.nextEventSequence(project),
-    type: "host_role_upgrade_deferred",
-    actor: { kind: "system", project_id: project },
-    created_at: at,
-    payload: { key, notice },
-  });
-}
-
-/** Only fields replaced by --from-default participate; project launch settings stay local. */
-export function deploymentRolePolicyHash(role: RoleDefinition): string {
-  const policy = {
-    instructions: role.instructions ?? role.core_prompt ?? "",
-    allowed_tools: [...role.allowed_tools].sort(),
-    capabilities: [...role.capabilities].sort(),
-    kind: role.kind,
-    worktree: role.worktree,
-    // Keep historical hashes for roles with no machine capability constraints.
-    ...(role.required_capabilities?.length
-      ? { required_capabilities: [...role.required_capabilities].sort() }
-      : {}),
-  };
-  return createHash("sha256").update(JSON.stringify(policy)).digest("hex");
-}
+export { deploymentRolePolicyHash };
 
 /** Fingerprint the loaded package, not the mutable project role definitions. */
 let loadedPackHash: string | undefined;
@@ -76,8 +42,6 @@ type PublishedRole = {
   readonly version: number;
   readonly policy_hash: string;
   readonly disposition: "matched" | "conflict" | "unverified";
-  /** The publishing release's own default policy; older receipts omit it. */
-  readonly default_hash?: string;
 };
 type RolePackReceipt = {
   readonly pack_hash: string;
@@ -104,6 +68,12 @@ export function defaultRolePackHash(): string {
   return loadedPackHash;
 }
 
+/**
+ * The only project whose default roles are published by deployment
+ * (`self-deploy roles`). A project with a publication receipt is managed too.
+ */
+export const ROLE_PACK_DEPLOYMENT_PROJECT = "cardigan";
+
 /** Read both the publication fence and role in the caller's fresh transaction. */
 export function idleRolePolicy(
   tx: ReadRepositories,
@@ -118,20 +88,20 @@ export function idleRolePolicies(tx: ReadRepositories, project: ProjectId) {
     listRoleVersions(tx, project).map((role) => [role.role_id, role]),
   );
   const publication = rolePackPublication(tx, project);
+  const managed =
+    publication !== undefined || project === ROLE_PACK_DEPLOYMENT_PROJECT;
   return new Map(
     [...latest].flatMap(([id, role]) => {
-      if (!isDefaultRoleId(id)) return [];
-      const hash = deploymentRolePolicyHash(
-        defaultRoleDefinition(id, {
-          harness: role.harness,
-          launch_profile_ref: role.launch_profile_ref,
-        }),
-      );
+      const expected = expectedRolePolicy(role);
+      if (!expected) return [];
+      const hash = deploymentRolePolicyHash(expected);
       const matches = deploymentRolePolicyHash(role) === hash;
-      // Old installations may have no publication receipt. Matching defaults are
-      // safe; an unexplained mismatch is never evidence of a manual edit.
       const receipt = publication?.payload as RolePackReceipt | undefined;
       const snapshot = receipt?.roles?.[id];
+      // Old deployment-managed installations may have no publication receipt.
+      // Matching defaults are safe; an unexplained mismatch is never evidence
+      // of a manual edit there. Other projects never receive a publication:
+      // their own latest version is authoritative and cannot conflict with it.
       const published = receipt
         ? receipt.pack_hash === defaultRolePackHash() &&
           !!snapshot &&
@@ -139,20 +109,23 @@ export function idleRolePolicies(tx: ReadRepositories, project: ProjectId) {
           (role.version !== snapshot.version ||
             deploymentRolePolicyHash(role) === snapshot.policy_hash) &&
           (matches || snapshot.disposition !== "unverified")
-        : matches;
-      return [[id as string, { role, hash, matches, published }] as const];
+        : matches || !managed;
+      const conflict = managed && !matches;
+      return [
+        [id as string, { role, hash, matches, published, conflict }] as const,
+      ];
     }),
   );
 }
 
 function rolePackPublication(tx: ReadRepositories, project: ProjectId) {
   // All receipts are in the project stream. Its sequence survives clock skew.
-  return tx.events
-    .listAfter(project, undefined, 0)
+  return streamEventsBy(tx.events, project, undefined, "type", [
+    "host_role_pack_published",
+  ])
     .filter(
       (e) =>
         e.card_id === undefined &&
-        e.type === "host_role_pack_published" &&
         e.actor.kind === "system" &&
         e.actor.project_id === project,
     )
@@ -160,32 +133,13 @@ function rolePackPublication(tx: ReadRepositories, project: ProjectId) {
     .at(-1);
 }
 
-/**
- * Defaults of the pack this project last published, recorded by the deployed
- * release itself. Unlike the supervisor's snapshot it never depends on the
- * supervisor's build, which does not upgrade with the release.
- */
-function publishedDefaults(tx: ReadRepositories, project: ProjectId) {
-  const receipt = rolePackPublication(tx, project)?.payload as
-    | RolePackReceipt
-    | undefined;
-  return new Map(
-    Object.entries(receipt?.roles ?? {}).flatMap(([id, role]) => {
-      // A matched role in an older receipt equalled that release's default.
-      const hash =
-        role.default_hash ??
-        (role.disposition === "matched" ? role.policy_hash : undefined);
-      return hash ? [[id, hash] as const] : [];
-    }),
-  );
-}
-
 /** Run from the deployed build, so defaults come from that exact release. */
 export function upgradeDeployedRoles(
   store: Store,
   project: ProjectId,
   changedRoles: readonly string[],
-  previousDefaults: Readonly<Record<string, string>>,
+  /** The supervisor's fingerprints; kept for its interface, never trusted (C-603). */
+  _previousDefaults: Readonly<Record<string, string>>,
   profiles: ReadonlySet<string> | (() => ReadonlySet<string>) = new Set(),
 ) {
   let loadedProfiles: ReadonlySet<string> | undefined;
@@ -208,128 +162,89 @@ export function upgradeDeployedRoles(
           ),
         ),
       );
-    const baselineOf = (id: string) =>
-      Object.hasOwn(previousDefaults, id) ? previousDefaults[id] : undefined;
-    const published = publishedDefaults(tx, project);
+    // C-613: every role is first judged against the trusted default record;
+    // what that pass decided is not judged again below.
+    const handled = syncOverlayRoles(
+      tx,
+      project,
+      clock.now,
+      { profiles: profileNames },
+      true,
+    );
+    // C-603 (Q-1186): only the trusted record proves a version untouched.
+    // This release's own default is no evidence, so a rerun of one release
+    // reaches the same conclusion.
+    const known = knownDefaults(tx, project);
+    const olderRecorded = (id: string) => {
+      if (!isDefaultRoleId(id)) return false;
+      const current = deploymentRolePolicyHash(
+        defaultRoleDefinition(id, {
+          harness: "codex",
+          launch_profile_ref: "deployment",
+        }),
+      );
+      return (known.get(id) ?? []).some((k) => k.policy_hash !== current);
+    };
     const ids = [
       ...new Set(listRoleVersions(tx, project).map((r) => r.role_id)),
     ];
     for (const id of ids) {
-      if (!isDefaultRoleId(id)) continue;
-      const roles = listRoleVersions(tx, project);
-      const latest = roles.filter((r) => r.role_id === id).at(-1);
-      if (!latest || latest.status === "inactive") continue;
+      if (!isDefaultRoleId(id) || !changedRoles.includes(id) || handled.has(id))
+        continue;
+      const latest = listRoleVersions(tx, project)
+        .filter((r) => r.role_id === id)
+        .at(-1);
+      if (!latest || latest.status === "inactive" || latest.default_overlay)
+        continue;
       const source = defaultRoleDefinition(id, {
         harness: latest.harness,
         launch_profile_ref: latest.launch_profile_ref,
       });
-      const currentHash = deploymentRolePolicyHash(latest);
       const sourceHash = deploymentRolePolicyHash(source);
       // No write is necessary when a formerly manual rule has reached the default pack.
-      if (currentHash === sourceHash) continue;
-      // An older supervisor's snapshot misses machine requirement changes; the
-      // published receipt still shows this role's default moved.
-      // A rerun of this release reads its own receipt, which names no earlier default.
-      const previous = published.get(id);
-      const prior = previous === sourceHash ? undefined : previous;
-      if (!changedRoles.includes(id) && prior === undefined) continue;
-      // A receipt the release wrote itself outranks a supervisor fingerprint,
-      // which an older supervisor computes without machine requirements.
-      const reference = prior ?? baselineOf(id);
-      if (!reference) {
+      if (deploymentRolePolicyHash(latest) === sourceHash) continue;
+      // Every version equal to a recorded default was upgraded above. The
+      // supervisor's fingerprint decides nothing: an older supervisor hashes
+      // without machine requirements, so it cannot tell them from a hand edit.
+      if (!olderRecorded(id)) {
         recordRoleDeferral(
           tx,
           project,
-          `missing-default:${id}:${latest.version}:${sourceHash}`,
-          `角色 ${id} 缺少上一默认包指纹，系统保留当前版本并通知 PM 排查部署基线；未创建人工拍板。`,
+          `unverified-default:${id}:${latest.version}:${sourceHash}`,
+          `角色 ${id} v${latest.version} 与新默认包不同，且没有可核对的已记录默认包；系统保留当前版本并通知 PM，未创建人工拍板。`,
           clock.now(),
         );
         continue;
       }
-      if (currentHash !== reference) {
-        if (source.instructions === undefined)
-          throw new Error("Default role instructions missing");
-        const diff = roleUpgradeDiff(latest, {
-          ...source,
-          instructions: source.instructions,
-        });
-        // A supervisor built before machine requirements hashes without them;
-        // only a published receipt can then tell a hand-added requirement apart.
-        const unverifiable =
-          prior === undefined &&
-          !!latest.required_capabilities?.length &&
-          deploymentRolePolicyHash({ ...latest, required_capabilities: [] }) ===
-            reference;
-        pending(
-          `deployment-role-manual:${id}:${latest.version}:${sourceHash}`,
-          `角色 ${id} 未自动升级：${unverifiable ? "上一次已部署默认版本的指纹不含机器要求，无法确认当前机器要求是否为项目手改" : "当前版本有手工改动，与上一次已部署默认版本不一致"}。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
-        );
-        continue;
-      }
-      if (!profileNames().has(source.launch_profile_ref)) {
-        recordRoleDeferral(
-          tx,
-          project,
-          `missing-profile:${id}:${latest.version}:${source.launch_profile_ref}`,
-          `默认角色 ${id} 引用的启动配置 ${source.launch_profile_ref} 不存在或配置未通过校验；保留原版本 v${latest.version}，请 PM 排查。`,
-          clock.now(),
-        );
-        continue;
-      }
-      const result = unwrap(
-        upgradeRoleAfterDeployment(
-          { project_id: project, roles },
-          actor,
-          id,
-          source,
-          ports,
-        ),
+      if (source.instructions === undefined)
+        throw new Error("Default role instructions missing");
+      const diff = roleUpgradeDiff(latest, {
+        ...source,
+        instructions: source.instructions,
+      });
+      pending(
+        `deployment-role-manual:${id}:${latest.version}:${sourceHash}`,
+        `角色 ${id} 未自动升级：当前版本有手工改动，与已记录的默认版本都不一致。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
       );
-      if (result.effect) {
-        persistRoleEffect(tx, project, result.effect);
-        tx.events.append(project, {
-          id: tx.ids.nextEventId(),
-          seq: tx.ids.nextEventSequence(project),
-          type: "host_role_upgraded",
-          actor,
-          created_at: clock.now(),
-          payload: {
-            role_id: id,
-            from_version: latest.version,
-            to_version: result.effect.data.version,
-            diff: JSON.parse(JSON.stringify(result.diff)),
-            notice: `默认角色 ${id} 已随已部署版本自动升级：v${latest.version} → v${result.effect.data.version}。`,
-          },
-        });
-      }
     }
     // Even a no-op publication needs a receipt. Commit it with all role writes;
     // a failed transaction cannot make a half-published pack look consistent.
     const pack_hash = defaultRolePackHash();
     const roles: Record<string, PublishedRole> = {};
     for (const role of listRoleVersions(tx, project)) {
-      if (!isDefaultRoleId(role.role_id)) continue;
+      const policy = expectedRolePolicy(role);
+      if (!policy) continue;
       const policy_hash = deploymentRolePolicyHash(role);
-      const default_hash = deploymentRolePolicyHash(
-        defaultRoleDefinition(role.role_id, {
-          harness: role.harness,
-          launch_profile_ref: role.launch_profile_ref,
-        }),
-      );
-      const previous = published.get(role.role_id);
-      const reference =
-        (previous === default_hash ? undefined : previous) ??
-        baselineOf(role.role_id);
+      const expected = deploymentRolePolicyHash(policy);
       roles[role.role_id] = {
         version: role.version,
         policy_hash,
         disposition:
-          policy_hash === default_hash
+          policy_hash === expected
             ? "matched"
-            : reference && policy_hash !== reference
+            : olderRecorded(role.role_id)
               ? "conflict"
               : "unverified",
-        default_hash,
       };
     }
     const receipt: RolePackReceipt = { pack_hash, roles };
@@ -344,7 +259,123 @@ export function upgradeDeployedRoles(
         payload: { ...receipt },
       });
   });
-  return rotateIdleDeployedRoles(store, project);
+  return rotateIdleDeployedRoles(
+    store,
+    project,
+    loadCommandState,
+    profileNames,
+  );
+}
+
+/**
+ * C-613 V-3073:1: a deployment's conclusion on a standing role's target
+ * launch profile, per role, version and profile. Only the system writes it,
+ * in the project stream and on no card, and only when it changes.
+ */
+export const LAUNCH_CHECKED_EVENT = "host_role_launch_checked";
+interface LaunchTarget {
+  readonly role_id: string;
+  readonly role_version: number;
+  readonly profile: string | undefined;
+}
+
+function lastLaunchCheck(
+  tx: ReadRepositories,
+  project: ProjectId,
+  target: LaunchTarget,
+): boolean | undefined {
+  const last = streamEventsBy(tx.events, project, undefined, "type", [
+    LAUNCH_CHECKED_EVENT,
+  ])
+    .filter((e) => {
+      const p = e.payload as Partial<LaunchTarget>;
+      return (
+        e.card_id === undefined &&
+        e.actor.kind === "system" &&
+        e.actor.project_id === project &&
+        p.role_id === target.role_id &&
+        p.role_version === target.role_version &&
+        p.profile === target.profile
+      );
+    })
+    .sort((a, b) => a.seq - b.seq)
+    .at(-1);
+  const valid = (last?.payload as { valid?: unknown } | undefined)?.valid;
+  return typeof valid === "boolean" ? valid : undefined;
+}
+
+function recordLaunchCheck(
+  tx: StoreTransactionContext,
+  project: ProjectId,
+  target: LaunchTarget & { readonly profile: string },
+  valid: boolean,
+  at: string,
+) {
+  if (lastLaunchCheck(tx, project, target) === valid) return;
+  tx.events.append(project, {
+    id: tx.ids.nextEventId(),
+    seq: tx.ids.nextEventSequence(project),
+    type: LAUNCH_CHECKED_EVENT,
+    actor: { kind: "system", project_id: project },
+    created_at: at,
+    payload: {
+      role_id: target.role_id,
+      role_version: target.role_version,
+      profile: target.profile,
+      valid,
+    },
+  });
+}
+
+/**
+ * The newest role version a standing Assignment should rotate to: only one an
+ * audited system upgrade reaches (V-3037:1), an upgrade audit to exactly that
+ * version or a metadata-only audit carrying one with the same policy and
+ * launch fields. Launchability and idleness are judged by the caller.
+ */
+function rotationTarget(state: CommandState, previous: Assignment) {
+  if (
+    previous.scope !== "standing" ||
+    previous.status !== "active" ||
+    previous.external
+  )
+    return undefined;
+  const latest = state.roles
+    .filter((r) => r.role_id === previous.role_id)
+    .sort((a, b) => b.role_version - a.role_version)[0];
+  if (!latest || latest.role_version <= previous.role_version) return undefined;
+  const audited = deploymentAuditedVersion(
+    state,
+    previous.role_id,
+    latest.role_version,
+  );
+  if (audited === undefined || audited <= previous.role_version)
+    return undefined;
+  return latest;
+}
+
+/** A session with an unfinished Run keeps its pinned version until idle. */
+function rotationBusy(state: CommandState, previous: Assignment) {
+  return state.runs.some(
+    (r) =>
+      r.assignment_id === previous.id &&
+      !["completed", "failed", "cancelled"].includes(r.status),
+  );
+}
+
+function rotatedPm(state: CommandState) {
+  return state.assignments.find(
+    (a) =>
+      a.role_id === "pm" &&
+      a.standing_mode === "ops" &&
+      a.status === "active" &&
+      !state.runs.some((r) => r.assignment_id === a.id) &&
+      eventsOfType(state.events, "standing_pm_rotated").some(
+        (e) =>
+          e.actor.kind === "system" &&
+          (e.payload as { assignment_id?: string }).assignment_id === a.id,
+      ),
+  )?.id;
 }
 
 /** Retry every maintenance tick; busy sessions retain their pinned version until idle. */
@@ -352,10 +383,29 @@ export function rotateIdleDeployedRoles(
   store: Store,
   project: ProjectId,
   loadState: (
-    tx: StoreTransactionContext,
+    tx: Parameters<typeof loadCommandState>[0],
     project: ProjectId,
   ) => CommandState = loadCommandState,
+  /** Valid launch profiles, known in a deployment only. */
+  profiles?: () => ReadonlySet<string>,
 ) {
+  // C-641: decide in a read snapshot; only pending work takes the writer lock,
+  // and the locked pass below re-evaluates everything.
+  const settled = store.uow.optimistic(project, (tx) => {
+    const state = loadState(tx, project);
+    return {
+      value:
+        pendingRoleConflictActions(state).length ||
+        // A deployment records launch checks for busy sessions too.
+        state.assignments.some(
+          (a) =>
+            rotationTarget(state, a) && (profiles || !rotationBusy(state, a)),
+        )
+          ? undefined
+          : { pm: rotatedPm(state) },
+    };
+  });
+  if (settled) return settled.pm;
   return store.uow.run((tx) => {
     let state = loadState(tx, project);
     const actor = { kind: "system" as const, project_id: project };
@@ -376,33 +426,53 @@ export function rotateIdleDeployedRoles(
       if (effect.changes.length) state = loadState(tx, project);
     }
     for (const previous of state.assignments) {
-      if (
-        previous.scope !== "standing" ||
-        previous.status !== "active" ||
-        previous.external
-      )
+      const latest = rotationTarget(state, previous);
+      if (!latest) continue;
+      // The new session must be launchable. A deployment checks the profile
+      // and records its conclusion, busy session or not; between deployments
+      // that conclusion stands (V-3073:1), else only an unchanged profile is
+      // taken.
+      const pinned = state.roles.find(
+        (r) =>
+          r.role_id === previous.role_id &&
+          r.role_version === previous.role_version,
+      );
+      const profile = latest.launch_profile_ref;
+      const target = {
+        role_id: previous.role_id,
+        role_version: latest.role_version,
+        profile,
+      };
+      let launchable: boolean;
+      if (profiles) {
+        launchable = profile !== undefined && profiles().has(profile);
+        if (profile !== undefined)
+          recordLaunchCheck(
+            tx,
+            project,
+            { ...target, profile },
+            launchable,
+            clock.now(),
+          );
+      } else {
+        // Already notified by the deployment that found it invalid.
+        if (lastLaunchCheck(tx, project, target) === false) continue;
+        launchable =
+          profile !== undefined && profile === pinned?.launch_profile_ref;
+      }
+      if (!launchable) {
+        recordRoleDeferral(
+          tx,
+          project,
+          `rotation-profile:${previous.id}:${latest.role_version}:${profile}`,
+          profiles
+            ? `常驻角色 ${previous.role_id} v${latest.role_version} 的启动配置 ${profile} 不存在或未通过校验；系统保留原会话并通知 PM 排查。`
+            : `常驻角色 ${previous.role_id} v${latest.role_version} 换了启动配置 ${profile}，部署之外无法核对；系统保留原会话，下次部署核对后再轮换。`,
+          clock.now(),
+        );
         continue;
-      const latest = state.roles
-        .filter((r) => r.role_id === previous.role_id)
-        .sort((a, b) => b.role_version - a.role_version)[0];
-      if (
-        !latest ||
-        latest.role_version <= previous.role_version ||
-        !eventsOfType(state.events, "host_role_upgraded").some(
-          (e) =>
-            e.actor.kind === "system" &&
-            (e.payload as Record<string, unknown>).role_id ===
-              previous.role_id &&
-            (e.payload as Record<string, unknown>).to_version ===
-              latest.role_version,
-        ) ||
-        state.runs.some(
-          (r) =>
-            r.assignment_id === previous.id &&
-            !["completed", "failed", "cancelled"].includes(r.status),
-        )
-      )
-        continue;
+      }
+      if (rotationBusy(state, previous)) continue;
       const rotated =
         previous.role_id === "pm"
           ? rotatePmAfterDeployment(
@@ -426,17 +496,6 @@ export function rotateIdleDeployedRoles(
       persistPmRotation(store, tx, project, rotated.value, clock.now());
       state = loadState(tx, project);
     }
-    return state.assignments.find(
-      (a) =>
-        a.role_id === "pm" &&
-        a.standing_mode === "ops" &&
-        a.status === "active" &&
-        !state.runs.some((r) => r.assignment_id === a.id) &&
-        eventsOfType(state.events, "standing_pm_rotated").some(
-          (e) =>
-            e.actor.kind === "system" &&
-            (e.payload as { assignment_id?: string }).assignment_id === a.id,
-        ),
-    )?.id;
+    return rotatedPm(state);
   });
 }

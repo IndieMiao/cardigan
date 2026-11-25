@@ -6,7 +6,7 @@ import {
   standingRunDormant,
 } from "../card-hold.js";
 import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
-import { eventById } from "../event-index.js";
+import { appendEvents, eventById } from "../event-index.js";
 import { HARNESSES, isHarness } from "../harness.js";
 import {
   automaticContextActionForRun,
@@ -15,7 +15,9 @@ import {
   pendingHostOpsActions,
 } from "../host-ops.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
+import { MCP_SESSION_FAILURE } from "../mcp-session.js";
 import { providerStarted } from "../provider-start.js";
+import { supersededRetirement } from "../retirement-session.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { originalRunTrigger } from "../run-trigger.js";
@@ -36,8 +38,10 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { dropWaitingRetirement } from "./idle-session-retirement.js";
 import { currentReviewTarget, reviewRound } from "./review-round.js";
 import { restartStandingSession, resumeStanding } from "./standing.js";
+import { recordHumanStart } from "./stop-state.js";
 import { incrementalTestReview } from "./test-review.js";
 import { activeWork } from "./workflow.js";
 
@@ -127,7 +131,7 @@ function requireTestReviewBudget(
   const item = d.work(assignment.work_item_id);
   if (item.kind === "verify" && item.status === "waiting_decision") {
     ensure(
-      reviewDiscussionInstruction(item, trigger, d.state.decisions),
+      reviewDiscussionInstruction(item, trigger, d.state),
       "illegal_transition",
       "Review budget is waiting for a decision",
     );
@@ -339,6 +343,7 @@ export function queueRunInDraft(
       requireTestReviewBudget(d, assignment, originalRunTrigger(state, queued));
       exclusive(d, assignment, { run: queued });
       snapshot(queued, assignment);
+      recordHumanStart(d, assignment, queued, cardId(d, assignment));
       return queued;
     }
   }
@@ -371,7 +376,9 @@ export function queueRunInDraft(
         ? eventById(state.events, p.trigger_event_id)
         : undefined,
   });
-  return createQueuedRun(d, assignment, p);
+  const run = createQueuedRun(d, assignment, p);
+  recordHumanStart(d, assignment, run, cardId(d, assignment));
+  return run;
 }
 
 /** Entry points validate their own cause before recording creation and snapshot together. */
@@ -420,7 +427,7 @@ export function createQueuedRun(
   const policy = newRecoveryPolicy(
     {
       ...d.state,
-      events: [...d.state.events, ...d.events],
+      events: appendEvents(d.state.events, d.events),
       work_items: d.list("work_items"),
       deliveries: d.list("deliveries"),
     },
@@ -452,6 +459,15 @@ export interface DispatchRunParams {
    * bell-triggered path reuses one session, it never provisions a second one.
    */
   readonly runtime_ref?: RuntimeRef;
+  /**
+   * C-600: with a new `runtime_ref`, require the session's harness to list the
+   * Card MCP tools before its first tool call (`mcp_handshake: pending`).
+   */
+  readonly verify_mcp_session?: {
+    readonly key_sha256: string;
+    /** Token issued to this launch; other Tokens never move its handshake. */
+    readonly token_id: string;
+  };
   readonly base_sha?: string;
   /** Host-only D5 replacement, committed together with dispatch and its handoff. */
   readonly replacement?: {
@@ -750,8 +766,31 @@ export function dispatchRun(
     if (runtime === "provisioning")
       runtime = unwrap(transition("runtime", runtime, "provisioned"));
     runtime = unwrap(transition("runtime", runtime, "run_started"));
-    const nextAssignment = { ...assignment };
+    // C-690: a new session supersedes a waiting retirement of an earlier one
+    // (target() already refuses a stopping one). Left in place, its handoff
+    // would fence every later bell of the new session.
+    const current =
+      p.runtime_ref !== undefined &&
+      supersededRetirement({ ...assignment, runtime_ref: ref })
+        ? dropWaitingRetirement(d, assignment, "superseded")
+        : assignment;
+    const nextAssignment = { ...current };
     if (p.replacement) delete nextAssignment.session_ref;
+    // C-600: the handshake belongs to the session; a reused one keeps it.
+    if (p.runtime_ref !== undefined) {
+      delete nextAssignment.mcp_handshake;
+      delete nextAssignment.mcp_session_key_sha256;
+      delete nextAssignment.mcp_session_token_id;
+    }
+    ensure(
+      p.verify_mcp_session === undefined ||
+        (p.runtime_ref !== undefined &&
+          /^[0-9a-f]{64}$/u.test(p.verify_mcp_session.key_sha256) &&
+          typeof p.verify_mcp_session.token_id === "string" &&
+          p.verify_mcp_session.token_id.length > 0),
+      "validation_failed",
+      "MCP session verification needs a new session and its key digest",
+    );
     d.put("assignments", {
       ...nextAssignment,
       runtime_state: runtime,
@@ -760,6 +799,13 @@ export function dispatchRun(
       ...(ref.branch ? { branch: ref.branch } : {}),
       ...(base_sha ? { base_sha } : {}),
       ...(ref.agent_session_id ? { session_ref: ref.agent_session_id } : {}),
+      ...(p.verify_mcp_session
+        ? {
+            mcp_handshake: "pending" as const,
+            mcp_session_key_sha256: p.verify_mcp_session.key_sha256,
+            mcp_session_token_id: p.verify_mcp_session.token_id,
+          }
+        : {}),
     });
     const scope =
       assignment.scope === "work_item"
@@ -801,13 +847,34 @@ export function dispatchRun(
 export function acknowledgeRun(
   state: CommandState,
   actor: Actor,
-  p: { run_id: RunId },
+  p: {
+    run_id: RunId;
+    /**
+     * C-600: id of the Token the acknowledging request authenticated with.
+     * A verified session records its launch's Token; any other (e.g. a late
+     * call of the replaced session) cannot start this launch's Run.
+     */
+    token_id?: string;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "acknowledge_run", ports, (d) => {
     const run = d.ownRun(p.run_id);
     if (run.status === "running") return run;
     const assignment = target(d, run.assignment_id);
+    // Checked in this write, so no other launch's request can slip between.
+    if (
+      assignment.mcp_session_token_id !== undefined &&
+      p.token_id !== assignment.mcp_session_token_id
+    )
+      return run;
+    // C-600: a call before the harness listed the Card tools is not native.
+    ensure(
+      assignment.mcp_handshake !== "pending" &&
+        assignment.mcp_handshake !== "missing",
+      "illegal_transition",
+      MCP_SESSION_FAILURE,
+    );
     ensure(
       !run.recovery_policy ||
         run.recovery_policy.root_run_id === run.id ||

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   type CardId,
   type Clock,
+  type Event,
   latestMergeCheck,
   type MergeCheckView,
   mergeBatches,
@@ -9,15 +10,22 @@ import {
 } from "@cardigan/domain";
 import { mergeCheckAttemptRunningInTransaction } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
-import type { Store, StoreTransactionContext } from "@cardigan/store";
+import {
+  recordNotification,
+  type Store,
+  type StoreTransactionContext,
+} from "@cardigan/store";
 import {
   callOpened,
   callSettled,
+  DEFAULT_REPOSITORY_WAIT_ALERT_MS,
   type RepositoryCall,
   type RepositoryReceipt,
   type RepositoryTarget,
   repositoryCard,
   repositoryCheckWait,
+  repositoryRetryDelay,
+  repositoryWaitOverdue,
   targetCallHistory,
 } from "./repository-check-wait.js";
 
@@ -27,7 +35,11 @@ export class RepositoryCheckCalls {
   constructor(
     private store: Store,
     private clock: Clock,
-  ) {}
+    private alertAfterMs = DEFAULT_REPOSITORY_WAIT_ALERT_MS,
+  ) {
+    if (!Number.isSafeInteger(alertAfterMs) || alertAfterMs <= 0)
+      throw new Error("Invalid repository wait alert threshold");
+  }
   begin(
     target: RepositoryTarget,
     check: MergeCheckView,
@@ -55,13 +67,12 @@ export class RepositoryCheckCalls {
       )
         return { kind: "wait" } as const;
       const history = targetCallHistory(events, target, check);
-      const { timeouts, retryAt, exhausted } = repositoryCheckWait(
+      const { timeouts, retryAt } = repositoryCheckWait(
         events,
         check,
         target,
         history,
       );
-      if (exhausted) return { kind: "exhausted", timeouts } as const;
       if (
         (retryAt && Date.parse(this.clock.now()) < Date.parse(retryAt)) ||
         [...history.pending.values()].some(
@@ -124,7 +135,7 @@ export class RepositoryCheckCalls {
       const ordinal =
         Math.max(call.prior_timeouts, prior?.ordinal ?? 0) +
         (outcome === "timeout" ? 1 : 0);
-      const delay = call.retry_delays_ms[ordinal - 1];
+      const delay = repositoryRetryDelay(call.retry_delays_ms, ordinal);
       const receipt: RepositoryReceipt = {
         ordinal,
         ...call,
@@ -135,7 +146,77 @@ export class RepositoryCheckCalls {
             : null,
       };
       this.append(tx, project, card, callSettled, receipt);
+      if (receipt.outcome === "timeout")
+        this.remindHostOps(tx, project, card, events, receipt);
       return receipt;
+    });
+  }
+  /** Contention past the total threshold only reminds host ops, once per wait
+   * epoch. The check stays queued and its author is never returned. */
+  private remindHostOps(
+    tx: StoreTransactionContext,
+    project: ProjectId,
+    card: CardId,
+    events: readonly Event[],
+    receipt: RepositoryReceipt,
+  ) {
+    const mine = (e: Event) =>
+      e.actor.kind === "system" &&
+      e.actor.project_id === project &&
+      (e.payload as { epoch?: unknown } | null)?.epoch === receipt.epoch;
+    if (events.some((e) => e.type === repositoryWaitOverdue && mine(e))) return;
+    const since =
+      events.find(
+        (e) =>
+          e.type === callSettled &&
+          mine(e) &&
+          (e.payload as RepositoryReceipt).outcome === "timeout",
+      )?.created_at ?? this.clock.now();
+    const now = this.clock.now();
+    const waited = Date.parse(now) - Date.parse(since);
+    if (waited < this.alertAfterMs) return;
+    const ops = tx.assignments
+      .list(project)
+      .find(
+        (a) =>
+          a.status === "active" &&
+          a.scope === "standing" &&
+          a.role_id === "host_ops",
+      );
+    const minutes = Math.floor(waited / 60_000);
+    const event: Event = {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project, card),
+      card_id: card,
+      actor: { kind: "system", project_id: project },
+      type: repositoryWaitOverdue,
+      payload: {
+        epoch: receipt.epoch,
+        attempt_id: receipt.attempt_id,
+        ...(receipt.batch_id ? { batch_id: receipt.batch_id } : {}),
+        ...(receipt.completion_id
+          ? { completion_id: receipt.completion_id }
+          : {}),
+        waiting_since: since,
+        timeouts: receipt.ordinal,
+        retry_at: receipt.retry_at,
+        threshold_ms: this.alertAfterMs,
+        ...(ops ? { assignment_id: ops.id } : {}),
+        body: `候选分发已等待仓库锁 ${minutes} 分钟（${receipt.ordinal} 次超时），检查仍在排队重试，请主机运维排查占锁原因。`,
+      },
+      created_at: now,
+    };
+    tx.events.append(project, event);
+    recordNotification(this.store.database, {
+      project_id: project,
+      card_id: card,
+      event_id: event.id,
+      seq: event.seq,
+      recipient: ops
+        ? { kind: "assignment", assignment_id: ops.id }
+        : { kind: "pm_ops" },
+      kind: "run_attention",
+      at: now,
     });
   }
   private append(

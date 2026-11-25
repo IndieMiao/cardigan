@@ -12,21 +12,29 @@ import type {
   Event,
   GlobalIdAllocator,
   GlobalRepositories,
+  IdAllocator,
+  LocalInputKind,
   NotificationStatus,
   ProjectId,
   ReadMachinePlacement,
   Result,
+  RunId,
   TimelineEntry,
   ToolName,
   TransactionContext,
   UnitOfWork,
 } from "@cardigan/domain";
+import { suggestProjectCode, validateProjectCode } from "@cardigan/domain";
 import {
   type ChangeCursor,
   type ChangeSet,
   changesSince,
 } from "./change-feed.js";
-import { CommandEvents } from "./command-events.js";
+import {
+  CommandEvents,
+  type HotStateHints,
+  hotStateHints,
+} from "./command-events.js";
 import {
   CommandSnapshots,
   type SnapshotTransaction,
@@ -41,7 +49,12 @@ import {
   ID_FORMAT_MIGRATION_NAME,
   legacyRequest,
 } from "./id-format-migration.js";
-import { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
+import {
+  type BufferedIdAllocator,
+  createBufferedIdAllocator,
+  createIdAllocator,
+  PROJECT_EVENT_STREAM,
+} from "./ids.js";
 import {
   acknowledgeNotifications,
   advanceRouterCursor,
@@ -62,6 +75,11 @@ import {
   migrate,
 } from "./migrate.js";
 import {
+  projectCodeSource,
+  projectCodes,
+  projectsHoldingId,
+} from "./project-codes.js";
+import {
   listFindings,
   type ReconcileFindingInput,
   recordFindings,
@@ -70,11 +88,13 @@ import {
   clearRepositoryCache,
   createReadRepositories,
   createRepositories,
+  platformDeploymentReader,
   type ReadEventRepository,
   type ReadRepositories,
 } from "./repositories.js";
 import { RunResourceAuthority } from "./run-resource-authority.js";
 import { backfillStandingModesInTransaction } from "./standing.js";
+import { prepare } from "./statements.js";
 import { seedCardTemplates } from "./templates.js";
 import {
   findTokenByHash,
@@ -108,6 +128,9 @@ export interface StoreTransactionContext
   readonly employees: GlobalRepositories["employees"];
   readonly members: GlobalRepositories["members"];
   readonly cachedCommandState?: SnapshotTransaction["state"];
+  readonly command_state_scope?: CommandStateScope;
+  readonly hot_state_hints?: HotStateHints;
+  readonly platformDeployments: (project: ProjectId, sha: string) => Event[];
   readonly global_ids: GlobalIdAllocator;
   /** Issue a token inside this transaction (assignment and token commit together). */
   issueToken(input: IssueTokenInput): IssuedToken;
@@ -129,21 +152,89 @@ export interface StoreUnitOfWork extends UnitOfWork {
    * working while another process is writing.
    */
   read<T>(operation: (transaction: ReadRepositories) => T): T;
+  /**
+   * C-641: compute in a read snapshot, then commit in a short write
+   * transaction. See `Store.optimistic`.
+   */
+  optimistic<T>(
+    project: ProjectId,
+    plan: (transaction: OptimisticContext) => OptimisticPlan<T>,
+    options?: OptimisticOptions,
+  ): T;
 }
 
-function projectRecord(row: {
+/**
+ * C-641: what an optimistic plan may read. Repositories are read-only; IDs are
+ * numbered in memory and only written if the plan commits.
+ */
+export interface OptimisticContext extends ReadRepositories {
+  readonly ids: IdAllocator;
+  readonly read_machine_placement?: ReadMachinePlacement;
+}
+
+export interface OptimisticPlan<T> {
+  readonly value: T;
+  /**
+   * Persist the plan. Runs under the writer lock only after the project's
+   * command-state version and every used ID counter are unchanged since the
+   * snapshot. Omit when there is nothing to write: no writer lock is taken.
+   */
+  readonly write?: (transaction: StoreTransactionContext) => void;
+}
+
+export interface OptimisticOptions {
+  /** Snapshot attempts before the pessimistic fallback; `0` goes straight to it. */
+  readonly attempts?: number;
+}
+
+/** Conflicting snapshots retried before falling back to `BEGIN IMMEDIATE`. */
+export const DEFAULT_OPTIMISTIC_ATTEMPTS = 3;
+const MAX_OPTIMISTIC_ATTEMPTS = 20;
+
+export interface OptimisticStats {
+  /** Committed from a snapshot plan. */
+  readonly committed: number;
+  /** A snapshot plan with nothing to write; no writer lock taken. */
+  readonly unchanged: number;
+  /** Snapshot plans discarded because the read set changed before commit. */
+  readonly conflicts: number;
+  /** Plans run pessimistically (attempt limit, port outside the read set, no version table). */
+  readonly fallbacks: number;
+}
+
+/** Thrown into a snapshot plan that reads a port outside the validated read set. */
+class PessimisticRequired extends Error {
+  constructor() {
+    super("This read requires the pessimistic write transaction");
+  }
+}
+
+type Planned<T> =
+  | {
+      readonly kind: "planned";
+      readonly plan: OptimisticPlan<T>;
+      readonly version: string;
+      readonly ids: BufferedIdAllocator;
+    }
+  | { readonly kind: "pessimistic" };
+
+interface ProjectRow {
   id: string;
   name: string;
   created_at: string;
   repo_path: string | null;
   base_branch: string | null;
-}): ProjectRecord {
+  code?: string | null;
+}
+
+function projectRecord(row: ProjectRow): ProjectRecord {
   return {
     id: row.id as ProjectId,
     name: row.name,
     created_at: row.created_at,
     repo_path: row.repo_path,
     base_branch: row.base_branch,
+    code: row.code ?? null,
   };
 }
 
@@ -157,6 +248,25 @@ export interface StoreOptions {
   readonly migrate?: boolean;
   /** Override the migrations directory (tests). */
   readonly migrationsDir?: string;
+  /**
+   * C-639 command state scope; defaults to `$CARDIGAN_COMMAND_STATE`, else
+   * `hot`. `full` restores the former whole-history command state.
+   */
+  readonly commandState?: CommandStateScope;
+}
+
+/**
+ * `hot`: open cards' streams plus durable closed-card facts; `full`: all
+ * history; `lean` (C-649): hot, plus closed-card GitHub dispatch records left
+ * out and project-stream retention by type.
+ */
+export type CommandStateScope = "full" | "hot" | "lean";
+export function commandStateScope(
+  value: string | undefined,
+): CommandStateScope {
+  if (value === undefined || value === "" || value === "hot") return "hot";
+  if (value === "full" || value === "lean") return value;
+  throw new Error("CARDIGAN_COMMAND_STATE must be hot, lean or full");
 }
 
 export interface GetUpdatesParams {
@@ -204,11 +314,23 @@ export interface ProjectRecord {
   readonly repo_path: string | null;
   /** Branch a worktree starts from when the card does not say otherwise. */
   readonly base_branch: string | null;
+  /**
+   * C-674: globally unique display code (`SEN`), immutable once registered.
+   * Null only before the project-code migration or for a project that has
+   * not registered one yet.
+   */
+  readonly code: string | null;
 }
 
 export interface ProjectCreateInput {
   readonly id: ProjectId;
   readonly name?: string;
+  /**
+   * C-674: the project code. Human entry points (`project create`) require
+   * it; omitted here, the suggested code for the name is registered, so
+   * fixtures need no code of their own.
+   */
+  readonly code?: string;
 }
 
 export interface IdempotentResult<T> {
@@ -234,12 +356,28 @@ export interface StoreObserver {
   transaction?(kind: "run" | "read", durationMs: number): void;
   /** A command-state cache miss rebuilt inside a UnitOfWork. */
   stateBuild?(durationMs: number): void;
+  /**
+   * C-638: a `BEGIN IMMEDIATE` write transaction: the wait for SQLite's write
+   * lock (busy timeout included) and, once held, the time until it was
+   * released by commit or rollback. `holdMs` is undefined when it was never
+   * acquired.
+   */
+  writeLock?(waitMs: number, holdMs: number | undefined): void;
 }
 
 type PlacementReader = (
   tx: ReadRepositories,
   ...args: Parameters<ReadMachinePlacement>
 ) => ReturnType<ReadMachinePlacement>;
+
+/** C-635: an MCP activity time waiting to ride along with a write. */
+export interface DeferredActivity {
+  readonly project_id: ProjectId;
+  readonly assignment_id: AssignmentId;
+  readonly at: string;
+  /** C-600: the request's Token; another launch's Token is not activity. */
+  readonly token_id?: string;
+}
 
 export class Store {
   readonly #db: DatabaseSync;
@@ -262,6 +400,12 @@ export class Store {
   }
   #snapshots: CommandSnapshots | undefined;
   readonly #commandEvents = new CommandEvents();
+  #commandStateScope: CommandStateScope = "hot";
+  get commandStateScope(): CommandStateScope {
+    return this.#commandStateScope;
+  }
+  /** C-635: deferred MCP activity, keyed by project, Assignment and Token. */
+  readonly #deferredActivity = new Map<string, DeferredActivity>();
 
   /** Call inside the consuming transaction: covers local writes and other connections. */
   snapshotVersion(project: ProjectId): string | undefined {
@@ -305,6 +449,9 @@ export class Store {
       options.clock ?? systemClock,
       options.migrationsDir,
     );
+    store.#commandStateScope =
+      options.commandState ??
+      commandStateScope(process.env.CARDIGAN_COMMAND_STATE);
     try {
       // Opening/configuring the database can contend with another process too.
       db.exec("PRAGMA busy_timeout = 5000");
@@ -463,7 +610,165 @@ export class Store {
         this.#timed("run", () => this.#run(operation)),
       read: <T>(operation: (transaction: ReadRepositories) => T): T =>
         this.#timed("read", () => this.#read(operation)),
+      optimistic: (project, plan, options) =>
+        this.optimistic(project, plan, options),
     };
+  }
+
+  #optimisticStats = { committed: 0, unchanged: 0, conflicts: 0, fallbacks: 0 };
+  get optimisticStats(): OptimisticStats {
+    return { ...this.#optimisticStats };
+  }
+
+  /**
+   * C-641: optimistic command commit. `plan` computes in a `BEGIN DEFERRED`
+   * snapshot without the writer lock. Its read set is the project's
+   * command-state version (the key of the command-state cache: project
+   * collections, global identities and all Assignments) plus the ID counters
+   * it used. Under `BEGIN IMMEDIATE` both are compared with the snapshot; only
+   * if unchanged does `write` run, so the lock covers persistence alone.
+   *
+   * A changed read set discards the plan and recomputes, at most `attempts`
+   * times; then (or when the plan reads machine placement or other projects'
+   * deployment records, which lie outside the project version) the plan and
+   * its write run in one `BEGIN IMMEDIATE`
+   * transaction exactly like `uow.run`. Plans must therefore be repeatable:
+   * no side effects outside the transaction they are given.
+   */
+  optimistic<T>(
+    project: ProjectId,
+    plan: (transaction: OptimisticContext) => OptimisticPlan<T>,
+    options: OptimisticOptions = {},
+  ): T {
+    if (this.#inTransaction)
+      throw new Error("nested UnitOfWork is not supported");
+    const attempts = options.attempts ?? DEFAULT_OPTIMISTIC_ATTEMPTS;
+    if (
+      !Number.isSafeInteger(attempts) ||
+      attempts < 0 ||
+      attempts > MAX_OPTIMISTIC_ATTEMPTS
+    )
+      throw new Error("Invalid optimistic attempt limit");
+    const snapshots = this.#snapshots;
+    if (snapshots)
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        const planned = this.#planInSnapshot(project, snapshots, plan);
+        if (planned.kind === "pessimistic") break;
+        const write = planned.plan.write;
+        if (!write) {
+          this.#optimisticStats.unchanged++;
+          return planned.plan.value;
+        }
+        if (this.#commitPlanned(project, snapshots, planned, write)) {
+          this.#optimisticStats.committed++;
+          return planned.plan.value;
+        }
+        this.#optimisticStats.conflicts++;
+      }
+    this.#optimisticStats.fallbacks++;
+    return this.#timed("run", () =>
+      this.#run((tx) => {
+        const planned = plan(tx);
+        planned.write?.(tx);
+        return planned.value;
+      }),
+    );
+  }
+
+  #planInSnapshot<T>(
+    project: ProjectId,
+    snapshots: CommandSnapshots,
+    plan: (transaction: OptimisticContext) => OptimisticPlan<T>,
+  ): Planned<T> {
+    const db = this.#db;
+    const started = performance.now();
+    db.exec("BEGIN DEFERRED");
+    this.#inTransaction = true;
+    let finished = false;
+    const events = this.#commandEvents.transaction(db);
+    const cache = snapshots.transaction();
+    try {
+      // The first read pins the snapshot the plan and its version share.
+      const version = snapshots.version(project);
+      const trust = this.#testReviewTrust;
+      const ids = createBufferedIdAllocator(db);
+      let outside = false;
+      const repositories = createReadRepositories(db, cache);
+      const context: OptimisticContext = {
+        ...repositories,
+        ...this.#cachedState(cache),
+        ...(trust ? { test_review_trust: trust } : {}),
+        ...(this.#placement
+          ? {
+              read_machine_placement: () => {
+                outside = true;
+                throw new PessimisticRequired();
+              },
+            }
+          : {}),
+        // Other projects' deployment records are outside the project version.
+        platformDeployments: () => {
+          outside = true;
+          throw new PessimisticRequired();
+        },
+        // Same history view and scope as `#run` and `#read` (C-639, C-640).
+        events: {
+          ...repositories.events,
+          listAfter: events.listAfter,
+          listStreams: events.listStreams,
+        },
+        command_state_scope: this.#commandStateScope,
+        hot_state_hints: hotStateHints(this.#db),
+        ids: ids.ids,
+      };
+      let result: OptimisticPlan<T>;
+      try {
+        result = plan(context);
+      } catch (error) {
+        // A domain wrapper may have converted the signal; the flag still holds.
+        if (outside) return { kind: "pessimistic" };
+        throw error;
+      }
+      if (outside || trust !== this.#testReviewTrust)
+        return { kind: "pessimistic" };
+      db.exec("COMMIT");
+      finished = true;
+      events.commit();
+      cache.commit();
+      return { kind: "planned", plan: result, version, ids };
+    } finally {
+      if (!finished) db.exec("ROLLBACK");
+      this.#inTransaction = false;
+      this.#observer?.transaction?.("read", performance.now() - started);
+    }
+  }
+
+  #commitPlanned<T>(
+    project: ProjectId,
+    snapshots: CommandSnapshots,
+    planned: Extract<Planned<T>, { kind: "planned" }>,
+    write: (transaction: StoreTransactionContext) => void,
+  ): boolean {
+    const db = this.#db;
+    const started = performance.now();
+    db.exec("BEGIN IMMEDIATE");
+    let handedOff = false;
+    try {
+      if (
+        snapshots.version(project) !== planned.version ||
+        !planned.ids.unchanged()
+      )
+        return false;
+      handedOff = true;
+      this.#writeAndCommit((tx) => {
+        planned.ids.flush();
+        write(tx);
+      });
+      return true;
+    } finally {
+      if (!handedOff) db.exec("ROLLBACK");
+      this.#observer?.transaction?.("run", performance.now() - started);
+    }
   }
 
   /** Recheck a single external-evidence-dependent write in a pinned read snapshot.
@@ -526,8 +831,32 @@ export class Store {
     if (this.#inTransaction) {
       throw new Error("nested UnitOfWork is not supported");
     }
-    this.#db.exec("BEGIN IMMEDIATE");
-    return this.#writeAndCommit(operation);
+    const observer = this.#observer;
+    if (!observer?.writeLock) {
+      this.#db.exec("BEGIN IMMEDIATE");
+      return this.#writeAndCommit(operation);
+    }
+    // Timing never changes a transaction's result or error.
+    const report = (waitMs: number, holdMs: number | undefined) => {
+      try {
+        observer.writeLock?.(waitMs, holdMs);
+      } catch {
+        // Ignored.
+      }
+    };
+    const started = performance.now();
+    try {
+      this.#db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      report(performance.now() - started, undefined);
+      throw error;
+    }
+    const acquired = performance.now();
+    try {
+      return this.#writeAndCommit(operation);
+    } finally {
+      report(acquired - started, performance.now() - acquired);
+    }
   }
 
   #writeAndCommit<T>(
@@ -566,7 +895,14 @@ export class Store {
         ...(this.#testReviewTrust
           ? { test_review_trust: this.#testReviewTrust }
           : {}),
-        events: { ...repositories.events, listStreams: events.listStreams },
+        events: {
+          ...repositories.events,
+          listAfter: events.listAfter,
+          listStreams: events.listStreams,
+        },
+        command_state_scope: this.#commandStateScope,
+        hot_state_hints: hotStateHints(this.#db),
+        platformDeployments: platformDeploymentReader(this.#db),
         ...createGlobalRepositories(this.#db, "write", snapshots),
         global_ids: createGlobalIdAllocator(this.#db),
         ids: createIdAllocator(this.#db),
@@ -584,7 +920,12 @@ export class Store {
         },
       };
       const result = operation(tx);
+      // C-635: deferred MCP activity rides along with this write.
+      const settled = this.#applyDeferredActivity();
       this.#db.exec("COMMIT");
+      for (const [key, entry] of settled)
+        if (this.#deferredActivity.get(key) === entry)
+          this.#deferredActivity.delete(key);
       events.commit();
       snapshots?.commit();
       return result;
@@ -615,16 +956,49 @@ export class Store {
       const repositories = createReadRepositories(this.#db, snapshots);
       const result = operation({
         ...repositories,
+        projectMergeEvents: events.projectMergeEvents,
         ...this.#cachedState(snapshots),
         ...(this.#testReviewTrust
           ? { test_review_trust: this.#testReviewTrust }
           : {}),
-        events: { ...repositories.events, listStreams: events.listStreams },
+        events: {
+          ...repositories.events,
+          listAfter: events.listAfter,
+          listStreams: events.listStreams,
+        },
+        command_state_scope: this.#commandStateScope,
+        hot_state_hints: hotStateHints(this.#db),
       });
       this.#db.exec("COMMIT");
       events.commit();
       snapshots?.commit();
       return result;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      this.#rollbacks++;
+      throw error;
+    } finally {
+      this.#inTransaction = false;
+    }
+  }
+
+  /**
+   * C-649: decode up to `rows` more of a project's events into the shared
+   * command-event log in a short read transaction. Returns true once the log
+   * is current; callers yield between calls to keep restart pauses short.
+   */
+  warmCommandEvents(project: ProjectId, rows = 50_000): boolean {
+    if (this.#inTransaction) {
+      throw new Error("nested UnitOfWork is not supported");
+    }
+    this.#db.exec("BEGIN DEFERRED");
+    this.#inTransaction = true;
+    const events = this.#commandEvents.transaction(this.#db);
+    try {
+      const done = events.warm(project, rows);
+      this.#db.exec("COMMIT");
+      events.commit();
+      return done;
     } catch (error) {
       this.#db.exec("ROLLBACK");
       this.#rollbacks++;
@@ -834,17 +1208,50 @@ export class Store {
         },
       };
     }
+    const name = input.name ?? input.id;
+    let code: string | null = null;
+    if (this.#hasProjectCodes()) {
+      const taken = projectCodes(this.#db);
+      if (input.code === undefined)
+        code = suggestProjectCode(
+          projectCodeSource({ id: input.id, name }),
+          taken,
+        );
+      else {
+        const valid = validateProjectCode(input.code, taken);
+        if (!valid.ok) return valid;
+        code = valid.value;
+      }
+    } else if (input.code !== undefined) {
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: "this database has no project codes yet",
+        },
+      };
+    }
     const record: ProjectRecord = {
       id: input.id,
-      name: input.name ?? input.id,
+      name,
       created_at: this.#clock.now(),
       repo_path: null,
       base_branch: null,
+      code,
     };
     this.uow.run(() => {
-      this.#db
-        .prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)")
-        .run(record.id, record.name, record.created_at);
+      if (code === null)
+        this.#db
+          .prepare(
+            "INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)",
+          )
+          .run(record.id, record.name, record.created_at);
+      else
+        this.#db
+          .prepare(
+            "INSERT INTO projects (id, name, created_at, code) VALUES (?, ?, ?, ?)",
+          )
+          .run(record.id, record.name, record.created_at, code);
       seedCardTemplates(this.#db, record.id);
       if (this.schemaVersion() >= 26)
         seedLocalMachine(this.#db, record.id, record.created_at);
@@ -854,38 +1261,145 @@ export class Store {
 
   getProject(id: ProjectId): ProjectRecord | undefined {
     const row = this.#db
-      .prepare(
-        "SELECT id, name, created_at, repo_path, base_branch FROM projects WHERE id = ?",
-      )
-      .get(id) as
-      | {
-          id: string;
-          name: string;
-          created_at: string;
-          repo_path: string | null;
-          base_branch: string | null;
-        }
-      | undefined;
+      .prepare(`SELECT ${this.#projectColumns()} FROM projects WHERE id = ?`)
+      .get(id) as ProjectRow | undefined;
     return row === undefined ? undefined : projectRecord(row);
+  }
+
+  /** C-674: the project a full number's code names, if any. */
+  projectByCode(code: string): ProjectRecord | undefined {
+    if (!this.#hasProjectCodes()) return undefined;
+    const row = this.#db
+      .prepare(`SELECT ${this.#projectColumns()} FROM projects WHERE code = ?`)
+      .get(code) as ProjectRow | undefined;
+    return row === undefined ? undefined : projectRecord(row);
+  }
+
+  /** C-675: the projects that have this project-scoped number (`C-34`). */
+  projectsHoldingId(kind: LocalInputKind, id: string): ProjectId[] {
+    return projectsHoldingId(this.#db, kind, id);
+  }
+
+  /** C-674: display code of a project; undefined when none is registered. */
+  projectCode(id: ProjectId): string | undefined {
+    return this.getProject(id)?.code ?? undefined;
+  }
+
+  /**
+   * C-674: register the code of a project that has none. A registered code
+   * never changes, even to the same project's own suggestion.
+   */
+  setProjectCode(input: {
+    readonly project_id: ProjectId;
+    readonly code: string;
+  }): Result<ProjectRecord> {
+    const project = this.getProject(input.project_id);
+    if (project === undefined)
+      return {
+        ok: false,
+        error: {
+          code: "not_found",
+          message: `project ${input.project_id} not found`,
+        },
+      };
+    if (!this.#hasProjectCodes())
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: "this database has no project codes yet",
+        },
+      };
+    if (project.code !== null)
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: `项目 ${project.id} 已登记代号 ${project.code}，登记后不可修改`,
+          details: { project_id: project.id, code: project.code },
+        },
+      };
+    const valid = validateProjectCode(input.code, projectCodes(this.#db));
+    if (!valid.ok) return valid;
+    const changed = this.#db
+      .prepare("UPDATE projects SET code = ? WHERE id = ? AND code IS NULL")
+      .run(valid.value, project.id);
+    if (Number(changed.changes) !== 1) {
+      // Another registration won the race; report the code actually stored.
+      const stored = this.getProject(project.id)?.code ?? null;
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: `项目 ${project.id} 已登记代号 ${stored}，登记后不可修改`,
+          details: { project_id: project.id, code: stored },
+        },
+      };
+    }
+    return { ok: true, value: { ...project, code: valid.value } };
+  }
+
+  #projectCodeColumn = false;
+  #hasProjectCodes(): boolean {
+    if (this.#projectCodeColumn) return true;
+    this.#projectCodeColumn =
+      this.#db
+        .prepare(
+          "SELECT 1 FROM pragma_table_info('projects') WHERE name = 'code'",
+        )
+        .get() !== undefined;
+    return this.#projectCodeColumn;
+  }
+
+  #projectColumns(): string {
+    return `id, name, created_at, repo_path, base_branch${this.#hasProjectCodes() ? ", code" : ""}`;
+  }
+
+  /**
+   * C-634: highest seq per event stream (`""` is the project stream) in one
+   * aggregate query. Streams come from the counters every append advances;
+   * each max is an index lookup, so the cost follows the stream count, not
+   * the history.
+   */
+  latestEventSeqs(project: ProjectId): Map<string, number> {
+    return new Map(
+      prepare(
+        this.#db,
+        `SELECT c.stream AS stream,
+          (SELECT MAX(e.seq) FROM events e
+            WHERE e.project_id = c.project_id AND e.stream = c.stream) AS seq
+        FROM event_counters c WHERE c.project_id = ?`,
+      )
+        .all(project)
+        .flatMap((row) =>
+          row.seq === null ? [] : [[String(row.stream), Number(row.seq)]],
+        ),
+    );
+  }
+
+  /**
+   * C-634: per-stream allocation counters. Allocation and append share one
+   * transaction, so a committed counter is never behind its stream: a stream
+   * whose counter is at or below a reader's cursor has nothing new for it.
+   */
+  eventStreamCounters(project: ProjectId): Map<string, number> {
+    return new Map(
+      prepare(
+        this.#db,
+        "SELECT stream, seq FROM event_counters WHERE project_id = ?",
+      )
+        .all(project)
+        .map((row) => [String(row.stream), Number(row.seq)]),
+    );
   }
 
   listProjects(): ProjectRecord[] {
     return this.#db
       .prepare(
-        "SELECT id, name, created_at, repo_path, base_branch FROM projects ORDER BY created_at, id",
+        `SELECT ${this.#projectColumns()} FROM projects ORDER BY created_at, id`,
       )
       .all()
-      .map((row) =>
-        projectRecord(
-          row as {
-            id: string;
-            name: string;
-            created_at: string;
-            repo_path: string | null;
-            base_branch: string | null;
-          },
-        ),
-      );
+      .map((row) => projectRecord(row as unknown as ProjectRow));
   }
 
   /**
@@ -1093,11 +1607,17 @@ export class Store {
    * watchdog of M3 plan §3.3 uses it to tell a busy Agent from a stuck one.
    * Unknown or unreleased Assignments are silently ignored, so a tool call can
    * never fail because of this bookkeeping.
+   *
+   * C-600: `token_id` is the Token the request authenticated with. A verified
+   * session records its launch's Token; a request on another one (a late call
+   * of the replaced session) is not this session's activity and is ignored,
+   * checked inside this write.
    */
   touchAssignmentActivity(
     project_id: ProjectId,
     assignment_id: AssignmentId,
     at: string = this.#clock.now(),
+    token_id?: string,
   ): boolean {
     return this.#run(() => {
       const row = this.#db
@@ -1106,6 +1626,12 @@ export class Store {
       if (row === undefined) return false;
       const assignment = JSON.parse(row.doc) as Assignment;
       if (assignment.status !== "active") return false;
+      if (
+        token_id !== undefined &&
+        assignment.mcp_session_token_id !== undefined &&
+        token_id !== assignment.mcp_session_token_id
+      )
+        return false;
       this.#db
         .prepare(
           "UPDATE assignments SET doc = ?, last_mcp_activity_at = ? WHERE project_id = ? AND id = ?",
@@ -1121,6 +1647,260 @@ export class Store {
         );
       return true;
     });
+  }
+
+  /**
+   * C-600: advance the current verified session's Card MCP handshake.
+   * `key_sha256` is the digest of the request's session header (or, for
+   * `deadline`, the session the host timed). Only the launch's own key
+   * counts as native: its `tools/list` or tool call turns `pending` into
+   * `listed`. Any other tool call while pending proves the session has no
+   * native tools (`missing`), and so does an expired `deadline` for the same
+   * session. Other states never change here. Returns the resulting state.
+   */
+  advanceMcpHandshake(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    observed: "tools_listed" | "tool_called" | "deadline",
+    key_sha256?: string,
+    token_id?: string,
+  ): Assignment["mcp_handshake"] {
+    return this.#advanceMcpHandshake(
+      project_id,
+      assignment_id,
+      observed,
+      key_sha256,
+      token_id,
+      true,
+    ).state;
+  }
+
+  /**
+   * C-635: `advanceMcpHandshake` for the tool-call hot path. It never waits
+   * for another process's write lock: when the transition must be written
+   * and the lock is busy, the state it would have written is returned with
+   * `persisted: false`, so the caller decides now and persists later.
+   */
+  tryAdvanceMcpHandshake(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    observed: "tools_listed" | "tool_called",
+    key_sha256?: string,
+    token_id?: string,
+  ): {
+    readonly state: Assignment["mcp_handshake"];
+    readonly persisted: boolean;
+  } {
+    return this.#advanceMcpHandshake(
+      project_id,
+      assignment_id,
+      observed,
+      key_sha256,
+      token_id,
+      false,
+    );
+  }
+
+  #advanceMcpHandshake(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    observed: "tools_listed" | "tool_called" | "deadline",
+    key_sha256: string | undefined,
+    token_id: string | undefined,
+    wait: boolean,
+  ): {
+    readonly state: Assignment["mcp_handshake"];
+    readonly persisted: boolean;
+  } {
+    const read = () => {
+      const row = this.#db
+        .prepare("SELECT doc FROM assignments WHERE project_id = ? AND id = ?")
+        .get(project_id, assignment_id) as { doc: string } | undefined;
+      return row && (JSON.parse(row.doc) as Assignment);
+    };
+    const next = (a: Assignment): NonNullable<Assignment["mcp_handshake"]> => {
+      const own =
+        key_sha256 !== undefined && key_sha256 === a.mcp_session_key_sha256;
+      if (observed === "deadline") return own ? "missing" : "pending";
+      if (own) return "listed";
+      // Another launch's key comes from that launch's own harness (e.g. a
+      // late call): no evidence about this session. Only a call carrying no
+      // key at all — a wrapper — proves this session lacks native tools.
+      return observed === "tool_called" && key_sha256 === undefined
+        ? "missing"
+        : "pending";
+    };
+    // A request on another launch's Token (e.g. a late call of the replaced
+    // session) says nothing about this session.
+    const foreign = (a: Assignment) =>
+      token_id !== undefined &&
+      a.mcp_session_token_id !== undefined &&
+      token_id !== a.mcp_session_token_id;
+    // Every request passes here: only a changing pending session writes.
+    const seen = read();
+    if (seen && foreign(seen)) return { state: undefined, persisted: true };
+    if (
+      seen?.status !== "active" ||
+      seen.mcp_handshake !== "pending" ||
+      next(seen) === "pending"
+    )
+      return { state: seen?.mcp_handshake, persisted: true };
+    const write = () =>
+      this.#timed("run", () =>
+        this.#run(() => {
+          const assignment = read();
+          if (assignment === undefined || foreign(assignment)) return undefined;
+          if (
+            assignment.status !== "active" ||
+            assignment.mcp_handshake !== "pending"
+          )
+            return assignment.mcp_handshake;
+          const mcp_handshake = next(assignment);
+          if (mcp_handshake === "pending") return mcp_handshake;
+          this.#db
+            .prepare(
+              "UPDATE assignments SET doc = ? WHERE project_id = ? AND id = ?",
+            )
+            .run(
+              JSON.stringify({
+                ...assignment,
+                mcp_handshake,
+              } satisfies Assignment),
+              project_id,
+              assignment_id,
+            );
+          return mcp_handshake;
+        }),
+      );
+    if (wait) return { state: write(), persisted: true };
+    const attempt = this.withoutLockWait(write);
+    return attempt.busy
+      ? { state: next(seen), persisted: false }
+      : { state: attempt.value, persisted: true };
+  }
+
+  /**
+   * C-635: run `operation` (typically one write) without waiting for another
+   * process's write lock: SQLite's busy timeout is 0 for its duration, and a
+   * busy database yields `{ busy: true }` instead of freezing this process's
+   * event loop. The operation's own transaction is rolled back as usual.
+   */
+  withoutLockWait<T>(
+    operation: () => T,
+  ): { readonly busy: false; readonly value: T } | { readonly busy: true } {
+    if (this.#inTransaction)
+      throw new Error("nested UnitOfWork is not supported");
+    const db = this.#db;
+    const timeout = Number(
+      (db.prepare("PRAGMA busy_timeout").get() as { timeout: number }).timeout,
+    );
+    db.exec("PRAGMA busy_timeout = 0");
+    try {
+      return { busy: false, value: operation() };
+    } catch (error) {
+      if (isSqliteBusy(error)) return { busy: true };
+      throw error;
+    } finally {
+      db.exec(`PRAGMA busy_timeout = ${timeout}`);
+    }
+  }
+
+  /** C-635: this Store's clock; MCP activity is stamped with it. */
+  now(): string {
+    return this.#clock.now();
+  }
+
+  /**
+   * C-635: defer an MCP activity time instead of writing it now. Deferred
+   * times ride along with the next write transaction of this Store (any
+   * command, cursor or idempotent write), or with `flushDeferredActivity`.
+   * Each one obeys `touchAssignmentActivity`'s rules when it is applied
+   * (active Assignment, the session's own Token), checked in that write, and
+   * never moves the recorded time backwards.
+   */
+  deferAssignmentActivity(entry: DeferredActivity): void {
+    const key = JSON.stringify([
+      entry.project_id,
+      entry.assignment_id,
+      entry.token_id ?? null,
+    ]);
+    const known = this.#deferredActivity.get(key);
+    if (!known || Date.parse(known.at) < Date.parse(entry.at))
+      this.#deferredActivity.set(key, entry);
+  }
+
+  /** C-635: activity times deferred and not yet written. */
+  deferredAssignmentActivity(): readonly DeferredActivity[] {
+    return [...this.#deferredActivity.values()];
+  }
+
+  /**
+   * C-635: write every deferred activity time in one transaction; nothing,
+   * not even a transaction, when none is deferred. Returns how many were
+   * settled (written or no longer applicable).
+   */
+  flushDeferredActivity(): number {
+    if (this.#deferredActivity.size === 0) return 0;
+    const before = this.#deferredActivity.size;
+    this.#timed("run", () => this.#run(() => undefined));
+    return before - this.#deferredActivity.size;
+  }
+
+  /** Inside a write transaction: apply deferred activity times. */
+  #applyDeferredActivity(): [string, DeferredActivity][] {
+    if (this.#deferredActivity.size === 0) return [];
+    const settled: [string, DeferredActivity][] = [];
+    const select = this.#db.prepare(
+      "SELECT doc FROM assignments WHERE project_id = ? AND id = ?",
+    );
+    const update = this.#db.prepare(
+      "UPDATE assignments SET doc = ?, last_mcp_activity_at = ? WHERE project_id = ? AND id = ?",
+    );
+    for (const [key, entry] of this.#deferredActivity) {
+      try {
+        const row = select.get(entry.project_id, entry.assignment_id) as
+          | { doc: string }
+          | undefined;
+        const assignment =
+          row === undefined ? undefined : (JSON.parse(row.doc) as Assignment);
+        const stored = Date.parse(assignment?.last_mcp_activity_at ?? "");
+        if (
+          assignment?.status === "active" &&
+          (entry.token_id === undefined ||
+            assignment.mcp_session_token_id === undefined ||
+            entry.token_id === assignment.mcp_session_token_id) &&
+          !(Number.isFinite(stored) && stored >= Date.parse(entry.at))
+        )
+          update.run(
+            JSON.stringify({
+              ...assignment,
+              last_mcp_activity_at: entry.at,
+            } satisfies Assignment),
+            entry.at,
+            entry.project_id,
+            entry.assignment_id,
+          );
+        settled.push([key, entry]);
+      } catch {
+        // Bookkeeping never fails the transaction it rides along with; the
+        // entry stays deferred for the next write.
+      }
+    }
+    return settled;
+  }
+
+  /** C-635: the Assignment's dispatched Runs, by index instead of a project-wide scan. */
+  dispatchedRunIds(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+  ): RunId[] {
+    return (
+      this.#db
+        .prepare(
+          "SELECT id FROM runs WHERE project_id = ? AND assignment_id = ? AND json_extract(doc, '$.status') = 'dispatched' ORDER BY rowid",
+        )
+        .all(project_id, assignment_id) as { id: RunId }[]
+    ).map((row) => row.id);
   }
 
   /**

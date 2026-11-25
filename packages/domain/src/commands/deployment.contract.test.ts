@@ -1,8 +1,10 @@
 import { expect, test } from "vitest";
+import { workerAgentToolsAction } from "../worker-helper-action.js";
 import { completeHumanAction, triageHumanAction } from "./coordination.js";
 import {
   completeVerifiedHelperAction,
   controlDeployment,
+  countDeploymentOperations,
   currentDeploymentPin,
   reconcileSupervisorNotice,
   recordDeployment,
@@ -10,6 +12,7 @@ import {
   recordHelperUpgradeChecks,
   requestDeploymentAction,
   retireVerifiedHelperAction,
+  retireWorkerMaintenanceActions,
 } from "./deployment.js";
 import { listNeedsYou } from "./queries.js";
 
@@ -189,7 +192,12 @@ test("stopping snapshots only running Runs and preserves every workflow state", 
   expect(finished.data.stop_snapshot).toEqual(effect.data.stop_snapshot);
 });
 
-test.each(["waiting_for_evidence", "waiting_for_capacity"] as const)(
+test.each([
+  "waiting_for_evidence",
+  "waiting_for_capacity",
+  "waiting_for_batch",
+  "waiting_for_operations",
+] as const)(
   "%s only records an observation and grants no workflow transition",
   (status) => {
     const state = fixture();
@@ -216,6 +224,94 @@ test.each(["waiting_for_evidence", "waiting_for_capacity"] as const)(
     expect(JSON.stringify(state)).toBe(original);
   },
 );
+
+test("C-609: operation waits carry only per-kind counts, copied, and grant no transition", () => {
+  const state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const deferred = [
+    { kind: "artifact_publication", count: 1 },
+    { kind: "mobile_signing", count: 2 },
+  ];
+  const effect = value(
+    recordDeployment(
+      state,
+      system,
+      {
+        ...record,
+        status: "stopping",
+        deferred_operations: deferred,
+        interrupted_operations: [{ kind: "mobile_signing", count: 51 }],
+        batch_window_ms: 300000,
+      },
+      ports(),
+    ),
+  );
+  expect(effect.changes).toEqual([]);
+  expect(effect.events[0]?.payload).toMatchObject({
+    deferred_operations: deferred,
+    interrupted_operations: [{ kind: "mobile_signing", count: 51 }],
+    batch_window_ms: 300000,
+  });
+  const payload = effect.events[0]?.payload as
+    | { deferred_operations?: unknown }
+    | undefined;
+  expect(payload?.deferred_operations).not.toBe(deferred);
+  const detail = {
+    kind: "mobile_signing",
+    project_id: "sensen",
+    card_id: "C-14",
+    label: "受管送签（android）",
+    started_at: now,
+  };
+  for (const invalid of [
+    // Another project's card detail never enters the deployment project.
+    { deferred_operations: [detail] },
+    {
+      deferred_operations: [
+        { kind: "mobile_signing", count: 1, card_id: "C-14" },
+      ],
+    },
+    { deferred_operations: [{ kind: "mobile_signing", count: 0 }] },
+    { deferred_operations: [{ kind: "mobile_signing", count: 1.5 }] },
+    { deferred_operations: [{ kind: "Sensen/C-14", count: 1 }] },
+    {
+      interrupted_operations: [
+        { kind: "mobile_signing", count: 1 },
+        { kind: "mobile_signing", count: 1 },
+      ],
+    },
+    {
+      interrupted_operations: Array.from({ length: 21 }, (_, i) => ({
+        kind: `k${i}`,
+        count: 1,
+      })),
+    },
+    { deferred_operations: "signing" },
+    { batch_window_ms: 0 },
+    { batch_window_ms: 1.5 },
+  ])
+    expect(
+      recordDeployment(
+        state,
+        system,
+        { ...record, ...(invalid as object) },
+        ports(),
+      ).ok,
+    ).toBe(false);
+});
+
+test("C-609: operation counts group by kind and are never truncated", () => {
+  expect(
+    countDeploymentOperations([
+      ...Array.from({ length: 60 }, () => ({ kind: "mobile_signing" })),
+      { kind: "artifact_publication" },
+    ]),
+  ).toEqual([
+    { kind: "artifact_publication", count: 1 },
+    { kind: "mobile_signing", count: 60 },
+  ]);
+  expect(countDeploymentOperations([])).toEqual([]);
+});
 
 test("backup evidence accepts only generated basenames, never paths or free text", () => {
   const state = fixture();
@@ -627,6 +723,143 @@ test("only verified system evidence retires the matching open manual helper acti
   expect(
     value(retireVerifiedHelperAction(state, system, target, io)).events,
   ).toEqual([]);
+});
+
+test("C-599: only system retires stale open notices of one machine's refreshable namespace", () => {
+  const io = ports();
+  let state = fixture();
+  const system = { kind: "system", project_id: state.project_id } as const;
+  const open = (key: string) => {
+    const effect = value(
+      requestDeploymentAction(
+        state,
+        system,
+        { key, instructions: key, reason: "worker_maintenance" },
+        io,
+      ),
+    );
+    state = apply(state, effect);
+    return effect.data.id;
+  };
+  const prefix = "worker-agent-tools:remote:";
+  const old = open(`${prefix}old`),
+    current = open(`${prefix}current`),
+    neighbor = open("worker-agent-tools:remote-2:old"),
+    helper = open(helperKey("remote"));
+  const target = { prefix, keep: `${prefix}current`, reason: "已换版" };
+  for (const caller of [
+    human,
+    actor(5, "host_ops"),
+    { ...system, project_id: "other" },
+  ])
+    expect(retireWorkerMaintenanceActions(state, caller, target, io).ok).toBe(
+      false,
+    );
+  // Only this namespace: never another machine's, a helper notice or a foreign key.
+  for (const bad of [
+    { prefix: "worker-helper:remote:" },
+    { prefix: "worker-agent-tools:" },
+    { keep: "worker-agent-tools:remote-2:old" },
+    { reason: " " },
+  ])
+    expect(
+      retireWorkerMaintenanceActions(state, system, { ...target, ...bad }, io)
+        .ok,
+    ).toBe(false);
+  const result = value(
+    retireWorkerMaintenanceActions(state, system, target, io),
+  );
+  expect(result.events.map((e) => e.type)).toEqual(["human_action_cancelled"]);
+  state = apply(state, result);
+  const status = (id: string) =>
+    state.human_actions.find((h) => h.id === id)?.status;
+  expect(state.human_actions.find((h) => h.id === old)).toMatchObject({
+    status: "cancelled",
+    cancellation: { by: "system", reason: "已换版" },
+  });
+  expect([current, neighbor, helper].map(status)).toEqual([
+    "open",
+    "open",
+    "open",
+  ]);
+  // Without a current key every open notice of the namespace is retired, once.
+  const all = value(
+    retireWorkerMaintenanceActions(
+      state,
+      system,
+      { prefix, reason: "已就绪" },
+      io,
+    ),
+  );
+  state = apply(state, all);
+  expect([current, neighbor, helper].map(status)).toEqual([
+    "cancelled",
+    "open",
+    "open",
+  ]);
+  expect(
+    value(
+      retireWorkerMaintenanceActions(
+        state,
+        system,
+        { prefix, reason: "x" },
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+  // C-599: identified only by the project's system request; its command is
+  // an administrator upgrade that no handoff may substitute.
+  const malformed = state.human_actions.find((h) => h.id === neighbor);
+  if (!malformed) throw new Error("missing notice");
+  expect(workerAgentToolsAction(state, malformed)).toEqual({
+    machine_id: null, // "old" is not a 64-hex digest: fenced, target unknown.
+  });
+  const hex = open(`worker-agent-tools:remote-2:${"c".repeat(64)}`);
+  const tools = state.human_actions.find((h) => h.id === hex);
+  if (!tools) throw new Error("missing notice");
+  expect(workerAgentToolsAction(state, tools)).toEqual({
+    machine_id: "remote-2",
+  });
+  const foreign = state.events.map((e) => ({
+    ...e,
+    actor: { ...system, project_id: "other" },
+  }));
+  expect(
+    workerAgentToolsAction({ ...state, events: foreign }, tools),
+  ).toBeUndefined();
+  const rewrite = {
+    human_action_id: hex,
+    disposition: "host" as const,
+    rationale: "改写",
+    title: "补装",
+    summary: "补装附件助手",
+    why_human: "需要管理员",
+    instructions: "执行命令",
+    expected_outcome: "助手可用",
+    expected_return: "结果",
+    terminal: {
+      target: "remote-2",
+      login: "admin",
+      command: "rewritten",
+      expected_output: "ok",
+      on_failure: "stop",
+    },
+  };
+  const refused = triageHumanAction(state, human, rewrite, io);
+  expect(refused.ok).toBe(false);
+  expect(JSON.stringify(refused)).toContain("系统升级命令不能改写");
+  const ordinary = open("worker-cooldown:remote-2");
+  const plain = triageHumanAction(
+    state,
+    human,
+    { ...rewrite, human_action_id: ordinary },
+    io,
+  );
+  expect(JSON.stringify(plain)).not.toContain("系统升级命令不能改写");
+  // A retired key that comes back is a new open notice.
+  const again = open(`${prefix}old`);
+  expect(again).not.toBe(old);
+  expect(status(again)).toBe("open");
 });
 
 test("patrol completes only a matching open helper action with two passed checks, once", () => {

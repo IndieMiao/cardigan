@@ -1,4 +1,5 @@
 import type { Actor, Card, Decision, Event } from "../entities.js";
+import { eventsOfTypes } from "../event-index.js";
 import type { CardId } from "../ids.js";
 import { autoMergePaused } from "../preferences.js";
 import {
@@ -58,7 +59,10 @@ export function automaticMergeReasons(
 
 function observations(events: readonly Event[]) {
   const latest = new Map<CardId, Event>();
-  for (const event of events) {
+  for (const event of eventsOfTypes(events, [
+    "merge_blocked",
+    "merge_unblocked",
+  ])) {
     if (
       !event.card_id ||
       event.actor.kind !== "system" ||

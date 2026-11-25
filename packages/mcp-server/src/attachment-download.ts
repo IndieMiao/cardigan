@@ -1,16 +1,51 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AttachmentId, AttachmentStore } from "@cardigan/domain";
 import { sendArtifact } from "./artifact-files.js";
+import { sendFileRange } from "./attachment-stream.js";
+import { openAttachmentFile } from "./attachments.js";
 import { ToolError } from "./errors.js";
+import { artifactKey, attachmentKey, offsiteFor } from "./offsite/offsite.js";
 import {
   accessibleAttachment,
   readVerifiedAttachment,
+  revalidate,
 } from "./tools/read-attachment.js";
 import { auditReferenceRead, referenceCard } from "./tools/reference-read.js";
 import type { ToolContext } from "./tools/types.js";
+import { isVideoMime } from "./video-format.js";
+
+/** C-614: request header of helpers that can fetch from a signed OSS URL. */
+export const SIGNED_DOWNLOAD_HEADER = "x-cardigan-download";
+export const SIGNED_DOWNLOAD_TYPE =
+  "application/vnd.cardigan.signed-download+json";
+
+function sendSigned(
+  res: ServerResponse,
+  a: { id: string; sha256: string; size: number },
+  url: string,
+  artifact: boolean,
+  sourceCard: string | undefined,
+) {
+  const body = Buffer.from(JSON.stringify({ url }));
+  res.writeHead(200, {
+    "Content-Type": SIGNED_DOWNLOAD_TYPE,
+    "Content-Length": body.byteLength,
+    "X-Attachment-Id": a.id,
+    "X-Attachment-Sha256": a.sha256,
+    "X-Attachment-Size": a.size,
+    ...(artifact ? { "X-Artifact-Size": a.size } : {}),
+    ...(sourceCard ? { "X-Source-Card-Id": sourceCard } : {}),
+  });
+  res.end(body);
+}
 
 /** Binary transport for the existing read_attachment capability. No paths or
- * caller-supplied identities are accepted; authorization is shared with MCP. */
+ * caller-supplied identities are accepted; authorization is shared with MCP.
+ *
+ * C-614: a helper that sends `x-cardigan-download: signed-url` may instead get
+ * a short-lived signed OSS URL for a verified off-site copy, after exactly the
+ * same authorization and audit. Requests without the header (older helpers)
+ * and objects without a verified copy keep the byte response unchanged. */
 export async function serveAttachmentDownload(
   req: IncomingMessage,
   res: ServerResponse,
@@ -41,7 +76,26 @@ export async function serveAttachmentDownload(
     )
       throw ToolError.validation("Provide only one attachment_id");
     const a = accessibleAttachment(ids[0] as AttachmentId, context);
+    const signed =
+      req.headers[SIGNED_DOWNLOAD_HEADER] === "signed-url"
+        ? offsiteFor(dataDir)
+        : undefined;
     if (a.streamed_artifact) {
+      const blob = a.streamed_artifact.blob_id;
+      const entry = signed?.synced(artifactKey(blob));
+      const location =
+        entry?.sha256 === a.sha256 && entry.size === a.size
+          ? signed?.signedUrl(artifactKey(blob))?.url
+          : undefined;
+      if (location) {
+        accessibleAttachment(a.id, context);
+        const { provenance } = context.store.uow.read((tx) =>
+          referenceCard(tx, context, a.card_id),
+        );
+        auditReferenceRead(context, [a.card_id], "read_attachment");
+        sendSigned(res, a, location, true, provenance.source_card_id);
+        return;
+      }
       await sendArtifact(dataDir, a, res, false, () => {
         accessibleAttachment(a.id, context);
         const { provenance } = context.store.uow.read((tx) =>
@@ -53,11 +107,67 @@ export async function serveAttachmentDownload(
       });
       return;
     }
+    if (isVideoMime(a.mime)) {
+      // C-683: videos stream from disk. `X-Artifact-Size` lets helpers
+      // (including older ones) accept the larger size; the sha256 still
+      // binds every byte.
+      const current = () => {
+        const assignment = revalidate(context);
+        accessibleAttachment(a.id, {
+          ...context,
+          identity: { ...context.identity, assignment },
+        });
+        const { provenance } = context.store.uow.read((tx) =>
+          referenceCard(tx, context, a.card_id),
+        );
+        auditReferenceRead(context, [a.card_id], "read_attachment");
+        return provenance.source_card_id;
+      };
+      const location =
+        signed?.synced(attachmentKey(a.sha256))?.size === a.size
+          ? signed.signedUrl(attachmentKey(a.sha256))?.url
+          : undefined;
+      if (location) {
+        sendSigned(res, a, location, true, current());
+        return;
+      }
+      const file = await openAttachmentFile(
+        dataDir ?? process.env.CARDIGAN_DATA_DIR ?? ".data",
+        a.sha256,
+        a.size,
+      );
+      if (!file) throw ToolError.notFound("Attachment not found");
+      let source: string | undefined;
+      try {
+        source = current();
+      } catch (error) {
+        await file.close();
+        throw error;
+      }
+      await sendFileRange(req, res, file, a.size, {
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": `attachment; filename="${a.id.replace(/[^A-Za-z0-9._-]/gu, "_")}.bin"`,
+        "X-Attachment-Id": a.id,
+        "X-Attachment-Sha256": a.sha256,
+        "X-Attachment-Size": a.size,
+        "X-Artifact-Size": a.size,
+        ...(source ? { "X-Source-Card-Id": source } : {}),
+      });
+      return;
+    }
     const { attachment, content, provenance } = await readVerifiedAttachment(
       a,
       attachments,
       context,
     );
+    const location =
+      signed?.synced(attachmentKey(attachment.sha256))?.size === attachment.size
+        ? signed.signedUrl(attachmentKey(attachment.sha256))?.url
+        : undefined;
+    if (location) {
+      sendSigned(res, attachment, location, false, provenance?.source_card_id);
+      return;
+    }
     res.writeHead(200, {
       "Content-Type": "application/octet-stream",
       "Content-Disposition": `attachment; filename="${attachment.id.replace(/[^A-Za-z0-9._-]/gu, "_")}.bin"`,

@@ -16,14 +16,17 @@ import {
   deriveCardStatus,
   deriveReviewMatrix,
   flowAtLeast,
+  followUpDraft,
   latestMergeCheck,
   mergeBatchReadScope,
   mergeClassificationView,
   mergeShadowComparisons,
   mergeStage,
+  outstandingEvidence,
   prechecks,
   precheckView,
   referenceReadState,
+  resolvePendingAttachmentRefs,
   roleRuleDeliveries,
   roleRuleInventory,
   runAuthorView,
@@ -359,6 +362,12 @@ export const getCardTool = defineTool({
           .filter((entry) => entry.card_id === cardId)
           .map((entry) => ({
             ...entry,
+            // C-615: a comment's `attachment-new-N` reads as the number it got.
+            body: resolvePendingAttachmentRefs(
+              entry.body,
+              entry,
+              state.attachments,
+            ),
             ...authorView(authors, entry.author),
           })),
       ),
@@ -398,14 +407,30 @@ export const getCardTool = defineTool({
       waiting_on: derived.waiting_on,
       next_owners: derived.next_owners,
       why: derived.why,
-      work_items: work_items.map((item) => ({
-        ...item,
-        verification_activity: verificationActivity(item, {
-          ...authors,
-          deliveries,
-          reviews,
-        }),
-      })),
+      work_items: work_items.map((item) => {
+        // C-618: evidence this verifier left pending on a platform blocker.
+        const pending =
+          item.kind === "verify"
+            ? outstandingEvidence(reviews, item.id)
+            : undefined;
+        return {
+          ...item,
+          verification_activity: verificationActivity(item, {
+            ...authors,
+            deliveries,
+            reviews,
+          }),
+          ...(pending?.evidence_pending
+            ? {
+                pending_evidence: {
+                  review_id: pending.id,
+                  delivery_id: pending.delivery_id,
+                  ...pending.evidence_pending,
+                },
+              }
+            : {}),
+        };
+      }),
       decisions: state.decisions
         .filter(
           (q) => q.card_id === cardId || q.affected_cards.includes(cardId),
@@ -444,6 +469,7 @@ export const getCardTool = defineTool({
       shared_must_fixes: flowAtLeast(card, 5)
         ? sharedMustFixes(reviews, deliveries, work_items)
         : [],
+      follow_up_draft: followUpDraft(card, reviews) ?? null,
       reviews: reviews.map((review) => ({
         ...review,
         ...runAuthorView(authors, review.run_id),

@@ -66,6 +66,11 @@ export interface HarnessAdapter {
   configureAssignment(context: AssignmentContext): void;
   /** Non-secret additions to compiled settings, applied after credential extraction. */
   readonly assignmentSettings?: Readonly<Record<string, boolean>>;
+  /** Per-launch settings, given the settings file's non-secret env only. */
+  assignmentSettingsFor?(
+    input: CompileAssignmentInput,
+    env: Readonly<Record<string, string>>,
+  ): Readonly<Record<string, unknown>>;
   localSetup?(
     input: CompileAssignmentInput,
     quote: (value: string) => string,
@@ -75,6 +80,12 @@ export interface HarnessAdapter {
   profileArgs?(profile: LaunchProfileDefinition): readonly string[];
   readContext(input: ContextReadInput): Promise<ContextReading | undefined>;
   readonly contextSource: string;
+  /**
+   * C-600: the harness always calls MCP `tools/list` at session start, before
+   * any tool call, so a call without it proves the session has no native
+   * tools. Pi's adapter may connect lazily from cached metadata, so not Pi.
+   */
+  readonly listsMcpToolsAtStartup?: true;
   readonly useStatuslineCache?: boolean;
   readonly allowWorktreeDescendant?: boolean;
   readonly activityDiagnostic?: string;

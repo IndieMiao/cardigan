@@ -29,7 +29,9 @@ beforeEach(async () => {
       throw new Error("No Git needed");
     },
   };
-  expect(await main(["project", "create", "preferences"], io)).toBe(0);
+  expect(
+    await main(["project", "create", "preferences", "--code", "PRE"], io),
+  ).toBe(0);
   store = Store.open({ dataDir });
 });
 afterEach(() => {
@@ -124,6 +126,35 @@ test("C-239: human configures auto-review switch, explicit cap and paths without
   expect(audit.every((e) => e.actor.kind === "human")).toBe(true);
 });
 
+test("C-685: the human narrows shared-library access per role; off restores the default", async () => {
+  expect(await run(["preference", "get", "shared-files-access"])).toBe(0);
+  expect(output).toContain("shared-files-access: null");
+  expect(
+    await run([
+      "preference",
+      "set",
+      "shared-files-access",
+      '{"*":"read","coder":"read_write"}',
+    ]),
+  ).toBe(0);
+  const preferences = () =>
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    );
+  expect(preferences()?.shared_files_access).toEqual({
+    "*": "read",
+    coder: "read_write",
+  });
+  for (const invalid of ['{"*":"write"}', "[]", "not-json"])
+    expect(
+      await run(["preference", "set", "shared-files-access", invalid]),
+    ).not.toBe(0);
+  expect(await run(["preference", "set", "shared-files-access", "off"])).toBe(
+    0,
+  );
+  expect(preferences()?.shared_files_access).toEqual({});
+});
+
 test("preference get/set persists minutes and off, with project isolation", async () => {
   expect(await run(["preference", "get", "auto-merge-after"])).toBe(0);
   expect(output).toContain("auto-merge-after: off");
@@ -138,7 +169,7 @@ test("preference get/set persists minutes and off, with project isolation", asyn
     ]),
   ).toBe(0);
   expect(output).toContain("auto-merge-after: 10");
-  expect(await run(["project", "create", "other"])).toBe(0);
+  expect(await run(["project", "create", "other", "--code", "OTH"])).toBe(0);
   expect(
     await run(["preference", "get", "auto-merge-after", "--project", "other"]),
   ).toBe(0);

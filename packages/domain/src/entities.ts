@@ -57,14 +57,23 @@ export const toolNames = [
   "request_decision",
   "upload_attachment",
   "read_attachment",
+  // C-726: read-only capability usage notes (C-725) for the Run's machine.
+  "get_capability_guide",
+  "list_shared_files",
+  "get_shared_file",
+  "upload_shared_file",
+  "commit_shared_file",
   "heartbeat",
   "finish_run",
   "submit_delivery",
   "request_recheck",
   "request_check",
   "run_probe",
+  "request_macos_check",
   "request_mobile_signature",
   "publish_artifact",
+  "write_release_note",
+  "list_release_notes",
   "submit_review",
   "withdraw_review",
   "request_delivery_rework",
@@ -96,6 +105,7 @@ export const toolNames = [
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 export type RoleWorktree = "none" | "write" | "readonly";
+export type McpHandshake = "pending" | "listed" | "missing";
 export interface RoleReference {
   readonly launch_profile_ref?: string;
   /** Legacy references may not declare a worktree policy. */
@@ -158,6 +168,8 @@ export interface Card {
   readonly title: string;
   readonly goal: string;
   readonly acceptance_criteria: readonly string[];
+  /** C-610: invariants agreed in a review alignment round; cited as INVn. */
+  readonly invariants?: readonly CardInvariant[];
   readonly source:
     | { readonly kind: "quote"; readonly text: string }
     | { readonly kind: "decision"; readonly decision_id: DecisionId };
@@ -184,6 +196,11 @@ export interface Card {
   };
   readonly repo?: string;
   readonly base_branch?: string;
+  /**
+   * C-728: full commit SHA or branch a no-merge card's producers check out
+   * (detached). Ignored for merge cards; a work item's own value wins.
+   */
+  readonly start_point?: string;
   readonly priority: CardPriority;
   readonly status: CardStatus;
   /** Scheduling fence, independent of lifecycle and historical evidence. */
@@ -313,6 +330,9 @@ export interface MergeStage {
   readonly peers?: readonly string[];
   readonly position?: number;
   readonly protecting_card_id?: string;
+  /** C-677: files shared with the protecting card; empty while paths are unknown. */
+  readonly protecting_files?: readonly string[];
+  readonly protecting_card_held?: boolean;
   readonly card_check?: MergeCheckView;
   readonly batch_check?: MergeCheckView;
   readonly color?: number;
@@ -414,6 +434,24 @@ export interface MergeCheckView {
   /** A1b: host classified complete logs using its reviewed executor allowlist. */
   readonly infra_flaky?: boolean;
 }
+export interface CardInvariant {
+  readonly text: string;
+  readonly work_item_id: WorkItemId;
+  /** The confirmed alignment proposal. */
+  readonly entry_id: TimelineEntryId;
+}
+export interface ReviewAlignment {
+  /** The rejection that opened the round; the round covers its streak. */
+  readonly review_id: ReviewId;
+  readonly status: "open" | "agreed" | "disputed";
+  readonly proposal?: {
+    readonly entry_id: TimelineEntryId;
+    readonly by: AssignmentId;
+    readonly invariants: readonly string[];
+  };
+  /** The confirm or dispute reply. */
+  readonly reply_entry_id?: TimelineEntryId;
+}
 interface WorkItemFields {
   readonly requirements?: import("./machine-requirements.js").WorkItemRequirements;
   /** PM/human hold: system assignment and reminders skip this item. */
@@ -427,6 +465,8 @@ interface WorkItemFields {
   readonly completion_criteria: readonly string[];
   readonly assignment_id?: AssignmentId;
   readonly template_key?: string;
+  /** C-728: this producer's start point on a no-merge card; overrides the card's. */
+  readonly start_point?: string;
   /** Historical verifier retained after an atomic replacement. */
   readonly replaced_by_work_item_id?: WorkItemId;
   readonly reported_blocker?: {
@@ -445,12 +485,15 @@ export type WorkItem = WorkItemFields &
         readonly status: ProduceStatus;
         readonly target_work_item_id?: never;
         readonly review_plan_target?: never;
+        readonly review_alignment?: never;
       }
     | {
         readonly kind: "verify";
         readonly status: VerifyStatus;
         /** Pending proposal this verifier can act on even without a current delivery. */
         readonly review_plan_target?: DecisionId;
+        /** C-610: alignment round opened by the third consecutive rejection. */
+        readonly review_alignment?: ReviewAlignment;
         readonly target_work_item_id?: WorkItemId;
         readonly max_review_rounds: number;
       }
@@ -550,6 +593,19 @@ interface AssignmentFields {
   readonly released_at?: Timestamp;
   /** Last authenticated MCP call (M3.2); the watchdog of §3.3 reads it. */
   readonly last_mcp_activity_at?: Timestamp;
+  /**
+   * C-600: whether the current session's harness listed the Card MCP tools.
+   * `pending` is set when a verified launch dispatches a new session. Only a
+   * request carrying that launch's session key (sent by the harness from its
+   * own MCP configuration) counts as native: its `tools/list` turns the state
+   * into `listed`. Any other tool call while pending, or no listing within
+   * the host's handshake deadline, turns it into `missing`.
+   */
+  readonly mcp_handshake?: McpHandshake;
+  /** C-600: SHA-256 (hex) of the current verified session's key. */
+  readonly mcp_session_key_sha256?: string;
+  /** C-600: Token issued to that session; requests on older Tokens are ignored. */
+  readonly mcp_session_token_id?: string;
   /** Immutable scheduling flag; true only for standing Office assignments. */
   readonly external?: boolean;
 }
@@ -595,7 +651,7 @@ export interface Run {
     readonly idle_check_at?: Timestamp;
     readonly escalated_at?: Timestamp;
   };
-  readonly failure_reason?: "provider_unavailable";
+  readonly failure_reason?: "provider_unavailable" | "mcp_unavailable";
   readonly provider_probe?: {
     readonly episode: EventId;
     readonly at: Timestamp;
@@ -685,7 +741,8 @@ export interface Run {
       | "provider_unavailable"
       | "delivery_retry_exhausted"
       | "server_restart"
-      | "runtime_exited";
+      | "runtime_exited"
+      | "mcp_unavailable";
   };
   /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
   readonly inactivity_stop?: {
@@ -879,8 +936,40 @@ export interface ReviewIssue {
   readonly must_fix: boolean;
   readonly pre_existing: boolean;
   readonly proof?: string;
+  /** C-610: acceptance criterion, card invariant, pass condition or standing invariant. */
+  readonly basis?: string;
+  /** C-610: server-owned; a requested must-fix recorded as a non-blocking follow-up. */
+  readonly follow_up?: { readonly reason: ReviewFollowUpReason };
+}
+export type ReviewFollowUpReason = "no_basis" | "guard" | "outside_checklist";
+/** C-610: a finite, verifiable condition the next review checks. */
+export interface PassCondition {
+  readonly description: string;
+  readonly basis: string;
+}
+/** C-618: a platform blocker the system can check, e.g. an unmerged platform card. */
+export interface PlatformBlocker {
+  readonly kind: "card_merged" | "deployment_ready";
+  readonly target_id: string;
+}
+/** C-618: required acceptance evidence unobtainable only because of a platform blocker. */
+export interface EvidencePending {
+  readonly items: readonly PassCondition[];
+  readonly blocker: PlatformBlocker;
 }
 export interface Review {
+  /**
+   * C-618: evidence pending on a platform blocker. Without a code must-fix the
+   * review is a non-passing conditional that neither spends a round nor ends a
+   * rejection streak.
+   */
+  readonly evidence_pending?: EvidencePending;
+  /** C-618: version-bound evidence attachments that settled earlier pending evidence. */
+  readonly evidence_attachments?: readonly AttachmentId[];
+  /** C-618: why earlier pending evidence no longer applies to this version. */
+  readonly evidence_not_applicable?: string;
+  /** C-610: fixed on the second consecutive rejection; later reviews check only these. */
+  readonly pass_conditions?: readonly PassCondition[];
   readonly rejection_category?: string;
   /** Historical quota fact, preserved even when a later lease expires. */
   readonly test_review?: import("./test-review.js").TestReviewBinding;
@@ -961,7 +1050,23 @@ export interface DecisionResolution {
   readonly taken_over_from?: "role:pm" | "system";
   /** C-192: the human submitted the raiser's suggestion with one click. */
   readonly via_suggestion?: true;
+  /** C-617 / Q-1198: the owner's answer cited as evidence for PM's decision. */
+  readonly owner_record?: OwnerEvidence;
   readonly at: Timestamp;
+}
+/**
+ * C-617 / Q-1198: the owner's own timeline comment cited as evidence, with
+ * source and time. The resolution (answer, rationale, resolved_by) stays the
+ * deciding PM's; this record grants no authority.
+ */
+export interface OwnerEvidence {
+  readonly author: "human";
+  readonly card_id: CardId;
+  readonly timeline_entry_id: TimelineEntryId;
+  /** The comment body, copied verbatim by the control plane. */
+  readonly quote: string;
+  readonly at: Timestamp;
+  readonly attachment_id?: AttachmentId;
 }
 /**
  * C-192: the raiser's (or escalating PM's) suggested answer, shown to the
@@ -1294,8 +1399,26 @@ export interface StreamedArtifact {
     readonly reason: "age" | "capacity";
   };
 }
+/**
+ * C-683: what the uploader measured about a video (the Workbench's browser,
+ * or an Agent); the host never decodes it. Every field is optional.
+ */
+export interface VideoMetadata {
+  readonly duration_seconds?: number;
+  readonly width?: number;
+  readonly height?: number;
+  readonly video_codec?: string;
+  readonly audio_codec?: string;
+}
+export interface VideoInfo extends VideoMetadata {
+  /** Cover frame (JPEG) made by the uploader's browser, stored by digest. */
+  readonly poster_sha256?: string;
+  readonly poster_size?: number;
+}
 interface AttachmentFields {
   readonly streamed_artifact?: StreamedArtifact;
+  /** C-683: video attachments only. */
+  readonly video?: VideoInfo;
   readonly id: AttachmentId;
   /** Display metadata only; storage is addressed by sha256. */
   readonly original_filename?: string;
@@ -1310,6 +1433,12 @@ interface AttachmentFields {
     | { readonly kind: "timeline_entry"; readonly id: TimelineEntryId }
     | { readonly kind: "delivery"; readonly id: DeliveryId };
   readonly supersedes?: AttachmentId;
+  /**
+   * C-615: the N of `attachment-new-N` this file fills in the body of the
+   * comment it is attached to (only that comment's author sets it, once per
+   * N). Reads resolve the placeholder by this, not by upload order.
+   */
+  readonly ref_slot?: number;
 }
 export type Attachment = AttachmentFields &
   (

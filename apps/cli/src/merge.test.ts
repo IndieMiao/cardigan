@@ -333,11 +333,12 @@ test("merge status lists the card, the confirmation and the plan", async () => {
   await seatAwaitingMerge();
   const result = await cardigan("merge", "status");
   expect(result.code).toBe(0);
+  // C-674: full numbers, so the output means the same outside the project.
   expect(result.out).toContain(
-    `${card_id} awaiting_merge merge_policy=confirm`,
+    `MER-${card_id} awaiting_merge merge_policy=confirm`,
   );
-  expect(result.out).toContain("confirmation: Q-1 open");
-  expect(result.out).toContain("delivery: D-1 W-1 git_head=");
+  expect(result.out).toContain("confirmation: MER-Q-1 open");
+  expect(result.out).toContain("delivery: MER-D-1 MER-W-1 git_head=");
   expect(result.out).toContain("plan: not ready");
   expect(result.out).toContain(
     `无法生成合并计划 ${card_id}：本次完成申请尚未获得合并确认（illegal_transition）`,
@@ -695,10 +696,11 @@ test.each([
     expect(result.out).toContain("待你拍板（1）");
     expect(result.out).toContain(`合并检查：${label}`);
     expect(result.out).not.toContain("排队或运行中");
-    const hint = `cardigan merge recheck ${card_id}`;
+    // C-675: the hint uses the full number, which the commands accept.
+    const hint = `cardigan merge recheck MER-${card_id}`;
     if (status === "failed" || status === "timed_out")
       expect(result.out).toContain(
-        `检查未通过，不会自己变成通过：cardigan merge request-changes ${card_id} --reason <原因>，偶发失败可 ${hint}`,
+        `检查未通过，不会自己变成通过：cardigan merge request-changes MER-${card_id} --reason <原因>，偶发失败可 ${hint}`,
       );
     else expect(result.out).not.toContain(hint);
   },
@@ -799,15 +801,16 @@ test.each([
     await seatAwaitingMerge();
     holdWithPm();
     expect((await cardigan("merge", "status", card_id)).out).toContain(
-      "confirmation: Q-1 open decider=PM（可直接处理）",
+      "confirmation: MER-Q-1 open decider=PM（可直接处理）",
     );
     const needs = await cardigan("needs-you");
     expect(needs.out).toContain("PM 代确认中的合并（1");
-    expect(needs.out).toContain(`cardigan merge confirm|hold ${card_id}`);
+    expect(needs.out).toContain(`cardigan merge confirm|hold MER-${card_id}`);
+    // C-675: the full number from the hint works as the command argument.
     const result = await cardigan(
       "merge",
       sub,
-      card_id,
+      `MER-${card_id}`,
       ...(sub === "hold" ? ["--reason", "等待核对"] : []),
     );
     expect(result.code).toBe(0);
