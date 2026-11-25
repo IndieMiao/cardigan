@@ -77,6 +77,7 @@ import {
   hasEarlierCapacityWait,
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
   type MachineLeases,
+  maintenanceActive,
   observeRetirementForDispatch,
   type ReadProjectQuota,
   type ReadResourceLimits,
@@ -512,6 +513,14 @@ export class Dispatcher {
             preferred(b) - preferred(a) ||
             compareDispatchOrder(a.order, b.order),
         );
+        // C-390: a human maintenance window starts no Run and delivers no
+        // bell; queued work waits for the window to end.
+        if (
+          this.options.store.uow.read(() =>
+            maintenanceActive(this.options.store),
+          )
+        )
+          return;
         await profileSpan("deliver", async () => {
           for (const candidate of orderPmCandidates(candidates, (c) =>
             this.state(c.project),
