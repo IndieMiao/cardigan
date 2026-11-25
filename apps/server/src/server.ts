@@ -77,6 +77,10 @@ import {
 import { DiagnosticsReader } from "./diagnostics-reader.js";
 import { type GitBinding, ServerGit } from "./git.js";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
+import {
+  ImageGenerationService,
+  imageGenerationConfigLoader,
+} from "./image-generation.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
@@ -468,6 +472,25 @@ async function assembleServer(
     git,
     configuration: mergeGate,
   });
+  // C-734: host-run image generation. The provider key is read from the
+  // host-only file named in image-generation.yaml at call time; it never
+  // reaches Agent environments, events or logs.
+  const imageGeneration = new ImageGenerationService({
+    store,
+    dataDir: config.dataDir,
+    config: imageGenerationConfigLoader(
+      runtimeEnv.CARDIGAN_CONFIG_DIR ??
+        join(
+          process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
+          "cardigan",
+        ),
+    ),
+  });
+  // A job cut off by a restart is reported failed, never re-billed.
+  if (options.role !== "background")
+    try {
+      imageGeneration.recover();
+    } catch {}
 
   // Assigned once, read from `close()`; the compiler cannot see through the
   // callback, so use `let` with a definite type.
@@ -609,6 +632,7 @@ async function assembleServer(
               beginRequest: () => beginActivity("request", "mcp"),
               probeHost: probes,
               macosCheckHost: macosChecks,
+              imageGenerator: imageGeneration,
               // C-685: shared file library; signs OSS URLs, never relays bytes.
               sharedFiles: sharedFileLibrary(store, config.dataDir),
               // C-726: read-only capability usage notes of the caller's project.

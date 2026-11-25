@@ -70,6 +70,8 @@ export const toolNames = [
   "request_check",
   "run_probe",
   "request_macos_check",
+  // C-734: host-run image generation with a host-held credential.
+  "generate_image",
   "request_mobile_signature",
   "publish_artifact",
   "write_release_note",
