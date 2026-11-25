@@ -140,6 +140,7 @@ export * from "./commands/merge-shadow.js";
 export * from "./commands/merge-snooze.js";
 export * from "./commands/merge-window.js";
 export * from "./commands/notices.js";
+export * from "./commands/office-pre-merge-prompt.js";
 export type { OwnerRecordInput } from "./commands/owner-record.js";
 export {
   buildPlainSummary,

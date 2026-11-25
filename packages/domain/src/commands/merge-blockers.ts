@@ -9,7 +9,10 @@ import { mergeRiskBlockers } from "./delegation.js";
 import { latestMergeCheck } from "./merge-check-view.js";
 import { mergeContext, newestById } from "./merge-context.js";
 import { missingMergeCheckReason } from "./merge-failure-view.js";
-import { effectivePreMergeChecks } from "./pre-merge-check-view.js";
+import {
+  type EffectivePreMergeCheck,
+  effectivePreMergeChecks,
+} from "./pre-merge-check-view.js";
 import {
   screenshotCheckBlocker,
   screenshotCheckEnforced,
@@ -157,6 +160,12 @@ export function latestReviews(state: CommandState, v: Delivery) {
   return latest;
 }
 
+/** The merge-blocker wording of one check that has not passed. */
+export const preMergeCheckBlockerReason = (
+  c: Pick<EffectivePreMergeCheck, "label" | "status" | "stale">,
+): string =>
+  `${c.label}：${c.status === "failed" ? "未通过" : "待核"}${c.stale ? "（当前交付需重新核对）" : ""}`;
+
 /** A3: the system must also consume the human's current pre-merge checklist. */
 export function systemMergeBlockers(
   state: CommandState,
@@ -210,10 +219,7 @@ export function systemMergeBlockers(
       ...blockers,
       ...checks
         .filter((c) => c.status !== "passed")
-        .map(
-          (c) =>
-            `${c.label}：${c.status === "failed" ? "未通过" : "待核"}${c.stale ? "（当前交付需重新核对）" : ""}`,
-        ),
+        .map(preMergeCheckBlockerReason),
     ]),
   ];
 }
