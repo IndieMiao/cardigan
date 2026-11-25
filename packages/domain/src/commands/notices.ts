@@ -7,6 +7,7 @@ import {
   command,
   ensure,
 } from "./core.js";
+import { ATTACHED_HUMAN_WAIT_OVERDUE } from "./host-ops-attached-wait.js";
 
 /**
  * Needs You "知会" (§7.4): every delegated resolution (PM Ops on project
@@ -83,8 +84,11 @@ const systemNoticeEvents = new Map([
   [PM_MERGE_STALL_KIND, "stalled"],
   ["launch_model_changed", "主机启动模型已更改"],
   ["host_disk_space_low", "主机磁盘可用空间不足"],
+  // C-656: /tmp or swap over threshold, with the largest users.
+  ["host_memory_pressure", "主机 /tmp 或 swap 用量过高"],
   ["launch_reload_failed", "主机启动配置重载失败"],
   ["host_role_upgraded", "默认角色已自动升级"],
+  ["host_role_overlay_migrated", "定制角色已迁移为默认包加附加规则"],
   ["host_role_upgrade_deferred", "角色升级等待系统排查"],
   ["standing_role_rotated", "常驻会话已自动轮换"],
   ["standing_pm_rotated", "常驻 PM 已轮换"],
@@ -97,6 +101,8 @@ const systemNoticeEvents = new Map([
   ["office_wait_overdue", "PM Office 等待超时"],
   // C-600: a rebuilt session still had no native Card tools.
   ["mcp_session_failed", "会话 MCP 初始化失败"],
+  // C-678: a session-ending host action waits for an attached human.
+  [ATTACHED_HUMAN_WAIT_OVERDUE, "Agent 终端有人连着，动作在等待断开"],
 ]);
 /** Newest first; one notice per delegated resolution, even for multi-card decisions. */
 export function notices(state: CommandState): readonly Notice[] {

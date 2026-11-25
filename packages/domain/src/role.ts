@@ -8,6 +8,7 @@ import {
 import type { Harness } from "./harness.js";
 import { HOST_OPS_TOOLS } from "./host-ops.js";
 import type { ProjectId } from "./ids.js";
+import { SHARED_FILE_TOOLS } from "./shared-files.js";
 
 export type RoleKind = "produce" | "verify" | "standing";
 
@@ -24,7 +25,34 @@ export interface Role extends Omit<RoleReference, "role_version"> {
   readonly abilities: readonly string[];
   readonly worktree: RoleWorktree;
   readonly required_machine_tags: readonly string[];
+  /** C-613: this version is a default-pack role plus project rules. */
+  readonly default_overlay?: RoleOverlay;
 }
+
+/** The project's own rules on top of a default-pack role. */
+export type RoleOverlayRules = {
+  /** Default-pack role the version is composed from; usually the role itself. */
+  readonly base_role_id: string;
+  /** Appended after the default instructions; empty means none. */
+  readonly append_instructions: string;
+  /**
+   * `replace`: a role of its own (e.g. release_ops) keeps `append_instructions`
+   * as its whole text and follows the base only for tools and policy fields.
+   */
+  readonly instructions_mode?: "append" | "replace";
+  readonly extra_tools: readonly ToolName[];
+  /** Explicit removals win over the default pack, including tools it adds later. */
+  readonly removed_tools: readonly ToolName[];
+};
+/**
+ * Hashes are computed by the host with its deployment policy hash. A version
+ * whose policy no longer matches `composed_hash` was edited outside the
+ * overlay and is never recomposed silently.
+ */
+export type RoleOverlay = RoleOverlayRules & {
+  readonly base_hash: string;
+  readonly composed_hash: string;
+};
 
 export function roleReference(role: Role): RoleReference {
   return {
@@ -56,6 +84,9 @@ export const STANDING_ROLE_TOOLS = [
   "request_decision",
   "upload_attachment",
   "read_attachment",
+  ...SHARED_FILE_TOOLS,
+  // C-731: read-only capability usage notes, so PM can cite the current note.
+  "get_capability_guide",
   "heartbeat",
   "finish_run",
   "submit_delivery",
@@ -82,6 +113,8 @@ export const STANDING_ROLE_TOOLS = [
   "triage_human_action",
   "complete_host_action",
   "publish_artifact",
+  "write_release_note",
+  "list_release_notes",
 ] as const satisfies readonly ToolName[];
 
 /** Standing PM tools; rework additionally requires Ops at issuance and execution. */
@@ -94,6 +127,9 @@ export const STANDING_ONLY_TOOLS = [
   "request_delivery_rework",
   "list_templates",
   "list_roles",
+  // C-712: release notes are written by the standing PM (or the human).
+  "write_release_note",
+  "list_release_notes",
 ] as const satisfies readonly ToolName[];
 /**
  * Who may hold a standing-only tool: the project's standing PM (Office or

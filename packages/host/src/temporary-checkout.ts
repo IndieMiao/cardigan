@@ -24,6 +24,7 @@ import { checkEnvironment } from "./check-environment.js";
 import type { CheckFlakeId } from "./check-flake-cases.js";
 import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
+import type { ExecutorFailure } from "./executor-diagnostics.js";
 import { type ExecutionOwner, executionOwner } from "./merge-check-capacity.js";
 import {
   type VerifiedCheckoutContext,
@@ -65,7 +66,14 @@ export interface CheckoutResult {
     | "security"
     | "rate_limited"
     | "job_unavailable"
-    | "timeout_or_cancel";
+    | "timeout_or_cancel"
+    | "timeout"
+    | "network"
+    | "http";
+  /** Fixed-shape summary of the log download error (limit, bytes, code). */
+  readonly logFailureDetail?: string;
+  /** C-681: structured executor failure; `reason` stays the readable text. */
+  readonly executorFailure?: ExecutorFailure;
 }
 export interface CheckoutInput {
   readonly execution: ExecutionConfig;

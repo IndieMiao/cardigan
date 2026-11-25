@@ -16,23 +16,35 @@ import { readAttention } from "./attention.js";
 import {
   defaultRolePackHash,
   deploymentRolePolicyHash,
+  ROLE_PACK_DEPLOYMENT_PROJECT,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
+import { recordDefault } from "./role-provenance.js";
 import {
   sessionIdleMinutes,
   sessionMaintenanceScan,
 } from "./session-maintenance.js";
+
+/** Same fixture rows under another project id (e.g. the deployment project). */
+function rehome<T>(value: T, project: string): T {
+  return JSON.parse(
+    JSON.stringify(value).replaceAll(
+      `"project_id":"${human.project_id}"`,
+      `"project_id":"${project}"`,
+    ),
+  ) as T;
+}
 
 function setup(
   dbPath = ":memory:",
   version = 1,
   manual = false,
   machineId = "local",
+  project: string = human.project_id,
 ) {
   const store = Store.open({ dbPath }),
-    state = fixture(),
-    project = human.project_id;
+    state = rehome(fixture(), project);
   const a = {
     ...state.assignments[0]!,
     role_version: version,
@@ -166,8 +178,50 @@ test("latest-role live sessions get durable diagnostics without new runtime prob
     await rm(dir, { recursive: true, force: true });
   }
 });
-test("unknown publication defers a suspected conflict; no-op publication restores real conflict handling without clearing the action", async () => {
+test("a project without publications follows its own customized latest role: no publication fence, no conflict, idle session replaced", async () => {
+  // C-662: e.g. a project that customized default role ids with its own rules.
   const f = setup(":memory:", 1, true);
+  try {
+    await f.tick();
+    expect(f.state().assignments[0]?.session_maintenance?.reason).not.toBe(
+      "publication_pending",
+    );
+    expect(f.state().assignments[0]?.session_maintenance?.reason).not.toBe(
+      "role_conflict",
+    );
+    expect(f.state().assignments[0]?.role_version).toBe(1);
+    expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+    f.runtime.status.mockResolvedValue({
+      ok: true,
+      value: { process: "exited", agent: "idle", observed_seq: 1 },
+    });
+    f.setTime("2030-01-01T02:01:00Z");
+    await f.tick();
+    expect(f.state().human_actions).toHaveLength(0);
+    expect(
+      f.state().events.filter((e) => e.type === "host_role_pack_published"),
+    ).toHaveLength(0);
+    expect(f.state().assignments[0]).toMatchObject({
+      role_version: 2,
+      runtime_ref: null,
+    });
+    expect(f.state().assignments[0]?.role_upgrade).toBeUndefined();
+    expect(
+      f
+        .state()
+        .events.filter((e) => e.type === "session_replaced")
+        .map((e) => e.payload),
+    ).toMatchObject([
+      { reason: "default_role_upgraded", from_version: 1, to_version: 2 },
+    ]);
+    expect(f.store.verifyToken(f.token.token)).toBeUndefined();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+  } finally {
+    f.store.close();
+  }
+});
+test("the deployment project without a receipt defers a suspected conflict; no-op publication restores real conflict handling without clearing the action", async () => {
+  const f = setup(":memory:", 1, true, "local", ROLE_PACK_DEPLOYMENT_PROJECT);
   f.runtime.status.mockResolvedValue({
     ok: true,
     value: { process: "exited", agent: "idle", observed_seq: 1 },
@@ -177,6 +231,17 @@ test("unknown publication defers a suspected conflict; no-op publication restore
     expect(f.state().human_actions).toHaveLength(0);
     expect(f.state().assignments[0]?.session_maintenance?.reason).toBe(
       "publication_pending",
+    );
+    // An earlier deployment recorded a default the manual rule differs from.
+    f.store.uow.run((tx) =>
+      recordDefault(
+        tx,
+        f.project,
+        "coder",
+        { ...f.source, instructions: "Earlier default" },
+        "pack",
+        "2030-01-01T00:00:00Z",
+      ),
     );
     upgradeDeployedRoles(
       f.store,
@@ -725,6 +790,18 @@ test("an interrupted earlier publication stays unverified even when the next pac
       "publication_pending",
     );
     expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+    // The default this version equals is recorded later, e.g. by
+    // `role upgrade --from-default`; only then can a publication prove it.
+    f.store.uow.run((tx) =>
+      recordDefault(
+        tx,
+        f.project,
+        "coder",
+        previousDefault,
+        "cli",
+        "2030-01-01T00:00:00Z",
+      ),
+    );
     // A later successful publication fixes the DB and receipt atomically.
     upgradeDeployedRoles(
       f.store,

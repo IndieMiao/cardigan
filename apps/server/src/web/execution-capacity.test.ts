@@ -1,7 +1,11 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { effectiveRunLimit, loadRunCapacityConfig } from "@cardigan/host";
+import {
+  acquireMergeCheckCapacity,
+  effectiveRunLimit,
+  loadRunCapacityConfig,
+} from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { expect, test } from "vitest";
 import {
@@ -10,7 +14,13 @@ import {
   run,
 } from "../../../../packages/domain/src/commands/test-fixtures.js";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
-import { executionCapacity } from "./execution-capacity.js";
+import {
+  CAPACITY_REFRESH_MS,
+  ExecutionCapacityCache,
+  executionCapacity,
+  executionCapacityInputs,
+  executionCapacityRevision,
+} from "./execution-capacity.js";
 
 test("MC-5 exposes configured resource slots per machine, sorted, without unconfigured keys", () => {
   const store = Store.open({ dbPath: ":memory:" });
@@ -318,5 +328,108 @@ test("C-145 human session alone edits capacity, with validation, idempotency and
     ]);
   } finally {
     await f.close();
+  }
+});
+
+test("C-634 rebuilds the shared capacity view only when its counted inputs change or the refresh interval passes", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    store.createProject({ id: "first" });
+    const item = fixture().work_items[0];
+    if (!item) throw new Error("Missing fixture");
+    store.uow.run((tx) => {
+      tx.work_items.put("first", item);
+      tx.assignments.put("first", assignment(1));
+    });
+    let clock = 0;
+    let builds = 0;
+    const now = "2030-01-01T00:00:00.000Z";
+    const cache = new ExecutionCapacityCache({
+      now: () => now,
+      monotonicMs: () => clock,
+      inputs: (at) => executionCapacityInputs(store, at),
+      build: (project, at) => {
+        builds++;
+        return executionCapacity(
+          store,
+          () => 4,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          project,
+          at,
+        );
+      },
+    });
+    const idle = cache.read("first");
+    expect(idle.revision).toBe(executionCapacityRevision(store, () => 4));
+    expect(idle.view.agents).toMatchObject([{ running: 0 }]);
+    // Polls without a write share the built view.
+    for (let i = 0; i < 5; i++) expect(cache.read("first")).toBe(idle);
+    expect(builds).toBe(1);
+    // Each project keeps its own view (lease labels name "this project").
+    cache.read("second");
+    expect(builds).toBe(2);
+    // A Run write moves the counters: rebuilt once, then shared again.
+    store.uow.run((tx) =>
+      tx.runs.put("first", { ...run(1), status: "running" }),
+    );
+    const running = cache.read("first");
+    expect(builds).toBe(3);
+    expect(running.revision).not.toBe(idle.revision);
+    expect(running.view.agents).toMatchObject([{ running: 1 }]);
+    expect(cache.read("first")).toBe(running);
+    expect(builds).toBe(3);
+    // A human run limit lives outside the counted collections.
+    store.database
+      .prepare(
+        "INSERT INTO run_capacity_limits (machine_id, doc) VALUES (?, ?)",
+      )
+      .run("local", JSON.stringify({ machine_id: "local", limit: 2 }));
+    const limited = cache.read("first");
+    expect(builds).toBe(4);
+    expect(limited.view.agents).toMatchObject([{ limit: 2 }]);
+    // Clock- and process-driven inputs are re-read after the refresh interval;
+    // an unchanged view keeps its revision, so clients do not refetch.
+    clock += CAPACITY_REFRESH_MS;
+    const refreshed = cache.read("first");
+    expect(builds).toBe(5);
+    expect(refreshed).not.toBe(limited);
+    expect(refreshed.revision).toBe(limited.revision);
+  } finally {
+    store.close();
+  }
+});
+
+test("C-634 counted capacity inputs follow active leases at the read time and running checks", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    store.createProject({ id: "first" });
+    const before = executionCapacityInputs(store, "2030-01-01T00:00:00.000Z");
+    store.database
+      .prepare(
+        "INSERT INTO machine_resource_leases (generation, machine, resource, project, starts_at, ends_at, endpoints) VALUES ('g1', 'local', 'godot', 'first', '2030-01-01T00:00:00.000Z', '2030-01-01T01:00:00.000Z', '[]')",
+      )
+      .run();
+    const leased = executionCapacityInputs(store, "2030-01-01T00:00:00.000Z");
+    expect(leased).not.toBe(before);
+    // Once the reservation has ended the inputs match the empty calendar again.
+    expect(executionCapacityInputs(store, "2030-01-01T02:00:00.000Z")).toBe(
+      before,
+    );
+    const release = acquireMergeCheckCapacity(store, "first", "check");
+    try {
+      expect(
+        executionCapacityInputs(store, "2030-01-01T02:00:00.000Z"),
+      ).not.toBe(before);
+    } finally {
+      release();
+    }
+    expect(executionCapacityInputs(store, "2030-01-01T02:00:00.000Z")).toBe(
+      before,
+    );
+  } finally {
+    store.close();
   }
 });

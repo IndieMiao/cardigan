@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   type Actor,
+  type Author,
   abortMergeBatch,
   abortMergeBatchPublish,
   batchFailures,
@@ -15,8 +16,10 @@ import {
   type MergeBatch,
   type MergeBatchMember,
   mergeBatches,
+  mergePlan,
   mergeQueue,
   mergeStage,
+  mergeWindows,
   mergeWindowVersions,
   parseId,
   type Result,
@@ -698,6 +701,166 @@ test("intersecting windows respect opening order and expiry releases waiting car
   };
   f.commit(refreshMergeWindows(f.state(), system, { paths: [] }, later));
   expect(mergeQueue(f.state())).toHaveLength(3);
+});
+
+test("C-677: a hold closes the card's window, frees shared files, and a later conflict reopens it", async () => {
+  const f = await fixture();
+  const [one, two, three] = f.members;
+  if (!one || !two || !three) throw new Error("Missing cards");
+  let s: CommandState = {
+    ...f.state(),
+    project_settings: {
+      merge_gate_enabled: true,
+      merge_queue: { max_batch_size: 4, conflict_threshold: 1 },
+    },
+  };
+  const run = <T>(r: Result<CommandEffect<T>>) => {
+    const effect = value(r);
+    s = apply(s, effect);
+    return effect;
+  };
+  const window = () =>
+    mergeWindows(s.events).find((w) => w.card_id === one.card_id);
+  run(
+    setMergeWindow(
+      s,
+      human,
+      { card_id: one.card_id, open: true, reason: "Protect shared file" },
+      f.io,
+    ),
+  );
+  run(
+    refreshMergeWindows(
+      s,
+      system,
+      {
+        paths: f.members.map((m, i) => ({
+          card_id: m.card_id,
+          versions: mergeWindowVersions(s, m.card_id),
+          files: i < 2 ? ["shared.ts", `own-${i}.ts`] : ["separate.ts"],
+        })),
+      },
+      f.io,
+    ),
+  );
+  // An unheld card's window keeps holding cards on the same files.
+  expect(heldByMergeWindow(s, two.card_id)).toBe(one.card_id);
+  expect(heldByMergeWindow(s, three.card_id)).toBeUndefined();
+  const card = (id: string) => {
+    const found = s.cards.find((c) => c.id === id);
+    if (!found) throw new Error("Missing card");
+    return found;
+  };
+  expect(mergeStage(s, card(two.card_id))).toEqual({
+    stage: "held_by_window",
+    protecting_card_id: one.card_id,
+    protecting_files: ["shared.ts"],
+    protecting_card_held: false,
+  });
+  const hold = { reason: "Release freeze", resume_condition: "After release" };
+  const held = run(updateCard(s, human, { card_id: one.card_id, hold }, f.io));
+  const closed = held.events.find((e) => e.type === "merge_window_changed");
+  expect(closed?.payload).toMatchObject({ open: false, closed_by_hold: true });
+  expect(held.timeline.find((t) => t.event_seq === closed?.seq)?.body).toBe(
+    "因暂停关闭合并窗口",
+  );
+  expect(window()?.open).toBe(false);
+  expect(heldByMergeWindow(s, two.card_id)).toBeUndefined();
+  expect(mergeQueue(s).map((q) => q.plan.card_id)).toContain(two.card_id);
+  // Releasing does not reopen; the next conflict does, by the existing rule.
+  run(updateCard(s, human, { card_id: one.card_id, hold: null }, f.io));
+  expect(window()?.open).toBe(false);
+  const plan = value(mergePlan(s, one.card_id));
+  const [conflicting] = plan.deliveries;
+  if (!conflicting) throw new Error("Missing delivery");
+  run(
+    recordMergeResult(
+      s,
+      system,
+      {
+        card_id: one.card_id,
+        completion_id: plan.completion_id,
+        result: {
+          kind: "conflicted",
+          delivery_id: conflicting.delivery_id,
+          files: ["shared.ts"],
+        },
+      },
+      f.io,
+    ),
+  );
+  expect(window()).toMatchObject({ open: true, reason: "重复合并冲突" });
+  expect(window()).not.toHaveProperty("closed_by_hold");
+});
+
+test("C-677: windows of cards held earlier close on refresh; a sensitive card's waits for the human", async () => {
+  const f = await fixture();
+  const [one, two] = f.members;
+  if (!one || !two) throw new Error("Missing cards");
+  let s = f.state();
+  const run = <T>(r: Result<CommandEffect<T>>) => {
+    const effect = value(r);
+    s = apply(s, effect);
+    return effect;
+  };
+  run(
+    setMergeWindow(
+      s,
+      human,
+      { card_id: one.card_id, open: true, reason: "Protect shared file" },
+      f.io,
+    ),
+  );
+  const paths = () => ({
+    paths: f.members.map((m) => ({
+      card_id: m.card_id,
+      versions: mergeWindowVersions(s, m.card_id),
+      files: ["shared.ts"],
+    })),
+  });
+  run(refreshMergeWindows(s, system, paths(), f.io));
+  // A hold set by PM before this rule shipped, on a sensitive card.
+  const pmHold = {
+    reason: "Release freeze",
+    resume_condition: "After release",
+    set_by: "assignment:A-9" as Author,
+    set_at: f.io.clock.now(),
+  };
+  s = {
+    ...s,
+    cards: s.cards.map((c) =>
+      c.id === one.card_id ? { ...c, sensitive: true, hold: pmHold } : c,
+    ),
+  };
+  run(refreshMergeWindows(s, system, paths(), f.io));
+  const open = () =>
+    mergeWindows(s.events).find((w) => w.card_id === one.card_id)?.open;
+  expect(open()).toBe(true);
+  const waiting = s.cards.find((c) => c.id === two.card_id);
+  if (!waiting) throw new Error("Missing card");
+  expect(mergeStage(s, waiting)).toMatchObject({
+    stage: "held_by_window",
+    protecting_card_id: one.card_id,
+    protecting_files: ["shared.ts"],
+    protecting_card_held: true,
+  });
+  // The same legacy hold on an ordinary card no longer holds others and closes.
+  s = {
+    ...s,
+    cards: s.cards.map((c) =>
+      c.id === one.card_id ? { ...c, sensitive: false } : c,
+    ),
+  };
+  expect(heldByMergeWindow(s, two.card_id)).toBeUndefined();
+  const swept = run(refreshMergeWindows(s, system, paths(), f.io));
+  expect(
+    swept.events.map((e) => [e.type, e.card_id, e.payload]),
+  ).toContainEqual([
+    "merge_window_changed",
+    one.card_id,
+    expect.objectContaining({ open: false, closed_by_hold: true }),
+  ]);
+  expect(open()).toBe(false);
 });
 
 test("solo changes do not mutate an existing batch and new batches enforce the flag", async () => {

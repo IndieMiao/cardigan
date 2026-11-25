@@ -34,6 +34,9 @@ export function autoRiskPathEvidence(
     fullSha(own.sha) &&
     fullSha(own.tree_sha) &&
     fullSha(own.base_sha) &&
+    // Audit only: the card-baseline tip may have moved past base_sha (its
+    // merge base with the delivery). Present on newer evidence, never partial.
+    (own.baseline_sha === undefined || fullSha(own.baseline_sha)) &&
     fullSha(own.assignment_base_sha) &&
     own.assignment_base_sha === commit?.base_sha &&
     commit?.sha === own.sha &&

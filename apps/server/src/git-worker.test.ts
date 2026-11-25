@@ -11,13 +11,21 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Assignment, Delivery, ProjectId } from "@cardigan/domain";
-import type { RepositoryLock } from "@cardigan/git-service";
+import {
+  type RepositoryLock,
+  RepositoryLockTimeoutError,
+} from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import { RuntimeTargets, type RuntimeWorker } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import * as runtime from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { ServerGit } from "./git.js";
+import {
+  type DeliverySourceErrorEntry,
+  type DeliverySourceLockEntry,
+  ServerGit,
+  type ServerGitOptions,
+} from "./git.js";
 import { type M4Fixture, m4Fixture, m4Scenario } from "./m4-fixtures.js";
 import { ReconcileExecutor } from "./reconcile-loop.js";
 import { lastSuccessfulWorkerBackup } from "./worker-backup.js";
@@ -1097,6 +1105,230 @@ test("interactive HEAD finishes while a backup upload-pack is still parked", asy
       );
   }
 }, 30000);
+
+test("C-642: delivery and precheck reads hold the project lock only to publish refs", async () => {
+  const a = required(assignments[0]);
+  const work = required(repositories.get(key(f.project_id, a.machine_id)));
+  const sha = git(work, "rev-parse", "HEAD");
+  const entries: DeliverySourceLockEntry[] = [];
+  const observed = new ServerGit({
+    dataDir,
+    store: f.store,
+    targets: (service as unknown as { options: ServerGitOptions }).options
+      .targets,
+    onSourceLock: (entry) => entries.push(entry),
+  });
+  await observed.baseline(required(observed.projectOf(f.project_id)));
+  const marker = join(root, "pack-started"),
+    release = join(root, "resume-pack");
+  const pack = vi.mocked(runtime.workerGitPack);
+  const original = required(pack.getMockImplementation());
+  pack.mockImplementationOnce(async (...args) => {
+    const entry = await original(...args);
+    const pause = `while ! test -f ${quote(release)}; do sleep 0.05; done`;
+    return `sh -c ${quote(`touch ${quote(marker)}; ${pause}; exec ${entry} "$@"`)} --`;
+  });
+  const lock = (observed as unknown as { lock: RepositoryLock }).lock;
+  const delivery = observed
+    .verifierFor(f.project_id)
+    .verify({ kind: "git_head", value: sha }, a);
+  const watchdog = setTimeout(() => writeFileSync(release, ""), 15000);
+  try {
+    await vi.waitFor(() => expect(existsSync(marker)).toBe(true), {
+      timeout: 10000,
+    });
+    // The parked worker transfer holds no project lock: other ref work and
+    // another source read of the same Assignment finish meanwhile.
+    expect(
+      await lock({ project_id: f.project_id, repository: center() }, async () =>
+        existsSync(release),
+      ),
+    ).toBe(false);
+    expect(await observed.checkHead(f.project_id, a)).toBe(sha);
+    expect(existsSync(release)).toBe(false);
+    expect(
+      git(
+        center(),
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/cardigan/candidates",
+      ),
+    ).toBe("");
+  } finally {
+    clearTimeout(watchdog);
+    writeFileSync(release, "");
+  }
+  expect((await delivery).ok).toBe(true);
+  expect(
+    git(center(), "rev-parse", `refs/cardigan/candidates/${a.id}/${sha}`),
+  ).toBe(sha);
+  expect(
+    git(center(), "rev-parse", `refs/cardigan/prechecks/${a.id}/${sha}`),
+  ).toBe(sha);
+  expect(
+    git(
+      center(),
+      "rev-parse",
+      `refs/cardigan/incoming/${a.machine_id}/${a.id}`,
+    ),
+  ).toBe(sha);
+  // No private stage or stray ref survives the transfer.
+  expect(
+    readdirSync(join(dataDir, "central")).filter((n) => n.startsWith(".")),
+  ).toEqual([]);
+  expect(entries.map((e) => [e.event, e.assignment_id, e.operation])).toEqual([
+    ["delivery_source_lock", a.id, "head"],
+    ["delivery_source_lock", a.id, "verify"],
+  ]);
+  for (const entry of entries) {
+    expect(entry.project_id).toBe(f.project_id);
+    expect(entry.held_ms).toBeGreaterThanOrEqual(0);
+    expect(entry.held_ms).toBeLessThan(2000);
+  }
+}, 30000);
+
+test("C-642: a rejected delivery takes the lock only to record the fetched tip, a bad SHA not at all", async () => {
+  const a = required(assignments[0]);
+  const work = required(repositories.get(key(f.project_id, a.machine_id)));
+  const head = git(work, "rev-parse", "HEAD");
+  const entries: DeliverySourceLockEntry[] = [];
+  const observed = new ServerGit({
+    dataDir,
+    store: f.store,
+    targets: (service as unknown as { options: ServerGitOptions }).options
+      .targets,
+    onSourceLock: (entry) => entries.push(entry),
+  });
+  const verifier = observed.verifierFor(f.project_id);
+  expect(
+    (await verifier.verify({ kind: "git_head", value: "A".repeat(40) }, a)).ok,
+  ).toBe(false);
+  expect(entries).toEqual([]);
+  expect(vi.mocked(runtime.workerGitPack)).not.toHaveBeenCalled();
+  const foreign = required(assignments[1]);
+  const other = git(
+    required(repositories.get(key(f.project_id, foreign.machine_id))),
+    "rev-parse",
+    "HEAD",
+  );
+  const rejected = await verifier.verify({ kind: "git_head", value: other }, a);
+  expect(rejected.ok).toBe(false);
+  expect(entries.map((e) => e.operation)).toEqual(["verify"]);
+  expect(
+    git(
+      center(),
+      "rev-parse",
+      `refs/cardigan/incoming/${a.machine_id}/${a.id}`,
+    ),
+  ).toBe(head);
+  expect(
+    git(
+      center(),
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/cardigan/candidates",
+    ),
+  ).toBe("");
+});
+
+test("C-642: a lock timeout at publication still reads as busy and publishes nothing", async () => {
+  const a = required(assignments[0]);
+  const sha = git(
+    required(repositories.get(key(f.project_id, a.machine_id))),
+    "rev-parse",
+    "HEAD",
+  );
+  const errors: DeliverySourceErrorEntry[] = [];
+  const observed = new ServerGit({
+    dataDir,
+    store: f.store,
+    targets: (service as unknown as { options: ServerGitOptions }).options
+      .targets,
+    onSourceError: (entry) => errors.push(entry),
+  });
+  vi.spyOn(
+    observed as unknown as { lock: RepositoryLock },
+    "lock",
+  ).mockRejectedValueOnce(new RepositoryLockTimeoutError(30_000));
+  const result = await observed
+    .verifierFor(f.project_id)
+    .verify({ kind: "git_head", value: sha }, a);
+  expect(result).toMatchObject({
+    ok: false,
+    error: { details: { source_error: "repository_busy", retryable: true } },
+  });
+  expect(errors).toMatchObject([
+    { event: "delivery_source_error", source_error: "repository_busy" },
+  ]);
+  expect(vi.mocked(runtime.workerGitPack)).toHaveBeenCalledTimes(1);
+  expect(
+    git(
+      center(),
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/cardigan/candidates",
+      "refs/cardigan/incoming",
+    ),
+  ).toBe("");
+});
+
+test("C-642: a busy lock never replaces the reason of a rejected delivery", async () => {
+  const a = required(assignments[0]);
+  const work = required(repositories.get(key(f.project_id, a.machine_id)));
+  const head = git(work, "rev-parse", "HEAD");
+  // Another worker's commit: never on this Assignment's branch.
+  const foreign = git(
+    required(
+      repositories.get(key(f.project_id, required(assignments[1]).machine_id)),
+    ),
+    "rev-parse",
+    "HEAD",
+  );
+  const errors: DeliverySourceErrorEntry[] = [];
+  const observed = new ServerGit({
+    dataDir,
+    store: f.store,
+    targets: (service as unknown as { options: ServerGitOptions }).options
+      .targets,
+    onSourceError: (entry) => errors.push(entry),
+  });
+  vi.spyOn(
+    observed as unknown as { lock: RepositoryLock },
+    "lock",
+  ).mockRejectedValueOnce(new RepositoryLockTimeoutError(30_000));
+  const result = await observed
+    .verifierFor(f.project_id)
+    .verify({ kind: "git_head", value: foreign }, a);
+  expect(result.ok).toBe(false);
+  if (!result.ok)
+    expect(result.error.message).toMatch(
+      /not a commit|not on the recorded Assignment branch/,
+    );
+  expect(errors).toEqual([]);
+  // The tip is only recorded best effort; the next read records it.
+  expect(
+    git(
+      center(),
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/cardigan/incoming",
+    ),
+  ).toBe("");
+  expect(
+    (
+      await observed
+        .verifierFor(f.project_id)
+        .verify({ kind: "git_head", value: foreign }, a)
+    ).ok,
+  ).toBe(false);
+  expect(
+    git(
+      center(),
+      "rev-parse",
+      `refs/cardigan/incoming/${a.machine_id}/${a.id}`,
+    ),
+  ).toBe(head);
+});
 
 function interceptWorkerFetch(
   machine: string,

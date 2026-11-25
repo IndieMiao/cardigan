@@ -3,6 +3,7 @@ import type {
   MergeClassificationInput,
   PreMergeCheckedVersion,
 } from "../entities.js";
+import { fullEventHistory } from "../event-index.js";
 import { type CommandDraft, type CommandState, ensure } from "./core.js";
 import { currentPreMergeVersions } from "./pre-merge-checks.js";
 
@@ -127,7 +128,10 @@ export function applyMergeClassification(
     "validation_failed",
     "数值拍板须引用人已亲自解决的拍板",
   );
-  const events = d.state.events.filter((e) => e.card_id === card.id);
+  // The reader's sequence covers every event on the card, telemetry included.
+  const events = fullEventHistory(d.state.events).filter(
+    (e) => e.card_id === card.id,
+  );
   const lastSeq = Math.max(0, ...events.map((e) => e.seq));
   ensure(
     Number.isSafeInteger(input.read_through_seq) &&

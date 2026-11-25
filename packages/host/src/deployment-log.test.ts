@@ -71,3 +71,20 @@ test("dual readiness requires the matching role and protocol; background needs n
   expect(append(web, webReady)).toBe(true);
   expect(append(background, bgReady)).toBe(true);
 });
+
+test("C-650: known start failures become fixed labels once, never the raw line", () => {
+  const log = new DeploymentBuildLog();
+  const text = [
+    "Error: database is locked TOKEN=synthetic-secret",
+    "SQLITE_BUSY: database is locked again",
+    "Error: listen EADDRINUSE: address already in use 127.0.0.1:3004",
+    "write ENOSPC /private/path",
+    "ordinary private output",
+  ].join("\n");
+  for (let i = 0; i < text.length; i += 5) log.append(text.slice(i, i + 5));
+  expect(log.causes()).toEqual(["数据库被锁", "端口被占用", "磁盘已满"]);
+  expect(log.finish("ready", "not_exited")).toBe(
+    "原因：数据库被锁\n原因：端口被占用\n原因：磁盘已满\nready: not_exited",
+  );
+  expect(new DeploymentBuildLog().causes()).toEqual([]);
+});

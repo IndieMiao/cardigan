@@ -31,6 +31,8 @@ const CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".woff2": "font/woff2",
   ".ttf": "font/ttf",
   ".txt": "text/plain; charset=utf-8",
+  // C-705: the device pairing script, fetched with curl on a new device.
+  ".py": "text/x-python; charset=utf-8",
   ".webmanifest": "application/manifest+json",
 };
 

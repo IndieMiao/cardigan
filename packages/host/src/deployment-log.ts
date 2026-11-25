@@ -1,3 +1,13 @@
+/** C-650: well-known start failures, mapped to fixed human-readable labels. */
+const FAILURE_CAUSES: readonly (readonly [RegExp, string])[] = [
+  [
+    /\bdatabase (?:table )?is locked\b|\bSQLITE_(?:BUSY|LOCKED)\b/u,
+    "数据库被锁",
+  ],
+  [/\bdatabase or disk is full\b|\bSQLITE_FULL\b|\bENOSPC\b/u, "磁盘已满"],
+  [/\bEADDRINUSE\b/u, "端口被占用"],
+];
+
 /**
  * Build output is untrusted, even when it comes from the approved main tree.
  * Only diagnostic codes and exit status cross into events/Agent diagnostics;
@@ -6,6 +16,7 @@
 export class DeploymentBuildLog {
   private pending = "";
   private readonly lines: string[] = [];
+  private readonly found: string[] = [];
   append(chunk: string) {
     this.pending += chunk;
     const lines = this.pending.split(/\r?\n/u);
@@ -15,7 +26,18 @@ export class DeploymentBuildLog {
         this.lines.push(`TypeScript ${match[1]}`);
         if (this.lines.length > 20) this.lines.shift();
       }
+      // C-650: fixed labels only; the matched text itself never leaves.
+      for (const [pattern, label] of FAILURE_CAUSES)
+        if (pattern.test(line) && !this.found.includes(label)) {
+          this.found.push(label);
+          this.lines.push(`原因：${label}`);
+          if (this.lines.length > 20) this.lines.shift();
+        }
     }
+  }
+  /** C-650: recognised causes seen so far, in order; fixed labels only. */
+  causes(): readonly string[] {
+    return this.found;
   }
   finish(
     stage: "install" | "build" | "start" | "ready",

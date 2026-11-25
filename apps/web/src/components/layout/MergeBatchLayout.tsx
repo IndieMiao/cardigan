@@ -26,11 +26,13 @@ export function MergeBatchStage({
   href,
   color = 0,
   culprit = false,
+  title,
   children,
 }: {
   href?: string;
   color?: number;
   culprit?: boolean;
+  title?: string;
   children: ReactNode;
 }) {
   const className = cn(
@@ -45,7 +47,9 @@ export function MergeBatchStage({
       {children}
     </a>
   ) : (
-    <span className={className}>{children}</span>
+    <span className={className} title={title}>
+      {children}
+    </span>
   );
 }
 

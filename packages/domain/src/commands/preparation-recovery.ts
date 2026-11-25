@@ -16,7 +16,7 @@ import {
 import { unreadableCommentTrigger } from "./dispatch-recovery.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { launchSettings } from "./launch.js";
-import { stoppedByHuman } from "./stop.js";
+import { stoppedByHuman } from "./stop-state.js";
 
 /** Host-only settlement after preparation failed, before any token/provision. */
 export function recoverPreparation(

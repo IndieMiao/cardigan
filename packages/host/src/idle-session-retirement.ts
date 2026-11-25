@@ -4,9 +4,14 @@ import {
   beginIdleSessionRetirement,
   type Clock,
   type CommandEffect,
+  type CommandState,
+  clearSupersededRetirement,
+  confirmKeptShellExit,
   confirmWaitingRetirementExit,
   darwinWorker,
   handoffIdleSessionRetirement,
+  hostOpsPending,
+  humanStopRecorded,
   needsRetirementHandoff,
   type ProjectId,
   type RetirementDispatchWait,
@@ -15,11 +20,14 @@ import {
   type RunId,
   type Runtime,
   type RuntimeErrorCode,
+  releaseRetainedRetirement,
   retirementOwnsSession,
+  runsOf,
   runtimeErrorCodes,
   sessionMaintenanceCandidate,
   settleIdleSessionRetirement,
   stoppedByHuman,
+  supersededRetirement,
   trackRetirementDispatch,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -28,6 +36,7 @@ import {
   recordNotification,
   type Store,
   type StoreTransactionContext,
+  unfinishedBellAttempts,
 } from "@cardigan/store";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import type { sessionMaintenanceScan } from "./session-maintenance.js";
@@ -57,7 +66,7 @@ export function idleRetirementPolicy() {
   return policy;
 }
 
-function revokeRetiredTokens(
+export function revokeRetiredTokens(
   tx: StoreTransactionContext,
   project: ProjectId,
   id: AssignmentId,
@@ -168,6 +177,263 @@ export async function observeRetirementForDispatch(
   } finally {
     await unlock();
   }
+}
+
+/** C-667/C-672: a live terminal whose CLI exited may be closed only while
+ * nothing of this owner runs or is being stopped, started or woken. A pending
+ * retirement (waiting, handed off, or a stop whose exit was never confirmed)
+ * does not keep it: the proof finishes that retirement. */
+function exitedAgentOwner(store: Store, state: CommandState, a: Assignment) {
+  if (
+    a.scope !== "work_item" ||
+    a.external ||
+    a.status !== "active" ||
+    !a.runtime_ref ||
+    // Only a macOS worker can prove the launched CLI is gone.
+    !darwinWorker(state, a) ||
+    a.role_upgrade ||
+    stoppedByHuman(state.events, a.id) ||
+    hostOpsPending(state.events, a.id) ||
+    runsOf(state.runs, a.id).some(
+      (r) =>
+        !["queued", "completed", "failed", "cancelled"].includes(r.status) ||
+        r.dispatch_stop ||
+        r.inactivity_stop ||
+        (r.launch_publication &&
+          !["started", "exited"].includes(r.launch_publication.phase)),
+    ) ||
+    unfinishedBellAttempts(store.database, state.project_id, a.id).length
+  )
+    return false;
+  // Only owners with work for a new session (or a retirement to finish).
+  const latest = Math.max(
+    0,
+    ...state.roles
+      .filter((r) => r.role_id === a.role_id && r.status !== "inactive")
+      .map((r) => r.role_version),
+  );
+  return (
+    !!a.idle_retirement ||
+    latest > a.role_version ||
+    runsOf(state.runs, a.id).some((r) => r.status === "queued") ||
+    store.listNotifications({
+      project_id: state.project_id,
+      assignment_id: a.id,
+      statuses: LIVE_NOTIFICATION_STATUSES,
+    }).length > 0
+  );
+}
+
+export type ExitedAgentRelease =
+  /** The terminal was closed and the session settled; dispatch starts anew. */
+  | "settled"
+  /** Proven exited, but the terminal could not be closed or settled now. */
+  | "proven"
+  /** Not eligible, not live, not proven or locked: nothing was changed. */
+  | "skipped";
+
+/**
+ * C-667/C-672: one owner. When the worker proves that this exact live
+ * terminal no longer runs its launched CLI (an idle shell of a kept terminal,
+ * or a launcher such as the macOS idle owner that outlived the CLI), close
+ * that terminal and settle the session so the existing upgrade and dispatch
+ * paths start a fresh one. Holds both host-ops locks and re-reads the owner
+ * before closing; never signals a live CLI.
+ */
+export async function releaseExitedAgent(
+  store: Store,
+  project: ProjectId,
+  a: Assignment,
+  runtime: Runtime,
+  clock: Clock,
+): Promise<ExitedAgentRelease> {
+  const ref = a.runtime_ref;
+  if (!ref || !runtime.observe_agent_exit) return "skipped";
+  const observed = await runtime.status(ref).catch(() => undefined);
+  if (!observed?.ok || observed.value.process !== "alive") return "skipped";
+  const unlock = await tryHostOpsLock(store, project, a.id);
+  if (!unlock) return "skipped";
+  try {
+    const unlockLaunch = await tryHostOpsLock(store, project, a.id, "launch");
+    if (!unlockLaunch) return "skipped";
+    try {
+      const current = () =>
+        store.uow.read((tx) => {
+          const state = loadCommandState(tx, project);
+          const owner = state.assignments.find((v) => v.id === a.id);
+          return owner &&
+            JSON.stringify(owner.runtime_ref) === JSON.stringify(ref) &&
+            exitedAgentOwner(store, state, owner)
+            ? owner
+            : undefined;
+        });
+      if (!current()) return "skipped";
+      const owner = { project_id: project, assignment_id: a.id };
+      const exited = await runtime
+        .observe_agent_exit(ref, owner)
+        .catch(() => undefined);
+      if (!exited?.ok || !exited.value) return "skipped";
+      if (!current()) return "proven";
+      const closed = await runtime
+        .release(ref, { force: true })
+        .catch(() => undefined);
+      if (!closed?.ok) return "proven";
+      return store.uow.run((tx) => {
+        const effect = confirmKeptShellExit(
+          loadCommandState(tx, project),
+          { kind: "system", project_id: project },
+          a.id,
+          ref,
+          { ids: tx.ids, clock },
+        );
+        // A changed owner keeps its reference; the closed terminal then
+        // reads as not found and takes the ordinary replacement path.
+        if (!effect.ok) return "proven" as const;
+        persistEffect(tx, project, effect.value);
+        revokeRetiredTokens(tx, project, a.id);
+        return "settled" as const;
+      });
+    } finally {
+      await unlockLaunch();
+    }
+  } catch {
+    console.error("Terminal of an exited Agent could not be settled");
+    return "skipped";
+  } finally {
+    await unlock();
+  }
+}
+
+/**
+ * C-690: a waiting retirement of a session the Assignment no longer runs
+ * (typically: retained for dispatch, then a human stop released that terminal
+ * and a start launched a new one) fenced the new session's dispatch, stall
+ * recovery and host operations. Drop it; no runtime IO, no signal.
+ */
+export function clearSupersededRetirements(
+  store: Store,
+  project: ProjectId,
+  clock: Clock,
+) {
+  const stale = store.uow.read((tx) =>
+    tx.assignments
+      .list(project)
+      .filter((a) => a.scope === "work_item" && supersededRetirement(a))
+      .map((a) => a.id),
+  );
+  for (const id of stale)
+    store.uow.run((tx) => {
+      const effect = clearSupersededRetirement(
+        loadCommandState(tx, project),
+        { kind: "system", project_id: project },
+        id,
+        { ids: tx.ids, clock },
+      );
+      if (effect.ok) persistEffect(tx, project, effect.value);
+    });
+  return stale.length;
+}
+
+/**
+ * C-690: a session the idle patrol retained for dispatch (handoff, nothing
+ * signalled) kept every later notification pending, because the dispatcher
+ * treats a handoff as busy and no host operation consumes a handoff without a
+ * queued Run. When notifications are waiting for it (and no Run is queued,
+ * running or being stopped or woken), withdraw that retirement under both
+ * host-ops locks; the dispatcher then wakes the session through its ordinary
+ * guarded path, or replaces it when its CLI is proven gone (C-672).
+ */
+export async function releaseRetainedForWork(
+  store: Store,
+  project: ProjectId,
+  clock: Clock,
+) {
+  const candidates = store.uow.read((tx) =>
+    tx.assignments
+      .list(project)
+      .filter(
+        (a) =>
+          a.scope === "work_item" &&
+          a.status === "active" &&
+          !a.external &&
+          a.idle_retirement?.phase === "waiting" &&
+          a.idle_retirement.handoff === true &&
+          retirementOwnsSession(a),
+      ),
+  );
+  let released = 0;
+  for (const a of candidates) {
+    if (
+      !store.listNotifications({
+        project_id: project,
+        assignment_id: a.id,
+        statuses: LIVE_NOTIFICATION_STATUSES,
+      }).length ||
+      unfinishedBellAttempts(store.database, project, a.id).length
+    )
+      continue;
+    const unlock = await tryHostOpsLock(store, project, a.id);
+    if (!unlock) continue;
+    try {
+      const unlockLaunch = await tryHostOpsLock(store, project, a.id, "launch");
+      if (!unlockLaunch) continue;
+      try {
+        const done = store.uow.run((tx) => {
+          const state = loadCommandState(tx, project);
+          const current = state.assignments.find((v) => v.id === a.id);
+          // Queued work belongs to the C-575 handoff consumer.
+          if (
+            !current ||
+            JSON.stringify(current.idle_retirement) !==
+              JSON.stringify(a.idle_retirement) ||
+            JSON.stringify(current.runtime_ref) !==
+              JSON.stringify(a.runtime_ref) ||
+            runsOf(state.runs, a.id).some((r) => r.status === "queued")
+          )
+            return false;
+          const effect = releaseRetainedRetirement(
+            state,
+            { kind: "system", project_id: project },
+            a.id,
+            { ids: tx.ids, clock },
+          );
+          if (!effect.ok) return false;
+          persistEffect(tx, project, effect.value);
+          return true;
+        });
+        if (done) released++;
+      } finally {
+        await unlockLaunch();
+      }
+    } finally {
+      await unlock();
+    }
+  }
+  return released;
+}
+
+/** C-667/C-672: every eligible owner of this project, bounded per pass. */
+export async function releaseExitedAgents(
+  store: Store,
+  project: ProjectId,
+  runtime: Runtime,
+  clock: Clock,
+  limit: number,
+  note?: ReturnType<typeof sessionMaintenanceScan>["note"],
+) {
+  if (!runtime.observe_agent_exit) return 0;
+  const candidates = store.uow.read((tx) => {
+    const state = loadCommandState(tx, project);
+    return state.assignments.filter((a) => exitedAgentOwner(store, state, a));
+  });
+  let released = 0;
+  for (const a of candidates) {
+    if (released >= limit) break;
+    const outcome = await releaseExitedAgent(store, project, a, runtime, clock);
+    if (outcome === "settled") released++;
+    else if (outcome === "proven") note?.(a.id, "agent_exited");
+  }
+  return released;
 }
 
 /** Shares both existing lock domains with attach/stop and launch/wake. */
@@ -372,7 +638,10 @@ export async function retireIdleSessions(
         const state = loadCommandState(tx, project);
         // A missing remote snapshot alone is not proof of exit. The human stop
         // path clears its exact ref only after successful release.
-        if (pending.runtime_ref === null && stoppedByHuman(state.events, a.id))
+        if (
+          pending.runtime_ref === null &&
+          humanStopRecorded(state.events, a.id)
+        )
           result = { outcome: "exited" };
         const retry = Math.min(
           policy.retry_max_ms,

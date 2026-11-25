@@ -2695,6 +2695,84 @@
           }
         }
       }
+    },
+    {
+      "id": "gu-kaizhi",
+      "name": "顾恺之",
+      "novel": "历史人物",
+      "bio": "东晋画家（约 348–409），出处《晋书·顾恺之传》《世说新语·巧艺》；有“画绝、才绝、痴绝”之称，提出“传神写照”，以“点睛”传神著称，传世摹本有《女史箴图》《洛神赋图》。sensen-godot 项目中担任 UI/UX 设计师。",
+      "background": "#BCB3D3",
+      "files": {
+        "full": {
+          "path": "gu-kaizhi/full.webp",
+          "sha256": "f56d1cbfbef1bda8202aa8f8bebae8f5465e1b1ddc0da1699538b405c2c18122",
+          "bytes": 989674,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "gu-kaizhi/head-64.webp",
+            "sha256": "2fe957a2c4b1e4d0efc700b23d12508cb3483aaaed90176018b5b0f73fc24a42",
+            "bytes": 5540,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "gu-kaizhi/head-128.webp",
+            "sha256": "1e5d44203e7c01ac61aad3ed61010c9e8fd45b50d7b81589685787463e782302",
+            "bytes": 19196,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "gu-kaizhi/head-256.webp",
+            "sha256": "edaad6e2956bc6873f05af9eb2ded87524a09ca00b0c28251eb90720bdc75734",
+            "bytes": 67526,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "wu-daozi",
+      "name": "吴道子",
+      "novel": "历史人物",
+      "bio": "唐代画家（约 680–759），出处《历代名画记》《唐朝名画录》；被尊为“画圣”，线条有“吴带当风”之誉，创“兰叶描”，落笔迅疾、气势奔放。sensen-godot 项目中担任设计总监（design director），负责界面验收与设计把关。",
+      "background": "#D4A5A0",
+      "files": {
+        "full": {
+          "path": "wu-daozi/full.webp",
+          "sha256": "66eedfa5e8a88622bd46a6791ed78537551e5c4c6e69f1071409437374e7378e",
+          "bytes": 893242,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "wu-daozi/head-64.webp",
+            "sha256": "9282cd36b561a573f6d36d20c5027e79bba095488e53edc42e26040da533e661",
+            "bytes": 5270,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "wu-daozi/head-128.webp",
+            "sha256": "4215d0d086dbf14f18007dae73285645c00830aff52034bbe3db077f6232561a",
+            "bytes": 16678,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "wu-daozi/head-256.webp",
+            "sha256": "cf4c10c5ef86be2aaf2cd50d04ea46f58275eaef419b0c3b382a9badbad81778",
+            "bytes": 55722,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
     }
   ]
 }

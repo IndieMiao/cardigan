@@ -13,7 +13,19 @@ export type StoryReply =
       readonly number: number;
       readonly answer: string;
     }
-  | { readonly action: "accept_defaults"; readonly group_id: TimelineEntryId };
+  | { readonly action: "accept_defaults"; readonly group_id: TimelineEntryId }
+  | {
+      /**
+       * C-715: the whole checklist in one entry. Every open question not in
+       * `answers` takes its recommended default, as with "accept_defaults".
+       */
+      readonly action: "submit_answers";
+      readonly group_id: TimelineEntryId;
+      readonly answers: readonly {
+        readonly number: number;
+        readonly answer: string;
+      }[];
+    };
 
 export type StoryDiscussion =
   | { readonly action: "ask"; readonly questions: readonly StoryQuestion[] }
@@ -35,6 +47,11 @@ export interface StoryProposalChildInput {
   readonly depends_on?: readonly number[];
   /** Existing same-project cards the child waits for. */
   readonly depends_on_cards?: readonly CardId[];
+  /**
+   * C-733: children with prerequisites wait for them by default (backlog, then
+   * todo once all complete); `false` keeps the child in backlog for PM.
+   */
+  readonly wait_for_dependencies?: boolean;
   readonly priority?: number;
   /** The role expected to own the work; shown for review, not an assignment. */
   readonly owner_role: string;

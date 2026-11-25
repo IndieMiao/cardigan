@@ -143,7 +143,18 @@ describe("an Assignment may only acknowledge its own Run", () => {
     dataDir = mkdtempSync(join(tmpdir(), "cardigan-attribution-"));
     roleConfig(dataDir, "codex-agent");
     expect(await cardigan(["init"])).toBe(0);
-    expect(await cardigan(["project", "create", project_id])).toBe(0);
+    expect(
+      await cardigan([
+        "project",
+        "create",
+        project_id,
+        "--code",
+        `T${project_id
+          .replace(/[^a-z0-9]/gu, "")
+          .slice(0, 3)
+          .toUpperCase()}`,
+      ]),
+    ).toBe(0);
     expect(
       await cardigan([
         "role",
@@ -172,6 +183,16 @@ describe("an Assignment may only acknowledge its own Run", () => {
         "reviewer",
         "--allowed-tools",
         "submit_review",
+      ]),
+    ).toBe(0);
+    // C-684: a person opens dev cards only once the project allows them.
+    expect(
+      await cardigan([
+        "preference",
+        "set",
+        "human-card-templates",
+        "dev",
+        "on",
       ]),
     ).toBe(0);
     expect(

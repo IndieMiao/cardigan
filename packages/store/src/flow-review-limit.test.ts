@@ -155,11 +155,13 @@ test.each([null, 1])(
               delivery_id: target.id,
               target_sha: target.subject.value,
               kind: "code",
+              pass_conditions: [{ description: "Defect fixed", basis: "AC1" }],
               issues: [
                 {
                   severity: "major",
                   description: "Defect",
                   impact: "functional" as const,
+                  basis: "AC1",
                   must_fix: true,
                   pre_existing: false,
                 },

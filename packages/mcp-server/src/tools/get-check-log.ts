@@ -1,7 +1,9 @@
 import {
   type CardId,
   checkLogAttempts,
+  isProjectMergeEventType,
   mergeBatchReadScope,
+  streamEventsBy,
 } from "@cardigan/domain";
 import { z } from "zod";
 import type { McpReadContext } from "../backend.js";
@@ -76,7 +78,13 @@ export function authorizeCheckLog(
   }
   const batchEvents =
     tx.projectMergeEvents?.(project) ??
-    tx.events.listAfter(project, undefined, 0);
+    streamEventsBy(
+      tx.events,
+      project,
+      undefined,
+      "type",
+      isProjectMergeEventType,
+    );
   const events = [...tx.events.listAfter(project, card, 0), ...batchEvents];
   const scope = mergeBatchReadScope(
     {

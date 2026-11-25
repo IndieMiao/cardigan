@@ -357,3 +357,147 @@ test("no target, disabled deployment and failed observations withdraw the pendin
   await new DeploymentController({ ...f.driver, enabled: false }).tick();
   expect(release).toHaveBeenCalledTimes(3);
 });
+
+/** C-650: a durable retry store shared by successive controllers (restarts). */
+function retrying(f: ReturnType<typeof fixture>, max = 2, intervalMs = 60_000) {
+  let now = Date.parse("2026-11-23T11:28:00.000Z");
+  const driver: DeploymentDriver = {
+    ...f.driver,
+    readyRetryMax: max,
+    readyRetryIntervalMs: intervalMs,
+    now: () => now,
+    // Mirrors readReadyRetry: the latest record of this target with retry state.
+    readyRetryState: async (to, control) =>
+      f.records.findLast(
+        (r) => r.to === to && r.control_event_id === control && r.ready_retry,
+      )?.ready_retry,
+    serverFailureCause: () => "数据库被锁",
+  };
+  return {
+    driver,
+    advance: (ms: number) => {
+      now += ms;
+    },
+  };
+}
+
+test("C-650: a rolled-back ready failure retries on schedule, survives restart and stops at the limit", async () => {
+  const f = fixture();
+  f.driver.ready = vi.fn(async () => {
+    f.calls.push("ready");
+    // Candidate never ready; the restored previous build always is.
+    return f.calls.filter((c) => c.startsWith("start:")).at(-1) === "start:old";
+  });
+  const r = retrying(f);
+  const builds = () => f.calls.filter((c) => c === "build").length;
+  let controller = new DeploymentController(r.driver);
+  await controller.tick();
+  expect(f.records.at(-1)).toMatchObject({
+    status: "rolled_back",
+    ready: true,
+    failure_stage: "ready",
+    ready_retry: {
+      failures: 1,
+      max: 2,
+      next_at: "2026-11-23T11:29:00.000Z",
+    },
+  });
+  expect(f.records.at(-1)?.summary).toBe(
+    "ready_failed（数据库被锁）；已恢复上一构建；不早于 60 秒后自动重试（第 1/2 次）",
+  );
+  // Not due yet: no build, no stop.
+  r.advance(59_999);
+  await controller.tick();
+  expect(builds()).toBe(1);
+  // A restarted supervisor reads the durable count instead of starting over.
+  r.advance(1);
+  controller = new DeploymentController(r.driver);
+  await controller.tick();
+  expect(builds()).toBe(2);
+  expect(f.records.at(-1)?.ready_retry).toMatchObject({ failures: 2, max: 2 });
+  r.advance(60_000);
+  controller = new DeploymentController(r.driver);
+  await controller.tick();
+  expect(builds()).toBe(3);
+  expect(f.records.at(-1)).toMatchObject({
+    status: "rolled_back",
+    ready_retry: { failures: 3, max: 2 },
+  });
+  expect(f.records.at(-1)?.ready_retry?.next_at).toBeUndefined();
+  expect(f.records.at(-1)?.summary).toContain(
+    "已自动重试 2 次仍失败，需主机处理",
+  );
+  // Used up: neither this controller nor a restarted one tries again.
+  r.advance(3_600_000);
+  await controller.tick();
+  await new DeploymentController(r.driver).tick();
+  expect(builds()).toBe(3);
+});
+
+test("C-650: a retry that becomes ready deploys; a failed rollback is never retried", async () => {
+  const f = fixture();
+  f.driver.ready = vi
+    .fn()
+    .mockResolvedValueOnce(false)
+    .mockResolvedValueOnce(true)
+    .mockResolvedValueOnce(true);
+  const r = retrying(f);
+  const controller = new DeploymentController(r.driver);
+  await controller.tick();
+  r.advance(60_000);
+  await controller.tick();
+  expect(f.records.at(-1)?.status).toBe("deployed");
+
+  const g = fixture();
+  g.driver.ready = vi.fn().mockResolvedValue(false);
+  const s = retrying(g);
+  await new DeploymentController(s.driver).tick();
+  expect(g.records.at(-1)).toMatchObject({
+    status: "failed",
+    ready: false,
+    ready_retry: { failures: 1, max: 2 },
+  });
+  expect(g.records.at(-1)?.ready_retry?.next_at).toBeUndefined();
+  s.advance(3_600_000);
+  await new DeploymentController(s.driver).tick();
+  expect(g.calls.filter((c) => c === "build")).toHaveLength(1);
+});
+
+test("C-650: a human pin counts separately; build failures keep the in-memory rule", async () => {
+  const f = fixture();
+  f.driver.ready = vi.fn(async () => {
+    f.calls.push("ready");
+    return f.calls.filter((c) => c.startsWith("start:")).at(-1) === "start:old";
+  });
+  const r = retrying(f, 0);
+  await new DeploymentController(r.driver).tick();
+  expect(f.records.at(-1)).toMatchObject({
+    status: "rolled_back",
+    ready_retry: { failures: 1, max: 0 },
+  });
+  // A new pin of the same commit is its own target.
+  r.driver.target = async () => ({
+    sha: "b".repeat(40),
+    control_event_id: "human-pin",
+  });
+  await new DeploymentController(r.driver).tick();
+  expect(f.calls.filter((c) => c === "build")).toHaveLength(2);
+  expect(f.records.at(-1)).toMatchObject({
+    control_event_id: "human-pin",
+    ready_retry: { failures: 1, max: 0 },
+  });
+
+  const g = fixture();
+  g.driver.build = async () => {
+    g.calls.push("build");
+    return { log_tail: "build: exit 1" };
+  };
+  const s = retrying(g);
+  const controller = new DeploymentController(s.driver);
+  await controller.tick();
+  s.advance(3_600_000);
+  await controller.tick();
+  expect(g.records.at(-1)?.ready_retry).toBeUndefined();
+  expect(g.records.at(-1)?.summary).toBe("build_failed");
+  expect(g.calls.filter((c) => c === "build")).toHaveLength(1);
+});

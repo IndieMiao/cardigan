@@ -1,10 +1,13 @@
 import {
+  composeRoleOverlay,
   HOST_OPS_ROLE_TOOLS,
   ROLE_TOOL_ALLOWLISTS,
+  STANDING_INVARIANTS,
   STANDING_ROLE_TOOLS,
   validateRole,
 } from "@cardigan/domain";
 import { describe, expect, test } from "vitest";
+import { composeRolePrompt } from "./prompt.js";
 import {
   corePromptFor,
   DEFAULT_ROLE_KINDS,
@@ -24,6 +27,7 @@ import {
   PM_PRE_MERGE_CHECK_RULE,
   PM_UI_VERIFICATION_RULES,
   PRODUCER_PLAIN_CHANGE_RULE,
+  REVIEW_CONVERGENCE_RULES,
   REVIEWER_PRE_MERGE_CHECK_RULE,
 } from "./role-pack.js";
 
@@ -221,6 +225,13 @@ const BASE_TOOLS = [
   "request_human_action",
   "request_decision",
   "upload_attachment",
+  // C-685: every role reads and writes the shared file library by default.
+  "list_shared_files",
+  "get_shared_file",
+  "upload_shared_file",
+  "commit_shared_file",
+  // C-726: read-only capability usage notes.
+  "get_capability_guide",
 ];
 
 test("C-293 PM Ops assigns ready work and leaves capacity enforcement to the scheduler", () => {
@@ -247,6 +258,15 @@ test("C-293 PM Ops assigns ready work and leaves capacity enforcement to the sch
   );
   // Flow Lite: role-rule changes are PM-handled and announced, no longer an Ops-only exception.
   expect(body).toContain("角色规则改动等其它事项由你或系统处理");
+});
+
+test("C-731 only the pm default pack gains get_capability_guide among standing roles", () => {
+  expect(defaultRoleDefinition("pm", launch).allowed_tools).toContain(
+    "get_capability_guide",
+  );
+  expect(defaultRoleDefinition("host_ops", launch).allowed_tools).not.toContain(
+    "get_capability_guide",
+  );
 });
 
 describe("C-226 PM Ops read-only subagent checks", () => {
@@ -551,7 +571,13 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
   });
   // An exact allowlist also excludes delivery, PM and host_ops tools.
   expect([...role.allowed_tools].sort()).toEqual(
-    [...BASE_TOOLS, "submit_review", "withdraw_review"].sort(),
+    [
+      ...BASE_TOOLS,
+      "submit_review",
+      "withdraw_review",
+      // C-611: reviewers request macOS evidence for the delivery directly.
+      "request_macos_check",
+    ].sort(),
   );
   expect(validateRole(role).ok).toBe(true);
   for (const phrase of [
@@ -560,12 +586,101 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
     "不复查 `code_review` 已覆盖",
     "`target_sha` 必须等于交付的 `subject`",
     "有阻塞问题必须标为 must_fix 并退回",
-    "轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 3 次驳回暂停并交 PM",
+    "轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 3 次驳回先开对齐回合，双方有分歧才交 PM",
     "复核员不能是本次交付的作者，不追溯历史 Assignment",
     "可写构建目录",
     "worker 数不超过主机限流配置的上限",
   ])
     expect(role.instructions).toContain(phrase);
+});
+
+test("C-610: every verifier role states review convergence once; PM only handles disputes and follow-up drafts", () => {
+  for (const role of [
+    "reviewer",
+    "independent_reviewer",
+    "design_director",
+  ] as const) {
+    const body = instructionsFor(role);
+    for (const rule of REVIEW_CONVERGENCE_RULES)
+      expect(body.split(`- ${rule}`).length - 1, role).toBe(1);
+  }
+  const rules = REVIEW_CONVERGENCE_RULES.join("\n");
+  // The prompt names exactly the bases the server accepts.
+  for (const key of Object.keys(STANDING_INVARIANTS))
+    expect(rules).toContain(`\`${key}\``);
+  for (const phrase of [
+    "`ACn`",
+    "`INVn`",
+    "`PCn`",
+    "没有依据的必改项由系统记为后续跟进，不挡合并",
+    "同一验证项第 2 次驳回时必须带 `pass_conditions`",
+    "之后的审核只核对清单",
+    "连续第 3 次驳回时系统开作者与审核员的对齐回合，不交 PM 加轮",
+    "只有分歧才交 PM 裁决",
+    "不提守卫类必改项",
+    "安全、权限、数值边界问题照常是必改项",
+    "第 1 次驳回附带的清单不生效",
+    "impact 为 `data_or_permission` 的数据、权限或数值上限错误不受清单限制",
+    "引用 `PCn` 时按该通过条件的依据",
+    "要求移除多余确认或停摆的意见不算守卫",
+  ])
+    expect(rules).toContain(phrase);
+  const pm = instructionsFor("pm");
+  for (const phrase of [
+    "系统先开作者与审核员的对齐回合，产出不变量清单后自动继续，不交 PM 加轮",
+    "只有对齐出现分歧",
+    "`get_card.follow_up_draft`",
+    "由你判断是否用 `create_card` 开卡",
+    "`project_snapshot.review_convergence.rejection_streak_episodes`",
+  ])
+    expect(pm).toContain(phrase);
+  expect(pm).not.toContain("同一验证项连续第 3 次驳回、交付与需求不一致");
+  expect(instructionsFor("coder")).not.toContain(REVIEW_CONVERGENCE_RULES[0]);
+});
+
+test("C-619: a held verifier answers only decision-bound questions; PM asks with decision_id", () => {
+  for (const role of [
+    "reviewer",
+    "independent_reviewer",
+    "design_director",
+  ] as const) {
+    const body = instructionsFor(role);
+    for (const phrase of [
+      "`issue_instruction` 绑定这条拍板（`decision_id`）的提问会唤醒你",
+      "用 `post_comment` 回复该条（`reply_to`）",
+      "不能提交审核结论、处理拍板或推进合并",
+      "普通评论不会唤醒等待中的审核项",
+    ])
+      expect(body, role).toContain(phrase);
+  }
+  const pm = instructionsFor("pm");
+  for (const phrase of [
+    "用 `issue_instruction` 对该审核项下指令并传 `decision_id` 绑定这条拍板",
+    "拍板已结、交付已换版本或审核员已更换时不会唤醒",
+    "审核员回复该指令后系统通知你",
+    "普通评论或提醒不会唤醒等待中的审核员",
+  ])
+    expect(pm).toContain(phrase);
+  expect(instructionsFor("coder")).not.toContain("绑定这条拍板");
+});
+
+test("C-618: verifiers mark platform-blocked evidence pending; authors supply it on a new delivery", () => {
+  const rules = REVIEW_CONVERGENCE_RULES.join("\n");
+  for (const phrase of [
+    "`evidence_pending={items, blocker}`",
+    "证据待补不是通过",
+    "不算驳回、不消耗轮数、不重置连续驳回",
+    "代码或功能必改照常写进 `issues`",
+    "`evidence_attachments`",
+    "`evidence_not_applicable`",
+    "旧版本上的证据不能沿用",
+  ])
+    expect(rules).toContain(phrase);
+  for (const role of ["coder", "frontend_engineer"] as const) {
+    const body = instructionsFor(role);
+    expect(body).toContain("`pending_evidence`");
+    expect(body).toContain("系统会通知你补证，只补仍适用的证据");
+  }
 });
 
 // C-162: wording copied independently of role-pack.ts.
@@ -899,3 +1014,24 @@ test.each(["coder", "reviewer", "tester"] as const)(
     expect(instructionsFor(role)).toContain("不要设法绕过");
   },
 );
+
+test("C-676: every default role, and a project role built on one, writes full numbers across projects", () => {
+  const rule = (prompt: string) =>
+    prompt
+      .split("\n")
+      .find((line) => line.startsWith("- 编号：") && line.includes("SEN-C-34"));
+  for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[]) {
+    const line = rule(corePromptFor(role, "显示名"));
+    expect(line, role).toContain("给所有者的消息、交人的待办和拍板说明");
+    expect(line, role).toContain("`project_code`");
+  }
+  // C-613 overlays keep instructions only; the shared rule joins at launch.
+  const overlay = composeRoleOverlay(defaultRoleDefinition("coder", launch), {
+    append_instructions: "项目定制：只改 game/ 目录。",
+    extra_tools: [],
+    removed_tools: [],
+  });
+  expect(rule(composeRolePrompt(overlay.instructions))).toBe(
+    rule(corePromptFor("coder")),
+  );
+});

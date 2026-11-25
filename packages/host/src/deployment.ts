@@ -4,6 +4,7 @@ import {
   countDeploymentOperations,
   type DeploymentDriver,
   type DeploymentOperation,
+  type DeploymentReadyRetry,
   type DeploymentRecord,
 } from "@cardigan/domain";
 
@@ -38,6 +39,8 @@ const operationSummary = (ops: readonly DeploymentOperation[]) =>
 export class DeploymentController {
   private busy = false;
   private readonly failed = new Set<string>();
+  /** C-650: cache of the durable retry state per target; restart re-reads it. */
+  private readonly retries = new Map<string, DeploymentReadyRetry>();
   /** End of the last attempt that restarted the server (in-memory). */
   private lastRestartAt: number | undefined;
   /** One bounded operation wait per from→to deployment. */
@@ -153,6 +156,21 @@ export class DeploymentController {
       : { record, interrupted: [] };
   }
 
+  /** C-650: the durable retry state of a target, or undefined when disabled. */
+  private async readyRetry(
+    key: string,
+    target: string,
+    controlEventId: string | undefined,
+  ): Promise<DeploymentReadyRetry | undefined> {
+    const d = this.driver;
+    if (d.readyRetryMax === undefined || !d.readyRetryState) return undefined;
+    const cached = this.retries.get(key);
+    if (cached) return cached;
+    const durable = await d.readyRetryState(target, controlEventId);
+    if (durable) this.retries.set(key, durable);
+    return durable;
+  }
+
   async tick(): Promise<void> {
     const d = this.driver;
     if (this.busy) return;
@@ -171,6 +189,20 @@ export class DeploymentController {
       const target = selection.sha;
       const failureKey = `${target}:${selection.control_event_id ?? "main"}`;
       if (current.sha === target || this.failed.has(failureKey)) {
+        this.drain = undefined;
+        return;
+      }
+      const priorRetry = await this.readyRetry(
+        failureKey,
+        target,
+        selection.control_event_id,
+      );
+      // C-650: retries used up, or the next retry is not due yet.
+      if (
+        priorRetry &&
+        (priorRetry.next_at === undefined ||
+          d.now() < Date.parse(priorRetry.next_at))
+      ) {
         this.drain = undefined;
         return;
       }
@@ -285,14 +317,24 @@ export class DeploymentController {
             : "中心 main 已部署，ready 和两个端口核对通过",
         };
       } catch (error) {
-        this.failed.add(failureKey);
-        const reason =
+        const serverStage = stage === "start" || stage === "ready";
+        const code =
           error instanceof Error &&
           ["non_fast_forward", "build_failed", "ready_failed"].includes(
             error.message,
           )
             ? error.message
             : "host_operation_failed";
+        // C-650: name a recognised cause (e.g. a locked database), read
+        // before the rollback starts a new log.
+        let cause: string | undefined;
+        if (serverStage)
+          try {
+            cause = d.serverFailureCause?.();
+          } catch {
+            cause = undefined;
+          }
+        const reason = cause ? `${code}（${cause}）` : code;
         record = {
           ...record,
           status: "failed",
@@ -323,6 +365,31 @@ export class DeploymentController {
             };
           }
         }
+        const max = d.readyRetryMax;
+        if (serverStage && max !== undefined && d.readyRetryState) {
+          // C-650: durable, bounded retries; only a restored server is retried.
+          const failures = (priorRetry?.failures ?? 0) + 1;
+          const interval = d.readyRetryIntervalMs ?? 0;
+          const scheduled = record.status === "rolled_back" && failures <= max;
+          const ready_retry: DeploymentReadyRetry = scheduled
+            ? {
+                failures,
+                max,
+                next_at: new Date(d.now() + interval).toISOString(),
+              }
+            : { failures, max };
+          this.retries.set(failureKey, ready_retry);
+          if (!scheduled) this.failed.add(failureKey);
+          record = {
+            ...record,
+            ready_retry,
+            summary: scheduled
+              ? `${record.summary}；不早于 ${Math.ceil(interval / 1000)} 秒后自动重试（第 ${failures}/${max} 次）`
+              : max > 0 && failures > max
+                ? `${record.summary}；已自动重试 ${max} 次仍失败，需主机处理`
+                : record.summary,
+          };
+        } else this.failed.add(failureKey);
         record = {
           ...record,
           downtime_ms: stoppedAt === undefined ? 0 : d.now() - stoppedAt,

@@ -16,6 +16,17 @@ else:
     account, target = api["preflight"](cfg, system)
     api["apply"](account, target)`;
 
+/**
+ * C-709: the root-owned release the operator unpacks on the worker. SteamOS
+ * mounts / (and so /opt) read-only; a work root under /home (wizard layout
+ * "home") keeps the release under /home as well.
+ */
+export function workerReleaseRoot(mac: boolean, root: string) {
+  return !mac && root.startsWith("/home/cardigan-workers/")
+    ? "/home/cardigan-release"
+    : "/opt/cardigan";
+}
+
 export function workerDirectoryCommand(
   mac: boolean,
   project: string,
@@ -25,7 +36,7 @@ export function workerDirectoryCommand(
   const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
   const args = [
     script,
-    `/opt/cardigan/deploy/install-${mac ? "macos" : "linux"}-worker.py`,
+    `${workerReleaseRoot(mac, root)}/deploy/install-${mac ? "macos" : "linux"}-worker.py`,
     mac ? "Darwin" : "Linux",
     project,
     account,

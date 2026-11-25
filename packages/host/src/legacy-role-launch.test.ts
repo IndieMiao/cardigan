@@ -252,8 +252,11 @@ test.each(["codex", "claude-code", "pi"] as const)(
           role_version: 2,
           status: "dispatched",
         });
+        // C-676: legacy prompts stay verbatim and still learn the project code.
+        const code = store.projectCode(project as never);
+        expect(code).toBe("LEG");
         expect(await readFile(join(launched.run_dir, "core.md"), "utf8")).toBe(
-          `${role.core_prompt}\n\n${RUN_RESOURCE_RULE}\n`,
+          `${role.core_prompt}\n\n项目资料：本项目 "legacy-roles" 的代号是 LEG，本项目卡片 C-12 的完整编号写作 LEG-C-12；引用其它项目或写给所有者时用完整编号。\n\n${RUN_RESOURCE_RULE}\n`,
         );
         expect(
           store.database

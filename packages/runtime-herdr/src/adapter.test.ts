@@ -360,8 +360,10 @@ test.each([false, true])(
     const calls = vi.mocked(client.exec).mock.calls.map(([args]) => args);
     expect(calls).toHaveLength(2);
     expect(calls[1]).toEqual(
-      expect.arrayContaining(["run", "--keep", "--", launch.command]),
+      expect.arrayContaining(["run", "--", launch.command]),
     );
+    // C-667: a replacement terminal finishes with its CLI, never leaves a shell.
+    expect(calls[1]).not.toContain("--keep");
     expect(
       calls.some((args) => ["get", "kill", "rm"].includes(args[0] ?? "")),
     ).toBe(false);
@@ -380,6 +382,32 @@ test("M5.6 replacement refuses an uncertain release while a core socket still ex
   expect(
     vi.mocked(client.exec).mock.calls.some(([args]) => args[0] === "run"),
   ).toBe(false);
+});
+test("C-667: status marks a kept terminal; only a macOS worker can prove its CLI left a shell", async () => {
+  const client = stub();
+  vi.mocked(client.exec).mockImplementation(async (args) =>
+    args[0] === "--version"
+      ? `hc ${HC_RELEASE.version}`
+      : JSON.stringify({
+          address: "t1",
+          state: "live",
+          keep: true,
+          status: null,
+        }),
+  );
+  const runtime = value(await HerdrRuntime.create({ client }));
+  expect(await runtime.status(ref)).toEqual({
+    ok: true,
+    value: { process: "alive", agent: "idle", observed_seq: 7, kept: true },
+  });
+  const calls = vi.mocked(client.exec).mock.calls.length;
+  expect(
+    await runtime.observe_agent_exit(ref, {
+      project_id: "fixture",
+      assignment_id: assignment.id,
+    }),
+  ).toEqual({ ok: true, value: false });
+  expect(vi.mocked(client.exec).mock.calls).toHaveLength(calls);
 });
 test("status uses a runtime sequence, and malformed or ended event streams fail explicitly", async () => {
   const client = stub();

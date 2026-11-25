@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 import { AVATAR_LIBRARY, parseAvatarReference } from "./avatar.js";
 
 test("the library has unique identities and every reference resolves exactly", () => {
-  expect(AVATAR_LIBRARY).toHaveLength(69);
+  expect(AVATAR_LIBRARY).toHaveLength(71);
   expect(new Set(AVATAR_LIBRARY.map(([id]) => id)).size).toBe(
     AVATAR_LIBRARY.length,
   );

@@ -146,7 +146,7 @@ test("owner creates audited global employees; options include all characters and
       role_change_blocked: null,
     },
   ]);
-  expect(library).toHaveLength(69);
+  expect(library).toHaveLength(71);
   expect(library).toContainEqual({
     id: "guan-yu",
     name: "关羽",
@@ -154,6 +154,18 @@ test("owner creates audited global employees; options include all characters and
     avatar: "/avatars/v1/guan-yu/head-128.webp",
     occupied_by: { id: "E-1", name: "云长", status: "inactive" },
   });
+  for (const [id, name] of [
+    ["gu-kaizhi", "顾恺之"],
+    ["wu-daozi", "吴道子"],
+  ]) {
+    expect(library).toContainEqual({
+      id,
+      name,
+      source: "历史人物",
+      avatar: `/avatars/v1/${id}/head-128.webp`,
+      occupied_by: null,
+    });
+  }
   expect((await post({ ...input, name: "另一个名字" })).status).toBe(400);
   expect(
     (

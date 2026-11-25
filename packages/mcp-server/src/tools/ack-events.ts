@@ -1,5 +1,14 @@
-import type { CardId } from "@cardigan/domain";
+import {
+  type AssignmentId,
+  advanceOfficeDigestSince,
+  type CardId,
+  isOfficeOnDuty,
+  OFFICE_DIGEST_SHOWN_STREAM,
+  OFFICE_DIGEST_SINCE_STREAM,
+  type ProjectId,
+} from "@cardigan/domain";
 import { z } from "zod";
+import type { McpBackend } from "../backend.js";
 import { ToolError } from "../errors.js";
 import { PROJECT_STREAM, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
@@ -14,6 +23,10 @@ import { defineTool } from "./types.js";
  * Passing `card_id` acks that card's stream; leaving it out acks the
  * project-level stream, mirroring `get_updates` (S5). Without this a standing
  * PM could read project events but never move past them.
+ *
+ * C-722: the project-stream ACK of the PM Office on duty also moves its
+ * digest window to where its latest `get_updates` page reached, never past
+ * it, so routine changes it has not been shown stay in the digest.
  */
 export const ackEventsTool = defineTool({
   name: "ack_events",
@@ -44,6 +57,33 @@ export const ackEventsTool = defineTool({
         result.error.details,
       );
     }
+    if (cardId === undefined)
+      advanceOfficeDigest(store, project_id, identity.actor.assignment_id);
     return { card_id: cardId ?? null, ...result.value };
   },
 });
+
+function advanceOfficeDigest(
+  store: McpBackend,
+  project_id: ProjectId,
+  assignment_id: AssignmentId,
+): void {
+  store.uow.run((tx) => {
+    const office = tx.assignments.get(project_id, assignment_id);
+    if (!office || !isOfficeOnDuty(office)) return;
+    const key = (stream: string) => ({
+      assignment_id,
+      card_id: stream as CardId,
+    });
+    const since = tx.cursors.get(project_id, key(OFFICE_DIGEST_SINCE_STREAM));
+    const shown = tx.cursors.get(project_id, key(OFFICE_DIGEST_SHOWN_STREAM));
+    // Nothing was ever shown: the first read pins the window instead.
+    if (!since || !shown) return;
+    const next = advanceOfficeDigestSince(since.acked_seq, shown.acked_seq);
+    if (next > since.acked_seq)
+      tx.cursors.put(project_id, {
+        ...key(OFFICE_DIGEST_SINCE_STREAM),
+        acked_seq: next,
+      });
+  });
+}

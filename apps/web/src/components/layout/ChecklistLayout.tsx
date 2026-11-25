@@ -81,6 +81,16 @@ export function ChecklistActions({ children }: { children: ReactNode }) {
   return <div className={styles.actions}>{children}</div>;
 }
 
+/** C-715: a short fact beside the panel's buttons, e.g. how many take defaults. */
+export function ChecklistNote({ children }: { children: ReactNode }) {
+  return <span className={styles.note}>{children}</span>;
+}
+
+/** C-715: one item's full-width input under its context line. */
+export function ChecklistField({ children }: { children: ReactNode }) {
+  return <div className={styles.field}>{children}</div>;
+}
+
 /** C-503: a refusal shown where the action was taken, with what to do next. */
 export function ChecklistAlert({ children }: { children: ReactNode }) {
   return (

@@ -19,7 +19,10 @@ import { loopbackTerminal, managedLoopback } from "./loopback-terminal.js";
 export { managedLoopback } from "./loopback-terminal.js";
 
 import { enrollDarwinOwner, stopDarwinOwner } from "./darwin-idle-owner.js";
-import { darwinRetirementObservation } from "./darwin-retirement.js";
+import {
+  darwinRetirementObservation,
+  stopDarwinTurn,
+} from "./darwin-retirement.js";
 import { idleRetirementHelper } from "./idle-retirement.js";
 import { confirmationVisible } from "./interaction.js";
 import { terminalSnapshot } from "./terminal-activity.js";
@@ -42,6 +45,7 @@ import type {
   PromptObservation,
   RetirementEvidence,
   RetirementIdentity,
+  RetirementStop,
   Role,
   Runtime,
   RuntimeError,
@@ -51,6 +55,7 @@ import type {
   RuntimeResult,
   RuntimeWakeOptions,
   RuntimeWakeResult,
+  TurnIdlePrompt,
 } from "@cardigan/domain";
 import { type AgentBinary, isAgentBinary } from "@cardigan/domain";
 import { registerAgentMachine } from "./agent-ssh.js";
@@ -172,6 +177,8 @@ type Terminal = {
   foreground?: Parameters<typeof terminalSnapshot>[1];
   created_ms?: number;
   keep?: boolean;
+  exit_code?: number | null;
+  reason?: string | null;
 };
 const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
 const statusStates = new WeakMap<
@@ -370,7 +377,7 @@ export class HerdrRuntime implements Runtime {
     )
       fail("invalid_launch", "Remote worker launch is not enabled");
   }
-  private async launch(launch: RuntimeLaunch, keep: boolean) {
+  private async launch(launch: RuntimeLaunch) {
     this.checkLaunchEnabled();
     this.validateLaunch(launch);
     // An explicit launch may bootstrap hc; probes must not do so. SSH aliases
@@ -396,7 +403,6 @@ export class HerdrRuntime implements Runtime {
       "--cwd",
       launch.cwd,
     ];
-    if (keep) args.push("--keep");
     for (const [key, value] of Object.entries(launch.labels))
       args.push("--label", `${key}=${value}`);
     // run stops parsing options at the program: all hc options must precede it.
@@ -545,22 +551,14 @@ export class HerdrRuntime implements Runtime {
         !launch.labels.run
       )
         fail("invalid_launch", "Launch identity or labels do not match");
-      const terminal_ref = await this.launch(
-        {
-          ...(await enrollDarwinOwner(
-            this.execution,
-            assignment,
-            role,
-            launch,
-          )),
-          labels: {
-            ...launch.labels,
-            cardigan: "1",
-            assignment: assignment.id,
-          },
+      const terminal_ref = await this.launch({
+        ...(await enrollDarwinOwner(this.execution, assignment, role, launch)),
+        labels: {
+          ...launch.labels,
+          cardigan: "1",
+          assignment: assignment.id,
         },
-        false,
-      );
+      });
       const ref: RuntimeRef = {
         machine_id: machine.id,
         runtime_machine:
@@ -817,14 +815,19 @@ export class HerdrRuntime implements Runtime {
     if (pending) return pending;
     const request = result(async () => {
       this.checkRef(ref);
-      this.checkTerminal(ref, await this.json(["get", ref.terminal_ref]));
+      const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      this.checkTerminal(ref, terminal);
       // The shared source refresh starts after get. Existing consumers keep
       // their subscription and observe the new source's own sequence.
       const event = await this.hub.snapshot(Math.max(this.timeoutMs, 20_000));
       const found = event.observations.find(
         (t) => t.terminal_ref === ref.terminal_ref,
       );
-      if (found) return found.status;
+      // C-667: a kept terminal stays live with a shell after its CLI exits.
+      if (found)
+        return terminal.keep === true
+          ? { ...found.status, kept: true as const }
+          : found.status;
       fail("runtime_not_found", "Terminal is absent from the runtime snapshot");
     });
     this.statusRequests.set(key, request);
@@ -983,10 +986,13 @@ export class HerdrRuntime implements Runtime {
       } = ref;
       return {
         ...previous,
-        terminal_ref: await this.launch(
-          { ...launch, labels: { ...launch.labels, cardigan: "1" } },
-          true,
-        ),
+        // C-667: never --keep. A kept terminal turns a lost CLI into a live
+        // shell, which every wake, retirement and upgrade must treat as alive;
+        // a plain terminal finishes, so the existing exit paths replace it.
+        terminal_ref: await this.launch({
+          ...launch,
+          labels: { ...launch.labels, cardigan: "1" },
+        }),
         agent_name: launch.agent_name,
         ...(launch.labels.generation
           ? {
@@ -1096,29 +1102,103 @@ export class HerdrRuntime implements Runtime {
       ? JSON.parse(await raw.exec(["get", ref.terminal_ref, "--json"]))
       : this.json(["get", ref.terminal_ref]);
   }
+  /** C-626: the dispatcher's bound empty-editor observation, read-only. */
+  private async promptIdle(
+    raw: Pick<HcClient, "exec">,
+    ref: RuntimeRef,
+    prompt?: TurnIdlePrompt,
+  ) {
+    return !!prompt && !!(await boundPrompt(raw, ref, prompt));
+  }
+  /** A system-ended turn on this terminal may be stopped: idle or done, or
+   * (C-626) no reported activity while the bound CLI shows its empty editor. */
+  private async turnIdle(
+    raw: Pick<HcClient, "exec">,
+    ref: RuntimeRef,
+    terminal: Terminal,
+    prompt?: TurnIdlePrompt,
+  ) {
+    const activity = terminal.status?.state ?? "unknown";
+    if (["idle", "done"].includes(activity)) return true;
+    return activity === "unknown" && this.promptIdle(raw, ref, prompt);
+  }
+  /** Strict worker observation first. Only when it cannot confirm, and the
+   * bound empty editor is read both before and after, may the worker accept
+   * an absent activity report. Identity, generation and keep are unchanged. */
+  private async darwinTurn(
+    ref: RuntimeRef,
+    identity: RetirementIdentity & {
+      readonly system_finished_turn?: true;
+      readonly idle_prompt?: TurnIdlePrompt;
+    },
+  ) {
+    const execution = this.execution as Extract<
+      ExecutionConfig,
+      { mode: "agent-ssh" }
+    >;
+    const { idle_prompt: prompt, ...owner } = identity;
+    const strict = await darwinRetirementObservation(execution, ref, owner);
+    if (
+      strict !== "unknown" ||
+      !owner.system_finished_turn ||
+      !(await this.promptIdle(this.client, ref, prompt))
+    )
+      return { observed: strict, basis: "terminal_status" as const };
+    const relaxed = await darwinRetirementObservation(execution, ref, {
+      ...owner,
+      unknown_activity: true,
+    });
+    return {
+      observed:
+        relaxed !== "alive" || (await this.promptIdle(this.client, ref, prompt))
+          ? relaxed
+          : ("unknown" as const),
+      basis: "bound_idle_prompt" as const,
+    };
+  }
+  /** C-667/C-672: only a macOS worker can prove that a still-live terminal
+   * no longer runs its launched CLI: the idle shell of a kept terminal, or a
+   * plain terminal whose launcher (the idle owner) outlived the CLI. */
+  observe_agent_exit(ref: RuntimeRef, owner: RetirementIdentity) {
+    return result(async () => {
+      this.checkRef(ref);
+      if (this.execution.mode !== "agent-ssh" || !this.execution.macosCore)
+        return false;
+      const observed = await darwinRetirementObservation(this.execution, ref, {
+        ...owner,
+        kept_shell: true,
+        agent_exit: true,
+      });
+      return observed === "shell" || observed === "agent_exited";
+    });
+  }
   observe_retirement(
     ref: RuntimeRef,
-    identity: RetirementIdentity & { readonly system_finished_turn?: true },
+    identity: RetirementIdentity & {
+      readonly system_finished_turn?: true;
+      readonly idle_prompt?: TurnIdlePrompt;
+    },
   ): Promise<RuntimeResult<RuntimeObservation["process"]>> {
     return result(async () => {
       this.checkRef(ref);
       if (this.execution.mode === "agent-ssh" && this.execution.macosCore) {
-        const observed = await darwinRetirementObservation(
-          this.execution,
-          ref,
-          identity,
-        );
-        return observed === "kept" ? "unknown" : observed;
+        const { observed } = await this.darwinTurn(ref, identity);
+        return observed === "kept" ||
+          observed === "shell" ||
+          observed === "agent_exited"
+          ? "unknown"
+          : observed;
       }
-      const terminal: Terminal = identity.system_finished_turn
-        ? await this.retirementTerminal(ref, identity)
+      const { idle_prompt: prompt, ...owner } = identity;
+      const terminal: Terminal = owner.system_finished_turn
+        ? await this.retirementTerminal(ref, owner)
         : await this.json(["get", ref.terminal_ref]);
-      this.checkRetirementTerminal(ref, identity, terminal);
+      this.checkRetirementTerminal(ref, owner, terminal);
       if (
-        identity.system_finished_turn &&
+        owner.system_finished_turn &&
         terminal.state === "live" &&
         (terminal.keep ||
-          !["idle", "done"].includes(terminal.status?.state ?? "unknown"))
+          !(await this.turnIdle(this.client, ref, terminal, prompt)))
       )
         return "unknown";
       return terminal.state === "finished"
@@ -1128,6 +1208,129 @@ export class HerdrRuntime implements Runtime {
           : "unknown";
     });
   }
+  /**
+   * C-626: one owner-bound TERM for a system-ended turn on a macOS worker.
+   * The generation's idle owner is asked first. When it cannot be asked (not
+   * enrolled, no key, or it refuses before any challenge because the retained
+   * checkout has changes or hc reports no activity), the worker re-proves the
+   * enrolled CLI and sends one TERM to that PID. Never a second signal.
+   */
+  private async retireDarwinTurn(
+    ref: RuntimeRef,
+    options: Parameters<NonNullable<Runtime["retire_idle"]>>[1] & {
+      readonly system_finished_turn: true;
+    },
+  ): Promise<{
+    attempted: boolean;
+    result?: RuntimeResult<IdleRetirementResult>;
+    outcome: "uncertain" | "timeout" | "withdrawn";
+    reason: RetirementEvidence["reason"];
+    details?: Partial<RetirementEvidence>;
+  }> {
+    const execution = this.execution as Extract<
+      ExecutionConfig,
+      { mode: "agent-ssh" }
+    >;
+    const exited = (stop?: RetirementStop) => ({
+      attempted: !!stop,
+      outcome: "withdrawn" as const,
+      reason: "hc_failed" as const,
+      result: {
+        ok: true as const,
+        value: { outcome: "exited" as const, ...(stop ? { stop } : {}) },
+      },
+    });
+    const refuse = (reason: RetirementEvidence["reason"]) => ({
+      attempted: false,
+      outcome: "withdrawn" as const,
+      reason,
+      details: { stage: "probe" as const },
+    });
+    const { idle_prompt: _prompt, ...owner } = options;
+    const confirm = async (stop: RetirementStop) => {
+      this.invalidateStatus(ref);
+      const deadline = Date.now() + options.terminate_ms;
+      do {
+        if (
+          (await darwinRetirementObservation(execution, ref, owner)) ===
+          "exited"
+        )
+          return exited(stop);
+        if (Date.now() >= deadline) break;
+        await delay(Math.min(250, deadline - Date.now()));
+      } while (Date.now() <= deadline);
+      // On timeout the next patrol observes only; the stop fence is kept.
+      return {
+        attempted: true,
+        outcome: "uncertain" as const,
+        reason: "confirmation_pending" as const,
+        details: { stage: "confirm" as const, stop },
+      };
+    };
+    const eligible = async () => {
+      const { observed, basis } = await this.darwinTurn(ref, options);
+      if (observed === "exited") return exited();
+      if (observed === "kept") return refuse("kept_terminal");
+      if (observed !== "alive")
+        return refuse(
+          options.idle_prompt && basis === "terminal_status"
+            ? "prompt_not_idle"
+            : "terminal_busy",
+        );
+      if (!(await options.workspace_preflight()))
+        return refuse("guard_changed");
+      return basis;
+    };
+    const first = await eligible();
+    if (typeof first !== "string") return first;
+    const pid = owner.enrolled_process?.pid;
+    const target = pid ? { pid } : {};
+    const managed = await stopDarwinOwner(execution, ref, options);
+    if (managed.outcome === "exited") return exited();
+    if (managed.outcome === "uncertain")
+      return confirm({ path: "darwin_idle_owner", signal: "TERM", ...target });
+    if (
+      managed.outcome !== "withdrawn" ||
+      !["conditional_close_unavailable", "probe_invalid"].includes(
+        managed.evidence.reason,
+      )
+    )
+      return {
+        attempted: false,
+        outcome: managed.outcome,
+        reason: managed.evidence.reason,
+        details: managed.evidence,
+      };
+    // Fallback: prove again (the owner attempt took time), then one TERM.
+    const basis = await eligible();
+    if (typeof basis !== "string") return basis;
+    const sent = await stopDarwinTurn(
+      execution,
+      ref,
+      {
+        ...owner,
+        ...(basis === "bound_idle_prompt"
+          ? { unknown_activity: true as const }
+          : {}),
+      },
+      options.before_signal,
+    );
+    const stop = {
+      path: "darwin_pid" as const,
+      signal: "TERM" as const,
+      ...target,
+    };
+    // The worker's own proof failed or a host guard changed: nothing was sent.
+    if (sent.sent === false)
+      return {
+        attempted: false,
+        outcome: "withdrawn" as const,
+        reason:
+          sent.reason === "guard_changed" ? "guard_changed" : "terminal_busy",
+        details: { stage: "TERM" as const },
+      };
+    return confirm(stop);
+  }
   async retire_idle(
     ref: RuntimeRef,
     options: Parameters<NonNullable<Runtime["retire_idle"]>>[1],
@@ -1136,6 +1339,8 @@ export class HerdrRuntime implements Runtime {
     let stage: RetirementEvidence["stage"] = "target";
     let reason: RetirementEvidence["reason"] = "hc_failed";
     let state: RetirementEvidence["terminal_state"];
+    // C-626: which owner-bound TERM a system-ended turn attempted.
+    let turnStop: RetirementStop | undefined;
     const failure = (
       outcome: "uncertain" | "timeout" | "withdrawn",
       why: RetirementEvidence["reason"],
@@ -1148,6 +1353,7 @@ export class HerdrRuntime implements Runtime {
           stage,
           reason: why,
           ...(state ? { terminal_state: state } : {}),
+          ...(attempted && turnStop ? { stop: turnStop } : {}),
           ...details,
         },
       },
@@ -1160,6 +1366,12 @@ export class HerdrRuntime implements Runtime {
           fail("invalid_launch", "Invalid idle retirement timeout");
       if (this.execution.mode === "agent-ssh" && this.execution.macosCore) {
         stage = "probe";
+        if (options.system_finished_turn) {
+          const turn = await this.retireDarwinTurn(ref, options);
+          attempted = turn.attempted;
+          if (turn.result) return turn.result;
+          return failure(turn.outcome, turn.reason, turn.details);
+        }
         const observed = await darwinRetirementObservation(
           this.execution,
           ref,
@@ -1212,7 +1424,7 @@ export class HerdrRuntime implements Runtime {
       if (first.keep) return failure("withdrawn", "kept_terminal");
       if (
         options.system_finished_turn &&
-        !["idle", "done"].includes(first.status?.state ?? "unknown")
+        !(await this.turnIdle(this.client, ref, first, options.idle_prompt))
       )
         return failure("withdrawn", "terminal_busy");
       if (first.state !== "live")
@@ -1221,6 +1433,12 @@ export class HerdrRuntime implements Runtime {
         return failure("withdrawn", "missing_pid");
       if (!Number.isSafeInteger(first.created_ms))
         return failure("withdrawn", "missing_creation_time");
+      if (options.system_finished_turn)
+        turnStop = {
+          path: "linux_pidfd",
+          signal: "TERM",
+          pid: Number(first.pid),
+        };
       const address = ref.terminal_ref.split("/").at(-1)!;
       const exec = (mode: string, identity?: string) => [
         "exec",
@@ -1265,8 +1483,11 @@ export class HerdrRuntime implements Runtime {
       )
         return failure("withdrawn", "identity_changed");
       reason = "hc_failed";
+      const sent: ("HUP" | "TERM")[] = [];
+      let last: Terminal = first;
       const hasExited = (terminal: Terminal) => {
         check(terminal);
+        last = terminal;
         if (terminal.state === "finished") return true;
         if (
           terminal.state !== "live" ||
@@ -1294,7 +1515,27 @@ export class HerdrRuntime implements Runtime {
       const settled = async (): Promise<
         RuntimeResult<IdleRetirementResult>
       > => {
-        if (!options.system_finished_turn) return exited;
+        if (!options.system_finished_turn)
+          return options.report_signals && sent.length
+            ? {
+                ok: true,
+                value: {
+                  outcome: "exited",
+                  signalled: {
+                    pid: first.pid as number,
+                    signals: [...sent],
+                    ...(Number.isSafeInteger(last.exit_code)
+                      ? { exit_code: last.exit_code as number }
+                      : {}),
+                    ...(typeof last.reason === "string" &&
+                    /^[a-z_]{1,32}$/u.test(last.reason)
+                      ? { exit_reason: last.reason }
+                      : {}),
+                  },
+                },
+              }
+            : exited;
+        const stop = attempted && turnStop ? { stop: turnStop } : {};
         try {
           const gone = await this.client.exec(
             exec("gone", JSON.stringify(identity)),
@@ -1302,12 +1543,16 @@ export class HerdrRuntime implements Runtime {
           if (gone.trim() === "gone")
             return {
               ok: true,
-              value: { outcome: "exited", process_group_exited: true },
+              value: {
+                outcome: "exited",
+                process_group_exited: true,
+                ...stop,
+              },
             };
         } catch {
           // Unconfirmed: the caller needs other process evidence.
         }
-        return exited;
+        return { ok: true, value: { outcome: "exited", ...stop } };
       };
       this.invalidateStatus(ref);
       try {
@@ -1343,9 +1588,12 @@ export class HerdrRuntime implements Runtime {
                       return false;
                     }
                     if (
-                      !["idle", "done"].includes(
-                        target.status?.state ?? "unknown",
-                      )
+                      !(await this.turnIdle(
+                        raw,
+                        ref,
+                        target,
+                        options.idle_prompt,
+                      ))
                     ) {
                       refused = "terminal_busy";
                       return false;
@@ -1356,6 +1604,7 @@ export class HerdrRuntime implements Runtime {
             ))
           )
             return failure(attempted ? "uncertain" : "withdrawn", refused);
+          sent.push(mode);
           if (await wait(budget)) return settled();
         }
         return failure("timeout", "still_live");

@@ -85,7 +85,8 @@ test("thumbnails and previews redirect to a signed OSS URL; ?local=1 stays local
   const location = new URL(String(thumb.headers.location));
   expect(location.origin).toBe(fake?.endpoint);
   expect(location.searchParams.get("x-oss-process")).toContain("format,webp");
-  // The page may load images from the bucket, and nothing else from it.
+  // The page may load images from the bucket and (C-685) send shared-library
+  // uploads to it; nothing else.
   const csp = String(thumb.headers["content-security-policy"]);
   expect(csp).toContain("sandbox");
   const page = await call(h?.port ?? 0, "/api/session", {});
@@ -93,7 +94,7 @@ test("thumbnails and previews redirect to a signed OSS URL; ?local=1 stays local
     `img-src 'self' data: blob: ${fake?.endpoint}`,
   );
   expect(String(page.headers["content-security-policy"])).toContain(
-    "connect-src 'self'",
+    `connect-src 'self' ${fake?.endpoint};`,
   );
   expect((await fetch(location)).status).toBe(200);
 

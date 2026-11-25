@@ -12,6 +12,8 @@ import {
   pauseDiscussionFor,
   readonlyReviewTarget,
   recordReadonlyCheckout,
+  worktreeUnavailablePrompt,
+  worktreeUnavailableReason,
 } from "@cardigan/domain";
 import {
   CentralRepositoryService,
@@ -41,6 +43,8 @@ export interface PreparedWorktree {
   readonly branch?: string | undefined;
   readonly base_sha: string;
   readonly baseline?: { readonly ref: string; readonly sha: string };
+  /** C-728: a no-merge card's start point, checked out detached. */
+  readonly start_point?: { readonly point: string; readonly sha: string };
   /** P2a-3: a readonly verifier's writable build checkout of the same delivery. */
   readonly build?: { readonly path: string; readonly sha: string };
   /** C-630: the artifact delivery under review and the commit checked out for it. */
@@ -58,10 +62,14 @@ export function worktreeBaselinePrompt(
   worktree?: PreparedWorktree,
 ): string | undefined {
   const baseline = worktree?.baseline,
-    build = worktree?.build;
+    build = worktree?.build,
+    start = worktree?.start_point;
   const lines = [
     baseline
       ? `当前基线 ${baseline.ref}：${baseline.sha}（已由主机同步）。`
+      : undefined,
+    start
+      ? `本卡不合并：worktree 已按起点 ${start.point === start.sha ? start.sha : `${start.point}（${start.sha}）`} detached 检出，不挂分支。`
       : undefined,
     worktree?.review_plan
       ? `本次只确认 ${worktree.review_plan} 的方案方向。只读检出是项目基线，不是待审交付；请在卡上回复方案。`
@@ -327,6 +335,7 @@ export function worktreeProvider(
             : {}),
           ...(placed.baseline ? { baseline: placed.baseline } : {}),
           ...(placed.branch ? { branch: placed.branch } : {}),
+          ...(placed.start_point ? { start_point: placed.start_point } : {}),
           ...(build ? { build } : {}),
         };
       },
@@ -403,6 +412,25 @@ export function recordArtifactCheckout(
         ports,
       ),
   });
+}
+
+/**
+ * C-728: the start/wake line for a work-item Assignment that wants source but
+ * whose card has no registered repository, so the empty worktree has a reason.
+ */
+export function missingWorktreePrompt(
+  store: Store,
+  project: ProjectId,
+  assignment: Assignment["id"],
+): string | undefined {
+  const entities = launchEntities(store, project, assignment);
+  return worktreeUnavailablePrompt(
+    worktreeUnavailableReason(
+      entities.role,
+      { scope: entities.assignment.scope },
+      entities.card,
+    ),
+  );
 }
 
 /** Only a readonly reviewer needs its worktree refreshed before every wake. */

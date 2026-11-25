@@ -1,5 +1,6 @@
-import type { Actor, Assignment } from "../entities.js";
+import type { Actor, Assignment, Event, RoleReference } from "../entities.js";
 import type { Result } from "../errors.js";
+import { eventsOfType } from "../event-index.js";
 import type { AssignmentId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
@@ -12,6 +13,69 @@ import {
 } from "./core.js";
 import { selectStandingEmployee } from "./employee-assignment.js";
 import type { RotateStandingPmResult } from "./pm-rotate.js";
+
+const sorted = (values: readonly string[] | undefined) =>
+  JSON.stringify([...(values ?? [])].sort());
+
+/** Launch and policy fields a domain role reference carries. */
+function sameReference(a: RoleReference, b: RoleReference) {
+  return (
+    sorted(a.allowed_tools) === sorted(b.allowed_tools) &&
+    sorted(a.capabilities) === sorted(b.capabilities) &&
+    sorted(a.required_capabilities) === sorted(b.required_capabilities) &&
+    a.launch_profile_ref === b.launch_profile_ref &&
+    a.worktree === b.worktree
+  );
+}
+
+/**
+ * C-613: the version whose audited system upgrade `version` carries. A real
+ * upgrade audit (`host_role_upgraded` to exactly this version) carries itself.
+ * A `metadata_only` audit carries its source version's, and only while the
+ * two versions keep the same policy and launch fields (the host also checks
+ * the full policy hash before writing one). Undefined: no audit reaches it,
+ * e.g. a version edited by hand.
+ */
+export function deploymentAuditedVersion(
+  state: {
+    readonly roles: readonly RoleReference[];
+    readonly events: readonly Event[];
+  },
+  roleId: string,
+  version: number,
+): number | undefined {
+  const reference = (v: number) =>
+    state.roles.find((r) => r.role_id === roleId && r.role_version === v);
+  let current = version;
+  for (;;) {
+    // C-649: first match from the type index, same as scanning every event.
+    const audit = eventsOfType(state.events, "host_role_upgraded").find((e) => {
+      const p = e.payload as Record<string, unknown>;
+      return (
+        e.type === "host_role_upgraded" &&
+        e.actor.kind === "system" &&
+        e.card_id === undefined &&
+        p.role_id === roleId &&
+        p.to_version === current
+      );
+    });
+    if (!audit) return undefined;
+    const p = audit.payload as Record<string, unknown>;
+    if (p.metadata_only !== true) return current;
+    const from = p.from_version;
+    const target = reference(current);
+    const source = typeof from === "number" ? reference(from) : undefined;
+    if (
+      typeof from !== "number" ||
+      from >= current ||
+      !target ||
+      !source ||
+      !sameReference(source, target)
+    )
+      return undefined;
+    current = from;
+  }
+}
 
 /** Host maintenance only; the upgrade audit must come from the deployed default pack. */
 export function rotateStandingAfterDeployment(
@@ -38,18 +102,14 @@ export function rotateStandingAfterDeployment(
     const latest = state.roles
       .filter((r) => r.role_id === previous.role_id && r.status !== "inactive")
       .sort((a, b) => b.role_version - a.role_version)[0];
+    const audited =
+      latest &&
+      deploymentAuditedVersion(state, previous.role_id, latest.role_version);
     ensure(
       latest &&
         latest.role_version > previous.role_version &&
-        state.events.some(
-          (e) =>
-            e.actor.kind === "system" &&
-            e.type === "host_role_upgraded" &&
-            (e.payload as Record<string, unknown>).role_id ===
-              previous.role_id &&
-            (e.payload as Record<string, unknown>).to_version ===
-              latest.role_version,
-        ),
+        audited !== undefined &&
+        audited > previous.role_version,
       "illegal_transition",
       "没有已部署默认包的升级审计",
     );

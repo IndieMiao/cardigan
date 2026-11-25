@@ -17,7 +17,10 @@ import { CLI_TOOLS } from "./command-access.js";
 import { resolveActor } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
-import { registerTemplateRoles } from "./template-fixtures.js";
+import {
+  openHumanCardTemplates,
+  registerTemplateRoles,
+} from "./template-fixtures.js";
 
 const project = "token-project";
 let dir: string;
@@ -40,6 +43,7 @@ beforeEach(async () => {
     }),
   );
   registerTemplateRoles(store, project);
+  openHumanCardTemplates(store, project, ["dev"]);
   output = [];
   errors = [];
   io = {
@@ -61,6 +65,8 @@ beforeEach(async () => {
       [
         "card",
         "create",
+        "--template",
+        "dev",
         "--title",
         "Fixture",
         "--goal",
@@ -113,6 +119,36 @@ async function run(args: string[], input = io) {
   errors.length = 0;
   return main(args, input);
 }
+test("C-684: a person is limited to opened templates; an Office Token is not", async () => {
+  const general = [
+    "card",
+    "create",
+    "--title",
+    "Notes",
+    "--goal",
+    "Prepare notes",
+  ];
+  expect(await run([...general, "--template", "general"])).toBe(2);
+  expect(errors.join("\n")).toContain("人只能开需求卡、开发卡");
+  // Without --template a person opens a story.
+  expect(await run(general)).toBe(0);
+  const office = tokenIo(issue().token);
+  expect(await run([...general, "--template", "general"], office)).toBe(0);
+  expect(
+    await run([...general, "--acceptance", "Pass", "--repo", "x/y"], office),
+  ).toBe(0);
+  expect(
+    store.uow
+      .read((tx) => tx.cards.list(project))
+      .map((c) => [c.template, c.created_by]),
+  ).toEqual([
+    ["dev", "human"],
+    ["story", "human"],
+    ["general", expect.stringMatching(/^assignment:/u)],
+    ["dev", expect.stringMatching(/^assignment:/u)],
+  ]);
+});
+
 const update = ["card", "update", "C-1", "--title", "Changed"];
 const comment = ["comment", "add", "C-1", "--text", "Identity check"];
 const accessCases = Object.entries(CLI_TOOLS);
@@ -121,6 +157,9 @@ test.each(["office", "ops"])(
   "%s Token cannot alter independent review authorization or its budget",
   async (mode) => {
     const token = mode === "ops" ? opsIdentity() : issue().token;
+    const preferences = store.uow.read((tx) =>
+      tx.project_preferences.list(project),
+    );
     for (const [key, input] of [
       ["independent-review-limit-delegation", "on"],
       ["independent-review-limit-delegation", "off"],
@@ -133,6 +172,13 @@ test.each(["office", "ops"])(
       expect(
         await run(["preference", "set", key, input], tokenIo(token)),
       ).not.toBe(0);
+    // C-684: only the human opens templates to people.
+    expect(
+      await run(
+        ["preference", "set", "human-card-templates", "general", "on"],
+        tokenIo(token),
+      ),
+    ).not.toBe(0);
     expect(
       await run(["card", "flow-upgrade", "C-1", "--to", "2"], tokenIo(token)),
     ).not.toBe(0);
@@ -141,7 +187,7 @@ test.each(["office", "ops"])(
     ).toBe(1);
     expect(
       store.uow.read((tx) => tx.project_preferences.list(project)),
-    ).toEqual([]);
+    ).toEqual(preferences);
   },
 );
 
@@ -844,6 +890,8 @@ test("MC-2 CLI creates template items with requirements and rejects misspelled k
   const args = [
     "card",
     "create",
+    "--template",
+    "dev",
     "--title",
     "Machine work",
     "--goal",

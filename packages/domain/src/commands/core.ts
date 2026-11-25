@@ -81,6 +81,14 @@ export interface CommandPorts {
   readonly human_confirmation?: "workbench";
   readonly clock: Clock;
   readonly ids: IdAllocator;
+  /**
+   * Host-only lazy reader: a SHA's host deployment records in the control
+   * plane's projects other than `project` (the platform). Never MCP parameters.
+   */
+  readonly platform_deployments?: (
+    project: I.ProjectId,
+    sha: string,
+  ) => readonly E.Event[];
   /** Registered repositories of this project, supplied by the host, not the proposal. */
   readonly project_repositories?: readonly {
     readonly repo: string;
@@ -183,6 +191,7 @@ type CommandName =
   | "confirm_story_proposal"
   | "clear_released_runtime_refs"
   | "request_worktree_cleanup"
+  | "request_held_assignment_resume"
   | "record_readonly_checkout";
 export function ensure(
   condition: unknown,
@@ -354,6 +363,7 @@ export class CommandDraft {
       "record_merge_push_result",
       "check_merge_push_range",
       "request_worktree_cleanup",
+      "request_held_assignment_resume",
       "clear_released_runtime_refs",
       "record_readonly_checkout",
     ].includes(tool);

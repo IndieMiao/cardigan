@@ -11,13 +11,12 @@ import {
   parseCapabilityRequirement,
 } from "@cardigan/domain";
 import { parseDocument } from "yaml";
-
+import { type AdbSlotPolicy, parseAdbSlots } from "./adb-slots.js";
 import {
   type ProjectQuota,
   parseProjectQuotas,
   type ReadProjectQuota,
 } from "./project-quotas.js";
-
 import {
   type MachinePolicy,
   parseResourcePolicies,
@@ -27,6 +26,8 @@ export interface RunCapacityConfiguration {
   forMachine(machine: string): number;
   resourcesForMachine(machine: string): ReadonlyMap<string, number>;
   policies(machine: string): MachinePolicy | undefined;
+  /** C-679: per-Run adb server and emulator ports for this machine. */
+  adbSlots(machine: string): AdbSlotPolicy | undefined;
   preferred(machine: string): string | undefined;
   readonly projectQuota: ReadProjectQuota;
   maxForMachine(machine: string): number;
@@ -58,6 +59,7 @@ export async function loadRunCapacityConfig(
   const projects = new Map<string, ReadonlyMap<string, ProjectQuota>>();
   const unlimited: ReadonlyMap<string, number> = new Map();
   const policies = new Map<string, MachinePolicy>(),
+    adbSlots = new Map<string, AdbSlotPolicy>(),
     preferred = new Map<string, string>();
   const names = new Map<string, string>();
   const errors: string[] = [];
@@ -79,6 +81,7 @@ export async function loadRunCapacityConfig(
     resourcesForMachine: (machine) =>
       errors.length ? unlimited : (resources.get(machine) ?? unlimited),
     policies: (machine) => (errors.length ? undefined : policies.get(machine)),
+    adbSlots: (machine) => (errors.length ? undefined : adbSlots.get(machine)),
     preferred: (machine) =>
       errors.length ? undefined : preferred.get(machine),
     projectQuota: (machine, project) =>
@@ -177,6 +180,7 @@ export async function loadRunCapacityConfig(
               "resources",
               "projects",
               "resource_policies",
+              "adb_slots",
               "preferred_project",
             ].includes(key),
         )
@@ -226,6 +230,15 @@ export async function loadRunCapacityConfig(
             resources.get(machine) ?? unlimited,
           ),
         );
+      if (settings.adb_slots !== undefined)
+        adbSlots.set(
+          machine,
+          parseAdbSlots(
+            settings.adb_slots,
+            resources.get(machine) ?? unlimited,
+            policies.get(machine),
+          ),
+        );
       if (settings.preferred_project !== undefined) {
         if (
           typeof settings.preferred_project !== "string" ||
@@ -260,7 +273,7 @@ export async function loadRunCapacityConfig(
   } catch {
     // Never include YAML contents (which could contain credentials) in diagnostics.
     errors.push(
-      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes、inbox_stall_after_minutes、queued_recheck_after_minutes 须为允许范围的正整数，display_name 须为有效文字，resources 须按能力名设置正整数上限。配置无效，暂停普通 Run 自动派发及失活回收",
+      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes、inbox_stall_after_minutes、queued_recheck_after_minutes 须为允许范围的正整数，display_name 须为有效文字，resources 须按能力名设置正整数上限，adb_slots 的资源须已在 resources 中、端口范围有效且不与其它端口重叠。配置无效，暂停普通 Run 自动派发及失活回收",
     );
   }
   return result();

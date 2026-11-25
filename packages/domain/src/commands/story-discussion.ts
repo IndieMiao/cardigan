@@ -47,6 +47,9 @@ export function storyChildForm(
     acceptance_criteria: child.acceptance_criteria,
     source: { kind: "quote", text: sourceText },
     ...(child.priority === undefined ? {} : { priority: child.priority }),
+    ...(child.wait_for_dependencies === undefined
+      ? {}
+      : { wait_for_dependencies: child.wait_for_dependencies }),
     ...(child.state_and_save === undefined
       ? {}
       : {
@@ -128,6 +131,12 @@ function proposalChildren(
       `第 ${n} 张子卡的依赖须为方案内其它子卡的序号`,
     );
     const cards = [...new Set<CardId>(c.depends_on_cards ?? [])];
+    ensure(
+      c.wait_for_dependencies === undefined ||
+        typeof c.wait_for_dependencies === "boolean",
+      "validation_failed",
+      `第 ${n} 张子卡的等待前置标记必须为布尔值`,
+    );
     checkStoryChild(n, c.title, () => {
       prepareCardCreation(d, storyChildForm(story.id, c), {
         registered_repo_only: true,
@@ -141,6 +150,9 @@ function proposalChildren(
       acceptance_criteria: [...acceptance],
       depends_on,
       ...(cards.length ? { depends_on_cards: cards } : {}),
+      ...(c.wait_for_dependencies === undefined
+        ? {}
+        : { wait_for_dependencies: c.wait_for_dependencies }),
       priority,
       owner_role: c.owner_role,
       ...(c.state_and_save === undefined
@@ -291,6 +303,65 @@ export function storyDiscussionChange(
       lines: defaultLines(group),
       apply: (id: TimelineEntryId) =>
         update(settleStoryQuestionDefaults(group, id, "accepted_default")),
+    };
+  }
+  if (action.action === "submit_answers") {
+    ensure(
+      group.questions.some((q) => !q.resolution),
+      "illegal_transition",
+      "该清单已全部回答或按默认处理",
+    );
+    ensure(
+      Array.isArray(action.answers),
+      "validation_failed",
+      "answers is required",
+    );
+    const answers = new Map<number, string>();
+    for (const { number, answer } of action.answers) {
+      const question = group.questions[number - 1];
+      ensure(
+        Number.isSafeInteger(number) && question,
+        "validation_failed",
+        "题号不存在",
+      );
+      ensure(!answers.has(number), "validation_failed", `第 ${number} 题重复`);
+      ensure(
+        !question.resolution,
+        "illegal_transition",
+        `第 ${number} 题已回答或按默认处理`,
+      );
+      text(answer, "answer");
+      answers.set(number, answer);
+    }
+    return {
+      lines: group.questions.flatMap((q, i) => {
+        if (q.resolution) return [];
+        const answer = answers.get(i + 1);
+        return [
+          answer === undefined
+            ? `${group.id} 第 ${i + 1} 题按默认：${q.recommended}`
+            : `${group.id} 第 ${i + 1} 题：${answer}`,
+        ];
+      }),
+      apply: (entry_id: TimelineEntryId) =>
+        update({
+          ...group,
+          questions: group.questions.map((q, i) => {
+            if (q.resolution) return q;
+            const answer = answers.get(i + 1);
+            return {
+              ...q,
+              resolution:
+                answer === undefined
+                  ? {
+                      source: "accepted_default" as const,
+                      value: q.recommended,
+                      entry_id,
+                    }
+                  : { source: "answer" as const, value: answer, entry_id },
+            };
+          }),
+        }),
     };
   }
   const index = action.number - 1;

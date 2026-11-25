@@ -33,6 +33,8 @@ import {
 } from "../retirement-session.js";
 import { runById } from "../run-index.js";
 import { hasRunTarget } from "../run-target.js";
+// C-730: moved next to session maintenance, which must not import this module.
+import { sharedStallRegistration } from "../session-maintenance.js";
 import {
   reviewDiscussionInstruction,
   reviewWakeBlocked,
@@ -49,9 +51,10 @@ import {
   unwrap,
 } from "./core.js";
 import { decisionFollowupBlocked } from "./decision-followup.js";
+import { hostOpsActionWaitStatus } from "./host-ops-attached-wait.js";
 import { cancelRunDispatch, queueRunInDraft, settingsValid } from "./launch.js";
 import { projectPreferences } from "./preferences.js";
-import { stoppedByHuman } from "./stop.js";
+import { stoppedByHuman } from "./stop-state.js";
 
 const unfinished = (r: Run) =>
   !["completed", "failed", "cancelled"].includes(r.status);
@@ -160,7 +163,7 @@ export function retirementStallHandoff(
     reviewWakeBlocked(state, trigger, item.id) ||
     (!(
       item.status === "waiting_decision" &&
-      reviewDiscussionInstruction(item, trigger, state.decisions)
+      reviewDiscussionInstruction(item, trigger, state)
     ) &&
       !["in_progress", "ready", "todo", "changes_requested"].includes(
         item.status,
@@ -173,21 +176,6 @@ export function retirementStallHandoff(
     queue_id: queue.id,
     ...(h.observe_only ? { observe_only: true } : {}),
   };
-}
-
-export function sharedStallRegistration(state: CommandState, a: Assignment) {
-  const ref = a.runtime_ref;
-  return state.assignments.some(
-    (other) =>
-      other.id !== a.id &&
-      other.status !== "released" &&
-      other.machine_id === a.machine_id &&
-      ((!!a.worktree_path && other.worktree_path === a.worktree_path) ||
-        (!!ref &&
-          other.runtime_ref?.runtime_machine === ref.runtime_machine &&
-          (other.runtime_ref.terminal_ref === ref.terminal_ref ||
-            other.runtime_ref.agent_name === ref.agent_name))),
-  );
 }
 
 export interface HostOpsActionParams {
@@ -293,7 +281,7 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
         reviewDiscussionInstruction(
           wait,
           eventById(d.state.events, p.review_trigger_id),
-          d.state.decisions,
+          d.state,
         )),
     "illegal_transition",
     "审核正在等待拍板，不能重启",
@@ -410,6 +398,11 @@ export function beginHostOpsAction(
 export function beginHostOpsActionInDraft(
   d: CommandDraft,
   p: HostOpsActionParams,
+  options: {
+    /** C-669: the system's own stalled-patrol restart may follow its earlier
+     * attempts on this incident when each was withdrawn before any signal. */
+    readonly retry_withdrawn?: boolean;
+  } = {},
 ) {
   const state = d.state;
   ensure(
@@ -462,13 +455,25 @@ export function beginHostOpsActionInDraft(
         .filter((e) => e.actor.kind === "system")
         .map((e) => (e.payload as { action_id?: string }).action_id),
     ]);
+    const withdrawnBeforeSignal = new Set(
+      eventsOfType(state.events, "host_ops_action_finished")
+        .filter(
+          (e) =>
+            (e.payload as { result?: string }).result ===
+            "withdrawn_stall_changed",
+        )
+        .map((e) => (e.payload as { action_id?: string }).action_id),
+    );
     ensure(
       !eventsOfType(state.events, "host_ops_action_taken").some((e) => {
-        // Only Ops may take it over; the system never retries its own attempt.
+        // Ops may take it over. The system retries its own attempt only on
+        // the explicit stalled-patrol entry, and only an unsignalled withdrawal.
         if (
-          d.actor.kind !== "system" &&
           e.actor.kind === "system" &&
-          withdrawnUnsignalled.has(e.id)
+          (d.actor.kind !== "system"
+            ? withdrawnUnsignalled.has(e.id)
+            : options.retry_withdrawn === true &&
+              withdrawnBeforeSignal.has(e.id))
         )
           return false;
         const prior = e.payload as {
@@ -673,8 +678,7 @@ export function finishHostOpsAction(
     if (
       action.tool !== "host_ops_cancel_run" &&
       (!action.dispatch_stall_id || currentStall) &&
-      (!wait ||
-        reviewDiscussionInstruction(wait, trigger, d.state.decisions)) &&
+      (!wait || reviewDiscussionInstruction(wait, trigger, d.state)) &&
       a.status !== "released" &&
       hasRunTarget(a, d.state) &&
       (!card || (!card.hold && !["done", "cancelled"].includes(card.status))) &&
@@ -828,14 +832,8 @@ export function hostOpsReadDiagnostics(state: CommandState, actor: Actor) {
         action_id: a.action_id,
         tool: a.tool,
         target_id: a.target_id,
-        status_reason:
-          (
-            state.events.findLast(
-              (e) =>
-                e.type === "host_ops_action_deferred" &&
-                (e.payload as { action_id: string }).action_id === a.action_id,
-            )?.payload as { reason?: string } | undefined
-          )?.reason ?? "pending",
+        // C-678: an attached human's wait names when the connection began.
+        ...hostOpsActionWaitStatus(state.events, a.action_id),
       })),
     };
   });
@@ -1040,6 +1038,12 @@ export function requestExitConfirmationInDraft(
 }
 
 /** Evidence changed before a stall recovery touched the terminal. Drop only this intent; never release a stop already in flight. */
+/** C-680: the upstream diagnosis that withdrew an automatic recovery. */
+export interface WithdrawnRecoveryDiagnosis {
+  readonly cause: string;
+  readonly action: string;
+  readonly evidence: readonly string[];
+}
 export function withdrawUnstartedStallRestart(
   state: CommandState,
   actor: Actor,
@@ -1050,6 +1054,8 @@ export function withdrawUnstartedStallRestart(
    * A later receipt can stand for the incident only after earlier attempts
    * are positively known not to have written one. */
   backupRecorded?: boolean,
+  /** C-680: the diagnosis that actually held the stop, as recorded facts. */
+  blockedBy?: WithdrawnRecoveryDiagnosis,
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
     const action = pendingHostOpsActions(state.events).find(
@@ -1075,6 +1081,15 @@ export function withdrawUnstartedStallRestart(
       ...(backupRecorded === undefined
         ? {}
         : { backup_recorded: backupRecorded }),
+      ...(blockedBy
+        ? {
+            blocked_by: {
+              cause: blockedBy.cause,
+              action: blockedBy.action,
+              evidence: [...blockedBy.evidence],
+            },
+          }
+        : {}),
       body: "派发积压、终端或工作区证据已改变；未停止旧会话，请 PM 核对。",
     });
   });

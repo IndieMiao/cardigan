@@ -1,4 +1,4 @@
-import { updateWorkItem } from "@cardigan/domain";
+import { postComment, updateWorkItem } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { command } from "../../domain/src/commands/core.js";
 import {
@@ -137,8 +137,8 @@ test.each([false, true])(
   },
 );
 
-test("B6: the third consecutive rejection routes one PM decision and suppresses author loops", async () => {
-  const { f, review } = flowReviewFixture(null);
+test("C-610: the third consecutive rejection wakes only the author for alignment; a dispute routes one PM decision", async () => {
+  const { f, review, dispute } = flowReviewFixture(null);
   const { work_item_id: _work, ...base } = assignment(900, "pm");
   f.commit({
     ok: true,
@@ -161,10 +161,122 @@ test("B6: the third consecutive rejection routes one PM decision and suppresses 
     f.state.events.findLast((e) => e.type === "review_submitted"),
   );
   expect(routeEvent({ event, snapshot: f.state }).notifications).toEqual([]);
+  const opened = required(
+    f.state.events.findLast((e) => e.type === "instruction_issued"),
+  );
+  expect(
+    routeEvent({ event: opened, snapshot: f.state }).notifications,
+  ).toEqual([
+    expect.objectContaining({
+      recipient: { kind: "assignment", assignment_id: f.coder.id },
+      kind: "instruction",
+    }),
+  ]);
+  expect(f.state.events.some((e) => e.type === "decision_requested")).toBe(
+    false,
+  );
+  dispute();
   const wait = required(
     f.state.events.findLast((e) => e.type === "decision_requested"),
   );
   expect(routeEvent({ event: wait, snapshot: f.state }).notifications).toEqual([
     expect.objectContaining({ recipient: { kind: "pm_ops" } }),
   ]);
+});
+
+test.each([false, true])(
+  "C-610: an agreed alignment wakes the verifier for a waiting delivery, otherwise the author (redelivered=%s)",
+  async (redelivered) => {
+    const { f, review } = flowReviewFixture(null);
+    for (let n = 0; n < 3; n++)
+      review(await f.deliver("code", String(n + 1).repeat(40)));
+    const verifier = required(f.reviewer.work_item_id);
+    f.start(f.coder);
+    const proposal = required(
+      f.commit(
+        postComment(
+          f.state,
+          f.actor(f.coder),
+          {
+            card_id: f.card.id,
+            body: "不变量",
+            review_alignment: {
+              work_item_id: verifier,
+              step: "propose",
+              invariants: ["保存成功后重新读取得到新值"],
+            },
+          },
+          f.io,
+        ),
+      ),
+    );
+    if (redelivered) await f.deliver("code", "4".repeat(40));
+    f.commit(
+      postComment(
+        f.state,
+        f.actor(f.reviewer),
+        {
+          card_id: f.card.id,
+          body: "同意",
+          reply_to: proposal.id,
+          review_alignment: { work_item_id: verifier, step: "confirm" },
+        },
+        f.io,
+      ),
+    );
+    const agreed = required(
+      f.state.events.findLast((e) => e.type === "review_alignment_agreed"),
+    );
+    expect(
+      routeEvent({ event: agreed, snapshot: f.state }).notifications,
+    ).toEqual([
+      expect.objectContaining({
+        recipient: {
+          kind: "assignment",
+          assignment_id: redelivered ? f.reviewer.id : f.coder.id,
+        },
+        run_kind: redelivered ? "decision_resumed" : "rework",
+      }),
+    ]);
+  },
+);
+
+test("C-610: a merged card hands its review follow-ups to PM Ops as a card draft", async () => {
+  const { f } = flowReviewFixture(null);
+  const v = await f.deliver();
+  f.review(v, [
+    {
+      severity: "minor",
+      impact: "functional",
+      must_fix: true,
+      pre_existing: false,
+      description: "建议补一条重试指标",
+    },
+  ]);
+  const merged = {
+    id: f.io.ids.nextEventId(),
+    card_id: f.card.id,
+    seq: (f.state.events.at(-1)?.seq ?? 0) + 1,
+    type: "card_merged",
+    actor: { kind: "system" as const, project_id: f.state.project_id },
+    payload: {},
+    created_at: "2026-11-23T00:00:00.000Z",
+  };
+  expect(
+    routeEvent({ event: merged, snapshot: f.state }).notifications,
+  ).toEqual([
+    expect.objectContaining({
+      recipient: { kind: "pm_ops" },
+      kind: "card",
+      summary: expect.stringContaining("get_card.follow_up_draft"),
+    }),
+  ]);
+  const clean = flowReviewFixture(null).f;
+  clean.review(await clean.deliver());
+  expect(
+    routeEvent({
+      event: { ...merged, card_id: clean.card.id },
+      snapshot: clean.state,
+    }).notifications,
+  ).toEqual([]);
 });

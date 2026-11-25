@@ -280,6 +280,10 @@ export function parseRuntimeWorkers(
   }
 }
 
+const parsedWorkers = new Map<
+  string,
+  { text: string; workers: readonly RuntimeWorker[] }
+>();
 /** Missing is compatible; malformed, linked or non-private input never falls back. */
 export function loadRuntimeWorkers(
   dataDir: string,
@@ -304,7 +308,22 @@ export function loadRuntimeWorkers(
       stat.uid !== process.getuid?.()
     )
       return invalid();
-    return parseRuntimeWorkers(parse(readFileSync(fd, "utf8")), dataDir);
+    // C-670: the targets router reloads this on nearly every runtime call.
+    // Permission checks and the read stay per call; only identical content
+    // for the same data directory reuses the parsed (frozen) result.
+    const text = readFileSync(fd, "utf8");
+    const key = `${file}\u0000${dataDir}`;
+    const cached = parsedWorkers.get(key);
+    if (cached?.text === text) return cached.workers;
+    const workers = Object.freeze(parseRuntimeWorkers(parse(text), dataDir));
+    parsedWorkers.delete(key);
+    parsedWorkers.set(key, { text, workers });
+    // Few real files exist; keep the cache bounded (oldest entry first).
+    for (const old of parsedWorkers.keys()) {
+      if (parsedWorkers.size <= 8) break;
+      parsedWorkers.delete(old);
+    }
+    return workers;
   } catch (error) {
     if (error instanceof WorkerMcpError) throw error;
     return invalid();

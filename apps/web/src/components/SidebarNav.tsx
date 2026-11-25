@@ -54,6 +54,10 @@ const iconPaths = {
       <path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4M12 16h.01" />
     </>
   ),
+  releaseNotes: <path d="M6 3h9l4 4v14H6V3ZM14 3v5h5M9 12h6M9 16h6" />,
+  folder: (
+    <path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6Z" />
+  ),
   logout: <path d="M10 4H4v16h6M9 12h12m-4-4 4 4-4 4" />,
   menu: <path d="M4 6h16M4 12h16M4 18h16" />,
   close: <path d="m6 6 12 12M6 18 18 6" />,
@@ -81,14 +85,18 @@ type ViewKind =
   | "activity"
   | "decision-history"
   | "snapshot"
+  | "release-notes"
   | "settings"
-  | "help";
+  | "help"
+  | "shared-files";
 
 const observeLinks: readonly (readonly [ViewKind, string, NavIconName])[] = [
   ["execution", "执行视图", "execution"],
   ["activity", "项目动态", "activity"],
   ["decision-history", "拍板记录", "decisions"],
   ["snapshot", "项目快照", "snapshot"],
+  // C-713: each project's release notes, one page per project.
+  ["release-notes", "发版说明", "releaseNotes"],
 ];
 
 export interface SidebarNavProps {
@@ -173,6 +181,7 @@ export function SidebarNav({
       <div className="sidebar-footer">
         {feedback}
         <nav className="nav-links nav-tools" aria-label="工具">
+          {link("shared-files", "共享文件", "folder")}
           {link("settings", "设置", "settings")}
           {link("help", "帮助", "help")}
           <button

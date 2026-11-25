@@ -5,9 +5,11 @@ import {
   DeploymentController,
   DeploymentDiskMonitor,
   DeploymentServerUnavailable,
+  HostMemoryPressureMonitor,
   loadDeploymentConfig,
   NodeDeploymentDriver,
   RunCapacityDeferred,
+  syncProjectOverlayRoles,
   upgradeDeployedRoles,
   writeDeploymentNotice,
 } from "@cardigan/host";
@@ -86,14 +88,19 @@ export async function runSelfDeployCommand(
         )
       )
         throw invalid();
-      let profiles: ReadonlySet<string> = new Set();
-      if (changed.length) {
+      // Read only when a role version is about to be written: overlay roles
+      // can follow the pack even when the supervisor lists no change.
+      let loaded: ReadonlySet<string> | undefined;
+      const profiles = (): ReadonlySet<string> => {
+        if (loaded) return loaded;
         try {
-          profiles = validProfileNames(cliLaunchPaths(io));
+          loaded = validProfileNames(cliLaunchPaths(io));
         } catch {
           io.stderr("启动配置未通过校验，不发布依赖该配置的新角色版本");
+          loaded = new Set();
         }
-      }
+        return loaded;
+      };
       const assignment = upgradeDeployedRoles(
         store,
         "cardigan",
@@ -101,6 +108,17 @@ export async function runSelfDeployCommand(
         previous as Record<string, string>,
         profiles,
       );
+      // C-613: project-customised roles elsewhere follow the same pack.
+      for (const other of store.listProjects()) {
+        if (other.id === "cardigan") continue;
+        try {
+          syncProjectOverlayRoles(store, other.id, { profiles });
+        } catch {
+          io.stderr(
+            `项目 ${other.id} 的定制角色未能随默认包升级，下次部署重试`,
+          );
+        }
+      }
       if (
         assignment &&
         store.uow.read(
@@ -138,6 +156,17 @@ export async function runSelfDeployCommand(
       dataDir,
       config.disk_low_percent,
     );
+    const pressure =
+      process.platform === "linux"
+        ? new HostMemoryPressureMonitor(
+            store,
+            { tmp: config.tmp_high_percent, swap: config.swap_high_percent },
+            undefined,
+            // C-656: start after a minute so a supervisor that exits at once
+            // (or a short-lived test) never scans the host's /tmp.
+            Date.now() + 60_000,
+          )
+        : undefined;
     const stop = new AbortController();
     const signal = () => stop.abort();
     io.signals.on("SIGTERM", signal);
@@ -148,6 +177,11 @@ export async function runSelfDeployCommand(
           await disk.poll();
         } catch {
           io.stderr("本次磁盘空间检查未完成，保留上次观测状态");
+        }
+        try {
+          await pressure?.poll();
+        } catch {
+          io.stderr("本次 /tmp 与 swap 用量检查未完成，保留上次观测状态");
         }
         try {
           await controller.tick();

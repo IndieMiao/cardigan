@@ -15,6 +15,7 @@ import {
   mergePlan,
   parseId,
   prepareMergePlan,
+  qualifyId,
   recheckMerge,
   recordDecision,
   requestMerge,
@@ -404,12 +405,15 @@ function describe(
     )
     .at(-1);
   const plan = mergePlan(state, card.id);
+  // C-674: full numbers (`CDG-C-34`) so the output reads the same anywhere.
+  const code = store.projectCode(project_id);
+  const full = (id: string) => qualifyId(code, id);
   const lines = [
-    `${card.id} ${card.status} merge_policy=${card.merge_policy ?? "confirm"} base=${card.base_branch ?? "无"} — ${card.title}`,
+    `${full(card.id)} ${card.status} merge_policy=${card.merge_policy ?? "confirm"} base=${card.base_branch ?? "无"} — ${card.title}`,
     `  confirmation: ${
       confirmation === undefined
         ? "none"
-        : `${confirmation.id} ${confirmation.status}${
+        : `${full(confirmation.id)} ${confirmation.status}${
             confirmation.resolution === undefined
               ? ""
               : ` (${confirmation.resolution.option})`
@@ -439,7 +443,7 @@ function describe(
   );
   for (const delivery of accepted)
     lines.push(
-      `  delivery: ${delivery.id} ${delivery.work_item_id} ${delivery.subject.kind}=${delivery.subject.value}`,
+      `  delivery: ${full(delivery.id)} ${full(delivery.work_item_id)} ${delivery.subject.kind}=${delivery.subject.value}`,
     );
   lines.push(...preMergeLines(preMergeChecksOf(state, card)));
   for (const blocker of mergeCheckBlockers(state, card.id)) {

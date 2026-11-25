@@ -20,6 +20,8 @@ import {
   beginAutomaticContextRestart,
   beginStalledPatrolRestart,
   beginSystemTurnRestart,
+  nudgeStalledPatrol,
+  patrolNudges,
   recordAutomaticContextRestartResult,
   systemTurnOwner,
 } from "./host-ops-context-restart.js";
@@ -647,6 +649,217 @@ test("only the system may replace a stalled patrol, once per cause and never wit
       (c) => c.collection === "assignments" && c.entity.id === f.ops.id,
     )?.entity,
   ).not.toHaveProperty("session_ref");
+});
+
+test("C-669: a stalled patrol restart withdrawn before any signal may be retried by the system only", () => {
+  const f = setup();
+  const params = { assignment_id: f.ops.id, cause_id: "pending-1", snapshot };
+  const begin = (
+    state: CommandState,
+    who: Parameters<typeof beginStalledPatrolRestart>[1] = system,
+  ) => beginStalledPatrolRestart(state, who, params, f.io);
+  const first = value(begin(f.state));
+  const pending = apply(f.state, first);
+  const withdrawn = apply(
+    pending,
+    value(
+      withdrawUnstartedStallRestart(
+        pending,
+        system,
+        first.data.action_id,
+        f.io,
+        "identity_changed",
+      ),
+    ),
+  );
+  expect(pendingHostOpsActions(withdrawn.events)).toHaveLength(0);
+  // Only the system entry retries; an agent or human still cannot use it.
+  expect(begin(withdrawn, human).ok).toBe(false);
+  expect(begin(withdrawn, actor(10, "host_ops")).ok).toBe(false);
+  const retry = value(begin(withdrawn));
+  expect(retry.events).toMatchObject([
+    {
+      type: "host_ops_action_taken",
+      payload: { assignment_id: f.ops.id, dispatch_stall_id: "pending-1" },
+    },
+  ]);
+  // One executor: never beside the retry's own pending intent.
+  expect(begin(apply(withdrawn, retry)).ok).toBe(false);
+  // A started stop is not withdrawn: its incident is never retried.
+  const stopping: CommandState = {
+    ...pending,
+    events: [
+      ...pending.events,
+      {
+        id: f.io.ids.nextEventId(),
+        seq: 99,
+        type: "host_ops_action_deferred",
+        actor: system,
+        created_at: now,
+        payload: {
+          action_id: first.data.action_id,
+          reason: "automatic_context_stop_started",
+        },
+      },
+    ],
+  };
+  expect(
+    value(
+      withdrawUnstartedStallRestart(
+        stopping,
+        system,
+        first.data.action_id,
+        f.io,
+        "identity_changed",
+      ),
+    ).events,
+  ).toEqual([]);
+  // Any other outcome of the earlier attempt still consumes the incident.
+  const failed: CommandState = {
+    ...pending,
+    events: [
+      ...pending.events,
+      {
+        id: f.io.ids.nextEventId(),
+        seq: 100,
+        type: "host_ops_action_finished",
+        actor: system,
+        created_at: now,
+        payload: {
+          action_id: first.data.action_id,
+          assignment_id: f.ops.id,
+          result: "failed",
+        },
+      },
+    ],
+  };
+  expect(pendingHostOpsActions(failed.events)).toHaveLength(0);
+  expect(begin(failed).ok).toBe(false);
+});
+
+test("C-680: a withdrawal records the diagnosis that held it", () => {
+  const f = setup();
+  const params = { assignment_id: f.ops.id, cause_id: "pending-1", snapshot };
+  const first = value(beginStalledPatrolRestart(f.state, system, params, f.io));
+  const pending = apply(f.state, first);
+  const withdrawn = value(
+    withdrawUnstartedStallRestart(
+      pending,
+      system,
+      first.data.action_id,
+      f.io,
+      "agent_busy",
+      false,
+      { cause: "agent_busy", action: "none", evidence: ["harness_working"] },
+    ),
+  );
+  expect(withdrawn.events).toMatchObject([
+    {
+      type: "host_ops_action_finished",
+      payload: {
+        result: "withdrawn_stall_changed",
+        reason: "agent_busy",
+        blocked_by: {
+          cause: "agent_busy",
+          action: "none",
+          evidence: ["harness_working"],
+        },
+      },
+    },
+  ]);
+  // Without a diagnosis the payload stays as before.
+  expect(
+    value(
+      withdrawUnstartedStallRestart(
+        pending,
+        system,
+        first.data.action_id,
+        f.io,
+        "identity_changed",
+      ),
+    ).events[0]?.payload,
+  ).not.toHaveProperty("blocked_by");
+});
+
+test("C-680: only the system queues a Run in the patrol's live session, never beside unfinished work, a stop or an operation", () => {
+  const f = setup();
+  const params = {
+    assignment_id: f.ops.id,
+    cause_id: "pending-1",
+    snapshot,
+    attempt: 1,
+  };
+  const nudge = (
+    state: CommandState,
+    who: Parameters<typeof nudgeStalledPatrol>[1] = system,
+    p: Parameters<typeof nudgeStalledPatrol>[2] = params,
+  ) => nudgeStalledPatrol(state, who, p, f.io);
+  expect(nudge(f.state, human).ok).toBe(false);
+  expect(nudge(f.state, actor(10, "host_ops")).ok).toBe(false);
+  expect(nudge(f.state, system, { ...params, attempt: 0 }).ok).toBe(false);
+  expect(nudge(f.state, system, { ...params, cause_id: "" }).ok).toBe(false);
+  // No live session to wake: never a launch in disguise.
+  expect(
+    nudge({
+      ...f.state,
+      assignments: f.state.assignments.map((a) =>
+        a.id === f.ops.id ? { ...a, runtime_ref: null } : a,
+      ),
+    }).ok,
+  ).toBe(false);
+  const busy = apply(
+    f.state,
+    value(
+      queueRun(f.state, system, { assignment_id: f.ops.id, ...snapshot }, f.io),
+    ),
+  );
+  expect(nudge(busy).ok).toBe(false);
+  const stopped: CommandState = {
+    ...f.state,
+    events: [
+      ...f.state.events,
+      {
+        id: f.io.ids.nextEventId(),
+        seq: 98,
+        type: "assignment_stopped",
+        actor: human,
+        created_at: now,
+        payload: { assignment_id: f.ops.id, hold: true },
+      },
+    ],
+  };
+  expect(nudge(stopped).ok).toBe(false);
+  const operating = apply(
+    f.state,
+    value(beginStalledPatrolRestart(f.state, system, params, f.io)),
+  );
+  expect(nudge(operating).ok).toBe(false);
+  const effect = value(nudge(f.state));
+  expect(effect.data).toMatchObject({
+    assignment_id: f.ops.id,
+    status: "queued",
+    kind: "initial",
+  });
+  const nudged = apply(f.state, effect);
+  expect(patrolNudges(nudged, f.ops.id, "pending-1")).toMatchObject([
+    {
+      type: "dispatch_stall_nudged",
+      payload: {
+        assignment_id: f.ops.id,
+        dispatch_stall_id: "pending-1",
+        run_id: effect.data.id,
+        attempt: 1,
+      },
+    },
+  ]);
+  expect(patrolNudges(nudged, f.ops.id, "other")).toEqual([]);
+  // The session and its reference are untouched.
+  expect(nudged.assignments.find((a) => a.id === f.ops.id)).toMatchObject({
+    runtime_ref: ref,
+    session_ref: "current",
+  });
+  // One Run at a time.
+  expect(nudge(nudged, system, { ...params, attempt: 2 }).ok).toBe(false);
 });
 
 test.each(["card", "project"] as const)(

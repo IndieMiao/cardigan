@@ -21,7 +21,11 @@ import type {
   Role,
   WorkItem,
 } from "@cardigan/domain";
-import { parseId } from "@cardigan/domain";
+import {
+  effectiveStartPoint,
+  normalizeStartPoint,
+  parseId,
+} from "@cardigan/domain";
 
 export {
   attributeReviewChanges,
@@ -59,6 +63,7 @@ export {
   type RepositoryLock,
   type RepositoryLockKey,
   type RepositoryLockOptions,
+  type RepositoryLockSample,
   RepositoryLockTimeoutError,
   repositoryLock,
 } from "./lock.js";
@@ -79,6 +84,8 @@ export interface WorktreePlacement {
   readonly base_sha: string;
   /** Current remote baseline; independent of the Assignment's original base. */
   readonly baseline?: { readonly ref: string; readonly sha: string };
+  /** C-728: the no-merge start point checked out detached, and its commit. */
+  readonly start_point?: { readonly point: string; readonly sha: string };
   /** Present only when a new writable worktree synchronizes its baseline. */
   readonly source_sync?: SourceSync;
 }
@@ -300,11 +307,22 @@ export class GitWorktreeService {
       !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/iu.test(input.target_sha ?? "")
     )
       throw new Error("Readonly worktree requires a delivery commit SHA");
+    // C-728: a no-merge card's producer checks out its start point detached.
+    // An Assignment that already owns a branch keeps it.
+    const requestedStart =
+      readonly || a.branch ? undefined : effectiveStartPoint(card, item);
+    const start =
+      requestedStart === undefined
+        ? undefined
+        : normalizeStartPoint(requestedStart);
+    if (requestedStart !== undefined && start === undefined)
+      throw new Error("Invalid start point");
     const path = join(this.worktrees, input.project_id, a.id),
       repository = join(this.repositories, input.project_id);
-    const branch = readonly
-      ? undefined
-      : `agent/${card.id}/${item.id}${a.recovery ? `-${a.id}` : ""}`;
+    const branch =
+      readonly || start
+        ? undefined
+        : `agent/${card.id}/${item.id}${a.recovery ? `-${a.id}` : ""}`;
     const baselineRef = `origin/${card.base_branch}`;
     if (a.worktree_path && resolve(a.worktree_path) !== path)
       throw new Error("Assignment worktree root changed");
@@ -316,7 +334,12 @@ export class GitWorktreeService {
       base_branch: card.base_branch,
     };
     return this.lock(
-      { machine_id: this.machineId, project_id: input.project_id, repository },
+      {
+        machine_id: this.machineId,
+        project_id: input.project_id,
+        repository,
+        operation: "worktree.ensure",
+      },
       () =>
         this.placeWorktree(input, project, {
           path,
@@ -324,6 +347,7 @@ export class GitWorktreeService {
           readonly,
           baselineRef,
           ...(branch ? { branch } : {}),
+          ...(start ? { start } : {}),
         }),
     );
   }
@@ -337,9 +361,10 @@ export class GitWorktreeService {
       readonly readonly: boolean;
       readonly baselineRef: string;
       readonly branch?: string;
+      readonly start?: string;
     },
   ): Promise<WorktreePlacement> {
-    const { path, repository, readonly, baselineRef, branch } = target,
+    const { path, repository, readonly, baselineRef, branch, start } = target,
       a = input.assignment,
       card = input.card as Card;
     // The card's branch may exist only in the source so far.
@@ -354,6 +379,13 @@ export class GitWorktreeService {
         throw new Error(
           "Existing worktree has a different branch or review target",
         );
+      // A start-point checkout is placed once; later Runs reuse it untouched.
+      if (start)
+        return {
+          worktree_path: path,
+          base_sha: a.base_sha ?? existing.head,
+          start_point: { point: start, sha: a.base_sha ?? existing.head },
+        };
       let artifactBaseline: string | undefined;
       if (
         readonly &&
@@ -389,6 +421,19 @@ export class GitWorktreeService {
         ...(branch ? { branch } : {}),
         base_sha: a.base_sha ?? existing.head,
         ...(baseline ? { baseline } : {}),
+      };
+    }
+    if (start) {
+      const sha = await this.central.pinStartPoint(project, start, a.id);
+      await this.git.fetch(repository, central);
+      const base_sha = await this.git.resolveCommit(repository, sha);
+      if (base_sha.toLowerCase() !== sha.toLowerCase())
+        throw new Error("Start point commit did not reach the base clone");
+      await this.git.addWorktree(repository, path, base_sha);
+      return {
+        worktree_path: path,
+        base_sha,
+        start_point: { point: start, sha: base_sha },
       };
     }
     const recovery =
@@ -499,7 +544,12 @@ export class GitWorktreeService {
         base_branch: card.base_branch,
       };
     return this.lock(
-      { machine_id: this.machineId, project_id: input.project_id, repository },
+      {
+        machine_id: this.machineId,
+        project_id: input.project_id,
+        repository,
+        operation: "build.ensure",
+      },
       async () => {
         const central = await this.central.ensureCentral(project);
         await this.git.ensureClone(central, repository);
@@ -559,6 +609,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project.project_id,
         repository,
+        operation: "build.remove",
       },
       async () => {
         if (!input.idle()) return { status: "in_use" };
@@ -683,6 +734,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project.project_id,
         repository,
+        operation: "worktree.diff",
       },
       async () => {
         const summary = await this.changeSummary(
@@ -714,6 +766,7 @@ export class GitWorktreeService {
         machine_id: this.machineId,
         project_id: input.project.project_id,
         repository: worktree.repository,
+        operation: "worktree.remove",
       },
       () => this.removeLocked(input, worktree),
     );
@@ -949,4 +1002,4 @@ export class GitWorktreeService {
   }
 }
 
-export { GitDeliveryVerifier } from "./delivery.js";
+export { GitDeliveryVerifier, type StagedDeliverySource } from "./delivery.js";

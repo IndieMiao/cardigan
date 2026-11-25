@@ -133,6 +133,19 @@ export interface GitCentralPort {
     /** Polling only: skip transfer when all advertised refs already match. */
     skipIfUnchanged?: boolean,
   ): Promise<void>;
+  /**
+   * C-642: fetch one branch through a private stage and import only its tip
+   * commit's objects. No ref (including FETCH_HEAD) is written in `repository`;
+   * the caller publishes the returned commit with a ref write of its own.
+   * A fetched branch without a tip, or whose tip is not a commit, rejects with
+   * `CheckHeadFailure` (`branch_missing` / `object_mismatch`).
+   */
+  fetchBranchTip(
+    repository: string,
+    source: GitRepositoryAddress,
+    branch: string,
+    uploadPack?: string,
+  ): Promise<string>;
   /** Every backup writer, including worktree cleanup, confirms refs and generations together. */
   prepareBranchBackup(
     repository: string,
@@ -151,6 +164,12 @@ export interface GitCentralPort {
     ancestor: string,
     descendant: string,
   ): Promise<boolean>;
+  /** Every best common ancestor of two commits (`merge-base --all`); empty when unrelated. */
+  mergeBases?(
+    repository: string,
+    left: string,
+    right: string,
+  ): Promise<readonly string[]>;
   compareAndSwapRef(
     repository: string,
     ref: string,

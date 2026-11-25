@@ -25,6 +25,7 @@ import {
   type ProjectSummary,
   type SessionInfo,
 } from "./api.js";
+import { capturePairingLink, takePairingCode } from "./pairing-link.js";
 import { changeControl } from "./testing/controls.js";
 import { fakeClient as baseClient, cardDetail } from "./testing/fixtures.js";
 
@@ -209,6 +210,31 @@ test("a successful login reloads the session and shows the board", async () => {
 
   expect(await screen.findByText("准备发布")).toBeTruthy();
   expect(passwords).toEqual(["correct horse battery"]);
+});
+
+test("C-707: a pairing link is cleared before login and then opens the machine panel", async () => {
+  window.history.replaceState(null, "", "/#/pair/ABCD-EFGH");
+  capturePairingLink();
+  expect(window.location.hash).toBe("");
+  let authenticated = false;
+  const client = fakeClient({
+    session: async () => ({ authenticated, password_configured: true }),
+    login: async () => {
+      authenticated = true;
+    },
+  });
+  try {
+    render(<App client={client} />);
+    changeControl(await screen.findByLabelText("密码"), {
+      target: { value: "correct horse battery" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    await waitFor(() =>
+      expect(window.location.hash).toBe("#/p/p-1/settings?tab=machines"),
+    );
+  } finally {
+    takePairingCode();
+  }
 });
 
 test("a broken connection offers a retry instead of a blank page", async () => {

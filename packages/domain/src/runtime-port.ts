@@ -18,6 +18,9 @@ export interface RuntimeObservation {
   readonly agent: "working" | "blocked" | "done" | "idle" | "error" | "unknown";
   /** Runtime event sequence, never a local timestamp. */
   readonly observed_seq: number;
+  /** C-667: the terminal replaces a lost program with a shell (hc --keep), so
+   * `alive` does not show that the launched CLI is still running. */
+  readonly kept?: true;
 }
 /** Both local and worker adapters must repeat this observation at the send slot. */
 export function idleWakeGuard(
@@ -80,6 +83,14 @@ export interface RuntimeInteractionReader {
     identity: { project_id: string; assignment_id: string; harness: string },
   ): Promise<RuntimeResult<import("./interaction.js").InteractionState>>;
 }
+/**
+ * C-626: hc can report no activity for these CLIs. For a system-ended turn the
+ * adapter may then treat a live terminal as idle only while this exact bound
+ * CLI shows its own empty editor and idle footer (the dispatcher's prompt
+ * observation). A working, blocked or error status never qualifies, and the
+ * terminal identity, generation and keep guards are unchanged.
+ */
+export type TurnIdlePrompt = PromptObservation;
 export interface RetirementIdentity {
   /** Host-enrolled native identity for this exact remote launch; never a stop capability. */
   readonly enrolled_process?: NonNullable<
@@ -99,8 +110,21 @@ export interface Runtime {
   /** Read-only. Only a finished terminal with this exact identity proves exit. */
   observe_retirement?(
     ref: RuntimeRef,
-    identity: RetirementIdentity & { readonly system_finished_turn?: true },
+    identity: RetirementIdentity & {
+      readonly system_finished_turn?: true;
+      /** System turns only: see TurnIdlePrompt. */
+      readonly idle_prompt?: TurnIdlePrompt;
+    },
   ): Promise<RuntimeResult<RuntimeObservation["process"]>>;
+  /** C-667/C-672: read-only. True only when this exact terminal is still
+   * live but no longer runs its launched CLI: a kept terminal with an idle
+   * replacement shell while the CLI's native identity and whole process group
+   * are gone, or a plain terminal whose launcher outlived the CLI's native
+   * identity. Never a stop capability by itself. */
+  observe_agent_exit?(
+    ref: RuntimeRef,
+    owner: RetirementIdentity,
+  ): Promise<RuntimeResult<boolean>>;
   /** Read-only local kernel check for an already queued Run whose core is gone.
    * A missing socket alone never proves the original terminal process exited. */
   confirm_local_exit?(
@@ -122,7 +146,11 @@ export interface Runtime {
       readonly terminate_ms: number;
       readonly before_signal: () => boolean;
     } & (
-        | { readonly system_finished_turn?: never }
+        | {
+            readonly system_finished_turn?: never;
+            /** Report the probed PID and the signals sent on exit. */
+            readonly report_signals?: true;
+          }
         | {
             /** One owner-bound TERM; recheck workspace inside the signal slot,
              * then terminal identity/activity, then synchronous authority. */
@@ -133,6 +161,8 @@ export interface Runtime {
               >["process"]
             >;
             readonly workspace_preflight: () => Promise<boolean>;
+            /** See TurnIdlePrompt; rechecked inside the signal slot. */
+            readonly idle_prompt?: TurnIdlePrompt;
           }
       ),
   ): Promise<RuntimeResult<IdleRetirementResult>>;

@@ -37,7 +37,14 @@ export function feishuCard(
   return JSON.stringify({
     schema: "2.0",
     config: { update_multi: true, enable_forward: false },
-    header: { title: text(message.title) },
+    // C-674: lead with the full number (`SEN-C-34`) so chats spanning projects stay unambiguous.
+    header: {
+      title: text(
+        "ref" in message && message.ref
+          ? `${message.ref} ${message.title}`
+          : message.title,
+      ),
+    },
     body: {
       elements: [
         ...(options.length ? [form] : []),

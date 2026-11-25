@@ -87,6 +87,16 @@ export function parseProbeProfiles(text: string): ProbeProfiles {
 }
 /** A missing private file disables all probes. Invalid files fail closed. */
 export function loadProbeProfiles(path: string): ProbeProfiles {
+  const text = readPrivateConfig(path);
+  if (text === undefined) return {};
+  try {
+    return parseProbeProfiles(text);
+  } catch {
+    return invalid();
+  }
+}
+/** Host-only 0600 regular file owned by this account; undefined when absent. */
+export function readPrivateConfig(path: string): string | undefined {
   let fd: number;
   try {
     fd = openSync(
@@ -94,7 +104,7 @@ export function loadProbeProfiles(path: string): ProbeProfiles {
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     return invalid();
   }
   try {
@@ -107,7 +117,7 @@ export function loadProbeProfiles(path: string): ProbeProfiles {
       st.size > 65536
     )
       invalid();
-    return parseProbeProfiles(readFileSync(fd, "utf8"));
+    return readFileSync(fd, "utf8");
   } catch {
     return invalid();
   } finally {

@@ -107,15 +107,25 @@ const client = fakeClient({
         Object.assign(question, {
           resolution: { source: "answer", value: reply.answer },
         });
-    } else if (reply?.action === "accept_defaults") {
-      for (const question of group.questions)
+    } else if (
+      reply?.action === "accept_defaults" ||
+      reply?.action === "submit_answers"
+    ) {
+      const answers = new Map(
+        reply.action === "submit_answers"
+          ? reply.answers.map((a) => [a.number, a.answer])
+          : [],
+      );
+      group.questions.forEach((question, i) => {
+        const answer = answers.get(i + 1);
         if (!question.resolution)
           Object.assign(question, {
-            resolution: {
-              source: "accepted_default",
-              value: question.recommended,
-            },
+            resolution:
+              answer === undefined
+                ? { source: "accepted_default", value: question.recommended }
+                : { source: "answer", value: answer },
           });
+      });
     }
     seq += 1;
     extra.unshift(

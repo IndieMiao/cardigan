@@ -13,6 +13,7 @@ import type {
   StoreTransactionContext,
 } from "@cardigan/store";
 import { CheckExecutorSuspended } from "./checkout-deadline.js";
+import type { ExecutorHttpObservation } from "./executor-diagnostics.js";
 import { GithubExecutorError, type GithubRun } from "./github-client.js";
 import {
   GITHUB_POLL_DEFAULTS,
@@ -71,6 +72,8 @@ export interface GithubDispatchIntent {
   readonly discoveryDeadlineAt?: number;
   /** Unverified dispatch response ID; only a lookup hint until full binding. */
   readonly dispatchedRunId?: number;
+  /** C-681: redacted POST response evidence for a later dispatch_unknown diagnosis. */
+  readonly dispatchResponse?: ExecutorHttpObservation;
   /** Only the validated response ID permits ignoring the provider's run title. */
   readonly boundByDispatchId?: boolean;
   readonly externalRun?: ExternalGithubRun;
@@ -134,6 +137,7 @@ export function canFinishUndispatched(
     !intent.postOwner
   );
 }
+const DISPATCH_TYPES: ReadonlySet<string> = new Set(["github_check_dispatch"]);
 const projectedIntents = new WeakMap<
   readonly Event[],
   readonly GithubDispatchIntent[]
@@ -151,6 +155,46 @@ function intentsFrom(
       }
     result = [...latest.values()];
     projectedIntents.set(events, result);
+  }
+  return result;
+}
+type BatchChecks = ReadonlyMap<string, MergeCheckView>;
+const batchChecks = new WeakMap<readonly Event[], BatchChecks>();
+/**
+ * Project-level system stream (card_id = null). Prefer the transaction's
+ * append-only decoded cache; it shares immutable history, so callers only read.
+ */
+function systemEvents(
+  tx: {
+    events: Pick<ReadRepositories["events"], "listAfter" | "listStreams">;
+  },
+  project: ProjectId,
+): readonly Event[] {
+  const streams = tx.events.listStreams?.(project);
+  return streams
+    ? (streams.get("") ?? [])
+    : tx.events.listAfter(project, undefined, 0);
+}
+const batchKey = (attempt: string, completion: string) =>
+  `${attempt}\u0000${completion}`;
+/** Latest batch check per attempt/completion, projected once per system history. */
+function latestBatchChecks(events: readonly Event[]): BatchChecks {
+  let result = batchChecks.get(events);
+  if (!result) {
+    const latest = new Map<string, MergeCheckView>();
+    for (const e of events) {
+      if (e.actor.kind !== "system" || !e.type.startsWith("merge_batch_check_"))
+        continue;
+      const c = (e.payload as unknown as { check?: MergeCheckView } | null)
+        ?.check;
+      if (
+        typeof c?.attempt_id === "string" &&
+        typeof c.completion_id === "string"
+      )
+        latest.set(batchKey(c.attempt_id, c.completion_id), c);
+    }
+    result = latest;
+    batchChecks.set(events, result);
   }
   return result;
 }
@@ -257,9 +301,11 @@ export class GithubDispatchJournal {
     cards: Pick<StoreTransactionContext["cards"], "list">;
   }): GithubDispatchIntent[] {
     return this.store.listProjects().flatMap((project) => {
-      const streams = this.probeCard
+      const all = this.probeCard
         ? undefined
         : tx.events.listStreams?.(project.id);
+      // C-639: intents read only dispatch records; never decode whole streams.
+      const streams = all?.ofTypes ? all.ofTypes(DISPATCH_TYPES) : all;
       return tx.cards
         .list(project.id)
         .filter((card) => !this.probeCard || card.id === this.probeCard)
@@ -267,6 +313,29 @@ export class GithubDispatchJournal {
           streams
             ? structuredClone(intentsFrom(streams.get(card.id) ?? []))
             : this.current(tx, project.id, card.id),
+        );
+    });
+  }
+  /**
+   * C-634: executor of every unfinished intent, for counting only. It reads
+   * the shared per-stream projection instead of cloning each card's intents,
+   * so nothing it returns may reach a writer.
+   */
+  unfinishedExecutorsAt(tx: Parameters<GithubDispatchJournal["allAt"]>[0]) {
+    return this.store.listProjects().flatMap((project) => {
+      const all = this.probeCard
+        ? undefined
+        : tx.events.listStreams?.(project.id);
+      // C-639: same dispatch-only subset as `allAt`.
+      const streams = all?.ofTypes ? all.ofTypes(DISPATCH_TYPES) : all;
+      return tx.cards
+        .list(project.id)
+        .filter((card) => !this.probeCard || card.id === this.probeCard)
+        .flatMap((card) =>
+          (streams
+            ? intentsFrom(streams.get(card.id) ?? [])
+            : this.current(tx, project.id, card.id)
+          ).flatMap((intent) => (intent.finished ? [] : [intent.executor])),
         );
     });
   }
@@ -341,7 +410,7 @@ export class GithubDispatchJournal {
             : undefined;
         const batch =
           "batch_id" in check && check.batch_id
-            ? mergeBatches(tx.events.listAfter(project, undefined, 0)).find(
+            ? mergeBatches(systemEvents(tx, project)).find(
                 (b) => b.id === check.batch_id,
               )
             : undefined;
@@ -455,22 +524,14 @@ export class GithubDispatchJournal {
       tx.work_items.get(project, completion.work_item_id)?.card_id !== card.id
     )
       return undefined;
-    const batchCheck = tx.events
-      .listAfter(project, undefined, 0)
-      .filter(
-        (e) =>
-          e.actor.kind === "system" && e.type.startsWith("merge_batch_check_"),
-      )
-      .map((e) => (e.payload as unknown as { check: MergeCheckView }).check)
-      .findLast(
-        (c) =>
-          c?.attempt_id === intent.attempt && c.completion_id === completion.id,
-      );
+    const batchCheck = latestBatchChecks(systemEvents(tx, project)).get(
+      batchKey(intent.attempt, completion.id),
+    );
     if (batchCheck)
       return batchCheck.candidate_sha === candidate.sha &&
         batchCheck.executor?.type === "github" &&
         batchCheck.executor.name === intent.executor
-        ? batchCheck
+        ? structuredClone(batchCheck)
         : undefined;
     const check = latestMergeCheck(
       tx.events
@@ -511,6 +572,34 @@ export class GithubDispatchJournal {
       )
         throw new GithubExecutorError("security");
       if (!current.finished) this.save(tx, { ...current, finished: true });
+    });
+  }
+  /**
+   * C-611: a probe-stream request that ended before its run was bound. Mark
+   * the exact reservation abandoned so the shared absence proof can release
+   * it, or a later discovery binds only the original run. A reservation that
+   * never crossed publication is released at once.
+   */
+  abandonProbe(intent: GithubDispatchIntent, reason: string): void {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      if (!this.probeCard || !current || current.key !== intent.key)
+        throw new GithubExecutorError("security");
+      if (current.finished || current.abandoned || current.deleting) return;
+      const unpublished =
+        current.phase === "reserved" &&
+        !current.publisher &&
+        !current.dispatchedRunId &&
+        !current.externalRun &&
+        !current.identity;
+      this.save(tx, {
+        ...current,
+        abandoned: "attempt_finished",
+        abandonmentReason: reason,
+        ...(unpublished ? { finished: true } : {}),
+      });
     });
   }
   /** Fence under the same fresh transaction as eligibility checks. */
@@ -1050,6 +1139,7 @@ export class GithubDispatchJournal {
     intent: GithubDispatchIntent,
     id: number | undefined,
     at: number,
+    response?: ExecutorHttpObservation,
   ): void {
     this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
@@ -1065,6 +1155,7 @@ export class GithubDispatchJournal {
       const { postOwner: _owner, ...settled } = current;
       this.save(tx, {
         ...settled,
+        ...(response ? { dispatchResponse: response } : {}),
         ...(id !== undefined
           ? { dispatchedRunId: id }
           : { absenceNotBefore: absenceDeadline(current, at) }),
@@ -1084,7 +1175,6 @@ export class GithubDispatchJournal {
         (i) => i.attempt === intent.attempt,
       );
       if (
-        this.probeCard ||
         !current ||
         current.key !== intent.key ||
         !this.ownsScan(current, intent) ||

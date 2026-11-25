@@ -1,7 +1,9 @@
 export { fileAvatarStore, readAvatarFile } from "./avatars.js";
+export * from "./capability-guides.js";
 export type { ChangeCursor, ChangeSet } from "./change-feed.js";
 export * from "./check-handoff.js";
 export * from "./check-recovery.js";
+export type { EventStreams, HotStateHints } from "./command-events.js";
 export { readContextSamples, writeContextSamples } from "./context-samples.js";
 export {
   type BeginBellAttempt,
@@ -50,6 +52,12 @@ export {
   migrate,
 } from "./migrate.js";
 export {
+  backfillProjectCodes,
+  PROJECT_CODES_MIGRATION_NAME,
+  projectCodeSource,
+  REGISTERED_PROJECT_CODES,
+} from "./project-codes.js";
+export {
   findingKey,
   listFindings,
   type ReconcileFindingInput,
@@ -82,6 +90,7 @@ export {
   writeRole,
 } from "./roles.js";
 export * from "./run-capacity.js";
+export { SharedFileStore } from "./shared-files.js";
 export {
   backfillStandingModesInTransaction,
   standingResolver,
@@ -89,7 +98,11 @@ export {
 export {
   type AckEventsParams,
   type AckEventsResult,
+  type CommandStateScope,
+  commandStateScope,
   DEFAULT_DB_FILE,
+  DEFAULT_OPTIMISTIC_ATTEMPTS,
+  type DeferredActivity,
   type GetUpdatesParams,
   type GetUpdatesResult,
   hashRequest,
@@ -97,6 +110,10 @@ export {
   type IdempotentResult,
   type IssuedToken,
   type IssueTokenInput,
+  type OptimisticContext,
+  type OptimisticOptions,
+  type OptimisticPlan,
+  type OptimisticStats,
   openStore,
   type ProjectCreateInput,
   type ProjectRecord,

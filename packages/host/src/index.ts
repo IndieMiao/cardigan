@@ -1,4 +1,16 @@
 export {
+  ADB_SLOT_SCRIPT,
+  type AdbProbe,
+  adbTargetProbe,
+} from "./adb-slot-probe.js";
+export {
+  type AdbSlotDiagnostic,
+  type AdbSlotPolicy,
+  AdbSlots,
+  adbEnvironmentWarnings,
+  parseAdbSlots,
+} from "./adb-slots.js";
+export {
   type AgentGitOptions,
   type AgentGitRunner,
   AgentGitTransport,
@@ -84,6 +96,7 @@ export {
   rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
+export * from "./device-init.js";
 export { turnSessionKey } from "./dispatch-stalls.js";
 export {
   HostLaunchError,
@@ -91,6 +104,12 @@ export {
   type LaunchStep,
   messageOf,
 } from "./errors.js";
+export {
+  type DispatchUnknownStage,
+  type ExecutorFailure,
+  type ExecutorHttpObservation,
+  recordGithubHttp,
+} from "./executor-diagnostics.js";
 export { classifyExecutorFailure } from "./executor-failure.js";
 export * from "./ext-message.js";
 export * from "./ext-message-config.js";
@@ -124,8 +143,23 @@ export {
 } from "./github-dispatch-journal.js";
 export * from "./github-probe.js";
 export * from "./github-rate-limit.js";
+export {
+  DEFAULT_HELD_BACKLOG_MS,
+  heldBacklogMs,
+  heldBacklogs,
+} from "./held-backlog.js";
+export {
+  HostMemoryPressureMonitor,
+  linuxPressureProbe,
+  pressureNotice,
+} from "./host-memory-pressure.js";
 export { HostOpsService } from "./host-ops.js";
-export { tryHelperConfirmationLock, tryHostOpsLock } from "./host-ops-lock.js";
+export {
+  type HostOpsLockHolder,
+  hostOpsLockHolder,
+  tryHelperConfirmationLock,
+  tryHostOpsLock,
+} from "./host-ops-lock.js";
 export {
   boundedRetirementError,
   idleRetirementPolicy,
@@ -190,6 +224,9 @@ export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";
 export * from "./machine-check-journal.js";
 export { configureMachinePlacement } from "./machine-placement.js";
+export * from "./macos-check-config.js";
+export * from "./macos-check-result.js";
+export * from "./macos-check-service.js";
 export {
   DEFAULT_MCP_HOST,
   DEFAULT_MCP_PORT,
@@ -205,6 +242,7 @@ export {
   mergeCheckAttemptRunning,
   mergeCheckAttemptRunningInTransaction,
   mergeCheckCapacityAvailable,
+  runningMergeChecks,
 } from "./merge-check-capacity.js";
 export {
   loadMergeGateConfig,
@@ -287,11 +325,24 @@ export {
   RoleDocumentError,
 } from "./role-document.js";
 export {
+  composeOverlaySource,
+  deriveOverlayRules,
+  overlayEditedByHand,
+  overlaySummary,
+  syncProjectOverlayRoles,
+} from "./role-overlay.js";
+export {
+  DEFAULTS_EVENT,
+  knownDefaults,
+  recordDefault,
+} from "./role-provenance.js";
+export {
   effectiveRunLimit,
   hasEarlierCapacityWait,
   MERGE_CHECK_RUN_SLOTS,
   machineRunCapacity,
   type ReadResourceLimits,
+  type RunCapacityBlock,
   readRunQueue,
   runCapacityMachines,
   runCapacitySnapshot,
@@ -301,7 +352,11 @@ export {
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
 export { previewRunResources, resourceTarget } from "./run-resource-worker.js";
-export { assignmentResourceKeys } from "./run-resources.js";
+export {
+  assignmentResourceKeys,
+  runResourceKeys,
+  unclaimedResourceKeys,
+} from "./run-resources.js";
 export {
   deferIfTargetWait,
   deferTargetAttempt,
@@ -313,11 +368,25 @@ export { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 export * from "./runtime-targets.js";
 export * from "./runtime-workers-config.js";
 export { pinStallBackup } from "./stall-backup.js";
+export type { SessionExitVerdict } from "./stall-evidence.js";
 export {
   StandingPmRecovery,
   standingPmStallPolicy,
 } from "./standing-pm-recovery.js";
-export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
+export {
+  exitCommand,
+  STANDING_EXIT_STEP,
+  type StandingExitPolicy,
+  standingExitPolicy,
+  standingExitSteps,
+} from "./standing-session-exit.js";
+export {
+  revokeStoppedRunTokens,
+  stoppedSessionExited,
+  stoppedSessionLive,
+  stopRunRuntime,
+  storedSessionExitProof,
+} from "./stop-run.js";
 export {
   proveSystemReviewLimit,
   systemReviewLimitFailure,
@@ -333,6 +402,14 @@ export {
 export * from "./test-review.js";
 export { settleTestReviewLimits } from "./test-review-limits.js";
 export { testReviewRunPrompt } from "./test-review-prompt.js";
+export {
+  releaseUnresponsiveAgent,
+  releaseUnresponsiveAgents,
+  type UnresponsiveOutcome,
+  type UnresponsiveProof,
+  unresponsiveProbeLimit,
+  workerProof,
+} from "./unresponsive-session.js";
 export * from "./upstream-health.js";
 export {
   type AgentBinary,
@@ -379,6 +456,7 @@ export * from "./worker-wizard-files.js";
 export * from "./worker-wizard-form.js";
 export {
   type ArtifactCheckout,
+  missingWorktreePrompt,
   prepareReadonlyWorktree,
   prepareRoleWorktree,
   readonlyWorktreeTarget,

@@ -1,9 +1,16 @@
-import type { Actor, Decision, RuntimeRef } from "../entities.js";
+import type {
+  Actor,
+  Assignment,
+  Decision,
+  Run,
+  RuntimeRef,
+} from "../entities.js";
 import type { Result } from "../errors.js";
 import { hostOpsPending } from "../host-ops.js";
-import type { AssignmentId, RunId } from "../ids.js";
+import type { AssignmentId, CardId, RunId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
+  type CommandDraft,
   type CommandEffect,
   type CommandPorts,
   type CommandState,
@@ -56,25 +63,15 @@ export function releaseAssignment(
     );
     if (p.cancel_queued_run_id !== undefined) {
       const run = d.get("runs", p.cancel_queued_run_id);
-      ensure(
-        actor.kind !== "system" &&
-          a.scope === "work_item" &&
-          !a.external &&
-          a.status === "active" &&
-          ["not_provisioned", "idle"].includes(a.runtime_state) &&
-          !a.runtime_ref &&
-          !a.session_ref &&
-          !a.worktree_path &&
-          !a.branch &&
-          !a.base_sha &&
-          run.assignment_id === a.id &&
-          run.status === "queued" &&
-          card !== undefined &&
-          neverDispatchedQueue(d, run, card.id) &&
-          ports.unreservedAssignment?.(state.project_id, a.id) === true,
-        "illegal_transition",
-        "只能取消从未派发、没有会话或启动占用的排队 Run；准备重试还须有清理记录。已有执行请走原停止流程。",
+      const refusal = cancelQueuedRunRefusal(
+        d,
+        actor,
+        a,
+        run,
+        card?.id,
+        () => ports.unreservedAssignment?.(state.project_id, a.id) === true,
       );
+      ensure(refusal === undefined, "illegal_transition", refusal ?? "");
       cancelRunDispatch(d, run, "取消未派发的排队 Run，释放指派以重新选机");
     }
     if (a.status === "released") {
@@ -120,6 +117,44 @@ export function releaseAssignment(
     return next;
   });
 }
+/**
+ * Only a never-dispatched queue without a session or launch reservation may be
+ * cancelled to reselect the machine. C-624: say which condition failed and
+ * what the operator can run next, instead of one catch-all sentence.
+ */
+function cancelQueuedRunRefusal(
+  d: CommandDraft,
+  actor: Actor,
+  a: Assignment,
+  run: Run,
+  card: CardId | undefined,
+  unreserved: () => boolean,
+): string | undefined {
+  if (
+    actor.kind === "system" ||
+    a.scope !== "work_item" ||
+    a.external ||
+    a.status !== "active" ||
+    card === undefined
+  )
+    return `${a.id} 不是在岗的工作项指派，不能用 --cancel-queued-run 取消排队 Run。`;
+  if (run.assignment_id !== a.id || run.status !== "queued")
+    return `${run.id} 不是 ${a.id} 的排队 Run（当前状态 ${run.status}），没有可取消的排队。`;
+  if (
+    !["not_provisioned", "idle"].includes(a.runtime_state) ||
+    a.runtime_ref ||
+    a.session_ref ||
+    a.worktree_path ||
+    a.branch ||
+    a.base_sha ||
+    !neverDispatchedQueue(d, run, card)
+  )
+    return `${a.id} 已有会话、工作区或派发记录，${run.id} 不能取消后改派到别的机器。要放弃 ${run.id}：先执行 cardigan assignment stop ${a.id}（取消排队的 Run，保留工作区），再执行 cardigan assignment release ${a.id}；要让它继续：执行 cardigan assignment start ${a.id}。`;
+  if (!unreserved())
+    return `${a.id} 正在启动（有未结束的启动记录，或资源租约还没完成释放核验），${run.id} 暂不能取消；等这次启动结束后重试。`;
+  return undefined;
+}
+
 /** Host-confirmed missing terminals; never a caller-supplied cleanup flag. */
 export function clearReleasedRuntimeRefs(
   state: CommandState,

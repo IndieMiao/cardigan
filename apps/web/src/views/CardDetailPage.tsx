@@ -1,7 +1,10 @@
 import {
+  type Dispatch,
+  type SetStateAction,
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -18,30 +21,35 @@ import { AttachmentGrid } from "../components/AttachmentGrid.js";
 import { AuthorPrechecks } from "../components/AuthorPrechecks.js";
 import { CardActions } from "../components/CardActions.js";
 import { CardDependencies } from "../components/CardDependencies.js";
-import { CardHoldActions } from "../components/CardHold.js";
 import {
   CardRiskTags,
   CardSource,
   RecentConclusions,
 } from "../components/CardIntro.js";
+import {
+  CardNextStep,
+  type NextStepTarget,
+} from "../components/CardNextStep.js";
 import { CardRecords } from "../components/CardRecords.js";
 import { CardSectionNav } from "../components/CardSectionNav.js";
 import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
-import { CardStatusLine } from "../components/CardStatusLine.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { CardTemplate } from "../components/CardTemplate.js";
-import { CommentBox, type CommentBoxHandle } from "../components/CommentBox.js";
+import { CommentBox } from "../components/CommentBox.js";
 import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   EmptyState,
   IdTag,
   LongContent,
   PageTitle,
+  StatusTag,
   Time,
 } from "../components/Foundation.js";
 import {
   CardDetailHeading,
   CardDetailLayout,
+  DetailNextStepForms,
+  DetailStatusRow,
 } from "../components/layout/CardDetailLayout.js";
 import { CardBatchChecks } from "../components/MergeBatch.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
@@ -59,10 +67,10 @@ import {
   TimelineControls,
   TimelinePager,
 } from "../components/TimelineControls.js";
-import { Button } from "../components/ui/button.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
+import { useAttachmentRefsState } from "../useAttachmentRefs.js";
 import { useResource } from "../useResource.js";
 import { MergeConfirmation, SuggestedDecision } from "./NeedsYouPage.js";
 
@@ -89,6 +97,15 @@ const mergeTimeline = (
   [...new Map(pages.flat().map((entry) => [entry.id, entry])).values()].sort(
     (a, b) => b.event_seq - a.event_seq,
   );
+/** Other cards' attachments of two pages, the newer read winning. */
+const mergeReferenced = (
+  current: CardDetail["referenced_attachments"],
+  older: CardDetail["referenced_attachments"],
+): NonNullable<CardDetail["referenced_attachments"]> => [
+  ...new Map(
+    [...(older ?? []), ...(current ?? [])].map((a) => [a.id, a]),
+  ).values(),
+];
 
 export interface CardDetailPageProps {
   readonly client: CardiganClient;
@@ -117,6 +134,9 @@ export function CardDetailPage(props: CardDetailPageProps) {
     onTitleChange,
   } = props;
   const [affectedCards, setAffectedCards] = useState<readonly string[]>([]);
+  // C-615: cards whose attachments this page shows as chips; their events
+  // (say, turning sensitive) refresh this page too.
+  const [referencedCards, setReferencedCards] = useState<readonly string[]>([]);
   const [routeFilters] = useRouteFilters({ kind: "card", projectId, cardId });
   const routeLocation = `${projectId}/${cardId}/${routeAnchor ?? ""}/${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
   const [localAnchor, setLocalAnchor] = useState<{
@@ -138,9 +158,10 @@ export function CardDetailPage(props: CardDetailPageProps) {
     ...(routeFilters.type ? { type: routeFilters.type } : {}),
     ...(routeFilters.author ? { author: routeFilters.author } : {}),
   });
-  const history = useRef<{ key: string; detail: CardDetail } | undefined>(
-    undefined,
-  );
+  const history = useRef<
+    | { key: string; detail: CardDetail; head?: CardDetail | undefined }
+    | undefined
+  >(undefined);
   const loadGeneration = useRef(0);
   // Older pages follow only a head read for the current query; after a filter,
   // anchor or card change the old snapshot's cursor must not be paged.
@@ -164,6 +185,11 @@ export function CardDetailPage(props: CardDetailPageProps) {
       // Read after the response: an older page may have landed meanwhile.
       const previous =
         history.current?.key === key ? history.current.detail : undefined;
+      // C-688: an unchanged head (304) keeps the shown history as it is.
+      if (previous && history.current?.head === detail) {
+        if (request === loadGeneration.current) setPagerReady(true);
+        return previous;
+      }
       // A disconnected refresh can skip an entire page. Keep cached history only
       // when the new window connects to it; otherwise restart from its cursor.
       const connected = detail.timeline.some((entry) =>
@@ -178,7 +204,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
             }
           : detail;
       if (request === loadGeneration.current) {
-        history.current = { key, detail: merged };
+        history.current = { key, detail: merged, head: detail };
         setPagerReady(true);
       }
       return merged;
@@ -268,8 +294,13 @@ export function CardDetailPage(props: CardDetailPageProps) {
             ...latest.detail,
             timeline: mergeTimeline(latest.detail.timeline, detail.timeline),
             timeline_next_cursor: detail.timeline_next_cursor ?? null,
+            // C-615: the older page's other-card attachments come with it.
+            referenced_attachments: mergeReferenced(
+              latest.detail.referenced_attachments,
+              detail.referenced_attachments,
+            ),
           };
-          history.current = { key, detail: merged };
+          history.current = { key, detail: merged, head: latest.head };
           replace(merged);
         }
         paging.current = undefined;
@@ -311,6 +342,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
             ),
             // C-567: another card's precheck ending settles this card's wait.
             ...(data.card.checking?.precheck?.cards ?? []),
+            ...referencedCards,
           ]),
       ),
     ].sort();
@@ -319,7 +351,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
         ? current
         : ids,
     );
-  }, [data, cardId]);
+  }, [data, cardId, referencedCards]);
   useEffect(() => {
     const filterKey = `${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
     if (query.current.at === anchor && previousFilters.current === filterKey)
@@ -357,6 +389,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
         <CardContent
           key={`${projectId}/${cardId}`}
           detail={data}
+          onReferencedCards={setReferencedCards}
           revision={
             cardRevision ? cardRevision(cardId, affectedCards) : revision
           }
@@ -418,8 +451,10 @@ function CardContent({
   pagerReady,
   loadOlder,
   anchorReady,
+  onReferencedCards,
 }: {
   detail: CardDetail;
+  onReferencedCards?: Dispatch<SetStateAction<readonly string[]>>;
   revision: number;
   client: CardiganClient;
   projectId: string;
@@ -440,12 +475,9 @@ function CardContent({
     projectId,
     cardId,
   });
-  const [activeAction, setActiveAction] = useState<
-    "card" | "hold" | "completion"
-  >();
+  const [activeAction, setActiveAction] = useState<"card" | "completion">();
   const [primaryPanels, setPrimaryPanels] = useState<HTMLElement | null>(null);
   const article = useRef<HTMLElement>(null);
-  const commentBox = useRef<CommentBoxHandle>(null);
   const scroll = useRef<HTMLElement>(null),
     lastAnchor = useRef<string | undefined>(undefined);
   const [selectedSection, setSelectedSection] = useState<string>();
@@ -475,6 +507,49 @@ function CardContent({
   );
   const detail = head.overview ? { ...head, ...panelData.data } : head;
   const panelReady = !head.overview || !!panelData.data;
+  // C-615: numbers on timeline pages the head read did not cover (older
+  // pages, rows kept across a refresh) are read on their own.
+  const knownAttachments = useMemo(
+    () =>
+      new Set(
+        [...detail.attachments, ...(detail.referenced_attachments ?? [])].map(
+          (a) => a.id,
+        ),
+      ),
+    [detail.attachments, detail.referenced_attachments],
+  );
+  const timelineBodies = useMemo(
+    () => detail.timeline.map((entry) => entry.body),
+    [detail.timeline],
+  );
+  const later = useAttachmentRefsState(
+    client,
+    projectId,
+    cardId,
+    timelineBodies,
+    knownAttachments,
+    detail.timeline,
+  );
+  const laterRefs = later.attachments;
+  const referencedAttachments = useMemo(
+    () => [...(detail.referenced_attachments ?? []), ...laterRefs],
+    [detail.referenced_attachments, laterRefs],
+  );
+  useEffect(() => {
+    const shown = referencedAttachments.map((a) => a.card_id);
+    onReferencedCards?.((current) => {
+      // While the follow-up read is out, its cards are unknown rather than
+      // gone: keep following them, or the page's revision drops, it reloads,
+      // asks again and never settles (V-3096). The answer sets the exact list.
+      const cards = [
+        ...new Set(later.settled ? shown : [...current, ...shown]),
+      ].sort();
+      return current.length === cards.length &&
+        current.every((id, i) => id === cards[i])
+        ? current
+        : cards;
+    });
+  }, [referencedAttachments, later.settled, onReferencedCards]);
   const storyAttachments = useStoryAttachments({
     detail: head,
     client,
@@ -582,6 +657,56 @@ function CardContent({
         window.removeEventListener(event, stop);
     };
   }, [anchor, anchorReady, filters.type, filters.author, activeSection]);
+  // C-695: a “下一步” action whose control still lives in a tab opens that
+  // tab, brings the control into view and focuses it.
+  const [revealing, setRevealing] = useState<{ target: NextStepTarget }>();
+  const revealTarget = useCallback(
+    (target: NextStepTarget) => {
+      setSelectedSection(
+        `card-${cardId}-${target === "questions" || target === "comment" ? "timeline" : "overview"}`,
+      );
+      setRevealing({ target });
+    },
+    [cardId],
+  );
+  useEffect(() => {
+    const root = article.current;
+    if (!revealing || !root) return;
+    setRevealing(undefined);
+    // Ordered [region, control] candidates: the first region present wins;
+    // inside it the first enabled control, else the region itself.
+    const answer = "[aria-label$='题回答']:is(input, textarea):not(:disabled)";
+    const button = "button:not(:disabled)";
+    const candidates: Record<NextStepTarget, [string, string[]][]> = {
+      merge: [
+        [
+          `#card-${cardId}-merge`,
+          ["button[type=submit][form]:not(:disabled)", button],
+        ],
+      ],
+      decisions: [[`#card-${cardId}-suggested`, [button]]],
+      proposal: [["section[aria-label='拆解方案']", [button]]],
+      // The first open question; with none left, the comment box.
+      questions: [
+        ["section[aria-label='需求澄清']", [answer]],
+        ["section.comment-box", ["textarea:not(:disabled)"]],
+      ],
+      comment: [["section.comment-box", ["textarea:not(:disabled)"]]],
+    };
+    const list = candidates[revealing.target];
+    for (const [index, [region, controls]] of list.entries()) {
+      const area = root.querySelector<HTMLElement>(region);
+      const control = controls
+        .map((selector) => area?.querySelector<HTMLElement>(selector))
+        .find(Boolean);
+      // A region without a usable control falls through to the next one.
+      if (!area || (!control && index < list.length - 1)) continue;
+      const target = control ?? area;
+      target.scrollIntoView?.({ block: "center" });
+      target.focus({ preventScroll: true });
+      return;
+    }
+  }, [revealing, cardId]);
   const card = detail.card;
   const cardPageClass = inDrawer ? "card-page card-page-drawer" : "card-page";
   const completionId =
@@ -668,58 +793,55 @@ function CardContent({
             <TemplateMarker card={card} info={detail.template} force />
           </CardDetailHeading>
         )}
-        <CardStatusLine
-          detail={detail}
-          projectId={projectId}
-          metadata={
-            <>
-              <span>
-                更新于 <Time value={detail.updated_at ?? card.created_at} />
-              </span>
-              <CardRiskTags tags={card.risk_tags} />
-            </>
+        <DetailStatusRow
+          aria-label="卡片状态"
+          actions={
+            <CardActions
+              disabled={!!activeAction && activeAction !== "card"}
+              onEditingChange={(editing) =>
+                setActiveAction(editing ? "card" : undefined)
+              }
+              card={card}
+              client={client}
+              projectId={projectId}
+              onSaved={reload}
+              formContainer={primaryPanels}
+            />
           }
-        />
+        >
+          <StatusTag status={card.status} />
+          <span>
+            更新于 <Time value={detail.updated_at ?? card.created_at} />
+          </span>
+          <CardRiskTags tags={card.risk_tags} />
+        </DetailStatusRow>
         <CardSuperseded card={card} projectId={projectId} />
-        <CardActions
-          disabled={!!activeAction && activeAction !== "card"}
-          onEditingChange={(editing) =>
-            setActiveAction(editing ? "card" : undefined)
-          }
-          card={card}
+        <CardNextStep
+          detail={detail}
           client={client}
           projectId={projectId}
           onSaved={reload}
-          primaryActions={
-            <>
-              <CardHoldActions
-                disabled={!!activeAction && activeAction !== "hold"}
-                formContainer={primaryPanels}
-                onEditingChange={(editing) =>
-                  setActiveAction(editing ? "hold" : undefined)
-                }
-                card={card}
-                client={client}
-                projectId={projectId}
-                onSaved={reload}
-              />
-              <CardTemplate
-                disabled={!!activeAction && activeAction !== "completion"}
-                formContainer={primaryPanels}
-                onEditingChange={(editing) =>
-                  setActiveAction(editing ? "completion" : undefined)
-                }
-                detail={detail}
-                client={client}
-                projectId={projectId}
-                onSaved={reload}
-                revision={revision}
-                showMetadata={false}
-              />
-            </>
-          }
+          onReveal={revealTarget}
+          completionId={completionId}
+          busy={!!activeAction}
+          markDone={(emphasis) => (
+            <CardTemplate
+              disabled={!!activeAction && activeAction !== "completion"}
+              formContainer={primaryPanels}
+              onEditingChange={(editing) =>
+                setActiveAction(editing ? "completion" : undefined)
+              }
+              detail={detail}
+              client={client}
+              projectId={projectId}
+              onSaved={reload}
+              revision={revision}
+              showMetadata={false}
+              emphasis={emphasis}
+            />
+          )}
         />
-        <div className="card-primary-panels" ref={setPrimaryPanels} />
+        <DetailNextStepForms ref={setPrimaryPanels} />
       </header>
       <div className="card-main">
         <AuthorPrechecks checks={card.prechecks ?? []} projectId={projectId} />
@@ -895,19 +1017,6 @@ function CardContent({
           className="card-section card-timeline"
           aria-label="时间线"
         >
-          <div className="card-timeline-heading">
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() =>
-                commentBox.current?.focus((target) =>
-                  target.scrollIntoView?.({ block: "nearest" }),
-                )
-              }
-            >
-              写评论
-            </Button>
-          </div>
           <TimelineControls
             filters={filters}
             onChange={setFilters}
@@ -925,11 +1034,12 @@ function CardContent({
             />
           )}
           <CommentBox
-            ref={commentBox}
             client={client}
             projectId={projectId}
             cardId={cardId}
             hasPmOps={detail.card.story ? undefined : detail.has_pm_ops}
+            attachments={detail.attachments}
+            referencedAttachments={referencedAttachments}
             onPosted={onPosted}
             onConflict={onCommentConflict}
           />
@@ -950,6 +1060,7 @@ function CardContent({
                 entries={detail.timeline}
                 attachments={detail.attachments}
                 detail={detail}
+                referencedAttachments={referencedAttachments}
                 typeFilter={filters.type ?? ""}
                 authorFilter={filters.author ?? ""}
                 anchor={anchor}

@@ -4,6 +4,7 @@ import {
   acknowledgeRun,
   claimDispatchStop,
   dispatchRun,
+  eventById,
   finishRun,
   listNeedsYou,
   queueRun,
@@ -63,9 +64,7 @@ const occupied = () =>
 
 test("C-339: settled and ordinary failed history does not add retry state reads", async () => {
   const original = f.latest();
-  const source = f
-    .state()
-    .events.find((e) => e.id === original.trigger_event_id);
+  const source = eventById(f.state().events, original.trigger_event_id);
   if (!source) throw new Error("Missing source event");
   f.store.uow.run((tx) => {
     for (let i = 0; i < 600; i++) {
