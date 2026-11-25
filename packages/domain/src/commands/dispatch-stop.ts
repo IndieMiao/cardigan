@@ -14,6 +14,7 @@ import {
   command,
   ensure,
 } from "./core.js";
+import { unreadableCommentTrigger } from "./dispatch-recovery.js";
 
 const cardOf = (d: CommandDraft, run: Run) => {
   const a = d.get("assignments", run.assignment_id);
@@ -82,12 +83,16 @@ export function claimDispatchStop(
     }
     if (run.inactivity_stop) return;
     // C-735: a refused start acknowledgement proves the session is alive;
-    // the watchdog reports its reason instead of stopping the terminal.
+    // the watchdog reports its reason instead of stopping the terminal. An
+    // obsolete review wake or unreadable trigger still retires through the
+    // ordinary fenced stop.
     if (
       !old &&
       run.ack_refusal &&
       (p.reason === "dispatch_timeout" ||
-        p.reason === "delivery_retry_exhausted")
+        p.reason === "delivery_retry_exhausted") &&
+      reviewRunWakeDisposition(state, a, run) !== "obsolete" &&
+      !unreadableCommentTrigger(state, run)
     )
       return;
     const card = cardOf(d, run);

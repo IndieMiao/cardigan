@@ -278,7 +278,10 @@ export function recoverDispatch(
     const refusal =
       !stopping &&
       !startupFailed &&
-      (reason === "dispatch_timeout" || reason === "delivery_retry_exhausted")
+      (reason === "dispatch_timeout" ||
+        reason === "delivery_retry_exhausted") &&
+      reviewWake !== "obsolete" &&
+      !unreadableCommentTrigger(state, run)
         ? run.ack_refusal
         : undefined;
     // C-600: a session without Card tools settles only through its own stop

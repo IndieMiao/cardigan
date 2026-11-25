@@ -492,6 +492,47 @@ test("C-735: a refused start acknowledgement escalates once with its reason and 
   ).toBe(true);
 });
 
+test("C-735: a refused acknowledgement does not keep an obsolete review wake from its fenced cancellation", async () => {
+  f.comment();
+  const d = dispatcher({ dispatchTimeoutMs: 100 });
+  await d.tick();
+  const original = f.latest();
+  f.store.uow.run((tx) => {
+    const run = tx.runs.get(f.project, original.id);
+    if (!run) throw new Error("Missing Run");
+    tx.runs.put(f.project, {
+      ...run,
+      bell_delivery: {
+        ...(run.bell_delivery ?? {}),
+        review_target: { delivery_id: "D-gone", target_sha: "0".repeat(40) },
+      },
+    } as typeof run);
+  });
+  f.apply(
+    (s, a, p) =>
+      recordRunAckRefusal(
+        s,
+        a,
+        {
+          run_id: original.id,
+          code: "illegal_transition",
+          message: "审核已暂停返工或目标已变更，请等待当前任务",
+        },
+        p,
+      ),
+    f.actorFor(f.target.assignment),
+  );
+  for (let i = 0; i < 6; i++) {
+    f.advance(100);
+    await d.tick();
+  }
+  expect(f.state().runs.find((r) => r.id === original.id)?.status).toBe(
+    "cancelled",
+  );
+  expect(count("run_dispatch_stop_requested")).toBe(1);
+  expect(count("run_dispatch_recovered")).toBe(0);
+});
+
 test.each(["exited", "unknown"] as const)(
   "retry checks the terminal and skips wake when process is %s",
   async (process) => {
