@@ -452,11 +452,14 @@ export async function retryDispatchedRuns(
       candidate.status === "dispatched" &&
       !candidate.started_at &&
       store.uow.run((tx) => {
+        const sent = listBellAttempts(store.database, project, candidate.id)
+          .filter((attempt) => attempt.outcome === "sent")
+          .at(-1)?.finished_at;
         const effect = unwrap(
           startDependencyReadyRun(
             loadState(tx, project),
             actor,
-            { run_id: candidate.id },
+            { run_id: candidate.id, ...(sent ? { bell_sent_at: sent } : {}) },
             { clock, ids: tx.ids },
           ),
         );

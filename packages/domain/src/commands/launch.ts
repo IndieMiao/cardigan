@@ -958,12 +958,14 @@ export function acknowledgeRun(
  * finished had every start acknowledgement refused; its Run stayed dispatched
  * and kept the Assignment busy, so no later bell reached the idle session and
  * nothing would ever acknowledge it. Once the prerequisites are complete, a
- * session proven alive after dispatch (a Card tool call or a recorded
- * refusal) is started here exactly as its own acknowledgement would have.
+ * session that was sent this Run's bell and still called Card tools (or had
+ * a refusal recorded) afterwards is started here as its own acknowledgement
+ * would have.
  */
 function dependencyReadyStart(
   d: CommandDraft,
   run: Run,
+  bellSentAt: string | undefined,
 ): { assignment: Assignment; item: WorkItem } | undefined {
   if (
     !["dispatched", "acked"].includes(run.status) ||
@@ -990,15 +992,20 @@ function dependencyReadyStart(
     hostOpsPending(d.state.events, assignment.id)
   )
     return;
+  // Only after this Run's own bell reached the session: starting it earlier
+  // would retire the pending wake, and a late call of the previous Run is
+  // not a refusal of this one.
+  const bell = run.bell_delivery;
+  const sent =
+    (bell?.run_id === run.id ? bell.sent_at : undefined) ?? bellSentAt;
   const dispatched = eventsOfType(d.state.events, "run_dispatched").findLast(
     (e) => (e.payload as { run_id?: unknown })?.run_id === run.id,
   )?.created_at;
-  const alive =
-    !!run.ack_refusal ||
-    (!!dispatched &&
-      !!assignment.last_mcp_activity_at &&
-      assignment.last_mcp_activity_at > dispatched);
-  if (!alive) return;
+  const since = sent && dispatched && sent > dispatched ? sent : dispatched;
+  const seen = [assignment.last_mcp_activity_at, run.ack_refusal?.at].filter(
+    (at): at is string => !!at,
+  );
+  if (!sent || !since || !seen.some((at) => at > since)) return;
   const item = d.work(assignment.work_item_id);
   const card = d.card(item.card_id);
   if (
@@ -1021,12 +1028,16 @@ function dependencyReadyStart(
 export function startDependencyReadyRun(
   state: CommandState,
   actor: Actor,
-  p: { run_id: RunId },
+  p: {
+    run_id: RunId;
+    /** Host journal: when a bell for this Run was last sent successfully. */
+    bell_sent_at?: string;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "start_dependency_ready_run", ports, (d) => {
     const run = d.get("runs", p.run_id);
-    const ready = dependencyReadyStart(d, run);
+    const ready = dependencyReadyStart(d, run, p.bell_sent_at);
     if (!ready) return;
     const { assignment, item } = ready;
     if (

@@ -405,15 +405,38 @@ const later = (seconds: number) =>
   new Date(Date.parse(now) + seconds * 1000).toISOString();
 const startReady = (r: Run, by: Actor = system) =>
   startDependencyReadyRun(f.state, by, { run_id: r.id }, f.io);
-/** A Run left dispatched by refused acknowledgements before this fix. */
-function legacyRefusedRun(a: typeof f.coder) {
-  const r = commit(dispatch(commit(queue(a)), dependentRef));
+/** The host sent this Run's bell into its session. */
+function bellSent(r: Run, at = later(1)) {
+  f.state = {
+    ...f.state,
+    runs: f.state.runs.map((x) =>
+      x.id === r.id
+        ? {
+            ...x,
+            bell_delivery: {
+              run_id: r.id,
+              card_id: item().card_id,
+              runtime_ref: dependentRef,
+              sent_at: at,
+            },
+          }
+        : x,
+    ),
+  };
+}
+function activity(a: typeof f.coder, at: string) {
   f.state = {
     ...f.state,
     assignments: f.state.assignments.map((x) =>
-      x.id === a.id ? { ...x, last_mcp_activity_at: later(1) } : x,
+      x.id === a.id ? { ...x, last_mcp_activity_at: at } : x,
     ),
   };
+}
+/** A Run left dispatched by refused acknowledgements before this fix. */
+function legacyRefusedRun(a: typeof f.coder) {
+  const r = commit(dispatch(commit(queue(a)), dependentRef));
+  bellSent(r);
+  activity(a, later(2));
   return r;
 }
 
@@ -448,11 +471,17 @@ test("C-735: once prerequisites complete the system starts a Run its session cou
   expect(f.state.runs.find((x) => x.id === r.id)?.status).toBe("completed");
 });
 
-test("C-735: the system start needs proof the session was alive after dispatch and leaves fenced Runs alone", async () => {
+test("C-735: the system start needs this Run's bell and a later sign of life, and leaves fenced Runs alone", async () => {
   const a = dependentAssignment();
   const r = commit(dispatch(commit(queue(a)), dependentRef));
   await acceptDependency();
   // No Card tool call since dispatch: an ordinary pending start.
+  expect(value(startReady(r)).changes).toEqual([]);
+  // A late call before this Run's bell was sent does not count, and neither
+  // does any call while the bell is still unsent.
+  activity(a, later(1));
+  expect(value(startReady(r)).changes).toEqual([]);
+  bellSent(r, later(2));
   expect(value(startReady(r)).changes).toEqual([]);
   f.state = {
     ...f.state,
@@ -460,7 +489,11 @@ test("C-735: the system start needs proof the session was alive after dispatch a
       x.id === r.id
         ? {
             ...x,
-            ack_refusal: { code: "invariant_violation", message: "x", at: now },
+            ack_refusal: {
+              code: "invariant_violation",
+              message: "x",
+              at: later(3),
+            },
           }
         : x,
     ),
