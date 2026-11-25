@@ -808,3 +808,74 @@ test("C-645 a release without a stop for that session, or after a stop without a
   expect(unstopped.ok && unstopped.value.changes).toEqual([]);
   expect(stoppedByHuman(racing.events, A1)).toBe(false);
 });
+
+// C-752 (sensen A-388, mac-mini): the idle patrol had handed off its
+// retirement of the session a managed stop then released. The record outlived
+// the binding, so every later bell stayed fenced until a human start.
+test.each([
+  ["managed stop, waiting handoff", false, "waiting"],
+  ["managed stop, stopping handoff", false, "stopping"],
+  ["pause, waiting handoff", true, "waiting"],
+] as const)(
+  "C-752 the release finishes the released session's idle retirement (%s)",
+  (_case, hold, phase) => {
+    const A1 = id("assignment", 1);
+    const retirement = {
+      phase,
+      handoff: true as const,
+      runtime_ref: ref,
+      started_at: "2026-01-01T00:00:00.000Z",
+      threshold_minutes: 60,
+      failures: 3,
+    };
+    const owned = (r: RuntimeRef): CommandState => {
+      const s = base();
+      return {
+        ...s,
+        assignments: s.assignments.map((a) =>
+          a.id === A1
+            ? ({
+                ...a,
+                idle_retirement: { ...retirement, runtime_ref: r },
+              } as Assignment)
+            : a,
+        ),
+      };
+    };
+    const release = (s: CommandState) => {
+      const stopped = apply(
+        s,
+        (stop(s, { hold }) as { ok: true; value: never }).value,
+      );
+      // Step 1 leaves the record: the terminal is not released yet.
+      expect(
+        stopped.assignments.find((a) => a.id === A1)?.idle_retirement,
+      ).toBeDefined();
+      const settled = stop(stopped, { released_runtime_ref: ref });
+      if (!settled.ok) throw new Error(settled.error.message);
+      return apply(stopped, settled.value);
+    };
+    const next = release(owned(ref));
+    expect(
+      next.assignments.find((a) => a.id === A1)?.idle_retirement,
+    ).toBeUndefined();
+    expect(
+      next.events
+        .filter((e) => e.type === "idle_session_retirement_superseded")
+        .map((e) => e.payload),
+    ).toMatchObject([{ assignment_id: A1, handoff: true, failures: 3 }]);
+    expect(stoppedByHuman(next.events, A1)).toBe(hold);
+    if (!hold) expect(dispatch(next, freshRef).ok).toBe(true);
+    // A record of another session is not this release's to finish.
+    const other = { ...ref, terminal_ref: "t-other" };
+    const kept = release(owned(other));
+    expect(
+      kept.assignments.find((a) => a.id === A1)?.idle_retirement,
+    ).toMatchObject({ phase, runtime_ref: other });
+    expect(
+      kept.events.filter(
+        (e) => e.type === "idle_session_retirement_superseded",
+      ),
+    ).toEqual([]);
+  },
+);

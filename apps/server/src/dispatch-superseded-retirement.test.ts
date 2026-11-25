@@ -153,6 +153,8 @@ function setup() {
         ),
       human(f),
     );
+    // C-752: the release now finishes it; keep it for the legacy case.
+    const stale = owner().idle_retirement;
     f.apply(
       (s, a, p) =>
         stopWorkItemAssignment(
@@ -167,7 +169,6 @@ function setup() {
         ),
       human(f),
     );
-    const stale = owner().idle_retirement;
     const run = f.apply(
       (s, a, p) =>
         queueRun(
@@ -504,4 +505,43 @@ test("a human stop keeps a retained session's handoff; nothing is woken", async 
   await within(f, 120_000, () => false);
   expect(f.runtime.wake).not.toHaveBeenCalled();
   expect(f.owner().idle_retirement).toMatchObject({ handoff: true });
+});
+
+// C-752 (sensen A-388, artist_3d on mac-mini): a managed stop released the
+// retained session; its handoff stayed, so the pending notification raised
+// notification_backlog (restart_blocked=session_maintenance) and a handoff
+// overdue, but no new session until a human start.
+test("after a managed stop releases a retained session, the next notice starts a new session within 2 minutes", async () => {
+  const f = setup();
+  f.settle();
+  const id = f.owner().id;
+  for (const released_runtime_ref of [undefined, f.old])
+    f.apply(
+      (s, a, p) =>
+        stopWorkItemAssignment(
+          s,
+          a,
+          {
+            assignment_id: id,
+            reason: "managed stop",
+            hold: false,
+            ...(released_runtime_ref ? { released_runtime_ref } : {}),
+          },
+          p,
+        ),
+      human(f),
+    );
+  expect(f.owner()).toMatchObject({ runtime_ref: null });
+  expect(f.owner().idle_retirement).toBeUndefined();
+  f.settle();
+  f.notify();
+  const elapsed = await within(
+    f,
+    120_000,
+    () => f.startRun.mock.calls.length > 0,
+  );
+  expect(elapsed).toBeDefined();
+  expect(elapsed).toBeLessThanOrEqual(120_000);
+  expect(f.runtime.wake).not.toHaveBeenCalled();
+  expect(f.onError).not.toHaveBeenCalled();
 });

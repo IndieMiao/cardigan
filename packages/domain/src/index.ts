@@ -350,6 +350,7 @@ export {
 } from "./shared-review-wake.js";
 export * from "./standing.js";
 export * from "./start-point.js";
+export * from "./startup-failure.js";
 export * from "./states.js";
 export * from "./story.js";
 export * from "./story-discussion.js";

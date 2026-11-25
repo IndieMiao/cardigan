@@ -26,6 +26,10 @@ import {
   canParkForDiscussion,
   reviewRunWakeDisposition,
 } from "../shared-review-wake.js";
+import {
+  STARTUP_FAILURE_REASONS,
+  startupFailureResolved,
+} from "../startup-failure.js";
 import { transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -165,19 +169,6 @@ export const dispatchRecoveryFailed = (state: CommandState, run: Run) =>
   eventsOfType(state.events, "run_dispatch_aborted").some(
     (e) => field(e.payload, "run_id") === run.id,
   );
-
-function startupFailureResolved(state: CommandState, run: Run): boolean {
-  return (
-    state.assignments.find((a) => a.id === run.assignment_id)?.status ===
-      "released" ||
-    state.runs.some(
-      (r) =>
-        r.assignment_id === run.assignment_id &&
-        r.started_at &&
-        Number(r.id.slice(2)) > Number(run.id.slice(2)),
-    )
-  );
-}
 
 /** Host supplies durable delivery attempt counts; business eligibility is rechecked here. */
 export function recoverDispatch(
@@ -593,7 +584,7 @@ export function obsoleteDispatchAttention(
   if (
     run &&
     (!!field(event?.payload, "recovery_root_run_id") ||
-      ["recovery_startup_failed", "runtime_exited"].includes(
+      STARTUP_FAILURE_REASONS.includes(
         String(field(event?.payload, "reason")),
       )) &&
     // Only the failed Assignment's own diagnostic marker retires with its Run.
@@ -631,7 +622,7 @@ export function resolveDispatchAttention(
       const a = d.get("assignments", run.assignment_id);
       if (
         field(source?.payload, "recovery_root_run_id") ||
-        ["recovery_startup_failed", "runtime_exited"].includes(
+        STARTUP_FAILURE_REASONS.includes(
           String(field(source?.payload, "dispatch_reason")),
         )
       ) {

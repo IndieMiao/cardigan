@@ -570,6 +570,35 @@ export function dropWaitingRetirement(
   return rest;
 }
 
+/**
+ * C-752 (sensen A-388): a human stop released the exact session an idle
+ * retirement was claimed for, and the host proved that terminal gone. Like
+ * `confirmKeptShellExit`, that proof finishes the retirement in either phase
+ * (a handed-off `stopping` one never settles itself). Without it the record,
+ * no longer bound to any session, fences every later bell until a human start.
+ */
+export function dropReleasedRetirement(
+  d: CommandDraft,
+  a: Assignment,
+  card: CardId,
+): Assignment {
+  const { idle_retirement: p, ...identity } = a;
+  if (!p || !retirementOwnsSession(a)) return a;
+  if (p.phase === "waiting") return dropWaitingRetirement(d, a, "superseded");
+  const rest: Assignment = identity;
+  d.put("assignments", rest);
+  d.emit("idle_session_retirement_superseded", card, {
+    assignment_id: a.id,
+    machine_id: a.machine_id,
+    reason: "session_released",
+    phase: p.phase,
+    handoff: p.handoff === true,
+    failures: p.failures,
+    started_at: p.started_at,
+  });
+  return rest;
+}
+
 /** A queued Run prevents a new idle claim. Dispatch may present positive exit
  * evidence, but only for this exact waiting ref, never for an in-flight stop. */
 export function confirmWaitingRetirementExit(
