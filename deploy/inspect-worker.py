@@ -25,6 +25,32 @@ STATES = ('working', 'idle', 'blocked', 'done', 'error', 'thinking', 'waiting fo
 PROGRAMS = ('codex', 'claude', 'pi', 'node', 'sh', 'bash', 'zsh', 'python3', 'git', 'pnpm')
 
 
+class Unavailable(ValueError):
+    """C-746: a refused or failed read with a bounded reason code (still a ValueError)."""
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def unavailable(error):
+    # Bounded reason only: never a message, path, hostname or raw reply.
+    if isinstance(error, Unavailable):
+        return error.code
+    if isinstance(error, FileNotFoundError):
+        return 'core_socket_missing'
+    if isinstance(error, ConnectionRefusedError):
+        return 'core_not_listening'
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return 'core_timeout'
+    if isinstance(error, PermissionError):
+        return 'permission_denied'
+    if isinstance(error, OSError):
+        return 'core_unreachable'
+    if isinstance(error, KeyError):
+        return 'core_reply_incomplete'
+    return 'core_reply_invalid'
+
+
 @contextlib.contextmanager
 def directory(path):
     fd = os.open('/', DIR)
@@ -128,11 +154,11 @@ def socket_path(home, session, system):
         if runtime.is_dir():
             st = runtime.lstat()
             if runtime.resolve() != runtime or st.st_uid != os.getuid() or st.st_mode & 0o077:
-                raise ValueError()
+                raise Unavailable('core_socket_untrusted')
             return runtime / 'herdr-core' / (session + '.sock')
         # With no per-user runtime hc falls back to its private session state.
     elif system != 'darwin':
-        raise ValueError()
+        raise Unavailable('platform_unsupported')
     return Path(home, '.local/state/herdr-core', session, session + '.sock')
 
 
@@ -141,7 +167,7 @@ def core_rpc(home, session, system):
     path = socket_path(home, session, system)
     st = path.lstat()
     if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid() or path.resolve() != path:
-        raise ValueError()
+        raise Unavailable('core_socket_untrusted')
     # The hc CLI autostarts a missing core. Talk only to an existing socket;
     # lines=0 reads the screen without scrolling the terminal for history.
     with socket.socket(socket.AF_UNIX) as sock:
@@ -154,14 +180,17 @@ def core_rpc(home, session, system):
                 sock.sendall((json.dumps(dict(jsonrpc='2.0', id=n, method=method, params=params))+'\n').encode())
                 line = stream.readline(1024 * 1024 + 1)
                 if not line.endswith(b'\n') or len(line) > 1024 * 1024:
-                    raise ValueError()
+                    raise Unavailable('core_reply_invalid')
                 reply = json.loads(line)
                 if reply.get('id') != n or reply.get('jsonrpc') != '2.0':
-                    raise ValueError()
+                    raise Unavailable('core_reply_invalid')
+                if 'result' not in reply and 'error' in reply:
+                    # e.g. an address the core no longer knows (terminal.get).
+                    raise Unavailable('core_error')
                 return reply['result']
             hello = rpc('hello', dict(generation=1, framed=False))
             if hello.get('generation') != 1 or hello.get('framed') is not False:
-                raise ValueError()
+                raise Unavailable('core_protocol')
             yield rpc
 
 
@@ -170,6 +199,8 @@ IDLE_FOOTERS = {True: re.compile(r'\? for shortcuts|\d+% context left', re.I),
 BUSY = re.compile(r'esc to (?:interrupt|cancel)|press enter to confirm', re.I)
 # Longer than the once-a-second elapsed-time redraw of a running turn.
 SETTLE_SECONDS = 1.5
+# C-746: lines Claude Code's status line may occupy under the editor.
+STATUS_LINES = 4
 
 
 def prompt_idle(screen, codex):
@@ -182,17 +213,33 @@ def prompt_idle(screen, codex):
     if not lines or not IDLE_FOOTERS[codex].search(lines[-1]):
         return False
     bottom = lines[:-1]
-    if not codex and bottom and re.fullmatch(r'─+', bottom[-1]):
-        bottom.pop()
+    if not codex:
+        # C-746: Claude Code draws the session's status line (Cardigan's
+        # statusLine setting, one or more lines) between the editor's bottom
+        # rule and the footer. Skip at most STATUS_LINES of them, and only
+        # when a rule closes them off and another rule tops the empty editor.
+        for n in range(1, STATUS_LINES + 1):
+            if len(bottom) > n + 2 and re.fullmatch(r'─+', bottom[-1 - n]):
+                if bottom[-2 - n] == '❯' and re.fullmatch(r'─+', bottom[-3 - n]):
+                    del bottom[-n:]
+                break
+        if bottom and re.fullmatch(r'─+', bottom[-1]):
+            bottom.pop()
     if not bottom or bottom.pop() != ('›' if codex else '❯'):
         return False
     return not BUSY.search('\n'.join(lines[-8:]))
 
 
-def darwin_retirement(c, terminal_owner=None):
+def darwin_retirement(c, terminal_owner=None, why=None):
     # Both facts are read on the pinned SSH account. The native receipt comes
     # from the original host launch journal, never from this terminal listing.
+    # C-746: `why` (the idle owner's list) receives one bounded code naming the
+    # proof that made the answer 'unknown'. It never changes the answer.
     import runpy
+    def unknown(code):
+        if why is not None and not why:
+            why.append(code)
+        return 'unknown'
     user = pwd.getpwuid(os.getuid())
     p = c['process']
     if (platform.system() != 'Darwin' or os.getuid() == 0 or os.getuid() != os.geteuid()
@@ -212,7 +259,7 @@ def darwin_retirement(c, terminal_owner=None):
         if terminal_owner is not None and (t.get('name') != c['agent_name'] or t.get('cwd') != c['cwd']
                 or t.get('rm') is not False or t.get('pid') != terminal_owner
                 or (t.get('foreground') or {}).get('pid') not in (terminal_owner, p['pid'])):
-            return 'unknown'
+            return unknown('terminal_owner_mismatch')
         native = runpy.run_path(c['primitive'])['darwin_identity']
         observed = darwin_execution(p, native)
         if t['state'] == 'finished' and observed == 'exited':
@@ -266,8 +313,12 @@ def darwin_retirement(c, terminal_owner=None):
             return screen() == first
         def live(t):
             return t.get('state') == 'live' and t.get('keep') is False and (not c['require_idle'] or idle(t))
-        if observed != 'alive' or not live(t):
-            return 'unknown'
+        if observed != 'alive':
+            return unknown('cli_identity_unproven')
+        if t.get('state') != 'live' or t.get('keep') is not False:
+            return unknown('terminal_not_live')
+        if not live(t):
+            return unknown('terminal_not_idle')
         if (terminal_owner or p['pid']) == t.get('pid'):
             return 'alive'
         # Read-only observation runs OUTSIDE the supervisor. The journal identifies
@@ -278,20 +329,20 @@ def darwin_retirement(c, terminal_owner=None):
             return (row.get('name') == c['agent_name'] and row.get('rm') is False
                     and (row.get('foreground') or {}).get('pid') in (parent, p['pid']))
         if terminal_owner is not None or type(parent) != int or parent <= 1 or not supervised(t):
-            return 'unknown'
+            return unknown('terminal_owner_mismatch')
         try:
             ppid = subprocess.check_output(['/bin/ps', '-p', str(p['pid']), '-o', 'ppid='],
                                            env={'LC_ALL': 'C'}, stdin=subprocess.DEVNULL,
                                            stderr=subprocess.DEVNULL, timeout=1).strip()
         except (OSError, subprocess.SubprocessError):
-            return 'unknown'
+            return unknown('cli_parent_unreadable')
         if ppid != str(parent).encode() or darwin_execution(p, native) != 'alive':
-            return 'unknown'
+            return unknown('terminal_owner_mismatch')
         again = rpc('terminal.get', dict(terminal=c['terminal']))
         if (live(again) and supervised(again) and all(again.get(k) == t[k] for k in ('address', 'created_ms', 'pid'))
                 and all(again['labels'].get(k) == v for k, v in labels.items())):
             return 'alive'
-        return 'unknown'
+        return unknown('terminal_changed')
 
 
 def kept_shell(t, p):
@@ -486,11 +537,25 @@ def main(c):
         labels['run'] = c['launch_run']
     if generation:
         labels['generation'] = generation
-    hc = optional(lambda: terminals(user.pw_dir, c['session'], labels, c['terminal'], c['platform'])) if c['live'] else None
+    # C-746: every null below carries a bounded reason, so a failed read is
+    # never mistaken for an empty one (and never for proof of absence).
+    why = {}
+    hc = None
+    if c['live']:
+        try:
+            hc = terminals(user.pw_dir, c['session'], labels, c['terminal'], c['platform'])
+        except (OSError, ValueError, KeyError, TypeError, RecursionError) as error:
+            why['terminals'] = unavailable(error)
+        else:
+            if not hc[0]:
+                # Not an error: the core has no matching row, or (with no
+                # attributed process either) a row changed while it was read.
+                why['terminals'] = 'terminal_unconfirmed' if hc[1] is None else 'terminal_not_registered'
     # The CLI can outlive a missing core. Independently identify only its
     # journaled pid (boot + birth + uid + process group), before AND after ps.
     processes = hc[1] if hc else None
     saved = c['process']
+    process_why = None
     if c['live'] and saved and saved['machine'] == c['target'] and saved['terminal'] == generation and saved['uid'] == os.getuid():
         def observed():
             return native['identity'](saved['machine'], saved['pid'], generation, saved['process_group'])
@@ -502,8 +567,18 @@ def main(c):
                     processes = (processes or []) + rows
             elif not processes:
                 processes = None
+                process_why = 'process_unconfirmed'
         elif birth is None and not processes:
             processes = None
+            process_why = 'process_identity_unreadable'
+        elif birth is not None:
+            process_why = 'process_identity_changed'
+    elif c['live'] and saved:
+        process_why = 'registered_process_mismatch'
+    elif c['live']:
+        process_why = 'no_registered_process'
+    if c['live'] and processes is None:
+        why['processes'] = process_why or ('process_attribution_incomplete' if hc else 'terminal_unreadable')
 
     def markers():
         with directory(base / 'generations' / generation) as d:
@@ -516,13 +591,16 @@ def main(c):
     # Local CLI homes are shared across replacement sessions. A matching hc
     # terminal does not bind a transcript; do not inspect that shared history.
     events = optional(lambda: log_events(base / 'sessions' / generation / logs)) if c['live'] and logs and marks else None
+    if c['live'] and events is None:
+        why['events'] = ('harness_unknown' if not logs else 'session_not_published' if not published
+                         else 'launch_markers_unreadable' if not marks else 'transcript_unreadable')
     def digest(path):
         with directory(Path(path).parent) as fd:
             return hashlib.sha256(read(fd, Path(path).name, 2*1024*1024)).hexdigest()
     with directory(c['root']) as fd:
         disk = os.fstatvfs(fd)
     return dict(terminals=hc[0] if hc else None, processes=processes,
-                events=events, markers=marks, helpers=[optional(lambda: digest(p)) if p else None for p in c['helpers']],
+                events=events, markers=marks, unavailable=why, helpers=[optional(lambda: digest(p)) if p else None for p in c['helpers']],
                 free_bytes=disk.f_bavail*disk.f_frsize)
 
 

@@ -196,6 +196,9 @@ export function sessionMaintenanceCandidate(
     at = Date.parse(now);
   if (handedBackForWork(state, a, at))
     return excluded("business_work_cooldown");
+  const refused = lastRetirementHandoff(state, a);
+  if (refused && refused <= at && at - refused < REFUSED_RETIREMENT_COOLDOWN_MS)
+    return excluded("retirement_refused");
   if (![lastRun, mcp, at].every(Number.isFinite) || lastRun > at || mcp > at)
     return excluded("activity_unknown");
   if (at - Math.max(lastRun, mcp) <= threshold * 60_000)
@@ -271,6 +274,96 @@ export function sharedStallRegistration(state: CommandState, a: Assignment) {
  * A-316: released -> started -> withdrawn -> handed off, again and again).
  */
 export const BUSINESS_WORK_COOLDOWN_MS = 10 * 60_000;
+
+/**
+ * C-746: after a macOS retirement was handed off because the session refused
+ * it (its idle owner kept refusing: a dirty or unprovable checkout, a busy or
+ * unreadable terminal), the same session is not reclaimed again for this long
+ * unless it shows a sign of life. Without it, every C-690/C-739 hand-back
+ * restarted the same three refused attempts and another handoff about every
+ * ten minutes (sensen A-252). The single notice is sent at the first handoff.
+ */
+export const REFUSED_RETIREMENT_COOLDOWN_MS = 6 * 60 * 60_000;
+
+/** The last sign of life of this Assignment: an MCP call, a Run start or finish. */
+export function signOfLifeAt(state: CommandState, a: Assignment): number {
+  return Math.max(
+    0,
+    Date.parse(a.last_mcp_activity_at ?? "") || 0,
+    ...runsOf(state.runs, a.id).flatMap((r) =>
+      [r.started_at, r.finished_at].map((at) => Date.parse(at ?? "") || 0),
+    ),
+  );
+}
+
+/** C-746: an event of this exact session (older events carry no ref). */
+function sameSession(a: Assignment, ref: unknown) {
+  return (
+    ref === undefined ||
+    JSON.stringify(canonicalSessionFacts(ref)) ===
+      JSON.stringify(canonicalSessionFacts(a.runtime_ref))
+  );
+}
+
+/**
+ * C-746: the latest handoff of this session since its last sign of life, as
+ * epoch ms (0 when none). Drives the refused-retirement cooldown.
+ */
+export function lastRetirementHandoff(
+  state: CommandState,
+  a: Assignment,
+): number {
+  if (!a.runtime_ref) return 0;
+  const since = signOfLifeAt(state, a);
+  let last = 0;
+  for (const e of eventsOfType(
+    state.events,
+    "idle_session_retirement_handed_off",
+  )) {
+    const p = e.payload as {
+      assignment_id?: string;
+      runtime_ref?: unknown;
+    } | null;
+    const t = Date.parse(e.created_at);
+    if (p?.assignment_id === a.id && sameSession(a, p.runtime_ref) && t > since)
+      last = Math.max(last, t);
+  }
+  return last;
+}
+
+/**
+ * C-746: whether a retirement notice for this session was already sent since
+ * its last sign of life. Repeated attempts of the same idle session then add
+ * no further notice; a session that showed life starts again.
+ */
+export function retirementNoticeSent(
+  state: CommandState,
+  a: Assignment,
+): boolean {
+  if (!a.runtime_ref) return false;
+  const since = signOfLifeAt(state, a);
+  return eventsOfType(state.events, "session_maintenance_attention").some(
+    (e) => {
+      const p = e.payload as {
+        assignment_id?: string;
+        reason?: string;
+        runtime_ref?: unknown;
+      } | null;
+      return (
+        p?.assignment_id === a.id &&
+        [
+          "retirement_pending",
+          "retirement_unavailable",
+          "retirement_timeout",
+        ].includes(p.reason ?? "") &&
+        // Older notices name no session; only those since the last sign of
+        // life can belong to the current one.
+        sameSession(a, p.runtime_ref) &&
+        Date.parse(e.created_at) > since
+      );
+    },
+  );
+}
 
 /** C-730: default for `probeInvalidStreak` before a stale terminal is released. */
 export const UNRESPONSIVE_PROBE_LIMIT = 3;

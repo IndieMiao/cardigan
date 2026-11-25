@@ -4,6 +4,7 @@ import type { RuntimeRef } from "@cardigan/domain";
 import { expect, test, vi } from "vitest";
 import {
   darwinRetirementObservation,
+  explainDarwinRefusal,
   stopDarwinTurn,
 } from "./darwin-retirement.js";
 import type { ExecutionConfig } from "./execution.js";
@@ -238,4 +239,63 @@ test("C-626 stop script: no-activity opt-in, busy, kept, foreign and reused PIDs
       new URL("../test-support/darwin-turn-stop.py", import.meta.url),
     ),
   ]);
+});
+
+test("C-746 explanation script: the owner's proofs in order, first failure only, never a signal", () => {
+  execFileSync("python3", [
+    "-IB",
+    fileURLToPath(
+      new URL("../test-support/darwin-idle-explain.py", import.meta.url),
+    ),
+  ]);
+});
+
+test("C-746: an anonymous refusal is explained by one read-only bound worker command", async () => {
+  const transport = vi.fn(async (_e: unknown, args: string[]) => ({
+    file: "ssh",
+    args,
+  }));
+  const ask = (reply: () => Promise<string>, who = owner) =>
+    explainDarwinRefusal(execution, ref, who, transport, vi.fn(reply));
+  expect(
+    await ask(async () => JSON.stringify({ refused: "terminal_not_idle" })),
+  ).toBe("terminal_not_idle");
+  const [, args] = transport.mock.calls[0]!;
+  expect(args.slice(0, 3)).toEqual(["/usr/bin/python3", "-IB", "-c"]);
+  expect(args[3]).toContain("def explain(inspector, owner, c)");
+  expect(args[4]).toContain("def darwin_retirement");
+  expect(args[5]).toContain("def workspace(c)");
+  // Nothing in the shipped explanation can signal or write.
+  expect(args[3]).not.toMatch(/os\.kill|terminate\(|signal\.SIG(?!ALRM)/u);
+  expect(JSON.parse(args[6]!)).toMatchObject({
+    platform: "darwin",
+    // The owner itself always requires idle and never accepts unknown activity.
+    require_idle: true,
+    process: processReceipt,
+    terminal: "t1",
+    generation: "g1",
+    root: "/worker",
+  });
+  expect(JSON.parse(args[6]!)).not.toHaveProperty("unknown_activity");
+  expect(transport.mock.calls[0]?.[2]).toEqual({ workerRuntimeDir: true });
+  // Every proof passes now.
+  expect(await ask(async () => JSON.stringify({ refused: null }))).toBeNull();
+  // Unbounded, malformed or failed replies are not an explanation.
+  for (const reply of [
+    async () => JSON.stringify({ refused: "../etc/passwd" }),
+    async () => "not json",
+    async () => {
+      throw new Error("ssh failed");
+    },
+  ])
+    expect(await ask(reply)).toBeUndefined();
+  // No enrolled receipt: no binding, no worker command.
+  const before = transport.mock.calls.length;
+  expect(
+    await ask(async () => "{}", {
+      project_id: "fixture",
+      assignment_id: "A-1",
+    } as typeof owner),
+  ).toBeUndefined();
+  expect(transport.mock.calls).toHaveLength(before);
 });
