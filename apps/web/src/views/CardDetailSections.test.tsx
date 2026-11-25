@@ -62,8 +62,14 @@ test("renders the head without waiting on panels, then requests just the selecte
     limit: 20,
     section: "overview",
   });
-  expect(screen.getByText("工作项 0/2 完成")).toBeTruthy();
-  expect(screen.getByText(/reviewer：还没有结论，依据 确认结果/)).toBeTruthy();
+  // C-699: the overview read alone fills the facts column.
+  const facts = screen.getByRole("complementary", { name: "卡片信息" });
+  const value = (label: string) =>
+    within(facts).getByText(label, { selector: "dt" }).nextElementSibling
+      ?.textContent;
+  expect(value("工作项")).toBe("0/2 完成");
+  // A server without verifier titles falls back to the role.
+  expect(value("验收")).toMatch(/W-2.*reviewer.*未结论/u);
   expect(cardPanel).not.toHaveBeenCalled();
   await selectCardTab(/^工作项/);
   await screen.findByText("已完成 0/2");

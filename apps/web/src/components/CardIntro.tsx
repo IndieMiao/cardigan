@@ -8,6 +8,10 @@ import { IdBadge } from "./IdTag.js";
 import { StatusIcon } from "./StatusIcon.js";
 import { Prose } from "./ui/prose.js";
 
+/**
+ * Where the card came from: the quoted request or the decision that opened
+ * it. C-699: related cards are listed once, in the overview's 关联 fact.
+ */
 export function CardSource({
   detail,
   projectId,
@@ -17,33 +21,11 @@ export function CardSource({
 }) {
   const source = detail.card.source,
     parent = detail.relations.source_card;
-  const related = detail.relations.cards;
   const quote = source?.kind === "quote" ? source.text.trim() : "";
-  if (!quote && !parent && !related.length) return null;
-  const cardLink = (c: { id: string; title: string }) => (
-    <a
-      aria-label={`${c.id} ${c.title}`}
-      title={c.title}
-      key={c.id}
-      href={routeHash({ kind: "card", projectId, cardId: c.id })}
-    >
-      <IdBadge id={c.id} />
-      <span className="related-card-title">{c.title}</span>
-    </a>
-  );
+  if (!quote && !parent) return null;
   return (
-    <section className="card-source" aria-label="来源和相关卡片">
-      <h2 className="card-background-summary">
-        <span>背景</span>
-        <span>
-          {[
-            quote ? "来源原话" : parent ? "拍板来源" : undefined,
-            related.length ? `${related.length}张相关卡片` : undefined,
-          ]
-            .filter(Boolean)
-            .join(" · ")}
-        </span>
-      </h2>
+    <section className="card-source" aria-label="来源">
+      <h2>来源</h2>
       {quote && (
         <blockquote>
           <LongContent>
@@ -55,7 +37,16 @@ export function CardSource({
       )}
       {parent && (
         <p>
-          来自 {cardLink(parent)} 的拍板{" "}
+          来自{" "}
+          <a
+            aria-label={`${parent.id} ${parent.title}`}
+            title={parent.title}
+            href={routeHash({ kind: "card", projectId, cardId: parent.id })}
+          >
+            <IdBadge id={parent.id} />
+            <span className="related-card-title">{parent.title}</span>
+          </a>{" "}
+          的拍板{" "}
           <a
             href={routeHash({
               kind: "card",
@@ -67,18 +58,6 @@ export function CardSource({
             <IdBadge id={parent.decision_id} />
           </a>
         </p>
-      )}
-      {!!related.length && (
-        <div className="related-cards">
-          <span>相关：</span>
-          {related.slice(0, 3).map(cardLink)}
-          {related.length > 3 && (
-            <details>
-              <summary>另外 {related.length - 3} 张</summary>
-              {related.slice(3).map(cardLink)}
-            </details>
-          )}
-        </div>
       )}
     </section>
   );

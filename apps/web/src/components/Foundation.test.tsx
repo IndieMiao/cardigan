@@ -390,7 +390,11 @@ test("U1 card uses shared tags and time without changing comment or attachment c
   expect(card.querySelector(".page-title h1")?.textContent).toContain(
     "准备发布",
   );
-  expect(within(card).getByText("代码审核").closest(".id-tag")).toBeTruthy();
+  expect(
+    within(within(card).getByRole("complementary", { name: "卡片信息" }))
+      .getByText("代码审核")
+      .closest(".id-tag"),
+  ).toBeTruthy();
   expect(card.querySelector("time")?.title).toMatch(/GMT/);
   expect(card.querySelector(".comment-box")).toBeTruthy();
   expect(card.querySelector(".attachment")).toBeTruthy();
@@ -448,7 +452,7 @@ test("U1 base text wrapping protects card header panels from unbroken commit SHA
             card: {
               ...detail.card,
               title: `等待确认 ${sha}`,
-              waiting_on: [{ kind: "review", ref: "D-1", label: sha }],
+              waiting_on: [{ kind: "blocked", ref: "D-1", label: sha }],
             },
           }),
         })}
@@ -456,9 +460,10 @@ test("U1 base text wrapping protects card header panels from unbroken commit SHA
     );
     const card = await screen.findByRole("article", { name: "卡片 C-1" });
     expect(card.querySelector(".page-title h1")?.textContent).toContain(sha);
+    // C-699: the blocker is said once, in the “下一步” panel.
     expect(
-      within(card).getByText("被什么阻塞").nextElementSibling?.textContent,
-    ).toBe(sha);
+      within(card).getByRole("region", { name: "下一步" }).textContent,
+    ).toContain(sha);
     // jsdom does not lay out text. Assert the inherited base policy from the real
     // stylesheet; a separate Chromium probe measures both viewport sizes.
     expect(window.getComputedStyle(document.body).overflowWrap).toBe(

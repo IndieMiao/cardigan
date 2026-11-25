@@ -83,6 +83,7 @@ export function templateIdentity(
     (card.template ? `未识别模板（${card.template}）` : "未知模板");
   return {
     kind,
+    name,
     label: `模板：${name} · ${version === undefined ? "版本未记录" : `v${version}`}`,
     omitted: builtin && card.template === "dev" && version === 2,
   };

@@ -201,7 +201,7 @@ test.each([undefined, []])(
         },
       }),
     });
-    await screen.findByRole("region", { name: "目标和验收标准" });
+    await screen.findByRole("region", { name: "目标" });
     expect(screen.queryByText(/风险标签/)).toBeNull();
   },
 );
@@ -239,31 +239,60 @@ test("a failed load shows the message and retries", async () => {
   expect(await screen.findByRole("heading", { level: 1 })).toBeTruthy();
 });
 
-test("the main column and sidebar answer the five questions", async () => {
+/** C-699: the value of one label in the overview's facts column. */
+async function fact(label: string) {
+  const facts = await screen.findByRole("complementary", { name: "卡片信息" });
+  const term = within(facts).getByText(label, { selector: "dt" });
+  return term.nextElementSibling as HTMLElement;
+}
+
+test("C-699 the overview: goal and criteria beside the card's standing facts, no index block", async () => {
   renderCard();
   const page = await screen.findByRole("article", { name: "卡片 C-1" });
   const header = within(page).getByRole("heading", { level: 1 });
   expect(header.textContent).toContain("准备发布");
-
-  const questions = [
-    ["进行到哪一步", "工作项 0/2 完成"],
-    ["下一步该谁做", "未命名的 reviewer"],
-    ["被什么阻塞", "等你拍板 D-1"],
-  ] as const;
-  for (const [question, answer] of questions) {
-    const term = within(page).getByText(question);
-    const value = term.parentElement?.querySelector("dd");
-    expect(value?.textContent ?? "", question).toContain(answer);
-  }
   expect(
-    within(page).getByRole("region", { name: "目标和验收标准" }).textContent,
+    within(page).getByRole("region", { name: "目标" }).textContent,
   ).toContain("把 0.1 发出去");
-  expect(page.textContent).toContain("测试通过");
   expect(
-    within(page).getByRole("region", { name: "验收责任" }).textContent,
-  ).toContain("reviewer：还没有结论，依据 没有阻塞问题");
+    within(page).getByRole("region", { name: "验收标准" }).textContent,
+  ).toContain("测试通过");
+  expect((await fact("工作项")).textContent).toBe("0/2 完成");
+  const verify = await fact("验收");
+  expect(verify.textContent).toContain("W-2");
+  expect(verify.textContent).toContain("代码审核");
+  expect(verify.textContent).toContain("未结论");
+  expect(
+    within(verify).getByRole("link", { name: /^W-2 / }).getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-1?at=work-item-W-2");
+  expect((await fact("关联")).textContent).toBe("—");
+  // Status, owners and blockers are said once, in the status row and panel.
+  for (const gone of [
+    "卡片索引与关联",
+    "进行到哪一步",
+    "下一步该谁做",
+    "被什么阻塞",
+    "谁验收、依据是什么",
+  ])
+    expect(within(page).queryByText(gone)).toBeNull();
   await selectCardTab(/^工作项/);
   expect(within(page).getByRole("link", { name: "V-1 交付" })).toBeTruthy();
+});
+
+test("C-699 empty overview sections do not render", async () => {
+  const detail = cardDetail();
+  renderCard({
+    card: async () => ({
+      ...detail,
+      card: { ...detail.card, acceptance_criteria: [] },
+    }),
+  });
+  await screen.findByRole("region", { name: "目标" });
+  expect(screen.queryByRole("region", { name: "验收标准" })).toBeNull();
+  expect(screen.queryByText(/验收标准（0/u)).toBeNull();
+  expect(screen.queryByRole("region", { name: "来源" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "最近结论" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "卡片依赖" })).toBeNull();
 });
 
 test("work items are collapsible and show owner, status and delivery", async () => {
@@ -280,7 +309,7 @@ test("work items are collapsible and show owner, status and delivery", async () 
   expect(details?.textContent).toContain("reviewer");
 });
 
-test("the relations section shows ids with their status", async () => {
+test("C-699 the 关联 fact links related cards, pull requests and decisions", async () => {
   const detail = cardDetail({
     relations: {
       decisions: [
@@ -304,16 +333,14 @@ test("the relations section shows ids with their status", async () => {
     },
   });
   renderCard({ card: async () => detail });
-  const relations = await screen.findByRole("region", { name: "关联" });
-  const decisions = screen.getByRole("region", { name: "拍板" });
-  expect(decisions.textContent).toContain("D-1");
-  expect(decisions.textContent).toContain("待拍板");
-  expect(decisions.textContent).toContain("阻塞中");
-  const decision = within(decisions).getByRole("link", { name: /^D-1 / });
+  const relations = await fact("关联");
+  const decision = within(relations).getByRole("link", { name: /^D-1/ });
   expect(decision.getAttribute("href")).toBe(
     "#/p/p-1/cards/C-1?at=decision-D-1",
   );
-  const related = within(relations).getByRole("link", { name: /^C-2 / });
+  // A deep link to the decision lands here while its entry is not loaded.
+  expect(decision.closest("#decision-D-1")).toBeTruthy();
+  const related = within(relations).getByRole("link", { name: /^C-2/ });
   expect(related.getAttribute("href")).toBe("#/p/p-1/cards/C-2");
   const pull = within(relations).getByRole("link", {
     name: "https://example.com/pr/7",
@@ -350,7 +377,7 @@ test("a pull request URL is only a link when its scheme is allowed", async () =>
     },
   });
   renderCard({ card: async () => detail });
-  const relations = await screen.findByRole("region", { name: "关联" });
+  const relations = await fact("关联");
 
   // Agent-supplied schemes are text, not links, whatever React would allow.
   expect(
@@ -546,7 +573,7 @@ test("C-534: the card goal uses the shared Markdown renderer, tables included", 
     }),
   });
   const purpose = (
-    await screen.findByRole("region", { name: "目标和验收标准" })
+    await screen.findByRole("region", { name: "目标" })
   ).querySelector(".markdown");
   const table = purpose?.querySelector(".ui-markdown-table > table");
   expect(table?.querySelector('td[data-align="right"]')?.textContent).toBe("1");
@@ -572,8 +599,8 @@ test("C-534: an acceptance criterion stays a list item and renders its table saf
     }),
   });
   const list = (
-    await screen.findByRole("region", { name: "目标和验收标准" })
-  ).querySelector(".acceptance-criteria ul");
+    await screen.findByRole("region", { name: "验收标准" })
+  ).querySelector("ul");
   const items = list?.querySelectorAll(":scope > li") ?? [];
   expect(items).toHaveLength(3);
   expect(items[0]?.textContent?.trim()).toBe("测试通过");

@@ -1,4 +1,9 @@
-import { type ComponentProps, forwardRef, type ReactNode } from "react";
+import {
+  type ComponentProps,
+  Fragment,
+  forwardRef,
+  type ReactNode,
+} from "react";
 import { cn } from "../../lib/utils.js";
 import { DetailProse } from "../ui/prose.js";
 import styles from "./CardDetailLayout.module.css";
@@ -84,6 +89,64 @@ export function DetailNextStepLine(
 ) {
   return <div {...props} className={styles.nextLine} />;
 }
+/**
+ * C-699: the overview: a main column and a 280px facts column beside it. In a
+ * drawer and at ≤760px one column, the facts below a 1px rule.
+ */
+export function CardOverviewGrid({
+  facts,
+  factsLabel,
+  children,
+}: {
+  readonly facts?: ReactNode;
+  readonly factsLabel?: string;
+  readonly children?: ReactNode;
+}) {
+  return (
+    <div className={styles.overview}>
+      <div className={styles.overviewMain}>{children}</div>
+      {facts && (
+        <aside aria-label={factsLabel} className={styles.overviewFacts}>
+          {facts}
+        </aside>
+      )}
+    </div>
+  );
+}
+
+export interface DetailFact {
+  readonly key: string;
+  readonly label: ReactNode;
+  readonly value: ReactNode;
+}
+/**
+ * C-699: label–value pairs, 13/20 with a 64px muted label. Two pairs a row in
+ * a drawer, one at ≤760px.
+ */
+export function DetailFacts({
+  facts,
+}: {
+  readonly facts: readonly DetailFact[];
+}) {
+  return (
+    <dl className={styles.facts}>
+      {facts.map((fact) => (
+        <Fragment key={fact.key}>
+          <dt>{fact.label}</dt>
+          <dd>{fact.value}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
+/** Items of one fact value that wrap as a group, e.g. a work item and its verdict. */
+export function DetailFactGroup(
+  props: Omit<ComponentProps<"span">, "className">,
+) {
+  return <span {...props} className={styles.factGroup} />;
+}
+
 /** Below DetailNextStep: forms that a panel action opens in place. */
 export function DetailNextStepForms(
   props: Omit<ComponentProps<"div">, "className">,

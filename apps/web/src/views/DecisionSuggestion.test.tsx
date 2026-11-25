@@ -477,7 +477,7 @@ test("C-192: card details show no suggestion section without a suggestion or for
       cardId="C-1"
     />,
   );
-  await screen.findByRole("complementary", { name: "卡片概况" });
+  await screen.findByRole("complementary", { name: "卡片信息" });
   expect(
     screen.queryByRole("region", { name: SUGGESTION_COPY.cardSection }),
   ).toBe(null);

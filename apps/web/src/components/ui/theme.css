@@ -70,6 +70,9 @@
     --ui-attention-line: 3px;
     /* C-695: the panel's text column wraps its buttons below under this. */
     --ui-next-step-body: 360px;
+    /* C-699: the overview's facts column and the label column inside it. */
+    --ui-detail-facts: 280px;
+    --ui-detail-facts-label: 64px;
     --ui-pill-radius: 999px;
     --ui-panel-padding: 16px;
     --ui-shadow: 0 4px 16px #0003;

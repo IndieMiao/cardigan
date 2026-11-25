@@ -2,12 +2,9 @@ import { useState } from "react";
 import {
   type CardDetail,
   type CardiganClient,
-  type DecisionView,
   describeWriteError,
   type WorkItemView,
 } from "../api.js";
-import { cardChecking, PRECHECK_LABEL } from "../card-checking.js";
-import { decisionTitle } from "../decision-labels.js";
 import {
   exclusionReason,
   requirementParts,
@@ -16,17 +13,27 @@ import {
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
 import { runPresence } from "../run-presence.js";
-import { SUGGESTION_COPY } from "../suggestion-copy.js";
-import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
 import { DecisionRouting } from "./DecisionRouting.js";
-import { EmployeeIdentity, NextOwners } from "./EmployeeIdentity.js";
+import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag, Time } from "./Foundation.js";
-import { CardDetailInlineOwner } from "./layout/CardDetailLayout.js";
-import { PlainSummary } from "./PlainSummary.js";
+import {
+  CardDetailInlineOwner,
+  type DetailFact,
+  DetailFactGroup,
+  DetailFacts,
+} from "./layout/CardDetailLayout.js";
+import { PRIORITY_LEVELS } from "./Priority.js";
+import { templateIdentity } from "./TemplateMarker.js";
 import { Checkbox } from "./ui/checkbox.js";
 import { Prose } from "./ui/prose.js";
 
-export function CardSidebar({
+const OPEN_DECISION = ["open", "provisional", "snoozed"];
+
+/**
+ * C-699: the overview's facts column. Status, next owners and blockers live
+ * in the status row and “下一步”; only the card's standing facts stay here.
+ */
+export function CardOverviewFacts({
   detail,
   projectId,
   cardId,
@@ -36,7 +43,7 @@ export function CardSidebar({
   cardId: string;
 }) {
   const { card, overview, work_items, relations } = detail;
-  const checks = cardChecking(card);
+  const workCount = overview?.work_count ?? work_items.length;
   const completed =
     overview?.completed_work_count ??
     work_items.filter((w) => ["accepted", "passed"].includes(w.status)).length;
@@ -49,145 +56,133 @@ export function CardSidebar({
         verdict: detail.review_matrix.findLast((r) => r.work_item_id === w.id)
           ?.verdict,
       }));
+  const dependency = card.dependency;
   const link = (anchor: string) =>
     routeHash({ kind: "card", projectId, cardId, anchor });
-  return (
-    <aside className="card-sidebar" aria-label="卡片概况">
-      <section>
-        <h2>卡片索引与关联</h2>
-        <section aria-label="当前进度">
-          <dl className="questions">
-            <div>
-              <dt>进行到哪一步</dt>
-              <dd>
-                <StatusTag status={card.status} />
-                <span>
-                  工作项 {completed}/{overview?.work_count ?? work_items.length}{" "}
-                  完成
-                </span>
-              </dd>
-            </div>
-            <div>
-              <dt>下一步该谁做</dt>
-              <dd>
-                <NextOwners owners={card.next_owners} />
-              </dd>
-            </div>
-            <div>
-              <dt>被什么阻塞</dt>
-              <dd>
-                {card.waiting_on.length
-                  ? card.waiting_on
-                      .map((w) =>
-                        checks.precheckWait(w)
-                          ? `${w.ref} ${PRECHECK_LABEL}`
-                          : w.label,
-                      )
-                      .join("；")
-                  : "没有被阻塞"}
-              </dd>
-            </div>
-          </dl>
-        </section>
-        <section aria-label="验收责任">
-          <section>
-            <h3>谁验收、依据是什么</h3>
-            <ul className="plain-list">
-              {verifiers.map((w) => (
-                <li key={w.id}>
-                  {w.role_id}：
-                  {w.verdict ? <StatusTag status={w.verdict} /> : "还没有结论"}
-                  {w.completion_criteria.length > 0 &&
-                    `，依据 ${w.completion_criteria.join("；")}`}
-                </li>
-              ))}
-            </ul>
-          </section>
-        </section>
-        {!!relations.decisions.length && (
-          <section aria-label="拍板">
-            <h3>拍板（{relations.decisions.length}）</h3>
-            <ul className="plain-list">
-              {relations.decisions.map((d) => (
-                <li
-                  key={d.id}
-                  id={
-                    detail.timeline.some((e) => e.decision_id === d.id)
-                      ? `decision-summary-${d.id}`
-                      : `decision-${d.id}`
-                  }
-                >
-                  <IdTag
-                    id={d.id}
-                    label="拍板"
-                    detail={d.question}
-                    href={link(`decision-${d.id}`)}
-                  />{" "}
-                  <StatusTag status={d.status} />
-                  {d.blocking &&
-                    ![
-                      "resolved",
-                      "withdrawn",
-                      "superseded",
-                      "revoked",
-                    ].includes(d.status) && <span>阻塞中</span>}
-                  <p>
-                    {decisionTitle(
-                      detail.decisions.find((q) => q.id === d.id) ?? d,
-                    )}
-                  </p>
-                  <OpenPlainSummary
-                    decision={detail.decisions.find((q) => q.id === d.id)}
-                  />
-                  <SuggestionLine
-                    decision={detail.decisions.find((q) => q.id === d.id)}
-                  />
-                  <DecisionAffectedCards
-                    decision={detail.decisions.find((q) => q.id === d.id)}
-                    projectId={projectId}
-                  />
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-        <section aria-label="关联">
-          <h3>关联</h3>
-          {!relations.cards.length && !relations.pull_requests.length && (
-            <EmptyState>没有关联卡片或 PR。</EmptyState>
-          )}
-          <ul className="plain-list">
-            {relations.cards.map((c) => (
-              <li key={c.id}>
+  const related =
+    relations.cards.length +
+    relations.pull_requests.length +
+    relations.decisions.length;
+  const facts: DetailFact[] = [
+    {
+      key: "template",
+      label: "模板",
+      value: templateIdentity(card, detail.template).name,
+    },
+    {
+      key: "priority",
+      label: "优先级",
+      value: PRIORITY_LEVELS[card.priority]?.label ?? "—",
+    },
+    ...(workCount
+      ? [
+          {
+            key: "work",
+            label: "工作项",
+            value: `${completed}/${workCount} 完成`,
+          },
+        ]
+      : []),
+    ...(verifiers.length
+      ? [
+          {
+            key: "verify",
+            label: "验收",
+            value: verifiers.map((w) => (
+              <DetailFactGroup key={w.id}>
                 <IdTag
-                  id={c.id}
-                  label={c.title}
-                  href={routeHash({ kind: "card", projectId, cardId: c.id })}
+                  id={w.id}
+                  label={w.title ?? w.role_id}
+                  href={link(`work-item-${w.id}`)}
                 />{" "}
-                <StatusTag status={c.status} />
-              </li>
-            ))}
-          </ul>
-          <ul className="plain-list">
-            {relations.pull_requests.map((p) => (
-              <li key={p.delivery_id}>
-                {isHttpLink(p.pr_url) ? (
-                  <a href={p.pr_url} target="_blank" rel="noopener noreferrer">
-                    {p.pr_url}
-                  </a>
-                ) : (
-                  <span className="plain-url">{p.pr_url}</span>
+                {w.verdict ? <StatusTag status={w.verdict} /> : "未结论"}
+              </DetailFactGroup>
+            )),
+          },
+        ]
+      : []),
+    ...(dependency &&
+    (dependency.predecessors.length || dependency.successors.length)
+      ? [
+          {
+            key: "dependency",
+            label: "依赖",
+            value: (
+              <>
+                <span>前置 {dependency.predecessors.length}</span>
+                <span>后续 {dependency.successors.length}</span>
+                <span>最长链 {dependency.critical_path_length}</span>
+              </>
+            ),
+          },
+        ]
+      : []),
+    { key: "created", label: "创建", value: <Time value={card.created_at} /> },
+    {
+      key: "related",
+      label: "关联",
+      value: related ? (
+        <>
+          {relations.cards.map((c) => (
+            <IdTag
+              key={c.id}
+              id={c.id}
+              label=""
+              detail={`${c.id} ${c.title}`}
+              href={routeHash({ kind: "card", projectId, cardId: c.id })}
+            />
+          ))}
+          {relations.pull_requests.map((p) =>
+            isHttpLink(p.pr_url) ? (
+              <a
+                key={p.delivery_id}
+                href={p.pr_url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {p.pr_url}
+              </a>
+            ) : (
+              <span key={p.delivery_id} className="plain-url">
+                {p.pr_url}
+              </span>
+            ),
+          )}
+          {relations.decisions.map((d) => {
+            const open = detail.decisions.find(
+              (q) => q.id === d.id && OPEN_DECISION.includes(q.status),
+            );
+            return (
+              // Deep links to a decision land here when its timeline entry is
+              // not on the loaded page.
+              <DetailFactGroup
+                key={d.id}
+                id={
+                  detail.timeline.some((e) => e.decision_id === d.id)
+                    ? `decision-summary-${d.id}`
+                    : `decision-${d.id}`
+                }
+              >
+                <IdTag
+                  id={d.id}
+                  detail={`${d.id} ${d.question}`}
+                  href={link(`decision-${d.id}`)}
+                />
+                {/* A human's own decision is told by “下一步”; one routed to
+                    PM is said only here. */}
+                {open?.decider === "role:pm" && (
+                  <DecisionRouting decision={open} />
                 )}
-                <p>
-                  {p.work_item_id}（<StatusTag status={p.status} />）
-                </p>
-              </li>
-            ))}
-          </ul>
-        </section>
-      </section>
-    </aside>
-  );
+              </DetailFactGroup>
+            );
+          })}
+        </>
+      ) : (
+        "—"
+      ),
+    },
+  ];
+  return <DetailFacts facts={facts} />;
 }
 
 export function CardWorkItems({
@@ -336,56 +331,6 @@ function MachinePlacement({ item }: { readonly item: WorkItemView }) {
           ))}
         </ul>
       )}
-    </>
-  );
-}
-
-/** C-192: read-only suggestion; one-click handling lives in Needs You. */
-function SuggestionLine({
-  decision,
-}: {
-  readonly decision: DecisionView | undefined;
-}) {
-  const s = decision?.suggestion;
-  if (
-    !decision ||
-    !s ||
-    !["open", "provisional", "snoozed"].includes(decision.status)
-  )
-    return null;
-  const label =
-    decision.trigger === "merge_confirmation"
-      ? (SUGGESTION_COPY.mergeOptions[s.option] ?? s.option)
-      : (decision.options.find((o) => o.key === s.option)?.description ??
-        s.option);
-  return (
-    <p className="hint">
-      {SUGGESTION_COPY.line(label, s.rationale)}
-      {s.stale && (
-        <>
-          {" "}
-          <StatusTag status="superseded" label={SUGGESTION_COPY.stale} />
-        </>
-      )}
-    </p>
-  );
-}
-
-/** C-202: the plain summary of an open decision, first thing under its title. */
-function OpenPlainSummary({
-  decision,
-}: {
-  readonly decision: DecisionView | undefined;
-}) {
-  if (
-    !decision ||
-    !["open", "provisional", "snoozed"].includes(decision.status)
-  )
-    return null;
-  return (
-    <>
-      <PlainSummary id={decision.id} summary={decision.plain_summary} compact />
-      <DecisionRouting decision={decision} />
     </>
   );
 }

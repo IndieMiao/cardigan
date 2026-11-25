@@ -693,6 +693,7 @@ export interface CardDetail {
       WorkItemView,
       "id" | "role_id" | "completion_criteria"
     > &
+      Partial<Pick<WorkItemView, "title">> &
       Pick<ReviewMatrixRow, "verdict">)[];
     attachment_count: number;
     completion_id?: string;
