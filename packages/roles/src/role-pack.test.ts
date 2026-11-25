@@ -433,6 +433,8 @@ describe("default role kinds (p2v-12 §2.3)", () => {
         "submit_delivery",
         "request_recheck",
         "request_check",
+        // C-734: host-run image generation, gated again by the host config.
+        "generate_image",
       ].sort(),
     );
     // Plan §2.3 grants no attachment reading to the designer (C-104 V-476).
@@ -442,6 +444,15 @@ describe("default role kinds (p2v-12 §2.3)", () => {
     for (const tool of role.allowed_tools)
       expect(ROLE_TOOL_ALLOWLISTS.produce).toContain(tool);
     expect(validateRole(role).ok).toBe(true);
+    // Other default roles do not receive image generation.
+    for (const other of [
+      "coder",
+      "frontend_engineer",
+      "design_director",
+    ] as const)
+      expect(defaultRoleDefinition(other, launch).allowed_tools).not.toContain(
+        "generate_image",
+      );
   });
 
   test("design_director is a verifier with exactly the planned tools", () => {

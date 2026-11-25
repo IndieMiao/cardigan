@@ -161,6 +161,8 @@ export {
   observeRetirementForDispatch,
   recordRetirementDispatch,
 } from "./idle-session-retirement.js";
+export * from "./image-generation-config.js";
+export * from "./image-generation-service.js";
 export {
   type LaunchedRun,
   type LaunchHost,

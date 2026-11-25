@@ -270,6 +270,7 @@ export * from "./host-ops.js";
 export * from "./hot-history.js";
 export * from "./hot-history-shadow.js";
 export * from "./ids.js";
+export * from "./image-generation.js";
 export {
   currentInteraction,
   type InteractionSample,

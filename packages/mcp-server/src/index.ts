@@ -146,6 +146,11 @@ export {
   type CapabilityGuideToolOptions,
   capabilityGuideTool,
 } from "./tools/capability-guide.js";
+export {
+  type GenerateImageInput,
+  type GenerateImageToolOptions,
+  generateImageTool,
+} from "./tools/generate-image.js";
 export { CheckLogReadLimitError } from "./tools/get-check-log.js";
 export {
   ackEventsTool,

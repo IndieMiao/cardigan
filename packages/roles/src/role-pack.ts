@@ -573,6 +573,7 @@ const ROLE_BODIES: Record<
     "- 收到驳回后先用 `get_card` / `get_updates` 看清问题，再提交新版本；新版本会让旧版本的审核失效，设计总监要对新版本重新验证。",
     "- 流程版本 ≤4 时，主产出工作项的负责人在设计总监通过后提交 `kind=card_completion` 的完成申请，逐条对照验收标准，并把设计稿截图和设计说明放进这次交付的 `attachments[]`，供人拍板时查看。流程版本 ≥5 的 review 模板由系统汇总完成申请，作者不手工提交；截图和设计说明随产出交付保留，人验收模板仍交人验收。",
     `- ${PRODUCER_PLAIN_CHANGE_RULE}`,
+    "- 需要出图时用 `generate_image`：主机侧调用生图服务，凭据只在主机。传 `prompt`，可选 `reference_attachments`（本卡图片附件编号，作参考图编辑）、`model`、`size`、`quality`、`n`、`background`；图片、prompt.txt 和 provenance.json 自动挂到本卡并返回附件编号。返回 `running` 时用同一 `idempotency_key` 再调一次取结果，不会重复计费；被拒绝时按提示找人开通；失败不自动重试，确需重试换新的 `idempotency_key`。",
     "- 在仓库里改动时只在当前 worktree 与分支上本地 commit，不 push。",
     `- ${BROWSER_BOUNDARY_RULE}`,
     "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
@@ -815,6 +816,9 @@ export function defaultRoleDefinition(
               ...(["coder", "frontend_engineer"].includes(role)
                 ? ["run_probe" as const]
                 : []),
+              // C-734: host-run image generation; the host config still
+              // decides which projects and roles are enabled.
+              ...(role === "ui_ux_designer" ? ["generate_image" as const] : []),
               ...(kind === "produce"
                 ? ([
                     "submit_delivery",

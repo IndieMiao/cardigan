@@ -51,6 +51,10 @@ import {
   capabilityGuideTool,
 } from "./tools/capability-guide.js";
 import {
+  type GenerateImageToolOptions,
+  generateImageTool,
+} from "./tools/generate-image.js";
+import {
   type CheckLogOptions,
   getCheckLogTool,
 } from "./tools/get-check-log.js";
@@ -92,6 +96,7 @@ export interface McpServerOptions
     PublicationOptions,
     ProbeToolOptions,
     MacosCheckToolOptions,
+    GenerateImageToolOptions,
     SharedFileToolOptions,
     CapabilityGuideToolOptions {
   readonly store: McpBackend;
@@ -169,6 +174,7 @@ export function serverTools(
     PublicationOptions &
     ProbeToolOptions &
     MacosCheckToolOptions &
+    GenerateImageToolOptions &
     SharedFileToolOptions &
     CapabilityGuideToolOptions,
 ): readonly ToolDefinition[] {
@@ -177,6 +183,7 @@ export function serverTools(
     getCheckLogTool(options),
     runProbeTool(options),
     macosCheckTool(options),
+    generateImageTool(options),
     ...sharedFileTools(options),
     capabilityGuideTool(options),
     mobileSigningTool(options),

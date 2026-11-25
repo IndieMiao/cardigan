@@ -166,6 +166,7 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
       tool !== "request_recheck" &&
       tool !== "request_check" &&
       tool !== "run_probe" &&
+      tool !== "generate_image" &&
       tool !== "request_mobile_signature" &&
       tool !== "publish_artifact" &&
       tool !== "replace_verification_work_item" &&
