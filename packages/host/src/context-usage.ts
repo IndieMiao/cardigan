@@ -401,6 +401,7 @@ export async function readSessionContexts(
             ...(metadata.model_output_at
               ? { model_output_at: metadata.model_output_at }
               : {}),
+            ...(metadata.written_at ? { written_at: metadata.written_at } : {}),
             ...(metadata.error &&
             progress &&
             progress.session_id === metadata.session_id &&

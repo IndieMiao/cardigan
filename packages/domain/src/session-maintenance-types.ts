@@ -14,6 +14,7 @@ export const sessionMaintenanceReasons = {
   retirement_unavailable: "未核：正常终止能力或进程身份不可用",
   run_busy: "等待未结束的执行",
   operation_pending: "等待会话操作结束",
+  startup_failure_pending: "启动失败待处理",
   no_session: "没有终端会话",
   recent_activity: "尚未达到空闲候选时长",
   activity_unknown: "未核：缺少有效活动时间",
@@ -54,6 +55,8 @@ export function sessionMaintenanceNeedsAttention(
     "retirement_refused",
     // C-672: the system closes the terminal and resumes on its own.
     "agent_exited",
+    // C-752: the startup-failure report already asks PM or the human.
+    "startup_failure_pending",
   ].includes(reason);
 }
 export interface SessionMaintenanceView {

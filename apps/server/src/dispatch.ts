@@ -156,7 +156,10 @@ import {
   wakeFailure,
 } from "./dispatch-alert.js";
 import { ClientRecovery } from "./dispatch-client-recovery.js";
-import { InactiveRunReaper } from "./dispatch-inactive.js";
+import {
+  InactiveRunReaper,
+  type ScarceInactiveCancel,
+} from "./dispatch-inactive.js";
 import { InactivityAlerts } from "./dispatch-inactivity-alerts.js";
 import {
   acknowledgeInbox,
@@ -221,6 +224,11 @@ export interface DispatcherOptions {
     project: ProjectId,
     assignment: Assignment["id"],
   ) => HarnessActivity | undefined;
+  /** C-752: cached Claude transcript write evidence for the inactivity reaper. */
+  readonly harnessFileActivity?: (
+    project: ProjectId,
+    assignment: Assignment["id"],
+  ) => HarnessActivity | undefined;
   readonly inspectHarnessActivity?: (
     project: ProjectId,
     stopTarget?: Assignment["id"],
@@ -262,6 +270,8 @@ export interface DispatcherOptions {
   readonly queuedRecheckAfterMs?: number;
   readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
+  /** C-752: optional shorter grace for Runs holding scarce resources; off by default. */
+  readonly scarceInactiveCancel?: ScarceInactiveCancel | null;
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
   readonly snapshot: (
     assignment: Assignment,
@@ -436,6 +446,12 @@ export class Dispatcher {
         : {}),
       ...(options.harnessActivity
         ? { harnessActivity: options.harnessActivity }
+        : {}),
+      ...(options.harnessFileActivity
+        ? { harnessFileActivity: options.harnessFileActivity }
+        : {}),
+      ...(options.scarceInactiveCancel
+        ? { scarce: options.scarceInactiveCancel }
         : {}),
       loadState: (tx, project) => this.loadState(tx, project),
       alert: (tx, state, assignment, run, reason) => {

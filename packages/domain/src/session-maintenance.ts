@@ -9,12 +9,12 @@ import {
   retirementOwnsSession,
 } from "./retirement-session.js";
 import { runsOf } from "./run-index.js";
-
 import {
   SESSION_IDLE_MINUTES,
   type SessionMaintenanceReason,
   type SessionMaintenanceView,
 } from "./session-maintenance-types.js";
+import { openStartupFailure } from "./startup-failure.js";
 
 export {
   retirementOwnsSession,
@@ -181,6 +181,8 @@ export function sessionMaintenanceCandidate(
     )
   )
     return excluded("operation_pending");
+  // C-752: the startup-failure report owns this session until it recovers.
+  if (openStartupFailure(state, a)) return excluded("startup_failure_pending");
   if (a.role_upgrade) return excluded("upgrade_pending");
   if (a.idle_retirement?.handoff && retirementOwnsSession(a))
     return excluded("retained_for_dispatch");

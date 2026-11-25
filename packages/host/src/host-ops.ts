@@ -1189,6 +1189,28 @@ export class HostOpsService {
     }
     return row?.activity;
   }
+  /**
+   * C-752: the completed background sample's Claude transcript write evidence,
+   * under the same freshness rule as session metadata. It only lets the
+   * dispatcher decide to start a stop-time read; the stop rereads it.
+   */
+  harnessFileActivity(
+    project: ProjectId,
+    assignment: AssignmentId,
+  ): HarnessActivity | undefined {
+    const cached = this.sessionSamples.get(project);
+    const row = cached?.samples.find((s) => s.assignment_id === assignment);
+    const file = row?.fileActivity;
+    if (
+      !cached ||
+      !file ||
+      row.activity_status === "read_failed" ||
+      this.sessionPolls.has(project)
+    )
+      return;
+    const age = Date.parse(this.clock.now()) - cached.completedAt;
+    return age < 0 || age > file.stale_after_ms ? undefined : file;
+  }
 
   /** Alerts can join an active poll. Destructive checks must start a new, target-only read. */
   async inspectHarnessActivity(

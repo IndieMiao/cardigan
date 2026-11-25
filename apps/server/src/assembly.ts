@@ -53,6 +53,7 @@ export interface ControlPlaneOptions {
   readonly upstream?: LaunchConfig;
   readonly hostOpsTick?: () => Promise<void>;
   readonly harnessActivity?: DispatcherOptions["harnessActivity"];
+  readonly harnessFileActivity?: DispatcherOptions["harnessFileActivity"];
   readonly inspectHarnessActivity?: DispatcherOptions["inspectHarnessActivity"];
   readonly inactivityInspectionTimeoutMs?: number;
   readonly hostOpsPatrolIntervalMs?: number;
@@ -86,6 +87,7 @@ export interface ControlPlaneOptions {
   readonly queuedRecheckAfterMs?: number;
   readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
+  readonly scarceInactiveCancel?: DispatcherOptions["scarceInactiveCancel"];
   readonly lossGraceMs?: number;
   readonly eventSilenceMs?: number;
   readonly runtimeFailureLimit?: number;
@@ -172,6 +174,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(options.harnessActivity
       ? { harnessActivity: options.harnessActivity }
       : {}),
+    ...(options.harnessFileActivity
+      ? { harnessFileActivity: options.harnessFileActivity }
+      : {}),
     ...(options.inspectHarnessActivity
       ? { inspectHarnessActivity: options.inspectHarnessActivity }
       : {}),
@@ -198,6 +203,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(options.inactiveCancelAfterMs === undefined
       ? {}
       : { inactiveCancelAfterMs: options.inactiveCancelAfterMs }),
+    ...(options.scarceInactiveCancel
+      ? { scarceInactiveCancel: options.scarceInactiveCancel }
+      : {}),
     ...(options.runLimit ? { runLimit: options.runLimit } : {}),
     ...(options.leases ? { leases: options.leases } : {}),
     ...(options.projectQuota ? { projectQuota: options.projectQuota } : {}),
