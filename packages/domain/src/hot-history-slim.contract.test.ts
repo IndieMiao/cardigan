@@ -80,7 +80,7 @@ const done = (n: number): Card => ({
 });
 const telemetry = (c: CardId) =>
   [...LEAN_COLD_CARD_OMITTED_EVENT_TYPES].map((type) => event(type, c));
-const [c1, c5, c6, c7, c8, c9, c10, c11, c12] = [
+const [c1, c5, c6, _c7, c8, c9, c10, c11, c12] = [
   1, 5, 6, 7, 8, 9, 10, 11, 12,
 ].map((n) => id("card", n)) as CardId[] as [
   CardId,

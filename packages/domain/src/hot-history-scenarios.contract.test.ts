@@ -1,4 +1,3 @@
-import { fullEventHistory } from "./event-index.js";
 import { describe, expect, test } from "vitest";
 import {
   assignmentDependenciesAllowStart,
@@ -26,6 +25,7 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "./entities.js";
+import { fullEventHistory } from "./event-index.js";
 import { pendingHostOpsActions } from "./host-ops.js";
 import {
   COLD_CARD_OMITTED_EVENT_TYPES,
