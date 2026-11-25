@@ -9,6 +9,13 @@ export const ASSIGNMENT_STOP_RELEASED = "assignment_stop_released";
 export const ASSIGNMENT_START_REQUESTED = "assignment_start_requested";
 /** C-620: exit of the stopped session proven once, reused by a retry. */
 export const ASSIGNMENT_STOP_EXIT_CONFIRMED = "assignment_stop_exit_confirmed";
+/**
+ * C-732: a pause ended on the human's behalf: PM Ops (under the project's
+ * `permission` delegation) or the human answered the system's resume
+ * question. Ends the pause like a human start; the Dispatcher then delivers
+ * the waiting bells in a fresh session.
+ */
+export const ASSIGNMENT_HOLD_RESUMED = "assignment_hold_resumed";
 
 /**
  * C-620: `held` is an explicit human pause (and every legacy stop without a
@@ -31,7 +38,20 @@ interface StopIndex {
    * the host has already started releasing that terminal.
    */
   readonly releasing: ReadonlyMap<unknown, string>;
+  /** C-732: who recorded the latest stop of a still-held pause, and when. */
+  readonly paused: ReadonlyMap<unknown, HeldPause>;
 }
+/** C-732: the author and time of the stop that holds an Assignment. */
+export interface HeldPause {
+  readonly by: string;
+  readonly at: string;
+  /** Event id of that `assignment_stopped`. */
+  readonly event_id: string;
+}
+const authorOf = (actor: Event["actor"]) =>
+  actor.kind === "assignment"
+    ? `assignment:${actor.assignment_id}`
+    : actor.kind;
 // One index per immutable event snapshot. Array order (not timestamps or
 // per-card sequence numbers) remains the authority, exactly as in the scan.
 const stoppedAssignments = new WeakMap<readonly Event[], StopIndex>();
@@ -49,6 +69,7 @@ function stopIndex(events: readonly Event[]): StopIndex {
     const episode = new Map<unknown, number>();
     const exited = new Map<unknown, unknown>();
     const releasing = new Map<unknown, string>();
+    const paused = new Map<unknown, HeldPause>();
     const close = (id: unknown) => {
       episode.delete(id);
       exited.delete(id);
@@ -57,10 +78,16 @@ function stopIndex(events: readonly Event[]): StopIndex {
     for (const [at, event] of fullEventHistory(events).entries()) {
       const id = field(event.payload, "assignment_id");
       if (event.type === ASSIGNMENT_STOPPED) {
-        state.set(
-          id,
-          field(event.payload, "hold") === false ? "stopping" : "held",
-        );
+        const next =
+          field(event.payload, "hold") === false ? "stopping" : "held";
+        state.set(id, next);
+        if (next === "held")
+          paused.set(id, {
+            by: authorOf(event.actor),
+            at: event.created_at,
+            event_id: event.id,
+          });
+        else paused.delete(id);
         recorded.set(id, true);
         // A retried stop continues the same episode.
         if (!episode.has(id)) episode.set(id, at);
@@ -71,9 +98,11 @@ function stopIndex(events: readonly Event[]): StopIndex {
       } else if (
         event.type === "run_dispatched" ||
         (event.type === ASSIGNMENT_START_REQUESTED &&
-          event.actor.kind === "human")
+          event.actor.kind === "human") ||
+        event.type === ASSIGNMENT_HOLD_RESUMED
       ) {
         state.delete(id);
+        paused.delete(id);
         recorded.set(id, false);
         close(id);
       } else if (event.type === ASSIGNMENT_STOP_RELEASED) {
@@ -86,7 +115,7 @@ function stopIndex(events: readonly Event[]): StopIndex {
       )
         exited.set(id, JSON.stringify(field(event.payload, "runtime_ref")));
     }
-    index = { state, recorded, episode, exited, releasing };
+    index = { state, recorded, episode, exited, releasing, paused };
     stoppedAssignments.set(events, index);
   }
   return index;
@@ -106,6 +135,9 @@ function stopIndex(events: readonly Event[]): StopIndex {
  * C-620: a managed stop (`hold: false`) fences the same way only until its
  * terminal release is confirmed. After `assignment_stop_released` it is no
  * longer stopped: like a recycled session, new work starts a fresh one.
+ *
+ * C-732: `assignment_hold_resumed` (the answered resume question) ends a
+ * pause like a human start.
  */
 export function stoppedByHuman(
   events: readonly Event[],
@@ -129,6 +161,17 @@ export function pausedByHuman(
   assignment_id: AssignmentId,
 ): boolean {
   return stopIndex(events).state.get(assignment_id) === "held";
+}
+
+/** C-732: who paused this Assignment and when, while the pause holds. */
+export function heldPause(
+  events: readonly Event[],
+  assignment_id: AssignmentId,
+): HeldPause | undefined {
+  const index = stopIndex(events);
+  return index.state.get(assignment_id) === "held"
+    ? index.paused.get(assignment_id)
+    : undefined;
 }
 
 /**

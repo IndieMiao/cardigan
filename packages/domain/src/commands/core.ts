@@ -190,7 +190,8 @@ type CommandName =
   | "mark_card_done"
   | "confirm_story_proposal"
   | "clear_released_runtime_refs"
-  | "request_worktree_cleanup";
+  | "request_worktree_cleanup"
+  | "request_held_assignment_resume";
 export function ensure(
   condition: unknown,
   code: ErrorCode,
@@ -361,6 +362,7 @@ export class CommandDraft {
       "record_merge_push_result",
       "check_merge_push_range",
       "request_worktree_cleanup",
+      "request_held_assignment_resume",
       "clear_released_runtime_refs",
     ].includes(tool);
     // Only recheck_merge maps onto a host_ops tool. abort_dispatch and

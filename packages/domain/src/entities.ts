@@ -1175,7 +1175,17 @@ interface DecisionFields {
     | "merge_confirmation"
     | "worktree_cleanup"
     | "completion_review"
-    | "accepted_delivery_rework";
+    | "accepted_delivery_rework"
+    | "held_assignment_resume";
+  /**
+   * C-732: the pause a `held_assignment_resume` question is about (its
+   * `assignment_stopped` event). Set by the control plane only.
+   */
+  readonly held_pause?: {
+    readonly event_id: EventId;
+    readonly by: Author;
+    readonly at: Timestamp;
+  };
   /** Scope explicitly authorized by a shared review-limit decision. Only matching rejections consume it. */
   readonly review_limit_group?: {
     readonly delivery_id: DeliveryId;
