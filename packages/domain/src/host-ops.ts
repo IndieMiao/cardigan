@@ -80,6 +80,8 @@ export interface HostOpsExecution {
   readonly upstream_incident_id?: Event["id"];
   readonly context_usage?: ContextObservation;
   readonly automatic_context_restart?: boolean;
+  /** C-745: the one extra attempt after the upstream diagnosis recovered. */
+  readonly diagnosis_recovery_retry?: boolean;
   readonly dispatch_stall_id?: string;
   /**
    * C-596 automatic standing-PM restart. Kept on the intent so execution
@@ -188,13 +190,60 @@ export function openRestartFailures(events: readonly Event[]): Event[] {
       .filter((e) => e.actor.kind === "human")
       .map((e) => (e.payload as { human_action_id?: string }).human_action_id),
   );
-  return eventsOfType(events, "context_session_restart_result").filter(
-    (e) =>
-      (e.payload as { result?: string }).result === "failed" &&
-      !completed.has(
-        (e.payload as { human_action_id?: string }).human_action_id,
-      ),
-  );
+  // C-745: the system's one extra attempt on the same session, begun after
+  // the upstream diagnosis recovered, takes over its earlier failure; that
+  // attempt is itself a pending action and fences until its own result.
+  const recoveries = new Map<string, number>();
+  for (const e of eventsOfType(events, "host_ops_action_taken")) {
+    const p = e.payload as {
+      diagnosis_recovery_retry?: boolean;
+      assignment_id?: string;
+      context_usage?: { session_id?: string };
+    };
+    if (p.diagnosis_recovery_retry === true && p.context_usage?.session_id)
+      recoveries.set(
+        `${p.assignment_id}\u0000${p.context_usage.session_id}`,
+        Math.max(
+          e.seq,
+          recoveries.get(
+            `${p.assignment_id}\u0000${p.context_usage.session_id}`,
+          ) ?? 0,
+        ),
+      );
+  }
+  return eventsOfType(events, "context_session_restart_result").filter((e) => {
+    const p = e.payload as {
+      result?: string;
+      human_action_id?: string;
+      assignment_id?: string;
+      context_usage?: { session_id?: string };
+    };
+    if (p.result !== "failed" || completed.has(p.human_action_id)) return false;
+    const recovery = p.context_usage?.session_id
+      ? recoveries.get(`${p.assignment_id}\u0000${p.context_usage.session_id}`)
+      : undefined;
+    return recovery === undefined || recovery < e.seq;
+  });
+}
+/**
+ * C-745: every open failure fence on this assignment belongs to the given
+ * session, so the system's extra attempt on that session may take it over.
+ */
+export function restartFencesOnlyOnSession(
+  events: readonly Event[],
+  assignment_id: AssignmentId,
+  session: string,
+): boolean {
+  return openRestartFailures(events).every((e) => {
+    const p = e.payload as {
+      assignment_id?: string;
+      context_usage?: { session_id?: string };
+    };
+    return (
+      p.assignment_id !== assignment_id ||
+      p.context_usage?.session_id === session
+    );
+  });
 }
 export function hostOpsPending(
   events: readonly Event[],

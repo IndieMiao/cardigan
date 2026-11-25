@@ -15,6 +15,7 @@ import {
   type ContextObservation,
   checkHostOpsAccess,
   claimHostOpsAction,
+  contextRestartRetryState,
   contextUsageFresh,
   currentHarnessActivity,
   DEFAULT_ATTACHED_HUMAN_NOTICE_MS,
@@ -48,6 +49,7 @@ import {
   type SessionActivity,
   systemTurnOwner,
   type UpstreamDiagnosis,
+  type UpstreamHoldDetail,
   type WorkerInspectionRequest,
   withdrawRecoveredHostOpsAction,
   withdrawUnstartedStallRestart,
@@ -126,7 +128,9 @@ import {
   type UnresponsiveProof,
 } from "./unresponsive-session.js";
 import {
+  staleObservation,
   UpstreamHealthMonitor,
+  upstreamHoldDetail,
   upstreamHoldReason,
 } from "./upstream-health.js";
 
@@ -267,6 +271,7 @@ export class HostOpsService {
               this.options.onError?.(
                 new Error("upstream probe publication failed"),
               ),
+            (line) => this.options.onError?.(new Error(line)),
           )
         : undefined;
     }
@@ -964,6 +969,26 @@ export class HostOpsService {
     }
     return activity;
   }
+  /**
+   * C-745: the upstream diagnosis is available for this session and the
+   * stop gate would pass; a line fault or a failed classification keeps
+   * the closed session closed.
+   */
+  private diagnosisRecovered(state: CommandState, id: AssignmentId) {
+    if (!this.upstream) return false;
+    try {
+      const diagnosis = this.checkUpstream(state, id, true);
+      return (
+        !!diagnosis &&
+        ![
+          "upstream_diagnosis_unavailable",
+          "upstream_recovery_not_ready",
+        ].includes(upstreamHoldReason(diagnosis))
+      );
+    } catch {
+      return false;
+    }
+  }
   private checkUpstream(
     state: CommandState,
     id: AssignmentId,
@@ -1015,9 +1040,16 @@ export class HostOpsService {
         if (!this.closing && this.upstream === upstream)
           upstream.reconcile(this.options.store, project, activity);
       })
-      .catch(() => {
-        if (!this.closing && this.upstream === upstream)
-          upstream.observationFailed(project);
+      .catch((error) => {
+        // C-745: a session that changed while sampled is a race; the next
+        // poll samples again. Marking the whole project failed here held
+        // every recovery and context restart until that poll.
+        if (
+          !this.closing &&
+          this.upstream === upstream &&
+          !staleObservation(error)
+        )
+          upstream.observationFailed(project, error);
       })
       .finally(() => this.upstreamPolls.delete(project));
     this.upstreamPolls.set(project, poll);
@@ -1223,7 +1255,26 @@ export class HostOpsService {
     const stale =
       this.options.contextUsage?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
     const state = store.uow.read((tx) => loadCommandState(tx, project));
-    if (!automaticContextRestartReady(state, usage, this.clock.now(), stale))
+    // C-745: a session closed only by an unavailable diagnosis gets one more
+    // attempt, and only while the upstream gate would let it stop now.
+    const recovered =
+      contextRestartRetryState(
+        state.events,
+        usage.assignment_id,
+        usage.session_id,
+        this.clock.now(),
+      ) === "recoverable" &&
+      this.diagnosisRecovered(state, usage.assignment_id);
+    if (
+      !automaticContextRestartReady(
+        state,
+        usage,
+        this.clock.now(),
+        stale,
+        undefined,
+        recovered,
+      )
+    )
       return;
     const assignment = state.assignments.find(
       (a) => a.id === usage.assignment_id,
@@ -1245,6 +1296,7 @@ export class HostOpsService {
             usage,
             stale_after_ms: stale,
             ...(snapshot ? { snapshot } : { preparation_failed: true }),
+            ...(recovered ? { diagnosis_recovered: true } : {}),
           },
           { clock: this.clock, ids: tx.ids },
         ),
@@ -1259,6 +1311,7 @@ export class HostOpsService {
     action: HostOpsExecution,
     result: "succeeded" | "failed",
     reason: string,
+    upstreamDetail?: UpstreamHoldDetail,
   ) {
     this.options.store.uow.run((tx) => {
       const effect = unwrap(
@@ -1269,6 +1322,7 @@ export class HostOpsService {
             action_id: action.action_id,
             result,
             reason,
+            ...(upstreamDetail ? { upstream_detail: upstreamDetail } : {}),
             ...(this.options.contextUsage?.restartRetryDelaysMs
               ? {
                   retry_delays_ms:
@@ -1459,7 +1513,12 @@ export class HostOpsService {
       });
     });
   }
-  private defer(project: ProjectId, action: string, reason: string) {
+  private defer(
+    project: ProjectId,
+    action: string,
+    reason: string,
+    upstreamDetail?: UpstreamHoldDetail,
+  ) {
     this.options.store.uow.run((tx) => {
       const events = loadCommandState(tx, project).events;
       if (
@@ -1478,7 +1537,11 @@ export class HostOpsService {
         seq: tx.ids.nextEventSequence(project),
         type: "host_ops_action_deferred",
         actor: { kind: "system", project_id: project },
-        payload: { action_id: action, reason },
+        payload: {
+          action_id: action,
+          reason,
+          ...(upstreamDetail ? { upstream_detail: upstreamDetail } : {}),
+        },
         created_at: this.clock.now(),
       });
     });
@@ -1631,7 +1694,11 @@ export class HostOpsService {
           ? undefined
           : false;
       let standingExitReason = "standing_exit_pending";
-      const fail = (reason: string, blockedBy?: UpstreamDiagnosis) => {
+      const fail = (
+        reason: string,
+        blockedBy?: UpstreamDiagnosis,
+        upstreamDetail?: UpstreamHoldDetail,
+      ) => {
         standingExitReason = reason;
         if (action.dispatch_stall_id) {
           const withdrawn = store.uow.run((tx) => {
@@ -1643,7 +1710,9 @@ export class HostOpsService {
                 { clock: this.clock, ids: tx.ids },
                 reason,
                 receiptRecorded,
-                blockedBy,
+                blockedBy && upstreamDetail
+                  ? { ...blockedBy, upstream_detail: upstreamDetail }
+                  : blockedBy,
               ),
             );
             persistEffect(tx, project, effect);
@@ -1672,8 +1741,8 @@ export class HostOpsService {
             return;
         }
         if (action.automatic_context_restart || action.dispatch_stall_id)
-          this.contextResult(project, action, "failed", reason);
-        else this.defer(project, action.action_id, reason);
+          this.contextResult(project, action, "failed", reason, upstreamDetail);
+        else this.defer(project, action.action_id, reason, upstreamDetail);
       };
       const current = () => {
         const state = read();
@@ -1747,9 +1816,9 @@ export class HostOpsService {
             action.assignment_id,
             samples,
           );
-        } catch {
-          if (this.upstream === observationMonitor)
-            observationMonitor?.observationFailed(project);
+        } catch (error) {
+          if (this.upstream === observationMonitor && !staleObservation(error))
+            observationMonitor?.observationFailed(project, error);
           fail("upstream_observation_failed");
           // C-625: a standing PM restart still observes its own terminal; the
           // upstream gate below then decides (bypassed only for confirmed idle).
@@ -1914,7 +1983,14 @@ export class HostOpsService {
             action.action_id,
             activity,
           );
-          fail(upstreamHoldReason(held), held);
+          fail(
+            upstreamHoldReason(held),
+            held,
+            upstreamHoldDetail(
+              held,
+              this.upstream?.classificationFailure(project),
+            ),
+          );
           return false;
         }
       };

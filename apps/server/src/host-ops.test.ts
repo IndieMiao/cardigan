@@ -1707,6 +1707,8 @@ test("C-248: rejected publication blocks Web preflight and an already accepted r
           payload: expect.objectContaining({
             // C-680: a classification fault is not an upstream outage.
             reason: "upstream_diagnosis_unavailable",
+            // C-745: a provider-group publication fault has no project start.
+            upstream_detail: { sub_reason: "classification_failed" },
           }),
         }),
       ),
