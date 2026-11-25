@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -84,7 +85,7 @@ test.each([false, true])(
   },
 );
 
-test("review templates have no mark-done action; denied human completion shows the server reason", () => {
+test("review templates have no mark-done action; denied human completion shows the server reason", async () => {
   const data = detail();
   const props = { client: fakeClient(), projectId: "p-1", onSaved: vi.fn() };
   const view = render(
@@ -112,11 +113,16 @@ test("review templates have no mark-done action; denied human completion shows t
         detail={{ ...data, mark_done: { allowed: false, reason } }}
       />,
     );
-    expect(
-      (screen.getByRole("button", { name: "标记完成" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
-    expect(screen.getByText(reason)).toBeTruthy();
+    // C-695: refused stays focusable; the reason is the tooltip, not a hint.
+    const button = screen.getByRole("button", { name: "标记完成" });
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(button);
+    expect(screen.queryByLabelText("完成结果")).toBeNull();
+    expect(document.querySelector(".hint")).toBeNull();
+    act(() => button.focus());
+    expect((await screen.findByRole("tooltip")).textContent).toBe(reason);
+    act(() => button.blur());
+    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
   }
 });
 

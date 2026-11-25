@@ -883,12 +883,10 @@ test("long hold reasons live in tooltips and remain fully available in the card 
   ).toBeTruthy();
   fireEvent.click(title);
   const dialog = await screen.findByRole("dialog");
-  await waitFor(() =>
-    expect(
-      dialog.querySelector(".card-hold-details:not(.card-hold-compact)")
-        ?.textContent,
-    ).toContain(reason),
-  );
+  // C-695: the drawer's “下一步” panel carries the full reason and condition.
+  const next = await within(dialog).findByRole("region", { name: "下一步" });
+  expect(next.textContent).toContain(`已暂停：${reason}`);
+  expect(next.textContent).toContain(`恢复条件：${reason}`);
 });
 
 test("stale role and status values from an old link stay visible in their dropdowns and clear there", async () => {
