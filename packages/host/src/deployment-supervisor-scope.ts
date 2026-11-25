@@ -166,9 +166,7 @@ export async function supervisorChanges(
         local === "tsconfig.json")
     ) {
       affected.add(dir);
-    } else if (path === "packages/host/src/deployment-retention-fs.py")
-      affected.add("packages/host");
-    else if (path === "tsconfig.base.json") affected.add(path);
+    } else if (path === "tsconfig.base.json") affected.add(path);
   }
   // Only a complete negative comparison can retire the running version's notice.
   if (incomplete && !affected.size)

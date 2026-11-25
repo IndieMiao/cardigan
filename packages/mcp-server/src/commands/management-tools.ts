@@ -626,6 +626,14 @@ const schemas = {
       .describe(
         "不合并卡（merge_policy=none）产出项的起点：完整提交 SHA 或分支名，检出为 detached worktree；传 null 清除。已有 worktree 后不能改",
       ),
+    keep_run_dirs: z
+      .object({ reason: text })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "PM 点名保护：保留本卡已释放指派的运行目录，不自动回收（已完成的卡也可设）；传 null 解除。不能与其它字段混用",
+      ),
     hold: z
       .object({ reason: text, resume_condition: text })
       .strict()

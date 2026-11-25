@@ -49,6 +49,7 @@ import {
   repositoryChangeNotes,
   workItemStartPoint,
 } from "./card-repository.js";
+import { applyKeepRunDirs, type CardRunDirKeepInput } from "./card-run-dirs.js";
 import {
   type CommandDraft,
   type CommandEffect,
@@ -636,6 +637,8 @@ export function updateCard(
     risk_tags?: Card["risk_tags"];
     high_risk?: boolean;
     hold?: CardHoldInput;
+    /** C-743: protect released Assignments' run directories; not mixed with other edits. */
+    keep_run_dirs?: CardRunDirKeepInput;
     /** C-160: add or update one pre-merge check; not mixed with other edits. */
     pre_merge_check?: PreMergeCheckInput;
     merge_classification?: MergeClassificationInput;
@@ -660,6 +663,16 @@ export function updateCard(
         "暂停操作不能与其他卡片修改混用",
       );
       return applyCardHold(d, card, p.hold);
+    }
+    if (p.keep_run_dirs !== undefined) {
+      ensure(
+        Object.keys(p).every((key) =>
+          ["card_id", "keep_run_dirs"].includes(key),
+        ),
+        "validation_failed",
+        "保留运行目录不能与其他卡片修改混用",
+      );
+      return applyKeepRunDirs(d, card, p.keep_run_dirs);
     }
     if (p.merge_classification !== undefined) {
       ensure(
