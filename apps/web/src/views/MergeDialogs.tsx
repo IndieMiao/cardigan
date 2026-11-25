@@ -22,7 +22,6 @@ import {
   DialogBody,
   DialogClose,
   DialogContent,
-  DialogDescription,
   DialogFields,
   DialogFooter,
   DialogHeader,
@@ -317,11 +316,6 @@ function MergeDialogForm({
         </DialogTitle>
       </DialogHeader>
       <DialogBody>
-        {mode === "hold" && (
-          <DialogDescription>
-            不填到期时间时使用项目默认暂缓时长，到期后自动放回待处理。
-          </DialogDescription>
-        )}
         {mode === "override" && (
           <>
             <p>
@@ -373,7 +367,7 @@ function MergeDialogForm({
                 />
               </label>
               <label>
-                暂缓到期时间（可选）
+                暂缓到期时间（可选，不填按项目默认时长）
                 <Input
                   type="datetime-local"
                   value={until}

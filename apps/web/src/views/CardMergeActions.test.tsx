@@ -181,9 +181,12 @@ test.each(["merge", "hold", "request_changes", "recheck"] as const)(
       fireEvent.change(dialog.getByLabelText("暂缓原因（必填）"), {
         target: { value: "等待核对" },
       });
-      fireEvent.change(dialog.getByLabelText("暂缓到期时间（可选）"), {
-        target: { value: "2035-01-01T12:30" },
-      });
+      fireEvent.change(
+        dialog.getByLabelText("暂缓到期时间（可选，不填按项目默认时长）"),
+        {
+          target: { value: "2035-01-01T12:30" },
+        },
+      );
       fireEvent.click(dialog.getByRole("button", { name: "登记暂缓" }));
     }
     if (option === "recheck")
