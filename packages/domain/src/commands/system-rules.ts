@@ -1,6 +1,6 @@
 import { cardDependenciesAllowStart } from "../card-dependencies.js";
 import type { Actor, Delivery, Event, WorkItem } from "../entities.js";
-import { eventsOfType } from "../event-index.js";
+import { appendEvents, eventsOfType, eventsOfTypes } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type { WorkItemId } from "../ids.js";
 import { validSystemReminderPolicy } from "../preferences.js";
@@ -234,7 +234,7 @@ export function assignReadyVerifiers(d: CommandDraft): void {
   if (!ready.length) return;
   // Keep the triggering actor on its events; only these derived actions use system authority.
   const system = new CommandDraft(
-    { ...d.state, events: [...d.state.events, ...d.events] },
+    { ...d.state, events: appendEvents(d.state.events, d.events) },
     { kind: "system", project_id: d.state.project_id },
     "auto_assign_verifier",
     d.ports,
@@ -287,7 +287,7 @@ function assignVerifier(d: CommandDraft, workItemId: WorkItemId) {
     ...candidates.map((c) => `${c.employee_id}：${c.reason}`),
   ].join("；");
   if (
-    ![...d.state.events, ...d.events].some(
+    !appendEvents(d.state.events, d.events).some(
       (e) =>
         e.type === "system_assignment_deferred" &&
         payload(e).work_item_id === item.id &&
@@ -654,7 +654,13 @@ export function systemRuleAttention(d: CommandDraft, now: string) {
   const pref = projectPreferences(state);
   const waits = systemWaits(d, now);
   const latest = new Map<string, Event>();
-  for (const e of state.events) {
+  // C-649: only these three types matter; the type index keeps history order.
+  const closedWaits = eventsOfType(state.events, "system_wait_closed");
+  for (const e of eventsOfTypes(state.events, [
+    "system_assignment_deferred",
+    "system_completion_deferred",
+    "system_wait_reminded",
+  ])) {
     if (e.actor.kind !== "system" || !e.card_id) continue;
     const p = payload(e);
     if (
@@ -689,11 +695,7 @@ export function systemRuleAttention(d: CommandDraft, now: string) {
     if (
       e.type === "system_wait_reminded" &&
       waits.some((w) => w.key === p.key) &&
-      !state.events.some(
-        (closed) =>
-          closed.type === "system_wait_closed" &&
-          payload(closed).wait_id === p.wait_id,
-      )
+      !closedWaits.some((closed) => payload(closed).wait_id === p.wait_id)
     )
       latest.set(`wait:${p.wait_id}`, e);
   }

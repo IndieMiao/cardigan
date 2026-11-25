@@ -255,6 +255,9 @@ describe("tool and worktree boundaries", () => {
           "list_templates",
           "list_roles",
           "complete_host_action",
+          // C-712: release notes belong to the standing PM.
+          "write_release_note",
+          "list_release_notes",
         ].includes(tool);
         const expected = tool.startsWith("host_ops_")
           ? false

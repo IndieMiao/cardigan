@@ -3,20 +3,23 @@ import { LaunchConfigError } from "@cardigan/roles";
 import { runAdminCommand } from "./admin.js";
 import { runAssignmentCommand } from "./assignment.js";
 import { runAvatarCommand } from "./avatar.js";
+import { runCapabilityCommand } from "./capability.js";
 import { tokenFileOption } from "./command-access.js";
 import { runContentCommand } from "./content.js";
 import { runCpuProfileCommand } from "./cpu-profile.js";
+import { runDecisionCommand } from "./decision.js";
 import { runDeployCommand } from "./deploy.js";
 import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
 import { runExtMessageCommand } from "./ext-message.js";
-import { authorizeCliInvocation } from "./host.js";
+import { authorizeCliInvocation, openCliStore } from "./host.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
 import { runMemberCommand } from "./member.js";
 import { runMergeCommand } from "./merge.js";
 import { runPreferenceCommand } from "./preference.js";
+import { resolveQualifiedArgs } from "./qualified-args.js";
 import { runReworkCommand } from "./rework.js";
 import { runSelfDeployCommand } from "./self-deploy.js";
 import { runTemplateCommand } from "./template.js";
@@ -67,12 +70,13 @@ const TOP_LEVEL_USAGE = [
   "",
   "用法：cardigan <命令>",
   "身份：CARDIGAN_TOKEN 或全局 --token-file <0600 文件>（二选一）；不提供时以人类身份操作。",
+  "编号：短号（C-34）按 --project / CARDIGAN_PROJECT 解析；完整编号（CDG-C-34、CDG-C-34#2）由代号决定项目，与 --project 不一致时报错。",
   "",
   "命令：",
   "  init             建库并执行迁移",
   "  self-deploy watch|roles  主机自举部署监督器；只部署中心 main，配置仅来自主机",
   "  deploy adopt|pin|unpin  人工认领 main 区间、固定版本或解除固定；必填 --reason",
-  "  project create   创建项目",
+  "  project create   创建项目（--code 必填）；project code 查看或登记项目代号",
   "  role             列出、查看、创建、复制、修改、停用、恢复和回退角色；upgrade --from-default 按默认包追加新版本",
   "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
   "  pm start         一键启动 PM Office 与 PM Ops（已在运行就跳过）",
@@ -84,6 +88,7 @@ const TOP_LEVEL_USAGE = [
   "  preference get|set merge-confirm-stall-after  查看或修改 PM 合并确认停留告警分钟数（默认 60）",
   "  template list|show|add|copy|update|deactivate|activate|rollback  管理项目模板",
   "  rework request|confirm|keep  请求或由人逐次确认正式返工（精确绑定交付和本人撤回的审核）",
+  "  decision answer <Q-n> --other <你的决定>  以“其他”回答任一待处理拍板（仅人类）",
   "  card create      按模板建卡（默认 dev）",
   "  card done        用 --result 记录结果并完成人工完成的卡片，可重复 --file 附证据",
   "  card update      修改或取消卡片；--risk-tags 设置风险标签；--superseded-by <C-m> 标记取代（已完成卡片不能取消；见 cardigan card --help）",
@@ -91,6 +96,7 @@ const TOP_LEVEL_USAGE = [
   "  comment add      发评论：--text <内容> 或 --text-file <路径>，可重复 --file 附文件，--note <说明>",
   "  attachment add   上传附件：--file <路径> [--note <说明>] [--kind evidence|artifact] [--basis <Q-n>] [--entry <C-n#k>]",
   "  machine          人专属机器登记/查看/更新/drain/check",
+  "  capability guide set|get|list|delete  能力使用说明：能力键主说明、机器补充、项目级说明（仅人类）",
   "  worker add|resume|check|status|apply-config  接入 Linux worker（仅人类）",
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
@@ -100,7 +106,7 @@ const TOP_LEVEL_USAGE = [
   "  needs-you        看待你拍板、待你执行的事项和知会（read 标为已读）",
   "  inbox            待投递和投递失败的通知（--assignment A-n 只看一个）",
   "  attention        升级通知与失联的 Assignment",
-  "  assignment start|stop|attach|release  启动/停止/观察终端或释放 Assignment；attach --interactive 接管输入，--print 只打印命令",
+  "  assignment start|stop|attach|release|move  启动/停止/观察终端、释放 Assignment 或把未开始的指派换机；attach --interactive 接管输入，--print 只打印命令",
   "  merge status|confirm|hold|request|request-changes  查看、确认或暂不合并、重新发起确认、退回修改（--reason 必填）；PM 代确认中的合并也可直接处理；push-accept <H-n> 接受暂停推送里的外来提交",
   "  merge finish-undispatched <C-n> <attempt>  在线核实并收尾未派发的旧检查（仅人）",
   "  worktree diff|clean|keep      看 worktree 改动、强制清理或保留（M4）",
@@ -237,12 +243,14 @@ export async function main(
 ): Promise<number> {
   try {
     ({ argv, io } = tokenFileOption(argv, io));
-    const [command, ...rest] = argv;
-    if (command === undefined || command === "--help" || command === "-h") {
+    if (argv[0] === undefined || argv[0] === "--help" || argv[0] === "-h") {
       io.stdout(TOP_LEVEL_USAGE);
       return EXIT.ok;
     }
+    // C-675: full numbers (`SEN-C-34`) pick the project; see qualified-args.
+    argv = resolveQualifiedArgs(argv, io, () => openCliStore(argv, io));
     authorizeCliInvocation(argv, io);
+    const [command, ...rest] = argv as [string, ...string[]];
     if (command === "worker") return await runWorkerCommand(rest, io);
     if (command === "ext-message") return await runExtMessageCommand(rest, io);
     if (command === "launch") {
@@ -261,11 +269,13 @@ export async function main(
     }
     if (command === "preference") return await runPreferenceCommand(rest, io);
     if (command === "cpu-profile") return runCpuProfileCommand(rest, io);
+    if (command === "capability") return await runCapabilityCommand(rest, io);
     if (command === "template") return await runTemplateCommand(rest, io);
     if (command === "comment" || command === "attachment") {
       return await runContentCommand(command, rest, io);
     }
     if (command === "rework") return await runReworkCommand(rest, io);
+    if (command === "decision") return await runDecisionCommand(rest, io);
     if (command === "merge") return await runMergeCommand(rest, io);
     if (command === "web") return await runWebCommand(rest, io);
     if (command === "worktree") return await runWorktreeCommand(rest, io);

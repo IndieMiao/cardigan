@@ -53,6 +53,39 @@ test("central clone is private, bare, independent and bound to its registered so
     ),
   ).toBe(true);
 });
+test("an unchanged center reuses its identity proof and ref validation; a rewritten config re-verifies", async () => {
+  const repo = await f.central.ensureCentral(f.project);
+  const count = (arg: string) =>
+    f.calls.filter((c) => c.cwd === repo && c.args.includes(arg)).length;
+  const identity = count("cardigan.source"),
+    bare = count("--is-bare-repository");
+  await f.transport.verifyBareSource(repo, f.source);
+  await f.transport.verifyBareSource(repo, f.source);
+  expect([count("cardigan.source"), count("--is-bare-repository")]).toEqual([
+    identity,
+    bare,
+  ]);
+  // A different expected source is never answered from the proof.
+  await expect(f.transport.verifyBareSource(repo, f.root)).rejects.toThrow(
+    /source changed/,
+  );
+  await git(repo, "config", "--local", "cardigan.source", f.root);
+  await expect(f.transport.verifyBareSource(repo, f.source)).rejects.toThrow(
+    /source changed/,
+  );
+  await git(repo, "config", "--local", "cardigan.source", f.source);
+  await f.transport.verifyBareSource(repo, f.source);
+  const formats = count("check-ref-format");
+  expect(await f.transport.readRef(repo, "refs/heads/main")).toBe(f.initial);
+  expect(await f.transport.readRef(repo, "refs/heads/main")).toBe(f.initial);
+  expect(count("check-ref-format")).toBeLessThanOrEqual(formats + 1);
+  await expect(
+    f.transport.readRef(repo, "refs/heads/bad..ref"),
+  ).rejects.toThrow();
+  await expect(
+    f.transport.readRef(repo, "refs/heads/bad..ref"),
+  ).rejects.toThrow();
+});
 test("source synchronization fast-forwards, preserves a leading center and refuses divergence", async () => {
   const repo = await f.central.ensureCentral(f.project);
   expect(await f.central.syncFromSource(f.project)).toBe("up_to_date");
@@ -266,6 +299,69 @@ test("base clone fetches fixed delivery refs from center and rejects legacy sour
     sha,
   );
   expect(await readFile(join(base, ".git", "config"), "utf8")).toContain(repo);
+});
+
+test("a macOS check candidate merges only the pinned delivery onto the current baseline", async () => {
+  const repo = await f.central.ensureCentral(f.project);
+  await git(f.source, "switch", "-c", "delivery");
+  const head = await commit(f.source, "delivery");
+  await f.transport.fetchRefs(repo, f.source, [
+    "refs/heads/delivery:refs/cardigan/deliveries/D-1",
+  ]);
+  await git(f.source, "switch", "main");
+  await writeFile(join(f.source, "other"), "baseline moved");
+  await git(f.source, "add", "other");
+  await git(f.source, "commit", "-m", "baseline moved");
+  const base = await git(f.source, "rev-parse", "HEAD");
+  await f.central.syncFromSource(f.project);
+  const candidate = await f.central.prepareDeliveryCandidate(
+    f.project,
+    "D-1",
+    head,
+  );
+  expect(candidate.base_sha).toBe(base);
+  expect(
+    (await git(repo, "rev-list", "--parents", "-n1", candidate.candidate_sha))
+      .split(" ")
+      .slice(1),
+  ).toEqual([base, head]);
+  expect(
+    await git(repo, "rev-parse", `refs/cardigan/candidates/macos-D-1-${base}`),
+  ).toBe(candidate.candidate_sha);
+  expect(
+    await git(repo, "rev-parse", `${candidate.candidate_sha}^{tree}`),
+  ).toBe(candidate.tree_sha);
+  // A rerun with the same delivery and baseline tests the very same commit.
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  expect(
+    await f.central.prepareDeliveryCandidate(f.project, "D-1", head),
+  ).toEqual(candidate);
+  // A moved baseline gives a new candidate on top of it.
+  await writeFile(join(f.source, "other"), "baseline moved again");
+  await git(f.source, "commit", "-am", "baseline moved again");
+  const next = await git(f.source, "rev-parse", "HEAD");
+  await f.central.syncFromSource(f.project);
+  const moved = await f.central.prepareDeliveryCandidate(
+    f.project,
+    "D-1",
+    head,
+  );
+  expect(moved.base_sha).toBe(next);
+  expect(moved.candidate_sha).not.toBe(candidate.candidate_sha);
+  expect(
+    (await git(repo, "rev-list", "--parents", "-n1", moved.candidate_sha))
+      .split(" ")
+      .slice(1),
+  ).toEqual([next, head]);
+  await expect(
+    f.central.prepareDeliveryCandidate(f.project, "D-2", head),
+  ).rejects.toThrow(/Unpinned/);
+  await expect(
+    f.central.prepareDeliveryCandidate(f.project, "D-1", base),
+  ).rejects.toThrow(/Unpinned/);
+  await expect(
+    f.central.prepareDeliveryCandidate(f.project, "../x", head),
+  ).rejects.toThrow(/Invalid/);
 });
 
 test("base fetch leaves automatic maintenance to its owner even above the repack threshold", async () => {

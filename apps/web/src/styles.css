@@ -517,13 +517,8 @@ button.build-version[data-feedback] {
   overflow: auto;
   overflow-wrap: anywhere;
   padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
   font-size: var(--text-sm);
   line-height: 1.6;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 15%);
 }
 .capacity-tooltip p {
   margin: 8px 0 0;
@@ -2492,15 +2487,7 @@ body[data-lightbox="open"] .drawer-overlay {
   z-index: 120;
   max-width: min(280px, calc(100vw - var(--gap) * 2));
   padding: 4px 8px;
-  background: var(--tooltip-bg);
-  color: var(--tooltip-text);
-  border: 1px solid var(--tooltip-border);
-  box-shadow: 0 4px 12px var(--overlay);
-  border-radius: 4px;
   font-size: var(--text-xs);
-}
-.tooltip-arrow {
-  fill: var(--tooltip-bg);
 }
 
 .merge-check {
@@ -2597,12 +2584,6 @@ body[data-lightbox="open"] .drawer-overlay {
   margin-bottom: 20px;
 }
 
-.card-tile-waiting {
-  border-left: 3px solid var(--status-wait);
-}
-.card-tile-blocked {
-  border-left: 3px solid var(--danger);
-}
 .card-tile > .id-tag {
   align-self: flex-start;
 }
@@ -3039,8 +3020,6 @@ body[data-lightbox="open"] .drawer-overlay {
   width: 300px;
   max-width: calc(100vw - 24px);
   padding: 10px 12px;
-  border-radius: var(--radius);
-  box-shadow: 0 4px 12px var(--overlay);
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
   z-index: 210;
@@ -3179,12 +3158,6 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .board-card-complete {
   color: var(--status-done);
-}
-.board-card-waiting {
-  color: var(--status-wait);
-}
-.board-card-blocked {
-  color: var(--danger);
 }
 .board-card .employee-owners {
   position: relative;
@@ -3880,20 +3853,6 @@ body[data-lightbox="open"] .drawer-overlay {
 .card-hold-tag {
   color: var(--accent);
 }
-.card-hold-form {
-  display: grid;
-  gap: 12px;
-  margin-top: 12px;
-}
-.card-hold-form label {
-  display: grid;
-  gap: 6px;
-}
-.card-hold-form textarea {
-  min-height: 88px;
-  width: 100%;
-  box-sizing: border-box;
-}
 .card-hold button,
 .board-held summary {
   min-height: 44px;
@@ -4096,9 +4055,6 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .menu-item .danger {
   color: var(--danger);
-}
-.card-menu-chevron {
-  margin-inline-start: 4px;
 }
 
 /* The source relationship is a separate action from merge approval. */

@@ -289,7 +289,8 @@ test("supervisor opens an existing schema without migration, while release start
     store = undefined;
     store = Store.open({ dataDir });
     expect(store.schemaVersion()).toBe(latestSchemaVersion());
-    expect(store.getProject("fixture")).toEqual(project);
+    // C-674: the project-code migration backfills the suggested code.
+    expect(store.getProject("fixture")).toEqual({ ...project, code: "FIX" });
     expect(
       store.database
         .prepare(

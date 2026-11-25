@@ -6,9 +6,17 @@ import {
   type Run,
   runOccupiesSlot,
 } from "@cardigan/domain";
-import { effectiveRunLimit, runCapacitySnapshot } from "@cardigan/host";
+import {
+  effectiveRunLimit,
+  type ReadProjectQuota,
+  type ReadResourceLimits,
+  type RunCapacityBlock,
+  runCapacitySnapshot,
+  runResourceKeys,
+} from "@cardigan/host";
 import {
   type BellAttempt,
+  PROJECT_EVENT_STREAM,
   recordNotification,
   type Store,
   type StoreTransactionContext,
@@ -26,6 +34,8 @@ export class QueuedRunPatrol {
       store: Store;
       runLimit?: (machine: string) => number;
       runLimitMaximum?: (machine: string) => number;
+      resourceLimits?: ReadResourceLimits;
+      projectQuota?: ReadProjectQuota;
       queuedRecheckAfterMs?: number;
     },
   ) {
@@ -54,7 +64,8 @@ export class QueuedRunPatrol {
     }
     if (!queue.length) return;
     const reserved = new Set(attempts.map((a) => a.run_id));
-    const { store, runLimit, runLimitMaximum } = this.options;
+    const { store, runLimit, runLimitMaximum, resourceLimits, projectQuota } =
+      this.options;
     let capacity: ReturnType<typeof runCapacitySnapshot> | undefined;
     for (const run of queue) {
       if (reserved.has(run.id) || runOccupiesSlot(run)) continue;
@@ -76,13 +87,50 @@ export class QueuedRunPatrol {
       const recheck = now - last >= this.threshold;
       if (!recheck && run.queue_notified_at) continue;
       let spare = false;
+      let block: RunCapacityBlock | undefined;
       if (!run.queue_notified_at) {
-        capacity ??= runCapacitySnapshot(store, tx);
+        capacity ??= runCapacitySnapshot(
+          store,
+          tx,
+          resourceLimits,
+          projectQuota,
+        );
         spare =
           (capacity.occupied.get(a.machine_id) ?? 0) <
           effectiveRunLimit(store, a.machine_id, runLimit, runLimitMaximum);
+        // C-714: free machine slots alone do not mean this Run can start.
+        // C-721: name only the resources this Run itself would claim.
+        if (spare)
+          block = capacity.capacityBlock(
+            project,
+            a,
+            runResourceKeys(
+              tx,
+              project,
+              a,
+              state.events,
+              run,
+              // Notices the owner already acknowledged ride on no bell.
+              store
+                .listNotifications({
+                  project_id: project,
+                  status: "pending",
+                  assignment_id: a.id,
+                })
+                .filter(
+                  (n) =>
+                    !state.cursors.some(
+                      (c) =>
+                        c.assignment_id === a.id &&
+                        c.card_id === (n.card_id ?? PROJECT_EVENT_STREAM) &&
+                        c.acked_seq >= n.seq,
+                    ),
+                ),
+            ),
+          );
       }
       if (!recheck && !spare) continue;
+      const minutes = Math.floor((now - Date.parse(queuedAt)) / 60_000);
       const card = assignmentCardId(a, state, run.trigger_event_id);
       const event: Event = {
         id: tx.ids.nextEventId(),
@@ -99,8 +147,9 @@ export class QueuedRunPatrol {
           queue_reason: run.queue_reason ?? null,
           threshold_ms: this.threshold,
           notified_pm_ops: spare,
+          ...(block ? { capacity_block: block } : {}),
           body: spare
-            ? `${run.id} 已排队 ${Math.floor((now - Date.parse(queuedAt)) / 60_000)} 分钟，${a.machine_id} 仍有并发名额。`
+            ? `${run.id} 已排队 ${minutes} 分钟，${block ? capacityBlockText(block) : `${a.machine_id} 仍有并发名额。`}`
             : `${run.id} 排队超时，已请求重新评估。`,
         },
       };
@@ -128,5 +177,26 @@ export class QueuedRunPatrol {
         ...(spare ? { queue_notified_at: at } : {}),
       });
     }
+  }
+}
+
+/** C-714: name the full ceiling instead of claiming spare Run capacity. */
+export function capacityBlockText(block: RunCapacityBlock): string {
+  const others =
+    block.kind === "machine_resource" && block.other_project_runs
+      ? `其它项目 ${block.other_project_runs} 个`
+      : "";
+  const held = [
+    ...(block.run_ids.length ? [block.run_ids.join("、")] : []),
+    ...(others ? [others] : []),
+  ];
+  const holders = held.length ? `（占用：${held.join("；")}）` : "";
+  switch (block.kind) {
+    case "project_limit":
+      return `项目 ${block.project_id} 在 ${block.machine_id} 的上限 ${block.limit} 已用满${holders}；整机名额未满。`;
+    case "project_resource":
+      return `项目 ${block.project_id} 在 ${block.machine_id} 的资源 ${block.resource} 上限 ${block.limit} 已用满${holders}；整机名额未满。`;
+    case "machine_resource":
+      return `${block.machine_id} 的资源 ${block.resource} 名额 ${block.limit} 已用满${holders}；整机名额未满。`;
   }
 }

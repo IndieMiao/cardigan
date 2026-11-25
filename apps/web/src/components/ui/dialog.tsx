@@ -51,6 +51,37 @@ export function DialogDescription({
     />
   );
 }
+/**
+ * Fixed-footer dialog parts: put `DialogHeader` (optional), `DialogBody` and
+ * `DialogFooter` directly in `DialogContent`, or in one `<form>` there. Only
+ * the body scrolls; the button row stays inside the viewport.
+ */
+export function DialogHeader({
+  className,
+  ...props
+}: React.ComponentProps<"div">) {
+  return <div {...props} className={cn("ui-dialog-header", className)} />;
+}
+export function DialogBody({
+  className,
+  ...props
+}: React.ComponentProps<"div">) {
+  return <div {...props} className={cn("ui-dialog-body", className)} />;
+}
+/** Right-aligned buttons: cancel first, confirm (`variant="emphasis"`) last. */
+export function DialogFooter({
+  className,
+  ...props
+}: React.ComponentProps<"div">) {
+  return <div {...props} className={cn("ui-dialog-footer", className)} />;
+}
+/** Fields in a `DialogBody`, 16px apart; each label sits 4px above its control. */
+export function DialogFields({
+  className,
+  ...props
+}: React.ComponentProps<"div">) {
+  return <div {...props} className={cn("ui-dialog-fields", className)} />;
+}
 export function DialogContent({
   children,
   inlineFeedback = false,

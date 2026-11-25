@@ -11,6 +11,7 @@ import {
   type ProjectId,
   type Result,
   recordMergePushResult,
+  streamEventsBy,
 } from "@cardigan/domain";
 import { type CentralProject, centralBranch } from "@cardigan/git-service";
 import type { PushResult } from "@cardigan/git-transport";
@@ -180,11 +181,11 @@ export class MergePushExecutor {
         if (!checked) return;
         if (checked.status === "held") return;
         const included = this.options.store.uow.read((tx) => {
-          const events = tx.events.listAfter(id, undefined, 0);
+          const events = streamEventsBy(tx.events, id, undefined, "type", [
+            "merge_push_queued",
+          ]);
           return attempt.queue_ids.map((queueId) => {
-            const event = events.find(
-              (e) => e.id === queueId && e.type === "merge_push_queued",
-            );
+            const event = events.find((e) => e.id === queueId);
             if (!event) throw new Error("Missing queued merge");
             return (event.payload as { sha: string }).sha;
           });

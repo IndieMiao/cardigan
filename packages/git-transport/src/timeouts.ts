@@ -6,6 +6,8 @@ const mergeTransfer = new AsyncLocalStorage<true>();
 export function withMergeTransferBudget<T>(work: () => T): T {
   return mergeTransfer.run(true, work);
 }
+/** Bulk object work; C-637: maintenance repacks write whole packs too. */
+const longCommands = ["clone", "fetch", "push", "bundle", "repack"];
 export interface GitTimeoutOptions {
   readonly queryTimeoutMs?: number;
   readonly transferTimeoutMs?: number;
@@ -14,7 +16,7 @@ export function gitTimeoutMs(
   command: string | undefined,
   options: GitTimeoutOptions,
 ): number {
-  const transfer = ["clone", "fetch", "push", "bundle"].includes(command ?? "");
+  const transfer = longCommands.includes(command ?? "");
   const name = transfer
     ? "CARDIGAN_GIT_TRANSFER_TIMEOUT_MS"
     : "CARDIGAN_GIT_QUERY_TIMEOUT_MS";
@@ -42,7 +44,7 @@ export async function withGitTimeout<T>(
   options: GitTimeoutOptions,
   run: (timeoutMs: number) => Promise<T>,
 ): Promise<T> {
-  const transfer = ["clone", "fetch", "push", "bundle"].includes(command ?? "");
+  const transfer = longCommands.includes(command ?? "");
   const name = transfer
     ? "CARDIGAN_GIT_TRANSFER_TIMEOUT_MS"
     : "CARDIGAN_GIT_QUERY_TIMEOUT_MS";

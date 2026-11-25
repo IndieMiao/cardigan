@@ -59,7 +59,10 @@ test.each(
     if (mode === "edit")
       fireEvent.click(screen.getByRole("button", { name: "编辑" }));
     else
-      await selectMenu(/^更多$/, mode === "cancel" ? "取消卡片" : "标记被取代");
+      await selectMenu(
+        /^更多卡片操作$/,
+        mode === "cancel" ? "取消卡片…" : "标记被取代…",
+      );
     if (mode === "supersede")
       fireEvent.change(screen.getByLabelText("被哪张卡取代"), {
         target: { value: "C-2" },
@@ -70,7 +73,7 @@ test.each(
           mode === "edit"
             ? "保存修改"
             : mode === "cancel"
-              ? "确认取消卡片"
+              ? "取消卡片 C-1"
               : "标记被取代",
       }),
     );
@@ -190,25 +193,27 @@ test("K2 cancellation requires a second action, can be dismissed, and sends the 
       cardId="C-1"
     />,
   );
-  await screen.findByRole("button", { name: "更多" });
-  await selectMenu(/^更多$/, "取消卡片");
+  await screen.findByRole("button", { name: "更多卡片操作" });
+  await selectMenu(/^更多卡片操作$/, "取消卡片…");
   expect(cancelCard).not.toHaveBeenCalled();
   await waitFor(() =>
     expect(document.activeElement).toBe(
       screen.getByLabelText("取消原因（可选）"),
     ),
   );
-  fireEvent.click(screen.getByRole("button", { name: "暂不取消" }));
-  expect(document.activeElement).toBe(
-    screen.getByRole("button", { name: "更多" }),
+  fireEvent.click(screen.getByRole("button", { name: "返回" }));
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "更多卡片操作" }),
+    ),
   );
   expect(cancelCard).not.toHaveBeenCalled();
-  await screen.findByRole("button", { name: "更多" });
-  await selectMenu(/^更多$/, "取消卡片");
+  await screen.findByRole("button", { name: "更多卡片操作" });
+  await selectMenu(/^更多卡片操作$/, "取消卡片…");
   fireEvent.change(screen.getByLabelText("取消原因（可选）"), {
     target: { value: "范围已调整" },
   });
-  const form = screen.getByRole("form", { name: "确认取消卡片" });
+  const form = screen.getByRole("form", { name: "取消卡片" });
   fireEvent.submit(form);
   fireEvent.submit(form);
   expect(cancelCard).toHaveBeenCalledTimes(1);
@@ -274,7 +279,7 @@ test.each(
       ...document.querySelectorAll<HTMLTextAreaElement>("textarea"),
     ];
     const values = drafts.map((field) => field.value);
-    await selectMenu(/^更多$/, "取消卡片");
+    await selectMenu(/^更多卡片操作$/, "取消卡片…");
     const reason =
       screen.getByLabelText<HTMLTextAreaElement>("取消原因（可选）");
     await waitFor(() => expect(document.activeElement).toBe(reason));
@@ -284,8 +289,10 @@ test.each(
     expect(reason.value).toBe("仅写入取消原因");
     expect(drafts.map((field) => field.value)).toEqual(values);
     fireEvent.keyDown(reason, { key: "Escape" });
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "更多" }),
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "更多卡片操作" }),
+      ),
     );
     expect(drafts.map((field) => field.value)).toEqual(values);
     if (inDrawer) expect(screen.getByRole("dialog")).toBeTruthy();
@@ -293,13 +300,9 @@ test.each(
   },
 );
 
-test.each(
-  [false, true].flatMap((inDrawer) =>
-    ["hold", "completion"].map((action) => ({ inDrawer, action })),
-  ),
-)(
-  "primary $action form stays below the toolbar and excludes other actions (drawer=$inDrawer)",
-  async ({ inDrawer, action }) => {
+test.each([false, true])(
+  "primary completion form stays below the toolbar and excludes other actions (drawer=%s)",
+  async (inDrawer) => {
     const detail = cardDetail({
       template: {
         id: "general",
@@ -343,26 +346,22 @@ test.each(
         page
       ),
     );
-    const name = action === "hold" ? "暂停卡片" : "标记完成";
+    const name = "标记完成";
     const trigger = await screen.findByRole("button", { name, exact: true });
     fireEvent.click(trigger);
-    const field = screen.getByLabelText(
-      action === "hold" ? "暂停原因" : "完成结果",
-    );
+    const field = screen.getByLabelText("完成结果");
     await waitFor(() => expect(document.activeElement).toBe(field));
     expect(field.closest(".card-action-buttons")).toBeNull();
     expect(field.closest(".card-primary-panels")).toBeTruthy();
-    for (const label of [
-      "编辑",
-      "更多",
-      action === "hold" ? "标记完成" : "暂停卡片",
-    ])
+    for (const label of ["编辑", "更多卡片操作"])
       expect(
         screen.getByRole<HTMLButtonElement>("button", {
           name: label,
           exact: true,
         }).disabled,
       ).toBe(true);
+    // C-700: pausing moved into the ⋯ menu; no inline pause button remains.
+    expect(screen.queryByRole("button", { name: "暂停卡片" })).toBeNull();
     expect(document.querySelectorAll(".card-header form")).toHaveLength(1);
     fireEvent.keyDown(field, { key: "Escape" });
     expect(document.querySelector(".card-primary-panels form")).toBeNull();
@@ -370,20 +369,201 @@ test.each(
       screen.getByRole("button", { name, exact: true }),
     );
     if (inDrawer) expect(screen.getByRole("dialog")).toBeTruthy();
-    await selectMenu(/^更多$/, "取消卡片");
+    await selectMenu(/^更多卡片操作$/, "取消卡片…");
     const reason = screen.getByLabelText("取消原因（可选）");
     await waitFor(() => expect(document.activeElement).toBe(reason));
     fireEvent.keyDown(reason, { key: "Escape" });
-    if (inDrawer) expect(screen.getByRole("dialog")).toBeTruthy();
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "更多" }),
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "更多卡片操作" }),
+      ),
     );
+    if (inDrawer) expect(screen.getByRole("dialog")).toBeTruthy();
     expect(cancelCard).not.toHaveBeenCalled();
     expect(updateCard).not.toHaveBeenCalled();
     expect(markCardDone).not.toHaveBeenCalled();
     expect(changeDrawer).not.toHaveBeenCalled();
   },
 );
+
+test("C-700: the ⋯ menu lists pause first and separates cancel as the last, destructive item", async () => {
+  const user = { key: "ArrowDown" };
+  render(
+    <CardActions
+      card={cardDetail().card}
+      client={fakeClient()}
+      projectId="p-1"
+      onSaved={() => {}}
+    />,
+  );
+  const trigger = screen.getByRole("button", { name: "更多卡片操作" });
+  expect(trigger.textContent).toBe("");
+  fireEvent.keyDown(trigger, user);
+  const menu = await screen.findByRole("menu", { name: "更多卡片操作" });
+  const items = [
+    ...menu.querySelectorAll('[role="menuitem"], [role="separator"]'),
+  ];
+  expect(
+    items.map((item) =>
+      item.getAttribute("role") === "separator" ? "—" : item.textContent,
+    ),
+  ).toEqual([
+    "暂停卡片…",
+    "复制链接",
+    "新建卡片",
+    "标为敏感",
+    "—",
+    "取消卡片…",
+  ]);
+  expect(items.at(-1)?.querySelector(".danger")).toBeTruthy();
+  fireEvent.keyDown(menu, { key: "Escape" });
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+});
+
+test.each(["done", "cancelled"] as const)(
+  "C-700: a %s card's menu has no pause or cancel, and supersedes without a separator",
+  async (status) => {
+    render(
+      <CardActions
+        card={{ ...cardDetail().card, status }}
+        client={fakeClient()}
+        projectId="p-1"
+        onSaved={() => {}}
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole("button", { name: "更多卡片操作" }), {
+      key: "ArrowDown",
+    });
+    const menu = await screen.findByRole("menu");
+    expect(
+      [...menu.querySelectorAll('[role="menuitem"]')].map((i) => i.textContent),
+    ).toEqual(["复制链接", "新建卡片", "标为敏感", "标记被取代…"]);
+    expect(menu.querySelector('[role="separator"]')).toBeNull();
+  },
+);
+
+test("C-700: pausing confirms in a dialog, writes once, and Esc writes nothing", async () => {
+  const card = cardDetail().card;
+  let fail = true;
+  const updateCard = vi
+    .fn<CardiganClient["updateCard"]>()
+    .mockImplementation(async () => {
+      if (fail) {
+        fail = false;
+        throw new TypeError("Lost response");
+      }
+    });
+  const onSaved = vi.fn();
+  render(
+    <CardActions
+      card={card}
+      client={fakeClient({ updateCard })}
+      projectId="p-1"
+      onSaved={onSaved}
+    />,
+  );
+  const trigger = screen.getByRole("button", { name: "更多卡片操作" });
+  await selectMenu(/^更多卡片操作$/, "暂停卡片…");
+  let dialog = within(
+    await screen.findByRole("dialog", { name: "暂停卡片 C-1" }),
+  );
+  const reason = dialog.getByLabelText("暂停原因");
+  await waitFor(() => expect(document.activeElement).toBe(reason));
+  fireEvent.change(reason, { target: { value: "等上游" } });
+  fireEvent.keyDown(reason, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+  expect(updateCard).not.toHaveBeenCalled();
+
+  await selectMenu(/^更多卡片操作$/, "暂停卡片…");
+  dialog = within(await screen.findByRole("dialog", { name: "暂停卡片 C-1" }));
+  // The draft is not kept after dismissing.
+  expect((dialog.getByLabelText("暂停原因") as HTMLTextAreaElement).value).toBe(
+    "",
+  );
+  const confirm = dialog.getByRole<HTMLButtonElement>("button", {
+    name: "暂停卡片",
+  });
+  expect(confirm.disabled).toBe(true);
+  fireEvent.change(dialog.getByLabelText("暂停原因"), {
+    target: { value: " 等上游 " },
+  });
+  expect(confirm.disabled).toBe(true);
+  fireEvent.change(dialog.getByLabelText("恢复条件"), {
+    target: { value: "C-9 合并" },
+  });
+  expect(confirm.className).toContain("ui-button-emphasis");
+  fireEvent.click(confirm);
+  // The failure stays inside the dialog, which remains open.
+  const alert = await dialog.findByRole("alert");
+  expect(alert.textContent).toContain("重试不会重复提交");
+  expect(onSaved).not.toHaveBeenCalled();
+  fireEvent.click(confirm);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(updateCard).toHaveBeenCalledTimes(2);
+  expect(updateCard.mock.calls[0]).toEqual(updateCard.mock.calls[1]);
+  expect(updateCard).toHaveBeenCalledWith(
+    "p-1",
+    "C-1",
+    { hold: { reason: "等上游", resume_condition: "C-9 合并" } },
+    expect.any(String),
+  );
+  expect(await screen.findByText("卡片已暂停。")).toBeTruthy();
+  expect(onSaved).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+});
+
+test("C-700: a paused card edits its pause from the menu with the saved values", async () => {
+  const updateCard = vi.fn<CardiganClient["updateCard"]>().mockResolvedValue();
+  render(
+    <CardActions
+      card={{
+        ...cardDetail().card,
+        hold: { reason: "等上游", resume_condition: "C-9 合并" },
+      }}
+      client={fakeClient({ updateCard })}
+      projectId="p-1"
+      onSaved={() => {}}
+    />,
+  );
+  await selectMenu(/^更多卡片操作$/, "修改暂停信息…");
+  const dialog = within(
+    await screen.findByRole("dialog", { name: "修改暂停信息 C-1" }),
+  );
+  expect((dialog.getByLabelText("恢复条件") as HTMLTextAreaElement).value).toBe(
+    "C-9 合并",
+  );
+  fireEvent.change(dialog.getByLabelText("恢复条件"), {
+    target: { value: "C-10 合并" },
+  });
+  fireEvent.click(dialog.getByRole("button", { name: "保存暂停信息" }));
+  await waitFor(() =>
+    expect(updateCard).toHaveBeenCalledWith(
+      "p-1",
+      "C-1",
+      { hold: { reason: "等上游", resume_condition: "C-10 合并" } },
+      expect.any(String),
+    ),
+  );
+});
+
+test("C-700: the cancel dialog confirms with a destructive button naming the card", async () => {
+  render(
+    <CardActions
+      card={cardDetail().card}
+      client={fakeClient()}
+      projectId="p-1"
+      onSaved={() => {}}
+    />,
+  );
+  await selectMenu(/^更多卡片操作$/, "取消卡片…");
+  const dialog = within(
+    await screen.findByRole("dialog", { name: "取消卡片 C-1" }),
+  );
+  const buttons = dialog.getAllByRole("button");
+  expect(buttons.map((b) => b.textContent)).toEqual(["返回", "取消卡片 C-1"]);
+  expect(buttons[1]?.className).toContain("ui-button-destructive");
+});
 
 test("K2 a stale cancellation displays a Chinese reason and the new-card instruction", async () => {
   render(
@@ -401,9 +581,9 @@ test("K2 a stale cancellation displays a Chinese reason and the new-card instruc
       cardId="C-1"
     />,
   );
-  await screen.findByRole("button", { name: "更多" });
-  await selectMenu(/^更多$/, "取消卡片");
-  fireEvent.click(screen.getByRole("button", { name: "确认取消卡片" }));
+  await screen.findByRole("button", { name: "更多卡片操作" });
+  await selectMenu(/^更多卡片操作$/, "取消卡片…");
+  fireEvent.click(screen.getByRole("button", { name: "取消卡片 C-1" }));
   expect((await screen.findByRole("alert")).textContent).toContain(
     "已完成卡片不能取消；请建新卡，再把旧卡标记为被取代。",
   );
@@ -433,8 +613,8 @@ test.each(["done", "cancelled"] as const)(
         cardId="C-1"
       />,
     );
-    await screen.findByRole("button", { name: "更多" });
-    await selectMenu(/^更多$/, "标记被取代");
+    await screen.findByRole("button", { name: "更多卡片操作" });
+    await selectMenu(/^更多卡片操作$/, "标记被取代…");
     expect(screen.queryByRole("button", { name: "取消卡片" })).toBeNull();
     const input = screen.getByLabelText("被哪张卡取代");
     for (const value of ["C-1", "other/C-2", "bad"]) {
@@ -466,8 +646,8 @@ test.each(["done", "cancelled"] as const)(
 
 test.each([
   { entry: "编辑", submit: "保存修改", operation: "update" },
-  { entry: "取消卡片", submit: "确认取消卡片", operation: "cancel" },
-  { entry: "标记被取代", submit: "标记被取代", operation: "supersede" },
+  { entry: "取消卡片…", submit: "取消卡片 C-1", operation: "cancel" },
+  { entry: "标记被取代…", submit: "标记被取代", operation: "supersede" },
 ])(
   "K2 $operation retries the exact HTTP request and keeps its idempotency key",
   async ({ entry, submit, operation }) => {
@@ -500,8 +680,8 @@ test.each([
     if (entry === "编辑")
       fireEvent.click(await screen.findByRole("button", { name: entry }));
     else {
-      await screen.findByRole("button", { name: "更多" });
-      await selectMenu(/^更多$/, entry);
+      await screen.findByRole("button", { name: "更多卡片操作" });
+      await selectMenu(/^更多卡片操作$/, entry);
     }
     if (operation === "supersede")
       fireEvent.change(screen.getByLabelText("被哪张卡取代"), {
@@ -553,8 +733,8 @@ test("the human marks and unmarks a card sensitive from the card detail", async 
       onSaved={onSaved}
     />,
   );
-  await screen.findByRole("button", { name: "更多" });
-  await selectMenu(/^更多$/, "标为敏感");
+  await screen.findByRole("button", { name: "更多卡片操作" });
+  await selectMenu(/^更多卡片操作$/, "标为敏感");
   await waitFor(() =>
     expect(setCardSensitive).toHaveBeenCalledWith(
       "p-1",
@@ -577,8 +757,8 @@ test("the human marks and unmarks a card sensitive from the card detail", async 
     />,
   );
   expect(screen.getByText("敏感卡片：合并确认由你亲自处理。")).toBeTruthy();
-  await screen.findByRole("button", { name: "更多" });
-  await selectMenu(/^更多$/, "取消敏感标记");
+  await screen.findByRole("button", { name: "更多卡片操作" });
+  await selectMenu(/^更多卡片操作$/, "取消敏感标记");
   await waitFor(() =>
     expect(setCardSensitive).toHaveBeenLastCalledWith(
       "p-1",
@@ -624,8 +804,8 @@ test("C-69: unmarking says when the timeout will auto-merge, only if it is on", 
         onSaved={() => {}}
       />,
     );
-    await screen.findByRole("button", { name: "更多" });
-    await selectMenu(/^更多$/, "取消敏感标记");
+    await screen.findByRole("button", { name: "更多卡片操作" });
+    await selectMenu(/^更多卡片操作$/, "取消敏感标记");
     await waitFor(() =>
       expect(screen.getByRole("status").textContent).toBe(expected),
     );
@@ -685,8 +865,8 @@ test("C-72: a repeated unmark does not promise a restarted timeout", async () =>
         onSaved={() => {}}
       />,
     );
-    await screen.findByRole("button", { name: "更多" });
-    await selectMenu(/^更多$/, "取消敏感标记");
+    await screen.findByRole("button", { name: "更多卡片操作" });
+    await selectMenu(/^更多卡片操作$/, "取消敏感标记");
     await waitFor(() =>
       expect(screen.getByRole("status").textContent).toBe(expected),
     );
@@ -743,9 +923,9 @@ test("story cancellation requires choosing what happens to the listed active chi
       onSaved={() => {}}
     />,
   );
-  await selectMenu(/^更多$/, "取消卡片");
+  await selectMenu(/^更多卡片操作$/, "取消卡片…");
   const submit = screen.getByRole("button", {
-    name: "确认取消卡片",
+    name: "取消卡片 C-1",
   }) as HTMLButtonElement;
   expect(submit.disabled).toBe(true);
   expect(
@@ -771,6 +951,11 @@ test("a lost create response reuses its key after reopening the child form and r
     .mockResolvedValue({ id: "C-9" });
   const client = fakeClient({
     createCard,
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: false,
+      human_card_templates: ["story", "dev"],
+    }),
     templates: async () => ({
       templates: [
         {
@@ -799,7 +984,7 @@ test("a lost create response reuses its key after reopening the child form and r
     />,
   );
   async function submit() {
-    await selectMenu(/^更多$/, "新建子卡");
+    await selectMenu(/^更多卡片操作$/, "新建子卡");
     const dialog = within(
       await screen.findByRole("dialog", { name: "新建子卡" }),
     );
@@ -816,7 +1001,10 @@ test("a lost create response reuses its key after reopening the child form and r
   }
   await submit();
   await screen.findByRole("alert");
+  // C-684: the typed content asks before it is discarded.
   fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  fireEvent.click(await screen.findByRole("button", { name: "放弃修改" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   await submit();
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(createCard.mock.calls[1]).toEqual(createCard.mock.calls[0]);

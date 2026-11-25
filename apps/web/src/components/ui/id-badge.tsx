@@ -1,3 +1,4 @@
+import { useFullId } from "../../full-id.js";
 import { idBadgeClass, idType } from "../../id-types.js";
 /** `titled={false}` drops the native type hint where a richer tooltip covers it. */
 export function IdBadge({
@@ -7,13 +8,14 @@ export function IdBadge({
   id: string;
   titled?: boolean;
 }) {
+  const shown = useFullId(id);
   return (
     <span
       data-ui="id-badge"
       className={idBadgeClass(id)}
       title={titled ? idType(id)?.label : undefined}
     >
-      {id}
+      {shown}
     </span>
   );
 }

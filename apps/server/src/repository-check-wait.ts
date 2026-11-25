@@ -7,11 +7,13 @@ import {
   type ProjectId,
 } from "@cardigan/domain";
 
-/** Trusted assembly override; never a card or candidate input. */
+/** Trusted assembly override; never a card or candidate input. The last
+ * delay repeats: lock contention keeps the check queued, it never fails it. */
 export function repositoryRetryDelays(
   delays: readonly number[] = [30_000, 60_000],
 ) {
   if (
+    delays.length === 0 ||
     delays.length > 10 ||
     Array.from(delays).some(
       (ms) => !Number.isSafeInteger(ms) || ms <= 0 || ms > 3_600_000,
@@ -20,6 +22,16 @@ export function repositoryRetryDelays(
     throw new Error("Invalid repository lock backoff");
   return [...delays];
 }
+/** Backoff before retry number `ordinal + 1`; never runs out. */
+export function repositoryRetryDelay(
+  delays: readonly number[],
+  ordinal: number,
+) {
+  return delays[Math.min(Math.max(ordinal, 1), delays.length) - 1];
+}
+/** Default total wait before host ops is reminded; the check stays queued. */
+export const DEFAULT_REPOSITORY_WAIT_ALERT_MS = 30 * 60_000;
+export const repositoryWaitOverdue = "merge_check_repository_wait_overdue";
 
 /** A temporary hold can retire a queued batch. Keep its backoff if that exact
  * group is formed again; terminal checks (including explicit recovery after
@@ -237,7 +249,6 @@ export function repositoryCheckWait(
       }
     }
   }
-  let exhausted = false;
   if (check?.status === "queued" && !check.recheck_requested) {
     const { lastCall, timeout } =
       history ?? targetCallHistory(events, target, check);
@@ -248,9 +259,9 @@ export function repositoryCheckWait(
         lastCall.outcome === "timeout";
     if (timeout) {
       timeouts = timeout.ordinal;
+      // A legacy receipt without a deadline (former exhaustion) retries now.
       retryAt = timeout.retry_at ?? undefined;
-      exhausted = timeout.retry_at === null;
     }
   }
-  return { timeouts, retryAt, exhausted, lastWaitWasLockTimeout };
+  return { timeouts, retryAt, lastWaitWasLockTimeout };
 }

@@ -23,15 +23,20 @@ export function acknowledgeDispatchedRun(
   now: () => string = () => new Date().toISOString(),
 ): void {
   const { actor } = identity;
-  const dispatched = store.uow.read((tx) =>
-    tx.runs
-      .list(actor.project_id)
-      .find(
-        (run) =>
-          run.assignment_id === actor.assignment_id &&
-          run.status === "dispatched",
-      ),
-  );
+  // C-635: an indexed lookup; scanning every Run of the project on each tool
+  // call cost milliseconds of the shared event loop.
+  const dispatched = store.dispatchedRunIds
+    ? store.dispatchedRunIds(actor.project_id, actor.assignment_id)[0]
+    : store.uow.read(
+        (tx) =>
+          tx.runs
+            .list(actor.project_id)
+            .find(
+              (run) =>
+                run.assignment_id === actor.assignment_id &&
+                run.status === "dispatched",
+            )?.id,
+      );
   if (dispatched === undefined) {
     return;
   }
@@ -40,7 +45,7 @@ export function acknowledgeDispatchedRun(
       loadCommandState(tx, actor.project_id),
       actor,
       // C-600: compared with the session's launch Token in this write.
-      { run_id: dispatched.id, token_id: identity.token.id },
+      { run_id: dispatched, token_id: identity.token.id },
       { clock: { now }, ids: tx.ids },
     );
     if (!effect.ok) {

@@ -1,4 +1,5 @@
-import { Store } from "@cardigan/store";
+import { suggestProjectCode } from "@cardigan/domain";
+import { projectCodeSource, Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { announceDataDir, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
@@ -7,7 +8,8 @@ import { runRoleCommand } from "./role.js";
 const ADMIN_USAGE = [
   "用法：",
   "  cardigan init [--data-dir <目录>]",
-  "  cardigan project create <project_id> [--name <名字>] [--data-dir <目录>]",
+  "  cardigan project create <project_id> --code <代号> [--name <名字>] [--data-dir <目录>]",
+  "  cardigan project code [--set <代号>] [--project <p>]",
   "  cardigan role add <project_id> <role_id> [--version <n>] [--allowed-tools a,b] [--capabilities x,y] [--data-dir <目录>]",
   "  cardigan role add --file <role.yaml> [--project <p>]",
   "  cardigan role update --file <role.yaml> [--project <p>]",
@@ -25,7 +27,7 @@ export interface AdminOptions {
 /** Parse `init`, `project create` and `role add` arguments. */
 export interface ParsedAdminArgs {
   readonly command: "init" | "project" | "role";
-  readonly subcommand?: "create" | "set-repo" | "add" | "update";
+  readonly subcommand?: "create" | "set-repo" | "code" | "add" | "update";
   readonly options: AdminOptions;
 }
 
@@ -34,16 +36,18 @@ export function parseAdminArgs(args: readonly string[]): ParsedAdminArgs {
   const positionals: string[] = [];
   const flags: Record<string, string> = {};
   let dataDir: string | undefined;
-  let subcommand: "create" | "add" | "update" | "set-repo" | undefined;
+  let subcommand: "create" | "add" | "update" | "set-repo" | "code" | undefined;
 
   let index = 0;
   if (command === "project") {
     const next = rest[0];
-    const allowed = ["create", "set-repo"] as const;
+    const allowed = ["create", "set-repo", "code"] as const;
     if (next === undefined || !(allowed as readonly string[]).includes(next)) {
-      throw new CliError("用法：cardigan project create|set-repo", EXIT.usage, [
-        ADMIN_USAGE,
-      ]);
+      throw new CliError(
+        "用法：cardigan project create|set-repo|code",
+        EXIT.usage,
+        [ADMIN_USAGE],
+      );
     }
     subcommand = next as (typeof allowed)[number];
     index = 1;
@@ -76,7 +80,9 @@ export function parseAdminArgs(args: readonly string[]): ParsedAdminArgs {
         token === "--file" ||
         token === "--path" ||
         token === "--base-branch" ||
-        token === "--project"
+        token === "--project" ||
+        token === "--code" ||
+        token === "--set"
       ) {
         flags[token.slice(2)] = value;
       } else {
@@ -108,6 +114,20 @@ export function parseAdminArgs(args: readonly string[]): ParsedAdminArgs {
     return {
       command: "project",
       subcommand: "set-repo",
+      options: { dataDir, positionals, flags },
+    };
+  }
+  if (command === "project" && subcommand === "code") {
+    if (positionals.length > 0) {
+      throw new CliError(
+        "用法：cardigan project code [--set <代号>] [--project <p>]",
+        EXIT.usage,
+        [ADMIN_USAGE],
+      );
+    }
+    return {
+      command: "project",
+      subcommand: "code",
       options: { dataDir, positionals, flags },
     };
   }
@@ -159,13 +179,14 @@ export async function runAdminCommand(
   io: CliIo,
 ): Promise<number> {
   if (args[0] === "role") return runRoleCommand(args.slice(1), io);
-  const { command, options } = parseAdminArgs(args);
+  const { command, subcommand, options } = parseAdminArgs(args);
   const dataDir = announceDataDir(io, options.dataDir);
 
   switch (command) {
     case "init":
       return initDatabase(dataDir, io);
     case "project":
+      if (subcommand === "code") return projectCode(dataDir, io, options);
       return options.flags.path === undefined
         ? createProject(dataDir, io, options)
         : setProjectRepo(dataDir, io, options);
@@ -199,8 +220,25 @@ function createProject(
   const projectId = requireIdentifier(options.positionals[0], "project_id");
   const store = Store.open({ dataDir });
   try {
+    const code = options.flags.code;
+    if (code === undefined) {
+      // C-674: the code is required; offer the suggestion for this name.
+      const suggestion = suggestProjectCode(
+        projectCodeSource({
+          id: projectId,
+          name: options.flags.name ?? projectId,
+        }),
+        store.listProjects().flatMap((p) => (p.code ? [p.code] : [])),
+      );
+      throw new CliError(
+        `创建项目需要 --code <代号>（3–4 位大写字母或数字，首位是字母，登记后不可改）；建议：--code ${suggestion}`,
+        EXIT.usage,
+        [ADMIN_USAGE],
+      );
+    }
     const created = store.createProject({
       id: projectId,
+      code,
       ...(options.flags.name === undefined ? {} : { name: options.flags.name }),
     });
     if (!created.ok) {
@@ -210,7 +248,7 @@ function createProject(
       );
     }
     io.stdout(
-      `已创建项目 ${created.value.id}（${created.value.name}）\n数据库：${dataDir}`,
+      `已创建项目 ${created.value.id}（${created.value.name}），代号 ${created.value.code}\n数据库：${dataDir}`,
     );
     return EXIT.ok;
   } finally {
@@ -226,6 +264,44 @@ function requireIdentifier(value: string | undefined, what: string): string {
     );
   }
   return value;
+}
+
+/** C-674: `cardigan project code [--set <code>]` — view or register the project code. */
+function projectCode(
+  dataDir: string,
+  io: CliIo,
+  options: AdminOptions,
+): number {
+  const store = Store.open({ dataDir });
+  try {
+    const projectId = resolveProject(store, io, options.flags.project);
+    const set = options.flags.set;
+    if (set !== undefined) {
+      const result = store.setProjectCode({ project_id: projectId, code: set });
+      if (!result.ok)
+        throw new CliError(
+          formatCommandError("登记项目代号", projectId, result.error),
+          EXIT.usage,
+        );
+      io.stdout(`项目 ${projectId} 已登记代号 ${result.value.code}`);
+      return EXIT.ok;
+    }
+    const project = store.getProject(projectId);
+    if (project?.code) {
+      io.stdout(`项目 ${projectId} 的代号：${project.code}`);
+      return EXIT.ok;
+    }
+    const suggestion = suggestProjectCode(
+      projectCodeSource(project ?? { id: projectId, name: projectId }),
+      store.listProjects().flatMap((p) => (p.code ? [p.code] : [])),
+    );
+    io.stdout(
+      `项目 ${projectId} 还没有登记代号；建议：cardigan project code --set ${suggestion} --project ${projectId}`,
+    );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
 }
 
 /** `cardigan project set-repo --path <dir> [--base-branch main]` */

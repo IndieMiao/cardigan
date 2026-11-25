@@ -1,4 +1,5 @@
 import type { Event, Precheck, PrecheckView, WorkItem } from "./entities.js";
+import { eventsOfTypes } from "./event-index.js";
 import type { CardId } from "./ids.js";
 
 export type { Precheck, PrecheckView } from "./entities.js";
@@ -39,7 +40,12 @@ export function authorPrecheckWaitHandled(
   result: Event,
 ): boolean {
   const check = result.payload as unknown as Precheck;
-  return events.some((e) => {
+  // C-649: the predicate only accepts these three types.
+  return eventsOfTypes(events, [
+    "precheck_wait_delivered",
+    "work_item_resume_requested",
+    "precheck_wait_escalated",
+  ]).some((e) => {
     if (
       e.card_id !== result.card_id ||
       e.actor.project_id !== result.actor.project_id
@@ -68,7 +74,10 @@ export function precheckConflictHandling(
   project: string,
   previousRunId?: string,
 ): Event | undefined {
-  return events.findLast((e) => {
+  return eventsOfTypes(events, [
+    "work_item_resume_requested",
+    "baseline_conflict_limit_reached",
+  ]).findLast((e) => {
     if (
       e.actor.kind !== "system" ||
       e.actor.project_id !== project ||
@@ -136,14 +145,13 @@ const projections = new WeakMap<
 export function prechecks(events: readonly Event[], card?: CardId): Precheck[] {
   let index = projections.get(events);
   if (!index) {
-    const relevant = events
-      .filter(
-        (e) =>
-          e.actor.kind === "system" &&
-          ["precheck_queued", "precheck_started", "precheck_finished"].includes(
-            e.type,
-          ),
-      )
+    // C-649: from the type index; filter-then-stable-sort keeps the order.
+    const relevant = eventsOfTypes(events, [
+      "precheck_queued",
+      "precheck_started",
+      "precheck_finished",
+    ])
+      .filter((e) => e.actor.kind === "system")
       .sort((a, b) => a.seq - b.seq);
     const byCard = new Map<CardId | undefined, Map<string, Precheck>>();
     // The project-wide projection keeps the original stable seq ordering and

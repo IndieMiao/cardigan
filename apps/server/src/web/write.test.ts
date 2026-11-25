@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import {
   type Card,
+  DECISION_OTHER_OPTION,
   type Decision,
   listNeedsYou,
   pauseStandingAssignment,
@@ -190,6 +191,24 @@ test("human instruction commits one typed event and rejects a closed card withou
   expect(snapshot()).toBe(before);
 });
 
+test("C-619: a human question bound to a decision reaches the domain checks without partial writes", async () => {
+  const p = {
+    work_item_id: s.primary.owner.work_item_id,
+    body: "请确认方向",
+  };
+  const before = snapshot();
+  expect(
+    await request(cardPath("instructions"), { ...p, decision_id: "Q-999" }),
+  ).toMatchObject({ status: 404, body: { error: { code: "not_found" } } });
+  expect(
+    await request(cardPath("instructions"), { ...p, decision_id: "bad id" }),
+  ).toMatchObject({
+    status: 400,
+    body: { error: { code: "validation_failed" } },
+  });
+  expect(snapshot()).toBe(before);
+});
+
 test("Needs You decisions preserve a human quote, supply a default, and reject wrong deciders or options", async () => {
   const q = s.command((state, actor, ports) =>
     requestDecision(state, actor, { ...question, card_id: s.card.id }, ports),
@@ -239,6 +258,40 @@ test("Needs You decisions preserve a human quote, supply a default, and reject w
     body: { error: { code: "forbidden_tool" } },
   });
   expect(snapshot()).toBe(before);
+});
+
+test("C-682: Needs You 其他 requires the owner's own words and never substitutes a default", async () => {
+  const q = s.command((state, actor, ports) =>
+    requestDecision(state, actor, { ...question, card_id: s.card.id }, ports),
+  );
+  const before = snapshot();
+  for (const raw_quote of [undefined, "", "   "])
+    expect(
+      await request(resolvePath(q), {
+        option: DECISION_OTHER_OPTION,
+        ...(raw_quote === undefined ? {} : { raw_quote }),
+      }),
+    ).toMatchObject({
+      status: 400,
+      body: { error: { code: "validation_failed" } },
+    });
+  expect(snapshot()).toBe(before);
+  expect(
+    await request(resolvePath(q), {
+      option: DECISION_OTHER_OPTION,
+      raw_quote: " 把仓库转为公开 ",
+    }),
+  ).toMatchObject({
+    status: 200,
+    body: {
+      status: "resolved",
+      resolution: {
+        option: DECISION_OTHER_OPTION,
+        raw_quote: "把仓库转为公开",
+        resolved_by: "human",
+      },
+    },
+  });
 });
 
 test("human action completion validates result, completes once, and rejects a terminal replay", async () => {
@@ -1415,7 +1468,8 @@ test.each([false, true])(
       (await (
         await fetch(web.url + path("/needs-you"), { headers: { cookie } })
       ).json()) as { decisions: { id: string }[] };
-    expect(recipients()).toEqual(["pm_ops"]);
+    // C-722: the Office on duty is told about the request; Needs You is not.
+    expect(recipients()).toEqual(["pm_ops", "pm_office"]);
     expect((await needsYou()).decisions.some((d) => d.id === q.id)).toBe(false);
     const before = snapshot();
     expect(
@@ -1934,6 +1988,105 @@ test("Web answers bind to a story group, retry exactly once, and leave the rest 
                   value: "原样",
                   source: "accepted_default",
                   entry_id: defaults.body.id,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+});
+
+test("C-715: Web submits a whole checklist once: answers and blank defaults share one entry, replays return it, a second submission is refused", async () => {
+  const group_id =
+    `${s.card.id}#1` as import("@cardigan/domain").TimelineEntryId;
+  s.store().uow.run((tx) =>
+    tx.cards.put(s.project.project_id, {
+      ...s.card,
+      story: {
+        question_groups: [
+          {
+            id: group_id,
+            questions: ["布局", "顺序"].map((question) => ({
+              question,
+              recommended: "原样",
+              impact: "少改动",
+            })),
+          },
+        ],
+      },
+    }),
+  );
+  const post = (action: Record<string, unknown>, key: string) =>
+    request(
+      cardPath("comments"),
+      { body: "提交回答", story_discussion: action },
+      { "idempotency-key": key },
+    );
+  const comments = () =>
+    s
+      .state()
+      .events.filter(
+        (e) => e.type === "comment_posted" && e.card_id === s.card.id,
+      );
+  const before = comments().length;
+  const submit = {
+    action: "submit_answers",
+    group_id,
+    answers: [{ number: 2, answer: "倒序" }],
+  };
+  const bad = [
+    { ...submit, answers: [{ number: 2, answer: " " }] },
+    { ...submit, answers: [{ number: 0, answer: "倒序" }] },
+    { ...submit, answers: [{ number: 2, answer: "倒序", extra: 1 }] },
+    { action: "submit_answers", group_id },
+  ];
+  for (const [i, action] of bad.entries())
+    expect((await post(action, `bad-${i}`)).status).toBe(400);
+  const first = await post(submit, "whole-list");
+  expect(first.status).toBe(200);
+  expect(first.body.body).toBe(
+    `提交回答\n\n${group_id} 第 1 题按默认：原样\n\n${group_id} 第 2 题：倒序`,
+  );
+  expect(await post(submit, "whole-list")).toEqual(first);
+  expect(await post(submit, "whole-list-again")).toMatchObject({
+    status: 409,
+  });
+  // Refused attempts, the replay and the second submission add nothing: the
+  // Office is woken once, by the one entry carrying the whole checklist.
+  const posted = comments().slice(before);
+  expect(posted).toHaveLength(1);
+  const [event] = posted;
+  if (!event) throw new Error("Missing submission event");
+  expect(
+    routeEvent({ event, snapshot: s.state() })
+      .notifications.map((n) => n.recipient.kind)
+      .filter((kind) => kind === "pm_office"),
+  ).toEqual(["pm_office"]);
+  const read = await fetch(web.url + path(`/cards/${s.card.id}`), {
+    headers: { cookie },
+  });
+  expect(await read.json()).toMatchObject({
+    card: {
+      story: {
+        discussion_rounds: 1,
+        question_groups: [
+          {
+            id: group_id,
+            questions: [
+              {
+                resolution: {
+                  value: "原样",
+                  source: "accepted_default",
+                  entry_id: first.body.id,
+                },
+              },
+              {
+                resolution: {
+                  value: "倒序",
+                  source: "answer",
+                  entry_id: first.body.id,
                 },
               },
             ],

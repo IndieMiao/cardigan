@@ -7,7 +7,10 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
-import { registerTemplateRoles } from "./template-fixtures.js";
+import {
+  openHumanCardTemplates,
+  registerTemplateRoles,
+} from "./template-fixtures.js";
 
 const project = "p-card-update" as ProjectId;
 let dataDir: string;
@@ -26,6 +29,7 @@ async function createCard(projectId = project): Promise<void> {
   const setup = Store.open({ dataDir });
   try {
     registerTemplateRoles(setup, projectId);
+    openHumanCardTemplates(setup, projectId);
   } finally {
     setup.close();
   }
@@ -68,7 +72,18 @@ beforeEach(async () => {
       throw new Error("card commands must not spawn");
     },
   };
-  expect(await run(["project", "create", project])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      project,
+      "--code",
+      `T${project
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   await createCard();
   store = Store.open({ dataDir });
 });
@@ -370,7 +385,18 @@ test.each([{ ids: [] }, { ids: ["W-1"] }, { ids: ["C-99"] }])(
 
 test("explicit project overrides the environment and ambiguous projects fail", async () => {
   const otherProject = "p-other" as ProjectId;
-  expect(await run(["project", "create", otherProject])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      otherProject,
+      "--code",
+      `T${otherProject
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   await createCard(otherProject);
   io.env.CARDIGAN_PROJECT = otherProject;
   expect(
@@ -393,7 +419,8 @@ test("explicit project overrides the environment and ambiguous projects fail", a
   delete io.env.CARDIGAN_PROJECT;
   const before = snapshot();
   expect(await run(["card", "update", "C-1", "--status", "cancelled"])).toBe(2);
-  expect(errors.join("\n")).toContain("有多个项目");
+  // C-675: both projects have C-1, so the refusal names the full numbers.
+  expect(errors.join("\n")).toContain("C-1 在多个项目里都有");
   expect(snapshot()).toEqual(before);
 });
 
@@ -554,7 +581,18 @@ test.each([
 
 test("does not resolve a replacement from another project and rolls back cancellation", async () => {
   const otherProject = "p-other" as ProjectId;
-  expect(await run(["project", "create", otherProject])).toBe(0);
+  expect(
+    await run([
+      "project",
+      "create",
+      otherProject,
+      "--code",
+      `T${otherProject
+        .replace(/[^a-z0-9]/gu, "")
+        .slice(0, 3)
+        .toUpperCase()}`,
+    ]),
+  ).toBe(0);
   await createCard(otherProject);
   await createCard(otherProject);
   const before = snapshot(),
@@ -730,4 +768,61 @@ test("CLI preserves explicit framework classification on create and update", asy
   expect(snapshot().cards.find((c) => c.id === "C-2")?.is_ui_framework).toBe(
     false,
   );
+});
+
+test("C-728: PM registers a no-merge card's repository and start point", async () => {
+  const sha = "9172f56f".padEnd(40, "0");
+  expect(await run(["card", "update", "C-1", "--start-point", sha])).toBe(2);
+  expect(errors.join("\n")).toContain("merge_policy=none");
+  store.setProjectRepo({ project_id: project, repo_path: "/srv/source/p" });
+  store.uow.run((tx) => {
+    const card = tx.cards.list(project).find((c) => c.id === "C-1");
+    if (!card) throw new Error("missing fixture card");
+    const { repo: _repo, base_branch: _base, ...bare } = card;
+    tx.cards.put(project, { ...bare, merge_policy: "none" });
+  });
+  expect(
+    await run(["card", "update", "C-1", "--start-point", sha.toUpperCase()]),
+  ).toBe(0);
+  expect(output.join("\n")).toBe("已更新卡片 C-1：start-point");
+  expect(snapshot().cards[0]).toMatchObject({
+    repo: "/srv/source/p",
+    base_branch: "main",
+    start_point: sha,
+  });
+  expect(snapshot().timeline.at(-1)?.body).toContain(`起点：${sha}`);
+  expect(await run(["card", "update", "C-1", "--start-point", "HEAD~1"])).toBe(
+    2,
+  );
+  const item = snapshot().work_items.find((w) => w.kind === "produce");
+  expect(
+    await run([
+      "work-item",
+      "update",
+      item?.id as string,
+      "--start-point",
+      "release/0.4",
+    ]),
+  ).toBe(0);
+  expect(
+    snapshot().work_items.find((w) => w.id === item?.id)?.start_point,
+  ).toBe("release/0.4");
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-1",
+      "--repo",
+      "other/repo",
+      "--base-branch",
+      "release",
+      "--start-point",
+      "none",
+    ]),
+  ).toBe(0);
+  expect(snapshot().cards[0]).toMatchObject({
+    repo: "other/repo",
+    base_branch: "release",
+  });
+  expect(snapshot().cards[0]).not.toHaveProperty("start_point");
 });

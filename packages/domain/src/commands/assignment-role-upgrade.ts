@@ -11,7 +11,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
-import { stoppedByHuman } from "./stop.js";
+import { stoppedByHuman } from "./stop-state.js";
 
 /** Host selects a verified current default; no IO or new Run occurs in these commands. */
 export function beginIdleAssignmentRoleUpgrade(

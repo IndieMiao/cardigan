@@ -1,8 +1,10 @@
 export * from "./artifact-publication.js";
+export * from "./attachment-refs.js";
 export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";
 export * from "./bell-receipt.js";
+export * from "./capability-guide.js";
 export * from "./card-dependencies.js";
 export * from "./card-derived.js";
 export {
@@ -52,8 +54,10 @@ export * from "./commands/employee.js";
 export { selectStandingEmployee } from "./commands/employee-assignment.js";
 export * from "./commands/flow.js";
 export { DEFAULT_FRAMEWORK_WAIT_REMINDER_MS } from "./commands/framework-dependencies.js";
+export * from "./commands/held-assignment-resume.js";
 export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
+export * from "./commands/host-ops-attached-wait.js";
 export * from "./commands/host-ops-context-restart.js";
 export * from "./commands/host-ops-rotate.js";
 export { refreshHumanActionFollowUps } from "./commands/human-action-follow-ups.js";
@@ -63,10 +67,16 @@ export {
 } from "./commands/human-action-lifecycle.js";
 export {
   beginIdleSessionRetirement,
+  clearSupersededRetirement,
+  confirmKeptShellExit,
   confirmWaitingRetirementExit,
   handoffIdleSessionRetirement,
+  releaseRetainedRetirement,
+  releaseUnresponsiveSession,
   settleIdleSessionRetirement,
   trackRetirementDispatch,
+  type UnresponsiveRelease,
+  unresponsiveReleaseBlocker,
 } from "./commands/idle-session-retirement.js";
 export * from "./commands/inactive-run.js";
 export { refreshRequiredVerifiers } from "./commands/late-verifier.js";
@@ -150,6 +160,7 @@ export * from "./commands/preferences.js";
 export * from "./commands/preparation-recovery.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
+export * from "./commands/release-notes.js";
 export * from "./commands/remote-worker-loss.js";
 export * from "./commands/replace-verifier.js";
 export * from "./commands/request-recheck.js";
@@ -168,12 +179,24 @@ export {
   sourceMergeSuggestionView,
 } from "./commands/source-merge.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
-export { rotateStandingAfterDeployment } from "./commands/standing-deployment.js";
+export {
+  deploymentAuditedVersion,
+  rotateStandingAfterDeployment,
+} from "./commands/standing-deployment.js";
 export * from "./commands/standing-pm-stall.js";
 export {
+  humanStopRecorded,
+  openStopEpisodeStart,
+  pausedByHuman,
+  stopExitConfirmed,
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./commands/stop.js";
+export {
+  ASSIGNMENT_HOLD_RESUMED,
+  type HeldPause,
+  heldPause,
+} from "./commands/stop-state.js";
 export * from "./commands/story-proposal.js";
 export * from "./commands/system-completion.js";
 export * from "./commands/system-merge.js";
@@ -203,13 +226,38 @@ export {
   categoryDelegated,
 } from "./decision-authorization.js";
 export * from "./decision-groups.js";
+export * from "./decision-other.js";
+export * from "./decision-question.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
 export * from "./dispatch-tier.js";
 export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
-export { eventById, eventsForDecision, eventsOfType } from "./event-index.js";
+export {
+  appendEvents,
+  commandEventHistory,
+  commandStreamHistory,
+  eventById,
+  eventsAtSeq,
+  eventsForDecision,
+  eventsOfType,
+  eventsOfTypes,
+  flatMapEvents,
+  fullEventHistory,
+  isTelemetryEvent,
+  streamEvents,
+  TELEMETRY_EVENT_TYPES,
+  telemetryEvents,
+} from "./event-index.js";
+export {
+  EventLog,
+  EventLogView,
+  type HistoryFilter,
+  type IndexKeys,
+  indexKeysOf,
+  streamHistory,
+} from "./event-log.js";
 export * from "./ext-interaction.js";
 export * from "./ext-message.js";
 export * from "./flow.js";
@@ -225,7 +273,10 @@ export {
 export * from "./harness-activity.js";
 export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
+export * from "./hot-history.js";
+export * from "./hot-history-shadow.js";
 export * from "./ids.js";
+export * from "./image-generation.js";
 export {
   currentInteraction,
   type InteractionSample,
@@ -233,6 +284,7 @@ export {
 } from "./interaction.js";
 export * from "./machine-placement.js";
 export * from "./machine-requirements.js";
+export * from "./macos-checks.js";
 export * from "./mcp-session.js";
 export * from "./member.js";
 export * from "./merge-batch.js";
@@ -240,6 +292,7 @@ export * from "./merge-override.js";
 export * from "./merge-stage.js";
 export { needsYouReadPhase } from "./needs-read-phase.js";
 export * from "./notification.js";
+export * from "./office-changes.js";
 export * from "./owner-message.js";
 export * from "./pm-merge-stall-attention.js";
 export * from "./pm-notification.js";
@@ -249,10 +302,14 @@ export * from "./preferences.js";
 export { cancelledQueueRelease } from "./prelaunch-release.js";
 export * from "./priority.js";
 export * from "./probes.js";
+export * from "./project-code.js";
 export * from "./provider-start.js";
 export * from "./readiness.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
+export * from "./release-notes.js";
 export * from "./remote-worker-loss.js";
+export * from "./review-convergence.js";
+export * from "./review-evidence.js";
 export {
   type ReviewLimitAttention,
   reviewLimitAttention,
@@ -267,6 +324,7 @@ export * from "./run-recovery.js";
 export { hasRunTarget } from "./run-target.js";
 export * from "./runtime-port.js";
 export * from "./session-maintenance.js";
+export * from "./shared-files.js";
 export { sharedMustFixes } from "./shared-findings.js";
 export {
   canParkForDiscussion,
@@ -280,9 +338,11 @@ export {
   reviewWakeBlocked,
 } from "./shared-review-wake.js";
 export * from "./standing.js";
+export * from "./start-point.js";
 export * from "./states.js";
 export * from "./story.js";
 export * from "./story-discussion.js";
+export { type StreamEventReader, streamEventsBy } from "./stream-events.js";
 export * from "./system-review-limit.js";
 export * from "./templates.js";
 export * from "./test-review.js";

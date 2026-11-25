@@ -21,6 +21,7 @@ test("board, list and card routes round-trip", () => {
     { kind: "snapshot", projectId: "p-fictional" },
     { kind: "execution", projectId: "p-fictional" },
     { kind: "activity", projectId: "p-fictional" },
+    { kind: "release-notes", projectId: "p-fictional" },
     { kind: "card", projectId: "p-fictional", cardId: "C-1" },
     {
       kind: "card",

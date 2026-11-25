@@ -9,12 +9,20 @@ import {
   eventById,
   eventsOfType,
   type HostOpsExecution,
+  heldPause,
+  heldPauseHandler,
   hostOpsPending,
+  nudgeStalledPatrol,
   observedLocalExitCause,
   type ProjectId,
+  patrolNudges,
   type Runtime,
   type RuntimeRef,
+  requestHeldAssignmentResume,
+  runsOf,
   STANDING_PM_STALL_EVENTS,
+  stoppedByHuman,
+  type WithdrawnRecoveryDiagnosis,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
@@ -30,7 +38,9 @@ import {
   dispatchHandoffs,
   dispatchStallCauses,
 } from "./dispatch-stalls.js";
-import { stallEvidence } from "./stall-evidence.js";
+import { heldBacklogMs, heldBacklogs } from "./held-backlog.js";
+import { releaseExitedAgent } from "./idle-session-retirement.js";
+import { sessionExitProof, stallEvidence } from "./stall-evidence.js";
 import { overdueStallHandoffs } from "./stall-handoff.js";
 import { StandingPmRecovery } from "./standing-pm-recovery.js";
 
@@ -115,17 +125,47 @@ function publishStallHandoff(
     type: "dispatch_stall_attention",
   };
   tx.events.append(project, event);
+  const held = heldStallRecipient(state, stall);
   recordNotification(store.database, {
     project_id: project,
     event_id: event.id,
     card_id: stall.card_id ?? undefined,
     seq: event.seq,
     at: event.created_at,
-    recipient: ops
-      ? { kind: "assignment", assignment_id: ops.id }
-      : { kind: "pm_office" },
-    kind: "run_attention",
+    recipient:
+      held ??
+      (ops
+        ? { kind: "assignment", assignment_id: ops.id }
+        : { kind: "pm_office" }),
+    kind: held?.kind === "needs_you" ? "needs_you" : "run_attention",
   });
+}
+/**
+ * C-732: host operations cannot end a human pause. A stall held only by one
+ * goes to whoever can resume it (PM Ops under the `permission` delegation,
+ * else the human), never to the host_ops patrol.
+ */
+function heldStallRecipient(
+  state: CommandState,
+  stall: Pick<DispatchStall, "restart_blocked" | "assignment_id">,
+): { kind: "pm_ops" } | { kind: "needs_you" } | undefined {
+  // A managed stop still releasing its terminal is transient, not a pause.
+  return stall.restart_blocked === "human_stopped" &&
+    heldPause(state.events, stall.assignment_id)
+    ? { kind: heldPauseHandler(state) }
+    : undefined;
+}
+/** C-732: who paused the Assignment and when, on a `human_stopped` stall. */
+function heldStallDetails(state: CommandState, stall: DispatchStall) {
+  const pause = heldPause(state.events, stall.assignment_id);
+  if (stall.restart_blocked !== "human_stopped" || !pause) return {};
+  const handler = heldPauseHandler(state);
+  return {
+    paused_by: pause.by,
+    paused_at: pause.at,
+    handled_by: handler,
+    next_step: `${stall.assignment_id} 处于人工暂停（${pause.by} 于 ${pause.at} 暂停），主机运维不能解除。卡片未暂停且待办排队超过阈值时，系统会请${handler === "pm_ops" ? "项目经理" : "人"}在恢复拍板中一键恢复；也可用 cardigan assignment start ${stall.assignment_id} 恢复。`,
+  };
 }
 export function recoveryBasis({
   session_maintenance: _maintenance,
@@ -169,9 +209,164 @@ function standingRestarted(state: CommandState, stall: DispatchStall) {
   );
 }
 
+/**
+ * C-626: how long the bound empty editor must keep standing in for a missing
+ * hc activity report before the patrol stops a system-ended turn. Every patrol
+ * pass (about 30 s) re-reads it; any other observation restarts the window.
+ */
+export const DEFAULT_TURN_IDLE_PROMPT_MS = 60_000;
+export function turnIdlePromptMs() {
+  const raw = process.env.CARDIGAN_TURN_IDLE_PROMPT_MS;
+  if (raw === undefined) return DEFAULT_TURN_IDLE_PROMPT_MS;
+  const value = Number(raw);
+  if (!/^\d+$/u.test(raw) || !Number.isSafeInteger(value) || value > 3_600_000)
+    throw new Error("Invalid CARDIGAN_TURN_IDLE_PROMPT_MS");
+  return value;
+}
+
+/**
+ * C-669: the patrol's own automatic restart that was withdrawn before any
+ * signal is retried, at most this many more times per incident and no sooner
+ * than the interval after the last withdrawal, and only once its session is
+ * kernel-proven gone. Invalid values fail host startup.
+ */
+export const DEFAULT_PATROL_RESTART_RETRIES = 3;
+export const DEFAULT_PATROL_RESTART_RETRY_MS = 60_000;
+export function patrolRestartRetryPolicy(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const read = (name: string, fallback: number, max: number) => {
+    const raw = env[name];
+    if (raw === undefined || raw === "") return fallback;
+    const value = Number(raw);
+    if (!/^\d+$/u.test(raw) || !Number.isSafeInteger(value) || value > max)
+      throw new Error(`Invalid ${name}`);
+    return value;
+  };
+  return {
+    retries: read(
+      "CARDIGAN_PATROL_RESTART_RETRIES",
+      DEFAULT_PATROL_RESTART_RETRIES,
+      100,
+    ),
+    interval_ms: read(
+      "CARDIGAN_PATROL_RESTART_RETRY_MS",
+      DEFAULT_PATROL_RESTART_RETRY_MS,
+      3_600_000,
+    ),
+  };
+}
+type PatrolAttempts =
+  /** A system attempt reached a signal, a deferred stop or another outcome. */
+  | { readonly settled: true }
+  | {
+      readonly settled: false;
+      readonly withdrawn: number;
+      readonly last_at?: string;
+      readonly reason?: string;
+      /** C-680: the diagnosis that held the last withdrawn attempt. */
+      readonly blocked_by?: WithdrawnRecoveryDiagnosis;
+    };
+/** C-669: this incident's system attempts, when every one of them was
+ * withdrawn before touching the terminal (`withdrawn_stall_changed`). */
+export function patrolAttempts(
+  state: CommandState,
+  assignment: Assignment["id"],
+  cause: string,
+): PatrolAttempts {
+  const attempts = eventsOfType(state.events, "host_ops_action_taken").filter(
+    (e) => {
+      const p = e.payload as {
+        assignment_id?: string;
+        dispatch_stall_id?: string;
+      };
+      return (
+        e.actor.kind === "system" &&
+        p.assignment_id === assignment &&
+        p.dispatch_stall_id === cause
+      );
+    },
+  );
+  let last: Event | undefined;
+  for (const attempt of attempts) {
+    const finished = eventsOfType(
+      state.events,
+      "host_ops_action_finished",
+    ).find(
+      (e) => (e.payload as { action_id?: string }).action_id === attempt.id,
+    );
+    if (
+      (finished?.payload as { result?: string } | undefined)?.result !==
+      "withdrawn_stall_changed"
+    )
+      return { settled: true };
+    last = finished;
+  }
+  return {
+    settled: false,
+    withdrawn: attempts.length,
+    ...(last
+      ? {
+          last_at: last.created_at,
+          reason:
+            (last.payload as { reason?: string }).reason ??
+            "automatic_recovery_withdrawn",
+          ...withdrawnBlockedBy(last),
+        }
+      : {}),
+  };
+}
+function withdrawnBlockedBy(e: Event) {
+  const blocked = (
+    e.payload as unknown as { blocked_by?: WithdrawnRecoveryDiagnosis }
+  ).blocked_by;
+  return blocked ? { blocked_by: blocked } : {};
+}
+const withdrawnNextStep = (
+  reason: string,
+  exhausted: boolean,
+  blocked?: WithdrawnRecoveryDiagnosis,
+  nudges?: { attempts: number; limit: number },
+) =>
+  `自动换会话已撤回（${reason}${
+    blocked?.evidence.length ? `：${blocked.evidence.join(", ")}` : ""
+  }），旧会话未被停止。${
+    nudges
+      ? `已在原会话续排 Run ${nudges.attempts}/${nudges.limit} 次${
+          nudges.attempts >= nudges.limit ? "，次数已用完" : ""
+        }；`
+      : ""
+  }${
+    exhausted
+      ? "自动重试次数已用完；"
+      : "系统每轮巡检复查：会话仍在时先在原会话续排 Run，终端和进程都确认已退出后自动续起；"
+  }旧会话仍在或无法确认时保持不动，请主机运维从派发停滞核对终端归属和进程，确认已退出或空闲后用 host_ops_restart_assignment 续办。`;
+
+/** C-672/C-690: only the maintenance and retirement fences yield to a proven
+ * exited Agent; the guarded release re-checks stops, host operations and Runs. */
+const EXITED_AGENT_FENCES = new Set([
+  "session_maintenance",
+  "retirement_handoff_changed",
+  "retirement_exit_unconfirmed",
+]);
+export function exitedAgentRow(
+  stall: Pick<DispatchStall, "restart_blocked">,
+  view: { readonly agent_exited: boolean },
+) {
+  return (
+    view.agent_exited && EXITED_AGENT_FENCES.has(stall.restart_blocked ?? "")
+  );
+}
+
 /** Called by the existing host service's tick. Reads never publish or start a recovery. */
 export class StallPatrol {
   private readonly standingPm: StandingPmRecovery;
+  /** First consecutive bound-idle-prompt observation per incident (in memory:
+   * a restarted host simply observes the full window again). */
+  private readonly idlePromptSince = new Map<string, number>();
+  private readonly idlePromptMs = turnIdlePromptMs();
+  private readonly retry = patrolRestartRetryPolicy();
+  private readonly heldBacklogMs = heldBacklogMs();
   constructor(
     private store: Store,
     private clock: Clock,
@@ -267,6 +462,19 @@ export class StallPatrol {
         (!hasTurn || turnKey(s)) && s.cause_id === cause && !s.restart_blocked,
     );
   }
+  /** C-669: nothing of this session is left: never provisioned, or its
+   * terminal is gone and the kernel shows no process of its launch. */
+  private async sessionGone(state: CommandState, a: Assignment) {
+    if (!a.runtime_ref) return !a.session_ref;
+    return (
+      (await sessionExitProof(
+        state,
+        a,
+        this.runtime,
+        this.execution(state.project_id, a.machine_id),
+      )) === "exited"
+    );
+  }
   async evidence(state: CommandState, a: Assignment, stall?: DispatchStall) {
     return stallEvidence(
       state,
@@ -292,8 +500,34 @@ export class StallPatrol {
       if (!a) continue;
       const view = evidence.get(a.id) ?? (await this.evidence(state, a, s));
       evidence.set(a.id, view);
+      const prior = turnKey(s)
+        ? undefined
+        : patrolAttempts(state, a.id, s.cause_id);
+      const nudges = patrolNudges(state, a.id, s.cause_id);
+      const light = nudges.length
+        ? {
+            attempts: nudges.length,
+            limit: this.retry.retries,
+            last_at: nudges.at(-1)?.created_at,
+          }
+        : undefined;
       result.push({
         ...s,
+        ...(prior && !prior.settled && prior.withdrawn
+          ? {
+              withdrawn_reason: prior.reason,
+              ...(prior.blocked_by
+                ? { withdrawn_blocked_by: prior.blocked_by }
+                : {}),
+              ...(light ? { light_recovery: light } : {}),
+              next_step: withdrawnNextStep(
+                prior.reason ?? "automatic_recovery_withdrawn",
+                prior.withdrawn > this.retry.retries,
+                prior.blocked_by,
+                light,
+              ),
+            }
+          : {}),
         ...(s.system_finished_run_id &&
         eventsOfType(state.events, "bell_turn_recovery_failed").some(
           (e) =>
@@ -303,8 +537,11 @@ export class StallPatrol {
           ? { next_step: turnNextStep }
           : {}),
         ...view,
+        // C-672: an exited Agent in a live terminal is not held by the
+        // session maintenance fence: the managed restart settles it.
+        ...(exitedAgentRow(s, view) ? { restart_blocked: null } : {}),
         can_restart:
-          actionable.has(s) &&
+          (actionable.has(s) || exitedAgentRow(s, view)) &&
           view.can_restart &&
           !hostOpsPending(state.events, a.id) &&
           !unfinishedBellAttempts(this.store.database, project, a.id).length,
@@ -364,13 +601,14 @@ export class StallPatrol {
       }
       for (const stall of rows) {
         if (turnKey(stall) || sent.has(key(stall))) continue;
+        const held = heldStallRecipient(state, stall);
         const event = {
           id: tx.ids.nextEventId(),
           seq: tx.ids.nextEventSequence(project),
           actor: { kind: "system" as const, project_id: project },
           type: "dispatch_stall_attention",
           created_at: this.clock.now(),
-          payload: { ...stall },
+          payload: { ...stall, ...heldStallDetails(state, stall) },
         };
         tx.events.append(project, event);
         // Reuse the handoff's (event, recipient) key; the dispatcher already rang operations.
@@ -383,12 +621,13 @@ export class StallPatrol {
           event_id: notice.id,
           card_id: "card_id" in notice ? notice.card_id : undefined,
           seq: notice.seq,
-          kind: "run_attention",
+          kind: held?.kind === "needs_you" ? "needs_you" : "run_attention",
           at: event.created_at,
           recipient:
-            patrol && patrol.id !== stall.assignment_id
+            held ??
+            (patrol && patrol.id !== stall.assignment_id
               ? { kind: "assignment", assignment_id: patrol.id }
-              : { kind: "pm_office" },
+              : { kind: "pm_office" }),
         });
       }
       return { state, actionable, patrol, turns };
@@ -443,6 +682,7 @@ export class StallPatrol {
           if (!row) return; // Original notification already delivered.
           publishStallHandoff(tx, this.store, fresh, a, stall, this.clock, {
             ...row,
+            ...heldStallDetails(fresh, row),
             can_restart: false,
             reason: failure,
             next_step: turnNextStep,
@@ -450,8 +690,40 @@ export class StallPatrol {
         });
       return;
     }
-    if (!a || handled(state) || hostOpsPending(state.events, a.id)) return;
+    const incident = `${project}/${stall.assignment_id}/${turnKey(stall)}`;
+    if (!a || handled(state) || hostOpsPending(state.events, a.id)) {
+      if (!a || handled(state)) this.idlePromptSince.delete(incident);
+      return;
+    }
     const view = await this.evidence(state, a, stall);
+    // C-672: the session's CLI is gone while its terminal stays live. Close
+    // that terminal and settle the session (guarded like maintenance); the
+    // dispatcher then starts a new session for the original notification.
+    if (
+      view.agent_exited &&
+      (!stall.restart_blocked || exitedAgentRow(stall, view))
+    ) {
+      await releaseExitedAgent(
+        this.store,
+        project,
+        a,
+        this.runtime,
+        this.clock,
+      );
+      return;
+    }
+    // The bound empty editor must persist across the window; until then
+    // keep the session and the original queue untouched, without an alert.
+    if (
+      !stall.restart_blocked &&
+      view.can_restart &&
+      view.idle_basis === "bound_idle_prompt"
+    ) {
+      const now = Date.parse(this.clock.now());
+      const since = this.idlePromptSince.get(incident) ?? now;
+      this.idlePromptSince.set(incident, since);
+      if (now - since < this.idlePromptMs) return;
+    } else this.idlePromptSince.delete(incident);
     let reason =
       stall.restart_blocked ?? (!view.can_restart ? "unsafe_evidence" : null);
     let launch: HostOpsExecution["snapshot"];
@@ -519,6 +791,7 @@ export class StallPatrol {
           can_restart: false,
           reason,
           next_step: turnNextStep,
+          ...heldStallDetails(fresh, row),
         },
       };
       const publish = (
@@ -563,6 +836,95 @@ export class StallPatrol {
     if (retry && !this.signal.aborted)
       await this.recoverTurn(retry.state, retry.stall, snapshot, false);
   }
+  private async nudge(
+    project: ProjectId,
+    state: CommandState,
+    patrol: Assignment,
+    stall: DispatchStall,
+    snapshot: (
+      a: Assignment,
+      p: ProjectId,
+    ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
+  ) {
+    const done = patrolNudges(state, patrol.id, stall.cause_id);
+    const last = done.at(-1)?.created_at;
+    if (
+      !patrol.runtime_ref ||
+      done.length >= this.retry.retries ||
+      (last &&
+        Date.parse(this.clock.now()) - Date.parse(last) <
+          this.retry.interval_ms) ||
+      runsOf(state.runs, patrol.id).some(
+        (r) => !["completed", "failed", "cancelled"].includes(r.status),
+      )
+    )
+      return;
+    // Only a session positively seen live gets the Run: a terminal that is
+    // no longer listed would make dispatch start a second session while its
+    // processes may still run.
+    const seen = await this.runtime
+      .status(patrol.runtime_ref)
+      .catch(() => undefined);
+    if (
+      !seen?.ok ||
+      seen.value.process !== "alive" ||
+      seen.value.kept ||
+      this.signal.aborted
+    )
+      return;
+    const launch = await snapshot(patrol, project);
+    if (this.signal.aborted) return;
+    this.store.uow.run((tx) => {
+      const fresh = loadCommandState(tx, project);
+      if (
+        JSON.stringify(fresh.assignments.find((a) => a.id === patrol.id)) !==
+          JSON.stringify(patrol) ||
+        !this.current(fresh, patrol.id, stall.cause_id) ||
+        patrolNudges(fresh, patrol.id, stall.cause_id).length !== done.length
+      )
+        return;
+      const effect = nudgeStalledPatrol(
+        fresh,
+        { kind: "system", project_id: project },
+        {
+          assignment_id: patrol.id,
+          cause_id: stall.cause_id,
+          snapshot: launch,
+          attempt: done.length + 1,
+        },
+        { clock: this.clock, ids: tx.ids },
+      );
+      if (effect.ok) persistEffect(tx, project, effect.value);
+    });
+  }
+  /**
+   * C-732: a human pause with work waiting past the threshold, on an open and
+   * unheld card, gets one resume question per pause for whoever may answer.
+   */
+  private askHeldResume(project: ProjectId) {
+    const state = this.store.uow.read((tx) => loadCommandState(tx, project));
+    const notes = this.store.listNotifications({
+      project_id: project,
+      statuses: ["pending", "belled", "delivery_failed"],
+    });
+    for (const ask of heldBacklogs(
+      state,
+      notes,
+      this.clock.now(),
+      this.heldBacklogMs,
+    ))
+      this.store.uow.run((tx) => {
+        const fresh = loadCommandState(tx, project);
+        const effect = requestHeldAssignmentResume(
+          fresh,
+          { kind: "system", project_id: project },
+          ask,
+          { clock: this.clock, ids: tx.ids },
+        );
+        if (effect.ok && effect.value.data)
+          persistEffect(tx, project, effect.value);
+      });
+  }
   async tick(
     project: ProjectId,
     snapshot: (
@@ -570,7 +932,14 @@ export class StallPatrol {
       p: ProjectId,
     ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
   ) {
+    this.askHeldResume(project);
     const { state, actionable, patrol, turns } = this.publish(project);
+    const open = new Set(
+      turns.map((s) => `${project}/${s.assignment_id}/${turnKey(s)}`),
+    );
+    for (const key of this.idlePromptSince.keys())
+      if (key.startsWith(`${project}/`) && !open.has(key))
+        this.idlePromptSince.delete(key);
     const seen = new Set<string>();
     for (const stall of turns.sort(
       (a, b) => Number(!!a.restart_blocked) - Number(!!b.restart_blocked),
@@ -582,25 +951,56 @@ export class StallPatrol {
     }
     if (!this.signal.aborted) await this.standingPm.tick(project, snapshot);
     if (!patrol || hostOpsPending(state.events, patrol.id)) return;
-    // A withdrawn automatic attempt is left to Ops; never retry it here.
-    const attempted = new Set(
-      eventsOfType(state.events, "host_ops_action_taken").map(
-        (e) => (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
-      ),
+    // An attempt by anyone else (Ops, a human) is never repeated here. C-669:
+    // a system attempt withdrawn before any signal is retried, bounded, once
+    // the old session is proven gone; while it may still live it stays put.
+    const foreign = new Set(
+      eventsOfType(state.events, "host_ops_action_taken")
+        .filter((e) => e.actor.kind !== "system")
+        .map(
+          (e) =>
+            (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
+        ),
     );
-    const own = [...actionable].find(
-      (s) =>
-        s.assignment_id === patrol.id &&
-        s.kind === "standing_backlog" &&
-        !s.system_finished_run_id &&
-        !attempted.has(s.cause_id),
-    );
-    if (!own) return;
-    if (
-      !(await this.evidence(state, patrol)).can_restart ||
-      this.signal.aborted
+    const now = Date.parse(this.clock.now());
+    const candidates = [...actionable]
+      .filter(
+        (s) =>
+          s.assignment_id === patrol.id &&
+          s.kind === "standing_backlog" &&
+          !s.system_finished_run_id &&
+          !foreign.has(s.cause_id),
+      )
+      .map((s) => ({ s, prior: patrolAttempts(state, patrol.id, s.cause_id) }))
+      .filter(
+        (c): c is typeof c & { prior: { settled: false } } =>
+          !c.prior.settled &&
+          (!c.prior.withdrawn ||
+            (c.prior.withdrawn <= this.retry.retries &&
+              now - Date.parse(c.prior.last_at ?? "") >=
+                this.retry.interval_ms)),
+      )
+      // A fresh incident first: a retry needs stronger evidence.
+      .sort((x, y) => x.prior.withdrawn - y.prior.withdrawn);
+    const next = candidates[0];
+    if (!next) return;
+    const own = next.s;
+    if (next.prior.withdrawn && !stoppedByHuman(state.events, patrol.id)) {
+      const gone = await this.sessionGone(state, patrol);
+      if (this.signal.aborted) return;
+      // C-680: a withdrawn restart whose session is still there is resumed
+      // the lightest way, as a human `assignment start` would: queue a Run
+      // for the original session, bounded per incident; nothing is stopped.
+      if (!gone) {
+        await this.nudge(project, state, patrol, own, snapshot);
+        return;
+      }
+    } else if (
+      next.prior.withdrawn ||
+      !(await this.evidence(state, patrol)).can_restart
     )
       return;
+    if (this.signal.aborted) return;
     const launch = await snapshot(patrol, project);
     if (this.signal.aborted) return;
     this.store.uow.run((tx) => {

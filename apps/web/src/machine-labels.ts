@@ -110,21 +110,25 @@ export function capabilityState(c: MachineCapabilityView): CapabilityState {
 }
 
 /**
- * The resource slot that set the remaining ratio, when it is tighter than the
- * machine's own Agent capacity. Uses the selection-time snapshot only.
+ * The resource slot or project ceiling that set the remaining ratio, when it
+ * is tighter than the machine's own Agent capacity. Selection-time snapshot only.
  */
 function bottleneck(c: MachineSelectionCandidate) {
   const machineRatio =
     c.limit !== null && c.occupied !== null && c.limit > 0
       ? (c.limit - c.occupied) / c.limit
       : 1;
-  let tightest:
-    | NonNullable<MachineSelectionCandidate["resources"]>[number]
-    | undefined;
+  let tightest: { label: string; limit: number; occupied: number } | undefined;
   let ratio = machineRatio;
-  for (const slot of c.resources ?? []) {
-    if (slot.limit <= 0) continue;
-    const r = (slot.limit - slot.occupied) / slot.limit;
+  for (const slot of [
+    ...(c.project_limit ? [{ label: "项目", ...c.project_limit }] : []),
+    ...(c.project_resources ?? []).map((s) => ({
+      ...s,
+      label: `项目 ${s.key} `,
+    })),
+    ...(c.resources ?? []).map((s) => ({ ...s, label: `${s.key} ` })),
+  ]) {
+    const r = slot.limit > 0 ? (slot.limit - slot.occupied) / slot.limit : 0;
     if (r < ratio) {
       ratio = r;
       tightest = slot;
@@ -137,7 +141,7 @@ function bottleneck(c: MachineSelectionCandidate) {
 export function candidateReasons(c: MachineSelectionCandidate): string[] {
   const slot = bottleneck(c);
   const occupancy = [
-    ...(slot ? [`${slot.key} 占用 ${slot.occupied}/${slot.limit}`] : []),
+    ...(slot ? [`${slot.label}占用 ${slot.occupied}/${slot.limit}`] : []),
     ...(c.limit !== null && c.occupied !== null
       ? [`${slot ? "机器" : ""}占用 ${c.occupied}/${c.limit}`]
       : []),
@@ -167,6 +171,8 @@ export function selectionSummary(
     return `未选出机器：${selection.reason || "原因未记录"}`;
   const machine = label(selection.machine_id) || "未记录";
   if (selection.status !== "selected") return `${machine}（已分配）`;
+  if (selection.queued_on?.length)
+    return `${machine}（合格机器均已满，排队：${selection.queued_on.join("，")}）`;
   const chosen = selection.candidates?.find(
     (c) => c.machine_id === selection.machine_id,
   );

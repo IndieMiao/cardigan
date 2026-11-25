@@ -1,5 +1,6 @@
 import type {
   DeploymentOperation,
+  DeploymentReadyRetry,
   DeploymentRecord,
 } from "./commands/deployment.js";
 
@@ -42,6 +43,26 @@ export interface DeploymentDriver {
   ready(): Promise<boolean>;
   /** Only allowlisted codes and process outcomes, never raw server output. */
   serverDiagnostics(stage: "start" | "ready"): string;
+  /**
+   * C-650: fixed labels of recognised start/ready failure causes (for
+   * example a locked database) of the latest start; never raw output.
+   */
+  serverFailureCause?(): string | undefined;
+  /**
+   * C-650, optional for legacy adapters: automatic retries of a target whose
+   * start/ready failed and was rolled back. Absent disables durable retries.
+   */
+  readonly readyRetryMax?: number | undefined;
+  /** C-650: minimum gap (ms) before the next automatic retry. */
+  readonly readyRetryIntervalMs?: number | undefined;
+  /**
+   * C-650: the latest durable retry state of one target (main or one human
+   * pin), so a supervisor restart neither forgets nor resets the count.
+   */
+  readyRetryState?(
+    to: string,
+    controlEventId?: string,
+  ): Promise<DeploymentReadyRetry | undefined>;
   promote(build: DeploymentBuild): Promise<void>;
   refreshRoles(): Promise<void>;
   record(record: DeploymentRecord): Promise<void>;

@@ -1,9 +1,9 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
-  agentProcessCommand,
-  type ExecutionConfig,
-} from "@cardigan/runtime-herdr";
+  type AdbProbe,
+  adbTargetProbe,
+  runOnTarget,
+} from "./adb-slot-probe.js";
 import type { ProbeCommand } from "./resource-policy.js";
 
 // The checked binary and its ancestors must not be replaceable by an employee.
@@ -28,66 +28,66 @@ export type ProbeContext = {
   port?: number;
   device?: string;
 };
-export type ResourceProbe = (
+export type ResourceProbe = ((
   argv: ProbeCommand | undefined,
   context: ProbeContext,
   expectedTarget?: string,
-) => Promise<string | undefined>;
-export function targetProbe(
-  resolve: (
-    project: string,
-    machine: string,
-    expectedTarget?: string,
-  ) => Promise<ExecutionConfig> | ExecutionConfig,
-): ResourceProbe {
-  return async (argv, context, expectedTarget) => {
+) => Promise<string | undefined>) & { adb?: AdbProbe };
+type ResolveTarget = (
+  project: string,
+  machine: string,
+  expectedTarget?: string,
+) => Promise<ExecutionConfig> | ExecutionConfig;
+
+/** The pinned execution target for a project and machine, or undefined. */
+async function resolveTarget(
+  resolve: ResolveTarget,
+  context: { project: string; machine: string },
+  expectedTarget?: string,
+) {
+  const config = await resolve(
+    context.project,
+    context.machine,
+    expectedTarget,
+  );
+  if (
+    config.target &&
+    (config.target.machine_id !== context.machine ||
+      config.target.project_id !== context.project)
+  )
+    return undefined;
+  if (
+    context.machine !== "local" &&
+    (config.mode !== "agent-ssh" ||
+      config.target?.machine_id !== context.machine ||
+      config.target.project_id !== context.project)
+  )
+    return undefined;
+  const target =
+    config.target?.fingerprint ??
+    (config.mode === "local" && context.machine === "local"
+      ? "local"
+      : undefined);
+  if (!target || (expectedTarget && expectedTarget !== target))
+    return undefined;
+  return { config, target };
+}
+
+export function targetProbe(resolve: ResolveTarget): ResourceProbe {
+  const probe: ResourceProbe = async (argv, context, expectedTarget) => {
     try {
-      const config = await resolve(
-        context.project,
-        context.machine,
-        expectedTarget,
-      );
-      if (
-        config.target &&
-        (config.target.machine_id !== context.machine ||
-          config.target.project_id !== context.project)
-      )
-        return undefined;
-      if (
-        context.machine !== "local" &&
-        (config.mode !== "agent-ssh" ||
-          config.target?.machine_id !== context.machine ||
-          config.target.project_id !== context.project)
-      )
-        return undefined;
-      const target =
-        config.target?.fingerprint ??
-        (config.mode === "local" && context.machine === "local"
-          ? "local"
-          : undefined);
-      if (!target || (expectedTarget && expectedTarget !== target))
-        return undefined;
+      const resolved = await resolveTarget(resolve, context, expectedTarget);
+      if (!resolved) return undefined;
+      const { config, target } = resolved;
       if (!argv) return target;
-      const args = [
-        "/usr/bin/python3",
+      const stdout = await runOnTarget(config, [
         "-I",
         "-B",
         "-c",
         wrapper,
         JSON.stringify(argv),
         JSON.stringify(context),
-      ];
-      const cmd =
-        config.mode === "agent-ssh"
-          ? await agentProcessCommand(config, args)
-          : { file: "/usr/bin/python3", args: args.slice(1) };
-      const { stdout } = await promisify(execFile)(cmd.file, cmd.args, {
-        cwd: "/",
-        env: { PATH: "/usr/bin:/bin" },
-        timeout: 10_000,
-        killSignal: "SIGKILL",
-        maxBuffer: 4096,
-      });
+      ]);
       if (
         context.action === "release" &&
         (!context.generation || stdout.trim() !== context.generation)
@@ -98,4 +98,13 @@ export function targetProbe(
       return undefined;
     }
   };
+  // C-679: the built-in adb slot cleanup runs on the same pinned target.
+  probe.adb = adbTargetProbe(async (context, expectedTarget) => {
+    try {
+      return await resolveTarget(resolve, context, expectedTarget);
+    } catch {
+      return undefined;
+    }
+  });
+  return probe;
 }

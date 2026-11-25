@@ -260,7 +260,7 @@ beforeEach(async () => {
   output = [];
   errors = [];
   await host(["init"]);
-  await host(["project", "create", "p-write"]);
+  await host(["project", "create", "p-write", "--code", "PWR"]);
   for (const [role, tools] of [
     ["pm", PM_TOOLS],
     ["coder", CODER_TOOLS],

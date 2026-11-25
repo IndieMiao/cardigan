@@ -279,12 +279,15 @@ export function invalidTestReviewPasses(
 ): readonly Review[] {
   return targets.flatMap((target) => {
     const latestReviews = new Map<string, Review>();
-    for (const r of [...state.reviews].sort(latest)) {
-      if (
-        (r.delivery_id === target.id ||
-          target.reused_reviews?.includes(r.id)) &&
-        !latestReviews.has(r.work_item_id)
+    // C-670: sort only this target's reviews (a stable sort of the subset
+    // keeps the same first match per verifier as sorting every review).
+    for (const r of state.reviews
+      .filter(
+        (r) =>
+          r.delivery_id === target.id || target.reused_reviews?.includes(r.id),
       )
+      .sort(latest)) {
+      if (!latestReviews.has(r.work_item_id))
         latestReviews.set(r.work_item_id, r);
     }
     return [...latestReviews.values()].filter(

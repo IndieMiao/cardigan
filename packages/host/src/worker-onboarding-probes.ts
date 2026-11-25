@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { agentProcessCommand } from "@cardigan/runtime-herdr";
-import { workerDirectoryCommand } from "./worker-directory-command.js";
+import {
+  workerDirectoryCommand,
+  workerReleaseRoot,
+} from "./worker-directory-command.js";
 import {
   helpers as helperNames,
   workerHelperDigests,
@@ -280,7 +283,8 @@ export function workerNextAction(
   }
   if (step === "helpers") {
     const guide = config.worker.os === "darwin" ? "macos" : "linux";
-    return `${WORKER_NEXT_ACTION.helpers.replace("linux-worker.md", `${guide}-worker.md`)}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-files.py ${e.fileHelper?.path}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-git.py ${e.gitHelper?.path}\nsudo install -d -o root -g ${e.gid} -m 0750 ${e.agentRoot}/libexec/agent-tools\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/agent-tools/download-attachment.mjs /opt/cardigan/deploy/agent-tools/upload-evidence.mjs ${e.agentRoot}/libexec/agent-tools/`;
+    const deploy = `${workerReleaseRoot(config.worker.os === "darwin", e.agentRoot)}/deploy`;
+    return `${WORKER_NEXT_ACTION.helpers.replace("linux-worker.md", `${guide}-worker.md`)}\nsudo install -o root -g ${e.gid} -m 0750 ${deploy}/worker-files.py ${e.fileHelper?.path}\nsudo install -o root -g ${e.gid} -m 0750 ${deploy}/worker-git.py ${e.gitHelper?.path}\nsudo install -d -o root -g ${e.gid} -m 0750 ${e.agentRoot}/libexec/agent-tools\nsudo install -o root -g ${e.gid} -m 0750 ${deploy}/agent-tools/download-attachment.mjs ${deploy}/agent-tools/upload-evidence.mjs ${e.agentRoot}/libexec/agent-tools/`;
   }
   if (config.worker.os === "darwin") {
     const actions: Record<WorkerProbe, string> = {
@@ -303,6 +307,9 @@ export function workerNextAction(
   if (step === "resources")
     return WORKER_NEXT_ACTION[step].replace("<UID>", String(config.uid));
   if (step === "tools")
-    return `${WORKER_NEXT_ACTION[step]}\n安装 Node 24 后：sudo npm install --global pnpm@11.7.0`;
+    // C-709: a read-only root (SteamOS) cannot take a global npm install.
+    return e.agentRoot.startsWith("/home/cardigan-workers/")
+      ? `${WORKER_NEXT_ACTION[step]}\n根分区只读（SteamOS）：按 docs/steamos-worker.md 把 Node、pnpm 和 hc 装在 /home 下。`
+      : `${WORKER_NEXT_ACTION[step]}\n安装 Node 24 后：sudo npm install --global pnpm@11.7.0`;
   return WORKER_NEXT_ACTION[step];
 }

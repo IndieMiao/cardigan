@@ -49,6 +49,7 @@ export function githubDispatchIdentity(
     attempt: request.attempt,
     kind: request.kind,
     ...(config.scopedChecks ? githubCheckScope(request) : {}),
+    ...(request.workflowInputs ? { files: request.workflowInputs.files } : {}),
   };
   // Cleanup policy is not dispatch identity; preserve existing durable keys.
   const dispatchConfig = { ...config };

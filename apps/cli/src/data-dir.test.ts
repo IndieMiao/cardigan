@@ -67,7 +67,7 @@ test("S10 explicit flags beat environment paths and relative paths resolve again
 });
 test.each([
   ["init"],
-  ["project", "create", "p-new"],
+  ["project", "create", "p-new", "--code", "PNE"],
   ["role", "add", "p", "coder"],
   ["needs-you"],
   ["inbox"],

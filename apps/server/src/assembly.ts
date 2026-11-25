@@ -3,6 +3,11 @@ import { RuntimeTargets } from "@cardigan/host";
 import type { LaunchConfig } from "@cardigan/roles";
 import { type Store, standingResolver } from "@cardigan/store";
 import { type AttachmentGc, startAttachmentLoop } from "./attachment-loop.js";
+import {
+  type MaintenanceWindow,
+  startCentralMaintenanceLoop,
+} from "./central-maintenance-loop.js";
+import { storeRefOwners } from "./central-ref-retention.js";
 import { type CleanupExecutor, startCleanupLoop } from "./cleanup-loop.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { dispatcherClock, type StandingResolver } from "./dispatch-inbox.js";
@@ -97,6 +102,13 @@ export interface ControlPlaneOptions {
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
   readonly backupIntervalMs?: number;
+  /** C-637: off-peak central repository maintenance; off without a window. */
+  readonly centralMaintenanceWindow?: MaintenanceWindow;
+  readonly centralMaintenanceIntervalMs?: number;
+  readonly centralCruftIntervalMs?: number;
+  /** Q-1233: candidate and precheck refs outlive their ended card by this long. */
+  readonly centralRefRetentionMs?: number;
+  readonly centralMaintenanceLog?: (line: Record<string, unknown>) => void;
   /**
    * Data directory holding `attachments/`. Without it the blob GC has nothing
    * to sweep, so the loop only starts when the caller passes it.
@@ -366,6 +378,32 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           onError: report,
           report: (message) => options.onError?.(new Error(message)),
         });
+  const maintenance =
+    options.git === undefined || options.centralMaintenanceWindow === undefined
+      ? undefined
+      : startCentralMaintenanceLoop({
+          startup: options.startup,
+          store: options.store,
+          git: options.git,
+          window: options.centralMaintenanceWindow,
+          clock,
+          ...(options.centralMaintenanceIntervalMs === undefined
+            ? {}
+            : { intervalMs: options.centralMaintenanceIntervalMs }),
+          ...(options.centralCruftIntervalMs === undefined
+            ? {}
+            : { cruftIntervalMs: options.centralCruftIntervalMs }),
+          refOwners: (project_id, cutoff) =>
+            storeRefOwners(options.store, project_id, cutoff),
+          ...(options.centralRefRetentionMs === undefined
+            ? {}
+            : { refRetentionMs: options.centralRefRetentionMs }),
+          ...(options.centralMaintenanceLog === undefined
+            ? {}
+            : { log: options.centralMaintenanceLog }),
+          onError: report,
+          report: (message) => options.onError?.(new Error(message)),
+        });
   // Orphaned content-addressed blobs (§9.3) are host housekeeping, not Git work:
   // the sweep runs even when the host wired no Git.
   const attachments =
@@ -389,6 +427,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     resources?.done,
     reconcile?.loop.done,
     backup?.loop.done,
+    maintenance?.loop.done,
     attachments?.loop.done,
     machineCapabilities?.done,
   ].filter((entry): entry is Promise<void> => entry !== undefined);
@@ -415,6 +454,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       await cleanup?.loop.stop();
       await reconcile?.loop.stop();
       await backup?.loop.stop();
+      await maintenance?.loop.stop();
       // The blob sweep last: it only touches files no record references.
       await attachments?.loop.stop();
       await stopMachineCapabilities;

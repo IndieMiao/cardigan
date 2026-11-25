@@ -6,7 +6,7 @@ import {
   standingRunDormant,
 } from "../card-hold.js";
 import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
-import { eventById } from "../event-index.js";
+import { appendEvents, eventById } from "../event-index.js";
 import { HARNESSES, isHarness } from "../harness.js";
 import {
   automaticContextActionForRun,
@@ -17,6 +17,7 @@ import {
 import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { MCP_SESSION_FAILURE } from "../mcp-session.js";
 import { providerStarted } from "../provider-start.js";
+import { supersededRetirement } from "../retirement-session.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { originalRunTrigger } from "../run-trigger.js";
@@ -37,8 +38,10 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { dropWaitingRetirement } from "./idle-session-retirement.js";
 import { currentReviewTarget, reviewRound } from "./review-round.js";
 import { restartStandingSession, resumeStanding } from "./standing.js";
+import { recordHumanStart } from "./stop-state.js";
 import { incrementalTestReview } from "./test-review.js";
 import { activeWork } from "./workflow.js";
 
@@ -128,7 +131,7 @@ function requireTestReviewBudget(
   const item = d.work(assignment.work_item_id);
   if (item.kind === "verify" && item.status === "waiting_decision") {
     ensure(
-      reviewDiscussionInstruction(item, trigger, d.state.decisions),
+      reviewDiscussionInstruction(item, trigger, d.state),
       "illegal_transition",
       "Review budget is waiting for a decision",
     );
@@ -340,6 +343,7 @@ export function queueRunInDraft(
       requireTestReviewBudget(d, assignment, originalRunTrigger(state, queued));
       exclusive(d, assignment, { run: queued });
       snapshot(queued, assignment);
+      recordHumanStart(d, assignment, queued, cardId(d, assignment));
       return queued;
     }
   }
@@ -372,7 +376,9 @@ export function queueRunInDraft(
         ? eventById(state.events, p.trigger_event_id)
         : undefined,
   });
-  return createQueuedRun(d, assignment, p);
+  const run = createQueuedRun(d, assignment, p);
+  recordHumanStart(d, assignment, run, cardId(d, assignment));
+  return run;
 }
 
 /** Entry points validate their own cause before recording creation and snapshot together. */
@@ -421,7 +427,7 @@ export function createQueuedRun(
   const policy = newRecoveryPolicy(
     {
       ...d.state,
-      events: [...d.state.events, ...d.events],
+      events: appendEvents(d.state.events, d.events),
       work_items: d.list("work_items"),
       deliveries: d.list("deliveries"),
     },
@@ -760,7 +766,15 @@ export function dispatchRun(
     if (runtime === "provisioning")
       runtime = unwrap(transition("runtime", runtime, "provisioned"));
     runtime = unwrap(transition("runtime", runtime, "run_started"));
-    const nextAssignment = { ...assignment };
+    // C-690: a new session supersedes a waiting retirement of an earlier one
+    // (target() already refuses a stopping one). Left in place, its handoff
+    // would fence every later bell of the new session.
+    const current =
+      p.runtime_ref !== undefined &&
+      supersededRetirement({ ...assignment, runtime_ref: ref })
+        ? dropWaitingRetirement(d, assignment, "superseded")
+        : assignment;
+    const nextAssignment = { ...current };
     if (p.replacement) delete nextAssignment.session_ref;
     // C-600: the handshake belongs to the session; a reused one keeps it.
     if (p.runtime_ref !== undefined) {

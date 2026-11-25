@@ -1,13 +1,21 @@
-// biome-ignore-all lint/security/noDangerouslySetInnerHtml: every HTML string
-// here comes from `renderMarkdown` (markdown-it with html off and a link
-// allow-list), never from the entry body itself.
-import type { AttachmentView, CardDetail, TimelineEntryView } from "../api.js";
+import type {
+  AttachmentView,
+  CardDetail,
+  ReferencedAttachment,
+  TimelineEntryView,
+} from "../api.js";
+import {
+  type AttachmentRefs,
+  attachmentTarget,
+  entryAttachmentRefs,
+} from "../attachment-refs.js";
 import { eventLabel } from "../events.js";
 import { renderMarkdown } from "../markdown.js";
 import { linkableReferences, linkifyReferences } from "../refs.js";
 import { statusLabel } from "../status.js";
 import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
+import { AttachmentRefBody } from "./AttachmentRefBody.js";
 import { EmptyState, LongContent, StatusTag, Time } from "./Foundation.js";
 import { mergeBlockerMessage } from "./MergeBlockers.js";
 import { MergeCheck } from "./MergeCheck.js";
@@ -18,6 +26,7 @@ import {
   TimelineIcon,
 } from "./TimelineHeader.js";
 import { Prose } from "./ui/prose.js";
+import { isVideo, VideoPreview } from "./VideoPreview.js";
 
 /**
  * The card's timeline (M5 plan §3.7, §8.4 of the development plan).
@@ -77,6 +86,11 @@ export interface TimelineProps {
   readonly typeFilter?: string;
   readonly authorFilter?: string;
   readonly anchor?: string | undefined;
+  /**
+   * C-615: other cards' attachments bodies may name; defaults to
+   * `detail.referenced_attachments`.
+   */
+  readonly referencedAttachments?: readonly ReferencedAttachment[];
 }
 
 export const timelineCategory = (entry: TimelineEntryView) =>
@@ -155,6 +169,7 @@ export function Timeline({
   typeFilter = "",
   authorFilter = "",
   anchor,
+  referencedAttachments,
 }: TimelineProps) {
   const groups = timelineGroups(entries)
     .map((group) =>
@@ -183,6 +198,11 @@ export function Timeline({
       if (!owner || entry.event_seq < owner.event_seq) aliasRows.set(id, entry);
     }
   }
+  const known = timelineAttachmentRefs(
+    attachments,
+    referencedAttachments ?? detail?.referenced_attachments,
+    cardId,
+  );
   const row = (entry: TimelineEntryView, nested = false) => {
     const related = attachments.filter(
       (a) =>
@@ -241,20 +261,25 @@ export function Timeline({
                     {entry.body}
                   </div>
                 ) : (
-                  <div
+                  <AttachmentRefBody
                     className="timeline-body markdown"
-                    dangerouslySetInnerHTML={{
-                      __html: renderMarkdown(
-                        linkifyReferences(
-                          entry.merge_check_blocker
-                            ? mergeBlockerMessage(entry.merge_check_blocker)
-                            : entry.body,
-                          linkableReferences(entry.references ?? []),
-                          projectId,
-                          cardId,
-                        ),
+                    html={renderMarkdown(
+                      linkifyReferences(
+                        entry.merge_check_blocker
+                          ? mergeBlockerMessage(entry.merge_check_blocker)
+                          : entry.body,
+                        linkableReferences(entry.references ?? []),
+                        projectId,
+                        cardId,
                       ),
-                    }}
+                      {
+                        attachments: entryAttachmentRefs(
+                          known,
+                          entry,
+                          attachments,
+                        ),
+                      },
+                    )}
                   />
                 )}
               </Prose>
@@ -342,6 +367,8 @@ export function Timeline({
                       <span className="attachment-caption" key={a.id}>
                         {isBitmap(a) ? (
                           <AttachmentPreview attachment={a} images={images} />
+                        ) : isVideo(a) ? (
+                          <VideoPreview attachment={a} compact />
                         ) : (
                           <a href={a.download_path} download>
                             下载 {attachmentName(a)}
@@ -370,6 +397,23 @@ export function Timeline({
 }
 
 /**
+ * C-615: the attachments bodies may name by number: this card's own and the
+ * other cards' ones the server let this page see.
+ */
+export function timelineAttachmentRefs(
+  attachments: readonly AttachmentView[],
+  referenced: readonly ReferencedAttachment[] | undefined,
+  cardId: string,
+): AttachmentRefs {
+  return new Map(
+    [...attachments, ...(referenced ?? [])].map((a) => [
+      a.id,
+      attachmentTarget(a, cardId),
+    ]),
+  );
+}
+
+/**
  * An attachment: a bitmap may render inline, everything else is a download
  * (§3.2). The caption carries the decision it rests on, so a screenshot without
  * an approved basis is visible as such.
@@ -383,6 +427,8 @@ function AttachmentItem({
     <li className="attachment">
       {isBitmap(attachment) ? (
         <AttachmentPreview attachment={attachment} images={[attachment]} />
+      ) : isVideo(attachment) ? (
+        <VideoPreview attachment={attachment} />
       ) : (
         <a
           className="attachment-download"

@@ -995,14 +995,18 @@ test("checks are live, and disabled launch is distinct from a passing machine ch
       status: "degraded",
     }),
   );
+  // C-642: launches reuse the explicit check's clean probe; machine state is
+  // still read live. Another explicit check probes again.
   await router.forLaunch("fixture", assignment("worker-a"));
   await router.forLaunch("fixture", assignment("worker-a"));
-  expect(readiness).toHaveBeenCalledTimes(3);
+  expect(readiness).toHaveBeenCalledTimes(1);
+  value(await router.check("fixture", "worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(2);
   expect(router.resolve("fixture", "worker-a").execution.target).toEqual(
     binding,
   );
   expect(calls.mock.calls.filter((c) => c[1] === "captureAgent")).toHaveLength(
-    3,
+    2,
   );
 });
 
@@ -1398,31 +1402,142 @@ test("missing MCP config rejects before any network probe", async () => {
   expect(mcpReachability).not.toHaveBeenCalled();
 });
 
-test("MCP reachability is checked every time and a configuration change during it prevents launch", async () => {
-  await router.forLaunch("fixture", assignment("worker-a"));
+test("C-642: preflight probes of one binding merge for 5 s; the final check stays live and a configuration change during it prevents launch", async () => {
+  let now = 1_000;
+  vi.spyOn(performance, "now").mockImplementation(() => now);
+  try {
+    await router.forLaunch("fixture", assignment("worker-a"));
+    await router.forLaunch("fixture", assignment("worker-a"));
+    expect(mcpReachability).toHaveBeenCalledTimes(1);
+    now += 4_999;
+    await router.forLaunch("fixture", assignment("worker-a"));
+    expect(mcpReachability).toHaveBeenCalledTimes(1);
+    // After the window, concurrent launches still share a single probe.
+    now += 1;
+    await Promise.all(
+      [1, 2, 3].map(() => router.forLaunch("fixture", assignment("worker-a"))),
+    );
+    expect(mcpReachability).toHaveBeenCalledTimes(2);
+    expect(readiness).toHaveBeenCalledTimes(2);
+    expect(
+      calls.mock.calls.filter(
+        (c) => c[0] === "worker-a" && c[1] === "captureAgent",
+      ),
+    ).toHaveLength(2);
+    // Another machine is another probe.
+    await router.forLaunch("fixture", assignment("worker-b"));
+    expect(mcpReachability).toHaveBeenCalledTimes(3);
+    // The final check before the adapter starts an Agent is always live, even
+    // inside the window.
+    mcpReachability.mockImplementationOnce(async () => {
+      workers = workers.map((w) => ({
+        ...w,
+        execution: {
+          ...w.execution,
+          mcp: {
+            url: "https://changed.example-tailnet.ts.net/mcp",
+            timeoutMs: 10000,
+          },
+        },
+      }));
+    });
+    expect(
+      await router.provision(
+        assignment("worker-a"),
+        role,
+        machine("worker-a"),
+        launch,
+      ),
+    ).toMatchObject({ ok: false });
+    expect(calls.mock.calls.some((c) => c[1] === "provision")).toBe(false);
+  } finally {
+    vi.mocked(performance.now).mockRestore();
+  }
+});
+
+test("C-642: failed or blocked probes are only shared in flight, and a changed binding probes again", async () => {
+  let release: (() => void) | undefined;
+  mcpReachability.mockImplementationOnce(
+    () =>
+      new Promise<void>((_, reject) => {
+        release = () => reject(new WorkerMcpError("mcp_gateway_error"));
+      }),
+  );
+  const first = Promise.allSettled(
+    [1, 2].map(() => router.forLaunch("fixture", assignment("worker-a"))),
+  );
+  await vi.waitFor(() => expect(release).toBeDefined());
+  release?.();
+  expect((await first).map((r) => r.status)).toEqual(["rejected", "rejected"]);
+  expect(mcpReachability).toHaveBeenCalledTimes(1);
+  // The failure is not reused: the next launch probes again and passes.
   await router.forLaunch("fixture", assignment("worker-a"));
   expect(mcpReachability).toHaveBeenCalledTimes(2);
-  mcpReachability.mockImplementationOnce(async () => {
-    workers = workers.map((w) => ({
-      ...w,
-      execution: {
-        ...w.execution,
-        mcp: {
-          url: "https://changed.example-tailnet.ts.net/mcp",
-          timeoutMs: 10000,
-        },
-      },
-    }));
-  });
-  expect(
-    await router.provision(
-      assignment("worker-a"),
-      role,
-      machine("worker-a"),
-      launch,
-    ),
-  ).toMatchObject({ ok: false });
-  expect(calls.mock.calls.some((c) => c[1] === "provision")).toBe(false);
+  // A worker blocker is not reused either, nor does it keep the clean result.
+  readiness.mockResolvedValueOnce(["worker_helpers"]);
+  expect(value(await router.check("fixture", "worker-a")).blockers).toEqual([
+    "worker_helpers",
+  ]);
+  await router.forLaunch("fixture", assignment("worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(4);
+  await router.forLaunch("fixture", assignment("worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(4);
+  // A changed binding is a different probe even inside the window.
+  workers = workers.map((w) =>
+    w.machine_id === "worker-a" ? { ...w, generation: "two" } : w,
+  );
+  await router.forLaunch("fixture", assignment("worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(5);
+});
+
+test("C-642: a rejected probe is not reused, and project views share the router's probes", async () => {
+  readiness.mockRejectedValueOnce(new Error("probe exploded"));
+  await expect(
+    router.forLaunch("fixture", assignment("worker-a")),
+  ).rejects.toThrow();
+  expect(readiness).toHaveBeenCalledTimes(1);
+  await router.forLaunch("fixture", assignment("worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(2);
+  await router
+    .forProject("fixture")
+    .forLaunch("fixture", assignment("worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(2);
+  // A live check through the project view refreshes the same shared result.
+  readiness.mockResolvedValueOnce(["worker_helpers"]);
+  value(await router.forProject("fixture").check("fixture", "worker-a"));
+  await router.forLaunch("fixture", assignment("worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(4);
+});
+
+test("C-642: the probe cache window is configurable and invalid values are refused", async () => {
+  const create = (options: {
+    probeCacheMs?: number;
+    env?: NodeJS.ProcessEnv;
+  }) =>
+    RuntimeTargets.create({
+      execution: { mode: "local", dataDir: root },
+      store,
+      project: "fixture",
+      workers: () => workers,
+      factory,
+      workerReadiness: readiness,
+      workerMcpReachability: mcpReachability,
+      ...options,
+    });
+  const uncached = value(await create({ probeCacheMs: 0 }));
+  await uncached.forLaunch("fixture", assignment("worker-a"));
+  await uncached.forLaunch("fixture", assignment("worker-a"));
+  expect(mcpReachability).toHaveBeenCalledTimes(2);
+  const configured = value(
+    await create({ env: { CARDIGAN_MACHINE_PROBE_CACHE_MS: "0" } }),
+  );
+  await configured.forLaunch("fixture", assignment("worker-a"));
+  await configured.forLaunch("fixture", assignment("worker-a"));
+  expect(mcpReachability).toHaveBeenCalledTimes(4);
+  for (const raw of ["-1", "1.5", "60001", "five"])
+    expect(
+      (await create({ env: { CARDIGAN_MACHINE_PROBE_CACHE_MS: raw } })).ok,
+    ).toBe(false);
 });
 
 test.each([

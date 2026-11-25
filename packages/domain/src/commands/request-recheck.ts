@@ -1,4 +1,5 @@
 import type { Actor, Delivery } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
 import type { DeliveryVerifier } from "../ports.js";
@@ -244,7 +245,7 @@ export function requestRecheck(
             deliveries: d.list("deliveries"),
             reviews: d.list("reviews"),
             decisions: d.list("decisions"),
-            events: [...d.state.events, ...d.events],
+            events: appendEvents(d.state.events, d.events),
             timeline: [...d.state.timeline, ...d.timeline],
           },
           { kind: "system", project_id: d.state.project_id },

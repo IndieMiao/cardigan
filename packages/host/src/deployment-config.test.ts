@@ -79,6 +79,30 @@ test("server logs are opt-in and require a complete, finite retention budget", (
     }),
   ).toThrow();
 });
+test("C-638: server log retention is whole hours and needs the log limits", () => {
+  const limits = { server_log_max_bytes: 16, server_log_max_files: 2 };
+  expect(
+    parseDeploymentConfig({ ...config, ...limits }).server_log_retention_hours,
+  ).toBeUndefined();
+  expect(
+    parseDeploymentConfig({
+      ...config,
+      ...limits,
+      server_log_retention_hours: 48,
+    }),
+  ).toMatchObject({ server_log_retention_hours: 48 });
+  for (const value of [0, -1, 1.5, "48", null, 24 * 365 + 1])
+    expect(() =>
+      parseDeploymentConfig({
+        ...config,
+        ...limits,
+        server_log_retention_hours: value,
+      }),
+    ).toThrow();
+  expect(() =>
+    parseDeploymentConfig({ ...config, server_log_retention_hours: 48 }),
+  ).toThrow();
+});
 test("only a private host config is accepted; errors cannot echo config secrets", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cg-deployment-config-"));
   try {
@@ -139,5 +163,27 @@ test("disk warning uses a strict private percent, defaulting to 15", () => {
   for (const disk_low_percent of [0, 101, -1, null, "15", 2.5])
     expect(() =>
       parseDeploymentConfig({ ...config, disk_low_percent }),
+    ).toThrow();
+});
+
+test("C-650: ready retries default to two, two minutes apart; 0 retries is allowed", () => {
+  expect(parseDeploymentConfig(config)).toMatchObject({
+    ready_retry_max: 2,
+    ready_retry_interval_ms: 120000,
+  });
+  expect(
+    parseDeploymentConfig({
+      ...config,
+      ready_retry_max: 0,
+      ready_retry_interval_ms: 1,
+    }),
+  ).toMatchObject({ ready_retry_max: 0, ready_retry_interval_ms: 1 });
+  for (const value of [-1, 1.5, 21, "2", null])
+    expect(() =>
+      parseDeploymentConfig({ ...config, ready_retry_max: value }),
+    ).toThrow();
+  for (const value of [0, -1, 1.5, "60000", null, 2147483648])
+    expect(() =>
+      parseDeploymentConfig({ ...config, ready_retry_interval_ms: value }),
     ).toThrow();
 });

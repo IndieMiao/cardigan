@@ -12,12 +12,15 @@ import {
   finishRun,
   heartbeat,
   listNeedsYou,
+  listReleaseNotes,
   listRoles,
   listTemplates,
   prepareAttachment,
+  RELEASE_NOTE_VERSION,
   type ReadRunCapacity,
   type Result,
   referenceProjectSnapshot,
+  streamEventsBy,
   uploadAttachment,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -31,6 +34,8 @@ import {
   MAX_ATTACHMENT_BASE64,
   MAX_ATTACHMENT_BYTES,
 } from "../attachments.js";
+import type { AssignmentActor } from "../auth.js";
+import type { McpBackend } from "../backend.js";
 import { ToolError } from "../errors.js";
 import { readAttachmentTool } from "../tools/read-attachment.js";
 import {
@@ -38,6 +43,8 @@ import {
   safeReferenceQuery,
 } from "../tools/reference-read.js";
 import { defineTool, type ToolContext } from "../tools/types.js";
+import { checkVideoContent, isVideoMime } from "../video-format.js";
+import type { VideoUploads } from "../video-uploads.js";
 import {
   executeCommand,
   executePreparedCommand,
@@ -49,6 +56,8 @@ import { entryId, id, idempotency_key } from "./schemas.js";
 export interface SupportToolOptions {
   readonly dataDir?: string;
   readonly artifactUploads?: ArtifactUploads;
+  /** C-683: chunked, durable video uploads. */
+  readonly videoUploads?: VideoUploads;
   /** Trusted host setting; never taken from tool arguments. */
   readonly attachmentInlineBytes?: number;
   readonly attachmentStore?: AttachmentStore;
@@ -57,7 +66,88 @@ export interface SupportToolOptions {
   readonly projectSettings?: (
     projectId: string,
   ) => CommandState["project_settings"];
+  readonly readProjectSnapshot?: ProjectSnapshotReader;
 }
+export interface ProjectSnapshotInput {
+  readonly read_audit_employee_id?: string;
+}
+export type ProjectSnapshotRead = ReturnType<typeof readProjectSnapshot>;
+/** C-648: the host may run the read half on a private read-only connection. */
+export type ProjectSnapshotReader = (
+  context: ToolContext,
+  input: ProjectSnapshotInput,
+) => Promise<ProjectSnapshotRead>;
+
+/**
+ * The read half of project_snapshot: read transactions only, no audit write and
+ * no run capacity. Authorization is derived from the transaction's state.
+ */
+export function readProjectSnapshot(
+  store: Pick<McpBackend, "uow">,
+  actor: AssignmentActor,
+  { read_audit_employee_id }: ProjectSnapshotInput,
+) {
+  const project = actor.project_id;
+  const snapshot = safeReferenceQuery(() =>
+    store.uow.read((tx) => {
+      const result = referenceProjectSnapshot(
+        loadCommandState(tx, project),
+        actor,
+      );
+      if (!result.ok)
+        throw new ToolError(result.error.code, result.error.message);
+      return result.value.data;
+    }),
+  );
+  const audit =
+    read_audit_employee_id === undefined
+      ? undefined
+      : safeReferenceQuery(() =>
+          store.uow.read((tx) =>
+            streamEventsBy(tx.events, project, undefined, "type", [
+              "cross_card_read",
+            ]).flatMap((e) => {
+              const p = e.payload;
+              if (
+                !p ||
+                typeof p !== "object" ||
+                Array.isArray(p) ||
+                !("employee_id" in p) ||
+                p.employee_id !== read_audit_employee_id
+              )
+                return [];
+              return [
+                {
+                  at: e.created_at,
+                  employee_id: p.employee_id,
+                  assignment_id: p.assignment_id,
+                  ...(p.tool === "project_snapshot" && Array.isArray(p.card_ids)
+                    ? { card_ids: p.card_ids, card_count: p.card_count }
+                    : { card_id: p.card_id }),
+                  tool: p.tool,
+                },
+              ];
+            }),
+          ),
+        );
+  return {
+    snapshot: {
+      ...snapshot,
+      cards: snapshot.cards.map((card) => {
+        const { repo: _path, ...safe } = card as typeof card & {
+          repo?: string;
+        };
+        if ("merge_check" in safe && safe.merge_check) {
+          const { log_ref: _logPath, ...check } = safe.merge_check;
+          return { ...safe, merge_check: check };
+        }
+        return safe;
+      }),
+    },
+    audit,
+  };
+}
+
 function readProject(
   context: ToolContext,
   query: (state: CommandState, actor: Actor) => Result<CommandEffect<unknown>>,
@@ -79,7 +169,7 @@ export function supportTools(options: SupportToolOptions = {}) {
     ),
     defineTool({
       name: "upload_attachment",
-      description: `Upload a base64 attachment (${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint.`,
+      description: `Upload a base64 attachment (${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint. Videos (video/mp4, video/quicktime, video/webm, video/x-m4v) with artifact_size and sha256 get a resumable chunked upload and become ordinary attachments; their content must match the type.`,
       input: z.object({
         idempotency_key,
         card_id: id("card"),
@@ -118,6 +208,19 @@ export function supportTools(options: SupportToolOptions = {}) {
         ]),
         basis: id("decision").optional(),
         supersedes: z.string().min(1).optional(),
+        video: z
+          .object({
+            duration_seconds: z.number().min(0).optional(),
+            width: z.number().int().min(0).optional(),
+            height: z.number().int().min(0).optional(),
+            video_codec: z.string().max(32).optional(),
+            audio_codec: z.string().max(32).optional(),
+          })
+          .strict()
+          .optional()
+          .describe(
+            "Videos only: what you measured (e.g. ffprobe on your worker); shown to readers.",
+          ),
       }),
       handler: (
         { idempotency_key, artifact_size, file, ...target },
@@ -128,6 +231,12 @@ export function supportTools(options: SupportToolOptions = {}) {
             throw ToolError.validation(
               "Provide artifact_size and sha256 without file",
             );
+          if (isVideoMime(target.mime) && options.videoUploads)
+            return options.videoUploads.reserve(context, idempotency_key, {
+              ...(target as AttachmentTarget),
+              sha256: target.sha256,
+              artifact_size,
+            });
           return options.artifactUploads.reserve(context, idempotency_key, {
             ...(target as AttachmentTarget),
             sha256: target.sha256,
@@ -144,6 +253,7 @@ export function supportTools(options: SupportToolOptions = {}) {
           params,
           async (_state, _actor, p) => {
             const { content, digest } = decodeAttachment(p.file, p.sha256);
+            checkVideoContent(p.mime, content);
             return unwrap(
               await prepareAttachment(digest, content, attachments),
             );
@@ -230,90 +340,48 @@ export function supportTools(options: SupportToolOptions = {}) {
         } catch {
           throw new ToolError("unauthorized", "Token 已失效。");
         }
-        const snapshot = safeReferenceQuery(() =>
-          context.store.uow.read((tx) => {
-            const result = referenceProjectSnapshot(
-              loadCommandState(tx, context.identity.actor.project_id),
-              context.identity.actor,
-            );
-            if (!result.ok)
-              throw new ToolError(result.error.code, result.error.message);
-            return result.value.data;
-          }),
-        );
-        const pm =
-          context.identity.assignment.scope === "standing" &&
-          context.identity.actor.role_id === "pm";
-        let run_capacity: ReturnType<ReadRunCapacity> = null;
-        if (pm) {
-          try {
-            run_capacity = options.runCapacity?.() ?? null;
-          } catch {
-            throw ToolError.validation("Run capacity is unavailable");
-          }
-        }
-        const audit =
+        const input =
           read_audit_employee_id === undefined
-            ? undefined
-            : safeReferenceQuery(() =>
-                context.store.uow.read((tx) =>
-                  tx.events
-                    .listAfter(context.identity.actor.project_id, undefined, 0)
-                    .flatMap((e) => {
-                      const p = e.payload;
-                      if (
-                        e.type !== "cross_card_read" ||
-                        !p ||
-                        typeof p !== "object" ||
-                        Array.isArray(p) ||
-                        !("employee_id" in p) ||
-                        p.employee_id !== read_audit_employee_id
-                      )
-                        return [];
-                      return [
-                        {
-                          at: e.created_at,
-                          employee_id: p.employee_id,
-                          assignment_id: p.assignment_id,
-                          ...(p.tool === "project_snapshot" &&
-                          Array.isArray(p.card_ids)
-                            ? { card_ids: p.card_ids, card_count: p.card_count }
-                            : { card_id: p.card_id }),
-                          tool: p.tool,
-                        },
-                      ];
-                    }),
-                ),
-              );
-        // Recheck and record references before exposing the response. Summary
-        // records carry no body and are allowed through the same audit path.
-        auditProjectSnapshotRead(
-          context,
-          snapshot.cards.map((card) => ({
-            id: card.id as CardId,
-            full: "goal" in card,
-          })),
-        );
-        return {
-          ...snapshot,
-          cards: snapshot.cards.map((card) => {
-            const { repo: _path, ...safe } = card as typeof card & {
-              repo?: string;
-            };
-            if ("merge_check" in safe && safe.merge_check) {
-              const { log_ref: _logPath, ...check } = safe.merge_check;
-              return { ...safe, merge_check: check };
+            ? {}
+            : { read_audit_employee_id };
+        const respond = ({ snapshot, audit }: ProjectSnapshotRead) => {
+          const pm =
+            context.identity.assignment.scope === "standing" &&
+            context.identity.actor.role_id === "pm";
+          let run_capacity: ReturnType<ReadRunCapacity> = null;
+          if (pm) {
+            try {
+              run_capacity = options.runCapacity?.() ?? null;
+            } catch {
+              throw ToolError.validation("Run capacity is unavailable");
             }
-            return safe;
-          }),
-          ...(pm ? { run_capacity } : {}),
-          ...(audit
-            ? {
-                read_audit: audit,
-                reference_notice: CROSS_CARD_REFERENCE_NOTICE,
-              }
-            : {}),
+          }
+          // Recheck and record references before exposing the response. Summary
+          // records carry no body and are allowed through the same audit path.
+          auditProjectSnapshotRead(
+            context,
+            snapshot.cards.map((card) => ({
+              id: card.id as CardId,
+              full: "goal" in card,
+            })),
+          );
+          return {
+            ...snapshot,
+            ...(pm ? { run_capacity } : {}),
+            ...(audit
+              ? {
+                  read_audit: audit,
+                  reference_notice: CROSS_CARD_REFERENCE_NOTICE,
+                }
+              : {}),
+          };
         };
+        // Without a host reader the original synchronous path is unchanged.
+        return options.readProjectSnapshot
+          ? options.readProjectSnapshot(context, input).then(respond)
+          : respond(
+              readProjectSnapshot(context.store, context.identity.actor, input),
+            );
       },
     }),
     defineTool({
@@ -322,6 +390,27 @@ export function supportTools(options: SupportToolOptions = {}) {
         "List the latest active card templates of this project with their work items (PM only, read-only).",
       input: z.object({}),
       handler: (_params, context) => readProject(context, listTemplates),
+    }),
+    defineTool({
+      name: "list_release_notes",
+      description:
+        "List this project's release notes by version, newest first, including published versions without a note (note: null). Pass version for one version's full revision history and the cards merged for it (read-only).",
+      input: z.object({
+        version: z
+          .string()
+          .max(80)
+          .regex(RELEASE_NOTE_VERSION)
+          .optional()
+          .describe("One version: its revisions and merged cards"),
+      }),
+      handler: (params, context) =>
+        readProject(context, (state, actor) =>
+          listReleaseNotes(
+            state,
+            actor,
+            params.version === undefined ? {} : { version: params.version },
+          ),
+        ),
     }),
     defineTool({
       name: "list_roles",

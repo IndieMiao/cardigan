@@ -1,15 +1,128 @@
 # 接入一台 Linux worker
 
+新设备按下面的“快速上手”接入：在设备上跑一行命令，在 Workbench 确认，设备自己完成初始化，检查通过后上线，用到哪个工具再装哪个。后面的“进阶/排障：手工接入”是原来的逐步手工路径，用于不走配对的接入、核对现场或排障。
+
+支持 Linux x64/arm64。下文的 `example`、`worker-a`、`cg_example`、域名及目录都是示例，请在私有配置中替换。每个项目使用不同的 UID、主组、HOME 和工作根；不要复用 CI 账号。控制主机与 worker 都准备同一版本的 Cardigan 发行文件，worker 的 root 持有源码目录以下用 `/opt/cardigan` 表示。快速上手里的 `<Workbench>`、`<机器>`、`<项目>` 换成自己的 Workbench 地址、机器编号和项目编号。
+
+Steam Deck 等根分区只读的设备另见 [SteamOS 设备接入](steamos-worker.md)；Mac 见 [macOS worker](macos-worker.md)。
+
+## 快速上手：一行命令配对接入
+
+| 步骤 | 在哪里 | 做什么 | 要 sudo |
+|---|---|---|---|
+| 0 | 控制主机、设备 | 一次性准备 | 设备上启用 SSH 服务要 |
+| 1 | 设备 | 运行配对命令 | 不要 |
+| 2 | 控制主机 | 登记设备的 SSH 主机公钥 | 不要 |
+| 3 | Workbench | 确认接入、确认写入配置 | 不要 |
+| 4 | 设备 | 运行一次性初始化脚本 | **要**（输入一次密码） |
+| 5 | 设备 | 准备 hc、helper、基础工具和资源限额 | **要** |
+| 6 | Workbench、控制主机 | 检查通过、开启远程派发、上线 | 不要 |
+| 7 | Workbench、设备 | 按需装工具 | 见第 7 步 |
+
+### 0. 准备（一次性）
+
+控制主机（运行 Cardigan 的机器）：
+
+- Workbench 经 Tailscale Serve 在 tailnet 内可以访问，下文写作 `https://<Workbench>`；MCP 地址同样对 tailnet 可见（见[第 4 节](#4-worker资源与-mcp)）。
+- 配置目录（默认 `~/.config/cardigan`）里有控制主机专用的 SSH 密钥 `worker-key` 及公钥 `worker-key.pub`，必须是 Ed25519。还没有时按[第 1 节](#1-控制主机预览与私有配置)的 `ssh-keygen` 命令生成，不需要 sudo。
+
+设备：
+
+- 有 `python3` 和 `curl`。
+- 装好 Tailscale 并登录同一个 tailnet。tailnet 访问规则放行两个方向：控制主机 → 设备的 TCP 22，设备 → 控制主机的 Serve 端口（写法见[第 4 节](#4-worker资源与-mcp)）。
+- SSH 服务已启用（**要 sudo**），例如 `sudo systemctl enable --now ssh`，有的发行版服务名是 `sshd`。
+- 你在设备上的账号能用 sudo（第 4、5 步用）。
+
+### 1. 设备：运行配对命令（不要 sudo）
+
+用普通账号运行，不要加 sudo：
+
+```sh
+curl -fsS https://<Workbench>/pair-device.py | python3 - https://<Workbench>
+```
+
+命令上报主机名、系统、架构、tailnet 地址、一个空闲的账号编号和硬件概况，然后显示：
+
+- 二维码和配对码（`XXXX-XXXX`，10 分钟内有效，只能用一次）；浅色背景的终端加 `--light`；
+- 确认页链接；
+- 控制主机 `worker-known-hosts` 需要的一行 `<机器> ssh-ed25519 <公钥>`；
+- 提示：本机 22 端口没有 SSH 服务、正在用电池。只提示，不会停下。
+
+之后命令在设备上等待确认。没装或没登录 Tailscale 时给出指引后退出；也可以用 `--address <地址>` 指定控制主机连这台设备用的地址。配对这一步不改动设备。
+
+### 2. 控制主机：登记设备的 SSH 主机公钥（不要 sudo）
+
+把上一步显示的那一行追加到控制主机配置目录里的 `worker-known-hosts`（权限 0600）。在向导里改了机器编号时，把开头换成新编号。这一行是在设备自己的屏幕上读到的，相当于[第 1 节](#1-控制主机预览与私有配置)要求的“经可信渠道取得主机公钥”；不要用 `ssh-keyscan` 的输出代替。
+
+### 3. Workbench：确认接入（不要 sudo）
+
+1. 用手机扫二维码或打开确认页链接；也可以在“设置 → 机器”点“新设备接入（配对码）”，手动输入配对码。
+2. 选项目和名额（这台机器同时跑几个 Agent，默认 1），点“确认接入”。一个配对码只接入一个项目；其它项目在接入完成后用“添加 worker”追加。
+3. 核对生成的配置预览，点“确认写入配置”。
+
+只有所有者的人类登录会话能确认。不确认就离开不会写入任何东西，配对码到期自动作废。
+
+### 4. 设备：一次性初始化（要 sudo）
+
+确认写入配置后，设备上的命令自动取得为这份配置生成的初始化脚本，先列出将做的操作。核对后输入 `yes`，再输入你的 sudo 密码；脚本用 `sudo python3 -IB -` 从标准输入运行，不写入磁盘。sudo 验证没通过时不做任何改动，按回车可以重试。跑完后结果报给 Workbench，向导自动开始九项检查。
+
+脚本具体做什么、遇到冲突怎么办，见下文“初始化脚本做什么”。
+
+### 5. 设备：hc、helper、基础工具和资源限额（要 sudo）
+
+初始化脚本只建账号和目录，不装软件。下面几项由设备管理员准备：
+
+- Python 3、Git、Node 24、pnpm 11，以及与控制主机同一版本的 hc 和三个 helper：见[第 3 节](#3-worker工具和-helper)（**要 sudo**）；
+- 专用账号的 CPU、内存、任务数上限：见[第 4 节](#4-worker资源与-mcp)（**要 sudo**）。
+
+Workbench 向导的“目标机命令”列出这台机器要执行的命令，可以逐条复制。检查停在工具、helper 这几步时页面每 15 秒自动复查，做完会自动往下走；停在其它步骤时点“继续检查”。
+
+### 6. 检查通过、开启远程派发、上线（不要 sudo）
+
+九项检查全部通过后，向导显示体检报告：设备自报的系统、CPU、内存、磁盘、GPU，已验证的能力，以及建议安装的工具。然后：
+
+1. 在向导最后一步“开启远程派发”：点“预览开启”，核对只给这台机器的绑定开启远程派发，勾选确认后开启。也可以先不开，直接点“完成”。
+2. 新登记的机器状态是离线。在控制主机的人类终端把它设为在线，再检查一次：
+
+   ```sh
+   cardigan machine update <机器> --project <项目> --status online
+   cardigan machine check <机器> --project <项目>
+   ```
+
+   检查通过后，这台机器按名额接收派发。之后在 Workbench 机器详情里可以“立即检查”“排空/恢复”和修改名额。
+
+### 7. 按需装工具
+
+在“设置 → 机器”打开这台机器，“能力”表列出主机能力目录里适用于它的能力及状态（已验证、已过期、未验证）。`node`、`godot`、`blender`、`android.sdk`、`android.emulator`、`browser.chromium` 未验证时，行末有“安装”：
+
+1. 点“安装”，选系统（Linux / SteamOS），点“复制命令”。
+2. 在设备上执行复制的命令。命令写的是专用账号用户目录下的位置（`~/.local`、`~/Android/Sdk`），需要管理员的步骤（系统运行库、`kvm` 组、Playwright 系统库）以注释给出，**要 sudo**。
+3. 回到对话框点“复查”；验证通过后该行的“安装”按钮消失。
+
+一次性初始化建的账号里，HOME、`~/.local` 和 `~/.local/bin` 由 root 持有（0750），专用账号自己写不进去，所以对话框里往这几处写的命令目前会因权限失败。在这一点修好之前，按[第 3 节](#3-worker工具和-helper)由管理员（**要 sudo**）把工具装到 root 持有的位置，再链接进 `~/.local/bin` 或加进绑定的 `path`，然后点“复查”。某个工具检测不到只是不登记这项能力，不影响机器健康和其它派发。
+
+### 初始化脚本做什么
+
+初始化脚本只做以下操作（HOME 为 `/home/cg_<项目>`，工作根为 `/srv/cardigan-workers/<项目>`；根分区只读的设备（如 SteamOS）工作根改为 `/home/cardigan-workers/<项目>`，发行文件和工具也放在 `/home` 下，见 [SteamOS 设备接入](steamos-worker.md)。）：
+
+- 建专用组和账号（向导给定的 UID/GID，无密码、shell `/bin/sh`、不加入其它组）；
+- 建 HOME、工作根及固定的私有目录，属主和权限同[第 2 节](#2-worker专用账号和安装布局进阶排障手工命令)；
+- 把控制主机公钥写成 `.ssh/authorized_keys`（root:项目组 0640，带 `restrict`）；
+- 写认领标记和安装配置，用随附的安装器先 `--check` 再 `--apply`（私有目录、锁文件和 `worker-primitives.py`）；
+- 只有专用账号执行 `sudo -n -l` 被要求输入密码时，才写入 `cardigan-worker-<账号>`，内容仅 `Defaults:<账号> listpw=never`（经 `visudo -cf` 校验，不授予任何命令）。
+
+账号、组、UID/GID、目录或文件已存在时，它列出冲突后停下，不做任何改动，也不接管已有账号。中途失败时列出已创建的内容和删除命令，不自动撤销。它不装其它软件、不改 `/etc/sudoers`、不含凭据；hc、helper、Node 等工具和资源配置仍按第 3、4 节准备。只想配对、不在设备上初始化时，给 `pair-device.py` 加 `--no-init`。
+
+## 进阶/排障：手工接入
+
 在已运行 Cardigan 的 Linux 控制主机上使用 `cardigan worker add/check/status`。向导读取主机私有 YAML，登记机器、生成配置草案，并检查 SSH、账号、目录、工具、资源限制和 HTTPS MCP。需要管理员权限的准备工作由人在 worker 上执行；向导只用 `sudo -n -l` 查询当前账号的授权，不执行特权命令、不请求密码、不安装软件、不签发 Token。
 
-支持 Linux x64/arm64。下文的 `example`、`worker-a`、`cg_example`、域名及目录都是示例，请在私有配置中替换。每个项目使用不同的 UID、主组、HOME 和工作根；不要复用 CI 账号。控制主机与 worker 都准备同一版本的 Cardigan 发行文件，worker 的 root 持有源码目录以下用 `/opt/cardigan` 表示。
-
-## 1. 控制主机：预览与私有配置
+### 1. 控制主机：预览与私有配置
 
 CLI 安装见 [部署说明](../deploy/README.md#安装-cardigan-命令)。使用人类终端，不设置 `CARDIGAN_TOKEN`、`MCP_TOKEN` 或 `--token-file`。项目需已存在：
 
 ```sh
-cardigan project create example
+cardigan project create example --code EXA
 cardigan worker add --project example --machine worker-a --host worker.invalid --dry-run
 ```
 
@@ -77,8 +190,9 @@ Android 项目可在私有 `runtime-workers.yaml` 对应的 `machines[].projects
 env:
   ANDROID_HOME: /home/cg_example/Android/Sdk
   ANDROID_AVD_HOME: /home/cg_example/.android/avd
-  ANDROID_ADB_SERVER_PORT: "15037"  # 示例：换成分配给本项目的端口，不用默认 5037
 ```
+
+不要在这里写 `ANDROID_ADB_SERVER_PORT`：同一台机器上的多个 Run 会共用一个 adb 服务，一个 Run 关掉 adb 会断开别人的模拟器。改在 `run-capacity.yaml` 的机器条目里配置 `adb_slots`，系统给每个 Run 分配自己的 adb 端口和模拟器端口，Run 结束后关闭（见 [C-679 计划](plans/C-679.md)）。机器配了 `adb_slots` 而绑定仍写着这一项时，启动时忽略它，控制面启动日志会给出警告。
 
 `env` 只传给该项目在该机器上新启动的 Run 和能力检查命令，不修改账号的登录环境，也不分配端口或设备。用工具的绝对路径；如需按名称找到 `adb`，把 SDK 的 `platform-tools` 目录加到绑定的 `path`，不要设置 `env.PATH`。变更前先清退使用旧绑定的会话，再重新检查机器能力。省略 `env` 或填写 `{}` 保持原行为。
 
@@ -100,7 +214,9 @@ machines:
 
 推荐账号命名 `cg_<项目短码>`，工作根 `/srv/cardigan-workers/<项目短码>`，每台物理机器固定一个机器编号；示例采用 `cg_example` 和 `/srv/cardigan-workers/example`。代码要求独立账号、组及互不重叠的根，不强制这一前缀。已有合法命名无需迁移。
 
-## 2. worker：专用账号和安装布局
+### 2. worker：专用账号和安装布局（进阶/排障：手工命令）
+
+以下是一次性初始化脚本所做操作的手工版本，用于不走配对的接入、核对现场或排障。
 
 **同机第二个项目**沿用机器编号，不复用第一个项目的账号、UID、主组、HOME、工作根或认领标记。逐项替换下例的 `example`、`cg_example` 和 UID/GID，在 `/etc/cardigan/worker-<项目>.json` 建 root 所有、0600 的新文件；文件名中的项目必须和正文、两份认领标记一致。同机已有 `worker.json` 的绑定原样保留，不复制为同项目的新文件，不覆盖它的内容。
 
@@ -172,7 +288,7 @@ sudo python3 /opt/cardigan/deploy/install-linux-worker.py --project example --ap
 
 示例假设工作根位于根文件系统；若使用独立挂载，将 `mount` 和 `volume` 改为实际挂载点及其 `os.statvfs(...).f_fsid`。空间下限应按工作量配置。安装器检查账号、组、sudo 拒绝、ACL、挂载及现有文件冲突，再创建项目目录、锁及基础 helper；重复执行不会替换已有锁 inode。不要使用旧 `install-agent.py` 的整机安装入口来接管每项目账号。
 
-## 3. worker：工具和 helper
+### 3. worker：工具和 helper
 
 准备 Python 3、Git、Node 24 及 pnpm 11（例如安装好 Node 后运行 `sudo npm install --global pnpm@11.7.0`），确认它们在 YAML 的 `path` 中。使用系统发行渠道或各工具官方固定版本；向导不代下载“最新版”。
 
@@ -207,7 +323,7 @@ sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /s
 
 `file_helper`、`git_helper` 与固定的 `<工作根>/libexec/worker-primitives.py` 必须是三个不同路径；复用路径会在读取配置时拒绝，不能用同一个 helper 代替其它协议。
 
-### 升级已接入 worker 的 helper
+#### 升级已接入 worker 的 helper
 
 部署新版本后，控制主机后台会立即巡检已登记机器；后续巡检和启动前检查仍核对发布协议及三个 helper 的 SHA-256。版本落后或文件不同的机器不能启动，运维待办附当前发行版预期摘要。主机运维可在 `host_ops_read_diagnostics` 的 `worker_maintenance` 里按待办编号读取升级步骤或冷却原因。不要通过工作树分发或以 worker 自身权限覆盖 helper。
 
@@ -246,7 +362,7 @@ sudo python3 -I -c 'import runpy, sys; p="/opt/cardigan/deploy/install-macos-wor
 cardigan worker check --project example --machine worker-a
 ```
 
-## 4. worker：资源与 MCP
+### 4. worker：资源与 MCP
 
 使用 cgroup v2/systemd，为 worker 账号所在的 user slice 配置预算，CI 保留自己的账号和预算。例如核实余量后：
 
@@ -312,7 +428,7 @@ curl --connect-timeout 10 --max-time 15 --silent --show-error --output /dev/null
 
 向导从 worker 发送**不带 Token**的请求，TLS 验证开启，必须得到 401；200、403、404、重定向、证书错误、超时均阻塞。此步骤证明可达及未鉴权拒绝。RW-2 的运行目标 Token 鉴权检查负责真实启动鉴权；本向导不会签发测试 Token。RW-2 尚未部署时，先完成该部署再验证 MCP。
 
-## 5. 控制主机：add、续跑、check 和 status
+### 5. 控制主机：add、续跑、check 和 status
 
 ```sh
 cardigan worker add --project example --machine worker-a --host worker.invalid
@@ -342,13 +458,13 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 
 草案位于上述路径；向导**不修改**正式 `runtime-workers.yaml`。人核对后将草案中的机器/项目条目合入正式私有配置，保留其它机器和项目，文件权限 0600。草案包含 RW-2 的项目级 `mcp_url` 和显式发布限额；向导与 RW-2 作为同一版本部署，共用正式配置校验。已有远程条目缺少 MCP 地址时先由人迁移配置；向导不会忽略缺失或非法字段。生成的草案就是完整 `runtime-workers.yaml` 示例，顶层仅为 `version`、`machines`，不要把向导的 `uid/home/timeout_ms` 外层字段复制进去。机器启用、hc 注册及真实远程启动按远程启动功能的门禁执行，接入检查通过不会自动放行派发。
 
-### 检查浏览器能力
+#### 检查浏览器能力
 
 运行 `cardigan machine check worker-a --project example` 刷新，`cardigan machine show worker-a --project example` 查看上次结果。`browser.chromium` 优先在控制主机 `launch.yaml` 的 `browser.browsers_path` 中查找 Playwright 安装的 Chromium 或无头浏览器。目录名指 **Run 所在机器**的路径；该账号能执行浏览器并读到版本号即可，不需要向缓存建链接。CLI 只查服务已接受的配置目录；配置无法读取、尚未生效，或候选程序超时、没有返回可解析版本时，继续检查后续位置，不影响其它能力。再查 Run 的 `PATH` 中的 `chromium`、`chromium-browser`、`google-chrome`，最后查该账号的 `$HOME/.cache/ms-playwright`。
 
 本机采用 `agent-ssh` 时以本机 Agent 账号检查，远程以项目 worker 账号检查；只有 Run 本身采用 `local` 模式才用当前运行账号。未验证浏览器时，`health.capability_failures` 只列出能确认尝试过的范围（配置键、命令名和账号缓存），不会回显私有目录或命令报错。`search_incomplete: true` 表示未能完成或确认本次检查，可再运行 `machine check`。若机器健康检查本身失败，先处理 `health.blockers`，能力探测此时尚未执行。
 
-## 5a. 用 Workbench 向导接入
+### 5a. 用 Workbench 向导接入
 
 不想在终端里逐条运行时，可以在 Workbench 的“设置 → 机器”点“添加 worker”。它和第 5 节的 `worker add/resume` 用同一个接入引擎和同一套私有文件，只限当前所有者的人类登录会话；Agent Token 和其它成员不能调用。
 
@@ -362,7 +478,7 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 
 页面上的“机器”详情还可以对单台机器“立即检查”（进行中按钮显示“检查中…”，不能重复启动，结束后刷新列表和详情）、“排空/恢复”（点击即提交，不重启或移动运行中的任务），并在“资源上限”里即时保存 Agent 并发上限（原“并发与容量”入口跳到这里）。这些操作与向导一样只对人类登录会话显示，由服务端按当前所有者授权。
 
-## 6. 常见阻塞
+### 6. 常见阻塞
 
 | 原因码 | 处理 |
 |---|---|
@@ -375,7 +491,7 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 
 现场账号、SSH、TLS、hc/Run 与 CI 共存尚未验证时，应明确保留“未现场验证”；合成测试通过不能替代这些事实。
 
-### 可选：一次接入，之后由后台升级 helper
+#### 可选：一次接入，之后由后台升级 helper
 
 旧安装器只可用向导维护唯一且能核实的 `worker.json`。出现命名配置时先核验并更新安装器，不要手改命令指向旧绑定。人工升级复用已匹配的共享发行目录；不同版本只作原子交换，不支持则停止。若有中断留下的备份或暂存目录，保留现场，按 `docs/plans/C-551.md` 核对。
 

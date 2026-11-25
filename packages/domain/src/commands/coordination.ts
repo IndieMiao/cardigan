@@ -1,4 +1,9 @@
 import { categoryDelegated } from "../decision-authorization.js";
+import { DECISION_OTHER_OPTION, isDecisionOther } from "../decision-other.js";
+import {
+  decisionQuestionBinding,
+  heldByReviewDecision,
+} from "../decision-question.js";
 import type {
   Actor,
   Assignment,
@@ -12,6 +17,7 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
+import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type {
   AssignmentId,
@@ -65,6 +71,10 @@ import {
 } from "./delegation.js";
 import { resolveDeliveryRework } from "./delivery-rework.js";
 import {
+  applyHeldResumeAnswer,
+  checkHeldResumeAnswer,
+} from "./held-assignment-resume.js";
+import {
   buildHumanDecidedMergeBasis,
   humanDecidedMergeQuestions,
 } from "./human-decided-merge.js";
@@ -82,6 +92,10 @@ import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { bindOwnerRecord, type OwnerRecordInput } from "./owner-record.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { authorPrecheckWait } from "./precheck-wait.js";
+import {
+  type ReviewAlignmentComment,
+  recordReviewAlignment,
+} from "./review-alignment.js";
 import {
   isReviewLimitOption,
   resolveReviewLimit,
@@ -150,7 +164,13 @@ import { activeWork } from "./workflow.js";
 export function issueInstruction(
   state: CommandState,
   actor: Actor,
-  p: { card_id: CardId; work_item_id: WorkItemId; body: string },
+  p: {
+    card_id: CardId;
+    work_item_id: WorkItemId;
+    body: string;
+    /** C-619: ask the verifier held by this pending review-limit decision. */
+    decision_id?: DecisionId | undefined;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "issue_instruction", ports, (d) => {
@@ -176,19 +196,43 @@ export function issueInstruction(
       "Cannot instruct closed work or a card awaiting merge",
     );
     text(p.body, "body");
+    const question =
+      p.decision_id === undefined
+        ? undefined
+        : decisionQuestion(d, item, d.get("decisions", p.decision_id));
     d.emit(
       "instruction_issued",
       card.id,
-      { work_item_id: item.id },
+      {
+        work_item_id: item.id,
+        ...(question
+          ? {
+              decision_id: question.decision,
+              decision_question: question.binding,
+            }
+          : {}),
+      },
       {
         type: "instruction",
         body: p.body,
         work_item_id: item.id,
+        ...(question ? { decision_id: question.decision } : {}),
         refs: extractReferences(p.body),
       },
     );
     return d.timeline[0];
   });
+}
+/** C-619: only the verifier held by this pending decision can be asked. */
+function decisionQuestion(d: CommandDraft, item: WorkItem, q: Decision) {
+  ensure(
+    !!heldByReviewDecision(d.list("decisions"), item, q.id),
+    "illegal_transition",
+    `${item.id} 没有在等待 ${q.id}：只能向正在等待该审核拍板的审核项提问`,
+  );
+  const binding = decisionQuestionBinding(item, d.list("deliveries"));
+  ensure(!!binding, "illegal_transition", `${item.id} 尚无负责的审核员`);
+  return { decision: q.id, binding };
 }
 export function postComment(
   state: CommandState,
@@ -199,6 +243,7 @@ export function postComment(
     host_result_for?: HumanActionId;
     host_report_for?: HumanActionId;
     review_plan?: ReviewPlanComment;
+    review_alignment?: ReviewAlignmentComment;
   } & Partial<
       Pick<
         TimelineEntry,
@@ -217,6 +262,7 @@ export function postComment(
           p.host_report_for ||
           p.host_result_for ||
           p.review_plan ||
+          p.review_alignment ||
           p.work_item_id ||
           p.supersedes
         ),
@@ -310,7 +356,12 @@ export function postComment(
         mentions: commentMentions(
           p.story_discussion?.action === "answer"
             ? `${p.body}\n${p.story_discussion.answer}`
-            : p.body,
+            : p.story_discussion?.action === "submit_answers"
+              ? [
+                  p.body,
+                  ...p.story_discussion.answers.map((a) => a.answer),
+                ].join("\n")
+              : p.body,
           p.mentions ?? [],
           state.employees ?? [],
           state.roles.map((role) => role.role_id),
@@ -366,6 +417,14 @@ export function postComment(
     }
     if (p.review_plan && d.timeline[0])
       recordReviewPlan(d, d.timeline[0], p.review_plan);
+    if (p.review_alignment && d.timeline[0]) {
+      ensure(
+        !p.review_plan,
+        "validation_failed",
+        "review_alignment 与 review_plan 不能同时提交",
+      );
+      recordReviewAlignment(d, d.timeline[0], p.review_alignment);
+    }
     if (p.host_result_for) {
       const action = d.get("human_actions", p.host_result_for);
       ensure(
@@ -600,6 +659,12 @@ export function requestDecision(
       "validation_failed",
       "Options and recommendation must be explicit",
     );
+    // C-682: the system appends "其他" itself; raisers cannot claim its key.
+    ensure(
+      p.options.every((o) => o.key !== DECISION_OTHER_OPTION),
+      "validation_failed",
+      `选项编号 ${DECISION_OTHER_OPTION} 由系统保留给“其他”，请换一个编号`,
+    );
     ensure(
       !p.suggestion || p.suggestion.option === p.recommended,
       "validation_failed",
@@ -817,7 +882,7 @@ export function requestDecision(
       highRiskCategories.includes(p.category) &&
       !categoryDelegated(
         d.list("project_preferences").find((p) => p.id === d.state.project_id),
-        [...d.state.events, ...d.events],
+        appendEvents(d.state.events, d.events),
         p.category,
       )
     ) {
@@ -942,6 +1007,32 @@ export function recordDecision(
   return command(state, actor, "record_decision", ports, (d) => {
     const held = d.get("decisions", input.decision_id);
     let p = input;
+    // C-682: "其他" is the human's own words; it binds no preset effect.
+    const other = isDecisionOther(p.option);
+    if (other) {
+      ensure(
+        actor.kind === "human",
+        "forbidden_tool",
+        "“其他”只能由人亲自填写，Agent 和 PM 不能代选",
+      );
+      ensure(
+        !p.via_suggestion &&
+          p.merge_override_reason === undefined &&
+          p.pause_plan === undefined &&
+          p.snooze_until === undefined &&
+          !p.delegate_future,
+        "validation_failed",
+        "选“其他”时只填写说明，不能同时按建议处理、强行合并、暂缓、暂停或授权同类事项",
+      );
+      ensure(
+        pendingDecision(held),
+        "illegal_transition",
+        "这条拍板已结项，不能再选“其他”",
+      );
+      const words = p.raw_quote.trim();
+      ensure(words.length > 0, "validation_failed", "选“其他”时必须填写说明");
+      p = { ...p, raw_quote: words, rationale: words };
+    }
     if (p.merge_override_reason !== undefined) {
       ensure(
         actor.kind === "human",
@@ -1119,7 +1210,7 @@ export function recordDecision(
     text(p.raw_quote, "raw_quote");
     text(p.rationale, "rationale");
     ensure(
-      decision.options.some((o) => o.key === p.option),
+      other || decision.options.some((o) => o.key === p.option),
       "validation_failed",
       "Option is not part of this decision",
     );
@@ -1247,6 +1338,8 @@ function resolveDecisionDraft(
       ...p,
       ...(p.delegated_merge ? { delegated: p.delegated_merge } : {}),
     });
+  // C-732: validate a resume before recording it.
+  if (!isDecisionOther(p.option)) checkHeldResumeAnswer(d, decision, p.option);
   const actor = d.actor;
   const result = recordDecisionResolution(
     d,
@@ -1306,10 +1399,13 @@ function resolveDecisionDraft(
       undefined,
       !!p.via_suggestion && !delegated,
     );
-  if (decision.trigger === "accepted_delivery_rework")
+  // C-682: "其他" resolves only the question; follow-up is the raiser's (or PM's).
+  const preset = !isDecisionOther(p.option);
+  if (preset && decision.trigger === "accepted_delivery_rework")
     resolveDeliveryRework(d, decision, p.option);
-  if (decision.trigger === "completion_review")
+  if (preset && decision.trigger === "completion_review")
     resolveHumanCompletionReview(d, decision, p.option);
+  if (preset) applyHeldResumeAnswer(d, decision, p.option);
   if (
     decision.category === "scope_change" ||
     decision.category === "permission"

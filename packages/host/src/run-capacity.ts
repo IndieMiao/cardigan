@@ -10,6 +10,7 @@ import {
   dispatchTier,
   type Event,
   type HostOpsExecution,
+  hostOpsPending,
   isRunCapacityExempt,
   type MachineResources,
   type MachineRunCapacity,
@@ -17,9 +18,13 @@ import {
   type QueuedRun,
   type Run,
   remainingResourceRatio,
+  runEndedByBusiness,
+  runHoldsCapacity,
   runOccupiesSlot,
   runQueuePositions,
+  stoppedByHuman,
 } from "@cardigan/domain";
+import { loadCommandState } from "@cardigan/mcp-server";
 import {
   type ReadRepositories,
   readRunLimit,
@@ -71,8 +76,8 @@ export function runCapacityMachines(
  * fresh array per call only misses the cache. Unfinished BellAttempts are not
  * snapshotted, so they are re-read and filtered on every call.
  *
- * Rows match the former JOIN: queued for `concurrency_limit`, owner active and
- * not capacity exempt, trigger event present; the card is the owner's work item
+ * Rows match the former JOIN: queued for `concurrency_limit`, owner active,
+ * not capacity exempt and not stopped by the human, trigger event present; the card is the owner's work item
  * card, else the trigger event's card, and priority comes from that card.
  */
 type QueueKey = readonly unknown[];
@@ -95,7 +100,13 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       cards: tx.cards.list(project.id),
       card_templates: tx.card_templates.list(project.id),
       deliveries: tx.deliveries.list(project.id),
-      events: tx.events.listStreams?.(project.id),
+      // C-639: in hot scope reuse the hot command history (same rule inputs).
+      events:
+        tx.command_state_scope !== "full" &&
+        tx.command_state_scope !== undefined &&
+        tx.events.listStreams
+          ? loadCommandState(tx, project.id).events
+          : tx.events.listStreams?.(project.id),
     };
     key.push(
       lists.id,
@@ -132,7 +143,13 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
     const items = new Map(project.work_items.map((w) => [w.id, w] as const));
     const cards = new Map(project.cards.map((c) => [c.id, c] as const));
     const history = project.events
-      ? [...project.events.values()].flat()
+      ? Array.isArray(project.events)
+        ? (project.events as readonly Event[])
+        : [
+            ...(
+              project.events as ReadonlyMap<string, readonly Event[]>
+            ).values(),
+          ].flat()
       : [undefined, ...project.cards.map((c) => c.id)].flatMap((card) =>
           tx.events.listAfter(project.id, card, 0),
         );
@@ -141,6 +158,9 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       const owner = assignments.get(run.assignment_id);
       if (owner?.status !== "active" || isRunCapacityExempt(owner)) continue;
       if (!assignmentDependenciesAllowStart(dependencyState, owner)) continue;
+      // C-624: nobody dispatches a human-stopped owner, so it cannot hold a
+      // queue position ahead of others. A human start restores its place.
+      if (stoppedByHuman(history, owner.id)) continue;
       let cause = triggerEvents.get(run);
       if (!cause) {
         triggerEvent ??= store.database.prepare(
@@ -211,11 +231,84 @@ function queueSnapshot(
 }
 
 const pendingActions = new WeakMap<
-  ReadonlyMap<string, readonly Event[]>,
+  object,
   WeakMap<readonly object[], readonly HostOpsExecution[]>
 >();
 
-/** Keep the existing order among runnable waiters, without blocking other resources. */
+// Project + card stream per immutable snapshot pair, so the domain's per-array
+// memos (hostOpsPending, stoppedByHuman) are reused across claims.
+const ownerHistories = new WeakMap<
+  readonly Event[],
+  WeakMap<readonly Event[], readonly Event[]>
+>();
+function ownerHistory(
+  tx: ReadRepositories,
+  project: string,
+  owner: Assignment,
+): readonly Event[] {
+  const card =
+    owner.work_item_id &&
+    tx.work_items.get(project, owner.work_item_id)?.card_id;
+  const streams = tx.events.listStreams?.(project);
+  if (!streams)
+    return [
+      ...tx.events.listAfter(project, undefined, 0),
+      ...(card ? tx.events.listAfter(project, card, 0) : []),
+    ];
+  const base = streams.get("") ?? [];
+  const own = (card && streams.get(card)) || [];
+  let byCard = ownerHistories.get(base);
+  if (!byCard) {
+    byCard = new WeakMap();
+    ownerHistories.set(base, byCard);
+  }
+  let merged = byCard.get(own);
+  if (!merged) {
+    merged = [...base, ...own];
+    byCard.set(own, merged);
+  }
+  return merged;
+}
+
+/**
+ * C-620: an earlier waiter whose owner cannot start any session now (pending
+ * host operation, unconfirmed recycle, human stop, role upgrade, or another
+ * Run still active) is not runnable and must not hold the queue behind it.
+ * It regains its place as soon as the fence clears.
+ */
+function ownerFenced(
+  tx: ReadRepositories,
+  project: string,
+  owner: Assignment,
+  run: string,
+): boolean {
+  if (
+    owner.role_upgrade ||
+    owner.idle_retirement?.handoff ||
+    owner.idle_retirement?.phase === "stopping"
+  )
+    return true;
+  if (
+    tx.runs
+      .list(project)
+      .some(
+        (r) =>
+          r.assignment_id === owner.id &&
+          r.id !== run &&
+          r.status !== "queued" &&
+          runOccupiesSlot(r),
+      )
+  )
+    return true;
+  const events = ownerHistory(tx, project, owner);
+  return hostOpsPending(events, owner.id) || stoppedByHuman(events, owner.id);
+}
+
+/**
+ * Keep the existing order among runnable waiters, without blocking other resources.
+ * C-721: `keysFor` names the resources a waiter's Run would claim; by default
+ * its work item's, so a waiter that may need fewer is judged conservatively.
+ */
 export function hasEarlierCapacityWait(
   tx: ReadRepositories,
   queue: readonly QueuedRun[],
@@ -223,8 +316,16 @@ export function hasEarlierCapacityWait(
   machine: string,
   resources: MachineResources,
   now: string,
-  eligible?: (project: string, owner: Assignment) => boolean,
+  eligible?: (
+    project: string,
+    owner: Assignment,
+    keys: readonly string[],
+  ) => boolean,
   preferredProject?: string,
+  keysFor: (entry: QueuedRun, owner: Assignment) => readonly string[] = (
+    entry,
+    owner,
+  ) => assignmentResourceKeys(tx, entry.project_id, owner),
 ): boolean {
   return queue.some((entry) => {
     const priority =
@@ -238,15 +339,16 @@ export function hasEarlierCapacityWait(
     const owner = tx.assignments
       .list(entry.project_id)
       .find((a) => a.id === entry.assignment_id);
+    if (
+      !owner ||
+      (owner.snapshot_retry && owner.snapshot_retry.ready_at > now) ||
+      ownerFenced(tx, entry.project_id, owner, entry.run_id)
+    )
+      return false;
+    const keys = keysFor(entry, owner);
     return (
-      !!owner &&
-      (!owner.snapshot_retry || owner.snapshot_retry.ready_at <= now) &&
-      (!eligible || eligible(entry.project_id, owner)) &&
-      (!resources.size ||
-        remainingResourceRatio(
-          assignmentResourceKeys(tx, entry.project_id, owner),
-          resources,
-        ) > 0)
+      (!eligible || eligible(entry.project_id, owner, keys)) &&
+      (!resources.size || remainingResourceRatio(keys, resources) > 0)
     );
   });
 }
@@ -254,6 +356,37 @@ export function hasEarlierCapacityWait(
 export type ReadResourceLimits = (
   machine: string,
 ) => ReadonlyMap<string, number>;
+
+/**
+ * C-714: diagnosis only. Names the full ceiling that keeps an owner waiting
+ * although its machine still has Run slots, with the Runs holding it. Mirrors
+ * `withinProjectQuota` and `remainingResourceRatio`; admission never reads it.
+ */
+export type RunCapacityBlock =
+  | {
+      readonly kind: "project_limit";
+      readonly project_id: string;
+      readonly machine_id: string;
+      readonly limit: number;
+      readonly run_ids: readonly string[];
+    }
+  | {
+      readonly kind: "project_resource";
+      readonly project_id: string;
+      readonly machine_id: string;
+      readonly resource: string;
+      readonly limit: number;
+      readonly run_ids: readonly string[];
+    }
+  | {
+      readonly kind: "machine_resource";
+      readonly machine_id: string;
+      readonly resource: string;
+      readonly limit: number;
+      /** Only the asking project's Runs; other projects are a bare count. */
+      readonly run_ids: readonly string[];
+      readonly other_project_runs: number;
+    };
 
 /** Read under the caller's transaction so counting and claiming share a snapshot. */
 export function runCapacitySnapshot(
@@ -266,6 +399,19 @@ export function runCapacitySnapshot(
     string,
     Map<string, { limit: number; occupied: number }>
   >();
+  // C-714: which Runs hold each machine resource slot (diagnosis only).
+  const slotRuns = new Map<
+    string,
+    Map<string, { project: string; run: string }[]>
+  >();
+  const holders = <T>(byKey: Map<string, T[]>, key: string) => {
+    let runs = byKey.get(key);
+    if (!runs) {
+      runs = [];
+      byKey.set(key, runs);
+    }
+    return runs;
+  };
   const resourceSlots = (machine: string) => {
     let slots = machines.get(machine);
     if (!slots) {
@@ -278,7 +424,12 @@ export function runCapacitySnapshot(
   };
   // Both views share the exact same effective Run/reservation set. Only the
   // trusted Assignment scope and role determine exemption, never Run labels.
-  type Usage = { occupied: number; resources: Map<string, number> };
+  type Usage = {
+    occupied: number;
+    resources: Map<string, number>;
+    runs: string[];
+    resourceRuns: Map<string, string[]>;
+  };
   const projectUsage = new Map<string, Map<string, Usage>>();
   const agentOccupied = new Map<string, number>();
   const allAgentOccupied = new Map<string, number>();
@@ -291,22 +442,31 @@ export function runCapacitySnapshot(
     // offers it; otherwise re-read each stream. Same streams, same order.
     // C-230: with the cache, also reuse the result while the stream map and
     // card list are the same immutable snapshots (see `queueCache`).
+    const hot =
+      tx.command_state_scope !== "full" &&
+      tx.command_state_scope !== undefined &&
+      tx.events.listStreams
+        ? loadCommandState(tx, project.id).events
+        : undefined;
     const streams = tx.events.listStreams?.(project.id);
     const cards = tx.cards.list(project.id);
+    // Host actions and their finishes are never cold-omitted types (C-639).
     const collect = () =>
       pendingHostOpsActions(
-        [undefined, ...cards.map((card) => card.id)].flatMap((card) =>
-          streams
-            ? (streams.get(card ?? "") ?? [])
-            : tx.events.listAfter(project.id, card, 0),
-        ),
+        hot ??
+          [undefined, ...cards.map((card) => card.id)].flatMap((card) =>
+            streams
+              ? (streams.get(card ?? "") ?? [])
+              : tx.events.listAfter(project.id, card, 0),
+          ),
       );
     let actions: readonly HostOpsExecution[];
-    if (streams) {
-      let byCards = pendingActions.get(streams);
+    const cacheKey = hot ?? streams;
+    if (cacheKey) {
+      let byCards = pendingActions.get(cacheKey);
       if (!byCards) {
         byCards = new WeakMap();
-        pendingActions.set(streams, byCards);
+        pendingActions.set(cacheKey, byCards);
       }
       actions = byCards.get(cards) ?? collect();
       byCards.set(cards, actions);
@@ -342,14 +502,23 @@ export function runCapacitySnapshot(
         agentOccupied.set(machine, (agentOccupied.get(machine) ?? 0) + 1);
       let usage = usageByMachine.get(machine);
       if (!usage && quotas?.(machine, project.id)) {
-        usage = { occupied: 0, resources: new Map() };
+        usage = {
+          occupied: 0,
+          resources: new Map(),
+          runs: [],
+          resourceRuns: new Map(),
+        };
         usageByMachine.set(machine, usage);
       }
-      if (usage && !isRunCapacityExempt(owner)) usage.occupied++;
+      if (usage && !isRunCapacityExempt(owner)) {
+        usage.occupied++;
+        if (run) usage.runs.push(run.id);
+      }
       const slots = resourceSlots(machine);
-      // Stop intents keep their existing machine slot. An idle terminal is not
-      // proof that its queued follow-up acquired any resources. Active Runs and
-      // in-flight startup reservations have already been counted in the Run loop.
+      // A pending stop of a possibly executing session keeps its machine slot.
+      // An idle terminal is not proof that its queued follow-up acquired any
+      // resources. Active Runs and in-flight startup reservations have already
+      // been counted in the Run loop.
       if (
         slots.size &&
         owner.work_item_id &&
@@ -369,27 +538,60 @@ export function runCapacitySnapshot(
           if (slot) {
             slot.occupied++;
             usage?.resources.set(key, (usage.resources.get(key) ?? 0) + 1);
+            let byKey = slotRuns.get(machine);
+            if (!byKey) {
+              byKey = new Map();
+              slotRuns.set(machine, byKey);
+            }
+            holders(byKey, key).push({ project: project.id, run: run.id });
+            if (usage) holders(usage.resourceRuns, key).push(run.id);
           }
         }
       }
       countedOwners.add(owner.id);
     };
+    // C-620: an ended turn leaves an idle session. It holds no machine,
+    // quota or resource slot, even while its stop or recycle is unconfirmed;
+    // its successor is admitted through this same count, so normal dispatch
+    // keeps the limit. A Run cancelled under a pending stop may still be
+    // executing and keeps its slot until exit is confirmed.
     for (const run of runs)
       if (
-        runOccupiesSlot(run) ||
+        runHoldsCapacity(run) ||
         (run.status === "queued" && reserved.has(run.id))
       )
         count(run.assignment_id, run);
-    for (const action of actions)
+    for (const action of actions) {
       if (
-        action.runtime_ref !== null &&
-        !countedOwners.has(action.assignment_id)
+        action.runtime_ref === null ||
+        countedOwners.has(action.assignment_id) ||
+        // Idle-session recycle handoffs and system-ended idle turns.
+        action.retirement_handoff ||
+        action.system_finished_run_id
       )
-        count(
-          action.assignment_id,
-          action.run_id ? tx.runs.get(project.id, action.run_id) : undefined,
-          true,
+        continue;
+      const owner = owners.get(action.assignment_id);
+      if (!owner) continue;
+      const history = historyFor(owner);
+      const turn = runs
+        .filter(
+          (r) => r.assignment_id === owner.id && wasDispatched(history, r),
+        )
+        .reduce<Run | undefined>(
+          (last, r) =>
+            !last || Number(r.id.slice(2)) > Number(last.id.slice(2))
+              ? r
+              : last,
+          undefined,
         );
+      // No turn ever ran, or the last one ended with a business result: idle.
+      if (!turn || runEndedByBusiness(turn)) continue;
+      count(
+        action.assignment_id,
+        action.run_id ? tx.runs.get(project.id, action.run_id) : undefined,
+        true,
+      );
+    }
   }
   // Runtime occupancy is independent of whether a card still accepts a merge
   // result. Dead process incarnations (including PID reuse) release on restart.
@@ -403,29 +605,87 @@ export function runCapacitySnapshot(
     (occupied.get(LOCAL_EXECUTOR) ?? 0) +
       (mergeChecks.get(LOCAL_EXECUTOR) ?? 0) * MERGE_CHECK_RUN_SLOTS,
   );
-  function withinProjectQuota(
+  function projectQuotaBlock(
     project: string,
     owner: Assignment,
     keys?: readonly string[],
-  ): boolean {
+  ): RunCapacityBlock | undefined {
     const quota = quotas?.(owner.machine_id, project);
-    if (!quota) return true;
-    const usage = projectUsage.get(project)?.get(owner.machine_id);
+    if (!quota) return undefined;
+    const machine = owner.machine_id;
+    const usage = projectUsage.get(project)?.get(machine);
     if (
       quota.limit !== undefined &&
       !isRunCapacityExempt(owner) &&
       (usage?.occupied ?? 0) >= quota.limit
     )
-      return false;
+      return {
+        kind: "project_limit",
+        project_id: project,
+        machine_id: machine,
+        limit: quota.limit,
+        run_ids: [...(usage?.runs ?? [])],
+      };
     for (const key of keys ?? assignmentResourceKeys(tx, project, owner)) {
       const ceiling = quota.resources.get(key);
       if (ceiling !== undefined && (usage?.resources.get(key) ?? 0) >= ceiling)
-        return false;
+        return {
+          kind: "project_resource",
+          project_id: project,
+          machine_id: machine,
+          resource: key,
+          limit: ceiling,
+          run_ids: [...(usage?.resourceRuns.get(key) ?? [])],
+        };
     }
-    return true;
+    return undefined;
+  }
+  function withinProjectQuota(
+    project: string,
+    owner: Assignment,
+    keys?: readonly string[],
+  ): boolean {
+    return projectQuotaBlock(project, owner, keys) === undefined;
+  }
+  /** C-714: the first full project or machine ceiling for this owner, if any. */
+  function capacityBlock(
+    project: string,
+    owner: Assignment,
+    keys: readonly string[] = assignmentResourceKeys(tx, project, owner),
+  ): RunCapacityBlock | undefined {
+    const blocked = projectQuotaBlock(project, owner, keys);
+    if (blocked) return blocked;
+    const machine = owner.machine_id;
+    const slots = resourceSlots(machine);
+    for (const key of keys) {
+      const slot = slots.get(key);
+      // Same test as `remainingResourceRatio(...) <= 0`.
+      if (slot && (slot.limit - slot.occupied) / slot.limit <= 0) {
+        const held = slotRuns.get(machine)?.get(key) ?? [];
+        const own = held.filter((h) => h.project === project);
+        return {
+          kind: "machine_resource",
+          machine_id: machine,
+          resource: key,
+          limit: slot.limit,
+          run_ids: own.map((h) => h.run),
+          other_project_runs: held.length - own.length,
+        };
+      }
+    }
+    return undefined;
   }
   return {
     withinProjectQuota,
+    capacityBlock,
+    /** C-716: a quota project's current usage on one machine (Runs only). */
+    projectUsage: (project: string, machine: string) => {
+      const usage = projectUsage.get(project)?.get(machine);
+      return {
+        occupied: usage?.occupied ?? 0,
+        resources: usage?.resources ?? new Map<string, number>(),
+      };
+    },
     occupied,
     agentOccupied,
     allAgentOccupied,

@@ -291,7 +291,8 @@ test("a historical unmanaged pause with a newer delivery resumes its reviewers, 
 });
 
 test("invariant 11: only a host's exact withdrawn repair can resume on the same delivery and SHA", async () => {
-  const f = await fixture(1, [first], 2);
+  // C-610: a fourth rejection predates alignment rounds and keeps the PM path.
+  const f = await fixture(1, [first], 3);
   f.review(2, [first]);
   const cause = f.state.events.findLast((e) => e.type === "review_submitted");
   const producer = f.state.assignments.find(

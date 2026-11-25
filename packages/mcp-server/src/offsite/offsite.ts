@@ -3,7 +3,13 @@ import { link, mkdir, open, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { type OffsiteConfig, readOffsiteConfig } from "./config.js";
 import {
+  type LoopDelay,
+  loopDelaySlow,
+  processLoopDelay,
+} from "./loop-delay.js";
+import {
   bucketOrigin,
+  type ObjectHead,
   OssClient,
   type OssCredentials,
   OssError,
@@ -269,6 +275,97 @@ export class Offsite {
     }
   }
 
+  /**
+   * C-685: the shared library's client, or a refusal. The library lives only
+   * in OSS, so without a valid configuration (or while OSS is known to be
+   * down) there is nothing to sign.
+   */
+  private sharedClient(): { client: OssClient; ttl: number } {
+    const config = this.config();
+    const client = this.client();
+    if (config.state !== "ready" || !client)
+      throw new OffsiteUnavailable("not_configured");
+    if (!this.reachable()) throw new OffsiteUnavailable("unreachable");
+    return { client, ttl: config.settings.signed_url_ttl_seconds };
+  }
+
+  /** Whether shared-library URLs can be signed right now. */
+  sharedAvailable(): "ready" | "not_configured" | "unreachable" {
+    try {
+      this.sharedClient();
+      return "ready";
+    } catch (error) {
+      return (error as OffsiteUnavailable).reason;
+    }
+  }
+
+  /**
+   * C-685: a signed PUT for one new shared-library object. The uploader sends
+   * the bytes straight to OSS with exactly `headers`; the host never sees
+   * them. The URL must be used within `SHARED_UPLOAD_URL_SECONDS`.
+   */
+  sharedUploadUrl(
+    key: string,
+    contentType: string,
+  ): {
+    readonly url: string;
+    readonly headers: Readonly<Record<string, string>>;
+    readonly expires_at: string;
+  } {
+    const { client } = this.sharedClient();
+    const at = this.now();
+    const headers = {
+      "content-type": contentType,
+      "x-oss-forbid-overwrite": "true",
+    };
+    const url = client.presignPut(
+      key,
+      { expires: SHARED_UPLOAD_URL_SECONDS, at },
+      headers,
+    );
+    this.usage.add({ requests: 1 });
+    return {
+      url,
+      headers,
+      expires_at: new Date(
+        at.getTime() + SHARED_UPLOAD_URL_SECONDS * 1000,
+      ).toISOString(),
+    };
+  }
+
+  /** C-685: a signed GET that downloads one shared-library version as `filename`. */
+  sharedDownloadUrl(
+    key: string,
+    file: { filename: string; contentType: string; size: number },
+  ): SignedLink & { readonly expires_at: string } {
+    const { client, ttl } = this.sharedClient();
+    const at = this.now();
+    const url = client.presign(key, {
+      expires: ttl,
+      at,
+      query: {
+        "response-content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}`,
+        "response-content-type": file.contentType,
+      },
+    });
+    this.usage.add({ requests: 1, egress_bytes: file.size });
+    return {
+      url,
+      valid_for_seconds: ttl,
+      expires_at: new Date(at.getTime() + ttl * 1000).toISOString(),
+    };
+  }
+
+  /** C-685: size of an uploaded shared object (HEAD only, no body), or undefined. */
+  async sharedHead(key: string): Promise<ObjectHead | undefined> {
+    const { client } = this.sharedClient();
+    try {
+      return await client.head(key);
+    } finally {
+      this.usage.add({ requests: 1 });
+    }
+  }
+
   thumbnailUrl(digest: string): SignedLink | undefined {
     const entry = this.synced(attachmentKey(digest));
     return entry
@@ -357,7 +454,27 @@ export class Offsite {
     size: number,
     sha256: string,
   ): Promise<boolean> {
-    const key = artifactKey(blobId);
+    return this.restoreObject(artifactKey(blobId), path, size, sha256);
+  }
+
+  /**
+   * C-683: restore an attachment blob too large to hold in memory (a video)
+   * at `path`, streaming and verifying it like `restoreArtifact`.
+   */
+  async restoreAttachment(
+    path: string,
+    digest: string,
+    size: number,
+  ): Promise<boolean> {
+    return this.restoreObject(attachmentKey(digest), path, size, digest);
+  }
+
+  private async restoreObject(
+    key: string,
+    path: string,
+    size: number,
+    sha256: string,
+  ): Promise<boolean> {
     if (!/^[a-f0-9]{64}$/u.test(sha256)) return false;
     const source = this.source(key);
     if (!source) return false;
@@ -434,6 +551,14 @@ export class Offsite {
       if ((sync?.failed.count ?? 0) > 0) alerts.push("sync_failed");
       if (budget !== undefined && estimate > budget) alerts.push("over_budget");
     }
+    // C-628: the syncing process and this one (MCP and web) stay responsive.
+    const own = processLoopDelay().snapshot();
+    const delay: { sync?: LoopDelay; server?: LoopDelay } = {
+      ...(sync?.loop_delay ? { sync: sync.loop_delay } : {}),
+      ...(own ? { server: own } : {}),
+    };
+    if (loopDelaySlow(delay.sync) || loopDelaySlow(delay.server))
+      alerts.push("loop_slow");
     return {
       configured: config.state,
       ...(config.state === "ready"
@@ -457,8 +582,19 @@ export class Offsite {
         estimated_yuan: Math.round(estimate * 100) / 100,
         ...(budget === undefined ? {} : { budget_yuan: budget }),
       },
+      ...(delay.sync || delay.server ? { loop_delay: delay } : {}),
       alerts,
     };
+  }
+}
+
+/** C-685: a signed upload URL stays usable this long (the upload may run longer). */
+export const SHARED_UPLOAD_URL_SECONDS = 3600;
+
+export class OffsiteUnavailable extends Error {
+  constructor(readonly reason: "not_configured" | "unreachable") {
+    super(`off-site storage ${reason}`);
+    this.name = "OffsiteUnavailable";
   }
 }
 
@@ -466,7 +602,8 @@ export type OffsiteAlert =
   | "config_invalid"
   | "unreachable"
   | "sync_failed"
-  | "over_budget";
+  | "over_budget"
+  | "loop_slow";
 export interface OffsiteStatusView {
   readonly configured: SyncStatus["configured"];
   readonly bucket?: string;
@@ -484,6 +621,11 @@ export interface OffsiteStatusView {
     readonly estimated_yuan: number;
     readonly budget_yuan?: number;
   };
+  /** C-628: p99 and maximum event-loop delay of the sync and this process. */
+  readonly loop_delay?: {
+    readonly sync?: LoopDelay;
+    readonly server?: LoopDelay;
+  };
   readonly alerts: readonly OffsiteAlert[];
 }
 
@@ -494,6 +636,8 @@ export interface OffsiteStatusView {
  */
 const registry = new Map<string, Offsite>();
 export function registerOffsite(offsite: Offsite) {
+  // C-628: measured from startup, so the health page has a window to show.
+  processLoopDelay();
   registry.set(offsite.dataDir, offsite);
   return () => {
     if (registry.get(offsite.dataDir) === offsite) {

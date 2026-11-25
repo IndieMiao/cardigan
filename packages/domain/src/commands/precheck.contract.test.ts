@@ -1,7 +1,9 @@
 import { expect, test } from "vitest";
 import {
   type Actor,
+  CheckHeadFailure,
   type CommandState,
+  checkHeadFailureReasons,
   hasPassedMergeCheck,
   type Precheck,
   prechecks,
@@ -141,6 +143,67 @@ test.each([undefined, 1, 2])(
     expect(reads).toBe(0);
   },
 );
+test("C-632: host HEAD failures map to a fixed reason and next step, never the raw error", async () => {
+  const f = setup();
+  const raw = "fatal: https://user:token@example.invalid /private/path";
+  const messages = new Set<string>();
+  for (const reason of checkHeadFailureReasons) {
+    const result = await prepareCheck(f.state, actor(), params, {
+      head: async () => {
+        throw new CheckHeadFailure(reason, { cause: new Error(raw) });
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) continue;
+    expect(result.error).toMatchObject({
+      code: "validation_failed",
+      details: {
+        reason,
+        retryable: reason === "repository_busy" || reason === "fetch_failed",
+      },
+    });
+    expect(JSON.stringify(result.error)).not.toMatch(/token|private|fatal/u);
+    expect(result.error.message).toMatch(/；请/u);
+    messages.add(result.error.message);
+  }
+  // Every reason reads differently to the Agent.
+  expect(messages.size).toBe(checkHeadFailureReasons.length);
+  const busy = await prepareCheck(f.state, actor(), params, {
+    head: async () => {
+      throw new CheckHeadFailure("repository_busy");
+    },
+  });
+  expect(!busy.ok && busy.error.message).toContain("主机仓库忙");
+  // A duplicated module instance is still recognised by name and reason.
+  const foreign = Object.assign(new Error("x"), {
+    name: "CheckHeadFailure",
+    reason: "branch_missing",
+  });
+  const forged = Object.assign(new Error(raw), {
+    name: "CheckHeadFailure",
+    reason: "not-a-reason",
+  });
+  const read = async (error: Error) =>
+    prepareCheck(f.state, actor(), params, {
+      head: async () => {
+        throw error;
+      },
+    });
+  expect(await read(foreign)).toMatchObject({
+    ok: false,
+    error: { details: { reason: "branch_missing", retryable: false } },
+  });
+  const unknown = await read(forged);
+  expect(unknown).toMatchObject({
+    ok: false,
+    error: { details: { reason: "unknown", retryable: true } },
+  });
+  expect(JSON.stringify(unknown)).not.toMatch(/token|private|fatal/u);
+  expect(await read(new Error(raw))).toMatchObject({
+    ok: false,
+    error: { details: { reason: "unknown" } },
+  });
+});
 test("prepared identity is revalidated after async IO and concurrent preparation cannot bypass in-flight exclusion", async () => {
   const f = setup();
   const receipt = value(

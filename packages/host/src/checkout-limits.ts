@@ -5,6 +5,9 @@ export const CHECKOUT_LIMITS = {
   entryMs: 70_000,
   graceMs: 120_000,
   remoteCommandMs: 60_000,
+  /** C-658: a job log download is renewed by received bytes, within a cap. */
+  logIdleMs: 60_000,
+  logDownloadMs: 15 * 60_000,
   orphanAgeMs: 60_000,
   sweepIntervalMs: 60_000,
   killGraceMs: 500,

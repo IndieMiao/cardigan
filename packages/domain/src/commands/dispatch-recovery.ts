@@ -1,6 +1,6 @@
 import { assignmentCardId, standingRunDormant } from "../card-hold.js";
 import type { Actor, Run, RuntimeRef } from "../entities.js";
-import { eventById } from "../event-index.js";
+import { eventById, eventsOfType } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import {
@@ -132,8 +132,8 @@ export function retireObsoleteQueuedRun(
 }
 export const retireUnreadableQueuedRun = retireObsoleteQueuedRun;
 export const dispatchedAt = (state: CommandState, run: Run) =>
-  state.events.findLast(
-    (e) => e.type === "run_dispatched" && field(e.payload, "run_id") === run.id,
+  eventsOfType(state.events, "run_dispatched").findLast(
+    (e) => field(e.payload, "run_id") === run.id,
   )?.created_at;
 export const dispatchRecoveryQueuedAt = (state: CommandState, run: Run) =>
   state.events.find(

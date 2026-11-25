@@ -3123,3 +3123,202 @@ test("Office submits a versioned decomposition through MCP; get_card shows every
     },
   });
 });
+
+test("C-610: post_comment passes review_alignment to the domain", async () => {
+  const client = await coder();
+  const result = await raw(client, "post_comment", {
+    card_id: card.id,
+    body: "不变量",
+    review_alignment: {
+      work_item_id: work("reviewer").id,
+      step: "propose",
+      invariants: ["保存后读回新值"],
+    },
+  });
+  expect(result.isError).toBe(true);
+  expect(result.structuredContent).toMatchObject({
+    error: { code: "illegal_transition" },
+  });
+});
+
+test("C-619: issue_instruction passes decision_id to the domain and validates its format", async () => {
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const ops: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      scope: "standing",
+      standing_mode: "ops",
+      mcp_token_id: "fixture-question-ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  const ops = await connect(opsAssignment, true);
+  const args = {
+    card_id: card.id,
+    work_item_id: work("reviewer").id,
+    body: "请确认方向",
+  };
+  const before = rows();
+  for (const [decision_id, code] of [
+    ["Q-999", "not_found"],
+    ["not a decision", "validation_failed"],
+  ] as const)
+    expect(
+      (await raw(ops, "issue_instruction", { ...args, decision_id }))
+        .structuredContent,
+    ).toMatchObject({ error: { code } });
+  expect(rows()).toEqual(before);
+});
+
+test("C-712 standing PM writes, revises and lists release notes; work-item roles do not see the tools", async () => {
+  const tools = (await office.listTools()).tools.map((t) => t.name);
+  expect(tools).toEqual(
+    expect.arrayContaining(["write_release_note", "list_release_notes"]),
+  );
+  const early = await raw(office, "write_release_note", {
+    version: "0.4.2",
+    body: "未发布",
+  });
+  expect(early.isError).toBe(true);
+  store.uow.run((tx) =>
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      card_id: card.id,
+      seq: tx.ids.nextEventSequence(project, card.id),
+      type: "artifact_publication_verified",
+      actor: { kind: "system", project_id: project },
+      payload: { version: "0.4.2", versionCode: 42, decision_id: "Q-1" },
+      created_at: "2026-01-02T00:00:00.000Z",
+    }),
+  );
+  const first = await ok<{
+    note: { revision: number; body: string };
+    changed: boolean;
+    merged_cards: { basis: string; note: string };
+  }>(office, "write_release_note", { version: "0.4.2", body: "修复闪退" });
+  expect(first).toMatchObject({
+    note: { revision: 1, body: "修复闪退" },
+    changed: true,
+    merged_cards: { basis: "recent" },
+  });
+  const stale = await raw(office, "write_release_note", {
+    version: "0.4.2",
+    body: "覆盖",
+    base_revision: 0,
+  });
+  expect(stale.isError).toBe(true);
+  const empty = await raw(office, "write_release_note", {
+    version: "0.4.2",
+    body: " ",
+  });
+  expect(empty.isError).toBe(true);
+  await ok(office, "write_release_note", {
+    version: "0.4.2",
+    body: "修复闪退，优化加载",
+    base_revision: 1,
+  });
+  const listed = await ok<{
+    entries: { version: string; note: { body: string; revision: number } }[];
+  }>(office, "list_release_notes", {});
+  expect(listed.entries).toMatchObject([
+    {
+      version: "0.4.2",
+      version_code: 42,
+      note: { body: "修复闪退，优化加载", revision: 2, version_code: 42 },
+    },
+  ]);
+  const history = await ok<{ history: { revision: number; body: string }[] }>(
+    office,
+    "list_release_notes",
+    { version: "0.4.2" },
+  );
+  expect(history.history.map((r) => [r.revision, r.body])).toEqual([
+    [1, "修复闪退"],
+    [2, "修复闪退，优化加载"],
+  ]);
+  // Project stream only: nothing on the card, nothing addressed to anyone.
+  expect(
+    store.uow
+      .read((tx) => tx.events.listAfter(project, undefined, 0))
+      .filter((e) => e.type === "release_note_written"),
+  ).toHaveLength(2);
+  expect(
+    store.uow
+      .read((tx) => tx.events.listAfter(project, card.id, 0))
+      .some((e) => e.type === "release_note_written"),
+  ).toBe(false);
+  const coderItem = work("coder").id;
+  const coder = await connect(
+    store.uow.run((tx): Assignment => {
+      const assignment: Assignment = {
+        id: tx.ids.next(project, "assignment"),
+        scope: "work_item",
+        work_item_id: coderItem,
+        role_id: "coder",
+        role_version: 1,
+        status: "active",
+        runtime_state: "idle",
+        runtime_ref: null,
+        machine_id: "local",
+        mcp_token_id: "release-note-coder",
+        created_at: "2026-01-01T00:00:00Z",
+      };
+      tx.assignments.put(project, assignment);
+      return assignment;
+    }),
+  );
+  const visible = (await coder.listTools()).tools.map((t) => t.name);
+  expect(visible).not.toContain("write_release_note");
+  expect(visible).not.toContain("list_release_notes");
+});
+
+test("C-728: PM registers a no-merge card's repository and start points over MCP", async () => {
+  const sha = "9172f56f".padEnd(40, "0");
+  expect(
+    (await raw(office, "update_card", { card_id: card.id, start_point: sha }))
+      .isError,
+  ).toBe(true);
+  store.setProjectRepo({ project_id: project, repo_path: "/srv/source/p" });
+  store.uow.run((tx) => {
+    const {
+      repo: _r,
+      base_branch: _b,
+      ...bare
+    } = tx.cards.get(project, card.id) as Card;
+    tx.cards.put(project, { ...bare, merge_policy: "none" });
+  });
+  const updated = await ok<Card>(office, "update_card", {
+    card_id: card.id,
+    start_point: sha,
+  });
+  // The host repository path stays out of Agent replies.
+  expect(updated).not.toHaveProperty("repo");
+  expect(updated).toMatchObject({ base_branch: "main", start_point: sha });
+  expect(store.uow.read((tx) => tx.cards.get(project, card.id))).toMatchObject({
+    repo: "/srv/source/p",
+    base_branch: "main",
+    start_point: sha,
+  });
+  const item = await ok<WorkItem>(office, "update_work_item", {
+    work_item_id: work("coder").id,
+    start_point: "release/0.4",
+  });
+  expect(item.start_point).toBe("release/0.4");
+  expect(
+    (
+      await raw(office, "update_work_item", {
+        work_item_id: work("coder").id,
+        start_point: "HEAD~1",
+      })
+    ).isError,
+  ).toBe(true);
+  expect(
+    await ok<WorkItem>(office, "update_work_item", {
+      work_item_id: work("coder").id,
+      start_point: null,
+    }),
+  ).not.toHaveProperty("start_point");
+});

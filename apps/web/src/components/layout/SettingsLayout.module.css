@@ -376,6 +376,10 @@
   .section ~ .notice {
     margin-block-start: var(--ui-space-4);
   }
+  .rowActions {
+    display: inline-flex;
+    gap: var(--ui-space-2);
+  }
   .dialogActions {
     display: flex;
     flex-wrap: wrap;

@@ -168,3 +168,73 @@ test("MC-5 the selection keeps the resource snapshot and drops malformed slots",
     },
   ]);
 });
+
+test("C-716 the selection keeps the project quota snapshot and the queue limits", () => {
+  const queued = event(6, "machine_selected", {
+    work_item_id: item,
+    assignment_id: id("assignment", 4),
+    machine_id: "cardigan-ci",
+    queued_on: ["项目上限 3/3", 7],
+    candidates: [
+      {
+        machine_id: "cardigan-ci",
+        affinity: false,
+        control_host: false,
+        limit: 12,
+        occupied: 3,
+        remaining_ratio: 0,
+        preference_rank: null,
+        project_limit: { limit: 3, occupied: 3 },
+        project_resources: [
+          { key: "godot", limit: 1, occupied: 0 },
+          { key: "bad", limit: 1 },
+        ],
+        full: ["项目上限 3/3"],
+      },
+      {
+        machine_id: "mac-mini",
+        affinity: false,
+        control_host: false,
+        limit: 6,
+        occupied: 6,
+        remaining_ratio: 0,
+        preference_rank: null,
+        project_limit: { limit: "3" },
+      },
+    ],
+    excluded: [],
+  });
+  expect(machineSelection([queued], item)).toEqual({
+    status: "selected",
+    at: at(6),
+    machine_id: "cardigan-ci",
+    assignment_id: id("assignment", 4),
+    queued_on: ["项目上限 3/3"],
+    candidates: [
+      {
+        machine_id: "cardigan-ci",
+        affinity: false,
+        control_host: false,
+        limit: 12,
+        occupied: 3,
+        remaining_ratio: 0,
+        preference_rank: null,
+        resources: [],
+        project_limit: { limit: 3, occupied: 3 },
+        project_resources: [{ key: "godot", limit: 1, occupied: 0 }],
+        full: ["项目上限 3/3"],
+      },
+      {
+        machine_id: "mac-mini",
+        affinity: false,
+        control_host: false,
+        limit: 6,
+        occupied: 6,
+        remaining_ratio: 0,
+        preference_rank: null,
+        resources: [],
+      },
+    ],
+    excluded: [],
+  });
+});

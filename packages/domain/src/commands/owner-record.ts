@@ -1,5 +1,9 @@
 import type { Decision, OwnerEvidence, TimelineEntry } from "../entities.js";
-import { eventsForDecision, eventsOfType } from "../event-index.js";
+import {
+  appendEvents,
+  eventsForDecision,
+  eventsOfType,
+} from "../event-index.js";
 import type { AttachmentId, CardId, TimelineEntryId } from "../ids.js";
 import { type CommandDraft, ensure } from "./core.js";
 
@@ -135,7 +139,7 @@ export function bindOwnerRecord(
     !entry.retracted && !timeline.some((e) => e.supersedes === entry.id),
     "所有者原话已撤回或已被改写",
   );
-  const events = [...d.state.events, ...d.events];
+  const events = appendEvents(d.state.events, d.events);
   const opened = eventsForDecision(events, q.id)
     .filter((e) => e.type === "decision_requested")
     .map((e) => ({ card_id: e.card_id, seq: e.seq, at: e.created_at }));

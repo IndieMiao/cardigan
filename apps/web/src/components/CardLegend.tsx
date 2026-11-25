@@ -2,9 +2,18 @@ import type { ReactNode } from "react";
 import type { CardListItem, CardStatus } from "../api.js";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
 import { BOARD_STATUSES } from "../status.js";
-import { BoardCard, BoardCardIcon, ProgressPie } from "./BoardCard.js";
+import {
+  BOARD_CARD_SIGNALS,
+  BoardCard,
+  BoardCardIcon,
+  ProgressPie,
+} from "./BoardCard.js";
 import { StatusTag } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
+import {
+  BoardCardSignal,
+  type BoardCardSignalKind,
+} from "./layout/BoardCardLayout.js";
 import { CardLegendPreview } from "./layout/CardLegendLayout.js";
 import { PRIORITY_LEVELS, PriorityGlyph } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
@@ -42,6 +51,11 @@ interface LegendRow {
 const icon = (name: Parameters<typeof BoardCardIcon>[0]["name"]) => (
   <BoardCardIcon name={name} />
 );
+const signal = (kind: BoardCardSignalKind) => (
+  <BoardCardSignal kind={kind}>
+    {BOARD_CARD_SIGNALS.find((item) => item.kind === kind)?.text}
+  </BoardCardSignal>
+);
 const progress = (completed: number, total: number) => (
   <span
     className={`board-card-badge${completed === total && total > 0 ? " board-card-complete" : ""}`}
@@ -68,33 +82,41 @@ export const CARD_LEGEND_GROUPS: readonly {
     ],
   },
   {
-    title: "左侧竖条",
+    title: "右下角角标",
     rows: [
       {
-        id: "border-normal",
-        element: <span className="card-guide-swatch">无彩色竖条</span>,
-        meaning: "没有需要强调的拍板、执行或阻塞信号。",
-        when: "普通进行中、待审核等情况。没有彩条不代表卡片已完成。",
+        id: "signal-none",
+        element: "无角标",
+        meaning: "没有阻塞、待拍板、待人工或待结案的事项。",
+        when: "普通进行中、待审核、检查中等情况。没有角标不代表卡片已完成。",
       },
       {
-        id: "border-waiting",
-        element: (
-          <span className="card-guide-swatch card-tile-waiting">
-            琥珀色（黄橙色）
-          </span>
-        ),
-        meaning: "有待拍板或待人执行的事项。",
-        when: "有拍板（包括暂停后的结案）或人工操作等待，且没有阻塞。只等方案、确认或系统派发时不显示琥珀色竖条。",
-        selectors: [".card-tile-waiting"],
+        id: "blocked",
+        element: signal("blocked"),
+        meaning: "红色，工作被阻塞。",
+        when: "存在阻塞原因。同时有多个原因时只显示一个，顺序为阻塞、待拍板、待人工、待结案；悬停或键盘聚焦角标可查看全部原因。只等预检结果的阻塞不显示角标。",
+        selectors: ['[data-card-signal="blocked"]'],
       },
       {
-        id: "border-blocked",
-        element: (
-          <span className="card-guide-swatch card-tile-blocked">红色</span>
-        ),
-        meaning: "工作被阻塞。",
-        when: "存在阻塞原因；同时有等待时，红色竖条优先。",
-        selectors: [".card-tile-blocked"],
+        id: "decision",
+        element: signal("decision"),
+        meaning: "琥珀色（黄橙色），有事项等拍板。",
+        when: "存在拍板等待，且没有阻塞。",
+        selectors: ['[data-card-signal="decision"]'],
+      },
+      {
+        id: "human_action",
+        element: signal("human_action"),
+        meaning: "琥珀色，有人工待办等人执行。",
+        when: "存在人工操作等待，且没有阻塞或拍板。",
+        selectors: ['[data-card-signal="human_action"]'],
+      },
+      {
+        id: "closeout",
+        element: signal("closeout"),
+        meaning: "琥珀色，审核暂停后确认已齐，等你或 PM 结案恢复返工。",
+        when: "审核暂停处于“待你结案恢复”或“待 PM 结案恢复”，且没有更靠前的原因。",
+        selectors: ['[data-card-signal="closeout"]'],
       },
     ],
   },
@@ -258,45 +280,10 @@ export const CARD_LEGEND_GROUPS: readonly {
     title: "等待、暂停与取代",
     rows: [
       {
-        id: "decision",
-        element: (
-          <>
-            <StatusIcon status="waiting_decision" />
-            等你拍板
-          </>
-        ),
-        meaning: "紫色圆内实心点；没有阻塞时，左侧使用琥珀色等待竖条。",
-        when: "存在拍板等待且开启“显示 → 等待标记”。",
-        selectors: ['[aria-label^="等你拍板："]'],
-      },
-      {
-        id: "human_action",
-        element: (
-          <span className="board-card-waiting card-guide-icon">
-            {icon("human_action")}待你执行
-          </span>
-        ),
-        meaning: "琥珀色手形，提示需要人工操作。",
-        when: "存在人工操作等待且开启“显示 → 等待标记”。",
-        selectors: [".board-card-waiting", '[aria-label^="待你执行："]'],
-      },
-      {
-        id: "blocked",
-        element: (
-          <>
-            <StatusIcon status="blocked" />
-            阻塞
-          </>
-        ),
-        meaning: "红色实心圆内感叹号，提示工作无法继续。",
-        when: "存在阻塞且开启“显示 → 等待标记”。同类原因合并在一个提示里，不同类标记可同时出现。",
-        selectors: [".board-card-blocked", '[aria-label^="阻塞："]'],
-      },
-      {
         id: "review-phase",
         element: <>{icon("review_phase")}审核暂停阶段</>,
         meaning:
-          "待方案：负责人提方案；待确认：指定人员确认当前方案。待 PM 结案恢复或待你结案恢复：确认已齐，等拍板人恢复返工。",
+          "待方案：负责人提方案；待确认：指定人员确认当前方案。确认已齐、等结案恢复时改为右下角“待结案”角标。",
         when: "开启“显示 → 等待标记”时显示当前阶段。结案后若返工尚未派发，显示“已允许返工但未派发”，此时等系统，不需要再拍板。",
         selectors: [".review-phase-badge"],
       },
@@ -309,7 +296,7 @@ export const CARD_LEGEND_GROUPS: readonly {
           </>
         ),
         meaning:
-          "作者的预检正在排队或运行；只等预检结果的工作项不按阻塞显示，也没有红色竖条。",
+          "作者的预检正在排队或运行；只等预检结果的工作项不按阻塞显示，也没有“阻塞”角标。",
         when: "存在排队或运行中的预检且开启“显示 → 等待标记”。预检结束后恢复为实际状态，失败退回或真正的阻塞照常显示。",
         selectors: ['[aria-label="预检中"]'],
       },
@@ -330,7 +317,7 @@ export const CARD_LEGEND_GROUPS: readonly {
         element: <StatusTag status="review" />,
         meaning:
           "悬停或键盘聚焦状态标签，查看当前原因、等待依赖、阻塞、交人及合并阶段的完整详情。",
-        when: "长详情可用滚轮查看；聚焦标签后，可用方向键、翻页键及 Home/End 滚动，Tab 进入内容，Esc 关闭。普通审核等待不产生彩色竖条。",
+        when: "长详情可用滚轮查看；聚焦标签后，可用方向键、翻页键及 Home/End 滚动，Tab 进入内容，Esc 关闭。普通审核等待不显示角标。",
         selectors: ["[data-card-status-tip]"],
       },
       {
@@ -402,7 +389,7 @@ export function cardGuideExample(now = Date.now()): CardListItem {
 }
 
 const annotations = [
-  "左侧等待竖条",
+  "右下角角标",
   "卡片编号",
   "当前状态",
   "卡片标题",
@@ -412,7 +399,6 @@ const annotations = [
   "参与员工",
   "最近活动",
   "附件数",
-  "拍板等待标记",
   "模板标记",
 ];
 

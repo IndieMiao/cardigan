@@ -17,11 +17,20 @@ import {
 } from "@cardigan/store";
 import { idleRolePolicy } from "./deployment-roles.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { retireIdleSessions } from "./idle-session-retirement.js";
+import {
+  clearSupersededRetirements,
+  releaseExitedAgents,
+  releaseRetainedForWork,
+  retireIdleSessions,
+} from "./idle-session-retirement.js";
 import {
   sessionIdleMinutes,
   sessionMaintenanceScan,
 } from "./session-maintenance.js";
+import {
+  releaseUnresponsiveAgents,
+  type UnresponsiveProof,
+} from "./unresponsive-session.js";
 
 export const IDLE_ROLE_UPGRADE_INTERVAL_MS = 60_000;
 export const MAX_IDLE_ROLE_UPGRADES = 2;
@@ -32,6 +41,8 @@ export async function upgradeIdleAssignmentRoles(
   project: ProjectId,
   runtime: Runtime,
   clock: Clock,
+  /** C-730: tests substitute the worker evidence. */
+  unresponsiveProof?: UnresponsiveProof,
 ) {
   // No full state loads for projects without managed work-item sessions.
   if (
@@ -53,6 +64,33 @@ export async function upgradeIdleAssignmentRoles(
     Boolean(runtime.retire_idle),
   );
   try {
+    // C-690: a retirement left behind by an earlier session no longer
+    // fences this one (dispatch, stall recovery and host operations).
+    clearSupersededRetirements(store, project, clock);
+    // C-667/C-672: an exited CLI whose terminal stayed live (a kept shell or
+    // a launcher that outlived it) first becomes "no session", so the upgrade
+    // below and the next dispatch start its replacement.
+    await releaseExitedAgents(
+      store,
+      project,
+      runtime,
+      clock,
+      MAX_IDLE_ROLE_UPGRADES,
+      scan.note,
+    );
+    // C-730: an Agent whose idle retirement kept failing for want of a
+    // process proof, and that the worker does not see alive, is released
+    // like a managed stop; pending work then starts a new session.
+    await releaseUnresponsiveAgents(
+      store,
+      project,
+      runtime,
+      clock,
+      MAX_IDLE_ROLE_UPGRADES,
+      unresponsiveProof,
+    );
+    // C-690: notifications for a session retained for dispatch wake it.
+    await releaseRetainedForWork(store, project, clock);
     const retired = await retireIdleSessions(
       store,
       project,
@@ -246,7 +284,7 @@ async function upgradeRoles(
           )
         )
           return;
-        if (!policy.matches) {
+        if (policy.conflict) {
           const notice = requestDeploymentAction(
             state,
             { kind: "system", project_id: project },

@@ -1,20 +1,44 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
-import { activeOwner, type Clock } from "@cardigan/domain";
+import {
+  activeOwner,
+  type Clock,
+  DEFAULT_MAX_RUN_LIMIT,
+  type MemberId,
+  setRunLimit,
+} from "@cardigan/domain";
 import {
   commitWorkerFile,
+  deviceInitPlan,
+  deviceInitScript,
   effectiveRunLimit,
   explicitMcpUrl,
+  loadMachineCapabilityCatalog,
   loadRuntimeWorkers,
   type MachineCheckJournal,
   planWorkerFile,
+  runCapacityMachines,
   type WizardFilePlan,
   WorkerOnboardingError,
   workerMcpConfig,
+  workerPublicKey,
   workerWizardForm,
 } from "@cardigan/host";
-import type { ReadRepositories, Store, WebSession } from "@cardigan/store";
+import {
+  persistRunLimitEffect,
+  type ReadRepositories,
+  readRunLimit,
+  type Store,
+  type StoreTransactionContext,
+  type WebSession,
+} from "@cardigan/store";
+import {
+  type DevicePairings,
+  type PairingDevice,
+  pairingForm,
+} from "./device-pairings.js";
+import { machineObservationView } from "./execution-state.js";
 import {
   HttpRejection,
   methodNotAllowed,
@@ -45,6 +69,35 @@ interface Session {
   steps: StepRecord[];
   check_id?: string;
   error?: string;
+  /** C-706: the device pairing this draft came from and its initialisation. */
+  pairing?: {
+    id: string;
+    init: "waiting" | "fetched" | "succeeded" | "failed";
+    at?: string;
+    /** C-707: what the device reported about itself when pairing. */
+    device: PairingDevice;
+    /**
+     * C-707: the Agent limit chosen when confirming the code, set when the
+     * check first registers the machine: `applied`, or `kept` when the machine
+     * was already known on this host (its limit stays as it is).
+     */
+    run_limit: { value: number; state: "pending" | "applied" | "kept" };
+    /** The registration wrote the limit (checked again when the check ends). */
+    limit_written?: boolean;
+  };
+}
+/**
+ * C-707: the onboarding report's host-side facts: capabilities observed for
+ * this machine and project, and catalog tools for its system not verified yet.
+ */
+interface Report {
+  capabilities: {
+    key: string;
+    version: string | null;
+    verified_at: string | null;
+    state: string;
+  }[];
+  suggested: string[];
 }
 const stale = () =>
   new HttpRejection(
@@ -53,6 +106,14 @@ const stale = () =>
     "预览已过期或状态已改变，请重新核对。",
   );
 const missing = () => new HttpRejection(404, "not_found", "没有此向导会话");
+/** C-707: the code stays usable; the reply names the field to correct. */
+const runLimitInvalid = (maximum: number | undefined) =>
+  new HttpRejection(
+    400,
+    "worker_run_limit_invalid",
+    maximum === undefined ? "名额须为正整数" : `名额须为 1～${maximum} 的整数`,
+    maximum === undefined ? undefined : { maximum },
+  );
 const invalid = () =>
   new HttpRejection(400, "validation_failed", "向导参数无效");
 const safeError = (e: unknown) =>
@@ -102,7 +163,7 @@ function knownMcpUrl(
     return undefined;
   }
 }
-function view(s: Session) {
+function view(s: Session, report?: Report) {
   return {
     id: s.id,
     machine_id: s.machine,
@@ -116,11 +177,24 @@ function view(s: Session) {
     command_guide:
       s.draft.config.worker.os === "darwin"
         ? "docs/macos-worker.md"
-        : "docs/linux-worker.md",
+        : // C-709: a read-only root (SteamOS) keeps the work root and release under /home.
+          s.draft.config.worker.execution.agentRoot.startsWith(
+              "/home/cardigan-workers/",
+            )
+          ? "docs/steamos-worker.md"
+          : "docs/linux-worker.md",
     command_prerequisites:
       "仅在目标机管理员终端执行。新建账号前核对名称和数字身份均空闲；按操作手册准备受保护的安装包、目录、认领标记和本机安装配置，Mac 先安装并核验签名 App。已有冲突请停下核对。",
     check_id: s.check_id,
     error: s.error,
+    ...(s.pairing
+      ? {
+          device_init: { state: s.pairing.init, at: s.pairing.at },
+          device: s.pairing.device,
+          run_limit: s.pairing.run_limit,
+        }
+      : {}),
+    ...(report ? { report } : {}),
     ...(s.preview
       ? {
           preview: {
@@ -144,7 +218,250 @@ export class WorkerWizards {
     private host: WizardHost | undefined,
     private limit?: ((id: string) => number) | undefined,
     private max?: ((id: string) => number) | undefined,
-  ) {}
+    private pairings?: DevicePairings | undefined,
+  ) {
+    pairings?.attach({
+      state: (id) => {
+        const s = this.sessions.get(id);
+        if (!s?.pairing || this.signal.aborted) return "unavailable";
+        if (s.pairing.init === "succeeded") return "succeeded";
+        return s.phase === "preview" ? "waiting" : "ready";
+      },
+      script: (id) => this.deviceScript(id),
+      completed: (id, ok) => this.deviceCompleted(id, ok),
+    });
+  }
+  /** A live paired session, or the device's view of why not. */
+  private paired(id: string) {
+    const s = this.sessions.get(id);
+    if (
+      !s?.pairing ||
+      !this.host ||
+      this.signal.aborted ||
+      (s.expires <= Date.parse(this.clock.now()) && s.phase !== "running")
+    )
+      throw new HttpRejection(
+        410,
+        "device_init_unavailable",
+        "向导草稿已取消或过期，请重新配对。",
+      );
+    return { s, pairing: s.pairing, host: this.host };
+  }
+  /**
+   * C-706: the one-time init script of a confirmed draft. Only the confirmed
+   * configuration and the host's public key go in; no token or credential.
+   */
+  private deviceScript(id: string) {
+    const { s, pairing, host } = this.paired(id);
+    if (s.phase === "preview")
+      throw new HttpRejection(
+        409,
+        "device_init_not_ready",
+        "请先在 Workbench 向导里确认写入配置。",
+      );
+    if (pairing.init === "succeeded")
+      throw new HttpRejection(409, "device_init_reported", "本机已完成初始化");
+    let script: string;
+    try {
+      script = deviceInitScript(
+        deviceInitPlan(s.draft.config, workerPublicKey(host.root)),
+      );
+    } catch (e) {
+      const code = safeError(e);
+      throw new HttpRejection(
+        409,
+        code === "worker_public_key_invalid"
+          ? "device_init_public_key_missing"
+          : "device_init_unsupported",
+        code === "worker_public_key_invalid"
+          ? "控制主机配置目录里没有可用的 worker-key.pub（Ed25519 公钥），请在控制主机补上后重试。"
+          : "这份向导配置不能生成初始化脚本，请按操作手册手工准备。",
+      );
+    }
+    if (pairing.init === "waiting") pairing.init = "fetched";
+    return script;
+  }
+  /**
+   * C-706: the device ran its script. Record it and, on success, start the
+   * wizard's recheck as the owner who confirmed the draft (still checked to
+   * be the active owner); the check itself verifies everything over SSH.
+   */
+  private deviceCompleted(id: string, ok: boolean): "started" | "skipped" {
+    const { s, pairing } = this.paired(id);
+    if (pairing.init === "succeeded")
+      throw new HttpRejection(409, "device_init_reported", "本机已完成初始化");
+    if (pairing.init === "waiting")
+      throw new HttpRejection(
+        409,
+        "device_init_not_ready",
+        "尚未取得初始化脚本",
+      );
+    pairing.init = ok ? "succeeded" : "failed";
+    pairing.at = this.clock.now();
+    this.store.uow.run((tx) =>
+      machineAudit(tx, this.clock, "worker_wizard_device_initialized", {
+        member_id: s.member,
+        project_id: s.project,
+        machine_id: s.machine,
+        wizard_id: s.id,
+        pairing_id: pairing.id,
+        ok,
+      }),
+    );
+    if (!ok || (s.phase !== "ready" && s.phase !== "failed")) return "skipped";
+    const owner = (tx?: ReadRepositories) => {
+      const current = tx
+        ? activeOwner(tx.members.list())?.id
+        : this.store.uow.read((t) => activeOwner(t.members.list())?.id);
+      if (current !== s.member)
+        throw new HttpRejection(403, "unauthorized", "仅限当前所有者");
+      return s.member;
+    };
+    try {
+      this.startCheck(s, owner);
+      return "started";
+    } catch {
+      return "skipped";
+    }
+  }
+  /**
+   * C-707: the chosen Agent limit, in the transaction that first registers a
+   * paired machine. A machine some project already has keeps its limit, and
+   * so does one with a saved limit: onboarding never changes a machine that
+   * is already working.
+   */
+  private registered(s: Session) {
+    return (tx: StoreTransactionContext, first: boolean) => {
+      const pairing = s.pairing;
+      const wanted = pairing?.run_limit;
+      if (!pairing || wanted?.state !== "pending") return;
+      // Also a machine some project ran work on without registering it
+      // (a legacy executor) keeps its limit.
+      if (
+        !first ||
+        readRunLimit(this.store.database, s.machine) ||
+        this.store
+          .listProjects()
+          .some((p) =>
+            tx.assignments.list(p.id).some((a) => a.machine_id === s.machine),
+          )
+      )
+        return;
+      const result = setRunLimit(
+        { kind: "human", project_id: s.project },
+        { machine_id: s.machine, limit: wanted.value },
+        {
+          machines: runCapacityMachines(this.store, tx),
+          previous: effectiveRunLimit(
+            this.store,
+            s.machine,
+            this.limit,
+            this.max,
+          ),
+          maximum: this.max?.(s.machine) ?? DEFAULT_MAX_RUN_LIMIT,
+          member_id: s.member as MemberId,
+          clock: this.clock,
+          ids: tx.global_ids,
+        },
+      );
+      // Only a hint: a limit the host refuses leaves its default in place.
+      if (!result.ok) return;
+      persistRunLimitEffect(this.store.database, tx, result.value);
+      // The outcome is read back once the check ends: this transaction may
+      // still roll back.
+      pairing.limit_written = true;
+    };
+  }
+  /** C-707: the report once the checks passed; owner-only like the view. */
+  private report(s: Session): Report | undefined {
+    if (!this.host || (s.phase !== "passed" && s.phase !== "enabled"))
+      return undefined;
+    const os = s.draft.config.worker.os;
+    let declared: string[] = [];
+    try {
+      declared = loadMachineCapabilityCatalog(this.host.env, undefined, os)
+        .filter((c) => c.os.some((o) => o === os))
+        .map((c) => c.key);
+    } catch {
+      // An invalid catalog only leaves the suggestions empty.
+    }
+    const now = this.clock.now();
+    return this.store.uow.read((tx) => {
+      const machine = tx.machines.get(s.project, s.machine);
+      if (!machine) return undefined;
+      const { capabilities } = machineObservationView(
+        this.store,
+        s.project,
+        machine,
+        now,
+        declared,
+      );
+      return {
+        capabilities: capabilities.map(
+          ({ key, version, verified_at, state }) => ({
+            key,
+            version,
+            verified_at,
+            state,
+          }),
+        ),
+        suggested: capabilities
+          .filter((c) => c.state !== "verified" && declared.includes(c.key))
+          .map((c) => c.key),
+      };
+    });
+  }
+  private view(s: Session) {
+    return view(s, this.report(s));
+  }
+  /** Start the wizard's checks for a ready, failed or passed session. */
+  private startCheck(s: Session, authorize: (tx?: ReadRepositories) => string) {
+    const host = this.host;
+    if (!host || !["ready", "failed", "passed"].includes(s.phase))
+      throw stale();
+    const steps = s.phase === "passed" ? initialSteps() : s.steps;
+    const check = checkWizard({
+      store: this.store,
+      checks: this.checks,
+      clock: this.clock,
+      host,
+      signal: this.signal,
+      draft: s.draft,
+      steps,
+      priorDigest: s.priorDigest,
+      authorize,
+      limit: effectiveRunLimit(this.store, s.machine, this.limit, this.max),
+      id: s.id,
+      onRegistered: this.registered(s),
+    });
+    s.steps = steps;
+    s.check_id = check.id;
+    s.phase = "running";
+    delete s.preview;
+    delete s.error;
+    const done = check.done.then(
+      (ok) => {
+        s.phase = ok ? "passed" : "failed";
+        // Applied only when the registration that wrote it committed;
+        // otherwise the machine was known before and keeps its limit. A
+        // failed round leaves it pending for the next one.
+        const pairing = s.pairing;
+        if (ok && pairing?.run_limit.state === "pending")
+          pairing.run_limit.state =
+            pairing.limit_written &&
+            readRunLimit(this.store.database, s.machine)?.limit ===
+              pairing.run_limit.value
+              ? "applied"
+              : "kept";
+      },
+      (e) => {
+        s.phase = "failed";
+        s.error = safeError(e);
+      },
+    );
+    this.pending.add(done);
+    void done.then(() => this.pending.delete(done));
+  }
   async settled() {
     await Promise.allSettled(this.pending);
   }
@@ -179,10 +496,13 @@ export class WorkerWizards {
         defaults: knownMcpUrl(host, project) ?? {},
       });
     }
-    const match =
-      /^\/worker-wizards(?:\/([a-f0-9-]{36})(?:\/(confirm|run|cancel|launch-preview|enable))?)?$/.exec(
-        rest,
-      );
+    // C-705: `/worker-wizards/pairing` turns a device pairing code into a draft.
+    const pairing = rest === "/worker-wizards/pairing";
+    const match = pairing
+      ? []
+      : /^\/worker-wizards(?:\/([a-f0-9-]{36})(?:\/(confirm|run|cancel|launch-preview|enable))?)?$/.exec(
+          rest,
+        );
     if (!match) throw missing();
     const [, id, action] = match,
       read = !!id && !action;
@@ -202,52 +522,120 @@ export class WorkerWizards {
           wizard_id: s.id,
         }),
       );
+    // The same draft, checks and preview as a form typed into the wizard.
+    const create = (form: Record<string, unknown>) => {
+      const draft = workerWizardForm(host.root, host.dataDir, project, form),
+        machine = draft.config.worker.machine_id;
+      this.store.uow.read((tx) =>
+        checkRegistryCompatibility(this.store, tx, draft),
+      );
+      const plan = planWorkerFile(
+        host.root,
+        host.dataDir,
+        draft.raw,
+        draft.config,
+      );
+      const { priorDigest } = plan.binding;
+      if (priorDigest && priorDigest !== draft.config.digest)
+        plan.diff.push({ field: "completed_checks", change: "reset" });
+      for (const s of this.sessions.values())
+        if (
+          s.project === project &&
+          s.machine === machine &&
+          s.member === member
+        ) {
+          if (s.phase === "running") throw stale();
+          this.sessions.delete(s.id);
+        }
+      if (this.sessions.size >= 64)
+        throw new HttpRejection(429, "capacity", "向导会话已满");
+      const s: Session = {
+        id: randomUUID(),
+        machine,
+        project,
+        member,
+        draft,
+        priorDigest,
+        expires: now + 86400_000,
+        phase: "preview",
+        steps: initialSteps(),
+        preview: preview(plan, now),
+      };
+      audit("previewed", s);
+      this.sessions.set(s.id, s);
+      return s;
+    };
     try {
-      if (!id) {
-        const draft = workerWizardForm(host.root, host.dataDir, project, body),
-          machine = draft.config.worker.machine_id;
-        this.store.uow.read((tx) =>
-          checkRegistryCompatibility(this.store, tx, draft),
-        );
-        const plan = planWorkerFile(
-          host.root,
-          host.dataDir,
-          draft.raw,
-          draft.config,
-        );
-        const { priorDigest } = plan.binding;
-        if (priorDigest && priorDigest !== draft.config.digest)
-          plan.diff.push({ field: "completed_checks", change: "reset" });
-        for (const s of this.sessions.values())
-          if (
-            s.project === project &&
-            s.machine === machine &&
-            s.member === member
-          ) {
-            if (s.phase === "running") throw stale();
-            this.sessions.delete(s.id);
-          }
-        if (this.sessions.size >= 64)
-          throw new HttpRejection(429, "capacity", "向导会话已满");
-        const s: Session = {
-          id: randomUUID(),
-          machine,
+      if (pairing) {
+        if (
+          !this.pairings ||
+          Object.keys(body).some((k) => k !== "code" && k !== "run_limit")
+        )
+          throw invalid();
+        // C-707: the Agent limit for a new machine, 1 unless chosen.
+        const runLimit = "run_limit" in body ? body.run_limit : 1;
+        if (
+          typeof runLimit !== "number" ||
+          !Number.isSafeInteger(runLimit) ||
+          runLimit < 1
+        )
+          throw runLimitInvalid(undefined);
+        // Look up, create and claim in one synchronous turn: of two
+        // submissions of one code only the first gets a draft.
+        const found = this.pairings.lookup(body.code, member);
+        const form = pairingForm(
+          found.device,
           project,
-          member,
-          draft,
-          priorDigest,
-          expires: now + 86400_000,
-          phase: "preview",
-          steps: initialSteps(),
-          preview: preview(plan, now),
+          knownMcpUrl(host, project)?.mcp_url,
+        );
+        const maximum = this.max?.(form.machine_id) ?? DEFAULT_MAX_RUN_LIMIT;
+        if (runLimit > maximum) throw runLimitInvalid(maximum);
+        let s: Session;
+        try {
+          s = create(form);
+        } catch (e) {
+          // The code stays usable; the device facts let the owner fill the
+          // wizard by hand instead.
+          const code = safeError(e);
+          throw new HttpRejection(
+            e instanceof HttpRejection
+              ? e.status
+              : code === "worker_form_invalid" ||
+                  code === "worker_config_invalid"
+                ? 400
+                : 409,
+            e instanceof HttpRejection ? e.code : code,
+            e instanceof HttpRejection
+              ? e.message
+              : "配对设备的信息不能直接生成向导草稿，请在向导里补全后预览。",
+            { form },
+          );
+        }
+        this.pairings.claim(found, s.id);
+        s.pairing = {
+          id: found.id,
+          init: "waiting",
+          device: found.device,
+          run_limit: { value: runLimit, state: "pending" },
         };
-        audit("previewed", s);
-        this.sessions.set(s.id, s);
-        return sendJson(res, 201, { wizard: view(s) });
+        this.store.uow.run((tx) =>
+          machineAudit(tx, this.clock, "worker_wizard_pairing_claimed", {
+            member_id: member,
+            project_id: project,
+            machine_id: s.machine,
+            wizard_id: s.id,
+            pairing_id: found.id,
+          }),
+        );
+        return sendJson(res, 201, {
+          wizard: this.view(s),
+          device: found.device,
+        });
       }
+      if (!id) return sendJson(res, 201, { wizard: this.view(create(body)) });
       const s = this.sessions.get(id);
       if (!s || s.member !== member || s.project !== project) throw missing();
-      if (read) return sendJson(res, 200, { wizard: view(s) });
+      if (read) return sendJson(res, 200, { wizard: this.view(s) });
       const keys =
         action === "enable"
           ? ["allow_remote_launch", "preview_id"]
@@ -341,40 +729,10 @@ export class WorkerWizards {
         delete s.preview;
         s.phase = action === "enable" ? "enabled" : "ready";
       } else if (action === "run") {
-        if (!["ready", "failed", "passed"].includes(s.phase)) throw stale();
-        const steps = s.phase === "passed" ? initialSteps() : s.steps;
-        const check = checkWizard({
-          store: this.store,
-          checks: this.checks,
-          clock: this.clock,
-          host,
-          signal: this.signal,
-          draft: s.draft,
-          steps,
-          priorDigest: s.priorDigest,
-          authorize,
-          limit: effectiveRunLimit(this.store, s.machine, this.limit, this.max),
-          id,
-        });
-        s.steps = steps;
-        s.check_id = check.id;
-        s.phase = "running";
-        delete s.preview;
-        delete s.error;
-        const done = check.done.then(
-          (ok) => {
-            s.phase = ok ? "passed" : "failed";
-          },
-          (e) => {
-            s.phase = "failed";
-            s.error = safeError(e);
-          },
-        );
-        this.pending.add(done);
-        void done.then(() => this.pending.delete(done));
-        return sendJson(res, 202, { wizard: view(s) });
+        this.startCheck(s, authorize);
+        return sendJson(res, 202, { wizard: this.view(s) });
       }
-      return sendJson(res, 200, { wizard: view(s) });
+      return sendJson(res, 200, { wizard: this.view(s) });
     } catch (e) {
       if (e instanceof HttpRejection) throw e;
       const code = safeError(e);

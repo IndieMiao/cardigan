@@ -1,10 +1,15 @@
 import type { CommandState, ProjectId } from "@cardigan/domain";
-import { loadCommandState } from "@cardigan/mcp-server";
+import {
+  type CommandStateOptions,
+  loadCommandState,
+} from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 
 export type StateLoader = (
   tx: Parameters<typeof loadCommandState>[0],
   project: ProjectId,
+  project_settings?: CommandState["project_settings"],
+  options?: CommandStateOptions,
 ) => CommandState;
 
 /** One cache per tick, shared by routing, retry, maintenance and delivery. */
@@ -13,7 +18,10 @@ export function dispatchStateLoader(store: Store): StateLoader {
     ProjectId,
     { version: string; state: CommandState }
   >();
-  return (tx, project) => {
+  return (tx, project, project_settings, options) => {
+    // C-639: targeted loads may extend the hot history; the Store caches them.
+    if (project_settings || options?.targets?.length)
+      return loadCommandState(tx, project, project_settings, options);
     // Recheck inside every consuming transaction, including after awaits.
     // Relevant project/global writes (including other connections) refresh;
     // never reuse a pre-write snapshot for a claim, ACK or stop decision.

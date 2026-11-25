@@ -10,7 +10,7 @@ import {
   run,
 } from "../../domain/src/commands/test-fixtures.js";
 import { acquireMergeCheckCapacity } from "./merge-check-capacity.js";
-import { runCapacitySnapshot } from "./run-capacity.js";
+import { hasEarlierCapacityWait, runCapacitySnapshot } from "./run-capacity.js";
 
 let store: Store;
 beforeEach(() => {
@@ -92,7 +92,7 @@ test("C-296 absolute and limited occupancy share physical machine buckets across
 });
 
 test.each(["coder", "pm", "host_ops"])(
-  "C-296 %s startup and stop reservations count once, with the same exemption as live Runs",
+  "C-296 %s startup and stop reservations of unfinished Runs count once, with the same exemption as live Runs; C-620 an ended turn's idle session counts none",
   (role) => {
     const owner = role === "coder" ? assignment(1) : standing(1, role);
     const limited = role === "coder" ? 1 : 0;
@@ -154,12 +154,23 @@ test.each(["coder", "pm", "host_ops"])(
       { ...execution, status: "queued" },
       {
         ...execution,
-        status: "completed",
         inactivity_stop: {
           attempt_id: "stop",
           runtime_ref: ref,
           stopping: true,
           lease_until: now,
+        },
+      },
+      {
+        // Cancelled from outside under a pending stop: may still execute.
+        ...execution,
+        status: "cancelled",
+        dispatch_stop: {
+          attempt_id: execution.trigger_event_id,
+          runtime_ref: ref,
+          stopping: true,
+          lease_until: now,
+          reason: "dispatch_timeout",
         },
       },
       {
@@ -188,6 +199,32 @@ test.each(["coder", "pm", "host_ops"])(
         expect(fallback.agentOccupied).toEqual(cached.agentOccupied);
       });
     }
+    // C-620: the turn ended with a business result. Its session may still be
+    // stopping or awaiting recycle, but it holds no admission or resource slot.
+    for (const variant of [
+      {
+        ...execution,
+        status: "completed",
+        inactivity_stop: {
+          attempt_id: "stop",
+          runtime_ref: ref,
+          stopping: true,
+          lease_until: now,
+        },
+      },
+      {
+        ...execution,
+        status: "failed",
+        launch_publication: {
+          generation: "g",
+          phase: "stopping",
+        } as unknown as Run["launch_publication"],
+      },
+    ] as Run[]) {
+      store.uow.run((tx) => tx.runs.put("first", variant));
+      expect(counts()).toEqual([0, 0, 0]);
+      expect(slots()).toEqual([0, 0, 0]);
+    }
     store.uow.run((tx) =>
       tx.runs.put("first", { ...execution, status: "completed" }),
     );
@@ -212,7 +249,8 @@ test.each(["coder", "pm", "host_ops"])(
     });
     expect(counts()).toEqual([1, limited, limited]); // intent and Run overlap
     expect(slots()).toEqual([limited, limited, 0]);
-    // Reporting completion does not confirm exit for the pending stop.
+    // C-620: once the turn ends, the pending stop (unconfirmed exit, e.g. a
+    // recycle that cannot be proven on a remote worker) holds no slot.
     store.uow.run((tx) =>
       tx.runs.put("first", {
         ...execution,
@@ -220,8 +258,8 @@ test.each(["coder", "pm", "host_ops"])(
         status: "completed",
       }),
     );
-    expect(counts()).toEqual([1, limited, limited]);
-    expect(slots()).toEqual([limited, limited, 0]);
+    expect(counts()).toEqual([0, 0, 0]);
+    expect(slots()).toEqual([0, 0, 0]);
     store.uow.run((tx) =>
       tx.events.append("first", {
         id: tx.ids.nextEventId(),
@@ -343,4 +381,80 @@ test("C-315 queue cache tracks formal deliveries, rollback and repository fallba
     });
     expect(fallback.queue).toEqual(runCapacitySnapshot(store, tx).queue);
   });
+});
+
+test("C-620 an earlier waiter whose owner cannot start a session now does not hold the queue; it regains its place when the fence clears", () => {
+  const waiting = (n: number): Run => ({
+    ...run(n),
+    status: "queued",
+    queue_reason: "concurrency_limit",
+  });
+  const head = assignment(1);
+  seed(head, waiting(1));
+  seed(assignment(2), waiting(2));
+  const blocks = () =>
+    store.uow.read((tx) => {
+      const { queue } = runCapacitySnapshot(store, tx);
+      const later = queue.find((e) => e.assignment_id === "A-2");
+      if (!later) throw new Error("Missing later waiter");
+      return hasEarlierCapacityWait(tx, queue, later, "local", new Map(), now);
+    });
+  expect(blocks()).toBe(true);
+  const put = (a: Assignment) =>
+    store.uow.run((tx) => tx.assignments.put("first", a));
+  const ref = {
+    machine_id: "local",
+    runtime_machine: "local",
+    terminal_ref: "t",
+    agent_name: "a",
+  };
+  // Unconfirmed recycle of its old session.
+  put({
+    ...head,
+    runtime_ref: ref,
+    idle_retirement: {
+      phase: "stopping",
+      runtime_ref: ref,
+      started_at: now,
+      threshold_minutes: 30,
+      failures: 0,
+    },
+  });
+  expect(blocks()).toBe(false);
+  put(head);
+  expect(blocks()).toBe(true);
+  // Another of its Runs is still active.
+  store.uow.run((tx) =>
+    tx.runs.put("first", { ...run(3, 1), status: "running" }),
+  );
+  expect(blocks()).toBe(false);
+  store.uow.run((tx) =>
+    tx.runs.put("first", { ...run(3, 1), status: "completed" }),
+  );
+  expect(blocks()).toBe(true);
+  // A pending host operation (exit not confirmed).
+  const action = store.uow.run((tx) => {
+    const id = tx.ids.nextEventId();
+    tx.events.append("first", {
+      id,
+      seq: tx.ids.nextEventSequence("first"),
+      type: "host_ops_action_taken",
+      actor: { kind: "system", project_id: "first" },
+      created_at: now,
+      payload: { execution: true, assignment_id: head.id, runtime_ref: ref },
+    });
+    return id;
+  });
+  expect(blocks()).toBe(false);
+  store.uow.run((tx) =>
+    tx.events.append("first", {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence("first"),
+      type: "host_ops_action_finished",
+      actor: { kind: "system", project_id: "first" },
+      created_at: now,
+      payload: { action_id: action },
+    }),
+  );
+  expect(blocks()).toBe(true);
 });
