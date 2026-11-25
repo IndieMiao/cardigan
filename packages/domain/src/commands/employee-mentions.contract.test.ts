@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import { type Employee, postComment } from "../index.js";
+import { commentMentions } from "../mentions.js";
 import {
   actor,
   fixture,
@@ -136,4 +137,41 @@ test("names containing punctuation are matched literally; role and explicit targ
     "@coder",
     "@A.* (开发)",
   ]);
+});
+
+test("C-751: names in code blocks, inline code and quote lines are not mentions", () => {
+  const body = [
+    "> @A-7 请处理（引用原评论）",
+    "  > > @诸葛亮 嵌套引用",
+    "```",
+    "@A-8 @reviewer",
+    "```",
+    "",
+    "    @A-9 缩进代码",
+    "",
+    "行内 `@Mary Jane` 和 [链接](mailto:x@A-10) 不算；",
+    "请 @A-2 和 @诸葛亮 处理",
+  ].join("\n");
+  expect(comment(body).data?.mentions).toEqual(["@A-2", "@诸葛亮"]);
+  // The text itself is kept as written.
+  expect(comment(body).data?.body).toBe(body);
+});
+
+test("C-751: the explicit mentions field still works for anything quoted in the body", () => {
+  expect(
+    comment("> @A-7 请处理\n`@reviewer`", ["A-7", "reviewer"]).data?.mentions,
+  ).toEqual(["A-7", "reviewer"]);
+});
+
+test("C-751: a comment and its story answers are read part by part", () => {
+  // An unclosed fence in one part never hides a name in the next.
+  expect(
+    commentMentions(
+      ["```\n@A-8 还没闭合", "请 @A-2 看", "> @A-9"],
+      [],
+      employees,
+      ["reviewer"],
+    ),
+  ).toEqual(["@A-2"]);
+  expect(commentMentions("```\n@A-8\n请 @A-2", [], employees, [])).toEqual([]);
 });

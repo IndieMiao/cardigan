@@ -882,7 +882,8 @@ export function managementTools(clock?: Clock) {
     ),
     defineTool({
       name: "post_comment",
-      description: "Post a comment and references.",
+      description:
+        "Post a comment and references. 系统只按点名通知：需要别人行动、决定或回复的内容必须点名具体对象，在 `mentions` 填 Assignment 编号（A-n）或员工名，或在正文写 @A-n、@员工名；不点名的评论只是记录，不保证有人看到。被阻塞用 report_blocker，需要人操作用 request_human_action。写在代码块（含行内代码）或引用块（以 > 开头的行）里的 @ 不生效。",
       input: z.object({ ...schemas.post_comment, idempotency_key }),
       handler: ({ idempotency_key, ...params }, context) =>
         executeCommand(
