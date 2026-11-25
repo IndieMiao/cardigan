@@ -11,6 +11,7 @@ import {
   flowAtLeast,
   maintainPmCoordination,
   type ProjectId,
+  preparationAwaitsDeployment,
   type Result,
   refreshCancelledHumanActions,
   refreshCardDependencies,
@@ -19,6 +20,7 @@ import {
   refreshTestReviewLimits,
   remindSystemWaits,
   resumeWorkWaits,
+  retryPreparationAfterDeployment,
   type SystemReviewLimitOutcome,
   systemCompleteCard,
   validRoleRulePaths,
@@ -33,7 +35,7 @@ import {
   loadCommandState,
   persistEffect,
 } from "@cardigan/mcp-server";
-import type { Store } from "@cardigan/store";
+import { latestReadyDeploymentSha, type Store } from "@cardigan/store";
 import type { StateLoader } from "./dispatch-state.js";
 import type { MergeGit } from "./git.js";
 
@@ -139,6 +141,14 @@ export function runSystemRules(
         ports,
       ),
     (state, ports) => maintainPmCoordination(state, actor, ports),
+    // C-738: once per ready deployment, retry preparation failures from before it.
+    (state, ports) => {
+      if (!preparationAwaitsDeployment(state, clock.now())) return undefined;
+      const sha = latestReadyDeploymentSha(store.database);
+      return sha
+        ? retryPreparationAfterDeployment(state, actor, { sha }, ports)
+        : undefined;
+    },
   ]);
   // Order and candidates come from the state at the start of each loop; every
   // command rechecks its item against the state it actually runs on.

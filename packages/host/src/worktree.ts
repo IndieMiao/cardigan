@@ -189,6 +189,18 @@ export function readonlyWorktreeTarget(
   });
 }
 
+/**
+ * C-738: a preparation failure raised before any Git or runtime command ran,
+ * e.g. the readonly target is not readable yet. Nothing can still be executing.
+ */
+export class PreparationNotStarted extends Error {
+  readonly executionExited = true;
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "PreparationNotStarted";
+  }
+}
+
 /** Shared by the CLI start and server start/wake paths; all Agent Git stays on its entry. */
 export function worktreeProvider(
   defaultExecution: ExecutionConfig,
@@ -369,6 +381,15 @@ export async function prepareRoleWorktree(
   const source = host.store.getProject(project)?.repo_path;
   if (!source)
     throw new Error(`Project ${project} has no registered repository`);
+  // C-738: the target is read before any Git command starts, so its failure
+  // carries proof that nothing is still executing (eligible for a retry).
+  let target: ReturnType<typeof readonlyWorktreeTarget> | undefined;
+  if (entities.role.worktree === "readonly")
+    try {
+      target = readonlyWorktreeTarget(host.store, project, entities.assignment);
+    } catch (error) {
+      throw new PreparationNotStarted(error);
+    }
   const worktree = await worktreeProvider(
     host.execution,
     host.runtime,
@@ -376,9 +397,7 @@ export async function prepareRoleWorktree(
     project_id: project,
     source_repo: source,
     ...entities,
-    ...(entities.role.worktree === "readonly"
-      ? readonlyWorktreeTarget(host.store, project, entities.assignment)
-      : { work_item: entities.workItem }),
+    ...(target ?? { work_item: entities.workItem }),
   });
   recordArtifactCheckout(host.store, project, assignment, worktree);
   return worktree;

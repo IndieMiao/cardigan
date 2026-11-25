@@ -10,7 +10,11 @@ export interface PreparationFailure {
     | "git_timeout"
     | "git_failed"
     | "runtime_failed"
-    | "prepare_failed";
+    | "prepare_failed"
+    /** C-738: explicit permission or path-safety refusal; never retried. */
+    | "permission_denied"
+    /** C-738: missing or mismatched host configuration; never retried. */
+    | "config_error";
   readonly exit_code?: number;
   /** First line only, credentials redacted, bounded length. */
   readonly message: string;
@@ -21,6 +25,10 @@ const LOCK_CONFLICT =
   /\.lock'?:? File exists|cannot lock ref|Unable to create '[^']*\.lock'|could not lock|failed to lock|another git process seems to be running|\.lock'?[:：]\s*文件已存在|无法锁定|另一个 git 进程/iu;
 const NETWORK =
   /Could not resolve host|Connection (?:refused|reset|timed out|closed)|early EOF|remote end hung up|unable to access|RPC failed|Network is unreachable|ssh: connect to host|Broken pipe|Temporary failure in name resolution|远程意外挂断|无法访问/iu;
+
+/** Host configuration the launch cannot repair by trying again. */
+const CONFIG_ERROR =
+  /has no registered repository|Workspace target does not match Assignment|requires a configured worker Git helper|worktree requires the Agent execution entry/u;
 
 const SECRET_KEY =
   "[\\w.-]*(?:token|secret|password|passwd|pwd|api[_-]?key|private[_-]?key|authorization|auth|credential|cookie|header)[\\w.-]*";
@@ -118,7 +126,8 @@ export function describePreparationFailure(error: unknown): PreparationFailure {
       text,
     )
   )
-    return shape("prepare_failed", false);
+    return shape("permission_denied", false);
+  if (CONFIG_ERROR.test(text)) return shape("config_error", false);
   if (LOCK_CONFLICT.test(text))
     return shape("git_lock_conflict", e.executionExited !== false);
   if (NETWORK.test(text))

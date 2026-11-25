@@ -23,6 +23,7 @@ import {
 } from "../host-ops.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { MCP_SESSION_FAILURE } from "../mcp-session.js";
+import { preparationRetryWaiting } from "../preparation-retry.js";
 import { providerStarted } from "../provider-start.js";
 import { supersededRetirement } from "../retirement-session.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
@@ -502,8 +503,7 @@ export function dispatchRun(
       "Launch stop is in progress",
     );
     ensure(
-      !stored.preparation_retry ||
-        Date.parse(d.now) >= Date.parse(stored.preparation_retry.ready_at),
+      !preparationRetryWaiting(stored, d.now),
       "illegal_transition",
       "工作目录准备重试正在退避等待",
     );

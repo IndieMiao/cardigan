@@ -717,6 +717,11 @@ export interface Run {
   readonly preparation_retry?: {
     readonly source_run_id: RunId;
     readonly ready_at: Timestamp;
+    /** C-738: a later ready deployment ended the backoff early, once. */
+    readonly expedited?: {
+      readonly at: Timestamp;
+      readonly deployment: string;
+    };
   };
   /** Explicit producer wait, consumed by host maintenance once its condition is met. */
   readonly wait_for?: import("./work-wait.js").RunWait;
