@@ -77,6 +77,8 @@ export type RuleId =
   | "story/decompose"
   | "story/summary"
   | "story/confirm"
+  | "story/proposal confirmed"
+  | "story/cancelled"
   | "6.4/card needs planning"
   | "6.4/work-item comment"
   | "6.4/card comment without mention"
