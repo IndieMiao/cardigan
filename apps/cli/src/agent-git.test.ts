@@ -783,13 +783,13 @@ process.exit(child.status ?? 98);
   });
   test("synthetic Darwin writer and Linux reviewer clone, build and return deliveries on independent disks", async () => {
     const bin = join(root, "default-bin");
+    // C-756: ~100 remote calls; a shell fixture avoids one Node start per call.
+    // Like ssh, run the remote command (last argument) and return its status.
     await writeFile(
       join(bin, "ssh"),
-      `#!/usr/bin/env node
-const {spawnSync}=require('node:child_process');
-const args=process.argv.slice(2), command=args.at(-1);
-const result=spawnSync('sh',['-c',command],{stdio:'inherit'});
-process.exit(result.status ?? 98);
+      `#!/bin/sh
+for command; do :; done
+exec sh -c "$command"
 `,
       { mode: 0o700 },
     );
