@@ -1376,6 +1376,16 @@ export interface MachineCapabilityView {
     | { readonly kind: "search"; readonly locations: readonly string[] };
 }
 
+/** C-608 readiness patrol: fixed text per item; never worker output. */
+export interface MachineReadinessView {
+  readonly checked_at: string;
+  readonly items: readonly {
+    readonly key: string;
+    readonly status: "ok" | "warning" | "repaired" | "failed" | "unknown";
+    readonly detail: string;
+  }[];
+}
+
 export interface ExecutionMachine {
   readonly id: string;
   readonly label: string;
@@ -1431,6 +1441,9 @@ export interface MachineBindingView {
     readonly checked_at: string;
     readonly blockers: readonly string[];
     readonly available: boolean;
+    /** C-608: non-blocking findings; older servers omit them. */
+    readonly warnings?: readonly string[];
+    readonly readiness?: MachineReadinessView;
   } | null;
   /** The latest explicitly requested check (Web or CLI). */
   readonly last_requested_check: {

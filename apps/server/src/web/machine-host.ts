@@ -4,6 +4,7 @@ import {
   agentToolsCommandVisible,
   type CheckKind,
   type CheckResult,
+  helperMismatch,
   loadRuntimeWorkers,
   MachineCheckJournal,
   manualWorkerUpgradeAllowed,
@@ -230,9 +231,16 @@ export function machineHost(
           result.health?.evidence_ref !== `machine-observation:${observationId}`
         )
           return { status: "failed", failed_steps: ["observation"] };
+        // A helper confirmation needs the current helper, not just a compatible one.
+        const helper = confirmation
+          ? (result.health.warnings ?? []).filter(helperMismatch)
+          : [];
         return {
-          status: result.health.status === "passed" ? "passed" : "failed",
-          failed_steps: result.health.blockers,
+          status:
+            result.health.status === "passed" && !helper.length
+              ? "passed"
+              : "failed",
+          failed_steps: [...result.health.blockers, ...helper],
           ...(result.maintenance ? { maintenance: result.maintenance } : {}),
           // C-599: a CLI check that joins this one reads the same tools outcome.
           ...(result.agent_tools ? { agent_tools: result.agent_tools } : {}),

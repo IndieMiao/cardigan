@@ -107,7 +107,11 @@ import {
   type ReadResourceLimits,
   runCapacitySnapshot,
 } from "./run-capacity.js";
-import { resourceEntry, verifiedLocalLaunch } from "./run-resource-worker.js";
+import {
+  resourceEntry,
+  sessionFilesRevision,
+  verifiedLocalLaunch,
+} from "./run-resource-worker.js";
 import {
   assignmentResourceKeys,
   unclaimedResourceKeys,
@@ -1694,11 +1698,14 @@ export function sessionFingerprint(
   catalog: string | undefined,
   role: Pick<Role, "worktree">,
   assignment: Pick<Assignment, "scope">,
+  files: string | undefined = sessionFilesRevision(),
 ): string | undefined {
   if (catalog === undefined) return undefined;
-  return role.worktree === "readonly" && assignment.scope === "work_item"
-    ? `${catalog}+${VERIFIER_LAUNCH_REVISION}`
-    : catalog;
+  const base =
+    role.worktree === "readonly" && assignment.scope === "work_item"
+      ? `${catalog}+${VERIFIER_LAUNCH_REVISION}`
+      : catalog;
+  return files ? `${base}+${files}` : base;
 }
 
 /**

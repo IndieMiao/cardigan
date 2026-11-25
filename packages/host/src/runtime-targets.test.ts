@@ -22,9 +22,15 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { governHcClient } from "../../runtime-herdr/src/call-queue.js";
 import { HerdrRuntime } from "../../runtime-herdr/src/index.js";
-import { observeRegisteredMachine, RuntimeTargets } from "./runtime-targets.js";
+import {
+  observeRegisteredMachine,
+  RuntimeTargets,
+  resetLaunchRefreshes,
+} from "./runtime-targets.js";
 import type { RuntimeWorker } from "./runtime-workers-config.js";
+import { digestMismatch, protocolMismatch } from "./worker-helper-release.js";
 import { WorkerMcpError } from "./worker-mcp.js";
+import { upgradeIdentity } from "./worker-upgrade-enrollment.js";
 import { upgradeHold } from "./worker-upgrade-gate.js";
 
 const value = <T>(result: RuntimeResult<T>): T => {
@@ -883,6 +889,98 @@ test.each([
   expect(calls.mock.calls.some((c) => c[1] === "provision")).toBe(false);
 });
 
+test("C-608: a same-protocol helper digest mismatch is a warning and launch proceeds", async () => {
+  readiness.mockResolvedValue([digestMismatch]);
+  expect(value(await router.check("fixture", "worker-a"))).toEqual({
+    machine_id: "worker-a",
+    blockers: [],
+    warnings: [digestMismatch],
+    launch_enabled: true,
+  });
+  expect(
+    (await router.forLaunch("fixture", assignment("worker-a"))).machine.id,
+  ).toBe("worker-a");
+  readiness.mockResolvedValue([protocolMismatch(1)]);
+  await expect(
+    router.forLaunch("fixture", assignment("worker-a")),
+  ).rejects.toThrow(protocolMismatch(1));
+});
+
+test("C-608: an enrolled worker upgrades through the patrol path before launch, at most once per window", async () => {
+  resetLaunchRefreshes();
+  const options = {
+    execution: { mode: "local" as const, dataDir: root },
+    store,
+    project: "fixture",
+    workers: () => workers,
+    factory,
+    workerReadiness: readiness,
+    workerMcpReachability: mcpReachability,
+    env: { CARDIGAN_CONFIG_DIR: root },
+  };
+  const plain = value(await RuntimeTargets.create(options));
+  const unenrolled = vi.spyOn(plain, "refreshMachine");
+  readiness.mockResolvedValue([protocolMismatch(1)]);
+  await expect(
+    plain.forLaunch("fixture", assignment("worker-a")),
+  ).rejects.toThrow(protocolMismatch(1));
+  expect(unenrolled).not.toHaveBeenCalled();
+
+  await writeFile(upgradeIdentity(root, "fixture", "worker-a"), "fixture", {
+    mode: 0o600,
+  });
+  const enrolled = value(await RuntimeTargets.create(options));
+  const refresh = vi
+    .spyOn(enrolled, "refreshMachine")
+    .mockImplementation(async () => {
+      readiness.mockResolvedValue([]);
+      return { capabilities: [], health: null };
+    });
+  expect(
+    (await enrolled.forLaunch("fixture", assignment("worker-a"))).machine.id,
+  ).toBe("worker-a");
+  expect(refresh).toHaveBeenCalledOnce();
+  expect(refresh).toHaveBeenCalledWith("fixture", "worker-a");
+  readiness.mockResolvedValue([protocolMismatch(1)]);
+  // The final check before an adapter starts probes live (C-642 cache bypassed).
+  await expect(
+    enrolled.forLaunch("fixture", assignment("worker-a"), undefined, false),
+  ).rejects.toThrow(protocolMismatch(1));
+  expect(refresh).toHaveBeenCalledOnce();
+  resetLaunchRefreshes();
+});
+
+test("C-608: an MCP timeout at launch refreshes readiness in the background once per window", async () => {
+  resetLaunchRefreshes();
+  const server = value(
+    await RuntimeTargets.create({
+      execution: { mode: "local", dataDir: root },
+      store,
+      project: "fixture",
+      workers: () => workers,
+      factory,
+      workerReadiness: readiness,
+      workerMcpReachability: mcpReachability,
+      refreshAfterLaunchFailure: true,
+    }),
+  );
+  const refresh = vi
+    .spyOn(server, "refreshMachine")
+    .mockResolvedValue({ capabilities: [], health: null });
+  mcpReachability.mockRejectedValue(new WorkerMcpError("mcp_timeout"));
+  for (let i = 0; i < 2; i++)
+    await expect(
+      server.forLaunch("fixture", assignment("worker-a")),
+    ).rejects.toThrow("mcp_timeout");
+  expect(refresh).toHaveBeenCalledOnce();
+  // The ordinary router (CLI and tests) never starts background work.
+  await expect(
+    router.forLaunch("fixture", assignment("worker-b")),
+  ).rejects.toThrow("mcp_timeout");
+  expect(refresh).toHaveBeenCalledOnce();
+  resetLaunchRefreshes();
+});
+
 test("checks are live, and disabled launch is distinct from a passing machine check", async () => {
   const binding = router.resolve("fixture", "worker-a").execution.target;
   workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
@@ -1492,14 +1590,42 @@ test.each([
   },
 );
 
-test("a manual confirmation may ignore drain but not a failed automatic upgrade", async () => {
+test("C-608: a manual helper confirmation still needs the current helper digest", async () => {
+  const project = "fixture",
+    id = "worker-a";
+  store.uow.run((tx) =>
+    tx.machines.put(project, { ...machine(id, id), status: "draining" }),
+  );
+  readiness.mockResolvedValue([digestMismatch]);
+  const observed = await observeRegisteredMachine(
+    {
+      store,
+      project,
+      machine: id,
+      observationId: "confirm-digest",
+      helperConfirmation: {
+        binding:
+          router.resolve(project, id).execution.target?.fingerprint ??
+          "missing",
+      },
+      catalog: () => [],
+    },
+    () => router,
+  );
+  expect(observed.maintenance).toEqual({
+    status: "failed",
+    failed_steps: [digestMismatch],
+  });
+});
+
+test("a manual confirmation may ignore drain but not an automatic upgrade in progress", async () => {
   const project = "fixture",
     id = "worker-a";
   store.uow.run((tx) => {
     tx.machines.put(project, { ...machine(id, id), status: "draining" });
     store.database
       .prepare(
-        "INSERT INTO worker_helper_upgrades (project_id,machine_id,release_key,state) VALUES (?,?,?,'failed')",
+        "INSERT INTO worker_helper_upgrades (project_id,machine_id,release_key,state) VALUES (?,?,?,'installing')",
       )
       .run(project, id, "fixture-release");
   });
