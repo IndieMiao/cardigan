@@ -1879,6 +1879,11 @@ export function needsYou(
       ...proposal,
       waited_ms: waitedMs(proposal.submitted_at, now) ?? null,
     })),
+    // C-750: finished human_mark_done cards waiting for the owner to close.
+    cards_to_close: data.cards_to_close.map((item) => ({
+      ...item,
+      waited_ms: item.since ? (waitedMs(item.since, now) ?? null) : null,
+    })),
     waiting_merge_checks_count: data.waiting_merge_checks_count,
     waiting_merge_check_items: data.waiting_merge_check_items,
     // C-212: deferred items; the page shows them folded under "稍后".

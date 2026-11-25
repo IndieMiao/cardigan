@@ -1873,41 +1873,47 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       throw new CliError((error as Error).message, EXIT.usage);
     }
     const now = systemClock.now();
-    const { decisions, actions, later, incidents, noticeList, held, waiting } =
-      store.uow.read((tx) => {
-        const state = loadCommandState(tx, project_id, {
-          merge_gate_enabled: gate.status !== "disabled",
-        });
-        const needs = unwrap(listNeedsYou(state, actor)).data;
-        return {
-          held: needs.pm_held_merges,
-          waiting: needs.waiting_merge_check_items,
-          decisions: needs.decisions.map((q) => ({
-            ...q,
-            merge_noop:
-              !!q.card_id &&
-              q.kind === "approve" &&
-              "delivery_id" in q.target &&
-              hasVerifiedMergeNoop(
-                state.events,
-                q.card_id,
-                q.target.delivery_id,
-              ),
-          })),
-          actions: needs.human_actions,
-          // C-212: deferred items, listed only as one folded line.
-          later: needs.later,
-          // Same source as the Workbench 知会 section (§7.4): newest first.
-          noticeList: notices(state),
-          incidents: tx.assignments.list(project_id).filter(
-            (a) =>
-              a.status === "active" &&
-              ["lost", "unknown"].includes(a.runtime_state) &&
-              // C-228: same grace period as the Workbench Needs You.
-              !runtimeUnknownDeferred(state.events, a, now, unknownGraceMs),
-          ),
-        };
+    const {
+      decisions,
+      actions,
+      toClose,
+      later,
+      incidents,
+      noticeList,
+      held,
+      waiting,
+    } = store.uow.read((tx) => {
+      const state = loadCommandState(tx, project_id, {
+        merge_gate_enabled: gate.status !== "disabled",
       });
+      const needs = unwrap(listNeedsYou(state, actor)).data;
+      return {
+        held: needs.pm_held_merges,
+        waiting: needs.waiting_merge_check_items,
+        decisions: needs.decisions.map((q) => ({
+          ...q,
+          merge_noop:
+            !!q.card_id &&
+            q.kind === "approve" &&
+            "delivery_id" in q.target &&
+            hasVerifiedMergeNoop(state.events, q.card_id, q.target.delivery_id),
+        })),
+        actions: needs.human_actions,
+        // C-750: finished cards waiting for the owner to mark done.
+        toClose: needs.cards_to_close,
+        // C-212: deferred items, listed only as one folded line.
+        later: needs.later,
+        // Same source as the Workbench 知会 section (§7.4): newest first.
+        noticeList: notices(state),
+        incidents: tx.assignments.list(project_id).filter(
+          (a) =>
+            a.status === "active" &&
+            ["lost", "unknown"].includes(a.runtime_state) &&
+            // C-228: same grace period as the Workbench Needs You.
+            !runtimeUnknownDeferred(state.events, a, now, unknownGraceMs),
+        ),
+      };
+    });
 
     // C-674: numbers read outside the project carry its code (`CDG-C-34`).
     const code = store.projectCode(project_id);
@@ -1957,6 +1963,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
     if (
       decisions.length === 0 &&
       actions.length === 0 &&
+      toClose.length === 0 &&
       incidents.length === 0 &&
       noticeList.length === 0
     ) {
@@ -2060,6 +2067,19 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
           ].join("\n"),
         );
       }
+    }
+    if (toClose.length > 0) {
+      lines.push(`待你标记完成（${toClose.length}）`);
+      for (const item of toClose)
+        lines.push(
+          [
+            `  ${full(item.card_id)}  ${item.card_title}`,
+            item.close_request
+              ? `    结项说明：${item.close_request.reason}`
+              : `    ${item.required_work_items} 个必需工作项已全部通过`,
+            `    标记完成：cardigan card done ${full(item.card_id)} --result <文字>`,
+          ].join("\n"),
+        );
     }
     if (later.length > 0)
       lines.push(

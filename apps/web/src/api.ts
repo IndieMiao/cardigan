@@ -1019,6 +1019,20 @@ export interface NeedsStoryProposal {
     readonly owner_role: string;
   }[];
 }
+/** C-750: a finished card waiting for the owner to mark it done. */
+export interface NeedsCardToClose {
+  readonly card_id: string;
+  readonly card_title: string;
+  readonly template: string;
+  readonly required_work_items: number;
+  readonly close_request: {
+    readonly reason: string;
+    readonly set_by: string;
+    readonly set_at: string;
+  } | null;
+  readonly since: string | null;
+  readonly waited_ms: number | null;
+}
 export interface StoryConfirmation {
   readonly card_id: string;
   readonly version: number;
@@ -1028,6 +1042,8 @@ export interface StoryConfirmation {
 export interface NeedsPage {
   /** C-503: older servers omit it. */
   readonly story_proposals?: readonly NeedsStoryProposal[];
+  /** C-750: older servers omit it. */
+  readonly cards_to_close?: readonly NeedsCardToClose[];
   readonly waiting_merge_checks_count?: number;
   /** C-171: the confirmations the waiting summary counts (queued or running). */
   readonly waiting_merge_check_items?: readonly {

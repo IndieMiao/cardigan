@@ -640,6 +640,14 @@ const schemas = {
       .describe(
         "PM 点名保护：保留本卡已释放指派的运行目录，不自动回收（已完成的卡也可设）；传 null 解除。不能与其它字段混用",
       ),
+    close_request: z
+      .object({ reason: text })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "请所有者结卡：人标记完成模板的非需求卡做完后，写明理由，进所有者 Needs You 的“待你标记完成”；只在卡现在就能标记完成时可用，不代为完成；传 null 撤回。不能与其它字段混用",
+      ),
     hold: z
       .object({ reason: text, resume_condition: text })
       .strict()
@@ -1057,7 +1065,7 @@ export function managementTools(clock?: Clock) {
     defineTool({
       name: "update_card",
       description:
-        "Update card metadata or planning state, register its repository and no-merge start point, or one pre-merge check (pre_merge_check).",
+        "Update card metadata or planning state, register its repository and no-merge start point, or one pre-merge check (pre_merge_check); close_request asks the owner to mark a finished card done.",
       input: z.object({ ...schemas.update_card, idempotency_key }),
       handler: ({ idempotency_key, ...params }, context) =>
         executeCommand(

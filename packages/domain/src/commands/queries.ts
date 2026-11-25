@@ -52,6 +52,7 @@ import {
   latestCardTemplate,
   requiresUiStateAndSave,
 } from "../templates.js";
+import { cardsAwaitingOwnerClose } from "./card-close.js";
 import { dependencyState } from "./card-dependencies.js";
 import {
   type CommandDraft,
@@ -779,6 +780,7 @@ export function listNeedsYouCounts(
       (h) => h.triage !== "host" && !isOperatorAction(h),
     ).length;
     const attention = data.incidents.length + data.attention.length;
+    const toClose = data.cards_to_close.length;
     const noticeList = notices(state);
     const unread = noticeList.filter((n) => !n.read).length;
     return {
@@ -786,6 +788,7 @@ export function listNeedsYouCounts(
         data.decisions.length +
         data.story_proposals.length +
         humanActions +
+        toClose +
         attention,
       tabs: {
         decisions: { count: decisionCount, attention: decisionCount },
@@ -796,10 +799,14 @@ export function listNeedsYouCounts(
         actions: {
           count:
             data.human_actions.length +
+            toClose +
             attention +
             data.system_rule_attention.length,
           attention:
-            humanActions + attention + data.system_rule_attention.length,
+            humanActions +
+            toClose +
+            attention +
+            data.system_rule_attention.length,
         },
         later: { count: data.later.length, attention: 0 },
         notices: { count: noticeList.length, attention: unread },
@@ -1067,6 +1074,8 @@ function selectNeedsYou<T>(
     // C-503: the current, unconfirmed proposal of each open story waits on the
     // human's one-click confirmation; no decision or default stands in for it.
     story_proposals: includes("decisions") ? pendingStoryProposals(d) : [],
+    // C-750: finished human_mark_done cards waiting for the owner to close.
+    cards_to_close: includes("actions") ? cardsAwaitingOwnerClose(d) : [],
     waiting_merge_checks_count: includes("merges") ? humanWaiting.length : 0,
     // C-171: which confirmations the summary counts, so the human can open them.
     waiting_merge_check_items: (includes("merges") ? humanWaiting : []).map(

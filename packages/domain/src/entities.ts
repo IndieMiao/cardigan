@@ -158,6 +158,13 @@ export interface CardRunDirKeep {
   readonly set_at: Timestamp;
 }
 
+/** C-750: PM asks the owner to mark a finished human_mark_done card done. */
+export interface CardCloseRequest {
+  readonly reason: string;
+  readonly set_by: Author;
+  readonly set_at: Timestamp;
+}
+
 /** New UI cards explicitly distinguish display-only work from a write contract. */
 export type UiStateAndSave =
   | "无写入"
@@ -218,6 +225,11 @@ export interface Card {
    * Assignments are never reclaimed automatically while it is set.
    */
   readonly keep_run_dirs?: CardRunDirKeep;
+  /**
+   * C-750: PM's closing note for the owner's "待你标记完成" item. Listed only
+   * while the card can be marked done; never marks it done by itself.
+   */
+  readonly close_request?: CardCloseRequest;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
   /** The replacement card, distinct from other related cards. */
   readonly superseded_by?: CardId;
