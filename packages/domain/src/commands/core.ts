@@ -158,6 +158,7 @@ type CommandName =
   | "auto_assign_verifier"
   | "auto_assign_producer"
   | "resume_work_waits"
+  | "start_dependency_ready_run"
   | "maintain_pm_coordination"
   | "recover_standing_pm"
   | "apply_auto_risk_tags"
@@ -335,6 +336,7 @@ export class CommandDraft {
       "auto_assign_verifier",
       "auto_assign_producer",
       "resume_work_waits",
+      "start_dependency_ready_run",
       "maintain_pm_coordination",
       "recover_standing_pm",
       "apply_auto_risk_tags",

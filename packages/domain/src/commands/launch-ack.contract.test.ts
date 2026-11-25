@@ -13,6 +13,7 @@ import {
   type Result,
   type Run,
   recordRunAckRefusal,
+  startDependencyReadyRun,
   submitDelivery,
   submitReview,
   toolNames,
@@ -360,10 +361,7 @@ test("C-735: a Run woken before its dependencies finish starts as a discussion a
   expect(item(a).status).toBe("todo");
 });
 
-test("C-735: once the dependency is accepted the same Assignment's next Run starts the item", async () => {
-  const a = dependentAssignment();
-  stop(start(a, dependentRef), a);
-  expect(item(a).status).toBe("todo");
+async function acceptDependency() {
   const producing = start();
   const delivery = await deliver();
   stop(producing);
@@ -387,12 +385,112 @@ test("C-735: once the dependency is accepted the same Assignment's next Run star
   );
   stop(reviewing, f.reviewer);
   expect(item().status).toBe("accepted");
+}
+
+test("C-735: once the dependency is accepted the same Assignment's next Run starts the item", async () => {
+  const a = dependentAssignment();
+  stop(start(a, dependentRef), a);
+  expect(item(a).status).toBe("todo");
+  await acceptDependency();
   const r = commit(dispatch(commit(queue(a)), dependentRef));
   const acknowledged = value(ack(r, a));
   expect(acknowledged.events.at(-1)?.payload).not.toHaveProperty(
     "dependency_wait",
   );
   f.state = apply(f.state, acknowledged);
+  expect(item(a).status).toBe("in_progress");
+});
+
+const later = (seconds: number) =>
+  new Date(Date.parse(now) + seconds * 1000).toISOString();
+const startReady = (r: Run, by: Actor = system) =>
+  startDependencyReadyRun(f.state, by, { run_id: r.id }, f.io);
+/** A Run left dispatched by refused acknowledgements before this fix. */
+function legacyRefusedRun(a: typeof f.coder) {
+  const r = commit(dispatch(commit(queue(a)), dependentRef));
+  f.state = {
+    ...f.state,
+    assignments: f.state.assignments.map((x) =>
+      x.id === a.id ? { ...x, last_mcp_activity_at: later(1) } : x,
+    ),
+  };
+  return r;
+}
+
+test("C-735: once prerequisites complete the system starts a Run its session could not acknowledge", async () => {
+  const a = dependentAssignment();
+  const r = legacyRefusedRun(a);
+  // Prerequisites unfinished: nothing to start yet.
+  expect(value(startReady(r))).toMatchObject({ data: undefined, changes: [] });
+  await acceptDependency();
+  expect(f.state.runs.find((x) => x.id === r.id)?.status).toBe("dispatched");
+  reject(startReady(r, actor(a)), "unauthorized");
+  const started = value(startReady(r));
+  expect(started.data).toMatchObject({ status: "running", started_at: now });
+  expect(started.events).toEqual([
+    expect.objectContaining({
+      type: "run_started",
+      card_id: item(a).card_id,
+      payload: {
+        run_id: r.id,
+        assignment_id: a.id,
+        system_acknowledged: "dependencies_met",
+      },
+    }),
+  ]);
+  expect(started.timeline[0]?.body).toContain(item(a).id);
+  f.state = apply(f.state, started);
+  expect(item(a).status).toBe("in_progress");
+  // The session's own later call is a no-op; a second sweep changes nothing.
+  expect(value(ack(r, a)).changes).toEqual([]);
+  expect(value(startReady(r)).changes).toEqual([]);
+  stop(r, a);
+  expect(f.state.runs.find((x) => x.id === r.id)?.status).toBe("completed");
+});
+
+test("C-735: the system start needs proof the session was alive after dispatch and leaves fenced Runs alone", async () => {
+  const a = dependentAssignment();
+  const r = commit(dispatch(commit(queue(a)), dependentRef));
+  await acceptDependency();
+  // No Card tool call since dispatch: an ordinary pending start.
+  expect(value(startReady(r)).changes).toEqual([]);
+  f.state = {
+    ...f.state,
+    runs: f.state.runs.map((x) =>
+      x.id === r.id
+        ? {
+            ...x,
+            ack_refusal: { code: "invariant_violation", message: "x", at: now },
+          }
+        : x,
+    ),
+  };
+  const fenced = {
+    ...f.state,
+    runs: f.state.runs.map((x) =>
+      x.id === r.id
+        ? {
+            ...x,
+            dispatch_stop: {
+              attempt_id: "E-1" as never,
+              runtime_ref: null,
+              lease_until: later(60),
+              stopping: false,
+              reason: "dispatch_timeout" as const,
+            },
+          }
+        : x,
+    ),
+  };
+  expect(
+    value(startDependencyReadyRun(fenced, system, { run_id: r.id }, f.io))
+      .changes,
+  ).toEqual([]);
+  // A recorded refusal is proof enough.
+  commit(startReady(r));
+  expect(f.state.runs.find((x) => x.id === r.id)).not.toHaveProperty(
+    "ack_refusal",
+  );
   expect(item(a).status).toBe("in_progress");
 });
 

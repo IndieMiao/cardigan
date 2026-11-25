@@ -5,6 +5,7 @@ import {
   claimDispatchStop,
   dispatchRun,
   eventById,
+  eventsOfType,
   finishRun,
   listNeedsYou,
   queueRun,
@@ -531,6 +532,70 @@ test("C-735: a refused acknowledgement does not keep an obsolete review wake fro
   );
   expect(count("run_dispatch_stop_requested")).toBe(1);
   expect(count("run_dispatch_recovered")).toBe(0);
+});
+
+test("C-735: once prerequisites complete, a Run left dispatched by refused acknowledgements starts and gets its pending bell", async () => {
+  f.comment();
+  const d = dispatcher({ dispatchTimeoutMs: 3_600_000 });
+  await d.tick();
+  const stuck = f.latest();
+  const runs = f.state().runs.length;
+  expect(stuck.status).toBe("dispatched");
+  expect(f.runtime.wake).toHaveBeenCalledTimes(1);
+  // Legacy state: the item waits for an unfinished prerequisite and the
+  // session's refused Card tool calls left only its activity time behind.
+  const prerequisite = {
+    ...f.target.item,
+    id: "W-900" as typeof f.target.item.id,
+    title: "Prerequisite",
+    status: "in_progress" as const,
+  };
+  delete (prerequisite as { assignment_id?: unknown }).assignment_id;
+  f.advance(1000);
+  f.store.uow.run((tx) => {
+    tx.work_items.put(f.project, prerequisite);
+    const item = tx.work_items.get(f.project, f.target.item.id);
+    if (!item) throw new Error("Missing item");
+    tx.work_items.put(f.project, {
+      ...item,
+      status: "todo",
+      depends_on: [prerequisite.id],
+    });
+    const a = tx.assignments.get(f.project, f.target.assignment.id);
+    if (!a) throw new Error("Missing Assignment");
+    tx.assignments.put(f.project, {
+      ...a,
+      last_mcp_activity_at: f.clock.now(),
+    });
+  });
+  f.advance(1000);
+  await d.tick();
+  expect(f.latest()).toMatchObject({ id: stuck.id, status: "dispatched" });
+  // The prerequisite completes; a new instruction is waiting for the session.
+  f.store.uow.run((tx) => {
+    const item = tx.work_items.get(f.project, prerequisite.id);
+    if (!item) throw new Error("Missing prerequisite");
+    tx.work_items.put(f.project, { ...item, status: "accepted" });
+  });
+  f.comment();
+  f.advance(1000);
+  await d.tick();
+  await d.tick();
+  expect(f.latest()).toMatchObject({ id: stuck.id, status: "running" });
+  expect(
+    f.state().work_items.find((w) => w.id === f.target.item.id)?.status,
+  ).toBe("in_progress");
+  expect(
+    eventsOfType(f.state().events, "run_started").filter(
+      (e) =>
+        (e.payload as { system_acknowledged?: string }).system_acknowledged ===
+        "dependencies_met",
+    ),
+  ).toHaveLength(1);
+  expect(f.runtime.wake).toHaveBeenCalledTimes(2);
+  expect(f.runtime.interrupt).not.toHaveBeenCalled();
+  expect(f.state().runs).toHaveLength(runs);
+  expect(count("run_dispatch_stop_requested")).toBe(0);
 });
 
 test.each(["exited", "unknown"] as const)(

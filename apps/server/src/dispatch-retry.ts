@@ -33,6 +33,7 @@ import {
   retireRecoveryQueuedRun,
   reviewRunWakeDisposition,
   runTargetWaitReason,
+  startDependencyReadyRun,
   startDispatchStop,
   stoppedByHuman,
   unreadableCommentTrigger,
@@ -445,6 +446,25 @@ export async function retryDispatchedRuns(
     const owner = owners.get(candidate.assignment_id);
     // External identities have no managed terminal, including stale recovery records.
     if (owner?.external) continue;
+    // C-735: a session refused while its prerequisites were unfinished never
+    // acknowledges again by itself; start its Run once they are complete.
+    if (
+      candidate.status === "dispatched" &&
+      !candidate.started_at &&
+      store.uow.run((tx) => {
+        const effect = unwrap(
+          startDependencyReadyRun(
+            loadState(tx, project),
+            actor,
+            { run_id: candidate.id },
+            { clock, ids: tx.ids },
+          ),
+        );
+        persistEffect(tx, project, effect);
+        return !!effect.data;
+      })
+    )
+      continue;
     if (candidate.dispatch_stop) {
       // Resume the original target even after monitor changed status or a host cancelled it.
       await stopRun(candidate.id, candidate.dispatch_stop.reason);

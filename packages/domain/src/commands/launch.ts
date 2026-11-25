@@ -5,8 +5,15 @@ import {
   runnableQueuedRun,
   standingRunDormant,
 } from "../card-hold.js";
-import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
-import { appendEvents, eventById } from "../event-index.js";
+import type {
+  Actor,
+  Assignment,
+  Event,
+  Run,
+  RuntimeRef,
+  WorkItem,
+} from "../entities.js";
+import { appendEvents, eventById, eventsOfType } from "../event-index.js";
 import { HARNESSES, isHarness } from "../harness.js";
 import {
   automaticContextActionForRun,
@@ -941,6 +948,122 @@ export function acknowledgeRun(
         ? { recovery_root_run_id: run.recovery_policy.root_run_id }
         : {}),
     });
+    return next;
+  });
+}
+
+/**
+ * C-735: whether the system may start this dispatched Run for its session.
+ * Before the dependency-wait fix, a session woken before its prerequisites
+ * finished had every start acknowledgement refused; its Run stayed dispatched
+ * and kept the Assignment busy, so no later bell reached the idle session and
+ * nothing would ever acknowledge it. Once the prerequisites are complete, a
+ * session proven alive after dispatch (a Card tool call or a recorded
+ * refusal) is started here exactly as its own acknowledgement would have.
+ */
+function dependencyReadyStart(
+  d: CommandDraft,
+  run: Run,
+): { assignment: Assignment; item: WorkItem } | undefined {
+  if (
+    !["dispatched", "acked"].includes(run.status) ||
+    run.started_at ||
+    run.dispatch_stop ||
+    run.inactivity_stop ||
+    run.recovery_policy ||
+    run.test_review ||
+    (run.launch_publication &&
+      !["started", "exited"].includes(run.launch_publication.phase))
+  )
+    return;
+  const assignment = d.get("assignments", run.assignment_id);
+  if (
+    assignment.status !== "active" ||
+    assignment.scope !== "work_item" ||
+    assignment.external ||
+    assignment.role_upgrade ||
+    assignment.idle_retirement?.phase === "stopping" ||
+    assignment.runtime_state !== "running" ||
+    !assignment.runtime_ref ||
+    assignment.mcp_handshake === "pending" ||
+    assignment.mcp_handshake === "missing" ||
+    hostOpsPending(d.state.events, assignment.id)
+  )
+    return;
+  const dispatched = eventsOfType(d.state.events, "run_dispatched").findLast(
+    (e) => (e.payload as { run_id?: unknown })?.run_id === run.id,
+  )?.created_at;
+  const alive =
+    !!run.ack_refusal ||
+    (!!dispatched &&
+      !!assignment.last_mcp_activity_at &&
+      assignment.last_mcp_activity_at > dispatched);
+  if (!alive) return;
+  const item = d.work(assignment.work_item_id);
+  const card = d.card(item.card_id);
+  if (
+    item.kind !== "produce" ||
+    item.assignment_id !== assignment.id ||
+    !["todo", "ready", "changes_requested"].includes(item.status) ||
+    (!item.depends_on.length && !card.depends_on_cards?.length) ||
+    workDependencyWait(d, item)
+  )
+    return;
+  return { assignment, item };
+}
+
+/**
+ * C-735: system start of a dispatched Run whose session was refused while its
+ * prerequisites were unfinished and which are now complete. No new session or
+ * terminal is involved; the Run's own session keeps it. Returns undefined when
+ * the Run does not qualify.
+ */
+export function startDependencyReadyRun(
+  state: CommandState,
+  actor: Actor,
+  p: { run_id: RunId },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "start_dependency_ready_run", ports, (d) => {
+    const run = d.get("runs", p.run_id);
+    const ready = dependencyReadyStart(d, run);
+    if (!ready) return;
+    const { assignment, item } = ready;
+    if (
+      d
+        .list("runs")
+        .some(
+          (r) =>
+            r.id !== run.id &&
+            r.assignment_id === assignment.id &&
+            ["acked", "running"].includes(r.status),
+        )
+    )
+      return;
+    let status: Run["status"] = run.status;
+    if (status !== "acked")
+      status = unwrap(transition("run", status, "acknowledge"));
+    status = unwrap(transition("run", status, "start"));
+    const { ack_refusal: _refusal, ...rest } = run;
+    const next: Run = { ...rest, status, started_at: d.now };
+    d.put("runs", next);
+    // Mirrors activeWork for a produce item whose dependencies are met.
+    let work = item;
+    if (work.status === "todo") work = d.move(work, "dependencies_met");
+    work = d.move(work, "run_started");
+    d.put("work_items", work);
+    providerStarted(d, run);
+    const body = `${assignment.id}（${run.id}）的前置已完成，会话此前已连上 Card 工具但启动确认被拒；系统已补做启动确认，${item.id} 开工。`;
+    d.emit(
+      "run_started",
+      item.card_id,
+      {
+        run_id: run.id,
+        assignment_id: assignment.id,
+        system_acknowledged: "dependencies_met",
+      },
+      { type: "system", body, run_id: run.id },
+    );
     return next;
   });
 }
