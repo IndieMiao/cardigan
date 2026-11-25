@@ -1312,7 +1312,11 @@ describe.skipIf(!hcAvailable)(
         await h.until(
           "Router 已消费全部拍板请求",
           () =>
-            pendingRequests.every(
+            [
+              ...pendingRequests,
+              // C-740: resolutions also notify the Office.
+              ...h.state().events.filter((e) => e.type === "decision_resolved"),
+            ].every(
               (event) =>
                 h.store.routerCursor(
                   PROJECT,
@@ -1337,7 +1341,11 @@ describe.skipIf(!hcAvailable)(
               state.events.find((event) => event.id === note.event_id)?.type ??
               `missing:${note.event_id}`,
           );
-        expect(new Set(escalating)).toEqual(new Set(["decision_requested"]));
+        // C-740: the Office also hears when the human closes a Needs You
+        // question; that is an Office notice, not an interruption.
+        expect(new Set(escalating)).toEqual(
+          new Set(["decision_requested", "decision_resolved"]),
+        );
         const requests = state.events.filter(
           (e) =>
             e.type === "decision_requested" &&
@@ -1360,7 +1368,27 @@ describe.skipIf(!hcAvailable)(
         const office = recipients("pm_office");
         expect(office).toEqual(expect.arrayContaining(recipients("needs_you")));
         const requestIds = new Set(pendingRequests.map((e) => e.id));
-        expect(office.filter((id) => !requestIds.has(id))).toEqual([]);
+        // C-740: beyond requests, only the human's own resolutions of the two
+        // human decisions reach the Office, each once.
+        const humanDecisionIds = new Set(
+          state.decisions
+            .filter((d) => d.decider === "human")
+            .map((d) => String(d.id)),
+        );
+        const closedByHuman = state.events
+          .filter(
+            (e) =>
+              e.type === "decision_resolved" &&
+              e.actor.kind === "human" &&
+              humanDecisionIds.has(
+                String((e.payload as { decision_id?: string }).decision_id),
+              ),
+          )
+          .map((e) => e.id)
+          .sort();
+        expect(office.filter((id) => !requestIds.has(id))).toEqual(
+          closedByHuman,
+        );
       } catch (error) {
         await printInterruptionFailure(h, observed);
         throw error;

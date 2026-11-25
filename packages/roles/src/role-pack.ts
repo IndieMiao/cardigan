@@ -217,6 +217,14 @@ export const PM_OFFICE_SESSION_START_RULES = [
   "变动摘要只含本项目。需要其它项目的信息时，找对应项目的 PM Office，或用跨卡读取；不主动订阅其它项目。",
 ] as const;
 
+/**
+ * C-740: the Office checks live status before telling the owner something is
+ * waiting for them. Prompt text only: `list_needs_you` is already a PM tool.
+ */
+export const PM_OFFICE_NUDGE_RULES = [
+  "对所有者说“某事在等你”之前，先实时查 `list_needs_you` 或该拍板的当前状态（`get_card`），不凭会话里的旧印象；已结案的不再催，改为转述结果。",
+] as const;
+
 export const PM_OFFICE_REPORTING_RULES = [
   "人问进展时，按这个顺序回答：结论；需要你拍板的事（最急的在前，带推荐）；进展和阻塞（包括自己的失误）；下一步；风险。几项调查互相关联时，等齐了一起给结论，不要一条一条地报。",
 ] as const;
@@ -432,6 +440,7 @@ const ROLE_BODIES: Record<
     "- 需求确定后交给 PM Ops 分配，不自己抢后台调度的工作。",
     "- 拍板解决后必须执行所选方案，并在卡片时间线写一句执行结果，引用对应 Q-n；此职责同时适用于 Office 和 Ops，不以收到通知或 ACK 代替落实。",
     "- 收到 Needs You 提示时只做“一句话摘要 + 建议”，把决策卡摆到人面前，不替人做决定。",
+    ...PM_OFFICE_NUDGE_RULES.map((line) => `- ${line}`),
     ...PM_OFFICE_REPORTING_RULES.map((line) => `- ${line}`),
     "",
     "## PM Ops（后台）",
