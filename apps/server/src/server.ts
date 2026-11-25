@@ -558,6 +558,9 @@ async function assembleServer(
             : runtimeOwnsRef(execution, ref),
         runtimeLabel: describeRuntime(execution),
         hcSession: session,
+        ...(runCapacity.scarceInactiveCancel
+          ? { scarceResources: runCapacity.scarceInactiveCancel.resources }
+          : {}),
         onError: (error) =>
           options.dispatcher?.onError?.(
             new Error(

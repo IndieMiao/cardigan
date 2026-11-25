@@ -1,4 +1,4 @@
-import type { Actor, Assignment, RuntimeRef } from "../entities.js";
+import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { AssignmentId, CardId, RunId } from "../ids.js";
 import {
@@ -203,14 +203,32 @@ export function confirmKeptShellExit(
 export type UnresponsiveRelease =
   /** Session maintenance: this many `probe_invalid` withdrawals in a row. */
   | { readonly trigger: "probe_invalid"; readonly limit: number }
-  /** A host operator's restart or cancel of a remote managed Assignment. */
+  /**
+   * A host operator's restart or cancel of a remote managed Assignment, or
+   * (C-759) a stop of a session whose last turn ended and that is idle.
+   */
   | {
       readonly trigger: "host_ops";
       readonly requested_by: AssignmentId;
-      readonly tool: "host_ops_restart_assignment" | "host_ops_cancel_run";
+      readonly tool:
+        | "host_ops_restart_assignment"
+        | "host_ops_cancel_run"
+        | "host_ops_stop_assignment";
       readonly reason: string;
       /** host_ops_cancel_run: also cancel this Run when it never started. */
       readonly run_id?: RunId;
+    }
+  /**
+   * C-759: the last turn of this session ended, its CLI reports `done`, and
+   * the never-started `queued_run_id` waited `waited_ms` without the session
+   * being used (for example a resource machine that needs a fresh session),
+   * while the checkout was clean.
+   */
+  | {
+      readonly trigger: "turn_done";
+      readonly queued_run_id: RunId;
+      readonly waited_ms: number;
+      readonly workspace: "clean" | "no_worktree";
     }
   /**
    * C-739: the system finished this Run, work is waiting for the Assignment,
@@ -237,6 +255,40 @@ export type UnresponsiveRelease =
 
 const unfinishedRun = (status: string) =>
   !["completed", "failed", "cancelled"].includes(status);
+
+/**
+ * C-759: a queued Run nothing has touched yet: never started, no bell sent,
+ * no launch, dispatch or stop in flight. It holds no terminal, so cancelling
+ * it or keeping it for a new session never affects a live session.
+ */
+export function untouchedQueuedRun(r: Run) {
+  return (
+    r.status === "queued" &&
+    !r.started_at &&
+    !r.finished_at &&
+    !r.heartbeat_at &&
+    !r.bell_delivery &&
+    !r.recovery_runtime &&
+    !r.launch_publication &&
+    !r.pending_finish &&
+    !r.dispatch_stop &&
+    !r.inactivity_stop
+  );
+}
+
+/**
+ * C-759: the session's previous turn ended: no Run on it is unfinished except
+ * untouched queued ones, and the session was not launched for one of those
+ * (that launch may still be starting).
+ */
+export function sessionTurnEnded(state: CommandState, a: Assignment) {
+  const runs = runsOf(state.runs, a.id);
+  const launch = a.runtime_ref?.launch_generation?.run_id;
+  return runs.every(
+    (r) =>
+      !unfinishedRun(r.status) || (untouchedQueuedRun(r) && r.id !== launch),
+  );
+}
 
 /**
  * C-730: why this session may not be released as unresponsive now
@@ -288,10 +340,23 @@ export function unresponsiveReleaseBlocker(
       !runs.some((r) => r.id === p.run_id && unfinishedRun(r.status))
     )
       return "run_changed";
+    // C-759: a stop only ends a session whose previous turn already ended.
+    if (p.tool === "host_ops_stop_assignment" && !sessionTurnEnded(state, a))
+      return "run_busy";
     return undefined;
   }
   if (runs.some((r) => r.status !== "queued" && unfinishedRun(r.status)))
     return "run_busy";
+  if (p.trigger === "turn_done") {
+    if (!sessionTurnEnded(state, a)) return "run_busy";
+    if (a.idle_retirement && a.idle_retirement.phase !== "waiting")
+      return "session_maintenance";
+    // A system-ended turn has its own trigger and recovery.
+    if (systemEndedTurn(state, a)) return "run_changed";
+    return runs.some((r) => r.id === p.queued_run_id && untouchedQueuedRun(r))
+      ? undefined
+      : "run_changed";
+  }
   if (p.trigger === "system_turn") {
     // An idle retirement owns its session; the release would race it.
     if (a.idle_retirement) return "session_maintenance";
@@ -341,14 +406,18 @@ export function releaseUnresponsiveSession(
       );
     else if (
       p.trigger === "system_turn" ||
-      p.trigger === "retirement_withdrawn"
+      p.trigger === "retirement_withdrawn" ||
+      p.trigger === "turn_done"
     )
       ensure(
         Number.isSafeInteger(p.waited_ms) &&
           p.waited_ms >= 0 &&
           ["clean", "no_worktree"].includes(p.workspace) &&
           (p.trigger === "system_turn" ||
-            (Number.isSafeInteger(p.withdrawals) &&
+            (p.trigger === "turn_done" &&
+              /^R-[1-9][0-9]*$/u.test(p.queued_run_id)) ||
+            (p.trigger === "retirement_withdrawn" &&
+              Number.isSafeInteger(p.withdrawals) &&
               p.withdrawals >= 2 &&
               p.withdrawals <= 1000)),
         "validation_failed",
@@ -376,7 +445,9 @@ export function releaseUnresponsiveSession(
           ? `released after the system-ended turn of ${p.system_finished_run_id} stayed unconfirmed`
           : p.trigger === "retirement_withdrawn"
             ? "released after work waited while idle retirement kept withdrawing"
-            : "released after the Agent stopped responding";
+            : p.trigger === "turn_done"
+              ? `released after ${p.queued_run_id} waited on an idle session`
+              : "released after the Agent stopped responding";
     const cancelled = d
       .list("runs")
       .filter(
@@ -413,13 +484,17 @@ export function releaseUnresponsiveSession(
       ? `，已取消在该会话上的 ${cancelled.map((r) => r.id).join("、")}`
       : "";
     const handoff =
-      p.trigger === "retirement_withdrawn"
-        ? `${a.id}（${a.machine_id}）有待办 ${Math.round(p.waited_ms / 60_000)} 分钟仍派不出新 Run，空闲回收已 ${p.withdrawals} 次被撤回，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，待办在新会话中派发。`
-        : p.trigger === "system_turn"
-          ? `系统代为结束 ${p.system_finished_run_id} 后，${a.id}（${a.machine_id}）的旧回合 ${Math.round(p.waited_ms / 60_000)} 分钟仍确认不了是否结束，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，排队的工作在新会话中派发。`
-          : p.trigger === "host_ops"
-            ? `主机运维 ${p.requested_by} 请求${p.tool === "host_ops_cancel_run" ? "取消 Run" : "重启"}：${a.id}（${a.machine_id}）的 Agent 进程未见存活，已关闭残留终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`
-            : `${a.id}（${a.machine_id}）的 Agent 进程已不在、终端仍残留：空闲回收连续 ${streak} 次未取得有效进程身份。系统已关闭该终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`;
+      p.trigger === "turn_done"
+        ? `${a.id}（${a.machine_id}）上一轮已结束、会话空闲（done），排队的 ${p.queued_run_id} ${Math.round(p.waited_ms / 60_000)} 分钟仍未开始，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，排队的工作在新会话中派发。`
+        : p.trigger === "host_ops" && p.tool === "host_ops_stop_assignment"
+          ? `主机运维 ${p.requested_by} 请求停止空闲会话：${a.id}（${a.machine_id}）上一轮已结束、会话空闲，已关闭终端并确认会话退出${runsNote}；保留身份、工作区和分支，排队的工作在新会话中派发。`
+          : p.trigger === "retirement_withdrawn"
+            ? `${a.id}（${a.machine_id}）有待办 ${Math.round(p.waited_ms / 60_000)} 分钟仍派不出新 Run，空闲回收已 ${p.withdrawals} 次被撤回，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，待办在新会话中派发。`
+            : p.trigger === "system_turn"
+              ? `系统代为结束 ${p.system_finished_run_id} 后，${a.id}（${a.machine_id}）的旧回合 ${Math.round(p.waited_ms / 60_000)} 分钟仍确认不了是否结束，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，排队的工作在新会话中派发。`
+              : p.trigger === "host_ops"
+                ? `主机运维 ${p.requested_by} 请求${p.tool === "host_ops_cancel_run" ? "取消 Run" : "重启"}：${a.id}（${a.machine_id}）的 Agent 进程未见存活，已关闭残留终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`
+                : `${a.id}（${a.machine_id}）的 Agent 进程已不在、终端仍残留：空闲回收连续 ${streak} 次未取得有效进程身份。系统已关闭该终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`;
     d.emit(
       "session_replaced",
       card,
@@ -430,13 +505,25 @@ export function releaseUnresponsiveSession(
             ? "system_turn_unconfirmed"
             : p.trigger === "retirement_withdrawn"
               ? "retirement_withdrawn"
-              : "agent_unresponsive",
+              : p.trigger === "turn_done" ||
+                  (p.trigger === "host_ops" &&
+                    p.tool === "host_ops_stop_assignment")
+                ? "idle_session_stopped"
+                : "agent_unresponsive",
         trigger: p.trigger,
         ...(p.trigger === "system_turn"
           ? {
               system_finished_run_id: p.system_finished_run_id,
               waited_ms: p.waited_ms,
               workspace: p.workspace,
+            }
+          : {}),
+        ...(p.trigger === "turn_done"
+          ? {
+              queued_run_id: p.queued_run_id,
+              waited_ms: p.waited_ms,
+              workspace: p.workspace,
+              idle_basis: "terminal_status",
             }
           : {}),
         ...(p.trigger === "retirement_withdrawn"

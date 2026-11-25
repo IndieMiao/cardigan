@@ -49,6 +49,7 @@ import {
 } from "./stall-evidence.js";
 import { overdueStallHandoffs } from "./stall-handoff.js";
 import {
+  doneSessionReleaseMs,
   managedReleaseCommand,
   releaseStalledSession,
   SESSION_RELEASE_HELD,
@@ -420,6 +421,8 @@ export class StallPatrol {
   private readonly heldBacklogMs = heldBacklogMs();
   /** C-739: stalled sessions are released after work waited this long. */
   private readonly releaseMs = stalledSessionReleaseMs();
+  /** C-759: idle `done` sessions are released after a queued Run waited this long. */
+  private readonly doneMs = doneSessionReleaseMs();
   /** C-739: next observation of a kept incident (in memory). */
   private readonly releaseRetryAt = new Map<string, number>();
   constructor(
@@ -1014,13 +1017,14 @@ export class StallPatrol {
    * entry.
    */
   private stalledDue(project: ProjectId) {
-    if (!this.releaseMs) return [];
+    if (!this.releaseMs && !this.doneMs) return [];
     const state = this.store.uow.read((tx) => loadCommandState(tx, project));
     const stalled = stalledSessions(
       state,
       this.liveNotes(project),
       this.clock.now(),
       this.releaseMs,
+      this.doneMs,
     );
     const key = (s: StalledSession) =>
       `${project}/${s.assignment.id}/${s.trigger}/${s.incident}`;
@@ -1039,13 +1043,12 @@ export class StallPatrol {
       const outcome = await this.releaseOne(state, stalled);
       // A kept incident is rechecked after two thresholds; one left to
       // another path (or transiently locked) after a minute, not every pass.
+      const ms = stalled.trigger === "turn_done" ? this.doneMs : this.releaseMs;
       if (outcome !== "released")
         this.releaseRetryAt.set(
           key,
           Date.parse(this.clock.now()) +
-            (outcome === "kept"
-              ? 2 * this.releaseMs
-              : Math.min(60_000, this.releaseMs)),
+            (outcome === "kept" ? 2 * ms : Math.min(60_000, ms)),
         );
     }
   }
@@ -1103,6 +1106,7 @@ export class StallPatrol {
     if (this.signal.aborted) return "skipped";
     const observedOwner = owner?.ok ? owner.value : "unobserved";
     const decision = stalledSessionDecision({
+      trigger: stalled.trigger,
       can_restart: view?.can_restart === true,
       status: status?.ok ? status.value : undefined,
       owner: observedOwner,
@@ -1134,6 +1138,7 @@ export class StallPatrol {
             this.liveNotes(project),
             this.clock.now(),
             this.releaseMs,
+            this.doneMs,
           ).some(
             (s) =>
               s.assignment.id === current.id &&
@@ -1162,7 +1167,9 @@ export class StallPatrol {
       const minutes = Math.round(stalled.waited_ms / 60_000);
       const what = stalled.turn
         ? `系统代为结束 ${stalled.turn.id} 后 ${minutes} 分钟，${a.id}（${a.machine_id}）的旧回合仍确认不了是否结束`
-        : `${a.id}（${a.machine_id}）有待办 ${minutes} 分钟仍派不出新 Run，空闲回收已 ${stalled.withdrawals} 次被撤回`;
+        : stalled.trigger === "turn_done"
+          ? `${a.id}（${a.machine_id}）上一轮已结束、会话空闲，排队的 ${stalled.queued_run_id} ${minutes} 分钟仍未开始`
+          : `${a.id}（${a.machine_id}）有待办 ${minutes} 分钟仍派不出新 Run，空闲回收已 ${stalled.withdrawals} 次被撤回`;
       const event = {
         id: tx.ids.nextEventId(),
         seq: tx.ids.nextEventSequence(project, stalled.card_id ?? undefined),
@@ -1177,7 +1184,9 @@ export class StallPatrol {
           incident: stalled.incident,
           ...(stalled.turn
             ? { system_finished_run_id: stalled.turn.id }
-            : { withdrawals: stalled.withdrawals ?? 0 }),
+            : stalled.trigger === "turn_done"
+              ? {}
+              : { withdrawals: stalled.withdrawals ?? 0 }),
           ...(stalled.queued_run_id
             ? { queued_run_id: stalled.queued_run_id }
             : {}),

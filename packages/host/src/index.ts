@@ -183,11 +183,19 @@ export {
   tryHostOpsLock,
 } from "./host-ops-lock.js";
 export {
+  type IdleScarceSession,
+  idleScarceSessions,
+} from "./idle-scarce-sessions.js";
+export {
   boundedRetirementError,
   idleRetirementPolicy,
   observeRetirementForDispatch,
   recordRetirementDispatch,
 } from "./idle-session-retirement.js";
+export {
+  type IdleSessionStop,
+  stopIdleSession,
+} from "./idle-session-stop.js";
 export {
   type LaunchedRun,
   type LaunchHost,
@@ -436,7 +444,9 @@ export * from "./runtime-workers-config.js";
 export { pinStallBackup } from "./stall-backup.js";
 export type { SessionExitVerdict } from "./stall-evidence.js";
 export {
+  DEFAULT_DONE_SESSION_RELEASE_MS,
   DEFAULT_STALLED_SESSION_RELEASE_MS,
+  doneSessionReleaseMs,
   managedReleaseCommand,
   SESSION_RELEASE_HELD,
   stalledSessionReleaseMs,

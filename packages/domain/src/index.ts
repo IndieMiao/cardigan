@@ -60,6 +60,7 @@ export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-attached-wait.js";
 export * from "./commands/host-ops-context-restart.js";
+export * from "./commands/host-ops-queued-cancel.js";
 export * from "./commands/host-ops-rotate.js";
 export { reassignHumanAction } from "./commands/human-action-executor.js";
 export { refreshHumanActionFollowUps } from "./commands/human-action-follow-ups.js";
@@ -75,10 +76,12 @@ export {
   handoffIdleSessionRetirement,
   releaseRetainedRetirement,
   releaseUnresponsiveSession,
+  sessionTurnEnded,
   settleIdleSessionRetirement,
   trackRetirementDispatch,
   type UnresponsiveRelease,
   unresponsiveReleaseBlocker,
+  untouchedQueuedRun,
 } from "./commands/idle-session-retirement.js";
 export * from "./commands/inactive-run.js";
 export { refreshRequiredVerifiers } from "./commands/late-verifier.js";
