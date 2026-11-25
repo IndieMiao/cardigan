@@ -19,6 +19,10 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import {
+  assignDecision,
+  routeDelegatedWorktreeCleanups,
+} from "./delegation.js";
 import { neverDispatchedQueue } from "./failed-placement.js";
 import { cancelRunDispatch } from "./launch.js";
 import { handoffWithoutOps } from "./ops-handoff.js";
@@ -239,7 +243,9 @@ export function requestWorktreeCleanup(
         ? d.card(d.work(a.work_item_id).card_id)
         : undefined;
     const id = d.ids.next(state.project_id, "decision");
-    const decision: Decision = {
+    // C-747: routed like any data_deletion question; delegated to PM when
+    // the project authorized it and PM Ops can take it.
+    const decision: Decision = assignDecision(d, {
       id,
       key: id,
       ...(card ? { card_id: card.id } : {}),
@@ -270,14 +276,55 @@ export function requestWorktreeCleanup(
       decider: "human",
       doc_refs: [],
       status: "open",
-    };
+    });
     d.put("decisions", decision);
+    const delegated = decision.decider === "role:pm";
     d.emit(
       "decision_requested",
       card?.id,
-      { decision_id: id, assignment_id: a.id, affected_work_items: [] },
-      { type: "decision_request", decision_id: id, body: decision.question },
+      {
+        decision_id: id,
+        assignment_id: a.id,
+        affected_work_items: [],
+        ...(delegated
+          ? {
+              routed_to: decision.decider,
+              routing_reason: decision.delegation_authority ?? null,
+            }
+          : {}),
+      },
+      {
+        type: "decision_request",
+        decision_id: id,
+        body: delegated
+          ? `${decision.question}\n已按常驻授权转给 PM`
+          : decision.question,
+      },
     );
     return decision;
+  });
+}
+
+/**
+ * C-747: the cleanup loop moves open worktree cleanup questions to PM once
+ * the project delegates data_deletion and PM Ops is active. This covers
+ * questions raised before C-747 (moved after deployment, e.g. Q-1370) and
+ * ones raised while PM Ops was unavailable. No change when nothing moves.
+ */
+export function routeWorktreeCleanupDecisions(
+  state: CommandState,
+  actor: Actor,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "request_worktree_cleanup", ports, (d) => {
+    ensure(
+      actor.kind === "system",
+      "unauthorized",
+      "Only the cleanup loop routes worktree cleanup questions",
+    );
+    return routeDelegatedWorktreeCleanups(
+      d,
+      "已按“删除数据”的常驻授权，将待处理的工作区清理拍板转给 PM 代拍。",
+    );
   });
 }
