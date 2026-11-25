@@ -317,6 +317,10 @@
     max-width: 100%;
     margin: 0;
   }
+  /* A linked id (the card of an execution) keeps the row at control height. */
+  .statusFacts > :global(a.id-tag) {
+    min-height: var(--ui-control);
+  }
   .statusActions {
     flex: none;
     align-self: flex-start;
