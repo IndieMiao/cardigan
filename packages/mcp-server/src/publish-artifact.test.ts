@@ -64,7 +64,9 @@ test("the actual MCP handler checks the token, card and stored decision before h
       false,
     );
     const call = () => tool.handler(request, ctx);
-    await expect(call()).rejects.toThrow("approval");
+    // C-754: the refusal names the sub-reason and the correct format.
+    await expect(call()).rejects.toThrow("approval（拍板不存在）");
+    await expect(call()).rejects.toThrow("kind=approve");
     expect(pub).not.toHaveBeenCalled();
     const decision: Decision = {
       id: qid,
@@ -99,7 +101,9 @@ test("the actual MCP handler checks the token, card and stored decision before h
     };
     store.uow.run((tx) => tx.decisions.put(project_id, decision));
     url = "https://other.invalid/test/app.apk";
-    await expect(call()).rejects.toThrow("approval");
+    await expect(call()).rejects.toThrow(
+      "approval（publish 选项说明与本次发布地址不符）",
+    );
     url = "https://example.invalid/test/app.apk";
     await expect(call()).resolves.toMatchObject({ sha256: digest });
     await expect(call()).rejects.toThrow("already_claimed");
@@ -536,7 +540,7 @@ test("a failure before the first OSS write consumes nothing; after a write the s
           return { url: other, size: 6, sha256: digest };
         },
       }).handler({ ...request, decision_id: "Q-5" }, ctx),
-    ).rejects.toThrow("immutable_prefix（未写入");
+    ).rejects.toThrow("immutable_prefix（目标目录已有对象）（未写入");
   } finally {
     store.close();
   }

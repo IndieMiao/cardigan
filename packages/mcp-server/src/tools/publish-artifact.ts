@@ -4,12 +4,13 @@ import {
   type AssignmentId,
   type Attachment,
   approvedReleaseChain,
-  approvesPublication,
   type CardId,
   cardReadAccess,
   type DecisionId,
   holdsPublicationTool,
   type ProjectId,
+  PUBLISH_APPROVAL_FORMAT,
+  publicationApprovalProblem,
   RELEASE_CHAIN_OPTION,
   RELEASE_NOTE_MISSING_HINT,
   releaseChainSmoked,
@@ -58,6 +59,16 @@ export interface PublicationOptions {
     claim: (url: string, existing?: boolean) => void,
     current: () => void,
   ) => Promise<{ url: string; size: number; sha256: string }>;
+  /**
+   * C-754: read-only readiness of this host for publishing `a` to `url`,
+   * run before a publish approval reaches anyone. Returns fixed-wording
+   * failures (never configuration values or credentials); empty when ready.
+   */
+  precheckPublication?: (
+    project: string,
+    a: Attachment,
+    url: string,
+  ) => Promise<readonly string[]>;
 }
 /** Never put raw tool/SDK errors, paths or configuration into responses or audits. */
 export class PublicationError extends Error {
@@ -78,8 +89,10 @@ export class PublicationError extends Error {
       | "host_error"
       /** C-609: cut off by the server's shutdown; no outcome is recorded. */
       | "interrupted",
+    /** C-754: fixed wording of the sub-reason; never paths, values or credentials. */
+    readonly reason?: string,
   ) {
-    super(category);
+    super(reason ? `${category}（${reason}）` : category);
   }
 }
 type Phase =
@@ -221,24 +234,22 @@ function authorize(
     throw new PublicationError("scope");
   onCard(a.card_id);
   const q = tx.decisions.get(p, request.decision_id as DecisionId);
-  if (
-    !approvesPublication(
-      p,
-      a,
-      q,
-      tx.project_preferences?.get(p, p),
-      // Delegation audits are the only events it reads (`categoryAuthorization`).
-      q?.resolution?.via === "delegated"
-        ? streamEventsBy(tx.events, p, undefined, "type", [
-            "project_preferences_updated",
-          ])
-        : [],
-      q?.resolution?.option === RELEASE_CHAIN_OPTION
-        ? tx.events.listAfter(p, a.card_id, 0)
-        : [],
-    )
-  )
-    throw new PublicationError("approval");
+  const problem = publicationApprovalProblem(
+    p,
+    a,
+    q,
+    tx.project_preferences?.get(p, p),
+    // Delegation audits are the only events it reads (`categoryAuthorization`).
+    q?.resolution?.via === "delegated"
+      ? streamEventsBy(tx.events, p, undefined, "type", [
+          "project_preferences_updated",
+        ])
+      : [],
+    q?.resolution?.option === RELEASE_CHAIN_OPTION
+      ? tx.events.listAfter(p, a.card_id, 0)
+      : [],
+  );
+  if (problem) throw new PublicationError("approval", problem);
   // C-612: under a chain, only the signed APK the card's smoke step
   // accepted; checked again at the claim, before any write.
   if (
@@ -250,7 +261,7 @@ function authorize(
       tx.deliveries.list(p),
     )
   )
-    throw new PublicationError("approval");
+    throw new PublicationError("approval", "安装包没有通过本卡冒烟验收");
   return a;
 }
 
@@ -367,7 +378,12 @@ async function runPublication(
                     o.key === "publish" && o.description === `发布到 ${url}`,
                 )
           )
-            throw new PublicationError("approval");
+            throw new PublicationError(
+              "approval",
+              chain
+                ? "发布链地址模板与本次发布地址不符"
+                : "publish 选项说明与本次发布地址不符",
+            );
           const mine = streamEventsBy(tx.events, p, a.card_id, "decision_id", [
             request.decision_id,
           ]);
@@ -413,7 +429,10 @@ async function runPublication(
                 (e) => (e.payload as { result?: string })?.result === target,
               )
             )
-              throw new PublicationError("immutable_prefix");
+              throw new PublicationError(
+                "immutable_prefix",
+                "目标目录已有对象",
+              );
             audit(tx, run.actor, a.card_id, request, "claimed", target, note);
           }
           inFlight.add(flight);
@@ -443,6 +462,7 @@ async function runPublication(
     }
   } catch (e) {
     const category = e instanceof PublicationError ? e.category : "host_error";
+    const failure = e instanceof PublicationError ? e.message : category;
     // C-609: a run cut off by the server's own shutdown records no outcome;
     // the next server continues it.
     let note = "";
@@ -455,7 +475,7 @@ async function runPublication(
             ? "（可能已写入部分对象，可用同一授权再次调用续做）"
             : "";
         store.uow.run((tx) =>
-          audit(tx, run.actor, id, request, "failed", category, note),
+          audit(tx, run.actor, id, request, "failed", failure, note),
         );
       } catch {
         throw new ToolError("validation_failed", "测试包外发审计不可用");
@@ -465,7 +485,7 @@ async function runPublication(
       category === "scope" || category === "approval"
         ? "forbidden_tool"
         : "validation_failed",
-      `测试包外发未放行：${category}${note}`,
+      `测试包外发未放行：${failure}${note}${category === "approval" ? `。${PUBLISH_APPROVAL_FORMAT}` : ""}`,
     );
   } finally {
     if (flying) inFlight.delete(flight);
@@ -543,7 +563,7 @@ export function publicationTool(options: PublicationOptions) {
   return defineTool({
     name: "publish_artifact",
     description:
-      "Publish one signed test APK to this project's configured HTTPS destination. Approval is either a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`, or the card's approved release chain, which covers the signed APK the system bound from the signing receipt and, when the card has a smoke step, only the one whose accepted smoke delivery names it (subject artifact_sha256). A release chain is one publish approval for intake, signing, signed intake and publication: kind approve, target.subject artifact_sha256 = the unsigned APK digest, and one option `release_chain` described exactly `发布链 <40-hex source commit> 发布到 <https APK URL template>`, where the template may use `<version>` (versionName) and `<sha12>` (first 12 hex of the signed APK digest). Use the chain decision as the basis for the unsigned intake. A failure before any OSS write consumes nothing: fix it and call again with the same decision. After a failure once writing began, calling again with the same (or a new) approval resumes: the files this release already wrote are read back and verified, only the missing ones are written, and nothing is overwritten. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths. Optional release_note saves the user-facing notes of this version after it is verified; without it the publication is unchanged and the result says the note is still missing. Also returns the cards merged since the previous successful publication as reference.",
+      "Publish one signed test APK to this project's configured HTTPS destination. Approval is either a same-card resolved publish approval raised with request_decision as category=publish, kind=approve, attachment_ids=[this one APK], target={subject:{kind:artifact_sha256,value:its full SHA-256}} (derived automatically when omitted with one attachment), and the publish option description exactly `发布到 <final HTTPS APK URL>`, or the card's approved release chain, which covers the signed APK the system bound from the signing receipt and, when the card has a smoke step, only the one whose accepted smoke delivery names it (subject artifact_sha256). A release chain is one publish approval for intake, signing, signed intake and publication: kind approve, target.subject artifact_sha256 = the unsigned APK digest, and one option `release_chain` described exactly `发布链 <40-hex source commit> 发布到 <https APK URL template>`, where the template may use `<version>` (versionName) and `<sha12>` (first 12 hex of the signed APK digest). Use the chain decision as the basis for the unsigned intake. A failure before any OSS write consumes nothing: fix it and call again with the same decision. After a failure once writing began, calling again with the same (or a new) approval resumes: the files this release already wrote are read back and verified, only the missing ones are written, and nothing is overwritten. Failures name the step and a fixed-wording sub-reason (e.g. approval kind or target mismatch, configuration unreadable, credential profile count, package name mismatch). Returns verified URL, size and SHA-256; never accepts credentials, commands or paths. Optional release_note saves the user-facing notes of this version after it is verified; without it the publication is unchanged and the result says the note is still missing. Also returns the cards merged since the previous successful publication as reference.",
     input: input.extend({
       release_note: z
         .string()

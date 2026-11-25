@@ -101,6 +101,7 @@ import {
   trackedPublisher,
 } from "./publication-recovery.js";
 import { apkPublisher } from "./publish-artifact.js";
+import { approvalPrecheck } from "./publish-precheck.js";
 import { RepositoryLockMetrics } from "./repository-lock-metrics.js";
 import {
   clearTickProfileSync,
@@ -643,6 +644,10 @@ async function assembleServer(
               capabilityGuides: (project) =>
                 listCapabilityGuides(store, project),
               ...(publisher ? { publishArtifact: publisher } : {}),
+              // C-754: a publish approval reaches no one unless this host could honour it.
+              precheckPublication: publisher
+                ? approvalPrecheck(config.dataDir)
+                : async () => ["本主机未开启测试包外发"],
               ...(mobileSigning
                 ? {
                     openMobileArtifact: (scope, id, current) =>

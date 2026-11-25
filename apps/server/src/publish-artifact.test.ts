@@ -470,6 +470,14 @@ test.each([
   }
   const download = ["range", "badHash"].includes(issue);
   await expect(f.call()).rejects.toThrow(download ? "download" : issue);
+  // C-754: each closed failure names its fixed-wording sub-reason.
+  const reason = {
+    configuration: "凭据文件 不存在、不是普通文件或不是服务用户独占 0600",
+    signature: "签名证书与配置不符或签名无效",
+    manifest: "APK 包名与配置的 package_name 不符",
+    immutable_prefix: "OSS 版本控制已开启或暂停",
+  }[issue as string];
+  if (reason) await expect(f.call()).rejects.toThrow(`${issue}（${reason}）`);
   expect(f.objects.size).toBe(download ? 1 : 0);
   expect(f.claim).toHaveBeenCalledTimes(download ? 1 : 0);
 });
@@ -612,7 +620,16 @@ test.each([
     if (issue === "wrong-region") registry.profiles[0].region_id = "another";
     await writeFile(path, JSON.stringify(registry));
   }
-  await expect(f.call()).rejects.toThrow("configuration");
+  // C-754: the sub-reason is named; values stay out.
+  await expect(f.call()).rejects.toThrow(
+    {
+      "another-project": "configuration（credential_file 与项目不符）",
+      "multiple-profiles":
+        "configuration（凭据文件须只有 1 个 profile（当前 2 个））",
+      "wrong-profile": "configuration（凭据 profile 名称与配置不符）",
+      "wrong-region": "configuration（凭据 profile 地域与配置不符）",
+    }[issue],
+  );
   expect(f.execute.mock.calls.some(([tool]) => tool === target.ossutil)).toBe(
     false,
   );
