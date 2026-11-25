@@ -17,6 +17,7 @@ import {
   requestDecision,
   requestHumanAction,
   resolveDelegatedDecision,
+  updateCard,
 } from "@cardigan/domain";
 import { type CapabilityProbe, RuntimeTargets } from "@cardigan/host";
 import { writeRegisteredRuntime } from "@cardigan/runtime-herdr";
@@ -1659,6 +1660,59 @@ test("needs-you lists open human decisions and pending human actions", async () 
   } finally {
     store.close();
   }
+});
+
+test("C-750: needs-you lists a finished card waiting for the owner to mark done", async () => {
+  await bootstrap();
+  await run([
+    "card",
+    "create",
+    "--template",
+    "general",
+    "--title",
+    "整理发布规则",
+    "--goal",
+    "G",
+  ]);
+  const store = Store.open({ dataDir });
+  try {
+    const human = { kind: "human", project_id: "p-work" as never } as const;
+    runCommand(store, {
+      project_id: "p-work" as never,
+      actor: human,
+      reduce: (state, actor, ports) =>
+        updateCard(
+          state,
+          actor,
+          {
+            card_id: "C-1" as never,
+            close_request: { reason: "规则已写进文档" },
+          },
+          ports,
+        ),
+    });
+  } finally {
+    store.close();
+  }
+  expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
+  const text = printed();
+  expect(text).toContain("待你标记完成（1）");
+  expect(text).toContain("整理发布规则");
+  expect(text).toContain("结项说明：规则已写进文档");
+  expect(text).toContain("cardigan card done");
+  expect(
+    await run([
+      "card",
+      "done",
+      "C-1",
+      "--result",
+      "已完成",
+      "--project",
+      "p-work",
+    ]),
+  ).toBe(0);
+  expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
+  expect(printed()).not.toContain("待你标记完成");
 });
 
 test("needs-you says so when nothing is waiting for the human", async () => {
