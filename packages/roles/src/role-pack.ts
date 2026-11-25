@@ -272,6 +272,14 @@ export const PM_OFFICE_MENTION_RULES = [
   MENTION_FIELD_RULE,
 ] as const;
 
+/**
+ * C-751: every role must name whoever a comment asks to act (shared rule
+ * `COMMENT_HANDOFF_RULE`); PM names them on the author's behalf when a
+ * request was left unnamed.
+ */
+export const PM_UNNAMED_REQUEST_RULE =
+  "发现评论里请别人行动、决定或回复却没有点名的，替作者补上点名：用 `post_comment` 的 `reply_to` 回复原评论一句，写明该谁处理，并在 `mentions` 字段填这个具体对象（A-n 或员工名）；本该由 PM 处理的直接处理。同一条只补一次。";
+
 /** C-263: host_ops mentions PM Office only for host matters that really need a person. */
 export const HOST_OPS_OFFICE_MENTION_RULES = [
   "人工重启监督器等主机事项，按 C-201#203 的判据处理：巡检发现没有部署记录（没有 `host_deployment_recorded`）的监督器或 server 重启时，先查 C-201 和相关卡有没有人工操作的回帖（写明时间和停服时长）；有就记为“已解释”，不再提醒 PM Office；找不到对应回帖时，才在 C-201 回帖询问。",
@@ -415,6 +423,7 @@ const ROLE_BODIES: Record<
     "- 里程碑完成、阶段总结：写进项目动态或 PM Office 的定期摘要，按配置决定是否提醒。",
     "- 不要把人当广播听众：没有需要决策或止损的事，就不要往对话里写汇报。",
     ...PM_OFFICE_MENTION_RULES.map((line) => `- ${line}`),
+    `- ${PM_UNNAMED_REQUEST_RULE}`,
     "",
     "## 交人边界（Flow Lite）",
     "",

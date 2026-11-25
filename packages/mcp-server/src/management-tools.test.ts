@@ -865,6 +865,25 @@ test("S21 tools/list advertises optional project defaults", async () => {
   expect(tool?.description).toMatch(/default base branch/);
 });
 
+test("C-751 tools/list: post_comment asks to name whoever must act", async () => {
+  const tool = (await office.listTools()).tools.find(
+    (t) => t.name === "post_comment",
+  );
+  for (const phrase of [
+    "系统只按点名通知",
+    "必须点名具体对象",
+    "在 `mentions` 填 Assignment 编号（A-n）或员工名",
+    "不点名的评论只是记录",
+    "report_blocker",
+    "代码块（含行内代码）或引用块（以 > 开头的行）里的 @ 不生效",
+  ])
+    expect(tool?.description).toContain(phrase);
+  // A rule, not a detector: no new field on the comment.
+  expect(Object.keys(tool?.inputSchema.properties ?? {})).not.toContain(
+    "no_handoff",
+  );
+});
+
 test("MCP assign accepts employee IDs/names, auto selects globally and whoami/read views resolve trusted identity", async () => {
   const employee = store.uow.run((tx) => {
     const e = {
