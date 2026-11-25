@@ -80,9 +80,7 @@ export class DormantEvent {
     readonly type: string,
     readonly card_id: string | undefined,
     /** Payload index keys, in `append` order, so another log can re-index it. */
-    readonly keys:
-      | readonly (readonly [EventIndexKind, unknown])[]
-      | undefined,
+    readonly keys: readonly (readonly [EventIndexKind, unknown])[] | undefined,
   ) {}
 }
 /**
@@ -269,6 +267,8 @@ export class EventLog {
   loader: DormantLoader | undefined;
   /** C-671: dormant entries not decoded yet, per stream. */
   readonly #dormant = new Map<string, number>();
+  /** C-671: dormant entries not decoded yet, per event type. */
+  readonly #dormantTypes = new Map<string, number>();
   constructor(readonly start = 0) {}
 
   get end(): number {
@@ -339,6 +339,10 @@ export class EventLog {
     for (const [kind, key] of entry.keys ?? [])
       this.#index(kind, key, stream, ord);
     this.#dormant.set(stream, (this.#dormant.get(stream) ?? 0) + 1);
+    this.#dormantTypes.set(
+      entry.type,
+      (this.#dormantTypes.get(entry.type) ?? 0) + 1,
+    );
   }
 
   /** Stream, ids and type index of one entry; returns its ordinal. */
@@ -384,12 +388,13 @@ export class EventLog {
 
   /** C-671: dormant entries per event type (diagnostics and benchmarks). */
   dormantTypes(): Map<string, number> {
-    const counts = new Map<string, number>();
-    for (const stream of this.#dormant.keys())
-      for (const entry of (this.streams.get(stream) as Seg).events)
-        if (entry instanceof DormantEvent)
-          counts.set(entry.type, (counts.get(entry.type) ?? 0) + 1);
-    return counts;
+    return new Map(this.#dormantTypes);
+  }
+
+  /** C-671: whether any entry of these types is still dormant. */
+  dormantOf(types: Iterable<string>): boolean {
+    for (const type of types) if (this.#dormantTypes.has(type)) return true;
+    return false;
   }
 
   /** C-671: whether `stream` still holds dormant entries. */
@@ -408,11 +413,10 @@ export class EventLog {
     const at: number[] = [];
     if (ords) {
       const found = new Set<number>();
-      for (const ord of ords) {
-        const i = below(seg.ords, ord);
-        if (seg.ords[i] === ord && seg.events[i] instanceof DormantEvent)
-          found.add(i);
-      }
+      // O(1) first: most asked-for entries are decoded already.
+      for (const ord of ords)
+        if (this.#all[ord - this.start] instanceof DormantEvent)
+          found.add(below(seg.ords, ord));
       at.push(...[...found].sort((a, b) => a - b));
     } else
       for (let i = 0; i < seg.events.length; i++)
@@ -439,6 +443,9 @@ export class EventLog {
       const ord = seg.ords[i] as number;
       this.#all[ord - this.start] = event;
       seg.events[i] = event;
+      const left = (this.#dormantTypes.get(event.type) as number) - 1;
+      if (left > 0) this.#dormantTypes.set(event.type, left);
+      else this.#dormantTypes.delete(event.type);
       const part = (
         isTelemetryEvent(event) ? this.telemetryStreams : this.commandStreams
       ).get(stream) as Seg;
@@ -828,6 +835,9 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
     };
     const own = ords(this.base, this.baseEnd);
     const extra = ords(this.overlay, this.end);
+    // C-671: resident types (the usual case) skip the dormant check.
+    const dormant =
+      this.base.dormantOf(types) || !!this.overlay?.dormantOf(types);
     const streams = new Map<string, readonly Event[]>();
     for (const stream of new Set([...own.keys(), ...extra.keys()])) {
       // Ordinals ascend with seq inside a stream; several types interleave.
@@ -835,13 +845,13 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
       const a = own.get(stream);
       if (a) {
         if (types.size > 1) a.sort((x, y) => x - y);
-        this.base.resolve(stream, a);
+        if (dormant) this.base.resolve(stream, a);
         for (const ord of a) events.push(this.base.entryAt(ord) as Event);
       }
       const b = extra.get(stream);
       if (b && this.overlay) {
         if (types.size > 1) b.sort((x, y) => x - y);
-        this.overlay.resolve(stream, b);
+        if (dormant) this.overlay.resolve(stream, b);
         for (const ord of b) events.push(this.overlay.entryAt(ord) as Event);
       }
       streams.set(stream, events);
