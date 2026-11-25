@@ -191,7 +191,8 @@ type CommandName =
   | "confirm_story_proposal"
   | "clear_released_runtime_refs"
   | "request_worktree_cleanup"
-  | "request_held_assignment_resume";
+  | "request_held_assignment_resume"
+  | "record_readonly_checkout";
 export function ensure(
   condition: unknown,
   code: ErrorCode,
@@ -364,6 +365,7 @@ export class CommandDraft {
       "request_worktree_cleanup",
       "request_held_assignment_resume",
       "clear_released_runtime_refs",
+      "record_readonly_checkout",
     ].includes(tool);
     // Only recheck_merge maps onto a host_ops tool. abort_dispatch and
     // pause_standing_assignment are host/human-only: host_ops reaches them

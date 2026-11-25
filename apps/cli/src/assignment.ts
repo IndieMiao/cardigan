@@ -35,6 +35,7 @@ import {
   RunProviderDeferred,
   RuntimeTargets,
   readonlyWorktreeTarget,
+  recordArtifactCheckout,
   resolveMcpUrl,
   type SessionExitVerdict,
   scrubRunCredentials,
@@ -227,6 +228,7 @@ async function prepareWorktree(
   });
   if (placed === undefined)
     throw new CliError("Git 服务没有给出 worktree", EXIT.failure);
+  recordArtifactCheckout(store, project_id, assignment.id, placed);
   return placed;
 }
 

@@ -2,6 +2,7 @@ import type {
   Assignment,
   Card,
   DecisionId,
+  DeliveryId,
   ProjectId,
   Role,
   Runtime,
@@ -9,6 +10,8 @@ import type {
 } from "@cardigan/domain";
 import {
   pauseDiscussionFor,
+  readonlyReviewTarget,
+  recordReadonlyCheckout,
   worktreeUnavailablePrompt,
   worktreeUnavailableReason,
 } from "@cardigan/domain";
@@ -28,7 +31,7 @@ import {
 } from "@cardigan/runtime-herdr";
 import type { ReadRepositories, Store } from "@cardigan/store";
 import { AgentGitTransport } from "./agent-git.js";
-import { launchEntities } from "./commands.js";
+import { applyCommand, launchEntities } from "./commands.js";
 import { withPreparationQueue } from "./preparation-queue.js";
 import { hostRepositoryLock } from "./repository-lock.js";
 import { RuntimeTargets } from "./runtime-targets.js";
@@ -44,6 +47,14 @@ export interface PreparedWorktree {
   readonly start_point?: { readonly point: string; readonly sha: string };
   /** P2a-3: a readonly verifier's writable build checkout of the same delivery. */
   readonly build?: { readonly path: string; readonly sha: string };
+  /** C-630: the artifact delivery under review and the commit checked out for it. */
+  readonly artifact?: ArtifactCheckout & { readonly sha: string };
+}
+
+/** C-630: an artifact delivery has no Git commit to check out. */
+export interface ArtifactCheckout {
+  readonly delivery_id: DeliveryId;
+  readonly source: "baseline" | "source_commit";
 }
 
 /** Host facts the Agent needs on every start or wake: baseline and build checkout. */
@@ -63,6 +74,9 @@ export function worktreeBaselinePrompt(
     worktree?.review_plan
       ? `本次只确认 ${worktree.review_plan} 的方案方向。只读检出是项目基线，不是待审交付；请在卡上回复方案。`
       : undefined,
+    worktree?.artifact
+      ? `待审的 ${worktree.artifact.delivery_id} 是制品交付，没有 Git 提交；只读工作区检出的是${worktree.artifact.source === "baseline" ? "基线当前 HEAD" : "制品记录的源码提交"} ${worktree.artifact.sha}，不是制品本身。请用 read_attachment 或下载助手核对制品。`
+      : undefined,
     build === undefined
       ? undefined
       : `可写构建目录：${build.path}（交付 ${build.sha} 的全新独立检出，可安装依赖、构建和跑测试；只读 worktree 保持不动。本次 Run 结束后主机会删除它，里面的改动不会保留，也不会被拉取、交付或合并）。`,
@@ -79,6 +93,8 @@ export interface WorktreeRequest {
   readonly work_item?: WorkItem | undefined;
   readonly target_sha?: string;
   readonly review_plan?: DecisionId;
+  /** C-630: the current target is an artifact delivery. */
+  readonly artifact?: ArtifactCheckout;
 }
 export type WorktreeProvider = (
   request: WorktreeRequest,
@@ -108,21 +124,8 @@ function currentDeliverySha(
 ): string | undefined {
   if (item?.kind !== "verify")
     throw new Error("Readonly Assignment requires a verification work item");
-  const delivery = tx.deliveries
-    .list(project)
-    .filter(
-      (d) =>
-        d.status !== "superseded" &&
-        (item.target_work_item_id
-          ? d.work_item_id === item.target_work_item_id &&
-            d.kind !== "card_completion"
-          : d.kind === "card_completion" &&
-            d.requested_verifiers.includes(item.id)),
-    )
-    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-  return delivery?.subject.kind === "git_head"
-    ? delivery.subject.value
-    : undefined;
+  const target = readonlyReviewTarget(tx.deliveries.list(project), item);
+  return target?.kind === "git" ? target.sha : undefined;
 }
 
 /** A plan is a discussion target, never a substitute SHA for a formal review. */
@@ -131,7 +134,8 @@ export function readonlyWorktreeTarget(
   project: ProjectId,
   assignment: Assignment,
 ): { work_item: WorkItem } & (
-  | { target_sha: string }
+  | { target_sha: string; artifact?: ArtifactCheckout }
+  | { artifact: ArtifactCheckout }
   | { review_plan: DecisionId }
 ) {
   if (assignment.scope !== "work_item")
@@ -151,8 +155,25 @@ export function readonlyWorktreeTarget(
     // A pause can also name a reviewer who still has a formal delivery to inspect.
     // Never substitute the baseline for that delivery. Without one, project the
     // current discussion target from the same read transaction for a readonly checkout.
-    const sha = currentDeliverySha(tx, project, current);
-    if (sha) return { work_item: current, target_sha: sha };
+    const target = readonlyReviewTarget(tx.deliveries.list(project), current);
+    if (target?.kind === "git")
+      return { work_item: current, target_sha: target.sha };
+    // C-630: an artifact delivery is still the formal target. Check out its
+    // recorded source commit, else the card baseline; never fake a Git delivery.
+    if (target?.kind === "artifact")
+      return target.source
+        ? {
+            work_item: current,
+            target_sha: target.source.sha.toLowerCase(),
+            artifact: {
+              delivery_id: target.delivery_id,
+              source: "source_commit",
+            },
+          }
+        : {
+            work_item: current,
+            artifact: { delivery_id: target.delivery_id, source: "baseline" },
+          };
     const plan = pauseDiscussionFor(
       tx.decisions.list(project),
       assignment.id,
@@ -274,6 +295,9 @@ export function worktreeProvider(
           ...(request.work_item ? { work_item: request.work_item } : {}),
           ...(request.review_plan ? { review_plan: request.review_plan } : {}),
           ...(request.target_sha ? { target_sha: request.target_sha } : {}),
+          ...(request.artifact?.source === "baseline"
+            ? { artifact_delivery: request.artifact.delivery_id }
+            : {}),
         });
         if (!placed) return undefined;
         // P2a-3: a readonly verifier also gets a writable checkout of the same SHA.
@@ -291,10 +315,24 @@ export function worktreeProvider(
                 target_sha: request.target_sha,
               })
             : undefined;
+        const artifactSha =
+          request.artifact?.source === "baseline"
+            ? placed.baseline?.sha
+            : request.target_sha;
+        if (request.artifact && !artifactSha)
+          throw new Error("Artifact checkout did not report its commit");
         return {
           path: placed.worktree_path,
           base_sha: placed.base_sha,
           ...(request.review_plan ? { review_plan: request.review_plan } : {}),
+          ...(request.artifact && artifactSha
+            ? {
+                artifact: {
+                  ...request.artifact,
+                  sha: artifactSha.toLowerCase(),
+                },
+              }
+            : {}),
           ...(placed.baseline ? { baseline: placed.baseline } : {}),
           ...(placed.branch ? { branch: placed.branch } : {}),
           ...(placed.start_point ? { start_point: placed.start_point } : {}),
@@ -331,7 +369,7 @@ export async function prepareRoleWorktree(
   const source = host.store.getProject(project)?.repo_path;
   if (!source)
     throw new Error(`Project ${project} has no registered repository`);
-  return worktreeProvider(
+  const worktree = await worktreeProvider(
     host.execution,
     host.runtime,
   )({
@@ -341,6 +379,38 @@ export async function prepareRoleWorktree(
     ...(entities.role.worktree === "readonly"
       ? readonlyWorktreeTarget(host.store, project, entities.assignment)
       : { work_item: entities.workItem }),
+  });
+  recordArtifactCheckout(host.store, project, assignment, worktree);
+  return worktree;
+}
+
+/** C-630: state on the card which commit an artifact verifier was given. */
+export function recordArtifactCheckout(
+  store: Store,
+  project: ProjectId,
+  assignment: Assignment["id"],
+  worktree: PreparedWorktree | undefined,
+): void {
+  const artifact = worktree?.artifact;
+  if (!artifact) return;
+  applyCommand(store, {
+    project,
+    actor: { kind: "system", project_id: project },
+    reduce: (state, actor, ports) =>
+      recordReadonlyCheckout(
+        state,
+        actor,
+        {
+          assignment_id: assignment,
+          delivery_id: artifact.delivery_id,
+          sha: artifact.sha,
+          source: artifact.source,
+          ...(artifact.source === "baseline" && worktree.baseline
+            ? { baseline_ref: worktree.baseline.ref }
+            : {}),
+        },
+        ports,
+      ),
   });
 }
 
