@@ -5,6 +5,9 @@ import {
   DEFAULT_CONTEXT_RESTART_RETRY_DELAYS_MS,
   humanRestartCommand,
   transientContextRestartReason,
+  type UpstreamHoldDetail,
+  upstreamHoldDetailPayload,
+  upstreamHoldDetailText,
 } from "../context-restart-retry.js";
 import {
   type ContextObservation,
@@ -17,12 +20,16 @@ import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import { eventById, eventsOfType } from "../event-index.js";
 import {
   type HostOpsExecution,
+  hostOpsActionPending,
   hostOpsPending,
+  openRestartFailures,
   pendingHostOpsActions,
+  restartFencesOnlyOnSession,
 } from "../host-ops.js";
-import type { EventId } from "../ids.js";
+import type { EventId, HumanActionId } from "../ids.js";
 import { runsOf } from "../run-index.js";
 import type { RetirementIdentity } from "../runtime-port.js";
+import { transition } from "../transitions.js";
 import {
   type CommandDraft,
   type CommandPorts,
@@ -30,6 +37,7 @@ import {
   command,
   ensure,
   text,
+  unwrap,
 } from "./core.js";
 import {
   beginHostOpsActionInDraft,
@@ -62,6 +70,8 @@ export function automaticContextRestartReady(
   now: string,
   staleAfterMs: number,
   actionId?: HostOpsExecution["action_id"],
+  /** C-745: the host saw the upstream diagnosis available and passing now. */
+  diagnosisRecovered = false,
 ) {
   const a = state.assignments.find((a) => a.id === usage.assignment_id);
   if (
@@ -102,12 +112,25 @@ export function automaticContextRestartReady(
     return false;
   // C-741: a session gets one attempt, plus the retries its held attempts
   // scheduled; a retry starts only once due and the session is idle again.
+  // C-745: a session closed only by an unavailable upstream diagnosis gets
+  // one more attempt once the host sees that diagnosis available again.
+  if (actionId !== undefined) return true;
+  const retry = contextRestartRetryState(
+    state.events,
+    a.id,
+    usage.session_id,
+    now,
+  );
+  // The extra attempt takes over only this session's own failure fence.
+  if (retry === "recoverable")
+    return (
+      diagnosisRecovered &&
+      !hostOpsActionPending(state.events, a.id) &&
+      restartFencesOnlyOnSession(state.events, a.id, usage.session_id)
+    );
   return (
-    actionId !== undefined ||
-    (!hostOpsPending(state.events, a.id) &&
-      ["fresh", "due"].includes(
-        contextRestartRetryState(state.events, a.id, usage.session_id, now),
-      ))
+    !hostOpsPending(state.events, a.id) &&
+    (retry === "fresh" || retry === "due")
   );
 }
 
@@ -119,12 +142,30 @@ export function beginAutomaticContextRestart(
     stale_after_ms: number;
     snapshot?: HostOpsExecution["snapshot"];
     preparation_failed?: boolean;
+    /** C-745: host-checked; allows the one attempt after diagnosis recovery. */
+    diagnosis_recovered?: boolean;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
-    if (!automaticContextRestartReady(state, p.usage, d.now, p.stale_after_ms))
+    if (
+      !automaticContextRestartReady(
+        state,
+        p.usage,
+        d.now,
+        p.stale_after_ms,
+        undefined,
+        p.diagnosis_recovered === true,
+      )
+    )
       return;
+    const recovery =
+      contextRestartRetryState(
+        state.events,
+        p.usage.assignment_id,
+        p.usage.session_id,
+        d.now,
+      ) === "recoverable";
     if (!p.preparation_failed) {
       ensure(p.snapshot, "validation_failed", "Launch snapshot is required");
       text(p.snapshot.model, "model");
@@ -137,18 +178,59 @@ export function beginAutomaticContextRestart(
     const intent = beginHostOpsActionInDraft(d, {
       tool: pm ? "host_ops_restart_standing_pm" : "host_ops_restart_assignment",
       target_id: p.usage.assignment_id,
-      reason: pm
-        ? "常驻 PM 上下文到档，系统在空闲时换会话。"
-        : "主机运维自身上下文到档，系统在空闲时换会话。",
+      reason: `${
+        pm
+          ? "常驻 PM 上下文到档，系统在空闲时换会话。"
+          : "主机运维自身上下文到档，系统在空闲时换会话。"
+      }${recovery ? "上次因上游诊断不可用未换成，诊断已恢复，自动再试一次。" : ""}`,
       automatic_context_restart: true,
+      ...(recovery ? { diagnosis_recovery_retry: true } : {}),
       context_usage: p.usage,
       context_stale_after_ms: p.stale_after_ms,
       ...(p.snapshot ? { snapshot: p.snapshot } : {}),
     });
+    if (recovery) takeOverDiagnosisFailures(d, p.usage);
     if (p.preparation_failed)
       recordResult(d, intent.action_id, "failed", "启动配置准备失败");
     return intent;
   });
+}
+
+/**
+ * C-745: the extra attempt takes over the earlier failure on this session;
+ * its open recovery item no longer asks anyone to restart by hand. A failure
+ * of the extra attempt opens a new item of its own.
+ */
+function takeOverDiagnosisFailures(d: CommandDraft, usage: ContextObservation) {
+  for (const failure of openRestartFailures(d.state.events)) {
+    const p = failure.payload as {
+      assignment_id?: string;
+      human_action_id?: HumanActionId;
+      context_usage?: { session_id?: string };
+    };
+    if (
+      p.assignment_id !== usage.assignment_id ||
+      p.context_usage?.session_id !== usage.session_id ||
+      !p.human_action_id
+    )
+      continue;
+    const item = d
+      .list("human_actions")
+      .find((h) => h.id === p.human_action_id);
+    if (item?.status !== "open" || item.blocked_work_items.length) continue;
+    const text = `上游诊断已恢复，系统对会话 ${usage.session_id} 自动再试一次换会话；本事项不再需要人手动执行，结果见后续换会话记录。`;
+    d.put("human_actions", {
+      ...item,
+      status: unwrap(transition("human_action", item.status, "complete")),
+      result: { text, attachments: [], at: d.now },
+    });
+    d.emit(
+      "human_action_completed",
+      item.card_id,
+      { human_action_id: item.id, resume_work_items: [] },
+      { type: "human_action", body: text, human_action_id: item.id },
+    );
+  }
 }
 
 /** Flow 5 loopback launches have no generation. The creating Run's label
@@ -395,7 +477,10 @@ function recordResult(
   result: "succeeded" | "failed",
   reason: string,
   retryDelaysMs: readonly number[] = DEFAULT_CONTEXT_RESTART_RETRY_DELAYS_MS,
+  upstreamDetail?: UpstreamHoldDetail,
 ) {
+  const detail = upstreamHoldDetailPayload(upstreamDetail);
+  const detailText = upstreamHoldDetailText(detail);
   const intent =
     d.state.events.find(
       (e) => e.id === actionId && e.type === "host_ops_action_taken",
@@ -433,6 +518,7 @@ function recordResult(
       action_id: actionId,
       assignment_id: action.assignment_id,
       reason,
+      ...(detail ? { upstream_detail: detail } : {}),
       notify_pm: true,
     });
   }
@@ -482,7 +568,7 @@ function recordResult(
   if (usage && delay !== undefined && Number.isFinite(delay) && delay >= 0) {
     const retryAt = new Date(Date.parse(d.now) + delay).toISOString();
     const minutes = Math.max(1, Math.round(delay / 60_000));
-    const body = `${who} ${action.assignment_id} 自动换会话暂缓：${usageText}原因 ${reason}。约 ${minutes} 分钟后、会话空闲时自动重试（第 ${retries + 1}/${retryDelaysMs.length} 次重试）。`;
+    const body = `${who} ${action.assignment_id} 自动换会话暂缓：${usageText}原因 ${reason}${detailText}。约 ${minutes} 分钟后、会话空闲时自动重试（第 ${retries + 1}/${retryDelaysMs.length} 次重试）。`;
     return d.emit(
       "context_session_restart_result",
       undefined,
@@ -492,6 +578,7 @@ function recordResult(
         context_usage: { ...usage },
         result: CONTEXT_RESTART_RETRY_SCHEDULED,
         reason,
+        ...(detail ? { upstream_detail: detail } : {}),
         retry_at: retryAt,
         attempt: retries + 1,
         body,
@@ -503,7 +590,7 @@ function recordResult(
   const exhausted = held;
   const body = !usage
     ? `派发积压 ${action.assignment_id} 换会话${result === "succeeded" ? "成功" : "失败"}：${reason}`
-    : `${who} ${action.assignment_id} 自动换会话${result === "succeeded" ? "成功" : "失败"}：${usageText}${reason}${exhausted ? `（已按退避重试 ${retries} 次仍被挡住）` : ""}`;
+    : `${who} ${action.assignment_id} 自动换会话${result === "succeeded" ? "成功" : "失败"}：${usageText}${reason}${result === "failed" ? detailText : ""}${exhausted ? `（已按退避重试 ${retries} 次仍被挡住）` : ""}`;
   const humanId =
     result === "failed"
       ? d.ids.next(d.state.project_id, "human_action")
@@ -563,6 +650,7 @@ function recordResult(
         : {}),
       result,
       reason,
+      ...(detail && result === "failed" ? { upstream_detail: detail } : {}),
       body,
       ...(run ? { run_id: run.id } : {}),
       ...(humanId ? { human_action_id: humanId } : {}),
@@ -583,10 +671,19 @@ export function recordAutomaticContextRestartResult(
     reason: string;
     /** C-741: host-configured backoff; defaults to 2, 5 and 10 minutes. */
     retry_delays_ms?: readonly number[];
+    /** C-745: why the upstream diagnosis was unavailable, when it was. */
+    upstream_detail?: UpstreamHoldDetail;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) =>
-    recordResult(d, p.action_id, p.result, p.reason, p.retry_delays_ms),
+    recordResult(
+      d,
+      p.action_id,
+      p.result,
+      p.reason,
+      p.retry_delays_ms,
+      p.upstream_detail,
+    ),
   );
 }

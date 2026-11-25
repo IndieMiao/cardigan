@@ -36,10 +36,75 @@ export function transientContextRestartReason(reason: string) {
   return TRANSIENT_REASONS.has(reason);
 }
 
+/**
+ * C-745: the reason a closed session may get one more automatic attempt —
+ * its last attempt failed only because the upstream diagnosis itself was
+ * unavailable, which says nothing about the line or the session.
+ */
+const DIAGNOSIS_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set([
+  "upstream_diagnosis_unavailable",
+  "upstream_observation_failed",
+]);
+
+/**
+ * C-745: why the upstream diagnosis was unavailable when a recovery or a
+ * context restart was held: the project or provider-group classification had
+ * failed (with the failure's start, count and error type when known), the
+ * session's provider could not be resolved, or there was no diagnosis at all.
+ */
+// A type alias, not an interface, so it stays assignable to event JSON.
+export type UpstreamHoldDetail = {
+  readonly sub_reason:
+    | "classification_failed"
+    | "provider_not_resolved"
+    | "no_diagnosis";
+  readonly classification_failed_since?: string;
+  readonly classification_failure_count?: number;
+  readonly classification_error_type?: string;
+};
+const SUB_REASONS: ReadonlySet<string> = new Set([
+  "classification_failed",
+  "provider_not_resolved",
+  "no_diagnosis",
+]);
+/** Copy only the known, bounded fields of a host-reported hold detail. */
+export function upstreamHoldDetailPayload(
+  detail: UpstreamHoldDetail | undefined,
+): UpstreamHoldDetail | undefined {
+  if (!detail || !SUB_REASONS.has(detail.sub_reason)) return undefined;
+  const since = detail.classification_failed_since;
+  const count = detail.classification_failure_count;
+  const type = detail.classification_error_type;
+  return {
+    sub_reason: detail.sub_reason,
+    ...(typeof since === "string" && Number.isFinite(Date.parse(since))
+      ? { classification_failed_since: since }
+      : {}),
+    ...(Number.isSafeInteger(count) && (count as number) > 0
+      ? { classification_failure_count: count as number }
+      : {}),
+    ...(typeof type === "string" && type.trim()
+      ? { classification_error_type: type.trim().slice(0, 80) }
+      : {}),
+  };
+}
+/** A short human-readable suffix for the hold detail, empty without one. */
+export function upstreamHoldDetailText(detail: UpstreamHoldDetail | undefined) {
+  if (!detail) return "";
+  const since = detail.classification_failed_since
+    ? `，分类失败自 ${detail.classification_failed_since} 起`
+    : "";
+  const count = detail.classification_failure_count
+    ? `，连续 ${detail.classification_failure_count} 次`
+    : "";
+  return `（${detail.sub_reason}${since}${count}）`;
+}
+
 interface RestartResultPayload {
   readonly action_id?: string;
   readonly assignment_id?: string;
   readonly result?: string;
+  readonly reason?: string;
   readonly retry_at?: string;
   readonly human_action_id?: string;
   readonly context_usage?: { readonly session_id?: string };
@@ -62,6 +127,22 @@ function sessionAttempts(
   });
 }
 
+/** Any sign that this attempt may have signalled or settled its old session. */
+function stopMayHaveStarted(events: readonly Event[], actionId: string) {
+  return (
+    eventsOfType(events, "host_ops_action_finished").some(
+      (e) => (e.payload as { action_id?: string }).action_id === actionId,
+    ) ||
+    eventsOfType(events, "host_ops_action_deferred").some((e) => {
+      const p = e.payload as { action_id?: string; reason?: string };
+      return (
+        p.action_id === actionId &&
+        p.reason === "automatic_context_stop_started"
+      );
+    })
+  );
+}
+
 /** Earlier attempts on this session that ended in a scheduled retry. */
 export function contextRestartRetries(
   events: readonly Event[],
@@ -82,6 +163,9 @@ export function contextRestartRetries(
  * - `fresh`: nothing was attempted on this session yet;
  * - `due`: every earlier attempt was held and its retry time has come;
  * - `waiting`: a retry is scheduled but not due yet;
+ * - `recoverable` (C-745): the last attempt failed for good only because the
+ *   upstream diagnosis was unavailable, and the session has not had its one
+ *   extra attempt after the diagnosis recovered yet;
  * - `closed`: an attempt is in flight, succeeded or failed for good.
  */
 export function contextRestartRetryState(
@@ -89,19 +173,33 @@ export function contextRestartRetryState(
   assignment: AssignmentId,
   session: string,
   now: string,
-): "fresh" | "due" | "waiting" | "closed" {
-  const attempts = sessionAttempts(events, assignment, session);
-  if (attempts.length === 0) return "fresh";
+): "fresh" | "due" | "waiting" | "recoverable" | "closed" {
+  const all = sessionAttempts(events, assignment, session);
+  if (all.length === 0) return "fresh";
   const results = new Map(
     eventsOfType(events, "context_session_restart_result").map((e) => [
       (e.payload as RestartResultPayload).action_id,
       e.payload as RestartResultPayload,
     ]),
   );
+  // The extra attempt starts a new chain; only it and its retries decide.
+  const recovery = all.findIndex(
+    (e) =>
+      (e.payload as { diagnosis_recovery_retry?: boolean })
+        .diagnosis_recovery_retry === true,
+  );
+  const attempts = recovery >= 0 ? all.slice(recovery) : all;
   let retryAt = Number.NEGATIVE_INFINITY;
-  for (const attempt of attempts) {
+  for (const [i, attempt] of attempts.entries()) {
     const result = results.get(attempt.id);
-    if (result?.result !== CONTEXT_RESTART_RETRY_SCHEDULED) return "closed";
+    if (result?.result !== CONTEXT_RESTART_RETRY_SCHEDULED)
+      return recovery < 0 &&
+        i === attempts.length - 1 &&
+        result?.result === "failed" &&
+        DIAGNOSIS_UNAVAILABLE_REASONS.has(result.reason ?? "") &&
+        !stopMayHaveStarted(events, attempt.id)
+        ? "recoverable"
+        : "closed";
     retryAt = Math.max(retryAt, Date.parse(result.retry_at ?? ""));
   }
   if (!Number.isFinite(retryAt)) return "closed";

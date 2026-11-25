@@ -13,7 +13,12 @@ import {
   type Runtime,
   type UpstreamDiagnosis,
 } from "@cardigan/domain";
-import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import {
+  loadCommandState,
+  persistEffect,
+  ToolError,
+  unwrap,
+} from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
@@ -459,12 +464,22 @@ test("C-462: a recent read of a stale Claude transcript is not an indefinite sto
   expect(service.harnessActivity(project, ops.id)).toEqual(activity);
 });
 
-function heldMonitor(cause: () => "held" | "healthy") {
+const classificationFailure = {
+  source: "reconcile",
+  error_type: "SqliteError:SQLITE_BUSY",
+  summary: "database is locked",
+  started_at: "2029-12-31T23:59:00.000Z",
+  count: 2,
+  recorded_at: "2029-12-31T23:59:00.000Z",
+};
+function heldMonitor(cause: () => "held" | "healthy" | "fault") {
   return {
     schedule() {},
     observe: async () => ({}),
     reconcile() {},
     observationFailed() {},
+    classificationFailure: () =>
+      cause() === "held" ? classificationFailure : undefined,
     diagnostics: () => ({ sessions: [] }),
     close: async () => {},
     diagnosis: (_state: unknown, id: string): UpstreamDiagnosis =>
@@ -477,14 +492,23 @@ function heldMonitor(cause: () => "held" | "healthy") {
             action: "wait",
             evidence: ["classification_failed"],
           }
-        : {
-            assignment_id: id as Assignment["id"],
-            provider: "fixture",
-            group: "fixture",
-            cause: "healthy",
-            action: "none",
-            evidence: [],
-          },
+        : cause() === "fault"
+          ? {
+              assignment_id: id as Assignment["id"],
+              provider: "fixture",
+              group: "fixture",
+              cause: "upstream_unreachable",
+              action: "wait",
+              evidence: ["probe_unreachable"],
+            }
+          : {
+              assignment_id: id as Assignment["id"],
+              provider: "fixture",
+              group: "fixture",
+              cause: "healthy",
+              action: "none",
+              evidence: [],
+            },
   } as unknown as UpstreamHealthMonitor;
 }
 async function settled(count: number) {
@@ -515,6 +539,13 @@ test("C-741: an unavailable upstream diagnosis is retried with backoff and the i
     payload: {
       result: "retry_scheduled",
       reason: "upstream_diagnosis_unavailable",
+      // C-745: the sub-reason and since when the classification failed.
+      upstream_detail: {
+        sub_reason: "classification_failed",
+        classification_failed_since: classificationFailure.started_at,
+        classification_failure_count: 2,
+        classification_error_type: "SqliteError:SQLITE_BUSY",
+      },
       attempt: 1,
       retry_at: new Date(time + 120_000).toISOString(),
     },
@@ -681,4 +712,80 @@ test("C-741: a standing PM at the restart level is replaced by the system with t
   expect(state().runs).toEqual([
     expect.objectContaining({ assignment_id: pm.id, status: "queued" }),
   ]);
+});
+
+test("C-745: a session closed by an unavailable diagnosis is tried once more after it recovers; a line fault keeps it closed", async () => {
+  let line: "held" | "healthy" | "fault" = "held";
+  await service.close();
+  service = makeService({
+    upstreamMonitor: heldMonitor(() => line),
+    // No backoff left, as for the pre-C-741 attempt on 11-25.
+    contextUsage: {
+      execution: { mode: "local", dataDir: root },
+      restartRetryDelaysMs: [],
+    },
+  });
+  await ready();
+  await settled(1);
+  expect(events("context_session_restart_result")[0]).toMatchObject({
+    payload: {
+      result: "failed",
+      reason: "upstream_diagnosis_unavailable",
+      upstream_detail: { sub_reason: "classification_failed" },
+    },
+  });
+  const failure = state().human_actions[0];
+  expect(failure).toMatchObject({ status: "open" });
+  // Still unavailable, then a real line fault: no new attempt.
+  for (const next of ["held", "fault"] as const) {
+    line = next;
+    time += 600_000;
+    usage = { ...usage, updated_at: new Date(time + 30_001).toISOString() };
+    await poll();
+    await service.tick();
+    expect(events("host_ops_action_taken")).toHaveLength(1);
+  }
+  expect(runtime.release).not.toHaveBeenCalled();
+  // The diagnosis is back and the context is still over the level.
+  line = "healthy";
+  time += 60_000;
+  usage = { ...usage, updated_at: new Date(time + 30_001).toISOString() };
+  await poll();
+  await vi.waitFor(() =>
+    expect(events("host_ops_action_taken")).toHaveLength(2),
+  );
+  expect(events("host_ops_action_taken")[1]).toMatchObject({
+    payload: {
+      automatic_context_restart: true,
+      diagnosis_recovery_retry: true,
+    },
+  });
+  await settled(2);
+  expect(events("host_ops_action_finished")).toHaveLength(1);
+  expect(runtime.release).toHaveBeenCalledOnce();
+  expect(
+    state().human_actions.find((h) => h.id === failure?.id)?.status,
+  ).not.toBe("open");
+  expect(state().runs).toHaveLength(1);
+});
+
+test("C-745: a session that changed while sampled does not mark the whole project's classification failed", async () => {
+  const monitor = heldMonitor(() => "healthy");
+  const failed = vi.fn();
+  let error: Error = new ToolError("stale_target", "活动采样期间会话已更换");
+  const observe = vi.fn(async () => {
+    throw error;
+  });
+  Object.assign(monitor, { observationFailed: failed, observe });
+  await service.close();
+  service = makeService({ upstreamMonitor: monitor });
+  await service.tick();
+  await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(1));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(failed).not.toHaveBeenCalled();
+  error = new Error("runtime unavailable");
+  time += 30_001;
+  await service.tick();
+  await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(failed).toHaveBeenCalledWith(project, error));
 });

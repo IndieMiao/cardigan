@@ -1,10 +1,13 @@
 import { expect, test } from "vitest";
+import { contextRestartRetryState } from "../context-restart-retry.js";
 import type { ContextObservation } from "../context-usage.js";
 import type { Assignment, Event } from "../entities.js";
 import {
   HOST_OPS_ROLE_TOOLS,
   hostOpsPending,
+  openRestartFailures,
   pendingHostOpsActions,
+  restartFencesOnlyOnSession,
 } from "../host-ops.js";
 import { recordContextUsageNotices } from "./context-usage.js";
 import { completeHumanAction } from "./coordination.js";
@@ -1499,4 +1502,336 @@ test("C-741: a standing PM is restarted automatically with the same retries and 
     "done",
   );
   expect(hostOpsPending(after.events, pm.id)).toBe(false);
+});
+
+/** C-745: a session whose only attempt failed for good on an unavailable diagnosis. */
+function closedByDiagnosis(reason = "upstream_diagnosis_unavailable") {
+  const f = setup();
+  const begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  // No backoff entries left (or a pre-C-741 single attempt): failed for good.
+  f.state = apply(
+    f.state,
+    hold(f, f.io, required(begun.data).action_id, reason, []),
+  );
+  return f;
+}
+function recover(
+  f: ReturnType<typeof setup>,
+  ms: number,
+  diagnosis_recovered: boolean,
+) {
+  const next = later(f, ms);
+  return beginAutomaticContextRestart(
+    f.state,
+    system,
+    {
+      usage: next.usage,
+      stale_after_ms: 60_000,
+      snapshot,
+      ...(diagnosis_recovered ? { diagnosis_recovered } : {}),
+    },
+    next.io,
+  );
+}
+
+test("C-745: a session closed by an unavailable diagnosis gets one more automatic attempt once the host sees the diagnosis recovered", () => {
+  const f = closedByDiagnosis();
+  const failure = required(f.state.human_actions.at(-1));
+  expect(failure.status).toBe("open");
+  expect(
+    contextRestartRetryState(
+      f.state.events,
+      f.ops.id,
+      "current",
+      later(f, 60_000).usage.updated_at,
+    ),
+  ).toBe("recoverable");
+  // The failure fence holds until the diagnosis is seen available again.
+  expect(hostOpsPending(f.state.events, f.ops.id)).toBe(true);
+  const at = later(f, 60_000);
+  expect(
+    automaticContextRestartReady(f.state, at.usage, at.io.clock.now(), 60_000),
+  ).toBe(false);
+  expect(value(recover(f, 60_000, false)).events).toHaveLength(0);
+  expect(
+    automaticContextRestartReady(
+      f.state,
+      at.usage,
+      at.io.clock.now(),
+      60_000,
+      undefined,
+      true,
+    ),
+  ).toBe(true);
+  // An operator cannot claim the recovery on the system's behalf.
+  expect(
+    beginHostOpsAction(
+      f.state,
+      actor(4, "pm"),
+      {
+        tool: "host_ops_restart_assignment",
+        target_id: f.ops.id,
+        reason: "manual",
+        automatic_context_restart: true,
+        diagnosis_recovery_retry: true,
+        context_usage: at.usage,
+        context_stale_after_ms: 60_000,
+        snapshot,
+      },
+      at.io,
+    ).ok,
+  ).toBe(false);
+
+  const retried = value(recover(f, 60_000, true));
+  expect(retried.events).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "host_ops_action_taken",
+        payload: expect.objectContaining({
+          automatic_context_restart: true,
+          diagnosis_recovery_retry: true,
+          reason: expect.stringContaining("诊断已恢复，自动再试一次"),
+        }),
+      }),
+      expect.objectContaining({
+        type: "human_action_completed",
+        payload: { human_action_id: failure.id, resume_work_items: [] },
+      }),
+    ]),
+  );
+  f.state = apply(f.state, retried);
+  expect(
+    f.state.human_actions.find((h) => h.id === failure.id)?.status,
+  ).not.toBe("open");
+  // The earlier failure no longer fences; the extra attempt itself does.
+  expect(openRestartFailures(f.state.events)).toHaveLength(0);
+  expect(pendingHostOpsActions(f.state.events)).toHaveLength(1);
+  expect(hostOpsPending(f.state.events, f.ops.id)).toBe(true);
+
+  // If the extra attempt fails for good too, the session stays closed and a
+  // new item asks for the human restart command.
+  f.state = apply(
+    f.state,
+    hold(
+      f,
+      later(f, 60_000).io,
+      required(retried.data).action_id,
+      "upstream_diagnosis_unavailable",
+      [],
+    ),
+  );
+  expect(
+    contextRestartRetryState(
+      f.state.events,
+      f.ops.id,
+      "current",
+      later(f, 120_000).usage.updated_at,
+    ),
+  ).toBe("closed");
+  expect(value(recover(f, 3_600_000, true)).events).toHaveLength(0);
+  expect(f.state.human_actions.filter((h) => h.status === "open")).toHaveLength(
+    1,
+  );
+});
+
+test("C-745: a held extra attempt follows the C-741 backoff; a success after it stays closed", () => {
+  const f = setup();
+  const begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  // A pre-C-741 single attempt: failed for good, no retries recorded.
+  f.state = apply(
+    f.state,
+    hold(
+      f,
+      f.io,
+      required(begun.data).action_id,
+      "upstream_observation_failed",
+      [],
+    ),
+  );
+  const retried = value(recover(f, 60_000, true));
+  f.state = apply(f.state, retried);
+  const held = hold(
+    f,
+    later(f, 60_000).io,
+    required(retried.data).action_id,
+    "agent_busy",
+  );
+  expect(held.events[0]).toMatchObject({
+    payload: { result: "retry_scheduled", attempt: 1 },
+  });
+  f.state = apply(f.state, held);
+  const waiting = later(f, 60_000 + 60_000).usage.updated_at;
+  expect(
+    contextRestartRetryState(f.state.events, f.ops.id, "current", waiting),
+  ).toBe("waiting");
+  const due = later(f, 60_000 + 120_000).usage.updated_at;
+  expect(
+    contextRestartRetryState(f.state.events, f.ops.id, "current", due),
+  ).toBe("due");
+});
+
+test("C-745: other failures, stops that may have started and real upstream holds never get the extra attempt", () => {
+  for (const reason of [
+    "新会话启动失败。",
+    "upstream_recovery_not_ready",
+    "exit unknown",
+  ]) {
+    const f = closedByDiagnosis(reason);
+    expect(
+      contextRestartRetryState(f.state.events, f.ops.id, "current", now),
+    ).toBe("closed");
+    expect(value(recover(f, 60_000, true)).events).toHaveLength(0);
+  }
+  // A diagnosis hold after the stop may have started keeps the single attempt.
+  const f = setup();
+  const begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  const action_id = required(begun.data).action_id;
+  f.state = {
+    ...f.state,
+    events: [
+      ...f.state.events,
+      {
+        ...required(f.state.events.at(-1)),
+        id: "00000000000000000000000998" as Event["id"],
+        type: "host_ops_action_deferred",
+        payload: { action_id, reason: "automatic_context_stop_started" },
+      },
+    ],
+  };
+  f.state = apply(
+    f.state,
+    hold(f, f.io, action_id, "upstream_diagnosis_unavailable", []),
+  );
+  expect(
+    contextRestartRetryState(f.state.events, f.ops.id, "current", now),
+  ).toBe("closed");
+  expect(value(recover(f, 60_000, true)).events).toHaveLength(0);
+});
+
+test("C-745: a failure fence of another session keeps the extra attempt out", () => {
+  const f = closedByDiagnosis();
+  const other = required(
+    f.state.events.findLast((e) => e.type === "context_session_restart_result"),
+  );
+  f.state = {
+    ...f.state,
+    events: [
+      ...f.state.events,
+      {
+        ...other,
+        id: "00000000000000000000000997" as Event["id"],
+        seq: other.seq + 1000,
+        payload: {
+          ...(other.payload as object),
+          action_id: "other-action",
+          human_action_id: "HA-other",
+          context_usage: { session_id: "older" },
+        },
+      },
+    ],
+  };
+  expect(restartFencesOnlyOnSession(f.state.events, f.ops.id, "current")).toBe(
+    false,
+  );
+  expect(value(recover(f, 60_000, true)).events).toHaveLength(0);
+});
+
+test("C-745: the upstream hold detail reaches the retry, failure and withdrawal records, bounded to known fields", () => {
+  const detail = {
+    sub_reason: "classification_failed",
+    classification_failed_since: "2026-11-25T04:54:10.000Z",
+    classification_failure_count: 3,
+    classification_error_type: "SqliteError:SQLITE_BUSY",
+  } as const;
+  const f = setup();
+  const begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  const record = (upstream_detail: unknown, delays?: number[]) =>
+    value(
+      recordAutomaticContextRestartResult(
+        f.state,
+        system,
+        {
+          action_id: required(begun.data).action_id,
+          result: "failed",
+          reason: "upstream_diagnosis_unavailable",
+          upstream_detail: upstream_detail as typeof detail,
+          ...(delays ? { retry_delays_ms: delays } : {}),
+        },
+        f.io,
+      ),
+    ).events.at(-1);
+  expect(record(detail)).toMatchObject({
+    payload: {
+      result: "retry_scheduled",
+      upstream_detail: detail,
+      body: expect.stringContaining(
+        "classification_failed，分类失败自 2026-11-25T04:54:10.000Z 起，连续 3 次",
+      ),
+    },
+  });
+  expect(record({ sub_reason: "no_diagnosis" }, [])).toMatchObject({
+    payload: {
+      result: "failed",
+      upstream_detail: { sub_reason: "no_diagnosis" },
+    },
+  });
+  expect(
+    record(
+      {
+        sub_reason: "provider_not_resolved",
+        classification_failed_since: "not a time",
+        classification_failure_count: -1,
+        token: "secret",
+      },
+      [],
+    )?.payload,
+  ).toMatchObject({ upstream_detail: { sub_reason: "provider_not_resolved" } });
+  expect(
+    (record({ sub_reason: "bogus" }, []) as { payload: object }).payload,
+  ).not.toHaveProperty("upstream_detail");
+  expect(
+    (
+      record({ sub_reason: "provider_not_resolved", token: "x" }, [])
+        ?.payload as { upstream_detail?: object } | undefined
+    )?.upstream_detail,
+  ).toStrictEqual({ sub_reason: "provider_not_resolved" });
+
+  const stall = setup();
+  const params = {
+    assignment_id: stall.ops.id,
+    cause_id: "pending-1",
+    snapshot,
+  };
+  const first = value(
+    beginStalledPatrolRestart(stall.state, system, params, stall.io),
+  );
+  expect(
+    value(
+      withdrawUnstartedStallRestart(
+        apply(stall.state, first),
+        system,
+        first.data.action_id,
+        stall.io,
+        "upstream_diagnosis_unavailable",
+        false,
+        {
+          cause: "unknown",
+          action: "wait",
+          evidence: ["classification_failed"],
+          upstream_detail: detail,
+        },
+      ),
+    ).events[0],
+  ).toMatchObject({
+    payload: {
+      blocked_by: {
+        evidence: ["classification_failed"],
+        upstream_detail: detail,
+      },
+    },
+  });
 });

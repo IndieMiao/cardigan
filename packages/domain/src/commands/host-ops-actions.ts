@@ -5,7 +5,11 @@ import {
   runnableQueuedRun,
   standingRunDormant,
 } from "../card-hold.js";
-import { contextRestartRetryState } from "../context-restart-retry.js";
+import {
+  contextRestartRetryState,
+  type UpstreamHoldDetail,
+  upstreamHoldDetailPayload,
+} from "../context-restart-retry.js";
 import {
   type ContextObservation,
   contextObservationCurrent,
@@ -18,8 +22,10 @@ import {
   type HOST_OPS_TOOLS,
   type HostOpsExecution,
   type HostOpsExecutionTool,
+  hostOpsActionPending,
   hostOpsPending,
   pendingHostOpsActions,
+  restartFencesOnlyOnSession,
 } from "../host-ops.js";
 import type {
   AssignmentId,
@@ -183,6 +189,9 @@ export interface HostOpsActionParams {
   readonly upstream_incident_id?: HostOpsExecution["action_id"];
   /** Internal system path only; never accepted by the MCP tool. */
   readonly automatic_context_restart?: boolean;
+  /** C-745 system path only: the one extra attempt after the upstream
+   * diagnosis recovered on a session closed by its unavailability. */
+  readonly diagnosis_recovery_retry?: boolean;
   readonly dispatch_stall_id?: string;
   /** C-596 system path only; never accepted by the MCP tool. */
   readonly standing_pm_stall?: boolean;
@@ -316,7 +325,14 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
     "验证工作项尚无当前可审交付，请等待交付后再启动",
   );
   ensure(
-    !hostOpsPending(d.state.events, a.id),
+    p.diagnosis_recovery_retry && p.context_usage
+      ? !hostOpsActionPending(d.state.events, a.id) &&
+          restartFencesOnlyOnSession(
+            d.state.events,
+            a.id,
+            p.context_usage.session_id,
+          )
+      : !hostOpsPending(d.state.events, a.id),
     "illegal_transition",
     "A host operation is already pending",
   );
@@ -411,6 +427,12 @@ export function beginHostOpsActionInDraft(
       d.actor.kind === "system",
     "unauthorized",
     "Automatic restarts are system-only",
+  );
+  ensure(
+    !p.diagnosis_recovery_retry ||
+      (p.automatic_context_restart && p.context_usage),
+    "validation_failed",
+    "Only an automatic context restart can be a diagnosis recovery retry",
   );
   ensure(
     !p.standing_pm_stall || p.tool === "host_ops_restart_standing_pm",
@@ -522,7 +544,9 @@ export function beginHostOpsActionInDraft(
       d.now,
     );
     ensure(
-      retry === "fresh" || (p.automatic_context_restart && retry === "due"),
+      retry === "fresh" ||
+        (p.automatic_context_restart && retry === "due") ||
+        (p.diagnosis_recovery_retry && retry === "recoverable"),
       "illegal_transition",
       "本会话已请求过上下文换会话",
     );
@@ -541,6 +565,7 @@ export function beginHostOpsActionInDraft(
     ...(handoff ? { retirement_handoff: handoff } : {}),
     ...(p.dispatch_stall_id ? { dispatch_stall_id: p.dispatch_stall_id } : {}),
     ...(p.automatic_context_restart ? { automatic_context_restart: true } : {}),
+    ...(p.diagnosis_recovery_retry ? { diagnosis_recovery_retry: true } : {}),
     ...(p.standing_pm_stall ? { standing_pm_stall: true } : {}),
     ...(p.upstream_incident_id
       ? { upstream_incident_id: p.upstream_incident_id }
@@ -1044,6 +1069,8 @@ export interface WithdrawnRecoveryDiagnosis {
   readonly cause: string;
   readonly action: string;
   readonly evidence: readonly string[];
+  /** C-745: why the diagnosis was unavailable, when it was. */
+  readonly upstream_detail?: UpstreamHoldDetail;
 }
 export function withdrawUnstartedStallRestart(
   state: CommandState,
@@ -1074,6 +1101,7 @@ export function withdrawUnstartedStallRestart(
       })
     )
       return;
+    const detail = upstreamHoldDetailPayload(blockedBy?.upstream_detail);
     return d.emit("host_ops_action_finished", undefined, {
       action_id: actionId,
       assignment_id: action.assignment_id,
@@ -1088,6 +1116,7 @@ export function withdrawUnstartedStallRestart(
               cause: blockedBy.cause,
               action: blockedBy.action,
               evidence: [...blockedBy.evidence],
+              ...(detail ? { upstream_detail: detail } : {}),
             },
           }
         : {}),

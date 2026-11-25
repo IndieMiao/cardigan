@@ -18,10 +18,16 @@ import {
   recordUpstreamHealth,
   type SessionActivity,
   type UpstreamDiagnosis,
+  type UpstreamHoldDetail,
   type UpstreamProbe,
   type UpstreamTarget,
 } from "@cardigan/domain";
-import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import {
+  loadCommandState,
+  persistEffect,
+  ToolError,
+  unwrap,
+} from "@cardigan/mcp-server";
 import type { LaunchConfig } from "@cardigan/roles";
 import {
   beginUpstreamProbeSample,
@@ -31,6 +37,8 @@ import {
   type Store,
   writeUpstreamProbeSample,
 } from "@cardigan/store";
+import { redactProviderText } from "./executor-diagnostics.js";
+import { redactSecrets } from "./wake-preparation.js";
 
 export type ConnectionProbe = (
   origin: string,
@@ -85,6 +93,49 @@ export const probeUpstreamConnection: ConnectionProbe = (
     if (signal.aborted) abort();
   });
 
+/**
+ * C-745: a project whose upstream classification is failing. Kept in memory
+ * for the fail-closed gate and recorded (event, host log) when it starts,
+ * at most every `CLASSIFICATION_RECORD_INTERVAL_MS` or on a new error type
+ * while it lasts, and when it recovers.
+ */
+export interface ClassificationFailure {
+  readonly source: "reconcile" | "observation";
+  readonly error_type: string;
+  readonly summary: string;
+  readonly started_at: string;
+  readonly count: number;
+  readonly recorded_at: string;
+}
+export const CLASSIFICATION_RECORD_INTERVAL_MS = 10 * 60_000;
+
+/** Error class and code only, plus a bounded redacted message. */
+export function describeClassificationError(error: unknown) {
+  const e = (error ?? {}) as {
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+  };
+  const name = typeof e.name === "string" && e.name ? e.name : typeof error;
+  const code =
+    typeof e.code === "string" && /^[A-Za-z0-9_.-]{1,64}$/u.test(e.code)
+      ? e.code
+      : undefined;
+  return {
+    error_type: (code ? `${name}:${code}` : name).slice(0, 80),
+    summary: redactProviderText(
+      redactSecrets(
+        typeof e.message === "string" ? e.message : String(error ?? ""),
+      ),
+    ),
+  };
+}
+
+/** A sampled session changed during observation: a race, not a failure. */
+export function staleObservation(error: unknown) {
+  return error instanceof ToolError && error.code === "stale_target";
+}
+
 /** Background sampling is detached from the global dispatcher tick; only cached facts are consumed there. */
 export class UpstreamHealthMonitor {
   readonly policy;
@@ -98,7 +149,12 @@ export class UpstreamHealthMonitor {
   >();
   private readonly interactions = new Map<string, InteractionSample>();
   private pending: Promise<void> | undefined;
-  private readonly classificationFailures = new Set<ProjectId>();
+  private readonly classificationFailures = new Map<
+    ProjectId,
+    ClassificationFailure
+  >();
+  /** Projects whose current failure has no stored event yet. */
+  private readonly unrecorded = new Set<ProjectId>();
   private lastPoll = Number.NEGATIVE_INFINITY;
   private readonly abort = new AbortController();
   constructor(
@@ -108,6 +164,8 @@ export class UpstreamHealthMonitor {
     private readonly probe: ConnectionProbe = probeUpstreamConnection,
     private sampleStore?: Store,
     private readonly onPublicationError?: () => void,
+    /** C-745: one redacted line per classification failure record. */
+    private readonly onClassificationLog?: (line: string) => void,
   ) {
     this.policy = config.upstream_health
       ? {
@@ -619,15 +677,147 @@ export class UpstreamHealthMonitor {
           );
         this.sampleStore = store;
       }
-      this.classificationFailures.delete(project);
-    } catch {
+      this.classificationRecovered(store, project);
+    } catch (error) {
       // Fail closed for recovery, but never stop dispatching other projects.
-      this.classificationFailures.add(project);
+      this.classificationFailed(store, project, "reconcile", error);
     }
   }
-  observationFailed(project: ProjectId) {
-    this.classificationFailures.add(project);
+  observationFailed(project: ProjectId, error?: unknown) {
+    this.classificationFailed(this.sampleStore, project, "observation", error);
   }
+  /** C-745: the current classification failure of this project, if any. */
+  classificationFailure(project: ProjectId) {
+    return this.classificationFailures.get(project);
+  }
+  private classificationFailed(
+    store: Store | undefined,
+    project: ProjectId,
+    source: ClassificationFailure["source"],
+    error: unknown,
+  ) {
+    const now = this.clock.now();
+    const { error_type, summary } = describeClassificationError(error);
+    const previous = this.classificationFailures.get(project);
+    const record =
+      !previous ||
+      this.unrecorded.has(project) ||
+      previous.error_type !== error_type ||
+      Date.parse(now) - Date.parse(previous.recorded_at) >=
+        CLASSIFICATION_RECORD_INTERVAL_MS;
+    const failure: ClassificationFailure = {
+      source,
+      error_type,
+      summary,
+      started_at: previous?.started_at ?? now,
+      count: (previous?.count ?? 0) + 1,
+      recorded_at: record ? now : (previous?.recorded_at ?? now),
+    };
+    this.classificationFailures.set(project, failure);
+    if (!record) return;
+    const { recorded_at: _recorded, summary: _summary, ...payload } = failure;
+    const body = `上游诊断分类失败：项目 ${project}，来源 ${source}，异常 ${error_type}，自 ${failure.started_at} 起连续 ${failure.count} 次`;
+    const stored = this.recordClassification(
+      store,
+      project,
+      "upstream_classification_failed",
+      payload,
+      body,
+      `${body}：${summary}`,
+    );
+    if (stored) this.unrecorded.delete(project);
+    else this.unrecorded.add(project);
+  }
+  private classificationRecovered(store: Store, project: ProjectId) {
+    const failure = this.classificationFailures.get(project);
+    if (!failure) return;
+    this.classificationFailures.delete(project);
+    this.unrecorded.delete(project);
+    const now = this.clock.now();
+    const { recorded_at: _recorded, summary: _summary, ...rest } = failure;
+    const body = `上游诊断分类恢复：项目 ${project}，最后异常 ${failure.error_type}，自 ${failure.started_at} 起连续失败 ${failure.count} 次，${now} 恢复`;
+    this.recordClassification(
+      store,
+      project,
+      "upstream_classification_recovered",
+      {
+        ...rest,
+        recovered_at: now,
+        duration_ms: Math.max(
+          0,
+          Date.parse(now) - Date.parse(failure.started_at),
+        ),
+      },
+      body,
+      body,
+    );
+  }
+  /**
+   * Best effort: the host log line is always written; the event goes to the
+   * reconciling store, else the monitor's own store. Returns whether an
+   * event was stored, so a failed write is retried with the next failure.
+   * Only the error class and code reach the event; the redacted message
+   * summary stays in the host log line.
+   */
+  private recordClassification(
+    store: Store | undefined,
+    project: ProjectId,
+    type: string,
+    payload: Record<string, string | number>,
+    body: string,
+    line: string,
+  ) {
+    try {
+      this.onClassificationLog?.(line);
+    } catch {
+      /* Logging cannot change the fail-closed gate. */
+    }
+    for (const target of new Set([store, this.sampleStore])) {
+      if (!target) continue;
+      try {
+        target.uow.run((tx) => {
+          tx.events.append(project, {
+            id: tx.ids.nextEventId(),
+            seq: tx.ids.nextEventSequence(project),
+            type,
+            actor: { kind: "system", project_id: project },
+            payload: { ...payload, body },
+            created_at: this.clock.now(),
+          });
+        });
+        return true;
+      } catch {
+        /* Try the next store; the host log line above remains the record. */
+      }
+    }
+    return false;
+  }
+}
+
+/**
+ * C-745: why a hold reported `upstream_diagnosis_unavailable`: the failed
+ * project or provider-group classification (with the project failure's start,
+ * count and error type), an unresolved provider, or no diagnosis at all.
+ */
+export function upstreamHoldDetail(
+  diagnosis: UpstreamDiagnosis | undefined,
+  failure: ClassificationFailure | undefined,
+): UpstreamHoldDetail | undefined {
+  if (upstreamHoldReason(diagnosis) !== "upstream_diagnosis_unavailable")
+    return undefined;
+  if (!diagnosis) return { sub_reason: "no_diagnosis" };
+  if (diagnosis.evidence.includes("classification_failed"))
+    return {
+      sub_reason: "classification_failed",
+      ...(failure
+        ? {
+            classification_failed_since: failure.started_at,
+            classification_failure_count: failure.count,
+            classification_error_type: failure.error_type,
+          }
+        : {}),
+    };
+  return { sub_reason: "provider_not_resolved" };
 }
 
 /**
