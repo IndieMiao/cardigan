@@ -290,7 +290,7 @@ test("C-182: the card merge block shows an accessible snoozed tag, reason and lo
       cardId="C-1"
     />,
   );
-  const status = await screen.findByRole("region", { name: "卡片状态" });
+  const status = await screen.findByRole("region", { name: "下一步" });
   expect(status.textContent).toContain("已暂缓至");
   expect(status.querySelector("time")?.dateTime).toBe(until);
   expect(status.textContent).toContain("等你处理");

@@ -826,7 +826,7 @@ test("a cross-card precheck wait refreshes the open detail when that precheck en
   }));
   const { client, connections } = live({ card: read });
   render(<App client={client} />);
-  const line = await screen.findByRole("region", { name: "卡片状态" });
+  const line = await screen.findByRole("region", { name: "下一步" });
   expect(line.textContent).toContain("预检中");
   expect(line.textContent).not.toContain("W-1 阻塞");
   act(() => connections.last.emit("open"));

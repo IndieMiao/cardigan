@@ -14,6 +14,7 @@ import {
   type StoryChildChoice,
 } from "../api.js";
 import { routeHash } from "../route.js";
+import { CardFormOutlet } from "./CardFormOutlet.js";
 import { CreateCardDialog } from "./CreateCardButton.js";
 import { IdBadge } from "./IdTag.js";
 import { DialogFeedback } from "./layout/DialogFeedbackLayout.js";
@@ -83,6 +84,7 @@ export function CardActions({
   navigation,
   disabled = false,
   onEditingChange,
+  formContainer,
 }: {
   card: CardView;
   client: CardiganClient;
@@ -92,6 +94,8 @@ export function CardActions({
   navigation?: ReactNode;
   disabled?: boolean;
   onEditingChange?: (editing: boolean) => void;
+  /** C-695: the buttons sit in the status row; the form and notes go here. */
+  formContainer?: HTMLElement | null;
 }) {
   const [creating, setCreating] = useState(false);
   const [editing, setEditingState] = useState(false);
@@ -302,24 +306,26 @@ export function CardActions({
         dismiss={() => setDialog(undefined)}
         restoreFocus={() => moreButton.current?.focus()}
       />
-      {card.sensitive && (
-        <p className="hint">敏感卡片：合并确认由你亲自处理。</p>
-      )}
-      <RequestFeedback
-        message={message}
-        pending={flagging}
-        interactive
-        pendingMessage="正在提交…"
-        error={flagError}
-      />
-      {editing && (
-        <CardEditForm
-          form={actionForm}
-          card={card}
-          perform={perform}
-          dismiss={() => setEditing(false)}
+      <CardFormOutlet container={formContainer}>
+        {card.sensitive && (
+          <p className="hint">敏感卡片：合并确认由你亲自处理。</p>
+        )}
+        <RequestFeedback
+          message={message}
+          pending={flagging}
+          interactive
+          pendingMessage="正在提交…"
+          error={flagError}
         />
-      )}
+        {editing && (
+          <CardEditForm
+            form={actionForm}
+            card={card}
+            perform={perform}
+            dismiss={() => setEditing(false)}
+          />
+        )}
+      </CardFormOutlet>
     </div>
   );
 }

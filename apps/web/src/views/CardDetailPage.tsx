@@ -21,16 +21,18 @@ import { AttachmentGrid } from "../components/AttachmentGrid.js";
 import { AuthorPrechecks } from "../components/AuthorPrechecks.js";
 import { CardActions } from "../components/CardActions.js";
 import { CardDependencies } from "../components/CardDependencies.js";
-import { CardHoldActions } from "../components/CardHold.js";
 import {
   CardRiskTags,
   CardSource,
   RecentConclusions,
 } from "../components/CardIntro.js";
+import {
+  CardNextStep,
+  type NextStepTarget,
+} from "../components/CardNextStep.js";
 import { CardRecords } from "../components/CardRecords.js";
 import { CardSectionNav } from "../components/CardSectionNav.js";
 import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
-import { CardStatusLine } from "../components/CardStatusLine.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { CardTemplate } from "../components/CardTemplate.js";
 import { CommentBox } from "../components/CommentBox.js";
@@ -40,11 +42,14 @@ import {
   IdTag,
   LongContent,
   PageTitle,
+  StatusTag,
   Time,
 } from "../components/Foundation.js";
 import {
   CardDetailHeading,
   CardDetailLayout,
+  DetailNextStepForms,
+  DetailStatusRow,
 } from "../components/layout/CardDetailLayout.js";
 import { CardBatchChecks } from "../components/MergeBatch.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
@@ -652,6 +657,56 @@ function CardContent({
         window.removeEventListener(event, stop);
     };
   }, [anchor, anchorReady, filters.type, filters.author, activeSection]);
+  // C-695: a “下一步” action whose control still lives in a tab opens that
+  // tab, brings the control into view and focuses it.
+  const [revealing, setRevealing] = useState<{ target: NextStepTarget }>();
+  const revealTarget = useCallback(
+    (target: NextStepTarget) => {
+      setSelectedSection(
+        `card-${cardId}-${target === "questions" || target === "comment" ? "timeline" : "overview"}`,
+      );
+      setRevealing({ target });
+    },
+    [cardId],
+  );
+  useEffect(() => {
+    const root = article.current;
+    if (!revealing || !root) return;
+    setRevealing(undefined);
+    // Ordered [region, control] candidates: the first region present wins;
+    // inside it the first enabled control, else the region itself.
+    const answer = "[aria-label$='题回答']:is(input, textarea):not(:disabled)";
+    const button = "button:not(:disabled)";
+    const candidates: Record<NextStepTarget, [string, string[]][]> = {
+      merge: [
+        [
+          `#card-${cardId}-merge`,
+          ["button[type=submit][form]:not(:disabled)", button],
+        ],
+      ],
+      decisions: [[`#card-${cardId}-suggested`, [button]]],
+      proposal: [["section[aria-label='拆解方案']", [button]]],
+      // The first open question; with none left, the comment box.
+      questions: [
+        ["section[aria-label='需求澄清']", [answer]],
+        ["section.comment-box", ["textarea:not(:disabled)"]],
+      ],
+      comment: [["section.comment-box", ["textarea:not(:disabled)"]]],
+    };
+    const list = candidates[revealing.target];
+    for (const [index, [region, controls]] of list.entries()) {
+      const area = root.querySelector<HTMLElement>(region);
+      const control = controls
+        .map((selector) => area?.querySelector<HTMLElement>(selector))
+        .find(Boolean);
+      // A region without a usable control falls through to the next one.
+      if (!area || (!control && index < list.length - 1)) continue;
+      const target = control ?? area;
+      target.scrollIntoView?.({ block: "center" });
+      target.focus({ preventScroll: true });
+      return;
+    }
+  }, [revealing, cardId]);
   const card = detail.card;
   const cardPageClass = inDrawer ? "card-page card-page-drawer" : "card-page";
   const completionId =
@@ -738,54 +793,55 @@ function CardContent({
             <TemplateMarker card={card} info={detail.template} force />
           </CardDetailHeading>
         )}
-        <CardStatusLine
-          detail={detail}
-          projectId={projectId}
-          metadata={
-            <>
-              <span>
-                更新于 <Time value={detail.updated_at ?? card.created_at} />
-              </span>
-              <CardRiskTags tags={card.risk_tags} />
-            </>
+        <DetailStatusRow
+          aria-label="卡片状态"
+          actions={
+            <CardActions
+              disabled={!!activeAction && activeAction !== "card"}
+              onEditingChange={(editing) =>
+                setActiveAction(editing ? "card" : undefined)
+              }
+              card={card}
+              client={client}
+              projectId={projectId}
+              onSaved={reload}
+              formContainer={primaryPanels}
+            />
           }
-        />
+        >
+          <StatusTag status={card.status} />
+          <span>
+            更新于 <Time value={detail.updated_at ?? card.created_at} />
+          </span>
+          <CardRiskTags tags={card.risk_tags} />
+        </DetailStatusRow>
         <CardSuperseded card={card} projectId={projectId} />
-        <CardActions
-          disabled={!!activeAction && activeAction !== "card"}
-          onEditingChange={(editing) =>
-            setActiveAction(editing ? "card" : undefined)
-          }
-          card={card}
+        <CardNextStep
+          detail={detail}
           client={client}
           projectId={projectId}
           onSaved={reload}
-          primaryActions={
-            <>
-              <CardHoldActions
-                disabled={!!activeAction}
-                card={card}
-                client={client}
-                projectId={projectId}
-                onSaved={reload}
-              />
-              <CardTemplate
-                disabled={!!activeAction && activeAction !== "completion"}
-                formContainer={primaryPanels}
-                onEditingChange={(editing) =>
-                  setActiveAction(editing ? "completion" : undefined)
-                }
-                detail={detail}
-                client={client}
-                projectId={projectId}
-                onSaved={reload}
-                revision={revision}
-                showMetadata={false}
-              />
-            </>
-          }
+          onReveal={revealTarget}
+          completionId={completionId}
+          busy={!!activeAction}
+          markDone={(emphasis) => (
+            <CardTemplate
+              disabled={!!activeAction && activeAction !== "completion"}
+              formContainer={primaryPanels}
+              onEditingChange={(editing) =>
+                setActiveAction(editing ? "completion" : undefined)
+              }
+              detail={detail}
+              client={client}
+              projectId={projectId}
+              onSaved={reload}
+              revision={revision}
+              showMetadata={false}
+              emphasis={emphasis}
+            />
+          )}
         />
-        <div className="card-primary-panels" ref={setPrimaryPanels} />
+        <DetailNextStepForms ref={setPrimaryPanels} />
       </header>
       <div className="card-main">
         <AuthorPrechecks checks={card.prechecks ?? []} projectId={projectId} />

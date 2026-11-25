@@ -66,6 +66,10 @@
     --ui-markdown-label: 5em;
     /* C-504: a thin meter track under its value text. */
     --ui-meter: 3px;
+    /* C-695: leading line of a panel that waits on you (“下一步”). */
+    --ui-attention-line: 3px;
+    /* C-695: the panel's text column wraps its buttons below under this. */
+    --ui-next-step-body: 360px;
     --ui-pill-radius: 999px;
     --ui-panel-padding: 16px;
     --ui-shadow: 0 4px 16px #0003;

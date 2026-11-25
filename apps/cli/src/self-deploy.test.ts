@@ -31,6 +31,7 @@ import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { startAssignmentById } from "./assignment.js";
 import type { CliIo } from "./io.js";
+import { runRoleCommand } from "./role.js";
 import { runSelfDeployCommand } from "./self-deploy.js";
 
 vi.mock("./assignment.js", () => ({ startAssignmentById: vi.fn() }));
@@ -493,6 +494,21 @@ test("post-deploy starts the replacement Ops as host automation only when it has
         },
         { mode: "add" },
       );
+      // The previous deployment recorded the default v1 equals.
+      recordDefault(
+        tx,
+        "cardigan",
+        "pm",
+        {
+          ...defaultRoleDefinition("pm", {
+            harness: "codex",
+            launch_profile_ref: "fixture",
+          }),
+          instructions: "Previous instructions",
+        },
+        "pack",
+        "2026-01-01T00:00:00.000Z",
+      );
       tx.assignments.put("cardigan", {
         id: "A-50",
         scope: "standing",
@@ -577,6 +593,309 @@ test("post-deploy starts the replacement Ops as host automation only when it has
         env: { ...io.env, CARDIGAN_TOKEN: "fixture-token" },
       }),
     ).rejects.toThrow("Agent 不可调用");
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.each([
+  {
+    name: "a requirement-only change the older supervisor does not list",
+    previous: [] as string[],
+    instructions: undefined as string | undefined,
+    cleared: false,
+    changed: [] as string[],
+    receipt: true,
+    outcome: "upgrade",
+  },
+  {
+    name: "requirements a project cleared, role listed as changed",
+    previous: ["browser.chromium", "gpu"],
+    instructions: "Earlier design director default",
+    cleared: true,
+    changed: ["design_director"],
+    receipt: true,
+    outcome: "conflict",
+  },
+  {
+    name: "requirements a project cleared while another role changed",
+    previous: ["browser.chromium", "gpu"],
+    instructions: "Earlier design director default",
+    cleared: true,
+    changed: ["pm"],
+    receipt: true,
+    outcome: "kept",
+  },
+  {
+    name: "no recorded default at all",
+    previous: ["browser.chromium"],
+    instructions: "Earlier design director default",
+    cleared: false,
+    changed: ["design_director"],
+    receipt: false,
+    outcome: "unverified",
+  },
+])(
+  "post-deploy role sync judges only by the recorded defaults, the same on a rerun: $name",
+  async ({ previous, instructions, cleared, changed, receipt, outcome }) => {
+    const root = await mkdtemp(join(tmpdir(), "cg-self-deploy-"));
+    const dataDir = join(root, "data");
+    const store = Store.open({ dataDir });
+    vi.mocked(startAssignmentById).mockReset();
+    const launch = { harness: "codex" as const, launch_profile_ref: "fixture" };
+    const nextDefault = defaultRoleDefinition("design_director", launch);
+    const previousDefault = {
+      ...nextDefault,
+      ...(instructions ? { instructions } : {}),
+      required_capabilities: previous,
+    };
+    const io: CliIo = {
+      env: {
+        CARDIGAN_DATA_DIR: dataDir,
+        CARDIGAN_CONFIG_DIR: root,
+        CARDIGAN_DEPLOYMENT_CHANGED_ROLES: JSON.stringify(changed),
+        // An older supervisor hashes the previous pack without machine requirements.
+        CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: JSON.stringify({
+          design_director: deploymentRolePolicyHash({
+            ...previousDefault,
+            required_capabilities: [],
+          }),
+        }),
+      },
+      cwd: root,
+      platform: "linux",
+      stdout: () => {},
+      stderr: () => {},
+      signals: { on: () => {}, off: () => {} },
+      spawnInherit: () => {
+        throw new Error("No real launch");
+      },
+      captureCommand: async () => {
+        throw new Error("No real command");
+      },
+    };
+    try {
+      await writeFile(
+        join(root, "self-deploy.yaml"),
+        JSON.stringify({
+          initial_release: root,
+          initial_sha: "a".repeat(40),
+          ready_timeout_ms: 1000,
+          stop_timeout_ms: 1000,
+          build_timeout_ms: 1000,
+          poll_interval_ms: 1000,
+        }),
+        { mode: 0o600 },
+      );
+      await writeFile(
+        join(root, "launch.yaml"),
+        JSON.stringify({
+          profiles: { fixture: { harness: "codex", model: "m" } },
+        }),
+      );
+      store.createProject({ id: "cardigan" });
+      store.uow.run((tx) => {
+        writeRole(
+          tx,
+          "cardigan",
+          { ...previousDefault, core_prompt: "", version: 1 },
+          { mode: "add" },
+        );
+        // A receipt written before the record existed seeds it.
+        if (receipt)
+          tx.events.append("cardigan", {
+            id: tx.ids.nextEventId(),
+            seq: tx.ids.nextEventSequence("cardigan"),
+            type: "host_role_pack_published",
+            actor: { kind: "system", project_id: "cardigan" },
+            created_at: "2026-11-18T00:00:00.000Z",
+            payload: {
+              pack_hash: "previous-release",
+              roles: {
+                design_director: {
+                  version: 1,
+                  policy_hash: deploymentRolePolicyHash(previousDefault),
+                  disposition: "matched",
+                },
+              },
+            },
+          });
+        if (cleared)
+          writeRole(
+            tx,
+            "cardigan",
+            {
+              ...previousDefault,
+              required_capabilities: [],
+              core_prompt: "",
+              version: 2,
+            },
+            { mode: "update" },
+          );
+      });
+      const before = store.uow.read((tx) =>
+        getRoleVersion(tx, "cardigan", "design_director"),
+      );
+      const observe = () =>
+        store.uow.read((tx) => {
+          const events = tx.events.listAfter("cardigan", undefined, 0);
+          const receipt = events
+            .filter((e) => e.type === "host_role_pack_published")
+            .at(-1)?.payload as {
+            roles: Record<string, { disposition: string }>;
+          };
+          return {
+            role: getRoleVersion(tx, "cardigan", "design_director"),
+            disposition: receipt.roles.design_director?.disposition,
+            upgrades: events.filter((e) => e.type === "host_role_upgraded")
+              .length,
+            deferrals: events
+              .filter((e) => e.type === "host_role_upgrade_deferred")
+              .map((e) => (e.payload as { notice: string }).notice),
+            actions: tx.human_actions
+              .list("cardigan")
+              .map((a) => ({ status: a.status, instructions: a.instructions })),
+          };
+        });
+      expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
+      const first = observe();
+      if (outcome === "upgrade") {
+        expect(first.role).toMatchObject({
+          version: 2,
+          required_capabilities: ["browser.chromium"],
+        });
+        expect(first.upgrades).toBe(1);
+        expect(first.actions).toEqual([]);
+        expect(first.disposition).toBe("matched");
+      } else {
+        expect(first.role).toEqual(before);
+        expect(first.upgrades).toBe(0);
+        expect(first.disposition).toBe(
+          outcome === "unverified" ? "unverified" : "conflict",
+        );
+        expect(first.actions).toEqual(
+          outcome === "conflict"
+            ? [
+                {
+                  status: "open",
+                  instructions: expect.stringContaining("当前版本有手工改动"),
+                },
+              ]
+            : [],
+        );
+        expect(first.deferrals).toEqual(
+          outcome === "unverified"
+            ? [expect.stringContaining("没有可核对的已记录默认包")]
+            : [],
+        );
+      }
+      expect(JSON.stringify(first.deferrals)).not.toContain("启动配置");
+      // The same release run again, with no project write or confirmation in
+      // between, reaches the same conclusion (V-3008).
+      expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
+      expect(observe()).toEqual(first);
+    } finally {
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test("role upgrade --from-default records the default it wrote, so a deployment knows it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cg-self-deploy-cli-"));
+  const dataDir = join(root, "data");
+  const store = Store.open({ dataDir });
+  vi.mocked(startAssignmentById).mockReset();
+  const io: CliIo = {
+    env: {
+      CARDIGAN_DATA_DIR: dataDir,
+      CARDIGAN_CONFIG_DIR: root,
+      CARDIGAN_DEPLOYMENT_CHANGED_ROLES: JSON.stringify(["design_director"]),
+      CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: "{}",
+    },
+    cwd: root,
+    platform: "linux",
+    stdout: () => {},
+    stderr: () => {},
+    signals: { on: () => {}, off: () => {} },
+    spawnInherit: () => {
+      throw new Error("No real launch");
+    },
+    captureCommand: async () => {
+      throw new Error("No real command");
+    },
+  };
+  try {
+    await writeFile(
+      join(root, "self-deploy.yaml"),
+      JSON.stringify({
+        initial_release: root,
+        initial_sha: "a".repeat(40),
+        ready_timeout_ms: 1000,
+        stop_timeout_ms: 1000,
+        build_timeout_ms: 1000,
+        poll_interval_ms: 1000,
+      }),
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(root, "launch.yaml"),
+      JSON.stringify({
+        profiles: { fixture: { harness: "codex", model: "m" } },
+      }),
+    );
+    store.createProject({ id: "cardigan" });
+    const pack = defaultRoleDefinition("design_director", {
+      harness: "codex",
+      launch_profile_ref: "fixture",
+    });
+    store.uow.run((tx) =>
+      writeRole(
+        tx,
+        "cardigan",
+        {
+          ...pack,
+          instructions: "Hand-edited director",
+          core_prompt: "",
+          version: 1,
+        },
+        { mode: "add" },
+      ),
+    );
+    expect(
+      await runRoleCommand(
+        [
+          "upgrade",
+          "design_director",
+          "--from-default",
+          "--project",
+          "cardigan",
+        ],
+        io,
+      ),
+    ).toBe(0);
+    store.uow.read((tx) => {
+      const written = getRoleVersion(tx, "cardigan", "design_director");
+      expect(written?.version).toBe(2);
+      expect(
+        knownDefaults(tx, "cardigan")
+          .get("design_director")
+          ?.map((k) => k.policy_hash),
+      ).toEqual([written && deploymentRolePolicyHash(written)]);
+    });
+    expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
+    store.uow.read((tx) => {
+      expect(getRoleVersion(tx, "cardigan", "design_director")?.version).toBe(
+        2,
+      );
+      expect(tx.human_actions.list("cardigan")).toEqual([]);
+      const receipt = tx.events
+        .listAfter("cardigan", undefined, 0)
+        .filter((e) => e.type === "host_role_pack_published")
+        .at(-1)?.payload as { roles: Record<string, { disposition: string }> };
+      expect(receipt.roles.design_director?.disposition).toBe("matched");
+    });
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });

@@ -13,8 +13,8 @@ import {
   verificationActivity,
 } from "../../../../packages/domain/src/index.js";
 import type { ExecutionAssignment } from "../api.js";
+import { CardNextStep } from "../components/CardNextStep.js";
 import { CardWorkItems } from "../components/CardSidebar.js";
-import { CardStatusLine } from "../components/CardStatusLine.js";
 import { changeControl } from "../testing/controls.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { ExecutionPage } from "./ExecutionPage.js";
@@ -216,11 +216,18 @@ test.each([true, false])(
         },
       ],
     };
-    render(<CardStatusLine detail={detail} />);
-    const line = screen.getByRole("region", { name: "卡片状态" });
-    expect(line.textContent).toContain(
-      waiting ? "下一步：提交新交付" : "下一步：完成审核",
+    render(
+      <CardNextStep
+        detail={detail}
+        client={fakeClient()}
+        projectId="p-1"
+        onSaved={() => {}}
+        onReveal={() => {}}
+        markDone={() => null}
+      />,
     );
-    if (waiting) expect(line.textContent).not.toContain("完成审核");
+    const title = screen.getByRole("heading", { level: 2 }).textContent;
+    expect(title).toContain(waiting ? "提交新交付" : "完成审核");
+    if (waiting) expect(title).not.toContain("完成审核");
   },
 );

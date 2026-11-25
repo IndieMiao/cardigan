@@ -217,6 +217,8 @@ test.runIf(process.platform === "linux")(
           launch_profile_ref: "fixture",
         }),
         instructions: "Previous default policy",
+        // The snapshot must hash machine requirements like deploymentRolePolicyHash.
+        required_capabilities: ["browser.chromium"],
       };
       const newPolicy = { ...oldPolicy, instructions: "New default policy" };
       for (const [folder, policy] of [
