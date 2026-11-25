@@ -10,6 +10,7 @@ import {
   diagnoseUpstream,
   diagnoseUpstreams,
   type EventId,
+  eventsOfTypes,
   type InteractionSample,
   type ProjectId,
   type Runtime,
@@ -330,10 +331,11 @@ export class UpstreamHealthMonitor {
             run &&
             ["dispatched", "acked", "running", "unknown"].includes(run.status)
           ) {
-            const inactive = state.events.some(
-              (e) =>
-                ["run_inactive", "run_dispatch_stalled"].includes(e.type) &&
-                (e.payload as { run_id?: string }).run_id === run.id,
+            const inactive = eventsOfTypes(state.events, [
+              "run_inactive",
+              "run_dispatch_stalled",
+            ]).some(
+              (e) => (e.payload as { run_id?: string }).run_id === run.id,
             );
             const exited =
               (result?.ok && result.value.process === "exited") ||

@@ -13,6 +13,12 @@ export function isPrecheckConflict(check: Precheck): boolean {
   );
 }
 
+const PRECHECK_TYPES = [
+  "precheck_queued",
+  "precheck_started",
+  "precheck_finished",
+];
+
 export function latestPrecheckConflict(
   events: readonly Event[],
   item: WorkItem,
@@ -24,7 +30,8 @@ export function latestPrecheckConflict(
   );
   return latest &&
     isPrecheckConflict(latest) &&
-    events.some(
+    // C-671: the precheck event itself, from the type index.
+    eventsOfTypes(events, PRECHECK_TYPES).some(
       (e) =>
         (e.payload as unknown) === latest &&
         e.actor.kind === "system" &&
@@ -146,11 +153,7 @@ export function prechecks(events: readonly Event[], card?: CardId): Precheck[] {
   let index = projections.get(events);
   if (!index) {
     // C-649: from the type index; filter-then-stable-sort keeps the order.
-    const relevant = eventsOfTypes(events, [
-      "precheck_queued",
-      "precheck_started",
-      "precheck_finished",
-    ])
+    const relevant = eventsOfTypes(events, PRECHECK_TYPES)
       .filter((e) => e.actor.kind === "system")
       .sort((a, b) => a.seq - b.seq);
     const byCard = new Map<CardId | undefined, Map<string, Precheck>>();

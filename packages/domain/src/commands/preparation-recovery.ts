@@ -1,5 +1,6 @@
 import { assignmentCardId } from "../card-hold.js";
 import type { Actor, Run, RuntimeRef } from "../entities.js";
+import { eventsOfType, eventsOfTypes } from "../event-index.js";
 import { automaticContextActionForRun, hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import {
@@ -47,12 +48,10 @@ export function recoverPreparation(
       unreadableCommentTrigger(state, run)
     )
       return;
-    const recorded = state.events.find(
-      (e) =>
-        ["run_preparation_recovered", "run_preparation_stalled"].includes(
-          e.type,
-        ) && (e.payload as { run_id?: string }).run_id === run.id,
-    );
+    const recorded = eventsOfTypes(state.events, [
+      "run_preparation_recovered",
+      "run_preparation_stalled",
+    ]).find((e) => (e.payload as { run_id?: string }).run_id === run.id);
     if (recorded) return;
     const sourceCard = assignmentCardId(a, state, run.trigger_event_id);
     const card = sourceCard ? d.get("cards", sourceCard) : undefined;
@@ -73,9 +72,8 @@ export function recoverPreparation(
         JSON.stringify(p.expected_runtime_ref) ||
       a.role_version !== run.role_version ||
       (item && (item.assignment_id !== a.id || item.role_id !== a.role_id)) ||
-      !state.events.some(
+      !eventsOfType(state.events, "run_dispatch_aborted").some(
         (e) =>
-          e.type === "run_dispatch_aborted" &&
           (e.payload as { run_id?: string; reason?: string }).run_id ===
             run.id &&
           (e.payload as { reason?: string }).reason ===

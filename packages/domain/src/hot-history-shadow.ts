@@ -1,34 +1,61 @@
 import { cardCriticalPathLengths } from "./card-dependencies.js";
+import { referenceReadState } from "./card-read.js";
 import { refreshCardDependencies } from "./commands/card-dependencies.js";
 import type { CommandPorts, CommandState } from "./commands/core.js";
 import {
   decisionHistory,
   remindDecisionFollowups,
 } from "./commands/decision-followup.js";
+import {
+  dispatchRecoveryFailed,
+  dispatchRecoveryUsed,
+} from "./commands/dispatch-recovery.js";
+import { hostOpsExitConfirmation } from "./commands/host-ops-actions.js";
 import { refreshCancelledHumanActions } from "./commands/human-action-lifecycle.js";
 import { mergeQueue } from "./commands/merge-batch.js";
+import { hasPassedMergeCheck } from "./commands/merge-check.js";
 import { recordMergeCheckBlockers } from "./commands/merge-check-blockers.js";
 import { recordAutomaticMergeWaits } from "./commands/merge-observation.js";
 import { beginMergePush } from "./commands/merge-push.js";
+import { mergeShadowComparisons } from "./commands/merge-shadow.js";
 import { notices } from "./commands/notices.js";
 import { maintainPmCoordination } from "./commands/pm-coordination.js";
 import { pmRecoveryEligible } from "./commands/pm-recovery.js";
 import { projectPreferences } from "./commands/preferences.js";
-import { listNeedsYou, projectSnapshot } from "./commands/queries.js";
+import {
+  listNeedsYou,
+  projectSnapshot,
+  referenceProjectSnapshot,
+} from "./commands/queries.js";
+import { resumeAttention } from "./commands/resume-attention.js";
+import { runtimeUnknownVisibleAt } from "./commands/runtime-incident.js";
 import { deploymentAuditedVersion } from "./commands/standing-deployment.js";
 import { standingPmStallEvents } from "./commands/standing-pm-stall.js";
-import { stoppedByHuman } from "./commands/stop-state.js";
+import {
+  humanStopRecorded,
+  pausedByHuman,
+  stoppedByHuman,
+} from "./commands/stop-state.js";
+import { suggestionProgressEvents } from "./commands/suggestion-progress.js";
 import { resumeWorkWaits } from "./commands/work-waits.js";
 import {
   categoryAuthorization,
   categoryDelegated,
 } from "./decision-authorization.js";
 import type { Actor } from "./entities.js";
+import { eventsOfType } from "./event-index.js";
+import { extInteraction } from "./ext-interaction.js";
 import { extMessageItems } from "./ext-message.js";
-import { hostOpsPending, pendingHostOpsActions } from "./host-ops.js";
+import {
+  automaticContextActionForRun,
+  hostOpsPending,
+  pendingHostOpsActions,
+} from "./host-ops.js";
 import { mergeBatches } from "./merge-batch.js";
 import type { IdAllocator } from "./ports.js";
+import { latestPrecheckConflict, prechecks } from "./precheck.js";
 import { delegationCategories } from "./preferences.js";
+import { releaseMergedCards, releaseNoteEntries } from "./release-notes.js";
 import { remoteWorkerLosses } from "./remote-worker-loss.js";
 import { sessionMaintenanceBasis } from "./session-maintenance.js";
 
@@ -229,6 +256,106 @@ export function compareHotState(
     ],
     ["remote_worker_losses", (s) => remoteWorkerLosses(s.events)],
     ["merge_queue", (s) => [mergeQueue(s), mergeBatches(s.events)]],
+    // C-671: the cross-card readers moved to the indexes for the `slim` scope.
+    [
+      "reference_snapshots",
+      (s) =>
+        s.assignments
+          .filter((a) => a.status === "active" && a.scope === "work_item")
+          .slice(0, 3)
+          .map((a) => [
+            a.id,
+            referenceProjectSnapshot(s, {
+              kind: "assignment",
+              project_id: s.project_id,
+              assignment_id: a.id,
+              role_id: a.role_id,
+              role_version: a.role_version,
+              allowed_tools: [],
+              capabilities: [],
+            }),
+            referenceReadState(s, a).timeline.map((t) => t.body),
+          ]),
+    ],
+    [
+      "assignment_facts",
+      (s) =>
+        s.assignments.map((a) => [
+          a.id,
+          stoppedByHuman(s.events, a.id),
+          humanStopRecorded(s.events, a.id),
+          pausedByHuman(s.events, a.id),
+          dispatchRecoveryUsed(s.events, a.id),
+          runtimeUnknownVisibleAt(s.events, a, 0),
+        ]),
+    ],
+    ["resume_attention", (s) => [...resumeAttention(s)]],
+    [
+      "run_recovery",
+      (s) =>
+        s.runs.map((r) => [
+          r.id,
+          dispatchRecoveryFailed(s, r),
+          automaticContextActionForRun(s.events, r)?.action_id,
+        ]),
+    ],
+    [
+      "host_ops_exit",
+      (s) =>
+        pendingHostOpsActions(s.events).map((a) => [
+          a.action_id,
+          hostOpsExitConfirmation(s, a.action_id),
+        ]),
+    ],
+    [
+      "prechecks",
+      (s) => [
+        prechecks(s.events),
+        s.work_items.map((w) =>
+          latestPrecheckConflict(s.events, w, s.project_id),
+        ),
+      ],
+    ],
+    [
+      "merge_evidence",
+      (s) =>
+        s.cards.map((c) => [
+          c.id,
+          mergeShadowComparisons(s, c.id),
+          eventsOfType(s.events, "card_merged")
+            .filter((e) => e.card_id === c.id)
+            .map((e) => {
+              const p = e.payload as {
+                completion_id?: string;
+                result?: { tree_sha?: string };
+              } | null;
+              return p?.completion_id && p.result?.tree_sha
+                ? hasPassedMergeCheck(
+                    s.events,
+                    c.id,
+                    p.completion_id as never,
+                    p.result.tree_sha,
+                  )
+                : null;
+            }),
+        ]),
+    ],
+    [
+      "release_notes",
+      (s) =>
+        releaseNoteEntries(s.events).map((n) => [
+          n,
+          releaseMergedCards(s, n.version),
+        ]),
+    ],
+    [
+      "ext_interactions",
+      (s) => extMessageItems(s, s.project_id).map((i) => extInteraction(s, i)),
+    ],
+    [
+      "suggestion_progress",
+      (s) => s.decisions.map((q) => suggestionProgressEvents(s, q)),
+    ],
     [
       "merge_push",
       (s) =>

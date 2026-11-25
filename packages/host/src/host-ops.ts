@@ -20,6 +20,7 @@ import {
   DEFAULT_ATTACHED_HUMAN_NOTICE_MS,
   dispatchRecoveryQueuedAt,
   eventById,
+  eventsOfType,
   finishHostOpsAction,
   guardReviewRestartStop,
   type HarnessActivity,
@@ -457,10 +458,8 @@ export class HostOpsService {
           r.inactivity_stop ||
           (!r.started_at &&
             (dispatchRecoveryQueuedAt(state, r) ||
-              state.events.some(
-                (e) =>
-                  e.type === "bell_delivery_attempt_failed" &&
-                  (e.payload as { run_id?: string }).run_id === r.id,
+              eventsOfType(state.events, "bell_delivery_attempt_failed").some(
+                (e) => (e.payload as { run_id?: string }).run_id === r.id,
               )))
             ? "automatic"
             : "host_ops",
@@ -1441,11 +1440,10 @@ export class HostOpsService {
         since: Date.parse(earlier[0]?.created_at ?? this.clock.now()),
         overdue:
           !!overdue ||
-          state.events.some(
+          eventsOfType(state.events, ATTACHED_HUMAN_WAIT_OVERDUE).some(
             (e) =>
-              e.type === ATTACHED_HUMAN_WAIT_OVERDUE &&
               (e.payload as { action_id?: string }).action_id ===
-                action.action_id,
+              action.action_id,
           ),
       });
     });
@@ -1609,9 +1607,12 @@ export class HostOpsService {
             (e.payload as { action_id?: string }).action_id ===
               action.action_id,
         ).length > 1;
-      let receiptRecorded: boolean | undefined = read().events.some(
+      // C-671: the receipt sits on a card; the type index sees it when closed.
+      let receiptRecorded: boolean | undefined = eventsOfType(
+        read().events,
+        "dispatch_stall_backup_verified",
+      ).some(
         (e) =>
-          e.type === "dispatch_stall_backup_verified" &&
           (e.payload as { action_id?: string }).action_id === action.action_id,
       )
         ? true
@@ -2069,11 +2070,13 @@ export class HostOpsService {
                   !isDeepStrictEqual(recoveryBasis(current), recoveryBasis(a))
                 )
                   throw new Error();
-                const prior = state.events.find(
+                const prior = eventsOfType(
+                  state.events,
+                  "dispatch_stall_backup_verified",
+                ).find(
                   (e) =>
-                    e.type === "dispatch_stall_backup_verified" &&
                     (e.payload as { action_id?: string }).action_id ===
-                      action.action_id,
+                    action.action_id,
                 );
                 if (prior) {
                   const p = prior.payload as {

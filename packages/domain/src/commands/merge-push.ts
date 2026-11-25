@@ -1,4 +1,5 @@
 import type { Actor, Event, HumanAction } from "../entities.js";
+import { eventById, eventsOfType } from "../event-index.js";
 import type { CardId, DeliveryId, EventId, HumanActionId } from "../ids.js";
 import {
   type CommandDraft,
@@ -180,7 +181,8 @@ function pushBase(
   }
   const id = (pending[0]?.payload as unknown as Queued | undefined)
     ?.merge_event_id;
-  const merge = state.events.find((e) => e.id === id);
+  // C-671: by id from the index; the merged card is closed by now.
+  const merge = eventById(state.events, id);
   const previous = (
     merge?.payload as { result?: { previous_sha?: string } } | null
   )?.result?.previous_sha;
@@ -203,8 +205,7 @@ export function foreignMergePushCommits(
 ): { readonly foreign: readonly MergePushCommit[]; readonly broken: boolean } {
   const segments = new Map<string, string>();
   const registered = registeredRoute(state, target, base_branch);
-  for (const e of state.events) {
-    if (e.type !== "card_merged") continue;
+  for (const e of eventsOfType(state.events, "card_merged")) {
     // Only merges into this route's branch are evidence for its chain.
     const merged = state.cards.find((c) => c.id === e.card_id)?.base_branch;
     if (

@@ -37,6 +37,7 @@ import {
   deriveReviewMatrix,
   effectivePreMergeChecks,
   eventById,
+  eventsOfType,
   extractQualifiedReferences,
   extractReferences,
   hasVerifiedMergeNoop,
@@ -630,9 +631,9 @@ function attachmentViewMapper(state: CommandState) {
     state.assignments.map((a) => [String(a.id), a.role_id]),
   );
   const uploaded = new Map<string, string>();
-  for (const event of state.events) {
+  // C-671: from the type index, so attachments of closed cards keep their time.
+  for (const event of eventsOfType(state.events, "attachment_uploaded")) {
     if (
-      event.type === "attachment_uploaded" &&
       event.payload &&
       typeof event.payload === "object" &&
       "attachment_id" in event.payload &&
@@ -1935,10 +1936,9 @@ export function projectSnapshotView(state: CommandState, now: string) {
       })),
   );
   const submitted = new Map<string, string>();
-  for (const event of state.events) {
+  for (const event of eventsOfType(state.events, "delivery_submitted")) {
     const payload = event.payload;
     if (
-      event.type === "delivery_submitted" &&
       payload &&
       typeof payload === "object" &&
       "delivery_id" in payload &&

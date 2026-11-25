@@ -2,6 +2,7 @@ import {
   type Assignment,
   type Clock,
   type Event,
+  eventsOfTypes,
   type HostOpsExecution,
   type IdleRetirementResult,
   idleWakeGuard,
@@ -486,10 +487,12 @@ function appendStep(
     // Only a still-pending action gathers evidence.
     if (
       !state.events.some((e) => e.id === action.action_id) ||
-      state.events.some(
+      // C-671: a finish written on a closed card still counts (type index).
+      eventsOfTypes(state.events, [
+        "host_ops_action_finished",
+        "context_session_restart_result",
+      ]).some(
         (e) =>
-          (e.type === "host_ops_action_finished" ||
-            e.type === "context_session_restart_result") &&
           (e.payload as { action_id?: string }).action_id === action.action_id,
       )
     )

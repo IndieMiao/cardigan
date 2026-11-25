@@ -1,4 +1,5 @@
 import type { Actor, Event } from "../entities.js";
+import { eventsOfTypes } from "../event-index.js";
 import type { CardId, DecisionId, EventId } from "../ids.js";
 import { PM_MERGE_STALL_KIND } from "../pm-merge-stall-attention.js";
 import {
@@ -46,7 +47,13 @@ function noticeIndex(events: readonly Event[]) {
   const overdue = new Set<string | undefined>();
   const closed = new Set<string | undefined>();
   const ids = new Set<string>();
-  for (const e of events) {
+  // C-671: from the type index, so notices on closed cards count in `slim`.
+  for (const e of eventsOfTypes(events, [
+    "standing_pm_recovery_started",
+    "office_wait_overdue",
+    "office_wait_closed",
+    "notices_read",
+  ])) {
     if (e.actor.kind === "system") {
       if (e.type === "standing_pm_recovery_started")
         recovered.add(field(e, "source_recovery_event_id"));
@@ -104,6 +111,17 @@ const systemNoticeEvents = new Map([
   // C-678: a session-ending host action waits for an attached human.
   [ATTACHED_HUMAN_WAIT_OVERDUE, "Agent 终端有人连着，动作在等待断开"],
 ]);
+/** Every type a notice can come from. */
+const NOTICE_TYPES = [
+  "card_hold_set",
+  "card_hold_released",
+  "human_action_completed",
+  "ext_message_failed",
+  "decision_resolved",
+  "decision_provisionally_resolved",
+  ...noticeOnlyEvents.keys(),
+  ...systemNoticeEvents.keys(),
+];
 /** Newest first; one notice per delegated resolution, even for multi-card decisions. */
 export function notices(state: CommandState): readonly Notice[] {
   const { read, recovered, overdue, closed } = noticeIndex(state.events);
@@ -112,7 +130,8 @@ export function notices(state: CommandState): readonly Notice[] {
   const out: Notice[] = [];
   // seq is per card stream (§6.1); order across cards by time, then by the
   // time-ordered event id, so a newer notice is never pushed out by older ones.
-  const candidates = state.events.filter(
+  // C-671: candidates come from the type index (the sort below fixes the order).
+  const candidates = eventsOfTypes(state.events, NOTICE_TYPES).filter(
     (e) =>
       ["card_hold_set", "card_hold_released"].includes(e.type) ||
       (e.type === "human_action_completed" &&

@@ -1,4 +1,5 @@
 import type { Actor, Decision, Event, MergeCheckView } from "../entities.js";
+import { eventsOfType, eventsOfTypes } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId, DecisionId, DeliveryId } from "../ids.js";
 import { deferredMergeBatch } from "../merge-batch.js";
@@ -189,9 +190,10 @@ export function hasPassedMergeCheck(
   // Once this completion has baseline-bound checks, unbound historical passes
   // cannot bypass their publication guard. Legacy-only event streams retain
   // their old projection; the host still rechecks them before publication.
+  // C-671: merge checks of merged (closed) cards come from the type index.
   const bound =
     base !== undefined &&
-    events.some((e) => {
+    eventsOfTypes(events, MERGE_CHECK_EVENTS).some((e) => {
       const p = e.payload as Partial<MergeCheckView> | null;
       return (
         e.card_id === card &&
@@ -200,7 +202,7 @@ export function hasPassedMergeCheck(
         p.base_sha !== undefined
       );
     });
-  return events.some((e) => {
+  return eventsOfType(events, "merge_check_finished").some((e) => {
     const p = e.payload as Partial<MergeCheckView> | null;
     return (
       e.card_id === card &&
@@ -373,11 +375,10 @@ export function recordMergeCheck(
       p,
       latestMergeCheck(state.events, p.card_id, p.completion_id),
       latestMergeCheck(state.events, p.card_id, p.completion_id, p.tree_sha),
-      state.events.some(
+      eventsOfTypes(state.events, MERGE_CHECK_EVENTS).some(
         (e) =>
-          MERGE_CHECK_EVENTS.includes(e.type) &&
           (e.payload as Partial<MergeCheckView> | null)?.attempt_id ===
-            p.attempt_id,
+          p.attempt_id,
       ),
     );
     if (replay) return replay;

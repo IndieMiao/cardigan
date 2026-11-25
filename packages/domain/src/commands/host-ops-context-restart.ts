@@ -80,9 +80,8 @@ export function automaticContextRestartReady(
   return (
     actionId !== undefined ||
     (!hostOpsPending(state.events, a.id) &&
-      !state.events.some(
+      !eventsOfType(state.events, "host_ops_action_taken").some(
         (e) =>
-          e.type === "host_ops_action_taken" &&
           (e.payload as { assignment_id?: string }).assignment_id === a.id &&
           (e.payload as { context_usage?: ContextObservation }).context_usage
             ?.session_id === usage.session_id,
@@ -413,21 +412,18 @@ function recordResult(
     ((intent.payload as { automatic_context_restart?: boolean })
       .automatic_context_restart !== true &&
       !(intent.payload as { dispatch_stall_id?: string }).dispatch_stall_id) ||
-    d.state.events.some(
-      (e) =>
-        e.type === "context_session_restart_result" &&
-        (e.payload as { action_id?: string }).action_id === actionId,
+    eventsOfType(d.state.events, "context_session_restart_result").some(
+      (e) => (e.payload as { action_id?: string }).action_id === actionId,
     )
   )
     return;
   const action = intent.payload as unknown as HostOpsExecution;
   const usage = action.context_usage;
 
-  const finished = d.state.events.find(
-    (e) =>
-      e.type === "host_ops_action_finished" &&
-      (e.payload as { action_id?: string }).action_id === actionId,
-  );
+  const finished = eventsOfType(
+    d.state.events,
+    "host_ops_action_finished",
+  ).find((e) => (e.payload as { action_id?: string }).action_id === actionId);
   // A stop was attempted but exit is not yet confirmed. Keep the original
   // intent/fence alive so a later lease may observe exit, never signal twice.
   if (action.system_finished_run_id && !finished && result === "failed") {

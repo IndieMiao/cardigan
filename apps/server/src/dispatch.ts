@@ -28,6 +28,8 @@ import {
   dispatchRunKind,
   dispatchTier,
   eventById,
+  eventsOfType,
+  eventsOfTypes,
   expireMergeSnoozes,
   type HarnessActivity,
   hasRunTarget,
@@ -437,10 +439,8 @@ export class Dispatcher {
       loadState: (tx, project) => this.loadState(tx, project),
       alert: (tx, state, assignment, run, reason) => {
         if (
-          state.events.some(
-            (e) =>
-              e.type === reason &&
-              payloadString(e.payload, "run_id") === run.id,
+          eventsOfType(state.events, reason).some(
+            (e) => payloadString(e.payload, "run_id") === run.id,
           )
         )
           return;
@@ -2832,12 +2832,10 @@ export class Dispatcher {
       // dispatch-retry; only escalate failures nobody else will handle.
       const recovering =
         continuation ||
-        state.events.some(
-          (e) =>
-            ["run_preparation_recovered", "run_preparation_stalled"].includes(
-              e.type,
-            ) && payloadString(e.payload, "run_id") === attempt.run_id,
-        ) ||
+        eventsOfTypes(state.events, [
+          "run_preparation_recovered",
+          "run_preparation_stalled",
+        ]).some((e) => payloadString(e.payload, "run_id") === attempt.run_id) ||
         run?.status === "dispatched" ||
         run?.status === "running" ||
         (run !== undefined && dispatchRecoveryFailed(state, run));

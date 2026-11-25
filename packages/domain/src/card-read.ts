@@ -10,7 +10,11 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "./entities.js";
-import { flatMapEvents } from "./event-index.js";
+import {
+  eventsWithKey,
+  flatMapEvents,
+  isTelemetryEvent,
+} from "./event-index.js";
 import type { ProjectId } from "./ids.js";
 import { mergeBatches } from "./merge-batch.js";
 import { crossCardRead, type ProjectPreferences } from "./preferences.js";
@@ -152,8 +156,13 @@ export function mergeBatchReadScope(
       event.type === "merge_batch_formed" ? payload?.id : payload?.batch_id;
     return id !== undefined ? !canRead(id) : payload?.level === "batch";
   };
+  // C-671: every event that can be restricted carries a `batch` index key
+  // (`batch_id`, or batch level); the index also sees closed cards in `slim`.
+  // Telemetry is not in the command-state array the scan used to read.
   const hiddenTimeline = new Set(
-    state.events.filter(restricted).map((e) => `${e.card_id}:${e.seq}`),
+    eventsWithKey(state.events, "batch")
+      .filter((e) => !isTelemetryEvent(e) && restricted(e))
+      .map((e) => `${e.card_id}:${e.seq}`),
   );
   return {
     canRead,
