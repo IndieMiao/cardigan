@@ -354,6 +354,8 @@ export {
 export { previewRunResources, resourceTarget } from "./run-resource-worker.js";
 export {
   assignmentResourceKeys,
+  type RunResourceClaim,
+  runResourceClaim,
   runResourceKeys,
   unclaimedResourceKeys,
 } from "./run-resources.js";

@@ -1222,6 +1222,9 @@ export interface RunView {
   readonly queue_order?: DispatchOrder;
   readonly dispatch_tier?: 1 | 2 | 3 | 4;
   readonly dispatch_reason?: string;
+  /** C-736: resources admission claimed and why; absent on older Runs. */
+  readonly resource_keys?: readonly string[];
+  readonly resource_reason?: string;
   readonly employee_id?: string;
   readonly launch_profile_ref?: string;
   readonly id: string;

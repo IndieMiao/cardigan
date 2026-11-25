@@ -520,9 +520,12 @@ async function launchWithClaim(
     const cleared = {
       ...run,
       resource_keys: keys,
+      // C-736: host launches always claim the work item's resources.
+      ...(keys.length ? { resource_reason: "主机启动按工作项占用" } : {}),
       ...(probe ? { provider_probe: probe } : {}),
     };
     delete cleared.queue_reason;
+    if (!keys.length) delete cleared.resource_reason;
     tx.runs.put(input.project, cleared);
     const at = clock.now();
     const attempt = {

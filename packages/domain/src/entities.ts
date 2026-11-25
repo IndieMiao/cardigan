@@ -660,6 +660,8 @@ export interface Run {
   };
   /** Physical resources pinned by the host at admission, not live editable requirements. */
   readonly resource_keys?: readonly string[];
+  /** C-736: why admission claimed `resource_keys` or skipped the work item's. */
+  readonly resource_reason?: string;
   /** Q-744: fixed on the first independent queue, inherited without reset. */
   readonly recovery_policy?: {
     readonly version: 6;

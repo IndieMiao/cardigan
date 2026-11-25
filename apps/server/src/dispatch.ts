@@ -93,6 +93,7 @@ import {
   redactFailureLine,
   retainedWriterRefusal,
   runCapacitySnapshot,
+  runResourceClaim,
   runResourceKeys,
   settleTestReviewLimits,
   testReviewRunPrompt,
@@ -296,9 +297,9 @@ export interface DispatcherOptions {
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
 /** C-721: a submit/reply follow-up runs without its work item's resources. */
-const unclaimedResourcesRule = (keys: readonly string[]) =>
+const unclaimedResourcesRule = (keys: readonly string[], reason?: string) =>
   keys.length
-    ? `本次 Run 未占用 ${keys.join("、")} 名额，只做提交和回帖：不要启动或操作这些资源；需要它们的工作（包括本次 Run 新收到的通知）用 report_blocker（needs=role）说明所需资源后结束本次 Run，恢复后的 Run 会按工作项占用名额。`
+    ? `本次 Run 未占用 ${keys.join("、")} 名额${reason ? `（原因：${reason}）` : ""}，只做提交和回帖：不要启动或操作这些资源；需要它们的工作（包括本次 Run 新收到的通知）用 report_blocker（needs=role）说明所需资源后结束本次 Run，恢复后的 Run 会按工作项占用名额。`
     : undefined;
 const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
   s.cursors.some(
@@ -1865,8 +1866,18 @@ export class Dispatcher {
     run: Run | undefined,
     ready: readonly Notification[],
   ) {
+    return this.runClaim(tx, state, a, run, ready).keys;
+  }
+  /** C-736: `runKeys` with the reason recorded on the admitted Run. */
+  private runClaim(
+    tx: ReadRepositories,
+    state: CommandState,
+    a: Assignment,
+    run: Run | undefined,
+    ready: readonly Notification[],
+  ) {
     const cause = run ? undefined : inboxCause(state, a, ready);
-    return runResourceKeys(
+    return runResourceClaim(
       tx,
       state.project_id,
       a,
@@ -1880,6 +1891,7 @@ export class Dispatcher {
         ...(cause ? { trigger_event_id: cause.event_id } : {}),
       },
       ready,
+      state.timeline,
     );
   }
   /**
@@ -1927,8 +1939,15 @@ export class Dispatcher {
       if (!run) return assignmentResourceKeys(tx, entry.project_id, owner);
       // Only a light trigger can lighten the Run; skip the notice read otherwise.
       if (
-        runResourceKeys(tx, entry.project_id, owner, state.events, run, [])
-          .length
+        runResourceKeys(
+          tx,
+          entry.project_id,
+          owner,
+          state.events,
+          run,
+          [],
+          state.timeline,
+        ).length
       )
         return assignmentResourceKeys(tx, entry.project_id, owner);
       let notes = pending.get(entry.project_id);
@@ -2225,7 +2244,8 @@ export class Dispatcher {
           return skip("provider_unavailable");
         }
         const leases = this.options.leases;
-        const keysNeeded = this.runKeys(tx, state, a, run, ready);
+        const claim = this.runClaim(tx, state, a, run, ready);
+        const keysNeeded = claim.keys;
         const blocked = leases?.blocked(
           project,
           a.machine_id,
@@ -2256,9 +2276,11 @@ export class Dispatcher {
         const cleared = {
           ...run,
           resource_keys: keys,
+          ...(claim.reason ? { resource_reason: claim.reason } : {}),
           ...(probe ? { provider_probe: probe } : {}),
         };
         delete cleared.queue_reason;
+        if (!claim.reason) delete cleared.resource_reason;
         run = cleared;
         tx.runs.put(project, run);
         state = this.loadState(tx, project);
@@ -2379,7 +2401,11 @@ export class Dispatcher {
         attempt,
         run,
         assignment: a,
-        bell: [bell, followup, unclaimedResourcesRule(unclaimed)]
+        bell: [
+          bell,
+          followup,
+          unclaimedResourcesRule(unclaimed, run.resource_reason),
+        ]
           .filter(Boolean)
           .join("\n"),
       };
