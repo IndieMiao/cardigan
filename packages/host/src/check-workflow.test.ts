@@ -68,7 +68,7 @@ describe("trusted GitHub check workflow", () => {
     const marker = steps.filter((step: { name: string }) =>
       step.name.startsWith("Recovered "),
     );
-    expect(marker).toHaveLength(4);
+    expect(marker).toHaveLength(5);
     for (const step of marker) {
       const key = step.name.slice("Recovered ".length);
       expect(step.if).toBe(
@@ -560,7 +560,7 @@ test("only the trusted complete merge diff grants environment retries (including
       return readFileSync(out, "utf8").trim();
     };
     expect(check("apps/web/src/file.ts")).toBe(
-      "retry_cases=ssh_local ssh_remote loopback corepack",
+      "retry_cases=ssh_local ssh_remote loopback corepack agent_git",
     );
     for (const file of [
       "packages/host/src/check-flake-cases.ts",
@@ -584,8 +584,33 @@ test("only the trusted complete merge diff grants environment retries (including
     expect(
       check("docs/plans/C-77.md", { scope: "docs_only", skip: true }),
     ).toBe("retry_cases=");
-    expect(check("apps/server/src/dispatch.ts")).toBe("retry_cases=corepack");
-    expect(check("packages/roles/src/file.ts")).toBe("retry_cases=");
+    expect(check("apps/server/src/dispatch.ts")).toBe(
+      "retry_cases=corepack agent_git",
+    );
+    expect(check("packages/roles/src/file.ts")).toBe("retry_cases=agent_git");
+    // C-757: the Git transport case, its stack, worker scripts or shared test
+    // configuration changed (including the old side of a rename).
+    for (const file of [
+      "apps/cli/src/agent-git.ts",
+      "apps/cli/test-support/worker-git.ts",
+      "apps/cli/package.json",
+      "packages/host/src/agent-git-transport.ts",
+      "packages/git-service/src/worktree.ts",
+      "packages/git-transport/src/index.ts",
+      "packages/runtime-herdr/src/worker-git.ts",
+      "deploy/worker-git.py",
+      "test-support/setup.ts",
+      "tsconfig.base.json",
+      "pnpm-lock.yaml",
+    ])
+      expect(check(file)).not.toContain("agent_git");
+    expect(check("deploy/install-agent.py")).toBe("retry_cases=agent_git");
+    expect(
+      check("apps/web/src/file.ts", {
+        scope: "affected",
+        affected: "apps/cli apps/web",
+      }),
+    ).toBe("retry_cases=agent_git");
     expect(check("apps/web/src/file.ts", { remove: true })).toBe(
       "retry_cases=",
     );

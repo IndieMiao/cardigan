@@ -132,6 +132,14 @@ jobs:
               elsewhere+=(":(exclude,glob)$pkg/src/**")
             done
             if selected packages/roles && "${diff[@]}" "${elsewhere[@]}"; then cases+=(corepack); fi
+            # The synthetic Git transport fixture: untouched case package, Git
+            # stack, worker scripts and shared test configuration (root
+            # manifests, lockfile, tsconfig and Vitest setup).
+            if selected apps/cli && git diff --quiet --no-renames "$WORKFLOW_BASE" HEAD -- \
+                 apps/cli packages/{host,git-service,git-transport,runtime-herdr} ':(glob)deploy/worker-*.py' \
+                 test-support ':(glob)vitest.config.*' ':(glob)*.json' ':(glob)*.yaml'; then
+              cases+=(agent_git)
+            fi
           fi
           echo "retry_cases=${cases[*]}" >> "$GITHUB_OUTPUT"
       - name: Setup Node
@@ -241,6 +249,9 @@ jobs:
         run: 'true'
       - name: Recovered loopback
         if: ${{ !cancelled() && (steps.isolated.outcome == 'success' || steps.isolated.outcome == 'failure') && contains(steps.identity.outputs.retry_cases, 'loopback') && steps.isolated.outputs.loopback == 'true' }}
+        run: 'true'
+      - name: Recovered agent_git
+        if: ${{ !cancelled() && (steps.isolated.outcome == 'success' || steps.isolated.outcome == 'failure') && contains(steps.identity.outputs.retry_cases, 'agent_git') && steps.isolated.outputs.agent_git == 'true' }}
         run: 'true'
       - name: build
         id: build
