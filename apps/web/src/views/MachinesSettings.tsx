@@ -825,6 +825,7 @@ function MachineFacts({
           </TableBody>
         </SettingsTable>
       </SettingsSection>
+      <DiskUsageSection bindings={bindings} />
       <SettingsSection title="在跑任务">
         {runs.length === 0 ? (
           <p>没有在跑任务</p>
@@ -911,6 +912,85 @@ function MachineFacts({
         )}
       </SettingsSection>
     </>
+  );
+}
+
+const GIB = 1024 ** 3;
+const gib = (bytes: number) => `${(bytes / GIB).toFixed(1)} GiB`;
+type DiskUsage = NonNullable<MachineBindingView["disk_usage"]>;
+function diskUsageTag(usage: DiskUsage) {
+  if (usage.status === "skipped")
+    return usage.skipped_reason === "helper_outdated"
+      ? { status: "blocked", label: "helper 过旧，未统计" }
+      : { status: "failed", label: "读取失败" };
+  return usage.measured?.complete === false
+    ? { status: "unknown", label: "部分统计" }
+    : { status: "passed", label: "已统计" };
+}
+
+/**
+ * C-666: each project's worktrees, builds and runs on this worker and the
+ * volume's free space, as last read through that project's helper.
+ */
+function DiskUsageSection({
+  bindings,
+}: {
+  bindings: readonly MachineBindingView[];
+}) {
+  const rows = bindings.flatMap((binding) =>
+    binding.disk_usage ? [{ binding, usage: binding.disk_usage }] : [],
+  );
+  return (
+    <SettingsSection title="目录占用">
+      {rows.length === 0 ? (
+        <p>没有占用记录</p>
+      ) : (
+        <SettingsTable aria-label="目录占用">
+          <TableHeader>
+            <TableRow>
+              <TableHead>项目</TableHead>
+              <TableHead>worktrees</TableHead>
+              <TableHead>builds</TableHead>
+              <TableHead>runs</TableHead>
+              <TableHead>可用空间</TableHead>
+              <TableHead>统计时间</TableHead>
+              <TableHead>状态</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map(({ binding, usage }) => {
+              const m = usage.measured;
+              const tag = diskUsageTag(usage);
+              return (
+                <TableRow key={binding.project_id}>
+                  <DataTableCell data-record="lead">
+                    {binding.project_name}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="worktrees">
+                    {m ? gib(m.worktrees.bytes) : "—"}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="builds">
+                    {m ? gib(m.builds.bytes) : "—"}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="runs">
+                    {m ? gib(m.runs.bytes) : "—"}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="可用空间">
+                    {m ? `${gib(m.free_bytes)} / ${gib(m.total_bytes)}` : "—"}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="统计时间">
+                    {m ? <Time value={m.measured_at} /> : "—"}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-record="aside">
+                    <StatusTag status={tag.status} label={tag.label} />
+                  </DataTableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </SettingsTable>
+      )}
+    </SettingsSection>
   );
 }
 

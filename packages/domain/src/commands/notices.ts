@@ -84,6 +84,9 @@ const systemNoticeEvents = new Map([
   [PM_MERGE_STALL_KIND, "stalled"],
   ["launch_model_changed", "主机启动模型已更改"],
   ["host_disk_space_low", "主机磁盘可用空间不足"],
+  // C-666: a remote worker's free space fell below the threshold; one
+  // reclaim of released Assignments' directories was started.
+  ["worker_disk_space_low", "远程 worker 磁盘可用空间不足"],
   // C-656: /tmp or swap over threshold, with the largest users.
   ["host_memory_pressure", "主机 /tmp 或 swap 用量过高"],
   ["launch_reload_failed", "主机启动配置重载失败"],

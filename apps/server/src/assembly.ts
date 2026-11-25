@@ -1,4 +1,4 @@
-import type { Clock } from "@cardigan/domain";
+import type { Clock, ProjectId } from "@cardigan/domain";
 import { RuntimeTargets } from "@cardigan/host";
 import type { LaunchConfig } from "@cardigan/roles";
 import { type Store, standingResolver } from "@cardigan/store";
@@ -38,6 +38,7 @@ import {
 } from "./reconcile-loop.js";
 import { startRunResourceLoop } from "./run-resource-cleanup.js";
 import type { MachineHost } from "./web/machine-host.js";
+import { WorkerUsageMonitor, workerLowFreeBytes } from "./worker-usage.js";
 
 /**
  * M3.5: the control plane the server runs beside the MCP endpoint.
@@ -278,18 +279,6 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   };
   const loop: DispatchLoop = startDispatchLoop(loopOptions);
   const report = (error: unknown) => options.onError?.(error);
-  const machineCapabilities =
-    options.runtime instanceof RuntimeTargets
-      ? startMachineCapabilityLoop({
-          startup: options.startup,
-          store: options.store,
-          runtime: options.runtime,
-          ...(options.machineHost
-            ? { verification: { host: options.machineHost, clock } }
-            : {}),
-          onError: report,
-        })
-      : undefined;
   const merge =
     options.git === undefined
       ? undefined
@@ -340,6 +329,40 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           onError: report,
           report: (message) => options.onError?.(new Error(message)),
         });
+  // C-666: worker usage after each machine check; low space starts a reclaim.
+  const usage =
+    options.git?.machineUsage === undefined
+      ? undefined
+      : new WorkerUsageMonitor({
+          store: options.store,
+          git: options.git,
+          clock,
+          lowFreeBytes: workerLowFreeBytes(),
+          ...(cleanup
+            ? {
+                // Never hold the machine patrol on a reclaim pass.
+                reclaim: (project: ProjectId) => {
+                  void cleanup.executor.reclaim(project).catch(report);
+                },
+              }
+            : {}),
+          report: (message) => options.onError?.(new Error(message)),
+        });
+  const machineCapabilities =
+    options.runtime instanceof RuntimeTargets
+      ? startMachineCapabilityLoop({
+          startup: options.startup,
+          store: options.store,
+          runtime: options.runtime,
+          ...(options.machineHost
+            ? { verification: { host: options.machineHost, clock } }
+            : {}),
+          ...(usage
+            ? { usage: (project, machine) => usage.observe(project, machine) }
+            : {}),
+          onError: report,
+        })
+      : undefined;
   const resources =
     options.git && options.runtime instanceof RuntimeTargets
       ? startRunResourceLoop(

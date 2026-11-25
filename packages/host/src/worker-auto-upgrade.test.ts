@@ -40,6 +40,7 @@ import {
   workerHelperDigests,
 } from "./worker-helper-release.js";
 import { onboardWorker } from "./worker-onboarding.js";
+import * as readiness from "./worker-readiness.js";
 import { type stageWorkerUpgrade, upgradeMaterials } from "./worker-upgrade.js";
 import {
   enrolledUpgradeIdentity,
@@ -1575,4 +1576,28 @@ test("C-609: a check that genuinely fails is still a failure", async () => {
   expect(upgradeState(f.store, project, machine)?.state).toBe("failed");
   expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
   expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
+});
+
+// C-666: the exact previous release is admitted for dispatch (no blocker), so
+// only enrollment decides whether the patrol upgrades it to the current one.
+test("C-666: an enrolled worker on the previous release upgrades; an unenrolled one keeps dispatching untouched", async () => {
+  const release = vi
+    .spyOn(readiness, "observedHelperRelease")
+    .mockReturnValue("previous");
+  const f = await setup();
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).not.toHaveBeenCalled();
+  expect(f.isHeld()).toBe(false);
+  expect(f.actions()).toEqual([]);
+
+  f.enroll();
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+  expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
+  expect(f.isHeld()).toBe(false);
+  // Once the current release is observed, nothing is installed again.
+  release.mockReturnValue("current");
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+  release.mockRestore();
 });

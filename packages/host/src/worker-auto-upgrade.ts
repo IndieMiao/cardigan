@@ -19,6 +19,7 @@ import {
   parseWorkerOnboarding,
   readOnboardingYaml,
 } from "./worker-onboarding-config.js";
+import { observedHelperRelease } from "./worker-readiness.js";
 import { enrolledUpgradeIdentity } from "./worker-upgrade-enrollment.js";
 import {
   finishUpgrade,
@@ -35,6 +36,13 @@ import {
 } from "./worker-upgrade-transport.js";
 
 type Check = { blockers: readonly string[]; launch_enabled: boolean };
+function enrolledFor(root: string, project: string, machine: string) {
+  try {
+    return !!enrolledUpgradeIdentity(root, project, machine);
+  } catch {
+    return false; // An unreadable enrollment never authorizes an install.
+  }
+}
 const held: Check = { blockers: [upgradeHold], launch_enabled: false };
 
 /** Called only while the patrol owns the machine check journal. No launch path installs. */
@@ -70,7 +78,12 @@ export async function patrolHelperUpgrade(
   const wasHeld = !!previous && previous.state !== "verified";
   const root = dirname(runtimeWorkersPath(options.env));
   const key = upgradeKey(execution.target?.fingerprint);
-  const helpersStale = initial.blockers.some(helperMismatch);
+  // C-666: the previous release is admitted for dispatch, but an enrolled
+  // binding still upgrades to the current one as for any helper mismatch.
+  const helpersStale =
+    initial.blockers.some(helperMismatch) ||
+    (observedHelperRelease(execution.target?.fingerprint) === "previous" &&
+      enrolledFor(root, project, machine));
   // C-609: an install of this release on this binding that a restart cut off
   // resumes once. What is already there is re-verified, and only what the
   // check shows missing is installed again; a second interruption fails.

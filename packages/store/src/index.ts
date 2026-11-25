@@ -161,3 +161,4 @@ export {
   webCredential,
   webPasswordConfigured,
 } from "./web-auth.js";
+export * from "./worker-usage.js";

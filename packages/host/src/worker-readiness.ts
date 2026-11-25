@@ -8,9 +8,10 @@ import {
 
 import {
   digestMismatch,
+  minimumWorkerPublicationProtocol,
+  previousWorkerHelperRelease,
   protocolMismatch,
   workerHelperDigests,
-  workerPublicationProtocol,
 } from "./worker-helper-release.js";
 
 type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
@@ -29,6 +30,7 @@ r=json.loads(sys.argv[1])
 failures=[]
 protocol=None
 matching=None
+previous=None
 def require(value):
     if not value: raise ValueError()
 def protected(path):
@@ -51,7 +53,9 @@ try:
         ('worker-primitives.py',pathlib.Path(r['file_helper']).with_name('worker-primitives.py')))
     # Unknown (unsafe/unreadable) is not evidence of an installed release mismatch.
     for _,path in paths: protected(path)
-    matching=all(hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()==r['digests'][name] for name,path in paths)
+    installed=[(name,hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()) for name,path in paths]
+    matching=all(digest==r['digests'][name] for name,digest in installed)
+    previous=all(digest==(r.get('previous') or {}).get(name) for name,digest in installed)
     files=module(r['file_helper'],'worker_files')
     protocol=getattr(files, 'PUBLICATION_PROTOCOL', 1)
     git=module(r['git_helper'],'worker_git')
@@ -87,12 +91,26 @@ version=None
 try:
     version=subprocess.check_output(['hc','--version'],stderr=subprocess.DEVNULL,timeout=5).decode().strip()
 except Exception: pass
-print(json.dumps(dict(failures=failures,version=version,protocol=protocol,matching=matching)))
+print(json.dumps(dict(failures=failures,version=version,protocol=protocol,matching=matching,previous=previous)))
 `;
+
+/**
+ * C-666: which admitted release each binding (target fingerprint) ran at its
+ * latest readiness probe in this process. "previous" is the exact release
+ * before the usage report: it launches, but its usage report is skipped.
+ */
+const releases = new Map<string, "current" | "previous">();
+export function observedHelperRelease(
+  fingerprint: string | undefined,
+): "current" | "previous" | undefined {
+  return fingerprint === undefined ? undefined : releases.get(fingerprint);
+}
 
 export async function workerReadiness(
   execution: Worker,
 ): Promise<readonly WorkerReadinessFailure[]> {
+  const fingerprint = execution.target?.fingerprint;
+  if (fingerprint !== undefined) releases.delete(fingerprint);
   if (!execution.gitHelper || !execution.fileHelper || !execution.target)
     return ["worker_helpers"];
   try {
@@ -104,6 +122,7 @@ export async function workerReadiness(
       workerReadinessScript,
       JSON.stringify({
         digests: workerHelperDigests(),
+        previous: previousWorkerHelperRelease.digests,
         root: execution.agentRoot,
         gid: execution.gid,
         project: execution.target.project_id,
@@ -119,6 +138,7 @@ export async function workerReadiness(
     const result = JSON.parse(stdout) as {
       protocol: unknown;
       matching: unknown;
+      previous?: unknown;
       failures: unknown;
       version: unknown;
     };
@@ -144,9 +164,21 @@ export async function workerReadiness(
       !blockers.includes("worker_helpers")
     )
       blockers.push("worker_helpers");
-    if (protocolKnown && protocol < workerPublicationProtocol)
+    // C-666: the exact previous release is admitted; only its usage report is skipped.
+    const previous =
+      result.matching === false &&
+      result.previous === true &&
+      protocol === previousWorkerHelperRelease.protocol;
+    if (protocolKnown && protocol < minimumWorkerPublicationProtocol)
       blockers.unshift(protocolMismatch(protocol));
-    else if (result.matching === false) blockers.unshift(digestMismatch);
+    else if (result.matching === false && !previous)
+      blockers.unshift(digestMismatch);
+    if (
+      fingerprint !== undefined &&
+      !blockers.includes("worker_helpers") &&
+      (result.matching === true || previous)
+    )
+      releases.set(fingerprint, previous ? "previous" : "current");
     return [
       ...blockers,
       ...(isHcVersionCompatible(version) ? [] : ["hc_version" as const]),

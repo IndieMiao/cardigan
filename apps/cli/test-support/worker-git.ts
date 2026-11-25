@@ -3,7 +3,10 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { type AgentExecution, HC_RELEASE } from "@cardigan/runtime-herdr";
-import { workerHelperDigests } from "../../../packages/host/src/worker-helper-release.js";
+import {
+  previousWorkerHelperRelease,
+  workerHelperDigests,
+} from "../../../packages/host/src/worker-helper-release.js";
 import { workerReadinessScript } from "../../../packages/host/src/worker-readiness.js";
 
 /** Separate physical disk; only the SSH fixture knows its mapping. */
@@ -109,6 +112,8 @@ def replace(value,a,b):
     return value
 r=replace(r,virtual,disk)
 os.umask(0o077)
+if r['operation']=='usage' and hasattr(m,'usage'):
+    print(json.dumps(m.usage(r)));sys.exit(0)
 w=m.Workspace(r)
 try:
     reply=w.operate()
@@ -147,6 +152,7 @@ ${workerReadinessScript}`;
       program,
       JSON.stringify({
         digests: workerHelperDigests(),
+        previous: previousWorkerHelperRelease.digests,
         root: disk,
         project,
         gid: config.gid,

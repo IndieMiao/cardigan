@@ -23,7 +23,8 @@ spec.loader.exec_module(native)
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 TRAILER = b'\nCARDIGAN-PUBLISH-1\n'
 # Independent of the format version in each publication manifest.
-PUBLICATION_PROTOCOL = 2
+# 3 (C-666): the release's worker-git.py answers the read-only `usage` report.
+PUBLICATION_PROTOCOL = 3
 FILES = re.compile(r'(core\.md|first\.md|run-command\.py|launch\.sh|launch\.json|token|secrets\.env|codex/config\.toml|pi/(models\.json|mcp\.json|trust\.json|extensions/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)')
 
 

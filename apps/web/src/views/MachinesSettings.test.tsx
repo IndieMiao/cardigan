@@ -1149,3 +1149,79 @@ test("V-2475: a detail answered 404 while the list still has the machine takes i
   expect(drawerTable("在跑任务")).toBeNull();
   expect(dialog.queryByText("资源上限")).toBeNull();
 });
+
+test("C-666: the detail lists each project's worktrees, builds, runs and free space with the measuring time; an older helper is marked, not hidden", async () => {
+  const GiB = 1024 ** 3;
+  const [first, ...rest] = byId("builder").bindings;
+  if (!first) throw new Error("fixture binding");
+  const builder: MachineView = {
+    ...byId("builder"),
+    bindings: [
+      {
+        ...first,
+        disk_usage: {
+          observed_at: "2026-11-25T03:00:00.000Z",
+          status: "measured",
+          measured: {
+            measured_at: "2026-11-25T03:00:00.000Z",
+            free_bytes: 9 * GiB,
+            total_bytes: 228 * GiB,
+            worktrees: { bytes: 85 * GiB, directories: 40 },
+            builds: { bytes: 42 * GiB, directories: 34 },
+            runs: { bytes: 24 * GiB, directories: 50 },
+            complete: true,
+          },
+        },
+      },
+      ...rest.map((b) => ({
+        ...b,
+        disk_usage: {
+          observed_at: "2026-11-25T03:00:00.000Z",
+          status: "skipped" as const,
+          skipped_reason: "helper_outdated" as const,
+        },
+      })),
+    ],
+  };
+  const c = client({
+    machine: vi.fn(async (_p: string, id: string) => ({
+      machine: id === "builder" ? builder : byId(id),
+    })),
+  });
+  await openMachines(c);
+  fireEvent.click(screen.getByRole("button", { name: "构建机" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  const usage = within(await dialog.findByRole("table", { name: "目录占用" }));
+  expect(usage.getAllByRole("columnheader").map((h) => h.textContent)).toEqual([
+    "项目",
+    "worktrees",
+    "builds",
+    "runs",
+    "可用空间",
+    "统计时间",
+    "状态",
+  ]);
+  const rows = usage.getAllByRole("row").slice(1);
+  expect(rows).toHaveLength(builder.bindings.length);
+  const measured = rows[0]?.textContent ?? "";
+  expect(measured).toContain(first.project_name);
+  for (const text of [
+    "85.0 GiB",
+    "42.0 GiB",
+    "24.0 GiB",
+    "9.0 GiB / 228.0 GiB",
+    "已统计",
+  ])
+    expect(measured).toContain(text);
+  for (const row of rows.slice(1))
+    expect(row.textContent).toContain("helper 过旧，未统计");
+});
+
+test("C-666: a machine without usage readings says so in one line", async () => {
+  const c = client();
+  await openMachines(c);
+  fireEvent.click(screen.getByRole("button", { name: "本机" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  expect(await dialog.findByText("没有占用记录")).toBeTruthy();
+  expect(dialog.queryByRole("table", { name: "目录占用" })).toBeNull();
+});

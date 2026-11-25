@@ -1650,6 +1650,8 @@ export class HerdrRuntime implements Runtime {
 export {
   type WorkerGitOperation,
   type WorkerGitRequest,
+  type WorkerUsageKind,
+  type WorkerUsageReport,
   workerGit,
   workerGitCommand,
   workerGitFailure,

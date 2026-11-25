@@ -1,4 +1,4 @@
-import type { Clock } from "@cardigan/domain";
+import type { Clock, ProjectId } from "@cardigan/domain";
 import {
   MACHINE_CAPABILITY_INTERVAL_MS,
   type RuntimeTargets,
@@ -14,6 +14,8 @@ export function startMachineCapabilityLoop(options: {
   readonly startup?: LoopStartup | undefined;
   readonly runtime: Pick<RuntimeTargets, "refreshMachine">;
   readonly verification?: { host: MachineHost; clock: Clock };
+  /** C-666: read a remote binding's directory usage after a passing check. */
+  readonly usage?: (project: ProjectId, machine: string) => Promise<void>;
   readonly onError: (error: unknown) => void;
 }) {
   const controller = new AbortController();
@@ -41,6 +43,7 @@ export function startMachineCapabilityLoop(options: {
         );
         for (const machine of machines) {
           if (controller.signal.aborted) return;
+          let available = false;
           try {
             const { health } = await options.runtime.refreshMachine(
               project.id,
@@ -49,6 +52,7 @@ export function startMachineCapabilityLoop(options: {
                 signal: controller.signal,
               },
             );
+            available = health?.available === true;
             // A dispatch pause is not a maintenance failure; the fresh double
             // check still has to prove that it was the only blocker.
             if (
@@ -63,7 +67,20 @@ export function startMachineCapabilityLoop(options: {
             }
           } catch {
             options.onError(new Error("Machine capability refresh failed"));
+            continue;
           }
+          // Read only through a helper the check just found reachable.
+          if (
+            options.usage &&
+            machine.id !== "local" &&
+            available &&
+            !controller.signal.aborted
+          )
+            try {
+              await options.usage(project.id, machine.id);
+            } catch {
+              options.onError(new Error("Worker usage observation failed"));
+            }
         }
       }
     },

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,8 +10,15 @@ import {
   HC_RELEASE,
 } from "@cardigan/runtime-herdr";
 import { afterEach, expect, test, vi } from "vitest";
-import { workerHelperDigests } from "./worker-helper-release.js";
-import { workerReadiness, workerReadinessScript } from "./worker-readiness.js";
+import {
+  previousWorkerHelperRelease,
+  workerHelperDigests,
+} from "./worker-helper-release.js";
+import {
+  observedHelperRelease,
+  workerReadiness,
+  workerReadinessScript,
+} from "./worker-readiness.js";
 
 vi.mock("@cardigan/runtime-herdr", async (original) => ({
   ...(await original<typeof import("@cardigan/runtime-herdr")>()),
@@ -46,7 +54,7 @@ const reply = (value: Record<string, unknown>) =>
     file: process.execPath,
     args: [
       "-e",
-      `process.stdout.write(${JSON.stringify(JSON.stringify({ protocol: 2, matching: true, ...value }))})`,
+      `process.stdout.write(${JSON.stringify(JSON.stringify({ protocol: 3, matching: true, previous: false, ...value }))})`,
     ],
   });
 
@@ -64,6 +72,7 @@ test("successful observations are collected through the pinned SSH entry with fi
   ]);
   expect(JSON.parse(args?.[5] ?? "null")).toEqual({
     digests: workerHelperDigests(),
+    previous: previousWorkerHelperRelease.digests,
     root: "/workers/fixture",
     gid: 2001,
     project: "fixture",
@@ -211,7 +220,7 @@ test("a legacy publication helper is rejected before launch; version alone canno
     matching: false,
   });
   expect(await workerReadiness(execution)).toEqual([
-    "worker helper 落后（已装 1，需要 2）",
+    "worker helper 落后（已装 1，需要 3）",
   ]);
   reply({ version: `hc ${HC_RELEASE.version}`, failures: [], matching: false });
   expect(await workerReadiness(execution)).toEqual([
@@ -278,8 +287,130 @@ test("real probe compares a release and a pre-run-command whitelist on a simulat
     expect(legacy).not.toContain("run-command\\.py|");
     await writeFile(path, legacy);
     expect((await workerReadiness(config))[0]).toBe(
-      "worker helper 落后（已装 1，需要 2）",
+      "worker helper 落后（已装 1，需要 3）",
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// C-666: the usage report raised the release to protocol 3. A worker still on
+// the exact previous release keeps dispatching; only its usage is skipped.
+test("the exact previous release is admitted and remembered; other protocol-2 bytes are not", async () => {
+  const fingerprint = execution.target?.fingerprint;
+  reply({ version: `hc ${HC_RELEASE.version}`, failures: [] });
+  expect(await workerReadiness(execution)).toEqual([]);
+  expect(observedHelperRelease(fingerprint)).toBe("current");
+  reply({
+    version: `hc ${HC_RELEASE.version}`,
+    failures: [],
+    protocol: 2,
+    matching: false,
+    previous: true,
+  });
+  expect(await workerReadiness(execution)).toEqual([]);
+  expect(observedHelperRelease(fingerprint)).toBe("previous");
+  // Any other protocol-2 helper is still a release mismatch, as before.
+  reply({
+    version: `hc ${HC_RELEASE.version}`,
+    failures: [],
+    protocol: 2,
+    matching: false,
+    previous: false,
+  });
+  expect(await workerReadiness(execution)).toEqual([
+    "worker helper 与当前部署的 SHA-256 不一致",
+  ]);
+  expect(observedHelperRelease(fingerprint)).toBeUndefined();
+  // A previous-release claim from a newer protocol is not the previous release.
+  reply({
+    version: `hc ${HC_RELEASE.version}`,
+    failures: [],
+    protocol: 3,
+    matching: false,
+    previous: true,
+  });
+  expect(await workerReadiness(execution)).toEqual([
+    "worker helper 与当前部署的 SHA-256 不一致",
+  ]);
+  vi.mocked(agentProcessCommand).mockRejectedValueOnce(new Error("offline"));
+  expect(await workerReadiness(execution)).toEqual(["worker_unreachable"]);
+  expect(observedHelperRelease(fingerprint)).toBeUndefined();
+});
+
+test("real probe admits the verbatim previous release (protocol 2) without a helper blocker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-previous-"));
+  try {
+    const sha = (bytes: Buffer | string) =>
+      createHash("sha256").update(bytes).digest("hex");
+    // The previous release: its verbatim worker-git.py, worker-files.py before
+    // the protocol bump, and the unchanged worker-primitives.py.
+    const files = {
+      "worker-git.py": await readFile(
+        new URL("../test-support/worker-git-v2.py", import.meta.url),
+      ),
+      "worker-files.py": Buffer.from(
+        (
+          await readFile(
+            new URL("../../../deploy/worker-files.py", import.meta.url),
+            "utf8",
+          )
+        )
+          .replace(/^# 3 \(C-666\): .*\n/mu, "")
+          .replace(/^PUBLICATION_PROTOCOL = 3$/mu, "PUBLICATION_PROTOCOL = 2"),
+      ),
+      "worker-primitives.py": await readFile(
+        new URL("../../../deploy/worker-primitives.py", import.meta.url),
+      ),
+    };
+    for (const [name, bytes] of Object.entries(files)) {
+      expect(sha(bytes)).toBe(
+        previousWorkerHelperRelease.digests[
+          name as keyof typeof previousWorkerHelperRelease.digests
+        ],
+      );
+      await writeFile(join(root, name), bytes);
+    }
+    // The old helper has no usage report; the current one does.
+    expect(files["worker-git.py"].toString()).not.toContain("def usage(");
+    expect(
+      await readFile(
+        new URL("../../../deploy/worker-git.py", import.meta.url),
+        "utf8",
+      ),
+    ).toContain("def usage(");
+    vi.mocked(agentProcessCommand).mockImplementation(
+      async (_config, args) => ({
+        file: "python3",
+        args: [
+          "-IB",
+          "-c",
+          workerReadinessScript.replace(
+            "try:\n    paths=",
+            "protected=lambda path: None\ntry:\n    paths=",
+          ),
+          args.at(-1) ?? "",
+        ],
+      }),
+    );
+    const config = {
+      ...execution,
+      agentRoot: root,
+      gitHelper: {
+        python: "/usr/bin/python3",
+        path: join(root, "worker-git.py"),
+      },
+      fileHelper: {
+        python: "/usr/bin/python3",
+        path: join(root, "worker-files.py"),
+      },
+    };
+    const blockers = await workerReadiness(config);
+    // Only the fixture's missing directory layout and hc remain.
+    expect(
+      blockers.every((b) => b === "worker_directories" || b === "hc_version"),
+    ).toBe(true);
+    expect(observedHelperRelease(config.target?.fingerprint)).toBe("previous");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
