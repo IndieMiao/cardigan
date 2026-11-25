@@ -865,6 +865,25 @@ test("S21 tools/list advertises optional project defaults", async () => {
   expect(tool?.description).toMatch(/default base branch/);
 });
 
+test("C-751 tools/list: post_comment asks to name whoever must act", async () => {
+  const tool = (await office.listTools()).tools.find(
+    (t) => t.name === "post_comment",
+  );
+  for (const phrase of [
+    "系统只按点名通知",
+    "必须点名具体对象",
+    "在 `mentions` 填 Assignment 编号（A-n）或员工名",
+    "不点名的评论只是记录",
+    "report_blocker",
+    "代码块（含行内代码）或引用块（以 > 开头的行）里的 @ 不生效",
+  ])
+    expect(tool?.description).toContain(phrase);
+  // A rule, not a detector: no new field on the comment.
+  expect(Object.keys(tool?.inputSchema.properties ?? {})).not.toContain(
+    "no_handoff",
+  );
+});
+
 test("MCP assign accepts employee IDs/names, auto selects globally and whoami/read views resolve trusted identity", async () => {
   const employee = store.uow.run((tx) => {
     const e = {
@@ -1252,7 +1271,49 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
   expect(
     await ok(ops, "resolve_delegated_decision", p, "delegation-answer"),
   ).toEqual(resolved);
+  // C-753: a PM declaration with its basis skips the feature_detail grant.
+  const ownerRequired = {
+    reason: "所有者须本人看图",
+    basis: "本卡验收第 4 条",
+  };
+  const owned = await ok<Decision>(office, "request_decision", {
+    ...question,
+    category: "feature_detail",
+    owner_required: ownerRequired,
+  });
+  expect(owned).toMatchObject({
+    decider: "human",
+    owner_required: ownerRequired,
+  });
+  expect(owned).not.toHaveProperty("routed_to");
+  expect(owned.delegation_authority).toBeUndefined();
   const agent = await coder();
+  for (const [client, owner_required] of [
+    [agent, ownerRequired],
+    [office, { ...ownerRequired, basis: " " }],
+    [office, { reason: ownerRequired.reason }],
+  ] as const)
+    expect(
+      (
+        await raw(client, "request_decision", {
+          ...question,
+          category: "feature_detail",
+          owner_required,
+        })
+      ).isError,
+    ).toBe(true);
+  const snapshot = await ok<{
+    owner_required_decisions: {
+      window_days: number;
+      count: number;
+      items: { decision_id: string; basis: string }[];
+    };
+  }>(office, "project_snapshot", {});
+  expect(snapshot.owner_required_decisions).toMatchObject({
+    window_days: 7,
+    count: 1,
+    items: [{ decision_id: owned.id, basis: ownerRequired.basis }],
+  });
   for (const client of [office, agent]) {
     const forcedParams = {
       ...question,

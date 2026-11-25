@@ -343,6 +343,9 @@ export class LocalGitTransport implements GitWorktreePort {
       throw new Error("Build checkout is not a worktree top level");
     await this.git(target, ["clean", "-ffdxq", "--", "."]);
   }
+  async pruneWorktrees(repository: string): Promise<void> {
+    await this.git(repository, ["worktree", "prune"]);
+  }
   async removeWorktree(
     repository: string,
     path: string,

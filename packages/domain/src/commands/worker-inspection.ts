@@ -1,5 +1,6 @@
 import { assignmentCardId } from "../card-hold.js";
 import type { Actor } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import type { AssignmentId, RunId } from "../ids.js";
 import { runOccupiesSlot } from "../run-capacity.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
@@ -49,9 +50,11 @@ export function admitWorkerInspection(
     const card =
       assignment && assignmentCardId(assignment, state, run?.trigger_event_id);
     const since = Date.parse(d.now) - intervalMs;
-    const limited = state.events.some(
+    const limited = eventsOfType(
+      state.events,
+      "worker_inspection_requested",
+    ).some(
       (e) =>
-        e.type === "worker_inspection_requested" &&
         (e.payload as { status?: string }).status === "admitted" &&
         Date.parse(e.created_at) > since,
     );

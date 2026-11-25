@@ -1081,6 +1081,8 @@ test("merged HumanAction query hides untriaged requests and retains C-41's uncla
     card_id: id("card", 1),
     instructions: "提供数据副本",
     why_human: "主机权限",
+    // C-742: the owner completes it; the operator rules are tested apart.
+    executor: "owner" as const,
     expected_return: "路径",
     blocked_work_items: [],
   };

@@ -1,4 +1,4 @@
-import { acknowledgeRun } from "@cardigan/domain";
+import { acknowledgeRun, recordRunAckRefusal } from "@cardigan/domain";
 import type { Identity } from "../auth.js";
 import type { McpBackend } from "../backend.js";
 import { loadCommandState, persistEffect } from "./execute.js";
@@ -55,10 +55,36 @@ export function acknowledgeDispatchedRun(
     return effect;
   });
   if (!result.ok) {
+    // C-735: keep the reason on the Run and the card so dispatch patrol, host
+    // ops and PM can see it; the tool call still reports the failure.
+    recordRefusal(store, identity, dispatched, result.error, now);
     // A run that another request already acknowledged is not an error for this
     // request; anything else is surfaced by the tool call itself.
     throw Object.assign(new Error(result.error.message), {
       code: result.error.code,
     });
+  }
+}
+
+function recordRefusal(
+  store: McpBackend,
+  identity: Identity,
+  run_id: Parameters<typeof recordRunAckRefusal>[2]["run_id"],
+  error: { code: string; message: string },
+  now: () => string,
+): void {
+  const { actor } = identity;
+  try {
+    store.uow.run((tx) => {
+      const effect = recordRunAckRefusal(
+        loadCommandState(tx, actor.project_id),
+        actor,
+        { run_id, code: error.code, message: error.message },
+        { clock: { now }, ids: tx.ids },
+      );
+      if (effect.ok) persistEffect(tx, actor.project_id, effect.value);
+    });
+  } catch {
+    // Best effort: the refusal itself is still thrown to the caller.
   }
 }

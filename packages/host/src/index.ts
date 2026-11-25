@@ -351,9 +351,18 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
+export {
+  DEFAULT_RUN_DIR_RETENTION_DAYS,
+  type RunDirReply,
+  type RunDirResult,
+  reclaimableRunDirectories,
+  reclaimRunDirectories,
+} from "./run-dir-retention.js";
 export { previewRunResources, resourceTarget } from "./run-resource-worker.js";
 export {
   assignmentResourceKeys,
+  type RunResourceClaim,
+  runResourceClaim,
   runResourceKeys,
   unclaimedResourceKeys,
 } from "./run-resources.js";
@@ -369,6 +378,12 @@ export * from "./runtime-targets.js";
 export * from "./runtime-workers-config.js";
 export { pinStallBackup } from "./stall-backup.js";
 export type { SessionExitVerdict } from "./stall-evidence.js";
+export {
+  DEFAULT_STALLED_SESSION_RELEASE_MS,
+  managedReleaseCommand,
+  SESSION_RELEASE_HELD,
+  stalledSessionReleaseMs,
+} from "./stalled-session-release.js";
 export {
   StandingPmRecovery,
   standingPmStallPolicy,
@@ -455,10 +470,13 @@ export { upgradeKey } from "./worker-upgrade-gate.js";
 export * from "./worker-wizard-files.js";
 export * from "./worker-wizard-form.js";
 export {
+  type ArtifactCheckout,
   missingWorktreePrompt,
+  PreparationNotStarted,
   prepareReadonlyWorktree,
   prepareRoleWorktree,
   readonlyWorktreeTarget,
+  recordArtifactCheckout,
   reviewTargetSha,
   type WorktreeProvider,
   type WorktreeRequest,

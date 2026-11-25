@@ -5,6 +5,7 @@ import type {
   CardId,
   Clock,
   ProjectId,
+  Run,
   Runtime,
   RuntimeRef,
 } from "@cardigan/domain";
@@ -13,11 +14,12 @@ import {
   isDecisionOther,
   releaseAssignment,
   requestWorktreeCleanup,
+  routeWorktreeCleanupDecisions,
 } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 import { unrevokedTokensForProject } from "@cardigan/store";
 import { buildCheckoutIdle } from "./build-checkouts.js";
-import type { ReconcileGit } from "./git.js";
+import type { MachineDirectories, ReconcileGit } from "./git.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
 import { MaintenanceBatch, projectCycle } from "./maintenance-batch.js";
 import { runSystemCommand, systemClock } from "./merge-loop.js";
@@ -36,6 +38,12 @@ import {
  * `worktree_cleanup` decision for the human; the loop executes the answer.
  */
 export const DEFAULT_CLEANUP_INTERVAL_MS = 60_000;
+/**
+ * C-747: how often an unchanged set of owner-held worktree cleanup questions
+ * is re-checked for delegation (e.g. PM Ops came back). New questions route
+ * when raised and the preference hook moves them when the category turns on.
+ */
+const ROUTE_RECHECK_MS = 10 * 60_000;
 
 export interface CleanupOptions {
   readonly store: Store;
@@ -73,6 +81,19 @@ export class CleanupExecutor {
     Set<"releases" | "owners" | "builds">
   >();
   private readonly builds = new MaintenanceBatch<ProjectId, string>();
+  /** C-747: last routing check of owner-held worktree cleanup questions. */
+  private readonly routing = new Map<
+    ProjectId,
+    { readonly waiting: string; readonly at: number }
+  >();
+  /**
+   * C-664: per pass, what each machine's project roots hold. A machine whose
+   * listing failed is `null`: nothing on it is judged absent or removed.
+   */
+  private readonly listings = new Map<
+    ProjectId,
+    Map<string, MachineDirectories | null>
+  >();
   pending(project: ProjectId) {
     return (
       this.owners.has(project) ||
@@ -110,6 +131,7 @@ export class CleanupExecutor {
     const done =
       this.pass.get(project_id) ?? new Set<"releases" | "owners" | "builds">();
     this.pass.set(project_id, done);
+    this.routeCleanupDecisions(project_id);
     if (!done.has("releases")) {
       await profileSpan("cleanup.release_closed", () =>
         this.releaseClosed(project_id),
@@ -146,16 +168,16 @@ export class CleanupExecutor {
     const missing: { assignment_id: AssignmentId; runtime_ref: RuntimeRef }[] =
       [];
     const eligible = new Map(candidates.map((a) => [a.id, a]));
+    const withWorktree = new Set<AssignmentId>();
+    if (!done.has("owners") && !this.owners.has(project_id))
+      for (const a of candidates)
+        if (await this.hasWorktree(project_id, a)) withWorktree.add(a.id);
     if (!done.has("owners"))
       await this.owners.run(
         project_id,
         () =>
           candidates
-            .filter(
-              (a) =>
-                a.runtime_ref ||
-                (a.worktree_path && !this.cleaned.has(`${project_id}/${a.id}`)),
-            )
+            .filter((a) => a.runtime_ref || withWorktree.has(a.id))
             .map((a) => a.id),
         async (id) => {
           const assignment = eligible.get(id);
@@ -168,10 +190,7 @@ export class CleanupExecutor {
           )
             return;
           unconfirmed.delete(id);
-          if (
-            assignment.scope === "work_item" &&
-            assignment.worktree_path !== undefined
-          )
+          if (await this.hasWorktree(project_id, assignment))
             await profileSpan("cleanup.settle", () =>
               this.settle(project_id, assignment),
             );
@@ -198,7 +217,73 @@ export class CleanupExecutor {
       );
       if (!this.builds.has(project_id)) done.add("builds");
     }
-    if (!this.pending(project_id)) this.pass.delete(project_id);
+    if (!this.pending(project_id)) {
+      this.pass.delete(project_id);
+      this.listings.delete(project_id);
+    }
+  }
+
+  /**
+   * C-664: list a machine's builds and worktrees once per pass, through the
+   * machine's own Git helper. Host `access()` cannot see a worker's disk, so a
+   * remote directory is only judged by this listing; a failure judges nothing.
+   */
+  private async listing(
+    project_id: ProjectId,
+    machine_id: string,
+  ): Promise<MachineDirectories | null> {
+    const pass =
+      this.listings.get(project_id) ??
+      new Map<string, MachineDirectories | null>();
+    this.listings.set(project_id, pass);
+    const known = pass.get(machine_id);
+    if (known !== undefined) return known;
+    const list = this.options.git.listMachineDirectories?.bind(
+      this.options.git,
+    );
+    const project = this.options.git.projectOf(project_id);
+    if (!list || project === undefined) return null;
+    // Do not page through an offline or draining worker every round.
+    const machine = this.options.store.uow.read((tx) =>
+      tx.machines.get(project_id, machine_id),
+    );
+    if (
+      machine_id !== "local" &&
+      !["online", "degraded"].includes(machine?.status ?? "")
+    )
+      return null;
+    try {
+      const listed = (await list(project, machine_id)) ?? null;
+      // A busy preparation is retried next pass, not recorded as known.
+      if (listed) pass.set(machine_id, listed);
+      return listed;
+    } catch (error) {
+      pass.set(machine_id, null);
+      this.report(
+        `worker directory listing for ${project_id}/${machine_id} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Whether a released work-item Assignment still has a worktree to settle:
+   * a local recorded path is probed by `settle`; a worker's directory, or one
+   * whose path the record lost, must appear in its machine's listing.
+   */
+  private async hasWorktree(
+    project_id: ProjectId,
+    a: Assignment,
+  ): Promise<boolean> {
+    if (a.scope !== "work_item") return false;
+    if (this.cleaned.has(`${project_id}/${a.id}`)) return false;
+    if (a.machine_id === "local" && a.worktree_path !== undefined) return true;
+    const listed = await this.listing(project_id, a.machine_id);
+    if (listed === null) return false;
+    if (listed.worktrees.includes(a.id)) return true;
+    // Listed and absent on its own machine: nothing left to remove.
+    this.cleaned.add(`${project_id}/${a.id}`);
+    return false;
   }
 
   /**
@@ -218,9 +303,15 @@ export class CleanupExecutor {
     if (project === undefined) return;
     // A failed resume can leave no successor Run. Its build directory is
     // still evidence for the recovery handoff, not disposable idle output.
-    const idle = (id: string) =>
+    // C-664: one Run snapshot pre-filters a page; the removal itself re-reads
+    // fresh Runs under the repository lock, which is what decides.
+    let snapshot: readonly Run[] | undefined;
+    const idle = (id: string, fresh = true) =>
       this.options.store.uow.read((tx) => {
-        if (!buildCheckoutIdle(tx.runs.list(project_id), id)) return false;
+        if (fresh || snapshot === undefined)
+          snapshot = tx.runs.list(project_id);
+        const runs = snapshot;
+        if (!buildCheckoutIdle(runs, id)) return false;
         const a = tx.assignments.get(project_id, id as AssignmentId);
         if (a?.scope !== "work_item" || a.status === "released") return true;
         if (a.idle_retirement?.handoff) return false;
@@ -241,7 +332,25 @@ export class CleanupExecutor {
       );
       return;
     }
-    const listed = owners;
+    // C-664: a worker's builds are listed on that worker; only ids whose
+    // Assignment is bound there are removed through its own helper leaf.
+    const remote: string[] = [];
+    if (!this.builds.has(project_id)) {
+      const assignments = this.options.store.uow.read((tx) =>
+        tx.assignments.list(project_id),
+      );
+      const machines = new Map(assignments.map((a) => [a.id, a.machine_id]));
+      for (const machine_id of new Set(
+        assignments
+          .map((a) => a.machine_id)
+          .filter((machine) => machine !== "local"),
+      )) {
+        const found = await this.listing(project_id, machine_id);
+        for (const id of found?.builds ?? [])
+          if (machines.get(id as AssignmentId) === machine_id) remote.push(id);
+      }
+    }
+    const listed = [...new Set([...owners, ...remote])];
     await this.builds.run(
       project_id,
       () => [...listed],
@@ -249,7 +358,7 @@ export class CleanupExecutor {
         // A released Assignment whose terminal release failed this round keeps
         // its build until the next round confirms the exit (§12.6).
         if (unconfirmed.has(assignment_id)) return;
-        if (!idle(assignment_id)) return;
+        if (!idle(assignment_id, false)) return;
         try {
           await remove({
             project,
@@ -311,6 +420,46 @@ export class CleanupExecutor {
     );
   }
 
+  /**
+   * C-747: open worktree cleanup questions still with the human move to PM
+   * once data_deletion is delegated and PM Ops is active (questions raised
+   * before deployment, or while PM Ops was away). Only a write when one moves.
+   */
+  private routeCleanupDecisions(project_id: ProjectId) {
+    const waiting = this.options.store.uow
+      .read((tx) =>
+        tx.decisions
+          .list(project_id)
+          .filter(
+            (q) =>
+              q.trigger === "worktree_cleanup" &&
+              q.decider === "human" &&
+              ["open", "provisional", "snoozed"].includes(q.status),
+          )
+          .map((q) => q.id),
+      )
+      .join(",");
+    const last = this.routing.get(project_id);
+    const now = Date.parse(this.clock.now());
+    if (
+      !waiting ||
+      (last?.waiting === waiting && now - last.at < ROUTE_RECHECK_MS)
+    )
+      return;
+    this.routing.set(project_id, { waiting, at: now });
+    const routed = runSystemCommand(
+      this.options.store,
+      project_id,
+      (state, actor, ports) =>
+        routeWorktreeCleanupDecisions(state, actor, ports),
+      this.clock,
+    );
+    if (!routed.ok)
+      this.report(
+        `worktree cleanup routing was rejected: ${routed.error.code} ${routed.error.message}`,
+      );
+  }
+
   /** Only absence proves there is no terminal resource left to sweep. */
   private async releaseTerminal(
     assignment: Assignment,
@@ -346,8 +495,13 @@ export class CleanupExecutor {
 
   private async settle(project_id: ProjectId, assignment: Assignment) {
     if (this.cleaned.has(`${project_id}/${assignment.id}`)) return;
-    // A worktree that is already gone needs no decision and no removal.
-    if (!(await exists(assignment.worktree_path as string))) {
+    // A worktree that is already gone needs no decision and no removal. Only
+    // a local recorded path is visible here; the rest came from the listing.
+    if (
+      assignment.machine_id === "local" &&
+      assignment.worktree_path !== undefined &&
+      !(await exists(assignment.worktree_path))
+    ) {
       this.cleaned.add(`${project_id}/${assignment.id}`);
       return;
     }
@@ -418,7 +572,14 @@ export class CleanupExecutor {
           requestWorktreeCleanup(
             state,
             actor,
-            { assignment_id: assignment.id, reason },
+            {
+              assignment_id: assignment.id,
+              reason,
+              // C-664: record where a pathless record's worktree was found.
+              ...(assignment.worktree_path === undefined
+                ? { worktree_path: summary.worktree_path }
+                : {}),
+            },
             ports,
           ),
         this.clock,

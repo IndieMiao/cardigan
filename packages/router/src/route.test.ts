@@ -140,6 +140,20 @@ test("preparation recovery wakes its owner and a stalled preparation only alerts
       }),
     ),
   ).toEqual(["assignment:A-4"]);
+  // C-738: a used-up retry budget reaches PM via its pm_ops handoff, not host ops.
+  expect(
+    recipients(
+      routeEvent({
+        event: event("run_preparation_stalled", {
+          assignment_id: "A-1",
+          body: "failed",
+          exhausted: true,
+          recovery_root_run_id: "R-1",
+        }),
+        snapshot: state,
+      }),
+    ),
+  ).toEqual([]);
 });
 
 test("§6.4 work-item comment notifies that work item's Assignment", () => {

@@ -1,10 +1,13 @@
 import { expect, test } from "vitest";
+import { contextRestartRetryState } from "../context-restart-retry.js";
 import type { ContextObservation } from "../context-usage.js";
 import type { Assignment, Event } from "../entities.js";
 import {
   HOST_OPS_ROLE_TOOLS,
   hostOpsPending,
+  openRestartFailures,
   pendingHostOpsActions,
+  restartFencesOnlyOnSession,
 } from "../host-ops.js";
 import { recordContextUsageNotices } from "./context-usage.js";
 import { completeHumanAction } from "./coordination.js";
@@ -216,7 +219,7 @@ test("current session, full reference, sample freshness, role, scope and human t
   for (const patch of [
     { status: "released" as const },
     { external: true },
-    { role_id: "pm" },
+    { role_id: "coder" },
     { runtime_ref: null },
   ]) {
     const state = {
@@ -290,20 +293,33 @@ test("failure persists once, blocks dispatch after reload, and only actual human
     payload: { human_action_id: request.id },
   };
   expect(hostOpsPending([...f.state.events, fake], f.ops.id)).toBe(true);
-  f.state = apply(
-    f.state,
-    value(
-      completeHumanAction(
-        f.state,
-        human,
-        {
-          human_action_id: request.id,
-          text: "Confirmed exact terminal exited",
-        },
-        f.io,
-      ),
+  const complete = () =>
+    completeHumanAction(
+      f.state,
+      human,
+      {
+        human_action_id: request.id,
+        text: "Confirmed exact terminal exited",
+      },
+      f.io,
+    );
+  // C-741: marking it done alone does not close it while the old session stays.
+  expect(complete()).toMatchObject({
+    ok: false,
+    error: {
+      code: "illegal_transition",
+      message: expect.stringContaining("cardigan host-ops restart"),
+    },
+  });
+  f.state = {
+    ...f.state,
+    assignments: f.state.assignments.map((a) =>
+      a.id === f.ops.id
+        ? { ...a, runtime_ref: { ...ref, terminal_ref: "replacement" } }
+        : a,
     ),
-  );
+  };
+  f.state = apply(f.state, value(complete()));
   expect(hostOpsPending(f.state.events, f.ops.id)).toBe(false);
   expect(value(f.begin()).events).toHaveLength(0);
 });
@@ -1110,3 +1126,712 @@ test.each(["waiting", "stopping"] as const)(
       expect(finish(raced).ok).toBe(false);
   },
 );
+
+/** C-741: a later moment with a fresh sample of the same session. */
+function later(f: ReturnType<typeof setup>, ms: number) {
+  const at = new Date(Date.parse(now) + ms).toISOString();
+  const io = { ...f.io, clock: { now: () => at } };
+  const usage = { ...f.usage, updated_at: at };
+  return {
+    io,
+    usage,
+    begin: () =>
+      beginAutomaticContextRestart(
+        f.state,
+        system,
+        { usage, stale_after_ms: 60_000, snapshot },
+        io,
+      ),
+  };
+}
+function hold(
+  f: ReturnType<typeof setup>,
+  io: ReturnType<typeof ports>,
+  action_id: Event["id"],
+  reason = "upstream_diagnosis_unavailable",
+  retry_delays_ms?: readonly number[],
+) {
+  return value(
+    recordAutomaticContextRestartResult(
+      f.state,
+      system,
+      {
+        action_id,
+        result: "failed",
+        reason,
+        ...(retry_delays_ms ? { retry_delays_ms } : {}),
+      },
+      io,
+    ),
+  );
+}
+
+test("C-741: a temporary hold schedules backoff retries (2, 5, 10 min) instead of a human item; PM gets it once they run out", () => {
+  const f = setup();
+  let at = 0;
+  let begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  const delays = [120_000, 300_000, 600_000];
+  for (const [attempt, delay] of delays.entries()) {
+    const held = hold(f, later(f, at).io, required(begun.data).action_id);
+    expect(held.events).toEqual([
+      expect.objectContaining({
+        type: "context_session_restart_result",
+        payload: expect.objectContaining({
+          result: "retry_scheduled",
+          reason: "upstream_diagnosis_unavailable",
+          attempt: attempt + 1,
+          retry_at: new Date(Date.parse(now) + at + delay).toISOString(),
+        }),
+      }),
+    ]);
+    f.state = apply(f.state, held);
+    expect(f.state.human_actions).toHaveLength(0);
+    expect(hostOpsPending(f.state.events, f.ops.id)).toBe(false);
+    expect(pendingHostOpsActions(f.state.events)).toHaveLength(0);
+    // Not due yet: neither readiness nor the intent accepts another attempt.
+    const early = later(f, at + delay - 1);
+    expect(
+      automaticContextRestartReady(
+        f.state,
+        early.usage,
+        early.io.clock.now(),
+        60_000,
+      ),
+    ).toBe(false);
+    expect(value(early.begin()).events).toHaveLength(0);
+    // The operator's own tool still cannot repeat a context restart.
+    expect(
+      beginHostOpsAction(
+        f.state,
+        actor(4, "pm"),
+        {
+          tool: "host_ops_restart_assignment",
+          target_id: f.ops.id,
+          reason: "manual",
+          context_usage: early.usage,
+          context_stale_after_ms: 60_000,
+          snapshot,
+        },
+        early.io,
+      ).ok,
+    ).toBe(false);
+    at += delay;
+    begun = value(later(f, at).begin());
+    expect(begun.data).toBeDefined();
+    f.state = apply(f.state, begun);
+  }
+  const final = hold(f, later(f, at).io, required(begun.data).action_id);
+  f.state = apply(f.state, final);
+  expect(final.events.at(-1)).toMatchObject({
+    type: "context_session_restart_result",
+    payload: {
+      result: "failed",
+      disposition: "pm_ops",
+      retries: 3,
+      reason: "upstream_diagnosis_unavailable",
+    },
+  });
+  expect(f.state.human_actions).toEqual([
+    expect.objectContaining({
+      triage: "pm_ops",
+      status: "open",
+      instructions: expect.stringContaining(
+        `cardigan host-ops restart --project ${human.project_id}`,
+      ),
+      why_human: expect.stringContaining("upstream_diagnosis_unavailable"),
+    }),
+  ]);
+  expect(hostOpsPending(f.state.events, f.ops.id)).toBe(true);
+  expect(value(later(f, at + 3_600_000).begin()).events).toHaveLength(0);
+});
+
+test("C-741: a configured list sets the delays; agent_busy is temporary too", () => {
+  const f = setup();
+  const begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  const held = hold(
+    f,
+    f.io,
+    required(begun.data).action_id,
+    "agent_busy",
+    [30_000],
+  );
+  expect(held.events[0]).toMatchObject({
+    payload: {
+      result: "retry_scheduled",
+      retry_at: new Date(Date.parse(now) + 30_000).toISOString(),
+    },
+  });
+  f.state = apply(f.state, held);
+  const next = value(later(f, 30_000).begin());
+  f.state = apply(f.state, next);
+  const last = hold(
+    f,
+    later(f, 30_000).io,
+    required(next.data).action_id,
+    "agent_busy",
+    [30_000],
+  );
+  expect(last.events.at(-1)).toMatchObject({
+    payload: { result: "failed", disposition: "pm_ops", retries: 1 },
+  });
+});
+
+test("C-741: other failures and holds after a stop may have started keep the single attempt and name the command", () => {
+  for (const kind of ["launch", "stop_started"] as const) {
+    const f = setup();
+    const begun = value(f.begin());
+    f.state = apply(f.state, begun);
+    const action_id = required(begun.data).action_id;
+    if (kind === "stop_started")
+      f.state = {
+        ...f.state,
+        events: [
+          ...f.state.events,
+          {
+            ...required(f.state.events.at(-1)),
+            id: "00000000000000000000000999" as Event["id"],
+            type: "host_ops_action_deferred",
+            payload: { action_id, reason: "automatic_context_stop_started" },
+          },
+        ],
+      };
+    const result = hold(
+      f,
+      f.io,
+      action_id,
+      kind === "launch" ? "新会话启动失败。" : "upstream_diagnosis_unavailable",
+    );
+    expect(result.events.at(-1)).toMatchObject({
+      payload: { result: "failed", disposition: "human" },
+    });
+    f.state = apply(f.state, result);
+    expect(f.state.human_actions).toEqual([
+      expect.objectContaining({
+        triage: "human",
+        instructions: expect.stringContaining(
+          `cardigan host-ops restart --project ${human.project_id}`,
+        ),
+      }),
+    ]);
+  }
+});
+
+test("C-741: the human restart command replaces the session, closes the failure item and releases the fence", () => {
+  const f = setup();
+  const begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  f.state = apply(
+    f.state,
+    hold(f, f.io, required(begun.data).action_id, "exit unknown"),
+  );
+  const item = required(f.state.human_actions.at(-1));
+  expect(hostOpsPending(f.state.events, f.ops.id)).toBe(true);
+  // A restart started by the system or an agent is still fenced.
+  expect(
+    queueRun(
+      f.state,
+      system,
+      {
+        ...snapshot,
+        assignment_id: f.ops.id,
+        restart_session: true,
+        expected_runtime_ref: ref,
+      },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  const restarted = value(
+    queueRun(
+      f.state,
+      human,
+      {
+        ...snapshot,
+        assignment_id: f.ops.id,
+        reuse_queued: true,
+        restart_session: true,
+        expected_runtime_ref: ref,
+      },
+      f.io,
+    ),
+  );
+  f.state = apply(f.state, restarted);
+  expect(restarted.events.map((e) => e.type)).toEqual(
+    expect.arrayContaining([
+      "standing_session_restarted",
+      "human_action_completed",
+      "run_queued",
+    ]),
+  );
+  expect(f.state.human_actions.find((h) => h.id === item.id)).toMatchObject({
+    status: "done",
+    result: {
+      text: expect.stringContaining("cardigan host-ops restart"),
+    },
+  });
+  expect(f.state.assignments.find((a) => a.id === f.ops.id)).toMatchObject({
+    id: f.ops.id,
+    status: "active",
+    runtime_ref: null,
+  });
+  expect(hostOpsPending(f.state.events, f.ops.id)).toBe(false);
+});
+
+test("C-741: a standing PM is restarted automatically with the same retries and points at pm restart", () => {
+  const io = ports();
+  const pmRef = { ...ref, terminal_ref: "pm", agent_session_id: "pm" };
+  const { work_item_id: _w, ...opsFields } = assignment(10, "host_ops");
+  const { work_item_id: _p, ...pmFields } = assignment(11, "pm");
+  const ops: Assignment = { ...opsFields, scope: "standing", runtime_ref: ref };
+  const pm: Assignment = {
+    ...pmFields,
+    scope: "standing",
+    standing_mode: "office",
+    runtime_ref: pmRef,
+    session_ref: "pm",
+  };
+  const s = fixture();
+  let state: CommandState = {
+    ...s,
+    assignments: [...s.assignments, ops, pm],
+    roles: [
+      ...s.roles,
+      { ...role("host_ops"), allowed_tools: HOST_OPS_ROLE_TOOLS },
+    ],
+  };
+  const usage: ContextObservation = {
+    assignment_id: pm.id,
+    agent: "claude",
+    session_id: "pm",
+    runtime_key: JSON.stringify(pmRef),
+    cwd: "/fixture",
+    transcript_path: null,
+    model: "fixture",
+    context_tokens: 850,
+    context_window_size: 1000,
+    used_percentage: 85,
+    updated_at: now,
+    source: "fixture",
+  };
+  for (let i = 0; i < 2; i++)
+    state = apply(
+      state,
+      value(recordContextUsageNotices(state, system, usage, 60_000, io)),
+    );
+  expect(state.events.at(-1)).toMatchObject({
+    type: "context_usage_notice",
+    payload: {
+      level: "restart",
+      body: expect.stringContaining("系统会在该会话空闲"),
+    },
+  });
+  expect(automaticContextRestartReady(state, usage, now, 60_000)).toBe(true);
+  const begun = value(
+    beginAutomaticContextRestart(
+      state,
+      system,
+      { usage, stale_after_ms: 60_000, snapshot },
+      io,
+    ),
+  );
+  expect(begun.events[0]).toMatchObject({
+    payload: {
+      tool: "host_ops_restart_standing_pm",
+      assignment_id: pm.id,
+      automatic_context_restart: true,
+    },
+  });
+  state = apply(state, begun);
+  const action_id = required(begun.data).action_id;
+  const held = value(
+    recordAutomaticContextRestartResult(
+      state,
+      system,
+      { action_id, result: "failed", reason: "session_state_unconfirmed" },
+      io,
+    ),
+  );
+  expect(held.events[0]).toMatchObject({
+    payload: { result: "retry_scheduled", assignment_id: pm.id },
+  });
+  // A failed attempt on the PM names its own restart command.
+  const f2 = apply(
+    state,
+    value(
+      recordAutomaticContextRestartResult(
+        state,
+        system,
+        { action_id, result: "failed", reason: "当前主机无法确认旧会话退出" },
+        io,
+      ),
+    ),
+  );
+  const item = required(f2.human_actions.at(-1));
+  expect(item.instructions).toContain(
+    `cardigan pm restart --office --project ${human.project_id}`,
+  );
+  expect(
+    completeHumanAction(
+      f2,
+      human,
+      { human_action_id: item.id, text: "done" },
+      io,
+    ),
+  ).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("cardigan pm restart --office") },
+  });
+  // The human's pm restart closes it, too.
+  const restarted = value(
+    queueRun(
+      f2,
+      human,
+      {
+        ...snapshot,
+        assignment_id: pm.id,
+        reuse_queued: true,
+        restart_session: true,
+        expected_runtime_ref: pmRef,
+      },
+      io,
+    ),
+  );
+  const after = apply(f2, restarted);
+  expect(after.human_actions.find((h) => h.id === item.id)?.status).toBe(
+    "done",
+  );
+  expect(hostOpsPending(after.events, pm.id)).toBe(false);
+});
+
+/** C-745: a session whose only attempt failed for good on an unavailable diagnosis. */
+function closedByDiagnosis(reason = "upstream_diagnosis_unavailable") {
+  const f = setup();
+  const begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  // No backoff entries left (or a pre-C-741 single attempt): failed for good.
+  f.state = apply(
+    f.state,
+    hold(f, f.io, required(begun.data).action_id, reason, []),
+  );
+  return f;
+}
+function recover(
+  f: ReturnType<typeof setup>,
+  ms: number,
+  diagnosis_recovered: boolean,
+) {
+  const next = later(f, ms);
+  return beginAutomaticContextRestart(
+    f.state,
+    system,
+    {
+      usage: next.usage,
+      stale_after_ms: 60_000,
+      snapshot,
+      ...(diagnosis_recovered ? { diagnosis_recovered } : {}),
+    },
+    next.io,
+  );
+}
+
+test("C-745: a session closed by an unavailable diagnosis gets one more automatic attempt once the host sees the diagnosis recovered", () => {
+  const f = closedByDiagnosis();
+  const failure = required(f.state.human_actions.at(-1));
+  expect(failure.status).toBe("open");
+  expect(
+    contextRestartRetryState(
+      f.state.events,
+      f.ops.id,
+      "current",
+      later(f, 60_000).usage.updated_at,
+    ),
+  ).toBe("recoverable");
+  // The failure fence holds until the diagnosis is seen available again.
+  expect(hostOpsPending(f.state.events, f.ops.id)).toBe(true);
+  const at = later(f, 60_000);
+  expect(
+    automaticContextRestartReady(f.state, at.usage, at.io.clock.now(), 60_000),
+  ).toBe(false);
+  expect(value(recover(f, 60_000, false)).events).toHaveLength(0);
+  expect(
+    automaticContextRestartReady(
+      f.state,
+      at.usage,
+      at.io.clock.now(),
+      60_000,
+      undefined,
+      true,
+    ),
+  ).toBe(true);
+  // An operator cannot claim the recovery on the system's behalf.
+  expect(
+    beginHostOpsAction(
+      f.state,
+      actor(4, "pm"),
+      {
+        tool: "host_ops_restart_assignment",
+        target_id: f.ops.id,
+        reason: "manual",
+        automatic_context_restart: true,
+        diagnosis_recovery_retry: true,
+        context_usage: at.usage,
+        context_stale_after_ms: 60_000,
+        snapshot,
+      },
+      at.io,
+    ).ok,
+  ).toBe(false);
+
+  const retried = value(recover(f, 60_000, true));
+  expect(retried.events).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "host_ops_action_taken",
+        payload: expect.objectContaining({
+          automatic_context_restart: true,
+          diagnosis_recovery_retry: true,
+          reason: expect.stringContaining("诊断已恢复，自动再试一次"),
+        }),
+      }),
+      expect.objectContaining({
+        type: "human_action_completed",
+        payload: { human_action_id: failure.id, resume_work_items: [] },
+      }),
+    ]),
+  );
+  f.state = apply(f.state, retried);
+  expect(
+    f.state.human_actions.find((h) => h.id === failure.id)?.status,
+  ).not.toBe("open");
+  // The earlier failure no longer fences; the extra attempt itself does.
+  expect(openRestartFailures(f.state.events)).toHaveLength(0);
+  expect(pendingHostOpsActions(f.state.events)).toHaveLength(1);
+  expect(hostOpsPending(f.state.events, f.ops.id)).toBe(true);
+
+  // If the extra attempt fails for good too, the session stays closed and a
+  // new item asks for the human restart command.
+  f.state = apply(
+    f.state,
+    hold(
+      f,
+      later(f, 60_000).io,
+      required(retried.data).action_id,
+      "upstream_diagnosis_unavailable",
+      [],
+    ),
+  );
+  expect(
+    contextRestartRetryState(
+      f.state.events,
+      f.ops.id,
+      "current",
+      later(f, 120_000).usage.updated_at,
+    ),
+  ).toBe("closed");
+  expect(value(recover(f, 3_600_000, true)).events).toHaveLength(0);
+  expect(f.state.human_actions.filter((h) => h.status === "open")).toHaveLength(
+    1,
+  );
+});
+
+test("C-745: a held extra attempt follows the C-741 backoff; a success after it stays closed", () => {
+  const f = setup();
+  const begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  // A pre-C-741 single attempt: failed for good, no retries recorded.
+  f.state = apply(
+    f.state,
+    hold(
+      f,
+      f.io,
+      required(begun.data).action_id,
+      "upstream_observation_failed",
+      [],
+    ),
+  );
+  const retried = value(recover(f, 60_000, true));
+  f.state = apply(f.state, retried);
+  const held = hold(
+    f,
+    later(f, 60_000).io,
+    required(retried.data).action_id,
+    "agent_busy",
+  );
+  expect(held.events[0]).toMatchObject({
+    payload: { result: "retry_scheduled", attempt: 1 },
+  });
+  f.state = apply(f.state, held);
+  const waiting = later(f, 60_000 + 60_000).usage.updated_at;
+  expect(
+    contextRestartRetryState(f.state.events, f.ops.id, "current", waiting),
+  ).toBe("waiting");
+  const due = later(f, 60_000 + 120_000).usage.updated_at;
+  expect(
+    contextRestartRetryState(f.state.events, f.ops.id, "current", due),
+  ).toBe("due");
+});
+
+test("C-745: other failures, stops that may have started and real upstream holds never get the extra attempt", () => {
+  for (const reason of [
+    "新会话启动失败。",
+    "upstream_recovery_not_ready",
+    "exit unknown",
+  ]) {
+    const f = closedByDiagnosis(reason);
+    expect(
+      contextRestartRetryState(f.state.events, f.ops.id, "current", now),
+    ).toBe("closed");
+    expect(value(recover(f, 60_000, true)).events).toHaveLength(0);
+  }
+  // A diagnosis hold after the stop may have started keeps the single attempt.
+  const f = setup();
+  const begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  const action_id = required(begun.data).action_id;
+  f.state = {
+    ...f.state,
+    events: [
+      ...f.state.events,
+      {
+        ...required(f.state.events.at(-1)),
+        id: "00000000000000000000000998" as Event["id"],
+        type: "host_ops_action_deferred",
+        payload: { action_id, reason: "automatic_context_stop_started" },
+      },
+    ],
+  };
+  f.state = apply(
+    f.state,
+    hold(f, f.io, action_id, "upstream_diagnosis_unavailable", []),
+  );
+  expect(
+    contextRestartRetryState(f.state.events, f.ops.id, "current", now),
+  ).toBe("closed");
+  expect(value(recover(f, 60_000, true)).events).toHaveLength(0);
+});
+
+test("C-745: a failure fence of another session keeps the extra attempt out", () => {
+  const f = closedByDiagnosis();
+  const other = required(
+    f.state.events.findLast((e) => e.type === "context_session_restart_result"),
+  );
+  f.state = {
+    ...f.state,
+    events: [
+      ...f.state.events,
+      {
+        ...other,
+        id: "00000000000000000000000997" as Event["id"],
+        seq: other.seq + 1000,
+        payload: {
+          ...(other.payload as object),
+          action_id: "other-action",
+          human_action_id: "HA-other",
+          context_usage: { session_id: "older" },
+        },
+      },
+    ],
+  };
+  expect(restartFencesOnlyOnSession(f.state.events, f.ops.id, "current")).toBe(
+    false,
+  );
+  expect(value(recover(f, 60_000, true)).events).toHaveLength(0);
+});
+
+test("C-745: the upstream hold detail reaches the retry, failure and withdrawal records, bounded to known fields", () => {
+  const detail = {
+    sub_reason: "classification_failed",
+    classification_failed_since: "2026-11-25T04:54:10.000Z",
+    classification_failure_count: 3,
+    classification_error_type: "SqliteError:SQLITE_BUSY",
+  } as const;
+  const f = setup();
+  const begun = value(f.begin());
+  f.state = apply(f.state, begun);
+  const record = (upstream_detail: unknown, delays?: number[]) =>
+    value(
+      recordAutomaticContextRestartResult(
+        f.state,
+        system,
+        {
+          action_id: required(begun.data).action_id,
+          result: "failed",
+          reason: "upstream_diagnosis_unavailable",
+          upstream_detail: upstream_detail as typeof detail,
+          ...(delays ? { retry_delays_ms: delays } : {}),
+        },
+        f.io,
+      ),
+    ).events.at(-1);
+  expect(record(detail)).toMatchObject({
+    payload: {
+      result: "retry_scheduled",
+      upstream_detail: detail,
+      body: expect.stringContaining(
+        "classification_failed，分类失败自 2026-11-25T04:54:10.000Z 起，连续 3 次",
+      ),
+    },
+  });
+  expect(record({ sub_reason: "no_diagnosis" }, [])).toMatchObject({
+    payload: {
+      result: "failed",
+      upstream_detail: { sub_reason: "no_diagnosis" },
+    },
+  });
+  expect(
+    record(
+      {
+        sub_reason: "provider_not_resolved",
+        classification_failed_since: "not a time",
+        classification_failure_count: -1,
+        token: "secret",
+      },
+      [],
+    )?.payload,
+  ).toMatchObject({ upstream_detail: { sub_reason: "provider_not_resolved" } });
+  expect(
+    (record({ sub_reason: "bogus" }, []) as { payload: object }).payload,
+  ).not.toHaveProperty("upstream_detail");
+  expect(
+    (
+      record({ sub_reason: "provider_not_resolved", token: "x" }, [])
+        ?.payload as { upstream_detail?: object } | undefined
+    )?.upstream_detail,
+  ).toStrictEqual({ sub_reason: "provider_not_resolved" });
+
+  const stall = setup();
+  const params = {
+    assignment_id: stall.ops.id,
+    cause_id: "pending-1",
+    snapshot,
+  };
+  const first = value(
+    beginStalledPatrolRestart(stall.state, system, params, stall.io),
+  );
+  expect(
+    value(
+      withdrawUnstartedStallRestart(
+        apply(stall.state, first),
+        system,
+        first.data.action_id,
+        stall.io,
+        "upstream_diagnosis_unavailable",
+        false,
+        {
+          cause: "unknown",
+          action: "wait",
+          evidence: ["classification_failed"],
+          upstream_detail: detail,
+        },
+      ),
+    ).events[0],
+  ).toMatchObject({
+    payload: {
+      blocked_by: {
+        evidence: ["classification_failed"],
+        upstream_detail: detail,
+      },
+    },
+  });
+});

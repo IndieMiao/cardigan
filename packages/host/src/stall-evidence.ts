@@ -49,9 +49,13 @@ def prefixes(args):
             prefix += parts[-1][:3-len(prefix)]
         if prefix or p.wait(): sys.exit(1)
 verdict = 'clean'
+untracked = False
 for tag in prefixes(['status','--porcelain=v1','-z','--untracked-files=normal','--ignored=matching','--ignore-submodules=none']):
+    if tag == b'?? ': untracked = True
     if tag not in (b'?? ', b'!! '): verdict = 'dirty'
     elif verdict == 'clean': verdict = 'local_only'
+# C-739: only ignored files (build output, dependencies), no untracked work.
+if verdict == 'local_only' and not untracked: verdict = 'ignored_only'
 # Hidden edits and unmerged index entries are not ordinary retained changes.
 for tag in prefixes(['ls-files','-v','-z']):
     if not tag.startswith(b'H '): verdict = 'unknown'
@@ -92,6 +96,11 @@ export async function stallWorkspace(
   signal?: AbortSignal,
   expectedHead?: string,
   inPlace = false,
+  /**
+   * C-739: an untracked file is work in progress (dirty) while ignored files
+   * alone (build output, dependencies) leave the checkout clean.
+   */
+  ignoredOnlyClean = false,
 ): Promise<Workspace> {
   if (!boundWorkspaceTarget(state.project_id, a, execution)) return "unknown";
   if (
@@ -174,7 +183,16 @@ export async function stallWorkspace(
       )
         return "unknown";
       const status = (await git([], true)).trimEnd();
-      if (status === "local_only" || status === "dirty")
+      if (ignoredOnlyClean) {
+        if (status === "local_only" || status === "dirty") return "dirty";
+        if (status === "ignored_only" || status === "clean") continue;
+        return "unknown";
+      }
+      if (
+        status === "local_only" ||
+        status === "ignored_only" ||
+        status === "dirty"
+      )
         return inPlace && role?.worktree === "write" && a.branch && a.base_sha
           ? "local_only"
           : "dirty";

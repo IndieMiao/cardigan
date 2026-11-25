@@ -39,6 +39,7 @@ import {
   type RoleDefinition,
   type RoleEffect,
   type RolePatch,
+  reassignHumanAction,
   recheckMerge,
   recordDecision,
   recordHelperUpgradeChecks,
@@ -421,19 +422,41 @@ function applyCommand<T>(
   c.authorize();
   const effect = must(
     reduce(
-      loadCommandState(tx, c.project_id, {
-        ...(c.mergeGate?.status === "enabled" && c.mergeGate.queue
-          ? { merge_queue: { max_batch_size: c.mergeGate.queue.maxBatchSize } }
-          : {}),
-        merge_gate_enabled:
-          c.mergeGate !== undefined && c.mergeGate.status !== "disabled",
-      }),
+      loadCommandState(
+        tx,
+        c.project_id,
+        {
+          ...(c.mergeGate?.status === "enabled" && c.mergeGate.queue
+            ? {
+                merge_queue: { max_batch_size: c.mergeGate.queue.maxBatchSize },
+              }
+            : {}),
+          merge_gate_enabled:
+            c.mergeGate !== undefined && c.mergeGate.status !== "disabled",
+        },
+        // C-639/C-671: like MCP commands, the cards the request names (path
+        // segments and the idempotent body) keep their whole history.
+        { targets: [requestPath(c.req.url), c.idempotency?.request] },
+      ),
       { kind: "human", project_id: c.project_id },
       { clock: c.clock, ids: tx.ids },
     ),
   );
   persistEffect(tx, c.project_id, effect);
   return effect.data;
+}
+/** Decoded path segments of a request URL (query excluded). */
+function requestPath(url: string | undefined): string[] {
+  return (url ?? "")
+    .replace(/\?.*$/su, "")
+    .split("/")
+    .flatMap((segment) => {
+      try {
+        return [decodeURIComponent(segment)];
+      } catch {
+        return [];
+      }
+    });
 }
 function cardResult<T>(result: Result<T>, operation: string): Result<T> {
   if (
@@ -684,7 +707,7 @@ async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
   return true;
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|story-confirm|sensitive|merge-solo|merge-window|source-unrelated)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|reassign|supersede|recheck-merge|mark-done|story-confirm|sensitive|merge-solo|merge-window|source-unrelated)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
@@ -1271,7 +1294,7 @@ export async function serveWrite(
         ]
       : group === "decisions"
         ? ["comments", "resolve", "source-unrelated"]
-        : ["complete", "cancel"];
+        : ["complete", "cancel", "reassign"];
   if (!supported.includes(operation ?? "")) return false;
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
   c.authorize();
@@ -1767,6 +1790,17 @@ export async function serveWrite(
       const p = parsed(z.object({ reason: text }).strict(), body);
       output = run(context, (s, a, ports) =>
         cancelHumanAction(s, a, { ...p, human_action_id }, ports),
+      );
+    } else if (operation === "reassign") {
+      // C-742: the owner can take an operator action back, never complete it.
+      const p = parsed(
+        z
+          .object({ executor: z.enum(["owner", "operator"]), reason: text })
+          .strict(),
+        body,
+      );
+      output = run(context, (s, a, ports) =>
+        reassignHumanAction(s, a, { ...p, human_action_id }, ports),
       );
     } else {
       const p = defined(parsed(action, body));

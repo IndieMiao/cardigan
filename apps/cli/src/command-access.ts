@@ -64,6 +64,7 @@ export const CLI_TOOLS = {
   "host-ops create": null,
   "host-ops start": null,
   "host-ops rotate": null,
+  "host-ops restart": null,
   "preference get": null,
   "preference set": null,
   "template list": null,
@@ -90,6 +91,7 @@ export const CLI_TOOLS = {
   "assign --start": null,
   "token issue": null,
   "human-action done": "complete_host_action",
+  "human-action reassign": null,
   "needs-you": "list_needs_you",
   "needs-you read": null,
   // C-81#10 exception: only notifications addressed to this exact Assignment.

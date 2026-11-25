@@ -18,7 +18,7 @@ import type {
   ProjectId,
   WorkItem,
 } from "@cardigan/domain";
-import { latestMergeCheck } from "@cardigan/domain";
+import { eventsOfType, latestMergeCheck } from "@cardigan/domain";
 import {
   CentralRepositoryService,
   type RepositoryLock,
@@ -679,7 +679,7 @@ projects:
         );
         if (
           state.decisions.length ||
-          state.events.some((e) => e.type === "card_merged")
+          eventsOfType(state.events, "card_merged").length > 0
         )
           throw new Error("Measurement publication state changed");
         const checks = candidates.map((c) =>

@@ -81,6 +81,8 @@ export interface ServerConfig {
   readonly hostOpsPatrolIntervalMs?: number;
   readonly contextUsageCacheDir?: string;
   readonly contextUsageStaleAfterMs?: number;
+  /** C-741: CARDIGAN_CONTEXT_RESTART_RETRY_DELAYS_MS, comma-separated; default 2, 5, 10 minutes. */
+  readonly contextRestartRetryDelaysMs?: readonly number[];
   readonly dispatchIntervalMs?: number;
   readonly runtimeFailureLimit?: number;
   /** C-228 / Q-387: CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS, default 60 s. */
@@ -144,6 +146,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_CONTEXT_USAGE_CACHE_DIR?: string | undefined;
   readonly CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS?: string | undefined;
+  readonly CARDIGAN_CONTEXT_RESTART_RETRY_DELAYS_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_RUNTIME_FAILURE_LIMIT?: string | undefined;
   readonly CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS?: string | undefined;
@@ -273,6 +276,14 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       "CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS",
       600_000,
     ),
+    ...(nonEmpty(env.CARDIGAN_CONTEXT_RESTART_RETRY_DELAYS_MS) === undefined
+      ? {}
+      : {
+          contextRestartRetryDelaysMs: retryDelays(
+            env.CARDIGAN_CONTEXT_RESTART_RETRY_DELAYS_MS as string,
+            "CARDIGAN_CONTEXT_RESTART_RETRY_DELAYS_MS",
+          ),
+        }),
     ...(env.CARDIGAN_WORKER_INSPECTION_INTERVAL_MS
       ? {
           workerInspectionIntervalMs: positiveInteger(
@@ -438,6 +449,14 @@ function resolveCheckHeadRetry(
       DEFAULT_CHECK_HEAD_RETRY.backoffMs,
     ),
   };
+}
+
+/** 1-10 comma-separated positive millisecond delays. */
+function retryDelays(value: string, name: string): readonly number[] {
+  const parts = value.split(",").map((part) => part.trim());
+  if (parts.length > 10 || parts.some((part) => part === ""))
+    throw new Error(`${name} must list 1-10 comma-separated milliseconds`);
+  return parts.map((part) => interval(part, name, 0));
 }
 
 function interval(

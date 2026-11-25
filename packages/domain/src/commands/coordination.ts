@@ -10,8 +10,10 @@ import type {
   Author,
   Decision,
   HumanAction,
+  HumanActionExecutor,
   HumanDecidedMergeBasis,
   MergeDecisionEvidence,
+  OwnerRequiredDeclaration,
   PlainSummary,
   ReviewPauseInput,
   TimelineEntry,
@@ -19,6 +21,12 @@ import type {
 } from "../entities.js";
 import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
+import {
+  classifyHumanActionExecutor,
+  HUMAN_ACTION_OPERATOR_NAME,
+  isOperatorAction,
+  isOperatorIdentity,
+} from "../human-action-executor.js";
 import type {
   AssignmentId,
   AttachmentId,
@@ -74,6 +82,10 @@ import {
   applyHeldResumeAnswer,
   checkHeldResumeAnswer,
 } from "./held-assignment-resume.js";
+import {
+  emitOperatorActionRequested,
+  validExecutor,
+} from "./human-action-executor.js";
 import {
   buildHumanDecidedMergeBasis,
   humanDecidedMergeQuestions,
@@ -355,12 +367,9 @@ export function postComment(
         refs,
         mentions: commentMentions(
           p.story_discussion?.action === "answer"
-            ? `${p.body}\n${p.story_discussion.answer}`
+            ? [p.body, p.story_discussion.answer]
             : p.story_discussion?.action === "submit_answers"
-              ? [
-                  p.body,
-                  ...p.story_discussion.answers.map((a) => a.answer),
-                ].join("\n")
+              ? [p.body, ...p.story_discussion.answers.map((a) => a.answer)]
               : p.body,
           p.mentions ?? [],
           state.employees ?? [],
@@ -594,6 +603,11 @@ export type RequestDecisionParams = Pick<
   readonly plain_summary?: PlainSummary;
   /** C-304: explicit human-only reason; requires decider=human. */
   readonly human_required_reason?: string;
+  /**
+   * C-753: PM only. The owner must decide personally: skips category
+   * delegation; both the reason and its basis are required.
+   */
+  readonly owner_required?: { readonly reason: string; readonly basis: string };
   /** C-212: defer when a human decision is shown in Needs You. */
   readonly ready_when?: ReadyConditionInput;
 };
@@ -615,6 +629,20 @@ export function requestDecision(
         p.decider === "human",
         "validation_failed",
         "强制交人理由只能用于 decider=human 的拍板",
+      );
+    }
+    if (p.owner_required !== undefined) {
+      ensure(
+        d.assignment?.scope === "standing" && d.assignment.role_id === "pm",
+        "unauthorized",
+        "只有 PM Office 或 PM Ops 可以声明此拍板须由所有者本人决定",
+      );
+      text(p.owner_required.reason, "owner_required.reason");
+      text(p.owner_required.basis, "owner_required.basis");
+      ensure(
+        p.decider === "human",
+        "validation_failed",
+        "声明须由所有者本人决定的拍板，decider 必须是 human",
       );
     }
     ensure(
@@ -776,6 +804,15 @@ export function requestDecision(
       for (const item of items) paused(d, item, "waiting_decision");
       endForDecision(d, id, p.question, items);
     }
+    const ownerRequired: OwnerRequiredDeclaration | undefined =
+      p.owner_required && d.assignment
+        ? {
+            reason: p.owner_required.reason.trim(),
+            basis: p.owner_required.basis.trim(),
+            declared_by: d.assignment.id,
+            declared_at: d.now,
+          }
+        : undefined;
     const base = {
       ...(d.assignment?.scope === "work_item"
         ? { pm_triage: true as const }
@@ -819,9 +856,16 @@ export function requestDecision(
       p.decider === "human"
         ? { handoff_group: `${p.card_id}/${p.category}` }
         : {}),
-      ...(p.human_required_reason !== undefined
-        ? { human_required_reason: p.human_required_reason.trim() }
-        : {}),
+      ...(ownerRequired
+        ? {
+            owner_required: ownerRequired,
+            human_required_reason:
+              p.human_required_reason?.trim() ||
+              `${ownerRequired.reason}（依据：${ownerRequired.basis}）`,
+          }
+        : p.human_required_reason !== undefined
+          ? { human_required_reason: p.human_required_reason.trim() }
+          : {}),
       ...(readyWhen ? { ready_when: readyWhen } : {}),
       blocking: p.blocking,
       decider:
@@ -862,6 +906,14 @@ export function requestDecision(
           decision_id: id,
           affected_work_items: decision.affected_work_items,
           ...routing,
+          ...(ownerRequired
+            ? {
+                owner_required: {
+                  reason: ownerRequired.reason,
+                  basis: ownerRequired.basis,
+                },
+              }
+            : {}),
         },
         {
           type: "decision_request",
@@ -869,7 +921,9 @@ export function requestDecision(
             ? `${p.question}\n已进入 PM 待办，尚未授权处理或交人`
             : decision.delegation_authority
               ? `${p.question}\n已按常驻授权转给 PM`
-              : p.question,
+              : ownerRequired
+                ? `${p.question}\n须由所有者本人决定：${ownerRequired.reason}（依据：${ownerRequired.basis}）`
+                : p.question,
           decision_id: id,
         },
       );
@@ -1835,10 +1889,17 @@ export function requestHumanAction(
     prerequisite?: HumanAction["prerequisite"];
     /** C-212: defer when the action is shown in Needs You. */
     ready_when?: ReadyConditionInput;
+    /** C-742: absent infers operator from the title prefix or reason. */
+    executor?: HumanActionExecutor;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "request_human_action", ports, (d) => {
+    ensure(
+      p.executor === undefined || validExecutor(p.executor),
+      "validation_failed",
+      "executor 须为 owner 或 operator",
+    );
     ensure(
       d.card(p.card_id).status !== "cancelled",
       "illegal_transition",
@@ -1893,11 +1954,16 @@ export function requestHumanAction(
       : undefined;
     if (blocks) for (const item of items) paused(d, item, "blocked");
     const id = d.ids.next(state.project_id, "human_action");
+    const classified = p.executor
+      ? { executor: p.executor, basis: "explicit" as const }
+      : classifyHumanActionExecutor(p);
+    const executor = classified.executor;
     const action: HumanAction = {
       id,
       key: id,
       card_id: p.card_id,
       requested_by: d.author,
+      ...(executor === "operator" ? { executor } : {}),
       ...(p.terminal ? { terminal: p.terminal } : {}),
       ...(p.category ? { category: p.category } : {}),
       instructions: p.instructions,
@@ -1925,9 +1991,20 @@ export function requestHumanAction(
         ...(action.blocks_merge
           ? { blocks_merge: true, prerequisite: action.prerequisite }
           : {}),
+        executor,
+        executor_basis: classified.basis,
       },
-      { type: "human_action", body: p.instructions, human_action_id: id },
+      {
+        type: "human_action",
+        body:
+          executor === "operator"
+            ? `交给${HUMAN_ACTION_OPERATOR_NAME}：${p.instructions}`
+            : p.instructions,
+        human_action_id: id,
+      },
     );
+    if (executor === "operator")
+      emitOperatorActionRequested(d, action, "requested", classified.basis);
     return action;
   });
 }
@@ -2001,6 +2078,8 @@ export function completeHumanAction(
     conclusion?: "exited" | "false_alarm" | "unconfirmed";
     text: string;
     attachments?: readonly string[];
+    /** C-742: set only by the operator-marked human CLI, never by web or Feishu. */
+    as_operator?: true;
   },
   ports: CommandPorts,
 ) {
@@ -2010,8 +2089,18 @@ export function completeHumanAction(
     actor.kind === "human" ? "request_human_action" : "complete_host_action",
     ports,
     (d) => {
+      ensure(
+        p.as_operator === undefined || actor.kind === "human",
+        "validation_failed",
+        "as_operator 仅用于人类 CLI",
+      );
       if (actor.kind !== "human") {
         const action = d.get("human_actions", p.human_action_id);
+        if (
+          isOperatorAction(action) &&
+          isOperatorIdentity(d.state, d.assignment)
+        )
+          return completeActionDraft(d, p);
         ensure(
           actor.kind === "assignment" &&
             action.triage === "host" &&
@@ -2295,14 +2384,20 @@ export function triageHumanAction(
       rewritten_by: d.author,
       rewritten_at: d.now,
     };
+    // C-742: an internal host handoff is no longer 张良's; the external
+    // operator and a human handoff keep the executor.
+    const internalHost =
+      p.disposition === "host" && p.host_operator !== "external";
     const {
       host_operator: _operator,
       host_diagnostic: _diagnostic,
       host_assignment_id: _owner,
       ready_when: _ready,
       ready_released: _released,
+      executor,
       ...rest
     } = classified;
+    const keptExecutor = executor && !internalHost ? { executor } : {};
     let owner = p.host_assignment_id;
     if (p.host_diagnostic) {
       ensure(
@@ -2320,6 +2415,7 @@ export function triageHumanAction(
     }
     const next: HumanAction = {
       ...rest,
+      ...keptExecutor,
       triage: p.disposition,
       ...(p.disposition === "host"
         ? {
@@ -2356,6 +2452,7 @@ export function triageHumanAction(
         host_assignment_id: next.host_assignment_id ?? null,
         ...(next.host_operator ? { host_operator: next.host_operator } : {}),
         ...(next.host_diagnostic ? { host_diagnostic: true } : {}),
+        ...(executor && !next.executor ? { previous_executor: executor } : {}),
         ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,
         handoff,

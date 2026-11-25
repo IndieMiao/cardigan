@@ -145,7 +145,6 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       this.retention = new DeploymentRetention(
         options.store,
         this.directory,
-        options.env,
         options.config.retention,
       );
     this.central = join(options.dataDir, "central", `${PROJECT}.git`);

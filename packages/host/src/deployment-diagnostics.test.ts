@@ -199,3 +199,59 @@ test("host ops reads deployment evidence without mutation, cross-project access 
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("C-743: diagnostics list each retention round with what it removed and freed", async () => {
+  const { readDeploymentDiagnostics } = await import(
+    "./deployment-diagnostics.js"
+  );
+  const store = Store.open({ dataDir: tmpdir(), dbPath: ":memory:" });
+  const project = "cardigan";
+  try {
+    store.createProject({ id: project });
+    const append = (type: string, payload: object, kind = "system") =>
+      store.uow.run((tx) =>
+        tx.events.append(project, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(project),
+          type,
+          actor:
+            kind === "system"
+              ? { kind: "system", project_id: project }
+              : { kind: "human", project_id: project },
+          created_at: new Date().toISOString(),
+          payload,
+        }),
+      );
+    append("host_retention_round", {
+      mode: "auto",
+      removed: 4,
+      freed_bytes: 1024,
+      notice: "已清理旧发布 2 个",
+    });
+    append("host_run_dirs_reclaimed", {
+      machine_id: "mac-mini",
+      mode: "auto",
+      removed: 7,
+      freed_bytes: 2048,
+    });
+    append("host_run_dirs_reclaimed", { removed: 99 }, "human");
+    const diagnostics = await readDeploymentDiagnostics(store, project);
+    expect(diagnostics?.retention).toEqual([
+      expect.objectContaining({
+        scope: "runs",
+        machine_id: "mac-mini",
+        mode: "auto",
+        removed: 7,
+        freed_bytes: 2048,
+      }),
+      expect.objectContaining({
+        scope: "deployment",
+        removed: 4,
+        freed_bytes: 1024,
+        notice: "已清理旧发布 2 个",
+      }),
+    ]);
+  } finally {
+    store.close();
+  }
+});

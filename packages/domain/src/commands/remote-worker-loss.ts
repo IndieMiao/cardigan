@@ -1,4 +1,5 @@
 import type { Actor } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import type { AssignmentId, EventId } from "../ids.js";
 import {
   remoteWorkerExitPending,
@@ -202,9 +203,8 @@ export function reportRemoteWorkerAlive(
     }
     if (
       remoteWorkerExitPending(state.events, loss) &&
-      state.events.some(
+      eventsOfType(state.events, "remote_worker_alive").some(
         (e) =>
-          e.type === "remote_worker_alive" &&
           (e.payload as { action_id?: string }).action_id === action_id &&
           (e.payload as { after_release?: boolean }).after_release,
       )

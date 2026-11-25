@@ -527,6 +527,9 @@ async function assembleServer(
               "context-usage",
             ),
           staleAfterMs: config.contextUsageStaleAfterMs ?? 600_000,
+          ...(config.contextRestartRetryDelaysMs
+            ? { restartRetryDelaysMs: config.contextRestartRetryDelaysMs }
+            : {}),
         },
         scrubCredentials: async (project, assignment, ref) => {
           const runtime = options.dispatcher?.runtime;
@@ -1023,6 +1026,10 @@ async function assembleServer(
                 project: ProjectId,
                 assignment: Assignment["id"],
               ) => hostOps.harnessActivity(project, assignment),
+              harnessFileActivity: (
+                project: ProjectId,
+                assignment: Assignment["id"],
+              ) => hostOps.harnessFileActivity(project, assignment),
             }
           : {}),
         hostOpsPatrolIntervalMs:
@@ -1064,6 +1071,7 @@ async function assembleServer(
         queuedRecheckAfterMs: runCapacity.queuedRecheckAfterMs,
         inboxStallAfterMs: runCapacity.inboxStallAfterMs,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
+        scarceInactiveCancel: runCapacity.scarceInactiveCancel,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
         ...(mergeWatchdogMs === undefined ? {} : { mergeWatchdogMs }),

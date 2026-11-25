@@ -1,4 +1,5 @@
 import type { Assignment, Event, Run, RuntimeRef } from "./entities.js";
+import { eventsOfType, eventsOfTypes } from "./event-index.js";
 import type {
   AssignmentId,
   EventId,
@@ -27,22 +28,14 @@ export function remoteWorkerLosses(
 ): readonly RemoteWorkerLoss[] {
   let losses = lossCache.get(events);
   if (!losses) {
+    // C-671: type lookups, so losses on closed cards count in `slim` too.
     const corrected = new Set(
-      events
-        .filter(
-          (e) =>
-            e.type === "remote_worker_loss_corrected" &&
-            ["human", "system"].includes(e.actor.kind),
-        )
+      eventsOfType(events, "remote_worker_loss_corrected")
+        .filter((e) => ["human", "system"].includes(e.actor.kind))
         .map((e) => (e.payload as { action_id: string }).action_id),
     );
-    losses = events
-      .filter(
-        (e) =>
-          e.type === "remote_worker_lost" &&
-          e.actor.kind === "system" &&
-          !corrected.has(e.id),
-      )
+    losses = eventsOfType(events, "remote_worker_lost")
+      .filter((e) => e.actor.kind === "system" && !corrected.has(e.id))
       .map((e) => ({
         ...(e.payload as unknown as RemoteWorkerLoss),
         action_id: e.id,
@@ -56,9 +49,8 @@ export function remoteWorkerLossReleased(
   events: readonly Event[],
   action_id: EventId,
 ) {
-  return events.some(
+  return eventsOfType(events, "remote_worker_released").some(
     (e) =>
-      e.type === "remote_worker_released" &&
       e.actor.kind === "system" &&
       (e.payload as { action_id?: string }).action_id === action_id,
   );
@@ -83,9 +75,16 @@ export function remoteExitAction(
 
 /** A newer request supersedes earlier exit evidence, including after a late alive observation. */
 export function remoteWorkerExitPending(
-  events: readonly Event[],
+  all: readonly Event[],
   loss: RemoteWorkerLoss,
 ) {
+  // C-671: only these types take part; their relative order is history order.
+  const events = eventsOfTypes(all, [
+    "human_action_requested",
+    "remote_worker_alive",
+    "remote_worker_exit_observed",
+    "human_action_completed",
+  ]);
   const request = events.findLastIndex(
     (e) =>
       e.type === "human_action_requested" &&

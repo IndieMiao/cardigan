@@ -989,18 +989,27 @@ test.each(["pidfd_unavailable", "kept_terminal"] as const)(
         tx.runs.put(f.project, { ...r, status: "queued" });
       });
       await f.tick();
-      await f.tick();
-      const state = f.state();
-      expect(state.assignments[0]?.idle_retirement).toMatchObject({
+      expect(f.state().assignments[0]?.idle_retirement).toMatchObject({
         phase: "waiting",
         handoff: true,
         failures: 5,
       });
+      await f.tick();
+      const state = f.state();
       expect(
         state.events.filter(
           (e) => e.type === "idle_session_retirement_handed_off",
         ),
       ).toHaveLength(1);
+      // C-739: the never-started queued Run is waiting work; the next pass
+      // hands the session back to the dispatcher (a macOS worker never gives
+      // the C-575 takeover its exit proof).
+      expect(state.assignments[0]?.idle_retirement).toBeUndefined();
+      expect(
+        state.events
+          .filter((e) => e.type === "idle_session_retirement_released")
+          .map((e) => e.payload),
+      ).toMatchObject([{ reason: "business_work", handoff: true }]);
       expect(retire).not.toHaveBeenCalled();
       expect(f.runtime.observe_retirement).not.toHaveBeenCalled();
       expect(state.runs[0]?.status).toBe("queued");

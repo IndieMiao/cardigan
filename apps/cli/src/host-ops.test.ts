@@ -201,7 +201,7 @@ test("start uses the existing launch entry and skips an unfinished Run", async (
   expect(output.join("\n")).toContain("已在运行，跳过");
 });
 
-test.each(["create", "start", "rotate"])(
+test.each(["create", "start", "rotate", "restart"])(
   "%s rejects both token inputs before effects or launch",
   async (sub) => {
     expect(
@@ -210,6 +210,7 @@ test.each(["create", "start", "rotate"])(
           | "host-ops create"
           | "host-ops start"
           | "host-ops rotate"
+          | "host-ops restart"
       ],
     ).toBeNull();
     expect(await main(["host-ops", "create"], io)).toBe(0);
@@ -243,6 +244,57 @@ test.each(["create", "start", "rotate"])(
     expect(store.verifyToken(token) !== undefined).toBe(true);
   },
 );
+
+test("C-741: restart replaces the session of a running, up-to-date operator", async () => {
+  const start = vi.fn(async (input: Parameters<StartById>[0]) => {
+    runCommand(input.store, {
+      project_id: project,
+      actor: { kind: "human", project_id: project },
+      reduce: (state, actor, ports) =>
+        queueRun(
+          state,
+          actor,
+          {
+            assignment_id: input.assignment_id,
+            model: "fixture",
+            agent_cli_version: "fixture",
+            reuse_queued: true,
+          },
+          ports,
+        ),
+    });
+    return 0;
+  });
+  expect(await main(["host-ops", "restart"], io, { start })).toBe(2);
+  expect(errors.join("\n")).toContain("cardigan host-ops create");
+  expect(start).not.toHaveBeenCalled();
+  expect(await main(["host-ops", "create"], io)).toBe(0);
+  expect(await main(["host-ops", "start"], io, { start })).toBe(0);
+  output = [];
+  // `rotate` and `start` skip a running operator; restart does not.
+  expect(await main(["host-ops", "rotate"], io, { start })).toBe(0);
+  expect(output.join("\n")).toContain(
+    `cardigan host-ops restart --project ${project}`,
+  );
+  expect(start).toHaveBeenCalledTimes(1);
+  output = [];
+  expect(
+    await main(
+      ["host-ops", "restart", "--project", project, "--hc-session", "s"],
+      io,
+      { start },
+    ),
+  ).toBe(0);
+  expect(start).toHaveBeenCalledTimes(2);
+  expect(start.mock.calls[1]?.[0]).toMatchObject({
+    assignment_id: assignments()[0]?.id,
+    project_id: project,
+    restart_session: true,
+    session: "s",
+  });
+  expect(output.join("\n")).toContain("已重开主机运维");
+  expect(await main(["host-ops", "restart", "--employee", "E-1"], io)).toBe(2);
+});
 
 test("invalid flags and unavailable roles fail without creating assignments or printing tokens", async () => {
   for (const args of [

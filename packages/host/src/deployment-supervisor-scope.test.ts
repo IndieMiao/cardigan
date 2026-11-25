@@ -10,7 +10,6 @@ const scope = (path: string, before?: unknown, after?: unknown) =>
 
 test.each([
   ["apps/cli/src/self-deploy.ts", "apps/cli"],
-  ["packages/host/src/deployment-retention-fs.py", "packages/host"],
   ["packages/host/src/deployment-node.ts", "packages/host"],
   ["packages/host/src/deployment-config.ts", "packages/host"],
   ["packages/host/src/deployment-server-log.ts", "packages/host"],

@@ -129,10 +129,9 @@ function context(
   const assignment = store.uow.read((tx) => tx.assignments.get(project_id, id));
   if (assignment === undefined)
     throw new CliError(`Assignment ${id} 不存在`, EXIT.usage);
-  if (
-    assignment.scope !== "work_item" ||
-    assignment.worktree_path === undefined
-  )
+  // C-664: a work-item record that lost its path is still located by
+  // project, machine and id (`worktrees/<project>/<A-n>` on its machine).
+  if (assignment.scope !== "work_item")
     throw new CliError(`${id} 没有 worktree`, EXIT.usage);
   const decision = store.uow.read((tx) =>
     tx.decisions

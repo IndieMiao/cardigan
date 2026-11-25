@@ -17,14 +17,21 @@ import {
   authorPrecheckWaitHandled,
   canStartWork,
   cardTemplate,
+  currentPreMergeVersions,
   decisionQuestionPayload,
   employeeNameKey,
+  eventsAtSeq,
+  eventsForWorkItem,
+  eventsOfType,
+  eventsOfTypes,
   flowAtLeast,
   followUpDraft,
+  HUMAN_ACTION_OPERATOR_NAME,
   heldReleaseNotice,
   humanDecisionGroupKey,
   isCompletionVerifier,
   isDecisionOther,
+  isOperatorAction,
   isPrecheckConflict,
   isReviewStale,
   latestMergeCheck,
@@ -33,13 +40,20 @@ import {
   mergeRequiresHuman,
   NEEDS_YOU_ITEM_READY,
   needsYouItemReady,
+  type OfficePreMergeMoment,
   officeAlertRecipient,
+  officeOnDuty,
+  officePendingPreMergeChecks,
+  officePreMergePromptText,
+  officeResolutionRecipient,
+  PRE_MERGE_CHECK_OFFICE_PROMPTED,
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   precheckConflictHandling,
   requesterNotificationRecipient,
   reviewPassed,
   reviewWakeBlocked,
+  screenshotCheckEnforced,
   storyTerminal,
   verificationTarget,
 } from "@cardigan/domain";
@@ -150,16 +164,17 @@ function note(
   if (
     to.kind === "assignment" &&
     resumed.length &&
-    input.snapshot.events.some((event) => {
-      if (event.type !== "work_item_resume_requested") return false;
-      const p = payloadObject(event.payload);
-      return (
-        p.trigger_event_id === input.event.id &&
-        p.assignment_id === to.assignment_id &&
-        typeof p.work_item_id === "string" &&
-        resumed.includes(p.work_item_id)
-      );
-    })
+    // C-671: by work item from the index (the resumed card may be closed).
+    resumed.some((work_item_id) =>
+      eventsForWorkItem(input.snapshot.events, work_item_id).some((event) => {
+        const p = payloadObject(event.payload);
+        return (
+          event.type === "work_item_resume_requested" &&
+          p.trigger_event_id === input.event.id &&
+          p.assignment_id === to.assignment_id
+        );
+      }),
+    )
   )
     return;
   // One event produces at most one notification per recipient (M3.3 unique
@@ -215,9 +230,11 @@ function noteAssignment(
         input.snapshot.project_preferences?.find(
           (p) => p.id === input.snapshot.project_id,
         )?.system_auto_assign_verifiers === true) &&
-      input.snapshot.events?.some(
+      (
+        input.snapshot.events &&
+        eventsOfType(input.snapshot.events, "system_assignment_deferred")
+      )?.some(
         (e) =>
-          e.type === "system_assignment_deferred" &&
           payloadString(e.payload, "work_item_id") === item.id &&
           payloadString(e.payload, "delivery_id") ===
             payloadString(input.event.payload, "delivery_id"),
@@ -351,6 +368,7 @@ function routeComment(input: RouteInput, draft: Draft): void {
 
   if (mentions.length > 0) {
     routeMentions(input, draft, mentions, item?.card_id);
+    routeStoryReplyWithMentions(input, draft, entry);
     return;
   }
   if (item !== undefined) return;
@@ -370,6 +388,117 @@ function routeComment(input: RouteInput, draft: Draft): void {
 }
 
 /**
+ * C-748: the human's reply to the Office's own story discussion (a change
+ * request on a proposal, or answers to its question checklist) still reaches
+ * the Office when the comment @mentions someone else. The mentioned targets
+ * keep their notifications; nobody else is added.
+ */
+function routeStoryReplyWithMentions(
+  input: RouteInput,
+  draft: Draft,
+  entry: TimelineEntry | undefined,
+): void {
+  if (input.event.actor.kind !== "human" || !entry) return;
+  const story = input.snapshot.cards.find(
+    (c) => c.id === input.event.card_id,
+  )?.story;
+  if (!story) return;
+  const replied =
+    entry.reply_to !== undefined &&
+    ((story.proposals ?? []).some((p) => p.entry_id === entry.reply_to) ||
+      (story.question_groups ?? []).some((g) => g.id === entry.reply_to));
+  const answered = (story.question_groups ?? []).some((g) =>
+    g.questions.some((q) => q.resolution?.entry_id === entry.id),
+  );
+  if (!replied && !answered) return;
+  if (officeAlreadyTold(input, draft)) return;
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "comment",
+    "story/discuss",
+    `需求卡 ${subject(input)} 有人对拆解讨论的回复，请 Office 跟进。`,
+  );
+}
+
+/** The Office already has a note on this event, logically or as itself. */
+function officeAlreadyTold(input: RouteInput, draft: Draft): boolean {
+  const office = officeOnDuty(input.snapshot.assignments);
+  return draft.notifications.some(
+    (n) =>
+      n.recipient.kind === "pm_office" ||
+      (office !== undefined &&
+        n.recipient.kind === "assignment" &&
+        n.recipient.assignment_id === office.id),
+  );
+}
+
+/**
+ * C-748: the human confirmed a story proposal. Ring the Office at once with
+ * the version and the children it opened, so it stops asking the owner to
+ * confirm; PM Ops gets an FYI. A replayed confirmation emits no event.
+ */
+function routeStoryProposalConfirmed(input: RouteInput, draft: Draft): void {
+  if (input.event.actor.kind !== "human") return;
+  const story = input.snapshot.cards.find(
+    (c) => c.id === input.event.card_id && c.story,
+  );
+  if (!story) return;
+  const version = payloadObject(input.event.payload).version;
+  const card_ids = payloadStrings(input.event.payload, "card_ids");
+  const what = `需求卡 ${story.id} 拆解方案第 ${String(version)} 版已由所有者确认，开出 ${card_ids.length} 张子卡：${card_ids.join("、") || "无"}`;
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "card",
+    "story/proposal confirmed",
+    `${what}。不再等待确认，勿再催所有者。`,
+  );
+  note(
+    input,
+    draft,
+    recipient.pm_ops(),
+    "story_fyi",
+    "story/proposal confirmed",
+    `知会：${what}。`,
+  );
+}
+
+/**
+ * C-748: the human cancelled a story card, which also drops its proposal.
+ * Ring the Office so it stops asking the owner about it. Children cancelled
+ * with it are not story cards and route as before.
+ */
+function routeStoryCancelled(input: RouteInput, draft: Draft): void {
+  if (input.event.actor.kind !== "human") return;
+  const story = input.snapshot.cards.find(
+    (c) => c.id === input.event.card_id && c.story,
+  );
+  if (!story) return;
+  const previous = input.snapshot.events
+    .filter(
+      (e) =>
+        e.card_id === input.event.card_id &&
+        e.seq < input.event.seq &&
+        ["card_created", "card_updated"].includes(e.type),
+    )
+    .sort((a, b) => b.seq - a.seq)[0];
+  if (previous && payloadString(previous.payload, "status") === "cancelled")
+    return;
+  if (officeAlreadyTold(input, draft)) return;
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "card",
+    "story/cancelled",
+    `需求卡 ${story.id} 已由所有者取消，拆解方案不再等待确认，勿再催所有者。`,
+  );
+}
+
+/**
  * C-619: the verifier's reply to a decision-bound question goes back to PM
  * Ops, who holds the decision. Only the asked verifier's own reply counts.
  */
@@ -383,10 +512,9 @@ function routeDecisionAnswer(
     (t) => t.id === entry.reply_to && t.card_id === entry.card_id,
   );
   if (asked?.type !== "instruction") return;
+  // C-671: by (card, seq) from the index; the asking card may have closed.
   const question = decisionQuestionPayload(
-    input.snapshot.events.find(
-      (e) => e.seq === asked.event_seq && e.card_id === asked.card_id,
-    ),
+    eventsAtSeq(input.snapshot.events, asked.card_id, asked.event_seq)[0],
   );
   if (
     !question ||
@@ -1322,7 +1450,7 @@ function routePreMergeCheckReminder(input: RouteInput, draft: Draft): void {
     const r = payloadObject(raw);
     const id = typeof r.human_action_id === "string" ? r.human_action_id : "";
     const open = input.snapshot.human_actions.some(
-      (h) => h.id === id && h.status === "open",
+      (h) => h.id === id && h.status === "open" && !isOperatorAction(h),
     );
     if (!open || typeof r.text !== "string" || typeof r.link !== "string")
       continue;
@@ -1338,6 +1466,66 @@ function routePreMergeCheckReminder(input: RouteInput, draft: Draft): void {
       "7.4/pre-merge check passed",
       lines.join("\n"),
     );
+}
+
+/**
+ * C-744: the domain asked the PM Office on duty to record the pre-merge checks
+ * it owns (after acceptance, or once only those checks hold the automatic
+ * merge). Ring only that Office, with the card, delivery IDs and SHAs and the
+ * labels still waiting. Checks recorded, versions replaced, a closed card or
+ * no Office on duty before routing ring nobody; no other role is told.
+ */
+function routeOfficePreMergePrompt(input: RouteInput, draft: Draft): void {
+  const { event, snapshot } = input;
+  if (
+    event.actor.kind !== "system" ||
+    event.actor.project_id !== snapshot.project_id ||
+    !officeOnDuty(snapshot.assignments)
+  )
+    return;
+  const card = snapshot.cards.find((c) => c.id === event.card_id);
+  if (!card || card.status === "done" || card.status === "cancelled") return;
+  const p = payloadObject(event.payload);
+  const moment = p.moment as OfficePreMergeMoment;
+  if (moment !== "accepted" && moment !== "merge_check_passed") return;
+  const versions = currentPreMergeVersions(
+    card,
+    snapshot.work_items,
+    snapshot.deliveries,
+  );
+  const sent = Array.isArray(p.versions) ? p.versions : [];
+  if (
+    sent.length !== versions.length ||
+    !versions.every((v, i) => {
+      const x = payloadObject(sent[i]);
+      return (
+        x.work_item_id === v.work_item_id &&
+        x.delivery_id === v.delivery_id &&
+        x.subject === v.subject
+      );
+    })
+  )
+    return;
+  const waiting = new Set(
+    officePendingPreMergeChecks(
+      card,
+      snapshot.work_items,
+      snapshot.deliveries,
+      screenshotCheckEnforced(snapshot),
+    ).map((c) => c.label),
+  );
+  const labels = payloadStrings(event.payload, "checks").filter((l) =>
+    waiting.has(l),
+  );
+  if (!labels.length) return;
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "card",
+    "C-744/office pre-merge checks",
+    officePreMergePromptText(card.id, moment, labels, versions),
+  );
 }
 
 function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
@@ -1554,6 +1742,18 @@ function notifyHumanAction(
   rule: "6.4/human action requested" | "6.4/needs you item ready",
 ): void {
   const title = action.handoff?.title ?? action.instructions;
+  // C-742: the operator reads `operator_action_requested`; never ring the owner.
+  if (isOperatorAction(action)) {
+    note(
+      input,
+      draft,
+      recipient.pm_office(),
+      "human_action",
+      rule,
+      `${action.id} 等${HUMAN_ACTION_OPERATOR_NAME}执行：${title}`,
+    );
+    return;
+  }
   if (action.triage === "host") {
     note(
       input,
@@ -1668,16 +1868,12 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
   // that event carries no run_id, so reviews are matched on their own row
   // (M5.S S25).
   const produced = [
-    ...input.snapshot.events.filter(
-      (event) =>
-        payloadString(event.payload, "run_id") === run_id &&
-        [
-          "delivery_submitted",
-          "blocker_reported",
-          "decision_requested",
-          "human_action_requested",
-        ].includes(event.type),
-    ),
+    ...eventsOfTypes(input.snapshot.events, [
+      "delivery_submitted",
+      "blocker_reported",
+      "decision_requested",
+      "human_action_requested",
+    ]).filter((event) => payloadString(event.payload, "run_id") === run_id),
     ...input.snapshot.deliveries.filter(
       (delivery) => delivery.run_id === run_id,
     ),
@@ -1831,10 +2027,15 @@ export function routeEvent(input: RouteInput): RouteResult {
       );
       break;
     }
+    case "story_proposal_confirmed":
+      routeStoryProposalConfirmed(input, draft);
+      break;
     case "card_created":
       routeCardPlanning(input, draft);
       break;
     case "card_updated":
+      if (payloadString(input.event.payload, "status") === "cancelled")
+        routeStoryCancelled(input, draft);
       if (payloadString(input.event.payload, "status") === "todo") {
         // updateCard also emits status on title-only edits. Compare the last
         // planning event in this card's stream, not the current snapshot.
@@ -1869,6 +2070,13 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "run_preparation_stalled": {
+      // C-738: a used-up retry budget goes to PM through its pm_ops handoff,
+      // never to host ops.
+      if (
+        (input.event.payload as { exhausted?: unknown } | null)?.exhausted ===
+        true
+      )
+        break;
       if (payloadString(input.event.payload, "recovery_root_run_id"))
         note(
           input,
@@ -2213,13 +2421,12 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "office_wait_overdue": {
       if (
         input.event.actor.kind !== "system" ||
-        input.snapshot.events.some(
+        eventsOfType(input.snapshot.events, "office_wait_closed").some(
           (e) =>
-            e.type === "office_wait_closed" &&
             (payloadString(e.payload, "wait_key") ??
               payloadString(e.payload, "source_entry_id")) ===
-              (payloadString(input.event.payload, "wait_key") ??
-                payloadString(input.event.payload, "source_entry_id")),
+            (payloadString(input.event.payload, "wait_key") ??
+              payloadString(input.event.payload, "source_entry_id")),
         )
       )
         break;
@@ -2538,11 +2745,10 @@ export function routeEvent(input: RouteInput): RouteResult {
         break;
       if (
         input.event.type === "system_wait_reminded" &&
-        input.snapshot.events.some(
+        eventsOfType(input.snapshot.events, "system_wait_closed").some(
           (e) =>
-            e.type === "system_wait_closed" &&
             payloadString(e.payload, "wait_id") ===
-              payloadString(input.event.payload, "wait_id"),
+            payloadString(input.event.payload, "wait_id"),
         )
       )
         break;
@@ -2591,6 +2797,20 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "human_action_requested":
       routeHumanAction(input, draft);
       break;
+    case "human_action_reassigned": {
+      // C-742: handing an action back to the owner rings them once it is ready.
+      const action = input.snapshot.human_actions.find(
+        (h) => h.id === payloadString(input.event.payload, "human_action_id"),
+      );
+      if (
+        action?.status === "open" &&
+        action.triage !== "pm_ops" &&
+        !isOperatorAction(action) &&
+        needsYouItemReady(input.snapshot, action)
+      )
+        notifyHumanAction(input, draft, action, "6.4/human action requested");
+      break;
+    }
     case "human_action_cancelled":
     case "human_action_completed":
       routeHumanActionCompleted(input, draft);
@@ -2643,6 +2863,9 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     case PRE_MERGE_CHECK_REMINDED:
       routePreMergeCheckReminder(input, draft);
+      break;
+    case PRE_MERGE_CHECK_OFFICE_PROMPTED:
+      routeOfficePreMergePrompt(input, draft);
       break;
     case "merge_conflicted":
     case "merge_changes_requested": {
@@ -2866,6 +3089,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
   }
   routeOfficeAlert(input, draft);
+  routeOfficeResolution(input, draft);
   return draft;
 }
 
@@ -2912,6 +3136,48 @@ function routeOfficeAlert(input: RouteInput, draft: Draft): void {
     OFFICE_ALERT_KIND[event.type] ?? "escalation",
     "C-722/office alert",
     `知会 Office：${subject(input)} ${what}`,
+  );
+}
+
+/**
+ * C-740: the human closed a Needs You question. Ring this project's Office on
+ * duty at once with the answer, so it stops telling the owner the question is
+ * still waiting. Appended last: other recipients stay exactly as they were,
+ * and an Office already told (for example as the raiser) is not told twice.
+ */
+function routeOfficeResolution(input: RouteInput, draft: Draft): void {
+  const { event, snapshot } = input;
+  const decision_id = payloadString(event.payload, "decision_id");
+  const q = snapshot.decisions.find((d) => d.id === decision_id);
+  const office = officeResolutionRecipient(
+    snapshot.project_id,
+    event,
+    q,
+    snapshot.assignments,
+    snapshot.timeline,
+  );
+  if (!office || !q?.resolution) return;
+  if (
+    draft.notifications.some(
+      (n) =>
+        n.recipient.kind === "pm_office" ||
+        (n.recipient.kind === "assignment" &&
+          n.recipient.assignment_id === office.id),
+    )
+  )
+    return;
+  const chosen = q.options.find((o) => o.key === q.resolution?.option);
+  const answer = isDecisionOther(q.resolution.option)
+    ? `选择“其他”，原话：${q.resolution.raw_quote}`
+    : `选择 ${q.resolution.option}：${chosen?.description ?? ""}。影响：${chosen?.impact ?? ""}`;
+  const options = q.options.map((o) => o.key).join("、");
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "decision",
+    "C-740/office decision closed",
+    `知会 Office：${q.id} 已由人结案，不再等待。${answer}（选项：${options}）`,
   );
 }
 

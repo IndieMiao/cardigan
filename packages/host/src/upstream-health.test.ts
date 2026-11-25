@@ -1,13 +1,18 @@
+import { mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   AssignmentId,
   EventId,
+  ProjectId,
   Runtime,
   UpstreamDiagnosis,
 } from "@cardigan/domain";
+import { loadCommandState, ToolError } from "@cardigan/mcp-server";
 import { parseLaunchConfig } from "@cardigan/roles";
-import type { Store } from "@cardigan/store";
+import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import {
   fixture,
@@ -16,8 +21,11 @@ import {
   run,
 } from "../../domain/src/commands/test-fixtures.js";
 import {
+  describeClassificationError,
   probeUpstreamConnection,
+  staleObservation,
   UpstreamHealthMonitor,
+  upstreamHoldDetail,
   upstreamHoldReason,
 } from "./upstream-health.js";
 
@@ -438,4 +446,199 @@ test("C-680: only a line fault holds a recovery as upstream not recovered", () =
     "upstream_diagnosis_unavailable",
   );
   expect(upstreamHoldReason(undefined)).toBe("upstream_diagnosis_unavailable");
+});
+
+test("C-745: classification failures and their recovery are recorded per project with type, start and merged count, never credentials", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "classification-"));
+  const store = Store.open({ dataDir });
+  try {
+    const project = "fixture" as ProjectId;
+    store.createProject({ id: project });
+    let time = Date.parse("2026-11-25T04:54:10.000Z");
+    const lines: string[] = [];
+    const monitor = new UpstreamHealthMonitor(
+      configuration(),
+      {} as Runtime,
+      { now: () => new Date(time).toISOString() },
+      undefined,
+      store,
+      undefined,
+      (line) => lines.push(line),
+    );
+    monitors.push(monitor);
+    let failing = true;
+    const flaky = Object.create(store, {
+      uow: {
+        value: {
+          read: store.uow.read.bind(store.uow),
+          run: (fn: Parameters<typeof store.uow.run>[0]) => {
+            if (failing) {
+              const error = new Error(
+                "database is locked; Authorization: Bearer sk-abcdefghijklmnop",
+              ) as Error & { code: string };
+              error.name = "SqliteError";
+              error.code = "SQLITE_BUSY";
+              throw error;
+            }
+            return store.uow.run(fn);
+          },
+        },
+      },
+    }) as Store;
+    const recorded = (type: string) =>
+      store.uow
+        .read((tx) => loadCommandState(tx, project))
+        .events.filter((e) => e.type === type);
+
+    monitor.reconcile(flaky, project);
+    time += 30_000;
+    monitor.reconcile(flaky, project);
+    // A failing observation joins the same run of failures.
+    time += 30_000;
+    monitor.observationFailed(
+      project,
+      Object.assign(new Error("database is locked"), {
+        name: "SqliteError",
+        code: "SQLITE_BUSY",
+      }),
+    );
+    expect(monitor.classificationFailure(project)).toMatchObject({
+      started_at: "2026-11-25T04:54:10.000Z",
+      count: 3,
+      error_type: "SqliteError:SQLITE_BUSY",
+    });
+    // One record for the run so far, not one per failure.
+    const failed = recorded("upstream_classification_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({
+      actor: { kind: "system", project_id: project },
+      payload: {
+        source: "reconcile",
+        error_type: "SqliteError:SQLITE_BUSY",
+        started_at: "2026-11-25T04:54:10.000Z",
+        count: 1,
+      },
+    });
+    // A long failure is recorded again with the merged count.
+    time += 10 * 60_000;
+    monitor.reconcile(flaky, project);
+    expect(recorded("upstream_classification_failed").at(-1)).toMatchObject({
+      payload: { started_at: "2026-11-25T04:54:10.000Z", count: 4 },
+    });
+    expect(
+      monitor.diagnostics({ ...fixture(), project_id: project }),
+    ).toMatchObject({ classification_available: false });
+
+    failing = false;
+    time += 64_000;
+    monitor.reconcile(flaky, project);
+    expect(monitor.classificationFailure(project)).toBeUndefined();
+    const recovered = recorded("upstream_classification_recovered");
+    expect(recovered).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          error_type: "SqliteError:SQLITE_BUSY",
+          started_at: "2026-11-25T04:54:10.000Z",
+          recovered_at: new Date(time).toISOString(),
+          count: 4,
+        }),
+      }),
+    ]);
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain("SqliteError:SQLITE_BUSY");
+    // The redacted message summary is in the host log line only.
+    expect(lines[0]).toContain("database is locked");
+    expect(JSON.stringify(failed)).not.toContain("database is locked");
+    for (const text of [
+      JSON.stringify(recorded("upstream_classification_failed")),
+      ...lines,
+    ])
+      expect(text).not.toContain("sk-abcdefghijklmnop");
+    // A healthy reconcile without an earlier failure records nothing.
+    monitor.reconcile(store, project);
+    expect(recorded("upstream_classification_recovered")).toHaveLength(1);
+  } finally {
+    store.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("C-745: a store that cannot record still leaves the host log line and keeps the gate closed", () => {
+  const lines: string[] = [];
+  const monitor = new UpstreamHealthMonitor(
+    configuration(),
+    {} as Runtime,
+    { now: () => "2026-01-01T00:00:00.000Z" },
+    undefined,
+    undefined,
+    undefined,
+    (line) => lines.push(line),
+  );
+  monitors.push(monitor);
+  const broken = {
+    uow: {
+      run: () => {
+        throw new TypeError("boom");
+      },
+    },
+  } as unknown as Store;
+  monitor.reconcile(broken, "fixture" as ProjectId);
+  expect(lines).toEqual([expect.stringContaining("TypeError")]);
+  expect(monitor.classificationFailure("fixture" as ProjectId)).toMatchObject({
+    source: "reconcile",
+    count: 1,
+  });
+});
+
+test("C-745: the hold detail names the sub-reason and the project failure's start", () => {
+  const diagnosis = (evidence: string[]): UpstreamDiagnosis => ({
+    assignment_id: "A-1" as AssignmentId,
+    provider: "unknown",
+    group: "unknown",
+    cause: "unknown",
+    action: "wait",
+    evidence,
+  });
+  const failure = {
+    source: "observation" as const,
+    error_type: "Error",
+    summary: "x",
+    started_at: "2026-11-25T04:54:10.000Z",
+    count: 2,
+    recorded_at: "2026-11-25T04:54:10.000Z",
+  };
+  expect(
+    upstreamHoldDetail(diagnosis(["classification_failed"]), failure),
+  ).toEqual({
+    sub_reason: "classification_failed",
+    classification_failed_since: failure.started_at,
+    classification_failure_count: 2,
+    classification_error_type: "Error",
+  });
+  // A provider-group publication failure has no project failure to date it.
+  expect(
+    upstreamHoldDetail(diagnosis(["classification_failed"]), undefined),
+  ).toEqual({
+    sub_reason: "classification_failed",
+  });
+  expect(
+    upstreamHoldDetail(diagnosis(["provider_not_resolved"]), failure),
+  ).toEqual({
+    sub_reason: "provider_not_resolved",
+  });
+  expect(upstreamHoldDetail(undefined, failure)).toEqual({
+    sub_reason: "no_diagnosis",
+  });
+  expect(
+    upstreamHoldDetail(
+      { ...diagnosis([]), cause: "upstream_unreachable" },
+      failure,
+    ),
+  ).toBeUndefined();
+  expect(staleObservation(new ToolError("stale_target", "changed"))).toBe(true);
+  expect(staleObservation(new Error("stale_target"))).toBe(false);
+  expect(describeClassificationError("plain")).toEqual({
+    error_type: "string",
+    summary: "plain",
+  });
 });

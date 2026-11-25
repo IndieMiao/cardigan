@@ -4,6 +4,7 @@ import type {
   CardView,
   CommandState,
   Delivery,
+  Event,
 } from "@cardigan/domain";
 import {
   authorView,
@@ -15,6 +16,7 @@ import {
   deriveCardFields,
   deriveCardStatus,
   deriveReviewMatrix,
+  EventLogView,
   flowAtLeast,
   followUpDraft,
   latestMergeCheck,
@@ -36,6 +38,7 @@ import {
   verificationActivity,
 } from "@cardigan/domain";
 import { z } from "zod";
+import type { CommandEventStreams, McpReadContext } from "../backend.js";
 import { ToolError } from "../errors.js";
 import { timeRead } from "../read-timing.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
@@ -208,7 +211,7 @@ export const getCardTool = defineTool({
         const stage = timed("merge_stage", () =>
           mergeStage(
             streams
-              ? { ...snapshot, events: [...streams.values()].flat() }
+              ? { ...snapshot, events: peerEvents(tx, streams, snapshot) }
               : snapshot,
             card,
           ),
@@ -510,4 +513,26 @@ function summarizeDelivery(delivery: Delivery): Record<string, unknown> {
       ? { system_completion: delivery.system_completion }
       : {}),
   };
+}
+
+/**
+ * Every stream for queue ordering. C-671: in the `slim` scope closed cards'
+ * streams stay out of the array (their dormant events are not decoded); the
+ * merge-stage readers reach them through the history's indexes instead.
+ */
+function peerEvents(
+  tx: McpReadContext,
+  streams: CommandEventStreams,
+  snapshot: CommandState,
+): readonly Event[] {
+  if (tx.command_state_scope !== "slim" || !(streams instanceof EventLogView))
+    return [...streams.values()].flat();
+  const open = snapshot.cards.filter(
+    (c) => !["done", "cancelled"].includes(c.status),
+  );
+  return streams.history([...streams.keys()], {
+    full: new Set(open.map((c) => c.id)),
+    omit: new Set(),
+    keep: new Set(),
+  });
 }

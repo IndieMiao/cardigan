@@ -26,6 +26,10 @@ import {
   canParkForDiscussion,
   reviewRunWakeDisposition,
 } from "../shared-review-wake.js";
+import {
+  STARTUP_FAILURE_REASONS,
+  startupFailureResolved,
+} from "../startup-failure.js";
 import { transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -136,10 +140,8 @@ export const dispatchedAt = (state: CommandState, run: Run) =>
     (e) => field(e.payload, "run_id") === run.id,
   )?.created_at;
 export const dispatchRecoveryQueuedAt = (state: CommandState, run: Run) =>
-  state.events.find(
-    (e) =>
-      e.type === "run_dispatch_recovered" &&
-      field(e.payload, "replacement_run_id") === run.id,
+  eventsOfType(state.events, "run_dispatch_recovered").find(
+    (e) => field(e.payload, "replacement_run_id") === run.id,
   )?.created_at;
 
 /**
@@ -151,9 +153,8 @@ export const dispatchRecoveryUsed = (
   events: CommandState["events"],
   assignment: string,
 ) =>
-  events.some(
+  eventsOfType(events, "run_dispatch_recovered").some(
     (e) =>
-      e.type === "run_dispatch_recovered" &&
       field(e.payload, "assignment_id") === assignment &&
       !["server_restart", "provider_unavailable"].includes(
         String(field(e.payload, "reason")),
@@ -165,24 +166,9 @@ export const dispatchRecoveryFailed = (state: CommandState, run: Run) =>
   run.failure_reason !== "provider_unavailable" &&
   ["cancelled", "failed"].includes(run.status) &&
   !!dispatchRecoveryQueuedAt(state, run) &&
-  state.events.some(
-    (e) =>
-      e.type === "run_dispatch_aborted" &&
-      field(e.payload, "run_id") === run.id,
+  eventsOfType(state.events, "run_dispatch_aborted").some(
+    (e) => field(e.payload, "run_id") === run.id,
   );
-
-function startupFailureResolved(state: CommandState, run: Run): boolean {
-  return (
-    state.assignments.find((a) => a.id === run.assignment_id)?.status ===
-      "released" ||
-    state.runs.some(
-      (r) =>
-        r.assignment_id === run.assignment_id &&
-        r.started_at &&
-        Number(r.id.slice(2)) > Number(run.id.slice(2)),
-    )
-  );
-}
 
 /** Host supplies durable delivery attempt counts; business eligibility is rechecked here. */
 export function recoverDispatch(
@@ -273,16 +259,25 @@ export function recoverDispatch(
               ? "delivery_retry_exhausted"
               : undefined;
     if (!reason) return;
+    // C-735: a session whose start acknowledgement was refused is up and
+    // calling Card tools; restarting it cannot help. Report the reason once.
+    const refusal =
+      !stopping &&
+      !startupFailed &&
+      (reason === "dispatch_timeout" ||
+        reason === "delivery_retry_exhausted") &&
+      reviewWake !== "obsolete" &&
+      !unreadableCommentTrigger(state, run)
+        ? run.ack_refusal
+        : undefined;
     // C-600: a session without Card tools settles only through its own stop
     // fence and exit proof, never by escalation that leaves it running.
     if (reason === "mcp_unavailable" && !stopping) return;
     // A prior unconfirmed-stop alert cannot prevent later exit settlement.
     if (
       !stopped &&
-      state.events.some(
-        (e) =>
-          e.type === "run_dispatch_stalled" &&
-          field(e.payload, "run_id") === run.id,
+      eventsOfType(state.events, "run_dispatch_stalled").some(
+        (e) => field(e.payload, "run_id") === run.id,
       )
     )
       return;
@@ -298,10 +293,8 @@ export function recoverDispatch(
     // start before the escalation below.
     const mcp = reason === "mcp_unavailable";
     // Report the whole recovery episode without changing this Run's timeout.
-    const recovery = state.events.find(
-      (e) =>
-        e.type === "run_dispatch_recovered" &&
-        field(e.payload, "replacement_run_id") === run.id,
+    const recovery = eventsOfType(state.events, "run_dispatch_recovered").find(
+      (e) => field(e.payload, "replacement_run_id") === run.id,
     );
     const original = state.runs.find(
       (r) =>
@@ -312,6 +305,7 @@ export function recoverDispatch(
     const minutes = Math.max(0, Math.floor(waitedMs / 60000));
     const context = `${card ? `${card.id}「${card.title}」` : "项目常驻任务"}的 ${a.id}（${run.id}）派发后已等待 ${minutes} 分钟，${exitRecovery ? "原终端已异常退出" : startupFailed ? "自动恢复后的启动失败" : "仍未开始工作"}`;
     if (
+      !refusal &&
       (!recovered ||
         unreadable ||
         reviewWake === "obsolete" ||
@@ -483,15 +477,15 @@ export function recoverDispatch(
         return next;
       }
     }
-    const body = `${context}；${mcp ? `${MCP_SESSION_FAILURE}，${stopped && !p.stop_failed ? "已确认终端退出并记为启动失败，" : ""}` : ""}${p.stop_failed ? "无法确认旧终端已停止，已保留原 Run 和凭据，暂不重排" : "已自动恢复过一次，仍未成功"}。请检查${mcp ? "该机器到 Card MCP 的网络路径（可运行机器检查，含系统代理）、" : ""}终端与服务，必要时执行 cardigan assignment stop ${a.id}，再执行 cardigan assignment start ${a.id}，并回报处理结果。`;
+    const body = refusal
+      ? `${context}；会话已连上 Card 工具，但启动确认被拒（${refusal.code}）：${refusal.message}。这不是终端启动故障，重启不能解决，请按原因处理。`
+      : `${context}；${mcp ? `${MCP_SESSION_FAILURE}，${stopped && !p.stop_failed ? "已确认终端退出并记为启动失败，" : ""}` : ""}${p.stop_failed ? "无法确认旧终端已停止，已保留原 Run 和凭据，暂不重排" : "已自动恢复过一次，仍未成功"}。请检查${mcp ? "该机器到 Card MCP 的网络路径（可运行机器检查，含系统代理）、" : ""}终端与服务，必要时执行 cardigan assignment stop ${a.id}，再执行 cardigan assignment start ${a.id}，并回报处理结果。`;
     // C-600: settling a session without Card tools after an earlier report
     // for this Run (e.g. an unconfirmed stop) reports nothing twice.
     if (
       mcp &&
-      state.events.some(
-        (e) =>
-          e.type === "run_dispatch_stalled" &&
-          field(e.payload, "run_id") === run.id,
+      eventsOfType(state.events, "run_dispatch_stalled").some(
+        (e) => field(e.payload, "run_id") === run.id,
       )
     )
       return;
@@ -509,7 +503,10 @@ export function recoverDispatch(
       {
         assignment_id: a.id,
         run_id: run.id,
-        reason,
+        reason: refusal ? "ack_refused" : reason,
+        ...(refusal
+          ? { ack_refusal: { code: refusal.code, message: refusal.message } }
+          : {}),
         waited_ms: waitedMs,
         body,
         audience: ops ? "pm_ops" : "needs_you",
@@ -546,7 +543,7 @@ export function recoverDispatch(
           human_action_id: id,
           blocked_work_items: [],
           dispatch_run_id: run.id,
-          dispatch_reason: reason,
+          dispatch_reason: refusal ? "ack_refused" : reason,
           ...(policy ? { recovery_root_run_id: policy.root_run_id } : {}),
         },
         { type: "human_action", body, human_action_id: id },
@@ -587,7 +584,7 @@ export function obsoleteDispatchAttention(
   if (
     run &&
     (!!field(event?.payload, "recovery_root_run_id") ||
-      ["recovery_startup_failed", "runtime_exited"].includes(
+      STARTUP_FAILURE_REASONS.includes(
         String(field(event?.payload, "reason")),
       )) &&
     // Only the failed Assignment's own diagnostic marker retires with its Run.
@@ -615,10 +612,8 @@ export function resolveDispatchAttention(
     for (const action of state.human_actions) {
       if (action.requested_by !== "system" || action.status !== "open")
         continue;
-      const source = state.events.find(
-        (e) =>
-          e.type === "human_action_requested" &&
-          field(e.payload, "human_action_id") === action.id,
+      const source = eventsOfType(state.events, "human_action_requested").find(
+        (e) => field(e.payload, "human_action_id") === action.id,
       );
       const run = state.runs.find(
         (r) => r.id === field(source?.payload, "dispatch_run_id"),
@@ -627,7 +622,7 @@ export function resolveDispatchAttention(
       const a = d.get("assignments", run.assignment_id);
       if (
         field(source?.payload, "recovery_root_run_id") ||
-        ["recovery_startup_failed", "runtime_exited"].includes(
+        STARTUP_FAILURE_REASONS.includes(
           String(field(source?.payload, "dispatch_reason")),
         )
       ) {

@@ -1,6 +1,6 @@
 import type { Actor, Assignment, RuntimeRef } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
-import type { AssignmentId, RunId } from "../ids.js";
+import type { AssignmentId, CardId, RunId } from "../ids.js";
 import {
   canonicalSessionFacts,
   retirementWaitReceipt,
@@ -8,6 +8,7 @@ import {
 import { runsOf } from "../run-index.js";
 import {
   type RetirementDispatchWait,
+  type RetirementEvidence,
   type RetirementSettlement,
   retirementObserveOnly,
   retirementReasons,
@@ -16,7 +17,10 @@ import {
   darwinWorker,
   needsRetirementHandoff,
   probeInvalidStreak,
+  REFUSED_RETIREMENT_COOLDOWN_MS,
+  retirementNoticeSent,
   retirementOwnsSession,
+  retirementWithdrawals,
   sessionMaintenanceCandidate,
   sharedStallRegistration,
   supersededRetirement,
@@ -32,6 +36,7 @@ import {
   unwrap,
 } from "./core.js";
 import { humanStopRecorded, stoppedByHuman } from "./stop-state.js";
+import { systemEndedTurn } from "./system-ended-turn.js";
 
 export function beginIdleSessionRetirement(
   state: CommandState,
@@ -206,6 +211,28 @@ export type UnresponsiveRelease =
       readonly reason: string;
       /** host_ops_cancel_run: also cancel this Run when it never started. */
       readonly run_id?: RunId;
+    }
+  /**
+   * C-739: the system finished this Run, work is waiting for the Assignment,
+   * and the old turn still could not be confirmed ended after `waited_ms`
+   * while the checkout was clean.
+   */
+  | {
+      readonly trigger: "system_turn";
+      readonly system_finished_run_id: RunId;
+      readonly waited_ms: number;
+      readonly workspace: "clean" | "no_worktree";
+    }
+  /**
+   * C-739: work waited `waited_ms` without a new Run while idle retirement of
+   * this live session kept being given up (`withdrawals` times, at least 2),
+   * and the checkout was clean.
+   */
+  | {
+      readonly trigger: "retirement_withdrawn";
+      readonly withdrawals: number;
+      readonly waited_ms: number;
+      readonly workspace: "clean" | "no_worktree";
     };
 
 const unfinishedRun = (status: string) =>
@@ -234,6 +261,8 @@ export function unresponsiveReleaseBlocker(
   | "run_busy"
   | "run_changed"
   | "probe_streak"
+  | "session_maintenance"
+  | "withdrawal_streak"
   | undefined {
   if (a.scope !== "work_item" || a.external || a.status !== "active")
     return "not_managed";
@@ -263,6 +292,21 @@ export function unresponsiveReleaseBlocker(
   }
   if (runs.some((r) => r.status !== "queued" && unfinishedRun(r.status)))
     return "run_busy";
+  if (p.trigger === "system_turn") {
+    // An idle retirement owns its session; the release would race it.
+    if (a.idle_retirement) return "session_maintenance";
+    return systemEndedTurn(state, a)?.id === p.system_finished_run_id
+      ? undefined
+      : "run_changed";
+  }
+  if (p.trigger === "retirement_withdrawn") {
+    // Only a retirement that signals nothing (waiting) may be dropped here.
+    if (a.idle_retirement && a.idle_retirement.phase !== "waiting")
+      return "session_maintenance";
+    return retirementWithdrawals(state, a) >= p.withdrawals
+      ? undefined
+      : "withdrawal_streak";
+  }
   return probeInvalidStreak(state, a) >= p.limit ? undefined : "probe_streak";
 }
 
@@ -295,6 +339,21 @@ export function releaseUnresponsiveSession(
         "validation_failed",
         "Invalid probe limit",
       );
+    else if (
+      p.trigger === "system_turn" ||
+      p.trigger === "retirement_withdrawn"
+    )
+      ensure(
+        Number.isSafeInteger(p.waited_ms) &&
+          p.waited_ms >= 0 &&
+          ["clean", "no_worktree"].includes(p.workspace) &&
+          (p.trigger === "system_turn" ||
+            (Number.isSafeInteger(p.withdrawals) &&
+              p.withdrawals >= 2 &&
+              p.withdrawals <= 1000)),
+        "validation_failed",
+        "Invalid stalled session release",
+      );
     else text(p.reason, "reason");
     const a = d.get("assignments", id);
     ensure(
@@ -313,7 +372,11 @@ export function releaseUnresponsiveSession(
     const summary =
       p.trigger === "host_ops"
         ? `released by host operations (${p.requested_by})`
-        : "released after the Agent stopped responding";
+        : p.trigger === "system_turn"
+          ? `released after the system-ended turn of ${p.system_finished_run_id} stayed unconfirmed`
+          : p.trigger === "retirement_withdrawn"
+            ? "released after work waited while idle retirement kept withdrawing"
+            : "released after the Agent stopped responding";
     const cancelled = d
       .list("runs")
       .filter(
@@ -350,16 +413,39 @@ export function releaseUnresponsiveSession(
       ? `，已取消在该会话上的 ${cancelled.map((r) => r.id).join("、")}`
       : "";
     const handoff =
-      p.trigger === "host_ops"
-        ? `主机运维 ${p.requested_by} 请求${p.tool === "host_ops_cancel_run" ? "取消 Run" : "重启"}：${a.id}（${a.machine_id}）的 Agent 进程未见存活，已关闭残留终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`
-        : `${a.id}（${a.machine_id}）的 Agent 进程已不在、终端仍残留：空闲回收连续 ${streak} 次未取得有效进程身份。系统已关闭该终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`;
+      p.trigger === "retirement_withdrawn"
+        ? `${a.id}（${a.machine_id}）有待办 ${Math.round(p.waited_ms / 60_000)} 分钟仍派不出新 Run，空闲回收已 ${p.withdrawals} 次被撤回，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，待办在新会话中派发。`
+        : p.trigger === "system_turn"
+          ? `系统代为结束 ${p.system_finished_run_id} 后，${a.id}（${a.machine_id}）的旧回合 ${Math.round(p.waited_ms / 60_000)} 分钟仍确认不了是否结束，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，排队的工作在新会话中派发。`
+          : p.trigger === "host_ops"
+            ? `主机运维 ${p.requested_by} 请求${p.tool === "host_ops_cancel_run" ? "取消 Run" : "重启"}：${a.id}（${a.machine_id}）的 Agent 进程未见存活，已关闭残留终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`
+            : `${a.id}（${a.machine_id}）的 Agent 进程已不在、终端仍残留：空闲回收连续 ${streak} 次未取得有效进程身份。系统已关闭该终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`;
     d.emit(
       "session_replaced",
       card,
       {
         assignment_id: a.id,
-        reason: "agent_unresponsive",
+        reason:
+          p.trigger === "system_turn"
+            ? "system_turn_unconfirmed"
+            : p.trigger === "retirement_withdrawn"
+              ? "retirement_withdrawn"
+              : "agent_unresponsive",
         trigger: p.trigger,
+        ...(p.trigger === "system_turn"
+          ? {
+              system_finished_run_id: p.system_finished_run_id,
+              waited_ms: p.waited_ms,
+              workspace: p.workspace,
+            }
+          : {}),
+        ...(p.trigger === "retirement_withdrawn"
+          ? {
+              withdrawals: p.withdrawals,
+              waited_ms: p.waited_ms,
+              workspace: p.workspace,
+            }
+          : {}),
         ...(p.trigger === "host_ops"
           ? {
               requested_by: p.requested_by,
@@ -411,8 +497,13 @@ export function clearSupersededRetirement(
  * arrives for it as notifications only, no host operation consumes that
  * handoff (C-575 takes over queued successors), so it fenced the live session
  * indefinitely. Withdraw it so the dispatcher wakes the session through its
- * ordinary guarded path. A queued Run, any unfinished Run or Run stop, a human
- * stop, a pending host operation or a role upgrade keeps the handoff.
+ * ordinary guarded path. A started or running Run, a Run stop, a human stop,
+ * a pending host operation or a role upgrade keeps the handoff.
+ *
+ * C-739: a queued Run that never started is waiting work like a
+ * notification. A remote worker never gives C-575 the exit proof it needs,
+ * so that handoff fenced the queued Run until someone stopped the session
+ * (sensen A-317).
  */
 export function releaseRetainedRetirement(
   state: CommandState,
@@ -440,7 +531,8 @@ export function releaseRetainedRetirement(
         !state.runs.some(
           (r) =>
             r.assignment_id === a.id &&
-            (!["completed", "failed", "cancelled"].includes(r.status) ||
+            ((!["completed", "failed", "cancelled"].includes(r.status) &&
+              !(r.status === "queued" && !r.started_at)) ||
               r.dispatch_stop ||
               r.inactivity_stop),
         ),
@@ -475,6 +567,35 @@ export function dropWaitingRetirement(
       started_at: p.started_at,
     },
   );
+  return rest;
+}
+
+/**
+ * C-752 (sensen A-388): a human stop released the exact session an idle
+ * retirement was claimed for, and the host proved that terminal gone. Like
+ * `confirmKeptShellExit`, that proof finishes the retirement in either phase
+ * (a handed-off `stopping` one never settles itself). Without it the record,
+ * no longer bound to any session, fences every later bell until a human start.
+ */
+export function dropReleasedRetirement(
+  d: CommandDraft,
+  a: Assignment,
+  card: CardId,
+): Assignment {
+  const { idle_retirement: p, ...identity } = a;
+  if (!p || !retirementOwnsSession(a)) return a;
+  if (p.phase === "waiting") return dropWaitingRetirement(d, a, "superseded");
+  const rest: Assignment = identity;
+  d.put("assignments", rest);
+  d.emit("idle_session_retirement_superseded", card, {
+    assignment_id: a.id,
+    machine_id: a.machine_id,
+    reason: "session_released",
+    phase: p.phase,
+    handoff: p.handoff === true,
+    failures: p.failures,
+    started_at: p.started_at,
+  });
   return rest;
 }
 
@@ -645,6 +766,11 @@ function handoff(d: CommandDraft, a: Assignment) {
       phase,
       failures: p.failures,
       reason: p.evidence?.reason ?? "confirmation_pending",
+      // C-746: binds the handoff to its session (refused-retirement cooldown).
+      runtime_ref: { ...p.runtime_ref },
+      ...(p.evidence?.owner_reason
+        ? { owner_reason: p.evidence.owner_reason }
+        : {}),
     },
   );
   return next;
@@ -753,51 +879,109 @@ export function settleIdleSessionRetirement(
           : {}),
       },
     };
-    if (needsRetirementHandoff(state, next)) return handoff(d, next);
-    d.put("assignments", next);
-    if (notify) {
-      const facts = [
-        evidence.stage,
-        evidence.terminal_state,
-        evidence.hc_kind,
-        evidence.runtime_code,
-        evidence.exit_code === undefined
-          ? undefined
-          : `exit=${evidence.exit_code}`,
-        evidence.observation,
-      ]
-        .filter((v) => v !== undefined)
-        .join(" / ");
-      const nextStep =
-        outcome === "uncertain" || retirementObserveOnly(evidence)
-          ? "只复查退出，不重发信号"
-          : "系统退避重试";
-      // The stop CLI cannot authenticate the owner of a legacy terminal address.
-      // Even a previously verified address must be checked again by the operator.
-      const verifiedLive =
-        (evidence.observation === "alive" &&
-          outcome === "unavailable" &&
-          retirementObserveOnly(evidence)) ||
-        (outcome === "timeout" &&
-          evidence.reason === "still_live" &&
-          evidence.terminal_state === "live");
-      const verifyOwner =
-        "请主机操作员用 hc get 只读核对终端地址、项目、指派和启动代次；无法确认归属时保留会话和凭据，不执行停止";
-      const guidance = verifiedLive
-        ? `${verifyOwner}。仅在归属吻合且确认可中断工作后执行 cardigan assignment stop ${id} --project ${state.project_id}，核对退出结果`
-        : verifyOwner;
-      d.emit("session_maintenance_attention", card, {
-        assignment_id: id,
-        reason:
-          outcome === "uncertain"
-            ? "retirement_pending"
-            : outcome === "unavailable"
-              ? "retirement_unavailable"
-              : "retirement_timeout",
-        evidence,
-        notice: `${id}（${a.machine_id}）空闲会话保留，凭据未撤销：${retirementReasons[evidence.reason]}（${facts}）。${nextStep}；${guidance}；不自动重启。`,
-      });
+    if (needsRetirementHandoff(state, next)) {
+      const handed = handoff(d, next);
+      // C-746: a macOS session that refused three attempts is retained, not
+      // retired. Say so once per idle session, with the cause and the commands
+      // to resolve it; repeated hand-backs of the same session add no notice.
+      if (
+        failures >= 3 &&
+        !kept &&
+        !pending.dispatch_wait &&
+        !retirementNoticeSent(state, a)
+      )
+        emitRetirementNotice(d, state, a, card, outcome, evidence, true);
+      return handed;
     }
+    d.put("assignments", next);
+    if (notify) emitRetirementNotice(d, state, a, card, outcome, evidence);
     return next;
+  });
+}
+
+/** Bounded facts of a retirement attempt for a notice; never paths or text. */
+function retirementFacts(evidence: RetirementEvidence) {
+  return [
+    evidence.stage,
+    evidence.terminal_state,
+    evidence.hc_kind,
+    evidence.runtime_code,
+    evidence.owner_reason,
+    evidence.exit_code === undefined ? undefined : `exit=${evidence.exit_code}`,
+    evidence.observation,
+  ]
+    .filter((v) => v !== undefined)
+    .join(" / ");
+}
+
+/**
+ * C-746: what an operator can run for a macOS session that keeps refusing
+ * retirement. Each step is read-only until the explicit managed stop, which
+ * keeps the worktree and branch.
+ */
+function refusedRetirementGuidance(
+  state: CommandState,
+  a: Assignment,
+  evidence: RetirementEvidence,
+) {
+  const stop = `cardigan assignment stop ${a.id} --project ${state.project_id}`;
+  const terminal = a.runtime_ref?.terminal_ref;
+  const inspect = `主机运维可用 host_ops_inspect_worker（machine_id=${a.machine_id}，assignment_id=${a.id}，不带 run_id）只读查看终端、进程和失败原因`;
+  if (evidence.reason === "workspace_not_clean")
+    return `${inspect}；在 ${a.machine_id} 上以项目账号执行 git -C ${a.worktree_path ?? "<工作区>"} status --short 核对改动。确认这些改动可以留在原工作区后执行 ${stop} 释放会话（工作区和分支保留），否则先由负责人提交或清理`;
+  if (evidence.owner_reason === "legacy_owner_refused")
+    return `${inspect}；该会话的空闲 owner 在 C-746 之前启动，按旧规则看不到状态栏上方的空输入框；按当前规则核对已通过。确认可以中断后执行 ${stop} 释放会话，下次唤醒的新会话使用新规则`;
+  if (evidence.reason === "terminal_busy")
+    return `${inspect}；终端仍显示在工作或等待确认，在控制端用 hc get ${terminal} 只读核对。确认可以中断后执行 ${stop}`;
+  return `${inspect}；在控制端用 hc get ${terminal} 只读核对终端仍在 herdr-core 登记且归属吻合（项目、指派、启动代次）。归属吻合且可以中断时执行 ${stop}，核对退出结果；无法确认归属时保留会话和凭据`;
+}
+
+function emitRetirementNotice(
+  d: CommandDraft,
+  state: CommandState,
+  a: Assignment,
+  card: CardId,
+  outcome: "uncertain" | "unavailable" | "timeout",
+  evidence: RetirementEvidence,
+  darwinHandoff = false,
+) {
+  const id = a.id;
+  const facts = retirementFacts(evidence);
+  let tail: string;
+  if (darwinHandoff) {
+    tail = `已保留会话待投递，同一会话 ${REFUSED_RETIREMENT_COOLDOWN_MS / 3_600_000} 小时内不再自动回收，有活动前不再重复通知。${refusedRetirementGuidance(state, a, evidence)}`;
+  } else {
+    const nextStep =
+      outcome === "uncertain" || retirementObserveOnly(evidence)
+        ? "只复查退出，不重发信号"
+        : "系统退避重试";
+    // The stop CLI cannot authenticate the owner of a legacy terminal address.
+    // Even a previously verified address must be checked again by the operator.
+    const verifiedLive =
+      (evidence.observation === "alive" &&
+        outcome === "unavailable" &&
+        retirementObserveOnly(evidence)) ||
+      (outcome === "timeout" &&
+        evidence.reason === "still_live" &&
+        evidence.terminal_state === "live");
+    const verifyOwner =
+      "请主机操作员用 hc get 只读核对终端地址、项目、指派和启动代次；无法确认归属时保留会话和凭据，不执行停止";
+    const guidance = verifiedLive
+      ? `${verifyOwner}。仅在归属吻合且确认可中断工作后执行 cardigan assignment stop ${id} --project ${state.project_id}，核对退出结果`
+      : verifyOwner;
+    tail = `${nextStep}；${guidance}`;
+  }
+  d.emit("session_maintenance_attention", card, {
+    assignment_id: id,
+    reason:
+      outcome === "uncertain"
+        ? "retirement_pending"
+        : outcome === "unavailable"
+          ? "retirement_unavailable"
+          : "retirement_timeout",
+    evidence,
+    // C-746: binds the notice to its session (retirementNoticeSent).
+    ...(a.runtime_ref ? { runtime_ref: { ...a.runtime_ref } } : {}),
+    notice: `${id}（${a.machine_id}）空闲会话保留，凭据未撤销：${retirementReasons[evidence.reason]}（${facts}）。${tail}；不自动重启。`,
   });
 }

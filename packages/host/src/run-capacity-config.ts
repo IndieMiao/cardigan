@@ -35,7 +35,19 @@ export interface RunCapacityConfiguration {
   readonly queuedRecheckAfterMs: number;
   readonly inboxStallAfterMs: number;
   readonly inactiveCancelAfterMs: number | null;
+  /** C-752: shorter grace for Runs holding scarce resources; null (off) unless configured. */
+  readonly scarceInactiveCancel: ScarceInactiveCancelConfig | null;
 }
+export interface ScarceInactiveCancelConfig {
+  readonly afterMs: number;
+  readonly resources: readonly string[];
+}
+/** Resources whose holder blocks others for long; used only when the grace is configured. */
+export const DEFAULT_SCARCE_RESOURCES = [
+  "android.emulator",
+  "ios.simulator",
+  "godot",
+] as const;
 
 /** Trusted YAML defaults read at startup; effectiveRunLimit applies live database overrides. */
 export async function loadRunCapacityConfig(
@@ -66,8 +78,14 @@ export async function loadRunCapacityConfig(
   let inactiveCancelAfterMs = DEFAULT_INACTIVE_CANCEL_AFTER_MS;
   let queuedRecheckAfterMs = DEFAULT_QUEUED_RECHECK_AFTER_MS;
   let inboxStallAfterMs = DEFAULT_INBOX_STALL_AFTER_MS;
+  let scarceAfterMs: number | undefined;
+  let scarceResources: readonly string[] = DEFAULT_SCARCE_RESOURCES;
   const result = (): RunCapacityConfiguration => ({
     errors,
+    scarceInactiveCancel:
+      errors.length || scarceAfterMs === undefined
+        ? null
+        : { afterMs: scarceAfterMs, resources: scarceResources },
     queuedRecheckAfterMs: errors.length
       ? DEFAULT_QUEUED_RECHECK_AFTER_MS
       : queuedRecheckAfterMs,
@@ -143,6 +161,8 @@ export async function loadRunCapacityConfig(
             "inactive_cancel_after_minutes",
             "inbox_stall_after_minutes",
             "queued_recheck_after_minutes",
+            "scarce_inactive_cancel_after_minutes",
+            "scarce_resources",
           ].includes(key),
       ) ||
       !object(raw.machines)
@@ -152,6 +172,7 @@ export async function loadRunCapacityConfig(
       "inactive_cancel_after_minutes",
       "inbox_stall_after_minutes",
       "queued_recheck_after_minutes",
+      "scarce_inactive_cancel_after_minutes",
     ]) {
       const minutes = raw[key];
       if (minutes === undefined) continue;
@@ -166,8 +187,26 @@ export async function loadRunCapacityConfig(
         inboxStallAfterMs = minutes * 60_000;
       else if (key === "queued_recheck_after_minutes")
         queuedRecheckAfterMs = minutes * 60_000;
+      else if (key === "scarce_inactive_cancel_after_minutes")
+        scarceAfterMs = minutes * 60_000;
       else inactiveCancelAfterMs = minutes * 60_000;
     }
+    if (raw.scarce_resources !== undefined) {
+      const list = raw.scarce_resources;
+      if (
+        !Array.isArray(list) ||
+        !list.length ||
+        list.some((key) => {
+          const parsed = parseCapabilityRequirement(key);
+          return !parsed.ok || parsed.value.key !== key;
+        })
+      )
+        throw new Error("Invalid scarce resources");
+      scarceResources = [...new Set(list as string[])];
+    }
+    // Only a shorter deadline is meaningful; it never lengthens the normal one.
+    if (scarceAfterMs !== undefined && scarceAfterMs >= inactiveCancelAfterMs)
+      throw new Error("Invalid scarce inactivity grace");
     for (const [machine, entry] of Object.entries(raw.machines)) {
       const settings = object(entry) ? entry : { limit: entry };
       if (
@@ -273,7 +312,7 @@ export async function loadRunCapacityConfig(
   } catch {
     // Never include YAML contents (which could contain credentials) in diagnostics.
     errors.push(
-      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes、inbox_stall_after_minutes、queued_recheck_after_minutes 须为允许范围的正整数，display_name 须为有效文字，resources 须按能力名设置正整数上限，adb_slots 的资源须已在 resources 中、端口范围有效且不与其它端口重叠。配置无效，暂停普通 Run 自动派发及失活回收",
+      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes、inbox_stall_after_minutes、queued_recheck_after_minutes、scarce_inactive_cancel_after_minutes 须为允许范围的正整数（最后一项须短于 inactive_cancel_after_minutes），scarce_resources 须为非空能力名列表，display_name 须为有效文字，resources 须按能力名设置正整数上限，adb_slots 的资源须已在 resources 中、端口范围有效且不与其它端口重叠。配置无效，暂停普通 Run 自动派发及失活回收",
     );
   }
   return result();
