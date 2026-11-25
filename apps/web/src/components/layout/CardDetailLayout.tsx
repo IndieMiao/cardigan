@@ -74,7 +74,11 @@ export const DetailNextStep = forwardRef<
       <h2 className={styles.nextTitle}>{title}</h2>
       {children}
     </div>
-    {actions && <div className={styles.nextActions}>{actions}</div>}
+    {actions && (
+      <div className={styles.nextActions} data-next-actions>
+        {actions}
+      </div>
+    )}
   </section>
 ));
 DetailNextStep.displayName = "DetailNextStep";
@@ -83,6 +87,33 @@ export function DetailNextStepLine(
   props: Omit<ComponentProps<"div">, "className">,
 ) {
   return <div {...props} className={styles.nextLine} />;
+}
+/**
+ * C-701: where CardActionDock renders: the first child of the detail, so the
+ * dock sticks to the top of the page or drawer body while it scrolls.
+ */
+export const CardActionDockSlot = forwardRef<HTMLDivElement>((_props, ref) => (
+  <div ref={ref} className={styles.dockSlot} />
+));
+CardActionDockSlot.displayName = "CardActionDockSlot";
+/**
+ * C-701: a 48px bar with the card (page) or the panel title (drawer) and the
+ * page's main action, shown once “下一步” has scrolled away. It takes no room
+ * in the flow; the tabs and anchors move below it.
+ */
+export function CardActionDock({
+  title,
+  children,
+}: {
+  readonly title: ReactNode;
+  readonly children: ReactNode;
+}) {
+  return (
+    <section aria-label="主操作" className={styles.dock}>
+      <div className={styles.dockTitle}>{title}</div>
+      <div className={styles.dockActions}>{children}</div>
+    </section>
+  );
 }
 /** Below DetailNextStep: forms that a panel action opens in place. */
 export function DetailNextStepForms(

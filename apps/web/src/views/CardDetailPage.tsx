@@ -46,6 +46,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import {
+  CardActionDockSlot,
   CardDetailHeading,
   CardDetailLayout,
   DetailNextStepForms,
@@ -479,6 +480,7 @@ function CardContent({
   });
   const [activeAction, setActiveAction] = useState<"card" | "completion">();
   const [primaryPanels, setPrimaryPanels] = useState<HTMLElement | null>(null);
+  const [dock, setDock] = useState<HTMLElement | null>(null);
   // C-696: “C-48 已完成” stays 4 seconds in the shared feedback stack; the
   // panel that held “标记完成” is gone after the reload.
   const [doneNotice, setDoneNotice] = useState("");
@@ -789,6 +791,7 @@ function CardContent({
       className={cardPageClass}
       aria-label={`卡片 ${cardId}`}
     >
+      <CardActionDockSlot ref={setDock} />
       <header className="card-header">
         {!inDrawer && (
           <CardDetailHeading>
@@ -834,6 +837,8 @@ function CardContent({
           onReveal={revealTarget}
           completionId={completionId}
           busy={!!activeAction}
+          inDrawer={inDrawer}
+          dock={dock}
           markDone={(emphasis) => (
             <CardTemplate
               disabled={!!activeAction && activeAction !== "completion"}
