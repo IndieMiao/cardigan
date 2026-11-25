@@ -37,6 +37,7 @@ import {
   NEEDS_YOU_ITEM_READY,
   needsYouItemReady,
   officeAlertRecipient,
+  officeResolutionRecipient,
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   precheckConflictHandling,
@@ -2816,6 +2817,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
   }
   routeOfficeAlert(input, draft);
+  routeOfficeResolution(input, draft);
   return draft;
 }
 
@@ -2862,6 +2864,48 @@ function routeOfficeAlert(input: RouteInput, draft: Draft): void {
     OFFICE_ALERT_KIND[event.type] ?? "escalation",
     "C-722/office alert",
     `知会 Office：${subject(input)} ${what}`,
+  );
+}
+
+/**
+ * C-740: the human closed a Needs You question. Ring this project's Office on
+ * duty at once with the answer, so it stops telling the owner the question is
+ * still waiting. Appended last: other recipients stay exactly as they were,
+ * and an Office already told (for example as the raiser) is not told twice.
+ */
+function routeOfficeResolution(input: RouteInput, draft: Draft): void {
+  const { event, snapshot } = input;
+  const decision_id = payloadString(event.payload, "decision_id");
+  const q = snapshot.decisions.find((d) => d.id === decision_id);
+  const office = officeResolutionRecipient(
+    snapshot.project_id,
+    event,
+    q,
+    snapshot.assignments,
+    snapshot.timeline,
+  );
+  if (!office || !q?.resolution) return;
+  if (
+    draft.notifications.some(
+      (n) =>
+        n.recipient.kind === "pm_office" ||
+        (n.recipient.kind === "assignment" &&
+          n.recipient.assignment_id === office.id),
+    )
+  )
+    return;
+  const chosen = q.options.find((o) => o.key === q.resolution?.option);
+  const answer = isDecisionOther(q.resolution.option)
+    ? `选择“其他”，原话：${q.resolution.raw_quote}`
+    : `选择 ${q.resolution.option}：${chosen?.description ?? ""}。影响：${chosen?.impact ?? ""}`;
+  const options = q.options.map((o) => o.key).join("、");
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "decision",
+    "C-740/office decision closed",
+    `知会 Office：${q.id} 已由人结案，不再等待。${answer}（选项：${options}）`,
   );
 }
 

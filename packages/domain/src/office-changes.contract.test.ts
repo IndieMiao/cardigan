@@ -1,5 +1,11 @@
 import { describe, expect, test } from "vitest";
-import type { Assignment, Cursor, Event } from "./entities.js";
+import type {
+  Assignment,
+  Cursor,
+  Decision,
+  Event,
+  TimelineEntry,
+} from "./entities.js";
 import type { CardId, ProjectId } from "./ids.js";
 import {
   advanceOfficeDigestSince,
@@ -10,11 +16,13 @@ import {
   OFFICE_DIGEST_SETTLE_MS,
   OFFICE_DIGEST_SHOWN_STREAM,
   OFFICE_DIGEST_SINCE_STREAM,
+  OFFICE_RESOLUTION_EVENT_TYPES,
   officeAlertRecipient,
   officeChangeTier,
   officeDigest,
   officeDigestInitialSince,
   officeOnDuty,
+  officeResolutionRecipient,
 } from "./index.js";
 
 const P = "p-office" as ProjectId;
@@ -383,3 +391,162 @@ test("the digest window rows never collide with a card or the project stream", (
 function digestInput(events: Event[]) {
   return { project_id: P, office, events, cursors: [], cards: [] };
 }
+
+describe("C-740 office resolution recipient", () => {
+  const byHuman = (
+    type = "decision_resolved",
+    project: ProjectId = P,
+  ): Event => ({
+    ...event(type, { payload: { decision_id: "Q-1" }, project }),
+    actor: { kind: "human", project_id: project },
+  });
+  const question = (
+    fields: Record<string, unknown> = {},
+    resolution: Record<string, unknown> = {},
+  ): Decision =>
+    ({
+      id: "Q-1",
+      card_id: "C-1",
+      decider: "human",
+      raised_by: "assignment:A-1",
+      status: "resolved",
+      options: [{ key: "a", description: "A", impact: "i" }],
+      resolution: {
+        option: "a",
+        rationale: "",
+        resolved_by: "human",
+        via: "needs_you",
+        raw_quote: "选 a",
+        via_chain: ["human"],
+        at: T0,
+        ...resolution,
+      },
+      ...fields,
+    }) as unknown as Decision;
+  const officeComment = (fields: Record<string, unknown>): TimelineEntry =>
+    ({
+      id: "C-1#5",
+      card_id: "C-1",
+      author: `assignment:${office.id}`,
+      retracted: false,
+      refs: [],
+      ...fields,
+    }) as unknown as TimelineEntry;
+
+  test("both resolution event types count; nothing else does", () => {
+    expect([...OFFICE_RESOLUTION_EVENT_TYPES].sort()).toEqual([
+      "decision_provisionally_resolved",
+      "decision_resolved",
+    ]);
+    for (const type of OFFICE_RESOLUTION_EVENT_TYPES)
+      expect(
+        officeResolutionRecipient(P, byHuman(type), question(), [
+          coder,
+          ops,
+          office,
+        ]),
+      ).toBe(office);
+    for (const type of [...ALERTS, ...OFFICE_DIGEST_EVENT_TYPES])
+      expect(
+        officeResolutionRecipient(P, byHuman(type), question(), [office]),
+      ).toBeUndefined();
+  });
+
+  test("a question Needs You listed: decided by, reserved for, or taken over by the human", () => {
+    for (const q of [
+      question(),
+      question({ decider: "role:pm", human_required_reason: "x" }),
+      question({ decider: "system" }, { taken_over_from: "system" }),
+    ])
+      expect(officeResolutionRecipient(P, byHuman(), q, [office])).toBe(office);
+  });
+
+  test("a question the Office raised, suggested or cited also counts", () => {
+    const pm = { decider: "role:pm" };
+    expect(
+      officeResolutionRecipient(P, byHuman(), question(pm), [office]),
+    ).toBeUndefined();
+    expect(
+      officeResolutionRecipient(
+        P,
+        byHuman(),
+        question({ ...pm, raised_by: `assignment:${office.id}` }),
+        [office],
+      ),
+    ).toBe(office);
+    expect(
+      officeResolutionRecipient(
+        P,
+        byHuman(),
+        question({ ...pm, suggestion: { by: `assignment:${office.id}` } }),
+        [office],
+      ),
+    ).toBe(office);
+    for (const cited of [
+      officeComment({ decision_id: "Q-1" }),
+      officeComment({ refs: [{ kind: "decision", id: "Q-1" }] }),
+    ])
+      expect(
+        officeResolutionRecipient(
+          P,
+          byHuman(),
+          question(pm),
+          [office],
+          [cited],
+        ),
+      ).toBe(office);
+    for (const ignored of [
+      officeComment({ decision_id: "Q-1", retracted: true }),
+      officeComment({ decision_id: "Q-2" }),
+      officeComment({ decision_id: "Q-1", author: "assignment:A-11" }),
+    ])
+      expect(
+        officeResolutionRecipient(
+          P,
+          byHuman(),
+          question(pm),
+          [office],
+          [ignored],
+        ),
+      ).toBeUndefined();
+  });
+
+  test("only the human's own resolution counts", () => {
+    for (const via of ["delegated", "pm_office_chat", "system_rule"])
+      expect(
+        officeResolutionRecipient(P, byHuman(), question({}, { via }), [
+          office,
+        ]),
+      ).toBeUndefined();
+    expect(
+      officeResolutionRecipient(
+        P,
+        event("decision_resolved", { actor: ops.id }),
+        question(),
+        [office],
+      ),
+    ).toBeUndefined();
+    expect(
+      officeResolutionRecipient(P, byHuman(), undefined, [office]),
+    ).toBeUndefined();
+  });
+
+  test("no Office on duty or another project: nothing, no error", () => {
+    expect(
+      officeResolutionRecipient(P, byHuman(), question(), [coder, ops]),
+    ).toBeUndefined();
+    expect(
+      officeResolutionRecipient(P, byHuman(), question(), [
+        assignment("A-10", { standing_mode: "office", status: "suspended" }),
+      ]),
+    ).toBeUndefined();
+    expect(
+      officeResolutionRecipient(
+        P,
+        byHuman("decision_resolved", OTHER),
+        question(),
+        [office],
+      ),
+    ).toBeUndefined();
+  });
+});
