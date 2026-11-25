@@ -317,9 +317,23 @@
     max-width: 100%;
     margin: 0;
   }
-  /* A linked id (the card of an execution) keeps the row at control height. */
+  /* C-702: a linked id with its title (the card of an execution) keeps the
+     row at control height and one line; the title gives way first and
+     shows in full in the id's tooltip. */
   .statusFacts > :global(a.id-tag) {
+    flex: 1 1 0;
+    min-width: calc(var(--ui-space-6) * 4);
+    max-width: max-content;
     min-height: var(--ui-control);
+  }
+  .statusFacts > :global(a.id-tag) > :global(.id-badge) {
+    flex: none;
+  }
+  .statusFacts > :global(a.id-tag) > :global(.id-description) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .statusActions {
     flex: none;
