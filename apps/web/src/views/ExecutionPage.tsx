@@ -10,6 +10,7 @@ import {
   labelledStandingRoles,
   MachinesContext,
   type RowProps,
+  standingLabel,
   unfinished,
   useNarrow,
 } from "../components/ExecutionContent.js";
@@ -30,6 +31,7 @@ import {
   DEFAULT_REFRESH_INTERVAL,
   REFRESH_INTERVALS,
 } from "../components/RefreshGroup.js";
+import { IdBadge } from "../components/ui/id-badge.js";
 import { TableHead, TableHeader, TableRow } from "../components/ui/table.js";
 import {
   type ExecutionDisplay,
@@ -478,12 +480,26 @@ export function ExecutionPage({
             )
               event.preventDefault();
           }}
-          title={detail ? `${detail.id} 详情` : "Assignment 详情"}
+          title={
+            detail ? (
+              <>
+                <IdBadge id={detail.id} />{" "}
+                {detail.employee?.name ??
+                  detail.author_display ??
+                  (detail.work_item_id
+                    ? (roleNames.get(detail.role_id) ?? detail.role_id)
+                    : standingLabel(detail, roleNames.get(detail.role_id)))}
+              </>
+            ) : (
+              "执行详情"
+            )
+          }
           description={
             detail
-              ? `${detail.id}（${detail.role_id}）的运行环境、命令、Run 历史和 ACK 游标`
+              ? `${detail.id} 的运行状态、运行环境、会话维护、执行记录和命令行`
               : undefined
           }
+          initialFocus="close"
         >
           {detail && (
             <ExecutionDetail
@@ -491,6 +507,7 @@ export function ExecutionPage({
               a={detail}
               run={latestRun(detail.id)}
               live={detailLive}
+              roleName={roleNames.get(detail.role_id)}
               client={client}
               projectId={projectId}
               revision={revision}

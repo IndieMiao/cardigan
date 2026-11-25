@@ -164,7 +164,7 @@ test.each([false, true])(
   },
 );
 
-test("Run history uses its dispatch machine even after the Assignment moves; missing history stays explicit", async () => {
+test("Run history uses its dispatch machine even after the Assignment moves; a missing record never borrows the Assignment's machine", async () => {
   const data = fixture();
   const first = data.runs[0] as RunView;
   show({
@@ -172,11 +172,17 @@ test("Run history uses its dispatch machine even after the Assignment moves; mis
     runs: [first, { ...first, id: "R-9", recovery_runtime: undefined }],
   });
   fireEvent.click(await screen.findByRole("button", { name: "查看 A-1 详情" }));
-  const history = await screen.findByRole("region", { name: "A-1 Run 历史" });
+  const history = await screen.findByRole("region", { name: /^执行记录/ });
   expect(
     await within(history).findByLabelText("机器：远端构建机"),
   ).toBeTruthy();
-  expect(within(history).getByLabelText("机器：未记录")).toBeTruthy();
+  // C-702: a Run shows its machine only when it differs from the
+  // Assignment's; an unrecorded one shows none rather than the current one.
+  const [, missing] = [
+    ...history.querySelectorAll("[data-ui=detail-history] > li"),
+  ] as HTMLElement[];
+  expect(missing?.textContent).toContain("R-9");
+  expect(within(missing as HTMLElement).queryByLabelText(/^机器：/)).toBeNull();
   const dialog = screen.getByRole("dialog");
   expect(within(dialog).getByLabelText("机器：工作机")).toBeTruthy();
   expect(within(dialog).getByText("t-0")).toBeTruthy();

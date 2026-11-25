@@ -42,7 +42,7 @@ import { Meter, type MeterTone } from "./ui/meter.js";
 import { TableCell, TableRow } from "./ui/table.js";
 
 export const MachinesContext = createContext<ExecutionData["machines"]>([]);
-function MachineBadge({
+export function MachineBadge({
   id,
   plain = false,
 }: {
@@ -84,8 +84,8 @@ const runStatus = (run: RunView) =>
   (run.queue_reason === "provider_unavailable"
     ? run.queue_reason
     : (run.outcome ?? run.status));
-const runKind = (run: RunView) => kinds[run.kind] ?? "执行";
-const runTime = (run: RunView) =>
+export const runKind = (run: RunView) => kinds[run.kind] ?? "执行";
+export const runTime = (run: RunView) =>
   run.finished_at ?? run.started_at ?? run.queued_at;
 export function RunSummary({ text }: { readonly text: string }) {
   return text.trim() ? (
@@ -126,16 +126,22 @@ function useRunDetails(run: RunView | undefined): string[] {
     abnormalRun(run) ? `最近执行：${statusLabel(runStatus(run))}` : "",
   ];
 }
-export function RunLine({ run }: { readonly run: RunView }) {
+/** A Run's status with its queue and failure details on hover. */
+export function RunStatus({ run }: { readonly run: RunView }) {
   const details = useRunDetails(run);
+  return (
+    <DetailsTip lines={[statusLabel(runStatus(run)), ...details]}>
+      <Button variant="ghost" className="ui-status-tip">
+        <StatusTag status={runStatus(run)} />
+      </Button>
+    </DetailsTip>
+  );
+}
+export function RunLine({ run }: { readonly run: RunView }) {
   return (
     <>
       <IdTag id={run.id} label={runKind(run)} />
-      <DetailsTip lines={[statusLabel(runStatus(run)), ...details]}>
-        <Button variant="ghost" className="ui-status-tip">
-          <StatusTag status={runStatus(run)} />
-        </Button>
-      </DetailsTip>
+      <RunStatus run={run} />
       <MachineBadge id={runMachine(run)} />
       {runTime(run) && <Time value={runTime(run)} />}
     </>
@@ -159,7 +165,8 @@ export function runConfig(run: RunView | undefined): string {
   if (!run) return NONE;
   return `${runHarness(run)} / ${run.model || NONE} / ${run.effort || NONE}`;
 }
-const windowSize = (tokens: number) => {
+/** A token count as 124K / 1.5M. */
+export const windowSize = (tokens: number) => {
   const [unit, size] =
     tokens >= 1_000_000
       ? ["M", 1_000_000]
@@ -235,7 +242,7 @@ export function contextUsage(run: RunView | undefined): string {
   if (!reading) return NONE;
   return `已用 ${reading.used}%，剩余 ${reading.remaining}%（${reading.window}）`;
 }
-const meterTones: Record<ContextLevel, MeterTone> = {
+export const meterTones: Record<ContextLevel, MeterTone> = {
   normal: "neutral",
   handoff: "warning",
   restart: "danger",
