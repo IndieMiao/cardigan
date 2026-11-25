@@ -1,7 +1,14 @@
 @layer legacy, theme, base, components, utilities;
 @layer components {
   .page {
-    --card-scroll-offset: calc(var(--ui-control) * 2 + var(--ui-space-4));
+    /* C-701: the main-action dock: a regular button with space-2 around. */
+    --card-dock-height: calc(var(--ui-control-regular) + var(--ui-space-2) * 2);
+    --card-scroll-offset: calc(
+      var(--ui-control) *
+      2 +
+      var(--ui-space-4) +
+      var(--card-dock-height)
+    );
     display: block;
     width: 100%;
     min-width: 0;
@@ -94,6 +101,41 @@
     padding-block: var(--ui-space-2);
     margin: 0;
     background: var(--surface);
+  }
+  .page:has(.dock) .tabs {
+    top: var(--card-dock-height);
+  }
+  /* C-701: the dock takes no room, so showing it never moves the content. */
+  .dockSlot {
+    display: contents;
+  }
+  .dock {
+    position: sticky;
+    top: 0;
+    z-index: 11;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-3);
+    height: var(--card-dock-height);
+    margin: 0 calc(-1 * var(--ui-space-6)) calc(-1 * var(--card-dock-height));
+    padding: 0 var(--ui-space-6);
+    background: var(--surface);
+    border-bottom: var(--ui-stroke) solid var(--border);
+  }
+  .dockTitle {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 600;
+  }
+  .dockActions {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: var(--ui-space-2);
   }
   .tabs :global([data-ui="tabs-list"]) {
     display: flex;
@@ -425,6 +467,10 @@
     }
     .drawer :global(.drawer-actions) {
       gap: var(--ui-space-1);
+    }
+    .dock {
+      margin-inline: calc(-1 * var(--ui-space-3));
+      padding-inline: var(--ui-space-3);
     }
     .page :global(.card-section) {
       padding: var(--ui-space-3);

@@ -65,7 +65,11 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
-const live = () => observers.filter((o) => !o.disconnected);
+// The pager sentinels; C-701's “下一步” panel observer is not one.
+const live = () =>
+  observers.filter(
+    (o) => !o.disconnected && !o.target.matches("[aria-label='下一步']"),
+  );
 /** Scroll the sentinel into view: every observer still armed sees it. */
 const reachBottom = () =>
   act(() => {

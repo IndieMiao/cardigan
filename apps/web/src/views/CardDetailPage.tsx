@@ -46,6 +46,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import {
+  CardActionDockSlot,
   CardDetailHeading,
   CardDetailLayout,
   DetailNextStepForms,
@@ -477,6 +478,7 @@ function CardContent({
   });
   const [activeAction, setActiveAction] = useState<"card" | "completion">();
   const [primaryPanels, setPrimaryPanels] = useState<HTMLElement | null>(null);
+  const [dock, setDock] = useState<HTMLElement | null>(null);
   const article = useRef<HTMLElement>(null);
   const scroll = useRef<HTMLElement>(null),
     lastAnchor = useRef<string | undefined>(undefined);
@@ -779,6 +781,7 @@ function CardContent({
       className={cardPageClass}
       aria-label={`卡片 ${cardId}`}
     >
+      <CardActionDockSlot ref={setDock} />
       <header className="card-header">
         {!inDrawer && (
           <CardDetailHeading>
@@ -824,6 +827,8 @@ function CardContent({
           onReveal={revealTarget}
           completionId={completionId}
           busy={!!activeAction}
+          inDrawer={inDrawer}
+          dock={dock}
           markDone={(emphasis) => (
             <CardTemplate
               disabled={!!activeAction && activeAction !== "completion"}
