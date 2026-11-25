@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import type { Assignment, Event, Run } from "../entities.js";
 import {
+  BUSINESS_WORK_COOLDOWN_MS,
   sessionMaintenanceBasis,
   sessionMaintenanceCandidate,
   sessionMaintenanceNeedsAttention,
@@ -1013,7 +1014,7 @@ test("C-690: a new session's dispatch supersedes the earlier session's waiting r
   ).toBe(false);
 });
 
-test("C-690: notifications release a live session retained for dispatch unless work is queued, running or fenced", () => {
+test("C-690: notifications release a live session retained for dispatch unless work is running or fenced", () => {
   const s = setup(),
     a = s.assignments[0]!,
     io = { ...ports(), clock: { now: () => now } };
@@ -1075,12 +1076,18 @@ test("C-690: notifications release a live session retained for dispatch unless w
       a.id,
       io,
     ),
+    // C-739: a queued Run whose stop is in flight still keeps the handoff.
     releaseRetainedRetirement(
       {
         ...base,
         runs: [
           ...base.runs,
-          { ...s.runs[0]!, id: "R-9" as Run["id"], status: "queued" },
+          {
+            ...s.runs[0]!,
+            id: "R-9" as Run["id"],
+            status: "queued",
+            dispatch_stop: {},
+          } as Run,
         ],
       },
       system,
@@ -1113,4 +1120,86 @@ test("C-690: notifications release a live session retained for dispatch unless w
     ),
   ];
   for (const effect of refused) expect(effect.ok).toBe(false);
+});
+
+test("C-739: a never-started queued Run releases a retained session, and the session is not reclaimed during the cooldown", () => {
+  const s = setup(),
+    a = s.assignments[0]!,
+    io = { ...ports(), clock: { now: () => now } };
+  const ref = a.runtime_ref!;
+  const queued = {
+    ...s.runs[0]!,
+    id: "R-9" as Run["id"],
+    status: "queued",
+    started_at: undefined,
+    finished_at: undefined,
+  } as unknown as Run;
+  const base: CommandState = {
+    ...s,
+    assignments: [
+      {
+        ...a,
+        idle_retirement: {
+          phase: "waiting",
+          handoff: true,
+          runtime_ref: ref,
+          started_at: now,
+          threshold_minutes: 60,
+          failures: 3,
+        },
+      },
+    ],
+    runs: [...s.runs, queued],
+  };
+  // sensen A-317: before, the queued Run kept the handoff forever.
+  const released = value(releaseRetainedRetirement(base, system, a.id, io));
+  expect(released.data.idle_retirement).toBeUndefined();
+  expect(released.changes.filter((c) => c.collection === "runs")).toEqual([]);
+  const handedBack = released.events.find(
+    (e) => e.type === "idle_session_retirement_released",
+  );
+  expect(handedBack?.payload).toMatchObject({ reason: "business_work" });
+  // sensen A-327/A-316: no Run yet; the patrol reclaimed the session within
+  // milliseconds. The cooldown keeps it for the dispatcher instead.
+  const after: CommandState = {
+    ...s,
+    assignments: [released.data],
+    events: [...s.events, ...released.events],
+  };
+  const at = (ms: number) => new Date(Date.parse(now) + ms).toISOString();
+  expect(sessionMaintenanceCandidate(after, released.data, at(1))).toEqual({
+    reason: "business_work_cooldown",
+    candidate: false,
+  });
+  expect(
+    sessionMaintenanceCandidate(
+      after,
+      released.data,
+      at(BUSINESS_WORK_COOLDOWN_MS - 1),
+    ).reason,
+  ).toBe("business_work_cooldown");
+  expect(
+    sessionMaintenanceCandidate(
+      after,
+      released.data,
+      at(BUSINESS_WORK_COOLDOWN_MS),
+    ),
+  ).toMatchObject({ candidate: true });
+  // A Run that started after the hand-back ends the cooldown.
+  const ran: CommandState = {
+    ...after,
+    runs: [
+      {
+        ...s.runs[0]!,
+        id: "R-10" as Run["id"],
+        status: "completed",
+        started_at: at(1000),
+        finished_at: at(2000),
+      } as Run,
+    ],
+  };
+  expect(
+    sessionMaintenanceCandidate(ran, released.data, at(3000)).reason,
+  ).not.toBe("business_work_cooldown");
+  expect(BUSINESS_WORK_COOLDOWN_MS).toBe(600_000);
 });

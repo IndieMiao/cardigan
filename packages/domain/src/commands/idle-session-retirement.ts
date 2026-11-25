@@ -494,8 +494,13 @@ export function clearSupersededRetirement(
  * arrives for it as notifications only, no host operation consumes that
  * handoff (C-575 takes over queued successors), so it fenced the live session
  * indefinitely. Withdraw it so the dispatcher wakes the session through its
- * ordinary guarded path. A queued Run, any unfinished Run or Run stop, a human
- * stop, a pending host operation or a role upgrade keeps the handoff.
+ * ordinary guarded path. A started or running Run, a Run stop, a human stop,
+ * a pending host operation or a role upgrade keeps the handoff.
+ *
+ * C-739: a queued Run that never started is waiting work like a
+ * notification. A remote worker never gives C-575 the exit proof it needs,
+ * so that handoff fenced the queued Run until someone stopped the session
+ * (sensen A-317).
  */
 export function releaseRetainedRetirement(
   state: CommandState,
@@ -523,7 +528,8 @@ export function releaseRetainedRetirement(
         !state.runs.some(
           (r) =>
             r.assignment_id === a.id &&
-            (!["completed", "failed", "cancelled"].includes(r.status) ||
+            ((!["completed", "failed", "cancelled"].includes(r.status) &&
+              !(r.status === "queued" && !r.started_at)) ||
               r.dispatch_stop ||
               r.inactivity_stop),
         ),
