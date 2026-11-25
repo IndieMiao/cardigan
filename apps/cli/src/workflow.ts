@@ -33,6 +33,7 @@ import {
   projectPreferences,
   projectSnapshot,
   qualifyId,
+  reassignHumanAction,
   runtimeUnknownDeferred,
   saveMachine,
   selectStandingEmployee,
@@ -124,7 +125,9 @@ const USAGE = [
   "    已是最新版本时不做改动。先用 cardigan role upgrade pm --from-default 追加新版本。",
   "  cardigan needs-you [--project <p>]                   看待你拍板、待你执行的事项和知会",
   "  cardigan needs-you read <知会编号...>|--all [--project <p>]  把知会标为已读",
-  "  cardigan human-action done <H-n> --text <结果> [--conclusion exited|false_alarm|unconfirmed] [--project <p>]",
+  "  cardigan human-action done <H-n> --text <结果> [--conclusion exited|false_alarm|unconfirmed] [--operator] [--project <p>]",
+  "    --operator：以主机操作员（张良）身份结项交给张良的待办",
+  "  cardigan human-action reassign <H-n> --to owner|operator --reason <理由> [--project <p>]",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
   "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
@@ -253,7 +256,9 @@ export async function runWorkflowCommand(
     case "needs-you":
       return needsYou(rest, io);
     case "human-action":
-      return humanActionDone(rest, io);
+      return rest[0] === "reassign"
+        ? humanActionReassign(rest.slice(1), io)
+        : humanActionDone(rest, io);
     default:
       throw new CliError(`不认识的命令：${args.join(" ")}`, EXIT.usage, [
         USAGE,
@@ -2035,6 +2040,9 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
         lines.push(
           [
             `  ${full(action.id)}${action.card_id === undefined ? "" : `  ${full(action.card_id)}`}`,
+            ...(action.executor === "operator"
+              ? ["    交给张良（所有者不能结项，可改派给所有者）"]
+              : []),
             ...(action.handoff
               ? [
                   `    ${action.triage === "host" ? (action.host_operator === "external" ? "主机操作（外接操作员）：" : "主机操作：") : ""}${action.handoff.title}（项目经理已改写）`,
@@ -2324,8 +2332,9 @@ async function humanActionDone(
       [USAGE],
     );
   }
-  const parsed = parseArgs(rest, []);
+  const parsed = parseArgs(rest, ["operator"]);
   const humanActionId = parseHumanAction(parsed.positionals[0]);
+  const asOperator = parsed.flags.operator === true;
   const conclusion = optional(parsed.flags, "conclusion");
   if (
     conclusion &&
@@ -2358,6 +2367,7 @@ async function humanActionDone(
           {
             human_action_id: humanActionId,
             text,
+            ...(asOperator ? { as_operator: true as const } : {}),
             ...(conclusion === "exited" ||
             conclusion === "false_alarm" ||
             conclusion === "unconfirmed"
@@ -2369,6 +2379,48 @@ async function humanActionDone(
     });
     io.stdout(
       `${action.status === "open" ? "已记录" : "已完成"} ${humanActionId}：${action.status}`,
+    );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+/** C-742: the human hands a human action to the owner or the operator. */
+async function humanActionReassign(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const usage =
+    "用法：cardigan human-action reassign <H-n> --to owner|operator --reason <理由>";
+  const parsed = parseArgs(args, []);
+  const humanActionId = parseHumanAction(parsed.positionals[0]);
+  const executor = optional(parsed.flags, "to");
+  if (executor !== "owner" && executor !== "operator")
+    throw new CliError(`--to 须为 owner 或 operator\n${usage}`, EXIT.usage);
+  const reason = required(parsed.flags, "reason");
+  const store = await openPlacementStore(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    runCommand(store, {
+      operation: "改派待办执行人",
+      target: humanActionId,
+      project_id,
+      ...resolveCommandIdentity(io, project_id, store),
+      reduce: (state, actor, ports) =>
+        reassignHumanAction(
+          state,
+          actor,
+          { human_action_id: humanActionId, executor, reason },
+          ports,
+        ),
+    });
+    io.stdout(
+      `已改派 ${humanActionId}：由${executor === "operator" ? "张良" : "所有者"}执行`,
     );
     return EXIT.ok;
   } finally {

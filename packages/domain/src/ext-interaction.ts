@@ -17,6 +17,7 @@ import {
 } from "./event-index.js";
 import { historyIndex } from "./event-log.js";
 import type { ExtMessageItem } from "./ext-message.js";
+import { isOperatorAction } from "./human-action-executor.js";
 import type { CardId, WorkItemId } from "./ids.js";
 
 /** The basis is host-only input to a digest. Never put it on an external card. */
@@ -130,7 +131,12 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
       (target && target.status === "superseded"))
   )
     return readOnly();
-  if (h && (h.status !== "open" || (h.triage && h.triage !== "human")))
+  if (
+    h &&
+    (h.status !== "open" ||
+      (h.triage && h.triage !== "human") ||
+      isOperatorAction(h))
+  )
     return readOnly();
   const merge = q?.trigger === "merge_confirmation";
   if (

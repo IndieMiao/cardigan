@@ -62,6 +62,8 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   human_action_requested: "请求你执行操作",
   human_action_cancelled: "关闭了待办（未记为完成）",
   human_action_completed: "回报了执行结果",
+  human_action_reassigned: "改派了待办执行人",
+  operator_action_requested: "交给张良执行",
   blocker_reported: "报告了阻塞",
   attachment_uploaded: "上传了附件",
   card_merged: "完成了合并",

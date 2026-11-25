@@ -3362,3 +3362,54 @@ test("a story proposal waits for one-click confirmation; a stale version says to
   );
   expect(await screen.findByText("没有需要你处理的事")).toBeTruthy();
 });
+
+test("张良's actions sit in their own group without a complete form and can be taken back (C-742)", async () => {
+  const reassignAction = vi.fn(async () => undefined);
+  const item = {
+    id: "H-7",
+    card_id: "C-1",
+    instructions: "张良：换主机运维会话",
+    expected_return: "新会话编号",
+    why: "只能在主机上操作",
+    triage: "human" as const,
+    executor: "operator" as const,
+    waited_ms: 0,
+    due: null,
+    blocked_work_items: [],
+  };
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          decisions: [],
+          human_actions: [item],
+          incidents: [],
+        }),
+        reassignAction,
+      })}
+    />,
+  );
+  const article = await screen.findByRole("article", { name: "执行 H-7" });
+  expect(article.closest("section")?.getAttribute("aria-label")).toBe(
+    "交给张良",
+  );
+  expect(screen.queryByRole("region", { name: "待你执行" })).toBeNull();
+  expect(screen.queryByText(/件事等你处理/)).toBeNull();
+  expect(within(article).getByText("待张良执行")).toBeTruthy();
+  expect(screen.queryByText("没有需要你处理的事")).toBeNull();
+  expect(
+    within(article).queryByRole("button", { name: "确认已完成" }),
+  ).toBeNull();
+  expect(within(article).queryByLabelText("H-7 执行结果")).toBeNull();
+  fireEvent.click(within(article).getByRole("button", { name: "改由我处理" }));
+  await waitFor(() =>
+    expect(reassignAction).toHaveBeenCalledWith(
+      "p-1",
+      "H-7",
+      "owner",
+      "所有者改为自己处理",
+      expect.any(String),
+    ),
+  );
+});

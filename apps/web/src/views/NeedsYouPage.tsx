@@ -1741,6 +1741,8 @@ function HumanAction({
     "exited" | "false_alarm" | "unconfirmed" | ""
   >("");
   const action = useAction(done);
+  // C-742: 张良's actions can be viewed and taken back, never completed here.
+  const operator = item.executor === "operator";
   if (item.completion_notice !== undefined)
     return (
       <NeedsRow
@@ -1800,16 +1802,18 @@ function HumanAction({
           label={
             item.last_loss_observation
               ? "已记录：无法确认"
-              : item.triage === "host"
-                ? item.host_operator === "external"
-                  ? "待外接操作员"
-                  : "待主机操作"
-                : "待你执行"
+              : operator
+                ? "待张良执行"
+                : item.triage === "host"
+                  ? item.host_operator === "external"
+                    ? "待外接操作员"
+                    : "待主机操作"
+                  : "待你执行"
           }
         />
       }
       action={
-        item.triage === "host" ? (
+        item.triage === "host" || operator ? (
           <NeedsOpenAction name={`查看 ${item.id}`} secondary>
             查看
           </NeedsOpenAction>
@@ -1909,64 +1913,84 @@ function HumanAction({
           <p>原期望返回：{item.original_request.expected_return}</p>
         </details>
       )}
-      <form
-        data-needs-focus=""
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (item.requires_loss_conclusion && !conclusion) return;
-          void action.run(
-            [projectId, item.id, "complete", text, conclusion],
-            async (key) => {
-              if (!conclusion)
-                return client.completeAction(projectId, item.id, text, key);
-              await client.completeAction(
+      {operator ? (
+        <Button
+          data-needs-focus=""
+          disabled={action.busy}
+          onClick={() =>
+            void action.run([projectId, item.id, "reassign"], (key) =>
+              client.reassignAction(
                 projectId,
                 item.id,
-                text,
+                "owner",
+                "所有者改为自己处理",
                 key,
-                conclusion,
-              );
-              if (conclusion === "unconfirmed") {
-                setText((draft) => (draft === text ? "" : draft));
-              }
-            },
-          );
-        }}
-      >
-        {item.requires_loss_conclusion && (
+              ),
+            )
+          }
+        >
+          改由我处理
+        </Button>
+      ) : (
+        <form
+          data-needs-focus=""
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (item.requires_loss_conclusion && !conclusion) return;
+            void action.run(
+              [projectId, item.id, "complete", text, conclusion],
+              async (key) => {
+                if (!conclusion)
+                  return client.completeAction(projectId, item.id, text, key);
+                await client.completeAction(
+                  projectId,
+                  item.id,
+                  text,
+                  key,
+                  conclusion,
+                );
+                if (conclusion === "unconfirmed") {
+                  setText((draft) => (draft === text ? "" : draft));
+                }
+              },
+            );
+          }}
+        >
+          {item.requires_loss_conclusion && (
+            <label>
+              失联结论
+              <SelectControl
+                required
+                aria-label={`${item.id} 失联结论`}
+                value={conclusion}
+                onValueChange={(v) =>
+                  setConclusion(
+                    v === "exited" || v === "false_alarm" || v === "unconfirmed"
+                      ? v
+                      : "",
+                  )
+                }
+              >
+                <option value="">请选择</option>
+                <option value="exited">已退出</option>
+                <option value="false_alarm">仍在运行（误报）</option>
+                <option value="unconfirmed">无法确认</option>
+              </SelectControl>
+            </label>
+          )}
           <label>
-            失联结论
-            <SelectControl
-              required
-              aria-label={`${item.id} 失联结论`}
-              value={conclusion}
-              onValueChange={(v) =>
-                setConclusion(
-                  v === "exited" || v === "false_alarm" || v === "unconfirmed"
-                    ? v
-                    : "",
-                )
-              }
-            >
-              <option value="">请选择</option>
-              <option value="exited">已退出</option>
-              <option value="false_alarm">仍在运行（误报）</option>
-              <option value="unconfirmed">无法确认</option>
-            </SelectControl>
+            执行结果
+            <Textarea
+              aria-label={`${item.id} 执行结果`}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+            />
           </label>
-        )}
-        <label>
-          执行结果
-          <Textarea
-            aria-label={`${item.id} 执行结果`}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-          />
-        </label>
-        <button type="submit" disabled={action.busy || !text.trim()}>
-          {conclusion === "unconfirmed" ? "记录核对结果" : "确认已完成"}
-        </button>
-      </form>
+          <button type="submit" disabled={action.busy || !text.trim()}>
+            {conclusion === "unconfirmed" ? "记录核对结果" : "确认已完成"}
+          </button>
+        </form>
+      )}
       <RequestFeedback
         interactive
         pending={action.busy}
@@ -2207,8 +2231,17 @@ function NeedsContent({
   const props = { client, projectId, done: reload, elapsed };
   // C-212: host actions are for the host operator; they sit in their own
   // folded group and never count as waiting on the human.
-  const mine = (data?.human_actions ?? []).filter((a) => a.triage !== "host");
-  const host = (data?.human_actions ?? []).filter((a) => a.triage === "host");
+  // C-742: 张良's open actions are listed apart and never count as the
+  // owner's; unclaimed completion notices stay with the owner's actions.
+  const forOperator = (a: NeedsAction) =>
+    a.executor === "operator" && a.completion_notice === undefined;
+  const operator = (data?.human_actions ?? []).filter(forOperator);
+  const mine = (data?.human_actions ?? []).filter(
+    (a) => !forOperator(a) && a.triage !== "host",
+  );
+  const host = (data?.human_actions ?? []).filter(
+    (a) => !forOperator(a) && a.triage === "host",
+  );
   const proposals = data?.story_proposals ?? [];
   const total = data
     ? data.decisions.length +
@@ -2309,6 +2342,7 @@ function NeedsContent({
             !closedMessage &&
             !data.notices?.length &&
             !host.length &&
+            !operator.length &&
             !data.system_rule_attention?.length && (
               <EmptyState>没有需要你处理的事</EmptyState>
             )}
@@ -2434,6 +2468,16 @@ function NeedsContent({
           {!!mine.length && (
             <NeedsList label="待你执行" title={`待你执行（${mine.length}）`}>
               {mine.map((item) => (
+                <HumanAction key={item.id} item={item} {...props} />
+              ))}
+            </NeedsList>
+          )}
+          {!!operator.length && (
+            <NeedsList
+              label="交给张良"
+              title={`交给张良（${operator.length}）`}
+            >
+              {operator.map((item) => (
                 <HumanAction key={item.id} item={item} {...props} />
               ))}
             </NeedsList>

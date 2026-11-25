@@ -10,6 +10,7 @@ import type {
   Author,
   Decision,
   HumanAction,
+  HumanActionExecutor,
   HumanDecidedMergeBasis,
   MergeDecisionEvidence,
   PlainSummary,
@@ -19,6 +20,12 @@ import type {
 } from "../entities.js";
 import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
+import {
+  classifyHumanActionExecutor,
+  HUMAN_ACTION_OPERATOR_NAME,
+  isOperatorAction,
+  isOperatorIdentity,
+} from "../human-action-executor.js";
 import type {
   AssignmentId,
   AttachmentId,
@@ -74,6 +81,10 @@ import {
   applyHeldResumeAnswer,
   checkHeldResumeAnswer,
 } from "./held-assignment-resume.js";
+import {
+  emitOperatorActionRequested,
+  validExecutor,
+} from "./human-action-executor.js";
 import {
   buildHumanDecidedMergeBasis,
   humanDecidedMergeQuestions,
@@ -1835,10 +1846,17 @@ export function requestHumanAction(
     prerequisite?: HumanAction["prerequisite"];
     /** C-212: defer when the action is shown in Needs You. */
     ready_when?: ReadyConditionInput;
+    /** C-742: absent infers operator from the title prefix or reason. */
+    executor?: HumanActionExecutor;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "request_human_action", ports, (d) => {
+    ensure(
+      p.executor === undefined || validExecutor(p.executor),
+      "validation_failed",
+      "executor 须为 owner 或 operator",
+    );
     ensure(
       d.card(p.card_id).status !== "cancelled",
       "illegal_transition",
@@ -1893,11 +1911,16 @@ export function requestHumanAction(
       : undefined;
     if (blocks) for (const item of items) paused(d, item, "blocked");
     const id = d.ids.next(state.project_id, "human_action");
+    const classified = p.executor
+      ? { executor: p.executor, basis: "explicit" as const }
+      : classifyHumanActionExecutor(p);
+    const executor = classified.executor;
     const action: HumanAction = {
       id,
       key: id,
       card_id: p.card_id,
       requested_by: d.author,
+      ...(executor === "operator" ? { executor } : {}),
       ...(p.terminal ? { terminal: p.terminal } : {}),
       ...(p.category ? { category: p.category } : {}),
       instructions: p.instructions,
@@ -1925,9 +1948,20 @@ export function requestHumanAction(
         ...(action.blocks_merge
           ? { blocks_merge: true, prerequisite: action.prerequisite }
           : {}),
+        executor,
+        executor_basis: classified.basis,
       },
-      { type: "human_action", body: p.instructions, human_action_id: id },
+      {
+        type: "human_action",
+        body:
+          executor === "operator"
+            ? `交给${HUMAN_ACTION_OPERATOR_NAME}：${p.instructions}`
+            : p.instructions,
+        human_action_id: id,
+      },
     );
+    if (executor === "operator")
+      emitOperatorActionRequested(d, action, "requested", classified.basis);
     return action;
   });
 }
@@ -2001,6 +2035,8 @@ export function completeHumanAction(
     conclusion?: "exited" | "false_alarm" | "unconfirmed";
     text: string;
     attachments?: readonly string[];
+    /** C-742: set only by the operator-marked human CLI, never by web or Feishu. */
+    as_operator?: true;
   },
   ports: CommandPorts,
 ) {
@@ -2010,8 +2046,18 @@ export function completeHumanAction(
     actor.kind === "human" ? "request_human_action" : "complete_host_action",
     ports,
     (d) => {
+      ensure(
+        p.as_operator === undefined || actor.kind === "human",
+        "validation_failed",
+        "as_operator 仅用于人类 CLI",
+      );
       if (actor.kind !== "human") {
         const action = d.get("human_actions", p.human_action_id);
+        if (
+          isOperatorAction(action) &&
+          isOperatorIdentity(d.state, d.assignment)
+        )
+          return completeActionDraft(d, p);
         ensure(
           actor.kind === "assignment" &&
             action.triage === "host" &&
@@ -2295,14 +2341,20 @@ export function triageHumanAction(
       rewritten_by: d.author,
       rewritten_at: d.now,
     };
+    // C-742: an internal host handoff is no longer 张良's; the external
+    // operator and a human handoff keep the executor.
+    const internalHost =
+      p.disposition === "host" && p.host_operator !== "external";
     const {
       host_operator: _operator,
       host_diagnostic: _diagnostic,
       host_assignment_id: _owner,
       ready_when: _ready,
       ready_released: _released,
+      executor,
       ...rest
     } = classified;
+    const keptExecutor = executor && !internalHost ? { executor } : {};
     let owner = p.host_assignment_id;
     if (p.host_diagnostic) {
       ensure(
@@ -2320,6 +2372,7 @@ export function triageHumanAction(
     }
     const next: HumanAction = {
       ...rest,
+      ...keptExecutor,
       triage: p.disposition,
       ...(p.disposition === "host"
         ? {
@@ -2356,6 +2409,7 @@ export function triageHumanAction(
         host_assignment_id: next.host_assignment_id ?? null,
         ...(next.host_operator ? { host_operator: next.host_operator } : {}),
         ...(next.host_diagnostic ? { host_diagnostic: true } : {}),
+        ...(executor && !next.executor ? { previous_executor: executor } : {}),
         ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,
         handoff,

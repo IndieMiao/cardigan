@@ -39,6 +39,7 @@ import {
   type RoleDefinition,
   type RoleEffect,
   type RolePatch,
+  reassignHumanAction,
   recheckMerge,
   recordDecision,
   recordHelperUpgradeChecks,
@@ -704,7 +705,7 @@ async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
   return true;
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|story-confirm|sensitive|merge-solo|merge-window|source-unrelated)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|reassign|supersede|recheck-merge|mark-done|story-confirm|sensitive|merge-solo|merge-window|source-unrelated)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
@@ -1291,7 +1292,7 @@ export async function serveWrite(
         ]
       : group === "decisions"
         ? ["comments", "resolve", "source-unrelated"]
-        : ["complete", "cancel"];
+        : ["complete", "cancel", "reassign"];
   if (!supported.includes(operation ?? "")) return false;
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
   c.authorize();
@@ -1787,6 +1788,17 @@ export async function serveWrite(
       const p = parsed(z.object({ reason: text }).strict(), body);
       output = run(context, (s, a, ports) =>
         cancelHumanAction(s, a, { ...p, human_action_id }, ports),
+      );
+    } else if (operation === "reassign") {
+      // C-742: the owner can take an operator action back, never complete it.
+      const p = parsed(
+        z
+          .object({ executor: z.enum(["owner", "operator"]), reason: text })
+          .strict(),
+        body,
+      );
+      output = run(context, (s, a, ports) =>
+        reassignHumanAction(s, a, { ...p, human_action_id }, ports),
       );
     } else {
       const p = defined(parsed(action, body));

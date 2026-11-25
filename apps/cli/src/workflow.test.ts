@@ -1202,6 +1202,104 @@ test("human-action done completes the action and requires --text", async () => {
   }
 });
 
+test("C-742 张良's action needs --operator to complete; reassign hands it back to the owner", async () => {
+  await bootstrap();
+  await run([
+    "card",
+    "create",
+    "--template",
+    "dev",
+    "--title",
+    "T",
+    "--goal",
+    "G",
+    "--acceptance",
+    "A",
+    "--repo",
+    "r/x",
+  ]);
+  const request = (instructions: string) => {
+    const store = Store.open({ dataDir });
+    try {
+      return runCommand(store, {
+        project_id: "p-work" as never,
+        actor: { kind: "human", project_id: "p-work" as never },
+        reduce: (state, actor, ports) =>
+          requestHumanAction(
+            state,
+            actor,
+            {
+              card_id: "C-1" as never,
+              instructions,
+              why_human: "only the operator can",
+              expected_return: "confirmation",
+              blocked_work_items: [],
+            },
+            ports,
+          ),
+      });
+    } finally {
+      store.close();
+    }
+  };
+  const stored = (id: HumanAction["id"]) => {
+    const store = Store.open({ dataDir });
+    try {
+      return store.uow.read((tx) =>
+        tx.human_actions.get("p-work" as never, id),
+      );
+    } finally {
+      store.close();
+    }
+  };
+  const first = request("张良：换会话");
+  expect(first.executor).toBe("operator");
+  expect(
+    await run(["human-action", "done", first.id, "--text", "done"]),
+  ).not.toBe(0);
+  expect(stored(first.id)?.status).toBe("open");
+  expect(
+    await run([
+      "human-action",
+      "done",
+      first.id,
+      "--text",
+      "done",
+      "--operator",
+    ]),
+  ).toBe(0);
+  expect(stored(first.id)?.status).toBe("done");
+
+  const second = request("张良：上传");
+  expect(
+    await run([
+      "human-action",
+      "reassign",
+      second.id,
+      "--to",
+      "nobody",
+      "--reason",
+      "x",
+    ]),
+  ).toBe(2);
+  expect(
+    await run([
+      "human-action",
+      "reassign",
+      second.id,
+      "--to",
+      "owner",
+      "--reason",
+      "所有者自己来",
+    ]),
+  ).toBe(0);
+  expect(printed()).toContain(`已改派 ${second.id}：由所有者执行`);
+  expect(stored(second.id)?.executor).toBeUndefined();
+  expect(await run(["human-action", "done", second.id, "--text", "done"])).toBe(
+    0,
+  );
+});
+
 test("assign rejects a role that does not match the work item", async () => {
   await bootstrap();
   await run([

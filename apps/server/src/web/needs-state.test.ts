@@ -25,6 +25,7 @@ const BASELINE_SHA256 =
 // original field/order; source classification has its own event contract tests.
 // C-540 adds attachment thumbnail paths; they derive from the download path.
 // C-503 adds story proposals; the synthetic data has none (asserted below).
+// C-742 adds the human action executor; it is stripped below.
 function legacyProjection(view: ReturnType<typeof needsYou>) {
   const {
     auto_merge_pause: _pause,
@@ -36,6 +37,10 @@ function legacyProjection(view: ReturnType<typeof needsYou>) {
       {
         ...legacy,
         notices: legacy.notices.map(({ source: _source, ...notice }) => notice),
+        // C-742 adds each action's executor after the golden response.
+        human_actions: legacy.human_actions.map(
+          ({ executor: _executor, ...action }) => action,
+        ),
       },
       // C-540 thumbnails and C-614 previews postdate the golden response.
       (key, value) =>

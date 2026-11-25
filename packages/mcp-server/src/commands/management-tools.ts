@@ -514,6 +514,12 @@ const schemas = {
         "Only credential or external-account prerequisites may block merge; prerequisite is required with true. Field verification is post-merge follow-up by default.",
       ),
     due: text.optional(),
+    executor: z
+      .enum(["owner", "operator"])
+      .optional()
+      .describe(
+        "执行人：owner 为所有者本人，operator 为主机操作员张良（主机、凭据文件、OSS 上传、送签批准、云助手）。不填时标题以“张良：”开头或 why_human 写明这类操作即为 operator；operator 待办不推给所有者，只能由张良结项。",
+      ),
   },
   create_card: {
     parent_card_id: id("card").optional(),

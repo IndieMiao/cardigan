@@ -1327,6 +1327,7 @@ export interface HelperCheckResult {
   readonly status: "passed" | "failed";
   readonly failed_steps: readonly string[];
 }
+export type HumanActionExecutor = "owner" | "operator";
 export interface HumanActionHandoff {
   readonly terminal?: ActionCommand;
   readonly title: string;
@@ -1368,6 +1369,13 @@ export interface HumanAction {
    * means host_ops.
    */
   readonly host_operator?: "external" | "host_ops";
+  /**
+   * C-742: who has to perform the action. `operator` is the host operator
+   * (the project's external PM Office identity or an operator-marked human
+   * CLI); the owner is never pushed, counted or allowed to complete it.
+   * Absent means `owner`.
+   */
+  readonly executor?: HumanActionExecutor;
   /** Explicit internal read-only diagnostic; absent on ordinary host handoffs. */
   readonly host_diagnostic?: true;
   /** Exact handoff owner (external Office, internal host ops, or fallback PM Ops). */
