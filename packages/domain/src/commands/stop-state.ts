@@ -62,6 +62,7 @@ const STOP_TYPES = [
   ASSIGNMENT_START_REQUESTED,
   ASSIGNMENT_STOP_RELEASED,
   ASSIGNMENT_STOP_EXIT_CONFIRMED,
+  ASSIGNMENT_HOLD_RESUMED,
 ];
 const stoppedAssignments = new WeakMap<readonly Event[], StopIndex>();
 
