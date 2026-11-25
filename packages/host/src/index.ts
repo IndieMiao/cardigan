@@ -351,6 +351,13 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
+export {
+  DEFAULT_RUN_DIR_RETENTION_DAYS,
+  type RunDirReply,
+  type RunDirResult,
+  reclaimableRunDirectories,
+  reclaimRunDirectories,
+} from "./run-dir-retention.js";
 export { previewRunResources, resourceTarget } from "./run-resource-worker.js";
 export {
   assignmentResourceKeys,

@@ -1,280 +1,182 @@
-import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
   chmod,
-  link,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
   rm,
+  symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import type { Attachment, Decision } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
-import {
-  assignment,
-  card,
-  id,
-} from "../../domain/src/commands/test-fixtures.js";
 import { NodeDeploymentDriver } from "./deployment-node.js";
-import { DeploymentRetention } from "./deployment-retention.js";
+import {
+  DeploymentRetention,
+  RETENTION_ROUND,
+} from "./deployment-retention.js";
 import { parseRetention } from "./deployment-retention-policy.js";
 
-async function verifyApprovedReport(version: 4 | 5) {
-  const p = "cardigan",
-    tmp = await mkdtemp(join(tmpdir(), "cg-retention-")),
-    dir = join(tmp, "self-deploy"),
-    root = join(tmp, "agent"),
-    parent = join(root, "runs", p);
+const release = (n: number) =>
+  `release-${String(n).padStart(40, "0")}-00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const backup = (n: number) =>
+  `database-00000000-0000-4000-8000-${String(n).padStart(12, "0")}.bak`;
+const DAY = 86_400_000;
+const now = Date.parse("2026-11-25T12:00:00Z");
+
+async function site(project = "cardigan") {
+  const tmp = await mkdtemp(join(tmpdir(), "cg-retention-"));
+  const dir = join(tmp, "self-deploy");
   const store = Store.open({ dataDir: tmp, dbPath: ":memory:" });
-  try {
-    await mkdir(dir, { mode: 0o700 });
-    await mkdir(parent, { recursive: true });
-    for (const path of [root, join(root, "runs"), parent])
-      await chmod(path, 0o2750);
-    for (const n of [1, 2, 5, 6, 7]) {
-      const path = join(parent, `A-${n}`);
-      await mkdir(path);
-      await chmod(path, 0o2770);
-      if (n === 5 || n === 7) await writeFile(join(path, "cache"), "cache");
-    }
-    await link(join(parent, "A-5/cache"), join(parent, "A-5/alias"));
-    const cmd = (op: string) => ({
-      file: "/usr/bin/python3",
-      args: [
-        "-I",
-        "-B",
-        "-c",
-        `import os,sys,runpy,json\nfrom unittest.mock import patch\nm=runpy.run_path(sys.argv[1]); uid=os.getuid()\nwith patch('os.getuid',return_value=uid+10001): print(json.dumps(m['main'](sys.argv[2],json.load(sys.stdin))))`,
-        fileURLToPath(new URL("./deployment-retention-fs.py", import.meta.url)),
-        op,
-      ],
-    });
-    const target = async () => ({
-      ownsRef: (ref: { runtime_machine: string } | null | undefined) =>
-        ref?.runtime_machine === "fixture",
-      root,
-      gid: process.getgid?.() ?? -1,
-      fingerprint: "test-only",
-      inventory: cmd("inventory"),
-    });
-    const policy = parseRetention({ snapshots: 1, daily_days: 1 });
-    const backup = (n: number) =>
-      `database-00000000-0000-4000-8000-${String(n).padStart(12, "0")}.bak`;
-    for (const n of [1, 2]) {
-      const path = join(dir, backup(n));
-      await writeFile(path, "db", { mode: 0o600 });
-      await utimes(path, n, n);
-    }
-    await writeFile(join(dir, backup(3)), "unverified", { mode: 0o640 });
-    await chmod(join(dir, backup(3)), 0o640);
-    await utimes(join(dir, backup(3)), 0, 0);
-    const ready = {
-      stillReady: async () => true,
-      keep: [dir],
-      attempt: "deployed",
-      deployed_at: new Date().toISOString(),
-    };
-    store.createProject({ id: p });
-    store.uow.run((tx) => {
-      tx.cards.put(p, { ...card(), project_id: p });
-      for (const n of [1, 2, 5, 6, 7])
-        tx.assignments.put(p, {
-          ...assignment(n),
-          runtime_ref: {
-            machine_id: "local",
-            runtime_machine: "fixture",
-            agent_name: "fixture",
-            terminal_ref: "fixture/t1",
-          },
-          status: "released",
-          released_at: "2026-01-01T00:00:00Z",
-        });
-      tx.assignments.put(p, assignment(3, "pm"));
-    });
-    const maintenance = (q = policy) =>
-      new DeploymentRetention(store, dir, {}, q, target);
-    const releaseName = `release-${"c".repeat(40)}-00000000-0000-4000-8000-000000000001`;
-    await mkdir(join(dir, releaseName), { mode: 0o700 });
-    await writeFile(join(dir, releaseName, "server"), "never remove");
-    const at = Date.now() - 10 * 86400000;
-    const survey = maintenance();
-    await vi.waitFor(async () => {
-      await survey.poll(ready, at);
-      await readFile(join(dir, "retention-preview-1.json"));
-    });
-    const path = join(dir, "retention-preview-1.json"),
-      preview = await readFile(path, "utf8");
-    const report = JSON.parse(preview);
-    expect(
-      report.candidates.map((i: { name: string }) => i.name).sort(),
-    ).toEqual(["A-1", "A-2", "A-6", backup(1)]);
-    expect(report.version).toBe(5);
-    expect(report.skipped).toEqual(expect.arrayContaining(["A-5", "A-7"]));
-    expect(report.skip_reasons["A-5"]).toBe("nonempty_run");
-    expect(report.retained_releases).toEqual([
-      { name: releaseName, reason: "recent", size_bytes: expect.any(Number) },
-    ]);
-    expect(report.total_bytes).toBe(
-      report.candidates.reduce(
-        (n: number, i: { size_bytes: number }) => n + i.size_bytes,
-        0,
-      ),
-    );
-    expect(report.skipped).toContain(backup(3));
-    const text =
-      version === 5 ? preview : JSON.stringify({ ...report, version });
-    if (version !== 5) await writeFile(path, text);
-    const sha = createHash("sha256").update(text).digest("hex");
-    await chmod(join(dir, backup(3)), 0o600);
-    const auth = { sha256: sha, pm_review: "Q-1", data_deletion: "Q-2" };
-    const apply = () => maintenance({ ...policy, approval: auth });
-    const check = async () => {
-      expect(await readFile(join(dir, backup(1)), "utf8")).toBe("db");
-      expect(await readFile(path, "utf8")).toBe(text);
-      expect(await readdir(join(parent, "A-2"))).toEqual([]);
-    };
-    await apply().poll(ready);
-    await check();
-    const q = (n: number, option: string) =>
-      ({
-        id: id("decision", n),
-        kind: "approve",
-        category: n === 1 ? "permission" : "data_deletion",
-        card_id: card().id,
-        status: "resolved",
-        target: { subject: { kind: "artifact_sha256", value: sha } },
-        attachment_ids: ["evidence"],
-        resolution: {
-          resolved_by: n === 1 ? "assignment:A-3" : "human",
-          option,
-          at: new Date().toISOString(),
-        },
-      }) as Decision;
-    store.uow.run((tx) => {
-      tx.attachments.put(p, {
-        id: "evidence",
-        kind: "evidence",
-        card_id: card().id,
-        sha256: sha,
-        size: text.length,
-        storage_path: "fixture",
-      } as Attachment);
-      tx.decisions.put(p, q(1, "enable_retention"));
-      tx.decisions.put(p, q(2, "reject"));
-    });
-    await apply().poll(ready);
-    await check();
-    store.uow.run((tx) => tx.decisions.put(p, q(2, "enable_retention")));
-    const job = apply();
-    await job.poll(ready);
-    if (version === 4) {
-      await check();
-      expect(
-        store.uow
-          .read((tx) => tx.events.listAfter(p, undefined, 0))
-          .filter((e) => e.type === "host_retention_recorded")
-          .at(-1)?.payload,
-      ).toMatchObject({
-        status: "retained",
-        reason: "scope_or_policy_changed",
-      });
-      return;
-    }
-    await expect(readFile(join(dir, backup(1)))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-    // Candidate was queued while released, but is no longer eligible at the deletion boundary.
-    store.uow.run((tx) => tx.assignments.put(p, assignment(1)));
-    await writeFile(join(parent, "A-6", "new"), "keep");
-    for (let n = 0; n < 3; n++) await job.poll(ready);
-    expect(await readdir(join(parent, "A-1"))).toEqual([]);
-    await expect(readdir(join(parent, "A-2"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-    expect(await readFile(join(parent, "A-6", "new"), "utf8")).toBe("keep");
-    const later = {
-      ...ready,
-      attempt: "later",
-      deployed_at: new Date(Date.now() + 10_000).toISOString(),
-    };
-    const added = join(parent, "A-4");
-    await mkdir(added);
-    await chmod(added, 0o2770);
-    // A-4 is new; A-7 was nonempty in the approved preview. Neither can roll over.
-    await rm(join(parent, "A-7", "cache"));
-    store.uow.run((tx) =>
-      tx.assignments.put(p, {
-        ...assignment(4),
-        runtime_ref: {
-          machine_id: "local",
-          runtime_machine: "fixture",
-          terminal_ref: "fixture/t4",
-          agent_name: "fixture",
-        },
-        status: "released",
-        released_at: new Date(at + 86400000).toISOString(),
-      }),
-    );
-    await job.poll(later);
-    await apply().poll(later);
-    expect(await readdir(added)).toEqual([]);
-    expect(await readdir(join(parent, "A-7"))).toEqual([]);
-    for (const name of ["cache", "alias"])
-      expect(await readFile(join(parent, "A-5", name), "utf8")).toBe("cache");
-    expect(await readFile(join(dir, releaseName, "server"), "utf8")).toBe(
-      "never remove",
-    );
-    expect(await readFile(join(dir, backup(3)), "utf8")).toBe("unverified");
-    expect(await readFile(join(dir, backup(2)), "utf8")).toBe("db");
-    expect(
-      store.uow
-        .read((tx) => tx.events.listAfter(p, undefined, 0))
-        .filter((e) => e.type === "host_retention_recorded")
-        .map((e) => e.payload),
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          name: "A-5",
-          status: "retained",
-          reason: "nonempty_run",
-        }),
-        ...["A-4", "A-7"].map((name) =>
-          expect.objectContaining({
-            name,
-            status: "retained",
-            reason: "outside_reviewed_inventory",
-          }),
-        ),
-        expect.objectContaining({
-          name: "A-6",
-          status: "retained",
-          reason: "nonempty_run",
-        }),
-        expect.objectContaining({ name: "A-1", status: "retained" }),
-        expect.objectContaining({ name: "A-2", status: "removed" }),
-        expect.objectContaining({
-          name: backup(1),
-          status: "removed",
-          size_bytes: 2,
-        }),
-      ]),
-    );
-  } finally {
-    store.close();
-    await rm(tmp, { recursive: true, force: true });
+  store.createProject({ id: project });
+  await mkdir(dir, { mode: 0o700 });
+  await chmod(dir, 0o700);
+  const outside = join(tmp, "outside");
+  await writeFile(outside, "keep me");
+  for (let n = 1; n <= 13; n++) {
+    const path = join(dir, release(n));
+    await mkdir(join(path, "node_modules/pkg"), { recursive: true });
+    await writeFile(join(path, "node_modules/pkg/index.js"), "x".repeat(5000));
+    await symlink(outside, join(path, "link"));
+    // A read-only cache directory must not stop removal.
+    await chmod(join(path, "node_modules/pkg"), 0o500);
+    await chmod(path, 0o700);
+    const t = new Date(now - (20 - n) * DAY);
+    await utimes(path, t, t);
   }
+  for (const [n, age] of [
+    [1, 30],
+    [2, 20],
+    [3, 10],
+    [4, 9],
+    [5, 2],
+    [6, 1],
+  ] as const) {
+    const path = join(dir, backup(n));
+    await writeFile(path, "db", { mode: 0o600 });
+    const t = new Date(now - age * DAY);
+    await utimes(path, t, t);
+  }
+  await mkdir(join(dir, "backups"));
+  await writeFile(join(dir, "backups", backup(9)), "manual", { mode: 0o600 });
+  const ready = {
+    stillReady: async () => true,
+    // state.json still references the oldest release (previous) and backup 1.
+    keep: [join(dir, release(13)), join(dir, release(1), "apps")],
+    backup: backup(1),
+    attempt: "deployed-1",
+    deployed_at: new Date(now).toISOString(),
+  };
+  const rounds = () =>
+    store.uow.read((tx) =>
+      tx.events
+        .listAfter(project, undefined, 0)
+        .filter((e) => e.type === RETENTION_ROUND),
+    );
+  return {
+    tmp,
+    dir,
+    store,
+    outside,
+    ready,
+    rounds,
+    close: async () => {
+      store.close();
+      execFileSync("chmod", ["-R", "u+rwx", tmp]);
+      await rm(tmp, { recursive: true, force: true });
+    },
+  };
 }
 
-test("two bound approvals permit only exact empty shells, with fresh checks and a durable audit", () =>
-  verifyApprovedReport(5));
-test("even two matching approvals cannot activate a legacy report", () =>
-  verifyApprovedReport(4));
+test("C-743: a successful deployment prunes releases beyond 10 and old backups, keeping every referenced one", async () => {
+  const s = await site();
+  try {
+    const retention = new DeploymentRetention(
+      s.store,
+      s.dir,
+      parseRetention({}),
+      () => now,
+    );
+    for (let i = 0; i < 20; i++) await retention.poll(s.ready);
+    const left = (await readdir(s.dir)).sort();
+    // Releases 4..13 are the newest ten; 1 stays because state.json uses it.
+    expect(left.filter((n) => n.startsWith("release-"))).toEqual(
+      [1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(release).sort(),
+    );
+    // Within 7 days: 5, 6; the newest three: 4, 5, 6; 1 is the recovery reference.
+    expect(left.filter((n) => n.startsWith("database-"))).toEqual(
+      [1, 4, 5, 6].map(backup),
+    );
+    expect(left).toContain("backups");
+    expect(await readFile(join(s.dir, "backups", backup(9)), "utf8")).toBe(
+      "manual",
+    );
+    expect(await readFile(s.outside, "utf8")).toBe("keep me");
+    const rounds = s.rounds();
+    expect(rounds).toHaveLength(1);
+    const p = rounds[0]?.payload as Record<string, unknown> & {
+      releases: { removed: number; freed_bytes: number };
+      snapshots: { removed: number; freed_bytes: number };
+    };
+    expect(p).toMatchObject({
+      scope: "deployment",
+      mode: "auto",
+      attempt: "deployed-1",
+      removed: 4,
+      releases: { removed: 2 },
+      snapshots: { removed: 2, freed_bytes: 4 },
+      failed: [],
+    });
+    expect(p.releases.freed_bytes).toBeGreaterThan(5000);
+    expect(p.freed_bytes).toBe(
+      p.releases.freed_bytes + p.snapshots.freed_bytes,
+    );
+    expect(p.names).toEqual(
+      expect.arrayContaining([release(2), release(3), backup(2), backup(3)]),
+    );
+    // Once per deployment: the same attempt does nothing more.
+    await retention.poll(s.ready);
+    expect(s.rounds()).toHaveLength(1);
+  } finally {
+    await s.close();
+  }
+});
+
+test("C-743: preview mode records the same round and removes nothing; a changed deployment stops the round", async () => {
+  const s = await site();
+  try {
+    const before = (await readdir(s.dir)).sort();
+    const preview = new DeploymentRetention(
+      s.store,
+      s.dir,
+      parseRetention({ mode: "preview" }),
+      () => now,
+    );
+    for (let i = 0; i < 20; i++) await preview.poll(s.ready);
+    expect((await readdir(s.dir)).sort()).toEqual(before);
+    expect(s.rounds()[0]?.payload).toMatchObject({
+      mode: "preview",
+      removed: 4,
+      releases: { removed: 2 },
+    });
+    const auto = new DeploymentRetention(
+      s.store,
+      s.dir,
+      parseRetention({}),
+      () => now,
+    );
+    await auto.poll({ ...s.ready, stillReady: async () => false });
+    await auto.poll({ ...s.ready, stillReady: async () => false });
+    expect((await readdir(s.dir)).sort()).toEqual(before);
+    expect(s.rounds()).toHaveLength(1);
+  } finally {
+    await s.close();
+  }
+});
 
 test("supervisor never starts retention on rollback, pre-ready, dead server, or mismatched running build", async () => {
   const tmp = await mkdtemp(join(tmpdir(), "cg-retention-ready-")),

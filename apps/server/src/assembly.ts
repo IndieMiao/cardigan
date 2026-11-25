@@ -36,6 +36,7 @@ import {
   startBackupLoop,
   startReconcileLoop,
 } from "./reconcile-loop.js";
+import { startRunDirLoop } from "./run-dir-cleanup.js";
 import { startRunResourceLoop } from "./run-resource-cleanup.js";
 import type { MachineHost } from "./web/machine-host.js";
 
@@ -350,6 +351,16 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           options.cleanupIntervalMs,
         )
       : undefined;
+  // C-743: released Assignments' run directories, on every machine.
+  const runDirs =
+    options.git && options.runtime instanceof RuntimeTargets
+      ? startRunDirLoop(
+          options.store,
+          options.runtime,
+          (line) => report(new Error(line)),
+          options.startup,
+        )
+      : undefined;
   const reconcile =
     options.git === undefined
       ? undefined
@@ -425,6 +436,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     push?.loop.done,
     cleanup?.loop.done,
     resources?.done,
+    runDirs?.done,
     reconcile?.loop.done,
     backup?.loop.done,
     maintenance?.loop.done,
@@ -452,6 +464,8 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       await merge?.loop.stop();
       await push?.loop.stop();
       await cleanup?.loop.stop();
+      // A removal round finishes its current directory before the Store closes.
+      await runDirs?.stop();
       await reconcile?.loop.stop();
       await backup?.loop.stop();
       await maintenance?.loop.stop();

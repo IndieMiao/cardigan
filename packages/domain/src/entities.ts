@@ -152,6 +152,12 @@ export interface CardHold {
   readonly set_at: Timestamp;
 }
 
+export interface CardRunDirKeep {
+  readonly reason: string;
+  readonly set_by: Author;
+  readonly set_at: Timestamp;
+}
+
 /** New UI cards explicitly distinguish display-only work from a write contract. */
 export type UiStateAndSave =
   | "无写入"
@@ -207,6 +213,11 @@ export interface Card {
   readonly status: CardStatus;
   /** Scheduling fence, independent of lifecycle and historical evidence. */
   readonly hold?: CardHold;
+  /**
+   * C-743: PM-named protection. Run directories of this card's released
+   * Assignments are never reclaimed automatically while it is set.
+   */
+  readonly keep_run_dirs?: CardRunDirKeep;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
   /** The replacement card, distinct from other related cards. */
   readonly superseded_by?: CardId;
