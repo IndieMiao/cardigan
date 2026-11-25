@@ -1,6 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { HC_RELEASE } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { expect, test } from "vitest";
 import {
@@ -27,6 +28,8 @@ import {
 import { acquireMergeCheckCapacity } from "./merge-check-capacity.js";
 
 const SHA = "a".repeat(40);
+/** A compatible version; literals stay in deploy/hc-version.json only. */
+const CURRENT = HC_RELEASE.version;
 const config = parseMaintenanceConfig({
   wait_timeout_minutes: 30,
   poll_interval_seconds: 10,
@@ -66,8 +69,8 @@ class FakeHost implements MaintenanceDriver {
   process = 1;
   hc: Record<string, boolean> = { host: true, agent: true };
   versions: Record<string, string> = {
-    "/fake/host/hc": "0.1.21",
-    "/fake/agent/hc": "0.1.21",
+    "/fake/host/hc": CURRENT,
+    "/fake/agent/hc": CURRENT,
   };
   busy: MaintenanceActivity["busy"] = [];
   standing: MaintenanceActivity["standing"] = [];
@@ -188,7 +191,7 @@ test("manual window: pauses, waits for work, stops, then restores and verifies",
   expect(stopped?.record.before).toMatchObject({
     software_sha: SHA,
     deploy_pin: "b".repeat(40),
-    hc: { host: "0.1.21", agent: "0.1.21" },
+    hc: { host: CURRENT, agent: CURRENT },
   });
   // Repeating the step neither stops again nor ends the window.
   await expect(runner.resume("resume")).rejects.toThrow("maintenance end");

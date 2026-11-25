@@ -68,9 +68,9 @@ function setup(layout: "symlink" | "file", shell = false) {
   mkdirSync(join(root, "old"));
   const link = join(root, "bin", "hc");
   if (layout === "symlink") {
-    fakeHc(join(root, "old", "hc"), "0.1.21");
+    fakeHc(join(root, "old", "hc"), "7.1.21");
     symlinkSync(join(root, "old", "hc"), link);
-  } else fakeHc(link, "0.1.21");
+  } else fakeHc(link, "7.1.21");
   // Stands in for ssh: the far side receives one shell command line.
   const ssh = join(root, "fake-ssh");
   writeFileSync(ssh, '#!/bin/sh\nexec /bin/sh -c "$*"\n');
@@ -167,12 +167,12 @@ test.each([false, true])(
   "symlink layout switches to a versioned directory (via shell: %s)",
   async (shell) => {
     const f = setup("symlink", shell);
-    const bytes = archive(f.root, "0.1.22");
-    const { plan, outcome } = await upgrade(f, release("0.1.22", bytes), bytes);
+    const bytes = archive(f.root, "7.1.22");
+    const { plan, outcome } = await upgrade(f, release("7.1.22", bytes), bytes);
     expect(outcome).toBe("completed");
-    expect(plan.staged.host).toBe(join(f.root, "versions", "0.1.22", "hc"));
+    expect(plan.staged.host).toBe(join(f.root, "versions", "7.1.22", "hc"));
     expect(readlinkSync(f.link)).toBe(plan.staged.host);
-    expect(version(f.link)).toBe("hc 0.1.22");
+    expect(version(f.link)).toBe("hc 7.1.22");
     expect(readMaintenance(f.store)?.record.steps.switched?.host).toEqual({
       kind: "symlink",
       target: join(f.root, "old", "hc"),
@@ -187,8 +187,8 @@ test.each([false, true])(
     // Staging again is idempotent and leaves the live link alone.
     const again = await prepareHcUpgrade({
       config: f.config,
-      version: "0.1.22",
-      release: release("0.1.22", bytes),
+      version: "7.1.22",
+      release: release("7.1.22", bytes),
       driver: f.driver,
       fetchArchive: async () => bytes,
     });
@@ -199,43 +199,43 @@ test.each([false, true])(
 test("a failed smoke check after the switch restores the original file and old version", async () => {
   const f = setup("file");
   const original = readFileSync(f.link, "utf8");
-  const bytes = archive(f.root, "0.1.22");
+  const bytes = archive(f.root, "7.1.22");
   f.failNextStart();
-  const { outcome } = await upgrade(f, release("0.1.22", bytes), bytes);
+  const { outcome } = await upgrade(f, release("7.1.22", bytes), bytes);
   expect(outcome).toBe("rolled_back");
   expect(lstatSync(f.link).isFile()).toBe(true);
   expect(readFileSync(f.link, "utf8")).toBe(original);
-  expect(version(f.link)).toBe("hc 0.1.21");
+  expect(version(f.link)).toBe("hc 7.1.21");
   const record = readMaintenance(f.store)?.record;
   expect(record?.steps.switched?.host).toMatchObject({ kind: "file" });
   expect(record?.error).toContain("server 启动失败");
   expect(maintenanceActive(f.store)).toBe(false);
   // The new version stays staged for a later attempt.
-  expect(version(join(f.root, "versions", "0.1.22", "hc"))).toBe("hc 0.1.22");
+  expect(version(join(f.root, "versions", "7.1.22", "hc"))).toBe("hc 7.1.22");
 });
 
 test("checksum, version and archive problems stop before any service is touched", async () => {
   const f = setup("symlink");
-  const bytes = archive(f.root, "0.1.22");
+  const bytes = archive(f.root, "7.1.22");
   await expect(
-    upgrade(f, release("0.1.22", bytes, "0".repeat(64)), bytes),
+    upgrade(f, release("7.1.22", bytes, "0".repeat(64)), bytes),
   ).rejects.toThrow("SHA-256 不符");
   await expect(
     prepareHcUpgrade({
       config: f.config,
-      version: "0.1.23",
-      release: release("0.1.22", bytes),
+      version: "7.1.23",
+      release: release("7.1.22", bytes),
       driver: f.driver,
       fetchArchive: async () => bytes,
     }),
-  ).rejects.toThrow("锁定的版本是 0.1.22");
-  const linked = archive(f.root, "0.1.24", "symlink");
-  await expect(upgrade(f, release("0.1.24", linked), linked)).rejects.toThrow(
+  ).rejects.toThrow("锁定的版本是 7.1.22");
+  const linked = archive(f.root, "7.1.24", "symlink");
+  await expect(upgrade(f, release("7.1.24", linked), linked)).rejects.toThrow(
     "regular herdr-core",
   );
-  const lying = archive(f.root, "0.1.25");
-  await expect(upgrade(f, release("0.1.26", lying), lying)).rejects.toThrow(
-    "does not report version 0.1.26",
+  const lying = archive(f.root, "7.1.25");
+  await expect(upgrade(f, release("7.1.26", lying), lying)).rejects.toThrow(
+    "does not report version 7.1.26",
   );
   expect(f.calls).toEqual([]);
   expect(readMaintenance(f.store)).toBeUndefined();
@@ -244,10 +244,10 @@ test("checksum, version and archive problems stop before any service is touched"
 
 test("an unofficial manifest URL is refused", async () => {
   const f = setup("symlink");
-  const bytes = archive(f.root, "0.1.22");
-  const rel = release("0.1.22", bytes);
+  const bytes = archive(f.root, "7.1.22");
+  const rel = release("7.1.22", bytes);
   const bad: HcRelease = {
-    version: "0.1.22",
+    version: "7.1.22",
     targets: {
       [platform]: {
         url: "https://example.invalid/hc.tar.gz",

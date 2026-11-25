@@ -57,7 +57,7 @@ test("Token and token-file callers are refused before any store or service is to
       ["maintenance", "begin", "--reason", "x"],
       ["maintenance", "status"],
       ["maintenance", "end"],
-      ["hc", "upgrade", "--version", "0.1.21"],
+      ["hc", "upgrade", "--version", "9.9.9"],
     ]) {
       const tokenIo = io({ CARDIGAN_TOKEN: "agent-token" });
       expect(await main(args, tokenIo)).toBe(2);
@@ -69,7 +69,7 @@ test("Token and token-file callers are refused before any store or service is to
     ).rejects.toThrow("Token/Agent 不可调用");
     await expect(
       runHcCommand(
-        ["upgrade", "--version", "0.1.21"],
+        ["upgrade", "--version", "9.9.9"],
         io({ CARDIGAN_TOKEN: "" }),
       ),
     ).rejects.toThrow("Token/Agent 不可调用");
