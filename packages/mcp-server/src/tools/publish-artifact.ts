@@ -3,13 +3,17 @@ import {
   type Assignment,
   type AssignmentId,
   type Attachment,
+  approvedReleaseChain,
   approvesPublication,
   type CardId,
   cardReadAccess,
   type DecisionId,
   holdsPublicationTool,
   type ProjectId,
+  RELEASE_CHAIN_OPTION,
   RELEASE_NOTE_MISSING_HINT,
+  releaseChainSmoked,
+  releaseChainUrl,
   releaseMergedCards,
   releaseNoteBodyError,
   releaseNotes,
@@ -45,10 +49,11 @@ export interface PublicationOptions {
     a: Attachment,
     request: PublishInput,
     /**
-     * Durably claim the decision for `url`. `existing` (C-609): the prefix
-     * already holds this release's objects, which is accepted only to
-     * continue this decision's own interrupted claim for the same URL and
-     * artifact; otherwise it throws.
+     * Durably claim the decision for `url`. `existing` (C-609/C-612): the
+     * prefix already holds only this release's own objects, which is accepted
+     * only to continue this card's own earlier claim of the same URL and
+     * artifact; otherwise it throws. Existing objects are then only read
+     * back, never overwritten.
      */
     claim: (url: string, existing?: boolean) => void,
     current: () => void,
@@ -62,6 +67,7 @@ export class PublicationError extends Error {
       | "scope"
       | "approval"
       | "already_claimed"
+      | "in_progress"
       | "configuration"
       | "artifact"
       | "signature"
@@ -83,6 +89,62 @@ type Phase =
   | "resumed"
   | "failed"
   | "verified";
+/** Host stages that fail before the first OSS write; the approval is not claimed by them. */
+const BEFORE_WRITE = new Set<string>([
+  "configuration",
+  "artifact",
+  "signature",
+  "manifest",
+  "immutable_prefix",
+  "host_error",
+]);
+/**
+ * C-612: a failure before the first OSS write consumes nothing, so the same
+ * approval is retried as often as needed after a fix. A claimed attempt that
+ * ended without verification may be continued with the same approval: the
+ * host only writes into an empty prefix or resumes one holding only this
+ * release's own files (APK, SHA256SUMS, release.json), writing just the gaps.
+ * Only a verified publication or a live attempt in this process refuses.
+ */
+function verified(
+  tx: McpReadContext,
+  p: ProjectId,
+  card: CardId,
+  decision: string,
+) {
+  return streamEventsBy(tx.events, p, card, "decision_id", [decision]).some(
+    (e) => e.type === "artifact_publication_verified",
+  );
+}
+/**
+ * A release chain publishes one APK to one place: once it claimed a URL and
+ * digest, it only continues that same receipt (C-612).
+ */
+function chainClaimedElsewhere(
+  tx: McpReadContext,
+  p: ProjectId,
+  card: CardId,
+  decision: string,
+  receipt: string | undefined,
+  sha256: string,
+) {
+  return streamEventsBy(tx.events, p, card, "decision_id", [decision]).some(
+    (e) => {
+      const payload = e.payload as { result?: string };
+      return (
+        e.type === "artifact_publication_claimed" &&
+        (receipt === undefined
+          ? !payload?.result?.endsWith(` · ${sha256}`)
+          : payload?.result !== receipt)
+      );
+    },
+  );
+}
+/**
+ * One executor per approval and per APK: a second concurrent call for either
+ * is refused, never queued.
+ */
+const running = new Set<string>();
 function audit(
   tx: TransactionContext,
   actor: Actor,
@@ -90,6 +152,7 @@ function audit(
   request: PublishInput,
   phase: Phase,
   result: string,
+  note = "",
 ) {
   const p = actor.project_id,
     at = new Date().toISOString(),
@@ -111,7 +174,7 @@ function audit(
     event_seq: seq,
     type: "system",
     author: "system",
-    body: `测试包外发 ${phase} · ${request.attachment_id} · ${request.decision_id} · ${result}`,
+    body: `测试包外发 ${phase} · ${request.attachment_id} · ${request.decision_id} · ${result}${note}`,
     refs: [],
     mentions: [],
     retracted: false,
@@ -170,6 +233,21 @@ function authorize(
             "project_preferences_updated",
           ])
         : [],
+      q?.resolution?.option === RELEASE_CHAIN_OPTION
+        ? tx.events.listAfter(p, a.card_id, 0)
+        : [],
+    )
+  )
+    throw new PublicationError("approval");
+  // C-612: under a chain, only the signed APK the card's smoke step
+  // accepted; checked again at the claim, before any write.
+  if (
+    q?.resolution?.option === RELEASE_CHAIN_OPTION &&
+    !releaseChainSmoked(
+      a.card_id,
+      a.sha256,
+      tx.work_items.list(p),
+      tx.deliveries.list(p),
     )
   )
     throw new PublicationError("approval");
@@ -215,83 +293,169 @@ async function runPublication(
     revalidate();
     const a = store.uow.read((tx) => run.authorized(tx, onCard));
     if (!options.publishArtifact) throw new PublicationError("not_enabled");
-    // C-609: durable before any wait, so a restart can pick it up again.
-    store.uow.run((tx) =>
-      audit(tx, run.actor, a.card_id, request, run.start, a.sha256),
-    );
-    const fresh = (tx: McpReadContext) => {
-      const now = run.authorized(tx, onCard);
-      if (
-        now.card_id !== a.card_id ||
-        now.sha256 !== a.sha256 ||
-        now.size !== a.size ||
-        now.streamed_artifact?.expired
-      )
-        throw new PublicationError("artifact");
-    };
-    const claim = (url: string, existing = false) => {
+    const publish = options.publishArtifact;
+    const slot = `${p}/${request.decision_id}`,
+      bytes = `${p}/sha256/${a.sha256}`;
+    if (running.has(slot) || running.has(bytes)) {
+      // Another executor holds this approval or APK: refuse without any
+      // audit row, so its own outcome stays the last word on the card.
+      card = undefined;
+      throw new PublicationError("in_progress");
+    }
+    running.add(slot);
+    running.add(bytes);
+    try {
+      // C-609: durable before any wait, so a restart can pick it up again.
+      store.uow.run((tx) =>
+        audit(tx, run.actor, a.card_id, request, run.start, a.sha256),
+      );
+      // C-612: refused before any host IO; the claim below re-checks
+      // atomically.
+      store.uow.read((tx) => {
+        if (verified(tx, p, a.card_id, request.decision_id))
+          throw new PublicationError("already_claimed");
+        if (
+          tx.decisions.get(p, request.decision_id as DecisionId)?.resolution
+            ?.option === RELEASE_CHAIN_OPTION &&
+          chainClaimedElsewhere(
+            tx,
+            p,
+            a.card_id,
+            request.decision_id,
+            undefined,
+            a.sha256,
+          )
+        )
+          throw new PublicationError("already_claimed");
+      });
+      const fresh = (tx: McpReadContext) => {
+        const now = run.authorized(tx, onCard);
+        if (
+          now.card_id !== a.card_id ||
+          now.sha256 !== a.sha256 ||
+          now.size !== a.size ||
+          now.streamed_artifact?.expired
+        )
+          throw new PublicationError("artifact");
+      };
+      const claim = (url: string, existing = false) => {
+        revalidate();
+        store.uow.run((tx) => {
+          fresh(tx);
+          const decision = tx.decisions.get(
+            p,
+            request.decision_id as DecisionId,
+          );
+          const chain =
+            decision?.resolution?.option === RELEASE_CHAIN_OPTION
+              ? approvedReleaseChain(
+                  p,
+                  decision,
+                  tx.project_preferences?.get(p, p),
+                  decision.resolution.via === "delegated"
+                    ? streamEventsBy(tx.events, p, undefined, "type", [
+                        "project_preferences_updated",
+                      ])
+                    : [],
+                )
+              : undefined;
+          if (
+            chain
+              ? releaseChainUrl(chain, request.version, a.sha256) !== url
+              : !decision?.options.some(
+                  (o) =>
+                    o.key === "publish" && o.description === `发布到 ${url}`,
+                )
+          )
+            throw new PublicationError("approval");
+          const mine = streamEventsBy(tx.events, p, a.card_id, "decision_id", [
+            request.decision_id,
+          ]);
+          const target = `${url} · ${a.sha256}`;
+          if (
+            mine.some((e) => e.type === "artifact_publication_verified") ||
+            (chain &&
+              chainClaimedElsewhere(
+                tx,
+                p,
+                a.card_id,
+                request.decision_id,
+                target,
+                a.sha256,
+              ))
+          )
+            throw new PublicationError("already_claimed");
+          const note = existing
+            ? "（续做：目录中只有本次发布写入的文件，已有的只回读核验，只补写缺项）"
+            : "";
+          const claimed = mine.find(
+            (e) => e.type === "artifact_publication_claimed",
+          );
+          if (claimed) {
+            // Continue only the same URL and artifact, never a verified or
+            // running publication; the objects are re-verified, never
+            // overwritten.
+            if (
+              (claimed.payload as { result?: string }).result !== target ||
+              inFlight.has(flight)
+            )
+              throw new PublicationError("already_claimed");
+            audit(tx, run.actor, a.card_id, request, "resumed", target, note);
+          } else {
+            // C-612: under a new approval, only this card's own earlier
+            // claim of the same URL and digest proves who wrote the
+            // existing files.
+            if (
+              existing &&
+              !streamEventsBy(tx.events, p, a.card_id, "type", [
+                "artifact_publication_claimed",
+              ]).some(
+                (e) => (e.payload as { result?: string })?.result === target,
+              )
+            )
+              throw new PublicationError("immutable_prefix");
+            audit(tx, run.actor, a.card_id, request, "claimed", target, note);
+          }
+          inFlight.add(flight);
+          flying = true;
+        });
+      };
+      const result = await publish(p, a, request, claim, () => {
+        revalidate();
+        store.uow.read(fresh);
+      });
       revalidate();
       store.uow.run((tx) => {
         fresh(tx);
-        const decision = tx.decisions.get(p, request.decision_id as DecisionId);
-        if (
-          !decision?.options.some(
-            (o) => o.key === "publish" && o.description === `发布到 ${url}`,
-          )
-        )
-          throw new PublicationError("approval");
-        const mine = streamEventsBy(tx.events, p, a.card_id, "decision_id", [
-          request.decision_id,
-        ]);
-        const claimed = mine.find(
-          (e) => e.type === "artifact_publication_claimed",
+        audit(
+          tx,
+          run.actor,
+          a.card_id,
+          request,
+          "verified",
+          `${result.url} · ${result.size} bytes · SHA-256 ${result.sha256}`,
         );
-        const target = `${url} · ${a.sha256}`;
-        if (claimed) {
-          // Continue only the same URL and artifact, never a verified or
-          // running publication; the objects are re-verified, never
-          // overwritten.
-          if (
-            (claimed.payload as { result?: string }).result !== target ||
-            mine.some((e) => e.type === "artifact_publication_verified") ||
-            inFlight.has(flight)
-          )
-            throw new PublicationError("already_claimed");
-          audit(tx, run.actor, a.card_id, request, "resumed", target);
-        } else {
-          if (existing) throw new PublicationError("immutable_prefix");
-          audit(tx, run.actor, a.card_id, request, "claimed", target);
-        }
-        inFlight.add(flight);
-        flying = true;
       });
-    };
-    const result = await options.publishArtifact(p, a, request, claim, () => {
-      revalidate();
-      store.uow.read(fresh);
-    });
-    revalidate();
-    store.uow.run((tx) => {
-      fresh(tx);
-      audit(
-        tx,
-        run.actor,
-        a.card_id,
-        request,
-        "verified",
-        `${result.url} · ${result.size} bytes · SHA-256 ${result.sha256}`,
-      );
-    });
-    return result;
+      return result;
+    } finally {
+      running.delete(slot);
+      running.delete(bytes);
+    }
   } catch (e) {
     const category = e instanceof PublicationError ? e.category : "host_error";
     // C-609: a run cut off by the server's own shutdown records no outcome;
     // the next server continues it.
+    let note = "";
     if (card && category !== "interrupted") {
       const id = card;
       try {
+        note = BEFORE_WRITE.has(category)
+          ? "（未写入，修复后可用同一授权直接重试）"
+          : category === "upload" || category === "download"
+            ? "（可能已写入部分对象，可用同一授权再次调用续做）"
+            : "";
         store.uow.run((tx) =>
-          audit(tx, run.actor, id, request, "failed", category),
+          audit(tx, run.actor, id, request, "failed", category, note),
         );
       } catch {
         throw new ToolError("validation_failed", "测试包外发审计不可用");
@@ -301,7 +465,7 @@ async function runPublication(
       category === "scope" || category === "approval"
         ? "forbidden_tool"
         : "validation_failed",
-      `测试包外发未放行：${category}`,
+      `测试包外发未放行：${category}${note}`,
     );
   } finally {
     if (flying) inFlight.delete(flight);
@@ -379,7 +543,7 @@ export function publicationTool(options: PublicationOptions) {
   return defineTool({
     name: "publish_artifact",
     description:
-      "Publish one signed test APK to this project's configured HTTPS destination. Requires a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths. Optional release_note saves the user-facing notes of this version after it is verified; without it the publication is unchanged and the result says the note is still missing. Also returns the cards merged since the previous successful publication as reference.",
+      "Publish one signed test APK to this project's configured HTTPS destination. Approval is either a same-card resolved publish approval (option publish) targeting the full artifact_sha256 and attachment_id, with the publish option description exactly `发布到 <final HTTPS APK URL>`, or the card's approved release chain, which covers the signed APK the system bound from the signing receipt and, when the card has a smoke step, only the one whose accepted smoke delivery names it (subject artifact_sha256). A release chain is one publish approval for intake, signing, signed intake and publication: kind approve, target.subject artifact_sha256 = the unsigned APK digest, and one option `release_chain` described exactly `发布链 <40-hex source commit> 发布到 <https APK URL template>`, where the template may use `<version>` (versionName) and `<sha12>` (first 12 hex of the signed APK digest). Use the chain decision as the basis for the unsigned intake. A failure before any OSS write consumes nothing: fix it and call again with the same decision. After a failure once writing began, calling again with the same (or a new) approval resumes: the files this release already wrote are read back and verified, only the missing ones are written, and nothing is overwritten. Returns verified URL, size and SHA-256; never accepts credentials, commands or paths. Optional release_note saves the user-facing notes of this version after it is verified; without it the publication is unchanged and the result says the note is still missing. Also returns the cards merged since the previous successful publication as reference.",
     input: input.extend({
       release_note: z
         .string()

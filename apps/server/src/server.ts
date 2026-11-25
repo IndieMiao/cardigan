@@ -90,6 +90,7 @@ import { mergeProjectSettings } from "./merge-push-loop.js";
 import {
   drainMobileSigning,
   openMobileArtifact,
+  registerChainCandidate,
   requestMobileSignature,
 } from "./mobile-signing.js";
 import { OFFSITE_SYNC_INTERVAL_MS, OffsiteSync } from "./offsite-sync.js";
@@ -646,12 +647,13 @@ async function assembleServer(
                 ? {
                     openMobileArtifact: (scope, id, current) =>
                       openMobileArtifact(config.dataDir, scope, id, current),
-                    signMobile: (scope, current) =>
+                    signMobile: (scope, current, chain) =>
                       requestMobileSignature(
                         config.dataDir,
                         scope,
                         current,
                         {},
+                        chain,
                         (signing) =>
                           holdLongOperation(store, {
                             kind: "mobile_signing",
@@ -659,6 +661,13 @@ async function assembleServer(
                             card_id: signing.card,
                             label: `受管送签（${signing.platform}）`,
                           }),
+                      ),
+                    chainSigning: (scope, candidate, current) =>
+                      registerChainCandidate(
+                        config.dataDir,
+                        scope,
+                        candidate,
+                        current,
                       ),
                   }
                 : {}),

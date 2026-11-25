@@ -36,6 +36,7 @@ import {
   isReviewStale,
   latestMergeCheck,
   latestPrecheckConflict,
+  managedPmOffice,
   mergeRequiresHuman,
   NEEDS_YOU_ITEM_READY,
   needsYouItemReady,
@@ -66,6 +67,7 @@ import {
   type RouteInput,
   type RouteProblem,
   type RouteResult,
+  type RouterSnapshot,
   type RuleId,
   recipient,
 } from "./types.js";
@@ -806,6 +808,54 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
       `${delivery.id} is waiting for ${verifier.id}`,
     );
   }
+  routeReleaseNotes(input, draft, delivery);
+}
+
+/**
+ * C-612: the last step of a packaging card. A delivered version note goes to
+ * the managed PM Office, which sends it with its existing owner-message tool
+ * under the project's switch (the card timeline shows queued and delivered
+ * apart). When the project cannot send (switch off, no managed Office), PM
+ * Ops gets a warning instead. Nothing waits for a decision.
+ */
+function routeReleaseNotes(
+  input: RouteInput,
+  draft: Draft,
+  delivery: RouterSnapshot["deliveries"][number],
+): void {
+  const item = itemOf(input, delivery.work_item_id);
+  const card = input.snapshot.cards.find((c) => c.id === item?.card_id);
+  if (
+    !card ||
+    item?.template_key !== "release_notes" ||
+    card.template !== "release"
+  )
+    return;
+  const sendable =
+    input.snapshot.project_preferences?.find(
+      (p) => p.id === input.snapshot.project_id,
+    )?.pm_owner_messages === true &&
+    input.snapshot.assignments.some(
+      (a) => a.status === "active" && managedPmOffice(a),
+    );
+  if (sendable)
+    note(
+      input,
+      draft,
+      recipient.pm_office(),
+      "delivery",
+      "C-612/release notes",
+      `${card.id} 的版本说明 ${delivery.id} 已交付：请用 send_owner_message 把正文发给所有者，受理和投递结果见卡片时间线。`,
+    );
+  else
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "delivery",
+      "C-612/release notes",
+      `${card.id} 的版本说明 ${delivery.id} 已交付，但未开启所有者私聊或没有托管 PM Office，未自动发送，请转告所有者。`,
+    );
 }
 
 /** §6.4: notify this completion delivery's explicitly requested verifiers. */
