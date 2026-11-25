@@ -24,6 +24,7 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   framework_dependency_overdue: "等待框架卡超时",
   card_dependencies_released: "前置完成后放行了卡片",
   card_dependencies_attention: "前置异常待处理",
+  card_dependencies_backlog_ready: "前置完成待排期",
   card_dependencies_ready: "前置完成待同步基线",
   card_superseded: "标记了卡片的取代关系",
   card_sensitivity_changed: "修改了卡片的敏感标记",
