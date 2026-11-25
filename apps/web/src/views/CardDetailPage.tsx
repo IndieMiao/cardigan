@@ -36,7 +36,6 @@ import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { CardTemplate } from "../components/CardTemplate.js";
 import { CommentBox } from "../components/CommentBox.js";
-import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   EmptyState,
   IdTag,
@@ -54,7 +53,6 @@ import {
 import { CardBatchChecks } from "../components/MergeBatch.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
 import { Markdown, MarkdownBody } from "../components/Operations.js";
-import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { StoryDiscussion } from "../components/StoryDiscussion.js";
 import {
@@ -69,10 +67,9 @@ import {
 } from "../components/TimelineControls.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
-import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { useAttachmentRefsState } from "../useAttachmentRefs.js";
 import { useResource } from "../useResource.js";
-import { MergeConfirmation, SuggestedDecision } from "./NeedsYouPage.js";
+import { MergeConfirmation } from "./NeedsYouPage.js";
 
 /** Timeline entries per read; older pages load as the reader scrolls. */
 const PAGE_SIZE = 20;
@@ -684,7 +681,6 @@ function CardContent({
           ["button[type=submit][form]:not(:disabled)", button],
         ],
       ],
-      decisions: [[`#card-${cardId}-suggested`, [button]]],
       proposal: [["section[aria-label='拆解方案']", [button]]],
       // The first open question; with none left, the comment box.
       questions: [
@@ -723,15 +719,6 @@ function CardContent({
     "aria-labelledby": `${sectionId(name)}-tab`,
     tabIndex: 0,
   });
-  // C-192: open human decisions (other than merge confirmations) carrying a
-  // suggestion can be handled here in one click, like in Needs You.
-  const suggested = detail.decisions.filter(
-    (q) =>
-      q.suggestion &&
-      q.decider === "human" &&
-      q.trigger !== "merge_confirmation" &&
-      ["open", "provisional", "snoozed"].includes(q.status),
-  );
   const workCount = detail.overview?.work_count ?? detail.work_items.length;
   const attachmentCount =
     detail.overview?.attachment_count ?? detail.attachments.length;
@@ -888,43 +875,6 @@ function CardContent({
                   elapsed={0}
                   inCardHeader
                 />
-              ))}
-            </section>
-          )}
-          {suggested.length > 0 && (
-            <section
-              id={sectionId("suggested")}
-              className="card-section"
-              aria-label={SUGGESTION_COPY.cardSection}
-            >
-              <h2>{SUGGESTION_COPY.cardSection}</h2>
-              {suggested.map((q) => (
-                <article
-                  key={q.id}
-                  className="needs-item"
-                  aria-label={`拍板 ${q.id}`}
-                >
-                  <h3 className="needs-question">{q.question}</h3>
-                  <PlainSummary id={q.id} summary={q.plain_summary} />
-                  <DecisionRouting decision={q} />
-                  <DecisionContext
-                    context={q.context}
-                    summary={q.plain_summary}
-                    legacy={null}
-                  />
-                  <SuggestedDecision
-                    q={q}
-                    client={client}
-                    projectId={projectId}
-                    done={reload}
-                  />
-                  <p className="hint">
-                    {SUGGESTION_COPY.otherOptions}
-                    <a href={routeHash({ kind: "needs-you", projectId })}>
-                      Needs You
-                    </a>
-                  </p>
-                </article>
               ))}
             </section>
           )}

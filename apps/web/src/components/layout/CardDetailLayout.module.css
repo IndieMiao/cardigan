@@ -372,6 +372,10 @@
     line-height: var(--ui-leading);
     overflow-wrap: anywhere;
   }
+  .nextLine[data-strong] {
+    color: var(--text);
+    font-weight: 600;
+  }
   .nextLine > * {
     min-width: 0;
     max-width: 100%;
@@ -394,6 +398,97 @@
   }
   .nextActions :global(.card-template) {
     display: contents;
+  }
+  /* C-698: a decision answered in the panel. */
+  .choiceForm {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-2);
+    min-width: 0;
+    margin: 0;
+  }
+  .choices {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-1);
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .choice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--ui-space-2);
+    padding: var(--ui-space-2);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-radius);
+    cursor: pointer;
+  }
+  .choice:hover {
+    background: var(--surface-muted);
+  }
+  .choice[data-selected] {
+    border-color: var(--ui-focus);
+    background: var(--ui-selected);
+  }
+  .choice:has(.choiceRadio:disabled) {
+    cursor: default;
+  }
+  .choiceRadio {
+    flex: none;
+    width: var(--ui-icon);
+    height: var(--ui-icon);
+    margin: calc((var(--ui-leading) - var(--ui-icon)) / 2) 0 0;
+    accent-color: var(--accent);
+  }
+  .choiceText {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    overflow-wrap: anywhere;
+  }
+  .choiceName {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    color: var(--text);
+    font-size: var(--ui-text-base);
+  }
+  .choiceDetail {
+    color: var(--text-muted);
+  }
+  .choiceTag {
+    padding: 0 var(--ui-space-2);
+    border-radius: var(--ui-pill-radius);
+    background: var(--surface-muted);
+    color: var(--text-muted);
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+  }
+  .choice[data-selected] .choiceTag {
+    background: var(--surface);
+  }
+  .choiceField {
+    display: grid;
+    gap: var(--ui-space-1);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .choiceField > label {
+    font-weight: 600;
+  }
+  .nextFeedback :global(.request-feedback-region) {
+    position: static;
+    align-items: stretch;
+    max-width: none;
+    max-height: none;
+  }
+  .nextFeedback:not(:has(:global(.request-feedback):not(:empty))) {
+    display: none;
   }
   .nextForms {
     display: grid;
