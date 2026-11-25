@@ -1,3 +1,8 @@
+import {
+  contextRestartRecovery,
+  contextSessionReplaced,
+  humanRestartCommand,
+} from "../context-restart-retry.js";
 import type { HumanAction, WorkItem } from "../entities.js";
 import { eventsOfType } from "../event-index.js";
 import type { HumanActionId } from "../ids.js";
@@ -95,6 +100,20 @@ export function completeActionDraft(
     "unauthorized",
     "未分类主机待办须先核对原始请求，不能仅凭完成回帖结项",
   );
+  // C-741: a failed automatic context restart is recovered only once its old
+  // session has been replaced; marking it done alone keeps it open.
+  const recovery = contextRestartRecovery(d.state.events, action.id);
+  if (recovery && p.conclusion !== "unconfirmed") {
+    const owner = d
+      .list("assignments")
+      .find((a) => a.id === recovery.assignment_id);
+    const command = owner && humanRestartCommand(owner, d.state.project_id);
+    ensure(
+      contextSessionReplaced(d.list("assignments"), recovery),
+      "illegal_transition",
+      `${recovery.assignment_id} 的旧会话尚未替换，不能标记完成${command ? `；请先在主机上执行 ${command}，成功后本事项自动结项` : ""}`,
+    );
+  }
   const remote = remoteExitAction(d.state, action.id);
   ensure(
     remote

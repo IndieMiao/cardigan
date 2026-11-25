@@ -289,18 +289,23 @@ async function startUnlocked(
     assignment.role_id === "pm" &&
     assignment.status === "suspended";
   const restarting = options.restart_session === true;
+  // C-741: the standing host operator restarts in place the same way.
+  const restartCommand =
+    assignment.role_id === "host_ops"
+      ? "cardigan host-ops restart"
+      : "cardigan pm restart";
   if (
     restarting &&
     !(
       assignment.scope === "standing" &&
-      assignment.role_id === "pm" &&
+      (assignment.role_id === "pm" || assignment.role_id === "host_ops") &&
       assignment.status === "active"
     )
   )
     throw new CliError(
       resuming
         ? `${assignment.id} 已暂停，用 cardigan pm start 恢复`
-        : `${assignment.id} 不是在岗的常驻 PM，不能重开会话`,
+        : `${assignment.id} 不是在岗的常驻 PM 或主机运维，不能重开会话`,
       EXIT.usage,
     );
   if (assignment.status !== "active" && !resuming) {
@@ -365,8 +370,8 @@ async function startUnlocked(
     if (stopped !== "exited")
       throw new CliError(
         stopped === "withdrawn"
-          ? `${assignment.id} 的会话已变化，没有替换；请重新运行 cardigan pm restart`
-          : `${assignment.id} 的旧终端没有确认退出，没有替换会话；Assignment、事项和 Token 都没动，稍后重试 cardigan pm restart`,
+          ? `${assignment.id} 的会话已变化，没有替换；请重新运行 ${restartCommand}`
+          : `${assignment.id} 的旧终端没有确认退出，没有替换会话；Assignment、事项和 Token 都没动，稍后重试 ${restartCommand}`,
         EXIT.failure,
       );
   }

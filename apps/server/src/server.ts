@@ -526,6 +526,9 @@ async function assembleServer(
               "context-usage",
             ),
           staleAfterMs: config.contextUsageStaleAfterMs ?? 600_000,
+          ...(config.contextRestartRetryDelaysMs
+            ? { restartRetryDelaysMs: config.contextRestartRetryDelaysMs }
+            : {}),
         },
         scrubCredentials: async (project, assignment, ref) => {
           const runtime = options.dispatcher?.runtime;

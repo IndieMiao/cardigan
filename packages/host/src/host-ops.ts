@@ -1264,7 +1264,17 @@ export class HostOpsService {
         recordAutomaticContextRestartResult(
           loadCommandState(tx, project),
           { kind: "system", project_id: project },
-          { action_id: action.action_id, result, reason },
+          {
+            action_id: action.action_id,
+            result,
+            reason,
+            ...(this.options.contextUsage?.restartRetryDelaysMs
+              ? {
+                  retry_delays_ms:
+                    this.options.contextUsage.restartRetryDelaysMs,
+                }
+              : {}),
+          },
           { clock: this.clock, ids: tx.ids },
         ),
       );

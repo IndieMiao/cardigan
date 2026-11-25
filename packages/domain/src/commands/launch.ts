@@ -17,6 +17,7 @@ import { appendEvents, eventById, eventsOfType } from "../event-index.js";
 import { HARNESSES, isHarness } from "../harness.js";
 import {
   automaticContextActionForRun,
+  hostOpsActionPending,
   hostOpsPending,
   observedLocalExitCause,
   pendingHostOpsActions,
@@ -54,7 +55,7 @@ import { activeWork, workDependencyWait } from "./workflow.js";
 
 const unfinished = (run: Run) =>
   !["completed", "failed", "cancelled"].includes(run.status);
-function target(d: CommandDraft, id: AssignmentId) {
+function target(d: CommandDraft, id: AssignmentId, humanRestart = false) {
   const assignment = d.get("assignments", id);
   ensure(
     !assignment.role_upgrade &&
@@ -62,8 +63,14 @@ function target(d: CommandDraft, id: AssignmentId) {
     "illegal_transition",
     "Assignment role upgrade is pending",
   );
+  // C-741: the human's session restart has just closed a failed automatic
+  // restart's fence in this draft; any other host operation still blocks.
   ensure(
-    d.tool === "manage_host_ops_action" || !hostOpsPending(d.state.events, id),
+    d.tool === "manage_host_ops_action" ||
+      !(humanRestart ? hostOpsActionPending : hostOpsPending)(
+        d.state.events,
+        id,
+      ),
     "illegal_transition",
     "A host operation is pending",
   );
@@ -324,7 +331,11 @@ export function queueRunInDraft(
       p.expected_runtime_ref,
       p.reuse_queued,
     );
-  const assignment = target(d, p.assignment_id);
+  const assignment = target(
+    d,
+    p.assignment_id,
+    p.restart_session === true && d.actor.kind === "human",
+  );
   ensure(
     assignmentDependenciesAllowStart(d.state, assignment),
     "illegal_transition",

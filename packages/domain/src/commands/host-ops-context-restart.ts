@@ -1,4 +1,12 @@
 import {
+  CONTEXT_RESTART_RETRY_SCHEDULED,
+  contextRestartRetries,
+  contextRestartRetryState,
+  DEFAULT_CONTEXT_RESTART_RETRY_DELAYS_MS,
+  humanRestartCommand,
+  transientContextRestartReason,
+} from "../context-restart-retry.js";
+import {
   type ContextObservation,
   contextNoticeRecorded,
   contextObservationCurrent,
@@ -31,6 +39,19 @@ import { queueRunInDraft, settingsValid } from "./launch.js";
 import { projectPreferences } from "./preferences.js";
 import { stoppedByHuman } from "./stop-state.js";
 
+/**
+ * Standing sessions the system restarts on its own once their context reaches
+ * the restart level: the host operator (nobody else can) and, C-741, the
+ * standing PMs, so a stuck operator cannot leave them full either.
+ */
+export function automaticContextRestartTarget(
+  a: Assignment | undefined,
+): a is Assignment & { scope: "standing" } {
+  return (
+    a?.scope === "standing" && (a.role_id === "host_ops" || a.role_id === "pm")
+  );
+}
+
 /** Reused before preparation, in the intent transaction and immediately before stopping. */
 export function automaticContextRestartReady(
   state: CommandState,
@@ -41,8 +62,7 @@ export function automaticContextRestartReady(
 ) {
   const a = state.assignments.find((a) => a.id === usage.assignment_id);
   if (
-    a?.scope !== "standing" ||
-    a.role_id !== "host_ops" ||
+    !automaticContextRestartTarget(a) ||
     a.external ||
     a.machine_id !== "local" ||
     !a.runtime_ref ||
@@ -77,14 +97,13 @@ export function automaticContextRestartReady(
     )
   )
     return false;
+  // C-741: a session gets one attempt, plus the retries its held attempts
+  // scheduled; a retry starts only once due and the session is idle again.
   return (
     actionId !== undefined ||
     (!hostOpsPending(state.events, a.id) &&
-      !eventsOfType(state.events, "host_ops_action_taken").some(
-        (e) =>
-          (e.payload as { assignment_id?: string }).assignment_id === a.id &&
-          (e.payload as { context_usage?: ContextObservation }).context_usage
-            ?.session_id === usage.session_id,
+      ["fresh", "due"].includes(
+        contextRestartRetryState(state.events, a.id, usage.session_id, now),
       ))
   );
 }
@@ -111,10 +130,13 @@ export function beginAutomaticContextRestart(
       if (p.snapshot.launch_profile_ref !== undefined)
         text(p.snapshot.launch_profile_ref, "launch_profile_ref");
     }
+    const pm = d.get("assignments", p.usage.assignment_id).role_id === "pm";
     const intent = beginHostOpsActionInDraft(d, {
-      tool: "host_ops_restart_assignment",
+      tool: pm ? "host_ops_restart_standing_pm" : "host_ops_restart_assignment",
       target_id: p.usage.assignment_id,
-      reason: "主机运维自身上下文到档，系统在空闲时换会话。",
+      reason: pm
+        ? "常驻 PM 上下文到档，系统在空闲时换会话。"
+        : "主机运维自身上下文到档，系统在空闲时换会话。",
       automatic_context_restart: true,
       context_usage: p.usage,
       context_stale_after_ms: p.stale_after_ms,
@@ -402,6 +424,7 @@ function recordResult(
   actionId: HostOpsExecution["action_id"],
   result: "succeeded" | "failed",
   reason: string,
+  retryDelaysMs: readonly number[] = DEFAULT_CONTEXT_RESTART_RETRY_DELAYS_MS,
 ) {
   const intent =
     d.state.events.find(
@@ -453,22 +476,80 @@ function recordResult(
     result = "succeeded";
     reason = "新会话已开始执行。";
   } else if (result === "succeeded") return;
+  const current = d.get("assignments", action.assignment_id);
+  const who = current.role_id === "pm" ? "常驻 PM" : "主机运维";
+  const usageText = usage
+    ? `会话 ${usage.session_id}，已用 ${usage.used_percentage}%，剩余 ${Math.round((100 - usage.used_percentage) * 10) / 10}%。`
+    : "";
+  // C-741: a hold that says nothing about the session (upstream diagnosis
+  // unavailable, agent busy, …) before any stop signal is retried with
+  // backoff on the next idle poll. Only the original attempt's evidence
+  // decides; a stop that may have been signalled keeps the single attempt.
+  const held =
+    result === "failed" &&
+    !!usage &&
+    action.automatic_context_restart === true &&
+    !action.dispatch_stall_id &&
+    !action.system_finished_run_id &&
+    !finished &&
+    !run &&
+    transientContextRestartReason(reason) &&
+    !eventsOfType(d.state.events, "host_ops_action_deferred").some(
+      (e) =>
+        (e.payload as { action_id?: string }).action_id === actionId &&
+        (e.payload as { reason?: string }).reason ===
+          "automatic_context_stop_started",
+    );
+  const retries =
+    held && usage
+      ? contextRestartRetries(
+          d.state.events,
+          action.assignment_id,
+          usage.session_id,
+        ).length
+      : 0;
+  const delay = held ? retryDelaysMs[retries] : undefined;
+  if (usage && delay !== undefined && Number.isFinite(delay) && delay >= 0) {
+    const retryAt = new Date(Date.parse(d.now) + delay).toISOString();
+    const minutes = Math.max(1, Math.round(delay / 60_000));
+    const body = `${who} ${action.assignment_id} 自动换会话暂缓：${usageText}原因 ${reason}。约 ${minutes} 分钟后、会话空闲时自动重试（第 ${retries + 1}/${retryDelaysMs.length} 次重试）。`;
+    return d.emit(
+      "context_session_restart_result",
+      undefined,
+      {
+        action_id: actionId,
+        assignment_id: action.assignment_id,
+        context_usage: { ...usage },
+        result: CONTEXT_RESTART_RETRY_SCHEDULED,
+        reason,
+        retry_at: retryAt,
+        attempt: retries + 1,
+        body,
+      },
+      { type: "system", body },
+    );
+  }
+  // Retries ran out on a temporary hold: PM triages it, not the owner.
+  const exhausted = held;
   const body = !usage
     ? `派发积压 ${action.assignment_id} 换会话${result === "succeeded" ? "成功" : "失败"}：${reason}`
-    : `主机运维 ${action.assignment_id} 自动换会话${result === "succeeded" ? "成功" : "失败"}：会话 ${usage.session_id}，已用 ${usage.used_percentage}%，剩余 ${Math.round((100 - usage.used_percentage) * 10) / 10}%。${reason}`;
+    : `${who} ${action.assignment_id} 自动换会话${result === "succeeded" ? "成功" : "失败"}：${usageText}${reason}${exhausted ? `（已按退避重试 ${retries} 次仍被挡住）` : ""}`;
   const humanId =
     result === "failed"
       ? d.ids.next(d.state.project_id, "human_action")
       : undefined;
+  let triage: "pm_ops" | "human" | undefined;
   if (humanId) {
-    const current = d.get("assignments", action.assignment_id);
     // A failed successor launch is not proof that its new process exited.
     // Retain the existing confirmation fence; PM triages this exceptional
     // case first, rather than sending a stop/start task to the human.
-    const triage = action.system_finished_run_id ? "pm_ops" : "human";
+    triage = action.system_finished_run_id || exhausted ? "pm_ops" : "human";
+    const command = humanRestartCommand(current, d.state.project_id);
     const instructions = action.system_finished_run_id
       ? `${body}。请 PM 先核对新会话启动与退出记录；如需现场核实，只申请确认进程是否退出，不要求人停止或启动指派。`
-      : `${body}\n1. 核对旧会话及当前会话的终端：${JSON.stringify(action.runtime_ref)}；${JSON.stringify(current.runtime_ref)}。\n2. 在所属运行时确认相关终端及 Agent 进程均已退出；无法确认时保持本事项打开。\n3. 确认退出后由人标记完成，再按既有主机流程恢复该员工。系统不自动重试这次换会话。`;
+      : usage && command
+        ? `${body}\n${exhausted ? `请 PM 核对原因 ${reason} 是否已解除；需要人操作时，把下面的命令交给人执行。\n` : ""}1. 在主机上执行：${command}。它先确认旧终端 ${JSON.stringify(action.runtime_ref)} 已退出，再为 ${action.assignment_id} 启动新会话；Assignment、待处理事项和员工不变。\n2. 命令成功后本事项自动结项；旧会话未替换时不能标记完成。\n3. 命令报告旧终端没有确认退出时，核对该终端及 Agent 进程后重试同一命令。`
+        : `${body}\n1. 核对旧会话及当前会话的终端：${JSON.stringify(action.runtime_ref)}；${JSON.stringify(current.runtime_ref)}。\n2. 在所属运行时确认相关终端及 Agent 进程均已退出；无法确认时保持本事项打开。\n3. 确认退出后由人标记完成，再按既有主机流程恢复该员工。系统不自动重试这次换会话。`;
     d.put("human_actions", {
       id: humanId,
       key: humanId,
@@ -477,8 +558,13 @@ function recordResult(
       triage,
       blocked_work_items: [],
       instructions,
-      why_human: "自动换会话只尝试一次；需要人确认退出并恢复。",
-      expected_return: "回传会话身份、终端退出核实方法和结果。",
+      why_human: exhausted
+        ? `自动换会话按退避重试 ${retries} 次仍被挡住（${reason}），交 PM 核对。`
+        : "自动换会话只尝试一次；需要人确认退出并恢复。",
+      expected_return:
+        usage && command
+          ? `执行 ${command} 后新会话启动，本事项自动结项。`
+          : "回传会话身份、终端退出核实方法和结果。",
     });
     d.emit(
       "human_action_requested",
@@ -510,6 +596,8 @@ function recordResult(
       body,
       ...(run ? { run_id: run.id } : {}),
       ...(humanId ? { human_action_id: humanId } : {}),
+      ...(triage ? { disposition: triage } : {}),
+      ...(exhausted ? { retries } : {}),
     },
     { type: "system", body },
   );
@@ -523,10 +611,12 @@ export function recordAutomaticContextRestartResult(
     action_id: HostOpsExecution["action_id"];
     result: "succeeded" | "failed";
     reason: string;
+    /** C-741: host-configured backoff; defaults to 2, 5 and 10 minutes. */
+    retry_delays_ms?: readonly number[];
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) =>
-    recordResult(d, p.action_id, p.result, p.reason),
+    recordResult(d, p.action_id, p.result, p.reason, p.retry_delays_ms),
   );
 }
