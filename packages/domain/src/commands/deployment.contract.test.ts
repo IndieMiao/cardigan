@@ -945,3 +945,60 @@ test("patrol completes only a matching open helper action with two passed checks
     value(completeVerifiedHelperAction(done, system, proof, io)).events,
   ).toEqual([]);
 });
+
+test("C-650: automatic retry state is bounded, copied and schedulable only for a restored server", () => {
+  const state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const rolledBack = {
+    ...record,
+    status: "rolled_back" as const,
+    failure_stage: "ready" as const,
+  };
+  const scheduled = {
+    failures: 1,
+    max: 2,
+    next_at: "2026-11-23T11:29:00.000Z",
+  };
+  const effect = value(
+    recordDeployment(
+      state,
+      system,
+      { ...rolledBack, ready_retry: scheduled },
+      ports(),
+    ),
+  );
+  expect(effect.changes).toEqual([]);
+  expect(effect.events[0]?.payload).toMatchObject({ ready_retry: scheduled });
+  // A used-up retry may close a failed or rolled-back attempt.
+  for (const status of ["failed", "rolled_back"] as const)
+    expect(
+      recordDeployment(
+        state,
+        system,
+        { ...rolledBack, status, ready_retry: { failures: 3, max: 2 } },
+        ports(),
+      ).ok,
+    ).toBe(true);
+  for (const [status, ready_retry] of [
+    // Only a restored server may wait for a retry.
+    ["failed", scheduled],
+    ["deployed", { failures: 1, max: 2 }],
+    ["started", { failures: 1, max: 2 }],
+    // Retries beyond the limit cannot be scheduled.
+    ["rolled_back", { ...scheduled, failures: 3 }],
+    ["rolled_back", { failures: 0, max: 2 }],
+    ["rolled_back", { failures: 1, max: -1 }],
+    ["rolled_back", { failures: 1, max: 21 }],
+    ["rolled_back", { failures: 1.5, max: 2 }],
+    ["rolled_back", { ...scheduled, next_at: "soon" }],
+    ["rolled_back", { ...scheduled, extra: "TOKEN=synthetic" }],
+  ] as const)
+    expect(
+      recordDeployment(
+        state,
+        system,
+        { ...rolledBack, status, ready_retry } as never,
+        ports(),
+      ).ok,
+    ).toBe(false);
+});
