@@ -416,11 +416,18 @@ export function createCardInDraft(
       ...(p.deadline ? { deadline: p.deadline } : {}),
     };
     card = applyCardDependencies(d, card, p);
-    if (
-      !card.early_start &&
-      (card.wait_for_dependencies ||
-        !cardDependenciesAllowStart(dependencyState(d), card))
-    )
+    const dependenciesMet = cardDependenciesAllowStart(
+      dependencyState(d),
+      card,
+    );
+    // C-733: cards opened by a decision or a confirmed story proposal wait for
+    // their prerequisites by default; an explicit flag (true or false) wins.
+    const waitByDefault =
+      p.wait_for_dependencies === undefined &&
+      !dependenciesMet &&
+      (p.source?.kind === "decision" || p.story_source !== undefined);
+    if (waitByDefault) card = { ...card, wait_for_dependencies: true };
+    if (!card.early_start && (card.wait_for_dependencies || !dependenciesMet))
       card = { ...card, status: "backlog" };
     d.put("cards", card);
     const ids = new Map(
@@ -502,8 +509,17 @@ export function createCardInDraft(
               dependency_reason: p.dependency_reason ?? "",
             }
           : {}),
+        ...(waitByDefault
+          ? { wait_for_dependencies: true, wait_for_dependencies_default: true }
+          : {}),
       },
-      { type: "system", body: dependencyChangeNotice(card, p) },
+      {
+        type: "system",
+        body: dependencyChangeNotice(
+          card,
+          waitByDefault ? { ...p, wait_for_dependencies: true } : p,
+        ),
+      },
     );
     if (card.parent_card_id)
       d.emit(

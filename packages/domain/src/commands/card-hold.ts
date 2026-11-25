@@ -1,5 +1,10 @@
 import type { Card, CardHold } from "../entities.js";
 import { type CommandDraft, ensure, text } from "./core.js";
+import {
+  heldAssignmentsOfCard,
+  heldReleaseNotice,
+  raiseHeldResumeInDraft,
+} from "./held-assignment-resume.js";
 import { closeHeldWindow } from "./merge-window.js";
 
 export type CardHoldInput = Pick<
@@ -48,10 +53,25 @@ export function applyCardHold(
       }
     : undefined;
   const result: Card = { ...rest, ...(hold ? { hold } : {}) };
+  d.put("cards", result);
+  // C-732: a paused Assignment does not resume with its card. Name each one
+  // and raise its one-click resume question instead of staying silent.
+  const paused = hold
+    ? []
+    : heldAssignmentsOfCard(d, card.id).map((h) => ({
+        assignment_id: h.assignment.id,
+        work_item_id: h.work_item.id,
+        paused_by: h.pause.by,
+        paused_at: h.pause.at,
+        resume_decision_id:
+          raiseHeldResumeInDraft(d, {
+            assignment_id: h.assignment.id,
+            reason: "card_hold_released",
+          })?.id ?? null,
+      }));
   const notice = hold
     ? `已暂停：${hold.reason}\n恢复条件：${hold.resume_condition}`
-    : "已解除暂停，后续按当前依赖和原有门禁继续。";
-  d.put("cards", result);
+    : `已解除暂停，后续按当前依赖和原有门禁继续。${heldReleaseNotice(paused)}`;
   d.emit(
     hold ? "card_hold_set" : "card_hold_released",
     card.id,
@@ -60,6 +80,7 @@ export function applyCardHold(
       notice,
       previous_hold: previous ? { ...previous } : null,
       hold: hold ? { ...hold } : null,
+      ...(paused.length ? { paused_assignments: paused } : {}),
     },
     {
       type: "status_change",

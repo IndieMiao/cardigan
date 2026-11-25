@@ -177,6 +177,7 @@ export function evaluateMergeShadow(
     (other) =>
       other.trigger !== "merge_confirmation" &&
       other.trigger !== "worktree_cleanup" &&
+      other.trigger !== "held_assignment_resume" &&
       ((card.source.kind === "decision" &&
         card.source.decision_id === other.id) ||
         (!mergeUnrelatedConfirmed(other) &&

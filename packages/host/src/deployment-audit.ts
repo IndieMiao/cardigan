@@ -3,6 +3,7 @@ import {
   type DeliveryId,
   type DeploymentControl,
   type DeploymentOperation,
+  type DeploymentReadyRetry,
   type DeploymentRecord,
   type Event,
   eventsOfType,
@@ -75,6 +76,32 @@ export function readInterruptedDeployment(
       ? record
       : undefined;
   });
+}
+
+/**
+ * C-650: the latest durable automatic-retry state of one target. Main and each
+ * human pin are separate targets, so a new pin starts its own count.
+ */
+export function readReadyRetry(
+  store: Store,
+  project: ProjectId,
+  to: string,
+  controlEventId?: string,
+): DeploymentReadyRetry | undefined {
+  const rows = store.database
+    .prepare(
+      `SELECT doc FROM events WHERE project_id = ? AND card_id IS NULL AND type = 'host_deployment_recorded'
+      AND json_extract(doc, '$.actor.kind') = 'system' AND json_extract(doc, '$.payload.to') = ?
+      AND json_extract(doc, '$.payload.ready_retry') IS NOT NULL
+      AND IFNULL(json_extract(doc, '$.payload.control_event_id'), '') = ?
+      ORDER BY seq DESC LIMIT 1`,
+    )
+    .all(project, to, controlEventId ?? "") as { doc: string }[];
+  const row = rows[0];
+  if (!row) return undefined;
+  const retry = (JSON.parse(row.doc) as Event)
+    .payload as unknown as DeploymentRecord;
+  return retry.ready_retry;
 }
 
 export function writeDeploymentRecord(
@@ -175,6 +202,9 @@ export function writeDeploymentRecord(
     // A normal publish can still be committing its audit. Keep it visible to
     // operations without creating a manual blocker for this transient window.
     if (capacityWait) return; // Notification and durable timeout audit; never force unlock.
+    // C-650: the previous build is back and an automatic retry is scheduled;
+    // only a retry that is used up (or a failed rollback) needs a person.
+    if (record.status === "rolled_back" && record.ready_retry?.next_at) return;
     if (
       record.status === "waiting_for_evidence" &&
       !record.evidence_wait_exceeded

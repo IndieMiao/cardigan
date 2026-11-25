@@ -12,7 +12,6 @@ import {
   rotatePmAfterDeployment,
   rotateStandingAfterDeployment,
   streamEventsBy,
-  upgradeRoleAfterDeployment,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
@@ -22,7 +21,6 @@ import {
 } from "@cardigan/roles";
 import {
   listRoleVersions,
-  persistRoleEffect,
   type ReadRepositories,
   type Store,
   type StoreTransactionContext,
@@ -140,7 +138,8 @@ export function upgradeDeployedRoles(
   store: Store,
   project: ProjectId,
   changedRoles: readonly string[],
-  previousDefaults: Readonly<Record<string, string>>,
+  /** The supervisor's fingerprints; kept for its interface, never trusted (C-603). */
+  _previousDefaults: Readonly<Record<string, string>>,
   profiles: ReadonlySet<string> | (() => ReadonlySet<string>) = new Set(),
 ) {
   let loadedProfiles: ReadonlySet<string> | undefined;
@@ -172,101 +171,61 @@ export function upgradeDeployedRoles(
       { profiles: profileNames },
       true,
     );
+    // C-603 (Q-1186): only the trusted record proves a version untouched.
+    // This release's own default is no evidence, so a rerun of one release
+    // reaches the same conclusion.
     const known = knownDefaults(tx, project);
+    const olderRecorded = (id: string) => {
+      if (!isDefaultRoleId(id)) return false;
+      const current = deploymentRolePolicyHash(
+        defaultRoleDefinition(id, {
+          harness: "codex",
+          launch_profile_ref: "deployment",
+        }),
+      );
+      return (known.get(id) ?? []).some((k) => k.policy_hash !== current);
+    };
     const ids = [
       ...new Set(listRoleVersions(tx, project).map((r) => r.role_id)),
     ];
     for (const id of ids) {
       if (!isDefaultRoleId(id) || !changedRoles.includes(id) || handled.has(id))
         continue;
-      const roles = listRoleVersions(tx, project);
-      const latest = roles.filter((r) => r.role_id === id).at(-1);
+      const latest = listRoleVersions(tx, project)
+        .filter((r) => r.role_id === id)
+        .at(-1);
       if (!latest || latest.status === "inactive" || latest.default_overlay)
         continue;
       const source = defaultRoleDefinition(id, {
         harness: latest.harness,
         launch_profile_ref: latest.launch_profile_ref,
       });
-      const currentHash = deploymentRolePolicyHash(latest);
+      const sourceHash = deploymentRolePolicyHash(source);
       // No write is necessary when a formerly manual rule has reached the default pack.
-      if (currentHash === deploymentRolePolicyHash(source)) continue;
-      const baseline = Object.hasOwn(previousDefaults, id)
-        ? previousDefaults[id]
-        : undefined;
-      if (!baseline) {
+      if (deploymentRolePolicyHash(latest) === sourceHash) continue;
+      // Every version equal to a recorded default was upgraded above. The
+      // supervisor's fingerprint decides nothing: an older supervisor hashes
+      // without machine requirements, so it cannot tell them from a hand edit.
+      if (!olderRecorded(id)) {
         recordRoleDeferral(
           tx,
           project,
-          `missing-default:${id}:${latest.version}:${deploymentRolePolicyHash(source)}`,
-          `角色 ${id} 缺少上一默认包指纹，系统保留当前版本并通知 PM 排查部署基线；未创建人工拍板。`,
+          `unverified-default:${id}:${latest.version}:${sourceHash}`,
+          `角色 ${id} v${latest.version} 与新默认包不同，且没有可核对的已记录默认包；系统保留当前版本并通知 PM，未创建人工拍板。`,
           clock.now(),
         );
         continue;
       }
-      if (currentHash !== baseline) {
-        // Only a recorded older default makes a mismatch a manual edit to
-        // review (C-603). Without one, e.g. an older supervisor's fingerprint
-        // that omits machine requirements, nothing is proven: keep the version
-        // and notify PM, opening no human action (V-3037:2).
-        const sourceHash = deploymentRolePolicyHash(source);
-        if (!(known.get(id) ?? []).some((k) => k.policy_hash !== sourceHash)) {
-          recordRoleDeferral(
-            tx,
-            project,
-            `unverified-default:${id}:${latest.version}:${sourceHash}`,
-            `角色 ${id} v${latest.version} 与上一默认包指纹不一致，且没有可核对的已记录默认包；系统保留当前版本并通知 PM，未创建人工拍板。`,
-            clock.now(),
-          );
-          continue;
-        }
-        if (source.instructions === undefined)
-          throw new Error("Default role instructions missing");
-        const diff = roleUpgradeDiff(latest, {
-          ...source,
-          instructions: source.instructions,
-        });
-        pending(
-          `deployment-role-manual:${id}:${latest.version}:${sourceHash}`,
-          `角色 ${id} 未自动升级：当前版本有手工改动，与已记录的默认版本都不一致。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
-        );
-        continue;
-      }
-      if (!profileNames().has(source.launch_profile_ref)) {
-        recordRoleDeferral(
-          tx,
-          project,
-          `missing-profile:${id}:${latest.version}:${source.launch_profile_ref}`,
-          `默认角色 ${id} 引用的启动配置 ${source.launch_profile_ref} 不存在或配置未通过校验；保留原版本 v${latest.version}，请 PM 排查。`,
-          clock.now(),
-        );
-        continue;
-      }
-      const result = unwrap(
-        upgradeRoleAfterDeployment(
-          { project_id: project, roles },
-          actor,
-          id,
-          source,
-          ports,
-        ),
+      if (source.instructions === undefined)
+        throw new Error("Default role instructions missing");
+      const diff = roleUpgradeDiff(latest, {
+        ...source,
+        instructions: source.instructions,
+      });
+      pending(
+        `deployment-role-manual:${id}:${latest.version}:${sourceHash}`,
+        `角色 ${id} 未自动升级：当前版本有手工改动，与已记录的默认版本都不一致。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
       );
-      if (result.effect) {
-        persistRoleEffect(tx, project, result.effect);
-        tx.events.append(project, {
-          id: tx.ids.nextEventId(),
-          seq: tx.ids.nextEventSequence(project),
-          type: "host_role_upgraded",
-          actor,
-          created_at: clock.now(),
-          payload: {
-            role_id: id,
-            from_version: latest.version,
-            to_version: result.effect.data.version,
-            diff: JSON.parse(JSON.stringify(result.diff)),
-            notice: `默认角色 ${id} 已随已部署版本自动升级：v${latest.version} → v${result.effect.data.version}。`,
-          },
-        });
-      }
     }
     // Even a no-op publication needs a receipt. Commit it with all role writes;
     // a failed transaction cannot make a half-published pack look consistent.
@@ -277,14 +236,13 @@ export function upgradeDeployedRoles(
       if (!policy) continue;
       const policy_hash = deploymentRolePolicyHash(role);
       const expected = deploymentRolePolicyHash(policy);
-      const baseline = previousDefaults[role.role_id];
       roles[role.role_id] = {
         version: role.version,
         policy_hash,
         disposition:
           policy_hash === expected
             ? "matched"
-            : baseline && policy_hash !== baseline
+            : olderRecorded(role.role_id)
               ? "conflict"
               : "unverified",
       };

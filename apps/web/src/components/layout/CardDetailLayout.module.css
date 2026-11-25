@@ -55,8 +55,9 @@
     padding: 0 var(--ui-space-6) var(--ui-space-6);
     scrollbar-gutter: stable;
   }
+  /* C-695: with the tab bar padding, space-6 between “下一步” and the tabs. */
   .page :global(.card-header) {
-    padding: 0;
+    padding: 0 0 var(--ui-space-4);
   }
   .page :global(.card-header .page-title) {
     margin: 0;
@@ -290,6 +291,127 @@
   .page :global(.card-primary-panels),
   .page :global(.card-primary-panels :is(form, fieldset)) {
     min-width: 0;
+  }
+  /* C-695: status row under the title: facts left, 编辑 and ⋯ right. */
+  .statusRow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-2) var(--ui-space-3);
+    min-height: var(--ui-control);
+    margin-block: var(--ui-space-3);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .statusFacts {
+    display: flex;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-2) var(--ui-space-3);
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .statusFacts > * {
+    min-width: 0;
+    max-width: 100%;
+    margin: 0;
+  }
+  .statusActions {
+    flex: none;
+    margin-inline-start: auto;
+  }
+  .statusActions :global(.card-actions) {
+    margin: 0;
+  }
+  .statusActions :global(.card-action-buttons) {
+    flex-wrap: nowrap;
+    gap: var(--ui-space-1);
+  }
+  /* C-695: “下一步” panel; the only emphasis button of the page lives here. */
+  .next {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--ui-space-3) var(--ui-space-4);
+    padding: var(--ui-space-4);
+    background: var(--surface);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+  }
+  .next[data-mine] {
+    border-color: var(--status-wait);
+    box-shadow: inset var(--ui-attention-line) 0 0 var(--status-wait);
+  }
+  .nextBody {
+    display: flex;
+    flex: 1 1 min(100%, var(--ui-next-step-body));
+    flex-direction: column;
+    gap: var(--ui-space-2);
+    min-width: 0;
+  }
+  .next .nextTitle {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    margin: 0;
+    font-size: var(--ui-text-section);
+    line-height: var(--ui-leading-section);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .nextLine {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    overflow-wrap: anywhere;
+  }
+  .nextLine > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .nextLine :global(dl),
+  .nextLine :global(.plain-summary-risk) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    margin: 0;
+  }
+  .nextLine :is(:global(dt), :global(dd)) {
+    margin: 0;
+  }
+  .nextActions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-2);
+  }
+  .nextActions :global(.card-template) {
+    display: contents;
+  }
+  .nextForms {
+    display: grid;
+    gap: var(--ui-space-3);
+    margin-top: var(--ui-space-3);
+  }
+  /* Feedback anchors are hidden; only a shown form or note takes room. */
+  .nextForms:not(:has(> :not([hidden]))) {
+    display: none;
+  }
+  @media (max-width: 760px) {
+    .nextActions {
+      flex: 1 1 100%;
+    }
+    .nextActions > :global([data-ui="button"]),
+    .nextActions > :global(.card-template) > :global([data-ui="button"]) {
+      flex: 1 1 0;
+    }
   }
   @media (max-width: 760px) {
     .page:not(:global(.card-page-drawer)) {

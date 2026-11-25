@@ -386,6 +386,7 @@ test("C-613 V-3025: an untouched previous default whose pack withdrew a tool upg
       ...pack,
       allowed_tools: [...pack.allowed_tools, "list_needs_you" as const],
     };
+    record(store, "cardigan", "reviewer", previous);
     put(store, "cardigan", previous, 1);
     upgradeDeployedRoles(
       store,

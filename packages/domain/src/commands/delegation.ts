@@ -278,7 +278,9 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
   return (
     // Dedicated human workflow triggers keep their own guards; a general note
     // does not override ordinary category delegation.
-    (!q.trigger || q.trigger === "review_limit") &&
+    (!q.trigger ||
+      q.trigger === "review_limit" ||
+      q.trigger === "held_assignment_resume") &&
     !!q.category &&
     categoryDelegated(
       projectPreference(d),

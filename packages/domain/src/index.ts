@@ -54,6 +54,7 @@ export * from "./commands/employee.js";
 export { selectStandingEmployee } from "./commands/employee-assignment.js";
 export * from "./commands/flow.js";
 export { DEFAULT_FRAMEWORK_WAIT_REMINDER_MS } from "./commands/framework-dependencies.js";
+export * from "./commands/held-assignment-resume.js";
 export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-attached-wait.js";
@@ -191,6 +192,11 @@ export {
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./commands/stop.js";
+export {
+  ASSIGNMENT_HOLD_RESUMED,
+  type HeldPause,
+  heldPause,
+} from "./commands/stop-state.js";
 export * from "./commands/story-proposal.js";
 export * from "./commands/system-completion.js";
 export * from "./commands/system-merge.js";

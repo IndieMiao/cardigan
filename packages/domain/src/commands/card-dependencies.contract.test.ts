@@ -4,7 +4,7 @@ import {
   cardDependencyComplete,
   unmetCardDependencies,
 } from "../card-dependencies.js";
-import type { Card, Event } from "../entities.js";
+import type { Card, Decision, Event } from "../entities.js";
 import { mergePlan, recordMergeResult } from "../index.js";
 import { compareDispatchOrder } from "../run-capacity.js";
 import {
@@ -593,4 +593,168 @@ test("C-631: dependencyState keeps a stable events array so the per-card history
   const replaced = dependencyState(d).events;
   expect(replaced).not.toBe(grown);
   expect(replaced).toEqual([...d.state.events, ...d.events]);
+});
+
+const decided = {
+  id: id("decision", 1),
+  project_id: human.project_id,
+} as unknown as Decision;
+const decisionForm = {
+  title: "Decided",
+  goal: "Build",
+  source: { kind: "decision" as const, decision_id: decided.id },
+  repo: "fixture",
+  base_branch: "main",
+  acceptance_criteria: ["passes"],
+};
+
+test("C-733: decision cards with unmet prerequisites wait by default and are released once they complete; explicit false stays in backlog", () => {
+  const io = ports();
+  const pending = { ...state(), decisions: [decided] };
+  const effect = value(
+    createCard(pending, human, { ...decisionForm, depends_on_cards: [c2] }, io),
+  );
+  expect(effect.data).toMatchObject({
+    status: "backlog",
+    depends_on_cards: [c2],
+    wait_for_dependencies: true,
+  });
+  expect(effect.events[0]?.payload).toMatchObject({
+    wait_for_dependencies: true,
+    wait_for_dependencies_default: true,
+  });
+  expect(effect.timeline[0]?.body).toContain("已标记等待前置");
+  const explicit = value(
+    createCard(
+      pending,
+      human,
+      { ...decisionForm, depends_on_cards: [c2], wait_for_dependencies: false },
+      io,
+    ),
+  ).data;
+  expect(explicit).toMatchObject({
+    status: "backlog",
+    wait_for_dependencies: false,
+  });
+  // Prerequisites already complete: nothing to wait for.
+  const met = value(
+    createCard(
+      { ...state([card(), before()]), decisions: [decided], events: [event()] },
+      human,
+      { ...decisionForm, depends_on_cards: [c2] },
+      io,
+    ),
+  ).data;
+  expect(met.status).toBe("todo");
+  expect(met.wait_for_dependencies).toBeUndefined();
+  // No prerequisites: unchanged.
+  const plain = value(createCard(pending, human, decisionForm, io)).data;
+  expect(plain.status).toBe("todo");
+  expect(plain.wait_for_dependencies).toBeUndefined();
+
+  const created = effect.data;
+  const done = {
+    ...apply(pending, effect),
+    cards: [
+      card(),
+      before(),
+      ...apply(pending, effect).cards.filter((c) => c.id === created.id),
+    ],
+    events: [...apply(pending, effect).events, event()],
+  };
+  const released = value(refreshCardDependencies(done, system, io));
+  expect(released.events.map((e) => e.type)).toEqual([
+    "card_dependencies_released",
+  ]);
+  expect(
+    apply(done, released).cards.find((c) => c.id === created.id)?.status,
+  ).toBe("todo");
+});
+
+test("C-733: a backlog card whose prerequisites all completed without waiting tells PM Ops once; waiting, held, early-start and dependency-free backlog cards do not", () => {
+  const io = ports();
+  const parked: Card = {
+    ...card(),
+    status: "backlog",
+    depends_on_cards: [c2],
+  };
+  const s: CommandState = {
+    ...state([parked, before(), { ...card(3), status: "backlog" }]),
+    events: [event()],
+  };
+  const effect = value(refreshCardDependencies(s, system, io));
+  expect(effect.changes).toEqual([]);
+  expect(effect.events.map((e) => [e.type, e.card_id])).toEqual([
+    ["card_dependencies_backlog_ready", c1],
+  ]);
+  expect(effect.events[0]?.payload).toMatchObject({
+    card_id: c1,
+    depends_on_cards: [c2],
+  });
+  expect(effect.timeline[0]?.body).toContain(`${c1} 的前置卡已全部正常完成`);
+  expect(effect.timeline[0]?.body).toContain(c2);
+  const after = apply(s, effect);
+  expect(after.cards.find((c) => c.id === c1)?.status).toBe("backlog");
+  // Same card, same prerequisites: no repeat on later ticks.
+  expect(value(refreshCardDependencies(after, system, io)).events).toEqual([]);
+  // Prerequisites still pending: no notice.
+  expect(
+    value(
+      refreshCardDependencies(
+        { ...s, cards: [parked, card(2)], events: [] },
+        system,
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+  for (const patch of [
+    { status: "todo" as const },
+    {
+      hold: {
+        reason: "Wait",
+        resume_condition: "Manual",
+        set_by: "human" as const,
+        set_at: now,
+      },
+    },
+  ])
+    expect(
+      value(
+        refreshCardDependencies(
+          { ...s, cards: [{ ...parked, ...patch }, before()] },
+          system,
+          io,
+        ),
+      ).events,
+    ).toEqual([]);
+  const early = value(
+    refreshCardDependencies(
+      {
+        ...s,
+        cards: [
+          {
+            ...parked,
+            early_start: { reason: "Parallel", set_by: "human", set_at: now },
+          },
+          before(),
+        ],
+      },
+      system,
+      io,
+    ),
+  );
+  expect(early.events.map((e) => e.type)).toEqual(["card_dependencies_ready"]);
+  const waiting = value(
+    refreshCardDependencies(
+      {
+        ...s,
+        cards: [{ ...parked, wait_for_dependencies: true }, before()],
+      },
+      system,
+      io,
+    ),
+  );
+  expect(waiting.events.map((e) => e.type)).toEqual([
+    "card_dependencies_released",
+  ]);
 });

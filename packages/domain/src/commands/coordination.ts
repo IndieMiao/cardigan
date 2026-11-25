@@ -71,6 +71,10 @@ import {
 } from "./delegation.js";
 import { resolveDeliveryRework } from "./delivery-rework.js";
 import {
+  applyHeldResumeAnswer,
+  checkHeldResumeAnswer,
+} from "./held-assignment-resume.js";
+import {
   buildHumanDecidedMergeBasis,
   humanDecidedMergeQuestions,
 } from "./human-decided-merge.js";
@@ -1334,6 +1338,8 @@ function resolveDecisionDraft(
       ...p,
       ...(p.delegated_merge ? { delegated: p.delegated_merge } : {}),
     });
+  // C-732: validate a resume before recording it.
+  if (!isDecisionOther(p.option)) checkHeldResumeAnswer(d, decision, p.option);
   const actor = d.actor;
   const result = recordDecisionResolution(
     d,
@@ -1399,6 +1405,7 @@ function resolveDecisionDraft(
     resolveDeliveryRework(d, decision, p.option);
   if (preset && decision.trigger === "completion_review")
     resolveHumanCompletionReview(d, decision, p.option);
+  if (preset) applyHeldResumeAnswer(d, decision, p.option);
   if (
     decision.category === "scope_change" ||
     decision.category === "permission"

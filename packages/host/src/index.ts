@@ -144,6 +144,11 @@ export {
 export * from "./github-probe.js";
 export * from "./github-rate-limit.js";
 export {
+  DEFAULT_HELD_BACKLOG_MS,
+  heldBacklogMs,
+  heldBacklogs,
+} from "./held-backlog.js";
+export {
   HostMemoryPressureMonitor,
   linuxPressureProbe,
   pressureNotice,

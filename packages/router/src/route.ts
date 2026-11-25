@@ -5,6 +5,7 @@ import type {
   Decision,
   EventId,
   HumanAction,
+  JsonValue,
   Precheck,
   RoleId,
   TimelineEntry,
@@ -24,6 +25,7 @@ import {
   eventsOfTypes,
   flowAtLeast,
   followUpDraft,
+  heldReleaseNotice,
   humanDecisionGroupKey,
   isCompletionVerifier,
   isDecisionOther,
@@ -1696,6 +1698,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "card_dependencies_attention":
+    case "card_dependencies_backlog_ready":
     case "card_dependencies_released":
     case "card_dependencies_ready": {
       if (input.event.actor.kind !== "system") break;
@@ -2240,7 +2243,9 @@ export function routeEvent(input: RouteInput): RouteResult {
         "6.4/system rules",
         input.event.type === "card_hold_set"
           ? `${subject(input)} 已暂停，原因和恢复条件见卡片。`
-          : `${subject(input)} 已解除暂停，按当前依赖和原有门禁继续。`,
+          : `${subject(input)} 已解除暂停，按当前依赖和原有门禁继续。${heldReleaseNotice(
+              heldReleaseRows(input.event.payload),
+            )}`,
       );
       if (input.event.type === "card_hold_released") {
         const card = input.snapshot.cards.find(
@@ -2292,6 +2297,18 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     case "decision_implementation_recorded":
       routeDecisionImplementation(input, draft);
+      break;
+    case "assignment_hold_resumed":
+      // C-732: a pause ended on the human's behalf is reported to the human.
+      if (input.event.actor.kind !== "human")
+        note(
+          input,
+          draft,
+          recipient.needs_you(),
+          "needs_you",
+          "6.4/system rules",
+          `${payloadString(input.event.payload, "assignment_id")} 的人工暂停（${payloadString(input.event.payload, "paused_by")} 于 ${payloadString(input.event.payload, "paused_at")} 暂停）已由 ${payloadString(input.event.payload, "resumed_by")} 按 ${payloadString(input.event.payload, "decision_id")} 恢复，系统将按排队的待办起新 Run。`,
+        );
       break;
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
@@ -2903,4 +2920,28 @@ export function routeRuntimeLost(input: {
     card_id: input.card_id,
     summary: `${input.assignment_id} lost its runtime ${input.lost_minutes} minutes ago; decide whether to take over`,
   };
+}
+
+/** C-732: the paused Assignments recorded on a card hold release. */
+function heldReleaseRows(
+  payload: JsonValue,
+): Parameters<typeof heldReleaseNotice>[0] {
+  const rows = payloadObject(payload).paused_assignments;
+  return Array.isArray(rows)
+    ? rows.flatMap((raw) => {
+        const r = payloadObject(raw);
+        const text = (k: string) => (typeof r[k] === "string" ? r[k] : "");
+        return text("assignment_id")
+          ? [
+              {
+                assignment_id: text("assignment_id"),
+                work_item_id: text("work_item_id"),
+                paused_by: text("paused_by"),
+                paused_at: text("paused_at"),
+                resume_decision_id: text("resume_decision_id") || null,
+              },
+            ]
+          : [];
+      })
+    : [];
 }

@@ -11,6 +11,9 @@ import {
   rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
+import { recordDefault } from "./role-provenance.js";
+
+const recordedAt = "2026-01-01T00:00:00Z";
 
 test.each(["pm", "host_ops"] as const)(
   "B9: %s default-tool additions upgrade with notice; busy standing sessions rotate once after becoming idle",
@@ -64,6 +67,8 @@ test.each(["pm", "host_ops"] as const)(
         );
         tx.assignments.put(project, owner);
         tx.runs.put(project, run);
+        // An earlier deployment recorded the default this version equals.
+        recordDefault(tx, project, roleId, previous, "pack", recordedAt);
         return tx.issueToken({
           project_id: project,
           assignment_id: owner.id,
@@ -85,7 +90,7 @@ test.each(["pm", "host_ops"] as const)(
         expect(tx.human_actions.list(project)).toEqual([]);
         expect(
           notices(loadCommandState(tx, project)).some((n) =>
-            n.body.includes("默认角色"),
+            n.body.includes("已按新默认包自动升级"),
           ),
         ).toBe(true);
       });
@@ -159,6 +164,7 @@ test.each(["frontend_engineer", "design_director"] as const)(
           { mode: "add" },
         );
         tx.assignments.put(project, owner);
+        recordDefault(tx, project, roleId, previous, "pack", recordedAt);
         return tx.issueToken({
           project_id: project,
           assignment_id: owner.id,
@@ -219,6 +225,7 @@ test("deploying host_ops defers rotation after a transfer and retains the old id
         { ...role, core_prompt: "", version: 1 },
         { mode: "add" },
       );
+      recordDefault(tx, project, "host_ops", role, "pack", recordedAt);
       const at = "2026-01-01T00:00:00Z";
       const employee = {
         id: tx.global_ids.nextEmployeeId(),

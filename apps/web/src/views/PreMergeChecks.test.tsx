@@ -216,7 +216,7 @@ test.each(["needs", "card"])(
     const statusLine = () =>
       within(
         screen.getByRole("region", {
-          name: page === "needs" ? "Q-7 状态" : "卡片状态",
+          name: page === "needs" ? "Q-7 状态" : "下一步",
         }),
       );
     await screen.findByRole("status", { name: "合并前置条件" });

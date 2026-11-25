@@ -10,10 +10,8 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
-import { card, cardDetail, fakeClient, NOW } from "../testing/fixtures.js";
+import { card, NOW } from "../testing/fixtures.js";
 import { Board } from "./Board.js";
-import { CardHoldActions } from "./CardHold.js";
-import { CardStatusLine } from "./CardStatusLine.js";
 
 if (!globalThis.ResizeObserver) {
   vi.stubGlobal(
@@ -95,84 +93,3 @@ test("server lane totals count all held cards beyond the loaded page", () => {
   expect(lane.querySelector(".board-column-count")?.textContent).toBe("4");
   expect(within(lane).getByText("已暂停 · 8 张")).toBeTruthy();
 });
-
-test("C-700: hold actions only resume a paused card; pausing lives in the ⋯ menu", async () => {
-  const updateCard = vi
-    .fn()
-    .mockRejectedValueOnce(new Error("temporary failure"))
-    .mockResolvedValue(undefined);
-  const onSaved = vi.fn();
-  const client = fakeClient({ updateCard });
-  const view = render(
-    <CardHoldActions
-      card={card}
-      client={client}
-      projectId="p-1"
-      onSaved={onSaved}
-    />,
-  );
-  expect(screen.queryByRole("button")).toBeNull();
-  view.rerender(
-    <CardHoldActions
-      card={{ ...card, hold }}
-      client={client}
-      projectId="p-1"
-      onSaved={onSaved}
-    />,
-  );
-  expect(screen.queryByRole("button", { name: "暂停卡片" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "修改暂停信息" })).toBeNull();
-  const resume = screen.getByRole("button", { name: "解除暂停" });
-  fireEvent.click(resume);
-  await waitFor(() => expect(resume.hasAttribute("disabled")).toBe(false));
-  expect(onSaved).not.toHaveBeenCalled();
-  fireEvent.click(resume);
-  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
-  // A retry after an uncertain failure reuses the idempotency key.
-  expect(updateCard.mock.calls[0]).toEqual(updateCard.mock.calls[1]);
-  expect(updateCard.mock.calls[0]?.[2]).toEqual({ hold: null });
-});
-
-test("held detail status points to the full explanation without repeating its prose", () => {
-  const held = {
-    ...card,
-    hold,
-    waiting_on: [
-      {
-        kind: "blocked" as const,
-        ref: card.id,
-        label: `已暂停：${hold.reason}`,
-      },
-    ],
-  };
-  render(
-    <>
-      <CardStatusLine detail={cardDetail({ card: held })} />
-      <CardHoldActions
-        card={held}
-        client={fakeClient()}
-        projectId="p-1"
-        onSaved={vi.fn()}
-      />
-    </>,
-  );
-  expect(screen.getByText("已暂停，见下方说明")).toBeTruthy();
-  expect(screen.getAllByText(`原因：${hold.reason}`)).toHaveLength(1);
-  expect(document.querySelector(".merge-exception")).toBeNull();
-});
-
-test.each(["done", "cancelled"] as const)(
-  "a closed paused card (%s) shows the pause without a resume action",
-  (status) => {
-    render(
-      <CardHoldActions
-        card={{ ...card, status, hold }}
-        client={fakeClient()}
-        projectId="p-1"
-        onSaved={vi.fn()}
-      />,
-    );
-    expect(screen.getByText(`恢复条件：${hold.resume_condition}`)).toBeTruthy();
-    expect(screen.queryByRole("button")).toBeNull();
-  },
-);

@@ -5,7 +5,6 @@ import {
   describeWriteError,
 } from "../api.js";
 import { RequestFeedback } from "./RequestFeedback.js";
-import { Button } from "./ui/button.js";
 
 export function CardHoldDetails({
   card,
@@ -29,23 +28,20 @@ export function CardHoldDetails({
 }
 
 /**
- * C-700: pausing and editing the pause moved to the ⋯ menu (a dialog); while
- * a card is paused, resuming stays here as a direct action.
+ * C-700: pausing and editing the pause moved to the ⋯ menu (a dialog). C-695:
+ * resuming is the “下一步” panel's main action; this keeps its write.
  */
-export function CardHoldActions({
+export function useCardResume({
   card,
   client,
   projectId,
   onSaved,
-  disabled = false,
 }: {
-  card: CardView;
+  card: Pick<CardView, "id">;
   client: CardiganClient;
   projectId: string;
   onSaved: () => void;
-  disabled?: boolean;
 }) {
-  const closed = ["done", "cancelled"].includes(card.status);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -72,27 +68,16 @@ export function CardHoldActions({
       setPending(false);
     }
   };
-  return (
-    <section className="card-hold" aria-label="卡片暂停">
-      <CardHoldDetails card={card} />
-      {!closed && card.hold && (
-        <div className="card-action-buttons">
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={pending || disabled}
-            onClick={() => void resume()}
-          >
-            解除暂停
-          </Button>
-        </div>
-      )}
+  return {
+    resume,
+    pending,
+    feedback: (
       <RequestFeedback
         pending={pending}
         error={error}
         message={message}
         interactive
       />
-    </section>
-  );
+    ),
+  };
 }

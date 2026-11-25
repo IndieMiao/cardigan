@@ -39,6 +39,9 @@ export function overdueStallHandoffs(
   return eventsOfType(events, "dispatch_stall_attention").filter(
     (e) =>
       e.actor.kind === "system" &&
+      // C-732: a human pause is not an Ops takeover; its resume question
+      // (PM Ops or Needs You) is the follow-up.
+      !(e.payload as { paused_by?: string }).paused_by &&
       outstanding.delete(incidentKey(e.payload as Incident)) &&
       !escalated.has(e.id) &&
       Date.parse(now) - Date.parse(e.created_at) >= 15 * 60_000,
