@@ -58,8 +58,10 @@ export {
   type GithubCheckContext,
   githubCheckRunName,
 } from "./github-dispatch-discovery.js";
-/** C-758: default pause before retrying a transient candidate push once. */
-export const CANDIDATE_PUSH_RETRY_MS = 5_000;
+/** C-758: pauses before each retry of a transient candidate push (20 s total). */
+export const CANDIDATE_PUSH_RETRY_DELAYS_MS: readonly number[] = [
+  5_000, 15_000,
+];
 const RETRIED_PUSH_FAILURES: ReadonlySet<CandidatePushFailure> = new Set([
   "auth",
   "network",
@@ -115,8 +117,8 @@ export class GithubCheckExecutor implements CheckExecutor {
       push: (
         request: CandidatePushRequest,
       ) => Promise<CandidatePushResult | { status: "not_started" }>;
-      /** C-758: wait before the single in-fence retry of a transient push failure. */
-      pushRetryDelayMs?: number;
+      /** C-758: waits before the bounded in-fence retries of a transient push failure. */
+      pushRetryDelaysMs?: readonly number[];
       /** Must check the central repository's exact configured baseline ref. */
       isBaselineAncestor: (sha: string, branch: string) => Promise<boolean>;
       lifecycle: GithubCheckLifecycle;
@@ -316,25 +318,25 @@ export class GithubCheckExecutor implements CheckExecutor {
                 ...(request.signal ? { signal: request.signal } : {}),
               };
               let result = await this.options.push(candidate);
-              // C-758: one bounded retry inside the same publication fence for
-              // a transient answer (e.g. a just-minted installation token that
+              // C-758: bounded retries inside the same publication fence for a
+              // transient answer (e.g. a just-minted installation token that
               // GitHub's Git frontend does not accept yet). Timeouts, rejected
               // refs and local cancellation are never retried here.
-              if (
-                result.status === "failed" &&
-                RETRIED_PUSH_FAILURES.has(result.reason) &&
-                !request.signal?.aborted
-              ) {
-                await abortableDelay(
-                  this.options.pushRetryDelayMs ?? CANDIDATE_PUSH_RETRY_MS,
-                  request.signal,
-                );
-                if (!request.signal?.aborted) {
-                  const retried = await this.options.push(candidate);
-                  // The first attempt entered transport: a busy lock on the
-                  // retry is not proof that nothing was ever sent.
-                  if (retried.status !== "not_started") result = retried;
-                }
+              for (const delay of this.options.pushRetryDelaysMs ??
+                CANDIDATE_PUSH_RETRY_DELAYS_MS) {
+                if (
+                  result.status !== "failed" ||
+                  !RETRIED_PUSH_FAILURES.has(result.reason) ||
+                  request.signal?.aborted
+                )
+                  break;
+                await abortableDelay(delay, request.signal);
+                if (request.signal?.aborted) break;
+                const retried = await this.options.push(candidate);
+                // An earlier attempt entered transport: a busy lock on a retry
+                // is not proof that nothing was ever sent. Keep that failure.
+                if (retried.status === "not_started") break;
+                result = retried;
               }
               if (result.status === "not_started") {
                 outcome = "not_started";

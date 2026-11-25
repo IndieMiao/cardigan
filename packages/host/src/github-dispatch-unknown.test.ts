@@ -17,6 +17,7 @@ import {
   summarizeProviderBody,
 } from "./executor-diagnostics.js";
 import {
+  CANDIDATE_PUSH_RETRY_DELAYS_MS,
   GithubCheckExecutor,
   githubCheckRunName,
 } from "./github-check-executor.js";
@@ -131,7 +132,7 @@ function setup() {
       fetchFailureLog: vi.fn(async () => undefined),
     },
     now: () => now,
-    pushRetryDelayMs: 0,
+    pushRetryDelaysMs: [0, 0],
   };
   const request: CheckRequest = {
     kind: "merge_check",
@@ -191,8 +192,8 @@ test("C-681/C-758: a persistently unreachable push records push_unreachable and 
     pushFailure: "network",
     last: tokenExchange,
   });
-  // One bounded retry inside the same publication fence, then the real cause.
-  expect(f.push).toHaveBeenCalledTimes(2);
+  // Two bounded retries inside the same publication fence, then the real cause.
+  expect(f.push).toHaveBeenCalledTimes(3);
   expect(f.client.dispatch).not.toHaveBeenCalled();
   expect(f.journal.unfinished()).toMatchObject([{ phase: "reserved" }]);
   const text = formatDispatchUnknown(error.dispatch!);
@@ -213,13 +214,13 @@ test.each([
   [
     "auth",
     "push_rejected",
-    2,
+    3,
     "GitHub 拒绝或报错候选推送；推送结果：认证或权限被拒",
   ],
   [
     "github_error",
     "push_rejected",
-    2,
+    3,
     "GitHub 拒绝或报错候选推送；推送结果：GitHub 服务端错误",
   ],
   [
@@ -228,7 +229,7 @@ test.each([
     1,
     "候选推送在本机失败；推送结果：传输前本机校验失败",
   ],
-  ["other", "push_failed", 2, "候选推送在本机失败；推送结果：未识别的推送错误"],
+  ["other", "push_failed", 3, "候选推送在本机失败；推送结果：未识别的推送错误"],
 ] as const)(
   "C-758: a failed push (%s) is classified as %s, not as an unreachable executor",
   async (reason, stage, pushes, label) => {
@@ -250,15 +251,23 @@ test.each([
   },
 );
 
-test("C-758: a transient push failure (fresh token not yet accepted) succeeds on the in-fence retry", async () => {
-  const f = setup();
-  f.push.mockResolvedValueOnce({ status: "failed", reason: "auth" });
-  await expect(
-    new GithubCheckExecutor(f.options).dispatch(f.request),
-  ).rejects.toMatchObject({ scope: "attempt" });
-  expect(f.push).toHaveBeenCalledTimes(2);
-  expect(f.push.mock.calls[1]).toEqual(f.push.mock.calls[0]);
-  expect(f.client.dispatch).toHaveBeenCalledOnce();
+test.each([1, 2])(
+  "C-758: a transient push failure (fresh token not yet accepted) succeeds on in-fence retry %i",
+  async (failures) => {
+    const f = setup();
+    for (let i = 0; i < failures; i++)
+      f.push.mockResolvedValueOnce({ status: "failed", reason: "auth" });
+    await expect(
+      new GithubCheckExecutor(f.options).dispatch(f.request),
+    ).rejects.toMatchObject({ scope: "attempt" });
+    expect(f.push).toHaveBeenCalledTimes(failures + 1);
+    expect(f.push.mock.calls.at(-1)).toEqual(f.push.mock.calls[0]);
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+  },
+);
+
+test("C-758: the default in-fence retry waits are bounded", () => {
+  expect(CANDIDATE_PUSH_RETRY_DELAYS_MS).toEqual([5_000, 15_000]);
 });
 
 test("C-758: a retry that cannot take the repository lock keeps the first failure, never not_started", async () => {
@@ -271,6 +280,8 @@ test("C-758: a retry that cannot take the repository lock keeps the first failur
     stage: "push_unreachable",
     pushFailure: "network",
   });
+  // A busy lock ends the retries; it is not a proven unstarted publication.
+  expect(f.push).toHaveBeenCalledTimes(2);
   expect(f.journal.unfinished()[0]).not.toHaveProperty("admission_suspended");
 });
 
@@ -286,7 +297,7 @@ test.each([
     const abort = new AbortController();
     const options = {
       ...f.options,
-      pushRetryDelayMs: when === "during retry wait" ? 60_000 : 0,
+      pushRetryDelaysMs: when === "during retry wait" ? [60_000, 0] : [0, 0],
     };
     f.push.mockImplementationOnce(async () => {
       if (when === "during push") abort.abort();
