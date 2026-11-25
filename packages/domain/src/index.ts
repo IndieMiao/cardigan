@@ -245,6 +245,7 @@ export {
   telemetryEvents,
 } from "./event-index.js";
 export {
+  type DormantLoader,
   EventLog,
   EventLogView,
   type HistoryFilter,

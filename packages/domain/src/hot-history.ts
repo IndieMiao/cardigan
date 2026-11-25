@@ -13,6 +13,7 @@ import {
   fullEventHistory,
 } from "./event-index.js";
 import type { CardId, EventId } from "./ids.js";
+import { OFFICE_DIGEST_EVENT_TYPES } from "./office-changes.js";
 
 /**
  * C-639 hot command state.
@@ -48,6 +49,29 @@ export const LEAN_COLD_CARD_OMITTED_EVENT_TYPES: ReadonlySet<string> = new Set([
   ...COLD_CARD_OMITTED_EVENT_TYPES,
   "github_check_dispatch",
   "github_probe_dispatch",
+]);
+
+/**
+ * C-671 `slim`: the only fact types a cold card keeps in the command state.
+ * Every reader that can read a cold card's events reads only these types, or
+ * reads the cold card's other events through the head index (`eventHead`),
+ * which answers over every event without decoding it. The audit behind this
+ * list is in docs/plans/C-671.md.
+ */
+export const SLIM_COLD_CARD_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "card_merged",
+]);
+
+/**
+ * C-671: the types the Store keeps decoded on closed cards in the `slim`
+ * scope: the cold whitelist, plus types read across every card stream outside
+ * the command state (the GitHub dispatch journal and the Office digest).
+ */
+export const SLIM_RESIDENT_EVENT_TYPES: ReadonlySet<string> = new Set([
+  ...SLIM_COLD_CARD_EVENT_TYPES,
+  "github_check_dispatch",
+  "github_probe_dispatch",
+  ...OFFICE_DIGEST_EVENT_TYPES,
 ]);
 
 /**
@@ -283,6 +307,40 @@ export function leanCommandEvents(
   extra: Iterable<CardId | undefined> = [],
   protect: ReadonlySet<string> = new Set(),
 ): readonly Event[] {
+  return retainedCommandEvents(
+    state,
+    extra,
+    protect,
+    (type) => !LEAN_COLD_CARD_OMITTED_EVENT_TYPES.has(type),
+  );
+}
+
+/**
+ * C-671 `slim` command state as a pure function of the whole-history state:
+ * `leanCommandEvents`, except that cold cards keep only the whitelisted fact
+ * types (`SLIM_COLD_CARD_EVENT_TYPES`).
+ */
+export function slimCommandEvents(
+  state: HotCardInput & { readonly events: readonly Event[] },
+  extra: Iterable<CardId | undefined> = [],
+  protect: ReadonlySet<string> = new Set(),
+): readonly Event[] {
+  return retainedCommandEvents(
+    state,
+    extra,
+    protect,
+    (type) =>
+      SLIM_COLD_CARD_EVENT_TYPES.has(type) &&
+      !LEAN_COLD_CARD_OMITTED_EVENT_TYPES.has(type),
+  );
+}
+
+function retainedCommandEvents(
+  state: HotCardInput & { readonly events: readonly Event[] },
+  extra: Iterable<CardId | undefined>,
+  protect: ReadonlySet<string>,
+  coldKeeps: (type: string) => boolean,
+): readonly Event[] {
   // C-643: decide over the complete history (telemetry included).
   const all = fullEventHistory(state.events);
   const triggers = new Set<string>(liveTriggerEventIds(state.runs));
@@ -301,9 +359,7 @@ export function leanCommandEvents(
     keep,
   );
   const kept = all.filter((e) =>
-    e.card_id
-      ? hot.has(e.card_id) || !LEAN_COLD_CARD_OMITTED_EVENT_TYPES.has(e.type)
-      : !dropped.has(e.id),
+    e.card_id ? hot.has(e.card_id) || coldKeeps(e.type) : !dropped.has(e.id),
   );
   return all === state.events ? kept : commandEventHistory([kept]);
 }

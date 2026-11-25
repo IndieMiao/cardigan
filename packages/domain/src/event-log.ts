@@ -52,7 +52,41 @@ export function indexKeysOf(
   return typeof value === "string" ? [value] : [];
 }
 
-type Seg = { readonly events: Event[]; readonly ords: number[] };
+/**
+ * C-671: an event the Store indexed but did not keep decoded (a closed card's
+ * event of a type that no hot path reads). It carries what indexes and history
+ * filters look at; the first reader that needs the event itself makes its log
+ * decode the stream's dormant events through `EventLog.loader`. Every array or
+ * answer handed out holds decoded events only.
+ */
+export class DormantEvent {
+  constructor(
+    readonly id: string,
+    readonly seq: number,
+    readonly type: string,
+    readonly card_id: string | undefined,
+    /** Payload index keys, in `append` order, so another log can re-index it. */
+    readonly keys: readonly (readonly [EventIndexKind, unknown])[],
+  ) {}
+}
+type Entry = Event | DormantEvent;
+/** What history filters and stream lookups read: decoded or dormant alike. */
+type Head = {
+  readonly id: string;
+  readonly type: string;
+  readonly card_id?: string | undefined;
+};
+/**
+ * C-671: the Store's reader of dormant events: the events of `stream` with
+ * these seqs (ascending), in the same order. Rows are immutable, so a later
+ * read returns what the log indexed.
+ */
+export type DormantLoader = (
+  stream: string,
+  seqs: readonly number[],
+) => readonly Event[];
+
+type Seg = { readonly events: Entry[]; readonly ords: number[] };
 /**
  * Per-stream ordinals of one index key (events resolve through `EventLog.at`);
  * `total` counts every entry appended.
@@ -65,7 +99,7 @@ type Results = Map<
   Map<unknown, { total: number; events: readonly Event[] }>
 >;
 
-const streamOf = (event: Event) => event.card_id ?? "";
+const streamOf = (event: Pick<Head, "card_id">) => event.card_id ?? "";
 const noEvents: readonly Event[] = Object.freeze([]);
 
 /**
@@ -75,6 +109,11 @@ const noEvents: readonly Event[] = Object.freeze([]);
 export interface HistoryFilter {
   readonly full: ReadonlySet<string>;
   readonly omit: ReadonlySet<string>;
+  /**
+   * C-671: when set, streams outside `full` also drop every type not in
+   * `keep` (the cold-card whitelist).
+   */
+  readonly keep?: ReadonlySet<string>;
   /**
    * C-649: project-stream events left out by id (retention). Reuse the same
    * set object while it does not change: views share answers by its identity.
@@ -105,23 +144,41 @@ const filterKey = (order: readonly string[], filter?: HistoryFilter) => {
   let flags = "";
   for (const stream of order)
     flags += stream !== "" && !filter.full.has(stream) ? "1" : "0";
-  return `${flags}\u0001${typesKey(filter.omit)}\u0003${droppedKey(filter.dropped)}`;
+  const keep = filter.keep ? typesKey(filter.keep) : "*";
+  return `${flags}\u0001${typesKey(filter.omit)}\u0004${keep}\u0003${droppedKey(filter.dropped)}`;
 };
+/**
+ * C-671: lookups on a history answer over the history without its `keep`
+ * whitelist: the whitelist bounds what scans of the array see, while indexed
+ * lookups decode the dormant events they ask for.
+ */
+const lookupFilter = (filter: HistoryFilter | undefined) =>
+  filter?.keep
+    ? {
+        full: filter.full,
+        omit: filter.omit,
+        ...(filter.dropped ? { dropped: filter.dropped } : {}),
+      }
+    : filter;
+/** Whether `filter` trims `type` from the streams outside `filter.full`. */
+const trims = (filter: HistoryFilter, type: string) =>
+  filter.omit.has(type) ||
+  (filter.keep !== undefined && !filter.keep.has(type));
 /** Whether `filter` removes `event` (on stream `stream`) from a history. */
 const filtered = (
   filter: HistoryFilter | undefined,
   stream: string,
-  event: Event,
+  event: Head,
 ) =>
   filter !== undefined &&
   (stream === ""
     ? filter.dropped?.has(event.id) === true
-    : !filter.full.has(stream) && filter.omit.has(event.type));
+    : !filter.full.has(stream) && trims(filter, event.type));
 
 function push(
   segments: Map<string, Seg>,
   stream: string,
-  event: Event,
+  event: Entry,
   ord: number,
 ) {
   const seg = segments.get(stream);
@@ -156,7 +213,7 @@ export class EventLog {
   /** C-643: only the telemetry of each stream. */
   readonly telemetryStreams = new Map<string, Seg>();
   readonly ids = new Map<string, number>();
-  readonly all: Event[] = [];
+  readonly #all: Entry[] = [];
   readonly buckets = new Map<EventIndexKind, Map<unknown, Bucket>>();
   /** Base-only materialized stream prefixes, shared by views with equal prefixes. */
   readonly materialized = new Map<
@@ -172,6 +229,7 @@ export class EventLog {
     {
       count: number;
       omit: ReadonlySet<string>;
+      keep: ReadonlySet<string> | undefined;
       events: readonly Event[];
     }
   >();
@@ -180,10 +238,20 @@ export class EventLog {
    * the key's bucket has not grown (unchanged keys stay O(1) across appends).
    */
   results: { order: string; answers: Results } | undefined;
+  /** C-671: decodes dormant events; the Store sets it before appending any. */
+  loader: DormantLoader | undefined;
+  /** C-671: dormant entries not decoded yet, per stream. */
+  readonly #dormant = new Map<string, number>();
   constructor(readonly start = 0) {}
 
   get end(): number {
-    return this.start + this.all.length;
+    return this.start + this.#all.length;
+  }
+
+  /** Every event in append order (decodes dormant ones: rare paths and tests). */
+  get all(): readonly Event[] {
+    for (const stream of [...this.#dormant.keys()]) this.resolve(stream);
+    return this.#all as Event[];
   }
 
   lastSeq(stream: string): number | undefined {
@@ -191,18 +259,8 @@ export class EventLog {
   }
 
   append(event: Event): void {
-    const ord = this.end;
+    const ord = this.#add(event);
     const stream = streamOf(event);
-    this.all.push(event);
-    push(this.streams, stream, event, ord);
-    push(
-      isTelemetryEvent(event) ? this.telemetryStreams : this.commandStreams,
-      stream,
-      event,
-      ord,
-    );
-    if (!this.ids.has(event.id)) this.ids.set(event.id, ord);
-    this.#index("type", event.type, stream, ord);
     const payload = event.payload as Record<string, unknown> | null;
     if (payload && typeof payload === "object") {
       for (const field of FIELDS) {
@@ -214,6 +272,53 @@ export class EventLog {
         for (const value of resume)
           this.#index("resume_work_items", value, stream, ord);
     }
+  }
+
+  /**
+   * C-671: index `event` exactly like `append`, but keep only a dormant
+   * stand-in; `loader` decodes it again when a reader needs it.
+   */
+  appendDormant(event: Event): void {
+    const keys: [EventIndexKind, unknown][] = [];
+    for (const kind of FIELDS)
+      for (const key of indexKeysOf(event, kind)) keys.push([kind, key]);
+    for (const key of indexKeysOf(event, "resume_work_items"))
+      keys.push(["resume_work_items", key]);
+    this.#addDormant(
+      new DormantEvent(event.id, event.seq, event.type, event.card_id, keys),
+    );
+  }
+
+  /** Append every entry of `other` (a committed overlay), dormant ones included. */
+  appendLog(other: EventLog): void {
+    this.loader ??= other.loader;
+    for (const entry of other.#all)
+      if (entry instanceof DormantEvent) this.#addDormant(entry);
+      else this.append(entry);
+  }
+
+  #addDormant(entry: DormantEvent) {
+    const ord = this.#add(entry);
+    const stream = streamOf(entry);
+    for (const [kind, key] of entry.keys) this.#index(kind, key, stream, ord);
+    this.#dormant.set(stream, (this.#dormant.get(stream) ?? 0) + 1);
+  }
+
+  /** Stream, ids and type index of one entry; returns its ordinal. */
+  #add(entry: Entry): number {
+    const ord = this.end;
+    const stream = streamOf(entry);
+    this.#all.push(entry);
+    push(this.streams, stream, entry, ord);
+    push(
+      isTelemetryEvent(entry) ? this.telemetryStreams : this.commandStreams,
+      stream,
+      entry,
+      ord,
+    );
+    if (!this.ids.has(entry.id)) this.ids.set(entry.id, ord);
+    this.#index("type", entry.type, stream, ord);
+    return ord;
   }
 
   #index(kind: EventIndexKind, key: unknown, stream: string, ord: number) {
@@ -233,9 +338,104 @@ export class EventLog {
     else bucket.set(stream, [ord]);
   }
 
-  /** Event by ordinal, for ordinals owned by this log. */
+  /** C-671: how many entries are still dormant. */
+  get dormant(): number {
+    let n = 0;
+    for (const count of this.#dormant.values()) n += count;
+    return n;
+  }
+
+  /** C-671: whether `stream` still holds dormant entries. */
+  hasDormant(stream: string): boolean {
+    return this.#dormant.has(stream);
+  }
+
+  /**
+   * C-671: decode the stream's dormant entries in place, or only those at
+   * `ords`. Ordinals and indexes stay as they are; views see the same events,
+   * now decoded. One loader call per stream.
+   */
+  resolve(stream: string, ords?: readonly number[]): void {
+    if (!this.#dormant.has(stream)) return;
+    const seg = this.streams.get(stream) as Seg;
+    const at: number[] = [];
+    if (ords) {
+      const found = new Set<number>();
+      for (const ord of ords) {
+        const i = below(seg.ords, ord);
+        if (seg.ords[i] === ord && seg.events[i] instanceof DormantEvent)
+          found.add(i);
+      }
+      at.push(...[...found].sort((a, b) => a - b));
+    } else
+      for (let i = 0; i < seg.events.length; i++)
+        if (seg.events[i] instanceof DormantEvent) at.push(i);
+    if (!at.length) return;
+    const loader = this.loader;
+    if (!loader) throw new Error("C-671: dormant events without a loader");
+    const loaded = loader(
+      stream,
+      at.map((i) => (seg.events[i] as DormantEvent).seq),
+    );
+    if (loaded.length !== at.length)
+      throw new Error(`C-671: stream ${stream} lost dormant events`);
+    for (const [k, i] of at.entries()) {
+      const dormant = seg.events[i] as DormantEvent;
+      const event = loaded[k] as Event;
+      if (
+        event.id !== dormant.id ||
+        event.seq !== dormant.seq ||
+        event.type !== dormant.type ||
+        streamOf(event) !== stream
+      )
+        throw new Error(`C-671: stream ${stream} changed under its log`);
+      const ord = seg.ords[i] as number;
+      this.#all[ord - this.start] = event;
+      seg.events[i] = event;
+      const part = (
+        isTelemetryEvent(event) ? this.telemetryStreams : this.commandStreams
+      ).get(stream) as Seg;
+      part.events[below(part.ords, ord)] = event;
+    }
+    const left = (this.#dormant.get(stream) as number) - at.length;
+    if (left > 0) this.#dormant.set(stream, left);
+    else this.#dormant.delete(stream);
+  }
+
+  /**
+   * C-671: decode the dormant entries among the first `n` of `seg` (a segment
+   * of this log's `stream`, any partition) that `wanted` accepts.
+   */
+  decodeWhere(
+    stream: string,
+    seg: {
+      readonly events: readonly Entry[];
+      readonly ords: readonly number[];
+    },
+    n: number,
+    wanted?: (entry: Head) => boolean,
+  ): void {
+    if (!this.#dormant.has(stream)) return;
+    const ords: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const entry = seg.events[i] as Entry;
+      if (entry instanceof DormantEvent && (!wanted || wanted(entry)))
+        ords.push(seg.ords[i] as number);
+    }
+    if (ords.length) this.resolve(stream, ords);
+  }
+
+  /** Event by ordinal, for ordinals owned by this log (C-671: decoded on demand). */
   at(ord: number): Event | undefined {
-    return this.all[ord - this.start];
+    const entry = this.#all[ord - this.start];
+    if (!(entry instanceof DormantEvent)) return entry;
+    this.resolve(streamOf(entry), [ord]);
+    return this.#all[ord - this.start] as Event;
+  }
+
+  /** C-671: the entry at `ord` without decoding it (filters look at type and id). */
+  entryAt(ord: number): Event | DormantEvent | undefined {
+    return this.#all[ord - this.start];
   }
 }
 
@@ -315,15 +515,22 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
     const out: Event[] = [];
     const take = (log: EventLog | undefined, limit: number) => {
       const seg = log?.streams.get(stream);
-      if (!seg) return;
+      if (!log || !seg) return;
       const n = below(seg.ords, limit);
       let lo = 0;
       let hi = n;
       while (lo < hi) {
         const mid = (lo + hi) >>> 1;
-        if ((seg.events[mid] as Event).seq <= since) lo = mid + 1;
+        if ((seg.events[mid] as Entry).seq <= since) lo = mid + 1;
         else hi = mid;
       }
+      // C-671: a read past the cursor decodes dormant events; an empty one does not.
+      if (lo < n)
+        log.decodeWhere(
+          stream,
+          { events: seg.events.slice(lo, n), ords: seg.ords.slice(lo, n) },
+          n - lo,
+        );
       for (let i = lo; i < n; i++) out.push(seg.events[i] as Event);
     };
     take(this.base, this.baseEnd);
@@ -348,8 +555,14 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
     const shared = this.base.materialized.get(key);
     if (shared?.count === own && !extra) events = shared.events;
     else {
-      const head = this.base.streams.get(key)?.events.slice(0, own) ?? [];
-      const tail = this.overlay?.streams.get(key)?.events.slice(0, extra);
+      // C-671: a whole stream is a read of every event in it.
+      this.base.resolve(key);
+      this.overlay?.resolve(key);
+      const head = (this.base.streams.get(key)?.events.slice(0, own) ??
+        []) as Event[];
+      const tail = this.overlay?.streams.get(key)?.events.slice(0, extra) as
+        | Event[]
+        | undefined;
       events = tail?.length ? head.concat(tail) : head;
       if (!extra) this.base.materialized.set(key, { count: own, events });
     }
@@ -422,23 +635,36 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
       return cached.events;
     // One exact-size concat over the segments; no per-event push or sort.
     const parts: (readonly Event[])[] = [];
-    const part = (seg: Seg | undefined, limit: number) => {
-      if (!seg) return;
+    const part = (
+      log: EventLog | undefined,
+      stream: string,
+      seg: Seg | undefined,
+      limit: number,
+    ) => {
+      if (!log || !seg) return;
       const n = below(seg.ords, limit);
-      if (n)
-        parts.push(
-          n === seg.events.length ? seg.events : seg.events.slice(0, n),
-        );
+      if (!n) return;
+      log.decodeWhere(stream, seg, n);
+      parts.push(
+        (n === seg.events.length
+          ? seg.events
+          : seg.events.slice(0, n)) as Event[],
+      );
     };
-    const omit = filter?.omit;
-    const trim = (seg: Seg | undefined, limit: number) => {
-      if (!seg || !omit) return;
+    const trim = (
+      log: EventLog | undefined,
+      stream: string,
+      seg: Seg | undefined,
+      limit: number,
+    ) => {
+      if (!log || !seg || !filter) return;
       const n = below(seg.ords, limit);
       const kept: Event[] = [];
-      for (let i = 0; i < n; i++) {
-        const event = seg.events[i] as Event;
-        if (!omit.has(event.type)) kept.push(event);
-      }
+      // C-671: trimmed dormant events are never decoded.
+      const keeps = (entry: Head) => !trims(filter, entry.type);
+      log.decodeWhere(stream, seg, n, keeps);
+      for (let i = 0; i < n; i++)
+        if (keeps(seg.events[i] as Entry)) kept.push(seg.events[i] as Event);
       if (kept.length) parts.push(kept);
     };
     for (const stream of order) {
@@ -449,19 +675,30 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
         const trimmedKey =
           partition === "streams" ? stream : `${partition}\u0000${stream}`;
         const shared = this.base.trimmed.get(trimmedKey);
-        if (shared && shared.count === own && shared.omit === filter.omit) {
+        if (
+          shared &&
+          shared.count === own &&
+          shared.omit === filter.omit &&
+          shared.keep === filter.keep
+        ) {
           if (shared.events.length) parts.push(shared.events);
         } else if (own) {
           const before = parts.length;
-          trim(seg, this.baseEnd);
+          trim(this.base, stream, seg, this.baseEnd);
           this.base.trimmed.set(trimmedKey, {
             count: own,
             omit: filter.omit,
+            keep: filter.keep,
             events:
               parts.length > before ? (parts.at(-1) as Event[]) : noEvents,
           });
         }
-        trim(this.overlay?.[partition].get(stream), this.end);
+        trim(
+          this.overlay,
+          stream,
+          this.overlay?.[partition].get(stream),
+          this.end,
+        );
         continue;
       }
       const dropped = stream === "" ? filter?.dropped : undefined;
@@ -472,24 +709,30 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
           [this.overlay, this.end],
         ] as const) {
           const seg = log?.[partition].get(stream);
-          if (!seg) continue;
+          if (!log || !seg) continue;
           const n = below(seg.ords, limit);
           const kept: Event[] = [];
-          for (let i = 0; i < n; i++) {
-            const event = seg.events[i] as Event;
-            if (!dropped.has(event.id)) kept.push(event);
-          }
+          const keeps = (entry: Head) => !dropped.has(entry.id);
+          log.decodeWhere(stream, seg, n, keeps);
+          for (let i = 0; i < n; i++)
+            if (keeps(seg.events[i] as Entry))
+              kept.push(seg.events[i] as Event);
           if (kept.length) parts.push(kept);
         }
         continue;
       }
-      part(this.base[partition].get(stream), this.baseEnd);
-      part(this.overlay?.[partition].get(stream), this.end);
+      part(this.base, stream, this.base[partition].get(stream), this.baseEnd);
+      part(
+        this.overlay,
+        stream,
+        this.overlay?.[partition].get(stream),
+        this.end,
+      );
     }
     const events = ([] as Event[]).concat(...parts);
     // The telemetry list is a plain journal; lookups go through the others.
     if (partition !== "telemetryStreams")
-      attachEventIndex(events, this.#indexFor(order, filter, key));
+      attachEventIndex(events, this.#indexFor(order, lookupFilter(filter)));
     this.#histories.set(partition, { order: [...order], filter: key, events });
     return events;
   }
@@ -498,8 +741,8 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
   #indexFor(
     order: readonly string[],
     filter: HistoryFilter | undefined,
-    key: string,
   ): ViewIndex {
+    const key = filterKey(order, filter);
     const cached = this.#index;
     if (cached?.filter === key && sameOrder(cached.order, order))
       return cached.index;
@@ -541,23 +784,31 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
       // Ordinals ascend with seq inside a stream; several types interleave.
       const events: Event[] = [];
       const a = own.get(stream);
-      if (a)
-        for (const ord of types.size > 1 ? a.sort((x, y) => x - y) : a)
-          events.push(this.base.at(ord) as Event);
+      if (a) {
+        if (types.size > 1) a.sort((x, y) => x - y);
+        this.base.resolve(stream, a);
+        for (const ord of a) events.push(this.base.entryAt(ord) as Event);
+      }
       const b = extra.get(stream);
-      if (b && this.overlay)
-        for (const ord of types.size > 1 ? b.sort((x, y) => x - y) : b)
-          events.push(this.overlay.at(ord) as Event);
+      if (b && this.overlay) {
+        if (types.size > 1) b.sort((x, y) => x - y);
+        this.overlay.resolve(stream, b);
+        for (const ord of b) events.push(this.overlay.entryAt(ord) as Event);
+      }
       streams.set(stream, events);
     }
     this.#subsets.set(key, streams);
     return streams;
   }
 
-  /** Bucket segments of this view in history `rank` order. */
+  /**
+   * Bucket segments of this view in history `rank` order. C-671: entries
+   * `skip` rejects (by stream, id and type) are left out without decoding.
+   */
   collect(
     rank: ReadonlyMap<string, number>,
     pick: (log: EventLog) => ReadonlyMap<string, number[]> | undefined,
+    skip?: (stream: string, entry: Head) => boolean,
   ): readonly Event[] {
     const own = pick(this.base);
     const extra = this.overlay ? pick(this.overlay) : undefined;
@@ -572,19 +823,24 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
     if (streams.length > 1)
       streams.sort((a, b) => (rank.get(a) as number) - (rank.get(b) as number));
     const events: Event[] = [];
+    const take = (log: EventLog, stream: string, ords: number[], n: number) => {
+      const kept: number[] = [];
+      let dormant = false;
+      for (let i = 0; i < n; i++) {
+        const ord = ords[i] as number;
+        const entry = log.entryAt(ord) as Entry;
+        if (skip?.(stream, entry)) continue;
+        kept.push(ord);
+        if (entry instanceof DormantEvent) dormant = true;
+      }
+      if (dormant) log.resolve(stream, kept);
+      for (const ord of kept) events.push(log.entryAt(ord) as Event);
+    };
     for (const stream of streams) {
       const a = own?.get(stream);
-      if (a) {
-        const n = below(a, this.baseEnd);
-        for (let i = 0; i < n; i++)
-          events.push(this.base.at(a[i] as number) as Event);
-      }
+      if (a) take(this.base, stream, a, below(a, this.baseEnd));
       const b = extra?.get(stream);
-      if (b && this.overlay) {
-        const n = below(b, this.end);
-        for (let i = 0; i < n; i++)
-          events.push(this.overlay.at(b[i] as number) as Event);
-      }
+      if (b && this.overlay) take(this.overlay, stream, b, below(b, this.end));
     }
     return events.length ? events : noEvents;
   }
@@ -614,13 +870,16 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
           : lists.flat().sort((a, b) => a - b);
       const n = below(ords, limit);
       // One event can sit in a bucket twice (repeated resume_work_items).
+      const kept: number[] = [];
       let last = -1;
       for (let i = 0; i < n; i++) {
         const ord = ords[i] as number;
         if (ord === last) continue;
         last = ord;
-        out.push(log.at(ord) as Event);
+        kept.push(ord);
       }
+      log.resolve(stream, kept);
+      for (const ord of kept) out.push(log.entryAt(ord) as Event);
     };
     take(this.base, this.baseEnd);
     take(this.overlay, this.end);
@@ -633,6 +892,16 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
     if (ord !== undefined && ord < this.baseEnd) return this.base.at(ord);
     const extra = this.overlay?.ids.get(id);
     if (extra !== undefined && extra < this.end) return this.overlay?.at(extra);
+    return undefined;
+  }
+
+  /** C-671: `eventWithId` without decoding a dormant entry. */
+  entryWithId(id: string): Head | undefined {
+    const ord = this.base.ids.get(id);
+    if (ord !== undefined && ord < this.baseEnd) return this.base.entryAt(ord);
+    const extra = this.overlay?.ids.get(id);
+    if (extra !== undefined && extra < this.end)
+      return this.overlay?.entryAt(extra);
     return undefined;
   }
 }
@@ -650,6 +919,10 @@ class ViewIndex implements HistoryIndex {
     for (const [i, stream] of order.entries())
       if (!this.#rank.has(stream)) this.#rank.set(stream, i);
   }
+
+  /** C-671: entries the filter drops, decided before decoding them. */
+  readonly #skip = (stream: string, entry: Head) =>
+    filtered(this.filter, stream, entry);
 
   /** C-639: the same events without those the history filter dropped. */
   #kept(events: readonly Event[]): readonly Event[] {
@@ -697,7 +970,11 @@ class ViewIndex implements HistoryIndex {
       const hit = answers?.get(key);
       if (hit && hit.total === total) return hit.events;
       const events = this.#kept(
-        view.collect(this.#rank, (log) => log.buckets.get(kind)?.get(key)),
+        view.collect(
+          this.#rank,
+          (log) => log.buckets.get(kind)?.get(key),
+          this.#skip,
+        ),
       );
       answers?.set(key, { total, events });
       return events;
@@ -725,7 +1002,7 @@ class ViewIndex implements HistoryIndex {
     if (
       !card ||
       !this.#rank.has(card) ||
-      (filter && !filter.full.has(card) && filter.omit.has(type))
+      (filter && !filter.full.has(card) && trims(filter, type))
     )
       return noEvents;
     return this.#memo(`card:${type}`, card, () => {
@@ -742,27 +1019,31 @@ class ViewIndex implements HistoryIndex {
     if (unique.length === 1) return this.query("type", unique[0]);
     return this.#memo("types", typesKey(unique), () =>
       this.#kept(
-        this.view.collect(this.#rank, (log) => {
-          const index = log.buckets.get("type");
-          let merged: Map<string, number[]> | undefined;
-          for (const type of unique) {
-            const bucket = index?.get(type);
-            if (!bucket) continue;
-            merged ??= new Map();
-            for (const [stream, ords] of bucket) {
-              let into = merged.get(stream);
-              if (!into) {
-                into = [];
-                merged.set(stream, into);
+        this.view.collect(
+          this.#rank,
+          (log) => {
+            const index = log.buckets.get("type");
+            let merged: Map<string, number[]> | undefined;
+            for (const type of unique) {
+              const bucket = index?.get(type);
+              if (!bucket) continue;
+              merged ??= new Map();
+              for (const [stream, ords] of bucket) {
+                let into = merged.get(stream);
+                if (!into) {
+                  into = [];
+                  merged.set(stream, into);
+                }
+                for (const ord of ords) into.push(ord);
               }
-              for (const ord of ords) into.push(ord);
             }
-          }
-          // Ordinals ascend with seq inside a stream; several types interleave.
-          if (merged && unique.length > 1)
-            for (const ords of merged.values()) ords.sort((a, b) => a - b);
-          return merged;
-        }),
+            // Ordinals ascend with seq inside a stream; several types interleave.
+            if (merged && unique.length > 1)
+              for (const ords of merged.values()) ords.sort((a, b) => a - b);
+            return merged;
+          },
+          this.#skip,
+        ),
       ),
     );
   }
@@ -773,12 +1054,12 @@ class ViewIndex implements HistoryIndex {
       const out: Event[] = [];
       const take = (log: EventLog | undefined, limit: number) => {
         const seg = log?.streams.get(stream);
-        if (!seg) return;
+        if (!log || !seg) return;
         const n = below(seg.ords, limit);
-        for (let i = 0; i < n; i++) {
-          const event = seg.events[i] as Event;
-          if (!filtered(this.filter, stream, event)) out.push(event);
-        }
+        const keeps = (entry: Head) => !filtered(this.filter, stream, entry);
+        log.decodeWhere(stream, seg, n, keeps);
+        for (let i = 0; i < n; i++)
+          if (keeps(seg.events[i] as Entry)) out.push(seg.events[i] as Event);
       };
       take(this.view.base, this.view.baseEnd);
       take(this.view.overlay, this.view.end);
@@ -791,21 +1072,27 @@ class ViewIndex implements HistoryIndex {
     const out: Event[] = [];
     const take = (log: EventLog | undefined, limit: number) => {
       const seg = log?.streams.get(stream);
-      if (!seg) return;
+      if (!log || !seg) return;
       const n = below(seg.ords, limit);
       // Seq ascends inside a stream (the Store rebuilds otherwise).
       let lo = 0;
       let hi = n;
       while (lo < hi) {
         const mid = (lo + hi) >>> 1;
-        if ((seg.events[mid] as Event).seq < seq) lo = mid + 1;
+        if ((seg.events[mid] as Entry).seq < seq) lo = mid + 1;
         else hi = mid;
       }
-      for (let i = lo; i < n; i++) {
-        const event = seg.events[i] as Event;
-        if (event.seq !== seq) break;
-        if (!filtered(this.filter, stream, event)) out.push(event);
-      }
+      let hi2 = lo;
+      while (hi2 < n && (seg.events[hi2] as Entry).seq === seq) hi2++;
+      const keeps = (entry: Head) => !filtered(this.filter, stream, entry);
+      log.decodeWhere(
+        stream,
+        { events: seg.events.slice(lo, hi2), ords: seg.ords.slice(lo, hi2) },
+        hi2 - lo,
+        keeps,
+      );
+      for (let i = lo; i < hi2; i++)
+        if (keeps(seg.events[i] as Entry)) out.push(seg.events[i] as Event);
     };
     take(this.view.base, this.view.baseEnd);
     take(this.view.overlay, this.view.end);
@@ -813,11 +1100,12 @@ class ViewIndex implements HistoryIndex {
   }
 
   byId(id: string): Event | undefined {
-    const event = this.view.eventWithId(id);
-    return event &&
-      this.#rank.has(streamOf(event)) &&
-      !filtered(this.filter, streamOf(event), event)
-      ? event
+    // C-671: decide on the entry, decode only an event this history keeps.
+    const entry = this.view.entryWithId(id);
+    return entry &&
+      this.#rank.has(streamOf(entry)) &&
+      !filtered(this.filter, streamOf(entry), entry)
+      ? this.view.eventWithId(id)
       : undefined;
   }
 }
