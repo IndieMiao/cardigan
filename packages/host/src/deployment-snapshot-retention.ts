@@ -15,22 +15,22 @@ async function mountId(fd: number) {
   return m[1];
 }
 
-/** Read-only input for the site manifest. Never descend into backup directories. */
+/**
+ * C-743: automatic database snapshots older than `days`, beyond the newest
+ * `latest`, and not the recovery reference. Only files directly in the
+ * deployment directory; never descend into manual backup directories.
+ */
 export async function previewDeploymentSnapshots(
   directory: string,
   referenced: string | undefined,
-  { latest = 5, days = 7, now = new Date() } = {},
+  { latest = 3, days = 7, now = new Date() } = {},
 ) {
   if (
     ![days, latest].every((n) => Number.isSafeInteger(n) && n >= 1) ||
     !Number.isFinite(now.getTime())
   )
     throw new Error("Invalid snapshot retention policy");
-  const midnight = new Date(now);
-  midnight.setHours(0, 0, 0, 0);
-  midnight.setDate(midnight.getDate() - days + 1);
-  if (!Number.isFinite(midnight.getTime()))
-    throw new Error("Invalid snapshot retention window");
+  const cutoff = now.getTime() - days * 86_400_000;
   await requireHostDirectory(directory);
   const root = await open(
     directory,
@@ -106,13 +106,10 @@ export async function previewDeploymentSnapshots(
           ? 1
           : -1,
     );
-    const seen = new Set<string>();
-    const candidates = snapshots.filter((entry, index) => {
-      const day = new Date(entry.mtime).toDateString();
-      const daily = entry.mtime >= midnight.getTime() && !seen.has(day);
-      seen.add(day);
-      return index >= latest && !daily && entry.name !== referenced;
-    });
+    const candidates = snapshots.filter(
+      (entry, index) =>
+        index >= latest && entry.mtime < cutoff && entry.name !== referenced,
+    );
     return {
       candidates,
       skipped,

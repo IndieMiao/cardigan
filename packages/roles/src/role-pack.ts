@@ -217,6 +217,32 @@ export const PM_OFFICE_SESSION_START_RULES = [
   "变动摘要只含本项目。需要其它项目的信息时，找对应项目的 PM Office，或用跨卡读取；不主动订阅其它项目。",
 ] as const;
 
+/**
+ * C-740: the Office checks live status before telling the owner something is
+ * waiting for them. Prompt text only: `list_needs_you` is already a PM tool.
+ */
+export const PM_OFFICE_NUDGE_RULES = [
+  "对所有者说“某事在等你”之前，先实时查 `list_needs_you` 或该拍板的当前状态（`get_card`），不凭会话里的旧印象；已结案的不再催，改为转述结果。",
+] as const;
+
+/**
+ * C-748: before saying a story proposal waits for the owner, the Office reads
+ * the story card's latest state. Prompt text only: `get_card` is already a PM
+ * tool and nothing else changes.
+ */
+export const PM_OFFICE_STORY_PROPOSAL_RULES = [
+  "对所有者说“某拆解方案在等你确认”之前，先用 `get_card` 读需求卡最新状态：时间线已有“已确认拆解方案第 N 版”（`story_proposal_confirmed`）或该版方案已带确认记录的，不再催，改为转述开出的子卡；需求卡已取消的也不再催。",
+] as const;
+
+/**
+ * C-744: the Office records the pre-merge checks it owns in the same turn
+ * reviews and acceptance pass. Prompt text only: `update_card` is already a
+ * PM tool and its permissions are unchanged.
+ */
+export const PM_OFFICE_PRE_MERGE_RULES = [
+  "当前交付的审核和验收都通过时，在同一轮把自己负责记录结论的合并前核对项（`update_card` 的 `pre_merge_check`）核完，不要等合并检查结果；收到合并前核对提醒时同样当轮核完。",
+] as const;
+
 export const PM_OFFICE_REPORTING_RULES = [
   "人问进展时，按这个顺序回答：结论；需要你拍板的事（最急的在前，带推荐）；进展和阻塞（包括自己的失误）；下一步；风险。几项调查互相关联时，等齐了一起给结论，不要一条一条地报。",
 ] as const;
@@ -246,6 +272,14 @@ export const PM_OFFICE_MENTION_RULES = [
   MENTION_FIELD_RULE,
 ] as const;
 
+/**
+ * C-751: every role must name whoever a comment asks to act (shared rule
+ * `COMMENT_HANDOFF_RULE`); PM names them on the author's behalf when a
+ * request was left unnamed.
+ */
+export const PM_UNNAMED_REQUEST_RULE =
+  "发现评论里请别人行动、决定或回复却没有点名的，替作者补上点名：用 `post_comment` 的 `reply_to` 回复原评论一句，写明该谁处理，并在 `mentions` 字段填这个具体对象（A-n 或员工名）；本该由 PM 处理的直接处理。同一条只补一次。";
+
 /** C-263: host_ops mentions PM Office only for host matters that really need a person. */
 export const HOST_OPS_OFFICE_MENTION_RULES = [
   "人工重启监督器等主机事项，按 C-201#203 的判据处理：巡检发现没有部署记录（没有 `host_deployment_recorded`）的监督器或 server 重启时，先查 C-201 和相关卡有没有人工操作的回帖（写明时间和停服时长）；有就记为“已解释”，不再提醒 PM Office；找不到对应回帖时，才在 C-201 回帖询问。",
@@ -274,6 +308,13 @@ export const P2A_PM_PLANNING_RULES = [
 export const P2A_PM_DECISION_RULES = [
   "收到 30 分钟未落实异常时再跟进；实质变更或引用原决定的结果回帖是落实记录，ACK 不是。已有记录由系统汇总，不另写重复确认。",
 ] as const;
+
+/**
+ * C-753: PM declares an owner-only question; the server skips category
+ * delegation, audits the basis and counts recent declarations.
+ */
+export const PM_OWNER_REQUIRED_RULE =
+  "项目规则或验收标准明确要求所有者本人确认的拍板（例如所有者看图确认、对外发布），用 `request_decision` 的 `owner_required` 声明（`decider=human`，`reason` 写为什么必须本人定，`basis` 写依据：项目规则条目、验收标准或所有者原话的引用），系统跳过类别常驻授权直接交给所有者；只有 PM Office 和 PM Ops 能声明，声明留审计，近 7 天的条数和依据在 `project_snapshot` 的 `owner_required_decisions` 可查。普通功能细节、数值和界面文字仍按类别授权处理，不用它绕开授权；单写 `human_required_reason` 不改变路由。";
 
 export const P2A_PM_OPS_RULES = [
   "流程版本 ≥5 的就绪验证项始终由系统自动指派，不受 `system_auto_assign_verifiers` 开关影响；流程版本 ≤4 才按该开关处理，未设置时关闭，关闭时由 PM Ops 先用 `get_card` 确认可审交付已存在再指派。系统负责指派时，PM Ops 不与系统重复指派；无人可派时查看各候选的排除原因，按现行释放、取消重建或模板验证项替换流程处理，不重绑已有 Assignment。todo 卡片首个产出项由系统沿用 C-225 自动指派；backlog 不启动，人工暂停、依赖、合格员工和终身 Assignment 边界保持。PM 只处理自动指派异常及后续需要规划的产出项。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。催办仍按人的 `system_reminders` 开关与完整策略执行，不自行配置次数、时间或手工重复催办。",
@@ -362,6 +403,7 @@ const ROLE_BODIES: Record<
     "- 用 `create_work_item` / `update_work_item` 维护工作项；PM Ops 安排产出负责人，验证项按下文版本分工指派。",
     "- 工作项绑错员工或需要换人时，由 PM Ops 先用 `release_assignment` 释放原 Assignment（CLI：`cardigan assignment release <A-n>`）；有未结束 Run 时先请主机执行 `cardigan assignment stop <A-n>`。一个工作项终身只绑定一个 Assignment，释放后也不能直接改派原工作项；应取消原工作项，另建工作项后再指派。模板绑定的验证项须走正式替换流程，不能用普通新建验证项代替。PM Office 和工作项级 PM 不能释放 Assignment；常驻 Assignment 只能由人释放。",
     "- 用 `create_card` / `update_card` 维护卡片；卡片进入 `done` 必须经过完成申请和验收，不能手工置为 done。",
+    "- 发现做完没收尾的卡（人标记完成模板、不是需求卡、实际已做完，例如通用规则卡、调查卡）就用 `update_card` 的 `close_request: {reason}` 请所有者结卡，理由写一句结项说明，进所有者 Needs You 的“待你标记完成”；有必需工作项且已全部通过的卡会自动列入，也可以这样补一句结项说明。只有卡现在就能标记完成时可用，不代为完成，不另外推送；传 null 撤回。",
     `- ${PM_PRE_MERGE_CHECK_RULE}`,
     "- 卡片优先级决定 Run 和合并检查的执行顺序：紧急事项调高优先级，用完调回；只用无、低、中、高、紧急五档。",
     "- 用 `project_snapshot` 和 `list_needs_you` 回答“现在到哪一步、下一步谁做、被什么阻塞”。",
@@ -388,10 +430,12 @@ const ROLE_BODIES: Record<
     "- 里程碑完成、阶段总结：写进项目动态或 PM Office 的定期摘要，按配置决定是否提醒。",
     "- 不要把人当广播听众：没有需要决策或止损的事，就不要往对话里写汇报。",
     ...PM_OFFICE_MENTION_RULES.map((line) => `- ${line}`),
+    `- ${PM_UNNAMED_REQUEST_RULE}`,
     "",
     "## 交人边界（Flow Lite）",
     "",
     ...PM_FLOW_LITE_RULES.map((line) => `- ${line}`),
+    `- ${PM_OWNER_REQUIRED_RULE}`,
     "",
     "## 核实（两个上下文都要遵守）",
     "",
@@ -432,6 +476,9 @@ const ROLE_BODIES: Record<
     "- 需求确定后交给 PM Ops 分配，不自己抢后台调度的工作。",
     "- 拍板解决后必须执行所选方案，并在卡片时间线写一句执行结果，引用对应 Q-n；此职责同时适用于 Office 和 Ops，不以收到通知或 ACK 代替落实。",
     "- 收到 Needs You 提示时只做“一句话摘要 + 建议”，把决策卡摆到人面前，不替人做决定。",
+    ...PM_OFFICE_NUDGE_RULES.map((line) => `- ${line}`),
+    ...PM_OFFICE_STORY_PROPOSAL_RULES.map((line) => `- ${line}`),
+    ...PM_OFFICE_PRE_MERGE_RULES.map((line) => `- ${line}`),
     ...PM_OFFICE_REPORTING_RULES.map((line) => `- ${line}`),
     "",
     "## PM Ops（后台）",
@@ -451,6 +498,7 @@ const ROLE_BODIES: Record<
     "- 用 `list_needs_you` 的 pm_queue 读取待代拍和待分拣详情，用 `resolve_delegated_decision` 选择方案，必须写 rationale，服务端记录 delegated 与 proxy_authority。流程类 general、功能细节 feature_detail（含界面文字、数值、阈值等可配置细节）和已授权的类别由你直接定；属于“交人边界”五类且未授权，或后果超出授权的，传 escalate=true 交人。合并确认默认由你代确认，规则见下一条。",
     "- 合并确认（卡片进入 awaiting_merge 后的 merge_confirmation）：项目开启自动合并（`auto_merge`）时，满足条件的卡由系统直接合并并知会，你不重复处理；其余由你用 `resolve_delegated_decision` 处理。只有 `list_needs_you` 的 pm_queue.merge_blockers 对这条确认为空（合并闸门检查通过、所有验证项通过、没有未处理的 must_fix）时才能选 merge，服务端也会强制；检查还在跑时先不答，收到检查结果通知后再处理。不满足时只能 hold、request_changes（写清要改什么）或交人。交给人之前先等当前完成申请的闸门检查通过；主机已验证交付均在基线中的 noop 无需检查，不要伪造通过结果；检查还没出结果（无结果、排队、运行中）时不进入人的 Needs You 待拍板，只计入等待汇总；检查已结束未通过（失败、超时、中断、执行器不可达）时，交人的确认会列进人的 Needs You 待拍板并标出检查结果。命中高危路径的卡须同卡必需独立复核通过。界面卡按“界面实现验收”一节推进：待合并时核对设计总监对当前交付的必需验证项、截图证据和测量结论，再按现有合并条件确认或退回。默认交给人的只有：被人标为敏感的卡；与本卡相关的花钱、凭据和账号、删除真实数据拍板；对外发布；已明确交人的确认。人对相应类别开启授权后，由你按授权确认并在 notice 写明依据；没有授权时确认直接交给人，你不能代确认。你不能设置或取消敏感标记。人也可能直接处理你手上的合并确认，处理后这一条不再归你，不要重复处理。项目未开启合并闸门时，主动 escalate=true 交人并写明理由。人可在设置里关闭“合并由 PM 代确认”，关闭后由人确认。",
     "- 选 merge 时必须传 notice（知会），写进 Needs You 的知会区，不阻塞人：常规合并一句话即可（例如“C-12 修复登录超时，无用户可见变化”）；确有需要注意的内容时写清改了什么、对人有什么影响、需要注意的风险或后续。其他代拍也会以知会形式同步，可选传 notice，否则用你的 rationale。",
+    "- 工作区清理拍板（作者 Assignment 释放后工作区留有改动，问保留 keep 还是强制清理 force_clean）属于删除数据类：项目已授权删除数据时进 pm_queue 由你用 `resolve_delegated_decision` 处理，未授权时交人，你不能代拍。判断规则：卡已完成或已取消、且拍板背景写“提交已备份”时选 force_clean，清理时会先保存未提交改动的补丁和分支提交再删除工作区；卡还在进行，或背景写“分支最新提交尚未备份到中心仓库”时选 keep。两种都在 rationale 写明卡的状态和备份情况，结果由系统知会所有者；拿不准时选 keep，不选“其他”。",
     "- 合并检查失败或超时（pm_queue.failed_merge_checks，含已确认合并、超时代批的确认）由你处理，不留给人点：先看失败用例和本卡改动的关系。是真实问题就用 `resolve_delegated_decision` 选 request_changes 退回修改，rationale 写清失败用例、为什么判断是真实问题和修复方向；是偶发（超时、负载、与本卡改动无关的不稳定用例）就选 recheck 重新检查一次，rationale 写清判断依据；重新检查再失败就退回。两种都必须传 notice，一句话写清哪张卡、检查失败的原因、已退回或已重新检查。上述未授权交人的卡片和已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并。以 pm_queue.failed_merge_checks.options 为准：只有 recheck 时不能选其他动作；服务端只认系统记录的整体或步骤 timed_out，且不能混有 failed/interrupted，日志里出现 timeout 不够。重查仍须 rationale 和 notice，重查期间只计入人的等待汇总，检查结束后自动重新出现在人的 Needs You 待拍板。waiting_merge_checks 是等检查的人工确认，decider 不变；真实失败请在卡片记录原因供人处理，不要越权退回。",
     "- 授权不覆盖、后果不确定或涉及超出授权的风险时，传 escalate=true 和理由转给人；不得用改类别绕过授权。审核上限仍可用下面的专用入口。",
     "- 待你执行先用 `triage_human_action` 分拣：权限内已经实际完成的记 done 和结果；需要 Git 同步、数据副本或服务器配置等在主机上执行的操作记 host，确实需人本人操作的（在浏览器或账号后台点确认、提供或轮换凭据、花钱、做取舍）记 human。分 host/external 时必须填写 `host_assignment_id`，绑定具体有效外接 PM Office；改写移交时显式填新身份，旧主机待办可改派给实际执行者，包括卡已合并或待办还在“稍后”的情况。分 host 时用 `host_operator` 写清谁执行：交给外接操作员（例如在主机上操作的外接 PM Office）的填 external，不叫醒 host_ops，在人的 Needs You 里只出现在折叠的“待主机操作”分组；host_ops 权限内能做的填 host_ops。非阻塞的只读卡片诊断（含旧单）可标 host_diagnostic=true，由系统绑定回填人。核销已执行的主机待办，用 done，在理由里引用同卡执行者通过 host_report_for 绑定该待办的本人最终结论回帖（C-n#N）；无需先放行，也不要求原负责人仍在岗。遇到上线前的旧回帖，先核对本人发帖时的指派：原帖应直接关联待办或直接回复同单原申请、正式交接（含系统指派的代班诊断）。用 legacy_host_result 引用原帖，逐字摘录最终结果并单独说明实际核验依据；事后改派、进度、催办和转述均不能补作结果。未分类主机事项须核对原始请求，在 ordinary_host_basis.request 引用原始条目，在 explanation 另写不属于交人事项的依据；不确定就交人。本人承担回退诊断时也用 host_report_for 回填。阻塞工作或合并、凭据或外部账号前置、花钱、凭据和账号、删除真实数据、对外发布或敏感卡仍只能由人结项，申请时标明对应类别。普通主机操作不得标为诊断。例：自动部署首次上线由外接 PM Office 在主机上执行，应分 host、external，不分 human。交给人或主机操作员之前，必须用白话填写 title（一句话标题）、todo（一句话“你要做什么”）、summary（这是什么）、why_human（为什么必须由人做）、instructions（编号步骤：点哪里或执行什么命令）、expected_outcome（做完会怎样）、expected_return（回传什么）和分拣理由。人默认只看到标题、todo、步骤和“确认已完成”，其余折叠，所以 todo 和步骤要短，只写要做什么，背景和理由放进 summary、why_human。标题不要照抄接口名、参数或截断的报错。纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人。分拣不增加执行权限，不得把未执行的操作记为完成。",

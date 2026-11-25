@@ -27,6 +27,7 @@ import {
   confirmBellWrite,
   HostOpsService,
   launchRun,
+  SESSION_RELEASE_HELD,
 } from "@cardigan/host";
 import { unwrap } from "@cardigan/mcp-server";
 import { parseLaunchConfig } from "@cardigan/roles";
@@ -1804,15 +1805,19 @@ test("A-1800 replay: retained reviewer receives its original instruction after a
         payload: {
           restart_blocked: "session_maintenance",
           can_restart: false,
-          next_step: expect.stringContaining("主机运维"),
+          // C-739: PM gets the incident with the managed release entry.
+          next_step: expect.stringContaining(
+            `PM 核对后可执行受管释放：cardigan assignment stop ${a.id}`,
+          ),
+          managed_release: { command: `cardigan assignment stop ${a.id}` },
         },
       },
     ]);
-    expect(
-      f.store
-        .listNotifications({ project_id: f.project, assignment_id: f.ops.id })
-        .filter((n) => n.event_id === alert[0]?.id),
-    ).toHaveLength(1);
+    const recipients = f.store
+      .listNotifications({ project_id: f.project })
+      .filter((n) => n.event_id === alert[0]?.id)
+      .map((n) => n.recipient);
+    expect(recipients).toEqual([{ kind: "pm_ops" }]);
     expect(f.runtime.wake).not.toHaveBeenCalled();
     ready = true;
     await dispatcher.tick();
@@ -2369,3 +2374,501 @@ function darwinWorker(
     },
   };
 }
+
+// C-739 (sensen C-115, A-317): the system finished the Run, the old turn's
+// owner check keeps answering "cannot tell" (alive/unknown) and work waits.
+// Before, it sat until a watchdog ran a managed stop by hand.
+function unconfirmedTurn(f: ReturnType<typeof endedReviewer>["f"]) {
+  let released = false;
+  vi.mocked(f.runtime.status).mockImplementation(async () => ({
+    ok: true,
+    value: {
+      process: released ? "exited" : "alive",
+      agent: "unknown",
+      observed_seq: 1,
+    },
+  }));
+  // The turn check cannot confirm the old turn ended; the session itself is
+  // this Assignment's live terminal (what a managed stop checks).
+  f.runtime.observe_retirement = vi.fn(async (_ref, identity) => ({
+    ok: true as const,
+    value: released
+      ? ("exited" as const)
+      : identity.system_finished_turn
+        ? ("unknown" as const)
+        : ("alive" as const),
+  }));
+  vi.mocked(f.runtime.release).mockImplementation(async () => {
+    released = true;
+    return { ok: true, value: undefined };
+  });
+  return { released: () => released };
+}
+/** One stall-patrol pass (the poll runs in the background). */
+async function patrolPass(service: { tick(): Promise<void> }) {
+  await service.tick();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+
+test.each(["notice", "queued"] as const)(
+  "C-739: an unconfirmed system-ended turn with waiting work (%s) is released after 3 minutes; the work starts in a new session",
+  async (work) => {
+    const ended = endedReviewer();
+    const { f, a, card, item, run } = ended;
+    let notice = ended.notice;
+    if (work === "notice") {
+      // The waiting work is a new instruction; the decision note was read.
+      const read = f.store
+        .listNotifications({ project_id: f.project, assignment_id: a.id })
+        .find((n) => n.event_id === notice.id);
+      if (!read) throw new Error("missing decision note");
+      f.store.uow.run(() =>
+        moveNotification(f.store.database, {
+          project_id: f.project,
+          id: read.id,
+          event: "ack",
+          at: f.clock.now(),
+        }),
+      );
+      notice = f.event(
+        "instruction_issued",
+        { work_item_id: item.id },
+        a,
+        card.id,
+      );
+    }
+    const successor =
+      work === "queued"
+        ? f.apply((state, actor, p) =>
+            queueRun(
+              state,
+              actor,
+              {
+                assignment_id: a.id,
+                model: "fixture",
+                agent_cli_version: "fixture",
+              },
+              p,
+            ),
+          )
+        : undefined;
+    unconfirmedTurn(f);
+    // Ignored build output is not work in progress.
+    writeFileSync(join(ended.tree, ".git", "info", "exclude"), "build/\n");
+    mkdirSync(join(ended.tree, "build"));
+    writeFileSync(join(ended.tree, "build", "out.js"), "generated");
+    const ref = f.refFor(a);
+    const dispatcher = new Dispatcher(f.options);
+    const events = (type: string) =>
+      f.state().events.filter((e) => e.type === type);
+    try {
+      await dispatcher.tick();
+      expect(events("bell_wake_deferred")).toMatchObject([
+        { payload: { reason: "system_finished_turn", run_id: run.id } },
+      ]);
+      // Inside the window nothing is touched.
+      f.advance(150_000);
+      await patrolPass(f.service);
+      expect(f.runtime.release).not.toHaveBeenCalled();
+      f.advance(31_000);
+      await f.service.tick();
+      await vi.waitFor(() =>
+        expect(events("session_replaced")).toMatchObject([
+          {
+            card_id: expect.any(String),
+            payload: {
+              assignment_id: a.id,
+              reason: "system_turn_unconfirmed",
+              trigger: "system_turn",
+              system_finished_run_id: run.id,
+              workspace: "clean",
+              old_runtime_ref: ref,
+              cancelled_run_ids: [],
+            },
+          },
+        ]),
+      );
+      expect(f.runtime.release).toHaveBeenCalledOnce();
+      expect(f.runtime.release).toHaveBeenCalledWith(ref, { force: true });
+      expect(f.state().assignments.find((v) => v.id === a.id)).toMatchObject({
+        runtime_ref: null,
+        status: "active",
+      });
+      expect(events(SESSION_RELEASE_HELD)).toEqual([]);
+      // The dispatcher now starts the waiting work in a new session.
+      await dispatcher.tick();
+      await dispatcher.tick();
+      expect(f.options.startRun).toHaveBeenCalledOnce();
+      if (successor)
+        expect(f.options.startRun).toHaveBeenCalledWith(
+          expect.objectContaining({
+            run: expect.objectContaining({ id: successor.id }),
+          }),
+        );
+      const original = f.store
+        .listNotifications({ project_id: f.project, assignment_id: a.id })
+        .find((n) => n.event_id === notice.id);
+      expect(original).toMatchObject({ status: "belled", seq: notice.seq });
+      expect(original?.run_id).not.toBe(run.id);
+      // Nothing is left for the 10-minute turn recovery or Ops.
+      f.advance(600_000);
+      await dispatcher.tick();
+      await patrolPass(f.service);
+      expect(events("bell_turn_recovery_due")).toEqual([]);
+      expect(events("bell_turn_recovery_failed")).toEqual([]);
+      expect(events("dispatch_stall_attention")).toEqual([]);
+      expect(f.runtime.release).toHaveBeenCalledOnce();
+    } finally {
+      await dispatcher.close();
+    }
+  },
+);
+
+test.each(["dirty", "working", "conflict", "exit_unconfirmed"] as const)(
+  "C-739: an unconfirmed turn is kept (%s); PM gets the reason and the managed release entry",
+  async (mode) => {
+    const { f, a, tree, run } = endedReviewer();
+    const turn = unconfirmedTurn(f);
+    if (mode === "dirty") writeFileSync(join(tree, "draft"), "uncommitted");
+    if (mode === "working")
+      vi.mocked(f.runtime.status).mockResolvedValue({
+        ok: true,
+        value: { process: "alive", agent: "working", observed_seq: 1 },
+      });
+    if (mode === "conflict")
+      f.runtime.observe_retirement = vi.fn(async () => ({
+        ok: false as const,
+        error: { code: "runtime_conflict" as const, message: "other owner" },
+      }));
+    if (mode === "exit_unconfirmed") {
+      // Neither the release nor the kernel proves this session gone.
+      f.runtime.observe_retirement = vi.fn(async () => ({
+        ok: true as const,
+        value: "unknown" as const,
+      }));
+      vi.mocked(f.runtime.release).mockResolvedValue({
+        ok: true,
+        value: undefined,
+      });
+    }
+    const dispatcher = new Dispatcher(f.options);
+    const events = (type: string) =>
+      f.state().events.filter((e) => e.type === type);
+    const ringsFor = (id: string | undefined) =>
+      f.store
+        .listNotifications({ project_id: f.project })
+        .filter((n) => n.event_id === id)
+        .map((n) => n.recipient);
+    try {
+      await dispatcher.tick();
+      f.advance(181_000);
+      await f.service.tick();
+      const handedOff = mode === "dirty" || mode === "exit_unconfirmed";
+      if (handedOff)
+        await vi.waitFor(() =>
+          expect(events(SESSION_RELEASE_HELD)).toMatchObject([
+            {
+              payload: {
+                assignment_id: a.id,
+                system_finished_run_id: run.id,
+                reason:
+                  mode === "dirty"
+                    ? "workspace=dirty"
+                    : "exit_unconfirmed:unproven",
+                terminal_owner: "unknown",
+                managed_release: {
+                  command: `cardigan assignment stop ${a.id}`,
+                },
+                next_step: expect.stringContaining(
+                  `PM 核对后可执行受管释放：cardigan assignment stop ${a.id}`,
+                ),
+              },
+            },
+          ]),
+        );
+      else await new Promise((resolve) => setTimeout(resolve, 100));
+      const held = events(SESSION_RELEASE_HELD);
+      if (handedOff)
+        expect(ringsFor(held[0]?.id)).toEqual([{ kind: "pm_ops" }]);
+      else expect(held).toEqual([]);
+      // Only the exit check closed a terminal; the session stays bound.
+      expect(f.runtime.release).toHaveBeenCalledTimes(
+        mode === "exit_unconfirmed" ? 1 : 0,
+      );
+      expect(turn.released()).toBe(false);
+      expect(events("session_replaced")).toEqual([]);
+      expect(
+        f.state().assignments.find((v) => v.id === a.id)?.runtime_ref,
+      ).toEqual(f.refFor(a));
+      expect(f.options.startRun).not.toHaveBeenCalled();
+      // Later passes do not ring PM again.
+      f.advance(31_000);
+      await patrolPass(f.service);
+      expect(events(SESSION_RELEASE_HELD)).toHaveLength(handedOff ? 1 : 0);
+      if (mode !== "dirty") return;
+      // The 10-minute turn recovery fails as before, recorded for PM without
+      // a second ring; its stall handoff goes to PM, never host operations.
+      f.advance(400_000);
+      await dispatcher.tick();
+      expect(events("bell_turn_recovery_due")).toHaveLength(1);
+      await f.service.tick();
+      await vi.waitFor(() =>
+        expect(events("bell_turn_recovery_failed")).toHaveLength(1),
+      );
+      await vi.waitFor(() =>
+        expect(events("dispatch_stall_attention")).toHaveLength(1),
+      );
+      expect(events("dispatch_stall_attention")[0]?.payload).toMatchObject({
+        managed_release: { command: `cardigan assignment stop ${a.id}` },
+      });
+      expect(ringsFor(events("bell_turn_recovery_failed")[0]?.id)).toEqual([]);
+      expect(ringsFor(events("dispatch_stall_attention")[0]?.id)).toEqual([]);
+      expect(f.runtime.release).not.toHaveBeenCalled();
+    } finally {
+      await dispatcher.close();
+    }
+  },
+);
+
+test.each(["darwin", "unbound"] as const)(
+  "C-739: a remote worker's unconfirmed turn (%s) is released only with a bound clean checkout",
+  async (mode) => {
+    const { f, a, tree, run } = endedReviewer(false, "mac");
+    // As in A-317: the resumed decision queued a Run behind the ended turn.
+    const successor = f.apply((state, actor, p) =>
+      queueRun(
+        state,
+        actor,
+        { assignment_id: a.id, model: "fixture", agent_cli_version: "fixture" },
+        p,
+      ),
+    );
+    const mac = darwinWorker(f, a, run, tree);
+    const turn = unconfirmedTurn(f);
+    mac.install(() => turn.released());
+    const service = new HostOpsService({
+      ...f.options,
+      contextUsage: { execution: { mode: "local", dataDir: f.dataDir } },
+      ...(mode === "darwin"
+        ? {
+            workerExecution: (_p: string, machine: string) =>
+              machine === "mac" ? mac.execution : undefined,
+          }
+        : {}),
+    });
+    const dispatcher = new Dispatcher(f.options);
+    const events = (type: string) =>
+      f.state().events.filter((e) => e.type === type);
+    try {
+      await dispatcher.tick();
+      f.advance(181_000);
+      await service.tick();
+      if (mode === "darwin") {
+        await vi.waitFor(() =>
+          expect(events("session_replaced")).toMatchObject([
+            {
+              payload: {
+                assignment_id: a.id,
+                trigger: "system_turn",
+                system_finished_run_id: run.id,
+              },
+            },
+          ]),
+        );
+        expect(f.runtime.release).toHaveBeenCalledOnce();
+        expect(
+          f.state().assignments.find((v) => v.id === a.id)?.runtime_ref,
+        ).toBeNull();
+        await dispatcher.tick();
+        await dispatcher.tick();
+        expect(f.options.startRun).toHaveBeenCalledOnce();
+        expect(f.options.startRun).toHaveBeenCalledWith(
+          expect.objectContaining({
+            run: expect.objectContaining({ id: successor.id }),
+          }),
+        );
+      } else {
+        // No bound worker: the checkout cannot be inspected.
+        await vi.waitFor(() =>
+          expect(events(SESSION_RELEASE_HELD)).toMatchObject([
+            {
+              payload: {
+                reason: "workspace=unknown",
+                machine_id: "mac",
+                queued_run_id: successor.id,
+              },
+            },
+          ]),
+        );
+        expect(f.runtime.release).not.toHaveBeenCalled();
+        expect(f.options.startRun).not.toHaveBeenCalled();
+      }
+    } finally {
+      mac.restore();
+      await dispatcher.close();
+      await service.close();
+    }
+  },
+);
+
+// C-739#3 (sensen C-105 W-317, A-327, mac-mini): the work item was ready for
+// 157 minutes without a Run while idle retirement of the live session was
+// started and given back for business work again and again; a watchdog's
+// managed stop let the new Run start within 30 seconds.
+test.each(["local", "dirty", "single", "darwin"] as const)(
+  "C-739: work waiting while idle retirement keeps withdrawing releases the session after 3 minutes (%s)",
+  async (mode) => {
+    const { f, a, card, item, tree } = reviewerFixture(
+      mode === "darwin" ? "mac" : "local",
+    );
+    const run = f.session(a);
+    const mac = darwinWorker(f, a, run, tree);
+    unconfirmedTurn(f);
+    if (mode === "darwin") mac.install(() => false);
+    if (mode === "dirty") writeFileSync(join(tree, "draft"), "uncommitted");
+    const service =
+      mode === "darwin"
+        ? new HostOpsService({
+            ...f.options,
+            contextUsage: { execution: { mode: "local", dataDir: f.dataDir } },
+            workerExecution: (_p: string, machine: string) =>
+              machine === "mac" ? mac.execution : undefined,
+          })
+        : f.service;
+    const ref = () => f.state().assignments.find((v) => v.id === a.id);
+    const session = ref()?.runtime_ref;
+    // As in A-1800: a retained retirement of the kept terminal whose CLI
+    // prompt cannot be confirmed, so the dispatcher does not wake it.
+    f.store.uow.run((tx) => {
+      const owner = tx.assignments.get(f.project, a.id);
+      const ended = tx.runs.get(f.project, run.id);
+      if (!owner?.runtime_ref || !ended) throw new Error("missing fixture");
+      tx.runs.put(f.project, { ...ended, harness: "codex" });
+      tx.assignments.put(f.project, {
+        ...owner,
+        idle_retirement: {
+          phase: "waiting",
+          runtime_ref: owner.runtime_ref,
+          started_at: f.clock.now(),
+          threshold_minutes: 60,
+          failures: 3,
+          last_failure: "unavailable",
+          evidence: {
+            stage: "confirm",
+            reason: "kept_terminal",
+            observation: "alive",
+          },
+        },
+      });
+    });
+    f.runtime.observe_prompt = vi.fn(async () => ({ ok: true, value: false }));
+    // Retirement attempts were given up (C-690 business work).
+    f.advance(60_000);
+    const retirement = (type: string, payload: Record<string, unknown>) =>
+      f.store.uow.run((tx) =>
+        tx.events.append(f.project, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(f.project, card.id),
+          card_id: card.id,
+          type,
+          actor: { kind: "system", project_id: f.project },
+          created_at: f.clock.now(),
+          payload: { assignment_id: a.id, ...payload } as never,
+        }),
+      );
+    retirement("idle_session_retirement_withdrawn", {
+      runtime_ref: session,
+      evidence: { stage: "TERM", reason: "guard_changed" },
+    });
+    if (mode !== "single")
+      retirement("idle_session_retirement_released", {
+        reason: "business_work",
+        handoff: true,
+        failures: 3,
+      });
+    const notice = f.event(
+      "instruction_issued",
+      { work_item_id: item.id },
+      a,
+      card.id,
+    );
+    const dispatcher = new Dispatcher(f.options);
+    const events = (type: string) =>
+      f.state().events.filter((e) => e.type === type);
+    try {
+      // hc cannot tell whether the CLI is idle: the dispatcher does not wake it.
+      await dispatcher.tick();
+      expect(f.options.startRun).not.toHaveBeenCalled();
+      f.advance(150_000);
+      await patrolPass(service);
+      expect(f.runtime.release).not.toHaveBeenCalled();
+      f.advance(31_000);
+      await service.tick();
+      if (mode === "local" || mode === "darwin") {
+        await vi.waitFor(() =>
+          expect(events("session_replaced")).toMatchObject([
+            {
+              payload: {
+                assignment_id: a.id,
+                reason: "retirement_withdrawn",
+                trigger: "retirement_withdrawn",
+                withdrawals: 2,
+                workspace: "clean",
+                old_runtime_ref: session,
+              },
+            },
+          ]),
+        );
+        expect(f.runtime.release).toHaveBeenCalledWith(session, {
+          force: true,
+        });
+        expect(ref()?.runtime_ref).toBeNull();
+        await dispatcher.tick();
+        await dispatcher.tick();
+        expect(f.options.startRun).toHaveBeenCalledOnce();
+        expect(
+          f.store
+            .listNotifications({ project_id: f.project, assignment_id: a.id })
+            .find((n) => n.event_id === notice.id),
+        ).toMatchObject({ status: "belled" });
+        return;
+      }
+      if (mode === "dirty") {
+        await vi.waitFor(() =>
+          expect(events(SESSION_RELEASE_HELD)).toMatchObject([
+            {
+              payload: {
+                assignment_id: a.id,
+                trigger: "retirement_withdrawn",
+                withdrawals: 2,
+                reason: "workspace=dirty",
+                notification_ids: [expect.any(String)],
+                managed_release: {
+                  command: `cardigan assignment stop ${a.id}`,
+                },
+              },
+            },
+          ]),
+        );
+        expect(
+          f.store
+            .listNotifications({ project_id: f.project })
+            .filter((n) => n.event_id === events(SESSION_RELEASE_HELD)[0]?.id)
+            .map((n) => n.recipient),
+        ).toEqual([{ kind: "pm_ops" }]);
+      } else {
+        // One withdrawal is not a loop: left to the ordinary paths.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(events(SESSION_RELEASE_HELD)).toEqual([]);
+      }
+      expect(f.runtime.release).not.toHaveBeenCalled();
+      expect(events("session_replaced")).toEqual([]);
+      expect(ref()?.runtime_ref).toEqual(session);
+      expect(f.options.startRun).not.toHaveBeenCalled();
+    } finally {
+      mac.restore();
+      await dispatcher.close();
+      if (service !== f.service) await service.close();
+    }
+  },
+);

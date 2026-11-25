@@ -119,3 +119,59 @@ test.each([
     expect(sent).toHaveBeenCalledTimes(allowed ? 1 : 0);
   },
 );
+
+test.each([
+  ["status line under an empty editor", "status", true],
+  ["plain empty editor", "plain", true],
+  ["running turn under the status line", "busy", false],
+  ["draft under the status line", "draft", false],
+  ["status line without a framed editor", "unframed", false],
+  ["more status lines than allowed", "tall", false],
+] as const)(
+  "C-746 bound prompt (Claude Code): %s",
+  async (_label, mode, idle) => {
+    const rule = "─".repeat(20);
+    const status = ["  fixture | A-1 | coder", "  model | 32% | 4m"];
+    const footer = "  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+    const screen = {
+      status: [rule, "❯ ", rule, ...status, footer],
+      plain: [rule, "❯ ", rule, "  ? for shortcuts"],
+      busy: [rule, "❯ ", rule, ...status, `${footer} · esc to interrupt`],
+      draft: [rule, "❯ draft", rule, ...status, footer],
+      unframed: ["text", "❯ ", rule, ...status, footer],
+      tall: [rule, "❯ ", rule, ...status, ...status, "  more", footer],
+    }[mode].join("\n");
+    const client: HcClient = {
+      available: async () => true,
+      async *lines() {},
+      exec: async (args) => {
+        if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
+        if (args[0] === "read") return screen;
+        return JSON.stringify({
+          address: ref.terminal_ref,
+          state: "live",
+          status: null,
+          labels: { project: "fixture", assignment: "A-1" },
+          created_ms: 10,
+          foreground: { name: "claude", pid: 1 },
+        });
+      },
+    };
+    const runtime = value(
+      await HerdrRuntime.create({
+        client,
+        session: "fixture",
+        execution: { mode: "local", dataDir: "/fixture" },
+      }),
+    );
+    expect(
+      value(
+        await runtime.observe_prompt(ref, {
+          project_id: "fixture",
+          assignment_id: "A-1",
+          harness: "claude-code",
+        }),
+      ),
+    ).toBe(idle);
+  },
+);

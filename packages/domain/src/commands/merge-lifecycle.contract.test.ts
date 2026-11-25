@@ -353,3 +353,60 @@ test.each(["keep", "force_clean"])(
     });
   },
 );
+
+test("C-664: a released work-item record that lost its path records the host-observed worktree with its one decision", () => {
+  const f = mergeFixture();
+  const coder = f.state.assignments.find((a) => a.id === f.coder.id);
+  expect(coder?.scope).toBe("work_item");
+  expect(coder?.worktree_path).toBeUndefined();
+  const path = `/worker/worktrees/${f.state.project_id}/${f.coder.id}`;
+  const p = {
+    assignment_id: f.coder.id,
+    reason: "Uncommitted changes",
+    worktree_path: path,
+  };
+  // Still only after release, and still only by the system.
+  expect(requestWorktreeCleanup(f.state, system, p, f.io).ok).toBe(false);
+  f.commit(releaseAssignment(f.state, human, p, f.io));
+  expect(requestWorktreeCleanup(f.state, human, p, f.io).ok).toBe(false);
+  // Without an observation there is still nothing to decide.
+  expect(
+    requestWorktreeCleanup(
+      f.state,
+      system,
+      { assignment_id: f.coder.id, reason: "none" },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  // Only the Assignment's own absolute directory is accepted.
+  for (const worktree_path of [
+    "relative/A-1",
+    `/worker/worktrees/${f.state.project_id}/A-999999`,
+    `/worker/../${f.coder.id}`,
+  ])
+    expect(
+      requestWorktreeCleanup(f.state, system, { ...p, worktree_path }, f.io),
+    ).toMatchObject({ ok: false, error: { code: "invariant_violation" } });
+  const q = f.commit(requestWorktreeCleanup(f.state, system, p, f.io));
+  expect(q).toMatchObject({
+    trigger: "worktree_cleanup",
+    assignment_id: f.coder.id,
+    category: "data_deletion",
+    decider: "human",
+  });
+  expect(
+    f.state.assignments.find((a) => a.id === f.coder.id)?.worktree_path,
+  ).toBe(path);
+  // Replays are no-ops; a different path for the now-recorded one is refused.
+  expect(value(requestWorktreeCleanup(f.state, system, p, f.io))).toMatchObject(
+    { data: q, changes: [], events: [] },
+  );
+  expect(
+    requestWorktreeCleanup(
+      f.state,
+      system,
+      { ...p, worktree_path: `/elsewhere/${f.coder.id}` },
+      f.io,
+    ).ok,
+  ).toBe(false);
+});

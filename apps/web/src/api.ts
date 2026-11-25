@@ -977,6 +977,8 @@ export interface NeedsAction
   readonly triage?: "pm_ops" | "human" | "host";
   /** C-212: host actions only; external operators never wake host_ops. */
   readonly host_operator?: "external" | "host_ops";
+  /** C-742: `operator` actions belong to 张良; absent on older servers means owner. */
+  readonly executor?: "owner" | "operator";
   readonly handoff?: HumanActionHandoffView;
   readonly original_request?: {
     readonly instructions: string;
@@ -1017,6 +1019,20 @@ export interface NeedsStoryProposal {
     readonly owner_role: string;
   }[];
 }
+/** C-750: a finished card waiting for the owner to mark it done. */
+export interface NeedsCardToClose {
+  readonly card_id: string;
+  readonly card_title: string;
+  readonly template: string;
+  readonly required_work_items: number;
+  readonly close_request: {
+    readonly reason: string;
+    readonly set_by: string;
+    readonly set_at: string;
+  } | null;
+  readonly since: string | null;
+  readonly waited_ms: number | null;
+}
 export interface StoryConfirmation {
   readonly card_id: string;
   readonly version: number;
@@ -1026,6 +1042,8 @@ export interface StoryConfirmation {
 export interface NeedsPage {
   /** C-503: older servers omit it. */
   readonly story_proposals?: readonly NeedsStoryProposal[];
+  /** C-750: older servers omit it. */
+  readonly cards_to_close?: readonly NeedsCardToClose[];
   readonly waiting_merge_checks_count?: number;
   /** C-171: the confirmations the waiting summary counts (queued or running). */
   readonly waiting_merge_check_items?: readonly {
@@ -1222,6 +1240,9 @@ export interface RunView {
   readonly queue_order?: DispatchOrder;
   readonly dispatch_tier?: 1 | 2 | 3 | 4;
   readonly dispatch_reason?: string;
+  /** C-736: resources admission claimed and why; absent on older Runs. */
+  readonly resource_keys?: readonly string[];
+  readonly resource_reason?: string;
   readonly employee_id?: string;
   readonly launch_profile_ref?: string;
   readonly id: string;
@@ -2784,6 +2805,14 @@ export interface CardiganClient {
     reason: string,
     idempotencyKey?: string,
   ): Promise<void>;
+  /** C-742: hand a human action to the owner or to 张良. */
+  reassignAction(
+    projectId: string,
+    id: string,
+    executor: "owner" | "operator",
+    reason: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
   completeAction(
     projectId: string,
     id: string,
@@ -4160,6 +4189,20 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       `human-actions/${encodeURIComponent(id)}/cancel`,
       { reason },
+      idempotencyKey,
+    );
+  }
+  async reassignAction(
+    projectId: string,
+    id: string,
+    executor: "owner" | "operator",
+    reason: string,
+    idempotencyKey: string = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `human-actions/${encodeURIComponent(id)}/reassign`,
+      { executor, reason },
       idempotencyKey,
     );
   }

@@ -10,6 +10,7 @@ import type {
   JsonValue,
   Machine,
   Run,
+  TimelineEntry,
   WorkItem,
 } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
@@ -23,7 +24,11 @@ import {
 import { MachineLeases } from "./resource-leases.js";
 import type { ResourceProbe } from "./resource-probe.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
-import { runResourceKeys, unclaimedResourceKeys } from "./run-resources.js";
+import {
+  runResourceClaim,
+  runResourceKeys,
+  unclaimedResourceKeys,
+} from "./run-resources.js";
 
 const project = "first";
 const at = "2032-02-01T00:00:00.000Z";
@@ -361,4 +366,151 @@ test("C-721 an admitted Run reports the work item's resources it does not hold",
   // No admission snapshot (legacy) or no Run: nothing is known to be missing.
   expect(unclaimed({})).toEqual([]);
   expect(unclaimed(undefined)).toEqual([]);
+});
+
+const pm: Actor = {
+  kind: "assignment",
+  project_id: project,
+  assignment_id: id("assignment", 4),
+  role_id: "pm",
+  role_version: 1,
+};
+function claim(
+  owner: Assignment,
+  trigger: Event,
+  timeline: TimelineEntry[] = [],
+  notes: { kind: string; event: Event }[] = [
+    { kind: "comment", event: trigger },
+  ],
+) {
+  return store.uow.read((tx) =>
+    runResourceClaim(
+      tx,
+      project,
+      owner,
+      [trigger, ...notes.map((n) => n.event)],
+      { kind: "followup", trigger_event_id: trigger.id },
+      notes.map((n) => ({ kind: n.kind, event_id: n.event.id })),
+      timeline,
+    ),
+  );
+}
+const entry = (e: Event, mentions: string[]): TimelineEntry =>
+  ({
+    id: `${produce.card_id}#${e.seq}`,
+    short_id: `${produce.card_id}#${e.seq}`,
+    card_id: produce.card_id,
+    event_seq: e.seq,
+    type: "comment",
+    author: "human",
+    refs: [],
+    retracted: false,
+    body: "",
+    mentions,
+    created_at: at,
+  }) as unknown as TimelineEntry;
+
+test("C-736 a comment ordering the producer to work claims the work item's resources", () => {
+  const { owner } = seed();
+  const named = event("comment_posted", { body: `@${owner.id} 请开工录屏` });
+  expect(claim(owner, named)).toEqual({
+    keys: FULL,
+    reason: `评论点名 @${owner.id}，工作项处于 in_progress`,
+  });
+  const item = event("comment_posted", { body: `@ ${produce.id} 开工` });
+  expect(claim(owner, item).keys).toEqual(FULL);
+  // An explicit mention passed beside the body lives on the timeline entry.
+  const listed = event("comment_posted", { body: "请开工" });
+  expect(claim(owner, listed).keys).toEqual([]);
+  expect(claim(owner, listed, [entry(listed, [`@${owner.id}`])]).keys).toEqual(
+    FULL,
+  );
+  const fromPm = event("comment_posted", { body: "按计划开工" }, pm);
+  expect(claim(owner, fromPm)).toEqual({
+    keys: FULL,
+    reason: "PM 评论，工作项处于 in_progress",
+  });
+  // An Office order rides in the same bell as an otherwise light reply.
+  const reply = event("comment_posted", { body: "thanks" });
+  const office = event("comment_posted", { body: "顺便把录屏补上" }, pm);
+  expect(
+    claim(
+      owner,
+      reply,
+      [],
+      [
+        { kind: "comment", event: reply },
+        { kind: "comment", event: office },
+      ],
+    ),
+  ).toEqual({
+    keys: FULL,
+    reason: "待读通知：PM 评论，工作项处于 in_progress",
+  });
+});
+
+test("C-736 ordinary discussion, other targets and finished items stay light, with the reason", () => {
+  const { owner } = seed();
+  expect(claim(owner, event("comment_posted", { body: "Looks fine" }))).toEqual(
+    { keys: [], reason: "普通讨论评论" },
+  );
+  for (const body of [
+    "@A-9 please check",
+    "@W-11 next",
+    `mail@${owner.id}`,
+    `@${owner.id}0 typo`,
+  ])
+    expect(claim(owner, event("comment_posted", { body })).keys, body).toEqual(
+      [],
+    );
+  store.uow.run((tx) =>
+    tx.work_items.put(project, {
+      ...produce,
+      status: "delivered",
+      requirements: { capabilities: FULL },
+    }),
+  );
+  expect(claim(owner, event("comment_posted", { body: "提交吧" }, pm))).toEqual(
+    {
+      keys: [],
+      reason: "PM 评论，但工作项处于 delivered，不可开工",
+    },
+  );
+});
+
+test("C-736 a claim names why it holds the work item's resources", () => {
+  const { owner, reviewer } = seed();
+  const order = event("instruction_issued", { work_item_id: produce.id });
+  expect(
+    claim(owner, order, [], [{ kind: "instruction", event: order }]),
+  ).toEqual({ keys: FULL, reason: "instruction_issued 需要按工作项开工" });
+  expect(
+    store.uow.read((tx) =>
+      runResourceClaim(tx, project, owner, [], { kind: "rework" }, []),
+    ),
+  ).toEqual({ keys: FULL, reason: "rework Run" });
+  expect(claim(reviewer, event("comment_posted"))).toEqual({
+    keys: FULL,
+    reason: "验证项跟进",
+  });
+  const reply = event("comment_posted");
+  const review = pass();
+  expect(
+    claim(
+      owner,
+      reply,
+      [],
+      [
+        { kind: "comment", event: reply },
+        { kind: "review", event: review },
+      ],
+    ),
+  ).toEqual({ keys: FULL, reason: "待读通知 review" });
+  // Nothing required: nothing to explain.
+  const free = assignment(3, "pm");
+  expect(
+    store.uow.read((tx) =>
+      runResourceClaim(tx, project, free, [], { kind: "followup" }, []),
+    ),
+  ).toEqual({ keys: [] });
 });

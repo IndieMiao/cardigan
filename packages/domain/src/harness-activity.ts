@@ -22,6 +22,8 @@ export interface HarnessActivity
   readonly last_progress_at?: string;
   /** Latest positively identified model output in this same session and workspace. */
   readonly model_output_at?: string;
+  /** C-752: last write of the same transcript file, of any record (`transcript_mtime` only). */
+  readonly written_at?: string;
   readonly error?:
     | "rate_limit"
     | "server_error"

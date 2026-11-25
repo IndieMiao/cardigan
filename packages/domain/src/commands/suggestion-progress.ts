@@ -1,5 +1,6 @@
 import { authorView } from "../author-view.js";
 import type { Author, Decision, Event } from "../entities.js";
+import { cardEventsOfType } from "../event-index.js";
 import type { CommandState } from "./core.js";
 
 export const SUGGESTION_REMINDER_WINDOW_MS = 5 * 60_000;
@@ -25,23 +26,42 @@ function progressEvent(event: Event): boolean {
   }
 }
 
+/** Every type `progressEvent` can accept. */
+const PROGRESS_TYPES = [
+  "comment_posted",
+  "merge_check_finished",
+  "delivery_submitted",
+  "review_submitted",
+  "completion_reviewed",
+  "human_action_completed",
+];
 const indexes = new WeakMap<readonly Event[], Map<string, Event[]>>();
-function progressIndex(events: readonly Event[]) {
+/**
+ * C-671: one card's progress events from the per-card type index, so a
+ * resolved decision's closed card still answers in the `slim` command state
+ * without decoding other cards' history.
+ */
+function progressFor(events: readonly Event[], card: string) {
   let index = indexes.get(events);
   if (!index) {
     index = new Map();
-    const seen = new Set<string>();
-    for (const event of events) {
-      if (!event.card_id || !progressEvent(event) || seen.has(event.id))
-        continue;
-      seen.add(event.id);
-      const list = index.get(event.card_id) ?? [];
-      list.push(event);
-      index.set(event.card_id, list);
-    }
     indexes.set(events, index);
   }
-  return index;
+  let list = index.get(card);
+  if (!list) {
+    const seen = new Set<string>();
+    list = PROGRESS_TYPES.flatMap((type) =>
+      cardEventsOfType(events, card, type),
+    )
+      .sort((a, b) => a.seq - b.seq)
+      .filter((event) => {
+        if (!progressEvent(event) || seen.has(event.id)) return false;
+        seen.add(event.id);
+        return true;
+      });
+    index.set(card, list);
+  }
+  return list;
 }
 
 /** Only cards in this project and in the current decision scope contribute. */
@@ -49,11 +69,10 @@ export function suggestionProgressEvents(state: CommandState, q: Decision) {
   const baseline = q.suggestion?.evidence_baseline;
   if (!baseline) return [];
   const scoped = new Set([q.card_id, ...q.affected_cards]);
-  const index = progressIndex(state.events);
   return state.cards
     .filter((c) => c.project_id === state.project_id && scoped.has(c.id))
     .flatMap((c) =>
-      (index.get(c.id) ?? []).filter(
+      progressFor(state.events, c.id).filter(
         (e) =>
           e.actor.project_id === state.project_id &&
           baseline[c.id] !== undefined &&

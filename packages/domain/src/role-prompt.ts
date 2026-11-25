@@ -8,6 +8,14 @@ export const AGENT_PROTOCOL = [
   "空闲时即使没有收到门铃，也可以低频调用 `get_updates` 自查，防止漏铃。",
 ] as const;
 
+/**
+ * C-751: the system notifies only the targets a comment names, so a request in
+ * an unnamed comment can go unread. A rule, not a check: keyword detection was
+ * nearly all false positives. The text has no at sign (C-269).
+ */
+export const COMMENT_HANDOFF_RULE =
+  "评论里需要别人行动、决定或回复的内容，必须点名具体对象：在 `post_comment` 的 `mentions` 字段填 Assignment 编号（A-n）或员工名；被阻塞用 `report_blocker`，需要人操作用 `request_human_action`。系统只按点名通知，不点名的评论只是记录，不保证有人看到；写在代码块、行内代码或引用块里的点名不生效。";
+
 export const SHARED_BOUNDARIES = [
   "工作项作者和审核员需要拍板时，调用 `request_decision` 交 `role:pm`；系统先放进 PM 待办，不直接交人。PM 按既有授权处理，处理不了的同卡同类事项汇总后再交人；分拣不增加代拍权限。",
   "身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。",
@@ -16,6 +24,7 @@ export const SHARED_BOUNDARIES = [
   "只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。",
   "实现细节、数值和阈值由作者或 PM 选择可配置的默认值并在卡上知会；只有 PM 无法处理或未获授权的事项才交人，不自行扩大范围。",
   "验证时不得人为制造 CPU 负载（空转、压测）；偶发失败只重复运行，次数不超过 20。",
+  COMMENT_HANDOFF_RULE,
   "编号：本项目内的卡片、拍板、待办等可以写短号（如 `C-12`）；引用其它项目的必须写完整编号（代号-编号，如 `SEN-C-34`），互相提及时也照此书写。给所有者的消息、交人的待办和拍板说明一律写完整编号。本项目代号见提示词里的“项目资料”或 `whoami` 的 `project_code`。",
 ] as const;
 

@@ -11,6 +11,7 @@ import {
   fullEventHistory,
   hotCommandEvents,
   leanCommandEvents,
+  slimCommandEvents,
 } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
@@ -490,6 +491,85 @@ test("C-649 lean scope retains the project stream by type, drops cold dispatch r
     expect(ids(targeted)).toEqual(["b2", "p1", "o1", "c1", "c2"]);
   } finally {
     lean.close();
+    full.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("C-671 slim scope keeps cold cards' whitelisted facts, answers lookups over the rest and matches the domain definition", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cg-slim-state-"));
+  const full = Store.open({ dataDir, commandState: "full" });
+  const slim = Store.open({ dataDir, commandState: "slim" });
+  const event = (
+    id: string,
+    seq: number,
+    type: string,
+    card_id?: Event["card_id"],
+    payload: Event["payload"] = {},
+  ): Event => ({
+    id,
+    seq,
+    ...(card_id ? { card_id } : {}),
+    type,
+    actor: { kind: "system", project_id },
+    payload,
+    created_at: NOW,
+  });
+  const closed = {
+    ...serverCard,
+    // Not one of the ids earlier tests in this file pin into the hot set.
+    id: "C-671" as Event["card_id"] & string,
+    status: "done" as const,
+  };
+  try {
+    full.createProject({ id: project_id });
+    full.uow.run((tx) => {
+      tx.cards.put(project_id, serverCard);
+      tx.cards.put(project_id, closed);
+      tx.events.append(project_id, event("p1", 1, "merge_push_queued"));
+      tx.events.append(
+        project_id,
+        event("o1", 1, "comment_posted", serverCard.id),
+      );
+      tx.events.append(project_id, event("c1", 1, "card_merged", closed.id));
+      tx.events.append(
+        project_id,
+        event("c2", 2, "comment_posted", closed.id, { decision_id: "Q-9" }),
+      );
+      tx.events.append(project_id, event("c3", 3, "run_started", closed.id));
+      tx.events.append(
+        project_id,
+        event("c4", 4, "work_item_updated", closed.id, { work_item_id: "W-9" }),
+      );
+    });
+    const whole = full.uow.read((tx) => loadCommandState(tx, project_id));
+    const ids = (events: readonly Event[]) => events.map((e) => e.id);
+    expect(slim.commandStateScope).toBe("slim");
+    const state = slim.uow.read((tx) => loadCommandState(tx, project_id));
+    // The array keeps the open card and only the closed card's merge fact.
+    expect(ids(state.events)).toEqual(["p1", "o1", "c1"]);
+    expect(ids(fullEventHistory(state.events))).toEqual(
+      ids(fullEventHistory(slimCommandEvents(whole))),
+    );
+    // Lookups still see the closed card's other business facts...
+    expect(ids(eventsOfType(state.events, "comment_posted"))).toEqual([
+      "o1",
+      "c2",
+    ]);
+    expect(ids(eventsForDecision(state.events, "Q-9"))).toEqual(["c2"]);
+    expect(eventById(state.events, "c4")?.type).toBe("work_item_updated");
+    // ...but not its run telemetry (lean semantics).
+    expect(eventById(state.events, "c3")).toBeUndefined();
+    expect(
+      compareHotState(whole, state, { now: NOW }).filter((c) => !c.equal),
+    ).toEqual([]);
+    // A command naming the closed card keeps it whole.
+    const targeted = slim.uow.read((tx) =>
+      loadCommandState(tx, project_id, undefined, { targets: [closed.id] }),
+    );
+    expect(ids(targeted.events)).toEqual(["p1", "o1", "c1", "c2", "c4"]);
+  } finally {
+    slim.close();
     full.close();
     rmSync(dataDir, { recursive: true, force: true });
   }

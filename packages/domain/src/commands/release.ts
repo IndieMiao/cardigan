@@ -19,6 +19,10 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import {
+  assignDecision,
+  routeDelegatedWorktreeCleanups,
+} from "./delegation.js";
 import { neverDispatchedQueue } from "./failed-placement.js";
 import { cancelRunDispatch } from "./launch.js";
 import { handoffWithoutOps } from "./ops-handoff.js";
@@ -189,17 +193,42 @@ export function clearReleasedRuntimeRefs(
 export function requestWorktreeCleanup(
   state: CommandState,
   actor: Actor,
-  p: { assignment_id: AssignmentId; reason: string },
+  p: {
+    assignment_id: AssignmentId;
+    reason: string;
+    /**
+     * C-664: the host-observed directory of a released work-item record that
+     * lost its path, located by project, machine and id. It is recorded so
+     * the decision and every later round name the same worktree.
+     */
+    worktree_path?: string;
+  },
   ports: CommandPorts,
 ): Result<CommandEffect<Decision>> {
   return command(state, actor, "request_worktree_cleanup", ports, (d) => {
-    const a = d.get("assignments", p.assignment_id);
+    let a = d.get("assignments", p.assignment_id);
     ensure(
-      a.status === "released" && a.worktree_path,
+      a.status === "released" && (a.worktree_path || p.worktree_path),
       "illegal_transition",
       "Cleanup requires a released Assignment with a worktree",
     );
     text(p.reason, "reason");
+    if (p.worktree_path !== undefined) {
+      const path = p.worktree_path;
+      ensure(
+        a.scope === "work_item" &&
+          path.startsWith("/") &&
+          !path.split("/").some((part) => part === "." || part === "..") &&
+          path.split("/").at(-1) === a.id &&
+          (a.worktree_path === undefined || a.worktree_path === path),
+        "invariant_violation",
+        "Observed worktree must be this work-item Assignment's own directory",
+      );
+      if (a.worktree_path === undefined) {
+        a = { ...a, worktree_path: path };
+        d.put("assignments", a);
+      }
+    }
     const old = d
       .list("decisions")
       .find(
@@ -214,7 +243,9 @@ export function requestWorktreeCleanup(
         ? d.card(d.work(a.work_item_id).card_id)
         : undefined;
     const id = d.ids.next(state.project_id, "decision");
-    const decision: Decision = {
+    // C-747: routed like any data_deletion question; delegated to PM when
+    // the project authorized it and PM Ops can take it.
+    const decision: Decision = assignDecision(d, {
       id,
       key: id,
       ...(card ? { card_id: card.id } : {}),
@@ -245,14 +276,55 @@ export function requestWorktreeCleanup(
       decider: "human",
       doc_refs: [],
       status: "open",
-    };
+    });
     d.put("decisions", decision);
+    const delegated = decision.decider === "role:pm";
     d.emit(
       "decision_requested",
       card?.id,
-      { decision_id: id, assignment_id: a.id, affected_work_items: [] },
-      { type: "decision_request", decision_id: id, body: decision.question },
+      {
+        decision_id: id,
+        assignment_id: a.id,
+        affected_work_items: [],
+        ...(delegated
+          ? {
+              routed_to: decision.decider,
+              routing_reason: decision.delegation_authority ?? null,
+            }
+          : {}),
+      },
+      {
+        type: "decision_request",
+        decision_id: id,
+        body: delegated
+          ? `${decision.question}\n已按常驻授权转给 PM`
+          : decision.question,
+      },
     );
     return decision;
+  });
+}
+
+/**
+ * C-747: the cleanup loop moves open worktree cleanup questions to PM once
+ * the project delegates data_deletion and PM Ops is active. This covers
+ * questions raised before C-747 (moved after deployment, e.g. Q-1370) and
+ * ones raised while PM Ops was unavailable. No change when nothing moves.
+ */
+export function routeWorktreeCleanupDecisions(
+  state: CommandState,
+  actor: Actor,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "request_worktree_cleanup", ports, (d) => {
+    ensure(
+      actor.kind === "system",
+      "unauthorized",
+      "Only the cleanup loop routes worktree cleanup questions",
+    );
+    return routeDelegatedWorktreeCleanups(
+      d,
+      "已按“删除数据”的常驻授权，将待处理的工作区清理拍板转给 PM 代拍。",
+    );
   });
 }

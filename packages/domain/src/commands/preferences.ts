@@ -60,6 +60,7 @@ import {
   assignDecision,
   handoffUnauthorizedDecisions,
   mergeNeedsHuman,
+  routeDelegatedWorktreeCleanups,
 } from "./delegation.js";
 import {
   syncHumanDecidedMerges,
@@ -832,6 +833,11 @@ export function setProjectPreferences(
           },
         );
       }
+      // C-747: open worktree cleanup questions follow data_deletion too.
+      routeDelegatedWorktreeCleanups(
+        d,
+        "已按你刚开启的“删除数据”授权，将待处理的工作区清理拍板转给 PM 代拍。",
+      );
     }
     if (roleRuleChanged) {
       d.emit("project_preferences_updated", undefined, {

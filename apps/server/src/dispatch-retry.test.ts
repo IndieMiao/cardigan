@@ -5,10 +5,12 @@ import {
   claimDispatchStop,
   dispatchRun,
   eventById,
+  eventsOfType,
   finishRun,
   listNeedsYou,
   queueRun,
   type Run,
+  recordRunAckRefusal,
   startDispatchStop,
 } from "@cardigan/domain";
 import { runCapacitySnapshot } from "@cardigan/host";
@@ -447,6 +449,153 @@ test("successful send without run_started times out once; second timeout creates
   await d.tick();
   expect(f.state().human_actions[0]?.status).toBe("cancelled");
   expect(f.notes().some((n) => n.status === "needs_attention")).toBe(false);
+});
+
+test("C-735: a refused start acknowledgement escalates once with its reason and never stops or requeues", async () => {
+  f.comment();
+  const d = dispatcher({ dispatchTimeoutMs: 100 });
+  await d.tick();
+  const original = f.latest();
+  f.apply(
+    (s, a, p) =>
+      recordRunAckRefusal(
+        s,
+        a,
+        {
+          run_id: original.id,
+          code: "invariant_violation",
+          message: "Dependencies are not complete for W-1",
+        },
+        p,
+      ),
+    f.actorFor(f.target.assignment),
+  );
+  f.advance(100);
+  await d.tick();
+  await d.tick();
+  expect(f.latest()).toMatchObject({ id: original.id, status: "dispatched" });
+  expect(f.latest().dispatch_stop).toBeUndefined();
+  expect(f.runtime.interrupt).not.toHaveBeenCalled();
+  expect(count("run_dispatch_stop_requested")).toBe(0);
+  expect(count("run_dispatch_recovered")).toBe(0);
+  expect(count("run_dispatch_stalled")).toBe(1);
+  const alert = f.state().events.find((e) => e.type === "run_dispatch_stalled");
+  expect(alert?.payload).toMatchObject({
+    run_id: original.id,
+    reason: "ack_refused",
+  });
+  expect(
+    f
+      .state()
+      .timeline.some((e) =>
+        e.body.includes("Dependencies are not complete for W-1"),
+      ),
+  ).toBe(true);
+});
+
+test("C-735: a refused acknowledgement does not keep an obsolete review wake from its fenced cancellation", async () => {
+  f.comment();
+  const d = dispatcher({ dispatchTimeoutMs: 100 });
+  await d.tick();
+  const original = f.latest();
+  f.store.uow.run((tx) => {
+    const run = tx.runs.get(f.project, original.id);
+    if (!run) throw new Error("Missing Run");
+    tx.runs.put(f.project, {
+      ...run,
+      bell_delivery: {
+        ...(run.bell_delivery ?? {}),
+        review_target: { delivery_id: "D-gone", target_sha: "0".repeat(40) },
+      },
+    } as typeof run);
+  });
+  f.apply(
+    (s, a, p) =>
+      recordRunAckRefusal(
+        s,
+        a,
+        {
+          run_id: original.id,
+          code: "illegal_transition",
+          message: "审核已暂停返工或目标已变更，请等待当前任务",
+        },
+        p,
+      ),
+    f.actorFor(f.target.assignment),
+  );
+  for (let i = 0; i < 6; i++) {
+    f.advance(100);
+    await d.tick();
+  }
+  expect(f.state().runs.find((r) => r.id === original.id)?.status).toBe(
+    "cancelled",
+  );
+  expect(count("run_dispatch_stop_requested")).toBe(1);
+  expect(count("run_dispatch_recovered")).toBe(0);
+});
+
+test("C-735: once prerequisites complete, a Run left dispatched by refused acknowledgements starts and gets its pending bell", async () => {
+  f.comment();
+  const d = dispatcher({ dispatchTimeoutMs: 3_600_000 });
+  await d.tick();
+  const stuck = f.latest();
+  const runs = f.state().runs.length;
+  expect(stuck.status).toBe("dispatched");
+  expect(f.runtime.wake).toHaveBeenCalledTimes(1);
+  // Legacy state: the item waits for an unfinished prerequisite and the
+  // session's refused Card tool calls left only its activity time behind.
+  const prerequisite = {
+    ...f.target.item,
+    id: "W-900" as typeof f.target.item.id,
+    title: "Prerequisite",
+    status: "in_progress" as const,
+  };
+  delete (prerequisite as { assignment_id?: unknown }).assignment_id;
+  f.advance(1000);
+  f.store.uow.run((tx) => {
+    tx.work_items.put(f.project, prerequisite);
+    const item = tx.work_items.get(f.project, f.target.item.id);
+    if (!item) throw new Error("Missing item");
+    tx.work_items.put(f.project, {
+      ...item,
+      status: "todo",
+      depends_on: [prerequisite.id],
+    });
+    const a = tx.assignments.get(f.project, f.target.assignment.id);
+    if (!a) throw new Error("Missing Assignment");
+    tx.assignments.put(f.project, {
+      ...a,
+      last_mcp_activity_at: f.clock.now(),
+    });
+  });
+  f.advance(1000);
+  await d.tick();
+  expect(f.latest()).toMatchObject({ id: stuck.id, status: "dispatched" });
+  // The prerequisite completes; a new instruction is waiting for the session.
+  f.store.uow.run((tx) => {
+    const item = tx.work_items.get(f.project, prerequisite.id);
+    if (!item) throw new Error("Missing prerequisite");
+    tx.work_items.put(f.project, { ...item, status: "accepted" });
+  });
+  f.comment();
+  f.advance(1000);
+  await d.tick();
+  await d.tick();
+  expect(f.latest()).toMatchObject({ id: stuck.id, status: "running" });
+  expect(
+    f.state().work_items.find((w) => w.id === f.target.item.id)?.status,
+  ).toBe("in_progress");
+  expect(
+    eventsOfType(f.state().events, "run_started").filter(
+      (e) =>
+        (e.payload as { system_acknowledged?: string }).system_acknowledged ===
+        "dependencies_met",
+    ),
+  ).toHaveLength(1);
+  expect(f.runtime.wake).toHaveBeenCalledTimes(2);
+  expect(f.runtime.interrupt).not.toHaveBeenCalled();
+  expect(f.state().runs).toHaveLength(runs);
+  expect(count("run_dispatch_stop_requested")).toBe(0);
 });
 
 test.each(["exited", "unknown"] as const)(

@@ -201,7 +201,8 @@ function alertMetadata(lines, path, mtime, activity) {
   const only = calls?.size === 1 ? calls.values().next().value : undefined;
   if (!file && !only) return;
   return {
-    ...(file ? {file_activity: file} : {}),
+    // C-752: the raw write time covers every later record of this session.
+    ...(file ? {file_activity: {...file, written_at: writeTime}} : {}),
     ...(only ? {foreground: {command: only.command, start: only.start}} : {}),
   };
 }
