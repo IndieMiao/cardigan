@@ -72,7 +72,8 @@ import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { useAttachmentRefsState } from "../useAttachmentRefs.js";
 import { useResource } from "../useResource.js";
-import { MergeConfirmation, SuggestedDecision } from "./NeedsYouPage.js";
+import { MergePanel } from "./MergePanel.js";
+import { SuggestedDecision } from "./NeedsYouPage.js";
 
 /** Timeline entries per read; older pages load as the reader scrolls. */
 const PAGE_SIZE = 20;
@@ -678,12 +679,6 @@ function CardContent({
     const answer = "[aria-label$='题回答']:is(input, textarea):not(:disabled)";
     const button = "button:not(:disabled)";
     const candidates: Record<NextStepTarget, [string, string[]][]> = {
-      merge: [
-        [
-          `#card-${cardId}-merge`,
-          ["button[type=submit][form]:not(:disabled)", button],
-        ],
-      ],
       decisions: [[`#card-${cardId}-suggested`, [button]]],
       proposal: [["section[aria-label='拆解方案']", [button]]],
       // The first open question; with none left, the comment box.
@@ -824,6 +819,17 @@ function CardContent({
           onReveal={revealTarget}
           completionId={completionId}
           busy={!!activeAction}
+          mergePanel={(q, { title, mine }) => (
+            <MergePanel
+              key={q.id}
+              q={q}
+              client={client}
+              projectId={projectId}
+              done={reload}
+              title={title}
+              mine={mine}
+            />
+          )}
           markDone={(emphasis) => (
             <CardTemplate
               disabled={!!activeAction && activeAction !== "completion"}
@@ -867,28 +873,14 @@ function CardContent({
             client={client}
             done={reload}
           />
-          {!!(
-            detail.merge_confirmations?.length ||
-            card.merge_check_blockers?.length
-          ) && (
+          {!!card.merge_check_blockers?.length && (
             <section
               id={sectionId("merge")}
               className="card-section card-merge"
               aria-label="合并处理"
             >
               <h2 className="visually-hidden">合并处理</h2>
-              <MergeBlockers blockers={card.merge_check_blockers ?? []} />
-              {detail.merge_confirmations?.map((q) => (
-                <MergeConfirmation
-                  key={q.id}
-                  q={q}
-                  client={client}
-                  projectId={projectId}
-                  done={reload}
-                  elapsed={0}
-                  inCardHeader
-                />
-              ))}
+              <MergeBlockers blockers={card.merge_check_blockers} />
             </section>
           )}
           {suggested.length > 0 && (

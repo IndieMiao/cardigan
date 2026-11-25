@@ -1,4 +1,5 @@
 import { type RefObject, useRef, useState } from "react";
+import { Button } from "./ui/button.js";
 import * as Dialog from "./ui/dialog.js";
 
 /** Opening the existing controls does not change the decision's owner. */
@@ -8,26 +9,38 @@ export function PmMergeTakeover({
   accepted,
   onAccept,
   controls,
+  regular = false,
 }: {
   title: string;
   waitingForCheck: boolean;
   accepted: boolean;
   onAccept: () => void;
-  controls: RefObject<HTMLFormElement | null>;
+  controls: RefObject<HTMLElement | null>;
+  /** C-697: a 32px button among the “下一步” panel's actions. */
+  regular?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const cancel = useRef<HTMLButtonElement>(null);
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
-      <Dialog.Trigger asChild>
-        <button
-          type="button"
-          className="quiet pm-merge-takeover"
-          hidden={accepted}
-        >
-          接手处理
-        </button>
-      </Dialog.Trigger>
+      {regular ? (
+        // A shown button keeps its own display; leave it out once accepted.
+        !accepted && (
+          <Dialog.Trigger asChild>
+            <Button size="regular">接手处理</Button>
+          </Dialog.Trigger>
+        )
+      ) : (
+        <Dialog.Trigger asChild>
+          <button
+            type="button"
+            className="quiet pm-merge-takeover"
+            hidden={accepted}
+          >
+            接手处理
+          </button>
+        </Dialog.Trigger>
+      )}
       <Dialog.Portal>
         <Dialog.Overlay className="pre-merge-overlay" />
         <Dialog.Content

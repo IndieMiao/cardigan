@@ -16,6 +16,7 @@ import type {
 } from "../api.js";
 import { PRE_MERGE_COPY as COPY } from "../pre-merge-copy.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
+import { selectMenu } from "../testing/menu.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 import { NeedsYouPage } from "./NeedsYouPage.js";
 
@@ -167,12 +168,11 @@ test("C-264: card detail shows the same blockers and disables merge", async () =
       cardId="C-1"
     />,
   );
-  const region = within(
-    await screen.findByRole("region", { name: "合并处理" }),
-  );
-  expect(
-    region.getByText(COPY.waitingTitle(["独立安全审核", "截图核对"])),
-  ).toBeTruthy();
+  // C-697: the “下一步” panel lists what still blocks the merge.
+  const region = within(await screen.findByRole("region", { name: "下一步" }));
+  const waiting = within(region.getByRole("status", { name: "合并前置条件" }));
+  expect(waiting.getByText("独立安全审核：待核")).toBeTruthy();
+  expect(waiting.getByText("截图核对：未通过")).toBeTruthy();
   fireEvent.click(
     region.getByRole("button", { name: "确认合并", exact: true }),
   );
@@ -226,7 +226,8 @@ test.each(["needs", "card"])(
     q = merge(passed);
     rerender(view(1));
     await waitFor(() => expect(button().hasAttribute("disabled")).toBe(false));
-    expect(statusLine().getByText("检查都已通过")).toBeTruthy();
+    // The card panel also announces it in its (visually hidden) live status.
+    expect(statusLine().getAllByText("检查都已通过").length).toBeGreaterThan(0);
     expect(
       within(screen.getByRole("status", { name: "合并前置条件" })).getByText(
         "检查都已通过",
@@ -312,13 +313,19 @@ test.each(["needs", "card"])(
         <CardDetailPage client={client} projectId="p-1" cardId="C-1" />
       ),
     );
+    // C-697: in card details 仍要合并 is in the panel's ⋯ menu.
     const trigger = await screen.findByRole("button", {
-      name: "仍要合并",
+      name: page === "needs" ? "仍要合并" : "更多合并操作",
       exact: true,
     });
-    fireEvent.click(trigger);
+    const open = () =>
+      page === "needs"
+        ? fireEvent.click(trigger)
+        : selectMenu(/^更多合并操作$/, "仍要合并…");
+    await open();
+    // Card details name the confirmation in the title as well.
     let dialog = await screen.findByRole("alertdialog", {
-      name: "仍要确认合并？",
+      name: /^仍要确认合并？/u,
     });
     expect(dialog.getAttribute("aria-modal")).toBe("true");
     expect(within(dialog).getByText("截图核对：未通过")).toBeTruthy();
@@ -330,8 +337,10 @@ test.each(["needs", "card"])(
     fireEvent.keyDown(dialog, { key: "Escape", code: "Escape" });
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     expect(document.activeElement).toBe(trigger);
-    fireEvent.click(trigger);
-    dialog = await screen.findByRole("alertdialog", { name: "仍要确认合并？" });
+    await open();
+    dialog = await screen.findByRole("alertdialog", {
+      name: /^仍要确认合并？/u,
+    });
     const submit = within(dialog).getByRole("button", { name: "确认仍要合并" });
     expect(submit.hasAttribute("disabled")).toBe(true);
     fireEvent.click(submit);

@@ -922,6 +922,13 @@
     padding: 0;
     flex: 0 0 var(--ui-control);
   }
+  .ui-icon-button-regular {
+    width: var(--ui-control-regular);
+    height: var(--ui-control-regular);
+    min-width: var(--ui-control-regular);
+    min-height: var(--ui-control-regular);
+    flex-basis: var(--ui-control-regular);
+  }
 
   .ui-table-cell :is(.id-tag, .status) {
     min-height: var(--ui-control);

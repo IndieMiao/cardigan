@@ -255,7 +255,8 @@ test("C-205: card refresh preserves the folded quote across snooze/check updates
   const view = render(
     <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
   );
-  await screen.findByRole("article", { name: "合并确认 Q-1" });
+  // C-697: the merge confirmation is the “下一步” panel.
+  await screen.findByRole("group", { name: "合并处理操作" });
   expect(screen.getAllByText("需要补齐截图")).toHaveLength(1);
   // C-695: the merge facts appear once, in the “下一步” panel.
   expect(

@@ -21,17 +21,10 @@ import {
   DetailNextStep,
   DetailNextStepLine,
 } from "./layout/CardDetailLayout.js";
-import { MergeStatusFacts } from "./MergeStatusLine.js";
-import { PlainSummaryRisk } from "./PlainSummary.js";
 import { Button } from "./ui/button.js";
 
 /** Where a panel action leads when the action itself still lives elsewhere. */
-export type NextStepTarget =
-  | "merge"
-  | "decisions"
-  | "proposal"
-  | "questions"
-  | "comment";
+export type NextStepTarget = "decisions" | "proposal" | "questions" | "comment";
 
 /** C-695: what the card waits for, most urgent first (C-687 §3.2). */
 export type NextStepState =
@@ -43,6 +36,8 @@ export type NextStepState =
       readonly failed: boolean;
     }
   | { readonly kind: "merge-pm"; readonly q: NeedsDecision }
+  /** Confirmed, waiting for the merge (or its check) to finish. */
+  | { readonly kind: "merge-confirmed"; readonly q: NeedsDecision }
   | {
       readonly kind: "decision";
       readonly ref: string;
@@ -135,6 +130,9 @@ export function cardNextSteps(detail: CardDetail): {
     (q) => q.decider === "role:pm" && q.status !== "resolved",
   );
   if (pm) return { current: { kind: "merge-pm", q: pm }, more: 0 };
+  const settled = confirmations.find((q) => q.status === "resolved");
+  if (settled)
+    return { current: { kind: "merge-confirmed", q: settled }, more: 0 };
   const blocked = waiting.filter(
     (item) => item.kind === "blocked" && !precheckWait(item),
   );
@@ -181,6 +179,7 @@ export function CardNextStep({
   onSaved,
   onReveal,
   markDone,
+  mergePanel,
   completionId,
   busy = false,
 }: {
@@ -191,6 +190,14 @@ export function CardNextStep({
   readonly onReveal: (target: NextStepTarget) => void;
   /** The existing “标记完成” action; emphasised when it is the main one. */
   readonly markDone: (emphasis: boolean) => ReactNode;
+  /**
+   * C-697: a merge confirmation is the panel itself, with its own buttons,
+   * ⋯ menu and “合并详情”.
+   */
+  readonly mergePanel: (
+    q: NeedsDecision,
+    panel: { readonly title: ReactNode; readonly mine: boolean },
+  ) => ReactNode;
   readonly completionId?: string | undefined;
   /** Another card form (edit, mark done) is open: panel writes wait. */
   readonly busy?: boolean;
@@ -312,51 +319,37 @@ export function CardNextStep({
         </>
       );
       break;
-    case "merge": {
-      const { q } = current;
-      title = (
-        <>
-          {current.failed ? "合并检查未通过" : "等你确认合并"}
-          <IdBadge id={q.id} />
-          {moreLink}
-        </>
-      );
-      lines = (
-        <>
-          <DetailNextStepLine>
-            <MergeStatusFacts q={q} />
-          </DetailNextStepLine>
-          <DetailNextStepLine>
-            <dl>
-              <PlainSummaryRisk
-                risk={q.plain_summary?.risk ?? "风险尚未说明"}
-              />
-            </dl>
-          </DetailNextStepLine>
-        </>
-      );
-      actions = reveal("merge", "处理合并确认");
-      break;
-    }
+    case "merge":
+      return mergePanel(current.q, {
+        mine: true,
+        title: (
+          <>
+            {current.failed ? "合并检查未通过" : "等你确认合并"}
+            <IdBadge id={current.q.id} />
+            {moreLink}
+          </>
+        ),
+      });
     case "merge-pm":
-      mine = false;
-      title = (
-        <>
-          等 PM 确认合并
-          <IdBadge id={current.q.id} />
-        </>
-      );
-      lines = (
-        <DetailNextStepLine>
-          <MergeStatusFacts q={current.q} />
-        </DetailNextStepLine>
-      );
-      actions = (
-        <Button size="regular" onClick={() => onReveal("merge")}>
-          查看合并详情
-        </Button>
-      );
-      break;
+      return mergePanel(current.q, {
+        mine: false,
+        title: (
+          <>
+            等 PM 确认合并
+            <IdBadge id={current.q.id} />
+          </>
+        ),
+      });
+    case "merge-confirmed":
+      return mergePanel(current.q, {
+        mine: false,
+        title: (
+          <>
+            {failedCheck(current.q) ? "合并检查未通过" : "已确认合并"}
+            <IdBadge id={current.q.id} />
+          </>
+        ),
+      });
     case "decision": {
       const { q } = current;
       const inCard =

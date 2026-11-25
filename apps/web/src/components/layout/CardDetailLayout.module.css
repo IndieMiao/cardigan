@@ -386,11 +386,49 @@
   .nextLine :is(:global(dt), :global(dd)) {
     margin: 0;
   }
+  .nextLine[data-tone="danger"] {
+    color: var(--danger);
+  }
+  /* C-697: 改了什么 / 影响 / 风险 rows; a flagged risk keeps its own colour. */
+  .nextFacts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--ui-space-1) var(--ui-space-3);
+    margin: 0;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .nextFacts > div {
+    display: contents;
+  }
+  .nextFacts :global(dt) {
+    color: var(--text-muted);
+    font-weight: normal;
+  }
+  .nextFacts :global(dd) {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .nextMore {
+    display: grid;
+    flex: 1 1 100%;
+    gap: var(--ui-space-2);
+    min-width: 0;
+    padding-top: var(--ui-space-3);
+    border-top: var(--ui-stroke) solid var(--border);
+  }
+  .nextMore[hidden] {
+    display: none;
+  }
   .nextActions {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--ui-space-2);
+  }
+  .nextActions:focus {
+    outline: none;
   }
   .nextActions :global(.card-template) {
     display: contents;
@@ -411,6 +449,10 @@
     .nextActions > :global([data-ui="button"]),
     .nextActions > :global(.card-template) > :global([data-ui="button"]) {
       flex: 1 1 0;
+    }
+    /* The ⋯ menu button stays square. */
+    .nextActions > :global(.ui-icon-button) {
+      flex: none;
     }
   }
   @media (max-width: 760px) {
