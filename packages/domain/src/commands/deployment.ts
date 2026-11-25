@@ -144,6 +144,32 @@ function validOperationCounts(list: unknown): boolean {
 const copyCounts = (list: readonly DeploymentOperationCount[]) =>
   list.map(({ kind, count }) => ({ kind, count }));
 
+/** C-650: upper bound of configurable automatic retries of one target. */
+export const MAX_DEPLOYMENT_READY_RETRIES = 20;
+
+export type DeploymentReadyRetry = {
+  readonly failures: number;
+  readonly max: number;
+  readonly next_at?: string;
+};
+
+function validReadyRetry(retry: unknown): boolean {
+  if (!retry || typeof retry !== "object" || Array.isArray(retry)) return false;
+  const r = retry as Record<string, unknown>;
+  return (
+    Object.keys(r).every((k) => ["failures", "max", "next_at"].includes(k)) &&
+    Number.isSafeInteger(r.failures) &&
+    Number(r.failures) >= 1 &&
+    Number.isSafeInteger(r.max) &&
+    Number(r.max) >= 0 &&
+    Number(r.max) <= MAX_DEPLOYMENT_READY_RETRIES &&
+    (r.next_at === undefined ||
+      (typeof r.next_at === "string" &&
+        Number(r.failures) <= Number(r.max) &&
+        Number.isFinite(Date.parse(r.next_at))))
+  );
+}
+
 /** Host-supplied, already redacted deployment evidence; never an execution request. */
 export interface DeploymentRecord {
   readonly control_event_id?: string;
@@ -181,6 +207,13 @@ export interface DeploymentRecord {
   /** C-609: deployments are at least this far apart; later merges are batched. */
   readonly batch_window_ms?: number;
   readonly failure_stage?: "build" | "start" | "ready" | "host";
+  /**
+   * C-650: durable automatic retry of a target whose start/ready failed.
+   * `failures` counts failed attempts of this target (main or one human pin),
+   * `max` is the configured number of retries; `next_at` is present only while
+   * a retry is still scheduled, so its absence means retries are used up.
+   */
+  readonly ready_retry?: DeploymentReadyRetry;
   /** Same-project runs observed immediately before requesting server shutdown. */
   readonly stop_snapshot?: {
     readonly captured_at: string;
@@ -228,6 +261,15 @@ export function recordDeployment(
       "validation_failed",
       "部署等待记录无效",
     );
+    ensure(
+      record.ready_retry === undefined ||
+        (validReadyRetry(record.ready_retry) &&
+          (record.status === "failed" || record.status === "rolled_back") &&
+          (record.ready_retry.next_at === undefined ||
+            record.status === "rolled_back")),
+      "validation_failed",
+      "部署自动重试记录无效",
+    );
     d.emit("host_deployment_recorded", undefined, {
       ...record,
       ...(record.stop_snapshot
@@ -244,6 +286,17 @@ export function recordDeployment(
       ...(record.interrupted_operations
         ? {
             interrupted_operations: copyCounts(record.interrupted_operations),
+          }
+        : {}),
+      ...(record.ready_retry
+        ? {
+            ready_retry: {
+              failures: record.ready_retry.failures,
+              max: record.ready_retry.max,
+              ...(record.ready_retry.next_at === undefined
+                ? {}
+                : { next_at: record.ready_retry.next_at }),
+            },
           }
         : {}),
     });

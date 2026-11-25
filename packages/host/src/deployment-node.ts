@@ -30,6 +30,7 @@ import type { Store } from "@cardigan/store";
 import {
   deploymentMergeSegments,
   readInterruptedDeployment,
+  readReadyRetry,
   writeDeferredOperations,
   writeDeploymentRecord,
   writeDeploymentStop,
@@ -87,6 +88,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   readonly enabled: boolean;
   readonly batchWindowMs: number;
   readonly operationWaitMs: number;
+  readonly readyRetryMax: number | undefined;
+  readonly readyRetryIntervalMs: number | undefined;
   private state!: State;
   private readonly retention?: DeploymentRetention;
   private readyMessage = false;
@@ -121,6 +124,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     // Defaults are applied by parseDeploymentConfig; a hand-built config opts out.
     this.batchWindowMs = options.config.batch_window_ms ?? 0;
     this.operationWaitMs = options.config.operation_wait_timeout_ms ?? 0;
+    // C-650: likewise, a hand-built config keeps the legacy in-memory failure.
+    this.readyRetryMax = options.config.ready_retry_max;
+    this.readyRetryIntervalMs = options.config.ready_retry_interval_ms;
     this.directory = deploymentDirectory(options.dataDir);
     if (options.config.retention)
       this.retention = new DeploymentRetention(
@@ -1085,6 +1091,13 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         : (this.child?.exitCode ??
             (this.child?.signalCode ? null : "not_exited")),
     );
+  }
+  serverFailureCause() {
+    const causes = this.serverLog.causes();
+    return causes.length ? causes.join("、") : undefined;
+  }
+  async readyRetryState(to: string, controlEventId?: string) {
+    return readReadyRetry(this.options.store, PROJECT, to, controlEventId);
   }
   private portReady(port: number) {
     return new Promise<boolean>((resolve) => {
