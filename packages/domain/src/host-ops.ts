@@ -140,15 +140,15 @@ export function pendingHostOpsActions(
 /** C-221: per-snapshot memo; event arrays are immutable (see event-index.ts). */
 const pendingAssignments = new WeakMap<
   readonly Event[],
-  ReadonlySet<unknown>
+  {
+    readonly actions: ReadonlySet<unknown>;
+    readonly fences: ReadonlySet<unknown>;
+  }
 >();
-export function hostOpsPending(
-  events: readonly Event[],
-  assignment_id: AssignmentId,
-): boolean {
+function pendingSets(events: readonly Event[]) {
   let pending = pendingAssignments.get(events);
   if (!pending) {
-    pending = new Set(
+    const actions = new Set<unknown>(
       pendingHostOpsActions(events).map((a) => a.assignment_id),
     );
     for (const loss of remoteWorkerLosses(events)) {
@@ -156,39 +156,63 @@ export function hostOpsPending(
         !remoteWorkerLossReleased(events, loss.action_id) ||
         remoteWorkerExitPending(events, loss)
       ) {
-        (pending as Set<unknown>).add(loss.assignment_id);
+        actions.add(loss.assignment_id);
         const assigned = eventsOfType(events, "work_item_assigned").findLast(
           (e) =>
             (e.payload as { work_item_id?: string }).work_item_id ===
             loss.work_item_id,
         );
         if (assigned)
-          (pending as Set<unknown>).add(
+          actions.add(
             (assigned.payload as { assignment_id?: string }).assignment_id,
           );
       }
     }
-    for (const event of eventsOfType(
-      events,
-      "context_session_restart_result",
-    )) {
-      if ((event.payload as { result?: string }).result !== "failed") continue;
-      // Only an actual human confirmation releases the failure fence.
-      if (
-        !eventsOfType(events, "human_action_completed").some(
-          (e) =>
-            e.actor.kind === "human" &&
-            (e.payload as { human_action_id?: string }).human_action_id ===
-              (event.payload as { human_action_id?: string }).human_action_id,
-        )
-      )
-        (pending as Set<unknown>).add(
-          (event.payload as { assignment_id?: string }).assignment_id,
-        );
-    }
+    const fences = new Set<unknown>(
+      openRestartFailures(events).map(
+        (e) => (e.payload as { assignment_id?: string }).assignment_id,
+      ),
+    );
+    pending = { actions, fences };
     pendingAssignments.set(events, pending);
   }
-  return pending.has(assignment_id);
+  return pending;
+}
+/**
+ * Failed automatic restarts whose human action has not been completed by the
+ * human. Only an actual human confirmation releases the failure fence.
+ */
+export function openRestartFailures(events: readonly Event[]): Event[] {
+  const completed = new Set(
+    eventsOfType(events, "human_action_completed")
+      .filter((e) => e.actor.kind === "human")
+      .map((e) => (e.payload as { human_action_id?: string }).human_action_id),
+  );
+  return eventsOfType(events, "context_session_restart_result").filter(
+    (e) =>
+      (e.payload as { result?: string }).result === "failed" &&
+      !completed.has(
+        (e.payload as { human_action_id?: string }).human_action_id,
+      ),
+  );
+}
+export function hostOpsPending(
+  events: readonly Event[],
+  assignment_id: AssignmentId,
+): boolean {
+  const { actions, fences } = pendingSets(events);
+  return actions.has(assignment_id) || fences.has(assignment_id);
+}
+/**
+ * C-741: a host operation is in flight, ignoring only the failure fence of an
+ * automatic restart. The human's own session restart command clears that
+ * fence in the same transaction, so it may proceed past it.
+ */
+export function hostOpsActionPending(
+  events: readonly Event[],
+  assignment_id: AssignmentId,
+): boolean {
+  return pendingSets(events).actions.has(assignment_id);
 }
 
 const automaticLaunches = new WeakMap<

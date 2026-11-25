@@ -5,6 +5,7 @@ import {
   runnableQueuedRun,
   standingRunDormant,
 } from "../card-hold.js";
+import { contextRestartRetryState } from "../context-restart-retry.js";
 import {
   type ContextObservation,
   contextObservationCurrent,
@@ -512,13 +513,16 @@ export function beginHostOpsActionInDraft(
       "stale_target",
       "上下文未到换会话档，或用量已过期、会话已更换",
     );
+    // C-741: only the system's own retry of an attempt that was held before
+    // any stop may follow it on the same session.
+    const retry = contextRestartRetryState(
+      state.events,
+      a.id,
+      usage.session_id,
+      d.now,
+    );
     ensure(
-      !eventsOfType(state.events, "host_ops_action_taken").some(
-        (e) =>
-          (e.payload as { assignment_id?: string }).assignment_id === a.id &&
-          (e.payload as { context_usage?: ContextObservation }).context_usage
-            ?.session_id === usage.session_id,
-      ),
+      retry === "fresh" || (p.automatic_context_restart && retry === "due"),
       "illegal_transition",
       "本会话已请求过上下文换会话",
     );
