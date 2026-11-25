@@ -1144,6 +1144,13 @@ export interface PlainSummary {
   readonly impact: string;
   readonly risk: string;
 }
+/** C-753: why only the owner may decide, and the rule or words it rests on. */
+export interface OwnerRequiredDeclaration {
+  readonly reason: string;
+  readonly basis: string;
+  readonly declared_by: AssignmentId;
+  readonly declared_at: Timestamp;
+}
 export interface ReviewPauseInput {
   readonly owner: AssignmentId;
   readonly confirmers: readonly AssignmentId[];
@@ -1247,6 +1254,14 @@ interface DecisionFields {
    * are never delegated to PM Ops, regardless of who raised them.
    */
   readonly human_required_reason?: string;
+  /**
+   * C-753: PM Office or PM Ops declared, with a reason and its basis (project
+   * rule, acceptance criterion or the owner's own words), that only the owner
+   * may decide. Such a question skips category delegation and goes straight
+   * to the owner. Set by request_decision only; audit lives on the
+   * decision_requested event.
+   */
+  readonly owner_required?: OwnerRequiredDeclaration;
   /**
    * C-167: `false` only when the raiser marked a D12 decision as unrelated to
    * the merge content of its cards (no produce work item, no approval
