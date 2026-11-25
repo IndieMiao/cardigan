@@ -138,6 +138,13 @@ describe("trusted GitHub check workflow", () => {
     expect(archive.if).toBeUndefined();
   });
 
+  test("a failing page-skeleton comparison names the checked card's receipt", () => {
+    const build = steps.find((step: { id?: string }) => step.id === "build");
+    expect(build.env).toEqual({
+      CARDIGAN_CHECK_CARD: `\${{ inputs.card }}`,
+    });
+  });
+
   test("candidate cache is restore only; only main push warms it", () => {
     const caches = steps.filter((step: { uses?: string }) =>
       step.uses?.startsWith("actions/cache"),

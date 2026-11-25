@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -9,7 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
-import { compare, scenes } from "../../test-support/page-skeleton-visual.mjs";
+import {
+  compare,
+  receiptHint,
+  scenes,
+} from "../../test-support/page-skeleton-visual.mjs";
 
 const seed = JSON.parse(
   readFileSync(
@@ -147,4 +152,106 @@ test("approving a revert does not retire unseen branches with the original pixel
   // C-4 independently approved identical pixels to C-1, but C-2 never saw it.
   const merged = { ...later, "C-4": compare({ seed }, pixels(a)) };
   expect(compare(merged, pixels(b))[board]?.replaces).toHaveLength(2);
+});
+
+// C-737: a failing remote check prints the receipt `--update` would write.
+const receiptIn = (hint: string) => {
+  const match = hint.match(
+    /--- page-skeleton receipt begin ---\n([\s\S]*)\n--- page-skeleton receipt end ---/,
+  );
+  if (!match?.[1]) throw new Error(`No receipt in: ${hint}`);
+  return `${match[1]}\n`;
+};
+
+test("a printed receipt only passes once committed as the card's own record", () => {
+  const actual = { ...pixels(a), [list]: b };
+  const hint = receiptHint({ seed }, actual, "C-9");
+  expect(hint).toContain(
+    "save the receipt between the markers as apps/web/test-support/page-skeleton-approvals/C-9.json",
+  );
+  // Printing a receipt does not approve it: without the file the check still fails.
+  expect(Object.keys(compare({ seed }, actual)).sort()).toEqual(
+    [board, list].sort(),
+  );
+  const receipt = JSON.parse(receiptIn(hint));
+  expect(receipt).toEqual(compare({ seed }, actual));
+  expect(compare({ seed, "C-9": receipt }, actual)).toEqual({});
+  // The receipt matches only these pixels.
+  expect(compare({ seed, "C-9": receipt }, pixels(c))).not.toEqual({});
+});
+
+test("a reworked card's receipt replaces its own earlier record", () => {
+  const first = compare({ seed }, pixels(a));
+  const hint = receiptHint({ seed, "C-9": first }, pixels(b), "C-9");
+  const rework = JSON.parse(receiptIn(hint));
+  expect(rework).toEqual(compare({ seed }, pixels(b)));
+  expect(compare({ seed, "C-9": rework }, pixels(b))).toEqual({});
+  // Restoring the original pixels means the card needs no receipt.
+  expect(receiptHint({ seed, "C-9": first }, baseline, "C-9")).toContain(
+    "delete apps/web/test-support/page-skeleton-approvals/C-9.json",
+  );
+  // Without a valid card name the receipt is computed against every record.
+  for (const card of [undefined, "", "C-0", "../C-9", "C-9 "])
+    expect(receiptHint({ seed }, pixels(a), card)).toContain(
+      "page-skeleton-approvals/C-<card>.json",
+    );
+  expect(receiptHint({ seed }, {}, "C-9")).toBe(
+    "No page-skeleton receipt can be derived: Incomplete capture",
+  );
+});
+
+test("the printed receipt reproduces a committed receipt byte for byte", () => {
+  const dir = new URL(
+    "../../test-support/page-skeleton-approvals/",
+    import.meta.url,
+  );
+  const files = readdirSync(dir).filter((file) => file.endsWith(".json"));
+  const committed = Object.fromEntries(
+    files.map((file) => [
+      file.slice(0, -5),
+      JSON.parse(readFileSync(new URL(file, dir), "utf8")),
+    ]),
+  );
+  // Recover the pixels main currently approves from the receipts themselves.
+  const approved: Record<string, string> = { ...baseline };
+  const candidates = new Map(
+    scenes.map((scene) => [
+      scene,
+      Object.values(committed).map(
+        (receipt) =>
+          (receipt[scene]?.hash ?? receipt[scene]) as string | undefined,
+      ),
+    ]),
+  );
+  for (const scene of Object.keys(compare(committed, approved)))
+    approved[scene] =
+      candidates
+        .get(scene)
+        ?.find(
+          (hash) =>
+            hash &&
+            !(scene in compare(committed, { ...approved, [scene]: hash })),
+        ) ?? "";
+  expect(compare(committed, approved)).toEqual({});
+  // Every receipt no other record builds upon can be regenerated exactly.
+  const latest = files.filter((file) => {
+    const card = file.slice(0, -5);
+    if (card === "seed") return false;
+    const rest = { ...committed };
+    delete rest[card];
+    try {
+      compare(rest, approved);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  expect(latest).toContain("C-695.json");
+  for (const file of latest) {
+    const card = file.slice(0, -5);
+    expect(
+      receiptIn(receiptHint(committed, approved, card)),
+      `${card} must be reproducible`,
+    ).toBe(readFileSync(new URL(file, dir), "utf8"));
+  }
 });

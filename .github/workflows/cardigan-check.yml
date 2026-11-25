@@ -244,6 +244,9 @@ jobs:
         run: 'true'
       - name: build
         id: build
+        env:
+          # Names the receipt a failing page-skeleton comparison prints.
+          CARDIGAN_CHECK_CARD: ${{ inputs.card }}
         run: |
           pnpm build
           sh apps/web/test-support/ci-page-skeleton.sh
