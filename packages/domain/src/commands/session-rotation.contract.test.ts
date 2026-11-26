@@ -284,3 +284,31 @@ test("without exit proof, or while a session is still bound, nothing starts", ()
   expect(ofType(f.state.events, "work_item_resume_requested")).toEqual([]);
   expect(ofType(f.state.events, SESSION_ROTATION_REQUESTED)).toEqual([]);
 });
+
+test("a system wake addressed to another work item or Assignment is not unread", () => {
+  ackAll();
+  const card = item().card_id;
+  const seq = Math.max(0, ...f.state.events.map((e) => e.seq)) + 1;
+  f.state = {
+    ...f.state,
+    events: [
+      ...f.state.events,
+      {
+        id: f.io.ids.nextEventId(),
+        seq,
+        card_id: card,
+        type: "work_item_resume_requested",
+        actor: system,
+        payload: {
+          work_item_id: f.reviewer.work_item_id ?? "W-999",
+          assignment_id: f.reviewer.id,
+        },
+        created_at: f.io.clock.now(),
+      },
+    ],
+  };
+  const { events } = stopSilentRun();
+  expect(ofType(events, SESSION_ROTATION_SKIPPED)[0]?.payload).toMatchObject({
+    reason: "nothing_unread",
+  });
+});

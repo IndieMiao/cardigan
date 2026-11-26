@@ -568,7 +568,9 @@ export function reportBlocker(
         guidance:
           condition && !disabled
             ? "已登记等待，工作项状态不变。请结束当前 Run；条件满足后系统自动唤起一次（资源名额会在派发时占用）。"
-            : "已登记等待并交 PM 处理，工作项状态不变。请结束当前 Run。",
+            : p.needs === "human"
+              ? "已登记等待并交 PM 处理（已交付或已验收的工作项不直接交人；需要人操作请用 request_human_action 或 request_decision），工作项状态不变。请结束当前 Run。"
+              : "已登记等待并交 PM 处理，工作项状态不变。请结束当前 Run。",
       };
     }
     const latestConflict = latestPrecheckConflict(

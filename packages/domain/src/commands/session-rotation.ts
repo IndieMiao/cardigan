@@ -62,6 +62,15 @@ const LIFECYCLE = /^(?:run|session|assignment|runtime|machine)_/u;
 const payload = (e: Event) =>
   (e.payload ?? {}) as Record<string, unknown> & { assignment_id?: unknown };
 
+/** A system wake naming another work item or Assignment is not for this owner. */
+function addressedTo(e: Event, assignment: string, item: string) {
+  const p = payload(e) as { assignment_id?: unknown; work_item_id?: unknown };
+  return (
+    (p.assignment_id === undefined || p.assignment_id === assignment) &&
+    (p.work_item_id === undefined || p.work_item_id === item)
+  );
+}
+
 /** Each Assignment has one automatic rotation, for life. */
 export function rotationAllowanceUsed(
   state: CommandState,
@@ -95,7 +104,7 @@ export function unreadForOwner(state: CommandState, a: Assignment): boolean {
       e.actor.project_id === state.project_id &&
       !(e.actor.kind === "assignment" && e.actor.assignment_id === a.id) &&
       (e.actor.kind === "system"
-        ? WAKE_SYSTEM_TYPES.has(e.type)
+        ? WAKE_SYSTEM_TYPES.has(e.type) && addressedTo(e, a.id, item.id)
         : !LIFECYCLE.test(e.type)),
   );
 }

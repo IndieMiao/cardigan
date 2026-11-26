@@ -654,3 +654,45 @@ test.each([false, true])(
     expect(next.events.map((e) => e.type)).toEqual(["delivery_submitted"]);
   },
 );
+
+test("C-789 (V-3498): a verifier's unregistered blocked ending never blocks the author's redelivery", async () => {
+  const ctx = setup();
+  let state = apply(ctx.state, await deliver(ctx, ctx.state));
+  expect(item(state, ctx.verifier).status).toBe("ready");
+  state = {
+    ...state,
+    work_items: state.work_items.map((w) =>
+      w.id === ctx.verifier ? ({ ...w, status: "in_progress" } as WorkItem) : w,
+    ),
+  };
+  const reviewerRun = present(
+    state.runs.find(
+      (r) =>
+        ctx.reviewer.kind === "assignment" &&
+        r.assignment_id === ctx.reviewer.assignment_id,
+    ),
+  );
+  const ended = value(
+    finishRun(
+      state,
+      ctx.reviewer,
+      {
+        run_id: reviewerRun.id,
+        outcome: "blocked",
+        summary: "Precheck not ready",
+      },
+      io,
+    ),
+  );
+  // PM is told without any state transition on the verifier.
+  expect(ended.events.map((e) => e.type)).toEqual([
+    "run_next_step_missing",
+    "run_finished",
+  ]);
+  state = apply(state, ended);
+  expect(item(state, ctx.verifier)).toMatchObject({ status: "in_progress" });
+  expect(item(state, ctx.verifier).reported_blocker).toBeUndefined();
+  const redelivered = await deliver(ctx, state, "b".repeat(40));
+  state = apply(state, redelivered);
+  expect(item(state, ctx.verifier).status).toBe("ready");
+});

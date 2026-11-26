@@ -280,6 +280,8 @@ function nextStepRegistered(d: CommandDraft, item: WorkItem, owner: string) {
   if (["blocked", "waiting_decision"].includes(item.status)) return true;
   // A leftover record on an item that went back to work is not a next step.
   if (item.standby_wait && standbyStatus(item)) return true;
+  // A delivered producer waits on its reviews, which the system tracks.
+  if (item.kind === "produce" && item.status === "delivered") return true;
   // The system already owns these waits: a candidate conflict is resumed on
   // the next baseline, an author precheck in flight wakes its author.
   if (pendingPrecheckConflict(d.state.events, item, d.state.project_id))
@@ -345,7 +347,10 @@ export function registerUnreportedBlock(
     return;
   if (nextStepRegistered(d, item, owner.id)) return;
   const reason = `系统代登记：${run.id} 以 blocked 结束，但没有登记阻塞原因或等待条件，交 PM 核查。执行摘要：${summary}`;
-  if (item.status === "in_progress") {
+  // Only a producer is blocked: a blocked verifier could not take the
+  // author's redelivery (no target_redelivered from blocked), so verifiers
+  // get a stateless record for PM instead.
+  if (item.kind === "produce" && item.status === "in_progress") {
     const moved = transition(item.kind, item.status, "block");
     if (moved.ok) {
       d.put("work_items", {

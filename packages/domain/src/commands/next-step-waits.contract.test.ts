@@ -148,7 +148,7 @@ test("an Agent's own blocker, human action or completed finish adds nothing", ()
   expect(item().status).toBe("in_progress");
 });
 
-test.each(["delivered", "accepted"] as const)(
+test.each(["accepted"] as const)(
   "a blocked %s producer gets a PM standby record and keeps its state",
   (status) => {
     setItem({ status });
@@ -394,7 +394,7 @@ test("a held card or a Run that already reviewed needs no system registration", 
   expect(types(effect)).toEqual(["run_finished"]);
 });
 
-test("a blocked verifier Run without anything registered is blocked for PM too", () => {
+test("a blocked verifier Run without anything registered goes to PM without a state change", () => {
   state = {
     ...state,
     work_items: state.work_items.map((w) =>
@@ -412,13 +412,20 @@ test("a blocked verifier Run without anything registered is blocked for PM too",
     ),
   );
   state = apply(state, effect);
-  expect(types(effect)).toEqual(["blocker_reported", "run_finished"]);
-  expect(
-    state.work_items.find((w) => w.id === id("work_item", 2)),
-  ).toMatchObject({
-    status: "blocked",
-    reported_blocker: { auto_registered: true },
+  expect(types(effect)).toEqual(["run_next_step_missing", "run_finished"]);
+  expect(effect.events[0]).toMatchObject({
+    actor: system,
+    payload: { work_item_id: id("work_item", 2), status: "in_progress" },
   });
+  const verifier = state.work_items.find((w) => w.id === id("work_item", 2));
+  expect(verifier?.status).toBe("in_progress");
+  expect(verifier?.reported_blocker).toBeUndefined();
+});
+
+test("a delivered producer waiting on its reviews already has a next step", () => {
+  setItem({ status: "delivered" });
+  expect(types(finish("blocked"))).toEqual(["run_finished"]);
+  expect(item().standby_wait).toBeUndefined();
 });
 
 test("a standby wake does not spend the allowance of a later rework episode", () => {
