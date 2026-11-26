@@ -163,15 +163,17 @@ export function runHarness(run: RunView | undefined): string {
     ? HARNESS_CATALOG[run.harness].displayName
     : run.harness;
 }
-/** C-106: "model / effort"; an unknown part shows "—". */
+/** C-704: the effort value behind its Chinese field name (C-687 §2.1). */
+const effortText = (run: RunView) => `推理强度 ${run.effort || NONE}`;
+/** C-106: "model / 推理强度 effort"; an unknown part shows "—". */
 export function runModelEffort(run: RunView | undefined): string {
   if (!run?.model) return NONE;
-  return `${run.model} / ${run.effort || NONE}`;
+  return `${run.model} / ${effortText(run)}`;
 }
 /** C-207: Harness, model and effort as one muted line; no Run shows "—". */
 export function runConfig(run: RunView | undefined): string {
   if (!run) return NONE;
-  return `${runHarness(run)} / ${run.model || NONE} / ${run.effort || NONE}`;
+  return `${runHarness(run)} / ${run.model || NONE} / ${effortText(run)}`;
 }
 /** A token count as 124K / 1.5M. */
 export const windowSize = (tokens: number) => {
@@ -642,7 +644,7 @@ export function AssignmentCard({
                 <RunLine run={run} />
               </p>
             ) : (
-              <p className="execution-card-config-line hint">尚无 Run</p>
+              <p className="execution-card-config-line hint">尚无执行记录</p>
             )}
           </div>
         ) : (
@@ -658,7 +660,7 @@ export function AssignmentCard({
                 <RunLine run={run} />
               </p>
             ) : (
-              <p className="execution-card-config-line hint">尚无 Run</p>
+              <p className="execution-card-config-line hint">尚无执行记录</p>
             )}
           </details>
         )}

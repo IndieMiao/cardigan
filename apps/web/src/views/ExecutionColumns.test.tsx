@@ -151,11 +151,11 @@ test("C-106/C-207: formatting shows recorded values and '—' for anything unkno
   expect(runHarness({ ...run, harness: "pi" })).toBe("pi");
   expect(runHarness(legacyRun)).toBe("—");
   expect(runHarness(undefined)).toBe("—");
-  expect(runModelEffort(run)).toBe("opus-5.5 / xhigh");
-  expect(runModelEffort(legacyRun)).toBe("fixture-model / —");
+  expect(runModelEffort(run)).toBe("opus-5.5 / 推理强度 xhigh");
+  expect(runModelEffort(legacyRun)).toBe("fixture-model / 推理强度 —");
   expect(runModelEffort(undefined)).toBe("—");
-  expect(runConfig(run)).toBe("claude / opus-5.5 / xhigh");
-  expect(runConfig(legacyRun)).toBe("— / fixture-model / —");
+  expect(runConfig(run)).toBe("claude / opus-5.5 / 推理强度 xhigh");
+  expect(runConfig(legacyRun)).toBe("— / fixture-model / 推理强度 —");
   expect(runConfig(undefined)).toBe("—");
   expect(contextUsage(run)).toBe("已用 90.00%，剩余 10.00%（1M）");
   expect(contextUsage(withUsage(0.6234))).toBe(
@@ -292,7 +292,7 @@ test("C-436: seven columns put employee, task, state and context first and fold 
   expect(coder.task).toContain("W-1");
   expect(coder.state).toContain("空闲");
   expect(coder.state).not.toContain("有效");
-  expect(coder.config).toBe("claude / opus-5.5 / xhigh");
+  expect(coder.config).toBe("claude / opus-5.5 / 推理强度 xhigh");
   expect(coder.context).toBe("90.00%");
   expect(
     coder.row.querySelector(".execution-context")?.getAttribute("data-level"),
@@ -305,7 +305,7 @@ test("C-436: seven columns put employee, task, state and context first and fold 
   // Recorded Run without launch profile data or context usage.
   const backstage = cells("A-7");
   expect(backstage.task).toBe("常驻 PM · 后台");
-  expect(backstage.config).toBe("— / fixture-model / —");
+  expect(backstage.config).toBe("— / fixture-model / 推理强度 —");
   expect(backstage.context).toBe("—");
   expect(within(backstage.row).queryByRole("meter")).toBeNull();
 
@@ -479,7 +479,7 @@ test("C-207: below 760px the same Assignments render as cards only, in reading o
       name: "查看 A-1 详情",
     });
     expect(document.querySelector(".execution-table")).toBeNull();
-    const list = screen.getByRole("list", { name: "Assignment 列表" });
+    const list = screen.getByRole("list", { name: "执行列表" });
     const cards = [...list.querySelectorAll(":scope > li")];
     expect(cards).toHaveLength(3);
     const card = trigger.closest("li") as HTMLElement;
@@ -507,7 +507,7 @@ test("C-207: below 760px the same Assignments render as cards only, in reading o
       .getByText("运行配置与最近执行")
       .closest("details") as HTMLDetailsElement;
     expect(details.open).toBe(false);
-    expect(details.textContent).toContain("claude / opus-5.5 / xhigh");
+    expect(details.textContent).toContain("claude / opus-5.5 / 推理强度 xhigh");
     // Sorting remains available in the shared toolbar on narrow screens.
     expect(screen.getByRole("combobox", { name: "排序：全部" })).toBeTruthy();
     // A plain card area opens the drawer.
