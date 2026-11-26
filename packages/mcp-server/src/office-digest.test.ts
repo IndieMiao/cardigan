@@ -322,3 +322,28 @@ test("a legacy PM row without standing_mode=office gets no digest and no error",
   expect(read.events).toBeDefined();
   expect(digestOf(read)).toBeUndefined();
 });
+
+test("C-785: a project ACK on a read-audit row still starts the first window there", async () => {
+  // Audit rows stay in the table but not in the in-memory event log.
+  store.uow.run((tx) => {
+    tx.events.append(HOME, {
+      id: tx.ids.nextEventId(),
+      seq: 2,
+      type: "cross_card_read",
+      actor: { kind: "system", project_id: HOME },
+      payload: { card_id: "C-9", tool: "get_card" },
+      created_at: at(5.5),
+    });
+    tx.cursors.put(HOME, {
+      assignment_id: "A-10" as never,
+      card_id: "" as never,
+      acked_seq: 2,
+    });
+  });
+  const read = await call(tokens.office as string, "get_updates");
+  expect(digestOf(read)?.since).toBe(at(5.5));
+  expect(entries(read)).toEqual([
+    "C-2#2:review_submitted",
+    "C-2#3:card_merged",
+  ]);
+});

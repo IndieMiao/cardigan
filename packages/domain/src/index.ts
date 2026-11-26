@@ -91,6 +91,7 @@ export * from "./commands/remote-worker-loss.js";
 export * from "./commands/replace-producer.js";
 export * from "./commands/replace-verifier.js";
 export * from "./commands/request-recheck.js";
+export * from "./commands/resume-attention.js";
 export * from "./commands/review-withdrawal.js";
 export * from "./commands/role.js";
 export * from "./commands/role-rule-implementation.js";

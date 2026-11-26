@@ -93,7 +93,9 @@ export function MergePanel({
     merge?.completion?.subject.value,
   ]);
   // As in Needs You, a PM's confirmation opens after an explicit takeover.
-  const pmTakeover = q.decider === "role:pm" && !confirmed;
+  // C-777: so does a stuck system one, which only reaches here once stalled.
+  const pmTakeover =
+    (q.decider === "role:pm" || q.decider === "system") && !confirmed;
   const needsTakeover = pmTakeover && acceptedTakeover !== takeoverKey;
   const blockers = merge?.blockers ?? ["检查状态尚未读取，请刷新"];
   const mergeBlocked = blockers.length > 0;
@@ -226,6 +228,7 @@ export function MergePanel({
       onAccept={() => setAcceptedTakeover(takeoverKey)}
       controls={actionsRef}
       regular
+      system={q.decider === "system"}
     />
   );
   // The emphasis button the dock repeats; it is the first of the actions.

@@ -1753,6 +1753,8 @@ export function needsYou(
   const decisions = data.decisions.map(decisionView);
   // §7.4 (C-65): PM-held merge confirmations the human may answer directly.
   const pm_held_merges = data.pm_held_merges.map(decisionView);
+  // C-777: stuck system merge confirmations the human may take over.
+  const stalled_system_merges = data.stalled_system_merges.map(decisionView);
   const human_actions = data.human_actions.map((action) => {
     const opened = openedAt(
       state.timeline,
@@ -1899,6 +1901,9 @@ export function needsYou(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
     pm_held_merges: [...pm_held_merges].sort(
+      (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
+    ),
+    stalled_system_merges: [...stalled_system_merges].sort(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
     // C-503: current proposals waiting for the human's one-click confirmation.
