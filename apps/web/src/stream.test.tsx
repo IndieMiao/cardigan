@@ -748,23 +748,50 @@ test("capacity revisions deduplicate, survive reconnection and update only the s
   const old = f.connections.last;
   act(() => old.emit("error"));
   await waitFor(() => expect(f.connections.last).not.toBe(old));
-  // C-802: since C-779 every open re-reads the views on screen, the shared
-  // capacity included, after the stream's 100 ms coalescing delay. Wait for
-  // that re-read explicitly instead of asserting inside its window.
-  act(() => f.connections.last.emit("open"));
-  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-  await settle();
-  read.mockClear();
-  cards.mockClear();
   running = 4;
   act(() => {
+    f.connections.last.emit("open");
     f.connections.last.emit("capacity", { revision: "three" });
     old.emit("capacity", { revision: "stale" });
   });
   await screen.findByRole("button", { name: /Agent 4\/6/u });
+  // C-802: count only once every read the reconnect starts has run. The
+  // re-read on open (after the stream's 100 ms coalescing delay) covers the
+  // new connection's opening revision; it used to add a second read.
   await settle();
-  expect(read).toHaveBeenCalledTimes(1);
+  expect(read).toHaveBeenCalledTimes(2);
   expect(cards).not.toHaveBeenCalled();
+});
+
+test("C-802: each connection's opening capacity revision is covered by the re-read on open", () => {
+  vi.useFakeTimers();
+  const p = pool(),
+    c = { ...callbacks(), capacity: vi.fn() },
+    stop = subscribeProject("p-1", c, p.create);
+  const first = p.last;
+  first.emit("open");
+  first.emit("capacity", { revision: "c1" });
+  expect(c.capacity).not.toHaveBeenCalled();
+  first.emit("capacity", { revision: "c1" });
+  first.emit("capacity", { revision: "c2" });
+  expect(c.capacity).toHaveBeenCalledTimes(1);
+
+  // Changed while away: the re-read on open covers it, with no second read.
+  first.emit("error");
+  vi.advanceTimersByTime(3000);
+  p.last.emit("open");
+  expect(c.ready).toHaveBeenCalledTimes(2);
+  p.last.emit("capacity", { revision: "c3" });
+  first.emit("capacity", { revision: "stale" });
+  expect(c.capacity).toHaveBeenCalledTimes(1);
+  // Later changes on the resumed connection still read, once per revision.
+  p.last.emit("capacity", { revision: "c3" });
+  expect(c.capacity).toHaveBeenCalledTimes(1);
+  p.last.emit("capacity", { revision: "c4" });
+  expect(c.capacity).toHaveBeenCalledTimes(2);
+  // Capacity frames never re-read the other views.
+  expect(c.ready).toHaveBeenCalledTimes(2);
+  stop();
 });
 
 test.each(["card_created", "card_updated"])(
