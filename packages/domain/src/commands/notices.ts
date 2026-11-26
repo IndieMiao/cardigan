@@ -9,6 +9,12 @@ import {
   ensure,
 } from "./core.js";
 import { ATTACHED_HUMAN_WAIT_OVERDUE } from "./host-ops-attached-wait.js";
+import {
+  STORY_SUMMARY_ESCALATED,
+  STORY_SUMMARY_HANDED_OFF,
+  storySummaryEscalationOpen,
+  storySummaryHandedOff,
+} from "./story-summary-handoff.js";
 
 /**
  * Needs You "知会" (§7.4): every delegated resolution (PM Ops on project
@@ -112,6 +118,9 @@ const systemNoticeEvents = new Map([
   ["mcp_session_failed", "会话 MCP 初始化失败"],
   // C-678: a session-ending host action waits for an attached human.
   [ATTACHED_HUMAN_WAIT_OVERDUE, "Agent 终端有人连着，动作在等待断开"],
+  // C-762: a settled story waits on an external Office, then on PM Ops.
+  [STORY_SUMMARY_ESCALATED, "需求总结待提交"],
+  [STORY_SUMMARY_HANDED_OFF, "需求总结已转交 PM Ops"],
 ]);
 /** Every type a notice can come from. */
 const NOTICE_TYPES = [
@@ -195,6 +204,16 @@ export function notices(state: CommandState): readonly Notice[] {
       continue;
     }
     if (e.type === "standing_pm_recovered" && recovered.has(e.id)) continue;
+    // C-762: listed only while the story still waits for its summary.
+    if (
+      (e.type === STORY_SUMMARY_ESCALATED ||
+        e.type === STORY_SUMMARY_HANDED_OFF) &&
+      (!storySummaryEscalationOpen(state, e) ||
+        (e.type === STORY_SUMMARY_ESCALATED &&
+          !!e.card_id &&
+          storySummaryHandedOff(state.events, e.card_id)))
+    )
+      continue;
     if (e.type === "office_wait_started" && overdue.has(officeWaitKey(e)))
       continue;
     if (

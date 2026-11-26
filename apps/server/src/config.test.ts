@@ -400,6 +400,18 @@ test("framework dependency reminder accepts a positive host duration", () => {
     ).toThrow("CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS");
 });
 
+test("C-762 story summary handoff accepts a positive host duration", () => {
+  expect(resolveServerConfig({}).storySummaryHandoffMs).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_STORY_SUMMARY_HANDOFF_MS: "3600000" })
+      .storySummaryHandoffMs,
+  ).toBe(3_600_000);
+  for (const value of ["0", "-1", "1.5", "Infinity"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_STORY_SUMMARY_HANDOFF_MS: value }),
+    ).toThrow("CARDIGAN_STORY_SUMMARY_HANDOFF_MS");
+});
+
 test("worker inspection cadence accepts only a positive deployment interval", () => {
   expect(
     resolveServerConfig({ CARDIGAN_WORKER_INSPECTION_INTERVAL_MS: "30000" })

@@ -943,6 +943,9 @@ async function assembleServer(
         frameworkWaitReminderMs =
           options.dispatcher.frameworkWaitReminderMs ??
           config.frameworkWaitReminderMs,
+        storySummaryHandoffMs =
+          options.dispatcher.storySummaryHandoffMs ??
+          config.storySummaryHandoffMs,
         mergeBlockedReminderMs =
           options.dispatcher.mergeBlockedReminderMs ??
           config.mergeBlockedReminderMs,
@@ -1086,6 +1089,9 @@ async function assembleServer(
         ...(frameworkWaitReminderMs === undefined
           ? {}
           : { frameworkWaitReminderMs }),
+        ...(storySummaryHandoffMs === undefined
+          ? {}
+          : { storySummaryHandoffMs }),
         ...(mergeBlockedReminderMs === undefined
           ? {}
           : { mergeBlockedReminderMs }),

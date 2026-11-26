@@ -181,6 +181,7 @@ import {
 } from "./merge-check.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { recordDecisionResolution } from "./review-limit-resolution.js";
+import { storySummaryHandedOff } from "./story-summary-handoff.js";
 import { activeWork } from "./workflow.js";
 
 export function issueInstruction(
@@ -392,12 +393,16 @@ export function postComment(
     );
     if (discussion && d.timeline[0]) discussion.apply(d.timeline[0].id);
     if (p.story_summary) {
+      // C-762: PM Ops may draft it only after the system handed this
+      // settlement over; confirming the story stays with the human.
       ensure(
         d.assignment?.scope === "standing" &&
           d.assignment.role_id === "pm" &&
-          d.assignment.standing_mode === "office",
+          (d.assignment.standing_mode === "office" ||
+            (d.assignment.standing_mode === "ops" &&
+              storySummaryHandedOff(state.events, card.id))),
         "unauthorized",
-        "只有常驻 Office 可提交需求总结",
+        "只有常驻 Office 可提交需求总结；超时转交后 PM Ops 可代笔",
       );
       ensure(
         !card.hold && card.status !== "backlog",

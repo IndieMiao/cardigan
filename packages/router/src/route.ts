@@ -2006,6 +2006,44 @@ export function routeEvent(input: RouteInput): RouteResult {
       );
       break;
     }
+    // C-762: the system raised the settled story for an external Office and,
+    // after the timeout, handed the draft to PM Ops. Logical recipients only,
+    // so they resolve within this project.
+    case "story_summary_escalated":
+    case "story_summary_handed_off": {
+      const parent = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (
+        input.event.actor.kind !== "system" ||
+        !parent?.story ||
+        parent.story.summary_entry_id ||
+        storyTerminal(parent)
+      )
+        break;
+      const notice =
+        payloadString(input.event.payload, "notice") ??
+        `需求卡 ${parent.id} 等待对照总结。`;
+      if (input.event.type === "story_summary_escalated")
+        note(
+          input,
+          draft,
+          recipient.needs_you(),
+          "needs_you",
+          "story/summary escalated",
+          notice,
+        );
+      else
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "card",
+          "story/summary handoff",
+          notice,
+        );
+      break;
+    }
     case "story_summary_submitted": {
       const parent = input.snapshot.cards.find(
         (c) => c.id === input.event.card_id,

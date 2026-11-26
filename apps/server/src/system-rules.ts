@@ -10,6 +10,7 @@ import {
   finishSystemReviewLimitRaise,
   flowAtLeast,
   maintainPmCoordination,
+  maintainStorySummaries,
   type ProjectId,
   preparationAwaitsDeployment,
   type Result,
@@ -99,11 +100,13 @@ export function runSystemRules(
     baselineConflictMaxResumes: conflictMaxResumes,
     authorPrecheckFailureLimit,
     frameworkWaitReminderMs,
+    storySummaryHandoffMs,
   }: {
     mergeGateEnabled?: (project: ProjectId) => boolean;
     baselineConflictMaxResumes?: number;
     authorPrecheckFailureLimit?: number;
     frameworkWaitReminderMs?: number;
+    storySummaryHandoffMs?: number;
   } = {},
 ) {
   rotateIdleDeployedRoles(store, project, loadState);
@@ -141,6 +144,11 @@ export function runSystemRules(
         ports,
       ),
     (state, ports) => maintainPmCoordination(state, actor, ports),
+    // C-762: external Office summary waits; cheap when no story settled.
+    (state, ports) =>
+      state.cards.some((c) => c.story && !c.story.summary_entry_id)
+        ? maintainStorySummaries(state, actor, ports, storySummaryHandoffMs)
+        : undefined,
     // C-738: once per ready deployment, retry preparation failures from before it.
     (state, ports) => {
       if (!preparationAwaitsDeployment(state, clock.now())) return undefined;

@@ -243,6 +243,7 @@ export interface DispatcherOptions {
   ) => Promise<{ branch: string; sha: string } | undefined>;
   readonly mergeGateEnabled?: (project: ProjectId) => boolean;
   readonly frameworkWaitReminderMs?: number;
+  readonly storySummaryHandoffMs?: number;
   /** Maximum automatic baseline synchronizations per work item and precheck HEAD. */
   readonly baselineConflictMaxResumes?: number;
   readonly authorPrecheckFailureLimit?: number;

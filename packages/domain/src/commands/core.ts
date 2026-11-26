@@ -160,6 +160,7 @@ type CommandName =
   | "resume_work_waits"
   | "start_dependency_ready_run"
   | "maintain_pm_coordination"
+  | "maintain_story_summaries"
   | "recover_standing_pm"
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
@@ -339,6 +340,7 @@ export class CommandDraft {
       "resume_work_waits",
       "start_dependency_ready_run",
       "maintain_pm_coordination",
+      "maintain_story_summaries",
       "recover_standing_pm",
       "apply_auto_risk_tags",
       "record_merge_shadow",
