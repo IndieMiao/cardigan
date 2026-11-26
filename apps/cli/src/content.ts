@@ -30,6 +30,7 @@ import {
   resolveActor,
   resolveProject,
   systemClock,
+  warmCommandState,
 } from "./host.js";
 import type { CliIo } from "./io.js";
 
@@ -277,6 +278,7 @@ export async function runContentCommand(
         throw error;
       }
     }
+    warmCommandState(store, project);
     const output = store.uow.run((tx) => {
       const ports = { clock: systemClock, ids: tx.ids };
       const save = <T>(result: Result<CommandEffect<T>>, operation: string) => {

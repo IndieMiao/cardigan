@@ -14,6 +14,7 @@ import {
   resolveActor,
   resolveProject,
   systemClock,
+  warmCommandState,
 } from "./host.js";
 import type { CliIo } from "./io.js";
 
@@ -59,6 +60,7 @@ export function runFlowUpgrade(args: readonly string[], io: CliIo): number {
     const actor = resolveActor(io, project, store);
     requireCliTool(actor, "card flow-upgrade");
     // Validate and persist the whole batch under one fresh write lock.
+    warmCommandState(store, project);
     store.uow.run((tx) => {
       for (const card_id of cards) {
         const state = loadCommandState(tx, project);

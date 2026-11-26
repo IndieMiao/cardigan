@@ -78,6 +78,7 @@ import {
   resolveProject,
   runCommand,
   systemClock,
+  warmCommandState,
 } from "./host.js";
 import type { CliIo, SpawnedChild } from "./io.js";
 import { cliLaunchPaths } from "./paths.js";
@@ -882,6 +883,7 @@ function moveAssignment(
   const identity = resolveCommandIdentity(io, project_id, store);
   const fail = (error: Parameters<typeof formatCommandError>[2]) =>
     new CliError(formatCommandError("换机", assignmentId, error), EXIT.usage);
+  warmCommandState(store, project_id);
   return store.uow.run((tx) => {
     const actor = identity.revalidateActor?.() ?? identity.actor;
     const ports = {
