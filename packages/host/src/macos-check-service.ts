@@ -37,6 +37,7 @@ import {
 } from "./github-dispatch-journal.js";
 import { ProbeBudget } from "./github-probe.js";
 import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
+import { hostWideEventDocs } from "./host-wide-events.js";
 import {
   MACOS_CHECK_DEFAULTS,
   MACOS_CHECK_WORKFLOW,
@@ -224,14 +225,12 @@ export class MacosCheckService {
   }
   jobs(): MacosCheckJob[] {
     const jobs = new Map<string, MacosCheckJob>();
-    for (const row of this.options.store.database
-      .prepare(
-        "SELECT doc FROM events WHERE type = 'macos_check_job' ORDER BY seq",
-      )
-      .all()) {
-      const event = JSON.parse(String(row.doc));
+    for (const event of hostWideEventDocs<MacosCheckJob>(
+      this.options.store.database,
+      "macos_check_job",
+    )) {
       if (event.actor.kind !== "system") continue;
-      jobs.set(event.payload.id, event.payload as MacosCheckJob);
+      jobs.set(event.payload.id, event.payload);
     }
     return [...jobs.values()];
   }

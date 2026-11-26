@@ -248,6 +248,8 @@ export interface DispatcherOptions {
   readonly baselineConflictMaxResumes?: number;
   readonly authorPrecheckFailureLimit?: number;
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
+  /** C-782: trial-merge delivered heads on a moved baseline; tell idle authors. */
+  readonly earlyConflictTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
   readonly runtime: Runtime &
@@ -658,6 +660,9 @@ export class Dispatcher {
     });
     await profileSpan("route.merge_shadow", async () =>
       this.options.mergeShadowTick?.(project),
+    );
+    await profileSpan("route.early_conflicts", async () =>
+      this.options.earlyConflictTick?.(project),
     );
     step("suggestion_progress", () =>
       store.uow.optimistic(project, (tx) => {

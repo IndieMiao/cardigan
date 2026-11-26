@@ -4,6 +4,11 @@ import type {
   GithubBudgetStorage,
 } from "./github-rate-limit.js";
 
+/** C-793: walks `global_events_by_type` backwards; no scan or temp sort. */
+export const LATEST_BUDGET_SQL = `SELECT doc FROM global_events
+        WHERE type = 'github_rest_budget' AND json_extract(doc, '$.payload.executor') = ?
+        ORDER BY seq DESC LIMIT 1`;
+
 /** Host-only global audit stream, keyed by executor across projects and process generations. */
 export class GithubBudgetJournal implements GithubBudgetStorage {
   constructor(
@@ -13,9 +18,7 @@ export class GithubBudgetJournal implements GithubBudgetStorage {
   update<T>(operation: (state: GithubBudgetState) => T): T {
     return this.store.uow.run((tx) => {
       const row = this.store.database
-        .prepare(`SELECT doc FROM global_events
-        WHERE type = 'github_rest_budget' AND json_extract(doc, '$.payload.executor') = ?
-        ORDER BY seq DESC LIMIT 1`)
+        .prepare(LATEST_BUDGET_SQL)
         .get(this.executor);
       const payload = row ? JSON.parse(String(row.doc)).payload : undefined;
       const state: GithubBudgetState = payload

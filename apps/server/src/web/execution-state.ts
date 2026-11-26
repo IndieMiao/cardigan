@@ -165,7 +165,8 @@ export function readExecution(
       store,
       project,
       "deliveries",
-      inIds("json_extract(doc, '$.work_item_id')"),
+      // The column mirrors the document and is indexed with project_id (C-793).
+      inIds("work_item_id"),
       [JSON.stringify(targets.map((w) => w.id))],
     );
     const reviews = readDocs(
