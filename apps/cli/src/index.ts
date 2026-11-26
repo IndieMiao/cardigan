@@ -76,7 +76,7 @@ const TOP_LEVEL_USAGE = [
   "",
   "命令：",
   "  init             建库并执行迁移",
-  "  self-deploy watch|roles  主机自举部署监督器；只部署中心 main，配置仅来自主机",
+  "  self-deploy watch|roles|check-upgrade  主机自举部署监督器；只部署中心 main，配置仅来自主机",
   "  deploy adopt|pin|unpin  人工认领 main 区间、固定版本或解除固定；必填 --reason",
   "  config check     一次校验 merge-gate.yaml、run-capacity.yaml、runtime-workers.yaml（仅人类）",
   "  capacity show|resource|quota  资源名额和项目上限的数据库覆盖值，改后立即生效（仅人类）",

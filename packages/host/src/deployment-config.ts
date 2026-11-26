@@ -225,16 +225,31 @@ export function deploymentDirectory(dataDir: string) {
   return join(dataDir, "self-deploy");
 }
 
+/** C-772: which ancestor failed and why, for host diagnostics only. */
+export class UnsafeHostDirectory extends Error {
+  constructor(
+    readonly path: string,
+    readonly reason: "symlink" | "not_directory" | "owner" | "writable",
+    readonly mode: number,
+  ) {
+    super("Unsafe host directory");
+  }
+}
+
 /** A writable ancestor would let an Agent substitute host state or executable code. */
 export async function requireHostDirectory(directory: string): Promise<void> {
   for (let path = resolve(directory); ; path = dirname(path)) {
     const stat = await lstat(path);
-    if (
-      !stat.isDirectory() ||
-      ![0, process.getuid?.()].includes(stat.uid) ||
-      (stat.mode & 0o022 && !(stat.mode & 0o1000))
-    )
-      throw new Error("Unsafe host directory");
+    const reason = stat.isSymbolicLink()
+      ? "symlink"
+      : !stat.isDirectory()
+        ? "not_directory"
+        : ![0, process.getuid?.()].includes(stat.uid)
+          ? "owner"
+          : stat.mode & 0o022 && !(stat.mode & 0o1000)
+            ? "writable"
+            : undefined;
+    if (reason) throw new UnsafeHostDirectory(path, reason, stat.mode & 0o7777);
     if (path === dirname(path)) break;
   }
 }

@@ -17,6 +17,7 @@ export const CLI_TOOLS = {
   "self-deploy roles": null,
   "self-deploy finish-upgrade": null,
   "self-deploy recover-upgrade": null,
+  "self-deploy check-upgrade": null,
   "deploy adopt": null,
   "deploy pin": null,
   "deploy unpin": null,

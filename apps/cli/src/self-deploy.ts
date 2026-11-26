@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
+  checkSupervisorUpgrade,
   DeploymentController,
   DeploymentDiskMonitor,
   DeploymentServerUnavailable,
@@ -14,6 +15,8 @@ import {
   nodeRestartPorts,
   nodeSystemdCommand,
   RunCapacityDeferred,
+  SUPERVISOR_UPGRADE_FILE,
+  supervisorCheckoutRoot,
   syncProjectOverlayRoles,
   upgradeDeployedRoles,
   writeDeploymentNotice,
@@ -35,14 +38,41 @@ export async function runSelfDeployCommand(
     throw new CliError("自动部署仅限主机，Agent 不可调用", EXIT.usage);
   if (
     args.length !== 1 ||
-    !["watch", "roles", "finish-upgrade", "recover-upgrade"].includes(
-      args[0] ?? "",
-    )
+    ![
+      "watch",
+      "roles",
+      "finish-upgrade",
+      "recover-upgrade",
+      "check-upgrade",
+    ].includes(args[0] ?? "")
   )
     throw new CliError(
-      "用法：cardigan self-deploy watch|roles|finish-upgrade|recover-upgrade（主机专用，配置来自 self-deploy.yaml；finish-upgrade 与 recover-upgrade 只由监督器自升级启动）",
+      "用法：cardigan self-deploy watch|roles|finish-upgrade|recover-upgrade|check-upgrade（主机专用，配置来自 self-deploy.yaml；finish-upgrade 与 recover-upgrade 只由监督器自升级启动；check-upgrade 只读自检 supervisor-upgrade.yaml）",
       EXIT.usage,
     );
+  const configDir =
+    io.env.CARDIGAN_CONFIG_DIR ?? join(homedir(), ".config", "cardigan");
+  // C-772: read-only pre-enable check of this checkout; opens no store.
+  if (args[0] === "check-upgrade") {
+    const root = await supervisorCheckoutRoot();
+    const result = await checkSupervisorUpgrade(configDir, root);
+    io.stdout(`开关文件：${join(configDir, SUPERVISOR_UPGRADE_FILE)}`);
+    io.stdout(`当前监督器目录：${root}`);
+    if (result.config) {
+      io.stdout(`systemd 单元：${result.config.unit}`);
+      io.stdout(`launch_file：${result.config.launch_file}`);
+    }
+    for (const problem of result.problems)
+      io.stdout(
+        `- ${problem.reason}${problem.path ? `（问题目录：${problem.path}）` : ""}`,
+      );
+    io.stdout(
+      result.ok
+        ? "自检通过：正式升级会按同样的检查读取并改写 launch_file"
+        : "自检未通过：修正以上问题后重新自检",
+    );
+    return result.ok ? EXIT.ok : EXIT.failure;
+  }
   const dataDir = resolveDataDir(io);
   // C-767: the restart helper the supervisor starts in its own systemd unit.
   // It reads only the host-written plan in the deployment directory.
@@ -74,8 +104,6 @@ export async function runSelfDeployCommand(
       store.close();
     }
   }
-  const configDir =
-    io.env.CARDIGAN_CONFIG_DIR ?? join(homedir(), ".config", "cardigan");
   const config = await loadDeploymentConfig(configDir).catch(
     (error: unknown) => {
       const message =
