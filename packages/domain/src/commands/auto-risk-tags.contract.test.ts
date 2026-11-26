@@ -595,8 +595,10 @@ test.each([1, 4])(
 test("D6: adding security invalidates an ineligible pending delegated merge in the same effect", async () => {
   const f = mergeFixture();
   const { product } = await f.accept();
+  // C-790: without the role the system cannot add the reviewer itself.
   const state = {
     ...f.state,
+    roles: f.state.roles.filter((r) => r.role_id !== "independent_reviewer"),
     deliveries: f.state.deliveries.map((v) =>
       v.id === product.id
         ? { ...v, evidence: evidence([".github/ci.yml"]) }
@@ -624,5 +626,33 @@ test("D6: adding security invalidates an ineligible pending delegated merge in t
         context: expect.stringContaining("风险标签"),
       }),
     }),
+  );
+});
+
+test("C-790: adding the reviewer withdraws the pending delegated merge and reopens the card", async () => {
+  const f = mergeFixture();
+  const { product } = await f.accept();
+  const state = {
+    ...f.state,
+    deliveries: f.state.deliveries.map((v) =>
+      v.id === product.id
+        ? { ...v, evidence: evidence([".github/ci.yml"]) }
+        : v,
+    ),
+  };
+  const effect = value(
+    applyAutoRiskTags(state, system, { delivery_id: product.id }, f.io),
+  );
+  const next = apply(state, effect);
+  expect(
+    next.decisions.find((q) => q.trigger === "merge_confirmation")?.status,
+  ).toBe("superseded");
+  const card = next.cards.find((c) => c.id === f.card.id);
+  expect(card?.risk_tags).toEqual(["security"]);
+  expect(card?.status).not.toBe("awaiting_merge");
+  expect(
+    next.deliveries.find((v) => v.id === product.id)?.requested_verifiers,
+  ).toContainEqual(
+    next.work_items.find((w) => w.role_id === "independent_reviewer")?.id,
   );
 });
