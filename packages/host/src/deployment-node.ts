@@ -100,6 +100,16 @@ export const ROLE_REFRESH_RETRY_MS = 10_000;
 const exitText = (code: number | null) =>
   code === null ? "被终止（超时或信号）" : `退出码 ${code}`;
 /**
+ * C-801: name a recognised cause (e.g. a database locked by the new server's
+ * startup work) with its fixed label; the matched text itself never leaves.
+ */
+function withCause(message: string, output: string) {
+  const log = new DeploymentBuildLog();
+  log.append(`${output}\n`);
+  const causes = log.causes();
+  return causes.length ? `${message}（${causes.join("、")}）` : message;
+}
+/**
  * C-801: an active standing PM Office and PM Ops whose sessions exist, so
  * nobody has to start PM Ops after a deployment.
  */
@@ -1571,7 +1581,10 @@ export class NodeDeploymentDriver
       if (result.code !== 0)
         throw new RoleRefreshFailed(
           "snapshot",
-          `${label}角色包快照失败：${exitText(result.code)}`,
+          withCause(
+            `${label}角色包快照失败：${exitText(result.code)}`,
+            result.text,
+          ),
           { output: result.text },
         );
       const values = parseRolePackSnapshot(result.text);
@@ -1611,7 +1624,7 @@ export class NodeDeploymentDriver
     if (result.code !== 0)
       throw new RoleRefreshFailed(
         "sync",
-        `self-deploy roles ${exitText(result.code)}`,
+        withCause(`self-deploy roles ${exitText(result.code)}`, result.text),
         { output: result.text, changed },
       );
   }
