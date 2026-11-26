@@ -10,7 +10,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function setup() {
+function setup(roleUpgradePass: "beside" | "default" = "beside") {
   const f = dispatchFixture();
   cleanup.push(() => f.close());
   const target = f.create();
@@ -45,6 +45,7 @@ function setup() {
     );
   });
   const dispatcher = new Dispatcher({
+    ...(roleUpgradePass === "beside" ? { roleUpgradePass } : {}),
     store: f.store,
     clock: f.clock,
     runtime,
@@ -121,4 +122,32 @@ test("C-788: close waits for a running role-upgrade pass", async () => {
   finish();
   await closing;
   expect(closed).toBe(true);
+});
+
+test("C-788: by default the pass runs inside routing, before delivery", async () => {
+  const { dispatcher, startRun, comment } = setup("default");
+  let finish!: () => void;
+  const pass = vi
+    .spyOn(host, "upgradeIdleAssignmentRoles")
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+  comment();
+  let ticked = false;
+  const tick = dispatcher.tick().then(() => {
+    ticked = true;
+  });
+  await vi.waitFor(() => expect(pass).toHaveBeenCalledOnce());
+  await new Promise((r) => setTimeout(r, 10));
+  // The tick waits for the pass; nothing is delivered meanwhile.
+  expect(ticked).toBe(false);
+  expect(startRun).not.toHaveBeenCalled();
+  finish();
+  await tick;
+  // The same tick delivers once the pass is done.
+  expect(startRun).toHaveBeenCalledOnce();
+  await dispatcher.roleUpgradesSettled();
 });

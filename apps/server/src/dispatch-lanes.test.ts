@@ -135,6 +135,7 @@ async function threeStarts(launchConcurrency: number) {
     human_entry: async () => ({ ok: true as const, value: "fixture" }),
   };
   const options: DispatcherOptions = {
+    roleUpgradePass: "beside",
     store: f.store,
     runtime,
     clock: f.clock,

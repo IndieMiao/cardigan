@@ -279,6 +279,15 @@ export interface DispatcherOptions {
    * queue widths, so dispatch alone never queues past either.
    */
   readonly launchConcurrency?: number;
+  /**
+   * C-788: where the idle retirement and default-role upgrade pass runs.
+   * `inline` (the default) awaits it inside each project's routing, before
+   * delivery; `beside` runs it next to dispatch so a slow pass never holds a
+   * tick, and fences that project's work-item deliveries until it ends. The
+   * control plane uses `beside`; `inline` keeps tick-by-tick results
+   * independent of the pass's real IO time.
+   */
+  readonly roleUpgradePass?: "inline" | "beside";
   readonly queuedRecheckAfterMs?: number;
   readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
@@ -552,7 +561,7 @@ export class Dispatcher {
         if (this.closing) return;
         await profileSpan("startup_check", () => this.startupCheck());
         await profileSpan("host_ops", async () => this.options.hostOpsTick?.());
-        this.startRoleUpgrades();
+        if (this.options.roleUpgradePass === "beside") this.startRoleUpgrades();
         // Route every project before choosing any winner. Project enumeration is
         // not a scheduling priority, even when a caller requests a project tick.
         const candidates: Candidate[] = [];
@@ -663,24 +672,7 @@ export class Dispatcher {
       for (const project of due) {
         if (this.closing) break;
         try {
-          await profileProject(project, () =>
-            upgradeIdleAssignmentRoles(
-              this.options.store,
-              project,
-              this.options.runtime,
-              this.clock,
-            ),
-          );
-        } catch {
-          try {
-            this.options.onError?.(
-              new Error(
-                "Idle role upgrade maintenance failed; dispatch continues",
-              ),
-            );
-          } catch {
-            /* Reporting cannot interrupt other projects. */
-          }
+          await profileProject(project, () => this.upgradeRoles(project));
         } finally {
           this.upgrading.delete(project);
         }
@@ -694,6 +686,25 @@ export class Dispatcher {
         if (this.roleUpgrade === pass) this.roleUpgrade = undefined;
       });
     this.roleUpgrade = pass;
+  }
+  /** One project's idle role-upgrade pass; a failure is reported, never thrown. */
+  private async upgradeRoles(project: ProjectId) {
+    try {
+      await upgradeIdleAssignmentRoles(
+        this.options.store,
+        project,
+        this.options.runtime,
+        this.clock,
+      );
+    } catch {
+      try {
+        this.options.onError?.(
+          new Error("Idle role upgrade maintenance failed; dispatch continues"),
+        );
+      } catch {
+        /* Reporting cannot interrupt unrelated routing. */
+      }
+    }
   }
   /** C-788: resolves once the background role-upgrade pass (if any) is done. */
   roleUpgradesSettled(): Promise<void> {
@@ -813,6 +824,15 @@ export class Dispatcher {
         };
       }),
     );
+    if (this.options.roleUpgradePass !== "beside") {
+      const now = Date.parse(this.clock.now());
+      if (now >= (this.nextRoleUpgrade.get(project) ?? 0)) {
+        this.nextRoleUpgrade.set(project, now + IDLE_ROLE_UPGRADE_INTERVAL_MS);
+        await profileSpan("route.role_upgrade", () =>
+          this.upgradeRoles(project),
+        );
+      }
+    }
     // Awaiting an already-resolved promise does not run timers or socket IO.
     // These boundaries hold no transaction; all consumers recheck revisions.
     await yieldToLoop();

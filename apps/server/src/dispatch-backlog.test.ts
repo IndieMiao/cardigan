@@ -91,7 +91,11 @@ function backlog(cards: number) {
   f.advance(11 * 60_000);
   const standing = (_p: string, kind: string) =>
     kind === "pm_office" ? office.id : undefined;
-  const dispatcher = new Dispatcher({ ...f.options, standing });
+  const dispatcher = new Dispatcher({
+    ...f.options,
+    roleUpgradePass: "beside",
+    standing,
+  });
   cleanup.push(() => void dispatcher.close());
   const counts = { reads: 0, writes: 0 };
   f.store.observe({
@@ -103,6 +107,8 @@ function backlog(cards: number) {
     },
   });
   const measure = async () => {
+    // A pass still running beside dispatch would count into this tick.
+    await dispatcher.roleUpgradesSettled();
     counts.reads = 0;
     counts.writes = 0;
     f.advance(1_000);

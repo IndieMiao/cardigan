@@ -148,6 +148,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   const standing = options.standing ?? standingResolver(options.store);
   const shadow = new MergeShadowObserver(options.store, options.git, clock);
   const dispatcher = new Dispatcher({
+    roleUpgradePass: "beside",
     ...(options.git?.proveReviewLimit
       ? { proveReviewLimit: options.git.proveReviewLimit.bind(options.git) }
       : {}),

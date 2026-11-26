@@ -112,6 +112,7 @@ test.runIf(process.env.BENCH === "1")(
     });
     const d = new Dispatcher({
       ...f.options,
+      roleUpgradePass: "beside",
       standing: (_p, kind) => (kind === "pm_office" ? office.id : undefined),
     });
     const ticks: unknown[] = [];

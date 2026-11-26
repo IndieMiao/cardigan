@@ -8,10 +8,7 @@ import * as host from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { PROJECT_EVENT_STREAM, writeRole } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
-import {
-  dispatchFixture,
-  settleRoleUpgradesPerTick,
-} from "../test-support/dispatch.js";
+import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 
 // C-667: a session replaced before C-667 ran under hc --keep. When its CLI
@@ -110,16 +107,14 @@ function setup({ upgrade = false } = {}) {
     harness: "pi" as const,
     effort: "high",
   }));
-  const dispatcher = settleRoleUpgradesPerTick(
-    new Dispatcher({
-      store: f.store,
-      clock: f.clock,
-      runtime,
-      startRun,
-      onError,
-      snapshot,
-    }),
-  );
+  const dispatcher = new Dispatcher({
+    store: f.store,
+    clock: f.clock,
+    runtime,
+    startRun,
+    onError,
+    snapshot,
+  });
   const owner = () =>
     f.state().assignments.find((a) => a.id === target.assignment.id)!;
   return {
