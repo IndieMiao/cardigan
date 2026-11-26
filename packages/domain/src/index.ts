@@ -122,6 +122,7 @@ export * from "./commands/merge-check-blockers.js";
 export {
   PRECHECK_REUSE_SUMMARY,
   type PrecheckReuseInput,
+  type RequiredCardCheck,
   reusablePrecheck,
   reusePrecheckForCardCheck,
 } from "./commands/merge-check-reuse.js";

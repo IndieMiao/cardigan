@@ -24,6 +24,7 @@ import {
   type CheckExecutor,
   CheckExecutorSuspended,
   type CheckRecovery,
+  checkStepFingerprint,
   createMergeCheckLog,
   DeploymentInProgress,
   type ExternalGithubRun,
@@ -1112,6 +1113,17 @@ export class AuthorPrechecks {
         );
       }
       stage = "执行检查";
+      const steps = settings.checks.map((s) => ({
+        name: s.name,
+        run: s.run,
+        ...(s.timeoutMs !== undefined ? { timeoutMs: s.timeoutMs } : {}),
+      }));
+      // C-798: the configuration these exact steps run with, fixed when the
+      // attempt starts running. A reattached run keeps its recorded value.
+      const fingerprints = steps.map((step) => ({
+        name: step.name,
+        fingerprint: checkStepFingerprint(step),
+      }));
       const result = await runCheckExecutor(
         executor,
         {
@@ -1124,11 +1136,7 @@ export class AuthorPrechecks {
           attempt: check.attempt_id,
           sha: candidate.candidate_sha,
           tree: candidate.tree_sha,
-          checks: settings.checks.map((s) => ({
-            name: s.name,
-            run: s.run,
-            ...(s.timeoutMs !== undefined ? { timeoutMs: s.timeoutMs } : {}),
-          })),
+          checks: steps,
           env: settings.env,
           totalTimeoutMs: settings.totalTimeoutMs,
           serialize: true,
@@ -1143,6 +1151,7 @@ export class AuthorPrechecks {
                 ...check,
                 status: "running",
                 ...(bound ? { external_run: bound } : {}),
+                check_fingerprints: fingerprints,
               };
               this.update(projectId, check);
             }

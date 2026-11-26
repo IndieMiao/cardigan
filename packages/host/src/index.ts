@@ -337,6 +337,7 @@ export {
   runningMergeChecks,
 } from "./merge-check-capacity.js";
 export {
+  checkStepFingerprint,
   loadMergeGateConfig,
   type MergeGateConfiguration,
   type ProjectMergeGate,

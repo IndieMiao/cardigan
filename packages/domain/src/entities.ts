@@ -330,10 +330,24 @@ export interface Precheck {
   readonly executor?: MergeCheckView["executor"];
   readonly external_run?: MergeCheckView["external_run"];
   readonly checks?: MergeCheckView["checks"];
+  /**
+   * C-798: host fingerprint (sha256 hex) of each configured check step as
+   * executed, fixed when the attempt starts running and immutable after. A
+   * card check reuses the precheck only while the fingerprints still match.
+   */
+  readonly check_fingerprints?: readonly PrecheckCheckFingerprint[];
   readonly summary?: string;
   readonly log_ref?: string;
 }
-export type PrecheckView = Omit<Precheck, "branch" | "machine_id">;
+export interface PrecheckCheckFingerprint {
+  readonly name: string;
+  readonly fingerprint: string;
+}
+/** C-798: step fingerprints are host-internal reuse evidence, not shown. */
+export type PrecheckView = Omit<
+  Precheck,
+  "branch" | "machine_id" | "check_fingerprints"
+>;
 
 export interface CardDependencyRef {
   readonly id: CardId;

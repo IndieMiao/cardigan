@@ -14,6 +14,7 @@ import {
   CHECK_SUMMARY_LIMIT,
   type CheckExecutor,
   CheckRecovery,
+  checkStepFingerprint,
   createMergeCheckLog,
   GithubDispatchJournal,
   GithubRetryLater,
@@ -2233,4 +2234,42 @@ test("C-773: host_ops abandon of a saved GitHub result still awaiting its HEAD p
     resumed.stop();
     await resumed.idle();
   }
+});
+
+test("C-798: a precheck records the fingerprint of each step it runs, fixed when it starts running", async () => {
+  const x = await setup();
+  await x.queue();
+  const expected = [
+    {
+      name: "test",
+      fingerprint: checkStepFingerprint({
+        name: "test",
+        run: "synthetic-command",
+      }),
+    },
+  ];
+  x.options.run = vi.fn(async (input) => {
+    expect(x.check().check_fingerprints).toBeUndefined();
+    input.onReady?.();
+    expect(x.check()).toMatchObject({
+      status: "running",
+      check_fingerprints: expected,
+    });
+    // A host configuration change during the run does not rewrite it.
+    x.settings.checks = [{ name: "test", run: "another-command" }];
+    return {
+      status: "passed" as const,
+      checks: [{ name: "test", status: "passed" as const, exit_code: 0 }],
+      cleanup_errors: [],
+    };
+  });
+  await (await new AuthorPrechecks(x.options).schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({
+    status: "passed",
+    check_fingerprints: expected,
+  });
+  expect(
+    checkStepFingerprint({ name: "test", run: "another-command" }),
+  ).not.toBe(expected[0]?.fingerprint);
+  expect(x.errors).toEqual([]);
 });
