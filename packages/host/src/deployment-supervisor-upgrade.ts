@@ -851,10 +851,24 @@ export class SupervisorUpgrader {
 
   /** Nothing runs: the next operation found gets the full bound again. */
   private drained(target: Prepared) {
+    if (this.drain?.attempt === target.attempt) this.endBusyRun();
+  }
+
+  private endBusyRun() {
     const drain = this.drain;
-    if (drain?.attempt !== target.attempt || drain.since === undefined) return;
+    if (drain?.since === undefined) return;
     drain.waited += Math.max(0, this.host.now() - drain.since);
     drain.since = undefined;
+  }
+
+  /**
+   * C-799: every step observes whether an operation still runs while a wait
+   * clock is open, whatever it waits on next (capacity, an idle deployment,
+   * maintenance, a helper): a step that starts later gets the full bound.
+   */
+  private settleOperationWait() {
+    if (this.drain?.since === undefined) return;
+    if (!liveLongOperations(this.host.store).length) this.endBusyRun();
   }
 
   /**
@@ -1006,6 +1020,7 @@ export class SupervisorUpgrader {
 
   private async advance(): Promise<SupervisorUpgradeStep> {
     if (this.restartingSince !== undefined) return this.awaitRestart();
+    this.settleOperationWait();
     const pending = this.pending;
     if (!pending) return "idle";
     // An earlier helper is still finishing (for example after a rollback).

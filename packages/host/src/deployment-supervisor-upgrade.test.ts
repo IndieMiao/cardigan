@@ -1139,3 +1139,41 @@ test("C-799: a step that starts after an earlier wait drained gets the full boun
   );
   expect(actions()).toEqual([]);
 });
+
+test("C-799: a step that starts after a wait on an idle deployment gets the full bound again (V-3534)", async () => {
+  const l = await layout();
+  let clock = Date.parse("2026-11-26T16:59:00.000Z");
+  const host = fakeHost(l, {
+    now: () => clock,
+    operationWaitMs: () => 60_000,
+  });
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  const step = mergeStepCard();
+  const first = step.hold();
+  expect(await upgrader.step()).toBe("waiting");
+  clock += 3_000;
+  first?.();
+  // Maintenance, a server that is not live or a switch: no idle deployment.
+  host.deploy(undefined);
+  expect(await upgrader.step()).toBe("waiting");
+  clock += 20 * 60_000;
+  expect(await upgrader.step()).toBe("waiting");
+  host.deploy(TO);
+  // A new merge step begins once the server is back: it is waited for.
+  const second = step.hold();
+  try {
+    clock += 1_000;
+    expect(await upgrader.step()).toBe("waiting");
+    clock += 58_000;
+    expect(await upgrader.step()).toBe("waiting");
+  } finally {
+    second?.();
+  }
+  clock += 2_000;
+  expect(await upgrader.step()).toBe("restarting");
+  expect(restartingSummary()).toContain(
+    "本机没有执行中的单卡或批次合并检查、合并步骤和其它受管长操作（已等待 63 秒）",
+  );
+  expect(actions()).toEqual([]);
+});
