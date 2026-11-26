@@ -427,3 +427,154 @@ test("C-671 slim keeps closed cards' other rows dormant and reads them back unch
     }
   });
 });
+
+test("C-796 dispatch records: superseded and retired rows load dormant in every scope but full, and read back unchanged", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: P });
+    const open = "C-1" as CardId;
+    const closed = "C-2" as CardId;
+    const record = (
+      id: string,
+      seq: number,
+      card_id: CardId,
+      payload: Record<string, unknown>,
+      kind: "system" | "human" = "system",
+      type = "github_check_dispatch",
+    ): Event => ({
+      id,
+      seq,
+      card_id,
+      type,
+      actor:
+        kind === "system"
+          ? { kind, project_id: P }
+          : ({ kind, project_id: P } as Event["actor"]),
+      payload,
+      created_at: at,
+    });
+    const candidate = {
+      repo: "r",
+      ref: "refs/heads/ci/x",
+      sha: "a",
+      delivery: "D",
+    };
+    store.uow.run((tx) => {
+      tx.cards.put(P, card({ id: open }));
+      tx.cards.put(P, card({ id: closed, status: "done" }));
+      const rows: Event[] = [
+        // Open card: a1 twice (o1 superseded), a retired-looking a0 kept.
+        record("o1", 1, open, { attempt: "a1", phase: "reserved" }),
+        record("o2", 2, open, { attempt: "a1", phase: "dispatching" }),
+        record("o3", 3, open, {
+          attempt: "a0",
+          finished: true,
+          deleted: true,
+          candidate,
+        }),
+        // Closed card: b1 cleaned up, b2 without candidate, b3 unfinished,
+        // b4 finished but not cleaned up.
+        record("c1", 1, closed, { attempt: "b1", candidate }),
+        record("c2", 2, closed, { attempt: "b1", finished: true, candidate }),
+        record("c3", 3, closed, {
+          attempt: "b1",
+          finished: true,
+          deleted: true,
+          candidate,
+        }),
+        record("c4", 4, closed, { attempt: "b2", finished: true }),
+        record("c5", 5, closed, {
+          attempt: "b3",
+          phase: "dispatching",
+          abandoned: "superseded",
+        }),
+        record("c6", 6, closed, { attempt: "b4", finished: true, candidate }),
+        // A non-system record never supersedes, nor a numeric attempt.
+        record("c7", 7, closed, { attempt: "b3", finished: true }, "human"),
+        record("c8", 8, closed, { attempt: 1, finished: true }),
+        record("c9", 9, closed, { attempt: 1, finished: true }),
+        // Probe records follow the same rule per type.
+        record(
+          "c10",
+          10,
+          closed,
+          { attempt: "b1", finished: true },
+          "system",
+          "github_probe_dispatch",
+        ),
+        record(
+          "c11",
+          11,
+          closed,
+          { attempt: "m1", phase: "reserved" },
+          "system",
+          "github_probe_dispatch",
+        ),
+        record(
+          "c12",
+          12,
+          closed,
+          { attempt: "m1", finished: true },
+          "system",
+          "github_probe_dispatch",
+        ),
+      ];
+      for (const row of rows) tx.events.append(P, row);
+    });
+    const sql = eventRepository(store.database, "read");
+    const dormantIds = (s: Store) =>
+      s.uow.read((tx) => {
+        const view = tx.events.listStreams?.(P);
+        if (!view || !("base" in view)) throw new Error("missing log view");
+        const ids: string[] = [];
+        for (let ord = view.base.start; ord < view.base.end; ord++) {
+          const entry = view.base.entryAt(ord);
+          if (entry && !("payload" in entry)) ids.push(entry.id);
+        }
+        return ids;
+      });
+    // o1, c1, c2 superseded; c3, c4 retired on the closed card; c11
+    // superseded and c10, c12 retired probes.
+    const expected = ["o1", "c1", "c2", "c3", "c4", "c10", "c11", "c12"];
+    for (const scope of ["hot", "lean", "slim"] as const) {
+      const s = Store.open({ dataDir, commandState: scope });
+      try {
+        expect(dormantIds(s)).toEqual(expected);
+        // Dormant rows keep their head; reading the stream returns them as stored.
+        s.uow.read((tx) => {
+          for (const stream of [open, closed])
+            expect(tx.events.listAfter(P, stream, 0)).toEqual(
+              sql.listAfter(P, stream, 0),
+            );
+        });
+        expect(dormantIds(s)).toEqual([]);
+      } finally {
+        s.close();
+      }
+    }
+    const full = Store.open({ dataDir, commandState: "full" });
+    try {
+      expect(dormantIds(full)).toEqual([]);
+    } finally {
+      full.close();
+    }
+    // Rows appended after a first read are decoded; older ones stay dormant.
+    const hot = Store.open({ dataDir, commandState: "hot" });
+    try {
+      expect(dormantIds(hot)).toEqual(expected);
+      store.uow.run((tx) =>
+        tx.events.append(
+          P,
+          record("c13", 13, closed, {
+            attempt: "b4",
+            finished: true,
+            deleted: true,
+            candidate,
+          }),
+        ),
+      );
+      expect(dormantIds(hot)).toEqual(expected);
+    } finally {
+      hot.close();
+    }
+  });
+});

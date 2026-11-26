@@ -249,6 +249,7 @@ export * from "./decision-other.js";
 export * from "./decision-question.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
+export * from "./dispatch-records.js";
 export * from "./dispatch-tier.js";
 export * from "./employee.js";
 export * from "./entities.js";
@@ -273,12 +274,14 @@ export {
   telemetryEvents,
 } from "./event-index.js";
 export {
+  DormantEvent,
   type DormantLoader,
   EventLog,
   EventLogView,
   type HistoryFilter,
   type IndexKeys,
   indexKeysOf,
+  type NewestKey,
   streamHistory,
 } from "./event-log.js";
 export * from "./ext-interaction.js";

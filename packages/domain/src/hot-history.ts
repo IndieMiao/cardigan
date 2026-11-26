@@ -13,7 +13,7 @@ import {
   eventsOfType,
   fullEventHistory,
 } from "./event-index.js";
-import { EventLog, EventLogView } from "./event-log.js";
+import { DormantEvent, EventLog, EventLogView } from "./event-log.js";
 import type { CardId, EventId } from "./ids.js";
 import { OFFICE_DIGEST_EVENT_TYPES } from "./office-changes.js";
 
@@ -37,21 +37,21 @@ export const COLD_CARD_OMITTED_EVENT_TYPES: ReadonlySet<string> = new Set([
   "bell_wake_deferred",
   "session_maintenance_changed",
   "machine_selected",
-  // github_check_dispatch stays: a github_run_completed wait may name any card's run.
   "github_check_progress",
-]);
-
-/**
- * C-649 `lean` scope: cold cards also drop GitHub dispatch records (about a
- * sixth of daily events). Their only command-state reader is a
- * `github_run_completed` wait or resume target, whose dispatch cards are made
- * hot through the full log index (`githubRunCards`).
- */
-export const LEAN_COLD_CARD_OMITTED_EVENT_TYPES: ReadonlySet<string> = new Set([
-  ...COLD_CARD_OMITTED_EVENT_TYPES,
+  // C-796 (C-649 `lean` before): GitHub dispatch records. Their only
+  // command-state reader is a `github_run_completed` wait or resume target,
+  // whose dispatch cards are made hot through the full log (`githubRunCards`,
+  // `githubRunCardsIn`); the host journal reads the Store log itself.
   "github_check_dispatch",
   "github_probe_dispatch",
 ]);
+
+/**
+ * C-649 `lean` scope: since C-796 the same cold-card types as `hot`; `lean`
+ * differs by its project-stream retention.
+ */
+export const LEAN_COLD_CARD_OMITTED_EVENT_TYPES: ReadonlySet<string> =
+  COLD_CARD_OMITTED_EVENT_TYPES;
 
 /**
  * C-671 `slim`: the only fact types a cold card keeps in the command-state
@@ -195,6 +195,28 @@ export function githubRunCards(
     if (e.card_id && run !== undefined && wanted.has(run)) cards.add(e.card_id);
   }
   return cards;
+}
+
+/**
+ * C-796: `githubRunCards` over a Store log view, read from the type index
+ * without decoding a dormant record (its `DispatchHead` names the run).
+ */
+export function githubRunCardsIn(
+  view: EventLogView,
+  runIds: Iterable<string>,
+): Set<CardId> {
+  const wanted = new Set<string>();
+  for (const id of runIds) if (RUN_ID.test(id)) wanted.add(id);
+  if (!wanted.size) return new Set();
+  const streams = view.streamsWhere("github_check_dispatch", (entry) => {
+    const run =
+      entry instanceof DormantEvent
+        ? entry.dispatch?.run_id
+        : externalRunId(entry);
+    return run !== undefined && wanted.has(run);
+  });
+  streams.delete("");
+  return streams as Set<CardId>;
 }
 
 /** GitHub run ids that live blocker waits name, on any work item. */
@@ -473,7 +495,13 @@ export function hotCommandEvents(
   const triggerCards = all
     .filter((e) => triggers.has(e.id))
     .map((e) => e.card_id);
-  const hot = hotCardIds(state, [...triggerCards, ...extra]);
+  // C-796: the dispatch cards of waited GitHub runs stay whole.
+  const dispatches = eventsOfType(state.events, "github_check_dispatch");
+  const hot = hotCardIds(state, [
+    ...triggerCards,
+    ...githubRunCards(dispatches, waitedGithubRuns(state.work_items)),
+    ...extra,
+  ]);
   const kept = all.filter(
     (e) =>
       !e.card_id ||
