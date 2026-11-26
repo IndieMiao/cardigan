@@ -56,25 +56,34 @@ function client(replies: (() => Response)[], delays?: readonly number[]) {
     },
     ...(delays ? { readOverloadDelaysMs: delays } : {}),
   });
-  return { http, fetchImpl, waits, noticeDuringSleep };
+  return { http, fetchImpl, waits, noticeDuringSleep, notice };
 }
 
-test("C-775: the overload backoff defaults to 2 retries after 5 s and 15 s", () => {
-  expect(READ_OVERLOAD_RETRY_DELAYS_MS).toEqual([5_000, 15_000]);
+test("C-775: an overloaded read is not retried by default (C-775#15)", () => {
+  expect(READ_OVERLOAD_RETRY_DELAYS_MS).toEqual([]);
 });
 
-test("C-775: a read refused with read_timeout backs off and stops at the limit", async () => {
-  const server = client(Array(10).fill(() => overloaded()));
-  const failure = await server.http.session().catch((error) => error);
-  expect(failure).toBeInstanceOf(ApiError);
-  expect(failure).toMatchObject({ status: 503, code: "read_timeout" });
-  // First attempt plus one per delay, never more.
-  expect(server.fetchImpl).toHaveBeenCalledTimes(3);
-  expect(server.waits).toEqual([5_000, 15_000]);
-  // An overload is not a deployment: no "服务正在更新" notice.
-  expect(server.noticeDuringSleep).toEqual([false, false]);
-  expect(isReadOverload(failure)).toBe(true);
-  expect(describeError(failure)).toBe("服务繁忙，读取超时，请稍后重试。");
+test.each(["read_timeout", "read_busy"] as const)(
+  "C-775: a read refused with %s fails at once without the restart notice",
+  async (code) => {
+    const server = client(Array(10).fill(() => overloaded(code)));
+    const seen: boolean[] = [];
+    server.notice.subscribe(() => seen.push(server.notice.active()));
+    const failure = await server.http.session().catch((error) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure).toMatchObject({ status: 503, code });
+    // One request, no wait: the retry limit for an overload is zero.
+    expect(server.fetchImpl).toHaveBeenCalledTimes(1);
+    expect(server.waits).toEqual([]);
+    // An overload is not a deployment: no "服务正在更新" notice.
+    expect(seen).toEqual([]);
+    expect(isReadOverload(failure)).toBe(true);
+    expect(describeError(failure)).toBe("服务繁忙，读取超时，请稍后重试。");
+  },
+);
+
+test("C-775: the restart schedule is still 4 retries after 1, 2, 4 and 8 s (Q-415)", () => {
+  expect(SERVICE_RETRY_DELAYS_MS).toEqual([1_000, 2_000, 4_000, 8_000]);
 });
 
 test("C-775: a configured overload schedule sets both the waits and the limit", async () => {
@@ -89,12 +98,13 @@ test("C-775: a configured overload schedule sets both the waits and the limit", 
   expect(server.fetchImpl).toHaveBeenCalledTimes(4);
 });
 
-test("C-775: a read that recovers within the limit returns its data", async () => {
-  const server = client([() => overloaded("read_busy"), ok]);
+test("C-775: with a configured schedule a read that recovers returns its data", async () => {
+  const server = client([() => overloaded("read_busy"), ok], [2_000]);
   await expect(server.http.session()).resolves.toMatchObject({
     authenticated: true,
   });
-  expect(server.waits).toEqual([5_000]);
+  expect(server.waits).toEqual([2_000]);
+  expect(server.noticeDuringSleep).toEqual([false]);
 });
 
 test("C-775: a proxy 503 during a restart keeps the C-250 schedule and notice", async () => {
@@ -108,12 +118,13 @@ test("C-775: a proxy 503 during a restart keeps the C-250 schedule and notice", 
   );
 });
 
-test("C-775: a restart followed by overload uses each schedule once", async () => {
+test("C-775: a restart followed by an overload stops at the overload", async () => {
   const server = client([proxyDown, ...Array(10).fill(() => overloaded())]);
   await expect(server.http.session()).rejects.toMatchObject({
     code: "read_timeout",
   });
-  expect(server.waits).toEqual([1_000, 5_000, 15_000]);
+  expect(server.waits).toEqual([1_000]);
+  expect(server.fetchImpl).toHaveBeenCalledTimes(2);
 });
 
 test("C-775: keyed writes keep the C-250 schedule even for an overload body", async () => {
@@ -167,6 +178,46 @@ test("C-775: automatic reads join the one in flight and run once afterwards", as
   await act(async () => calls[1]?.resolve("second"));
   expect(result.current).toMatchObject({ data: "second", pending: false });
   expect(load).toHaveBeenCalledTimes(2);
+});
+
+test("C-775: an event during the follow-up read gets one more read after it", async () => {
+  const { load, calls } = controlledLoad();
+  const { result, rerender } = renderHook(
+    ({ revision }) => useResource(load, revision),
+    { initialProps: { revision: 0 } },
+  );
+  rerender({ revision: 1 });
+  await act(async () => calls[0]?.resolve("first"));
+  expect(load).toHaveBeenCalledTimes(2);
+  // The last event arrives while the follow-up is open: it is not lost.
+  rerender({ revision: 2 });
+  expect(load).toHaveBeenCalledTimes(2);
+  await act(async () => calls[1]?.resolve("second"));
+  expect(load).toHaveBeenCalledTimes(3);
+  await act(async () => calls[2]?.resolve("third"));
+  expect(result.current).toMatchObject({ data: "third", pending: false });
+  // Nothing changed after the third read started: no fourth.
+  expect(load).toHaveBeenCalledTimes(3);
+});
+
+test("C-775: events during a slow failing read do not hide its failure", async () => {
+  const { load, calls } = controlledLoad();
+  const { result, rerender } = renderHook(
+    ({ revision }) => useResource(load, revision),
+    { initialProps: { revision: 0 } },
+  );
+  // Project activity every few seconds while a read waits out its timeout.
+  for (let revision = 1; revision <= 10; revision++) rerender({ revision });
+  expect(load).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    calls[0]?.reject(new ApiError(503, "read_timeout", "读取超时")),
+  );
+  expect(result.current).toMatchObject({
+    error: "服务繁忙，读取超时，请稍后重试。",
+    pending: false,
+  });
+  // The overload ends the chain: the queued events do not read again.
+  expect(load).toHaveBeenCalledTimes(1);
 });
 
 test("C-775: an explicit reload still replaces the read in flight", async () => {

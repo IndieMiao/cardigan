@@ -1,7 +1,7 @@
 // C-775 evidence: a card detail whose reads the server refuses with
 // 503 read_timeout. Synthetic data only; no server or database.
-// `?phase=retrying` holds every retry wait open (the page while it backs off);
-// `?phase=failed` lets the waits pass at once (the page after the last retry).
+// `?phase=retrying` holds every retry wait open (the page while a client that
+// retries is backing off); `?phase=failed` lets the waits pass at once.
 // The first click on “重试” makes the next read succeed.
 import { createRoot } from "react-dom/client";
 import { App } from "../src/App.js";

@@ -179,13 +179,14 @@ try {
       await open(width, theme, "#/p/p-1/cards?view=list");
       await until("!!document.querySelector('.card-table')");
       await record(`list-${suffix}`);
-      // While the client waits between retries.
+      // 1.3 s after opening (past RequestFeedback's 1 s slow threshold) with
+      // every retry wait held open: the baseline is still retrying a
+      // read_timeout; C-775#15 shows the failure at once instead.
       await open(width, theme, "#/p/p-1/cards/C-2", "retrying");
       await until("window.c775.reads.count >= 1");
-      // Past RequestFeedback's 1 s slow threshold.
       await delay(1300);
-      await record(`detail-retrying-${suffix}`);
-      // After the last retry.
+      await record(`detail-1s-${suffix}`);
+      // After every automatic retry, if any.
       await open(width, theme, "#/p/p-1/cards/C-2", "failed");
       await until("!!document.querySelector('[role=alert]')");
       const failed = await record(`detail-failed-${suffix}`);

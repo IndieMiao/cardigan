@@ -4,9 +4,9 @@ import { isReadOverload } from "./service-retry.js";
 
 /**
  * C-775: an automatic read joins one still in flight for at most this long
- * instead of starting a second one. Longer than the client's whole overload
- * retry schedule (three ~30 s attempts plus 5 + 15 s), so a hung request
- * cannot freeze the page's live updates for good.
+ * instead of starting a second one. Well past a ~30 s `read_timeout` plus the
+ * ~15 s restart schedule, so a hung request cannot freeze the page's live
+ * updates for good.
  */
 export const RESOURCE_JOIN_MAX_MS = 120_000;
 
@@ -28,8 +28,8 @@ export function useResource<T>(
       }
     | undefined
   >(undefined);
-  // C-775: after the server stayed overloaded through every retry, automatic
-  // reads of this source wait for an explicit retry instead of loading again.
+  // C-775: after the server refused a read as overloaded, automatic reads of
+  // this source wait for an explicit retry instead of loading again.
   const paused = useRef<typeof load | undefined>(undefined);
   const [state, setState] = useState<{
     source: typeof load;

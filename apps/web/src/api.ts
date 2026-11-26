@@ -4479,9 +4479,9 @@ export class HttpCardiganClient implements CardiganClient {
    * may have applied it), so a final 502/503 cannot prove nothing happened.
    *
    * C-775: a read the read pool refused as overloaded (503 `read_timeout` /
-   * `read_busy`) is retried on its own, slower and shorter schedule and
-   * without the "服务正在更新" notice; a restart keeps the C-250 schedule.
-   * Writes never take the overload branch.
+   * `read_busy`) follows its own schedule (by default not retried at all) and
+   * never raises the "服务正在更新" notice; a restart keeps the C-250
+   * schedule. Writes never take the overload branch.
    */
   private async sendWithRetry(
     send: () => Promise<Response>,

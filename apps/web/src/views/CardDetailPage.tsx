@@ -68,6 +68,7 @@ import {
 import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { useAttachmentRefsState } from "../useAttachmentRefs.js";
+import { usePageVisible } from "../usePageVisible.js";
 import { useResource } from "../useResource.js";
 import { MergePanel } from "./MergePanel.js";
 
@@ -212,9 +213,12 @@ export function CardDetailPage(props: CardDetailPageProps) {
       throw error;
     }
   }, [client, projectId, cardId]);
+  // C-775: a background tab stops reading and reads once when shown again.
+  const visible = usePageVisible();
   const { data, error, reload, pending, interactive, replace } = useResource(
     load,
     cardRevision ? cardRevision(cardId, affectedCards) : revision,
+    visible,
   );
   // Older pages are read beside the live head refresh: at most one at a time,
   // dropped when filters, anchors or the card change while it is in flight.
@@ -513,10 +517,11 @@ function CardContent({
         : {},
     [client, section, projectId, cardId],
   );
+  const visible = usePageVisible();
   const panelData = useResource(
     panelLoad,
     revision + (section === "work" ? workRevision : 0),
-    !!head.overview && section !== "overview",
+    !!head.overview && section !== "overview" && visible,
   );
   const detail = head.overview ? { ...head, ...panelData.data } : head;
   const panelReady = !head.overview || !!panelData.data;

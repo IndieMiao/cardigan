@@ -28,9 +28,9 @@ export const SERVICE_UPDATING_MESSAGE = "服务正在更新，几秒后自动重
 /**
  * C-775: the read pool's 503 codes for "too busy to read right now"
  * (`read_timeout` after its ~30 s budget, `read_busy` when its queue is full).
- * They are an overload, not a restart: retrying them as fast as a restart
- * only adds load, so they follow {@link READ_OVERLOAD_RETRY_DELAYS_MS} and do
- * not raise the "服务正在更新" notice.
+ * They are an overload, not a restart: retrying them only adds load, so they
+ * follow {@link READ_OVERLOAD_RETRY_DELAYS_MS} instead of the restart schedule
+ * and do not raise the "服务正在更新" notice.
  */
 export const READ_OVERLOAD_CODES: ReadonlySet<string> = new Set([
   "read_timeout",
@@ -39,12 +39,11 @@ export const READ_OVERLOAD_CODES: ReadonlySet<string> = new Set([
 
 /**
  * C-775: waits before each automatic retry of a read the server refused as
- * overloaded; its length is the retry limit. Default chosen by the author
- * (C-775): 2 retries, 5 then 15 seconds. A `read_timeout` attempt itself
- * takes ~30 s, so a page gives up after about two minutes at most and then
- * shows the failure with a retry button.
+ * overloaded; its length is the retry limit. Default: none (C-775#15). A
+ * `read_timeout` already waited ~30 s on the server, so the page shows the
+ * failure with a retry button at once instead of asking again.
  */
-export const READ_OVERLOAD_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000];
+export const READ_OVERLOAD_RETRY_DELAYS_MS: readonly number[] = [];
 
 /** True for an error the read pool raised because it was overloaded. */
 export function isReadOverload(error: unknown): boolean {
