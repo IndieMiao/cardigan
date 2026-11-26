@@ -2728,6 +2728,7 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_resume_deferred":
     case "precheck_wait_escalated":
     case "baseline_conflict_limit_reached":
+    case "precheck_slot_waiting":
       if (
         input.event.actor.kind === "system" &&
         input.event.actor.project_id === input.snapshot.project_id

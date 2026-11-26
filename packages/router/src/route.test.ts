@@ -1817,6 +1817,32 @@ test("an author precheck wait routes only its settlement, not an early or duplic
   }
 });
 
+test("C-777: a precheck slot wait goes to PM Ops with its occupant", () => {
+  const system = { actor: { kind: "system" as const, project_id } };
+  const body =
+    "W-1 的作者预检查 check 已排队 10 分钟未取得执行名额：cardigan/C-557 的合并检查等待执行名额。请 PM 核查。";
+  const wait = event(
+    "precheck_slot_waiting",
+    { work_item_id: "W-1", assignment_id: "A-1", attempt_id: "check", body },
+    system,
+  );
+  const result = routeEvent({
+    event: wait,
+    snapshot: snapshot({ events: [wait] }),
+  });
+  expect(recipients(result)).toEqual(["pm_ops"]);
+  expect(JSON.stringify(result)).toContain("C-557");
+  // An assignment cannot raise it.
+  expect(
+    recipients(
+      routeEvent({
+        event: event("precheck_slot_waiting", { body }),
+        snapshot: snapshot({}),
+      }),
+    ),
+  ).toEqual([]);
+});
+
 test("C-612: delivered release notes go to the managed PM Office, or warn PM Ops when nobody can send", () => {
   const route = (options: {
     enabled?: boolean;

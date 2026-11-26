@@ -72,9 +72,11 @@ test("cross-card read audit is excluded before activity pagination but remains e
     });
     const state = projectState(f.store, project_id);
     expect(activity(state, {}).events).toEqual(activity(before, {}).events);
+    // C-785: audit rows stay in the table (queried above) but not in the
+    // in-memory command state.
     expect(
       activity(state, { type: "cross_card_read", limit: 100 }).events,
-    ).toHaveLength(47);
+    ).toHaveLength(0);
   } finally {
     await f.close();
   }

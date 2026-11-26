@@ -31,11 +31,14 @@ const BASELINE_SHA256 =
 // C-760 adds each action's merge hold (blocks_merge, prerequisite); stripped too.
 // C-750 adds cards waiting for the owner to mark done; the synthetic data has
 // none (asserted below).
+// C-777 adds stuck system merge confirmations; the synthetic data has none
+// (asserted below).
 function legacyProjection(view: ReturnType<typeof needsYou>) {
   const {
     auto_merge_pause: _pause,
     story_proposals: _proposals,
     cards_to_close: _toClose,
+    stalled_system_merges: _stalled,
     ...legacy
   } = view;
   return JSON.parse(
@@ -95,6 +98,7 @@ test("production-size synthetic Needs You exactly matches the original reader re
     expect(view.auto_merge_pause).toEqual({ paused: false, waiting_count: 0 });
     expect(view.story_proposals).toEqual([]);
     expect(view.cards_to_close).toEqual([]);
+    expect(view.stalled_system_merges).toEqual([]);
     const response = JSON.stringify(legacyProjection(view));
     expect(createHash("sha256").update(response).digest("hex")).toBe(
       BASELINE_SHA256,
