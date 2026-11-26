@@ -69,6 +69,10 @@ export {
   refreshCancelledHumanActions,
 } from "./commands/human-action-lifecycle.js";
 export {
+  ownerMergeBlockingBasis,
+  setHumanActionMergeBlocking,
+} from "./commands/human-action-merge-blocking.js";
+export {
   beginIdleSessionRetirement,
   clearSupersededRetirement,
   confirmKeptShellExit,
@@ -91,6 +95,7 @@ export * from "./commands/machines.js";
 export * from "./commands/member.js";
 export {
   type MergePlan,
+  mergeBlockingHumanActions,
   mergePlan,
   prepareMergePlan,
   requestMerge,
@@ -287,6 +292,7 @@ export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
 export * from "./hot-history.js";
 export * from "./hot-history-shadow.js";
+export { isMergePrerequisite } from "./human-action.js";
 export * from "./human-action-executor.js";
 export * from "./ids.js";
 export * from "./image-generation.js";

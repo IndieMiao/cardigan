@@ -103,6 +103,7 @@ export type RuleId =
   | "6.4/human action requested"
   | "6.4/human action completed"
   | "6.4/human action cancelled"
+  | "6.4/human action merge blocking changed"
   | "6.4/needs you item ready"
   | "6.4/bell delivery failed"
   | "6.4/run finished without output"

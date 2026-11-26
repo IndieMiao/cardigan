@@ -43,11 +43,13 @@ import {
   hasVerifiedMergeNoop,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
+  isMergePrerequisite,
   isOfficeDigestStream,
   latestCardTemplate,
   listNeedsYou,
   listNeedsYouCounts,
   markCardDone,
+  mergeBlockingHumanActions,
   mergeStage,
   type NeedsYouSection,
   notices,
@@ -1603,6 +1605,16 @@ function decisionActionWebView(
                 original,
               )
             : ["完成申请：当前不可合并"],
+          // C-760: "仍要合并" offers to turn these into follow-ups.
+          blocking_human_actions: decision.card_id
+            ? mergeBlockingHumanActions(state, decision.card_id).map((h) => ({
+                id: h.id,
+                title:
+                  h.handoff?.title ??
+                  h.instructions.split(/\r?\n/u)[0] ??
+                  h.instructions,
+              }))
+            : [],
           // C-264: confirmation checks; a conclusion on an older version reads
           // as pending (`stale`) until PM Office records one for this version.
           pre_merge_checks: preMergeChecksView(state, decision.card_id),
@@ -1811,6 +1823,9 @@ export function needsYou(
       executor: action.executor ?? "owner",
       triage_rationale: action.triage_rationale ?? null,
       blocked_work_items: action.blocked_work_items,
+      // C-760: the owner can switch between a merge hold and a follow-up.
+      blocks_merge: isMergePrerequisite(action),
+      ...(action.prerequisite ? { prerequisite: action.prerequisite } : {}),
       ...(action.completion_notice !== undefined
         ? { completion_notice: action.completion_notice }
         : {}),

@@ -99,6 +99,7 @@ export const CLI_TOOLS = {
   "token issue": null,
   "human-action done": "complete_host_action",
   "human-action reassign": null,
+  "human-action merge-blocking": null,
   "needs-you": "list_needs_you",
   "needs-you read": null,
   // C-81#10 exception: only notifications addressed to this exact Assignment.

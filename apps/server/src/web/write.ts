@@ -47,6 +47,7 @@ import {
   runLimitMaximumMessage,
   type SystemReminderPolicy,
   setCardSensitive,
+  setHumanActionMergeBlocking,
   setMergeSolo,
   setMergeWindow,
   setProjectPreferences,
@@ -265,6 +266,8 @@ const decision = z.object({
       if (message) context.addIssue({ code: "custom", message });
     })
     .optional(),
+  /** C-760: with merge_override_reason, turn open holds into follow-ups. */
+  merge_override_follow_up: z.boolean().optional(),
   rationale: z.string().optional(),
   snooze_until: z.string().optional(),
   raw_quote: z.string().optional(),
@@ -707,7 +710,7 @@ async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
   return true;
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|reassign|supersede|recheck-merge|mark-done|story-confirm|sensitive|merge-solo|merge-window|source-unrelated)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|reassign|merge-blocking|supersede|recheck-merge|mark-done|story-confirm|sensitive|merge-solo|merge-window|source-unrelated)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
@@ -1294,7 +1297,7 @@ export async function serveWrite(
         ]
       : group === "decisions"
         ? ["comments", "resolve", "source-unrelated"]
-        : ["complete", "cancel", "reassign"];
+        : ["complete", "cancel", "reassign", "merge-blocking"];
   if (!supported.includes(operation ?? "")) return false;
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
   c.authorize();
@@ -1728,6 +1731,9 @@ export async function serveWrite(
             ...(p.merge_override_reason !== undefined
               ? { merge_override_reason: p.merge_override_reason }
               : {}),
+            ...(p.merge_override_follow_up !== undefined
+              ? { merge_override_follow_up: p.merge_override_follow_up }
+              : {}),
             ...(p.snooze_until !== undefined
               ? { snooze_until: p.snooze_until }
               : {}),
@@ -1790,6 +1796,34 @@ export async function serveWrite(
       const p = parsed(z.object({ reason: text }).strict(), body);
       output = run(context, (s, a, ports) =>
         cancelHumanAction(s, a, { ...p, human_action_id }, ports),
+      );
+    } else if (operation === "merge-blocking") {
+      // C-760: the owner moves an action between holding the merge and
+      // post-merge follow-up, in either direction.
+      const p = parsed(
+        z
+          .object({
+            blocks_merge: z.boolean(),
+            prerequisite: z.enum(["credential", "external_account"]).optional(),
+            reason: text,
+            decision_id: id("decision").optional(),
+          })
+          .strict(),
+        body,
+      );
+      output = run(context, (s, a, ports) =>
+        setHumanActionMergeBlocking(
+          s,
+          a,
+          {
+            human_action_id,
+            blocks_merge: p.blocks_merge,
+            reason: p.reason,
+            ...(p.prerequisite ? { prerequisite: p.prerequisite } : {}),
+            ...(p.decision_id ? { decision_id: p.decision_id } : {}),
+          },
+          ports,
+        ),
       );
     } else if (operation === "reassign") {
       // C-742: the owner can take an operator action back, never complete it.

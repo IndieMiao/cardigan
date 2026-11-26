@@ -233,13 +233,6 @@
   {
     "path": "views/NeedsYouPage.tsx",
     "kind": "native-button",
-    "hash": "403e70ff609e6805",
-    "text": "<button ref={overrideTrigger} type=\"button\" className=\"quiet\" disabled={action.busy} onClick={() => { setOverrideReason(\"\"); setOverriding(true); }} >",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-button",
     "hash": "96dedfaf16f5ea81",
     "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy} onClick={() => void action.run( [ projectId, cardId, \"recheck\", check.completion_id, check.attemp",
     "count": 1
@@ -284,13 +277,6 @@
     "kind": "native-button",
     "hash": "7fc3be4962929f33",
     "text": "<button ref={overrideCancel} type=\"button\">",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-button",
-    "hash": "11f955b181b90d41",
-    "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy || !!overrideError} onClick={() => { if (overrideError) return; void action.run( [projectId, q.id,",
     "count": 1
   },
   {

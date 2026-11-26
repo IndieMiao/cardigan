@@ -1357,6 +1357,25 @@ export interface HelperCheckResult {
   readonly failed_steps: readonly string[];
 }
 export type HumanActionExecutor = "owner" | "operator";
+/**
+ * C-760: one change between "holds the merge" and "post-merge follow-up",
+ * kept on the action as its audit trail (who, when, why, which decision).
+ */
+export interface HumanActionMergeBlockingChange {
+  readonly at: Timestamp;
+  readonly by: Author;
+  readonly blocks_merge: boolean;
+  readonly prerequisite?: "credential" | "external_account";
+  readonly previous_blocks_merge: boolean;
+  readonly previous_prerequisite?: "credential" | "external_account";
+  readonly reason: string;
+  /** The human decision this change carries out, if any. */
+  readonly decision_id?: DecisionId;
+  /** The human's words recorded on that decision. */
+  readonly raw_quote?: string;
+  /** direct: the dedicated command; triage: PM rewrite; merge_override: "仍要合并". */
+  readonly via: "direct" | "triage" | "merge_override";
+}
 export interface HumanActionHandoff {
   readonly terminal?: ActionCommand;
   readonly title: string;
@@ -1434,6 +1453,8 @@ export interface HumanAction {
   /** Only credential or external-account preparation can hold a merge. */
   readonly prerequisite?: "credential" | "external_account";
   readonly follow_up_work_items?: readonly WorkItemId[];
+  /** C-760: merge-blocking reclassifications, oldest first. */
+  readonly merge_blocking_changes?: readonly HumanActionMergeBlockingChange[];
   readonly status: HumanActionStatus;
   readonly result?: {
     readonly conclusion?: "exited" | "false_alarm" | "unconfirmed";

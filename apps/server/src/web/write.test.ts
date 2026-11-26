@@ -697,6 +697,7 @@ test("every write route enforces cookie authentication, Origin and JSON before a
       "/human-actions/H-1/complete",
       "/human-actions/H-1/cancel",
       "/human-actions/H-1/reassign",
+      "/human-actions/H-1/merge-blocking",
     ],
     before = snapshot();
   for (const url of routes) {
@@ -1997,6 +1998,86 @@ test("C-742 the owner cannot complete 张良's action on the web but can take it
     status: 200,
     body: { status: "done" },
   });
+});
+
+test("C-760 the owner switches a credential hold to a post-merge follow-up and back on the web", async () => {
+  const action = s.command((state, actor, ports) =>
+    requestHumanAction(
+      state,
+      actor,
+      {
+        card_id: s.card.id,
+        instructions: "在 Google 后台配置账号",
+        why_human: "只有所有者有账号",
+        executor: "owner",
+        expected_return: "配置完成",
+        blocked_work_items: [],
+        blocks_merge: true,
+        prerequisite: "external_account",
+      },
+      ports,
+    ),
+  );
+  s.command((state, actor, ports) =>
+    triageHumanAction(
+      state,
+      actor,
+      {
+        human_action_id: action.id,
+        disposition: "human",
+        rationale: "交给所有者",
+        title: "Google 账号配置",
+        summary: "账号配置",
+        why_human: "只有所有者有账号",
+        instructions: "在后台配置",
+        expected_outcome: "配置完成",
+        expected_return: "配置完成",
+      },
+      ports,
+    ),
+  );
+  const url = `/human-actions/${action.id}/merge-blocking`;
+  const readNeeds = async () =>
+    (await fetch(web.url + path("/needs-you"), { headers: { cookie } })).json();
+  expect((await readNeeds()).human_actions).toContainEqual(
+    expect.objectContaining({
+      id: action.id,
+      blocks_merge: true,
+      prerequisite: "external_account",
+    }),
+  );
+  const before = snapshot();
+  for (const bad of [
+    { blocks_merge: true, reason: "缺前置" },
+    { blocks_merge: false, prerequisite: "credential", reason: "多前置" },
+    { blocks_merge: "no", reason: "x" },
+  ])
+    expect(await request(url, bad)).toMatchObject({ status: 400 });
+  expect(snapshot()).toBe(before);
+  const lifted = await request(url, {
+    blocks_merge: false,
+    reason: "所有者改为合并后跟进",
+  });
+  expect(lifted).toMatchObject({
+    status: 200,
+    body: {
+      blocks_merge: false,
+      merge_blocking_changes: [
+        { by: "human", via: "direct", previous_blocks_merge: true },
+      ],
+    },
+  });
+  expect(lifted.body.prerequisite).toBeUndefined();
+  const held = await request(url, {
+    blocks_merge: true,
+    prerequisite: "credential",
+    reason: "所有者改为挡合并",
+  });
+  expect(held).toMatchObject({
+    status: 200,
+    body: { blocks_merge: true, prerequisite: "credential" },
+  });
+  expect(held.body.merge_blocking_changes).toHaveLength(2);
 });
 
 test("Web answers bind to a story group, retry exactly once, and leave the rest to the human default choice", async () => {

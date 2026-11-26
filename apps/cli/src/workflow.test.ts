@@ -1301,6 +1301,95 @@ test("C-742 张良's action needs --operator to complete; reassign hands it back
   );
 });
 
+test("C-760 human-action merge-blocking moves a hold to a follow-up and back", async () => {
+  await bootstrap();
+  await run([
+    "card",
+    "create",
+    "--template",
+    "dev",
+    "--title",
+    "T",
+    "--goal",
+    "G",
+    "--acceptance",
+    "A",
+    "--repo",
+    "r/x",
+  ]);
+  const store = Store.open({ dataDir });
+  let action: HumanAction;
+  try {
+    action = runCommand(store, {
+      project_id: "p-work" as never,
+      actor: { kind: "human", project_id: "p-work" as never },
+      reduce: (state, actor, ports) =>
+        requestHumanAction(
+          state,
+          actor,
+          {
+            card_id: "C-1" as never,
+            instructions: "在 Google 后台配置账号",
+            why_human: "只有所有者有账号",
+            executor: "owner",
+            expected_return: "配置完成",
+            blocked_work_items: [],
+            blocks_merge: true,
+            prerequisite: "external_account",
+          },
+          ports,
+        ),
+    });
+  } finally {
+    store.close();
+  }
+  const stored = () => {
+    const reopened = Store.open({ dataDir });
+    try {
+      return reopened.uow.read((tx) =>
+        tx.human_actions.get("p-work" as never, action.id),
+      );
+    } finally {
+      reopened.close();
+    }
+  };
+  const move = (...flags: string[]) =>
+    run(["human-action", "merge-blocking", action.id, ...flags]);
+  expect(await move("--to", "nowhere", "--reason", "x")).toBe(2);
+  expect(await move("--to", "hold", "--reason", "x")).toBe(2);
+  expect(
+    await move(
+      "--to",
+      "follow-up",
+      "--prerequisite",
+      "credential",
+      "--reason",
+      "x",
+    ),
+  ).toBe(2);
+  expect(stored()?.blocks_merge).toBe(true);
+  expect(await move("--to", "follow-up", "--reason", "账号合并后再配")).toBe(0);
+  expect(printed()).toContain(`已把 ${action.id} 改为合并后跟进`);
+  expect(stored()).toMatchObject({
+    blocks_merge: false,
+    merge_blocking_changes: [{ by: "human", reason: "账号合并后再配" }],
+  });
+  expect(
+    await move(
+      "--to",
+      "hold",
+      "--prerequisite",
+      "credential",
+      "--reason",
+      "先配",
+    ),
+  ).toBe(0);
+  expect(stored()).toMatchObject({
+    blocks_merge: true,
+    prerequisite: "credential",
+  });
+});
+
 test("assign rejects a role that does not match the work item", async () => {
   await bootstrap();
   await run([

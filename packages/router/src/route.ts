@@ -2811,6 +2811,32 @@ export function routeEvent(input: RouteInput): RouteResult {
         notifyHumanAction(input, draft, action, "6.4/human action requested");
       break;
     }
+    case "human_action_merge_blocking_changed": {
+      // C-760: PM Ops hears when the human or "仍要合并" moves a hold; a
+      // new hold rings the owner like a fresh request.
+      const action = input.snapshot.human_actions.find(
+        (h) => h.id === payloadString(input.event.payload, "human_action_id"),
+      );
+      if (action?.status !== "open") break;
+      if (input.event.actor.kind === "human")
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "human_action",
+          "6.4/human action merge blocking changed",
+          `${action.card_id ?? "项目"} ${action.key}: 所有者改为${action.blocks_merge ? "挡合并" : "合并后跟进"}；${payloadString(input.event.payload, "reason") ?? ""}`,
+        );
+      if (
+        action.blocks_merge === true &&
+        action.triage !== "pm_ops" &&
+        input.event.actor.kind !== "human" &&
+        !isOperatorAction(action) &&
+        needsYouItemReady(input.snapshot, action)
+      )
+        notifyHumanAction(input, draft, action, "6.4/human action requested");
+      break;
+    }
     case "human_action_cancelled":
     case "human_action_completed":
       routeHumanActionCompleted(input, draft);
