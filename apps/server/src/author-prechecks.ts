@@ -54,6 +54,11 @@ type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
 type StoreTx = Parameters<Parameters<Store["uow"]["run"]>[0]>[0];
 /** C-773: bound for the one read-only GitHub lookup of a stale or abandoned check. */
 const INSPECT_TIMEOUT_MS = 60_000;
+/** C-773: a HEAD lock busy this long is not a transient wait any more. */
+export const DEFAULT_HEAD_LOCK_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_SHUTDOWN_GRACE_MS = 2_000;
+/** C-773: failures in these stages happen before any executor is called. */
+const PRE_EXECUTION_STAGES = new Set(["读取分支HEAD", "准备候选", "创建日志"]);
 const RECOVERY_TEXT = { reinspect: "重新核对", abandon: "放弃" } as const;
 const HANDLED_TEXT = {
   reattach: "重新接上已绑定的 GitHub 运行核对结果",
@@ -62,15 +67,15 @@ const HANDLED_TEXT = {
   abandoned: "已按放弃收尾",
 } as const;
 /**
- * C-773: a bound GitHub precheck can legitimately wait up to the queue wait
- * and then run up to the total timeout. One more total timeout is slack.
+ * C-773: a precheck can legitimately wait up to the queue wait (the GitHub
+ * queue, or a slot behind merge checks) and then run up to the total
+ * timeout. One more total timeout is slack.
  */
 export function defaultPrecheckStaleAfterMs(settings: Settings): number {
   const executor = settings.executor;
   const queue =
-    executor?.type === "github"
-      ? (executor.queueWaitMs ?? GITHUB_POLL_DEFAULTS.queueWaitMs)
-      : 0;
+    (executor?.type === "github" ? executor.queueWaitMs : undefined) ??
+    GITHUB_POLL_DEFAULTS.queueWaitMs;
   return queue + 2 * settings.totalTimeoutMs;
 }
 /** GitHub's status words only; anything else is not echoed into a summary. */
@@ -137,15 +142,56 @@ export class AuthorPrechecks {
       createLog?: typeof createMergeCheckLog;
       /** C-773: one read-only lookup of a bound run; never dispatches or cancels. */
       inspect?(run: ExternalGithubRun, settings: Settings): Promise<GithubRun>;
-      /** C-773: how long a bound GitHub precheck may stay unsettled. */
+      /** C-773: how long a queued or running precheck may stay unsettled. */
       staleAfterMs?(settings: Settings): number;
+      /** C-773: how long consecutive HEAD-lock timeouts may last. */
+      headLockTimeoutMs?: number;
+      /** C-773: how long a pre-execution failure waits for a shutdown signal. */
+      shutdownGraceMs?: number;
     },
   ) {}
   /** C-773: stale or abandoned attempts being settled from a GitHub lookup. */
   private readonly expiring = new Map<string, Promise<void>>();
   /** C-773: bound attempts this process has already announced re-attaching. */
   private readonly reattached = new Set<string>();
-  private readonly since = new Map<string, number>();
+  private readonly since = new Map<
+    string,
+    { queued?: number; started?: number }
+  >();
+  /** C-773: when this attempt's current run of HEAD-lock timeouts began. */
+  private readonly headLockSince = new Map<string, number>();
+  /**
+   * C-773: the limit, once this attempt's consecutive HEAD-lock timeouts have
+   * lasted that long; a successful read resets the run.
+   */
+  private headLockExpired(check: Precheck): number | undefined {
+    const now = Date.parse(this.options.clock.now());
+    const first = this.headLockSince.get(check.attempt_id);
+    if (first === undefined) this.headLockSince.set(check.attempt_id, now);
+    const limit =
+      this.options.headLockTimeoutMs ?? DEFAULT_HEAD_LOCK_TIMEOUT_MS;
+    return now - (first ?? now) >= limit ? limit : undefined;
+  }
+  /**
+   * C-773: whether this host is shutting down. A SIGTERM can kill a Git child
+   * just before the controller's abort signal fires, so a pre-execution
+   * failure waits briefly for that signal before it becomes a terminal.
+   */
+  private async shuttingDown(): Promise<boolean> {
+    const { signal } = this.options;
+    const ms = this.options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
+    if (!signal.aborted && ms > 0)
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          signal.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, ms);
+        signal.addEventListener("abort", done, { once: true });
+      });
+    return signal.aborted;
+  }
   owns(attempt: string) {
     return this.active.has(attempt);
   }
@@ -201,12 +247,29 @@ export class AuthorPrechecks {
           (await this.options.git.checkHead(project, owner)) ===
           result.head_sha;
       } catch (error) {
-        // Another tick (or controller after restart) retries only the proof.
-        if (error instanceof RepositoryLockTimeoutError) return;
+        // Another tick (or controller after restart) retries only the proof,
+        // until the lock has stayed busy past its limit (C-773).
+        if (error instanceof RepositoryLockTimeoutError) {
+          const limit = this.headLockExpired(result);
+          if (limit !== undefined) {
+            this.headLockSince.delete(result.attempt_id);
+            this.update(
+              project,
+              {
+                ...result,
+                status: "interrupted",
+                summary: `核对分支HEAD时主机仓库锁持续被占用超过 ${Math.ceil(limit / 60_000)} 分钟，按超时结束；检查结果未能核验，不作为通过依据，请重新 request_check`,
+              },
+              true,
+            );
+          }
+          return;
+        }
         throw new PrecheckVerificationFailure("Could not verify branch HEAD", {
           cause: error,
         });
       }
+      this.headLockSince.delete(result.attempt_id);
     }
     this.update(
       project,
@@ -406,6 +469,7 @@ export class AuthorPrechecks {
           this.retry.delete(check.attempt_id);
           this.reattached.delete(check.attempt_id);
           this.since.delete(check.attempt_id);
+          this.headLockSince.delete(check.attempt_id);
           continue;
         }
         if (this.options.signal.aborted || this.expiring.has(check.attempt_id))
@@ -515,38 +579,43 @@ export class AuthorPrechecks {
     return intent;
   }
   /**
-   * C-773: when this attempt started running on the host clock, or else when
-   * its bound journal intent was claimed (just before its single dispatch).
+   * C-773: when this attempt last made trusted progress: when it started
+   * running on the host clock, or else when it was queued. Both events are
+   * append-only, so a seen value never moves.
    */
-  private runningSince(
+  private unsettledSince(
     project: ProjectId,
     check: Precheck,
-    intent: GithubDispatchIntent | undefined,
   ): number | undefined {
     const known = this.since.get(check.attempt_id);
-    if (known !== undefined) return known;
-    const started = this.options.store.uow
-      .read((tx) => tx.events.listAfter(project, check.card_id, 0))
-      .find(
-        (e) =>
-          e.type === "precheck_started" &&
-          e.actor.kind === "system" &&
-          (e.payload as { attempt_id?: unknown } | null)?.attempt_id ===
-            check.attempt_id,
+    if (known?.started !== undefined) return known.started;
+    if (check.status === "queued" && known?.queued !== undefined)
+      return known.queued;
+    const at = (type: string) =>
+      Date.parse(
+        this.options.store.uow
+          .read((tx) => tx.events.listAfter(project, check.card_id, 0))
+          .find(
+            (e) =>
+              e.type === type &&
+              e.actor.kind === "system" &&
+              (e.payload as { attempt_id?: unknown } | null)?.attempt_id ===
+                check.attempt_id,
+          )?.created_at ?? "",
       );
-    const at = Date.parse(started?.created_at ?? "");
-    // The start event is append-only: once seen, the start never moves.
-    if (Number.isFinite(at)) {
-      this.since.set(check.attempt_id, at);
-      return at;
-    }
-    const claimed = Date.parse(intent?.startedAt ?? "");
-    return Number.isFinite(claimed) ? claimed : undefined;
+    const started = at("precheck_started");
+    const queued = known?.queued ?? at("precheck_queued");
+    this.since.set(check.attempt_id, {
+      ...(Number.isFinite(started) ? { started } : {}),
+      ...(Number.isFinite(queued) ? { queued } : {}),
+    });
+    if (Number.isFinite(started)) return started;
+    return Number.isFinite(queued) ? queued : undefined;
   }
   /**
    * C-773: host_ops requests and the stale fallback. Returns the settlement
-   * work when this pass ends the attempt from a GitHub lookup instead of
-   * running it; reinspection only clears local waits and continues below.
+   * work when this pass ends the attempt instead of running it;
+   * reinspection only clears local waits and continues below.
    */
   private recover(
     project: ProjectId,
@@ -555,20 +624,19 @@ export class AuthorPrechecks {
     active: boolean,
   ): Promise<void> | undefined {
     const settings = this.options.configuration.forProject(project);
-    if (settings.status !== "enabled" || settings.executor?.type !== "github")
-      return undefined;
-    const executor = settings.executor.name;
-    const request = pendingPrecheckRecovery(
-      events,
-      check.card_id,
-      check.attempt_id,
-    );
-    if (request?.action === "reinspect") {
+    if (settings.status !== "enabled") return undefined;
+    const github =
+      settings.executor?.type === "github" ? settings.executor.name : undefined;
+    const request = github
+      ? pendingPrecheckRecovery(events, check.card_id, check.attempt_id)
+      : undefined;
+    if (github && request?.action === "reinspect") {
       this.retry.delete(check.attempt_id);
       this.reattached.delete(check.attempt_id);
+      this.headLockSince.delete(check.attempt_id);
       const outcome = active
         ? "active"
-        : this.reattachable(project, check, executor)
+        : this.reattachable(project, check, github)
           ? "reattach"
           : "unbound";
       this.options.store.uow.run((tx) =>
@@ -578,10 +646,8 @@ export class AuthorPrechecks {
     }
     let limit: number | undefined;
     if (request?.action !== "abandon") {
-      const intent = this.boundIntent(project, check, executor);
-      if (check.status !== "running" && !check.external_run && !intent)
-        return undefined;
-      const since = this.runningSince(project, check, intent);
+      // Queued or running, bound or not: nothing may stay unsettled forever.
+      const since = this.unsettledSince(project, check);
       limit =
         this.options.staleAfterMs?.(settings) ??
         defaultPrecheckStaleAfterMs(settings);
@@ -685,11 +751,18 @@ export class AuthorPrechecks {
   ): Promise<void> {
     const executor = settings.executor?.name ?? "";
     const intent = this.boundIntent(project, original, executor);
-    const observed = await this.observeRun(
-      intent?.externalRun ?? original.external_run,
-      intent,
-      settings,
-    );
+    const run = intent?.externalRun ?? original.external_run;
+    const observed = run
+      ? await this.observeRun(run, intent, settings)
+      : new GithubDispatchJournal(this.options.store).hasUnboundIntent(
+            project,
+            original.card_id,
+            original.attempt_id,
+          )
+        ? "未核实：GitHub 派发结果尚未确认，没有绑定的运行"
+        : original.status === "queued"
+          ? "尚未开始执行检查"
+          : "未核实远端状态";
     const request = "request" in cause ? cause.request : undefined;
     const check = prechecks(this.state(project).events).find(
       (c) => c.attempt_id === original.attempt_id,
@@ -852,10 +925,23 @@ export class AuthorPrechecks {
           head = await this.options.git.checkHead(projectId, assignment);
         } catch (error) {
           // No executor has been called. Leave this exact queued attempt
-          // for the next scheduling pass.
-          if (error instanceof RepositoryLockTimeoutError) return;
+          // for the next scheduling pass, until the lock has stayed busy
+          // past its limit (C-773).
+          if (error instanceof RepositoryLockTimeoutError) {
+            const limit = this.headLockExpired(check);
+            if (limit !== undefined) {
+              this.headLockSince.delete(check.attempt_id);
+              this.update(projectId, {
+                ...check,
+                status: "interrupted",
+                summary: `读取分支HEAD时主机仓库锁持续被占用超过 ${Math.ceil(limit / 60_000)} 分钟，按超时结束；尚未开始执行检查，请重新 request_check`,
+              });
+            }
+            return;
+          }
           throw error;
         }
+        this.headLockSince.delete(check.attempt_id);
         if (head !== check.head_sha) {
           this.update(projectId, {
             ...check,
@@ -1118,6 +1204,17 @@ export class AuthorPrechecks {
         this.retry.set(check.attempt_id, error.retryAt);
         return;
       }
+      // C-773: a restart interrupting the HEAD read or candidate preparation
+      // is not an environment failure. No executor was called, so the queued
+      // attempt is left as it is and the next controller continues it.
+      if (
+        !verifying &&
+        PRE_EXECUTION_STAGES.has(stage) &&
+        !(error instanceof PrecheckMergeConflict) &&
+        !(error instanceof PrecheckVerificationFailure) &&
+        (await this.shuttingDown())
+      )
+        return;
       if (verifying && !(error instanceof PrecheckVerificationFailure)) {
         // A rolled-back transaction says nothing about the saved check result.
         // Keep it private and repeat the owner and HEAD proof on the next pass.

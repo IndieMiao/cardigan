@@ -175,6 +175,8 @@ async function setup(shared?: { dataDir: string; project_id: string }) {
     },
     run,
     recovery,
+    // C-773: shutdown handling has its own tests; failures settle at once here.
+    shutdownGraceMs: 0,
   };
   const queue = async () => {
     const p = { work_item_id: s.development.id };
@@ -1755,31 +1757,146 @@ test("C-773: after a restart a bound precheck whose GitHub run is still going re
   }
 });
 
-test("C-773: a queued precheck that never dispatched keeps the existing wait, even long past the stale limit", async () => {
+test("C-773: a queued precheck that never dispatched keeps the existing wait until the stale limit, then ends without any dispatch or run lookup", async () => {
   const { x, options, client } = await setupGithubPrechecks();
+  const { defaultPrecheckStaleAfterMs } = await import("./author-prechecks.js");
   const gate = new MergeChecks(options);
   const reserve = vi.fn(async () => undefined);
   Reflect.set(gate, "reservePrecheck", reserve);
+  const limit = defaultPrecheckStaleAfterMs(x.settings);
   try {
     for (let i = 0; i < 3; i++) {
       await (await gate.schedule([x.f.project_id])).done;
-      x.advance(6 * 60 * 60_000);
+      x.advance((limit - 60_000) / 3);
     }
     expect(reserve).toHaveBeenCalled();
     expect(x.check().status).toBe("queued");
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_finished"),
+    ).toEqual([]);
+    x.advance(60_001);
+    await (await gate.schedule([x.f.project_id])).done;
+    expect(x.check()).toMatchObject({
+      status: "interrupted",
+      summary: `预检查超过 ${Math.ceil(limit / 60_000)} 分钟仍未收尾，按核对超时结束；尚未开始执行检查；结果未经主机完整核验，不作为通过依据，请重新 request_check`,
+    });
     expect(client.dispatch).not.toHaveBeenCalled();
     expect(client.run).not.toHaveBeenCalled();
     expect(
-      x.f
-        .state()
-        .events.filter((e) =>
-          ["precheck_finished", "precheck_recovery_handled"].includes(e.type),
-        ),
+      x.f.state().events.filter((e) => e.type === "precheck_recovery_handled"),
     ).toEqual([]);
   } finally {
     gate.stop();
     await gate.idle();
   }
+});
+
+test.each(["abort-first", "failure-first"] as const)(
+  "C-773: a restart during the HEAD read leaves the attempt queued instead of an environment failure, and the next controller continues it (%s)",
+  async (order) => {
+    const x = await setup();
+    await x.queue();
+    const stopping = new AbortController();
+    const { CheckHeadFailure } = await import("@cardigan/domain");
+    x.git.checkHead.mockImplementationOnce(async () => {
+      if (order === "abort-first") stopping.abort();
+      // SIGTERM reaches the Git child too: it dies as a repository failure.
+      else setTimeout(() => stopping.abort(), 20);
+      throw new CheckHeadFailure("repository_failed");
+    });
+    const first = new AuthorPrechecks({
+      ...x.options,
+      signal: stopping.signal,
+      shutdownGraceMs: 1_000,
+    });
+    await (await first.schedule([x.f.project_id])).done;
+    expect(x.check().status).toBe("queued");
+    expect(
+      x.f
+        .state()
+        .events.filter((e) =>
+          ["precheck_finished", "precheck_settlement_pending"].includes(e.type),
+        ),
+    ).toEqual([]);
+    expect(x.run).not.toHaveBeenCalled();
+    await (await new AuthorPrechecks(x.options).schedule([x.f.project_id]))
+      .done;
+    // The fixture's executor reports a failing test: it really ran once.
+    expect(x.check().status).toBe("failed");
+    expect(x.run).toHaveBeenCalledOnce();
+  },
+);
+
+test("C-773: the same HEAD-read failure without a shutdown is still recorded as an environment failure", async () => {
+  const x = await setup();
+  await x.queue();
+  const { CheckHeadFailure } = await import("@cardigan/domain");
+  x.git.checkHead.mockRejectedValueOnce(
+    new CheckHeadFailure("repository_failed"),
+  );
+  await (
+    await new AuthorPrechecks({ ...x.options, shutdownGraceMs: 10 }).schedule([
+      x.f.project_id,
+    ])
+  ).done;
+  expect(x.check()).toMatchObject({ status: "environment_failed" });
+  expect(x.check().summary).toContain("读取分支HEAD");
+  expect(x.run).not.toHaveBeenCalled();
+});
+
+test("C-773: HEAD-lock timeouts that keep repeating end the queued attempt once they outlast the limit", async () => {
+  const x = await setup();
+  await x.queue();
+  const { DEFAULT_HEAD_LOCK_TIMEOUT_MS } = await import(
+    "./author-prechecks.js"
+  );
+  x.git.checkHead.mockRejectedValue(new RepositoryLockTimeoutError(1));
+  const host = new AuthorPrechecks(x.options);
+  for (let i = 0; i < 5; i++) {
+    await (await host.schedule([x.f.project_id])).done;
+    expect(x.check().status).toBe("queued");
+    x.advance((DEFAULT_HEAD_LOCK_TIMEOUT_MS - 1_000) / 5);
+  }
+  x.advance(1_000);
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({
+    status: "interrupted",
+    summary:
+      "读取分支HEAD时主机仓库锁持续被占用超过 15 分钟，按超时结束；尚未开始执行检查，请重新 request_check",
+  });
+  expect(x.git.checkHead).toHaveBeenCalledTimes(6);
+  expect(x.run).not.toHaveBeenCalled();
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.git.checkHead).toHaveBeenCalledTimes(6);
+});
+
+test("C-773: a saved result whose HEAD proof keeps hitting a busy lock ends as unverified, never as its own result", async () => {
+  const x = await setup();
+  await x.queue();
+  const { DEFAULT_HEAD_LOCK_TIMEOUT_MS } = await import(
+    "./author-prechecks.js"
+  );
+  x.git.checkHead
+    .mockImplementationOnce(async () => "a".repeat(40))
+    .mockRejectedValue(new RepositoryLockTimeoutError(1));
+  const host = new AuthorPrechecks(x.options);
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.run).toHaveBeenCalledOnce();
+  expect(x.check().status).toBe("running");
+  x.advance(DEFAULT_HEAD_LOCK_TIMEOUT_MS - 1_000);
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.check().status).toBe("running");
+  x.advance(1_000);
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({
+    status: "interrupted",
+    summary:
+      "核对分支HEAD时主机仓库锁持续被占用超过 15 分钟，按超时结束；检查结果未能核验，不作为通过依据，请重新 request_check",
+  });
+  expect(x.run).toHaveBeenCalledOnce();
+  expect(
+    x.f.state().events.filter((e) => e.type === "precheck_finished"),
+  ).toHaveLength(1);
 });
 
 test.each(["completed", "running", "unreadable"] as const)(
