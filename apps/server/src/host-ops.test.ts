@@ -209,6 +209,8 @@ test("C-137: diagnostics stay within P2a-10 categories and omit Needs You decisi
       "runs",
       "sessions",
       "session_maintenance",
+      // C-666: per-project directory usage on remote workers.
+      "worker_usage",
     ].sort(),
   );
   const text = JSON.stringify(diagnostics);
