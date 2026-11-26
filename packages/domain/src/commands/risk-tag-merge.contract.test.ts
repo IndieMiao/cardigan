@@ -753,14 +753,14 @@ test("ordinary cards retain PM confirmation without independent review", async (
   expect(mergePlan(f.state, f.card.id).ok).toBe(true);
 });
 
-test("passing independent review does not waive other verification", async () => {
+test("passing independent review does not waive opt-out or other verification", async () => {
   const { f, confirmation, check, resolve } = await setup();
   check("passed");
   const state: CommandState = {
     ...f.state,
     work_items: f.state.work_items.map((w) =>
       w.kind === "verify" && w.role_id === "reviewer"
-        ? { ...w, status: "failed" }
+        ? { ...w, required: false, status: "failed" }
         : w,
     ),
   };

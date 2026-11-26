@@ -1,9 +1,11 @@
 // C-768: Needs You merge confirmation with an optional verifier still open.
 // `optional-before` is the same card as the previous rule reported it (the
 // verifier listed as waiting, “确认合并” disabled, only “仍要合并” left);
-// `optional-pending` is the current rule (merge enabled, the verifier listed
-// apart under “可选、不挡合并”). 1440×900 and 390×844, light and dark, on the
-// synthetic compact-merge fixture. Records the button states and both lists.
+// `optional-pending` is the current rule with only the optional verifier left
+// (merge enabled, the verifier grouped apart); `optional-required` adds an
+// unfinished required verifier (merge still disabled). 1440×900 and 390×844,
+// light and dark, on the synthetic compact-merge fixture. Records the button
+// states, both lists, overflow and the group/button boxes.
 //
 // CHROMIUM_PATH=<chrome> node apps/web/test-support/c768-capture.mjs <new dir>
 import assert from "node:assert/strict";
@@ -42,6 +44,7 @@ const server = await createServer({
     },
   ],
 });
+const LABEL = "可选验证项（确认合并即视为豁免）";
 const shots = [];
 let browser;
 try {
@@ -55,7 +58,11 @@ try {
       await delay(50);
     }
   };
-  for (const scenario of ["optional-before", "optional-pending"])
+  for (const scenario of [
+    "optional-before",
+    "optional-pending",
+    "optional-required",
+  ])
     for (const width of [1440, 390])
       for (const theme of ["light", "dark"]) {
         const height = width === 390 ? 844 : 900;
@@ -88,8 +95,11 @@ try {
           const confirm = find('确认合并');
           const visible = e => !!e && e.getClientRects().length > 0;
           const status = document.querySelector('[aria-label="合并前置条件"]');
-          const optional = status.querySelector('[aria-label="可选、不挡合并"]');
+          const optional = status.querySelector('[aria-label="${LABEL}"]');
+          const box = e => e ? e.getBoundingClientRect().toJSON() : null;
           return {
+            optionalBox: box(optional),
+            actionsBox: box(confirm.closest('.action-row') ?? confirm.parentElement),
             clientWidth: document.documentElement.clientWidth,
             scrollWidth: document.documentElement.scrollWidth,
             confirmVisible: visible(confirm),
@@ -109,14 +119,22 @@ try {
           `${name}: overflow`,
         );
         assert.equal(metric.confirmVisible, true, `${name}: confirm visible`);
-        if (scenario === "optional-pending") {
-          assert.equal(metric.confirmDisabled, false, name);
-          assert.equal(metric.override, false, name);
-          assert.deepEqual(metric.waiting, [], name);
+        const pending = scenario === "optional-pending";
+        assert.equal(metric.confirmDisabled, !pending, name);
+        assert.equal(metric.override, !pending, name);
+        if (scenario === "optional-before")
+          assert.deepEqual(metric.optional, [], name);
+        else {
           assert.deepEqual(metric.optional, ["Google 补录（W-420）"], name);
-        } else {
-          assert.equal(metric.confirmDisabled, true, name);
-          assert.equal(metric.override, true, name);
+          assert.deepEqual(
+            metric.waiting,
+            pending ? [] : ["独立复核（W-3）：未通过当前交付审核"],
+            name,
+          );
+          assert(
+            metric.optionalBox.bottom <= metric.actionsBox.top,
+            `${name}: group overlaps the buttons`,
+          );
         }
         const { cssContentSize } = await send("Page.getLayoutMetrics");
         const { data } = await send("Page.captureScreenshot", {

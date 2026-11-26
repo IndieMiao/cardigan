@@ -83,6 +83,8 @@ import { statusLabel } from "../status.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { useResource } from "../useResource.js";
 
+/** C-768: optional verifiers still open on a merge confirmation. */
+const OPTIONAL_VERIFIERS_LABEL = "可选验证项（确认合并即视为豁免）";
 const waitLabel = (ms: number | null, elapsed = 0) => {
   const age = (ms ?? 0) + elapsed;
   return ms === null
@@ -986,10 +988,12 @@ export function MergeConfirmation({
           )}
           {optionalPending.length > 0 && (
             <>
-              <p>可选、不挡合并：</p>
-              <ul aria-label="可选、不挡合并">
+              <p>{OPTIONAL_VERIFIERS_LABEL}：</p>
+              <ul aria-label={OPTIONAL_VERIFIERS_LABEL}>
                 {optionalPending.map((item) => (
-                  <li key={item}>{item}</li>
+                  <li key={item.id}>
+                    {item.title}（{item.id}）
+                  </li>
                 ))}
               </ul>
             </>

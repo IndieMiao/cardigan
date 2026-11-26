@@ -248,9 +248,8 @@ const blockers: [string, (s: CommandState) => CommandState][] = [
       ),
     }),
   ],
-  // C-768: an optional verifier no longer blocks (human-merge contract).
   [
-    "added required verification",
+    "optional verification",
     (s) => ({
       ...s,
       work_items: [
@@ -258,7 +257,7 @@ const blockers: [string, (s: CommandState) => CommandState][] = [
         {
           ...required(s.work_items.find((w) => w.kind === "verify")),
           id: id("work_item", 800),
-          required: true,
+          required: false,
           status: "todo" as const,
         },
       ],

@@ -14,6 +14,7 @@ import type {
   Assignment,
   Author,
   Decision,
+  DecisionResolution,
   HumanAction,
   HumanActionExecutor,
   HumanDecidedMergeBasis,
@@ -105,6 +106,7 @@ import { mergeBlockingHumanActions, syncHumanDecidedMerges } from "./merge.js";
 import {
   currentMergeConfirmations,
   humanMergeBlockers,
+  optionalPendingVerifiers,
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckFailureAuthority,
@@ -1158,6 +1160,7 @@ export function recordDecision(
     let mergeOverride:
       | { reason: string; blockers: readonly string[] }
       | undefined;
+    let waivedVerifiers: DecisionResolution["waived_verifiers"];
     if (p.via_suggestion) {
       ensure(
         actor.kind === "human",
@@ -1320,6 +1323,9 @@ export function recordDecision(
     );
     if (decision.trigger === "merge_confirmation" && p.option === "merge") {
       const blockers = humanMergeBlockers(d.state, decision);
+      // C-768: the human's confirmation waives optional verifiers still open.
+      const waived = optionalPendingVerifiers(d.state, decision);
+      if (waived.length) waivedVerifiers = waived;
       if (p.merge_override_reason !== undefined) {
         const holds = mergeBlockingHumanActions(
           {
@@ -1379,6 +1385,7 @@ export function recordDecision(
           ? { taken_over_from: held.decider as "role:pm" | "system" }
           : {}),
         ...(mergeOverride ? { merge_override: mergeOverride } : {}),
+        ...(waivedVerifiers ? { waived_verifiers: waivedVerifiers } : {}),
       },
       false,
     );
@@ -1425,6 +1432,7 @@ function resolveDecisionDraft(
     notice?: string;
     taken_over_from?: "role:pm" | "system";
     merge_override?: { reason: string; blockers: readonly string[] };
+    waived_verifiers?: DecisionResolution["waived_verifiers"];
     via_suggestion?: boolean;
     human_decided_merge_basis?: HumanDecidedMergeBasis;
     /** C-591: delegated authority other than the PM merge preference. */
@@ -1494,6 +1502,9 @@ function resolveDecisionDraft(
           : {}),
       ...(p.taken_over_from ? { taken_over_from: p.taken_over_from } : {}),
       ...(p.merge_override ? { merge_override: p.merge_override } : {}),
+      ...(p.waived_verifiers && !delegated
+        ? { waived_verifiers: p.waived_verifiers }
+        : {}),
       ...(p.via_suggestion && !delegated
         ? { via_suggestion: true as const }
         : {}),

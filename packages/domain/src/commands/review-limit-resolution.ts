@@ -220,6 +220,13 @@ export function raiseVerifierLimit(
 }
 
 /** All authorized decision entry points share the budget, audit and resumption effects. */
+/** C-768: names the optional verifiers a human merge confirmation waived. */
+function waivedVerifiersNote(resolution: NonNullable<Decision["resolution"]>) {
+  const waived = resolution.waived_verifiers ?? [];
+  return waived.length
+    ? `豁免可选验证项：${waived.map((w) => `${w.title}（${w.id}）`).join("、")}\n`
+    : "";
+}
 export function recordDecisionResolution(
   d: CommandDraft,
   q: Decision,
@@ -434,6 +441,13 @@ export function recordDecisionResolution(
         ...(resolution.merge_override
           ? { merge_override: resolution.merge_override }
           : {}),
+        ...(resolution.waived_verifiers
+          ? {
+              waived_verifiers: resolution.waived_verifiers.map((w) => ({
+                ...w,
+              })),
+            }
+          : {}),
         status: result.status,
         ...(pendingRepair
           ? { rework_run_id: pendingRepair.id }
@@ -448,20 +462,21 @@ export function recordDecisionResolution(
         ...(reviewItemId ? { work_item_id: reviewItemId } : {}),
         body: withOwnerEvidence(
           resolution.owner_record,
-          other
-            ? `${DECISION_OTHER_LABEL}：${resolution.raw_quote}`
-            : resolution.human_decided_merge_basis
-              ? `${resolution.notice ?? resolution.raw_quote}\n\n拍板对应依据：\n${resolution.human_decided_merge_basis.entries.map((e) => `- ${e.decision_id} / ${e.option} → ${e.completion_id} / ${e.delivery_id} / ${e.target_sha}：${e.evidence}`).join("\n")}`
-              : resolution.merge_override
-                ? `强行确认合并；理由：${resolution.merge_override.reason}\n当时缺项：${resolution.merge_override.blockers.length ? `\n${resolution.merge_override.blockers.map((b) => `- ${b}`).join("\n")}` : "无"}\n${resolution.raw_quote}`
-                : resolution.review_limit_target &&
-                    resolution.via === "delegated"
-                  ? (resolution.notice ?? resolution.raw_quote)
-                  : resolution.via === "delegated" &&
-                      q.category &&
-                      highRiskCategories.includes(q.category)
+          waivedVerifiersNote(resolution) +
+            (other
+              ? `${DECISION_OTHER_LABEL}：${resolution.raw_quote}`
+              : resolution.human_decided_merge_basis
+                ? `${resolution.notice ?? resolution.raw_quote}\n\n拍板对应依据：\n${resolution.human_decided_merge_basis.entries.map((e) => `- ${e.decision_id} / ${e.option} → ${e.completion_id} / ${e.delivery_id} / ${e.target_sha}：${e.evidence}`).join("\n")}`
+                : resolution.merge_override
+                  ? `强行确认合并；理由：${resolution.merge_override.reason}\n当时缺项：${resolution.merge_override.blockers.length ? `\n${resolution.merge_override.blockers.map((b) => `- ${b}`).join("\n")}` : "无"}\n${resolution.raw_quote}`
+                  : resolution.review_limit_target &&
+                      resolution.via === "delegated"
                     ? (resolution.notice ?? resolution.raw_quote)
-                    : resolution.raw_quote,
+                    : resolution.via === "delegated" &&
+                        q.category &&
+                        highRiskCategories.includes(q.category)
+                      ? (resolution.notice ?? resolution.raw_quote)
+                      : resolution.raw_quote),
         ),
       },
     );

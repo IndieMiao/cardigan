@@ -941,8 +941,11 @@ export interface MergeConfirmationView {
   }[];
   /** C-264: reasons returned by the domain confirmation gate. */
   readonly blockers?: readonly string[];
-  /** C-768: optional verifiers still open; listed apart, never blocking. */
-  readonly optional_pending?: readonly string[];
+  /** C-768: optional verifiers still open; confirming merge waives them. */
+  readonly optional_pending?: readonly {
+    readonly id: string;
+    readonly title: string;
+  }[];
   /** C-160: checks to finish before the human confirms; empty when none. */
   readonly pre_merge_checks?: readonly PreMergeCheckView[];
   readonly merge_noop?: boolean;

@@ -40,12 +40,11 @@ const newest = (values: readonly Delivery[]) =>
 
 export {
   latestReviews,
-  mergeBlockingVerifier,
   pmMergeBlockers,
   systemMergeBlockers,
 } from "./merge-blockers.js";
 
-import { latestReviews, mergeBlockingVerifier } from "./merge-blockers.js";
+import { latestReviews } from "./merge-blockers.js";
 
 /**
  * The card's current product deliveries and the live verifiers that have not
@@ -97,13 +96,14 @@ function verifierProgress(
 }
 
 /**
- * C-768: optional verifiers still open on the current completion. Shown next
- * to the waiting list as reference; they never hold the confirmation.
+ * C-768: optional verifiers still open on the current completion. They do not
+ * hold the human's own confirmation, which waives them (and records so); PM
+ * Ops and the system keep their own rules (`pmMergeBlockers`).
  */
 export function optionalPendingVerifiers(
   state: CommandState,
   q: Decision,
-): readonly string[] {
+): readonly { readonly id: WorkItem["id"]; readonly title: string }[] {
   if (
     q.trigger !== "merge_confirmation" ||
     !q.card_id ||
@@ -116,8 +116,8 @@ export function optionalPendingVerifiers(
   if (!context.ok || context.value.target.id !== q.target.delivery_id)
     return [];
   return verifierProgress(state, cardId, context.value.target)
-    .unpassed.filter((w) => !mergeBlockingVerifier(w))
-    .map((w) => `${w.title}（${w.id}）`);
+    .unpassed.filter((w) => !w.required)
+    .map((w) => ({ id: w.id, title: w.title }));
 }
 
 /** C-264: the human's confirmation, API and CLI share this current-state gate. */
@@ -157,7 +157,8 @@ export function humanMergeBlockers(
   )
     blockers.push("增量复核的隔离证据已失效，须完整复核");
   const { current, unpassed } = verifierProgress(state, card.id, completion);
-  for (const w of unpassed.filter(mergeBlockingVerifier))
+  // C-768: an optional verifier is listed apart; confirming waives it.
+  for (const w of unpassed.filter((w) => w.required))
     blockers.push(`${w.title}（${w.id}）：未通过当前交付审核`);
   for (const check of effectivePreMergeChecks(
     card,

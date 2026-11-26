@@ -625,7 +625,7 @@ function mergeConfirmation(
     });
   return {
     blockers: humanMergeBlockers(state, decision),
-    // C-768: optional verifiers still open; listed apart, never blocking.
+    // C-768: optional verifiers still open; confirming merge waives them.
     optional_pending: optionalPendingVerifiers(state, decision),
     decision_evidence_required: [],
     completion:

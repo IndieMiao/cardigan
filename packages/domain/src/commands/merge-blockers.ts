@@ -1,7 +1,7 @@
 import { missingAutoRiskPathEvidence } from "../auto-risk.js";
 import { unmetCardDependencies } from "../card-dependencies.js";
 import { isReviewStale, reviewPassed, unresolvedMustFix } from "../derived.js";
-import type { Decision, Delivery, WorkItem } from "../entities.js";
+import type { Decision, Delivery } from "../entities.js";
 import { passedCardCheck } from "../merge-batch.js";
 import { autoMergeOn } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
@@ -51,20 +51,9 @@ function currentProducts(
 }
 
 /**
- * C-768: the one rule every merge gate (human, PM Ops, system) shares — only a
- * required verifier holds a merge. An optional one is listed for reference.
- * Waiving a required verifier stays guarded elsewhere: template items cannot
- * be made optional, and an independent review made optional hands the
- * confirmation to the human (`riskTagAutoMergeAllowed`, `mergeRiskBlockers`).
- */
-export const mergeBlockingVerifier = (
-  w: Pick<WorkItem, "kind" | "required">,
-): boolean => w.kind === "verify" && w.required;
-
-/**
  * §7.4: PM Ops may choose `merge` only when the merge gate passed for the
- * current completion, every non-cancelled required verify item passed and no
- * must_fix remains open. An empty list means merge is allowed;
+ * current completion, every non-cancelled verify item passed (required or
+ * not) and no must_fix remains open. An empty list means merge is allowed;
  * otherwise PM Ops can only hold, request changes or hand the confirmation
  * to the human.
  */
@@ -124,7 +113,10 @@ export function pmMergeBlockers(
   const items = state.work_items.filter(
     (w) => w.card_id === card_id && w.status !== "cancelled",
   );
-  for (const w of items.filter(mergeBlockingVerifier))
+  // Every live verifier counts, required or not: `required` is editable by
+  // PM Ops on added items, so it cannot waive verification here. Waiving one
+  // is the human's call (escalate).
+  for (const w of items.filter((w) => w.kind === "verify"))
     if (w.status !== "passed") blockers.push(`验证项 ${w.id} 未通过`);
   const currentByItem = currentProducts(
     state.deliveries,
@@ -141,7 +133,7 @@ export function pmMergeBlockers(
   for (const v of [...current, completion]) {
     for (const id of v.requested_verifiers)
       if (
-        items.some((w) => w.id === id && (w.kind !== "verify" || w.required)) &&
+        items.some((w) => w.id === id) &&
         !state.reviews.some(
           (r) =>
             r.work_item_id === id && reviewPassed(r) && !isReviewStale(r, v),

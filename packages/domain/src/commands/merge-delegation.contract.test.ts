@@ -1106,7 +1106,7 @@ test("a card created from a sensitive decision keeps its merge with the human", 
   expect(confirmation().id).not.toBe(again.id);
 });
 
-test("C-768: an unfinished optional verifier does not block a PM merge; a required one does", async () => {
+test("a non-required verifier that has not passed still blocks a PM merge", async () => {
   const { f, confirmation, check } = setup();
   await f.accept();
   check("passed");
@@ -1125,18 +1125,62 @@ test("C-768: an unfinished optional verifier does not block a PM merge; a requir
     ...f.state,
     work_items: [...f.state.work_items, optional],
   };
-  expect(pmMergeBlockers(state, confirmation())).toEqual([]);
-  expect(
-    pmMergeBlockers(
+  expect(pmMergeBlockers(state, confirmation())).toEqual([
+    `验证项 ${optional.id} 未通过`,
+  ]);
+});
+
+test("C-768: an optional verifier still blocks PM Ops, which hands the merge to the human, whose confirmation waives it", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  await f.accept();
+  check("passed");
+  expect(confirmation().decider).toBe("role:pm");
+  // Without the optional verifier PM Ops could merge.
+  expect(pmResolve("merge", { notice: "可以合并" }).ok).toBe(true);
+  const template = f.state.work_items.find(
+    (w) => w.card_id === f.card.id && w.kind === "verify",
+  );
+  if (!template) throw new Error("Missing verifier");
+  const optional = {
+    ...template,
+    id: id("work_item", 998),
+    template_key: undefined,
+    title: "Google 补录",
+    required: false,
+    status: "in_progress",
+  } as unknown as WorkItem;
+  let state: CommandState = {
+    ...f.state,
+    work_items: [...f.state.work_items, optional],
+  };
+  expect(pmMergeBlockers(state, confirmation())).toEqual([
+    `验证项 ${optional.id} 未通过`,
+  ]);
+  expect(pmResolve("merge", { notice: "可以合并" }, state)).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+  state = apply(state, value(pmResolve("merge", { escalate: true }, state)));
+  const handed = state.decisions.find((q) => q.id === confirmation().id);
+  expect(handed).toMatchObject({ status: "open", decider: "human" });
+  if (!handed) throw new Error("Missing confirmation");
+  const confirmed = value(
+    recordDecision(
+      state,
+      human,
       {
-        ...state,
-        work_items: state.work_items.map((w) =>
-          w.id === optional.id ? { ...w, required: true } : w,
-        ),
+        decision_id: handed.id,
+        option: "merge",
+        rationale: "确认",
+        raw_quote: "合并",
       },
-      confirmation(),
+      f.io,
     ),
-  ).toEqual([`验证项 ${optional.id} 未通过`]);
+  );
+  expect(confirmed.data.resolution?.waived_verifiers).toEqual([
+    { id: optional.id, title: "Google 补录" },
+  ]);
+  expect(confirmed.data.resolution).not.toHaveProperty("merge_override");
 });
 
 test("notices are ordered by resolution time across cards, not by per-card seq", () => {
