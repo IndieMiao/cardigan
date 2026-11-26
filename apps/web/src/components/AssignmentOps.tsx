@@ -132,7 +132,7 @@ export function StartButton({
     </Button>
   );
 }
-/** Progress, the result or the failure of the panel's writes. */
+/** The result or the failure of the panel's writes; the button shows progress. */
 export function AssignmentOpsFeedback({
   ops,
 }: {
@@ -143,8 +143,6 @@ export function AssignmentOpsFeedback({
   return (
     <RequestFeedback
       interactive
-      pending={ops.pending !== undefined && ops.pending !== "stop"}
-      pendingMessage={pendingLabels[ops.pending ?? "start"]}
       message={ops.message}
       error={failed?.text}
       retry={failed && (() => void ops.perform(failed.op))}
@@ -230,7 +228,7 @@ export function StopDialog({
                   </DetailFact>
                 )}
                 <DetailFact label="结果">
-                  终端关闭，当前执行记为已取消
+                  {run ? "终端关闭，当前执行记为已取消" : "终端关闭"}
                 </DetailFact>
               </DetailFacts>
               <DialogFeedback>
@@ -334,12 +332,15 @@ export function DiffSheet({
   client,
   projectId,
   a,
+  restoreFocus,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly client: CardiganClient;
   readonly projectId: string;
   readonly a: ExecutionAssignment;
+  /** Opened by a button, not a DialogTrigger: give the focus back on close. */
+  readonly restoreFocus: () => void;
 }) {
   const [diff, setDiff] = useState<AssignmentDiff>();
   const [error, setError] = useState("");
@@ -383,7 +384,13 @@ export function DiffSheet({
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       {open && (
-        <SheetContent aria-describedby={undefined}>
+        <SheetContent
+          aria-describedby={undefined}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            restoreFocus();
+          }}
+        >
           <DialogHeader>
             <DiffSheetHeading
               title={

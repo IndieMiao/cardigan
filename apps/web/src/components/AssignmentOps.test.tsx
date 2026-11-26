@@ -329,6 +329,32 @@ test("查看改动 reads the changes once, folds them per file and lists untrack
   await waitFor(() =>
     expect(screen.queryByRole("dialog", { name: /改动/ })).toBeNull(),
   );
+  // Closed, the focus is back on the button that opened it.
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(current).getByRole("button", { name: "查看改动" }),
+    ),
+  );
+});
+
+test("the stop dialog opened from ⋯ gives the focus back to ⋯; without a current Run it says only the terminal closes", async () => {
+  const stopAssignment = vi.fn<CardiganClient["stopAssignment"]>();
+  await open({ ...base, runtime_state: "lost" }, { stopAssignment });
+  const more = screen.getByRole("button", { name: "更多执行操作" });
+  fireEvent.keyDown(more, { key: "ArrowDown" });
+  const menu = await screen.findByRole("menu", { name: "更多执行操作" });
+  fireEvent.click(
+    within(menu).getByRole("menuitem", { name: "停止并取消执行…" }),
+  );
+  const dialog = await screen.findByRole("dialog", { name: /停止执行/ });
+  expect(within(dialog).getByText("终端关闭")).toBeTruthy();
+  expect(dialog.textContent).not.toContain("当前执行记为已取消");
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: /停止执行/ })).toBeNull(),
+  );
+  await waitFor(() => expect(document.activeElement).toBe(more));
+  expect(stopAssignment).not.toHaveBeenCalled();
 });
 
 test("patchFiles splits a patch per file and keeps a path with spaces", () => {

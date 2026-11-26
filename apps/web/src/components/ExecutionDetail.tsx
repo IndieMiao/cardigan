@@ -491,16 +491,19 @@ export function ExecutionDetail({
   const [diffOpen, setDiffOpen] = useState(false);
   const [stopOpen, setStopOpen] = useState(false);
   const stopTrigger = useRef<HTMLElement | null>(null);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const diffButton = useRef<HTMLButtonElement>(null);
+  // Focus goes back to what opened a dialog; when that is gone (a menu item)
+  // or hidden, to the ⋯ trigger.
+  const refocus = (opener: HTMLElement | null) =>
+    (opener?.isConnected ? opener : moreButton.current)?.focus();
   const managed = !a.external && a.status === "active" && !!a.work_item_id;
   const cardOpen = !["done", "cancelled", "awaiting_merge"].includes(
     a.card_status ?? "",
   );
   const canStop = managed && !!a.runtime_ref;
-  const openStop = () => {
-    stopTrigger.current =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
+  const openStop = (opener: HTMLElement | null) => {
+    stopTrigger.current = opener;
     setStopOpen(true);
   };
   const busy = ops.pending !== undefined;
@@ -529,7 +532,8 @@ export function ExecutionDetail({
             id: "stop",
             label: <span className="danger">停止并取消执行…</span>,
             disabled: busy,
-            onSelect: openStop,
+            // The menu item unmounts; the stop dialog hands focus to ⋯.
+            onSelect: () => openStop(moreButton.current),
           },
         ]
       : []),
@@ -550,6 +554,7 @@ export function ExecutionDetail({
     managed &&
     a.worktree_path && (
       <Button
+        ref={diffButton}
         type="button"
         size="regular"
         variant={emphasis ? "emphasis" : "default"}
@@ -564,7 +569,7 @@ export function ExecutionDetail({
       size="regular"
       variant="destructive"
       disabled={busy}
-      onClick={openStop}
+      onClick={(event) => openStop(event.currentTarget)}
     >
       停止执行…
     </Button>
@@ -677,7 +682,7 @@ export function ExecutionDetail({
         actions={
           <Menu
             label="更多执行操作"
-            trigger={<MoreButton label="更多执行操作" />}
+            trigger={<MoreButton ref={moreButton} label="更多执行操作" />}
             items={menu}
           />
         }
@@ -820,7 +825,7 @@ export function ExecutionDetail({
             run={latest && unfinished(latest) ? latest : undefined}
             name={name}
             ops={ops}
-            restoreFocus={() => stopTrigger.current?.focus()}
+            restoreFocus={() => refocus(stopTrigger.current)}
           />
           <DiffSheet
             open={diffOpen}
@@ -828,6 +833,7 @@ export function ExecutionDetail({
             client={client}
             projectId={projectId}
             a={a}
+            restoreFocus={() => refocus(diffButton.current)}
           />
         </>
       )}
