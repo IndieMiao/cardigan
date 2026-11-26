@@ -1030,7 +1030,19 @@ export interface Review {
   readonly blocking: boolean;
   readonly recheck_required: boolean;
   readonly followup_card_id?: CardId;
-  readonly withdrawn?: { readonly at: string; readonly rationale: string };
+  readonly withdrawn?: {
+    readonly at: string;
+    readonly rationale: string;
+    /** C-769: who voided a rejection (its reviewer or PM Ops). */
+    readonly by?: Author;
+    /** C-769: the evidence that arrived after the reviewer started reading. */
+    readonly late_evidence?: readonly AttachmentId[];
+  };
+  /**
+   * C-769: evidence that arrived after the review Run started and that the
+   * reviewer confirmed having checked before rejecting.
+   */
+  readonly evidence_seen?: readonly AttachmentId[];
   /** Captured by submitReview; legacy records without proof cannot be reused. */
   readonly reuse_basis?: {
     readonly context: string;
