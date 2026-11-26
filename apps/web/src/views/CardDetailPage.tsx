@@ -379,7 +379,12 @@ export function CardDetailPage(props: CardDetailPageProps) {
       <RequestFeedback
         pending={pending}
         interactive={interactive}
-        error={error}
+        // C-775: with nothing shown yet, say which card failed to load.
+        error={
+          error && data === undefined
+            ? `卡片 ${cardId} 没有加载出来：${error}`
+            : error
+        }
         retry={reload}
         pendingMessage={`正在加载卡片 ${cardId}…`}
       />
