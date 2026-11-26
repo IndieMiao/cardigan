@@ -3,6 +3,7 @@ export * from "./adb-slots.js";
 export * from "./agent-git.js";
 export * from "./agent-tools-maintenance.js";
 export * from "./assignment-role-upgrade.js";
+export * from "./assignment-stop.js";
 export * from "./attention.js";
 export * from "./automatic-context-restart.js";
 export * from "./change-scope.js";

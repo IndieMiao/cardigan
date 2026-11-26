@@ -124,7 +124,12 @@ export {
   type SyncStatus,
   writeSyncStatus,
 } from "./offsite/state.js";
-export { type RecordReadTiming, timeRead } from "./read-timing.js";
+export {
+  type CommandStateTiming,
+  measureCommandState,
+  type RecordReadTiming,
+  timeRead,
+} from "./read-timing.js";
 export {
   defaultToolCatalog,
   type McpServerOptions,
