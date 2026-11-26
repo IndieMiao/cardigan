@@ -565,6 +565,12 @@ export async function finishSupervisorUpgrade(options: {
     )
       back = "healthy";
     else {
+      // C-787: a new supervisor that crash-looped may have tripped the
+      // unit's start limit, which refuses this restart; clear it first.
+      if (reload.code === 0)
+        await ports
+          .systemctl(["--user", "reset-failed", plan.unit])
+          .catch(() => undefined);
       const again =
         reload.code === 0
           ? await ports

@@ -421,6 +421,34 @@ test("C-767: an explicit start failure rolls back at once, without waiting for t
   expect(actions()).toHaveLength(1);
 });
 
+test("C-787: a crash-looping new supervisor that tripped the start limit is still rolled back", async () => {
+  const l = await prepareRestart();
+  const { ports, calls } = restartPorts(l, "crashes");
+  const systemctl = ports.systemctl;
+  // Like systemd after StartLimitBurst: the unit refuses to start until reset.
+  let limited = false;
+  ports.systemctl = async (args) => {
+    if (args.includes("reset-failed")) limited = false;
+    if (args.includes("restart")) {
+      if (limited) return { code: 1, text: "" };
+      const text = await readFile(l.launch, "utf8");
+      if (text.includes(`release-watch-${TO}`)) limited = true;
+    }
+    return systemctl(args);
+  };
+  expect(
+    await finishSupervisorUpgrade({ store, directory: l.directory, ports }),
+  ).toBe("rolled_back");
+  const reset = calls.indexOf(
+    "--user reset-failed cardigan-selfdeploy.service",
+  );
+  expect(reset).toBeGreaterThan(0);
+  expect(calls[reset + 1]).toBe(
+    "--user restart --no-block cardigan-selfdeploy.service",
+  );
+  expect(await readFile(l.launch, "utf8")).toBe(l.original);
+});
+
 test("C-767: rollback never overwrites a launch file someone edited meanwhile; a failed restart command keeps the old supervisor", async () => {
   const l = await prepareRestart();
   const { ports } = restartPorts(l, "hangs");
