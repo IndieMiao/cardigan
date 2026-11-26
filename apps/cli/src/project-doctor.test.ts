@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
-import { comparablePreferences } from "./project-copy.js";
+import { comparablePreferences, GATE_PREFERENCES } from "./project-copy.js";
 import { checkWorkflowSource } from "./project-doctor.js";
 
 const root = new URL("../../../", import.meta.url);
@@ -292,6 +292,64 @@ describe("project copy-setup", () => {
     expect(alpha.preferences.auto_merge).toBe("on");
     // The source is only read.
     expect(alpha).toEqual(before);
+  });
+
+  test("no authorization or gate preference is ever copied", async () => {
+    await sourceProject();
+    // Every gate set to a non-default value, written directly.
+    const gates = {
+      flow_version: 5,
+      decision_delegation: { spending: true, publish: true },
+      auto_merge: "on",
+      auto_merge_after_minutes: 30,
+      auto_merge_paused: true,
+      pm_merge_confirmation: false,
+      pm_confirm_role_rule_implementations: false,
+      pm_confirm_human_decided_merges: false,
+      enable_reviewer_browser: true,
+      independent_review_limit_delegation: true,
+      independent_review_limit_delegation_max: 3,
+      system_review_limit_raise: true,
+      system_review_limit_max_raises: 2,
+      high_risk_paths: ["src/**"],
+      auto_security_paths: [".github/**", "src/**"],
+      role_rule_paths: ["roles/**"],
+      system_merge_shadow_policy: { role_rule_paths: [], release_paths: [] },
+    } as const;
+    expect(Object.keys(gates).sort()).toEqual(
+      Object.keys(GATE_PREFERENCES).sort(),
+    );
+    const store = Store.open({ dataDir });
+    try {
+      store.uow.run((tx) =>
+        tx.project_preferences.put("alpha", {
+          ...snapshot("alpha").preferences,
+          ...gates,
+          tick_profile: true,
+        }),
+      );
+    } finally {
+      store.close();
+    }
+    expect(
+      await run([
+        "project",
+        "create",
+        "beta",
+        "--code",
+        "BET",
+        "--from",
+        "alpha",
+      ]),
+    ).toBe(0);
+    const beta = snapshot("beta").preferences;
+    // Absent, or null for auto_merge_after_minutes: the defaults.
+    for (const key of Object.keys(gates))
+      expect(beta[key as keyof typeof beta] ?? null, key).toBeNull();
+    expect(beta.tick_profile).toBe(true);
+    expect(out.join("\n")).toContain(
+      `授权和门禁类不复制，保持本项目原值，需要时由人设置：${Object.values(GATE_PREFERENCES).join("、")}`,
+    );
   });
 
   test("existing roles are kept and reported; a second copy changes nothing", async () => {

@@ -61,9 +61,56 @@ export const GATE_PREFERENCES = {
   role_rule_paths: "role-rule-paths",
   system_merge_shadow_policy: "system-merge-shadow-policy",
 } as const satisfies Partial<Record<keyof ProjectPreferences, string>>;
-const GATE_KEYS: readonly string[] = Object.keys(GATE_PREFERENCES);
-/** A per-device board view setting, not a project rule. */
-const VIEW_PREFERENCES = ["id", "board_collapsed_lanes"];
+/**
+ * Every preference, classified. The mapped type makes a preference added
+ * later fail to compile until it is classified here, so nothing new is
+ * copied by default. `templates` is copied as switches.
+ */
+const PREFERENCE_COPY: {
+  readonly [K in keyof Required<ProjectPreferences>]: K extends keyof typeof GATE_PREFERENCES
+    ? "gate"
+    : "copy" | "view" | "templates";
+} = {
+  id: "view",
+  board_collapsed_lanes: "view",
+  human_card_templates: "templates",
+  machine_preference: "copy",
+  cross_card_read: "copy",
+  shared_files_access: "copy",
+  system_merge_shadow: "copy",
+  system_auto_assign_verifiers: "copy",
+  system_reminders: "copy",
+  pm_owner_messages: "copy",
+  system_reminder_policy: "copy",
+  context_handoff_remaining_pct: "copy",
+  context_restart_remaining_pct: "copy",
+  merge_confirm_stall_after_minutes: "copy",
+  merge_confirm_snooze_default_minutes: "copy",
+  merge_confirm_snooze_max_minutes: "copy",
+  review_max_rounds: "copy",
+  independent_review_max_rounds: "copy",
+  tick_profile: "copy",
+  flow_version: "gate",
+  decision_delegation: "gate",
+  auto_merge: "gate",
+  auto_merge_after_minutes: "gate",
+  auto_merge_paused: "gate",
+  pm_merge_confirmation: "gate",
+  pm_confirm_role_rule_implementations: "gate",
+  pm_confirm_human_decided_merges: "gate",
+  enable_reviewer_browser: "gate",
+  independent_review_limit_delegation: "gate",
+  independent_review_limit_delegation_max: "gate",
+  system_review_limit_raise: "gate",
+  system_review_limit_max_raises: "gate",
+  high_risk_paths: "gate",
+  auto_security_paths: "gate",
+  role_rule_paths: "gate",
+  system_merge_shadow_policy: "gate",
+};
+const COPIED_KEYS: readonly string[] = Object.entries(PREFERENCE_COPY)
+  .filter(([, how]) => how === "copy")
+  .map(([key]) => key);
 
 export interface ProjectSetupCopy {
   readonly copied_roles: readonly string[];
@@ -228,8 +275,7 @@ export async function copyProjectSetup(
         .map((role) => role.role_id),
       kept_preferences: Object.keys(before).filter(
         (key) =>
-          !VIEW_PREFERENCES.includes(key) &&
-          !GATE_KEYS.includes(key) &&
+          COPIED_KEYS.includes(key) &&
           before[key as keyof ProjectPreferences] !== undefined &&
           !Object.hasOwn(patch, key),
       ),
@@ -248,12 +294,7 @@ function preferencePatch(
   target: ProjectPreferences,
 ): Parameters<typeof setProjectPreferences>[2] {
   const rest = Object.fromEntries(
-    Object.entries(source).filter(
-      ([key]) =>
-        !VIEW_PREFERENCES.includes(key) &&
-        !GATE_KEYS.includes(key) &&
-        key !== "human_card_templates",
-    ),
+    Object.entries(source).filter(([key]) => COPIED_KEYS.includes(key)),
   ) as Parameters<typeof setProjectPreferences>[2];
   // Templates are a patch of switches: close what the source does not open.
   const open = humanCardTemplates(source);
@@ -266,7 +307,7 @@ function preferencePatch(
   return { ...rest, human_card_templates: templates };
 }
 
-/** Preferences as compared after a copy: without id, view and gate settings. */
+/** The preferences a copy carries over, in a comparable form. */
 export function comparablePreferences(preferences: ProjectPreferences): string {
   // Templates are stored as a patch over the default; compare the effect.
   const normalized: Record<string, unknown> = {
@@ -276,8 +317,7 @@ export function comparablePreferences(preferences: ProjectPreferences): string {
   const entries = Object.entries(normalized)
     .filter(
       ([key, value]) =>
-        !VIEW_PREFERENCES.includes(key) &&
-        !GATE_KEYS.includes(key) &&
+        (COPIED_KEYS.includes(key) || key === "human_card_templates") &&
         value !== undefined,
     )
     .sort(([a], [b]) => a.localeCompare(b));
