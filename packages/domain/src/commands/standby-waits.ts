@@ -140,6 +140,48 @@ function standbyGuard(d: CommandDraft, item: WorkItem) {
     return "已有未结束的 Run";
 }
 
+const DURABLE_GUARDS: ReadonlySet<string> = new Set([
+  "指派未激活",
+  "指派与工作项不匹配",
+  "外接指派不自动启动 Run",
+  "指派已被人工停止",
+]);
+
+/** One PM note per standby registration and reason. */
+function deferStandby(
+  d: CommandDraft,
+  item: WorkItem,
+  wait: StandbyWait,
+  reason: string,
+) {
+  if (
+    eventsOfType(d.state.events, "work_item_resume_deferred").some(
+      (e) =>
+        e.card_id === item.card_id &&
+        e.created_at >= wait.registered_at &&
+        (e.payload as { work_item_id?: unknown; reason?: unknown } | null)
+          ?.work_item_id === item.id &&
+        (e.payload as { reason?: unknown }).reason === reason,
+    )
+  )
+    return;
+  const body = `${item.id} 的等待条件已满足，但未能唤起负责人：${reason}。请 PM 核查。`;
+  d.emit(
+    "work_item_resume_deferred",
+    item.card_id,
+    {
+      work_item_id: item.id,
+      assignment_id: item.assignment_id ?? null,
+      reason,
+      standby: true,
+      requested_by: "system",
+      body,
+    },
+    { type: "system", work_item_id: item.id, author: "system", body },
+    { kind: "system", project_id: d.state.project_id },
+  );
+}
+
 /** The owner delivered again after registering: the wait no longer applies. */
 function deliveredSince(d: CommandDraft, item: WorkItem, at: string) {
   return eventsOfType(d.state.events, "delivery_submitted").some(
@@ -188,7 +230,14 @@ export function resumeStandbyWaits(
     }
     const condition = wait.condition;
     if (!condition || wait.auto_resume_disabled) continue;
-    if (standbyGuard(d, item)) continue;
+    const guard = standbyGuard(d, item);
+    if (guard) {
+      // Durable obstacles need PM once; transient ones (own Run, stop in
+      // progress, hold, role upgrade, host operation) just wait.
+      if (DURABLE_GUARDS.has(guard) && satisfied(condition, item))
+        deferStandby(d, item, wait, guard);
+      continue;
+    }
     const evidence = satisfied(condition, item);
     const owner = d
       .list("assignments")
@@ -229,7 +278,8 @@ export function resumeStandbyWaits(
 /** A next step this Run's owner already registered for the item. */
 function nextStepRegistered(d: CommandDraft, item: WorkItem, owner: string) {
   if (["blocked", "waiting_decision"].includes(item.status)) return true;
-  if (item.standby_wait) return true;
+  // A leftover record on an item that went back to work is not a next step.
+  if (item.standby_wait && standbyStatus(item)) return true;
   // The system already owns these waits: a candidate conflict is resumed on
   // the next baseline, an author precheck in flight wakes its author.
   if (pendingPrecheckConflict(d.state.events, item, d.state.project_id))

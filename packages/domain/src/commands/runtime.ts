@@ -147,9 +147,11 @@ export function finishRun(
         );
         wait = { condition: p.wait_for };
       }
+      // A repeated standby wait is registered for PM instead (applyFinish).
       ensure(
-        (wait.condition.kind === "baseline_updated" &&
-          !!pendingBaselineConflict(d, item)) ||
+        standby ||
+          (wait.condition.kind === "baseline_updated" &&
+            !!pendingBaselineConflict(d, item)) ||
           !autoResumeUsed(d, item, wait.condition),
         "illegal_transition",
         "此等待已自动恢复过，请报告阻塞交由 PM 处理",
@@ -226,11 +228,23 @@ function applyFinish(
   const owner = d.get("assignments", run.assignment_id);
   const item =
     owner.scope === "work_item" ? d.work(owner.work_item_id) : undefined;
-  if (wait && item && standbyStatus(item)) {
+  // A deferred finish settles later: only a still-valid standby wait is
+  // registered; anything else keeps the old Run wait and never throws here.
+  if (
+    wait &&
+    item &&
+    standbyStatus(item) &&
+    STANDBY_CONDITION_KINDS.has(wait.condition.kind) &&
+    !(
+      wait.condition.kind === "resource_available" &&
+      run.resource_keys?.includes(wait.condition.target_id)
+    )
+  ) {
     registerStandbyWait(d, item, {
       reason: summary,
       condition: wait.condition,
       run,
+      disabled: autoResumeUsed(d, item, wait.condition),
     });
     return endRun(d, run, outcome, summary);
   }

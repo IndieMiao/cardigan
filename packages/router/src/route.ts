@@ -1930,6 +1930,7 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
       "human_action_requested",
       // C-789: a wait registered on a delivered/accepted producer.
       "work_item_standby_registered",
+      "run_next_step_missing",
     ]).filter((event) => payloadString(event.payload, "run_id") === run_id),
     ...input.snapshot.deliveries.filter(
       (delivery) => delivery.run_id === run_id,

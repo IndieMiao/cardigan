@@ -117,7 +117,8 @@ export function rotationSkipReason(
   if (card.hold) return "card_held";
   if (item.status !== "in_progress" || item.assignment_id !== a.id)
     return "not_in_progress";
-  if (item.reported_blocker || item.standby_wait) return "blocked";
+  // In progress, a leftover standby record is stale (cleared on the next scan).
+  if (item.reported_blocker) return "blocked";
   if (stoppedByHuman(d.state.events, a.id)) return "human_stopped";
   if (hostOpsPending(d.state.events, a.id)) return "host_ops_pending";
   if (

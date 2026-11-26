@@ -29,7 +29,7 @@ import {
 import { authorPrecheckWait } from "./precheck-wait.js";
 import { closedResumeTarget, deferResume } from "./resume-attention.js";
 import { resumeBlockReason, resumeWork } from "./resumption.js";
-import { resumeStandbyWaits } from "./standby-waits.js";
+import { resumeStandbyWaits, standbyStatus } from "./standby-waits.js";
 import { stoppedByHuman } from "./stop-state.js";
 
 const payload = (e: Event) => e.payload as Record<string, unknown>;
@@ -196,9 +196,22 @@ export function autoResumeUsed(
         payload(e).automatic_wait === true) ||
         e.type === BLOCKER_WAIT_DELIVERED),
   );
-  if (c && automatic.some((e) => sameCondition(payload(e).condition, c)))
+  // C-789: a standby wake (delivered/accepted, state unchanged) only spends
+  // its own condition while the item still waits that way. It never opens an
+  // episode, so a later rework starts with a fresh allowance.
+  const standbyNow = standbyStatus(item);
+  if (
+    c &&
+    automatic.some(
+      (e) =>
+        (payload(e).standby !== true || standbyNow) &&
+        sameCondition(payload(e).condition, c),
+    )
+  )
     return true;
-  const latest = automatic.toSorted((a, b) => b.seq - a.seq)[0];
+  const latest = automatic
+    .filter((e) => payload(e).standby !== true)
+    .toSorted((a, b) => b.seq - a.seq)[0];
   if (!latest) return false;
   // A successful new delivery or explicit PM clearance starts a new episode,
   // but never restores the already-consumed allowance for the same condition.

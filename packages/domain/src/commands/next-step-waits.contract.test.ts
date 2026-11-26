@@ -420,3 +420,54 @@ test("a blocked verifier Run without anything registered is blocked for PM too",
     reported_blocker: { auto_registered: true },
   });
 });
+
+test("a standby wake does not spend the allowance of a later rework episode", () => {
+  setItem({ status: "delivered" });
+  finish("completed", { kind: "resource_available", target_id: "godot" });
+  expect(scan().data).toEqual([work]);
+  // Rejected: back to work in a fresh Run, without redelivering.
+  setItem({ status: "in_progress" });
+  state = {
+    ...state,
+    runs: state.runs.map((r) =>
+      r.id === runId ? { ...r, status: "running", outcome: null } : r,
+    ),
+  };
+  report({ kind: "resource_available", target_id: "godot" });
+  expect(item()).toMatchObject({ status: "blocked" });
+  expect(item().reported_blocker?.auto_resume_disabled).toBeUndefined();
+});
+
+test("a repeated standby wait via finish_run is registered for PM, not refused", () => {
+  setItem({ status: "accepted" });
+  finish("completed", { kind: "baseline_updated" });
+  expect(scan(next).data).toEqual([work]);
+  state = {
+    ...state,
+    runs: state.runs.map((r) =>
+      r.id === runId ? { ...r, status: "running", outcome: null } : r,
+    ),
+  };
+  const effect = finish("completed", { kind: "baseline_updated" });
+  expect(run()).toMatchObject({ status: "completed" });
+  expect(item().standby_wait).toMatchObject({ auto_resume_disabled: true });
+  expect(effect.events[0]?.payload).toMatchObject({
+    auto_resume_disabled: true,
+  });
+});
+
+test("a satisfied standby wait whose owner was stopped goes to PM once", () => {
+  setItem({ status: "accepted" });
+  finish("completed", { kind: "baseline_updated" });
+  state = {
+    ...state,
+    assignments: state.assignments.map((a) =>
+      a.id === owner ? { ...a, status: "released" } : a,
+    ),
+  };
+  const first = scan(next);
+  expect(first.data).toEqual([]);
+  expect(types(first)).toEqual(["work_item_resume_deferred"]);
+  expect(types(scan(next))).toEqual([]);
+  expect(item().standby_wait).toBeDefined();
+});
