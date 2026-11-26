@@ -25,6 +25,10 @@ import "../src/components/ui/theme.css";
 const now = "2026-11-24T08:00:00.000Z";
 Date.now = () => Date.parse(now);
 const failing = new URLSearchParams(location.search).has("fail");
+// `?long`: a timeline long enough to scroll “下一步” away (the C-701 dock).
+const timelineLength = new URLSearchParams(location.search).has("long")
+  ? 40
+  : 6;
 
 const devTpl = {
   id: "dev",
@@ -197,8 +201,13 @@ const make = (
       status: "passed",
     },
   ] as CardDetail["work_items"],
-  timeline: entries(id, 6),
-  counts: { timeline: 6, deliveries: 1, reviews: 1, open_decisions: 1 },
+  timeline: entries(id, timelineLength),
+  counts: {
+    timeline: timelineLength,
+    deliveries: 1,
+    reviews: 1,
+    open_decisions: 1,
+  },
 });
 
 const details: CardDetail[] = [
@@ -229,6 +238,22 @@ const details: CardDetail[] = [
         by: "human",
       },
     }),
+  ),
+  // C-760: 仍要合并 past an open merge hold.
+  make(
+    "C-709",
+    "接入 Google 登录：合并",
+    (() => {
+      const q = merge("Q-909", "C-709", "接入 Google 登录：合并");
+      return {
+        ...q,
+        merge_confirmation: q.merge_confirmation && {
+          ...q.merge_confirmation,
+          blockers: ["人工事项 H-9：尚未完成"],
+          blocking_human_actions: [{ id: "H-9", title: "Google 账号配置" }],
+        },
+      };
+    })(),
   ),
 ];
 const cards: CardListItem[] = details.map((d) => ({ ...card, ...d.card }));

@@ -439,10 +439,10 @@ function MergeDialogForm({
             </label>
           )}
           {holds.length > 0 && (
-            <fieldset aria-label="挡合并的人工事项">
-              <p>
+            <fieldset>
+              <legend>
                 {`人工事项 ${holds.map((h) => h.id).join("、")} 未完成，会继续挡住合并。`}
-              </p>
+              </legend>
               <label>
                 <Checkbox
                   checked={followUp}

@@ -13,6 +13,9 @@
 //
 // CHROMIUM_PATH=<chrome> node apps/web/test-support/c697-capture.mjs <new dir> [--before]
 // CHROMIUM_PATH=<chrome> node apps/web/test-support/c697-capture.mjs --compose <before dir> <after dir> <new dir>
+// CHROMIUM_PATH=<chrome> node apps/web/test-support/c697-capture.mjs <new dir> --merged
+//   only the scenes from merging C-701 and C-760: the main-action dock
+//   repeating 确认合并 (page and drawer), and 仍要合并 past an open hold.
 import assert from "node:assert/strict";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -35,9 +38,14 @@ const flags = [
 const states = ["C-702", "C-706", "C-707", "C-708"];
 
 if (process.argv[2] === "--compose") await compose(...process.argv.slice(3));
-else await capture(process.argv[2], process.argv.includes("--before"));
+else
+  await capture(
+    process.argv[2],
+    process.argv.includes("--before"),
+    process.argv.includes("--merged"),
+  );
 
-async function capture(outArg, before) {
+async function capture(outArg, before, merged = false) {
   assert(outArg, "Pass a new output directory");
   const root = fileURLToPath(new URL("../", import.meta.url));
   const output = resolve(outArg);
@@ -195,7 +203,14 @@ async function capture(outArg, before) {
         const footer = dialog?.querySelector(".ui-dialog-footer");
         const menu = document.querySelector("[role=menu]");
         const body = document.querySelector(".drawer-body");
+        const dock = document.querySelector("section[aria-label='主操作']");
         return {
+          dock: dock && {
+            ...rect(dock),
+            title: dock.firstElementChild?.textContent,
+            titleFont: font(dock.firstElementChild),
+            buttons: [...dock.querySelectorAll("[data-ui=button]")].map(button),
+          },
           viewport: { width: innerWidth, height: innerHeight },
           panel: panel && {
             ...rect(panel),
@@ -259,6 +274,79 @@ async function capture(outArg, before) {
           theme,
         );
         await shot(`list-${suffix}`);
+        if (merged) {
+          const dockReady =
+            "!!document.querySelector('section[aria-label=主操作]')";
+          // Page: the window scrolls; drawer: its body does.
+          // As in c701-capture: the timeline tab, then 700px down.
+          const scrollAway = async () => {
+            await run(() =>
+              document
+                .querySelector(
+                  "article.card-page [role=tab][id$='-timeline-tab']",
+                )
+                ?.click(),
+            );
+            await until(
+              "document.querySelectorAll('article.card-page .timeline-entry').length >= 40",
+            );
+            await run(() => {
+              const article = document.querySelector("article.card-page");
+              let node = article?.parentElement;
+              while (node && node !== document.body) {
+                const style = getComputedStyle(node);
+                if (
+                  /(auto|scroll)/.test(style.overflowY) &&
+                  node.scrollHeight > node.clientHeight
+                )
+                  break;
+                node = node.parentElement;
+              }
+              (node && node !== document.body
+                ? node
+                : document.scrollingElement).scrollTop += 700;
+            });
+            await until(dockReady);
+          };
+          await open("cards/C-702", pageReady, theme, "?long");
+          await scrollAway();
+          await record(`dock-page-C-702-${suffix}`, [
+            "?long",
+            "时间线",
+            "scroll 700",
+          ]);
+          await open(
+            "cards?view=list&card=C-702",
+            "!!document.querySelector('.drawer-body article.card-page .card-main')",
+            theme,
+            "?long",
+          );
+          await scrollAway();
+          await record(`dock-drawer-C-702-${suffix}`, [
+            "?long",
+            "时间线",
+            "scroll 700",
+          ]);
+          await open("cards/C-709", pageReady, theme);
+          await click(
+            "section[aria-label='下一步'] [data-ui=button]",
+            "更多合并操作",
+          );
+          await click("[role=menuitem]", "仍要合并…");
+          await until(
+            "!!document.querySelector('[role=alertdialog] textarea')",
+          );
+          await click("[role=alertdialog] textarea");
+          await type("账号合并后再配");
+          await click("[role=alertdialog] [data-ui=checkbox]");
+          await record(`dialog-override-hold-C-709-${suffix}`, [
+            "更多合并操作",
+            "menu:仍要合并…",
+            "type 账号合并后再配",
+            "tick 一并改为合并后跟进",
+          ]);
+          continue;
+        }
         for (const id of states)
           for (const mode of ["page", "drawer"]) {
             await open(
@@ -376,7 +464,7 @@ async function compose(beforeArg, afterArg, outArg) {
           ["改前", "改后"],
           `before-after-${file}`,
         );
-      if (suffix && file.startsWith("page-"))
+      if (suffix && /^(page|dock|dialog-override)-/.test(file))
         await pair(
           resolve(afterDir, `list-${suffix}`),
           resolve(afterDir, file),
