@@ -14,6 +14,7 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
+import { hostWideEventDocs } from "./host-wide-events.js";
 import type { ProbeProfiles } from "./probe-config.js";
 
 export type { ProbeAdapter, ProbeJob } from "@cardigan/domain";
@@ -49,12 +50,12 @@ export class ProbeService {
   private jobs(): ProbeJob[] {
     const jobs = new Map<string, ProbeJob>();
     // Query only probe facts; an idle probe loop must not load every card history.
-    for (const row of this.options.store.database
-      .prepare("SELECT doc FROM events WHERE type = 'probe_job' ORDER BY seq")
-      .all()) {
-      const event = JSON.parse(String(row.doc));
+    for (const event of hostWideEventDocs<ProbeJob>(
+      this.options.store.database,
+      "probe_job",
+    )) {
       if (event.actor.kind !== "system") continue;
-      const job = event.payload as ProbeJob;
+      const job = event.payload;
       jobs.set(job.id, job);
     }
     return [...jobs.values()];
