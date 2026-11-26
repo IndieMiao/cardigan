@@ -374,11 +374,15 @@ test("C-504: the list meter follows the reading's length and level; no reading h
   }
   expect(cells("A-7").context).toBe("—");
   expect(within(cells("A-7").row).queryByRole("meter")).toBeNull();
-  // The detail drawer keeps its one-line text without a meter.
+  // C-702: the drawer shows the same reading with the meter and its level.
   fireEvent.click(screen.getByRole("button", { name: "查看 A-2 详情" }));
-  const drawer = await screen.findByRole("dialog", { name: "A-2 详情" });
-  expect(within(drawer).queryByRole("meter")).toBeNull();
-  expect(drawer.textContent).toContain("已用 82.00%，剩余 18.00%（200K）");
+  const drawer = await screen.findByRole("dialog", { name: /^A-2 / });
+  const meter = within(drawer).getByRole("meter");
+  expect(meter.getAttribute("aria-label")).toBe("上下文已用 82.00%");
+  expect(meter.closest("[data-ui=meter]")?.getAttribute("data-tone")).toBe(
+    "warning",
+  );
+  expect(meter.closest("dd")?.textContent).toBe("82% 164K / 200K");
 });
 
 test("C-207: abnormal Assignment status and a bad Run outcome stay in the row", async () => {
@@ -415,7 +419,7 @@ test("C-106: clicking the row or the Assignment id opens the drawer; the id is a
   trigger.focus();
   expect(document.activeElement).toBe(trigger);
   fireEvent.click(trigger);
-  expect(await screen.findByRole("dialog", { name: "A-7 详情" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: /^A-7 / })).toBeTruthy();
   expect(trigger.getAttribute("aria-expanded")).toBe("true");
 
   // A plain cell of another row opens that row's drawer instead.
@@ -423,11 +427,12 @@ test("C-106: clicking the row or the Assignment id opens the drawer; the id is a
   fireEvent.click(
     coder.row.querySelector('td[data-column="config"]') as Element,
   );
-  const drawer = await screen.findByRole("dialog", { name: "A-1 详情" });
+  const drawer = await screen.findByRole("dialog", { name: /^A-1 / });
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
-  // C-207: the folded details live in the drawer.
-  expect(drawer.textContent).toContain("opus-5.5 / xhigh");
-  expect(drawer.textContent).toContain("900,000 / 1,000,000 tokens");
+  // C-207: the folded details live in the drawer (C-702: model and
+  // reasoning effort share one field, the context shows its tokens).
+  expect(drawer.textContent).toContain("opus-5.5推理强度 xhigh");
+  expect(drawer.textContent).toContain("900K / 1M");
 });
 
 test("C-106: a link inside the row keeps its own behaviour and does not open the drawer", async () => {
@@ -436,7 +441,7 @@ test("C-106: a link inside the row keeps its own behaviour and does not open the
   const link = cells("A-1").row.querySelector("a") as HTMLAnchorElement;
   expect(link).not.toBeNull();
   fireEvent.click(link);
-  expect(screen.queryByRole("dialog", { name: /详情$/ })).toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
 test("C-106: the wide table scrolls sideways inside its own container", async () => {
@@ -507,9 +512,7 @@ test("C-207: below 760px the same Assignments render as cards only, in reading o
     expect(screen.getByRole("combobox", { name: "排序：全部" })).toBeTruthy();
     // A plain card area opens the drawer.
     fireEvent.click(card.querySelector(".execution-card-context") as Element);
-    expect(
-      await screen.findByRole("dialog", { name: "A-1 详情" }),
-    ).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: /^A-1 / })).toBeTruthy();
   } finally {
     vi.unstubAllGlobals();
   }

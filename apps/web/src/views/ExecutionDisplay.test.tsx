@@ -198,7 +198,7 @@ test.each([false, true])(
     expect(screen.getByText("常驻 PM · 后台")).toBeTruthy();
     click("查看 A-1 详情");
     expect(await screen.findByRole("dialog")).toBeTruthy();
-    expect(screen.getByText("尚无 Run。")).toBeTruthy();
+    expect(await screen.findByText("没有执行记录")).toBeTruthy();
     view.unmount();
     show();
     await screen.findByRole("region", { name: "员工泳道" });
