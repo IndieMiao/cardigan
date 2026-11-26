@@ -60,8 +60,10 @@ import {
   PROJECT_EVENT_STREAM,
 } from "./ids.js";
 import {
+  type AckCandidateQuery,
   acknowledgeNotifications,
   advanceRouterCursor,
+  listAckCandidates,
   listNotifications,
   type MoveNotificationInput,
   moveNotification,
@@ -1552,6 +1554,11 @@ export class Store {
 
   listNotifications(query: NotificationQuery) {
     return listNotifications(this.#db, query);
+  }
+
+  /** C-788: rows an ACK pass may move; see `listAckCandidates`. */
+  listAckCandidates(query: AckCandidateQuery) {
+    return listAckCandidates(this.#db, query);
   }
 
   /**

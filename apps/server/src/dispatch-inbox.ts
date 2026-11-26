@@ -5,6 +5,8 @@ import {
   type CommandState,
   cancelledQueueRelease,
   type DecisionId,
+  DISPATCH_ATTENTION_STATUSES,
+  DISPATCH_DIAGNOSTIC_EVENT_TYPES,
   type Event,
   eventById,
   type HumanActionId,
@@ -431,7 +433,16 @@ export function notificationOwner(
   // C-244: keyed lookup, same first match as runs.find.
   const sent = note.run_id && runById(state.runs, note.run_id);
   if (sent) return sent.assignment_id;
-  const id = standing?.(state.project_id, note.recipient.kind, state);
+  return standingOwner(note.recipient.kind, state, standing);
+}
+
+/** Owner of a role-addressed row that no Run is pinned to. */
+export function standingOwner(
+  kind: "pm_ops" | "pm_office",
+  state: CommandState,
+  standing?: StandingResolver,
+): AssignmentId | undefined {
+  const id = standing?.(state.project_id, kind, state);
   return state.assignments.some(
     (a) => a.id === id && a.scope === "standing" && a.status === "active",
   )
@@ -484,9 +495,15 @@ export function resolveUnreadableNotifications(
       at = clock.now();
     let count = 0;
     // C-244: acked and resolved rows were skipped; do not decode them.
+    // C-788: nor rows for another recipient kind (owner notices, PM roles)
+    // or for standing Assignments, which can read every card.
     for (const note of store.listNotifications({
       project_id: project,
       statuses: UNSETTLED_NOTIFICATION_STATUSES,
+      recipient_kind: "assignment",
+      exclude_assignment_ids: state.assignments
+        .filter((a) => a.scope === "standing")
+        .map((a) => a.id),
     })) {
       if (
         !note.card_id ||
@@ -528,6 +545,43 @@ export function resolveUnreadableNotifications(
     return count;
   });
 }
+/**
+ * C-788: unsettled rows that `obsoleteDispatchAttention` or
+ * `settledHumanActionNeedsYou` may match, per the preconditions documented on
+ * them: a delivery-problem status, a Run pin, a diagnostic source event, or an
+ * owner notice whose source event names human actions. A superset; the caller
+ * still applies both predicates to every row returned.
+ */
+export function listAttentionCandidates(
+  store: Store,
+  project: ProjectId,
+): Notification[] {
+  return store.database
+    .prepare(
+      `SELECT n.doc FROM notifications n
+       LEFT JOIN events e ON e.project_id = n.project_id AND e.id = n.event_id
+       WHERE n.project_id = ? AND n.status IN (SELECT value FROM json_each(?))
+         AND (n.status IN (SELECT value FROM json_each(?))
+           OR e.type IN (SELECT value FROM json_each(?))
+           -- instr() first: a cheap byte search before parsing the JSON.
+           OR (instr(n.doc, '"run_id"') > 0
+             AND json_extract(n.doc, '$.run_id') IS NOT NULL)
+           OR (n.recipient_kind = 'needs_you'
+             AND ((instr(e.doc, '"human_action_id"') > 0
+                 AND json_extract(e.doc, '$.payload.human_action_id') IS NOT NULL)
+               OR (instr(e.doc, '"reminders"') > 0
+                 AND json_type(e.doc, '$.payload.reminders') = 'array'))))
+       ORDER BY n.seq, n.id`,
+    )
+    .all(
+      project,
+      JSON.stringify(UNSETTLED_NOTIFICATION_STATUSES),
+      JSON.stringify(DISPATCH_ATTENTION_STATUSES),
+      JSON.stringify(DISPATCH_DIAGNOSTIC_EVENT_TYPES),
+    )
+    .map((row) => JSON.parse(String(row.doc)) as Notification);
+}
+
 /** ACK wins over a late delivery failure; escalated terminal rows are left alone. */
 export function acknowledgeInbox(
   store: Store,
@@ -544,10 +598,19 @@ export function acknowledgeInbox(
     // stay as read, so one standing PM resolution per kind serves every row.
     const standingOnce = memoStanding(standing);
     let count = 0;
-    // C-244: decode only the statuses this loop handles.
-    for (const note of store.listNotifications({
+    // C-244: decode only the statuses this loop handles. C-788: and only rows
+    // whose owner's cursor may cover them; the unread backlog (owner
+    // notices, external Office bells nobody ACKs) stays pending, unread.
+    const pmOps = standingOwner("pm_ops", state, standingOnce),
+      pmOffice = standingOwner("pm_office", state, standingOnce);
+    for (const note of store.listAckCandidates({
       project_id: project,
       statuses: ACKABLE,
+      held: attempts.flatMap((a) => a.notification_ids),
+      role_owners: {
+        ...(pmOps ? { pm_ops: pmOps } : {}),
+        ...(pmOffice ? { pm_office: pmOffice } : {}),
+      },
     })) {
       if (!ACKABLE.includes(note.status)) continue;
       const owner =
@@ -587,10 +650,40 @@ export function resolveObsoletePmNotifications(
         (a) => a.notification_ids,
       ),
     );
-    for (const note of store.listNotifications({
-      project_id: project,
-      status: "pending",
-    })) {
+    // C-788: only rows whose owner can be PM Ops (an unpinned row for a role
+    // resolved to Ops, or one addressed to an Ops Assignment); the owner's
+    // notices and other inboxes are not decoded on every pass.
+    const ops = state.assignments
+      .filter(
+        (a) =>
+          a.scope === "standing" &&
+          a.role_id === "pm" &&
+          a.standing_mode === "ops",
+      )
+      .map((a) => a.id);
+    if (!ops.length) return;
+    const kinds = (["pm_ops", "pm_office"] as const).filter((kind) => {
+      const owner = standingOwner(kind, state, standing);
+      return !!owner && ops.includes(owner);
+    });
+    const notes = [
+      ...kinds.flatMap((kind) =>
+        store.listNotifications({
+          project_id: project,
+          status: "pending",
+          recipient_kind: kind,
+        }),
+      ),
+      ...ops.flatMap((assignment_id) =>
+        store.listNotifications({
+          project_id: project,
+          status: "pending",
+          recipient_kind: "assignment",
+          assignment_id,
+        }),
+      ),
+    ].sort((a, b) => a.seq - b.seq || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    for (const note of notes) {
       if (held.has(note.id) || !newPmNotification(state, note)) continue;
       const owner = notificationOwner(note, state, standing);
       if (
