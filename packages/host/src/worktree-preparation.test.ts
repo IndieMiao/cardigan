@@ -139,7 +139,7 @@ test("a started host preparation records the attestation fields and renews them"
   );
 });
 
-test("a PATH or env edit recomputes the binding instead of invalidating it (sensen Android PATH)", () => {
+test("a PATH or env edit is reported, then the next real preparation re-binds and renews (sensen Android PATH)", () => {
   const before = worker();
   launchStarted(resolved(before));
   const android = worker({
@@ -150,7 +150,8 @@ test("a PATH or env edit recomputes the binding instead of invalidating it (sens
   expect(runtimeTargetBinding(android).fingerprint).not.toBe(
     runtimeTargetBinding(before).fingerprint,
   );
-  expect(read(android)).toBe("verified");
+  // Not silently invalid, and the unverified new configuration is not admitted.
+  expect(read(android)).toBe("stale");
   expect(read(android, at(30 * day))).toBe("expired");
   // The next real preparation re-binds to the current fingerprint and renews.
   launchStarted(resolved(android), at(29 * day));

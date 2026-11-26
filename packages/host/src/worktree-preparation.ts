@@ -58,7 +58,8 @@ const RANK: Record<WorktreePreparation, number> = {
   missing: 0,
   invalid: 1,
   expired: 2,
-  verified: 3,
+  stale: 3,
+  verified: 4,
 };
 
 /**
@@ -75,19 +76,25 @@ export function readWorktreePreparation(
   return (worker) => {
     const attested = manual(worker);
     const proof = observed(worker.project_id, worker.machine_id);
-    const seen: WorktreePreparation = !proof
-      ? "missing"
-      : proof.os !== worker.os ||
-          proof.arch !== worker.arch ||
-          typeof proof.evidence_ref !== "string" ||
-          !proof.evidence_ref.trim() ||
-          !helpersConfigured(worker) ||
-          (proof.target_fingerprint !==
-            runtimeTargetBinding(worker).fingerprint &&
-            proof.preparation_fingerprint !==
-              worktreePreparationFingerprint(worker))
-        ? "invalid"
-        : window(proof, at);
+    let seen: WorktreePreparation = "missing";
+    if (proof) {
+      const exact =
+        proof.target_fingerprint === runtimeTargetBinding(worker).fingerprint;
+      seen =
+        proof.os !== worker.os ||
+        proof.arch !== worker.arch ||
+        typeof proof.evidence_ref !== "string" ||
+        !proof.evidence_ref.trim() ||
+        !helpersConfigured(worker) ||
+        (!exact &&
+          proof.preparation_fingerprint !==
+            worktreePreparationFingerprint(worker))
+          ? "invalid"
+          : window(proof, at);
+      // A PATH or env edit is reported, never admitted, until the next real
+      // preparation re-binds the evidence to the current fingerprint.
+      if (seen === "verified" && !exact) seen = "stale";
+    }
     return RANK[seen] > RANK[attested] ? seen : attested;
   };
 }

@@ -65,10 +65,9 @@ export function runtimeTargetBinding(
 }
 
 /**
- * C-784: the same binding without the Run tool PATH and env. Host Git
- * preparation runs through the configured helpers, never through these, so
- * observed preparation evidence follows a PATH or env edit; every other field,
- * including generation and helpers, still revokes it.
+ * C-784: the same binding without the Run tool PATH and env. Placement uses it
+ * only to tell a PATH or env edit (awaiting the next real preparation) from any
+ * other binding change, which still makes the evidence invalid; it never admits.
  */
 export const worktreePreparationFingerprint = (identity: TargetIdentity) =>
   encode(identity, false);

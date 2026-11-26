@@ -440,6 +440,7 @@ test("selection records sorted scores and exclusions, never redeems an unverifie
 test.each([
   [{ worktree_preparation: "expired" }, "准备证据已过期"],
   [{ worktree_preparation: "invalid" }, "准备证据无效"],
+  [{ worktree_preparation: "stale" }, "准备证据待重新验证（PATH 或 env 已变更"],
   [{ limit: 0 }, "容量配置不可用"],
   [{ remote_binding: "disabled" }, "allow_remote_launch"],
   [{ remote_binding: "platform_mismatch" }, "OS 或架构与机器登记不一致"],
@@ -482,9 +483,9 @@ test.each([
 // same for every state it can report, whoever produced the observation.
 test.each(
   (["write", "readonly", "none"] as const).flatMap((worktree) =>
-    ([undefined, "missing", "invalid", "expired", "verified"] as const).map(
-      (proof) => [worktree, proof] as const,
-    ),
+    (
+      [undefined, "missing", "invalid", "expired", "stale", "verified"] as const
+    ).map((proof) => [worktree, proof] as const),
   ),
 )(
   "implicit placement admits a remote under policy %s only with verified preparation (%s); local and explicit are unaffected",
