@@ -110,6 +110,7 @@ export {
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
 export {
+  checkSupervisorUpgrade,
   finishSupervisorUpgrade,
   loadSupervisorUpgradeConfig,
   nodeRestartPorts,
@@ -117,6 +118,7 @@ export {
   parseSupervisorUpgradeConfig,
   SUPERVISOR_UPGRADE_FILE,
   type SupervisorUpgradeConfig,
+  supervisorCheckoutRoot,
 } from "./deployment-supervisor-upgrade.js";
 export * from "./device-init.js";
 export { turnSessionKey } from "./dispatch-stalls.js";

@@ -75,7 +75,7 @@ const TOP_LEVEL_USAGE = [
   "",
   "命令：",
   "  init             建库并执行迁移",
-  "  self-deploy watch|roles  主机自举部署监督器；只部署中心 main，配置仅来自主机",
+  "  self-deploy watch|roles|check-upgrade  主机自举部署监督器；只部署中心 main，配置仅来自主机",
   "  deploy adopt|pin|unpin  人工认领 main 区间、固定版本或解除固定；必填 --reason",
   "  maintenance begin|run|status|continue|end|abandon  人专用停服维护：暂停派活和自动部署，等在跑工作结束后停服，结束时核对并恢复",
   "  hc upgrade --version <版本>  人专用 hc 升级：核 SHA-256、分版本目录预置，经维护入口切换、冒烟，失败自动回退",

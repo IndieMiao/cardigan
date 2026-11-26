@@ -14,7 +14,7 @@ import {
   rename,
 } from "node:fs/promises";
 import { connect } from "node:net";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -65,6 +65,7 @@ import {
   type SupervisorUpgradeConfig,
   SupervisorUpgrader,
   type SupervisorUpgradeStep,
+  supervisorCheckoutRoot,
 } from "./deployment-supervisor-upgrade.js";
 import {
   fenceLongOperations,
@@ -581,7 +582,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           : null;
       if (this.supervisorSha && this.options.upgrade?.config.enabled)
         this.upgrader = new SupervisorUpgrader(
-          this.upgradeHost(await realpath(resolve(root)), this.supervisorSha),
+          this.upgradeHost(await supervisorCheckoutRoot(), this.supervisorSha),
           this.options.upgrade.config,
         );
     }
