@@ -1425,6 +1425,11 @@ export interface ExecutionMachine {
   } | null;
 }
 
+export interface MachineDiskUsageKind {
+  readonly bytes: number;
+  readonly directories: number;
+}
+
 /**
  * C-512: the human-only machine read (C-509). Machines are global; each
  * binding is one project's registration of the machine, as far as the server
@@ -1466,6 +1471,25 @@ export interface MachineBindingView {
     /** C-608: non-blocking findings; older servers omit them. */
     readonly warnings?: readonly string[];
     readonly readiness?: MachineReadinessView;
+  } | null;
+  /**
+   * C-666: this project's worktrees/builds/runs on a remote worker and the
+   * volume's free space; null on `local` or before the first read (older
+   * servers omit it). A skipped read keeps the last measurement.
+   */
+  readonly disk_usage?: {
+    readonly observed_at: string;
+    readonly status: "measured" | "skipped";
+    readonly skipped_reason?: "helper_outdated" | "failed";
+    readonly measured?: {
+      readonly measured_at: string;
+      readonly free_bytes: number;
+      readonly total_bytes: number;
+      readonly worktrees: MachineDiskUsageKind;
+      readonly builds: MachineDiskUsageKind;
+      readonly runs: MachineDiskUsageKind;
+      readonly complete: boolean;
+    };
   } | null;
   /** The latest explicitly requested check (Web or CLI). */
   readonly last_requested_check: {

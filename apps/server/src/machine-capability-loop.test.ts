@@ -69,3 +69,62 @@ test("patrol refreshes each project immediately and every 30 minutes, tolerates 
     vi.useRealTimers();
   }
 });
+
+test("C-666: worker usage is read after a passing check of a remote binding only; its failure stays in the patrol", async () => {
+  vi.useFakeTimers();
+  const root = mkdtempSync(join(tmpdir(), "capability-usage-"));
+  const store = Store.open({ dataDir: root });
+  store.createProject({ id: "a" });
+  const remote = (id: string) => ({
+    id,
+    label: id,
+    herdr_machine: id,
+    os: "darwin" as const,
+    arch: "arm64",
+    tags: [],
+    max_assignments: 4,
+    status: "online" as const,
+    last_seen: null,
+  });
+  store.uow.run((tx) => {
+    tx.machines.put("a", remote("mac-mini"));
+    tx.machines.put("a", remote("broken"));
+  });
+  const health = (available: boolean) => ({
+    capabilities: [],
+    health: {
+      status: available ? ("passed" as const) : ("failed" as const),
+      checked_at: "2026-11-25T00:00:00.000Z",
+      blockers: available ? [] : ["worker_unreachable"],
+      launch_enabled: available,
+      evidence_ref: "machine-observation:x",
+      available,
+    },
+  });
+  const refreshMachine = vi.fn(async (_project: string, machine: string) =>
+    health(machine !== "broken"),
+  );
+  const usage = vi.fn(async () => {
+    throw new Error("private-ssh-detail");
+  });
+  const onError = vi.fn();
+  const loop = startMachineCapabilityLoop({
+    store,
+    runtime: { refreshMachine } as never,
+    usage,
+    onError,
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(refreshMachine).toHaveBeenCalledTimes(3);
+    expect(usage.mock.calls).toEqual([["a", "mac-mini"]]);
+    expect(onError.mock.calls).toEqual([
+      [new Error("Worker usage observation failed")],
+    ]);
+  } finally {
+    await loop.stop();
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+    vi.useRealTimers();
+  }
+});

@@ -58,6 +58,7 @@ import {
   hostRepositoryLock,
   loadWorkspace,
   type MergePushConfig,
+  observedHelperRelease,
   PreparationQueueTimeout,
   pinStallBackup,
   preparationBusy,
@@ -84,6 +85,7 @@ import {
   type ExecutionConfig,
   matchesAgentBundleOrigin,
   mirrorReceivePack,
+  type WorkerUsageReport,
   workerGit,
   workerGitPack,
 } from "@cardigan/runtime-herdr";
@@ -346,6 +348,16 @@ export interface MachineDirectories {
   readonly builds: readonly string[];
   readonly worktrees: readonly string[];
 }
+/**
+ * C-666: a project's directory usage on one worker. `outdated` is a worker
+ * whose latest readiness probe found the previous helper release, which has
+ * no usage report; it is not asked.
+ */
+export type MachineUsage =
+  | { readonly helper: "current"; readonly report: WorkerUsageReport }
+  | { readonly helper: "outdated" };
+/** C-666: the helper stops walking at 80% of this and reports `complete: false`. */
+export const MACHINE_USAGE_TIMEOUT_MS = 120_000;
 export interface ReconcileGit {
   reconcilePages?(
     ...args: Parameters<ReconcileGit["reconcile"]>
@@ -374,6 +386,16 @@ export interface ReconcileGit {
     project: CentralProject,
     machine_id: string,
   ): Promise<MachineDirectories | undefined>;
+  /**
+   * C-666: the project's worktrees/builds/runs usage and the free space on a
+   * remote worker, read through that worker's helper. `undefined` when no
+   * Assignment of the project was ever bound to the machine; throws when the
+   * machine cannot be read.
+   */
+  machineUsage?(
+    project: CentralProject,
+    machine_id: string,
+  ): Promise<MachineUsage | undefined>;
   /** P2a-3: `idle` is re-checked under the project's repository lock. */
   removeBuildCheckout?(input: {
     readonly project: CentralProject;
@@ -1792,6 +1814,33 @@ export class ServerGit implements GitBinding {
       undefined,
       true,
     );
+  }
+  async machineUsage(
+    project: CentralProject,
+    machine_id: string,
+  ): Promise<MachineUsage | undefined> {
+    const targets = this.options.targets;
+    if (machine_id === "local" || !targets)
+      throw new Error("Worker usage needs a remote worker target");
+    const project_id = project.project_id as ProjectId;
+    // The helper binds each request to one Assignment; the usage report reads
+    // only the project's roots, whichever of its Assignments asks.
+    const probe = this.options.store.uow?.read((tx) =>
+      tx.assignments.list(project_id).find((a) => a.machine_id === machine_id),
+    );
+    if (probe === undefined) return undefined;
+    const { execution } = targets.forRepository(project_id, machine_id);
+    if (execution.mode !== "agent-ssh" || !execution.gitHelper)
+      throw new Error("Worker Git helper is not configured");
+    if (observedHelperRelease(execution.target?.fingerprint) === "previous")
+      return { helper: "outdated" };
+    const report = await workerGit<WorkerUsageReport>(execution, {
+      operation: "usage",
+      project: project.project_id,
+      assignment: probe.id,
+      timeout_ms: MACHINE_USAGE_TIMEOUT_MS,
+    });
+    return { helper: "current", report };
   }
   async removeBuildCheckout(input: {
     readonly project: CentralProject;

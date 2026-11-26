@@ -73,6 +73,8 @@
     /* C-699: the overview's facts column and the label column inside it. */
     --ui-detail-facts: 280px;
     --ui-detail-facts-label: 64px;
+    /* C-702: label column of detail facts (运行环境, 会话维护). */
+    --ui-detail-label: 80px;
     --ui-pill-radius: 999px;
     --ui-panel-padding: 16px;
     --ui-shadow: 0 4px 16px #0003;

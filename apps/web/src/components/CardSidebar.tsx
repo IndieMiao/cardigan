@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import {
   type CardDetail,
   type CardiganClient,
@@ -19,7 +19,7 @@ import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag, Time } from "./Foundation.js";
 import {
   CardDetailInlineOwner,
-  type DetailFact,
+  DetailFact,
   DetailFactGroup,
   DetailFacts,
 } from "./layout/CardDetailLayout.js";
@@ -66,7 +66,11 @@ export function CardOverviewFacts({
     relations.cards.length +
     relations.pull_requests.length +
     relations.decisions.length;
-  const facts: DetailFact[] = [
+  const facts: {
+    readonly key: string;
+    readonly label: string;
+    readonly value: ReactNode;
+  }[] = [
     {
       key: "template",
       label: "模板",
@@ -184,7 +188,15 @@ export function CardOverviewFacts({
       ),
     },
   ];
-  return <DetailFacts facts={facts} />;
+  return (
+    <DetailFacts compact>
+      {facts.map((fact) => (
+        <DetailFact key={fact.key} label={fact.label}>
+          {fact.value}
+        </DetailFact>
+      ))}
+    </DetailFacts>
+  );
 }
 
 export function CardWorkItems({

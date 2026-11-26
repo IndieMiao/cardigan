@@ -664,5 +664,5 @@ test("execution assignment identity opens the profile without expanding its row"
   fireEvent.click(trigger);
   expect(await screen.findByRole("dialog")).toBeTruthy();
   // C-75: the profile opens on its own; the execution detail drawer does not.
-  expect(screen.queryByRole("dialog", { name: /详情$/ })).toBeNull();
+  expect(screen.queryByRole("region", { name: "当前" })).toBeNull();
 });

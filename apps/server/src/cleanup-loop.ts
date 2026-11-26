@@ -127,6 +127,31 @@ export class CleanupExecutor {
     while (projects().some((project) => this.pending(project)));
   }
 
+  /**
+   * C-666: a worker reported low free space. Forget what this process has
+   * already judged absent and the listings of the current pass, then finish
+   * one full pass now instead of waiting for the timer. The pass applies the
+   * usual rules: only released or idle directories, dirty worktrees still
+   * become decisions.
+   */
+  reclaim(project_id: ProjectId): Promise<void> {
+    const reset = this.serial.then(() => {
+      for (const key of this.cleaned)
+        if (key.startsWith(`${project_id}/`)) this.cleaned.delete(key);
+      this.listings.delete(project_id);
+      // A pass already under way may have listed this machine before.
+      return this.pass.has(project_id);
+    });
+    this.serial = reset.then(
+      () => undefined,
+      () => undefined,
+    );
+    return reset.then(async (midPass) => {
+      await this.sweep(project_id);
+      if (midPass) await this.sweep(project_id);
+    });
+  }
+
   private async project(project_id: ProjectId) {
     const done =
       this.pass.get(project_id) ?? new Set<"releases" | "owners" | "builds">();

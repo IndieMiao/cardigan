@@ -8,9 +8,10 @@ import {
 
 import {
   digestMismatch,
+  minimumWorkerPublicationProtocol,
   protocolMismatch,
   workerHelperDigests,
-  workerPublicationProtocol,
+  workerUsageProtocol,
 } from "./worker-helper-release.js";
 
 type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
@@ -90,9 +91,23 @@ except Exception: pass
 print(json.dumps(dict(failures=failures,version=version,protocol=protocol,matching=matching)))
 `;
 
+/**
+ * C-666: which admitted release each binding (target fingerprint) ran at its
+ * latest readiness probe in this process. "previous" is a protocol-2 helper,
+ * before the usage report: it launches, but its usage report is skipped.
+ */
+const releases = new Map<string, "current" | "previous">();
+export function observedHelperRelease(
+  fingerprint: string | undefined,
+): "current" | "previous" | undefined {
+  return fingerprint === undefined ? undefined : releases.get(fingerprint);
+}
+
 export async function workerReadiness(
   execution: Worker,
 ): Promise<readonly WorkerReadinessFailure[]> {
+  const fingerprint = execution.target?.fingerprint;
+  if (fingerprint !== undefined) releases.delete(fingerprint);
   if (!execution.gitHelper || !execution.fileHelper || !execution.target)
     return ["worker_helpers"];
   try {
@@ -144,9 +159,22 @@ export async function workerReadiness(
       !blockers.includes("worker_helpers")
     )
       blockers.push("worker_helpers");
-    if (protocolKnown && protocol < workerPublicationProtocol)
+    // C-666: protocol 2 is still admitted. Its digest differs from the
+    // deployed release, which is only a warning (C-608) and upgrades it; its
+    // usage report is skipped.
+    if (protocolKnown && protocol < minimumWorkerPublicationProtocol)
       blockers.unshift(protocolMismatch(protocol));
     else if (result.matching === false) blockers.unshift(digestMismatch);
+    if (
+      fingerprint !== undefined &&
+      protocolKnown &&
+      protocol >= minimumWorkerPublicationProtocol &&
+      !blockers.includes("worker_helpers")
+    )
+      releases.set(
+        fingerprint,
+        protocol < workerUsageProtocol ? "previous" : "current",
+      );
     return [
       ...blockers,
       ...(isHcVersionCompatible(version) ? [] : ["hc_version" as const]),
