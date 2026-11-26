@@ -166,6 +166,7 @@ type CommandName =
   | "remind_system_waits"
   | "system_complete_card"
   | "refresh_card_dependencies"
+  | "settle_card_watches"
   | "system_confirm_merge"
   | "auto_confirm_merge"
   | "expire_merge_snoozes"
@@ -345,6 +346,7 @@ export class CommandDraft {
       "remind_system_waits",
       "system_complete_card",
       "refresh_card_dependencies",
+      "settle_card_watches",
       "system_confirm_merge",
       "auto_confirm_merge",
       "expire_merge_snoozes",

@@ -7,6 +7,7 @@ import {
   type CommandPorts,
   type CommandState,
   cardCriticalPathLengths,
+  cardWatchesPending,
   finishSystemReviewLimitRaise,
   flowAtLeast,
   maintainPmCoordination,
@@ -22,6 +23,7 @@ import {
   resumeWorkWaits,
   retryPreparationAfterDeployment,
   type SystemReviewLimitOutcome,
+  settleCardWatches,
   systemCompleteCard,
   validRoleRulePaths,
   validSystemReviewLimitMax,
@@ -114,6 +116,11 @@ export function runSystemRules(
   run([
     (state, ports) =>
       refreshCardDependencies(state, actor, ports, frameworkWaitReminderMs),
+    // C-763: one bell per settled PM watch; never changes either card.
+    (state, ports) =>
+      cardWatchesPending(state)
+        ? settleCardWatches(state, actor, ports)
+        : undefined,
     (state, ports) => {
       const cancelledCards = new Set(
         state.cards.filter((c) => c.status === "cancelled").map((c) => c.id),

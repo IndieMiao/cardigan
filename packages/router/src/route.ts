@@ -15,6 +15,8 @@ import type {
 import {
   assignmentCanReadCard,
   authorPrecheckWaitHandled,
+  CARD_WATCH_ENDED,
+  CARD_WATCH_TRIGGERED,
   canStartWork,
   cardTemplate,
   currentPreMergeVersions,
@@ -1918,6 +1920,51 @@ export function escalation(
   };
 }
 
+/**
+ * C-763: the settled watch rings exactly the recipient named at registration.
+ * A released Assignment (rotated standing PM, finished work item) falls back
+ * to PM Ops so the note is never dropped. One event, one bell: replaying the
+ * event yields the same notification, deduplicated by event and recipient.
+ */
+function routeCardWatch(input: RouteInput, draft: Draft): void {
+  const { event } = input;
+  if (
+    event.actor.kind !== "system" ||
+    event.actor.project_id !== input.snapshot.project_id
+  )
+    return;
+  const p = payloadObject(event.payload);
+  const message = payloadString(event.payload, "notice");
+  if (!message) return;
+  const to = payloadObject(p.recipient ?? null);
+  const assignment =
+    to.kind === "assignment" && typeof to.assignment_id === "string"
+      ? assignmentOf(input, to.assignment_id as AssignmentId)
+      : undefined;
+  if (assignment && isActive(assignment)) {
+    note(
+      input,
+      draft,
+      recipient.assignment(assignment.id),
+      "dependency",
+      "C-763/card watch",
+      message,
+      assignment.scope === "work_item"
+        ? { work_item_id: assignment.work_item_id }
+        : {},
+    );
+    return;
+  }
+  note(
+    input,
+    draft,
+    recipient.pm_ops(),
+    "dependency",
+    "C-763/card watch",
+    message,
+  );
+}
+
 /** Route one event; pure, so the same input always yields the same output. */
 export function routeEvent(input: RouteInput): RouteResult {
   const draft: Draft = { notifications: [], checks: [], problems: [] };
@@ -1982,6 +2029,10 @@ export function routeEvent(input: RouteInput): RouteResult {
             );
       break;
     }
+    case CARD_WATCH_TRIGGERED:
+    case CARD_WATCH_ENDED:
+      routeCardWatch(input, draft);
+      break;
     case "story_children_settled": {
       const parent = input.snapshot.cards.find(
         (c) => c.id === input.event.card_id,
