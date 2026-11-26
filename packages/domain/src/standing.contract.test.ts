@@ -119,6 +119,12 @@ test("C-110: verifier replacement is issued only to standing PM Ops", () => {
   expect(standingTools(tools, "ops")).toEqual(tools);
 });
 
+test("C-778: primary producer replacement is issued only to standing PM Ops", () => {
+  const tools = ["whoami", "replace_primary_work_item"] as const;
+  expect(standingTools(tools, "office")).toEqual(["whoami"]);
+  expect(standingTools(tools, "ops")).toEqual(tools);
+});
+
 test("formal rework is only issued to Ops and is never added to older roles", () => {
   const tools = ["whoami", "request_delivery_rework"] as const;
   expect(standingTools(tools, "office")).toEqual(["whoami"]);

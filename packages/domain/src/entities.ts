@@ -90,6 +90,7 @@ export const toolNames = [
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
+  "replace_primary_work_item",
   "assign",
   "release_assignment",
   "project_snapshot",

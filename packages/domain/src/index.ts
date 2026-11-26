@@ -186,6 +186,7 @@ export * from "./commands/readonly-checkout.js";
 export * from "./commands/release.js";
 export * from "./commands/release-notes.js";
 export * from "./commands/remote-worker-loss.js";
+export * from "./commands/replace-producer.js";
 export * from "./commands/replace-verifier.js";
 export * from "./commands/request-recheck.js";
 export * from "./commands/review-withdrawal.js";
