@@ -377,18 +377,19 @@ test("C-192: card details show the suggestion on the merge confirmation and appl
       cardId="C-1"
     />,
   );
-  const region = within(
-    await screen.findByRole("region", { name: "合并处理" }),
-  );
-  const box = within(region.getByRole("region", { name: "Q-3 建议" }));
+  // C-697: the suggestion is a line of the “下一步” panel; following it is
+  // the panel's emphasis button.
+  const region = within(await screen.findByRole("region", { name: "下一步" }));
+  const box = within(region.getByRole("note", { name: "Q-3 建议" }));
   expect(
     box.getByText(SUGGESTION_COPY.line("确认合并", "检查和审核都通过")),
   ).toBeTruthy();
-  fireEvent.click(
-    box.getByRole("button", {
-      name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
-    }),
-  );
+  const follow = region.getByRole("button", { name: "按建议：确认合并" });
+  expect(follow.className).toContain("ui-button-emphasis");
+  expect(
+    region.getByRole("button", { name: "确认合并" }).className,
+  ).not.toContain("ui-button-emphasis");
+  fireEvent.click(follow);
   await waitFor(() =>
     expect(applySuggestion).toHaveBeenCalledWith(
       "p-1",
@@ -727,7 +728,11 @@ test.each(["merge"])(
       });
     };
     render(<LiveDetail client={client} />);
-    await screen.findByRole("region", { name: `${q().id} 建议` });
+    // C-697: a merge suggestion is a line of the “下一步” panel, its buttons
+    // the panel's and its confirmation a dialog.
+    await screen.findByRole(kind === "merge" ? "note" : "region", {
+      name: `${q().id} 建议`,
+    });
     const initialReads = read.mock.calls.length;
     const progress = {
       count: 1,
@@ -747,7 +752,9 @@ test.each(["merge"])(
     expect(read.mock.calls.length).toBeGreaterThan(initialReads);
     expect(screen.getByText("发起卡新证据")).toBeTruthy();
     const box = () =>
-      within(screen.getByRole("region", { name: `${q().id} 建议` }));
+      kind === "merge"
+        ? within(document.body)
+        : within(screen.getByRole("region", { name: `${q().id} 建议` }));
     fireEvent.click(
       box().getByRole("button", { name: /^(按建议处理|按建议：确认合并)$/u }),
     );
