@@ -164,3 +164,40 @@ test("a delayed or failed timeline lookup leaves the first page readable and ret
   );
   expect(cardPanel).toHaveBeenCalledTimes(2);
 });
+
+test("C-775: a hidden tab stops reading the open panel and reads it once when shown", async () => {
+  let hidden = false;
+  vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden);
+  const full = cardDetail();
+  const card = vi.fn(async () => overview(full));
+  const cardPanel = vi.fn(async () => ({ work_items: full.work_items }));
+  const client = fakeClient({ card, cardPanel });
+  const page = (revision: number) => (
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      revision={revision}
+    />
+  );
+  const { rerender } = render(page(0));
+  await selectCardTab(/^工作项/);
+  await screen.findByText("已完成 0/2");
+  expect(cardPanel).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    hidden = true;
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  rerender(page(1));
+  rerender(page(2));
+  await act(async () => {});
+  expect(cardPanel).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    hidden = false;
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await waitFor(() => expect(cardPanel).toHaveBeenCalledTimes(2));
+  await act(async () => {});
+  expect(cardPanel).toHaveBeenCalledTimes(2);
+  vi.restoreAllMocks();
+});

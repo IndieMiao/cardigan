@@ -20,7 +20,8 @@ import { Button } from "./ui/button.js";
 import { Input } from "./ui/input.js";
 import { useDraftLeaveGuard } from "./useDraftLeaveGuard.js";
 
-const resolutionLabels = {
+/** How a question was settled (also listed in the story overview). */
+export const STORY_RESOLUTION_LABELS = {
   answer: "已回答",
   accepted_default: "已接受默认",
   proposal_default: "未答，方案按默认",
@@ -205,7 +206,8 @@ function QuestionGroup({
             >
               {q.resolution ? (
                 <p>
-                  {resolutionLabels[q.resolution.source]}：{q.resolution.value}
+                  {STORY_RESOLUTION_LABELS[q.resolution.source]}：
+                  {q.resolution.value}
                 </p>
               ) : (
                 !closed && (

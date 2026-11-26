@@ -448,6 +448,50 @@ function applyCommand<T>(
   persistEffect(tx, c.project_id, effect);
   return effect.data;
 }
+/**
+ * C-703: a write whose host work is asynchronous (outside this file's routes).
+ * `replay` returns the result already recorded under the Idempotency-Key,
+ * `record` stores this request's result under it, `run` applies one command
+ * as part of the keyed request and `apply` one more command without the key.
+ */
+export function keyedHumanWrite(
+  c: WriteContext,
+  key: string,
+  request: unknown,
+) {
+  const context: CommandContext = { ...c, idempotency: { key, request } };
+  const missing = Symbol("uncached request");
+  return {
+    replay(): { readonly value: unknown } | undefined {
+      try {
+        // `execute` returns without running the operation only on a hit.
+        return {
+          value: execute<unknown>(context, () => {
+            throw missing;
+          }),
+        };
+      } catch (error) {
+        if (error !== missing) throw error;
+        return undefined;
+      }
+    },
+    record: <T>(value: T): T => execute(context, () => value),
+    run: <T>(
+      reduce: (
+        s: CommandState,
+        a: Actor,
+        p: CommandPorts,
+      ) => Result<CommandEffect<T>>,
+    ): T => run(context, reduce),
+    apply: <T>(
+      reduce: (
+        s: CommandState,
+        a: Actor,
+        p: CommandPorts,
+      ) => Result<CommandEffect<T>>,
+    ): T => run(c, reduce),
+  };
+}
 /** Decoded path segments of a request URL (query excluded). */
 function requestPath(url: string | undefined): string[] {
   return (url ?? "")

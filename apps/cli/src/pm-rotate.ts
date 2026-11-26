@@ -18,6 +18,7 @@ import {
   printToken,
   roleInTransaction,
   systemClock,
+  warmCommandState,
 } from "./host.js";
 import type { CliIo } from "./io.js";
 
@@ -44,6 +45,7 @@ export function rotateStandingPmInStore(
   readonly revoked_tokens: number;
   readonly token?: ReturnType<typeof issueTokenForAssignment>;
 } {
+  warmCommandState(store, project_id);
   return store.uow.run((tx) => {
     backfillStandingModesInTransaction(tx, project_id);
     const at = systemClock.now();

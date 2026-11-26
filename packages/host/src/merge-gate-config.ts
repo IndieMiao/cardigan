@@ -49,6 +49,8 @@ export type ProjectMergeGate =
         readonly maxBatchSize: number;
         readonly conflictThreshold: number;
         readonly windowTimeoutMs: number;
+        /** C-781: absent means a card check reuses a passed same-head precheck. */
+        readonly reusePrecheck?: false;
       };
     };
 export interface MergeGateConfiguration {
@@ -137,6 +139,7 @@ async function projectConfig(
         maxBatchSize: number;
         conflictThreshold: number;
         windowTimeoutMs: number;
+        reusePrecheck?: false;
       }
     | undefined;
   if (raw.queue !== undefined) {
@@ -146,6 +149,7 @@ async function projectConfig(
       "max_batch_size",
       "window_conflicts",
       "window_timeout_minutes",
+      "reuse_precheck",
     ]);
     if (typeof raw.queue.enabled !== "boolean")
       invalid("queue.enabled 必须是布尔值");
@@ -165,11 +169,15 @@ async function projectConfig(
     )
       invalid("queue.window_conflicts 必须是正整数");
     const timeout = minutes(raw.queue.window_timeout_minutes, 1440);
+    const reuse = raw.queue.reuse_precheck ?? true;
+    if (typeof reuse !== "boolean")
+      invalid("queue.reuse_precheck 必须是布尔值");
     if (raw.queue.enabled)
       queue = {
         maxBatchSize: size,
         conflictThreshold: threshold,
         windowTimeoutMs: timeout,
+        ...(reuse ? {} : { reusePrecheck: false as const }),
       };
   }
   const executor = resolveProjectExecutor(raw.executor, executors);

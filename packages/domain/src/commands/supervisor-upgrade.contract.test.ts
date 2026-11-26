@@ -162,3 +162,114 @@ test("C-767: a completed upgrade is recorded without Needs You", () => {
     blocked: false,
   });
 });
+
+test("C-770: after a failed or rolled-back attempt the human reminder reuses its Needs You item", () => {
+  const io = ports();
+  let state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const manual = { supervisor: from, main: to, affected: ["packages/host"] };
+  // A reminder opened while the switch was still off.
+  state = apply(
+    state,
+    value(reconcileSupervisorNotice(state, system, manual, io)),
+  );
+  const [reminder] = state.human_actions;
+  expect(reminder?.status).toBe("open");
+  for (const status of ["started", "rolled_back"] as const)
+    state = apply(
+      state,
+      value(
+        recordSupervisorUpgrade(
+          state,
+          system,
+          { attempt, from, to, status, summary: "60 秒内健康检查未通过" },
+          io,
+        ),
+      ),
+    );
+  const failure = state.human_actions.find((h) => h.id !== reminder?.id);
+  expect(failure?.status).toBe("open");
+  const folded = value(
+    reconcileSupervisorNotice(
+      state,
+      system,
+      { ...manual, main: "c".repeat(40) },
+      io,
+    ),
+  );
+  // No new human action; the change points at the failure item.
+  expect(folded.events.map((e) => e.type)).toEqual([
+    "human_action_cancelled",
+    "host_deployment_supervisor_change",
+  ]);
+  expect(folded.events.at(-1)?.payload).toEqual({
+    supervisor: from,
+    main: "c".repeat(40),
+    affected: ["packages/host"],
+    human_action_id: failure?.id,
+    upgrade_attempt: attempt,
+  });
+  state = apply(state, folded);
+  const open = state.human_actions.filter((h) => h.status === "open");
+  expect(open.map((h) => h.id)).toEqual([failure?.id]);
+  expect(open[0]?.instructions).toContain("已用备份回滚");
+  expect(open[0]?.instructions).toContain(
+    `到中心 main ${"c".repeat(40)} 的监督器差异涉及：packages/host`,
+  );
+  expect(
+    state.human_actions.find((h) => h.id === reminder?.id)?.cancellation,
+  ).toMatchObject({
+    source: "supervisor_rechecked",
+    reason: `已并入监督器自动升级失败待办 ${failure?.id}`,
+  });
+  expect(
+    value(listNeedsYou(state, human)).data.human_actions.map((h) => h.id),
+  ).toEqual([failure?.id]);
+  // Once per running supervisor: later mains add nothing.
+  expect(
+    value(
+      reconcileSupervisorNotice(
+        state,
+        system,
+        { ...manual, main: "d".repeat(40) },
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+});
+
+test("C-770: with no self-upgrade records (switch off) the reminder is unchanged", () => {
+  const io = ports();
+  let state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  // Another version's failure never folds this version's reminder.
+  for (const status of ["started", "failed"] as const)
+    state = apply(
+      state,
+      value(
+        recordSupervisorUpgrade(
+          state,
+          system,
+          { attempt, from: to, to: "c".repeat(40), status, summary: "x" },
+          io,
+        ),
+      ),
+    );
+  const result = value(
+    reconcileSupervisorNotice(
+      state,
+      system,
+      { supervisor: from, main: to, affected: ["packages/host"] },
+      io,
+    ),
+  );
+  expect(result.events.map((e) => e.type)).toEqual([
+    "host_deployment_action_requested",
+    "human_action_requested",
+    "host_deployment_supervisor_change",
+  ]);
+  state = apply(state, result);
+  expect(
+    state.human_actions.filter((h) => h.status === "open").at(-1)?.instructions,
+  ).toContain("系统不会自我升级");
+});

@@ -10,6 +10,11 @@ import { extname, join, resolve, sep } from "node:path";
  * Every path is resolved against the build directory and rejected if it escapes
  * it, so `GET /../../etc/passwd` cannot leave the tree. Unknown extension-less
  * paths fall back to `index.html`, which is what a client-side route needs.
+ *
+ * C-795: the web build writes a `.gz` sibling next to every JS and CSS file.
+ * A client that accepts gzip gets those bytes with `Content-Encoding: gzip`;
+ * anyone else gets the original file. Both answers carry
+ * `Vary: Accept-Encoding` so a shared cache keeps them apart.
  */
 
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
@@ -35,6 +40,9 @@ const CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".py": "text/x-python; charset=utf-8",
   ".webmanifest": "application/manifest+json",
 };
+
+/** Extensions whose build output has a precompressed `.gz` sibling. */
+const PRECOMPRESSED = new Set([".js", ".mjs", ".css"]);
 
 export interface StaticResult {
   readonly served: boolean;
@@ -111,19 +119,35 @@ async function existingFile(candidate: string): Promise<string | undefined> {
   }
 }
 
+async function regularFile(candidate: string): Promise<string | undefined> {
+  try {
+    return (await stat(candidate)).isFile() ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function sendFile(
   req: IncomingMessage,
   res: ServerResponse,
   file: string,
   immutable: boolean,
 ): Promise<void> {
-  const info = await stat(file);
-  const type =
-    CONTENT_TYPES[extname(file).toLowerCase()] ?? "application/octet-stream";
+  const ext = extname(file).toLowerCase();
+  const type = CONTENT_TYPES[ext] ?? "application/octet-stream";
   const isShell = file.endsWith(`${sep}index.html`);
+  const negotiated = PRECOMPRESSED.has(ext);
+  const gzip =
+    negotiated && acceptsGzip(req.headers["accept-encoding"])
+      ? await regularFile(`${file}.gz`)
+      : undefined;
+  const body = gzip ?? file;
+  const info = await stat(body);
   res.writeHead(200, {
     "Content-Type": type,
     "Content-Length": info.size,
+    ...(gzip === undefined ? {} : { "Content-Encoding": "gzip" }),
+    ...(negotiated ? { Vary: "Accept-Encoding" } : {}),
     // Vite fingerprints everything under /assets; the shell must revalidate so
     // a new build is picked up without a hard refresh.
     "Cache-Control":
@@ -136,9 +160,45 @@ async function sendFile(
     return;
   }
   await new Promise<void>((done, fail) => {
-    const stream = createReadStream(file);
+    const stream = createReadStream(body);
     stream.on("error", fail);
     stream.on("end", () => done());
     stream.pipe(res);
   });
+}
+
+/**
+ * Whether an `Accept-Encoding` header admits gzip (RFC 9110 §12.5.3): `gzip`
+ * or `x-gzip` with a non-zero weight, or `*` with a non-zero weight when gzip
+ * is not listed on its own. A missing header means "no preference", which we
+ * answer with the plain file.
+ */
+export function acceptsGzip(header: string | string[] | undefined): boolean {
+  if (header === undefined) {
+    return false;
+  }
+  let gzip: number | undefined;
+  let wildcard: number | undefined;
+  for (const part of (Array.isArray(header) ? header.join(",") : header).split(
+    ",",
+  )) {
+    const [rawName = "", ...params] = part.split(";");
+    const name = rawName.trim().toLowerCase();
+    let weight = 1;
+    for (const param of params) {
+      const match = /^\s*q\s*=\s*([0-9.]+)\s*$/i.exec(param);
+      if (match) {
+        weight = Number(match[1]);
+      }
+    }
+    if (Number.isNaN(weight)) {
+      weight = 0;
+    }
+    if (name === "gzip" || name === "x-gzip") {
+      gzip = Math.max(gzip ?? 0, weight);
+    } else if (name === "*") {
+      wildcard = weight;
+    }
+  }
+  return (gzip ?? wildcard ?? 0) > 0;
 }

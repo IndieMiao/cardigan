@@ -26,7 +26,9 @@ export interface AuthorView {
 
 import {
   defaultRetryPolicy,
+  isReadOverload,
   isRetryableRequest,
+  READ_OVERLOAD_CODES,
   type RetryPolicy,
   SERVICE_UPDATING_STATUSES,
 } from "./service-retry.js";
@@ -1736,6 +1738,27 @@ export interface ExecutionRunPage {
   readonly next_cursor: string | null;
 }
 
+/** C-703: what a Workbench stop did (`cardigan assignment stop`). */
+export interface AssignmentStopResult {
+  readonly released: boolean;
+  readonly aborted: boolean;
+  readonly held?: boolean;
+  /** The session it was asked to stop had been settled or replaced. */
+  readonly stale?: boolean;
+}
+/** C-703: an Assignment's worktree changes (`cardigan worktree diff`). */
+export interface AssignmentDiff {
+  readonly worktree_path: string;
+  readonly branch?: string;
+  readonly head_sha: string;
+  readonly tracked: readonly string[];
+  readonly untracked: readonly string[];
+  readonly reachable: boolean;
+  /** `git diff HEAD`, cut at a line end when `truncated`. */
+  readonly patch: string;
+  readonly truncated: boolean;
+}
+
 export interface ActivityFilter {
   readonly card_id?: string;
   readonly role?: string;
@@ -2798,6 +2821,23 @@ export interface CardiganClient {
     assignmentId: string,
     before?: string,
   ): Promise<ExecutionRunPage>;
+  /** C-703: start (or, with `restart`, stop then start) a session. */
+  startAssignment(
+    projectId: string,
+    assignmentId: string,
+    restart: boolean,
+    idempotencyKey: string,
+  ): Promise<{ readonly run_id: string }>;
+  /** C-703: stop the session and cancel its current Run. */
+  stopAssignment(
+    projectId: string,
+    assignmentId: string,
+    idempotencyKey: string,
+  ): Promise<AssignmentStopResult>;
+  assignmentDiff(
+    projectId: string,
+    assignmentId: string,
+  ): Promise<AssignmentDiff>;
   needsYou(projectId: string, invalidation?: string): Promise<NeedsPage>;
   needsYouCounts(
     projectId: string,
@@ -3559,6 +3599,39 @@ export class HttpCardiganClient implements CardiganClient {
     const query = before ? `?${new URLSearchParams({ before })}` : "";
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/execution/assignments/${encodeURIComponent(assignmentId)}/runs${query}`,
+    );
+  }
+  startAssignment(
+    projectId: string,
+    assignmentId: string,
+    restart: boolean,
+    idempotencyKey: string,
+  ): Promise<{ readonly run_id: string }> {
+    return this.write(
+      projectId,
+      `execution/assignments/${encodeURIComponent(assignmentId)}/start`,
+      restart ? { restart: true } : {},
+      idempotencyKey,
+    ) as Promise<{ readonly run_id: string }>;
+  }
+  stopAssignment(
+    projectId: string,
+    assignmentId: string,
+    idempotencyKey: string,
+  ): Promise<AssignmentStopResult> {
+    return this.write(
+      projectId,
+      `execution/assignments/${encodeURIComponent(assignmentId)}/stop`,
+      {},
+      idempotencyKey,
+    ) as Promise<AssignmentStopResult>;
+  }
+  assignmentDiff(
+    projectId: string,
+    assignmentId: string,
+  ): Promise<AssignmentDiff> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/execution/assignments/${encodeURIComponent(assignmentId)}/diff`,
     );
   }
   decisionHistory(
@@ -4440,6 +4513,7 @@ export class HttpCardiganClient implements CardiganClient {
     const { response, lostReply } = await this.sendWithRetry(
       send,
       init.resend ?? isRetryableRequest(method, init.idempotencyKey),
+      method === "GET" || method === "HEAD",
     );
     if (response.status === 304 && init.ifNoneMatch !== undefined) {
       observe?.(response);
@@ -4474,17 +4548,25 @@ export class HttpCardiganClient implements CardiganClient {
    * Every attempt sends the identical request, so the key never changes.
    * `lostReply` records that some attempt failed without a reply (the server
    * may have applied it), so a final 502/503 cannot prove nothing happened.
+   *
+   * C-775: a read the read pool refused as overloaded (503 `read_timeout` /
+   * `read_busy`) follows its own schedule (by default not retried at all) and
+   * never raises the "服务正在更新" notice; a restart keeps the C-250
+   * schedule. Writes never take the overload branch.
    */
   private async sendWithRetry(
     send: () => Promise<Response>,
     retryable: boolean,
+    read: boolean,
   ): Promise<{ response: Response; lostReply: boolean }> {
-    const { delaysMs, sleep, notice } = this.retry;
+    const { delaysMs, readOverloadDelaysMs, sleep, notice } = this.retry;
     let end: (() => void) | undefined;
     let lostReply = false;
+    let restarts = 0;
+    let overloads = 0;
     try {
-      for (let attempt = 0; ; attempt++) {
-        const canRetry = retryable && attempt < delaysMs.length;
+      for (;;) {
+        const canRetry = retryable && restarts < delaysMs.length;
         let response: Response;
         try {
           response = await send();
@@ -4492,18 +4574,37 @@ export class HttpCardiganClient implements CardiganClient {
           if (!canRetry || !(error instanceof TypeError)) throw error;
           lostReply = true;
           end ??= notice.begin();
-          await sleep(delaysMs[attempt] ?? 0);
+          await sleep(delaysMs[restarts++] ?? 0);
           continue;
         }
-        if (!canRetry || !SERVICE_UPDATING_STATUSES.has(response.status)) {
+        if (!retryable || !SERVICE_UPDATING_STATUSES.has(response.status))
           return { response, lostReply };
+        if (read && (await isOverloadResponse(response))) {
+          if (overloads >= readOverloadDelaysMs.length)
+            return { response, lostReply };
+          await sleep(readOverloadDelaysMs[overloads++] ?? 0);
+          continue;
         }
+        if (!canRetry) return { response, lostReply };
         end ??= notice.begin();
-        await sleep(delaysMs[attempt] ?? 0);
+        await sleep(delaysMs[restarts++] ?? 0);
       }
     } finally {
       end?.();
     }
+  }
+}
+
+/** C-775: whether a 503 carries one of the read pool's overload codes. */
+async function isOverloadResponse(response: Response): Promise<boolean> {
+  if (response.status !== 503) return false;
+  try {
+    const body = (await response.clone().json()) as ErrorBody;
+    const code = body.error?.code;
+    return code !== undefined && READ_OVERLOAD_CODES.has(code);
+  } catch {
+    // A proxy's HTML 503 is a restart, not the read pool.
+    return false;
   }
 }
 
@@ -4568,6 +4669,8 @@ export function describeError(error: unknown): string {
         return "没有权限执行此操作。";
       return "请求被拒绝，请检查操作权限和当前状态。";
     }
+    // C-775: checked before the restart copy, which shares status 503.
+    if (isReadOverload(error)) return "服务繁忙，读取超时，请稍后重试。";
     if (SERVICE_UPDATING_STATUSES.has(error.status))
       return "服务正在更新，暂时没有恢复，请几秒后再试。";
     return `请求失败：${webErrorMessage(error.message)}`;
