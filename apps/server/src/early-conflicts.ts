@@ -114,9 +114,14 @@ export class EarlyConflictObserver {
         this.clock,
       );
     }
-    for (const map of [this.cache, this.failed])
-      for (const key of map.keys())
-        if (key.startsWith(`${project}:`) && !live.has(key)) map.delete(key);
+    for (const key of this.cache.keys())
+      if (key.startsWith(`${project}:`) && !live.has(key))
+        this.cache.delete(key);
+    // A skipped tick (unreadable baseline, deferred authors) keeps the cooldown.
+    const now = Date.parse(this.clock.now());
+    for (const [key, at] of this.failed)
+      if (key.startsWith(`${project}:`) && at + this.retryMs <= now)
+        this.failed.delete(key);
   }
   private async probe(
     binding: CentralProject,

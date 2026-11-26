@@ -148,6 +148,11 @@ test("C-782: Git failures record nothing and are retried after a pause", async (
   expect(early()).toEqual([]);
   await observer.tick(f.id);
   expect(git.trialMerge).toHaveBeenCalledOnce();
+  // A tick that cannot read the baseline does not reset the cooldown.
+  git.baseline.mockRejectedValueOnce(new Error("unavailable"));
+  await observer.tick(f.id);
+  await observer.tick(f.id);
+  expect(git.trialMerge).toHaveBeenCalledOnce();
   f.advance(EARLY_CONFLICT_RETRY_MS);
   await observer.tick(f.id);
   expect(git.trialMerge).toHaveBeenCalledTimes(2);
