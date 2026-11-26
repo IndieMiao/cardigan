@@ -2,7 +2,9 @@ import type { DeploymentDriver, DeploymentRecord } from "@cardigan/domain";
 import { expect, test, vi } from "vitest";
 import {
   DeploymentController,
+  type DeploymentHandoff,
   DeploymentServerUnavailable,
+  type SupervisorJoinDriver,
 } from "./deployment.js";
 
 function fixture() {
@@ -513,4 +515,193 @@ test("C-390: an open maintenance window holds automatic deployment", async () =>
   open = false;
   await controller.tick();
   expect(f.calls).toContain("build");
+});
+
+/** C-787: a driver whose supervisor upgrade to main can join the deployment. */
+function joining(f: ReturnType<typeof fixture>, join: "prepare" | "join") {
+  const handoffs: DeploymentHandoff[] = [];
+  let accept = true;
+  const driver: DeploymentDriver & SupervisorJoinDriver = {
+    ...f.driver,
+    supervisorJoin: async (target) => {
+      f.calls.push(`join:${target.slice(0, 1)}`);
+      return join;
+    },
+    handOff: async (handoff) => {
+      f.calls.push("handoff");
+      handoffs.push(handoff);
+      return accept;
+    },
+  };
+  return {
+    driver,
+    handoffs,
+    refuse() {
+      accept = false;
+    },
+  };
+}
+
+test("C-787: a supervisor upgrade being prepared defers the deployment without capacity or build", async () => {
+  const f = fixture();
+  const j = joining(f, "prepare");
+  await new DeploymentController(j.driver).tick();
+  expect(f.calls).toEqual(["join:b"]);
+  expect(f.records).toEqual([]);
+});
+
+test("C-787: a prepared upgrade gets the stopped server; the start, capacity and fence wait for the new supervisor", async () => {
+  const f = fixture();
+  const fence: string[] = [];
+  const j = joining(f, "join");
+  j.driver.fenceOperations = async () => {
+    fence.push("fence");
+    return [];
+  };
+  j.driver.releaseOperationFence = async () => {
+    fence.push("unfence");
+  };
+  const controller = new DeploymentController(j.driver);
+  await controller.tick();
+  // Exactly one stop; no start, no unlock, no terminal record by this supervisor.
+  expect(f.calls).toEqual([
+    "join:b",
+    "build",
+    "snapshot",
+    "stop",
+    "backup",
+    "handoff",
+  ]);
+  expect(fence).toEqual(["fence"]);
+  expect(j.handoffs).toEqual([
+    {
+      from: { sha: "a".repeat(40), release: "old" },
+      build: { sha: "b".repeat(40), release: "next" },
+      record: expect.objectContaining({
+        status: "stopping",
+        backup_file: "database-00000000-0000-0000-0000-000000000001.bak",
+      }),
+      stopped_at: 100,
+    },
+  ]);
+  expect(f.records.map((r) => r.status)).toEqual(["started", "stopping"]);
+  // The restart never came (helper stalled or refused): this supervisor
+  // finishes the same switch on its next tick, without a second stop.
+  await controller.tick();
+  expect(f.calls.slice(6)).toEqual([
+    "start:next",
+    "ready",
+    "promote:next",
+    "roles",
+    "unlock",
+  ]);
+  expect(fence).toEqual(["fence", "unfence"]);
+  expect(f.records.at(-1)).toMatchObject({
+    attempt: j.handoffs[0]?.record.attempt,
+    status: "deployed",
+    ready: true,
+    backup_file: "database-00000000-0000-0000-0000-000000000001.bak",
+    summary: expect.stringContaining("与监督器升级合并为一次停起"),
+  });
+});
+
+test("C-787: a refused handoff keeps the ordinary single stop/start", async () => {
+  const f = fixture();
+  const j = joining(f, "join");
+  j.refuse();
+  await new DeploymentController(j.driver).tick();
+  expect(f.calls).toEqual([
+    "join:b",
+    "build",
+    "snapshot",
+    "stop",
+    "backup",
+    "handoff",
+    "start:next",
+    "ready",
+    "promote:next",
+    "roles",
+    "unlock",
+  ]);
+  expect(f.records.at(-1)?.status).toBe("deployed");
+});
+
+test("C-787: a human pin never joins a supervisor upgrade", async () => {
+  const f = fixture();
+  const j = joining(f, "prepare");
+  j.driver.target = async () => ({
+    sha: "b".repeat(40),
+    control_event_id: "event-1",
+  });
+  await new DeploymentController(j.driver).tick();
+  expect(f.calls).not.toContain("join:b");
+  expect(f.records.at(-1)?.status).toBe("deployed");
+});
+
+test("C-787: the new supervisor finishes a handed-over switch first, restoring the old build when the new one is not ready", async () => {
+  const f = fixture();
+  const handoff: DeploymentHandoff = {
+    from: { sha: "a".repeat(40), release: "old" },
+    build: { sha: "b".repeat(40), release: "next" },
+    record: {
+      attempt: "00000000-0000-4000-8000-000000000001",
+      from: "a".repeat(40),
+      to: "b".repeat(40),
+      status: "stopping",
+      build: "passed",
+      ready: false,
+      downtime_ms: 0,
+      summary: "构建已完成，准备停止旧 server",
+    },
+    stopped_at: 40,
+  };
+  let taken = 0;
+  const driver: DeploymentDriver & SupervisorJoinDriver = {
+    ...f.driver,
+    // The server is stopped: checking it first would end this supervisor.
+    checkServer: async () => {
+      f.calls.push("check");
+    },
+    takeHandoff: () =>
+      taken++
+        ? undefined
+        : {
+            handoff,
+            release: async () => {
+              f.calls.push("release");
+            },
+          },
+    ready: vi.fn(async () => {
+      f.calls.push("ready");
+      return (
+        f.calls.filter((c) => c.startsWith("start:")).at(-1) === "start:old"
+      );
+    }),
+    readyRetryMax: 2,
+    readyRetryIntervalMs: 60_000,
+    readyRetryState: async () => undefined,
+  };
+  const controller = new DeploymentController(driver);
+  await controller.tick();
+  expect(f.calls).toEqual([
+    "start:next",
+    "ready",
+    "stop",
+    "start:old",
+    "ready",
+    "promote:old",
+    "release",
+  ]);
+  expect(f.records.at(-1)).toMatchObject({
+    attempt: handoff.record.attempt,
+    status: "rolled_back",
+    ready: true,
+    failure_stage: "ready",
+    downtime_ms: 60,
+    ready_retry: { failures: 1, max: 2 },
+  });
+  // Taken once: the following ticks are ordinary ones.
+  await controller.tick();
+  expect(taken).toBe(1);
+  expect(f.calls.at(7)).toBe("check");
 });
