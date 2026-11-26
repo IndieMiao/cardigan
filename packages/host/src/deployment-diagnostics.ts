@@ -67,6 +67,32 @@ export async function readDeploymentDiagnostics(
         ...(record.post_deploy_failed === undefined
           ? {}
           : { post_deploy_failed: record.post_deploy_failed }),
+        ...(record.post_deploy_failure
+          ? {
+              post_deploy_failure: {
+                attempts: record.post_deploy_failure.attempts.map((a) => ({
+                  step: a.step,
+                  error: a.error,
+                  ...(a.output_tail === undefined
+                    ? {}
+                    : { output_tail: a.output_tail }),
+                })),
+                ...(record.post_deploy_failure.changed_roles
+                  ? {
+                      changed_roles: [
+                        ...record.post_deploy_failure.changed_roles,
+                      ],
+                    }
+                  : {}),
+                ...(record.post_deploy_failure.recovered
+                  ? { recovered: true }
+                  : {}),
+                ...(record.post_deploy_failure.notice_only
+                  ? { notice_only: true }
+                  : {}),
+              },
+            }
+          : {}),
         ...(record.stop_snapshot
           ? {
               stop_snapshot: {

@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import { extMessageItems } from "../ext-message.js";
 import { workerAgentToolsAction } from "../worker-helper-action.js";
 import { completeHumanAction, triageHumanAction } from "./coordination.js";
 import {
@@ -1001,4 +1002,132 @@ test("C-650: automatic retry state is bounded, copied and schedulable only for a
         ports(),
       ).ok,
     ).toBe(false);
+});
+
+test("C-801: post-deploy evidence is bounded, deployed-only and consistent with the failure flag", () => {
+  const state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const attempt = { step: "sync", error: "self-deploy roles 退出码 1" };
+  const failed = { ...record, post_deploy_failed: true };
+  const accepted = [
+    { ...failed, post_deploy_failure: { attempts: [attempt, attempt] } },
+    {
+      ...failed,
+      post_deploy_failure: {
+        attempts: [{ ...attempt, output_tail: "角色同步未完成" }, attempt],
+        changed_roles: [],
+        notice_only: true,
+      },
+    },
+    {
+      ...record,
+      post_deploy_failure: { attempts: [attempt], recovered: true },
+    },
+  ];
+  for (const r of accepted) {
+    const effect = value(recordDeployment(state, system, r as never, ports()));
+    expect(effect.events[0]?.payload).toMatchObject({
+      post_deploy_failure: r.post_deploy_failure,
+    });
+  }
+  for (const r of [
+    // Only a deployed build has a role refresh.
+    {
+      ...failed,
+      status: "failed",
+      post_deploy_failure: { attempts: [attempt] },
+    },
+    // A failure must say so, and a recovery must not.
+    { ...record, post_deploy_failure: { attempts: [attempt] } },
+    {
+      ...failed,
+      post_deploy_failure: { attempts: [attempt], recovered: true },
+    },
+    {
+      ...record,
+      post_deploy_failure: { attempts: [attempt], notice_only: true },
+    },
+    // One try and one retry, no more.
+    { ...failed, post_deploy_failure: { attempts: [] } },
+    {
+      ...failed,
+      post_deploy_failure: { attempts: [attempt, attempt, attempt] },
+    },
+    {
+      ...failed,
+      post_deploy_failure: { attempts: [{ ...attempt, step: "rm -rf" }] },
+    },
+    {
+      ...failed,
+      post_deploy_failure: { attempts: [{ ...attempt, error: " " }] },
+    },
+    {
+      ...failed,
+      post_deploy_failure: {
+        attempts: [{ ...attempt, error: "x".repeat(501) }],
+      },
+    },
+    {
+      ...failed,
+      post_deploy_failure: {
+        attempts: [{ ...attempt, output_tail: "x".repeat(2001) }],
+      },
+    },
+    {
+      ...failed,
+      post_deploy_failure: {
+        attempts: [{ ...attempt, extra: "TOKEN=synthetic" }],
+      },
+    },
+    { ...failed, post_deploy_failure: { attempts: [attempt], extra: true } },
+    {
+      ...failed,
+      post_deploy_failure: { attempts: [attempt], changed_roles: [1] },
+    },
+  ])
+    expect(recordDeployment(state, system, r as never, ports()).ok).toBe(false);
+});
+
+test("C-801: a deployment action for the host operator is never the owner's, and stays idempotent", () => {
+  const state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const p = {
+    key: "deployment:post-deploy",
+    instructions: "自动部署：角色同步未完成",
+    executor: "operator" as const,
+  };
+  const effect = value(requestDeploymentAction(state, system, p, ports()));
+  expect(effect.data).toMatchObject({
+    executor: "operator",
+    triage: "human",
+    requested_by: "system",
+  });
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "host_deployment_action_requested",
+    "human_action_requested",
+    "operator_action_requested",
+  ]);
+  expect(effect.events[1]?.payload).toMatchObject({
+    executor: "operator",
+    executor_basis: "explicit",
+  });
+  const next = apply(state, effect);
+  // The owner's push (Feishu) never carries it.
+  expect(
+    extMessageItems(next, next.project_id).map((i) => i.item_id),
+  ).not.toContain(effect.data.id);
+  expect(
+    value(requestDeploymentAction(next, system, p, ports())).events,
+  ).toEqual([]);
+  // Worker maintenance keeps its internal host ops owner.
+  expect(
+    value(
+      requestDeploymentAction(
+        state,
+        system,
+        { ...p, key: "worker:x", reason: "worker_maintenance" },
+        ports(),
+      ),
+    ).data.executor,
+  ).toBeUndefined();
 });

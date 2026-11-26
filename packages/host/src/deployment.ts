@@ -6,9 +6,13 @@ import {
   type DeploymentConfigTrial,
   type DeploymentDriver,
   type DeploymentOperation,
+  type DeploymentPostDeployFailure,
   type DeploymentReadyRetry,
   type DeploymentRecord,
+  POST_DEPLOY_ERROR_MAX,
+  type PostDeployStep,
 } from "@cardigan/domain";
+import { redactCommandTail } from "./deployment-log.js";
 
 /**
  * C-787: a switch whose old server is stopped (and database backed up) and
@@ -52,6 +56,53 @@ export class DeploymentServerUnavailable extends Error {
   constructor() {
     super("主机 server 已退出或无法确认，监督器退出，请核对主机服务恢复记录");
   }
+}
+
+/**
+ * C-801: a post-deployment role refresh failure the host adapter can name.
+ * The message is fixed host text; `output` is raw command output, redacted
+ * before it is recorded.
+ */
+export class RoleRefreshFailed extends Error {
+  constructor(
+    readonly step: Exclude<PostDeployStep, "unknown">,
+    message: string,
+    readonly detail: {
+      readonly output?: string;
+      /** Default roles whose pack changed, once both snapshots were read. */
+      readonly changed?: readonly string[];
+    } = {},
+  ) {
+    super(message);
+  }
+}
+
+const POST_DEPLOY_STEP_LABELS: Readonly<Record<PostDeployStep, string>> = {
+  previous: "读取上一版本",
+  snapshot: "角色包快照",
+  sync: "角色同步（self-deploy roles）",
+  unknown: "角色同步",
+};
+
+/** C-801: one attempt as recorded; unrecognised exceptions keep no text. */
+function postDeployAttempt(error: unknown) {
+  if (!(error instanceof RoleRefreshFailed))
+    return {
+      attempt: { step: "unknown" as const, error: "host_operation_failed" },
+      changed: undefined,
+    };
+  const output =
+    error.detail.output === undefined
+      ? undefined
+      : redactCommandTail(error.detail.output);
+  return {
+    attempt: {
+      step: error.step,
+      error: error.message.slice(0, POST_DEPLOY_ERROR_MAX),
+      ...(output ? { output_tail: output } : {}),
+    },
+    changed: error.detail.changed,
+  };
 }
 
 /** C-609: how often the post-build wait re-reads the operation registry. */
@@ -605,17 +656,57 @@ export class DeploymentController {
     return record;
   }
 
+  /**
+   * C-801: refresh the roles once more after a failure. A recovered retry is
+   * recorded for diagnostics only. A final failure with no changed role and
+   * the standing PMs on duty is a notice; otherwise the host operator is asked
+   * to check, never the owner.
+   */
   private async afterDeploy(record: DeploymentRecord) {
     const d = this.driver;
-    try {
-      await d.refreshRoles();
-    } catch {
-      await d.record({
-        ...record,
-        post_deploy_failed: true,
-        summary: "代码已部署，角色升级或 PM Ops 启动未完成，需主机核对",
-      });
+    const attempts: DeploymentPostDeployFailure["attempts"][number][] = [];
+    let changed: readonly string[] | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0) await delay(Math.max(0, d.roleRefreshRetryMs ?? 0));
+      try {
+        await d.refreshRoles();
+        if (!attempts.length) return;
+        const [first] = attempts;
+        await d.record({
+          ...record,
+          post_deploy_failure: { attempts, recovered: true },
+          summary: `代码已部署；${POST_DEPLOY_STEP_LABELS[first?.step ?? "unknown"]}首次未完成，自动重试后已完成`,
+        });
+        return;
+      } catch (error) {
+        const failed = postDeployAttempt(error);
+        attempts.push(failed.attempt);
+        changed = failed.changed ?? changed;
+      }
     }
+    const last = attempts.at(-1) ?? { step: "unknown", error: "" };
+    let onDuty = false;
+    if (changed?.length === 0 && d.standingPmOnDuty)
+      try {
+        onDuty = await d.standingPmOnDuty();
+      } catch {
+        onDuty = false;
+      }
+    const notice = changed?.length === 0 && onDuty;
+    const failure: DeploymentPostDeployFailure = {
+      attempts,
+      ...(changed ? { changed_roles: changed.slice(0, 100) } : {}),
+      ...(notice ? { notice_only: true as const } : {}),
+    };
+    const step = POST_DEPLOY_STEP_LABELS[last.step];
+    await d.record({
+      ...record,
+      post_deploy_failed: true,
+      post_deploy_failure: failure,
+      summary: notice
+        ? `代码已部署；${step}未完成（${last.error}），已自动重试 1 次；角色包无变化、常驻 PM 在岗，仅知会`
+        : `代码已部署；${step}未完成（${last.error}），已自动重试 1 次仍失败，需主机核对`,
+    });
   }
 
   /**

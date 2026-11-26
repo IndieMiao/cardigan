@@ -12,6 +12,7 @@ import {
   completeActionDraft,
   humanOnlyAction,
 } from "./human-action-completion.js";
+import { emitOperatorActionRequested } from "./human-action-executor.js";
 
 export type DeploymentControl =
   | {
@@ -170,6 +171,79 @@ function validReadyRetry(retry: unknown): boolean {
   );
 }
 
+/** C-801: the step of the post-deployment role refresh that failed. */
+export type PostDeployStep = "previous" | "snapshot" | "sync" | "unknown";
+export const POST_DEPLOY_STEPS: readonly PostDeployStep[] = [
+  "previous",
+  "snapshot",
+  "sync",
+  "unknown",
+];
+/** C-801: bounds of the host-written, already redacted post-deploy evidence. */
+export const POST_DEPLOY_ERROR_MAX = 500;
+export const POST_DEPLOY_OUTPUT_MAX = 2000;
+
+/**
+ * C-801: why the role refresh after a deployment did not finish, per attempt
+ * (the first try and its single automatic retry). Host-written fixed texts
+ * and a redacted command output tail only.
+ */
+export type DeploymentPostDeployFailure = {
+  readonly attempts: readonly {
+    readonly step: PostDeployStep;
+    readonly error: string;
+    readonly output_tail?: string;
+  }[];
+  /** Default roles whose pack changed, when the snapshots got that far. */
+  readonly changed_roles?: readonly string[];
+  /** The retry finished the refresh; nothing is left to do. */
+  readonly recovered?: true;
+  /** No role changed and the standing PMs are on duty: a notice, no action. */
+  readonly notice_only?: true;
+};
+
+function validPostDeployFailure(
+  value: unknown,
+  failed: boolean | undefined,
+): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const f = value as Record<string, unknown>;
+  const attempts = f.attempts;
+  const text = (v: unknown, max: number) =>
+    typeof v === "string" && v.trim().length > 0 && v.length <= max;
+  return (
+    Object.keys(f).every((k) =>
+      ["attempts", "changed_roles", "recovered", "notice_only"].includes(k),
+    ) &&
+    Array.isArray(attempts) &&
+    attempts.length >= 1 &&
+    attempts.length <= 2 &&
+    attempts.every((a: unknown) => {
+      if (!a || typeof a !== "object" || Array.isArray(a)) return false;
+      const r = a as Record<string, unknown>;
+      return (
+        Object.keys(r).every((k) =>
+          ["step", "error", "output_tail"].includes(k),
+        ) &&
+        POST_DEPLOY_STEPS.includes(r.step as PostDeployStep) &&
+        text(r.error, POST_DEPLOY_ERROR_MAX) &&
+        (r.output_tail === undefined ||
+          text(r.output_tail, POST_DEPLOY_OUTPUT_MAX))
+      );
+    }) &&
+    (f.changed_roles === undefined ||
+      (Array.isArray(f.changed_roles) &&
+        f.changed_roles.length <= 100 &&
+        f.changed_roles.every((id) => text(id, 100)))) &&
+    (f.recovered === undefined || f.recovered === true) &&
+    (f.notice_only === undefined || f.notice_only === true) &&
+    // A recovered refresh is no failure; a notice is one that needs nobody.
+    (f.recovered === true
+      ? !failed && f.notice_only === undefined && attempts.length === 1
+      : failed === true)
+  );
+}
+
 /** Host-supplied, already redacted deployment evidence; never an execution request. */
 export interface DeploymentRecord {
   readonly control_event_id?: string;
@@ -194,6 +268,8 @@ export interface DeploymentRecord {
   readonly summary: string;
   readonly log_tail?: string;
   readonly post_deploy_failed?: boolean;
+  /** C-801: present on a deployed record whose role refresh failed at least once. */
+  readonly post_deploy_failure?: DeploymentPostDeployFailure;
   readonly backup_file?: string;
   readonly waiting_since?: string;
   readonly evidence_wait_exceeded?: boolean;
@@ -270,8 +346,37 @@ export function recordDeployment(
       "validation_failed",
       "部署自动重试记录无效",
     );
+    ensure(
+      record.post_deploy_failure === undefined ||
+        (record.status === "deployed" &&
+          validPostDeployFailure(
+            record.post_deploy_failure,
+            record.post_deploy_failed,
+          )),
+      "validation_failed",
+      "部署后角色同步记录无效",
+    );
+    const postDeploy = record.post_deploy_failure;
     d.emit("host_deployment_recorded", undefined, {
       ...record,
+      ...(postDeploy
+        ? {
+            post_deploy_failure: {
+              attempts: postDeploy.attempts.map((a) => ({
+                step: a.step,
+                error: a.error,
+                ...(a.output_tail === undefined
+                  ? {}
+                  : { output_tail: a.output_tail }),
+              })),
+              ...(postDeploy.changed_roles
+                ? { changed_roles: [...postDeploy.changed_roles] }
+                : {}),
+              ...(postDeploy.recovered ? { recovered: true as const } : {}),
+              ...(postDeploy.notice_only ? { notice_only: true as const } : {}),
+            },
+          }
+        : {}),
       ...(record.stop_snapshot
         ? {
             stop_snapshot: {
@@ -448,6 +553,11 @@ interface DeploymentActionInput {
   readonly key: string;
   readonly instructions: string;
   readonly reason?: "evidence_wait" | "worker_maintenance";
+  /**
+   * C-801: the host operator performs it (never pushed to the owner). Only
+   * for host-observed deployment failures the operator can check on the host.
+   */
+  readonly executor?: "operator";
 }
 
 function supersedeHelperAction(
@@ -618,6 +728,9 @@ export function requestDeploymentAction(
 
 function createDeploymentAction(d: CommandDraft, input: DeploymentActionInput) {
   const id = d.ids.next(d.state.project_id, "human_action");
+  // C-801: worker maintenance keeps its own internal host ops owner.
+  const operator =
+    input.executor === "operator" && input.reason !== "worker_maintenance";
   const action: HumanAction = {
     id,
     key: id,
@@ -626,6 +739,7 @@ function createDeploymentAction(d: CommandDraft, input: DeploymentActionInput) {
     ...(input.helper_upgrade ? { helper_upgrade: input.helper_upgrade } : {}),
     status: "open",
     ...(input.reason ? { category: "general" as const } : {}),
+    ...(operator ? { executor: "operator" as const } : {}),
     triage:
       input.reason === "worker_maintenance"
         ? "host"
@@ -657,7 +771,11 @@ function createDeploymentAction(d: CommandDraft, input: DeploymentActionInput) {
       : {}),
     human_action_id: id,
     blocked_work_items: [],
+    ...(operator
+      ? { executor: "operator" as const, executor_basis: "explicit" as const }
+      : {}),
   });
+  if (operator) emitOperatorActionRequested(d, action, "requested", "explicit");
   return action;
 }
 

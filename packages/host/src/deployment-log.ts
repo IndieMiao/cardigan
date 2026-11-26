@@ -103,3 +103,57 @@ export class DeploymentServerReady {
     return found;
   }
 }
+
+/** C-801: terminal escapes and other control characters of command output. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: these are exactly what is stripped
+const CONTROL = /\u001b\[[0-9;]*[A-Za-z]|[\u0000-\u0008\u000b-\u001f\u007f]/gu;
+/** C-801: bounds of a redacted command output tail. */
+const TAIL_LINES = 10;
+const TAIL_LINE_MAX = 200;
+export const COMMAND_TAIL_MAX = 2000;
+
+/**
+ * C-801: the last lines of a host command's output, for the deployment record
+ * and diagnostics. Stack frames are dropped; paths, URLs, credentials,
+ * `NAME=value` settings and long opaque strings are replaced with fixed
+ * placeholders, so only the command's own messages remain. Undefined when
+ * nothing is left.
+ */
+export function redactCommandTail(text: string): string | undefined {
+  const lines = text
+    .split(/\r?\n/u)
+    .map((line) =>
+      line
+        .replace(CONTROL, "")
+        .replace(
+          /\b((?:proxy-)?authorization|(?:set-)?cookie)\b\s*[:=].*$/giu,
+          "$1: <已隐去>",
+        )
+        .replace(/\b(bearer|basic|token)\s+\S+/giu, "$1 <已隐去>")
+        .replace(
+          /\b(password|passwd|secret|token|api[_-]?key)\b\s*[:=]\s*\S+/giu,
+          "$1: <已隐去>",
+        )
+        .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/giu, "<地址>")
+        .replace(/(?:~|\.{1,2})?\/[^\s'"`,;)\]}]+/gu, "<路径>")
+        .replace(
+          /\b[A-Za-z_][A-Za-z0-9_]*=\S+/gu,
+          (m) => `${m.split("=")[0]}=<已隐去>`,
+        )
+        .replace(/[A-Za-z0-9+/_=-]{32,}/gu, "<已隐去>")
+        .trim(),
+    )
+    .filter((line) => line && !/^at\s/u.test(line) && !/^\^+$/u.test(line));
+  const tail = lines
+    .slice(-TAIL_LINES)
+    .map((line) =>
+      line.length > TAIL_LINE_MAX
+        ? `${line.slice(0, TAIL_LINE_MAX - 1)}…`
+        : line,
+    )
+    .join("\n");
+  if (!tail) return undefined;
+  return tail.length > COMMAND_TAIL_MAX
+    ? `…${tail.slice(-(COMMAND_TAIL_MAX - 1))}`
+    : tail;
+}

@@ -18,7 +18,10 @@ import {
   writeRole,
 } from "@cardigan/store";
 import { expect, test } from "vitest";
-import { ROLE_PACK_SNAPSHOT_SCRIPT } from "./deployment-node.js";
+import {
+  parseRolePackSnapshot,
+  ROLE_PACK_SNAPSHOT_SCRIPT,
+} from "./deployment-node.js";
 import {
   deploymentRolePolicyHash,
   rotateIdleDeployedRoles,
@@ -717,7 +720,7 @@ test("the supervisor's previous-pack snapshot hashes every default like the depl
     harness: "codex" as const,
     launch_profile_ref: "deployment",
   };
-  expect(JSON.parse(stdout)).toEqual(
+  expect(parseRolePackSnapshot(stdout)).toEqual(
     Object.fromEntries(
       Object.keys(DEFAULT_ROLE_KINDS).map((id) => [
         id,
