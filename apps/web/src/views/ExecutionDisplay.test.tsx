@@ -192,7 +192,7 @@ test.each([false, true])(
     const lane = screen.getByRole("region", { name: "赵云泳道" });
     expect(within(lane).getAllByRole("listitem")).toHaveLength(2);
     expect(
-      within(lane).getAllByText("codex / fixture-model / high").length,
+      within(lane).getAllByText("codex / fixture-model / 推理强度 high").length,
     ).toBeGreaterThan(0);
     expect(screen.getByText("主机运维（常驻）")).toBeTruthy();
     expect(screen.getByText("常驻 PM · 后台")).toBeTruthy();

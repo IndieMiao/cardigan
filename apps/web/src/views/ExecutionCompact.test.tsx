@@ -65,7 +65,7 @@ test("lane cards share employee identity, show only numeric context and keep det
   fireEvent.click(
     within(missingRunCard).getByRole("button", { name: "运行配置与最近执行" }),
   );
-  expect(within(missingRunCard).getByText("尚无 Run")).toBeTruthy();
+  expect(within(missingRunCard).getByText("尚无执行记录")).toBeTruthy();
   fireEvent.click(more);
   expect(more.getAttribute("aria-expanded")).toBe("true");
   expect(within(card).getByText("R-1")).toBeTruthy();
