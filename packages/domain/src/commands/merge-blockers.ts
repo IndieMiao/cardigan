@@ -9,6 +9,7 @@ import { mergeRiskBlockers } from "./delegation.js";
 import { latestMergeCheck } from "./merge-check-view.js";
 import { mergeContext, newestById } from "./merge-context.js";
 import { missingMergeCheckReason } from "./merge-failure-view.js";
+import { hasVerifiedMergeNoop } from "./merge-noop.js";
 import {
   type EffectivePreMergeCheck,
   effectivePreMergeChecks,
@@ -62,6 +63,20 @@ export function pmMergeBlockers(
   q: Decision,
   proofReads?: TestReviewProofRead[],
 ): readonly string[] {
+  return mergeBlockers(state, q, proofReads, false);
+}
+
+/**
+ * C-777: `waiveVerifiedNoop` lets the system confirmation take the same
+ * host-verified noop exception as the human (invariant 21): no check is
+ * queued for it, and none is forged. PM Ops never gets it.
+ */
+function mergeBlockers(
+  state: CommandState,
+  q: Decision,
+  proofReads: TestReviewProofRead[] | undefined,
+  waiveVerifiedNoop: boolean,
+): readonly string[] {
   if (
     q.trigger !== "merge_confirmation" ||
     !q.card_id ||
@@ -99,7 +114,14 @@ export function pmMergeBlockers(
   const check = state.project_settings?.merge_queue
     ? passedCardCheck(state.events, card_id, completion.id)
     : latestMergeCheck(state.events, card_id, completion.id);
-  if (check?.status !== "passed")
+  if (
+    check?.status !== "passed" &&
+    !(
+      waiveVerifiedNoop &&
+      state.project_settings?.merge_gate_enabled &&
+      hasVerifiedMergeNoop(state.events, card_id, completion.id)
+    )
+  )
     blockers.push(
       check
         ? `合并闸门检查未通过（当前 ${check.status}）`
@@ -174,7 +196,7 @@ export function systemMergeBlockers(
   const lite = autoMergeOn(
     state.project_preferences?.find((p) => p.id === state.project_id),
   );
-  const blockers = pmMergeBlockers(
+  const blockers = mergeBlockers(
     lite
       ? {
           ...state,
@@ -184,6 +206,8 @@ export function systemMergeBlockers(
         }
       : state,
     q,
+    undefined,
+    true,
   );
   const card = state.cards.find((c) => c.id === q.card_id);
   if (!card || !systemMergeEnabled(state, card)) return blockers;

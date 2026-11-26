@@ -10,6 +10,7 @@ import {
 } from "react";
 import type { CardiganClient, ExecutionCapacity } from "../api.js";
 import { settingKey, trackSettingsRead } from "../settings-clock.js";
+import { usePageVisible } from "../usePageVisible.js";
 import { useResource } from "../useResource.js";
 
 import { Button } from "./ui/button.js";
@@ -59,7 +60,8 @@ export function CapacityProvider({
       ),
     [client, projectId],
   );
-  const resource = useResource(load, revision);
+  // C-775: a background tab stops reading and reads once when shown again.
+  const resource = useResource(load, revision, usePageVisible());
   // Held by the provider (one per project, always mounted), so leaving and
   // returning to a page that reads it does not lose a failure.
   const [failed, setFailed] = useState(false);

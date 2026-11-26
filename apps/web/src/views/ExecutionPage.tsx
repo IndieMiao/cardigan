@@ -51,6 +51,7 @@ import {
   writeExecutionSort,
 } from "../execution-sort.js";
 import { useRouteFilters } from "../route.js";
+import { usePageVisible } from "../usePageVisible.js";
 import { useResource } from "../useResource.js";
 
 export {
@@ -122,9 +123,11 @@ export function ExecutionPage({
     [client, projectId],
   );
   // Both counters only grow, so their sum changes whenever either does.
+  // C-775: a background tab stops reading and reads once when shown again.
   const { data, pending, error, reload, interactive } = useResource(
     load,
     revision + contextRevision,
+    usePageVisible(),
   );
   const diagnostics = useExecutionDiagnostics(client, projectId);
   const refreshKey = `cardigan.execution.refresh.${projectId}`;

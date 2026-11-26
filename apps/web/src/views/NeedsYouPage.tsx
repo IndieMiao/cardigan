@@ -605,7 +605,10 @@ export function MergeConfirmation({
     merge?.completion?.id,
     merge?.completion?.subject.value,
   ]);
-  const pmTakeover = confirmPmTakeover && q.decider === "role:pm" && !confirmed;
+  const pmTakeover =
+    confirmPmTakeover &&
+    (q.decider === "role:pm" || q.decider === "system") &&
+    !confirmed;
   const needsTakeover = pmTakeover && acceptedTakeover !== takeoverKey;
   const preChecks = merge?.pre_merge_checks ?? [];
   const blockers = merge?.blockers ?? ["检查状态尚未读取，请刷新"];
@@ -853,6 +856,7 @@ export function MergeConfirmation({
             accepted={!needsTakeover}
             onAccept={() => setAcceptedTakeover(takeoverKey)}
             controls={controls}
+            system={q.decider === "system"}
           />
         </div>
       )}
@@ -2146,6 +2150,7 @@ function NeedsContent({
           ))}
           {total === 0 &&
             !data.pm_held_merges?.length &&
+            !data.stalled_system_merges?.length &&
             !later.length &&
             !closedMessage &&
             !data.notices?.length &&
@@ -2238,6 +2243,21 @@ function NeedsContent({
             <NeedsList label="合并确认" title={`合并确认（${merges.length}）`}>
               {merges.map((q) => (
                 <MergeConfirmation key={q.id} q={q} {...props} />
+              ))}
+            </NeedsList>
+          )}
+          {!!data.stalled_system_merges?.length && (
+            <NeedsList
+              label="系统合并确认未决"
+              title={`系统合并确认未决（${data.stalled_system_merges.length}）`}
+            >
+              {data.stalled_system_merges.map((q) => (
+                <MergeConfirmation
+                  key={q.id}
+                  q={q}
+                  {...props}
+                  confirmPmTakeover
+                />
               ))}
             </NeedsList>
           )}

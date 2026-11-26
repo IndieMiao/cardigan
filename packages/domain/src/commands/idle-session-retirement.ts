@@ -35,6 +35,10 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import {
+  type RotationSignal,
+  settleSessionRotation,
+} from "./session-rotation.js";
 import { humanStopRecorded, stoppedByHuman } from "./stop-state.js";
 import { systemEndedTurn } from "./system-ended-turn.js";
 
@@ -495,7 +499,7 @@ export function releaseUnresponsiveSession(
               : p.trigger === "host_ops"
                 ? `主机运维 ${p.requested_by} 请求${p.tool === "host_ops_cancel_run" ? "取消 Run" : "重启"}：${a.id}（${a.machine_id}）的 Agent 进程未见存活，已关闭残留终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`
                 : `${a.id}（${a.machine_id}）的 Agent 进程已不在、终端仍残留：空闲回收连续 ${streak} 次未取得有效进程身份。系统已关闭该终端并确认会话退出${runsNote}；保留身份、工作区和分支，有待办时按受管入口新起会话。`;
-    d.emit(
+    const replaced = d.emit(
       "session_replaced",
       card,
       {
@@ -548,8 +552,35 @@ export function releaseUnresponsiveSession(
       },
       { type: "handoff", body: handoff },
     );
+    // C-789: the host proved this exact session exited. Work that was in
+    // flight on it is rerun once per Assignment under the shared rotation rule;
+    // a host operator's own restart or cancel stays theirs.
+    const signal = rotationSignal(p);
+    if (cancelled.length && signal)
+      settleSessionRotation(
+        d,
+        next,
+        signal,
+        cancelled.find((r) => r.status !== "queued"),
+        { runtime_ref: releasedRef, exited: true, evidence: replaced.id },
+      );
     return next;
   });
+}
+
+/** C-789: which stuck-session signal a proven release settles, if any. */
+function rotationSignal(p: UnresponsiveRelease): RotationSignal | undefined {
+  switch (p.trigger) {
+    case "turn_done":
+      return "idle_scarce";
+    case "system_turn":
+      return "bell_deferred";
+    case "retirement_withdrawn":
+    case "probe_invalid":
+      return "retirement_failed";
+    case "host_ops":
+      return p.tool === "host_ops_stop_assignment" ? "idle_scarce" : undefined;
+  }
 }
 
 /**

@@ -1742,6 +1742,33 @@ test("candidate conflict results inform an active author but cannot bypass bound
   ).toEqual([]);
 });
 
+test("C-783: a precheck superseded by the author's newer HEAD rings no result bell; an ordinary result still does", () => {
+  const result = (extra: Record<string, unknown>) =>
+    event(
+      "precheck_finished",
+      {
+        card_id: "C-1",
+        work_item_id: "W-1",
+        assignment_id: "A-1",
+        attempt_id: "old",
+        status: "interrupted",
+        head_sha: "a".repeat(40),
+        ...extra,
+      },
+      { actor: { kind: "system", project_id } },
+    );
+  const active = snapshot({
+    runs: [run("R-1", { assignment_id: "A-1", status: "running" })],
+  });
+  expect(
+    routeEvent({ event: result({ superseded_by: "new" }), snapshot: active })
+      .notifications,
+  ).toEqual([]);
+  expect(
+    recipients(routeEvent({ event: result({}), snapshot: active })),
+  ).toEqual(["assignment:A-1"]);
+});
+
 test("human-confirmed remote worker release asks PM to choose the next machine without creating an Assignment", () => {
   const e = event(
     "remote_worker_released",
@@ -1815,6 +1842,32 @@ test("an author precheck wait routes only its settlement, not an early or duplic
       type === "work_item_resume_requested" ? "assignment:A-1" : "pm_ops",
     ]);
   }
+});
+
+test("C-777: a precheck slot wait goes to PM Ops with its occupant", () => {
+  const system = { actor: { kind: "system" as const, project_id } };
+  const body =
+    "W-1 的作者预检查 check 已排队 10 分钟未取得执行名额：cardigan/C-557 的合并检查等待执行名额。请 PM 核查。";
+  const wait = event(
+    "precheck_slot_waiting",
+    { work_item_id: "W-1", assignment_id: "A-1", attempt_id: "check", body },
+    system,
+  );
+  const result = routeEvent({
+    event: wait,
+    snapshot: snapshot({ events: [wait] }),
+  });
+  expect(recipients(result)).toEqual(["pm_ops"]);
+  expect(JSON.stringify(result)).toContain("C-557");
+  // An assignment cannot raise it.
+  expect(
+    recipients(
+      routeEvent({
+        event: event("precheck_slot_waiting", { body }),
+        snapshot: snapshot({}),
+      }),
+    ),
+  ).toEqual([]);
 });
 
 test("C-612: delivered release notes go to the managed PM Office, or warn PM Ops when nobody can send", () => {

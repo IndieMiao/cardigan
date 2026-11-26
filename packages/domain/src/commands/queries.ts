@@ -643,17 +643,13 @@ function mergeConfirmation(
   };
 }
 
-/** Shared decision presentation for the task list and actionable card details. */
-export function decisionActionView(
+/** When a decision was raised; project decisions have no card timeline. */
+function decisionOpenedAt(
   state: CommandState,
-  q: Decision & { grouped_decisions?: readonly Decision[] },
-  now?: string,
-) {
-  const why = (text: string) => [...text].slice(0, 40).join("");
-  const failedConfirmation = failedConfirmedMergeCheck(state, q);
-  const followup = !failedConfirmation && decisionFollowupNeedsHuman(state, q);
+  q: Decision,
+): string | undefined {
   // Project decisions have no card timeline; their request event is the creation fact.
-  const opened =
+  return (
     eventsForDecision(state.events, q.id)
       .filter(
         (e) =>
@@ -667,7 +663,52 @@ export function decisionActionView(
       ?.created_at ??
     state.timeline
       .filter((e) => e.decision_id === q.id)
-      .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
+      .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at
+  );
+}
+
+/** C-777: an open system merge confirmation is offered to the human after this. */
+export const SYSTEM_MERGE_STALLED_MS = 30 * 60_000;
+
+/**
+ * C-777: system-held merge confirmations still open past the threshold on an
+ * awaiting-merge card. Listing them only offers the human's existing answer
+ * (the same recordDecision the CLI uses); it grants nothing to anyone else.
+ */
+export function stalledSystemMerges(
+  state: CommandState,
+  now: string | undefined,
+  thresholdMs = SYSTEM_MERGE_STALLED_MS,
+): readonly Decision[] {
+  if (!now) return [];
+  const awaiting = new Set(
+    state.cards.filter((c) => c.status === "awaiting_merge").map((c) => c.id),
+  );
+  return state.decisions.filter((q) => {
+    if (
+      q.decider !== "system" ||
+      q.trigger !== "merge_confirmation" ||
+      q.status !== "open" ||
+      !q.card_id ||
+      !awaiting.has(q.card_id)
+    )
+      return false;
+    const opened = decisionOpenedAt(state, q);
+    const waited = opened ? Date.parse(now) - Date.parse(opened) : Number.NaN;
+    return Number.isFinite(waited) && waited >= thresholdMs;
+  });
+}
+
+/** Shared decision presentation for the task list and actionable card details. */
+export function decisionActionView(
+  state: CommandState,
+  q: Decision & { grouped_decisions?: readonly Decision[] },
+  now?: string,
+) {
+  const why = (text: string) => [...text].slice(0, 40).join("");
+  const failedConfirmation = failedConfirmedMergeCheck(state, q);
+  const followup = !failedConfirmation && decisionFollowupNeedsHuman(state, q);
+  const opened = decisionOpenedAt(state, q);
   const elapsed =
     opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
   // C-154: still with the human after the PM handed it over (pause, release
@@ -816,7 +857,10 @@ export function listNeedsYouCounts(
       tabs: {
         decisions: { count: decisionCount, attention: decisionCount },
         merges: {
-          count: mergeCount + data.pm_held_merges.length,
+          count:
+            mergeCount +
+            data.pm_held_merges.length +
+            data.stalled_system_merges.length,
           attention: mergeCount,
         },
         actions: {
@@ -1112,6 +1156,12 @@ function selectNeedsYou<T>(
             : null,
       }),
     ),
+    // C-777: system confirmations stuck past the threshold; the human may
+    // take them over. Counted like PM-held merges: listed, not attention.
+    stalled_system_merges:
+      actor.kind === "human" && includes("merges")
+        ? stalledSystemMerges(state, now).map(view)
+        : [],
     // §7.4 (C-65): merge confirmations PM Ops still holds. Not counted as
     // waiting on the human, but the human may answer them directly.
     pm_held_merges:

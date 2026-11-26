@@ -19,7 +19,7 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
-import { resolveActor, systemClock } from "./host.js";
+import { resolveActor, systemClock, warmCommandState } from "./host.js";
 import type { CliIo } from "./io.js";
 import { launchExecution, terminalExecution } from "./runtime-check.js";
 
@@ -119,6 +119,7 @@ export async function rotateHostOps(input: {
       );
     if (!currentTarget())
       throw new CliError("轮换对象已改变，请核对最新状态", EXIT.failure);
+    warmCommandState(store, project_id);
     const next = store.uow.run((tx) => {
       const current = tx.assignments.get(project_id, previous.id);
       if (

@@ -165,7 +165,9 @@ export function selectMachine(
               ? "证据已过期"
               : proof === "invalid"
                 ? "证据无效"
-                : "尚未验证";
+                : proof === "stale"
+                  ? "证据待重新验证（PATH 或 env 已变更，下次真实准备成功后自动续期）"
+                  : "尚未验证";
           reasons.push(
             `服务端远程 Git 工作树准备${reason}（角色工作树策略：${worktree}）`,
           );

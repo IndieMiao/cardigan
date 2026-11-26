@@ -234,6 +234,7 @@ export async function runSelfDeployCommand(
       dataDir,
       config,
       env: io.env,
+      configDir,
       ...(upgrade ? { upgrade: { config: upgrade, configDir } } : {}),
     });
     unlock = await driver.initialize();

@@ -367,6 +367,34 @@ test("C-391: queue is opt-in and has bounded, configurable batch and window defa
     },
   });
 });
+test("C-781: precheck reuse defaults on, can be switched off, and rejects non-booleans", async () => {
+  const f = await fixture({
+    projects: { p: { ...valid, queue: { enabled: true } } },
+  });
+  const on = (await f.load()).forProject("p");
+  expect(on.status === "enabled" && on.queue).toStrictEqual({
+    maxBatchSize: 4,
+    conflictThreshold: 2,
+    windowTimeoutMs: 86_400_000,
+  });
+  await writeFile(
+    f.file,
+    JSON.stringify({
+      projects: {
+        p: { ...valid, queue: { enabled: true, reuse_precheck: false } },
+        q: { ...valid, queue: { enabled: true, reuse_precheck: "no" } },
+      },
+    }),
+  );
+  const config = await f.load();
+  expect(config.forProject("p")).toMatchObject({
+    queue: { reusePrecheck: false },
+  });
+  expect(config.forProject("q")).toMatchObject({
+    status: "invalid",
+    reason: expect.stringContaining("reuse_precheck"),
+  });
+});
 test.each([0, 9, 1.5, "4"])(
   "C-391: rejects invalid max batch size %s",
   async (max_batch_size) => {

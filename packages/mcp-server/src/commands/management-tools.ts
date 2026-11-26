@@ -30,6 +30,7 @@ import {
   type Result,
   recordDecision,
   releaseAssignment,
+  replacePrimaryWorkItem,
   replaceVerificationWorkItem,
   reportBlocker,
   requestDecision,
@@ -305,12 +306,13 @@ const schemas = {
           "deployment_ready",
           "baseline_updated",
           "decision_resolved",
+          "resource_available",
         ]),
         target_id: z.string().min(1).max(100),
       })
       .optional()
       .describe(
-        "Automatically resume when the same-project target settles. Use an attempt ID, bound GitHub run ID, card ID, full deployed SHA, decision ID, or the registered baseline SHA for baseline_updated. Each new author precheck can resume its own wait. Repeated failures of the same HEAD, exhausted candidate-conflict recovery and other repeated blockers go to PM.",
+        "Automatically resume when the same-project target settles. Use an attempt ID, bound GitHub run ID, card ID, full deployed SHA, decision ID, the registered baseline SHA for baseline_updated, or a resource key this work item requires for resource_available (the next Run claims it). Delivered or accepted producers record a wait for the baseline or a resource without changing state; without a condition it goes to PM. Each new author precheck can resume its own wait. Repeated failures of the same HEAD, exhausted candidate-conflict recovery and other repeated blockers go to PM.",
       ),
   },
   request_decision: {
@@ -828,6 +830,17 @@ const schemas = {
     template_key: text,
     reason: text,
   },
+  replace_primary_work_item: {
+    work_item_id: id("work_item").describe(
+      "The card's current template primary producer that gives up its slot.",
+    ),
+    replacement_work_item_id: id("work_item").describe(
+      "An existing open producer on the same card that takes the slot over.",
+    ),
+    card_id: id("card"),
+    template_key: text.describe("The card template's primary work item key."),
+    reason: text,
+  },
   assign: {
     employee_id: text
       .describe("Employee ID (E-n) or active name; omitted selects by role.")
@@ -1264,6 +1277,11 @@ export function managementTools(
       "replace_verification_work_item",
       "PM Ops: replace a cancelled or released template verifier with a new unassigned item on the same card and template key. Inherits its target and requirements; invalidates affected deliveries and completion requests, which must be submitted again.",
       replaceVerificationWorkItem,
+    ),
+    wire(
+      "replace_primary_work_item",
+      "PM Ops: move the template's primary production slot from a mis-assigned producer (whose Assignment must be released and Runs finished) to another open producer on the same card. The old item is cancelled with replaced_by_work_item_id; the new item becomes the required primary producer and may request completion. Its accepted deliveries and the reviews aimed at it stay valid; verifiers that targeted the old item now target the new one and must review it again; the current completion request is invalidated.",
+      replacePrimaryWorkItem,
     ),
   ];
 }
