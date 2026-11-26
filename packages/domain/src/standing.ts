@@ -29,6 +29,7 @@ export function standingTools(
           "resolve_delegated_decision",
           "triage_human_action",
           "replace_verification_work_item",
+          "replace_primary_work_item",
           "request_delivery_rework",
         ].includes(tool)
       : tool !== "send_owner_message" &&

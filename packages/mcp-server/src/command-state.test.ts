@@ -461,12 +461,21 @@ test("C-649 lean scope retains the project stream by type, drops cold dispatch r
       fullEventHistory(s.events).map((e) => e.id);
     expect(lean.commandStateScope).toBe("lean");
     const base = lean.uow.read((tx) => loadCommandState(tx, project_id));
-    expect(ids(base)).toEqual(["b2", "x2", "p1", "o1", "c1"]);
+    // C-785: read-audit rows never reach the in-memory log in any scope
+    // (the table and its SQL readers keep them), so even a live
+    // notification subject of that type is absent from both states.
+    expect(ids(whole)).not.toContain("x2");
+    expect(
+      full
+        .streamEventsOfType(project_id, undefined, "cross_card_read")
+        .map((e) => e.id),
+    ).toEqual(["x1", "x2"]);
+    expect(ids(base)).toEqual(["b2", "p1", "o1", "c1"]);
     expect(ids(base)).toEqual(
       ids({ events: leanCommandEvents(whole, [], new Set(["x2"])) }),
     );
     // The command stream itself carries business events only.
-    expect(base.events.map((e) => e.id)).toEqual(["x2", "p1", "c1"]);
+    expect(base.events.map((e) => e.id)).toEqual(["p1", "c1"]);
     // The hot scope keeps every project-stream event and cold dispatch records.
     expect(ids(whole)).toEqual(ids({ events: hotCommandEvents(whole) }));
     expect(

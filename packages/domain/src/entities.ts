@@ -90,6 +90,7 @@ export const toolNames = [
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
+  "replace_primary_work_item",
   "assign",
   "release_assignment",
   "project_snapshot",
@@ -332,6 +333,8 @@ export interface Precheck {
   readonly checks?: MergeCheckView["checks"];
   readonly summary?: string;
   readonly log_ref?: string;
+  /** C-783: set only by request_check when a newer HEAD replaced this attempt. */
+  readonly superseded_by?: string;
 }
 export type PrecheckView = Omit<Precheck, "branch" | "machine_id">;
 
@@ -475,6 +478,16 @@ export interface MergeCheckView {
   readonly updated_at: Timestamp;
   readonly recheck_requested?: boolean;
   /**
+   * C-781: this card check is an explicit reuse of the author precheck that
+   * passed on the same delivered head; nothing was executed for this attempt.
+   */
+  readonly reused_precheck?: {
+    readonly attempt_id: string;
+    readonly work_item_id: WorkItemId;
+    readonly head_sha: string;
+    readonly delivery_id?: DeliveryId;
+  };
+  /**
    * C-116: the check supervisor classified every failure as a timeout (for
    * example vitest "Test timed out"). Only drives the one automatic rerun; it
    * never widens PM authority over human-only merges.
@@ -527,7 +540,11 @@ interface WorkItemFields {
     readonly reported_at: Timestamp;
     readonly resume_when?: import("./work-wait.js").ResumeCondition;
     readonly auto_resume_disabled?: boolean;
+    /** C-789: registered by the system for a Run that ended blocked without one. */
+    readonly auto_registered?: true;
   };
+  /** C-789: a wait on a delivered/accepted producer; never changes `status`. */
+  readonly standby_wait?: import("./work-wait.js").StandbyWait;
 }
 export type WorkItem = WorkItemFields &
   (

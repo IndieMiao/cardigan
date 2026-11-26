@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import {
   type CardDetail,
   type CardiganClient,
@@ -23,10 +23,27 @@ import {
   DetailFactGroup,
   DetailFacts,
 } from "./layout/CardDetailLayout.js";
+import { DialogFeedback } from "./layout/DialogFeedbackLayout.js";
+import { Menu } from "./Menu.js";
 import { PRIORITY_LEVELS } from "./Priority.js";
+import { RequestFeedback } from "./RequestFeedback.js";
 import { templateIdentity } from "./TemplateMarker.js";
+import { Button } from "./ui/button.js";
 import { Checkbox } from "./ui/checkbox.js";
+import {
+  Dialog,
+  DialogBody,
+  DialogClose,
+  DialogContent,
+  DialogFields,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "./ui/dialog.js";
+import { RadioChoice } from "./ui/input.js";
+import { MoreButton } from "./ui/more-button.js";
 import { Prose } from "./ui/prose.js";
+import { Textarea } from "./ui/textarea.js";
 
 const OPEN_DECISION = ["open", "provisional", "snoozed"];
 
@@ -218,6 +235,19 @@ export function CardWorkItems({
   ).length;
   const link = (anchor: string) =>
     routeHash({ kind: "card", projectId, cardId, anchor });
+  // C-778: the template's primary slot can move to another open producer.
+  const primaryKey = detail.template?.primary_work_item_key ?? null;
+  const replaceable =
+    !!client &&
+    primaryKey !== null &&
+    !["done", "cancelled", "awaiting_merge"].includes(detail.card.status);
+  const successors = work_items.filter(
+    (w) =>
+      w.kind === "produce" &&
+      w.template_key === undefined &&
+      w.status !== "cancelled" &&
+      !w.replaced_by_work_item_id,
+  );
   return (
     <section className="card-section" aria-label="工作项">
       <div className="work-items">
@@ -287,6 +317,22 @@ export function CardWorkItems({
                         changed={changed}
                       />
                     )}
+                  {client &&
+                    replaceable &&
+                    primaryKey !== null &&
+                    item.kind === "produce" &&
+                    item.template_key === primaryKey &&
+                    successors.length > 0 && (
+                      <PrimaryReplacement
+                        item={item}
+                        cardId={detail.card.id}
+                        templateKey={primaryKey}
+                        successors={successors}
+                        client={client}
+                        projectId={projectId}
+                        changed={changed}
+                      />
+                    )}
                   {delivery && (
                     <p>
                       <IdTag
@@ -345,6 +391,176 @@ function MachinePlacement({ item }: { readonly item: WorkItemView }) {
           ))}
         </ul>
       )}
+    </>
+  );
+}
+
+/**
+ * C-778: “替换为…” moves the primary production slot; writing happens only
+ * when the dialog is confirmed.
+ */
+function PrimaryReplacement({
+  item,
+  cardId,
+  templateKey,
+  successors,
+  client,
+  projectId,
+  changed,
+}: {
+  item: WorkItemView;
+  cardId: string;
+  templateKey: string;
+  successors: readonly WorkItemView[];
+  client: CardiganClient;
+  projectId: string;
+  changed?: (() => void) | undefined;
+}) {
+  const [open, setOpen] = useState(false);
+  const [target, setTarget] = useState("");
+  const [reason, setReason] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const more = useRef<HTMLButtonElement>(null);
+  const opening = useRef(false);
+  // Retain the key of an uncertain request so a retry stays idempotent.
+  const keys = useRef(new Map<string, string>());
+  const valid =
+    successors.some((w) => w.id === target) && reason.trim().length > 0;
+  const title = `替换主产出项 ${item.id}`;
+  return (
+    <>
+      <Menu
+        label={`${item.id} 工作项操作`}
+        onCloseAutoFocus={(event) => {
+          if (opening.current) {
+            event.preventDefault();
+            opening.current = false;
+          }
+        }}
+        trigger={<MoreButton ref={more} label={`${item.id} 工作项操作`} />}
+        items={[
+          {
+            id: "replace-primary",
+            label: "替换为…",
+            onSelect: () => {
+              opening.current = true;
+              setError("");
+              setOpen(true);
+            },
+          },
+        ]}
+      />
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          if (!next && !pending) setOpen(false);
+        }}
+      >
+        {open && (
+          <DialogContent
+            aria-describedby={undefined}
+            onEscapeKeyDown={(event) => {
+              if (pending) event.preventDefault();
+            }}
+            onInteractOutside={(event) => {
+              if (pending) event.preventDefault();
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              more.current?.focus();
+            }}
+          >
+            <form
+              aria-label={title}
+              onSubmit={async (event) => {
+                event.preventDefault();
+                if (pending || !valid) return;
+                const input = {
+                  replacement_work_item_id: target,
+                  card_id: cardId,
+                  template_key: templateKey,
+                  reason: reason.trim(),
+                };
+                const request = JSON.stringify(input);
+                const key = keys.current.get(request) ?? crypto.randomUUID();
+                keys.current.set(request, key);
+                setPending(true);
+                setError("");
+                try {
+                  await client.replacePrimaryWorkItem(
+                    projectId,
+                    item.id,
+                    input,
+                    key,
+                  );
+                  keys.current.delete(request);
+                  setOpen(false);
+                  changed?.();
+                } catch (failure) {
+                  setError(describeWriteError(failure));
+                } finally {
+                  setPending(false);
+                }
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>{title}</DialogTitle>
+              </DialogHeader>
+              <DialogBody>
+                <DialogFields>
+                  <fieldset disabled={pending}>
+                    <legend>替换为</legend>
+                    {successors.map((w) => (
+                      <RadioChoice
+                        key={w.id}
+                        name={`replace-${item.id}`}
+                        checked={target === w.id}
+                        onChange={() => setTarget(w.id)}
+                      >
+                        {w.id} {w.title}（{w.role_id}）
+                      </RadioChoice>
+                    ))}
+                  </fieldset>
+                  <label>
+                    替换原因
+                    <Textarea
+                      required
+                      rows={3}
+                      value={reason}
+                      disabled={pending}
+                      onChange={(e) => setReason(e.target.value)}
+                    />
+                  </label>
+                </DialogFields>
+                <DialogFeedback>
+                  <RequestFeedback
+                    interactive
+                    pending={pending}
+                    pendingMessage="正在提交…"
+                    error={error}
+                  />
+                </DialogFeedback>
+              </DialogBody>
+              <DialogFooter>
+                <DialogClose asChild>
+                  <Button size="regular" disabled={pending}>
+                    取消
+                  </Button>
+                </DialogClose>
+                <Button
+                  type="submit"
+                  size="regular"
+                  variant="destructive"
+                  disabled={!valid || pending}
+                >
+                  确认替换
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        )}
+      </Dialog>
     </>
   );
 }

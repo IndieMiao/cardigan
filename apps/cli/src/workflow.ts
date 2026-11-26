@@ -34,6 +34,7 @@ import {
   projectSnapshot,
   qualifyId,
   reassignHumanAction,
+  replacePrimaryWorkItem,
   runtimeUnknownDeferred,
   saveMachine,
   selectStandingEmployee,
@@ -55,6 +56,7 @@ import {
   MachineLeases,
   RuntimeTargets,
   targetProbe,
+  withCapacityOverrides,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { secureDataDirectory } from "@cardigan/runtime-herdr";
@@ -95,6 +97,10 @@ const USAGE = [
   "用法：",
   "  cardigan work-item create <C-n> --title <标题> --role <角色> --kind produce|verify [--required on|off] [--acceptance <标准>] [--target <W-n>] [--requirements <JSON>]",
   "  cardigan work-item update <W-n> [--requirements <JSON>] [--start-point <完整SHA|分支|none>] | work-item show <W-n>",
+  "  cardigan work-item replace-primary <W-旧> --with <W-新> --reason <理由> [--project <p>]",
+  "    仅人或常驻 PM Ops：把卡片模板的主产出槽位从派错的旧项转给同卡另一个未取消的产出项。",
+  "    旧项的 Assignment 须已释放、Run 已结束；旧项取消，新项成为必需的主产出并可提交完成申请。",
+  "    新项已通过的交付和审核保留；原指向旧项的验证项改审新项，当前完成申请作废。",
   "    card create 可用 --work-item-requirements <JSON> 按模板 key 追加机器要求；能力版本只接受无版本、=、>=。",
   "  cardigan card create [--template <id>] [--parent-card <C-id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
   "    界面或设计模板需加 --state-and-save 无写入，或传含 save_timing、leave_behavior、failure_feedback、consistency 的 JSON 对象。",
@@ -709,14 +715,69 @@ function jsonFlag(flags: Args["flags"], name: string): unknown {
   }
 }
 
+/** C-778: hand a template's primary slot from a mis-assigned producer to another. */
+async function workItemReplacePrimary(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const { flags, positionals } = parseArgs(args, []);
+  const allowed = ["project", "data-dir", "with", "reason"];
+  if (
+    positionals.length !== 1 ||
+    Object.keys(flags).some((key) => !allowed.includes(key))
+  )
+    throw new CliError("工作项参数不合法", EXIT.usage, [USAGE]);
+  const oldId = parseWorkItem(positionals[0]);
+  const replacementId = parseWorkItem(required(flags, "with"));
+  const reason = required(flags, "reason");
+  const store = await openPlacementStore(io, flags);
+  try {
+    const project_id = resolveProject(store, io, optional(flags, "project"));
+    const identity = resolveCommandIdentity(io, project_id, store);
+    const holder = runCommand(store, {
+      operation: "替换主产出项",
+      target: oldId,
+      project_id,
+      ...identity,
+      reduce: (s, a, p) => {
+        // The named old item fixes the card and slot; the domain rechecks both.
+        const old = s.work_items.find((w) => w.id === oldId);
+        return replacePrimaryWorkItem(
+          s,
+          a,
+          {
+            work_item_id: oldId,
+            replacement_work_item_id: replacementId,
+            card_id: old?.card_id ?? ("" as CardId),
+            template_key: old?.template_key ?? "",
+            reason,
+          },
+          p,
+        );
+      },
+    });
+    io.stdout(
+      `已把 ${holder.card_id} 的主产出槽位 ${holder.template_key} 从 ${oldId} 转给 ${holder.id}`,
+    );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
 async function workItemCommand(
   args: readonly string[],
   io: CliIo,
 ): Promise<number> {
   const [action, ...rest] = args;
+  if (args.includes("--help") || args.includes("-h")) {
+    io.stdout(USAGE);
+    return EXIT.ok;
+  }
+  if (action === "replace-primary") return workItemReplacePrimary(rest, io);
   if (!["create", "update", "show"].includes(action ?? ""))
     throw new CliError(
-      "用法：cardigan work-item create|update|show",
+      "用法：cardigan work-item create|update|show|replace-primary",
       EXIT.usage,
     );
   const { flags, positionals } = parseArgs(rest, []);
@@ -2525,8 +2586,11 @@ async function openPlacementStore(
   flags: Args["flags"],
 ): Promise<Store> {
   const dataDir = announceDataDir(io, optional(flags, "data-dir"));
-  const limits = await loadRunCapacityConfig({ env: io.env });
   const store = openCardiganStore({ dataDir });
+  const limits = withCapacityOverrides(
+    await loadRunCapacityConfig({ env: io.env }),
+    store.database,
+  );
   configureMachinePlacement(store, dataDir, io.env, limits, () =>
     loadOptionalConfigSync(cliLaunchPaths(io, dataDir)),
   );

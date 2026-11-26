@@ -641,6 +641,17 @@ test("C-110: PM instructions use the replacement command for verifier handoffs",
     expect(prompt).toContain(rule);
 });
 
+test("C-778: PM instructions transfer a mis-assigned primary slot instead of emptying it", () => {
+  const prompt = corePromptFor("pm");
+  for (const rule of [
+    "replace_primary_work_item",
+    "主产出项派错角色",
+    "Assignment 须已释放、Run 已结束",
+    "不能用它让主产出槽位空着",
+  ])
+    expect(prompt).toContain(rule);
+});
+
 test("C-169 superseded by Flow Lite: PM decides configurable details, credentials require explicit delegation", () => {
   const details = PM_DECISION_RULES.find((rule) => rule.includes("可配置细节"));
   expect(details).toContain("只有“交人边界”一节里未授权的五类交人");

@@ -188,7 +188,7 @@ test("C-255: affected work-item Runs get card-local system endings and traceable
   );
 });
 
-test.each(["completed", "blocked", "failed"] as const)(
+test.each(["completed", "failed"] as const)(
   "C-255: explicit %s finish still emits exactly one unchanged event",
   (outcome) => {
     const effect = value(
@@ -216,3 +216,28 @@ test.each(["completed", "blocked", "failed"] as const)(
     });
   },
 );
+
+test("C-255/C-789: an unregistered blocked finish keeps its unchanged event after the system-registered blocker", () => {
+  const effect = value(
+    finishRun(
+      fixture(),
+      actor(),
+      { run_id: id("run", 1), outcome: "blocked", summary: "Agent conclusion" },
+      ports(),
+    ),
+  );
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "blocker_reported",
+    "run_finished",
+  ]);
+  expect(effect.events[1]).toMatchObject({
+    type: "run_finished",
+    actor: actor(),
+    card_id: id("card", 1),
+  });
+  expect(effect.events[1]?.payload).toEqual({
+    run_id: id("run", 1),
+    outcome: "blocked",
+    summary: "Agent conclusion",
+  });
+});

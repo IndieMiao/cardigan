@@ -83,7 +83,7 @@ export type ProjectSnapshotReader = (
  * no run capacity. Authorization is derived from the transaction's state.
  */
 export function readProjectSnapshot(
-  store: Pick<McpBackend, "uow">,
+  store: Pick<McpBackend, "uow" | "streamEventsOfType">,
   actor: AssignmentActor,
   { read_audit_employee_id }: ProjectSnapshotInput,
   /** C-753: end of the seven-day owner-required window. */
@@ -107,9 +107,17 @@ export function readProjectSnapshot(
       ? undefined
       : safeReferenceQuery(() =>
           store.uow.read((tx) =>
-            streamEventsBy(tx.events, project, undefined, "type", [
-              "cross_card_read",
-            ]).flatMap((e) => {
+            // C-785: audit rows are not in the in-memory log; read the table.
+            (
+              store.streamEventsOfType?.(
+                project,
+                undefined,
+                "cross_card_read",
+              ) ??
+              streamEventsBy(tx.events, project, undefined, "type", [
+                "cross_card_read",
+              ])
+            ).flatMap((e) => {
               const p = e.payload;
               if (
                 !p ||
@@ -312,10 +320,14 @@ export function supportTools(options: SupportToolOptions = {}) {
               kind: z.literal("deployment_ready"),
               target_id: z.string().regex(/^[a-f0-9]{40}$/u),
             }),
+            z.object({
+              kind: z.literal("resource_available"),
+              target_id: z.string().min(1).max(64),
+            }),
           ])
           .optional()
           .describe(
-            "Wake this producer once the host baseline differs from its registered baseline, or the specified full SHA is deployed successfully. Omit for normal finish.",
+            "Wake this producer once the host baseline differs from its registered baseline, the specified full SHA is deployed successfully, or (resource_available) in a new Run that holds the named resource this work item requires. Delivered or accepted producers may wait for the baseline or a resource without changing state. Omit for normal finish.",
           ),
       }),
       handler: ({ idempotency_key, ...params }, context) =>

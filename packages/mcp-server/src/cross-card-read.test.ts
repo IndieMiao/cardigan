@@ -390,12 +390,9 @@ test("four tools expose same-project references with provenance and employee aud
   expect(() => getCardTool.handler({ card_id: "C-9" }, f.context)).toThrow();
 });
 
+// C-785: audit rows stay in the table but not in the in-memory event log.
 function readAudits(store: Store) {
-  return store.uow.read((tx) =>
-    tx.events
-      .listAfter(project_id, undefined, 0)
-      .filter((event) => event.type === "cross_card_read"),
-  );
+  return store.streamEventsOfType(project_id, undefined, "cross_card_read");
 }
 
 test.each([1, 370])(

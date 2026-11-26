@@ -248,6 +248,8 @@ export interface DispatcherOptions {
   readonly baselineConflictMaxResumes?: number;
   readonly authorPrecheckFailureLimit?: number;
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
+  /** C-782: trial-merge delivered heads on a moved baseline; tell idle authors. */
+  readonly earlyConflictTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
   readonly runtime: Runtime &
@@ -659,6 +661,9 @@ export class Dispatcher {
     await profileSpan("route.merge_shadow", async () =>
       this.options.mergeShadowTick?.(project),
     );
+    await profileSpan("route.early_conflicts", async () =>
+      this.options.earlyConflictTick?.(project),
+    );
     step("suggestion_progress", () =>
       store.uow.optimistic(project, (tx) => {
         const effect = unwrap(
@@ -712,7 +717,10 @@ export class Dispatcher {
         return !!pendingPrecheckConflict(waitState.events, w, project);
       }) ||
       waitState.work_items.some(
-        (w) => w.reported_blocker?.resume_when?.kind === "baseline_updated",
+        (w) =>
+          w.reported_blocker?.resume_when?.kind === "baseline_updated" ||
+          // C-789: a delivered/accepted producer waiting without a state change.
+          w.standby_wait?.condition?.kind === "baseline_updated",
       ) ||
       waitState.runs.some(
         (r) =>

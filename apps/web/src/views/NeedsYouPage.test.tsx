@@ -2502,6 +2502,49 @@ test("PM-held merges keep their count and existing actions after explicit takeov
   );
 });
 
+test("C-777: a stuck system merge confirmation is listed with a takeover entry", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => ({
+          ...page([]),
+          human_actions: [],
+          stalled_system_merges: [
+            merge({ id: "Q-1424", decider: "system", blocking: false }),
+          ],
+        }),
+        recordDecision,
+      })}
+      projectId="p-1"
+    />,
+  );
+  const group = await screen.findByRole("region", {
+    name: "系统合并确认未决",
+  });
+  expect(screen.queryByText("没有需要你处理的事")).toBeNull();
+  const item = within(group).getByRole("article", {
+    name: "合并确认 Q-1424",
+  });
+  expect(within(item).queryByRole("button", { name: "确认合并" })).toBeNull();
+  fireEvent.click(within(item).getByRole("button", { name: "接手处理" }));
+  const dialog = screen.getByRole("dialog", { name: "接手系统合并确认" });
+  expect(recordDecision).not.toHaveBeenCalled();
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认接手" }));
+  fireEvent.click(
+    await within(item).findByRole("button", { name: "确认合并" }),
+  );
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "Q-1424",
+      "merge",
+      "",
+      expect.any(String),
+    ),
+  );
+});
+
 const pmPage = (decision = merge({ decider: "role:pm", blocking: false })) => ({
   ...page([]),
   human_actions: [],

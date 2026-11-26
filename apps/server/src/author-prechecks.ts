@@ -99,6 +99,45 @@ function within<T>(work: Promise<T>, ms: number): Promise<T> {
 class PrecheckVerificationFailure extends Error {}
 
 type Candidate = { candidate_sha: string; tree_sha: string; base_sha: string };
+
+/** C-777: what keeps every check slot of the executor from an author precheck. */
+export interface PrecheckSlotOccupant {
+  readonly kind: "merge_check" | "batch_check" | "precheck" | "capacity";
+  readonly reason: string;
+  readonly project_id?: string;
+  readonly card_id?: string;
+}
+/** C-777: name the running work that fills every slot of the executor. */
+export function runningSlotOccupant(
+  executor: string,
+  intents: readonly GithubDispatchIntent[],
+  limit: number,
+): PrecheckSlotOccupant {
+  const running = intents
+    .filter((intent) => intent.executor === executor)
+    .map((intent) => ({
+      project_id: intent.project,
+      card_id: intent.card,
+      kind:
+        intent.identity?.display_title.split("/")[4] === "precheck"
+          ? ("precheck" as const)
+          : ("merge_check" as const),
+    }));
+  const label = (r: (typeof running)[number]) =>
+    `${r.project_id}/${r.card_id} 的${r.kind === "precheck" ? "作者预检查" : "合并检查"}`;
+  const first = running[0];
+  return first
+    ? {
+        ...first,
+        reason: `执行器 ${executor} 的 ${limit} 个检查名额都在使用：${running.slice(0, 5).map(label).join("、")}${running.length > 5 ? ` 等 ${running.length} 项` : ""}`,
+      }
+    : {
+        kind: "capacity",
+        reason: `执行器 ${executor} 的 ${limit} 个检查名额都在使用`,
+      };
+}
+/** C-777: a precheck queued this long without a slot is reported to PM Ops. */
+export const DEFAULT_PRECHECK_SLOT_WAIT_MS = 10 * 60_000;
 export interface AuthorCheckGit {
   projectOf(project: ProjectId): CentralProject | undefined;
   checkHead(project: ProjectId, assignment: Assignment): Promise<string>;
@@ -118,6 +157,8 @@ export class AuthorPrechecks {
   private readonly pendingFailures = new Set<string>();
   private readonly retry = new Map<string, number>();
   private readonly active = new Map<string, Promise<void>>();
+  /** C-783: business cancellation of an in-flight attempt a newer HEAD replaced. */
+  private readonly cancels = new Map<string, AbortController>();
   constructor(
     private readonly options: {
       store: Store;
@@ -129,7 +170,10 @@ export class AuthorPrechecks {
       onError(error: unknown): void;
       reserve(
         settings: Settings,
+        busy?: (occupant: PrecheckSlotOccupant) => void,
       ): Promise<{ index: number; release(): void } | undefined>;
+      /** C-777: queue time before a missing slot is reported (default 10 min). */
+      precheckSlotWaitMs?: number;
       github(
         check: Precheck,
         project: CentralProject,
@@ -237,7 +281,10 @@ export class AuthorPrechecks {
     return row ? (JSON.parse(String(row.doc)) as Precheck) : undefined;
   }
   private async verify(project: ProjectId, result: Precheck) {
-    const owner = this.owner(project, result);
+    // A superseded attempt needs no HEAD proof; update() only drops its checkpoint.
+    const owner = this.superseded(project, result)
+      ? undefined
+      : this.owner(project, result);
     let same = false;
     if (owner) {
       if (!this.options.git.checkHead)
@@ -283,13 +330,29 @@ export class AuthorPrechecks {
       true,
     );
   }
+  /** request_check already settled this attempt for a newer HEAD (C-783). */
+  private superseded(project: ProjectId, check: Precheck) {
+    return !!this.current(project, check)?.superseded_by;
+  }
+  private cancelSuperseded(attempt: string) {
+    this.cancels.get(attempt)?.abort();
+  }
   private update(
     project: ProjectId,
     check: Precheck,
     verifyOwner = false,
     after?: (tx: StoreTx) => void,
   ) {
-    this.options.store.uow.run((tx) => {
+    const replaced = this.options.store.uow.run((tx) => {
+      // C-783: never republish an attempt a newer HEAD replaced; drop any
+      // private result checkpoint and let the executor be cancelled instead.
+      if (this.superseded(project, check)) {
+        this.options.store.database
+          .prepare(`DELETE FROM precheck_head_proofs
+          WHERE project_id=? AND card_id=? AND attempt_id=?`)
+          .run(project, check.card_id, check.attempt_id);
+        return true;
+      }
       // A stale queue observer cannot interrupt/requeue a completed execution;
       // concurrent proof readers cannot publish a second terminal result.
       if (verifyOwner !== !!this.proof(project, check)) {
@@ -320,7 +383,9 @@ export class AuthorPrechecks {
           .prepare(`DELETE FROM precheck_head_proofs
           WHERE project_id=? AND card_id=? AND attempt_id=?`)
           .run(project, check.card_id, check.attempt_id);
+      return false;
     });
+    if (replaced) this.cancelSuperseded(check.attempt_id);
     // A terminal pre-dispatch failure has no remote run or unsettled publisher.
     if (
       check.executor?.type === "github" &&
@@ -470,6 +535,8 @@ export class AuthorPrechecks {
           this.reattached.delete(check.attempt_id);
           this.since.delete(check.attempt_id);
           this.headLockSince.delete(check.attempt_id);
+          // C-783: a newer HEAD replaced it; stop its executor and remote run now.
+          if (check.superseded_by) this.cancelSuperseded(check.attempt_id);
           continue;
         }
         if (this.options.signal.aborted || this.expiring.has(check.attempt_id))
@@ -866,6 +933,89 @@ export class AuthorPrechecks {
       });
     });
   }
+  /**
+   * C-777: a precheck that has waited past the threshold for a slot records
+   * once per occupant why, so PM Ops sees which merge work holds the executor
+   * instead of a silent queue.
+   */
+  private recordSlotWait(
+    project: ProjectId,
+    check: Precheck,
+    occupant: PrecheckSlotOccupant,
+  ): void {
+    const threshold =
+      this.options.precheckSlotWaitMs ?? DEFAULT_PRECHECK_SLOT_WAIT_MS;
+    this.options.store.uow.run((tx) => {
+      const events = tx.events.listAfter(project, check.card_id, 0);
+      const queued = events.find(
+        (e) =>
+          e.type === "precheck_queued" &&
+          e.actor.kind === "system" &&
+          (e.payload as { attempt_id?: string }).attempt_id ===
+            check.attempt_id,
+      );
+      const at = this.options.clock.now();
+      const waited = queued
+        ? Date.parse(at) - Date.parse(queued.created_at)
+        : Number.NaN;
+      if (!Number.isFinite(waited) || waited < threshold) return;
+      const key = JSON.stringify([
+        occupant.kind,
+        occupant.project_id ?? null,
+        occupant.card_id ?? null,
+      ]);
+      if (
+        events.some(
+          (e) =>
+            e.type === "precheck_slot_waiting" &&
+            e.actor.kind === "system" &&
+            (e.payload as { attempt_id?: string }).attempt_id ===
+              check.attempt_id &&
+            (e.payload as { occupant_key?: string }).occupant_key === key,
+        )
+      )
+        return;
+      const minutes = Math.floor(waited / 60_000);
+      const body = `${check.work_item_id} 的作者预检查 ${check.attempt_id} 已排队 ${minutes} 分钟未取得执行名额：${occupant.reason}。请 PM 核查。`;
+      const seq = tx.ids.nextEventSequence(project, check.card_id);
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq,
+        card_id: check.card_id,
+        type: "precheck_slot_waiting",
+        actor: { kind: "system", project_id: project },
+        payload: {
+          attempt_id: check.attempt_id,
+          work_item_id: check.work_item_id,
+          assignment_id: check.assignment_id,
+          occupant_key: key,
+          occupant: {
+            kind: occupant.kind,
+            ...(occupant.project_id ? { project_id: occupant.project_id } : {}),
+            ...(occupant.card_id ? { card_id: occupant.card_id } : {}),
+          },
+          reason: occupant.reason,
+          waited_ms: waited,
+          body,
+        },
+        created_at: at,
+      });
+      const id = tx.ids.nextTimelineEntryId(project, check.card_id);
+      tx.timeline.put(project, {
+        id,
+        short_id: id,
+        card_id: check.card_id,
+        event_seq: seq,
+        type: "system",
+        author: "system",
+        refs: [],
+        mentions: [],
+        retracted: false,
+        created_at: at,
+        body,
+      });
+    });
+  }
   private async execute(projectId: ProjectId, original: Precheck) {
     let check = original,
       stage = "配置",
@@ -879,6 +1029,8 @@ export class AuthorPrechecks {
     let finishedLog = false,
       verifying = !!pending;
     let errorEnv: Readonly<Record<string, string>> = {};
+    const cancel = new AbortController();
+    this.cancels.set(check.attempt_id, cancel);
     try {
       if (
         !pending &&
@@ -1010,11 +1162,22 @@ export class AuthorPrechecks {
             (i) => i.attempt === check.attempt_id && i.project === projectId,
           ) &&
           unfinished.length >= target.maxConcurrent
-        )
+        ) {
+          this.recordSlotWait(
+            projectId,
+            check,
+            runningSlotOccupant(target.name, unfinished, target.maxConcurrent),
+          );
           return;
+        }
       }
       if (!reattach) {
-        slot = await this.options.reserve(settings);
+        let occupant: PrecheckSlotOccupant | undefined;
+        slot = await this.options.reserve(settings, (o) => {
+          occupant = o;
+        });
+        if (!slot && occupant && !this.options.signal.aborted)
+          this.recordSlotWait(projectId, check, occupant);
         if (!slot || this.options.signal.aborted) return;
         // Admission and capacity are rechecked under the same SQLite write lock.
         release = acquireMergeCheckCapacity(
@@ -1060,7 +1223,7 @@ export class AuthorPrechecks {
         if (this.held(projectId, check)) return;
         if (check.status === "queued") this.update(projectId, check);
       }
-      if (this.options.signal.aborted) return;
+      if (this.options.signal.aborted || cancel.signal.aborted) return;
       stage = "创建日志";
       log = await (this.options.createLog ?? createMergeCheckLog)({
         dataDir: this.options.execution.dataDir,
@@ -1116,7 +1279,12 @@ export class AuthorPrechecks {
         executor,
         {
           beforeDispatch: () => {
-            if (!this.owner(projectId, check) || this.held(projectId, check))
+            if (
+              cancel.signal.aborted ||
+              this.superseded(projectId, check) ||
+              !this.owner(projectId, check) ||
+              this.held(projectId, check)
+            )
               throw new CheckExecutorSuspended();
           },
           kind: "precheck",
@@ -1133,9 +1301,13 @@ export class AuthorPrechecks {
           totalTimeoutMs: settings.totalTimeoutMs,
           serialize: true,
           ...(slot ? { lockSlot: slot.index } : {}),
+          // Host shutdown only detaches GitHub supervision; supersession
+          // cancels the run (C-783), as merge checks do for invalid tasks.
           ...(target.type === "github"
-            ? { hostSignal: this.options.signal }
-            : { signal: this.options.signal }),
+            ? { hostSignal: this.options.signal, signal: cancel.signal }
+            : {
+                signal: AbortSignal.any([this.options.signal, cancel.signal]),
+              }),
           onReady: (owner) => {
             if (target.type !== "github") release?.transfer(owner);
             if (check.status !== "running") {
@@ -1299,6 +1471,8 @@ export class AuthorPrechecks {
           : {}),
       });
     } finally {
+      if (this.cancels.get(check.attempt_id) === cancel)
+        this.cancels.delete(check.attempt_id);
       release?.();
       slot?.release();
     }

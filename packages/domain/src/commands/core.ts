@@ -164,6 +164,7 @@ type CommandName =
   | "recover_standing_pm"
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
+  | "notify_early_merge_conflicts"
   | "remind_system_waits"
   | "system_complete_card"
   | "refresh_card_dependencies"
@@ -182,6 +183,7 @@ type CommandName =
   | "record_merge_executor"
   | "record_precheck"
   | "record_merge_check"
+  | "reuse_precheck_check"
   | "record_merge_preparation"
   | "record_merge_check_blockers"
   | "record_automatic_merge_waits"
@@ -345,6 +347,7 @@ export class CommandDraft {
       "recover_standing_pm",
       "apply_auto_risk_tags",
       "record_merge_shadow",
+      "notify_early_merge_conflicts",
       "remind_system_waits",
       "system_complete_card",
       "refresh_card_dependencies",
@@ -361,6 +364,7 @@ export class CommandDraft {
       "record_merge_executor",
       "record_precheck",
       "record_merge_check",
+      "reuse_precheck_check",
       "record_merge_preparation",
       "record_merge_check_blockers",
       "record_automatic_merge_waits",

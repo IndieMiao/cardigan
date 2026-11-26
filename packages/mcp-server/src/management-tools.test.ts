@@ -1682,6 +1682,115 @@ test("C-110: only standing PM Ops can replace a template verifier; invalid attem
   expect(assigned.id).not.toBe(acceptance.id);
 });
 
+test("C-778: only standing PM Ops can transfer the primary slot over MCP; refusals and persistence failure roll back", async () => {
+  const tool = "replace_primary_work_item";
+  const old = work("coder");
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const ops: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      scope: "standing",
+      standing_mode: "ops",
+      mcp_token_id: "fixture-primary-ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  const ops = await connect(opsAssignment, true);
+  const agent = await coder();
+  const redo = await ok<WorkItem>(office, "create_work_item", {
+    card_id: card.id,
+    title: "重做",
+    kind: "produce",
+    role_id: "coder",
+    required: true,
+    completion_criteria: ["Pass"],
+  });
+  const p = {
+    work_item_id: old.id,
+    replacement_work_item_id: redo.id,
+    card_id: card.id,
+    template_key: "development",
+    reason: "派错角色，改由新产出项交付",
+  };
+  for (const client of [office, agent]) {
+    expect((await client.listTools()).tools.some((t) => t.name === tool)).toBe(
+      false,
+    );
+    expect((await raw(client, tool, p)).isError).toBe(true);
+  }
+  expect((await ops.listTools()).tools.some((t) => t.name === tool)).toBe(true);
+  const snapshot = () =>
+    store.uow.read((tx) => ({
+      items: tx.work_items.list(project),
+      deliveries: tx.deliveries.list(project),
+      events: tx.events.listAfter(project, card.id, 0),
+      timeline: tx.timeline.list(project),
+      id_counters: store.database
+        .prepare("SELECT * FROM id_counters ORDER BY project_id, kind")
+        .all(),
+    }));
+  // The old producer still holds an active Assignment and a running Run.
+  const beforeActive = snapshot();
+  const refused = await raw(ops, tool, p);
+  expect(refused.isError).toBe(true);
+  expect(JSON.stringify(refused)).toContain("未释放的 Assignment");
+  expect(snapshot()).toEqual(beforeActive);
+  store.uow.run((tx) => {
+    for (const run of tx.runs.list(project))
+      if (run.status === "running")
+        tx.runs.put(project, {
+          ...run,
+          status: "completed",
+          outcome: "completed",
+        });
+    for (const a of tx.assignments.list(project))
+      if (a.scope === "work_item" && a.work_item_id === old.id)
+        tx.assignments.put(project, { ...a, status: "released" });
+  });
+  const before = snapshot();
+  for (const invalid of [
+    { ...p, card_id: "C-999" },
+    { ...p, template_key: "code_review" },
+    { ...p, replacement_work_item_id: work("reviewer").id },
+  ]) {
+    const r = await raw(ops, tool, invalid);
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r)).toMatch(/[\u4e00-\u9fff]/u);
+    expect(snapshot()).toEqual(before);
+  }
+  store.database.exec(
+    "CREATE TRIGGER fail_primary BEFORE INSERT ON events WHEN NEW.type = 'primary_work_item_replaced' BEGIN SELECT RAISE(ABORT, 'replacement fixture failure'); END",
+  );
+  expect((await raw(ops, tool, p, "primary-once")).isError).toBe(true);
+  expect(snapshot()).toEqual(before);
+  store.database.exec("DROP TRIGGER fail_primary");
+  const holder = await ok<WorkItem>(ops, tool, p, "primary-once");
+  expect(holder).toMatchObject({
+    id: redo.id,
+    template_key: "development",
+    required: true,
+  });
+  expect(await ok<WorkItem>(ops, tool, p, "primary-once")).toEqual(holder);
+  expect((await raw(ops, tool, p)).isError).toBe(true);
+  const retired = store.uow.read((tx) => tx.work_items.get(project, old.id));
+  expect(retired).toMatchObject({
+    status: "cancelled",
+    required: false,
+    replaced_by_work_item_id: redo.id,
+  });
+  expect(retired?.template_key).toBeUndefined();
+  expect(
+    store.uow.read((tx) =>
+      tx.events
+        .listAfter(project, card.id, 0)
+        .filter((e) => e.type === "primary_work_item_replaced"),
+    ),
+  ).toHaveLength(1);
+});
+
 test.each([
   "none",
   "low",

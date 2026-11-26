@@ -475,7 +475,23 @@ test.each(["completed", "blocked", "failed"] as const)(
           (e.payload as { run_id?: string }).run_id === run.id,
       ),
     ).toHaveLength(1);
-    expect(f.state().work_items).toEqual(work);
+    if (outcome !== "blocked") expect(f.state().work_items).toEqual(work);
+    else {
+      // C-789: the settled blocked finish registered nothing, so the system
+      // registers one blocker for PM, exactly once.
+      const [owned, ...rest] = f.state().work_items;
+      expect(rest).toEqual(work.slice(1));
+      expect(owned).toMatchObject({
+        id: work[0]?.id,
+        status: "blocked",
+        reported_blocker: { auto_registered: true, needs: "role" },
+      });
+      expect(
+        fullEventHistory(f.state().events).filter(
+          (e) => e.type === "blocker_reported",
+        ),
+      ).toHaveLength(1);
+    }
   },
 );
 

@@ -43,6 +43,9 @@ const RESUME_ATTENTION_TYPES = [
   "work_item_resume_deferred",
   "precheck_wait_escalated",
   "baseline_conflict_limit_reached",
+  "precheck_slot_waiting",
+  "precheck_started",
+  "precheck_finished",
 ];
 
 /** Rebuild the PM inbox from card facts. A new report starts a new wait;
@@ -119,6 +122,14 @@ export function resumeAttention(state: CommandState) {
       stopped.has(p.assignment_id)
     )
       continue; // A suspended wake notification is not a restart.
+    // C-777: a slot wait ends once its precheck starts or settles.
+    if (
+      (e.type === "precheck_started" || e.type === "precheck_finished") &&
+      open.get(w.id)?.reason === "precheck_slot_waiting"
+    ) {
+      open.delete(w.id);
+      continue;
+    }
     if (
       [
         "work_item_resume_requested",
@@ -151,6 +162,7 @@ export function resumeAttention(state: CommandState) {
         "work_item_resume_deferred",
         "precheck_wait_escalated",
         "baseline_conflict_limit_reached",
+        "precheck_slot_waiting",
       ].includes(e.type) ||
       p.assignment_id !== (w.assignment_id ?? null) ||
       !p.body
@@ -160,7 +172,9 @@ export function resumeAttention(state: CommandState) {
       card_id: w.card_id,
       work_item_id: w.id,
       assignment_id: p.assignment_id,
-      reason: p.reason ?? e.type,
+      // The slot wait's reason is prose; keep a stable key for settling it.
+      reason:
+        e.type === "precheck_slot_waiting" ? e.type : (p.reason ?? e.type),
       body: p.body,
     });
   }

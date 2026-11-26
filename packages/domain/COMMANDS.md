@@ -188,3 +188,5 @@ C-414：`report_blocker.resume_when={kind,target_id}` 可选；支持 `precheck_
 C-420：`report_blocker.resume_when` 增加 `baseline_updated`，`target_id` 须为当前作者主机登记的基线 SHA。当前作者最新预检候选冲突会自动纳入同一恢复扫描，无需作者报告或声明等待；新 Run 仍由原主机准备链同步基线，不自动合入或解冲突。每个工作项同一 HEAD 默认最多自动同步 3 次（内部 Dispatcher 可配置），每个 attempt 仅消费一次；达到上限只向 PM 发一次 `baseline_conflict_limit_reached`。受信历史候选冲突与明确基线原因匹配时兼容解除旧阻塞，不解除其它原因的报告。
 
 C-521：当前作者等待本产出项自己的预检时，每个新 attempt 可独立恢复，不受此前普通等待次数影响；同一 HEAD 连续检查失败交 PM（默认两次，可由 Dispatcher 配置）。等待的 attempt 已通过时，提交匹配 HEAD 的交付可在同一事务解除该等待，不清除其它阻塞。其它项目内等待与候选冲突仍按原规则处理。
+
+C-782：`notifyEarlyMergeConflicts(state, system, {base_branch, baseline_sha, probes}, ports)` 是内部命令。主机在 main 前进后，对审核中卡片的当前产出交付做只读试合并（待合并的卡不能再交付，由合并准备照常报冲突并退回）：merge-tree 的对象写进随后删除的临时对象目录，中心库只读；不建提交、不写 ref，也不占仓库锁；双方自分叉以来改过的路径有重叠才试。冲突文件写入 `early_merge_conflict_detected` 和系统时间线，路由只通知当前产出负责人。同一交付只提醒一次，之后 main 再前进也并入这一条。作者有未结束的 Run、被人工停止、卡片暂停或负责人失效时不发，下一轮再试。新交付另起一条。卡片、工作项和审核状态都不变，合并闸门照常准备和检查真实候选。审核沿用的冲突证明另接受一种解决：两侧都只在同一处插入行，且双方插入的行原样保留（顺序不限）；这类证明不沿用独立复核结论。跨 SHA 的主机等价证明不再要求作者自报的测试结果相同；同一 SHA 重交、附件和已知遗漏仍须相同。

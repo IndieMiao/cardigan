@@ -17,6 +17,7 @@ import {
   unwrap,
 } from "./core.js";
 import { cancelRunDispatch } from "./launch.js";
+import { settleSessionRotation } from "./session-rotation.js";
 
 // Q-88 explicitly selects 60 minutes despite observed legitimate silence of
 // 48 minutes. The 15-minute alert remains separate from this configurable deadline.
@@ -398,6 +399,14 @@ export function finishInactiveRunStop(
         ...(a.scope === "work_item" ? { work_item_id: a.work_item_id } : {}),
       },
     );
+    // C-789: the host proved this terminal exited. Rerun the in-progress
+    // work once per Assignment if its owner has unread work; never otherwise.
+    if (cancelled)
+      settleSessionRotation(d, d.get("assignments", a.id), "inactive", next, {
+        runtime_ref: stop.runtime_ref,
+        exited: true,
+        evidence: stop.attempt_id,
+      });
     return next;
   });
 }

@@ -41,6 +41,7 @@ import {
   targetProbe,
   tryHostOpsLock,
   type WorktreeProvider,
+  withCapacityOverrides,
   worktreeProvider,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
@@ -269,7 +270,10 @@ async function startUnlocked(
     ? { kind: "system", project_id }
     : caller;
   rejectExternalTerminalAction(store, project_id, options.assignment_id);
-  const capacity = await loadRunCapacityConfig({ env: io.env });
+  const capacity = withCapacityOverrides(
+    await loadRunCapacityConfig({ env: io.env }),
+    store.database,
+  );
   for (const error of capacity.errors) io.stderr(error);
   let execution =
     options.execution ?? (await executionFor(io, options.dataDir));
