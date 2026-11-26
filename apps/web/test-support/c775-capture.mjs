@@ -94,6 +94,9 @@ try {
       url: `${server.resolvedUrls.local[0]}__c775?phase=${phase}${hash}`,
     });
     await until("!!window.c775");
+    await run((theme) => {
+      document.documentElement.dataset.theme = theme;
+    }, theme);
   };
   const measure = () =>
     run(() => {
@@ -174,7 +177,7 @@ try {
       const suffix = `${width}-${theme}.png`;
       // The reference page at the same width and theme.
       await open(width, theme, "#/p/p-1/cards?view=list");
-      await until("document.querySelectorAll('[data-card-id]').length >= 7");
+      await until("!!document.querySelector('.card-table')");
       await record(`list-${suffix}`);
       // While the client waits between retries.
       await open(width, theme, "#/p/p-1/cards/C-2", "retrying");
@@ -199,9 +202,7 @@ try {
         document.querySelector("[role=alert] button").click();
       });
       await until("!document.querySelector('[role=alert]')");
-      await until(
-        "document.body.innerText.includes('核对卡片页工具栏、长标题与下一步负责人')",
-      );
+      await until("!!document.querySelector('.card-main')");
       await record(`detail-recovered-${suffix}`);
     }
   assert.deepEqual(browser.errors, []);
