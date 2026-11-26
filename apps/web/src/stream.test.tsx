@@ -746,14 +746,22 @@ test("capacity revisions deduplicate, survive reconnection and update only the s
   const old = f.connections.last;
   act(() => old.emit("error"));
   await waitFor(() => expect(f.connections.last).not.toBe(old));
+  // C-802: since C-779 every open re-reads the views on screen, the shared
+  // capacity included, after the stream's 100 ms coalescing delay. Wait for
+  // that re-read explicitly instead of asserting inside its window.
+  act(() => f.connections.last.emit("open"));
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  await settle();
+  read.mockClear();
+  cards.mockClear();
   running = 4;
   act(() => {
-    f.connections.last.emit("open");
     f.connections.last.emit("capacity", { revision: "three" });
     old.emit("capacity", { revision: "stale" });
   });
   await screen.findByRole("button", { name: /Agent 4\/6/u });
-  expect(read).toHaveBeenCalledTimes(2);
+  await settle();
+  expect(read).toHaveBeenCalledTimes(1);
   expect(cards).not.toHaveBeenCalled();
 });
 
