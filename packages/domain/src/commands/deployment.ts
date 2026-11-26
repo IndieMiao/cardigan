@@ -731,19 +731,44 @@ export function reconcileSupervisorNotice(
         source: "supervisor_rechecked",
       });
     }
+    // C-770: after a failed or rolled-back self-upgrade of this version, its
+    // Needs You item already says to upgrade by hand. Point the reminder at
+    // it instead of opening a second item for the same thing.
+    const failure = automatic
+      ? undefined
+      : supervisorUpgradeEvents(state.events, state.project_id)
+          .filter(
+            (e) =>
+              e.from === supervisor &&
+              (e.status === "failed" || e.status === "rolled_back") &&
+              e.human_action_id,
+          )
+          .at(-1);
+    const failureAction =
+      failure &&
+      d.list("human_actions").find((h) => h.id === failure.human_action_id);
     // Legacy false alarms do not consume the one verified reminder per running SHA.
     // C-767: an automatic record never consumes the human reminder either.
+    // C-770: a failed attempt is folded once, even after an earlier reminder.
     if (
       !affected.length ||
       eventsOfType(state.events, "host_deployment_supervisor_change").some(
         (e) => {
-          const p = e.payload as { supervisor?: string; automatic?: boolean };
+          const p = e.payload as {
+            supervisor?: string;
+            automatic?: boolean;
+            upgrade_attempt?: string;
+          };
           return (
             e.actor.kind === "system" &&
             e.actor.project_id === state.project_id &&
             !e.card_id &&
             p.supervisor === supervisor &&
-            (automatic ? p.automatic === true : !p.automatic)
+            (automatic
+              ? p.automatic === true
+              : failure && failureAction
+                ? p.upgrade_attempt === failure.attempt
+                : !p.automatic)
           );
         },
       )
@@ -755,6 +780,39 @@ export function reconcileSupervisorNotice(
         main,
         affected: [...affected],
         automatic: true,
+      });
+      return;
+    }
+    if (failure && failureAction) {
+      if (current?.status === "open") {
+        const reason = `已并入监督器自动升级失败待办 ${failureAction.id}`;
+        d.put("human_actions", {
+          ...current,
+          status: unwrap(transition("human_action", current.status, "cancel")),
+          cancellation: {
+            reason,
+            by: d.author,
+            at: d.now,
+            source: "supervisor_rechecked",
+          },
+        });
+        d.emit("human_action_cancelled", undefined, {
+          human_action_id: current.id,
+          reason,
+          source: "supervisor_rechecked",
+        });
+      }
+      if (failureAction.status === "open")
+        d.put("human_actions", {
+          ...failureAction,
+          instructions: `${failureAction.instructions}\n到中心 main ${main} 的监督器差异涉及：${affected.join("、")}。`,
+        });
+      d.emit("host_deployment_supervisor_change", undefined, {
+        supervisor,
+        main,
+        affected: [...affected],
+        human_action_id: failureAction.id,
+        upgrade_attempt: failure.attempt,
       });
       return;
     }
