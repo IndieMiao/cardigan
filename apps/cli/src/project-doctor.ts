@@ -18,6 +18,8 @@ import {
   loadRunCapacityConfig,
   loadRuntimeWorkers,
   type MergeGateExecutor,
+  type ObservedPreparation,
+  observedWorktreePreparation,
   type RuntimeWorker,
   readWorktreePreparation,
   runtimeTargetBinding,
@@ -478,9 +480,17 @@ export async function projectDoctor(input: DoctorInput): Promise<DoctorItem[]> {
   } catch (error) {
     workersError = error instanceof Error ? error.message : String(error);
   }
+  // Same evidence as placement; a store not yet migrated has none.
+  let observed: ObservedPreparation | undefined;
+  try {
+    observed = observedWorktreePreparation(store);
+  } catch {
+    observed = undefined;
+  }
   const preparation = readWorktreePreparation(
     io.env as NodeJS.ProcessEnv,
     input.now,
+    observed,
   );
   const capacity = await loadRunCapacityConfig({ env: io.env });
   if (!snapshot.machines.length)
@@ -538,6 +548,7 @@ export async function projectDoctor(input: DoctorInput): Promise<DoctorItem[]> {
       detail: {
         verified: "有效",
         expired: "已过期",
+        stale: `改过 path/env，当前指纹 ${fingerprint.slice(0, 12)} 尚未重新准备`,
         invalid: `与当前绑定不符（当前指纹 ${fingerprint.slice(0, 12)}；改过 path/env 后要重新登记）`,
         missing: "没有登记，自动选机不会选这台",
       }[proof],
