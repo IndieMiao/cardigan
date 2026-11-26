@@ -84,9 +84,12 @@ import {
   projectsHoldingId,
 } from "./project-codes.js";
 import {
+  findingKey,
   listFindings,
+  openFinding,
   type ReconcileFindingInput,
   recordFindings,
+  resolveFinding,
 } from "./reconcile.js";
 import {
   clearRepositoryCache,
@@ -1538,6 +1541,7 @@ export class Store {
     options: {
       readonly unscanned?: readonly string[];
       readonly unscannedPaths?: readonly string[];
+      readonly exceptKinds?: readonly string[];
     } = {},
   ) {
     return recordFindings(
@@ -1546,6 +1550,24 @@ export class Store {
       findings,
       this.#clock.now(),
       options,
+    );
+  }
+
+  /** C-791: open one finding outside a reconcile pass; its record if new. */
+  openReconcileFinding(project_id: ProjectId, finding: ReconcileFindingInput) {
+    return openFinding(this.#db, project_id, finding, this.#clock.now());
+  }
+
+  /** C-791: resolve the finding with this kind and subject, if open. */
+  resolveReconcileFinding(
+    project_id: ProjectId,
+    finding: Omit<ReconcileFindingInput, "detail">,
+  ) {
+    return resolveFinding(
+      this.#db,
+      project_id,
+      findingKey({ ...finding, detail: "" }),
+      this.#clock.now(),
     );
   }
 

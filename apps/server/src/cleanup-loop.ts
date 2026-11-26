@@ -16,9 +16,23 @@ import {
   requestWorktreeCleanup,
   routeWorktreeCleanupDecisions,
 } from "@cardigan/domain";
+import {
+  workerGitRejection,
+  workerGitRejectionNeedsHuman,
+} from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
-import { unrevokedTokensForProject } from "@cardigan/store";
+import {
+  retireReconcileNotifications,
+  unrevokedTokensForProject,
+} from "@cardigan/store";
 import { buildCheckoutIdle } from "./build-checkouts.js";
+import {
+  appendFindingEvent,
+  BUILD_CLEANUP_FINDING,
+  BUILD_FINDING_AFTER,
+  BuildCleanupRetries,
+  buildCleanupDetail,
+} from "./build-cleanup-retry.js";
 import type { MachineDirectories, ReconcileGit } from "./git.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
 import { MaintenanceBatch, projectCycle } from "./maintenance-batch.js";
@@ -81,6 +95,8 @@ export class CleanupExecutor {
     Set<"releases" | "owners" | "builds">
   >();
   private readonly builds = new MaintenanceBatch<ProjectId, string>();
+  /** C-791: builds whose removal failed wait out a backoff, per Assignment. */
+  private readonly buildRetries = new BuildCleanupRetries();
   /** C-747: last routing check of owner-held worktree cleanup questions. */
   private readonly routing = new Map<
     ProjectId,
@@ -138,6 +154,7 @@ export class CleanupExecutor {
     const reset = this.serial.then(() => {
       for (const key of this.cleaned)
         if (key.startsWith(`${project_id}/`)) this.cleaned.delete(key);
+      this.buildRetries.reset(project_id);
       this.listings.delete(project_id);
       // A pass already under way may have listed this machine before.
       return this.pass.has(project_id);
@@ -360,20 +377,37 @@ export class CleanupExecutor {
     // C-664: a worker's builds are listed on that worker; only ids whose
     // Assignment is bound there are removed through its own helper leaf.
     const remote: string[] = [];
+    const machines = new Map<string, string>();
     if (!this.builds.has(project_id)) {
       const assignments = this.options.store.uow.read((tx) =>
         tx.assignments.list(project_id),
       );
-      const machines = new Map(assignments.map((a) => [a.id, a.machine_id]));
+      for (const a of assignments) machines.set(a.id, a.machine_id);
+      // C-791: machines whose listing this pass can trust as complete.
+      const scanned = new Set(["local"]);
       for (const machine_id of new Set(
         assignments
           .map((a) => a.machine_id)
           .filter((machine) => machine !== "local"),
       )) {
         const found = await this.listing(project_id, machine_id);
+        if (found) scanned.add(machine_id);
         for (const id of found?.builds ?? [])
           if (machines.get(id as AssignmentId) === machine_id) remote.push(id);
       }
+      const present = new Set([...owners, ...remote]);
+      // A build that is gone (e.g. removed by a person) needs nothing more.
+      for (const finding of this.options.store.listReconcileFindings(
+        project_id,
+        { openOnly: true },
+      ))
+        if (
+          finding.kind === BUILD_CLEANUP_FINDING &&
+          finding.assignment_id !== undefined &&
+          !present.has(finding.assignment_id) &&
+          scanned.has(machines.get(finding.assignment_id) ?? "local")
+        )
+          this.buildCleaned(project_id, finding.assignment_id);
     }
     const listed = [...new Set([...owners, ...remote])];
     await this.builds.run(
@@ -383,22 +417,107 @@ export class CleanupExecutor {
         // A released Assignment whose terminal release failed this round keeps
         // its build until the next round confirms the exit (§12.6).
         if (unconfirmed.has(assignment_id)) return;
+        // C-791: no Git lock or SSH call while a failed removal backs off.
+        if (
+          !this.buildRetries.due(
+            project_id,
+            assignment_id,
+            Date.parse(this.clock.now()),
+          )
+        )
+          return;
         if (!idle(assignment_id, false)) return;
         try {
-          await remove({
+          const outcome = await remove({
             project,
             assignment_id,
             // Re-read under the repository lock: a Run queued meanwhile wins.
             idle: () => idle(assignment_id),
           });
+          if (outcome.status !== "in_use")
+            this.buildCleaned(project_id, assignment_id);
         } catch (error) {
-          // Reconcile reports the leftover after the cleanup grace.
-          this.report(
-            `build checkout cleanup for ${assignment_id} failed: ${error instanceof Error ? error.message : String(error)}`,
+          this.buildFailed(
+            project_id,
+            assignment_id,
+            machines.get(assignment_id) ??
+              this.options.store.uow.read(
+                (tx) =>
+                  tx.assignments.get(project_id, assignment_id as AssignmentId)
+                    ?.machine_id,
+              ) ??
+              "local",
+            error,
           );
         }
       },
     );
+  }
+
+  /**
+   * C-791: one failed build removal. The next try waits an exponential
+   * backoff; a cause only a person can repair (non-empty, not removable or
+   * not a private directory) waits the cap and is a finding at once, any
+   * other cause after `BUILD_FINDING_AFTER` failures in a row.
+   */
+  private buildFailed(
+    project_id: ProjectId,
+    assignment_id: string,
+    machine_id: string,
+    error: unknown,
+  ) {
+    const reason = workerGitRejection(error);
+    const human = reason !== undefined && workerGitRejectionNeedsHuman(reason);
+    const now = this.clock.now();
+    const retry = this.buildRetries.failed(
+      project_id,
+      assignment_id,
+      Date.parse(now),
+      human,
+    );
+    this.report(
+      `build checkout cleanup for ${assignment_id} failed (${retry.failures} in a row, next try after ${new Date(retry.next_at).toISOString()}): ${error instanceof Error ? error.message : String(error)}`,
+    );
+    if (!human && retry.failures < BUILD_FINDING_AFTER) return;
+    this.options.store.uow.run((tx) => {
+      const opened = this.options.store.openReconcileFinding(project_id, {
+        kind: BUILD_CLEANUP_FINDING,
+        assignment_id,
+        detail: buildCleanupDetail({
+          machine_id,
+          reason,
+          human,
+          failures: retry.failures,
+        }),
+      });
+      if (opened) appendFindingEvent(tx, project_id, opened, now);
+    });
+  }
+
+  /** C-791: the build is gone; forget its backoff and resolve its finding. */
+  private buildCleaned(project_id: ProjectId, assignment_id: string) {
+    this.buildRetries.forget(project_id, assignment_id);
+    const open = this.options.store
+      .listReconcileFindings(project_id, { openOnly: true })
+      .some(
+        (finding) =>
+          finding.kind === BUILD_CLEANUP_FINDING &&
+          finding.assignment_id === assignment_id,
+      );
+    if (!open) return;
+    this.options.store.uow.run(() => {
+      if (
+        this.options.store.resolveReconcileFinding(project_id, {
+          kind: BUILD_CLEANUP_FINDING,
+          assignment_id,
+        })
+      )
+        retireReconcileNotifications(
+          this.options.store.database,
+          project_id,
+          this.clock.now(),
+        );
+    });
   }
 
   /** §3.6: release every work-item Assignment of a done or cancelled card. */

@@ -42,6 +42,7 @@ import {
   m4Fixture,
   m4Scenario,
 } from "./m4-fixtures.js";
+import { ReconcileExecutor } from "./reconcile-loop.js";
 import { WorkerUsageMonitor } from "./worker-usage.js";
 
 const REMOTE = "/worker-fixture";
@@ -72,6 +73,8 @@ let root: string;
 let disk: string;
 let service: ServerGit;
 let failListing: boolean;
+/** C-791: the reason line of the helper release; undefined is the previous one. */
+let helperReason: string | undefined;
 const GiB = 1024 ** 3;
 let usageFree: number;
 let requests: { operation: string; assignment: string; path?: string }[];
@@ -143,6 +146,12 @@ function helper(request: runtime.WorkerGitRequest): unknown {
         return null;
       allowed(path);
       if (!existsSync(local(path))) return null;
+      // Like deploy/worker-git.py: never recurse; refuse with exit 75.
+      if (readdirSync(local(path)).length)
+        throw runtime.workerGitFailure("remove-empty", {
+          code: 75,
+          stderr: `worker_git_rejected\n${helperReason ? `worker_git_reason=${helperReason}\n` : ""}`,
+        });
       rmdirSync(local(path));
       return null;
     case "prepare":
@@ -227,6 +236,7 @@ beforeEach(async () => {
   scenario = m4Scenario(f, "auto");
   reports.length = 0;
   failListing = false;
+  helperReason = "not_empty";
   usageFree = 100 * GiB;
   requests = [];
   root = realpathSync(mkdtempSync(join(tmpdir(), "cg-worker-reclaim-")));
@@ -488,6 +498,122 @@ test("a failed worker listing judges nothing absent and the next pass reclaims",
   await executor.sweep(f.project_id);
   expect(existsSync(dir)).toBe(false);
   expect(existsSync(buildDir)).toBe(false);
+});
+
+/** C-791: a build directory a failed `git worktree remove` left behind. */
+function leftover(id: string) {
+  const dir = local(buildOf(id));
+  mkdirSync(join(dir, ".godot", "imported"), { recursive: true });
+  writeFileSync(join(dir, ".godot", "imported", "a.ctex"), "x");
+  return dir;
+}
+const removals = (id: string) =>
+  requests.filter((r) => r.operation === "remove-empty" && r.assignment === id)
+    .length;
+const openCleanupFindings = () =>
+  f.store
+    .listReconcileFindings(f.project_id, { openOnly: true })
+    .filter((finding) => finding.kind === "build_cleanup_rejected");
+
+test("C-791 a build the helper refuses as non-empty backs off, becomes one finding and resolves once a person removed it", async () => {
+  const stuck = released(scenario.reviewer, "A-326");
+  const dir = leftover(stuck.id);
+  let now = Date.parse("2030-01-01T00:00:00.000Z");
+  const executor = new CleanupExecutor({
+    store: f.store,
+    git: service,
+    runtime: runtimeStub,
+    clock: { now: () => new Date(now).toISOString() },
+    report: (message) => reports.push(message),
+  });
+
+  await executor.sweep(f.project_id);
+  expect(existsSync(dir)).toBe(true);
+  expect(removals(stuck.id)).toBe(1);
+  expect(reports).toEqual([
+    expect.stringMatching(
+      /^build checkout cleanup for A-326 failed \(1 in a row, next try after 2030-01-01T06:00:00\.000Z\): .*helper rejected request: not_empty/u,
+    ),
+  ]);
+  // A person must look: one finding at once, routed to PM Ops.
+  expect(openCleanupFindings()).toEqual([
+    expect.objectContaining({
+      assignment_id: "A-326",
+      detail: `${MACHINE} 上的构建目录连续 1 次清理失败：目录非空；需要人处理，处理后自动消除`,
+    }),
+  ]);
+  expect(lowSpaceEvents("reconcile_finding")).toHaveLength(1);
+
+  // Every round within the backoff: no helper call, no Git lock, no log line.
+  for (const minutes of [1, 30, 359]) {
+    now = Date.parse("2030-01-01T00:00:00.000Z") + minutes * 60_000;
+    await executor.sweep(f.project_id);
+  }
+  expect(removals(stuck.id)).toBe(1);
+  expect(reports).toHaveLength(1);
+
+  now = Date.parse("2030-01-01T06:00:00.000Z");
+  await executor.sweep(f.project_id);
+  expect(removals(stuck.id)).toBe(2);
+  // Still the same finding: updated, not announced again.
+  expect(openCleanupFindings()).toEqual([
+    expect.objectContaining({
+      detail: expect.stringContaining("连续 2 次"),
+      first_seen_at: "2030-01-01T00:00:00.000Z",
+    }),
+  ]);
+  expect(lowSpaceEvents("reconcile_finding")).toHaveLength(1);
+  // The reconcile pass does not resolve the cleanup loop's finding.
+  await new ReconcileExecutor({ store: f.store, git: service }).tick(
+    f.project_id,
+  );
+  expect(openCleanupFindings()).toHaveLength(1);
+
+  // A person removed it: the next listing no longer has it, before the retry.
+  rmSync(dir, { recursive: true, force: true });
+  now += 60_000;
+  await executor.sweep(f.project_id);
+  expect(openCleanupFindings()).toEqual([]);
+  expect(removals(stuck.id)).toBe(2);
+});
+
+test("C-791 a refusal without a reason (previous helper) backs off exponentially and is a finding after three in a row", async () => {
+  helperReason = undefined;
+  const stuck = released(scenario.reviewer, "A-320");
+  const dir = leftover(stuck.id);
+  const start = Date.parse("2030-01-01T00:00:00.000Z");
+  let now = start;
+  const executor = new CleanupExecutor({
+    store: f.store,
+    git: service,
+    runtime: runtimeStub,
+    clock: { now: () => new Date(now).toISOString() },
+    report: (message) => reports.push(message),
+  });
+  const tries: number[] = [];
+  for (let minute = 0; minute <= 16; minute++) {
+    now = start + minute * 60_000;
+    const before = removals(stuck.id);
+    await executor.sweep(f.project_id);
+    if (removals(stuck.id) > before) tries.push(minute);
+    if (tries.length === 2) expect(openCleanupFindings()).toEqual([]);
+  }
+  // 1, 2, 4, 8 minutes apart instead of every round.
+  expect(tries).toEqual([0, 1, 3, 7, 15]);
+  expect(openCleanupFindings()).toEqual([
+    expect.objectContaining({
+      assignment_id: "A-320",
+      detail: expect.stringContaining("未给出原因"),
+    }),
+  ]);
+  expect(lowSpaceEvents("reconcile_finding")).toHaveLength(1);
+
+  // The directory became removable: removed on the next due try, resolved.
+  rmSync(join(dir, ".godot"), { recursive: true, force: true });
+  now = start + 31 * 60_000;
+  await executor.sweep(f.project_id);
+  expect(existsSync(dir)).toBe(false);
+  expect(openCleanupFindings()).toEqual([]);
 });
 
 test("an offline worker is not listed and keeps its directories", async () => {

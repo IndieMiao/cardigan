@@ -6,6 +6,10 @@ import type {
 } from "@cardigan/git-service";
 import { retireReconcileNotifications, type Store } from "@cardigan/store";
 import { buildCheckoutFacts } from "./build-checkouts.js";
+import {
+  appendFindingEvent,
+  BUILD_CLEANUP_FINDING,
+} from "./build-cleanup-retry.js";
 import type { ReconcileGit, ReconcilePages } from "./git.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
 import { projectCycle, visitMaintenancePage } from "./maintenance-batch.js";
@@ -217,31 +221,13 @@ export class ReconcileExecutor {
             .flatMap((finding) =>
               finding.path === undefined ? [] : [finding.path],
             ),
+          // C-791: the cleanup loop opens and resolves these itself.
+          exceptKinds: [BUILD_CLEANUP_FINDING],
         },
       );
       retireReconcileNotifications(this.options.store.database, project_id, at);
-      for (const finding of created) {
-        const seq = tx.ids.nextEventSequence(project_id, undefined);
-        tx.events.append(project_id, {
-          id: tx.ids.nextEventId(),
-          seq,
-          type: "reconcile_finding",
-          actor: { kind: "system", project_id },
-          payload: {
-            kind: finding.kind,
-            detail: finding.detail,
-            first_seen_at: finding.first_seen_at,
-            ...(finding.path === undefined ? {} : { path: finding.path }),
-            ...(finding.assignment_id === undefined
-              ? {}
-              : { assignment_id: finding.assignment_id }),
-            ...(finding.delivery_id === undefined
-              ? {}
-              : { delivery_id: finding.delivery_id }),
-          },
-          created_at: at,
-        });
-      }
+      for (const finding of created)
+        appendFindingEvent(tx, project_id, finding, at);
       return created;
     });
   }

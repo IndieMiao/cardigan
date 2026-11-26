@@ -85,10 +85,55 @@ export function recordFindings(
     readonly unscanned?: readonly string[];
     /** Exact paths whose targeted probes failed, independent of prefix scans. */
     readonly unscannedPaths?: readonly string[];
+    /**
+     * C-791: kinds another loop records and resolves itself (see
+     * `openFinding`); this pass never resolves them by absence.
+     */
+    readonly exceptKinds?: readonly string[];
   } = {},
 ): { readonly created: readonly ReconcileFindingRecord[] } {
   const created: ReconcileFindingRecord[] = [];
   const seen = new Set<string>();
+  for (const finding of findings) {
+    const id = findingKey(finding);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const opened = openFinding(db, project_id, finding, at);
+    if (opened) created.push(opened);
+  }
+  const unscanned = options.unscanned ?? [];
+  const unscannedPaths = new Set(options.unscannedPaths ?? []);
+  const except = new Set(options.exceptKinds ?? []);
+  const open = db
+    .prepare(
+      "SELECT id, kind, path FROM reconcile_findings WHERE project_id = ? AND resolved_at IS NULL",
+    )
+    .all(project_id)
+    .map((row) => row as { id: unknown; kind: unknown; path: unknown })
+    .filter((row) => !except.has(String(row.kind)))
+    .filter(
+      (row) =>
+        typeof row.path !== "string" ||
+        (!unscannedPaths.has(row.path) &&
+          !unscanned.some((prefix) => (row.path as string).startsWith(prefix))),
+    )
+    .map((row) => String(row.id));
+  for (const id of open)
+    if (!seen.has(id)) resolveFinding(db, project_id, id, at);
+  return { created };
+}
+
+/**
+ * Upsert one finding. Returns its record when it was newly opened or reopened
+ * after being resolved (both deserve attention), otherwise `undefined`.
+ */
+export function openFinding(
+  db: DatabaseSync,
+  project_id: ProjectId,
+  finding: ReconcileFindingInput,
+  at: string = new Date().toISOString(),
+): ReconcileFindingRecord | undefined {
+  const id = findingKey(finding);
   const upsert = db.prepare(
     "INSERT INTO reconcile_findings " +
       "(project_id, id, kind, path, assignment_id, delivery_id, detail, first_seen_at, last_seen_at, resolved_at) " +
@@ -103,48 +148,41 @@ export function recordFindings(
     "SELECT id, kind, path, assignment_id, delivery_id, detail, first_seen_at, last_seen_at, resolved_at " +
       "FROM reconcile_findings WHERE project_id = ? AND id = ?",
   );
-  for (const finding of findings) {
-    const id = findingKey(finding);
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const before = find.get(project_id, id) as
-      | Record<string, unknown>
-      | undefined;
-    upsert.run(
-      project_id,
-      id,
-      finding.kind,
-      finding.path ?? null,
-      finding.assignment_id ?? null,
-      finding.delivery_id ?? null,
-      finding.detail,
-      at,
-      at,
-    );
-    // Newly opened, or reopened after being resolved: both deserve attention.
-    if (before === undefined || before.resolved_at !== null)
-      created.push(record(find.get(project_id, id) as Record<string, unknown>));
-  }
-  const unscanned = options.unscanned ?? [];
-  const unscannedPaths = new Set(options.unscannedPaths ?? []);
-  const open = db
-    .prepare(
-      "SELECT id, path FROM reconcile_findings WHERE project_id = ? AND resolved_at IS NULL",
-    )
-    .all(project_id)
-    .map((row) => row as { id: unknown; path: unknown })
-    .filter(
-      (row) =>
-        typeof row.path !== "string" ||
-        (!unscannedPaths.has(row.path) &&
-          !unscanned.some((prefix) => (row.path as string).startsWith(prefix))),
-    )
-    .map((row) => String(row.id));
-  const resolve = db.prepare(
-    "UPDATE reconcile_findings SET resolved_at = ? WHERE project_id = ? AND id = ? AND resolved_at IS NULL",
+  const before = find.get(project_id, id) as
+    | Record<string, unknown>
+    | undefined;
+  upsert.run(
+    project_id,
+    id,
+    finding.kind,
+    finding.path ?? null,
+    finding.assignment_id ?? null,
+    finding.delivery_id ?? null,
+    finding.detail,
+    at,
+    at,
   );
-  for (const id of open) if (!seen.has(id)) resolve.run(at, project_id, id);
-  return { created };
+  return before === undefined || before.resolved_at !== null
+    ? record(find.get(project_id, id) as Record<string, unknown>)
+    : undefined;
+}
+
+/** Resolve one open finding by key; true when it was open. */
+export function resolveFinding(
+  db: DatabaseSync,
+  project_id: ProjectId,
+  id: string,
+  at: string = new Date().toISOString(),
+): boolean {
+  return (
+    Number(
+      db
+        .prepare(
+          "UPDATE reconcile_findings SET resolved_at = ? WHERE project_id = ? AND id = ? AND resolved_at IS NULL",
+        )
+        .run(at, project_id, id).changes,
+    ) > 0
+  );
 }
 
 /** Findings of a project, newest last; `openOnly` hides resolved ones. */
