@@ -63,6 +63,8 @@ export class AuthorPrechecks {
   private readonly pendingFailures = new Set<string>();
   private readonly retry = new Map<string, number>();
   private readonly active = new Map<string, Promise<void>>();
+  /** C-783: business cancellation of an in-flight attempt a newer HEAD replaced. */
+  private readonly cancels = new Map<string, AbortController>();
   constructor(
     private readonly options: {
       store: Store;
@@ -132,7 +134,10 @@ export class AuthorPrechecks {
     return row ? (JSON.parse(String(row.doc)) as Precheck) : undefined;
   }
   private async verify(project: ProjectId, result: Precheck) {
-    const owner = this.owner(project, result);
+    // A superseded attempt needs no HEAD proof; update() only drops its checkpoint.
+    const owner = this.superseded(project, result)
+      ? undefined
+      : this.owner(project, result);
     let same = false;
     if (owner) {
       if (!this.options.git.checkHead)
@@ -161,8 +166,24 @@ export class AuthorPrechecks {
       true,
     );
   }
+  /** request_check already settled this attempt for a newer HEAD (C-783). */
+  private superseded(project: ProjectId, check: Precheck) {
+    return !!this.current(project, check)?.superseded_by;
+  }
+  private cancelSuperseded(attempt: string) {
+    this.cancels.get(attempt)?.abort();
+  }
   private update(project: ProjectId, check: Precheck, verifyOwner = false) {
-    this.options.store.uow.run((tx) => {
+    const replaced = this.options.store.uow.run((tx) => {
+      // C-783: never republish an attempt a newer HEAD replaced; drop any
+      // private result checkpoint and let the executor be cancelled instead.
+      if (this.superseded(project, check)) {
+        this.options.store.database
+          .prepare(`DELETE FROM precheck_head_proofs
+          WHERE project_id=? AND card_id=? AND attempt_id=?`)
+          .run(project, check.card_id, check.attempt_id);
+        return true;
+      }
       // A stale queue observer cannot interrupt/requeue a completed execution;
       // concurrent proof readers cannot publish a second terminal result.
       if (verifyOwner !== !!this.proof(project, check)) {
@@ -192,7 +213,9 @@ export class AuthorPrechecks {
           .prepare(`DELETE FROM precheck_head_proofs
           WHERE project_id=? AND card_id=? AND attempt_id=?`)
           .run(project, check.card_id, check.attempt_id);
+      return false;
     });
+    if (replaced) this.cancelSuperseded(check.attempt_id);
     // A terminal pre-dispatch failure has no remote run or unsettled publisher.
     if (
       check.executor?.type === "github" &&
@@ -338,6 +361,8 @@ export class AuthorPrechecks {
           // A retry deadline is useful only while the attempt can run again.
           // Drop settled attempts, including ones settled by another process.
           this.retry.delete(check.attempt_id);
+          // C-783: a newer HEAD replaced it; stop its executor and remote run now.
+          if (check.superseded_by) this.cancelSuperseded(check.attempt_id);
           continue;
         }
         if (this.active.has(check.attempt_id) || this.options.signal.aborted)
@@ -438,6 +463,8 @@ export class AuthorPrechecks {
     let finishedLog = false,
       verifying = !!pending;
     let errorEnv: Readonly<Record<string, string>> = {};
+    const cancel = new AbortController();
+    this.cancels.set(check.attempt_id, cancel);
     try {
       if (
         !pending &&
@@ -593,7 +620,7 @@ export class AuthorPrechecks {
       };
       if (this.held(projectId, check)) return;
       if (check.status === "queued") this.update(projectId, check);
-      if (this.options.signal.aborted) return;
+      if (this.options.signal.aborted || cancel.signal.aborted) return;
       stage = "创建日志";
       log = await (this.options.createLog ?? createMergeCheckLog)({
         dataDir: this.options.execution.dataDir,
@@ -639,7 +666,12 @@ export class AuthorPrechecks {
         executor,
         {
           beforeDispatch: () => {
-            if (!this.owner(projectId, check) || this.held(projectId, check))
+            if (
+              cancel.signal.aborted ||
+              this.superseded(projectId, check) ||
+              !this.owner(projectId, check) ||
+              this.held(projectId, check)
+            )
               throw new CheckExecutorSuspended();
           },
           kind: "precheck",
@@ -656,9 +688,13 @@ export class AuthorPrechecks {
           totalTimeoutMs: settings.totalTimeoutMs,
           serialize: true,
           lockSlot: slot.index,
+          // Host shutdown only detaches GitHub supervision; supersession
+          // cancels the run (C-783), as merge checks do for invalid tasks.
           ...(target.type === "github"
-            ? { hostSignal: this.options.signal }
-            : { signal: this.options.signal }),
+            ? { hostSignal: this.options.signal, signal: cancel.signal }
+            : {
+                signal: AbortSignal.any([this.options.signal, cancel.signal]),
+              }),
           onReady: (owner) => {
             if (target.type !== "github") release?.transfer(owner);
             if (check.status !== "running") {
@@ -811,6 +847,8 @@ export class AuthorPrechecks {
           : {}),
       });
     } finally {
+      if (this.cancels.get(check.attempt_id) === cancel)
+        this.cancels.delete(check.attempt_id);
       release?.();
       slot?.release();
     }

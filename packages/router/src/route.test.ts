@@ -1742,6 +1742,33 @@ test("candidate conflict results inform an active author but cannot bypass bound
   ).toEqual([]);
 });
 
+test("C-783: a precheck superseded by the author's newer HEAD rings no result bell; an ordinary result still does", () => {
+  const result = (extra: Record<string, unknown>) =>
+    event(
+      "precheck_finished",
+      {
+        card_id: "C-1",
+        work_item_id: "W-1",
+        assignment_id: "A-1",
+        attempt_id: "old",
+        status: "interrupted",
+        head_sha: "a".repeat(40),
+        ...extra,
+      },
+      { actor: { kind: "system", project_id } },
+    );
+  const active = snapshot({
+    runs: [run("R-1", { assignment_id: "A-1", status: "running" })],
+  });
+  expect(
+    routeEvent({ event: result({ superseded_by: "new" }), snapshot: active })
+      .notifications,
+  ).toEqual([]);
+  expect(
+    recipients(routeEvent({ event: result({}), snapshot: active })),
+  ).toEqual(["assignment:A-1"]);
+});
+
 test("human-confirmed remote worker release asks PM to choose the next machine without creating an Assignment", () => {
   const e = event(
     "remote_worker_released",

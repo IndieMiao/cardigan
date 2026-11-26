@@ -2409,12 +2409,15 @@ export function routeEvent(input: RouteInput): RouteResult {
         attempt_id?: string;
         assignment_id?: AssignmentId;
         work_item_id?: WorkItemId;
+        superseded_by?: string;
       };
       if (
         input.event.actor.kind !== "system" ||
         input.event.actor.project_id !== input.snapshot.project_id ||
         !p.assignment_id ||
-        !p.work_item_id
+        !p.work_item_id ||
+        // C-783: the author's own newer request replaced it; its result is the one to read.
+        p.superseded_by
       )
         break;
       const conflict = isPrecheckConflict(
