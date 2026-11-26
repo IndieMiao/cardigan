@@ -392,7 +392,8 @@ test.each([
       name: "影响的卡片",
       hidden: true,
     });
-    expect(rows).toHaveLength(merge ? 1 : 3);
+    // Requested and resolved timeline rows; C-699 dropped the overview's copy.
+    expect(rows).toHaveLength(merge ? 1 : 2);
     for (const row of rows)
       expect(within(row).getByText("旧标题")).toBeTruthy();
     const field = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
@@ -418,7 +419,7 @@ test.each([
         name: "C-2 新标题 已完成",
         hidden: true,
       }),
-    ).toHaveLength(merge ? 1 : 3);
+    ).toHaveLength(merge ? 1 : 2);
     expect(read).toHaveBeenCalledTimes(before + 1);
     expect(screen.getByLabelText("评论正文")).toBe(field);
     expect(field.value).toBe("跨卡刷新期间保留的草稿");
@@ -443,7 +444,7 @@ test.each([
           name: "C-3 加载期间已经完成 已完成",
           hidden: true,
         }),
-      ).toHaveLength(merge ? 1 : 3);
+      ).toHaveLength(merge ? 1 : 2);
       expect(read).toHaveBeenCalledTimes(before + 2);
 
       // The new snapshot replaces the dependency set: no longer watch C-2.
@@ -464,7 +465,7 @@ test.each([
           name: "C-3 新的影响卡片已完成 已完成",
           hidden: true,
         }),
-      ).toHaveLength(merge ? 1 : 3);
+      ).toHaveLength(merge ? 1 : 2);
       expect(read).toHaveBeenCalledTimes(before + 1);
     }
   },

@@ -399,6 +399,24 @@ export interface MergeCheckBlocker {
   readonly detail: string;
   readonly started_at: string;
 }
+/** C-766: notification-only label of a failed merge check. */
+export type CheckFailureLabel =
+  | "baseline_drift"
+  | "genuine"
+  | "flaky"
+  | "unknown";
+export type CheckFailureClass = {
+  readonly label: CheckFailureLabel;
+  readonly basis: string;
+  /** baseline_drift: merged cards whose changes touch the failing modules. */
+  readonly cards?: readonly CardId[];
+  readonly commits?: readonly string[];
+  /** The single automatic rerun this failure queued or followed. */
+  readonly rerun?: {
+    readonly attempt_id: string;
+    readonly result: "queued" | "failed" | "timed_out";
+  };
+};
 export interface MergeCheckView {
   readonly level?: "single" | "card" | "batch";
   readonly batch_id?: MergeBatchId;
@@ -462,6 +480,8 @@ export interface MergeCheckView {
   readonly timeout_only?: boolean;
   /** A1b: host classified complete logs using its reviewed executor allowlist. */
   readonly infra_flaky?: boolean;
+  /** C-766: notification-only failure label and basis; never changes the result. */
+  readonly failure_class?: CheckFailureClass;
 }
 export interface CardInvariant {
   readonly text: string;

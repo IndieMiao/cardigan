@@ -1,0 +1,922 @@
+import { execFile } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, open, readFile, rename, unlink } from "node:fs/promises";
+import { connect } from "node:net";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import type { Store } from "@cardigan/store";
+import { parseDocument } from "yaml";
+import {
+  readSupervisorUpgradeState,
+  writeDeploymentNotice,
+  writeSupervisorUpgrade,
+} from "./deployment-audit.js";
+import { acquireDeploymentCapacity } from "./deployment-capacity.js";
+import { requireHostDirectory } from "./deployment-config.js";
+import {
+  fenceLongOperations,
+  liveLongOperations,
+  releaseLongOperationFence,
+} from "./long-operations.js";
+import { type ExecutionOwner, executionOwner } from "./process-identity.js";
+
+/**
+ * C-767: the self-upgrade switch lives in its own host file. `self-deploy.yaml`
+ * rejects unknown keys, so a new key there would stop every older supervisor,
+ * including the one a rollback restores. This file is read only by
+ * supervisors that know it; unknown keys are ignored so a rollback target can
+ * still read a file written for a newer version. A missing file is "off".
+ */
+export const SUPERVISOR_UPGRADE_FILE = "supervisor-upgrade.yaml";
+export const DEFAULT_SUPERVISOR_HEALTH_TIMEOUT_MS = 60_000;
+const MIN_HEALTH_TIMEOUT_MS = 10_000;
+const MAX_HEALTH_TIMEOUT_MS = 10 * 60_000;
+/** systemd user unit name of the supervisor service. */
+const UNIT = /^[A-Za-z0-9][A-Za-z0-9@._-]{0,200}\.service$/u;
+const SHA = /^[a-f0-9]{40}$/u;
+const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
+const PLAN_FILE = "supervisor-upgrade.json";
+const MAX_LAUNCH_BYTES = 65536;
+
+export interface SupervisorUpgradeConfig {
+  readonly enabled: boolean;
+  /** systemd user unit, e.g. `cardigan-selfdeploy.service`. */
+  readonly unit: string;
+  /** Host launch configuration naming the running supervisor checkout. */
+  readonly launch_file: string;
+  readonly health_timeout_ms: number;
+}
+
+export function parseSupervisorUpgradeConfig(
+  raw: unknown,
+): SupervisorUpgradeConfig | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw))
+    throw new Error("Invalid supervisor upgrade configuration");
+  const value = raw as Record<string, unknown>;
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean")
+    throw new Error("Invalid supervisor upgrade configuration");
+  if (value.enabled !== true) return undefined;
+  const timeout =
+    value.health_timeout_ms ?? DEFAULT_SUPERVISOR_HEALTH_TIMEOUT_MS;
+  if (
+    typeof value.unit !== "string" ||
+    !UNIT.test(value.unit) ||
+    typeof value.launch_file !== "string" ||
+    !isAbsolute(value.launch_file) ||
+    value.launch_file !== resolve(value.launch_file) ||
+    value.launch_file === "/" ||
+    !Number.isSafeInteger(timeout) ||
+    Number(timeout) < MIN_HEALTH_TIMEOUT_MS ||
+    Number(timeout) > MAX_HEALTH_TIMEOUT_MS
+  )
+    throw new Error("Invalid supervisor upgrade configuration");
+  return {
+    enabled: true,
+    unit: value.unit,
+    launch_file: value.launch_file,
+    health_timeout_ms: Number(timeout),
+  };
+}
+
+/** Same host-file rules as self-deploy.yaml; undefined when absent or off. */
+export async function loadSupervisorUpgradeConfig(
+  configDir: string,
+): Promise<SupervisorUpgradeConfig | undefined> {
+  const file = resolve(configDir, SUPERVISOR_UPGRADE_FILE);
+  let source: string;
+  try {
+    source = await readHostFile(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new Error("无法安全读取主机 supervisor-upgrade.yaml");
+  }
+  try {
+    const doc = parseDocument(source, { uniqueKeys: true, strict: true });
+    if (doc.errors.length || doc.warnings.length) throw new Error();
+    return parseSupervisorUpgradeConfig(doc.toJS({ maxAliasCount: 0 }));
+  } catch {
+    throw new Error("无法安全读取主机 supervisor-upgrade.yaml");
+  }
+}
+
+/** Regular, owner-only, bounded file below a host-owned directory. */
+async function readHostFile(file: string, ownerOnly = true): Promise<string> {
+  await requireHostDirectory(dirname(file));
+  const handle = await open(
+    file,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      ![0, process.getuid?.()].includes(stat.uid) ||
+      stat.mode & (ownerOnly ? 0o077 : 0o022) ||
+      stat.size > MAX_LAUNCH_BYTES
+    )
+      throw new Error("Unsafe host file");
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Atomic replace in the same directory, keeping the original mode. */
+async function replaceFile(file: string, text: string, mode: number) {
+  const tmp = join(dirname(file), `.${basename(file)}.${randomUUID()}.tmp`);
+  const handle = await open(tmp, "wx", mode & 0o777);
+  try {
+    await handle.writeFile(text);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(tmp, file);
+}
+
+const digest = (text: string) =>
+  createHash("sha256").update(text).digest("hex");
+const escapeRegExp = (text: string) =>
+  text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+/** The checkout path as a whole path component, never a longer sibling name. */
+const rootPattern = (root: string) =>
+  new RegExp(`${escapeRegExp(root)}(?=[/\\s"':=]|$)`, "gu");
+
+export interface SupervisorUpgradePlan {
+  readonly version: 1;
+  readonly attempt: string;
+  readonly from: string;
+  readonly to: string;
+  readonly unit: string;
+  readonly launch_file: string;
+  /** Mode of the original launch file, restored with its bytes. */
+  readonly launch_mode: number;
+  /** SHA-256 of the rewritten launch file; rollback never clobbers other edits. */
+  readonly launch_sha256: string;
+  readonly backup_file: string;
+  readonly old_root: string;
+  readonly new_root: string;
+  readonly health_timeout_ms: number;
+  readonly ports: readonly { readonly host: string; readonly port: number }[];
+  /** The supervisor and server incarnations that the restart replaces. */
+  readonly supervisor: ExecutionOwner;
+  readonly server?: ExecutionOwner;
+  readonly requested_at: string;
+}
+
+const planPath = (directory: string) => join(directory, PLAN_FILE);
+
+async function writePlan(directory: string, plan: SupervisorUpgradePlan) {
+  await replaceFile(planPath(directory), JSON.stringify(plan), 0o600);
+}
+
+export async function readSupervisorUpgradePlan(
+  directory: string,
+): Promise<SupervisorUpgradePlan | undefined> {
+  let text: string;
+  try {
+    text = await readHostFile(planPath(directory));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new Error("Unsafe supervisor upgrade plan");
+  }
+  const p = JSON.parse(text) as SupervisorUpgradePlan;
+  const owner = (o: unknown) =>
+    !!o &&
+    typeof o === "object" &&
+    Number.isSafeInteger((o as ExecutionOwner).pid) &&
+    typeof (o as ExecutionOwner).start === "string";
+  const path = (v: unknown) =>
+    typeof v === "string" && isAbsolute(v) && v === resolve(v) && v !== "/";
+  if (
+    p.version !== 1 ||
+    !UUID.test(p.attempt) ||
+    !SHA.test(p.from) ||
+    !SHA.test(p.to) ||
+    !UNIT.test(p.unit) ||
+    ![p.launch_file, p.backup_file, p.old_root, p.new_root].every(path) ||
+    dirname(p.backup_file) !== directory ||
+    dirname(p.old_root) !== dirname(p.new_root) ||
+    !Number.isSafeInteger(p.launch_mode) ||
+    !/^[a-f0-9]{64}$/u.test(p.launch_sha256) ||
+    !Number.isSafeInteger(p.health_timeout_ms) ||
+    p.health_timeout_ms < MIN_HEALTH_TIMEOUT_MS ||
+    p.health_timeout_ms > MAX_HEALTH_TIMEOUT_MS ||
+    !Array.isArray(p.ports) ||
+    p.ports.length < 1 ||
+    !p.ports.every(
+      (t) =>
+        ["127.0.0.1", "::1", "localhost"].includes(t.host) &&
+        Number.isSafeInteger(t.port) &&
+        t.port > 0 &&
+        t.port < 65536,
+    ) ||
+    !owner(p.supervisor) ||
+    (p.server !== undefined && !owner(p.server)) ||
+    typeof p.requested_at !== "string"
+  )
+    throw new Error("Invalid supervisor upgrade plan");
+  return p;
+}
+
+async function removePlan(directory: string) {
+  try {
+    await unlink(planPath(directory));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+/** Ports the restart helper needs; tests replace systemd, /proc and sockets. */
+export interface SupervisorRestartPorts {
+  systemctl(args: string[]): Promise<{ code: number | null; text: string }>;
+  /** The deployment state.json, or undefined while unreadable. */
+  readState(): Promise<DeployedState | undefined>;
+  portOpen(host: string, port: number): Promise<boolean>;
+  cmdline(pid: number): Promise<readonly string[] | undefined>;
+  alive(owner: ExecutionOwner): boolean;
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+export interface DeployedState {
+  readonly ready?: boolean;
+  readonly current: { readonly sha: string };
+  readonly running?: { readonly sha: string };
+  readonly process?: ExecutionOwner;
+}
+
+type Health = "healthy" | "failed" | "pending";
+
+function unitStatus(text: string) {
+  const fields = new Map(
+    text
+      .split("\n")
+      .map((line) => line.split("=", 2) as [string, string | undefined])
+      .filter(([, v]) => v !== undefined),
+  );
+  return {
+    active: fields.get("ActiveState") ?? "",
+    sub: fields.get("SubState") ?? "",
+    pid: Number(fields.get("MainPID") ?? 0),
+  };
+}
+
+/**
+ * One observation of the restarted service: the unit's main process runs
+ * from `root`, state.json shows a ready server incarnation newer than the one
+ * the restart replaced, and every fixed port accepts a connection.
+ * `strict` (the upgrade) treats a crashed unit or a process from another
+ * checkout as an explicit failure; a rollback only waits.
+ */
+async function observe(
+  plan: SupervisorUpgradePlan,
+  root: string,
+  strict: boolean,
+  ports: SupervisorRestartPorts,
+): Promise<Health> {
+  const show = await ports.systemctl([
+    "--user",
+    "show",
+    "--property=ActiveState",
+    "--property=SubState",
+    "--property=MainPID",
+    plan.unit,
+  ]);
+  if (show.code !== 0) return "pending";
+  const unit = unitStatus(show.text);
+  if (strict && (unit.active === "failed" || unit.sub === "auto-restart"))
+    return "failed";
+  if (
+    unit.active !== "active" ||
+    !Number.isSafeInteger(unit.pid) ||
+    unit.pid < 1
+  )
+    return "pending";
+  if (unit.pid === plan.supervisor.pid && ports.alive(plan.supervisor))
+    return "pending"; // The old supervisor is still shutting down.
+  const argv = await ports.cmdline(unit.pid);
+  if (!argv) return "pending";
+  if (!argv.some((arg) => arg.startsWith(`${root}/`)))
+    return strict ? "failed" : "pending";
+  const state = await ports.readState().catch(() => undefined);
+  if (
+    !state?.ready ||
+    !state.process ||
+    state.running?.sha !== state.current.sha ||
+    state.process.start === plan.server?.start ||
+    !ports.alive(state.process)
+  )
+    return "pending";
+  for (const target of plan.ports)
+    if (!(await ports.portOpen(target.host, target.port))) return "pending";
+  return "healthy";
+}
+
+async function waitHealthy(
+  plan: SupervisorUpgradePlan,
+  root: string,
+  strict: boolean,
+  ports: SupervisorRestartPorts,
+): Promise<"healthy" | "failed" | "timeout"> {
+  const deadline = ports.now() + plan.health_timeout_ms;
+  let failures = 0;
+  for (;;) {
+    let health: Health = "pending";
+    try {
+      health = await observe(plan, root, strict, ports);
+    } catch {
+      /* An unreadable observation is not health; keep waiting to the deadline. */
+    }
+    if (health === "healthy") return health;
+    // Two observations in a row: never a transient state of the restart job.
+    failures = health === "failed" ? failures + 1 : 0;
+    if (failures >= 2) return "failed";
+    if (ports.now() >= deadline) return "timeout";
+    await ports.sleep(Math.min(1000, Math.max(0, deadline - ports.now())));
+  }
+}
+
+/** Put back the original launch file, unless someone else changed it since. */
+async function restoreLaunch(plan: SupervisorUpgradePlan): Promise<boolean> {
+  try {
+    const current = await readHostFile(plan.launch_file, false);
+    if (digest(current) !== plan.launch_sha256) return false;
+    const backup = await readHostFile(plan.backup_file);
+    await replaceFile(plan.launch_file, backup, plan.launch_mode);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const seconds = (ms: number) => Math.ceil(ms / 1000);
+
+/**
+ * C-767 restart helper. Runs from the OLD supervisor checkout in its own
+ * transient systemd unit, so restarting the supervisor never stops it: it
+ * restarts the unit, waits for health, and on an explicit failure or timeout
+ * restores the backed-up launch file and restarts the old version.
+ */
+export async function finishSupervisorUpgrade(options: {
+  store: Store;
+  directory: string;
+  ports: SupervisorRestartPorts;
+}): Promise<"completed" | "rolled_back" | "failed"> {
+  const { store, directory, ports } = options;
+  const plan = await readSupervisorUpgradePlan(directory);
+  if (!plan) throw new Error("No supervisor upgrade is pending");
+  const record = (
+    status: "completed" | "rolled_back" | "failed",
+    summary: string,
+  ) => {
+    try {
+      writeSupervisorUpgrade(store, {
+        attempt: plan.attempt,
+        from: plan.from,
+        to: plan.to,
+        status,
+        summary,
+      });
+    } catch {
+      console.error("监督器自动升级结果未能写入审计，请核对主机日志");
+    }
+  };
+  const started = ports.now();
+  const restart = await ports
+    .systemctl(["--user", "restart", "--no-block", plan.unit])
+    .catch(() => ({ code: null, text: "" }));
+  let result: "healthy" | "failed" | "timeout" | "not_restarted" =
+    "not_restarted";
+  if (restart.code === 0)
+    result = await waitHealthy(plan, plan.new_root, true, ports);
+  if (result === "healthy") {
+    record(
+      "completed",
+      `新监督器已接管，ready、state.json 与 ${plan.ports.length} 个端口核对通过，用时约 ${seconds(ports.now() - started)} 秒`,
+    );
+    await removePlan(directory);
+    return "completed";
+  }
+  const cause =
+    result === "not_restarted"
+      ? "重启命令未执行"
+      : result === "failed"
+        ? "新监督器启动失败或运行的不是新目录"
+        : `${seconds(plan.health_timeout_ms)} 秒内健康检查未通过`;
+  const restored = await restoreLaunch(plan);
+  let back: "healthy" | "failed" | "timeout" | "not_restored" = "not_restored";
+  if (restored) {
+    const reload = await ports
+      .systemctl(["--user", "daemon-reload"])
+      .catch(() => ({ code: null, text: "" }));
+    // The old supervisor was never stopped when the restart itself failed.
+    if (result === "not_restarted")
+      back = reload.code === 0 ? "healthy" : "failed";
+    else {
+      const again =
+        reload.code === 0
+          ? await ports
+              .systemctl(["--user", "restart", "--no-block", plan.unit])
+              .catch(() => ({ code: null, text: "" }))
+          : { code: null };
+      back =
+        again.code === 0
+          ? await waitHealthy(plan, plan.old_root, false, ports)
+          : "failed";
+    }
+  }
+  const outcome =
+    back === "healthy"
+      ? result === "not_restarted"
+        ? "failed"
+        : "rolled_back"
+      : "failed";
+  record(
+    outcome,
+    `${cause}；${
+      back === "healthy"
+        ? result === "not_restarted"
+          ? "启动配置已恢复，旧监督器继续运行"
+          : "已用备份恢复启动配置并重启旧监督器，旧版本健康检查通过"
+        : back === "not_restored"
+          ? "启动配置已被改动或备份不可读，未自动回滚，请人工核对"
+          : "已恢复启动配置，但旧监督器健康检查未通过，请立即人工核对"
+    }`,
+  );
+  await removePlan(directory);
+  return outcome;
+}
+
+/** What the upgrader needs from the running supervisor (the driver). */
+export interface SupervisorUpgradeHost {
+  readonly store: Store;
+  /** Deployment state directory (plan and backups live here). */
+  readonly directory: string;
+  readonly configDir: string;
+  /** The running supervisor checkout and its SHA. */
+  readonly root: string;
+  readonly supervisor: string;
+  /** Deployed SHA when the owned server is ready and no switch is pending. */
+  idleDeployment(): Promise<string | undefined>;
+  /** Clone the central repository at `sha` into `release`, install and build. */
+  checkout(
+    sha: string,
+    release: string,
+  ): Promise<{ ok: boolean; log_tail: string }>;
+  /** Run the new code against the host configuration it will read. */
+  validate(release: string): Promise<boolean>;
+  systemctl(args: string[]): Promise<{ code: number | null; text: string }>;
+  /** Start the restart helper from `root` outside the supervisor unit. */
+  launchHelper(attempt: string, root: string): Promise<boolean>;
+  ports(): readonly { host: string; port: number }[];
+  server(): ExecutionOwner | undefined;
+  /** Compare again next tick, so a blocked upgrade raises the human reminder. */
+  recheck(): void;
+  /**
+   * The waiter row closing check admission is one per process and shared
+   * with deployments: report this upgrade's wait, never delete it directly.
+   */
+  capacityWaiting(waiting: boolean): void;
+  now(): number;
+}
+
+type Pending = { readonly from: string; readonly to: string };
+type Prepared = Pending & {
+  readonly attempt: string;
+  readonly release: string;
+};
+
+export type SupervisorUpgradeStep =
+  | "idle"
+  | "waiting"
+  | "restarting"
+  | "failed";
+
+/**
+ * C-767 automatic supervisor upgrade, default off. The watch loop calls
+ * `step()` between deployment ticks, so no deployment of this supervisor is in
+ * flight. The restart happens only while this supervisor holds the deployment
+ * capacity: that requires no live card or batch merge check or author
+ * precheck of any project, and closes their admission until the new
+ * supervisor starts. Managed long operations are fenced the same way.
+ */
+export class SupervisorUpgrader {
+  private pending: Pending | undefined;
+  private prepared: Prepared | undefined;
+  private restartingSince: number | undefined;
+  private release: (() => void) | undefined;
+  private noticed = new Set<string>();
+  private capacityWait = false;
+  private waiter = false;
+  constructor(
+    private readonly host: SupervisorUpgradeHost,
+    private readonly config: SupervisorUpgradeConfig,
+  ) {}
+
+  get restarting() {
+    return this.restartingSince !== undefined;
+  }
+
+  /** The helper's own bound: an upgrade window, a rollback window and slack. */
+  private limit() {
+    return 2 * this.config.health_timeout_ms + 120_000;
+  }
+
+  /**
+   * Whether a verified change from the running supervisor to `main` is
+   * handled here instead of as a human reminder.
+   */
+  automatic(supervisor: string, main: string, affected: readonly string[]) {
+    if (supervisor !== this.host.supervisor) return false;
+    let state: ReturnType<typeof readSupervisorUpgradeState>;
+    try {
+      state = readSupervisorUpgradeState(this.host.store, supervisor);
+    } catch {
+      return false;
+    }
+    if (state.blocked) return false;
+    if (affected.length && supervisor !== main)
+      this.pending = { from: supervisor, to: main };
+    else this.pending = undefined;
+    return true;
+  }
+
+  private notice(key: string, text: string) {
+    if (this.noticed.has(key)) return;
+    try {
+      writeDeploymentNotice(this.host.store, key, text);
+      this.noticed.add(key);
+    } catch {
+      /* Retried on the next step. */
+    }
+  }
+
+  private record(
+    target: Prepared,
+    status: "started" | "restarting" | "failed",
+    summary: string,
+  ) {
+    writeSupervisorUpgrade(this.host.store, {
+      attempt: target.attempt,
+      from: target.from,
+      to: target.to,
+      status,
+      summary,
+    });
+  }
+
+  private fail(target: Prepared, summary: string): SupervisorUpgradeStep {
+    this.prepared = undefined;
+    this.pending = undefined;
+    try {
+      this.record(target, "failed", summary);
+    } catch {
+      console.error("监督器自动升级失败审计未能写入，请核对主机日志");
+    }
+    this.host.recheck();
+    return "failed";
+  }
+
+  private releaseHold() {
+    const release = this.release;
+    this.release = undefined;
+    try {
+      release?.();
+    } catch {
+      /* Rows of this incarnation are reclaimed once it exits. */
+    }
+    releaseLongOperationFence(this.host.store);
+  }
+
+  /** Bounded wait for the helper; resume deployments if no restart came. */
+  private async awaitRestart(): Promise<SupervisorUpgradeStep> {
+    const since = this.restartingSince ?? this.host.now();
+    const limit = this.limit();
+    const plan = await readSupervisorUpgradePlan(this.host.directory).catch(
+      () => undefined,
+    );
+    if (plan && this.host.now() - since < limit) return "restarting";
+    if (plan)
+      this.notice(
+        `supervisor-upgrade-stalled:${plan.attempt}`,
+        `部署监督器自动升级（${plan.from} → ${plan.to}）的重启助手超过 ${seconds(limit)} 秒没有结束，监督器已恢复正常部署。请核对 systemd 单元 ${plan.unit} 与启动配置。`,
+      );
+    this.restartingSince = undefined;
+    this.prepared = undefined;
+    this.pending = undefined;
+    this.releaseHold();
+    this.host.recheck();
+    return "idle";
+  }
+
+  async step(): Promise<SupervisorUpgradeStep> {
+    this.capacityWait = false;
+    try {
+      return await this.advance();
+    } finally {
+      // A capacity wait closes check admission; never leave it behind once
+      // this upgrade stops waiting for capacity (held, abandoned or failed).
+      if (this.capacityWait !== this.waiter) {
+        this.waiter = this.capacityWait;
+        try {
+          this.host.capacityWaiting(this.capacityWait);
+        } catch {
+          /* Reclaimed with this incarnation. */
+        }
+      }
+    }
+  }
+
+  private async advance(): Promise<SupervisorUpgradeStep> {
+    if (this.restartingSince !== undefined) return this.awaitRestart();
+    const pending = this.pending;
+    if (!pending) return "idle";
+    // An earlier helper is still finishing (for example after a rollback).
+    const existing = await readSupervisorUpgradePlan(this.host.directory).catch(
+      () => "unsafe" as const,
+    );
+    if (existing) {
+      if (existing === "unsafe")
+        this.notice(
+          "supervisor-upgrade-plan-invalid",
+          "部署监督器自动升级的计划文件无法安全读取，自动升级已暂停。请主机管理员核对部署目录。",
+        );
+      else if (
+        !(this.host.now() - Date.parse(existing.requested_at) < this.limit())
+      )
+        this.notice(
+          `supervisor-upgrade-stalled:${existing.attempt}`,
+          `部署监督器自动升级（${existing.from} → ${existing.to}）的重启助手超过 ${seconds(this.limit())} 秒没有结束，自动升级已暂停。请核对 systemd 单元 ${existing.unit}、启动配置与部署目录中的升级计划。`,
+        );
+      return "waiting";
+    }
+    // Deploy the server first; the supervisor follows the version it runs.
+    const deployed = await this.host.idleDeployment();
+    if (deployed !== pending.to) return "waiting";
+    if (this.prepared?.to !== pending.to) {
+      // Another incarnation (or a helper) may have ended an attempt since.
+      if (readSupervisorUpgradeState(this.host.store, pending.from).blocked) {
+        this.pending = undefined;
+        this.host.recheck();
+        return "idle";
+      }
+      const attempt = randomUUID();
+      const release = join(
+        dirname(this.host.root),
+        `release-watch-${pending.to}`,
+      );
+      const target = { ...pending, attempt, release };
+      this.record(
+        target,
+        "started",
+        "监督器版本落后，开始在新目录准备新版本监督器",
+      );
+      try {
+        await lstat(release);
+        return this.fail(target, "目标目录已存在，未覆盖");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+          return this.fail(target, "无法核对目标目录");
+      }
+      try {
+        await requireHostDirectory(dirname(this.host.root));
+        const built = await this.host.checkout(pending.to, release);
+        if (!built.ok)
+          return this.fail(target, `新版本构建未通过：${built.log_tail}`);
+        if (!(await this.host.validate(release)))
+          return this.fail(target, "新版本未能读取现有主机配置");
+        await this.launchText();
+      } catch (error) {
+        return this.fail(
+          target,
+          error instanceof LaunchFileRejected
+            ? error.message
+            : "新版本准备未完成",
+        );
+      }
+      this.prepared = target;
+    }
+    const target = this.prepared;
+    if (!target || (await this.host.idleDeployment()) !== target.to)
+      return "waiting";
+    if (liveLongOperations(this.host.store).length) return "waiting";
+    const release = acquireDeploymentCapacity(this.host.store);
+    if (!release) {
+      // A merge check or another deployment holder; admission stays closed.
+      this.capacityWait = true;
+      return "waiting";
+    }
+    this.release = release;
+    if (fenceLongOperations(this.host.store).length) {
+      this.releaseHold();
+      return "waiting";
+    }
+    // Re-read after taking the fence: nothing may have switched meanwhile.
+    if ((await this.host.idleDeployment()) !== target.to) {
+      this.releaseHold();
+      return "waiting";
+    }
+    return this.restart(target);
+  }
+
+  /** The current launch file, proven to name the running checkout. */
+  private async launchText() {
+    let text: string;
+    let mode: number;
+    try {
+      const stat = await lstat(this.config.launch_file);
+      mode = stat.mode;
+      text = await readHostFile(this.config.launch_file, false);
+    } catch {
+      throw new LaunchFileRejected("启动配置无法安全读取");
+    }
+    if (!text.match(rootPattern(this.host.root))?.length)
+      throw new LaunchFileRejected("启动配置没有引用当前监督器目录");
+    return { text, mode };
+  }
+
+  private async restart(target: Prepared): Promise<SupervisorUpgradeStep> {
+    const backup = join(
+      this.host.directory,
+      `supervisor-launch-${target.attempt}.bak`,
+    );
+    let launch: { text: string; mode: number };
+    let rewritten: string;
+    try {
+      launch = await this.launchText();
+      rewritten = launch.text.replace(
+        rootPattern(this.host.root),
+        () => target.release,
+      );
+      await replaceFile(backup, launch.text, 0o600);
+    } catch (error) {
+      this.releaseHold();
+      return this.fail(
+        target,
+        error instanceof LaunchFileRejected
+          ? error.message
+          : "启动配置备份未完成",
+      );
+    }
+    const owner = executionOwner(process.pid);
+    if (!owner) {
+      this.releaseHold();
+      return this.fail(target, "监督器进程身份不可用");
+    }
+    const server = this.host.server();
+    const plan: SupervisorUpgradePlan = {
+      version: 1,
+      attempt: target.attempt,
+      from: target.from,
+      to: target.to,
+      unit: this.config.unit,
+      launch_file: this.config.launch_file,
+      launch_mode: launch.mode & 0o777,
+      launch_sha256: digest(rewritten),
+      backup_file: backup,
+      old_root: this.host.root,
+      new_root: target.release,
+      health_timeout_ms: this.config.health_timeout_ms,
+      ports: this.host.ports(),
+      supervisor: owner,
+      ...(server ? { server } : {}),
+      requested_at: new Date(this.host.now()).toISOString(),
+    };
+    let rewrote = false;
+    try {
+      await replaceFile(this.config.launch_file, rewritten, launch.mode);
+      rewrote = true;
+      if ((await this.host.systemctl(["--user", "daemon-reload"])).code !== 0)
+        throw new Error("daemon-reload");
+      await writePlan(this.host.directory, plan);
+      this.record(
+        target,
+        "restarting",
+        "单卡与批次合并检查均空闲、无进行中的部署，改写启动配置并通过 systemd 重启监督器",
+      );
+      if (!(await this.host.launchHelper(target.attempt, this.host.root)))
+        throw new Error("helper");
+    } catch {
+      await removePlan(this.host.directory).catch(() => {});
+      let restored = !rewrote;
+      if (rewrote)
+        try {
+          await replaceFile(this.config.launch_file, launch.text, launch.mode);
+          restored =
+            (await this.host.systemctl(["--user", "daemon-reload"])).code === 0;
+        } catch {
+          restored = false;
+        }
+      this.releaseHold();
+      return this.fail(
+        target,
+        restored
+          ? "未能交给重启助手（重新加载 systemd 或启动助手失败），启动配置已恢复，监督器继续运行旧版本"
+          : "未能交给重启助手，且启动配置未能恢复，请立即人工核对",
+      );
+    }
+    this.restartingSince = this.host.now();
+    return "restarting";
+  }
+}
+
+class LaunchFileRejected extends Error {}
+
+/** Production ports of the restart helper. */
+export function nodeRestartPorts(options: {
+  directory: string;
+  systemctl: SupervisorRestartPorts["systemctl"];
+}): SupervisorRestartPorts {
+  return {
+    systemctl: options.systemctl,
+    async readState() {
+      const text = await readHostFile(join(options.directory, "state.json"));
+      const state = JSON.parse(text) as DeployedState;
+      if (!SHA.test(state.current?.sha ?? "")) return undefined;
+      return state;
+    },
+    portOpen: (host, port) =>
+      new Promise<boolean>((resolve) => {
+        const socket = connect({ host, port });
+        const done = (ok: boolean) => {
+          socket.destroy();
+          resolve(ok);
+        };
+        socket.setTimeout(1000, () => done(false));
+        socket.once("connect", () => done(true));
+        socket.once("error", () => done(false));
+      }),
+    async cmdline(pid) {
+      try {
+        return (await readFile(`/proc/${pid}/cmdline`, "utf8"))
+          .split("\0")
+          .filter(Boolean);
+      } catch {
+        return undefined;
+      }
+    },
+    alive: (owner) => executionOwner(owner.pid)?.start === owner.start,
+    now: () => Date.now(),
+    sleep: (ms) => delay(ms),
+  };
+}
+
+/** systemctl / systemd-run of the user manager, bounded and without a shell. */
+export function nodeSystemdCommand(
+  file: "systemctl" | "systemd-run",
+  env: NodeJS.ProcessEnv,
+) {
+  return (args: string[]) =>
+    new Promise<{ code: number | null; text: string }>((resolve) => {
+      execFile(
+        file,
+        args,
+        {
+          env: systemdEnv(env),
+          timeout: 30_000,
+          maxBuffer: 64 * 1024,
+          encoding: "utf8",
+        },
+        (error, stdout) => {
+          const code =
+            error === null
+              ? 0
+              : typeof (error as { code?: unknown }).code === "number"
+                ? Number((error as { code?: unknown }).code)
+                : null;
+          resolve({ code, text: String(stdout ?? "") });
+        },
+      );
+    });
+}
+
+/** Only what the user manager connection needs, never Agent tokens. */
+export function systemdEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {
+    PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    LANG: "C.UTF-8",
+  };
+  for (const key of ["HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"])
+    if (env[key]) out[key] = env[key];
+  return out;
+}
+
+/**
+ * C-767: deployments and the supervisor upgrade of one process share the
+ * single capacity waiter row. It is released only when neither still waits,
+ * so one never reopens check admission under the other.
+ */
+export class SharedCapacityWait {
+  private readonly waiting = new Set<"deploy" | "upgrade">();
+  constructor(private readonly release: () => void) {}
+  set(who: "deploy" | "upgrade", waiting: boolean) {
+    if (waiting) this.waiting.add(who);
+    else {
+      this.waiting.delete(who);
+      if (!this.waiting.size) this.release();
+    }
+  }
+}

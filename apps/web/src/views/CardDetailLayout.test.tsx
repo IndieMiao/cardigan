@@ -148,7 +148,7 @@ const show = (data = detail(), revision = 0) =>
   );
 
 test.each([[], ["C-1"], ["C-1", "C-2"]].map((ids) => ({ ids })))(
-  "C-133: sidebar and requested/resolved timeline decisions show impact for $ids",
+  "C-133: requested/resolved timeline decisions show impact for $ids",
   async ({ ids }) => {
     const data = detail();
     const decisions = data.decisions.map((decision) => ({
@@ -167,7 +167,8 @@ test.each([[], ["C-1"], ["C-1", "C-2"]].map((ids) => ({ ids })))(
       name: "影响的卡片",
       hidden: true,
     });
-    expect(rows).toHaveLength(ids.includes("C-2") ? 3 : 0);
+    // C-699: the overview's facts no longer repeat a decision's details.
+    expect(rows).toHaveLength(ids.includes("C-2") ? 2 : 0);
     for (const row of rows) {
       const links = within(row).getAllByRole("link", { hidden: true });
       expect(links).toHaveLength(1);
@@ -187,14 +188,13 @@ test("U3 separates goal/checklist and sticky summary, with only identity/status/
   expect(header?.textContent).toContain("进行中");
   expect(header?.querySelector("time")?.dateTime).toBe("2026-11-08T01:00:00Z");
   expect(header?.textContent).not.toContain("把 0.1 发出去");
-  const sidebar = screen.getByRole("complementary", { name: "卡片概况" });
-  for (const text of ["进行到哪一步", "下一步该谁做", "被什么阻塞"])
-    expect(within(sidebar).getByText(text)).toBeTruthy();
-  const purpose = screen.getByRole("region", { name: "目标和验收标准" });
+  expect(screen.getByRole("region", { name: "目标" }).textContent).toContain(
+    "把 0.1 发出去",
+  );
+  const purpose = screen.getByRole("region", { name: "验收标准" });
   expect(purpose.textContent).toContain("测试通过");
   expect(purpose.querySelectorAll("li")).toHaveLength(2);
   // A globally accepted completion has no per-criterion mapping: no inferred ticks.
-  expect(purpose.textContent).toContain("整体完成申请已通过");
   expect(
     purpose.querySelectorAll('input:checked, [aria-checked="true"]'),
   ).toHaveLength(0);
@@ -493,7 +493,7 @@ test("U3 the same anchor is repositioned when a route change restores filtered-o
   }
 });
 
-test("U6d the wheel over the card sidebar reaches the page or the drawer", async () => {
+test("U6d the wheel over the overview's facts column reaches the page or the drawer", async () => {
   const css = readFileSync(
     new NodeURL(
       "../components/layout/CardDetailLayout.module.css",
@@ -508,13 +508,11 @@ test("U6d the wheel over the card sidebar reaches the page or the drawer", async
       .slice(start, css.indexOf("}", start) + 1)
       .replaceAll(/\/\*[\s\S]*?\*\//g, "");
   };
-  const sidebar = rule(".page :global(.card-sidebar)");
-  // Overview shares the page scroll container in both presentations.
-  expect(sidebar).toContain("overflow: visible;");
-  // …but the wheel is never trapped when they fit.
-  expect(sidebar).not.toContain("overscroll-behavior:");
-  // The drawer body is the only scroll container inside a drawer.
-  expect(rule(".page :global(.card-sidebar)")).toContain("overflow: visible;");
+  // C-699: the facts column shares the page (or drawer body) scroll container
+  // and never traps the wheel.
+  for (const selector of [".overview", ".overviewMain", ".overviewFacts"]) {
+    expect(rule(selector)).not.toMatch(/overflow|overscroll-behavior/u);
+  }
   render(
     <CardDetailPage
       client={fakeClient({ card: async () => detail() })}
@@ -523,8 +521,7 @@ test("U6d the wheel over the card sidebar reaches the page or the drawer", async
       inDrawer
     />,
   );
-  const column = await screen.findByRole("complementary", { name: "卡片概况" });
-  expect(column.className).toContain("card-sidebar");
+  const column = await screen.findByRole("complementary", { name: "卡片信息" });
   expect(column.closest(".card-page-drawer")).toBeTruthy();
 });
 test.each(["loaded", "missing", "failed"] as const)(

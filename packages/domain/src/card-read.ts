@@ -195,16 +195,18 @@ export function mergeBatchReadScope(
           },
         ];
       }
-      if (event.type === "merge_changes_requested")
+      if (event.type === "merge_changes_requested") {
+        const { failure_class: _class, ...payload } = event.payload as Record<
+          string,
+          JsonValue
+        >;
         return [
           {
             ...event,
-            payload: {
-              ...(event.payload as object),
-              reason: "批次检查失败，详情受限",
-            },
+            payload: { ...payload, reason: "批次检查失败，详情受限" },
           },
         ];
+      }
       return [];
     },
     timeline: (entry: TimelineEntry): TimelineEntry =>

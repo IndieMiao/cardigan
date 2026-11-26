@@ -55,6 +55,8 @@ test("overview preserves the head, page and counts; each panel returns only its 
       verifiers: [
         {
           id: "W-3",
+          title: full.work_items.find((w: { id: string }) => w.id === "W-3")
+            ?.title,
           role_id: "reviewer",
           completion_criteria: ["matches the plan"],
           verdict: null,

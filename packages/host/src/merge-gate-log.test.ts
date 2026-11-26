@@ -728,6 +728,87 @@ test.each([
   },
 );
 
+test("C-766: all-passed counts with a failing exit keep key lines instead of only counts", async () => {
+  const log = await createMergeCheckLog({
+    dataDir: await fixture(),
+    project: "p",
+    attempt: "teardown",
+    env: { SECRET: "fixture-secret-value" },
+  });
+  log.append(
+    "e2e",
+    [
+      "packages/server e2e: ✓ tests/harvest.test.ts (3 tests) 120ms",
+      " Test Files  3 passed (3)",
+      "      Tests  27 passed (27)",
+      "   Duration  4.2s",
+      "globalTeardown failed: harvest returned 422 NOT_WATERED fixture-secret-value",
+      "server shutdown pending",
+      " ELIFECYCLE  Test failed. See above for more details.",
+      "##[error]Process completed with exit code 1.",
+    ].join("\n"),
+  );
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "e2e", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  expect(result.summary).toContain("检查 e2e 未通过（failed，退出码 1）");
+  expect(result.summary).toContain("未识别到失败用例，相关输出：");
+  expect(result.summary).toContain(
+    "globalTeardown failed: harvest returned 422 NOT_WATERED [REDACTED]",
+  );
+  expect(result.summary).toContain("server shutdown pending");
+  expect(result.summary).toContain("Tests  27 passed (27)");
+  for (const noise of ["ELIFECYCLE", "Duration", "fixture-secret-value"])
+    expect(result.summary).not.toContain(noise);
+});
+
+test("C-766: a located failure keeps the original projection and reports package files", async () => {
+  const log = await createMergeCheckLog({
+    dataDir: await fixture(),
+    project: "p",
+    attempt: "located",
+  });
+  log.append(
+    "test",
+    [
+      "packages/host test: FAIL src/a.test.ts > case",
+      "packages/host test: AssertionError: expected 1 to be 2",
+      "packages/host test: ❯ src/lib/b.ts:4:2",
+      "unrelated trailing line that mentions error",
+      "Tests 1 failed (1)",
+    ].join("\n"),
+  );
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  expect(result.summary).toContain("FAIL src/a.test.ts > case");
+  expect(result.summary).not.toContain("未识别到失败用例");
+  expect(result.summary).not.toContain("unrelated trailing line");
+  expect(result.failure_points).toEqual([
+    "packages/host/src/a.test.ts",
+    "packages/host/src/lib/b.ts",
+  ]);
+  const passed = await createMergeCheckLog({
+    dataDir: await fixture(),
+    project: "p",
+    attempt: "ok",
+  });
+  passed.append("test", "FAIL src/flaky.test.ts > retried\n");
+  expect(
+    (
+      await passed.finish({
+        status: "passed",
+        checks: [{ name: "test", status: "passed", exit_code: 0 }],
+        cleanup_errors: [],
+      })
+    ).failure_points,
+  ).toBeUndefined();
+});
+
 test.each([true, false])(
   "suite failures and repeated cases stay independent; authoritative total=%s",
   async (stats) => {

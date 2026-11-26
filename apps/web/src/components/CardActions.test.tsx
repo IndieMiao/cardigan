@@ -122,7 +122,7 @@ test.each([false, true])(
     fireEvent.change(screen.getByLabelText("标题"), {
       target: { value: "修改后的标题" },
     });
-    fireEvent.change(screen.getByLabelText("目标"), {
+    fireEvent.change(screen.getByRole("textbox", { name: "目标" }), {
       target: { value: "新的目标" },
     });
     fireEvent.change(screen.getByLabelText("验收标准 1"), {
@@ -164,10 +164,11 @@ test.each([false, true])(
       },
       expect.any(String),
     );
-    const overview = screen.getByRole("region", { name: "目标和验收标准" });
-    expect(overview.textContent).toContain("新的目标");
-    expect(overview.textContent).toContain("新增标准");
-    expect(overview.textContent).not.toContain("文档更新");
+    const goal = screen.getByRole("region", { name: "目标" });
+    expect(goal.textContent).toContain("新的目标");
+    const criteria = screen.getByRole("region", { name: "验收标准" });
+    expect(criteria.textContent).toContain("新增标准");
+    expect(criteria.textContent).not.toContain("文档更新");
     const nav = screen.getByRole("tablist", { name: "卡片区块导航" });
     expect(nav.querySelector(".card-nav-identity")).toBeNull();
     expect(within(nav).queryByRole("button", { name: "写评论" })).toBeNull();

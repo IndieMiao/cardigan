@@ -143,7 +143,7 @@ function storyDetail(
   });
 }
 
-test("a story overview shows the request, a child graph, empty plan and summary places, and no write controls", async () => {
+test("a story overview shows the request and a child graph, no empty sections and no write controls", async () => {
   const cards = vi.fn(async () => ({
     project_id: "p-1",
     filter: "all" as const,
@@ -160,9 +160,15 @@ test("a story overview shows the request, a child graph, empty plan and summary 
   const request = await screen.findByRole("region", { name: "原始需求" });
   expect(within(request).getByText("希望能把看板导出成表格。")).toBeTruthy();
   // No acceptance criteria were written: no empty heading for them.
-  expect(within(request).queryByText(/验收标准/)).toBeNull();
-  expect(within(request).getByText("没有附件")).toBeTruthy();
-  expect(screen.queryByRole("region", { name: "目标和验收标准" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "验收标准" })).toBeNull();
+  expect(screen.queryByText(/验收标准/)).toBeNull();
+  // C-699: attachments live in their own tab, not in the request.
+  expect(within(request).queryByText(/附件/)).toBeNull();
+  expect(screen.queryByRole("region", { name: "目标" })).toBeNull();
+  // The children follow the request directly.
+  expect(request.nextElementSibling?.getAttribute("aria-label")).toBe(
+    "子卡进度",
+  );
 
   const progress = screen.getByRole("region", { name: "子卡进度" });
   expect(within(progress).getByText("已结束 1/3")).toBeTruthy();
@@ -205,11 +211,10 @@ test("a story overview shows the request, a child graph, empty plan and summary 
     within(peek).getByRole("link", { name: "打开卡片" }).getAttribute("href"),
   ).toBe(routeHash({ kind: "card", projectId: "p-1", cardId: "C-4" }));
 
-  const plan = screen.getByRole("region", { name: "拆解方案" });
-  expect(within(plan).getByText("没有拆解方案")).toBeTruthy();
-  expect(within(plan).queryAllByRole("button")).toHaveLength(0);
-  const summary = screen.getByRole("region", { name: "对照总结" });
-  expect(within(summary).getByText("没有总结")).toBeTruthy();
+  // C-699: without a plan or a summary there is no section for them.
+  expect(screen.queryByRole("region", { name: "拆解方案" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "对照总结" })).toBeNull();
+  expect(screen.queryByText(/没有拆解方案|没有总结|没有附件/u)).toBeNull();
   const discussion = screen.getByRole("region", { name: "讨论" });
   expect(within(discussion).getByText("需求澄清 1 轮")).toBeTruthy();
   expect(within(discussion).getByText("1 题待答")).toBeTruthy();
@@ -228,7 +233,7 @@ test("a story overview shows the request, a child graph, empty plan and summary 
   ).toBe("true");
 });
 
-test("a story without children shows the empty state and makes no list read", async () => {
+test("a story without children or questions shows no empty sections and makes no list read", async () => {
   const cards = vi.fn();
   render(
     <CardDetailPage
@@ -241,15 +246,11 @@ test("a story without children shows the empty state and makes no list read", as
       cardId="C-1"
     />,
   );
-  const progress = await screen.findByRole("region", { name: "子卡进度" });
-  expect(within(progress).getByText("没有子卡")).toBeTruthy();
-  expect(within(progress).queryByRole("list")).toBeNull();
+  await screen.findByRole("region", { name: "原始需求" });
+  for (const name of ["子卡进度", "讨论", "拆解方案", "对照总结"])
+    expect(screen.queryByRole("region", { name })).toBeNull();
+  expect(screen.queryByText(/没有子卡|没有问题清单/u)).toBeNull();
   expect(cards).not.toHaveBeenCalled();
-  expect(
-    within(screen.getByRole("region", { name: "讨论" })).getByText(
-      "没有问题清单",
-    ),
-  ).toBeTruthy();
 });
 
 test("a failed child read keeps the parent lines and offers a retry", async () => {
@@ -288,7 +289,7 @@ test("a failed child read keeps the parent lines and offers a retry", async () =
   );
 });
 
-test("the summary shows its text and author, and the overview reads the attachments panel", async () => {
+test("the summary shows its text and author; the overview reads no attachments panel", async () => {
   const detail = storyDetail({ summary: true });
   const cardPanel = vi.fn(async () => ({ attachments: [attachment({})] }));
   render(
@@ -332,14 +333,11 @@ test("the summary shows its text and author, and the overview reads the attachme
       anchor: "entry-C-1#9",
     }),
   );
+  // C-699: attachments are listed once, in their tab.
   const request = screen.getByRole("region", { name: "原始需求" });
-  expect(
-    within(request).getByRole("heading", { name: "附件（1）" }),
-  ).toBeTruthy();
-  await waitFor(() =>
-    expect(request.querySelector("#attachment-F-1")).not.toBeNull(),
-  );
-  expect(cardPanel).toHaveBeenCalledWith("p-1", "C-1", "attachments");
+  expect(request.querySelector("#attachment-F-1")).toBeNull();
+  expect(cardPanel).not.toHaveBeenCalledWith("p-1", "C-1", "attachments");
+  expect(screen.getByRole("tab", { name: /附件/ })).toBeTruthy();
 });
 
 test("an ordinary card keeps its goal section and shows no story frame", async () => {
@@ -351,7 +349,7 @@ test("an ordinary card keeps its goal section and shows no story frame", async (
       cardId="C-1"
     />,
   );
-  await screen.findByRole("region", { name: "目标和验收标准" });
+  await screen.findByRole("region", { name: "目标" });
   for (const name of ["原始需求", "子卡进度", "拆解方案", "对照总结", "讨论"])
     expect(screen.queryByRole("region", { name })).toBeNull();
   expect(cards).not.toHaveBeenCalled();
@@ -479,28 +477,14 @@ test("a failed summary read says so and retries", async () => {
   expect(within(summary).queryByRole("alert")).toBeNull();
 });
 
-test("refresh failures of attachments and child links keep the last result and offer a retry", async () => {
+test("a refresh failure of child links keeps the last result and offers a retry", async () => {
   let fail = false;
-  const detail = {
-    ...storyDetail(),
-    overview: {
-      work_count: 0,
-      completed_work_count: 0,
-      verifiers: [],
-      attachment_count: 1,
-      waiting_delivery: [],
-      conclusion_reviews: [],
-    },
-  };
-  const cardPanel = vi.fn(async () => {
-    if (fail) throw new Error("附件服务断开");
-    return { attachments: [attachment({})] };
-  });
+  const detail = storyDetail();
   const cards = vi.fn(async () => {
     if (fail) throw new Error("列表服务断开");
     return listPage(rows);
   });
-  const client = fakeClient({ card: async () => detail, cardPanel, cards });
+  const client = fakeClient({ card: async () => detail, cards });
   const { rerender } = render(
     <CardDetailPage
       client={client}
@@ -509,11 +493,7 @@ test("refresh failures of attachments and child links keep the last result and o
       revision={0}
     />,
   );
-  const request = await screen.findByRole("region", { name: "原始需求" });
-  const progress = screen.getByRole("region", { name: "子卡进度" });
-  await waitFor(() =>
-    expect(request.querySelector("#attachment-F-1")).not.toBeNull(),
-  );
+  const progress = await screen.findByRole("region", { name: "子卡进度" });
   await waitFor(() =>
     expect(progress.querySelector('[data-edge="C-3>C-4"]')).not.toBeNull(),
   );
@@ -527,22 +507,15 @@ test("refresh failures of attachments and child links keep the last result and o
       revision={1}
     />,
   );
-  expect((await within(request).findByRole("alert")).textContent).toContain(
-    "读取附件失败：附件服务断开",
-  );
   expect((await within(progress).findByRole("alert")).textContent).toContain(
     "读取子卡依赖失败：列表服务断开",
   );
   // The last good result stays on screen beside the error.
-  expect(request.querySelector("#attachment-F-1")).not.toBeNull();
   expect(progress.querySelector('[data-edge="C-3>C-4"]')).not.toBeNull();
 
   fail = false;
-  fireEvent.click(within(request).getByRole("button", { name: "重试" }));
   fireEvent.click(within(progress).getByRole("button", { name: "重试" }));
-  await waitFor(() => expect(within(request).queryByRole("alert")).toBeNull());
   await waitFor(() => expect(within(progress).queryByRole("alert")).toBeNull());
-  expect(cardPanel).toHaveBeenCalledTimes(3);
   expect(cards).toHaveBeenCalledTimes(3);
 });
 

@@ -27,8 +27,9 @@ export function cardSectionPayload(detail: Detail, section: string | null) {
           ).length,
           verifiers: work_items
             .filter((w) => w.kind === "verify")
-            .map(({ id, role_id, completion_criteria }) => ({
+            .map(({ id, title, role_id, completion_criteria }) => ({
               id,
+              title,
               role_id,
               completion_criteria,
               verdict:

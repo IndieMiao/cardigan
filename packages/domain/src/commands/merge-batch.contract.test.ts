@@ -435,6 +435,17 @@ test.each(
         via: "system_rule",
         run_kind: "fix",
       });
+      // C-766: the batch return names this card and its failing step, and
+      // the bisection evidence decides the label without copying batch logs.
+      expect(returned[0]?.payload).toMatchObject({
+        failure_class: {
+          label: position > 1 ? "genuine" : "unknown",
+          basis: expect.stringContaining("批次二分"),
+        },
+        reason: expect.stringContaining(
+          `定位到本卡 ${f.members[position - 1]!.card_id} 的失败`,
+        ),
+      });
       expect(
         f
           .state()

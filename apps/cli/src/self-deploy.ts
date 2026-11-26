@@ -5,9 +5,14 @@ import {
   DeploymentController,
   DeploymentDiskMonitor,
   DeploymentServerUnavailable,
+  deploymentDirectory,
+  finishSupervisorUpgrade,
   HostMemoryPressureMonitor,
   loadDeploymentConfig,
+  loadSupervisorUpgradeConfig,
   NodeDeploymentDriver,
+  nodeRestartPorts,
+  nodeSystemdCommand,
   RunCapacityDeferred,
   syncProjectOverlayRoles,
   upgradeDeployedRoles,
@@ -28,31 +33,62 @@ export async function runSelfDeployCommand(
 ): Promise<number> {
   if (hasToken(io))
     throw new CliError("自动部署仅限主机，Agent 不可调用", EXIT.usage);
-  if (args.length !== 1 || !["watch", "roles"].includes(args[0] ?? ""))
+  if (
+    args.length !== 1 ||
+    !["watch", "roles", "finish-upgrade"].includes(args[0] ?? "")
+  )
     throw new CliError(
-      "用法：cardigan self-deploy watch|roles（主机专用，配置来自 self-deploy.yaml）",
+      "用法：cardigan self-deploy watch|roles|finish-upgrade（主机专用，配置来自 self-deploy.yaml；finish-upgrade 只由监督器自升级启动）",
       EXIT.usage,
     );
   const dataDir = resolveDataDir(io);
-  const config = await loadDeploymentConfig(
-    io.env.CARDIGAN_CONFIG_DIR ?? join(homedir(), ".config", "cardigan"),
-  ).catch((error: unknown) => {
-    const message =
-      "无法安全解析部署配置，自动部署未启动。请管理员核对 self-deploy.yaml；修复后重启监督器。";
-    io.stderr(message);
-    // Never migrate an existing live deployment merely to record a warning.
-    let audit: Store | undefined;
+  // C-767: the restart helper the supervisor starts in its own systemd unit.
+  // It reads only the host-written plan in the deployment directory.
+  if (args[0] === "finish-upgrade") {
+    const store = Store.open({ dataDir, migrate: false });
     try {
-      audit = Store.open({ dataDir, migrate: false });
-      if (audit.getProject("cardigan"))
-        writeDeploymentNotice(audit, "deployment-config-invalid", message);
-    } catch {
-      io.stderr("部署配置告警未能写入待办，请核对主机日志和数据库可用性");
+      if (!store.getProject("cardigan"))
+        throw new CliError("自动部署只服务自举项目 cardigan", EXIT.usage);
+      const directory = deploymentDirectory(dataDir);
+      const outcome = await finishSupervisorUpgrade({
+        store,
+        directory,
+        ports: nodeRestartPorts({
+          directory,
+          systemctl: nodeSystemdCommand("systemctl", io.env),
+        }),
+      });
+      io.stderr(
+        outcome === "completed"
+          ? "部署监督器自动升级完成"
+          : "部署监督器自动升级未完成，结果已写入待办",
+      );
+      return outcome === "completed" ? EXIT.ok : EXIT.failure;
     } finally {
-      audit?.close();
+      store.close();
     }
-    throw error;
-  });
+  }
+  const configDir =
+    io.env.CARDIGAN_CONFIG_DIR ?? join(homedir(), ".config", "cardigan");
+  const config = await loadDeploymentConfig(configDir).catch(
+    (error: unknown) => {
+      const message =
+        "无法安全解析部署配置，自动部署未启动。请管理员核对 self-deploy.yaml；修复后重启监督器。";
+      io.stderr(message);
+      // Never migrate an existing live deployment merely to record a warning.
+      let audit: Store | undefined;
+      try {
+        audit = Store.open({ dataDir, migrate: false });
+        if (audit.getProject("cardigan"))
+          writeDeploymentNotice(audit, "deployment-config-invalid", message);
+      } catch {
+        io.stderr("部署配置告警未能写入待办，请核对主机日志和数据库可用性");
+      } finally {
+        audit?.close();
+      }
+      throw error;
+    },
+  );
   // The running release owns migrations, after both old roles have stopped.
   const store = Store.open({ dataDir, migrate: false });
   let unlock: (() => Promise<void>) | undefined;
@@ -143,11 +179,28 @@ export async function runSelfDeployCommand(
         }
       return EXIT.ok;
     }
+    // C-767: optional and default off; an unreadable switch file stays off.
+    const upgrade = await loadSupervisorUpgradeConfig(configDir).catch(() => {
+      const message =
+        "无法安全读取 supervisor-upgrade.yaml，监督器自动升级保持关闭。请管理员核对该文件；修复后重启监督器。";
+      io.stderr(message);
+      try {
+        writeDeploymentNotice(
+          store,
+          "supervisor-upgrade-config-invalid",
+          message,
+        );
+      } catch {
+        io.stderr("监督器自动升级配置告警未能写入待办，请核对主机日志");
+      }
+      return undefined;
+    });
     driver = new NodeDeploymentDriver({
       store,
       dataDir,
       config,
       env: io.env,
+      ...(upgrade ? { upgrade: { config: upgrade, configDir } } : {}),
     });
     unlock = await driver.initialize();
     const controller = new DeploymentController(driver);
@@ -183,16 +236,23 @@ export async function runSelfDeployCommand(
         } catch {
           io.stderr("本次 /tmp 与 swap 用量检查未完成，保留上次观测状态");
         }
-        try {
-          await controller.tick();
+        // C-767: while the restart helper takes over, start no deployment.
+        if (!driver.supervisorRestarting)
           try {
-            await driver.maintainDisk();
-          } catch {
-            io.stderr("本次磁盘回收未完成，请核对清单和主机审计");
+            await controller.tick();
+            try {
+              await driver.maintainDisk();
+            } catch {
+              io.stderr("本次磁盘回收未完成，请核对清单和主机审计");
+            }
+          } catch (error) {
+            if (error instanceof DeploymentServerUnavailable) throw error;
+            io.stderr("主机自动部署本轮未完成，请核对部署记录和主机配置");
           }
-        } catch (error) {
-          if (error instanceof DeploymentServerUnavailable) throw error;
-          io.stderr("主机自动部署本轮未完成，请核对部署记录和主机配置");
+        try {
+          await driver.upgradeSupervisor();
+        } catch {
+          io.stderr("本轮监督器自动升级未完成，下轮重试");
         }
         try {
           await delay(config.poll_interval_ms, undefined, {

@@ -29,12 +29,12 @@ test.each([false, true])(
       />,
     );
     const nav = await screen.findByRole("tablist", { name: "卡片区块导航" });
-    const purpose = screen.getByRole("region", { name: "目标和验收标准" });
+    const purpose = screen.getByRole("region", { name: "目标" });
     expect(purpose.closest("details")).toBeNull();
     expect(screen.getByText("背景原话").closest("details")).toBeNull();
     expect(
       screen
-        .getByRole("heading", { name: "卡片索引与关联" })
+        .getByRole("complementary", { name: "卡片信息" })
         .closest("details"),
     ).toBeNull();
     for (const label of ["概览", "工作项", "交付与审核", "时间线", "附件"]) {

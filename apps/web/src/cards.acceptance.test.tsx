@@ -9,6 +9,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterAll, afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
@@ -316,7 +317,8 @@ test("U04 §8.4: card detail handles loading, transport errors, missing cards an
   const decision = f
     .state()
     .decisions.find((q) => q.trigger === "merge_confirmation");
-  expect(textOf(screen.getByText("被什么阻塞").nextElementSibling)).toContain(
+  // C-695/C-699: what the card waits on is said once, in “下一步”.
+  expect(textOf(screen.getByRole("region", { name: "下一步" }))).toContain(
     decision?.id,
   );
   for (const criterion of f.card.acceptance_criteria)
@@ -325,10 +327,11 @@ test("U04 §8.4: card detail handles loading, transport errors, missing cards an
     ).toBeGreaterThan(0);
   expect(screen.getAllByText(/PM|pm/).length).toBeGreaterThan(0);
   expect(screen.getAllByText(/通过|已接受/).length).toBeGreaterThan(0);
+  const facts = screen.getByRole("complementary", { name: "卡片信息" });
   const acceptance = textOf(
-    screen.getByText("谁验收、依据是什么").nextElementSibling,
+    within(facts).getByText("验收", { selector: "dt" }).nextElementSibling,
   );
-  expect(acceptance).toContain("pm");
+  expect(acceptance).toMatch(/W-\d+/u);
   expect(acceptance).toContain("已通过");
 }, 30_000);
 

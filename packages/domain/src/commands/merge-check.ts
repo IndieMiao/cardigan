@@ -1,4 +1,17 @@
-import type { Actor, Decision, Event, MergeCheckView } from "../entities.js";
+import {
+  FAILURE_BASIS_MAX,
+  failureClassLine,
+  flakyEvidence,
+  type HostCheckFailureClass,
+  validHostFailureClass,
+} from "../check-failure-class.js";
+import type {
+  Actor,
+  CheckFailureClass,
+  Decision,
+  Event,
+  MergeCheckView,
+} from "../entities.js";
 import { eventsOfType, eventsOfTypes } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId, DecisionId, DeliveryId } from "../ids.js";
@@ -54,16 +67,28 @@ export function systemReturnFailedCheck(
       status: unwrap(transition("decision", q.status, "supersede")),
     });
   }
-  const steps = (check.level === "batch" ? [] : check.checks)
+  const steps = check.checks
     .filter((c) => c.status === "failed" || c.status === "timed_out")
     .map((c) => c.name);
+  const failure_class: CheckFailureClass = check.failure_class ?? {
+    label: "unknown",
+    basis: "主机未提供失败定位证据",
+  };
+  const batch = check.level === "batch";
   const reason = [
     `合并检查 ${check.status}${steps.length ? `：${steps.join("、")}` : ""}`,
+    // C-766: a batch return names the bisected card and its failing steps.
+    batch
+      ? `批次 ${check.batch_id} 定位到本卡 ${card.id} 的失败${steps.length ? `步骤：${steps.join("、")}` : ""}`
+      : "",
     // Legacy executors already supply a bounded, redacted host summary.
     // Keep its diagnostics when an explicit excerpt is not yet available.
-    check.level === "batch"
-      ? `批次 ${check.batch_id}，日志：get_check_log(card_id=${card.id}, attempt_id=${check.attempt_id})`
-      : check.failure_excerpt || check.summary,
+    // C-391: batch output may describe peers and is never copied here.
+    batch ? "" : check.failure_excerpt || check.summary,
+    batch
+      ? `日志：get_check_log(card_id=${card.id}, attempt_id=${check.attempt_id})`
+      : "",
+    failureClassLine(failure_class),
   ]
     .filter(Boolean)
     .join("\n");
@@ -95,6 +120,14 @@ export function systemReturnFailedCheck(
       tree_sha: check.tree_sha,
       run_kind: "fix",
       reason,
+      failure_class: {
+        ...failure_class,
+        ...(failure_class.cards ? { cards: [...failure_class.cards] } : {}),
+        ...(failure_class.commits
+          ? { commits: [...failure_class.commits] }
+          : {}),
+        ...(failure_class.rerun ? { rerun: { ...failure_class.rerun } } : {}),
+      },
       via: "system_rule",
       rule: "flow-v2/A1",
     },
@@ -157,6 +190,50 @@ export function timeoutOnly(check: MergeCheckView | undefined): boolean {
 /** C-116: the source tag of the single automatic rerun after a timeout. */
 export const TIMEOUT_AUTO_RERUN = "timeout_auto_rerun";
 export const INFRA_AUTO_RERUN = "infra_auto_rerun";
+/** C-766: pre-test failure or a tree that passed before; same shared quota. */
+export const FLAKY_AUTO_RERUN = "flaky_auto_rerun";
+const AUTO_RERUNS = [TIMEOUT_AUTO_RERUN, INFRA_AUTO_RERUN, FLAKY_AUTO_RERUN];
+const AUTO_RERUN_TEXT: Readonly<Record<string, string>> = {
+  [TIMEOUT_AUTO_RERUN]: "超时",
+  [INFRA_AUTO_RERUN]: "基础设施偶发",
+  [FLAKY_AUTO_RERUN]: "偶发",
+};
+/**
+ * The automatic rerun this attempt is: the completion's latest requeue was
+ * automatic and this attempt is the first one queued after it.
+ */
+function autoRerunOf(
+  events: readonly Event[],
+  card: CardId,
+  completion: DeliveryId,
+  attempt_id: string,
+) {
+  const forCompletion = (e: Event) =>
+    e.card_id === card &&
+    (e.payload as { completion_id?: string } | null)?.completion_id ===
+      completion;
+  const requeue = eventsOfType(events, "merge_check_requeued").findLast(
+    forCompletion,
+  );
+  const latest = requeue?.payload as
+    | { attempt_id?: unknown; via?: unknown }
+    | null
+    | undefined;
+  if (
+    !requeue ||
+    typeof latest?.attempt_id !== "string" ||
+    typeof latest.via !== "string" ||
+    !AUTO_RERUNS.includes(latest.via)
+  )
+    return undefined;
+  const next = eventsOfType(events, "merge_check_queued").find(
+    (e) => forCompletion(e) && e.seq > requeue.seq,
+  );
+  return (next?.payload as { attempt_id?: unknown } | null)?.attempt_id ===
+    attempt_id
+    ? { attempt_id: latest.attempt_id, via: latest.via }
+    : undefined;
+}
 /** Whether this completion used its shared timeout/infrastructure rerun. */
 export function hasAutoRerun(
   events: readonly Event[],
@@ -172,7 +249,7 @@ export function hasAutoRerun(
       e.card_id === card &&
       e.type === "merge_check_requeued" &&
       p?.completion_id === completion &&
-      [TIMEOUT_AUTO_RERUN, INFRA_AUTO_RERUN].includes(p.via ?? "")
+      AUTO_RERUNS.includes(p.via ?? "")
     );
   });
 }
@@ -249,6 +326,12 @@ export type CheckUpdate = Pick<
         readonly startup_failure?: "repository_busy";
         /** A1b: trusted host classification, never derived from domain text. */
         readonly infra_flaky?: boolean;
+        /**
+         * C-766: host failure location evidence; notification only. Typed as
+         * the stored view so a recorded check can be spread back, but only
+         * `HostCheckFailureClass` values pass validation.
+         */
+        readonly failure_class?: CheckFailureClass;
       }
   );
 const sha = (value: string) => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
@@ -382,6 +465,22 @@ export function recordMergeCheck(
       ),
     );
     if (replay) return replay;
+    const terminalFailure =
+      "checks" in p && (p.status === "failed" || p.status === "timed_out");
+    // Validated below: only host labels without rerun evidence are accepted.
+    const hostClass = ("checks" in p ? p.failure_class : undefined) as
+      | HostCheckFailureClass
+      | undefined;
+    if (hostClass !== undefined)
+      ensure(
+        terminalFailure &&
+          validHostFailureClass(hostClass, (card, commit) =>
+            mergedAs(state.events, card, commit),
+          ) &&
+          safeFailureExcerpt(hostClass.basis),
+        "validation_failed",
+        "Invalid failure classification",
+      );
     const value: MergeCheckView = {
       ...(p.level ? { level: p.level } : {}),
       attempt_id: p.attempt_id,
@@ -411,15 +510,56 @@ export function recordMergeCheck(
     // Only the supervisor, which sees the full
     // output, can tell a clean timeout from a step that failed and then hung,
     // so structured statuses alone never trigger the rerun.
-    const plan =
+    // C-766: structured flaky evidence joins the same single rerun quota.
+    const flaky =
+      terminalFailure && flowAtLeast(d.card(p.card_id), 2)
+        ? flakyEvidence(state.events, p.card_id, value)
+        : undefined;
+    const infra =
       "checks" in p &&
-      (p.status === "failed" || p.status === "timed_out") &&
-      (p.timeout_only === true ||
-        (flowAtLeast(d.card(p.card_id), 2) && p.infra_flaky === true)) &&
+      flowAtLeast(d.card(p.card_id), 2) &&
+      p.infra_flaky === true;
+    const previous = autoRerunOf(
+      state.events,
+      p.card_id,
+      p.completion_id,
+      p.attempt_id,
+    );
+    const plan =
+      terminalFailure &&
+      (value.timeout_only === true || infra || flaky !== undefined) &&
       !hasAutoRerun(state.events, p.card_id, p.completion_id)
         ? attempt(() => unwrap(prepareMergePlan(state, p.card_id)))
         : undefined;
     const rerun = plan?.ok && plan.value.completion_id === p.completion_id;
+    const via = value.timeout_only
+      ? TIMEOUT_AUTO_RERUN
+      : infra
+        ? INFRA_AUTO_RERUN
+        : FLAKY_AUTO_RERUN;
+    const failure_class = !terminalFailure
+      ? undefined
+      : rerun
+        ? ({
+            label: "flaky",
+            basis: `${
+              via === TIMEOUT_AUTO_RERUN
+                ? "失败均为超时"
+                : via === INFRA_AUTO_RERUN
+                  ? "命中已知基础设施偶发规则"
+                  : flaky
+            }，自动重跑一次`,
+            rerun: { attempt_id: value.attempt_id, result: "queued" },
+          } satisfies CheckFailureClass)
+        : finalFailureClass(
+            hostClass,
+            previous,
+            flaky,
+            p.status as "failed" | "timed_out",
+          );
+    const stored: MergeCheckView = failure_class
+      ? { ...value, failure_class }
+      : value;
     const type =
       p.status === "queued"
         ? "merge_check_queued"
@@ -430,8 +570,11 @@ export function recordMergeCheck(
       type,
       p.card_id,
       {
-        ...value,
+        ...stored,
         checks: value.checks.map((c) => ({ ...c })),
+        ...(failure_class
+          ? { failure_class: copyFailureClass(failure_class) }
+          : {}),
         ...("checks" in p ? { result: p.status } : {}),
         ...(rerun ? { auto_rerun: true } : {}),
       },
@@ -445,8 +588,8 @@ export function recordMergeCheck(
         (p.status === "failed" || p.status === "timed_out") &&
         flowAtLeast(d.card(p.card_id), 2)
       )
-        systemReturnFailedCheck(d, p.card_id, value);
-      return value;
+        systemReturnFailedCheck(d, p.card_id, stored);
+      return stored;
     }
     const requeued: MergeCheckView = {
       attempt_id: value.attempt_id,
@@ -464,18 +607,65 @@ export function recordMergeCheck(
       p.card_id,
       {
         ...requeued,
-        via: value.timeout_only ? TIMEOUT_AUTO_RERUN : INFRA_AUTO_RERUN,
+        via,
         failed_status: p.status,
       },
       {
         type: "status_change",
-        body: value.timeout_only
-          ? "因超时自动重跑"
-          : "因基础设施偶发失败自动重跑",
+        body:
+          via === TIMEOUT_AUTO_RERUN
+            ? "因超时自动重跑"
+            : via === INFRA_AUTO_RERUN
+              ? "因基础设施偶发失败自动重跑"
+              : `判定为偶发失败（${flaky}），自动重跑一次`,
       },
     );
-    return value;
+    return stored;
   });
+}
+function mergedAs(events: readonly Event[], card: CardId, commit: string) {
+  return eventsOfType(events, "card_merged").some(
+    (e) =>
+      e.card_id === card &&
+      e.actor.kind === "system" &&
+      (e.payload as { result?: { merge_sha?: unknown } } | null)?.result
+        ?.merge_sha === commit,
+  );
+}
+function copyFailureClass(c: CheckFailureClass): CheckFailureClass {
+  return {
+    ...c,
+    ...(c.cards ? { cards: [...c.cards] } : {}),
+    ...(c.commits ? { commits: [...c.commits] } : {}),
+    ...(c.rerun ? { rerun: { ...c.rerun } } : {}),
+  };
+}
+/** The label returned to the author: never `flaky` once its rerun failed too. */
+function finalFailureClass(
+  host: HostCheckFailureClass | undefined,
+  previous: ReturnType<typeof autoRerunOf>,
+  flaky: string | undefined,
+  status: "failed" | "timed_out",
+): CheckFailureClass {
+  const base: CheckFailureClass = host ?? {
+    label: "unknown",
+    basis: "主机未提供失败定位证据",
+  };
+  if (previous) {
+    const basis = `已按${AUTO_RERUN_TEXT[previous.via] ?? "偶发"}自动重跑一次（首次 ${previous.attempt_id}），重跑仍失败；${base.basis}`;
+    return {
+      ...base,
+      basis:
+        basis.length <= FAILURE_BASIS_MAX
+          ? basis
+          : `${basis.slice(0, FAILURE_BASIS_MAX - 1)}…`,
+      rerun: { attempt_id: previous.attempt_id, result: status },
+    };
+  }
+  // Flaky evidence whose rerun could not be queued still tells the author why.
+  return flaky && !host
+    ? { label: "flaky", basis: `${flaky}，未能自动重跑` }
+    : base;
 }
 /** Used by the CLI and HTTP preflight; the command rechecks the same completion. */
 export function canRecheckMerge(
@@ -558,6 +748,7 @@ export function requeueMergeCheck(
     startup_failure: _startup,
     timeout_only: _classified,
     infra_flaky: _infra,
+    failure_class: _failure,
     failure_excerpt: _excerpt,
     external_run: _external,
     ...previous

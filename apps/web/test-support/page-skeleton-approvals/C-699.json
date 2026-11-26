@@ -1,0 +1,26 @@
+{
+  "detail-1440-dark.png": {
+    "hash": "1d5d4c27385a685b0ba250f8f77b04abec00bd4bfaa2e54425c3ad2910131d01",
+    "replaces": [
+      "eb3bb94eadcfb3002c47148224a3f80e934bac4354754172a16b801572b9a5a7"
+    ]
+  },
+  "detail-1440-light.png": {
+    "hash": "862411663e3b11700e40c4efbf08132adeb426e79d81955151a50e3cb5b7f182",
+    "replaces": [
+      "4152d906bb37e2324d6588c1c4a29c076181989f1faed6b4401c52f482568c54"
+    ]
+  },
+  "detail-390-dark.png": {
+    "hash": "6a80152493db29ec998908ad5f86327d30fc2801d0d17a4a231cad66a76c46de",
+    "replaces": [
+      "3c236ad824d4e4d55ab99397ad02115d92844d9a89a3f9428307baf1e78b83e3"
+    ]
+  },
+  "detail-390-light.png": {
+    "hash": "e19e1bd84f59ac55d82c461f48604001da04e0c3fc6bfe95851eb223bedaf565",
+    "replaces": [
+      "e3f32bddc3c01e32b626555c7325c026ed3c43c7070f92135d97260ce38c1427"
+    ]
+  }
+}

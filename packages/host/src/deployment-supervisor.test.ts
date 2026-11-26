@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { Store } from "@cardigan/store";
 import { expect, test } from "vitest";
-import { writeDeploymentNotice } from "./deployment-audit.js";
+import {
+  writeDeploymentNotice,
+  writeSupervisorUpgrade,
+} from "./deployment-audit.js";
 import { NodeDeploymentDriver } from "./deployment-node.js";
 
 // Only redirect discovery of the stable checkout's HEAD; main, ancestry, diff and blobs use real Git.
@@ -154,6 +157,115 @@ test("watch retires false alarms, retries unknown evidence, and asks exactly onc
     expect(actions().filter((h) => h.status === "open")).toMatchObject([
       { instructions: "keep this action" },
     ]);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// C-767: with the switch on, a verified change is recorded for the automatic
+// path instead of a human reminder; once an attempt fails, the reminder returns.
+test("watch with automatic upgrade records the change without a reminder until an attempt fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cg-supervisor-auto-"));
+  const store = Store.open({ dataDir: root, dbPath: ":memory:" });
+  const repo = join(root, "work");
+  const bin = join(root, "bin");
+  const git = async (...args: string[]) =>
+    (
+      await promisify(execFile)(
+        "git",
+        [
+          "-c",
+          "user.name=fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          ...args,
+        ],
+        { cwd: repo },
+      )
+    ).stdout.trim();
+  const commit = async (path: string, content: string) => {
+    await writeFile(join(repo, path), content);
+    await git("add", "--", path);
+    await git("commit", "-qm", "test: change");
+    return git("rev-parse", "HEAD");
+  };
+  try {
+    store.createProject({ id: "cardigan" });
+    for (const dir of [
+      "bin",
+      "central",
+      "self-deploy",
+      "work/packages/host/src",
+    ])
+      await mkdir(join(root, dir), { recursive: true });
+    await git(
+      "init",
+      "-qb",
+      "main",
+      "--separate-git-dir",
+      join(root, "central/cardigan.git"),
+    );
+    const supervisor = await commit("package.json", "{}");
+    const script = `#!/bin/sh\nfor arg do if [ "$arg" = -C ]; then echo ${supervisor}; exit 0; fi; done\nPATH=\${PATH#*:} exec git "$@"\n`;
+    await writeFile(join(bin, "git"), script, { mode: 0o700 });
+    const driver = () =>
+      new NodeDeploymentDriver({
+        store,
+        dataDir: root,
+        config: {
+          enabled: true,
+          initial_sha: supervisor,
+          initial_release: repo,
+          ready_timeout_ms: 1000,
+          stop_timeout_ms: 1000,
+          poll_interval_ms: 1000,
+          build_timeout_ms: 5000,
+        },
+        env: { PATH: `${bin}:${process.env.PATH}` },
+        upgrade: {
+          configDir: root,
+          config: {
+            enabled: true,
+            unit: "cardigan-selfdeploy.service",
+            launch_file: join(root, "unit.service"),
+            health_timeout_ms: 60_000,
+          },
+        },
+      });
+    const main = await commit("packages/host/src/deployment-config.ts", "x");
+    const watch = driver();
+    await watch.main();
+    const changes = () =>
+      store
+        .getUpdates({ project_id: "cardigan" })
+        .events.filter((e) => e.type === "host_deployment_supervisor_change")
+        .map((e) => e.payload);
+    expect(changes()).toEqual([
+      { supervisor, main, affected: ["packages/host"], automatic: true },
+    ]);
+    expect(store.uow.read((tx) => tx.human_actions.list("cardigan"))).toEqual(
+      [],
+    );
+    expect(watch.supervisorRestarting).toBe(false);
+    // A failed attempt from this SHA hands the upgrade back to a human.
+    const attempt = "0b5c8f9e-1a2b-4c3d-8e9f-0a1b2c3d4e5f";
+    for (const status of ["started", "failed"] as const)
+      writeSupervisorUpgrade(store, {
+        attempt,
+        from: supervisor,
+        to: main,
+        status,
+        summary: "build: exit 1",
+      });
+    await driver().main();
+    const reminders = store.uow
+      .read((tx) => tx.human_actions.list("cardigan"))
+      .map((h) => h.instructions);
+    expect(reminders).toHaveLength(2);
+    expect(reminders.some((text) => text.includes("系统不会自我升级"))).toBe(
+      true,
+    );
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
