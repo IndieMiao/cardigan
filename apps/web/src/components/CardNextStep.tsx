@@ -30,12 +30,10 @@ import {
   DetailNextStep,
   DetailNextStepLine,
 } from "./layout/CardDetailLayout.js";
-import { MergeStatusFacts } from "./MergeStatusLine.js";
-import { PlainSummaryRisk } from "./PlainSummary.js";
 import { Button } from "./ui/button.js";
 
 /** Where a panel action leads when the action itself still lives elsewhere. */
-export type NextStepTarget = "merge" | "proposal" | "questions" | "comment";
+export type NextStepTarget = "proposal" | "questions" | "comment";
 
 /** C-695: what the card waits for, most urgent first (C-687 §3.2). */
 export type NextStepState =
@@ -47,6 +45,8 @@ export type NextStepState =
       readonly failed: boolean;
     }
   | { readonly kind: "merge-pm"; readonly q: NeedsDecision }
+  /** Confirmed, waiting for the merge (or its check) to finish. */
+  | { readonly kind: "merge-confirmed"; readonly q: NeedsDecision }
   | {
       readonly kind: "decision";
       readonly ref: string;
@@ -150,6 +150,9 @@ export function cardNextSteps(detail: CardDetail): {
     (q) => q.decider === "role:pm" && q.status !== "resolved",
   );
   if (pm) return { current: { kind: "merge-pm", q: pm }, more: 0 };
+  const settled = confirmations.find((q) => q.status === "resolved");
+  if (settled)
+    return { current: { kind: "merge-confirmed", q: settled }, more: 0 };
   const blocked = waiting.filter(
     (item) => item.kind === "blocked" && !precheckWait(item),
   );
@@ -196,6 +199,7 @@ export function CardNextStep({
   onSaved,
   onReveal,
   markDone,
+  mergePanel,
   completionId,
   busy = false,
   inDrawer = false,
@@ -208,6 +212,19 @@ export function CardNextStep({
   readonly onReveal: (target: NextStepTarget) => void;
   /** The existing “标记完成” action; emphasised when it is the main one. */
   readonly markDone: (emphasis: boolean) => ReactNode;
+  /**
+   * C-697: a merge confirmation is the panel itself, with its own buttons,
+   * ⋯ menu and “合并详情”.
+   */
+  readonly mergePanel: (
+    q: NeedsDecision,
+    panel: {
+      readonly title: ReactNode;
+      readonly mine: boolean;
+      /** The main-action dock for the merge panel's own emphasis button. */
+      readonly dockFor: DockFor;
+    },
+  ) => ReactNode;
   readonly completionId?: string | undefined;
   /** Another card form (edit, mark done) is open: panel writes wait. */
   readonly busy?: boolean;
@@ -219,7 +236,6 @@ export function CardNextStep({
   const { card } = detail;
   const { current, more, markDoneLater } = cardNextSteps(detail);
   const panel = useRef<HTMLElement>(null);
-  const docked = usePanelScrolledAway(panel);
   const resume = useCardResume({ card, client, projectId, onSaved });
   const decision = useCardDecision({
     q: current.kind === "decision" ? current.q : undefined,
@@ -297,9 +313,25 @@ export function CardNextStep({
   let lines: ReactNode = null;
   let actions: ReactNode = null;
   // The emphasis action, which the dock repeats once the panel scrolls away.
-  let primary:
-    | { readonly label: string; readonly disabled?: boolean }
-    | undefined;
+  let primary: DockAction | undefined;
+  const dockFor =
+    (step: ReactNode): DockFor =>
+    (panel, action) => (
+      <NextStepDock
+        panel={panel}
+        dock={dock}
+        primary={action}
+        title={
+          inDrawer ? (
+            step
+          ) : (
+            <>
+              <IdBadge id={card.id} /> {card.title}
+            </>
+          )
+        }
+      />
+    );
   switch (current.kind) {
     case "closed":
       mine = false;
@@ -348,50 +380,49 @@ export function CardNextStep({
       );
       break;
     case "merge": {
-      const { q } = current;
-      title = (
+      const step = (
         <>
           {current.failed ? "合并检查未通过" : "等你确认合并"}
-          <IdBadge id={q.id} />
+          <IdBadge id={current.q.id} />
         </>
       );
-      lines = (
-        <>
-          <DetailNextStepLine>
-            <MergeStatusFacts q={q} />
-          </DetailNextStepLine>
-          <DetailNextStepLine>
-            <dl>
-              <PlainSummaryRisk
-                risk={q.plain_summary?.risk ?? "风险尚未说明"}
-              />
-            </dl>
-          </DetailNextStepLine>
-        </>
-      );
-      primary = { label: "处理合并确认" };
-      actions = reveal("merge", primary.label);
-      break;
+      return mergePanel(current.q, {
+        mine: true,
+        title: (
+          <>
+            {step}
+            {moreLink}
+          </>
+        ),
+        dockFor: dockFor(step),
+      });
     }
-    case "merge-pm":
-      mine = false;
-      title = (
+    case "merge-pm": {
+      const step = (
         <>
           等 PM 确认合并
           <IdBadge id={current.q.id} />
         </>
       );
-      lines = (
-        <DetailNextStepLine>
-          <MergeStatusFacts q={current.q} />
-        </DetailNextStepLine>
+      return mergePanel(current.q, {
+        mine: false,
+        title: step,
+        dockFor: dockFor(step),
+      });
+    }
+    case "merge-confirmed": {
+      const step = (
+        <>
+          {failedCheck(current.q) ? "合并检查未通过" : "已确认合并"}
+          <IdBadge id={current.q.id} />
+        </>
       );
-      actions = (
-        <Button size="regular" onClick={() => onReveal("merge")}>
-          查看合并详情
-        </Button>
-      );
-      break;
+      return mergePanel(current.q, {
+        mine: false,
+        title: step,
+        dockFor: dockFor(step),
+      });
+    }
     case "decision": {
       const { q } = current;
       title = (
@@ -549,43 +580,64 @@ export function CardNextStep({
         {lines}
         {checkLine}
       </DetailNextStep>
-      {docked && primary && dock && (
-        <CardFormOutlet container={dock}>
-          <CardActionDock
-            title={
-              inDrawer ? (
-                title
-              ) : (
-                <>
-                  <IdBadge id={card.id} /> {card.title}
-                </>
-              )
-            }
-          >
-            <Button
-              size="regular"
-              variant="emphasis"
-              disabled={primary.disabled}
-              // The panel's first action is the main one; the dock runs it,
-              // so its forms, focus and feedback stay where they were. The
-              // panel comes back into view first for its feedback (恢复卡片);
-              // actions that lead elsewhere scroll there after.
-              onClick={() => {
-                const element = panel.current;
-                element?.scrollIntoView?.({ block: "nearest" });
-                element
-                  ?.querySelector<HTMLElement>(
-                    "[data-next-actions] [data-ui='button']",
-                  )
-                  ?.click();
-              }}
-            >
-              {primary.label}
-            </Button>
-          </CardActionDock>
-        </CardFormOutlet>
-      )}
+      {dockFor(title)(panel, primary)}
     </>
+  );
+}
+
+/** C-701: the panel's emphasis action, which the dock repeats. */
+export type DockAction = {
+  readonly label: string;
+  readonly disabled?: boolean;
+};
+/** C-697: renders the dock for a panel that has its own buttons. */
+export type DockFor = (
+  panel: RefObject<HTMLElement | null>,
+  primary: DockAction | undefined,
+) => ReactNode;
+
+/**
+ * C-701: once the panel has scrolled away, a bar in the dock slot repeats
+ * the panel's emphasis action; nothing without one.
+ */
+function NextStepDock({
+  panel,
+  dock,
+  primary,
+  title,
+}: {
+  readonly panel: RefObject<HTMLElement | null>;
+  readonly dock: HTMLElement | null | undefined;
+  readonly primary: DockAction | undefined;
+  readonly title: ReactNode;
+}) {
+  const docked = usePanelScrolledAway(panel);
+  if (!docked || !primary || !dock) return null;
+  return (
+    <CardFormOutlet container={dock}>
+      <CardActionDock title={title}>
+        <Button
+          size="regular"
+          variant="emphasis"
+          disabled={primary.disabled}
+          // The panel's first action is the main one; the dock runs it, so
+          // its forms, focus and feedback stay where they were. The panel
+          // comes back into view first for its feedback (恢复卡片); actions
+          // that lead elsewhere scroll there after.
+          onClick={() => {
+            const element = panel.current;
+            element?.scrollIntoView?.({ block: "nearest" });
+            element
+              ?.querySelector<HTMLElement>(
+                "[data-next-actions] [data-ui='button']",
+              )
+              ?.click();
+          }}
+        >
+          {primary.label}
+        </Button>
+      </CardActionDock>
+    </CardFormOutlet>
   );
 }
 

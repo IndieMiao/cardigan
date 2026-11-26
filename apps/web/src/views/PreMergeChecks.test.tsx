@@ -7,7 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, expect, onTestFinished, test, vi } from "vitest";
 import type {
   CardDetail,
   NeedsDecision,
@@ -16,6 +16,7 @@ import type {
 } from "../api.js";
 import { PRE_MERGE_COPY as COPY } from "../pre-merge-copy.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
+import { selectMenu } from "../testing/menu.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 import { NeedsYouPage } from "./NeedsYouPage.js";
 
@@ -110,6 +111,67 @@ test("C-264: Needs You disables merge and lists reasons while hold and return re
   ).toBe(false);
 });
 
+test("C-768: only optional verifiers left — they are listed apart and merge stays enabled", async () => {
+  const recordDecision = vi.fn(async () => undefined);
+  const q = merge(passed);
+  if (!q.merge_confirmation) throw new Error("Missing merge fixture");
+  q.merge_confirmation = {
+    ...q.merge_confirmation,
+    optional_pending: [{ id: "W-420", title: "Google 补录" }],
+  };
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => needs(q), recordDecision })}
+      projectId="p-1"
+    />,
+  );
+  const status = await screen.findByRole("status", { name: "合并前置条件" });
+  expect(within(status).getByText("检查都已通过")).toBeTruthy();
+  expect(within(status).queryByText("等待中：")).toBeNull();
+  const optional = within(status).getByRole("list", {
+    name: "可选验证项（确认合并即视为豁免）",
+  });
+  expect(within(optional).getByText("Google 补录（W-420）")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "仍要合并" })).toBeNull();
+  const confirm = screen.getByRole("button", { name: "确认合并", exact: true });
+  expect(confirm.hasAttribute("disabled")).toBe(false);
+  fireEvent.click(confirm);
+  await waitFor(() => expect(recordDecision).toHaveBeenCalled());
+});
+
+test("C-768: a required blocker beside an optional verifier keeps merge disabled", async () => {
+  const q = merge(passed);
+  if (!q.merge_confirmation) throw new Error("Missing merge fixture");
+  q.merge_confirmation = {
+    ...q.merge_confirmation,
+    blockers: ["代码审核（W-2）：未通过当前交付审核"],
+    optional_pending: [{ id: "W-420", title: "Google 补录" }],
+  };
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => needs(q) })}
+      projectId="p-1"
+    />,
+  );
+  const status = await screen.findByRole("status", { name: "合并前置条件" });
+  expect(
+    within(status).getByText("代码审核（W-2）：未通过当前交付审核"),
+  ).toBeTruthy();
+  expect(
+    within(
+      within(status).getByRole("list", {
+        name: "可选验证项（确认合并即视为豁免）",
+      }),
+    ).getByText("Google 补录（W-420）"),
+  ).toBeTruthy();
+  expect(
+    screen
+      .getByRole("button", { name: "确认合并", exact: true })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  expect(screen.getByRole("button", { name: "仍要合并" })).toBeTruthy();
+});
+
 test("C-205: passed checks and standard steps fold away without adding a confirmation", async () => {
   const recordDecision = vi.fn(async () => undefined);
   render(
@@ -167,12 +229,11 @@ test("C-264: card detail shows the same blockers and disables merge", async () =
       cardId="C-1"
     />,
   );
-  const region = within(
-    await screen.findByRole("region", { name: "合并处理" }),
-  );
-  expect(
-    region.getByText(COPY.waitingTitle(["独立安全审核", "截图核对"])),
-  ).toBeTruthy();
+  // C-697: the “下一步” panel lists what still blocks the merge.
+  const region = within(await screen.findByRole("region", { name: "下一步" }));
+  const waiting = within(region.getByRole("status", { name: "合并前置条件" }));
+  expect(waiting.getByText("独立安全审核：待核")).toBeTruthy();
+  expect(waiting.getByText("截图核对：未通过")).toBeTruthy();
   fireEvent.click(
     region.getByRole("button", { name: "确认合并", exact: true }),
   );
@@ -226,7 +287,8 @@ test.each(["needs", "card"])(
     q = merge(passed);
     rerender(view(1));
     await waitFor(() => expect(button().hasAttribute("disabled")).toBe(false));
-    expect(statusLine().getByText("检查都已通过")).toBeTruthy();
+    // The card panel also announces it in its (visually hidden) live status.
+    expect(statusLine().getAllByText("检查都已通过").length).toBeGreaterThan(0);
     expect(
       within(screen.getByRole("status", { name: "合并前置条件" })).getByText(
         "检查都已通过",
@@ -312,13 +374,19 @@ test.each(["needs", "card"])(
         <CardDetailPage client={client} projectId="p-1" cardId="C-1" />
       ),
     );
+    // C-697: in card details 仍要合并 is in the panel's ⋯ menu.
     const trigger = await screen.findByRole("button", {
-      name: "仍要合并",
+      name: page === "needs" ? "仍要合并" : "更多合并操作",
       exact: true,
     });
-    fireEvent.click(trigger);
+    const open = () =>
+      page === "needs"
+        ? fireEvent.click(trigger)
+        : selectMenu(/^更多合并操作$/, "仍要合并…");
+    await open();
+    // Card details name the confirmation in the title as well.
     let dialog = await screen.findByRole("alertdialog", {
-      name: "仍要确认合并？",
+      name: /^仍要确认合并？/u,
     });
     expect(dialog.getAttribute("aria-modal")).toBe("true");
     expect(within(dialog).getByText("截图核对：未通过")).toBeTruthy();
@@ -330,8 +398,10 @@ test.each(["needs", "card"])(
     fireEvent.keyDown(dialog, { key: "Escape", code: "Escape" });
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     expect(document.activeElement).toBe(trigger);
-    fireEvent.click(trigger);
-    dialog = await screen.findByRole("alertdialog", { name: "仍要确认合并？" });
+    await open();
+    dialog = await screen.findByRole("alertdialog", {
+      name: /^仍要确认合并？/u,
+    });
     const submit = within(dialog).getByRole("button", { name: "确认仍要合并" });
     expect(submit.hasAttribute("disabled")).toBe(true);
     fireEvent.click(submit);
@@ -383,6 +453,16 @@ test.each(["needs", "card"])(
 test.each(["needs", "card"])(
   "C-760: %s override names open holds and sends them as follow-ups only when ticked",
   async (page) => {
+    // Radix measures the checkbox's form input inside the dialog's form.
+    onTestFinished(() => vi.unstubAllGlobals());
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
     const q = merge(pending);
     if (!q.merge_confirmation) throw new Error("Missing merge fixture");
     q.merge_confirmation = {
@@ -409,11 +489,17 @@ test.each(["needs", "card"])(
         <CardDetailPage client={client} projectId="p-1" cardId="C-1" />
       ),
     );
-    fireEvent.click(
-      await screen.findByRole("button", { name: "仍要合并", exact: true }),
-    );
+    // C-697: in card details 仍要合并 is in the panel's ⋯ menu.
+    if (page === "needs")
+      fireEvent.click(
+        await screen.findByRole("button", { name: "仍要合并", exact: true }),
+      );
+    else {
+      await screen.findByRole("button", { name: "更多合并操作" });
+      await selectMenu(/^更多合并操作$/, "仍要合并…");
+    }
     const dialog = await screen.findByRole("alertdialog", {
-      name: "仍要确认合并？",
+      name: /^仍要确认合并？/u,
     });
     expect(
       within(dialog).getByText("人工事项 H-9 未完成，会继续挡住合并。"),

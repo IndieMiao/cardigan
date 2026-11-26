@@ -18,6 +18,7 @@ import type {
 } from "../api.js";
 import { card, cardDetail, fakeClient, NOW } from "../testing/fixtures.js";
 import { CardDetailPage } from "../views/CardDetailPage.js";
+import { MergePanel } from "../views/MergePanel.js";
 import { CardNextStep, cardNextSteps } from "./CardNextStep.js";
 
 afterEach(cleanup);
@@ -115,6 +116,17 @@ function panel(
       onSaved={onSaved}
       onReveal={onReveal}
       markDone={markDone}
+      mergePanel={(q, { title, mine, dockFor }) => (
+        <MergePanel
+          q={q}
+          client={client}
+          projectId="p 1"
+          done={onSaved}
+          title={title}
+          mine={mine}
+          dockFor={dockFor}
+        />
+      )}
     />,
   );
   const region = screen.getByRole("region", { name: "下一步" });
@@ -210,8 +222,9 @@ test("waiting on someone else: owners and the step in the title, only 写评论"
   expect(onReveal).toHaveBeenCalledWith("comment");
 });
 
-test("a merge waiting on you is the one emphasis action and leads to the merge controls", () => {
-  const onReveal = vi.fn();
+test("C-697: a merge waiting on you is the panel: 确认合并 is its one emphasis action", async () => {
+  const recordDecision = vi.fn(async () => {});
+  const onSaved = vi.fn();
   const q = merge({
     plain_summary: { changed: "a", impact: "b", risk: "删库" },
   });
@@ -225,34 +238,87 @@ test("a merge waiting on you is the one emphasis action and leads to the merge c
       merge_confirmations: [q],
       decisions: [q],
     }),
-    { onReveal },
+    { client: fakeClient({ recordDecision }), onSaved },
   );
   expect(title).toBe("等你确认合并Q-2");
   expect(region.dataset.mine).toBe("true");
-  expect(emphasis).toHaveLength(1);
+  expect([...emphasis].map((b) => b.textContent)).toEqual(["确认合并"]);
   expect(region.textContent).toContain("合并检查：");
   expect(within(region).getByRole("note").textContent).toContain("删库");
+  const actions = within(
+    within(region).getByRole("group", { name: "合并处理操作" }),
+  );
+  expect(
+    actions
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label") ?? b.textContent),
+  ).toEqual(["确认合并", "暂不合并", "退回修改", "更多合并操作"]);
   fireEvent.click(emphasis[0] as HTMLElement);
-  expect(onReveal).toHaveBeenCalledWith("merge");
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p 1",
+      "Q-2",
+      "merge",
+      "",
+      expect.any(String),
+    ),
+  );
+  expect(onSaved).toHaveBeenCalled();
 });
 
-test("a merge PM confirms is not yours: no emphasis, details only", () => {
-  const onReveal = vi.fn();
+test("C-697: 合并详情 opens the folded evidence below the panel", () => {
+  const { region } = panel(
+    cardDetail({
+      card: { ...card, status: "awaiting_merge" },
+      merge_confirmations: [merge()],
+    }),
+  );
+  const toggle = within(region).getByRole("button", { name: "合并详情" });
+  const details = document.getElementById(
+    toggle.getAttribute("aria-controls") ?? "",
+  );
+  expect(details?.hidden).toBe(true);
+  expect(region.contains(details)).toBe(true);
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  expect(details?.hidden).toBe(false);
+  expect(details?.textContent).toContain("要合并的交付（0 项）");
+  expect(details?.textContent).toContain("审核与验收（0 项）");
+  fireEvent.click(toggle);
+  expect(details?.hidden).toBe(true);
+});
+
+test("a merge PM confirms is not yours: 接手处理 leads until you take it over", async () => {
   const q = merge({ decider: "role:pm" });
   const { region, title, emphasis } = panel(
     cardDetail({
       card: { ...card, status: "awaiting_merge", waiting_on: [] },
       merge_confirmations: [q],
     }),
-    { onReveal },
   );
   expect(title).toBe("等 PM 确认合并Q-2");
-  expect(emphasis).toHaveLength(0);
-  fireEvent.click(within(region).getByRole("button", { name: "查看合并详情" }));
-  expect(onReveal).toHaveBeenCalledWith("merge");
+  expect(region.dataset.mine).toBeUndefined();
+  // C-687 §3.2: before a takeover, 接手处理 is the panel's only main action.
+  expect([...emphasis].map((e) => e.textContent)).toEqual(["接手处理"]);
+  expect(within(region).queryByRole("button", { name: "确认合并" })).toBeNull();
+  expect(within(region).getByRole("button", { name: "合并详情" })).toBeTruthy();
+  fireEvent.click(within(region).getByRole("button", { name: "接手处理" }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认接手" }));
+  await waitFor(() =>
+    expect(
+      within(region).getByRole("button", { name: "确认合并" }).className,
+    ).toContain("ui-button-emphasis"),
+  );
+  expect(within(region).queryByRole("button", { name: "接手处理" })).toBeNull();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(region).getByRole("group", { name: "合并处理操作" }),
+    ),
+  );
 });
 
-test("a failed merge check after confirming still waits on you", () => {
+test("a failed merge check after confirming still waits on you: 重新检查 leads", async () => {
+  const recheckMerge = vi.fn(async () => {});
   const q = merge({
     status: "resolved",
     merge_confirmation: {
@@ -268,13 +334,47 @@ test("a failed merge check after confirming still waits on you", () => {
       },
     },
   });
-  const { title } = panel(
+  const { region, title, emphasis } = panel(
+    cardDetail({
+      card: { ...card, status: "awaiting_merge", waiting_on: [] },
+      merge_confirmations: [q],
+    }),
+    { client: fakeClient({ recheckMerge }) },
+  );
+  expect(title).toBe("合并检查未通过Q-2");
+  expect([...emphasis].map((b) => b.textContent)).toEqual(["重新检查"]);
+  expect(
+    within(region)
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label") ?? b.textContent),
+  ).toEqual(["合并详情", "重新检查", "退回修改"]);
+  fireEvent.click(emphasis[0] as HTMLElement);
+  await waitFor(() =>
+    expect(recheckMerge).toHaveBeenCalledWith(
+      "p 1",
+      "C-1",
+      "D-1",
+      expect.any(String),
+    ),
+  );
+});
+
+test("a confirmed merge waiting for its check is not yours: only 退回修改", () => {
+  const q = merge({ status: "resolved" });
+  const { region, title, emphasis } = panel(
     cardDetail({
       card: { ...card, status: "awaiting_merge", waiting_on: [] },
       merge_confirmations: [q],
     }),
   );
-  expect(title).toBe("合并检查未通过Q-2");
+  expect(title).toBe("已确认合并Q-2");
+  expect(region.dataset.mine).toBeUndefined();
+  expect(emphasis).toHaveLength(0);
+  expect(
+    within(within(region).getByRole("group", { name: "合并处理操作" }))
+      .getAllByRole("button")
+      .map((b) => b.textContent),
+  ).toEqual(["退回修改"]);
 });
 
 const decision = (over: Partial<NeedsDecision> = {}): NeedsDecision =>
@@ -764,17 +864,15 @@ test("C-695: the status row keeps only status, time and risk, with 编辑 and �
   expect(
     within(row).getByRole("button", { name: "更多卡片操作" }),
   ).toBeTruthy();
-  // The page has one emphasis button: the panel's.
+  // The page has one emphasis button: the panel's own 确认合并 (C-697).
   const next = screen.getByRole("region", { name: "下一步" });
   const emphasis = document.querySelectorAll(".ui-button-emphasis");
   expect(emphasis).toHaveLength(1);
   expect(next.contains(emphasis[0] as Node)).toBe(true);
-  // It leads to and focuses the existing confirm control.
-  fireEvent.click(emphasis[0] as HTMLElement);
-  await waitFor(() =>
-    expect(document.activeElement?.textContent).toBe("确认合并"),
-  );
-  expect(document.activeElement?.getAttribute("form")).toBe("merge-Q-2");
+  expect(emphasis[0]?.textContent).toBe("确认合并");
+  // The overview no longer repeats the merge controls.
+  expect(screen.queryByRole("region", { name: "合并处理" })).toBeNull();
+  expect(screen.getAllByRole("button", { name: "确认合并" })).toHaveLength(1);
   vi.unstubAllGlobals();
 });
 
@@ -988,9 +1086,10 @@ test("C-701: the page dock shows the card and the main action once the panel scr
   vi.unstubAllGlobals();
 });
 
-test("C-701: the drawer dock names the step; it runs the panel's action", () => {
+test("C-697: the drawer dock names the step and repeats 确认合并 from the merge panel", async () => {
   const move = stubPanelObserver();
-  const onReveal = vi.fn();
+  const recordDecision = vi.fn(async () => undefined);
+  const client = fakeClient({ recordDecision });
   const slot = document.createElement("div");
   document.body.append(slot);
   const q = merge();
@@ -1005,11 +1104,22 @@ test("C-701: the drawer dock names the step; it runs the panel's action", () => 
         merge_confirmations: [q],
         decisions: [q],
       })}
-      client={fakeClient()}
+      client={client}
       projectId="p-1"
       onSaved={() => {}}
-      onReveal={onReveal}
+      onReveal={() => {}}
       markDone={() => null}
+      mergePanel={(item, { title, mine, dockFor }) => (
+        <MergePanel
+          q={item}
+          client={client}
+          projectId="p-1"
+          done={() => {}}
+          title={title}
+          mine={mine}
+          dockFor={dockFor}
+        />
+      )}
       inDrawer
       dock={slot}
     />,
@@ -1018,9 +1128,66 @@ test("C-701: the drawer dock names the step; it runs the panel's action", () => 
   expect(slot.childElementCount).toBe(0);
   move("above");
   const dock = within(slot).getByRole("region", { name: "主操作" });
-  expect(dock.textContent).toBe("等你确认合并Q-2处理合并确认");
-  fireEvent.click(within(dock).getByRole("button", { name: "处理合并确认" }));
-  expect(onReveal).toHaveBeenCalledWith("merge");
+  expect(dock.textContent).toBe("等你确认合并Q-2确认合并");
+  const action = within(dock).getByRole("button", { name: "确认合并" });
+  expect(action.className).toContain("ui-button-emphasis");
+  fireEvent.click(action);
+  // The panel's own 确认合并 ran, with its idempotency key.
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "Q-2",
+      "merge",
+      "",
+      expect.any(String),
+    ),
+  );
+  slot.remove();
+  vi.unstubAllGlobals();
+});
+
+test("C-697: before a PM takeover the dock repeats 接手处理 and opens its dialog", async () => {
+  const move = stubPanelObserver();
+  const client = fakeClient();
+  const slot = document.createElement("div");
+  document.body.append(slot);
+  const q = merge({ decider: "role:pm" });
+  render(
+    <CardNextStep
+      detail={cardDetail({
+        card: { ...card, status: "awaiting_merge", waiting_on: [] },
+        merge_confirmations: [q],
+        decisions: [q],
+      })}
+      client={client}
+      projectId="p-1"
+      onSaved={() => {}}
+      onReveal={() => {}}
+      markDone={() => null}
+      mergePanel={(item, { title, mine, dockFor }) => (
+        <MergePanel
+          q={item}
+          client={client}
+          projectId="p-1"
+          done={() => {}}
+          title={title}
+          mine={mine}
+          dockFor={dockFor}
+        />
+      )}
+      inDrawer
+      dock={slot}
+    />,
+  );
+  move("above");
+  const dock = within(slot).getByRole("region", { name: "主操作" });
+  expect(dock.textContent).toBe("等 PM 确认合并Q-2接手处理");
+  const action = within(dock).getByRole("button", { name: "接手处理" });
+  expect(action.className).toContain("ui-button-emphasis");
+  fireEvent.click(action);
+  expect(
+    await screen.findByRole("dialog", { name: "接手 PM 合并确认" }),
+  ).toBeTruthy();
   slot.remove();
   vi.unstubAllGlobals();
 });

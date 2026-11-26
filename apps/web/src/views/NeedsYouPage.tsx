@@ -13,7 +13,6 @@ import {
   describeError,
   describeWriteError,
   type IncidentHandling,
-  type MergeConfirmationReview,
   type NeedsAction,
   type NeedsCardToClose,
   type NeedsDecision,
@@ -46,7 +45,6 @@ import {
   NeedsRow,
 } from "../components/layout/NeedsRowLayout.js";
 import { MergeBlockingControl } from "../components/MergeBlockingControl.js";
-import { MergeCheck } from "../components/MergeCheck.js";
 import { MergeStatusLine } from "../components/MergeStatusLine.js";
 import {
   type NeedsCountsResource,
@@ -82,7 +80,11 @@ import { routeHash } from "../route.js";
 import { statusLabel } from "../status.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { useResource } from "../useResource.js";
+import { MergeEvidence, PreMergeCheckList } from "./MergeEvidence.js";
+import { useAction } from "./useAction.js";
 
+/** C-768: optional verifiers still open on a merge confirmation. */
+const OPTIONAL_VERIFIERS_LABEL = "可选验证项（确认合并即视为豁免）";
 const waitLabel = (ms: number | null, elapsed = 0) => {
   const age = (ms ?? 0) + elapsed;
   return ms === null
@@ -109,111 +111,6 @@ const reviewOptionLabels: Record<string, string> = {
   split_card: "拆卡",
 };
 type Props = { client: CardiganClient; projectId: string; revision?: number };
-function useAction(done: () => void) {
-  const keys = useRef(new Map<string, string>());
-  const sending = useRef(false);
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState<string>(),
-    [message, setMessage] = useState("");
-  return {
-    busy,
-    error,
-    message,
-    clearFeedback: () => {
-      if (sending.current) return;
-      setError(undefined);
-      setMessage("");
-    },
-    run: async (
-      input: readonly unknown[],
-      action: (key: string) => Promise<void>,
-    ) => {
-      if (sending.current) return;
-      sending.current = true;
-      const request = JSON.stringify(input);
-      const key = keys.current.get(request) ?? crypto.randomUUID();
-      keys.current.set(request, key);
-      setBusy(true);
-      setError(undefined);
-      setMessage("");
-      try {
-        await action(key);
-        keys.current.delete(request);
-        setMessage("已提交");
-        done();
-      } catch (e) {
-        setError(describeWriteError(e));
-      } finally {
-        sending.current = false;
-        setBusy(false);
-      }
-    },
-  };
-}
-function DecisionMeta({
-  q,
-  projectId,
-  elapsed,
-  hideCard = false,
-}: {
-  readonly q: NeedsDecision;
-  readonly projectId: string;
-  readonly elapsed: number;
-  readonly hideCard?: boolean;
-}) {
-  return (
-    <>
-      <IdentityRow as="header" className="needs-meta">
-        <EmployeeIdentity {...q} showTitle={false} />
-        <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
-        {q.blocking && !q.followup_notice && !isMergeConfirmation(q) && (
-          <StatusTag status="blocked" />
-        )}
-        {isPausedReview(q) && (
-          <StatusTag status="suspended" label="已暂停（临时决定）" />
-        )}
-        {q.handed_over_from_pm && (
-          <span className="hint" title={q.handed_over_from_pm.reason}>
-            由 PM 转交
-          </span>
-        )}
-        <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
-        {q.auto_merge && !isMergeConfirmation(q) && (
-          <span className="hint">
-            将于{" "}
-            {new Date(q.auto_merge.due_at).toLocaleTimeString("zh-CN", {
-              hour: "2-digit",
-              minute: "2-digit",
-              hour12: false,
-            })}{" "}
-            自动合并（偏好设置：{q.auto_merge.minutes} 分钟）
-            {q.auto_merge.remaining_ms !== undefined
-              ? ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.remaining_ms - elapsed) / 60_000))} 分钟`
-              : q.waited_ms !== null &&
-                ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.minutes * 60_000 - q.waited_ms - elapsed) / 60_000))} 分钟`}
-          </span>
-        )}
-        {!hideCard && (
-          <span className="needs-cards">
-            {!q.card_id ? (
-              <span>项目级事项</span>
-            ) : (
-              <CardLink
-                projectId={projectId}
-                id={q.card_id}
-                label={
-                  q.related_cards.find((card) => card.id === q.card_id)
-                    ?.title ?? "卡片"
-                }
-              />
-            )}
-          </span>
-        )}
-      </IdentityRow>
-      <DecisionAffectedCards decision={q} projectId={projectId} />
-    </>
-  );
-}
 function cardTitle(q: NeedsDecision, id = q.card_id) {
   return q.related_cards.find((card) => card.id === id)?.title;
 }
@@ -639,58 +536,6 @@ export function SuggestedDecision({
     </>
   );
 }
-function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
-  const label =
-    [review.work_item_title, review.role_id].filter(Boolean).join(" ") ||
-    "验证";
-  return (
-    <li>
-      <IdentityRow className="needs-review-head">
-        <EmployeeIdentity {...review} showTitle={false} />
-        <IdTag id={review.work_item_id} label={label} />
-        <StatusTag status={review.verdict} />
-        {review.followup_card_id && (
-          <IdTag id={review.followup_card_id} label="后续卡" />
-        )}
-      </IdentityRow>
-      {review.issues.length > 0 && (
-        <details className="needs-review-issues">
-          <summary>问题（{review.issues.length}）</summary>
-          <ul>
-            {review.issues.map((issue) => (
-              <li key={`${review.id}-${issue.severity}-${issue.description}`}>
-                <strong>
-                  {issue.must_fix ? "必须修" : "非阻塞"} · {issue.severity}
-                  {issue.impact && ` · ${reviewImpactLabel[issue.impact]}`}
-                </strong>
-                <span>{issue.description}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-    </li>
-  );
-}
-function PreMergeCheckList({
-  checks,
-}: {
-  checks: readonly PreMergeCheckView[];
-}) {
-  return (
-    <ul className="pre-merge-check-list">
-      {checks.map((c) => (
-        <li key={c.label}>
-          <strong>{c.label}</strong>：{PRE_MERGE_COPY.status[c.status]}
-          {c.stale && (
-            <span className="hint">（{PRE_MERGE_COPY.staleNote}）</span>
-          )}
-          {c.note && <span className="hint">（{c.note}）</span>}
-        </li>
-      ))}
-    </ul>
-  );
-}
 /**
  * C-160: checks the human wants done before confirming (e.g. an independent
  * security review). Advisory: the confirm button stays available.
@@ -722,13 +567,11 @@ export function MergeConfirmation({
   projectId,
   done,
   elapsed,
-  inCardHeader = false,
   confirmPmTakeover = false,
 }: Props & {
   q: NeedsDecision;
   done: () => void;
   elapsed: number;
-  inCardHeader?: boolean;
   confirmPmTakeover?: boolean;
 }) {
   const [quote, setQuote] = useState("");
@@ -767,6 +610,7 @@ export function MergeConfirmation({
   const preChecks = merge?.pre_merge_checks ?? [];
   const blockers = merge?.blockers ?? ["检查状态尚未读取，请刷新"];
   const holds = merge?.blocking_human_actions ?? [];
+  const optionalPending = merge?.optional_pending ?? [];
   const mergeBlocked = blockers.length > 0;
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge", viaSuggestion = false) =>
@@ -891,11 +735,7 @@ export function MergeConfirmation({
   const content = (
     <>
       {q.plain_summary ? (
-        <PlainSummary
-          id={q.id}
-          summary={q.plain_summary}
-          omitRisk={inCardHeader}
-        />
+        <PlainSummary id={q.id} summary={q.plain_summary} />
       ) : (
         <p className="hint">尚未提供改动概述 / 风险尚未说明</p>
       )}
@@ -982,6 +822,18 @@ export function MergeConfirmation({
             </>
           ) : (
             <p>检查都已通过</p>
+          )}
+          {optionalPending.length > 0 && (
+            <>
+              <p>{OPTIONAL_VERIFIERS_LABEL}：</p>
+              <ul aria-label={OPTIONAL_VERIFIERS_LABEL}>
+                {optionalPending.map((item) => (
+                  <li key={item.id}>
+                    {item.title}（{item.id}）
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
         </div>
       )}
@@ -1358,130 +1210,7 @@ export function MergeConfirmation({
           </div>
         </form>
       )}
-      <div className="merge-evidence">
-        <details
-          className="needs-merge-section"
-          aria-label="要合并的交付"
-          open={!q.plain_summary}
-        >
-          <summary>要合并的交付（{merge?.deliveries.length ?? 0} 项）</summary>
-          {!merge || merge.deliveries.length === 0 ? (
-            <p className="hint">还没有可合并的交付。</p>
-          ) : (
-            <ul className="needs-delivery-list">
-              {merge.deliveries.map((delivery) => (
-                <li key={delivery.id}>
-                  <IdentityRow className="needs-delivery-head">
-                    <EmployeeIdentity {...delivery} showTitle={false} />
-                    <IdTag
-                      id={delivery.work_item_id}
-                      label={delivery.work_item_title}
-                    />
-                    <code title={delivery.subject.value}>
-                      {delivery.subject.value.slice(0, 12)}
-                    </code>
-                    {cardId && (
-                      <a
-                        href={routeHash({
-                          kind: "card",
-                          projectId,
-                          cardId,
-                          anchor: `delivery-${delivery.id}`,
-                        })}
-                      >
-                        查看改动
-                      </a>
-                    )}
-                  </IdentityRow>
-                  <p>{delivery.summary}</p>
-                </li>
-              ))}
-            </ul>
-          )}
-        </details>
-        <details className="needs-merge-section" aria-label="审核与验收">
-          <summary>审核与验收（{merge?.reviews.length ?? 0} 项）</summary>
-          {!merge || merge.reviews.length === 0 ? (
-            <p className="hint">还没有审核或验收结论。</p>
-          ) : (
-            <ul className="needs-review-list">
-              {merge.reviews.map((review) => (
-                <ReviewLine key={review.id} review={review} />
-              ))}
-            </ul>
-          )}
-        </details>
-        <details
-          className="needs-merge-section"
-          aria-label="已知遗留"
-          open={!merge?.known_gaps || merge.known_gaps.length > 0}
-        >
-          <summary>
-            已知遗留{" "}
-            {merge?.known_gaps ? `${merge.known_gaps.length} 项` : "资料未提供"}
-          </summary>
-          {!merge?.known_gaps ? (
-            <p>遗留资料未提供，不能视为无遗留</p>
-          ) : merge.known_gaps.length === 0 ? (
-            <p className="hint">没有已知遗留。</p>
-          ) : (
-            <ul className="needs-gap-list">
-              {merge.known_gaps.map((gap) => (
-                <li
-                  key={`${gap.description}-${gap.followup_card_id ?? ""}-${gap.precondition ?? ""}`}
-                >
-                  <span>{gap.description}</span>
-                  {gap.followup_card_id && (
-                    <CardLink
-                      projectId={projectId}
-                      id={gap.followup_card_id}
-                      label="后续卡"
-                    />
-                  )}
-                  {gap.precondition && (
-                    <span className="hint">前置条件：{gap.precondition}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-        </details>
-        {merge?.merge_gate_enabled &&
-          !merge.merge_noop &&
-          !merge.merge_gate_invalid && (
-            <details className="needs-merge-section">
-              <summary>合并检查详情</summary>
-              <MergeCheck
-                check={check ?? null}
-                projectId={projectId}
-                live
-                detailsOnly
-              />
-            </details>
-          )}
-        {!!preChecks.length && (
-          <details className="needs-merge-section">
-            <summary>合并前核对（{preChecks.length} 项）</summary>
-            <PreMergeCheckList checks={preChecks} />
-          </details>
-        )}
-        <DecisionContext
-          context={q.context}
-          summary={q.plain_summary}
-          legacy="上下文原文"
-        />
-        <details className="needs-merge-section">
-          <summary>操作说明</summary>
-          <ol className="pre-merge-steps">
-            {PRE_MERGE_COPY.readySteps(
-              !!merge?.merge_gate_enabled && !merge.merge_noop,
-            ).map((step) => (
-              <li key={step}>{step}</li>
-            ))}
-          </ol>
-          <p>两种确认都会记录你的合并决定，“按建议”另记为采纳建议。</p>
-        </details>
-      </div>
+      <MergeEvidence q={q} projectId={projectId} cardId={cardId} />
       <RequestFeedback
         interactive
         pending={action.busy}
@@ -1497,17 +1226,6 @@ export function MergeConfirmation({
       {decisionTitle(q)}
     </>
   );
-  if (inCardHeader)
-    return (
-      <article
-        className="needs-item needs-merge"
-        aria-label={`合并确认 ${q.id}`}
-      >
-        <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} hideCard />
-        <h3 className="needs-question">{title}</h3>
-        {content}
-      </article>
-    );
   return (
     <NeedsRow
       label={`合并确认 ${q.id}`}

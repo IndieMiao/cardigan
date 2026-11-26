@@ -291,11 +291,7 @@ export function ExecutionPage({
     lane = false,
     id?: string,
   ) => (
-    <ul
-      id={id}
-      className="execution-cards board-list"
-      aria-label="Assignment 列表"
-    >
+    <ul id={id} className="execution-cards board-list" aria-label="执行列表">
       {rows.map((a) => (
         <AssignmentCard key={a.id} {...rowProps(a)} lane={lane} />
       ))}

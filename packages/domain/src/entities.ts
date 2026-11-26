@@ -1091,6 +1091,14 @@ export interface DecisionResolution {
     readonly delivery_id: DeliveryId;
     readonly subject: Delivery["subject"];
   };
+  /**
+   * C-768: optional verifiers still open that the human's own merge
+   * confirmation waived, observed in its transaction.
+   */
+  readonly waived_verifiers?: readonly {
+    readonly id: WorkItemId;
+    readonly title: string;
+  }[];
   /** Q-440: human-only override, including the blockers observed in its transaction. */
   readonly merge_override?: {
     readonly reason: string;

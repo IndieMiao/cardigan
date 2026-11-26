@@ -57,15 +57,20 @@ Button.displayName = "Button";
 export function ButtonLabel({ children }: { children: ReactNode }) {
   return <span className="ui-button-label">{children}</span>;
 }
+/** 28px icon button; `size="regular"` (32px) sits in a row of regular buttons. */
 const IconButton = forwardRef<
   HTMLButtonElement,
-  Omit<ButtonProps, "size"> & { "aria-label": string }
->(({ className, ...props }, ref) => (
+  Omit<ButtonProps, "size"> & { "aria-label": string; size?: "regular" }
+>(({ className, size, ...props }, ref) => (
   <Button
     {...props}
-    className={cn("ui-icon-button", className)}
+    className={cn(
+      "ui-icon-button",
+      size === "regular" && "ui-icon-button-regular",
+      className,
+    )}
     ref={ref}
-    size="icon"
+    size={size === "regular" ? "icon-regular" : "icon"}
   />
 ));
 IconButton.displayName = "IconButton";
