@@ -11,11 +11,13 @@ import type {
   DeliveryEvidence,
   DeliverySubject,
   Review,
+  Run,
   WorkItem,
 } from "../entities.js";
 import { REVIEW_IMPACTS } from "../entities.js";
 import type { Result } from "../errors.js";
 import { flowAtLeast } from "../flow.js";
+import type { AttachmentId } from "../ids.js";
 import type { DeliveryVerifier } from "../ports.js";
 import { reviewMaxRounds } from "../preferences.js";
 import { hasProbeEvidence } from "../probes.js";
@@ -48,6 +50,7 @@ import { supersedeDelivery } from "./delivery-invalidation.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { upgradeFastPatch } from "./fast-patch.js";
 import { requestHumanCompletionReview } from "./human-completion.js";
+import { lateEvidence } from "./late-evidence.js";
 import { completionPassed } from "./merge.js";
 import { buildPlainSummary } from "./plain-summary.js";
 import {
@@ -71,6 +74,7 @@ import {
 import {
   conflictRepairEvent,
   reviewRejectionsNeedAttention,
+  voidedRejection,
 } from "./review-round.js";
 import { checkReviewPlanGate } from "./review-strategy.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
@@ -898,8 +902,38 @@ export type SubmitReviewParams = Pick<
       | "screenshot_check"
       | "rejection_category"
       | "followup_card_id"
+      | "evidence_seen"
     >
   >;
+/**
+ * C-769: a rejection must not take effect while evidence that reached the
+ * delivery after the review started may be unread. The reviewer re-reads the
+ * card and names every such file in `evidence_seen` to reject anyway.
+ */
+function checkLateEvidence(
+  d: CommandDraft,
+  run: Run,
+  target: Delivery,
+  blocking: boolean,
+  seen: readonly AttachmentId[] | undefined,
+): readonly AttachmentId[] | undefined {
+  ensure(
+    seen === undefined ||
+      (Array.isArray(seen) && seen.every((id) => typeof id === "string")),
+    "validation_failed",
+    "evidence_seen 须为附件编号列表",
+  );
+  if (!blocking) return undefined;
+  const late = lateEvidence(d, run, target);
+  const unseen = late.filter((id) => !seen?.includes(id));
+  ensure(
+    unseen.length === 0,
+    "stale_target",
+    `本次审核开始后交付又到了证据附件：${unseen.join("、")}。证据已更新，请重新读取卡片和附件后再下结论；核对后仍要驳回，把这些附件编号填进 evidence_seen`,
+  );
+  return late.length ? late : undefined;
+}
+
 export function submitReview(
   state: CommandState,
   actor: Actor,
@@ -1114,6 +1148,13 @@ export function submitReview(
       "invariant_violation",
       "A Run may submit only one review",
     );
+    const evidenceSeen = checkLateEvidence(
+      d,
+      run,
+      target,
+      calculated.blocking,
+      p.evidence_seen,
+    );
     const testReview = incrementalTestReview(d, item, target);
     ensure(
       !run.test_review ||
@@ -1135,7 +1176,7 @@ export function submitReview(
     );
     const prior = d
       .list("reviews")
-      .filter((r) => r.work_item_id === item.id)
+      .filter((r) => r.work_item_id === item.id && !voidedRejection(r))
       .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
     if (prior && !testReview)
       ensure(
@@ -1201,6 +1242,7 @@ export function submitReview(
       recheck_required: recheckRequired,
       ...(testReview ? { test_review: testReview } : {}),
       attachments: [...(p.attachments ?? [])],
+      ...(evidenceSeen ? { evidence_seen: evidenceSeen } : {}),
       ...(reuseContext
         ? {
             reuse_basis: {

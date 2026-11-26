@@ -155,7 +155,11 @@ function note(
   if (
     to.kind === "assignment" &&
     to.assignment_id === actorAssignmentId(input) &&
-    !["6.4/review reuse invalidated", "6.4/work item resumed"].includes(rule)
+    ![
+      "6.4/review reuse invalidated",
+      "6.4/work item resumed",
+      "C-769/review rejection withdrawn",
+    ].includes(rule)
   ) {
     return;
   }
@@ -1037,6 +1041,55 @@ function routeDeliveryAccepted(input: RouteInput, draft: Draft): void {
     (candidate) => candidate.id === delivery_id,
   );
   routeCompletion(input, draft, delivery?.work_item_id);
+}
+
+/**
+ * C-769: a rejection voided because its evidence arrived late. The same
+ * delivery awaits review again: wake its verifier and tell the author that no
+ * resubmission is needed. Replays after a newer delivery stay silent.
+ */
+function routeVoidedRejection(input: RouteInput, draft: Draft): void {
+  const payload = payloadObject(input.event.payload);
+  if (payload.verdict !== "reject") return;
+  const delivery = input.snapshot.deliveries.find(
+    (v) => v.id === payloadString(input.event.payload, "delivery_id"),
+  );
+  if (delivery?.status !== "submitted") return;
+  const verifier = itemOf(
+    input,
+    payloadString(input.event.payload, "work_item_id") as
+      | WorkItemId
+      | undefined,
+  );
+  // A reviewer voiding its own rejection from a later Run reviews right there;
+  // the Run that submitted the rejection cannot review again.
+  const own =
+    verifier?.assignment_id !== undefined &&
+    verifier.assignment_id === actorAssignmentId(input);
+  if (
+    verifier?.kind === "verify" &&
+    ["ready", "in_progress"].includes(verifier.status) &&
+    verificationTarget(verifier, input.snapshot)?.id === delivery.id &&
+    (!own || payload.reviewer_needs_run !== false)
+  )
+    noteAssignment(
+      input,
+      draft,
+      verifier,
+      "delivery",
+      "C-769/review rejection withdrawn",
+      `${delivery.id} 的驳回已作废（证据晚到），请重新读取卡片和附件后审核同一交付`,
+    );
+  const producer = itemOf(input, delivery.work_item_id);
+  if (producer?.status === "delivered")
+    noteAssignment(
+      input,
+      draft,
+      producer,
+      "review",
+      "C-769/review rejection withdrawn",
+      `${delivery.id} 的驳回已作废，无需重交，等待重新审核`,
+    );
 }
 
 function routeReview(input: RouteInput, draft: Draft): void {
@@ -2416,6 +2469,9 @@ export function routeEvent(input: RouteInput): RouteResult {
         );
       break;
     }
+    case "review_withdrawn":
+      routeVoidedRejection(input, draft);
+      break;
     case "review_submitted":
     case "completion_reviewed":
       routeReview(input, draft);
