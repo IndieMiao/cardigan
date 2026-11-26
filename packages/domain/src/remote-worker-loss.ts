@@ -73,6 +73,58 @@ export function remoteExitAction(
   );
 }
 
+/** C-761: the helper reported a boot other than the one journaled with the process. */
+export interface RemoteRebootReading {
+  readonly process: "exited";
+  readonly current_boot: string;
+}
+
+/** Boot identities as the worker helper reports them (Linux boot_id, Darwin boot session UUID). */
+export const REMOTE_BOOT_PATTERN = /^[A-Za-z0-9:-]{1,128}$/u;
+
+/**
+ * C-761: the only non-human completion of a remote exit request. The system
+ * completes it solely in the same transaction as its own reboot finding;
+ * no other system, PM or Assignment completion counts as exit evidence.
+ */
+export function rebootExitCompletion(
+  events: readonly Event[],
+  completed: Event,
+) {
+  const p = completed.payload as {
+    human_action_id?: string;
+    conclusion?: string;
+    basis?: string;
+    evidence_event_id?: string;
+  };
+  if (
+    completed.type !== "human_action_completed" ||
+    completed.actor.kind !== "system" ||
+    p.basis !== "reboot" ||
+    p.conclusion !== "exited"
+  )
+    return false;
+  return eventsOfType(events, "remote_worker_reboot_confirmed").some(
+    (e) =>
+      e.actor.kind === "system" &&
+      e.id === p.evidence_event_id &&
+      (e.payload as { human_action_id?: string }).human_action_id ===
+        p.human_action_id,
+  );
+}
+
+/** Whether a completion of a remote exit request confirms the exit. */
+export function exitCompletionConfirms(
+  events: readonly Event[],
+  completed: Event,
+) {
+  return completed.actor.kind === "human"
+    ? [undefined, "exited"].includes(
+        (completed.payload as { conclusion?: string }).conclusion,
+      )
+    : rebootExitCompletion(events, completed);
+}
+
 /** A newer request supersedes earlier exit evidence, including after a late alive observation. */
 export function remoteWorkerExitPending(
   all: readonly Event[],
@@ -117,10 +169,7 @@ export function remoteWorkerExitPending(
       (e, i) =>
         i > request &&
         e.type === "human_action_completed" &&
-        e.actor.kind === "human" &&
-        [undefined, "exited"].includes(
-          (e.payload as { conclusion?: string }).conclusion,
-        ) &&
+        exitCompletionConfirms(all, e) &&
         (e.payload as { human_action_id?: string }).human_action_id === id,
     )
   );

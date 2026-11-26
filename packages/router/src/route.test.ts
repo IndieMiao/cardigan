@@ -1752,6 +1752,16 @@ test("human-confirmed remote worker release asks PM to choose the next machine w
   );
   const result = routeEvent({ event: e, snapshot: snapshot() });
   expect(recipients(result)).toEqual(["pm_ops"]);
+  expect(result.notifications[0]?.summary).toContain("已由人确认退出");
+  // C-761: a release on reboot evidence names the system, not the human.
+  const reboot = routeEvent({
+    event: { ...e, payload: { ...e.payload, exit_basis: "reboot" } },
+    snapshot: snapshot(),
+  });
+  expect(recipients(reboot)).toEqual(["pm_ops"]);
+  expect(reboot.notifications[0]?.summary).toContain(
+    "已由系统按重启证据确认退出",
+  );
   expect(
     routeEvent({ event: { ...e, actor: agent("A-1") }, snapshot: snapshot() })
       .notifications,

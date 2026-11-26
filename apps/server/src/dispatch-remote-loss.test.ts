@@ -32,7 +32,12 @@ const owner = () =>
   f.state().assignments.find((a) => a.id === target.assignment.id);
 const currentRun = () =>
   f.state().runs.find((r) => r.assignment_id === target.assignment.id);
-let evidence: "alive" | "exited" | "unknown" | "unreachable" = "unreachable";
+let evidence:
+  | "alive"
+  | "exited"
+  | "unknown"
+  | "unreachable"
+  | { process: "exited"; current_boot: string } = "unreachable";
 const probeRemoteProcess = vi.fn(async () => evidence);
 const startMonitor = () =>
   new RuntimeMonitor({
@@ -619,3 +624,123 @@ test("a released backup takeover can continue in-progress work after dispatcher 
     await plane.stop();
   }
 });
+
+// C-761: the launch receipt the host journaled before dispatch.
+function journalLaunchReceipt() {
+  const run = currentRun();
+  const a = owner();
+  if (!run || !a) throw new Error("Missing Run");
+  const generation = "c".repeat(32);
+  const ref = {
+    ...f.refFor(target.assignment),
+    launch_generation: { run_id: run.id, generation },
+  };
+  const target_binding = ref.target;
+  if (!target_binding) throw new Error("Missing worker target");
+  f.store.uow.run((tx) => {
+    tx.assignments.put(f.project, { ...a, runtime_ref: ref });
+    tx.runs.put(f.project, {
+      ...run,
+      launch_publication: {
+        generation,
+        target: target_binding,
+        phase: "started",
+        lease_until: f.clock.now(),
+        agent_name: ref.agent_name,
+        work_dir: "/worker/A-1",
+        sha: null,
+        token_id: null,
+        runtime_ref: ref,
+        process: {
+          machine: target_binding.fingerprint,
+          terminal: generation,
+          boot: "old-boot",
+          uid: 1000,
+          pid: 42,
+          start: "20",
+          process_group: 42,
+        },
+        log_offset: 0,
+        artifacts: [],
+        wait: false,
+        provision_attempted: true,
+      },
+    });
+  });
+  monitor.reconcile();
+}
+
+test("C-761: a changed boot after the Run started settles the exit as the system, revokes tokens and leaves PM a plain reassignment", async () => {
+  journalLaunchReceipt();
+  evidence = { process: "exited", current_boot: "new-boot" };
+  await lose();
+  const action = f.state().human_actions[0];
+  if (!action) throw new Error("Missing exit request");
+  monitor.reconcile();
+  await expect.poll(() => owner()?.status).toBe("released");
+  expect(f.state().human_actions[0]).toMatchObject({
+    id: action.id,
+    status: "done",
+    result: { conclusion: "exited" },
+  });
+  const finding = f
+    .state()
+    .events.find((e) => e.type === "remote_worker_reboot_confirmed");
+  expect(finding).toMatchObject({
+    actor: { kind: "system" },
+    payload: {
+      human_action_id: action.id,
+      previous_boot: "old-boot",
+      current_boot: "new-boot",
+    },
+  });
+  expect(
+    f.state().events.find((e) => e.type === "human_action_completed")?.actor
+      .kind,
+  ).toBe("system");
+  expect(
+    f.state().events.find((e) => e.type === "remote_worker_released")?.payload,
+  ).toMatchObject({ exit_basis: "reboot" });
+  expect(f.store.verifyToken(token.token)).toBeUndefined();
+  expect(currentRun()).toMatchObject({ status: "cancelled" });
+  const next = f.apply((s, a, p) =>
+    assign(
+      s,
+      a,
+      {
+        work_item_id: target.item.id,
+        role_id: "coder",
+        machine_id: "local",
+        recovery_source: "main",
+      },
+      p,
+    ),
+  );
+  expect(next.recovery?.previous_assignment_id).toBe(target.assignment.id);
+});
+
+test.each([
+  ["without a journaled launch boot", false, "new-boot"],
+  ["that is a plain exit (older helper or same boot)", true, "old-boot"],
+] as const)(
+  "C-761: a boot reading %s keeps the exit request with the human",
+  async (_name, journaled, current_boot) => {
+    if (journaled) journalLaunchReceipt();
+    evidence =
+      current_boot === "old-boot"
+        ? "exited"
+        : { process: "exited", current_boot };
+    await lose();
+    for (let i = 0; i < 3; i++) {
+      monitor.reconcile();
+      await setImmediate();
+    }
+    expect(probeRemoteProcess).toHaveBeenCalled();
+    expect(f.state().human_actions[0]?.status).toBe("open");
+    expect(owner()?.status).toBe("active");
+    expect(f.store.verifyToken(token.token)).toBeDefined();
+    expect(
+      f.state().events.some((e) => e.type === "remote_worker_reboot_confirmed"),
+    ).toBe(false);
+  },
+);

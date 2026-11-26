@@ -626,12 +626,21 @@ class ProcBSDInfo(ctypes.Structure):
                 ('start_usec', ctypes.c_uint64)]
 
 
-def darwin_identity(pid):
+def darwin_boot():
     libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
     boot = ctypes.create_string_buffer(128)
     size = ctypes.c_size_t(len(boot))
     if libc.sysctlbyname(b'kern.bootsessionuuid', boot, ctypes.byref(size), None, 0):
         raise OSError('boot_unknown')
+    return boot.value.decode()
+
+
+def linux_boot():
+    return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+
+
+def darwin_identity(pid):
+    boot = darwin_boot()
     libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
     info = ProcBSDInfo()
     libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
@@ -639,7 +648,7 @@ def darwin_identity(pid):
         raise OSError('identity_unknown')
     if info.pid != pid or info.status == 5 or not info.start_sec:
         raise ValueError('identity_unknown')
-    return boot.value.decode(), info.uid, f'{info.start_sec}:{info.start_usec}', info.pgid
+    return boot, info.uid, f'{info.start_sec}:{info.start_usec}', info.pgid
 
 
 def linux_identity(pid):
@@ -647,8 +656,16 @@ def linux_identity(pid):
     if fields[0] in ('Z', 'X'):
         raise ValueError('identity_unknown')
     uid = Path(f'/proc/{pid}').stat().st_uid
-    boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-    return boot, uid, fields[19], int(fields[2])
+    return linux_boot(), uid, fields[19], int(fields[2])
+
+
+def current_boot():
+    """C-761: this boot's identity, or None. Never inferred from uptime."""
+    try:
+        boot = {'Linux': linux_boot, 'Darwin': darwin_boot}[platform.system()]()
+        return boot if re.fullmatch(r'[A-Za-z0-9:-]{1,128}', boot) else None
+    except (OSError, ValueError, KeyError, UnicodeDecodeError):
+        return None
 
 
 def identity(machine, pid, terminal, pgid):
