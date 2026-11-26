@@ -412,10 +412,28 @@ test.each([
     if (needsYou)
       expect(needsYou.getAttribute("href")).toBe("#/p/p-1/needs-you");
     expect(screen.queryByText("处理拍板、清理或失联事项")).toBeNull();
-    // The panel copies the start command where the CLI offers it.
+    // C-703: a work-item Assignment starts (or, lost, restarts) right here;
+    // the copied start command stays in 命令行.
     expect(
-      Boolean(within(current).queryByRole("button", { name: "复制启动命令" })),
-    ).toBe(["idle", "not_provisioned"].includes(state));
+      within(current).queryByRole("button", { name: "复制启动命令" }),
+    ).toBeNull();
+    expect(
+      within(current)
+        .queryAllByRole("button")
+        .filter((b) => b.classList.contains("ui-button-emphasis"))
+        .map((b) => b.textContent),
+    ).toEqual(
+      ["idle", "not_provisioned"].includes(state)
+        ? ["启动会话"]
+        : lost
+          ? ["重启会话"]
+          : state === "running"
+            ? ["查看改动"]
+            : [],
+    );
+    expect(
+      Boolean(within(current).queryByRole("button", { name: "停止执行…" })),
+    ).toBe(lost || state === "running");
     openCommands();
     const start = screen.queryByRole("button", { name: "复制启动或恢复会话" });
     expect(Boolean(start)).toBe(["idle", "not_provisioned"].includes(state));
@@ -499,9 +517,22 @@ test("C-702: the 当前 panel and ⋯ menu offer only existing actions for runni
   );
   expect(current.textContent).toContain("已运行 44 分钟");
   expect(current.textContent).toContain("上下文 62%");
-  // No new write interface here (C-703): no emphasis button, no stop.
-  expect(current.querySelector(".ui-button-emphasis")).toBeNull();
-  expect(within(current).queryByRole("button", { name: /停止/ })).toBeNull();
+  // C-703: 查看改动 is the main action, then attach and the dangerous stop.
+  expect(
+    [...current.querySelectorAll("[data-next-actions] > *")].map(
+      (b) => b.textContent,
+    ),
+  ).toEqual(["查看改动", "复制接入命令", "停止执行…"]);
+  expect(
+    within(current)
+      .getByRole("button", { name: "查看改动" })
+      .classList.contains("ui-button-emphasis"),
+  ).toBe(true);
+  expect(
+    within(current)
+      .getByRole("button", { name: "停止执行…" })
+      .classList.contains("ui-button-destructive"),
+  ).toBe(true);
   fireEvent.click(
     within(current).getByRole("button", { name: "复制接入命令" }),
   );
@@ -525,7 +556,8 @@ test("C-702: the 当前 panel and ⋯ menu offer only existing actions for runni
   const menu = await screen.findByRole("menu", { name: "更多执行操作" });
   expect(
     [...menu.querySelectorAll('[role="menuitem"]')].map((i) => i.textContent),
-  ).toEqual(["复制接入命令", "在 Needs You 中查看"]);
+  ).toEqual(["复制接入命令", "在 Needs You 中查看", "停止并取消执行…"]);
+  expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(1);
   fireEvent.click(
     within(menu).getByRole("menuitem", { name: "在 Needs You 中查看" }),
   );
@@ -538,7 +570,18 @@ test("C-702: the 当前 panel and ⋯ menu offer only existing actions for runni
   expect(within(current).getByRole("heading").textContent).toBe(
     "会话维护中：等待终端结束工作",
   );
-  expect(current.hasAttribute("data-mine")).toBe(false);
+  // C-703 (from C-702 V-3406): it waits on you like a lost session.
+  expect(current.hasAttribute("data-mine")).toBe(true);
+  expect(
+    [...current.querySelectorAll("[data-next-actions] > *")].map(
+      (b) => b.textContent,
+    ),
+  ).toEqual(["重启会话", "到 Needs You 处理", "停止执行…"]);
+  expect(
+    within(current)
+      .getByRole("link", { name: "到 Needs You 处理" })
+      .getAttribute("href"),
+  ).toBe("#/p/p-1/needs-you");
 
   fireEvent.click(screen.getByRole("button", { name: "查看 A-3 详情" }));
   await screen.findByRole("dialog", { name: "A-3 coder" });

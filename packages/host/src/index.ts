@@ -21,6 +21,14 @@ export {
   MAX_IDLE_ROLE_UPGRADES,
   upgradeIdleAssignmentRoles,
 } from "./assignment-role-upgrade.js";
+export {
+  type AssignmentStopCommand,
+  AssignmentStopError,
+  stopWorkItemSession,
+  unconfirmedExitMessage,
+  type WorkItemStopInput,
+  type WorkItemStopResult,
+} from "./assignment-stop.js";
 export { readAttention } from "./attention.js";
 export { failAutomaticContextRun } from "./automatic-context-restart.js";
 export {

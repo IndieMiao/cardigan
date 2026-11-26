@@ -199,6 +199,9 @@ const make = (
     waiting_on: [],
     risk_tags: [],
     related_cards: [],
+    // C-771: cards carry their template; one that names its own may leave
+    // the version out, as cards from before versions were recorded do.
+    ...(over.template ? {} : { template: "dev", template_version: 2 }),
     ...over,
   },
   template: devTpl,
@@ -279,6 +282,8 @@ const details: CardDetail[] = [
     {
       title: "现场勘查：三号仓库货架承重复核",
       status: "in_progress",
+      // C-771: an old card that recorded no template version (read as v1).
+      template: "general",
       goal: "到三号仓库现场复核货架承重标签，拍照记录，并写明是否需要更换。",
       acceptance_criteria: [],
       next_owners: [{ kind: "human", ref: "human" }],
@@ -365,6 +370,8 @@ const details: CardDetail[] = [
     {
       title: "需求：看板导出成表格",
       status: "in_progress",
+      template: "story",
+      template_version: 1,
       goal: "希望能把看板导出成表格，方便周会。",
       acceptance_criteria: [],
       next_owners: [{ kind: "human", ref: "human" }],
