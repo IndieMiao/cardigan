@@ -665,11 +665,21 @@ function createDeploymentAction(d: CommandDraft, input: DeploymentActionInput) {
 export function reconcileSupervisorNotice(
   state: CommandState,
   actor: Actor,
-  input: { supervisor: string; main: string; affected: readonly string[] },
+  input: {
+    supervisor: string;
+    main: string;
+    affected: readonly string[];
+    /**
+     * C-767: the watch process upgrades itself; record the verified change
+     * once, without a human action. Failures raise their own action.
+     */
+    automatic?: boolean;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "record_deployment", ports, (d) => {
     const { supervisor, main, affected } = input;
+    const automatic = input.automatic === true;
     ensure(
       [supervisor, main].every((sha) => /^[a-f0-9]{40}$/u.test(sha)),
       "validation_failed",
@@ -722,17 +732,32 @@ export function reconcileSupervisorNotice(
       });
     }
     // Legacy false alarms do not consume the one verified reminder per running SHA.
+    // C-767: an automatic record never consumes the human reminder either.
     if (
       !affected.length ||
       eventsOfType(state.events, "host_deployment_supervisor_change").some(
-        (e) =>
-          e.actor.kind === "system" &&
-          e.actor.project_id === state.project_id &&
-          !e.card_id &&
-          (e.payload as { supervisor?: string }).supervisor === supervisor,
+        (e) => {
+          const p = e.payload as { supervisor?: string; automatic?: boolean };
+          return (
+            e.actor.kind === "system" &&
+            e.actor.project_id === state.project_id &&
+            !e.card_id &&
+            p.supervisor === supervisor &&
+            (automatic ? p.automatic === true : !p.automatic)
+          );
+        },
       )
     )
       return;
+    if (automatic) {
+      d.emit("host_deployment_supervisor_change", undefined, {
+        supervisor,
+        main,
+        affected: [...affected],
+        automatic: true,
+      });
+      return;
+    }
     if (
       current &&
       current.status !== "open" &&
@@ -750,6 +775,153 @@ export function reconcileSupervisorNotice(
       main,
       affected: [...affected],
       human_action_id: action.id,
+    });
+  });
+}
+
+/** C-767: every stage of an automatic supervisor self-upgrade attempt. */
+export type SupervisorUpgradeStatus =
+  | "started"
+  | "restarting"
+  | "completed"
+  | "rolled_back"
+  | "failed";
+
+const SUPERVISOR_UPGRADE_TERMINAL: readonly SupervisorUpgradeStatus[] = [
+  "completed",
+  "rolled_back",
+  "failed",
+];
+
+export interface SupervisorUpgradeEvent {
+  readonly attempt: string;
+  readonly from: string;
+  readonly to: string;
+  readonly status: SupervisorUpgradeStatus;
+  readonly summary: string;
+  readonly human_action_id?: string;
+}
+
+function supervisorUpgradeEvents(events: readonly Event[], project: string) {
+  return eventsOfType(events, "host_supervisor_upgrade")
+    .filter(
+      (e) =>
+        e.actor.kind === "system" &&
+        e.actor.project_id === project &&
+        !e.card_id,
+    )
+    .map((e) => e.payload as unknown as SupervisorUpgradeEvent);
+}
+
+/**
+ * C-767: whether the running supervisor may still upgrade itself. Any failed
+ * or rolled-back attempt from this SHA hands the upgrade back to a human, so a
+ * broken target never turns into a restart loop. `active` is an attempt that
+ * has not reached a terminal record yet.
+ */
+export function supervisorUpgradeState(
+  events: readonly Event[],
+  project: string,
+  supervisor: string,
+): { readonly blocked: boolean; readonly active?: SupervisorUpgradeEvent } {
+  const own = supervisorUpgradeEvents(events, project).filter(
+    (e) => e.from === supervisor,
+  );
+  const blocked = own.some(
+    (e) => e.status === "failed" || e.status === "rolled_back",
+  );
+  const ended = new Set(
+    own
+      .filter((e) => SUPERVISOR_UPGRADE_TERMINAL.includes(e.status))
+      .map((e) => e.attempt),
+  );
+  const active = own.findLast((e) => !ended.has(e.attempt));
+  return active ? { blocked, active } : { blocked };
+}
+
+/**
+ * C-767: host-written audit of an automatic supervisor self-upgrade. Only the
+ * watch process and its restart helper call this; it is never upgrade
+ * authority. A failed or rolled-back attempt opens one human action.
+ */
+export function recordSupervisorUpgrade(
+  state: CommandState,
+  actor: Actor,
+  input: {
+    attempt: string;
+    from: string;
+    to: string;
+    status: SupervisorUpgradeStatus;
+    summary: string;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "record_deployment", ports, (d) => {
+    const { attempt, from, to, status, summary } = input;
+    ensure(
+      [from, to].every(
+        (sha) => typeof sha === "string" && /^[a-f0-9]{40}$/u.test(sha),
+      ) && from !== to,
+      "validation_failed",
+      "需要两个不同的完整提交 SHA",
+    );
+    ensure(
+      typeof attempt === "string" &&
+        /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(attempt),
+      "validation_failed",
+      "升级尝试编号无效",
+    );
+    ensure(
+      ["started", "restarting", ...SUPERVISOR_UPGRADE_TERMINAL].includes(
+        status,
+      ),
+      "validation_failed",
+      "升级状态无效",
+    );
+    ensure(
+      typeof summary === "string" &&
+        summary.trim().length > 0 &&
+        summary.length <= 2000,
+      "validation_failed",
+      "需要简短的升级说明",
+    );
+    const prior = supervisorUpgradeEvents(
+      state.events,
+      state.project_id,
+    ).filter((e) => e.attempt === attempt);
+    // A terminal record is final; repeated helper writes are idempotent.
+    if (
+      prior.some(
+        (e) =>
+          e.status === status || SUPERVISOR_UPGRADE_TERMINAL.includes(e.status),
+      )
+    )
+      return;
+    if (status === "started")
+      ensure(!prior.length, "invariant_violation", "该升级尝试已经开始");
+    else
+      ensure(
+        prior.some(
+          (e) => e.status === "started" && e.from === from && e.to === to,
+        ),
+        "invariant_violation",
+        "升级尝试尚未开始或版本不符",
+      );
+    let human_action_id: string | undefined;
+    if (status === "failed" || status === "rolled_back") {
+      const action = createDeploymentAction(d, {
+        key: `supervisor-upgrade:${attempt}`,
+        instructions: `部署监督器自动升级（${from} → ${to}）${status === "rolled_back" ? "健康检查未通过，已用备份回滚" : "未完成"}：${summary}。系统不再自动升级这个监督器版本，请按 cardigan-deploy README「升级监督器本身」核对并处理。`,
+      });
+      human_action_id = action.id;
+    }
+    d.emit("host_supervisor_upgrade", undefined, {
+      attempt,
+      from,
+      to,
+      status,
+      summary,
+      ...(human_action_id ? { human_action_id } : {}),
     });
   });
 }
