@@ -12,6 +12,8 @@ import {
   groupBatchCards,
   MergeBatchPage,
   MergeStageBadge,
+  mergeStageLabel,
+  shortTime,
 } from "./MergeBatch.js";
 
 afterEach(cleanup);
@@ -233,5 +235,29 @@ test("solo toggle exposes permission failures and restores the saved value", asy
   expect((await screen.findByRole("alert")).textContent).toContain("没有权限");
   expect(screen.getByRole("checkbox").getAttribute("aria-checked")).toBe(
     "false",
+  );
+});
+
+test("C-803: a window hold shows when the window expires and when the card may join a batch", () => {
+  const expires = "2030-01-02T03:04:00.000Z",
+    release = "2030-01-01T02:00:00.000Z";
+  expect(
+    mergeStageLabel({
+      stage: "held_by_window",
+      protecting_card_id: "C-3",
+      protecting_expires_at: expires,
+    }),
+  ).toBe(`等待合并窗口：保护 C-3 · ${shortTime(expires)} 到期`);
+  expect(
+    mergeStageLabel({
+      stage: "held_by_window",
+      protecting_card_id: "C-3",
+      protecting_card_held: true,
+      protecting_expires_at: expires,
+      held_since: "2030-01-01T00:00:00.000Z",
+      release_at: release,
+    }),
+  ).toBe(
+    `等待合并窗口：保护 C-3（已暂停） · ${shortTime(expires)} 到期 · ${shortTime(release)} 起可进批次`,
   );
 });

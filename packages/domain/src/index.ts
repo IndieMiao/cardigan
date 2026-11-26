@@ -71,6 +71,7 @@ export * from "./commands/merge-result.js";
 export * from "./commands/merge-shadow.js";
 export * from "./commands/merge-snooze.js";
 export * from "./commands/merge-window.js";
+export * from "./commands/merge-window-hold.js";
 export * from "./commands/notices.js";
 export * from "./commands/office-pre-merge-prompt.js";
 export * from "./commands/owner-record.js";

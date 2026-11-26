@@ -367,6 +367,11 @@ export interface MergeStage {
   /** C-677: files shared with the protecting card; empty while paths are unknown. */
   readonly protecting_files?: readonly string[];
   readonly protecting_card_held?: boolean;
+  /** C-803: the window closes then unless a new protected version renews it. */
+  readonly protecting_expires_at?: string;
+  /** C-803: recorded start of the hold and when the card may join a batch. */
+  readonly held_since?: string;
+  readonly release_at?: string;
   readonly card_check?: MergeCheckView;
   readonly batch_check?: MergeCheckView;
   readonly color?: number;

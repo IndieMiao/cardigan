@@ -20,6 +20,15 @@ import { Button } from "./ui/button.js";
 import { Checkbox } from "./ui/checkbox.js";
 import * as Dialog from "./ui/dialog.js";
 
+/** C-803: window expiry and hold release, in local month-day time. */
+export const shortTime = (at: string) =>
+  new Date(at).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
 export function mergeStageLabel(stage: MergeStageView): string {
   switch (stage.stage) {
     case "awaiting_confirmation":
@@ -27,7 +36,7 @@ export function mergeStageLabel(stage: MergeStageView): string {
     case "queued":
       return `排队中 · 第 ${stage.position ?? 1} 位`;
     case "held_by_window":
-      return `等待合并窗口：保护 ${stage.protecting_card_id}${stage.protecting_card_held ? "（已暂停）" : ""}`;
+      return `等待合并窗口：保护 ${stage.protecting_card_id}${stage.protecting_card_held ? "（已暂停）" : ""}${stage.protecting_expires_at ? ` · ${shortTime(stage.protecting_expires_at)} 到期` : ""}${stage.release_at ? ` · ${shortTime(stage.release_at)} 起可进批次` : ""}`;
     case "batch_checking":
       return `${stage.batch_id} 批次检查中`;
     case "bisecting":

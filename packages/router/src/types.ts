@@ -119,6 +119,7 @@ export type RuleId =
   | "6.4/merge check finished"
   | "6.4/automatic merge blocked"
   | "6.4/merge window closed by hold"
+  | "6.4/merge window hold released"
   | "6.4/card merged"
   | "6.4/merge failed"
   | "6.4/reconcile finding"

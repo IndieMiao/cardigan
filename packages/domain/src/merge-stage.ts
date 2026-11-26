@@ -100,6 +100,9 @@ export function mergeStage(
       protecting_card_id: protecting.card_id,
       protecting_files: protecting.files,
       protecting_card_held: protecting.held,
+      protecting_expires_at: protecting.expires_at,
+      ...(protecting.since ? { held_since: protecting.since } : {}),
+      ...(protecting.release_at ? { release_at: protecting.release_at } : {}),
     };
   const position = mergeQueue(state).findIndex(
     (q) => q.plan.card_id === card.id,
