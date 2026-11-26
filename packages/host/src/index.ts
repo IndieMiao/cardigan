@@ -24,6 +24,10 @@ export {
 export { readAttention } from "./attention.js";
 export { failAutomaticContextRun } from "./automatic-context-restart.js";
 export {
+  capacityOverrideBase,
+  withCapacityOverrides,
+} from "./capacity-overrides.js";
+export {
   AFFECTED_PACKAGE_DIR,
   type ChangeScope,
   type ChangeScopeInput,
@@ -180,6 +184,15 @@ export {
   heldBacklogMs,
   heldBacklogs,
 } from "./held-backlog.js";
+export {
+  checkHostConfig,
+  HOST_CONFIG_FILES,
+  type HostConfigCheck,
+  type HostConfigFile,
+  type HostConfigFileResult,
+  hostConfigFingerprint,
+  snapshotHostConfig,
+} from "./host-config-check.js";
 export {
   HostMemoryPressureMonitor,
   linuxPressureProbe,

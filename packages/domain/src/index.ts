@@ -27,6 +27,7 @@ export {
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
 export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";
+export * from "./commands/capacity-override.js";
 export * from "./commands/card-close.js";
 export { refreshCardDependencies } from "./commands/card-dependencies.js";
 export * from "./commands/card-watch.js";
