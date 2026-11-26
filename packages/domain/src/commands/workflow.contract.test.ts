@@ -350,8 +350,24 @@ test.each(["delivered", "accepted"] as const)(
     expect(requested.data.affected_work_items).toEqual([]);
     expect(apply(state, requested).runs).toEqual(state.runs);
     expect(item(apply(state, requested), ctx.producer).status).toBe(status);
+    // C-789: a blocker report on a delivered/accepted producer is a standby
+    // wait for PM; it never changes the state.
+    const standby = value(
+      reportBlocker(
+        state,
+        ctx.coder,
+        { work_item_id: ctx.producer, needs: "role", reason: "Need help" },
+        io,
+      ),
+    );
+    expect(item(apply(state, standby), ctx.producer)).toMatchObject({
+      status,
+      standby_wait: { reason: expect.any(String) },
+    });
+    expect(item(apply(state, standby), ctx.producer).reported_blocker).toBe(
+      undefined,
+    );
     const results = [
-      pause(ctx, state, "blocker"),
       pause(ctx, state, "human_action"),
       requestDecision(
         state,
@@ -638,3 +654,45 @@ test.each([false, true])(
     expect(next.events.map((e) => e.type)).toEqual(["delivery_submitted"]);
   },
 );
+
+test("C-789 (V-3498): a verifier's unregistered blocked ending never blocks the author's redelivery", async () => {
+  const ctx = setup();
+  let state = apply(ctx.state, await deliver(ctx, ctx.state));
+  expect(item(state, ctx.verifier).status).toBe("ready");
+  state = {
+    ...state,
+    work_items: state.work_items.map((w) =>
+      w.id === ctx.verifier ? ({ ...w, status: "in_progress" } as WorkItem) : w,
+    ),
+  };
+  const reviewerRun = present(
+    state.runs.find(
+      (r) =>
+        ctx.reviewer.kind === "assignment" &&
+        r.assignment_id === ctx.reviewer.assignment_id,
+    ),
+  );
+  const ended = value(
+    finishRun(
+      state,
+      ctx.reviewer,
+      {
+        run_id: reviewerRun.id,
+        outcome: "blocked",
+        summary: "Precheck not ready",
+      },
+      io,
+    ),
+  );
+  // PM is told without any state transition on the verifier.
+  expect(ended.events.map((e) => e.type)).toEqual([
+    "run_next_step_missing",
+    "run_finished",
+  ]);
+  state = apply(state, ended);
+  expect(item(state, ctx.verifier)).toMatchObject({ status: "in_progress" });
+  expect(item(state, ctx.verifier).reported_blocker).toBeUndefined();
+  const redelivered = await deliver(ctx, state, "b".repeat(40));
+  state = apply(state, redelivered);
+  expect(item(state, ctx.verifier).status).toBe("ready");
+});

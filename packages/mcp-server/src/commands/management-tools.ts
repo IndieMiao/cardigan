@@ -306,12 +306,13 @@ const schemas = {
           "deployment_ready",
           "baseline_updated",
           "decision_resolved",
+          "resource_available",
         ]),
         target_id: z.string().min(1).max(100),
       })
       .optional()
       .describe(
-        "Automatically resume when the same-project target settles. Use an attempt ID, bound GitHub run ID, card ID, full deployed SHA, decision ID, or the registered baseline SHA for baseline_updated. Each new author precheck can resume its own wait. Repeated failures of the same HEAD, exhausted candidate-conflict recovery and other repeated blockers go to PM.",
+        "Automatically resume when the same-project target settles. Use an attempt ID, bound GitHub run ID, card ID, full deployed SHA, decision ID, the registered baseline SHA for baseline_updated, or a resource key this work item requires for resource_available (the next Run claims it). Delivered or accepted producers record a wait for the baseline or a resource without changing state; without a condition it goes to PM. Each new author precheck can resume its own wait. Repeated failures of the same HEAD, exhausted candidate-conflict recovery and other repeated blockers go to PM.",
       ),
   },
   request_decision: {

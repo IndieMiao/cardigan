@@ -1928,6 +1928,9 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
       "blocker_reported",
       "decision_requested",
       "human_action_requested",
+      // C-789: a wait registered on a delivered/accepted producer.
+      "work_item_standby_registered",
+      "run_next_step_missing",
     ]).filter((event) => payloadString(event.payload, "run_id") === run_id),
     ...input.snapshot.deliveries.filter(
       (delivery) => delivery.run_id === run_id,
@@ -2757,6 +2760,47 @@ export function routeEvent(input: RouteInput): RouteResult {
           `${subject(input)} 工作项阻塞需要 PM 核查`,
         );
       break;
+    case "work_item_standby_registered": {
+      // C-789: nothing the system can verify, or the allowance is used: PM.
+      const p = payloadObject(input.event.payload);
+      if (!p.condition || p.auto_resume_disabled === true)
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "6.4/system rules",
+          p.auto_registered === true
+            ? `${subject(input)} Run 以 blocked 结束但未登记下一步，系统已代登记，需要 PM 核查`
+            : `${subject(input)} 已交付工作项登记等待，需要 PM 核查`,
+        );
+      break;
+    }
+    case "session_rotation_skipped":
+      // C-789: the one automatic rotation is spent; PM decides the next one.
+      if (
+        input.event.actor.kind === "system" &&
+        payloadObject(input.event.payload).reason === "allowance_used"
+      )
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "6.4/system rules",
+          `${subject(input)} 会话再次卡住，已用完自动换代额度，需要 PM 核查`,
+        );
+      break;
+    case "run_next_step_missing":
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "escalation",
+        "6.4/system rules",
+        `${subject(input)} Run 以 blocked 结束但未登记下一步，需要 PM 核查`,
+      );
+      break;
     case "work_item_resume_requested": {
       const p = payloadObject(input.event.payload);
       const item = itemOf(input, p.work_item_id as WorkItemId);
@@ -2765,7 +2809,12 @@ export function routeEvent(input: RouteInput): RouteResult {
       if (
         item &&
         item.card_id === input.event.card_id &&
-        ["ready", "in_progress"].includes(item.status) &&
+        (["ready", "in_progress"].includes(item.status) ||
+          // C-789: a standby wake leaves a delivered/accepted item's state.
+          (p.standby === true &&
+            input.event.actor.kind === "system" &&
+            item.kind === "produce" &&
+            ["delivered", "accepted"].includes(item.status))) &&
         card &&
         !["done", "cancelled"].includes(card.status) &&
         owner?.scope === "work_item" &&
