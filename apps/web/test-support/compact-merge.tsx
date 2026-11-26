@@ -148,6 +148,28 @@ if (scenario.startsWith("premerge-")) {
   };
   if (status === "missing") delete q.merge_confirmation.merge_check;
 }
+// C-768: an optional verifier still open (the sensen-godot C-101 / W-420
+// case). `optional-before` is the same card as the previous rule reported it;
+// `optional-required` adds an unfinished required verifier.
+if (scenario.startsWith("optional-")) {
+  const merge = q.merge_confirmation;
+  if (!merge) throw new Error("Missing merge fixture");
+  const optional = { id: "W-420", title: "Google 补录" };
+  q.merge_confirmation =
+    scenario === "optional-before"
+      ? {
+          ...merge,
+          blockers: [`${optional.title}（${optional.id}）：未通过当前交付审核`],
+        }
+      : {
+          ...merge,
+          blockers:
+            scenario === "optional-required"
+              ? ["独立复核（W-3）：未通过当前交付审核"]
+              : [],
+          optional_pending: [optional],
+        };
+}
 if (scenario === "legacy")
   delete (q as { plain_summary?: unknown }).plain_summary;
 if (scenario === "unknown")

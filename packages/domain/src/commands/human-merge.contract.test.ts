@@ -4,13 +4,17 @@ import {
   type Decision,
   humanMergeBlockers,
   listNeedsYou,
+  mergePlan,
+  optionalPendingVerifiers,
+  pmMergeBlockers,
   recordDecision,
   recordMergeCheck,
   requestDecision,
+  systemMergeBlockers,
   updateCard,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
-import { assignment, human, id, role, value } from "./test-fixtures.js";
+import { apply, assignment, human, id, role, value } from "./test-fixtures.js";
 
 function required<T>(value: T | undefined): T {
   if (value === undefined) throw new Error("Missing fixture");
@@ -150,7 +154,8 @@ const failures: {
     reason: "未通过当前交付审核",
   },
   {
-    name: "optional verifier",
+    // C-768: an optional one is waived by confirming (see the tests below).
+    name: "added required verifier",
     mutate: (s) => ({
       ...s,
       work_items: [
@@ -158,13 +163,13 @@ const failures: {
         {
           ...required(s.work_items.find((w) => w.kind === "verify")),
           id: id("work_item", 100),
-          title: "可选检查",
-          required: false,
+          title: "追加检查",
+          required: true,
           status: "ready",
         },
       ],
     }),
-    reason: "可选检查",
+    reason: "追加检查（W-100）：未通过当前交付审核",
   },
   {
     name: "independent verifier",
@@ -263,6 +268,143 @@ test.each(failures)(
   },
 );
 
+/** C-768: an extra verifier on the product, still in progress, requested by its delivery. */
+function withExtraVerifier(
+  s: CommandState,
+  requiredItem: boolean,
+): CommandState {
+  const base = required(s.work_items.find((w) => w.kind === "verify"));
+  const extra = id("work_item", 100);
+  const { template_key: _template, ...item } = base;
+  return {
+    ...s,
+    work_items: [
+      ...s.work_items,
+      {
+        ...item,
+        id: extra,
+        title: "Google 补录",
+        required: requiredItem,
+        status: "in_progress",
+      },
+    ],
+    deliveries: s.deliveries.map((v) =>
+      v.work_item_id === base.target_work_item_id
+        ? { ...v, requested_verifiers: [...v.requested_verifiers, extra] }
+        : v,
+    ),
+  };
+}
+const autoMerge = (s: CommandState, on: boolean): CommandState => ({
+  ...s,
+  project_preferences: [
+    {
+      id: s.project_id,
+      auto_merge_after_minutes: null,
+      auto_merge: on ? "on" : "off",
+      flow_version: 5,
+    },
+  ],
+});
+
+test("C-768: only optional verifiers left — the human confirms directly and the waiver is recorded", async () => {
+  const s = await setup();
+  const state = withExtraVerifier(s.state, false);
+  const waived = [{ id: id("work_item", 100), title: "Google 补录" }];
+  expect(humanMergeBlockers(state, s.q)).toEqual([]);
+  expect(optionalPendingVerifiers(state, s.q)).toEqual(waived);
+  const view = value(listNeedsYou(state, human)).data.decisions.find(
+    (q) => q.id === s.q.id,
+  );
+  expect(view?.merge_confirmation?.blockers).toEqual([]);
+  expect(view?.merge_confirmation?.optional_pending).toEqual(waived);
+  const effect = value(s.confirm(state));
+  expect(effect.data.resolution).toMatchObject({
+    option: "merge",
+    via: "needs_you",
+    waived_verifiers: waived,
+  });
+  expect(effect.data.resolution).not.toHaveProperty("merge_override");
+  expect(effect.events).toContainEqual(
+    expect.objectContaining({
+      type: "decision_resolved",
+      payload: expect.objectContaining({ waived_verifiers: waived }),
+    }),
+  );
+  expect(
+    effect.timeline.find((t) => t.type === "decision_resolved")?.body,
+  ).toBe("豁免可选验证项：Google 补录（W-100）\n人工选择");
+  expect(mergePlan(apply(state, effect), s.f.card.id).ok).toBe(true);
+});
+
+test("C-768: nothing is waived when no optional verifier is open", async () => {
+  const s = await setup();
+  const effect = value(s.confirm(s.state));
+  expect(effect.data.resolution).not.toHaveProperty("waived_verifiers");
+  expect(
+    effect.timeline.find((t) => t.type === "decision_resolved")?.body,
+  ).toBe("人工选择");
+});
+
+test("C-768: an unfinished required verifier still blocks the human confirmation", async () => {
+  const s = await setup();
+  const state = withExtraVerifier(s.state, true);
+  const blockers = humanMergeBlockers(state, s.q);
+  expect(blockers).toEqual(["Google 补录（W-100）：未通过当前交付审核"]);
+  expect(optionalPendingVerifiers(state, s.q)).toEqual([]);
+  expect(s.confirm(state)).toMatchObject({
+    ok: false,
+    error: {
+      code: "illegal_transition",
+      details: { merge_blockers: blockers },
+    },
+  });
+});
+
+test("C-768: a required blocker beside an optional one still needs 仍要合并, which also records the waiver", async () => {
+  const s = await setup();
+  const state = {
+    ...withExtraVerifier(s.state, false),
+    events: s.state.events.filter((e) => !e.type.startsWith("merge_check_")),
+  };
+  expect(humanMergeBlockers(state, s.q)).toEqual(["合并检查：尚无结果"]);
+  expect(s.confirm(state).ok).toBe(false);
+  const effect = value(
+    recordDecision(
+      state,
+      human,
+      {
+        decision_id: s.q.id,
+        option: "merge",
+        rationale: "人工决定",
+        raw_quote: "确认",
+        merge_override_reason: "已人工核实",
+      },
+      s.f.io,
+    ),
+  );
+  expect(effect.data.resolution).toMatchObject({
+    merge_override: { reason: "已人工核实", blockers: ["合并检查：尚无结果"] },
+    waived_verifiers: [{ id: id("work_item", 100), title: "Google 补录" }],
+  });
+});
+
+test.each([true, false])(
+  "C-768: auto_merge=%s — PM Ops and system rules for optional verifiers are unchanged",
+  async (on) => {
+    const s = await setup();
+    const state = withExtraVerifier(autoMerge(s.state, on), false);
+    expect(humanMergeBlockers(state, s.q)).toEqual([]);
+    expect(pmMergeBlockers(state, s.q)).toContain(
+      `验证项 ${id("work_item", 100)} 未通过`,
+    );
+    // The system drops optional verifiers only when auto-merge is on.
+    expect(
+      systemMergeBlockers(state, s.q).some((r) => r.includes("W-100")),
+    ).toBe(!on);
+  },
+);
+
 test("C-264: related blocking questions count; the merge confirmation itself does not", async () => {
   const s = await setup();
   const q = s.f.commit(
@@ -337,7 +479,7 @@ test("C-264: redelivery requires new reviews and a new completion check", async 
 test("C-264: cancelled optional checks and pre-existing issues do not add blockers", async () => {
   const s = await setup();
   const state = required(
-    failures.find((f) => f.name === "optional verifier"),
+    failures.find((f) => f.name === "added required verifier"),
   ).mutate(s.state);
   const cancelled: CommandState = {
     ...state,

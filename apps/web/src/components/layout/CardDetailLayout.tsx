@@ -2,6 +2,7 @@ import {
   type ComponentProps,
   forwardRef,
   type ReactNode,
+  type Ref,
   useId,
   useState,
 } from "react";
@@ -67,43 +68,91 @@ export const DetailNextStep = forwardRef<
     readonly title: ReactNode;
     readonly mine?: boolean;
     readonly actions?: ReactNode;
+    /** C-697: names the button group; it can then take focus (tabIndex -1). */
+    readonly actionsLabel?: string;
+    readonly actionsRef?: Ref<HTMLDivElement>;
+    /** C-697: a full-width area under body and buttons (e.g. 合并详情). */
+    readonly more?: ReactNode;
     readonly children?: ReactNode;
     readonly "aria-label"?: string;
   }
->(({ title, mine = false, actions, children, ...props }, ref) => (
-  <section
-    ref={ref}
-    aria-label={props["aria-label"] ?? "下一步"}
-    data-mine={mine || undefined}
-    className={styles.next}
-  >
-    <div className={styles.nextBody}>
-      <h2 className={styles.nextTitle}>{title}</h2>
-      {children}
-    </div>
-    {actions && (
-      <div className={styles.nextActions} data-next-actions>
-        {actions}
+>(
+  (
+    {
+      title,
+      mine = false,
+      actions,
+      actionsLabel,
+      actionsRef,
+      more,
+      children,
+      ...props
+    },
+    ref,
+  ) => (
+    <section
+      ref={ref}
+      aria-label={props["aria-label"] ?? "下一步"}
+      data-mine={mine || undefined}
+      className={styles.next}
+    >
+      <div className={styles.nextBody}>
+        <h2 className={styles.nextTitle}>{title}</h2>
+        {children}
       </div>
-    )}
-  </section>
-));
+      {actions && (
+        <div
+          ref={actionsRef}
+          className={styles.nextActions}
+          data-next-actions
+          {...(actionsLabel
+            ? { role: "group", "aria-label": actionsLabel, tabIndex: -1 }
+            : {})}
+        >
+          {actions}
+        </div>
+      )}
+      {more}
+    </section>
+  ),
+);
 DetailNextStep.displayName = "DetailNextStep";
 /**
  * One 13/20 muted fact line inside DetailNextStep; `strong` is the line the
- * panel asks about (a decision's question): text colour, 600.
+ * panel asks about (a decision's question): text colour, 600; `danger` for
+ * must-fix.
  */
 export function DetailNextStepLine({
   strong = false,
+  tone,
   ...props
-}: Omit<ComponentProps<"div">, "className"> & { readonly strong?: boolean }) {
+}: Omit<ComponentProps<"div">, "className"> & {
+  readonly strong?: boolean;
+  readonly tone?: "danger";
+}) {
   return (
     <div
       {...props}
       data-strong={strong || undefined}
+      data-tone={tone}
       className={styles.nextLine}
     />
   );
+}
+/**
+ * C-697: label/value rows inside DetailNextStep (改了什么、影响、风险). Each
+ * row is a `<div>` holding one `<dt>` and one `<dd>`; labels muted, 13/20.
+ */
+export function DetailNextStepFacts(
+  props: Omit<ComponentProps<"dl">, "className">,
+) {
+  return <dl {...props} className={styles.nextFacts} />;
+}
+/** C-697: the area a panel toggle opens, full width under a 1px divider. */
+export function DetailNextStepMore(
+  props: Omit<ComponentProps<"div">, "className">,
+) {
+  return <div {...props} className={styles.nextMore} />;
 }
 /** C-698: a write answered inside DetailNextStep; its rows 8px apart. */
 export function DetailChoiceForm(

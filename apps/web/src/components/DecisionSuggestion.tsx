@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import type { DecisionSuggestionView } from "../api.js";
+import type { DecisionSuggestionView, SuggestionProgressView } from "../api.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { StatusTag } from "./Foundation.js";
 import { Textarea } from "./ui/textarea.js";
@@ -68,20 +68,7 @@ export function DecisionSuggestion({
             <summary className="suggestion-progress-toggle">
               {SUGGESTION_COPY.progress(progress.count)}
             </summary>
-            <ul>
-              {progress.entries.map((entry) => (
-                <li key={entry.id}>
-                  <p>
-                    <strong>{entry.author_display}</strong> ·{" "}
-                    <time dateTime={entry.at}>
-                      {new Date(entry.at).toLocaleString()}
-                    </time>{" "}
-                    · {entry.card_id}
-                  </p>
-                  <p>{entry.summary}</p>
-                </li>
-              ))}
-            </ul>
+            <SuggestionProgressEntries progress={progress} />
           </details>
         </div>
       )}
@@ -141,6 +128,30 @@ export function DecisionSuggestion({
         </>
       )}
     </section>
+  );
+}
+
+/** What happened after the suggestion was written, oldest first. */
+export function SuggestionProgressEntries({
+  progress,
+}: {
+  readonly progress: SuggestionProgressView;
+}) {
+  return (
+    <ul>
+      {progress.entries.map((entry) => (
+        <li key={entry.id}>
+          <p>
+            <strong>{entry.author_display}</strong> ·{" "}
+            <time dateTime={entry.at}>
+              {new Date(entry.at).toLocaleString()}
+            </time>{" "}
+            · {entry.card_id}
+          </p>
+          <p>{entry.summary}</p>
+        </li>
+      ))}
+    </ul>
   );
 }
 

@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+
+import { DECISION_OTHER_OPTION, decisionOtherOption } from "@cardigan/domain";
 import {
   cleanup,
   fireEvent,
@@ -10,6 +12,7 @@ import {
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiError, type CardDetail, type NeedsDecision } from "../api.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
+import { selectMenu } from "../testing/menu.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 
 afterEach(cleanup);
@@ -142,9 +145,9 @@ test.each(["merge", "hold", "request_changes", "recheck"] as const)(
         cardId="C-1"
       />,
     );
-    const controls = within(
-      await screen.findByRole("region", { name: "合并处理" }),
-    );
+    // C-697: the controls are the “下一步” panel; words go in a dialog.
+    const panel = await screen.findByRole("region", { name: "下一步" });
+    const controls = within(panel);
     expect(controls.getByText("断言失败")).toBeTruthy();
     const label = {
       merge: "确认合并",
@@ -152,31 +155,39 @@ test.each(["merge", "hold", "request_changes", "recheck"] as const)(
       request_changes: "退回修改",
       recheck: "重新检查",
     }[option];
-    fireEvent.click(controls.getByRole("button", { name: label, exact: true }));
+    // A failed check puts 重新检查 first; the rest sit in ⋯.
+    if (option === "merge") await selectMenu(/^更多合并操作$/, "确认合并");
+    else if (option === "hold") await selectMenu(/^更多合并操作$/, "暂不合并…");
+    else fireEvent.click(controls.getByRole("button", { name: label }));
     if (option === "request_changes") {
+      const dialog = within(await screen.findByRole("dialog"));
       expect(
-        controls
+        dialog
           .getByRole("button", { name: "确认退回修改" })
           .hasAttribute("disabled"),
       ).toBe(true);
-      fireEvent.change(controls.getByLabelText("Q-115 退回原因"), {
+      fireEvent.change(dialog.getByLabelText("Q-115 退回原因"), {
         target: { value: "请修复断言失败" },
       });
-      fireEvent.click(controls.getByRole("button", { name: "确认退回修改" }));
+      fireEvent.click(dialog.getByRole("button", { name: "确认退回修改" }));
     }
     if (option === "hold") {
+      const dialog = within(await screen.findByRole("dialog"));
       expect(
-        controls
+        dialog
           .getByRole("button", { name: "登记暂缓" })
           .hasAttribute("disabled"),
       ).toBe(true);
-      fireEvent.change(controls.getByLabelText("暂缓原因（必填）"), {
+      fireEvent.change(dialog.getByLabelText("暂缓原因（必填）"), {
         target: { value: "等待核对" },
       });
-      fireEvent.change(controls.getByLabelText("暂缓到期时间（可选）"), {
-        target: { value: "2035-01-01T12:30" },
-      });
-      fireEvent.click(controls.getByRole("button", { name: "登记暂缓" }));
+      fireEvent.change(
+        dialog.getByLabelText("暂缓到期时间（可选，不填按项目默认时长）"),
+        {
+          target: { value: "2035-01-01T12:30" },
+        },
+      );
+      fireEvent.click(dialog.getByRole("button", { name: "登记暂缓" }));
     }
     if (option === "recheck")
       expect(recheckMerge).toHaveBeenCalledWith(
@@ -201,7 +212,7 @@ test.each(["merge", "hold", "request_changes", "recheck"] as const)(
           : []),
       );
     await waitFor(() =>
-      expect(screen.queryByRole("region", { name: "合并处理" })).toBeNull(),
+      expect(screen.queryByRole("group", { name: "合并处理操作" })).toBeNull(),
     );
     expect(read).toHaveBeenCalledTimes(2);
   },
@@ -221,7 +232,7 @@ test("C-115: confirmed failure exposes return/recheck only, and stale targets ke
     />,
   );
   const controls = within(
-    await screen.findByRole("region", { name: "合并处理" }),
+    await screen.findByRole("region", { name: "下一步" }),
   );
   expect(controls.queryByRole("button", { name: "确认合并" })).toBeNull();
   expect(controls.queryByRole("button", { name: "暂不合并" })).toBeNull();
@@ -259,7 +270,7 @@ test("C-115: a verified noop keeps human confirmation without claiming a passed 
   });
   render(<CardDetailPage client={client} projectId="p-1" cardId="C-1" />);
   const controls = within(
-    await screen.findByRole("region", { name: "合并处理" }),
+    await screen.findByRole("region", { name: "下一步" }),
   );
   expect(controls.getByText(/交付均在基线中/)).toBeTruthy();
   expect(controls.getByRole("button", { name: "确认合并" })).toBeTruthy();
@@ -314,15 +325,16 @@ test("C-196: a rejected hold shows the cap without the preference key and preser
       cardId="C-1"
     />,
   );
-  const controls = within(
-    await screen.findByRole("region", { name: "合并处理" }),
-  );
-  fireEvent.click(controls.getByRole("button", { name: "暂不合并" }));
+  await screen.findByRole("region", { name: "下一步" });
+  await selectMenu(/^更多合并操作$/, "暂不合并…");
+  const dialog = await screen.findByRole("dialog");
+  const controls = within(dialog);
   fireEvent.change(controls.getByLabelText("暂缓原因（必填）"), {
     target: { value: "等待核对" },
   });
   fireEvent.click(controls.getByRole("button", { name: "登记暂缓" }));
-  const alert = (await screen.findByRole("alert")).textContent ?? "";
+  // The failure stays in the dialog with the reason kept.
+  const alert = (await controls.findByRole("alert")).textContent ?? "";
   expect(alert).toContain(
     "暂缓到期时间距现在不能超过 90 分钟（可在项目设置的“合并确认最长暂缓时长”中调整）",
   );
@@ -330,4 +342,107 @@ test("C-196: a rejected hold shows the cap without the preference key and preser
   expect(
     (controls.getByLabelText("暂缓原因（必填）") as HTMLInputElement).value,
   ).toBe("等待核对");
+});
+
+function ready(): CardDetail {
+  const detail = fixture();
+  const q = detail.merge_confirmations?.[0];
+  if (!q?.merge_confirmation?.merge_check) throw new Error("Missing fixture");
+  const passed: NeedsDecision = {
+    ...q,
+    merge_confirmation: {
+      ...q.merge_confirmation,
+      merge_check: { ...q.merge_confirmation.merge_check, status: "passed" },
+    },
+  };
+  return { ...detail, decisions: [passed], merge_confirmations: [passed] };
+}
+
+test("C-697: 退回修改 confirms in a dialog; closing it writes nothing and returns focus", async () => {
+  const recordDecision = vi
+    .fn()
+    .mockRejectedValueOnce(new ApiError(409, "stale_target", "交付已更新"))
+    .mockResolvedValue(undefined);
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => ready(), recordDecision })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const panel = within(await screen.findByRole("region", { name: "下一步" }));
+  const trigger = panel.getByRole("button", { name: "退回修改" });
+  fireEvent.click(trigger);
+  let dialog = within(await screen.findByRole("dialog"));
+  const reason = dialog.getByLabelText("Q-115 退回原因");
+  await waitFor(() => expect(document.activeElement).toBe(reason));
+  fireEvent.change(reason, { target: { value: "草稿" } });
+  fireEvent.click(dialog.getByRole("button", { name: "取消" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(document.activeElement).toBe(trigger);
+  expect(recordDecision).not.toHaveBeenCalled();
+  fireEvent.click(trigger);
+  dialog = within(await screen.findByRole("dialog"));
+  fireEvent.change(dialog.getByLabelText("Q-115 退回原因"), {
+    target: { value: "请补截图" },
+  });
+  const submit = dialog.getByRole("button", { name: "确认退回修改" });
+  expect(submit.className).toContain("ui-button-emphasis");
+  fireEvent.click(submit);
+  // A failure stays in the dialog with the words kept; retrying reuses the key.
+  expect((await dialog.findByRole("alert")).textContent).toContain(
+    "交付已更新",
+  );
+  expect(
+    (dialog.getByLabelText("Q-115 退回原因") as HTMLTextAreaElement).value,
+  ).toBe("请补截图");
+  fireEvent.click(submit);
+  await waitFor(() => expect(recordDecision).toHaveBeenCalledTimes(2));
+  expect(recordDecision.mock.calls[1]).toEqual(recordDecision.mock.calls[0]);
+  expect(recordDecision).toHaveBeenCalledWith(
+    "p-1",
+    "Q-115",
+    "request_changes",
+    "请补截图",
+    expect.any(String),
+  );
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("C-697: 其他（自己填写） is in ⋯ and needs the human's own words", async () => {
+  const recordDecision = vi.fn(async () => {});
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => ready(), recordDecision })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const panel = within(await screen.findByRole("region", { name: "下一步" }));
+  expect(
+    panel
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label") ?? b.textContent),
+  ).toEqual(["合并详情", "确认合并", "暂不合并", "退回修改", "更多合并操作"]);
+  await selectMenu(/^更多合并操作$/, `${decisionOtherOption.description}…`);
+  const dialog = within(await screen.findByRole("dialog"));
+  const submit = dialog.getByRole("button", { name: "提交" });
+  expect(submit.hasAttribute("disabled")).toBe(true);
+  fireEvent.change(dialog.getByLabelText("Q-115 其他决定"), {
+    target: { value: "先合到预发分支" },
+  });
+  fireEvent.click(submit);
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "Q-115",
+      DECISION_OTHER_OPTION,
+      "先合到预发分支",
+      expect.any(String),
+    ),
+  );
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(document.activeElement).toBe(
+    screen.getByRole("button", { name: "更多合并操作" }),
+  );
 });

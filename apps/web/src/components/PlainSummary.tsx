@@ -11,14 +11,11 @@ export function PlainSummary({
   id,
   summary,
   compact = false,
-  omitRisk = false,
 }: {
   readonly id: string;
   readonly summary: PlainSummaryView | undefined;
   /** Sidebar lists: smaller type, same three rows. */
   readonly compact?: boolean;
-  /** The card header already displays this risk. */
-  readonly omitRisk?: boolean;
 }) {
   if (!summary) return null;
   return (
@@ -35,7 +32,7 @@ export function PlainSummary({
           <dt>{PLAIN_SUMMARY_COPY.impact}</dt>
           <dd>{summary.impact}</dd>
         </div>
-        {!omitRisk && <PlainSummaryRisk risk={summary.risk} />}
+        <PlainSummaryRisk risk={summary.risk} />
       </dl>
     </section>
   );

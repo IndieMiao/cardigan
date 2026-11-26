@@ -123,6 +123,7 @@ export * from "./commands/merge-classification.js";
 export {
   currentMergeConfirmations,
   humanMergeBlockers,
+  optionalPendingVerifiers,
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckDelegationAllowed,

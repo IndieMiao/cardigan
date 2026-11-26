@@ -3762,11 +3762,6 @@ body[data-lightbox="open"] .drawer-overlay {
     gap: 2px;
   }
 }
-.card-merge .needs-item.needs-merge {
-  border: 0;
-  padding: 0;
-  margin: 0;
-}
 
 .needs-merge .needs-question {
   display: flex;
