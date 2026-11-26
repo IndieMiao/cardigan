@@ -5804,6 +5804,62 @@ test("C-391: GitHub batch survives controller restart without redispatch and bin
   await restarted.idle();
 });
 
+test("C-799: a restart fence defers a batch's sync and publication without failing members; its running GitHub check is counted and tracked across the restart", async () => {
+  const { h, gate, publish } = await confirmedGithubBatch(3);
+  const {
+    GithubDispatchJournal,
+    fenceLongOperations,
+    releaseLongOperationFence,
+  } = await import("@cardigan/host");
+  await gate.schedule([h.f.project_id]);
+  await vi.waitFor(() =>
+    expect(mergeBatches(h.f.state().events)[0]?.check?.status).toBe("running"),
+  );
+  const before = required(mergeBatches(h.f.state().events)[0]);
+  // Bound on GitHub: the restart record counts it instead of calling it idle.
+  expect(new GithubDispatchJournal(h.f.store).remoteRunning()).toBe(1);
+  // A restart decision (supervisor upgrade or deployment) closes new steps.
+  fenceLongOperations(h.f.store);
+  gate.stop();
+  await gate.idle();
+  const restarted = h.create();
+  const failed = () =>
+    h.f.state().events.filter((e) => e.type === "merge_failed");
+  try {
+    const runCalls = h.client.run.mock.calls.length;
+    await restarted.schedule([h.f.project_id]);
+    // The new server polls the same run again; no second dispatch.
+    await vi.waitFor(() =>
+      expect(h.client.run.mock.calls.length).toBeGreaterThan(runCalls),
+    );
+    required(
+      h.runs.get(required(before.check?.external_run).run_id),
+    ).conclusion = "success";
+    h.advance();
+    await restarted.schedule([h.f.project_id]);
+    await restarted.idle();
+    await (await restarted.schedule([h.f.project_id])).done;
+    // Passed, but neither synced nor published while the fence stands, and
+    // no member recorded a failure (C-793: four cards failed in 「同步源仓库」).
+    expect(mergeBatches(h.f.state().events)[0]?.status).toBe("passed");
+    expect(publish).not.toHaveBeenCalled();
+    expect(failed()).toEqual([]);
+    releaseLongOperationFence(h.f.store);
+    await (await restarted.schedule([h.f.project_id])).done;
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
+    await (await restarted.schedule([h.f.project_id])).done;
+    expect(
+      h.f.state().events.filter((e) => e.type === "card_merged"),
+    ).toHaveLength(3);
+    expect(failed()).toEqual([]);
+    expect(h.client.dispatch).toHaveBeenCalledTimes(4);
+    expect(new GithubDispatchJournal(h.f.store).remoteRunning()).toBe(0);
+  } finally {
+    restarted.stop();
+    await restarted.idle();
+  }
+});
+
 test.each(["merge_check", "precheck"])(
   "C-466: a stuck workflow list does not block %s admission on another card of the same project",
   async (kind) => {

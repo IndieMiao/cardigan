@@ -21,6 +21,7 @@ import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { type LoopStartup, startTimerLoop } from "./loop.js";
+import { holdMergeStep, MergeStepDeferred } from "./merge-step.js";
 import { MergeLockBusy, withPublication } from "./publication-lock.js";
 
 export function mergeProjectSettings(
@@ -127,6 +128,30 @@ export class MergePushExecutor {
       await this.route(id, project, push);
     }
   }
+  /** C-799: the cards whose merges this push publishes, in queue order. */
+  private pushedCards(id: ProjectId, queueIds: readonly string[]): string[] {
+    try {
+      return this.options.store.uow.read((tx) => {
+        const events = streamEventsBy(tx.events, id, undefined, "type", [
+          "merge_push_queued",
+        ]);
+        const cards: string[] = [];
+        for (const queueId of queueIds) {
+          const card = (
+            events.find((e) => e.id === queueId)?.payload as
+              | { card_id?: unknown }
+              | undefined
+          )?.card_id;
+          if (typeof card === "string" && !cards.includes(card))
+            cards.push(card);
+        }
+        return cards;
+      });
+    } catch {
+      return [];
+    }
+  }
+
   private async route(
     id: ProjectId,
     project: CentralProject,
@@ -147,78 +172,101 @@ export class MergePushExecutor {
         ),
       );
       if (!attempt || this.abort.signal.aborted) return;
-      let outcome: PushResult;
+      // C-799: the push is a managed operation a restart waits for. While a
+      // restart fences new steps it does not start; the started attempt is
+      // resumed as is on a later tick, here or on the next server.
+      let release: () => void;
       try {
-        // C-94: read current central main under the publication lock and
-        // publish only if its whole first-parent history since a trusted
-        // boundary was recorded by the merge loop (or accepted by the human).
-        const { base_sha } = attempt;
-        const range = this.options.git.pushRange;
-        if (!base_sha || !range)
-          throw new Error("Push range cannot be checked");
-        const checked = await withPublication(id, async () => {
-          const read = await range.call(
-            this.options.git,
-            project,
-            base_sha,
-            MERGE_PUSH_RANGE_LIMIT,
-          );
-          if (this.abort.signal.aborted) return undefined;
-          return this.command(id, (s, a, ports) =>
-            checkMergePushRange(
-              s,
-              a,
-              {
-                target: attempt.target,
-                attempt_id: attempt.attempt_id,
-                head: read.head,
-                chain: read.chain,
-                truncated: read.truncated,
-              },
-              ports,
-            ),
-          );
-        });
-        if (!checked) return;
-        if (checked.status === "held") return;
-        const included = this.options.store.uow.read((tx) => {
-          const events = streamEventsBy(tx.events, id, undefined, "type", [
-            "merge_push_queued",
-          ]);
-          return attempt.queue_ids.map((queueId) => {
-            const event = events.find((e) => e.id === queueId);
-            if (!event) throw new Error("Missing queued merge");
-            return (event.payload as { sha: string }).sha;
-          });
-        });
-        outcome = this.options.git.push
-          ? await this.options.git.push(
-              project,
-              { sha: attempt.sha, included },
-              push,
-              this.abort.signal,
-            )
-          : { status: "failed", reason: "other" };
-      } catch (error) {
-        // No external push was attempted. Keep this attempt for the next tick.
-        if (error instanceof MergeLockBusy) return;
-        outcome = { status: "failed", reason: "other" };
-      }
-      // Stopping may leave an unknown external outcome. Keep the exact attempt
-      // for restart; re-pushing its SHA is safe and must not advance the queue.
-      if (this.abort.signal.aborted) return;
-      this.command(id, (s, a, ports) =>
-        recordMergePushResult(
-          s,
-          a,
+        const cards = this.pushedCards(id, attempt.queue_ids);
+        release = holdMergeStep(
+          this.options.store,
           {
-            target: attempt.target,
-            attempt_id: attempt.attempt_id,
-            ...outcome,
+            project_id: id,
+            card_id: cards[0],
+            subject: pushSubject(cards, push.branch),
           },
-          ports,
-        ),
-      );
+          "推送",
+        );
+      } catch (error) {
+        if (error instanceof MergeStepDeferred) return;
+        throw error;
+      }
+      try {
+        let outcome: PushResult;
+        try {
+          // C-94: read current central main under the publication lock and
+          // publish only if its whole first-parent history since a trusted
+          // boundary was recorded by the merge loop (or accepted by the human).
+          const { base_sha } = attempt;
+          const range = this.options.git.pushRange;
+          if (!base_sha || !range)
+            throw new Error("Push range cannot be checked");
+          const checked = await withPublication(id, async () => {
+            const read = await range.call(
+              this.options.git,
+              project,
+              base_sha,
+              MERGE_PUSH_RANGE_LIMIT,
+            );
+            if (this.abort.signal.aborted) return undefined;
+            return this.command(id, (s, a, ports) =>
+              checkMergePushRange(
+                s,
+                a,
+                {
+                  target: attempt.target,
+                  attempt_id: attempt.attempt_id,
+                  head: read.head,
+                  chain: read.chain,
+                  truncated: read.truncated,
+                },
+                ports,
+              ),
+            );
+          });
+          if (!checked) return;
+          if (checked.status === "held") return;
+          const included = this.options.store.uow.read((tx) => {
+            const events = streamEventsBy(tx.events, id, undefined, "type", [
+              "merge_push_queued",
+            ]);
+            return attempt.queue_ids.map((queueId) => {
+              const event = events.find((e) => e.id === queueId);
+              if (!event) throw new Error("Missing queued merge");
+              return (event.payload as { sha: string }).sha;
+            });
+          });
+          outcome = this.options.git.push
+            ? await this.options.git.push(
+                project,
+                { sha: attempt.sha, included },
+                push,
+                this.abort.signal,
+              )
+            : { status: "failed", reason: "other" };
+        } catch (error) {
+          // No external push was attempted. Keep this attempt for the next tick.
+          if (error instanceof MergeLockBusy) return;
+          outcome = { status: "failed", reason: "other" };
+        }
+        // Stopping may leave an unknown external outcome. Keep the exact attempt
+        // for restart; re-pushing its SHA is safe and must not advance the queue.
+        if (this.abort.signal.aborted) return;
+        this.command(id, (s, a, ports) =>
+          recordMergePushResult(
+            s,
+            a,
+            {
+              target: attempt.target,
+              attempt_id: attempt.attempt_id,
+              ...outcome,
+            },
+            ports,
+          ),
+        );
+      } finally {
+        release();
+      }
     } catch {
       this.options.onError?.(
         new Error("合并推送队列读取或结果记录失败，请检查主机状态"),
@@ -253,4 +301,13 @@ export function startMergePushLoop(
       },
     },
   };
+}
+
+/** C-799: `推送 C-1、C-2 到 main`; the card list is bounded for the label. */
+export function pushSubject(cards: readonly string[], branch: string): string {
+  const shown = cards.slice(0, 8).join("、");
+  const more = cards.length > 8 ? ` 等 ${cards.length} 张` : "";
+  return cards.length
+    ? `推送 ${shown}${more} 到 ${branch}`
+    : `推送到 ${branch}`;
 }

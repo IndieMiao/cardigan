@@ -40,6 +40,7 @@ import { mergeFailureReason, mergeStage } from "./merge-failure.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
+import { MergeStepDeferred, mergeStep } from "./merge-step.js";
 import { DEFAULT_MERGE_WATCHDOG_MS, watchMergePass } from "./merge-watchdog.js";
 import { tryPublication } from "./publication-lock.js";
 import { profileProject, profileProjectSync } from "./tick-profile.js";
@@ -346,6 +347,13 @@ export class MergeExecutor {
     plan: MergePlan,
   ): Promise<boolean> {
     const project_id = registered.project_id as ProjectId;
+    // C-799: each Git step is a managed operation a restart waits for.
+    const step = {
+      project_id,
+      card_id: plan.card_id,
+      subject: `合并 ${plan.card_id}`,
+    };
+    const store = this.options.store;
     try {
       if (new CheckHandoffs(this.options.store, "").blockedProject(project_id))
         return false;
@@ -353,7 +361,9 @@ export class MergeExecutor {
       const project = await mergeStage("选择基线分支", () =>
         centralBranch(registered, plan.base_branch),
       );
-      await mergeStage("同步源仓库", () => this.options.git.sync(project));
+      await mergeStep(store, step, "同步源仓库", () =>
+        this.options.git.sync(project),
+      );
       const merged = await tryPublication(project_id, async () => {
         if (
           this.stopped ||
@@ -372,11 +382,11 @@ export class MergeExecutor {
         const git = this.options.git;
         const { prepare, publish } = git;
         if (prepare && publish) {
-          const candidate = await mergeStage("准备合并候选", () =>
+          const candidate = await mergeStep(store, step, "准备合并候选", () =>
             prepare.call(git, project, plan),
           );
           if (candidate.status === "candidate") {
-            const published = await mergeStage("发布合并", () =>
+            const published = await mergeStep(store, step, "发布合并", () =>
               publish.call(
                 git,
                 project,
@@ -407,7 +417,7 @@ export class MergeExecutor {
           }
           outcome = candidate;
         } else {
-          outcome = await mergeStage("准备合并候选", () =>
+          outcome = await mergeStep(store, step, "准备合并候选", () =>
             git.merge(project, plan),
           );
         }
@@ -436,6 +446,8 @@ export class MergeExecutor {
       });
       return merged ?? false; // Busy project writer: re-plan on the next pass.
     } catch (error) {
+      // A restart is about to stop this server; nothing ran, nothing failed.
+      if (error instanceof MergeStepDeferred) return false;
       this.recordFailure(
         project_id,
         plan,

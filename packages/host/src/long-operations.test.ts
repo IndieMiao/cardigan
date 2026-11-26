@@ -21,8 +21,12 @@ import {
   keepUntilSettled,
   LONG_OPERATION_FENCE_MAX_MS,
   liveLongOperations,
+  longOperationFenceStands,
+  longOperationNoteKey,
   releaseLongOperationFence,
   releaseSettlingHold,
+  tryHeldLongOperation,
+  tryHoldLongOperation,
   withLongOperation,
 } from "./long-operations.js";
 import { executionOwner } from "./process-identity.js";
@@ -429,6 +433,83 @@ test("C-609: the Node driver keeps other projects' card detail out of the deploy
     ]);
     release();
     expect(await driver.operations()).toEqual([]);
+  } finally {
+    await f.close();
+  }
+});
+
+test("C-799: trying to hold never waits: refused while a fence stands, registered otherwise", async () => {
+  const f = await fixture();
+  try {
+    const step = {
+      kind: "merge_step" as const,
+      project_id: "cardigan",
+      card_id: "C-7",
+      label: "合并 C-7 的「同步源仓库」",
+    };
+    expect(longOperationFenceStands(f.store)).toBe(false);
+    const release = tryHoldLongOperation(f.store, step);
+    expect(release).toBeTypeOf("function");
+    // The fence reads it in the same transaction that closes new starts.
+    expect(fenceLongOperations(f.store)).toMatchObject([step]);
+    expect(longOperationFenceStands(f.store)).toBe(true);
+    expect(tryHoldLongOperation(f.store, step)).toBeUndefined();
+    release?.();
+    release?.();
+    expect(liveLongOperations(f.store)).toEqual([]);
+    // An expired fence no longer refuses (and is retired by the next writer).
+    expect(
+      longOperationFenceStands(
+        f.store,
+        Date.now() + LONG_OPERATION_FENCE_MAX_MS + 1,
+      ),
+    ).toBe(false);
+    releaseLongOperationFence(f.store);
+    expect(longOperationFenceStands(f.store)).toBe(false);
+    const again = tryHoldLongOperation(f.store, step);
+    expect(liveLongOperations(f.store)).toHaveLength(1);
+    again?.();
+    // No identity or table: best effort, never throws, never refuses.
+    f.store.database.exec("DROP TABLE host_long_operation_fence");
+    expect(longOperationFenceStands(f.store)).toBe(false);
+  } finally {
+    await f.close();
+  }
+});
+
+test("C-799: a held row can be renamed to another running operation; a fence keeps seeing it and its note key changes", async () => {
+  const f = await fixture();
+  try {
+    const held = tryHeldLongOperation(f.store, {
+      kind: "merge_step",
+      project_id: "cardigan",
+      card_id: "C-7",
+      label: "合并 C-7 的「同步源仓库」",
+    });
+    if (!held) throw new Error("not registered");
+    const [before] = fenceLongOperations(f.store);
+    releaseLongOperationFence(f.store);
+    if (!before) throw new Error("missing row");
+    held.relabel(
+      { project_id: "other", card_id: "C-3", label: "合并 C-3 的「发布合并」" },
+      "2026-11-26T17:00:00.000Z",
+    );
+    const [after] = liveLongOperations(f.store);
+    expect(after).toEqual({
+      id: before.id,
+      kind: "merge_step",
+      project_id: "other",
+      card_id: "C-3",
+      label: "合并 C-3 的「发布合并」",
+      started_at: "2026-11-26T17:00:00.000Z",
+    });
+    if (!after) throw new Error("missing row");
+    expect(longOperationNoteKey(after)).not.toBe(longOperationNoteKey(before));
+    held.release();
+    held.release();
+    // A released row is not brought back by a late rename.
+    held.relabel({ project_id: "cardigan", label: "x" });
+    expect(liveLongOperations(f.store)).toEqual([]);
   } finally {
     await f.close();
   }

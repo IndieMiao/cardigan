@@ -15,19 +15,25 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { Store } from "@cardigan/store";
 import { parseDocument } from "yaml";
+import { operationSummary } from "./deployment.js";
 import {
   readSupervisorUpgradeState,
+  writeDeferredOperations,
   writeDeploymentNotice,
+  writeInterruptedOperations,
   writeSupervisorUpgrade,
 } from "./deployment-audit.js";
 import { acquireDeploymentCapacity } from "./deployment-capacity.js";
 import {
+  DEFAULT_OPERATION_WAIT_TIMEOUT_MS,
   requireHostDirectory,
   UnsafeHostDirectory,
 } from "./deployment-config.js";
 import {
   fenceLongOperations,
+  type LongOperation,
   liveLongOperations,
+  longOperationNoteKey,
   releaseLongOperationFence,
 } from "./long-operations.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
@@ -824,6 +830,17 @@ export interface SupervisorUpgradeHost {
    * with deployments: report this upgrade's wait, never delete it directly.
    */
   capacityWaiting(waiting: boolean): void;
+  /**
+   * C-799: bound (ms) of the wait for managed long operations (merge steps,
+   * signing, publication, worker upgrades) before a restart; the deployment's
+   * `operation_wait_timeout_ms`. 0 restarts without waiting. Default 15 min.
+   */
+  operationWaitMs?(): number;
+  /**
+   * C-799: GitHub checks bound to a remote run and not finished yet. They do
+   * not stop with the server; the restarted server keeps polling them.
+   */
+  remoteChecks?(): number;
   now(): number;
 }
 
@@ -859,6 +876,21 @@ export class SupervisorUpgrader {
   private attempted: string | undefined;
   /** C-787: an earlier helper's plan file was present at the last step. */
   private planPresent = false;
+  /**
+   * C-799: this attempt's operation wait. `since` is when the current run of
+   * busy observations began (cleared once none runs, so each new operation
+   * gets the full bound, as a deployment does); `waited` sums the finished
+   * runs for the restart record; `noted` the operations announced on their
+   * own cards.
+   */
+  private drain:
+    | {
+        attempt: string;
+        since: number | undefined;
+        waited: number;
+        noted: Set<string>;
+      }
+    | undefined;
   constructor(
     private readonly host: SupervisorUpgradeHost,
     private readonly config: SupervisorUpgradeConfig,
@@ -966,6 +998,118 @@ export class SupervisorUpgrader {
     return "failed";
   }
 
+  private operationWaitMs() {
+    try {
+      const ms = this.host.operationWaitMs?.();
+      return ms === undefined || !Number.isFinite(ms)
+        ? DEFAULT_OPERATION_WAIT_TIMEOUT_MS
+        : Math.max(0, ms);
+    } catch {
+      return DEFAULT_OPERATION_WAIT_TIMEOUT_MS;
+    }
+  }
+
+  /** This attempt's wait state, fresh for a new attempt. */
+  private drainOf(target: Prepared) {
+    if (this.drain?.attempt !== target.attempt)
+      this.drain = {
+        attempt: target.attempt,
+        since: undefined,
+        waited: 0,
+        noted: new Set(),
+      };
+    return this.drain;
+  }
+
+  /** Time left in the current bounded operation wait; starts the clock. */
+  private waitLeft(target: Prepared) {
+    const drain = this.drainOf(target);
+    drain.since ??= this.host.now();
+    return drain.since + this.operationWaitMs() - this.host.now();
+  }
+
+  /** Nothing runs: the next operation found gets the full bound again. */
+  private drained(target: Prepared) {
+    if (this.drain?.attempt === target.attempt) this.endBusyRun();
+  }
+
+  private endBusyRun() {
+    const drain = this.drain;
+    if (drain?.since === undefined) return;
+    drain.waited += Math.max(0, this.host.now() - drain.since);
+    drain.since = undefined;
+  }
+
+  /**
+   * C-799: every step observes whether an operation still runs while a wait
+   * clock is open, whatever it waits on next (capacity, an idle deployment,
+   * maintenance, a helper): a step that starts later gets the full bound.
+   */
+  private settleOperationWait() {
+    if (this.drain?.since === undefined) return;
+    if (!liveLongOperations(this.host.store).length) this.endBusyRun();
+  }
+
+  /**
+   * C-799: wait (bounded) for running operations; each source card hears once
+   * which of its steps the restart waits for.
+   */
+  private awaitOperations(
+    target: Prepared,
+    ops: readonly LongOperation[],
+  ): boolean {
+    if (!ops.length) {
+      this.drained(target);
+      return false;
+    }
+    if (this.waitLeft(target) <= 0) return false;
+    const noted = this.drain?.noted;
+    const fresh = ops.filter((op) => !noted?.has(longOperationNoteKey(op)));
+    if (fresh.length)
+      try {
+        writeDeferredOperations(
+          this.host.store,
+          target.attempt,
+          fresh,
+          "supervisor_upgrade",
+        );
+        for (const op of fresh) noted?.add(longOperationNoteKey(op));
+      } catch {
+        /* Card notes are informational; retried on the next step. */
+      }
+    return true;
+  }
+
+  /** C-799: the restart record states what it found, including remote checks. */
+  private idleSummary(target: Prepared, interrupted: readonly LongOperation[]) {
+    const drain =
+      this.drain?.attempt === target.attempt ? this.drain : undefined;
+    const waited = drain
+      ? drain.waited +
+        (drain.since === undefined
+          ? 0
+          : Math.max(0, this.host.now() - drain.since))
+      : 0;
+    const local = interrupted.length
+      ? `等待受管长操作已达上限（${seconds(this.operationWaitMs())} 秒），照常重启，重启后续跑或重排：${operationSummary(interrupted)}`
+      : `本机没有执行中的单卡或批次合并检查、合并步骤和其它受管长操作${
+          drain ? `（已等待 ${seconds(waited)} 秒）` : ""
+        }`;
+    let remote: string;
+    try {
+      const count = this.host.remoteChecks?.();
+      remote =
+        count === undefined
+          ? ""
+          : count > 0
+            ? `；远端（GitHub）仍在执行的检查 ${count} 项不随服务端停止，重启后由新服务端继续跟踪到出结果`
+            : "；远端没有执行中的检查";
+    } catch {
+      remote = "；远端检查数量未能读取，已绑定的远端检查重启后照常继续跟踪";
+    }
+    return `${local}，无进行中的部署${remote}；改写启动配置并通过 systemd 重启监督器`;
+  }
+
   private releaseHold() {
     const release = this.release;
     this.release = undefined;
@@ -1055,6 +1199,7 @@ export class SupervisorUpgrader {
 
   private async advance(): Promise<SupervisorUpgradeStep> {
     if (this.restartingSince !== undefined) return this.awaitRestart();
+    this.settleOperationWait();
     const pending = this.pending;
     if (!pending) return "idle";
     // An earlier helper is still finishing (for example after a rollback).
@@ -1129,7 +1274,9 @@ export class SupervisorUpgrader {
     // Otherwise (already deployed, e.g. by a pin) restart on its own.
     if (!target || (await this.host.idleDeployment()) !== target.to)
       return "waiting";
-    if (liveLongOperations(this.host.store).length) return "waiting";
+    // C-799: merge steps register as managed operations too; wait (bounded).
+    if (this.awaitOperations(target, liveLongOperations(this.host.store)))
+      return "waiting";
     const release = acquireDeploymentCapacity(this.host.store);
     if (!release) {
       // A merge check or another deployment holder; admission stays closed.
@@ -1137,7 +1284,10 @@ export class SupervisorUpgrader {
       return "waiting";
     }
     this.release = release;
-    if (fenceLongOperations(this.host.store).length) {
+    // The fence and this read are one step: an operation either started
+    // before it (and is waited for, or interrupted at the bound) or waits.
+    const running = fenceLongOperations(this.host.store);
+    if (this.awaitOperations(target, running)) {
       this.releaseHold();
       return "waiting";
     }
@@ -1146,7 +1296,7 @@ export class SupervisorUpgrader {
       this.releaseHold();
       return "waiting";
     }
-    return this.restart(target);
+    return this.restart(target, undefined, running);
   }
 
   /** The current launch file, proven to name the running checkout. */
@@ -1162,6 +1312,7 @@ export class SupervisorUpgrader {
   private async restart(
     target: Prepared,
     deploy?: SupervisorHandoffPlan,
+    interrupted: readonly LongOperation[] = [],
   ): Promise<SupervisorUpgradeStep> {
     // A handed-over deployment owns the capacity and the operation fence.
     const releaseHold = () => {
@@ -1225,12 +1376,23 @@ export class SupervisorUpgrader {
       if ((await this.host.systemctl(["--user", "daemon-reload"])).code !== 0)
         throw new Error("daemon-reload");
       await writePlan(this.host.directory, plan);
+      if (interrupted.length)
+        try {
+          writeInterruptedOperations(
+            this.host.store,
+            target.attempt,
+            interrupted,
+            "supervisor_upgrade",
+          );
+        } catch {
+          // Card notes are informational; the restart record keeps the counts.
+        }
       this.record(
         target,
         "restarting",
         deploy
           ? `与服务部署合并为一次停起：旧服务已停，改写启动配置并通过 systemd 重启监督器，由新监督器启动 ${deploy.sha.slice(0, 12)}`
-          : "单卡与批次合并检查均空闲、无进行中的部署，改写启动配置并通过 systemd 重启监督器",
+          : this.idleSummary(target, interrupted),
       );
       if (!(await this.host.launchHelper(target.attempt, this.host.root)))
         throw new Error("helper");
