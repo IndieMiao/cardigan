@@ -4,7 +4,10 @@
 // fresh copy. Build first, then:
 //   pnpm exec tsc -b apps/server
 //   pnpm fixture:generate --profile cards --out <new-dir>
-//   node apps/server/benchmarks/read-segments.mjs <source-root> <fixture-dir> <out-prefix> [samples] [cards]
+//   node apps/server/benchmarks/read-segments.mjs <source-root> <fixture-dir> <out-prefix> [samples] [cards] [baseline-cards]
+// [baseline-cards] > 0 adds one resolved decision whose suggestion has an
+// evidence baseline (seq 0) on the read cards and that many more cards, so the
+// C-303 suggestion progress SQL runs (the generator writes no baselines).
 // Writes <out-prefix>.json and <out-prefix>-<op>.cpuprofile for every op.
 import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { Session } from "node:inspector/promises";
@@ -78,6 +81,35 @@ store.uow.run((tx) =>
     created_at: now,
   }),
 );
+const baselineCards = Number(process.argv[7] ?? 0);
+if (baselineCards > 0)
+  store.uow.run((tx) => {
+    const ids = [
+      ...new Set([
+        ...cards,
+        ...tx.cards
+          .list(project)
+          .map((c) => c.id)
+          .slice(0, baselineCards),
+      ]),
+    ];
+    const original = tx.decisions.list(project)[0];
+    tx.decisions.put(project, {
+      ...original,
+      id: "Q-bench-baseline",
+      card_id: ids[0],
+      affected_cards: ids.slice(1),
+      status: "resolved",
+      suggestion: {
+        option: original.options?.[0]?.key ?? "ok",
+        rationale: "benchmark",
+        by: { kind: "system", project_id: project },
+        at: now,
+        basis: "benchmark",
+        evidence_baseline: Object.fromEntries(ids.map((id) => [id, 0])),
+      },
+    });
+  });
 const busyRun = store.uow.read(
   (tx) => tx.runs.list(project).find((r) => r.status === "completed").id,
 );
@@ -129,10 +161,9 @@ try {
   for (const [name, op] of Object.entries(OPS)) {
     const result = await runWorkbenchRead(store, op);
     cold[name] = Object.fromEntries(
-      ["read_state", "read_state_rebuild", "read_query"].map((k) => [
-        k,
-        +result.timings[k].toFixed(2),
-      ]),
+      ["read_state", "read_state_rebuild", "read_query", "suggestion_sql"]
+        .filter((k) => result.timings[k] !== undefined)
+        .map((k) => [k, +result.timings[k].toFixed(2)]),
     );
   }
   const results = {};
@@ -143,6 +174,7 @@ try {
       read_state: [],
       read_state_rebuild: [],
       read_query: [],
+      suggestion_sql: [],
     };
     const profiler = new Session();
     profiler.connect();
@@ -154,8 +186,9 @@ try {
       const started = performance.now();
       const result = await runWorkbenchRead(store, op);
       series.total.push(performance.now() - started);
-      for (const k of ["read_state", "read_state_rebuild", "read_query"])
-        series[k].push(result.timings[k]);
+      for (const k of Object.keys(series))
+        if (k !== "total" && result.timings[k] !== undefined)
+          series[k].push(result.timings[k]);
     }
     const { profile } = await profiler.post("Profiler.stop");
     profiler.disconnect();
@@ -165,7 +198,9 @@ try {
     );
     profiles[name] = top(profile);
     results[name] = Object.fromEntries(
-      Object.entries(series).map(([k, xs]) => [k, stats(xs)]),
+      Object.entries(series)
+        .filter(([, xs]) => xs.length)
+        .map(([k, xs]) => [k, stats(xs)]),
     );
   }
   const report = {

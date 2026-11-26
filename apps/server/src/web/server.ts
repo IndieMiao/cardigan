@@ -383,10 +383,7 @@ export async function startWebServer(
     return facts;
   };
   const pool = options.workbenchReads
-    ? new WorkbenchReadPool({
-        warmProjects: warmOrder(store),
-        ...options.workbenchReads,
-      })
+    ? new WorkbenchReadPool(options.workbenchReads)
     : undefined;
   const read: RequestContext["read"] = async (op, recordTiming) => {
     if (pool) return pool.read(op, hostFacts, recordTiming);
@@ -574,10 +571,19 @@ export async function startWebServer(
     }
   }
 
-  await new Promise<void>((resolve, reject) => {
-    http.once("error", reject);
-    http.listen(config.port, host, () => resolve());
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      http.once("error", reject);
+      http.listen(config.port, host, () => resolve());
+    });
+  } catch (error) {
+    // C-774: a server that never bound leaves no read workers behind (they
+    // would keep a role that gives up on its port from exiting).
+    await pool?.close();
+    throw error;
+  }
+  // C-774: warm the read workers only once this server serves.
+  pool?.warm(warmOrder(store));
   const address = http.address() as AddressInfo;
   boundPort = address.port;
   const graceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;

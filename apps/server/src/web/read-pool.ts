@@ -13,9 +13,9 @@ import {
  * C-644 defaults (configurable, see `workbenchReadOptionsFromEnv`):
  * - 2 workers. A project always reads in the same worker, so its versions stay
  *   stable between polls and its state is cached once, not once per worker.
- *   C-774: which worker is decided by load, not by a hash of the project id
- *   (see `#laneOf`), so two active projects never share a worker while another
- *   one has fewer active projects.
+ *   C-774: a project's worker is fixed the first time the pool sees it, on the
+ *   worker with the fewest projects so far (see `#laneOf`), not by a hash of
+ *   the project id; with no more projects than workers each has its own.
  * - 64 waiting reads per worker; the 65th answers 503 at once.
  * - 30 s per read, queue wait included. A read that already started is not
  *   killed when it times out: it finishes and warms the worker's cache, and
@@ -36,29 +36,11 @@ export interface WorkbenchReadOptions {
   readonly timeoutMs?: number;
   /** Tests point at a stub; production uses the built worker beside this file. */
   readonly workerUrl?: URL;
-  /** C-774: a project idle this long may move to a less busy worker. */
-  readonly affinityIdleMs?: number;
   /**
    * C-774: projects to place and warm at once, busiest first. Their workers
    * start right away and decode the projects' history before reads arrive.
    */
   readonly warmProjects?: readonly string[];
-}
-
-/**
- * C-774: a project without reads for 10 minutes no longer counts as active on
- * its worker. Its next read may then move to the worker with the fewest
- * active projects (cold caches once); a busy project never moves.
- */
-export const READ_AFFINITY_IDLE_MS = 10 * 60_000;
-
-/** A project's worker, kept while it reads or has read recently. */
-interface Affinity {
-  lane: number;
-  /** Reads queued or running for the project (timed-out ones excluded). */
-  pending: number;
-  /** When the project last queued or finished a read (`performance.now()`). */
-  lastActive: number;
 }
 
 /**
@@ -100,7 +82,7 @@ export interface WorkbenchReadStats {
   readonly workers: number;
   readonly running: number;
   readonly queued: number;
-  /** C-774: active projects per worker, by worker index. */
+  /** C-774: projects placed on each worker, by worker index. */
   readonly projects: readonly (readonly string[])[];
 }
 
@@ -111,7 +93,8 @@ export class WorkbenchReadPool {
     workerUrl: URL;
   };
   readonly #lanes: Lane[];
-  readonly #affinity = new Map<string, Affinity>();
+  /** C-774: each project's worker, fixed for the pool's lifetime. */
+  readonly #placed = new Map<string, number>();
   #serial = 0;
   #closed = false;
 
@@ -129,15 +112,11 @@ export class WorkbenchReadPool {
     const maxQueue = Math.max(1, requestedQueue);
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)
       throw new Error("Workbench read timeout must be a positive integer");
-    const affinityIdleMs = options.affinityIdleMs ?? READ_AFFINITY_IDLE_MS;
-    if (!Number.isSafeInteger(affinityIdleMs) || affinityIdleMs < 0)
-      throw new Error("Workbench read affinity idle time must be >= 0");
     this.#options = {
       dbPath: options.dbPath,
       workers,
       maxQueue,
       timeoutMs,
-      affinityIdleMs,
       workerUrl:
         options.workerUrl ??
         new URL("../../dist/web/read-worker.js", import.meta.url),
@@ -148,11 +127,19 @@ export class WorkbenchReadPool {
       running: undefined,
       deadline: undefined,
     }));
-    const now = performance.now();
-    for (const project of options.warmProjects ?? [])
-      this.#laneOf(project, now);
+    if (options.warmProjects) this.warm(options.warmProjects);
+  }
+
+  /**
+   * C-774: place these projects (busiest first) and start their workers now,
+   * so each decodes its projects' history before reads arrive. The Web server
+   * calls this once it listens, never for a server that failed to bind.
+   */
+  warm(projects: readonly string[]): void {
+    if (this.#closed) return;
+    for (const project of projects) this.#laneOf(project);
     for (const lane of this.#lanes)
-      if (this.#warmList(lane, now).length)
+      if (!lane.worker && this.#warmList(lane).length)
         try {
           this.#start(lane);
         } catch {
@@ -160,19 +147,17 @@ export class WorkbenchReadPool {
         }
   }
 
-  /** Active projects of a lane, the ones its (new) worker should warm. */
-  #warmList(lane: Lane, now: number): string[] {
+  /** Projects placed on a lane, the ones its (new) worker should warm. */
+  #warmList(lane: Lane): string[] {
     const index = this.#lanes.indexOf(lane);
-    return [...this.#affinity]
-      .filter(([, a]) => a.lane === index && this.#active(a, now))
+    return [...this.#placed]
+      .filter(([, at]) => at === index)
       .map(([project]) => project);
   }
 
   stats(): WorkbenchReadStats {
-    const now = performance.now();
     const projects = this.#lanes.map((): string[] => []);
-    for (const [project, affinity] of this.#affinity)
-      if (this.#active(affinity, now)) projects[affinity.lane]?.push(project);
+    for (const [project, at] of this.#placed) projects[at]?.push(project);
     return {
       workers: this.#lanes.filter((lane) => lane.worker).length,
       running: this.#lanes.filter((lane) => lane.running).length,
@@ -181,59 +166,34 @@ export class WorkbenchReadPool {
     };
   }
 
-  /** The worker index the project's next read goes to (tests, diagnostics). */
+  /** The worker index the project's reads go to (tests, diagnostics). */
   laneOf(project: string): number {
-    const now = performance.now();
-    const known = this.#affinity.get(project);
-    return known && this.#active(known, now)
-      ? known.lane
-      : this.#placement(project, known, now);
-  }
-
-  #active(affinity: Affinity, now: number): boolean {
-    return (
-      affinity.pending > 0 ||
-      now - affinity.lastActive < this.#options.affinityIdleMs
-    );
+    return this.#placed.get(project) ?? this.#placement(project);
   }
 
   /**
-   * C-774: a project keeps its worker while it has reads in flight or read
-   * within the idle window, so its reads stay in one worker, in order, against
-   * one cache. A new or idle project goes to the worker with the fewest active
-   * projects; ties keep its previous worker (warm caches), then the stable
-   * hash lane, then the lowest index. With nothing in flight, the moved
-   * project's next read starts after its last one finished and reads the same
-   * database, so its versions never go back.
+   * C-774: the first time the pool sees a project (warm list at start, or its
+   * first read) it goes to the worker with the fewest projects; ties take the
+   * stable hash lane, then the lowest index. It never moves afterwards, so
+   * all its reads run in one worker, in order, against one cache and one
+   * per-connection version epoch (`cards-cache.ts`), and a move never costs a
+   * cold build on another worker. With no more projects than workers, each
+   * project has a worker of its own.
    */
-  #laneOf(project: string, now: number): Affinity {
-    const known = this.#affinity.get(project);
-    if (known && this.#active(known, now)) return known;
-    const lane = this.#placement(project, known, now);
-    const next: Affinity = { lane, pending: 0, lastActive: now };
-    this.#affinity.set(project, next);
-    // Forget projects idle long enough to be placed afresh anyway.
-    for (const [other, affinity] of this.#affinity)
-      if (
-        affinity.pending === 0 &&
-        now - affinity.lastActive >= this.#options.affinityIdleMs * 2
-      )
-        this.#affinity.delete(other);
-    return next;
+  #laneOf(project: string): number {
+    const known = this.#placed.get(project);
+    if (known !== undefined) return known;
+    const lane = this.#placement(project);
+    this.#placed.set(project, lane);
+    return lane;
   }
 
-  #placement(
-    project: string,
-    known: Affinity | undefined,
-    now: number,
-  ): number {
-    const active = this.#lanes.map(() => 0);
-    for (const [other, affinity] of this.#affinity)
-      if (other !== project && this.#active(affinity, now))
-        active[affinity.lane] = (active[affinity.lane] ?? 0) + 1;
-    let lane = known?.lane ?? laneFor(project, this.#lanes.length);
-    for (let i = 0; i < active.length; i++)
-      if ((active[i] ?? 0) < (active[lane] ?? 0)) lane = i;
+  #placement(project: string): number {
+    const count = this.#lanes.map(() => 0);
+    for (const at of this.#placed.values()) count[at] = (count[at] ?? 0) + 1;
+    let lane = laneFor(project, this.#lanes.length);
+    for (let i = 0; i < count.length; i++)
+      if ((count[i] ?? 0) < (count[lane] ?? 0)) lane = i;
     return lane;
   }
 
@@ -257,8 +217,7 @@ export class WorkbenchReadPool {
         ),
       );
     const queuedAt = performance.now();
-    const affinity = this.#laneOf(op.project, queuedAt);
-    const lane = this.#lanes[affinity.lane] as Lane;
+    const lane = this.#lanes[this.#laneOf(op.project)] as Lane;
     if (lane.queue.length >= this.#options.maxQueue)
       return Promise.reject(
         new HttpRejection(
@@ -269,12 +228,6 @@ export class WorkbenchReadPool {
           RETRY_AFTER,
         ),
       );
-    affinity.pending++;
-    affinity.lastActive = queuedAt;
-    const released = () => {
-      affinity.pending--;
-      affinity.lastActive = performance.now();
-    };
     return new Promise<WorkbenchReadResult>((resolve, reject) => {
       const job: Job = {
         id: ++this.#serial,
@@ -282,15 +235,11 @@ export class WorkbenchReadPool {
         host,
         queuedAt,
         resolve: (result) => {
-          released();
           for (const [stage, ms] of Object.entries(result.timings))
             recordTiming?.(stage, ms);
           resolve(result);
         },
-        reject: (error) => {
-          released();
-          reject(error);
-        },
+        reject,
         timer: undefined,
         started: false,
         settled: false,
@@ -325,7 +274,7 @@ export class WorkbenchReadPool {
 
   async close(): Promise<void> {
     this.#closed = true;
-    this.#affinity.clear();
+    this.#placed.clear();
     const workers: Worker[] = [];
     for (const lane of this.#lanes) {
       for (const job of lane.queue.splice(0))
@@ -434,7 +383,7 @@ export class WorkbenchReadPool {
     });
     lane.worker = worker;
     // C-774: a new or restarted worker warms its projects between reads.
-    const warm = this.#warmList(lane, performance.now());
+    const warm = this.#warmList(lane);
     if (warm.length) worker.postMessage({ kind: "warm", projects: warm });
     const failed = () => {
       if (lane.worker !== worker) return;

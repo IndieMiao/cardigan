@@ -81,9 +81,13 @@ export function withSuggestionProgress(
     }
   }
   if (!baselines.size) return state;
+  // C-774: CROSS JOIN keeps json_each outside. The database has no ANALYZE
+  // statistics, so with a plain JOIN SQLite scanned the project's whole events
+  // or timeline index and the json array once per row (0.2-16 s per detail
+  // read in production); the index lookups below are per json row instead.
   const events = store.database
     .prepare(`SELECT e.doc FROM json_each(?) b
-    JOIN events e ON e.project_id = ? AND e.stream = b.key AND e.seq > b.value
+    CROSS JOIN events e ON e.project_id = ? AND e.stream = b.key AND e.seq > b.value
     WHERE e.type IN ('comment_posted','merge_check_finished','delivery_submitted',
       'review_submitted','completion_reviewed','human_action_completed')`)
     .all(JSON.stringify(Object.fromEntries(baselines)), state.project_id)
@@ -93,7 +97,7 @@ export function withSuggestionProgress(
   );
   const timeline = store.database
     .prepare(`SELECT t.doc FROM json_each(?) e
-    JOIN timeline t ON t.project_id = ? AND t.card_id = json_extract(e.value, '$.card_id')
+    CROSS JOIN timeline t ON t.project_id = ? AND t.card_id = json_extract(e.value, '$.card_id')
       AND t.event_seq = json_extract(e.value, '$.seq')`)
     .all(
       JSON.stringify(visible.map((e) => ({ card_id: e.card_id, seq: e.seq }))),

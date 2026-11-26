@@ -72,7 +72,6 @@ function pool(options: {
   workers?: number;
   maxQueue?: number;
   timeoutMs?: number;
-  affinityIdleMs?: number;
   warmProjects?: readonly string[];
 }) {
   const p = new WorkbenchReadPool({
@@ -262,23 +261,30 @@ test("C-774: a project's reads stay in one worker, in order, while other project
   expect(p.laneOf("cardigan")).not.toBe(p.laneOf("sensen-godot"));
 });
 
-test("C-774: only an idle project moves to a less busy worker; one with a read in flight stays", async () => {
-  const p = pool({ workers: 2, affinityIdleMs: 100 });
+test("C-774: a project keeps its first worker even when another worker is free", async () => {
+  const p = pool({ workers: 2 });
   const first = body(await p.read(op("ok", { project: "cardigan" })));
   const home = p.laneOf("cardigan");
-  // Past the idle window nothing holds cardigan to its worker.
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  // sensen-godot (same hash lane) now reads there for a long time.
-  const busy = p.read(op("slow", { project: "sensen-godot", delay: 400 }));
+  const other = body(await p.read(op("ok", { project: "sensen-godot" })));
+  expect(other.threadId).not.toBe(first.threadId);
+  // A third project goes to the worker with fewer projects (ties: hash lane).
+  const third = p.laneOf("p-web");
+  body(await p.read(op("ok", { project: "p-web" })));
+  expect(
+    p
+      .stats()
+      .projects.map((ids) => ids.length)
+      .sort(),
+  ).toEqual([1, 2]);
+  // cardigan's worker is busy; its next reads still queue there instead of
+  // moving (a move would swap its version epoch and rebuild a cold cache).
+  const busy = p.read(op("slow", { project: "cardigan", delay: 200 }));
   await vi.waitFor(() => expect(p.stats().running).toBe(1));
-  expect(p.laneOf("sensen-godot")).toBe(home);
-  // A read in flight keeps sensen-godot in place past the idle window.
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  expect(p.laneOf("sensen-godot")).toBe(home);
-  // Idle cardigan goes to the free worker instead of queueing behind it.
-  const moved = body(await p.read(op("ok", { project: "cardigan" })));
-  expect(moved.threadId).not.toBe(first.threadId);
-  expect(p.laneOf("cardigan")).not.toBe(home);
+  const after = body(await p.read(op("ok", { project: "cardigan" })));
+  expect(after.threadId).toBe(first.threadId);
+  expect(after.seen).toBeGreaterThan(first.seen);
+  expect(p.laneOf("cardigan")).toBe(home);
+  expect(p.laneOf("p-web")).toBe(third);
   await busy;
 });
 
@@ -320,6 +326,16 @@ test("C-774: warm projects are spread over workers that start at once and are to
   const lazy = pool({ workers: 1 });
   expect(lazy.stats().workers).toBe(0);
   expect(body(await lazy.read(op("ok"))).warm).toEqual(["p1"]);
+  // The Web server warms only once it listens; a closed pool starts nothing.
+  const later = pool({ workers: 2 });
+  expect(later.stats().workers).toBe(0);
+  later.warm(["cardigan", "sensen-godot"]);
+  expect(later.stats().workers).toBe(2);
+  expect(later.laneOf("cardigan")).not.toBe(later.laneOf("sensen-godot"));
+  const closed = pool({ workers: 2 });
+  await closed.close();
+  closed.warm(["cardigan"]);
+  expect(closed.stats().workers).toBe(0);
 });
 
 test("host facts are asked on the Web thread and answered to the worker", async () => {
