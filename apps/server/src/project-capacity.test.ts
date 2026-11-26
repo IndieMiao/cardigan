@@ -371,6 +371,10 @@ test.each(["missing", "configured", "invalid"] as const)(
         ),
       );
       const before = f.state();
+      // C-785: audit rows stay in the table, not in the in-memory state.
+      const audits = () =>
+        f.store.streamEventsOfType(f.project, undefined, "cross_card_read");
+      const auditedBefore = new Set(audits().map((e) => e.id));
       const capacity = await snapshot();
       expect(capacity[0]).toMatchObject({
         running: 5,
@@ -395,10 +399,7 @@ test.each(["missing", "configured", "invalid"] as const)(
         merge_check_slots: 0,
       });
       const after = f.state();
-      const previousEvents = new Set(before.events.map((e) => e.id));
-      const audit = after.events.filter(
-        (e) => e.type === "cross_card_read" && !previousEvents.has(e.id),
-      );
+      const audit = audits().filter((e) => !auditedBefore.has(e.id));
       expect(audit).toMatchObject([
         {
           payload: {
