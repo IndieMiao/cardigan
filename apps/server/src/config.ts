@@ -5,6 +5,7 @@ import {
   DEFAULT_MERGE_BLOCKED_REMINDER_MS,
   DEFAULT_PROVIDER_COOLDOWN_MS,
   DEFAULT_PROVIDER_FAILURES,
+  DEFAULT_STORY_SUMMARY_HANDOFF_MS,
   MAX_RUNTIME_FAILURE_LIMIT,
   MIN_RUNTIME_FAILURE_LIMIT,
   parseRuntimeUnknownGraceMs,
@@ -59,6 +60,8 @@ export interface ServerConfig {
   readonly mergeWatchdogMs?: number;
   readonly mergeIntervalMs?: number;
   readonly frameworkWaitReminderMs?: number;
+  /** C-762: external Office summary wait before PM Ops drafts it. */
+  readonly storySummaryHandoffMs?: number;
   readonly mergeBlockedReminderMs?: number;
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
@@ -128,6 +131,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_MERGE_WATCHDOG_MS?: string | undefined;
   readonly CARDIGAN_MERGE_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS?: string | undefined;
+  readonly CARDIGAN_STORY_SUMMARY_HANDOFF_MS?: string | undefined;
   readonly CARDIGAN_MERGE_BLOCKED_REMINDER_MS?: string | undefined;
   readonly CARDIGAN_CLEANUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_RECONCILE_INTERVAL_MS?: string | undefined;
@@ -340,6 +344,15 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
             env.CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS,
             "CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS",
             DEFAULT_FRAMEWORK_WAIT_REMINDER_MS,
+          ),
+        }),
+    ...(nonEmpty(env.CARDIGAN_STORY_SUMMARY_HANDOFF_MS) === undefined
+      ? {}
+      : {
+          storySummaryHandoffMs: interval(
+            env.CARDIGAN_STORY_SUMMARY_HANDOFF_MS,
+            "CARDIGAN_STORY_SUMMARY_HANDOFF_MS",
+            DEFAULT_STORY_SUMMARY_HANDOFF_MS,
           ),
         }),
     ...(nonEmpty(env.CARDIGAN_MERGE_BLOCKED_REMINDER_MS) === undefined

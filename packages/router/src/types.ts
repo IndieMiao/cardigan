@@ -77,6 +77,8 @@ export type RuleId =
   | "C-612/release notes"
   | "story/decompose"
   | "story/summary"
+  | "story/summary escalated"
+  | "story/summary handoff"
   | "story/confirm"
   | "story/proposal confirmed"
   | "story/cancelled"

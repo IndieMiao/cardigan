@@ -226,7 +226,9 @@ const schemas = {
     story_summary: z
       .boolean()
       .optional()
-      .describe("常驻 Office 在子卡全部结束后提交对照总结，由人标记需求卡完成"),
+      .describe(
+        "常驻 Office 在子卡全部结束后提交对照总结；超时转交后 PM Ops 也可代笔。由人标记需求卡完成",
+      ),
     card_id: id("card"),
     body: text,
     work_item_id: id("work_item").optional(),
