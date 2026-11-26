@@ -219,7 +219,6 @@ export function raiseVerifierLimit(
     });
 }
 
-/** All authorized decision entry points share the budget, audit and resumption effects. */
 /** C-768: names the optional verifiers a human merge confirmation waived. */
 function waivedVerifiersNote(resolution: NonNullable<Decision["resolution"]>) {
   const waived = resolution.waived_verifiers ?? [];
@@ -227,6 +226,7 @@ function waivedVerifiersNote(resolution: NonNullable<Decision["resolution"]>) {
     ? `豁免可选验证项：${waived.map((w) => `${w.title}（${w.id}）`).join("、")}\n`
     : "";
 }
+/** All authorized decision entry points share the budget, audit and resumption effects. */
 export function recordDecisionResolution(
   d: CommandDraft,
   q: Decision,
