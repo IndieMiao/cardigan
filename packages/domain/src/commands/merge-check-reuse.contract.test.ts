@@ -25,7 +25,19 @@ import { apply, human, value } from "./test-fixtures.js";
 const system: Actor = { kind: "system", project_id: human.project_id };
 const sha = (n: number) => n.toString(16).padStart(40, "0");
 const HEAD = "a".repeat(40);
-const REQUIRED = ["install", "build", "test", "lint", "deps"];
+const NAMES = ["install", "build", "test", "lint", "deps"];
+/** C-798: a stand-in for the host's sha256 of one step's configuration. */
+const fp = (name: string, version = 1) =>
+  [...`${name}:${version}`]
+    .map((c) => c.charCodeAt(0).toString(16))
+    .join("")
+    .padEnd(64, "0")
+    .slice(0, 64);
+const REQUIRED = NAMES.map((name) => ({ name, fingerprint: fp(name) }));
+const FINGERPRINTS = [...NAMES, "e2e"].map((name) => ({
+  name,
+  fingerprint: fp(name),
+}));
 const PRECHECK_RUN = {
   provider: "github" as const,
   run_id: 4242,
@@ -33,7 +45,7 @@ const PRECHECK_RUN = {
   html_url: "https://github.com/acme/app/actions/runs/4242",
   workflow_sha: sha(9),
 };
-const allPassed = [...REQUIRED, "e2e"].map((name) => ({
+const allPassed = [...NAMES, "e2e"].map((name) => ({
   name,
   status: "passed" as const,
   exit_code: 0,
@@ -84,6 +96,7 @@ async function fixture(flow_version = 5) {
         executor: { name: "github-actions", type: "github" },
         external_run: PRECHECK_RUN,
         checks: allPassed,
+        check_fingerprints: FINGERPRINTS,
         summary: "检查全部通过",
         log_ref: `${attempt_id}.log`,
         ...overrides,
@@ -91,7 +104,11 @@ async function fixture(flow_version = 5) {
     };
     state = { ...state, events: [...state.events, event] };
   };
-  const reuse = (attempt_id = "reuse-1", precheck_attempt_id = "pre-1") =>
+  const reuse = (
+    attempt_id = "reuse-1",
+    precheck_attempt_id = "pre-1",
+    required_checks = REQUIRED,
+  ) =>
     reusePrecheckForCardCheck(
       state,
       system,
@@ -100,7 +117,7 @@ async function fixture(flow_version = 5) {
         completion_id: completion.id,
         attempt_id,
         precheck_attempt_id,
-        required_checks: REQUIRED,
+        required_checks,
       },
       f.io,
     );
@@ -535,4 +552,150 @@ test("C-781/invariant 21 a reused card pass never authorizes merged; only the ba
   expect(t.state().cards.find((c) => c.id === t.f.card.id)?.status).toBe(
     "awaiting_merge",
   );
+});
+
+test.each([
+  ["failed", { checks: [{ name: "test", status: "failed", exit_code: 1 }] }],
+  [
+    "timed_out",
+    { checks: [{ name: "test", status: "timed_out", exit_code: null }] },
+  ],
+  ["interrupted", { checks: [] }],
+  ["environment_failed", { checks: [] }],
+  ["executor_unreachable", { checks: [] }],
+])(
+  "C-798 a pass followed by a %s rerun on the same head is never reused",
+  async (status, overrides) => {
+    const t = await fixture();
+    t.precheck("pre-1");
+    expect(reusablePrecheck(t.state(), t.f.card.id, REQUIRED)).toBeDefined();
+    t.precheck("pre-2", { status, ...overrides });
+    expect(reusablePrecheck(t.state(), t.f.card.id, REQUIRED)).toBeUndefined();
+    // Neither the earlier pass nor the latest attempt can be recorded.
+    for (const attempt of ["pre-1", "pre-2"])
+      expect(t.reuse("reuse-1", attempt)).toMatchObject({
+        ok: false,
+        error: { code: "illegal_transition" },
+      });
+  },
+);
+
+test.each(["precheck_queued", "precheck_started"] as const)(
+  "C-798 a newer %s attempt on the same head keeps the earlier pass from counting",
+  async (type) => {
+    const t = await fixture();
+    t.precheck("pre-1");
+    const s = t.state();
+    const finished = s.events.at(-1);
+    if (!finished) throw new Error("Missing precheck");
+    const {
+      checks: _checks,
+      summary: _summary,
+      ...identity
+    } = finished.payload as Record<string, unknown>;
+    const pending: Event = {
+      ...finished,
+      id: t.f.io.ids.nextEventId(),
+      seq: t.f.io.ids.nextEventSequence(human.project_id, t.f.card.id),
+      type,
+      payload: {
+        ...identity,
+        attempt_id: "pre-2",
+        status: type === "precheck_queued" ? "queued" : "running",
+      } as Event["payload"],
+    };
+    t.set({ ...s, events: [...s.events, pending] });
+    expect(reusablePrecheck(t.state(), t.f.card.id, REQUIRED)).toBeUndefined();
+    expect(t.reuse("reuse-1", "pre-1").ok).toBe(false);
+  },
+);
+
+test("C-798 only the latest attempt counts: fail then pass reuses the newer pass", async () => {
+  const t = await fixture();
+  t.precheck("pre-1");
+  t.precheck("pre-2", {
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+  });
+  t.precheck("pre-3");
+  expect(
+    reusablePrecheck(t.state(), t.f.card.id, REQUIRED)?.precheck.attempt_id,
+  ).toBe("pre-3");
+  expect(t.reuse("reuse-1", "pre-1").ok).toBe(false);
+  expect(t.commit(t.reuse("reuse-1", "pre-3"))).toMatchObject({
+    reused_precheck: { attempt_id: "pre-3" },
+  });
+});
+
+test("C-798 a failed attempt on another head does not affect the delivered head", async () => {
+  const t = await fixture();
+  t.precheck("pre-1");
+  t.precheck("pre-2", {
+    head_sha: "b".repeat(40),
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+  });
+  expect(
+    reusablePrecheck(t.state(), t.f.card.id, REQUIRED)?.precheck.attempt_id,
+  ).toBe("pre-1");
+});
+
+test("C-798 a card-tier command changed after the precheck is never reused; an unchanged one is", async () => {
+  const t = await fixture();
+  t.precheck("pre-1");
+  const changed = REQUIRED.map((c) =>
+    c.name === "test" ? { ...c, fingerprint: fp("test", 2) } : c,
+  );
+  expect(reusablePrecheck(t.state(), t.f.card.id, changed)).toBeUndefined();
+  expect(t.reuse("reuse-1", "pre-1", changed)).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+  // Only the card tier matters: a changed batch-only e2e step does not.
+  expect(t.commit(t.reuse())).toMatchObject({
+    status: "passed",
+    reused_precheck: { attempt_id: "pre-1" },
+  });
+});
+
+test.each([
+  ["no fingerprints (a legacy precheck)", { check_fingerprints: undefined }],
+  ["empty fingerprints", { check_fingerprints: [] }],
+  [
+    "a fingerprint missing for a card-tier step",
+    { check_fingerprints: FINGERPRINTS.filter((f) => f.name !== "lint") },
+  ],
+  [
+    "a malformed fingerprint",
+    {
+      check_fingerprints: FINGERPRINTS.map((f) =>
+        f.name === "build" ? { ...f, fingerprint: "build" } : f,
+      ),
+    },
+  ],
+  [
+    "duplicate fingerprint names",
+    { check_fingerprints: [...FINGERPRINTS, FINGERPRINTS[0]] },
+  ],
+])("C-798 a precheck with %s is never reused", async (_name, overrides) => {
+  const t = await fixture();
+  t.precheck("pre-1", overrides);
+  expect(reusablePrecheck(t.state(), t.f.card.id, REQUIRED)).toBeUndefined();
+  expect(t.reuse().ok).toBe(false);
+});
+
+test("C-798 required checks must each carry a valid fingerprint", async () => {
+  const t = await fixture();
+  t.precheck("pre-1");
+  for (const required of [
+    REQUIRED.map((c) => ({ name: c.name })),
+    REQUIRED.map((c) => ({ ...c, fingerprint: "" })),
+    [...REQUIRED, REQUIRED[0]],
+  ] as unknown as (typeof REQUIRED)[]) {
+    expect(reusablePrecheck(t.state(), t.f.card.id, required)).toBeUndefined();
+    expect(t.reuse("reuse-1", "pre-1", required)).toMatchObject({
+      ok: false,
+      error: { code: "validation_failed" },
+    });
+  }
 });

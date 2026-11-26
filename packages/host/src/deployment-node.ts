@@ -69,6 +69,7 @@ import {
   type SupervisorUpgradeConfig,
   SupervisorUpgrader,
   type SupervisorUpgradeStep,
+  supervisorCheckoutRoot,
   supervisorHelperArguments,
 } from "./deployment-supervisor-upgrade.js";
 import { GithubDispatchJournal } from "./github-dispatch-journal.js";
@@ -648,7 +649,7 @@ export class NodeDeploymentDriver
           : null;
       if (this.supervisorSha && this.options.upgrade?.config.enabled)
         this.upgrader = new SupervisorUpgrader(
-          this.upgradeHost(await realpath(resolve(root)), this.supervisorSha),
+          this.upgradeHost(await supervisorCheckoutRoot(), this.supervisorSha),
           this.options.upgrade.config,
         );
     }

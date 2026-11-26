@@ -30,9 +30,11 @@ export * from "./ext-message-window.js";
 export * from "./feishu.js";
 export { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 export {
+  type AckCandidateQuery,
   acknowledgeNotifications,
   advanceRouterCursor,
   LIVE_NOTIFICATION_STATUSES,
+  listAckCandidates,
   type MoveNotificationInput,
   moveNotification,
   type NotificationQuery,
@@ -64,9 +66,11 @@ export {
 export {
   findingKey,
   listFindings,
+  openFinding,
   type ReconcileFindingInput,
   type ReconcileFindingRecord,
   recordFindings,
+  resolveFinding,
 } from "./reconcile.js";
 export {
   createReadRepositories,
@@ -139,6 +143,11 @@ export {
   unrevokedTokensForProject,
   verifyToken,
 } from "./tokens.js";
+export {
+  readToolCatalogSnapshot,
+  recordToolCatalogSnapshot,
+  TOOL_CATALOG_SNAPSHOT_RETENTION_MS,
+} from "./tool-catalog-snapshots.js";
 export { newUlid } from "./ulid.js";
 export {
   beginUpstreamProbeSample,

@@ -114,6 +114,9 @@ export interface MergeStageView {
   readonly protecting_card_id?: string;
   readonly protecting_files?: readonly string[];
   readonly protecting_card_held?: boolean;
+  readonly protecting_expires_at?: string;
+  readonly held_since?: string;
+  readonly release_at?: string;
   readonly card_check?: MergeCheckView;
   readonly batch_check?: MergeCheckView;
   readonly color?: number;

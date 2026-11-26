@@ -14,6 +14,15 @@ import {
   text,
 } from "./core.js";
 
+/** Default window lifetime without a new protected version (24 hours). */
+export const DEFAULT_MERGE_WINDOW_TIMEOUT_MS = 86_400_000;
+/** C-803: default time one window may hold a card before it may join a batch. */
+export const DEFAULT_MERGE_WINDOW_HOLD_LIMIT_MS = 7_200_000;
+/** C-803: a window first held the card's current versions. */
+export const MERGE_QUEUE_HELD = "merge_queue_held";
+/** C-803: the card waited past the limit and no longer waits for that window. */
+export const MERGE_QUEUE_HOLD_RELEASED = "merge_queue_hold_released";
+
 export interface MergeWindow {
   readonly card_id: CardId;
   readonly opened_at: string;
@@ -293,7 +302,7 @@ export function refreshMergeWindows(
         (!changed &&
           Date.parse(d.now) - Date.parse(window.refreshed_at) >=
             (state.project_settings?.merge_queue?.window_timeout_ms ??
-              86_400_000))
+              DEFAULT_MERGE_WINDOW_TIMEOUT_MS))
       ) {
         write(
           d,
@@ -313,13 +322,48 @@ export function refreshMergeWindows(
     }
   });
 }
+/**
+ * C-803: one hold is one window instance (its card and opening time) holding
+ * one set of the held card's versions; a new version starts a new hold.
+ */
+export function mergeQueueHoldEvent(
+  events: readonly Event[],
+  card: CardId,
+  type: typeof MERGE_QUEUE_HELD | typeof MERGE_QUEUE_HOLD_RELEASED,
+  window: Pick<MergeWindow, "card_id" | "opened_at">,
+  versions: readonly string[],
+): Event | undefined {
+  const key = JSON.stringify(versions);
+  return cardEventsOfType(events, card, type).findLast((e) => {
+    if (e.actor.kind !== "system" || e.card_id !== card) return false;
+    const p = e.payload as {
+      window_card_id?: unknown;
+      window_opened_at?: unknown;
+      versions?: unknown;
+    } | null;
+    return (
+      p?.window_card_id === window.card_id &&
+      p.window_opened_at === window.opened_at &&
+      JSON.stringify(p.versions) === key
+    );
+  });
+}
+
 /** C-677: which window holds a card, the overlapping files and whether its card is held. */
 export interface MergeWindowHold {
   readonly card_id: CardId;
   /** Empty when either side's paths are not known yet, which fails closed. */
   readonly files: readonly string[];
   readonly held: boolean;
+  /** C-803: the window instance and when it closes unless a new version renews it. */
+  readonly opened_at: string;
+  readonly expires_at: string;
+  /** C-803: recorded start of this hold and when the card may join a batch. */
+  readonly since?: string;
+  readonly release_at?: string;
 }
+const later = (at: string, ms: number) =>
+  new Date(Date.parse(at) + ms).toISOString();
 export function mergeWindowHold(
   state: CommandState,
   card: CardId,
@@ -358,20 +402,37 @@ export function mergeWindowHold(
   }
   const paths = cardEventsOfType(state.events, card, "merge_queue_paths").at(-1)
     ?.payload as unknown as { versions: string[]; files: string[] } | undefined;
+  const versions = mergeWindowVersions(state, card);
   // Paths of an older version are unknown, like missing paths.
   const known =
-    paths &&
-    JSON.stringify(paths.versions) ===
-      JSON.stringify(mergeWindowVersions(state, card))
+    paths && JSON.stringify(paths.versions) === JSON.stringify(versions)
       ? paths.files
       : undefined;
   const window = active.find(
     (w) =>
       w.card_id !== card &&
       branch(w.card_id) === branch(card) &&
-      (!known || !w.versions.length || known.some((f) => w.files.includes(f))),
+      (!known ||
+        !w.versions.length ||
+        known.some((f) => w.files.includes(f))) &&
+      // C-803: a card that waited past the limit no longer waits for it.
+      !mergeQueueHoldEvent(
+        state.events,
+        card,
+        MERGE_QUEUE_HOLD_RELEASED,
+        w,
+        versions,
+      ),
   );
   if (!window) return undefined;
+  const config = state.project_settings?.merge_queue;
+  const since = mergeQueueHoldEvent(
+    state.events,
+    card,
+    MERGE_QUEUE_HELD,
+    window,
+    versions,
+  )?.created_at;
   return {
     card_id: window.card_id,
     files:
@@ -379,6 +440,20 @@ export function mergeWindowHold(
         ? known.filter((f) => window.files.includes(f))
         : [],
     held: !!cards.get(window.card_id)?.hold,
+    opened_at: window.opened_at,
+    expires_at: later(
+      window.refreshed_at,
+      config?.window_timeout_ms ?? DEFAULT_MERGE_WINDOW_TIMEOUT_MS,
+    ),
+    ...(since
+      ? {
+          since,
+          release_at: later(
+            since,
+            config?.window_hold_limit_ms ?? DEFAULT_MERGE_WINDOW_HOLD_LIMIT_MS,
+          ),
+        }
+      : {}),
   };
 }
 export function heldByMergeWindow(

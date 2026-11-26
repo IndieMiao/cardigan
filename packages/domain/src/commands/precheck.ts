@@ -8,6 +8,7 @@ import {
   precheckRecoveryActions,
   prechecks,
   precheckView,
+  validCheckFingerprints,
   validPrecheckSummary,
 } from "../precheck.js";
 import {
@@ -287,6 +288,27 @@ export function recordPrecheck(
           "stale_target",
           "检查候选或远程身份已变化",
         );
+    // C-798: the step fingerprints are fixed by the execution that ran the
+    // steps. They may first appear while leaving `queued` and never change.
+    if (p.check_fingerprints !== undefined)
+      ensure(
+        validCheckFingerprints(p.check_fingerprints),
+        "validation_failed",
+        "检查配置指纹无效",
+      );
+    if (old.check_fingerprints !== undefined)
+      ensure(
+        JSON.stringify(old.check_fingerprints) ===
+          JSON.stringify(p.check_fingerprints),
+        "stale_target",
+        "检查配置指纹已变化",
+      );
+    else if (p.check_fingerprints !== undefined)
+      ensure(
+        old.status === "queued",
+        "illegal_transition",
+        "检查配置指纹只能在开始执行时记录",
+      );
     if (
       p.executor?.type === "github" &&
       ["running", "passed", "failed", "timed_out"].includes(p.status)

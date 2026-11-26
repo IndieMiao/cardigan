@@ -6,7 +6,16 @@ import type {
   ProjectId,
   TimelineEntryId,
 } from "@cardigan/domain";
-import { latestMergeCheck, mergeBatches, prechecks } from "@cardigan/domain";
+import {
+  type DispatchHead,
+  DormantEvent,
+  EventLogView,
+  latestMergeCheck,
+  mergeBatches,
+  type NewestKey,
+  prechecks,
+  SKIP_ENTRY,
+} from "@cardigan/domain";
 import type {
   ReadRepositories,
   Store,
@@ -138,6 +147,40 @@ export function canFinishUndispatched(
   );
 }
 const DISPATCH_TYPES: ReadonlySet<string> = new Set(["github_check_dispatch"]);
+/**
+ * C-796: the journal's projection key, the attempt of a system record (a
+ * dormant one carries it in its head); other records take no part, exactly
+ * like `intentsFrom` and `current` filter them.
+ */
+const attemptKey: NewestKey = (entry) => {
+  if (entry instanceof DormantEvent) {
+    if (!entry.dispatch)
+      throw new Error("C-796: dormant dispatch record without its head");
+    return entry.dispatch.system ? entry.dispatch.attempt : SKIP_ENTRY;
+  }
+  return entry.actor.kind === "system"
+    ? (entry.payload as unknown as GithubDispatchIntent).attempt
+    : SKIP_ENTRY;
+};
+type EventsReader = {
+  events: Pick<StoreTransactionContext["events"], "listAfter"> &
+    Partial<Pick<StoreTransactionContext["events"], "listStreams">>;
+};
+/** C-796: the Store log view, when the transaction reads one. */
+function logView(tx: EventsReader, project: ProjectId) {
+  const view = tx.events.listStreams?.(project);
+  return view instanceof EventLogView ? view : undefined;
+}
+/**
+ * C-796: which dormant newest records a read decodes. The Store keeps an
+ * attempt's newest record dormant only when it is retired on a card closed
+ * at load (finished, cleaned up or without a candidate), so skipping a
+ * finished one on a card that is still closed hides no executor; a card
+ * reopened since is read whole again.
+ */
+type Wanted = (closed: boolean, head: DispatchHead) => boolean;
+const LIVE: Wanted = (closed, head) => !closed || !head.finished;
+const EVERY: Wanted = () => true;
 const projectedIntents = new WeakMap<
   readonly Event[],
   readonly GithubDispatchIntent[]
@@ -256,11 +299,39 @@ export class GithubDispatchJournal {
       });
     });
   }
+  /**
+   * Newest record per attempt of this card's (or the probe) stream. C-796:
+   * from the Store log's type index, decoding no superseded record; `live`
+   * skips retired intents of a closed card (see `LIVE`), which only an exact
+   * attempt lookup still needs.
+   */
   private current(
-    tx: { events: Pick<StoreTransactionContext["events"], "listAfter"> },
+    tx: EventsReader & {
+      cards?: Pick<StoreTransactionContext["cards"], "get">;
+    },
     project: string,
     card: string,
+    live = false,
   ): GithubDispatchIntent[] {
+    const view = logView(tx, project as ProjectId);
+    if (view) {
+      const stream = this.probeCard ?? card;
+      const status = live
+        ? tx.cards?.get(project as ProjectId, stream as CardId)?.status
+        : undefined;
+      const closed = status === "done" || status === "cancelled";
+      const wanted = live ? LIVE : EVERY;
+      return (
+        view
+          .newestOfType(
+            this.probeCard ? "github_probe_dispatch" : "github_check_dispatch",
+            attemptKey,
+            (_, entry) => wanted(closed, entry.dispatch as DispatchHead),
+            stream,
+          )
+          .get(stream) ?? []
+      ).map((event) => event.payload as unknown as GithubDispatchIntent);
+    }
     const latest = new Map<string, GithubDispatchIntent>();
     for (const event of tx.events.listAfter(
       project as ProjectId,
@@ -293,28 +364,40 @@ export class GithubDispatchJournal {
       created_at: new Date().toISOString(),
     });
   }
+  /**
+   * Newest intent per attempt of every card, in card order. C-796: retired
+   * intents of closed cards (finished, cleaned up or without a candidate;
+   * see `LIVE`) may be left out, so callers only act on unfinished intents
+   * or look one up by its card (`current`) or candidate (`candidateOwnersAt`).
+   */
   allAt(tx: {
     events: Pick<
       StoreTransactionContext["events"],
       "listAfter" | "listStreams"
     >;
-    cards: Pick<StoreTransactionContext["cards"], "list">;
+    cards: Pick<StoreTransactionContext["cards"], "list" | "get">;
   }): GithubDispatchIntent[] {
-    return this.store.listProjects().flatMap((project) => {
-      const all = this.probeCard
-        ? undefined
-        : tx.events.listStreams?.(project.id);
-      // C-639: intents read only dispatch records; never decode whole streams.
-      const streams = all?.ofTypes ? all.ofTypes(DISPATCH_TYPES) : all;
-      return tx.cards
-        .list(project.id)
-        .filter((card) => !this.probeCard || card.id === this.probeCard)
-        .flatMap((card) =>
-          streams
-            ? structuredClone(intentsFrom(streams.get(card.id) ?? []))
-            : this.current(tx, project.id, card.id),
-        );
-    });
+    return this.intentsAt(tx, LIVE, true);
+  }
+  /**
+   * C-796: the newest intent of every attempt, retired ones included, whose
+   * candidate is this repo/ref (the candidate-reuse and cleanup fences).
+   */
+  candidateOwnersAt(
+    tx: Parameters<GithubDispatchJournal["allAt"]>[0],
+    candidate: { readonly repo: string; readonly ref: string },
+  ): GithubDispatchIntent[] {
+    return this.intentsAt(
+      tx,
+      (closed, head) =>
+        LIVE(closed, head) ||
+        (head.repo === candidate.repo && head.ref === candidate.ref),
+      true,
+    ).filter(
+      (intent) =>
+        intent.candidate?.repo === candidate.repo &&
+        intent.candidate.ref === candidate.ref,
+    );
   }
   /**
    * C-634: executor of every unfinished intent, for counting only. It reads
@@ -322,21 +405,52 @@ export class GithubDispatchJournal {
    * so nothing it returns may reach a writer.
    */
   unfinishedExecutorsAt(tx: Parameters<GithubDispatchJournal["allAt"]>[0]) {
+    return this.intentsAt(tx, LIVE, false).flatMap((intent) =>
+      intent.finished ? [] : [intent.executor],
+    );
+  }
+  private intentsAt(
+    tx: Parameters<GithubDispatchJournal["allAt"]>[0],
+    wanted: Wanted,
+    clone: boolean,
+  ): GithubDispatchIntent[] {
     return this.store.listProjects().flatMap((project) => {
+      const cards = tx.cards
+        .list(project.id)
+        .filter((card) => !this.probeCard || card.id === this.probeCard);
+      const view = this.probeCard ? undefined : logView(tx, project.id);
+      if (view) {
+        // C-796: newest record per attempt from the type index; superseded
+        // records are never decoded.
+        const closed = new Set(
+          cards
+            .filter((c) => c.status === "done" || c.status === "cancelled")
+            .map((c) => c.id as string),
+        );
+        const newest = view.newestOfType(
+          "github_check_dispatch",
+          attemptKey,
+          (stream, entry) =>
+            wanted(closed.has(stream), entry.dispatch as DispatchHead),
+        );
+        return cards.flatMap((card) => {
+          const intents = (newest.get(card.id) ?? []).map(
+            (event) => event.payload as unknown as GithubDispatchIntent,
+          );
+          return clone ? structuredClone(intents) : intents;
+        });
+      }
       const all = this.probeCard
         ? undefined
         : tx.events.listStreams?.(project.id);
-      // C-639: same dispatch-only subset as `allAt`.
+      // C-639: intents read only dispatch records; never decode whole streams.
       const streams = all?.ofTypes ? all.ofTypes(DISPATCH_TYPES) : all;
-      return tx.cards
-        .list(project.id)
-        .filter((card) => !this.probeCard || card.id === this.probeCard)
-        .flatMap((card) =>
-          (streams
-            ? intentsFrom(streams.get(card.id) ?? [])
-            : this.current(tx, project.id, card.id)
-          ).flatMap((intent) => (intent.finished ? [] : [intent.executor])),
-        );
+      return cards.flatMap((card) => {
+        if (!streams)
+          return this.current(tx, project.id, card.id, wanted === LIVE);
+        const intents = intentsFrom(streams.get(card.id) ?? []);
+        return clone ? structuredClone(intents) : [...intents];
+      });
     });
   }
   unfinished(): GithubDispatchIntent[] {
@@ -680,10 +794,20 @@ export class GithubDispatchJournal {
     fresh: boolean;
   } {
     const result = this.store.uow.run((tx) => {
-      const all = this.admissionIntents(tx);
-      const previous = all.filter(
-        (v) => v.project === intent.project && v.card === intent.card,
-      );
+      // Admission bookkeeping (holds) over every card, as before.
+      this.admissionIntents(tx);
+      // C-796: this card's every newest intent, retired ones included.
+      const previous = tx.cards.get(
+        intent.project as ProjectId,
+        (this.probeCard ?? intent.card) as CardId,
+      )
+        ? this.admissionIntents(
+            tx,
+            this.current(tx, intent.project, intent.card),
+          ).filter(
+            (v) => v.project === intent.project && v.card === intent.card,
+          )
+        : [];
       const same = previous.find((value) => value.attempt === intent.attempt);
       const capacity = (exclude?: GithubDispatchIntent) => {
         if (!intent.executor || maxConcurrent === undefined) return true;
@@ -696,7 +820,8 @@ export class GithubDispatchJournal {
             const journal = new GithubDispatchJournal(this.store, card.id);
             return journal.admissionIntents(
               tx,
-              journal.current(tx, project.id, card.id),
+              // Counting unfinished intents only: retired ones can stay dormant.
+              journal.current(tx, project.id, card.id, true),
             );
           }),
         );
@@ -750,11 +875,10 @@ export class GithubDispatchJournal {
         return undefined;
       if (
         intent.candidate &&
-        this.allAt(tx).some(
-          (value) =>
-            value.candidate?.repo === intent.candidate?.repo &&
-            value.candidate?.ref === intent.candidate?.ref,
-        )
+        this.candidateOwnersAt(tx, {
+          repo: intent.candidate.repo,
+          ref: intent.candidate.ref,
+        }).length
       )
         throw new GithubExecutorError("security");
       if (previous.some((value) => !value.finished))

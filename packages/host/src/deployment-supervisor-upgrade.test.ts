@@ -1,14 +1,16 @@
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
@@ -26,6 +28,7 @@ import {
   parseDeploymentConfig,
 } from "./deployment-config.js";
 import {
+  checkSupervisorUpgrade,
   finishSupervisorUpgrade,
   loadSupervisorUpgradeConfig,
   readSupervisorUpgradePlan,
@@ -316,6 +319,170 @@ test("C-767: a launch file that does not name the running checkout, or a helper 
   } finally {
     await rm(second, { recursive: true, force: true });
   }
+});
+
+/** Files owned by someone else: only readHostFile's own owner check sees it. */
+function foreignFileOwner() {
+  const uid = process.getuid?.();
+  return vi.spyOn(process, "getuid").mockImplementation(() => {
+    const caller = new Error().stack
+      ?.split("\n")
+      .find((line) => /^\s+at /u.test(line) && !line.includes("process."));
+    return caller?.includes("readHostFile") ? 424242 : (uid ?? 0);
+  });
+}
+
+const LAUNCH_CASES: readonly {
+  name: string;
+  /** May return a cleanup function. */
+  arrange(l: Awaited<ReturnType<typeof layout>>): Promise<unknown>;
+  reason: readonly string[];
+}[] = [
+  {
+    name: "group-writable unit (C-767#73)",
+    arrange: (l) => chmod(l.launch, 0o664),
+    reason: ["组或其他人可写（权限 0664）", "chmod go-w"],
+  },
+  {
+    name: "owner mismatch",
+    arrange: async () => {
+      const spy = foreignFileOwner();
+      return () => spy.mockRestore();
+    },
+    reason: ["属主不是运行监督器的用户或 root", "chown"],
+  },
+  {
+    name: "symlink",
+    arrange: async (l) => {
+      const real = `${l.launch}.real`;
+      await writeFile(real, l.original, { mode: 0o600 });
+      await rm(l.launch);
+      await symlink(real, l.launch);
+    },
+    reason: ["是符号链接", "真实文件路径"],
+  },
+  {
+    name: "missing file",
+    arrange: (l) => rm(l.launch),
+    reason: ["启动配置（launch_file）不存在"],
+  },
+  {
+    name: "unsafe directory",
+    arrange: (l) => chmod(dirname(l.launch), 0o770),
+    reason: ["所在目录或其上级目录组或其他人可写（权限 0770）"],
+  },
+  {
+    name: "no checkout path (C-767#73: the wrapper decides the release)",
+    arrange: (l) =>
+      writeFile(
+        l.launch,
+        "[Service]\nExecStart=/home/x/cardigan-selfdeploy/selfdeploy-watch.sh\n",
+      ),
+    reason: [
+      `没有引用当前监督器目录 release-watch-${FROM}`,
+      "RELEASE=",
+      "不一定是 systemd 单元",
+    ],
+  },
+];
+
+test("C-772: each launch-file refusal names its cause and fix in the event and Needs You, without host paths", async () => {
+  for (const c of LAUNCH_CASES) {
+    store.close();
+    store = Store.open({ dataDir: root, dbPath: ":memory:" });
+    store.createProject({ id: "cardigan" });
+    const l = await layout();
+    const cleanup = await c.arrange(l);
+    try {
+      const upgrader = new SupervisorUpgrader(fakeHost(l), l.config);
+      upgrader.automatic(FROM, TO, ["packages/host"]);
+      expect(await upgrader.step(), c.name).toBe("failed");
+    } finally {
+      if (typeof cleanup === "function") cleanup();
+    }
+    const summary = events().at(-1)?.summary ?? "";
+    const [action] = actions();
+    for (const text of c.reason) {
+      expect(summary, c.name).toContain(text);
+      expect(action?.instructions, c.name).toContain(text);
+    }
+    // Paths of the host stay out of events and Needs You.
+    expect(JSON.stringify([events(), actions()]), c.name).not.toContain(root);
+    await chmod(dirname(l.launch), 0o700);
+    await rm(join(root, "selfdeploy"), { recursive: true, force: true });
+    await rm(join(root, "units"), { recursive: true, force: true });
+  }
+});
+
+test("C-772: the self-check runs the same launch-file checks read-only and reports each cause", async () => {
+  const l = await layout();
+  const file = join(l.configDir, "supervisor-upgrade.yaml");
+  const check = () => checkSupervisorUpgrade(l.configDir, l.old);
+  const snapshot = async () =>
+    JSON.stringify(
+      await Promise.all(
+        [l.launch, file].map(async (f) => {
+          try {
+            const s = await lstat(f);
+            return [f, s.mode, s.mtimeMs, await readFile(f, "utf8")];
+          } catch {
+            return [f, "absent"];
+          }
+        }),
+      ),
+    );
+  // Switch absent or off: nothing to check, automatic upgrade stays off.
+  expect(await check()).toMatchObject({
+    ok: false,
+    problems: [{ reason: expect.stringContaining("enabled 不是 true") }],
+  });
+  await writeFile(file, "enabled: true\nunit: a.service\n", { mode: 0o600 });
+  expect((await check()).problems[0]?.reason).toContain("不是合法 YAML");
+  await writeFile(
+    file,
+    `enabled: true\nunit: cardigan-selfdeploy.service\nlaunch_file: ${l.launch}\n`,
+  );
+  await chmod(file, 0o640);
+  expect((await check()).problems[0]?.reason).toContain(
+    "supervisor-upgrade.yaml组或其他人有权限（权限 0640）",
+  );
+  await chmod(file, 0o600);
+  expect(await check()).toEqual({
+    ok: true,
+    config: { ...l.config, enabled: true },
+    problems: [],
+  });
+  for (const c of LAUNCH_CASES) {
+    await writeFile(l.launch, l.original, { mode: 0o600 }).catch(() => {});
+    const cleanup = await c.arrange(l);
+    const before = await snapshot();
+    let result: Awaited<ReturnType<typeof check>>;
+    try {
+      result = await check();
+    } finally {
+      if (typeof cleanup === "function") cleanup();
+    }
+    expect(result.ok, c.name).toBe(false);
+    for (const text of c.reason)
+      expect(result.problems.map((p) => p.reason).join("\n"), c.name).toContain(
+        text,
+      );
+    // Read-only: neither the launch file nor the switch file changed.
+    expect(await snapshot(), c.name).toBe(before);
+    await chmod(dirname(l.launch), 0o700);
+    await rm(l.launch, { force: true });
+  }
+  // The unsafe directory is named for the local operator only.
+  await writeFile(l.launch, l.original, { mode: 0o600 });
+  await chmod(l.install, 0o770);
+  expect((await check()).problems).toEqual([
+    {
+      reason: expect.stringContaining("监督器目录所在目录或其上级目录"),
+      path: l.install,
+    },
+  ]);
+  await chmod(l.install, 0o700);
+  expect((await check()).ok).toBe(true);
 });
 
 /** A fake service manager: the upgrade target is `healthy`, `hangs` or `crashes`. */

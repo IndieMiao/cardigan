@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -27,6 +28,29 @@ export interface MergeGateCheck extends CheckoutCheck {
   readonly skipDocsOnly?: boolean;
 }
 
+/**
+ * C-798: fingerprint of what one check step executes: its name, command and
+ * timeout. A card check reuses a precheck only when every card-tier step
+ * still has the fingerprint the precheck ran with. Selection metadata (tiers,
+ * scope, docs-only skipping) is not part of it: the precheck always runs the
+ * step in full. Environment values are deliberately excluded so no digest of
+ * a secret is ever recorded.
+ */
+export function checkStepFingerprint(
+  step: Pick<CheckoutCheck, "name" | "run" | "timeoutMs">,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        "cardigan.check-step.v1",
+        step.name,
+        step.run,
+        step.timeoutMs ?? null,
+      ]),
+    )
+    .digest("hex");
+}
+
 export interface MergeGateAffected {
   /** Package directory -> directories of additional dependent packages. */
   readonly extraDependents?: Readonly<Record<string, readonly string[]>>;
@@ -49,6 +73,8 @@ export type ProjectMergeGate =
         readonly maxBatchSize: number;
         readonly conflictThreshold: number;
         readonly windowTimeoutMs: number;
+        /** C-803: how long one window may hold a card before it may join a batch. */
+        readonly windowHoldLimitMs: number;
         /** C-781: absent means a card check reuses a passed same-head precheck. */
         readonly reusePrecheck?: false;
       };
@@ -139,6 +165,7 @@ async function projectConfig(
         maxBatchSize: number;
         conflictThreshold: number;
         windowTimeoutMs: number;
+        windowHoldLimitMs: number;
         reusePrecheck?: false;
       }
     | undefined;
@@ -149,6 +176,7 @@ async function projectConfig(
       "max_batch_size",
       "window_conflicts",
       "window_timeout_minutes",
+      "window_hold_minutes",
       "reuse_precheck",
     ]);
     if (typeof raw.queue.enabled !== "boolean")
@@ -169,6 +197,7 @@ async function projectConfig(
     )
       invalid("queue.window_conflicts 必须是正整数");
     const timeout = minutes(raw.queue.window_timeout_minutes, 1440);
+    const holdLimit = minutes(raw.queue.window_hold_minutes, 120);
     const reuse = raw.queue.reuse_precheck ?? true;
     if (typeof reuse !== "boolean")
       invalid("queue.reuse_precheck 必须是布尔值");
@@ -177,6 +206,7 @@ async function projectConfig(
         maxBatchSize: size,
         conflictThreshold: threshold,
         windowTimeoutMs: timeout,
+        windowHoldLimitMs: holdLimit,
         ...(reuse ? {} : { reusePrecheck: false as const }),
       };
   }

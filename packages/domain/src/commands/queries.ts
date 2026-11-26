@@ -80,6 +80,7 @@ import {
   pmFailedMergeCheckOptions,
   pmMergeBlockers,
 } from "./merge-delegation.js";
+import { mergeWindowHoldings } from "./merge-window-hold.js";
 import { notices } from "./notices.js";
 import { latestPreMergeCheckReminder } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
@@ -1077,6 +1078,9 @@ function selectNeedsYou<T>(
               .list("human_actions")
               .filter((h) => h.status === "open" && h.triage === "pm_ops")
               .map(withReminder),
+            // C-803: open merge windows and the cards each holds; PM Ops
+            // closes one with set_merge_window, the human with the CLI.
+            merge_windows: mergeWindowHoldings(state),
           },
         }
       : {}),

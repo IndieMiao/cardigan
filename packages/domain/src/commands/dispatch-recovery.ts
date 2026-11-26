@@ -30,6 +30,7 @@ import {
   STARTUP_FAILURE_REASONS,
   startupFailureResolved,
 } from "../startup-failure.js";
+import type { NotificationStatus } from "../states.js";
 import { transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -552,25 +553,41 @@ export function recoverDispatch(
   });
 }
 
-/** Escalation notifications refer to the source Run, not the PM Run that reads them. */
+/** Diagnostic events whose notices retire with the Run they name. */
+export const DISPATCH_DIAGNOSTIC_EVENT_TYPES: readonly string[] = [
+  "run_inactive",
+  "run_dispatch_stalled",
+  "bell_delivery_failed",
+  "bell_retry_exhausted",
+];
+/** Statuses of a delivery problem; any other row needs a diagnostic or a Run. */
+export const DISPATCH_ATTENTION_STATUSES: readonly NotificationStatus[] = [
+  "needs_attention",
+  "delivery_failed",
+];
+
+/**
+ * Escalation notifications refer to the source Run, not the PM Run that reads
+ * them. C-788: true only for a row whose source event is one of
+ * `DISPATCH_DIAGNOSTIC_EVENT_TYPES`, whose status is one of
+ * `DISPATCH_ATTENTION_STATUSES`, or which is pinned to a Run; callers may
+ * leave every other row out of their scan.
+ */
 export function obsoleteDispatchAttention(
   state: CommandState,
   note: Notification,
 ): boolean {
   if (["acked", "resolved"].includes(note.status)) return false;
   const event = eventById(state.events, note.event_id);
-  const diagnostic = [
-    "run_inactive",
-    "run_dispatch_stalled",
-    "bell_delivery_failed",
-    "bell_retry_exhausted",
-  ].includes(event?.type ?? "");
+  const diagnostic = DISPATCH_DIAGNOSTIC_EVENT_TYPES.includes(
+    event?.type ?? "",
+  );
   const runId = diagnostic ? field(event?.payload, "run_id") : note.run_id;
   // C-244: keyed per Run snapshot; same first match as runs.find.
   const run = runById(state.runs, runId);
   if (
     !diagnostic &&
-    !["needs_attention", "delivery_failed"].includes(note.status) &&
+    !DISPATCH_ATTENTION_STATUSES.includes(note.status) &&
     run?.status !== "cancelled"
   )
     return false;

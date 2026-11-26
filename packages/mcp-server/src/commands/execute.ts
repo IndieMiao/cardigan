@@ -18,7 +18,9 @@ import {
   commandRunIds,
   commandStreamHistory,
   commandTargetCards,
+  EventLogView,
   githubRunCards,
+  githubRunCardsIn,
   hotCardIds,
   LEAN_COLD_CARD_OMITTED_EVENT_TYPES,
   liveTriggerEventIds,
@@ -98,17 +100,31 @@ const leanInputs = new WeakMap<CommandState, Lean>();
 
 /**
  * C-649 `lean` scope: project-stream retention (`dropped`, one stable object
- * while its inputs do not change, so histories and index answers are shared)
- * and the project's GitHub dispatch records from the full log index.
+ * while its inputs do not change, so histories and index answers are shared).
  */
 interface Lean {
   readonly serial: number;
   readonly dropped: ReadonlySet<string>;
-  readonly dispatches: readonly Event[];
   /** C-671 `slim`: lean plus the cold-card whitelist. */
   readonly slim: boolean;
 }
 const DISPATCH_TYPES: ReadonlySet<string> = new Set(["github_check_dispatch"]);
+/**
+ * C-649/C-796: cards holding the dispatch records of these GitHub run ids.
+ * A Store log view answers from its type index without decoding a dormant
+ * record; other backends filter the decoded records.
+ */
+function runCards(
+  streams: CommandEventStreams,
+  runIds: readonly string[],
+): Iterable<CardId> {
+  if (!runIds.length) return [];
+  if (streams instanceof EventLogView) return githubRunCardsIn(streams, runIds);
+  const dispatches = streams.ofTypes
+    ? [...streams.ofTypes(DISPATCH_TYPES).values()].flat()
+    : [...streams.values()].flat().filter((e) => DISPATCH_TYPES.has(e.type));
+  return githubRunCards(dispatches, runIds);
+}
 // One subset per type (rules are per type), so no cross-type merge or sort.
 const retainedTypes = [...PROJECT_STREAM_RETENTION.keys()].map(
   (type) => new Set([type]),
@@ -126,15 +142,12 @@ function leanInputsFor(
   const typed = retainedTypes.flatMap(
     (t) => ofTypes.call(streams, t).get("") ?? [],
   );
-  const dispatches = [...ofTypes.call(streams, DISPATCH_TYPES).values()].flat();
   // Appends only grow these lists; ids are unique, so count + last id + the
   // protected ids identify the inputs.
   const key = [
     slim ? "slim" : "lean",
     typed.length,
     typed.at(-1)?.id ?? "",
-    dispatches.length,
-    dispatches.at(-1)?.id ?? "",
     [...protect].join(","),
   ].join("\u0000");
   const cached = leanCache.get(project);
@@ -142,7 +155,6 @@ function leanInputsFor(
   const lean = {
     serial: ++leanSerial,
     dropped: projectStreamDropped(typed, protect),
-    dispatches,
     slim,
   };
   leanCache.set(project, { key, lean });
@@ -278,11 +290,9 @@ function extendHot(
           slim,
         ) ?? built)
       : built;
-  if (current && options.targets?.length)
-    for (const id of githubRunCards(
-      current.dispatches,
-      commandRunIds(options.targets),
-    ))
+  // C-796: in every hot scope (`lean` before).
+  if (options.targets?.length)
+    for (const id of runCards(streams, commandRunIds(options.targets)))
       extra.add(id);
   const pins = stickyPins(state.project_id);
   for (const id of extra) pins.used.set(id, pins.generation);
@@ -347,7 +357,6 @@ function readCommandState(
     pins.generation++;
     for (const [id, used] of pins.used)
       if (pins.generation - used > STICKY_GENERATIONS) pins.used.delete(id);
-    // C-649: lean keeps the dispatch cards of waited GitHub runs whole.
     leanInput = lean
       ? leanInputsFor(
           project_id,
@@ -359,12 +368,8 @@ function readCommandState(
     hotCards = hotCardIds(entities, [
       ...((triggers?.values() ?? []) as Iterable<CardId | undefined>),
       ...(pins.used.keys() as Iterable<CardId>),
-      ...(leanInput
-        ? githubRunCards(
-            leanInput.dispatches,
-            waitedGithubRuns(entities.work_items),
-          )
-        : []),
+      // C-649/C-796: the dispatch cards of waited GitHub runs stay whole.
+      ...runCards(streams, waitedGithubRuns(entities.work_items)),
     ]);
   }
   // Store reads only newly appended rows. Keep the original project/card/seq

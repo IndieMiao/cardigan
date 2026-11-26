@@ -19,6 +19,7 @@ import {
   completeHumanAction,
   heldByMergeWindow,
   latestMergeCheck,
+  MERGE_QUEUE_HELD,
   mergeBatches,
   prepareMergePlan,
   recordDecision,
@@ -1648,6 +1649,44 @@ function requiredCard(value: import("@cardigan/domain").CardId | undefined) {
   if (!value) throw new Error("Missing card");
   return value;
 }
+
+test("C-803: the queue tick records each held card once and keeps it out of the batch", async () => {
+  const cards = await queuedCards(2);
+  // A protected card without deliveries yet holds every card on its branch.
+  const protector = m4Scenario(f, "auto").card.id;
+  f.store.uow.run((tx) =>
+    persistEffect(
+      tx,
+      f.project_id,
+      unwrap(
+        setMergeWindow(
+          loadCommandState(tx, f.project_id),
+          { kind: "human", project_id: f.project_id },
+          { card_id: protector, open: true, reason: "Protect" },
+          { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
+        ),
+      ),
+    ),
+  );
+  const { options, errors } = await gated("true", true);
+  const executor = new MergeExecutor(options);
+  await executor.tick();
+  await executor.tick();
+  await executor.tick();
+  expect(errors).toEqual([]);
+  const state = f.state();
+  for (const id of cards) {
+    const held = state.events.filter(
+      (e) => e.card_id === id && e.type === MERGE_QUEUE_HELD,
+    );
+    expect(held).toHaveLength(1);
+    expect(held[0]?.payload).toMatchObject({
+      window_card_id: protector,
+      files: [],
+    });
+  }
+  expect(mergeBatches(state.events)).toEqual([]);
+}, 20_000);
 
 test("C-391: baseline-only files do not intersect unrelated delivery windows", async () => {
   const cards = await queuedCards(2);

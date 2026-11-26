@@ -431,6 +431,90 @@ test("hold arriving during HEAD preparation rejects the request in the fresh wri
   expect((await queued(state, f.io)).ok).toBe(false);
   expect(prechecks(state.events)).toEqual([]);
 });
+
+test("C-798 step fingerprints are fixed when the attempt leaves queued and never change", async () => {
+  const f = setup();
+  let s = apply(f.state, value(await queued(f.state, f.io)));
+  const initial = prechecks(s.events)[0]!;
+  const fingerprints = [
+    { name: "test", fingerprint: "1".repeat(64) },
+    { name: "lint", fingerprint: "2".repeat(64) },
+  ];
+  for (const invalid of [
+    [],
+    [{ name: "test", fingerprint: "TEST" }],
+    [{ name: "", fingerprint: "1".repeat(64) }],
+    [fingerprints[0], fingerprints[0]],
+    [{ ...fingerprints[0], extra: true }],
+    "1".repeat(64),
+  ])
+    expect(
+      recordPrecheck(
+        s,
+        system,
+        {
+          ...running(initial),
+          check_fingerprints: invalid as unknown as NonNullable<
+            Precheck["check_fingerprints"]
+          >,
+        },
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  const start = { ...running(initial), check_fingerprints: fingerprints };
+  s = apply(s, value(recordPrecheck(s, system, start, f.io)));
+  expect(prechecks(s.events)[0]?.check_fingerprints).toEqual(fingerprints);
+  const done: Precheck = {
+    ...start,
+    status: "passed",
+    checks: [
+      { name: "test", status: "passed", exit_code: 0 },
+      { name: "lint", status: "passed", exit_code: 0 },
+    ],
+    log_ref: `${start.attempt_id}.log`,
+  };
+  // A result cannot drop or rewrite what the running attempt recorded.
+  const { check_fingerprints: _dropped, ...unstamped } = done;
+  for (const result of [
+    unstamped,
+    {
+      ...done,
+      check_fingerprints: [
+        { name: "test", fingerprint: "3".repeat(64) },
+        { name: "lint", fingerprint: "2".repeat(64) },
+      ],
+    },
+  ])
+    expect(recordPrecheck(s, system, result, f.io)).toMatchObject({
+      ok: false,
+      error: { code: "stale_target" },
+    });
+  s = apply(s, value(recordPrecheck(s, system, done, f.io)));
+  expect(prechecks(s.events)[0]?.check_fingerprints).toEqual(fingerprints);
+  // Host-internal reuse evidence: not part of the public precheck view.
+  expect(precheckView(done)).not.toHaveProperty("check_fingerprints");
+});
+
+test("C-798 an attempt already running without fingerprints cannot gain them later", async () => {
+  const f = setup();
+  let s = apply(f.state, value(await queued(f.state, f.io)));
+  const start = running(prechecks(s.events)[0]!);
+  s = apply(s, value(recordPrecheck(s, system, start, f.io)));
+  expect(
+    recordPrecheck(
+      s,
+      system,
+      {
+        ...start,
+        status: "passed",
+        checks: [{ name: "test", status: "passed", exit_code: 0 }],
+        log_ref: `${start.attempt_id}.log`,
+        check_fingerprints: [{ name: "test", fingerprint: "1".repeat(64) }],
+      },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+});
 async function queuedAt(s: CommandState, at: string, io = ports()) {
   const receipt = await prepareCheck(s, actor(), params, {
     head: async () => at,

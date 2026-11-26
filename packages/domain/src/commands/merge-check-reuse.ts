@@ -6,6 +6,7 @@ import {
 } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId, DeliveryId } from "../ids.js";
+import { prechecks, validCheckFingerprints } from "../precheck.js";
 import {
   attempt,
   type CommandPorts,
@@ -28,8 +29,16 @@ export interface PrecheckReuseInput {
   /** New card-check attempt; its log only points at the precheck log. */
   readonly attempt_id: string;
   readonly precheck_attempt_id: string;
-  /** Card-tier check names the card check would otherwise run. */
-  readonly required_checks: readonly string[];
+  /**
+   * Card-tier checks the card check would otherwise run, each with the host
+   * fingerprint of its current configuration (C-798).
+   */
+  readonly required_checks: readonly RequiredCardCheck[];
+}
+/** C-798: a card-tier check name and its current configuration fingerprint. */
+export interface RequiredCardCheck {
+  readonly name: string;
+  readonly fingerprint: string;
 }
 
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -45,12 +54,15 @@ const NO_RESULT = new Set([
 export const PRECHECK_REUSE_SUMMARY =
   "沿用同一提交已通过的作者预检，未重复执行";
 
-function validRequired(required: readonly string[]) {
-  return (
-    Array.isArray(required) &&
-    required.length > 0 &&
-    required.every((name) => typeof name === "string" && name.trim() !== "") &&
-    new Set(required).size === required.length
+function validRequired(required: readonly RequiredCardCheck[]) {
+  return validCheckFingerprints(
+    Array.isArray(required)
+      ? required.map((c) =>
+          typeof c === "object" && c !== null
+            ? { name: c.name, fingerprint: c.fingerprint }
+            : c,
+        )
+      : required,
   );
 }
 
@@ -61,13 +73,18 @@ function validRequired(required: readonly string[]) {
  * - a card with exactly one producer and one planned Git delivery;
  * - a completion that has no card check result yet (a failed, timed-out or
  *   rechecked completion always runs a real check);
- * - a system precheck of that producer on exactly the delivered head, passed
- *   with every required card-tier check passed.
+ * - the latest precheck attempt of that producer on exactly the delivered
+ *   head (C-798): it must be a system-recorded `passed` with every required
+ *   card-tier check passed. A later failed, timed-out, interrupted, queued or
+ *   running attempt never lets an earlier pass count;
+ * - every required check ran with the configuration it has now (C-798): the
+ *   precheck's recorded fingerprint equals the current one. Prechecks recorded
+ *   without fingerprints are never reused.
  */
 export function reusablePrecheck(
   state: CommandState,
   card_id: CardId,
-  required_checks: readonly string[],
+  required_checks: readonly RequiredCardCheck[],
 ): { readonly plan: MergePlan; readonly precheck: Precheck } | undefined {
   if (
     !state.project_settings?.merge_gate_enabled ||
@@ -101,35 +118,49 @@ export function reusablePrecheck(
     },
   );
   if (checked) return undefined;
-  const precheck = eventsOfType(state.events, "precheck_finished")
-    .filter(
-      (e) =>
-        e.card_id === card_id &&
-        e.type === "precheck_finished" &&
-        e.actor.kind === "system" &&
-        e.actor.project_id === state.project_id,
+  // C-798: only the newest attempt on this head counts. The projection keeps
+  // attempts in the order they were first recorded, each at its latest state.
+  const latest = prechecks(state.events, card_id).findLast(
+    (p) =>
+      p.work_item_id === delivery.work_item_id && p.head_sha === delivery.sha,
+  );
+  if (latest?.status !== "passed") return undefined;
+  // That latest state is this project's system `precheck_finished` record.
+  const recorded = eventsOfType(state.events, "precheck_finished").some(
+    (e) =>
+      (e.payload as unknown) === latest &&
+      e.card_id === card_id &&
+      e.type === "precheck_finished" &&
+      e.actor.kind === "system" &&
+      e.actor.project_id === state.project_id,
+  );
+  const p = latest;
+  const fingerprints = p.check_fingerprints;
+  const precheck =
+    recorded &&
+    p.card_id === card_id &&
+    typeof p.attempt_id === "string" &&
+    ATTEMPT.test(p.attempt_id) &&
+    typeof p.candidate_sha === "string" &&
+    SHA.test(p.candidate_sha) &&
+    typeof p.tree_sha === "string" &&
+    SHA.test(p.tree_sha) &&
+    typeof p.base_sha === "string" &&
+    SHA.test(p.base_sha) &&
+    Array.isArray(p.checks) &&
+    p.checks.length > 0 &&
+    p.checks.every((c) => c.status === "passed" && c.exit_code === 0) &&
+    validCheckFingerprints(fingerprints) &&
+    required_checks.every(
+      (required) =>
+        p.checks?.some((c) => c.name === required.name) &&
+        fingerprints?.some(
+          (f) =>
+            f.name === required.name && f.fingerprint === required.fingerprint,
+        ),
     )
-    .sort((a, b) => b.seq - a.seq)
-    .map((e) => e.payload as unknown as Precheck)
-    .find(
-      (p) =>
-        p?.card_id === card_id &&
-        p.status === "passed" &&
-        p.head_sha === delivery.sha &&
-        p.work_item_id === delivery.work_item_id &&
-        typeof p.attempt_id === "string" &&
-        ATTEMPT.test(p.attempt_id) &&
-        typeof p.candidate_sha === "string" &&
-        SHA.test(p.candidate_sha) &&
-        typeof p.tree_sha === "string" &&
-        SHA.test(p.tree_sha) &&
-        typeof p.base_sha === "string" &&
-        SHA.test(p.base_sha) &&
-        Array.isArray(p.checks) &&
-        p.checks.length > 0 &&
-        p.checks.every((c) => c.status === "passed" && c.exit_code === 0) &&
-        required_checks.every((name) => p.checks?.some((c) => c.name === name)),
-    );
+      ? p
+      : undefined;
   return precheck ? { plan, precheck } : undefined;
 }
 

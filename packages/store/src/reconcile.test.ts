@@ -132,3 +132,35 @@ test("an unscanned exact path preserves only that directory and its observation 
   store.recordReconcileFindings(project, []);
   expect(store.listReconcileFindings(project, { openOnly: true })).toEqual([]);
 });
+
+test("C-791 a finding another loop owns is opened and resolved only by that loop", () => {
+  const cleanup = {
+    kind: "build_cleanup_rejected",
+    detail: "rejected: not empty",
+    assignment_id: "A-326",
+  };
+  const opened = store.openReconcileFinding(project, cleanup);
+  expect(opened).toMatchObject({ id: findingKey(cleanup), resolved_at: null });
+  // Seen again: updated, not announced again.
+  time += 60_000;
+  expect(
+    store.openReconcileFinding(project, { ...cleanup, detail: "3 in a row" }),
+  ).toBeUndefined();
+  // A reconcile pass without it resolves its own kinds only.
+  const except = { exceptKinds: ["build_cleanup_rejected"] };
+  store.recordReconcileFindings(project, [orphan], except);
+  store.recordReconcileFindings(project, [], except);
+  expect(store.listReconcileFindings(project, { openOnly: true })).toEqual([
+    expect.objectContaining({
+      kind: "build_cleanup_rejected",
+      detail: "3 in a row",
+      first_seen_at: "2030-01-01T00:00:00.000Z",
+    }),
+  ]);
+  const { detail: _detail, ...subject } = cleanup;
+  expect(store.resolveReconcileFinding(project, subject)).toBe(true);
+  expect(store.resolveReconcileFinding(project, subject)).toBe(false);
+  expect(store.listReconcileFindings(project, { openOnly: true })).toEqual([]);
+  // Reappearing later is announced again.
+  expect(store.openReconcileFinding(project, cleanup)).toBeDefined();
+});

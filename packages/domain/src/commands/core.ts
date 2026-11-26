@@ -46,6 +46,8 @@ export type CommandState = {
       readonly max_batch_size: number;
       readonly conflict_threshold?: number;
       readonly window_timeout_ms?: number;
+      /** C-803: how long one window may hold a card before it may join a batch. */
+      readonly window_hold_limit_ms?: number;
     };
     /** Push routes: merges into `base_branch` are pushed to `branch` of `target`. */
     readonly merge_push?: readonly {

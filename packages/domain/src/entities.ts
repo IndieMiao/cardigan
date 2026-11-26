@@ -331,12 +331,26 @@ export interface Precheck {
   readonly executor?: MergeCheckView["executor"];
   readonly external_run?: MergeCheckView["external_run"];
   readonly checks?: MergeCheckView["checks"];
+  /**
+   * C-798: host fingerprint (sha256 hex) of each configured check step as
+   * executed, fixed when the attempt starts running and immutable after. A
+   * card check reuses the precheck only while the fingerprints still match.
+   */
+  readonly check_fingerprints?: readonly PrecheckCheckFingerprint[];
   readonly summary?: string;
   readonly log_ref?: string;
   /** C-783: set only by request_check when a newer HEAD replaced this attempt. */
   readonly superseded_by?: string;
 }
-export type PrecheckView = Omit<Precheck, "branch" | "machine_id">;
+export interface PrecheckCheckFingerprint {
+  readonly name: string;
+  readonly fingerprint: string;
+}
+/** C-798: step fingerprints are host-internal reuse evidence, not shown. */
+export type PrecheckView = Omit<
+  Precheck,
+  "branch" | "machine_id" | "check_fingerprints"
+>;
 
 export interface CardDependencyRef {
   readonly id: CardId;
@@ -367,6 +381,11 @@ export interface MergeStage {
   /** C-677: files shared with the protecting card; empty while paths are unknown. */
   readonly protecting_files?: readonly string[];
   readonly protecting_card_held?: boolean;
+  /** C-803: the window closes then unless a new protected version renews it. */
+  readonly protecting_expires_at?: string;
+  /** C-803: recorded start of the hold and when the card may join a batch. */
+  readonly held_since?: string;
+  readonly release_at?: string;
   readonly card_check?: MergeCheckView;
   readonly batch_check?: MergeCheckView;
   readonly color?: number;

@@ -61,6 +61,7 @@ import {
   type CheckoutResult,
   CheckRecovery,
   type CheckRequest,
+  checkStepFingerprint,
   classifyExecutorFailure,
   computeChangeScope,
   createMergeCheckLog,
@@ -1105,9 +1106,14 @@ export class MergeChecks {
     if (task.batch || !task.settings.queue) return false;
     if (task.settings.queue.reusePrecheck === false) return false;
     const project = task.project.project_id;
+    // C-798: each card-tier step with the fingerprint of its configuration
+    // now; domain reuses only a precheck that ran the same configuration.
     const required = requestChecks(task.settings, undefined, "card")
       .filter((check) => check.skipReason !== "card_tier")
-      .map((check) => check.name);
+      .map((check) => ({
+        name: check.name,
+        fingerprint: checkStepFingerprint(check),
+      }));
     const reuse = reusablePrecheck(
       this.state(project),
       task.plan.card_id,

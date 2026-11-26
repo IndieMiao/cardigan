@@ -60,8 +60,10 @@ import {
   PROJECT_EVENT_STREAM,
 } from "./ids.js";
 import {
+  type AckCandidateQuery,
   acknowledgeNotifications,
   advanceRouterCursor,
+  listAckCandidates,
   listNotifications,
   type MoveNotificationInput,
   moveNotification,
@@ -84,9 +86,12 @@ import {
   projectsHoldingId,
 } from "./project-codes.js";
 import {
+  findingKey,
   listFindings,
+  openFinding,
   type ReconcileFindingInput,
   recordFindings,
+  resolveFinding,
 } from "./reconcile.js";
 import {
   clearRepositoryCache,
@@ -459,8 +464,12 @@ export class Store {
       options.commandState ??
       commandStateScope(process.env.CARDIGAN_COMMAND_STATE);
     // C-671: `slim` keeps closed cards' other event types dormant in memory.
+    // C-796: every scope but `full` keeps the GitHub dispatch records the
+    // journal no longer reads dormant (superseded and retired ones).
     if (store.#commandStateScope === "slim")
-      store.#commandEvents = new CommandEvents(SLIM_RESIDENT_EVENT_TYPES);
+      store.#commandEvents = new CommandEvents(SLIM_RESIDENT_EVENT_TYPES, true);
+    else if (store.#commandStateScope !== "full")
+      store.#commandEvents = new CommandEvents(undefined, true);
     try {
       // Opening/configuring the database can contend with another process too.
       db.exec("PRAGMA busy_timeout = 5000");
@@ -1550,6 +1559,11 @@ export class Store {
     return listNotifications(this.#db, query);
   }
 
+  /** C-788: rows an ACK pass may move; see `listAckCandidates`. */
+  listAckCandidates(query: AckCandidateQuery) {
+    return listAckCandidates(this.#db, query);
+  }
+
   /**
    * M4.5: stamp `standing_mode` on rows written before the field existed, using
    * their newest token once. Safe to call repeatedly and from startup.
@@ -1569,6 +1583,7 @@ export class Store {
     options: {
       readonly unscanned?: readonly string[];
       readonly unscannedPaths?: readonly string[];
+      readonly exceptKinds?: readonly string[];
     } = {},
   ) {
     return recordFindings(
@@ -1577,6 +1592,24 @@ export class Store {
       findings,
       this.#clock.now(),
       options,
+    );
+  }
+
+  /** C-791: open one finding outside a reconcile pass; its record if new. */
+  openReconcileFinding(project_id: ProjectId, finding: ReconcileFindingInput) {
+    return openFinding(this.#db, project_id, finding, this.#clock.now());
+  }
+
+  /** C-791: resolve the finding with this kind and subject, if open. */
+  resolveReconcileFinding(
+    project_id: ProjectId,
+    finding: Omit<ReconcileFindingInput, "detail">,
+  ) {
+    return resolveFinding(
+      this.#db,
+      project_id,
+      findingKey({ ...finding, detail: "" }),
+      this.#clock.now(),
     );
   }
 

@@ -9,7 +9,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { loadMergeGateConfig } from "./merge-gate-config.js";
+import {
+  checkStepFingerprint,
+  loadMergeGateConfig,
+} from "./merge-gate-config.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -364,8 +367,24 @@ test("C-391: queue is opt-in and has bounded, configurable batch and window defa
       maxBatchSize: 4,
       conflictThreshold: 2,
       windowTimeoutMs: 86_400_000,
+      windowHoldLimitMs: 7_200_000,
     },
   });
+});
+test("C-803: the window hold limit is configurable in minutes and rejects invalid values", async () => {
+  const f = await fixture({
+    projects: {
+      p: { ...valid, queue: { enabled: true, window_hold_minutes: 45 } },
+      q: { ...valid, queue: { enabled: true, window_hold_minutes: 0 } },
+      r: { ...valid, queue: { enabled: true, window_hold_minutes: "2h" } },
+    },
+  });
+  const config = await f.load();
+  expect(config.forProject("p")).toMatchObject({
+    queue: { windowHoldLimitMs: 45 * 60_000 },
+  });
+  for (const project of ["q", "r"])
+    expect(config.forProject(project).status).toBe("invalid");
 });
 test("C-781: precheck reuse defaults on, can be switched off, and rejects non-booleans", async () => {
   const f = await fixture({
@@ -376,6 +395,7 @@ test("C-781: precheck reuse defaults on, can be switched off, and rejects non-bo
     maxBatchSize: 4,
     conflictThreshold: 2,
     windowTimeoutMs: 86_400_000,
+    windowHoldLimitMs: 7_200_000,
   });
   await writeFile(
     f.file,
@@ -404,3 +424,27 @@ test.each([0, 9, 1.5, "4"])(
     expect((await f.load()).forProject("p").status).toBe("invalid");
   },
 );
+
+test("C-798 a check step fingerprint covers its name, command and timeout only", () => {
+  const base = checkStepFingerprint({ name: "test", run: "pnpm test" });
+  expect(base).toMatch(/^[a-f0-9]{64}$/u);
+  expect(checkStepFingerprint({ name: "test", run: "pnpm test" })).toBe(base);
+  for (const changed of [
+    { name: "test", run: "pnpm test --changed" },
+    { name: "test", run: "pnpm test " },
+    { name: "lint", run: "pnpm test" },
+    { name: "test", run: "pnpm test", timeoutMs: 60_000 },
+  ])
+    expect(checkStepFingerprint(changed)).not.toBe(base);
+  // Selection metadata is not what the step executes.
+  const selected = {
+    name: "test",
+    run: "pnpm test",
+    tiers: ["card" as const],
+    scope: "affected" as const,
+    skipDocsOnly: true,
+    skipReason: "docs_only" as const,
+    affectedPaths: ["packages/host"],
+  };
+  expect(checkStepFingerprint(selected)).toBe(base);
+});

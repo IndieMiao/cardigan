@@ -1,10 +1,18 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readFile, rename, unlink } from "node:fs/promises";
+import {
+  lstat,
+  open,
+  readFile,
+  realpath,
+  rename,
+  unlink,
+} from "node:fs/promises";
 import { connect } from "node:net";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import type { Store } from "@cardigan/store";
 import { parseDocument } from "yaml";
 import { operationSummary } from "./deployment.js";
@@ -19,6 +27,7 @@ import { acquireDeploymentCapacity } from "./deployment-capacity.js";
 import {
   DEFAULT_OPERATION_WAIT_TIMEOUT_MS,
   requireHostDirectory,
+  UnsafeHostDirectory,
 } from "./deployment-config.js";
 import {
   fenceLongOperations,
@@ -98,7 +107,9 @@ export async function loadSupervisorUpgradeConfig(
     source = await readHostFile(file);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw new Error("无法安全读取主机 supervisor-upgrade.yaml");
+    throw new Error("无法安全读取主机 supervisor-upgrade.yaml", {
+      cause: error,
+    });
   }
   try {
     const doc = parseDocument(source, { uniqueKeys: true, strict: true });
@@ -106,6 +117,16 @@ export async function loadSupervisorUpgradeConfig(
     return parseSupervisorUpgradeConfig(doc.toJS({ maxAliasCount: 0 }));
   } catch {
     throw new Error("无法安全读取主机 supervisor-upgrade.yaml");
+  }
+}
+
+/** C-772: which host-file rule refused the file; the verdict is unchanged. */
+class UnsafeHostFile extends Error {
+  constructor(
+    readonly reason: "not_file" | "owner" | "mode" | "too_large",
+    readonly mode: number,
+  ) {
+    super("Unsafe host file");
   }
 }
 
@@ -118,17 +139,175 @@ async function readHostFile(file: string, ownerOnly = true): Promise<string> {
   );
   try {
     const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      ![0, process.getuid?.()].includes(stat.uid) ||
-      stat.mode & (ownerOnly ? 0o077 : 0o022) ||
-      stat.size > MAX_LAUNCH_BYTES
-    )
-      throw new Error("Unsafe host file");
+    const reason = !stat.isFile()
+      ? "not_file"
+      : ![0, process.getuid?.()].includes(stat.uid)
+        ? "owner"
+        : stat.mode & (ownerOnly ? 0o077 : 0o022)
+          ? "mode"
+          : stat.size > MAX_LAUNCH_BYTES
+            ? "too_large"
+            : undefined;
+    if (reason) throw new UnsafeHostFile(reason, stat.mode & 0o7777);
     return await handle.readFile("utf8");
   } finally {
     await handle.close();
   }
+}
+
+const octal = (mode: number) => `0${(mode & 0o777).toString(8)}`;
+
+/**
+ * C-772: why a host file could not be read safely, and how to fix it. Never
+ * names host paths or file content, so it can go into events and Needs You;
+ * `path` (the unsafe ancestor directory) is only for the local self-check.
+ */
+function hostFileProblem(
+  error: unknown,
+  subject: string,
+  ownerOnly: boolean,
+): { readonly reason: string; readonly path?: string } {
+  const owner = "运行监督器的用户或 root";
+  if (error instanceof UnsafeHostDirectory) {
+    const where = `${subject}所在目录或其上级目录`;
+    const reason = {
+      symlink: `${where}是符号链接，不会跟随：请改写为不经过符号链接的真实路径`,
+      not_directory: `${where}不是目录：请核对路径`,
+      owner: `${where}的属主不是${owner}：请改为由${owner}所有`,
+      writable: `${where}组或其他人可写（权限 ${octal(error.mode)}）：请执行 chmod go-w 去掉写权限，或移到只有本用户可写的目录`,
+    }[error.reason];
+    return { reason, path: error.path };
+  }
+  if (error instanceof UnsafeHostFile)
+    return {
+      reason: {
+        not_file: `${subject}不是普通文件：请指向一个普通文件`,
+        owner: `${subject}的属主不是${owner}：请用 chown 改为由${owner}所有`,
+        mode: ownerOnly
+          ? `${subject}组或其他人有权限（权限 ${octal(error.mode)}）：请执行 chmod 600`
+          : `${subject}组或其他人可写（权限 ${octal(error.mode)}）：请执行 chmod go-w 去掉组和其他人的写权限`,
+        too_large: `${subject}超过 ${MAX_LAUNCH_BYTES / 1024} KiB：请指向 systemd 单元或包装脚本这类小文件`,
+      }[error.reason],
+    };
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === "ENOENT") return { reason: `${subject}不存在：请核对路径` };
+  if (code === "ENOTDIR")
+    return { reason: `${subject}的上级路径不是目录：请核对路径` };
+  if (code === "ELOOP" || code === "EMLINK")
+    return {
+      reason: `${subject}是符号链接，不会跟随读取：请直接写链接指向的真实文件路径`,
+    };
+  if (code === "EACCES" || code === "EPERM")
+    return { reason: `运行监督器的用户无权读取${subject}：请给该用户读权限` };
+  return { reason: `${subject}无法安全读取：请核对文件和所在目录` };
+}
+
+/** The checkout this code runs from: the supervisor the driver upgrades. */
+export async function supervisorCheckoutRoot() {
+  return realpath(fileURLToPath(new URL("../../../", import.meta.url)));
+}
+
+export type LaunchFileCheck =
+  | { readonly ok: true; readonly text: string; readonly mode: number }
+  | { readonly ok: false; readonly reason: string; readonly path?: string };
+
+/**
+ * The launch file as the upgrade reads it: a safe host file (group and others
+ * may read it) that names the running checkout `root` as a whole path
+ * component. C-772: the self-check runs exactly this, never a looser copy.
+ */
+export async function inspectLaunchFile(
+  file: string,
+  root: string,
+): Promise<LaunchFileCheck> {
+  let text: string;
+  let mode: number;
+  try {
+    mode = (await lstat(file)).mode;
+    text = await readHostFile(file, false);
+  } catch (error) {
+    return {
+      ok: false,
+      ...hostFileProblem(error, "启动配置（launch_file）", false),
+    };
+  }
+  if (!text.match(rootPattern(root))?.length)
+    return {
+      ok: false,
+      reason: `启动配置没有引用当前监督器目录 ${basename(root)}：launch_file 要指向实际决定启动哪个版本、含该目录完整路径的文件（例如包装脚本里的 RELEASE=），不一定是 systemd 单元`,
+    };
+  return { ok: true, text, mode };
+}
+
+/** New releases are prepared next to the running checkout. */
+async function inspectReleaseParent(root: string) {
+  try {
+    await requireHostDirectory(dirname(root));
+    return undefined;
+  } catch (error) {
+    return hostFileProblem(error, "监督器目录", false);
+  }
+}
+
+export interface SupervisorUpgradeSelfCheck {
+  readonly ok: boolean;
+  readonly config?: SupervisorUpgradeConfig;
+  readonly problems: readonly {
+    readonly reason: string;
+    readonly path?: string;
+  }[];
+}
+
+/**
+ * C-772: read-only check before enabling the upgrade. Reads the switch file
+ * and runs the release-directory and launch-file checks of a real attempt
+ * against `root`; it writes nothing, restarts nothing and opens no store.
+ */
+export async function checkSupervisorUpgrade(
+  configDir: string,
+  root: string,
+): Promise<SupervisorUpgradeSelfCheck> {
+  let config: SupervisorUpgradeConfig | undefined;
+  try {
+    config = await loadSupervisorUpgradeConfig(configDir);
+  } catch (error) {
+    const cause = (error as Error).cause;
+    return {
+      ok: false,
+      problems: [
+        cause === undefined
+          ? {
+              reason: `${SUPERVISOR_UPGRADE_FILE} 不是合法 YAML 或字段无效：请核对 enabled、unit、launch_file（绝对路径）与 health_timeout_ms（10000 到 600000）`,
+            }
+          : hostFileProblem(cause, SUPERVISOR_UPGRADE_FILE, true),
+      ],
+    };
+  }
+  if (!config)
+    return {
+      ok: false,
+      problems: [
+        {
+          reason: `${SUPERVISOR_UPGRADE_FILE} 不存在或 enabled 不是 true：自动升级保持关闭，请先写好开关文件再自检`,
+        },
+      ],
+    };
+  const problems = [
+    await inspectReleaseParent(root),
+    await inspectLaunchFile(config.launch_file, root).then((check) =>
+      check.ok ? undefined : check,
+    ),
+  ].flatMap((problem) =>
+    problem
+      ? [
+          {
+            reason: problem.reason,
+            ...(problem.path ? { path: problem.path } : {}),
+          },
+        ]
+      : [],
+  );
+  return { ok: !problems.length, config, problems };
 }
 
 /** Atomic replace in the same directory, keeping the original mode. */
@@ -1074,7 +1253,8 @@ export class SupervisorUpgrader {
           return this.fail(target, "无法核对目标目录");
       }
       try {
-        await requireHostDirectory(dirname(this.host.root));
+        const parent = await inspectReleaseParent(this.host.root);
+        if (parent) throw new UpgradeRejected(parent.reason);
         const built = await this.host.checkout(pending.to, release);
         if (!built.ok)
           return this.fail(target, `新版本构建未通过：${built.log_tail}`);
@@ -1084,9 +1264,7 @@ export class SupervisorUpgrader {
       } catch (error) {
         return this.fail(
           target,
-          error instanceof LaunchFileRejected
-            ? error.message
-            : "新版本准备未完成",
+          error instanceof UpgradeRejected ? error.message : "新版本准备未完成",
         );
       }
       this.prepared = target;
@@ -1123,18 +1301,12 @@ export class SupervisorUpgrader {
 
   /** The current launch file, proven to name the running checkout. */
   private async launchText() {
-    let text: string;
-    let mode: number;
-    try {
-      const stat = await lstat(this.config.launch_file);
-      mode = stat.mode;
-      text = await readHostFile(this.config.launch_file, false);
-    } catch {
-      throw new LaunchFileRejected("启动配置无法安全读取");
-    }
-    if (!text.match(rootPattern(this.host.root))?.length)
-      throw new LaunchFileRejected("启动配置没有引用当前监督器目录");
-    return { text, mode };
+    const check = await inspectLaunchFile(
+      this.config.launch_file,
+      this.host.root,
+    );
+    if (!check.ok) throw new UpgradeRejected(check.reason);
+    return { text: check.text, mode: check.mode };
   }
 
   private async restart(
@@ -1163,9 +1335,7 @@ export class SupervisorUpgrader {
       releaseHold();
       return this.fail(
         target,
-        error instanceof LaunchFileRejected
-          ? error.message
-          : "启动配置备份未完成",
+        error instanceof UpgradeRejected ? error.message : "启动配置备份未完成",
       );
     }
     const owner = executionOwner(process.pid);
@@ -1250,7 +1420,7 @@ export class SupervisorUpgrader {
   }
 }
 
-class LaunchFileRejected extends Error {}
+class UpgradeRejected extends Error {}
 
 /** Production ports of the restart helper. */
 export function nodeRestartPorts(options: {

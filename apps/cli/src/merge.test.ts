@@ -40,6 +40,7 @@ import {
   recordMergeCheckBlockers,
   recordMergePreparation,
   requestHumanAction,
+  setMergeWindow,
   submitDelivery,
   submitReview,
   updateCard,
@@ -421,6 +422,66 @@ test("C-112: merge status names the human action that holds the merge", async ()
   );
   expect(result.out).toContain(
     `无法生成合并计划 ${card_id}：合并被待执行的人工事项 ${blocking.id} 挡住（illegal_transition）`,
+  );
+});
+
+test("C-803: merge status names the merge window that holds the card, its files and expiry", async () => {
+  await seatAwaitingMerge();
+  writeFileSync(
+    join(dataDir, "merge-gate.yaml"),
+    JSON.stringify({
+      projects: {
+        [project]: {
+          checks: [{ name: "test", run: "true" }],
+          queue: { enabled: true, window_timeout_minutes: 60 },
+        },
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const other = apply(
+    (s, a, p) =>
+      createCard(
+        s,
+        a,
+        {
+          title: "Protected card",
+          goal: "Ship",
+          acceptance_criteria: ["merged"],
+          source: { kind: "quote", text: "fixture" },
+          repo: "example/repo",
+          base_branch: "main",
+        },
+        {
+          ...p,
+          templates: [{ ...developmentCardTemplate, merge: "confirm" }],
+        },
+      ),
+    human,
+  );
+  expect((await cardigan("merge", "status", card_id)).out).not.toContain(
+    "合并窗口",
+  );
+  apply((s, a, p) =>
+    setMergeWindow(
+      s,
+      a,
+      { card_id: other.id, open: true, reason: "重复合并冲突" },
+      p,
+    ),
+  );
+  const expires = new Date(Date.parse(NOW) + 3_600_000).toLocaleString(
+    "zh-CN",
+    {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    },
+  );
+  expect((await cardigan("merge", "status", card_id)).out).toContain(
+    `  合并窗口：被 MER-${other.id} 的合并窗口挡住；文件：未知；窗口 ${expires} 到期`,
   );
 });
 

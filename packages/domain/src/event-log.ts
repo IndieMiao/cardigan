@@ -1,3 +1,9 @@
+import {
+  DISPATCH_RECORD_TYPES,
+  type DispatchHead,
+  dispatchHead,
+  SKIP_ENTRY,
+} from "./dispatch-records.js";
 import type { Event } from "./entities.js";
 import { isTelemetryEvent } from "./telemetry.js";
 
@@ -81,6 +87,8 @@ export class DormantEvent {
     readonly card_id: string | undefined,
     /** Payload index keys, in `append` order, so another log can re-index it. */
     readonly keys: readonly (readonly [EventIndexKind, unknown])[] | undefined,
+    /** C-796: a dispatch record's head (attempt, run id, candidate ref). */
+    readonly dispatch?: DispatchHead,
   ) {}
 }
 /**
@@ -94,6 +102,19 @@ const share = (value: string) => {
   shared.set(value, value);
   return value;
 };
+/** C-796: a dispatch head whose strings are shared across one attempt's records. */
+function sharedHead(event: Event): DispatchHead {
+  const head = dispatchHead(event);
+  const text = (value: unknown) =>
+    typeof value === "string" ? share(value) : value;
+  return {
+    system: head.system,
+    attempt: text(head.attempt),
+    ...(head.run_id === undefined ? {} : { run_id: share(head.run_id) }),
+    finished: head.finished,
+    ...("repo" in head ? { repo: text(head.repo), ref: text(head.ref) } : {}),
+  };
+}
 type Entry = Event | DormantEvent;
 /** What history filters and stream lookups read: decoded or dormant alike. */
 type Head = {
@@ -112,6 +133,9 @@ export type DormantLoader = (
 ) => readonly Event[];
 
 type Seg = { readonly events: Entry[]; readonly ords: number[] };
+/** C-796: a `newestOfType` key function (`SKIP_ENTRY` to leave an entry out). */
+export type NewestKey = (entry: Event | DormantEvent) => unknown;
+type Newest = ReadonlyMap<unknown, readonly [EventLog, number]>;
 /**
  * Per-stream ordinals of one index key (events resolve through `EventLog.at`);
  * `total` counts every entry appended.
@@ -321,6 +345,7 @@ export class EventLog {
         share(event.type),
         event.card_id === undefined ? undefined : share(event.card_id),
         keys.length ? keys : undefined,
+        DISPATCH_RECORD_TYPES.has(event.type) ? sharedHead(event) : undefined,
       ),
     );
   }
@@ -529,6 +554,10 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
     | { order: readonly string[]; filter: string; index: ViewIndex }
     | undefined;
   #subsets: Map<string, ReadonlyMap<string, readonly Event[]>> | undefined;
+  /** C-796: newest-per-key projections, per type and key function. */
+  #newest:
+    | Map<string, WeakMap<NewestKey, ReadonlyMap<string, Newest>>>
+    | undefined;
   constructor(
     readonly base: EventLog,
     readonly baseEnd: number,
@@ -952,6 +981,142 @@ export class EventLogView implements ReadonlyMap<string, readonly Event[]> {
     const extra = this.overlay?.ids.get(id);
     if (extra !== undefined && extra < this.end) return this.overlay?.at(extra);
     return undefined;
+  }
+
+  /**
+   * C-796: per stream, the newest entry of `type` per key, keys in first-seen
+   * order: what `Map.set(keyOf(e), e)` over the stream's events of `type`
+   * leaves. `keyOf` sees decoded events and dormant stand-ins alike (a dormant
+   * dispatch record carries its `DispatchHead`) and returns `SKIP_ENTRY` for
+   * an entry that takes no part, which then hides no older one. Only newest
+   * entries are ever decoded: a dormant one when `want(stream, entry)`
+   * accepts it (in place, like any C-671 read); refused ones are left out of
+   * the answer and stay dormant. `stream` limits the answer to one stream.
+   */
+  newestOfType(
+    type: string,
+    keyOf: NewestKey,
+    want: (stream: string, entry: DormantEvent) => boolean,
+    stream?: string,
+  ): ReadonlyMap<string, readonly Event[]> {
+    const projection =
+      stream === undefined
+        ? this.#newestProjection(type, keyOf)
+        : this.#newestOf(type, keyOf, [stream]);
+    const out = new Map<string, readonly Event[]>();
+    const streams =
+      stream === undefined
+        ? projection.keys()
+        : projection.has(stream)
+          ? [stream]
+          : [];
+    for (const key of streams) {
+      const newest = projection.get(key) as Newest;
+      const chosen: (readonly [EventLog, number])[] = [];
+      const wake = new Map<EventLog, number[]>();
+      for (const at of newest.values()) {
+        const [log, ord] = at;
+        const entry = log.entryAt(ord);
+        if (entry instanceof DormantEvent) {
+          if (!want(key, entry)) continue;
+          const ords = wake.get(log);
+          if (ords) ords.push(ord);
+          else wake.set(log, [ord]);
+        }
+        chosen.push(at);
+      }
+      for (const [log, ords] of wake)
+        log.resolve(
+          key,
+          ords.sort((a, b) => a - b),
+        );
+      if (chosen.length)
+        out.set(
+          key,
+          chosen.map(([log, ord]) => log.entryAt(ord) as Event),
+        );
+    }
+    return out;
+  }
+
+  /**
+   * C-796: streams holding an entry of `type` that `test` accepts, decoded
+   * or dormant alike, without decoding any.
+   */
+  streamsWhere(
+    type: string,
+    test: (entry: Event | DormantEvent) => boolean,
+  ): Set<string> {
+    const found = new Set<string>();
+    for (const [log, limit] of [
+      [this.base, this.baseEnd],
+      [this.overlay, this.end],
+    ] as const) {
+      const bucket = log?.buckets.get("type")?.get(type);
+      if (!log || !bucket) continue;
+      for (const [stream, ords] of bucket) {
+        if (found.has(stream)) continue;
+        const n = below(ords, limit);
+        for (let i = 0; i < n; i++)
+          if (test(log.entryAt(ords[i] as number) as Entry)) {
+            found.add(stream);
+            break;
+          }
+      }
+    }
+    return found;
+  }
+
+  #newestProjection(type: string, keyOf: NewestKey) {
+    this.#newest ??= new Map();
+    let byKey = this.#newest.get(type);
+    if (!byKey) {
+      byKey = new WeakMap();
+      this.#newest.set(type, byKey);
+    }
+    let projection = byKey.get(keyOf);
+    if (!projection) {
+      projection = this.#newestOf(type, keyOf);
+      byKey.set(keyOf, projection);
+    }
+    return projection;
+  }
+
+  /** Newest entry per key of each stream (all, or `only`), none decoded. */
+  #newestOf(
+    type: string,
+    keyOf: NewestKey,
+    only?: readonly string[],
+  ): ReadonlyMap<string, Newest> {
+    const out = new Map<string, Map<unknown, readonly [EventLog, number]>>();
+    for (const [log, limit] of [
+      [this.base, this.baseEnd],
+      [this.overlay, this.end],
+    ] as const) {
+      const bucket = log?.buckets.get("type")?.get(type);
+      if (!log || !bucket) continue;
+      const take = (stream: string, ords: readonly number[]) => {
+        const n = below(ords, limit);
+        if (!n) return;
+        let newest = out.get(stream);
+        if (!newest) {
+          newest = new Map();
+          out.set(stream, newest);
+        }
+        for (let i = 0; i < n; i++) {
+          const ord = ords[i] as number;
+          const key = keyOf(log.entryAt(ord) as Entry);
+          if (key !== SKIP_ENTRY) newest.set(key, [log, ord]);
+        }
+      };
+      if (only)
+        for (const stream of only) {
+          const ords = bucket.get(stream);
+          if (ords) take(stream, ords);
+        }
+      else for (const [stream, ords] of bucket) take(stream, ords);
+    }
+    return out;
   }
 
   /** C-671: `eventWithId` without decoding a dormant entry. */

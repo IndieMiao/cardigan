@@ -124,6 +124,39 @@ export async function workerGitCommand(
   }
 }
 
+/**
+ * C-791: why a release helper refused a request (its `worker_git_reason=`
+ * stderr line). `busy` and `remove_failed` may pass on a later round; the
+ * others are a directory only a person can repair. An older helper sends no
+ * reason, which callers treat like a retryable refusal.
+ */
+export const workerGitRejectionReasons = [
+  "busy",
+  "remove_failed",
+  "not_empty",
+  "permission",
+  "unsafe_directory",
+] as const;
+export type WorkerGitRejection = (typeof workerGitRejectionReasons)[number];
+const humanRejections: ReadonlySet<WorkerGitRejection> = new Set([
+  "not_empty",
+  "permission",
+  "unsafe_directory",
+]);
+export const workerGitRejectionNeedsHuman = (reason: WorkerGitRejection) =>
+  humanRejections.has(reason);
+const REJECTION = new RegExp(
+  `helper rejected request: (${workerGitRejectionReasons.join("|")})[;)]`,
+  "u",
+);
+/** C-791: the helper's reason carried by a `workerGitFailure` error, if any. */
+export function workerGitRejection(
+  error: unknown,
+): WorkerGitRejection | undefined {
+  const message = error instanceof Error ? error.message : "";
+  return REJECTION.exec(message)?.[1] as WorkerGitRejection | undefined;
+}
+
 /** Project both direct SSH exits and stderr forwarded by host Git to fixed labels. */
 export function workerGitFailure(
   operation: WorkerGitOperation,
@@ -153,8 +186,18 @@ export function workerGitFailure(
     if (
       (code === 75 || pack) &&
       /(?:^|\n)worker_git_rejected(?:\r?\n|$)/u.test(stderr)
-    )
-      return ["helper rejected request", true];
+    ) {
+      // Only a known fixed label is echoed, never other helper output.
+      const reason = /(?:^|\n)worker_git_reason=([a-z_]+)(?:\r?\n|$)/u.exec(
+        stderr,
+      )?.[1];
+      return [
+        (workerGitRejectionReasons as readonly string[]).includes(reason ?? "")
+          ? `helper rejected request: ${reason}`
+          : "helper rejected request",
+        true,
+      ];
+    }
     if (code === 255 || pack) {
       if (/connection timed out|operation timed out/iu.test(stderr))
         return ["SSH connection timed out", true];

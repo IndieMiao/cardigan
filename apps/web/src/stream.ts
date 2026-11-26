@@ -57,11 +57,16 @@ export function subscribeProject(
   };
   function connect(retry: boolean) {
     if (stopped) return;
-    // Revisions changed while away are not covered by `ready()` for context
-    // and capacity, so a reconnect still reports a revision it had not seen.
+    // Context revisions changed while away are not covered by `ready()`, so
+    // a reconnect still reports a context revision it had not seen.
     const resumed = retry;
     // The queue's opening revision is always covered by the re-read on open.
     let queueOpened = false;
+    // C-802: so is the capacity's. The server sends it with the headers on
+    // every connection, and the views that show capacity re-read on
+    // `ready()` as well, so reporting it again read capacity twice per
+    // reconnect.
+    let capacityOpened = false;
     const url = `/api/projects/${encodeURIComponent(project)}/stream`;
     callbacks.status("connecting");
     let connection: EventConnection;
@@ -139,8 +144,9 @@ export function subscribeProject(
       if (typeof revision !== "string") return;
       const known = capacityRevision;
       capacityRevision = revision;
-      if (known !== revision && (known !== undefined || resumed))
-        callbacks.capacity?.();
+      const opening = !capacityOpened;
+      capacityOpened = true;
+      if (known !== revision && !opening) callbacks.capacity?.();
     });
     connection.addEventListener("change", (event) => {
       if (!current()) return;

@@ -1685,6 +1685,7 @@ export class HerdrRuntime implements Runtime {
 
 export {
   type WorkerGitOperation,
+  type WorkerGitRejection,
   type WorkerGitRequest,
   type WorkerUsageKind,
   type WorkerUsageReport,
@@ -1692,4 +1693,7 @@ export {
   workerGitCommand,
   workerGitFailure,
   workerGitPack,
+  workerGitRejection,
+  workerGitRejectionNeedsHuman,
+  workerGitRejectionReasons,
 } from "./worker-git.js";

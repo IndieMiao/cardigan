@@ -25,6 +25,7 @@ import {
   NodeDeploymentDriver,
   RunCapacityDeferred,
   recordDefault,
+  supervisorCheckoutRoot,
 } from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
@@ -78,6 +79,69 @@ test("invalid supervisor configuration creates one visible safe human notice wit
     expect(io.spawnInherit).not.toHaveBeenCalled();
   } finally {
     store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("C-772: check-upgrade is a host-only, read-only self-check of this checkout's launch file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cg-check-upgrade-"));
+  const dataDir = join(root, "data");
+  const out: string[] = [];
+  const io: CliIo = {
+    env: { CARDIGAN_DATA_DIR: dataDir, CARDIGAN_CONFIG_DIR: root },
+    cwd: root,
+    platform: "linux",
+    stdout: (line: string) => out.push(line),
+    stderr: vi.fn(),
+    signals: new EventEmitter(),
+    spawnInherit: vi.fn(),
+    captureCommand: vi.fn(),
+  };
+  try {
+    await expect(
+      runSelfDeployCommand(["check-upgrade"], {
+        ...io,
+        env: { ...io.env, CARDIGAN_TOKEN: "synthetic" },
+      }),
+    ).rejects.toThrow("Agent 不可调用");
+    const checkout = await supervisorCheckoutRoot();
+    const launch = join(root, "cardigan-selfdeploy.service");
+    await writeFile(
+      join(root, "supervisor-upgrade.yaml"),
+      `enabled: true\nunit: cardigan-selfdeploy.service\nlaunch_file: ${launch}\n`,
+      { mode: 0o600 },
+    );
+    const run = async () => {
+      out.length = 0;
+      const code = await runSelfDeployCommand(["check-upgrade"], io);
+      return { code, text: out.join("\n") };
+    };
+    // C-767#73: the systemd unit is 0664, and it names a wrapper script
+    // instead of the release directory.
+    const unit =
+      "[Service]\nExecStart=/home/x/cardigan-selfdeploy/selfdeploy-watch.sh\n";
+    await writeFile(launch, unit, { mode: 0o600 });
+    await chmod(launch, 0o664);
+    let result = await run();
+    expect(result.code).toBe(1);
+    expect(result.text).toContain(`当前监督器目录：${checkout}`);
+    expect(result.text).toContain("组或其他人可写（权限 0664）");
+    expect(result.text).toContain("自检未通过");
+    await chmod(launch, 0o644);
+    result = await run();
+    expect(result.code).toBe(1);
+    expect(result.text).toContain("没有引用当前监督器目录");
+    expect(result.text).toContain("RELEASE=");
+    expect(await readFile(launch, "utf8")).toBe(unit);
+    // Pointing at the file that names this checkout passes the launch check.
+    await writeFile(launch, `RELEASE=${checkout}\n`);
+    result = await run();
+    expect(result.text).not.toContain("启动配置");
+    // Nothing was opened, written or launched.
+    await expect(readdir(dataDir)).rejects.toThrow();
+    expect(io.spawnInherit).not.toHaveBeenCalled();
+    expect(io.captureCommand).not.toHaveBeenCalled();
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

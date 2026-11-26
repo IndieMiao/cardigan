@@ -13,6 +13,10 @@ import {
 import { DEFAULT_CHECK_CLEANUP_GRACE_MS } from "@cardigan/git-service";
 import { resolveAttachmentInlineBytes } from "@cardigan/mcp-server";
 import {
+  BUILD_RETRY_BASE_MS,
+  BUILD_RETRY_MAX_MS,
+} from "./build-cleanup-retry.js";
+import {
   DEFAULT_CENTRAL_CRUFT_INTERVAL_MS,
   DEFAULT_CENTRAL_MAINTENANCE_INTERVAL_MS,
   DEFAULT_CENTRAL_MAINTENANCE_WINDOW,
@@ -64,6 +68,9 @@ export interface ServerConfig {
   readonly storySummaryHandoffMs?: number;
   readonly mergeBlockedReminderMs?: number;
   readonly cleanupIntervalMs?: number;
+  /** C-791: first wait and cap of a failed build removal's backoff. */
+  readonly buildRetryBaseMs?: number;
+  readonly buildRetryMaxMs?: number;
   readonly reconcileIntervalMs?: number;
   readonly checkCleanupGraceMs?: number;
   /** Q-618: five minutes by default, configurable in trusted host environment. */
@@ -134,6 +141,8 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_STORY_SUMMARY_HANDOFF_MS?: string | undefined;
   readonly CARDIGAN_MERGE_BLOCKED_REMINDER_MS?: string | undefined;
   readonly CARDIGAN_CLEANUP_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_BUILD_RETRY_BASE_MS?: string | undefined;
+  readonly CARDIGAN_BUILD_RETRY_MAX_MS?: string | undefined;
   readonly CARDIGAN_RECONCILE_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_CHECK_CLEANUP_GRACE_MS?: string | undefined;
   readonly CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS?: string | undefined;
@@ -383,6 +392,16 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       env.CARDIGAN_CLEANUP_INTERVAL_MS,
       "CARDIGAN_CLEANUP_INTERVAL_MS",
       DEFAULT_INTERVALS.cleanup,
+    ),
+    buildRetryBaseMs: interval(
+      env.CARDIGAN_BUILD_RETRY_BASE_MS,
+      "CARDIGAN_BUILD_RETRY_BASE_MS",
+      BUILD_RETRY_BASE_MS,
+    ),
+    buildRetryMaxMs: interval(
+      env.CARDIGAN_BUILD_RETRY_MAX_MS,
+      "CARDIGAN_BUILD_RETRY_MAX_MS",
+      BUILD_RETRY_MAX_MS,
     ),
     reconcileIntervalMs: interval(
       env.CARDIGAN_RECONCILE_INTERVAL_MS,

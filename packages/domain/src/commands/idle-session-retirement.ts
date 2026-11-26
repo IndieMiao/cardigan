@@ -889,6 +889,11 @@ function handoff(d: CommandDraft, a: Assignment) {
       ...(p.evidence?.owner_reason
         ? { owner_reason: p.evidence.owner_reason }
         : {}),
+      // C-804: which idle-owner precondition failed, and the launch's enrollment.
+      ...(p.evidence?.precondition
+        ? { precondition: p.evidence.precondition }
+        : {}),
+      ...(p.evidence?.enrollment ? { enrollment: p.evidence.enrollment } : {}),
     },
   );
   return next;
@@ -1025,6 +1030,10 @@ function retirementFacts(evidence: RetirementEvidence) {
     evidence.hc_kind,
     evidence.runtime_code,
     evidence.owner_reason,
+    evidence.precondition,
+    evidence.enrollment === undefined
+      ? undefined
+      : `enrollment=${evidence.enrollment}`,
     evidence.exit_code === undefined ? undefined : `exit=${evidence.exit_code}`,
     evidence.observation,
   ]

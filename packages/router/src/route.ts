@@ -3139,6 +3139,20 @@ export function routeEvent(input: RouteInput): RouteResult {
           `${subject(input)} 已暂停，系统已关闭它的合并窗口；解除暂停后再冲突时按原规则重开。`,
         );
       break;
+    case "merge_queue_hold_released": {
+      // C-803: a card waited past the limit; PM Ops may close the window early.
+      const window = payloadString(input.event.payload, "window_card_id");
+      if (input.event.actor.kind === "system" && window)
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "card",
+          "6.4/merge window hold released",
+          `${subject(input)} 被 ${window} 的合并窗口挡过等待上限，已可进入批次；如需提前关窗口，用 set_merge_window 关闭 ${window} 的窗口（人可用 cardigan merge window ${window} off）`,
+        );
+      break;
+    }
     case PRE_MERGE_CHECK_REMINDED:
       routePreMergeCheckReminder(input, draft);
       break;

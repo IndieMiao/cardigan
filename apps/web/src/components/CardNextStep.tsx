@@ -33,6 +33,7 @@ import {
   DetailNextStep,
   DetailNextStepLine,
 } from "./layout/CardDetailLayout.js";
+import { mergeStageLabel } from "./MergeBatch.js";
 import { Button } from "./ui/button.js";
 
 /** Where a panel action leads when the action itself still lives elsewhere. */
@@ -438,9 +439,18 @@ export function CardNextStep({
       });
     }
     case "merge-confirmed": {
+      // C-803: a merge window keeps the confirmed card out of the batch queue.
+      const held =
+        card.merge_stage?.stage === "held_by_window"
+          ? card.merge_stage
+          : undefined;
       const step = (
         <>
-          {failedCheck(current.q) ? "合并检查未通过" : "已确认合并"}
+          {failedCheck(current.q)
+            ? "合并检查未通过"
+            : held
+              ? mergeStageLabel(held)
+              : "已确认合并"}
           <IdBadge id={current.q.id} />
         </>
       );
