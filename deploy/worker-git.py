@@ -2,6 +2,7 @@
 """Project-account Git entry. Pack stdin/stdout remain binary streams."""
 import ctypes
 import array
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -28,6 +29,22 @@ DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 def require(ok):
     if not ok:
         raise ValueError('worker_git_rejected')
+
+
+class Rejected(ValueError):
+    """C-791: a refusal whose cause the controller may act on. Only the fixed
+    label leaves the worker, never a path, errno text or traceback."""
+    def __init__(self, reason):
+        super().__init__('worker_git_rejected')
+        self.reason = reason
+
+
+def rejection(error):
+    if isinstance(error, Rejected):
+        return error.reason
+    if isinstance(error, BlockingIOError):
+        return 'busy'  # The project's Git lock stayed held past the budget.
+    return None
 
 
 def private(fd):
@@ -269,6 +286,8 @@ class Workspace:
                 fd = self.directory(path)
             except FileNotFoundError:
                 return False
+            except (ValueError, OSError) as error:
+                raise Rejected('unsafe_directory') from error  # C-791: e.g. a 0775 leaf
             try:
                 if path == self.repo:
                     try:
@@ -293,8 +312,19 @@ class Workspace:
                 fd = self.directory(path)
             except FileNotFoundError:
                 return None
+            except (ValueError, OSError) as error:
+                # Not a private 0700 directory of this account (mode, owner,
+                # ACL or a symlink): never repaired from here.
+                raise Rejected('unsafe_directory') from error
             os.close(fd)
-            os.rmdir(path)
+            try:
+                os.rmdir(path)
+            except OSError as error:
+                # Leftover contents are never recursed into; only a person
+                # can judge them. Other errors may pass on a later round.
+                raise Rejected('not_empty' if error.errno in (errno.ENOTEMPTY, errno.EEXIST)
+                               else 'permission' if error.errno in (errno.EACCES, errno.EPERM)
+                               else 'remove_failed') from error
             return None
         raise ValueError('unsupported_operation')
 
@@ -656,9 +686,18 @@ def main():
         os.close(workspace.anchor)
 
 
+def refuse(error):
+    print('worker_git_rejected', file=sys.stderr)
+    # C-791: an extra line, so a controller that only knows the first still
+    # recognises the refusal; same exit status as before.
+    reason = rejection(error)
+    if reason:
+        print('worker_git_reason=' + reason, file=sys.stderr)
+    sys.exit(75)
+
+
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
-        print('worker_git_rejected', file=sys.stderr)
-        sys.exit(75)
+    except Exception as error:
+        refuse(error)

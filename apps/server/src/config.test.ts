@@ -1,6 +1,10 @@
 import { DEFAULT_CHECK_CLEANUP_GRACE_MS } from "@cardigan/git-service";
 import { expect, test } from "vitest";
 import {
+  BUILD_RETRY_BASE_MS,
+  BUILD_RETRY_MAX_MS,
+} from "./build-cleanup-retry.js";
+import {
   DEFAULT_INTERVALS,
   DEFAULT_MCP_HOST,
   DEFAULT_MCP_PORT,
@@ -40,6 +44,8 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     mergeWatchdogMs: 300_000,
     recoveryInspectionIntervalMs: 300_000,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
+    buildRetryBaseMs: BUILD_RETRY_BASE_MS,
+    buildRetryMaxMs: BUILD_RETRY_MAX_MS,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
     runtimeUnknownGraceMs: 60_000,
     checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
@@ -126,6 +132,8 @@ test("reads data dir and port from the environment", () => {
     mergeWatchdogMs: 300_000,
     recoveryInspectionIntervalMs: 300_000,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
+    buildRetryBaseMs: BUILD_RETRY_BASE_MS,
+    buildRetryMaxMs: BUILD_RETRY_MAX_MS,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
     runtimeUnknownGraceMs: 60_000,
     checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
@@ -498,4 +506,16 @@ test("C-637: central maintenance runs 03:00-06:00 host time by default, is confi
     expect(() =>
       resolveServerConfig({ CARDIGAN_CENTRAL_REF_RETENTION_DAYS: days }),
     ).toThrow(/CARDIGAN_CENTRAL_REF_RETENTION_DAYS/);
+});
+
+test("C-791 the build cleanup backoff is configurable in milliseconds", () => {
+  const config = resolveServerConfig({
+    CARDIGAN_BUILD_RETRY_BASE_MS: "30000",
+    CARDIGAN_BUILD_RETRY_MAX_MS: "3600000",
+  });
+  expect(config.buildRetryBaseMs).toBe(30_000);
+  expect(config.buildRetryMaxMs).toBe(3_600_000);
+  expect(() =>
+    resolveServerConfig({ CARDIGAN_BUILD_RETRY_MAX_MS: "0" }),
+  ).toThrow("CARDIGAN_BUILD_RETRY_MAX_MS");
 });

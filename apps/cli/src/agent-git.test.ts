@@ -36,7 +36,9 @@ import {
   type AgentExecution,
   agentUploadPack,
   workerGit,
+  workerGitFailure,
   workerGitPack,
+  workerGitRejection,
 } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { workerGitFixture } from "../test-support/worker-git.js";
@@ -1119,6 +1121,125 @@ process.exit(result.status ?? 98);
         },
       ),
     ).rejects.toThrow(/unavailable/);
+  });
+
+  test("C-791 remove-empty names why it refused; an older helper's bare refusal still parses", async () => {
+    const { stdout } = await exec("python3", [
+      "-I",
+      "-B",
+      "-c",
+      `
+import contextlib,errno,importlib.util,io,json,os,pathlib,sys
+spec=importlib.util.spec_from_file_location('worker','deploy/worker-git.py')
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+root=pathlib.Path(sys.argv[1]);leaf=root/'builds'/'p'/'A-1'
+(leaf/'.godot'/'imported').mkdir(parents=True)
+w=object.__new__(m.Workspace)
+w.request={'operation':'remove-empty','repository':str(leaf)}
+w.project='p';w.repo=str(root/'repos'/'p')
+w.leaves=[str(root/'worktrees'/'p'/'A-1'),str(leaf)]
+opened=lambda path,create=False:os.open(path,m.DIRECTORY)
+def reason():
+    try:
+        w.operate();return 'removed'
+    except Exception as error:
+        return m.rejection(error)
+def fail(code):
+    def rmdir(path): raise OSError(code,'fixture')
+    return rmdir
+w.directory=opened;seen=[reason()]
+w.directory=lambda path,create=False:m.require(False);seen.append(reason())
+w.request['operation']='exists';seen.append(reason())
+w.request['operation']='remove-empty'
+w.directory=opened;rmdir=m.os.rmdir
+for code in (errno.EACCES,errno.EIO):
+    m.os.rmdir=fail(code);seen.append(reason())
+m.os.rmdir=rmdir
+os.rmdir(leaf/'.godot'/'imported');os.rmdir(leaf/'.godot');seen.append(reason())
+seen.append(leaf.exists())
+seen.append(m.rejection(BlockingIOError()))
+seen.append(m.rejection(ValueError('worker_git_rejected')))
+lines=[]
+for error in (m.Rejected('not_empty'),ValueError('worker_git_rejected')):
+    err=io.StringIO()
+    with contextlib.redirect_stderr(err):
+        try: m.refuse(error)
+        except SystemExit as exit: lines.append([exit.code,err.getvalue()])
+print(json.dumps({'seen':seen,'stderr':lines}))
+`,
+      root,
+    ]);
+    const { seen, stderr } = JSON.parse(stdout) as {
+      seen: unknown[];
+      stderr: [number, string][];
+    };
+    expect(seen).toEqual([
+      "not_empty",
+      "unsafe_directory",
+      // C-791: a 0775 leaf already fails the existence check.
+      "unsafe_directory",
+      "permission",
+      "remove_failed",
+      "removed",
+      false,
+      "busy",
+      null,
+    ]);
+    expect(stderr).toEqual([
+      [75, "worker_git_rejected\nworker_git_reason=not_empty\n"],
+      [75, "worker_git_rejected\n"],
+    ]);
+    // The controller reads the reason; the first line alone still means a
+    // helper refusal, so the previous release (no reason line) is unchanged.
+    const current = workerGitFailure("remove-empty", {
+      code: 75,
+      stderr: stderr[0]?.[1],
+    });
+    expect(current.message).toBe(
+      "Worker Git operation failed (remove-empty: helper rejected request: not_empty; exit 75)",
+    );
+    expect(workerGitRejection(current)).toBe("not_empty");
+    // The previous release, run for real: a bare refusal, no reason.
+    const a = await workerGitFixture(root, config, "worker-a");
+    const v2 = join(root, "v2");
+    await mkdir(v2, { mode: 0o700 });
+    await writeFile(
+      join(v2, "worker-git.py"),
+      await readFile("packages/host/test-support/worker-git-v2.py"),
+    );
+    await writeFile(
+      join(v2, "worker-primitives.py"),
+      await readFile("deploy/worker-primitives.py"),
+    );
+    const old = await exec("/usr/bin/python3", [
+      "-I",
+      "-B",
+      join(v2, "worker-git.py"),
+      JSON.stringify({
+        operation: "remove-empty",
+        root: a.disk,
+        project: "project",
+        assignment: "A-1",
+        repository: join(a.disk, "builds/project/A-1"),
+        path: "/usr/bin:/bin",
+        timeout_ms: 1000,
+      }),
+    ]).catch((error: { code: number; stderr: string }) => error);
+    expect(old).toMatchObject({ code: 75, stderr: "worker_git_rejected\n" });
+    const previous = workerGitFailure("remove-empty", old);
+    expect(previous.message).toBe(
+      "Worker Git operation failed (remove-empty: helper rejected request; exit 75)",
+    );
+    expect(workerGitRejection(previous)).toBeUndefined();
+    // An unknown label is never echoed.
+    expect(
+      workerGitFailure("remove-empty", {
+        code: 75,
+        stderr: "worker_git_rejected\nworker_git_reason=/home/x\n",
+      }).message,
+    ).toBe(
+      "Worker Git operation failed (remove-empty: helper rejected request; exit 75)",
+    );
   });
 
   test("readiness and Git preparation both reject changed namespaces and preserve unrelated files", async () => {

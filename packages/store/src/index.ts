@@ -66,9 +66,11 @@ export {
 export {
   findingKey,
   listFindings,
+  openFinding,
   type ReconcileFindingInput,
   type ReconcileFindingRecord,
   recordFindings,
+  resolveFinding,
 } from "./reconcile.js";
 export {
   createReadRepositories,

@@ -3,6 +3,7 @@ import { RuntimeTargets } from "@cardigan/host";
 import type { LaunchConfig } from "@cardigan/roles";
 import { type Store, standingResolver } from "@cardigan/store";
 import { type AttachmentGc, startAttachmentLoop } from "./attachment-loop.js";
+import type { BuildRetryPolicy } from "./build-cleanup-retry.js";
 import {
   type MaintenanceWindow,
   startCentralMaintenanceLoop,
@@ -107,6 +108,8 @@ export interface ControlPlaneOptions {
   readonly mergeIntervalMs?: number;
   readonly mergeBlockedReminderMs?: number;
   readonly cleanupIntervalMs?: number;
+  /** C-791: backoff of failed build removals. */
+  readonly buildRetry?: Partial<BuildRetryPolicy>;
   readonly reconcileIntervalMs?: number;
   readonly backupIntervalMs?: number;
   /** C-637: off-peak central repository maintenance; off without a window. */
@@ -347,6 +350,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           ...(options.cleanupIntervalMs === undefined
             ? {}
             : { intervalMs: options.cleanupIntervalMs }),
+          ...(options.buildRetry === undefined
+            ? {}
+            : { buildRetry: options.buildRetry }),
           onError: report,
           report: (message) => options.onError?.(new Error(message)),
         });
