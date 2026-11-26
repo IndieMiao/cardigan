@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { capacityMachine } from "./capacity-owner.js";
+import { releaseDeploymentWait } from "./deployment-capacity.js";
 import {
   loadDeploymentConfig,
   parseDeploymentConfig,
@@ -20,6 +21,7 @@ import {
   finishSupervisorUpgrade,
   loadSupervisorUpgradeConfig,
   readSupervisorUpgradePlan,
+  SharedCapacityWait,
   type SupervisorRestartPorts,
   type SupervisorUpgradeConfig,
   type SupervisorUpgradeHost,
@@ -77,6 +79,8 @@ function fakeHost(
 ) {
   const calls: string[] = [];
   let deployed: string | undefined = TO;
+  // As in the driver: the waiter row is shared with deployments.
+  const shared = new SharedCapacityWait(() => releaseDeploymentWait(store));
   const host: SupervisorUpgradeHost & {
     calls: string[];
     deploy(sha: string | undefined): void;
@@ -111,6 +115,7 @@ function fakeHost(
     ports: () => [{ host: "127.0.0.1", port: 3004 }],
     server: () => executionOwner(process.pid),
     recheck: () => calls.push("recheck"),
+    capacityWaiting: (waiting) => shared.set("upgrade", waiting),
     now: () => Date.now(),
     ...overrides,
   };
@@ -445,3 +450,21 @@ async function prepareRestartAgain(l: Awaited<ReturnType<typeof layout>>) {
   expect(await upgrader.step()).toBe("restarting");
   return l;
 }
+
+test("C-767: deployment and upgrade share the capacity waiter; neither reopens admission under the other", () => {
+  const released: string[] = [];
+  const shared = new SharedCapacityWait(() => released.push("release"));
+  // Switch off: a deployment that stops waiting releases, exactly as before.
+  shared.set("deploy", false);
+  expect(released).toEqual(["release"]);
+  shared.set("upgrade", true);
+  // An idle deployment tick no longer drops the upgrade's waiter row.
+  shared.set("deploy", false);
+  expect(released).toEqual(["release"]);
+  shared.set("deploy", true);
+  // Nor does an abandoned upgrade drop a waiting deployment's row.
+  shared.set("upgrade", false);
+  expect(released).toEqual(["release"]);
+  shared.set("deploy", false);
+  expect(released).toEqual(["release", "release"]);
+});

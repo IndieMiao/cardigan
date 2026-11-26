@@ -38,7 +38,7 @@ export async function runSelfDeployCommand(
     !["watch", "roles", "finish-upgrade"].includes(args[0] ?? "")
   )
     throw new CliError(
-      "用法：cardigan self-deploy watch|roles（主机专用，配置来自 self-deploy.yaml）",
+      "用法：cardigan self-deploy watch|roles|finish-upgrade（主机专用，配置来自 self-deploy.yaml；finish-upgrade 只由监督器自升级启动）",
       EXIT.usage,
     );
   const dataDir = resolveDataDir(io);

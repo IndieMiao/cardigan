@@ -61,6 +61,7 @@ import {
 import { supervisorChanges } from "./deployment-supervisor-scope.js";
 import {
   nodeSystemdCommand,
+  SharedCapacityWait,
   type SupervisorUpgradeConfig,
   SupervisorUpgrader,
   type SupervisorUpgradeStep,
@@ -139,6 +140,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private lastOperationWait: string | undefined;
   private notedOperations = new Set<string>();
   private upgrader: SupervisorUpgrader | undefined;
+  private readonly capacityWait = new SharedCapacityWait(() =>
+    releaseDeploymentWait(this.options.store),
+  );
   constructor(
     private readonly options: {
       store: Store;
@@ -678,9 +682,10 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     });
   }
   async releaseCapacityWait() {
-    releaseDeploymentWait(this.options.store);
+    this.capacityWait.set("deploy", false);
   }
   async waitForCapacity(record: DeploymentRecord) {
+    this.capacityWait.set("deploy", true);
     const blocking_checks = this.options.store.database
       .prepare(
         "SELECT project_id AS project, attempt_id AS attempt FROM merge_check_capacity ORDER BY project_id, attempt_id",
@@ -880,6 +885,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       recheck: () => {
         this.checkedSupervisorMain = undefined;
       },
+      capacityWaiting: (waiting: boolean) =>
+        this.capacityWait.set("upgrade", waiting),
       now: () => this.now(),
     };
   }

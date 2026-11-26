@@ -12,10 +12,7 @@ import {
   writeDeploymentNotice,
   writeSupervisorUpgrade,
 } from "./deployment-audit.js";
-import {
-  acquireDeploymentCapacity,
-  releaseDeploymentWait,
-} from "./deployment-capacity.js";
+import { acquireDeploymentCapacity } from "./deployment-capacity.js";
 import { requireHostDirectory } from "./deployment-config.js";
 import {
   fenceLongOperations,
@@ -478,6 +475,11 @@ export interface SupervisorUpgradeHost {
   server(): ExecutionOwner | undefined;
   /** Compare again next tick, so a blocked upgrade raises the human reminder. */
   recheck(): void;
+  /**
+   * The waiter row closing check admission is one per process and shared
+   * with deployments: report this upgrade's wait, never delete it directly.
+   */
+  capacityWaiting(waiting: boolean): void;
   now(): number;
 }
 
@@ -617,11 +619,10 @@ export class SupervisorUpgrader {
     } finally {
       // A capacity wait closes check admission; never leave it behind once
       // this upgrade stops waiting for capacity (held, abandoned or failed).
-      if (this.capacityWait) this.waiter = true;
-      else if (this.waiter) {
-        this.waiter = false;
+      if (this.capacityWait !== this.waiter) {
+        this.waiter = this.capacityWait;
         try {
-          releaseDeploymentWait(this.host.store);
+          this.host.capacityWaiting(this.capacityWait);
         } catch {
           /* Reclaimed with this incarnation. */
         }
@@ -901,4 +902,21 @@ export function systemdEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   for (const key of ["HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"])
     if (env[key]) out[key] = env[key];
   return out;
+}
+
+/**
+ * C-767: deployments and the supervisor upgrade of one process share the
+ * single capacity waiter row. It is released only when neither still waits,
+ * so one never reopens check admission under the other.
+ */
+export class SharedCapacityWait {
+  private readonly waiting = new Set<"deploy" | "upgrade">();
+  constructor(private readonly release: () => void) {}
+  set(who: "deploy" | "upgrade", waiting: boolean) {
+    if (waiting) this.waiting.add(who);
+    else {
+      this.waiting.delete(who);
+      if (!this.waiting.size) this.release();
+    }
+  }
 }
