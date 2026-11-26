@@ -71,6 +71,7 @@ import {
   storyRefusal,
 } from "../components/StoryProposal.js";
 import { Button } from "../components/ui/button.js";
+import { Checkbox } from "../components/ui/checkbox.js";
 import * as Dialog from "../components/ui/dialog.js";
 import { SelectControl } from "../components/ui/select-control.js";
 import { Skeleton } from "../components/ui/skeleton.js";
@@ -815,10 +816,8 @@ export function MergeConfirmation({
         </button>
       )}
       {!confirmed && mergeBlocked && (
-        <button
+        <Button
           ref={overrideTrigger}
-          type="button"
-          className="quiet"
           disabled={action.busy}
           onClick={() => {
             setOverrideReason("");
@@ -827,7 +826,7 @@ export function MergeConfirmation({
           }}
         >
           仍要合并
-        </button>
+        </Button>
       )}
       {merge?.merge_gate_enabled &&
         !merge.merge_noop &&
@@ -1199,10 +1198,9 @@ export function MergeConfirmation({
                   {`人工事项 ${holds.map((h) => h.id).join("、")} 未完成，会继续挡住合并。`}
                 </p>
                 <label>
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={overrideFollowUp}
-                    onChange={(e) => setOverrideFollowUp(e.target.checked)}
+                    onCheckedChange={(v) => setOverrideFollowUp(v === true)}
                   />
                   一并改为合并后跟进
                 </label>
@@ -1219,9 +1217,7 @@ export function MergeConfirmation({
                   先不确认
                 </button>
               </Dialog.Close>
-              <button
-                type="button"
-                className="quiet"
+              <Button
                 disabled={
                   action.busy ||
                   !!overrideError ||
@@ -1269,7 +1265,7 @@ export function MergeConfirmation({
                 }}
               >
                 确认仍要合并
-              </button>
+              </Button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>

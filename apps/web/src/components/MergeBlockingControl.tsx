@@ -122,12 +122,10 @@ export function MergeBlockingControl({
               <option value="external_account">外部账号</option>
             </SelectControl>
           </label>
-          <button type="submit" disabled={busy || !prerequisite}>
+          <Button type="submit" disabled={busy || !prerequisite}>
             确认挡合并
-          </button>
-          <button type="button" onClick={() => setChoosing(false)}>
-            取消
-          </button>
+          </Button>
+          <Button onClick={() => setChoosing(false)}>取消</Button>
         </form>
       ) : (
         <Button disabled={busy} onClick={() => setChoosing(true)}>
