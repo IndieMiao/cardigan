@@ -10,6 +10,7 @@ export function PmMergeTakeover({
   onAccept,
   controls,
   regular = false,
+  system = false,
 }: {
   title: string;
   waitingForCheck: boolean;
@@ -21,6 +22,8 @@ export function PmMergeTakeover({
    * emphasis button (C-687 §3.2).
    */
   regular?: boolean;
+  /** C-777: a stuck system confirmation rather than a PM-held one. */
+  system?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const cancel = useRef<HTMLButtonElement>(null);
@@ -62,7 +65,9 @@ export function PmMergeTakeover({
           }}
         >
           <div className="pm-merge-takeover-heading">
-            <Dialog.Title>接手 PM 合并确认</Dialog.Title>
+            <Dialog.Title>
+              {system ? "接手系统合并确认" : "接手 PM 合并确认"}
+            </Dialog.Title>
             <Dialog.Close asChild>
               <button type="button" className="quiet" aria-label="关闭接手确认">
                 ×
@@ -71,7 +76,9 @@ export function PmMergeTakeover({
           </div>
           <p className="pm-merge-takeover-title">{title}</p>
           <Dialog.Description>
-            这条由 PM 处理即可，确定要接手吗
+            {system
+              ? "系统确认合并已超时未决，确定要接手吗"
+              : "这条由 PM 处理即可，确定要接手吗"}
           </Dialog.Description>
           <p>确认接手后可选择合并、暂缓或退回，不会立即合并。</p>
           {waitingForCheck && (

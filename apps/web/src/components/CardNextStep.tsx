@@ -1,4 +1,7 @@
-import { storyProposalConfirmable } from "@cardigan/domain";
+import {
+  SYSTEM_MERGE_STALLED_MS,
+  storyProposalConfirmable,
+} from "@cardigan/domain";
 import {
   type ReactNode,
   type RefObject,
@@ -45,6 +48,8 @@ export type NextStepState =
       readonly failed: boolean;
     }
   | { readonly kind: "merge-pm"; readonly q: NeedsDecision }
+  /** C-777: the system's confirmation is stuck; the human may take over. */
+  | { readonly kind: "merge-system"; readonly q: NeedsDecision }
   /** Confirmed, waiting for the merge (or its check) to finish. */
   | { readonly kind: "merge-confirmed"; readonly q: NeedsDecision }
   | {
@@ -150,6 +155,15 @@ export function cardNextSteps(detail: CardDetail): {
     (q) => q.decider === "role:pm" && q.status !== "resolved",
   );
   if (pm) return { current: { kind: "merge-pm", q: pm }, more: 0 };
+  const stalled = confirmations.find(
+    (q) =>
+      q.decider === "system" &&
+      q.status === "open" &&
+      card.status === "awaiting_merge" &&
+      (q.waited_ms ?? 0) >= SYSTEM_MERGE_STALLED_MS,
+  );
+  if (stalled)
+    return { current: { kind: "merge-system", q: stalled }, more: 0 };
   const settled = confirmations.find((q) => q.status === "resolved");
   if (settled)
     return { current: { kind: "merge-confirmed", q: settled }, more: 0 };
@@ -401,6 +415,19 @@ export function CardNextStep({
       const step = (
         <>
           等 PM 确认合并
+          <IdBadge id={current.q.id} />
+        </>
+      );
+      return mergePanel(current.q, {
+        mine: false,
+        title: step,
+        dockFor: dockFor(step),
+      });
+    }
+    case "merge-system": {
+      const step = (
+        <>
+          系统合并确认未决
           <IdBadge id={current.q.id} />
         </>
       );

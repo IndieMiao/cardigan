@@ -1109,6 +1109,8 @@ export interface NeedsPage {
   };
   /** §7.4 (C-65): merge confirmations PM Ops holds; the human may answer them. */
   readonly pm_held_merges?: readonly NeedsDecision[];
+  /** C-777: system merge confirmations stuck past the threshold. */
+  readonly stalled_system_merges?: readonly NeedsDecision[];
   /** §7.4 知会: delegated resolutions; never blocking. */
   readonly notices?: readonly NoticeView[];
   readonly notices_next_cursor?: string | null;

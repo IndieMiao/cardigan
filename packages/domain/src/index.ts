@@ -133,6 +133,7 @@ export * from "./commands/merge-executor.js";
 export * from "./commands/merge-observation.js";
 export {
   hasVerifiedMergeNoop,
+  mergeAwaitsNoCheck,
   recordMergePreparation,
 } from "./commands/merge-preparation.js";
 export {
@@ -181,6 +182,7 @@ export * from "./commands/release-notes.js";
 export * from "./commands/remote-worker-loss.js";
 export * from "./commands/replace-verifier.js";
 export * from "./commands/request-recheck.js";
+export { resumeAttention } from "./commands/resume-attention.js";
 export * from "./commands/review-withdrawal.js";
 export * from "./commands/role.js";
 export * from "./commands/role-rule-implementation.js";

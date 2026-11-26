@@ -1,5 +1,4 @@
-import type { Actor, Event } from "../entities.js";
-import { eventsForCompletion } from "../event-index.js";
+import type { Actor } from "../entities.js";
 import type { CardId, DeliveryId } from "../ids.js";
 import {
   type CommandPorts,
@@ -9,36 +8,9 @@ import {
   unwrap,
 } from "./core.js";
 import { prepareMergePlan } from "./merge.js";
+import { hasVerifiedMergeNoop, readinessEvents } from "./merge-noop.js";
 
-const readinessEvents = new Set([
-  "merge_preparation_recorded",
-  "merge_check_queued",
-  "merge_check_started",
-  "merge_check_finished",
-  "merge_check_requeued",
-]);
-
-/** A host-verified noop makes the confirmation visible; it never authorizes publication. */
-export function hasVerifiedMergeNoop(
-  events: readonly Event[],
-  card: CardId,
-  completion: DeliveryId,
-): boolean {
-  const latest = eventsForCompletion(events, completion)
-    .filter(
-      (e) =>
-        e.card_id === card &&
-        readinessEvents.has(e.type) &&
-        (e.payload as { completion_id?: string } | null)?.completion_id ===
-          completion,
-    )
-    .sort((a, b) => b.seq - a.seq)[0];
-  return (
-    latest?.type === "merge_preparation_recorded" &&
-    latest.actor.kind === "system" &&
-    (latest.payload as { noop?: boolean }).noop === true
-  );
-}
+export { hasVerifiedMergeNoop, mergeAwaitsNoCheck } from "./merge-noop.js";
 
 /** Only the host records Git ancestry verification, bound to the current completion. */
 export function recordMergePreparation(
