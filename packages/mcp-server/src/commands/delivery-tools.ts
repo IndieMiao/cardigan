@@ -144,6 +144,14 @@ const reviewInput = z.object({
     .describe(
       "核对本验证项此前标为待补的证据：引用绑定当前交付的证据附件。待补证据未核对时不能通过；旧版本上的附件不能沿用",
     ),
+  evidence_seen: z
+    .array(z.string().min(1))
+    .min(1)
+    .max(100)
+    .optional()
+    .describe(
+      "驳回时，如果审核开始后交付又到了证据附件，系统会拦下驳回并列出这些附件编号；重新读取卡片和附件核对后仍要驳回时，在这里列出它们",
+    ),
   evidence_not_applicable: z
     .string()
     .trim()
@@ -386,7 +394,8 @@ export function deliveryTools(options: DeliveryToolOptions) {
     }),
     defineTool({
       name: "withdraw_review",
-      description: "Withdraw your own passed review with a required rationale.",
+      description:
+        "Withdraw your own passed review with a required rationale. Also voids a rejection made before evidence that arrived after the review started was read: allowed to the rejecting reviewer or PM Ops; the same delivery awaits review again, the author need not resubmit and the rejection spends no review round.",
       input: z.object({
         idempotency_key,
         work_item_id: id("work_item"),
