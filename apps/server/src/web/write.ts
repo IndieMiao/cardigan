@@ -43,6 +43,7 @@ import {
   recheckMerge,
   recordDecision,
   recordHelperUpgradeChecks,
+  replacePrimaryWorkItem,
   rollbackRole,
   runLimitMaximumMessage,
   type SystemReminderPolicy,
@@ -256,6 +257,14 @@ const cardCancel = z
   })
   .strict();
 const cardSupersede = z.object({ superseded_by: id("card") }).strict();
+const primaryReplacement = z
+  .object({
+    replacement_work_item_id: id("work_item"),
+    card_id: id("card"),
+    template_key: text,
+    reason: text,
+  })
+  .strict();
 const cardSensitive = z.object({ sensitive: z.boolean() }).strict();
 const decision = z.object({
   option: text,
@@ -1055,6 +1064,33 @@ export async function serveWrite(
           { work_item_id, manual_assign: input.manual_assign },
           ports,
         ),
+      ),
+    );
+    return true;
+  }
+  // C-778: the human hands a mis-assigned primary slot to another producer.
+  const primaryWorkItem = /^\/work-items\/(W-[0-9]+)\/replace-primary$/.exec(
+    rest,
+  );
+  if (primaryWorkItem) {
+    if (c.req.method !== "POST") methodNotAllowed(["POST"]);
+    c.authorize();
+    const input = parsed(primaryReplacement, await readJsonBody(c.req));
+    const work_item_id = parsed(id("work_item"), primaryWorkItem[1]);
+    const key = parsed(
+      text,
+      c.req.headers["idempotency-key"],
+      "工作项写入需要 Idempotency-Key",
+    );
+    const context: CommandContext = {
+      ...c,
+      idempotency: { key, request: { rest, input } },
+    };
+    sendJson(
+      c.res,
+      200,
+      run(context, (s, a, ports) =>
+        replacePrimaryWorkItem(s, a, { work_item_id, ...input }, ports),
       ),
     );
     return true;

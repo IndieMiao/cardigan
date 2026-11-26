@@ -283,6 +283,7 @@ export function fakeClient(
     setHumanCardTemplates: async () => {},
     setSystemRules: async () => {},
     setManualAssign: async () => {},
+    replacePrimaryWorkItem: async () => {},
     templates: async () => ({ templates: [] }),
     template: async () => {
       throw new Error("Missing template fixture");
