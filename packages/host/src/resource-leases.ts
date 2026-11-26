@@ -8,6 +8,13 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { type AdbSlotAccess, AdbSlots } from "./adb-slots.js";
+import {
+  CAPACITY_WAIT_REASON,
+  type ResourceWaitKind,
+  reservationIdOf,
+  reservationOf,
+  reservationReason,
+} from "./machine-reservations.js";
 import { BindingClearances } from "./resource-clearance.js";
 import { bindingIdentity, endpoints, fingerprint } from "./resource-policy.js";
 import type { ResourceProbe } from "./resource-probe.js";
@@ -29,6 +36,8 @@ interface Lease {
   target: string | null;
   endpoints: string;
   verified_at: string | null;
+  source: string | null;
+  cancelled_at: string | null;
 }
 export type ResourceAdmission = {
   signature: string;
@@ -252,7 +261,7 @@ export class MachineLeases {
         !tx.machines.get(project, machine) ||
         ends <= at ||
         this.rows(
-          "machine=? AND resource=? AND starts_at<? AND ends_at>?",
+          "machine=? AND resource=? AND starts_at<? AND ends_at>? AND cancelled_at IS NULL",
           machine,
           key,
           ends,
@@ -262,7 +271,7 @@ export class MachineLeases {
         throw new Error("机器未登记或预约时段冲突");
       this.store.database
         .prepare(
-          "INSERT INTO machine_resource_leases (generation,machine,resource,project,starts_at,ends_at,binding,target,endpoints) VALUES(?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO machine_resource_leases (generation,machine,resource,project,starts_at,ends_at,binding,target,endpoints,source) VALUES(?,?,?,?,?,?,?,?,?,?)",
         )
         .run(
           generation,
@@ -274,6 +283,7 @@ export class MachineLeases {
           b ? bindingIdentity(b) : null,
           target ?? null,
           JSON.stringify(b ? endpoints(b) : []),
+          actor.kind === "human" ? "human" : "standing_pm",
         );
       event(tx, actor, "machine_resource_reserved", at, {
         generation,
@@ -391,7 +401,8 @@ export class MachineLeases {
         )
           continue;
         if (l.ends_at && l.ends_at > now && !l.deadline_recorded) {
-          if (l.project !== project) return `${key}：预约独占`;
+          if (l.project !== project)
+            return reservationReason(key, reservationOf({ ...l }));
         } else if (l.binding && !l.verified_at) return `${key}：等待释放核验`;
       }
     }
@@ -679,6 +690,12 @@ export class MachineLeases {
     }
     return access;
   }
+  /**
+   * C-800: the wait records its kind. A reservation reason (built by
+   * `blocked`) names the reservation, so a human cancel can find and wake
+   * exactly the Runs it held back; other policy waits are `resource`, and a
+   * plain slot or queue-order wait is `capacity` unless the caller says so.
+   */
   wait(
     tx: StoreTransactionContext,
     project: string,
@@ -688,10 +705,23 @@ export class MachineLeases {
     now: string,
     policyWait = true,
     publicationWait = false,
+    kind?: ResourceWaitKind,
   ) {
+    const id = reservationIdOf(reason);
+    const held = id
+      ? this.rows("generation=? AND run_id IS NULL", id)[0]
+      : undefined;
+    const reservation =
+      held && held.project !== project ? reservationOf({ ...held }) : undefined;
+    const resolved: ResourceWaitKind = reservation
+      ? "reservation"
+      : (kind ??
+        (policyWait && reason !== CAPACITY_WAIT_REASON
+          ? "resource"
+          : "capacity"));
     const changed = this.store.database
       .prepare(
-        `INSERT INTO machine_resource_waits VALUES(?,?,?,?,?,?) ON CONFLICT(project,run_id) DO UPDATE SET reason=excluded.reason,policy_wait=excluded.policy_wait,publication_wait=excluded.publication_wait WHERE reason<>excluded.reason OR policy_wait<>excluded.policy_wait OR publication_wait<>excluded.publication_wait`,
+        `INSERT INTO machine_resource_waits (project,run_id,machine,reason,policy_wait,publication_wait,kind,reservation) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project,run_id) DO UPDATE SET reason=excluded.reason,policy_wait=excluded.policy_wait,publication_wait=excluded.publication_wait,kind=excluded.kind,reservation=excluded.reservation WHERE reason<>excluded.reason OR policy_wait<>excluded.policy_wait OR publication_wait<>excluded.publication_wait OR kind<>excluded.kind OR reservation IS NOT excluded.reservation`,
       )
       .run(
         project,
@@ -700,12 +730,27 @@ export class MachineLeases {
         reason,
         Number(policyWait),
         Number(publicationWait),
+        resolved,
+        reservation?.reservation_id ?? null,
       ).changes;
     if (changed)
       event(tx, system(project), "machine_resource_waiting", now, {
         machine: a.machine_id,
         run_id: run.id,
         reason,
+        kind: resolved,
+        ...(reservation
+          ? {
+              reservation: {
+                reservation_id: reservation.reservation_id,
+                resource: reservation.resource,
+                holder_project: reservation.holder_project,
+                source: reservation.source,
+                starts_at: reservation.starts_at,
+                ends_at: reservation.ends_at,
+              },
+            }
+          : {}),
       });
   }
   private eligible(tx: ReadRepositories, l: Lease, now: string) {

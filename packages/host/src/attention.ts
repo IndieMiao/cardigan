@@ -7,6 +7,10 @@ import {
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
+import {
+  type ResourceWaitView,
+  resourceWaits,
+} from "./machine-reservations.js";
 import { readRunQueue } from "./run-capacity.js";
 
 /** Shared CLI attention / MCP diagnostics aggregation, read in one snapshot. */
@@ -46,7 +50,17 @@ export function readAttention(
           a.role_id === "pm" &&
           a.status === "suspended",
       ),
-      queued: readRunQueue(store, tx).filter((r) => r.project_id === project),
+      // C-800: why each queued Run waits; another project's reservation shows
+      // only its holder project, source, window and reservation id.
+      queued: (() => {
+        const waits = resourceWaits(store.database, project);
+        return readRunQueue(store, tx)
+          .filter((r) => r.project_id === project)
+          .map((r): typeof r & { resource_wait?: ResourceWaitView } => {
+            const wait = waits.get(r.run_id);
+            return wait ? { ...r, resource_wait: wait } : r;
+          });
+      })(),
       findings: store.listReconcileFindings(project, { openOnly: true }),
     };
   };

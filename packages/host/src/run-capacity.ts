@@ -31,6 +31,7 @@ import {
   type Store,
   unfinishedBellAttempts,
 } from "@cardigan/store";
+import { listMachineReservations } from "./machine-reservations.js";
 import { runningMergeChecks } from "./merge-check-capacity.js";
 import { LOCAL_EXECUTOR } from "./merge-gate-executors.js";
 import type { ReadProjectQuota } from "./project-quotas.js";
@@ -711,11 +712,22 @@ export function machineRunCapacity(
     defaults?: ((machine: string) => number) | undefined;
     maximums?: ((machine: string) => number) | undefined;
     displayName?: ((machine: string) => string | undefined) | undefined;
+    /** C-800: include each machine's calendar reservations still open at this time. */
+    reservationsAt?: string | undefined;
   } = {},
   snapshot = runCapacitySnapshot(store, tx),
 ): MachineRunCapacity[] {
   const maximums = options.maximums ?? (() => DEFAULT_MAX_RUN_LIMIT);
+  const at = options.reservationsAt;
   return runCapacityMachines(store, tx, options.displayName).map((machine) => ({
+    ...(at === undefined
+      ? {}
+      : {
+          reservations: listMachineReservations(store.database, {
+            now: at,
+            machine: machine.id,
+          }).map(({ machine: _machine, ...reservation }) => reservation),
+        }),
     machine_id: machine.id,
     label: machine.label,
     running: snapshot.agentOccupied.get(machine.id) ?? 0,

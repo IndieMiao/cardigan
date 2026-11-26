@@ -752,6 +752,7 @@ async function assembleServer(
                     defaults: runCapacity.forMachine,
                     maximums: runCapacity.maxForMachine,
                     displayName: runCapacity.displayNameForMachine,
+                    reservationsAt: new Date().toISOString(),
                   }),
                 ),
               // §3.3: production always verifies against the real Git service, and the

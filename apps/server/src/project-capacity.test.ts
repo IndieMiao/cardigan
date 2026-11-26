@@ -171,7 +171,11 @@ test.each(["missing", "configured", "invalid"] as const)(
             undefined,
             config.maxForMachine,
             config.displayNameForMachine,
-          ).agents.map(({ resources: _resources, ...machine }) => machine),
+          ).agents.map(({ resources: _resources, ...machine }) => ({
+            ...machine,
+            // C-800: open calendar reservations (none in this fixture).
+            reservations: [],
+          })),
         );
         f.store.uow.read((tx) => {
           const dispatch = runCapacitySnapshot(f.store, tx);
@@ -204,6 +208,7 @@ test.each(["missing", "configured", "invalid"] as const)(
               "max_limit",
               "merge_check_slots",
               "queued",
+              "reservations",
               "running",
               "total_running",
             ]);
@@ -231,6 +236,7 @@ test.each(["missing", "configured", "invalid"] as const)(
                 : 16,
           queued: 0,
           merge_check_slots: 0,
+          reservations: [],
         },
         {
           machine_id: "worker",
@@ -246,6 +252,7 @@ test.each(["missing", "configured", "invalid"] as const)(
           max_limit: configuration === "invalid" ? 0 : 16,
           queued: 0,
           merge_check_slots: 0,
+          reservations: [],
         },
       ]);
       // Standing roles never enter the capacity queue; work-item PMs still do.

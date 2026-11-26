@@ -23,7 +23,10 @@ test("upgrading the resource-lease schema adds the check journal without changin
       name: "machine_check_jobs",
     });
     expect(db.prepare("SELECT id FROM machine_check_jobs").all()).toEqual([]);
-    expect(leases.all()).toEqual(before);
+    // Later migrations may add columns (C-800); the stored values stay as they were.
+    expect(leases.all()).toEqual(
+      before.map((row) => expect.objectContaining({ ...row })),
+    );
     expect(migrate(db)).toEqual([]);
   } finally {
     store.close();

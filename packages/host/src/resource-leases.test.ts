@@ -20,6 +20,7 @@ import {
   fixture,
   run,
 } from "../../domain/src/commands/test-fixtures.js";
+import { listMachineReservations } from "./machine-reservations.js";
 import { MachineLeases } from "./resource-leases.js";
 import { type ResourceProbe, targetProbe } from "./resource-probe.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
@@ -287,6 +288,13 @@ test("standing PM bookings require explicit project authorization and fresh iden
   const id = await reserve();
   expect(await reserve()).toBe(id);
   expect(request.revalidate).toHaveBeenCalledTimes(2);
+  // C-800: the blocked side sees the PM source, never the PM's Assignment.
+  expect(listMachineReservations(store.database, { now: start })).toEqual([
+    expect.objectContaining({ reservation_id: id, source: "standing_pm" }),
+  ]);
+  const reason = l.blocked("second", "local", ["fixture"], start);
+  expect(reason).toContain("常驻 PM 预约");
+  expect(reason).not.toContain(pm.assignment_id);
   expect(
     store
       .getUpdates({ project_id: "first" })

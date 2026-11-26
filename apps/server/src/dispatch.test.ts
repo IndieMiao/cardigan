@@ -4005,6 +4005,113 @@ test("C-497 another project reservation blocks a live wake, hard deadline unbloc
   );
 });
 
+test("C-800 a Run held by another project's reservation shows the holder in diagnostics and is re-admitted once a human cancels it", async () => {
+  requireCapabilities(target.item, ["godot"]);
+  f.store.createProject({ id: "priority" });
+  f.store.uow.run((tx) =>
+    tx.cards.put("priority", {
+      ...target.card,
+      title: "priority-secret-card",
+      goal: "priority-secret-goal",
+    }),
+  );
+  await writeFile(
+    join(f.dataDir, "run-capacity.yaml"),
+    JSON.stringify({ machines: { local: { resources: { godot: 1 } } } }),
+    { mode: 0o600 },
+  );
+  const {
+    cancelMachineReservation,
+    loadRunCapacityConfig,
+    MachineLeases,
+    readAttention,
+  } = await import("@cardigan/host");
+  const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+  const leases = new MachineLeases(f.store, cfg, vi.fn());
+  const at = f.clock.now(),
+    end = new Date(Date.parse(at) + 3_600_000).toISOString();
+  const id = await leases.reserve(
+    { kind: "human", project_id: "priority" },
+    "local",
+    "godot",
+    at,
+    end,
+    () => at,
+  );
+  const d = new Dispatcher({
+    ...options,
+    leases,
+    resourceLimits: cfg.resourcesForMachine,
+  });
+  instruct();
+  await d.tick();
+  const [wait] = readRunQueue(f.store);
+  expect(wait?.assignment_id).toBe(target.assignment.id);
+  const reason = `godot：预约独占（持有项目 priority，人工预约，${at} — ${end}，预约 ${id}）`;
+  const { queued } = readAttention(f.store, f.project, f.clock.now());
+  expect(queued[0]?.resource_wait).toEqual({
+    kind: "reservation",
+    reason,
+    reservation: {
+      reservation_id: id,
+      machine: "local",
+      resource: "godot",
+      holder_project: "priority",
+      source: "human",
+      starts_at: at,
+      ends_at: end,
+    },
+  });
+  const view = executionCapacity(
+    f.store,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    cfg.resourcesForMachine,
+    f.project,
+    f.clock.now(),
+  );
+  expect(view.agents[0]?.lease_details).toEqual([
+    `godot：项目 priority，人工预约，${at} — ${end}，预约 ${id}`,
+    `${wait?.run_id}：${reason}`,
+  ]);
+  expect(JSON.stringify([queued, view, f.state().events])).not.toMatch(
+    /priority-secret/,
+  );
+  // Still held on the next pass: the reservation, not capacity, keeps it queued.
+  await d.tick();
+  expect(f.state().runs.find((r) => r.id === wait?.run_id)?.status).toBe(
+    "queued",
+  );
+  expect(
+    cancelMachineReservation(
+      f.store,
+      { kind: "human", project_id: f.project },
+      { reservation_id: id, reason: "所有者要求提前恢复" },
+      () => f.clock.now(),
+    ).released_runs,
+  ).toBe(1);
+  expect(
+    f
+      .state()
+      .events.filter(
+        (e) => e.type === "machine_resource_reservation_cancelled",
+      ),
+  ).toEqual([
+    expect.objectContaining({
+      payload: expect.objectContaining({
+        reservation_id: id,
+        run_ids: [wait?.run_id],
+      }),
+    }),
+  ]);
+  await d.tick();
+  expect(f.state().runs.find((r) => r.id === wait?.run_id)?.status).toBe(
+    "dispatched",
+  );
+});
+
 test("C-721 a follow-up inspected for its own empty claim passes admission beside another project's reservation", async () => {
   requireCapabilities(target.item, ["godot"]);
   f.store.createProject({ id: "priority" });

@@ -48,9 +48,12 @@ import {
 } from "@cardigan/domain";
 import {
   AdbSlots,
+  cancelMachineReservation,
   checkRegisteredMachine,
   configureMachinePlacement,
   effectiveRunLimit,
+  findMachineReservation,
+  listMachineReservations,
   loadMergeGateConfig,
   loadRunCapacityConfig,
   MachineLeases,
@@ -119,6 +122,8 @@ const USAGE = [
   "  cardigan machine register|update <编号> --label <名称> --os <系统> --arch <架构> [--tags <逗号分隔标签>] [--status online|degraded|offline|draining] [--project <p>]",
   "    update 的 label/os/arch 同步到该物理机器的所有已登记项目；tags/status 只修改当前项目。",
   "  cardigan machine reserve <机器> --resource <键> --start <带时区时间> --end <带时区时间> [--project <p>]",
+  "  cardigan machine reservation list [--machine <机器>]  列出各项目当前和未来的资源预约（持有项目、来源、起止时间、预约编号）",
+  "  cardigan machine reservation cancel <预约编号> --reason <原因>  仅人可用：提前结束预约，写事件并让被挡的 Run 重新排队",
   "  cardigan machine list|show|drain|check [编号] [--project <p>]  人专属登记与检查；远程现场探测尚未启用",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--employee <E-n 或名字>] [--project <p>]",
@@ -977,6 +982,75 @@ async function cardCreate(args: readonly string[], io: CliIo): Promise<number> {
   }
 }
 
+const RESERVATION_USAGE =
+  "用法：cardigan machine reservation list [--machine <机器>] | cancel <预约编号> --reason <原因>";
+
+/** C-800: list calendar reservations of every project, or end one early (human only). */
+function machineReservationCommand(args: readonly string[], io: CliIo): number {
+  const [action, ...rest] = args;
+  if (action !== "list" && action !== "cancel")
+    throw new CliError(RESERVATION_USAGE, EXIT.usage);
+  const parsed = parseArgs(rest, []);
+  const allowed =
+    action === "list" ? ["data-dir", "machine"] : ["data-dir", "reason"];
+  for (const key of Object.keys(parsed.flags))
+    if (!allowed.includes(key))
+      throw new CliError(`预约命令不接受 --${key}`, EXIT.usage);
+  if (parsed.positionals.length !== (action === "list" ? 0 : 1))
+    throw new CliError(RESERVATION_USAGE, EXIT.usage);
+  const reason = optional(parsed.flags, "reason");
+  if (action === "cancel" && !reason?.trim())
+    throw new CliError("取消预约需要 --reason <原因>", EXIT.usage);
+  const store = openStoreFrom(io, parsed.flags);
+  try {
+    // Reservations span projects: list them all; a cancel acts as the human
+    // of the holder project.
+    if (action === "list") {
+      io.stdout(
+        JSON.stringify(
+          listMachineReservations(store.database, {
+            now: new Date().toISOString(),
+            machine: optional(parsed.flags, "machine"),
+          }),
+          null,
+          2,
+        ),
+      );
+      return EXIT.ok;
+    }
+    const reservation_id = parsed.positionals[0] ?? "";
+    const holder = findMachineReservation(store.database, reservation_id);
+    if (!holder) throw new CliError("取消预约失败：预约不存在", EXIT.failure);
+    const actor = resolveActor(io, holder.holder_project, store);
+    if (actor.kind !== "human")
+      throw new CliError("预约管理仅限人类操作", EXIT.usage);
+    let result: ReturnType<typeof cancelMachineReservation>;
+    try {
+      result = cancelMachineReservation(
+        store,
+        actor,
+        { reservation_id, reason: reason ?? "" },
+        () => new Date().toISOString(),
+      );
+    } catch (error) {
+      throw new CliError(
+        `取消预约失败：${error instanceof Error ? error.message : String(error)}`,
+        EXIT.failure,
+      );
+    }
+    io.stdout(
+      JSON.stringify({
+        reservation_id: result.reservation.reservation_id,
+        cancelled: true,
+        released_runs: result.released_runs,
+      }),
+    );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
 async function machineCommand(
   args: readonly string[],
   io: CliIo,
@@ -988,6 +1062,7 @@ async function machineCommand(
   if (hasToken(io) || io.env.MCP_TOKEN !== undefined)
     throw new CliError("机器管理仅限人类操作，Token 模式不可用。", EXIT.usage);
   const [sub, ...rest] = args;
+  if (sub === "reservation") return machineReservationCommand(rest, io);
   if (
     ![
       "register",
@@ -1000,7 +1075,7 @@ async function machineCommand(
     ].includes(sub ?? "")
   )
     throw new CliError(
-      "用法：cardigan machine register|update|list|show|drain|check",
+      "用法：cardigan machine register|update|list|show|drain|check|reserve|reservation",
       EXIT.usage,
     );
   const parsed = parseArgs(rest, []);

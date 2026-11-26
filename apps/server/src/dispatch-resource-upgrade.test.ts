@@ -69,13 +69,18 @@ test.each(["snapshot", "historical", "exit_unconfirmed"] as const)(
       f.store.uow.run((tx) => tx.runs.put(f.project, legacy));
       requirements([]); // This edit is not the original admission.
     }
-    const upgrade = "0045_machine_resource_leases.sql";
-    await copyFile(
-      join(defaultMigrationsDir, upgrade),
-      join(migrations, upgrade),
-    );
+    // C-800 extends the same two tables; the current host needs both steps.
+    const upgrades = [
+      "0045_machine_resource_leases.sql",
+      "1795716061715_machine_reservation_details.sql",
+    ];
+    for (const upgrade of upgrades)
+      await copyFile(
+        join(defaultMigrationsDir, upgrade),
+        join(migrations, upgrade),
+      );
     expect(migrate(f.store.database, migrations).map((m) => m.version)).toEqual(
-      [45],
+      [45, 1795716061715],
     );
     await writeFile(
       join(f.dataDir, "run-capacity.yaml"),

@@ -11,7 +11,9 @@ import {
   GithubDispatchJournal,
   type MergeGateConfiguration,
   machineRunCapacity,
+  RESERVATION_SOURCE_LABELS,
   type ReadResourceLimits,
+  reservationOf,
   runCapacitySnapshot,
   runningMergeChecks,
 } from "@cardigan/host";
@@ -61,7 +63,7 @@ export function executionCapacityInputs(store: Store, now: string): string {
         .map((row) => Object.values(row)),
       db
         .prepare(
-          "SELECT machine, project, run_id, reason FROM machine_resource_waits ORDER BY machine, project, run_id",
+          "SELECT machine, project, run_id, reason, kind, reservation FROM machine_resource_waits ORDER BY machine, project, run_id",
         )
         .all()
         .map((row) => Object.values(row)),
@@ -243,13 +245,16 @@ function leaseDetails(
 ) {
   const rows = store.database
     .prepare(
-      `SELECT resource,project,starts_at,ends_at,binding,verified_at,run_id FROM machine_resource_leases WHERE machine=? AND (ends_at>? OR (binding IS NOT NULL AND verified_at IS NULL)) ORDER BY starts_at,generation`,
+      `SELECT generation,machine,resource,project,source,starts_at,ends_at,binding,verified_at,run_id FROM machine_resource_leases WHERE machine=? AND (ends_at>? OR (binding IS NOT NULL AND verified_at IS NULL)) ORDER BY starts_at,generation`,
     )
     .all(machine, now);
   const details = rows.map((row) => {
     const key = String(row.resource);
-    if (row.ends_at && String(row.ends_at) > now)
-      return `${key}：${row.project === project ? "本项目" : "其它项目"}预约 ${row.starts_at} — ${row.ends_at}`;
+    // C-800: name the holder project, source and id, never its cards.
+    if (row.ends_at && String(row.ends_at) > now && !row.run_id) {
+      const r = reservationOf(row);
+      return `${key}：${r.holder_project === project ? "本项目" : `项目 ${r.holder_project}`}，${RESERVATION_SOURCE_LABELS[r.source]}，${r.starts_at} — ${r.ends_at}，预约 ${r.reservation_id}`;
+    }
     return `${key}：${row.run_id && tx.runs.get(String(row.project), row.run_id as RunId)?.status === "running" ? "已占用" : "等待释放核验"}`;
   });
   if (project)

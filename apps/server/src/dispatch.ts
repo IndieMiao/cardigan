@@ -70,6 +70,7 @@ import {
   assignmentResourceKeys,
   bindRepairAttempt,
   boundedRetirementError,
+  CAPACITY_WAIT_REASON,
   crossRepairSendBoundary,
   deferIfTargetWait,
   deferTargetAttempt,
@@ -2600,7 +2601,7 @@ export class Dispatcher {
               project,
               a,
               run,
-              blocked ?? "并发额度或排队顺序",
+              blocked ?? CAPACITY_WAIT_REASON,
               at,
               !!blocked,
             );

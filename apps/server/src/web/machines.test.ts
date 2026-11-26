@@ -1096,3 +1096,85 @@ test("C-666: each remote binding shows its latest directory usage; local has non
     store.close();
   }
 });
+
+test("C-800 the machine detail lists every project's reservation; only the owner's session cancels one, with a reason", async () => {
+  const f = await m5Cross({
+    machineHost: {
+      check: vi.fn<MachineHost["check"]>(),
+      bindings: () => () => null,
+      workerRecord: () => null,
+    },
+  });
+  try {
+    const store = f.store();
+    store.createProject({ id: "peer" });
+    const starts_at = new Date(f.now() - 3_600_000).toISOString(),
+      ends_at = new Date(f.now() + 3_600_000).toISOString();
+    store.database
+      .prepare(
+        "INSERT INTO machine_resource_leases (generation, machine, resource, project, starts_at, ends_at, endpoints, source) VALUES ('rsv-1', 'local', 'android.emulator', 'peer', ?, ?, '[]', 'human')",
+      )
+      .run(starts_at, ends_at);
+    const path = `${f.projectPath("/machines")}/local`,
+      cancel = `${path}/reservations/rsv-1/cancel`;
+    const post = (url: string, body: Record<string, unknown>, extra = {}) =>
+      f.call(url, { method: "POST", body, ...extra });
+    expect(
+      (await post(cancel, { reason: "x" }, { anonymous: true })).status,
+    ).toBe(401);
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    expect(
+      (
+        await post(
+          cancel,
+          { reason: "x" },
+          { headers: { authorization: `Bearer ${f.token(f.primary.owner)}` } },
+        )
+      ).status,
+    ).toBe(403);
+    expect((await f.call(path)).json).toMatchObject({
+      machine: {
+        reservations: [
+          {
+            reservation_id: "rsv-1",
+            resource: "android.emulator",
+            holder_project: "peer",
+            source: "human",
+            starts_at,
+            ends_at,
+          },
+        ],
+      },
+    });
+    expect((await post(cancel, {})).status).toBe(400);
+    expect((await post(cancel, { reason: "  " })).status).toBe(400);
+    expect((await post(cancel, { reason: "ok", extra: 1 })).status).toBe(400);
+    expect(
+      (await post(`${path}/reservations/missing/cancel`, { reason: "r" }))
+        .status,
+    ).toBe(404);
+    const done = await post(cancel, { reason: "所有者要求恢复模拟器" });
+    expect(done.status).toBe(200);
+    expect(done.json).toEqual({ reservation_id: "rsv-1", released_runs: 0 });
+    expect((await f.call(path)).json).toMatchObject({
+      machine: { reservations: [] },
+    });
+    expect((await post(cancel, { reason: "again" })).status).toBe(409);
+    expect(
+      store
+        .getUpdates({ project_id: "peer" })
+        .events.filter(
+          (e) => e.type === "machine_resource_reservation_cancelled",
+        )
+        .map((e) => e.payload),
+    ).toEqual([
+      expect.objectContaining({
+        reservation_id: "rsv-1",
+        reason: "所有者要求恢复模拟器",
+      }),
+    ]);
+  } finally {
+    await f.close();
+  }
+});

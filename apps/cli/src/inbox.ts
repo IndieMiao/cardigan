@@ -226,7 +226,7 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
       lines.push(`等待并发名额（${queued.length}）`);
       for (const run of queued)
         lines.push(
-          `  ${run.run_id} ${run.assignment_id}${run.card_id ? ` ${run.card_id}` : ""} ${run.machine_id} ${run.dispatch_reason ?? ""} 排队中（前面还有 ${run.ahead} 个）`,
+          `  ${run.run_id} ${run.assignment_id}${run.card_id ? ` ${run.card_id}` : ""} ${run.machine_id} ${run.dispatch_reason ?? ""} 排队中（前面还有 ${run.ahead} 个）${run.resource_wait ? `；${run.resource_wait.reason}` : ""}`,
         );
     }
     if (paused.length) {
