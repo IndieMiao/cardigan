@@ -6,6 +6,7 @@ export {
   Copy as CopyIcon,
   Ellipsis as MoreHorizontalIcon,
   TriangleAlert as AlertIcon,
+  X as CloseIcon,
 } from "lucide-react";
 
 export function ListIcon() {

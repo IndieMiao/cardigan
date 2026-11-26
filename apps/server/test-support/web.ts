@@ -47,6 +47,9 @@ export interface HarnessOptions {
   readonly launchSettings?: WebServerOptions["launchSettings"];
   readonly roleLaunchConfig?: WebServerOptions["roleLaunchConfig"];
   readonly executionDiagnostics?: WebServerOptions["executionDiagnostics"];
+  readonly assignmentOps?: WebServerOptions["assignmentOps"];
+  /** C-703: serve an existing store (left open on close) instead of a new one. */
+  readonly store?: Store;
   readonly mergeGate?: WebServerOptions["mergeGate"];
   readonly clock?: WebServerOptions["clock"];
   readonly contextUsage?: WebServerOptions["contextUsage"];
@@ -80,9 +83,9 @@ export async function webHarness(
     writeFileSync(file, content);
   }
   const dataDir = mkdtempSync(join(tmpdir(), "cardigan-web-data-"));
-  const store = Store.open(
-    options.diskStore ? { dataDir } : { dbPath: ":memory:" },
-  );
+  const store =
+    options.store ??
+    Store.open(options.diskStore ? { dataDir } : { dbPath: ":memory:" });
   if (options.password !== undefined) {
     store.setWebPassword(options.password);
   }
@@ -115,6 +118,7 @@ export async function webHarness(
     ...(options.executionDiagnostics
       ? { executionDiagnostics: options.executionDiagnostics }
       : {}),
+    ...(options.assignmentOps ? { assignmentOps: options.assignmentOps } : {}),
     config: resolveWebConfig(options.env, {
       port: 0,
       staticDir,
@@ -145,7 +149,7 @@ export async function webHarness(
     },
     close: async () => {
       await server.close();
-      store.close();
+      if (options.store === undefined) store.close();
       rmSync(staticDir, { recursive: true, force: true });
       rmSync(dataDir, { recursive: true, force: true });
     },

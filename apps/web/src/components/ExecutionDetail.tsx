@@ -2,7 +2,14 @@ import {
   sessionMaintenanceNeedsAttention,
   sessionMaintenanceReasons,
 } from "@cardigan/domain";
-import { type ReactNode, useContext, useEffect, useState } from "react";
+import {
+  Fragment,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import type {
   CardiganClient,
   ExecutionAssignment,
@@ -13,6 +20,13 @@ import { assignmentMachine, runMachine } from "../execution-machine.js";
 import { assignmentActivity } from "../execution-sort.js";
 import { routeHash } from "../route.js";
 import { statusLabel } from "../status.js";
+import {
+  AssignmentOpsFeedback,
+  DiffSheet,
+  StartButton,
+  StopDialog,
+  useAssignmentOps,
+} from "./AssignmentOps.js";
 import {
   AssignmentMachine,
   contextReading,
@@ -41,6 +55,7 @@ import {
   DetailMuted,
   DetailNextStep,
   DetailNextStepFact,
+  DetailNextStepFeedback,
   DetailNextStepLine,
   DetailSection,
   DetailStatusRow,
@@ -347,17 +362,37 @@ const duration = (from: string | undefined, now: number) => {
   return `${Math.floor(minutes / 1440)} 天`;
 };
 
-/** The facts under the panel title, joined by a muted middle dot. */
-function Facts({ items }: { readonly items: readonly ReactNode[] }) {
-  const shown = items.filter(Boolean);
+/** The panel's buttons in order; nothing when none applies. */
+const actionGroup = (...buttons: readonly ReactNode[]) => {
+  const shown = buttons.filter(Boolean);
+  return shown.length
+    ? shown.map((button, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: a fixed short list.
+        <Fragment key={index}>{button}</Fragment>
+      ))
+    : undefined;
+};
+/** A panel fact: one node, or pieces that may wrap between them. */
+type Fact = ReactNode | readonly ReactNode[];
+/**
+ * The facts under the panel title, joined by a muted middle dot. C-703: the
+ * dot ends the fact before it, so a wrapped line never starts with “·”.
+ */
+function Facts({ items }: { readonly items: readonly Fact[] }) {
+  const shown = items
+    .filter(Boolean)
+    .map((item) => (Array.isArray(item) ? item : [item]));
   if (!shown.length) return null;
   return (
     <DetailNextStepLine>
-      {shown.map((item, index) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: a fixed short list.
-        <DetailNextStepFact key={index}>
-          {index > 0 && <span aria-hidden="true">·</span>}
-          {item}
+      {shown.map((pieces, index) => (
+        <DetailNextStepFact
+          // biome-ignore lint/suspicious/noArrayIndexKey: a fixed short list.
+          key={index}
+          separated={index < shown.length - 1}
+          tail={pieces.at(-1)}
+        >
+          {pieces.slice(0, -1)}
         </DetailNextStepFact>
       ))}
     </DetailNextStepLine>
@@ -365,13 +400,11 @@ function Facts({ items }: { readonly items: readonly ReactNode[] }) {
 }
 /** A Run as 编号 + 类型 + 状态, after an optional lead-in. */
 const runRef = (run: RunView | undefined, prefix?: string) =>
-  run && (
-    <>
-      {prefix && <span>{prefix}</span>}
-      <IdTag id={run.id} label={runKind(run)} />
-      <RunStatus run={run} />
-    </>
-  );
+  run && [
+    ...(prefix ? [<span key="prefix">{prefix}</span>] : []),
+    <IdTag key="id" id={run.id} label={runKind(run)} />,
+    <RunStatus key="status" run={run} />,
+  ];
 
 export function ExecutionDetail({
   a,
@@ -407,6 +440,10 @@ export function ExecutionDetail({
   const cardHref = a.card_id
     ? routeHash({ kind: "card", projectId, cardId: a.card_id })
     : undefined;
+  const name =
+    a.employee?.name ??
+    a.author_display ??
+    (a.work_item_id ? (roleName ?? a.role_id) : standingLabel(a, roleName));
 
   // C-702: the commands and their display conditions are unchanged; they
   // move into the folded 命令行 section.
@@ -448,6 +485,26 @@ export function ExecutionDetail({
       !!item,
   );
 
+  // C-703: a work-item Assignment is started, restarted and stopped right
+  // here (human sessions only); standing ones keep the copied commands.
+  const ops = useAssignmentOps(client, projectId, a);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const [stopOpen, setStopOpen] = useState(false);
+  const stopTrigger = useRef<HTMLElement | null>(null);
+  const managed = !a.external && a.status === "active" && !!a.work_item_id;
+  const cardOpen = !["done", "cancelled", "awaiting_merge"].includes(
+    a.card_status ?? "",
+  );
+  const canStop = managed && !!a.runtime_ref;
+  const openStop = () => {
+    stopTrigger.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setStopOpen(true);
+  };
+  const busy = ops.pending !== undefined;
+
   const menu: MenuItem[] = [
     ...(attachable
       ? [
@@ -465,6 +522,17 @@ export function ExecutionDetail({
         window.location.hash = needsYou;
       },
     },
+    ...(canStop
+      ? [
+          { id: "stop-separator", kind: "separator" as const },
+          {
+            id: "stop",
+            label: <span className="danger">停止并取消执行…</span>,
+            disabled: busy,
+            onSelect: openStop,
+          },
+        ]
+      : []),
   ];
 
   const copyAttach = attachable && (
@@ -478,9 +546,45 @@ export function ExecutionDetail({
       <a href={cardHref}>打开卡片</a>
     </Button>
   );
+  const viewDiff = (emphasis: boolean) =>
+    managed &&
+    a.worktree_path && (
+      <Button
+        type="button"
+        size="regular"
+        variant={emphasis ? "emphasis" : "default"}
+        onClick={() => setDiffOpen(true)}
+      >
+        查看改动
+      </Button>
+    );
+  const stopButton = canStop && (
+    <Button
+      type="button"
+      size="regular"
+      variant="destructive"
+      disabled={busy}
+      onClick={openStop}
+    >
+      停止执行…
+    </Button>
+  );
+  const needsYouButton = (
+    <Button asChild size="regular">
+      <a href={needsYou}>到 Needs You 处理</a>
+    </Button>
+  );
+  // 会话维护中 and 失联 wait on you: restart first, then Needs You and stop.
+  const attention = managed
+    ? actionGroup(
+        cardOpen && <StartButton ops={ops} restart={!!a.runtime_ref} />,
+        needsYouButton,
+        stopButton,
+      )
+    : needsYouButton;
   const panel: Record<
     ExecutionState,
-    { title: ReactNode; facts: ReactNode[]; actions?: ReactNode }
+    { title: ReactNode; facts: Fact[]; actions?: ReactNode }
   > = {
     running: {
       title: (
@@ -498,7 +602,7 @@ export function ExecutionDetail({
           `已运行 ${duration(latest.started_at, now)}`,
         reading && `上下文 ${Math.round(reading.meter)}%`,
       ],
-      actions: copyAttach,
+      actions: actionGroup(viewDiff(true), copyAttach, stopButton),
     },
     idle: {
       title:
@@ -513,23 +617,28 @@ export function ExecutionDetail({
           duration(activity, now) &&
           `空闲 ${duration(activity, now)}`,
       ],
-      actions: startable && (
-        <Button
-          type="button"
-          size="regular"
-          onClick={() =>
-            void copy(cliCommand(projectId, "assignment start", a.id))
-          }
-        >
-          <CopyIcon aria-hidden="true" />
-          复制启动命令
-        </Button>
-      ),
+      actions: managed
+        ? actionGroup(
+            startable && <StartButton ops={ops} restart={false} />,
+            viewDiff(!startable),
+          )
+        : startable && (
+            <Button
+              type="button"
+              size="regular"
+              onClick={() =>
+                void copy(cliCommand(projectId, "assignment start", a.id))
+              }
+            >
+              <CopyIcon aria-hidden="true" />
+              复制启动命令
+            </Button>
+          ),
     },
     maintenance: {
       title: `会话维护中：${maintenanceLabel ?? ""}`,
       facts: [runRef(latest, "上次执行")],
-      actions: copyAttach,
+      actions: attention,
     },
     lost: {
       title: maintenanceLabel ? `会话失联：${maintenanceLabel}` : "会话失联",
@@ -537,11 +646,7 @@ export function ExecutionDetail({
         runRef(latest),
         duration(activity, now) && `${duration(activity, now)}没有活动`,
       ],
-      actions: (
-        <Button asChild size="regular">
-          <a href={needsYou}>到 Needs You 处理</a>
-        </Button>
-      ),
+      actions: attention,
     },
     suspended: {
       title: "已暂停",
@@ -600,10 +705,13 @@ export function ExecutionDetail({
       <DetailNextStep
         aria-label="当前"
         title={current.title}
-        mine={state === "lost"}
+        mine={state === "lost" || state === "maintenance"}
         actions={current.actions || undefined}
       >
         <Facts items={current.facts} />
+        <DetailNextStepFeedback>
+          <AssignmentOpsFeedback ops={ops} />
+        </DetailNextStepFeedback>
       </DetailNextStep>
 
       <DetailSection title="运行环境">
@@ -703,6 +811,26 @@ export function ExecutionDetail({
         </DetailCommandList>
       </DetailDisclosure>
       {feedback}
+      {managed && (
+        <>
+          <StopDialog
+            open={stopOpen}
+            onOpenChange={setStopOpen}
+            a={a}
+            run={latest && unfinished(latest) ? latest : undefined}
+            name={name}
+            ops={ops}
+            restoreFocus={() => stopTrigger.current?.focus()}
+          />
+          <DiffSheet
+            open={diffOpen}
+            onOpenChange={setDiffOpen}
+            client={client}
+            projectId={projectId}
+            a={a}
+          />
+        </>
+      )}
     </CardDetailLayout>
   );
 }

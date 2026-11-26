@@ -54,6 +54,11 @@ import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { mergeProjectSettings } from "../merge-push-loop.js";
 import { type ProcessRole, processHealthView } from "../process-health.js";
 import { readActivity } from "./activity-state.js";
+import {
+  ASSIGNMENT_OPS_ROUTE,
+  type AssignmentOps,
+  serveAssignmentOps,
+} from "./assignment-ops.js";
 import { readAttachmentRefs } from "./attachment-ref-read.js";
 import {
   serveAttachment,
@@ -133,7 +138,7 @@ import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
 import { serveAttachmentThumbnail } from "./thumbnails.js";
 import { serveUploads } from "./uploads.js";
 import { WorkerWizards } from "./worker-wizards.js";
-import { serveWrite } from "./write.js";
+import { serveWrite, type WriteContext } from "./write.js";
 
 const HTTP_METHODS = new Set([
   "GET",
@@ -167,6 +172,8 @@ export interface WebServerOptions {
     | undefined;
   readonly launchProfiles?: () => readonly string[];
   readonly executionDiagnostics?: HostOpsService["executionDiagnostics"];
+  /** C-703: start, stop and diff an Assignment from the Workbench. */
+  readonly assignmentOps?: AssignmentOps;
   readonly cardsCache?: CardsCacheOptions;
   /**
    * C-644: run the heavy Workbench reads (cards, card detail, Needs You,
@@ -246,6 +253,7 @@ interface RequestContext {
   readonly roleLaunchConfig: WebServerOptions["roleLaunchConfig"];
   readonly launchProfiles: WebServerOptions["launchProfiles"];
   readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
+  readonly assignmentOps: WebServerOptions["assignmentOps"];
   readonly buildInfo: BuildInfo;
   readonly cardsCache: CardsCacheOptions | undefined;
   /** C-644: one heavy read, in its worker when configured, else inline. */
@@ -555,6 +563,7 @@ export async function startWebServer(
         queueWarningMinutes,
         contextUsage: options.contextUsage,
         executionDiagnostics: options.executionDiagnostics,
+        assignmentOps: options.assignmentOps,
         shutdown: shutdown.signal,
         secureCookie: config.publicOrigins.includes(`https://${hostHeader}`),
         log,
@@ -638,9 +647,9 @@ async function handleApi(context: RequestContext): Promise<void> {
       path.slice("/api/device-pairings".length),
     );
 
-  // C-725: an Agent's MCP Token is refused outright, not asked to log in.
+  // C-725/C-703: an Agent's MCP Token is refused outright, not asked to log in.
   if (
-    CAPABILITY_GUIDES_ROUTE.test(path) &&
+    (CAPABILITY_GUIDES_ROUTE.test(path) || ASSIGNMENT_OPS_ROUTE.test(path)) &&
     req.headers.authorization !== undefined
   )
     throw new HttpRejection(403, "unauthorized", "仅限人类登录会话");
@@ -923,27 +932,24 @@ async function serveProjectRoute(
   )
     return;
 
-  if (
-    await serveWrite(
-      {
-        checks: context.checks,
-        req,
-        res,
-        store,
-        project_id,
-        clock,
-        dataDir: context.dataDir,
-        roleLaunchConfig: context.roleLaunchConfig,
-        launchProfiles: context.launchProfiles,
-        mergeGate: context.mergeGate?.forProject(project_id),
-        runLimit: context.runLimit,
-        runLimitMaximum: context.runLimitMaximum,
-        authorize: () => requireSession(context),
-      },
-      rest,
-    )
-  )
+  const write: WriteContext = {
+    checks: context.checks,
+    req,
+    res,
+    store,
+    project_id,
+    clock,
+    dataDir: context.dataDir,
+    roleLaunchConfig: context.roleLaunchConfig,
+    launchProfiles: context.launchProfiles,
+    mergeGate: context.mergeGate?.forProject(project_id),
+    runLimit: context.runLimit,
+    runLimitMaximum: context.runLimitMaximum,
+    authorize: () => requireSession(context),
+  };
+  if (await serveAssignmentOps({ ...write, ops: context.assignmentOps }, rest))
     return;
+  if (await serveWrite(write, rest)) return;
 
   if (req.method !== "GET") methodNotAllowed(["GET"]);
 
