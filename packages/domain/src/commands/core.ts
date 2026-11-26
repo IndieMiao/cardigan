@@ -164,6 +164,7 @@ type CommandName =
   | "recover_standing_pm"
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
+  | "notify_early_merge_conflicts"
   | "remind_system_waits"
   | "system_complete_card"
   | "refresh_card_dependencies"
@@ -345,6 +346,7 @@ export class CommandDraft {
       "recover_standing_pm",
       "apply_auto_risk_tags",
       "record_merge_shadow",
+      "notify_early_merge_conflicts",
       "remind_system_waits",
       "system_complete_card",
       "refresh_card_dependencies",

@@ -31,6 +31,7 @@ export * from "./commands/delivery-rework.js";
 export * from "./commands/deployment.js";
 export * from "./commands/dispatch-recovery.js";
 export * from "./commands/dispatch-stop.js";
+export * from "./commands/early-merge-conflicts.js";
 export * from "./commands/employee.js";
 export * from "./commands/employee-assignment.js";
 export * from "./commands/flow.js";

@@ -315,6 +315,12 @@ export interface MergeGit {
     base: string,
     commit: string,
   ): Promise<readonly string[]>;
+  /** C-782: lock-free merge-tree of a delivered head on `base`; conflicted paths. */
+  trialMerge?(
+    project: CentralProject,
+    base: string,
+    head: string,
+  ): Promise<readonly string[]>;
   prepare?(project: CentralProject, plan: MergePlan): Promise<PreparedMerge>;
   publish?(
     project: CentralProject,
@@ -976,6 +982,13 @@ export class ServerGit implements GitBinding {
   ): Promise<readonly string[]> {
     const repository = await this.central.ensureCentral(project);
     return this.transport.changedPaths(repository, base, commit);
+  }
+  trialMerge(
+    project: CentralProject,
+    base: string,
+    head: string,
+  ): Promise<readonly string[]> {
+    return this.central.trialMerge(project, base, head);
   }
   /**
    * P2a-13 A1: the workspace packages of one candidate commit, read from that

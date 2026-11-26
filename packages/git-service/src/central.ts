@@ -539,6 +539,31 @@ export class CentralRepositoryService {
     }
     return this.publishBatch(project, batch);
   }
+  /** The final preparation's merge, before any commit object; `undefined` when already merged. */
+  private async resolvedMerge(repository: string, base: string, sha: string) {
+    if (await this.git.isAncestor(repository, sha, base)) return undefined;
+    const merged = await this.git.mergeTree(repository, base, sha);
+    return merged.conflicts.length === 1 &&
+      merged.conflicts[0] === "docs/development-plan.md" &&
+      this.git.resolvePlanConflict
+      ? this.git.resolvePlanConflict(repository, base, sha, merged)
+      : merged;
+  }
+  /**
+   * C-782: paths the final merge preparation would report as conflicted for a
+   * delivered head on the current baseline. Only merge-tree objects are
+   * written: no commit, ref, index, worktree or repository lock is involved.
+   */
+  async trialMerge(
+    project: CentralProject,
+    base: string,
+    sha: string,
+  ): Promise<readonly string[]> {
+    if (![base, sha].every((value) => fullSha.test(value)))
+      throw new Error("Trial merge requires full commit SHAs");
+    const repository = await this.ensureCentral(project);
+    return (await this.resolvedMerge(repository, base, sha))?.conflicts ?? [];
+  }
   private async mergeCandidate(
     repository: string,
     base: string,
@@ -546,20 +571,8 @@ export class CentralRepositoryService {
     message: string,
     identity: { readonly name: string; readonly email: string },
   ) {
-    if (await this.git.isAncestor(repository, sha, base))
-      return { sha: base, conflicts: [] as readonly string[] };
-    let merged = await this.git.mergeTree(repository, base, sha);
-    if (
-      merged.conflicts.length === 1 &&
-      merged.conflicts[0] === "docs/development-plan.md" &&
-      this.git.resolvePlanConflict
-    )
-      merged = await this.git.resolvePlanConflict(
-        repository,
-        base,
-        sha,
-        merged,
-      );
+    const merged = await this.resolvedMerge(repository, base, sha);
+    if (!merged) return { sha: base, conflicts: [] as readonly string[] };
     if (merged.conflicts.length)
       return { sha: base, conflicts: merged.conflicts };
     return {
