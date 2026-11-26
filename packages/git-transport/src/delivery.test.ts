@@ -510,6 +510,91 @@ test("Flow Lite: a conflict resolution retaining exactly the reviewed author sid
   ).toMatchObject({ kind: "conflict" });
 });
 
+/** C-782: main and author both edit list.ts after a shared baseline commit. */
+async function conflictingEdits(base: string, main: string, author: string) {
+  await writeFile(join(f.source, "list.ts"), base);
+  await git(f.source, "add", "list.ts");
+  await git(f.source, "commit", "-m", "Shared list");
+  await central.syncFromSource(f.project);
+  await git(work, "fetch", repo, "main");
+  await git(work, "merge", "--no-edit", "FETCH_HEAD");
+  const old = await writeCommit("list.ts", author);
+  await writeFile(join(f.source, "list.ts"), main);
+  await git(f.source, "add", "list.ts");
+  await git(f.source, "commit", "-m", "Main list");
+  await central.syncFromSource(f.project);
+  await git(work, "fetch", repo, "main");
+  await expect(git(work, "merge", "--no-edit", "FETCH_HEAD")).rejects.toThrow();
+  return old;
+}
+async function resolveConflict(text: string) {
+  await writeFile(join(work, "list.ts"), text);
+  await git(work, "add", "list.ts");
+  await git(work, "commit", "--no-edit");
+  return git(work, "rev-parse", "HEAD");
+}
+const list = (...names: string[]) =>
+  names.map((name) => `export * from "./${name}.js";\n`).join("");
+
+test.each([
+  ["main then author", list("a", "b", "c", "d")],
+  ["author then main", list("a", "c", "b", "d")],
+])(
+  "C-782: an insertion conflict keeping both inserted blocks verbatim is reusable (%s)",
+  async (_order, resolved) => {
+    const old = await conflictingEdits(
+      list("a", "d"),
+      list("a", "b", "d"),
+      list("a", "c", "d"),
+    );
+    expect(
+      await equivalence(old, await resolveConflict(resolved)),
+    ).toMatchObject({
+      kind: "conflict",
+      paths: ["list.ts"],
+      union_paths: ["list.ts"],
+    });
+  },
+);
+
+test.each([
+  ["an edited inserted line", list("a", "b", "c2", "d")],
+  ["a dropped automatic line", list("b", "c", "d")],
+  ["an extra line", list("a", "b", "c", "x", "d")],
+])(
+  "C-782: an insertion conflict resolution with %s still requires review",
+  async (_case, resolved) => {
+    const old = await conflictingEdits(
+      list("a", "d"),
+      list("a", "b", "d"),
+      list("a", "c", "d"),
+    );
+    expect(
+      await equivalence(old, await resolveConflict(resolved)),
+    ).toBeUndefined();
+  },
+);
+
+test("C-782: both sides changing the same line cannot be proved by keeping both", async () => {
+  const old = await conflictingEdits(
+    list("a", "b", "d"),
+    list("a", "main", "d"),
+    list("a", "author", "d"),
+  );
+  expect(
+    await equivalence(
+      old,
+      await resolveConflict(list("a", "main", "author", "d")),
+    ),
+  ).toBeUndefined();
+  // The reviewed author side alone remains the pre-existing provable resolution.
+  await git(work, "reset", "--hard", "HEAD^");
+  await expect(git(work, "merge", "--no-edit", "FETCH_HEAD")).rejects.toThrow();
+  expect(
+    await equivalence(old, await resolveConflict(list("a", "author", "d"))),
+  ).toMatchObject({ kind: "conflict" });
+});
+
 test.each([false, true])(
   "Flow Lite: snapshot proof accepts data-only snapshot updates and rejects executable code (%s)",
   async (malicious) => {

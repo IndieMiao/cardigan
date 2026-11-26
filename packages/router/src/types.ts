@@ -66,6 +66,7 @@ export type RuleId =
   | "6.4/card dependencies"
   | "C-763/card watch"
   | "C-769/review rejection withdrawn"
+  | "C-782/early merge conflict"
   | "6.4/precheck finished"
   | "flow-v2/B2"
   | "flow-v2/B3a"

@@ -130,6 +130,7 @@ export async function reviewEquivalence(
     if (after.conflicts.length) return;
     let kind = "baseline";
     const paths: string[] = [];
+    const unionPaths: string[] = [];
     if (before.tree !== after.tree) {
       const commits = await Promise.all(
         [before, after].map((merge) =>
@@ -151,6 +152,28 @@ export async function reviewEquivalence(
       )
         return;
       if (!changes.length) return;
+      // C-782: lazily re-render the reviewed merge with merge-base sections.
+      let diff3: Map<string, string | undefined> | undefined;
+      const unionResolved = async (path: string, resolved: string) => {
+        if (!diff3) {
+          const merge = await git.mergeTree(repository, baseline, old, {
+            conflictStyle: "diff3",
+          });
+          const commit = await git.commitTree(repository, {
+            tree: merge.tree,
+            parents: [baseline],
+            message: "Review equivalence comparison",
+            author: identity,
+          });
+          diff3 = new Map(
+            (await git.fileDiffs?.(repository, commit, newCommit))?.map(
+              (change) => [change.path, change.before],
+            ),
+          );
+        }
+        const text = diff3.get(path);
+        return text !== undefined && bothSides(text, baseline, old, resolved);
+      };
       for (const file of changes) {
         if (
           file.status !== "M" ||
@@ -162,9 +185,19 @@ export async function reviewEquivalence(
           file.after.includes("\0")
         )
           return;
-        const expected = before.conflicts.includes(file.path)
+        const conflicted = before.conflicts.includes(file.path);
+        const expected = conflicted
           ? authorSide(file.before, baseline, old)
           : file.before;
+        if (
+          conflicted &&
+          expected !== file.after &&
+          (await unionResolved(file.path, file.after))
+        ) {
+          paths.push(file.path);
+          unionPaths.push(file.path);
+          continue;
+        }
         if (expected === undefined) return;
         if (expected === file.after) {
           paths.push(file.path);
@@ -204,6 +237,7 @@ export async function reviewEquivalence(
           compared_new_tree: after.tree,
           kind,
           paths,
+          ...(unionPaths.length ? { union_paths: unionPaths } : {}),
         },
       },
     };
@@ -242,4 +276,78 @@ function authorSide(
     if (phase !== 1) out.push(line);
   }
   return phase === 0 && resolved > 0 ? out.join("") : undefined;
+}
+
+/**
+ * C-782: in a diff3 rendering, every conflict hunk keeps the reviewed author's
+ * side verbatim. A hunk whose merge base is empty (both sides only inserted
+ * lines at the same place) may instead keep both inserted blocks verbatim in
+ * either order, the same content a clean merge would have produced had one
+ * line separated them. Every other line must equal the automatic merge.
+ */
+function bothSides(
+  text: string,
+  baseline: string,
+  old: string,
+  after: string,
+): boolean {
+  const start = `<<<<<<< ${baseline}\n`,
+    end = `>>>>>>> ${old}`;
+  const lines = text.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
+  const segments: (string | { main: string; base: string; author: string })[] =
+    [];
+  let phase = 0,
+    plain = "",
+    main = "",
+    base = "",
+    author = "";
+  for (const line of lines) {
+    if (line === start && phase === 0) {
+      segments.push(plain);
+      plain = main = base = author = "";
+      phase = 1;
+      continue;
+    }
+    if (/^\|{7}(?: [^\n]*)?\n$/u.test(line) && phase === 1) {
+      phase = 2;
+      continue;
+    }
+    if (line === "=======\n" && phase === 2) {
+      phase = 3;
+      continue;
+    }
+    if ((line === `${end}\n` || line === end) && phase === 3) {
+      segments.push({ main, base, author });
+      phase = 0;
+      continue;
+    }
+    if (/^(?:<{7}|={7}|>{7}|\|{7})/u.test(line)) return false;
+    if (phase === 0) plain += line;
+    else if (phase === 1) main += line;
+    else if (phase === 2) base += line;
+    else author += line;
+  }
+  if (phase !== 0 || segments.length < 2) return false;
+  segments.push(plain);
+  // Forward set of reachable offsets: at most three choices per hunk.
+  let reachable = new Set([0]);
+  for (const segment of segments) {
+    const choices =
+      typeof segment === "string"
+        ? [segment]
+        : segment.base === "" && segment.main !== "" && segment.author !== ""
+          ? [
+              segment.author,
+              segment.main + segment.author,
+              segment.author + segment.main,
+            ]
+          : [segment.author];
+    const next = new Set<number>();
+    for (const offset of reachable)
+      for (const choice of choices)
+        if (after.startsWith(choice, offset)) next.add(offset + choice.length);
+    if (!next.size) return false;
+    reachable = next;
+  }
+  return reachable.has(after.length);
 }
