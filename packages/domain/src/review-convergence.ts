@@ -265,12 +265,15 @@ export interface RejectionStreakEpisode {
 export function rejectionStreakEpisodes(state: {
   readonly events: readonly Event[];
   readonly reviews: readonly (Pick<Review, "id" | "work_item_id"> &
-    Partial<Pick<Review, "verdict" | "evidence_pending">>)[];
+    Partial<Pick<Review, "verdict" | "evidence_pending" | "withdrawn">>)[];
 }): RejectionStreakEpisode[] {
   // C-618: pure platform evidence waits neither extend nor end a streak.
   const items = new Map(
     state.reviews
-      .filter((r) => !evidenceWait(r))
+      // C-769: a voided rejection is neither a rejection nor a streak end.
+      .filter(
+        (r) => !evidenceWait(r) && !(r.verdict === "reject" && r.withdrawn),
+      )
       .map((r) => [r.id, r.work_item_id]),
   );
   const streaks = new Map<WorkItemId, number>();

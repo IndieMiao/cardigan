@@ -1738,6 +1738,27 @@ export interface ExecutionRunPage {
   readonly next_cursor: string | null;
 }
 
+/** C-703: what a Workbench stop did (`cardigan assignment stop`). */
+export interface AssignmentStopResult {
+  readonly released: boolean;
+  readonly aborted: boolean;
+  readonly held?: boolean;
+  /** The session it was asked to stop had been settled or replaced. */
+  readonly stale?: boolean;
+}
+/** C-703: an Assignment's worktree changes (`cardigan worktree diff`). */
+export interface AssignmentDiff {
+  readonly worktree_path: string;
+  readonly branch?: string;
+  readonly head_sha: string;
+  readonly tracked: readonly string[];
+  readonly untracked: readonly string[];
+  readonly reachable: boolean;
+  /** `git diff HEAD`, cut at a line end when `truncated`. */
+  readonly patch: string;
+  readonly truncated: boolean;
+}
+
 export interface ActivityFilter {
   readonly card_id?: string;
   readonly role?: string;
@@ -2800,6 +2821,23 @@ export interface CardiganClient {
     assignmentId: string,
     before?: string,
   ): Promise<ExecutionRunPage>;
+  /** C-703: start (or, with `restart`, stop then start) a session. */
+  startAssignment(
+    projectId: string,
+    assignmentId: string,
+    restart: boolean,
+    idempotencyKey: string,
+  ): Promise<{ readonly run_id: string }>;
+  /** C-703: stop the session and cancel its current Run. */
+  stopAssignment(
+    projectId: string,
+    assignmentId: string,
+    idempotencyKey: string,
+  ): Promise<AssignmentStopResult>;
+  assignmentDiff(
+    projectId: string,
+    assignmentId: string,
+  ): Promise<AssignmentDiff>;
   needsYou(projectId: string, invalidation?: string): Promise<NeedsPage>;
   needsYouCounts(
     projectId: string,
@@ -3561,6 +3599,39 @@ export class HttpCardiganClient implements CardiganClient {
     const query = before ? `?${new URLSearchParams({ before })}` : "";
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/execution/assignments/${encodeURIComponent(assignmentId)}/runs${query}`,
+    );
+  }
+  startAssignment(
+    projectId: string,
+    assignmentId: string,
+    restart: boolean,
+    idempotencyKey: string,
+  ): Promise<{ readonly run_id: string }> {
+    return this.write(
+      projectId,
+      `execution/assignments/${encodeURIComponent(assignmentId)}/start`,
+      restart ? { restart: true } : {},
+      idempotencyKey,
+    ) as Promise<{ readonly run_id: string }>;
+  }
+  stopAssignment(
+    projectId: string,
+    assignmentId: string,
+    idempotencyKey: string,
+  ): Promise<AssignmentStopResult> {
+    return this.write(
+      projectId,
+      `execution/assignments/${encodeURIComponent(assignmentId)}/stop`,
+      {},
+      idempotencyKey,
+    ) as Promise<AssignmentStopResult>;
+  }
+  assignmentDiff(
+    projectId: string,
+    assignmentId: string,
+  ): Promise<AssignmentDiff> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/execution/assignments/${encodeURIComponent(assignmentId)}/diff`,
     );
   }
   decisionHistory(

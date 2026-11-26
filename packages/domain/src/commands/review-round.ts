@@ -1,4 +1,4 @@
-import type { Delivery, Run, WorkItem } from "../entities.js";
+import type { Delivery, Review, Run, WorkItem } from "../entities.js";
 import { appendEvents, eventById } from "../event-index.js";
 import type { EventId } from "../ids.js";
 import { streakAlignment } from "../review-convergence.js";
@@ -89,6 +89,13 @@ export function currentReviewTarget(d: CommandDraft, item: WorkItem) {
     );
 }
 
+/**
+ * C-769: a rejection voided because its evidence arrived after the reviewer
+ * read the card is kept for audit but is not an effective rejection.
+ */
+export const voidedRejection = (r: Pick<Review, "verdict" | "withdrawn">) =>
+  r.verdict === "reject" && r.withdrawn !== undefined;
+
 /** Budget measures rejected reviews; pass, conditional and reuse never spend it. */
 export function reviewRound(
   d: CommandDraft,
@@ -98,8 +105,12 @@ export function reviewRound(
   return (
     d
       .list("reviews")
-      .filter((r) => r.work_item_id === item.id && r.verdict === "reject")
-      .length + 1
+      .filter(
+        (r) =>
+          r.work_item_id === item.id &&
+          r.verdict === "reject" &&
+          !voidedRejection(r),
+      ).length + 1
   );
 }
 
@@ -110,7 +121,10 @@ export function reviewRound(
 export function rejectionStreak(d: CommandDraft, item: WorkItem) {
   const reviews = d
     .list("reviews")
-    .filter((r) => r.work_item_id === item.id && !evidenceWait(r))
+    .filter(
+      (r) =>
+        r.work_item_id === item.id && !evidenceWait(r) && !voidedRejection(r),
+    )
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
   const end = reviews.findIndex((r) => r.verdict !== "reject");
   return end === -1 ? reviews : reviews.slice(0, end);

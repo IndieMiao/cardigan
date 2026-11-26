@@ -309,6 +309,35 @@ test.each([
   });
 });
 
+// C-769: voiding a rejection caused by late evidence restores the pre-review states.
+test.each([
+  ["verify", "failed", "ready"],
+  ["delivery", "rejected", "submitted"],
+  ["produce", "changes_requested", "delivered"],
+  ["produce", "in_progress", "delivered"],
+] as const)("%s %s + rejection_withdrawn -> %s", (machine, from, to) => {
+  expect(transition(machine, from, "rejection_withdrawn")).toEqual({
+    ok: true,
+    value: to,
+  });
+});
+
+test.each([
+  ["verify", "passed"],
+  ["verify", "in_progress"],
+  ["verify", "waiting_decision"],
+  ["delivery", "accepted"],
+  ["delivery", "superseded"],
+  ["produce", "accepted"],
+  ["produce", "blocked"],
+  ["produce", "waiting_decision"],
+] as const)("%s %s cannot take rejection_withdrawn", (machine, from) => {
+  expect(transition(machine, from, "rejection_withdrawn")).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+});
+
 test("transition lookup rejects inherited object properties", () => {
   expect(transition("produce", "__proto__" as ProduceStatus, "cancel").ok).toBe(
     false,
