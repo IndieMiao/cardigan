@@ -10,6 +10,29 @@ import {
 } from "@cardigan/domain";
 import { prepare } from "./statements.js";
 
+/**
+ * C-785: event types no project's in-memory event log keeps, in any command
+ * state scope. Their rows stay in the `events` table, so `get_updates`, the
+ * router, the activity page and every other SQL reader see them as before;
+ * only `listStreams` and the transaction's `listAfter` (both answered from
+ * the log) leave them out. A type belongs here only when no reader of those
+ * two needs it: `cross_card_read` is a read-audit row (about a sixth of all
+ * event bytes in the 11-26 production snapshot) whose one in-process reader,
+ * the `project_snapshot` read audit, queries SQL, and that never routes a
+ * notification or starts a Run.
+ */
+export const NON_RESIDENT_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "cross_card_read",
+]);
+/** Compile-time constants only; checked so the SQL literal stays inert. */
+const SKIPPED = (() => {
+  const types = [...NON_RESIDENT_EVENT_TYPES];
+  if (!types.every((t) => /^[a-z][a-z0-9_]*$/u.test(t)))
+    throw new Error("C-785: invalid non-resident event type");
+  return types.map((t) => `'${t}'`).join(", ");
+})();
+const ROWS_AFTER = `SELECT rowid AS r, doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? AND type NOT IN (${SKIPPED}) ORDER BY rowid`;
+
 /** C-639: the Store's `listStreams` result (an immutable log view). */
 export type EventStreams = EventLogView;
 
@@ -76,9 +99,7 @@ export class CommandEvents {
       const previous = pending.get(project) ?? this.committed.get(project);
       if (previous?.through === through) return previous.view;
       const rows = db
-        .prepare(
-          "SELECT rowid AS r, doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid",
-        )
+        .prepare(ROWS_AFTER)
         .iterate(previous?.through ?? 0, through, project);
       // C-649: the first read decodes straight into a fresh log (no row array
       // or per-stream copy), which keeps the restart peak and RSS down.
@@ -117,9 +138,7 @@ export class CommandEvents {
       let count = 0;
       const rows = (function* () {
         for (const row of db
-          .prepare(
-            "SELECT rowid AS r, doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid LIMIT ?",
-          )
+          .prepare(`${ROWS_AFTER} LIMIT ?`)
           .iterate(from, max, project, limit)) {
           last = Number(row.r);
           count++;

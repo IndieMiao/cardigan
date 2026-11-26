@@ -1044,6 +1044,37 @@ export class Store {
   }
 
   /**
+   * C-785: a stream's events of one type straight from the table (via
+   * `events_by_type`), seq ascending. For types the in-memory event log does
+   * not keep (`NON_RESIDENT_EVENT_TYPES`); nothing is cached.
+   */
+  streamEventsOfType(
+    project_id: ProjectId,
+    card_id: CardId | undefined,
+    type: string,
+  ): Event[] {
+    return prepare(
+      this.#db,
+      "SELECT doc FROM events WHERE project_id = ? AND type = ? AND stream = ? ORDER BY seq",
+    )
+      .all(project_id, type, card_id ?? PROJECT_EVENT_STREAM)
+      .map((row) => JSON.parse(String(row.doc)) as Event);
+  }
+
+  /** C-785: one event by stream and seq from the table, of any type. */
+  eventAt(
+    project_id: ProjectId,
+    card_id: CardId | undefined,
+    seq: number,
+  ): Event | undefined {
+    const row = prepare(
+      this.#db,
+      "SELECT doc FROM events WHERE project_id = ? AND stream = ? AND seq = ?",
+    ).get(project_id, card_id ?? PROJECT_EVENT_STREAM, seq);
+    return row ? (JSON.parse(String(row.doc)) as Event) : undefined;
+  }
+
+  /**
    * Move a read cursor forward. A cursor never goes backwards: an older or
    * repeated `up_to_seq` returns the current value unchanged, and a value past
    * the newest event is rejected instead of being silently clamped.

@@ -66,6 +66,8 @@ export type ExecutionConfig = {
         readonly failures: number;
         readonly duration_ms: number;
       };
+      /** C-784: validity of one host-observed worktree preparation; absent means 30 days. */
+      readonly preparationEvidenceTtlMs?: number;
       readonly publication?: WorkerPublishLimits;
       readonly gitHelper?: { readonly python: string; readonly path: string };
       readonly fileHelper?: { readonly python: string; readonly path: string };

@@ -373,6 +373,7 @@ test("publication has no implicit limits; only complete trusted limits and helpe
     configured({
       publication,
       preparation_cooldown: { failures: 2, duration_ms: 1000 },
+      preparation_evidence_ttl_ms: 86_400_000,
       python: "/usr/bin/python3",
       file_helper: "/opt/worker/worker-files.py",
     }),
@@ -383,6 +384,7 @@ test("publication has no implicit limits; only complete trusted limits and helpe
     failures: 2,
     duration_ms: 1000,
   });
+  expect(parsed?.execution.preparationEvidenceTtlMs).toBe(86_400_000);
   expect(parsed?.execution.fileHelper).toEqual({
     python: "/usr/bin/python3",
     path: "/opt/worker/worker-files.py",
@@ -390,6 +392,9 @@ test("publication has no implicit limits; only complete trusted limits and helpe
   for (const patch of [
     { preparation_cooldown: { failures: 0, duration_ms: 1 } },
     { preparation_cooldown: { failures: 2, duration_ms: -1 } },
+    { preparation_evidence_ttl_ms: 0 },
+    { preparation_evidence_ttl_ms: "86400000" },
+    { preparation_evidence_ttl_ms: 367 * 86_400_000 },
     { publication: {} },
     { publication: { ...publication, timeout_ms: 0 } },
     { publication: { ...publication, file_max_bytes: 8193 } },

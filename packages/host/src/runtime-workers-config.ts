@@ -96,6 +96,17 @@ function cooldown(value: unknown) {
     return invalid();
   return { failures, duration_ms };
 }
+// C-784: an idle worker keeps an observed preparation for at most a year.
+function evidenceTtl(value: unknown) {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value <= 0 ||
+    value > 366 * 86_400_000
+  )
+    return invalid();
+  return value;
+}
 const list = (value: unknown): unknown[] =>
   Array.isArray(value) ? value : invalid();
 const str = (value: unknown): string =>
@@ -156,7 +167,7 @@ export function parseRuntimeWorkers(
       for (const binding of list(m.projects)) {
         const p = object(
           binding,
-          "project_id user gid alias session root path env generation publication preparation_cooldown python file_helper git_helper allow_remote_launch mcp_url mcp_timeout_ms retired_launchd_label",
+          "project_id user gid alias session root path env generation publication preparation_cooldown preparation_evidence_ttl_ms python file_helper git_helper allow_remote_launch mcp_url mcp_timeout_ms retired_launchd_label",
         );
         const project_id = id(p.project_id),
           user = str(p.user),
@@ -231,6 +242,13 @@ export function parseRuntimeWorkers(
           ...(p.preparation_cooldown === undefined
             ? {}
             : { preparationCooldown: cooldown(p.preparation_cooldown) }),
+          ...(p.preparation_evidence_ttl_ms === undefined
+            ? {}
+            : {
+                preparationEvidenceTtlMs: evidenceTtl(
+                  p.preparation_evidence_ttl_ms,
+                ),
+              }),
           ...(p.publication === undefined
             ? {}
             : { publication: workerPublishLimits(p.publication) }),

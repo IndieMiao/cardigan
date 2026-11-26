@@ -23,6 +23,8 @@ export type WorktreePreparation =
   | "missing"
   | "invalid"
   | "expired"
+  /** C-784: proven for this binding before a Run PATH or env edit; awaits the next real preparation. */
+  | "stale"
   | "verified";
 
 /** Transaction-local host evidence. Contains neither worker configuration nor other projects' identities. */

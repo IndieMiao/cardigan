@@ -103,6 +103,7 @@ export const STANDING_ROLE_TOOLS = [
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
+  "replace_primary_work_item",
   "request_delivery_rework",
   "assign",
   "release_assignment",
@@ -158,6 +159,7 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
     (tool) =>
       tool !== "submit_review" &&
       tool !== "replace_verification_work_item" &&
+      tool !== "replace_primary_work_item" &&
       tool !== "request_delivery_rework" &&
       tool !== "withdraw_review" &&
       workItemTool(tool),
@@ -171,6 +173,7 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
       tool !== "request_mobile_signature" &&
       tool !== "publish_artifact" &&
       tool !== "replace_verification_work_item" &&
+      tool !== "replace_primary_work_item" &&
       tool !== "request_delivery_rework" &&
       workItemTool(tool),
   ),

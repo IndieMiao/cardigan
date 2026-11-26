@@ -13,6 +13,7 @@ import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
 import { runExtMessageCommand } from "./ext-message.js";
 import { authorizeCliInvocation, openCliStore } from "./host.js";
+import { runCapacityCommand, runConfigCommand } from "./host-config.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
@@ -77,6 +78,8 @@ const TOP_LEVEL_USAGE = [
   "  init             建库并执行迁移",
   "  self-deploy watch|roles  主机自举部署监督器；只部署中心 main，配置仅来自主机",
   "  deploy adopt|pin|unpin  人工认领 main 区间、固定版本或解除固定；必填 --reason",
+  "  config check     一次校验 merge-gate.yaml、run-capacity.yaml、runtime-workers.yaml（仅人类）",
+  "  capacity show|resource|quota  资源名额和项目上限的数据库覆盖值，改后立即生效（仅人类）",
   "  maintenance begin|run|status|continue|end|abandon  人专用停服维护：暂停派活和自动部署，等在跑工作结束后停服，结束时核对并恢复",
   "  hc upgrade --version <版本>  人专用 hc 升级：核 SHA-256、分版本目录预置，经维护入口切换、冒烟，失败自动回退",
   "  project create   创建项目（--code 必填）；project code 查看或登记项目代号",
@@ -261,6 +264,8 @@ export async function main(
     }
     if (command === "self-deploy") return await runSelfDeployCommand(rest, io);
     if (command === "deploy") return await runDeployCommand(rest, io);
+    if (command === "config") return await runConfigCommand(rest, io);
+    if (command === "capacity") return await runCapacityCommand(rest, io);
     if (command === "maintenance") return await runMaintenanceCommand(rest, io);
     if (command === "hc") return await runHcCommand(rest, io);
     if (command === "member") return await runMemberCommand(rest, io);

@@ -257,11 +257,28 @@ export interface CommandRun<T> {
 }
 
 /**
+ * C-780: build the project's command state in a read transaction before a
+ * write. A cold CLI process otherwise builds the whole project history while
+ * holding SQLite's write lock, stalling every other writer for seconds. The
+ * write transaction still calls `loadCommandState`: the cache is keyed by the
+ * project's committed version, so it is a hit when nothing changed and an
+ * incremental rebuild when another writer committed after this read.
+ */
+export function warmCommandState(store: Store, project_id: ProjectId): void {
+  store.uow.read((tx) => {
+    loadCommandState(tx, project_id);
+  });
+}
+
+/**
  * Run one domain command in a single write transaction: load the project
  * snapshot, reduce it, persist the effect, then run `after` (token issuance
- * happens there, so the assignment and its token commit together).
+ * happens there, so the assignment and its token commit together). The state
+ * is warmed outside the write lock first; authority and state are rechecked
+ * inside it.
  */
 export function runCommand<T>(store: Store, run: CommandRun<T>): T {
+  warmCommandState(store, run.project_id);
   return store.uow.run((tx) => {
     const actor = run.revalidateActor?.() ?? run.actor;
     const state = loadCommandState(tx, run.project_id);

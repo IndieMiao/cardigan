@@ -12,6 +12,7 @@ import {
   readlink,
   realpath,
   rename,
+  rm,
 } from "node:fs/promises";
 import { connect } from "node:net";
 import { delimiter, join, resolve } from "node:path";
@@ -20,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type {
   DeploymentBuild,
+  DeploymentConfigTrial,
   DeploymentDriver,
   DeploymentOperation,
   DeploymentRecord,
@@ -68,14 +70,21 @@ import {
   supervisorHelperArguments,
 } from "./deployment-supervisor-upgrade.js";
 import {
+  type HostConfigCheck,
+  hostConfigFingerprint,
+  snapshotHostConfig,
+} from "./host-config-check.js";
+import {
   fenceLongOperations,
   liveLongOperations,
   releaseLongOperationFence,
 } from "./long-operations.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
+import { type ServerHeap, serverHeap } from "./server-heap.js";
 
 const exec = promisify(execFile);
+const CONFIG_TRIAL_MARKER = "CARDIGAN_HOST_CONFIG_CHECK";
 const PROJECT = "cardigan";
 /** Backoff for a failing supervisor comparison of one unchanged main. */
 const SUPERVISOR_RETRY_MS = 10 * 60_000;
@@ -98,6 +107,16 @@ export const SUPERVISOR_CONFIG_CHECK_SCRIPT = `import { pathToFileURL } from 'no
   await m.loadDeploymentConfig(process.argv[2]);
   if (typeof m.loadSupervisorUpgradeConfig !== 'function') process.exit(3);
   await m.loadSupervisorUpgradeConfig(process.argv[2]);`;
+/**
+ * C-792: the new checkout loads the private copy of the host configuration.
+ * Releases without the checker (an older human pin) exit 3 and are not held.
+ */
+export const HOST_CONFIG_TRIAL_SCRIPT = `import { pathToFileURL } from 'node:url';
+  const m = await import(pathToFileURL(process.argv[1]).href);
+  if (typeof m.checkHostConfig !== 'function') process.exit(3);
+  const result = await m.checkHostConfig({ configDir: process.argv[2],
+    dataDir: process.argv[3], projects: JSON.parse(process.argv[4]) });
+  process.stdout.write('\\n${CONFIG_TRIAL_MARKER} ' + JSON.stringify(result) + '\\n');`;
 class DeploymentCommandUnavailable extends Error {}
 interface State {
   current: DeploymentBuild;
@@ -134,6 +153,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private readonly central: string;
   private readonly ports: readonly number[];
   private readonly buildEnv: NodeJS.ProcessEnv;
+  /** C-785: one heap limit for both server roles, fixed for this supervisor. */
+  readonly serverHeap: ServerHeap;
   private supervisorSha: string | null | undefined;
   private checkedSupervisorMain: string | undefined;
   private failedSupervisorMain?: string;
@@ -152,6 +173,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       env: NodeJS.ProcessEnv;
       /** C-767: absent (the default) keeps the human upgrade reminder only. */
       upgrade?: { config: SupervisorUpgradeConfig; configDir: string };
+      /** C-792: host configuration the new build must load before a switch. */
+      configDir?: string;
     },
   ) {
     this.enabled = options.config.enabled;
@@ -182,6 +205,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       PATH: options.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
       LANG: "C.UTF-8",
     };
+    this.serverHeap = serverHeap(options.env);
+    if (this.serverHeap.warning)
+      process.stderr.write(`${this.serverHeap.warning}\n`);
   }
 
   /** Keep this lock for the whole supervisor lifetime, including idle ticks. */
@@ -795,6 +821,65 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     }
   }
 
+  /** C-792: never the real directory; the trial copy is removed afterwards. */
+  async checkConfig(build: DeploymentBuild): Promise<DeploymentConfigTrial> {
+    const configDir = this.options.configDir;
+    if (!configDir) return { ok: true, errors: [] };
+    const trial = join(this.directory, `config-trial-${randomUUID()}`);
+    await mkdir(trial, { mode: 0o700 });
+    try {
+      await chmod(trial, 0o700);
+      const snapshot = await snapshotHostConfig(configDir, trial);
+      const { fingerprint } = snapshot;
+      if (snapshot.errors.length)
+        return { ok: false, errors: snapshot.errors, fingerprint };
+      const projects = this.options.store
+        .listProjects()
+        .map((p) => ({ id: p.id, base_branch: p.base_branch ?? "main" }));
+      const result = await this.command(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          HOST_CONFIG_TRIAL_SCRIPT,
+          join(build.release, "packages/host/dist/index.js"),
+          trial,
+          this.options.dataDir,
+          JSON.stringify(projects),
+        ],
+        build.release,
+        this.buildEnv,
+      );
+      if (result.code === 3) return { ok: true, errors: [], fingerprint };
+      const line = result.text
+        .split("\n")
+        .findLast((l) => l.startsWith(`${CONFIG_TRIAL_MARKER} `));
+      if (result.code !== 0 || !line)
+        return { ok: false, errors: ["主机配置试加载未能运行"] };
+      const check = JSON.parse(
+        line.slice(CONFIG_TRIAL_MARKER.length + 1),
+      ) as HostConfigCheck;
+      return {
+        ok: check.ok === true,
+        errors: check.files.flatMap((f) =>
+          f.errors.map((error) => `${f.file}：${error}`),
+        ),
+        fingerprint,
+      };
+    } finally {
+      await rm(trial, { recursive: true, force: true });
+    }
+  }
+  async configFingerprint(): Promise<string | undefined> {
+    const configDir = this.options.configDir;
+    if (!configDir) return undefined;
+    try {
+      return await hostConfigFingerprint(configDir);
+    } catch {
+      return undefined;
+    }
+  }
+
   /** C-767: one step of the optional automatic supervisor upgrade. */
   async upgradeSupervisor(): Promise<SupervisorUpgradeStep> {
     return this.upgrader ? this.upgrader.step() : "idle";
@@ -1077,6 +1162,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         cwd: build.release,
         env: {
           ...this.options.env,
+          // C-785: identical for Web and background (and their workers).
+          NODE_OPTIONS: this.serverHeap.node_options,
           CARDIGAN_DATA_DIR: this.options.dataDir,
           ...(this.state.dual ? { CARDIGAN_SUPERVISED: "1" } : {}),
         },

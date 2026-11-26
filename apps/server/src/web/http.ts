@@ -79,6 +79,8 @@ export function requestRoute(path: string): string {
       return prefix + rest;
     if (/^\/work-items\/[^/]+\/manual-assign$/.test(rest))
       return `${prefix}/work-items/:id/manual-assign`;
+    if (/^\/work-items\/[^/]+\/replace-primary$/.test(rest))
+      return `${prefix}/work-items/:id/replace-primary`;
     if (
       rest === "/execution/capacity" ||
       rest === "/needs-you/version" ||

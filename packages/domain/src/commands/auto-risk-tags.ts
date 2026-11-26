@@ -1,23 +1,26 @@
 import { autoRiskPathEvidence } from "../auto-risk.js";
-import type { Actor } from "../entities.js";
+import type { Actor, Card, WorkItem } from "../entities.js";
 import { appendEvents } from "../event-index.js";
 import { highRiskProducts } from "../high-risk.js";
 import type { DeliveryId } from "../ids.js";
 import {
   autoSecurityPaths,
   displayChangedPath,
+  initialReviewMaxRounds,
   mergePathMatches,
   validMergePathList,
 } from "../preferences.js";
+import { activeTemplateRole } from "../templates.js";
 import {
   CommandDraft,
   type CommandPorts,
   type CommandState,
-  command,
   ensure,
 } from "./core.js";
+import { bindRequiredVerifier } from "./late-verifier.js";
 import { syncRiskTagMerge } from "./merge.js";
 import { projectPreferences } from "./preferences.js";
+import { commandWithReadyVerifiers as command } from "./system-rules.js";
 
 /** Host-only, idempotent, add-only risk classification of a persisted product delivery. */
 export function applyAutoRiskTags(
@@ -64,6 +67,10 @@ function apply(d: CommandDraft, deliveryId: DeliveryId) {
         !w.replaced_by_work_item_id &&
         w.target_work_item_id === item.id,
     );
+  const added =
+    highRisk && !covered
+      ? addIndependentReviewer(d, card, item, deliveryId)
+      : undefined;
   const willClassify =
     !card.risk_tags?.includes("security") &&
     autoRiskPathEvidence(delivery)?.paths.some((path) =>
@@ -75,6 +82,7 @@ function apply(d: CommandDraft, deliveryId: DeliveryId) {
     !willClassify &&
     highRisk &&
     !covered &&
+    !added &&
     !appendEvents(d.state.events, d.events).some(
       (e) =>
         ["high_risk_review_required", "auto_risk_tags_applied"].includes(
@@ -112,8 +120,9 @@ function apply(d: CommandDraft, deliveryId: DeliveryId) {
     ),
   ].sort();
   if (!matched.length || card.risk_tags?.includes("security")) return null;
+  // Re-read: adding a reviewer may already have withdrawn a completion.
   const next = {
-    ...card,
+    ...d.card(card.id),
     risk_tags: [...(card.risk_tags ?? []), "security" as const],
   };
   d.put("cards", next);
@@ -145,11 +154,62 @@ function apply(d: CommandDraft, deliveryId: DeliveryId) {
       type: "system",
       delivery_id: delivery.id,
       work_item_id: item.id,
-      body: `系统自动添加 security 标签；命中路径：${matched.map(displayChangedPath).join("、")}。${missing ? "请 PM Ops 补充指向本产出项的必需独立复核项；完成申请仍受原有硬门限制。" : "保留现有独立复核要求。"}${evidence.complete ? "" : "其余路径证据无法完整判读，自动合并保持等待。"}`,
+      body: `系统自动添加 security 标签；命中路径：${matched.map(displayChangedPath).join("、")}。${missing ? "请 PM Ops 补充指向本产出项的必需独立复核项；完成申请仍受原有硬门限制。" : added ? `系统已补充指向本产出项的必需独立复核项 ${added.id}。` : "保留现有独立复核要求。"}${evidence.complete ? "" : "其余路径证据无法完整判读，自动合并保持等待。"}`,
     },
   );
   syncRiskTagMerge(d, next);
   return next;
+}
+
+/**
+ * C-790: a high-risk product without a covering required independent review
+ * gets one from the system. Only creation is automated; the review itself,
+ * reviewer separation and every merge/completion gate are unchanged. Without
+ * an active independent_reviewer role the PM request remains the fallback.
+ */
+function addIndependentReviewer(
+  d: CommandDraft,
+  card: Card,
+  producer: WorkItem,
+  deliveryId: DeliveryId,
+): WorkItem | undefined {
+  if (!activeTemplateRole(d.state.roles, "independent_reviewer")) return;
+  const item: WorkItem = {
+    id: d.ids.next(d.state.project_id, "work_item"),
+    card_id: card.id,
+    kind: "verify",
+    role_id: "independent_reviewer",
+    title: "独立复核",
+    // Like the fast-patch upgrade: a template key keeps it from being made optional.
+    template_key: "independent_review",
+    required: true,
+    status: "todo",
+    depends_on: [],
+    target_work_item_id: producer.id,
+    completion_criteria: [...card.acceptance_criteria],
+    max_review_rounds: initialReviewMaxRounds(
+      "independent_reviewer",
+      projectPreferences(d.state),
+    ),
+  };
+  d.put("work_items", item);
+  d.emit(
+    "work_item_created",
+    card.id,
+    {
+      work_item_id: item.id,
+      target_work_item_id: producer.id,
+      delivery_id: deliveryId,
+      reason: "high_risk_path",
+    },
+    {
+      type: "system",
+      work_item_id: item.id,
+      delivery_id: deliveryId,
+      body: `高危交付缺少同卡必需独立复核，系统已为 ${producer.id} 补充必需独立复核项 ${item.id}。`,
+    },
+  );
+  return bindRequiredVerifier(d, item);
 }
 
 /** Derive system effects inside the same delivery draft and persistence transaction. */

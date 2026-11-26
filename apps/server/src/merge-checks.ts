@@ -23,6 +23,7 @@ import {
   hasPassedMergeCheck,
   latestMergeCheck,
   type MergeBatch,
+  mergeAwaitsNoCheck,
   mergeBatches,
   mergeChain,
   mergeExecutorOutage,
@@ -38,6 +39,8 @@ import {
   recordMergeExecutor,
   recordMergePreparation,
   recordMergeResult,
+  reusablePrecheck,
+  reusePrecheckForCardCheck,
   validateBatchStartupObservation,
   validateMergeBatchMembers,
 } from "@cardigan/domain";
@@ -88,6 +91,7 @@ import {
   requestChecks,
   runCheckExecutor,
   type runInTemporaryCheckout,
+  runningMergeChecks,
   SshCheckExecutor,
   safeCheckDiagnostic,
   sweepCheckoutOrphans,
@@ -106,7 +110,12 @@ import {
   type Store,
   type StoreTransactionContext,
 } from "@cardigan/store";
-import { type AuthorCheckGit, AuthorPrechecks } from "./author-prechecks.js";
+import {
+  type AuthorCheckGit,
+  AuthorPrechecks,
+  type PrecheckSlotOccupant,
+  runningSlotOccupant,
+} from "./author-prechecks.js";
 import { recordCheckFlakes } from "./check-flake-ledger.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import {
@@ -376,7 +385,7 @@ export class MergeChecks {
       onError: (error) => this.report(error),
       recovery: this.recovery,
       ...(options.checkExecutor ? { executor: options.checkExecutor } : {}),
-      reserve: (settings) => this.reservePrecheck(settings),
+      reserve: (settings, busy) => this.reservePrecheck(settings, busy),
       // C-773: the stale fallback and host_ops abandon read the bound run once.
       inspect: async (run, settings) => {
         const config = settings.executor;
@@ -1041,6 +1050,7 @@ export class MergeChecks {
       !previous.recheck_requested
     )
       return undefined;
+    if (await this.reusePrecheck(task)) return undefined;
     const scope = task.batch
       ? { kind: "full" as const }
       : candidate.previous_sha
@@ -1076,6 +1086,69 @@ export class MergeChecks {
     );
     this.seen.add(queued.attempt_id);
     return queued;
+  }
+  /**
+   * C-781: in queue mode the card check of a single-producer card reuses the
+   * author precheck that already passed on the same delivered head. The
+   * precheck ran every configured check (the card tier plus e2e), and a card
+   * result is not bound to a baseline (ADR 0004 §1), so running it again only
+   * repeats the same work. Domain re-derives every condition in the recording
+   * transaction; the batch check still alone authorizes publication.
+   */
+  private async reusePrecheck(task: Task): Promise<boolean> {
+    if (task.batch || !task.settings.queue) return false;
+    if (task.settings.queue.reusePrecheck === false) return false;
+    const project = task.project.project_id;
+    const required = requestChecks(task.settings, undefined, "card")
+      .filter((check) => check.skipReason !== "card_tier")
+      .map((check) => check.name);
+    const reuse = reusablePrecheck(
+      this.state(project),
+      task.plan.card_id,
+      required,
+    );
+    if (!reuse || reuse.plan.completion_id !== task.plan.completion_id)
+      return false;
+    const attempt = randomUUID();
+    const precheck = reuse.precheck.attempt_id;
+    try {
+      const log = await createMergeCheckLog({
+        dataDir: this.options.execution.dataDir,
+        project,
+        attempt,
+        env: task.settings.env,
+      });
+      await log.waiting(
+        `沿用作者预检 ${precheck}（提交 ${reuse.precheck.head_sha}）的通过结果，本次未执行检查。\n预检日志：get_check_log(card_id=${task.plan.card_id}, attempt_id=${precheck})`,
+      );
+    } catch {
+      // The pointer log is a convenience; the reuse fact is the domain record.
+      this.options.onError(new Error("沿用预检的指引日志无法创建"));
+    }
+    try {
+      this.command(project, (s, a, p) => {
+        if (this.fenced(project)) throw new CheckAdmissionClosed();
+        return reusePrecheckForCardCheck(
+          s,
+          a,
+          {
+            card_id: task.plan.card_id,
+            completion_id: task.plan.completion_id,
+            attempt_id: attempt,
+            precheck_attempt_id: precheck,
+            required_checks: required,
+          },
+          p,
+        );
+      });
+    } catch (error) {
+      if (error instanceof CheckAdmissionClosed) throw error;
+      // State moved between the read and the write: run a real check.
+      if (!String((error as Error)?.message).startsWith("illegal_transition"))
+        this.options.onError(new Error("沿用作者预检失败，改为正常检查"));
+      return false;
+    }
+    return true;
   }
   private async scope(
     task: Task,
@@ -1197,59 +1270,120 @@ export class MergeChecks {
       },
     };
   }
-  /** Q-486: reserve only a free target slot after every executable merge. */
-  private async reservePrecheck(settings: Settings) {
+  /**
+   * Q-486: reserve only a free target slot after every executable merge.
+   * C-777: `busy` learns which work holds the slots when none is free.
+   */
+  private async reservePrecheck(
+    settings: Settings,
+    busy?: (occupant: PrecheckSlotOccupant) => void,
+  ) {
     const target = settings.executor;
     if (!target || this.abort.signal.aborted) return;
     const limit = target.type === "github" ? target.maxConcurrent : 1;
-    if (!this.within(() => this.precheckSlotFree(target, limit))) return;
+    const occupant = this.within(() =>
+      this.precheckSlotOccupant(target, limit),
+    );
+    if (occupant) {
+      busy?.(occupant);
+      return;
+    }
     return this.slot({ settings }, () => undefined);
   }
-  private precheckSlotFree(
+  /**
+   * C-777: merge work that will never ask for a check slot by itself (a
+   * host-verified noop, a recorded merge failure) holds no precheck capacity.
+   */
+  private awaitsNoCheck(task: Task): boolean {
+    if (task.batch) return false;
+    const { card_id, completion_id } = task.plan;
+    return this.options.store.uow.read((tx) =>
+      mergeAwaitsNoCheck(
+        tx.events.listAfter(task.project.project_id, card_id, 0),
+        card_id,
+        completion_id,
+      ),
+    );
+  }
+  /**
+   * The work keeping every slot of `target` from an author precheck, or
+   * nothing when one is free. C-777: executable merge work is counted against
+   * the limit like the slot waiters below instead of vetoing on its own, so a
+   * single stuck task cannot stop every precheck on the executor; merge work
+   * still ranks ahead of prechecks (C-647).
+   */
+  private precheckSlotOccupant(
     target: NonNullable<Settings["executor"]>,
     limit: number,
-  ): boolean {
-    const tasks = this.tasks(
+  ): PrecheckSlotOccupant | undefined {
+    const intents = target.type === "github" ? this.admitted() : NO_INTENTS;
+    const inFlight = intents.filter(
+      (intent) => intent.executor === target.name,
+    ).length;
+    const waiting = new Map<string, Task>();
+    for (const task of this.tasks(
       this.options.store.listProjects().map((p) => p.id),
-    );
-    if (
-      tasks.some((task) => {
-        if (
-          (task.settings.executor?.name ?? LOCAL_EXECUTOR) !== target.name ||
-          !this.capacity(task)
-        )
-          return false;
-        const check = this.cardCheck(task);
-        return (
-          !check ||
+    )) {
+      if (
+        (task.settings.executor?.name ?? LOCAL_EXECUTOR) !== target.name ||
+        !this.capacity(task)
+      )
+        continue;
+      const check = this.cardCheck(task);
+      if (
+        (!check ||
           check.recheck_requested ||
           ["queued", "interrupted", "executor_unreachable"].includes(
             check.status,
+          )) &&
+        // Already dispatched work is counted once, in flight.
+        !(
+          check &&
+          intents.some(
+            (intent) =>
+              intent.project === task.project.project_id &&
+              intent.attempt === check.attempt_id,
           )
-        );
-      })
-    )
-      return false;
+        ) &&
+        !this.awaitsNoCheck(task)
+      )
+        waiting.set(this.key(task), task);
+    }
     // C-647: merge work still waiting for a slot (for example on the same-card
     // mutex after a restart) keeps its capacity ahead of author checks.
-    const intents = target.type === "github" ? this.admitted() : NO_INTENTS;
     const backoff = this.backoff();
-    const pending = this.tasks(this.executorProjects(target.name)).filter(
-      (task) => this.waitsForSlot(task, intents, backoff),
-    ).length;
-    if (
-      pending &&
-      intents.filter((intent) => intent.executor === target.name).length +
-        pending >=
-        limit
-    )
-      return false;
+    for (const task of this.tasks(this.executorProjects(target.name)))
+      if (
+        !waiting.has(this.key(task)) &&
+        this.waitsForSlot(task, intents, backoff) &&
+        !this.awaitsNoCheck(task)
+      )
+        waiting.set(this.key(task), task);
     const pool = this.slots.get(target.name);
-    return !(
+    // In-flight intents, held slots and running rows view the same occupied
+    // capacity from different sides: take the largest, never their sum.
+    const occupied = Math.max(
+      inFlight,
+      pool?.used.filter(Boolean).length ?? 0,
+      this.options.store.uow.read(
+        () => runningMergeChecks(this.options.store).get(target.name) ?? 0,
+      ),
+    );
+    const first = waiting.values().next().value;
+    if (first && occupied + waiting.size >= limit)
+      return {
+        kind: first.batch ? "batch_check" : "merge_check",
+        project_id: first.project.project_id,
+        card_id: first.plan.card_id,
+        reason: `${first.project.project_id}/${first.plan.card_id} 的${first.batch ? `批次 ${first.batch.id} ` : ""}合并检查等待执行名额${waiting.size > 1 ? `（共 ${waiting.size} 项合并任务）` : ""}`,
+      };
+    if (
       pool?.waiting.length ||
       (pool?.used.filter(Boolean).length ?? 0) >= limit ||
       !mergeCheckCapacityAvailable(this.options.store, target.name, limit)
-    );
+    )
+      return runningSlotOccupant(target.name, intents, limit);
+    return undefined;
   }
   /** Persist only actual waits; observations never acquire or release capacity. */
   private waiting(task: Task, reason: string, check?: MergeCheckView): false {
