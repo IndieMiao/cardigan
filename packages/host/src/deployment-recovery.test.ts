@@ -5,12 +5,14 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Assignment, Card, Event } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
@@ -526,4 +528,120 @@ test.runIf(process.platform === "linux")(
     }
   },
   15000,
+);
+
+test.runIf(process.platform === "linux")(
+  "C-787: a restarted supervisor starts the build handed over with the stopped server, once, and only when addressed to it",
+  async () => {
+    const f = await fixture();
+    try {
+      // The next main and its built release, as the old supervisor's deployment made them.
+      const work = join(f.root, "work");
+      await f.git(["clone", "-q", f.central, work]);
+      await f.git(["-C", work, "commit", "--allow-empty", "-m", "test: next"]);
+      const next = await f.git(["-C", work, "rev-parse", "HEAD"]);
+      await f.git(["-C", work, "push", "-q", "origin", "HEAD:main"]);
+      await writeFile(join(f.root, "pnpm"), "#!/bin/sh\nexit 0\n", {
+        mode: 0o700,
+      });
+      const built = (await f.driver.build(next)).build;
+      if (!built) throw new Error("fixture build failed");
+      const directory = join(f.root, "data/self-deploy");
+      const root = await realpath(
+        fileURLToPath(new URL("../../../", import.meta.url)),
+      );
+      // The old supervisor's switch: stop record, stopped server, restart plan.
+      const handOver = async (attempt: string, newRoot: string) => {
+        await f.driver.beforeStop({
+          attempt,
+          from: f.sha,
+          to: next,
+          status: "started",
+          build: "passed",
+          ready: false,
+          downtime_ms: 0,
+          summary: "构建已完成",
+        });
+        await f.driver.stop();
+        const plan = {
+          version: 1,
+          attempt: "00000000-0000-4000-8000-0000000000aa",
+          from: "c".repeat(40),
+          to: next,
+          unit: "cardigan-selfdeploy.service",
+          launch_file: join(f.root, "unit.service"),
+          launch_mode: 0o600,
+          launch_sha256: "0".repeat(64),
+          backup_file: join(directory, "supervisor-launch-x.bak"),
+          old_root: join(dirname(newRoot), "release-watch-old"),
+          new_root: newRoot,
+          health_timeout_ms: 60_000,
+          ports: [{ host: "127.0.0.1", port: 1 }],
+          supervisor: { pid: 1, start: "old-supervisor" },
+          requested_at: new Date().toISOString(),
+          deploy: {
+            attempt,
+            sha: next,
+            release: built.release,
+            from: f.sha,
+            stopped_at: Date.now() - 1_000,
+          },
+        };
+        await writeFile(
+          join(directory, "supervisor-upgrade.json"),
+          JSON.stringify(plan),
+          { mode: 0o600 },
+        );
+      };
+      // Addressed to another checkout: ordinary recovery of the old build.
+      await handOver(
+        "00000000-0000-4000-8000-000000000001",
+        join(dirname(root), "release-watch-other"),
+      );
+      await f.restart();
+      expect(f.driver.takeHandoff()).toBeUndefined();
+      expect((await f.state()).current.sha).toBe(f.sha);
+      expect((await f.records())[0]).toMatchObject({
+        attempt: "00000000-0000-4000-8000-000000000001",
+        status: "rolled_back",
+      });
+      // Addressed to this checkout: startup leaves the server stopped and
+      // keeps the capacity for the controller, which starts `next` first.
+      await handOver("00000000-0000-4000-8000-000000000002", root);
+      await f.restart();
+      expect((await f.state()).process).toBeUndefined();
+      expect(f.store.uow.read(() => deploymentInProgress(f.store))).toBe(true);
+      vi.spyOn(f.driver, "refreshRoles").mockResolvedValue();
+      await new DeploymentController(f.driver).tick();
+      const state = await f.state();
+      expect(state).toMatchObject({
+        current: { sha: next, release: built.release },
+        previous: { sha: f.sha },
+        ready: true,
+      });
+      expect(executionOwner(state.process.pid)?.start).toBe(
+        state.process.start,
+      );
+      expect((await f.records())[0]).toMatchObject({
+        attempt: "00000000-0000-4000-8000-000000000002",
+        from: f.sha,
+        to: next,
+        status: "deployed",
+        ready: true,
+        summary: expect.stringContaining("与监督器升级合并为一次停起"),
+      });
+      expect(f.store.uow.read(() => deploymentInProgress(f.store))).toBe(false);
+      // Consumed: a later restart with the plan still present starts `next`
+      // normally and replays nothing.
+      const count = (await f.records()).length;
+      await f.driver.stop();
+      await f.restart();
+      expect(f.driver.takeHandoff()).toBeUndefined();
+      expect((await f.state()).current.sha).toBe(next);
+      expect(await f.records()).toHaveLength(count);
+    } finally {
+      await f.close();
+    }
+  },
+  30000,
 );

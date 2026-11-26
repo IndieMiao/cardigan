@@ -164,6 +164,46 @@ export interface SupervisorUpgradePlan {
   readonly supervisor: ExecutionOwner;
   readonly server?: ExecutionOwner;
   readonly requested_at: string;
+  /**
+   * C-787: the deployment this restart finishes. The old server is already
+   * stopped; the new supervisor starts `release` at startup, or restores
+   * `from` when it does not become ready.
+   */
+  readonly deploy?: SupervisorHandoffPlan;
+}
+
+/** C-787: what the new supervisor needs to start the handed-over build. */
+export interface SupervisorHandoffPlan {
+  /** Attempt of the deployment's durable stop record. */
+  readonly attempt: string;
+  readonly sha: string;
+  /** Built release of `sha` in the deployment directory. */
+  readonly release: string;
+  /** The deployed SHA whose server was stopped. */
+  readonly from: string;
+  /** Epoch ms when the old server was stopped. */
+  readonly stopped_at: number;
+  /** Database backup taken after the stop, when migrations changed. */
+  readonly backup_file?: string;
+}
+
+function validHandoffPlan(d: unknown): d is SupervisorHandoffPlan {
+  if (!d || typeof d !== "object" || Array.isArray(d)) return false;
+  const v = d as SupervisorHandoffPlan;
+  return (
+    UUID.test(v.attempt) &&
+    SHA.test(v.sha) &&
+    SHA.test(v.from) &&
+    typeof v.release === "string" &&
+    isAbsolute(v.release) &&
+    v.release === resolve(v.release) &&
+    v.release !== "/" &&
+    Number.isSafeInteger(v.stopped_at) &&
+    v.stopped_at > 0 &&
+    (v.backup_file === undefined ||
+      (typeof v.backup_file === "string" &&
+        /^database-[a-f0-9-]{36}\.bak$/u.test(v.backup_file)))
+  );
 }
 
 const planPath = (directory: string) => join(directory, PLAN_FILE);
@@ -215,7 +255,9 @@ export async function readSupervisorUpgradePlan(
     ) ||
     !owner(p.supervisor) ||
     (p.server !== undefined && !owner(p.server)) ||
-    typeof p.requested_at !== "string"
+    typeof p.requested_at !== "string" ||
+    (p.deploy !== undefined &&
+      (!validHandoffPlan(p.deploy) || p.deploy.sha !== p.to))
   )
     throw new Error("Invalid supervisor upgrade plan");
   return p;
@@ -476,6 +518,11 @@ export interface SupervisorUpgradeHost {
   /** Compare again next tick, so a blocked upgrade raises the human reminder. */
   recheck(): void;
   /**
+   * C-787: extra health window (ms) for a restart that also starts the
+   * handed-over build: its start and ready, and a rollback to the old build.
+   */
+  switchWindowMs?(): number;
+  /**
    * The waiter row closing check admission is one per process and shared
    * with deployments: report this upgrade's wait, never delete it directly.
    */
@@ -511,6 +558,10 @@ export class SupervisorUpgrader {
   private noticed = new Set<string>();
   private capacityWait = false;
   private waiter = false;
+  /** C-787: the main whose preparation this incarnation already tried. */
+  private attempted: string | undefined;
+  /** C-787: an earlier helper's plan file was present at the last step. */
+  private planPresent = false;
   constructor(
     private readonly host: SupervisorUpgradeHost,
     private readonly config: SupervisorUpgradeConfig,
@@ -542,6 +593,44 @@ export class SupervisorUpgrader {
       this.pending = { from: supervisor, to: main };
     else this.pending = undefined;
     return true;
+  }
+
+  /**
+   * C-787: how the deployment of `target` (central main) joins this upgrade.
+   * "prepare": defer that deployment for one upgrade step, which prepares
+   * the new supervisor. "join": prepared; the deployment stops the server
+   * and hands its start to the restarted supervisor (`handOff`). Undefined:
+   * deploy as before; the upgrade follows separately, if at all.
+   */
+  join(target: string): "prepare" | "join" | undefined {
+    if (
+      this.restartingSince !== undefined ||
+      this.planPresent ||
+      this.pending?.to !== target
+    )
+      return undefined;
+    if (this.prepared?.to === target) return "join";
+    return this.attempted === target ? undefined : "prepare";
+  }
+
+  /**
+   * C-787: restart now as the final step of a deployment of the prepared
+   * main. The deployment has stopped the server and holds the capacity and
+   * the operation fence; they stay held until this supervisor is replaced.
+   * False (with the upgrade recorded failed, launch file restored) means the
+   * deployment starts the new build itself.
+   */
+  async handOff(deploy: SupervisorHandoffPlan): Promise<boolean> {
+    const target = this.prepared;
+    if (
+      this.restartingSince !== undefined ||
+      !target ||
+      target.to !== deploy.sha ||
+      this.pending?.to !== deploy.sha ||
+      !validHandoffPlan(deploy)
+    )
+      return false;
+    return (await this.restart(target, deploy)) === "restarting";
   }
 
   private notice(key: string, text: string) {
@@ -638,6 +727,7 @@ export class SupervisorUpgrader {
     const existing = await readSupervisorUpgradePlan(this.host.directory).catch(
       () => "unsafe" as const,
     );
+    this.planPresent = Boolean(existing);
     if (existing) {
       if (existing === "unsafe")
         this.notice(
@@ -653,9 +743,11 @@ export class SupervisorUpgrader {
         );
       return "waiting";
     }
-    // Deploy the server first; the supervisor follows the version it runs.
-    const deployed = await this.host.idleDeployment();
-    if (deployed !== pending.to) return "waiting";
+    // C-787: a deployment of this main defers at most this one step for it.
+    this.attempted = pending.to;
+    // Prepare while the server runs any build, so that the deployment of the
+    // same main joins the restart; never during a switch or maintenance.
+    if ((await this.host.idleDeployment()) === undefined) return "waiting";
     if (this.prepared?.to !== pending.to) {
       // Another incarnation (or a helper) may have ended an attempt since.
       if (readSupervisorUpgradeState(this.host.store, pending.from).blocked) {
@@ -700,6 +792,8 @@ export class SupervisorUpgrader {
       this.prepared = target;
     }
     const target = this.prepared;
+    // Main not deployed yet: its deployment hands over the restart (C-787).
+    // Otherwise (already deployed, e.g. by a pin) restart on its own.
     if (!target || (await this.host.idleDeployment()) !== target.to)
       return "waiting";
     if (liveLongOperations(this.host.store).length) return "waiting";
@@ -738,7 +832,14 @@ export class SupervisorUpgrader {
     return { text, mode };
   }
 
-  private async restart(target: Prepared): Promise<SupervisorUpgradeStep> {
+  private async restart(
+    target: Prepared,
+    deploy?: SupervisorHandoffPlan,
+  ): Promise<SupervisorUpgradeStep> {
+    // A handed-over deployment owns the capacity and the operation fence.
+    const releaseHold = () => {
+      if (!deploy) this.releaseHold();
+    };
     const backup = join(
       this.host.directory,
       `supervisor-launch-${target.attempt}.bak`,
@@ -753,7 +854,7 @@ export class SupervisorUpgrader {
       );
       await replaceFile(backup, launch.text, 0o600);
     } catch (error) {
-      this.releaseHold();
+      releaseHold();
       return this.fail(
         target,
         error instanceof LaunchFileRejected
@@ -763,7 +864,7 @@ export class SupervisorUpgrader {
     }
     const owner = executionOwner(process.pid);
     if (!owner) {
-      this.releaseHold();
+      releaseHold();
       return this.fail(target, "监督器进程身份不可用");
     }
     const server = this.host.server();
@@ -779,11 +880,18 @@ export class SupervisorUpgrader {
       backup_file: backup,
       old_root: this.host.root,
       new_root: target.release,
-      health_timeout_ms: this.config.health_timeout_ms,
+      health_timeout_ms: deploy
+        ? Math.min(
+            MAX_HEALTH_TIMEOUT_MS,
+            this.config.health_timeout_ms +
+              Math.max(0, this.host.switchWindowMs?.() ?? 0),
+          )
+        : this.config.health_timeout_ms,
       ports: this.host.ports(),
       supervisor: owner,
       ...(server ? { server } : {}),
       requested_at: new Date(this.host.now()).toISOString(),
+      ...(deploy ? { deploy } : {}),
     };
     let rewrote = false;
     try {
@@ -795,7 +903,9 @@ export class SupervisorUpgrader {
       this.record(
         target,
         "restarting",
-        "单卡与批次合并检查均空闲、无进行中的部署，改写启动配置并通过 systemd 重启监督器",
+        deploy
+          ? `与服务部署合并为一次停起：旧服务已停，改写启动配置并通过 systemd 重启监督器，由新监督器启动 ${deploy.sha.slice(0, 12)}`
+          : "单卡与批次合并检查均空闲、无进行中的部署，改写启动配置并通过 systemd 重启监督器",
       );
       if (!(await this.host.launchHelper(target.attempt, this.host.root)))
         throw new Error("helper");
@@ -810,7 +920,7 @@ export class SupervisorUpgrader {
         } catch {
           restored = false;
         }
-      this.releaseHold();
+      releaseHold();
       return this.fail(
         target,
         restored
