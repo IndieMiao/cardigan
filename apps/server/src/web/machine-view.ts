@@ -6,6 +6,7 @@ import {
 } from "@cardigan/host";
 import {
   readMachineObservationsInTransaction,
+  readWorkerUsage,
   type Store,
 } from "@cardigan/store";
 import {
@@ -168,6 +169,9 @@ export function machineView(
             ...(f.reason ? { reason: f.reason } : {}),
           })),
           machine_check: observed.health,
+          // C-666: this project's directories on a remote worker; null until read.
+          disk_usage:
+            m.id === "local" ? null : readWorkerUsage(store, p.id, m.id),
           last_requested_check: options.checks.latest(m.id, p.id),
           assignments,
         };

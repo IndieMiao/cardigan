@@ -8,6 +8,7 @@ test.each([
   "launch_reload_failed",
   "host_disk_space_low",
   "host_memory_pressure",
+  "worker_disk_space_low",
   // C-390: host maintenance began, timed out, ended or needs recovery.
   "host_maintenance_notice",
 ])("%s is a host-only, nonblocking notice with durable read state", (type) => {

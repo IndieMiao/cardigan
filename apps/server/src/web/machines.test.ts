@@ -9,6 +9,7 @@ import {
 import {
   beginMachineObservation,
   completeMachineObservation,
+  recordWorkerUsage,
   Store,
 } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
@@ -1022,6 +1023,75 @@ test("C-708: this project's binding lists unverified catalog keys with the built
     ]);
     expect(peer?.capability_failures).toEqual([]);
     expect(JSON.stringify(machine)).not.toContain("private-ref");
+  } finally {
+    store.close();
+  }
+});
+
+test("C-666: each remote binding shows its latest directory usage; local has none", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    for (const project of ["cardigan", "sensen"]) {
+      store.createProject({ id: project });
+      store.uow.run((tx) => {
+        tx.machines.put(project, machine());
+        tx.machines.put(project, {
+          ...machine(),
+          id: "mac-mini",
+          label: "mac-mini",
+          herdr_machine: "mac-mini",
+          os: "darwin",
+          arch: "arm64",
+        });
+      });
+    }
+    const GiB = 1024 ** 3;
+    const measured = {
+      measured_at: "2026-11-25T03:00:00.000Z",
+      free_bytes: 9 * GiB,
+      total_bytes: 228 * GiB,
+      worktrees: { bytes: 85 * GiB, directories: 40 },
+      builds: { bytes: 42 * GiB, directories: 34 },
+      runs: { bytes: 24 * GiB, directories: 50 },
+      complete: true,
+    };
+    recordWorkerUsage(store, "sensen", "mac-mini", {
+      observed_at: measured.measured_at,
+      status: "measured",
+      measured,
+    });
+    recordWorkerUsage(store, "cardigan", "mac-mini", {
+      observed_at: "2026-11-25T03:30:00.000Z",
+      status: "skipped",
+      skipped_reason: "helper_outdated",
+    });
+    const clock = { now: () => new Date().toISOString() };
+    const checks = new MachineChecks(
+      store,
+      clock,
+      new AbortController().signal,
+    );
+    const view = machineView(store, "sensen", { checks }, clock.now());
+    const usage = (id: string) =>
+      Object.fromEntries(
+        (view.find((m) => m.id === id)?.bindings ?? []).map((b) => [
+          b.project_id,
+          b.disk_usage,
+        ]),
+      );
+    expect(usage("mac-mini")).toEqual({
+      sensen: {
+        observed_at: measured.measured_at,
+        status: "measured",
+        measured,
+      },
+      cardigan: {
+        observed_at: "2026-11-25T03:30:00.000Z",
+        status: "skipped",
+        skipped_reason: "helper_outdated",
+      },
+    });
+    expect(usage("local")).toEqual({ cardigan: null, sensen: null });
   } finally {
     store.close();
   }

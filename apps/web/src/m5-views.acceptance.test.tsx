@@ -482,22 +482,25 @@ test("§8.5: execution environment actions use copyable commands and hide start 
   });
   expect(toggle.closest("tr")?.textContent).toContain("失联");
   fireEvent.click(toggle);
+  // C-702: a lost session links to Needs You from the 当前 panel; the
+  // commands sit in the folded 命令行 section.
+  expect(
+    within(screen.getByRole("region", { name: "当前" }))
+      .getByRole("link", { name: "到 Needs You 处理" })
+      .getAttribute("href"),
+  ).toBe("#/p/p-1/needs-you");
+  fireEvent.click(screen.getByRole("button", { name: /^命令行/ }));
   expect(
     screen.queryByRole("button", { name: "复制启动或恢复会话" }),
   ).toBeNull();
   expect(screen.getByRole("button", { name: "复制检查异常" })).toBeTruthy();
-  expect(
-    screen
-      .getByRole("link", { name: "处理拍板、清理或失联事项" })
-      .getAttribute("href"),
-  ).toBe("#/p/p-1/needs-you");
   // Copying is the only action: the UI never runs the command itself.
   const clipboard = vi.fn(async () => {});
   Object.defineProperty(navigator, "clipboard", {
     value: { writeText: clipboard },
     configurable: true,
   });
-  fireEvent.click(screen.getByRole("button", { name: "复制查看 Diff" }));
+  fireEvent.click(screen.getByRole("button", { name: "复制查看改动" }));
   await waitFor(() => expect(clipboard).toHaveBeenCalledTimes(1));
   expect(clipboard).toHaveBeenCalledWith(
     "cardigan worktree diff 'A-1' --project 'p-1'",

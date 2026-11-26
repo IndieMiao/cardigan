@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,8 +10,15 @@ import {
   HC_RELEASE,
 } from "@cardigan/runtime-herdr";
 import { afterEach, expect, test, vi } from "vitest";
-import { workerHelperDigests } from "./worker-helper-release.js";
-import { workerReadiness, workerReadinessScript } from "./worker-readiness.js";
+import {
+  softHelperMismatch,
+  workerHelperDigests,
+} from "./worker-helper-release.js";
+import {
+  observedHelperRelease,
+  workerReadiness,
+  workerReadinessScript,
+} from "./worker-readiness.js";
 
 vi.mock("@cardigan/runtime-herdr", async (original) => ({
   ...(await original<typeof import("@cardigan/runtime-herdr")>()),
@@ -46,7 +54,7 @@ const reply = (value: Record<string, unknown>) =>
     file: process.execPath,
     args: [
       "-e",
-      `process.stdout.write(${JSON.stringify(JSON.stringify({ protocol: 2, matching: true, ...value }))})`,
+      `process.stdout.write(${JSON.stringify(JSON.stringify({ protocol: 3, matching: true, ...value }))})`,
     ],
   });
 
@@ -211,7 +219,7 @@ test("a legacy publication helper is rejected before launch; version alone canno
     matching: false,
   });
   expect(await workerReadiness(execution)).toEqual([
-    "worker helper 落后（已装 1，需要 2）",
+    "worker helper 落后（已装 1，需要 3）",
   ]);
   reply({ version: `hc ${HC_RELEASE.version}`, failures: [], matching: false });
   expect(await workerReadiness(execution)).toEqual([
@@ -278,8 +286,143 @@ test("real probe compares a release and a pre-run-command whitelist on a simulat
     expect(legacy).not.toContain("run-command\\.py|");
     await writeFile(path, legacy);
     expect((await workerReadiness(config))[0]).toBe(
-      "worker helper 落后（已装 1，需要 2）",
+      "worker helper 落后（已装 1，需要 3）",
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// C-666: the usage report raised the release to protocol 3. A protocol-2
+// worker keeps dispatching with only a digest warning (C-608); its usage is
+// skipped.
+test("protocol 2 is admitted with a warning and remembered as previous", async () => {
+  const fingerprint = execution.target?.fingerprint;
+  reply({ version: `hc ${HC_RELEASE.version}`, failures: [] });
+  expect(await workerReadiness(execution)).toEqual([]);
+  expect(observedHelperRelease(fingerprint)).toBe("current");
+  reply({
+    version: `hc ${HC_RELEASE.version}`,
+    failures: [],
+    protocol: 2,
+    matching: false,
+  });
+  const previous = await workerReadiness(execution);
+  expect(previous).toEqual(["worker helper 与当前部署的 SHA-256 不一致"]);
+  expect(previous.every(softHelperMismatch)).toBe(true);
+  expect(observedHelperRelease(fingerprint)).toBe("previous");
+  // A protocol-3 helper with other bytes still answers the usage report.
+  reply({
+    version: `hc ${HC_RELEASE.version}`,
+    failures: [],
+    protocol: 3,
+    matching: false,
+  });
+  expect(await workerReadiness(execution)).toEqual([
+    "worker helper 与当前部署的 SHA-256 不一致",
+  ]);
+  expect(observedHelperRelease(fingerprint)).toBe("current");
+  // Below protocol 2 stays a hard mismatch and is not remembered.
+  reply({
+    version: `hc ${HC_RELEASE.version}`,
+    failures: [],
+    protocol: 1,
+    matching: false,
+  });
+  expect(await workerReadiness(execution)).toEqual([
+    "worker helper 落后（已装 1，需要 3）",
+  ]);
+  expect(observedHelperRelease(fingerprint)).toBeUndefined();
+  reply({
+    version: `hc ${HC_RELEASE.version}`,
+    failures: ["worker_helpers"],
+    protocol: 2,
+    matching: false,
+  });
+  await workerReadiness(execution);
+  expect(observedHelperRelease(fingerprint)).toBeUndefined();
+  vi.mocked(agentProcessCommand).mockRejectedValueOnce(new Error("offline"));
+  expect(await workerReadiness(execution)).toEqual(["worker_unreachable"]);
+  expect(observedHelperRelease(fingerprint)).toBeUndefined();
+});
+
+test("real probe admits the previous release (protocol 2) with only a soft digest warning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-previous-"));
+  try {
+    const sha = (bytes: Buffer | string) =>
+      createHash("sha256").update(bytes).digest("hex");
+    // The previous release: its verbatim worker-git.py, worker-files.py before
+    // the protocol bump, and the unchanged worker-primitives.py.
+    const files = {
+      "worker-git.py": await readFile(
+        new URL("../test-support/worker-git-v2.py", import.meta.url),
+      ),
+      "worker-files.py": Buffer.from(
+        (
+          await readFile(
+            new URL("../../../deploy/worker-files.py", import.meta.url),
+            "utf8",
+          )
+        )
+          .replace(/^# 3 \(C-666\): .*\n/mu, "")
+          .replace(/^PUBLICATION_PROTOCOL = 3$/mu, "PUBLICATION_PROTOCOL = 2"),
+      ),
+      "worker-primitives.py": await readFile(
+        new URL("../../../deploy/worker-primitives.py", import.meta.url),
+      ),
+    };
+    for (const [name, bytes] of Object.entries(files))
+      await writeFile(join(root, name), bytes);
+    expect(sha(files["worker-files.py"])).not.toBe(
+      workerHelperDigests()["worker-files.py"],
+    );
+    // The old helper has no usage report; the current one does.
+    expect(files["worker-git.py"].toString()).not.toContain("def usage(");
+    expect(
+      await readFile(
+        new URL("../../../deploy/worker-git.py", import.meta.url),
+        "utf8",
+      ),
+    ).toContain("def usage(");
+    vi.mocked(agentProcessCommand).mockImplementation(
+      async (_config, args) => ({
+        file: "python3",
+        args: [
+          "-IB",
+          "-c",
+          workerReadinessScript.replace(
+            "try:\n    paths=",
+            "protected=lambda path: None\ntry:\n    paths=",
+          ),
+          args.at(-1) ?? "",
+        ],
+      }),
+    );
+    const config = {
+      ...execution,
+      agentRoot: root,
+      gitHelper: {
+        python: "/usr/bin/python3",
+        path: join(root, "worker-git.py"),
+      },
+      fileHelper: {
+        python: "/usr/bin/python3",
+        path: join(root, "worker-files.py"),
+      },
+    };
+    const blockers = await workerReadiness(config);
+    expect(blockers[0]).toBe("worker helper 与当前部署的 SHA-256 不一致");
+    // Besides the soft digest warning, only the fixture's missing directory
+    // layout and hc remain.
+    expect(
+      blockers.every(
+        (b) =>
+          softHelperMismatch(b) ||
+          b === "worker_directories" ||
+          b === "hc_version",
+      ),
+    ).toBe(true);
+    expect(observedHelperRelease(config.target?.fingerprint)).toBe("previous");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

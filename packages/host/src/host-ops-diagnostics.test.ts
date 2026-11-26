@@ -15,7 +15,7 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import { parseLaunchConfig } from "@cardigan/roles";
-import { Store } from "@cardigan/store";
+import { recordWorkerUsage, Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { writeDeploymentRecord } from "./deployment-audit.js";
 import { HostOpsService } from "./host-ops.js";
@@ -149,7 +149,38 @@ test("host ops returns deployment and upstream diagnostics together and revalida
         { failures: 1, duration_ms: 1000 },
       );
     });
+    // C-666: each worker's latest usage report for this project only.
+    const usage = {
+      observed_at: "2026-11-13T00:00:00.000Z",
+      status: "measured" as const,
+      measured: {
+        measured_at: "2026-11-13T00:00:00.000Z",
+        free_bytes: 9 * 1024 ** 3,
+        total_bytes: 228 * 1024 ** 3,
+        worktrees: { bytes: 85 * 1024 ** 3, directories: 40 },
+        builds: { bytes: 42 * 1024 ** 3, directories: 34 },
+        runs: { bytes: 24 * 1024 ** 3, directories: 50 },
+        complete: true,
+      },
+    };
+    recordWorkerUsage(store, project, "worker-a", usage);
+    recordWorkerUsage(store, project, "worker-b", {
+      observed_at: "2026-11-13T00:00:00.000Z",
+      status: "skipped",
+      skipped_reason: "helper_outdated",
+    });
+    store.createProject({ id: "other" });
+    recordWorkerUsage(store, "other", "worker-c", usage);
     const view = await read.handler(read.input.parse({}), context);
+    expect((view as { worker_usage: unknown }).worker_usage).toEqual([
+      { machine_id: "worker-a", ...usage },
+      {
+        machine_id: "worker-b",
+        observed_at: "2026-11-13T00:00:00.000Z",
+        status: "skipped",
+        skipped_reason: "helper_outdated",
+      },
+    ]);
     expect(view).toMatchObject({
       worker_maintenance: expect.arrayContaining([
         ...Object.entries(workerHelperDigests()).map(([name, digest]) =>

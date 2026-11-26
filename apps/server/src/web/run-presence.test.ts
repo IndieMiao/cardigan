@@ -10,6 +10,8 @@ import { cardDetail, cardListViews, executionView } from "./read.js";
 import {
   assignmentPresence,
   precheckIndex,
+  runningFirst,
+  runningSince,
   strongestPresence,
 } from "./run-presence.js";
 
@@ -198,11 +200,12 @@ describe("board participants", () => {
       ["员工1", { state: "running" }],
       ["员工2", { state: "idle" }],
     ]);
+    // C-765: the running person comes first.
     expect(
       presences(board([{ ...run(2, 2), status: "queued" }, run(3, 3)])),
     ).toStrictEqual([
-      ["员工1", { state: "queued" }],
       ["员工2", { state: "running" }],
+      ["员工1", { state: "queued" }],
     ]);
   });
 
@@ -282,4 +285,173 @@ test("execution rows and detail work items carry only their own state", () => {
     [id("work_item", 2), { state: "queued" }, "reviewer"],
     [id("work_item", 3), { state: "idle" }, "pm"],
   ]);
+});
+
+// C-765: board avatars show three people, so running people go first.
+describe("running people first", () => {
+  type P = { name: string; state: "running" | "idle" | "queued"; at?: number };
+  const order = (people: readonly P[]) =>
+    runningFirst(people, (p) => ({
+      presence: { state: p.state },
+      ...(p.at === undefined ? {} : { since: p.at }),
+    })).map((p) => p.name);
+
+  test("nobody running keeps the given order", () => {
+    const people: P[] = [
+      { name: "a", state: "idle" },
+      { name: "b", state: "queued" },
+      { name: "c", state: "idle" },
+      { name: "d", state: "queued" },
+    ];
+    expect(order(people)).toStrictEqual(["a", "b", "c", "d"]);
+  });
+
+  test("one runner moves to the front; the rest keep their order", () => {
+    expect(
+      order([
+        { name: "a", state: "idle" },
+        { name: "b", state: "queued" },
+        { name: "c", state: "idle" },
+        { name: "d", state: "running", at: 5 },
+        { name: "e", state: "idle" },
+      ]),
+    ).toStrictEqual(["d", "a", "b", "c", "e"]);
+  });
+
+  test("runners sort by start time; unknown start last; ties keep order", () => {
+    expect(
+      order([
+        { name: "a", state: "running", at: 30 },
+        { name: "b", state: "idle" },
+        { name: "c", state: "running" },
+        { name: "d", state: "running", at: 10 },
+        { name: "e", state: "running", at: 30 },
+        { name: "f", state: "running", at: 20 },
+      ]),
+    ).toStrictEqual(["d", "f", "a", "e", "c", "b"]);
+  });
+
+  test("more than three runners fill the first three; idle people follow", () => {
+    const names = order([
+      { name: "a", state: "idle" },
+      { name: "b", state: "running", at: 4 },
+      { name: "c", state: "idle" },
+      { name: "d", state: "running", at: 3 },
+      { name: "e", state: "running", at: 2 },
+      { name: "f", state: "running", at: 1 },
+    ]);
+    expect(names.slice(0, 3)).toStrictEqual(["f", "e", "d"]);
+    expect(names.slice(3)).toStrictEqual(["b", "a", "c"]);
+  });
+
+  test("start time is the earliest running Run of the assignment", () => {
+    const state = {
+      runs: [
+        { ...run(1), started_at: "2026-01-01T00:00:09.000Z" },
+        { ...run(2, 1), started_at: "2026-01-01T00:00:03.000Z" },
+        // Finished Runs do not count, however early.
+        {
+          ...run(3, 1),
+          status: "completed",
+          started_at: "2026-01-01T00:00:01.000Z",
+        },
+        // Another assignment's Run does not count.
+        { ...run(4, 2), started_at: "2026-01-01T00:00:00.000Z" },
+      ] as Run[],
+    };
+    expect(runningSince(state, { id: id("assignment", 1) })).toBe(
+      Date.parse("2026-01-01T00:00:03.000Z"),
+    );
+    expect(
+      runningSince({ runs: [run(1)] }, { id: id("assignment", 1) }),
+    ).toBeUndefined();
+    expect(
+      runningSince(
+        { runs: [{ ...run(1), started_at: "not a time" }] },
+        { id: id("assignment", 1) },
+      ),
+    ).toBeUndefined();
+  });
+
+  /** Card 1 with `count` work items, one person each, in creation order. */
+  function crowd(count: number, runs: readonly Run[]) {
+    const base = fixture();
+    const template = base.work_items[0] as WorkItem;
+    const items = Array.from({ length: count }, (_, i) => ({
+      ...template,
+      id: id("work_item", i + 1),
+      assignment_id: id("assignment", i + 1),
+    }));
+    return {
+      ...base,
+      employees: items.map((_, i) => employee(i + 1)),
+      work_items: items,
+      assignments: items.map((_, i) => ({
+        ...assignment(i + 1),
+        employee_id: id("employee", i + 1),
+      })),
+      runs: [...runs],
+    } as CommandState;
+  }
+  const names = (state: CommandState) =>
+    cardListViews(state)
+      .find((c) => c.id === id("card", 1))
+      ?.participants.map((p) => [p.employee?.name, p.run_presence.state]);
+  const at = (n: number, assignmentNumber: number, second: number) => ({
+    ...run(n, assignmentNumber),
+    started_at: `2026-01-01T00:00:${String(second).padStart(2, "0")}.000Z`,
+  });
+
+  test("board: without runners the creation order stays", () => {
+    expect(names(crowd(5, [{ ...run(1, 5), status: "queued" }]))).toStrictEqual(
+      [
+        ["员工1", "idle"],
+        ["员工2", "idle"],
+        ["员工3", "idle"],
+        ["员工4", "idle"],
+        ["员工5", "queued"],
+      ],
+    );
+  });
+
+  test("board: the fifth person running is no longer folded into +N", () => {
+    expect(names(crowd(5, [at(1, 5, 1)]))).toStrictEqual([
+      ["员工5", "running"],
+      ["员工1", "idle"],
+      ["员工2", "idle"],
+      ["员工3", "idle"],
+      ["员工4", "idle"],
+    ]);
+  });
+
+  test("board: four runners by start time, then the idle person", () => {
+    expect(
+      names(crowd(5, [at(1, 2, 40), at(2, 3, 10), at(3, 4, 30), at(4, 5, 20)])),
+    ).toStrictEqual([
+      ["员工3", "running"],
+      ["员工5", "running"],
+      ["员工4", "running"],
+      ["员工2", "running"],
+      ["员工1", "idle"],
+    ]);
+  });
+
+  test("board: order follows a Run finishing on the next read", () => {
+    const runs = [at(1, 4, 10), at(2, 5, 20)];
+    expect(names(crowd(5, runs))?.slice(0, 2)).toStrictEqual([
+      ["员工4", "running"],
+      ["员工5", "running"],
+    ]);
+    const after = crowd(5, [
+      { ...runs[0], status: "completed" } as Run,
+      runs[1] as Run,
+    ]);
+    expect(names(after)?.map(([name]) => name)).toStrictEqual([
+      "员工5",
+      "员工1",
+      "员工2",
+      "员工3",
+      "员工4",
+    ]);
+  });
 });

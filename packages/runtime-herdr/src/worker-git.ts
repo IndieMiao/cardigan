@@ -19,6 +19,7 @@ export type WorkerGitOperation =
   | "prepare"
   | "remove-empty"
   | "directories"
+  | "usage"
   | "receive-pack"
   | "upload-pack";
 export interface WorkerGitRequest {
@@ -34,6 +35,47 @@ export interface WorkerGitRequest {
   readonly expected?: string;
   readonly process?: WorkerProcessIdentity;
   readonly args?: readonly string[];
+}
+
+/** C-666: one kind of the project's own directories on a worker. */
+export interface WorkerUsageKind {
+  readonly bytes: number;
+  readonly directories: number;
+}
+/**
+ * C-666: the `usage` reply of a release helper (publication protocol 3):
+ * allocated bytes under the project's worktrees, builds and runs leaves and
+ * the free space of the volume holding them. `complete` is false when the
+ * walk hit its time or entry budget or an unreadable entry.
+ */
+export interface WorkerUsageReport {
+  readonly free_bytes: number;
+  readonly total_bytes: number;
+  readonly worktrees: WorkerUsageKind;
+  readonly builds: WorkerUsageKind;
+  readonly runs: WorkerUsageKind;
+  readonly complete: boolean;
+}
+const count = (value: unknown) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+function validUsage(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const v = value as Record<string, unknown>;
+  const kind = (k: unknown) =>
+    typeof k === "object" &&
+    k !== null &&
+    count((k as Record<string, unknown>).bytes) &&
+    count((k as Record<string, unknown>).directories);
+  return (
+    count(v.free_bytes) &&
+    count(v.total_bytes) &&
+    Number(v.free_bytes) <= Number(v.total_bytes) &&
+    kind(v.worktrees) &&
+    kind(v.builds) &&
+    kind(v.runs) &&
+    typeof v.complete === "boolean"
+  );
 }
 
 /** Only trusted target configuration supplies the entry, root, PATH and account. */
@@ -161,6 +203,8 @@ function validReply(operation: WorkerGitOperation, value: unknown): boolean {
       return typeof value === "boolean";
     case "directories":
       return Array.isArray(value) && value.every((v) => typeof v === "string");
+    case "usage":
+      return validUsage(value);
     case "verify-sealed-snapshot":
       return value === null || validReply("snapshot", value);
     case "snapshot":
