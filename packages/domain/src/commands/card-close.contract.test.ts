@@ -371,6 +371,37 @@ describe("C-750 owner notices of settled human actions", () => {
     expect(settledHumanActionNeedsYou(cancelled, note(event))).toBe(true);
   });
 
+  test("C-788: a row whose source event names no human action never matches", () => {
+    const base = fixture();
+    const requested = request(base);
+    const state = apply(base, requested);
+    const event = requested.events.find(
+      (e) => e.type === "human_action_requested",
+    );
+    if (!event) throw new Error("missing request event");
+    const settled = apply(
+      state,
+      value(
+        cancelHumanAction(
+          state,
+          human,
+          { human_action_id: requested.data.id, reason: "不需要了" },
+          io,
+        ),
+      ),
+    );
+    // Same settled action, but the payload carries neither field the
+    // dispatcher's narrowed scan looks for.
+    const bare = {
+      ...event,
+      id: "E-bare" as EventId,
+      payload: { note: requested.data.id },
+    } as Event;
+    const withBare = { ...settled, events: [...settled.events, bare] };
+    expect(settledHumanActionNeedsYou(withBare, note(event))).toBe(true);
+    expect(settledHumanActionNeedsYou(withBare, note(bare))).toBe(false);
+  });
+
   test("reminders resolve only when every action they name is settled; unknown events stay", () => {
     const base = fixture();
     const first = request(base);

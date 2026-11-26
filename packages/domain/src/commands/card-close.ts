@@ -189,7 +189,9 @@ function humanActionIds(payload: unknown): string[] {
  * C-750: an owner (`needs_you`) notification raised for human actions that
  * have all been completed or cancelled. Such rows never ring and nobody ACKs
  * them, so the dispatcher resolves them; existing ones go on its next pass.
- * A missing event or action is not proof, so the row stays.
+ * A missing event or action is not proof, so the row stays. C-788: only a
+ * `needs_you` row whose source event payload carries `human_action_id` or a
+ * `reminders` array can match; callers may leave other rows out of a scan.
  */
 export function settledHumanActionNeedsYou(
   state: CommandState,

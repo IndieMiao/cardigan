@@ -119,6 +119,11 @@ export interface NotificationQuery {
   readonly statuses?: readonly NotificationStatus[] | undefined;
   readonly recipient_kind?: Notification["recipient"]["kind"] | undefined;
   readonly assignment_id?: AssignmentId | undefined;
+  /**
+   * C-788: leave out rows addressed to these Assignments (`assignment` rows
+   * only; other recipient kinds have no Assignment and are kept).
+   */
+  readonly exclude_assignment_ids?: readonly AssignmentId[] | undefined;
   readonly card_id?: CardId | undefined;
   /**
    * Only these notification ids (C-216). Looked up through the primary key, so
@@ -152,6 +157,10 @@ export function listNotifications(
     conditions.push("assignment_id = ?");
     values.push(query.assignment_id);
   }
+  if (query.exclude_assignment_ids?.length) {
+    conditions.push("assignment_id NOT IN (SELECT value FROM json_each(?))");
+    values.push(JSON.stringify(query.exclude_assignment_ids));
+  }
   if (query.card_id !== undefined) {
     conditions.push("card_id = ?");
     values.push(query.card_id);
@@ -166,6 +175,54 @@ export function listNotifications(
       `SELECT doc FROM notifications WHERE ${conditions.join(" AND ")} ORDER BY seq, id`,
     )
     .all(...values)
+    .map(decode);
+}
+
+export interface AckCandidateQuery {
+  readonly project_id: ProjectId;
+  readonly statuses: readonly NotificationStatus[];
+  /** Rows held by an unfinished bell attempt; their owner is the attempt's. */
+  readonly held: readonly string[];
+  /** Resolved owner of unpinned role-addressed rows; absent kinds never ACK. */
+  readonly role_owners: Partial<Record<"pm_ops" | "pm_office", AssignmentId>>;
+}
+
+/**
+ * C-788: rows in `statuses` whose owner's read cursor may already cover them.
+ * A superset of what an ACK pass can move: held rows and run-pinned role rows
+ * always come back (their owner is decided by the caller); unheld `needs_you`
+ * rows never have an owner; any other row needs its owner's cursor on its
+ * stream at or past its seq. The unread backlog is therefore not decoded on
+ * every pass, and no row is confirmed, resolved or hidden by this filter.
+ */
+export function listAckCandidates(
+  db: DatabaseSync,
+  query: AckCandidateQuery,
+): Notification[] {
+  if (!query.statuses.length) return [];
+  return db
+    .prepare(
+      `SELECT n.doc FROM notifications n
+       WHERE n.project_id = ? AND n.status IN (SELECT value FROM json_each(?))
+         AND (n.id IN (SELECT value FROM json_each(?))
+           OR (n.recipient_kind IN ('pm_ops', 'pm_office')
+             AND json_extract(n.doc, '$.run_id') IS NOT NULL)
+           OR EXISTS (SELECT 1 FROM cursors c
+             WHERE c.project_id = n.project_id
+               AND c.assignment_id = CASE n.recipient_kind
+                 WHEN 'assignment' THEN n.assignment_id
+                 WHEN 'pm_ops' THEN ? WHEN 'pm_office' THEN ? END
+               AND c.card_id = COALESCE(n.card_id, '')
+               AND c.acked_seq >= n.seq))
+       ORDER BY n.seq, n.id`,
+    )
+    .all(
+      query.project_id,
+      JSON.stringify(query.statuses),
+      JSON.stringify(query.held),
+      query.role_owners.pm_ops ?? null,
+      query.role_owners.pm_office ?? null,
+    )
     .map(decode);
 }
 
@@ -311,23 +368,30 @@ export function retireReconcileNotifications(
   project_id: ProjectId,
   at: string = new Date().toISOString(),
 ): number {
+  let retired = 0;
+  // C-244: decode only live rows; terminal ones were skipped anyway.
+  // C-788: join the source event so rows of any other event type (the whole
+  // unread backlog) are neither decoded nor looked up one by one.
+  const rows = db
+    .prepare(
+      `SELECT n.doc AS doc, e.doc AS event FROM notifications n
+       JOIN events e ON e.project_id = n.project_id AND e.id = n.event_id
+         AND e.type = 'reconcile_finding'
+       WHERE n.project_id = ? AND n.status IN (SELECT value FROM json_each(?))
+       ORDER BY n.seq, n.id`,
+    )
+    .all(project_id, JSON.stringify(LIVE_NOTIFICATION_STATUSES)) as Array<{
+    doc: string;
+    event: string;
+  }>;
+  if (!rows.length) return 0;
   const findings = new Map(
     listFindings(db, project_id).map((finding) => [finding.id, finding]),
   );
-  let retired = 0;
-  // C-244: decode only live rows; terminal ones were skipped anyway.
-  for (const note of listNotifications(db, {
-    project_id,
-    statuses: LIVE_NOTIFICATION_STATUSES,
-  })) {
+  for (const row of rows) {
+    const note = decode(row);
     if (isTerminalNotification(note.status)) continue;
-    const row = db
-      .prepare(
-        "SELECT doc FROM events WHERE project_id = ? AND id = ? AND type = 'reconcile_finding'",
-      )
-      .get(project_id, note.event_id) as { doc: string } | undefined;
-    if (!row) continue;
-    const payload = (JSON.parse(row.doc) as Event)
+    const payload = (JSON.parse(row.event) as Event)
       .payload as unknown as ReconcileFindingInput & { first_seen_at?: string };
     const finding = findings.get(findingKey(payload));
     // Missing ledger data is not proof of resolution. Preserve such notices.

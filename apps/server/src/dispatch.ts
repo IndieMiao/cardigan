@@ -83,6 +83,7 @@ import {
   type MachineLeases,
   maintenanceActive,
   observeRetirementForDispatch,
+  preparationPolicy,
   type ReadProjectQuota,
   type ReadResourceLimits,
   type ResourceAccess,
@@ -115,7 +116,7 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
-import type { HerdrRuntime } from "@cardigan/runtime-herdr";
+import { type HerdrRuntime, hcCallPolicy } from "@cardigan/runtime-herdr";
 import {
   type BellAttempt,
   beginBellAttempt,
@@ -166,6 +167,7 @@ import { InactivityAlerts } from "./dispatch-inactivity-alerts.js";
 import {
   acknowledgeInbox,
   dispatcherClock,
+  listAttentionCandidates,
   memoStanding,
   notificationBell,
   notificationOwner,
@@ -174,8 +176,8 @@ import {
   retireCancelledQueueNotes,
   routeProjectEvents,
   type StandingResolver,
-  UNSETTLED_NOTIFICATION_STATUSES,
 } from "./dispatch-inbox.js";
+import { LaunchLanes } from "./dispatch-lanes.js";
 import { dispatchRecovery, retryDispatchedRuns } from "./dispatch-retry.js";
 import { DispatchSkips } from "./dispatch-skips.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
@@ -200,6 +202,7 @@ import {
   profileProject,
   profileSpan,
   profileSpanSync,
+  profileTick,
 } from "./tick-profile.js";
 
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
@@ -270,6 +273,12 @@ export interface DispatcherOptions {
   readonly inactivityGraceMs?: number;
   readonly dispatchTimeoutMs?: number;
   readonly deliveryRetryBaseMs?: number;
+  /**
+   * C-788: post-claim wakes and starts running at once, across machines (one
+   * per machine). Defaults to the smaller of the hc call and preparation
+   * queue widths, so dispatch alone never queues past either.
+   */
+  readonly launchConcurrency?: number;
   readonly queuedRecheckAfterMs?: number;
   readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
@@ -324,6 +333,28 @@ const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
       c.card_id === (n.card_id ?? PROJECT_EVENT_STREAM) &&
       c.acked_seq >= n.seq,
   );
+/** C-788: what the pre-claim checks decided, carried to claim and launch. */
+interface ClaimContext {
+  readonly snapshot: LaunchSnapshot;
+  readonly live: boolean;
+  readonly sessionCatalog: string | undefined;
+  readonly guard: ReturnType<typeof idleWakeGuard>;
+  readonly guardedTurn:
+    | {
+        readonly turn: Run;
+        readonly reason:
+          | "continuing_turn"
+          | "system_finished_turn"
+          | "unread_reminder";
+      }
+    | undefined;
+  readonly reminder: Run | undefined;
+  readonly observation: string;
+  readonly replacement: DispatchRunParams["replacement"];
+  readonly replaceProfile: boolean;
+  readonly retirementHeld: boolean;
+  readonly changedEnvironment: string | undefined;
+}
 interface Job {
   sessionEnvironment?: string;
   resourceAccess?: ResourceAccess;
@@ -363,6 +394,10 @@ export class Dispatcher {
   /** C-649: projects whose state was warmed in a read slice after start. */
   private readonly warmed = new Set<ProjectId>();
   private readonly nextRoleUpgrade = new Map<ProjectId, number>();
+  /** C-788: the idle role-upgrade pass running beside dispatch, if any. */
+  private roleUpgrade: Promise<void> | undefined;
+  /** C-788: projects whose role-upgrade pass is scheduled or running. */
+  private readonly upgrading = new Set<ProjectId>();
   /** C-244: candidate lists per project, kept across ticks (memory only). */
   private candidateIndex: CandidateIndex | undefined;
   private readonly leaseMs: number;
@@ -371,6 +406,7 @@ export class Dispatcher {
   private readonly inactivityGraceMs: number;
   private readonly dispatchTimeoutMs: number;
   private readonly deliveryRetryBaseMs: number;
+  private readonly launchConcurrency: number;
   private readonly inactive: InactiveRunReaper;
   private readonly skips: DispatchSkips;
   private readonly queuedRunPatrol: QueuedRunPatrol;
@@ -395,6 +431,14 @@ export class Dispatcher {
     this.inactivityGraceMs = options.inactivityGraceMs ?? 15 * 60_000;
     this.dispatchTimeoutMs = options.dispatchTimeoutMs ?? 10 * 60_000;
     this.deliveryRetryBaseMs = options.deliveryRetryBaseMs ?? 30_000;
+    this.launchConcurrency =
+      options.launchConcurrency ??
+      Math.min(preparationPolicy().maxConcurrent, hcCallPolicy().concurrency);
+    if (
+      !Number.isSafeInteger(this.launchConcurrency) ||
+      this.launchConcurrency < 1
+    )
+      throw new Error("Invalid dispatcher launch concurrency");
     // Reject invalid source settings before deriving the cancellation grace.
     if (
       !Number.isSafeInteger(this.maxRetries) ||
@@ -496,6 +540,7 @@ export class Dispatcher {
     return Promise.all([
       this.inactive.close(),
       this.clientRecovery.drain(),
+      this.roleUpgradesSettled(),
     ]).then(() => {});
   }
   /** Calls on one instance serialize; cross-process attempts are guarded in SQLite. */
@@ -507,6 +552,7 @@ export class Dispatcher {
         if (this.closing) return;
         await profileSpan("startup_check", () => this.startupCheck());
         await profileSpan("host_ops", async () => this.options.hostOpsTick?.());
+        this.startRoleUpgrades();
         // Route every project before choosing any winner. Project enumeration is
         // not a scheduling priority, even when a caller requests a project tick.
         const candidates: Candidate[] = [];
@@ -542,15 +588,45 @@ export class Dispatcher {
         )
           return;
         await profileSpan("deliver", async () => {
-          for (const candidate of orderPmCandidates(candidates, (c) =>
-            this.state(c.project),
-          )) {
-            if (this.closing) break;
-            await profileProject(candidate.project, () =>
-              this.deliver(candidate),
-            );
-            this.checkStandingInbox(candidate);
+          // C-788: claims stay in this order; wakes and starts after a claim
+          // overlap across machines (see LaunchLanes) and all settle here,
+          // before this tick's state loader is retired.
+          const lanes = new LaunchLanes(this.launchConcurrency);
+          try {
+            for (const candidate of orderPmCandidates(candidates, (c) =>
+              this.state(c.project),
+            )) {
+              if (this.closing) break;
+              // C-788: as when the pass ran inline before delivery, a
+              // project's work-item sessions are not woken or started while
+              // its pass may retire or upgrade them; next tick delivers.
+              if (
+                candidate.assignment.scope === "work_item" &&
+                this.upgrading.has(candidate.project)
+              ) {
+                this.skips.record(
+                  candidate.project,
+                  candidate.assignment.id,
+                  candidate.notes[0]?.id ?? candidate.assignment.id,
+                  candidate.notes[0]?.created_at ??
+                    candidate.assignment.created_at,
+                  "role_upgrade_pass",
+                );
+                continue;
+              }
+              const after = () => this.checkStandingInbox(candidate);
+              if (
+                !(await profileProject(candidate.project, () =>
+                  this.deliver(candidate, lanes, after),
+                ))
+              )
+                after();
+            }
+          } catch (error) {
+            await lanes.drain().catch(() => {});
+            throw error;
           }
+          await lanes.drain();
         });
       } finally {
         this.loadState = loadCommandState;
@@ -561,6 +637,67 @@ export class Dispatcher {
   }
   private state(project: ProjectId) {
     return this.options.store.uow.read((tx) => this.loadState(tx, project));
+  }
+  /**
+   * C-788: idle retirement and default-role upgrades (runtime IO, up to tens
+   * of seconds) run beside dispatch instead of inside its routing pass: at
+   * most one pass at a time, each project at most once per interval. They
+   * take the same host-ops and launch locks as any other host operation, and
+   * delivery honours their durable fences (`role_upgrade`, `idle_retirement`).
+   */
+  private startRoleUpgrades() {
+    if (this.roleUpgrade || this.closing) return;
+    const now = Date.parse(this.clock.now());
+    const due = this.options.store
+      .listProjects()
+      .map((p) => p.id)
+      .filter((p) => now >= (this.nextRoleUpgrade.get(p) ?? 0));
+    if (!due.length) return;
+    // Fenced from now on: no launch of this dispatcher is in flight between
+    // ticks, so none overlaps a project's pass.
+    for (const project of due) {
+      this.nextRoleUpgrade.set(project, now + IDLE_ROLE_UPGRADE_INTERVAL_MS);
+      this.upgrading.add(project);
+    }
+    const pass = profileTick("dispatch_role_upgrade", async () => {
+      for (const project of due) {
+        if (this.closing) break;
+        try {
+          await profileProject(project, () =>
+            upgradeIdleAssignmentRoles(
+              this.options.store,
+              project,
+              this.options.runtime,
+              this.clock,
+            ),
+          );
+        } catch {
+          try {
+            this.options.onError?.(
+              new Error(
+                "Idle role upgrade maintenance failed; dispatch continues",
+              ),
+            );
+          } catch {
+            /* Reporting cannot interrupt other projects. */
+          }
+        } finally {
+          this.upgrading.delete(project);
+        }
+      }
+    })
+      .catch(() => {
+        /* Each project's failure was reported above. */
+      })
+      .finally(() => {
+        for (const project of due) this.upgrading.delete(project);
+        if (this.roleUpgrade === pass) this.roleUpgrade = undefined;
+      });
+    this.roleUpgrade = pass;
+  }
+  /** C-788: resolves once the background role-upgrade pass (if any) is done. */
+  roleUpgradesSettled(): Promise<void> {
+    return this.roleUpgrade ?? Promise.resolve();
   }
   private owner(n: Notification, state: CommandState) {
     return notificationOwner(n, state, this.options.standing);
@@ -676,30 +813,6 @@ export class Dispatcher {
         };
       }),
     );
-    const now = Date.parse(this.clock.now());
-    if (now >= (this.nextRoleUpgrade.get(project) ?? 0)) {
-      this.nextRoleUpgrade.set(project, now + IDLE_ROLE_UPGRADE_INTERVAL_MS);
-      try {
-        await profileSpan("route.role_upgrade", () =>
-          upgradeIdleAssignmentRoles(
-            store,
-            project,
-            this.options.runtime,
-            this.clock,
-          ),
-        );
-      } catch {
-        try {
-          this.options.onError?.(
-            new Error(
-              "Idle role upgrade maintenance failed; dispatch continues",
-            ),
-          );
-        } catch {
-          /* Reporting cannot interrupt unrelated routing. */
-        }
-      }
-    }
     // Awaiting an already-resolved promise does not run timers or socket IO.
     // These boundaries hold no transaction; all consumers recheck revisions.
     await yieldToLoop();
@@ -936,12 +1049,39 @@ export class Dispatcher {
       ? "unfinished_run"
       : undefined;
   }
-  private async deliver({
-    project,
-    notes,
-    assignment: expected,
-    target: candidateTarget,
-  }: Candidate) {
+  /**
+   * Deliver one candidate. C-788: with `lanes`, the post-claim wake or start
+   * runs in the background in its machine's lane; true means it was handed
+   * off there and `after` runs once it settles.
+   */
+  private async deliver(
+    {
+      project,
+      notes,
+      assignment: expected,
+      target: candidateTarget,
+    }: Candidate,
+    lanes?: LaunchLanes,
+    after?: () => void,
+  ): Promise<boolean | undefined> {
+    await lanes?.idle(expected.id);
+    // C-788: an external Office is never woken or started here, and the flag
+    // is immutable; skip its plain inbox before loading state. A release or
+    // a Run target still goes through the full path below (released inbox
+    // rejected, queued Run marked evaluated).
+    if (
+      expected.external &&
+      expected.status === "active" &&
+      candidateTarget.mode === "inbox" &&
+      !this.closing
+    )
+      return this.skips.record(
+        project,
+        expected.id,
+        notes[0]?.id ?? expected.id,
+        notes[0]?.created_at ?? expected.created_at,
+        "external",
+      );
     const state = profileSpanSync("deliver.state", () => this.state(project));
     const a = state.assignments.find((a) => a.id === expected.id);
     const note = notes[0];
@@ -1352,6 +1492,67 @@ export class Dispatcher {
     const sessionCatalog = live ? prior?.tool_catalog : catalog;
     // C-247: runtime status and snapshot IO were awaited; shutdown may have begun.
     if (this.closing) return skip("shutting_down");
+    // C-788: claim only with this machine's lane free, so the claimed attempt
+    // is delivered right away; the claim rechecks everything read above.
+    const lane = await lanes?.acquire(a.id, a.machine_id);
+    let handedOff = false;
+    try {
+      return await this.claimAndLaunch(
+        project,
+        notes,
+        a,
+        queued,
+        continuing,
+        target,
+        skip,
+        (launch) => {
+          if (!lane) return false;
+          lane.run(launch, after);
+          handedOff = true;
+          return true;
+        },
+        {
+          snapshot,
+          live,
+          sessionCatalog,
+          guard,
+          guardedTurn,
+          reminder,
+          observation,
+          replacement,
+          replaceProfile,
+          retirementHeld,
+          changedEnvironment,
+        },
+      );
+    } finally {
+      if (!handedOff) lane?.release();
+    }
+  }
+  private async claimAndLaunch(
+    project: ProjectId,
+    notes: Notification[],
+    a: Assignment,
+    queued: Run | undefined,
+    continuing: Run | undefined,
+    target: InboxTarget,
+    skip: (reason: string) => undefined,
+    background: (launch: () => Promise<void>) => boolean,
+    {
+      snapshot,
+      live,
+      sessionCatalog,
+      guard,
+      guardedTurn,
+      reminder,
+      observation,
+      replacement,
+      replaceProfile,
+      retirementHeld,
+      changedEnvironment,
+    }: ClaimContext,
+  ): Promise<boolean | undefined> {
+    if (this.closing) return skip("shutting_down");
     const inspection =
       !continuing &&
       (this.options.leases?.configured(project, a.machine_id) ||
@@ -1401,6 +1602,46 @@ export class Dispatcher {
       throw error;
     }
     if (!job) return;
+    const claimed = job;
+    const launch = () =>
+      this.launch(project, notes, a, queued, continuing, skip, claimed, {
+        snapshot,
+        live,
+        sessionCatalog,
+        guard,
+        guardedTurn,
+        reminder,
+        observation,
+        replacement,
+        replaceProfile,
+        retirementHeld,
+        changedEnvironment,
+      });
+    if (background(launch)) return true;
+    await launch();
+    return undefined;
+  }
+  private async launch(
+    project: ProjectId,
+    notes: Notification[],
+    a: Assignment,
+    queued: Run | undefined,
+    continuing: Run | undefined,
+    skip: (reason: string) => undefined,
+    job: Job,
+    {
+      snapshot,
+      live,
+      guard,
+      guardedTurn,
+      reminder,
+      observation,
+      replacement,
+      replaceProfile,
+      retirementHeld,
+      changedEnvironment,
+    }: ClaimContext,
+  ): Promise<void> {
     if (changedEnvironment && !continuing && !reminder)
       job.sessionEnvironment = changedEnvironment;
     const leases = this.options.leases;
@@ -1694,7 +1935,15 @@ export class Dispatcher {
   /** Catch no-Run stalls independently of the turn guard (e.g. status unavailable before claim).
    * Use the routed candidate's IDs; never scan all inbox history or preempt a successful delivery. */
   private checkStandingInbox({ project, assignment, notes }: Candidate) {
-    if (this.closing || assignment.scope !== "standing" || !notes.length)
+    // C-788: `external` is immutable, so the routed snapshot is enough to
+    // leave an external Office alone without opening a write transaction;
+    // the transaction below still checks the fresh owner.
+    if (
+      this.closing ||
+      assignment.scope !== "standing" ||
+      assignment.external ||
+      !notes.length
+    )
       return;
     const at = this.clock.now(),
       deadline = Date.parse(at) - this.dispatchTimeoutMs;
@@ -3110,11 +3359,10 @@ export class Dispatcher {
         ),
       );
       step("obsolete", () => {
-        for (const n of store.listNotifications({
-          // C-244: acked/resolved rows are never obsolete attention.
-          project_id: project,
-          statuses: UNSETTLED_NOTIFICATION_STATUSES,
-        })) {
+        // C-244: acked/resolved rows are never obsolete attention. C-788:
+        // nor are rows either predicate rules out by status, Run pin and
+        // source event, so the unread backlog is not decoded every pass.
+        for (const n of listAttentionCandidates(store, project)) {
           // C-750: owner notices of completed or cancelled human actions.
           if (
             obsoleteDispatchAttention(state, n) ||

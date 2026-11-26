@@ -26,9 +26,11 @@ export * from "./ext-message-window.js";
 export * from "./feishu.js";
 export { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 export {
+  type AckCandidateQuery,
   acknowledgeNotifications,
   advanceRouterCursor,
   LIVE_NOTIFICATION_STATUSES,
+  listAckCandidates,
   type MoveNotificationInput,
   moveNotification,
   type NotificationQuery,

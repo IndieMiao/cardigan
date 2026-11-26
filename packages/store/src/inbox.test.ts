@@ -677,3 +677,67 @@ test("a confirmed human release resolves only preceding retirement notices for i
     ]);
   });
 });
+
+test("C-788: ACK candidates are the rows an owner's cursor may cover, plus held and run-pinned role rows", () => {
+  withTempStore((store) => {
+    seed(store);
+    const office = "A-7" as never;
+    store.uow.run((tx) =>
+      tx.assignments.put(
+        project_id,
+        assignment({ id: office, scope: "standing", role_id: "pm" } as never),
+      ),
+    );
+    const at = (seq: number, recipient: unknown) =>
+      store.recordNotification(note(store, seq, recipient as never))
+        .notification;
+    const mine = at(1, { kind: "assignment", assignment_id: assignment().id });
+    const later = at(5, { kind: "assignment", assignment_id: assignment().id });
+    const role = at(1, { kind: "pm_office" });
+    const owner = at(1, { kind: "needs_you" });
+    const pinned = at(5, { kind: "pm_ops" });
+    store.moveNotification({
+      project_id,
+      id: pinned.id,
+      event: "bell",
+      patch: { run_id: "R-9" as never },
+    });
+    const list = (held: string[] = [], pm_office?: string) =>
+      store
+        .listAckCandidates({
+          project_id,
+          statuses: ["pending", "belled", "delivery_failed"],
+          held,
+          role_owners: pm_office ? { pm_office: pm_office as never } : {},
+        })
+        .map((n) => n.id)
+        .sort();
+    // Same-seq rows sort by their random ids; compare as sets.
+    const ids = (...rows: { id: string }[]) => rows.map((n) => n.id).sort();
+    // No cursor yet: only the run-pinned role row (its owner is its Run's).
+    expect(list()).toEqual(ids(pinned));
+    for (const assignment_id of [assignment().id, office])
+      expect(
+        store.ackEvents({ project_id, assignment_id, card_id, up_to_seq: 1 })
+          .ok,
+      ).toBe(true);
+    expect(list()).toEqual(ids(mine, pinned));
+    expect(list([], office)).toEqual(ids(mine, role, pinned));
+    // A held row comes back whoever its owner is; an owner notice never does.
+    expect(list([later.id, owner.id], office)).toEqual(
+      ids(mine, role, owner, later, pinned),
+    );
+    expect(list().length).toBeLessThan(
+      store.listNotifications({ project_id }).length,
+    );
+    expect(
+      store
+        .listNotifications({
+          project_id,
+          exclude_assignment_ids: [assignment().id],
+        })
+        .map((n) => n.id)
+        .sort(),
+    ).toEqual(ids(role, owner, pinned));
+  });
+});

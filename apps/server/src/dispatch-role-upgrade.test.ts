@@ -26,7 +26,10 @@ import { defaultRoleDefinition } from "@cardigan/roles";
 import { PROJECT_EVENT_STREAM, writeRole } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { value } from "../../../packages/domain/src/commands/test-fixtures.js";
-import { dispatchFixture } from "../test-support/dispatch.js";
+import {
+  dispatchFixture,
+  settleRoleUpgradesPerTick,
+} from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 
 const fixtures: ReturnType<typeof dispatchFixture>[] = [];
@@ -117,14 +120,16 @@ function setup(upgrade = true, complete = true, darwin = false) {
     harness: "pi" as const,
     effort: "high",
   }));
-  const dispatcher = new Dispatcher({
-    store: f.store,
-    clock: f.clock,
-    runtime,
-    startRun,
-    onError,
-    snapshot,
-  });
+  const dispatcher = settleRoleUpgradesPerTick(
+    new Dispatcher({
+      store: f.store,
+      clock: f.clock,
+      runtime,
+      startRun,
+      onError,
+      snapshot,
+    }),
+  );
   const comment = () =>
     f.apply((s, a, p) =>
       postComment(
@@ -504,19 +509,21 @@ test.each(["withdrawn", "queue_timeout"] as const)(
 
 test("a Run acknowledged before the retry sends is not a guarded wake receipt", async () => {
   const { f, queued, wake, wait } = await retirementWakeToRetry("withdrawn");
-  const dispatcher = new Dispatcher({
-    store: f.store,
-    clock: f.clock,
-    runtime: f.runtime,
-    startRun: f.startRun,
-    snapshot: f.snapshot,
-    beforeWake: async () => {
-      f.apply(
-        (s, a, p) => acknowledgeRun(s, a, { run_id: queued }, p),
-        f.actorFor(f.owner()),
-      );
-    },
-  });
+  const dispatcher = settleRoleUpgradesPerTick(
+    new Dispatcher({
+      store: f.store,
+      clock: f.clock,
+      runtime: f.runtime,
+      startRun: f.startRun,
+      snapshot: f.snapshot,
+      beforeWake: async () => {
+        f.apply(
+          (s, a, p) => acknowledgeRun(s, a, { run_id: queued }, p),
+          f.actorFor(f.owner()),
+        );
+      },
+    }),
+  );
   f.advance(31_000);
   await dispatcher.tick();
   expect(f.state().runs.find((r) => r.id === queued)?.status).toBe("running");

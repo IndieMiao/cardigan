@@ -262,3 +262,21 @@ export function stalledTranscript(
 export const stalledCache =
   (state: CommandState) => (_project: string, id: Assignment["id"]) =>
     stalledTranscript(state, id);
+
+/**
+ * C-788: idle role upgrades run beside dispatch, not inside its tick. Tests
+ * that step maintenance tick by tick let each tick's pass settle first.
+ */
+export function settleRoleUpgradesPerTick<
+  T extends {
+    tick(project?: never): Promise<void>;
+    roleUpgradesSettled(): Promise<void>;
+  },
+>(dispatcher: T): T {
+  const tick = dispatcher.tick.bind(dispatcher);
+  dispatcher.tick = async (project?: never) => {
+    await tick(project);
+    await dispatcher.roleUpgradesSettled();
+  };
+  return dispatcher;
+}

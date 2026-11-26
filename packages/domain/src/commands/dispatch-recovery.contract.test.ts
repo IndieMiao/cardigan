@@ -5,6 +5,8 @@ import {
   type CardId,
   claimDispatchStop,
   claimInactiveRunStop,
+  DISPATCH_ATTENTION_STATUSES,
+  DISPATCH_DIAGNOSTIC_EVENT_TYPES,
   dispatchedAt,
   dispatchRecoveryUsed,
   finishRun,
@@ -540,6 +542,33 @@ test("completed Run and released Assignment attention resolves without changing 
     assignments: f.state.assignments.map((a) => ({ ...a, status: "released" })),
   };
   expect(obsoleteDispatchAttention(f.state, missingRun)).toBe(true);
+});
+
+test("C-788: an unpinned row in a live status on a non-diagnostic event is never obsolete", () => {
+  const note: Notification = {
+    id: "notice",
+    project_id: f.state.project_id,
+    event_id: run.trigger_event_id,
+    recipient: { kind: "assignment", assignment_id: f.coder.id },
+    seq: 1,
+    kind: "run_attention",
+    status: "pending",
+    attempts: 0,
+    created_at: f.io.clock.now(),
+    updated_at: f.io.clock.now(),
+  };
+  expect(DISPATCH_DIAGNOSTIC_EVENT_TYPES).not.toContain(
+    f.state.events.find((e) => e.id === run.trigger_event_id)?.type,
+  );
+  // Even with its Assignment released, which retires attention rows.
+  f.state = {
+    ...f.state,
+    assignments: f.state.assignments.map((a) => ({ ...a, status: "released" })),
+  };
+  for (const status of ["pending", "belled"] as const)
+    expect(obsoleteDispatchAttention(f.state, { ...note, status })).toBe(false);
+  for (const status of DISPATCH_ATTENTION_STATUSES)
+    expect(obsoleteDispatchAttention(f.state, { ...note, status })).toBe(true);
 });
 
 test("late start closes the Needs You action after escalation", () => {
