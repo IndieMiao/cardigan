@@ -78,6 +78,12 @@ const rows: CardListItem[] = children.map((child) => ({
       }
     : {}),
 }));
+const listPage = (cards: CardListItem[]) => ({
+  project_id: "p-1",
+  filter: "all" as const,
+  cards,
+  counts: { total: cards.length, needs_me: 0, agent: 0 },
+});
 function storyDetail(
   overrides: {
     children?: typeof children;
@@ -143,13 +149,8 @@ function storyDetail(
   });
 }
 
-test("a story overview shows the request and a child graph, no empty sections and no write controls", async () => {
-  const cards = vi.fn(async () => ({
-    project_id: "p-1",
-    filter: "all" as const,
-    cards: rows,
-    counts: { total: rows.length, needs_me: 0, agent: 0 },
-  }));
+test("a story overview lists the request, each child and each question, with no empty sections and no write controls", async () => {
+  const cards = vi.fn(async () => listPage(rows));
   render(
     <CardDetailPage
       client={fakeClient({ card: async () => storyDetail(), cards })}
@@ -165,72 +166,125 @@ test("a story overview shows the request and a child graph, no empty sections an
   // C-699: attachments live in their own tab, not in the request.
   expect(within(request).queryByText(/附件/)).toBeNull();
   expect(screen.queryByRole("region", { name: "目标" })).toBeNull();
-  // The children follow the request directly.
+  // The children follow the request directly, then the questions.
   expect(request.nextElementSibling?.getAttribute("aria-label")).toBe(
     "子卡进度",
   );
+  expect(
+    request.nextElementSibling?.nextElementSibling?.getAttribute("aria-label"),
+  ).toBe("问题清单");
 
+  // C-771 (design §4.2): one row per child: id, title and status.
   const progress = screen.getByRole("region", { name: "子卡进度" });
-  expect(within(progress).getByText("已结束 1/3")).toBeTruthy();
-  expect(within(progress).getByText("进行中 1")).toBeTruthy();
-  const graph = await within(progress).findByRole("list", {
-    name: "子卡进度图",
-  });
-  // The children were read once through the shared, scope-checked list.
-  expect(cards).toHaveBeenCalledWith("p-1", "all", { ids: "C-2,C-3,C-4" });
-  await waitFor(() =>
-    expect(
-      graph.parentElement?.querySelector('[data-edge="C-3>C-4"]'),
-    ).not.toBeNull(),
-  );
-  const svg = graph.parentElement as HTMLElement;
-  expect(
-    [...svg.querySelectorAll("[data-edge]")].map((p) => [
-      p.getAttribute("data-edge"),
-      p.getAttribute("data-edge-kind"),
-      p.hasAttribute("marker-end"),
-    ]),
-  ).toEqual([
-    ["C-1>C-2", "parent", false],
-    ["C-1>C-3", "parent", false],
-    ["C-3>C-4", "dependency", true],
+  const list = within(progress).getByRole("list", { name: "子卡" });
+  const items = within(list).getAllByRole("listitem");
+  expect(items.map((item) => item.textContent)).toEqual([
+    "C-2数据模型已完成",
+    "C-3接口进行中",
+    "C-4界面待开始",
   ]);
-  // C-9 is outside the story and stays out of this graph.
-  expect(graph.querySelector('[data-node="C-9"]')).toBeNull();
-  const current = graph.querySelector('[aria-current="page"]');
-  expect(current?.textContent).toContain("C-1");
-  expect(graph.textContent).toContain("父卡 C-1；前置 C-3");
-  expect(graph.textContent).toContain("子卡 C-2、C-3、C-4");
-
-  // A child opens its peek; only the peek's action leaves the page.
-  const node = within(graph).getByRole("button", { name: /C-4/ });
-  fireEvent.click(node);
-  const peek = await screen.findByRole("dialog", { name: "卡片 C-4" });
-  expect(within(peek).getByText("子卡 · 前置 C-3")).toBeTruthy();
   expect(
-    within(peek).getByRole("link", { name: "打开卡片" }).getAttribute("href"),
+    within(items[2] as HTMLElement)
+      .getByRole("link", { name: /C-4/ })
+      .getAttribute("href"),
   ).toBe(routeHash({ kind: "card", projectId: "p-1", cardId: "C-4" }));
+  // The list is the story's own record: no graph and no extra list read.
+  expect(
+    within(progress).queryByRole("list", { name: "子卡进度图" }),
+  ).toBeNull();
+  expect(cards).not.toHaveBeenCalled();
+
+  // C-771: every question, numbered; open ones show the default, answered
+  // ones the answer. No discussion summary or 查看讨论 button.
+  const questions = screen.getByRole("region", { name: "问题清单" });
+  const asked = within(questions).getByRole("list", { name: "问题" });
+  expect(asked.tagName).toBe("OL");
+  expect(
+    within(asked)
+      .getAllByRole("listitem")
+      .map((item) => item.textContent),
+  ).toEqual(["格式？建议：CSV", "范围？已回答：全部"]);
+  expect(screen.queryByRole("region", { name: "讨论" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "查看讨论" })).toBeNull();
 
   // C-699: without a plan or a summary there is no section for them.
   expect(screen.queryByRole("region", { name: "拆解方案" })).toBeNull();
   expect(screen.queryByRole("region", { name: "对照总结" })).toBeNull();
   expect(screen.queryByText(/没有拆解方案|没有总结|没有附件/u)).toBeNull();
-  const discussion = screen.getByRole("region", { name: "讨论" });
-  expect(within(discussion).getByText("需求澄清 1 轮")).toBeTruthy();
-  expect(within(discussion).getByText("1 题待答")).toBeTruthy();
   // Nothing on the overview submits a plan, creates children, writes change
-  // requests or confirms completion.
-  for (const name of [/确认/, /开卡/, /提交/, /修改意见/, /标记完成/])
-    expect(
-      within(screen.getByRole("tabpanel", { name: /概览/ })).queryByRole(
-        "button",
-        { name },
-      ),
-    ).toBeNull();
-  fireEvent.click(within(discussion).getByRole("button", { name: "查看讨论" }));
+  // requests, answers questions or confirms completion.
+  const overview = screen.getByRole("tabpanel", { name: /概览/ });
+  for (const name of [/确认/, /开卡/, /提交/, /修改意见/, /标记完成/, /按默认/])
+    expect(within(overview).queryByRole("button", { name })).toBeNull();
+  expect(within(overview).queryByRole("textbox")).toBeNull();
+});
+
+test("several checklists list their questions apart, each numbered from 1", async () => {
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () =>
+          storyDetail({
+            story: {
+              discussion_rounds: 2,
+              question_groups: [
+                {
+                  id: "C-1#3",
+                  questions: [
+                    {
+                      question: "格式？",
+                      recommended: "CSV",
+                      impact: "依赖",
+                      resolution: {
+                        source: "accepted_default",
+                        value: "CSV",
+                        entry_id: "C-1#5",
+                      },
+                    },
+                  ],
+                },
+                { id: "C-1#6", questions: [] },
+                {
+                  id: "C-1#7",
+                  questions: [
+                    { question: "要表头吗？", recommended: "要", impact: "" },
+                    {
+                      question: "文件名？",
+                      recommended: "按日期",
+                      impact: "",
+                      resolution: {
+                        source: "proposal_default",
+                        value: "按日期",
+                        entry_id: "C-1#8",
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          }),
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const questions = await screen.findByRole("region", { name: "问题清单" });
+  // An empty checklist adds no list.
+  const lists = within(questions).getAllByRole("list");
+  expect(lists.map((l) => l.getAttribute("aria-label"))).toEqual([
+    "问题清单 C-1#3",
+    "问题清单 C-1#7",
+  ]);
   expect(
-    screen.getByRole("tab", { name: /时间线/ }).getAttribute("aria-selected"),
-  ).toBe("true");
+    lists.map((l) =>
+      within(l)
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
+    ),
+  ).toEqual([
+    ["格式？已接受默认：CSV"],
+    ["要表头吗？建议：要", "文件名？未答，方案按默认：按日期"],
+  ]);
 });
 
 test("a story without children or questions shows no empty sections and makes no list read", async () => {
@@ -247,46 +301,10 @@ test("a story without children or questions shows no empty sections and makes no
     />,
   );
   await screen.findByRole("region", { name: "原始需求" });
-  for (const name of ["子卡进度", "讨论", "拆解方案", "对照总结"])
+  for (const name of ["子卡进度", "问题清单", "拆解方案", "对照总结"])
     expect(screen.queryByRole("region", { name })).toBeNull();
   expect(screen.queryByText(/没有子卡|没有问题清单/u)).toBeNull();
   expect(cards).not.toHaveBeenCalled();
-});
-
-test("a failed child read keeps the parent lines and offers a retry", async () => {
-  let fail = true;
-  const cards = vi.fn(async () => {
-    if (fail) throw new Error("网络断开");
-    return {
-      project_id: "p-1",
-      filter: "all" as const,
-      cards: rows,
-      counts: { total: rows.length, needs_me: 0, agent: 0 },
-    };
-  });
-  render(
-    <CardDetailPage
-      client={fakeClient({ card: async () => storyDetail(), cards })}
-      projectId="p-1"
-      cardId="C-1"
-    />,
-  );
-  const progress = await screen.findByRole("region", { name: "子卡进度" });
-  expect((await within(progress).findByRole("alert")).textContent).toContain(
-    "读取子卡依赖失败",
-  );
-  const graph = within(progress).getByRole("list", { name: "子卡进度图" });
-  expect(graph.querySelectorAll("[data-node]")).toHaveLength(4);
-  fail = false;
-  fireEvent.click(within(progress).getByRole("button", { name: "重试" }));
-  await waitFor(() => expect(within(progress).queryByRole("alert")).toBeNull());
-  await waitFor(() =>
-    expect(
-      within(progress)
-        .getByRole("list", { name: "子卡进度图" })
-        .parentElement?.querySelector('[data-edge="C-3>C-4"]'),
-    ).not.toBeNull(),
-  );
 });
 
 test("the summary shows its text and author; the overview reads no attachments panel", async () => {
@@ -355,15 +373,10 @@ test("an ordinary card keeps its goal section and shows no story frame", async (
   expect(cards).not.toHaveBeenCalled();
 });
 
-const listPage = (cards: CardListItem[]) => ({
-  project_id: "p-1",
-  filter: "all" as const,
-  cards,
-  counts: { total: cards.length, needs_me: 0, agent: 0 },
-});
-const nodeText = (id: string) =>
-  document.querySelector(`section[aria-label="子卡进度"] [data-node="${id}"]`)
-    ?.textContent ?? "";
+const rowText = (id: string) =>
+  [...document.querySelectorAll('section[aria-label="子卡进度"] li')].find(
+    (row) => row.textContent?.startsWith(id),
+  )?.textContent ?? "";
 
 test("a child's own event refreshes the open story; an unrelated card's does not", async () => {
   let status: CardStatus = "in_progress";
@@ -383,7 +396,7 @@ test("a child's own event refreshes the open story; an unrelated card's does not
       events.filter((e) => e === id || related.includes(e)).length,
   });
   const { rerender } = render(<CardDetailPage {...props()} />);
-  await waitFor(() => expect(nodeText("C-3")).toContain("进行中"));
+  await waitFor(() => expect(rowText("C-3")).toContain("进行中"));
   expect(card).toHaveBeenCalledTimes(1);
 
   events = ["C-99"];
@@ -394,9 +407,8 @@ test("a child's own event refreshes the open story; an unrelated card's does not
   status = "review";
   events = ["C-99", "C-3"];
   rerender(<CardDetailPage {...props()} />);
-  await waitFor(() => expect(nodeText("C-3")).toContain("审核中"));
+  await waitFor(() => expect(rowText("C-3")).toContain("审核中"));
   expect(card).toHaveBeenCalledTimes(2);
-  expect(screen.getByText("审核中 1")).toBeTruthy();
 });
 
 test("a summary outside the loaded timeline is read by its anchor alone", async () => {
@@ -477,66 +489,25 @@ test("a failed summary read says so and retries", async () => {
   expect(within(summary).queryByRole("alert")).toBeNull();
 });
 
-test("a refresh failure of child links keeps the last result and offers a retry", async () => {
-  let fail = false;
-  const detail = storyDetail();
-  const cards = vi.fn(async () => {
-    if (fail) throw new Error("列表服务断开");
-    return listPage(rows);
-  });
-  const client = fakeClient({ card: async () => detail, cards });
-  const { rerender } = render(
-    <CardDetailPage
-      client={client}
-      projectId="p-1"
-      cardId="C-1"
-      revision={0}
-    />,
-  );
-  const progress = await screen.findByRole("region", { name: "子卡进度" });
-  await waitFor(() =>
-    expect(progress.querySelector('[data-edge="C-3>C-4"]')).not.toBeNull(),
-  );
-
-  fail = true;
-  rerender(
-    <CardDetailPage
-      client={client}
-      projectId="p-1"
-      cardId="C-1"
-      revision={1}
-    />,
-  );
-  expect((await within(progress).findByRole("alert")).textContent).toContain(
-    "读取子卡依赖失败：列表服务断开",
-  );
-  // The last good result stays on screen beside the error.
-  expect(progress.querySelector('[data-edge="C-3>C-4"]')).not.toBeNull();
-
-  fail = false;
-  fireEvent.click(within(progress).getByRole("button", { name: "重试" }));
-  await waitFor(() => expect(within(progress).queryByRole("alert")).toBeNull());
-  expect(cards).toHaveBeenCalledTimes(3);
-});
-
-test("a story the person marked done shows 已完成 on its node, never 待核", async () => {
-  const kids = children.map((c) => ({ ...c, status: "done" as const }));
-  const detail = storyDetail({ children: kids, summary: true });
+test("the child list leaves out the story itself and lists a repeated child once", async () => {
+  const kids = [
+    { id: "C-1", title: "需求：导出报表", status: "done" as const },
+    ...children,
+    { id: "C-3", title: "接口", status: "in_progress" as const },
+  ];
   render(
     <CardDetailPage
-      client={fakeClient({
-        card: async () => ({
-          ...detail,
-          card: { ...detail.card, status: "done", resolution: "done" },
-        }),
-        cards: async () => listPage(rows),
-      })}
+      client={fakeClient({ card: async () => storyDetail({ children: kids }) })}
       projectId="p-1"
       cardId="C-1"
     />,
   );
-  await waitFor(() => expect(nodeText("C-1")).toContain("已完成"));
-  expect(nodeText("C-1")).not.toContain("待核");
+  const list = await screen.findByRole("list", { name: "子卡" });
+  expect(
+    within(list)
+      .getAllByRole("listitem")
+      .map((item) => item.textContent?.slice(0, 3)),
+  ).toEqual(["C-2", "C-3", "C-4"]);
 });
 
 const proposal = (

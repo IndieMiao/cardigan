@@ -165,9 +165,19 @@ export class CommandEvents {
       /**
        * C-652: `projectMergeEvents` from the same view's type index, the same
        * rows as the SQL `type GLOB 'merge_batch_*'` read without parsing them.
+       * C-774: before this connection has decoded the project's history, read
+       * those few rows by the type index instead of decoding the whole log
+       * (a closed card's detail must not pay a cold history load).
        */
       projectMergeEvents: (project: ProjectId): Event[] =>
-        listStreams(project).matching("", "type", isProjectMergeEventType),
+        pending.has(project) || this.committed.has(project)
+          ? listStreams(project).matching("", "type", isProjectMergeEventType)
+          : prepare(
+              db,
+              "SELECT doc FROM events WHERE project_id = ? AND stream = '' AND (type = 'merge_queue_configured' OR type GLOB 'merge_batch_*') ORDER BY seq",
+            )
+              .all(project)
+              .map((row) => JSON.parse(String(row.doc)) as Event),
       commit: () => {
         for (const [project, snapshot] of pending)
           this.committed.set(project, publish(snapshot));

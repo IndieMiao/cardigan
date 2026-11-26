@@ -92,8 +92,22 @@ export function readCardDetailCached(
   store: Store,
   request: CardDetailRead,
   read: () => Record<string, unknown>,
-  options: { ttlMs?: number; maxEntries?: number } = {},
+  options: {
+    ttlMs?: number;
+    maxEntries?: number;
+    /** C-774: version check, serialization and compression, in ms. */
+    recordTiming?: (stage: string, ms: number) => void;
+  } = {},
 ): CardDetailAnswer {
+  const timed = <T>(stage: string, fn: () => T): T => {
+    if (!options.recordTiming) return fn();
+    const started = performance.now();
+    try {
+      return fn();
+    } finally {
+      options.recordTiming(stage, performance.now() - started);
+    }
+  };
   const ttlMs = options.ttlMs ?? CARD_DETAIL_CACHE_DEFAULTS.ttlMs;
   const maxEntries =
     options.maxEntries ?? CARD_DETAIL_CACHE_DEFAULTS.maxEntries;
@@ -111,7 +125,9 @@ export function readCardDetailCached(
     caches.set(store, cache);
   }
   // Read before the detail: a write in between only costs a later rebuild.
-  const version = storeVersion(store, request.project);
+  const version = timed("detail_version", () =>
+    storeVersion(store, request.project),
+  );
   let entry = cache.get(key);
   if (
     !entry ||
@@ -120,19 +136,21 @@ export function readCardDetailCached(
     entry.expires <= Date.now()
   ) {
     const payload = read();
-    const { now: _now, ...stable } = payload;
-    const etag = `W/"${createHash("sha256")
-      .update(key)
-      .update("\0")
-      .update(JSON.stringify(stable))
-      .digest("base64url")
-      .slice(0, 32)}"`;
-    entry = {
-      version: version ?? "",
-      expires: Date.now() + ttlMs,
-      etag,
-      body: JSON.stringify(payload),
-    };
+    entry = timed("detail_serialize", () => {
+      const { now: _now, ...stable } = payload;
+      const etag = `W/"${createHash("sha256")
+        .update(key)
+        .update("\0")
+        .update(JSON.stringify(stable))
+        .digest("base64url")
+        .slice(0, 32)}"`;
+      return {
+        version: version ?? "",
+        expires: Date.now() + ttlMs,
+        etag,
+        body: JSON.stringify(payload),
+      };
+    });
     if (version !== undefined) {
       cache.delete(key);
       cache.set(key, entry);
@@ -143,7 +161,8 @@ export function readCardDetailCached(
   if (matchesValidator(request.ifNoneMatch, entry.etag))
     return { etag: entry.etag, notModified: true };
   if (request.acceptGzip && entry.body.length >= GZIP_MIN_BYTES) {
-    entry.gzip ??= gzipSync(entry.body);
+    const body = entry.body;
+    entry.gzip ??= timed("detail_gzip", () => gzipSync(body));
     return { etag: entry.etag, gzip: entry.gzip, notModified: false };
   }
   return { etag: entry.etag, body: entry.body, notModified: false };

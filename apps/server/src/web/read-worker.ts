@@ -1,5 +1,7 @@
 import { parentPort, workerData } from "node:worker_threads";
+import type { ProjectId } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
+import { readNeedsState } from "./needs-state.js";
 import {
   type HostFacts,
   type HostFactsRequest,
@@ -58,7 +60,47 @@ async function read(id: number, op: WorkbenchReadOp) {
   }
 }
 
+/**
+ * C-774: a fresh worker decodes its projects' history in slices of this many
+ * events, then builds their command state once, so the first reads after a
+ * restart do not each wait for a cold build. A read that arrives meanwhile
+ * runs between slices (it reads the database itself, never a partial view).
+ */
+const WARM_SLICE_ROWS = 5_000;
+const warming: string[] = [];
+let warmScheduled = false;
+
+function scheduleWarm() {
+  if (warmScheduled || closing || !warming.length) return;
+  warmScheduled = true;
+  setImmediate(warmStep);
+}
+
+function warmStep() {
+  warmScheduled = false;
+  // Reads go first; the finished read schedules the next slice.
+  if (closing || current) return;
+  const project = warming[0];
+  if (project === undefined) return;
+  try {
+    if (store.warmCommandEvents(project as ProjectId, WARM_SLICE_ROWS)) {
+      readNeedsState(store, project as ProjectId);
+      warming.shift();
+    }
+  } catch {
+    // Best effort: the project's first read builds whatever is left.
+    warming.shift();
+  }
+  scheduleWarm();
+}
+
 port.on("message", (message) => {
+  if (message.kind === "warm") {
+    for (const project of message.projects as string[])
+      if (!warming.includes(project)) warming.push(project);
+    scheduleWarm();
+    return;
+  }
   if (message.kind === "host") {
     asks.get(message.id)?.(message.facts ?? {});
     asks.delete(message.id);
@@ -77,6 +119,7 @@ port.on("message", (message) => {
   if (message.kind !== "read" || closing) return;
   const request = read(message.id, message.op).finally(() => {
     if (current === request) current = undefined;
+    scheduleWarm();
   });
   current = request;
 });

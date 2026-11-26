@@ -504,3 +504,42 @@ test("C-785: warming in slices skips non-resident rows without stalling", () => 
     }
   });
 });
+
+test("C-774: a cold projectMergeEvents reads the type index without decoding the project's history", () => {
+  withTempStore((store) => {
+    const event = (id: string, seq: number, type: string): Event => ({
+      ...audit(id, seq),
+      type,
+    });
+    const sqlMerge = () =>
+      store.database
+        .prepare(
+          "SELECT doc FROM events WHERE project_id = ? AND stream = '' AND (type = 'merge_queue_configured' OR type GLOB 'merge_batch_*') ORDER BY seq",
+        )
+        .all(P)
+        .map((r) => JSON.parse(String(r.doc)) as Event);
+    store.createProject({ id: P });
+    store.uow.run((tx) => {
+      tx.events.append(P, event("p-1", 1, "merge_queue_configured"));
+      tx.events.append(P, event("p-2", 2, "merge_push_queued"));
+      tx.events.append(P, event("p-3", 3, "merge_batch_formed"));
+    });
+    const cold = store.uow.read((tx) => tx.projectMergeEvents?.(P));
+    expect(cold?.map((e) => e.id)).toEqual(["p-1", "p-3"]);
+    expect(cold).toEqual(sqlMerge());
+    // The history is still undecoded: warming one row does not catch up.
+    expect(store.warmCommandEvents(P, 1)).toBe(false);
+    // Rows committed meanwhile are seen on the cold path too.
+    store.uow.run((tx) =>
+      tx.events.append(P, event("p-4", 4, "merge_batch_finished")),
+    );
+    expect(
+      store.uow.read((tx) => tx.projectMergeEvents?.(P))?.map((e) => e.id),
+    ).toEqual(["p-1", "p-3", "p-4"]);
+    // Once decoded, the in-memory index answers the same rows.
+    while (!store.warmCommandEvents(P, 1));
+    expect(store.uow.read((tx) => tx.projectMergeEvents?.(P))).toEqual(
+      sqlMerge(),
+    );
+  });
+});
