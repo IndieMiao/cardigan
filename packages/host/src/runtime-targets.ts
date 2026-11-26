@@ -1,4 +1,5 @@
 import { arch, platform } from "node:os";
+import { dirname } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -6,6 +7,7 @@ import type {
   IdleRetirementResult,
   Machine,
   ProjectId,
+  RemoteRebootReading,
   RemoteWorkerLoss,
   RetirementEvidence,
   RetirementIdentity,
@@ -63,12 +65,18 @@ import {
 } from "./runtime-workers-config.js";
 import { patrolHelperUpgrade } from "./worker-auto-upgrade.js";
 import {
+  hasHelperMismatch,
+  helperMismatch,
+  softHelperMismatch,
+} from "./worker-helper-release.js";
+import {
   checkWorkerMcpReachability,
   WorkerMcpError,
   workerMcpConfig,
 } from "./worker-mcp.js";
 import { WorkerPathHistory } from "./worker-path-history.js";
 import { workerReadiness } from "./worker-readiness.js";
+import { enrolledUpgradeIdentity } from "./worker-upgrade-enrollment.js";
 import {
   upgradeHeld,
   upgradeHold,
@@ -100,7 +108,21 @@ export interface MachineCheck {
   readonly draining?: true;
   readonly machine_id: string;
   readonly blockers: readonly string[];
+  /** Non-blocking findings (C-608), e.g. a compatible helper awaiting upgrade. */
+  readonly warnings?: readonly string[];
   readonly launch_enabled: boolean;
+}
+/** C-608: at most one launch-triggered readiness refresh per machine in this window. */
+export const LAUNCH_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const launchRefreshes = new Map<string, number>();
+/** Test isolation only. */
+export const resetLaunchRefreshes = () => launchRefreshes.clear();
+function launchRefreshDue(key: string, now = Date.now()) {
+  const last = launchRefreshes.get(key);
+  if (last !== undefined && now - last < LAUNCH_REFRESH_INTERVAL_MS)
+    return false;
+  launchRefreshes.set(key, now);
+  return true;
 }
 export interface RuntimeTargetsOptions extends HerdrOptions {
   readonly execution: ExecutionConfig;
@@ -115,6 +137,8 @@ export interface RuntimeTargetsOptions extends HerdrOptions {
   /** Host probe injection for tests; never loaded from project input. */
   readonly workerReadiness?: typeof workerReadiness;
   readonly workerMcpReachability?: typeof checkWorkerMcpReachability;
+  /** Server only: a launch refused by an unreachable MCP refreshes readiness in the background. */
+  readonly refreshAfterLaunchFailure?: boolean;
   /** C-642: reuse of a clean machine probe; `CARDIGAN_MACHINE_PROBE_CACHE_MS`. */
   readonly probeCacheMs?: number;
 }
@@ -486,18 +510,23 @@ export class RuntimeTargets implements Runtime {
     const resolve = pinned ?? (() => this.launchTarget(project, assignment));
     const target = resolve();
     if (assignment.machine_id === "local") return target;
+    const machine = assignment.machine_id;
     // C-642: preflights may share a recent clean probe of the same binding.
-    const checked = pinned
-      ? await this.rawMachineCheck(
-          project,
-          assignment.machine_id,
-          pinned,
-          reuse,
-        )
-      : await this.check(project, assignment.machine_id, false, reuse);
+    let checked = pinned
+      ? await this.rawMachineCheck(project, machine, pinned, reuse)
+      : await this.check(project, machine, false, reuse);
+    // C-608: upgrade a stale helper through the patrol path first, then check again.
+    if (
+      !pinned &&
+      checked.ok &&
+      (await this.upgradeBeforeLaunch(project, machine, checked.value))
+    )
+      checked = await this.check(project, machine);
     if (!checked.ok) return rejected(`machine_check_${checked.error.code}`);
-    if (checked.value.blockers.length)
+    if (checked.value.blockers.length) {
+      this.refreshAfterRefusal(project, machine, checked.value.blockers);
       return rejected(checked.value.blockers[0]);
+    }
     const current = resolve();
     if (
       target.execution.target?.fingerprint !==
@@ -505,6 +534,40 @@ export class RuntimeTargets implements Runtime {
     )
       return rejected("target_changed");
     return current;
+  }
+  private async upgradeBeforeLaunch(
+    project: ProjectId,
+    machine: string,
+    check: MachineCheck,
+  ): Promise<boolean> {
+    if (!hasHelperMismatch(check)) return false;
+    try {
+      const root = dirname(runtimeWorkersPath(this.options.env));
+      if (!enrolledUpgradeIdentity(root, project, machine)) return false;
+    } catch {
+      return false;
+    }
+    if (!launchRefreshDue(`upgrade\0${project}\0${machine}`)) return false;
+    try {
+      await this.refreshMachine(project, machine);
+    } catch {
+      // The live check after this decides; the patrol keeps retrying.
+    }
+    return true;
+  }
+  /** Surface a slow link as a readiness warning instead of only an MCP timeout. */
+  private refreshAfterRefusal(
+    project: ProjectId,
+    machine: string,
+    blockers: readonly string[],
+  ) {
+    if (
+      !this.options.refreshAfterLaunchFailure ||
+      !blockers.some((b) => b === "mcp_timeout" || b === "mcp_unreachable") ||
+      !launchRefreshDue(`network\0${project}\0${machine}`)
+    )
+      return;
+    void this.refreshMachine(project, machine).catch(() => undefined);
   }
   // A reused terminal runs this inside its hc send slot. Revalidate the
   // pinned SSH target directly; forLaunch's hc health call would requeue on
@@ -516,7 +579,9 @@ export class RuntimeTargets implements Runtime {
       if (!pin || target.execution.target?.fingerprint !== pin)
         return rejected("target_changed");
       if (machine_id !== "local") {
-        const blockers = await this.workerBlockers(target);
+        const blockers = (await this.workerBlockers(target)).filter(
+          (b) => !softHelperMismatch(b),
+        );
         if (blockers.length) return rejected(blockers[0]);
       }
       return this.checkedTarget(target, project, assignment).execution;
@@ -797,6 +862,8 @@ export class RuntimeTargets implements Runtime {
           return rejected("target_changed");
         if (!["online", "degraded"].includes(current.machine.status))
           blockers = [...blockers, "machine_not_ready"];
+        const warnings = blockers.filter(softHelperMismatch);
+        blockers = blockers.filter((b) => !softHelperMismatch(b));
         return {
           ok: true,
           value: {
@@ -805,6 +872,7 @@ export class RuntimeTargets implements Runtime {
               ? { draining: true as const }
               : {}),
             blockers,
+            ...(warnings.length ? { warnings } : {}),
             launch_enabled:
               blockers.length === 0 && this.launchAllowed(project, machine_id),
           },
@@ -1209,9 +1277,18 @@ export class RuntimeTargets implements Runtime {
         "status",
       );
       this.executionForRef(ref, project);
-      return isDeepStrictEqual(evidence.process, receipt)
-        ? evidence.observed
-        : "unknown";
+      if (!isDeepStrictEqual(evidence.process, receipt)) return "unknown";
+      // C-761: the same receipt read under another boot; that boot has ended.
+      if (
+        evidence.observed !== "alive" &&
+        evidence.boot !== undefined &&
+        evidence.boot !== receipt.boot
+      )
+        return {
+          process: "exited",
+          current_boot: evidence.boot,
+        } satisfies RemoteRebootReading;
+      return evidence.observed;
     } catch (error) {
       if (error instanceof WorkerTransportUnavailable) {
         try {
@@ -1505,6 +1582,9 @@ export async function observeRegisteredMachine(
       return checked.ok
         ? {
             blockers: checked.value.blockers,
+            ...(checked.value.warnings
+              ? { warnings: checked.value.warnings }
+              : {}),
             launch_enabled: checked.value.launch_enabled,
           }
         : {
@@ -1524,9 +1604,11 @@ export async function observeRegisteredMachine(
       `machine-observation:${options.observationId}` &&
     result.health.blockers.includes("machine_not_ready")
   ) {
-    const failed_steps = result.health.blockers.filter(
-      (s) => s !== "machine_not_ready",
-    );
+    // A manual helper confirmation needs the current helper, not just a compatible one.
+    const failed_steps = [
+      ...result.health.blockers.filter((s) => s !== "machine_not_ready"),
+      ...(result.health.warnings ?? []).filter(helperMismatch),
+    ];
     maintenance = {
       status: failed_steps.length ? "failed" : "passed",
       failed_steps,

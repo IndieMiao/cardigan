@@ -53,9 +53,10 @@ def registered_admin(path, common):
 
 
 def clean_tree(path, common, project):
+    """None only when the checkout is provably clean, else a bounded refusal code."""
     admin = registered_admin(path, common)
     if not admin:
-        return False
+        return 'worktree_unregistered'
     # Do not let Git rediscover a different repository through a changed .git file.
     env = dict(PATH='/usr/bin:/bin', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
                GIT_DIR=str(admin), GIT_COMMON_DIR=str(common), GIT_WORK_TREE=str(path),
@@ -73,29 +74,45 @@ def clean_tree(path, common, project):
     # Refuse configs that could launch repository-selected programs or hide changes.
     keys = git('config', '--local', '--no-includes', '--name-only', '--list').decode().splitlines()
     if any(not re.fullmatch(r'core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode)|remote\.origin\.(url|fetch)|branch\..+\.(remote|merge)|extensions\.objectformat', k) for k in keys):
-        return False
+        return 'git_config'
     if git('config', '--local', '--no-includes', '--get-all', 'remote.origin.url') != os.fsencode('cardigan-central:' + project) + b'\n':
-        return False
+        return 'git_remote'
     # Unborn/damaged checkouts and indexes hiding tracked changes are not proof.
     if not re.fullmatch(b'[0-9a-f]{40}(?:[0-9a-f]{24})?\n', git('rev-parse', '--verify', 'HEAD^{commit}')):
-        return False
+        return 'git_head'
     if any(not row.startswith((b'H 100644 ', b'H 100755 ', b'H 120000 '))
            for row in git('ls-files', '--stage', '-v', '-z').split(b'\x00') if row):
-        return False
-    return (git('rev-parse', '--show-toplevel') == os.fsencode(path) + b'\n' and
-            not git('status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignore-submodules=none') and
-            registered_admin(path, common) == admin)
+        return 'git_index'
+    if git('rev-parse', '--show-toplevel') != os.fsencode(path) + b'\n':
+        return 'worktree_unregistered'
+    if git('status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignore-submodules=none'):
+        return 'worktree_dirty'
+    return None if registered_admin(path, common) == admin else 'worktree_unregistered'
 
 
 def workspace(c):
-    leaf = Path(c['project'], c['assignment'])
-    tree, build = (Path(c['root'], k, leaf) for k in ('worktrees', 'builds'))
-    if c['worktree'] == 'none':
-        return (Path.cwd() == Path(c['root'], 'runs', leaf, 'generations', c['generation']) and
-                not os.path.lexists(tree) and not os.path.lexists(build))
-    common = Path(c['root'], 'repos', c['project'], '.git')
-    return (Path.cwd() == tree and clean_tree(tree, common, c['project']) and
-            (not os.path.lexists(build) or clean_tree(build, common, c['project'])))
+    """None only when this session's workspace is provably clean, else a refusal code.
+
+    C-746: the code names which proof failed; it carries no path or file name."""
+    try:
+        leaf = Path(c['project'], c['assignment'])
+        tree, build = (Path(c['root'], k, leaf) for k in ('worktrees', 'builds'))
+        if c['worktree'] == 'none':
+            if Path.cwd() != Path(c['root'], 'runs', leaf, 'generations', c['generation']):
+                return 'workspace_cwd'
+            return 'workspace_unexpected' if os.path.lexists(tree) or os.path.lexists(build) else None
+        common = Path(c['root'], 'repos', c['project'], '.git')
+        if Path.cwd() != tree:
+            return 'workspace_cwd'
+        refused = clean_tree(tree, common, c['project'])
+        if refused or not os.path.lexists(build):
+            return refused
+        refused = clean_tree(build, common, c['project'])
+        return refused and 'build_' + refused
+    except subprocess.TimeoutExpired:
+        return 'git_timeout'
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return 'workspace_unreadable'
 
 
 def valid_signature(public_pem, message, signature):
@@ -118,26 +135,46 @@ def handle(conn, c, child, inspect, public_pem, spent):
     # Only this single-threaded parent reaps child. A dead, not-yet-reaped
     # child still reserves its PID; poll() returning an exit always withdraws.
     conn.settimeout(3)
+    def refuse(code):
+        # C-746: name the refused proof before closing, so the controller can
+        # report it instead of an anonymous closed connection. Never a signal.
+        conn.sendall(f'refused {code}\n'.encode())
     with conn.makefile('rb') as stream:
         raw = stream.readline(2048)
         if not raw.endswith(b'\n'):
             return
-        req = json.loads(raw)
-        p, terminal = req['process'], req['terminal']
-        if (spent[0] or p['pid'] != child.pid or terminal != os.environ.get('HC_TERMINAL_ID') or
-                child.poll() is not None):
-            return
+        try:
+            req = json.loads(raw)
+            p, terminal = req['process'], req['terminal']
+            mismatch = spent[0] or p['pid'] != child.pid or terminal != os.environ.get('HC_TERMINAL_ID')
+        except (ValueError, KeyError, TypeError):
+            return refuse('request_invalid')
+        if mismatch:
+            return refuse('request_mismatch')
         bound = dict(c, process=p, terminal=terminal, require_idle=True)
         def eligible():
-            return (workspace(c) and inspect(bound, os.getpid()) == 'alive' and child.poll() is None)
-        if not eligible():
-            return
+            if child.poll() is not None:
+                return 'cli_exited'
+            refused = workspace(c)
+            if refused:
+                return refused
+            why = []
+            try:
+                observed = inspect(bound, os.getpid(), why)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+                return 'terminal_unreadable'
+            if observed != 'alive':
+                return why[0] if why else 'terminal_' + observed
+            return None if child.poll() is None else 'cli_exited'
+        refused = eligible()
+        if refused:
+            return refuse(refused)
         nonce = secrets.token_hex(32)
         # The key id lets a restarted controller refuse to sign for an owner it cannot serve.
         conn.sendall(f'{nonce} {key_id(public_pem)}\n'.encode())
         signature = stream.readline(256).rstrip(b'\n')
         if (not valid_signature(public_pem, nonce.encode()+b':'+hashlib.sha256(raw).hexdigest().encode(), signature)
-                or not eligible()):
+                or eligible()):
             conn.sendall(b'withdrawn\n')
             return
         spent[0] = True  # even an ambiguous receipt never repeats the stop

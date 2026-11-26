@@ -5,7 +5,11 @@ import type {
   Event,
   PreMergeCheckedVersion,
 } from "../entities.js";
-import { cardEventsOfType, eventsForDecision } from "../event-index.js";
+import {
+  cardEventsOfType,
+  eventsForDecision,
+  eventsOfTypes,
+} from "../event-index.js";
 import type { CardId, DecisionId, DeliveryId } from "../ids.js";
 import {
   displayChangedPath,
@@ -491,52 +495,51 @@ export function mergeShadowComparisons(
   state: Pick<CommandState, "events" | "decisions">,
   card: CardId,
 ) {
-  return state.events
-    .filter(
-      (e) => e.card_id === card && e.type === "system_merge_shadow_recorded",
-    )
-    .map((e) => {
-      const q = state.decisions.find((q) => q.id === payload(e).decision_id);
-      return {
-        event_id: e.id,
-        at: e.created_at,
-        prediction: e.payload,
-        actual: q
-          ? {
-              decision_id: q.id,
-              status: q.status,
-              decider: q.decider,
-              resolution: q.resolution ?? null,
-            }
-          : null,
-        actual_events: state.events
-          .filter(
-            (actual) =>
-              actual.card_id === card &&
-              [
-                "decision_resolved",
-                "decision_provisionally_resolved",
-                "decision_requested",
-                "merge_confirmation_snoozed",
-                "decision_superseded",
-                // A confirmed merge keeps its original resolution when returned.
-                "merge_changes_requested",
-              ].includes(actual.type) &&
-              payload(actual).decision_id === q?.id,
-          )
-          .sort((a, b) => a.seq - b.seq)
-          .map((actual) => ({
-            event_id: actual.id,
-            seq: actual.seq,
-            at: actual.created_at,
-            type: actual.type,
-            author:
-              actual.actor.kind === "assignment"
-                ? (`assignment:${actual.actor.assignment_id}` as const)
-                : actual.actor.kind,
-            payload: actual.payload,
-          })),
-        evaluated_seq: e.seq,
-      };
-    });
+  // C-671: from the indexes; the card may be closed (and cold) by now.
+  return cardEventsOfType(
+    state.events,
+    card,
+    "system_merge_shadow_recorded",
+  ).map((e) => {
+    const q = state.decisions.find((q) => q.id === payload(e).decision_id);
+    return {
+      event_id: e.id,
+      at: e.created_at,
+      prediction: e.payload,
+      actual: q
+        ? {
+            decision_id: q.id,
+            status: q.status,
+            decider: q.decider,
+            resolution: q.resolution ?? null,
+          }
+        : null,
+      actual_events: eventsOfTypes(state.events, [
+        "decision_resolved",
+        "decision_provisionally_resolved",
+        "decision_requested",
+        "merge_confirmation_snoozed",
+        "decision_superseded",
+        // A confirmed merge keeps its original resolution when returned.
+        "merge_changes_requested",
+      ])
+        .filter(
+          (actual) =>
+            actual.card_id === card && payload(actual).decision_id === q?.id,
+        )
+        .sort((a, b) => a.seq - b.seq)
+        .map((actual) => ({
+          event_id: actual.id,
+          seq: actual.seq,
+          at: actual.created_at,
+          type: actual.type,
+          author:
+            actual.actor.kind === "assignment"
+              ? (`assignment:${actual.actor.assignment_id}` as const)
+              : actual.actor.kind,
+          payload: actual.payload,
+        })),
+      evaluated_seq: e.seq,
+    };
+  });
 }

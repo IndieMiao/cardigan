@@ -76,11 +76,35 @@ def private_mkdir(path,mode=0o777,*,dir_fd=None):
     return mkdir(path,mode,dir_fd=dir_fd)
 os.mkdir=private_mkdir
 `;
+  // C-756: every remote call starts a fresh `python3 -I -B` that would
+  // recompile the three helpers (~25 ms each time). Compile them once into a
+  // fixture-private cache outside the protected disk and redirect only these
+  // three sources to it (stdlib keeps its own cache). Hash-checked bytecode is
+  // revalidated against the installed source on every load, so a changed
+  // helper is still compiled from its real bytes; -B keeps the cache read-only.
+  const bytecode = Object.fromEntries(
+    ["worker-git.py", "worker-files.py", "worker-primitives.py"].map((n) => [
+      join(disk, "libexec", n),
+      join(root, `${name}-pycache`, `${n}c`),
+    ]),
+  );
+  await mkdir(join(root, `${name}-pycache`), { mode: 0o700 });
+  await promisify(execFile)("/usr/bin/python3", [
+    "-I",
+    "-c",
+    `import json,py_compile,sys
+for source,cache in json.loads(sys.argv[1]).items():
+    py_compile.compile(source,cfile=cache,doraise=True,invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)`,
+    JSON.stringify(bytecode),
+  ]);
   const helper = join(root, `${name}-git.py`);
   await writeFile(
     helper,
     `${ownership}
 import importlib.util,json,sys
+import importlib._bootstrap_external as external
+cached,cache_from_source=${JSON.stringify(bytecode)},external.cache_from_source
+external.cache_from_source=lambda path,*args,**kwargs:cached.get(path) or cache_from_source(path,*args,**kwargs)
 spec=importlib.util.spec_from_file_location('worker',${JSON.stringify(join(disk, "libexec", "worker-git.py"))})
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 ${

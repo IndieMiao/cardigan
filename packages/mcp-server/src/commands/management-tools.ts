@@ -1,7 +1,11 @@
+import { randomUUID } from "node:crypto";
 import {
   type Actor,
   assignOrDefer,
   builtinCardTemplatesForFlow,
+  CARD_WATCH_NOTE_MAX_LENGTH,
+  CARD_WATCH_UNTIL,
+  type CardId,
   type Clock,
   type CommandEffect,
   type CommandPorts,
@@ -10,14 +14,19 @@ import {
   createCard,
   createWorkItem,
   decisionCategories,
+  HUMAN_ACTION_OPERATOR_NAME,
+  isPublishApprovalRequest,
   issueInstruction,
   latestCardTemplate,
   MAX_DECISION_ATTACHMENTS,
+  PUBLISH_APPROVAL_FORMAT,
   parseId,
   postComment,
   projectFlowVersion,
+  publishApprovalShape,
   RELEASE_NOTE_MAX_LENGTH,
   RELEASE_NOTE_VERSION,
+  type RequestDecisionParams,
   type Result,
   recordDecision,
   releaseAssignment,
@@ -35,12 +44,19 @@ import {
   updateWorkItem,
   validateWorkItemRequirements,
   validationFailed,
+  watchCard,
   writeReleaseNote,
 } from "@cardigan/domain";
 import { z } from "zod";
+import { ToolError } from "../errors.js";
+import type { PublicationOptions } from "../tools/publish-artifact.js";
 import { agentCard } from "../tools/shared.js";
-import { defineTool } from "../tools/types.js";
-import { executeCommand, projectRepositories } from "./execute.js";
+import { defineTool, type ToolContext } from "../tools/types.js";
+import {
+  executeCommand,
+  executePreparedCommand,
+  projectRepositories,
+} from "./execute.js";
 import { entryId, id, idempotency_key, plainSummary } from "./schemas.js";
 
 const text = z.string().min(1);
@@ -137,6 +153,26 @@ const requirements = z
   });
 const schemas = {
   set_merge_solo: { card_id: id("card"), solo: z.boolean(), reason: text },
+  watch_card: {
+    card_id: id("card").describe("Same-project card to watch"),
+    until: z
+      .enum(CARD_WATCH_UNTIL)
+      .describe("Ring once when the card is done, merged or cancelled"),
+    notify: z
+      .enum(["self", "pm_ops"])
+      .optional()
+      .describe("Recipient: this Assignment (default) or the PM Ops inbox"),
+    context_card_id: id("card")
+      .optional()
+      .describe(
+        "Card where you are waiting; the bell is posted there. Defaults to your own card for a work-item PM",
+      ),
+    note: z
+      .string()
+      .max(CARD_WATCH_NOTE_MAX_LENGTH)
+      .optional()
+      .describe("Why you wait, shown in the bell"),
+  },
   set_merge_window: { card_id: id("card"), open: z.boolean(), reason: text },
   issue_instruction: {
     card_id: id("card"),
@@ -213,7 +249,9 @@ const schemas = {
     story_summary: z
       .boolean()
       .optional()
-      .describe("常驻 Office 在子卡全部结束后提交对照总结，由人标记需求卡完成"),
+      .describe(
+        "常驻 Office 在子卡全部结束后提交对照总结；超时转交后 PM Ops 也可代笔。由人标记需求卡完成",
+      ),
     card_id: id("card"),
     body: text,
     work_item_id: id("work_item").optional(),
@@ -279,7 +317,14 @@ const schemas = {
     human_required_reason: text
       .optional()
       .describe(
-        "With decider=human: explicit reason this decision must be made personally by the human (numeric, behavior or role rules, scope changes required by AGENTS.md). Overrides standing delegation; PM cannot approve or transcribe it. Omit to keep category delegation. Delegated responses include routed_to and routing_reason and the timeline says 已按常驻授权转给 PM.",
+        "With decider=human: note why the human should decide, shown to the human. On its own it does not override category delegation: a delegated category still goes to PM Ops (the response includes routed_to and routing_reason and the timeline says 已按常驻授权转给 PM). PM declares an owner-only question with owner_required.",
+      ),
+    owner_required: z
+      .object({ reason: text, basis: text })
+      .strict()
+      .optional()
+      .describe(
+        "PM Office/Ops only, with decider=human: the owner must decide personally. reason = why; basis = the project rule, acceptance criterion or quoted owner words requiring it. Skips category delegation and goes straight to the owner; audited and counted in project_snapshot.owner_required_decisions. Only for rules or acceptance that require the owner's own confirmation (e.g. the owner checking artwork, publishing); ordinary feature details stay with delegation.",
       ),
     ready_when: readyWhen(false),
     card_id: id("card")
@@ -468,6 +513,11 @@ const schemas = {
         "With human/host handoff only: false explicitly reclassifies an old hold as post-merge follow-up; true requires a credential or external-account prerequisite. Omit to preserve the existing hold.",
       ),
     prerequisite: z.enum(["credential", "external_account"]).optional(),
+    basis_decision_id: id("decision")
+      .optional()
+      .describe(
+        "With blocks_merge=false on a credential or account hold: the decision on this card the human already resolved (e.g. chose to stop holding the merge); its answer is recorded as the basis. Without it only the human can lift such a hold.",
+      ),
     summary: text.optional(),
     why_human: text.optional(),
     expected_outcome: text.optional(),
@@ -514,6 +564,12 @@ const schemas = {
         "Only credential or external-account prerequisites may block merge; prerequisite is required with true. Field verification is post-merge follow-up by default.",
       ),
     due: text.optional(),
+    executor: z
+      .enum(["owner", "operator"])
+      .optional()
+      .describe(
+        "执行人：owner 为所有者本人，operator 为主机操作员张良（主机、凭据文件、OSS 上传、送签批准、云助手）。不填时标题以“张良：”开头或 why_human 写明这类操作即为 operator；operator 待办不推给所有者，只能由张良结项。",
+      ),
   },
   create_card: {
     parent_card_id: id("card").optional(),
@@ -625,6 +681,22 @@ const schemas = {
       .optional()
       .describe(
         "不合并卡（merge_policy=none）产出项的起点：完整提交 SHA 或分支名，检出为 detached worktree；传 null 清除。已有 worktree 后不能改",
+      ),
+    keep_run_dirs: z
+      .object({ reason: text })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "PM 点名保护：保留本卡已释放指派的运行目录，不自动回收（已完成的卡也可设）；传 null 解除。不能与其它字段混用",
+      ),
+    close_request: z
+      .object({ reason: text })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "请所有者结卡：人标记完成模板的非需求卡做完后，写明理由，进所有者 Needs You 的“待你标记完成”；只在卡现在就能标记完成时可用，不代为完成；传 null 撤回。不能与其它字段混用",
       ),
     hold: z
       .object({ reason: text, resume_condition: text })
@@ -834,7 +906,89 @@ function cardReply(result: ReturnType<typeof createCard>) {
   };
 }
 
-export function managementTools(clock?: Clock) {
+/**
+ * C-754: tell the host operator once per open item why a publish approval was
+ * not raised. Best effort: the caller still gets the refusal and its reasons.
+ * True when an open item for these reasons exists afterwards.
+ */
+function notifyPublishPrecheck(
+  context: ToolContext,
+  card: CardId,
+  failures: readonly string[],
+  clock: Clock | undefined,
+) {
+  const project = context.identity.actor.project_id;
+  const instructions = `${project} 的测试包外发主机预检未通过，外发拍板没有发起：${numbered(failures)}。修好后用 publish-precheck 命令核对全部 ok，再告知 PM 重新发起外发拍板。`;
+  try {
+    const open = context.store.uow.read((tx) =>
+      tx.human_actions
+        .list(project)
+        .some(
+          (h) =>
+            h.card_id === card &&
+            h.status === "open" &&
+            h.executor === "operator" &&
+            h.instructions === instructions,
+        ),
+    );
+    if (open) return true;
+    executeCommand(
+      context,
+      "request_human_action",
+      `c754-publish-precheck:${card}:${randomUUID()}`,
+      {
+        card_id: card,
+        executor: "operator",
+        instructions,
+        why_human: "主机发布配置和凭据文件只能由主机操作员修改",
+        expected_return: "publish-precheck 全部 ok，或说明无法修复的原因",
+        blocked_work_items: [],
+      },
+      requestHumanAction,
+      clock,
+    );
+    return true;
+  } catch {
+    // The refusal already carries the reasons to the caller.
+    return false;
+  }
+}
+const numbered = (items: readonly string[]) =>
+  items.map((f, i) => `${i + 1}) ${f}`).join("；");
+
+/** C-754: a publish approval reaches no one before this host could honour it. */
+async function precheckPublishApproval(
+  publication: PublicationOptions,
+  context: ToolContext,
+  state: CommandState,
+  p: RequestDecisionParams,
+  clock: Clock | undefined,
+) {
+  const precheck = publication.precheckPublication;
+  if (!precheck || !isPublishApprovalRequest(p) || !p.card_id) return;
+  const shape = publishApprovalShape(p, (id) =>
+    state.attachments.find((a) => a.id === id && !a.streamed_artifact?.expired),
+  );
+  // A malformed request is refused by the command itself, naming what is missing.
+  if (!shape.ok) return;
+  let failures: readonly string[];
+  try {
+    failures = await precheck(state.project_id, shape.attachment, shape.url);
+  } catch {
+    failures = ["主机预检无法完成"];
+  }
+  if (failures.length === 0) return;
+  const notified = notifyPublishPrecheck(context, p.card_id, failures, clock);
+  throw new ToolError(
+    "validation_failed",
+    `外发拍板没有发起：主机发布预检未通过（${numbered(failures)}）。${notified ? `已交${HUMAN_ACTION_OPERATOR_NAME}处理` : `请用 request_human_action（executor=operator）把原因交给${HUMAN_ACTION_OPERATOR_NAME}`}；修好后重新发起。`,
+  );
+}
+
+export function managementTools(
+  clock?: Clock,
+  publication: PublicationOptions = {},
+) {
   function wire<P, T>(
     name: keyof typeof schemas & ToolName,
     description: string,
@@ -868,7 +1022,8 @@ export function managementTools(clock?: Clock) {
     ),
     defineTool({
       name: "post_comment",
-      description: "Post a comment and references.",
+      description:
+        "Post a comment and references. 系统只按点名通知：需要别人行动、决定或回复的内容必须点名具体对象，在 `mentions` 填 Assignment 编号（A-n）或员工名，或在正文写 @A-n、@员工名；不点名的评论只是记录，不保证有人看到。被阻塞用 report_blocker，需要人操作用 request_human_action。写在代码块（含行内代码）或引用块（以 > 开头的行）里的 @ 不生效。",
       input: z.object({ ...schemas.post_comment, idempotency_key }),
       handler: ({ idempotency_key, ...params }, context) =>
         executeCommand(
@@ -916,7 +1071,23 @@ export function managementTools(clock?: Clock) {
       "Complete your assigned external host action as PM Office, with a required execution result. This does not grant host execution authority.",
       completeHumanAction,
     ),
-    wire("request_decision", "Request a scoped decision.", requestDecision),
+    defineTool({
+      name: "request_decision",
+      description: `Request a scoped decision. Publish approvals (category=publish with a publish option) are checked when raised. ${PUBLISH_APPROVAL_FORMAT}. A malformed one is refused naming what is missing; then this host's read-only publish precheck (configuration, credentials file, tools, OSS read access, and the attachment's signature, package name and version against the URL) must pass, otherwise the decision is not raised, the host operator is notified and the reasons are returned.`,
+      input: z.object({ ...schemas.request_decision, idempotency_key }),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executePreparedCommand(
+          context,
+          "request_decision",
+          idempotency_key,
+          params as RequestDecisionParams,
+          (state, _actor, p) =>
+            precheckPublishApproval(publication, context, state, p, clock),
+          (state, actor, p, _prepared, ports) =>
+            requestDecision(state, actor, p, ports),
+          clock,
+        ),
+    }),
     wire(
       "record_decision",
       "Record a decision through PM Office. A system-held merge confirmation (decider=system) accepts only hold or request_changes, with the rationale and raw_quote citing the basis.",
@@ -1043,7 +1214,7 @@ export function managementTools(clock?: Clock) {
     defineTool({
       name: "update_card",
       description:
-        "Update card metadata or planning state, register its repository and no-merge start point, or one pre-merge check (pre_merge_check).",
+        "Update card metadata or planning state, register its repository and no-merge start point, or one pre-merge check (pre_merge_check); close_request asks the owner to mark a finished card done.",
       input: z.object({ ...schemas.update_card, idempotency_key }),
       handler: ({ idempotency_key, ...params }, context) =>
         executeCommand(
@@ -1078,6 +1249,11 @@ export function managementTools(clock?: Clock) {
       "assign",
       "Assign work; omitted machine selects automatically. A deferred response has no Assignment or token. Credentials must be provisioned by the host.",
       assignPending,
+    ),
+    wire(
+      "watch_card",
+      "PM: register a one-shot note to be rung when another same-project card is done, merged or cancelled. If it closes another way (cancelled, superseded, done without merge) you are told instead. Changes no card or work item and is not a dependency: use depends_on_cards for start order and report_blocker for your own blocked work.",
+      watchCard,
     ),
     wire(
       "write_release_note",

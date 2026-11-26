@@ -52,6 +52,7 @@ import {
   requireHostDirectory,
 } from "./deployment-config.js";
 import { DeploymentBuildLog, DeploymentServerReady } from "./deployment-log.js";
+import { maintenanceActive } from "./deployment-maintenance.js";
 import { DeploymentRetention } from "./deployment-retention.js";
 import {
   DeploymentServerLog,
@@ -145,7 +146,6 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       this.retention = new DeploymentRetention(
         options.store,
         this.directory,
-        options.env,
         options.config.retention,
       );
     this.central = join(options.dataDir, "central", `${PROJECT}.git`);
@@ -454,6 +454,11 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           `自动部署未启动：PATH 中缺少可执行命令 ${command}，请在主机单元中显式配置 PATH`,
         );
     }
+  }
+  async maintenanceActive() {
+    return this.options.store.uow.read(() =>
+      maintenanceActive(this.options.store),
+    );
   }
   async checkServer() {
     if (this.live() && (!this.state.dual || this.live("background"))) {

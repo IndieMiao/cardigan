@@ -154,6 +154,46 @@ test("Q-88 loads a configurable cancellation grace once, defaulting to 60 minute
   ).toBe(60 * 60_000);
 });
 
+test("C-752: the scarce-resource grace is off by default and only ever shorter", async () => {
+  expect(
+    (await loadRunCapacityConfig({ configDir })).scarceInactiveCancel,
+  ).toBeNull();
+  await write("machines: { local: 4 }\n");
+  expect(
+    (await loadRunCapacityConfig({ configDir })).scarceInactiveCancel,
+  ).toBeNull();
+  await write(
+    "machines: { local: 4 }\nscarce_inactive_cancel_after_minutes: 30\n",
+  );
+  expect(await loadRunCapacityConfig({ configDir })).toMatchObject({
+    errors: [],
+    inactiveCancelAfterMs: 60 * 60_000,
+    scarceInactiveCancel: {
+      afterMs: 30 * 60_000,
+      resources: ["android.emulator", "ios.simulator", "godot"],
+    },
+  });
+  await write(
+    "machines: { local: 4 }\nscarce_inactive_cancel_after_minutes: 20\nscarce_resources: [ios.simulator]\n",
+  );
+  expect(
+    (await loadRunCapacityConfig({ configDir })).scarceInactiveCancel,
+  ).toEqual({ afterMs: 20 * 60_000, resources: ["ios.simulator"] });
+  for (const bad of [
+    "scarce_inactive_cancel_after_minutes: 60",
+    "scarce_inactive_cancel_after_minutes: 0",
+    "inactive_cancel_after_minutes: 20\nscarce_inactive_cancel_after_minutes: 30",
+    "scarce_inactive_cancel_after_minutes: 30\nscarce_resources: []",
+    "scarce_inactive_cancel_after_minutes: 30\nscarce_resources: ['Bad Key']",
+  ]) {
+    await write(`machines: { local: 4 }\n${bad}\n`);
+    const config = await loadRunCapacityConfig({ configDir });
+    expect(config.errors).toHaveLength(1);
+    expect(config.scarceInactiveCancel).toBeNull();
+    expect(config.inactiveCancelAfterMs).toBeNull();
+  }
+});
+
 test("C-475: inbox escalation has a separate read-on-start threshold", async () => {
   expect((await loadRunCapacityConfig({ configDir })).inboxStallAfterMs).toBe(
     120 * 60_000,

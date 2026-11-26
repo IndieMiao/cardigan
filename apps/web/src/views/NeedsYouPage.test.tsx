@@ -3362,3 +3362,112 @@ test("a story proposal waits for one-click confirmation; a stale version says to
   );
   expect(await screen.findByText("没有需要你处理的事")).toBeTruthy();
 });
+
+test("张良's actions sit in their own group without a complete form and can be taken back (C-742)", async () => {
+  const reassignAction = vi.fn(async () => undefined);
+  const item = {
+    id: "H-7",
+    card_id: "C-1",
+    instructions: "张良：换主机运维会话",
+    expected_return: "新会话编号",
+    why: "只能在主机上操作",
+    triage: "human" as const,
+    executor: "operator" as const,
+    waited_ms: 0,
+    due: null,
+    blocked_work_items: [],
+  };
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          decisions: [],
+          human_actions: [item],
+          incidents: [],
+        }),
+        reassignAction,
+      })}
+    />,
+  );
+  const article = await screen.findByRole("article", { name: "执行 H-7" });
+  expect(article.closest("section")?.getAttribute("aria-label")).toBe(
+    "交给张良",
+  );
+  expect(screen.queryByRole("region", { name: "待你执行" })).toBeNull();
+  expect(screen.queryByText(/件事等你处理/)).toBeNull();
+  expect(within(article).getByText("待张良执行")).toBeTruthy();
+  expect(screen.queryByText("没有需要你处理的事")).toBeNull();
+  expect(
+    within(article).queryByRole("button", { name: "确认已完成" }),
+  ).toBeNull();
+  expect(within(article).queryByLabelText("H-7 执行结果")).toBeNull();
+  fireEvent.click(within(article).getByRole("button", { name: "改由我处理" }));
+  await waitFor(() =>
+    expect(reassignAction).toHaveBeenCalledWith(
+      "p-1",
+      "H-7",
+      "owner",
+      "所有者改为自己处理",
+      expect.any(String),
+    ),
+  );
+});
+
+test("C-750: finished cards wait in 待你标记完成 with PM's note and a link to mark done", async () => {
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          decisions: [],
+          human_actions: [],
+          incidents: [],
+          cards_to_close: [
+            {
+              card_id: "C-23",
+              card_title: "整理发布规则",
+              template: "general",
+              required_work_items: 0,
+              close_request: {
+                reason: "规则已写进文档",
+                set_by: "assignment:A-4",
+                set_at: "2026-01-01T00:00:00.000Z",
+              },
+              since: "2026-01-01T00:00:00.000Z",
+              waited_ms: 2 * 3600000,
+            },
+            {
+              card_id: "C-24",
+              card_title: "调查卡",
+              template: "investigation",
+              required_work_items: 2,
+              close_request: null,
+              since: null,
+              waited_ms: null,
+            },
+          ],
+        }),
+      })}
+    />,
+  );
+  const group = await screen.findByRole("region", { name: "待你标记完成" });
+  expect(
+    within(group).getByRole("heading", { name: "待你标记完成（2）" }),
+  ).toBeTruthy();
+  const asked = within(group).getByRole("article", {
+    name: "待你标记完成 C-23",
+  });
+  expect(within(asked).getByText("规则已写进文档")).toBeTruthy();
+  expect(within(asked).getByText("已等待 2 小时")).toBeTruthy();
+  expect(
+    within(asked)
+      .getByRole("link", { name: "标记完成 C-23" })
+      .getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-23");
+  const auto = within(group).getByRole("article", {
+    name: "待你标记完成 C-24",
+  });
+  expect(within(auto).getByText("2 个必需工作项已全部通过")).toBeTruthy();
+  expect(screen.queryByText("没有需要你处理的事")).toBeNull();
+});

@@ -1,6 +1,11 @@
+import { unmetCardDependencies } from "../card-dependencies.js";
 import type { WorkItem } from "../entities.js";
+import type { CardId, WorkItemId } from "../ids.js";
 import { beginReviewRound } from "../transitions.js";
-import { requireCardDependencyStart } from "./card-dependencies.js";
+import {
+  dependencyState,
+  requireCardDependencyStart,
+} from "./card-dependencies.js";
 import { type CommandDraft, ensure, unwrap } from "./core.js";
 import { reviewRound } from "./review-round.js";
 
@@ -38,6 +43,35 @@ export function canStartWork(input: {
     );
     return dependency !== undefined && workCompleted(dependency);
   });
+}
+
+/**
+ * C-735: the prerequisites that keep `activeWork` from starting this item now,
+ * or undefined when it may start. Mirrors the dependency checks of
+ * `activeWork` without moving anything, so a Run woken before its
+ * prerequisites finish can start as a discussion instead of failing.
+ */
+export function workDependencyWait(
+  d: CommandDraft,
+  item: WorkItem,
+):
+  | {
+      readonly cards: readonly CardId[];
+      readonly work_items: readonly WorkItemId[];
+    }
+  | undefined {
+  const current = d.work(item.id);
+  if (!["todo", "ready", "changes_requested"].includes(current.status)) return;
+  const card = d.card(current.card_id);
+  const cards =
+    card.depends_on_cards?.length && !card.early_start
+      ? unmetCardDependencies(dependencyState(d), card)
+      : [];
+  const work_items =
+    current.kind === "produce" && current.status === "todo"
+      ? current.depends_on.filter((id) => !workCompleted(d.work(id)))
+      : [];
+  return cards.length || work_items.length ? { cards, work_items } : undefined;
 }
 
 // Only the caller's current Run can activate its work; waiting/terminal states stay intact.

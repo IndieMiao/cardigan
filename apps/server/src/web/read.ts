@@ -37,16 +37,19 @@ import {
   deriveReviewMatrix,
   effectivePreMergeChecks,
   eventById,
+  eventsOfType,
   extractQualifiedReferences,
   extractReferences,
   hasVerifiedMergeNoop,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
+  isMergePrerequisite,
   isOfficeDigestStream,
   latestCardTemplate,
   listNeedsYou,
   listNeedsYouCounts,
   markCardDone,
+  mergeBlockingHumanActions,
   mergeStage,
   type NeedsYouSection,
   notices,
@@ -630,9 +633,9 @@ function attachmentViewMapper(state: CommandState) {
     state.assignments.map((a) => [String(a.id), a.role_id]),
   );
   const uploaded = new Map<string, string>();
-  for (const event of state.events) {
+  // C-671: from the type index, so attachments of closed cards keep their time.
+  for (const event of eventsOfType(state.events, "attachment_uploaded")) {
     if (
-      event.type === "attachment_uploaded" &&
       event.payload &&
       typeof event.payload === "object" &&
       "attachment_id" in event.payload &&
@@ -1602,6 +1605,16 @@ function decisionActionWebView(
                 original,
               )
             : ["完成申请：当前不可合并"],
+          // C-760: "仍要合并" offers to turn these into follow-ups.
+          blocking_human_actions: decision.card_id
+            ? mergeBlockingHumanActions(state, decision.card_id).map((h) => ({
+                id: h.id,
+                title:
+                  h.handoff?.title ??
+                  h.instructions.split(/\r?\n/u)[0] ??
+                  h.instructions,
+              }))
+            : [],
           // C-264: confirmation checks; a conclusion on an older version reads
           // as pending (`stale`) until PM Office records one for this version.
           pre_merge_checks: preMergeChecksView(state, decision.card_id),
@@ -1807,8 +1820,12 @@ export function needsYou(
       ...(action.triage === "host"
         ? { host_operator: action.host_operator ?? "host_ops" }
         : {}),
+      executor: action.executor ?? "owner",
       triage_rationale: action.triage_rationale ?? null,
       blocked_work_items: action.blocked_work_items,
+      // C-760: the owner can switch between a merge hold and a follow-up.
+      blocks_merge: isMergePrerequisite(action),
+      ...(action.prerequisite ? { prerequisite: action.prerequisite } : {}),
       ...(action.completion_notice !== undefined
         ? { completion_notice: action.completion_notice }
         : {}),
@@ -1877,6 +1894,11 @@ export function needsYou(
       ...proposal,
       waited_ms: waitedMs(proposal.submitted_at, now) ?? null,
     })),
+    // C-750: finished human_mark_done cards waiting for the owner to close.
+    cards_to_close: data.cards_to_close.map((item) => ({
+      ...item,
+      waited_ms: item.since ? (waitedMs(item.since, now) ?? null) : null,
+    })),
     waiting_merge_checks_count: data.waiting_merge_checks_count,
     waiting_merge_check_items: data.waiting_merge_check_items,
     // C-212: deferred items; the page shows them folded under "稍后".
@@ -1935,10 +1957,9 @@ export function projectSnapshotView(state: CommandState, now: string) {
       })),
   );
   const submitted = new Map<string, string>();
-  for (const event of state.events) {
+  for (const event of eventsOfType(state.events, "delivery_submitted")) {
     const payload = event.payload;
     if (
-      event.type === "delivery_submitted" &&
       payload &&
       typeof payload === "object" &&
       "delivery_id" in payload &&

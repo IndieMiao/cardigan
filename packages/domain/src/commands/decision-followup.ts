@@ -336,9 +336,9 @@ export function decisionHistory(
         !!q.resolution &&
         (q.status === "resolved" ||
           (["superseded", "revoked"].includes(q.status) &&
-            state.events.some(
+            // C-671: the type index sees resolutions on closed cards too.
+            eventsOfType(state.events, "decision_resolved").some(
               (e) =>
-                e.type === "decision_resolved" &&
                 field(e, "decision_id") === q.id &&
                 e.created_at === q.resolution?.at,
             ))),

@@ -871,6 +871,80 @@ test("P07 §6.4/§7.3: decisions and human actions appear in needs-you, Office g
   expect(after).not.toContain(String(action.id));
 });
 
+test("C-740: the human closing a Needs You question rings the PM Office at once", async () => {
+  const s = await routingSetup();
+  await s.cli("preference", "set", "decision-delegation", "general", "off");
+  const decision = await s.call(s.coder, "request_decision", {
+    card_id: s.card.id,
+    kind: "choose",
+    category: "general",
+    question: "Which rollout?",
+    context: "Pick the rollout",
+    options: [{ key: "slow", description: "Slow", impact: "Two days" }],
+    recommended: "slow",
+    affected_cards: [s.card.id],
+    affected_work_items: [],
+    blocking: false,
+    decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  await s.call(s.ops, "resolve_delegated_decision", {
+    decision_id: decision.id,
+    option: "slow",
+    rationale: "Escalated after PM triage",
+    escalate: true,
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  await expect
+    .poll(() => s.runtime.bells.filter((b) => b.id === s.office.id).length)
+    .toBe(1);
+  await s.call(s.office, "ack_events", {
+    card_id: s.card.id,
+    up_to_seq: s.store.getUpdates({ project_id: s.project, card_id: s.card.id })
+      .latest_seq,
+  });
+  await s.finish(s.office);
+  const coderBefore = notices(s, s.coder).length;
+  const opsBefore = notices(s, s.ops).length;
+  await s.cli(
+    "decision",
+    "answer",
+    String(decision.id),
+    "--other",
+    "Hold the rollout",
+  );
+  await s.routed();
+  await expect
+    .poll(() => s.runtime.bells.filter((b) => b.id === s.office.id).length)
+    .toBe(2);
+  const resolved = s.store
+    .getUpdates({ project_id: s.project, card_id: s.card.id })
+    .events.find((e) => e.type === "decision_resolved");
+  const closed = notices(s, s.office).filter(
+    (n) => n.event_id === resolved?.id,
+  );
+  expect(closed).toMatchObject([
+    { recipient: { kind: "pm_office" }, kind: "decision", status: "belled" },
+  ]);
+  const bell = s.runtime.bells.filter((b) => b.id === s.office.id).at(-1);
+  expect(bell?.text).toContain(`card=${s.card.id}`);
+  expect(bell?.text).toContain('summary="1 decision"');
+  // The Office reads the answer on the card it was rung for.
+  const updates = await s.call(s.office, "get_updates", { card_id: s.card.id });
+  expect(
+    updates.events.find((e: { id: string }) => e.id === resolved?.id),
+  ).toMatchObject({
+    payload: {
+      decision_id: decision.id,
+      via: "needs_you",
+      other_text: "Hold the rollout",
+    },
+  });
+  // The raiser hears its result as before; PM Ops gets nothing new.
+  expect(notices(s, s.coder).length).toBe(coderBefore + 1);
+  expect(notices(s, s.ops).length).toBe(opsBefore);
+});
+
 test("P08 M3.5: inbox and attention show delivery_failed after a real wake failure; Office stays quiet", async () => {
   const s = await routingSetup();
   await s.finish(s.coder);

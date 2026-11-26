@@ -18,15 +18,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type Assignment,
+  type AssignmentId,
+  notices,
   type Runtime,
   type RuntimeRef,
   releaseAssignment,
+  resolveDelegatedDecision,
+  setProjectPreferences,
 } from "@cardigan/domain";
 import {
   type CentralProject,
   CentralRepositoryService,
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
+import { writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { CleanupExecutor } from "./cleanup-loop.js";
 import { ServerGit } from "./git.js";
@@ -240,6 +245,95 @@ test("force_clean backs up a patch and then removes the worktree", async () => {
   const patches = readdirSync(join(f.dataDir, "cleanup", f.project_id));
   expect(patches).toHaveLength(1);
   expect(patches[0]).toMatch(/^A-\d+-.*\.patch$/u);
+});
+
+test("C-747: an owner-held cleanup question moves to PM under data_deletion delegation; PM Ops' force_clean backs up then removes", async () => {
+  await doneCard();
+  writeFileSync(join(worktree, "local-notes.txt"), "unsaved\n");
+  // Raised while nothing is delegated: the owner's, as before.
+  await cleanup().sweep(f.project_id);
+  const question = () =>
+    f
+      .state()
+      .decisions.find((candidate) => candidate.trigger === "worktree_cleanup");
+  expect(question()?.decider).toBe("human");
+
+  // The project delegates data_deletion and a PM Ops is on duty.
+  f.apply((s, a, p) =>
+    setProjectPreferences(
+      s,
+      a,
+      { decision_delegation: { data_deletion: true } },
+      p,
+    ),
+  );
+  f.store.uow.run((tx) => {
+    writeRole(
+      tx,
+      f.project_id,
+      {
+        role_id: "pm",
+        version: 2,
+        display_name: "pm",
+        kind: "work",
+        core_prompt: "You are the pm.",
+        harness: "pi",
+        launch_profile_ref: "fixture",
+        allowed_tools: ["resolve_delegated_decision", "finish_run"],
+        capabilities: [],
+        abilities: [],
+        worktree: "none",
+        required_machine_tags: [],
+      },
+      { mode: "update" },
+    );
+    tx.assignments.put(f.project_id, {
+      id: "A-90" as AssignmentId,
+      scope: "standing",
+      standing_mode: "ops",
+      role_id: "pm",
+      role_version: 2,
+      status: "active",
+      runtime_state: "idle",
+      machine_id: "local",
+      runtime_ref: null,
+      session_ref: "ops",
+      mcp_token_id: "token-ops",
+      created_at: f.clock.now(),
+    });
+  });
+  // PM Ops came on duty after the question was raised (as for questions
+  // stored before C-747): the loop moves it to PM.
+  expect(question()?.decider).toBe("human");
+  await cleanup().sweep(f.project_id);
+  const moved = question();
+  if (!moved) throw new Error("missing decision");
+  expect(moved.decider).toBe("role:pm");
+  expect(existsSync(worktree)).toBe(true);
+
+  const ops = f.state().assignments.find((a) => a.id === "A-90");
+  if (!ops) throw new Error("missing PM Ops");
+  f.apply(
+    (s, a, p) =>
+      resolveDelegatedDecision(
+        s,
+        a,
+        {
+          decision_id: moved.id,
+          option: "force_clean",
+          rationale: "卡已完成，提交已备份",
+        },
+        p,
+      ),
+    f.actorFor(ops),
+  );
+  await cleanup().sweep(f.project_id);
+
+  expect(existsSync(worktree)).toBe(false);
+  expect(readdirSync(join(f.dataDir, "cleanup", f.project_id))).toHaveLength(1);
+  expect(
+    notices(f.state()).find((n) => n.decision_id === moved.id)?.body,
+  ).toContain("PM 依常驻授权代拍");
 });
 
 test("keep leaves the worktree in place and stops asking", async () => {

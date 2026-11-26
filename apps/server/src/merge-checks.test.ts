@@ -4896,6 +4896,82 @@ test("C-375: discovery expiry reports unknown through the original outage path w
   }
 });
 
+test("C-758: a timed-out candidate push is recorded as a push failure with the unchanged executor backoff", async () => {
+  const h = await reworkGithubFixture();
+  h.git.pushCheckCandidate.mockResolvedValueOnce({
+    status: "failed",
+    reason: "timeout",
+    exit_code: 137,
+  } as never);
+  const checks = h.create();
+  try {
+    await (await checks.schedule([h.f.project_id])).done;
+    const original = required(h.check());
+    expect(original.status).toBe("queued");
+    const events = h.f.state().events;
+    expect(events.some((e) => e.type === "merge_executor_unreachable")).toBe(
+      false,
+    );
+    const failed = events.filter(
+      (e) => e.type === "merge_executor_push_failed",
+    );
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.payload).toMatchObject({
+      attempt_id: original.attempt_id,
+      failure: {
+        category: "dispatch_unknown",
+        stage: "push_timeout",
+        push_failure: "timeout",
+        push_exit_code: 137,
+        push_attempts: 1,
+        push_duration_ms: expect.any(Number),
+      },
+      description: "候选推送超时，合并检查排队等待并按退避重试",
+    });
+    expect(h.client.dispatch).not.toHaveBeenCalled();
+    // Backoff is unchanged: no second push before next_retry_at.
+    h.advance(30_000);
+    await (await checks.schedule([h.f.project_id])).done;
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+    h.advance(31_000);
+    await checks.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(2);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.check()?.attempt_id).toBe(original.attempt_id);
+  } finally {
+    checks.stop();
+    await checks.idle();
+  }
+});
+
+test("C-758: a locally cancelled candidate push records no executor outage and retries the same attempt", async () => {
+  const h = await reworkGithubFixture();
+  h.git.pushCheckCandidate.mockResolvedValueOnce({
+    status: "failed",
+    reason: "cancelled",
+  } as never);
+  const checks = h.create();
+  try {
+    await (await checks.schedule([h.f.project_id])).done;
+    const original = required(h.check());
+    expect(original.status).toBe("queued");
+    expect(
+      h.f.state().events.filter((e) => e.type.startsWith("merge_executor_")),
+    ).toEqual([]);
+    expect(h.client.dispatch).not.toHaveBeenCalled();
+    // No backoff: the next pass retries the same attempt at once.
+    await checks.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(2);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.check()?.attempt_id).toBe(original.attempt_id);
+  } finally {
+    checks.stop();
+    await checks.idle();
+  }
+});
+
 /** Independent fake REST runs exercise the actual GitHub journal and poller. */
 async function parallelGithub(count = 3) {
   const h = await reworkGithubFixture();

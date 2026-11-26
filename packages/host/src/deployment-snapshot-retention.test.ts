@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 import { previewDeploymentSnapshots } from "./deployment-snapshot-retention.js";
 
-test("snapshot preview reports only old automatic files; protects latest N, last per local day, and the recovery backup", async () => {
+test("C-743: only automatic snapshots older than the window go; the newest N and the recovery backup stay", async () => {
   const root = await mkdtemp(join(tmpdir(), "cg-snapshot-plan-"));
   const name = (day: number, hour: number) =>
     `database-00000000-0000-4000-8000-${String(day * 100 + hour).padStart(12, "0")}.bak`;
@@ -39,22 +39,29 @@ test("snapshot preview reports only old automatic files; protects latest N, last
       mode: 0o600,
     });
     const report = await previewDeploymentSnapshots(root, name(13, 1), { now });
-    // Five newest: all three on the 20th and two on the 19th. The last on the 14th is protected separately.
+    // Seven days back from the 20th 18:00: only the 13th is older; its 01:00 is the recovery reference.
     expect(report.candidates.map((f) => f.name)).toEqual([
-      name(19, 1),
-      name(14, 2),
-      name(14, 1),
       name(13, 3),
       name(13, 2),
     ]);
-    expect(report.total_bytes).toBe(30);
+    expect(report.total_bytes).toBe(12);
     expect(await readFile(join(root, name(13, 2)), "utf8")).toBe("backup");
     const custom = await previewDeploymentSnapshots(root, undefined, {
       now,
       latest: 1,
       days: 1,
     });
-    expect(custom.candidates).toHaveLength(11);
+    // One day back: everything before the 19th 18:00, except the single newest.
+    expect(custom.candidates).toHaveLength(9);
+    const floor = await previewDeploymentSnapshots(root, undefined, {
+      now: new Date(2027, 0, 1),
+      latest: 3,
+      days: 7,
+    });
+    // Every one of the 13 files is old, yet the newest three always stay.
+    expect(floor.candidates.map((f) => f.name)).not.toContain(name(21, 1));
+    expect(floor.candidates.map((f) => f.name)).not.toContain(name(20, 2));
+    expect(floor.candidates).toHaveLength(10);
     await expect(
       previewDeploymentSnapshots(root, undefined, { latest: -1 }),
     ).rejects.toThrow();

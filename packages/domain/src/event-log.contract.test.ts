@@ -14,6 +14,7 @@ import {
   eventsForWorkItem,
   eventsOfType,
   eventsOfTypes,
+  flatMapEvents,
   fullEventHistory,
   isTelemetryEvent,
   resumeEventsForItem,
@@ -633,5 +634,231 @@ test("C-652: matching and streamEventsBy equal filtering the stream read", () =>
             streamEventsBy(reader(new Map(view)), "P", card, kind, keys),
           ).toEqual(expected);
         }
+  }
+});
+
+test("C-671: dormant entries answer like decoded ones and decode only when a kept event is read", () => {
+  // Cold whitelist: streams outside `full` keep only these types.
+  const keep = new Set(["decision_requested"]);
+  const order = ["", ...cards];
+  const selections: [EventIndexKind, IndexKeys][] = [
+    ["type", ["run_started", "noise"]],
+    ["decision_id", ["Q-0", "Q-1", "Q-2"]],
+    ["work_item_id", ["W-1"]],
+    ["resume_work_items", () => true],
+  ];
+  for (let seed = 1; seed <= 80; seed++) {
+    const pick = rng(seed);
+    const seqs = new Map<string, number>();
+    const next = { id: 1 };
+    const stored = new Map<string, Event>();
+    const loads: string[] = [];
+    const loader = (stream: string, list: readonly number[]) => {
+      loads.push(stream);
+      return list.map((seq) => stored.get(`${stream} ${seq}`) as Event);
+    };
+    const plain = new EventLog();
+    const lazy = new EventLog();
+    lazy.loader = loader;
+    // The Store leaves closed cards' events of non-whitelisted types dormant.
+    const closed = new Set(cards.slice(0, 2));
+    const dormant = (e: Event) =>
+      e.card_id !== undefined && closed.has(e.card_id) && !keep.has(e.type);
+    const committed: Event[] = [];
+    for (let round = 0; round < 3; round++) {
+      const added = randomBatch(pick, seqs, next, pick(16));
+      const overlayPlain = new EventLog(plain.end);
+      const overlayLazy = new EventLog(lazy.end);
+      overlayLazy.loader = loader;
+      for (const e of added) {
+        stored.set(`${e.card_id ?? ""} ${e.seq}`, e);
+        overlayPlain.append(e);
+        if (dormant(e)) overlayLazy.appendDormant(e);
+        else overlayLazy.append(e);
+      }
+      const pairs = [
+        [
+          new EventLogView(plain, plain.end, overlayPlain, overlayPlain.end),
+          new EventLogView(lazy, lazy.end, overlayLazy, overlayLazy.end),
+          [...committed, ...added],
+        ],
+        [
+          new EventLogView(plain, plain.end),
+          new EventLogView(lazy, lazy.end),
+          [...committed],
+        ],
+      ] as const;
+      for (const [expectedView, view, events] of pairs) {
+        // Cold history: the whitelist trims every dormant entry from the
+        // arrays, so building them decodes nothing.
+        const full = new Set(cards.filter((c) => !closed.has(c) && pick(2)));
+        const omit = new Set(["__proto__"]);
+        const filter = { full, omit, keep };
+        const before = loads.length;
+        const cold = view.history(order, filter);
+        const expectedCold = expectedView.history(order, filter);
+        expect(cold).toEqual(expectedCold);
+        expect(cold).toEqual(
+          legacyHistory(events, order).filter(
+            (e) =>
+              !e.card_id ||
+              full.has(e.card_id) ||
+              (keep.has(e.type) && !omit.has(e.type)),
+          ),
+        );
+        expect(commandStreamHistory(view, order, filter)).toEqual(
+          commandStreamHistory(expectedView, order, filter),
+        );
+        expect(loads.length).toBe(before);
+        // Lookups answer over the history without the whitelist (only `omit`
+        // applies), decoding just the dormant events they return.
+        const unlisted = expectedView.history(order, { full, omit });
+        expectSameLookups(cold, unlisted, false);
+        expectSameLookups(expectedCold, unlisted, false);
+        for (const set of [["noise", "run_started"], ["decision_requested"]])
+          expect(eventsOfTypes(cold, set)).toEqual(
+            eventsOfTypes(unlisted, set),
+          );
+        for (const card of [undefined, ...cards])
+          expect(streamEvents(cold, card)).toEqual(
+            streamEvents(unlisted, card),
+          );
+        expect(loads.every((stream) => closed.has(stream as CardId))).toBe(
+          true,
+        );
+        // Everything else reads decoded events, identical to the plain log.
+        expectSameLookups(view.history(order), expectedView.history(order));
+        expectGroupLookups(view.history(order), expectedView.history(order));
+        for (const stream of ["", ...cards, id("card", 9)]) {
+          expect(view.get(stream)).toEqual(expectedView.get(stream));
+          expect(view.after(stream, 2)).toEqual(expectedView.after(stream, 2));
+          for (const [kind, keys] of selections)
+            expect(view.matching(stream, kind, keys)).toEqual(
+              expectedView.matching(stream, kind, keys),
+            );
+        }
+        for (const set of [new Set(["noise"]), new Set(["run_started"])])
+          expect(new Map(view.ofTypes(set))).toEqual(
+            new Map(expectedView.ofTypes(set)),
+          );
+        for (let n = 0; n < 60; n++)
+          expect(view.eventWithId(eventId(n))).toEqual(
+            expectedView.eventWithId(eventId(n)),
+          );
+      }
+      if (pick(3) === 0) {
+        for (const event of added) {
+          const key = event.card_id ?? "";
+          seqs.set(key, (seqs.get(key) ?? 0) - 1);
+        }
+        next.id -= added.length;
+        continue;
+      }
+      for (const event of overlayPlain.all) plain.append(event);
+      lazy.appendLog(overlayLazy);
+      committed.push(...added);
+    }
+    // A read of a stream past its last seq decodes nothing.
+    const head = new EventLogView(lazy, lazy.end);
+    const before = loads.length;
+    for (const stream of cards)
+      expect(head.after(stream, seqs.get(stream) ?? 0)).toEqual([]);
+    expect(loads.length).toBe(before);
+    expect(lazy.all).toEqual(plain.all);
+  }
+});
+
+test("C-671: a dormant entry whose row changed fails loudly instead of answering", () => {
+  const card = cards[0] as string;
+  const event: Event = {
+    id: eventId(1),
+    seq: 1,
+    card_id: card as NonNullable<Event["card_id"]>,
+    type: "noise",
+    actor: { kind: "system", project_id: "fixture-project" },
+    payload: null,
+    created_at: "2026-01-01T00:00:00.000Z",
+  };
+  const changed = new EventLog();
+  changed.loader = () => [{ ...event, type: "other" }];
+  changed.appendDormant(event);
+  expect(() => new EventLogView(changed, changed.end).get(card)).toThrow(
+    /C-671/,
+  );
+  const lost = new EventLog();
+  lost.loader = () => [];
+  lost.appendDormant(event);
+  expect(() => lost.at(0)).toThrow(/C-671/);
+});
+
+/** Every lookup of `indexed` equals the plain lookup of `copy` (by value). */
+function expectEqualLookups(indexed: readonly Event[], copy: readonly Event[]) {
+  for (const type of [...types, "absent"]) {
+    expect(eventsOfType(indexed, type)).toEqual(eventsOfType(copy, type));
+    for (const card of ["", ...cards])
+      expect(cardEventsOfType(indexed, card, type)).toEqual(
+        cardEventsOfType(copy, card, type),
+      );
+  }
+  for (let n = 0; n < 4; n++) {
+    expect(eventsForDecision(indexed, `Q-${n}`)).toEqual(
+      eventsForDecision(copy, `Q-${n}`),
+    );
+    expect(eventsForCompletion(indexed, `CR-${n}`)).toEqual(
+      eventsForCompletion(copy, `CR-${n}`),
+    );
+    expect(eventsForWorkItem(indexed, `W-${n}`)).toEqual(
+      eventsForWorkItem(copy, `W-${n}`),
+    );
+    expect(resumeEventsForItem(indexed, `W-${n}`)).toEqual(
+      resumeEventsForItem(copy, `W-${n}`),
+    );
+  }
+  for (const set of [["noise", "run_started"], ["decision_requested"], []])
+    expect(eventsOfTypes(indexed, set)).toEqual(eventsOfTypes(copy, set));
+  for (const card of [undefined, ...cards]) {
+    expect(streamEvents(indexed, card)).toEqual(streamEvents(copy, card));
+    for (const seq of [1, 2, 3])
+      expect(eventsAtSeq(indexed, card, seq)).toEqual(
+        eventsAtSeq(copy, card, seq),
+      );
+  }
+  for (let n = 0; n < 60; n++)
+    expect(eventById(indexed, eventId(n))).toEqual(eventById(copy, eventId(n)));
+}
+
+test("C-671: flatMapEvents lookups go through the source index and equal scanning the mapped history", () => {
+  const keep = new Set(["decision_requested"]);
+  // Drops some events and strips fields; never adds a type or index key.
+  const each = (e: Event): Event[] =>
+    e.seq % 3 === 0 ? [] : e.type === "noise" ? [{ ...e, payload: null }] : [e];
+  for (let seed = 1; seed <= 40; seed++) {
+    const pick = rng(seed);
+    const log = new EventLog();
+    for (const event of randomBatch(pick, new Map(), { id: 1 }, 40))
+      log.append(event);
+    const view = new EventLogView(log, log.end);
+    const order = ["", ...cards];
+    const full = new Set(cards.filter(() => pick(2) === 0));
+    const omit = new Set(["__proto__"]);
+    for (const [base, lookups] of [
+      [view.history(order), view.history(order)],
+      [
+        commandStreamHistory(view, order, { full, omit }),
+        view.history(order, { full, omit }),
+      ],
+      // A whitelisted history: lookups still see the unlisted events.
+      [
+        view.history(order, { full, omit, keep }),
+        view.history(order, { full, omit }),
+      ],
+    ] as const) {
+      const derived = flatMapEvents(base, each);
+      expect(derived).toEqual(base.flatMap(each));
+      // Lookups answer with the very objects of the mapped history.
+      for (const event of derived)
+        expect(eventById(derived, event.id)).toBe(event);
+      expectEqualLookups(derived, structuredClone(lookups.flatMap(each)));
+    }
   }
 });

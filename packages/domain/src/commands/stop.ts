@@ -12,6 +12,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { dropReleasedRetirement } from "./idle-session-retirement.js";
 import { replayStopDeferredResume } from "./resumption.js";
 
 import {
@@ -152,13 +153,19 @@ export function stopWorkItemAssignment(
             !(managed && pendingWork(r)),
         );
       cancel(runs);
+      // C-752 (sensen A-388): an idle retirement (often handed off on a
+      // macOS worker) of the session just released has nothing left to
+      // retire. Left behind without a binding, C-690 never supersedes it and
+      // the dispatcher keeps every later bell fenced as idle_retirement until
+      // a human start, despite "new work starts a new session".
+      const owner = dropReleasedRetirement(d, a, card);
       // A later start launches from a clean runtime state, as after a restart.
       const runtime_state = ["unknown", "lost"].includes(a.runtime_state)
         ? unwrap(transition("runtime", a.runtime_state, "session_replaced"))
         : a.runtime_state === "running"
           ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
           : a.runtime_state;
-      const next = { ...a, runtime_state, runtime_ref: null };
+      const next = { ...owner, runtime_state, runtime_ref: null };
       d.put("assignments", next);
       d.emit(ASSIGNMENT_STOP_RELEASED, card, {
         ...retirementWaitReceipt(a),

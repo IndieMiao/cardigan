@@ -1,6 +1,9 @@
 import { expect, test } from "vitest";
 import type { Assignment, Event, Run, RuntimeRef } from "../entities.js";
-import { probeInvalidStreak } from "../session-maintenance.js";
+import {
+  probeInvalidStreak,
+  retirementWithdrawals,
+} from "../session-maintenance.js";
 import type { CommandState } from "./core.js";
 import {
   beginIdleSessionRetirement,
@@ -367,4 +370,233 @@ test("a host operator's release cancels the Runs of that session and the Run it 
       f.io,
     ).ok,
   ).toBe(false);
+});
+
+// C-739: the system finished the Run; the old turn stayed unconfirmed while
+// work waited and the checkout was clean.
+function systemEnded() {
+  const f = setup();
+  const [first] = f.state.runs;
+  const [card] = f.state.cards;
+  if (!first || !card) throw new Error("fixture");
+  const ended = { ...first, outcome: "blocked" } as Run;
+  const queued = {
+    ...ended,
+    id: "R-9" as Run["id"],
+    status: "queued",
+    outcome: undefined,
+    started_at: undefined,
+    finished_at: undefined,
+  } as unknown as Run;
+  const finished: Event = {
+    id: f.io.ids.nextEventId(),
+    seq: 901,
+    card_id: card.id,
+    type: "run_finished",
+    actor: system,
+    payload: { run_id: ended.id, finished_by: "system" },
+    created_at: "2030-01-01T00:00:00Z",
+  };
+  f.state = {
+    ...f.state,
+    runs: [ended, queued],
+    events: [...f.state.events, finished],
+  };
+  const request: UnresponsiveRelease = {
+    trigger: "system_turn",
+    system_finished_run_id: ended.id,
+    waited_ms: 180_000,
+    workspace: "clean",
+  };
+  return { f, ended, queued, card, request };
+}
+
+test("C-739: a system-ended turn is released like a managed stop, keeping the queued Run", () => {
+  const { f, ended, queued, request } = systemEnded();
+  const a = f.owner();
+  // No probe streak is needed: the unconfirmed turn stands in for it.
+  expect(probeInvalidStreak(f.state, a)).toBe(0);
+  expect(unresponsiveReleaseBlocker(f.state, a, request)).toBeUndefined();
+  const settled = value(
+    releaseUnresponsiveSession(f.state, system, a.id, f.ref, request, f.io),
+  );
+  expect(settled.data).toMatchObject({ runtime_ref: null });
+  expect(settled.changes.filter((c) => c.collection === "runs")).toEqual([]);
+  expect(settled.events.at(-1)).toMatchObject({
+    type: "session_replaced",
+    payload: {
+      assignment_id: a.id,
+      reason: "system_turn_unconfirmed",
+      trigger: "system_turn",
+      system_finished_run_id: ended.id,
+      waited_ms: 180_000,
+      workspace: "clean",
+      cancelled_run_ids: [],
+      old_runtime_ref: f.ref,
+    },
+  });
+  expect(settled.timeline[0]?.body).toContain(
+    `系统代为结束 ${ended.id} 后，${a.id}（local）的旧回合 3 分钟仍确认不了是否结束，工作区干净`,
+  );
+  expect(f.state.runs.find((r) => r.id === queued.id)?.status).toBe("queued");
+});
+
+test("C-739: another ended turn, a Run in flight, a retirement or a human stop keeps the session", () => {
+  const { f, ended, card, request } = systemEnded();
+  const base = f.state,
+    a = f.owner();
+  const stopped: Event = {
+    id: f.io.ids.nextEventId(),
+    seq: 902,
+    card_id: card.id,
+    type: "assignment_stopped",
+    actor: human,
+    payload: { assignment_id: a.id, hold: false },
+    created_at: f.io.clock.now(),
+  };
+  const cases: [CommandState, Assignment, string][] = [
+    // The ended Run was not left blocked by the system: not this turn.
+    [
+      {
+        ...base,
+        runs: base.runs.map((r) =>
+          r.id === ended.id ? ({ ...r, outcome: "completed" } as Run) : r,
+        ),
+      },
+      a,
+      "run_changed",
+    ],
+    [
+      {
+        ...base,
+        runs: base.runs.map((r) =>
+          r.id === ended.id ? r : ({ ...r, status: "running" } as Run),
+        ),
+      },
+      a,
+      "run_busy",
+    ],
+    [
+      base,
+      { ...a, idle_retirement: { phase: "waiting" } } as unknown as Assignment,
+      "session_maintenance",
+    ],
+    [{ ...base, events: [...base.events, stopped] }, a, "stopped_by_human"],
+  ];
+  for (const [state, owner, reason] of cases) {
+    expect(unresponsiveReleaseBlocker(state, owner, request)).toBe(reason);
+    expect(
+      releaseUnresponsiveSession(
+        { ...state, assignments: [owner] },
+        system,
+        a.id,
+        f.ref,
+        request,
+        f.io,
+      ).ok,
+    ).toBe(false);
+  }
+  // A wrong ended Run id, an invalid wait or workspace, or another actor.
+  for (const bad of [
+    { ...request, system_finished_run_id: "R-77" as Run["id"] },
+    { ...request, waited_ms: -1 },
+    { ...request, workspace: "dirty" as never },
+  ])
+    expect(
+      releaseUnresponsiveSession(base, system, a.id, f.ref, bad, f.io).ok,
+    ).toBe(false);
+  expect(
+    releaseUnresponsiveSession(base, actor(), a.id, f.ref, request, f.io).ok,
+  ).toBe(false);
+});
+
+test("C-739: work waiting while idle retirement keeps withdrawing releases the session after two withdrawals", () => {
+  const f = setup();
+  const [first] = f.state.runs;
+  if (!first) throw new Error("fixture");
+  const queued = {
+    ...first,
+    id: "R-9" as Run["id"],
+    status: "queued",
+    started_at: undefined,
+    finished_at: undefined,
+  } as unknown as Run;
+  const request: UnresponsiveRelease = {
+    trigger: "retirement_withdrawn",
+    withdrawals: 2,
+    waited_ms: 240_000,
+    workspace: "clean",
+  };
+  f.withdraw("terminal_busy");
+  f.state = { ...f.state, runs: [...f.state.runs, queued] };
+  expect(retirementWithdrawals(f.state, f.owner())).toBe(1);
+  expect(unresponsiveReleaseBlocker(f.state, f.owner(), request)).toBe(
+    "withdrawal_streak",
+  );
+  f.state = { ...f.state, runs: f.state.runs.filter((r) => r !== queued) };
+  f.withdraw("probe_invalid");
+  f.state = { ...f.state, runs: [...f.state.runs, queued] };
+  // Any withdrawal reason counts, unlike the C-730 probe streak.
+  expect(retirementWithdrawals(f.state, f.owner())).toBe(2);
+  expect(probeInvalidStreak(f.state, f.owner())).toBe(1);
+  expect(f.owner().idle_retirement?.phase).toBe("waiting");
+  expect(
+    unresponsiveReleaseBlocker(f.state, f.owner(), request),
+  ).toBeUndefined();
+  const settled = value(
+    releaseUnresponsiveSession(
+      f.state,
+      system,
+      f.owner().id,
+      f.ref,
+      request,
+      f.io,
+    ),
+  );
+  expect(settled.data).toMatchObject({ runtime_ref: null });
+  expect(settled.data.idle_retirement).toBeUndefined();
+  expect(settled.changes.filter((c) => c.collection === "runs")).toEqual([]);
+  expect(settled.events.at(-1)).toMatchObject({
+    type: "session_replaced",
+    payload: {
+      reason: "retirement_withdrawn",
+      trigger: "retirement_withdrawn",
+      withdrawals: 2,
+      waited_ms: 240_000,
+      workspace: "clean",
+      old_runtime_ref: f.ref,
+    },
+  });
+  expect(settled.timeline[0]?.body).toContain(
+    "有待办 4 分钟仍派不出新 Run，空闲回收已 2 次被撤回，工作区干净",
+  );
+  // A sign of life restarts the count; a stopping retirement or a bad
+  // request keeps the session.
+  expect(
+    retirementWithdrawals(f.state, {
+      ...f.owner(),
+      last_mcp_activity_at: new Date(start + 3_600_000).toISOString(),
+    }),
+  ).toBe(0);
+  const stopping = {
+    ...f.owner(),
+    idle_retirement: { ...f.owner().idle_retirement, phase: "stopping" },
+  } as Assignment;
+  expect(unresponsiveReleaseBlocker(f.state, stopping, request)).toBe(
+    "session_maintenance",
+  );
+  for (const bad of [
+    { ...request, withdrawals: 1 },
+    { ...request, waited_ms: Number.NaN },
+  ])
+    expect(
+      releaseUnresponsiveSession(
+        f.state,
+        system,
+        f.owner().id,
+        f.ref,
+        bad,
+        f.io,
+      ).ok,
+    ).toBe(false);
 });

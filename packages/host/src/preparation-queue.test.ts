@@ -28,7 +28,23 @@ test("Q-475 defaults and malformed host configuration", () => {
     maxConcurrent: 2,
     queueWaitMs: 300000,
     retryBackoffMs: 5000,
+    retryScheduleMs: [300000, 900000, 3600000],
   });
+  // C-738: the retry schedule is a comma-separated list of milliseconds.
+  expect(
+    preparationPolicy({ CARDIGAN_PREPARATION_RETRY_SCHEDULE_MS: "1000, 2000" })
+      .retryScheduleMs,
+  ).toEqual([1000, 2000]);
+  for (const value of [
+    "0",
+    "1,,2",
+    "1.5",
+    "2147483648",
+    "1,2,3,4,5,6,7,8,9,10,11",
+  ])
+    expect(() =>
+      preparationPolicy({ CARDIGAN_PREPARATION_RETRY_SCHEDULE_MS: value }),
+    ).toThrow("CARDIGAN_PREPARATION_RETRY_SCHEDULE_MS");
   for (const name of [
     "CARDIGAN_PREPARATION_CONCURRENCY",
     "CARDIGAN_PREPARATION_QUEUE_WAIT_MS",

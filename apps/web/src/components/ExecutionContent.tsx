@@ -94,6 +94,13 @@ export function RunSummary({ text }: { readonly text: string }) {
     <span className="hint">无摘要</span>
   );
 }
+/** C-736: whether admission reserved the work item's resources, and why. */
+const runResources = (run: RunView) =>
+  run.resource_reason
+    ? run.resource_keys?.length
+      ? `已预留 ${run.resource_keys.join("、")}：${run.resource_reason}`
+      : `未占用资源：${run.resource_reason}`
+    : "";
 function useRunDetails(run: RunView | undefined): string[] {
   const [elapsed, setElapsed] = useState(0);
   const waited = run?.queue_warning?.waited_ms;
@@ -117,6 +124,7 @@ function useRunDetails(run: RunView | undefined): string[] {
       ? `排队中（前面还有 ${run.queue_ahead} 个）`
       : "",
     run.dispatch_reason ?? "",
+    runResources(run),
     run.status === "queued" &&
     run.queue_warning &&
     run.queue_warning.waited_ms + elapsed >=

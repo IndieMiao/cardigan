@@ -1,4 +1,5 @@
 import type { Assignment, Event, Run, RuntimeRef } from "./entities.js";
+import { eventsOfType, eventsOfTypes } from "./event-index.js";
 import type {
   AssignmentId,
   EventId,
@@ -27,22 +28,14 @@ export function remoteWorkerLosses(
 ): readonly RemoteWorkerLoss[] {
   let losses = lossCache.get(events);
   if (!losses) {
+    // C-671: type lookups, so losses on closed cards count in `slim` too.
     const corrected = new Set(
-      events
-        .filter(
-          (e) =>
-            e.type === "remote_worker_loss_corrected" &&
-            ["human", "system"].includes(e.actor.kind),
-        )
+      eventsOfType(events, "remote_worker_loss_corrected")
+        .filter((e) => ["human", "system"].includes(e.actor.kind))
         .map((e) => (e.payload as { action_id: string }).action_id),
     );
-    losses = events
-      .filter(
-        (e) =>
-          e.type === "remote_worker_lost" &&
-          e.actor.kind === "system" &&
-          !corrected.has(e.id),
-      )
+    losses = eventsOfType(events, "remote_worker_lost")
+      .filter((e) => e.actor.kind === "system" && !corrected.has(e.id))
       .map((e) => ({
         ...(e.payload as unknown as RemoteWorkerLoss),
         action_id: e.id,
@@ -56,9 +49,8 @@ export function remoteWorkerLossReleased(
   events: readonly Event[],
   action_id: EventId,
 ) {
-  return events.some(
+  return eventsOfType(events, "remote_worker_released").some(
     (e) =>
-      e.type === "remote_worker_released" &&
       e.actor.kind === "system" &&
       (e.payload as { action_id?: string }).action_id === action_id,
   );
@@ -81,11 +73,70 @@ export function remoteExitAction(
   );
 }
 
+/** C-761: the helper reported a boot other than the one journaled with the process. */
+export interface RemoteRebootReading {
+  readonly process: "exited";
+  readonly current_boot: string;
+}
+
+/** Boot identities as the worker helper reports them (Linux boot_id, Darwin boot session UUID). */
+export const REMOTE_BOOT_PATTERN = /^[A-Za-z0-9:-]{1,128}$/u;
+
+/**
+ * C-761: the only non-human completion of a remote exit request. The system
+ * completes it solely in the same transaction as its own reboot finding;
+ * no other system, PM or Assignment completion counts as exit evidence.
+ */
+export function rebootExitCompletion(
+  events: readonly Event[],
+  completed: Event,
+) {
+  const p = completed.payload as {
+    human_action_id?: string;
+    conclusion?: string;
+    basis?: string;
+    evidence_event_id?: string;
+  };
+  if (
+    completed.type !== "human_action_completed" ||
+    completed.actor.kind !== "system" ||
+    p.basis !== "reboot" ||
+    p.conclusion !== "exited"
+  )
+    return false;
+  return eventsOfType(events, "remote_worker_reboot_confirmed").some(
+    (e) =>
+      e.actor.kind === "system" &&
+      e.id === p.evidence_event_id &&
+      (e.payload as { human_action_id?: string }).human_action_id ===
+        p.human_action_id,
+  );
+}
+
+/** Whether a completion of a remote exit request confirms the exit. */
+export function exitCompletionConfirms(
+  events: readonly Event[],
+  completed: Event,
+) {
+  return completed.actor.kind === "human"
+    ? [undefined, "exited"].includes(
+        (completed.payload as { conclusion?: string }).conclusion,
+      )
+    : rebootExitCompletion(events, completed);
+}
+
 /** A newer request supersedes earlier exit evidence, including after a late alive observation. */
 export function remoteWorkerExitPending(
-  events: readonly Event[],
+  all: readonly Event[],
   loss: RemoteWorkerLoss,
 ) {
+  // C-671: only these types take part; their relative order is history order.
+  const events = eventsOfTypes(all, [
+    "human_action_requested",
+    "remote_worker_alive",
+    "remote_worker_exit_observed",
+    "human_action_completed",
+  ]);
   const request = events.findLastIndex(
     (e) =>
       e.type === "human_action_requested" &&
@@ -118,10 +169,7 @@ export function remoteWorkerExitPending(
       (e, i) =>
         i > request &&
         e.type === "human_action_completed" &&
-        e.actor.kind === "human" &&
-        [undefined, "exited"].includes(
-          (e.payload as { conclusion?: string }).conclusion,
-        ) &&
+        exitCompletionConfirms(all, e) &&
         (e.payload as { human_action_id?: string }).human_action_id === id,
     )
   );

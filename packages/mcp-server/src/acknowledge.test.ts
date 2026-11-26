@@ -251,6 +251,33 @@ describe("acknowledgeDispatchedRun", () => {
   });
 });
 
+test("C-735: a refused acknowledgement throws as before and leaves its reason on the Run and card once", () => {
+  const { assignment, run_id, card } = dispatchedRun("none", { verify: true });
+  const launch = {
+    ...identity(assignment),
+    token: { id: "issued-at-launch" },
+  } as Identity;
+  const refused = () => acknowledgeDispatchedRun(store, launch, () => NOW);
+  expect(refused).toThrow();
+  expect(read(run_id)).toMatchObject({
+    status: "dispatched",
+    ack_refusal: { code: "illegal_transition", at: NOW },
+  });
+  const events = () =>
+    store.uow
+      .read((tx) => tx.events.listAfter(project_id, card.id, 0))
+      .filter((e) => e.type === "run_ack_refused");
+  expect(events()).toHaveLength(1);
+  expect(events()[0]?.payload).toMatchObject({
+    run_id,
+    assignment_id: assignment.id,
+    code: "illegal_transition",
+    message: read(run_id)?.ack_refusal?.message,
+  });
+  expect(refused).toThrow();
+  expect(events()).toHaveLength(1);
+});
+
 test("a tool call before dispatch acknowledges nothing, and the next call recovers", () => {
   // The wrapper starts the CLI during provision, so a fast Agent can reach the
   // MCP endpoint while its Run is still queued. There is nothing to acknowledge

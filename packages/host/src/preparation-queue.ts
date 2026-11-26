@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { DEFAULT_PREPARATION_RETRY_SCHEDULE_MS } from "@cardigan/domain";
 import { RepositoryLockTimeoutError } from "@cardigan/git-service";
 import {
   PreparationQueueTimeout,
@@ -15,6 +16,25 @@ export interface PreparationPolicy {
   readonly maxConcurrent: number;
   readonly queueWaitMs: number;
   readonly retryBackoffMs: number;
+  /** C-738: delay before each automatic retry; its length is the retry limit. */
+  readonly retryScheduleMs: readonly number[];
+}
+
+/** C-738: comma-separated milliseconds, e.g. `300000,900000,3600000`. */
+function readSchedule(value: string | undefined): readonly number[] {
+  if (value === undefined || value.trim() === "")
+    return DEFAULT_PREPARATION_RETRY_SCHEDULE_MS;
+  const schedule = value.split(",").map((part) => Number(part.trim()));
+  if (
+    schedule.length > 10 ||
+    !schedule.every(
+      (ms) => Number.isSafeInteger(ms) && ms >= 1 && ms <= 2_147_483_647,
+    )
+  )
+    throw new Error(
+      "CARDIGAN_PREPARATION_RETRY_SCHEDULE_MS must list 1 to 10 integers between 1 and 2147483647",
+    );
+  return schedule;
 }
 
 /** Q-475: host configuration only; independent of the system Run limit. */
@@ -31,6 +51,7 @@ export function preparationPolicy(
     maxConcurrent: read("CARDIGAN_PREPARATION_CONCURRENCY", 2),
     queueWaitMs: read("CARDIGAN_PREPARATION_QUEUE_WAIT_MS", 300_000),
     retryBackoffMs: read("CARDIGAN_PREPARATION_RETRY_BACKOFF_MS", 5_000),
+    retryScheduleMs: readSchedule(env.CARDIGAN_PREPARATION_RETRY_SCHEDULE_MS),
   };
 }
 

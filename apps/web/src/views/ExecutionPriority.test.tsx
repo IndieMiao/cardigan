@@ -83,3 +83,36 @@ test("C-499: the execution badge distinguishes a failed startup and a paused pro
   expect(tip.textContent).toContain("等待模型服务恢复后自动重派");
   expect(tip.textContent).not.toContain("最近执行：");
 });
+
+test("C-736: the Run details say whether admission reserved resources and why", async () => {
+  const run = {
+    id: "R-9",
+    assignment_id: "A-3",
+    status: "running",
+    kind: "followup",
+    model: "test",
+    role_version: 1,
+    agent_cli_version: "test",
+    summary: "",
+    resource_keys: ["godot"],
+    resource_reason: "PM 评论，工作项处于 in_progress",
+  };
+  const view = render(<RunLine run={run} />);
+  fireEvent.focus(screen.getByRole("button"));
+  const tip = await screen.findByRole("tooltip");
+  expect(tip.textContent).toContain(
+    "已预留 godot：PM 评论，工作项处于 in_progress",
+  );
+  view.rerender(
+    <RunLine
+      run={{ ...run, resource_keys: [], resource_reason: "普通讨论评论" }}
+    />,
+  );
+  expect(tip.textContent).toContain("未占用资源：普通讨论评论");
+  view.rerender(
+    <RunLine
+      run={{ ...run, resource_keys: undefined, resource_reason: undefined }}
+    />,
+  );
+  expect(tip.textContent).not.toContain("资源");
+});

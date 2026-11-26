@@ -4,7 +4,7 @@ import {
   HOST_OPS_ROLE_TOOLS,
 } from "@cardigan/domain";
 import type { HarnessActivityInspection } from "@cardigan/host";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { stalledTranscript } from "../test-support/dispatch.js";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { runtimeEvents } from "../test-support/runtime-events.js";
@@ -250,7 +250,8 @@ test.each(["progress", "missing", "silent", "closing"] as const)(
       expect(alerts()).toMatchObject([{ run_id: remote.run.id }]);
       f.advance(15 * 60_000 - 1000);
       await d.tick();
-      expect(reads).toBe(3);
+      // The remote stop runs beside the tick and first takes the host-ops lock.
+      await vi.waitFor(() => expect(reads).toBe(3));
       expect(f.latest().inactivity_stop?.stopping).toBe(false);
       f.advance(1000);
       await d.tick();
