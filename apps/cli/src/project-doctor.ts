@@ -33,6 +33,7 @@ import {
 } from "./host.js";
 import type { CliIo } from "./io.js";
 import { cliLaunchPaths } from "./paths.js";
+import { GATE_PREFERENCES } from "./project-copy.js";
 
 /**
  * C-794: `cardigan project doctor` — read-only walk over the onboarding
@@ -292,6 +293,13 @@ export async function projectDoctor(input: DoctorInput): Promise<DoctorItem[]> {
       ? ["auto-security-paths（默认是 Cardigan 仓库的路径）"]
       : []),
   ];
+  // Never copied from another project; the human sets the ones they want.
+  const unsetGates = Object.entries(GATE_PREFERENCES)
+    .filter(
+      ([key]) =>
+        (preferences[key as keyof typeof preferences] ?? null) === null,
+    )
+    .map(([, name]) => name);
   items.push({
     step: "6",
     title: "项目偏好",
@@ -299,8 +307,11 @@ export async function projectDoctor(input: DoctorInput): Promise<DoctorItem[]> {
     detail: [
       `流程版本 ${projectFlowVersion(preferences)}，自动合并 ${preferences.auto_merge ?? "off"}，高危路径 ${highRiskPaths(preferences).length} 条`,
       ...(defaults.length ? [`仍是默认值：${defaults.join("、")}`] : []),
+      ...(unsetGates.length
+        ? [`授权和门禁类（复制不带，由人设置）未设：${unsetGates.join("、")}`]
+        : []),
     ].join("；"),
-    fix: `cardigan project copy-setup --from <现有项目> --project ${project}，再按新仓库改路径类偏好（cardigan preference set …）`,
+    fix: `其余偏好用 cardigan project copy-setup --from <现有项目> --project ${project} 复制；流程版本和路径类由人按新仓库设置（cardigan preference set …）`,
   });
 
   // 7–9: merge gate, GitHub and the baseline workflow.

@@ -1,7 +1,6 @@
 import {
   type Actor,
   copyRole,
-  decisionDelegation,
   humanCardTemplates,
   type ProjectId,
   type ProjectPreferences,
@@ -30,18 +29,39 @@ import { cliLaunchPaths } from "./paths.js";
 /**
  * C-794: copy every active role and the project preferences of an existing
  * project into another one, in one transaction (onboarding steps 4 and 6).
- * Roles the target already has are kept; preferences take the source values.
+ * Roles the target already has are kept; preferences take the source values,
+ * except the human's authorizations and gates, which stay at the new
+ * project's defaults until the human sets them (PM decision, C-794#8).
  */
 
 const USAGE =
   "用法：cardigan project copy-setup --from <源项目> [--project <目标项目>] [--data-dir <目录>]";
-/** Preferences that name paths of the source repository. */
-const REPOSITORY_PATH_PREFERENCES = [
-  "high_risk_paths",
-  "auto_security_paths",
-  "role_rule_paths",
-  "system_merge_shadow_policy",
-] as const;
+/**
+ * Never copied: category authorizations, automatic and PM-confirmed merges,
+ * delegated review raises and the path gates (with the flow version, which
+ * from 4 requires the release paths). Key → `cardigan preference` name.
+ */
+export const GATE_PREFERENCES = {
+  flow_version: "flow-version",
+  decision_delegation: "decision-delegation",
+  auto_merge: "auto-merge",
+  auto_merge_after_minutes: "auto-merge-after",
+  auto_merge_paused: "auto-merge-paused",
+  pm_merge_confirmation: "pm-merge-confirmation",
+  pm_confirm_role_rule_implementations: "pm-confirm-role-rule-implementations",
+  pm_confirm_human_decided_merges: "pm-confirm-human-decided-merges",
+  enable_reviewer_browser: "reviewer-browser",
+  independent_review_limit_delegation: "independent-review-limit-delegation",
+  independent_review_limit_delegation_max:
+    "independent-review-limit-delegation-max",
+  system_review_limit_raise: "system-review-limit-raise",
+  system_review_limit_max_raises: "system-review-limit-max-raises",
+  high_risk_paths: "high-risk-paths",
+  auto_security_paths: "auto-security-paths",
+  role_rule_paths: "role-rule-paths",
+  system_merge_shadow_policy: "system-merge-shadow-policy",
+} as const satisfies Partial<Record<keyof ProjectPreferences, string>>;
+const GATE_KEYS: readonly string[] = Object.keys(GATE_PREFERENCES);
 /** A per-device board view setting, not a project rule. */
 const VIEW_PREFERENCES = ["id", "board_collapsed_lanes"];
 
@@ -51,8 +71,8 @@ export interface ProjectSetupCopy {
   readonly kept_roles: readonly string[];
   /** Target preferences the source does not set; left unchanged. */
   readonly kept_preferences: readonly string[];
-  /** Copied preferences that name paths of the source repository. */
-  readonly path_preferences: readonly string[];
+  /** Gate preferences the source sets, as `cardigan preference` names. */
+  readonly not_copied: readonly string[];
 }
 
 export async function runProjectCopySetup(
@@ -107,13 +127,13 @@ export function formatProjectSetupCopy(
     ...(result.kept_roles.length
       ? [`  目标项目已有、未覆盖的角色：${list(result.kept_roles)}`]
       : []),
-    "  项目偏好：已按源项目设置",
+    "  项目偏好：除授权和门禁类外已按源项目设置",
     ...(result.kept_preferences.length
       ? [`  源项目未设、保留目标项目值的偏好：${list(result.kept_preferences)}`]
       : []),
-    ...(result.path_preferences.length
+    ...(result.not_copied.length
       ? [
-          `  以下偏好写的是源仓库的路径，请按新仓库核对：${list(result.path_preferences)}`,
+          `  授权和门禁类不复制，保持本项目原值，需要时由人设置：${list(result.not_copied)}`,
         ]
       : []),
   ].join("\n");
@@ -209,12 +229,15 @@ export async function copyProjectSetup(
       kept_preferences: Object.keys(before).filter(
         (key) =>
           !VIEW_PREFERENCES.includes(key) &&
+          !GATE_KEYS.includes(key) &&
           before[key as keyof ProjectPreferences] !== undefined &&
           !Object.hasOwn(patch, key),
       ),
-      path_preferences: REPOSITORY_PATH_PREFERENCES.filter(
-        (key) => source[key] !== undefined && source[key] !== null,
-      ),
+      not_copied: Object.entries(GATE_PREFERENCES)
+        .filter(
+          ([key]) => (source[key as keyof ProjectPreferences] ?? null) !== null,
+        )
+        .map(([, name]) => name),
     };
   });
 }
@@ -224,12 +247,14 @@ function preferencePatch(
   source: ProjectPreferences,
   target: ProjectPreferences,
 ): Parameters<typeof setProjectPreferences>[2] {
-  const {
-    id: _id,
-    board_collapsed_lanes: _lanes,
-    human_card_templates: _templates,
-    ...rest
-  } = source;
+  const rest = Object.fromEntries(
+    Object.entries(source).filter(
+      ([key]) =>
+        !VIEW_PREFERENCES.includes(key) &&
+        !GATE_KEYS.includes(key) &&
+        key !== "human_card_templates",
+    ),
+  ) as Parameters<typeof setProjectPreferences>[2];
   // Templates are a patch of switches: close what the source does not open.
   const open = humanCardTemplates(source);
   const templates = Object.fromEntries([
@@ -238,24 +263,22 @@ function preferencePatch(
       .map((template) => [template, false]),
     ...open.map((template) => [template, true]),
   ]);
-  return {
-    ...rest,
-    auto_merge_after_minutes: source.auto_merge_after_minutes ?? null,
-    human_card_templates: templates,
-  };
+  return { ...rest, human_card_templates: templates };
 }
 
-/** Preferences as compared after a copy: without id and view settings. */
+/** Preferences as compared after a copy: without id, view and gate settings. */
 export function comparablePreferences(preferences: ProjectPreferences): string {
-  // Both are stored as patches over defaults; compare their effective values.
+  // Templates are stored as a patch over the default; compare the effect.
   const normalized: Record<string, unknown> = {
     ...preferences,
-    decision_delegation: decisionDelegation(preferences),
     human_card_templates: [...humanCardTemplates(preferences)].sort(),
   };
   const entries = Object.entries(normalized)
     .filter(
-      ([key, value]) => !VIEW_PREFERENCES.includes(key) && value !== undefined,
+      ([key, value]) =>
+        !VIEW_PREFERENCES.includes(key) &&
+        !GATE_KEYS.includes(key) &&
+        value !== undefined,
     )
     .sort(([a], [b]) => a.localeCompare(b));
   return JSON.stringify(entries);

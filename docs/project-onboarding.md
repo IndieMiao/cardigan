@@ -19,7 +19,7 @@ cardigan project doctor --project <p>
 | 3 | 登记仓库和基线 | `cardigan project set-repo --path <仓库> --base-branch <基线> --project <p>` | 改基线要（合并闸门在启动时读） |
 | 4 | 角色 | 第 2 步带了 `--from` 就已完成；否则 `cardigan project copy-setup --from <src> --project <p>`。角色引用的启动配置必须在 `launch.yaml` 里 | 否 |
 | 5 | 员工 | 员工是全局的：给现有员工加上本项目 `cardigan employee update <E-n> --projects <原项目>,<p>`（整表替换），或 `employee add`。常驻 PM 和主机运维各至少一名 | 否 |
-| 6 | 项目偏好 | 同第 4 步一起复制；再把写着源仓库路径的偏好按新仓库改掉：`preference set high-risk-paths`、`auto-security-paths`、`role-rule-paths`、`system-merge-shadow-policy`（流程版本 ≥4 时先设它） | 否 |
+| 6 | 项目偏好 | 同第 4 步一起复制，但**授权和门禁类不复制**（见下），保持新项目默认，由人按需 `cardigan preference set … --project <p>` | 否 |
 | 7 | `merge-gate.yaml` 项目段和执行器 | 手改。用 GitHub 检查时照 [`templates/merge-gate-github-executor.yaml`](templates/merge-gate-github-executor.yaml) 加项目段、推送路线和**本项目专用**的执行器（一个执行器只服务一个项目） | **要** |
 | 8 | GitHub App、部署密钥 | 所有者在 GitHub 上把 App 装到仓库、加可写的部署密钥 | 否 |
 | 9 | 每条基线加检查工作流 | 复制 [`templates/cardigan-check.yml`](templates/cardigan-check.yml) 到每条基线的 `.github/workflows/cardigan-check.yml`，只换六步的命令；第 7 步的 `step_contract` 要与它一致 | 否（合同在第 7 步） |
@@ -33,9 +33,21 @@ cardigan project doctor --project <p>
 
 只用本机（`local`）的项目跳过 12–18。
 
+## 复制时不带的偏好
+
+为了不把源项目已放宽的权限带到新项目，下面这些偏好不复制，由人在新项目里自己设置（`cardigan preference set <名字> … --project <p>`）；`project doctor` 第 6 步列出其中还没设的：
+
+- 流程版本和路径门禁：`flow-version`、`high-risk-paths`、`auto-security-paths`、`role-rule-paths`、`system-merge-shadow-policy`（流程版本 ≥4 之前先设它）。默认的高危路径和安全路径是 Cardigan 仓库自己的路径，新仓库必须改。
+- 类别授权：`decision-delegation`。
+- 自动合并：`auto-merge`、`auto-merge-after`、`auto-merge-paused`。
+- PM 代确认合并：`pm-merge-confirmation`、`pm-confirm-role-rule-implementations`、`pm-confirm-human-decided-merges`、`reviewer-browser`。
+- 代批加轮：`independent-review-limit-delegation`、`independent-review-limit-delegation-max`、`system-review-limit-raise`、`system-review-limit-max-raises`。
+
+其余偏好（审核轮数、合并确认的告警和暂缓时长、上下文阈值、机器偏好、跨卡只读、共享文件权限、人可开的卡片模板、催办等）照源项目复制。
+
 ## 仍需手工的部分
 
-- 主机：第 1 步克隆；第 7、19 步改 YAML 并重启；第 17 步登记证据（每台远程机器一条）。
+- 主机：第 1 步克隆；第 6 步设置授权和门禁类偏好；第 7、19 步改 YAML 并重启；第 17 步登记证据（每台远程机器一条）。
 - 所有者：第 8 步 GitHub 设置。
 - 目标仓库：第 9 步提交工作流。工作流增删、改名或调整步骤时，同时改第 7 步执行器的 `step_contract`。
 - 设备：第 12–15、18 步里要 sudo 的部分。

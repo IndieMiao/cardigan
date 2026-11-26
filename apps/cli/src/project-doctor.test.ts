@@ -250,8 +250,9 @@ describe("project copy-setup", () => {
     ).toBe(0);
     const text = out.join("\n");
     expect(text).toContain("已从项目 alpha 复制到 beta");
+    // PM decision C-794#8: authorizations and gates stay at the defaults.
     expect(text).toContain(
-      "以下偏好写的是源仓库的路径，请按新仓库核对：high_risk_paths、auto_security_paths、system_merge_shadow_policy",
+      "授权和门禁类不复制，保持本项目原值，需要时由人设置：flow-version、decision-delegation、auto-merge、high-risk-paths、auto-security-paths、system-merge-shadow-policy",
     );
     const alpha = snapshot("alpha");
     const beta = snapshot("beta");
@@ -274,7 +275,20 @@ describe("project copy-setup", () => {
     expect(comparablePreferences(beta.preferences)).toBe(
       comparablePreferences(alpha.preferences),
     );
-    expect(beta.preferences.flow_version).toBe(5);
+    expect(beta.preferences).toMatchObject({
+      review_max_rounds: 6,
+      human_card_templates: ["story", "dev"],
+    });
+    for (const gate of [
+      "flow_version",
+      "decision_delegation",
+      "auto_merge",
+      "high_risk_paths",
+      "auto_security_paths",
+      "system_merge_shadow_policy",
+    ] as const)
+      expect(beta.preferences[gate]).toBeUndefined();
+    expect(alpha.preferences.auto_merge).toBe("on");
   });
 
   test("existing roles are kept and reported; a second copy changes nothing", async () => {
@@ -424,6 +438,17 @@ describe("project doctor", () => {
     const steps: string[][] = [
       ["project", "create", "beta", "--code", "BET", "--from", "alpha"],
       ["project", "set-repo", "--path", repo, "--project", "beta"],
+      // Gates the copy leaves to the human.
+      [
+        "preference",
+        "set",
+        "system-merge-shadow-policy",
+        '{"role_rule_paths":[],"release_paths":[]}',
+        "--project",
+        "beta",
+      ],
+      ["preference", "set", "flow-version", "5", "--project", "beta"],
+      ["preference", "set", "auto-merge", "on", "--project", "beta"],
       [
         "preference",
         "set",
