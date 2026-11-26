@@ -83,6 +83,7 @@ import {
   roleInTransaction,
   runCommand,
   systemClock,
+  warmCommandState,
 } from "./host.js";
 import { rotateHostOps } from "./host-ops-rotate.js";
 import type { CliIo } from "./io.js";
@@ -578,6 +579,7 @@ async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
   try {
     const project_id = resolveProject(store, io, optional(flags, "project"));
     const actor = resolveActor(io, project_id, store);
+    warmCommandState(store, project_id);
     store.uow.run((tx) => {
       const ports = {
         clock: systemClock,
@@ -1081,6 +1083,7 @@ async function machineCommand(
       }
       return EXIT.ok;
     }
+    warmCommandState(store, project_id);
     const result = store.uow.run((tx) => {
       const state = loadCommandState(tx, project_id);
       const ports = { clock: systemClock, ids: tx.ids };
@@ -1400,6 +1403,7 @@ async function hostOpsCommand(
       optional(parsed.flags, "project"),
     );
     if (sub === "create") {
+      warmCommandState(store, project_id);
       const created = store.uow.run((tx) => {
         const employee_id = optional(parsed.flags, "employee");
         const result = createHostOpsAssignment(
