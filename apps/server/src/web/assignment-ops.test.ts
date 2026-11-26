@@ -286,6 +286,35 @@ test("after a pause whose release failed, start is refused and restart still nee
   ).toHaveLength(0);
 });
 
+test("after a pause, a Workbench stop still needs a proven exit, so a following start cannot run a second session", async () => {
+  const { assignment } = f.create();
+  f.session(assignment, false);
+  const ref = assignmentOf(assignment.id)?.runtime_ref as RuntimeRef;
+  f.apply((s, a, p) =>
+    stopWorkItemAssignment(
+      s,
+      a,
+      { assignment_id: assignment.id, reason: "paused", hold: true },
+      p,
+    ),
+  );
+  // The terminal is gone from the list; nothing proves the process exited.
+  runtime.status.mockResolvedValue({
+    ok: false,
+    error: { code: "runtime_not_found", message: "gone" },
+  });
+  const stopped = await post(assignment.id, "stop", "stop-paused");
+  expect(stopped.status).toBe(409);
+  expect(stopped.json).toMatchObject({ error: { code: "stop_failed" } });
+  expect(message(stopped.json)).toContain("不会另起会话");
+  expect(assignmentOf(assignment.id)?.runtime_ref).toEqual(ref);
+  const started = await post(assignment.id, "start", "start-after-stop");
+  expect(started.status).toBe(409);
+  expect(
+    runsOf(assignment.id).filter((r) => r.status === "queued"),
+  ).toHaveLength(0);
+});
+
 test("a restart whose snapshot fails leaves the running session alone", async () => {
   const { assignment } = f.create();
   const running = f.session(assignment, false);

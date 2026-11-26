@@ -157,7 +157,7 @@ export async function serveAssignmentOps(
       });
     c.authorize();
     if (restart && workItemAssignment(c, id).runtime_ref !== null) {
-      const stopped = await stop(c, ops, write, id, true);
+      const stopped = await stop(c, ops, write, id);
       if (stopped.stale)
         throw new HttpRejection(
           409,
@@ -238,8 +238,6 @@ async function stop(
   ops: AssignmentOps,
   write: ReturnType<typeof keyedHumanWrite>,
   id: Assignment["id"],
-  /** A start follows: prove the exit even when the stop is a pause. */
-  restarting = false,
 ): Promise<WorkItemStopResult> {
   try {
     return await stopWorkItemSession({
@@ -248,7 +246,10 @@ async function stop(
       assignment_id: id,
       runtime: ops.runtime,
       reason: STOP_REASON,
-      require_exit_proof: restarting,
+      // The Workbench never pauses: after its stop the next start may run at
+      // once, so the old session's exit is proven even when the Assignment
+      // was already paused (a CLI `stop --hold`).
+      require_exit_proof: true,
       apply: write.apply,
     });
   } catch (error) {
