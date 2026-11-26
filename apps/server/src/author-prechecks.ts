@@ -99,6 +99,45 @@ function within<T>(work: Promise<T>, ms: number): Promise<T> {
 class PrecheckVerificationFailure extends Error {}
 
 type Candidate = { candidate_sha: string; tree_sha: string; base_sha: string };
+
+/** C-777: what keeps every check slot of the executor from an author precheck. */
+export interface PrecheckSlotOccupant {
+  readonly kind: "merge_check" | "batch_check" | "precheck" | "capacity";
+  readonly reason: string;
+  readonly project_id?: string;
+  readonly card_id?: string;
+}
+/** C-777: name the running work that fills every slot of the executor. */
+export function runningSlotOccupant(
+  executor: string,
+  intents: readonly GithubDispatchIntent[],
+  limit: number,
+): PrecheckSlotOccupant {
+  const running = intents
+    .filter((intent) => intent.executor === executor)
+    .map((intent) => ({
+      project_id: intent.project,
+      card_id: intent.card,
+      kind:
+        intent.identity?.display_title.split("/")[4] === "precheck"
+          ? ("precheck" as const)
+          : ("merge_check" as const),
+    }));
+  const label = (r: (typeof running)[number]) =>
+    `${r.project_id}/${r.card_id} 的${r.kind === "precheck" ? "作者预检查" : "合并检查"}`;
+  const first = running[0];
+  return first
+    ? {
+        ...first,
+        reason: `执行器 ${executor} 的 ${limit} 个检查名额都在使用：${running.slice(0, 5).map(label).join("、")}${running.length > 5 ? ` 等 ${running.length} 项` : ""}`,
+      }
+    : {
+        kind: "capacity",
+        reason: `执行器 ${executor} 的 ${limit} 个检查名额都在使用`,
+      };
+}
+/** C-777: a precheck queued this long without a slot is reported to PM Ops. */
+export const DEFAULT_PRECHECK_SLOT_WAIT_MS = 10 * 60_000;
 export interface AuthorCheckGit {
   projectOf(project: ProjectId): CentralProject | undefined;
   checkHead(project: ProjectId, assignment: Assignment): Promise<string>;
@@ -129,7 +168,10 @@ export class AuthorPrechecks {
       onError(error: unknown): void;
       reserve(
         settings: Settings,
+        busy?: (occupant: PrecheckSlotOccupant) => void,
       ): Promise<{ index: number; release(): void } | undefined>;
+      /** C-777: queue time before a missing slot is reported (default 10 min). */
+      precheckSlotWaitMs?: number;
       github(
         check: Precheck,
         project: CentralProject,
@@ -866,6 +908,89 @@ export class AuthorPrechecks {
       });
     });
   }
+  /**
+   * C-777: a precheck that has waited past the threshold for a slot records
+   * once per occupant why, so PM Ops sees which merge work holds the executor
+   * instead of a silent queue.
+   */
+  private recordSlotWait(
+    project: ProjectId,
+    check: Precheck,
+    occupant: PrecheckSlotOccupant,
+  ): void {
+    const threshold =
+      this.options.precheckSlotWaitMs ?? DEFAULT_PRECHECK_SLOT_WAIT_MS;
+    this.options.store.uow.run((tx) => {
+      const events = tx.events.listAfter(project, check.card_id, 0);
+      const queued = events.find(
+        (e) =>
+          e.type === "precheck_queued" &&
+          e.actor.kind === "system" &&
+          (e.payload as { attempt_id?: string }).attempt_id ===
+            check.attempt_id,
+      );
+      const at = this.options.clock.now();
+      const waited = queued
+        ? Date.parse(at) - Date.parse(queued.created_at)
+        : Number.NaN;
+      if (!Number.isFinite(waited) || waited < threshold) return;
+      const key = JSON.stringify([
+        occupant.kind,
+        occupant.project_id ?? null,
+        occupant.card_id ?? null,
+      ]);
+      if (
+        events.some(
+          (e) =>
+            e.type === "precheck_slot_waiting" &&
+            e.actor.kind === "system" &&
+            (e.payload as { attempt_id?: string }).attempt_id ===
+              check.attempt_id &&
+            (e.payload as { occupant_key?: string }).occupant_key === key,
+        )
+      )
+        return;
+      const minutes = Math.floor(waited / 60_000);
+      const body = `${check.work_item_id} 的作者预检查 ${check.attempt_id} 已排队 ${minutes} 分钟未取得执行名额：${occupant.reason}。请 PM 核查。`;
+      const seq = tx.ids.nextEventSequence(project, check.card_id);
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq,
+        card_id: check.card_id,
+        type: "precheck_slot_waiting",
+        actor: { kind: "system", project_id: project },
+        payload: {
+          attempt_id: check.attempt_id,
+          work_item_id: check.work_item_id,
+          assignment_id: check.assignment_id,
+          occupant_key: key,
+          occupant: {
+            kind: occupant.kind,
+            ...(occupant.project_id ? { project_id: occupant.project_id } : {}),
+            ...(occupant.card_id ? { card_id: occupant.card_id } : {}),
+          },
+          reason: occupant.reason,
+          waited_ms: waited,
+          body,
+        },
+        created_at: at,
+      });
+      const id = tx.ids.nextTimelineEntryId(project, check.card_id);
+      tx.timeline.put(project, {
+        id,
+        short_id: id,
+        card_id: check.card_id,
+        event_seq: seq,
+        type: "system",
+        author: "system",
+        refs: [],
+        mentions: [],
+        retracted: false,
+        created_at: at,
+        body,
+      });
+    });
+  }
   private async execute(projectId: ProjectId, original: Precheck) {
     let check = original,
       stage = "配置",
@@ -1010,11 +1135,22 @@ export class AuthorPrechecks {
             (i) => i.attempt === check.attempt_id && i.project === projectId,
           ) &&
           unfinished.length >= target.maxConcurrent
-        )
+        ) {
+          this.recordSlotWait(
+            projectId,
+            check,
+            runningSlotOccupant(target.name, unfinished, target.maxConcurrent),
+          );
           return;
+        }
       }
       if (!reattach) {
-        slot = await this.options.reserve(settings);
+        let occupant: PrecheckSlotOccupant | undefined;
+        slot = await this.options.reserve(settings, (o) => {
+          occupant = o;
+        });
+        if (!slot && occupant && !this.options.signal.aborted)
+          this.recordSlotWait(projectId, check, occupant);
         if (!slot || this.options.signal.aborted) return;
         // Admission and capacity are rechecked under the same SQLite write lock.
         release = acquireMergeCheckCapacity(
