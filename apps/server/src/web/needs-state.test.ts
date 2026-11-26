@@ -25,10 +25,15 @@ const BASELINE_SHA256 =
 // original field/order; source classification has its own event contract tests.
 // C-540 adds attachment thumbnail paths; they derive from the download path.
 // C-503 adds story proposals; the synthetic data has none (asserted below).
+// C-742 adds the human action executor; it is stripped below.
+// C-760 adds each action's merge hold (blocks_merge, prerequisite); stripped too.
+// C-750 adds cards waiting for the owner to mark done; the synthetic data has
+// none (asserted below).
 function legacyProjection(view: ReturnType<typeof needsYou>) {
   const {
     auto_merge_pause: _pause,
     story_proposals: _proposals,
+    cards_to_close: _toClose,
     ...legacy
   } = view;
   return JSON.parse(
@@ -36,10 +41,24 @@ function legacyProjection(view: ReturnType<typeof needsYou>) {
       {
         ...legacy,
         notices: legacy.notices.map(({ source: _source, ...notice }) => notice),
+        // C-742 adds each action's executor after the golden response.
+        human_actions: legacy.human_actions.map(
+          ({
+            executor: _executor,
+            blocks_merge: _blocks,
+            prerequisite: _prerequisite,
+            ...action
+          }) => action,
+        ),
       },
       // C-540 thumbnails and C-614 previews postdate the golden response.
+      // C-760 adds blocking_human_actions to merge confirmations.
       (key, value) =>
-        key === "thumbnail_path" || key === "preview_path" ? undefined : value,
+        key === "thumbnail_path" ||
+        key === "preview_path" ||
+        key === "blocking_human_actions"
+          ? undefined
+          : value,
     ),
   );
 }
@@ -71,6 +90,7 @@ test("production-size synthetic Needs You exactly matches the original reader re
     const view = needsYou(first, FIXTURE_NOW);
     expect(view.auto_merge_pause).toEqual({ paused: false, waiting_count: 0 });
     expect(view.story_proposals).toEqual([]);
+    expect(view.cards_to_close).toEqual([]);
     const response = JSON.stringify(legacyProjection(view));
     expect(createHash("sha256").update(response).digest("hex")).toBe(
       BASELINE_SHA256,

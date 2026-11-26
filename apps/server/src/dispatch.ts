@@ -28,6 +28,8 @@ import {
   dispatchRunKind,
   dispatchTier,
   eventById,
+  eventsOfType,
+  eventsOfTypes,
   expireMergeSnoozes,
   type HarnessActivity,
   hasRunTarget,
@@ -41,6 +43,7 @@ import {
   parkedPauseRepair,
   pendingPrecheckConflict,
   pmNotificationState,
+  preparationRetryWaiting,
   providerAdmission,
   queueRun,
   type RetirementDispatchWait,
@@ -54,6 +57,7 @@ import {
   reviewRunWakeDisposition,
   runnableQueuedRun,
   runsOf,
+  settledHumanActionNeedsYou,
   standingRunDormant,
   stoppedByHuman,
   supersededRetirement,
@@ -77,6 +81,7 @@ import {
   hasEarlierCapacityWait,
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
   type MachineLeases,
+  maintenanceActive,
   observeRetirementForDispatch,
   type ReadProjectQuota,
   type ReadResourceLimits,
@@ -93,6 +98,7 @@ import {
   redactFailureLine,
   retainedWriterRefusal,
   runCapacitySnapshot,
+  runResourceClaim,
   runResourceKeys,
   settleTestReviewLimits,
   testReviewRunPrompt,
@@ -152,7 +158,10 @@ import {
   wakeFailure,
 } from "./dispatch-alert.js";
 import { ClientRecovery } from "./dispatch-client-recovery.js";
-import { InactiveRunReaper } from "./dispatch-inactive.js";
+import {
+  InactiveRunReaper,
+  type ScarceInactiveCancel,
+} from "./dispatch-inactive.js";
 import { InactivityAlerts } from "./dispatch-inactivity-alerts.js";
 import {
   acknowledgeInbox,
@@ -217,6 +226,11 @@ export interface DispatcherOptions {
     project: ProjectId,
     assignment: Assignment["id"],
   ) => HarnessActivity | undefined;
+  /** C-752: cached Claude transcript write evidence for the inactivity reaper. */
+  readonly harnessFileActivity?: (
+    project: ProjectId,
+    assignment: Assignment["id"],
+  ) => HarnessActivity | undefined;
   readonly inspectHarnessActivity?: (
     project: ProjectId,
     stopTarget?: Assignment["id"],
@@ -229,6 +243,7 @@ export interface DispatcherOptions {
   ) => Promise<{ branch: string; sha: string } | undefined>;
   readonly mergeGateEnabled?: (project: ProjectId) => boolean;
   readonly frameworkWaitReminderMs?: number;
+  readonly storySummaryHandoffMs?: number;
   /** Maximum automatic baseline synchronizations per work item and precheck HEAD. */
   readonly baselineConflictMaxResumes?: number;
   readonly authorPrecheckFailureLimit?: number;
@@ -258,6 +273,8 @@ export interface DispatcherOptions {
   readonly queuedRecheckAfterMs?: number;
   readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
+  /** C-752: optional shorter grace for Runs holding scarce resources; off by default. */
+  readonly scarceInactiveCancel?: ScarceInactiveCancel | null;
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
   readonly snapshot: (
     assignment: Assignment,
@@ -296,9 +313,9 @@ export interface DispatcherOptions {
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
 /** C-721: a submit/reply follow-up runs without its work item's resources. */
-const unclaimedResourcesRule = (keys: readonly string[]) =>
+const unclaimedResourcesRule = (keys: readonly string[], reason?: string) =>
   keys.length
-    ? `本次 Run 未占用 ${keys.join("、")} 名额，只做提交和回帖：不要启动或操作这些资源；需要它们的工作（包括本次 Run 新收到的通知）用 report_blocker（needs=role）说明所需资源后结束本次 Run，恢复后的 Run 会按工作项占用名额。`
+    ? `本次 Run 未占用 ${keys.join("、")} 名额${reason ? `（原因：${reason}）` : ""}，只做提交和回帖：不要启动或操作这些资源；需要它们的工作（包括本次 Run 新收到的通知）用 report_blocker（needs=role）说明所需资源后结束本次 Run，恢复后的 Run 会按工作项占用名额。`
     : undefined;
 const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
   s.cursors.some(
@@ -433,13 +450,17 @@ export class Dispatcher {
       ...(options.harnessActivity
         ? { harnessActivity: options.harnessActivity }
         : {}),
+      ...(options.harnessFileActivity
+        ? { harnessFileActivity: options.harnessFileActivity }
+        : {}),
+      ...(options.scarceInactiveCancel
+        ? { scarce: options.scarceInactiveCancel }
+        : {}),
       loadState: (tx, project) => this.loadState(tx, project),
       alert: (tx, state, assignment, run, reason) => {
         if (
-          state.events.some(
-            (e) =>
-              e.type === reason &&
-              payloadString(e.payload, "run_id") === run.id,
+          eventsOfType(state.events, reason).some(
+            (e) => payloadString(e.payload, "run_id") === run.id,
           )
         )
           return;
@@ -512,6 +533,14 @@ export class Dispatcher {
             preferred(b) - preferred(a) ||
             compareDispatchOrder(a.order, b.order),
         );
+        // C-390: a human maintenance window starts no Run and delivers no
+        // bell; queued work waits for the window to end.
+        if (
+          this.options.store.uow.read(() =>
+            maintenanceActive(this.options.store),
+          )
+        )
+          return;
         await profileSpan("deliver", async () => {
           for (const candidate of orderPmCandidates(candidates, (c) =>
             this.state(c.project),
@@ -1865,8 +1894,18 @@ export class Dispatcher {
     run: Run | undefined,
     ready: readonly Notification[],
   ) {
+    return this.runClaim(tx, state, a, run, ready).keys;
+  }
+  /** C-736: `runKeys` with the reason recorded on the admitted Run. */
+  private runClaim(
+    tx: ReadRepositories,
+    state: CommandState,
+    a: Assignment,
+    run: Run | undefined,
+    ready: readonly Notification[],
+  ) {
     const cause = run ? undefined : inboxCause(state, a, ready);
-    return runResourceKeys(
+    return runResourceClaim(
       tx,
       state.project_id,
       a,
@@ -1880,6 +1919,7 @@ export class Dispatcher {
         ...(cause ? { trigger_event_id: cause.event_id } : {}),
       },
       ready,
+      state.timeline,
     );
   }
   /**
@@ -1927,8 +1967,15 @@ export class Dispatcher {
       if (!run) return assignmentResourceKeys(tx, entry.project_id, owner);
       // Only a light trigger can lighten the Run; skip the notice read otherwise.
       if (
-        runResourceKeys(tx, entry.project_id, owner, state.events, run, [])
-          .length
+        runResourceKeys(
+          tx,
+          entry.project_id,
+          owner,
+          state.events,
+          run,
+          [],
+          state.timeline,
+        ).length
       )
         return assignmentResourceKeys(tx, entry.project_id, owner);
       let notes = pending.get(entry.project_id);
@@ -2195,11 +2242,7 @@ export class Dispatcher {
         state = this.loadState(tx, project);
       }
       if (!run) return skip("run_missing");
-      if (
-        run.preparation_retry &&
-        Date.parse(this.clock.now()) <
-          Date.parse(run.preparation_retry.ready_at)
-      )
+      if (preparationRetryWaiting(run, this.clock.now()))
         return skip("preparation_backoff");
       if (unreadableCommentTrigger(state, run))
         return skip("unreadable_trigger");
@@ -2225,7 +2268,8 @@ export class Dispatcher {
           return skip("provider_unavailable");
         }
         const leases = this.options.leases;
-        const keysNeeded = this.runKeys(tx, state, a, run, ready);
+        const claim = this.runClaim(tx, state, a, run, ready);
+        const keysNeeded = claim.keys;
         const blocked = leases?.blocked(
           project,
           a.machine_id,
@@ -2256,9 +2300,11 @@ export class Dispatcher {
         const cleared = {
           ...run,
           resource_keys: keys,
+          ...(claim.reason ? { resource_reason: claim.reason } : {}),
           ...(probe ? { provider_probe: probe } : {}),
         };
         delete cleared.queue_reason;
+        if (!claim.reason) delete cleared.resource_reason;
         run = cleared;
         tx.runs.put(project, run);
         state = this.loadState(tx, project);
@@ -2379,7 +2425,11 @@ export class Dispatcher {
         attempt,
         run,
         assignment: a,
-        bell: [bell, followup, unclaimedResourcesRule(unclaimed)]
+        bell: [
+          bell,
+          followup,
+          unclaimedResourcesRule(unclaimed, run.resource_reason),
+        ]
           .filter(Boolean)
           .join("\n"),
       };
@@ -2806,12 +2856,10 @@ export class Dispatcher {
       // dispatch-retry; only escalate failures nobody else will handle.
       const recovering =
         continuation ||
-        state.events.some(
-          (e) =>
-            ["run_preparation_recovered", "run_preparation_stalled"].includes(
-              e.type,
-            ) && payloadString(e.payload, "run_id") === attempt.run_id,
-        ) ||
+        eventsOfTypes(state.events, [
+          "run_preparation_recovered",
+          "run_preparation_stalled",
+        ]).some((e) => payloadString(e.payload, "run_id") === attempt.run_id) ||
         run?.status === "dispatched" ||
         run?.status === "running" ||
         (run !== undefined && dispatchRecoveryFailed(state, run));
@@ -3067,7 +3115,11 @@ export class Dispatcher {
           project_id: project,
           statuses: UNSETTLED_NOTIFICATION_STATUSES,
         })) {
-          if (obsoleteDispatchAttention(state, n))
+          // C-750: owner notices of completed or cancelled human actions.
+          if (
+            obsoleteDispatchAttention(state, n) ||
+            settledHumanActionNeedsYou(state, n)
+          )
             moveNotification(store.database, {
               project_id: project,
               id: n.id,

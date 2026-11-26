@@ -1,6 +1,15 @@
-import { postComment, queueRun, type Runtime } from "@cardigan/domain";
+import {
+  postComment,
+  queueRun,
+  type Runtime,
+  recordDeployment,
+} from "@cardigan/domain";
 import { RepositoryLockTimeoutError } from "@cardigan/git-service";
-import { launchRun, tryHostOpsLock } from "@cardigan/host";
+import {
+  launchRun,
+  PreparationNotStarted,
+  tryHostOpsLock,
+} from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
@@ -213,20 +222,140 @@ test.each([
       f.advance(1);
       await new Dispatcher(options).tick();
       expect(prepare).toHaveBeenCalledTimes(2);
-      expect(f.state().runs.map((r) => r.status)).toEqual([
-        "cancelled",
-        failAgain ? "cancelled" : "dispatched",
-      ]);
+      // C-738: a second failure queues the next retry on the long schedule.
+      expect(f.state().runs.map((r) => r.status)).toEqual(
+        failAgain
+          ? ["cancelled", "cancelled", "queued"]
+          : ["cancelled", "dispatched"],
+      );
       expect(runtime.provision).toHaveBeenCalledTimes(failAgain ? 0 : 1);
-      expect(f.state().human_actions).toHaveLength(failAgain ? 1 : 0);
+      expect(f.state().human_actions).toHaveLength(0);
       await new Dispatcher(options).tick();
-      expect(f.state().runs).toHaveLength(2);
+      expect(f.state().runs).toHaveLength(failAgain ? 3 : 2);
       expect(prepare).toHaveBeenCalledTimes(2);
     } finally {
       f.close();
     }
   },
 );
+
+// C-738 (sensen C-131): a readonly target that was not readable yet failed
+// before any command ran. It retries on the long backoff, and the next ready
+// deployment retries it at once instead of waiting out the backoff.
+test("a pre-execution preparation failure retries after backoff and right after a deployment", async () => {
+  const f = dispatchFixture(),
+    target = f.create();
+  const prepare = vi
+    .fn<() => Promise<undefined>>()
+    .mockRejectedValueOnce(
+      new PreparationNotStarted(
+        new Error("No current Git delivery for readonly work item W-413"),
+      ),
+    )
+    .mockResolvedValue(undefined);
+  const runtime = {
+    provision: vi.fn(async () => ({
+      ok: true,
+      value: f.refFor(target.assignment),
+    })),
+    status: vi.fn(async () => ({
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    })),
+    release: vi.fn(async () => ({ ok: true, value: undefined })),
+  } as unknown as Runtime;
+  const options: DispatcherOptions = {
+    store: f.store,
+    runtime,
+    clock: f.clock,
+    snapshot: async () => ({ model: "fixture", agent_cli_version: "fixture" }),
+    startRun: async ({ project, assignment, run, bell }) => {
+      await launchRun(
+        {
+          store: f.store,
+          runtime,
+          dataDir: f.dataDir,
+          clock: f.clock,
+          mcpUrl: "http://localhost/mcp",
+          launch: {
+            config: parseLaunchConfig({
+              profiles: { fixture: { harness: "pi", model: "fixture" } },
+            }),
+            secrets: {},
+          },
+        },
+        {
+          project,
+          assignment_id: assignment.id,
+          run,
+          actor: { kind: "system", project_id: project },
+          first_prompt: bell,
+          prepare_worktree: prepare,
+        },
+      );
+    },
+  };
+  f.apply((s, a, p) =>
+    postComment(
+      s,
+      a,
+      { card_id: target.card.id, work_item_id: target.item.id, body: "Go" },
+      p,
+    ),
+  );
+  try {
+    await new Dispatcher(options).tick();
+    expect(f.state().runs.map((r) => r.status)).toEqual([
+      "cancelled",
+      "queued",
+    ]);
+    expect(
+      f.state().events.find((e) => e.type === "run_preparation_recovered")
+        ?.payload,
+    ).toMatchObject({
+      category: "prepare_failed",
+      message: "No current Git delivery for readonly work item W-413",
+      attempt: 1,
+      max_retries: 3,
+    });
+    expect(f.state().human_actions).toHaveLength(0);
+    f.advance(60_000);
+    await new Dispatcher(options).tick();
+    expect(prepare).toHaveBeenCalledTimes(1);
+    f.apply(
+      (s, a, p) =>
+        recordDeployment(
+          s,
+          a,
+          {
+            attempt: "fixture",
+            from: "a".repeat(40),
+            to: "b".repeat(40),
+            status: "deployed",
+            ready: true,
+            build: "passed",
+            downtime_ms: 0,
+            summary: "deployed",
+          },
+          p,
+        ),
+      { kind: "system", project_id: f.project },
+    );
+    f.advance(1000);
+    await new Dispatcher(options).tick();
+    expect(
+      f.state().events.filter((e) => e.type === "run_preparation_expedited"),
+    ).toHaveLength(1);
+    await new Dispatcher(options).tick();
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(f.state().runs.map((r) => r.status)).toEqual([
+      "cancelled",
+      "dispatched",
+    ]);
+  } finally {
+    f.close();
+  }
+});
 
 test("ten queued Runs prepare in order and each provisions once", async () => {
   const f = dispatchFixture();

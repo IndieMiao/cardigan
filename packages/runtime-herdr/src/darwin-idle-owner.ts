@@ -166,6 +166,48 @@ const uncertain = (): IdleRetirementResult => ({
   outcome: "uncertain",
   evidence: { stage: "confirm", reason: "confirmation_pending" },
 });
+/**
+ * C-746: the owner names the proof it refused (`refused <code>`) before it
+ * closes. A dirty or unprovable checkout and a busy terminal are deliberate
+ * keeps; any other refusal stays `probe_invalid`, now with its cause. The
+ * code is a bounded token: never a path, file name or screen text.
+ */
+export function ownerRefusal(code: string): {
+  readonly outcome: "withdrawn";
+  readonly evidence: RetirementEvidence;
+} {
+  return {
+    outcome: "withdrawn",
+    evidence: {
+      stage: "probe",
+      reason:
+        code === "terminal_not_idle"
+          ? "terminal_busy"
+          : /^(?:workspace|worktree|git|build)_/u.test(code)
+            ? "workspace_not_clean"
+            : "probe_invalid",
+      owner_reason: code,
+    },
+  };
+}
+/** An owner that closed without naming a cause (enrolled before C-746), or a
+ * relay/transport failure before any challenge. Nothing was signed. */
+const unanswered = (
+  owner_reason: "no_reply" | "relay_failed",
+  code?: number | null,
+): IdleRetirementResult => ({
+  outcome: "withdrawn",
+  evidence: {
+    stage: "probe",
+    reason: "probe_invalid",
+    owner_reason,
+    ...(Number.isInteger(code) &&
+    (code as number) >= 0 &&
+    (code as number) <= 255
+      ? { exit_code: code as number }
+      : {}),
+  },
+});
 
 export async function stopDarwinOwner(
   e: Ssh,
@@ -232,12 +274,16 @@ export async function stopDarwinOwner(
       child.stdin.end();
       resolve(value);
     };
-    const lost = () =>
-      finish(attempted ? uncertain() : refused("probe_invalid"));
-    child.stdin.on("error", lost);
-    child.on("error", lost);
+    const lost = (code?: number | null) =>
+      finish(
+        attempted
+          ? uncertain()
+          : unanswered(code === undefined ? "relay_failed" : "no_reply", code),
+      );
+    child.stdin.on("error", () => lost());
+    child.on("error", () => lost());
     child.on("close", (code) =>
-      code === 3 && !attempted ? finish(unowned) : lost(),
+      code === 3 && !attempted ? finish(unowned) : lost(code),
     );
     child.stdout.setEncoding("utf8").on("data", (data: string) => {
       if (settled) return;
@@ -245,6 +291,8 @@ export async function stopDarwinOwner(
       if (buffer.length > 256) return lost();
       if (!buffer.includes("\n")) return;
       if (attempted) return finish(uncertain());
+      const refusal = /^refused ([a-z_]{1,32})\n$/u.exec(buffer);
+      if (refusal) return finish(ownerRefusal(refusal[1]!));
       // Owners enrolled before durable keys report no key id.
       const challenge = /^([a-f0-9]{64})(?: ([a-f0-9]{64}))?\n$/u.exec(buffer);
       if (!challenge) return lost();

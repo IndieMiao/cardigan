@@ -1,4 +1,5 @@
 import type { Assignment, Event } from "../entities.js";
+import { eventsOfTypes } from "../event-index.js";
 
 /**
  * C-228 / Q-387 (human chose g60_c10): a runtime that went `unknown` only
@@ -45,9 +46,8 @@ export function runtimeUnknownVisibleAt(
   if (assignment.runtime_state !== "unknown") return null;
   // Same key the RuntimeMonitor writes into each fact's `runtime_key`.
   const key = JSON.stringify(assignment.runtime_ref);
-  const facts = events.filter(
+  const facts = eventsOfTypes(events, RUNTIME_FACTS).filter(
     (e) =>
-      (RUNTIME_FACTS as readonly string[]).includes(e.type) &&
       field(e, "assignment_id") === assignment.id &&
       field(e, "runtime_key") === key,
   );

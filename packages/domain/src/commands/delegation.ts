@@ -11,7 +11,7 @@ import type {
   PlainSummary,
   ToolName,
 } from "../entities.js";
-import { appendEvents } from "../event-index.js";
+import { appendEvents, eventsForDecision } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import { highRiskProducts } from "../high-risk.js";
 import type { CardId } from "../ids.js";
@@ -123,6 +123,7 @@ type DelegationSubject = Pick<
   Decision,
   "category" | "trigger" | "card_id" | "human_required_reason"
 > &
+  Partial<Pick<Decision, "owner_required">> &
   Partial<
     Pick<
       Decision,
@@ -207,8 +208,10 @@ function projectPreference(d: CommandDraft) {
 }
 /** Old uncategorized decisions remain human-only until explicitly classified. */
 export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
+  // C-753: PM declared, with its basis, that only the owner may decide.
+  if (q.owner_required) return false;
   if (
-    !q.trigger &&
+    (!q.trigger || q.trigger === "worktree_cleanup") &&
     q.card_id &&
     d.list("cards").some((c) => c.id === q.card_id && c.sensitive) &&
     !categoryDelegated(
@@ -280,7 +283,10 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     // does not override ordinary category delegation.
     (!q.trigger ||
       q.trigger === "review_limit" ||
-      q.trigger === "held_assignment_resume") &&
+      q.trigger === "held_assignment_resume" ||
+      // C-747: keep or back up and remove a released worktree follows its
+      // category (data_deletion) like an ordinary question.
+      q.trigger === "worktree_cleanup") &&
     !!q.category &&
     categoryDelegated(
       projectPreference(d),
@@ -483,4 +489,62 @@ export function grantDecisionCategory(d: CommandDraft, q: Decision) {
     new_value: next,
     decision_id: q.id,
   });
+}
+
+/**
+ * C-747: open worktree cleanup questions still held by the human move to PM
+ * once their category (data_deletion) is delegated and PM Ops can take them:
+ * when the human turns the category on, after deployment for questions raised
+ * before C-747 (e.g. Q-1370), and when PM Ops was unavailable at request time.
+ * A question PM itself escalated to the human stays with the human.
+ */
+export function routeDelegatedWorktreeCleanups(
+  d: CommandDraft,
+  note: string,
+): Decision[] {
+  const moved: Decision[] = [];
+  for (const q of d.list("decisions")) {
+    if (
+      q.trigger !== "worktree_cleanup" ||
+      q.decider !== "human" ||
+      q.human_required_reason ||
+      !["open", "provisional", "snoozed"].includes(q.status) ||
+      escalatedByPm(d, q)
+    )
+      continue;
+    const next = assignDecision(d, q);
+    if (next.decider !== "role:pm") continue;
+    d.put("decisions", next);
+    moved.push(next);
+    d.emit(
+      "decision_requested",
+      q.card_id,
+      {
+        decision_id: q.id,
+        ...(q.assignment_id ? { assignment_id: q.assignment_id } : {}),
+        previous_decider: "human",
+        routed_to: "role:pm",
+        routing_reason: next.delegation_authority ?? null,
+        delegation_authority: next.delegation_authority ?? null,
+        affected_work_items: [],
+      },
+      { type: "decision_request", decision_id: q.id, body: note },
+    );
+  }
+  return moved;
+}
+/** PM Ops handed this question to the human itself (`escalate`). */
+function escalatedByPm(d: CommandDraft, q: Decision) {
+  return [...eventsForDecision(d.state.events, q.id), ...d.events].some(
+    (e) =>
+      e.type === "decision_requested" &&
+      e.actor.kind === "assignment" &&
+      e.actor.role_id === "pm" &&
+      typeof e.payload === "object" &&
+      e.payload !== null &&
+      "decision_id" in e.payload &&
+      e.payload.decision_id === q.id &&
+      "previous_decider" in e.payload &&
+      e.payload.previous_decider === "role:pm",
+  );
 }

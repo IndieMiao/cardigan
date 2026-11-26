@@ -46,6 +46,7 @@ import {
 export { mergeContext } from "./merge-context.js";
 
 import { reopenMerge } from "./merge-rework.js";
+import { promptOfficePreMergeChecks } from "./office-pre-merge-prompt.js";
 import { roleRuleConfirmationRequired } from "./role-rule-implementation.js";
 import { screenshotCheckBlocker } from "./screenshot-check.js";
 import {
@@ -629,6 +630,9 @@ export function completionPassed(
   )
     requestConfirmation(d, card, target);
   d.put("cards", next);
+  // C-744: reviews and acceptance passed; the Office finishes its checks now.
+  if (next.status === "awaiting_merge")
+    promptOfficePreMergeChecks(d, next, "accepted", target.id);
 }
 /**
  * C-65: after the sensitive flag changes on a card awaiting merge, make the

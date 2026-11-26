@@ -23,6 +23,7 @@ import {
   PM_HOST_MATTERS_RULE,
   PM_OFFICE_MENTION_FIRST_LINE_RULE,
   PM_OFFICE_MENTION_RULES,
+  PM_OWNER_REQUIRED_RULE,
   PM_PLAIN_SUMMARY_RULE,
   PM_PRE_MERGE_CHECK_RULE,
   PM_UI_VERIFICATION_RULES,
@@ -1034,4 +1035,25 @@ test("C-676: every default role, and a project role built on one, writes full nu
   expect(rule(composeRolePrompt(overlay.instructions))).toBe(
     rule(corePromptFor("coder")),
   );
+});
+
+test("C-753: PM learns when to declare an owner-required decision; other roles do not", () => {
+  const pm = corePromptFor("pm");
+  const section = pm.slice(
+    pm.indexOf("## 交人边界（Flow Lite）"),
+    pm.indexOf("## 核实（两个上下文都要遵守）"),
+  );
+  expect(section).toContain(`- ${PM_OWNER_REQUIRED_RULE}`);
+  for (const phrase of [
+    "`owner_required`",
+    "所有者看图确认、对外发布",
+    "项目规则条目、验收标准或所有者原话的引用",
+    "只有 PM Office 和 PM Ops 能声明",
+    "近 7 天的条数和依据",
+    "普通功能细节、数值和界面文字仍按类别授权处理",
+  ])
+    expect(PM_OWNER_REQUIRED_RULE).toContain(phrase);
+  for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[])
+    if (role !== "pm")
+      expect(corePromptFor(role), role).not.toContain(PM_OWNER_REQUIRED_RULE);
 });

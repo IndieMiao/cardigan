@@ -1552,6 +1552,55 @@ describe("C-154 standing PM session restart", () => {
     ).toContain("常驻 PM 会话已由人重开");
   });
 
+  test("C-741: the standing host operator restarts in place the same way", async () => {
+    store.createProject({ id: project_id, name: "One" });
+    store.uow.run((tx) =>
+      writeRole(
+        tx,
+        project_id,
+        {
+          ...roleFor("none"),
+          role_id: "host_ops",
+          display_name: "Host ops",
+          core_prompt: corePromptFor("host_ops"),
+          kind: "standing",
+        } as Role,
+        { mode: "add" },
+      ),
+    );
+    store.uow.run((tx) =>
+      tx.assignments.put(project_id, {
+        id: "A-1",
+        scope: "standing",
+        role_id: "host_ops",
+        role_version: 1,
+        status: "active",
+        runtime_state: "not_provisioned",
+        machine_id: "local",
+        runtime_ref: null,
+        mcp_token_id: "host-ops",
+        created_at: "2026-01-01T00:00:00.000Z",
+      } as unknown as Assignment),
+    );
+    const runtime = liveUntilReleased(new FakeRuntime());
+    const first = await startAssignment(options(runtime));
+    const second = await startAssignment(options(runtime, true));
+    expect(second.run_id).not.toBe(first.run_id);
+    expect(runtime.released.map((r) => r.terminal_ref)).toEqual([
+      first.runtime_ref.terminal_ref,
+    ]);
+    const state = store.uow.read((tx) => ({
+      assignment: tx.assignments.get(project_id, "A-1" as never),
+      old: tx.runs.get(project_id, first.run_id as never),
+      next: tx.runs.get(project_id, second.run_id as never),
+      events: tx.events.listAfter(project_id, undefined, 0).map((e) => e.type),
+    }));
+    expect(state.assignment).toMatchObject({ id: "A-1", status: "active" });
+    expect(state.old?.status).toBe("cancelled");
+    expect(state.next?.status).toBe("dispatched");
+    expect(state.events).toContain("standing_session_restarted");
+  });
+
   test("restart keeps everything when the old terminal is not proven to have exited", async () => {
     standingOps();
     const runtime = new FakeRuntime();

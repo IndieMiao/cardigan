@@ -376,8 +376,11 @@ export {
   candidateDeleteCommand,
 } from "./candidate-delete.js";
 export {
+  type CandidatePushFailure,
   type CandidatePushRequest,
+  type CandidatePushResult,
   candidatePushCommand,
+  classifyCandidatePushFailure,
 } from "./candidate-push.js";
 export {
   classifyPushFailure,

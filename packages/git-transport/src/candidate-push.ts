@@ -63,3 +63,57 @@ export function candidatePushCommand(
     },
   };
 }
+
+/**
+ * C-758: why a candidate publication did not reach GitHub. `cancelled` is a
+ * local abort, `timeout` the host transfer budget, `local` a failure before
+ * Git transport started. Only `network` means GitHub could not be reached;
+ * `auth`, `rejected` and `github_error` are answers from GitHub.
+ */
+export type CandidatePushFailure =
+  | "cancelled"
+  | "timeout"
+  | "local"
+  | "network"
+  | "auth"
+  | "rejected"
+  | "github_error"
+  | "other";
+export type CandidatePushResult =
+  | { readonly status: "pushed" }
+  | {
+      readonly status: "failed";
+      readonly reason: CandidatePushFailure;
+      /** The numeric process exit status, when available; never raw diagnostics. */
+      readonly exit_code?: number;
+    };
+/** Git HTTPS output is inspected in memory only; no raw text leaves the transport. */
+export function classifyCandidatePushFailure(
+  output: string,
+): "network" | "auth" | "rejected" | "github_error" | "other" {
+  if (
+    /Authentication failed|Invalid username or (?:password|token)|returned error: 40[13]\b|Permission to \S+ denied|Bad credentials/iu.test(
+      output,
+    )
+  )
+    return "auth";
+  if (
+    /non-fast-forward|fetch first|\[rejected\]|\[remote rejected\]|returned error: 4\d\d\b/iu.test(
+      output,
+    )
+  )
+    return "rejected";
+  if (
+    /returned error: 5\d\d\b|Internal Server Error|Service Unavailable|Bad Gateway|Gateway Time-?out/iu.test(
+      output,
+    )
+  )
+    return "github_error";
+  if (
+    /Could not resolve|Failed to connect|Connection (?:timed out|refused|reset|closed)|Network is unreachable|No route to host|remote end hung up|unexpected disconnect|early EOF|Operation timed out|SSL|TLS|RPC failed|Recv failure|Send failure|stream \d+ was not closed cleanly|Empty reply from server/iu.test(
+      output,
+    )
+  )
+    return "network";
+  return "other";
+}

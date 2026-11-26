@@ -22,9 +22,15 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { governHcClient } from "../../runtime-herdr/src/call-queue.js";
 import { HerdrRuntime } from "../../runtime-herdr/src/index.js";
-import { observeRegisteredMachine, RuntimeTargets } from "./runtime-targets.js";
+import {
+  observeRegisteredMachine,
+  RuntimeTargets,
+  resetLaunchRefreshes,
+} from "./runtime-targets.js";
 import type { RuntimeWorker } from "./runtime-workers-config.js";
+import { digestMismatch, protocolMismatch } from "./worker-helper-release.js";
 import { WorkerMcpError } from "./worker-mcp.js";
+import { upgradeIdentity } from "./worker-upgrade-enrollment.js";
 import { upgradeHold } from "./worker-upgrade-gate.js";
 
 const value = <T>(result: RuntimeResult<T>): T => {
@@ -883,6 +889,98 @@ test.each([
   expect(calls.mock.calls.some((c) => c[1] === "provision")).toBe(false);
 });
 
+test("C-608: a same-protocol helper digest mismatch is a warning and launch proceeds", async () => {
+  readiness.mockResolvedValue([digestMismatch]);
+  expect(value(await router.check("fixture", "worker-a"))).toEqual({
+    machine_id: "worker-a",
+    blockers: [],
+    warnings: [digestMismatch],
+    launch_enabled: true,
+  });
+  expect(
+    (await router.forLaunch("fixture", assignment("worker-a"))).machine.id,
+  ).toBe("worker-a");
+  readiness.mockResolvedValue([protocolMismatch(1)]);
+  await expect(
+    router.forLaunch("fixture", assignment("worker-a")),
+  ).rejects.toThrow(protocolMismatch(1));
+});
+
+test("C-608: an enrolled worker upgrades through the patrol path before launch, at most once per window", async () => {
+  resetLaunchRefreshes();
+  const options = {
+    execution: { mode: "local" as const, dataDir: root },
+    store,
+    project: "fixture",
+    workers: () => workers,
+    factory,
+    workerReadiness: readiness,
+    workerMcpReachability: mcpReachability,
+    env: { CARDIGAN_CONFIG_DIR: root },
+  };
+  const plain = value(await RuntimeTargets.create(options));
+  const unenrolled = vi.spyOn(plain, "refreshMachine");
+  readiness.mockResolvedValue([protocolMismatch(1)]);
+  await expect(
+    plain.forLaunch("fixture", assignment("worker-a")),
+  ).rejects.toThrow(protocolMismatch(1));
+  expect(unenrolled).not.toHaveBeenCalled();
+
+  await writeFile(upgradeIdentity(root, "fixture", "worker-a"), "fixture", {
+    mode: 0o600,
+  });
+  const enrolled = value(await RuntimeTargets.create(options));
+  const refresh = vi
+    .spyOn(enrolled, "refreshMachine")
+    .mockImplementation(async () => {
+      readiness.mockResolvedValue([]);
+      return { capabilities: [], health: null };
+    });
+  expect(
+    (await enrolled.forLaunch("fixture", assignment("worker-a"))).machine.id,
+  ).toBe("worker-a");
+  expect(refresh).toHaveBeenCalledOnce();
+  expect(refresh).toHaveBeenCalledWith("fixture", "worker-a");
+  readiness.mockResolvedValue([protocolMismatch(1)]);
+  // The final check before an adapter starts probes live (C-642 cache bypassed).
+  await expect(
+    enrolled.forLaunch("fixture", assignment("worker-a"), undefined, false),
+  ).rejects.toThrow(protocolMismatch(1));
+  expect(refresh).toHaveBeenCalledOnce();
+  resetLaunchRefreshes();
+});
+
+test("C-608: an MCP timeout at launch refreshes readiness in the background once per window", async () => {
+  resetLaunchRefreshes();
+  const server = value(
+    await RuntimeTargets.create({
+      execution: { mode: "local", dataDir: root },
+      store,
+      project: "fixture",
+      workers: () => workers,
+      factory,
+      workerReadiness: readiness,
+      workerMcpReachability: mcpReachability,
+      refreshAfterLaunchFailure: true,
+    }),
+  );
+  const refresh = vi
+    .spyOn(server, "refreshMachine")
+    .mockResolvedValue({ capabilities: [], health: null });
+  mcpReachability.mockRejectedValue(new WorkerMcpError("mcp_timeout"));
+  for (let i = 0; i < 2; i++)
+    await expect(
+      server.forLaunch("fixture", assignment("worker-a")),
+    ).rejects.toThrow("mcp_timeout");
+  expect(refresh).toHaveBeenCalledOnce();
+  // The ordinary router (CLI and tests) never starts background work.
+  await expect(
+    router.forLaunch("fixture", assignment("worker-b")),
+  ).rejects.toThrow("mcp_timeout");
+  expect(refresh).toHaveBeenCalledOnce();
+  resetLaunchRefreshes();
+});
+
 test("checks are live, and disabled launch is distinct from a passing machine check", async () => {
   const binding = router.resolve("fixture", "worker-a").execution.target;
   workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
@@ -1492,14 +1590,42 @@ test.each([
   },
 );
 
-test("a manual confirmation may ignore drain but not a failed automatic upgrade", async () => {
+test("C-608: a manual helper confirmation still needs the current helper digest", async () => {
+  const project = "fixture",
+    id = "worker-a";
+  store.uow.run((tx) =>
+    tx.machines.put(project, { ...machine(id, id), status: "draining" }),
+  );
+  readiness.mockResolvedValue([digestMismatch]);
+  const observed = await observeRegisteredMachine(
+    {
+      store,
+      project,
+      machine: id,
+      observationId: "confirm-digest",
+      helperConfirmation: {
+        binding:
+          router.resolve(project, id).execution.target?.fingerprint ??
+          "missing",
+      },
+      catalog: () => [],
+    },
+    () => router,
+  );
+  expect(observed.maintenance).toEqual({
+    status: "failed",
+    failed_steps: [digestMismatch],
+  });
+});
+
+test("a manual confirmation may ignore drain but not an automatic upgrade in progress", async () => {
   const project = "fixture",
     id = "worker-a";
   store.uow.run((tx) => {
     tx.machines.put(project, { ...machine(id, id), status: "draining" });
     store.database
       .prepare(
-        "INSERT INTO worker_helper_upgrades (project_id,machine_id,release_key,state) VALUES (?,?,?,'failed')",
+        "INSERT INTO worker_helper_upgrades (project_id,machine_id,release_key,state) VALUES (?,?,?,'installing')",
       )
       .run(project, id, "fixture-release");
   });
@@ -1710,4 +1836,97 @@ test("only a checked PATH-only binding can reuse the original session; a revoked
   workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
   expect(options.before_send?.()).toBe(false);
   expect(await router.canAdmitSession("fixture", a, fp)).toBe(false);
+});
+
+test("C-761: a reboot is reported only for the journaled receipt read under another boot", async () => {
+  const provisioned = value(
+    await router.provision(
+      assignment("worker-a"),
+      role,
+      machine("worker-a"),
+      launch,
+    ),
+  );
+  const target = provisioned.target;
+  if (!target) throw new Error("Missing worker target");
+  const generation = "c".repeat(32);
+  const ref = {
+    ...provisioned,
+    launch_generation: { run_id: "R-1", generation },
+  };
+  const receipt = {
+    machine: target.fingerprint,
+    terminal: generation,
+    boot: "old-boot",
+    uid: 1000,
+    pid: 42,
+    start: "20",
+    process_group: 42,
+  };
+  store.uow.run((tx) => {
+    tx.assignments.put("fixture", {
+      ...assignment("worker-a"),
+      runtime_ref: ref,
+    });
+    tx.runs.put("fixture", {
+      id: "R-1",
+      assignment_id: "A-1",
+      status: "unknown",
+      kind: "initial",
+      trigger_event_id: "fixture",
+      role_version: 1,
+      model: "fixture",
+      agent_cli_version: "fixture",
+      outcome: null,
+      summary: "",
+      launch_publication: {
+        generation,
+        target,
+        process: receipt,
+        runtime_ref: ref,
+      },
+    } as unknown as import("@cardigan/domain").Run);
+  });
+  const reply = {
+    version: 1 as const,
+    project: "fixture",
+    assignment: "A-1",
+    run: "R-1",
+    generation,
+    target: target.fingerprint,
+    phase: "running" as const,
+    process: receipt,
+    observed: "exited" as "alive" | "exited" | "unknown",
+  };
+  const files = vi.spyOn(herdr, "workerFiles");
+  const probe = async (answer: Partial<typeof reply> & { boot?: string }) => {
+    files.mockResolvedValueOnce({ ...reply, ...answer });
+    return router.probeRemoteProcess("fixture", "A-1", ref);
+  };
+  try {
+    // An older helper sends no boot: only the existing observation.
+    expect(await probe({})).toBe("exited");
+    expect(await probe({ observed: "unknown" })).toBe("unknown");
+    expect(await probe({ boot: "old-boot" })).toBe("exited");
+    expect(await probe({ boot: "new-boot" })).toEqual({
+      process: "exited",
+      current_boot: "new-boot",
+    });
+    expect(await probe({ boot: "new-boot", observed: "unknown" })).toEqual({
+      process: "exited",
+      current_boot: "new-boot",
+    });
+    // Neither a live match nor another generation's receipt is a reboot.
+    expect(await probe({ boot: "new-boot", observed: "alive" })).toBe("alive");
+    expect(
+      await probe({ boot: "new-boot", process: { ...receipt, pid: 43 } }),
+    ).toBe("unknown");
+    expect(files).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ run: "R-1", generation }),
+      "status",
+    );
+  } finally {
+    files.mockRestore();
+  }
 });

@@ -8,6 +8,8 @@ export type TemplateWorkItem = {
   readonly role_id: RoleId;
   readonly required: boolean;
   readonly completion_criteria?: readonly string[];
+  /** C-612: keys of same-template items this one waits for (set as `depends_on`). */
+  readonly depends_on?: readonly string[];
 } & (
   | { readonly kind: "produce"; readonly target_work_item_key?: never }
   | { readonly kind: "verify"; readonly target_work_item_key?: string }
@@ -245,6 +247,77 @@ export const designCardTemplate = {
     // can review neither the design nor a human-reviewed completion request.
   ],
 } as const satisfies CardTemplate;
+/**
+ * C-612 packaging card: build → signing → smoke → publication → release
+ * notes, each step waiting for the previous one. One release-chain approval
+ * covers the intake, signing, signed intake and publication steps.
+ */
+export const releaseCardTemplate = {
+  id: "release",
+  title: "打包发布",
+  description: "出包、送签、冒烟、外发与版本说明，按发布链一次授权",
+  version: 1,
+  builtin: true,
+  status: "active",
+  requires_repo: true,
+  merge: "none",
+  require_acceptance_criteria: true,
+  primary_work_item_key: "build",
+  completion: { mode: "review", reviewer: "role:pm" },
+  work_items: [
+    {
+      key: "build",
+      title: "出包",
+      kind: "produce",
+      role_id: "release_ops",
+      required: true,
+      completion_criteria: [
+        "未签名包以发布链拍板为依据入库，摘要与发布链绑定的未签名摘要一致",
+      ],
+    },
+    {
+      key: "signing",
+      title: "送签",
+      kind: "produce",
+      role_id: "release_ops",
+      required: true,
+      depends_on: ["build"],
+      completion_criteria: ["按发布链送签；签后包由系统入库并绑定回执摘要"],
+    },
+    {
+      key: "smoke",
+      title: "冒烟",
+      kind: "produce",
+      role_id: "release_ops",
+      required: true,
+      depends_on: ["signing"],
+      completion_criteria: [
+        "用签后入库的包冒烟，附结果；交付的 subject 填这份签后包的 artifact_sha256，外发只认冒烟通过的这份",
+      ],
+    },
+    {
+      key: "publish",
+      title: "外发",
+      kind: "produce",
+      role_id: "release_ops",
+      required: true,
+      depends_on: ["smoke"],
+      completion_criteria: ["用发布链拍板外发签后包，附链接、大小和摘要"],
+    },
+    {
+      key: "release_notes",
+      title: "版本说明",
+      kind: "produce",
+      role_id: "release_ops",
+      required: true,
+      depends_on: ["publish"],
+      completion_criteria: [
+        "按外发结果写版本说明并交付；交付后系统转给托管 PM Office 发给所有者，不能发送时提示 PM Ops",
+      ],
+    },
+    acceptance,
+  ],
+} as const satisfies CardTemplate;
 /** Legacy defaults remain available for projects below flow 5. */
 export const builtinCardTemplates: readonly CardTemplate[] = [
   developmentCardTemplate,
@@ -268,6 +341,7 @@ export function builtinCardTemplatesForFlow(
         fastPatchCardTemplate,
         integrationCardTemplate,
         uiCardTemplate,
+        releaseCardTemplate,
       ]
     : builtinCardTemplates;
 }
@@ -279,6 +353,7 @@ export const builtinCardTemplateVersions: readonly CardTemplate[] = [
   fastPatchCardTemplate,
   integrationCardTemplate,
   uiCardTemplate,
+  releaseCardTemplate,
 ];
 
 /** Creation-time input for UI implementations and design-first templates (including copies).

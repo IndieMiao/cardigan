@@ -1,6 +1,7 @@
 """Trusted control host only. No caller-supplied command, path, key reference or target."""
 import os
 from pathlib import Path
+import secrets
 import signal
 import subprocess
 import stat
@@ -63,6 +64,61 @@ def route(root, s):
     return hits[0]['peer']
 
 
+def handoff_route(root, s):
+    # C-612: the administrator marks a route whose signer runs on the worker's machine.
+    hits = [p for p in config(root / 'routes.json') if all(p[k] == s[k] for k in ('project','machine','platform','version','app'))]
+    return s['platform'] == 'android' and len(hits) == 1 and hits[0].get('handoff') is True
+
+
+def handoff_path(value):
+    # The signer names each copy randomly; only this ledger and, once released, the Run learn it.
+    return (isinstance(value, str) and re.fullmatch(r'(?:/[A-Za-z0-9_.-]+)+/[0-9a-f]{32}\.apk', value, re.ASCII)
+            and '/../' not in value + '/' and '/./' not in value + '/')
+
+
+def handoffs(db):
+    db.execute('CREATE TABLE IF NOT EXISTS handoffs (id TEXT PRIMARY KEY, path TEXT NOT NULL, sha TEXT NOT NULL)')
+
+
+def withdraw(db, root, rid, dial=None):
+    """After a revocation, ask the signer to remove the same-machine copy.
+
+    Never blocking: a revoked grant is no longer released, so its path is
+    not reported again. The ledger keeps the handoff until the signer
+    confirms the removal; repeating `revoke` retries, and an unreachable or
+    older signer leaves the copy to the signer's periodic expiry job.
+    """
+    path = handed_off(db, rid, None)
+    if path is None:
+        return False
+    row = db.execute('SELECT spec,peer FROM grants JOIN dispatch_peer USING(id) WHERE id=?', (rid,)).fetchone()
+    done = False
+    if row:
+        try:
+            p = (dial or connect)(root, row[1])
+            try:
+                send(p.stdin, canonical({'mode': 'withdraw', 'grant': json.loads(row[0]), 'size': 0}).encode())
+                p.stdin.close()
+                done = line(p.stdout) == b'withdrawn' and p.wait(timeout=10) == 0
+            finally:
+                hang_up(p)
+        except Exception:
+            done = False
+    if done:
+        with transaction(db):
+            db.execute('DELETE FROM handoffs WHERE id=?', (rid,))
+    event(db, scope(json.loads(row[0])) if row else None, rid, 'handoff_withdrawn' if done else 'handoff_withdraw_failed')
+    return done
+
+
+def handed_off(db, rid, sha):
+    """The same-machine path the signer reported for exactly these bytes (any bytes: None), if any."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='handoffs'").fetchone():
+        return None
+    row = db.execute('SELECT path FROM handoffs WHERE id=? AND (? IS NULL OR sha=?)', (rid, sha, sha)).fetchone()
+    return row[0] if row else None
+
+
 def register(root, db, s, source):
     # Operator supplies a private, already registered build snapshot, not a worktree path.
     manifest(s)
@@ -95,6 +151,112 @@ def approve(root, db, s):
     except BaseException:
         db.rollback()
         raise
+
+
+# C-612: a chain grant outlives any packaging Run, so signed intake and
+# download never fail on its expiry.
+CHAIN_TTL = 7 * 86400
+DECISION = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', re.ASCII)
+USABLE = ('approved', 'pending', 'peer_signed', 'signed')
+
+
+def chain_grants(db):
+    db.execute('CREATE TABLE IF NOT EXISTS chain_grants (id TEXT PRIMARY KEY, decision TEXT NOT NULL)')
+
+
+def chain_of(db, rid):
+    """The release-chain decision a grant was derived from, or None for an operator grant."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chain_grants'").fetchone():
+        return None
+    row = db.execute('SELECT decision FROM chain_grants WHERE id=?', (rid,)).fetchone()
+    return row[0] if row else None
+
+
+def attested(identity):
+    """Split the Run scope from the control service's optional chain attestation.
+
+    A grant derived from a release chain is used only while the control
+    service, which alone can see the decision, attests that this very chain
+    is still approved. It never falls back to counting as an operator grant.
+    """
+    require(type(identity) is dict)
+    chain = identity.get('chain')
+    require(chain is None or (isinstance(chain, str) and DECISION.fullmatch(chain)))
+    return {k: v for k, v in identity.items() if k != 'chain'}, chain
+
+
+def bound_to(root, db, s, chain):
+    """A chain-derived grant: attested by the service and still on a marked test route."""
+    derived = chain_of(db, s['id'])
+    if derived is None:
+        return
+    require(derived == chain)
+    hits = [r for r in config(root / 'routes.json') if all(r[k] == s[k] for k in ('project','machine','platform','version','app'))]
+    require(len(hits) == 1 and hits[0].get('test_identity') is True)
+
+
+def chain_grant(root, db, identity, request, source):
+    """An approved release chain stands in for the operator's register + approve.
+
+    Internal Android test candidates only. The control service passes the
+    chain's bound source commit and unsigned digest, the build reference and
+    the byte count; the single route for this project, machine and platform
+    marked `"test_identity": true` fixes the app and credential version. The signer still checks project,
+    machine, Run, digest and package name. One candidate per Run: an existing
+    grant for this scope is reported, never replaced.
+    """
+    ctx = scope(identity)
+    require(set(identity) == set(SCOPE) and identity['platform'] == 'android')
+    require(type(request) is dict and set(request) == {'commit', 'build', 'sha256', 'size', 'decision'})
+    require(isinstance(request['decision'], str) and DECISION.fullmatch(request['decision']))
+
+    def known():
+        # Reused only when it is this chain's own live candidate for the same
+        # source commit and bytes. An operator grant, a registered but not
+        # approved one, another chain's or a revoked one is `other`, never
+        # recorded as this chain's approval.
+        row = db.execute('SELECT id,spec,state,revoked FROM grants WHERE scope=?', (ctx,)).fetchone()
+        if row:
+            spec = json.loads(row[1])
+            same = (not row[3] and row[2] in USABLE and chain_of(db, row[0]) == request['decision']
+                    and spec['sha256'] == request['sha256'] and spec['commit'] == request['commit'])
+            return row[0], 'existing' if same else 'other'
+        return None
+
+    found = known()
+    if found:
+        return found
+    # Only a route the administrator marked as this project's internal test
+    # signing identity; any other route keeps per-candidate operator approval.
+    hits = [r for r in config(root / 'routes.json')
+            if all(r[k] == identity[k] for k in ('project', 'machine', 'platform')) and r.get('test_identity') is True]
+    require(len(hits) == 1)
+    s = {**identity, 'id': secrets.token_hex(16), 'version': hits[0]['version'], 'app': hits[0]['app'],
+         'build': request['build'], 'commit': request['commit'], 'sha256': request['sha256'],
+         'expires': int(time.time()) + CHAIN_TTL}
+    manifest(s)
+    route(root, s)
+    with tempfile.TemporaryDirectory(dir=root) as tmp:
+        copy = Path(tmp) / 'input'
+        with copy.open('xb') as dst:
+            require(transfer(source, dst, request['size']) == s['sha256'] and not source.read(1))
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            found = known()  # a concurrent chain call won the scope
+            if found:
+                db.rollback()
+                return found
+            db.execute("INSERT INTO grants(id,scope,spec,state) VALUES(?,?,?,'approved')", (s['id'], ctx, canonical(s)))
+            chain_grants(db)
+            db.execute('INSERT INTO chain_grants VALUES(?,?)', (s['id'], request['decision']))
+            persist(copy, directory(root, 'inputs') / s['id'])
+            event(db, ctx, s['id'], 'chain_registered')
+            event(db, ctx, s['id'], 'chain_approved')
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+    return s['id'], 'new'
 
 
 def connect(root, peer):
@@ -153,6 +315,7 @@ def undispatched(root, s, peer, dial):
 
 
 def request(root, db, identity, fence, dial=connect, accepted=lambda rid, seconds, mode: None):
+    identity, chain = attested(identity)
     ctx = scope(identity)
     require(set(identity) == set(SCOPE))
     rid = None
@@ -161,12 +324,14 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
         require(row)
         s, state = json.loads(row[0]), row[1]
         rid = s['id']
-        require(state in ('approved','pending','peer_signed','signed'))
+        require(state in USABLE)
+        bound_to(root, db, s, chain)
         manifest(s)
         peer = route(root,s)
 
         def authorized():
             require(db.execute('SELECT 1 FROM grants WHERE id=? AND NOT revoked', (rid,)).fetchone())
+            bound_to(root, db, s, chain)
             require(route(root,s) == peer)
             manifest(s)
 
@@ -209,8 +374,9 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
         try:
             inp = directory(root,'inputs') / rid
             size = inp.stat().st_size if fresh else 0
+            local = handoff_route(root, s)
             send(p.stdin, canonical({'grant':s,'mode':'sign' if fresh else 'lookup','size':size,
-                                     'failure_details':True}).encode())
+                                     'failure_details':True,**({'handoff':True} if local else {})}).encode())
             if fresh:
                 with inp.open('rb') as f:
                     require(transfer(f,p.stdin,size) == s['sha256'])
@@ -243,6 +409,9 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
                 try:
                     require(db.execute("UPDATE grants SET state='signed',output=? WHERE id=? AND NOT revoked AND state IN ('pending','peer_signed','signed')",(sha,rid)).rowcount == 1)
                     observe(db, rid, 'signed', sha)
+                    if local and handoff_path(header.get('handoff')):
+                        handoffs(db)
+                        db.execute('INSERT OR REPLACE INTO handoffs VALUES(?,?,?)', (rid, header['handoff'], sha))
                     event(db,ctx,rid,'signed')
                     db.commit()
                 except BaseException:
@@ -345,7 +514,8 @@ def main():
         def accepted(rid, seconds, mode):
             send(sys.stdout.buffer, f'accepted {rid} {seconds} {mode}'.encode())
         rid, sha = request(root,db,json.loads(line(sys.stdin.buffer)),fence,accepted=accepted)
-        print(rid,sha)
+        local = handed_off(db, rid, sha)
+        print(rid, sha, *([local] if local else []))
     elif cmd == 'permit':
         rid=sys.argv[3]
         with os.fdopen(3,'rb') as f:
@@ -356,9 +526,19 @@ def main():
         # still signed, not revoked, live manifest and route. No bytes, no hashing.
         rid=sys.argv[3]
         require(re.fullmatch('[0-9a-f]{32}',rid))
-        print(rid,release_authority(root,db,rid,json.loads(line(sys.stdin.buffer))))
+        identity, chain = attested(json.loads(line(sys.stdin.buffer)))
+        sha = release_authority(root,db,rid,identity)
+        bound_to(root, db, json.loads(db.execute('SELECT spec FROM grants WHERE id=?', (rid,)).fetchone()[0]), chain)
+        print(rid,sha)
     elif cmd == 'reconcile':
         print(canonical(reconcile(db,root,sys.argv[3])))
+    elif cmd == 'chain':
+        # Two lines on stdin (Run scope, chain request); candidate bytes on fd 3.
+        identity = json.loads(line(sys.stdin.buffer))
+        chained = json.loads(line(sys.stdin.buffer))
+        with os.fdopen(3, 'rb') as f:
+            rid, status = chain_grant(root, db, identity, chained, f)
+        print(rid, status)
     elif cmd == 'register':
         register(root,db,config(staged(root,sys.argv[3])),staged(root,sys.argv[4]))
     elif cmd == 'approve':
@@ -374,6 +554,7 @@ def main():
         rid=sys.argv[3]
         require(db.execute('UPDATE grants SET revoked=1 WHERE id=?',(rid,)).rowcount == 1)
         event(db,db.execute('SELECT scope FROM grants WHERE id=?',(rid,)).fetchone()[0],rid,'revoked')
+        withdraw(db, root, rid)
     elif cmd == 'export':
         rid=sys.argv[3]
         require(re.fullmatch('[0-9a-f]{32}',rid))

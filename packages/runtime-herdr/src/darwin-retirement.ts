@@ -146,3 +146,67 @@ export async function stopDarwinTurn(
   }
   return { sent: "unknown" };
 }
+
+/**
+ * C-746: an idle owner enrolled before C-746 closes without naming why it
+ * refused. Repeat its own proofs read-only on the pinned worker account (the
+ * owner's workspace check and the idle terminal proof, shipped per call) and
+ * return the first failed one as a bounded code; `null` when every proof
+ * passes now; undefined when the explanation itself could not be read.
+ * Never authorizes anything: the owner alone decides a stop.
+ */
+export async function explainDarwinRefusal(
+  execution: Ssh,
+  ref: RuntimeRef,
+  owner: Owner,
+  transport = agentProcessCommand,
+  exec = run,
+): Promise<string | null | undefined> {
+  // The owner always requires an idle terminal; it never accepts unknown activity.
+  const bound = binding(execution, ref, {
+    project_id: owner.project_id,
+    assignment_id: owner.assignment_id,
+    ...(owner.enrolled_process
+      ? { enrolled_process: owner.enrolled_process }
+      : {}),
+    system_finished_turn: true,
+  });
+  if (!bound) return;
+  try {
+    const [explain, inspector, idleOwner] = await Promise.all(
+      [
+        "darwin-idle-explain.py",
+        "inspect-worker.py",
+        "darwin-idle-owner.py",
+      ].map((name) =>
+        readFile(new URL(`../../../deploy/${name}`, import.meta.url), "utf8"),
+      ),
+    );
+    if (!explain || !inspector || !idleOwner) return;
+    const cmd = await transport(
+      execution,
+      [
+        "/usr/bin/python3",
+        "-IB",
+        "-c",
+        explain,
+        inspector,
+        idleOwner,
+        JSON.stringify({ ...bound, root: execution.agentRoot }),
+      ],
+      { workerRuntimeDir: true },
+    );
+    const reply = JSON.parse(await exec(cmd.file, cmd.args)) as {
+      refused?: unknown;
+    };
+    if (reply.refused === null) return null;
+    if (
+      typeof reply.refused === "string" &&
+      /^[a-z_]{1,32}$/u.test(reply.refused)
+    )
+      return reply.refused;
+  } catch {
+    // Unread explanation: the anonymous refusal stays as it was.
+  }
+  return;
+}

@@ -11,8 +11,14 @@ import {
   pendingHostOpsActions,
   queueRun,
   type Runtime,
+  type UpstreamDiagnosis,
 } from "@cardigan/domain";
-import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import {
+  loadCommandState,
+  persistEffect,
+  ToolError,
+  unwrap,
+} from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
@@ -20,6 +26,7 @@ import {
   type SessionContextDiagnostic,
 } from "./context-usage.js";
 import { HostOpsService } from "./host-ops.js";
+import type { UpstreamHealthMonitor } from "./upstream-health.js";
 
 vi.mock("./context-usage.js", async (original) => ({
   ...(await original<typeof import("./context-usage.js")>()),
@@ -379,7 +386,14 @@ test("sample age is rechecked after the runtime observation and before release",
     ok: true,
     value: { process: "alive", agent: "idle", observed_seq: 1 },
   });
-  await vi.waitFor(() => expect(state().human_actions).toHaveLength(1));
+  // C-741: a stale sample says nothing about the session; retry later.
+  await vi.waitFor(() =>
+    expect(events("context_session_restart_result")).toHaveLength(1),
+  );
+  expect(events("context_session_restart_result")[0]).toMatchObject({
+    payload: { result: "retry_scheduled" },
+  });
+  expect(state().human_actions).toHaveLength(0);
   expect(runtime.release).not.toHaveBeenCalled();
 });
 
@@ -393,9 +407,11 @@ test.each(["compacted", "new_session"])(
         : { ...usage, session_id: "successor" };
     await drain();
     expect(runtime.release).not.toHaveBeenCalled();
+    // C-741: held before any stop; retried only if the session needs it again.
     expect(events("context_session_restart_result")[0]).toMatchObject({
-      payload: { result: "failed" },
+      payload: { result: "retry_scheduled" },
     });
+    expect(state().human_actions).toHaveLength(0);
   },
 );
 
@@ -446,4 +462,330 @@ test("C-462: a recent read of a stale Claude transcript is not an indefinite sto
   expect(service.harnessActivity(project, ops.id)).toBeUndefined();
   await service.inspectHarnessActivity(project);
   expect(service.harnessActivity(project, ops.id)).toEqual(activity);
+});
+
+const classificationFailure = {
+  source: "reconcile",
+  error_type: "SqliteError:SQLITE_BUSY",
+  summary: "database is locked",
+  started_at: "2029-12-31T23:59:00.000Z",
+  count: 2,
+  recorded_at: "2029-12-31T23:59:00.000Z",
+};
+function heldMonitor(cause: () => "held" | "healthy" | "fault") {
+  return {
+    schedule() {},
+    observe: async () => ({}),
+    reconcile() {},
+    observationFailed() {},
+    classificationFailure: () =>
+      cause() === "held" ? classificationFailure : undefined,
+    diagnostics: () => ({ sessions: [] }),
+    close: async () => {},
+    diagnosis: (_state: unknown, id: string): UpstreamDiagnosis =>
+      cause() === "held"
+        ? {
+            assignment_id: id as Assignment["id"],
+            provider: "fixture",
+            group: "fixture",
+            cause: "unknown",
+            action: "wait",
+            evidence: ["classification_failed"],
+          }
+        : cause() === "fault"
+          ? {
+              assignment_id: id as Assignment["id"],
+              provider: "fixture",
+              group: "fixture",
+              cause: "upstream_unreachable",
+              action: "wait",
+              evidence: ["probe_unreachable"],
+            }
+          : {
+              assignment_id: id as Assignment["id"],
+              provider: "fixture",
+              group: "fixture",
+              cause: "healthy",
+              action: "none",
+              evidence: [],
+            },
+  } as unknown as UpstreamHealthMonitor;
+}
+async function settled(count: number) {
+  await service.tick();
+  await vi.waitFor(() =>
+    expect(
+      events("host_ops_action_finished").length +
+        events("context_session_restart_result").length,
+    ).toBe(count),
+  );
+}
+const recipients = (eventId: string | undefined) =>
+  store
+    .listNotifications({ project_id: project })
+    .filter((n) => n.event_id === eventId)
+    .map((n) => n.recipient.kind)
+    .sort();
+
+test("C-741: an unavailable upstream diagnosis is retried with backoff and the idle session is then replaced", async () => {
+  let line: "held" | "healthy" = "held";
+  await service.close();
+  service = makeService({ upstreamMonitor: heldMonitor(() => line) });
+  await ready();
+  await settled(1);
+  expect(runtime.release).not.toHaveBeenCalled();
+  const first = events("context_session_restart_result")[0];
+  expect(first).toMatchObject({
+    payload: {
+      result: "retry_scheduled",
+      reason: "upstream_diagnosis_unavailable",
+      // C-745: the sub-reason and since when the classification failed.
+      upstream_detail: {
+        sub_reason: "classification_failed",
+        classification_failed_since: classificationFailure.started_at,
+        classification_failure_count: 2,
+        classification_error_type: "SqliteError:SQLITE_BUSY",
+      },
+      attempt: 1,
+      retry_at: new Date(time + 120_000).toISOString(),
+    },
+  });
+  expect(state().human_actions).toHaveLength(0);
+  expect(hostOpsPending(state().events, ops.id)).toBe(false);
+  expect(recipients(first?.id)).toEqual(["pm_ops"]);
+  // Not yet due: the next idle poll leaves it alone.
+  usage = { ...usage, updated_at: new Date(time).toISOString() };
+  await poll();
+  expect(events("host_ops_action_taken")).toHaveLength(1);
+  // Due: held again, the next delay is 5 minutes.
+  time += 120_000;
+  usage = { ...usage, updated_at: new Date(time + 30_001).toISOString() };
+  await poll();
+  await vi.waitFor(() =>
+    expect(events("host_ops_action_taken")).toHaveLength(2),
+  );
+  await settled(2);
+  expect(events("context_session_restart_result")[1]).toMatchObject({
+    payload: {
+      result: "retry_scheduled",
+      attempt: 2,
+      retry_at: new Date(time + 300_000).toISOString(),
+    },
+  });
+  // The diagnosis is back: the third attempt replaces the idle session.
+  line = "healthy";
+  time += 300_000;
+  usage = { ...usage, updated_at: new Date(time + 30_001).toISOString() };
+  await poll();
+  await vi.waitFor(() =>
+    expect(events("host_ops_action_taken")).toHaveLength(3),
+  );
+  await settled(3);
+  expect(events("host_ops_action_finished")).toHaveLength(1);
+  expect(runtime.release).toHaveBeenCalledOnce();
+  expect(state().assignments[0]).toMatchObject({
+    id: ops.id,
+    runtime_ref: null,
+  });
+  expect(state().runs).toHaveLength(1);
+  expect(state().human_actions).toHaveLength(0);
+});
+
+test("C-741: once the retries run out, PM (not the owner) gets the item with a working restart command", async () => {
+  await service.close();
+  service = makeService({
+    upstreamMonitor: heldMonitor(() => "held"),
+    contextUsage: {
+      execution: { mode: "local", dataDir: root },
+      restartRetryDelaysMs: [60_000],
+    },
+  });
+  await ready();
+  await settled(1);
+  time += 60_000;
+  usage = { ...usage, updated_at: new Date(time + 30_001).toISOString() };
+  await poll();
+  await vi.waitFor(() =>
+    expect(events("host_ops_action_taken")).toHaveLength(2),
+  );
+  await settled(2);
+  const result = events("context_session_restart_result")[1];
+  expect(result).toMatchObject({
+    payload: {
+      result: "failed",
+      disposition: "pm_ops",
+      retries: 1,
+      reason: "upstream_diagnosis_unavailable",
+    },
+  });
+  expect(recipients(result?.id)).toEqual(["pm_office", "pm_ops"]);
+  expect(state().human_actions).toEqual([
+    expect.objectContaining({
+      triage: "pm_ops",
+      status: "open",
+      instructions: expect.stringContaining(
+        `cardigan host-ops restart --project ${project}`,
+      ),
+    }),
+  ]);
+  expect(runtime.release).not.toHaveBeenCalled();
+  // The fence holds: no further automatic attempt on this session.
+  time += 600_000;
+  usage = { ...usage, updated_at: new Date(time + 30_001).toISOString() };
+  await poll();
+  await service.tick();
+  expect(events("host_ops_action_taken")).toHaveLength(2);
+});
+
+test("C-741: a standing PM at the restart level is replaced by the system with the same backoff", async () => {
+  const pmRef = { ...ref, terminal_ref: "pm", agent_session_id: "pm-session" };
+  const pm = {
+    ...ops,
+    id: "A-2",
+    role_id: "pm",
+    standing_mode: "ops",
+    employee_id: "E-2",
+    runtime_ref: pmRef,
+    session_ref: "pm-session",
+  } as Assignment;
+  store.uow.run((tx) => {
+    tx.roles.put(project, {
+      role_id: "pm",
+      role_version: 1,
+      allowed_tools: [],
+      capabilities: [],
+    });
+    tx.assignments.put(project, pm);
+  });
+  let pmUsage: ContextObservation = {
+    ...usage,
+    assignment_id: pm.id,
+    runtime_key: JSON.stringify(pmRef),
+    session_id: "pm-session",
+  };
+  usage = { ...usage, context_tokens: 100, used_percentage: 10 };
+  vi.mocked(readSessionContexts).mockImplementation(async () => [
+    {
+      assignment_id: ops.id,
+      session_id: usage.session_id,
+      stale: false,
+      observation: usage,
+    } as SessionContextDiagnostic,
+    {
+      assignment_id: pm.id,
+      session_id: pmUsage.session_id,
+      stale: false,
+      observation: pmUsage,
+    } as SessionContextDiagnostic,
+  ]);
+  let line: "held" | "healthy" = "held";
+  await service.close();
+  service = makeService({ upstreamMonitor: heldMonitor(() => line) });
+  await ready();
+  expect(events("host_ops_action_taken")[0]).toMatchObject({
+    payload: {
+      tool: "host_ops_restart_standing_pm",
+      assignment_id: pm.id,
+      automatic_context_restart: true,
+    },
+  });
+  await settled(1);
+  expect(events("context_session_restart_result")[0]).toMatchObject({
+    payload: { result: "retry_scheduled", assignment_id: pm.id },
+  });
+  expect(state().human_actions).toHaveLength(0);
+  line = "healthy";
+  time += 120_000;
+  pmUsage = { ...pmUsage, updated_at: new Date(time + 30_001).toISOString() };
+  await poll();
+  await vi.waitFor(() =>
+    expect(events("host_ops_action_taken")).toHaveLength(2),
+  );
+  await settled(2);
+  expect(events("host_ops_action_finished")).toHaveLength(1);
+  expect(runtime.release).toHaveBeenCalledOnce();
+  expect(events("standing_session_restarted")).toHaveLength(1);
+  expect(state().assignments.find((a) => a.id === pm.id)).toMatchObject({
+    status: "active",
+    runtime_ref: null,
+  });
+  expect(state().runs).toEqual([
+    expect.objectContaining({ assignment_id: pm.id, status: "queued" }),
+  ]);
+});
+
+test("C-745: a session closed by an unavailable diagnosis is tried once more after it recovers; a line fault keeps it closed", async () => {
+  let line: "held" | "healthy" | "fault" = "held";
+  await service.close();
+  service = makeService({
+    upstreamMonitor: heldMonitor(() => line),
+    // No backoff left, as for the pre-C-741 attempt on 11-25.
+    contextUsage: {
+      execution: { mode: "local", dataDir: root },
+      restartRetryDelaysMs: [],
+    },
+  });
+  await ready();
+  await settled(1);
+  expect(events("context_session_restart_result")[0]).toMatchObject({
+    payload: {
+      result: "failed",
+      reason: "upstream_diagnosis_unavailable",
+      upstream_detail: { sub_reason: "classification_failed" },
+    },
+  });
+  const failure = state().human_actions[0];
+  expect(failure).toMatchObject({ status: "open" });
+  // Still unavailable, then a real line fault: no new attempt.
+  for (const next of ["held", "fault"] as const) {
+    line = next;
+    time += 600_000;
+    usage = { ...usage, updated_at: new Date(time + 30_001).toISOString() };
+    await poll();
+    await service.tick();
+    expect(events("host_ops_action_taken")).toHaveLength(1);
+  }
+  expect(runtime.release).not.toHaveBeenCalled();
+  // The diagnosis is back and the context is still over the level.
+  line = "healthy";
+  time += 60_000;
+  usage = { ...usage, updated_at: new Date(time + 30_001).toISOString() };
+  await poll();
+  await vi.waitFor(() =>
+    expect(events("host_ops_action_taken")).toHaveLength(2),
+  );
+  expect(events("host_ops_action_taken")[1]).toMatchObject({
+    payload: {
+      automatic_context_restart: true,
+      diagnosis_recovery_retry: true,
+    },
+  });
+  await settled(2);
+  expect(events("host_ops_action_finished")).toHaveLength(1);
+  expect(runtime.release).toHaveBeenCalledOnce();
+  expect(
+    state().human_actions.find((h) => h.id === failure?.id)?.status,
+  ).not.toBe("open");
+  expect(state().runs).toHaveLength(1);
+});
+
+test("C-745: a session that changed while sampled does not mark the whole project's classification failed", async () => {
+  const monitor = heldMonitor(() => "healthy");
+  const failed = vi.fn();
+  let error: Error = new ToolError("stale_target", "活动采样期间会话已更换");
+  const observe = vi.fn(async () => {
+    throw error;
+  });
+  Object.assign(monitor, { observationFailed: failed, observe });
+  await service.close();
+  service = makeService({ upstreamMonitor: monitor });
+  await service.tick();
+  await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(1));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(failed).not.toHaveBeenCalled();
+  error = new Error("runtime unavailable");
+  time += 30_001;
+  await service.tick();
+  await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(failed).toHaveBeenCalledWith(project, error));
 });

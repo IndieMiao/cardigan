@@ -351,20 +351,25 @@ test.each([false, true])(
     fireEvent.click(trigger);
     const field = screen.getByLabelText("完成结果");
     await waitFor(() => expect(document.activeElement).toBe(field));
+    // C-696: marking done is a dialog with its own fixed button row.
     expect(field.closest(".card-action-buttons")).toBeNull();
-    expect(field.closest(".card-primary-panels")).toBeTruthy();
+    expect(field.closest("[role=dialog]")).toBeTruthy();
     for (const label of ["编辑", "更多卡片操作"])
       expect(
+        // Behind the modal dialog the page is hidden from the a11y tree.
         screen.getByRole<HTMLButtonElement>("button", {
           name: label,
           exact: true,
+          hidden: true,
         }).disabled,
       ).toBe(true);
     // C-700: pausing moved into the ⋯ menu; no inline pause button remains.
     expect(screen.queryByRole("button", { name: "暂停卡片" })).toBeNull();
-    expect(document.querySelectorAll(".card-header form")).toHaveLength(1);
+    expect(document.querySelectorAll(".card-header form")).toHaveLength(0);
     fireEvent.keyDown(field, { key: "Escape" });
-    expect(document.querySelector(".card-primary-panels form")).toBeNull();
+    await waitFor(() =>
+      expect(document.querySelector("form[aria-label='标记完成']")).toBeNull(),
+    );
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name, exact: true }),
     );

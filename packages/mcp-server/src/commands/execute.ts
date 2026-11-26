@@ -24,6 +24,7 @@ import {
   liveTriggerEventIds,
   PROJECT_STREAM_RETENTION,
   projectStreamDropped,
+  SLIM_COLD_CARD_EVENT_TYPES,
   waitedGithubRuns,
 } from "@cardigan/domain";
 import type {
@@ -57,7 +58,7 @@ function eventHistory(
 ) {
   // Only which cards are hot matters, in card order: no sort on this path.
   const key =
-    (lean ? `L${lean.serial}:` : "") +
+    (lean ? `${lean.slim ? "S" : "L"}${lean.serial}:` : "") +
     cards
       .map((c) => (hot === undefined ? "*" : hot.has(c.id) ? "+" : "-") + c.id)
       .join(",");
@@ -76,6 +77,8 @@ function eventHistory(
         ? {
             full: hot,
             omit: LEAN_COLD_CARD_OMITTED_EVENT_TYPES,
+            // C-671: cold cards keep only the whitelisted fact types.
+            ...(lean.slim ? { keep: SLIM_COLD_CARD_EVENT_TYPES } : {}),
             dropped: lean.dropped,
           }
         : { full: hot, omit: COLD_CARD_OMITTED_EVENT_TYPES }
@@ -101,6 +104,8 @@ interface Lean {
   readonly serial: number;
   readonly dropped: ReadonlySet<string>;
   readonly dispatches: readonly Event[];
+  /** C-671 `slim`: lean plus the cold-card whitelist. */
+  readonly slim: boolean;
 }
 const DISPATCH_TYPES: ReadonlySet<string> = new Set(["github_check_dispatch"]);
 // One subset per type (rules are per type), so no cross-type merge or sort.
@@ -113,6 +118,7 @@ function leanInputsFor(
   project: string,
   streams: CommandEventStreams,
   protect: ReadonlySet<string>,
+  slim: boolean,
 ): Lean | undefined {
   if (!streams.ofTypes) return undefined;
   const { ofTypes } = streams;
@@ -123,6 +129,7 @@ function leanInputsFor(
   // Appends only grow these lists; ids are unique, so count + last id + the
   // protected ids identify the inputs.
   const key = [
+    slim ? "slim" : "lean",
     typed.length,
     typed.at(-1)?.id ?? "",
     dispatches.length,
@@ -135,6 +142,7 @@ function leanInputsFor(
     serial: ++leanSerial,
     dropped: projectStreamDropped(typed, protect),
     dispatches,
+    slim,
   };
   leanCache.set(project, { key, lean });
   return lean;
@@ -194,12 +202,18 @@ export function loadCommandState(
   // backend without this bulk port keeps the original per-stream read path.
   const streams = tx.events.listStreams?.(project_id);
   const scope = tx.command_state_scope;
-  const hot = (scope === "hot" || scope === "lean") && streams !== undefined;
-  const lean = scope === "lean" && hot;
-  const build = () => readCommandState(tx, project_id, streams, hot, lean);
+  const hot =
+    (scope === "hot" || scope === "lean" || scope === "slim") &&
+    streams !== undefined;
+  // C-671: `slim` is `lean` plus the cold-card whitelist.
+  const lean = (scope === "lean" || scope === "slim") && hot;
+  const slim = scope === "slim" && hot;
+  const build = () =>
+    readCommandState(tx, project_id, streams, hot, lean, slim);
   let state =
     (streams && tx.cachedCommandState?.(project_id, build)) || build();
-  if (hot && streams) state = extendHot(tx, state, streams, options, lean);
+  if (hot && streams)
+    state = extendHot(tx, state, streams, options, lean, slim);
   if (!project_settings && !tx.test_review_trust && !tx.read_machine_placement)
     return state;
   // Attach live authority AFTER the data cache; revoked/restarted sources must
@@ -226,6 +240,7 @@ function extendHot(
   streams: CommandEventStreams,
   options: CommandStateOptions,
   lean = false,
+  slim = false,
 ): CommandState {
   const base = hotSets.get(state);
   if (!base) return state;
@@ -244,6 +259,7 @@ function extendHot(
           state.project_id,
           streams,
           leanProtect(tx, state.project_id, state.runs),
+          slim,
         ) ?? built)
       : built;
   if (current && options.targets?.length)
@@ -290,6 +306,7 @@ function readCommandState(
   streams: CommandEventStreams | undefined,
   hot = false,
   lean = false,
+  slim = false,
 ): CommandState {
   const cards = tx.cards.list(project_id);
   const entities = {
@@ -320,6 +337,7 @@ function readCommandState(
           project_id,
           streams,
           leanProtect(tx, project_id, entities.runs),
+          slim,
         )
       : undefined;
     hotCards = hotCardIds(entities, [

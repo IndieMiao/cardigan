@@ -119,3 +119,39 @@ test.each([
   expect(error instanceof WorkerPreparationFailure).toBe(remote);
   expect(error).toMatchObject({ executionExited: false });
 });
+
+test("C-761: status carries a well-formed boot when sent; older replies without one still parse", async () => {
+  const reply = {
+    version: 1,
+    project: "test",
+    assignment: "A-1",
+    run: "R-1",
+    generation: "b".repeat(32),
+    target: target.fingerprint,
+    phase: "running",
+    process: null,
+    observed: "unknown",
+  };
+  const answer = (extra: Record<string, unknown>) =>
+    vi.mocked(agentProcessCommand).mockResolvedValueOnce({
+      file: process.execPath,
+      args: [
+        "-e",
+        `process.stdin.resume();process.stdin.on('end',()=>process.stdout.write(${JSON.stringify(JSON.stringify({ ...reply, ...extra }))}))`,
+      ],
+    });
+  answer({});
+  const legacy = await checkStatus();
+  expect(legacy).not.toHaveProperty("boot");
+  expect(legacy).toMatchObject({ observed: "unknown", process: null });
+  answer({ boot: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0" });
+  expect(await checkStatus()).toMatchObject({
+    boot: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+  });
+  for (const boot of ["", "a/b", 7, "x".repeat(129)]) {
+    answer({ boot });
+    await expect(checkStatus()).rejects.toBeInstanceOf(
+      WorkerPreparationFailure,
+    );
+  }
+});

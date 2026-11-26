@@ -1,6 +1,7 @@
 import { decisionOtherOption, reviewImpactLabel } from "@cardigan/domain";
 import { type ReactNode, useRef, useState } from "react";
 import type { CardiganClient, NeedsDecision } from "../api.js";
+import type { DockAction, DockFor } from "../components/CardNextStep.js";
 import { DecisionAffectedCards } from "../components/DecisionAffectedCards.js";
 import { DecisionAttachments } from "../components/DecisionAttachments.js";
 import {
@@ -48,6 +49,7 @@ export function MergePanel({
   done,
   title,
   mine,
+  dockFor,
 }: {
   readonly q: NeedsDecision;
   readonly client: CardiganClient;
@@ -56,6 +58,8 @@ export function MergePanel({
   readonly title: ReactNode;
   /** Waits on you: the panel's wait border and an emphasis button. */
   readonly mine: boolean;
+  /** C-701: the bar that repeats the emphasis button once scrolled away. */
+  readonly dockFor?: DockFor | undefined;
 }) {
   const [quote, setQuote] = useState("");
   const [dialog, setDialog] = useState<{
@@ -67,6 +71,7 @@ export function MergePanel({
   const menuOpensDialog = useRef(false);
   const more = useRef<HTMLButtonElement>(null);
   const actionsRef = useRef<HTMLDivElement>(null);
+  const panel = useRef<HTMLElement>(null);
   const [showDetails, setShowDetails] = useState(false);
   const detailsId = `merge-details-${q.id}`;
   // C-192: once confirmed, only a return is still possible (failed check).
@@ -223,6 +228,26 @@ export function MergePanel({
       regular
     />
   );
+  // The emphasis button the dock repeats; it is the first of the actions.
+  const primary: DockAction | undefined =
+    main !== "emphasis" || needsTakeover
+      ? undefined
+      : fresh
+        ? {
+            label: `按建议：${suggestionLabel}`,
+            disabled: action.busy || (fresh.option === "merge" && mergeBlocked),
+          }
+        : recheck
+          ? { label: "重新检查", disabled: action.busy }
+          : confirmed
+            ? undefined
+            : {
+                label:
+                  check?.level === "card"
+                    ? "确认合并（批次检查通过后生效）"
+                    : "确认合并",
+                disabled: action.busy || mergeBlocked,
+              };
   const actions = needsTakeover ? (
     takeover
   ) : (
@@ -310,6 +335,7 @@ export function MergePanel({
   return (
     <>
       <DetailNextStep
+        ref={panel}
         title={title}
         mine={mine}
         actions={actions}
@@ -433,6 +459,7 @@ export function MergePanel({
           done={done}
         />
       </DetailNextStep>
+      {dockFor?.(panel, primary)}
       <MergeDialogs
         mode={dialogMode}
         q={q}

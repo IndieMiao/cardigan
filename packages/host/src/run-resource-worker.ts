@@ -13,6 +13,33 @@ const source = () =>
     new URL("../../../deploy/run-resources.py", import.meta.url),
     "utf8",
   );
+const viteOwner = new URL(
+  "../../../deploy/run-vite-owner.mjs",
+  import.meta.url,
+);
+// A release is immutable for the lifetime of the controller process.
+let filesRevision: { value: string | undefined } | undefined;
+/**
+ * C-608: a session keeps the run-command entry it was started with. Folding
+ * this release's entry into the session fingerprint replaces an older session
+ * on its next wake instead of failing it with exit 125. Undefined when the
+ * release files are unreadable (no replacement, never a blocked launch).
+ */
+export function sessionFilesRevision(): string | undefined {
+  if (!filesRevision) {
+    try {
+      const digest = createHash("sha256")
+        .update(source())
+        .update("\0")
+        .update(readFileSync(viteOwner))
+        .digest("hex");
+      filesRevision = { value: `run-command-${digest.slice(0, 16)}` };
+    } catch {
+      filesRevision = { value: undefined };
+    }
+  }
+  return filesRevision.value;
+}
 export function resourceTarget(
   project: string,
   machine: string,
@@ -41,8 +68,7 @@ export function resourceEntry(
     source: source()
       .replace(
         "VITE_OWNER = None",
-        () =>
-          `VITE_OWNER = ${JSON.stringify(readFileSync(new URL("../../../deploy/run-vite-owner.mjs", import.meta.url), "utf8"))}`,
+        () => `VITE_OWNER = ${JSON.stringify(readFileSync(viteOwner, "utf8"))}`,
       )
       .replace(
         "AUTHORITY = None",

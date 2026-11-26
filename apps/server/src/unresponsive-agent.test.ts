@@ -1,5 +1,10 @@
 import type { Assignment, Run, Runtime } from "@cardigan/domain";
-import { dispatchRun, postComment, queueRun } from "@cardigan/domain";
+import {
+  dispatchRun,
+  hostOpsPending,
+  postComment,
+  queueRun,
+} from "@cardigan/domain";
 import * as host from "@cardigan/host";
 import { PROJECT_EVENT_STREAM } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
@@ -376,10 +381,9 @@ test("Host Ops restart of a remote Assignment whose Agent is gone closes the ter
   expect(f.options.startRun).toHaveBeenCalledOnce();
 });
 
-test("Host Ops cancel of a remote Run releases the stale session and cancels that Run", async () => {
-  const f = remote();
+function queue(f: ReturnType<typeof remote>) {
   const id = f.owner().id;
-  const run = f.apply((s, a, p) =>
+  return f.apply((s, a, p) =>
     queueRun(
       s,
       a,
@@ -391,6 +395,15 @@ test("Host Ops cancel of a remote Run releases the stale session and cancels tha
       p,
     ),
   ) as Run;
+}
+
+test("Host Ops cancel of a dispatched remote Run releases the stale session and cancels that Run", async () => {
+  const f = remote();
+  const run = queue(f);
+  const ref = f.owner().runtime_ref!;
+  f.apply((s, a, p) =>
+    dispatchRun(s, a, { run_id: run.id, runtime_ref: ref }, p),
+  );
   const result = await f.execute("host_ops_cancel_run", run.id);
   expect(result).toMatchObject({
     assignment_id: f.owner().id,
@@ -401,6 +414,57 @@ test("Host Ops cancel of a remote Run releases the stale session and cancels tha
     status: "cancelled",
   });
   expect(f.owner()).toMatchObject({ runtime_ref: null });
+});
+
+test("C-759: Host Ops cancels a queued, never-started Run directly and leaves the live session alone", async () => {
+  // The previous turn's session is still live (its Agent even answers alive).
+  const f = remote(true);
+  const old = f.owner().runtime_ref;
+  const run = queue(f);
+  const result = await f.execute("host_ops_cancel_run", run.id);
+  expect(result).toMatchObject({
+    assignment_id: f.owner().id,
+    run_id: run.id,
+    result: "queued_run_cancelled",
+  });
+  expect(f.state().runs.find((r) => r.id === run.id)).toMatchObject({
+    status: "cancelled",
+  });
+  // No terminal was touched; the session and its credentials stay.
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.owner().runtime_ref).toEqual(old);
+  const audit = f
+    .state()
+    .events.filter((e) => e.type === "host_ops_action_taken");
+  expect(audit.map((e) => e.payload)).toMatchObject([
+    {
+      tool: "host_ops_cancel_run",
+      target_id: run.id,
+      result: "queued_run_cancelled",
+    },
+  ]);
+  // An audit record, never a pending execution that would fence the session.
+  expect(hostOpsPending(f.state().events, f.owner().id)).toBe(false);
+  // Idempotent replay.
+  expect(await f.execute("host_ops_cancel_run", run.id)).toEqual(result);
+});
+
+test("C-759: a dispatched remote Run whose Agent is alive stays protected (agent_alive)", async () => {
+  const f = remote(true);
+  const old = f.owner().runtime_ref!;
+  const run = queue(f);
+  f.apply((s, a, p) =>
+    dispatchRun(s, a, { run_id: run.id, runtime_ref: old }, p),
+  );
+  await expect(f.execute("host_ops_cancel_run", run.id)).rejects.toMatchObject({
+    code: "illegal_transition",
+    message: expect.stringContaining("worker 显示 Agent 进程仍在运行"),
+  });
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.owner().runtime_ref).toEqual(old);
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+    "dispatched",
+  );
 });
 
 test("Host Ops never closes the terminal of a remote Agent that is still running", async () => {
@@ -429,4 +493,100 @@ test("Host Ops does not close a remote terminal on an unreadable worker journal 
   ).rejects.toBeDefined();
   for (const x of [f, g]) expect(x.runtime.release).not.toHaveBeenCalled();
   expect(f.owner().runtime_ref).toEqual(old);
+});
+
+// C-759: the previous turn ended, the CLI reports `done` and its session
+// stays live while a queued Run waits (sensen A-461, cardigan-ci).
+function idle(agent: "done" | "working" = "done") {
+  const f = remote(true);
+  const original = vi.mocked(f.runtime.status).getMockImplementation()!;
+  let state: "done" | "working" = agent;
+  vi.mocked(f.runtime.status).mockImplementation(async (ref) => {
+    const seen = await original(ref);
+    return seen.ok && seen.value.process === "alive"
+      ? { ok: true, value: { ...seen.value, agent: state } }
+      : seen;
+  });
+  const stop = (reason = "空闲会话挡着排队 Run") =>
+    f.service.tools.execute(f.context, "host_ops_stop_assignment", {
+      target_id: f.owner().id,
+      reason,
+      idempotency_key: `stop:${f.owner().id}:${reason}`,
+    });
+  return {
+    ...f,
+    stop,
+    set agent(value: "done" | "working") {
+      state = value;
+    },
+  };
+}
+
+test("C-759: Host Ops stops an idle session of an ended turn like assignment stop; the queued Run starts in a new session", async () => {
+  const f = idle();
+  const old = f.owner().runtime_ref;
+  const run = queue(f);
+  const result = await f.stop();
+  expect(result).toMatchObject({
+    assignment_id: f.owner().id,
+    result: "session_stopped",
+    basis: "agent_done",
+  });
+  expect(f.runtime.release).toHaveBeenCalledExactlyOnceWith(old, {
+    force: true,
+  });
+  expect(f.owner()).toMatchObject({ runtime_ref: null });
+  // No Run was queued or cancelled; the waiting one is kept.
+  expect(
+    f
+      .state()
+      .runs.filter(
+        (r) => r.assignment_id === f.owner().id && r.status === "queued",
+      )
+      .map((r) => r.id),
+  ).toEqual([run.id]);
+  expect(
+    f
+      .state()
+      .events.filter((e) => e.type === "session_replaced")
+      .map((e) => e.payload),
+  ).toMatchObject([
+    {
+      reason: "idle_session_stopped",
+      trigger: "host_ops",
+      tool: "host_ops_stop_assignment",
+      requested_by: f.ops.id,
+      cancelled_run_ids: [],
+      old_runtime_ref: old,
+    },
+  ]);
+  // Idempotent replay, no second close.
+  expect(await f.stop()).toEqual(result);
+  expect(f.runtime.release).toHaveBeenCalledOnce();
+  f.comment();
+  await new Dispatcher(f.options).tick([f.project]);
+  expect(f.options.startRun).toHaveBeenCalledOnce();
+});
+
+test("C-759: Host Ops stop is refused while the Agent works or a Run of the session is unfinished", async () => {
+  const f = idle("working");
+  const old = f.owner().runtime_ref!;
+  queue(f);
+  await expect(f.stop()).rejects.toMatchObject({
+    code: "illegal_transition",
+    message: expect.stringContaining("Agent 不是空闲状态"),
+  });
+  f.agent = "done";
+  const g = idle();
+  const run = queue(g);
+  const ref = g.owner().runtime_ref!;
+  g.apply((s, a, p) =>
+    dispatchRun(s, a, { run_id: run.id, runtime_ref: ref }, p),
+  );
+  await expect(g.stop()).rejects.toMatchObject({
+    message: expect.stringContaining("上一轮没有结束"),
+  });
+  for (const x of [f, g]) expect(x.runtime.release).not.toHaveBeenCalled();
+  expect(f.owner().runtime_ref).toEqual(old);
+  await expect(f.stop(" ")).rejects.toBeDefined();
 });

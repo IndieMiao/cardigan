@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import type { CandidatePushRequest, PushResult } from "@cardigan/git-transport";
+import { setTimeout as sleep } from "node:timers/promises";
+import type {
+  CandidatePushFailure,
+  CandidatePushRequest,
+  CandidatePushResult,
+} from "@cardigan/git-transport";
 import type {
   CheckExecutor,
   CheckHandle,
@@ -15,6 +20,7 @@ import {
   type DispatchUnknownStage,
   GithubHttpTrace,
   githubHttpTrace,
+  pushFailureStage,
   validObservation,
 } from "./executor-diagnostics.js";
 import { githubScopedRequest } from "./github-check-scope.js";
@@ -52,6 +58,31 @@ export {
   type GithubCheckContext,
   githubCheckRunName,
 } from "./github-dispatch-discovery.js";
+
+/** C-758: what the candidate pushes of one dispatch did, fixed fields only. */
+interface PushEvidence {
+  readonly reason?: CandidatePushFailure;
+  readonly exitCode?: number;
+  readonly attempts: number;
+  readonly durationMs: number;
+}
+/** C-758: pauses before each retry of a transient candidate push (20 s total). */
+export const CANDIDATE_PUSH_RETRY_DELAYS_MS: readonly number[] = [
+  5_000, 15_000,
+];
+const RETRIED_PUSH_FAILURES: ReadonlySet<CandidatePushFailure> = new Set([
+  "auth",
+  "network",
+  "github_error",
+  "other",
+]);
+async function abortableDelay(ms: number, signal?: AbortSignal) {
+  try {
+    await sleep(ms, undefined, signal ? { signal } : undefined);
+  } catch {
+    // An abort ends the wait; the caller re-checks the signal.
+  }
+}
 /** D4 owns shared polling, cancellation, log redaction and terminal confirmation. */
 export interface GithubCheckLifecycle {
   /** Only the terminal callback releases the reservation; local failures keep tracking it. */
@@ -93,7 +124,9 @@ export class GithubCheckExecutor implements CheckExecutor {
       /** Only the trusted Git adapter can prove that transport was never entered. */
       push: (
         request: CandidatePushRequest,
-      ) => Promise<PushResult | { status: "not_started" }>;
+      ) => Promise<CandidatePushResult | { status: "not_started" }>;
+      /** C-758: waits before the bounded in-fence retries of a transient push failure. */
+      pushRetryDelaysMs?: readonly number[];
       /** Must check the central repository's exact configured baseline ref. */
       isBaselineAncestor: (sha: string, branch: string) => Promise<boolean>;
       lifecycle: GithubCheckLifecycle;
@@ -202,13 +235,22 @@ export class GithubCheckExecutor implements CheckExecutor {
     let dispatchToken = "";
     // C-681: every dispatch_unknown names its branch and the latest redacted
     // GitHub exchange of this call, plus the persisted POST response if any.
-    const dispatchUnknown = (stage: DispatchUnknownStage) => {
+    const dispatchUnknown = (
+      stage: DispatchUnknownStage,
+      push?: PushEvidence,
+    ) => {
       const error = new GithubExecutorError("dispatch_unknown");
       const persisted = claimedIntent?.dispatchResponse;
       const post =
         trace.dispatch ?? (validObservation(persisted) ? persisted : undefined);
       error.dispatch = {
         stage,
+        ...(push?.reason ? { pushFailure: push.reason } : {}),
+        ...(push?.exitCode !== undefined
+          ? { pushExitCode: push.exitCode }
+          : {}),
+        ...(push ? { pushAttempts: push.attempts } : {}),
+        ...(push ? { pushDurationMs: push.durationMs } : {}),
         ...(trace.last ? { last: trace.last } : {}),
         ...(post ? { post } : {}),
       };
@@ -278,18 +320,59 @@ export class GithubCheckExecutor implements CheckExecutor {
             this.options.journal.beginPublication(intent, publicationDeadlineAt)
           ) {
             let outcome: "pushed" | "not_started" | "cancelled" = "cancelled";
+            let failed: CandidatePushFailure | undefined;
+            let exitCode: number | undefined;
+            let attempts = 0;
+            let started: number | undefined;
+            let ended: number | undefined;
             let dispatch: boolean;
             try {
-              const result = await this.options.push({
+              const candidate = {
                 repo: this.options.config.repo,
                 sha: request.sha,
                 ref: `refs/heads/ci/${context.card}/${context.delivery}/${inputs.attempt}`,
                 token,
                 ...(request.signal ? { signal: request.signal } : {}),
-              });
+              };
+              // C-758: every push is timed and counted for the diagnosis.
+              const push = async () => {
+                started ??= performance.now();
+                try {
+                  const pushed = await this.options.push(candidate);
+                  if (pushed.status !== "not_started") attempts++;
+                  return pushed;
+                } finally {
+                  ended = performance.now();
+                }
+              };
+              let result = await push();
+              // C-758: bounded retries inside the same publication fence for a
+              // transient answer (e.g. a just-minted installation token that
+              // GitHub's Git frontend does not accept yet). Timeouts, rejected
+              // refs and local cancellation are never retried here.
+              for (const delay of this.options.pushRetryDelaysMs ??
+                CANDIDATE_PUSH_RETRY_DELAYS_MS) {
+                if (
+                  result.status !== "failed" ||
+                  !RETRIED_PUSH_FAILURES.has(result.reason) ||
+                  request.signal?.aborted
+                )
+                  break;
+                await abortableDelay(delay, request.signal);
+                if (request.signal?.aborted) break;
+                const retried = await push();
+                // An earlier attempt entered transport: a busy lock on a retry
+                // is not proof that nothing was ever sent. Keep that failure.
+                if (retried.status === "not_started") break;
+                result = retried;
+              }
               if (result.status === "not_started") {
                 outcome = "not_started";
                 throw new CandidateRepositoryBusy();
+              }
+              if (result.status === "failed") {
+                failed = result.reason;
+                exitCode = result.exit_code;
               }
               if (result.status === "pushed" && !request.signal?.aborted) {
                 if (request.kind === "merge_check")
@@ -301,7 +384,28 @@ export class GithubCheckExecutor implements CheckExecutor {
               // Only a successful, still-current publication may cross POST.
               dispatch = this.options.journal.beginDispatch(intent, outcome);
             }
-            if (!dispatch) throw dispatchUnknown("push_incomplete");
+            // C-758: name the real cause. A local abort, or a pushed candidate
+            // whose fence was taken by abandonment, is a local cancellation.
+            if (!dispatch) {
+              const evidence: PushEvidence | undefined =
+                started === undefined
+                  ? undefined
+                  : {
+                      attempts,
+                      durationMs: Math.max(
+                        0,
+                        Math.round((ended ?? started) - started),
+                      ),
+                    };
+              throw request.signal?.aborted || failed === undefined
+                ? dispatchUnknown("push_cancelled", evidence)
+                : dispatchUnknown(pushFailureStage(failed), {
+                    attempts,
+                    durationMs: evidence?.durationMs ?? 0,
+                    reason: failed,
+                    ...(exitCode !== undefined ? { exitCode } : {}),
+                  });
+            }
             try {
               runId = await this.options.client.dispatch(
                 context.baselineBranch,

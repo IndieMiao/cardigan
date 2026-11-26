@@ -17,6 +17,7 @@ import { IdBadge } from "../components/IdTag.js";
 import { DialogFeedback } from "../components/layout/DialogFeedbackLayout.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Button } from "../components/ui/button.js";
+import { Checkbox } from "../components/ui/checkbox.js";
 import {
   Dialog,
   DialogBody,
@@ -215,18 +216,37 @@ export function MergeDialogs({
                   );
                 case "override":
                   return run(
-                    [projectId, q.id, "merge-override", quote, values.text],
+                    [
+                      projectId,
+                      q.id,
+                      "merge-override",
+                      quote,
+                      values.text,
+                      !!values.followUp,
+                    ],
                     (key) =>
-                      client.recordDecision(
-                        projectId,
-                        q.id,
-                        "merge",
-                        quote,
-                        key,
-                        false,
-                        undefined,
-                        values.text,
-                      ),
+                      values.followUp
+                        ? client.recordDecision(
+                            projectId,
+                            q.id,
+                            "merge",
+                            quote,
+                            key,
+                            false,
+                            undefined,
+                            values.text,
+                            true,
+                          )
+                        : client.recordDecision(
+                            projectId,
+                            q.id,
+                            "merge",
+                            quote,
+                            key,
+                            false,
+                            undefined,
+                            values.text,
+                          ),
                   );
               }
             }}
@@ -267,10 +287,20 @@ function MergeDialogForm({
   readonly suggestion: DecisionSuggestionView | undefined;
   readonly blockers: readonly string[];
   readonly feedback: ReactNode;
-  readonly submit: (values: { text: string; until?: string }) => void;
+  readonly submit: (values: {
+    text: string;
+    until?: string;
+    /** C-760: the open merge holds become follow-ups with the override. */
+    followUp?: boolean;
+  }) => void;
 }) {
   const [text, setText] = useState("");
   const [until, setUntil] = useState("");
+  const [followUp, setFollowUp] = useState(false);
+  const holds =
+    mode === "override"
+      ? (q.merge_confirmation?.blocking_human_actions ?? [])
+      : [];
   const overrideError =
     mode === "override" ? mergeOverrideReasonError(text) : undefined;
   const returning = mode === "return" || mode === "suggested-return";
@@ -284,7 +314,7 @@ function MergeDialogForm({
       : mode === "other"
         ? !!text.trim()
         : mode === "override"
-          ? !overrideError
+          ? !overrideError && (holds.length === 0 || followUp)
           : true;
   const confirmLabel = {
     hold: "登记暂缓",
@@ -307,6 +337,7 @@ function MergeDialogForm({
           ...(mode === "hold" && until
             ? { until: new Date(until).toISOString() }
             : {}),
+          ...(holds.length > 0 ? { followUp } : {}),
         });
       }}
     >
@@ -406,6 +437,21 @@ function MergeDialogForm({
                 onChange={(e) => setText(e.target.value)}
               />
             </label>
+          )}
+          {holds.length > 0 && (
+            <fieldset aria-label="挡合并的人工事项">
+              <p>
+                {`人工事项 ${holds.map((h) => h.id).join("、")} 未完成，会继续挡住合并。`}
+              </p>
+              <label>
+                <Checkbox
+                  checked={followUp}
+                  disabled={busy}
+                  onCheckedChange={(v) => setFollowUp(v === true)}
+                />
+                一并改为合并后跟进
+              </label>
+            </fieldset>
           )}
         </DialogFields>
         {mode === "override" && text.trim() && overrideError && (

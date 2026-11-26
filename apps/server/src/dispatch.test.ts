@@ -1940,6 +1940,50 @@ test.each(["rework", "fix", "decision_resumed"] as const)(
   },
 );
 
+test("C-736 a comment naming the producer waits for the work item's resources; plain discussion stays light", async () => {
+  const { busy, own, settings } = fullDevices();
+  comment(`@${target.assignment.id} 请按卡片要求开工录屏`);
+  await new Dispatcher(settings).tick();
+  expect(readRunQueue(f.store)).toMatchObject([
+    { assignment_id: target.assignment.id },
+  ]);
+  expect(own("queued")).toMatchObject([
+    { kind: "followup", queue_reason: "concurrency_limit" },
+  ]);
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(options.startRun).not.toHaveBeenCalled();
+  finish(busy.assignment);
+  await new Dispatcher(settings).tick();
+  expect(own("dispatched")).toMatchObject([
+    {
+      resource_keys: ["godot", "android.emulator"],
+      resource_reason: expect.stringContaining(
+        `评论点名 @${target.assignment.id}`,
+      ),
+    },
+  ]);
+  const bells = [
+    ...vi.mocked(runtime.wake).mock.calls.map(([, bell]) => bell),
+    ...vi.mocked(options.startRun).mock.calls.map(([input]) => input.bell),
+  ];
+  expect(bells).toHaveLength(1);
+  expect(bells[0]).not.toContain("未占用");
+});
+
+test("C-736 a light Run records and tells why it holds no resources", async () => {
+  const { own, settings } = fullDevices();
+  comment("Looks fine to me");
+  await new Dispatcher(settings).tick();
+  expect(own("dispatched")).toMatchObject([
+    { resource_keys: [], resource_reason: "普通讨论评论" },
+  ]);
+  expect(vi.mocked(options.startRun).mock.calls[0]?.[0]).toMatchObject({
+    bell: expect.stringContaining(
+      "未占用 godot、android.emulator 名额（原因：普通讨论评论）",
+    ),
+  });
+});
+
 test("C-721 a running follow-up that holds no resources is told so with every notice; the next Run claims them in a new session", async () => {
   const { busy, own, settings } = fullDevices();
   const light = f.session(target.assignment, false);

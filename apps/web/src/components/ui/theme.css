@@ -789,6 +789,16 @@
       flex: 1 1 0;
       min-width: 0;
     }
+    /* C-696: DialogContent narrowSheet rises from the bottom edge. */
+    .ui-dialog.ui-dialog-narrow-sheet:not(.ui-sheet) {
+      top: auto;
+      bottom: 0;
+      left: 0;
+      transform: none;
+      width: 100vw;
+      border-bottom: 0;
+      border-radius: var(--ui-panel-radius) var(--ui-panel-radius) 0 0;
+    }
   }
   .ui-dialog-fields {
     display: grid;

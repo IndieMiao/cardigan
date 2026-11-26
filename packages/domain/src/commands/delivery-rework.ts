@@ -1,6 +1,6 @@
 import { reviewPassed } from "../derived.js";
 import type { Actor, Decision } from "../entities.js";
-import { appendEvents } from "../event-index.js";
+import { appendEvents, eventsOfType } from "../event-index.js";
 import type { DeliveryId, ReviewId, WorkItemId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
@@ -50,9 +50,11 @@ function humanScopeAuthority(
   return (
     source?.category === "scope_change" &&
     personallyResolved(source) &&
-    appendEvents(d.state.events, d.events).some(
+    eventsOfType(
+      appendEvents(d.state.events, d.events),
+      "decision_resolved",
+    ).some(
       (e) =>
-        e.type === "decision_resolved" &&
         e.actor.kind === "human" &&
         e.actor.project_id === d.state.project_id &&
         (e.payload as { decision_id?: string; option?: string }).decision_id ===

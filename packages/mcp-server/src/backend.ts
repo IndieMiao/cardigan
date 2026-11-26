@@ -133,7 +133,7 @@ export interface McpReadContext {
     listStreams?(project: ProjectId): CommandEventStreams;
   };
   /** C-639: process-wide scope; absent keeps the whole-history state. */
-  readonly command_state_scope?: "full" | "hot" | "lean";
+  readonly command_state_scope?: "full" | "hot" | "lean" | "slim";
   readonly hot_state_hints?: {
     eventCards(
       project: ProjectId,

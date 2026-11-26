@@ -14,6 +14,10 @@ import {
 } from "./id-format-migration.js";
 import { seedLocalMachine } from "./machines.js";
 import { persistMemberEffect } from "./members.js";
+import {
+  migrateOperatorHumanActions,
+  OPERATOR_ACTIONS_MIGRATION_NAME,
+} from "./operator-action-migration.js";
 import { migrateCardPriorities } from "./priority-migration.js";
 import {
   backfillProjectCodes,
@@ -130,6 +134,8 @@ export function migrate(
       if (migration.name === "story_template") seedStoryTemplates(db);
       if (migration.name === PROJECT_CODES_MIGRATION_NAME)
         backfillProjectCodes(db);
+      if (migration.name === OPERATOR_ACTIONS_MIGRATION_NAME)
+        migrateOperatorHumanActions(db);
       if (migration.version === 39 && migration.name === "ui_template")
         seedUiTemplates(db);
       if (migration.version === 26 && migration.name === "machine_registry")

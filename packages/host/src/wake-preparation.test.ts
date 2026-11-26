@@ -19,6 +19,7 @@ import {
   redactSecrets,
   withPreparationRetry,
 } from "./wake-preparation.js";
+import { PreparationNotStarted } from "./worktree.js";
 
 const exec = promisify(execFile);
 
@@ -49,7 +50,39 @@ test("one-run recovery requires exit proof and refuses permission messages even 
     describePreparationFailure(
       gitError("unable to access repository: Permission denied"),
     ),
-  ).toMatchObject({ retryable: false, category: "prepare_failed" });
+  ).toMatchObject({ retryable: false, category: "permission_denied" });
+});
+
+// C-738: a failure raised before any command ran proves nothing still executes;
+// explicit permission and configuration errors are named so they are not retried.
+test("pre-execution failures carry exit proof; permission and config errors are named", () => {
+  const notStarted = new PreparationNotStarted(
+    new Error("No current Git delivery for readonly work item W-413"),
+  );
+  expect(preparationExecutionExited(notStarted)).toBe(true);
+  expect(describePreparationFailure(notStarted)).toMatchObject({
+    category: "prepare_failed",
+    message: "No current Git delivery for readonly work item W-413",
+  });
+  expect(
+    describePreparationFailure(
+      Object.assign(new Error("open"), { code: "EACCES" }),
+    ).category,
+  ).toBe("permission_denied");
+  expect(
+    describePreparationFailure(new Error("Unsafe Agent repository directory"))
+      .category,
+  ).toBe("permission_denied");
+  expect(
+    describePreparationFailure(
+      new Error("Remote worktree requires a configured worker Git helper"),
+    ).category,
+  ).toBe("config_error");
+  expect(
+    describePreparationFailure(
+      new Error("Workspace target does not match Assignment"),
+    ).category,
+  ).toBe("config_error");
 });
 
 test.each([
@@ -84,11 +117,7 @@ test.each([
     "runtime_failed",
     false,
   ],
-  [
-    new Error("Project p has no registered repository"),
-    "prepare_failed",
-    false,
-  ],
+  [new Error("Project p has no registered repository"), "config_error", false],
 ] as const)("classifies %#", (error, category, retryable) => {
   expect(describePreparationFailure(error)).toMatchObject({
     category,

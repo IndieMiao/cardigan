@@ -6,6 +6,7 @@ import type {
   Event,
   WorkItem,
 } from "./entities.js";
+import { eventsOfTypes } from "./event-index.js";
 import type { CardId } from "./ids.js";
 import { cardMergeCandidates } from "./merge-candidates.js";
 import { type CardTemplate, cardTemplate } from "./templates.js";
@@ -18,8 +19,18 @@ export interface CardDependencyState {
   readonly work_items: readonly WorkItem[];
 }
 
+/** The only event types completion evidence reads. */
+const COMPLETION_EVIDENCE_TYPES = [
+  "card_merged",
+  "card_marked_done",
+  "review_submitted",
+  "completion_reviewed",
+  "delivery_submitted",
+  "review_reused",
+];
 // Critical path calculation checks every terminal card against the same
 // immutable history. Group once, retaining order; never memoize eligibility.
+// C-671: from the type index, so done cards' evidence counts in `slim` too.
 const cardHistories = new WeakMap<
   readonly Event[],
   ReadonlyMap<CardId, readonly Event[]>
@@ -28,7 +39,7 @@ function historyFor(events: readonly Event[], card: Card) {
   let byCard = cardHistories.get(events);
   if (!byCard) {
     const grouped = new Map<CardId, Event[]>();
-    for (const event of events) {
+    for (const event of eventsOfTypes(events, COMPLETION_EVIDENCE_TYPES)) {
       if (!event.card_id) continue;
       const entries = grouped.get(event.card_id);
       if (entries) entries.push(event);

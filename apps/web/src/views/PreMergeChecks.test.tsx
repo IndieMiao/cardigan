@@ -390,6 +390,86 @@ test.each(["needs", "card"])(
 );
 
 test.each(["needs", "card"])(
+  "C-760: %s override names open holds and sends them as follow-ups only when ticked",
+  async (page) => {
+    // Radix measures the checkbox's form input inside the dialog's form.
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    const q = merge(pending);
+    if (!q.merge_confirmation) throw new Error("Missing merge fixture");
+    q.merge_confirmation = {
+      ...q.merge_confirmation,
+      blockers: ["人工事项 H-9：尚未完成"],
+      blocking_human_actions: [{ id: "H-9", title: "Google 账号配置" }],
+    };
+    const base = cardDetail();
+    const recordDecision = vi.fn(async () => undefined);
+    const client = fakeClient({
+      needsYou: async () => needs(q),
+      card: async () => ({
+        ...base,
+        card: { ...base.card, status: "awaiting_merge" },
+        decisions: [q],
+        merge_confirmations: [q],
+      }),
+      recordDecision,
+    });
+    render(
+      page === "needs" ? (
+        <NeedsYouPage client={client} projectId="p-1" />
+      ) : (
+        <CardDetailPage client={client} projectId="p-1" cardId="C-1" />
+      ),
+    );
+    // C-697: in card details 仍要合并 is in the panel's ⋯ menu.
+    if (page === "needs")
+      fireEvent.click(
+        await screen.findByRole("button", { name: "仍要合并", exact: true }),
+      );
+    else {
+      await screen.findByRole("button", { name: "更多合并操作" });
+      await selectMenu(/^更多合并操作$/, "仍要合并…");
+    }
+    const dialog = await screen.findByRole("alertdialog", {
+      name: /^仍要确认合并？/u,
+    });
+    expect(
+      within(dialog).getByText("人工事项 H-9 未完成，会继续挡住合并。"),
+    ).toBeTruthy();
+    fireEvent.change(within(dialog).getByLabelText("强行合并理由（必填）"), {
+      target: { value: "账号合并后再配" },
+    });
+    const submit = within(dialog).getByRole("button", { name: "确认仍要合并" });
+    expect(submit.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(submit);
+    expect(recordDecision).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByLabelText("一并改为合并后跟进"));
+    expect(submit.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(recordDecision).toHaveBeenCalledWith(
+        "p-1",
+        "Q-7",
+        "merge",
+        "",
+        expect.any(String),
+        false,
+        undefined,
+        "账号合并后再配",
+        true,
+      ),
+    );
+    vi.unstubAllGlobals();
+  },
+);
+
+test.each(["needs", "card"])(
   "C-271: %s status and prerequisite list share the current check reason",
   async (page) => {
     for (const [status, label] of [
