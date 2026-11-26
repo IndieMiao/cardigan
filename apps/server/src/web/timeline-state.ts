@@ -61,6 +61,9 @@ export function readPagedCard(
       );
       args.push(project, author);
     }
+    // C-774: every SQL step of the detail is timed, so a slow read is
+    // attributable from the request log alone.
+    const timelineStarted = performance.now();
     const total = Number(
       store.database
         .prepare(
@@ -122,24 +125,35 @@ export function readPagedCard(
       )
       .all(project, cardId)
       .map((r) => JSON.parse(String(r.doc)) as TimelineEntry);
+    options?.recordTiming?.(
+      "timeline_sql",
+      performance.now() - timelineStarted,
+    );
     state = {
       ...state,
       timeline: [
         ...new Map([...entries, ...conclusions].map((e) => [e.id, e])).values(),
       ],
     };
-    state = withReferences(
-      store,
-      state,
-      [
-        card.title,
-        card.goal,
-        ...card.acceptance_criteria,
-        ...card.out_of_scope,
-        ...state.timeline.map((e) => e.body),
-      ].join("\n"),
+    const referenced = state;
+    state = timed("references_sql", () =>
+      withReferences(
+        store,
+        referenced,
+        [
+          card.title,
+          card.goal,
+          ...card.acceptance_criteria,
+          ...card.out_of_scope,
+          ...referenced.timeline.map((e) => e.body),
+        ].join("\n"),
+      ),
     );
-    state = withSuggestionProgress(store, state);
+    const suggested = state;
+    state = timed("suggestion_sql", () =>
+      withSuggestionProgress(store, suggested),
+    );
+    const eventsStarted = performance.now();
     const pageEvents = readDocs(
       store,
       project,
@@ -192,6 +206,7 @@ export function readPagedCard(
         )
         .map((row) => [String(row.id), String(row.card_id) as CardId] as const),
     );
+    options?.recordTiming?.("events_sql", performance.now() - eventsStarted);
     const dependencyState = timed("dependency_sql", () =>
       readCardDependencies(
         store,

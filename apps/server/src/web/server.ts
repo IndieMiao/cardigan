@@ -571,10 +571,19 @@ export async function startWebServer(
     }
   }
 
-  await new Promise<void>((resolve, reject) => {
-    http.once("error", reject);
-    http.listen(config.port, host, () => resolve());
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      http.once("error", reject);
+      http.listen(config.port, host, () => resolve());
+    });
+  } catch (error) {
+    // C-774: a server that never bound leaves no read workers behind (they
+    // would keep a role that gives up on its port from exiting).
+    await pool?.close();
+    throw error;
+  }
+  // C-774: warm the read workers only once this server serves.
+  pool?.warm(warmOrder(store));
   const address = http.address() as AddressInfo;
   boundPort = address.port;
   const graceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
@@ -1567,5 +1576,22 @@ function capabilityCatalog(context: RequestContext) {
       .map(({ key, os }) => ({ key, os: [...os] }));
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * C-774: projects for the read workers to warm at start, those with the most
+ * cards first, so the two busiest land on different workers. Best effort.
+ */
+function warmOrder(store: Store): string[] {
+  try {
+    return store.database
+      .prepare(
+        "SELECT p.id AS id FROM projects p LEFT JOIN (SELECT project_id, count(*) AS n FROM cards GROUP BY project_id) c ON c.project_id = p.id ORDER BY COALESCE(c.n, 0) DESC, p.id",
+      )
+      .all()
+      .map((row) => String(row.id));
+  } catch {
+    return [];
   }
 }
