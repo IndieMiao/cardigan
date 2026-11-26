@@ -325,7 +325,7 @@ sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /s
 
 #### 升级已接入 worker 的 helper
 
-部署新版本后，控制主机后台会立即巡检已登记机器；后续巡检和启动前检查仍核对发布协议及三个 helper 的 SHA-256。版本落后或文件不同的机器不能启动，运维待办附当前发行版预期摘要。主机运维可在 `host_ops_read_diagnostics` 的 `worker_maintenance` 里按待办编号读取升级步骤或冷却原因。不要通过工作树分发或以 worker 自身权限覆盖 helper。
+部署新版本后，控制主机后台会立即巡检已登记机器；后续巡检和启动前检查仍核对发布协议及三个 helper 的 SHA-256。版本落后或文件不同的机器不能启动，运维待办附当前发行版预期摘要。例外（C-666）：仍装着协议 2 那一版原样 helper 的机器照常启动，只是不做目录占用统计，机器详情的“目录占用”显示“helper 过旧，未统计”；已接入自动升级的机器照常升级，其余由管理员安装当前发行版。主机运维可在 `host_ops_read_diagnostics` 的 `worker_maintenance` 里按待办编号读取升级步骤或冷却原因。不要通过工作树分发或以 worker 自身权限覆盖 helper。
 
 默认连续 3 次远程启动准备失败会让自动指派跳过该项目绑定 30 分钟；冷却到期或该绑定实际启动成功后自动解除。私有 `runtime-workers.yaml` 的项目绑定可设 `preparation_cooldown: { failures: 3, duration_ms: 1800000 }`。等待、审核目标变化及启动租约失效不算作机器故障。冷却不撤回已派任务、不解除其它就绪门禁。
 

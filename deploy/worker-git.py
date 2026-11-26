@@ -520,11 +520,132 @@ def workspace_snapshot(workspace, path, branch, generation):
     return sha
 
 
+USAGE_KINDS = ('worktrees', 'builds', 'runs')
+USAGE_ENTRIES = 2000000
+USAGE_DEPTH = 256
+
+
+class Tally:
+    def __init__(self, device, deadline):
+        self.device, self.deadline = device, deadline
+        self.entries, self.inodes, self.complete = USAGE_ENTRIES, set(), True
+
+    def spend(self):
+        self.entries -= 1
+        if self.entries < 0 or time.monotonic() > self.deadline:
+            self.complete = False
+            return False
+        return True
+
+
+def measure(fd, tally, depth):
+    """Allocated bytes below an open directory, like du -s on one file system.
+    Never follows a symlink, never leaves the device and never writes."""
+    total = 0
+    try:
+        names = os.listdir(fd)
+    except OSError:
+        tally.complete = False
+        return 0
+    for name in names:
+        if not tally.spend():
+            return total
+        try:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            tally.complete = False
+            continue
+        if info.st_dev != tally.device:
+            tally.complete = False
+            continue
+        directory = stat.S_ISDIR(info.st_mode)
+        if not directory and info.st_nlink > 1:
+            if info.st_ino in tally.inodes:
+                continue
+            tally.inodes.add(info.st_ino)
+        total += info.st_blocks * 512
+        if not directory:
+            continue
+        if depth >= USAGE_DEPTH:
+            tally.complete = False
+            continue
+        try:
+            child = os.open(name, DIRECTORY, dir_fd=fd)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            tally.complete = False
+            continue
+        try:
+            opened = os.fstat(child)
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                tally.complete = False
+                continue
+            total += measure(child, tally, depth + 1)
+        finally:
+            os.close(child)
+    return total
+
+
+def subdirectories(fd):
+    count = 0
+    for name in os.listdir(fd):
+        try:
+            count += stat.S_ISDIR(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode)
+        except FileNotFoundError:
+            pass
+    return count
+
+
+def usage(request):
+    """C-666: read-only space report of this project's own worktrees, builds and
+    runs leaves plus the volume's free space. It runs as the project account,
+    takes no Git lock and touches no other account's directory."""
+    project = request['project']
+    require(type(project) is str and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]*', project))
+    require(re.fullmatch(r'A-[1-9][0-9]*', request['assignment']))
+    deadline = time.monotonic() + request['timeout_ms'] * 0.8 / 1000
+    anchor = check_layout(request['root'], project)
+    try:
+        volume = os.fstatvfs(anchor)
+        tally = Tally(os.fstat(anchor).st_dev, deadline)
+        reply = dict(free_bytes=volume.f_bavail * volume.f_frsize,
+                     total_bytes=volume.f_blocks * volume.f_frsize)
+        for kind in USAGE_KINDS:
+            reply[kind] = dict(bytes=0, directories=0)
+            try:
+                parent = os.open(kind, DIRECTORY, dir_fd=anchor)
+            except FileNotFoundError:
+                continue
+            try:
+                namespace(parent)
+                try:
+                    leaf = os.open(project, DIRECTORY, dir_fd=parent)
+                except FileNotFoundError:
+                    continue
+                try:
+                    private(leaf)
+                    reply[kind] = dict(bytes=measure(leaf, tally, 0), directories=subdirectories(leaf))
+                finally:
+                    os.close(leaf)
+            finally:
+                os.close(parent)
+        reply['complete'] = tally.complete
+        return reply
+    finally:
+        os.close(anchor)
+
+
 def main():
     require(len(sys.argv) == 2 and len(sys.argv[1].encode()) <= 65536)
     request = json.loads(sys.argv[1])
     require(type(request['timeout_ms']) is int and 0 < request['timeout_ms'] <= 2147483647)
     os.umask(0o077)
+    if request['operation'] == 'usage':
+        print(json.dumps(usage(request)))
+        return
     workspace = Workspace(request)
     try:
         reply = workspace.operate()

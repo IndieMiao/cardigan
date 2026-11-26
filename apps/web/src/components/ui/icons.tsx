@@ -3,6 +3,7 @@ import { ImageOff } from "lucide-react";
 export {
   ChevronDown as ChevronDownIcon,
   ChevronRight as ChevronRightIcon,
+  Copy as CopyIcon,
   Ellipsis as MoreHorizontalIcon,
   TriangleAlert as AlertIcon,
 } from "lucide-react";

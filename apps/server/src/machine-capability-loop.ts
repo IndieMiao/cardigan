@@ -1,4 +1,4 @@
-import type { Clock } from "@cardigan/domain";
+import type { Clock, ProjectId } from "@cardigan/domain";
 import {
   MACHINE_CAPABILITY_INTERVAL_MS,
   type RuntimeTargets,
@@ -27,6 +27,8 @@ export function startMachineCapabilityLoop(options: {
   readonly startup?: LoopStartup | undefined;
   readonly runtime: Pick<RuntimeTargets, "refreshMachine">;
   readonly verification?: { host: MachineHost; clock: Clock };
+  /** C-666: read a remote binding's directory usage after a passing check. */
+  readonly usage?: (project: ProjectId, machine: string) => Promise<void>;
   readonly onError: (error: unknown) => void;
 }) {
   const controller = new AbortController();
@@ -45,12 +47,15 @@ export function startMachineCapabilityLoop(options: {
     queue = run.catch(() => {});
     return run;
   };
-  /** One project's view of one machine: refresh, then its own double check. */
+  /**
+   * One project's view of one machine: refresh, then its own double check.
+   * Returns whether the fresh check found the machine available.
+   */
   const patrol = async (project: string, machine: string) => {
     const record = options.store.uow.read((tx) =>
       tx.machines.get(project, machine),
     );
-    if (!record) return;
+    if (!record) return false;
     const { health } = await options.runtime.refreshMachine(project, machine, {
       signal: controller.signal,
     });
@@ -65,6 +70,7 @@ export function startMachineCapabilityLoop(options: {
           health.blockers[0] === "machine_not_ready"))
     )
       await reconcileHelperActions(checks, project, machine);
+    return health?.available === true;
   };
   const loop = startTimerLoop({
     startup: options.startup,
@@ -83,11 +89,25 @@ export function startMachineCapabilityLoop(options: {
           );
           for (const machine of machines) {
             if (controller.signal.aborted) return;
+            let available = false;
             try {
-              await patrol(project.id, machine.id);
+              available = await patrol(project.id, machine.id);
             } catch {
               options.onError(new Error("Machine capability refresh failed"));
+              continue;
             }
+            // Read only through a helper the check just found reachable.
+            if (
+              options.usage &&
+              machine.id !== "local" &&
+              available &&
+              !controller.signal.aborted
+            )
+              try {
+                await options.usage(project.id, machine.id);
+              } catch {
+                options.onError(new Error("Worker usage observation failed"));
+              }
           }
         }
       }),

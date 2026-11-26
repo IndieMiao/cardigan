@@ -337,7 +337,7 @@
   /* C-695: status row under the title: facts left, 编辑 and ⋯ right. */
   .statusRow {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     gap: var(--ui-space-2) var(--ui-space-3);
     min-height: var(--ui-control);
@@ -347,7 +347,7 @@
   }
   .statusFacts {
     display: flex;
-    flex: 1 1 auto;
+    flex: 1 1 0;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--ui-space-2) var(--ui-space-3);
@@ -359,8 +359,27 @@
     max-width: 100%;
     margin: 0;
   }
+  /* C-702: a linked id with its title (the card of an execution) keeps the
+     row at control height and one line; the title gives way first and
+     shows in full in the id's tooltip. */
+  .statusFacts > :global(a.id-tag) {
+    flex: 1 1 0;
+    min-width: calc(var(--ui-space-6) * 4);
+    max-width: max-content;
+    min-height: var(--ui-control);
+  }
+  .statusFacts > :global(a.id-tag) > :global(.id-badge) {
+    flex: none;
+  }
+  .statusFacts > :global(a.id-tag) > :global(.id-description) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .statusActions {
     flex: none;
+    align-self: flex-start;
     margin-inline-start: auto;
   }
   .statusActions :global(.card-actions) {
@@ -414,9 +433,20 @@
     line-height: var(--ui-leading);
     overflow-wrap: anywhere;
   }
+  .nextLine[data-strong] {
+    color: var(--text);
+    font-weight: 600;
+  }
   .nextLine > * {
     min-width: 0;
     max-width: 100%;
+  }
+  .nextFact {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    min-width: 0;
   }
   .nextLine :global(dl),
   .nextLine :global(.plain-summary-risk) {
@@ -475,6 +505,97 @@
   .nextActions :global(.card-template) {
     display: contents;
   }
+  /* C-698: a decision answered in the panel. */
+  .choiceForm {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-2);
+    min-width: 0;
+    margin: 0;
+  }
+  .choices {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-1);
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .choice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--ui-space-2);
+    padding: var(--ui-space-2);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-radius);
+    cursor: pointer;
+  }
+  .choice:hover {
+    background: var(--surface-muted);
+  }
+  .choice[data-selected] {
+    border-color: var(--ui-focus);
+    background: var(--ui-selected);
+  }
+  .choice:has(.choiceRadio:disabled) {
+    cursor: default;
+  }
+  .choiceRadio {
+    flex: none;
+    width: var(--ui-icon);
+    height: var(--ui-icon);
+    margin: calc((var(--ui-leading) - var(--ui-icon)) / 2) 0 0;
+    accent-color: var(--accent);
+  }
+  .choiceText {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    overflow-wrap: anywhere;
+  }
+  .choiceName {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    color: var(--text);
+    font-size: var(--ui-text-base);
+  }
+  .choiceDetail {
+    color: var(--text-muted);
+  }
+  .choiceTag {
+    padding: 0 var(--ui-space-2);
+    border-radius: var(--ui-pill-radius);
+    background: var(--surface-muted);
+    color: var(--text-muted);
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+  }
+  .choice[data-selected] .choiceTag {
+    background: var(--surface);
+  }
+  .choiceField {
+    display: grid;
+    gap: var(--ui-space-1);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .choiceField > label {
+    font-weight: 600;
+  }
+  .nextFeedback :global(.request-feedback-region) {
+    position: static;
+    align-items: stretch;
+    max-width: none;
+    max-height: none;
+  }
+  .nextFeedback:not(:has(:global(.request-feedback):not(:empty))) {
+    display: none;
+  }
   .nextForms {
     display: grid;
     gap: var(--ui-space-3);
@@ -483,6 +604,194 @@
   /* Feedback anchors are hidden; only a shown form or note takes room. */
   .nextForms:not(:has(> :not([hidden]))) {
     display: none;
+  }
+  /* C-702: titled blocks of a detail, space-6 apart (运行环境, 执行记录). */
+  .section {
+    display: grid;
+    gap: var(--ui-space-3);
+    min-width: 0;
+    margin-top: var(--ui-space-6);
+  }
+  .page .sectionTitle {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    margin: 0;
+    font-size: var(--ui-text-section);
+    line-height: var(--ui-leading-section);
+    font-weight: 600;
+  }
+  .muted {
+    color: var(--text-muted);
+    font-weight: normal;
+  }
+  .disclosure {
+    display: inline-flex;
+    align-items: center;
+    justify-self: start;
+    gap: var(--ui-space-1);
+    min-height: var(--ui-control);
+    padding: 0 var(--ui-space-2) 0 0;
+    border: 0;
+    border-radius: var(--ui-radius);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .disclosure:hover {
+    background: var(--surface-muted);
+  }
+  .disclosure:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: var(--ui-focus-width);
+  }
+  .disclosure :global(.lucide) {
+    width: var(--ui-icon);
+    height: var(--ui-icon);
+    color: var(--text-muted);
+  }
+  .disclosure[aria-expanded="true"] :global(.lucide) {
+    transform: rotate(90deg);
+  }
+  /* A paging button (显示更多) under a list keeps its own width. */
+  .section > :global([data-ui="button"]),
+  .disclosureBody > :global([data-ui="button"]) {
+    justify-self: start;
+  }
+  /* A fact that folds a list open (签收) turns its chevron when open. */
+  .fact dd :global([aria-expanded="true"] > .lucide) {
+    transform: rotate(90deg);
+  }
+  .disclosureBody {
+    display: grid;
+    gap: var(--ui-space-3);
+    min-width: 0;
+  }
+  .disclosureBody[hidden] {
+    display: none;
+  }
+  /* C-702: label/value facts with muted labels (--ui-detail-label). */
+  .facts {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-2) var(--ui-space-6);
+    margin: 0;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .facts[data-columns="2"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .fact {
+    display: grid;
+    grid-template-columns: var(--ui-detail-label) minmax(0, 1fr);
+    gap: var(--ui-space-3);
+    align-items: center;
+    min-width: 0;
+    min-height: var(--ui-control);
+  }
+  .fact dt {
+    color: var(--text-muted);
+  }
+  .fact dd {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .fact dd[data-code] {
+    font-family: var(--font-code);
+    font-size: var(--ui-text-xs);
+  }
+  .fact dd:has(> .truncate) {
+    flex-wrap: nowrap;
+  }
+  .truncate,
+  .historyText,
+  .commandCode {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* C-702: bordered one-line records. */
+  .history {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+  }
+  .historyItem {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2) var(--ui-space-3);
+    min-width: 0;
+    min-height: calc(var(--ui-control) + var(--ui-space-2));
+    padding: var(--ui-space-1) var(--ui-space-3);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .historyItem + .historyItem {
+    border-top: var(--ui-stroke) solid var(--border);
+  }
+  .historyLead {
+    display: inline-flex;
+    flex: none;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    min-width: 0;
+    max-width: 100%;
+  }
+  .historySummary {
+    display: flex;
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .historyTime {
+    flex: none;
+    margin-inline-start: auto;
+    color: var(--text-muted);
+  }
+  /* C-702: copyable commands in a bordered list. */
+  .commands {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+  }
+  .command {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--ui-space-3);
+    min-height: calc(var(--ui-control) + var(--ui-space-2));
+    padding: var(--ui-space-1) var(--ui-space-1) var(--ui-space-1)
+      var(--ui-space-3);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .command + .command {
+    border-top: var(--ui-stroke) solid var(--border);
+  }
+  .commandCode {
+    padding: 0 var(--ui-space-1);
+    border-radius: var(--ui-radius);
+    background: var(--surface-muted);
+    color: var(--text-muted);
+    font-family: var(--font-code);
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading);
   }
   @media (max-width: 760px) {
     .nextActions {
@@ -495,6 +804,33 @@
     /* The ⋯ menu button stays square. */
     .nextActions > :global(.ui-icon-button) {
       flex: none;
+    }
+  }
+  @media (max-width: 760px) {
+    .facts[data-columns="2"] {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .historyItem {
+      flex-wrap: wrap;
+      padding-block: var(--ui-space-2);
+    }
+    .historyTime {
+      margin-inline-start: 0;
+    }
+    .historySummary {
+      flex-basis: 100%;
+      order: 1;
+    }
+    .command {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .commandCode {
+      grid-column: 1;
+      grid-row: 2;
+    }
+    .command > :last-child {
+      grid-column: 2;
+      grid-row: 1 / span 2;
     }
   }
   @media (max-width: 760px) {

@@ -29,8 +29,10 @@ import {
   type Runtime,
   recordDecision,
 } from "@cardigan/domain";
+import * as host from "@cardigan/host";
 import { RuntimeTargets, type RuntimeWorker } from "@cardigan/host";
 import * as runtime from "@cardigan/runtime-herdr";
+import { readWorkerUsage } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { CleanupExecutor } from "./cleanup-loop.js";
 import { ServerGit } from "./git.js";
@@ -40,6 +42,7 @@ import {
   m4Fixture,
   m4Scenario,
 } from "./m4-fixtures.js";
+import { WorkerUsageMonitor } from "./worker-usage.js";
 
 const REMOTE = "/worker-fixture";
 const MACHINE = "mac-mini";
@@ -69,6 +72,8 @@ let root: string;
 let disk: string;
 let service: ServerGit;
 let failListing: boolean;
+const GiB = 1024 ** 3;
+let usageFree: number;
 let requests: { operation: string; assignment: string; path?: string }[];
 
 const local = (path: string) =>
@@ -108,6 +113,25 @@ function helper(request: runtime.WorkerGitRequest): unknown {
         .filter((name) => statSync(join(local(path), name)).isDirectory())
         .map((name) => `${path}/${name}`)
         .sort();
+    }
+    case "usage": {
+      // C-666: the release helper's read-only report of the project's roots.
+      const kind = (name: string) => {
+        const dir = join(disk, name, f.project_id);
+        const directories = existsSync(dir)
+          ? readdirSync(dir).filter((n) => statSync(join(dir, n)).isDirectory())
+              .length
+          : 0;
+        return { bytes: directories * GiB, directories };
+      };
+      return {
+        free_bytes: usageFree,
+        total_bytes: 228 * GiB,
+        worktrees: kind("worktrees"),
+        builds: kind("builds"),
+        runs: kind("runs"),
+        complete: true,
+      };
     }
     case "exists":
       allowed(path);
@@ -203,6 +227,7 @@ beforeEach(async () => {
   scenario = m4Scenario(f, "auto");
   reports.length = 0;
   failListing = false;
+  usageFree = 100 * GiB;
   requests = [];
   root = realpathSync(mkdtempSync(join(tmpdir(), "cg-worker-reclaim-")));
   disk = join(root, "worker-disk");
@@ -479,4 +504,133 @@ test("an offline worker is not listed and keeps its directories", async () => {
 
   expect(existsSync(buildDir)).toBe(true);
   expect(requests.filter((r) => r.operation === "directories")).toEqual([]);
+});
+
+const lowSpaceEvents = (type: string) =>
+  f.store.database
+    .prepare(
+      "SELECT doc FROM events WHERE project_id = ? AND card_id IS NULL AND type = ? ORDER BY seq",
+    )
+    .all(f.project_id, type)
+    .map((row) => JSON.parse(String(row.doc)));
+
+test("C-666: low free space on the worker records one notice and reclaims released builds now, once per episode", async () => {
+  const gone = released(scenario.reviewer, "A-311");
+  const dir = build(gone.id);
+  usageFree = 5 * GiB;
+  const executor = cleanup();
+  const reclaim = vi.fn((project: typeof f.project_id) =>
+    executor.reclaim(project),
+  );
+  const monitor = new WorkerUsageMonitor({
+    store: f.store,
+    git: service,
+    reclaim,
+    lowFreeBytes: 20 * GiB,
+    clock: f.clock,
+    report: (message) => reports.push(message),
+  });
+
+  await monitor.observe(f.project_id, MACHINE);
+
+  // Measured before the reclaim: one build of the released verifier.
+  expect(readWorkerUsage(f.store, f.project_id, MACHINE)).toMatchObject({
+    status: "measured",
+    measured: {
+      free_bytes: 5 * GiB,
+      total_bytes: 228 * GiB,
+      builds: { directories: 1, bytes: GiB },
+      complete: true,
+    },
+  });
+  expect(reclaim).toHaveBeenCalledTimes(1);
+  expect(existsSync(dir)).toBe(false);
+  expect(registered()).not.toContain(buildOf(gone.id));
+  const [notice, ...more] = lowSpaceEvents("worker_disk_space_low");
+  expect(more).toEqual([]);
+  expect(notice.actor).toEqual({ kind: "system", project_id: f.project_id });
+  expect(notice.payload).toMatchObject({
+    machine_id: MACHINE,
+    free_bytes: 5 * GiB,
+    threshold_bytes: 20 * GiB,
+    builds_bytes: GiB,
+    reclaim: "started",
+  });
+  expect(notice.payload.notice).toContain("已触发一次已释放指派目录的回收");
+
+  // Still low: neither a second notice nor a second reclaim.
+  await monitor.observe(f.project_id, MACHINE);
+  expect(reclaim).toHaveBeenCalledTimes(1);
+  expect(lowSpaceEvents("worker_disk_space_low")).toHaveLength(1);
+
+  // Recovered, then low again: a new episode.
+  usageFree = 60 * GiB;
+  await monitor.observe(f.project_id, MACHINE);
+  expect(lowSpaceEvents("worker_disk_space_recovered")).toHaveLength(1);
+  expect(reclaim).toHaveBeenCalledTimes(1);
+  usageFree = 4 * GiB;
+  await monitor.observe(f.project_id, MACHINE);
+  expect(lowSpaceEvents("worker_disk_space_low")).toHaveLength(2);
+  expect(reclaim).toHaveBeenCalledTimes(2);
+  expect(reports).toEqual([]);
+  // The usage read was a project-root report, not a removal.
+  for (const r of requests.filter((r) => r.operation === "usage"))
+    expect(r.path).toBe(repo());
+});
+
+test("C-666: a worker on the previous helper release is skipped with a warning; the last measurement stays", async () => {
+  usageFree = 30 * GiB;
+  released(scenario.reviewer, "A-312");
+  const reclaim = vi.fn();
+  const monitor = new WorkerUsageMonitor({
+    store: f.store,
+    git: service,
+    reclaim,
+    lowFreeBytes: 20 * GiB,
+    clock: f.clock,
+    report: (message) => reports.push(message),
+  });
+  await monitor.observe(f.project_id, MACHINE);
+  vi.spyOn(host, "observedHelperRelease").mockReturnValue("previous");
+  requests = [];
+  await monitor.observe(f.project_id, MACHINE);
+  await monitor.observe(f.project_id, MACHINE);
+
+  // The old helper is never asked for a report it does not have.
+  expect(requests.filter((r) => r.operation === "usage")).toEqual([]);
+  expect(readWorkerUsage(f.store, f.project_id, MACHINE)).toMatchObject({
+    status: "skipped",
+    skipped_reason: "helper_outdated",
+    measured: { free_bytes: 30 * GiB },
+  });
+  // One warning per episode; no notice and no reclaim from a skipped read.
+  expect(reports).toHaveLength(1);
+  expect(reports[0]).toContain("previous helper release");
+  expect(reclaim).not.toHaveBeenCalled();
+  expect(lowSpaceEvents("worker_disk_space_low")).toEqual([]);
+});
+
+test("C-666: a failed usage read is recorded as skipped and judges nothing", async () => {
+  released(scenario.reviewer, "A-313");
+  const reclaim = vi.fn();
+  vi.spyOn(service, "machineUsage").mockRejectedValue(
+    new Error("Worker Git operation failed (usage: SSH transport failed)"),
+  );
+  const monitor = new WorkerUsageMonitor({
+    store: f.store,
+    git: service,
+    reclaim,
+    lowFreeBytes: 20 * GiB,
+    clock: f.clock,
+    report: (message) => reports.push(message),
+  });
+  await monitor.observe(f.project_id, MACHINE);
+  expect(readWorkerUsage(f.store, f.project_id, MACHINE)).toMatchObject({
+    status: "skipped",
+    skipped_reason: "failed",
+  });
+  expect(reclaim).not.toHaveBeenCalled();
+  expect(reports).toEqual([
+    `worker usage for ${f.project_id}/${MACHINE} failed: Worker Git operation failed (usage: SSH transport failed)`,
+  ]);
 });

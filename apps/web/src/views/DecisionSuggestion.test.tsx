@@ -403,7 +403,7 @@ test("C-192: card details show the suggestion on the merge confirmation and appl
   );
 });
 
-test("C-192: card details offer one-click handling for a business decision, with an editable prefilled return", async () => {
+test("C-698: card details answer a suggested business decision in “下一步”, with an editable prefilled return", async () => {
   const detail = cardDetail();
   const q = choose({
     id: "Q-5",
@@ -419,56 +419,58 @@ test("C-192: card details offer one-click handling for a business decision, with
       return_reason: "补暗色截图",
     }),
   });
-  const applySuggestion = vi.fn().mockResolvedValue(undefined);
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
   render(
     <CardDetailPage
       client={fakeClient({
-        card: async () => ({ ...detail, decisions: [q] }),
-        applySuggestion,
+        card: async () => ({
+          ...detail,
+          card: { ...detail.card, waiting_on: [] },
+          decisions: [q],
+        }),
+        recordDecision,
       })}
       projectId="p-1"
       cardId="C-1"
     />,
   );
-  const section = within(
-    await screen.findByRole("region", { name: SUGGESTION_COPY.cardSection }),
-  );
-  const box = within(section.getByRole("region", { name: "Q-5 建议" }));
+  const next = within(await screen.findByRole("region", { name: "下一步" }));
   expect(
-    box.getByText(SUGGESTION_COPY.line("退回修改", "缺暗色截图")),
+    next.getByText(SUGGESTION_COPY.line("退回修改", "缺暗色截图")),
   ).toBeTruthy();
-  const reason = box.getByLabelText(
+  expect(
+    (next.getByRole("radio", { name: /退回修改/u }) as HTMLInputElement)
+      .checked,
+  ).toBe(true);
+  const reason = next.getByLabelText(
     "Q-5 建议的退回原因",
   ) as HTMLTextAreaElement;
   expect(reason.value).toBe("补暗色截图");
   fireEvent.change(reason, { target: { value: "补暗色和窄屏截图" } });
-  fireEvent.click(
-    box.getByRole("button", {
-      name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
-    }),
-  );
+  fireEvent.click(next.getByRole("button", { name: "确认选择" }));
   await waitFor(() =>
-    expect(applySuggestion).toHaveBeenCalledWith(
+    expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
       "Q-5",
       "request_changes",
       "补暗色和窄屏截图",
       expect.any(String),
-      undefined,
-      1,
     ),
   );
+  // The overview no longer repeats the decision or sends you to Needs You.
+  expect(screen.queryByRole("region", { name: "待你拍板" })).toBe(null);
+  expect(screen.queryByText(/要选其他方案/u)).toBe(null);
 });
 
-test("C-192: card details show no suggestion section without a suggestion or for decisions not with the human", async () => {
+test("C-698: card details offer no one-click suggestion button; decisions not with the human stay out of the panel", async () => {
   const detail = cardDetail();
   render(
     <CardDetailPage
       client={fakeClient({
         card: async () => ({
           ...detail,
+          card: { ...detail.card, waiting_on: [] },
           decisions: [
-            choose({ id: "Q-6" }),
             choose({ id: "Q-7", decider: "role:pm", suggestion: suggestion() }),
             choose({ id: "Q-8", status: "resolved", suggestion: suggestion() }),
           ],
@@ -479,9 +481,9 @@ test("C-192: card details show no suggestion section without a suggestion or for
     />,
   );
   await screen.findByRole("complementary", { name: "卡片概况" });
-  expect(
-    screen.queryByRole("region", { name: SUGGESTION_COPY.cardSection }),
-  ).toBe(null);
+  const next = within(screen.getByRole("region", { name: "下一步" }));
+  expect(next.queryByText(/等你拍板/u)).toBe(null);
+  expect(next.queryAllByRole("radio")).toHaveLength(0);
   expect(
     screen.queryByRole("button", {
       name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
@@ -688,7 +690,7 @@ test.each(["a", "merge", "request_changes"])(
   },
 );
 
-test.each(["choose", "merge"])(
+test.each(["merge"])(
   "C-303: affected-card details refresh %s suggestions from every displayed dependency",
   async (kind) => {
     let stream: StreamCallbacks | undefined;
@@ -799,3 +801,80 @@ test.each(["choose", "merge"])(
     );
   },
 );
+
+test("C-303/C-698: affected-card details refresh a decision's suggestion progress in “下一步”", async () => {
+  let stream: StreamCallbacks | undefined;
+  let advice = suggestion({ option: "a" });
+  const q = () =>
+    choose({
+      suggestion: advice,
+      affected_cards: ["C-1", "C-2", "C-3"],
+      affected_card_views: ["C-1", "C-2", "C-3"].map((id) => ({
+        id,
+        title: id,
+        status: "review",
+      })),
+    });
+  const detail = cardDetail();
+  const read = vi.fn(async () => ({
+    ...detail,
+    card: { ...detail.card, id: "C-2", waiting_on: [] },
+    decisions: [q()],
+    merge_confirmations: [],
+  }));
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  const client = fakeClient({
+    card: read,
+    recordDecision,
+    subscribe: (_id, callbacks) => {
+      stream = callbacks;
+      return () => {};
+    },
+  });
+  const push = async (card: string, type: string) => {
+    await act(async () => {
+      stream?.change({ stream: card, seq: 1, type });
+      await new Promise((resolve) => setTimeout(resolve, 140));
+    });
+  };
+  render(<LiveDetail client={client} />);
+  const next = () => within(screen.getByRole("region", { name: "下一步" }));
+  const left = () => next().getByRole("radio", { name: /左侧栏/u });
+  await screen.findByRole("form", { name: "拍板 Q-4" });
+  expect((left() as HTMLInputElement).checked).toBe(true);
+  const initialReads = read.mock.calls.length;
+  advice = {
+    ...advice,
+    progress: { count: 1, token: "source-comment", entries: [] },
+  };
+  await push("C-1", "comment_posted");
+  await screen.findByText("建议生成后有 1 条新进展");
+  expect(read.mock.calls.length).toBeGreaterThan(initialReads);
+  // Newer progress: the suggestion is no longer chosen for you.
+  expect((left() as HTMLInputElement).checked).toBe(false);
+  advice = {
+    ...advice,
+    progress: { count: 2, token: "affected-comment", entries: [] },
+  };
+  await push("C-3", "comment_posted");
+  await screen.findByText("建议生成后有 2 条新进展");
+  advice = suggestion({
+    option: "a",
+    version: 2,
+    rationale: "已重新核对所有证据",
+  });
+  await push("C-1", "decision_suggestion_updated");
+  await screen.findByText(/已重新核对所有证据/u);
+  expect(screen.queryByText(/建议生成后有/u)).toBeNull();
+  expect((left() as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(next().getByRole("button", { name: "确认选择" }));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "Q-4",
+      "a",
+      "",
+      expect.any(String),
+    ),
+  );
+});

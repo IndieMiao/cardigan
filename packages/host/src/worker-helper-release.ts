@@ -2,7 +2,17 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Machine } from "@cardigan/domain";
 
-export const workerPublicationProtocol = 2;
+/** The protocol the deployed release announces (`PUBLICATION_PROTOCOL`). */
+export const workerPublicationProtocol = 3;
+/**
+ * C-666: launch admission still starts at protocol 2. The usage report is the
+ * only addition of protocol 3, so a protocol-2 helper keeps dispatching (its
+ * digest differs, which is only a warning since C-608) and is upgraded; only
+ * its usage report is skipped.
+ */
+export const minimumWorkerPublicationProtocol = 2;
+/** C-666: the first protocol whose worker-git.py answers the `usage` report. */
+export const workerUsageProtocol = 3;
 export const helpers = [
   "worker-files.py",
   "worker-git.py",

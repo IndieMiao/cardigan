@@ -73,6 +73,7 @@ import {
   type HerdrRuntime,
 } from "@cardigan/runtime-herdr";
 import {
+  listWorkerUsage,
   readContextSamples,
   recordNotification,
   type Store,
@@ -508,6 +509,8 @@ export class HostOpsService {
         ...(view.worker_maintenance
           ? { worker_maintenance: view.worker_maintenance }
           : {}),
+        // C-666: each remote worker's latest usage report for this project.
+        worker_usage: listWorkerUsage(this.options.store, actor.project_id),
         // Full read-only state stays visible; C-56 failures are excluded from patrol work.
         runs,
         patrol_runs: runs.filter(

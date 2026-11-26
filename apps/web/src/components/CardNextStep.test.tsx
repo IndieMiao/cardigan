@@ -377,19 +377,38 @@ test("a confirmed merge waiting for its check is not yours: only 退回修改", 
   ).toEqual(["退回修改"]);
 });
 
-test("a decision with a suggestion leads into the card; without one to Needs You; more items are counted", () => {
-  const suggested = {
-    ...merge({ id: "Q-3", trigger: null, question: "放哪里？" }),
-    suggestion: {
-      version: 1,
-      option: "a",
-      rationale: "习惯",
-      by: "assignment:A-1",
-      at: NOW,
-      stale: false,
-    },
-  };
-  const onReveal = vi.fn();
+const decision = (over: Partial<NeedsDecision> = {}): NeedsDecision =>
+  merge({
+    id: "Q-3",
+    trigger: null,
+    question: "放哪里？",
+    options: [
+      { key: "a", description: "侧栏底部", impact: "与现有习惯一致" },
+      { key: "b", description: "侧栏顶部", impact: "更显眼" },
+    ],
+    recommended: "a",
+    merge_confirmation: null,
+    plain_summary: undefined,
+    ...over,
+  });
+const advice = {
+  version: 1,
+  option: "a",
+  rationale: "习惯",
+  by: "assignment:A-1",
+  at: NOW,
+  stale: false,
+};
+const quiet = { ...card, waiting_on: [] };
+const radios = (region: HTMLElement) =>
+  within(region).getAllByRole("radio") as HTMLInputElement[];
+const confirm = (region: HTMLElement) =>
+  within(region).getByRole("button", { name: "确认选择" }) as HTMLButtonElement;
+
+test("C-698: a decision is answered in the panel, a fresh suggestion preselected; more items are counted", async () => {
+  const suggested = decision({ suggestion: advice });
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  const onSaved = vi.fn();
   const detail = cardDetail({
     card: {
       ...card,
@@ -400,27 +419,206 @@ test("a decision with a suggestion leads into the card; without one to Needs You
     },
     decisions: [suggested],
   });
-  const first = panel(detail, { onReveal });
-  expect(first.title).toBe("等你拍板Q-3还有 1 件");
-  expect(first.region.textContent).toContain("放哪里？");
-  expect(first.emphasis).toHaveLength(1);
-  fireEvent.click(first.emphasis[0] as HTMLElement);
-  expect(onReveal).toHaveBeenCalledWith("decisions");
-  cleanup();
-  const plain = panel({
-    ...detail,
-    decisions: [{ ...suggested, suggestion: undefined }],
+  const { region, title, emphasis } = panel(detail, {
+    client: fakeClient({ recordDecision }),
+    onSaved,
   });
+  expect(title).toBe("等你拍板Q-3还有 1 件");
+  expect(region.textContent).toContain("放哪里？");
+  expect(region.textContent).not.toContain("Needs You");
+  expect(within(region).queryByRole("link", { name: "处理拍板" })).toBeNull();
   expect(
-    within(plain.region)
-      .getByRole("link", { name: "处理拍板" })
-      .getAttribute("href"),
-  ).toBe("#/p/p%201/needs-you");
-  expect(
-    within(plain.region)
+    within(region)
       .getByRole("link", { name: "还有 1 件" })
       .getAttribute("href"),
   ).toBe("#/p/p%201/needs-you");
+  // Every option plus the system “其他”, the suggestion preselected and tagged.
+  expect(radios(region).map((radio) => radio.value)).toEqual([
+    "a",
+    "b",
+    "_other",
+  ]);
+  expect(radios(region).map((radio) => radio.checked)).toEqual([
+    true,
+    false,
+    false,
+  ]);
+  expect(within(region).getByText("建议")).toBeTruthy();
+  expect(within(region).getByText("其他（自己填写）")).toBeTruthy();
+  expect(emphasis).toHaveLength(1);
+  expect(emphasis[0]?.textContent).toBe("确认选择");
+  fireEvent.click(radios(region)[1] as HTMLInputElement);
+  fireEvent.click(confirm(region));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p 1",
+      "Q-3",
+      "b",
+      "",
+      expect.any(String),
+    ),
+  );
+  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+});
+
+test("C-698: without a suggestion nothing is preselected; the raiser's recommendation is marked", () => {
+  const { region } = panel(
+    cardDetail({
+      card: {
+        ...card,
+        waiting_on: [{ kind: "decision", ref: "Q-3", label: "等你拍板" }],
+      },
+      decisions: [decision()],
+    }),
+  );
+  expect(radios(region).some((radio) => radio.checked)).toBe(false);
+  expect(within(region).getByText("推荐")).toBeTruthy();
+  expect(within(region).queryByText("建议")).toBeNull();
+  expect(confirm(region).disabled).toBe(true);
+  fireEvent.click(radios(region)[0] as HTMLInputElement);
+  expect(confirm(region).disabled).toBe(false);
+});
+
+test("C-698: an expired suggestion, or one with newer progress, is shown but not preselected", () => {
+  const { region } = panel(
+    cardDetail({
+      card: quiet,
+      decisions: [decision({ suggestion: { ...advice, stale: true } })],
+    }),
+  );
+  expect(region.textContent).toContain("建议：侧栏底部（习惯）");
+  expect(within(region).getByText("已过期")).toBeTruthy();
+  expect(radios(region).some((radio) => radio.checked)).toBe(false);
+  expect(confirm(region).disabled).toBe(true);
+  cleanup();
+  const progressed = panel(
+    cardDetail({
+      card: quiet,
+      decisions: [
+        decision({
+          suggestion: {
+            ...advice,
+            progress: { count: 2, token: "t", entries: [] },
+          },
+        }),
+      ],
+    }),
+  ).region;
+  expect(progressed.textContent).toContain("建议生成后有 2 条新进展");
+  expect(radios(progressed).some((radio) => radio.checked)).toBe(false);
+});
+
+test("C-698: the human-only reason and plain summary sit under the question", () => {
+  const { region } = panel(
+    cardDetail({
+      card: quiet,
+      decisions: [
+        decision({
+          human_required_reason: "改角色规则",
+          plain_summary: {
+            changed: "调整入口",
+            impact: "找设置更快",
+            risk: "无",
+          },
+        }),
+      ],
+    }),
+  );
+  const text = region.textContent ?? "";
+  expect(text).toContain("须由你亲自决定：改角色规则");
+  expect(text.indexOf("放哪里？")).toBeLessThan(text.indexOf("须由你亲自决定"));
+  expect(text.indexOf("须由你亲自决定")).toBeLessThan(
+    text.indexOf("找设置更快"),
+  );
+  // As in the design: impact and risk; “改了什么” stays in Needs You.
+  expect(text).not.toContain("调整入口");
+  expect(text).toContain("风险无");
+  expect(text.indexOf("找设置更快")).toBeLessThan(text.indexOf("侧栏底部"));
+});
+
+test("C-698: “其他” needs your words; a failure stays in the panel with the choice kept", async () => {
+  const recordDecision = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("网络断开"))
+    .mockResolvedValue(undefined);
+  const onSaved = vi.fn();
+  const { region } = panel(
+    cardDetail({ card: quiet, decisions: [decision()] }),
+    {
+      client: fakeClient({ recordDecision }),
+      onSaved,
+    },
+  );
+  fireEvent.click(radios(region)[2] as HTMLInputElement);
+  const words = within(region).getByLabelText(
+    "Q-3 你的决定",
+  ) as HTMLTextAreaElement;
+  expect(words.required).toBe(true);
+  fireEvent.click(confirm(region));
+  expect(recordDecision).not.toHaveBeenCalled();
+  fireEvent.change(words, { target: { value: "放到设置页里" } });
+  fireEvent.click(confirm(region));
+  await waitFor(() =>
+    expect(within(region).getByRole("alert").textContent).toContain("网络断开"),
+  );
+  expect(onSaved).not.toHaveBeenCalled();
+  expect((radios(region)[2] as HTMLInputElement).checked).toBe(true);
+  expect(
+    (within(region).getByLabelText("Q-3 你的决定") as HTMLTextAreaElement)
+      .value,
+  ).toBe("放到设置页里");
+  fireEvent.click(confirm(region));
+  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+  expect(recordDecision).toHaveBeenNthCalledWith(
+    1,
+    "p 1",
+    "Q-3",
+    "_other",
+    "放到设置页里",
+    expect.any(String),
+  );
+  // The retry reuses the same idempotency key.
+  expect(recordDecision.mock.calls[1]?.[4]).toBe(
+    recordDecision.mock.calls[0]?.[4],
+  );
+});
+
+test("C-698: decisions with their own controls (review limit, rework, cleanup) still open Needs You", () => {
+  for (const trigger of [
+    "review_limit",
+    "accepted_delivery_rework",
+    "worktree_cleanup",
+  ]) {
+    const { region } = panel(
+      cardDetail({
+        card: {
+          ...card,
+          waiting_on: [{ kind: "decision", ref: "Q-3", label: "等你拍板" }],
+        },
+        decisions: [decision({ trigger })],
+      }),
+    );
+    expect(within(region).queryAllByRole("radio")).toHaveLength(0);
+    expect(
+      within(region)
+        .getByRole("link", { name: "处理拍板" })
+        .getAttribute("href"),
+    ).toBe("#/p/p%201/needs-you");
+    cleanup();
+  }
+});
+
+test("C-698: a non-blocking decision for you takes the panel; one PM decides does not", () => {
+  const steps = (q: NeedsDecision) =>
+    cardNextSteps(
+      cardDetail({
+        card: { ...card, next_owners: [{ kind: "role", ref: "coder" }] },
+        decisions: [q],
+      }),
+    ).current.kind;
+  expect(steps(decision({ blocking: false }))).toBe("decision");
+  expect(steps(decision({ decider: "role:pm" }))).not.toBe("decision");
+  expect(steps(decision({ status: "resolved" }))).not.toBe("decision");
 });
 
 test("a decision PM decides is not yours", () => {
@@ -990,6 +1188,50 @@ test("C-697: before a PM takeover the dock repeats 接手处理 and opens its di
   expect(
     await screen.findByRole("dialog", { name: "接手 PM 合并确认" }),
   ).toBeTruthy();
+  slot.remove();
+  vi.unstubAllGlobals();
+});
+
+test("C-698/C-701: the dock repeats “确认选择”, disabled until an option is picked, and submits the panel", async () => {
+  const move = stubPanelObserver();
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  const slot = document.createElement("div");
+  document.body.append(slot);
+  render(
+    <CardNextStep
+      detail={cardDetail({
+        card: {
+          ...card,
+          waiting_on: [{ kind: "decision", ref: "Q-3", label: "等你拍板" }],
+        },
+        decisions: [decision()],
+      })}
+      client={fakeClient({ recordDecision })}
+      projectId="p 1"
+      onSaved={() => {}}
+      onReveal={() => {}}
+      markDone={() => null}
+      inDrawer
+      dock={slot}
+    />,
+  );
+  move("above");
+  const dock = within(slot).getByRole("region", { name: "主操作" });
+  const action = within(dock).getByRole("button", { name: "确认选择" });
+  expect(action.hasAttribute("disabled")).toBe(true);
+  const region = screen.getByRole("region", { name: "下一步" });
+  fireEvent.click(radios(region)[1] as HTMLInputElement);
+  expect(action.hasAttribute("disabled")).toBe(false);
+  fireEvent.click(action);
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p 1",
+      "Q-3",
+      "b",
+      "",
+      expect.any(String),
+    ),
+  );
   slot.remove();
   vi.unstubAllGlobals();
 });
