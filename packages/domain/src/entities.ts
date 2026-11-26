@@ -108,6 +108,8 @@ export const toolNames = [
   "host_ops_restart_standing_pm",
   // C-759: managed stop of a session whose previous turn ended and is idle.
   "host_ops_stop_assignment",
+  // C-773: reinspect or abandon a stuck author precheck.
+  "host_ops_recheck_precheck",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 export type RoleWorktree = "none" | "write" | "readonly";
