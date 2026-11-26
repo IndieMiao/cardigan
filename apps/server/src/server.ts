@@ -90,6 +90,7 @@ import { mergeProjectSettings } from "./merge-push-loop.js";
 import {
   drainMobileSigning,
   openMobileArtifact,
+  registerChainCandidate,
   requestMobileSignature,
 } from "./mobile-signing.js";
 import { OFFSITE_SYNC_INTERVAL_MS, OffsiteSync } from "./offsite-sync.js";
@@ -100,6 +101,7 @@ import {
   trackedPublisher,
 } from "./publication-recovery.js";
 import { apkPublisher } from "./publish-artifact.js";
+import { approvalPrecheck } from "./publish-precheck.js";
 import { RepositoryLockMetrics } from "./repository-lock-metrics.js";
 import {
   clearTickProfileSync,
@@ -526,6 +528,9 @@ async function assembleServer(
               "context-usage",
             ),
           staleAfterMs: config.contextUsageStaleAfterMs ?? 600_000,
+          ...(config.contextRestartRetryDelaysMs
+            ? { restartRetryDelaysMs: config.contextRestartRetryDelaysMs }
+            : {}),
         },
         scrubCredentials: async (project, assignment, ref) => {
           const runtime = options.dispatcher?.runtime;
@@ -553,6 +558,9 @@ async function assembleServer(
             : runtimeOwnsRef(execution, ref),
         runtimeLabel: describeRuntime(execution),
         hcSession: session,
+        ...(runCapacity.scarceInactiveCancel
+          ? { scarceResources: runCapacity.scarceInactiveCancel.resources }
+          : {}),
         onError: (error) =>
           options.dispatcher?.onError?.(
             new Error(
@@ -639,16 +647,21 @@ async function assembleServer(
               capabilityGuides: (project) =>
                 listCapabilityGuides(store, project),
               ...(publisher ? { publishArtifact: publisher } : {}),
+              // C-754: a publish approval reaches no one unless this host could honour it.
+              precheckPublication: publisher
+                ? approvalPrecheck(config.dataDir)
+                : async () => ["本主机未开启测试包外发"],
               ...(mobileSigning
                 ? {
                     openMobileArtifact: (scope, id, current) =>
                       openMobileArtifact(config.dataDir, scope, id, current),
-                    signMobile: (scope, current) =>
+                    signMobile: (scope, current, chain) =>
                       requestMobileSignature(
                         config.dataDir,
                         scope,
                         current,
                         {},
+                        chain,
                         (signing) =>
                           holdLongOperation(store, {
                             kind: "mobile_signing",
@@ -656,6 +669,13 @@ async function assembleServer(
                             card_id: signing.card,
                             label: `受管送签（${signing.platform}）`,
                           }),
+                      ),
+                    chainSigning: (scope, candidate, current) =>
+                      registerChainCandidate(
+                        config.dataDir,
+                        scope,
+                        candidate,
+                        current,
                       ),
                   }
                 : {}),
@@ -923,6 +943,9 @@ async function assembleServer(
         frameworkWaitReminderMs =
           options.dispatcher.frameworkWaitReminderMs ??
           config.frameworkWaitReminderMs,
+        storySummaryHandoffMs =
+          options.dispatcher.storySummaryHandoffMs ??
+          config.storySummaryHandoffMs,
         mergeBlockedReminderMs =
           options.dispatcher.mergeBlockedReminderMs ??
           config.mergeBlockedReminderMs,
@@ -1014,6 +1037,10 @@ async function assembleServer(
                 project: ProjectId,
                 assignment: Assignment["id"],
               ) => hostOps.harnessActivity(project, assignment),
+              harnessFileActivity: (
+                project: ProjectId,
+                assignment: Assignment["id"],
+              ) => hostOps.harnessFileActivity(project, assignment),
             }
           : {}),
         hostOpsPatrolIntervalMs:
@@ -1055,12 +1082,16 @@ async function assembleServer(
         queuedRecheckAfterMs: runCapacity.queuedRecheckAfterMs,
         inboxStallAfterMs: runCapacity.inboxStallAfterMs,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
+        scarceInactiveCancel: runCapacity.scarceInactiveCancel,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
         ...(mergeWatchdogMs === undefined ? {} : { mergeWatchdogMs }),
         ...(frameworkWaitReminderMs === undefined
           ? {}
           : { frameworkWaitReminderMs }),
+        ...(storySummaryHandoffMs === undefined
+          ? {}
+          : { storySummaryHandoffMs }),
         ...(mergeBlockedReminderMs === undefined
           ? {}
           : { mergeBlockedReminderMs }),

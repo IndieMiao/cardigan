@@ -24,7 +24,11 @@ import type {
   TransactionContext,
   UnitOfWork,
 } from "@cardigan/domain";
-import { suggestProjectCode, validateProjectCode } from "@cardigan/domain";
+import {
+  SLIM_RESIDENT_EVENT_TYPES,
+  suggestProjectCode,
+  validateProjectCode,
+} from "@cardigan/domain";
 import {
   type ChangeCursor,
   type ChangeSet,
@@ -258,15 +262,17 @@ export interface StoreOptions {
 /**
  * `hot`: open cards' streams plus durable closed-card facts; `full`: all
  * history; `lean` (C-649): hot, plus closed-card GitHub dispatch records left
- * out and project-stream retention by type.
+ * out and project-stream retention by type; `slim` (C-671): lean, but cold
+ * cards keep only the whitelisted fact types, and closed cards' other events
+ * are not kept decoded in memory.
  */
-export type CommandStateScope = "full" | "hot" | "lean";
+export type CommandStateScope = "full" | "hot" | "lean" | "slim";
 export function commandStateScope(
   value: string | undefined,
 ): CommandStateScope {
   if (value === undefined || value === "" || value === "hot") return "hot";
-  if (value === "full" || value === "lean") return value;
-  throw new Error("CARDIGAN_COMMAND_STATE must be hot, lean or full");
+  if (value === "full" || value === "lean" || value === "slim") return value;
+  throw new Error("CARDIGAN_COMMAND_STATE must be hot, lean, slim or full");
 }
 
 export interface GetUpdatesParams {
@@ -399,7 +405,7 @@ export class Store {
     this.#testReviewTrust = trust;
   }
   #snapshots: CommandSnapshots | undefined;
-  readonly #commandEvents = new CommandEvents();
+  #commandEvents = new CommandEvents();
   #commandStateScope: CommandStateScope = "hot";
   get commandStateScope(): CommandStateScope {
     return this.#commandStateScope;
@@ -452,6 +458,9 @@ export class Store {
     store.#commandStateScope =
       options.commandState ??
       commandStateScope(process.env.CARDIGAN_COMMAND_STATE);
+    // C-671: `slim` keeps closed cards' other event types dormant in memory.
+    if (store.#commandStateScope === "slim")
+      store.#commandEvents = new CommandEvents(SLIM_RESIDENT_EVENT_TYPES);
     try {
       // Opening/configuring the database can contend with another process too.
       db.exec("PRAGMA busy_timeout = 5000");

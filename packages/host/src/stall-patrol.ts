@@ -22,6 +22,7 @@ import {
   runsOf,
   STANDING_PM_STALL_EVENTS,
   stoppedByHuman,
+  systemTurnOwner,
   type WithdrawnRecoveryDiagnosis,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
@@ -40,8 +41,26 @@ import {
 } from "./dispatch-stalls.js";
 import { heldBacklogMs, heldBacklogs } from "./held-backlog.js";
 import { releaseExitedAgent } from "./idle-session-retirement.js";
-import { sessionExitProof, stallEvidence } from "./stall-evidence.js";
+import {
+  observeTurnOwner,
+  sessionExitProof,
+  stallEvidence,
+  stallWorkspace,
+} from "./stall-evidence.js";
 import { overdueStallHandoffs } from "./stall-handoff.js";
+import {
+  doneSessionReleaseMs,
+  managedReleaseCommand,
+  releaseStalledSession,
+  SESSION_RELEASE_HELD,
+  type StalledSession,
+  sessionReleaseHandedOff,
+  stalledSessionDecision,
+  stalledSessionReleaseMs,
+  stalledSessions,
+  systemTurnReleased,
+  TRANSIENT_RELEASE_REFUSALS,
+} from "./stalled-session-release.js";
 import { StandingPmRecovery } from "./standing-pm-recovery.js";
 
 function turnKey(s: DispatchStall) {
@@ -105,6 +124,7 @@ function publishStallHandoff(
   stall: DispatchStall,
   clock: Clock,
   payload: object,
+  notify?: boolean,
 ) {
   const project = state.project_id;
   const ops = state.assignments.find(
@@ -125,6 +145,8 @@ function publishStallHandoff(
     type: "dispatch_stall_attention",
   };
   tx.events.append(project, event);
+  // C-739: PM already has this turn's reason; keep the record, not a second ring.
+  if (notify === false) return;
   const held = heldStallRecipient(state, stall);
   recordNotification(store.database, {
     project_id: project,
@@ -134,11 +156,21 @@ function publishStallHandoff(
     at: event.created_at,
     recipient:
       held ??
-      (ops
-        ? { kind: "assignment", assignment_id: ops.id }
-        : { kind: "pm_office" }),
+      // C-739: a system-ended turn goes to PM (who can run the managed
+      // release), not to host operations.
+      (systemTurnStall(stall)
+        ? { kind: recoveryPm(a) }
+        : ops
+          ? { kind: "assignment", assignment_id: ops.id }
+          : { kind: "pm_office" }),
     kind: held?.kind === "needs_you" ? "needs_you" : "run_attention",
   });
+}
+/** C-739: an incident of a system-ended turn (not a retirement transfer). */
+function systemTurnStall(
+  stall: Pick<DispatchStall, "system_finished_run_id" | "retirement_handoff">,
+) {
+  return !!stall.system_finished_run_id && !stall.retirement_handoff;
 }
 /**
  * C-732: host operations cannot end a human pause. A stall held only by one
@@ -181,8 +213,28 @@ function registration({
 }: ReturnType<typeof recoveryBasis>) {
   return rest;
 }
-const turnNextStep =
+const retirementNextStep =
   "系统会复查原通知；请主机运维从派发停滞核对终端名字、归属及客户端状态，确认空闲后续办。不能确认时保留会话，不自动重启。";
+/** C-739: what PM can do about a turn the system could not settle. */
+function managedReleaseNextStep(id: Assignment["id"]) {
+  return `系统没有自动释放 ${id} 的旧会话（原因见 reason），原通知和排队的 Run 保留。PM 核对后可执行受管释放：${managedReleaseCommand(id)}（不带 --hold；确认旧会话退出后，排队的工作在新会话中派发）。工作区有未提交改动时，先确认这些改动可以留在原工作区。`;
+}
+/** C-739: the managed release entry for a system-ended turn incident. */
+function turnFollowUp(
+  stall: Pick<
+    DispatchStall,
+    "assignment_id" | "system_finished_run_id" | "retirement_handoff"
+  >,
+) {
+  return systemTurnStall(stall)
+    ? {
+        next_step: managedReleaseNextStep(stall.assignment_id),
+        managed_release: {
+          command: managedReleaseCommand(stall.assignment_id),
+        },
+      }
+    : { next_step: retirementNextStep };
+}
 
 // Keep diagnostics and notifications compact, without using a display row as a recovery fence.
 function oldestPerGroup(causes: DispatchStall[]) {
@@ -367,6 +419,12 @@ export class StallPatrol {
   private readonly idlePromptMs = turnIdlePromptMs();
   private readonly retry = patrolRestartRetryPolicy();
   private readonly heldBacklogMs = heldBacklogMs();
+  /** C-739: stalled sessions are released after work waited this long. */
+  private readonly releaseMs = stalledSessionReleaseMs();
+  /** C-759: idle `done` sessions are released after a queued Run waited this long. */
+  private readonly doneMs = doneSessionReleaseMs();
+  /** C-739: next observation of a kept incident (in memory). */
+  private readonly releaseRetryAt = new Map<string, number>();
   constructor(
     private store: Store,
     private clock: Clock,
@@ -377,6 +435,11 @@ export class StallPatrol {
     ) => ExecutionConfig | undefined,
     private signal: AbortSignal,
     owns?: (ref: RuntimeRef) => boolean,
+    private scrubCredentials?: (
+      project: ProjectId,
+      assignment: Assignment["id"],
+      ref: RuntimeRef | null,
+    ) => Promise<void>,
   ) {
     this.standingPm = new StandingPmRecovery(
       store,
@@ -534,7 +597,7 @@ export class StallPatrol {
             (e.payload as { system_finished_run_id?: string })
               .system_finished_run_id === s.system_finished_run_id,
         )
-          ? { next_step: turnNextStep }
+          ? turnFollowUp(s)
           : {}),
         ...view,
         // C-672: an exited Agent in a live terminal is not held by the
@@ -659,7 +722,10 @@ export class StallPatrol {
               p.system_finished_run_id === stall.system_finished_run_id;
       });
     const handled = (s: CommandState) =>
-      recorded(s, "host_ops_action_taken") || standingRestarted(s, stall);
+      recorded(s, "host_ops_action_taken") ||
+      standingRestarted(s, stall) ||
+      // C-739: the patrol already released this turn's session.
+      systemTurnReleased(s, stall.system_finished_run_id);
     // A failed automatic attempt is neither a recovery nor Ops pickup. Hand the
     // incident off once, without starting a second stop for the same turn.
     if (a && recorded(state, "host_ops_action_taken")) {
@@ -685,7 +751,7 @@ export class StallPatrol {
             ...heldStallDetails(fresh, row),
             can_restart: false,
             reason: failure,
-            next_step: turnNextStep,
+            ...turnFollowUp(row),
           });
         });
       return;
@@ -790,7 +856,7 @@ export class StallPatrol {
           ...view,
           can_restart: false,
           reason,
-          next_step: turnNextStep,
+          ...turnFollowUp(row),
           ...heldStallDetails(fresh, row),
         },
       };
@@ -818,8 +884,17 @@ export class StallPatrol {
             kind: "run_attention",
           });
       };
+      // C-739: PM was already told why the patrol kept this turn.
+      const told = sessionReleaseHandedOff(
+        fresh,
+        a.id,
+        stall.system_finished_run_id,
+      );
       if (!recorded(fresh, "bell_turn_recovery_failed"))
-        publish("bell_turn_recovery_failed", { kind: recoveryPm(a) });
+        publish(
+          "bell_turn_recovery_failed",
+          told ? undefined : { kind: recoveryPm(a) },
+        );
       // Adopt older failures too. All overdue notices for this owner's turn
       // share a handoff; the still-pending originals keep their retry path.
       if (!recorded(fresh, "dispatch_stall_attention"))
@@ -831,6 +906,7 @@ export class StallPatrol {
           stall,
           this.clock,
           incident.payload,
+          !told,
         );
     });
     if (retry && !this.signal.aborted)
@@ -925,6 +1001,216 @@ export class StallPatrol {
           persistEffect(tx, project, effect.value);
       });
   }
+  /** C-739: live notifications, as the dispatcher sees them. */
+  private liveNotes(project: ProjectId) {
+    return this.store.listNotifications({
+      project_id: project,
+      statuses: ["pending", "belled", "delivery_failed", "needs_attention"],
+    });
+  }
+  /**
+   * C-739: a live session the dispatcher cannot use while work waits past
+   * the threshold (an unconfirmed system-ended turn, or idle retirement that
+   * keeps withdrawing): release it (a managed stop, no hold) when the
+   * checkout is clean, so the dispatcher starts the waiting work in a new
+   * session; otherwise tell PM once, with the reason and the managed release
+   * entry.
+   */
+  private stalledDue(project: ProjectId) {
+    if (!this.releaseMs && !this.doneMs) return [];
+    const state = this.store.uow.read((tx) => loadCommandState(tx, project));
+    const stalled = stalledSessions(
+      state,
+      this.liveNotes(project),
+      this.clock.now(),
+      this.releaseMs,
+      this.doneMs,
+    );
+    const key = (s: StalledSession) =>
+      `${project}/${s.assignment.id}/${s.trigger}/${s.incident}`;
+    const open = new Set(stalled.map(key));
+    for (const k of this.releaseRetryAt.keys())
+      if (k.startsWith(`${project}/`) && !open.has(k))
+        this.releaseRetryAt.delete(k);
+    const now = Date.parse(this.clock.now());
+    return stalled
+      .filter((s) => (this.releaseRetryAt.get(key(s)) ?? 0) <= now)
+      .map((s) => ({ state, stalled: s, key: key(s) }));
+  }
+  private async releaseStalled(due: ReturnType<StallPatrol["stalledDue"]>) {
+    for (const { state, stalled, key } of due) {
+      if (this.signal.aborted) return;
+      const outcome = await this.releaseOne(state, stalled);
+      // A kept incident is rechecked after two thresholds; one left to
+      // another path (or transiently locked) after a minute, not every pass.
+      const ms = stalled.trigger === "turn_done" ? this.doneMs : this.releaseMs;
+      if (outcome !== "released")
+        this.releaseRetryAt.set(
+          key,
+          Date.parse(this.clock.now()) +
+            (outcome === "kept" ? 2 * ms : Math.min(60_000, ms)),
+        );
+    }
+  }
+  private async releaseOne(
+    state: CommandState,
+    stalled: StalledSession,
+  ): Promise<"released" | "kept" | "skipped"> {
+    const project = state.project_id;
+    const a = stalled.assignment;
+    const ref = a.runtime_ref;
+    const turn = stalled.turn?.id;
+    if (
+      !ref ||
+      hostOpsPending(state.events, a.id) ||
+      stoppedByHuman(state.events, a.id) ||
+      (turn &&
+        eventsOfType(state.events, "host_ops_action_taken").some(
+          (e) =>
+            (e.payload as { system_finished_run_id?: string })
+              .system_finished_run_id === turn,
+        )) ||
+      unfinishedBellAttempts(this.store.database, project, a.id).length
+    )
+      return "skipped";
+    const execution = this.execution(project, a.machine_id);
+    // The ordinary turn recovery is preferred while its evidence allows it.
+    const view = turn
+      ? await stallEvidence(
+          state,
+          a,
+          this.runtime,
+          execution,
+          this.signal,
+          turn,
+        )
+      : undefined;
+    const status = await this.runtime.status(ref).catch(() => undefined);
+    const owner = await observeTurnOwner(
+      this.runtime,
+      ref,
+      turn
+        ? systemTurnOwner(state, a.id, ref, turn)
+        : { project_id: project, assignment_id: a.id },
+      !!turn,
+    );
+    const workspace = await stallWorkspace(
+      state,
+      a,
+      execution,
+      this.signal,
+      undefined,
+      false,
+      true,
+    );
+    if (this.signal.aborted) return "skipped";
+    const observedOwner = owner?.ok ? owner.value : "unobserved";
+    const decision = stalledSessionDecision({
+      trigger: stalled.trigger,
+      can_restart: view?.can_restart === true,
+      status: status?.ok ? status.value : undefined,
+      owner: observedOwner,
+      workspace,
+    });
+    const facts = {
+      workspace,
+      terminal_state: status?.ok ? status.value.agent : null,
+      process_state: status?.ok ? status.value.process : null,
+      terminal_owner: observedOwner,
+    };
+    if (decision.action === "skip") return "skipped";
+    if (decision.action === "hand_off") {
+      this.handOff(project, stalled, decision.reason, facts);
+      return "kept";
+    }
+    const result = await releaseStalledSession(
+      this.store,
+      project,
+      stalled,
+      this.runtime,
+      this.clock,
+      {
+        execution,
+        signal: this.signal,
+        stillWaiting: (fresh, current) =>
+          stalledSessions(
+            fresh,
+            this.liveNotes(project),
+            this.clock.now(),
+            this.releaseMs,
+            this.doneMs,
+          ).some(
+            (s) =>
+              s.assignment.id === current.id &&
+              s.trigger === stalled.trigger &&
+              s.incident === stalled.incident,
+          ),
+        scrubCredentials: this.scrubCredentials,
+      },
+    );
+    if (result.outcome === "settled") return "released";
+    if (TRANSIENT_RELEASE_REFUSALS.has(result.reason)) return "skipped";
+    this.handOff(project, stalled, result.reason, facts);
+    return "kept";
+  }
+  /** C-739: once per incident, to PM (not host operations). */
+  private handOff(
+    project: ProjectId,
+    stalled: StalledSession,
+    reason: string,
+    facts: Record<string, string | null>,
+  ) {
+    const a = stalled.assignment;
+    this.store.uow.run((tx) => {
+      const fresh = loadCommandState(tx, project);
+      if (sessionReleaseHandedOff(fresh, a.id, stalled.incident)) return;
+      const minutes = Math.round(stalled.waited_ms / 60_000);
+      const what = stalled.turn
+        ? `系统代为结束 ${stalled.turn.id} 后 ${minutes} 分钟，${a.id}（${a.machine_id}）的旧回合仍确认不了是否结束`
+        : stalled.trigger === "turn_done"
+          ? `${a.id}（${a.machine_id}）上一轮已结束、会话空闲，排队的 ${stalled.queued_run_id} ${minutes} 分钟仍未开始`
+          : `${a.id}（${a.machine_id}）有待办 ${minutes} 分钟仍派不出新 Run，空闲回收已 ${stalled.withdrawals} 次被撤回`;
+      const event = {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project, stalled.card_id ?? undefined),
+        ...(stalled.card_id ? { card_id: stalled.card_id } : {}),
+        actor: { kind: "system" as const, project_id: project },
+        type: SESSION_RELEASE_HELD,
+        created_at: this.clock.now(),
+        payload: {
+          assignment_id: a.id,
+          machine_id: a.machine_id,
+          trigger: stalled.trigger,
+          incident: stalled.incident,
+          ...(stalled.turn
+            ? { system_finished_run_id: stalled.turn.id }
+            : stalled.trigger === "turn_done"
+              ? {}
+              : { withdrawals: stalled.withdrawals ?? 0 }),
+          ...(stalled.queued_run_id
+            ? { queued_run_id: stalled.queued_run_id }
+            : {}),
+          notification_ids: [...stalled.notification_ids],
+          waited_ms: stalled.waited_ms,
+          reason,
+          ...facts,
+          managed_release: { command: managedReleaseCommand(a.id) },
+          body: `${what}，系统没有自动释放：${reason}。`,
+          next_step: managedReleaseNextStep(a.id),
+        },
+      };
+      tx.events.append(project, event);
+      recordNotification(this.store.database, {
+        project_id: project,
+        event_id: event.id,
+        card_id: stalled.card_id ?? undefined,
+        seq: event.seq,
+        at: event.created_at,
+        kind: "run_attention",
+        recipient: { kind: recoveryPm(a) },
+      });
+    });
+  }
   async tick(
     project: ProjectId,
     snapshot: (
@@ -933,6 +1219,9 @@ export class StallPatrol {
     ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
   ) {
     this.askHeldResume(project);
+    // Synchronous unless a session is due: no extra await on an idle pass.
+    const due = this.stalledDue(project);
+    if (due.length && !this.signal.aborted) await this.releaseStalled(due);
     const { state, actionable, patrol, turns } = this.publish(project);
     const open = new Set(
       turns.map((s) => `${project}/${s.assignment_id}/${turnKey(s)}`),

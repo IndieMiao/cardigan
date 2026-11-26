@@ -7,11 +7,14 @@ export const sessionMaintenanceReasons = {
   stopped: "等待人工恢复",
   held: "卡片已暂停",
   retained_for_dispatch: "已保留终端，待投递时核对归属和空闲状态",
+  business_work_cooldown: "空闲回收刚因待办交回，冷却期内不再回收",
+  retirement_refused: "会话多次拒绝空闲回收，已通知，冷却期内不再回收",
   retirement_pending: "等待确认会话退出",
   retirement_timeout: "终止超时，保留会话等待重试",
   retirement_unavailable: "未核：正常终止能力或进程身份不可用",
   run_busy: "等待未结束的执行",
   operation_pending: "等待会话操作结束",
+  startup_failure_pending: "启动失败待处理",
   no_session: "没有终端会话",
   recent_activity: "尚未达到空闲候选时长",
   activity_unknown: "未核：缺少有效活动时间",
@@ -46,8 +49,14 @@ export function sessionMaintenanceNeedsAttention(
     "no_session",
     "recent_activity",
     "retained_for_dispatch",
+    // C-739: the dispatcher delivers the waiting work meanwhile.
+    "business_work_cooldown",
+    // C-746: the single retirement notice already names the cause and commands.
+    "retirement_refused",
     // C-672: the system closes the terminal and resumes on its own.
     "agent_exited",
+    // C-752: the startup-failure report already asks PM or the human.
+    "startup_failure_pending",
   ].includes(reason);
 }
 export interface SessionMaintenanceView {

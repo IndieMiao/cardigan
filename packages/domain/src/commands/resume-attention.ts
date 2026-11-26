@@ -1,5 +1,5 @@
 import type { Card, WorkItem } from "../entities.js";
-import { fullEventHistory } from "../event-index.js";
+import { eventsOfTypes } from "../event-index.js";
 import type { AssignmentId, WorkItemId } from "../ids.js";
 import type { CommandDraft, CommandState } from "./core.js";
 import { workCompleted } from "./work-status.js";
@@ -24,6 +24,26 @@ type Attention = {
 };
 
 const cache = new WeakMap<CommandState, ReadonlyMap<WorkItemId, Attention>>();
+/** Every event type the loop in `resumeAttention` acts on. */
+const RESUME_ATTENTION_TYPES = [
+  "delivery_submitted",
+  "review_submitted",
+  "card_merged",
+  "card_updated",
+  "assignment_stopped",
+  "assignment_stop_released",
+  "run_queued",
+  "run_dispatched",
+  "work_item_resume_requested",
+  "precheck_wait_delivered",
+  "blocker_wait_delivered",
+  "blocker_reported",
+  "work_item_assigned",
+  "work_item_replaced",
+  "work_item_resume_deferred",
+  "precheck_wait_escalated",
+  "baseline_conflict_limit_reached",
+];
 
 /** Rebuild the PM inbox from card facts. A new report starts a new wait;
  * a wake, successor Run or inline delivery settles the previous incident. */
@@ -45,7 +65,8 @@ export function resumeAttention(state: CommandState) {
     return stopped.delete(id);
   };
   // Run queue and dispatch telemetry interleave with stops: keep array order.
-  for (const e of fullEventHistory(state.events)) {
+  // C-671: only these types change the result; the index keeps their order.
+  for (const e of eventsOfTypes(state.events, RESUME_ATTENTION_TYPES)) {
     if (!e.card_id || e.actor.project_id !== state.project_id) continue;
     if (typeof e.payload !== "object" || !e.payload || Array.isArray(e.payload))
       continue;

@@ -381,6 +381,8 @@ export function fakeClient(
     decisionComment: async () => undefined,
     cancelAction: async () => undefined,
     completeAction: async () => undefined,
+    reassignAction: async () => undefined,
+    setActionMergeBlocking: async () => undefined,
     updateCard: async () => undefined,
     cancelCard: async () => undefined,
     supersedeCard: async () => undefined,

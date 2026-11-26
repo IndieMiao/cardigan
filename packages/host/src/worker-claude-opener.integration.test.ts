@@ -58,6 +58,7 @@ test("the worker emits only activity from the fd and original record time", asyn
       cwd: "/worktree/src",
       session_id: "one",
       updated_at: new Date(at).toISOString(),
+      written_at: new Date(at).toISOString(),
     },
     path,
     activity: {
@@ -91,6 +92,7 @@ test.each([false, true])(
         cwd: "/worktree/src",
         session_id: "one",
         updated_at: later,
+        written_at: later,
       },
       activity: {
         cwd: "/worktree/src",

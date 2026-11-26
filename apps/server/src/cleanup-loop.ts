@@ -14,6 +14,7 @@ import {
   isDecisionOther,
   releaseAssignment,
   requestWorktreeCleanup,
+  routeWorktreeCleanupDecisions,
 } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 import { unrevokedTokensForProject } from "@cardigan/store";
@@ -37,6 +38,12 @@ import {
  * `worktree_cleanup` decision for the human; the loop executes the answer.
  */
 export const DEFAULT_CLEANUP_INTERVAL_MS = 60_000;
+/**
+ * C-747: how often an unchanged set of owner-held worktree cleanup questions
+ * is re-checked for delegation (e.g. PM Ops came back). New questions route
+ * when raised and the preference hook moves them when the category turns on.
+ */
+const ROUTE_RECHECK_MS = 10 * 60_000;
 
 export interface CleanupOptions {
   readonly store: Store;
@@ -74,6 +81,11 @@ export class CleanupExecutor {
     Set<"releases" | "owners" | "builds">
   >();
   private readonly builds = new MaintenanceBatch<ProjectId, string>();
+  /** C-747: last routing check of owner-held worktree cleanup questions. */
+  private readonly routing = new Map<
+    ProjectId,
+    { readonly waiting: string; readonly at: number }
+  >();
   /**
    * C-664: per pass, what each machine's project roots hold. A machine whose
    * listing failed is `null`: nothing on it is judged absent or removed.
@@ -144,6 +156,7 @@ export class CleanupExecutor {
     const done =
       this.pass.get(project_id) ?? new Set<"releases" | "owners" | "builds">();
     this.pass.set(project_id, done);
+    this.routeCleanupDecisions(project_id);
     if (!done.has("releases")) {
       await profileSpan("cleanup.release_closed", () =>
         this.releaseClosed(project_id),
@@ -430,6 +443,46 @@ export class CleanupExecutor {
           );
       },
     );
+  }
+
+  /**
+   * C-747: open worktree cleanup questions still with the human move to PM
+   * once data_deletion is delegated and PM Ops is active (questions raised
+   * before deployment, or while PM Ops was away). Only a write when one moves.
+   */
+  private routeCleanupDecisions(project_id: ProjectId) {
+    const waiting = this.options.store.uow
+      .read((tx) =>
+        tx.decisions
+          .list(project_id)
+          .filter(
+            (q) =>
+              q.trigger === "worktree_cleanup" &&
+              q.decider === "human" &&
+              ["open", "provisional", "snoozed"].includes(q.status),
+          )
+          .map((q) => q.id),
+      )
+      .join(",");
+    const last = this.routing.get(project_id);
+    const now = Date.parse(this.clock.now());
+    if (
+      !waiting ||
+      (last?.waiting === waiting && now - last.at < ROUTE_RECHECK_MS)
+    )
+      return;
+    this.routing.set(project_id, { waiting, at: now });
+    const routed = runSystemCommand(
+      this.options.store,
+      project_id,
+      (state, actor, ports) =>
+        routeWorktreeCleanupDecisions(state, actor, ports),
+      this.clock,
+    );
+    if (!routed.ok)
+      this.report(
+        `worktree cleanup routing was rejected: ${routed.error.code} ${routed.error.message}`,
+      );
   }
 
   /** Only absence proves there is no terminal resource left to sweep. */

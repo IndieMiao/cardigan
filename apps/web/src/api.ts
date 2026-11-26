@@ -615,6 +615,10 @@ export interface HumanActionHandoffView {
 export interface HumanActionView {
   readonly handoff?: HumanActionHandoffView;
   readonly id: string;
+  readonly card_id?: string;
+  /** C-760: absent on older servers; legacy holds may lack a prerequisite. */
+  readonly blocks_merge?: boolean;
+  readonly prerequisite?: MergePrerequisite;
   readonly instructions: string;
   readonly why_human: string;
   readonly expected_return: string;
@@ -916,7 +920,21 @@ export interface PreMergeCheckView {
   readonly note: string | null;
   readonly updated_at: string;
 }
+/** C-760: credential or external-account preparation that holds a merge. */
+export type MergePrerequisite = "credential" | "external_account";
+export type MergeBlockingInput =
+  | {
+      readonly blocks_merge: true;
+      readonly prerequisite: MergePrerequisite;
+      readonly reason: string;
+    }
+  | { readonly blocks_merge: false; readonly reason: string };
 export interface MergeConfirmationView {
+  /** C-760: open actions still holding this merge; older servers omit it. */
+  readonly blocking_human_actions?: readonly {
+    readonly id: string;
+    readonly title: string;
+  }[];
   readonly decision_evidence_required?: readonly {
     readonly decision_id: string;
     readonly option: string | null;
@@ -977,6 +995,8 @@ export interface NeedsAction
   readonly triage?: "pm_ops" | "human" | "host";
   /** C-212: host actions only; external operators never wake host_ops. */
   readonly host_operator?: "external" | "host_ops";
+  /** C-742: `operator` actions belong to 张良; absent on older servers means owner. */
+  readonly executor?: "owner" | "operator";
   readonly handoff?: HumanActionHandoffView;
   readonly original_request?: {
     readonly instructions: string;
@@ -987,6 +1007,9 @@ export interface NeedsAction
   readonly waited_ms: number | null;
   readonly due: string | null;
   readonly blocked_work_items: readonly string[];
+  /** C-760: true while the action holds its card's merge. */
+  readonly blocks_merge?: boolean;
+  readonly prerequisite?: MergePrerequisite;
   readonly completion_notice?: string;
   /** C-179: a pre-merge check passed while this action still holds the merge. */
   readonly pre_merge_check_reminder?: {
@@ -1017,6 +1040,20 @@ export interface NeedsStoryProposal {
     readonly owner_role: string;
   }[];
 }
+/** C-750: a finished card waiting for the owner to mark it done. */
+export interface NeedsCardToClose {
+  readonly card_id: string;
+  readonly card_title: string;
+  readonly template: string;
+  readonly required_work_items: number;
+  readonly close_request: {
+    readonly reason: string;
+    readonly set_by: string;
+    readonly set_at: string;
+  } | null;
+  readonly since: string | null;
+  readonly waited_ms: number | null;
+}
 export interface StoryConfirmation {
   readonly card_id: string;
   readonly version: number;
@@ -1026,6 +1063,8 @@ export interface StoryConfirmation {
 export interface NeedsPage {
   /** C-503: older servers omit it. */
   readonly story_proposals?: readonly NeedsStoryProposal[];
+  /** C-750: older servers omit it. */
+  readonly cards_to_close?: readonly NeedsCardToClose[];
   readonly waiting_merge_checks_count?: number;
   /** C-171: the confirmations the waiting summary counts (queued or running). */
   readonly waiting_merge_check_items?: readonly {
@@ -1222,6 +1261,9 @@ export interface RunView {
   readonly queue_order?: DispatchOrder;
   readonly dispatch_tier?: 1 | 2 | 3 | 4;
   readonly dispatch_reason?: string;
+  /** C-736: resources admission claimed and why; absent on older Runs. */
+  readonly resource_keys?: readonly string[];
+  readonly resource_reason?: string;
   readonly employee_id?: string;
   readonly launch_profile_ref?: string;
   readonly id: string;
@@ -1355,6 +1397,16 @@ export interface MachineCapabilityView {
     | { readonly kind: "search"; readonly locations: readonly string[] };
 }
 
+/** C-608 readiness patrol: fixed text per item; never worker output. */
+export interface MachineReadinessView {
+  readonly checked_at: string;
+  readonly items: readonly {
+    readonly key: string;
+    readonly status: "ok" | "warning" | "repaired" | "failed" | "unknown";
+    readonly detail: string;
+  }[];
+}
+
 export interface ExecutionMachine {
   readonly id: string;
   readonly label: string;
@@ -1415,6 +1467,9 @@ export interface MachineBindingView {
     readonly checked_at: string;
     readonly blockers: readonly string[];
     readonly available: boolean;
+    /** C-608: non-blocking findings; older servers omit them. */
+    readonly warnings?: readonly string[];
+    readonly readiness?: MachineReadinessView;
   } | null;
   /**
    * C-666: this project's worktrees/builds/runs on a remote worker and the
@@ -2771,6 +2826,8 @@ export interface CardiganClient {
     delegateFuture?: boolean,
     snoozeUntil?: string,
     mergeOverrideReason?: string,
+    /** C-760: with an override, turn open merge holds into follow-ups. */
+    mergeOverrideFollowUp?: boolean,
   ): Promise<void>;
   /** C-192: submit the decision's fresh suggestion ("按建议处理"). */
   applySuggestion(
@@ -2792,6 +2849,21 @@ export interface CardiganClient {
   cancelAction(
     projectId: string,
     id: string,
+    reason: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  /** C-760: switch an action between holding the merge and a follow-up. */
+  setActionMergeBlocking(
+    projectId: string,
+    id: string,
+    input: MergeBlockingInput,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  /** C-742: hand a human action to the owner or to 张良. */
+  reassignAction(
+    projectId: string,
+    id: string,
+    executor: "owner" | "operator",
     reason: string,
     idempotencyKey?: string,
   ): Promise<void>;
@@ -4109,6 +4181,7 @@ export class HttpCardiganClient implements CardiganClient {
     delegateFuture = false,
     snoozeUntil?: string,
     mergeOverrideReason?: string,
+    mergeOverrideFollowUp?: boolean,
   ): Promise<void> {
     await this.write(
       projectId,
@@ -4121,6 +4194,7 @@ export class HttpCardiganClient implements CardiganClient {
         ...(mergeOverrideReason !== undefined
           ? { merge_override_reason: mergeOverrideReason }
           : {}),
+        ...(mergeOverrideFollowUp ? { merge_override_follow_up: true } : {}),
       },
       idempotencyKey,
     );
@@ -4171,6 +4245,33 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       `human-actions/${encodeURIComponent(id)}/cancel`,
       { reason },
+      idempotencyKey,
+    );
+  }
+  async setActionMergeBlocking(
+    projectId: string,
+    id: string,
+    input: MergeBlockingInput,
+    idempotencyKey: string = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `human-actions/${encodeURIComponent(id)}/merge-blocking`,
+      input,
+      idempotencyKey,
+    );
+  }
+  async reassignAction(
+    projectId: string,
+    id: string,
+    executor: "owner" | "operator",
+    reason: string,
+    idempotencyKey: string = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `human-actions/${encodeURIComponent(id)}/reassign`,
+      { executor, reason },
       idempotencyKey,
     );
   }

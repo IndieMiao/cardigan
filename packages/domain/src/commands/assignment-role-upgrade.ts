@@ -1,4 +1,5 @@
 import type { Actor, Assignment } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import { hostOpsPending, pendingHostOpsActions } from "../host-ops.js";
 import type { AssignmentId } from "../ids.js";
 import { retirementWaitReceipt } from "../retirement-session.js";
@@ -257,9 +258,8 @@ export function deferIdleAssignmentRoleUpgrade(
     const upgrade = previous.role_upgrade;
     const started_at =
       upgrade.started_at ??
-      state.events.find(
+      eventsOfType(state.events, "assignment_role_upgrade_started").find(
         (e) =>
-          e.type === "assignment_role_upgrade_started" &&
           e.actor.kind === "system" &&
           (e.payload as { assignment_id?: string }).assignment_id ===
             previous.id &&

@@ -57,7 +57,8 @@ import { CLI_PRE_MERGE_COPY as COPY } from "./pre-merge-copy.js";
 const USAGE = [
   "用法：",
   "  cardigan merge status [C-n] [--project <p>]       看待合并的卡片、确认和合并计划",
-  "  cardigan merge confirm <C-n> [--quote <原话>] [--yes --reason <理由>]  检查通过后确认；强行确认必须同时提供 --yes 和理由",
+  "  cardigan merge confirm <C-n> [--quote <原话>] [--yes --reason <理由> [--follow-up-actions]]  检查通过后确认；强行确认必须同时提供 --yes 和理由",
+  "    未完成的挡合并人工事项会继续挡住合并；--follow-up-actions 把它们一并改为合并后跟进",
   "  cardigan merge hold <C-n> --reason <原因> [--until <带时区时间>] [--quote <原话>]  暂缓合并（到期自动恢复）",
   "  cardigan merge request <C-n>                      旧 hold 之后重新发起合并确认",
   "  cardigan merge finish-undispatched <C-n> <attempt> [--project <p>]  在线核实并收尾未派发的旧检查（仅人）",
@@ -75,7 +76,7 @@ interface Args {
   readonly positionals: readonly string[];
   readonly flags: Readonly<Record<string, string | true>>;
 }
-const BOOLEAN_FLAGS = new Set(["yes"]);
+const BOOLEAN_FLAGS = new Set(["yes", "follow-up-actions"]);
 function parseArgs(args: readonly string[]): Args {
   const positionals: string[] = [];
   const flags: Record<string, string | true> = {};
@@ -563,7 +564,12 @@ async function mergeConfirm(
             decision_id: confirmation.id,
             option,
             ...(option === "merge" && parsed.flags.yes === true
-              ? { merge_override_reason: holdReason ?? "" }
+              ? {
+                  merge_override_reason: holdReason ?? "",
+                  ...(parsed.flags["follow-up-actions"] === true
+                    ? { merge_override_follow_up: true }
+                    : {}),
+                }
               : {}),
             rationale:
               option === "merge" ? `命令行确认合并 ${id}` : (holdReason ?? ""),

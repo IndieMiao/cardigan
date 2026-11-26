@@ -90,6 +90,18 @@ export {
 } from "./deployment-control.js";
 export { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 export { DeploymentDiskMonitor } from "./deployment-disk.js";
+export {
+  type HcLinkState,
+  MAINTENANCE_TERMINAL,
+  type MaintenanceBusyItem,
+  MaintenanceConflict,
+  type MaintenanceOperation,
+  type MaintenancePhase,
+  type MaintenanceRecord,
+  MaintenanceUnavailable,
+  maintenanceActive,
+  readMaintenance,
+} from "./deployment-maintenance.js";
 export { NodeDeploymentDriver } from "./deployment-node.js";
 export {
   deploymentRolePolicyHash,
@@ -144,6 +156,16 @@ export {
 export * from "./github-probe.js";
 export * from "./github-rate-limit.js";
 export {
+  fetchHcArchive,
+  type HcRelease,
+  type HcUpgradePlan,
+  hcHelper,
+  hcStagingRecovery,
+  hcUpgradeNeedsStaging,
+  hcUpgradeRecoveryWork,
+  prepareHcUpgrade,
+} from "./hc-upgrade.js";
+export {
   DEFAULT_HELD_BACKLOG_MS,
   heldBacklogMs,
   heldBacklogs,
@@ -161,11 +183,19 @@ export {
   tryHostOpsLock,
 } from "./host-ops-lock.js";
 export {
+  type IdleScarceSession,
+  idleScarceSessions,
+} from "./idle-scarce-sessions.js";
+export {
   boundedRetirementError,
   idleRetirementPolicy,
   observeRetirementForDispatch,
   recordRetirementDispatch,
 } from "./idle-session-retirement.js";
+export {
+  type IdleSessionStop,
+  stopIdleSession,
+} from "./idle-session-stop.js";
 export {
   type LaunchedRun,
   type LaunchHost,
@@ -227,6 +257,37 @@ export { configureMachinePlacement } from "./machine-placement.js";
 export * from "./macos-check-config.js";
 export * from "./macos-check-result.js";
 export * from "./macos-check-service.js";
+export {
+  type CommandResult,
+  commandWork,
+  type MaintenanceDriver,
+  type MaintenanceOutcome,
+  MaintenanceRunner,
+  type MaintenanceStart,
+  type MaintenanceWork,
+  maintenanceStatus,
+  type SoftwareState,
+  shellQuote,
+} from "./maintenance.js";
+export {
+  describeBusy,
+  type MaintenanceActivity,
+  maintenanceActivity,
+} from "./maintenance-activity.js";
+export {
+  DEFAULT_MAINTENANCE_WAIT_MINUTES,
+  loadMaintenanceConfig,
+  type MaintenanceConfig,
+  type MaintenanceHcTarget,
+  parseMaintenanceConfig,
+} from "./maintenance-config.js";
+export {
+  appendMaintenanceAudit,
+  MAINTENANCE_AUDIT_EVENT,
+  MAINTENANCE_NOTICE_EVENT,
+  nodeMaintenanceDriver,
+  readSoftwareState,
+} from "./maintenance-node.js";
 export {
   DEFAULT_MCP_HOST,
   DEFAULT_MCP_PORT,
@@ -351,9 +412,22 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
-export { previewRunResources, resourceTarget } from "./run-resource-worker.js";
+export {
+  DEFAULT_RUN_DIR_RETENTION_DAYS,
+  type RunDirReply,
+  type RunDirResult,
+  reclaimableRunDirectories,
+  reclaimRunDirectories,
+} from "./run-dir-retention.js";
+export {
+  previewRunResources,
+  resourceTarget,
+  sessionFilesRevision,
+} from "./run-resource-worker.js";
 export {
   assignmentResourceKeys,
+  type RunResourceClaim,
+  runResourceClaim,
   runResourceKeys,
   unclaimedResourceKeys,
 } from "./run-resources.js";
@@ -369,6 +443,14 @@ export * from "./runtime-targets.js";
 export * from "./runtime-workers-config.js";
 export { pinStallBackup } from "./stall-backup.js";
 export type { SessionExitVerdict } from "./stall-evidence.js";
+export {
+  DEFAULT_DONE_SESSION_RELEASE_MS,
+  DEFAULT_STALLED_SESSION_RELEASE_MS,
+  doneSessionReleaseMs,
+  managedReleaseCommand,
+  SESSION_RELEASE_HELD,
+  stalledSessionReleaseMs,
+} from "./stalled-session-release.js";
 export {
   StandingPmRecovery,
   standingPmStallPolicy,
@@ -445,6 +527,7 @@ export {
   type WorkerFailureIdentity,
 } from "./worker-failure-context.js";
 export { WorkerGitTransport } from "./worker-git.js";
+export { helperMismatch } from "./worker-helper-release.js";
 export { manualUpgradeKey } from "./worker-maintenance.js";
 export { workerMcpConfig } from "./worker-mcp.js";
 export * from "./worker-observations.js";
@@ -456,10 +539,13 @@ export { upgradeKey } from "./worker-upgrade-gate.js";
 export * from "./worker-wizard-files.js";
 export * from "./worker-wizard-form.js";
 export {
+  type ArtifactCheckout,
   missingWorktreePrompt,
+  PreparationNotStarted,
   prepareReadonlyWorktree,
   prepareRoleWorktree,
   readonlyWorktreeTarget,
+  recordArtifactCheckout,
   reviewTargetSha,
   type WorktreeProvider,
   type WorktreeRequest,

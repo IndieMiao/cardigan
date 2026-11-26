@@ -59,6 +59,10 @@ const storyTpl = tpl({
 });
 
 const base = cardDetail();
+// C-701: `?long` gives every card a timeline long enough to scroll.
+const timelineLength = new URLSearchParams(location.search).has("long")
+  ? 40
+  : 6;
 const entries = (id: string, n: number) =>
   Array.from({ length: n }, (_, i) =>
     timelineEntry({
@@ -213,8 +217,13 @@ const make = (
     "in_progress",
     "todo",
   ) as CardDetail["work_items"],
-  timeline: entries(id, 6),
-  counts: { timeline: 6, deliveries: 1, reviews: 0, open_decisions: 0 },
+  timeline: entries(id, timelineLength),
+  counts: {
+    timeline: timelineLength,
+    deliveries: 1,
+    reviews: 0,
+    open_decisions: 0,
+  },
   ...extra,
 });
 
@@ -343,7 +352,12 @@ const details: CardDetail[] = [
       mark_done: { allowed: true, reason: null },
       work_items: [],
       attachments: evidence,
-      counts: { timeline: 6, deliveries: 0, reviews: 0, open_decisions: 0 },
+      counts: {
+        timeline: timelineLength,
+        deliveries: 0,
+        reviews: 0,
+        open_decisions: 0,
+      },
     },
   ),
   make(

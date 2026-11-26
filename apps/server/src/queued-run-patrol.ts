@@ -126,6 +126,7 @@ export class QueuedRunPatrol {
                         c.acked_seq >= n.seq,
                     ),
                 ),
+              state.timeline,
             ),
           );
       }

@@ -118,7 +118,7 @@ export interface M4Fixture {
     input: {
       readonly kind?: Delivery["kind"];
       readonly subject: string;
-      readonly subject_kind?: "git_head" | "doc_version";
+      readonly subject_kind?: "git_head" | "artifact_sha256" | "doc_version";
       readonly verifiers: readonly WorkItem["id"][];
     },
   ): Promise<Delivery>;

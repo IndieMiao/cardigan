@@ -2,7 +2,7 @@ import type { CommandState } from "./commands/core.js";
 import { stoppedByHuman } from "./commands/stop-state.js";
 import { canStartWork } from "./commands/workflow.js";
 import type { Assignment, Run, RuntimeRef, WorkItem } from "./entities.js";
-import { eventById } from "./event-index.js";
+import { eventById, eventsOfTypes } from "./event-index.js";
 import { flowAtLeast } from "./flow.js";
 import { automaticContextActionForRun, hostOpsPending } from "./host-ops.js";
 import { verificationTarget } from "./verification-activity.js";
@@ -95,12 +95,12 @@ export function recoveryChainUsed(state: CommandState, run: Run): boolean {
   const policy = recoveryPolicy(state, run);
   return (
     !!policy &&
-    state.events.some(
+    eventsOfTypes(state.events, [
+      "run_dispatch_recovered",
+      "run_preparation_recovered",
+    ]).some(
       (e) =>
         e.actor.kind === "system" &&
-        ["run_dispatch_recovered", "run_preparation_recovered"].includes(
-          e.type,
-        ) &&
         field(e.payload, "assignment_id") === run.assignment_id &&
         field(e.payload, "reason") !== "provider_unavailable" &&
         field(e.payload, "recovery_root_run_id") === policy.root_run_id,

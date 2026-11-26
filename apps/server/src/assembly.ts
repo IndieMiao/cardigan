@@ -36,6 +36,7 @@ import {
   startBackupLoop,
   startReconcileLoop,
 } from "./reconcile-loop.js";
+import { startRunDirLoop } from "./run-dir-cleanup.js";
 import { startRunResourceLoop } from "./run-resource-cleanup.js";
 import type { MachineHost } from "./web/machine-host.js";
 import { WorkerUsageMonitor, workerLowFreeBytes } from "./worker-usage.js";
@@ -53,6 +54,7 @@ export interface ControlPlaneOptions {
   readonly upstream?: LaunchConfig;
   readonly hostOpsTick?: () => Promise<void>;
   readonly harnessActivity?: DispatcherOptions["harnessActivity"];
+  readonly harnessFileActivity?: DispatcherOptions["harnessFileActivity"];
   readonly inspectHarnessActivity?: DispatcherOptions["inspectHarnessActivity"];
   readonly inactivityInspectionTimeoutMs?: number;
   readonly hostOpsPatrolIntervalMs?: number;
@@ -70,6 +72,7 @@ export interface ControlPlaneOptions {
   readonly recoverLaunches?: DispatcherOptions["recoverLaunches"];
   readonly beforeWake?: DispatcherOptions["beforeWake"];
   readonly frameworkWaitReminderMs?: number;
+  readonly storySummaryHandoffMs?: number;
   readonly baselineConflictMaxResumes?: number;
   readonly authorPrecheckFailureLimit?: number;
   readonly standing?: StandingResolver;
@@ -86,6 +89,7 @@ export interface ControlPlaneOptions {
   readonly queuedRecheckAfterMs?: number;
   readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
+  readonly scarceInactiveCancel?: DispatcherOptions["scarceInactiveCancel"];
   readonly lossGraceMs?: number;
   readonly eventSilenceMs?: number;
   readonly runtimeFailureLimit?: number;
@@ -154,6 +158,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(options.frameworkWaitReminderMs !== undefined
       ? { frameworkWaitReminderMs: options.frameworkWaitReminderMs }
       : {}),
+    ...(options.storySummaryHandoffMs !== undefined
+      ? { storySummaryHandoffMs: options.storySummaryHandoffMs }
+      : {}),
     ...(options.authorPrecheckFailureLimit !== undefined
       ? { authorPrecheckFailureLimit: options.authorPrecheckFailureLimit }
       : {}),
@@ -171,6 +178,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(options.hostOpsTick ? { hostOpsTick: options.hostOpsTick } : {}),
     ...(options.harnessActivity
       ? { harnessActivity: options.harnessActivity }
+      : {}),
+    ...(options.harnessFileActivity
+      ? { harnessFileActivity: options.harnessFileActivity }
       : {}),
     ...(options.inspectHarnessActivity
       ? { inspectHarnessActivity: options.inspectHarnessActivity }
@@ -198,6 +208,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(options.inactiveCancelAfterMs === undefined
       ? {}
       : { inactiveCancelAfterMs: options.inactiveCancelAfterMs }),
+    ...(options.scarceInactiveCancel
+      ? { scarceInactiveCancel: options.scarceInactiveCancel }
+      : {}),
     ...(options.runLimit ? { runLimit: options.runLimit } : {}),
     ...(options.leases ? { leases: options.leases } : {}),
     ...(options.projectQuota ? { projectQuota: options.projectQuota } : {}),
@@ -373,6 +386,16 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           options.cleanupIntervalMs,
         )
       : undefined;
+  // C-743: released Assignments' run directories, on every machine.
+  const runDirs =
+    options.git && options.runtime instanceof RuntimeTargets
+      ? startRunDirLoop(
+          options.store,
+          options.runtime,
+          (line) => report(new Error(line)),
+          options.startup,
+        )
+      : undefined;
   const reconcile =
     options.git === undefined
       ? undefined
@@ -448,6 +471,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     push?.loop.done,
     cleanup?.loop.done,
     resources?.done,
+    runDirs?.done,
     reconcile?.loop.done,
     backup?.loop.done,
     maintenance?.loop.done,
@@ -475,6 +499,8 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       await merge?.loop.stop();
       await push?.loop.stop();
       await cleanup?.loop.stop();
+      // A removal round finishes its current directory before the Store closes.
+      await runDirs?.stop();
       await reconcile?.loop.stop();
       await backup?.loop.stop();
       await maintenance?.loop.stop();

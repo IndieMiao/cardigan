@@ -9,9 +9,9 @@ import {
 import {
   digestMismatch,
   minimumWorkerPublicationProtocol,
-  previousWorkerHelperRelease,
   protocolMismatch,
   workerHelperDigests,
+  workerUsageProtocol,
 } from "./worker-helper-release.js";
 
 type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
@@ -30,7 +30,6 @@ r=json.loads(sys.argv[1])
 failures=[]
 protocol=None
 matching=None
-previous=None
 def require(value):
     if not value: raise ValueError()
 def protected(path):
@@ -53,9 +52,7 @@ try:
         ('worker-primitives.py',pathlib.Path(r['file_helper']).with_name('worker-primitives.py')))
     # Unknown (unsafe/unreadable) is not evidence of an installed release mismatch.
     for _,path in paths: protected(path)
-    installed=[(name,hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()) for name,path in paths]
-    matching=all(digest==r['digests'][name] for name,digest in installed)
-    previous=all(digest==(r.get('previous') or {}).get(name) for name,digest in installed)
+    matching=all(hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()==r['digests'][name] for name,path in paths)
     files=module(r['file_helper'],'worker_files')
     protocol=getattr(files, 'PUBLICATION_PROTOCOL', 1)
     git=module(r['git_helper'],'worker_git')
@@ -91,12 +88,12 @@ version=None
 try:
     version=subprocess.check_output(['hc','--version'],stderr=subprocess.DEVNULL,timeout=5).decode().strip()
 except Exception: pass
-print(json.dumps(dict(failures=failures,version=version,protocol=protocol,matching=matching,previous=previous)))
+print(json.dumps(dict(failures=failures,version=version,protocol=protocol,matching=matching)))
 `;
 
 /**
  * C-666: which admitted release each binding (target fingerprint) ran at its
- * latest readiness probe in this process. "previous" is the exact release
+ * latest readiness probe in this process. "previous" is a protocol-2 helper,
  * before the usage report: it launches, but its usage report is skipped.
  */
 const releases = new Map<string, "current" | "previous">();
@@ -122,7 +119,6 @@ export async function workerReadiness(
       workerReadinessScript,
       JSON.stringify({
         digests: workerHelperDigests(),
-        previous: previousWorkerHelperRelease.digests,
         root: execution.agentRoot,
         gid: execution.gid,
         project: execution.target.project_id,
@@ -138,7 +134,6 @@ export async function workerReadiness(
     const result = JSON.parse(stdout) as {
       protocol: unknown;
       matching: unknown;
-      previous?: unknown;
       failures: unknown;
       version: unknown;
     };
@@ -164,21 +159,22 @@ export async function workerReadiness(
       !blockers.includes("worker_helpers")
     )
       blockers.push("worker_helpers");
-    // C-666: the exact previous release is admitted; only its usage report is skipped.
-    const previous =
-      result.matching === false &&
-      result.previous === true &&
-      protocol === previousWorkerHelperRelease.protocol;
+    // C-666: protocol 2 is still admitted. Its digest differs from the
+    // deployed release, which is only a warning (C-608) and upgrades it; its
+    // usage report is skipped.
     if (protocolKnown && protocol < minimumWorkerPublicationProtocol)
       blockers.unshift(protocolMismatch(protocol));
-    else if (result.matching === false && !previous)
-      blockers.unshift(digestMismatch);
+    else if (result.matching === false) blockers.unshift(digestMismatch);
     if (
       fingerprint !== undefined &&
-      !blockers.includes("worker_helpers") &&
-      (result.matching === true || previous)
+      protocolKnown &&
+      protocol >= minimumWorkerPublicationProtocol &&
+      !blockers.includes("worker_helpers")
     )
-      releases.set(fingerprint, previous ? "previous" : "current");
+      releases.set(
+        fingerprint,
+        protocol < workerUsageProtocol ? "previous" : "current",
+      );
     return [
       ...blockers,
       ...(isHcVersionCompatible(version) ? [] : ["hc_version" as const]),

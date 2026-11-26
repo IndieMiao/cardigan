@@ -1,4 +1,11 @@
-import type { Assignment, Card, Cursor, Event } from "./entities.js";
+import type {
+  Assignment,
+  Card,
+  Cursor,
+  Decision,
+  Event,
+  TimelineEntry,
+} from "./entities.js";
 import type { CardId, ProjectId } from "./ids.js";
 
 /**
@@ -93,6 +100,73 @@ export function officeAlertRecipient(
   const office = officeOnDuty(assignments);
   if (!office || concernsOffice(event, office)) return undefined;
   return office;
+}
+
+/**
+ * C-740: the human closed a question in Needs You or the Workbench. The
+ * Office may have just told the owner it is still waiting, so this rings the
+ * Office right away like an alert. Other recipients are untouched.
+ */
+export const OFFICE_RESOLUTION_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "decision_resolved",
+  "decision_provisionally_resolved",
+]);
+
+/** The question was the human's to answer, so Needs You listed it. */
+function shownInNeedsYou(decision: Decision): boolean {
+  return (
+    decision.decider === "human" ||
+    decision.human_required_reason !== undefined ||
+    decision.resolution?.taken_over_from !== undefined
+  );
+}
+
+/** The Office raised, suggested or referred to the question itself. */
+function officeTouched(
+  decision: Decision,
+  office: Assignment,
+  timeline: readonly TimelineEntry[],
+): boolean {
+  const author = `assignment:${office.id}`;
+  return (
+    decision.raised_by === author ||
+    decision.suggestion?.by === author ||
+    timeline.some(
+      (entry) =>
+        entry.author === author &&
+        !entry.retracted &&
+        (entry.decision_id === decision.id ||
+          entry.refs.some(
+            (ref) => ref.kind === "decision" && ref.id === decision.id,
+          )),
+    )
+  );
+}
+
+/**
+ * Whether the human's resolution of `decision` rings the project's Office.
+ * Only a resolution the human recorded (Needs You or the Workbench, recorded
+ * as `via: needs_you`) on a question Needs You listed, or one the Office
+ * raised, suggested or referred to, counts. Delegated, system and Office-chat
+ * resolutions, other projects' events and an Office not on duty return
+ * `undefined`. Never fails.
+ */
+export function officeResolutionRecipient(
+  project_id: ProjectId,
+  event: Event,
+  decision: Decision | undefined,
+  assignments: readonly Assignment[],
+  timeline: readonly TimelineEntry[] = [],
+): Assignment | undefined {
+  if (!OFFICE_RESOLUTION_EVENT_TYPES.has(event.type)) return undefined;
+  if (event.actor.project_id !== project_id || event.actor.kind !== "human")
+    return undefined;
+  if (decision?.resolution?.via !== "needs_you") return undefined;
+  const office = officeOnDuty(assignments);
+  if (!office) return undefined;
+  return shownInNeedsYou(decision) || officeTouched(decision, office, timeline)
+    ? office
+    : undefined;
 }
 
 export interface OfficeDigestEntry {

@@ -7,10 +7,13 @@ import {
   type CommandPorts,
   type CommandState,
   cardCriticalPathLengths,
+  cardWatchesPending,
   finishSystemReviewLimitRaise,
   flowAtLeast,
   maintainPmCoordination,
+  maintainStorySummaries,
   type ProjectId,
+  preparationAwaitsDeployment,
   type Result,
   refreshCancelledHumanActions,
   refreshCardDependencies,
@@ -19,7 +22,9 @@ import {
   refreshTestReviewLimits,
   remindSystemWaits,
   resumeWorkWaits,
+  retryPreparationAfterDeployment,
   type SystemReviewLimitOutcome,
+  settleCardWatches,
   systemCompleteCard,
   validRoleRulePaths,
   validSystemReviewLimitMax,
@@ -33,7 +38,7 @@ import {
   loadCommandState,
   persistEffect,
 } from "@cardigan/mcp-server";
-import type { Store } from "@cardigan/store";
+import { latestReadyDeploymentSha, type Store } from "@cardigan/store";
 import type { StateLoader } from "./dispatch-state.js";
 import type { MergeGit } from "./git.js";
 
@@ -97,11 +102,13 @@ export function runSystemRules(
     baselineConflictMaxResumes: conflictMaxResumes,
     authorPrecheckFailureLimit,
     frameworkWaitReminderMs,
+    storySummaryHandoffMs,
   }: {
     mergeGateEnabled?: (project: ProjectId) => boolean;
     baselineConflictMaxResumes?: number;
     authorPrecheckFailureLimit?: number;
     frameworkWaitReminderMs?: number;
+    storySummaryHandoffMs?: number;
   } = {},
 ) {
   rotateIdleDeployedRoles(store, project, loadState);
@@ -112,6 +119,11 @@ export function runSystemRules(
   run([
     (state, ports) =>
       refreshCardDependencies(state, actor, ports, frameworkWaitReminderMs),
+    // C-763: one bell per settled PM watch; never changes either card.
+    (state, ports) =>
+      cardWatchesPending(state)
+        ? settleCardWatches(state, actor, ports)
+        : undefined,
     (state, ports) => {
       const cancelledCards = new Set(
         state.cards.filter((c) => c.status === "cancelled").map((c) => c.id),
@@ -139,6 +151,19 @@ export function runSystemRules(
         ports,
       ),
     (state, ports) => maintainPmCoordination(state, actor, ports),
+    // C-762: external Office summary waits; cheap when no story settled.
+    (state, ports) =>
+      state.cards.some((c) => c.story && !c.story.summary_entry_id)
+        ? maintainStorySummaries(state, actor, ports, storySummaryHandoffMs)
+        : undefined,
+    // C-738: once per ready deployment, retry preparation failures from before it.
+    (state, ports) => {
+      if (!preparationAwaitsDeployment(state, clock.now())) return undefined;
+      const sha = latestReadyDeploymentSha(store.database);
+      return sha
+        ? retryPreparationAfterDeployment(state, actor, { sha }, ports)
+        : undefined;
+    },
   ]);
   // Order and candidates come from the state at the start of each loop; every
   // command rechecks its item against the state it actually runs on.

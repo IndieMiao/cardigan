@@ -42,6 +42,7 @@ import {
 import {
   type CandidateDeleteRequest,
   type CandidatePushRequest,
+  type CandidatePushResult,
   CentralGitTransport,
   type CentralRepackMode,
   LocalGitTransport,
@@ -255,7 +256,7 @@ export class CandidatePushNotStarted extends RepositoryLockTimeoutError {}
 
 /** Only a proven pre-transport lock timeout can release a GitHub publication fence. */
 export async function pushCheckCandidateOrWait(
-  push: () => Promise<PushResult>,
+  push: () => Promise<CandidatePushResult>,
 ) {
   try {
     return await push();
@@ -275,7 +276,7 @@ export interface MergeGit {
   pushCheckCandidate?(
     project: CentralProject,
     input: CandidatePushRequest,
-  ): Promise<PushResult>;
+  ): Promise<CandidatePushResult>;
   isBaselineAncestor?(
     project: CentralProject,
     sha: string,
@@ -804,7 +805,7 @@ export class ServerGit implements GitBinding {
   async pushCheckCandidate(
     project: CentralProject,
     input: CandidatePushRequest,
-  ): Promise<PushResult> {
+  ): Promise<CandidatePushResult> {
     const repository = await this.central.ensureCentral(project);
     // C-636: only the local check of the candidate commit holds the project
     // lock. The GitHub push only reads that immutable object (the center is
@@ -820,7 +821,7 @@ export class ServerGit implements GitBinding {
           .objectType(repository, input.sha)
           .catch(() => undefined)) === "commit",
     );
-    if (!present) return { status: "failed", reason: "other" };
+    if (!present) return { status: "failed", reason: "local" };
     return this.transport.pushCandidateCommit(repository, input);
   }
   /** A lock timeout before `transfer` started proves nothing was sent. */

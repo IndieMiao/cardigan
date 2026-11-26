@@ -189,6 +189,34 @@ export const fixtureMachines: readonly MachineView[] = [
           checked_at: "2025-12-31T23:10:00.000Z",
           blockers: ["machine_check_failed"],
           available: false,
+          // C-608: the readiness patrol's fixed per-item results.
+          readiness: {
+            checked_at: "2025-12-31T23:10:00.000Z",
+            items: [
+              {
+                key: "disk",
+                status: "repaired",
+                detail: "已自动清理 4 处缓存，释放 18.2 GiB，可用 34.0 GiB",
+              },
+              {
+                key: "network",
+                status: "warning",
+                detail:
+                  "链路慢：下行 0.6 MB/s，往返 820 ms（阈值 2.0 MB/s、500 ms）",
+              },
+              {
+                key: "mcp",
+                status: "failed",
+                detail: "Card MCP 不可达（mcp_timeout），暂停向该机器派发",
+              },
+              { key: "helper", status: "ok", detail: "与当前部署一致" },
+              {
+                key: "avd:Pixel_7",
+                status: "warning",
+                detail: "AVD 文件无法读取（检查外接盘与系统隐私权限）",
+              },
+            ],
+          },
         },
         worker_check: {
           status: "failed",

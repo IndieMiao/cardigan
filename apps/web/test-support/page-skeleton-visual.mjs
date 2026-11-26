@@ -135,28 +135,62 @@ async function capture(card) {
       /^(?:seed|C-[1-9]\d*)\.json$/.test(file),
       `Unexpected approval file: ${file}`,
     );
-    if (file === `${card}.json`) continue;
     receipts[file.slice(0, -5)] = JSON.parse(
       await readFile(resolve(approvals, file), "utf8"),
     );
   }
-  const changes = compare(receipts, pngs);
   if (!card) {
+    const changes = compare(receipts, pngs);
+    if (Object.keys(changes).length)
+      console.error(
+        receiptHint(receipts, pngs, process.env.CARDIGAN_CHECK_CARD),
+      );
     assert.deepEqual(
       Object.keys(changes),
       [],
       "Unreviewed or competing visual baseline. Inspect the rendered PNGs before recording a new receipt.",
     );
     console.log(`Verified ${scenes.length} PNGs against design approvals`);
-  } else if (Object.keys(changes).length) {
-    await writeFile(
-      resolve(approvals, `${card}.json`),
-      `${JSON.stringify(changes, null, 2)}\n`,
-    );
+    return;
+  }
+  const changes = compare(withoutCard(receipts, card), pngs);
+  if (Object.keys(changes).length) {
+    await writeFile(resolve(approvals, `${card}.json`), formatReceipt(changes));
   } else {
     // A reworked card may restore all original pixels.
     await rm(resolve(approvals, `${card}.json`), { force: true });
   }
+}
+
+const formatReceipt = (changes) => `${JSON.stringify(changes, null, 2)}\n`;
+const withoutCard = (receipts, card) =>
+  Object.fromEntries(Object.entries(receipts).filter(([id]) => id !== card));
+
+// C-737: a failing check prints exactly what `--update <card>` would write in
+// this environment, so an author on any machine can record an authorized
+// change. The check itself still fails until the receipt is committed.
+export function receiptHint(receipts, actual, checkCard) {
+  const card = /^C-[1-9]\d*$/.test(checkCard ?? "") ? checkCard : undefined;
+  let changes;
+  try {
+    changes = compare(card ? withoutCard(receipts, card) : receipts, actual);
+  } catch (error) {
+    return `No page-skeleton receipt can be derived: ${String(error?.message).split("\n")[0]}`;
+  }
+  const path = `apps/web/test-support/page-skeleton-approvals/${card ?? "C-<card>"}.json`;
+  const lines = [
+    `Page skeleton pixels differ from design approvals (${process.platform} ${process.arch}).`,
+    "Only if the card already authorizes this visual change:",
+  ];
+  if (!Object.keys(changes).length) lines.push(`delete ${path}`);
+  else
+    lines.push(
+      `save the receipt between the markers as ${path}`,
+      "--- page-skeleton receipt begin ---",
+      formatReceipt(changes).trimEnd(),
+      "--- page-skeleton receipt end ---",
+    );
+  return lines.join("\n");
 }
 if (
   process.argv[1] &&

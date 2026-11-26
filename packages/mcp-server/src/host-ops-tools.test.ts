@@ -77,6 +77,7 @@ const args = {
   host_ops_cancel_run: { run_id: "R-1", reason: "Stop" },
   host_ops_recheck_merge: { card_id: "C-1" },
   host_ops_restart_standing_pm: { assignment_id: "A-3", reason: "Refresh" },
+  host_ops_stop_assignment: { assignment_id: "A-2", reason: "Idle session" },
 };
 
 test("all host tools register and dispatch only the authenticated host_ops identity", async () => {
@@ -95,7 +96,7 @@ test("all host tools register and dispatch only the authenticated host_ops ident
     expect(result.isError).not.toBe(true);
   }
   expect(read).toHaveBeenCalledTimes(1);
-  expect(execute).toHaveBeenCalledTimes(4);
+  expect(execute).toHaveBeenCalledTimes(5);
   for (const [context] of execute.mock.calls as unknown as [
     { identity: { actor: { role_id: string; project_id: string } } },
   ][])

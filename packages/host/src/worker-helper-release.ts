@@ -5,30 +5,14 @@ import type { Machine } from "@cardigan/domain";
 /** The protocol the deployed release announces (`PUBLICATION_PROTOCOL`). */
 export const workerPublicationProtocol = 3;
 /**
- * C-666: launch admission still starts at protocol 2. A protocol-2 worker is
- * only admitted when it runs exactly `previousWorkerHelperRelease`; any other
- * helper bytes remain a digest mismatch.
+ * C-666: launch admission still starts at protocol 2. The usage report is the
+ * only addition of protocol 3, so a protocol-2 helper keeps dispatching (its
+ * digest differs, which is only a warning since C-608) and is upgraded; only
+ * its usage report is skipped.
  */
 export const minimumWorkerPublicationProtocol = 2;
 /** C-666: the first protocol whose worker-git.py answers the `usage` report. */
 export const workerUsageProtocol = 3;
-/**
- * C-666: SHA-256 of the release before the usage report (protocol 2). Only
- * the usage report is missing from it; Git, publication and launch are the
- * same, so a worker still running it is not held from dispatch.
- * `test-support/worker-git-v2.py` is that release's worker-git.py.
- */
-export const previousWorkerHelperRelease = Object.freeze({
-  protocol: 2,
-  digests: Object.freeze({
-    "worker-files.py":
-      "a63ab830368b1fae01a581da85f61ac995eabc35da72b164cd411f406d9e209e",
-    "worker-git.py":
-      "929f712639aa4a4cfc79fc5770b547c9c00749f4af1286417234e2dd399f2bbb",
-    "worker-primitives.py":
-      "3d4a0d80df21020d2bf7f172d991d2fcdaea829ca472c03b243de595300fe67d",
-  }),
-});
 export const helpers = [
   "worker-files.py",
   "worker-git.py",
@@ -60,6 +44,30 @@ export function helperMismatch(reason: string) {
     /^worker helper 落后（已装 [0-9]+，需要 [0-9]+）$/u.test(reason)
   );
 }
+/**
+ * AGENTS.md: an incompatible helper change must raise the publication
+ * protocol. A same-protocol helper with a different digest is therefore
+ * compatible: it is upgraded, but never stops dispatch (C-608).
+ */
+export const softHelperMismatch = (reason: string) => reason === digestMismatch;
+export interface SplitCheck {
+  readonly blockers: readonly string[];
+  readonly warnings?: readonly string[];
+  readonly launch_enabled: boolean;
+}
+/** Move non-blocking findings out of blockers. */
+export function splitHelperWarnings<T extends SplitCheck>(
+  check: T,
+): T & { warnings: readonly string[] } {
+  const soft = check.blockers.filter(softHelperMismatch);
+  return {
+    ...check,
+    blockers: check.blockers.filter((b) => !softHelperMismatch(b)),
+    warnings: [...new Set([...(check.warnings ?? []), ...soft])],
+  };
+}
+export const hasHelperMismatch = (check: SplitCheck) =>
+  [...check.blockers, ...(check.warnings ?? [])].some(helperMismatch);
 
 /** Capability evidence identifies the probed platform as well as the private runtime binding.
  * Keep this separate from the persisted runtime_ref fingerprint used to address live terminals. */

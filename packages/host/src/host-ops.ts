@@ -13,13 +13,17 @@ import {
   type Clock,
   type CommandState,
   type ContextObservation,
+  cancelQueuedHostOpsRun,
   checkHostOpsAccess,
   claimHostOpsAction,
+  contextRestartRetryState,
   contextUsageFresh,
   currentHarnessActivity,
   DEFAULT_ATTACHED_HUMAN_NOTICE_MS,
+  directlyCancellableRun,
   dispatchRecoveryQueuedAt,
   eventById,
+  eventsOfType,
   finishHostOpsAction,
   guardReviewRestartStop,
   type HarnessActivity,
@@ -47,6 +51,7 @@ import {
   type SessionActivity,
   systemTurnOwner,
   type UpstreamDiagnosis,
+  type UpstreamHoldDetail,
   type WorkerInspectionRequest,
   withdrawRecoveredHostOpsAction,
   withdrawUnstartedStallRestart,
@@ -92,12 +97,15 @@ import {
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { hostOpsLockHolder, tryHostOpsLock } from "./host-ops-lock.js";
+import { idleScarceSessions } from "./idle-scarce-sessions.js";
 import { releaseExitedAgent } from "./idle-session-retirement.js";
+import { stopIdleSession } from "./idle-session-stop.js";
 import {
   incidentIdentity,
   settlementIdentityHolds,
   writerPlacementSeal,
 } from "./retained-writer.js";
+import { DEFAULT_SCARCE_RESOURCES } from "./run-capacity-config.js";
 import {
   darwinTurnTarget,
   localTurnExitProof,
@@ -126,7 +134,9 @@ import {
   type UnresponsiveProof,
 } from "./unresponsive-session.js";
 import {
+  staleObservation,
   UpstreamHealthMonitor,
+  upstreamHoldDetail,
   upstreamHoldReason,
 } from "./upstream-health.js";
 
@@ -181,6 +191,8 @@ interface Options {
   attachedHumanNoticeMs?: number;
   /** C-730: worker evidence for remote releases; tests substitute it. */
   unresponsiveProof?: UnresponsiveProof;
+  /** C-759: resources flagged in `idle_scarce_sessions` (default: emulator, simulator, godot). */
+  scarceResources?: readonly string[];
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
@@ -225,6 +237,7 @@ export class HostOpsService {
       (project, machine) => this.stallExecution(project, machine),
       this.contextAbort.signal,
       (ref) => options.ownsRuntimeRef?.(ref) !== false,
+      options.scrubCredentials,
     );
   }
   /** A project-local worker may have a different account and workspace root
@@ -266,6 +279,7 @@ export class HostOpsService {
               this.options.onError?.(
                 new Error("upstream probe publication failed"),
               ),
+            (line) => this.options.onError?.(new Error(line)),
           )
         : undefined;
     }
@@ -458,10 +472,8 @@ export class HostOpsService {
           r.inactivity_stop ||
           (!r.started_at &&
             (dispatchRecoveryQueuedAt(state, r) ||
-              state.events.some(
-                (e) =>
-                  e.type === "bell_delivery_attempt_failed" &&
-                  (e.payload as { run_id?: string }).run_id === r.id,
+              eventsOfType(state.events, "bell_delivery_attempt_failed").some(
+                (e) => (e.payload as { run_id?: string }).run_id === r.id,
               )))
             ? "automatic"
             : "host_ops",
@@ -469,6 +481,13 @@ export class HostOpsService {
       return {
         ...attention,
         dispatch_stalls: stalls,
+        // C-759: idle sessions holding a scarce resource (emulator etc.).
+        idle_scarce_sessions: idleScarceSessions(
+          tx,
+          state,
+          this.options.scarceResources ?? DEFAULT_SCARCE_RESOURCES,
+          this.clock.now(),
+        ),
         ...(this.options.upstream
           ? { launch_warnings: launchWarnings(this.options.upstream) }
           : {}),
@@ -518,7 +537,7 @@ export class HostOpsService {
   }
   private async execute(
     context: ToolContext,
-    tool: HostOpsExecutionTool | "host_ops_recheck_merge",
+    tool: HostOpsToolName,
     p: {
       target_id: string;
       reason?: string;
@@ -566,6 +585,17 @@ export class HostOpsService {
           return effect.data;
         }),
       ).value;
+    if (tool === "host_ops_stop_assignment") {
+      const stopped = await this.stopIdle(context, project, p);
+      return unwrap(store.runIdempotent(invocation, () => stopped)).value;
+    }
+    // C-759: a queued Run that never started holds no terminal. Cancel it
+    // directly, even while a previous turn's session is still live; the
+    // terminal and that session are not touched.
+    if (tool === "host_ops_cancel_run") {
+      const direct = await this.cancelQueued(context, project, p, invocation);
+      if (direct) return direct;
+    }
     // C-672: a worker terminal still live after its Agent CLI exited has
     // nothing left to stop. Close it and settle the session through the same
     // guarded path as maintenance (both host-ops locks, kernel exit proof, no
@@ -783,6 +813,138 @@ export class HostOpsService {
     ).value;
   }
   /**
+   * C-759: cancel an untouched queued Run without stopping any terminal. The
+   * launch lock keeps a launch from starting it meanwhile; a Run that was
+   * dispatched in between takes the ordinary path. Undefined: not applicable.
+   */
+  private async cancelQueued(
+    context: ToolContext,
+    project: ProjectId,
+    p: { target_id: string; reason?: string },
+    invocation: Parameters<Store["runIdempotent"]>[0],
+  ) {
+    const { store } = this.options;
+    const target = () =>
+      store.uow.read((tx) => {
+        const state = loadCommandState(tx, project);
+        const run = state.runs.find((r) => r.id === p.target_id);
+        return run && directlyCancellableRun(state, run) ? run : undefined;
+      });
+    const run = target();
+    if (!run || !p.reason?.trim()) return;
+    const unlock = await tryHostOpsLock(
+      store,
+      project,
+      run.assignment_id,
+      "launch",
+    );
+    if (!unlock)
+      throw new ToolError("stale_target", "该 Run 正在派发，请重新读取诊断", {
+        reason: "launch_in_progress",
+      });
+    try {
+      if (!target()) return;
+      return unwrap(
+        store.runIdempotent(invocation, (tx) => {
+          context.revalidateToken?.();
+          // A bell being written to the session may start this Run.
+          if (
+            unfinishedBellAttempts(store.database, project, run.assignment_id)
+              .length
+          )
+            throw new ToolError(
+              "stale_target",
+              "正在向该会话投递通知，请重新读取诊断",
+              { reason: "delivery_in_progress" },
+            );
+          const effect = unwrap(
+            cancelQueuedHostOpsRun(
+              loadCommandState(tx, project),
+              context.identity.actor,
+              { run_id: run.id, reason: p.reason ?? "" },
+              { clock: this.clock, ids: tx.ids },
+            ),
+          );
+          persistEffect(tx, project, effect);
+          return effect.data;
+        }),
+      ).value;
+    } finally {
+      await unlock();
+    }
+  }
+  /**
+   * C-759: managed stop of a work-item session whose previous turn ended and
+   * that is idle (`stopIdleSession`). Never queues a Run; refusals say why.
+   */
+  private async stopIdle(
+    context: ToolContext,
+    project: ProjectId,
+    p: { target_id: string; reason?: string },
+  ) {
+    const { store } = this.options;
+    const actor = context.identity.actor;
+    const reason = p.reason?.trim();
+    if (!reason) throw new ToolError("validation_failed", "reason is required");
+    const a = store.uow.read((tx) => {
+      const state = loadCommandState(tx, project);
+      unwrap(checkHostOpsAccess(state, actor, "host_ops_stop_assignment"));
+      if (
+        actor.kind === "assignment" &&
+        hostOpsPending(state.events, actor.assignment_id)
+      )
+        throw new ToolError(
+          "illegal_transition",
+          "The operator has a pending session operation",
+        );
+      return state.assignments.find((v) => v.id === p.target_id);
+    });
+    if (!a || actor.kind !== "assignment")
+      throw new ToolError("not_found", "Assignment not found");
+    if (a.scope !== "work_item" || a.external)
+      throw new ToolError(
+        "illegal_transition",
+        "只能停止受管工作项指派的会话",
+        { reason: "not_managed" },
+      );
+    const ref = a.runtime_ref;
+    const outcome = await stopIdleSession(
+      store,
+      project,
+      a,
+      this.options.runtime,
+      this.clock,
+      {
+        trigger: "host_ops",
+        requested_by: actor.assignment_id,
+        tool: "host_ops_stop_assignment",
+        reason,
+      },
+      {
+        execution: this.stallExecution(project, a.machine_id),
+        proof: this.options.unresponsiveProof,
+      },
+    );
+    if (outcome.outcome === "refused")
+      throw new ToolError(
+        "illegal_transition",
+        `会话未停止：${idleStopRefusalText(outcome.reason)}`,
+        { reason: outcome.reason },
+      );
+    context.revalidateToken?.();
+    if (ref)
+      await this.options
+        .scrubCredentials?.(project, a.id, ref)
+        .catch(() => undefined);
+    return {
+      assignment_id: a.id,
+      result: "session_stopped" as const,
+      basis: outcome.basis,
+      message:
+        "已停止上一轮已结束的空闲会话：关闭终端、确认退出并结算；工作区、分支和排队的工作保留，系统按受管入口新起会话。",
+    };
+  }
+  /**
    * C-730: restart or cancel on a remote managed Assignment. Only a session
    * whose terminal is live while the worker does not see its Agent CLI alive
    * is released; anything else returns the refusal and the ordinary path
@@ -967,6 +1129,26 @@ export class HostOpsService {
     }
     return activity;
   }
+  /**
+   * C-745: the upstream diagnosis is available for this session and the
+   * stop gate would pass; a line fault or a failed classification keeps
+   * the closed session closed.
+   */
+  private diagnosisRecovered(state: CommandState, id: AssignmentId) {
+    if (!this.upstream) return false;
+    try {
+      const diagnosis = this.checkUpstream(state, id, true);
+      return (
+        !!diagnosis &&
+        ![
+          "upstream_diagnosis_unavailable",
+          "upstream_recovery_not_ready",
+        ].includes(upstreamHoldReason(diagnosis))
+      );
+    } catch {
+      return false;
+    }
+  }
   private checkUpstream(
     state: CommandState,
     id: AssignmentId,
@@ -1018,9 +1200,16 @@ export class HostOpsService {
         if (!this.closing && this.upstream === upstream)
           upstream.reconcile(this.options.store, project, activity);
       })
-      .catch(() => {
-        if (!this.closing && this.upstream === upstream)
-          upstream.observationFailed(project);
+      .catch((error) => {
+        // C-745: a session that changed while sampled is a race; the next
+        // poll samples again. Marking the whole project failed here held
+        // every recovery and context restart until that poll.
+        if (
+          !this.closing &&
+          this.upstream === upstream &&
+          !staleObservation(error)
+        )
+          upstream.observationFailed(project, error);
       })
       .finally(() => this.upstreamPolls.delete(project));
     this.upstreamPolls.set(project, poll);
@@ -1160,6 +1349,28 @@ export class HostOpsService {
     }
     return row?.activity;
   }
+  /**
+   * C-752: the completed background sample's Claude transcript write evidence,
+   * under the same freshness rule as session metadata. It only lets the
+   * dispatcher decide to start a stop-time read; the stop rereads it.
+   */
+  harnessFileActivity(
+    project: ProjectId,
+    assignment: AssignmentId,
+  ): HarnessActivity | undefined {
+    const cached = this.sessionSamples.get(project);
+    const row = cached?.samples.find((s) => s.assignment_id === assignment);
+    const file = row?.fileActivity;
+    if (
+      !cached ||
+      !file ||
+      row.activity_status === "read_failed" ||
+      this.sessionPolls.has(project)
+    )
+      return;
+    const age = Date.parse(this.clock.now()) - cached.completedAt;
+    return age < 0 || age > file.stale_after_ms ? undefined : file;
+  }
 
   /** Alerts can join an active poll. Destructive checks must start a new, target-only read. */
   async inspectHarnessActivity(
@@ -1226,7 +1437,26 @@ export class HostOpsService {
     const stale =
       this.options.contextUsage?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
     const state = store.uow.read((tx) => loadCommandState(tx, project));
-    if (!automaticContextRestartReady(state, usage, this.clock.now(), stale))
+    // C-745: a session closed only by an unavailable diagnosis gets one more
+    // attempt, and only while the upstream gate would let it stop now.
+    const recovered =
+      contextRestartRetryState(
+        state.events,
+        usage.assignment_id,
+        usage.session_id,
+        this.clock.now(),
+      ) === "recoverable" &&
+      this.diagnosisRecovered(state, usage.assignment_id);
+    if (
+      !automaticContextRestartReady(
+        state,
+        usage,
+        this.clock.now(),
+        stale,
+        undefined,
+        recovered,
+      )
+    )
       return;
     const assignment = state.assignments.find(
       (a) => a.id === usage.assignment_id,
@@ -1248,6 +1478,7 @@ export class HostOpsService {
             usage,
             stale_after_ms: stale,
             ...(snapshot ? { snapshot } : { preparation_failed: true }),
+            ...(recovered ? { diagnosis_recovered: true } : {}),
           },
           { clock: this.clock, ids: tx.ids },
         ),
@@ -1262,13 +1493,25 @@ export class HostOpsService {
     action: HostOpsExecution,
     result: "succeeded" | "failed",
     reason: string,
+    upstreamDetail?: UpstreamHoldDetail,
   ) {
     this.options.store.uow.run((tx) => {
       const effect = unwrap(
         recordAutomaticContextRestartResult(
           loadCommandState(tx, project),
           { kind: "system", project_id: project },
-          { action_id: action.action_id, result, reason },
+          {
+            action_id: action.action_id,
+            result,
+            reason,
+            ...(upstreamDetail ? { upstream_detail: upstreamDetail } : {}),
+            ...(this.options.contextUsage?.restartRetryDelaysMs
+              ? {
+                  retry_delays_ms:
+                    this.options.contextUsage.restartRetryDelaysMs,
+                }
+              : {}),
+          },
           { clock: this.clock, ids: tx.ids },
         ),
       );
@@ -1444,16 +1687,20 @@ export class HostOpsService {
         since: Date.parse(earlier[0]?.created_at ?? this.clock.now()),
         overdue:
           !!overdue ||
-          state.events.some(
+          eventsOfType(state.events, ATTACHED_HUMAN_WAIT_OVERDUE).some(
             (e) =>
-              e.type === ATTACHED_HUMAN_WAIT_OVERDUE &&
               (e.payload as { action_id?: string }).action_id ===
-                action.action_id,
+              action.action_id,
           ),
       });
     });
   }
-  private defer(project: ProjectId, action: string, reason: string) {
+  private defer(
+    project: ProjectId,
+    action: string,
+    reason: string,
+    upstreamDetail?: UpstreamHoldDetail,
+  ) {
     this.options.store.uow.run((tx) => {
       const events = loadCommandState(tx, project).events;
       if (
@@ -1472,7 +1719,11 @@ export class HostOpsService {
         seq: tx.ids.nextEventSequence(project),
         type: "host_ops_action_deferred",
         actor: { kind: "system", project_id: project },
-        payload: { action_id: action, reason },
+        payload: {
+          action_id: action,
+          reason,
+          ...(upstreamDetail ? { upstream_detail: upstreamDetail } : {}),
+        },
         created_at: this.clock.now(),
       });
     });
@@ -1612,9 +1863,12 @@ export class HostOpsService {
             (e.payload as { action_id?: string }).action_id ===
               action.action_id,
         ).length > 1;
-      let receiptRecorded: boolean | undefined = read().events.some(
+      // C-671: the receipt sits on a card; the type index sees it when closed.
+      let receiptRecorded: boolean | undefined = eventsOfType(
+        read().events,
+        "dispatch_stall_backup_verified",
+      ).some(
         (e) =>
-          e.type === "dispatch_stall_backup_verified" &&
           (e.payload as { action_id?: string }).action_id === action.action_id,
       )
         ? true
@@ -1622,7 +1876,11 @@ export class HostOpsService {
           ? undefined
           : false;
       let standingExitReason = "standing_exit_pending";
-      const fail = (reason: string, blockedBy?: UpstreamDiagnosis) => {
+      const fail = (
+        reason: string,
+        blockedBy?: UpstreamDiagnosis,
+        upstreamDetail?: UpstreamHoldDetail,
+      ) => {
         standingExitReason = reason;
         if (action.dispatch_stall_id) {
           const withdrawn = store.uow.run((tx) => {
@@ -1634,7 +1892,9 @@ export class HostOpsService {
                 { clock: this.clock, ids: tx.ids },
                 reason,
                 receiptRecorded,
-                blockedBy,
+                blockedBy && upstreamDetail
+                  ? { ...blockedBy, upstream_detail: upstreamDetail }
+                  : blockedBy,
               ),
             );
             persistEffect(tx, project, effect);
@@ -1663,8 +1923,8 @@ export class HostOpsService {
             return;
         }
         if (action.automatic_context_restart || action.dispatch_stall_id)
-          this.contextResult(project, action, "failed", reason);
-        else this.defer(project, action.action_id, reason);
+          this.contextResult(project, action, "failed", reason, upstreamDetail);
+        else this.defer(project, action.action_id, reason, upstreamDetail);
       };
       const current = () => {
         const state = read();
@@ -1738,9 +1998,9 @@ export class HostOpsService {
             action.assignment_id,
             samples,
           );
-        } catch {
-          if (this.upstream === observationMonitor)
-            observationMonitor?.observationFailed(project);
+        } catch (error) {
+          if (this.upstream === observationMonitor && !staleObservation(error))
+            observationMonitor?.observationFailed(project, error);
           fail("upstream_observation_failed");
           // C-625: a standing PM restart still observes its own terminal; the
           // upstream gate below then decides (bypassed only for confirmed idle).
@@ -1905,7 +2165,14 @@ export class HostOpsService {
             action.action_id,
             activity,
           );
-          fail(upstreamHoldReason(held), held);
+          fail(
+            upstreamHoldReason(held),
+            held,
+            upstreamHoldDetail(
+              held,
+              this.upstream?.classificationFailure(project),
+            ),
+          );
           return false;
         }
       };
@@ -2072,11 +2339,13 @@ export class HostOpsService {
                   !isDeepStrictEqual(recoveryBasis(current), recoveryBasis(a))
                 )
                   throw new Error();
-                const prior = state.events.find(
+                const prior = eventsOfType(
+                  state.events,
+                  "dispatch_stall_backup_verified",
+                ).find(
                   (e) =>
-                    e.type === "dispatch_stall_backup_verified" &&
                     (e.payload as { action_id?: string }).action_id ===
-                      action.action_id,
+                    action.action_id,
                 );
                 if (prior) {
                   const p = prior.payload as {
@@ -2366,6 +2635,39 @@ const OPERATION: Record<HostOpsExecution["tool"], string> = {
   host_ops_restart_standing_pm: "重启常驻 PM",
   host_ops_cancel_run: "取消 Run",
 };
+
+/** Every host-ops tool HostOpsService executes. */
+type HostOpsToolName =
+  | HostOpsExecutionTool
+  | "host_ops_recheck_merge"
+  | "host_ops_stop_assignment";
+
+/** C-759: why a managed stop of an idle session did not apply. */
+export function idleStopRefusalText(reason: string) {
+  const fixed: Record<string, string> = {
+    no_session: "该指派没有在运行的终端",
+    not_managed: "只能停止受管工作项指派的会话",
+    terminal_unobserved: "读不到终端状态",
+    terminal_not_live: "终端已不在运行，按原有替换路径处理",
+    locked: "该指派正在启动、交接或执行其它主机操作，稍后再试",
+    session_changed: "会话已更换，请重新读取诊断",
+    delivery_in_progress: "正在向该会话投递通知",
+    run_busy: "该会话上还有已开始或正在启动的 Run，上一轮没有结束",
+    stopped_by_human: "人已停止该指派，只能由人启动",
+    operation_pending: "该指派有主机操作、Run 停止或启动在途",
+    upgrade_pending: "该指派有待完成的角色升级",
+    shared_registration: "终端或工作区还有其它登记",
+    agent_unobserved: "确认不了 Agent 是否空闲",
+    release_failed: "关闭终端失败",
+    failed: "内部错误",
+  };
+  if (fixed[reason]) return fixed[reason];
+  if (reason.startsWith("agent_"))
+    return `Agent 不是空闲状态（${reason.slice(6)}），不关闭终端`;
+  if (reason.startsWith("exit_unconfirmed"))
+    return "已关闭终端但未能证实会话退出，保留终端引用，不另起会话";
+  return reason;
+}
 
 /** C-730: why a remote restart or cancel did not release the session. */
 export function remoteRefusalText(reason: string) {

@@ -68,6 +68,11 @@ export interface ContextUsageOptions {
   /** Existing Claude status-line cache; optional when not installed. */
   cacheDir?: string;
   staleAfterMs?: number;
+  /**
+   * C-741: backoff before retrying an automatic context restart that a
+   * temporary condition held; defaults to 2, 5 and 10 minutes.
+   */
+  restartRetryDelaysMs?: readonly number[];
   /** Host launch config, used only to expand a Claude model alias. */
   launch?: LaunchConfig;
   /** Service shutdown cancels readers without queuing another Assignment. */
@@ -396,6 +401,7 @@ export async function readSessionContexts(
             ...(metadata.model_output_at
               ? { model_output_at: metadata.model_output_at }
               : {}),
+            ...(metadata.written_at ? { written_at: metadata.written_at } : {}),
             ...(metadata.error &&
             progress &&
             progress.session_id === metadata.session_id &&

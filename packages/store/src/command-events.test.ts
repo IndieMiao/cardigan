@@ -212,7 +212,8 @@ test("C-639 command state scope defaults to hot and rejects unknown values", () 
   expect(commandStateScope("hot")).toBe("hot");
   expect(commandStateScope("full")).toBe("full");
   expect(commandStateScope("lean")).toBe("lean");
-  expect(() => commandStateScope("cold")).toThrow("hot, lean or full");
+  expect(commandStateScope("slim")).toBe("slim");
+  expect(() => commandStateScope("cold")).toThrow("hot, lean, slim or full");
   withTempStore((store) => {
     expect(store.commandStateScope).toBe(
       commandStateScope(process.env.CARDIGAN_COMMAND_STATE),
@@ -340,6 +341,88 @@ test("C-649 chunked warm-up gives the same streams as one full read, then reads 
       }
     } finally {
       reference.close();
+      warmed.close();
+    }
+  });
+});
+
+test("C-671 slim keeps closed cards' other rows dormant and reads them back unchanged", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: P });
+    const open = "C-1" as CardId;
+    const closed = "C-2" as CardId;
+    const reopened = "C-3" as CardId;
+    store.uow.run((tx) => {
+      tx.cards.put(P, card({ id: open }));
+      tx.cards.put(P, card({ id: closed, status: "done" }));
+      tx.cards.put(P, card({ id: reopened, status: "cancelled" }));
+      for (let n = 1; n <= 6; n++) {
+        tx.events.append(P, event(`p${n}`, n, "x"));
+        tx.events.append(P, event(`o${n}`, n, "comment_posted", open));
+        // card_merged is a whitelisted fact; the others stay dormant.
+        tx.events.append(
+          P,
+          event(`c${n}`, n, n % 3 ? "comment_posted" : "card_merged", closed),
+        );
+        tx.events.append(P, event(`r${n}`, n, "run_started", reopened));
+      }
+    });
+    const read = (s: Store) =>
+      s.uow.read((tx) => {
+        const streams = tx.events.listStreams?.(P);
+        if (!streams) throw new Error("missing bulk port");
+        return [...streams].map(([key, events]) => [key, events]);
+      });
+    const sql = eventRepository(store.database, "read");
+    const full = Store.open({ dataDir, commandState: "full" });
+    const slim = Store.open({ dataDir, commandState: "slim" });
+    const warmed = Store.open({ dataDir, commandState: "slim" });
+    try {
+      const view = slim.uow.read((tx) => tx.events.listStreams?.(P));
+      if (!view || !("base" in view)) throw new Error("missing log view");
+      const log = view.base;
+      // 4 comments on the closed card, 6 run rows on the cancelled one.
+      expect(log.dormant).toBe(10);
+      // A slim history of cold cards decodes nothing.
+      const history = view.history(["", open, closed, reopened], {
+        full: new Set([open]),
+        omit: new Set(),
+        keep: new Set(["card_merged"]),
+      });
+      expect(history.map((e) => e.id)).toEqual([
+        ...[1, 2, 3, 4, 5, 6].map((n) => `p${n}`),
+        ...[1, 2, 3, 4, 5, 6].map((n) => `o${n}`),
+        "c3",
+        "c6",
+      ]);
+      expect(log.dormant).toBe(10);
+      // A cursor read at the head decodes nothing; an older one decodes.
+      slim.uow.read((tx) => {
+        expect(tx.events.listAfter(P, closed, 6)).toEqual([]);
+        expect(log.dormant).toBe(10);
+        for (const stream of [undefined, open, closed, reopened])
+          for (const since of [0, 2, 5])
+            expect(tx.events.listAfter(P, stream, since)).toEqual(
+              sql.listAfter(P, stream, since),
+            );
+      });
+      expect(log.dormant).toBe(0);
+      expect(read(slim)).toEqual(read(full));
+      // Rows written after the first read are always decoded.
+      store.uow.run((tx) =>
+        tx.events.append(P, event("c7", 7, "comment_posted", closed)),
+      );
+      expect(read(slim)).toEqual(read(full));
+      // Chunked warm-up leaves the rows dormant that existed at its first
+      // read, c7 included.
+      while (!warmed.warmCommandEvents(P, 4));
+      const warm = warmed.uow.read((tx) => tx.events.listStreams?.(P));
+      if (!warm || !("base" in warm)) throw new Error("missing log view");
+      expect(warm.base.dormant).toBe(11);
+      expect(read(warmed)).toEqual(read(full));
+    } finally {
+      full.close();
+      slim.close();
       warmed.close();
     }
   });

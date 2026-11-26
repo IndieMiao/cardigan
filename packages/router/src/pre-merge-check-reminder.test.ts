@@ -48,6 +48,14 @@ test("C-179: the persisted reminder rings each triage owner once with its text a
   for (const n of notes) expect(n.card_id).toBe("C-1");
 });
 
+test("C-742: 张良's action is never rung to the owner", () => {
+  expect(
+    route(reminded([reminder("H-1", "needs_you")]), [
+      open("H-1", { executor: "operator" }),
+    ]),
+  ).toEqual([]);
+});
+
 test("C-179: an action closed before routing is not rung", () => {
   expect(
     route(reminded([reminder("H-1", "pm_ops")]), [

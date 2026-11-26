@@ -321,6 +321,11 @@ def operate(namespace, header, source, policy):
                     os.kill(process['pid'], 0)
                 except ProcessLookupError:
                     observed = 'exited'
+        if operation == 'status':
+            # C-761: the controller compares this with the boot journaled at launch.
+            boot = native.current_boot()
+            if boot:
+                extra['boot'] = boot
         phase = next((name for name in ('revoked', 'running', 'start', 'published', 'receiving') if exists(generation, name)), 'empty')
         namespace.verify(generation, lock)
         return dict(identity, phase=phase, process=process, observed=observed, **extra)

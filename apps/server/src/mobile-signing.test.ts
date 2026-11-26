@@ -227,6 +227,63 @@ test("first call is accepted at once; polls of the same Run follow one job to it
   }
 }, 20_000);
 
+test("a same-machine handoff path from the host is reported with the receipt, never a traversing one", async () => {
+  for (const [kind, expected] of [
+    [
+      "handoff",
+      { path: `/srv/handoff/${"2".repeat(32)}.apk`, sha256: "a".repeat(64) },
+    ],
+    ["handoff-other", undefined],
+  ] as const) {
+    const host = fakeHost(kind);
+    try {
+      const receipt = await settle(() =>
+        requestMobileSignature(host.data, jobScope(`R-${kind}`), () => {}, {
+          program: host.program,
+          acceptWaitMs: 300,
+        }),
+      );
+      expect(receipt).toMatchObject({ status: "signed" });
+      expect((receipt as { local_handoff?: unknown }).local_handoff).toEqual(
+        expected,
+      );
+    } finally {
+      rmSync(host.data, { recursive: true, force: true });
+    }
+  }
+}, 20_000);
+
+test("C-612: the release-chain attestation reaches the host's request and ledger check only when given", async () => {
+  for (const chain of ["Q-1", undefined]) {
+    const host = fakeHost("stored");
+    try {
+      const receipt = await settle(() =>
+        requestMobileSignature(
+          host.data,
+          jobScope(`R-chain-${chain}`),
+          () => {},
+          { program: host.program, acceptWaitMs: 300 },
+          chain,
+        ),
+      );
+      expect(receipt).toMatchObject({ status: "signed" });
+      const sent = readFileSync(join(host.ctl, "identities"), "utf8")
+        .trim()
+        .split("\n")
+        .map((row) => {
+          const [kind, json] = row.split(/ (.*)/su);
+          return [kind, JSON.parse(json ?? "{}").chain];
+        });
+      expect(sent).toEqual([
+        ["stored", chain],
+        ["check", chain],
+      ]);
+    } finally {
+      rmSync(host.data, { recursive: true, force: true });
+    }
+  }
+}, 20_000);
+
 test("C-609: one deployment hold covers the job from start until its helper settles", async () => {
   const host = fakeHost("slow");
   const scope = jobScope("R-21");
@@ -243,6 +300,7 @@ test("C-609: one deployment hold covers the job from start until its helper sett
       scope,
       () => {},
       { program: host.program, acceptWaitMs: 300 },
+      undefined,
       track,
     );
   try {
@@ -267,6 +325,7 @@ test("C-609: a failing tracker never blocks signing", async () => {
       scope,
       () => {},
       { program: host.program, acceptWaitMs: 300 },
+      undefined,
       async () => {
         throw new Error("registry unavailable");
       },
@@ -293,6 +352,7 @@ test("C-609: while a deployment's stop fence stands the job stays queued and cla
       scope,
       () => {},
       { program: host.program, acceptWaitMs: 100 },
+      undefined,
       () =>
         new Promise((resolve) => {
           lift = () => resolve(() => {});

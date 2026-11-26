@@ -4,6 +4,7 @@ import type {
   CommandState,
   Event,
   ProjectId,
+  RemoteRebootReading,
   RemoteWorkerLoss,
   Run,
   Runtime,
@@ -12,6 +13,7 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import {
+  confirmRemoteExitByReboot,
   DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
   eventsOfType,
   hostOpsExitConfirmation,
@@ -53,7 +55,9 @@ export interface RuntimeEventSource extends Pick<Runtime, "retire_idle"> {
     assignment: Assignment["id"],
     ref: RuntimeRef,
     saved?: RemoteWorkerLoss["process"],
-  ): Promise<RuntimeObservation["process"] | "unreachable">;
+  ): Promise<
+    RuntimeObservation["process"] | "unreachable" | RemoteRebootReading
+  >;
   events(
     ref: RuntimeRef,
     signal?: AbortSignal,
@@ -355,6 +359,7 @@ export class RuntimeMonitor {
     process: RuntimeObservation["process"],
     cause: RuntimeDisconnectCause = "exit",
     proof?: string,
+    reboot?: RemoteRebootReading & { readonly observed_at: string },
   ) {
     const alive = process === "alive";
     const { store } = this.options;
@@ -393,6 +398,27 @@ export class RuntimeMonitor {
               ),
             ),
           );
+        // C-761: a changed boot identity read after the loss is the only
+        // automatic exit evidence; a refusal leaves the request with the human.
+        else if (
+          reboot &&
+          !remoteWorkerLossReleased(state.events, loss.action_id)
+        ) {
+          const confirmed = confirmRemoteExitByReboot(
+            state,
+            { kind: "system", project_id: project },
+            {
+              action_id: loss.action_id,
+              current_boot: reboot.current_boot,
+              observed_at: reboot.observed_at,
+            },
+            { clock: this.clock, ids: tx.ids },
+          );
+          if (confirmed.ok) {
+            persistEffect(tx, project, confirmed.value);
+            this.recoverLost(tx, project, a);
+          }
+        }
         // Loss, missing registry entries and transport failures do not prove process exit.
         else if (
           process === "exited" &&
@@ -547,6 +573,7 @@ export class RuntimeMonitor {
     if (this.probes.has(slot)) return;
     this.probes.add(slot);
     const stamp = this.probeKey(state, a, ref, loss);
+    const observed_at = this.clock.now();
     const task = Promise.resolve()
       .then(() =>
         this.options.runtime.probeRemoteProcess?.(
@@ -559,7 +586,9 @@ export class RuntimeMonitor {
       .catch(() => "unknown" as const)
       .then(async (result) => {
         if (this.stopped) return;
-        const process = result ?? "unknown";
+        const reboot = typeof result === "object" ? result : undefined;
+        const process =
+          typeof result === "object" ? result.process : (result ?? "unknown");
         if (process === "alive" || loss)
           this.observe(
             project,
@@ -568,6 +597,7 @@ export class RuntimeMonitor {
             process === "unreachable" ? "unknown" : process,
             "exit",
             stamp,
+            reboot && { ...reboot, observed_at },
           );
         else this.expire(project, { id: a.id, stamp, process });
         if (

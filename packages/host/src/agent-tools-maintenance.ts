@@ -32,7 +32,10 @@ import {
 import { MachineCheckJournal } from "./machine-check-journal.js";
 import type { AgentToolsOutcome } from "./machine-check-types.js";
 import { runtimeWorkersPath } from "./runtime-workers-config.js";
-import { observationFingerprint } from "./worker-helper-release.js";
+import {
+  helperMismatch,
+  observationFingerprint,
+} from "./worker-helper-release.js";
 import { stageWorkerUpgrade, upgradeMaterials } from "./worker-upgrade.js";
 import { enrolledUpgradeIdentity } from "./worker-upgrade-enrollment.js";
 import { upgradeKey, upgradeState } from "./worker-upgrade-gate.js";
@@ -179,7 +182,7 @@ function agentToolsRoute(
   if (row.state === "failed" || row.state === "worker_checked")
     return {
       outcome: { status: "held" },
-      reason: "签名自动升级未通过核验，按升级待办恢复",
+      reason: "签名自动升级未通过核验，系统会自动重试",
     };
   return {
     note: "签名自动升级已对本版本执行一次，附件助手仍未就绪：C-595 之前登记的 v1 入口只能更新三个 helper，需要本命令迁移；v2 入口则是安装后复查未通过",
@@ -232,6 +235,7 @@ export function agentToolsCommandVisible(
   if (
     !observed.observation_target_matches ||
     !health?.available ||
+    health.warnings?.some(helperMismatch) ||
     observed.capabilities.some((c) => c.key === AGENT_TOOLS_CAPABILITY)
   )
     return false;
@@ -315,7 +319,13 @@ async function reconcile(
     });
   // Nothing about the tools was verified (helper mismatch, a new release,
   // offline, rebinding): no earlier command may outlive this check.
-  if (o.health.status !== "passed" || !o.target) {
+  // C-608: a compatible helper awaiting upgrade passes the check, but its
+  // upgrade also brings the tools: keep only the helper notice.
+  if (
+    o.health.status !== "passed" ||
+    o.health.warnings?.some(helperMismatch) ||
+    !o.target
+  ) {
     settle({ status: "unverifiable" }, "本次机器检查未通过，旧的补装命令作废");
     return undefined;
   }
@@ -436,7 +446,7 @@ const MESSAGES: Record<AgentToolsGuidance["status"], string> = {
   current: "附件助手与当前发布一致。",
   automatic:
     "该机已登记签名自动升级：下次巡检会按当前发布安装附件助手，之后重跑 machine check 核对。",
-  held: "签名自动升级未通过核验，请先按升级待办恢复，再重跑 machine check。",
+  held: "签名自动升级未通过核验，系统会在 6 小时后自动重试；持续失败时按升级待办处理。",
   unverifiable:
     "无法核验当前绑定或控制端发行材料，没有可执行命令。修复后重跑 machine check。",
   staging_failed:

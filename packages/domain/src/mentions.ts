@@ -1,12 +1,40 @@
+import { markdownLiteralRanges } from "./attachment-refs.js";
 import { type Employee, employeeNameKey } from "./employee.js";
 
-/** Server-side parsing shared by human and Agent comments (including old UIs). */
+/**
+ * C-751: the prose of a Markdown body that may name someone. Code (fenced,
+ * indented, inline), link destinations and quote lines (`>`) become spaces of
+ * the same length, so an at sign there is never a mention.
+ */
+function mentionProse(body: string): string {
+  // Ranges are UTF-16 offsets, so work on code units; lengths never change.
+  const units = body.split("");
+  const blank = (from: number, to: number) => {
+    for (let i = from; i < to; i++) if (units[i] !== "\n") units[i] = " ";
+  };
+  for (const [from, to] of markdownLiteralRanges(body)) blank(from, to);
+  let at = 0;
+  for (const line of body.split("\n")) {
+    if (/^[ \t]*>/u.test(line)) blank(at, at + line.length);
+    at += line.length + 1;
+  }
+  return units.join("");
+}
+
+/**
+ * Server-side parsing shared by human and Agent comments (including old UIs).
+ * Several bodies (a comment and its story answers) are read part by part, so
+ * an open code block in one never hides a name in the next.
+ */
 export function commentMentions(
-  body: string,
+  bodies: string | readonly string[],
   explicit: readonly string[],
   employees: readonly Employee[],
   roles: readonly string[],
 ): readonly string[] {
+  const body = (typeof bodies === "string" ? [bodies] : bodies)
+    .map(mentionProse)
+    .join("\n");
   const active = employees.filter((employee) => employee.status === "active");
   // Longest name wins: @Mary Jane must not also mention @Mary.
   const names = active

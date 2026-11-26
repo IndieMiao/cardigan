@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeRef } from "@cardigan/domain";
 import { afterAll, beforeEach, expect, test, vi } from "vitest";
-import { stopDarwinOwner } from "./darwin-idle-owner.js";
+import { ownerRefusal, stopDarwinOwner } from "./darwin-idle-owner.js";
 import {
   darwinRetirementObservation,
+  explainDarwinRefusal,
   stopDarwinTurn,
 } from "./darwin-retirement.js";
 import type { ExecutionConfig } from "./execution.js";
@@ -16,6 +17,7 @@ import { value } from "./test-support.js";
 // The real adapter; only the two worker transports are substituted.
 vi.mock("./darwin-retirement.js", () => ({
   darwinRetirementObservation: vi.fn(),
+  explainDarwinRefusal: vi.fn(),
   stopDarwinTurn: vi.fn(),
 }));
 vi.mock("./darwin-idle-owner.js", async (original) => ({
@@ -260,6 +262,75 @@ test("C-626 macOS: a TERM that is not followed by exit keeps the fence for obser
       reason: "confirmation_pending",
       stop: { path: "darwin_pid", signal: "TERM", pid: receipt.pid },
     },
+  });
+  expect(pid).toHaveBeenCalledOnce();
+});
+
+test("C-746 macOS: an owner's anonymous refusal of an idle retirement is explained from the worker, never signalled", async () => {
+  const r = await runtime();
+  const explain = vi.mocked(explainDarwinRefusal);
+  const idleOptions = () => {
+    const { system_finished_turn: _t, idle_prompt: _p, ...rest } = options();
+    return rest;
+  };
+  observe.mockResolvedValue("alive");
+  const anonymous = {
+    outcome: "withdrawn" as const,
+    evidence: {
+      stage: "probe" as const,
+      reason: "probe_invalid" as const,
+      owner_reason: "no_reply",
+      exit_code: 1,
+    },
+  };
+  owner.mockResolvedValue(anonymous);
+  explain.mockResolvedValue("terminal_not_idle");
+  // sensen A-252: the owner (enrolled before C-746) closed without a word.
+  expect(value(await r.retire_idle(ref, idleOptions()))).toEqual({
+    outcome: "withdrawn",
+    evidence: {
+      stage: "probe",
+      reason: "terminal_busy",
+      owner_reason: "terminal_not_idle",
+      owner_reason_source: "worker_probe",
+      exit_code: 1,
+    },
+  });
+  expect(explain).toHaveBeenCalledOnce();
+  expect(explain.mock.calls[0]?.[2]).toMatchObject({
+    enrolled_process: receipt,
+  });
+  // Every current proof passes: the owner refused by its older rule.
+  explain.mockResolvedValue(null);
+  expect(value(await r.retire_idle(ref, idleOptions()))).toEqual({
+    outcome: "withdrawn",
+    evidence: {
+      ...anonymous.evidence,
+      owner_reason: "legacy_owner_refused",
+      owner_reason_source: "worker_probe",
+    },
+  });
+  // The explanation itself could not be read: nothing more is claimed.
+  explain.mockResolvedValue(undefined);
+  expect(value(await r.retire_idle(ref, idleOptions()))).toEqual(anonymous);
+  // A named refusal needs no explanation.
+  explain.mockClear();
+  owner.mockResolvedValue(ownerRefusal("worktree_dirty"));
+  expect(value(await r.retire_idle(ref, idleOptions()))).toEqual(
+    ownerRefusal("worktree_dirty"),
+  );
+  expect(explain).not.toHaveBeenCalled();
+  // Idle retirement never falls back to a PID signal.
+  expect(pid).not.toHaveBeenCalled();
+});
+
+test("C-746 macOS: a system-ended turn keeps its bounded PID fallback when the owner names its refusal", async () => {
+  const r = await runtime();
+  // Before C-746 this refusal was anonymous (probe_invalid) and fell back.
+  owner.mockResolvedValue(ownerRefusal("terminal_not_idle"));
+  const guard = vi.fn(() => true);
+  expect(value(await r.retire_idle(ref, options(guard)))).toMatchObject({
+    outcome: "exited",
   });
   expect(pid).toHaveBeenCalledOnce();
 });

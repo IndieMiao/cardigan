@@ -7,6 +7,7 @@ import {
   eventsForDecision,
   eventsForHumanAction,
 } from "./event-index.js";
+import { isOperatorAction } from "./human-action-executor.js";
 import type { CardId, EventId, ProjectId } from "./ids.js";
 import { qualifyId, qualifyText } from "./project-code.js";
 import { NEEDS_YOU_ITEM_READY, needsYouItemReady } from "./readiness.js";
@@ -290,7 +291,8 @@ export function extMessageItems(
     });
   }
   for (const h of state.human_actions) {
-    if (h.triage === "pm_ops") continue;
+    // C-742: the operator is notified by event, never through the owner.
+    if (h.triage === "pm_ops" || isOperatorAction(h)) continue;
     const facts = itemHistory(
       state.events,
       eventsForHumanAction(state.events, h.id),

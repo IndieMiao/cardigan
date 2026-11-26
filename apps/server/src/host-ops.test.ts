@@ -200,6 +200,7 @@ test("C-137: diagnostics stay within P2a-10 categories and omit Needs You decisi
       "context_thresholds",
       "escalated",
       "findings",
+      "idle_scarce_sessions",
       "lost",
       "merge_stalls",
       "patrol_runs",
@@ -1707,6 +1708,8 @@ test("C-248: rejected publication blocks Web preflight and an already accepted r
           payload: expect.objectContaining({
             // C-680: a classification fault is not an upstream outage.
             reason: "upstream_diagnosis_unavailable",
+            // C-745: a provider-group publication fault has no project start.
+            upstream_detail: { sub_reason: "classification_failed" },
           }),
         }),
       ),

@@ -9,7 +9,14 @@ import {
   ensure,
 } from "./core.js";
 import { prepareMergePlan } from "./merge.js";
-import { systemMergeBlockers } from "./merge-blockers.js";
+import {
+  preMergeCheckBlockerReason,
+  systemMergeBlockers,
+} from "./merge-blockers.js";
+import {
+  officePendingPreMergeChecks,
+  promptOfficePreMergeChecks,
+} from "./office-pre-merge-prompt.js";
 import { effectivePreMergeChecks } from "./pre-merge-check-view.js";
 import { screenshotCheckEnforced } from "./screenshot-check.js";
 import {
@@ -168,6 +175,23 @@ export function recordAutomaticMergeWaits(
             ...work_item_ids.map((id) => ({ kind: "work_item" as const, id })),
           ],
         });
+      // C-744: the merge check passed and only checks the PM Office records
+      // remain; ring it now rather than after the reminder threshold.
+      const officeReasons = new Set(
+        officePendingPreMergeChecks(
+          card,
+          state.work_items,
+          state.deliveries,
+          screenshotCheckEnforced(state),
+        ).map(preMergeCheckBlockerReason),
+      );
+      if (reasons.every((reason) => officeReasons.has(reason)))
+        promptOfficePreMergeChecks(
+          d,
+          card,
+          "merge_check_passed",
+          completion_id,
+        );
       // Capacity/check execution and deliberate pauses need no PM workflow action.
       const pmReasons = reasons.filter(
         (reason) =>

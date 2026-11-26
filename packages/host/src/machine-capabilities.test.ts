@@ -678,7 +678,8 @@ test.each([
         expect(
           (await refreshMachineObservations(options)).health,
         ).toMatchObject({
-          blockers,
+          // C-608: a same-protocol digest mismatch is only a warning.
+          blockers: blockers.filter((b) => !b.includes("SHA-256")),
           available: false,
         });
       const actions = store.uow.read((tx) => tx.human_actions.list("a"));
