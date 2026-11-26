@@ -53,6 +53,7 @@ export const CLI_TOOLS = {
   "machine drain": null,
   "machine check": null,
   "machine reserve": null,
+  "machine reservation": null,
   "capability guide": null,
   "worker apply-config": null,
   "worker add": null,

@@ -4,7 +4,7 @@ export const DEFAULT_QUEUED_RECHECK_AFTER_MS = 5 * 60_000;
 export const DEFAULT_RUN_LIMIT = 4;
 export const DEFAULT_MAX_RUN_LIMIT = 16;
 
-/** Cross-project machine totals only; no project, card or Run identities. */
+/** Cross-project machine totals; no card or Run identities (reservations name only their holder project, C-800). */
 export interface MachineRunCapacity {
   readonly machine_id: string;
   readonly label: string;
@@ -17,6 +17,20 @@ export interface MachineRunCapacity {
   /** Ordinary Runs waiting for capacity, excluding reserved startups. */
   readonly queued: number;
   readonly merge_check_slots: number;
+  /**
+   * C-800: current and future calendar reservations on this machine. Only
+   * metadata: holder project, source, window and id, never the holder's cards.
+   */
+  readonly reservations?: readonly MachineReservationSummary[];
+}
+
+export interface MachineReservationSummary {
+  readonly reservation_id: string;
+  readonly resource: string;
+  readonly holder_project: string;
+  readonly source: "human" | "standing_pm" | "unknown";
+  readonly starts_at: string;
+  readonly ends_at: string;
 }
 
 /** Host-provided read port; absence must not be reported as zero capacity. */

@@ -239,6 +239,93 @@ test("machine CLI is human-only, audits metadata and cannot enable remote execut
     expect(await run(["machine", sub, "worker-a"])).not.toBe(0);
 });
 
+test("C-800 machine reservation list shows every project's holder metadata; cancel is human-only, needs a reason and writes the event", async () => {
+  await bootstrap();
+  const starts_at = new Date(Date.now() - 3_600_000).toISOString(),
+    ends_at = new Date(Date.now() + 3_600_000).toISOString();
+  const store = Store.open({ dataDir });
+  try {
+    store.createProject({ id: "peer" });
+    store.database
+      .prepare(
+        "INSERT INTO machine_resource_leases (generation, machine, resource, project, starts_at, ends_at, endpoints, source) VALUES ('rsv-1', 'cardigan-ci', 'android.emulator', 'peer', ?, ?, '[]', 'human')",
+      )
+      .run(starts_at, ends_at);
+  } finally {
+    store.close();
+  }
+  expect(await run(["machine", "reservation", "list"])).toBe(0);
+  expect(JSON.parse(printed())).toEqual([
+    {
+      reservation_id: "rsv-1",
+      machine: "cardigan-ci",
+      resource: "android.emulator",
+      holder_project: "peer",
+      source: "human",
+      starts_at,
+      ends_at,
+    },
+  ]);
+  expect(
+    await run(["machine", "reservation", "list", "--machine", "local"]),
+  ).toBe(0);
+  expect(JSON.parse(printed())).toEqual([]);
+  expect(await run(["machine", "reservation", "cancel", "rsv-1"])).not.toBe(0);
+  expect(errors.join("\n")).toContain("--reason");
+  expect(
+    await run(["machine", "reservation", "cancel", "--reason", "x"]),
+  ).not.toBe(0);
+  const tokenIo = io;
+  io = { ...io, env: { ...io.env, CARDIGAN_TOKEN: "untrusted-token" } };
+  expect(
+    await run(["machine", "reservation", "cancel", "rsv-1", "--reason", "x"]),
+  ).not.toBe(0);
+  expect(await run(["machine", "reservation", "list"])).not.toBe(0);
+  io = tokenIo;
+  expect(
+    await run([
+      "machine",
+      "reservation",
+      "cancel",
+      "rsv-1",
+      "--reason",
+      "所有者要求提前恢复模拟器",
+    ]),
+  ).toBe(0);
+  expect(JSON.parse(printed())).toEqual({
+    reservation_id: "rsv-1",
+    cancelled: true,
+    released_runs: 0,
+  });
+  expect(await run(["machine", "reservation", "list"])).toBe(0);
+  expect(JSON.parse(printed())).toEqual([]);
+  expect(
+    await run(["machine", "reservation", "cancel", "rsv-1", "--reason", "x"]),
+  ).not.toBe(0);
+  expect(errors.join("\n")).toContain("预约已结束");
+  const after = Store.open({ dataDir });
+  try {
+    expect(
+      after
+        .getUpdates({ project_id: "peer" })
+        .events.filter(
+          (e) => e.type === "machine_resource_reservation_cancelled",
+        )
+        .map((e) => [e.actor, e.payload]),
+    ).toEqual([
+      [
+        { kind: "human", project_id: "peer" },
+        expect.objectContaining({
+          reservation_id: "rsv-1",
+          reason: "所有者要求提前恢复模拟器",
+        }),
+      ],
+    ]);
+  } finally {
+    after.close();
+  }
+});
+
 test("machine check reports actual remote results without a blanket field-verification refusal", async () => {
   await bootstrap();
   expect(

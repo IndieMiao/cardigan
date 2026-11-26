@@ -1,6 +1,7 @@
 import { DEFAULT_MAX_RUN_LIMIT, type Machine } from "@cardigan/domain";
 import {
   effectiveRunLimit,
+  listMachineReservations,
   parseMachineCapabilityCatalog,
   type ReadResourceLimits,
 } from "@cardigan/host";
@@ -208,6 +209,11 @@ export function machineView(
         resources: [...(options.resourceLimits?.(id) ?? [])].map(
           ([key, limit]) => ({ key, limit }),
         ),
+        // C-800: open calendar reservations of every project on this machine.
+        reservations: listMachineReservations(store.database, {
+          now,
+          machine: id,
+        }).map(({ machine: _machine, ...reservation }) => reservation),
         bindings,
       };
     });

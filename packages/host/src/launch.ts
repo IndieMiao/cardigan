@@ -467,16 +467,19 @@ async function launchWithClaim(
       (assignment.runtime_ref &&
         host.leases?.freshSession(input.project, assignment))
     ) {
+      const overQuota =
+        !denied &&
+        !capacity.withinProjectQuota(input.project, assignment, keys);
       host.leases?.wait(
         tx,
         input.project,
         assignment,
         run,
-        denied ??
-          (!capacity.withinProjectQuota(input.project, assignment, keys)
-            ? "项目额度已满"
-            : "等待重新创建资源会话"),
+        denied ?? (overQuota ? "项目额度已满" : "等待重新创建资源会话"),
         clock.now(),
+        true,
+        false,
+        overQuota ? "capacity" : undefined,
       );
       return undefined;
     }

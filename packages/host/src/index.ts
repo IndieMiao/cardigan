@@ -285,6 +285,7 @@ export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";
 export * from "./machine-check-journal.js";
 export { configureMachinePlacement } from "./machine-placement.js";
+export * from "./machine-reservations.js";
 export * from "./macos-check-config.js";
 export * from "./macos-check-result.js";
 export * from "./macos-check-service.js";

@@ -1555,7 +1555,18 @@ export interface MachineView {
     readonly key: string;
     readonly limit: number;
   }[];
+  /** C-800: open calendar reservations of every project on this machine. */
+  readonly reservations?: readonly MachineReservationView[];
   readonly bindings: readonly MachineBindingView[];
+}
+/** C-800: reservation metadata only; never the holder project's cards. */
+export interface MachineReservationView {
+  readonly reservation_id: string;
+  readonly resource: string;
+  readonly holder_project: string;
+  readonly source: "human" | "standing_pm" | "unknown";
+  readonly starts_at: string;
+  readonly ends_at: string;
 }
 
 /**
@@ -2792,6 +2803,13 @@ export interface CardiganClient {
     drain: boolean,
     idempotencyKey: string,
   ): Promise<{ machine_id: string; status: string }>;
+  /** C-800: end a calendar reservation early; owner's human session only. */
+  cancelMachineReservation?(
+    projectId: string,
+    machineId: string,
+    reservationId: string,
+    reason: string,
+  ): Promise<{ reservation_id: string; released_runs: number }>;
   createWorkerWizard?(
     projectId: string,
     input: WorkerWizardInput,
@@ -3522,6 +3540,18 @@ export class HttpCardiganClient implements CardiganClient {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/${drain ? "drain" : "resume"}`,
       { method: "POST", body: "{}", idempotencyKey, resend: false },
+    );
+  }
+  cancelMachineReservation(
+    projectId: string,
+    machineId: string,
+    reservationId: string,
+    reason: string,
+  ): Promise<{ reservation_id: string; released_runs: number }> {
+    // Not resent: a lost reply is followed by a fresh read of the machine.
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/reservations/${encodeURIComponent(reservationId)}/cancel`,
+      { method: "POST", body: JSON.stringify({ reason }), resend: false },
     );
   }
   createWorkerWizard(

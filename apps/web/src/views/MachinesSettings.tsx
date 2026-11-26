@@ -87,6 +87,7 @@ import {
   useCapabilityGuides,
 } from "./CapabilityGuide.js";
 import { CapabilityInstallDialog } from "./CapabilityInstall.js";
+import { MachineReservations } from "./MachineReservations.js";
 import {
   checkingWithoutId,
   machineActions,
@@ -573,6 +574,15 @@ function MachineDrawer({
                 />
               )
             }
+          />
+        )}
+        {machine && (
+          <MachineReservations
+            client={client}
+            projectId={projectId}
+            machine={machine}
+            canEdit={canEdit}
+            onChanged={changed}
           />
         )}
         {machine && installing && (

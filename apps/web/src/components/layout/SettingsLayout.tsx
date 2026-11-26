@@ -398,6 +398,8 @@ export function SettingsConfirmDialog({
   onCancel,
   onConfirm,
   fallbackFocus,
+  children,
+  confirmDisabled = false,
 }: {
   open: boolean;
   title: string;
@@ -410,6 +412,9 @@ export function SettingsConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
   fallbackFocus?: () => HTMLElement | null;
+  /** C-800: fields the confirmation needs (e.g. a required reason). */
+  children?: ReactNode;
+  confirmDisabled?: boolean;
 }) {
   const opener = useRef<HTMLElement | null>(null);
   return (
@@ -441,11 +446,15 @@ export function SettingsConfirmDialog({
         <DialogDescription className={describe ? undefined : "visually-hidden"}>
           {description}
         </DialogDescription>
+        {children}
         <SettingsDialogActions>
           <Button onClick={onCancel}>{cancelLabel}</Button>
           <Button
             variant={destructive ? "destructive" : "primary"}
-            onClick={onConfirm}
+            aria-disabled={confirmDisabled || undefined}
+            onClick={() => {
+              if (!confirmDisabled) onConfirm();
+            }}
           >
             {confirmLabel}
           </Button>
