@@ -10,6 +10,29 @@ import {
 } from "@cardigan/domain";
 import { prepare } from "./statements.js";
 
+/**
+ * C-785: event types no project's in-memory event log keeps, in any command
+ * state scope. Their rows stay in the `events` table, so `get_updates`, the
+ * router, the activity page and every other SQL reader see them as before;
+ * only `listStreams` and the transaction's `listAfter` (both answered from
+ * the log) leave them out. A type belongs here only when no reader of those
+ * two needs it: `cross_card_read` is a read-audit row (about a sixth of all
+ * event bytes in the 11-26 production snapshot) whose one in-process reader,
+ * the `project_snapshot` read audit, queries SQL, and that never routes a
+ * notification or starts a Run.
+ */
+export const NON_RESIDENT_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "cross_card_read",
+]);
+/** Compile-time constants only; checked so the SQL literal stays inert. */
+const SKIPPED = (() => {
+  const types = [...NON_RESIDENT_EVENT_TYPES];
+  if (!types.every((t) => /^[a-z][a-z0-9_]*$/u.test(t)))
+    throw new Error("C-785: invalid non-resident event type");
+  return types.map((t) => `'${t}'`).join(", ");
+})();
+const ROWS_AFTER = `SELECT rowid AS r, doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? AND type NOT IN (${SKIPPED}) ORDER BY rowid`;
+
 /** C-639: the Store's `listStreams` result (an immutable log view). */
 export type EventStreams = EventLogView;
 
@@ -22,6 +45,8 @@ interface Dormancy {
   readonly closed: ReadonlySet<string>;
   /** Rowid watermark of the first read. */
   readonly until: number;
+  /** C-796: rowids of dispatch records no journal read needs decoded. */
+  readonly dispatch?: ReadonlySet<number>;
 }
 
 type Snapshot = {
@@ -48,13 +73,20 @@ export class CommandEvents {
   /**
    * C-671: with `resident` (the `slim` scope), closed cards' rows of other
    * types load dormant and are decoded from the table when first read.
+   * C-796: with `dispatch` (every scope but `full`), so do the GitHub
+   * dispatch records `dormantDispatchRows` picks.
    */
-  constructor(private readonly resident?: ReadonlySet<string>) {}
+  constructor(
+    private readonly resident?: ReadonlySet<string>,
+    private readonly dispatch = false,
+  ) {}
 
   transaction(db: DatabaseSync) {
-    const resident = this.resident;
+    const { resident, dispatch } = this;
     const first = (project: ProjectId, until: number) =>
-      resident ? firstRead(db, project, until, resident) : undefined;
+      resident || dispatch
+        ? firstRead(db, project, until, resident, dispatch)
+        : undefined;
     const pending = new Map<ProjectId, Snapshot>();
     const listStreams = (project: ProjectId): EventLogView => {
       const through = Number(
@@ -67,25 +99,23 @@ export class CommandEvents {
       const previous = pending.get(project) ?? this.committed.get(project);
       if (previous?.through === through) return previous.view;
       const rows = db
-        .prepare(
-          "SELECT rowid AS r, doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid",
-        )
+        .prepare(ROWS_AFTER)
         .iterate(previous?.through ?? 0, through, project);
       // C-649: the first read decodes straight into a fresh log (no row array
       // or per-stream copy), which keeps the restart peak and RSS down.
       if (!previous) {
         const next = load(rows, through, first(project, through));
-        pending.set(project, next);
+        pending.set(project, settled(next));
         return next.view;
       }
       const added = decode(rows, previous.dormancy);
       // Another project's rows move the watermark without changing this view.
       if (added.length === 0) {
-        pending.set(project, { ...previous, through });
+        pending.set(project, settled({ ...previous, through }));
         return previous.view;
       }
       const next = extend(previous, added, through);
-      pending.set(project, next);
+      pending.set(project, settled(next));
       return next.view;
     };
     /**
@@ -108,9 +138,7 @@ export class CommandEvents {
       let count = 0;
       const rows = (function* () {
         for (const row of db
-          .prepare(
-            "SELECT rowid AS r, doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid LIMIT ?",
-          )
+          .prepare(`${ROWS_AFTER} LIMIT ?`)
           .iterate(from, max, project, limit)) {
           last = Number(row.r);
           count++;
@@ -128,7 +156,7 @@ export class CommandEvents {
         next = load(rows, max, first(project, max));
         if (count >= limit) next = { ...next, through: last };
       }
-      pending.set(project, next);
+      pending.set(project, settled(next));
       return count < limit;
     };
     return {
@@ -204,17 +232,34 @@ function load(
   };
 }
 
+/**
+ * C-796: once a snapshot has read through its first-read watermark, no later
+ * row can be dormant, so the dormancy inputs (closed cards, dispatch rowids)
+ * are dropped instead of being kept for the process lifetime.
+ */
+function settled(snapshot: Snapshot): Snapshot {
+  if (!snapshot.dormancy || snapshot.through < snapshot.dormancy.until)
+    return snapshot;
+  const { dormancy: _done, ...rest } = snapshot;
+  return rest;
+}
+
 /** C-671: whether a row read now stays dormant under `dormancy`. */
 const dormant = (
   dormancy: Dormancy | undefined,
   row: Record<string, unknown>,
   event: Event,
-) =>
-  dormancy !== undefined &&
-  Number(row.r) <= dormancy.until &&
-  event.card_id !== undefined &&
-  dormancy.closed.has(event.card_id) &&
-  !RESIDENT.get(dormancy)?.has(event.type);
+) => {
+  if (dormancy === undefined || Number(row.r) > dormancy.until) return false;
+  if (dormancy.dispatch?.has(Number(row.r))) return true;
+  const resident = RESIDENT.get(dormancy);
+  return (
+    resident !== undefined &&
+    event.card_id !== undefined &&
+    dormancy.closed.has(event.card_id) &&
+    !resident.has(event.type)
+  );
+};
 const RESIDENT = new WeakMap<Dormancy, ReadonlySet<string>>();
 
 type Row = { readonly event: Event; readonly dormant: boolean };
@@ -239,7 +284,8 @@ function firstRead(
   db: DatabaseSync,
   project: ProjectId,
   until: number,
-  resident: ReadonlySet<string>,
+  resident: ReadonlySet<string> | undefined,
+  dispatch: boolean,
 ): { dormancy: Dormancy; loader: DormantLoader } {
   const closed = new Set(
     prepare(
@@ -249,8 +295,14 @@ function firstRead(
       .all(project)
       .map((row) => String(row.id)),
   );
-  const dormancy: Dormancy = { closed, until };
-  RESIDENT.set(dormancy, resident);
+  const dormancy: Dormancy = {
+    closed,
+    until,
+    ...(dispatch
+      ? { dispatch: dormantDispatchRows(db, project, until, closed) }
+      : {}),
+  };
+  if (resident) RESIDENT.set(dormancy, resident);
   const loader: DormantLoader = (stream, seqs) => {
     const wanted = new Set(seqs);
     const found: Event[] = [];
@@ -263,6 +315,65 @@ function firstRead(
     return found;
   };
   return { dormancy, loader };
+}
+
+/**
+ * C-796: the project's GitHub dispatch records (rowid <= `until`) that stay
+ * dormant. The journal reads only the newest system record of each attempt
+ * (`Map.set(payload.attempt, …)` over a stream), so a record is dormant when
+ *
+ * - a later system record of the same stream, type and (string) attempt
+ *   supersedes it; or
+ * - it is that newest record on a card closed now, and retired: finished,
+ *   and either cleaned up (`deleted`) or without a candidate ref. Such an
+ *   intent holds no executor and no branch; the journal skips it while its
+ *   card stays closed and decodes it again if the card reopens.
+ *
+ * Every other record (unfinished intents above all) stays decoded. Rows are
+ * read in seq order per stream, the order the log keeps them in.
+ */
+function dormantDispatchRows(
+  db: DatabaseSync,
+  project: ProjectId,
+  until: number,
+  closed: ReadonlySet<string>,
+): Set<number> {
+  const rows = new Set<number>();
+  type Newest = { r: number; retired: boolean };
+  let group: string | undefined;
+  let stream = "";
+  let newest = new Map<string, Newest>();
+  const flush = () => {
+    if (closed.has(stream))
+      for (const { r, retired } of newest.values()) if (retired) rows.add(r);
+    newest = new Map();
+  };
+  for (const row of prepare(
+    db,
+    "SELECT rowid AS r, type, stream, json_extract(doc, '$.actor.kind', '$.payload.attempt', '$.payload.finished', '$.payload.deleted', '$.payload.candidate') AS f FROM events WHERE project_id = ? AND type IN ('github_check_dispatch', 'github_probe_dispatch') AND rowid <= ? ORDER BY type, stream, seq",
+  ).iterate(project, until)) {
+    const key = `${row.type as string}\u0000${row.stream as string}`;
+    if (key !== group) {
+      if (group !== undefined) flush();
+      group = key;
+      stream = row.stream as string;
+    }
+    const [actor, attempt, finished, deleted, candidate] = JSON.parse(
+      row.f as string,
+    ) as unknown[];
+    if (actor !== "system" || typeof attempt !== "string") continue;
+    const r = Number(row.r);
+    const previous = newest.get(attempt);
+    if (previous) rows.add(previous.r);
+    newest.set(attempt, {
+      r,
+      retired:
+        finished === true &&
+        (deleted === true || candidate === null || candidate === undefined),
+    });
+  }
+  if (group !== undefined) flush();
+  return rows;
 }
 
 /** Append to the transaction overlay, or rebuild when a stream's seq goes back. */

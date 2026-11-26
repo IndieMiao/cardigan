@@ -515,3 +515,121 @@ test("C-798 an attempt already running without fingerprints cannot gain them lat
     ),
   ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
 });
+async function queuedAt(s: CommandState, at: string, io = ports()) {
+  const receipt = await prepareCheck(s, actor(), params, {
+    head: async () => at,
+  });
+  if (!receipt.ok) return receipt;
+  return requestCheck(s, actor(), params, receipt.value, io);
+}
+const inFlight = (s: CommandState) =>
+  prechecks(s.events).filter((c) => ["queued", "running"].includes(c.status));
+test.each(["queued", "running"] as const)(
+  "C-783: a new HEAD supersedes the %s attempt in the same transaction, keeping one slot",
+  async (phase) => {
+    const f = setup();
+    let s = apply(f.state, value(await queued(f.state, f.io)));
+    const old = prechecks(s.events)[0]!;
+    if (phase === "running")
+      s = apply(s, value(recordPrecheck(s, system, running(old), f.io)));
+    const newer = "e".repeat(40);
+    const effect = value(await queuedAt(s, newer, f.io));
+    expect(effect.events.map((e) => [e.type, e.actor.kind])).toEqual([
+      ["precheck_finished", "system"],
+      ["precheck_queued", "system"],
+    ]);
+    s = apply(s, effect);
+    const replaced = prechecks(s.events).find(
+      (c) => c.attempt_id === old.attempt_id,
+    )!;
+    expect(replaced).toMatchObject({
+      status: "interrupted",
+      head_sha: head,
+      superseded_by: effect.data.attempt_id,
+      summary: expect.stringContaining(newer.slice(0, 12)),
+    });
+    if (phase === "running")
+      // The executor identity is kept so the host can cancel the bound run.
+      expect(replaced).toMatchObject({ executor: { name: "ci", type: "ssh" } });
+    expect(inFlight(s)).toEqual([
+      expect.objectContaining({ head_sha: newer, status: "queued" }),
+    ]);
+    // The latest attempt for the Assignment is the new one (journal supersession).
+    expect(prechecks(s.events).at(-1)?.attempt_id).toBe(effect.data.attempt_id);
+    // A late host result for the replaced attempt can never be published.
+    expect(
+      recordPrecheck(
+        s,
+        system,
+        {
+          ...running(old),
+          status: "passed",
+          checks: [{ name: "test", status: "passed", exit_code: 0 }],
+        },
+        f.io,
+      ).ok,
+    ).toBe(false);
+    expect(
+      recordPrecheck(s, system, { ...old, status: "interrupted" }, f.io).ok,
+    ).toBe(false);
+    expect(JSON.stringify(effect)).not.toContain("/synthetic");
+  },
+);
+test("C-783: the same HEAD never supersedes, re-queues or takes a second precheck slot", async () => {
+  const f = setup();
+  let s = apply(f.state, value(await queued(f.state, f.io)));
+  const old = prechecks(s.events)[0]!;
+  for (const phase of ["queued", "running"] as const) {
+    if (phase === "running")
+      s = apply(s, value(recordPrecheck(s, system, running(old), f.io)));
+    const again = await queuedAt(s, head, f.io);
+    expect(again).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+    expect(inFlight(s)).toEqual([
+      expect.objectContaining({ attempt_id: old.attempt_id, status: phase }),
+    ]);
+  }
+  // A settled attempt with the same HEAD can be checked again as before.
+  s = apply(
+    s,
+    value(
+      recordPrecheck(
+        s,
+        system,
+        { ...running(old), status: "failed", checks: [] },
+        f.io,
+      ),
+    ),
+  );
+  const retry = value(await queuedAt(s, head, f.io));
+  expect(retry.events.map((e) => e.type)).toEqual(["precheck_queued"]);
+});
+test("C-783: supersession keeps the request's own authorization and hold guards", async () => {
+  const f = setup();
+  const s = apply(f.state, value(await queued(f.state, f.io)));
+  const held = apply(
+    s,
+    value(
+      updateCard(
+        s,
+        human,
+        {
+          card_id: id("card", 1),
+          hold: { reason: "wait", resume_condition: "ready" },
+        },
+        f.io,
+      ),
+    ),
+  );
+  expect((await queuedAt(held, "e".repeat(40))).ok).toBe(false);
+  expect(
+    (
+      await prepareCheck(s, actor(2, "reviewer"), params, {
+        head: async () => "e".repeat(40),
+      })
+    ).ok,
+  ).toBe(false);
+  expect(inFlight(held)).toHaveLength(1);
+});

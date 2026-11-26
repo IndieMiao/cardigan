@@ -539,6 +539,33 @@ export class CentralRepositoryService {
     }
     return this.publishBatch(project, batch);
   }
+  /**
+   * C-782: paths the final merge preparation would report as conflicted for a
+   * delivered head on the current baseline. Read-only for the central
+   * repository: merge objects go to a scratch directory that is removed, and
+   * no commit, ref, index, worktree or repository lock is involved. A lone
+   * development-plan conflict is left to the preparation's union resolution.
+   */
+  async trialMerge(
+    project: CentralProject,
+    base: string,
+    sha: string,
+  ): Promise<readonly string[]> {
+    if (![base, sha].every((value) => fullSha.test(value)))
+      throw new Error("Trial merge requires full commit SHAs");
+    if (!(await this.hasCentral(project)))
+      throw new Error("Central repository is missing");
+    const repository = this.repositoryPath(project);
+    if (await this.git.isAncestor(repository, sha, base)) return [];
+    const { conflicts } = await this.git.mergeTree(repository, base, sha, {
+      scratch: true,
+    });
+    return conflicts.length === 1 &&
+      conflicts[0] === "docs/development-plan.md" &&
+      this.git.resolvePlanConflict
+      ? []
+      : conflicts;
+  }
   private async mergeCandidate(
     repository: string,
     base: string,

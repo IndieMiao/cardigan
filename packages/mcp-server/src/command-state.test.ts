@@ -461,14 +461,30 @@ test("C-649 lean scope retains the project stream by type, drops cold dispatch r
       fullEventHistory(s.events).map((e) => e.id);
     expect(lean.commandStateScope).toBe("lean");
     const base = lean.uow.read((tx) => loadCommandState(tx, project_id));
-    expect(ids(base)).toEqual(["b2", "x2", "p1", "o1", "c1"]);
+    // C-785: read-audit rows never reach the in-memory log in any scope
+    // (the table and its SQL readers keep them), so even a live
+    // notification subject of that type is absent from both states.
+    expect(ids(whole)).not.toContain("x2");
+    expect(
+      full
+        .streamEventsOfType(project_id, undefined, "cross_card_read")
+        .map((e) => e.id),
+    ).toEqual(["x1", "x2"]);
+    expect(ids(base)).toEqual(["b2", "p1", "o1", "c1"]);
     expect(ids(base)).toEqual(
       ids({ events: leanCommandEvents(whole, [], new Set(["x2"])) }),
     );
     // The command stream itself carries business events only.
-    expect(base.events.map((e) => e.id)).toEqual(["x2", "p1", "c1"]);
-    // The hot scope keeps every project-stream event and cold dispatch records.
-    expect(ids(whole)).toEqual(ids({ events: hotCommandEvents(whole) }));
+    expect(base.events.map((e) => e.id)).toEqual(["p1", "c1"]);
+    // The hot scope keeps every project-stream event; since C-796 it drops
+    // cold dispatch records like lean.
+    expect(ids({ events: hotCommandEvents(whole) })).toEqual([
+      "b1",
+      "b2",
+      "p1",
+      "o1",
+      "c1",
+    ]);
     expect(
       compareHotState(whole, base, { now: NOW }).filter((c) => !c.equal),
     ).toEqual([]);
@@ -571,6 +587,85 @@ test("C-671 slim scope keeps cold cards' whitelisted facts, answers lookups over
   } finally {
     slim.close();
     full.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("C-796 hot: a closed card's dispatch records stay out until a target or waited run names it, then read back whole", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cg-dispatch-state-"));
+  const writer = Store.open({ dataDir, commandState: "full" });
+  const closed = {
+    ...serverCard,
+    id: "C-796" as Event["card_id"] & string,
+    status: "done" as const,
+  };
+  const record = (seq: number, payload: Record<string, unknown>): Event => ({
+    id: `d${seq}`,
+    seq,
+    card_id: closed.id,
+    type: "github_check_dispatch",
+    actor: { kind: "system", project_id },
+    payload: payload as Event["payload"],
+    created_at: NOW,
+  });
+  try {
+    writer.createProject({ id: project_id });
+    writer.uow.run((tx) => {
+      tx.cards.put(project_id, serverCard);
+      tx.cards.put(project_id, closed);
+      tx.events.append(project_id, record(1, { attempt: "a" }));
+      tx.events.append(
+        project_id,
+        record(2, { attempt: "a", externalRun: { run_id: 796 } }),
+      );
+      tx.events.append(
+        project_id,
+        record(3, {
+          attempt: "a",
+          externalRun: { run_id: 796 },
+          finished: true,
+          deleted: true,
+        }),
+      );
+    });
+    const hot = Store.open({ dataDir, commandState: "hot" });
+    try {
+      const ids = (s: CommandState) =>
+        fullEventHistory(s.events)
+          .filter((e) => e.card_id === closed.id)
+          .map((e) => e.id);
+      const dormant = () =>
+        hot.uow.read((tx) => {
+          const view = tx.events.listStreams?.(project_id);
+          return view && "base" in view ? view.base.dormant : -1;
+        });
+      const base = hot.uow.read((tx) => loadCommandState(tx, project_id));
+      expect(ids(base)).toEqual([]);
+      // Every record of the closed card is dormant; finding its run decodes none.
+      expect(dormant()).toBe(3);
+      const byRun = hot.uow.read((tx) =>
+        loadCommandState(tx, project_id, undefined, { targets: ["796"] }),
+      );
+      expect(dormant()).toBe(3);
+      // A command naming the run or the card reads the card whole, as stored.
+      const whole = writer.uow.read((tx) =>
+        tx.events.listAfter(project_id, closed.id, 0),
+      );
+      expect(
+        fullEventHistory(byRun.events).filter((e) => e.card_id === closed.id),
+      ).toEqual(whole);
+      const byCard = hot.uow.read((tx) =>
+        loadCommandState(tx, project_id, undefined, { targets: [closed.id] }),
+      );
+      expect(ids(byCard)).toEqual(["d1", "d2", "d3"]);
+      expect(eventsOfType(byCard.events, "github_check_dispatch")).toEqual(
+        whole,
+      );
+    } finally {
+      hot.close();
+    }
+  } finally {
+    writer.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });

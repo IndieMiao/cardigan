@@ -21,6 +21,7 @@ import {
   cardTemplate,
   currentPreMergeVersions,
   decisionQuestionPayload,
+  EARLY_MERGE_CONFLICT,
   employeeNameKey,
   eventsAtSeq,
   eventsForWorkItem,
@@ -1092,6 +1093,56 @@ function routeVoidedRejection(input: RouteInput, draft: Draft): void {
     );
 }
 
+/** C-782: carry-over compares these delivery fields verbatim across a proved SHA change. */
+const REUSE_HINT =
+  "只合入基线、解冲突的重交：已知遗漏和附件原样沿用上一版，主机可证明代码等价时沿用已有审核。";
+
+/** C-782: advisory only; nobody else is told when the author is gone or has redelivered. */
+function routeEarlyMergeConflict(input: RouteInput, draft: Draft): void {
+  if (
+    input.event.actor.kind !== "system" ||
+    input.event.actor.project_id !== input.snapshot.project_id
+  )
+    return;
+  const item = itemOf(
+    input,
+    payloadString(input.event.payload, "work_item_id") as
+      | WorkItemId
+      | undefined,
+  );
+  const owner = assignmentOf(input, item?.assignment_id);
+  const card = input.snapshot.cards.find((c) => c.id === input.event.card_id);
+  const current =
+    card &&
+    item &&
+    currentPreMergeVersions(
+      card,
+      input.snapshot.work_items,
+      input.snapshot.deliveries,
+    ).find((v) => v.work_item_id === item.id);
+  if (
+    !item ||
+    item.card_id !== input.event.card_id ||
+    item.kind !== "produce" ||
+    !owner ||
+    !isActive(owner) ||
+    current?.delivery_id !== payloadString(input.event.payload, "delivery_id")
+  )
+    return;
+  note(
+    input,
+    draft,
+    recipient.assignment(owner.id),
+    "instruction",
+    "C-782/early merge conflict",
+    `${
+      payloadString(input.event.payload, "body") ??
+      `${item.id} 的交付与最新基线试合并冲突，请合入基线并解决冲突。`
+    }${REUSE_HINT}`,
+    { work_item_id: item.id },
+  );
+}
+
 function routeReview(input: RouteInput, draft: Draft): void {
   const verdict = payloadString(input.event.payload, "verdict");
   const delivery_id = payloadString(input.event.payload, "delivery_id");
@@ -1928,6 +1979,9 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
       "blocker_reported",
       "decision_requested",
       "human_action_requested",
+      // C-789: a wait registered on a delivered/accepted producer.
+      "work_item_standby_registered",
+      "run_next_step_missing",
     ]).filter((event) => payloadString(event.payload, "run_id") === run_id),
     ...input.snapshot.deliveries.filter(
       (delivery) => delivery.run_id === run_id,
@@ -2085,6 +2139,9 @@ export function routeEvent(input: RouteInput): RouteResult {
     case CARD_WATCH_TRIGGERED:
     case CARD_WATCH_ENDED:
       routeCardWatch(input, draft);
+      break;
+    case EARLY_MERGE_CONFLICT:
+      routeEarlyMergeConflict(input, draft);
       break;
     case "story_children_settled": {
       const parent = input.snapshot.cards.find(
@@ -2409,12 +2466,15 @@ export function routeEvent(input: RouteInput): RouteResult {
         attempt_id?: string;
         assignment_id?: AssignmentId;
         work_item_id?: WorkItemId;
+        superseded_by?: string;
       };
       if (
         input.event.actor.kind !== "system" ||
         input.event.actor.project_id !== input.snapshot.project_id ||
         !p.assignment_id ||
-        !p.work_item_id
+        !p.work_item_id ||
+        // C-783: the author's own newer request replaced it; its result is the one to read.
+        p.superseded_by
       )
         break;
       const conflict = isPrecheckConflict(
@@ -2728,6 +2788,7 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_resume_deferred":
     case "precheck_wait_escalated":
     case "baseline_conflict_limit_reached":
+    case "precheck_slot_waiting":
       if (
         input.event.actor.kind === "system" &&
         input.event.actor.project_id === input.snapshot.project_id
@@ -2756,6 +2817,47 @@ export function routeEvent(input: RouteInput): RouteResult {
           `${subject(input)} 工作项阻塞需要 PM 核查`,
         );
       break;
+    case "work_item_standby_registered": {
+      // C-789: nothing the system can verify, or the allowance is used: PM.
+      const p = payloadObject(input.event.payload);
+      if (!p.condition || p.auto_resume_disabled === true)
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "6.4/system rules",
+          p.auto_registered === true
+            ? `${subject(input)} Run 以 blocked 结束但未登记下一步，系统已代登记，需要 PM 核查`
+            : `${subject(input)} 已交付工作项登记等待，需要 PM 核查`,
+        );
+      break;
+    }
+    case "session_rotation_skipped":
+      // C-789: the one automatic rotation is spent; PM decides the next one.
+      if (
+        input.event.actor.kind === "system" &&
+        payloadObject(input.event.payload).reason === "allowance_used"
+      )
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "6.4/system rules",
+          `${subject(input)} 会话再次卡住，已用完自动换代额度，需要 PM 核查`,
+        );
+      break;
+    case "run_next_step_missing":
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "escalation",
+        "6.4/system rules",
+        `${subject(input)} Run 以 blocked 结束但未登记下一步，需要 PM 核查`,
+      );
+      break;
     case "work_item_resume_requested": {
       const p = payloadObject(input.event.payload);
       const item = itemOf(input, p.work_item_id as WorkItemId);
@@ -2764,7 +2866,12 @@ export function routeEvent(input: RouteInput): RouteResult {
       if (
         item &&
         item.card_id === input.event.card_id &&
-        ["ready", "in_progress"].includes(item.status) &&
+        (["ready", "in_progress"].includes(item.status) ||
+          // C-789: a standby wake leaves a delivered/accepted item's state.
+          (p.standby === true &&
+            input.event.actor.kind === "system" &&
+            item.kind === "produce" &&
+            ["delivered", "accepted"].includes(item.status))) &&
         card &&
         !["done", "cancelled"].includes(card.status) &&
         owner?.scope === "work_item" &&
@@ -3065,7 +3172,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           rule,
           returned
             ? `Changes requested for ${item.id}: ${payloadString(input.event.payload, "reason") ?? ""}`
-            : `Resolve the merge conflict for ${item.id}`,
+            : `Resolve the merge conflict for ${item.id}. ${REUSE_HINT}`,
           { work_item_id: item.id, run_kind: "fix" },
         );
       else

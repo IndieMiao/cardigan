@@ -265,6 +265,10 @@ export function dispatchStallCauses(
         ) &&
         // C-618: a delivered author is asked to supply unblocked evidence.
         !(w.status === "delivered" && evidenceUnblockedInstruction(trigger)) &&
+        // C-789: a standby wait woke a delivered/accepted producer.
+        !(
+          ["delivered", "accepted"].includes(w.status) && standbyWake(trigger)
+        ) &&
         !["in_progress", "ready", "todo", "changes_requested"].includes(
           w.status,
         )
@@ -590,6 +594,15 @@ export function dispatchStallCauses(
       s.restart_blocked ||
       s.system_finished_run_id ||
       s.retirement_handoff,
+  );
+}
+
+/** C-789: the system's one-time wake of a standby wait (state unchanged). */
+function standbyWake(trigger: Event | undefined): boolean {
+  return (
+    trigger?.type === "work_item_resume_requested" &&
+    trigger.actor.kind === "system" &&
+    (trigger.payload as { standby?: unknown } | null)?.standby === true
   );
 }
 

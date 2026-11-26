@@ -90,7 +90,8 @@ GROUP BY type ORDER BY n DESC;
 | 合并确认：分类确认之后，其余条件全部满足时选 `merge` 并写知会 | **交给系统**（决定 2），项目偏好开启后生效 | 条件已由 `pmMergeBlockers` 等服务端强制，再加更严的系统条件 |
 | 合并确认：条件不满足时 hold / 退回 / 交人；合并检查失败判断真实问题还是偶发 | **仍由 PM Ops** | 需要判断 |
 | 合并确认：敏感、D12 四类、需求范围变化、角色规则、对外发布、已交人的确认 | **交人**（不变） | 人确认边界不变 |
-| 打 `risk_tags`、补 `independent_reviewer` 验证项 | **仍由 PM Ops** | 风险分类是判断（ADR 0006 决定 4） |
+| 打 `risk_tags` | **仍由 PM Ops** | 风险分类是判断（ADR 0006 决定 4） |
+| 补 `independent_reviewer` 验证项：交付命中高危路径（`high_risk_paths`）或卡片被人标为高危，而该产出项还没有同卡必需、未取消、未替换的独立复核项 | **交给系统**（C-790 修订） | “是否高危”由路径清单和人的标记确定，不是判断；系统只负责建项，复核判断标准、复核员隔离和各项合并、完成硬门都不变。看到未命中路径的安全、权限、数值改动时另补复核项仍由 PM Ops 判断 |
 | 审核轮数用尽（`raise_limit`/`pause`/`escalate`） | 普通验证项满足决定 4a 条件时**交给系统**加一轮，其余**仍由 PM Ops**；独立复核的上限**仍交人**（4b 是否改变交邵杰单独拍板） | 大多需要判断；“上一轮通过、只合入基线”的情形是确定性的 |
 | 代拍 general / feature_detail | **仍由 PM Ops** | 需要判断（Q-279） |
 | 分拣人工操作（`triage_human_action`） | **仍由 PM Ops** | 需要判断 |
@@ -140,7 +141,7 @@ GROUP BY type ORDER BY n DESC;
 **授权来源**：系统只处理**已经委托给 PM Ops** 的合并确认（`trigger=merge_confirmation`、`decider=role:pm`、`status=open`），即今天 PM Ops 有权代确认的那一部分；系统在此基础上再加更严的条件。`decider=human` 的确认（包括已交人的、敏感卡、D12、需求范围变化、PM 偏好关闭、没有活跃 PM Ops 时转给人的）**系统一律不碰**；它们仍按现有规则由人确认或走已有的超时自动合并（不变量 20，本 ADR 不改）。开关：新项目偏好 `system_merge_confirmation`，默认关闭，只有 human 能设置；`pm_merge_confirmation` 关闭时它也不生效。
 
 **为什么需要 PM Ops 先做一次分类确认（复核 V-741 第 1 条）**：现行规则下，PM Ops 合并前会看一遍卡片，并做几项判断：
-- 看到安全、权限、数值改动时，补 `risk_tags` 和 `independent_reviewer` 验证项；
+- 看到安全、权限、数值改动时，补 `risk_tags` 和 `independent_reviewer` 验证项（命中高危路径或人标高危的，复核项已由系统建好，见 C-790 修订）；
 - `numeric_rule` 卡要核对新数值、新行为规则已经由人拍板（“这不授权 PM 决定新的数值或行为规则”）；
 - 截图核对还没计入代确认时，界面卡要等 PM Office 写出截图核对结论；
 - 读全部时间线，看有没有“先别合”之类的意见。
@@ -296,6 +297,13 @@ Q-394 选 A：4a 只用第 1 档；第 2、3 档未采纳。独立复核仍保�
 - 等待依据来自交付、依赖完成、标记变更和核对记录等持久事实；开启催办后开始计时，不追补开启前的告警。旧记录缺少可信时间时从首次观察开始。等待周期和提醒次数以 `system_wait_started/closed/reminded` 持久化，重启不丢；新交付、重新进入等待或手动标记清除开始新周期。已通知自动指派失败的交付不另催。
 - 核对仅在 awaiting_merge 且对当前版本 pending 时提醒；独立复核和已开启审核投影的截图核对发给当前复核负责人，未指派交给就绪计时器。灰度开关关闭时截图核对仍属人工核对，提醒 PM Ops。普通核对和就绪项送 PM Ops，没有活跃 Ops 时进入 Needs You 可见列表；事项解决、标记手动或开关关闭后待处理投影消失。
 - C-237 不改变任何合并、业务拍板或审核轮数的权限。PM 正文按开关区分系统与人工职责，合并后需执行 `cardigan role upgrade pm --from-default` 并按既有常驻角色轮换流程生效；角色规则改动仍按 Q-279 交人确认。
+
+### C-790 修订：高危路径的独立复核项由系统建
+
+- 原第 2.3 节把“补 `independent_reviewer` 验证项”归为 PM 的判断。高危路径的那一部分其实是确定性规则：交付的主机路径证据命中项目 `high_risk_paths`，或卡片被人标为高危（`highRiskProducts`），就必须有同卡、必需、指向该产出项的独立复核项。原先系统只发 `high_risk_review_required` 请 PM 补齐，7 天 cardigan 103 次、sensen 28 次都是 PM 照做。
+- 现在由系统在交付事务内建项（`kind=verify`、`role_id=independent_reviewer`、`required=true`、目标为该产出项、`template_key=independent_review`），立即挂到当前交付，与快速补丁转普通通道时补的复核项相同；开了自动指派验证项的项目随后按既有规则挑非作者的复核员。去重沿用原有覆盖判断：同一产出项已有未取消、未替换的必需复核项就不再建，重复处理同一交付或后续重交都不会重复建。
+- 复核判断标准本身不变：复核员与被审交付作者隔离、复核结论只认绑定当前交付编号和 SHA 的 `submit_review`、完成和合并硬门（`missingIndependentReview`、`riskTagAutoMergeAllowed` 等）都照旧。系统建的项带模板键，PM 和人都不能改为可选；去掉 `security` 标签不影响它；PM 手建后改为可选的不算覆盖，下一次交付会重新建必需项；拆到别的卡的产出项按自己的交付单独判定。
+- 项目没有在用的 `independent_reviewer` 角色时系统建不了，仍发原来的请求给 PM Ops。sensen 等未开 `system_auto_assign_verifiers` 的项目，系统建的项仍要 PM 指派，开关属另一张卡的范围。
 
 ## 9. 回滚方式
 

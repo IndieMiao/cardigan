@@ -332,6 +332,10 @@ export interface WorkItemView {
   readonly card_id: string;
   readonly title: string;
   readonly kind: "produce" | "verify";
+  /** The card template slot this item fills, if any. */
+  readonly template_key?: string;
+  /** C-778: a retired item points at the one that took its place. */
+  readonly replaced_by_work_item_id?: string;
   readonly role_id: string;
   readonly required: boolean;
   readonly status: string;
@@ -346,6 +350,14 @@ export interface WorkItemView {
   readonly requirements?: MachineRequirements;
   /** MC-5: the newest placement outcome; older servers omit it. */
   readonly machine_selection?: MachineSelection;
+}
+
+export interface PrimaryReplacementInput {
+  readonly replacement_work_item_id: string;
+  /** Expected card and slot; the server refuses a stale view. */
+  readonly card_id: string;
+  readonly template_key: string;
+  readonly reason: string;
 }
 
 export interface MachineRequirements {
@@ -1111,6 +1123,8 @@ export interface NeedsPage {
   };
   /** §7.4 (C-65): merge confirmations PM Ops holds; the human may answer them. */
   readonly pm_held_merges?: readonly NeedsDecision[];
+  /** C-777: system merge confirmations stuck past the threshold. */
+  readonly stalled_system_merges?: readonly NeedsDecision[];
   /** §7.4 知会: delegated resolutions; never blocking. */
   readonly notices?: readonly NoticeView[];
   readonly notices_next_cursor?: string | null;
@@ -2671,6 +2685,13 @@ export interface CardiganClient {
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
+  /** C-778: hand the template's primary slot to another producer. */
+  replacePrimaryWorkItem(
+    projectId: string,
+    workItemId: string,
+    input: PrimaryReplacementInput,
+    idempotencyKey: string,
+  ): Promise<void>;
   preferences(projectId: string): Promise<PreferencesView>;
   setPreferences(
     projectId: string,
@@ -3926,6 +3947,19 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       `work-items/${encodeURIComponent(workItemId)}/manual-assign`,
       { manual_assign: enabled },
+      idempotencyKey,
+    );
+  }
+  async replacePrimaryWorkItem(
+    projectId: string,
+    workItemId: string,
+    input: PrimaryReplacementInput,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `work-items/${encodeURIComponent(workItemId)}/replace-primary`,
+      input,
       idempotencyKey,
     );
   }

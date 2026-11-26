@@ -15,7 +15,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { connect } from "node:net";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -29,6 +29,7 @@ import type {
 import { currentDeploymentPin } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import type { Store } from "@cardigan/store";
+import type { DeploymentHandoff, SupervisorJoinDriver } from "./deployment.js";
 import {
   deploymentMergeSegments,
   readInterruptedDeployment,
@@ -63,6 +64,7 @@ import {
 import { supervisorChanges } from "./deployment-supervisor-scope.js";
 import {
   nodeSystemdCommand,
+  readSupervisorUpgradePlan,
   SharedCapacityWait,
   type SupervisorUpgradeConfig,
   SupervisorUpgrader,
@@ -81,6 +83,7 @@ import {
 } from "./long-operations.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
+import { type ServerHeap, serverHeap } from "./server-heap.js";
 
 const exec = promisify(execFile);
 const CONFIG_TRIAL_MARKER = "CARDIGAN_HOST_CONFIG_CHECK";
@@ -129,8 +132,14 @@ interface State {
   backup_file?: string;
 }
 
+/** The checkout this supervisor runs from (its `release-watch-<sha>`). */
+const supervisorRoot = () =>
+  fileURLToPath(new URL("../../../", import.meta.url));
+
 /** Own child handles plus boot/start identity; never search cmdline or signal by name. */
-export class NodeDeploymentDriver implements DeploymentDriver {
+export class NodeDeploymentDriver
+  implements DeploymentDriver, SupervisorJoinDriver
+{
   readonly enabled: boolean;
   readonly batchWindowMs: number;
   readonly operationWaitMs: number;
@@ -152,6 +161,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private readonly central: string;
   private readonly ports: readonly number[];
   private readonly buildEnv: NodeJS.ProcessEnv;
+  /** C-785: one heap limit for both server roles, fixed for this supervisor. */
+  readonly serverHeap: ServerHeap;
   private supervisorSha: string | null | undefined;
   private checkedSupervisorMain: string | undefined;
   private failedSupervisorMain?: string;
@@ -159,6 +170,10 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private lastOperationWait: string | undefined;
   private notedOperations = new Set<string>();
   private upgrader: SupervisorUpgrader | undefined;
+  /** C-787: the switch handed over by the previous supervisor at startup. */
+  private received:
+    | { handoff: DeploymentHandoff; release(): Promise<void> }
+    | undefined;
   private readonly capacityWait = new SharedCapacityWait(() =>
     releaseDeploymentWait(this.options.store),
   );
@@ -202,6 +217,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       PATH: options.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
       LANG: "C.UTF-8",
     };
+    this.serverHeap = serverHeap(options.env);
+    if (this.serverHeap.warning)
+      process.stderr.write(`${this.serverHeap.warning}\n`);
   }
 
   /** Keep this lock for the whole supervisor lifetime, including idle ticks. */
@@ -344,6 +362,29 @@ export class NodeDeploymentDriver implements DeploymentDriver {
             PROJECT,
             this.state.current.sha,
           );
+        // C-787: the previous supervisor stopped the server for this restart
+        // and left its start to this one. Any doubt: recover as below.
+        const handoff =
+          pending && !saved.running
+            ? await this.receivedHandoff(pending)
+            : undefined;
+        if (handoff) {
+          this.state = {
+            current: this.state.current,
+            ...(this.state.previous ? { previous: this.state.previous } : {}),
+            ...(this.state.backup_file
+              ? { backup_file: this.state.backup_file }
+              : {}),
+          };
+          // The capacity stays held until the controller finishes the switch.
+          this.received = {
+            handoff,
+            release: async () => {
+              release();
+            },
+          };
+          return unlock;
+        }
         if (
           pending ||
           (saved?.running && saved.running.sha !== saved.current.sha)
@@ -589,7 +630,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     if (result.code !== 0 || !/^[a-f0-9]{40}$/u.test(sha))
       throw new Error("Central main unavailable");
     if (this.supervisorSha === undefined) {
-      const root = fileURLToPath(new URL("../../../", import.meta.url));
+      const root = supervisorRoot();
       const version = await this.command(
         "git",
         [...gitSafetyArguments, "-C", root, "rev-parse", "--verify", "HEAD"],
@@ -815,6 +856,65 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     }
   }
 
+  /**
+   * C-787: the plan of the restart that replaced the previous supervisor,
+   * proven to be addressed to this checkout and to finish exactly the
+   * interrupted deployment; otherwise undefined.
+   */
+  private async receivedHandoff(
+    pending: DeploymentRecord,
+  ): Promise<DeploymentHandoff | undefined> {
+    try {
+      const plan = await readSupervisorUpgradePlan(this.directory);
+      const deploy = plan?.deploy;
+      if (
+        !plan ||
+        !deploy ||
+        pending.status !== "stopping" ||
+        pending.attempt !== deploy.attempt ||
+        pending.to !== deploy.sha ||
+        pending.from !== deploy.from ||
+        deploy.from !== this.state.current.sha ||
+        dirname(deploy.release) !== this.directory ||
+        plan.new_root !== (await realpath(resolve(supervisorRoot())))
+      )
+        return undefined;
+      const build = { sha: deploy.sha, release: deploy.release };
+      await requireHostDirectory(build.release);
+      const dir = await lstat(build.release);
+      if (
+        !dir.isDirectory() ||
+        dir.uid !== process.getuid?.() ||
+        dir.mode & 0o022
+      )
+        return undefined;
+      const head = await this.command(
+        "git",
+        [
+          ...gitSafetyArguments,
+          "-C",
+          build.release,
+          "rev-parse",
+          "--verify",
+          "HEAD",
+        ],
+        this.directory,
+        this.gitEnv(),
+      );
+      if (head.code !== 0 || head.text.trim() !== build.sha) return undefined;
+      return {
+        from: this.state.current,
+        build,
+        record: {
+          ...pending,
+          ...(deploy.backup_file ? { backup_file: deploy.backup_file } : {}),
+        },
+        stopped_at: deploy.stopped_at,
+      };
+    } catch {
+      return undefined;
+    }
+  }
   /** C-792: never the real directory; the trial copy is removed afterwards. */
   async checkConfig(build: DeploymentBuild): Promise<DeploymentConfigTrial> {
     const configDir = this.options.configDir;
@@ -872,6 +972,29 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     } catch {
       return undefined;
     }
+  }
+  /** C-787: read once by the controller right after startup. */
+  takeHandoff() {
+    const received = this.received;
+    this.received = undefined;
+    return received;
+  }
+  async supervisorJoin(target: string) {
+    return this.upgrader?.join(target);
+  }
+  async handOff(handoff: DeploymentHandoff) {
+    if (!this.upgrader || dirname(handoff.build.release) !== this.directory)
+      return false;
+    return this.upgrader.handOff({
+      attempt: handoff.record.attempt,
+      sha: handoff.build.sha,
+      release: handoff.build.release,
+      from: handoff.from.sha,
+      stopped_at: handoff.stopped_at,
+      ...(handoff.record.backup_file
+        ? { backup_file: handoff.record.backup_file }
+        : {}),
+    });
   }
 
   /** C-767: one step of the optional automatic supervisor upgrade. */
@@ -960,6 +1083,10 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       recheck: () => {
         this.checkedSupervisorMain = undefined;
       },
+      // Start and ready of the new build, then a rollback's stop, start and ready.
+      switchWindowMs: () =>
+        2 * this.options.config.ready_timeout_ms +
+        this.options.config.stop_timeout_ms,
       capacityWaiting: (waiting: boolean) =>
         this.capacityWait.set("upgrade", waiting),
       now: () => this.now(),
@@ -1156,6 +1283,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         cwd: build.release,
         env: {
           ...this.options.env,
+          // C-785: identical for Web and background (and their workers).
+          NODE_OPTIONS: this.serverHeap.node_options,
           CARDIGAN_DATA_DIR: this.options.dataDir,
           ...(this.state.dual ? { CARDIGAN_SUPERVISED: "1" } : {}),
         },

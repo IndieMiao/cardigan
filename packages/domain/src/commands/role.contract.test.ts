@@ -263,6 +263,7 @@ describe("tool and worktree boundaries", () => {
           ? false
           : [
                 "replace_verification_work_item",
+                "replace_primary_work_item",
                 "request_delivery_rework",
               ].includes(tool)
             ? kind === "standing"
@@ -302,6 +303,7 @@ describe("tool and worktree boundaries", () => {
         "launch_rocket",
         "record_decision",
         "replace_verification_work_item",
+        "replace_primary_work_item",
       ]) {
         expect(
           validateRole(

@@ -317,6 +317,48 @@ test("a merge PM confirms is not yours: 接手处理 leads until you take it ove
   );
 });
 
+test("C-777: a system merge confirmation stuck past the threshold offers the human a takeover", async () => {
+  const recordDecision = vi.fn(async () => {});
+  const awaiting = {
+    ...card,
+    status: "awaiting_merge" as const,
+    waiting_on: [],
+  };
+  // Not yet stalled: nothing to take over.
+  const fresh = merge({ decider: "system", waited_ms: 60_000 });
+  expect(
+    cardNextSteps(cardDetail({ card: awaiting, merge_confirmations: [fresh] }))
+      .current.kind,
+  ).not.toBe("merge-system");
+  const q = merge({ decider: "system", waited_ms: 31 * 60_000 });
+  const { region, title, emphasis } = panel(
+    cardDetail({ card: awaiting, merge_confirmations: [q] }),
+    { client: fakeClient({ recordDecision }) },
+  );
+  expect(title).toBe("系统合并确认未决Q-2");
+  expect(region.dataset.mine).toBeUndefined();
+  expect([...emphasis].map((e) => e.textContent)).toEqual(["接手处理"]);
+  expect(within(region).queryByRole("button", { name: "确认合并" })).toBeNull();
+  fireEvent.click(within(region).getByRole("button", { name: "接手处理" }));
+  expect((await screen.findByRole("dialog")).textContent).toContain(
+    "接手系统合并确认",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "确认接手" }));
+  const confirm = await within(region).findByRole("button", {
+    name: "确认合并",
+  });
+  fireEvent.click(confirm);
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p 1",
+      "Q-2",
+      "merge",
+      "",
+      expect.any(String),
+    ),
+  );
+});
+
 test("a failed merge check after confirming still waits on you: 重新检查 leads", async () => {
   const recheckMerge = vi.fn(async () => {});
   const q = merge({

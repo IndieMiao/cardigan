@@ -28,11 +28,14 @@ import {
   runtimeWorkersPath,
   scrubRunCredentials,
   sessionFingerprint,
+  ToolCatalogKeeper,
   targetProbe,
+  wallClock,
   withCapacityOverrides,
 } from "@cardigan/host";
 import {
   defaultToolCatalog,
+  defaultToolCatalogSnapshot,
   type Logger,
   type McpBackend,
   Offsite,
@@ -75,6 +78,7 @@ import {
   type ServerConfig,
   type ServerEnv,
 } from "./config.js";
+import { startDbOptimizeLoop } from "./db-optimize.js";
 import { DiagnosticsReader } from "./diagnostics-reader.js";
 import { type GitBinding, ServerGit } from "./git.js";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
@@ -634,6 +638,7 @@ async function assembleServer(
             port: config.port,
             url: `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}/mcp`,
             toolCatalog: defaultToolCatalog,
+            toolCatalogSnapshot: defaultToolCatalogSnapshot,
             close: async () => {},
           }
         : await listen(config.port, () =>
@@ -934,6 +939,7 @@ async function assembleServer(
   let extLoop: TimerLoop | undefined;
   let probeLoop: TimerLoop | undefined;
   let macosLoop: TimerLoop | undefined;
+  let dbOptimizeLoop: TimerLoop | undefined;
   let extSender: LiveExtMessageSender | undefined;
   if (options.dispatcher !== undefined && options.role !== "web") {
     try {
@@ -954,6 +960,11 @@ async function assembleServer(
         slowTickMs: 120000,
         tick: () => macosChecks.tick(),
         onError: () => warnLine("macOS 检查执行或清理未完成，将重试"),
+      });
+      dbOptimizeLoop = startDbOptimizeLoop({
+        store,
+        startup: startup.promise,
+        onError: () => warnLine("数据库统计信息维护未完成，将重试"),
       });
       const mergeIntervalMs =
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
@@ -990,6 +1001,12 @@ async function assembleServer(
           options.dispatcher.attachmentIntervalMs ??
           config.attachmentIntervalMs;
       const served = mcp;
+      // C-797: keeps each served catalog's structure for later compatibility.
+      const toolCatalogs = new ToolCatalogKeeper(
+        store,
+        options.dispatcher.clock ?? wallClock,
+        options.dispatcher.onError,
+      );
       plane = startControlPlane({
         machineHost: checkHost,
         // P2a-10 A: the fingerprint comes from the endpoint's own tool set, so
@@ -1011,11 +1028,15 @@ async function assembleServer(
           return allowed === undefined || role === undefined
             ? undefined
             : sessionFingerprint(
-                served.toolCatalog(allowed, assignment),
+                toolCatalogs.record(
+                  served.toolCatalogSnapshot(allowed, assignment),
+                ),
                 role,
                 assignment,
               );
         },
+        toolCatalogCompatible: (previous, current) =>
+          toolCatalogs.compatible(previous, current),
         ...(config.providerFailureThreshold !== undefined
           ? { providerFailureThreshold: config.providerFailureThreshold }
           : {}),
@@ -1188,6 +1209,7 @@ async function assembleServer(
         extLoop?.stop(),
         probeLoop?.stop(),
         macosLoop?.stop(),
+        dbOptimizeLoop?.stop(),
         offsiteLoop?.stop(),
         plane?.stop(),
       ]);
@@ -1255,6 +1277,7 @@ async function assembleServer(
       extLoop?.stop(),
       probeLoop?.stop(),
       macosLoop?.stop(),
+      dbOptimizeLoop?.stop(),
       offsiteLoop?.stop(),
       plane?.stop(),
     ]);
@@ -1316,6 +1339,7 @@ async function assembleServer(
         extLoop?.stop(),
         probeLoop?.stop(),
         macosLoop?.stop(),
+        dbOptimizeLoop?.stop(),
         (offsiteSync?.stop(), offsiteLoop?.stop()),
         // C-601: in-flight signing helpers end inside the shutdown grace (a
         // margin before the forced exit), never as orphans of this process.

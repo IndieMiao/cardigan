@@ -11,6 +11,7 @@ import {
   completeHumanAction,
   createHostOpsAssignment,
   HOST_OPS_ROLE_TOOLS,
+  hasVerifiedMergeNoop,
   latestMergeCheck,
   listNeedsYou,
   type MergePlan,
@@ -24,6 +25,7 @@ import {
   requestCheck,
   requestHumanAction,
   requestRecheck,
+  resumeAttention,
   updateCard,
 } from "@cardigan/domain";
 import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
@@ -8061,6 +8063,140 @@ test("C-647: an author precheck does not take the slot of a merge check still wa
   } finally {
     next.stop();
     await next.idle();
+  }
+});
+
+/** C-777: the kinds of every GitHub dispatch so far. */
+const dispatchKinds = (h: Awaited<ReturnType<typeof parallelGithub>>) =>
+  h.client.dispatch.mock.calls.map(([, inputs]) => inputs.kind);
+
+test("C-777 (C-557 replay): a host-verified noop merge task no longer stops author prechecks on its executor", async () => {
+  const h = await parallelGithub(1);
+  // C-557: a no-change completion whose deliveries are all in the baseline.
+  h.git.prepare.mockResolvedValue({
+    status: "noop",
+    branch_sha: "a".repeat(40),
+  });
+  await queueGithubAuthor(h);
+  const gate = h.create();
+  const project = [h.f.project_id];
+  const queuedAt = h.now();
+  try {
+    await vi.waitFor(async () => {
+      h.advance(5000);
+      await gate.schedule(project);
+      expect(dispatchKinds(h)).toEqual(["precheck"]);
+    });
+    // Started within a minute of queueing, not after hours.
+    expect(h.now() - queuedAt).toBeLessThan(60_000);
+    const card = required(h.cards[0]);
+    expect(
+      hasVerifiedMergeNoop(
+        h.f.state().events,
+        card.scenario.card.id,
+        card.completion.id,
+      ),
+    ).toBe(true);
+    expect(
+      latestMergeCheck(
+        h.f.state().events,
+        card.scenario.card.id,
+        card.completion.id,
+      ),
+    ).toBeUndefined();
+    await vi.waitFor(() =>
+      expect(prechecks(h.f.state().events).at(-1)?.status).toBe("running"),
+    );
+    expect(
+      h.f.state().events.some((e) => e.type === "precheck_slot_waiting"),
+    ).toBe(false);
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-777: a merge task whose candidate preparation failed holds no author precheck slot", async () => {
+  const h = await parallelGithub(1);
+  h.git.prepare.mockRejectedValue(new Error("synthetic preparation failure"));
+  await queueGithubAuthor(h);
+  const gate = h.create();
+  const project = [h.f.project_id];
+  const card = required(h.cards[0]);
+  try {
+    await vi.waitFor(async () => {
+      h.advance(5000);
+      await gate.schedule(project);
+      expect(
+        h.f
+          .state()
+          .events.some(
+            (e) =>
+              e.type === "merge_failed" && e.card_id === card.scenario.card.id,
+          ),
+      ).toBe(true);
+      expect(dispatchKinds(h)).toEqual(["precheck"]);
+    });
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-777: merge work waiting for a slot still ranks ahead; a long wait names the occupant for PM Ops", async () => {
+  const h = await parallelGithub(3);
+  await queueGithubAuthor(h);
+  const gate = h.create();
+  const project = [h.f.project_id];
+  try {
+    await h.startPair(gate);
+    // Two merge checks run, a third waits: no precheck takes its slot.
+    for (let i = 0; i < 3; i++) {
+      h.advance(5000);
+      await gate.schedule(project);
+    }
+    expect(dispatchKinds(h)).toEqual(["merge_check", "merge_check"]);
+    const waits = () =>
+      h.f.state().events.filter((e) => e.type === "precheck_slot_waiting");
+    expect(waits()).toEqual([]);
+    // Past the threshold the wait is recorded once, with the occupant.
+    h.advance(11 * 60_000);
+    await gate.schedule(project);
+    await gate.schedule(project);
+    const [first, second] = [0, 1].map(
+      (i) => required(h.cards[i]).scenario.card.id,
+    );
+    expect(waits()).toHaveLength(1);
+    expect(waits()[0]?.payload).toMatchObject({
+      occupant: {
+        kind: "merge_check",
+        project_id: h.f.project_id,
+        card_id: first,
+      },
+      reason: expect.stringMatching(
+        new RegExp(`${first} 的合并检查、.*${second} 的合并检查`, "u"),
+      ),
+    });
+    const pm = resumeAttention(h.f.state());
+    const author = required(prechecks(h.f.state().events).at(-1));
+    expect(pm.get(author.work_item_id)).toMatchObject({
+      reason: "precheck_slot_waiting",
+      body: expect.stringContaining(`${first} 的合并检查`),
+    });
+    // Once the slots free up, the precheck starts and the PM entry settles.
+    h.finish(0);
+    h.finish(1);
+    await vi.waitFor(async () => {
+      h.advance(5000);
+      await gate.schedule(project);
+      expect(dispatchKinds(h)).toContain("precheck");
+      expect(prechecks(h.f.state().events).at(-1)?.status).toBe("running");
+    });
+    expect(resumeAttention(h.f.state()).has(author.work_item_id)).toBe(false);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
   }
 });
 

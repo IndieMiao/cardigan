@@ -12,7 +12,10 @@ import { join } from "node:path";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { capacityMachine } from "./capacity-owner.js";
-import { releaseDeploymentWait } from "./deployment-capacity.js";
+import {
+  acquireDeploymentCapacity,
+  releaseDeploymentWait,
+} from "./deployment-capacity.js";
 import {
   loadDeploymentConfig,
   parseDeploymentConfig,
@@ -28,7 +31,7 @@ import {
   SupervisorUpgrader,
   supervisorHelperArguments,
 } from "./deployment-supervisor-upgrade.js";
-import { holdLongOperation } from "./long-operations.js";
+import { fenceLongOperations, holdLongOperation } from "./long-operations.js";
 import { executionOwner } from "./process-identity.js";
 
 const FROM = "a".repeat(40);
@@ -179,10 +182,15 @@ test("C-767: a running merge check (or long operation) holds the restart; nothin
   const host = fakeHost(l);
   const upgrader = new SupervisorUpgrader(host, l.config);
   expect(upgrader.automatic(FROM, TO, ["packages/host"])).toBe(true);
-  // The server has not been deployed to main yet: no build, no restart.
-  host.deploy(FROM);
+  // Mid-switch or in maintenance (not idle): no build, no restart.
+  host.deploy(undefined);
   expect(await upgrader.step()).toBe("waiting");
   expect(host.calls).toEqual([]);
+  // C-787: the server still runs the old build: prepare, but leave the
+  // restart to the deployment of main (it joins the same stop/start).
+  host.deploy(FROM);
+  expect(await upgrader.step()).toBe("waiting");
+  expect(host.calls).toEqual([`checkout ${TO}`, "validate"]);
   host.deploy(TO);
   // A merge check of the other project is still running (card and batch
   // checks hold the same per-attempt capacity row while they execute).
@@ -413,6 +421,34 @@ test("C-767: an explicit start failure rolls back at once, without waiting for t
   expect(actions()).toHaveLength(1);
 });
 
+test("C-787: a crash-looping new supervisor that tripped the start limit is still rolled back", async () => {
+  const l = await prepareRestart();
+  const { ports, calls } = restartPorts(l, "crashes");
+  const systemctl = ports.systemctl;
+  // Like systemd after StartLimitBurst: the unit refuses to start until reset.
+  let limited = false;
+  ports.systemctl = async (args) => {
+    if (args.includes("reset-failed")) limited = false;
+    if (args.includes("restart")) {
+      if (limited) return { code: 1, text: "" };
+      const text = await readFile(l.launch, "utf8");
+      if (text.includes(`release-watch-${TO}`)) limited = true;
+    }
+    return systemctl(args);
+  };
+  expect(
+    await finishSupervisorUpgrade({ store, directory: l.directory, ports }),
+  ).toBe("rolled_back");
+  const reset = calls.indexOf(
+    "--user reset-failed cardigan-selfdeploy.service",
+  );
+  expect(reset).toBeGreaterThan(0);
+  expect(calls[reset + 1]).toBe(
+    "--user restart --no-block cardigan-selfdeploy.service",
+  );
+  expect(await readFile(l.launch, "utf8")).toBe(l.original);
+});
+
 test("C-767: rollback never overwrites a launch file someone edited meanwhile; a failed restart command keeps the old supervisor", async () => {
   const l = await prepareRestart();
   const { ports } = restartPorts(l, "hangs");
@@ -468,6 +504,153 @@ test("C-767: deployment and upgrade share the capacity waiter; neither reopens a
   expect(released).toEqual(["release"]);
   shared.set("deploy", false);
   expect(released).toEqual(["release", "release"]);
+});
+
+const fenced = () =>
+  store.database.prepare("SELECT 1 FROM host_long_operation_fence").get() !==
+  undefined;
+const capacityHeld = () =>
+  store.database.prepare("SELECT 1 FROM host_deployment_capacity").get() !==
+  undefined;
+
+function handoff(l: Awaited<ReturnType<typeof layout>>) {
+  return {
+    attempt: "00000000-0000-4000-8000-000000000787",
+    sha: TO,
+    release: join(l.directory, `release-${TO}-x`),
+    from: FROM,
+    stopped_at: 1_700_000_000_000,
+  };
+}
+
+test("C-787: a deployment of the pending main waits one step for the preparation, then hands the restart its stopped server", async () => {
+  const l = await layout();
+  const host = fakeHost(l, {
+    server: () => undefined,
+    switchWindowMs: () => 7_000,
+  });
+  host.deploy(FROM);
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  expect(upgrader.join(TO)).toBe("prepare");
+  expect(upgrader.join("c".repeat(40))).toBeUndefined();
+  // The step prepares while the server still runs the old build.
+  expect(await upgrader.step()).toBe("waiting");
+  expect(host.calls).toEqual([`checkout ${TO}`, "validate"]);
+  expect(upgrader.join(TO)).toBe("join");
+  // The deployment holds capacity and the operation fence, then stops the server.
+  const release = acquireDeploymentCapacity(store);
+  fenceLongOperations(store);
+  expect(release).toBeTruthy();
+  expect(await upgrader.handOff(handoff(l))).toBe(true);
+  expect(upgrader.restarting).toBe(true);
+  expect(upgrader.join(TO)).toBeUndefined();
+  const plan = await readSupervisorUpgradePlan(l.directory);
+  expect(plan).toMatchObject({
+    from: FROM,
+    to: TO,
+    new_root: join(l.install, `release-watch-${TO}`),
+    // Room for the new build's start and a rollback's start.
+    health_timeout_ms: 67_000,
+    deploy: handoff(l),
+  });
+  expect(plan?.server).toBeUndefined();
+  expect(events().map((e) => e.status)).toEqual(["started", "restarting"]);
+  expect(events().at(-1)?.summary).toContain("与服务部署合并为一次停起");
+  expect(host.calls.slice(-2)).toEqual([
+    "systemctl --user daemon-reload",
+    `helper ${l.old}`,
+  ]);
+  expect(await readFile(l.launch, "utf8")).toContain(`release-watch-${TO}`);
+  // Still the deployment's: the restart replaces this supervisor holding them.
+  expect(capacityHeld()).toBe(true);
+  expect(fenced()).toBe(true);
+  expect(actions()).toEqual([]);
+});
+
+test("C-787: a refused handoff restores the launch file, records the failure and leaves the deployment's capacity and fence", async () => {
+  const l = await layout();
+  const host = fakeHost(l, { launchHelper: async () => false });
+  host.deploy(FROM);
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  // Nothing prepared yet, or for another main: never handed over.
+  expect(await upgrader.handOff(handoff(l))).toBe(false);
+  await upgrader.step();
+  expect(await upgrader.handOff({ ...handoff(l), sha: "c".repeat(40) })).toBe(
+    false,
+  );
+  acquireDeploymentCapacity(store);
+  fenceLongOperations(store);
+  expect(await upgrader.handOff(handoff(l))).toBe(false);
+  expect(await readFile(l.launch, "utf8")).toBe(l.original);
+  expect(await readSupervisorUpgradePlan(l.directory)).toBeUndefined();
+  expect(events().at(-1)).toMatchObject({
+    status: "failed",
+    summary: expect.stringContaining("启动配置已恢复"),
+  });
+  expect(capacityHeld()).toBe(true);
+  expect(fenced()).toBe(true);
+  // The deployment starts the build itself; this version is not tried again.
+  expect(upgrader.join(TO)).toBeUndefined();
+  expect(upgrader.automatic(FROM, TO, ["packages/host"])).toBe(false);
+});
+
+test("C-787: a step that cannot prepare, or an earlier helper's plan, never holds a deployment", async () => {
+  const l = await layout();
+  const host = fakeHost(l, {
+    checkout: async () => {
+      throw new Error("disk");
+    },
+  });
+  host.deploy(FROM);
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  expect(upgrader.join(TO)).toBe("prepare");
+  expect(await upgrader.step()).toBe("failed");
+  expect(upgrader.join(TO)).toBeUndefined();
+
+  // A fresh state for this version: the earlier failure blocked it.
+  store.close();
+  store = Store.open({ dataDir: root, dbPath: ":memory:" });
+  store.createProject({ id: "cardigan" });
+  await writeFile(join(l.directory, "supervisor-upgrade.json"), "{not a plan", {
+    mode: 0o600,
+  });
+  const other = new SupervisorUpgrader(fakeHost(l), l.config);
+  other.automatic(FROM, TO, ["packages/host"]);
+  expect(await other.step()).toBe("waiting");
+  expect(other.join(TO)).toBeUndefined();
+});
+
+test("C-787: a plan's handed-over deployment is validated with the plan", async () => {
+  const l = await layout();
+  const host = fakeHost(l, { server: () => undefined });
+  host.deploy(FROM);
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  await upgrader.step();
+  await upgrader.handOff({
+    ...handoff(l),
+    backup_file: "database-00000000-0000-4000-8000-000000000001.bak",
+  });
+  const file = join(l.directory, "supervisor-upgrade.json");
+  const plan = JSON.parse(await readFile(file, "utf8"));
+  expect((await readSupervisorUpgradePlan(l.directory))?.deploy).toMatchObject({
+    backup_file: "database-00000000-0000-4000-8000-000000000001.bak",
+  });
+  for (const deploy of [
+    { ...plan.deploy, sha: "c".repeat(40) },
+    { ...plan.deploy, release: "relative" },
+    { ...plan.deploy, backup_file: "../state.json" },
+    { ...plan.deploy, stopped_at: "soon" },
+    "yes",
+  ]) {
+    await writeFile(file, JSON.stringify({ ...plan, deploy }), {
+      mode: 0o600,
+    });
+    await expect(readSupervisorUpgradePlan(l.directory)).rejects.toThrow();
+  }
 });
 
 /** The upgrader of `prepareRestart`, with its clock under test control. */

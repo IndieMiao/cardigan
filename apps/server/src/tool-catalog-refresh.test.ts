@@ -6,7 +6,8 @@ import {
   type Run,
   type Runtime,
 } from "@cardigan/domain";
-import { RuntimeTargetError } from "@cardigan/host";
+import { RuntimeTargetError, ToolCatalogKeeper } from "@cardigan/host";
+import { catalogHash, catalogSnapshot } from "@cardigan/mcp-server";
 import { afterEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
@@ -251,6 +252,213 @@ test.each([
     expect(handoff?.body).toContain("部署后工具清单已变更");
   },
 );
+
+// C-786: real fingerprints of deploys of the same tool.
+const listing = (
+  shape: Record<string, unknown>,
+  required: string[],
+  description = "Read updates",
+) => [
+  {
+    name: "get_updates",
+    description,
+    inputSchema: { type: "object", description, properties: shape, required },
+  },
+];
+const v1 = catalogHash(listing({ card_id: { type: "string" } }, ["card_id"]));
+const reworded = catalogHash(
+  listing(
+    { card_id: { type: "string", description: "The card" } },
+    ["card_id"],
+    "Read the card's updates",
+  ),
+);
+const withOptional = catalogHash(
+  listing({ card_id: { type: "string" }, limit: { type: "number" } }, [
+    "card_id",
+  ]),
+);
+
+test("C-786: a deploy that only rewords tool descriptions reuses the live session", async () => {
+  expect(reworded).toBe(v1);
+  const f = fixture({ recorded: v1 });
+  f.deploy(reworded);
+  f.wake();
+  await new Dispatcher(f.dispatcher).tick();
+  expect(f.runtime.wake).toHaveBeenCalledOnce();
+  expect(f.runtime.resume_or_replace).not.toHaveBeenCalled();
+  expect(f.replaced()).toEqual([]);
+});
+
+test("C-786: without a compatibility judge any parameter structure change replaces the live session", async () => {
+  const f = fixture({ recorded: v1 });
+  f.deploy(withOptional);
+  f.wake();
+  await new Dispatcher(f.dispatcher).tick();
+  expect(f.runtime.resume_or_replace).toHaveBeenCalledOnce();
+  expect(f.replaced()).toMatchObject([
+    { payload: { reason: "tool_catalog_changed" } },
+  ]);
+  expect(f.latest()).toMatchObject({ tool_catalog: withOptional });
+});
+
+// C-797: the server's judge, backed by the snapshots this process recorded.
+function judged(
+  f: ReturnType<typeof fixture>,
+  immediate: Record<string, readonly string[]> = {},
+) {
+  const keeper = new ToolCatalogKeeper(f.store, f.clock, undefined, immediate);
+  const record = (listed: ReturnType<typeof listing>) =>
+    keeper.record(catalogSnapshot(listed));
+  return {
+    keeper,
+    record,
+    dispatcher: new Dispatcher({
+      ...f.dispatcher,
+      toolCatalogCompatible: (previous, current) =>
+        keeper.compatible(previous, current),
+    }),
+  };
+}
+const v1Listing = listing({ card_id: { type: "string" } }, ["card_id"]);
+const optionalListing = listing(
+  { card_id: { type: "string" }, limit: { type: "number" } },
+  ["card_id"],
+);
+
+test("C-797: a deploy that only adds an optional parameter reuses the live session", async () => {
+  const f = fixture({ recorded: v1 });
+  const judge = judged(f);
+  judge.record(v1Listing);
+  f.deploy(judge.record(optionalListing));
+  f.wake();
+  await judge.dispatcher.tick();
+  expect(f.runtime.wake).toHaveBeenCalledOnce();
+  expect(f.runtime.resume_or_replace).not.toHaveBeenCalled();
+  expect(f.dispatcher.startRun).not.toHaveBeenCalled();
+  expect(f.replaced()).toEqual([]);
+  // The reused session still lists the old tools, so its Run keeps v1: the
+  // next deploy is judged against what the session actually listed.
+  expect(f.latest()).toMatchObject({ status: "dispatched", tool_catalog: v1 });
+});
+
+test("C-797: the snapshot survives a restart: a new process judges the old session", async () => {
+  const f = fixture({ recorded: v1 });
+  // The previous deploy's process recorded v1; this process only knows its own.
+  judged(f).record(v1Listing);
+  const judge = judged(f);
+  f.deploy(judge.record(optionalListing));
+  f.wake();
+  await judge.dispatcher.tick();
+  expect(f.runtime.resume_or_replace).not.toHaveBeenCalled();
+  expect(f.replaced()).toEqual([]);
+});
+
+test.each([
+  [
+    "a required parameter is added",
+    listing({ card_id: { type: "string" }, limit: { type: "number" } }, [
+      "card_id",
+      "limit",
+    ]),
+  ],
+  ["a parameter is removed", listing({}, [])],
+  ["a parameter is renamed", listing({ card: { type: "string" } }, ["card"])],
+  [
+    "a parameter type changes",
+    listing({ card_id: { type: "number" } }, ["card_id"]),
+  ],
+  [
+    "a tool is added",
+    [
+      ...v1Listing,
+      { name: "whoami", description: "who", inputSchema: { type: "object" } },
+    ],
+  ],
+  ["a tool is removed", []],
+])(
+  "C-797: a deploy where %s still replaces the live session",
+  async (_label, next) => {
+    const f = fixture({ recorded: v1 });
+    const judge = judged(f);
+    judge.record(v1Listing);
+    f.deploy(judge.record(next));
+    f.wake();
+    await judge.dispatcher.tick();
+    expect(f.runtime.resume_or_replace).toHaveBeenCalledOnce();
+    expect(f.replaced()).toMatchObject([
+      { payload: { reason: "tool_catalog_changed" } },
+    ]);
+  },
+);
+
+test("C-797: a new optional parameter marked immediate replaces the live session", async () => {
+  const f = fixture({ recorded: v1 });
+  const judge = judged(f, { get_updates: ["limit"] });
+  judge.record(v1Listing);
+  f.deploy(judge.record(optionalListing));
+  f.wake();
+  await judge.dispatcher.tick();
+  expect(f.runtime.resume_or_replace).toHaveBeenCalledOnce();
+  expect(f.replaced()).toMatchObject([
+    { payload: { reason: "tool_catalog_changed" } },
+  ]);
+});
+
+test("C-797: an unreadable difference replaces the live session", async () => {
+  // v1 was never recorded (e.g. a session from before this deploy kept no
+  // snapshot, or it was pruned): the difference cannot be read.
+  const f = fixture({ recorded: v1 });
+  const judge = judged(f);
+  f.deploy(judge.record(optionalListing));
+  f.wake();
+  await judge.dispatcher.tick();
+  expect(f.runtime.resume_or_replace).toHaveBeenCalledOnce();
+  expect(f.replaced()).toMatchObject([
+    { payload: { reason: "tool_catalog_changed" } },
+  ]);
+});
+
+test("C-797: a different launch suffix replaces the live session even when the tools are compatible", async () => {
+  const f = fixture({ recorded: `${v1}+build-env-1` });
+  const judge = judged(f);
+  judge.record(v1Listing);
+  f.deploy(`${judge.record(optionalListing)}+build-env-1+files-2`);
+  f.wake();
+  await judge.dispatcher.tick();
+  expect(f.runtime.resume_or_replace).toHaveBeenCalledOnce();
+  // The same suffix keeps the session.
+  const g = fixture({ recorded: `${v1}+build-env-1` });
+  const same = judged(g);
+  same.record(v1Listing);
+  g.deploy(`${same.record(optionalListing)}+build-env-1`);
+  g.wake();
+  await same.dispatcher.tick();
+  expect(g.runtime.resume_or_replace).not.toHaveBeenCalled();
+});
+
+test("C-797: a failing compatibility judge replaces the live session", async () => {
+  const f = fixture({ recorded: v1 });
+  f.deploy(withOptional);
+  const onError = vi.fn();
+  f.wake();
+  await new Dispatcher({
+    ...f.dispatcher,
+    onError,
+    toolCatalogCompatible: () => {
+      throw new Error("snapshot store unavailable");
+    },
+  }).tick();
+  expect(f.runtime.resume_or_replace).toHaveBeenCalledOnce();
+  expect(f.replaced()).toMatchObject([
+    { payload: { reason: "tool_catalog_changed" } },
+  ]);
+  expect(onError).toHaveBeenCalledWith(
+    expect.objectContaining({
+      message: expect.stringContaining("tool catalog comparison failed"),
+    }),
+  );
+});
 
 test("P2a-10 A: after one replacement the same deploy reuses the new session", async () => {
   const f = fixture({ recorded: "catalog-v1" });

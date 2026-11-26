@@ -115,15 +115,12 @@ function inspect(d: CommandDraft, p: RequestCheckParams) {
     "illegal_transition",
     "已关闭事项不能请求预检查",
   );
-  ensure(
-    !prechecks(d.state.events).some(
-      (c) =>
-        c.assignment_id === a.id && ["queued", "running"].includes(c.status),
-    ),
-    "illegal_transition",
-    "本负责人已有排队或运行中的预检查",
+  // C-783: an in-flight attempt no longer blocks preparation; requestCheck
+  // decides from the host-read HEAD whether the new request supersedes it.
+  const active = prechecks(d.state.events).filter(
+    (c) => c.assignment_id === a.id && ["queued", "running"].includes(c.status),
   );
-  return { a, item, card };
+  return { a, item, card, active };
 }
 const proof = Symbol("host-verified-check-head");
 interface VerifiedCheck {
@@ -180,15 +177,44 @@ export function requestCheck(
   ports: CommandPorts,
 ) {
   return command(state, actor, "request_check", ports, (d) => {
-    const { a, item, card } = inspect(d, p);
+    const { a, item, card, active } = inspect(d, p);
     ensure(
       receipt?.[proof] && receipt.source === source(a) && sha(receipt.head),
       "stale_target",
       "预检查负责人或登记分支已变化",
     );
     ensure(a.branch, "stale_target", "登记分支已变化");
+    // C-783: the same HEAD never takes a second slot or restarts its check.
+    ensure(
+      !active.some((c) => c.head_sha === receipt.head),
+      "illegal_transition",
+      "本负责人已有同一提交的排队或运行中的预检查，请等待结果",
+    );
+    const attemptId = d.ids.nextEventId();
+    // A newer HEAD settles the obsolete attempt now; the host cancels its
+    // executor (including a remote run) instead of finishing it first.
+    const system = { kind: "system" as const, project_id: state.project_id };
+    for (const old of active)
+      d.emit(
+        "precheck_finished",
+        card.id,
+        JSON.parse(
+          JSON.stringify({
+            ...old,
+            status: "interrupted",
+            summary: `已被新提交 ${receipt.head.slice(0, 12)} 的预检查取代`,
+            superseded_by: attemptId,
+          } satisfies Precheck),
+        ),
+        {
+          type: "system",
+          work_item_id: item.id,
+          body: `作者预检查已被取代：${old.attempt_id}（${old.head_sha}）由新提交 ${receipt.head} 的预检查 ${attemptId} 顶替，原执行将被取消`,
+        },
+        system,
+      );
     const check: Precheck = {
-      attempt_id: d.ids.nextEventId(),
+      attempt_id: attemptId,
       assignment_id: a.id,
       work_item_id: item.id,
       card_id: card.id,
@@ -197,7 +223,8 @@ export function requestCheck(
       machine_id: a.machine_id,
       status: "queued",
     };
-    const e = d.emit(
+    // A validated command creates this system fact; no caller-supplied actor or evidence.
+    d.emit(
       "precheck_queued",
       card.id,
       JSON.parse(JSON.stringify(check)),
@@ -206,12 +233,8 @@ export function requestCheck(
         work_item_id: item.id,
         body: `作者预检查已排队（${receipt.head}）`,
       },
+      system,
     );
-    // A validated command creates this system fact; no caller-supplied actor or evidence.
-    d.events[d.events.length - 1] = {
-      ...e,
-      actor: { kind: "system", project_id: state.project_id },
-    };
     return precheckView(check);
   });
 }

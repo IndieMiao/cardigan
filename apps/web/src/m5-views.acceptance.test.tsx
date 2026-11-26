@@ -349,12 +349,7 @@ test("§8.6/M5.4: after a reconnect the Needs You view refetches and catches up 
   const previous = connections.at(-1);
   act(() => previous?.emit("error"));
   await waitFor(() => expect(connections.at(-1)).not.toBe(previous));
-  expect(
-    new URL(
-      connections.at(-1)?.url as string,
-      "https://workbench.invalid",
-    ).searchParams.get("after"),
-  ).toBe("project:0");
+  expect(connections.at(-1)?.url).toBe("/api/projects/p-1/stream");
   act(() => connections.at(-1)?.emit("open"));
   await screen.findByText(/断线期间出现的拍板/);
   expect(screen.getByLabelText("Q-1 原话或补充说明")).toBe(field);

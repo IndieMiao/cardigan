@@ -91,6 +91,7 @@ export const CLI_TOOLS = {
   "work-item create": "create_work_item",
   "work-item update": "update_work_item",
   "work-item show": "get_card",
+  "work-item replace-primary": "replace_primary_work_item",
   "card create": "create_card",
   "card update": "update_card",
   "card update --superseded-by": null,

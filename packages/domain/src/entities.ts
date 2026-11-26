@@ -90,6 +90,7 @@ export const toolNames = [
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
+  "replace_primary_work_item",
   "assign",
   "release_assignment",
   "project_snapshot",
@@ -338,6 +339,8 @@ export interface Precheck {
   readonly check_fingerprints?: readonly PrecheckCheckFingerprint[];
   readonly summary?: string;
   readonly log_ref?: string;
+  /** C-783: set only by request_check when a newer HEAD replaced this attempt. */
+  readonly superseded_by?: string;
 }
 export interface PrecheckCheckFingerprint {
   readonly name: string;
@@ -551,7 +554,11 @@ interface WorkItemFields {
     readonly reported_at: Timestamp;
     readonly resume_when?: import("./work-wait.js").ResumeCondition;
     readonly auto_resume_disabled?: boolean;
+    /** C-789: registered by the system for a Run that ended blocked without one. */
+    readonly auto_registered?: true;
   };
+  /** C-789: a wait on a delivered/accepted producer; never changes `status`. */
+  readonly standby_wait?: import("./work-wait.js").StandbyWait;
 }
 export type WorkItem = WorkItemFields &
   (

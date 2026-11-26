@@ -34,6 +34,7 @@ import {
 import { stopRunRuntime } from "./stop-run.js";
 import { redactSecrets } from "./wake-preparation.js";
 import { workerPreparationOutcome } from "./worker-maintenance.js";
+import { recordWorktreePreparation } from "./worktree-preparation.js";
 
 /** One bounded host diagnostic for the journal and the dispatcher's failure log. */
 export function launchFailureReason(
@@ -84,6 +85,8 @@ export class LaunchPublication {
   readonly sessionDir: string;
   readonly clock: Clock;
   recoveryOperation = "journal";
+  /** C-784: set by the launch only after it prepared this Run's worktree itself. */
+  preparedWorktree = false;
   constructor(
     readonly host: PublicationHost,
     readonly execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
@@ -216,6 +219,19 @@ export class LaunchPublication {
           this.clock,
           value.failure_reason ?? null,
           this.execution.preparationCooldown,
+        );
+      if (
+        value.phase === "started" &&
+        old?.phase !== "started" &&
+        this.preparedWorktree
+      )
+        recordWorktreePreparation(
+          this.host.store,
+          tx,
+          this.project,
+          this.execution,
+          `${this.assignment.id}/${this.run.id}`,
+          this.clock.now(),
         );
       return value;
     });
