@@ -7,6 +7,7 @@ import {
   type Runtime,
 } from "@cardigan/domain";
 import { RuntimeTargetError } from "@cardigan/host";
+import { catalogHash } from "@cardigan/mcp-server";
 import { afterEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
@@ -251,6 +252,55 @@ test.each([
     expect(handoff?.body).toContain("部署后工具清单已变更");
   },
 );
+
+// C-786: real fingerprints of deploys of the same tool.
+const listing = (
+  shape: Record<string, unknown>,
+  required: string[],
+  description = "Read updates",
+) => [
+  {
+    name: "get_updates",
+    description,
+    inputSchema: { type: "object", description, properties: shape, required },
+  },
+];
+const v1 = catalogHash(listing({ card_id: { type: "string" } }, ["card_id"]));
+const reworded = catalogHash(
+  listing(
+    { card_id: { type: "string", description: "The card" } },
+    ["card_id"],
+    "Read the card's updates",
+  ),
+);
+const withOptional = catalogHash(
+  listing({ card_id: { type: "string" }, limit: { type: "number" } }, [
+    "card_id",
+  ]),
+);
+
+test("C-786: a deploy that only rewords tool descriptions reuses the live session", async () => {
+  expect(reworded).toBe(v1);
+  const f = fixture({ recorded: v1 });
+  f.deploy(reworded);
+  f.wake();
+  await new Dispatcher(f.dispatcher).tick();
+  expect(f.runtime.wake).toHaveBeenCalledOnce();
+  expect(f.runtime.resume_or_replace).not.toHaveBeenCalled();
+  expect(f.replaced()).toEqual([]);
+});
+
+test("C-786: a deploy that changes a parameter structure replaces the live session", async () => {
+  const f = fixture({ recorded: v1 });
+  f.deploy(withOptional);
+  f.wake();
+  await new Dispatcher(f.dispatcher).tick();
+  expect(f.runtime.resume_or_replace).toHaveBeenCalledOnce();
+  expect(f.replaced()).toMatchObject([
+    { payload: { reason: "tool_catalog_changed" } },
+  ]);
+  expect(f.latest()).toMatchObject({ tool_catalog: withOptional });
+});
 
 test("P2a-10 A: after one replacement the same deploy reuses the new session", async () => {
   const f = fixture({ recorded: "catalog-v1" });

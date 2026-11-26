@@ -145,7 +145,10 @@ export {
   type SharedUploadTicket,
 } from "./shared-files/library.js";
 export {
+  catalogHash,
   createMcpServer,
+  structuralSchema,
+  TOOL_CATALOG_REVISION,
   type ToolServerOptions,
   toolCatalogFingerprint,
 } from "./tool-server.js";

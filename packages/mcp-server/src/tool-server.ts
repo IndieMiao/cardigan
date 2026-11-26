@@ -61,22 +61,90 @@ function listedTools(visible: readonly ToolDefinition[]) {
 }
 
 /**
- * P2a-10 A: a stable hash of exactly what `tools/list` returns to an
- * Assignment holding `allowed`. Harnesses such as Claude Code list tools once
- * per session and this stateless endpoint cannot send `list_changed`, so a
- * session started under another deploy keeps the old list. Comparing this
- * fingerprint with the one recorded when the session started tells the
- * Dispatcher whether that list actually changed. Order-insensitive.
+ * C-786: bump when a change the fingerprint ignores (a tool or parameter
+ * description, a title) must still reach live sessions at their next wake,
+ * e.g. a safety rule written into a tool description. Every live session
+ * whose catalog this revision covers is then replaced once.
+ */
+export const TOOL_CATALOG_REVISION = 1;
+
+/** JSON Schema keywords that only annotate; changing them changes no call. */
+const SCHEMA_ANNOTATIONS = new Set([
+  "description",
+  "title",
+  "examples",
+  "$comment",
+]);
+/** Keywords whose value maps names (e.g. parameter names) to schemas. */
+const SCHEMA_NAME_MAPS = new Set([
+  "properties",
+  "patternProperties",
+  "definitions",
+  "$defs",
+  "dependentSchemas",
+]);
+/** Keywords whose value is data, never a schema: kept verbatim. */
+const SCHEMA_DATA = new Set(["enum", "const", "default", "required"]);
+
+/**
+ * C-786: a JSON Schema with its annotations removed. Names, types, required
+ * lists, enums, bounds, defaults and every other validating keyword stay, so
+ * two schemas are equal exactly when they accept the same calls. A parameter
+ * that happens to be called `description` is a name, not an annotation.
+ */
+export function structuralSchema(schema: unknown): unknown {
+  const walk = (node: unknown, names: boolean): unknown => {
+    if (Array.isArray(node)) return node.map((item) => walk(item, false));
+    if (node === null || typeof node !== "object") return node;
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (names) out[key] = walk(value, false);
+      else if (SCHEMA_ANNOTATIONS.has(key)) continue;
+      else if (SCHEMA_DATA.has(key)) out[key] = value;
+      else out[key] = walk(value, SCHEMA_NAME_MAPS.has(key));
+    }
+    return out;
+  };
+  return walk(schema, false);
+}
+
+/**
+ * P2a-10 A: a stable hash of the `tools/list` an Assignment holding `allowed`
+ * receives. Harnesses such as Claude Code list tools once per session and this
+ * stateless endpoint cannot send `list_changed`, so a session started under
+ * another deploy keeps the old list. The Dispatcher replaces a live session
+ * whose recorded fingerprint differs from this deploy's. Order-insensitive.
+ *
+ * C-786: only incompatible changes change it, and every structural change is
+ * incompatible: a tool added or removed (including through `allowed_tools`),
+ * and any change to a tool's input schema other than its annotations
+ * (parameters added or removed, required or optional, types, enums, bounds,
+ * patterns, defaults, strictness). Tool and parameter descriptions and titles
+ * are left out, so wording alone never replaces a session;
+ * `TOOL_CATALOG_REVISION` forces a replacement when wording must apply at once.
  */
 export function toolCatalogFingerprint(
   tools: readonly ToolDefinition[],
   allowed: readonly string[],
   assignment: Parameters<typeof visibleTools>[2],
 ): string {
-  const listed = listedTools(visibleTools(tools, allowed, assignment)).sort(
-    (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
-  );
-  return createHash("sha256").update(canonicalJson(listed)).digest("hex");
+  return catalogHash(listedTools(visibleTools(tools, allowed, assignment)));
+}
+
+/** The C-786 fingerprint of tools as `tools/list` serves them. */
+export function catalogHash(
+  listed: readonly { readonly name: string; readonly inputSchema: unknown }[],
+  revision: number = TOOL_CATALOG_REVISION,
+): string {
+  const tools = listed
+    .map(({ name, inputSchema }) => ({
+      name,
+      inputSchema: structuralSchema(inputSchema),
+    }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return createHash("sha256")
+    .update(canonicalJson({ revision, tools }))
+    .digest("hex");
 }
 
 /** JSON with object keys sorted, so key order never changes the hash. */

@@ -14,6 +14,7 @@ import {
   DEFAULT_ROLE_KINDS,
   defaultRoleDefinition,
   isDefaultRoleId,
+  roleSecurityRevision,
 } from "@cardigan/roles";
 import {
   listRoleVersions,
@@ -489,6 +490,9 @@ export function syncOverlayRoles(
     const migratedText =
       summary &&
       `已迁移为“默认包 + 项目附加规则”，保留追加说明 ${summary.appended_paragraphs} 段${summary.extra_tools.length ? `、额外工具 ${summary.extra_tools.join("、")}` : ""}${summary.removed_tools.length ? `、移除工具 ${summary.removed_tools.join("、")}` : ""}${migrated?.moved ? "，追加说明已移到默认说明之后" : ""}`;
+    const securityRevision = changedText
+      ? roleSecurityRevision(source.default_overlay?.base_role_id ?? id)
+      : 0;
     // Idle standing sessions follow host_role_upgraded only; a structure-only
     // migration with no audited upgrade to carry needs no rotation.
     tx.events.append(project, {
@@ -507,6 +511,9 @@ export function syncOverlayRoles(
           from_version: latest.version,
           to_version: to,
           metadata_only: carried || undefined,
+          // C-786: a bumped revision makes pinned standing sessions rotate
+          // at once instead of waiting until they are idle.
+          security_revision: securityRevision || undefined,
           diff: changedText ? result.value.diff : undefined,
           overlay:
             source.default_overlay && overlaySummary(source.default_overlay),
