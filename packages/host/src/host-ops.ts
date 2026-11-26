@@ -32,6 +32,7 @@ import {
   hostOpsExitConfirmation,
   hostOpsPending,
   hostOpsReadDiagnostics,
+  hostOpsRecheckPrecheck,
   lastRunActivity,
   observedLocalExitCause,
   type ProjectId,
@@ -540,6 +541,8 @@ export class HostOpsService {
     tool: HostOpsToolName,
     p: {
       target_id: string;
+      attempt_id?: string;
+      action?: "reinspect" | "abandon";
       reason?: string;
       idempotency_key: string;
       context_session_id?: string;
@@ -578,6 +581,29 @@ export class HostOpsService {
               loadCommandState(tx, project, this.options.settings?.(project)),
               actor,
               { card_id: p.target_id as CardId },
+              { clock: this.clock, ids: tx.ids },
+            ),
+          );
+          persistEffect(tx, project, effect);
+          return effect.data;
+        }),
+      ).value;
+    // C-773: only records the request; the author precheck scheduler
+    // settles it (reinspect through the bound run, or a verified abandon).
+    if (tool === "host_ops_recheck_precheck")
+      return unwrap(
+        store.runIdempotent(invocation, (tx) => {
+          context.revalidateToken?.();
+          const effect = unwrap(
+            hostOpsRecheckPrecheck(
+              loadCommandState(tx, project, this.options.settings?.(project)),
+              actor,
+              {
+                card_id: p.target_id as CardId,
+                attempt_id: p.attempt_id ?? "",
+                action: p.action as "reinspect" | "abandon",
+                reason: p.reason ?? "",
+              },
               { clock: this.clock, ids: tx.ids },
             ),
           );
@@ -2640,6 +2666,7 @@ const OPERATION: Record<HostOpsExecution["tool"], string> = {
 type HostOpsToolName =
   | HostOpsExecutionTool
   | "host_ops_recheck_merge"
+  | "host_ops_recheck_precheck"
   | "host_ops_stop_assignment";
 
 /** C-759: why a managed stop of an idle session did not apply. */

@@ -829,6 +829,20 @@ async function assembleServer(
                     : hostOps.executionDiagnostics(project),
               }
             : {}),
+          ...(options.dispatcher
+            ? {
+                assignmentOps: {
+                  runtime: options.dispatcher.runtime,
+                  snapshot: options.dispatcher.snapshot,
+                  diff: async (project, assignment) => {
+                    const central = git.projectOf(project);
+                    if (!central)
+                      throw new Error(`项目 ${project} 没有登记中心仓库`);
+                    return git.diffWorktree({ project: central, assignment });
+                  },
+                },
+              }
+            : {}),
           machineHost: checkHost,
           machineDisplayName: runCapacity.displayNameForMachine,
           resourceLimits: runCapacity.resourcesForMachine,

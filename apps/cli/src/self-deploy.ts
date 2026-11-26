@@ -38,12 +38,16 @@ export async function runSelfDeployCommand(
     throw new CliError("自动部署仅限主机，Agent 不可调用", EXIT.usage);
   if (
     args.length !== 1 ||
-    !["watch", "roles", "finish-upgrade", "check-upgrade"].includes(
-      args[0] ?? "",
-    )
+    ![
+      "watch",
+      "roles",
+      "finish-upgrade",
+      "recover-upgrade",
+      "check-upgrade",
+    ].includes(args[0] ?? "")
   )
     throw new CliError(
-      "用法：cardigan self-deploy watch|roles|finish-upgrade|check-upgrade（主机专用，配置来自 self-deploy.yaml；finish-upgrade 只由监督器自升级启动；check-upgrade 只读自检 supervisor-upgrade.yaml）",
+      "用法：cardigan self-deploy watch|roles|finish-upgrade|recover-upgrade|check-upgrade（主机专用，配置来自 self-deploy.yaml；finish-upgrade 与 recover-upgrade 只由监督器自升级启动；check-upgrade 只读自检 supervisor-upgrade.yaml）",
       EXIT.usage,
     );
   const configDir =
@@ -72,7 +76,9 @@ export async function runSelfDeployCommand(
   const dataDir = resolveDataDir(io);
   // C-767: the restart helper the supervisor starts in its own systemd unit.
   // It reads only the host-written plan in the deployment directory.
-  if (args[0] === "finish-upgrade") {
+  // C-770: recover-upgrade is the helper unit's ExecStopPost= fallback.
+  if (args[0] === "finish-upgrade" || args[0] === "recover-upgrade") {
+    const resume = args[0] === "recover-upgrade";
     const store = Store.open({ dataDir, migrate: false });
     try {
       if (!store.getProject("cardigan"))
@@ -85,7 +91,9 @@ export async function runSelfDeployCommand(
           directory,
           systemctl: nodeSystemdCommand("systemctl", io.env),
         }),
+        resume,
       });
+      if (outcome === "none") return EXIT.ok;
       io.stderr(
         outcome === "completed"
           ? "部署监督器自动升级完成"

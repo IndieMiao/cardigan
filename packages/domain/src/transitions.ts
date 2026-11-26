@@ -53,6 +53,7 @@ export const transitionTables: {
     in_progress: {
       story_summary_submitted: "delivered",
       delivery_submitted: "delivered",
+      rejection_withdrawn: "delivered",
       block: "blocked",
       request_decision: "waiting_decision",
       cancel: "cancelled",
@@ -64,7 +65,11 @@ export const transitionTables: {
       review_rejected: "changes_requested",
       cancel: "cancelled",
     },
-    changes_requested: { run_started: "in_progress", cancel: "cancelled" },
+    changes_requested: {
+      run_started: "in_progress",
+      rejection_withdrawn: "delivered",
+      cancel: "cancelled",
+    },
     blocked: { resume: "in_progress", cancel: "cancelled" },
     waiting_decision: { decision_resolved: "in_progress", cancel: "cancelled" },
     accepted: {
@@ -95,6 +100,7 @@ export const transitionTables: {
     failed: {
       target_redelivered: "ready",
       target_withdrawn: "todo",
+      rejection_withdrawn: "ready",
       review_limit_exceeded: "waiting_decision",
       cancel: "cancelled",
     },
@@ -113,7 +119,7 @@ export const transitionTables: {
       supersede: "superseded",
     },
     accepted: { supersede: "superseded", require_review: "submitted" },
-    rejected: { supersede: "superseded" },
+    rejected: { supersede: "superseded", rejection_withdrawn: "submitted" },
   },
   decision: {
     snoozed: {
