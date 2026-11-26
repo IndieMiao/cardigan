@@ -768,8 +768,42 @@ export class AuthorPrechecks {
       (c) => c.attempt_id === original.attempt_id,
     );
     if (!check || !["queued", "running"].includes(check.status)) return;
-    // A saved result is already being verified; that path settles the attempt.
-    if (this.options.store.uow.read(() => this.proof(project, check))) return;
+    const after = request
+      ? (tx: StoreTx) => this.handled(tx, project, check, request, "abandoned")
+      : undefined;
+    // A saved result still awaiting its HEAD proof must also settle here:
+    // schedule() skips execute() for an expiring attempt, so nothing else
+    // would ever verify it again.
+    const saved = this.options.store.uow.read(() => this.proof(project, check));
+    if (saved) {
+      if (!request) {
+        // The stale fallback gives the proof one more chance first.
+        try {
+          await this.verify(project, saved);
+        } catch {
+          /* Falls through to the unverified terminal below. */
+        }
+        if (!this.options.store.uow.read(() => this.proof(project, check)))
+          return;
+      }
+      this.headLockSince.delete(check.attempt_id);
+      // Settles only while the checkpoint remains, so a concurrent verifier
+      // and this pass can never publish two terminals.
+      this.update(
+        project,
+        {
+          ...check,
+          status: "interrupted",
+          summary:
+            "limit" in cause
+              ? `预检查超过 ${Math.ceil(cause.limit / 60_000)} 分钟仍未收尾，检查结果已保存但未能核验分支HEAD，按核对超时结束；不作为通过依据，请重新 request_check`
+              : "主机运维已放弃此次预检查；检查结果已保存但未能核验分支HEAD，不作为通过依据，请重新 request_check",
+        },
+        true,
+        after,
+      );
+      return;
+    }
     const summary =
       "limit" in cause
         ? `预检查超过 ${Math.ceil(cause.limit / 60_000)} 分钟仍未收尾，按核对超时结束；${observed}；结果未经主机完整核验，不作为通过依据，请重新 request_check`
@@ -778,9 +812,7 @@ export class AuthorPrechecks {
       project,
       { ...check, status: "interrupted", summary },
       false,
-      request
-        ? (tx) => this.handled(tx, project, check, request, "abandoned")
-        : undefined,
+      after,
     );
   }
   private recordMutexWait(

@@ -2127,3 +2127,110 @@ test("C-773: host_ops abandon ends a stuck precheck once, stating the GitHub sta
     await resumed.idle();
   }
 });
+
+test.each([
+  ["the lock frees up", "failed"],
+  ["the lock stays busy", "interrupted"],
+] as const)(
+  "C-773: a saved result still awaiting its HEAD proof past the stale limit settles instead of staying running (%s)",
+  async (_case, expected) => {
+    const x = await setup();
+    await x.queue();
+    x.git.checkHead
+      .mockImplementationOnce(async () => "a".repeat(40))
+      .mockRejectedValue(new RepositoryLockTimeoutError(1));
+    const host = new AuthorPrechecks({
+      ...x.options,
+      staleAfterMs: () => 60_000,
+    });
+    await (await host.schedule([x.f.project_id])).done;
+    expect(x.run).toHaveBeenCalledOnce();
+    expect(x.check().status).toBe("running");
+    x.advance(120_000);
+    if (expected === "failed")
+      x.git.checkHead
+        .mockReset()
+        .mockImplementation(async () => "a".repeat(40));
+    await (await host.schedule([x.f.project_id])).done;
+    await host.idle();
+    if (expected === "failed")
+      // The stale pass gives the saved result one more proof and records
+      // that verified result (this fixture's check failed).
+      expect(x.check()).toMatchObject({
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      });
+    else
+      expect(x.check()).toMatchObject({
+        status: "interrupted",
+        summary:
+          "预检查超过 1 分钟仍未收尾，检查结果已保存但未能核验分支HEAD，按核对超时结束；不作为通过依据，请重新 request_check",
+      });
+    expect(x.run).toHaveBeenCalledOnce();
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_finished"),
+    ).toHaveLength(1);
+    expect(
+      x.f.store.database
+        .prepare("SELECT count(*) n FROM precheck_head_proofs")
+        .get(),
+    ).toEqual({ n: 0 });
+    // Nothing is left to settle on later passes.
+    x.advance(120_000);
+    await (await host.schedule([x.f.project_id])).done;
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_finished"),
+    ).toHaveLength(1);
+  },
+);
+
+test("C-773: host_ops abandon of a saved GitHub result still awaiting its HEAD proof ends it as unverified, with its handling in the same transaction", async () => {
+  const { x, git, client, resumed } = await boundAfterRestart("completed");
+  const { call } = await hostOpsCaller(x);
+  git.checkHead.mockRejectedValue(new RepositoryLockTimeoutError(1));
+  const proofs = () =>
+    x.f.store.database
+      .prepare("SELECT count(*) n FROM precheck_head_proofs")
+      .get();
+  try {
+    const reads = client.run.mock.calls.length;
+    const round = await resumed.schedule([x.f.project_id]);
+    await vi.waitFor(() =>
+      expect(client.run.mock.calls.length).toBeGreaterThan(reads),
+    );
+    x.advance();
+    await resumed.schedule([x.f.project_id]);
+    await round.done;
+    await resumed.idle();
+    expect(proofs()).toEqual({ n: 1 });
+    expect(x.check().status).toBe("running");
+    expect(
+      await call({ action: "abandon", idempotency_key: "a-1" }),
+    ).toMatchObject({ status: "requested", action: "abandon" });
+    // Even once the lock frees up, abandon records no pass.
+    git.checkHead.mockReset().mockImplementation(async () => "a".repeat(40));
+    await (await resumed.schedule([x.f.project_id])).done;
+    await resumed.idle();
+    expect(x.check()).toMatchObject({
+      status: "interrupted",
+      summary:
+        "主机运维已放弃此次预检查；检查结果已保存但未能核验分支HEAD，不作为通过依据，请重新 request_check",
+    });
+    expect(proofs()).toEqual({ n: 0 });
+    const handled = x.f
+      .state()
+      .events.filter((e) => e.type === "precheck_recovery_handled");
+    expect(handled).toMatchObject([
+      { actor: { kind: "system" }, payload: { outcome: "abandoned" } },
+    ]);
+    const finished = x.f
+      .state()
+      .events.filter((e) => e.type === "precheck_finished");
+    expect(finished).toHaveLength(1);
+    expect(handled[0]?.seq).toBe((finished[0]?.seq ?? 0) + 1);
+    expect(client.dispatch).toHaveBeenCalledOnce();
+  } finally {
+    resumed.stop();
+    await resumed.idle();
+  }
+});
