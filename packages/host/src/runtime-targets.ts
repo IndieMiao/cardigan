@@ -7,6 +7,7 @@ import type {
   IdleRetirementResult,
   Machine,
   ProjectId,
+  RemoteRebootReading,
   RemoteWorkerLoss,
   RetirementEvidence,
   RetirementIdentity,
@@ -1276,9 +1277,18 @@ export class RuntimeTargets implements Runtime {
         "status",
       );
       this.executionForRef(ref, project);
-      return isDeepStrictEqual(evidence.process, receipt)
-        ? evidence.observed
-        : "unknown";
+      if (!isDeepStrictEqual(evidence.process, receipt)) return "unknown";
+      // C-761: the same receipt read under another boot; that boot has ended.
+      if (
+        evidence.observed !== "alive" &&
+        evidence.boot !== undefined &&
+        evidence.boot !== receipt.boot
+      )
+        return {
+          process: "exited",
+          current_boot: evidence.boot,
+        } satisfies RemoteRebootReading;
+      return evidence.observed;
     } catch (error) {
       if (error instanceof WorkerTransportUnavailable) {
         try {

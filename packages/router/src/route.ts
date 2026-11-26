@@ -2791,7 +2791,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           recipient.pm_ops(),
           "human_action",
           "6.4/human action completed",
-          `${payloadString(input.event.payload, "assignment_id")} 旧进程已由人确认退出，${payloadString(input.event.payload, "work_item_id")} 等待 PM 选择备份或基线并指定机器；使用原机器须显式确认同机恢复。`,
+          `${payloadString(input.event.payload, "assignment_id")} 旧进程已由${payloadString(input.event.payload, "exit_basis") === "reboot" ? "系统按重启证据" : "人"}确认退出，${payloadString(input.event.payload, "work_item_id")} 等待 PM 选择备份或基线并指定机器；使用原机器须显式确认同机恢复。`,
         );
       break;
     case "human_action_requested":

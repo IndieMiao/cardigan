@@ -34,6 +34,7 @@ import type {
   HumanActionId,
   RunId,
 } from "../ids.js";
+import { rebootExitCompletion } from "../remote-worker-loss.js";
 import {
   retirementOwnsSession,
   retirementWaitReceipt,
@@ -944,7 +945,8 @@ export function claimHostOpsAction(
 
 /**
  * C-152: state of the human confirmation that a host operation's recorded
- * terminal has exited. Only a human completion counts; a PM triage or a
+ * terminal has exited. Only a human completion counts, or (C-761) the
+ * system's own reboot finding for a remote loss; a PM triage or a
  * cancellation leaves the terminal unconfirmed.
  */
 export type HostOpsExitConfirmation =
@@ -952,6 +954,8 @@ export type HostOpsExitConfirmation =
   | {
       readonly status: "open" | "confirmed" | "rejected";
       readonly human_action_id: HumanActionId;
+      /** C-761: present when the system confirmed the exit from a reboot. */
+      readonly basis?: "reboot";
     };
 export function hostOpsExitConfirmation(
   state: Pick<CommandState, "events" | "human_actions">,
@@ -976,11 +980,16 @@ export function hostOpsExitConfirmation(
   ).findLast(
     (e) => (e.payload as { human_action_id?: string }).human_action_id === id,
   );
-  return action?.status === "done" &&
-    completed?.actor.kind === "human" &&
-    [undefined, "exited"].includes(
-      (completed.payload as { conclusion?: string }).conclusion,
-    )
+  if (action?.status !== "done" || !completed)
+    return { status: "rejected", human_action_id: id };
+  // C-761: a system completion counts only with its own reboot finding.
+  if (completed.actor.kind !== "human")
+    return rebootExitCompletion(state.events, completed)
+      ? { status: "confirmed", human_action_id: id, basis: "reboot" }
+      : { status: "rejected", human_action_id: id };
+  return [undefined, "exited"].includes(
+    (completed.payload as { conclusion?: string }).conclusion,
+  )
     ? { status: "confirmed", human_action_id: id }
     : { status: "rejected", human_action_id: id };
 }
