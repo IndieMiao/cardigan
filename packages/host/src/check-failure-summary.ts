@@ -20,7 +20,9 @@ const HINT =
   /\b(?:[Ee]rror|ERROR|FATAL|[Ff]atal|[Pp]anic|Exception|[Ff]ailed|FAILED|[Uu]nhandled|[Tt]raceback)\b/u;
 /** Repository-relative file references; absolute paths are redacted upstream. */
 const PATH =
-  /(?:^|[\s('"`@])(?:\.\/)?((?:[\w@.-]+\/)*[\w@-][\w@.-]*\.[A-Za-z][A-Za-z0-9]{0,5})(?=$|[\s:)'"`,(])/gu;
+  /(?:^|[\s('"`])(?:\.\/)?((?:[\w@.-]+\/)*[\w@-][\w@.-]*\.[A-Za-z][A-Za-z0-9]{0,5})(?=$|[\s:)'"`,(])/gu;
+/** Bounds path scanning per line; located names sit near the line start. */
+const LOCATE_CHARS = 512;
 const SOURCE =
   /\.(?:[cm]?[jt]sx?|gd|tscn|py|go|rs|java|kt|rb|cs|vue|svelte|json|ya?ml|toml|css|html|sh)$/u;
 const PACKAGE_PREFIX =
@@ -58,7 +60,7 @@ export class CheckFailureSummary {
     }
     const compact = (s: string) => this.redact(s).slice(0, 480).trimEnd();
     const locate = (text: string) => {
-      for (const match of text.matchAll(PATH)) {
+      for (const match of text.slice(0, LOCATE_CHARS).matchAll(PATH)) {
         const path = match[1] as string;
         if (
           path.includes("..") ||

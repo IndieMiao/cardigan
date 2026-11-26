@@ -13,6 +13,7 @@ import {
   type MergeCheckView,
   mergeChain,
   passedOnOtherBase,
+  recheckMerge,
   recordMergeCheck,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
@@ -512,4 +513,37 @@ test("C-766: an older passing base of the same deliveries is found from checks o
       older,
     ),
   ).toBeUndefined();
+});
+
+test("C-766: only the attempt right after an automatic rerun reports the rerun result", async () => {
+  const { f, state, start, failed, identity } = await fixture(1);
+  start("attempt-1");
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      failed("attempt-1", steps("test"), { timeout_only: true }),
+      f.io,
+    ),
+  );
+  start("attempt-2");
+  f.commit(
+    recordMergeCheck(state(), system, failed("attempt-2", steps("test")), f.io),
+  );
+  expect(
+    latestMergeCheck(state().events, f.card.id, identity.completion_id)
+      ?.failure_class,
+  ).toMatchObject({
+    rerun: { attempt_id: "attempt-1", result: "failed" },
+    basis: expect.stringContaining("已按超时自动重跑一次"),
+  });
+  f.commit(recheckMerge(state(), human, { card_id: f.card.id }, f.io));
+  start("attempt-3");
+  f.commit(
+    recordMergeCheck(state(), system, failed("attempt-3", steps("test")), f.io),
+  );
+  expect(
+    latestMergeCheck(state().events, f.card.id, identity.completion_id)
+      ?.failure_class,
+  ).toEqual({ label: "unknown", basis: "主机未提供失败定位证据" });
 });

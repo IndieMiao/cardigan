@@ -198,21 +198,39 @@ const AUTO_RERUN_TEXT: Readonly<Record<string, string>> = {
   [INFRA_AUTO_RERUN]: "基础设施偶发",
   [FLAKY_AUTO_RERUN]: "偶发",
 };
-/** The automatic rerun this failure follows: the completion's latest requeue. */
+/**
+ * The automatic rerun this attempt is: the completion's latest requeue was
+ * automatic and this attempt is the first one queued after it.
+ */
 function autoRerunOf(
   events: readonly Event[],
   card: CardId,
   completion: DeliveryId,
+  attempt_id: string,
 ) {
-  const latest = eventsOfType(events, "merge_check_requeued").findLast(
-    (e) =>
-      e.card_id === card &&
-      (e.payload as { completion_id?: string } | null)?.completion_id ===
-        completion,
-  )?.payload as { attempt_id?: unknown; via?: unknown } | null | undefined;
-  return typeof latest?.attempt_id === "string" &&
-    typeof latest.via === "string" &&
-    AUTO_RERUNS.includes(latest.via)
+  const forCompletion = (e: Event) =>
+    e.card_id === card &&
+    (e.payload as { completion_id?: string } | null)?.completion_id ===
+      completion;
+  const requeue = eventsOfType(events, "merge_check_requeued").findLast(
+    forCompletion,
+  );
+  const latest = requeue?.payload as
+    | { attempt_id?: unknown; via?: unknown }
+    | null
+    | undefined;
+  if (
+    !requeue ||
+    typeof latest?.attempt_id !== "string" ||
+    typeof latest.via !== "string" ||
+    !AUTO_RERUNS.includes(latest.via)
+  )
+    return undefined;
+  const next = eventsOfType(events, "merge_check_queued").find(
+    (e) => forCompletion(e) && e.seq > requeue.seq,
+  );
+  return (next?.payload as { attempt_id?: unknown } | null)?.attempt_id ===
+    attempt_id
     ? { attempt_id: latest.attempt_id, via: latest.via }
     : undefined;
 }
@@ -501,7 +519,12 @@ export function recordMergeCheck(
       "checks" in p &&
       flowAtLeast(d.card(p.card_id), 2) &&
       p.infra_flaky === true;
-    const previous = autoRerunOf(state.events, p.card_id, p.completion_id);
+    const previous = autoRerunOf(
+      state.events,
+      p.card_id,
+      p.completion_id,
+      p.attempt_id,
+    );
     const plan =
       terminalFailure &&
       (value.timeout_only === true || infra || flaky !== undefined) &&

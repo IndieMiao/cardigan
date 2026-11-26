@@ -859,7 +859,12 @@ export class ServerGit implements GitBinding {
     ancestor: string,
     descendant: string,
   ): Promise<boolean> {
-    if (![ancestor, descendant].every((sha) => /^[a-f0-9]{40}$/u.test(sha)))
+    if (
+      ![ancestor, descendant].every((sha) =>
+        /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(sha),
+      ) ||
+      ancestor.length !== descendant.length
+    )
       return false;
     const repository = await this.central.ensureCentral(project);
     return this.transport.isAncestor(repository, ancestor, descendant);

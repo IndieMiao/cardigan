@@ -573,14 +573,25 @@ export class MergeChecks {
           : recordMergeCheck(s, a, change, p);
         if (
           recorded.ok ||
-          !("failure_excerpt" in change) ||
-          change.failure_excerpt === undefined ||
-          recorded.error.code !== "validation_failed"
+          recorded.error.code !== "validation_failed" ||
+          !(
+            ("failure_excerpt" in change &&
+              change.failure_excerpt !== undefined) ||
+            ("failure_class" in change && change.failure_class !== undefined)
+          )
         )
           return recorded;
         // Optional diagnostics cannot prevent an otherwise valid terminal fact.
         // The second command still validates every required identity/state field.
-        const { failure_excerpt: _excerpt, ...required } = change;
+        // C-766: the failure classification is optional diagnostics too.
+        const {
+          failure_excerpt: _excerpt,
+          failure_class: _class,
+          ...required
+        } = change as typeof change & {
+          failure_excerpt?: unknown;
+          failure_class?: unknown;
+        };
         return task.batch
           ? recordMergeBatchCheck(
               s,

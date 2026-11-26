@@ -129,6 +129,8 @@ export function passedOnOtherBase(
   }
   const newest = candidates.sort((a, b) => b.seq - a.seq)[0]?.base;
   if (newest) return newest;
+  // A precheck covers one producer's head; it only speaks for single-delivery cards.
+  if (heads.length !== 1) return undefined;
   return prechecks(events, card_id).findLast(
     (c) =>
       c.status === "passed" &&
