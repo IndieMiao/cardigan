@@ -270,6 +270,47 @@ test("M5.6 invariants 4, 5, 12: replacement dispatch records one system handoff 
   ).toBe(false);
 });
 
+test("C-786: a resource isolation replacement is system-only and names its own reason", () => {
+  const previous = start();
+  end(previous, "completed");
+  const queued = commit(queue());
+  const replacement = {
+    previous: ref,
+    reason: "resource_isolation" as const,
+  };
+  const nextRef = { ...ref, terminal_ref: "t2" };
+  delete nextRef.agent_session_id;
+  const before = JSON.stringify(f.state);
+  expect(
+    dispatchRun(
+      f.state,
+      actor(),
+      { run_id: queued.id, runtime_ref: nextRef, replacement },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  expect(JSON.stringify(f.state)).toBe(before);
+  const params = {
+    run_id: queued.id,
+    runtime_ref: nextRef,
+    replacement,
+    launch_snapshot: {
+      model: queued.model,
+      agent_cli_version: queued.agent_cli_version,
+    },
+  };
+  const body = value(dispatchRun(f.state, system, params, f.io)).timeline[0]
+    ?.body;
+  expect(body).toContain("设备资源隔离要求新会话");
+  expect(body).not.toContain("工具清单");
+  expect(body).not.toContain("运行时失联");
+  commit(dispatchRun(f.state, system, params, f.io));
+  expect(
+    f.state.events.filter((e) => e.type === "session_replaced").at(-1)?.payload,
+  ).toMatchObject({ reason: "resource_isolation", run_id: queued.id });
+  expect(owner()?.runtime_ref).toMatchObject({ terminal_ref: "t2" });
+});
+
 test("P2a-10 A: a tool catalog replacement is system-only, keeps the queued snapshot and names its reason", () => {
   const previous = start();
   end(previous, "completed");

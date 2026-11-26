@@ -497,7 +497,9 @@ export interface DispatchRunParams {
       | "runtime_not_found"
       | "runtime_unavailable"
       | "launch_profile_changed"
-      | "tool_catalog_changed";
+      | "tool_catalog_changed"
+      /** C-786: device resource isolation needs a fresh session; not a deploy. */
+      | "resource_isolation";
   };
 }
 export function dispatchRun(
@@ -712,7 +714,9 @@ export function dispatchRun(
           ? "员工启动配置已变更"
           : p.replacement.reason === "tool_catalog_changed"
             ? "部署后工具清单已变更"
-            : `运行时失联（${p.replacement.reason}）`;
+            : p.replacement.reason === "resource_isolation"
+              ? "设备资源隔离要求新会话"
+              : `运行时失联（${p.replacement.reason}）`;
       const body = `${reason}，替换 Session。旧 RuntimeRef：${JSON.stringify(p.replacement.previous)}。最近 Run：${previousRun?.id ?? "无"}，outcome：${previousRun?.outcome ?? "无"}。新 Session 先读卡片和 get_updates。`;
       d.emit(
         "session_replaced",
