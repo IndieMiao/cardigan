@@ -266,19 +266,25 @@ async function createProject(
     io.stdout(
       `已创建项目 ${created.value.id}（${created.value.name}），代号 ${created.value.code}\n数据库：${dataDir}`,
     );
-    // C-794: onboarding steps 4 and 6 in the same command.
-    if (from !== undefined)
-      io.stdout(
-        formatProjectSetupCopy(
+    // C-794: onboarding steps 4 and 6 in the same command. The project is
+    // already committed; a failed copy says how to finish it.
+    if (from !== undefined) {
+      let copied: Awaited<ReturnType<typeof copyProjectSetup>>;
+      try {
+        copied = await copyProjectSetup(store, io, {
           from,
-          projectId,
-          await copyProjectSetup(store, io, {
-            from,
-            to: projectId,
-            dataDir,
-          }),
-        ),
-      );
+          to: projectId,
+          dataDir,
+        });
+      } catch (error) {
+        if (!(error instanceof CliError)) throw error;
+        throw new CliError(error.message, error.exitCode, [
+          ...error.details,
+          `项目 ${projectId} 已创建、未复制任何角色和偏好；处理后运行 cardigan project copy-setup --from ${from} --project ${projectId}`,
+        ]);
+      }
+      io.stdout(formatProjectSetupCopy(from, projectId, copied));
+    }
     return EXIT.ok;
   } finally {
     store.close();

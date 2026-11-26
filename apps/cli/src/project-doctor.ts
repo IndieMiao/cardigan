@@ -22,7 +22,7 @@ import {
   runtimeTargetBinding,
   runtimeWorkersPath,
 } from "@cardigan/host";
-import { listRoleVersions, openStore, type Store } from "@cardigan/store";
+import { DEFAULT_DB_FILE, listRoleVersions, Store } from "@cardigan/store";
 import { parse as parseYaml } from "yaml";
 import { loadOptionalConfigSync } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
@@ -90,7 +90,10 @@ export async function runProjectDoctor(
     i++;
   }
   const dataDir = announceDataDir(io, flags["data-dir"]);
-  const store = openStore({ dataDir });
+  // Read-only: never create a database or apply migrations to a live one.
+  if (!existsSync(join(dataDir, DEFAULT_DB_FILE)))
+    throw new CliError(`数据目录里没有数据库：${dataDir}`, EXIT.usage);
+  const store = Store.open({ dataDir, migrate: false });
   try {
     const project = resolveProject(store, io, flags.project);
     const items = await projectDoctor({
@@ -632,7 +635,7 @@ export function checkWorkflowSource(
   const runName =
     typeof workflow["run-name"] === "string"
       ? workflow["run-name"].replace(
-          /\$\{\{\s*inputs\.(\w+)\s*\}\}/gu,
+          /\$\{\{\s*(?:github\.event\.)?inputs\.(\w+)\s*\}\}/gu,
           (_match, key: string) => sample[key] ?? `<?${key}>`,
         )
       : undefined;

@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -413,6 +415,21 @@ describe("project copy-setup", () => {
     ).toBe(2);
     expect(err.join("\n")).toContain("未复制任何内容");
     expect(snapshot("beta").roles).toEqual([]);
+    err = [];
+    expect(
+      await run([
+        "project",
+        "create",
+        "gamma",
+        "--code",
+        "GAM",
+        "--from",
+        "alpha",
+      ]),
+    ).toBe(2);
+    expect(err.join("\n")).toContain(
+      "项目 gamma 已创建、未复制任何角色和偏好；处理后运行 cardigan project copy-setup --from alpha --project gamma",
+    );
   });
 
   test("the source must exist and differ from the target", async () => {
@@ -448,6 +465,33 @@ describe("project copy-setup", () => {
 });
 
 describe("project doctor", () => {
+  test("is read-only: the database is unchanged and never created", async () => {
+    await sourceProject();
+    // WAL mode: a write may land in the -wal file, so hash both.
+    const files = () =>
+      ["cardigan.db", "cardigan.db-wal"]
+        .map((name) => join(dataDir, name))
+        .filter((file) => existsSync(file))
+        .map((file) =>
+          createHash("sha256").update(readFileSync(file)).digest("hex"),
+        );
+    const before = files();
+    expect(await run(["project", "doctor", "--project", "alpha"])).toBe(1);
+    expect(files()).toEqual(before);
+    const absent = join(dataDir, "absent");
+    expect(
+      await run([
+        "project",
+        "doctor",
+        "--project",
+        "alpha",
+        "--data-dir",
+        absent,
+      ]),
+    ).toBe(2);
+    expect(existsSync(absent)).toBe(false);
+  });
+
   test("a bare project lists the missing onboarding steps", async () => {
     expect(await run(["project", "create", "beta", "--code", "BET"])).toBe(0);
     expect(await run(["project", "doctor", "--project", "beta"])).toBe(1);
