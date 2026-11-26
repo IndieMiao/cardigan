@@ -83,6 +83,8 @@ import { useResource } from "../useResource.js";
 import { MergeEvidence, PreMergeCheckList } from "./MergeEvidence.js";
 import { useAction } from "./useAction.js";
 
+/** C-768: optional verifiers still open on a merge confirmation. */
+const OPTIONAL_VERIFIERS_LABEL = "可选验证项（确认合并即视为豁免）";
 const waitLabel = (ms: number | null, elapsed = 0) => {
   const age = (ms ?? 0) + elapsed;
   return ms === null
@@ -608,6 +610,7 @@ export function MergeConfirmation({
   const preChecks = merge?.pre_merge_checks ?? [];
   const blockers = merge?.blockers ?? ["检查状态尚未读取，请刷新"];
   const holds = merge?.blocking_human_actions ?? [];
+  const optionalPending = merge?.optional_pending ?? [];
   const mergeBlocked = blockers.length > 0;
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge", viaSuggestion = false) =>
@@ -819,6 +822,18 @@ export function MergeConfirmation({
             </>
           ) : (
             <p>检查都已通过</p>
+          )}
+          {optionalPending.length > 0 && (
+            <>
+              <p>{OPTIONAL_VERIFIERS_LABEL}：</p>
+              <ul aria-label={OPTIONAL_VERIFIERS_LABEL}>
+                {optionalPending.map((item) => (
+                  <li key={item.id}>
+                    {item.title}（{item.id}）
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
         </div>
       )}

@@ -111,6 +111,67 @@ test("C-264: Needs You disables merge and lists reasons while hold and return re
   ).toBe(false);
 });
 
+test("C-768: only optional verifiers left — they are listed apart and merge stays enabled", async () => {
+  const recordDecision = vi.fn(async () => undefined);
+  const q = merge(passed);
+  if (!q.merge_confirmation) throw new Error("Missing merge fixture");
+  q.merge_confirmation = {
+    ...q.merge_confirmation,
+    optional_pending: [{ id: "W-420", title: "Google 补录" }],
+  };
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => needs(q), recordDecision })}
+      projectId="p-1"
+    />,
+  );
+  const status = await screen.findByRole("status", { name: "合并前置条件" });
+  expect(within(status).getByText("检查都已通过")).toBeTruthy();
+  expect(within(status).queryByText("等待中：")).toBeNull();
+  const optional = within(status).getByRole("list", {
+    name: "可选验证项（确认合并即视为豁免）",
+  });
+  expect(within(optional).getByText("Google 补录（W-420）")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "仍要合并" })).toBeNull();
+  const confirm = screen.getByRole("button", { name: "确认合并", exact: true });
+  expect(confirm.hasAttribute("disabled")).toBe(false);
+  fireEvent.click(confirm);
+  await waitFor(() => expect(recordDecision).toHaveBeenCalled());
+});
+
+test("C-768: a required blocker beside an optional verifier keeps merge disabled", async () => {
+  const q = merge(passed);
+  if (!q.merge_confirmation) throw new Error("Missing merge fixture");
+  q.merge_confirmation = {
+    ...q.merge_confirmation,
+    blockers: ["代码审核（W-2）：未通过当前交付审核"],
+    optional_pending: [{ id: "W-420", title: "Google 补录" }],
+  };
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => needs(q) })}
+      projectId="p-1"
+    />,
+  );
+  const status = await screen.findByRole("status", { name: "合并前置条件" });
+  expect(
+    within(status).getByText("代码审核（W-2）：未通过当前交付审核"),
+  ).toBeTruthy();
+  expect(
+    within(
+      within(status).getByRole("list", {
+        name: "可选验证项（确认合并即视为豁免）",
+      }),
+    ).getByText("Google 补录（W-420）"),
+  ).toBeTruthy();
+  expect(
+    screen
+      .getByRole("button", { name: "确认合并", exact: true })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  expect(screen.getByRole("button", { name: "仍要合并" })).toBeTruthy();
+});
+
 test("C-205: passed checks and standard steps fold away without adding a confirmation", async () => {
   const recordDecision = vi.fn(async () => undefined);
   render(
