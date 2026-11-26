@@ -165,6 +165,8 @@ export function runHarness(run: RunView | undefined): string {
 }
 /** C-704: the effort value behind its Chinese field name (C-687 §2.1). */
 const effortText = (run: RunView) => `推理强度 ${run.effort || NONE}`;
+/** Word joiners: a narrow column may wrap before "推理强度 high", never inside. */
+const unbroken = (text: string) => [...text].join("\u2060");
 /** C-106: "model / 推理强度 effort"; an unknown part shows "—". */
 export function runModelEffort(run: RunView | undefined): string {
   if (!run?.model) return NONE;
@@ -174,6 +176,11 @@ export function runModelEffort(run: RunView | undefined): string {
 export function runConfig(run: RunView | undefined): string {
   if (!run) return NONE;
   return `${runHarness(run)} / ${run.model || NONE} / ${effortText(run)}`;
+}
+/** C-704: runConfig for the narrow table column; the effort stays whole. */
+export function runConfigCell(run: RunView | undefined): string {
+  if (!run) return NONE;
+  return `${runHarness(run)} / ${run.model || NONE} / ${unbroken(effortText(run))}`;
 }
 /** A token count as 124K / 1.5M. */
 export const windowSize = (tokens: number) => {
@@ -546,7 +553,7 @@ export function AssignmentRow({
         <ContextCell run={run} meter />
       </TableCell>
       <TableCell data-column="config" className="execution-config">
-        <LongContent lines={2}>{runConfig(run)}</LongContent>
+        <LongContent lines={2}>{runConfigCell(run)}</LongContent>
       </TableCell>
       <TableCell data-column="activity">
         <Activity value={assignmentActivity(a, run)} />

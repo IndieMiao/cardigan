@@ -292,7 +292,13 @@ test("C-436: seven columns put employee, task, state and context first and fold 
   expect(coder.task).toContain("W-1");
   expect(coder.state).toContain("空闲");
   expect(coder.state).not.toContain("有效");
-  expect(coder.config).toBe("claude / opus-5.5 / 推理强度 xhigh");
+  // C-704: word joiners keep "推理强度 xhigh" on one line in the narrow column.
+  expect(coder.config).toBe(
+    `claude / opus-5.5 / ${[..."推理强度 xhigh"].join("\u2060")}`,
+  );
+  expect(coder.config.replaceAll("\u2060", "")).toBe(
+    "claude / opus-5.5 / 推理强度 xhigh",
+  );
   expect(coder.context).toBe("90.00%");
   expect(
     coder.row.querySelector(".execution-context")?.getAttribute("data-level"),
@@ -305,7 +311,9 @@ test("C-436: seven columns put employee, task, state and context first and fold 
   // Recorded Run without launch profile data or context usage.
   const backstage = cells("A-7");
   expect(backstage.task).toBe("常驻 PM · 后台");
-  expect(backstage.config).toBe("— / fixture-model / 推理强度 —");
+  expect(backstage.config.replaceAll("\u2060", "")).toBe(
+    "— / fixture-model / 推理强度 —",
+  );
   expect(backstage.context).toBe("—");
   expect(within(backstage.row).queryByRole("meter")).toBeNull();
 
