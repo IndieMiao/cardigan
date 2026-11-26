@@ -22,7 +22,15 @@ export interface EventConnection {
 export type StreamFactory = (url: string) => EventConnection;
 export const browserStream: StreamFactory = (url) => new EventSource(url);
 
-/** One project subscription, monotonic per-stream cursors, explicit reconnect URLs. */
+/**
+ * One project subscription with monotonic per-stream dedupe.
+ *
+ * C-779: every connection, a reconnect included, opens without `after` and so
+ * starts at the server's current seqs; `ready()` on open re-reads the views on
+ * screen, which covers whatever changed while the page was away. Sending the
+ * seen cursors back made the URL grow with every card (431 past ~16 KB) and a
+ * page that had seen only a few streams replayed the whole history once.
+ */
 export function subscribeProject(
   project: string,
   callbacks: StreamCallbacks,
@@ -30,8 +38,8 @@ export function subscribeProject(
   retryMs = 3000,
 ): () => void {
   const seen = new Map<string, number>();
-  // Last run-queue revision the server announced. The queue has no seq, so a
-  // resumed connection relies on this to notice changes made while away.
+  // Last run-queue revision the server announced. The queue has no seq, so
+  // this tells a real change from a repeated revision on one connection.
   let queueRevision: string | undefined;
   // C-232: the same for the host's context samples.
   let contextRevision: string | undefined;
@@ -49,13 +57,12 @@ export function subscribeProject(
   };
   function connect(retry: boolean) {
     if (stopped) return;
-    const cursors = [...seen].sort(([a], [b]) => a.localeCompare(b));
-    const resumed = retry && cursors.length > 0;
-    // No events observed before disconnect: requesting an explicit zero avoids "start at now".
-    const after = (cursors.length ? cursors : [["project", 0]])
-      .map(([s, n]) => `${s}:${n}`)
-      .join(",");
-    const url = `/api/projects/${encodeURIComponent(project)}/stream${retry ? `?after=${encodeURIComponent(after)}` : ""}`;
+    // Revisions changed while away are not covered by `ready()` for context
+    // and capacity, so a reconnect still reports a revision it had not seen.
+    const resumed = retry;
+    // The queue's opening revision is always covered by the re-read on open.
+    let queueOpened = false;
+    const url = `/api/projects/${encodeURIComponent(project)}/stream`;
     callbacks.status("connecting");
     let connection: EventConnection;
     try {
@@ -69,11 +76,9 @@ export function subscribeProject(
     connection.addEventListener("open", () => {
       if (!current()) return;
       callbacks.status("live");
-      // A connection resumed from known cursors replays exactly the seqs
-      // missed while away, so the views already on screen stay as they are.
-      // The first connection, and a retry with no cursor yet (which replays
-      // from zero anyway), re-read to cover the window before the stream.
-      if (!resumed) callbacks.ready();
+      // The stream starts at "now": re-read to cover the window before it,
+      // on the first connection and after every reconnect alike.
+      callbacks.ready();
     });
     connection.addEventListener("queue", (event) => {
       if (!current()) return;
@@ -94,11 +99,11 @@ export function subscribeProject(
       }
       const known = queueRevision;
       queueRevision = revision;
+      const opening = !queueOpened;
+      queueOpened = true;
       if (known === revision) return;
-      // The first revision of the first connection is already covered by the
-      // re-read on open; on a resumed connection any revision we did not have
-      // yet means the queue may have changed while we were away.
-      if (known !== undefined || resumed) callbacks.ready();
+      // Each connection's first revision is covered by the re-read on open.
+      if (!opening) callbacks.ready();
     });
     connection.addEventListener("context", (event) => {
       if (!current()) return;
@@ -172,8 +177,8 @@ export function subscribeProject(
       reconnect();
     };
     connection.addEventListener("error", lost);
-    // The server is restarting: drop this connection now and resume on the
-    // next server with the same cursors, without a page reload.
+    // The server is restarting: drop this connection now and reconnect to the
+    // next server, without a page reload.
     connection.addEventListener("shutdown", lost);
   }
   connect(false);
