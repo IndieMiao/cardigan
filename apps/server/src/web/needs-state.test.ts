@@ -26,6 +26,7 @@ const BASELINE_SHA256 =
 // C-540 adds attachment thumbnail paths; they derive from the download path.
 // C-503 adds story proposals; the synthetic data has none (asserted below).
 // C-742 adds the human action executor; it is stripped below.
+// C-760 adds each action's merge hold (blocks_merge, prerequisite); stripped too.
 // C-750 adds cards waiting for the owner to mark done; the synthetic data has
 // none (asserted below).
 function legacyProjection(view: ReturnType<typeof needsYou>) {
@@ -42,12 +43,22 @@ function legacyProjection(view: ReturnType<typeof needsYou>) {
         notices: legacy.notices.map(({ source: _source, ...notice }) => notice),
         // C-742 adds each action's executor after the golden response.
         human_actions: legacy.human_actions.map(
-          ({ executor: _executor, ...action }) => action,
+          ({
+            executor: _executor,
+            blocks_merge: _blocks,
+            prerequisite: _prerequisite,
+            ...action
+          }) => action,
         ),
       },
       // C-540 thumbnails and C-614 previews postdate the golden response.
+      // C-760 adds blocking_human_actions to merge confirmations.
       (key, value) =>
-        key === "thumbnail_path" || key === "preview_path" ? undefined : value,
+        key === "thumbnail_path" ||
+        key === "preview_path" ||
+        key === "blocking_human_actions"
+          ? undefined
+          : value,
     ),
   );
 }

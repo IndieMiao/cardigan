@@ -615,6 +615,10 @@ export interface HumanActionHandoffView {
 export interface HumanActionView {
   readonly handoff?: HumanActionHandoffView;
   readonly id: string;
+  readonly card_id?: string;
+  /** C-760: absent on older servers; legacy holds may lack a prerequisite. */
+  readonly blocks_merge?: boolean;
+  readonly prerequisite?: MergePrerequisite;
   readonly instructions: string;
   readonly why_human: string;
   readonly expected_return: string;
@@ -916,7 +920,21 @@ export interface PreMergeCheckView {
   readonly note: string | null;
   readonly updated_at: string;
 }
+/** C-760: credential or external-account preparation that holds a merge. */
+export type MergePrerequisite = "credential" | "external_account";
+export type MergeBlockingInput =
+  | {
+      readonly blocks_merge: true;
+      readonly prerequisite: MergePrerequisite;
+      readonly reason: string;
+    }
+  | { readonly blocks_merge: false; readonly reason: string };
 export interface MergeConfirmationView {
+  /** C-760: open actions still holding this merge; older servers omit it. */
+  readonly blocking_human_actions?: readonly {
+    readonly id: string;
+    readonly title: string;
+  }[];
   readonly decision_evidence_required?: readonly {
     readonly decision_id: string;
     readonly option: string | null;
@@ -989,6 +1007,9 @@ export interface NeedsAction
   readonly waited_ms: number | null;
   readonly due: string | null;
   readonly blocked_work_items: readonly string[];
+  /** C-760: true while the action holds its card's merge. */
+  readonly blocks_merge?: boolean;
+  readonly prerequisite?: MergePrerequisite;
   readonly completion_notice?: string;
   /** C-179: a pre-merge check passed while this action still holds the merge. */
   readonly pre_merge_check_reminder?: {
@@ -2781,6 +2802,8 @@ export interface CardiganClient {
     delegateFuture?: boolean,
     snoozeUntil?: string,
     mergeOverrideReason?: string,
+    /** C-760: with an override, turn open merge holds into follow-ups. */
+    mergeOverrideFollowUp?: boolean,
   ): Promise<void>;
   /** C-192: submit the decision's fresh suggestion ("按建议处理"). */
   applySuggestion(
@@ -2803,6 +2826,13 @@ export interface CardiganClient {
     projectId: string,
     id: string,
     reason: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  /** C-760: switch an action between holding the merge and a follow-up. */
+  setActionMergeBlocking(
+    projectId: string,
+    id: string,
+    input: MergeBlockingInput,
     idempotencyKey?: string,
   ): Promise<void>;
   /** C-742: hand a human action to the owner or to 张良. */
@@ -4127,6 +4157,7 @@ export class HttpCardiganClient implements CardiganClient {
     delegateFuture = false,
     snoozeUntil?: string,
     mergeOverrideReason?: string,
+    mergeOverrideFollowUp?: boolean,
   ): Promise<void> {
     await this.write(
       projectId,
@@ -4139,6 +4170,7 @@ export class HttpCardiganClient implements CardiganClient {
         ...(mergeOverrideReason !== undefined
           ? { merge_override_reason: mergeOverrideReason }
           : {}),
+        ...(mergeOverrideFollowUp ? { merge_override_follow_up: true } : {}),
       },
       idempotencyKey,
     );
@@ -4189,6 +4221,19 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       `human-actions/${encodeURIComponent(id)}/cancel`,
       { reason },
+      idempotencyKey,
+    );
+  }
+  async setActionMergeBlocking(
+    projectId: string,
+    id: string,
+    input: MergeBlockingInput,
+    idempotencyKey: string = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `human-actions/${encodeURIComponent(id)}/merge-blocking`,
+      input,
       idempotencyKey,
     );
   }

@@ -488,6 +488,11 @@ const schemas = {
         "With human/host handoff only: false explicitly reclassifies an old hold as post-merge follow-up; true requires a credential or external-account prerequisite. Omit to preserve the existing hold.",
       ),
     prerequisite: z.enum(["credential", "external_account"]).optional(),
+    basis_decision_id: id("decision")
+      .optional()
+      .describe(
+        "With blocks_merge=false on a credential or account hold: the decision on this card the human already resolved (e.g. chose to stop holding the merge); its answer is recorded as the basis. Without it only the human can lift such a hold.",
+      ),
     summary: text.optional(),
     why_human: text.optional(),
     expected_outcome: text.optional(),

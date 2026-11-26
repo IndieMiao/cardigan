@@ -45,6 +45,7 @@ import {
   NeedsOpenAction,
   NeedsRow,
 } from "../components/layout/NeedsRowLayout.js";
+import { MergeBlockingControl } from "../components/MergeBlockingControl.js";
 import { MergeCheck } from "../components/MergeCheck.js";
 import { MergeStatusLine } from "../components/MergeStatusLine.js";
 import {
@@ -736,6 +737,7 @@ export function MergeConfirmation({
   const [holdUntil, setHoldUntil] = useState("");
   const [overriding, setOverriding] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
+  const [overrideFollowUp, setOverrideFollowUp] = useState(false);
   const [answeringOther, setAnsweringOther] = useState(false);
   const [otherWords, setOtherWords] = useState("");
   const overrideError = mergeOverrideReasonError(overrideReason);
@@ -763,6 +765,7 @@ export function MergeConfirmation({
   const needsTakeover = pmTakeover && acceptedTakeover !== takeoverKey;
   const preChecks = merge?.pre_merge_checks ?? [];
   const blockers = merge?.blockers ?? ["检查状态尚未读取，请刷新"];
+  const holds = merge?.blocking_human_actions ?? [];
   const mergeBlocked = blockers.length > 0;
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge", viaSuggestion = false) =>
@@ -819,6 +822,7 @@ export function MergeConfirmation({
           disabled={action.busy}
           onClick={() => {
             setOverrideReason("");
+            setOverrideFollowUp(false);
             setOverriding(true);
           }}
         >
@@ -1189,6 +1193,21 @@ export function MergeConfirmation({
                 {overrideError}
               </p>
             )}
+            {holds.length > 0 && (
+              <fieldset aria-label="挡合并的人工事项">
+                <p>
+                  {`人工事项 ${holds.map((h) => h.id).join("、")} 未完成，会继续挡住合并。`}
+                </p>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={overrideFollowUp}
+                    onChange={(e) => setOverrideFollowUp(e.target.checked)}
+                  />
+                  一并改为合并后跟进
+                </label>
+              </fieldset>
+            )}
             {action.error && (
               <p className="error" role="alert">
                 {action.error}
@@ -1203,22 +1222,47 @@ export function MergeConfirmation({
               <button
                 type="button"
                 className="quiet"
-                disabled={action.busy || !!overrideError}
+                disabled={
+                  action.busy ||
+                  !!overrideError ||
+                  (holds.length > 0 && !overrideFollowUp)
+                }
                 onClick={() => {
-                  if (overrideError) return;
+                  if (overrideError || (holds.length > 0 && !overrideFollowUp))
+                    return;
                   void action.run(
-                    [projectId, q.id, "merge-override", quote, overrideReason],
+                    [
+                      projectId,
+                      q.id,
+                      "merge-override",
+                      quote,
+                      overrideReason,
+                      holds.length > 0,
+                    ],
                     async (key) => {
-                      await client.recordDecision(
-                        projectId,
-                        q.id,
-                        "merge",
-                        quote,
-                        key,
-                        false,
-                        undefined,
-                        overrideReason,
-                      );
+                      if (holds.length > 0)
+                        await client.recordDecision(
+                          projectId,
+                          q.id,
+                          "merge",
+                          quote,
+                          key,
+                          false,
+                          undefined,
+                          overrideReason,
+                          true,
+                        );
+                      else
+                        await client.recordDecision(
+                          projectId,
+                          q.id,
+                          "merge",
+                          quote,
+                          key,
+                          false,
+                          undefined,
+                          overrideReason,
+                        );
                       setOverriding(false);
                     },
                   );
@@ -1952,6 +1996,14 @@ function HumanAction({
           <p>原请求原因：{item.original_request.why_human}</p>
           <p>原期望返回：{item.original_request.expected_return}</p>
         </details>
+      )}
+      {item.card_id && (
+        <MergeBlockingControl
+          client={client}
+          projectId={projectId}
+          action={item}
+          done={done}
+        />
       )}
       {operator ? (
         <Button

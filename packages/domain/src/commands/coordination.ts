@@ -92,11 +92,16 @@ import {
   validExecutor,
 } from "./human-action-executor.js";
 import {
+  changeMergeBlocking,
+  mergeBlockingAudit,
+  ownerMergeBlockingBasis,
+} from "./human-action-merge-blocking.js";
+import {
   buildHumanDecidedMergeBasis,
   humanDecidedMergeQuestions,
 } from "./human-decided-merge.js";
 import { independentReviewLimitItem } from "./independent-review-limit-delegation.js";
-import { syncHumanDecidedMerges } from "./merge.js";
+import { mergeBlockingHumanActions, syncHumanDecidedMerges } from "./merge.js";
 import {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -1072,6 +1077,12 @@ export function recordDecision(
     delegate_future?: boolean;
     /** Q-440: explicit human override; blank reasons and Agent actors are rejected. */
     merge_override_reason?: string;
+    /**
+     * C-760: with an override, the human ticked "turn the open merge-holding
+     * actions into post-merge follow-ups"; without it such actions refuse the
+     * override instead of silently holding the confirmed merge.
+     */
+    merge_override_follow_up?: boolean;
     /** C-192: the human clicked "按建议处理"; never accepted from Agents. */
     via_suggestion?: boolean;
     suggestion_progress_token?: string;
@@ -1108,6 +1119,12 @@ export function recordDecision(
       ensure(words.length > 0, "validation_failed", "选“其他”时必须填写说明");
       p = { ...p, raw_quote: words, rationale: words };
     }
+    ensure(
+      p.merge_override_follow_up === undefined ||
+        p.merge_override_reason !== undefined,
+      "validation_failed",
+      "只有强行确认合并时才能一并改为合并后跟进",
+    );
     if (p.merge_override_reason !== undefined) {
       ensure(
         actor.kind === "human",
@@ -1298,9 +1315,33 @@ export function recordDecision(
     );
     if (decision.trigger === "merge_confirmation" && p.option === "merge") {
       const blockers = humanMergeBlockers(d.state, decision);
-      if (p.merge_override_reason !== undefined)
-        mergeOverride = { reason: p.merge_override_reason.trim(), blockers };
-      else
+      if (p.merge_override_reason !== undefined) {
+        const holds = mergeBlockingHumanActions(
+          {
+            human_actions: d.list("human_actions"),
+            work_items: d.list("work_items"),
+          },
+          decision.card_id as CardId,
+        );
+        ensure(
+          holds.length === 0 || p.merge_override_follow_up === true,
+          "illegal_transition",
+          `仍要合并越不过未完成的挡合并待办 ${holds.map((h) => h.id).join("、")}：勾选“一并改为合并后跟进”，或先处理这些待办`,
+          {
+            merge_blockers: blockers,
+            merge_blocking_actions: holds.map((h) => h.id),
+          },
+        );
+        const reason = p.merge_override_reason.trim();
+        for (const hold of holds)
+          changeMergeBlocking(d, hold, {
+            blocks_merge: false,
+            reason: `强行确认合并：${reason}`,
+            basis: { decision_id: decision.id, raw_quote: p.raw_quote.trim() },
+            via: "merge_override",
+          });
+        mergeOverride = { reason, blockers };
+      } else
         ensure(
           blockers.length === 0,
           "illegal_transition",
@@ -2159,6 +2200,8 @@ export function triageHumanAction(
     /** Explicitly retain a prerequisite or reclassify it as a post-merge follow-up. */
     blocks_merge?: boolean;
     prerequisite?: HumanAction["prerequisite"];
+    /** C-760: the human's resolved decision that lifts a credential or account hold. */
+    basis_decision_id?: DecisionId;
     summary?: string;
     why_human?: string;
     expected_outcome?: string;
@@ -2236,11 +2279,21 @@ export function triageHumanAction(
       "交人事项不能标记为可回填诊断",
     );
     ensure(
+      p.basis_decision_id === undefined || p.blocks_merge === false,
+      "validation_failed",
+      "basis_decision_id 只能和 blocks_merge=false 一起使用",
+    );
+    const basis =
+      p.basis_decision_id === undefined
+        ? undefined
+        : ownerMergeBlockingBasis(d, action, p.basis_decision_id);
+    ensure(
       actor.kind === "human" ||
         !action.prerequisite ||
-        p.blocks_merge !== false,
+        p.blocks_merge !== false ||
+        !!basis,
       "unauthorized",
-      "只有人能移除凭据或账号前置分类",
+      "只有人能移除凭据或账号前置分类；项目经理须引用人已作出的拍板（basis_decision_id）",
     );
     if (external) {
       text(p.host_assignment_id, "host_assignment_id");
@@ -2352,9 +2405,22 @@ export function triageHumanAction(
     text(p.instructions, "instructions");
     text(p.expected_return, "expected_return");
     const { prerequisite: _previousPrerequisite, ...original } = action;
+    const audit = reclassify
+      ? mergeBlockingAudit(d, action, {
+          blocks_merge: blocksMerge === true,
+          ...(blocksMerge && prerequisite ? { prerequisite } : {}),
+          reason: p.rationale,
+          ...(basis ? { basis } : {}),
+          via: "triage",
+        })
+      : undefined;
     const classified: HumanAction = reclassify
       ? {
           ...original,
+          merge_blocking_changes: [
+            ...(action.merge_blocking_changes ?? []),
+            ...(audit ? [audit] : []),
+          ],
           blocks_merge: blocksMerge === true,
           ...(blocksMerge && prerequisite
             ? { prerequisite }
@@ -2486,6 +2552,12 @@ export function triageHumanAction(
               prerequisite: next.prerequisite ?? null,
               follow_up_work_items: next.follow_up_work_items ?? [],
               resume_work_items: resumed.map((item) => item.id),
+              ...(basis
+                ? {
+                    basis_decision_id: basis.decision_id,
+                    raw_quote: basis.raw_quote,
+                  }
+                : {}),
             }
           : {}),
       },

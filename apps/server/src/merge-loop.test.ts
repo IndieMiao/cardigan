@@ -261,7 +261,6 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
       ),
     );
   ask(false);
-  const blocking = ask(true);
   const confirmation = mergeConfirmation(f, scenario.card.id);
   if (!confirmation) throw new Error("Missing confirmation");
   f.apply((s, a, p) =>
@@ -273,11 +272,13 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
         option: "merge",
         rationale: "已核实",
         raw_quote: "已核实",
-        merge_override_reason: "测试强行确认后仍须等待人工事项",
       },
       p,
     ),
   );
+  // C-760: a hold raised after the confirmation still holds the merge
+  // (an override can no longer pass one silently).
+  const blocking = ask(true);
   await loop.tick(f.project_id);
   await loop.tick(f.project_id);
   expect(skips()).toHaveLength(2);

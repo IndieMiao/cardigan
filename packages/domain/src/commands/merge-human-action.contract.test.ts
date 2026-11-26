@@ -79,6 +79,8 @@ test("C-112: a read-only human action on the card does not hold prepareMergePlan
 
 test("C-112: a human action raised with blocks_merge holds the merge and names itself until done", async () => {
   const f = await awaitingMerge();
+  // C-760: confirm first; an override can no longer pass an open hold.
+  confirm(f);
   const action = ask(f, {
     blocks_merge: true,
     prerequisite: "external_account" as const,
@@ -91,7 +93,6 @@ test("C-112: a human action raised with blocks_merge holds the merge and names i
     blocks_merge: true,
     prerequisite: "external_account" as const,
   });
-  confirm(f, true);
   for (const plan of [prepareMergePlan, mergePlan])
     expect(plan(f.state, f.card.id)).toMatchObject({
       ok: false,
@@ -297,6 +298,8 @@ test.each([false, true])(
   async (linked) => {
     const f = await awaitingMerge();
     const action = legacyHold(f, linked);
+    // C-760: confirm first; an override can no longer pass an open hold.
+    confirm(f);
     seedHold(f, action);
     const system = { kind: "system" as const, project_id: f.state.project_id };
     for (let pass = 0; pass < 2; pass++) {
@@ -307,7 +310,6 @@ test.each([false, true])(
       expect(refreshed.events).toEqual([]);
       expect(f.state.human_actions).toEqual([action]);
     }
-    confirm(f, true);
     for (const plan of [prepareMergePlan, mergePlan])
       expect(plan(f.state, f.card.id)).toMatchObject({
         ok: false,

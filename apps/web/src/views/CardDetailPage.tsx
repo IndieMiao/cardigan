@@ -54,6 +54,7 @@ import {
 } from "../components/layout/CardDetailLayout.js";
 import { CardBatchChecks } from "../components/MergeBatch.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
+import { MergeBlockingControl } from "../components/MergeBlockingControl.js";
 import { Markdown, MarkdownBody } from "../components/Operations.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
@@ -727,6 +728,10 @@ function CardContent({
       .reverse()
       .find((d) => d.kind === "card_completion" && d.status === "accepted")?.id;
   const sectionId = (name: string) => `card-${cardId}-${name}`;
+  // C-760: open actions on this card; the owner may move their merge hold.
+  const openActions = detail.human_actions.filter(
+    (a) => a.status === "open" && a.card_id === cardId,
+  );
   const panel = (name: string) => ({
     id: sectionId(name),
     "data-card-panel": true,
@@ -904,6 +909,33 @@ function CardContent({
                   elapsed={0}
                   inCardHeader
                 />
+              ))}
+            </section>
+          )}
+          {openActions.length > 0 && (
+            <section
+              id={sectionId("human-actions")}
+              className="card-section"
+              aria-label="人工事项"
+            >
+              <h2>人工事项</h2>
+              {openActions.map((a) => (
+                <article
+                  key={a.id}
+                  className="needs-item"
+                  aria-label={`人工事项 ${a.id}`}
+                >
+                  <h3 className="needs-question">
+                    <IdTag id={a.id} label="" />{" "}
+                    {a.handoff?.title ?? a.instructions.split(/\r?\n/u)[0]}
+                  </h3>
+                  <MergeBlockingControl
+                    client={client}
+                    projectId={projectId}
+                    action={a}
+                    done={reload}
+                  />
+                </article>
               ))}
             </section>
           )}

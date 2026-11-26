@@ -38,6 +38,7 @@ import {
   saveMachine,
   selectStandingEmployee,
   setCardSensitive,
+  setHumanActionMergeBlocking,
   standingTools,
   supersedeCard,
   updateCard,
@@ -128,6 +129,8 @@ const USAGE = [
   "  cardigan human-action done <H-n> --text <结果> [--conclusion exited|false_alarm|unconfirmed] [--operator] [--project <p>]",
   "    --operator：以主机操作员（张良）身份结项交给张良的待办",
   "  cardigan human-action reassign <H-n> --to owner|operator --reason <理由> [--project <p>]",
+  "  cardigan human-action merge-blocking <H-n> --to follow-up|hold [--prerequisite credential|external_account] --reason <理由> [--project <p>]",
+  "    follow-up：改为合并后跟进；hold：挡合并，须注明前置类型",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
   "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
@@ -258,7 +261,9 @@ export async function runWorkflowCommand(
     case "human-action":
       return rest[0] === "reassign"
         ? humanActionReassign(rest.slice(1), io)
-        : humanActionDone(rest, io);
+        : rest[0] === "merge-blocking"
+          ? humanActionMergeBlocking(rest.slice(1), io)
+          : humanActionDone(rest, io);
     default:
       throw new CliError(`不认识的命令：${args.join(" ")}`, EXIT.usage, [
         USAGE,
@@ -2441,6 +2446,68 @@ async function humanActionReassign(
     });
     io.stdout(
       `已改派 ${humanActionId}：由${executor === "operator" ? "张良" : "所有者"}执行`,
+    );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+/** C-760: the human moves an action between a merge hold and a follow-up. */
+async function humanActionMergeBlocking(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const usage =
+    "用法：cardigan human-action merge-blocking <H-n> --to follow-up|hold [--prerequisite credential|external_account] --reason <理由>";
+  const parsed = parseArgs(args, []);
+  const humanActionId = parseHumanAction(parsed.positionals[0]);
+  const to = optional(parsed.flags, "to");
+  if (to !== "follow-up" && to !== "hold")
+    throw new CliError(`--to 须为 follow-up 或 hold\n${usage}`, EXIT.usage);
+  const prerequisite = optional(parsed.flags, "prerequisite");
+  if (
+    to === "hold"
+      ? prerequisite !== "credential" && prerequisite !== "external_account"
+      : prerequisite !== undefined
+  )
+    throw new CliError(
+      `hold 须用 --prerequisite credential 或 external_account；follow-up 不填前置\n${usage}`,
+      EXIT.usage,
+    );
+  const reason = required(parsed.flags, "reason");
+  const store = await openPlacementStore(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    runCommand(store, {
+      operation: "修改待办的合并前置",
+      target: humanActionId,
+      project_id,
+      ...resolveCommandIdentity(io, project_id, store),
+      reduce: (state, actor, ports) =>
+        setHumanActionMergeBlocking(
+          state,
+          actor,
+          {
+            human_action_id: humanActionId,
+            blocks_merge: to === "hold",
+            ...(prerequisite === "credential" ||
+            prerequisite === "external_account"
+              ? { prerequisite }
+              : {}),
+            reason,
+          },
+          ports,
+        ),
+    });
+    io.stdout(
+      to === "hold"
+        ? `已把 ${humanActionId} 改为挡合并（${prerequisite === "credential" ? "凭据" : "外部账号"}前置）`
+        : `已把 ${humanActionId} 改为合并后跟进`,
     );
     return EXIT.ok;
   } finally {
