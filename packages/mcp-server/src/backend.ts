@@ -264,6 +264,22 @@ export interface McpBackend {
     readonly card_id?: CardId;
     readonly since_seq?: number;
   }): McpUpdates;
+  /**
+   * C-785: a stream's events of one type from the table, for types the
+   * Store's in-memory event log leaves out (`NON_RESIDENT_EVENT_TYPES`).
+   * Backends without it keep every event in `events.listAfter`.
+   */
+  streamEventsOfType?(
+    project_id: ProjectId,
+    card_id: CardId | undefined,
+    type: string,
+  ): readonly Event[];
+  /** C-785: one event by stream and seq from the table, of any type. */
+  eventAt?(
+    project_id: ProjectId,
+    card_id: CardId | undefined,
+    seq: number,
+  ): Event | undefined;
   ackEvents(params: {
     readonly project_id: ProjectId;
     readonly assignment_id: AssignmentId;

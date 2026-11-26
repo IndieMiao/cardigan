@@ -163,7 +163,7 @@ function readOfficeDigest(
   now: string,
 ): OfficeDigest | undefined {
   const read = store.uow.read((tx) =>
-    computeOfficeDigest(tx, project_id, assignment_id, now),
+    computeOfficeDigest(tx, project_id, assignment_id, now, store),
   );
   if (!read) return undefined;
   const cursor = (stream: string, at: string) => ({
@@ -191,6 +191,7 @@ function computeOfficeDigest(
   project_id: ProjectId,
   assignment_id: AssignmentId,
   now: string,
+  store?: Pick<McpBackend, "eventAt">,
 ): DigestRead | undefined {
   const office = tx.assignments.get(project_id, assignment_id);
   const streams = tx.events.listStreams?.(project_id);
@@ -207,7 +208,9 @@ function computeOfficeDigest(
     stored === undefined
       ? officeDigestInitialSince(
           office,
-          projectCursor > 0 ? (streams.get("") ?? []) : [],
+          projectCursor > 0
+            ? ackedProjectEvent(tx, project_id, projectCursor, store)
+            : [],
           projectCursor,
         )
       : new Date(stored).toISOString();
@@ -234,4 +237,19 @@ function computeOfficeDigest(
       cards: tx.cards.list(project_id),
     }),
   };
+}
+
+/**
+ * C-785: the acknowledged project-stream event. It is often a read-audit row,
+ * which the in-memory log does not keep, so look it up in the table first.
+ */
+function ackedProjectEvent(
+  tx: McpReadContext,
+  project_id: ProjectId,
+  seq: number,
+  store: Pick<McpBackend, "eventAt"> | undefined,
+): readonly Event[] {
+  const acked = store?.eventAt?.(project_id, undefined, seq);
+  if (acked) return [acked];
+  return tx.events.listStreams?.(project_id)?.get("") ?? [];
 }

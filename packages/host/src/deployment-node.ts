@@ -73,6 +73,7 @@ import {
 } from "./long-operations.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
+import { type ServerHeap, serverHeap } from "./server-heap.js";
 
 const exec = promisify(execFile);
 const PROJECT = "cardigan";
@@ -133,6 +134,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private readonly central: string;
   private readonly ports: readonly number[];
   private readonly buildEnv: NodeJS.ProcessEnv;
+  /** C-785: one heap limit for both server roles, fixed for this supervisor. */
+  readonly serverHeap: ServerHeap;
   private supervisorSha: string | null | undefined;
   private checkedSupervisorMain: string | undefined;
   private failedSupervisorMain?: string;
@@ -181,6 +184,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       PATH: options.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
       LANG: "C.UTF-8",
     };
+    this.serverHeap = serverHeap(options.env);
+    if (this.serverHeap.warning)
+      process.stderr.write(`${this.serverHeap.warning}\n`);
   }
 
   /** Keep this lock for the whole supervisor lifetime, including idle ticks. */
@@ -1081,6 +1087,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         cwd: build.release,
         env: {
           ...this.options.env,
+          // C-785: identical for Web and background (and their workers).
+          NODE_OPTIONS: this.serverHeap.node_options,
           CARDIGAN_DATA_DIR: this.options.dataDir,
           ...(this.state.dual ? { CARDIGAN_SUPERVISED: "1" } : {}),
         },

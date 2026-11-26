@@ -427,3 +427,80 @@ test("C-671 slim keeps closed cards' other rows dormant and reads them back unch
     }
   });
 });
+
+test("C-785: non-resident types stay in the table but never reach the in-memory log", () => {
+  withTempStore((store) => {
+    const read = (id: string, seq: number): Event => ({
+      ...audit(id, seq),
+      type: "cross_card_read",
+    });
+    store.createProject({ id: P });
+    store.uow.run((tx) => {
+      tx.cards.put(P, card());
+      tx.events.append(P, audit("p-1", 1));
+      tx.events.append(P, read("r-2", 2));
+      tx.events.append(P, read("r-3", 3));
+      tx.events.append(P, audit("p-4", 4));
+      tx.events.append(P, audit("c-1", 1, cardId));
+    });
+    const inLog = () =>
+      store.uow.read((tx) => ({
+        project: tx.events.listAfter(P, undefined, 0).map((e) => e.id),
+        streams: [...(tx.events.listStreams?.(P).get("") ?? [])].map(
+          (e) => e.id,
+        ),
+      }));
+    expect(inLog()).toEqual({
+      project: ["p-1", "p-4"],
+      streams: ["p-1", "p-4"],
+    });
+    // A trailing audit row moves the watermark only; own writes too.
+    store.uow.run((tx) => {
+      tx.events.append(P, read("r-5", 5));
+      expect(tx.events.listAfter(P, undefined, 0).map((e) => e.id)).toEqual([
+        "p-1",
+        "p-4",
+      ]);
+    });
+    expect(inLog().project).toEqual(["p-1", "p-4"]);
+    // SQL readers see every row.
+    expect(store.getUpdates({ project_id: P }).events.map((e) => e.id)).toEqual(
+      ["p-1", "r-2", "r-3", "p-4", "r-5"],
+    );
+    expect(
+      store
+        .streamEventsOfType(P, undefined, "cross_card_read")
+        .map((e) => e.id),
+    ).toEqual(["r-2", "r-3", "r-5"]);
+    expect(store.eventAt(P, undefined, 3)?.id).toBe("r-3");
+    expect(store.eventAt(P, cardId, 1)?.id).toBe("c-1");
+    expect(store.eventAt(P, undefined, 9)).toBeUndefined();
+  });
+});
+
+test("C-785: warming in slices skips non-resident rows without stalling", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: P });
+    store.uow.run((tx) => {
+      tx.cards.put(P, card());
+      for (let seq = 1; seq <= 7; seq++)
+        tx.events.append(P, {
+          ...audit(`p-${seq}`, seq),
+          ...(seq % 3 ? { type: "cross_card_read" } : {}),
+        });
+    });
+    const cold = Store.open({ dataDir });
+    try {
+      let rounds = 0;
+      while (!cold.warmCommandEvents(P, 1)) rounds++;
+      expect(rounds).toBeLessThan(7);
+      expect(
+        cold.uow.read((tx) =>
+          tx.events.listAfter(P, undefined, 0).map((e) => e.id),
+        ),
+      ).toEqual(["p-3", "p-6"]);
+    } finally {
+      cold.close();
+    }
+  });
+});
