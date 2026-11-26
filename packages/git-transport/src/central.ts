@@ -28,6 +28,7 @@ import {
   type GitCentralPort,
   type GitCommitTreeInput,
   type GitFileDiff,
+  type GitMergeTreeOptions,
   type GitPreparedBackup,
   type GitPublicationGuard,
   type GitRef,
@@ -1476,23 +1477,51 @@ export class CentralGitTransport
       if (!authorized) return false as const;
     });
   }
-  async mergeTree(repository: string, ours: string, theirs: string) {
+  async mergeTree(
+    repository: string,
+    ours: string,
+    theirs: string,
+    options: GitMergeTreeOptions = {},
+  ) {
     if (![ours, theirs].every((sha) => fullSha.test(sha)))
       throw new Error("Invalid full commit SHA");
-    const result = await this.command(repository, [
-      "merge-tree",
-      "--write-tree",
-      "-z",
-      ours,
-      theirs,
-    ]);
-    // 1 means conflicts; anything else non-zero is a real failure.
-    if (result.code !== 0 && result.code !== 1)
-      throw new Error(result.stderr || "merge-tree failed");
-    const merge = this.parseMergeTree(result.stdout);
-    if ((result.code === 1) !== merge.conflicts.length > 0)
-      throw new Error("merge-tree conflict report is inconsistent");
-    return merge;
+    // C-782: a scratch merge writes its objects to a private directory that is
+    // removed afterwards; the repository's own objects are only read.
+    const scratch = options.scratch
+      ? await mkdtemp(join(this.root, ".trial-merge-"))
+      : undefined;
+    try {
+      if (scratch) await mkdir(join(scratch, "objects"), { mode: 0o700 });
+      const result = await this.command(
+        repository,
+        ["merge-tree", "--write-tree", "-z", ours, theirs],
+        {
+          // Command-line scope overrides any repository conflict style.
+          ...(options.conflictStyle === "diff3"
+            ? {
+                GIT_CONFIG_COUNT: "1",
+                GIT_CONFIG_KEY_0: "merge.conflictStyle",
+                GIT_CONFIG_VALUE_0: "diff3",
+              }
+            : {}),
+          ...(scratch
+            ? {
+                GIT_OBJECT_DIRECTORY: join(scratch, "objects"),
+                GIT_ALTERNATE_OBJECT_DIRECTORIES: join(repository, "objects"),
+              }
+            : {}),
+        },
+      );
+      // 1 means conflicts; anything else non-zero is a real failure.
+      if (result.code !== 0 && result.code !== 1)
+        throw new Error(result.stderr || "merge-tree failed");
+      const merge = this.parseMergeTree(result.stdout);
+      if ((result.code === 1) !== merge.conflicts.length > 0)
+        throw new Error("merge-tree conflict report is inconsistent");
+      return merge;
+    } finally {
+      if (scratch) await rm(scratch, { recursive: true, force: true });
+    }
   }
   async resolvePlanConflict(
     repository: string,

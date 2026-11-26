@@ -75,6 +75,7 @@ import {
   type ServerConfig,
   type ServerEnv,
 } from "./config.js";
+import { startDbOptimizeLoop } from "./db-optimize.js";
 import { DiagnosticsReader } from "./diagnostics-reader.js";
 import { type GitBinding, ServerGit } from "./git.js";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
@@ -934,6 +935,7 @@ async function assembleServer(
   let extLoop: TimerLoop | undefined;
   let probeLoop: TimerLoop | undefined;
   let macosLoop: TimerLoop | undefined;
+  let dbOptimizeLoop: TimerLoop | undefined;
   let extSender: LiveExtMessageSender | undefined;
   if (options.dispatcher !== undefined && options.role !== "web") {
     try {
@@ -954,6 +956,11 @@ async function assembleServer(
         slowTickMs: 120000,
         tick: () => macosChecks.tick(),
         onError: () => warnLine("macOS 检查执行或清理未完成，将重试"),
+      });
+      dbOptimizeLoop = startDbOptimizeLoop({
+        store,
+        startup: startup.promise,
+        onError: () => warnLine("数据库统计信息维护未完成，将重试"),
       });
       const mergeIntervalMs =
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
@@ -1188,6 +1195,7 @@ async function assembleServer(
         extLoop?.stop(),
         probeLoop?.stop(),
         macosLoop?.stop(),
+        dbOptimizeLoop?.stop(),
         offsiteLoop?.stop(),
         plane?.stop(),
       ]);
@@ -1255,6 +1263,7 @@ async function assembleServer(
       extLoop?.stop(),
       probeLoop?.stop(),
       macosLoop?.stop(),
+      dbOptimizeLoop?.stop(),
       offsiteLoop?.stop(),
       plane?.stop(),
     ]);
@@ -1316,6 +1325,7 @@ async function assembleServer(
         extLoop?.stop(),
         probeLoop?.stop(),
         macosLoop?.stop(),
+        dbOptimizeLoop?.stop(),
         (offsiteSync?.stop(), offsiteLoop?.stop()),
         // C-601: in-flight signing helpers end inside the shutdown grace (a
         // margin before the forced exit), never as orphans of this process.

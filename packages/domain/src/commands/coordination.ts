@@ -131,6 +131,7 @@ import {
 } from "./review-strategy.js";
 import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import { suggestSourceMergeUnrelated } from "./source-merge.js";
+import { registerStandbyWait, standbyStatus } from "./standby-waits.js";
 import { storyDiscussionChange } from "./story-discussion.js";
 import {
   suggestionProgressEvents,
@@ -543,6 +544,35 @@ export function reportBlocker(
         ? { kind: "baseline_updated" as const, target_id: registeredBase }
         : undefined);
     if (condition) validateResumeCondition(d, item, condition);
+    if (standbyStatus(item)) {
+      // C-789: a delivered/accepted producer waits without changing state.
+      const disabled = condition ? autoResumeUsed(d, item, condition) : false;
+      registerStandbyWait(d, item, {
+        reason: p.reason,
+        ...(condition ? { condition } : {}),
+        ...(d.assignment
+          ? {
+              run: d
+                .list("runs")
+                .find(
+                  (r) =>
+                    r.assignment_id === d.assignment?.id &&
+                    r.status === "running",
+                ),
+            }
+          : {}),
+        disabled,
+      });
+      return {
+        work_item_id: item.id,
+        guidance:
+          condition && !disabled
+            ? "已登记等待，工作项状态不变。请结束当前 Run；条件满足后系统自动唤起一次（资源名额会在派发时占用）。"
+            : p.needs === "human"
+              ? "已登记等待并交 PM 处理（已交付或已验收的工作项不直接交人；需要人操作请用 request_human_action 或 request_decision），工作项状态不变。请结束当前 Run。"
+              : "已登记等待并交 PM 处理，工作项状态不变。请结束当前 Run。",
+      };
+    }
     const latestConflict = latestPrecheckConflict(
       d.state.events,
       item,

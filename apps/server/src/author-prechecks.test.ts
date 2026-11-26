@@ -1644,6 +1644,144 @@ test("a verified author precheck still records its six passing steps when local 
     await gate.idle();
   }
 });
+test("C-783: a newer HEAD cancels the running SSH attempt at once, and the new attempt takes its slot", async () => {
+  const x = await setup();
+  await x.queue();
+  const signals: AbortSignal[] = [];
+  x.run.mockImplementation(async (input) => {
+    input.onReady?.();
+    if (signals.push(input.signal!) === 1)
+      await new Promise<void>((resolve) =>
+        input.signal?.addEventListener("abort", () => resolve(), {
+          once: true,
+        }),
+      );
+    return {
+      status: input.signal?.aborted ? "interrupted" : "passed",
+      checks: input.signal?.aborted
+        ? []
+        : [{ name: "test", status: "passed" as const, exit_code: 0 }],
+      cleanup_errors: [],
+    } as never;
+  });
+  const host = new AuthorPrechecks(x.options);
+  const first = await host.schedule([x.f.project_id]);
+  await vi.waitFor(() => expect(x.check().status).toBe("running"));
+  const old = x.check();
+  // Same HEAD: refused, the running attempt keeps its execution.
+  await expect(x.queue()).rejects.toThrow();
+  await (await host.schedule([x.f.project_id])).done;
+  expect(signals[0]?.aborted).toBe(false);
+  x.setHead("e".repeat(40));
+  await x.queue();
+  const replaced = prechecks(x.f.state().events).find(
+    (c) => c.attempt_id === old.attempt_id,
+  );
+  expect(replaced).toMatchObject({
+    status: "interrupted",
+    superseded_by: x.check().attempt_id,
+  });
+  const next = await host.schedule([x.f.project_id]);
+  await first.done;
+  expect(signals[0]?.aborted).toBe(true);
+  await next.done;
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({ head_sha: "e".repeat(40) });
+  await vi.waitFor(() => expect(x.check().status).toBe("passed"));
+  expect(x.run).toHaveBeenCalledTimes(2);
+  // The replaced attempt never republishes a result over its supersession.
+  expect(
+    prechecks(x.f.state().events).find((c) => c.attempt_id === old.attempt_id),
+  ).toEqual(replaced);
+  expect(
+    Number(
+      x.f.store.database
+        .prepare("SELECT COUNT(*) AS n FROM merge_check_capacity")
+        .get()?.n ?? 0,
+    ),
+  ).toBe(0);
+  expect(x.errors).toEqual([]);
+});
+test("C-783: a newer HEAD cancels the bound GitHub run; the new attempt waits for its confirmed end, leaving no orphan run", async () => {
+  const { x, remote, dispatched, options, client } =
+    await setupGithubPrechecks(false);
+  const cancelled = new Set<number>();
+  client.cancel.mockImplementation(async (id: number) => {
+    cancelled.add(id);
+  });
+  const view = <T extends { id: number }>(r: T) =>
+    cancelled.has(r.id)
+      ? { ...r, status: "completed", conclusion: "cancelled" }
+      : r;
+  const run = client.run.getMockImplementation()!;
+  client.run.mockImplementation(async (id: number) => view(await run(id)));
+  const poll = client.pollRuns.getMockImplementation()!;
+  client.pollRuns.mockImplementation(async () => {
+    const page = await poll();
+    return { ...page, runs: page.runs.map(view) };
+  });
+  const host = new MergeChecks(options);
+  const first = await host.schedule([x.f.project_id]);
+  await vi.waitFor(() => expect(x.check().status).toBe("running"));
+  const old = x.check();
+  expect(old.external_run).toMatchObject({ run_id: 123 });
+  remote.started = true;
+  x.setHead("e".repeat(40));
+  await x.queue();
+  const replacement = x.check();
+  expect(replacement).toMatchObject({
+    head_sha: "e".repeat(40),
+    status: "queued",
+  });
+  for (let i = 0; i < 20 && !cancelled.has(123); i++) {
+    x.advance();
+    await (await host.schedule([x.f.project_id])).done;
+  }
+  expect(client.cancel).toHaveBeenCalledWith(123, expect.anything());
+  // The old supervision ends on GitHub's confirmed cancellation, not at completion.
+  const settled = () =>
+    !new GithubDispatchJournal(x.f.store)
+      .unfinished()
+      .some((i) => i.attempt === old.attempt_id);
+  for (let i = 0; i < 20 && !settled(); i++) {
+    x.advance();
+    await (await host.schedule([x.f.project_id])).done;
+  }
+  expect(settled()).toBe(true);
+  await first.done;
+  expect(dispatched.has(125)).toBe(false);
+  // The replacement waits for the cancelled run's confirmed end, then runs.
+  let second = await host.schedule([x.f.project_id]);
+  await vi.waitFor(async () => {
+    if (x.check().status === "queued")
+      second = await host.schedule([x.f.project_id]);
+    expect(x.check().status).toBe("running");
+  });
+  expect(dispatched.has(125)).toBe(true);
+  expect(
+    new GithubDispatchJournal(x.f.store).unfinished().map((i) => i.attempt),
+  ).toEqual([replacement.attempt_id]);
+  expect(
+    prechecks(x.f.state().events).find((c) => c.attempt_id === old.attempt_id),
+  ).toMatchObject({
+    status: "interrupted",
+    superseded_by: replacement.attempt_id,
+  });
+  remote.complete = true;
+  x.advance();
+  await host.schedule([x.f.project_id]);
+  await second.done;
+  await host.idle();
+  expect(x.check()).toMatchObject({
+    attempt_id: replacement.attempt_id,
+    status: "passed",
+    external_run: { run_id: 125 },
+  });
+  expect(new GithubDispatchJournal(x.f.store).unfinished()).toEqual([]);
+  expect(client.cancel).not.toHaveBeenCalledWith(125, expect.anything());
+  expect(x.errors).toEqual([]);
+  host.stop();
+});
 
 /**
  * C-773: bind a GitHub author precheck to run 123 in one controller, stop it

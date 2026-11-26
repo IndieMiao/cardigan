@@ -10,6 +10,43 @@ import {
   type DeploymentRecord,
 } from "@cardigan/domain";
 
+/**
+ * C-787: a switch whose old server is stopped (and database backed up) and
+ * whose start is handed to the restarted supervisor, so a supervisor upgrade
+ * and a deployment share one stop/start.
+ */
+export interface DeploymentHandoff {
+  /** The build to restore when `build` does not become ready. */
+  readonly from: DeploymentBuild;
+  readonly build: DeploymentBuild;
+  /** The durable stop record of the attempt (with its backup file, if any). */
+  readonly record: DeploymentRecord;
+  /** Epoch ms when the old server was stopped; downtime counts from here. */
+  readonly stopped_at: number;
+}
+
+/**
+ * C-787, optional and host-only: the supervisor self-upgrade joins the
+ * deployment of the same main. Absent methods keep the separate restarts.
+ */
+export interface SupervisorJoinDriver {
+  /**
+   * "prepare": the upgrade to `target` is pending and its new supervisor is
+   * being prepared; deploy after the next upgrade step. "join": prepared;
+   * hand the start of `target` to the restarted supervisor.
+   */
+  supervisorJoin?(target: string): Promise<"prepare" | "join" | undefined>;
+  /** Restart the supervisor with the server stopped; true when the restart helper took over. */
+  handOff?(handoff: DeploymentHandoff): Promise<boolean>;
+  /**
+   * The switch the previous supervisor handed over, read once after startup,
+   * with the deployment capacity startup kept for it.
+   */
+  takeHandoff?():
+    | { handoff: DeploymentHandoff; release(): Promise<void> }
+    | undefined;
+}
+
 /** Fatal to the supervisor: its host service manager must recover the server. */
 export class DeploymentServerUnavailable extends Error {
   constructor() {
@@ -66,7 +103,17 @@ export class DeploymentController {
   private drain: { key: string; since: number } | undefined;
   /** The start of new long operations is closed until this attempt ends. */
   private fenced = false;
-  constructor(private readonly driver: DeploymentDriver) {}
+  /**
+   * C-787: a switch handed to the restarted supervisor, with the capacity it
+   * keeps until then. Resumed here when the restart did not come.
+   */
+  private handedOff:
+    | { handoff: DeploymentHandoff; release(): Promise<void> }
+    | undefined;
+  private handoffChecked = false;
+  constructor(
+    private readonly driver: DeploymentDriver & SupervisorJoinDriver,
+  ) {}
 
   /** C-609: deployments within the window wait and then take the latest main. */
   private batched(): number | undefined {
@@ -208,7 +255,17 @@ export class DeploymentController {
     this.busy = true;
     let waitingForCapacity = false;
     let unlock: (() => Promise<void>) | undefined;
+    let handedOff = false;
     try {
+      if (!this.handoffChecked) {
+        this.handoffChecked = true;
+        this.handedOff = d.takeHandoff?.();
+      }
+      // C-787: the server is stopped; finish this switch before anything else.
+      if (this.handedOff) {
+        await this.resume(this.handedOff);
+        return;
+      }
       try {
         await d.checkServer();
       } catch {
@@ -282,6 +339,16 @@ export class DeploymentController {
         });
         return;
       }
+      // C-787: a pending supervisor upgrade to this main joins its stop/start.
+      // Its preparation is one upgrade step (bounded); pins never join.
+      let join: "prepare" | "join" | undefined;
+      if (!selection.control_event_id)
+        try {
+          join = await d.supervisorJoin?.(target);
+        } catch {
+          join = undefined;
+        }
+      if (join === "prepare") return;
       // Keyed by the running build: a main that keeps moving cannot extend it.
       const drainKey = current.sha;
       const busy = await this.operations();
@@ -357,6 +424,34 @@ export class DeploymentController {
         await d.stop();
         oldStopped = true;
         if (migrations) record = { ...record, backup_file: await d.backup() };
+        if (join === "join" && d.handOff) {
+          const handoff: DeploymentHandoff = {
+            from: current,
+            build: result.build,
+            record,
+            stopped_at: stoppedAt,
+          };
+          let accepted = false;
+          try {
+            accepted = await d.handOff(handoff);
+          } catch {
+            accepted = false;
+          }
+          if (accepted) {
+            // Capacity and the operation fence stay held until this
+            // supervisor is replaced, or until resume() below.
+            const held = unlock;
+            this.handedOff = {
+              handoff,
+              release: async () => {
+                await held?.();
+              },
+            };
+            handedOff = true;
+            return;
+          }
+          // Not handed over: this supervisor starts the new build itself.
+        }
         stage = "start";
         await d.start(result.build);
         stage = "ready";
@@ -373,92 +468,15 @@ export class DeploymentController {
             : "中心 main 已部署，ready 和两个端口核对通过",
         };
       } catch (error) {
-        const serverStage = stage === "start" || stage === "ready";
-        const code =
-          error instanceof Error &&
-          [
-            "non_fast_forward",
-            "build_failed",
-            "config_invalid",
-            "ready_failed",
-          ].includes(error.message)
-            ? error.message
-            : "host_operation_failed";
-        // C-650: name a recognised cause (e.g. a locked database), read
-        // before the rollback starts a new log.
-        let cause: string | undefined;
-        if (serverStage)
-          try {
-            cause = d.serverFailureCause?.();
-          } catch {
-            cause = undefined;
-          }
-        const reason = cause ? `${code}（${cause}）` : code;
-        record = {
-          ...record,
-          status: "failed",
-          summary: reason,
-          failure_stage: stage,
-          ...(stage === "start" || stage === "ready"
-            ? { log_tail: d.serverDiagnostics(stage) }
-            : {}),
-          ...(stage === "config" && trial
-            ? {
-                summary: trial.fingerprint
-                  ? `${reason}：新构建试加载主机配置未通过，未停旧服务、未切换；修正配置后自动重试`
-                  : `${reason}：新构建试加载主机配置未能完成，未停旧服务、未切换；中心 main 更新后重试`,
-                log_tail: configLog(trial.errors),
-              }
-            : {}),
-        };
-        if (oldStopped) {
-          try {
-            await d.stop();
-            await d.start(current);
-            const ready = await d.ready();
-            if (ready) await d.promote(current);
-            record = {
-              ...record,
-              status: ready ? "rolled_back" : "failed",
-              ready,
-              summary: ready
-                ? `${reason}；已恢复上一构建`
-                : `${reason}；上一构建未就绪，需主机处理`,
-            };
-          } catch {
-            record = {
-              ...record,
-              summary: `${reason}；回滚未确认，需主机处理`,
-            };
-          }
-        }
-        const max = d.readyRetryMax;
-        if (serverStage && max !== undefined && d.readyRetryState) {
-          // C-650: durable, bounded retries; only a restored server is retried.
-          const failures = (priorRetry?.failures ?? 0) + 1;
-          const interval = d.readyRetryIntervalMs ?? 0;
-          const scheduled = record.status === "rolled_back" && failures <= max;
-          const ready_retry: DeploymentReadyRetry = scheduled
-            ? {
-                failures,
-                max,
-                next_at: new Date(d.now() + interval).toISOString(),
-              }
-            : { failures, max };
-          this.retries.set(failureKey, ready_retry);
-          if (!scheduled) this.failed.add(failureKey);
-          record = {
-            ...record,
-            ready_retry,
-            summary: scheduled
-              ? `${record.summary}；不早于 ${Math.ceil(interval / 1000)} 秒后自动重试（第 ${failures}/${max} 次）`
-              : max > 0 && failures > max
-                ? `${record.summary}；已自动重试 ${max} 次仍失败，需主机处理`
-                : record.summary,
-          };
-        } else if (stage === "config")
-          this.configRejected.set(failureKey, trial?.fingerprint ?? null);
-        else this.failed.add(failureKey);
+        record = await this.failedSwitch(error, {
+          record,
+          stage,
+          current,
+          oldStopped,
+          failureKey,
+          priorRetry,
+          trial,
+        });
         record = {
           ...record,
           downtime_ms: stoppedAt === undefined ? 0 : d.now() - stoppedAt,
@@ -467,24 +485,199 @@ export class DeploymentController {
       if (stoppedAt !== undefined) this.lastRestartAt = d.now();
       this.drain = undefined;
       await d.record(record);
-      if (record.status === "deployed") {
-        try {
-          await d.refreshRoles();
-        } catch {
-          await d.record({
-            ...record,
-            post_deploy_failed: true,
-            summary: "代码已部署，角色升级或 PM Ops 启动未完成，需主机核对",
-          });
+      if (record.status === "deployed") await this.afterDeploy(record);
+    } finally {
+      try {
+        if (!handedOff) {
+          await this.unfence();
+          await unlock?.();
+          if (!waitingForCapacity) await d.releaseCapacityWait();
         }
+      } finally {
+        this.busy = false;
       }
+    }
+  }
+
+  /** Rollback and C-650 retry bookkeeping of one failed attempt. */
+  private async failedSwitch(
+    error: unknown,
+    attempt: {
+      record: DeploymentRecord;
+      stage: NonNullable<DeploymentRecord["failure_stage"]>;
+      current: DeploymentBuild;
+      oldStopped: boolean;
+      failureKey: string;
+      priorRetry: DeploymentReadyRetry | undefined;
+      trial?: DeploymentConfigTrial | undefined;
+    },
+  ): Promise<DeploymentRecord> {
+    const d = this.driver;
+    const { stage, current, oldStopped, failureKey, priorRetry, trial } =
+      attempt;
+    let record = attempt.record;
+    const serverStage = stage === "start" || stage === "ready";
+    const code =
+      error instanceof Error &&
+      [
+        "non_fast_forward",
+        "build_failed",
+        "config_invalid",
+        "ready_failed",
+      ].includes(error.message)
+        ? error.message
+        : "host_operation_failed";
+    // C-650: name a recognised cause (e.g. a locked database), read
+    // before the rollback starts a new log.
+    let cause: string | undefined;
+    if (serverStage)
+      try {
+        cause = d.serverFailureCause?.();
+      } catch {
+        cause = undefined;
+      }
+    const reason = cause ? `${code}（${cause}）` : code;
+    record = {
+      ...record,
+      status: "failed",
+      summary: reason,
+      failure_stage: stage,
+      ...(stage === "start" || stage === "ready"
+        ? { log_tail: d.serverDiagnostics(stage) }
+        : {}),
+      ...(stage === "config" && trial
+        ? {
+            summary: trial.fingerprint
+              ? `${reason}：新构建试加载主机配置未通过，未停旧服务、未切换；修正配置后自动重试`
+              : `${reason}：新构建试加载主机配置未能完成，未停旧服务、未切换；中心 main 更新后重试`,
+            log_tail: configLog(trial.errors),
+          }
+        : {}),
+    };
+    if (oldStopped) {
+      try {
+        await d.stop();
+        await d.start(current);
+        const ready = await d.ready();
+        if (ready) await d.promote(current);
+        record = {
+          ...record,
+          status: ready ? "rolled_back" : "failed",
+          ready,
+          summary: ready
+            ? `${reason}；已恢复上一构建`
+            : `${reason}；上一构建未就绪，需主机处理`,
+        };
+      } catch {
+        record = {
+          ...record,
+          summary: `${reason}；回滚未确认，需主机处理`,
+        };
+      }
+    }
+    const max = d.readyRetryMax;
+    if (serverStage && max !== undefined && d.readyRetryState) {
+      // C-650: durable, bounded retries; only a restored server is retried.
+      const failures = (priorRetry?.failures ?? 0) + 1;
+      const interval = d.readyRetryIntervalMs ?? 0;
+      const scheduled = record.status === "rolled_back" && failures <= max;
+      const ready_retry: DeploymentReadyRetry = scheduled
+        ? {
+            failures,
+            max,
+            next_at: new Date(d.now() + interval).toISOString(),
+          }
+        : { failures, max };
+      this.retries.set(failureKey, ready_retry);
+      if (!scheduled) this.failed.add(failureKey);
+      record = {
+        ...record,
+        ready_retry,
+        summary: scheduled
+          ? `${record.summary}；不早于 ${Math.ceil(interval / 1000)} 秒后自动重试（第 ${failures}/${max} 次）`
+          : max > 0 && failures > max
+            ? `${record.summary}；已自动重试 ${max} 次仍失败，需主机处理`
+            : record.summary,
+      };
+    } else if (stage === "config")
+      this.configRejected.set(failureKey, trial?.fingerprint ?? null);
+    else this.failed.add(failureKey);
+    return record;
+  }
+
+  private async afterDeploy(record: DeploymentRecord) {
+    const d = this.driver;
+    try {
+      await d.refreshRoles();
+    } catch {
+      await d.record({
+        ...record,
+        post_deploy_failed: true,
+        summary: "代码已部署，角色升级或 PM Ops 启动未完成，需主机核对",
+      });
+    }
+  }
+
+  /**
+   * C-787: start the handed-over build, as the rest of a deployment would:
+   * on success promote it; otherwise restore the previous build, with the
+   * same C-650 retry bookkeeping. Runs in the new supervisor right after its
+   * startup, or in the old one when its restart never came.
+   */
+  private async resume(held: {
+    handoff: DeploymentHandoff;
+    release(): Promise<void>;
+  }) {
+    const d = this.driver;
+    const { handoff } = held;
+    this.handedOff = undefined;
+    const target = handoff.build.sha;
+    const failureKey = `${target}:main`;
+    let record: DeploymentRecord = handoff.record;
+    let stage: NonNullable<DeploymentRecord["failure_stage"]> = "start";
+    try {
+      // An unreadable retry state must not keep the server stopped.
+      const priorRetry = await this.readyRetry(
+        failureKey,
+        target,
+        undefined,
+      ).catch(() => undefined);
+      try {
+        await d.start(handoff.build);
+        stage = "ready";
+        if (!(await d.ready())) throw new Error("ready_failed");
+        stage = "host";
+        await d.promote(handoff.build);
+        record = {
+          ...record,
+          status: "deployed",
+          ready: true,
+          downtime_ms: d.now() - handoff.stopped_at,
+          summary:
+            "中心 main 已部署（与监督器升级合并为一次停起），ready 和两个端口核对通过",
+        };
+      } catch (error) {
+        record = await this.failedSwitch(error, {
+          record,
+          stage,
+          current: handoff.from,
+          oldStopped: true,
+          failureKey,
+          priorRetry,
+        });
+        record = { ...record, downtime_ms: d.now() - handoff.stopped_at };
+      }
+      this.lastRestartAt = d.now();
+      this.drain = undefined;
+      await d.record(record);
+      if (record.status === "deployed") await this.afterDeploy(record);
     } finally {
       try {
         await this.unfence();
-        await unlock?.();
-        if (!waitingForCapacity) await d.releaseCapacityWait();
-      } finally {
-        this.busy = false;
+        await held.release();
+        await d.releaseCapacityWait();
+      } catch {
+        /* Rows of this incarnation are reclaimed once it exits. */
       }
     }
   }

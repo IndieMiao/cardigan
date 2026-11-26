@@ -333,6 +333,8 @@ export interface Precheck {
   readonly checks?: MergeCheckView["checks"];
   readonly summary?: string;
   readonly log_ref?: string;
+  /** C-783: set only by request_check when a newer HEAD replaced this attempt. */
+  readonly superseded_by?: string;
 }
 export type PrecheckView = Omit<Precheck, "branch" | "machine_id">;
 
@@ -538,7 +540,11 @@ interface WorkItemFields {
     readonly reported_at: Timestamp;
     readonly resume_when?: import("./work-wait.js").ResumeCondition;
     readonly auto_resume_disabled?: boolean;
+    /** C-789: registered by the system for a Run that ended blocked without one. */
+    readonly auto_registered?: true;
   };
+  /** C-789: a wait on a delivered/accepted producer; never changes `status`. */
+  readonly standby_wait?: import("./work-wait.js").StandbyWait;
 }
 export type WorkItem = WorkItemFields &
   (
