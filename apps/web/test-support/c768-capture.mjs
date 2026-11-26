@@ -71,8 +71,12 @@ try {
         await send("Page.navigate", {
           url: `${server.resolvedUrls.local[0]}__c768?scenario=${scenario}#/p/p-1/needs-you`,
         });
+        await until("!!document.querySelector('[aria-label=\"处理 Q-337\"]')");
+        await evaluate(
+          "document.querySelector('[aria-label=\"处理 Q-337\"]').click()",
+        );
         await until(
-          "!!document.querySelector('[aria-label=\"合并前置条件\"]')",
+          "!!document.querySelector('[aria-label=\"合并前置条件\"]')?.getClientRects().length",
         );
         await evaluate("document.fonts.ready");
         await evaluate(
@@ -82,11 +86,13 @@ try {
           const buttons = [...document.querySelectorAll('button')];
           const find = text => buttons.find(b => b.textContent.trim() === text);
           const confirm = find('确认合并');
+          const visible = e => !!e && e.getClientRects().length > 0;
           const status = document.querySelector('[aria-label="合并前置条件"]');
           const optional = status.querySelector('[aria-label="可选、不挡合并"]');
           return {
             clientWidth: document.documentElement.clientWidth,
             scrollWidth: document.documentElement.scrollWidth,
+            confirmVisible: visible(confirm),
             confirmDisabled: confirm.disabled,
             override: !!find('仍要合并'),
             statusText: [...status.querySelectorAll('p')].map(e => e.textContent),
@@ -102,6 +108,7 @@ try {
           metric.clientWidth,
           `${name}: overflow`,
         );
+        assert.equal(metric.confirmVisible, true, `${name}: confirm visible`);
         if (scenario === "optional-pending") {
           assert.equal(metric.confirmDisabled, false, name);
           assert.equal(metric.override, false, name);
@@ -111,8 +118,17 @@ try {
           assert.equal(metric.confirmDisabled, true, name);
           assert.equal(metric.override, true, name);
         }
+        const { cssContentSize } = await send("Page.getLayoutMetrics");
         const { data } = await send("Page.captureScreenshot", {
           format: "png",
+          captureBeyondViewport: true,
+          clip: {
+            x: 0,
+            y: 0,
+            width: cssContentSize.width,
+            height: Math.ceil(cssContentSize.height),
+            scale: 1,
+          },
         });
         await writeFile(
           resolve(output, `${name}.png`),
