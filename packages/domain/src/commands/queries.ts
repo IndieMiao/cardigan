@@ -24,15 +24,18 @@ import type {
   Delivery,
   HumanAction,
   Review,
+  Timestamp,
   WorkItem,
 } from "../entities.js";
-import { eventsForDecision } from "../event-index.js";
+import { eventsForDecision, eventsOfType } from "../event-index.js";
 import { cardFlowVersion } from "../flow.js";
+import { isOperatorAction } from "../human-action-executor.js";
 import type { CardId, WorkItemId } from "../ids.js";
 import { effectiveWorkItemRequirements } from "../machine-requirements.js";
 import { mergeBatches } from "../merge-batch.js";
 import { mergeStage } from "../merge-stage.js";
 import { requesterNotificationRecipient } from "../notification.js";
+import { ownerRequiredDeclarations } from "../owner-required.js";
 import type { Clock } from "../ports.js";
 import { prechecks, precheckView } from "../precheck.js";
 import { crossCardRead } from "../preferences.js";
@@ -51,6 +54,7 @@ import {
   latestCardTemplate,
   requiresUiStateAndSave,
 } from "../templates.js";
+import { cardsAwaitingOwnerClose } from "./card-close.js";
 import { dependencyState } from "./card-dependencies.js";
 import {
   type CommandDraft,
@@ -218,13 +222,22 @@ function cardView(
     ...fields,
   };
 }
-export function projectSnapshot(state: CommandState, actor: Actor) {
+export function projectSnapshot(
+  state: CommandState,
+  actor: Actor,
+  /** C-753: end of the owner-required window; defaults to the last event. */
+  now?: Timestamp,
+) {
   return command(state, actor, "project_snapshot", undefined, (d) => {
     d.pm();
     d.projectAccess();
     return {
       project_id: state.project_id,
       merge_batches: mergeBatches(state.events),
+      owner_required_decisions: ownerRequiredDeclarations(
+        state.decisions,
+        now ?? state.events.at(-1)?.created_at,
+      ),
       // C-610 metric: compare counts before and after the deployment time.
       review_convergence: {
         rejection_streak_episodes: rejectionStreakEpisodes(state),
@@ -266,7 +279,12 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
 }
 
 /** Agent reference view; writes and the human project view retain their own gates. */
-export function referenceProjectSnapshot(state: CommandState, actor: Actor) {
+export function referenceProjectSnapshot(
+  state: CommandState,
+  actor: Actor,
+  /** C-753: end of the owner-required window; defaults to the last event. */
+  now?: Timestamp,
+) {
   const assignment =
     actor.kind === "assignment"
       ? state.assignments.find((a) => a.id === actor.assignment_id)
@@ -333,6 +351,10 @@ export function referenceProjectSnapshot(state: CommandState, actor: Actor) {
           ? (priority.get(b.id) ?? 0) - (priority.get(a.id) ?? 0) ||
             (lengths.get(b.id) ?? 0) - (lengths.get(a.id) ?? 0)
           : 0,
+      ),
+      owner_required_decisions: ownerRequiredDeclarations(
+        visibleState.decisions,
+        now ?? state.events.at(-1)?.created_at,
       ),
       // C-610 metric: compare counts before and after the deployment time.
       review_convergence: {
@@ -773,10 +795,12 @@ export function listNeedsYouCounts(
     // Story proposals count with decisions and never against merges.
     const decisionCount = decisionsOnly + data.story_proposals.length;
     const mergeCount = data.decisions.length - decisionsOnly;
+    // C-742: operator actions are listed apart and never count as the owner's.
     const humanActions = data.human_actions.filter(
-      (h) => h.triage !== "host",
+      (h) => h.triage !== "host" && !isOperatorAction(h),
     ).length;
     const attention = data.incidents.length + data.attention.length;
+    const toClose = data.cards_to_close.length;
     const noticeList = notices(state);
     const unread = noticeList.filter((n) => !n.read).length;
     return {
@@ -784,6 +808,7 @@ export function listNeedsYouCounts(
         data.decisions.length +
         data.story_proposals.length +
         humanActions +
+        toClose +
         attention,
       tabs: {
         decisions: { count: decisionCount, attention: decisionCount },
@@ -794,10 +819,14 @@ export function listNeedsYouCounts(
         actions: {
           count:
             data.human_actions.length +
+            toClose +
             attention +
             data.system_rule_attention.length,
           attention:
-            humanActions + attention + data.system_rule_attention.length,
+            humanActions +
+            toClose +
+            attention +
+            data.system_rule_attention.length,
         },
         later: { count: data.later.length, attention: 0 },
         notices: { count: noticeList.length, attention: unread },
@@ -1034,9 +1063,8 @@ function selectNeedsYou<T>(
           )
           .map((a) => {
             const fact = (type: string) =>
-              state.events.findLast(
+              eventsOfType(state.events, type).findLast(
                 (e) =>
-                  e.type === type &&
                   typeof e.payload === "object" &&
                   e.payload !== null &&
                   "assignment_id" in e.payload &&
@@ -1066,6 +1094,8 @@ function selectNeedsYou<T>(
     // C-503: the current, unconfirmed proposal of each open story waits on the
     // human's one-click confirmation; no decision or default stands in for it.
     story_proposals: includes("decisions") ? pendingStoryProposals(d) : [],
+    // C-750: finished human_mark_done cards waiting for the owner to close.
+    cards_to_close: includes("actions") ? cardsAwaitingOwnerClose(d) : [],
     waiting_merge_checks_count: includes("merges") ? humanWaiting.length : 0,
     // C-171: which confirmations the summary counts, so the human can open them.
     waiting_merge_check_items: (includes("merges") ? humanWaiting : []).map(

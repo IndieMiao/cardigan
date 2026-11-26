@@ -1,4 +1,5 @@
 import type { Actor, Event } from "../entities.js";
+import { eventsOfTypes } from "../event-index.js";
 import type { CardId, DecisionId, EventId } from "../ids.js";
 import { PM_MERGE_STALL_KIND } from "../pm-merge-stall-attention.js";
 import {
@@ -8,6 +9,12 @@ import {
   ensure,
 } from "./core.js";
 import { ATTACHED_HUMAN_WAIT_OVERDUE } from "./host-ops-attached-wait.js";
+import {
+  STORY_SUMMARY_ESCALATED,
+  STORY_SUMMARY_HANDED_OFF,
+  storySummaryEscalationOpen,
+  storySummaryHandedOff,
+} from "./story-summary-handoff.js";
 
 /**
  * Needs You "知会" (§7.4): every delegated resolution (PM Ops on project
@@ -46,7 +53,13 @@ function noticeIndex(events: readonly Event[]) {
   const overdue = new Set<string | undefined>();
   const closed = new Set<string | undefined>();
   const ids = new Set<string>();
-  for (const e of events) {
+  // C-671: from the type index, so notices on closed cards count in `slim`.
+  for (const e of eventsOfTypes(events, [
+    "standing_pm_recovery_started",
+    "office_wait_overdue",
+    "office_wait_closed",
+    "notices_read",
+  ])) {
     if (e.actor.kind === "system") {
       if (e.type === "standing_pm_recovery_started")
         recovered.add(field(e, "source_recovery_event_id"));
@@ -86,6 +99,8 @@ const systemNoticeEvents = new Map([
   ["host_disk_space_low", "主机磁盘可用空间不足"],
   // C-656: /tmp or swap over threshold, with the largest users.
   ["host_memory_pressure", "主机 /tmp 或 swap 用量过高"],
+  // C-390: human maintenance window began, timed out, ended or needs recovery.
+  ["host_maintenance_notice", "主机维护"],
   ["launch_reload_failed", "主机启动配置重载失败"],
   ["host_role_upgraded", "默认角色已自动升级"],
   ["host_role_overlay_migrated", "定制角色已迁移为默认包加附加规则"],
@@ -103,7 +118,21 @@ const systemNoticeEvents = new Map([
   ["mcp_session_failed", "会话 MCP 初始化失败"],
   // C-678: a session-ending host action waits for an attached human.
   [ATTACHED_HUMAN_WAIT_OVERDUE, "Agent 终端有人连着，动作在等待断开"],
+  // C-762: a settled story waits on an external Office, then on PM Ops.
+  [STORY_SUMMARY_ESCALATED, "需求总结待提交"],
+  [STORY_SUMMARY_HANDED_OFF, "需求总结已转交 PM Ops"],
 ]);
+/** Every type a notice can come from. */
+const NOTICE_TYPES = [
+  "card_hold_set",
+  "card_hold_released",
+  "human_action_completed",
+  "ext_message_failed",
+  "decision_resolved",
+  "decision_provisionally_resolved",
+  ...noticeOnlyEvents.keys(),
+  ...systemNoticeEvents.keys(),
+];
 /** Newest first; one notice per delegated resolution, even for multi-card decisions. */
 export function notices(state: CommandState): readonly Notice[] {
   const { read, recovered, overdue, closed } = noticeIndex(state.events);
@@ -112,7 +141,8 @@ export function notices(state: CommandState): readonly Notice[] {
   const out: Notice[] = [];
   // seq is per card stream (§6.1); order across cards by time, then by the
   // time-ordered event id, so a newer notice is never pushed out by older ones.
-  const candidates = state.events.filter(
+  // C-671: candidates come from the type index (the sort below fixes the order).
+  const candidates = eventsOfTypes(state.events, NOTICE_TYPES).filter(
     (e) =>
       ["card_hold_set", "card_hold_released"].includes(e.type) ||
       (e.type === "human_action_completed" &&
@@ -174,6 +204,16 @@ export function notices(state: CommandState): readonly Notice[] {
       continue;
     }
     if (e.type === "standing_pm_recovered" && recovered.has(e.id)) continue;
+    // C-762: listed only while the story still waits for its summary.
+    if (
+      (e.type === STORY_SUMMARY_ESCALATED ||
+        e.type === STORY_SUMMARY_HANDED_OFF) &&
+      (!storySummaryEscalationOpen(state, e) ||
+        (e.type === STORY_SUMMARY_ESCALATED &&
+          !!e.card_id &&
+          storySummaryHandedOff(state.events, e.card_id)))
+    )
+      continue;
     if (e.type === "office_wait_started" && overdue.has(officeWaitKey(e)))
       continue;
     if (

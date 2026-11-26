@@ -37,25 +37,37 @@ export function neverDispatchedQueue(d: CommandDraft, run: Run, card: CardId) {
   )
     return false;
   if (!run.preparation_retry) return runs.length === 1;
-  const source = runs.find(
-    (r) => r.id === run.preparation_retry?.source_run_id && r.id !== run.id,
-  );
-  const evidence = eventById(d.state.events, run.trigger_event_id);
-  const p = evidence?.payload as Record<string, unknown> | undefined;
-  return (
-    runs.length === 2 &&
-    source?.status === "cancelled" &&
-    !source.preparation_retry &&
-    evidence?.type === "run_preparation_recovered" &&
-    evidence.actor.kind === "system" &&
-    evidence.actor.project_id === d.state.project_id &&
-    evidence.card_id === card &&
-    p?.assignment_id === run.assignment_id &&
-    p.run_id === source.id &&
-    p.replacement_run_id === run.id &&
-    p.original_trigger_event_id === source.trigger_event_id &&
-    p.ready_at === run.preparation_retry.ready_at
-  );
+  // C-738: a chain of host-confirmed preparation retries, each bound to its
+  // cancelled source, back to the first queue — and no other Run.
+  const chain = new Set<string>();
+  let current = run;
+  while (current.preparation_retry) {
+    if (chain.has(current.id)) return false;
+    chain.add(current.id);
+    const retry = current.preparation_retry;
+    const source = runs.find(
+      (r) => r.id === retry.source_run_id && r.id !== current.id,
+    );
+    const evidence = eventById(d.state.events, current.trigger_event_id);
+    const p = evidence?.payload as Record<string, unknown> | undefined;
+    if (
+      source?.status !== "cancelled" ||
+      evidence?.type !== "run_preparation_recovered" ||
+      evidence.actor.kind !== "system" ||
+      evidence.actor.project_id !== d.state.project_id ||
+      evidence.card_id !== card ||
+      p?.assignment_id !== run.assignment_id ||
+      p.run_id !== source.id ||
+      p.replacement_run_id !== current.id ||
+      p.original_trigger_event_id !== source.trigger_event_id ||
+      p.ready_at !== retry.ready_at
+    )
+      return false;
+    current = source;
+  }
+  if (chain.has(current.id)) return false;
+  chain.add(current.id);
+  return runs.length === chain.size;
 }
 
 /** A launch needs a durable Run before provisioning. A missing terminal alone is not proof. */

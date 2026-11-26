@@ -14,11 +14,30 @@ import {
   lastInactiveStopActivity,
   startInactiveRunStop,
 } from "@cardigan/domain";
-import type { HarnessActivityInspection } from "@cardigan/host";
+import { type HarnessActivityInspection, tryHostOpsLock } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
 import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
+
+/** C-752: a shorter grace for Runs holding any of these resources. */
+export interface ScarceInactiveCancel {
+  readonly afterMs: number;
+  readonly resources: readonly string[];
+}
+
+/** The configured grace for this Run; the scarce one only when enabled and held. */
+export function inactiveGraceFor(
+  run: Run,
+  afterMs: number,
+  scarce: ScarceInactiveCancel | undefined,
+) {
+  return scarce &&
+    scarce.afterMs < afterMs &&
+    run.resource_keys?.some((key) => scarce.resources.includes(key))
+    ? scarce.afterMs
+    : afterMs;
+}
 
 interface ReaperOptions {
   loadState?: StateLoader;
@@ -36,6 +55,11 @@ interface ReaperOptions {
     project: ProjectId,
     assignment: Assignment["id"],
   ) => HarnessActivity | undefined;
+  harnessFileActivity?: (
+    project: ProjectId,
+    assignment: Assignment["id"],
+  ) => HarnessActivity | undefined;
+  scarce?: ScarceInactiveCancel;
   alert(
     tx: StoreTransactionContext,
     state: CommandState,
@@ -55,8 +79,8 @@ export class InactiveRunReaper {
     await Promise.all(this.remoteStops.values());
   }
   async tick(projects: readonly ProjectId[]) {
-    const afterMs = this.options.afterMs;
-    if (afterMs === null) return;
+    const configured = this.options.afterMs;
+    if (configured === null) return;
     for (const project of projects) {
       const state = this.options.store.uow.read((tx) =>
         (this.options.loadState ?? loadCommandState)(tx, project),
@@ -72,8 +96,11 @@ export class InactiveRunReaper {
         )
           continue;
         const a = owners.get(run.assignment_id);
+        const afterMs = inactiveGraceFor(run, configured, this.options.scarce);
         const cached = () =>
           this.options.harnessActivity?.(project, run.assignment_id);
+        const cachedFile = () =>
+          this.options.harnessFileActivity?.(project, run.assignment_id);
         const now = this.options.clock.now();
         if (
           !a ||
@@ -84,18 +111,25 @@ export class InactiveRunReaper {
               a,
               now,
               afterMs,
-              lastInactiveStopActivity(state, run, a, now, cached()),
+              lastInactiveStopActivity(
+                state,
+                run,
+                a,
+                now,
+                cached(),
+                cachedFile(),
+              ),
             ))
         )
           continue;
         if (a.machine_id === "local") {
-          await this.reap(project, a, run, afterMs, cached);
+          await this.reap(project, a, run, afterMs, cached, cachedFile);
           continue;
         }
         // Neither stop-time read (nor a slow runtime status) owns the global tick.
         const key = `${project}/${run.id}`;
         if (this.remoteStops.has(key)) continue;
-        const pending = this.reap(project, a, run, afterMs, cached)
+        const pending = this.reap(project, a, run, afterMs, cached, cachedFile)
           .catch((error) => this.options.onError?.(error))
           .finally(() => this.remoteStops.delete(key));
         this.remoteStops.set(key, pending);
@@ -108,10 +142,31 @@ export class InactiveRunReaper {
     run: Run,
     afterMs: number,
     cached: () => HarnessActivity | undefined,
+    cachedFile: () => HarnessActivity | undefined,
+  ) {
+    // An attached human (or another host operation) holds this lock; never
+    // end a session under them. Hold it from the claim through settlement.
+    const unlock = await tryHostOpsLock(this.options.store, project, a.id);
+    if (!unlock) return;
+    try {
+      await this.reapLocked(project, a, run, afterMs, cached, cachedFile);
+    } finally {
+      await unlock();
+    }
+  }
+  private async reapLocked(
+    project: ProjectId,
+    a: Assignment,
+    run: Run,
+    afterMs: number,
+    cached: () => HarnessActivity | undefined,
+    cachedFile: () => HarnessActivity | undefined,
   ) {
     let inspected: HarnessActivity | undefined;
+    let inspectedFile: HarnessActivity | undefined;
     const refresh = async () => {
       inspected = undefined;
+      inspectedFile = undefined;
       if (this.closed) return;
       let row: HarnessActivityInspection | undefined;
       try {
@@ -124,6 +179,8 @@ export class InactiveRunReaper {
       if (this.closed) return;
       if (row?.status === "stale" || row?.status === "fresh")
         inspected = row.activity;
+      // C-752: the same read's transcript write evidence, never after a failure.
+      if (row && row.status !== "read_failed") inspectedFile = row.fileActivity;
     };
     const needsInspection =
       run.harness === "claude-code" || a.machine_id !== "local";
@@ -131,13 +188,20 @@ export class InactiveRunReaper {
     if (this.closed) return;
     const sample = () =>
       this.closed ? undefined : needsInspection ? inspected : cached();
+    const file = () =>
+      this.closed ? undefined : needsInspection ? inspectedFile : cachedFile();
     const actor = { kind: "system" as const, project_id: project };
     await runStopWorkflow(this.options, project, {
       claim: (s, p) =>
         claimInactiveRunStop(
           s,
           actor,
-          { run_id: run.id, after_ms: afterMs, harness_activity: sample() },
+          {
+            run_id: run.id,
+            after_ms: afterMs,
+            harness_activity: sample(),
+            file_activity: file(),
+          },
           p,
         ),
       ...(needsInspection ? { beforeStart: refresh } : {}),
@@ -151,6 +215,7 @@ export class InactiveRunReaper {
             attempt_id: stop.attempt_id,
             after_ms: afterMs,
             harness_activity: sample(),
+            file_activity: file(),
           },
           p,
         ),

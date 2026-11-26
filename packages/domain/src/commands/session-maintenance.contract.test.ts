@@ -1,6 +1,8 @@
 import { expect, test } from "vitest";
 import type { Assignment, Event, Run } from "../entities.js";
 import {
+  BUSINESS_WORK_COOLDOWN_MS,
+  REFUSED_RETIREMENT_COOLDOWN_MS,
   sessionMaintenanceBasis,
   sessionMaintenanceCandidate,
   sessionMaintenanceNeedsAttention,
@@ -1013,7 +1015,7 @@ test("C-690: a new session's dispatch supersedes the earlier session's waiting r
   ).toBe(false);
 });
 
-test("C-690: notifications release a live session retained for dispatch unless work is queued, running or fenced", () => {
+test("C-690: notifications release a live session retained for dispatch unless work is running or fenced", () => {
   const s = setup(),
     a = s.assignments[0]!,
     io = { ...ports(), clock: { now: () => now } };
@@ -1075,12 +1077,18 @@ test("C-690: notifications release a live session retained for dispatch unless w
       a.id,
       io,
     ),
+    // C-739: a queued Run whose stop is in flight still keeps the handoff.
     releaseRetainedRetirement(
       {
         ...base,
         runs: [
           ...base.runs,
-          { ...s.runs[0]!, id: "R-9" as Run["id"], status: "queued" },
+          {
+            ...s.runs[0]!,
+            id: "R-9" as Run["id"],
+            status: "queued",
+            dispatch_stop: {},
+          } as Run,
         ],
       },
       system,
@@ -1114,3 +1122,287 @@ test("C-690: notifications release a live session retained for dispatch unless w
   ];
   for (const effect of refused) expect(effect.ok).toBe(false);
 });
+
+test("C-739: a never-started queued Run releases a retained session, and the session is not reclaimed during the cooldown", () => {
+  const s = setup(),
+    a = s.assignments[0]!,
+    io = { ...ports(), clock: { now: () => now } };
+  const ref = a.runtime_ref!;
+  const queued = {
+    ...s.runs[0]!,
+    id: "R-9" as Run["id"],
+    status: "queued",
+    started_at: undefined,
+    finished_at: undefined,
+  } as unknown as Run;
+  const base: CommandState = {
+    ...s,
+    assignments: [
+      {
+        ...a,
+        idle_retirement: {
+          phase: "waiting",
+          handoff: true,
+          runtime_ref: ref,
+          started_at: now,
+          threshold_minutes: 60,
+          failures: 3,
+        },
+      },
+    ],
+    runs: [...s.runs, queued],
+  };
+  // sensen A-317: before, the queued Run kept the handoff forever.
+  const released = value(releaseRetainedRetirement(base, system, a.id, io));
+  expect(released.data.idle_retirement).toBeUndefined();
+  expect(released.changes.filter((c) => c.collection === "runs")).toEqual([]);
+  const handedBack = released.events.find(
+    (e) => e.type === "idle_session_retirement_released",
+  );
+  expect(handedBack?.payload).toMatchObject({ reason: "business_work" });
+  // sensen A-327/A-316: no Run yet; the patrol reclaimed the session within
+  // milliseconds. The cooldown keeps it for the dispatcher instead.
+  const after: CommandState = {
+    ...s,
+    assignments: [released.data],
+    events: [...s.events, ...released.events],
+  };
+  const at = (ms: number) => new Date(Date.parse(now) + ms).toISOString();
+  expect(sessionMaintenanceCandidate(after, released.data, at(1))).toEqual({
+    reason: "business_work_cooldown",
+    candidate: false,
+  });
+  expect(
+    sessionMaintenanceCandidate(
+      after,
+      released.data,
+      at(BUSINESS_WORK_COOLDOWN_MS - 1),
+    ).reason,
+  ).toBe("business_work_cooldown");
+  expect(
+    sessionMaintenanceCandidate(
+      after,
+      released.data,
+      at(BUSINESS_WORK_COOLDOWN_MS),
+    ),
+  ).toMatchObject({ candidate: true });
+  // A Run that started after the hand-back ends the cooldown.
+  const ran: CommandState = {
+    ...after,
+    runs: [
+      {
+        ...s.runs[0]!,
+        id: "R-10" as Run["id"],
+        status: "completed",
+        started_at: at(1000),
+        finished_at: at(2000),
+      } as Run,
+    ],
+  };
+  expect(
+    sessionMaintenanceCandidate(ran, released.data, at(3000)).reason,
+  ).not.toBe("business_work_cooldown");
+  expect(BUSINESS_WORK_COOLDOWN_MS).toBe(600_000);
+});
+
+test("C-746: a macOS session that keeps refusing retirement gets one notice with its cause and commands, then a cooldown instead of another round", () => {
+  const s = setup(),
+    worker = "fixture-worker";
+  const a: Assignment = {
+    ...s.assignments[0]!,
+    machine_id: worker,
+    worktree_path: "/worker/worktrees/fixture/A-1",
+    runtime_ref: {
+      ...s.assignments[0]!.runtime_ref!,
+      machine_id: worker,
+      terminal_ref: "fixture-worker/t86",
+    },
+  };
+  let state: CommandState = {
+    ...s,
+    assignments: [a],
+    machines: s.machines!.map((m) => ({ ...m, id: worker, os: "darwin" })),
+  };
+  const at = (ms: number) => new Date(Date.parse(now) + ms).toISOString();
+  const refusal = {
+    outcome: "withdrawn" as const,
+    evidence: {
+      stage: "probe" as const,
+      reason: "workspace_not_clean" as const,
+      owner_reason: "git_config",
+    },
+  };
+  // One round: three refused attempts, each a fresh claim after its retry.
+  const round = (start: number) => {
+    const events: Event[] = [];
+    for (let i = 0; i < 3; i++) {
+      const io = { ...ports(), clock: { now: () => at(start + i * 1000) } };
+      const current = state.assignments[0]!;
+      state = apply(
+        state,
+        value(beginIdleSessionRetirement(state, system, current.id, 60, io)),
+      );
+      const settled = value(
+        settleIdleSessionRetirement(state, system, a.id, refusal, 1, io),
+      );
+      events.push(...settled.events);
+      state = apply(state, settled);
+    }
+    return events;
+  };
+  const first = round(0);
+  const owner = state.assignments[0]!;
+  expect(owner.idle_retirement).toMatchObject({ handoff: true, failures: 3 });
+  const handed = first.filter(
+    (e) => e.type === "idle_session_retirement_handed_off",
+  );
+  expect(handed).toHaveLength(1);
+  expect(handed[0]!.payload).toMatchObject({
+    reason: "workspace_not_clean",
+    owner_reason: "git_config",
+    runtime_ref: a.runtime_ref,
+  });
+  const notices = first.filter(
+    (e) => e.type === "session_maintenance_attention",
+  );
+  expect(notices).toHaveLength(1);
+  const notice = notices[0]!.payload as {
+    reason: string;
+    notice: string;
+    evidence: unknown;
+    runtime_ref: unknown;
+  };
+  expect(notice.reason).toBe("retirement_unavailable");
+  expect(notice.evidence).toEqual(refusal.evidence);
+  expect(notice.runtime_ref).toEqual(a.runtime_ref);
+  // The cause, the read-only checks and the managed stop, ready to run.
+  expect(notice.notice).toContain("git_config");
+  expect(notice.notice).toContain(
+    "git -C /worker/worktrees/fixture/A-1 status --short",
+  );
+  expect(notice.notice).toContain(
+    `cardigan assignment stop ${a.id} --project ${state.project_id}`,
+  );
+  expect(notice.notice).toContain("host_ops_inspect_worker");
+  // Business work hands the session back (C-690/C-739)...
+  const io = { ...ports(), clock: { now: () => at(5000) } };
+  const released = value(releaseRetainedRetirement(state, system, a.id, io));
+  state = apply(state, released);
+  const back = state.assignments[0]!;
+  // ...and after the C-739 cooldown the refused session is still not
+  // reclaimed: sensen A-252 looped here every ten minutes.
+  expect(
+    sessionMaintenanceCandidate(
+      state,
+      back,
+      at(BUSINESS_WORK_COOLDOWN_MS + 5000),
+    ),
+  ).toEqual({ reason: "retirement_refused", candidate: false });
+  expect(sessionMaintenanceNeedsAttention("retirement_refused")).toBe(false);
+  expect(
+    sessionMaintenanceCandidate(
+      state,
+      back,
+      at(REFUSED_RETIREMENT_COOLDOWN_MS + 1999),
+    ).reason,
+  ).toBe("retirement_refused");
+  expect(
+    sessionMaintenanceCandidate(
+      state,
+      back,
+      at(REFUSED_RETIREMENT_COOLDOWN_MS + 2000),
+    ).candidate,
+  ).toBe(true);
+  // A later round of the same idle session adds a handoff, never a notice.
+  const second = round(REFUSED_RETIREMENT_COOLDOWN_MS + 3000);
+  expect(
+    second.filter((e) => e.type === "session_maintenance_attention"),
+  ).toEqual([]);
+  expect(
+    second.filter((e) => e.type === "idle_session_retirement_handed_off"),
+  ).toHaveLength(1);
+  // A sign of life (an MCP call) starts over: no cooldown, a fresh notice.
+  const lively: CommandState = {
+    ...state,
+    assignments: [
+      {
+        ...back,
+        last_mcp_activity_at: at(REFUSED_RETIREMENT_COOLDOWN_MS + 10_000),
+      },
+    ],
+  };
+  expect(
+    sessionMaintenanceCandidate(
+      lively,
+      lively.assignments[0]!,
+      at(REFUSED_RETIREMENT_COOLDOWN_MS + 10_000 + 61 * 60_000),
+    ).reason,
+  ).not.toBe("retirement_refused");
+  expect(REFUSED_RETIREMENT_COOLDOWN_MS).toBe(6 * 60 * 60_000);
+});
+
+test.each([
+  ["terminal_busy", "terminal_not_idle", "hc get fixture-worker/t86"],
+  ["probe_invalid", "no_reply", "hc get fixture-worker/t86"],
+  // sensen A-252: an owner launched before C-746 kept its old idle rule.
+  ["probe_invalid", "legacy_owner_refused", "C-746 之前启动"],
+] as const)(
+  "C-746: a macOS %s refusal notice names %s and the read-only check",
+  (reason, owner_reason, check) => {
+    const s = setup(),
+      worker = "fixture-worker";
+    const a: Assignment = {
+      ...s.assignments[0]!,
+      machine_id: worker,
+      runtime_ref: {
+        ...s.assignments[0]!.runtime_ref!,
+        machine_id: worker,
+        terminal_ref: "fixture-worker/t86",
+      },
+    };
+    const base: CommandState = {
+      ...s,
+      assignments: [a],
+      machines: s.machines!.map((m) => ({ ...m, id: worker, os: "darwin" })),
+    };
+    const io = { ...ports(), clock: { now: () => now } };
+    const pending = apply(
+      base,
+      value(beginIdleSessionRetirement(base, system, a.id, 60, io)),
+    );
+    const state = {
+      ...pending,
+      assignments: pending.assignments.map((v) => ({
+        ...v,
+        idle_retirement: { ...v.idle_retirement!, failures: 2 },
+      })),
+    };
+    const settled = value(
+      settleIdleSessionRetirement(
+        state,
+        system,
+        a.id,
+        {
+          outcome: "withdrawn",
+          evidence: {
+            stage: "probe",
+            reason,
+            owner_reason,
+            ...(owner_reason === "no_reply" ? { exit_code: 1 } : {}),
+          },
+        },
+        1,
+        io,
+      ),
+    );
+    const notices = settled.events.filter(
+      (e) => e.type === "session_maintenance_attention",
+    );
+    expect(notices).toHaveLength(1);
+    const text = (notices[0]!.payload as { notice: string }).notice;
+    expect(text).toContain(owner_reason);
+    expect(text).toContain(check);
+    expect(text).toContain(`cardigan assignment stop ${a.id}`);
+    if (owner_reason === "no_reply") expect(text).toContain("exit=1");
+  },
+);

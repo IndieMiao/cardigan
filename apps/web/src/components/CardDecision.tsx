@@ -68,7 +68,14 @@ export function useCardDecision({
   readonly onSaved: () => void;
   /** Another card form is open: the write waits. */
   readonly busy?: boolean;
-}): { readonly body: ReactNode; readonly action: ReactNode } | undefined {
+}):
+  | {
+      readonly body: ReactNode;
+      readonly action: ReactNode;
+      /** The confirm button is disabled; the dock (C-701) mirrors it. */
+      readonly disabled: boolean;
+    }
+  | undefined {
   const [picked, setPicked] = useState<{ id: string; option: string }>();
   const [words, setWords] = useState<{ id: string; text: string }>();
   const [pending, setPending] = useState(false);
@@ -233,16 +240,17 @@ export function useCardDecision({
       </DetailNextStepFeedback>
     </DetailChoiceForm>
   );
+  const disabled = pending || busy || !selected;
   const action = (
     <Button
       type="submit"
       form={formId}
       size="regular"
       variant="emphasis"
-      disabled={pending || busy || !selected}
+      disabled={disabled}
     >
       确认选择
     </Button>
   );
-  return { body, action };
+  return { body, action, disabled };
 }

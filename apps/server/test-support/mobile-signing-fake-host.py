@@ -27,8 +27,11 @@ def wait(name):
         time.sleep(0.02)
 
 
-if kind == 'invalid' or not sys.stdin.readline().endswith('}\n'):
+identity = sys.stdin.readline()
+if kind == 'invalid' or not identity.endswith('}\n'):
     sys.exit(1)
+with (ctl / 'identities').open('a') as f:
+    f.write(kind + ' ' + identity)
 if kind == 'check':
     # The ledger no longer releases a revoked or expired grant.
     if (ctl / 'revoked').exists():
@@ -57,4 +60,9 @@ if kind == 'slow':
 if kind == 'lost':
     # Interrupted after the signer finished: no result reaches the server.
     sys.exit(3)
-print(rid, 'a' * 64, flush=True)
+if kind == 'handoff':
+    print(rid, 'a' * 64, f'/srv/handoff/{"2" * 32}.apk', flush=True)
+elif kind == 'handoff-other':
+    print(rid, 'a' * 64, f'/srv/../handoff/{"2" * 32}.apk', flush=True)
+else:
+    print(rid, 'a' * 64, flush=True)

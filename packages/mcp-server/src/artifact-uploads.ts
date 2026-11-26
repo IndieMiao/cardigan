@@ -129,7 +129,7 @@ export class ArtifactUploads {
       upload_query: `?artifact_upload=${grant.id}`,
       content_type: "application/octet-stream",
       instructions:
-        "Append upload_query to the configured MCP URL. Send raw bytes with this session Bearer, no redirects. Use the returned attachment id and sha256 as evidence.",
+        "Append upload_query to the configured MCP URL. Send raw bytes with this session Bearer, no redirects. The returned sha256 and size are computed by the server from the received bytes; use the returned attachment id and sha256 as evidence, no read-back download is needed.",
     };
   }
   async accept(

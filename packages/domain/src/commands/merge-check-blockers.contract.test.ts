@@ -29,6 +29,8 @@ async function fixture() {
           card_id: f.card.id,
           instructions: "轮换凭据",
           why_human: "需要人在主机执行",
+          // C-742: the owner performs these blocking actions.
+          executor: "owner",
           expected_return: "完成",
           blocked_work_items: [],
           blocks_merge,

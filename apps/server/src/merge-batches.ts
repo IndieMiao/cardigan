@@ -9,6 +9,7 @@ import {
   type CommandEffect,
   type CommandPorts,
   type CommandState,
+  eventsOfType,
   formBisectProbe,
   formMergeBatch,
   hasBatchFailureEvidence,
@@ -213,10 +214,11 @@ export class MergeBatches {
       )
         continue;
       if (batch.status === "failed") {
-        const rerun = state(id).events.some(
-          (e) =>
-            e.type === "merge_batch_requeued" &&
-            (e.payload as { batch_id?: string }).batch_id === batch.id,
+        const rerun = eventsOfType(
+          state(id).events,
+          "merge_batch_requeued",
+        ).some(
+          (e) => (e.payload as { batch_id?: string }).batch_id === batch.id,
         );
         if (
           !rerun &&

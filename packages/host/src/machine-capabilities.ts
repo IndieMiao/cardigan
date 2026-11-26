@@ -28,6 +28,13 @@ import {
   probeMachineCapability,
 } from "./machine-capability-probe.js";
 import {
+  observeReadiness,
+  type ReadinessInput,
+  type ReadinessOutcome,
+  readinessReachable,
+  recordReadiness,
+} from "./machine-readiness.js";
+import {
   RuntimeTargetError,
   safeTargetReason,
 } from "./runtime-target-error.js";
@@ -35,6 +42,7 @@ import { runtimeWorkersPath } from "./runtime-workers-config.js";
 import {
   helperMismatch,
   observationFingerprint,
+  splitHelperWarnings,
 } from "./worker-helper-release.js";
 import { notifyHelperMismatch } from "./worker-maintenance.js";
 import { stageWorkerUpgrade } from "./worker-upgrade.js";
@@ -57,7 +65,7 @@ export interface MachineObservationOptions {
   readonly observationId?: string;
   readonly progress?: (step: "runtime" | "capabilities") => void;
   readonly check: () => Promise<
-    Pick<MachineHealth, "blockers" | "launch_enabled">
+    Pick<MachineHealth, "blockers" | "launch_enabled" | "warnings">
   >;
   /** Same launch configuration that supplies the browser MCP on this host. */
   readonly browsersPath?: () =>
@@ -66,6 +74,8 @@ export interface MachineObservationOptions {
     | Promise<string | undefined>;
   readonly catalog?: () => readonly CapabilityDefinition[];
   readonly probe?: CapabilityProbe;
+  /** C-608 readiness patrol; on by default only with the production catalog. */
+  readonly readiness?: (input: ReadinessInput) => Promise<ReadinessOutcome>;
   readonly env?: NodeJS.ProcessEnv;
   readonly now?: () => string;
   readonly signal?: AbortSignal;
@@ -84,6 +94,12 @@ export async function refreshMachineObservations(
   const now = options.now ?? (() => new Date().toISOString());
   const actor = { kind: "system" as const, project_id: project };
   const observation = options.observationId ?? randomUUID();
+  const previousReadiness = readMachineObservations(
+    store,
+    project,
+    machine,
+    now(),
+  ).health?.readiness;
   beginMachineObservation(store, actor, project, machine, observation, now());
   let health: MachineHealth = {
     status: "failed",
@@ -95,6 +111,7 @@ export async function refreshMachineObservations(
   let observedBrowserDigest: string | null | undefined;
   let targetFingerprint: string | undefined;
   let checkedTarget: ObservationTarget | undefined;
+  let readiness: ReadinessOutcome | undefined;
   try {
     const target = await options.target();
     const binding = JSON.stringify([
@@ -102,9 +119,11 @@ export async function refreshMachineObservations(
       target.machine.os,
       target.machine.arch,
     ]);
-    const checked = await options.check();
+    // A compatible helper awaiting upgrade is a warning, never a dispatch stop (C-608).
+    const { warnings, ...checked } = splitHelperWarnings(await options.check());
     health = {
       ...checked,
+      ...(warnings.length ? { warnings } : {}),
       checked_at: now(),
       status: checked.blockers.length ? "failed" : "passed",
     };
@@ -192,6 +211,31 @@ export async function refreshMachineObservations(
       });
     }
     if (failures.length) health = { ...health, capability_failures: failures };
+    const observe =
+      options.readiness ?? (options.catalog === undefined && observeReadiness);
+    if (
+      observe &&
+      target.execution.mode === "agent-ssh" &&
+      readinessReachable(health.blockers)
+    ) {
+      try {
+        readiness = await observe({
+          store,
+          project,
+          machine,
+          now,
+          os: target.machine.os,
+          execution: target.execution,
+          health,
+          capabilities: capabilities.map((c) => c.key),
+          signal: options.signal,
+          env: options.env,
+        });
+        health = { ...health, readiness: readiness.readiness };
+      } catch {
+        // Readiness is advisory; it never changes the machine check outcome.
+      }
+    }
     const current = await options.target();
     options.signal?.throwIfAborted();
     if (
@@ -233,6 +277,23 @@ export async function refreshMachineObservations(
     targetFingerprint,
     observedBrowserDigest,
   );
+  if (recorded && readiness) {
+    const outcome = readiness;
+    try {
+      store.uow.run((tx) =>
+        recordReadiness(
+          tx,
+          project,
+          machine,
+          previousReadiness,
+          outcome,
+          now(),
+        ),
+      );
+    } catch {
+      // A failed timeline write never invalidates the recorded observation.
+    }
+  }
   const owns = () =>
     readMachineObservationsInTransaction(store, project, machine, now()).health
       ?.evidence_ref === `machine-observation:${observation}`;
@@ -258,7 +319,9 @@ export async function refreshMachineObservations(
     ...readMachineObservations(store, project, machine, now()),
     ...(tools ? { agent_tools: tools } : {}),
   });
-  const mismatch = health.blockers.find(helperMismatch);
+  const mismatch = [...health.blockers, ...(health.warnings ?? [])].find(
+    helperMismatch,
+  );
   const manualAllowed = () =>
     manualWorkerUpgradeAllowed(
       dirname(runtimeWorkersPath(options.env)),

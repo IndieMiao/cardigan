@@ -45,6 +45,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import {
+  CardActionDockSlot,
   CardDetailHeading,
   CardDetailLayout,
   DetailNextStepForms,
@@ -52,6 +53,7 @@ import {
 } from "../components/layout/CardDetailLayout.js";
 import { CardBatchChecks } from "../components/MergeBatch.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
+import { MergeBlockingControl } from "../components/MergeBlockingControl.js";
 import { Markdown, MarkdownBody } from "../components/Operations.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { StoryDiscussion } from "../components/StoryDiscussion.js";
@@ -73,6 +75,8 @@ import { MergeConfirmation } from "./NeedsYouPage.js";
 
 /** Timeline entries per read; older pages load as the reader scrolls. */
 const PAGE_SIZE = 20;
+/** C-696: how long “C-xx 已完成” stays after marking a card done. */
+const DONE_NOTICE_MS = 4000;
 type PagerStatus = { loading: true } | { error: string } | undefined;
 const historyKey = (
   projectId: string,
@@ -474,6 +478,15 @@ function CardContent({
   });
   const [activeAction, setActiveAction] = useState<"card" | "completion">();
   const [primaryPanels, setPrimaryPanels] = useState<HTMLElement | null>(null);
+  const [dock, setDock] = useState<HTMLElement | null>(null);
+  // C-696: “C-48 已完成” stays 4 seconds in the shared feedback stack; the
+  // panel that held “标记完成” is gone after the reload.
+  const [doneNotice, setDoneNotice] = useState("");
+  useEffect(() => {
+    if (!doneNotice) return;
+    const timer = window.setTimeout(() => setDoneNotice(""), DONE_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [doneNotice]);
   const article = useRef<HTMLElement>(null);
   const scroll = useRef<HTMLElement>(null),
     lastAnchor = useRef<string | undefined>(undefined);
@@ -711,6 +724,10 @@ function CardContent({
       .reverse()
       .find((d) => d.kind === "card_completion" && d.status === "accepted")?.id;
   const sectionId = (name: string) => `card-${cardId}-${name}`;
+  // C-760: open actions on this card; the owner may move their merge hold.
+  const openActions = detail.human_actions.filter(
+    (a) => a.status === "open" && a.card_id === cardId,
+  );
   const panel = (name: string) => ({
     id: sectionId(name),
     "data-card-panel": true,
@@ -766,6 +783,7 @@ function CardContent({
       className={cardPageClass}
       aria-label={`卡片 ${cardId}`}
     >
+      <CardActionDockSlot ref={setDock} />
       <header className="card-header">
         {!inDrawer && (
           <CardDetailHeading>
@@ -811,10 +829,12 @@ function CardContent({
           onReveal={revealTarget}
           completionId={completionId}
           busy={!!activeAction}
+          inDrawer={inDrawer}
+          dock={dock}
           markDone={(emphasis) => (
             <CardTemplate
               disabled={!!activeAction && activeAction !== "completion"}
-              formContainer={primaryPanels}
+              onDone={setDoneNotice}
               onEditingChange={(editing) =>
                 setActiveAction(editing ? "completion" : undefined)
               }
@@ -829,6 +849,7 @@ function CardContent({
           )}
         />
         <DetailNextStepForms ref={setPrimaryPanels} />
+        <RequestFeedback message={doneNotice} />
       </header>
       <div className="card-main">
         <AuthorPrechecks checks={card.prechecks ?? []} projectId={projectId} />
@@ -875,6 +896,33 @@ function CardContent({
                   elapsed={0}
                   inCardHeader
                 />
+              ))}
+            </section>
+          )}
+          {openActions.length > 0 && (
+            <section
+              id={sectionId("human-actions")}
+              className="card-section"
+              aria-label="人工事项"
+            >
+              <h2>人工事项</h2>
+              {openActions.map((a) => (
+                <article
+                  key={a.id}
+                  className="needs-item"
+                  aria-label={`人工事项 ${a.id}`}
+                >
+                  <h3 className="needs-question">
+                    <IdTag id={a.id} label="" />{" "}
+                    {a.handoff?.title ?? a.instructions.split(/\r?\n/u)[0]}
+                  </h3>
+                  <MergeBlockingControl
+                    client={client}
+                    projectId={projectId}
+                    action={a}
+                    done={reload}
+                  />
+                </article>
               ))}
             </section>
           )}

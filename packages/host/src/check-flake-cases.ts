@@ -18,6 +18,11 @@ export const checkFlakeCases = {
     name: "P10 §13.9/M3.5: runtime loss becomes unknown then lost; attention, needs-you and Office report it",
     signature: "loopback-connect",
   },
+  agent_git: {
+    file: "apps/cli/src/agent-git.test.ts",
+    name: "Agent workspace Git > synthetic Darwin writer and Linux reviewer clone, build and return deliveries on independent disks",
+    signature: "vitest-20000ms",
+  },
 } as const;
 export type CheckFlakeId = keyof typeof checkFlakeCases;
 export const checkFlakeIds = Object.keys(checkFlakeCases) as CheckFlakeId[];

@@ -83,6 +83,9 @@ export function machineObservationView(
           checked_at: health.checked_at,
           blockers: health.blockers,
           available: health.available,
+          // C-608: fixed controller text and numbers only.
+          ...(health.warnings?.length ? { warnings: health.warnings } : {}),
+          ...(health.readiness ? { readiness: health.readiness } : {}),
         }
       : null,
   };

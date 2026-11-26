@@ -2,9 +2,14 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { SigningScope } from "@cardigan/mcp-server";
+import type {
+  ChainCandidate,
+  ChainGrant,
+  SigningScope,
+} from "@cardigan/mcp-server";
 
 export interface MobileSigningTiming {
   /** Test seam: interpreter and helper, before the private root and command. */
@@ -48,7 +53,9 @@ function helper(
     | { artifact: { id: string; fd: number } }
     | { progress: Progress }
     | { check: string },
-): Promise<{ request_id: string; sha256: string }> {
+  /** C-612: the release chain this control service attests is still approved. */
+  chain?: string,
+): Promise<{ request_id: string; sha256: string; handoff?: string }> {
   const artifact = "artifact" in run ? run.artifact : undefined;
   const check = "check" in run ? run.check : undefined;
   const [file = "/usr/bin/python3", ...prefix] = timing.program ?? [
@@ -91,7 +98,9 @@ function helper(
       // A ledger check has no fence: its only line is the result.
       stage: "start" | "accepted" | "committed" = check ? "committed" : "start",
       accepted: string | undefined,
-      receipt: { request_id: string; sha256: string } | undefined,
+      receipt:
+        | { request_id: string; sha256: string; handoff?: string }
+        | undefined,
       failed = false,
       term: NodeJS.Timeout | undefined;
     // SIGTERM first: the helper records `interrupted` (or its own `timed_out`)
@@ -152,9 +161,20 @@ function helper(
         if ("progress" in run) run.progress.committed();
         return true;
       }
-      const done = /^([0-9a-f]{32}) ([0-9a-f]{64})$/u.exec(row);
+      // C-612: an optional third field is the signer's same-machine handoff
+      // path, under a random name the host discloses only after release.
+      const done =
+        /^([0-9a-f]{32}) ([0-9a-f]{64})(?: ((?:\/[A-Za-z0-9_.-]+)+\/[0-9a-f]{32}\.apk))?$/u.exec(
+          row,
+        );
       if (stage === "committed" && !receipt && done?.[1] && done[2]) {
-        receipt = { request_id: done[1], sha256: done[2] };
+        receipt = {
+          request_id: done[1],
+          sha256: done[2],
+          ...(done[3] && !/\/\.\.?\//u.test(done[3])
+            ? { handoff: done[3] }
+            : {}),
+        };
         return true;
       }
       return false;
@@ -182,7 +202,12 @@ function helper(
         return fail();
       resolve(receipt);
     });
-    input.write(`${JSON.stringify(scope)}\n`);
+    // A download (permit) never carries the attestation; a request and a
+    // ledger check do, so the host releases a chain-derived grant only while
+    // its chain is still approved.
+    input.write(
+      `${JSON.stringify(chain && !artifact ? { ...scope, chain } : scope)}\n`,
+    );
   });
 }
 
@@ -206,12 +231,20 @@ const RETAIN_SETTLED_MS = 3_600_000;
 
 function receiptFor(
   scope: SigningScope,
-  receipt: { request_id: string; sha256: string },
+  {
+    handoff,
+    ...receipt
+  }: { request_id: string; sha256: string; handoff?: string },
 ) {
   return {
     status: "signed" as const,
     ...receipt,
     platform: scope.platform,
+    // C-612: same signed bytes, already on the signer's (= this worker's)
+    // machine. Read it there and verify sha256; download otherwise.
+    ...(handoff && scope.platform === "android"
+      ? { local_handoff: { path: handoff, sha256: receipt.sha256 } }
+      : {}),
     download: {
       method: "GET",
       query: `?mobile_artifact=${receipt.request_id}&platform=${scope.platform}`,
@@ -233,6 +266,7 @@ function startJob(
   scope: SigningScope,
   current: () => void,
   timing: MobileSigningTiming,
+  chain: string | undefined,
   track?: SigningTracker,
 ): Job {
   let release = () => {};
@@ -251,19 +285,26 @@ function startJob(
     started: Date.now(),
     done: tracked()
       .then(() =>
-        helper(dataDir, scope, current, timing, {
-          progress: {
-            accepted: (id, seconds, mode) => {
-              job.phase = "transferring";
-              job.request_id = id;
-              job.mode = mode;
-              job.deadline_seconds = seconds;
-            },
-            committed: () => {
-              job.phase = "signing";
+        helper(
+          dataDir,
+          scope,
+          current,
+          timing,
+          {
+            progress: {
+              accepted: (id, seconds, mode) => {
+                job.phase = "transferring";
+                job.request_id = id;
+                job.mode = mode;
+                job.deadline_seconds = seconds;
+              },
+              committed: () => {
+                job.phase = "signing";
+              },
             },
           },
-        }),
+          chain,
+        ),
       )
       .then(
         (receipt) => {
@@ -301,6 +342,8 @@ export async function requestMobileSignature(
   scope: SigningScope,
   current: () => void,
   timing: MobileSigningTiming = {},
+  /** C-612: set only while the Run's release chain is approved (see host `attested`). */
+  chain?: string,
   track?: SigningTracker,
 ) {
   const key = JSON.stringify([
@@ -341,13 +384,13 @@ export async function requestMobileSignature(
           poll_after_seconds: 5,
         };
   if (!job) {
-    job = startJob(key, dataDir, scope, current, timing, track);
+    job = startJob(key, dataDir, scope, current, timing, chain, track);
     await wait(job);
   } else if (job.outcome && "error" in job.outcome && job.request_id) {
     // The previous attempt ended after its claim without a result (e.g. the
     // helper was interrupted). Continue the same request: resend or look up.
     jobs.delete(key);
-    job = startJob(key, dataDir, scope, current, timing, track);
+    job = startJob(key, dataDir, scope, current, timing, chain, track);
     await wait(job);
   }
   const elapsed_seconds = Math.floor((Date.now() - job.started) / 1000);
@@ -378,9 +421,14 @@ export async function requestMobileSignature(
         platform: scope.platform,
         poll_after_seconds: 60,
       };
-    const now = await helper(dataDir, scope, current, timing, {
-      check: receipt.request_id,
-    });
+    const now = await helper(
+      dataDir,
+      scope,
+      current,
+      timing,
+      { check: receipt.request_id },
+      chain,
+    );
     if (now.sha256 !== receipt.sha256) throw new Error("Signing unavailable");
     return receipt;
   }
@@ -455,5 +503,88 @@ export async function openMobileArtifact(
   } catch (e) {
     await f.close();
     throw e;
+  }
+}
+
+/**
+ * C-612: register and approve this Run's release-chain candidate through
+ * `host.py chain`. The candidate bytes go to the helper on fd 3; the host
+ * verifies the digest, fixes app and credential version from its route, and
+ * reports `new`, `existing` (this chain's candidate already holds the Run's
+ * grant) or `other`. Bounded by `permitMs`; never started while draining.
+ */
+export async function registerChainCandidate(
+  dataDir: string,
+  scope: SigningScope,
+  candidate: ChainCandidate,
+  current: () => void,
+  timing: MobileSigningTiming = {},
+): Promise<ChainGrant> {
+  if (draining) throw new Error("Signing unavailable");
+  current();
+  const source = await candidate.source();
+  const [file = "/usr/bin/python3", ...prefix] = timing.program ?? [
+    "/usr/bin/python3",
+    "-IB",
+    HOST,
+  ];
+  const child = spawn(
+    file,
+    [...prefix, join(dataDir, "mobile-signing"), "chain"],
+    {
+      cwd: dataDir,
+      env: { PATH: "/usr/bin:/bin", LANG: "C" },
+      stdio: ["pipe", "pipe", "ignore", "pipe"],
+    },
+  );
+  live.set(
+    child,
+    new Promise<void>((exited) =>
+      child.once("close", () => {
+        live.delete(child);
+        exited();
+      }),
+    ),
+  );
+  // The host skips fd 3 for an existing grant; a reset pipe is not an error.
+  const ignore = () => {};
+  child.stdin?.on("error", ignore);
+  child.stdio[3]?.on("error", ignore);
+  const timer = setTimeout(() => {
+    child.kill("SIGTERM");
+    setTimeout(() => child.kill("SIGKILL"), timing.killMs ?? 30_000).unref();
+  }, timing.permitMs ?? 600_000);
+  timer.unref();
+  try {
+    const closed = new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    let text = "";
+    child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
+      text += chunk;
+      if (text.length > 128) child.kill("SIGKILL");
+    });
+    child.stdin?.end(
+      `${JSON.stringify(scope)}\n${JSON.stringify({
+        commit: candidate.commit,
+        build: candidate.build,
+        sha256: candidate.sha256,
+        size: candidate.size,
+        decision: candidate.decision,
+      })}\n`,
+    );
+    const input = child.stdio[3];
+    if (!input || !("write" in input)) throw new Error("Signing unavailable");
+
+    // A refusal may close fd 3 early; the exit code decides.
+    await pipeline(source, input).catch(() => undefined);
+    const code = await closed;
+    const m = /^([0-9a-f]{32}) (new|existing|other)\n$/u.exec(text);
+    if (code !== 0 || !m?.[1] || !m[2]) throw new Error("Signing unavailable");
+    return { request_id: m[1], status: m[2] as ChainGrant["status"] };
+  } finally {
+    clearTimeout(timer);
+    source.destroy();
   }
 }

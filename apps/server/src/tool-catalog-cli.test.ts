@@ -6,6 +6,7 @@ import {
   finishRun,
   issueInstruction,
 } from "@cardigan/domain";
+import { sessionFilesRevision } from "@cardigan/host";
 import { defaultToolCatalog } from "@cardigan/mcp-server";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { tokensForAssignment } from "@cardigan/store";
@@ -114,13 +115,14 @@ function fixture() {
       agent,
     );
   };
-  /** What this deploy's endpoint serves to the Assignment's current token. */
+  /** What this deploy's endpoint serves to the Assignment's current token,
+   * with this release's run-command entry (C-608), as the server compares it. */
   const served = () =>
-    defaultToolCatalog(
+    `${defaultToolCatalog(
       tokensForAssignment(f.store.database, f.project, assignment.id).at(-1)
         ?.allowed_tools ?? [],
       current(),
-    );
+    )}+${sessionFilesRevision()}`;
   let deployed: string | undefined;
   const dispatcher: DispatcherOptions = {
     store: f.store,
@@ -188,7 +190,9 @@ test("P2a-10 A: a CLI-started session records the catalog its token lists", asyn
   await x.startFromCli();
   const run = x.state().runs.at(-1);
   expect(run?.status).toBe("dispatched");
-  expect(run?.tool_catalog).toMatch(/^[a-f0-9]{64}$/u);
+  expect(run?.tool_catalog).toMatch(
+    /^[a-f0-9]{64}\+run-command-[a-f0-9]{16}$/u,
+  );
   expect(run?.tool_catalog).toBe(x.served());
 });
 

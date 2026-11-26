@@ -5,7 +5,11 @@ import type {
   NeedsYouSection,
   ProjectId,
 } from "@cardigan/domain";
-import { workerAgentToolsAction, workerHelperAction } from "@cardigan/domain";
+import {
+  eventsOfTypes,
+  workerAgentToolsAction,
+  workerHelperAction,
+} from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
 import type { Store } from "@cardigan/store";
 import { readCardDetailCached } from "./card-detail-cache.js";
@@ -357,16 +361,18 @@ function precheckHeader(
   project: ProjectId,
   attempt: string,
 ): string | null {
-  const event = projectState(store, project)
-    .events.filter((event) => {
+  // C-671: from the type index, so a closed card's precheck still shows.
+  const event = eventsOfTypes(projectState(store, project).events, [
+    "precheck_queued",
+    "precheck_started",
+    "precheck_finished",
+  ])
+    .filter((event) => {
       const payload = event.payload;
       return (
         event.card_id &&
         event.actor.kind === "system" &&
         event.actor.project_id === project &&
-        ["precheck_queued", "precheck_started", "precheck_finished"].includes(
-          event.type,
-        ) &&
         payload !== null &&
         typeof payload === "object" &&
         "attempt_id" in payload &&
@@ -389,29 +395,32 @@ function hasMergeCheckAttempt(
   project: ProjectId,
   attempt: string,
 ): boolean {
-  return projectState(store, project).events.some((event) => {
-    const payload = event.payload;
-    if (
-      !event.card_id &&
-      event.actor.kind === "system" &&
-      event.type.startsWith("merge_batch_check_") &&
-      (payload as { check?: { attempt_id?: string } } | null)?.check
-        ?.attempt_id === attempt
-    )
-      return true;
-    return (
-      event.card_id &&
-      event.actor.project_id === project &&
-      [
-        "merge_check_queued",
-        "merge_check_started",
-        "merge_check_finished",
-        "merge_check_requeued",
-      ].includes(event.type) &&
-      payload !== null &&
-      typeof payload === "object" &&
-      "attempt_id" in payload &&
-      payload.attempt_id === attempt
-    );
-  });
+  const events = projectState(store, project).events;
+  return (
+    events.some(
+      (event) =>
+        !event.card_id &&
+        event.actor.kind === "system" &&
+        event.type.startsWith("merge_batch_check_") &&
+        (event.payload as { check?: { attempt_id?: string } } | null)?.check
+          ?.attempt_id === attempt,
+    ) ||
+    // C-671: card checks from the type index, closed cards included.
+    eventsOfTypes(events, [
+      "merge_check_queued",
+      "merge_check_started",
+      "merge_check_finished",
+      "merge_check_requeued",
+    ]).some((event) => {
+      const payload = event.payload;
+      return (
+        !!event.card_id &&
+        event.actor.project_id === project &&
+        payload !== null &&
+        typeof payload === "object" &&
+        "attempt_id" in payload &&
+        payload.attempt_id === attempt
+      );
+    })
+  );
 }

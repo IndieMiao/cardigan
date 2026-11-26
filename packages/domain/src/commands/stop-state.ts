@@ -1,5 +1,5 @@
 import type { Assignment, Event, Run, RuntimeRef } from "../entities.js";
-import { fullEventHistory } from "../event-index.js";
+import { eventsOfTypes, fullEventHistory } from "../event-index.js";
 import type { AssignmentId, CardId } from "../ids.js";
 import type { CommandDraft } from "./core.js";
 
@@ -28,8 +28,8 @@ interface StopIndex {
   readonly state: ReadonlyMap<unknown, StopState>;
   /** Latest of a stop (any kind) and a start (dispatch or human start) is the stop. */
   readonly recorded: ReadonlyMap<unknown, boolean>;
-  /** Index of the first stop of the episode that is still unreleased. */
-  readonly episode: ReadonlyMap<unknown, number>;
+  /** First stop event of the episode that is still unreleased. */
+  readonly episode: ReadonlyMap<unknown, Event>;
   /** Session whose exit this unreleased episode has already proven. */
   readonly exited: ReadonlyMap<unknown, unknown>;
   /**
@@ -54,6 +54,16 @@ const authorOf = (actor: Event["actor"]) =>
     : actor.kind;
 // One index per immutable event snapshot. Array order (not timestamps or
 // per-card sequence numbers) remains the authority, exactly as in the scan.
+// C-671: only these types change the index; the type index keeps their order
+// and also answers for stops on closed cards in the `slim` command state.
+const STOP_TYPES = [
+  ASSIGNMENT_STOPPED,
+  "run_dispatched",
+  ASSIGNMENT_START_REQUESTED,
+  ASSIGNMENT_STOP_RELEASED,
+  ASSIGNMENT_STOP_EXIT_CONFIRMED,
+  ASSIGNMENT_HOLD_RESUMED,
+];
 const stoppedAssignments = new WeakMap<readonly Event[], StopIndex>();
 
 const field = (payload: unknown, key: string): unknown =>
@@ -66,7 +76,7 @@ function stopIndex(events: readonly Event[]): StopIndex {
   if (!index) {
     const state = new Map<unknown, StopState>();
     const recorded = new Map<unknown, boolean>();
-    const episode = new Map<unknown, number>();
+    const episode = new Map<unknown, Event>();
     const exited = new Map<unknown, unknown>();
     const releasing = new Map<unknown, string>();
     const paused = new Map<unknown, HeldPause>();
@@ -74,8 +84,8 @@ function stopIndex(events: readonly Event[]): StopIndex {
       episode.delete(id);
       exited.delete(id);
     };
-    // C-643: `run_dispatched` is telemetry; array order covers the full history.
-    for (const [at, event] of fullEventHistory(events).entries()) {
+    // C-643: `run_dispatched` is telemetry; the lookup covers the full history.
+    for (const event of eventsOfTypes(events, STOP_TYPES)) {
       const id = field(event.payload, "assignment_id");
       if (event.type === ASSIGNMENT_STOPPED) {
         const next =
@@ -90,7 +100,7 @@ function stopIndex(events: readonly Event[]): StopIndex {
         else paused.delete(id);
         recorded.set(id, true);
         // A retried stop continues the same episode.
-        if (!episode.has(id)) episode.set(id, at);
+        if (!episode.has(id)) episode.set(id, event);
         const session = field(event.payload, "runtime_ref");
         if (session !== undefined && session !== null)
           releasing.set(id, JSON.stringify(session));
@@ -184,7 +194,9 @@ export function openStopEpisodeStart(
   events: readonly Event[],
   assignment_id: AssignmentId,
 ): number | undefined {
-  return stopIndex(events).episode.get(assignment_id);
+  const start = stopIndex(events).episode.get(assignment_id);
+  const at = start ? fullEventHistory(events).indexOf(start) : -1;
+  return at >= 0 ? at : undefined;
 }
 
 /** C-620: this unreleased stop has already proven `ref`'s exit. */

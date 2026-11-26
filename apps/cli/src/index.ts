@@ -16,6 +16,7 @@ import { authorizeCliInvocation, openCliStore } from "./host.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
+import { runHcCommand, runMaintenanceCommand } from "./maintenance.js";
 import { runMemberCommand } from "./member.js";
 import { runMergeCommand } from "./merge.js";
 import { runPreferenceCommand } from "./preference.js";
@@ -76,13 +77,15 @@ const TOP_LEVEL_USAGE = [
   "  init             建库并执行迁移",
   "  self-deploy watch|roles  主机自举部署监督器；只部署中心 main，配置仅来自主机",
   "  deploy adopt|pin|unpin  人工认领 main 区间、固定版本或解除固定；必填 --reason",
+  "  maintenance begin|run|status|continue|end|abandon  人专用停服维护：暂停派活和自动部署，等在跑工作结束后停服，结束时核对并恢复",
+  "  hc upgrade --version <版本>  人专用 hc 升级：核 SHA-256、分版本目录预置，经维护入口切换、冒烟，失败自动回退",
   "  project create   创建项目（--code 必填）；project code 查看或登记项目代号",
   "  role             列出、查看、创建、复制、修改、停用、恢复和回退角色；upgrade --from-default 按默认包追加新版本",
   "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
   "  pm start         一键启动 PM Office 与 PM Ops（已在运行就跳过）",
   "  pm rotate        把常驻 PM 换到 pm 最新版本（--office / --ops），事项转给新 Assignment",
   "  pm restart       重开常驻 PM 会话（--office / --ops），不暂停、不转交事项",
-  "  host-ops create|start|rotate  创建、启动或轮换常驻主机运维（仅人类，不显示凭据）",
+  "  host-ops create|start|rotate|restart  创建、启动、轮换或重开常驻主机运维（仅人类，不显示凭据）",
   "  preference get|set auto-merge-after  查看或修改超时自动合并偏好",
   "  preference get|set merge-confirm-snooze-default  查看或修改合并确认默认暂缓分钟数（默认 240）",
   "  preference get|set merge-confirm-stall-after  查看或修改 PM 合并确认停留告警分钟数（默认 60）",
@@ -258,6 +261,8 @@ export async function main(
     }
     if (command === "self-deploy") return await runSelfDeployCommand(rest, io);
     if (command === "deploy") return await runDeployCommand(rest, io);
+    if (command === "maintenance") return await runMaintenanceCommand(rest, io);
+    if (command === "hc") return await runHcCommand(rest, io);
     if (command === "member") return await runMemberCommand(rest, io);
     if (command === "employee") return await runEmployeeCommand(rest, io);
     if (command === "avatar") return runAvatarCommand(rest, io);

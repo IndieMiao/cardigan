@@ -226,8 +226,89 @@ test.each([
     );
     expect(result.session_launch_run_id).toBe(expected.launch_run);
     expect(result.processes).toEqual(live ? [] : null);
+    // C-746: every null live field names why; a present one names nothing.
+    expect(result.unavailable).toEqual(
+      live
+        ? { terminals: "other", events: "other" }
+        : Object.fromEntries(
+            ["terminals", "processes", "events"].map((k) => [
+              k,
+              current ? "session_not_bound" : "run_not_current",
+            ]),
+          ),
+    );
   },
 );
+
+test("C-746: inspecting an idle remote session names why each field is null instead of returning bare nulls", async () => {
+  const { execution, a, target } = worker("remote-worker");
+  const generation = "c".repeat(32);
+  const owner = {
+    ...a,
+    runtime_ref: {
+      target,
+      runtime_machine: "binding",
+      machine_id: "remote-worker",
+      terminal_ref: "binding/t86",
+      agent_name: "agent",
+      launch_generation: { run_id: unwrap(formatId("run", 2319)), generation },
+    },
+  };
+  const collector = (out: object) =>
+    vi
+      .mocked(agentProcessCommand)
+      .mockResolvedValueOnce(
+        transport(
+          `process.stdin.resume().on('end',()=>console.log(${JSON.stringify(JSON.stringify(out))}))`,
+        ),
+      );
+  // sensen C-113#69: the query named the session's completed launch Run.
+  // That Run does not hold the session, so the collector was not asked.
+  collector(reply);
+  const finished = await inspectWorker(
+    execution,
+    project,
+    owner,
+    { id: "R-2319", status: "completed" } as Run,
+    false,
+    "darwin",
+  );
+  expect(finished).toMatchObject({
+    terminals: null,
+    processes: null,
+    events: null,
+    unavailable: {
+      terminals: "run_not_current",
+      processes: "run_not_current",
+      events: "run_not_current",
+    },
+  });
+  // The unqualified query of the idle Assignment reads the live facts; the
+  // collector's own reasons pass through, unknown codes are never echoed.
+  collector({
+    ...reply,
+    processes: null,
+    unavailable: {
+      terminals: "core_error",
+      processes: "process_identity_changed",
+      events: "/private/path",
+    },
+  });
+  const idle = await inspectWorker(
+    execution,
+    project,
+    owner,
+    undefined,
+    true,
+    "darwin",
+  );
+  expect(idle.unavailable).toEqual({
+    terminals: "core_error",
+    processes: "process_identity_changed",
+    events: "other",
+  });
+  expect(JSON.stringify(idle)).not.toContain("/private/path");
+});
 test.each(["alive", "exited", "unknown"] as const)(
   "native local: only exact hc evidence is exposed (%s)",
   async (value) => {

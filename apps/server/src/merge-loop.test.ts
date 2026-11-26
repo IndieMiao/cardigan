@@ -249,6 +249,8 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
           card_id: scenario.card.id,
           instructions: "请查看主机日志",
           why_human: "只有主机能看",
+          // C-742: the owner performs these actions.
+          executor: "owner",
           expected_return: "日志摘要",
           blocked_work_items: [],
           ...(blocks_merge
@@ -259,7 +261,6 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
       ),
     );
   ask(false);
-  const blocking = ask(true);
   const confirmation = mergeConfirmation(f, scenario.card.id);
   if (!confirmation) throw new Error("Missing confirmation");
   f.apply((s, a, p) =>
@@ -271,11 +272,13 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
         option: "merge",
         rationale: "已核实",
         raw_quote: "已核实",
-        merge_override_reason: "测试强行确认后仍须等待人工事项",
       },
       p,
     ),
   );
+  // C-760: a hold raised after the confirmation still holds the merge
+  // (an override can no longer pass one silently).
+  const blocking = ask(true);
   await loop.tick(f.project_id);
   await loop.tick(f.project_id);
   expect(skips()).toHaveLength(2);

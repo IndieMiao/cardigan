@@ -13,6 +13,7 @@ import {
   dispatchRecoveryUsed,
   dispatchTargetWaitMs,
   eventById,
+  eventsOfTypes,
   type HarnessActivity,
   hasRunTarget,
   hostOpsPending,
@@ -33,6 +34,7 @@ import {
   retireRecoveryQueuedRun,
   reviewRunWakeDisposition,
   runTargetWaitReason,
+  startDependencyReadyRun,
   startDispatchStop,
   stoppedByHuman,
   unreadableCommentTrigger,
@@ -129,7 +131,11 @@ function failedRecoveryRuns(
   if (!failed) {
     const recovered = new Set<unknown>();
     const aborted = new Set<unknown>();
-    for (const event of events) {
+    // C-671: from the type index (recoveries on closed cards count in `slim`).
+    for (const event of eventsOfTypes(events, [
+      "run_dispatch_recovered",
+      "run_dispatch_aborted",
+    ])) {
       if (typeof event.payload !== "object" || event.payload === null) continue;
       if (
         event.type === "run_dispatch_recovered" &&
@@ -445,6 +451,28 @@ export async function retryDispatchedRuns(
     const owner = owners.get(candidate.assignment_id);
     // External identities have no managed terminal, including stale recovery records.
     if (owner?.external) continue;
+    // C-735: a session refused while its prerequisites were unfinished never
+    // acknowledges again by itself; start its Run once they are complete.
+    if (
+      candidate.status === "dispatched" &&
+      !candidate.started_at &&
+      store.uow.run((tx) => {
+        const sent = listBellAttempts(store.database, project, candidate.id)
+          .filter((attempt) => attempt.outcome === "sent")
+          .at(-1)?.finished_at;
+        const effect = unwrap(
+          startDependencyReadyRun(
+            loadState(tx, project),
+            actor,
+            { run_id: candidate.id, ...(sent ? { bell_sent_at: sent } : {}) },
+            { clock, ids: tx.ids },
+          ),
+        );
+        persistEffect(tx, project, effect);
+        return !!effect.data;
+      })
+    )
+      continue;
     if (candidate.dispatch_stop) {
       // Resume the original target even after monitor changed status or a host cancelled it.
       await stopRun(candidate.id, candidate.dispatch_stop.reason);
@@ -831,8 +859,9 @@ export async function retryDispatchedRuns(
       const used =
         dispatchRecoveryUsed(observed.state.events, observed.a.id) ||
         recoveryChainUsed(observed.state, observed.run);
+      // C-735: a refused start acknowledgement is reported, never restarted.
       if (
-        used &&
+        (used || observed.run.ack_refusal) &&
         !unreadableCommentTrigger(observed.state, observed.run) &&
         reviewRunWakeDisposition(observed.state, observed.a, observed.run) !==
           "obsolete"

@@ -5,17 +5,26 @@ import {
   runnableQueuedRun,
   standingRunDormant,
 } from "../card-hold.js";
-import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
-import { appendEvents, eventById } from "../event-index.js";
+import type {
+  Actor,
+  Assignment,
+  Event,
+  Run,
+  RuntimeRef,
+  WorkItem,
+} from "../entities.js";
+import { appendEvents, eventById, eventsOfType } from "../event-index.js";
 import { HARNESSES, isHarness } from "../harness.js";
 import {
   automaticContextActionForRun,
+  hostOpsActionPending,
   hostOpsPending,
   observedLocalExitCause,
   pendingHostOpsActions,
 } from "../host-ops.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { MCP_SESSION_FAILURE } from "../mcp-session.js";
+import { preparationRetryWaiting } from "../preparation-retry.js";
 import { providerStarted } from "../provider-start.js";
 import { supersededRetirement } from "../retirement-session.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
@@ -43,11 +52,11 @@ import { currentReviewTarget, reviewRound } from "./review-round.js";
 import { restartStandingSession, resumeStanding } from "./standing.js";
 import { recordHumanStart } from "./stop-state.js";
 import { incrementalTestReview } from "./test-review.js";
-import { activeWork } from "./workflow.js";
+import { activeWork, workDependencyWait } from "./workflow.js";
 
 const unfinished = (run: Run) =>
   !["completed", "failed", "cancelled"].includes(run.status);
-function target(d: CommandDraft, id: AssignmentId) {
+function target(d: CommandDraft, id: AssignmentId, humanRestart = false) {
   const assignment = d.get("assignments", id);
   ensure(
     !assignment.role_upgrade &&
@@ -55,8 +64,14 @@ function target(d: CommandDraft, id: AssignmentId) {
     "illegal_transition",
     "Assignment role upgrade is pending",
   );
+  // C-741: the human's session restart has just closed a failed automatic
+  // restart's fence in this draft; any other host operation still blocks.
   ensure(
-    d.tool === "manage_host_ops_action" || !hostOpsPending(d.state.events, id),
+    d.tool === "manage_host_ops_action" ||
+      !(humanRestart ? hostOpsActionPending : hostOpsPending)(
+        d.state.events,
+        id,
+      ),
     "illegal_transition",
     "A host operation is pending",
   );
@@ -317,7 +332,11 @@ export function queueRunInDraft(
       p.expected_runtime_ref,
       p.reuse_queued,
     );
-  const assignment = target(d, p.assignment_id);
+  const assignment = target(
+    d,
+    p.assignment_id,
+    p.restart_session === true && d.actor.kind === "human",
+  );
   ensure(
     assignmentDependenciesAllowStart(d.state, assignment),
     "illegal_transition",
@@ -495,8 +514,7 @@ export function dispatchRun(
       "Launch stop is in progress",
     );
     ensure(
-      !stored.preparation_retry ||
-        Date.parse(d.now) >= Date.parse(stored.preparation_retry.ready_at),
+      !preparationRetryWaiting(stored, d.now),
       "illegal_transition",
       "工作目录准备重试正在退避等待",
     );
@@ -906,8 +924,10 @@ export function acknowledgeRun(
     if (status !== "acked")
       status = unwrap(transition("run", status, "acknowledge"));
     status = unwrap(transition("run", status, "start"));
-    const next = { ...run, status, started_at: d.now };
+    const { ack_refusal: _refusal, ...started } = run;
+    const next = { ...started, status, started_at: d.now };
     d.put("runs", next);
+    let dependencyWait: ReturnType<typeof workDependencyWait>;
     if (assignment.scope === "work_item") {
       const item = d.ownWork(assignment.work_item_id);
       // A directed pause discussion does not start the repair or spend a review round.
@@ -916,17 +936,193 @@ export function acknowledgeRun(
         trigger?.type === "instruction_issued" &&
         (trigger.payload as { pause_recipient?: string })?.pause_recipient ===
           assignment.id;
-      const active = discussion ? item : activeWork(d, item);
+      // C-735: woken before its prerequisites finish, the Run starts as a
+      // discussion and leaves the item waiting. Delivery and every other
+      // activation still go through activeWork's dependency checks.
+      dependencyWait = discussion ? undefined : workDependencyWait(d, item);
+      const active = discussion || dependencyWait ? item : activeWork(d, item);
       if (active.status !== item.status) d.put("work_items", active);
     }
     providerStarted(d, run);
     d.emit("run_started", cardId(d, assignment), {
       run_id: run.id,
       assignment_id: assignment.id,
+      ...(dependencyWait
+        ? {
+            dependency_wait: {
+              cards: [...dependencyWait.cards],
+              work_items: [...dependencyWait.work_items],
+            },
+          }
+        : {}),
       ...(run.recovery_policy && run.recovery_policy.root_run_id !== run.id
         ? { recovery_root_run_id: run.recovery_policy.root_run_id }
         : {}),
     });
+    return next;
+  });
+}
+
+/**
+ * C-735: whether the system may start this dispatched Run for its session.
+ * Before the dependency-wait fix, a session woken before its prerequisites
+ * finished had every start acknowledgement refused; its Run stayed dispatched
+ * and kept the Assignment busy, so no later bell reached the idle session and
+ * nothing would ever acknowledge it. Once the prerequisites are complete, a
+ * session that was sent this Run's bell and still called Card tools (or had
+ * a refusal recorded) afterwards is started here as its own acknowledgement
+ * would have.
+ */
+function dependencyReadyStart(
+  d: CommandDraft,
+  run: Run,
+  bellSentAt: string | undefined,
+): { assignment: Assignment; item: WorkItem } | undefined {
+  if (
+    !["dispatched", "acked"].includes(run.status) ||
+    run.started_at ||
+    run.dispatch_stop ||
+    run.inactivity_stop ||
+    run.recovery_policy ||
+    run.test_review ||
+    (run.launch_publication &&
+      !["started", "exited"].includes(run.launch_publication.phase))
+  )
+    return;
+  const assignment = d.get("assignments", run.assignment_id);
+  if (
+    assignment.status !== "active" ||
+    assignment.scope !== "work_item" ||
+    assignment.external ||
+    assignment.role_upgrade ||
+    assignment.idle_retirement?.phase === "stopping" ||
+    assignment.runtime_state !== "running" ||
+    !assignment.runtime_ref ||
+    assignment.mcp_handshake === "pending" ||
+    assignment.mcp_handshake === "missing" ||
+    hostOpsPending(d.state.events, assignment.id)
+  )
+    return;
+  // Only after this Run's own bell reached the session: starting it earlier
+  // would retire the pending wake, and a late call of the previous Run is
+  // not a refusal of this one.
+  const bell = run.bell_delivery;
+  const sent =
+    (bell?.run_id === run.id ? bell.sent_at : undefined) ?? bellSentAt;
+  const dispatched = eventsOfType(d.state.events, "run_dispatched").findLast(
+    (e) => (e.payload as { run_id?: unknown })?.run_id === run.id,
+  )?.created_at;
+  const since = sent && dispatched && sent > dispatched ? sent : dispatched;
+  const seen = [assignment.last_mcp_activity_at, run.ack_refusal?.at].filter(
+    (at): at is string => !!at,
+  );
+  if (!sent || !since || !seen.some((at) => at > since)) return;
+  const item = d.work(assignment.work_item_id);
+  const card = d.card(item.card_id);
+  if (
+    item.kind !== "produce" ||
+    item.assignment_id !== assignment.id ||
+    !["todo", "ready", "changes_requested"].includes(item.status) ||
+    (!item.depends_on.length && !card.depends_on_cards?.length) ||
+    workDependencyWait(d, item)
+  )
+    return;
+  return { assignment, item };
+}
+
+/**
+ * C-735: system start of a dispatched Run whose session was refused while its
+ * prerequisites were unfinished and which are now complete. No new session or
+ * terminal is involved; the Run's own session keeps it. Returns undefined when
+ * the Run does not qualify.
+ */
+export function startDependencyReadyRun(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    run_id: RunId;
+    /** Host journal: when a bell for this Run was last sent successfully. */
+    bell_sent_at?: string;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "start_dependency_ready_run", ports, (d) => {
+    const run = d.get("runs", p.run_id);
+    const ready = dependencyReadyStart(d, run, p.bell_sent_at);
+    if (!ready) return;
+    const { assignment, item } = ready;
+    if (
+      d
+        .list("runs")
+        .some(
+          (r) =>
+            r.id !== run.id &&
+            r.assignment_id === assignment.id &&
+            ["acked", "running"].includes(r.status),
+        )
+    )
+      return;
+    let status: Run["status"] = run.status;
+    if (status !== "acked")
+      status = unwrap(transition("run", status, "acknowledge"));
+    status = unwrap(transition("run", status, "start"));
+    const { ack_refusal: _refusal, ...rest } = run;
+    const next: Run = { ...rest, status, started_at: d.now };
+    d.put("runs", next);
+    // Mirrors activeWork for a produce item whose dependencies are met.
+    let work = item;
+    if (work.status === "todo") work = d.move(work, "dependencies_met");
+    work = d.move(work, "run_started");
+    d.put("work_items", work);
+    providerStarted(d, run);
+    const body = `${assignment.id}（${run.id}）的前置已完成，会话此前已连上 Card 工具但启动确认被拒；系统已补做启动确认，${item.id} 开工。`;
+    d.emit(
+      "run_started",
+      item.card_id,
+      {
+        run_id: run.id,
+        assignment_id: assignment.id,
+        system_acknowledged: "dependencies_met",
+      },
+      { type: "system", body, run_id: run.id },
+    );
+    return next;
+  });
+}
+
+/** C-735: longest refusal message kept on the Run and its event. */
+export const ACK_REFUSAL_MESSAGE_MAX = 500;
+
+/**
+ * C-735: record why the caller's own dispatched Run could not be acknowledged,
+ * so dispatch patrol, host ops and PM see the cause instead of a silent
+ * startup failure. A repeat of the same refusal changes nothing.
+ */
+export function recordRunAckRefusal(
+  state: CommandState,
+  actor: Actor,
+  p: { run_id: RunId; code: string; message: string },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "acknowledge_run", ports, (d) => {
+    const run = d.ownRun(p.run_id);
+    if (!["dispatched", "acked"].includes(run.status) || run.started_at)
+      return run;
+    const code = String(p.code).slice(0, 64) || "unknown";
+    const message =
+      String(p.message).trim().slice(0, ACK_REFUSAL_MESSAGE_MAX) || code;
+    if (run.ack_refusal?.code === code && run.ack_refusal.message === message)
+      return run;
+    const next: Run = { ...run, ack_refusal: { code, message, at: d.now } };
+    d.put("runs", next);
+    const assignment = d.get("assignments", run.assignment_id);
+    const body = `${assignment.id}（${run.id}）已连上 Card 工具，但启动确认被拒（${code}）：${message}`;
+    d.emit(
+      "run_ack_refused",
+      cardId(d, assignment),
+      { run_id: run.id, assignment_id: assignment.id, code, message },
+      { type: "system", body, run_id: run.id },
+    );
     return next;
   });
 }

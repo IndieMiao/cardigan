@@ -501,3 +501,16 @@ test("C-650: a human pin counts separately; build failures keep the in-memory ru
   expect(g.records.at(-1)?.summary).toBe("build_failed");
   expect(g.calls.filter((c) => c === "build")).toHaveLength(1);
 });
+
+test("C-390: an open maintenance window holds automatic deployment", async () => {
+  const f = fixture();
+  let open = true;
+  const driver = { ...f.driver, maintenanceActive: async () => open };
+  const controller = new DeploymentController(driver);
+  await controller.tick();
+  expect(f.calls).toEqual([]);
+  expect(f.records).toEqual([]);
+  open = false;
+  await controller.tick();
+  expect(f.calls).toContain("build");
+});

@@ -260,6 +260,23 @@ test("context usage config defaults to ten minutes and accepts a host-selected c
     ).toThrow("CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS");
 });
 
+test("C-741: context restart retry delays use the domain default unless the host lists them", () => {
+  expect(resolveServerConfig({}).contextRestartRetryDelaysMs).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_CONTEXT_RESTART_RETRY_DELAYS_MS: " " })
+      .contextRestartRetryDelaysMs,
+  ).toBeUndefined();
+  expect(
+    resolveServerConfig({
+      CARDIGAN_CONTEXT_RESTART_RETRY_DELAYS_MS: " 60000, 180000 ",
+    }).contextRestartRetryDelaysMs,
+  ).toEqual([60_000, 180_000]);
+  for (const value of ["0", "60000,", "60000,,1", "-1", "1.5", "a"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_CONTEXT_RESTART_RETRY_DELAYS_MS: value }),
+    ).toThrow("CARDIGAN_CONTEXT_RESTART_RETRY_DELAYS_MS");
+});
+
 test("C-219 runtime failure limit is configurable and rejects invalid counts", () => {
   expect(
     resolveServerConfig({ CARDIGAN_RUNTIME_FAILURE_LIMIT: "5" })
@@ -381,6 +398,18 @@ test("framework dependency reminder accepts a positive host duration", () => {
     expect(() =>
       resolveServerConfig({ CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS: value }),
     ).toThrow("CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS");
+});
+
+test("C-762 story summary handoff accepts a positive host duration", () => {
+  expect(resolveServerConfig({}).storySummaryHandoffMs).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_STORY_SUMMARY_HANDOFF_MS: "3600000" })
+      .storySummaryHandoffMs,
+  ).toBe(3_600_000);
+  for (const value of ["0", "-1", "1.5", "Infinity"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_STORY_SUMMARY_HANDOFF_MS: value }),
+    ).toThrow("CARDIGAN_STORY_SUMMARY_HANDOFF_MS");
 });
 
 test("worker inspection cadence accepts only a positive deployment interval", () => {

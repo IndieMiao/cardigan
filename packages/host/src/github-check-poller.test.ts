@@ -940,6 +940,9 @@ test.each([
   "isolated timed out",
   "batch timeout",
   "card timeout",
+  "pre-agent_git baseline",
+  "agent_git recovered",
+  "agent_git unselected",
 ] as const)(
   "case contract is strict, receipts are scoped, batch timeout handling is preserved: %s",
   async (mode) => {
@@ -950,7 +953,9 @@ test.each([
       checks: request.checks.map((check) =>
         check.name === "test" && mode === "unselected"
           ? { ...check, affectedPaths: ["apps/web"] }
-          : check,
+          : check.name === "test" && mode === "agent_git unselected"
+            ? { ...check, affectedPaths: ["packages/roles"] }
+            : check,
       ),
     });
     f.complete();
@@ -958,11 +963,14 @@ test.each([
     const names = CASE_WORKFLOW_STEPS.filter(
       (name) =>
         !(mode === "missing all" && name.startsWith("Recovered ")) &&
-        !(mode === "partial" && name === "Recovered loopback"),
+        !(mode === "partial" && name === "Recovered loopback") &&
+        // C-757: a run on a baseline whose workflow predates the receipt.
+        !(mode === "pre-agent_git baseline" && name === "Recovered agent_git"),
     );
     const conclusion = (name: string) => {
       if (name.startsWith("Recovered "))
-        return name === "Recovered corepack" && !timeout
+        return (name === "Recovered corepack" && !timeout) ||
+          (name === "Recovered agent_git" && mode.startsWith("agent_git"))
           ? "success"
           : "skipped";
       if (name === "test" && (timeout || mode === "failed")) return "failure";
@@ -985,6 +993,16 @@ test.each([
     const settled = await result;
     if (mode === "passed" || mode === "failed")
       expect(settled).toMatchObject({ status: mode, recovered: ["corepack"] });
+    else if (mode === "pre-agent_git baseline")
+      expect(settled).toMatchObject({
+        status: "passed",
+        recovered: ["corepack"],
+      });
+    else if (mode === "agent_git recovered")
+      expect(settled).toMatchObject({
+        status: "passed",
+        recovered: ["corepack", "agent_git"],
+      });
     else if (mode === "isolated failed")
       expect(settled).toMatchObject({
         status: "failed",

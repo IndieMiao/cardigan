@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
   type CardId,
+  type DormantLoader,
   type Event,
   EventLog,
   EventLogView,
@@ -12,9 +13,21 @@ import { prepare } from "./statements.js";
 /** C-639: the Store's `listStreams` result (an immutable log view). */
 export type EventStreams = EventLogView;
 
+/**
+ * C-671 `slim`: rows that existed when a project was first read and belong to
+ * a card closed at that time stay dormant (indexed, not kept decoded) unless
+ * their type is resident. Later rows are always decoded.
+ */
+interface Dormancy {
+  readonly closed: ReadonlySet<string>;
+  /** Rowid watermark of the first read. */
+  readonly until: number;
+}
+
 type Snapshot = {
   /** Global events rowid watermark this snapshot has read through. */
   through: number;
+  dormancy?: Dormancy;
   /** Shared append-only log; only COMMIT appends to it. */
   log: EventLog;
   /** Transaction-local rows (other connections' and our own) not yet published. */
@@ -32,7 +45,16 @@ type Snapshot = {
 export class CommandEvents {
   private committed = new Map<ProjectId, Snapshot>();
 
+  /**
+   * C-671: with `resident` (the `slim` scope), closed cards' rows of other
+   * types load dormant and are decoded from the table when first read.
+   */
+  constructor(private readonly resident?: ReadonlySet<string>) {}
+
   transaction(db: DatabaseSync) {
+    const resident = this.resident;
+    const first = (project: ProjectId, until: number) =>
+      resident ? firstRead(db, project, until, resident) : undefined;
     const pending = new Map<ProjectId, Snapshot>();
     const listStreams = (project: ProjectId): EventLogView => {
       const through = Number(
@@ -46,19 +68,17 @@ export class CommandEvents {
       if (previous?.through === through) return previous.view;
       const rows = db
         .prepare(
-          "SELECT doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid",
+          "SELECT rowid AS r, doc FROM events NOT INDEXED WHERE rowid > ? AND rowid <= ? AND project_id = ? ORDER BY rowid",
         )
         .iterate(previous?.through ?? 0, through, project);
       // C-649: the first read decodes straight into a fresh log (no row array
       // or per-stream copy), which keeps the restart peak and RSS down.
       if (!previous) {
-        const next = load(rows, through);
+        const next = load(rows, through, first(project, through));
         pending.set(project, next);
         return next.view;
       }
-      const added: Event[] = [];
-      for (const row of rows)
-        added.push(JSON.parse(row.doc as string) as Event);
+      const added = decode(rows, previous.dormancy);
       // Another project's rows move the watermark without changing this view.
       if (added.length === 0) {
         pending.set(project, { ...previous, through });
@@ -99,15 +119,13 @@ export class CommandEvents {
       })();
       let next: Snapshot;
       if (previous) {
-        const added: Event[] = [];
-        for (const row of rows)
-          added.push(JSON.parse(row.doc as string) as Event);
+        const added = decode(rows, previous.dormancy);
         const through = count < limit ? max : last;
         next = added.length
           ? extend(previous, added, through)
           : { ...previous, through };
       } else {
-        next = load(rows, max);
+        next = load(rows, max, first(project, max));
         if (count >= limit) next = { ...next, through: last };
       }
       pending.set(project, next);
@@ -147,8 +165,10 @@ export class CommandEvents {
 function load(
   rows: Iterable<Record<string, unknown>>,
   through: number,
+  first?: { dormancy: Dormancy; loader: DormantLoader },
 ): Snapshot {
   const log = new EventLog();
+  log.loader = first?.loader;
   let disordered: Event[] | undefined;
   for (const row of rows) {
     const event = JSON.parse(row.doc as string) as Event;
@@ -161,34 +181,110 @@ function load(
       disordered = [...log.all, event];
       continue;
     }
-    log.append(event);
+    if (first && dormant(first.dormancy, row, event)) log.appendDormant(event);
+    else log.append(event);
   }
+  // The rare rebuild decodes everything, so it needs no dormancy.
   if (disordered) return rebuild([], disordered, through);
-  return { through, log, view: new EventLogView(log, log.end) };
+  return {
+    through,
+    log,
+    view: new EventLogView(log, log.end),
+    ...(first ? { dormancy: first.dormancy } : {}),
+  };
+}
+
+/** C-671: whether a row read now stays dormant under `dormancy`. */
+const dormant = (
+  dormancy: Dormancy | undefined,
+  row: Record<string, unknown>,
+  event: Event,
+) =>
+  dormancy !== undefined &&
+  Number(row.r) <= dormancy.until &&
+  event.card_id !== undefined &&
+  dormancy.closed.has(event.card_id) &&
+  !RESIDENT.get(dormancy)?.has(event.type);
+const RESIDENT = new WeakMap<Dormancy, ReadonlySet<string>>();
+
+type Row = { readonly event: Event; readonly dormant: boolean };
+function decode(
+  rows: Iterable<Record<string, unknown>>,
+  dormancy: Dormancy | undefined,
+): Row[] {
+  const added: Row[] = [];
+  for (const row of rows) {
+    const event = JSON.parse(row.doc as string) as Event;
+    added.push({ event, dormant: dormant(dormancy, row, event) });
+  }
+  return added;
+}
+
+/**
+ * C-671: the closed cards of a project's first read, and the reader that
+ * decodes their dormant rows again by (stream, seq) — rows are never updated
+ * or deleted, so the read returns what the log indexed.
+ */
+function firstRead(
+  db: DatabaseSync,
+  project: ProjectId,
+  until: number,
+  resident: ReadonlySet<string>,
+): { dormancy: Dormancy; loader: DormantLoader } {
+  const closed = new Set(
+    prepare(
+      db,
+      "SELECT id FROM cards WHERE project_id = ? AND json_extract(doc, '$.status') IN ('done', 'cancelled')",
+    )
+      .all(project)
+      .map((row) => String(row.id)),
+  );
+  const dormancy: Dormancy = { closed, until };
+  RESIDENT.set(dormancy, resident);
+  const loader: DormantLoader = (stream, seqs) => {
+    const wanted = new Set(seqs);
+    const found: Event[] = [];
+    for (const row of prepare(
+      db,
+      "SELECT seq, doc FROM events WHERE project_id = ? AND stream = ? AND seq >= ? AND seq <= ? ORDER BY seq",
+    ).iterate(project, stream, seqs[0] ?? 0, seqs.at(-1) ?? -1))
+      if (wanted.has(Number(row.seq)))
+        found.push(JSON.parse(row.doc as string) as Event);
+    return found;
+  };
+  return { dormancy, loader };
 }
 
 /** Append to the transaction overlay, or rebuild when a stream's seq goes back. */
 function extend(
   previous: Snapshot,
-  added: readonly Event[],
+  added: readonly Row[],
   through: number,
 ): Snapshot {
   const overlay = previous.overlay ?? new EventLog(previous.log.end);
+  overlay.loader ??= previous.log.loader;
   const last = new Map<string, number | undefined>();
   const lastSeq = (stream: string) => {
     if (!last.has(stream))
       last.set(stream, overlay.lastSeq(stream) ?? previous.log.lastSeq(stream));
     return last.get(stream);
   };
-  for (const event of added) {
+  for (const { event } of added) {
     const stream = event.card_id ?? "";
     const seq = lastSeq(stream);
     if (seq !== undefined && event.seq <= seq)
-      return rebuild([previous.view], added, through);
+      return rebuild(
+        [previous.view],
+        added.map((row) => row.event),
+        through,
+      );
     last.set(stream, event.seq);
   }
-  for (const event of added) overlay.append(event);
+  for (const { event, dormant } of added)
+    if (dormant) overlay.appendDormant(event);
+    else overlay.append(event);
   return {
+    ...(previous.dormancy ? { dormancy: previous.dormancy } : {}),
     through,
     log: previous.log,
     overlay,
@@ -233,9 +329,14 @@ function publish(snapshot: Snapshot): Snapshot {
     // Defensive: never splice an overlay onto a log that moved underneath it.
     return rebuild([snapshot.view], [], snapshot.through);
   }
-  for (const event of overlay.all) log.append(event);
+  log.appendLog(overlay);
   // Keep the transaction's view: base(< start) + overlay equals base(< end).
-  return { through: snapshot.through, log, view: snapshot.view };
+  return {
+    ...(snapshot.dormancy ? { dormancy: snapshot.dormancy } : {}),
+    through: snapshot.through,
+    log,
+    view: snapshot.view,
+  };
 }
 
 /** C-639 host facts for the hot command state that live outside entity lists. */

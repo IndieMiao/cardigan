@@ -10,6 +10,9 @@ import { type CheckFlakeId, checkFlakeCases } from "./check-flake-cases.js";
 const timeout = new Error(
   'Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".',
 );
+const longTimeout = new Error(
+  'Test timed out in 20000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".',
+);
 const download = new Error(
   "Command failed: pnpm test\n! Corepack is about to download https://registry.npmjs.org/pnpm/-/pnpm-12.21.0.tgz\nDownloading the pnpm 12.21.0 binary for linux-x64...\n",
 );
@@ -80,6 +83,67 @@ test("only one retry, tied to exact case, scope and a single matching environmen
   expect(
     matchesFailure("ssh_remote", new Error('Unable to find role="tabpanel"')),
   ).toBe(false);
+});
+
+test("C-757: the synthetic Git transport case retries once only for its own 20000ms timeout", () => {
+  expect(checkFlakeCases.agent_git).toEqual({
+    file: "apps/cli/src/agent-git.test.ts",
+    name: "Agent workspace Git > synthetic Darwin writer and Linux reviewer clone, build and return deliveries on independent disks",
+    signature: "vitest-20000ms",
+  });
+  expect(policy("agent_git", ["agent_git"], [longTimeout])).toBe(1);
+  expect(policy("agent_git", [], [longTimeout])).toBe(0);
+  expect(policy("agent_git", ["corepack"], [longTimeout])).toBe(0);
+  expect(
+    policy("agent_git", ["agent_git"], [longTimeout], "Agent workspace Git"),
+  ).toBe(0);
+  // Another case of the same file is not the registered one.
+  expect(
+    policy(
+      "agent_git",
+      ["agent_git"],
+      [longTimeout],
+      "Agent workspace Git > another case",
+    ),
+  ).toBe(0);
+  expect(policy("agent_git", ["agent_git"], [timeout])).toBe(0);
+  expect(
+    policy("agent_git", ["agent_git"], [new Error("assertion"), longTimeout]),
+  ).toBe(0);
+  expect(
+    matchesFailure("agent_git", new Error("Test timed out in 20000ms")),
+  ).toBe(false);
+  expect(
+    matchesFailure(
+      "agent_git",
+      Object.assign(new Error(longTimeout.message), { expected: 1 }),
+    ),
+  ).toBe(false);
+  // The existing 5000ms cases keep their own signature only.
+  expect(policy("ssh_local", ["ssh_local"], [timeout])).toBe(1);
+  expect(policy("ssh_local", ["ssh_local"], [longTimeout])).toBe(0);
+  const attempts = [
+    { state: "failed", retryIndex: 0, repeatIndex: 0, errors: [longTimeout] },
+    { state: "passed", retryIndex: 1, repeatIndex: 0 },
+  ] as const;
+  const row = { ...checkFlakeCases.agent_git, state: "passed", attempts };
+  expect(caseReceipts(["agent_git"], [row])).toEqual({
+    recovered: ["agent_git"],
+    complete: true,
+  });
+  for (const rows of [
+    [{ ...row, state: "failed" }],
+    [
+      {
+        ...row,
+        attempts: [{ ...attempts[0], errors: [timeout] }, attempts[1]],
+      },
+    ],
+  ])
+    expect(caseReceipts(["agent_git"], rows)).toEqual({
+      recovered: [],
+      complete: false,
+    });
 });
 
 test("the coordinator ties recovery to exact identity, first signature and indexed attempts, not worker metadata", () => {

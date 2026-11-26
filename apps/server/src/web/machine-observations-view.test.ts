@@ -162,3 +162,48 @@ test("MC-5 an unreadable or absent catalog declares nothing instead of failing t
     }),
   ).toBeUndefined();
 });
+
+test("C-608 readiness results and warnings reach the machine views", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    store.createProject({ id: "a" });
+    const readiness = {
+      checked_at: now,
+      items: [
+        {
+          key: "network",
+          status: "warning" as const,
+          detail: "链路慢：下行 0.6 MB/s，往返 820 ms（阈值 2.0 MB/s、500 ms）",
+        },
+      ],
+      metrics: { rtt_ms: 820 },
+    };
+    beginMachineObservation(store, actor, "a", "local", "probe", now);
+    completeMachineObservation(
+      store,
+      actor,
+      "a",
+      "local",
+      "probe",
+      {
+        status: "passed",
+        checked_at: now,
+        blockers: [],
+        warnings: ["worker helper 与当前部署的 SHA-256 不一致"],
+        launch_enabled: true,
+        readiness,
+      },
+      [],
+    );
+    expect(readExecution(store, "a", url, now).machines[0]?.health).toEqual({
+      status: "passed",
+      checked_at: now,
+      blockers: [],
+      available: true,
+      warnings: ["worker helper 与当前部署的 SHA-256 不一致"],
+      readiness,
+    });
+  } finally {
+    store.close();
+  }
+});

@@ -49,14 +49,56 @@ export function lastRunActivity(
     ),
   );
 }
+/** Where the attributable progress behind an automatic stop came from. */
+export type InactiveStopEvidence = "session_metadata" | "transcript_write";
+
+/**
+ * C-752: the last write of this Run's own Claude transcript. The bounded
+ * record must belong to this Run, session, terminal reference and generation;
+ * the raw write time of the same file then covers every later record of that
+ * session (errors, sidechains, records outside the worktree), so it can only
+ * delay a stop. Without both facts there is no evidence.
+ */
+function transcriptWriteTime(
+  state: CommandState,
+  run: Run,
+  assignment: Assignment,
+  now: string,
+  file: HarnessActivity | undefined,
+): number | undefined {
+  if (
+    run.harness !== "claude-code" ||
+    !file ||
+    file.source !== "claude-code:transcript_mtime" ||
+    file.run_id !== run.id ||
+    file.error ||
+    !file.written_at
+  )
+    return;
+  const written = Date.parse(file.written_at);
+  if (
+    !Number.isFinite(written) ||
+    !associatedHarnessActivity(state, assignment, now, file)
+  )
+    return;
+  const at = Math.max(Date.parse(file.updated_at), written);
+  return associatedHarnessActivity(state, assignment, now, {
+    ...file,
+    updated_at: new Date(at).toISOString(),
+  })
+    ? at
+    : undefined;
+}
+
 /** Claude and remote workers require attributable progress, not just MCP silence. */
-export function lastInactiveStopActivity(
+export function inactiveStopEvidence(
   state: CommandState,
   run: Run,
   assignment: Assignment,
   now: string,
   sample?: HarnessActivity,
-): number | undefined {
+  file?: HarnessActivity,
+): { at: number; source: InactiveStopEvidence | "mcp" } | undefined {
   if (run.harness === "claude-code" || assignment.machine_id !== "local") {
     const associated = associatedHarnessActivity(
       state,
@@ -64,35 +106,62 @@ export function lastInactiveStopActivity(
       now,
       sample,
     );
-    if (
-      associated?.source !== `${run.harness}:session_metadata` ||
-      associated.run_id !== run.id
-    )
-      return;
-    if (!associated.error)
-      return lastRunActivity(
-        run,
-        assignment,
-        Date.parse(associated.updated_at),
-      );
-    // An error proves ownership, not progress. Never fall back to MCP alone.
-    const progress = associated.last_progress_at;
-    if (
-      !progress ||
-      Date.parse(progress) > Date.parse(associated.updated_at) ||
-      !associatedHarnessActivity(state, assignment, now, {
-        ...associated,
-        updated_at: progress,
-      })
-    )
-      return;
-    return lastRunActivity(run, assignment, Date.parse(progress));
+    const metadata =
+      associated?.source === `${run.harness}:session_metadata` &&
+      associated.run_id === run.id
+        ? associated
+        : undefined;
+    let progress: number | undefined;
+    if (metadata && !metadata.error) progress = Date.parse(metadata.updated_at);
+    else if (metadata) {
+      // An error proves ownership, not progress. Never fall back to MCP alone,
+      // and a later transcript write cannot stand in for unverified progress.
+      const last = metadata.last_progress_at;
+      if (
+        !last ||
+        Date.parse(last) > Date.parse(metadata.updated_at) ||
+        !associatedHarnessActivity(state, assignment, now, {
+          ...metadata,
+          updated_at: last,
+        })
+      )
+        return;
+      progress = Date.parse(last);
+    }
+    const written = transcriptWriteTime(state, run, assignment, now, file);
+    if (progress === undefined && written === undefined) return;
+    const latest = Math.max(
+      progress ?? Number.NEGATIVE_INFINITY,
+      written ?? Number.NEGATIVE_INFINITY,
+    );
+    return {
+      at: lastRunActivity(run, assignment, latest),
+      source:
+        progress !== undefined && progress >= (written ?? latest)
+          ? "session_metadata"
+          : "transcript_write",
+    };
   }
-  return lastRunActivity(
-    run,
-    assignment,
-    harnessActivityTime(currentHarnessActivity(state, assignment, now, sample)),
-  );
+  return {
+    at: lastRunActivity(
+      run,
+      assignment,
+      harnessActivityTime(
+        currentHarnessActivity(state, assignment, now, sample),
+      ),
+    ),
+    source: "mcp",
+  };
+}
+export function lastInactiveStopActivity(
+  state: CommandState,
+  run: Run,
+  assignment: Assignment,
+  now: string,
+  sample?: HarnessActivity,
+  file?: HarnessActivity,
+): number | undefined {
+  return inactiveStopEvidence(state, run, assignment, now, sample, file)?.at;
 }
 export function inactiveRunDue(
   run: Run,
@@ -132,6 +201,8 @@ export function claimInactiveRunStop(
     run_id: RunId;
     after_ms: number;
     harness_activity?: HarnessActivity | undefined;
+    /** C-752: the same Run's Claude transcript write evidence. */
+    file_activity?: HarnessActivity | undefined;
   },
   ports: CommandPorts,
 ) {
@@ -143,13 +214,15 @@ export function claimInactiveRunStop(
     );
     const run = d.get("runs", p.run_id),
       a = d.get("assignments", run.assignment_id);
-    const lastActivity = lastInactiveStopActivity(
+    const evidence = inactiveStopEvidence(
       state,
       run,
       a,
       d.now,
       p.harness_activity,
+      p.file_activity,
     );
+    const lastActivity = evidence?.at;
     // Read-only diagnoses (open or reported) have zero stop grace. This checks
     // execution/exit fences only; those must never expire on a timer.
     if (hostOpsPending(state.events, a.id)) return;
@@ -180,6 +253,7 @@ export function claimInactiveRunStop(
       last_activity_at: new Date(
         lastActivity ?? lastRunActivity(run, a),
       ).toISOString(),
+      ...(evidence ? { evidence: evidence.source } : {}),
     });
     const next: Run = {
       ...run,
@@ -206,6 +280,7 @@ export function startInactiveRunStop(
     attempt_id: string;
     after_ms: number;
     harness_activity?: HarnessActivity | undefined;
+    file_activity?: HarnessActivity | undefined;
   },
   ports: CommandPorts,
 ) {
@@ -228,6 +303,7 @@ export function startInactiveRunStop(
       a,
       d.now,
       p.harness_activity,
+      p.file_activity,
     );
     const due = stop.stopping
       ? lastActivity !== undefined &&

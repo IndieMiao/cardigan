@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -896,4 +897,220 @@ test("C-695: 恢复卡片 waits while another card form is open", () => {
   expect(
     screen.getByRole("button", { name: "恢复卡片" }).hasAttribute("disabled"),
   ).toBe(true);
+});
+
+/** C-701: an IntersectionObserver the test moves the panel through. */
+function stubPanelObserver() {
+  const observers: ((entries: IntersectionObserverEntry[]) => void)[] = [];
+  vi.stubGlobal(
+    "IntersectionObserver",
+    class {
+      constructor(callback: (entries: IntersectionObserverEntry[]) => void) {
+        observers.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  return (where: "above" | "in view" | "below") =>
+    act(() => {
+      for (const callback of observers)
+        callback([
+          {
+            isIntersecting: where === "in view",
+            boundingClientRect: {
+              top: where === "above" ? -200 : where === "below" ? 900 : 100,
+              bottom: where === "above" ? -40 : where === "below" ? 1100 : 300,
+            },
+            rootBounds: { top: 0 },
+          } as unknown as IntersectionObserverEntry,
+        ]);
+    });
+}
+
+test("C-701: the page dock shows the card and the main action once the panel scrolls away", async () => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  const move = stubPanelObserver();
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () =>
+          cardDetail({
+            card: {
+              ...card,
+              waiting_on: [],
+              next_owners: [{ kind: "human", ref: "human" }],
+            },
+            template: general,
+            mark_done: { allowed: true, reason: null },
+          }),
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const article = await screen.findByRole("article", { name: "卡片 C-1" });
+  await screen.findByRole("region", { name: "下一步" });
+  expect(screen.queryByRole("region", { name: "主操作" })).toBeNull();
+  move("above");
+  const dock = screen.getByRole("region", { name: "主操作" });
+  // First in the detail, so it sticks to the top of what scrolls.
+  expect(article.firstElementChild?.contains(dock)).toBe(true);
+  expect(dock.textContent).toContain("C-1");
+  expect(dock.textContent).toContain(card.title);
+  const action = within(dock).getByRole("button", { name: "标记完成" });
+  expect(action.className).toContain("ui-button-emphasis");
+  fireEvent.click(action);
+  // The panel's own action ran: its form opened and took the focus.
+  await waitFor(() =>
+    expect(
+      screen
+        .getByRole("form", { name: "标记完成" })
+        .contains(document.activeElement),
+    ).toBe(true),
+  );
+  // The modal dialog hides the page from the accessibility tree.
+  expect(
+    within(dock)
+      .getByRole("button", { name: "标记完成", hidden: true })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  move("in view");
+  expect(screen.queryByRole("region", { name: "主操作" })).toBeNull();
+  vi.unstubAllGlobals();
+});
+
+test("C-701: the drawer dock names the step; it runs the panel's action", () => {
+  const move = stubPanelObserver();
+  const onReveal = vi.fn();
+  const slot = document.createElement("div");
+  document.body.append(slot);
+  const q = merge();
+  render(
+    <CardNextStep
+      detail={cardDetail({
+        card: {
+          ...card,
+          status: "awaiting_merge",
+          waiting_on: [{ kind: "decision", ref: "Q-2", label: "等你确认合并" }],
+        },
+        merge_confirmations: [q],
+        decisions: [q],
+      })}
+      client={fakeClient()}
+      projectId="p-1"
+      onSaved={() => {}}
+      onReveal={onReveal}
+      markDone={() => null}
+      inDrawer
+      dock={slot}
+    />,
+  );
+  move("below");
+  expect(slot.childElementCount).toBe(0);
+  move("above");
+  const dock = within(slot).getByRole("region", { name: "主操作" });
+  expect(dock.textContent).toBe("等你确认合并Q-2处理合并确认");
+  fireEvent.click(within(dock).getByRole("button", { name: "处理合并确认" }));
+  expect(onReveal).toHaveBeenCalledWith("merge");
+  slot.remove();
+  vi.unstubAllGlobals();
+});
+
+test("C-698/C-701: the dock repeats “确认选择”, disabled until an option is picked, and submits the panel", async () => {
+  const move = stubPanelObserver();
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  const slot = document.createElement("div");
+  document.body.append(slot);
+  render(
+    <CardNextStep
+      detail={cardDetail({
+        card: {
+          ...card,
+          waiting_on: [{ kind: "decision", ref: "Q-3", label: "等你拍板" }],
+        },
+        decisions: [decision()],
+      })}
+      client={fakeClient({ recordDecision })}
+      projectId="p 1"
+      onSaved={() => {}}
+      onReveal={() => {}}
+      markDone={() => null}
+      inDrawer
+      dock={slot}
+    />,
+  );
+  move("above");
+  const dock = within(slot).getByRole("region", { name: "主操作" });
+  const action = within(dock).getByRole("button", { name: "确认选择" });
+  expect(action.hasAttribute("disabled")).toBe(true);
+  const region = screen.getByRole("region", { name: "下一步" });
+  fireEvent.click(radios(region)[1] as HTMLInputElement);
+  expect(action.hasAttribute("disabled")).toBe(false);
+  fireEvent.click(action);
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p 1",
+      "Q-3",
+      "b",
+      "",
+      expect.any(String),
+    ),
+  );
+  slot.remove();
+  vi.unstubAllGlobals();
+});
+
+test.each([
+  [
+    "waiting on someone else",
+    cardDetail({
+      card: {
+        ...card,
+        waiting_on: [],
+        next_owners: [{ kind: "role", ref: "coder" }],
+      },
+    }),
+  ],
+  [
+    "a refused mark done",
+    cardDetail({
+      card: {
+        ...card,
+        waiting_on: [],
+        next_owners: [{ kind: "human", ref: "human" }],
+      },
+      template: general,
+      mark_done: { allowed: false, reason: "当前会话不能标记完成" },
+    }),
+  ],
+])("C-701: no main action, no dock: %s", (_name, detail) => {
+  const move = stubPanelObserver();
+  const slot = document.createElement("div");
+  render(
+    <CardNextStep
+      detail={detail}
+      client={fakeClient()}
+      projectId="p-1"
+      onSaved={() => {}}
+      onReveal={() => {}}
+      markDone={() => (
+        <button type="button" aria-disabled="true">
+          标记完成
+        </button>
+      )}
+      dock={slot}
+    />,
+  );
+  move("above");
+  expect(slot.childElementCount).toBe(0);
+  vi.unstubAllGlobals();
 });

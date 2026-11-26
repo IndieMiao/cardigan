@@ -34,6 +34,30 @@ export function helperMismatch(reason: string) {
     /^worker helper 落后（已装 [0-9]+，需要 [0-9]+）$/u.test(reason)
   );
 }
+/**
+ * AGENTS.md: an incompatible helper change must raise the publication
+ * protocol. A same-protocol helper with a different digest is therefore
+ * compatible: it is upgraded, but never stops dispatch (C-608).
+ */
+export const softHelperMismatch = (reason: string) => reason === digestMismatch;
+export interface SplitCheck {
+  readonly blockers: readonly string[];
+  readonly warnings?: readonly string[];
+  readonly launch_enabled: boolean;
+}
+/** Move non-blocking findings out of blockers. */
+export function splitHelperWarnings<T extends SplitCheck>(
+  check: T,
+): T & { warnings: readonly string[] } {
+  const soft = check.blockers.filter(softHelperMismatch);
+  return {
+    ...check,
+    blockers: check.blockers.filter((b) => !softHelperMismatch(b)),
+    warnings: [...new Set([...(check.warnings ?? []), ...soft])],
+  };
+}
+export const hasHelperMismatch = (check: SplitCheck) =>
+  [...check.blockers, ...(check.warnings ?? [])].some(helperMismatch);
 
 /** Capability evidence identifies the probed platform as well as the private runtime binding.
  * Keep this separate from the persisted runtime_ref fingerprint used to address live terminals. */

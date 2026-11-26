@@ -1,5 +1,11 @@
 import { storyProposalConfirmable } from "@cardigan/domain";
-import type { ReactNode } from "react";
+import {
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import type {
   CardDetail,
   CardiganClient,
@@ -14,10 +20,12 @@ import {
 } from "../card-checking.js";
 import { routeHash } from "../route.js";
 import { useCardDecision } from "./CardDecision.js";
+import { CardFormOutlet } from "./CardFormOutlet.js";
 import { useCardResume } from "./CardHold.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { IdBadge, IdTag } from "./IdTag.js";
 import {
+  CardActionDock,
   CardDetailInlineOwner,
   DetailNextStep,
   DetailNextStepLine,
@@ -190,6 +198,8 @@ export function CardNextStep({
   markDone,
   completionId,
   busy = false,
+  inDrawer = false,
+  dock,
 }: {
   readonly detail: CardDetail;
   readonly client: CardiganClient;
@@ -201,9 +211,15 @@ export function CardNextStep({
   readonly completionId?: string | undefined;
   /** Another card form (edit, mark done) is open: panel writes wait. */
   readonly busy?: boolean;
+  /** The drawer has the card in its own title: the dock names the step. */
+  readonly inDrawer?: boolean;
+  /** C-701: where the main-action dock renders (CardActionDockSlot). */
+  readonly dock?: HTMLElement | null;
 }) {
   const { card } = detail;
   const { current, more, markDoneLater } = cardNextSteps(detail);
+  const panel = useRef<HTMLElement>(null);
+  const docked = usePanelScrolledAway(panel);
   const resume = useCardResume({ card, client, projectId, onSaved });
   const decision = useCardDecision({
     q: current.kind === "decision" ? current.q : undefined,
@@ -280,6 +296,10 @@ export function CardNextStep({
   let mine = true;
   let lines: ReactNode = null;
   let actions: ReactNode = null;
+  // The emphasis action, which the dock repeats once the panel scrolls away.
+  let primary:
+    | { readonly label: string; readonly disabled?: boolean }
+    | undefined;
   switch (current.kind) {
     case "closed":
       mine = false;
@@ -306,6 +326,7 @@ export function CardNextStep({
       break;
     case "hold":
       title = `已暂停：${card.hold?.reason ?? ""}`;
+      primary = { label: "恢复卡片", disabled: resume.pending || busy };
       lines = (
         <DetailNextStepLine>
           恢复条件：{card.hold?.resume_condition}
@@ -332,7 +353,6 @@ export function CardNextStep({
         <>
           {current.failed ? "合并检查未通过" : "等你确认合并"}
           <IdBadge id={q.id} />
-          {moreLink}
         </>
       );
       lines = (
@@ -349,7 +369,8 @@ export function CardNextStep({
           </DetailNextStepLine>
         </>
       );
-      actions = reveal("merge", "处理合并确认");
+      primary = { label: "处理合并确认" };
+      actions = reveal("merge", primary.label);
       break;
     }
     case "merge-pm":
@@ -377,16 +398,17 @@ export function CardNextStep({
         <>
           等你拍板
           <IdBadge id={current.ref} />
-          {moreLink}
         </>
       );
       // C-698: answered right here; special decisions keep Needs You.
       if (decision) {
         lines = decision.body;
+        primary = { label: "确认选择", disabled: decision.disabled };
         actions = decision.action;
       } else {
         lines = q && <DetailNextStepLine>{q.question}</DetailNextStepLine>;
-        actions = openNeedsYou("处理拍板");
+        primary = { label: "处理拍板" };
+        actions = openNeedsYou(primary.label);
       }
       break;
     }
@@ -395,49 +417,44 @@ export function CardNextStep({
         <>
           等你执行
           <IdBadge id={current.item.ref} />
-          {moreLink}
         </>
       );
       lines = actionTitle(current.item.ref) && (
         <DetailNextStepLine>{actionTitle(current.item.ref)}</DetailNextStepLine>
       );
+      primary = { label: "处理人工事项" };
       actions = (
         <>
-          {openNeedsYou("处理人工事项")}
+          {openNeedsYou(primary.label)}
           {comment}
         </>
       );
       break;
     case "questions":
-      title = (
-        <>
-          等你回答 {current.open} 个问题
-          {moreLink}
-        </>
-      );
+      title = <>等你回答 {current.open} 个问题</>;
       lines = card.story_progress && (
         <DetailNextStepLine>
           子卡已结束 {card.story_progress.finished}/{card.story_progress.total}
         </DetailNextStepLine>
       );
+      primary = { label: "回答问题" };
       actions = (
         <>
-          {reveal("questions", "回答问题")}
+          {reveal("questions", primary.label)}
           {markDone(false)}
         </>
       );
       break;
     case "proposal":
-      title = (
-        <>
-          等你确认拆解方案
-          {moreLink}
-        </>
-      );
-      actions = reveal("proposal", "查看拆解方案");
+      title = <>等你确认拆解方案</>;
+      primary = { label: "查看拆解方案" };
+      actions = reveal("proposal", primary.label);
       break;
     case "mark-done":
       title = "等你标记完成";
+      // A refused mark is a plain button with its reason: no main action.
+      if (detail.mark_done?.allowed === true)
+        primary = { label: "标记完成", disabled: busy };
       lines = humanActionLine;
       actions = (
         <>
@@ -517,11 +534,84 @@ export function CardNextStep({
       </>
     );
   return (
-    <DetailNextStep title={title} mine={mine} actions={actions}>
-      {lines}
-      {checkLine}
-    </DetailNextStep>
+    <>
+      <DetailNextStep
+        ref={panel}
+        title={
+          <>
+            {title}
+            {moreLink}
+          </>
+        }
+        mine={mine}
+        actions={actions}
+      >
+        {lines}
+        {checkLine}
+      </DetailNextStep>
+      {docked && primary && dock && (
+        <CardFormOutlet container={dock}>
+          <CardActionDock
+            title={
+              inDrawer ? (
+                title
+              ) : (
+                <>
+                  <IdBadge id={card.id} /> {card.title}
+                </>
+              )
+            }
+          >
+            <Button
+              size="regular"
+              variant="emphasis"
+              disabled={primary.disabled}
+              // The panel's first action is the main one; the dock runs it,
+              // so its forms, focus and feedback stay where they were. The
+              // panel comes back into view first for its feedback (恢复卡片);
+              // actions that lead elsewhere scroll there after.
+              onClick={() => {
+                const element = panel.current;
+                element?.scrollIntoView?.({ block: "nearest" });
+                element
+                  ?.querySelector<HTMLElement>(
+                    "[data-next-actions] [data-ui='button']",
+                  )
+                  ?.click();
+              }}
+            >
+              {primary.label}
+            </Button>
+          </CardActionDock>
+        </CardFormOutlet>
+      )}
+    </>
   );
+}
+
+/**
+ * C-701: true once the panel has scrolled out above its scroller (the drawer
+ * body or the viewport); false while it is in view or below.
+ */
+function usePanelScrolledAway(panel: RefObject<HTMLElement | null>) {
+  const [away, setAway] = useState(false);
+  useEffect(() => {
+    const element = panel.current;
+    if (!element || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry) return;
+        const top = entry.rootBounds?.top ?? 0;
+        setAway(
+          !entry.isIntersecting && entry.boundingClientRect.bottom <= top,
+        );
+      },
+      { root: element.closest<HTMLElement>(".drawer-body") },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [panel]);
+  return away;
 }
 
 /** Work items in progress and how many are done (as in the overview). */

@@ -121,6 +121,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 afterAll(() => rmSync(dataDir, { recursive: true, force: true }));
+/** C-746: a pre-challenge refusal the owner named (nothing was signed). */
+const refusedBy = (
+  reason: "probe_invalid" | "workspace_not_clean" | "terminal_busy",
+  owner_reason: string,
+) => ({
+  outcome: "withdrawn",
+  evidence: { stage: "probe", reason, owner_reason },
+});
 
 test("registration excludes legacy, Linux, standing, external and disabled launches", async () => {
   vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", "0");
@@ -284,13 +292,21 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
   const { root, tree, build, git, config, proc, closed, enrolled, pid } = f;
   const { stop, cleanup } = f;
   try {
+    // C-746: every refusal names its failed proof; none of them signals.
+    // A receipt whose birth identity differs is never the process to stop.
     expect(
-      (
-        await stop({
-          enrolled_process: { ...enrolled, start: "reused" },
-        })
-      ).outcome,
-    ).toBe("withdrawn");
+      await stop({
+        enrolled_process: { ...enrolled, start: "reused" },
+      }),
+    ).toEqual(refusedBy("probe_invalid", "cli_identity_unproven"));
+    // Another PID than the owner's own direct child is refused before any proof.
+    expect(
+      await stop({
+        enrolled_process: { ...enrolled, pid: enrolled.pid + 1 },
+      }),
+    ).toEqual(refusedBy("probe_invalid", "request_mismatch"));
+    expect(proc.exitCode).toBeNull();
+    process.kill(pid, 0);
     expect((await stop({ before_signal: () => false })).outcome).toBe(
       "withdrawn",
     );
@@ -298,12 +314,16 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     // The abandoned challenge released the owner: the next request is served
     // without waiting out the owner's 3 s signature read.
     const served = Date.now();
-    expect((await stop()).outcome).toBe("withdrawn");
+    expect(await stop()).toEqual(
+      refusedBy("workspace_not_clean", "worktree_dirty"),
+    );
     expect(Date.now() - served).toBeLessThan(2500);
     expect(readFileSync(join(tree, "pending"), "utf8")).toBe("preserve me");
     rmSync(join(tree, "pending"));
     writeFileSync(join(build, "pending"), "keep build changes");
-    expect((await stop()).outcome).toBe("withdrawn");
+    expect(await stop()).toEqual(
+      refusedBy("workspace_not_clean", "build_worktree_dirty"),
+    );
     expect(readFileSync(join(build, "pending"), "utf8")).toBe(
       "keep build changes",
     );
@@ -311,12 +331,18 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     const marker = join(tree, ".git"),
       registered = readFileSync(marker);
     writeFileSync(marker, readFileSync(join(build, ".git"))); // Same repository, wrong backlink.
-    expect((await stop()).outcome).toBe("withdrawn");
+    expect(await stop()).toEqual(
+      refusedBy("workspace_not_clean", "worktree_unregistered"),
+    );
     writeFileSync(marker, `gitdir: ${join(root, "unbound", ".git")}\n`);
-    expect((await stop()).outcome).toBe("withdrawn");
+    expect(await stop()).toEqual(
+      refusedBy("workspace_not_clean", "worktree_unregistered"),
+    );
     rmSync(marker);
     symlinkSync(join(build, ".git"), marker);
-    expect((await stop()).outcome).toBe("withdrawn");
+    expect(await stop()).toEqual(
+      refusedBy("workspace_not_clean", "workspace_unreadable"),
+    );
     rmSync(marker);
     writeFileSync(marker, registered);
     const commonFile = join(
@@ -325,11 +351,21 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     );
     const common = readFileSync(commonFile);
     writeFileSync(commonFile, "../elsewhere\n");
-    expect((await stop()).outcome).toBe("withdrawn");
+    expect(await stop()).toEqual(
+      refusedBy("workspace_not_clean", "worktree_unregistered"),
+    );
     writeFileSync(commonFile, common);
     git("config", "remote.origin.url", "cardigan-central:other");
-    expect((await stop()).outcome).toBe("withdrawn");
+    expect(await stop()).toEqual(
+      refusedBy("workspace_not_clean", "git_remote"),
+    );
     git("config", "remote.origin.url", "cardigan-central:fixture");
+    // A repository-local setting outside the allowed set is not proof either.
+    git("config", "lfs.repositoryformatversion", "0");
+    expect(await stop()).toEqual(
+      refusedBy("workspace_not_clean", "git_config"),
+    );
+    git("config", "--unset", "lfs.repositoryformatversion");
     // Become busy AFTER worker readiness. A signed request without independent
     // exit evidence retains the fence, even when the worker reports refusal.
     expect(
@@ -345,14 +381,15 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     expect(proc.exitCode).toBeNull();
     process.kill(pid, 0);
     writeFileSync(join(root, "state"), "replaced");
-    expect((await stop()).outcome).toBe("withdrawn");
+    expect(await stop()).toEqual(
+      refusedBy("probe_invalid", "terminal_unreadable"),
+    );
     // A harness that self-reports a busy state is never stopped.
     for (const busy of ["working", "blocked", "error"]) {
       writeFileSync(join(root, "state"), busy);
-      expect(await stop()).toEqual({
-        outcome: "withdrawn",
-        evidence: { stage: "probe", reason: "probe_invalid" },
-      });
+      expect(await stop()).toEqual(
+        refusedBy("terminal_busy", "terminal_not_idle"),
+      );
     }
     expect(proc.exitCode).toBeNull();
     process.kill(pid, 0);
@@ -360,28 +397,34 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     // Null alone is not idle: a turn still running on screen is never stopped.
     writeFileSync(join(root, "state"), "null");
     writeFileSync(join(root, "screen"), "busy");
-    expect(await stop()).toEqual({
-      outcome: "withdrawn",
-      evidence: { stage: "probe", reason: "probe_invalid" },
-    });
+    expect(await stop()).toEqual(
+      refusedBy("terminal_busy", "terminal_not_idle"),
+    );
     expect(proc.exitCode).toBeNull();
     process.kill(pid, 0);
     // A malformed core reply refuses this request; the owner keeps serving.
     writeFileSync(join(root, "screen"), "malformed");
-    expect(await stop()).toEqual({
-      outcome: "withdrawn",
-      evidence: { stage: "probe", reason: "probe_invalid" },
-    });
+    expect(await stop()).toEqual(
+      refusedBy("probe_invalid", "terminal_unreadable"),
+    );
     // Still listening: an exited owner would answer conditional_close_unavailable.
     writeFileSync(join(root, "screen"), "busy");
-    expect(await stop()).toEqual({
-      outcome: "withdrawn",
-      evidence: { stage: "probe", reason: "probe_invalid" },
-    });
+    expect(await stop()).toEqual(
+      refusedBy("terminal_busy", "terminal_not_idle"),
+    );
     expect(proc.exitCode).toBeNull();
     process.kill(pid, 0);
-    // Back at its own empty prompt, the same null-status session may be stopped.
-    writeFileSync(join(root, "screen"), "idle");
+    // C-746: a running turn or a draft under the status line is still kept.
+    for (const screen of ["status_busy", "status_draft"]) {
+      writeFileSync(join(root, "screen"), screen);
+      expect(await stop()).toEqual(
+        refusedBy("terminal_busy", "terminal_not_idle"),
+      );
+    }
+    // Back at its own empty prompt, the same null-status session may be
+    // stopped, also with Cardigan's status line drawn under the editor
+    // (sensen A-252: refused as probe_invalid for hours before C-746).
+    writeFileSync(join(root, "screen"), "status");
     // A missing or replaced seed cannot serve this owner: refuse, never sign.
     const seed = join(dataDir, DARWIN_OWNER_SEED);
     renameSync(seed, `${seed}.saved`);
@@ -478,6 +521,101 @@ test("a generation without an owner is refused with no further worker command", 
     expect(commands).toHaveLength(1);
     expect(commands[0]!.slice(0, 3)).toEqual(["/usr/bin/python3", "-IB", "-c"]);
     expect(commands[0]![3]).toContain("idle-owner.sock");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("C-746: an owner's named refusal, an anonymous close and a transport failure are told apart; none is signed", async () => {
+  vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "darwin-refusal-"));
+  const execution = { ...e, agentRoot: root };
+  // Enrolls the key the controller would rebuild for this generation.
+  await enrollDarwinOwner(execution, assignment, role, {
+    ...l,
+    args: launchArgsFor(execution),
+  });
+  // Stands in for the worker relay: prints `reply` (if any) after reading the
+  // request line, then exits with `code`. Never reads a signature.
+  const relay =
+    (reply: string, code: number) =>
+    async (_: unknown, argv: readonly string[]) => {
+      expect(argv[3]).toContain("idle-owner.sock");
+      return {
+        file: "python3",
+        args: [
+          "-c",
+          `import sys\nsys.stdin.readline()\nsys.stdout.write(${JSON.stringify(reply)})\nsys.stdout.flush()\nsys.exit(${code})`,
+        ],
+      };
+    };
+  const signed = vi.fn(() => true);
+  const ask = (reply: string, code: number) =>
+    stopDarwinOwner(
+      execution,
+      ref,
+      {
+        project_id: "fixture",
+        assignment_id: "A-1",
+        hangup_ms: 100,
+        terminate_ms: 500,
+        before_signal: signed,
+        enrolled_process: {
+          machine: fingerprint,
+          boot: "boot",
+          uid: 501,
+          pid: 4242,
+          start: "1",
+          process_group: 4242,
+          terminal: generation,
+        },
+      },
+      relay(reply, code),
+    );
+  try {
+    for (const [code, reason] of [
+      ["worktree_dirty", "workspace_not_clean"],
+      ["git_config", "workspace_not_clean"],
+      ["git_timeout", "workspace_not_clean"],
+      ["workspace_cwd", "workspace_not_clean"],
+      ["build_worktree_dirty", "workspace_not_clean"],
+      ["terminal_not_idle", "terminal_busy"],
+      ["terminal_unreadable", "probe_invalid"],
+      ["terminal_owner_mismatch", "probe_invalid"],
+      ["cli_identity_unproven", "probe_invalid"],
+      ["request_mismatch", "probe_invalid"],
+      ["cli_exited", "probe_invalid"],
+    ] as const)
+      expect(await ask(`refused ${code}\n`, 1)).toEqual({
+        outcome: "withdrawn",
+        evidence: { stage: "probe", reason, owner_reason: code },
+      });
+    // An owner enrolled before C-746 closes without a word (relay exit 1).
+    expect(await ask("", 1)).toEqual({
+      outcome: "withdrawn",
+      evidence: {
+        stage: "probe",
+        reason: "probe_invalid",
+        owner_reason: "no_reply",
+        exit_code: 1,
+      },
+    });
+    // SSH itself failed: the exit status says so.
+    expect(await ask("", 255)).toEqual({
+      outcome: "withdrawn",
+      evidence: {
+        stage: "probe",
+        reason: "probe_invalid",
+        owner_reason: "no_reply",
+        exit_code: 255,
+      },
+    });
+    // Neither a refusal nor a challenge: not trusted, nothing signed.
+    expect((await ask("refused ../../etc\n", 1)).evidence).toMatchObject({
+      reason: "probe_invalid",
+      owner_reason: "relay_failed",
+    });
+    expect(signed).not.toHaveBeenCalled();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -585,10 +723,7 @@ test.skipIf(!hcAvailable || !["linux", "darwin"].includes(process.platform))(
         );
       return { ...w, terminal, record, enrolled, stop };
     };
-    const refused = {
-      outcome: "withdrawn",
-      evidence: { stage: "probe", reason: "probe_invalid" },
-    };
+    const refused = refusedBy("terminal_busy", "terminal_not_idle");
     try {
       // Codex and Claude Code never send OSC 7501: status stays null in both.
       const running = await owned("busy");

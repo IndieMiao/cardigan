@@ -1,10 +1,11 @@
 import { type Dirent, lstatSync, unlinkSync } from "node:fs";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-  AttachmentId,
-  DeliverySubject,
-  ProjectId,
+import {
+  type AttachmentId,
+  type DeliverySubject,
+  type ProjectId,
+  releaseChainOf,
 } from "@cardigan/domain";
 import { ARTIFACT_BLOB_ID, artifactPath } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
@@ -85,6 +86,23 @@ function expire(
       for (const id of ids)
         if (typeof id === "string") pins.add(id as AttachmentId);
   }
+  // C-612: a release chain still needs the packages it stored on its approval
+  // (unsigned intake, signed intake) until its publication is verified.
+  const published = new Set<string>();
+  for (const row of store.database
+    .prepare(
+      "SELECT doc FROM events WHERE project_id=? AND type='artifact_publication_verified' AND card_id IS NOT NULL",
+    )
+    .iterate(project)) {
+    const id = JSON.parse(String(row.doc)).payload?.decision_id;
+    if (typeof id === "string") published.add(id);
+  }
+  const chains = new Set(
+    tx.decisions
+      .list(project)
+      .filter((q) => releaseChainOf(q) && !published.has(q.id))
+      .map((q) => q.key as string),
+  );
   let changed = 0;
   const until = performance.now() + 250;
   let total = records.reduce((sum, { a }) => sum + a.size, 0);
@@ -103,7 +121,8 @@ function expire(
       !reason ||
       a.attach_to.kind === "delivery" ||
       pins.has(a.id) ||
-      hashes.has(a.sha256)
+      hashes.has(a.sha256) ||
+      (a.basis !== undefined && chains.has(a.basis))
     ) {
       live.add(s.blob_id);
       continue;

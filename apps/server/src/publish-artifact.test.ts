@@ -129,18 +129,22 @@ async function setup() {
             : "<VersioningConfiguration/>\n0.123456(s) elapsed\n";
         case "list-objects-v2": {
           expect(arg("--prefix")).toBe(prefix);
-          const keys = [...objects.keys(), ...flags.extra].filter((k) =>
-            k.startsWith(prefix),
-          );
+          expect(arg("--max-keys")).toBe("4");
+          const listed = [
+            ...[...objects].map(([Key, b]) => ({
+              Key,
+              Size: String(b.length),
+            })),
+            ...flags.extra.map((Key) => ({ Key, Size: "1" })),
+          ].filter(({ Key }) => Key.startsWith(prefix));
+          const page = listed.slice(0, 4);
           return JSON.stringify({
-            KeyCount: String(keys.length),
-            IsTruncated: "false",
+            KeyCount: String(page.length),
+            IsTruncated: String(listed.length > 4),
             // ossutil renders a single entry as an object, several as a list.
-            ...(keys.length === 1
-              ? { Contents: { Key: keys[0] } }
-              : keys.length
-                ? { Contents: keys.map((Key) => ({ Key })) }
-                : {}),
+            ...(page.length
+              ? { Contents: page.length === 1 ? page[0] : page }
+              : {}),
           });
         }
         case "put-object": {
@@ -321,6 +325,116 @@ test("wrong bytes are not retried", async () => {
   await expect(f.call()).rejects.toThrow("download");
   expect(f.reads.get(`false${f.prefix}app.apk`)).toBe(1);
 });
+test("after a post-write read-back failure, a new approval resumes the lone APK and writes the sidecars", async () => {
+  const f = await setup();
+  // The tool accepts the resume (own earlier claim of this URL and digest).
+  f.flags.resumable = true;
+  f.flags.missing = 99;
+  await expect(f.call()).rejects.toThrow("download");
+  expect([...f.objects.keys()]).toEqual([`${f.prefix}app.apk`]);
+  expect(f.claim).toHaveBeenLastCalledWith(
+    `${target.origin}/${f.prefix}app.apk`,
+    false,
+  );
+  f.flags.missing = 0;
+  f.reads.clear();
+  const puts = () =>
+    f.execute.mock.calls.filter(([, args]) => args[1] === "put-object").length;
+  const before = puts();
+  await expect(f.call()).resolves.toMatchObject({ sha256: sha });
+  expect(f.claim).toHaveBeenLastCalledWith(
+    `${target.origin}/${f.prefix}app.apk`,
+    true,
+  );
+  expect(puts() - before).toBe(2);
+  expect(f.objects.size).toBe(3);
+});
+test("C-612: resumes from this release's own manifests, writing only the gaps", async () => {
+  const f = await setup();
+  f.flags.resumable = true;
+  await expect(f.call()).resolves.toMatchObject({ sha256: sha });
+  const puts = () =>
+    f.execute.mock.calls.filter(([, args]) => args[1] === "put-object").length;
+  // SHA256SUMS written, its read-back failed: release.json never written.
+  const release = f.objects.get(`${f.prefix}release.json`);
+  expect(release).toBeDefined();
+  f.objects.delete(`${f.prefix}release.json`);
+  let before = puts();
+  await expect(f.call()).resolves.toMatchObject({ sha256: sha });
+  expect(f.claim).toHaveBeenLastCalledWith(
+    `${target.origin}/${f.prefix}app.apk`,
+    true,
+  );
+  expect(puts() - before).toBe(1);
+  expect(f.objects.get(`${f.prefix}release.json`)).toEqual(release);
+  // Everything written, the final receipt lost: verify only, write nothing.
+  before = puts();
+  await expect(f.call()).resolves.toMatchObject({ sha256: sha });
+  expect(puts()).toBe(before);
+});
+test.each([
+  "a manifest with other bytes of the same size",
+  "a manifest without the APK",
+  "a stranger next to them",
+] as const)(
+  "C-612: resume still refuses %s and never overwrites",
+  async (issue) => {
+    const f = await setup();
+    f.flags.resumable = true;
+    await expect(f.call()).resolves.toMatchObject({ sha256: sha });
+    const sums = `${f.prefix}SHA256SUMS`;
+    if (issue === "a manifest with other bytes of the same size")
+      f.objects.set(sums, Buffer.alloc(f.objects.get(sums)?.length ?? 0, 0x61));
+    if (issue === "a manifest without the APK")
+      f.objects.delete(`${f.prefix}app.apk`);
+    if (issue === "a stranger next to them")
+      f.objects.set(`${f.prefix}notes.txt`, Buffer.from("x"));
+    const kept = new Map(f.objects);
+    const before = f.execute.mock.calls.filter(
+      ([, args]) => args[1] === "put-object",
+    ).length;
+    await expect(f.call()).rejects.toThrow(
+      issue === "a manifest with other bytes of the same size"
+        ? "download"
+        : "immutable_prefix",
+    );
+    expect(
+      f.execute.mock.calls.filter(([, args]) => args[1] === "put-object")
+        .length,
+    ).toBe(before);
+    expect(f.objects).toEqual(kept);
+  },
+);
+test.each([
+  "different size",
+  "same size, different bytes",
+  "another object",
+  "claim refused",
+] as const)("resume refuses: %s", async (issue) => {
+  const f = await setup();
+  f.flags.resumable = true;
+  const key = `${f.prefix}app.apk`;
+  f.objects.set(
+    key,
+    issue === "different size"
+      ? Buffer.concat([apk, Buffer.from("x")])
+      : issue === "same size, different bytes"
+        ? Buffer.alloc(apk.length)
+        : apk,
+  );
+  if (issue === "another object") f.objects.set(`${f.prefix}SHA256SUMS`, apk);
+  if (issue === "claim refused")
+    f.claim.mockImplementation(() => {
+      throw Error("immutable_prefix");
+    });
+  const failure =
+    issue === "same size, different bytes" ? "download" : "immutable_prefix";
+  await expect(f.call()).rejects.toThrow(failure);
+  expect(
+    f.execute.mock.calls.some(([, args]) => args[1] === "put-object"),
+  ).toBe(false);
+});
+
 test.each([
   "configuration",
   "signature",
@@ -356,6 +470,14 @@ test.each([
   }
   const download = ["range", "badHash"].includes(issue);
   await expect(f.call()).rejects.toThrow(download ? "download" : issue);
+  // C-754: each closed failure names its fixed-wording sub-reason.
+  const reason = {
+    configuration: "凭据文件 不存在、不是普通文件或不是服务用户独占 0600",
+    signature: "签名证书与配置不符或签名无效",
+    manifest: "APK 包名与配置的 package_name 不符",
+    immutable_prefix: "OSS 版本控制已开启或暂停",
+  }[issue as string];
+  if (reason) await expect(f.call()).rejects.toThrow(`${issue}（${reason}）`);
   expect(f.objects.size).toBe(download ? 1 : 0);
   expect(f.claim).toHaveBeenCalledTimes(download ? 1 : 0);
 });
@@ -498,7 +620,16 @@ test.each([
     if (issue === "wrong-region") registry.profiles[0].region_id = "another";
     await writeFile(path, JSON.stringify(registry));
   }
-  await expect(f.call()).rejects.toThrow("configuration");
+  // C-754: the sub-reason is named; values stay out.
+  await expect(f.call()).rejects.toThrow(
+    {
+      "another-project": "configuration（credential_file 与项目不符）",
+      "multiple-profiles":
+        "configuration（凭据文件须只有 1 个 profile（当前 2 个））",
+      "wrong-profile": "configuration（凭据 profile 名称与配置不符）",
+      "wrong-region": "configuration（凭据 profile 地域与配置不符）",
+    }[issue],
+  );
   expect(f.execute.mock.calls.some(([tool]) => tool === target.ossutil)).toBe(
     false,
   );

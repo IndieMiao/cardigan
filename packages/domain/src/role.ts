@@ -94,6 +94,8 @@ export const STANDING_ROLE_TOOLS = [
   "withdraw_review",
   "create_card",
   "update_card",
+  // C-763: work-item and standing PM alike; never a gate.
+  "watch_card",
   "send_owner_message",
   "set_merge_solo",
   "set_merge_window",

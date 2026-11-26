@@ -263,6 +263,25 @@ test("a failed worker binding shows its steps; an unreadable configuration says 
   expect(checks[2]?.textContent).toContain("机器检查失败");
   expect(view.getByText("agent_builder")).toBeTruthy();
   expect(view.getByText("4 项")).toBeTruthy();
+  // C-608: readiness findings, problems first, each with its fixed result.
+  expect(
+    within(view.getByRole("table", { name: "就绪巡检" }))
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) =>
+        within(r)
+          .getAllByRole("cell")
+          .filter((_, i) => i !== 1)
+          .map((cell) => cell.textContent)
+          .join(" | "),
+      ),
+  ).toEqual([
+    "Card MCP | Card MCP 不可达（mcp_timeout），暂停向该机器派发 | 停派",
+    "到控制主机的链路 | 链路慢：下行 0.6 MB/s，往返 820 ms（阈值 2.0 MB/s、500 ms） | 告警",
+    "AVD Pixel_7 | AVD 文件无法读取（检查外接盘与系统隐私权限） | 告警",
+    "磁盘 | 已自动清理 4 处缓存，释放 18.2 GiB，可用 34.0 GiB | 已自动修复",
+    "worker helper | 与当前部署一致 | 正常",
+  ]);
   expect(view.getByText("没有在跑任务")).toBeTruthy();
   expect(document.body.textContent).not.toMatch(/SECRET/);
   fireEvent.keyDown(dialog, { key: "Escape" });
@@ -272,6 +291,7 @@ test("a failed worker binding shows its steps; an unreadable configuration says 
   const other = within(await screen.findByRole("dialog"));
   expect(await other.findByText("配置不可读")).toBeTruthy();
   expect(other.getByText("没有能力记录")).toBeTruthy();
+  expect(other.getByText("没有巡检记录")).toBeTruthy();
   // An unreadable worker record is shown as such, not as "no checks".
   expect(other.queryByText("没有检查记录")).toBeNull();
   const unreadable = within(
