@@ -7,16 +7,18 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectPreferences } from "@cardigan/domain";
+import { createCard, projectPreferences } from "@cardigan/domain";
 import { loadMergeGateConfig } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { listRoleVersions, Store } from "@cardigan/store";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { roleConfig } from "../../../test-support/launch-fixture.js";
+import { humanActor, runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 import { comparablePreferences, GATE_PREFERENCES } from "./project-copy.js";
@@ -317,6 +319,7 @@ describe("project copy-setup", () => {
       auto_security_paths: [".github/**", "src/**"],
       role_rule_paths: ["roles/**"],
       system_merge_shadow_policy: { role_rule_paths: [], release_paths: [] },
+      pm_owner_messages: true,
     } as const;
     expect(Object.keys(gates).sort()).toEqual(
       Object.keys(GATE_PREFERENCES).sort(),
@@ -369,6 +372,16 @@ describe("project copy-setup", () => {
     ).toBe(0);
     expect(
       await run([
+        "preference",
+        "set",
+        "review-max-rounds",
+        "3",
+        "--project",
+        "beta",
+      ]),
+    ).toBe(0);
+    expect(
+      await run([
         "project",
         "copy-setup",
         "--from",
@@ -378,6 +391,10 @@ describe("project copy-setup", () => {
       ]),
     ).toBe(0);
     expect(out.join("\n")).toContain("目标项目已有、未覆盖的角色：coder");
+    // A value the target had set is named when the copy replaces it.
+    expect(out.join("\n")).toContain(
+      "目标项目原有值被源项目覆盖的偏好：review_max_rounds",
+    );
     const coder = snapshot("beta").roles.find((r) => r.role_id === "coder");
     expect(coder?.allowed_tools).toEqual(["submit_delivery", "post_comment"]);
     expect(
@@ -391,6 +408,7 @@ describe("project copy-setup", () => {
       ]),
     ).toBe(0);
     expect(out.join("\n")).toContain("角色 0 个：无");
+    expect(out.join("\n")).not.toContain("被源项目覆盖");
   });
 
   test("a role whose launch profile is missing on this host copies nothing", async () => {
@@ -594,6 +612,41 @@ describe("project doctor", () => {
       "缺 0 项",
     ])
       expect(text).toContain(line);
+
+    // V-3489: a card baseline is Agent input and must never reach git as an
+    // option (`git show --output=<path>` would overwrite a symlink target).
+    const victim = join(dataDir, "victim.txt");
+    writeFileSync(victim, "ORIGINAL");
+    const trap = join(dataDir, "agentdir", "evil:.github", "workflows");
+    mkdirSync(trap, { recursive: true });
+    symlinkSync(victim, join(trap, "cardigan-check.yml"));
+    const store = Store.open({ dataDir });
+    try {
+      runCommand(store, {
+        project_id: "beta",
+        actor: humanActor("beta"),
+        reduce: (state, actor, ports) =>
+          createCard(
+            state,
+            actor,
+            {
+              template_id: "general",
+              title: "x",
+              goal: "x",
+              acceptance_criteria: ["x"],
+              source: { kind: "quote", text: "x" },
+              repo: "example/repo",
+              base_branch: `--output=${join(dataDir, "agentdir", "evil")}`,
+            },
+            ports,
+          ),
+      });
+    } finally {
+      store.close();
+    }
+    expect(await run(["project", "doctor", "--project", "beta"])).toBe(1);
+    expect(readFileSync(victim, "utf8")).toBe("ORIGINAL");
+    expect(out.join("\n")).toContain("不是合法的分支名，未核对");
   });
 
   test("a registered remote machine without a binding is reported", async () => {

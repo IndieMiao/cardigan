@@ -4,6 +4,7 @@ import {
   highRiskPaths,
   type ProjectId,
   projectFlowVersion,
+  validBranchName,
 } from "@cardigan/domain";
 import {
   CASE_WORKFLOW_STEPS,
@@ -190,6 +191,7 @@ export async function projectDoctor(input: DoctorInput): Promise<DoctorItem[]> {
     const present = existsSync(repo) && statSync(repo).isDirectory();
     const branch =
       present &&
+      validBranchName(base) &&
       (await git(io, repo, ["rev-parse", "--verify", `refs/heads/${base}`]));
     items.push({
       step: "1",
@@ -215,8 +217,7 @@ export async function projectDoctor(input: DoctorInput): Promise<DoctorItem[]> {
     title: "登记仓库和基线",
     status: repo === null ? "missing" : "ok",
     detail: repo === null ? "未登记" : `${repo}，基线 ${base}`,
-    fix: `cardigan project set-repo --path <本地仓库> --base-branch <基线> --project ${project}`,
-    restart: true,
+    fix: `cardigan project set-repo --path <本地仓库> --base-branch <基线> --project ${project}（改基线后重启 server）`,
   });
 
   // 4–6: roles, employees and preferences (live, no restart).
@@ -367,12 +368,21 @@ export async function projectDoctor(input: DoctorInput): Promise<DoctorItem[]> {
     ];
     const problems: string[] = [];
     for (const branch of baselines) {
+      // Card baselines come from Agents: never let one reach git as an
+      // option. Only plain branch names, read as a blob below refs/heads.
+      if (!validBranchName(branch)) {
+        problems.push(
+          `卡片基线 ${JSON.stringify(branch)} 不是合法的分支名，未核对`,
+        );
+        continue;
+      }
       const text =
         repository === null
           ? false
           : await git(io, repository, [
-              "show",
-              `${branch}:${executor.workflow}`,
+              "cat-file",
+              "blob",
+              `refs/heads/${branch}:${executor.workflow}`,
             ]);
       if (text === false) {
         problems.push(`${branch}：没有 ${executor.workflow}`);

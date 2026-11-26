@@ -42,8 +42,9 @@ cardigan project doctor --project <p>
 - 自动合并：`auto-merge`、`auto-merge-after`、`auto-merge-paused`。
 - PM 代确认合并：`pm-merge-confirmation`、`pm-confirm-role-rule-implementations`、`pm-confirm-human-decided-merges`、`reviewer-browser`。
 - 代批加轮：`independent-review-limit-delegation`、`independent-review-limit-delegation-max`、`system-review-limit-raise`、`system-review-limit-max-raises`。
+- PM 给所有者发私聊：`pm-owner-messages`（在 Workbench 设置页开）。
 
-其余偏好（审核轮数、合并确认的告警和暂缓时长、上下文阈值、机器偏好、跨卡只读、共享文件权限、人可开的卡片模板、催办等）照源项目复制。
+其余偏好（审核轮数、合并确认的告警和暂缓时长、上下文阈值、机器偏好、跨卡只读、共享文件权限、人可开的卡片模板、催办等）照源项目复制。复制到已有项目时，目标项目原来设过、被源项目值覆盖的偏好会在命令输出里逐项列出。
 
 ## 仍需手工的部分
 

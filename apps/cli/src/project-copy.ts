@@ -60,6 +60,8 @@ export const GATE_PREFERENCES = {
   auto_security_paths: "auto-security-paths",
   role_rule_paths: "role-rule-paths",
   system_merge_shadow_policy: "system-merge-shadow-policy",
+  // Set in Workbench settings only; PM's direct messages to the owner.
+  pm_owner_messages: "pm-owner-messages",
 } as const satisfies Partial<Record<keyof ProjectPreferences, string>>;
 /**
  * Every preference, classified. The mapped type makes a preference added
@@ -80,7 +82,7 @@ const PREFERENCE_COPY: {
   system_merge_shadow: "copy",
   system_auto_assign_verifiers: "copy",
   system_reminders: "copy",
-  pm_owner_messages: "copy",
+  pm_owner_messages: "gate",
   system_reminder_policy: "copy",
   context_handoff_remaining_pct: "copy",
   context_restart_remaining_pct: "copy",
@@ -118,6 +120,8 @@ export interface ProjectSetupCopy {
   readonly kept_roles: readonly string[];
   /** Target preferences the source does not set; left unchanged. */
   readonly kept_preferences: readonly string[];
+  /** Target preferences already set that took a different source value. */
+  readonly overwritten_preferences: readonly string[];
   /** Gate preferences the source sets, as `cardigan preference` names. */
   readonly not_copied: readonly string[];
 }
@@ -177,6 +181,11 @@ export function formatProjectSetupCopy(
     "  项目偏好：除授权和门禁类外已按源项目设置",
     ...(result.kept_preferences.length
       ? [`  源项目未设、保留目标项目值的偏好：${list(result.kept_preferences)}`]
+      : []),
+    ...(result.overwritten_preferences.length
+      ? [
+          `  目标项目原有值被源项目覆盖的偏好：${list(result.overwritten_preferences)}`,
+        ]
       : []),
     ...(result.not_copied.length
       ? [
@@ -268,6 +277,9 @@ export async function copyProjectSetup(
         EXIT.usage,
       );
     persistEffect(tx, to, result.value);
+    const after: ProjectPreferences = result.value.data;
+    const value = (p: ProjectPreferences, key: string) =>
+      JSON.stringify(p[key as keyof ProjectPreferences] ?? null);
     return {
       copied_roles: copied.map((role) => role.role_id),
       kept_roles: sources
@@ -278,6 +290,11 @@ export async function copyProjectSetup(
           COPIED_KEYS.includes(key) &&
           before[key as keyof ProjectPreferences] !== undefined &&
           !Object.hasOwn(patch, key),
+      ),
+      overwritten_preferences: COPIED_KEYS.filter(
+        (key) =>
+          before[key as keyof ProjectPreferences] !== undefined &&
+          value(before, key) !== value(after, key),
       ),
       not_copied: Object.entries(GATE_PREFERENCES)
         .filter(
