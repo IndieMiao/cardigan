@@ -4,7 +4,12 @@ import {
   reviewPassed,
   unresolvedMustFix,
 } from "../derived.js";
-import type { Decision, Delivery, MergeCheckView } from "../entities.js";
+import type {
+  Decision,
+  Delivery,
+  MergeCheckView,
+  WorkItem,
+} from "../entities.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
 import { passedCardCheck } from "../merge-batch.js";
@@ -35,11 +40,85 @@ const newest = (values: readonly Delivery[]) =>
 
 export {
   latestReviews,
+  mergeBlockingVerifier,
   pmMergeBlockers,
   systemMergeBlockers,
 } from "./merge-blockers.js";
 
-import { latestReviews } from "./merge-blockers.js";
+import { latestReviews, mergeBlockingVerifier } from "./merge-blockers.js";
+
+/**
+ * The card's current product deliveries and the live verifiers that have not
+ * passed the delivery they target (the completion when untargeted).
+ */
+function verifierProgress(
+  state: CommandState,
+  cardId: CardId,
+  completion: Delivery,
+): { current: Delivery[]; unpassed: WorkItem[] } {
+  const items = state.work_items.filter(
+    (w) => w.card_id === cardId && w.status !== "cancelled",
+  );
+  const current = items
+    .filter((w) => w.kind === "produce")
+    .flatMap((w) => {
+      const delivery = newest(
+        state.deliveries.filter(
+          (v) =>
+            v.work_item_id === w.id &&
+            v.kind !== "card_completion" &&
+            v.status !== "superseded",
+        ),
+      );
+      return delivery ? [delivery] : [];
+    });
+  const matrix = deriveReviewMatrix(
+    [...current, completion],
+    items,
+    state.reviews,
+  );
+  const unpassed = items.filter((w) => {
+    if (w.kind !== "verify") return false;
+    const target = w.target_work_item_id
+      ? current.find((v) => v.work_item_id === w.target_work_item_id)
+      : completion;
+    return (
+      w.status !== "passed" ||
+      !target ||
+      !matrix.some(
+        (r) =>
+          r.work_item_id === w.id &&
+          r.delivery_id === target.id &&
+          reviewPassed(r),
+      )
+    );
+  });
+  return { current, unpassed };
+}
+
+/**
+ * C-768: optional verifiers still open on the current completion. Shown next
+ * to the waiting list as reference; they never hold the confirmation.
+ */
+export function optionalPendingVerifiers(
+  state: CommandState,
+  q: Decision,
+): readonly string[] {
+  if (
+    q.trigger !== "merge_confirmation" ||
+    !q.card_id ||
+    q.kind !== "approve" ||
+    !("delivery_id" in q.target)
+  )
+    return [];
+  const cardId = q.card_id;
+  const context = attempt(() => mergeContext(state, cardId));
+  if (!context.ok || context.value.target.id !== q.target.delivery_id)
+    return [];
+  return verifierProgress(state, cardId, context.value.target)
+    .unpassed.filter((w) => !mergeBlockingVerifier(w))
+    .map((w) => `${w.title}（${w.id}）`);
+}
 
 /** C-264: the human's confirmation, API and CLI share this current-state gate. */
 export function humanMergeBlockers(
@@ -77,43 +156,9 @@ export function humanMergeBlockers(
     ).length
   )
     blockers.push("增量复核的隔离证据已失效，须完整复核");
-  const items = state.work_items.filter(
-    (w) => w.card_id === card.id && w.status !== "cancelled",
-  );
-  const current = items
-    .filter((w) => w.kind === "produce")
-    .flatMap((w) => {
-      const delivery = newest(
-        state.deliveries.filter(
-          (v) =>
-            v.work_item_id === w.id &&
-            v.kind !== "card_completion" &&
-            v.status !== "superseded",
-        ),
-      );
-      return delivery ? [delivery] : [];
-    });
-  const matrix = deriveReviewMatrix(
-    [...current, completion],
-    items,
-    state.reviews,
-  );
-  for (const w of items.filter((w) => w.kind === "verify")) {
-    const target = w.target_work_item_id
-      ? current.find((v) => v.work_item_id === w.target_work_item_id)
-      : completion;
-    if (
-      w.status !== "passed" ||
-      !target ||
-      !matrix.some(
-        (r) =>
-          r.work_item_id === w.id &&
-          r.delivery_id === target.id &&
-          reviewPassed(r),
-      )
-    )
-      blockers.push(`${w.title}（${w.id}）：未通过当前交付审核`);
-  }
+  const { current, unpassed } = verifierProgress(state, card.id, completion);
+  for (const w of unpassed.filter(mergeBlockingVerifier))
+    blockers.push(`${w.title}（${w.id}）：未通过当前交付审核`);
   for (const check of effectivePreMergeChecks(
     card,
     state.work_items,

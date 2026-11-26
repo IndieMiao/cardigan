@@ -1106,7 +1106,7 @@ test("a card created from a sensitive decision keeps its merge with the human", 
   expect(confirmation().id).not.toBe(again.id);
 });
 
-test("a non-required verifier that has not passed still blocks a PM merge", async () => {
+test("C-768: an unfinished optional verifier does not block a PM merge; a required one does", async () => {
   const { f, confirmation, check } = setup();
   await f.accept();
   check("passed");
@@ -1125,9 +1125,18 @@ test("a non-required verifier that has not passed still blocks a PM merge", asyn
     ...f.state,
     work_items: [...f.state.work_items, optional],
   };
-  expect(pmMergeBlockers(state, confirmation())).toEqual([
-    `验证项 ${optional.id} 未通过`,
-  ]);
+  expect(pmMergeBlockers(state, confirmation())).toEqual([]);
+  expect(
+    pmMergeBlockers(
+      {
+        ...state,
+        work_items: state.work_items.map((w) =>
+          w.id === optional.id ? { ...w, required: true } : w,
+        ),
+      },
+      confirmation(),
+    ),
+  ).toEqual([`验证项 ${optional.id} 未通过`]);
 });
 
 test("notices are ordered by resolution time across cards, not by per-card seq", () => {

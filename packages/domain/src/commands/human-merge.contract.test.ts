@@ -4,9 +4,12 @@ import {
   type Decision,
   humanMergeBlockers,
   listNeedsYou,
+  optionalPendingVerifiers,
+  pmMergeBlockers,
   recordDecision,
   recordMergeCheck,
   requestDecision,
+  systemMergeBlockers,
   updateCard,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
@@ -150,7 +153,8 @@ const failures: {
     reason: "未通过当前交付审核",
   },
   {
-    name: "optional verifier",
+    // C-768: an optional one no longer blocks (see the tests below).
+    name: "added required verifier",
     mutate: (s) => ({
       ...s,
       work_items: [
@@ -158,13 +162,13 @@ const failures: {
         {
           ...required(s.work_items.find((w) => w.kind === "verify")),
           id: id("work_item", 100),
-          title: "可选检查",
-          required: false,
+          title: "追加检查",
+          required: true,
           status: "ready",
         },
       ],
     }),
-    reason: "可选检查",
+    reason: "追加检查（W-100）：未通过当前交付审核",
   },
   {
     name: "independent verifier",
@@ -263,6 +267,107 @@ test.each(failures)(
   },
 );
 
+/** C-768: an extra verifier on the product, still in progress, requested by its delivery. */
+function withExtraVerifier(
+  s: CommandState,
+  requiredItem: boolean,
+): CommandState {
+  const base = required(s.work_items.find((w) => w.kind === "verify"));
+  const extra = id("work_item", 100);
+  const { template_key: _template, ...item } = base;
+  return {
+    ...s,
+    work_items: [
+      ...s.work_items,
+      {
+        ...item,
+        id: extra,
+        title: "Google 补录",
+        required: requiredItem,
+        status: "in_progress",
+      },
+    ],
+    deliveries: s.deliveries.map((v) =>
+      v.work_item_id === base.target_work_item_id
+        ? { ...v, requested_verifiers: [...v.requested_verifiers, extra] }
+        : v,
+    ),
+  };
+}
+const autoMerge = (s: CommandState, on: boolean): CommandState => ({
+  ...s,
+  project_preferences: [
+    {
+      id: s.project_id,
+      auto_merge_after_minutes: null,
+      auto_merge: on ? "on" : "off",
+      flow_version: 5,
+    },
+  ],
+});
+
+test("C-768: an unfinished optional verifier neither blocks nor hides; confirmation succeeds", async () => {
+  const s = await setup();
+  const state = withExtraVerifier(s.state, false);
+  expect(humanMergeBlockers(state, s.q)).toEqual([]);
+  expect(optionalPendingVerifiers(state, s.q)).toEqual([
+    "Google 补录（W-100）",
+  ]);
+  const view = value(listNeedsYou(state, human)).data.decisions.find(
+    (q) => q.id === s.q.id,
+  );
+  expect(view?.merge_confirmation?.blockers).toEqual([]);
+  expect(view?.merge_confirmation?.optional_pending).toEqual([
+    "Google 补录（W-100）",
+  ]);
+  const result = value(s.confirm(state));
+  expect(result.data.resolution).toMatchObject({ option: "merge" });
+  expect(result.data.resolution).not.toHaveProperty("merge_override");
+});
+
+test("C-768: an unfinished required verifier still blocks the human confirmation", async () => {
+  const s = await setup();
+  const state = withExtraVerifier(s.state, true);
+  const blockers = humanMergeBlockers(state, s.q);
+  expect(blockers).toEqual(["Google 补录（W-100）：未通过当前交付审核"]);
+  expect(optionalPendingVerifiers(state, s.q)).toEqual([]);
+  expect(s.confirm(state)).toMatchObject({
+    ok: false,
+    error: {
+      code: "illegal_transition",
+      details: { merge_blockers: blockers },
+    },
+  });
+});
+
+test.each(
+  [true, false].flatMap((on) =>
+    [true, false].map((requiredItem) => ({ on, requiredItem })),
+  ),
+)(
+  "C-768: auto_merge=$on, required=$requiredItem — human, PM and system gates agree on the verifier",
+  async ({ on, requiredItem }) => {
+    const s = await setup();
+    const base = autoMerge(s.state, on);
+    const state = withExtraVerifier(base, requiredItem);
+    const mentions = (reasons: readonly string[]) =>
+      reasons.some((r) => r.includes("W-100"));
+    expect(mentions(humanMergeBlockers(state, s.q))).toBe(requiredItem);
+    expect(mentions(pmMergeBlockers(state, s.q))).toBe(requiredItem);
+    expect(mentions(systemMergeBlockers(state, s.q))).toBe(requiredItem);
+    if (!requiredItem) {
+      // Optional: every gate answers exactly as if the verifier were absent.
+      expect(humanMergeBlockers(state, s.q)).toEqual(
+        humanMergeBlockers(base, s.q),
+      );
+      expect(pmMergeBlockers(state, s.q)).toEqual(pmMergeBlockers(base, s.q));
+      expect(systemMergeBlockers(state, s.q)).toEqual(
+        systemMergeBlockers(base, s.q),
+      );
+    }
+  },
+);
+
 test("C-264: related blocking questions count; the merge confirmation itself does not", async () => {
   const s = await setup();
   const q = s.f.commit(
@@ -337,7 +442,7 @@ test("C-264: redelivery requires new reviews and a new completion check", async 
 test("C-264: cancelled optional checks and pre-existing issues do not add blockers", async () => {
   const s = await setup();
   const state = required(
-    failures.find((f) => f.name === "optional verifier"),
+    failures.find((f) => f.name === "added required verifier"),
   ).mutate(s.state);
   const cancelled: CommandState = {
     ...state,

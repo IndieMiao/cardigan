@@ -75,6 +75,7 @@ import {
   humanMergeBlockers,
   mergeCheckEndedWithoutPass,
   mergeConfirmationWaitingForCheck,
+  optionalPendingVerifiers,
   pmFailedMergeCheck,
   pmFailedMergeCheckOptions,
   pmMergeBlockers,
@@ -624,6 +625,8 @@ function mergeConfirmation(
     });
   return {
     blockers: humanMergeBlockers(state, decision),
+    // C-768: optional verifiers still open; listed apart, never blocking.
+    optional_pending: optionalPendingVerifiers(state, decision),
     decision_evidence_required: [],
     completion:
       completion === undefined

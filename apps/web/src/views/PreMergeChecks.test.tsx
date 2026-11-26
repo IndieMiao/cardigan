@@ -110,6 +110,34 @@ test("C-264: Needs You disables merge and lists reasons while hold and return re
   ).toBe(false);
 });
 
+test("C-768: an open optional verifier is listed apart and merge stays enabled", async () => {
+  const recordDecision = vi.fn(async () => undefined);
+  const q = merge(passed);
+  if (!q.merge_confirmation) throw new Error("Missing merge fixture");
+  q.merge_confirmation = {
+    ...q.merge_confirmation,
+    optional_pending: ["Google 补录（W-420）"],
+  };
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => needs(q), recordDecision })}
+      projectId="p-1"
+    />,
+  );
+  const status = await screen.findByRole("status", { name: "合并前置条件" });
+  expect(within(status).getByText("检查都已通过")).toBeTruthy();
+  expect(within(status).queryByText("等待中：")).toBeNull();
+  const optional = within(status).getByRole("list", {
+    name: "可选、不挡合并",
+  });
+  expect(within(optional).getByText("Google 补录（W-420）")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "仍要合并" })).toBeNull();
+  const confirm = screen.getByRole("button", { name: "确认合并", exact: true });
+  expect(confirm.hasAttribute("disabled")).toBe(false);
+  fireEvent.click(confirm);
+  await waitFor(() => expect(recordDecision).toHaveBeenCalled());
+});
+
 test("C-205: passed checks and standard steps fold away without adding a confirmation", async () => {
   const recordDecision = vi.fn(async () => undefined);
   render(

@@ -767,6 +767,7 @@ export function MergeConfirmation({
   const preChecks = merge?.pre_merge_checks ?? [];
   const blockers = merge?.blockers ?? ["检查状态尚未读取，请刷新"];
   const holds = merge?.blocking_human_actions ?? [];
+  const optionalPending = merge?.optional_pending ?? [];
   const mergeBlocked = blockers.length > 0;
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge", viaSuggestion = false) =>
@@ -982,6 +983,16 @@ export function MergeConfirmation({
             </>
           ) : (
             <p>检查都已通过</p>
+          )}
+          {optionalPending.length > 0 && (
+            <>
+              <p>可选、不挡合并：</p>
+              <ul aria-label="可选、不挡合并">
+                {optionalPending.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </>
           )}
         </div>
       )}

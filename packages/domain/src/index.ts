@@ -121,6 +121,8 @@ export * from "./commands/merge-classification.js";
 export {
   currentMergeConfirmations,
   humanMergeBlockers,
+  mergeBlockingVerifier,
+  optionalPendingVerifiers,
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckDelegationAllowed,
