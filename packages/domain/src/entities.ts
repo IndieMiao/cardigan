@@ -333,6 +333,8 @@ export interface Precheck {
   readonly checks?: MergeCheckView["checks"];
   readonly summary?: string;
   readonly log_ref?: string;
+  /** C-783: set only by request_check when a newer HEAD replaced this attempt. */
+  readonly superseded_by?: string;
 }
 export type PrecheckView = Omit<Precheck, "branch" | "machine_id">;
 
