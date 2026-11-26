@@ -123,6 +123,7 @@ export * from "./temporary-checkout.js";
 export * from "./test-review.js";
 export * from "./test-review-limits.js";
 export * from "./test-review-prompt.js";
+export * from "./tool-catalog-snapshots.js";
 export * from "./unresponsive-session.js";
 export * from "./upstream-health.js";
 export * from "./version.js";

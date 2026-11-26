@@ -291,6 +291,15 @@ export interface DispatcherOptions {
     assignment: Assignment,
     project: ProjectId,
   ) => string | undefined;
+  /**
+   * C-797: whether a live session that recorded `previous` may keep running
+   * under a deploy whose fingerprint is `current` (they differ). Absent, any
+   * difference replaces the session; a throw counts as incompatible.
+   */
+  readonly toolCatalogCompatible?: (
+    previous: string,
+    current: string,
+  ) => boolean;
   /** M3.5 host adapter: provision and dispatch THIS queued Run with bell as first prompt.
    * Never queue another Run. Own token/terminal compensation on startup failure. */
   readonly startRun: (input: {
@@ -1261,11 +1270,14 @@ export class Dispatcher {
     // recorded fingerprint that differs from this deploy's counts; legacy Runs
     // without one never trigger a replacement.
     const catalog = this.catalog(a, project);
-    // C-786: the fingerprint changes only for incompatible tool changes.
+    // C-786: the fingerprint ignores wording. C-797: a session whose tools
+    // only lack new optional parameters keeps running; the endpoint still
+    // validates every call against this deploy's tools and the token.
     const catalogChanged =
       catalog !== undefined &&
       prior?.tool_catalog !== undefined &&
-      prior.tool_catalog !== catalog;
+      prior.tool_catalog !== catalog &&
+      !this.catalogCompatible(prior.tool_catalog, catalog);
     // C-786: device resource isolation is its own replacement reason, so a
     // count of deploy-caused replacements never includes it.
     const isolate =
@@ -1694,6 +1706,21 @@ export class Dispatcher {
         ? a
         : undefined,
     );
+  }
+  private catalogCompatible(previous: string, current: string): boolean {
+    const compatible = this.options.toolCatalogCompatible;
+    if (!compatible) return false;
+    try {
+      return compatible(previous, current);
+    } catch (error) {
+      // An unreadable difference replaces the session.
+      this.options.onError?.(
+        new Error(
+          `tool catalog comparison failed: message=${redactFailureLine(error instanceof Error ? error.message : String(error))}`,
+        ),
+      );
+      return false;
+    }
   }
   private catalog(a: Assignment, project: ProjectId): string | undefined {
     try {

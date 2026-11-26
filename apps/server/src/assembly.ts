@@ -64,6 +64,7 @@ export interface ControlPlaneOptions {
     RuntimeMonitorOptions["runtime"];
   readonly snapshot: DispatcherOptions["snapshot"];
   readonly toolCatalog?: DispatcherOptions["toolCatalog"];
+  readonly toolCatalogCompatible?: DispatcherOptions["toolCatalogCompatible"];
   readonly runLimit?: DispatcherOptions["runLimit"];
   readonly leases?: DispatcherOptions["leases"];
   readonly projectQuota?: DispatcherOptions["projectQuota"];
@@ -202,6 +203,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     standing,
     snapshot: options.snapshot,
     ...(options.toolCatalog ? { toolCatalog: options.toolCatalog } : {}),
+    ...(options.toolCatalogCompatible
+      ? { toolCatalogCompatible: options.toolCatalogCompatible }
+      : {}),
     ...(options.queuedRecheckAfterMs !== undefined
       ? { queuedRecheckAfterMs: options.queuedRecheckAfterMs }
       : {}),

@@ -139,6 +139,11 @@ export {
   unrevokedTokensForProject,
   verifyToken,
 } from "./tokens.js";
+export {
+  readToolCatalogSnapshot,
+  recordToolCatalogSnapshot,
+  TOOL_CATALOG_SNAPSHOT_RETENTION_MS,
+} from "./tool-catalog-snapshots.js";
 export { newUlid } from "./ulid.js";
 export {
   beginUpstreamProbeSample,

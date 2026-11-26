@@ -28,11 +28,14 @@ import {
   runtimeWorkersPath,
   scrubRunCredentials,
   sessionFingerprint,
+  ToolCatalogKeeper,
   targetProbe,
+  wallClock,
   withCapacityOverrides,
 } from "@cardigan/host";
 import {
   defaultToolCatalog,
+  defaultToolCatalogSnapshot,
   type Logger,
   type McpBackend,
   Offsite,
@@ -635,6 +638,7 @@ async function assembleServer(
             port: config.port,
             url: `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}/mcp`,
             toolCatalog: defaultToolCatalog,
+            toolCatalogSnapshot: defaultToolCatalogSnapshot,
             close: async () => {},
           }
         : await listen(config.port, () =>
@@ -997,6 +1001,12 @@ async function assembleServer(
           options.dispatcher.attachmentIntervalMs ??
           config.attachmentIntervalMs;
       const served = mcp;
+      // C-797: keeps each served catalog's structure for later compatibility.
+      const toolCatalogs = new ToolCatalogKeeper(
+        store,
+        options.dispatcher.clock ?? wallClock,
+        options.dispatcher.onError,
+      );
       plane = startControlPlane({
         machineHost: checkHost,
         // P2a-10 A: the fingerprint comes from the endpoint's own tool set, so
@@ -1018,11 +1028,15 @@ async function assembleServer(
           return allowed === undefined || role === undefined
             ? undefined
             : sessionFingerprint(
-                served.toolCatalog(allowed, assignment),
+                toolCatalogs.record(
+                  served.toolCatalogSnapshot(allowed, assignment),
+                ),
                 role,
                 assignment,
               );
         },
+        toolCatalogCompatible: (previous, current) =>
+          toolCatalogs.compatible(previous, current),
         ...(config.providerFailureThreshold !== undefined
           ? { providerFailureThreshold: config.providerFailureThreshold }
           : {}),

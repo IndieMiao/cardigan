@@ -132,6 +132,7 @@ export {
 } from "./read-timing.js";
 export {
   defaultToolCatalog,
+  defaultToolCatalogSnapshot,
   type McpServerOptions,
   type RunningServer,
   serverTools,
@@ -146,11 +147,17 @@ export {
 } from "./shared-files/library.js";
 export {
   catalogHash,
+  catalogSnapshot,
+  compareToolCatalogs,
   createMcpServer,
+  IMMEDIATE_TOOL_PARAMETERS,
   structuralSchema,
   TOOL_CATALOG_REVISION,
+  type ToolCatalogChange,
+  type ToolCatalogSnapshot,
   type ToolServerOptions,
   toolCatalogFingerprint,
+  toolCatalogSnapshot,
 } from "./tool-server.js";
 export {
   CAPABILITY_GUIDE_NOTICE,

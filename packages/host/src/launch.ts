@@ -35,7 +35,7 @@ import {
   worktreeUnavailableReason,
 } from "@cardigan/domain";
 import {
-  defaultToolCatalog,
+  defaultToolCatalogSnapshot,
   loadCommandState,
   persistEffect,
   unwrap,
@@ -71,6 +71,7 @@ import {
   confirmReviewNotSent,
   finishBellAttempt,
   getRoleVersion,
+  recordToolCatalogSnapshot,
   type Store,
   unfinishedBellAttempts,
   withdrawBellAttempt,
@@ -1107,7 +1108,12 @@ async function launch(
       host.store.uow.read((tx) => tx.assignments.get(project, assignment.id)) ??
       assignment;
     const toolCatalog = sessionFingerprint(
-      sessionToolCatalog(issued.record.allowed_tools, currentAssignment),
+      sessionToolCatalog(
+        issued.record.allowed_tools,
+        currentAssignment,
+        host.store,
+        clock,
+      ),
       role,
       currentAssignment,
     );
@@ -1725,12 +1731,28 @@ export function sessionFingerprint(
 function sessionToolCatalog(
   allowed: readonly string[],
   assignment: Assignment,
+  store: Store,
+  clock: Clock,
 ): string | undefined {
+  let snapshot: ReturnType<typeof defaultToolCatalogSnapshot>;
   try {
-    return defaultToolCatalog(allowed, assignment);
+    snapshot = defaultToolCatalogSnapshot(allowed, assignment);
   } catch {
     return undefined;
   }
+  // C-797: keep the structure, so a later deploy can tell whether this session
+  // may keep running. Losing it only means a replacement at that deploy.
+  try {
+    recordToolCatalogSnapshot(
+      store,
+      snapshot.fingerprint,
+      snapshot.structure,
+      clock.now(),
+    );
+  } catch {
+    // Ignored.
+  }
+  return snapshot.fingerprint;
 }
 
 /** C-686: baseline ref and the project's context thresholds for the status line. */
