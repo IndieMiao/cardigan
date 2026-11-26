@@ -49,6 +49,8 @@ export type ProjectMergeGate =
         readonly maxBatchSize: number;
         readonly conflictThreshold: number;
         readonly windowTimeoutMs: number;
+        /** C-803: how long one window may hold a card before it may join a batch. */
+        readonly windowHoldLimitMs: number;
         /** C-781: absent means a card check reuses a passed same-head precheck. */
         readonly reusePrecheck?: false;
       };
@@ -139,6 +141,7 @@ async function projectConfig(
         maxBatchSize: number;
         conflictThreshold: number;
         windowTimeoutMs: number;
+        windowHoldLimitMs: number;
         reusePrecheck?: false;
       }
     | undefined;
@@ -149,6 +152,7 @@ async function projectConfig(
       "max_batch_size",
       "window_conflicts",
       "window_timeout_minutes",
+      "window_hold_minutes",
       "reuse_precheck",
     ]);
     if (typeof raw.queue.enabled !== "boolean")
@@ -169,6 +173,7 @@ async function projectConfig(
     )
       invalid("queue.window_conflicts 必须是正整数");
     const timeout = minutes(raw.queue.window_timeout_minutes, 1440);
+    const holdLimit = minutes(raw.queue.window_hold_minutes, 120);
     const reuse = raw.queue.reuse_precheck ?? true;
     if (typeof reuse !== "boolean")
       invalid("queue.reuse_precheck 必须是布尔值");
@@ -177,6 +182,7 @@ async function projectConfig(
         maxBatchSize: size,
         conflictThreshold: threshold,
         windowTimeoutMs: timeout,
+        windowHoldLimitMs: holdLimit,
         ...(reuse ? {} : { reusePrecheck: false as const }),
       };
   }

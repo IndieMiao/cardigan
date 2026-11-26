@@ -20,6 +20,7 @@ import { card, cardDetail, fakeClient, NOW } from "../testing/fixtures.js";
 import { CardDetailPage } from "../views/CardDetailPage.js";
 import { MergePanel } from "../views/MergePanel.js";
 import { CardNextStep, cardNextSteps } from "./CardNextStep.js";
+import { shortTime } from "./MergeBatch.js";
 
 afterEach(cleanup);
 
@@ -417,6 +418,32 @@ test("a confirmed merge waiting for its check is not yours: only 退回修改", 
       .getAllByRole("button")
       .map((b) => b.textContent),
   ).toEqual(["退回修改"]);
+});
+
+test("C-803: a confirmed merge held by a merge window says which window and when it expires", () => {
+  const q = merge({ status: "resolved" });
+  const at = (ms: number) => new Date(Date.parse(NOW) + ms).toISOString();
+  const { title } = panel(
+    cardDetail({
+      card: {
+        ...card,
+        status: "awaiting_merge",
+        waiting_on: [],
+        merge_stage: {
+          stage: "held_by_window",
+          protecting_card_id: "C-9",
+          protecting_files: ["a.ts"],
+          protecting_expires_at: at(3_600_000),
+          held_since: NOW,
+          release_at: at(7_200_000),
+        },
+      },
+      merge_confirmations: [q],
+    }),
+  );
+  expect(title).toBe(
+    `等待合并窗口：保护 C-9 · ${shortTime(at(3_600_000))} 到期 · ${shortTime(at(7_200_000))} 起可进批次Q-2`,
+  );
 });
 
 const decision = (over: Partial<NeedsDecision> = {}): NeedsDecision =>

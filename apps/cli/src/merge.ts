@@ -13,6 +13,7 @@ import {
   effectivePreMergeChecks,
   mergeCheckBlockers,
   mergePlan,
+  mergeWindowHold,
   parseId,
   prepareMergePlan,
   qualifyId,
@@ -354,7 +355,10 @@ function confirmationOf(store: Store, project_id: ProjectId, card_id: CardId) {
   );
 }
 
-function mergeStatus(args: readonly string[], io: CliIo): number {
+async function mergeStatus(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
   const parsed = parseArgs(args);
   const store = open(io, parsed.flags);
   try {
@@ -382,8 +386,24 @@ function mergeStatus(args: readonly string[], io: CliIo): number {
       );
       return EXIT.ok;
     }
+    // C-803: window lifetime and hold limit come from the host configuration.
+    const gate = await loadProjectMergeGate(
+      store,
+      project_id,
+      io,
+      optional(parsed.flags, "data-dir"),
+    );
+    const queue =
+      gate.status === "enabled" && gate.queue
+        ? {
+            max_batch_size: gate.queue.maxBatchSize,
+            window_timeout_ms: gate.queue.windowTimeoutMs,
+            window_hold_limit_ms: gate.queue.windowHoldLimitMs,
+          }
+        : undefined;
     const lines: string[] = [];
-    for (const card of cards) lines.push(...describe(store, project_id, card));
+    for (const card of cards)
+      lines.push(...describe(store, project_id, card, queue));
     io.stdout(lines.join("\n"));
     return EXIT.ok;
   } finally {
@@ -395,6 +415,7 @@ function describe(
   store: Store,
   project_id: ProjectId,
   card: Card,
+  queue?: NonNullable<CommandState["project_settings"]>["merge_queue"],
 ): readonly string[] {
   // The same snapshot the commands see, so `mergePlan` can be trusted here.
   const state = store.uow.read((tx) => loadCommandState(tx, project_id));
@@ -457,6 +478,20 @@ function describe(
       `  合并检查未开始：被 ${blocker.label} 挡住（自 ${since} 起）：${blocker.detail}`,
     );
   }
+  // C-803: a merge window keeps a ready card out of the batch queue.
+  const window = mergeWindowHold(
+    queue
+      ? {
+          ...state,
+          project_settings: { ...state.project_settings, merge_queue: queue },
+        }
+      : state,
+    card.id,
+  );
+  if (window)
+    lines.push(
+      `  合并窗口：被 ${full(window.card_id)} 的合并窗口挡住${window.held ? "（保护卡已暂停）" : ""}；文件：${window.files.length ? window.files.join("、") : "未知"}；窗口 ${minute(window.expires_at)} 到期${window.release_at ? `；${minute(window.release_at)} 起可进入批次` : ""}`,
+    );
   lines.push(
     plan.ok
       ? `  plan: ready (completion ${plan.value.completion_id}, ${plan.value.deliveries.length} deliveries)`
@@ -464,6 +499,15 @@ function describe(
   );
   return lines;
 }
+
+const minute = (at: string) =>
+  new Date(at).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
 
 /** C-160: the card's pre-merge checks, read as the Workbench reads them. */
 function preMergeChecksOf(

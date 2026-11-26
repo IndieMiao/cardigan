@@ -37,6 +37,7 @@ export function mergeProjectSettings(
                 max_batch_size: config.queue.maxBatchSize,
                 conflict_threshold: config.queue.conflictThreshold,
                 window_timeout_ms: config.queue.windowTimeoutMs,
+                window_hold_limit_ms: config.queue.windowHoldLimitMs,
               },
             }
           : {}),

@@ -26,6 +26,7 @@ import {
   recordMergeBatchResult,
   recordMergeQueueConfiguration,
   recordMergeResult,
+  recordMergeWindowHolds,
   refreshMergeWindows,
   requeueMergeBatch,
   startMergeBatchBisect,
@@ -148,6 +149,9 @@ export class MergeBatches {
         command(id, (s, a, p) => refreshMergeWindows(s, a, { paths }, p));
       }
     }
+    // C-803: record on each held card why it waits; release it past the limit.
+    if (mergeWindows(state(id).events).some((w) => w.open))
+      command(id, (s, a, p) => recordMergeWindowHolds(s, a, {}, p));
     for (const batch of activeMergeFamilies(state(id).events)) {
       if (["failed", "bisecting"].includes(batch.status)) {
         const family = mergeBatches(state(id).events).filter(

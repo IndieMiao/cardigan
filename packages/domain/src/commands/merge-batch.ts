@@ -46,7 +46,14 @@ const emit = (
   extra: Record<string, JsonValue> = {},
 ) => d.emit(type, undefined, { batch_id: batch.id, ...extra });
 
-export function mergeQueue(state: CommandState) {
+/**
+ * Cards ready to join a batch, in queue order. `ignoreWindows` (C-803) lists
+ * the cards that would be ready but for a merge window, to record the hold.
+ */
+export function mergeQueue(
+  state: CommandState,
+  options: { readonly ignoreWindows?: boolean } = {},
+) {
   if (!state.project_settings?.merge_queue) return [];
   const owned = new Set(
     activeMergeFamilies(state.events).flatMap((b) =>
@@ -63,7 +70,7 @@ export function mergeQueue(state: CommandState) {
     if (
       owned.has(card.id) ||
       card.status !== "awaiting_merge" ||
-      heldByMergeWindow(state, card.id)
+      (!options.ignoreWindows && heldByMergeWindow(state, card.id))
     )
       continue;
     const plan = mergePlan(state, card.id);

@@ -364,8 +364,24 @@ test("C-391: queue is opt-in and has bounded, configurable batch and window defa
       maxBatchSize: 4,
       conflictThreshold: 2,
       windowTimeoutMs: 86_400_000,
+      windowHoldLimitMs: 7_200_000,
     },
   });
+});
+test("C-803: the window hold limit is configurable in minutes and rejects invalid values", async () => {
+  const f = await fixture({
+    projects: {
+      p: { ...valid, queue: { enabled: true, window_hold_minutes: 45 } },
+      q: { ...valid, queue: { enabled: true, window_hold_minutes: 0 } },
+      r: { ...valid, queue: { enabled: true, window_hold_minutes: "2h" } },
+    },
+  });
+  const config = await f.load();
+  expect(config.forProject("p")).toMatchObject({
+    queue: { windowHoldLimitMs: 45 * 60_000 },
+  });
+  for (const project of ["q", "r"])
+    expect(config.forProject(project).status).toBe("invalid");
 });
 test("C-781: precheck reuse defaults on, can be switched off, and rejects non-booleans", async () => {
   const f = await fixture({
@@ -376,6 +392,7 @@ test("C-781: precheck reuse defaults on, can be switched off, and rejects non-bo
     maxBatchSize: 4,
     conflictThreshold: 2,
     windowTimeoutMs: 86_400_000,
+    windowHoldLimitMs: 7_200_000,
   });
   await writeFile(
     f.file,

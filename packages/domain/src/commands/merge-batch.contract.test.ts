@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   type Actor,
+  type Assignment,
   type Author,
   abortMergeBatch,
   abortMergeBatchPublish,
@@ -8,17 +9,23 @@ import {
   beginMergeBatchPublish,
   type CommandEffect,
   type CommandState,
+  DEFAULT_MERGE_WINDOW_HOLD_LIMIT_MS,
+  DEFAULT_MERGE_WINDOW_TIMEOUT_MS,
   formBisectProbe,
   formMergeBatch,
   hasPassedMergeCheck,
   heldByMergeWindow,
   identifyMergeBatchCulprit,
+  listNeedsYou,
+  MERGE_QUEUE_HELD,
+  MERGE_QUEUE_HOLD_RELEASED,
   type MergeBatch,
   type MergeBatchMember,
   mergeBatches,
   mergePlan,
   mergeQueue,
   mergeStage,
+  mergeWindowHoldings,
   mergeWindows,
   mergeWindowVersions,
   parseId,
@@ -30,17 +37,19 @@ import {
   recordMergeCheck,
   recordMergeCheckWait,
   recordMergeResult,
+  recordMergeWindowHolds,
   referenceProjectSnapshot,
   referenceReadState,
   refreshMergeWindows,
   requeueMergeBatch,
   setMergeSolo,
   setMergeWindow,
+  standingTools,
   startMergeBatchBisect,
   updateCard,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
-import { apply, human, role, value } from "./test-fixtures.js";
+import { apply, assignment, human, role, value } from "./test-fixtures.js";
 
 const system: Actor = { kind: "system", project_id: human.project_id };
 const sha = (n: number) => n.toString(16).padStart(40, "0");
@@ -767,6 +776,7 @@ test("C-677: a hold closes the card's window, frees shared files, and a later co
     protecting_card_id: one.card_id,
     protecting_files: ["shared.ts"],
     protecting_card_held: false,
+    protecting_expires_at: expect.any(String),
   });
   const hold = { reason: "Release freeze", resume_condition: "After release" };
   const held = run(updateCard(s, human, { card_id: one.card_id, hold }, f.io));
@@ -872,6 +882,242 @@ test("C-677: windows of cards held earlier close on refresh; a sensitive card's 
     expect.objectContaining({ open: false, closed_by_hold: true }),
   ]);
   expect(open()).toBe(false);
+});
+
+test("C-803: a held card records one hold with window, files and expiry; the limit releases it into the queue", async () => {
+  const f = await fixture();
+  const [one, two, three] = f.members;
+  if (!one || !two || !three) throw new Error("Missing cards");
+  const hour = 3_600_000;
+  let s: CommandState = {
+    ...f.state(),
+    project_settings: {
+      merge_gate_enabled: true,
+      merge_queue: {
+        max_batch_size: 4,
+        window_timeout_ms: 24 * hour,
+        window_hold_limit_ms: 2 * hour,
+      },
+    },
+  };
+  const start = Date.parse(f.io.clock.now());
+  const at = (ms: number) => new Date(start + ms).toISOString();
+  const io = (ms: number) => ({ ...f.io, clock: { now: () => at(ms) } });
+  const run = <T>(r: Result<CommandEffect<T>>) => {
+    const effect = value(r);
+    s = apply(s, effect);
+    return effect;
+  };
+  const holds = (ms: number) =>
+    run(recordMergeWindowHolds(s, system, {}, io(ms)));
+  // No open window: nothing to record.
+  expect(holds(0).events).toEqual([]);
+  run(
+    setMergeWindow(
+      s,
+      human,
+      { card_id: one.card_id, open: true, reason: "Protect shared file" },
+      io(0),
+    ),
+  );
+  run(
+    refreshMergeWindows(
+      s,
+      system,
+      {
+        paths: f.members.map((m, i) => ({
+          card_id: m.card_id,
+          versions: mergeWindowVersions(s, m.card_id),
+          files: i < 2 ? ["shared.ts", `own-${i}.ts`] : ["separate.ts"],
+        })),
+      },
+      io(0),
+    ),
+  );
+  const first = holds(10 * 60_000);
+  expect(first.events.map((e) => [e.type, e.card_id, e.payload])).toEqual([
+    [
+      MERGE_QUEUE_HELD,
+      two.card_id,
+      {
+        window_card_id: one.card_id,
+        window_opened_at: at(0),
+        versions: mergeWindowVersions(s, two.card_id),
+        files: ["shared.ts"],
+        expires_at: at(24 * hour),
+        release_at: at(10 * 60_000 + 2 * hour),
+      },
+    ],
+  ]);
+  expect(first.timeline.map((t) => t.body)).toEqual([
+    `合并排队被 ${one.card_id} 的合并窗口挡住（shared.ts）；窗口 ${at(24 * hour)
+      .slice(0, 16)
+      .replace("T", " ")}Z 到期，最迟 ${at(10 * 60_000 + 2 * hour)
+      .slice(0, 16)
+      .replace("T", " ")}Z 可进入批次`,
+  ]);
+  const card = (id: string) => {
+    const found = s.cards.find((c) => c.id === id);
+    if (!found) throw new Error("Missing card");
+    return found;
+  };
+  expect(mergeStage(s, card(two.card_id))).toEqual({
+    stage: "held_by_window",
+    protecting_card_id: one.card_id,
+    protecting_files: ["shared.ts"],
+    protecting_card_held: false,
+    protecting_expires_at: at(24 * hour),
+    held_since: at(10 * 60_000),
+    release_at: at(10 * 60_000 + 2 * hour),
+  });
+  expect(mergeWindowHoldings(s)).toEqual([
+    {
+      card_id: one.card_id,
+      opened_at: at(0),
+      expires_at: at(24 * hour),
+      files: ["shared.ts", "own-0.ts"],
+      holding: [
+        {
+          card_id: two.card_id,
+          files: ["shared.ts"],
+          since: at(10 * 60_000),
+          release_at: at(10 * 60_000 + 2 * hour),
+        },
+      ],
+    },
+  ]);
+  // The same hold is recorded once; just before the limit it still holds.
+  expect(holds(30 * 60_000).events).toEqual([]);
+  expect(holds(10 * 60_000 + 2 * hour - 1).events).toEqual([]);
+  expect(heldByMergeWindow(s, two.card_id)).toBe(one.card_id);
+  expect(mergeQueue(s).map((q) => q.plan.card_id)).toEqual([
+    one.card_id,
+    three.card_id,
+  ]);
+  // At the limit the card is released into the queue, once.
+  const released = holds(10 * 60_000 + 2 * hour);
+  expect(released.events.map((e) => [e.type, e.card_id, e.payload])).toEqual([
+    [
+      MERGE_QUEUE_HOLD_RELEASED,
+      two.card_id,
+      {
+        window_card_id: one.card_id,
+        window_opened_at: at(0),
+        versions: mergeWindowVersions(s, two.card_id),
+        held_since: at(10 * 60_000),
+        waited_ms: 2 * hour,
+        limit_ms: 2 * hour,
+      },
+    ],
+  ]);
+  expect(released.timeline.map((t) => t.body)).toEqual([
+    `被 ${one.card_id} 的合并窗口挡了 120 分钟，超过等待上限，可进入批次，由批次检查兜底`,
+  ]);
+  expect(heldByMergeWindow(s, two.card_id)).toBeUndefined();
+  expect(mergeQueue(s).map((q) => q.plan.card_id)).toEqual(
+    f.members.map((m) => m.card_id),
+  );
+  expect(mergeStage(s, card(two.card_id))).toMatchObject({ stage: "queued" });
+  expect(mergeWindowHoldings(s)[0]?.holding).toEqual([]);
+  expect(holds(3 * hour).events).toEqual([]);
+  // A new window instance is a new hold, recorded again.
+  run(
+    setMergeWindow(
+      s,
+      human,
+      { card_id: one.card_id, open: false, reason: "Done" },
+      io(3 * hour),
+    ),
+  );
+  run(
+    setMergeWindow(
+      s,
+      human,
+      { card_id: one.card_id, open: true, reason: "Again" },
+      io(4 * hour),
+    ),
+  );
+  expect(heldByMergeWindow(s, two.card_id)).toBe(one.card_id);
+  expect(holds(4 * hour).events.map((e) => [e.type, e.card_id])).toEqual([
+    [MERGE_QUEUE_HELD, two.card_id],
+    [MERGE_QUEUE_HELD, three.card_id],
+  ]);
+});
+
+test("C-803: holds use the default limit, unknown paths say so, and PM Ops sees windows in its queue", async () => {
+  const f = await fixture(2);
+  const [one, two] = f.members;
+  if (!one || !two) throw new Error("Missing cards");
+  const { work_item_id: _work, ...base } = assignment(900, "pm");
+  const ops: Assignment = { ...base, scope: "standing", standing_mode: "ops" };
+  const opsActor: Actor = {
+    kind: "assignment",
+    project_id: human.project_id,
+    assignment_id: ops.id,
+    ...role("pm"),
+    allowed_tools: standingTools(role("pm").allowed_tools, "ops"),
+  };
+  let s: CommandState = {
+    ...f.state(),
+    assignments: [...f.state().assignments, ops],
+  };
+  const start = Date.parse(f.io.clock.now());
+  const at = (ms: number) => new Date(start + ms).toISOString();
+  const io = (ms: number) => ({ ...f.io, clock: { now: () => at(ms) } });
+  const run = <T>(r: Result<CommandEffect<T>>) => {
+    const effect = value(r);
+    s = apply(s, effect);
+    return effect;
+  };
+  run(
+    setMergeWindow(
+      s,
+      human,
+      { card_id: one.card_id, open: true, reason: "Protect" },
+      io(0),
+    ),
+  );
+  // Only the system records holds.
+  expect(recordMergeWindowHolds(s, human, {}, io(0)).ok).toBe(false);
+  const held = run(recordMergeWindowHolds(s, system, {}, io(0)));
+  expect(held.events[0]?.payload).toMatchObject({
+    files: [],
+    expires_at: at(DEFAULT_MERGE_WINDOW_TIMEOUT_MS),
+    release_at: at(DEFAULT_MERGE_WINDOW_HOLD_LIMIT_MS),
+  });
+  expect(held.timeline[0]?.body).toContain("（改动文件未知）");
+  const queue = value(listNeedsYou(s, opsActor)).data.pm_queue;
+  expect(queue?.merge_windows).toEqual([
+    {
+      card_id: one.card_id,
+      opened_at: at(0),
+      expires_at: at(DEFAULT_MERGE_WINDOW_TIMEOUT_MS),
+      files: [],
+      holding: [
+        {
+          card_id: two.card_id,
+          files: [],
+          since: at(0),
+          release_at: at(DEFAULT_MERGE_WINDOW_HOLD_LIMIT_MS),
+        },
+      ],
+    },
+  ]);
+  expect(value(listNeedsYou(s, human)).data.pm_queue).toBeUndefined();
+  expect(
+    run(
+      recordMergeWindowHolds(
+        s,
+        system,
+        {},
+        io(DEFAULT_MERGE_WINDOW_HOLD_LIMIT_MS),
+      ),
+    ).events.map((e) => e.type),
+  ).toEqual([MERGE_QUEUE_HOLD_RELEASED]);
+  expect(mergeQueue(s).map((q) => q.plan.card_id)).toEqual([
+    one.card_id,
+    two.card_id,
+  ]);
 });
 
 test("solo changes do not mutate an existing batch and new batches enforce the flag", async () => {

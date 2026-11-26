@@ -39,6 +39,8 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   merge_unblocked: "自动合并阻塞解除",
   merge_blocked_reminded: "自动合并等待提醒",
   merge_check_waiting: "合并检查排队原因",
+  merge_queue_held: "被合并窗口挡住",
+  merge_queue_hold_released: "合并窗口等待超过上限",
   pre_merge_check_updated: PRE_MERGE_COPY.eventLabel,
   pre_merge_check_reminded: PRE_MERGE_COPY.reminderEventLabel,
   pre_merge_check_office_prompted: "提醒 PM Office 核对合并前核对项",
