@@ -118,6 +118,32 @@ export function pendingPrecheckConflict(
     : undefined;
 }
 
+const FINGERPRINT = /^[a-f0-9]{64}$/u;
+/**
+ * C-798: one sha256 hex fingerprint per uniquely named check step. Domain
+ * compares the host's values only; it never computes them.
+ */
+export function validCheckFingerprints(value: unknown): boolean {
+  if (!Array.isArray(value) || !value.length) return false;
+  const names = new Set<string>();
+  for (const entry of value as unknown[]) {
+    const e = entry as Record<string, unknown> | null;
+    if (
+      typeof e !== "object" ||
+      e === null ||
+      Object.keys(e).length !== 2 ||
+      typeof e.name !== "string" ||
+      !e.name.trim() ||
+      typeof e.fingerprint !== "string" ||
+      !FINGERPRINT.test(e.fingerprint) ||
+      names.has(e.name)
+    )
+      return false;
+    names.add(e.name);
+  }
+  return true;
+}
+
 /** The host uses this exact predicate before persisting a projected diagnostic. */
 export function validPrecheckSummary(
   summary: string,
@@ -183,6 +209,7 @@ export function prechecks(events: readonly Event[], card?: CardId): Precheck[] {
 export function precheckView({
   branch: _branch,
   machine_id: _machine,
+  check_fingerprints: _fingerprints,
   ...view
 }: Precheck): PrecheckView {
   return view;

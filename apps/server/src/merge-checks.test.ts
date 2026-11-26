@@ -38,6 +38,7 @@ import {
   type CheckoutResult,
   CheckRecovery,
   type CheckRequest,
+  checkStepFingerprint,
   ExecutorPreparationError,
   loadMergeGateConfig,
   type ProjectMergeGate,
@@ -8498,6 +8499,7 @@ function seedPassedPrecheck(
   names: readonly string[],
   attempt = `pre-${card.id}`,
   head = "a".repeat(40),
+  overrides: Record<string, unknown> = {},
 ) {
   f.store.uow.run((tx) => {
     const current = required(tx.cards.get(f.project_id, card.id as never));
@@ -8526,8 +8528,14 @@ function seedPassedPrecheck(
           status: "passed",
           exit_code: 0,
         })),
+        // C-798: what the fixtures configure for every step (`run: "true"`).
+        check_fingerprints: names.map((name) => ({
+          name,
+          fingerprint: checkStepFingerprint({ name, run: "true" }),
+        })),
         summary: "检查全部通过",
         log_ref: `${attempt}.log`,
+        ...overrides,
       },
     });
   });
@@ -8881,3 +8889,116 @@ test.each([
     }
   },
 );
+
+/** C-798: an SSH queue gate whose only card-tier step is `test`. */
+async function sshQueueFixture(run = "true") {
+  const fx = await fixture();
+  const c = controller(fx.f);
+  c.setConfig({
+    status: "enabled",
+    checks: [
+      { name: "test", run },
+      { name: "e2e", run: "true", tiers: ["batch"] },
+    ],
+    env: { SECRET: "fixture-secret" },
+    totalTimeoutMs: 1000,
+    queue: {
+      maxBatchSize: 4,
+      conflictThreshold: 2,
+      windowTimeoutMs: 86_400_000,
+    },
+  });
+  Object.assign(c.git, {
+    prepareBatch: vi.fn(),
+    pinBatch: vi.fn(),
+    publishBatch: vi.fn(),
+  });
+  return { ...fx, c };
+}
+
+test.each([
+  ["failed", [{ name: "test", status: "failed", exit_code: 1 }]],
+  ["timed_out", [{ name: "test", status: "timed_out", exit_code: null }]],
+  ["interrupted", []],
+])(
+  "C-798: a same-head precheck that passed and then a rerun %s runs a real card check",
+  async (status, checks) => {
+    const { f, scenario, completion, check, c } = await sshQueueFixture();
+    seedPassedPrecheck(f, scenario.card, completion, ["test", "e2e"], "pre-1");
+    seedPassedPrecheck(
+      f,
+      scenario.card,
+      completion,
+      ["test", "e2e"],
+      "pre-2",
+      undefined,
+      {
+        status,
+        checks,
+      },
+    );
+    await c.gate.tick([f.project_id]);
+    await c.gate.idle();
+    expect(c.run).toHaveBeenCalledTimes(1);
+    expect(check()).toMatchObject({ level: "card", status: "passed" });
+    expect(check()?.reused_precheck).toBeUndefined();
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test("C-798: a card-tier command changed after the precheck runs a real card check", async () => {
+  // The precheck ran `test` as `true`; the host now configures another command.
+  const { f, scenario, completion, check, c } =
+    await sshQueueFixture("true # changed");
+  seedPassedPrecheck(f, scenario.card, completion, ["test", "e2e"]);
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(check()).toMatchObject({ level: "card", status: "passed" });
+  expect(check()?.reused_precheck).toBeUndefined();
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("C-798: a legacy precheck without step fingerprints runs a real card check", async () => {
+  const { f, scenario, completion, check, c } = await sshQueueFixture();
+  seedPassedPrecheck(
+    f,
+    scenario.card,
+    completion,
+    ["test", "e2e"],
+    undefined,
+    undefined,
+    {
+      check_fingerprints: undefined,
+    },
+  );
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(check()?.reused_precheck).toBeUndefined();
+});
+
+test("C-798: an unchanged configuration and a newest passing attempt still reuse it", async () => {
+  const { f, scenario, completion, check, c } = await sshQueueFixture();
+  seedPassedPrecheck(
+    f,
+    scenario.card,
+    completion,
+    ["test", "e2e"],
+    "pre-1",
+    undefined,
+    {
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    },
+  );
+  seedPassedPrecheck(f, scenario.card, completion, ["test", "e2e"], "pre-2");
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.run).not.toHaveBeenCalled();
+  expect(check()).toMatchObject({
+    level: "card",
+    status: "passed",
+    reused_precheck: { attempt_id: "pre-2" },
+  });
+});

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -25,6 +26,29 @@ export interface MergeGateCheck extends CheckoutCheck {
   readonly tiers?: readonly ("card" | "batch")[];
   readonly scope?: "affected";
   readonly skipDocsOnly?: boolean;
+}
+
+/**
+ * C-798: fingerprint of what one check step executes: its name, command and
+ * timeout. A card check reuses a precheck only when every card-tier step
+ * still has the fingerprint the precheck ran with. Selection metadata (tiers,
+ * scope, docs-only skipping) is not part of it: the precheck always runs the
+ * step in full. Environment values are deliberately excluded so no digest of
+ * a secret is ever recorded.
+ */
+export function checkStepFingerprint(
+  step: Pick<CheckoutCheck, "name" | "run" | "timeoutMs">,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        "cardigan.check-step.v1",
+        step.name,
+        step.run,
+        step.timeoutMs ?? null,
+      ]),
+    )
+    .digest("hex");
 }
 
 export interface MergeGateAffected {
