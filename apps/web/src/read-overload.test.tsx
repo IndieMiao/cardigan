@@ -17,7 +17,8 @@ import {
   ServiceUpdatingNotice,
 } from "./service-retry.js";
 import { cardDetail, fakeClient } from "./testing/fixtures.js";
-import { useResource } from "./useResource.js";
+import { useNeedsResource } from "./useNeedsResource.js";
+import { RESOURCE_OVERLOAD_COOLDOWN_MS, useResource } from "./useResource.js";
 import { CardDetailPage } from "./views/CardDetailPage.js";
 
 afterEach(() => {
@@ -216,7 +217,7 @@ test("C-775: events during a slow failing read do not hide its failure", async (
     error: "服务繁忙，读取超时，请稍后重试。",
     pending: false,
   });
-  // The overload ends the chain: the queued events do not read again.
+  // The queued events wait out the overload cooldown instead of reading now.
   expect(load).toHaveBeenCalledTimes(1);
 });
 
@@ -231,34 +232,168 @@ test("C-775: an explicit reload still replaces the read in flight", async () => 
   expect(result.current.data).toBe("current");
 });
 
-test("C-775: after an overload failure only an explicit retry reads again", async () => {
-  const { load, calls } = controlledLoad();
-  const { result, rerender } = renderHook(
-    ({ revision }) => useResource(load, revision),
-    { initialProps: { revision: 0 } },
-  );
-  await act(async () =>
-    calls[0]?.reject(new ApiError(503, "read_timeout", "读取超时")),
-  );
-  expect(result.current).toMatchObject({
-    error: "服务繁忙，读取超时，请稍后重试。",
-    pending: false,
-  });
-  rerender({ revision: 1 });
-  rerender({ revision: 2 });
-  act(() => result.current.refresh());
-  // Live updates no longer turn the failure back into "正在加载".
-  expect(load).toHaveBeenCalledTimes(1);
-  expect(result.current).toMatchObject({ pending: false });
-  expect(result.current.error).toBeDefined();
-  act(() => result.current.reload());
-  expect(load).toHaveBeenCalledTimes(2);
-  await act(async () => calls[1]?.resolve("back"));
-  expect(result.current).toMatchObject({ data: "back", pending: false });
-  expect(result.current.error).toBeUndefined();
-  // Recovered: automatic reads resume.
-  rerender({ revision: 3 });
-  expect(load).toHaveBeenCalledTimes(3);
+const timeout = () => new ApiError(503, "read_timeout", "读取超时");
+
+test("C-775: the overload cooldown defaults to 30 seconds", () => {
+  expect(RESOURCE_OVERLOAD_COOLDOWN_MS).toBe(30_000);
+});
+
+test("C-775: after an overload, changes wait out the cooldown and then read once", async () => {
+  vi.useFakeTimers();
+  try {
+    const { load, calls } = controlledLoad();
+    const { result, rerender } = renderHook(
+      ({ revision }) => useResource(load, revision),
+      { initialProps: { revision: 0 } },
+    );
+    await act(async () => calls[0]?.reject(timeout()));
+    expect(result.current).toMatchObject({
+      error: "服务繁忙，读取超时，请稍后重试。",
+      overloaded: true,
+      pending: false,
+    });
+    for (let revision = 1; revision <= 10; revision++) rerender({ revision });
+    act(() => result.current.refresh());
+    // Live updates during the cooldown neither read nor show "正在加载".
+    await act(() => vi.advanceTimersByTimeAsync(29_999));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current).toMatchObject({ pending: false, overloaded: true });
+    // When it ends, one read covers all of them; the failure stays shown.
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(result.current).toMatchObject({
+      pending: true,
+      error: "服务繁忙，读取超时，请稍后重试。",
+    });
+    await act(async () => calls[1]?.resolve("back"));
+    expect(result.current).toMatchObject({ data: "back", pending: false });
+    expect(result.current.error).toBeUndefined();
+    expect(result.current.overloaded).toBe(false);
+    // Recovered: automatic reads follow changes at once again.
+    rerender({ revision: 11 });
+    expect(load).toHaveBeenCalledTimes(3);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("C-775: with no change during the cooldown nothing is read when it ends", async () => {
+  vi.useFakeTimers();
+  try {
+    const { load, calls } = controlledLoad();
+    renderHook(() => useResource(load));
+    await act(async () => calls[0]?.reject(timeout()));
+    await act(() => vi.advanceTimersByTimeAsync(120_000));
+    expect(load).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("C-775: an overload again after the cooldown starts a new cooldown", async () => {
+  vi.useFakeTimers();
+  try {
+    const { load, calls } = controlledLoad();
+    const { rerender } = renderHook(
+      ({ revision }) => useResource(load, revision),
+      { initialProps: { revision: 0 } },
+    );
+    await act(async () => calls[0]?.reject(timeout()));
+    rerender({ revision: 1 });
+    await act(() => vi.advanceTimersByTimeAsync(30_000));
+    expect(load).toHaveBeenCalledTimes(2);
+    await act(async () => calls[1]?.reject(timeout()));
+    rerender({ revision: 2 });
+    await act(() => vi.advanceTimersByTimeAsync(29_000));
+    expect(load).toHaveBeenCalledTimes(2);
+    await act(() => vi.advanceTimersByTimeAsync(1_000));
+    expect(load).toHaveBeenCalledTimes(3);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("C-775: an explicit retry during the cooldown reads at once", async () => {
+  vi.useFakeTimers();
+  try {
+    const { load, calls } = controlledLoad();
+    const { result, rerender } = renderHook(
+      ({ revision }) => useResource(load, revision),
+      { initialProps: { revision: 0 } },
+    );
+    await act(async () => calls[0]?.reject(timeout()));
+    rerender({ revision: 1 });
+    act(() => result.current.reload());
+    expect(load).toHaveBeenCalledTimes(2);
+    await act(async () => calls[1]?.resolve("back"));
+    expect(result.current).toMatchObject({ data: "back", pending: false });
+    // The retry ended the cooldown: its pending timer reads nothing more.
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(load).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("C-775: a tab shown again after the cooldown reads once", async () => {
+  vi.useFakeTimers();
+  try {
+    const { load, calls } = controlledLoad();
+    const { rerender } = renderHook(
+      ({ revision, enabled }) => useResource(load, revision, enabled),
+      { initialProps: { revision: 0, enabled: true } },
+    );
+    await act(async () => calls[0]?.reject(timeout()));
+    // Hidden during the cooldown: its end reads nothing in the background.
+    rerender({ revision: 1, enabled: true });
+    rerender({ revision: 1, enabled: false });
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(load).toHaveBeenCalledTimes(1);
+    rerender({ revision: 1, enabled: true });
+    expect(load).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("C-775: the Needs You count recovers after a read timeout (V-3461)", async () => {
+  vi.useFakeTimers();
+  try {
+    let total = 0;
+    const needsYouCounts = vi.fn(async () => {
+      total++;
+      if (total === 2) throw timeout();
+      return {
+        total_pending: total,
+        tabs: {
+          decisions: { count: 0, attention: 0 },
+          merges: { count: 0, attention: 0 },
+          actions: { count: 0, attention: 0 },
+          later: { count: 0, attention: 0 },
+        },
+      };
+    });
+    const client = fakeClient({ needsYouCounts });
+    const { result, rerender } = renderHook(
+      ({ revision }) => useNeedsResource(client, "p-1", revision, "k"),
+      { initialProps: { revision: 0 } },
+    );
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(result.current.data?.total_pending).toBe(1);
+    rerender({ revision: 1 });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(result.current.error).toBeDefined();
+    for (let revision = 2; revision <= 11; revision++) {
+      rerender({ revision });
+      await act(() => vi.advanceTimersByTimeAsync(3_000));
+    }
+    // Ten changes over 30 s: one read when the cooldown ends, and it counts.
+    expect(needsYouCounts).toHaveBeenCalledTimes(3);
+    expect(result.current.data?.total_pending).toBe(3);
+    expect(result.current.error).toBeUndefined();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("C-775: other failures keep reloading on the next change as before", async () => {
@@ -331,4 +466,20 @@ test("C-775: the card detail shows the failure and a retry instead of loading fo
   expect(
     (await screen.findAllByText(cardDetail().card.title)).length,
   ).toBeGreaterThan(0);
+});
+
+test("C-775: other first-load failures keep their message without the card prefix", async () => {
+  const card = vi.fn(async () => {
+    throw new ApiError(500, "internal", "boom");
+  });
+  render(
+    <CardDetailPage
+      client={fakeClient({ card })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("请求失败：boom");
+  expect(alert.textContent).not.toContain("没有加载出来");
 });

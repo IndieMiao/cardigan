@@ -215,11 +215,12 @@ export function CardDetailPage(props: CardDetailPageProps) {
   }, [client, projectId, cardId]);
   // C-775: a background tab stops reading and reads once when shown again.
   const visible = usePageVisible();
-  const { data, error, reload, pending, interactive, replace } = useResource(
-    load,
-    cardRevision ? cardRevision(cardId, affectedCards) : revision,
-    visible,
-  );
+  const { data, error, overloaded, reload, pending, interactive, replace } =
+    useResource(
+      load,
+      cardRevision ? cardRevision(cardId, affectedCards) : revision,
+      visible,
+    );
   // Older pages are read beside the live head refresh: at most one at a time,
   // dropped when filters, anchors or the card change while it is in flight.
   const [pager, setPager] = useState<PagerStatus>();
@@ -383,9 +384,9 @@ export function CardDetailPage(props: CardDetailPageProps) {
       <RequestFeedback
         pending={pending}
         interactive={interactive}
-        // C-775: with nothing shown yet, say which card failed to load.
+        // C-775: a read timeout with nothing shown yet names the card.
         error={
-          error && data === undefined
+          error && overloaded && data === undefined
             ? `卡片 ${cardId} 没有加载出来：${error}`
             : error
         }
