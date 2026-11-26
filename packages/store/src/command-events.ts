@@ -16,9 +16,10 @@ import { prepare } from "./statements.js";
  * router, the activity page and every other SQL reader see them as before;
  * only `listStreams` and the transaction's `listAfter` (both answered from
  * the log) leave them out. A type belongs here only when no reader of those
- * two needs it: `cross_card_read` is a read-audit row (a third of the project
- * stream's bytes) whose one in-process reader, the `project_snapshot` read
- * audit, queries SQL, and that never routes a notification or starts a Run.
+ * two needs it: `cross_card_read` is a read-audit row (about a sixth of all
+ * event bytes in the 11-26 production snapshot) whose one in-process reader,
+ * the `project_snapshot` read audit, queries SQL, and that never routes a
+ * notification or starts a Run.
  */
 export const NON_RESIDENT_EVENT_TYPES: ReadonlySet<string> = new Set([
   "cross_card_read",
