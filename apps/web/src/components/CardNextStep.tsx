@@ -19,6 +19,7 @@ import {
   PRECHECK_LABEL,
 } from "../card-checking.js";
 import { routeHash } from "../route.js";
+import { useCardDecision } from "./CardDecision.js";
 import { CardFormOutlet } from "./CardFormOutlet.js";
 import { useCardResume } from "./CardHold.js";
 import { NextOwners } from "./EmployeeIdentity.js";
@@ -34,12 +35,7 @@ import { PlainSummaryRisk } from "./PlainSummary.js";
 import { Button } from "./ui/button.js";
 
 /** Where a panel action leads when the action itself still lives elsewhere. */
-export type NextStepTarget =
-  | "merge"
-  | "decisions"
-  | "proposal"
-  | "questions"
-  | "comment";
+export type NextStepTarget = "merge" | "proposal" | "questions" | "comment";
 
 /** C-695: what the card waits for, most urgent first (C-687 §3.2). */
 export type NextStepState =
@@ -117,6 +113,17 @@ export function cardNextSteps(detail: CardDetail): {
     if (q ? q.decider === "human" : humanOwner)
       mine.push({ kind: "decision", ref: item.ref, q });
   }
+  // C-698: a non-blocking decision is not in waiting_on but still waits on
+  // you; it used to be answered in the overview's “待你拍板” section.
+  for (const q of detail.decisions)
+    if (
+      q.decider === "human" &&
+      q.trigger !== "merge_confirmation" &&
+      ["open", "provisional", "snoozed"].includes(q.status) &&
+      !mine.some((step) => step.kind === "decision" && step.ref === q.id) &&
+      !confirmations.some((merge) => merge.id === q.id)
+    )
+      mine.push({ kind: "decision", ref: q.id, q });
   if (!generalDone)
     for (const item of waiting)
       if (item.kind === "human_action")
@@ -214,6 +221,13 @@ export function CardNextStep({
   const panel = useRef<HTMLElement>(null);
   const docked = usePanelScrolledAway(panel);
   const resume = useCardResume({ card, client, projectId, onSaved });
+  const decision = useCardDecision({
+    q: current.kind === "decision" ? current.q : undefined,
+    client,
+    projectId,
+    onSaved,
+    busy,
+  });
   const needsYou = routeHash({ kind: "needs-you", projectId });
   const checks = cardChecking(card);
   const precheckLog = card.prechecks?.find(
@@ -380,20 +394,22 @@ export function CardNextStep({
       break;
     case "decision": {
       const { q } = current;
-      const inCard =
-        !!q?.suggestion &&
-        ["open", "provisional", "snoozed"].includes(q.status);
       title = (
         <>
           等你拍板
           <IdBadge id={current.ref} />
         </>
       );
-      lines = q && <DetailNextStepLine>{q.question}</DetailNextStepLine>;
-      primary = { label: "处理拍板" };
-      actions = inCard
-        ? reveal("decisions", primary.label)
-        : openNeedsYou(primary.label);
+      // C-698: answered right here; special decisions keep Needs You.
+      if (decision) {
+        lines = decision.body;
+        primary = { label: "确认选择", disabled: decision.disabled };
+        actions = decision.action;
+      } else {
+        lines = q && <DetailNextStepLine>{q.question}</DetailNextStepLine>;
+        primary = { label: "处理拍板" };
+        actions = openNeedsYou(primary.label);
+      }
       break;
     }
     case "human-action":

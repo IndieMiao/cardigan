@@ -13,6 +13,7 @@ import {
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
 import { runPresence } from "../run-presence.js";
+import { cardNextSteps } from "./CardNextStep.js";
 import { DecisionRouting } from "./DecisionRouting.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag, Time } from "./Foundation.js";
@@ -57,6 +58,8 @@ export function CardOverviewFacts({
           ?.verdict,
       }));
   const dependency = card.dependency;
+  const next = cardNextSteps(detail).current;
+  const shown = next.kind === "decision" ? next.ref : undefined;
   const link = (anchor: string) =>
     routeHash({ kind: "card", projectId, cardId, anchor });
   const related =
@@ -168,9 +171,8 @@ export function CardOverviewFacts({
                   detail={`${d.id} ${d.question}`}
                   href={link(`decision-${d.id}`)}
                 />
-                {/* A human's own decision is told by “下一步”; one routed to
-                    PM is said only here. */}
-                {open?.decider === "role:pm" && (
+                {/* The decision “下一步” shows already says its own reason. */}
+                {open && open.id !== shown && (
                   <DecisionRouting decision={open} />
                 )}
               </DetailFactGroup>

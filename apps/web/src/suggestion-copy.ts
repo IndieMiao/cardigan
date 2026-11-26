@@ -19,9 +19,6 @@ export const SUGGESTION_COPY = {
   staleHint:
     "交付、合并检查或合并前核对在建议之后有变化，请按当前情况自己选择。",
   returnReason: "退回原因（已按建议预填，可修改）",
-  /** Card details: section of open decisions that carry a suggestion. */
-  cardSection: "待你拍板",
-  otherOptions: "要选其他方案，请到 ",
   /** Merge confirmations name the option after the button the human knows. */
   mergeOptions: { merge: "确认合并", request_changes: "退回修改" } as Record<
     string,
