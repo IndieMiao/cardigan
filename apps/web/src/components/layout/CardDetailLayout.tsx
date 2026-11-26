@@ -240,11 +240,31 @@ export function DetailNextStepFeedback({
     </div>
   );
 }
-/** C-702: one fact of a panel line kept together when the line wraps. */
-export function DetailNextStepFact(
-  props: Omit<ComponentProps<"span">, "className">,
-) {
-  return <span {...props} className={styles.nextFact} />;
+/**
+ * C-702: one fact of a panel line kept together when the line wraps.
+ * C-703: `separated` ends it with a muted “·” glued to its last piece
+ * (`tail`), so a wrapped line never starts with the dot.
+ */
+export function DetailNextStepFact({
+  separated = false,
+  tail,
+  children,
+  ...props
+}: Omit<ComponentProps<"span">, "className"> & {
+  readonly separated?: boolean;
+  readonly tail?: ReactNode;
+}) {
+  return (
+    <span {...props} className={styles.nextFact}>
+      {children}
+      {(tail !== undefined || separated) && (
+        <span className={styles.nextFactTail}>
+          {tail}
+          {separated && <span aria-hidden="true">·</span>}
+        </span>
+      )}
+    </span>
+  );
 }
 /**
  * C-699: the overview: a main column and a 280px facts column beside it. In a
