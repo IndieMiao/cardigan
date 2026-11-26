@@ -112,6 +112,7 @@ import {
   effectWrites,
   loadCommandState,
   persistEffect,
+  toolCatalogCompatible,
   unwrap,
 } from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
@@ -1253,16 +1254,23 @@ export class Dispatcher {
     // recorded fingerprint that differs from this deploy's counts; legacy Runs
     // without one never trigger a replacement.
     const catalog = this.catalog(a, project);
-    const replaceCatalog =
+    // C-786: only an incompatible change replaces the session; a reused
+    // session keeps the catalog it listed, so later deploys compare with it.
+    const catalogChanged =
+      catalog !== undefined &&
+      prior?.tool_catalog !== undefined &&
+      !toolCatalogCompatible(prior.tool_catalog, catalog);
+    // C-786: device resource isolation is its own replacement reason, so a
+    // count of deploy-caused replacements never includes it.
+    const isolate =
       live &&
-      ((!continuing &&
-        (this.options.leases?.freshSession(project, a) ||
-          // C-721: a Run without some of its work item's resources never
-          // shares a session (and its device environment) with one that has them.
-          this.admissionKeys(project, a, notes, prior).restricted)) ||
-        (catalog !== undefined &&
-          prior?.tool_catalog !== undefined &&
-          prior.tool_catalog !== catalog));
+      !continuing &&
+      !catalogChanged &&
+      (this.options.leases?.freshSession(project, a) ||
+        // C-721: a Run without some of its work item's resources never
+        // shares a session (and its device environment) with one that has them.
+        this.admissionKeys(project, a, notes, prior).restricted);
+    const replaceCatalog = live && (catalogChanged || isolate);
     try {
       if (reminder) snapshot = reminder;
       else if (continuing) snapshot = continuing;
@@ -1341,7 +1349,10 @@ export class Dispatcher {
       // releases the live terminal and starts a fresh CLI session, so the new
       // session lists the current tools.
       live = false;
-      replacement = { previous: a.runtime_ref, reason: "tool_catalog_changed" };
+      replacement = {
+        previous: a.runtime_ref,
+        reason: catalogChanged ? "tool_catalog_changed" : "resource_isolation",
+      };
     }
     if (changedEnvironment && !live) return skip("session_replacement_pending");
     if (retirementHeld && !live) {

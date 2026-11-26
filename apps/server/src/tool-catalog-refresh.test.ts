@@ -7,6 +7,7 @@ import {
   type Runtime,
 } from "@cardigan/domain";
 import { RuntimeTargetError } from "@cardigan/host";
+import { catalogHash } from "@cardigan/mcp-server";
 import { afterEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
@@ -251,6 +252,50 @@ test.each([
     expect(handoff?.body).toContain("部署后工具清单已变更");
   },
 );
+
+// C-786: real fingerprints of two deploys of the same tool.
+const listing = (shape: Record<string, unknown>, required: string[]) => [
+  {
+    name: "get_updates",
+    inputSchema: { type: "object", properties: shape, required },
+  },
+];
+const v1 = catalogHash(listing({ card_id: { type: "string" } }, ["card_id"]));
+const withOptional = catalogHash(
+  listing({ card_id: { type: "string" }, limit: { type: "number" } }, [
+    "card_id",
+  ]),
+);
+const withRequired = catalogHash(
+  listing({ card_id: { type: "string" }, limit: { type: "number" } }, [
+    "card_id",
+    "limit",
+  ]),
+);
+
+test("C-786: a deploy that only adds an optional parameter reuses the live session", async () => {
+  const f = fixture({ recorded: v1 });
+  f.deploy(withOptional);
+  f.wake();
+  await new Dispatcher(f.dispatcher).tick();
+  expect(f.runtime.wake).toHaveBeenCalledOnce();
+  expect(f.runtime.resume_or_replace).not.toHaveBeenCalled();
+  expect(f.replaced()).toEqual([]);
+  // The session still lists what it listed; the next deploy compares with that.
+  expect(f.latest()).toMatchObject({ status: "dispatched", tool_catalog: v1 });
+});
+
+test("C-786: a deploy that adds a required parameter replaces the live session", async () => {
+  const f = fixture({ recorded: v1 });
+  f.deploy(withRequired);
+  f.wake();
+  await new Dispatcher(f.dispatcher).tick();
+  expect(f.runtime.resume_or_replace).toHaveBeenCalledOnce();
+  expect(f.replaced()).toMatchObject([
+    { payload: { reason: "tool_catalog_changed" } },
+  ]);
+  expect(f.latest()).toMatchObject({ tool_catalog: withRequired });
+});
 
 test("P2a-10 A: after one replacement the same deploy reuses the new session", async () => {
   const f = fixture({ recorded: "catalog-v1" });

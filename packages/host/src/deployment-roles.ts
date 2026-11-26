@@ -354,6 +354,134 @@ function rotationTarget(state: CommandState, previous: Assignment) {
   return latest;
 }
 
+/**
+ * C-786: when a deployed role upgrade reaches a standing session. Rotating
+ * drops the session's context (PM Office loses what it was holding), so an
+ * ordinary upgrade waits and several deployments collapse into one rotation.
+ */
+export interface StandingRotationPolicy {
+  /** Rotate once the session has had no activity this long; 0 rotates as
+   * soon as its Run ends (the pre-C-786 behaviour, also the off switch). */
+  readonly quiet_ms: number;
+  /** An upgrade pending this long rotates at the next idle moment anyway. */
+  readonly max_defer_ms: number;
+}
+/** Same as the idle threshold that retires work-item sessions. */
+export const STANDING_ROTATION_QUIET_MINUTES = 60;
+export const STANDING_ROTATION_MAX_DEFER_MINUTES = 720;
+
+function minutes(raw: string | undefined, fallback: number, min: number) {
+  if (raw === undefined || !/^\d+$/u.test(raw)) return fallback;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= min && value <= 10_080
+    ? value
+    : fallback;
+}
+
+/** Host settings; an unreadable value keeps the default rather than stopping maintenance. */
+export function standingRotationPolicy(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): StandingRotationPolicy {
+  return {
+    quiet_ms:
+      minutes(
+        env.CARDIGAN_STANDING_ROTATION_QUIET_MINUTES,
+        STANDING_ROTATION_QUIET_MINUTES,
+        0,
+      ) * 60_000,
+    max_defer_ms:
+      minutes(
+        env.CARDIGAN_STANDING_ROTATION_MAX_DEFER_MINUTES,
+        STANDING_ROTATION_MAX_DEFER_MINUTES,
+        1,
+      ) * 60_000,
+  };
+}
+
+export type StandingRotationTrigger =
+  | "immediate"
+  | "security"
+  | "no_session"
+  | "quiet"
+  | "max_defer";
+
+const upgradeAudits = (state: CommandState, roleId: string) =>
+  eventsOfType(state.events, "host_role_upgraded").filter(
+    (e) =>
+      e.actor.kind === "system" &&
+      e.card_id === undefined &&
+      (e.payload as { role_id?: unknown }).role_id === roleId,
+  );
+const auditVersion = (e: { payload: unknown }) =>
+  (e.payload as { to_version?: unknown }).to_version;
+const auditRevision = (e: { payload: unknown }) => {
+  const r = (e.payload as { security_revision?: unknown }).security_revision;
+  return typeof r === "number" && Number.isSafeInteger(r) ? r : 0;
+};
+
+/**
+ * C-786: whether a rotation to `latest` is due now, and why; undefined keeps
+ * the pinned version for now. Pure: judged from the state and `now` only.
+ *
+ * - `security`: an upgrade between the pinned and the target version carries
+ *   a higher security revision than the pinned version (roles package
+ *   `ROLE_SECURITY_REVISIONS`), so it never waits.
+ * - `no_session`: the Assignment has no live session; its next wake starts a
+ *   new one anyway, so no context is lost.
+ * - `quiet`: no Run or Card MCP activity for `quiet_ms`.
+ * - `max_defer`: the oldest pending upgrade has waited `max_defer_ms`.
+ */
+export function standingRotationDue(
+  state: CommandState,
+  previous: Assignment,
+  latest: { readonly role_version: number },
+  now: string,
+  policy: StandingRotationPolicy,
+): StandingRotationTrigger | undefined {
+  if (policy.quiet_ms === 0) return "immediate";
+  const audits = upgradeAudits(state, previous.role_id);
+  const pinnedRevision = Math.max(
+    0,
+    ...audits
+      .filter((e) => {
+        const v = auditVersion(e);
+        return typeof v === "number" && v <= previous.role_version;
+      })
+      .map(auditRevision),
+  );
+  const pending = audits.filter((e) => {
+    const v = auditVersion(e);
+    return (
+      typeof v === "number" &&
+      v > previous.role_version &&
+      v <= latest.role_version
+    );
+  });
+  if (pending.some((e) => auditRevision(e) > pinnedRevision)) return "security";
+  if (!previous.runtime_ref) return "no_session";
+  const at = Date.parse(now);
+  const times = [
+    previous.created_at,
+    previous.last_mcp_activity_at,
+    ...state.runs
+      .filter((r) => r.assignment_id === previous.id)
+      .flatMap((r) => [r.started_at, r.finished_at, r.heartbeat_at]),
+  ]
+    .map((t) => (t ? Date.parse(t) : Number.NaN))
+    .filter((t) => Number.isFinite(t));
+  const lastActivity = Math.max(0, ...times);
+  if (at - lastActivity >= policy.quiet_ms) return "quiet";
+  const since = Math.min(
+    ...pending.map((e) => Date.parse(e.created_at)).filter(Number.isFinite),
+  );
+  if (Number.isFinite(since) && at - since >= policy.max_defer_ms)
+    return "max_defer";
+  return undefined;
+}
+
+/** C-786: the host's record of why a deferred standing rotation went ahead. */
+export const ROTATION_DUE_EVENT = "host_standing_rotation_due";
+
 /** A session with an unfinished Run keeps its pinned version until idle. */
 function rotationBusy(state: CommandState, previous: Assignment) {
   return state.runs.some(
@@ -388,6 +516,8 @@ export function rotateIdleDeployedRoles(
   ) => CommandState = loadCommandState,
   /** Valid launch profiles, known in a deployment only. */
   profiles?: () => ReadonlySet<string>,
+  policy: StandingRotationPolicy = standingRotationPolicy(),
+  clock: { now(): string } = { now: () => new Date().toISOString() },
 ) {
   // C-641: decide in a read snapshot; only pending work takes the writer lock,
   // and the locked pass below re-evaluates everything.
@@ -397,10 +527,15 @@ export function rotateIdleDeployedRoles(
       value:
         pendingRoleConflictActions(state).length ||
         // A deployment records launch checks for busy sessions too.
-        state.assignments.some(
-          (a) =>
-            rotationTarget(state, a) && (profiles || !rotationBusy(state, a)),
-        )
+        state.assignments.some((a) => {
+          const latest = rotationTarget(state, a);
+          return (
+            latest &&
+            (profiles ||
+              (!rotationBusy(state, a) &&
+                standingRotationDue(state, a, latest, clock.now(), policy)))
+          );
+        })
           ? undefined
           : { pm: rotatedPm(state) },
     };
@@ -409,7 +544,6 @@ export function rotateIdleDeployedRoles(
   return store.uow.run((tx) => {
     let state = loadState(tx, project);
     const actor = { kind: "system" as const, project_id: project };
-    const clock = { now: () => new Date().toISOString() };
     const ports = { ids: tx.ids, clock };
     if (pendingRoleConflictActions(state).length) {
       const matched = new Set(
@@ -473,6 +607,14 @@ export function rotateIdleDeployedRoles(
         continue;
       }
       if (rotationBusy(state, previous)) continue;
+      const trigger = standingRotationDue(
+        state,
+        previous,
+        latest,
+        clock.now(),
+        policy,
+      );
+      if (!trigger) continue;
       const rotated =
         previous.role_id === "pm"
           ? rotatePmAfterDeployment(
@@ -493,6 +635,21 @@ export function rotateIdleDeployedRoles(
         );
         continue;
       }
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project),
+        type: ROTATION_DUE_EVENT,
+        actor,
+        created_at: clock.now(),
+        payload: {
+          role_id: previous.role_id,
+          previous_assignment_id: previous.id,
+          assignment_id: rotated.value.data.assignment.id,
+          from_version: previous.role_version,
+          to_version: rotated.value.data.to_version,
+          trigger,
+        },
+      });
       persistPmRotation(store, tx, project, rotated.value, clock.now());
       state = loadState(tx, project);
     }

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +6,7 @@ import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { z } from "zod";
 import { memoryLogger } from "./log.js";
 import {
   defaultToolCatalog,
@@ -18,8 +18,15 @@ import {
   project_id,
   seedProject,
 } from "./test-support.js";
-import { canonicalJson } from "./tool-server.js";
+import {
+  catalogHash,
+  structuralSchema,
+  TOOL_CATALOG_REVISION,
+  toolCatalogCompatible,
+  toolCatalogFingerprint,
+} from "./tool-server.js";
 import { readOnlyTools } from "./tools/index.js";
+import type { ToolDefinition } from "./tools/types.js";
 
 // P2a-10 A (finding 40): the Dispatcher compares a session's recorded tool
 // catalog with this fingerprint, so it must hash exactly what tools/list
@@ -71,20 +78,7 @@ async function listed(server: RunningServer) {
   return tools;
 }
 
-const hash = (tools: Awaited<ReturnType<typeof listed>>) =>
-  createHash("sha256")
-    .update(
-      canonicalJson(
-        [...tools]
-          .map(({ name, description, inputSchema }) => ({
-            name,
-            description,
-            inputSchema,
-          }))
-          .sort((a, b) => (a.name < b.name ? -1 : 1)),
-      ),
-    )
-    .digest("hex");
+const hash = (tools: Awaited<ReturnType<typeof listed>>) => catalogHash(tools);
 
 test("P2a-10 A: the fingerprint is the hash of the tools/list a session receives", async () => {
   const server = await deploy();
@@ -105,7 +99,7 @@ test("P2a-10 A: a redeploy with the same tools keeps the fingerprint", async () 
   );
 });
 
-test("P2a-10 A: a changed description changes the fingerprint and a new session lists it", async () => {
+test("C-786: a changed description keeps the fingerprint, though a new session lists it", async () => {
   const before = await deploy(readOnlyTools);
   const changed = readOnlyTools.map((tool) =>
     tool.name === "get_updates"
@@ -113,7 +107,7 @@ test("P2a-10 A: a changed description changes the fingerprint and a new session 
       : tool,
   );
   const after = await deploy(changed);
-  expect(after.toolCatalog(allowed, assignment)).not.toBe(
+  expect(after.toolCatalog(allowed, assignment)).toBe(
     before.toolCatalog(allowed, assignment),
   );
   // The same token, in a new session against the new deploy, sees the change.
@@ -122,18 +116,289 @@ test("P2a-10 A: a changed description changes the fingerprint and a new session 
     "(new deploy)",
   );
   expect(after.toolCatalog(allowed, assignment)).toBe(hash(tools));
+});
+
+test("C-786: a new optional parameter changes the fingerprint but stays compatible", async () => {
+  const before = await deploy(readOnlyTools);
+  const changed = readOnlyTools.map((tool) =>
+    tool.name === "get_updates"
+      ? { ...tool, input: tool.input.extend({ extra: z.string().optional() }) }
+      : tool,
+  );
+  const after = await deploy(changed);
+  const recorded = before.toolCatalog(allowed, assignment);
+  const current = after.toolCatalog(allowed, assignment);
+  expect(current).not.toBe(recorded);
+  expect(current).toBe(hash(await listed(after)));
+  expect(toolCatalogCompatible(recorded, current)).toBe(true);
+  // A session that listed the new parameter cannot go back to a list without it.
+  expect(toolCatalogCompatible(current, recorded)).toBe(false);
   // Tools outside the token's scope do not affect the fingerprint.
   const unrelated = readOnlyTools.map((tool) =>
     tool.name === "get_card"
-      ? { ...tool, description: `${tool.description} (new deploy)` }
+      ? { ...tool, input: tool.input.extend({ extra: z.string() }) }
       : tool,
   );
   const other = await deploy(unrelated);
-  expect(other.toolCatalog(allowed, assignment)).toBe(
-    before.toolCatalog(allowed, assignment),
-  );
+  expect(other.toolCatalog(allowed, assignment)).toBe(recorded);
 });
 
+// C-786: typical deploys, judged against a session that listed `base()`.
+const fixtureTool = (
+  name: ToolName,
+  shape: z.ZodRawShape,
+  description = `fictional ${name}`,
+): ToolDefinition => ({
+  name,
+  description,
+  input: z.object(shape),
+  handler: () => ({}),
+});
+const base = () => [
+  fixtureTool("whoami", {}),
+  fixtureTool("get_updates", {
+    card_id: z.string().min(1).describe("card to read"),
+    since_seq: z.number().int().min(0).optional(),
+    filter: z
+      .object({ kind: z.enum(["a", "b"]), limit: z.number().optional() })
+      .optional(),
+  }),
+];
+const updates = (shape: (old: z.ZodRawShape) => z.ZodRawShape) =>
+  base().map((t) =>
+    t.name === "get_updates" ? fixtureTool(t.name, shape(t.input.shape)) : t,
+  );
+const all: readonly ToolName[] = ["whoami", "get_updates", "ack_events"];
+const print = (tools: readonly ToolDefinition[]) =>
+  toolCatalogFingerprint(tools, all, assignment);
+const compatible = (tools: readonly ToolDefinition[]) =>
+  toolCatalogCompatible(print(base()), print(tools));
+
+test.each([
+  [
+    "a tool is added",
+    () => [...base(), fixtureTool("ack_events", { up_to_seq: z.number() })],
+  ],
+  ["a tool is removed", () => base().filter((t) => t.name !== "whoami")],
+  [
+    "a required parameter is added",
+    () => updates((old) => ({ ...old, limit: z.number() })),
+  ],
+  [
+    "a required parameter is removed",
+    () => updates(({ card_id: _gone, ...old }) => old),
+  ],
+  [
+    "an optional parameter is removed",
+    () => updates(({ since_seq: _gone, ...old }) => old),
+  ],
+  [
+    "a parameter type changes",
+    () => updates((old) => ({ ...old, since_seq: z.string().optional() })),
+  ],
+  [
+    "an optional parameter becomes required",
+    () => updates((old) => ({ ...old, since_seq: z.number().int().min(0) })),
+  ],
+  [
+    "a required parameter becomes optional",
+    () => updates((old) => ({ ...old, card_id: z.string().min(1).optional() })),
+  ],
+  [
+    "a bound changes",
+    () => updates((old) => ({ ...old, card_id: z.string().min(2) })),
+  ],
+  [
+    "an enum gains a value",
+    () =>
+      updates((old) => ({
+        ...old,
+        filter: z
+          .object({
+            kind: z.enum(["a", "b", "c"]),
+            limit: z.number().optional(),
+          })
+          .optional(),
+      })),
+  ],
+  [
+    "a nested optional field changes type",
+    () =>
+      updates((old) => ({
+        ...old,
+        filter: z
+          .object({ kind: z.enum(["a", "b"]), limit: z.string().optional() })
+          .optional(),
+      })),
+  ],
+  [
+    "an optional object gains a required field",
+    () =>
+      updates((old) => ({
+        ...old,
+        filter: z
+          .object({
+            kind: z.enum(["a", "b"]),
+            limit: z.number().optional(),
+            page: z.number(),
+          })
+          .optional(),
+      })),
+  ],
+  [
+    "an object parameter becomes strict",
+    () =>
+      updates((old) => ({
+        ...old,
+        filter: z
+          .object({ kind: z.enum(["a", "b"]), limit: z.number().optional() })
+          .strict()
+          .optional(),
+      })),
+  ],
+])("C-786: incompatible — %s", (_label, changed) => {
+  expect(compatible(changed())).toBe(false);
+});
+
+test.each([
+  [
+    "a tool description changes",
+    () =>
+      base().map((t) =>
+        t.name === "whoami" ? fixtureTool(t.name, {}, "reworded") : t,
+      ),
+  ],
+  [
+    "a parameter description changes or is added",
+    () =>
+      updates((old) => ({
+        ...old,
+        card_id: z.string().min(1).describe("reworded"),
+        since_seq: z.number().int().min(0).optional().describe("new"),
+      })),
+  ],
+  ["only the order changes", () => [...base()].reverse()],
+  [
+    "an optional parameter is added",
+    () => updates((old) => ({ ...old, limit: z.number().optional() })),
+  ],
+  [
+    "an optional field is added inside an optional object",
+    () =>
+      updates((old) => ({
+        ...old,
+        filter: z
+          .object({
+            kind: z.enum(["a", "b"]),
+            limit: z.number().optional(),
+            page: z.number().optional(),
+          })
+          .optional(),
+      })),
+  ],
+])("C-786: compatible — %s", (_label, changed) => {
+  expect(compatible(changed())).toBe(true);
+});
+
+test("C-786: optional fields added at depth stay compatible across deploys", () => {
+  const nested = (extra: z.ZodRawShape) => [
+    fixtureTool("get_updates", {
+      card_id: z.string(),
+      gaps: z.array(z.object({ description: z.string(), ...extra })),
+    }),
+  ];
+  const recorded = print(nested({}));
+  const once = print(nested({ precondition: z.string().optional() }));
+  const twice = print(
+    nested({
+      precondition: z.string().optional(),
+      followup: z.string().optional(),
+    }),
+  );
+  expect(toolCatalogCompatible(recorded, once)).toBe(true);
+  // A live session keeps its recorded list; each deploy compares with it.
+  expect(toolCatalogCompatible(recorded, twice)).toBe(true);
+  expect(
+    toolCatalogCompatible(
+      recorded,
+      print(nested({ precondition: z.string() })),
+    ),
+  ).toBe(false);
+});
+
+test("C-786: launch suffixes must match and older fingerprints compare by equality", () => {
+  const recorded = print(base());
+  const wider = print(
+    updates((old) => ({ ...old, limit: z.number().optional() })),
+  );
+  expect(recorded).toMatch(/^c2\.[0-9a-f]{64}\.[0-9a-f,]*$/u);
+  expect(
+    toolCatalogCompatible(`${recorded}+build-env-1`, `${wider}+build-env-1`),
+  ).toBe(true);
+  expect(toolCatalogCompatible(`${recorded}+build-env-1`, wider)).toBe(false);
+  expect(
+    toolCatalogCompatible(
+      `${recorded}+run-command-a`,
+      `${wider}+run-command-b`,
+    ),
+  ).toBe(false);
+  const legacy = "a".repeat(64);
+  expect(toolCatalogCompatible(legacy, legacy)).toBe(true);
+  expect(toolCatalogCompatible(legacy, recorded)).toBe(false);
+  expect(toolCatalogCompatible(recorded, legacy)).toBe(false);
+  expect(toolCatalogCompatible("new-catalog", "catalog-v2")).toBe(false);
+});
+
+test("C-786: a parameter named description is a name, not an annotation", () => {
+  const schema = {
+    type: "object",
+    description: "dropped",
+    properties: {
+      description: { type: "string", description: "dropped too" },
+      known_gaps: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { description: { type: "string" } },
+          required: ["description"],
+        },
+      },
+    },
+    required: ["description"],
+  };
+  expect(structuralSchema(schema)).toEqual({
+    type: "object",
+    properties: {
+      description: { type: "string" },
+      known_gaps: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { description: { type: "string" } },
+          required: ["description"],
+        },
+      },
+    },
+    required: ["description"],
+  });
+  const renamed = {
+    ...schema,
+    properties: { summary: schema.properties.description },
+  };
+  expect(structuralSchema(renamed)).not.toEqual(structuralSchema(schema));
+  // Enum values and defaults are data: an enum member called "title" stays.
+  expect(
+    structuralSchema({ type: "string", enum: ["title"], default: "title" }),
+  ).toEqual({ type: "string", enum: ["title"], default: "title" });
+});
+
+test("C-786: bumping the catalog revision changes the fingerprint", () => {
+  const listed = [{ name: "whoami", inputSchema: { type: "object" } }];
+  expect(catalogHash(listed)).toBe(catalogHash(listed, TOOL_CATALOG_REVISION));
+  expect(catalogHash(listed, TOOL_CATALOG_REVISION + 1)).not.toBe(
+    catalogHash(listed),
+  );
+});
 test("P2a-10 A: host launches compute the same fingerprint as the default endpoint", async () => {
   const server = await deploy();
   expect(defaultToolCatalog(allowed, assignment)).toBe(

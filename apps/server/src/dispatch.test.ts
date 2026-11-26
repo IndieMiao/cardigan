@@ -1875,7 +1875,7 @@ test("C-721 a submit/reply follow-up starts while godot and the emulator are ful
   expect(options.startRun).toHaveBeenCalledOnce();
   expect(vi.mocked(options.startRun).mock.calls[0]?.[0]).toMatchObject({
     bell: expect.stringContaining("未占用 godot、android.emulator 名额"),
-    replacement: { reason: "tool_catalog_changed" },
+    replacement: { reason: "resource_isolation" },
   });
   expect(occupied("godot")).toBe(1);
   expect(occupied("android.emulator")).toBe(1);
@@ -2016,7 +2016,7 @@ test("C-721 a running follow-up that holds no resources is told so with every no
   expect(options.startRun).toHaveBeenCalledOnce();
   expect(vi.mocked(options.startRun).mock.calls[0]?.[0]).toMatchObject({
     bell: expect.not.stringContaining("未占用"),
-    replacement: { reason: "tool_catalog_changed" },
+    replacement: { reason: "resource_isolation" },
   });
 });
 

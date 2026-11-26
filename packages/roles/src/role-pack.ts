@@ -882,6 +882,24 @@ export function isDefaultRoleId(id: string): id is DefaultRoleId {
   return Object.hasOwn(ROLE_BODIES, id);
 }
 
+/**
+ * C-786: a deployed default-pack change normally reaches a standing session
+ * only when it is idle for a while or starts a new session anyway (see the
+ * host's standing rotation policy). Bump a role's number here, in the same
+ * change, when that change must reach standing sessions at once: a security
+ * or permission rule, a removed tool, anything a session must not keep
+ * working under. The deployment records the number on the role upgrade, and a
+ * session pinned below it rotates as soon as its current Run ends.
+ */
+export const ROLE_SECURITY_REVISIONS: Readonly<
+  Partial<Record<DefaultRoleId, number>>
+> = {};
+
+/** The C-786 security revision a default-pack role carries; 0 for none. */
+export function roleSecurityRevision(id: string): number {
+  return isDefaultRoleId(id) ? (ROLE_SECURITY_REVISIONS[id] ?? 0) : 0;
+}
+
 /** Every default role, ready for `compileAssignmentLaunch`. */
 export function defaultRoles(
   options: Record<DefaultRoleId, DefaultRoleOptions>,
