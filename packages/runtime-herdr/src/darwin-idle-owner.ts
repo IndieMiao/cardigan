@@ -12,6 +12,10 @@ import type {
   RuntimeRef,
 } from "@cardigan/domain";
 import { agentProcessCommand } from "./agent-ssh.js";
+import {
+  readDarwinEnrollment,
+  recordDarwinEnrollment,
+} from "./darwin-owner-enrollment.js";
 import { darwinOwnerKey } from "./darwin-owner-key.js";
 import type { ExecutionConfig } from "./execution.js";
 import { workerFileRequest, workerLaunchPath } from "./worker-files.js";
@@ -54,31 +58,44 @@ export async function enrollDarwinOwner(
   role: Role,
   launch: RuntimeLaunch,
 ): Promise<RuntimeLaunch> {
+  // Not a launch of this controller's opted-in Darwin target: nothing to record.
   if (
     !enabled(e) ||
     e.mode !== "agent-ssh" ||
     !e.macosCore ||
     !e.target ||
     e.target.machine_id === "local" ||
-    !e.fileHelper ||
-    !e.user ||
-    a.scope !== "work_item" ||
-    a.external ||
-    !["none", "write", "readonly"].includes(role.worktree ?? "") ||
+    !launch.labels.generation ||
+    !launch.labels.run ||
+    launch.labels.project !== e.target.project_id
+  )
+    return launch;
+  const ssh = e;
+  const { project, run, generation } = launch.labels;
+  // C-804: a skipped enrollment says why, so a refused retirement can name it.
+  const skip = async (reason: string) => {
+    let id: string | undefined;
+    try {
+      id = enrollment(ssh, project, a.id, run, generation).id;
+    } catch {}
+    if (id) await recordDarwinEnrollment(ssh.dataDir, id, reason);
+    return launch;
+  };
+  if (!e.fileHelper || !e.user) return skip("worker_config");
+  if (a.scope !== "work_item" || a.external) return skip("assignment_scope");
+  if (!["none", "write", "readonly"].includes(role.worktree ?? ""))
+    return skip("role_worktree");
+  if (
     launch.command !== e.fileHelper.python ||
     launch.args[0] !== "-I" ||
     launch.args[1] !== "-B" ||
     launch.args[2] !== e.fileHelper.path ||
     launch.args[4] !== "run" ||
     launch.args.length !== 7 ||
-    !/^[0-9a-f]{64}$/u.test(launch.args[6] ?? "") ||
-    !launch.labels.generation ||
-    !launch.labels.run ||
-    launch.labels.project !== e.target.project_id ||
-    launch.labels.assignment !== a.id
+    !/^[0-9a-f]{64}$/u.test(launch.args[6] ?? "")
   )
-    return launch;
-  const { project, run, generation } = launch.labels;
+    return skip("launch_shape");
+  if (launch.labels.assignment !== a.id) return skip("launch_labels");
   const { directory, id, identity } = enrollment(
     e,
     project,
@@ -88,7 +105,7 @@ export async function enrollDarwinOwner(
   );
   const packet = workerFileRequest(e, identity, "status");
   if (launch.args[5] !== packet.subarray(0, packet.indexOf(10)).toString())
-    return launch;
+    return skip("launch_packet");
   const [owner, inspector] = await Promise.all(
     ["darwin-idle-owner.py", "inspect-worker.py"].map((name) =>
       readFile(new URL(`../../../deploy/${name}`, import.meta.url), "utf8"),
@@ -100,7 +117,8 @@ export async function enrollDarwinOwner(
   const key = await darwinOwnerKey(e.dataDir, id, true).catch(() => {
     console.error("Darwin idle owner seed unavailable; launch not enrolled");
   });
-  if (!key) return launch;
+  if (!key) return skip("seed_unavailable");
+  await recordDarwinEnrollment(e.dataDir, id, "enrolled");
   const config = {
     project,
     assignment: a.id,
@@ -162,6 +180,35 @@ const refused = (reason: Refusal): IdleRetirementResult => ({
   outcome: "withdrawn",
   evidence: { stage: "probe", reason },
 });
+/**
+ * C-804: each precondition of the owner path that does not hold. All stay
+ * `conditional_close_unavailable` (the session is kept, nothing is signed);
+ * the bounded token and the launch's enrollment record only tell them apart.
+ */
+type Precondition =
+  | "target_not_enabled"
+  | "launch_generation_missing"
+  | "terminal_machine_mismatch"
+  | "enrolled_process_missing"
+  | "receipt_target_mismatch"
+  | "receipt_generation_mismatch"
+  | "seed_missing"
+  | "seed_unavailable"
+  | "owner_not_listening"
+  | "owner_key_absent"
+  | "owner_key_mismatch";
+const unavailable = (
+  precondition: Precondition,
+  facts: { enrollment?: string; exit_code?: number } = {},
+): IdleRetirementResult => ({
+  outcome: "withdrawn",
+  evidence: {
+    stage: "probe",
+    reason: "conditional_close_unavailable",
+    precondition,
+    ...facts,
+  },
+});
 const uncertain = (): IdleRetirementResult => ({
   outcome: "uncertain",
   evidence: { stage: "confirm", reason: "confirmation_pending" },
@@ -221,28 +268,44 @@ export async function stopDarwinOwner(
   // C-626: a system-ended turn may ask the owner too. The adapter already
   // ran its workspace preflight; the owner still requires a clean checkout
   // and an idle status itself, and refuses before any challenge otherwise.
-  if (
-    !enabled(e) ||
-    !target ||
-    !g ||
-    !p ||
-    !ref.terminal_ref.startsWith(`${e.machine}/`) ||
-    p.machine !== target.fingerprint ||
-    p.terminal !== g.generation
-  )
-    return refused("conditional_close_unavailable");
-  const { directory, id } = enrollment(
-    e,
-    options.project_id,
-    options.assignment_id,
-    g.run_id,
-    g.generation,
-  );
+  if (!enabled(e) || !target) return unavailable("target_not_enabled");
+  if (!g) return unavailable("launch_generation_missing");
+  if (!ref.terminal_ref.startsWith(`${e.machine}/`))
+    return unavailable("terminal_machine_mismatch");
+  const bind = () =>
+    enrollment(
+      e,
+      options.project_id,
+      options.assignment_id,
+      g.run_id,
+      g.generation,
+    );
+  let bound: ReturnType<typeof bind> | undefined;
+  try {
+    bound = bind();
+  } catch {}
+  // C-804: what this host recorded when it launched this generation.
+  const enrolled = bound
+    ? { enrollment: await readDarwinEnrollment(e.dataDir, bound.id) }
+    : {};
+  if (!p) return unavailable("enrolled_process_missing", enrolled);
+  if (p.machine !== target.fingerprint)
+    return unavailable("receipt_target_mismatch", enrolled);
+  if (p.terminal !== g.generation)
+    return unavailable("receipt_generation_mismatch", enrolled);
+  // A foreign identity still fails here, as before C-804.
+  const { directory, id } = bound ?? bind();
   // Without a key this controller can rebuild no owner can be asked. No
   // other entry can bind the original generation at delivery (Q-1166): the
   // session is kept and the bounded handoff applies.
-  const key = await darwinOwnerKey(e.dataDir, id).catch(() => undefined);
-  if (!key) return refused("conditional_close_unavailable");
+  let seedFailure: Precondition | undefined;
+  const key = await darwinOwnerKey(e.dataDir, id).catch((err: unknown) => {
+    seedFailure =
+      (err as NodeJS.ErrnoException).code === "ENOENT"
+        ? "seed_missing"
+        : "seed_unavailable";
+  });
+  if (!key) return unavailable(seedFailure ?? "seed_unavailable", enrolled);
   const request =
     JSON.stringify({
       process: p,
@@ -257,7 +320,6 @@ export async function stopDarwinOwner(
   ]);
   // An owner this controller cannot serve (none listening, or a key it
   // cannot rebuild) is never signed for: nothing was attempted.
-  const unowned = refused("conditional_close_unavailable");
   return new Promise<IdleRetirementResult>((resolve) => {
     const child = spawn(cmd.file, cmd.args, {
       cwd: "/",
@@ -283,7 +345,11 @@ export async function stopDarwinOwner(
     child.stdin.on("error", () => lost());
     child.on("error", () => lost());
     child.on("close", (code) =>
-      code === 3 && !attempted ? finish(unowned) : lost(code),
+      code === 3 && !attempted
+        ? finish(
+            unavailable("owner_not_listening", { ...enrolled, exit_code: 3 }),
+          )
+        : lost(code),
     );
     child.stdout.setEncoding("utf8").on("data", (data: string) => {
       if (settled) return;
@@ -296,7 +362,16 @@ export async function stopDarwinOwner(
       // Owners enrolled before durable keys report no key id.
       const challenge = /^([a-f0-9]{64})(?: ([a-f0-9]{64}))?\n$/u.exec(buffer);
       if (!challenge) return lost();
-      if (challenge[2] !== key.id) return finish(unowned);
+      // C-804: only whether the ids agree is recorded, never either id.
+      if (challenge[2] !== key.id)
+        return finish(
+          unavailable(
+            challenge[2] === undefined
+              ? "owner_key_absent"
+              : "owner_key_mismatch",
+            enrolled,
+          ),
+        );
       const message = `${challenge[1]}:${createHash("sha256").update(request).digest("hex")}`;
       buffer = "";
       try {

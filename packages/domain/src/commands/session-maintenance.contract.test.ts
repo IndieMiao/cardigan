@@ -1406,3 +1406,75 @@ test.each([
     if (owner_reason === "no_reply") expect(text).toContain("exit=1");
   },
 );
+
+test("C-804: a refused macOS owner precondition and its enrollment reach the notice and the handoff; the reason is unchanged", () => {
+  const s = setup(),
+    worker = "fixture-worker";
+  const a: Assignment = {
+    ...s.assignments[0]!,
+    machine_id: worker,
+    runtime_ref: {
+      ...s.assignments[0]!.runtime_ref!,
+      machine_id: worker,
+      terminal_ref: "fixture-worker/t86",
+    },
+  };
+  const base: CommandState = {
+    ...s,
+    assignments: [a],
+    machines: s.machines!.map((m) => ({ ...m, id: worker, os: "darwin" })),
+  };
+  const io = { ...ports(), clock: { now: () => now } };
+  const pending = apply(
+    base,
+    value(beginIdleSessionRetirement(base, system, a.id, 60, io)),
+  );
+  const state = {
+    ...pending,
+    assignments: pending.assignments.map((v) => ({
+      ...v,
+      idle_retirement: { ...v.idle_retirement!, failures: 2 },
+    })),
+  };
+  const evidence = {
+    stage: "probe" as const,
+    reason: "conditional_close_unavailable" as const,
+    precondition: "owner_not_listening",
+    enrollment: "seed_unavailable",
+    exit_code: 3,
+  };
+  const settled = value(
+    settleIdleSessionRetirement(
+      state,
+      system,
+      a.id,
+      { outcome: "withdrawn", evidence },
+      1,
+      io,
+    ),
+  );
+  const next = apply(state, settled).assignments[0]!;
+  // Same decision as before C-804: kept and handed off, observe only.
+  expect(next.idle_retirement).toMatchObject({
+    handoff: true,
+    failures: 3,
+    evidence,
+  });
+  const handed = settled.events.filter(
+    (e) => e.type === "idle_session_retirement_handed_off",
+  );
+  expect(handed).toHaveLength(1);
+  expect(handed[0]!.payload).toMatchObject({
+    reason: "conditional_close_unavailable",
+    precondition: "owner_not_listening",
+    enrollment: "seed_unavailable",
+  });
+  const notices = settled.events.filter(
+    (e) => e.type === "session_maintenance_attention",
+  );
+  expect(notices).toHaveLength(1);
+  const text = (notices[0]!.payload as { notice: string }).notice;
+  expect(text).toContain("owner_not_listening");
+  expect(text).toContain("enrollment=seed_unavailable");
+  expect(text).toContain("exit=3");
+});

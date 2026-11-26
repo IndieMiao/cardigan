@@ -2,9 +2,11 @@ import { execFile, execFileSync, spawn } from "node:child_process";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -25,10 +27,14 @@ import {
 } from "../../../test-support/paths.js";
 import { corePid, stopCore } from "../test-support/hc-core.js";
 import { enrollDarwinOwner, stopDarwinOwner } from "./darwin-idle-owner.js";
+import {
+  DARWIN_ENROLLMENT_DIR,
+  readDarwinEnrollment,
+} from "./darwin-owner-enrollment.js";
 import { DARWIN_OWNER_SEED, darwinOwnerKey } from "./darwin-owner-key.js";
 import type { ExecutionConfig } from "./execution.js";
 import { assignment, launch, role } from "./test-support.js";
-import { workerFileRequest } from "./worker-files.js";
+import { workerFileRequest, workerLaunchPath } from "./worker-files.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -121,6 +127,21 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 afterAll(() => rmSync(dataDir, { recursive: true, force: true }));
+/** C-804: still `conditional_close_unavailable`, now naming the precondition
+ * and this host's enrollment record of the launch. */
+const unavailable = (
+  precondition: string,
+  facts: { enrollment?: string; exit_code?: number } = {},
+) => ({
+  outcome: "withdrawn",
+  evidence: {
+    stage: "probe",
+    reason: "conditional_close_unavailable",
+    precondition,
+    enrollment: "enrolled",
+    ...facts,
+  },
+});
 /** C-746: a pre-challenge refusal the owner named (nothing was signed). */
 const refusedBy = (
   reason: "probe_invalid" | "workspace_not_clean" | "terminal_busy",
@@ -159,6 +180,213 @@ test("registration excludes legacy, Linux, standing, external and disabled launc
   vi.spyOn(console, "error").mockImplementation(() => {});
   const missing = { ...e, dataDir: join(dataDir, "missing") };
   expect(await enrollDarwinOwner(missing, assignment, role, l)).toBe(l);
+});
+
+test("C-804: a skipped registration records why; retirement reads it back", async () => {
+  vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const data = mkdtempSync(join(realpathSync(tmpdir()), "darwin-skip-"));
+  const execution = { ...e, dataDir: data };
+  const id = JSON.stringify([
+    fingerprint,
+    workerLaunchPath(e, {
+      project: "fixture",
+      assignment: "A-1",
+      run: "R-1",
+      generation,
+      target: fingerprint,
+    }).value,
+    "R-1",
+  ]);
+  const recorded = () => readDarwinEnrollment(data, id);
+  try {
+    // Not this controller's opted-in Darwin launch: nothing recorded.
+    vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", "0");
+    expect(await enrollDarwinOwner(execution, assignment, role, l)).toBe(l);
+    expect(await recorded()).toBe("unrecorded");
+    vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+    const { user: _u, ...noUser } = execution;
+    const cases = [
+      ["worker_config", noUser, assignment, role, l],
+      [
+        "assignment_scope",
+        execution,
+        { ...assignment, external: true },
+        role,
+        l,
+      ],
+      [
+        "assignment_scope",
+        execution,
+        { ...assignment, scope: "standing" as const },
+        role,
+        l,
+      ],
+      [
+        "role_worktree",
+        execution,
+        assignment,
+        { ...role, worktree: undefined },
+        l,
+      ],
+      ["launch_shape", execution, assignment, role, { ...l, command: "node" }],
+      [
+        "launch_labels",
+        execution,
+        assignment,
+        role,
+        { ...l, labels: { ...l.labels, assignment: "A-2" } },
+      ],
+      [
+        "launch_packet",
+        execution,
+        assignment,
+        role,
+        { ...l, args: l.args.map((v, i) => (i === 5 ? "{}" : v)) },
+      ],
+    ] as const;
+    for (const [reason, ex, a, r, launched] of cases) {
+      expect(await enrollDarwinOwner(ex, a, r as never, launched)).toBe(
+        launched,
+      );
+      expect(await recorded()).toBe(reason);
+    }
+    // A seed this host cannot verify is never replaced: launched unenrolled.
+    writeFileSync(join(data, DARWIN_OWNER_SEED), Buffer.alloc(32, 1), {
+      mode: 0o644,
+    });
+    expect(await enrollDarwinOwner(execution, assignment, role, l)).toBe(l);
+    expect(await recorded()).toBe("seed_unavailable");
+    // The record is host-private and holds only the bounded token.
+    const dir = join(data, DARWIN_ENROLLMENT_DIR);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(readdirSync(dir)).toHaveLength(1);
+    const file = join(dir, readdirSync(dir)[0]!);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(readFileSync(file, "utf8")).toBe("seed_unavailable\n");
+    // The refused retirement names the launch's skipped enrollment.
+    const transport = vi.fn();
+    expect(
+      await stopDarwinOwner(
+        execution,
+        ref,
+        {
+          project_id: "fixture",
+          assignment_id: "A-1",
+          hangup_ms: 100,
+          terminate_ms: 500,
+          before_signal: () => true,
+        },
+        transport,
+      ),
+    ).toEqual(
+      unavailable("enrolled_process_missing", {
+        enrollment: "seed_unavailable",
+      }),
+    );
+    expect(transport).not.toHaveBeenCalled();
+    // A record that is not a bounded token is not repeated.
+    writeFileSync(file, "/Users/someone/secret\n");
+    expect(await recorded()).toBe("unreadable");
+    rmSync(file);
+    symlinkSync(join(data, DARWIN_OWNER_SEED), file);
+    expect(await recorded()).toBe("unreadable");
+  } finally {
+    rmSync(data, { recursive: true, force: true });
+  }
+});
+
+test("C-804: every refused precondition before the relay is named; none runs a worker command", async () => {
+  vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "darwin-pre-"));
+  const execution = { ...e, agentRoot: root };
+  await enrollDarwinOwner(execution, assignment, role, {
+    ...l,
+    args: launchArgsFor(execution),
+  });
+  const process_ = {
+    machine: fingerprint,
+    boot: "boot",
+    uid: 501,
+    pid: 4242,
+    start: "1",
+    process_group: 4242,
+    terminal: generation,
+  };
+  const transport = vi.fn();
+  const before_signal = vi.fn(() => true);
+  const ask = (
+    patch: { ref?: Partial<RuntimeRef>; process?: typeof process_ | null } = {},
+    ex: typeof e = execution,
+  ) =>
+    stopDarwinOwner(
+      ex,
+      { ...ref, ...patch.ref },
+      {
+        project_id: "fixture",
+        assignment_id: "A-1",
+        hangup_ms: 100,
+        terminate_ms: 500,
+        before_signal,
+        ...(patch.process === null
+          ? {}
+          : { enrolled_process: patch.process ?? process_ }),
+      },
+      transport,
+    );
+  const without = (precondition: string) => ({
+    outcome: "withdrawn",
+    evidence: {
+      stage: "probe",
+      reason: "conditional_close_unavailable",
+      precondition,
+    },
+  });
+  try {
+    vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", "0");
+    expect(await ask()).toEqual(without("target_not_enabled"));
+    vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+    const { target: _t, ...untargeted } = execution;
+    expect(await ask({}, untargeted)).toEqual(without("target_not_enabled"));
+    const { launch_generation: _g, ...legacy } = ref;
+    expect(
+      await stopDarwinOwner(
+        execution,
+        legacy,
+        {
+          project_id: "fixture",
+          assignment_id: "A-1",
+          hangup_ms: 100,
+          terminate_ms: 500,
+          before_signal,
+          enrolled_process: process_,
+        },
+        transport,
+      ),
+    ).toEqual(without("launch_generation_missing"));
+    expect(await ask({ ref: { terminal_ref: "other/t1" } })).toEqual(
+      without("terminal_machine_mismatch"),
+    );
+    expect(await ask({ process: null })).toEqual(
+      unavailable("enrolled_process_missing"),
+    );
+    expect(
+      await ask({ process: { ...process_, machine: "e".repeat(64) } }),
+    ).toEqual(unavailable("receipt_target_mismatch"));
+    expect(
+      await ask({ process: { ...process_, terminal: "f".repeat(32) } }),
+    ).toEqual(unavailable("receipt_generation_mismatch"));
+    // Launched before C-804 (or the record was lost): said so, still refused.
+    const other = { ...execution, agentRoot: join(root, "other") };
+    expect(await ask({ process: null }, other)).toEqual(
+      unavailable("enrolled_process_missing", { enrollment: "unrecorded" }),
+    );
+    // Nothing reached the worker, and nothing was signed.
+    expect(transport).not.toHaveBeenCalled();
+    expect(before_signal).not.toHaveBeenCalled();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 /** The registered clone, branch worktree and build checkout one owner guards. */
@@ -428,15 +656,10 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     // A missing or replaced seed cannot serve this owner: refuse, never sign.
     const seed = join(dataDir, DARWIN_OWNER_SEED);
     renameSync(seed, `${seed}.saved`);
-    expect(await stop()).toEqual({
-      outcome: "withdrawn",
-      evidence: { stage: "probe", reason: "conditional_close_unavailable" },
-    });
+    expect(await stop()).toEqual(unavailable("seed_missing"));
+    // C-804: another seed rebuilds another key; the owner's id disagrees.
     writeFileSync(seed, Buffer.alloc(32, 7), { mode: 0o600 });
-    expect(await stop()).toEqual({
-      outcome: "withdrawn",
-      evidence: { stage: "probe", reason: "conditional_close_unavailable" },
-    });
+    expect(await stop()).toEqual(unavailable("owner_key_mismatch"));
     renameSync(`${seed}.saved`, seed);
     expect(proc.exitCode).toBeNull();
     process.kill(pid, 0);
@@ -462,10 +685,7 @@ test("an owner enrolled with a key the controller cannot rebuild is never signed
     legacy.publicKey.export({ type: "spki", format: "pem" }).toString(),
   );
   try {
-    expect(await stop()).toEqual({
-      outcome: "withdrawn",
-      evidence: { stage: "probe", reason: "conditional_close_unavailable" },
-    });
+    expect(await stop()).toEqual(unavailable("owner_key_mismatch"));
     expect(proc.exitCode).toBeNull();
     process.kill(pid, 0);
   } finally {
@@ -513,10 +733,7 @@ test("a generation without an owner is refused with no further worker command", 
         },
         transport,
       ),
-    ).toEqual({
-      outcome: "withdrawn",
-      evidence: { stage: "probe", reason: "conditional_close_unavailable" },
-    });
+    ).toEqual(unavailable("owner_not_listening", { exit_code: 3 }));
     // Only the signal-free relay ran; nothing was typed, signalled or sent.
     expect(commands).toHaveLength(1);
     expect(commands[0]!.slice(0, 3)).toEqual(["/usr/bin/python3", "-IB", "-c"]);
@@ -531,10 +748,11 @@ test("C-746: an owner's named refusal, an anonymous close and a transport failur
   const root = mkdtempSync(join(realpathSync(tmpdir()), "darwin-refusal-"));
   const execution = { ...e, agentRoot: root };
   // Enrolls the key the controller would rebuild for this generation.
-  await enrollDarwinOwner(execution, assignment, role, {
+  const launched = await enrollDarwinOwner(execution, assignment, role, {
     ...l,
     args: launchArgsFor(execution),
   });
+  const { directory } = JSON.parse(launched.args[4]!);
   // Stands in for the worker relay: prints `reply` (if any) after reading the
   // request line, then exits with `code`. Never reads a signature.
   const relay =
@@ -615,6 +833,42 @@ test("C-746: an owner's named refusal, an anonymous close and a transport failur
       reason: "probe_invalid",
       owner_reason: "relay_failed",
     });
+    // C-804: no owner listens for this generation (relay exit 3).
+    const seen = [await ask("", 3)];
+    expect(seen[0]).toEqual(
+      unavailable("owner_not_listening", { exit_code: 3 }),
+    );
+    // An owner enrolled before durable keys names no key id; another names
+    // a different one. Only whether they agree is recorded.
+    seen.push(await ask(`${"c".repeat(64)}\n`, 1));
+    expect(seen[1]).toEqual(unavailable("owner_key_absent"));
+    seen.push(await ask(`${"c".repeat(64)} ${"d".repeat(64)}\n`, 1));
+    expect(seen[2]).toEqual(unavailable("owner_key_mismatch"));
+    // A seed this controller cannot verify is never replaced or used.
+    const seedPath = join(dataDir, DARWIN_OWNER_SEED);
+    chmodSync(seedPath, 0o644);
+    try {
+      seen.push(await ask("", 3));
+    } finally {
+      chmodSync(seedPath, 0o600);
+    }
+    expect(seen[3]).toEqual(unavailable("seed_unavailable"));
+    // Diagnostics never carry the seed, either key, the key id or a signature.
+    const seed = readFileSync(seedPath);
+    const key = await darwinOwnerKey(
+      dataDir,
+      JSON.stringify([fingerprint, directory, "R-1"]),
+    );
+    const evidence = JSON.stringify(seen);
+    for (const secret of [
+      seed.toString("hex"),
+      seed.toString("base64"),
+      seed.toString("base64url"),
+      key.id,
+      "PRIVATE KEY",
+      "PUBLIC KEY",
+    ])
+      expect(evidence).not.toContain(secret);
     expect(signed).not.toHaveBeenCalled();
   } finally {
     rmSync(root, { recursive: true, force: true });
