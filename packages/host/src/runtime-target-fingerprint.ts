@@ -5,22 +5,20 @@ import {
   registeredRuntimeOf,
 } from "@cardigan/runtime-herdr";
 
-/** The persisted runtime_ref identity; placement must compare against the same encoding. */
-export function runtimeTargetBinding({
-  project_id,
-  machine_id,
-  generation,
-  execution,
-  session,
-}: {
+interface TargetIdentity {
   project_id: string;
   machine_id: string;
   generation: string;
   execution: ExecutionConfig;
   session: string;
-}): RuntimeTargetBinding {
-  // parseRuntimeWorkers canonicalizes env keys and omits an empty mapping.
-  const fingerprint = createHash("sha256")
+}
+
+// parseRuntimeWorkers canonicalizes env keys and omits an empty mapping.
+function encode(
+  { project_id, machine_id, generation, execution, session }: TargetIdentity,
+  tools: boolean,
+): string {
+  return createHash("sha256")
     .update(
       JSON.stringify([
         project_id,
@@ -28,8 +26,10 @@ export function runtimeTargetBinding({
         generation,
         registeredRuntimeOf(execution, session),
         execution.dataDir,
-        execution.mode === "agent-ssh" ? execution.path : null,
-        ...(execution.mode === "agent-ssh" && execution.env
+        tools && execution.mode === "agent-ssh"
+          ? (execution.path ?? null)
+          : null,
+        ...(tools && execution.mode === "agent-ssh" && execution.env
           ? [{ env: execution.env }]
           : []),
         ...(execution.mode === "agent-ssh" && execution.macosCore
@@ -48,8 +48,26 @@ export function runtimeTargetBinding({
               },
             ]
           : []),
+        // Keeps this digest disjoint from every full binding fingerprint.
+        ...(tools ? [] : ["worktree-preparation"]),
       ]),
     )
     .digest("hex");
+}
+
+/** The persisted runtime_ref identity; placement must compare against the same encoding. */
+export function runtimeTargetBinding(
+  identity: TargetIdentity,
+): RuntimeTargetBinding {
+  const { project_id, machine_id, session, generation } = identity;
+  const fingerprint = encode(identity, true);
   return { project_id, machine_id, session, generation, fingerprint };
 }
+
+/**
+ * C-784: the same binding without the Run tool PATH and env. Placement uses it
+ * only to tell a PATH or env edit (awaiting the next real preparation) from any
+ * other binding change, which still makes the evidence invalid; it never admits.
+ */
+export const worktreePreparationFingerprint = (identity: TargetIdentity) =>
+  encode(identity, false);

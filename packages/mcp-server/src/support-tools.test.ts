@@ -427,6 +427,7 @@ test("legacy PM tools exclude Ops instructions; concurrent attachment uploads an
           "request_delivery_rework",
           "release_assignment",
           "replace_verification_work_item",
+          "replace_primary_work_item",
           "complete_host_action",
           "send_owner_message",
           "publish_artifact",

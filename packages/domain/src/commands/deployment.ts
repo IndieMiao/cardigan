@@ -206,7 +206,7 @@ export interface DeploymentRecord {
   readonly interrupted_operations?: readonly DeploymentOperationCount[];
   /** C-609: deployments are at least this far apart; later merges are batched. */
   readonly batch_window_ms?: number;
-  readonly failure_stage?: "build" | "start" | "ready" | "host";
+  readonly failure_stage?: "build" | "config" | "start" | "ready" | "host";
   /**
    * C-650: durable automatic retry of a target whose start/ready failed.
    * `failures` counts failed attempts of this target (main or one human pin),

@@ -90,6 +90,7 @@ export const toolNames = [
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
+  "replace_primary_work_item",
   "assign",
   "release_assignment",
   "project_snapshot",
@@ -474,6 +475,16 @@ export interface MergeCheckView {
   };
   readonly updated_at: Timestamp;
   readonly recheck_requested?: boolean;
+  /**
+   * C-781: this card check is an explicit reuse of the author precheck that
+   * passed on the same delivered head; nothing was executed for this attempt.
+   */
+  readonly reused_precheck?: {
+    readonly attempt_id: string;
+    readonly work_item_id: WorkItemId;
+    readonly head_sha: string;
+    readonly delivery_id?: DeliveryId;
+  };
   /**
    * C-116: the check supervisor classified every failure as a timeout (for
    * example vitest "Test timed out"). Only drives the one automatic rerun; it

@@ -178,6 +178,16 @@ test.each([
       reason: "Replace released reviewer",
     },
   },
+  {
+    name: "replace_primary_work_item" as const,
+    arguments: {
+      work_item_id: "W-1",
+      replacement_work_item_id: "W-4",
+      card_id: "C-1",
+      template_key: "development",
+      reason: "Replace mis-assigned producer",
+    },
+  },
 ])(
   "host_ops cannot discover or invoke the PM Ops $name tool with a broad legacy token",
   async (tool) => {

@@ -29,6 +29,7 @@ import {
   scrubRunCredentials,
   sessionFingerprint,
   targetProbe,
+  withCapacityOverrides,
 } from "@cardigan/host";
 import {
   defaultToolCatalog,
@@ -381,9 +382,13 @@ async function assembleServer(
     projectIds: store.listProjects().map((project) => project.id),
     env: { ...(options.env ?? process.env) },
   });
-  const runCapacity = await loadRunCapacityConfig({
-    env: { ...(options.env ?? process.env) },
-  });
+  // C-792: resource slots and project ceilings also have live database overrides.
+  const runCapacity = withCapacityOverrides(
+    await loadRunCapacityConfig({
+      env: { ...(options.env ?? process.env) },
+    }),
+    store.database,
+  );
   const targets = options.dispatcher?.runtime;
   const leases = new MachineLeases(
     store,

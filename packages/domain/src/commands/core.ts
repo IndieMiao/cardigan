@@ -183,6 +183,7 @@ type CommandName =
   | "record_merge_executor"
   | "record_precheck"
   | "record_merge_check"
+  | "reuse_precheck_check"
   | "record_merge_preparation"
   | "record_merge_check_blockers"
   | "record_automatic_merge_waits"
@@ -363,6 +364,7 @@ export class CommandDraft {
       "record_merge_executor",
       "record_precheck",
       "record_merge_check",
+      "reuse_precheck_check",
       "record_merge_preparation",
       "record_merge_check_blockers",
       "record_automatic_merge_waits",
