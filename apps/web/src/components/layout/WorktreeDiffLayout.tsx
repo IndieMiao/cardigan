@@ -73,9 +73,9 @@ export function DiffFile({
   const id = useId();
   const label = (
     <>
-      <code className={styles.path} title={path}>
+      <span className={styles.path} title={path}>
         {path}
-      </code>
+      </span>
       {stats && <span className={styles.stats}>{stats}</span>}
     </>
   );

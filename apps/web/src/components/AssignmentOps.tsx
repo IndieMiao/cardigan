@@ -177,6 +177,7 @@ export function StopDialog({
 }) {
   const pending = ops.pending === "stop";
   const failed = ops.failure?.op === "stop" ? ops.failure.text : undefined;
+  const back = useRef<HTMLButtonElement>(null);
   return (
     <Dialog
       open={open}
@@ -189,6 +190,11 @@ export function StopDialog({
         <DialogContent
           aria-describedby={undefined}
           narrowSheet
+          // The safe answer has the focus first.
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            back.current?.focus();
+          }}
           onEscapeKeyDown={(event) => {
             if (pending) event.preventDefault();
           }}
@@ -238,7 +244,7 @@ export function StopDialog({
             </DialogBody>
             <DialogFooter>
               <DialogClose asChild>
-                <Button size="regular" disabled={pending}>
+                <Button ref={back} size="regular" disabled={pending}>
                   返回
                 </Button>
               </DialogClose>
