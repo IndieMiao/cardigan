@@ -84,6 +84,8 @@ export const toolNames = [
   "send_owner_message",
   "set_merge_solo",
   "set_merge_window",
+  // C-763: PM's non-blocking "wake me when that card settles" note.
+  "watch_card",
   "reserve_machine_resource",
   "create_work_item",
   "update_work_item",

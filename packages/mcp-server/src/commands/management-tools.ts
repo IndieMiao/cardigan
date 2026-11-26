@@ -3,6 +3,8 @@ import {
   type Actor,
   assignOrDefer,
   builtinCardTemplatesForFlow,
+  CARD_WATCH_NOTE_MAX_LENGTH,
+  CARD_WATCH_UNTIL,
   type CardId,
   type Clock,
   type CommandEffect,
@@ -42,6 +44,7 @@ import {
   updateWorkItem,
   validateWorkItemRequirements,
   validationFailed,
+  watchCard,
   writeReleaseNote,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -150,6 +153,26 @@ const requirements = z
   });
 const schemas = {
   set_merge_solo: { card_id: id("card"), solo: z.boolean(), reason: text },
+  watch_card: {
+    card_id: id("card").describe("Same-project card to watch"),
+    until: z
+      .enum(CARD_WATCH_UNTIL)
+      .describe("Ring once when the card is done, merged or cancelled"),
+    notify: z
+      .enum(["self", "pm_ops"])
+      .optional()
+      .describe("Recipient: this Assignment (default) or the PM Ops inbox"),
+    context_card_id: id("card")
+      .optional()
+      .describe(
+        "Card where you are waiting; the bell is posted there. Defaults to your own card for a work-item PM",
+      ),
+    note: z
+      .string()
+      .max(CARD_WATCH_NOTE_MAX_LENGTH)
+      .optional()
+      .describe("Why you wait, shown in the bell"),
+  },
   set_merge_window: { card_id: id("card"), open: z.boolean(), reason: text },
   issue_instruction: {
     card_id: id("card"),
@@ -1226,6 +1249,11 @@ export function managementTools(
       "assign",
       "Assign work; omitted machine selects automatically. A deferred response has no Assignment or token. Credentials must be provisioned by the host.",
       assignPending,
+    ),
+    wire(
+      "watch_card",
+      "PM: register a one-shot note to be rung when another same-project card is done, merged or cancelled. If it closes another way (cancelled, superseded, done without merge) you are told instead. Changes no card or work item and is not a dependency: use depends_on_cards for start order and report_blocker for your own blocked work.",
+      watchCard,
     ),
     wire(
       "write_release_note",

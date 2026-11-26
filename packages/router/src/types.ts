@@ -64,6 +64,7 @@ export type NotificationKind =
  */
 export type RuleId =
   | "6.4/card dependencies"
+  | "C-763/card watch"
   | "6.4/precheck finished"
   | "flow-v2/B2"
   | "flow-v2/B3a"

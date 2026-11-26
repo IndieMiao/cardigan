@@ -15,6 +15,7 @@ export {
   standingRunDormant,
 } from "./card-hold.js";
 export * from "./card-read.js";
+export * from "./card-watch.js";
 export { checkLogAttempts } from "./check-log.js";
 export * from "./check-recovery.js";
 export {
@@ -27,6 +28,7 @@ export * from "./commands/auto-merge.js";
 export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";
 export * from "./commands/card-close.js";
 export { refreshCardDependencies } from "./commands/card-dependencies.js";
+export * from "./commands/card-watch.js";
 export * from "./commands/context-usage.js";
 export * from "./commands/coordination.js";
 export type {
