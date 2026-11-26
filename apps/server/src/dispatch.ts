@@ -112,7 +112,6 @@ import {
   effectWrites,
   loadCommandState,
   persistEffect,
-  toolCatalogCompatible,
   unwrap,
 } from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
@@ -1254,12 +1253,11 @@ export class Dispatcher {
     // recorded fingerprint that differs from this deploy's counts; legacy Runs
     // without one never trigger a replacement.
     const catalog = this.catalog(a, project);
-    // C-786: only an incompatible change replaces the session; a reused
-    // session keeps the catalog it listed, so later deploys compare with it.
+    // C-786: the fingerprint changes only for incompatible tool changes.
     const catalogChanged =
       catalog !== undefined &&
       prior?.tool_catalog !== undefined &&
-      !toolCatalogCompatible(prior.tool_catalog, catalog);
+      prior.tool_catalog !== catalog;
     // C-786: device resource isolation is its own replacement reason, so a
     // count of deploy-caused replacements never includes it.
     const isolate =

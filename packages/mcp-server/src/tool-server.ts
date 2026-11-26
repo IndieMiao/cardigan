@@ -109,21 +109,19 @@ export function structuralSchema(schema: unknown): unknown {
 }
 
 /**
- * P2a-10 A: a stable fingerprint of the `tools/list` an Assignment holding
- * `allowed` receives. Harnesses such as Claude Code list tools once per
- * session and this stateless endpoint cannot send `list_changed`, so a session
- * started under another deploy keeps the old list. The Dispatcher compares the
- * fingerprint recorded when the session started with this deploy's using
- * `toolCatalogCompatible`. Order-insensitive.
+ * P2a-10 A: a stable hash of the `tools/list` an Assignment holding `allowed`
+ * receives. Harnesses such as Claude Code list tools once per session and this
+ * stateless endpoint cannot send `list_changed`, so a session started under
+ * another deploy keeps the old list. The Dispatcher replaces a live session
+ * whose recorded fingerprint differs from this deploy's. Order-insensitive.
  *
- * C-786: only incompatible changes replace a session. Compatible (the session
- * keeps its list): a changed tool or parameter description or title, and a new
- * optional parameter at any depth; every call the old list allows is still
- * valid and means the same. Incompatible: a tool added or removed, a parameter
- * removed, a new required parameter, an optional parameter that became
- * required or the reverse, and any other change to a parameter's schema
- * (type, enum, bounds, pattern, default, strictness). `TOOL_CATALOG_REVISION`
- * forces a replacement when wording alone must apply at once.
+ * C-786: only incompatible changes change it, and every structural change is
+ * incompatible: a tool added or removed (including through `allowed_tools`),
+ * and any change to a tool's input schema other than its annotations
+ * (parameters added or removed, required or optional, types, enums, bounds,
+ * patterns, defaults, strictness). Tool and parameter descriptions and titles
+ * are left out, so wording alone never replaces a session;
+ * `TOOL_CATALOG_REVISION` forces a replacement when wording must apply at once.
  */
 export function toolCatalogFingerprint(
   tools: readonly ToolDefinition[],
@@ -133,97 +131,20 @@ export function toolCatalogFingerprint(
   return catalogHash(listedTools(visibleTools(tools, allowed, assignment)));
 }
 
-const CATALOG_FORMAT = "c2";
-const sha256 = (value: unknown) =>
-  createHash("sha256").update(canonicalJson(value)).digest("hex");
-
-/**
- * C-786: the schema without its optional properties, at any depth. Each
- * removed property is recorded in `optional` as a short hash of its location
- * and its own schema without its optional properties (those are recorded the
- * same way), so a later catalog can show it kept every one unchanged.
- */
-function splitOptional(
-  node: unknown,
-  at: readonly (string | number)[],
-  optional: Set<string>,
-): unknown {
-  if (Array.isArray(node))
-    return node.map((item, i) => splitOptional(item, [...at, i], optional));
-  if (node === null || typeof node !== "object") return node;
-  const schema = node as Record<string, unknown>;
-  const required = new Set(
-    Array.isArray(schema.required) ? (schema.required as unknown[]) : [],
-  );
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(schema)) {
-    if (SCHEMA_DATA.has(key)) out[key] = value;
-    else if (
-      key === "properties" &&
-      value !== null &&
-      typeof value === "object" &&
-      !Array.isArray(value)
-    ) {
-      const kept: Record<string, unknown> = {};
-      for (const [name, child] of Object.entries(value)) {
-        const path = [...at, "properties", name];
-        const core = splitOptional(child, path, optional);
-        if (required.has(name)) kept[name] = core;
-        else optional.add(sha256([path, core]).slice(0, 8));
-      }
-      out[key] = kept;
-    } else out[key] = splitOptional(value, [...at, key], optional);
-  }
-  return out;
-}
-
-/**
- * The C-786 fingerprint of tools as `tools/list` serves them:
- * `c2.<core>.<optional,...>`. `core` hashes the revision, the tool names and
- * every schema without its optional properties; each optional property is one
- * 32-bit hash of its tool, location and schema (about 2 KB for the largest
- * role; a collision could only hide a removed optional parameter).
- */
+/** The C-786 fingerprint of tools as `tools/list` serves them. */
 export function catalogHash(
   listed: readonly { readonly name: string; readonly inputSchema: unknown }[],
   revision: number = TOOL_CATALOG_REVISION,
 ): string {
-  const optional = new Set<string>();
-  const core = [...listed]
-    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  const tools = listed
     .map(({ name, inputSchema }) => ({
       name,
-      inputSchema: splitOptional(
-        structuralSchema(inputSchema),
-        [name],
-        optional,
-      ),
-    }));
-  return `${CATALOG_FORMAT}.${sha256({ revision, tools: core })}.${[...optional].sort().join(",")}`;
-}
-
-const CATALOG_PATTERN =
-  /^c2\.([0-9a-f]{64})\.((?:[0-9a-f]{8}(?:,[0-9a-f]{8})*)?)$/u;
-
-/**
- * C-786: whether a session that listed `recorded` can keep working with the
- * tools this deploy serves as `current`. Both may carry the host's `+`
- * launch suffixes (session environment revisions); those must match exactly.
- * A fingerprint in an older format compares only by equality.
- */
-export function toolCatalogCompatible(
-  recorded: string,
-  current: string,
-): boolean {
-  if (recorded === current) return true;
-  const [recordedCatalog, ...recordedSuffix] = recorded.split("+");
-  const [currentCatalog, ...currentSuffix] = current.split("+");
-  if (recordedSuffix.join("+") !== currentSuffix.join("+")) return false;
-  const before = CATALOG_PATTERN.exec(recordedCatalog ?? "");
-  const after = CATALOG_PATTERN.exec(currentCatalog ?? "");
-  if (!before || !after || before[1] !== after[1]) return false;
-  const kept = new Set(after[2] ? after[2].split(",") : []);
-  return (before[2] ? before[2].split(",") : []).every((h) => kept.has(h));
+      inputSchema: structuralSchema(inputSchema),
+    }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return createHash("sha256")
+    .update(canonicalJson({ revision, tools }))
+    .digest("hex");
 }
 
 /** JSON with object keys sorted, so key order never changes the hash. */

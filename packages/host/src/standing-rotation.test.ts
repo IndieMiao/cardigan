@@ -53,10 +53,20 @@ const standing = (over: Partial<Assignment> = {}): Assignment =>
     created_at: at(-600),
     ...over,
   }) as Assignment;
+/** What `roleUpgradeDiff` records for an instructions-only upgrade. */
+const instructionsDiff = {
+  added_tools: [],
+  removed_tools: [],
+  added_capabilities: [],
+  removed_capabilities: [],
+  fields: [{ field: "instructions", from: "旧版说明", to: "默认包说明" }],
+  relaxations: [],
+};
 const upgrade = (
   to: number,
   created: string,
   security_revision?: number,
+  diff: unknown = instructionsDiff,
 ): Event =>
   ({
     id: `E-${to}`,
@@ -68,6 +78,7 @@ const upgrade = (
       role_id: "pm",
       from_version: to - 1,
       to_version: to,
+      ...(diff === null ? {} : { diff }),
       ...(security_revision === undefined ? {} : { security_revision }),
     },
   }) as Event;
@@ -189,6 +200,55 @@ test("C-786: a raised security revision never waits", () => {
   ).toBeUndefined();
 });
 
+test.each([
+  ["a removed tool", { ...instructionsDiff, removed_tools: ["merge"] }],
+  ["an added tool", { ...instructionsDiff, added_tools: ["merge"] }],
+  [
+    "a removed capability",
+    { ...instructionsDiff, removed_capabilities: ["verify"] },
+  ],
+  [
+    "a worktree change",
+    {
+      ...instructionsDiff,
+      fields: [{ field: "worktree", from: "write", to: "readonly" }],
+    },
+  ],
+  ["a relaxation", { ...instructionsDiff, relaxations: ["新增工具 merge"] }],
+  ["no recorded diff", null],
+  ["an unreadable diff", { fields: "instructions" }],
+])("C-786: %s never waits: permissions must not lag", (_label, diff) => {
+  const busy = [run({ finished_at: at(0) })];
+  expect(
+    due(state([upgrade(3, at(0), undefined, diff)], busy), standing(), 0),
+  ).toBe("permission");
+  // Any such upgrade on the way to the target counts.
+  expect(
+    standingRotationDue(
+      state([upgrade(3, at(0), undefined, diff), upgrade(4, at(1))], busy),
+      standing(),
+      { role_version: 4 },
+      at(1),
+      policy,
+    ),
+  ).toBe("permission");
+});
+
+test("C-786: a metadata-only audit changes nothing and waits like an ordinary upgrade", () => {
+  const carried = {
+    ...upgrade(3, at(0), undefined, undefined),
+    payload: {
+      role_id: "pm",
+      from_version: 2,
+      to_version: 3,
+      metadata_only: true,
+    },
+  } as Event;
+  expect(
+    due(state([carried], [run({ finished_at: at(0) })]), standing(), 0),
+  ).toBeUndefined();
+});
+
 test("C-786: quiet 0 is the switch back to rotating as soon as the Run ends", () => {
   const s = state([upgrade(3, at(0))], [run({ finished_at: at(0) })]);
   expect(due(s, standing(), 0, { quiet_ms: 0, max_defer_ms: MIN })).toBe(
@@ -222,7 +282,10 @@ test("C-786: the policy reads host settings and keeps its defaults for bad value
 });
 
 /** A live, recently active standing host_ops session and a deployed upgrade. */
-async function deployedUpgrade(recentActivity: string) {
+async function deployedUpgrade(
+  recentActivity: string,
+  oldTools: string[] = [],
+) {
   const dataDir = await mkdtemp(join(tmpdir(), "cg-standing-rotation-"));
   const store = Store.open({ dataDir });
   const project = "fixture";
@@ -231,7 +294,14 @@ async function deployedUpgrade(recentActivity: string) {
     harness: "codex",
     launch_profile_ref: "fixture",
   });
-  const old = { ...next, instructions: "Earlier default instructions" };
+  const old = {
+    ...next,
+    instructions: "Earlier default instructions",
+    allowed_tools: [
+      ...next.allowed_tools,
+      ...oldTools,
+    ] as typeof next.allowed_tools,
+  };
   const a: Assignment = {
     id: "A-50" as never,
     scope: "standing",
@@ -328,6 +398,25 @@ test("C-786: a security revision in the deployed pack rotates the active session
     expect(
       after.events.find((e) => e.type === ROTATION_DUE_EVENT)?.payload,
     ).toMatchObject({ trigger: "security" });
+  } finally {
+    await f.close();
+  }
+});
+
+test("C-786: a deployed upgrade that removes a tool rotates the active session at once", async () => {
+  const f = await deployedUpgrade(new Date().toISOString(), ["report_blocker"]);
+  try {
+    const after = f.read();
+    expect(
+      after.events.find((e) => e.type === "host_role_upgraded")?.payload,
+    ).toMatchObject({
+      to_version: 2,
+      diff: { removed_tools: ["report_blocker"] },
+    });
+    expect(after.assignment?.status).toBe("released");
+    expect(
+      after.events.find((e) => e.type === ROTATION_DUE_EVENT)?.payload,
+    ).toMatchObject({ trigger: "permission" });
   } finally {
     await f.close();
   }

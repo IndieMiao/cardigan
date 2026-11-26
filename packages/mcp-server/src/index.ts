@@ -145,7 +145,6 @@ export {
   structuralSchema,
   TOOL_CATALOG_REVISION,
   type ToolServerOptions,
-  toolCatalogCompatible,
   toolCatalogFingerprint,
 } from "./tool-server.js";
 export {

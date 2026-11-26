@@ -402,6 +402,7 @@ export function standingRotationPolicy(
 export type StandingRotationTrigger =
   | "immediate"
   | "security"
+  | "permission"
   | "no_session"
   | "quiet"
   | "max_defer";
@@ -415,6 +416,33 @@ const upgradeAudits = (state: CommandState, roleId: string) =>
   );
 const auditVersion = (e: { payload: unknown }) =>
   (e.payload as { to_version?: unknown }).to_version;
+/**
+ * C-786: an upgrade that changes nothing but the instructions, as its recorded
+ * diff shows; a metadata-only audit changes nothing. Any other field (tools,
+ * capabilities, worktree, kind) or a diff that cannot be read counts as a
+ * permission change.
+ */
+const instructionsOnly = (e: { payload: unknown }) => {
+  const p = e.payload as { metadata_only?: unknown; diff?: unknown };
+  if (p.metadata_only === true) return true;
+  const d = p.diff as Record<string, unknown> | null | undefined;
+  if (!d || typeof d !== "object") return false;
+  const none = (key: string) => Array.isArray(d[key]) && d[key].length === 0;
+  return (
+    none("added_tools") &&
+    none("removed_tools") &&
+    none("added_capabilities") &&
+    none("removed_capabilities") &&
+    none("relaxations") &&
+    Array.isArray(d.fields) &&
+    d.fields.every(
+      (f) =>
+        f !== null &&
+        typeof f === "object" &&
+        (f as { field?: unknown }).field === "instructions",
+    )
+  );
+};
 const auditRevision = (e: { payload: unknown }) => {
   const r = (e.payload as { security_revision?: unknown }).security_revision;
   return typeof r === "number" && Number.isSafeInteger(r) ? r : 0;
@@ -427,6 +455,9 @@ const auditRevision = (e: { payload: unknown }) => {
  * - `security`: an upgrade between the pinned and the target version carries
  *   a higher security revision than the pinned version (roles package
  *   `ROLE_SECURITY_REVISIONS`), so it never waits.
+ * - `permission`: an upgrade between them changes more than the instructions
+ *   (tools, capabilities, worktree, kind), or its diff cannot be read: the old
+ *   Token's tool scope must not linger, so it never waits either.
  * - `no_session`: the Assignment has no live session; its next wake starts a
  *   new one anyway, so no context is lost.
  * - `quiet`: no Run or Card MCP activity for `quiet_ms`.
@@ -459,6 +490,8 @@ export function standingRotationDue(
     );
   });
   if (pending.some((e) => auditRevision(e) > pinnedRevision)) return "security";
+  // Uncertain counts as immediate: only a proven instructions-only upgrade waits.
+  if (!pending.length || !pending.every(instructionsOnly)) return "permission";
   if (!previous.runtime_ref) return "no_session";
   const at = Date.parse(now);
   const times = [

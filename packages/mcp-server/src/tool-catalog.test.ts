@@ -22,7 +22,6 @@ import {
   catalogHash,
   structuralSchema,
   TOOL_CATALOG_REVISION,
-  toolCatalogCompatible,
   toolCatalogFingerprint,
 } from "./tool-server.js";
 import { readOnlyTools } from "./tools/index.js";
@@ -118,7 +117,7 @@ test("C-786: a changed description keeps the fingerprint, though a new session l
   expect(after.toolCatalog(allowed, assignment)).toBe(hash(tools));
 });
 
-test("C-786: a new optional parameter changes the fingerprint but stays compatible", async () => {
+test("C-786: a changed parameter structure changes the fingerprint", async () => {
   const before = await deploy(readOnlyTools);
   const changed = readOnlyTools.map((tool) =>
     tool.name === "get_updates"
@@ -126,13 +125,12 @@ test("C-786: a new optional parameter changes the fingerprint but stays compatib
       : tool,
   );
   const after = await deploy(changed);
-  const recorded = before.toolCatalog(allowed, assignment);
-  const current = after.toolCatalog(allowed, assignment);
-  expect(current).not.toBe(recorded);
-  expect(current).toBe(hash(await listed(after)));
-  expect(toolCatalogCompatible(recorded, current)).toBe(true);
-  // A session that listed the new parameter cannot go back to a list without it.
-  expect(toolCatalogCompatible(current, recorded)).toBe(false);
+  expect(after.toolCatalog(allowed, assignment)).not.toBe(
+    before.toolCatalog(allowed, assignment),
+  );
+  expect(after.toolCatalog(allowed, assignment)).toBe(
+    hash(await listed(after)),
+  );
   // Tools outside the token's scope do not affect the fingerprint.
   const unrelated = readOnlyTools.map((tool) =>
     tool.name === "get_card"
@@ -140,10 +138,13 @@ test("C-786: a new optional parameter changes the fingerprint but stays compatib
       : tool,
   );
   const other = await deploy(unrelated);
-  expect(other.toolCatalog(allowed, assignment)).toBe(recorded);
+  expect(other.toolCatalog(allowed, assignment)).toBe(
+    before.toolCatalog(allowed, assignment),
+  );
 });
 
-// C-786: typical deploys, judged against a session that listed `base()`.
+// C-786: typical deploys, judged against a session that listed `base()`:
+// every structural change is incompatible, wording alone is not.
 const fixtureTool = (
   name: ToolName,
   shape: z.ZodRawShape,
@@ -172,7 +173,7 @@ const all: readonly ToolName[] = ["whoami", "get_updates", "ack_events"];
 const print = (tools: readonly ToolDefinition[]) =>
   toolCatalogFingerprint(tools, all, assignment);
 const compatible = (tools: readonly ToolDefinition[]) =>
-  toolCatalogCompatible(print(base()), print(tools));
+  print(tools) === print(base());
 
 test.each([
   [
@@ -256,6 +257,24 @@ test.each([
           .optional(),
       })),
   ],
+  [
+    "an optional parameter is added",
+    () => updates((old) => ({ ...old, limit: z.number().optional() })),
+  ],
+  [
+    "an optional field is added inside an optional object",
+    () =>
+      updates((old) => ({
+        ...old,
+        filter: z
+          .object({
+            kind: z.enum(["a", "b"]),
+            limit: z.number().optional(),
+            page: z.number().optional(),
+          })
+          .optional(),
+      })),
+  ],
 ])("C-786: incompatible — %s", (_label, changed) => {
   expect(compatible(changed())).toBe(false);
 });
@@ -278,75 +297,19 @@ test.each([
       })),
   ],
   ["only the order changes", () => [...base()].reverse()],
-  [
-    "an optional parameter is added",
-    () => updates((old) => ({ ...old, limit: z.number().optional() })),
-  ],
-  [
-    "an optional field is added inside an optional object",
-    () =>
-      updates((old) => ({
-        ...old,
-        filter: z
-          .object({
-            kind: z.enum(["a", "b"]),
-            limit: z.number().optional(),
-            page: z.number().optional(),
-          })
-          .optional(),
-      })),
-  ],
 ])("C-786: compatible — %s", (_label, changed) => {
   expect(compatible(changed())).toBe(true);
 });
 
-test("C-786: optional fields added at depth stay compatible across deploys", () => {
-  const nested = (extra: z.ZodRawShape) => [
-    fixtureTool("get_updates", {
-      card_id: z.string(),
-      gaps: z.array(z.object({ description: z.string(), ...extra })),
-    }),
+test("C-786: allowed_tools decide the catalog: a tool leaving the scope is incompatible", () => {
+  const narrower: readonly ToolName[] = ["whoami", "get_updates"];
+  const wider = [
+    ...base(),
+    fixtureTool("ack_events", { up_to_seq: z.number() }),
   ];
-  const recorded = print(nested({}));
-  const once = print(nested({ precondition: z.string().optional() }));
-  const twice = print(
-    nested({
-      precondition: z.string().optional(),
-      followup: z.string().optional(),
-    }),
+  expect(toolCatalogFingerprint(wider, all, assignment)).not.toBe(
+    toolCatalogFingerprint(wider, narrower, assignment),
   );
-  expect(toolCatalogCompatible(recorded, once)).toBe(true);
-  // A live session keeps its recorded list; each deploy compares with it.
-  expect(toolCatalogCompatible(recorded, twice)).toBe(true);
-  expect(
-    toolCatalogCompatible(
-      recorded,
-      print(nested({ precondition: z.string() })),
-    ),
-  ).toBe(false);
-});
-
-test("C-786: launch suffixes must match and older fingerprints compare by equality", () => {
-  const recorded = print(base());
-  const wider = print(
-    updates((old) => ({ ...old, limit: z.number().optional() })),
-  );
-  expect(recorded).toMatch(/^c2\.[0-9a-f]{64}\.[0-9a-f,]*$/u);
-  expect(
-    toolCatalogCompatible(`${recorded}+build-env-1`, `${wider}+build-env-1`),
-  ).toBe(true);
-  expect(toolCatalogCompatible(`${recorded}+build-env-1`, wider)).toBe(false);
-  expect(
-    toolCatalogCompatible(
-      `${recorded}+run-command-a`,
-      `${wider}+run-command-b`,
-    ),
-  ).toBe(false);
-  const legacy = "a".repeat(64);
-  expect(toolCatalogCompatible(legacy, legacy)).toBe(true);
-  expect(toolCatalogCompatible(legacy, recorded)).toBe(false);
-  expect(toolCatalogCompatible(recorded, legacy)).toBe(false);
-  expect(toolCatalogCompatible("new-catalog", "catalog-v2")).toBe(false);
 });
 
 test("C-786: a parameter named description is a name, not an annotation", () => {
