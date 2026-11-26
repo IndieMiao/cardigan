@@ -372,6 +372,11 @@ export async function createMergeCheckLog(input: {
         failed?.name ?? result.failedGithubStep ?? "executor",
       );
       const failures = failureBuffer?.failure.lines() ?? [];
+      // C-766: files named by recognized failure lines, for host classification only.
+      const failure_points =
+        result.status === "passed"
+          ? []
+          : (failureBuffer?.failure.points() ?? []);
       const checkSummary =
         result.status === "passed"
           ? result.checks.some((c) => c.status === "skipped")
@@ -530,6 +535,7 @@ export async function createMergeCheckLog(input: {
         timeout_only,
         infra_flaky,
         ...(firstFail ? { failure_excerpt: firstFail } : {}),
+        ...(failure_points.length ? { failure_points } : {}),
       };
     },
   };

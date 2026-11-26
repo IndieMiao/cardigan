@@ -1782,7 +1782,7 @@ test.each([undefined, "", "FAIL explicit redacted excerpt"])(
     expect(
       effect.events.find((e) => e.type === "merge_changes_requested")?.payload,
     ).toMatchObject({
-      reason: `合并检查 failed：check-0\n${failure_excerpt || summary}`,
+      reason: `合并检查 failed：check-0\n${failure_excerpt || summary}\n失败分类：unknown（无法判定）：主机未提供失败定位证据`,
     });
   },
 );

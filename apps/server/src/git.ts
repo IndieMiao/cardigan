@@ -280,6 +280,12 @@ export interface MergeGit {
     sha: string,
     branch: string,
   ): Promise<boolean>;
+  /** C-766: read-only ancestry between two full commit SHAs. */
+  isAncestor?(
+    project: CentralProject,
+    ancestor: string,
+    descendant: string,
+  ): Promise<boolean>;
   proveReviewLimit?(
     project: ProjectId,
     candidate: SystemReviewLimitCandidate,
@@ -847,6 +853,16 @@ export class ServerGit implements GitBinding {
       sha,
       await this.baseline(project),
     );
+  }
+  async isAncestor(
+    project: CentralProject,
+    ancestor: string,
+    descendant: string,
+  ): Promise<boolean> {
+    if (![ancestor, descendant].every((sha) => /^[a-f0-9]{40}$/u.test(sha)))
+      return false;
+    const repository = await this.central.ensureCentral(project);
+    return this.transport.isAncestor(repository, ancestor, descendant);
   }
   /**
    * Read-only fixed-object validation. C-636: no project lock: it only reads

@@ -8,6 +8,7 @@ import type {
   CommandState,
   DeliveryId,
   GitPublicationGuard,
+  HostCheckFailureClass,
   MergeCheckView,
   MergePlan,
   MergeResult,
@@ -17,14 +18,17 @@ import type {
 import {
   batchQueueWait,
   cardTemplate,
+  classifyCheckFailure,
   flowAtLeast,
   hasPassedMergeCheck,
   latestMergeCheck,
   type MergeBatch,
   mergeBatches,
+  mergeChain,
   mergeExecutorOutage,
   mergePlan,
   passedCardCheck,
+  passedOnOtherBase,
   prechecks,
   prepareMergePlan,
   recordMergeBatchCheck,
@@ -862,10 +866,11 @@ export class MergeChecks {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST")
         this.options.onError(new Error("中断检查的日志无法创建"));
     }
+    const { failure_class: _class, ...pending } = check;
     this.check(
       task,
       {
-        ...check,
+        ...pending,
         status: "interrupted",
         checks: [],
         // C-609: a moved baseline needs a new check whether or not the server
@@ -2170,6 +2175,7 @@ export class MergeChecks {
       timeout_only?: boolean;
       infra_flaky?: boolean;
       failure_excerpt?: string;
+      failure_points?: readonly string[];
     };
     try {
       finished = log
@@ -2203,6 +2209,11 @@ export class MergeChecks {
         log_ref: `${check.attempt_id}.log`,
       };
     }
+    const failure_class =
+      !task.batch &&
+      (finished.status === "failed" || finished.status === "timed_out")
+        ? await this.failureClass(task, check, finished.failure_points ?? [])
+        : undefined;
     if ((executedOn?.type === "github" || task.batch) && !this.valid(task)) {
       this.githubActive.delete(check.attempt_id);
       this.seen.delete(check.attempt_id);
@@ -2233,8 +2244,9 @@ export class MergeChecks {
       this.seen.delete(check.attempt_id);
       return;
     }
+    const { failure_class: _previous, ...pending } = check;
     this.check(task, {
-      ...check,
+      ...pending,
       ...(bound ? { external_run: bound } : {}),
       status: finished.status,
       checks: finished.checks,
@@ -2245,6 +2257,7 @@ export class MergeChecks {
       ...(executedOn?.type === "github" && finished.failure_excerpt
         ? { failure_excerpt: finished.failure_excerpt }
         : {}),
+      ...(failure_class ? { failure_class } : {}),
     });
     this.githubActive.delete(check.attempt_id);
     this.seen.delete(check.attempt_id);
@@ -2254,6 +2267,77 @@ export class MergeChecks {
       this.valid(task)
     )
       await this.queue(task, check);
+  }
+  /**
+   * C-766: notification-only location of a failed check. Compares the files
+   * named by the failure output with this card's own changes and with cards
+   * merged since its merge base. Any Git error yields no evidence; it never
+   * changes the check result.
+   */
+  private async failureClass(
+    task: Task,
+    check: MergeCheckView,
+    points: readonly string[],
+  ): Promise<HostCheckFailureClass | undefined> {
+    const base = check.base_sha;
+    const git = this.options.git;
+    if (
+      !base ||
+      !git.deliveryChangedPaths ||
+      !git.changedPaths ||
+      !git.isAncestor
+    )
+      return undefined;
+    try {
+      const events = this.state(task.project.project_id).events;
+      const heads = task.plan.deliveries.map((d) => d.sha);
+      const passed_base = passedOnOtherBase(
+        events,
+        task.plan.card_id,
+        task.plan.completion_id,
+        heads,
+        base,
+      );
+      const own: string[] = [];
+      for (const head of heads)
+        own.push(...(await git.deliveryChangedPaths(task.project, base, head)));
+      const drift: {
+        card_id: CardId;
+        merge_sha: string;
+        paths: readonly string[];
+      }[] = [];
+      for (const link of mergeChain(events, base)) {
+        if (link.merge_sha === passed_base) break;
+        let contained = true;
+        for (const head of heads)
+          contained &&= await git.isAncestor(
+            task.project,
+            link.merge_sha,
+            head,
+          );
+        // Every delivery already contains this merge: the drift range ends.
+        if (contained) break;
+        if (link.card_id === task.plan.card_id) continue;
+        drift.push({
+          card_id: link.card_id,
+          merge_sha: link.merge_sha,
+          paths: await git.changedPaths(
+            task.project,
+            link.previous_sha,
+            link.merge_sha,
+          ),
+        });
+      }
+      return classifyCheckFailure({
+        points,
+        own,
+        drift,
+        base,
+        ...(passed_base ? { passed_base } : {}),
+      });
+    } catch {
+      return undefined;
+    }
   }
   private failedCompletion(task: Task): boolean {
     const latest = this.latest(task);
