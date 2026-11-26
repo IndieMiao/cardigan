@@ -436,6 +436,13 @@
     gap: var(--ui-space-1) var(--ui-space-2);
     min-width: 0;
   }
+  /* C-703: the last piece of a fact and its “·” never part on a wrap. */
+  .nextFactTail {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    white-space: nowrap;
+  }
   .nextLine :global(dl),
   .nextLine :global(.plain-summary-risk) {
     display: flex;

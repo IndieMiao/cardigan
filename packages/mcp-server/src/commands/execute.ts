@@ -34,6 +34,7 @@ import type {
   McpBackend,
   McpReadContext,
 } from "../backend.js";
+import { meterStateBuild, meterStateLoad } from "../read-timing.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import type { ToolContext } from "../tools/types.js";
 
@@ -210,6 +211,19 @@ export function loadCommandState(
   project_settings?: CommandState["project_settings"],
   options: CommandStateOptions = {},
 ): CommandState {
+  // C-774: reads report how long command state took, and how much of it was
+  // a rebuild after a version moved.
+  return meterStateLoad(() =>
+    loadCommandStateUnmetered(tx, project_id, project_settings, options),
+  );
+}
+
+function loadCommandStateUnmetered(
+  tx: McpReadContext,
+  project_id: ProjectId,
+  project_settings: CommandState["project_settings"] | undefined,
+  options: CommandStateOptions,
+): CommandState {
   // Resolve the transaction's event history even on a state cache hit. A
   // backend without this bulk port keeps the original per-stream read path.
   const streams = tx.events.listStreams?.(project_id);
@@ -221,7 +235,9 @@ export function loadCommandState(
   const lean = (scope === "lean" || scope === "slim") && hot;
   const slim = scope === "slim" && hot;
   const build = () =>
-    readCommandState(tx, project_id, streams, hot, lean, slim);
+    meterStateBuild(() =>
+      readCommandState(tx, project_id, streams, hot, lean, slim),
+    );
   let state =
     (streams && tx.cachedCommandState?.(project_id, build)) || build();
   if (hot && streams)
