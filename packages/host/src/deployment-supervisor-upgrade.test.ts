@@ -1100,3 +1100,42 @@ test("C-799: a step registered between the registry read and the fence is seen b
   release?.();
   expect(await upgrader.step()).toBe("restarting");
 });
+
+test("C-799: a step that starts after an earlier wait drained gets the full bound again (V-3520)", async () => {
+  const l = await layout();
+  let clock = Date.parse("2026-11-26T16:59:00.000Z");
+  const host = fakeHost(l, {
+    now: () => clock,
+    operationWaitMs: () => 60_000,
+  });
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  const step = mergeStepCard();
+  const first = step.hold();
+  expect(await upgrader.step()).toBe("waiting");
+  clock += 3_000;
+  first?.();
+  // Then a long wait on something else (here the deployment capacity).
+  const capacity = acquireDeploymentCapacity(store);
+  expect(await upgrader.step()).toBe("waiting");
+  clock += 20 * 60_000;
+  expect(await upgrader.step()).toBe("waiting");
+  capacity?.();
+  // A new merge step begins: it is waited for, not cut off at once.
+  const second = step.hold();
+  try {
+    clock += 1_000;
+    expect(await upgrader.step()).toBe("waiting");
+    clock += 58_000;
+    expect(await upgrader.step()).toBe("waiting");
+  } finally {
+    second?.();
+  }
+  clock += 2_000;
+  expect(await upgrader.step()).toBe("restarting");
+  // The record counts the time actually spent waiting for operations.
+  expect(restartingSummary()).toContain(
+    "本机没有执行中的单卡或批次合并检查、合并步骤和其它受管长操作（已等待 63 秒）",
+  );
+  expect(actions()).toEqual([]);
+});

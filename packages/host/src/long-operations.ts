@@ -198,8 +198,70 @@ export function tryHoldLongOperation(
   operation: OperationInput,
   options: HoldOptions = {},
 ): (() => void) | undefined {
+  return tryHeldLongOperation(store, operation, options)?.release;
+}
+
+/** C-799: a registration whose subject can be moved to another operation. */
+export interface HeldLongOperation {
+  /** Idempotent, never throws. */
+  readonly release: () => void;
+  /**
+   * Name another running operation on the same row (one write), so readers
+   * that note waits on a card see the operation actually running. The row id
+   * stays, so a fence taken earlier keeps seeing it. Best effort.
+   */
+  readonly relabel: (
+    operation: Omit<OperationInput, "kind">,
+    startedAt?: string,
+  ) => void;
+}
+
+/** `tryHoldLongOperation` with `relabel`. */
+export function tryHeldLongOperation(
+  store: Store,
+  operation: OperationInput,
+  options: HoldOptions = {},
+): HeldLongOperation | undefined {
   const id = register(store, operation, options);
-  return id === "fenced" ? undefined : releaser(store, id);
+  if (id === "fenced") return undefined;
+  const release = releaser(store, id);
+  let released = false;
+  return {
+    release: () => {
+      released = true;
+      release();
+    },
+    relabel: (next, startedAt) => {
+      if (!id || released) return;
+      try {
+        store.uow.run(() => {
+          store.database
+            .prepare(
+              "UPDATE host_long_operations SET project_id = ?, card_id = ?, label = ?, started_at = ? WHERE id = ?",
+            )
+            .run(
+              next.project_id,
+              next.card_id ?? null,
+              next.label.slice(0, 200),
+              startedAt ?? options.now?.() ?? new Date().toISOString(),
+              id,
+            );
+        });
+      } catch {
+        /* The row still holds the restart; only its note may be stale. */
+      }
+    },
+  };
+}
+
+/**
+ * C-799: a key for "this card already heard about this operation". A row
+ * that is relabelled to another card or step is noted afresh.
+ */
+export function longOperationNoteKey(
+  op: Pick<LongOperation, "id" | "project_id" | "card_id" | "label">,
+): string {
+  return JSON.stringify([op.id, op.project_id, op.card_id, op.label]);
 }
 
 /** Hold for the lifetime of `work`, including when it rejects. */

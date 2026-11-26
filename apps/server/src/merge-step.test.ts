@@ -44,7 +44,8 @@ test("C-799: a running merge step is a managed operation naming its card and ste
   await mergeStep(store, card, "同步源仓库", () => {
     seen.push(rows());
   });
-  // The next step of the same pass reuses the standing row: no new write.
+  // The next step of the same pass reuses the standing row; a step shorter
+  // than the rename delay costs no write.
   await mergeStep(store, card, "读取基线", () => {
     seen.push(rows());
   });
@@ -100,18 +101,54 @@ test("C-799: under a restart fence no step starts, an idle row goes at once, and
   releaseLongOperationFence(store);
 });
 
-test("C-799: overlapping steps keep the row until the last one ends", async () => {
+test("C-799: overlapping steps keep the row until the last one ends; it names a running step or one that ended within the delay", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  store.createProject({ id: "other" });
+  const named = () =>
+    liveLongOperations(store).map((op) => [
+      op.project_id,
+      op.card_id,
+      op.label,
+    ]);
   const a = holdMergeStep(store, card, "同步源仓库");
   const b = holdMergeStep(
     store,
-    { project_id: "cardigan", card_id: "C-8", subject: "合并 C-8" },
-    "准备合并候选",
+    { project_id: "other", card_id: "C-3", subject: "合并 C-3" },
+    "发布合并",
   );
+  // The row names a running step, the first one while it runs.
+  expect(named()).toEqual([["cardigan", "C-7", "合并 C-7 的「同步源仓库」"]]);
+  const before = fenceLongOperations(store);
+  releaseLongOperationFence(store);
   a();
-  await vi.advanceTimersByTimeAsync(MERGE_STEP_LINGER_MS * 2);
-  expect(rows()).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(MERGE_STEP_LINGER_MS - 1);
+  expect(named()).toEqual([["cardigan", "C-7", "合并 C-7 的「同步源仓库」"]]);
+  await vi.advanceTimersByTimeAsync(1);
+  // V-3519: the step that ended is no longer named; the running one in the
+  // other project is, on the same row (a fence taken earlier still sees it).
+  const after = fenceLongOperations(store);
+  releaseLongOperationFence(store);
+  expect(
+    after.map((op) => [op.id, op.project_id, op.card_id, op.label]),
+  ).toEqual([[before[0]?.id, "other", "C-3", "合并 C-3 的「发布合并」"]]);
+  // A step that starts after the named one ended is named in turn once it
+  // outlasts the delay; one starting while the named one runs changes
+  // nothing.
   b();
+  const c = holdMergeStep(
+    store,
+    { project_id: "cardigan", card_id: "C-9", subject: "合并 C-9" },
+    "同步源仓库",
+  );
+  await vi.advanceTimersByTimeAsync(MERGE_STEP_LINGER_MS);
+  expect(named()).toEqual([["cardigan", "C-9", "合并 C-9 的「同步源仓库」"]]);
+  const d = holdMergeStep(store, card, "读取基线");
+  await vi.advanceTimersByTimeAsync(MERGE_STEP_LINGER_MS * 4);
+  expect(named()).toEqual([["cardigan", "C-9", "合并 C-9 的「同步源仓库」"]]);
+  c();
+  await vi.advanceTimersByTimeAsync(MERGE_STEP_LINGER_MS);
+  expect(named()).toEqual([["cardigan", "C-7", "合并 C-7 的「读取基线」"]]);
+  d();
   await vi.advanceTimersByTimeAsync(MERGE_STEP_LINGER_MS);
   expect(rows()).toEqual([]);
 });

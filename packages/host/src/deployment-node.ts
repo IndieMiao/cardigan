@@ -80,6 +80,7 @@ import {
 import {
   fenceLongOperations,
   liveLongOperations,
+  longOperationNoteKey,
   releaseLongOperationFence,
 } from "./long-operations.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
@@ -599,8 +600,11 @@ export class NodeDeploymentDriver
     operations: readonly DeploymentOperation[] = [],
   ) {
     // Each source card hears once per operation that a deployment waits for it.
-    const fresh = operations.filter((op) => !this.notedOperations.has(op.id));
-    this.notedOperations = new Set(operations.map((op) => op.id));
+    // C-799: a merge-step row relabelled to another card or step is new.
+    const fresh = operations.filter(
+      (op) => !this.notedOperations.has(longOperationNoteKey(op)),
+    );
+    this.notedOperations = new Set(operations.map(longOperationNoteKey));
     if (fresh.length)
       try {
         writeDeferredOperations(this.options.store, record.attempt, fresh);

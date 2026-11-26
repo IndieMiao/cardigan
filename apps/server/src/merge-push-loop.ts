@@ -127,6 +127,30 @@ export class MergePushExecutor {
       await this.route(id, project, push);
     }
   }
+  /** C-799: the cards whose merges this push publishes, in queue order. */
+  private pushedCards(id: ProjectId, queueIds: readonly string[]): string[] {
+    try {
+      return this.options.store.uow.read((tx) => {
+        const events = streamEventsBy(tx.events, id, undefined, "type", [
+          "merge_push_queued",
+        ]);
+        const cards: string[] = [];
+        for (const queueId of queueIds) {
+          const card = (
+            events.find((e) => e.id === queueId)?.payload as
+              | { card_id?: unknown }
+              | undefined
+          )?.card_id;
+          if (typeof card === "string" && !cards.includes(card))
+            cards.push(card);
+        }
+        return cards;
+      });
+    } catch {
+      return [];
+    }
+  }
+
   private async route(
     id: ProjectId,
     project: CentralProject,
@@ -152,9 +176,14 @@ export class MergePushExecutor {
       // resumed as is on a later tick, here or on the next server.
       let release: () => void;
       try {
+        const cards = this.pushedCards(id, attempt.queue_ids);
         release = holdMergeStep(
           this.options.store,
-          { project_id: id, subject: `推送 ${push.target}/${push.branch}` },
+          {
+            project_id: id,
+            card_id: cards[0],
+            subject: pushSubject(cards, push.branch),
+          },
           "推送",
         );
       } catch (error) {
@@ -271,4 +300,13 @@ export function startMergePushLoop(
       },
     },
   };
+}
+
+/** C-799: `推送 C-1、C-2 到 main`; the card list is bounded for the label. */
+export function pushSubject(cards: readonly string[], branch: string): string {
+  const shown = cards.slice(0, 8).join("、");
+  const more = cards.length > 8 ? ` 等 ${cards.length} 张` : "";
+  return cards.length
+    ? `推送 ${shown}${more} 到 ${branch}`
+    : `推送到 ${branch}`;
 }

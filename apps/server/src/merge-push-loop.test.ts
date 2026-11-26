@@ -13,6 +13,7 @@ import { CentralRepositoryService } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import {
   fenceLongOperations,
+  liveLongOperations,
   loadMergeGateConfig,
   parseMergePushConfig,
   releaseLongOperationFence,
@@ -272,6 +273,7 @@ test("C-799: under a restart fence the push does not start; the started attempt 
   await c.merge().tick();
   expect(c.f.card().status).toBe("done");
   await c.confirmFirstPush();
+  const realPush = c.binding.push.bind(c.binding);
   const push = vi.spyOn(c.binding, "push");
   fenceLongOperations(c.f.store);
   await c.push().tick();
@@ -282,7 +284,17 @@ test("C-799: under a restart fence the push does not start; the started attempt 
   expect(git(c.remote, "for-each-ref")).toBe("");
   const started = c.events("merge_push_started").length;
   releaseLongOperationFence(c.f.store);
+  // V-3519: the running push names the card it publishes, so a waiting
+  // restart notes it there.
+  let running: unknown[] = [];
+  push.mockImplementationOnce(async (...args) => {
+    running = liveLongOperations(c.f.store).map((op) => [op.card_id, op.label]);
+    return realPush(...args);
+  });
   await c.push().tick();
+  expect(running).toEqual([
+    [c.f.card().id, `推送 ${c.f.card().id} 到 main 的「推送」`],
+  ]);
   expect(push).toHaveBeenCalledTimes(1);
   // The attempt begun under the fence resumed; no second one was begun.
   expect(c.events("merge_push_started")).toHaveLength(started);

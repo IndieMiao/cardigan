@@ -24,6 +24,7 @@ import {
   fenceLongOperations,
   type LongOperation,
   liveLongOperations,
+  longOperationNoteKey,
   releaseLongOperationFence,
 } from "./long-operations.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
@@ -697,11 +698,19 @@ export class SupervisorUpgrader {
   /** C-787: an earlier helper's plan file was present at the last step. */
   private planPresent = false;
   /**
-   * C-799: when this attempt first found a managed operation running, and
-   * the operations already announced on their own cards.
+   * C-799: this attempt's operation wait. `since` is when the current run of
+   * busy observations began (cleared once none runs, so each new operation
+   * gets the full bound, as a deployment does); `waited` sums the finished
+   * runs for the restart record; `noted` the operations announced on their
+   * own cards.
    */
   private drain:
-    | { attempt: string; since: number; noted: Set<string> }
+    | {
+        attempt: string;
+        since: number | undefined;
+        waited: number;
+        noted: Set<string>;
+      }
     | undefined;
   constructor(
     private readonly host: SupervisorUpgradeHost,
@@ -821,15 +830,31 @@ export class SupervisorUpgrader {
     }
   }
 
-  /** Time left in this attempt's bounded operation wait; starts the clock. */
-  private waitLeft(target: Prepared) {
+  /** This attempt's wait state, fresh for a new attempt. */
+  private drainOf(target: Prepared) {
     if (this.drain?.attempt !== target.attempt)
       this.drain = {
         attempt: target.attempt,
-        since: this.host.now(),
+        since: undefined,
+        waited: 0,
         noted: new Set(),
       };
-    return this.drain.since + this.operationWaitMs() - this.host.now();
+    return this.drain;
+  }
+
+  /** Time left in the current bounded operation wait; starts the clock. */
+  private waitLeft(target: Prepared) {
+    const drain = this.drainOf(target);
+    drain.since ??= this.host.now();
+    return drain.since + this.operationWaitMs() - this.host.now();
+  }
+
+  /** Nothing runs: the next operation found gets the full bound again. */
+  private drained(target: Prepared) {
+    const drain = this.drain;
+    if (drain?.attempt !== target.attempt || drain.since === undefined) return;
+    drain.waited += Math.max(0, this.host.now() - drain.since);
+    drain.since = undefined;
   }
 
   /**
@@ -840,9 +865,13 @@ export class SupervisorUpgrader {
     target: Prepared,
     ops: readonly LongOperation[],
   ): boolean {
-    if (!ops.length || this.waitLeft(target) <= 0) return false;
+    if (!ops.length) {
+      this.drained(target);
+      return false;
+    }
+    if (this.waitLeft(target) <= 0) return false;
     const noted = this.drain?.noted;
-    const fresh = ops.filter((op) => !noted?.has(op.id));
+    const fresh = ops.filter((op) => !noted?.has(longOperationNoteKey(op)));
     if (fresh.length)
       try {
         writeDeferredOperations(
@@ -851,7 +880,7 @@ export class SupervisorUpgrader {
           fresh,
           "supervisor_upgrade",
         );
-        for (const op of fresh) noted?.add(op.id);
+        for (const op of fresh) noted?.add(longOperationNoteKey(op));
       } catch {
         /* Card notes are informational; retried on the next step. */
       }
@@ -860,14 +889,18 @@ export class SupervisorUpgrader {
 
   /** C-799: the restart record states what it found, including remote checks. */
   private idleSummary(target: Prepared, interrupted: readonly LongOperation[]) {
-    const waited =
+    const drain =
       this.drain?.attempt === target.attempt ? this.drain : undefined;
+    const waited = drain
+      ? drain.waited +
+        (drain.since === undefined
+          ? 0
+          : Math.max(0, this.host.now() - drain.since))
+      : 0;
     const local = interrupted.length
       ? `等待受管长操作已达上限（${seconds(this.operationWaitMs())} 秒），照常重启，重启后续跑或重排：${operationSummary(interrupted)}`
       : `本机没有执行中的单卡或批次合并检查、合并步骤和其它受管长操作${
-          waited
-            ? `（已等待 ${seconds(Math.max(0, this.host.now() - waited.since))} 秒）`
-            : ""
+          drain ? `（已等待 ${seconds(waited)} 秒）` : ""
         }`;
     let remote: string;
     try {
