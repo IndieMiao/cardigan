@@ -12,6 +12,9 @@ import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { runSystemCommand } from "./merge-loop.js";
 
+/** A failed Git probe for the same delivery and baseline waits this long. */
+export const EARLY_CONFLICT_RETRY_MS = 60_000;
+
 /** Same path, or one is a directory containing the other (file/directory conflicts). */
 export function pathsOverlap(
   left: readonly string[],
@@ -33,19 +36,22 @@ export function pathsOverlap(
 }
 
 /**
- * C-782: after main advances, trial-merge delivered heads whose changes overlap
- * main's changes since they forked, and tell idle authors about conflicts
- * early. Git work is read-only merge-tree in the central bare repository: no
+ * C-782: after main advances, trial-merge delivered heads of cards in review
+ * whose changes overlap main's changes since they forked, and tell idle
+ * authors about conflicts early. Git work is read-only merge-tree in the central bare repository: no
  * repository or publication lock, ref, index or worktree is touched, so it
  * never waits for, nor holds up, merges or other cards' Git operations.
  */
 export class EarlyConflictObserver {
   /** `${project}:${delivery}:${head}:${baseline}` → conflicted paths ([] = clean). */
   private readonly cache = new Map<string, readonly string[]>();
+  /** Same key → when its Git probe last failed; retried after `retryMs`. */
+  private readonly failed = new Map<string, number>();
   constructor(
     private readonly store: Store,
     private readonly git: MergeGit | undefined,
     private readonly clock: Clock,
+    private readonly retryMs = EARLY_CONFLICT_RETRY_MS,
   ) {}
   async tick(project: ProjectId): Promise<void> {
     const git = this.git;
@@ -68,12 +74,19 @@ export class EarlyConflictObserver {
       const key = `${project}:${target.delivery_id}:${target.head_sha}:${baseline}`;
       live.add(key);
       let files = this.cache.get(key);
-      if (!files && baseline)
+      const now = Date.parse(this.clock.now());
+      if (
+        !files &&
+        baseline &&
+        !(now < (this.failed.get(key) ?? 0) + this.retryMs)
+      )
         try {
           files = await this.probe(binding, baseline, target.head_sha);
           this.cache.set(key, files);
+          this.failed.delete(key);
         } catch {
           // No raw Git diagnostics in project events; unknown is not a conflict.
+          this.failed.set(key, now);
         }
       if (files?.length) probes.push({ ...target, files });
     }
@@ -100,9 +113,9 @@ export class EarlyConflictObserver {
         this.clock,
       );
     }
-    for (const key of this.cache.keys())
-      if (key.startsWith(`${project}:`) && !live.has(key))
-        this.cache.delete(key);
+    for (const map of [this.cache, this.failed])
+      for (const key of map.keys())
+        if (key.startsWith(`${project}:`) && !live.has(key)) map.delete(key);
   }
   private async probe(
     binding: CentralProject,

@@ -45,7 +45,11 @@ function notifiedDeliveries(
   );
 }
 
-/** Current product deliveries in review or awaiting merge, not yet told about a conflict. */
+/**
+ * Current product deliveries of cards in review, not yet told about a
+ * conflict. An awaiting-merge card cannot take a new delivery; its merge
+ * preparation reports the conflict and reopens it (`merge_conflicted`).
+ */
 export function earlyConflictTargets(
   state: CommandState,
   base_branch: string,
@@ -53,10 +57,7 @@ export function earlyConflictTargets(
   const notified = notifiedDeliveries(state);
   return state.cards
     .filter(
-      (c) =>
-        ["review", "awaiting_merge"].includes(c.status) &&
-        c.base_branch === base_branch &&
-        !c.hold,
+      (c) => c.status === "review" && c.base_branch === base_branch && !c.hold,
     )
     .flatMap((card) =>
       currentPreMergeVersions(card, state.work_items, state.deliveries).flatMap(

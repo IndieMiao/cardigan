@@ -167,6 +167,13 @@ test.each([
     }),
   ],
   [
+    "card awaiting merge",
+    (s: CommandState) => ({
+      ...s,
+      cards: s.cards.map((c) => ({ ...c, status: "awaiting_merge" as const })),
+    }),
+  ],
+  [
     "card on hold",
     (s: CommandState) => ({
       ...s,

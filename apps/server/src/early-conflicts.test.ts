@@ -10,7 +10,11 @@ import type {
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { m3Fixture } from "../test-support/m3-acceptance.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
-import { EarlyConflictObserver, pathsOverlap } from "./early-conflicts.js";
+import {
+  EARLY_CONFLICT_RETRY_MS,
+  EarlyConflictObserver,
+  pathsOverlap,
+} from "./early-conflicts.js";
 import { ServerGit } from "./git.js";
 import { m4Fixture } from "./m4-fixtures.js";
 
@@ -129,7 +133,7 @@ test("C-782: a baseline move during the probes discards them until the next tick
   expect(early()[0]?.payload).toMatchObject({ baseline_sha: "c".repeat(40) });
 });
 
-test("C-782: Git failures record nothing and are retried", async () => {
+test("C-782: Git failures record nothing and are retried after a pause", async () => {
   await delivered();
   const git = fakeGit();
   git.trialMerge.mockRejectedValueOnce(new Error("fatal: raw diagnostics"));
@@ -137,6 +141,10 @@ test("C-782: Git failures record nothing and are retried", async () => {
   await observer.tick(f.id);
   expect(early()).toEqual([]);
   await observer.tick(f.id);
+  expect(git.trialMerge).toHaveBeenCalledOnce();
+  f.advance(EARLY_CONFLICT_RETRY_MS);
+  await observer.tick(f.id);
+  expect(git.trialMerge).toHaveBeenCalledTimes(2);
   expect(early()).toHaveLength(1);
   expect(JSON.stringify(early())).not.toContain("raw diagnostics");
 });

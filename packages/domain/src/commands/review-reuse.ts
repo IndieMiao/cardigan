@@ -162,10 +162,17 @@ export function reusableReviews(
     previous.status === "superseded" ||
     previous.status === "rejected" ||
     previous.work_item_id !== next.work_item_id ||
-    previous.kind !== next.kind ||
-    !equivalentReviewTrees(previous, next)
+    previous.kind !== next.kind
   )
     return [];
+  const proof = equivalenceProof(previous, next);
+  if (!proof) return [];
+  // C-782: a both-sides insertion order was the author's choice, not reviewed.
+  // High-risk independent review conclusions do not carry across it.
+  const union =
+    proof !== "same" &&
+    Array.isArray(proof.union_paths) &&
+    proof.union_paths.length > 0;
   // C-782: across a host-proved SHA change the author's self-reported test
   // results necessarily name the new SHA, precheck and baseline; that SHA gets
   // its own precheck and final merge check. The same SHA keeps the old claims.
@@ -189,6 +196,7 @@ export function reusableReviews(
   return next.requested_verifiers.flatMap((id) => {
     const item = d.work(id);
     if (item.status !== "passed") return [];
+    if (union && item.role_id === "independent_reviewer") return [];
     const review = d
       .list("reviews")
       .filter((r) => r.work_item_id === id)
@@ -223,50 +231,47 @@ export function equivalentReviewTrees(
   previous: Delivery,
   next: Delivery,
 ): boolean {
+  return equivalenceProof(previous, next) !== undefined;
+}
+
+type Proof = Record<string, import("../entities.js").JsonValue>;
+
+/** `"same"` for the same full SHA and tree, else the matching host proof. */
+function equivalenceProof(
+  previous: Delivery,
+  next: Delivery,
+): "same" | Proof | undefined {
   const oldTree = deliveryTree(previous),
     newTree = deliveryTree(next);
-  if (!oldTree || !newTree) return false;
+  if (!oldTree || !newTree) return;
   if (previous.subject.value === next.subject.value && oldTree === newTree)
-    return true;
-  return (
-    next.kind !== "card_completion" &&
-    next.evidence.some((e) => {
-      if (
-        e.kind !== "diff" ||
-        !e.details ||
-        typeof e.details !== "object" ||
-        Array.isArray(e.details)
+    return "same";
+  if (next.kind === "card_completion") return;
+  for (const e of next.evidence) {
+    if (
+      e.kind !== "diff" ||
+      !e.details ||
+      typeof e.details !== "object" ||
+      Array.isArray(e.details)
+    )
+      continue;
+    const candidate = (e.details as Proof).review_equivalence;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+      continue;
+    const proof = candidate as Proof;
+    if (
+      proof.version === 1 &&
+      proof.previous_delivery_id === previous.id &&
+      proof.old_sha === previous.subject.value &&
+      proof.new_sha === next.subject.value &&
+      proof.old_tree === oldTree &&
+      proof.new_tree === newTree &&
+      typeof proof.baseline_sha === "string" &&
+      /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(proof.baseline_sha) &&
+      ["baseline", "format_or_snapshot", "conflict"].includes(
+        String(proof.kind),
       )
-        return false;
-      const candidate = (
-        e.details as Record<string, import("../entities.js").JsonValue>
-      ).review_equivalence;
-      if (
-        !candidate ||
-        typeof candidate !== "object" ||
-        Array.isArray(candidate)
-      )
-        return false;
-      const proof = candidate as Record<
-        string,
-        import("../entities.js").JsonValue
-      >;
-      return (
-        !!proof &&
-        typeof proof === "object" &&
-        !Array.isArray(proof) &&
-        proof.version === 1 &&
-        proof.previous_delivery_id === previous.id &&
-        proof.old_sha === previous.subject.value &&
-        proof.new_sha === next.subject.value &&
-        proof.old_tree === oldTree &&
-        proof.new_tree === newTree &&
-        typeof proof.baseline_sha === "string" &&
-        /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(proof.baseline_sha) &&
-        ["baseline", "format_or_snapshot", "conflict"].includes(
-          String(proof.kind),
-        )
-      );
-    })
-  );
+    )
+      return proof;
+  }
 }

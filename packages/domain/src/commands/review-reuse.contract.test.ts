@@ -1081,6 +1081,39 @@ test("C-782: across a host-proved SHA change, new self-reported test results sti
   });
 });
 
+test.each([
+  ["reviewer", true],
+  ["independent_reviewer", false],
+] as const)(
+  "C-782: a both-sides insertion proof carries a %s pass: %s",
+  async (roleId, reused) => {
+    const base = fixture();
+    let s: CommandState = {
+      ...base,
+      roles: [...base.roles, role(roleId)],
+      assignments: base.assignments.map((a) =>
+        a.id === id("assignment", 2) ? { ...a, role_id: roleId } : a,
+      ),
+      work_items: base.work_items.map((w) =>
+        w.id === id("work_item", 2) ? { ...w, role_id: roleId } : w,
+      ),
+    };
+    const first = await deliver(s);
+    s = apply(s, first);
+    const reviewed = pass(s, first.data, actor(2, roleId));
+    s = apply(s, reviewed);
+    const sha = "b".repeat(40);
+    const next = await deliver(
+      s,
+      { ...params, subject: { ...subject, value: sha } },
+      conflictProof(first.data, sha),
+    );
+    expect(next.data.reused_reviews).toEqual(
+      reused ? [reviewed.data.id] : undefined,
+    );
+  },
+);
+
 test("C-782: across a host-proved SHA change, changed known gaps still require review", async () => {
   const { s, first } = await passed();
   const sha = "b".repeat(40);
