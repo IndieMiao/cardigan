@@ -237,6 +237,7 @@ function snapshot(project: string) {
 describe("project copy-setup", () => {
   test("create --from copies every active role and the preferences", async () => {
     await sourceProject();
+    const before = snapshot("alpha");
     expect(
       await run([
         "project",
@@ -289,6 +290,8 @@ describe("project copy-setup", () => {
     ] as const)
       expect(beta.preferences[gate]).toBeUndefined();
     expect(alpha.preferences.auto_merge).toBe("on");
+    // The source is only read.
+    expect(alpha).toEqual(before);
   });
 
   test("existing roles are kept and reported; a second copy changes nothing", async () => {

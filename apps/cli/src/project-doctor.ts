@@ -24,7 +24,7 @@ import {
 } from "@cardigan/host";
 import { listRoleVersions, openStore, type Store } from "@cardigan/store";
 import { parse as parseYaml } from "yaml";
-import { validProfileNames } from "./config.js";
+import { loadOptionalConfigSync } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import {
   announceDataDir,
@@ -234,7 +234,9 @@ export async function projectDoctor(input: DoctorInput): Promise<DoctorItem[]> {
   ];
   let profiles: ReadonlySet<string> | undefined;
   try {
-    profiles = validProfileNames(cliLaunchPaths(io, input.dataDir));
+    // launch.yaml only: unlike `role copy`, never open secrets.env.
+    const config = loadOptionalConfigSync(cliLaunchPaths(io, input.dataDir));
+    profiles = config ? new Set(Object.keys(config.profiles)) : undefined;
   } catch {
     profiles = undefined;
   }
