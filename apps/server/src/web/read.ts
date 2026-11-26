@@ -107,6 +107,8 @@ import {
   assignmentPresence,
   precheckIndex,
   type RunPresence,
+  runningFirst,
+  runningSince,
   strongestPresence,
 } from "./run-presence.js";
 
@@ -454,7 +456,7 @@ export function cardListViews(
   const participants = (cardId: string, items: readonly WorkItem[]) => {
     const people = new Map<
       string,
-      { view: WebAuthorView; presences: RunPresence[] }
+      { view: WebAuthorView; presences: RunPresence[]; since?: number }
     >();
     for (const assignment of live(items)) {
       const key = assignment.employee_id ?? assignment.id;
@@ -465,12 +467,22 @@ export function cardListViews(
       person.presences.push(
         assignmentPresence(state, assignment, cardPrechecks(cardId)),
       );
+      const since = runningSince(state, assignment);
+      if (
+        since !== undefined &&
+        (person.since === undefined || since < person.since)
+      )
+        person.since = since;
       people.set(key, person);
     }
-    return [...people.values()].map(({ view, presences }) => ({
-      ...view,
-      run_presence: strongestPresence(presences),
-    }));
+    // C-765: running people first so the board never folds them into +N.
+    return runningFirst(
+      [...people.values()].map(({ view, presences, since }) => ({
+        view: { ...view, run_presence: strongestPresence(presences) },
+        since,
+      })),
+      ({ view, since }) => ({ presence: view.run_presence, since }),
+    ).map(({ view }) => view);
   };
   return cardViews(state, dependencyState, mergeState, precheckEvents).map(
     (card) => {

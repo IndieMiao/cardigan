@@ -406,11 +406,24 @@ export function ProduceOwners({
   presence?: boolean;
 }) {
   if (!owners.length) return null;
+  // C-765: runners take the visible slots first. The server already orders
+  // them by Run start; this stable split keeps that order and leaves the rest
+  // as given, so with nobody running nothing moves.
+  const ordered = presence
+    ? [
+        ...owners.filter(
+          (owner) => runPresence(owner.run_presence).state === "running",
+        ),
+        ...owners.filter(
+          (owner) => runPresence(owner.run_presence).state !== "running",
+        ),
+      ]
+    : owners;
   const ownerName = (owner: AuthorView) =>
     owner.employee?.name ??
     owner.author_display ??
     `未命名的 ${owner.author_role ?? "未知角色"}`;
-  const hidden = owners.slice(3).map((owner) => ({
+  const hidden = ordered.slice(3).map((owner) => ({
     name: ownerName(owner),
     presence: presence ? runPresence(owner.run_presence) : undefined,
   }));
@@ -420,7 +433,7 @@ export function ProduceOwners({
     .map((owner) => owner.name);
   return (
     <fieldset className="employee-group employee-owners" aria-label={label}>
-      {owners.slice(0, 3).map((owner, index) => (
+      {ordered.slice(0, 3).map((owner, index) => (
         <EmployeeIdentity
           key={owner.employee?.id ?? owner.author ?? index}
           {...owner}

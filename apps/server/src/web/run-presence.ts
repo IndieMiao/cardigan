@@ -78,6 +78,56 @@ export function strongestPresence(
 }
 
 /**
+ * C-765: when this Assignment's earliest `running` Run started, in ms.
+ * Undefined when it has no running Run or the host recorded no start time.
+ */
+export function runningSince(
+  state: Pick<CommandState, "runs">,
+  assignment: Pick<Assignment, "id">,
+): number | undefined {
+  let since: number | undefined;
+  for (const run of state.runs) {
+    if (run.assignment_id !== assignment.id || run.status !== "running")
+      continue;
+    const at = run.started_at ? Date.parse(run.started_at) : Number.NaN;
+    if (Number.isFinite(at) && (since === undefined || at < since)) since = at;
+  }
+  return since;
+}
+
+/**
+ * C-765: board avatars show at most three people, so running people go
+ * first, ordered by when their Run started (unknown start last, ties keep
+ * the given order). Everyone else keeps the given order after them. With
+ * nobody running the order is unchanged.
+ */
+export function runningFirst<T>(
+  people: readonly T[],
+  fact: (person: T) => {
+    readonly presence: RunPresence;
+    readonly since?: number | undefined;
+  },
+): T[] {
+  const ranked = people.map((person, index) => ({
+    person,
+    index,
+    ...fact(person),
+  }));
+  const running = ranked.filter((p) => p.presence.state === "running");
+  if (!running.length) return [...people];
+  const rest = ranked.filter((p) => p.presence.state !== "running");
+  running.sort((a, b) => {
+    if (a.since !== b.since) {
+      if (a.since === undefined) return 1;
+      if (b.since === undefined) return -1;
+      return a.since - b.since;
+    }
+    return a.index - b.index;
+  });
+  return [...running, ...rest].map((p) => p.person);
+}
+
+/**
  * Presence of one work-item Assignment. `cardPrechecks` must be this card's
  * precheck projection; it is passed in so a list computes it once per card.
  */

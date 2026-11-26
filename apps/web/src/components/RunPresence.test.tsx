@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
 import type { AuthorView } from "../api.js";
 import {
@@ -80,12 +80,14 @@ describe("board participants", () => {
     const group = screen.getByRole("group", { name: "参与员工" });
     for (const name of [
       "赵云，正在为这张卡运行",
+      "关羽，正在为这张卡运行",
       "晴雯，已排队，等待机器",
-      "林黛玉，等待预检",
     ])
       expect(within(group).getByRole("button", { name })).toBeTruthy();
     const rings = [...container.querySelectorAll("[data-run]")];
+    // C-765: both runners come first, then the queued person.
     expect(rings.map((ring) => ring.getAttribute("data-run"))).toStrictEqual([
+      "running",
       "running",
       "queued",
     ]);
@@ -94,12 +96,100 @@ describe("board participants", () => {
       expect(ring.getAttribute("aria-hidden")).toBe("true");
       expect(ring.querySelector("[tabindex]")).toBeNull();
     }
-    // +N keeps its slot, does not spin and names hidden runners.
+    // +N keeps its slot and does not spin; no runner is hidden.
     const more = within(group).getByRole("button", {
-      name: "另有 3 位参与员工，其中正在为这张卡运行：关羽",
+      name: "另有 3 位参与员工",
     });
     expect(more.textContent).toBe("+3");
     expect(more.querySelector("[data-run]")).toBeNull();
+  });
+
+  // C-765: runners take the first three slots; +N folds the rest in order.
+  /** The group's buttons, in DOM order, are exactly these accessible names. */
+  const expectButtons = (group: HTMLElement, names: readonly string[]) =>
+    expect(within(group).getAllByRole("button")).toStrictEqual(
+      names.map((name) => within(group).getByRole("button", { name })),
+    );
+
+  test("nobody running keeps the given order", () => {
+    render(
+      <ProduceOwners
+        owners={owners.map((owner) => ({
+          ...owner,
+          run_presence: { state: "idle" },
+        }))}
+        label="参与员工"
+        presence
+      />,
+    );
+    expectButtons(screen.getByRole("group", { name: "参与员工" }), [
+      "赵云，已指派，当前无运行",
+      "晴雯，已指派，当前无运行",
+      "林黛玉，已指派，当前无运行",
+      "另有 3 位参与员工",
+    ]);
+  });
+
+  test("more than three runners fill the slots; +N names the extra runner first", async () => {
+    const crowd = [
+      { ...person(1, "赵云"), run_presence: { state: "idle" } },
+      { ...person(2, "晴雯"), run_presence: { state: "running" } },
+      { ...person(3, "林黛玉"), run_presence: { state: "queued" } },
+      { ...person(4, "张良"), run_presence: { state: "running" } },
+      { ...person(5, "关羽"), run_presence: { state: "running" } },
+      { ...person(6, "妙玉"), run_presence: { state: "running" } },
+    ];
+    render(<ProduceOwners owners={crowd} label="参与员工" presence />);
+    const group = screen.getByRole("group", { name: "参与员工" });
+    expectButtons(group, [
+      "晴雯，正在为这张卡运行",
+      "张良，正在为这张卡运行",
+      "关羽，正在为这张卡运行",
+      "另有 3 位参与员工，其中正在为这张卡运行：妙玉",
+    ]);
+    act(() =>
+      within(group)
+        .getByRole("button", { name: /^另有 3 位/ })
+        .focus(),
+    );
+    expect((await screen.findByRole("tooltip")).textContent).toBe(
+      "妙玉，正在为这张卡运行；赵云，已指派，当前无运行；林黛玉，已排队，等待机器",
+    );
+  });
+
+  test("a new read with changed states reorders the avatars", () => {
+    const first = [
+      { ...person(1, "赵云"), run_presence: { state: "idle" } },
+      { ...person(2, "晴雯"), run_presence: { state: "idle" } },
+      { ...person(3, "林黛玉"), run_presence: { state: "idle" } },
+      { ...person(4, "张良"), run_presence: { state: "running" } },
+    ];
+    const { rerender } = render(
+      <ProduceOwners owners={first} label="参与员工" presence />,
+    );
+    const group = () => screen.getByRole("group", { name: "参与员工" });
+    expectButtons(group(), [
+      "张良，正在为这张卡运行",
+      "赵云，已指派，当前无运行",
+      "晴雯，已指派，当前无运行",
+      "另有 1 位参与员工",
+    ]);
+    rerender(
+      <ProduceOwners
+        owners={first.map((owner, i) => ({
+          ...owner,
+          run_presence: { state: i === 0 ? "running" : "idle" },
+        }))}
+        label="参与员工"
+        presence
+      />,
+    );
+    expectButtons(group(), [
+      "赵云，正在为这张卡运行",
+      "晴雯，已指派，当前无运行",
+      "林黛玉，已指派，当前无运行",
+      "另有 1 位参与员工",
+    ]);
   });
 
   test("other hosts keep the plain avatar and original names", () => {

@@ -173,21 +173,27 @@ test("three participant avatars plus overflow preserve employee navigation indep
       avatar: null,
       bio: "公开简介",
     },
-    // C-531: the hidden runner is named on +N, which itself never spins.
+    // C-765: the runner takes a visible slot instead of being folded.
     run_presence: { state: n === 4 ? "running" : "idle" } as const,
   }));
   renderCard({ ...example, participants }, onOpenCard);
   const group = screen.getByRole("group", { name: "参与员工" });
-  expect(
-    within(group).getAllByRole("button", { name: /，已指派，当前无运行$/ }),
-  ).toHaveLength(3);
+  expect(within(group).getAllByRole("button")).toStrictEqual(
+    [
+      "员工4，正在为这张卡运行",
+      "员工1，已指派，当前无运行",
+      "员工2，已指派，当前无运行",
+      "另有 2 位参与员工",
+    ].map((name) => within(group).getByRole("button", { name })),
+  );
   const overflow = within(group).getByRole("button", {
-    name: "另有 2 位参与员工，其中正在为这张卡运行：员工4",
+    name: "另有 2 位参与员工",
   });
   expect(overflow.textContent).toBe("+2");
   act(() => overflow.focus());
+  // The +N list continues the visible order.
   expect((await screen.findByRole("tooltip")).textContent).toBe(
-    "员工4，正在为这张卡运行；员工5，已指派，当前无运行",
+    "员工3，已指派，当前无运行；员工5，已指派，当前无运行",
   );
   const employee = within(group).getByRole("button", {
     name: "员工1，已指派，当前无运行",
