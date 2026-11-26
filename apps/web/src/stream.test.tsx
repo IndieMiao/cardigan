@@ -92,7 +92,7 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
-test("stream resumes every observed cursor, ignores duplicates/stale sources, and cancels reconnects", () => {
+test("C-779: a reconnect carries no cursors, re-reads on open, ignores duplicates/stale sources, and cancels reconnects", () => {
   vi.useFakeTimers();
   const p = pool(),
     c = callbacks();
@@ -113,23 +113,23 @@ test("stream resumes every observed cursor, ignores duplicates/stale sources, an
   first.emit("error");
   expect(first.closed).toBe(true);
   vi.advanceTimersByTime(3000);
-  expect(
-    new URL(p.last.url, "https://workbench.invalid").searchParams.get("after"),
-  ).toBe("C-1:5,C-2:2,project:4");
+  // The URL does not grow with the streams seen: the server starts at "now".
+  expect(p.last.url).toBe("/api/projects/p%2Fa/stream");
   first.emit("change", change("C-1", 100));
   expect(c.change).toHaveBeenCalledTimes(3);
   p.last.emit("open");
+  // Every open re-reads, which covers what changed while away.
+  expect(c.ready).toHaveBeenCalledTimes(2);
+  p.last.emit("change", change("C-1", 5));
   p.last.emit("change", change("C-1", 6));
   expect(c.change).toHaveBeenCalledTimes(4);
-  // Only the first open re-reads; the resumed one relies on the replay.
-  expect(c.ready).toHaveBeenCalledTimes(1);
   p.last.emit("error");
   stop();
   vi.advanceTimersByTime(10000);
   expect(p.all).toHaveLength(2);
 });
 
-test("a server shutdown frame drops the connection and resumes on the next server with the same cursors", () => {
+test("a server shutdown frame drops the connection and reconnects to the next server", () => {
   vi.useFakeTimers();
   const p = pool(),
     c = callbacks(),
@@ -149,19 +149,17 @@ test("a server shutdown frame drops the connection and resumes on the next serve
   vi.advanceTimersByTime(3000);
   const third = p.last;
   expect(third).not.toBe(second);
-  expect(
-    new URL(third.url, "https://workbench.invalid").searchParams.get("after"),
-  ).toBe("C-3:9,project:2");
+  expect(third.url).toBe("/api/projects/p-1/stream");
   // A late frame from the old connection is ignored.
   first.emit("shutdown");
   expect(p.all).toHaveLength(3);
   third.emit("open");
   expect(c.status).toHaveBeenLastCalledWith("live");
-  expect(c.ready).toHaveBeenCalledTimes(1);
+  expect(c.ready).toHaveBeenCalledTimes(2);
   stop();
 });
 
-test("a disconnect before any event reconnects from zero; malformed changes cannot advance a cursor", () => {
+test("C-779: a disconnect before any event does not replay from zero; malformed changes cannot advance a cursor", () => {
   vi.useFakeTimers();
   const p = pool(),
     c = callbacks(),
@@ -179,9 +177,12 @@ test("a disconnect before any event reconnects from zero; malformed changes cann
   expect(c.change).not.toHaveBeenCalled();
   p.last.emit("error");
   vi.advanceTimersByTime(3000);
-  expect(
-    new URL(p.last.url, "https://workbench.invalid").searchParams.get("after"),
-  ).toBe("project:0");
+  // An explicit `project:0` replayed the whole history (C-779).
+  expect(p.last.url).toBe("/api/projects/p-1/stream");
+  p.last.emit("open");
+  expect(c.ready).toHaveBeenCalledOnce();
+  p.last.emit("change", change("C-1", 1));
+  expect(c.change).toHaveBeenCalledOnce();
   stop();
 });
 
@@ -231,11 +232,7 @@ test("StrictMode reconnect preserves card changes for the next scheduled refresh
   act(() => old.emit("error"));
   title = "断线期间的变化";
   await waitFor(() => expect(connections.last).not.toBe(old));
-  expect(
-    new URL(connections.last.url, "https://workbench.invalid").searchParams.get(
-      "after",
-    ),
-  ).toBe("C-1:10,C-2:7,project:4");
+  expect(connections.last.url).toBe("/api/projects/p-1/stream");
   act(() => {
     connections.last.emit("open");
     connections.last.emit("change", change("C-1", 11));
@@ -471,43 +468,60 @@ test.each([
   },
 );
 
-test("after a server restart the Workbench reconnects without re-reading loaded views or losing a draft", async () => {
-  window.location.hash = "#/p/p-1/cards/C-1";
-  const read = vi.fn<CardiganClient["card"]>().mockResolvedValue(cardDetail());
-  const cards = vi.spyOn(fakeClient(), "cards");
-  const { client, connections } = live({ card: read, cards });
-  render(<App client={client} />);
-  const field = (await screen.findByLabelText(
-    "评论正文",
-  )) as HTMLTextAreaElement;
-  act(() => connections.last.emit("open"));
-  act(() => connections.last.emit("change", change("C-1", 4)));
-  await settle();
-  changeControl(field, { target: { value: "重启期间的草稿" } });
-  const reads = read.mock.calls.length,
-    lists = cards.mock.calls.length;
+test.each(["error", "shutdown"])(
+  "C-779: an open card that changed while the tab slept shows the change after the %s reconnect, without a replay or losing a draft",
+  async (lost) => {
+    window.location.hash = "#/p/p-1/cards/C-1";
+    let detail = cardDetail({
+      timeline: [
+        timelineEntry({ id: "C-1#2", event_seq: 2, body: "睡前的评论" }),
+      ],
+    });
+    const read = vi
+      .fn<CardiganClient["card"]>()
+      .mockImplementation(async () => detail);
+    const { client, connections } = live({ card: read });
+    render(<App client={client} />);
+    const field = (await screen.findByLabelText(
+      "评论正文",
+    )) as HTMLTextAreaElement;
+    act(() => {
+      connections.last.emit("open");
+      connections.last.emit("change", change("C-1", 2));
+    });
+    await settle();
+    await selectCardTab(/^时间线/);
+    await screen.findByText("睡前的评论");
+    changeControl(field, { target: { value: "休眠期间的草稿" } });
 
-  const old = connections.last;
-  act(() => old.emit("shutdown"));
-  await waitFor(() => expect(connections.last).not.toBe(old));
-  expect(
-    new URL(connections.last.url, "https://workbench.invalid").searchParams.get(
-      "after",
-    ),
-  ).toBe("C-1:4");
-  act(() => connections.last.emit("open"));
-  await settle();
-  // Nothing changed while away: nothing is fetched again.
-  expect(read).toHaveBeenCalledTimes(reads);
-  expect(cards).toHaveBeenCalledTimes(lists);
-  expect(screen.getByLabelText("评论正文")).toBe(field);
-  expect(field.value).toBe("重启期间的草稿");
+    // The tab sleeps; meanwhile C-1 gets a comment. The new connection starts
+    // at "now" and replays nothing, so only the re-read on open can show it.
+    const asleep = connections.last;
+    act(() => asleep.emit(lost));
+    detail = cardDetail({
+      timeline: [
+        timelineEntry({ id: "C-1#2", event_seq: 2, body: "睡前的评论" }),
+        timelineEntry({ id: "C-1#3", event_seq: 3, body: "休眠期间的新评论" }),
+      ],
+    });
+    await waitFor(() => expect(connections.last).not.toBe(asleep));
+    expect(asleep.closed).toBe(true);
+    expect(connections.last.url).toBe("/api/projects/p-1/stream");
+    const reads = read.mock.calls.length;
+    act(() => connections.last.emit("open"));
+    await screen.findByText("休眠期间的新评论");
+    expect(read).toHaveBeenCalledTimes(reads + 1);
+    expect(screen.getByLabelText("评论正文")).toBe(field);
+    expect(field.value).toBe("休眠期间的草稿");
 
-  // A change replayed by the new server refreshes the card once.
-  act(() => connections.last.emit("change", change("C-1", 5)));
-  await waitFor(() => expect(read).toHaveBeenCalledTimes(reads + 1));
-  expect(field.value).toBe("重启期间的草稿");
-});
+    // Later changes still arrive on the new connection, once each.
+    act(() => connections.last.emit("change", change("C-1", 4)));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(reads + 2));
+    act(() => connections.last.emit("change", change("C-1", 4)));
+    await settle();
+    expect(read).toHaveBeenCalledTimes(reads + 2);
+  },
+);
 
 test("a queue change made during a restart reaches the cards on the next refresh", async () => {
   window.location.hash = "#/p/p-1/cards";
@@ -598,20 +612,24 @@ test("queue revisions refresh only when they change, including changes made whil
   expect(c.ready).toHaveBeenCalledTimes(2);
   first.emit("change", change("C-1", 3));
 
-  // Restart with no queue change: a resumed connection reads nothing again.
+  // A reconnect re-reads on open, which covers a queue changed while away; its
+  // opening revision never adds a second read, changed or not.
   first.emit("shutdown");
   vi.advanceTimersByTime(3000);
   p.last.emit("open");
+  expect(c.ready).toHaveBeenCalledTimes(3);
   p.last.emit("queue", { revision: "r2" });
-  expect(c.ready).toHaveBeenCalledTimes(2);
+  expect(c.ready).toHaveBeenCalledTimes(3);
 
-  // Another project's Run left the queue while we were away.
   p.last.emit("shutdown");
   vi.advanceTimersByTime(3000);
   p.last.emit("open");
-  expect(c.ready).toHaveBeenCalledTimes(2);
+  expect(c.ready).toHaveBeenCalledTimes(4);
   p.last.emit("queue", { revision: "r3" });
-  expect(c.ready).toHaveBeenCalledTimes(3);
+  expect(c.ready).toHaveBeenCalledTimes(4);
+  // Later changes on the same connection still refresh.
+  p.last.emit("queue", { revision: "r4" });
+  expect(c.ready).toHaveBeenCalledTimes(5);
   stop();
 });
 
@@ -660,7 +678,8 @@ test("C-232: context revisions call only the context callback, and only when the
   // No revision (malformed): refresh to be safe.
   p.last.emit("context");
   expect(c.context).toHaveBeenCalledTimes(3);
-  expect(c.ready).toHaveBeenCalledTimes(1);
+  // Context frames never re-read the other views; only the three opens did.
+  expect(c.ready).toHaveBeenCalledTimes(3);
   stop();
 });
 
