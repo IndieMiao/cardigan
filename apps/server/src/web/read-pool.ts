@@ -13,6 +13,9 @@ import {
  * C-644 defaults (configurable, see `workbenchReadOptionsFromEnv`):
  * - 2 workers. A project always reads in the same worker, so its versions stay
  *   stable between polls and its state is cached once, not once per worker.
+ *   C-774: a project's worker is fixed the first time the pool sees it, on the
+ *   worker with the fewest projects so far (see `#laneOf`), not by a hash of
+ *   the project id; with no more projects than workers each has its own.
  * - 64 waiting reads per worker; the 65th answers 503 at once.
  * - 30 s per read, queue wait included. A read that already started is not
  *   killed when it times out: it finishes and warms the worker's cache, and
@@ -33,6 +36,11 @@ export interface WorkbenchReadOptions {
   readonly timeoutMs?: number;
   /** Tests point at a stub; production uses the built worker beside this file. */
   readonly workerUrl?: URL;
+  /**
+   * C-774: projects to place and warm at once, busiest first. Their workers
+   * start right away and decode the projects' history before reads arrive.
+   */
+  readonly warmProjects?: readonly string[];
 }
 
 /**
@@ -74,13 +82,19 @@ export interface WorkbenchReadStats {
   readonly workers: number;
   readonly running: number;
   readonly queued: number;
+  /** C-774: projects placed on each worker, by worker index. */
+  readonly projects: readonly (readonly string[])[];
 }
 
 export class WorkbenchReadPool {
-  readonly #options: Required<Omit<WorkbenchReadOptions, "workerUrl">> & {
+  readonly #options: Required<
+    Omit<WorkbenchReadOptions, "workerUrl" | "warmProjects">
+  > & {
     workerUrl: URL;
   };
   readonly #lanes: Lane[];
+  /** C-774: each project's worker, fixed for the pool's lifetime. */
+  readonly #placed = new Map<string, number>();
   #serial = 0;
   #closed = false;
 
@@ -113,14 +127,74 @@ export class WorkbenchReadPool {
       running: undefined,
       deadline: undefined,
     }));
+    if (options.warmProjects) this.warm(options.warmProjects);
+  }
+
+  /**
+   * C-774: place these projects (busiest first) and start their workers now,
+   * so each decodes its projects' history before reads arrive. The Web server
+   * calls this once it listens, never for a server that failed to bind.
+   */
+  warm(projects: readonly string[]): void {
+    if (this.#closed) return;
+    for (const project of projects) this.#laneOf(project);
+    for (const lane of this.#lanes)
+      if (!lane.worker && this.#warmList(lane).length)
+        try {
+          this.#start(lane);
+        } catch {
+          // The lane's first read starts (and warms) its worker instead.
+        }
+  }
+
+  /** Projects placed on a lane, the ones its (new) worker should warm. */
+  #warmList(lane: Lane): string[] {
+    const index = this.#lanes.indexOf(lane);
+    return [...this.#placed]
+      .filter(([, at]) => at === index)
+      .map(([project]) => project);
   }
 
   stats(): WorkbenchReadStats {
+    const projects = this.#lanes.map((): string[] => []);
+    for (const [project, at] of this.#placed) projects[at]?.push(project);
     return {
       workers: this.#lanes.filter((lane) => lane.worker).length,
       running: this.#lanes.filter((lane) => lane.running).length,
       queued: this.#lanes.reduce((n, lane) => n + lane.queue.length, 0),
+      projects: projects.map((ids) => ids.sort()),
     };
+  }
+
+  /** The worker index the project's reads go to (tests, diagnostics). */
+  laneOf(project: string): number {
+    return this.#placed.get(project) ?? this.#placement(project);
+  }
+
+  /**
+   * C-774: the first time the pool sees a project (warm list at start, or its
+   * first read) it goes to the worker with the fewest projects; ties take the
+   * stable hash lane, then the lowest index. It never moves afterwards, so
+   * all its reads run in one worker, in order, against one cache and one
+   * per-connection version epoch (`cards-cache.ts`), and a move never costs a
+   * cold build on another worker. With no more projects than workers, each
+   * project has a worker of its own.
+   */
+  #laneOf(project: string): number {
+    const known = this.#placed.get(project);
+    if (known !== undefined) return known;
+    const lane = this.#placement(project);
+    this.#placed.set(project, lane);
+    return lane;
+  }
+
+  #placement(project: string): number {
+    const count = this.#lanes.map(() => 0);
+    for (const at of this.#placed.values()) count[at] = (count[at] ?? 0) + 1;
+    let lane = laneFor(project, this.#lanes.length);
+    for (let i = 0; i < count.length; i++)
+      if ((count[i] ?? 0) < (count[lane] ?? 0)) lane = i;
+    return lane;
   }
 
   /**
@@ -142,7 +216,8 @@ export class WorkbenchReadPool {
           RETRY_AFTER,
         ),
       );
-    const lane = this.#lanes[laneFor(op.project, this.#lanes.length)] as Lane;
+    const queuedAt = performance.now();
+    const lane = this.#lanes[this.#laneOf(op.project)] as Lane;
     if (lane.queue.length >= this.#options.maxQueue)
       return Promise.reject(
         new HttpRejection(
@@ -158,7 +233,7 @@ export class WorkbenchReadPool {
         id: ++this.#serial,
         op,
         host,
-        queuedAt: performance.now(),
+        queuedAt,
         resolve: (result) => {
           for (const [stage, ms] of Object.entries(result.timings))
             recordTiming?.(stage, ms);
@@ -175,6 +250,11 @@ export class WorkbenchReadPool {
           const at = lane.queue.indexOf(job);
           if (at >= 0) lane.queue.splice(at, 1);
         }
+        // C-774: a timed-out read still says where its time went.
+        const elapsed = performance.now() - job.queuedAt;
+        recordTiming?.("read_queue", job.waited ?? elapsed);
+        if (job.waited !== undefined)
+          recordTiming?.("read_running", elapsed - job.waited);
         this.#settle(
           job,
           new HttpRejection(
@@ -194,6 +274,7 @@ export class WorkbenchReadPool {
 
   async close(): Promise<void> {
     this.#closed = true;
+    this.#placed.clear();
     const workers: Worker[] = [];
     for (const lane of this.#lanes) {
       for (const job of lane.queue.splice(0))
@@ -301,6 +382,9 @@ export class WorkbenchReadPool {
       workerData: { dbPath: this.#options.dbPath },
     });
     lane.worker = worker;
+    // C-774: a new or restarted worker warms its projects between reads.
+    const warm = this.#warmList(lane);
+    if (warm.length) worker.postMessage({ kind: "warm", projects: warm });
     const failed = () => {
       if (lane.worker !== worker) return;
       lane.worker = undefined;
@@ -366,7 +450,7 @@ function clearLaneDeadline(lane: Lane): void {
   lane.deadline = undefined;
 }
 
-/** Stable project → worker affinity. */
+/** A project's worker when every worker is equally busy (C-774: tie-break only). */
 export function laneFor(project: string, lanes: number): number {
   if (lanes <= 1) return 0;
   return createHash("sha256").update(project).digest().readUInt32BE(0) % lanes;

@@ -377,6 +377,16 @@ export class MergeChecks {
       recovery: this.recovery,
       ...(options.checkExecutor ? { executor: options.checkExecutor } : {}),
       reserve: (settings) => this.reservePrecheck(settings),
+      // C-773: the stale fallback and host_ops abandon read the bound run once.
+      inspect: async (run, settings) => {
+        const config = settings.executor;
+        if (config?.type !== "github")
+          throw new Error("GitHub precheck adapter unavailable");
+        return this.githubProvider(config).client.run(
+          run.run_id,
+          AbortSignal.timeout(60_000),
+        );
+      },
       github: (check, project, settings, bind) => {
         const config = settings.executor;
         if (

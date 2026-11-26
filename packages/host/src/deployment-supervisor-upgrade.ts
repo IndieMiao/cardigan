@@ -165,6 +165,17 @@ export interface SupervisorUpgradePlan {
   readonly server?: ExecutionOwner;
   readonly requested_at: string;
   /**
+   * C-770: written by the helper right before it restarts the unit, so a
+   * recovery after the helper died knows whether the old supervisor was
+   * already asked to stop.
+   */
+  readonly restart_requested_at?: string;
+  /** C-770: an outcome whose audit write failed; recovery replays it. */
+  readonly result?: {
+    readonly status: "completed" | "rolled_back" | "failed";
+    readonly summary: string;
+  };
+  /**
    * C-787: the deployment this restart finishes. The old server is already
    * stopped; the new supervisor starts `release` at startup, or restores
    * `from` when it does not become ready.
@@ -256,6 +267,12 @@ export async function readSupervisorUpgradePlan(
     !owner(p.supervisor) ||
     (p.server !== undefined && !owner(p.server)) ||
     typeof p.requested_at !== "string" ||
+    (p.restart_requested_at !== undefined &&
+      !Number.isFinite(Date.parse(p.restart_requested_at))) ||
+    (p.result !== undefined &&
+      (!["completed", "rolled_back", "failed"].includes(p.result?.status) ||
+        typeof p.result.summary !== "string" ||
+        !p.result.summary.trim())) ||
     (p.deploy !== undefined &&
       (!validHandoffPlan(p.deploy) || p.deploy.sha !== p.to))
   )
@@ -362,8 +379,8 @@ async function waitHealthy(
   root: string,
   strict: boolean,
   ports: SupervisorRestartPorts,
+  deadline = ports.now() + plan.health_timeout_ms,
 ): Promise<"healthy" | "failed" | "timeout"> {
-  const deadline = ports.now() + plan.health_timeout_ms;
   let failures = 0;
   for (;;) {
     let health: Health = "pending";
@@ -381,39 +398,45 @@ async function waitHealthy(
   }
 }
 
-/** Put back the original launch file, unless someone else changed it since. */
-async function restoreLaunch(plan: SupervisorUpgradePlan): Promise<boolean> {
+/**
+ * Put back the original launch file, unless someone else changed it since.
+ * C-770: idempotent, so the supervisor, the helper and its recovery may each
+ * try: a launch file already equal to the backup counts as restored.
+ */
+async function restoreLaunch(
+  plan: SupervisorUpgradePlan,
+): Promise<"restored" | "already" | "changed"> {
   try {
     const current = await readHostFile(plan.launch_file, false);
-    if (digest(current) !== plan.launch_sha256) return false;
     const backup = await readHostFile(plan.backup_file);
+    if (current === backup) return "already";
+    if (digest(current) !== plan.launch_sha256) return "changed";
     await replaceFile(plan.launch_file, backup, plan.launch_mode);
-    return true;
+    return "restored";
   } catch {
-    return false;
+    return "changed";
   }
 }
 
 const seconds = (ms: number) => Math.ceil(ms / 1000);
+const RECORD_ATTEMPTS = 3;
+
+type Outcome = "completed" | "rolled_back" | "failed";
 
 /**
- * C-767 restart helper. Runs from the OLD supervisor checkout in its own
- * transient systemd unit, so restarting the supervisor never stops it: it
- * restarts the unit, waits for health, and on an explicit failure or timeout
- * restores the backed-up launch file and restarts the old version.
+ * Write the terminal audit (which opens Needs You on failure) and clear the
+ * plan. C-770: a write that keeps failing leaves the plan with the outcome so
+ * the recovery can replay it, instead of only logging to the console.
  */
-export async function finishSupervisorUpgrade(options: {
-  store: Store;
-  directory: string;
-  ports: SupervisorRestartPorts;
-}): Promise<"completed" | "rolled_back" | "failed"> {
-  const { store, directory, ports } = options;
-  const plan = await readSupervisorUpgradePlan(directory);
-  if (!plan) throw new Error("No supervisor upgrade is pending");
-  const record = (
-    status: "completed" | "rolled_back" | "failed",
-    summary: string,
-  ) => {
+async function settle(
+  store: Store,
+  directory: string,
+  plan: SupervisorUpgradePlan,
+  ports: SupervisorRestartPorts,
+  status: Outcome,
+  summary: string,
+): Promise<boolean> {
+  for (let i = 0; i < RECORD_ATTEMPTS; i++) {
     try {
       writeSupervisorUpgrade(store, {
         attempt: plan.attempt,
@@ -422,41 +445,125 @@ export async function finishSupervisorUpgrade(options: {
         status,
         summary,
       });
+      await removePlan(directory);
+      return true;
     } catch {
-      console.error("监督器自动升级结果未能写入审计，请核对主机日志");
+      if (i + 1 < RECORD_ATTEMPTS) await ports.sleep(1000);
     }
-  };
+  }
+  console.error("监督器自动升级结果未能写入审计，结果保留在升级计划中待恢复");
+  try {
+    await writePlan(directory, { ...plan, result: { status, summary } });
+  } catch {
+    console.error("监督器自动升级结果也未能写入升级计划，请核对主机日志");
+  }
+  return false;
+}
+
+/**
+ * C-767 restart helper. Runs from the OLD supervisor checkout in its own
+ * transient systemd unit, so restarting the supervisor never stops it: it
+ * restarts the unit, waits for health, and on an explicit failure or timeout
+ * restores the backed-up launch file and restarts the old version.
+ *
+ * C-770 `resume`: the recovery that the helper unit's `ExecStopPost=` runs
+ * once the helper has exited for any reason (including SIGKILL). With no
+ * plan left it does nothing. Otherwise it continues where the helper
+ * stopped: replays an unwritten outcome; rolls the launch file back without
+ * a restart when the helper never asked for one; else waits out the rest of
+ * the health window and rolls back if the new supervisor is not healthy.
+ */
+export async function finishSupervisorUpgrade(options: {
+  store: Store;
+  directory: string;
+  ports: SupervisorRestartPorts;
+  resume?: boolean;
+}): Promise<Outcome | "none"> {
+  const { store, directory, ports } = options;
+  const resume = options.resume === true;
+  const loaded = await readSupervisorUpgradePlan(directory);
+  if (!loaded) {
+    if (resume) return "none";
+    throw new Error("No supervisor upgrade is pending");
+  }
+  let plan = loaded;
+  if (plan.result) {
+    if (!resume) throw new Error("No supervisor upgrade is pending");
+    const { status, summary } = plan.result;
+    await settle(store, directory, plan, ports, status, summary);
+    return status;
+  }
   const started = ports.now();
-  const restart = await ports
-    .systemctl(["--user", "restart", "--no-block", plan.unit])
-    .catch(() => ({ code: null, text: "" }));
   let result: "healthy" | "failed" | "timeout" | "not_restarted" =
     "not_restarted";
-  if (restart.code === 0)
-    result = await waitHealthy(plan, plan.new_root, true, ports);
-  if (result === "healthy") {
-    record(
-      "completed",
-      `新监督器已接管，ready、state.json 与 ${plan.ports.length} 个端口核对通过，用时约 ${seconds(ports.now() - started)} 秒`,
+  if (!resume) {
+    plan = {
+      ...plan,
+      restart_requested_at: new Date(ports.now()).toISOString(),
+    };
+    let marked = false;
+    try {
+      await writePlan(directory, plan);
+      marked = true;
+    } catch {
+      /* Not restarted: the recovery must never assume the old one stopped. */
+    }
+    const restart = marked
+      ? await ports
+          .systemctl(["--user", "restart", "--no-block", plan.unit])
+          .catch(() => ({ code: null, text: "" }))
+      : { code: null };
+    if (restart.code === 0)
+      result = await waitHealthy(plan, plan.new_root, true, ports);
+  } else if (plan.restart_requested_at) {
+    // The rest of the helper's window; at least one observation.
+    result = await waitHealthy(
+      plan,
+      plan.new_root,
+      true,
+      ports,
+      Date.parse(plan.restart_requested_at) + plan.health_timeout_ms,
     );
-    await removePlan(directory);
+  }
+  if (result === "healthy") {
+    await settle(
+      store,
+      directory,
+      plan,
+      ports,
+      "completed",
+      `新监督器已接管，ready、state.json 与 ${plan.ports.length} 个端口核对通过，用时约 ${seconds(ports.now() - started)} 秒${resume ? "（由重启助手的兜底核对）" : ""}`,
+    );
     return "completed";
   }
   const cause =
     result === "not_restarted"
-      ? "重启命令未执行"
+      ? resume
+        ? "重启助手在发出重启前退出"
+        : "重启命令未执行"
       : result === "failed"
         ? "新监督器启动失败或运行的不是新目录"
         : `${seconds(plan.health_timeout_ms)} 秒内健康检查未通过`;
+  const prefix =
+    resume && result !== "not_restarted" ? "重启助手异常退出，" : "";
   const restored = await restoreLaunch(plan);
   let back: "healthy" | "failed" | "timeout" | "not_restored" = "not_restored";
-  if (restored) {
+  if (restored !== "changed") {
     const reload = await ports
       .systemctl(["--user", "daemon-reload"])
       .catch(() => ({ code: null, text: "" }));
     // The old supervisor was never stopped when the restart itself failed.
     if (result === "not_restarted")
       back = reload.code === 0 ? "healthy" : "failed";
+    else if (
+      // A helper that died mid-rollback may already have restarted it.
+      restored === "already" &&
+      reload.code === 0 &&
+      (await observe(plan, plan.old_root, false, ports).catch(
+        () => "pending" as const,
+      )) === "healthy"
+    )
+      back = "healthy";
     else {
       const again =
         reload.code === 0
@@ -470,15 +577,19 @@ export async function finishSupervisorUpgrade(options: {
           : "failed";
     }
   }
-  const outcome =
+  const outcome: Outcome =
     back === "healthy"
       ? result === "not_restarted"
         ? "failed"
         : "rolled_back"
       : "failed";
-  record(
+  await settle(
+    store,
+    directory,
+    plan,
+    ports,
     outcome,
-    `${cause}；${
+    `${prefix}${cause}；${
       back === "healthy"
         ? result === "not_restarted"
           ? "启动配置已恢复，旧监督器继续运行"
@@ -488,7 +599,6 @@ export async function finishSupervisorUpgrade(options: {
           : "已恢复启动配置，但旧监督器健康检查未通过，请立即人工核对"
     }`,
   );
-  await removePlan(directory);
   return outcome;
 }
 
@@ -680,7 +790,14 @@ export class SupervisorUpgrader {
     releaseLongOperationFence(this.host.store);
   }
 
-  /** Bounded wait for the helper; resume deployments if no restart came. */
+  /**
+   * Bounded wait for the helper; resume deployments if no restart came.
+   * C-770: this process was never restarted, yet the launch file already
+   * names the new checkout. Put the backup back while it is still exactly
+   * the rewritten file, so the next restart of any kind runs the old
+   * checkout; a file someone edited is left alone. Either way the attempt
+   * ends with one Needs You item.
+   */
   private async awaitRestart(): Promise<SupervisorUpgradeStep> {
     const since = this.restartingSince ?? this.host.now();
     const limit = this.limit();
@@ -688,17 +805,47 @@ export class SupervisorUpgrader {
       () => undefined,
     );
     if (plan && this.host.now() - since < limit) return "restarting";
-    if (plan)
-      this.notice(
-        `supervisor-upgrade-stalled:${plan.attempt}`,
-        `部署监督器自动升级（${plan.from} → ${plan.to}）的重启助手超过 ${seconds(limit)} 秒没有结束，监督器已恢复正常部署。请核对 systemd 单元 ${plan.unit} 与启动配置。`,
-      );
+    if (plan) await this.abandon(plan, limit);
     this.restartingSince = undefined;
     this.prepared = undefined;
     this.pending = undefined;
     this.releaseHold();
     this.host.recheck();
     return "idle";
+  }
+
+  private async abandon(plan: SupervisorUpgradePlan, limit: number) {
+    const restored = await restoreLaunch(plan);
+    let reloaded = false;
+    if (restored !== "changed")
+      reloaded = await this.host
+        .systemctl(["--user", "daemon-reload"])
+        .then((r) => r.code === 0)
+        .catch(() => false);
+    const summary = `重启助手超过 ${seconds(limit)} 秒没有结束，监督器没有被重启，已恢复正常部署；${
+      restored === "changed"
+        ? `启动配置 ${plan.launch_file} 已被改动或备份不可读，未覆盖，请人工核对（备份 ${plan.backup_file}）`
+        : reloaded
+          ? "启动配置已恢复为备份并重新加载 systemd，之后重启运行的仍是旧目录"
+          : `启动配置已恢复为备份，但 systemd 重新加载失败，请人工执行 systemctl --user daemon-reload 并核对单元 ${plan.unit}`
+    }`;
+    try {
+      writeSupervisorUpgrade(this.host.store, {
+        attempt: plan.attempt,
+        from: plan.from,
+        to: plan.to,
+        status: "failed",
+        summary,
+      });
+    } catch {
+      // Keep the plan: a later incarnation still reports it as stalled.
+      this.notice(
+        `supervisor-upgrade-stalled:${plan.attempt}`,
+        `部署监督器自动升级（${plan.from} → ${plan.to}）：${summary}`,
+      );
+      return;
+    }
+    await removePlan(this.host.directory).catch(() => {});
   }
 
   async step(): Promise<SupervisorUpgradeStep> {
@@ -1001,6 +1148,50 @@ export function nodeSystemdCommand(
         },
       );
     });
+}
+
+/** One argument of a systemd command line, never split or expanded. */
+const systemdWord = (arg: string) =>
+  `"${arg.replace(/[\\"]/gu, "\\$&").replace(/%/gu, "%%").replace(/\$/gu, "$$$$")}"`;
+
+/**
+ * `systemd-run` arguments of the C-767 restart helper. C-770: the helper unit
+ * also runs `self-deploy recover-upgrade` as `ExecStopPost=`, which systemd
+ * starts whenever the helper exits, even when it was killed or crashed after
+ * restarting the supervisor; with the helper finished normally there is no
+ * plan left and the recovery does nothing. Its stop timeout covers a full
+ * upgrade window, a rollback window and slack.
+ */
+export function supervisorHelperArguments(options: {
+  attempt: string;
+  node: string;
+  bin: string;
+  dataDir: string;
+  path: string | undefined;
+  runtimeDir: string | undefined;
+  healthTimeoutMs: number;
+}): string[] {
+  const recover = [options.node, options.bin, "self-deploy", "recover-upgrade"]
+    .map(systemdWord)
+    .join(" ");
+  return [
+    "--user",
+    "--collect",
+    "--quiet",
+    `--unit=cardigan-supervisor-upgrade-${options.attempt.slice(0, 8)}`,
+    `--setenv=CARDIGAN_DATA_DIR=${options.dataDir}`,
+    `--setenv=PATH=${options.path}`,
+    ...(options.runtimeDir
+      ? [`--setenv=XDG_RUNTIME_DIR=${options.runtimeDir}`]
+      : []),
+    `--property=ExecStopPost=${recover}`,
+    `--property=TimeoutStopSec=${Math.ceil((2 * options.healthTimeoutMs + 120_000) / 1000)}s`,
+    "--",
+    options.node,
+    options.bin,
+    "self-deploy",
+    "finish-upgrade",
+  ];
 }
 
 /** Only what the user manager connection needs, never Agent tokens. */

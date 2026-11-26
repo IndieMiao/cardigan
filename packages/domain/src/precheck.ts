@@ -187,3 +187,60 @@ export function precheckView({
 }: Precheck): PrecheckView {
   return view;
 }
+
+/** C-773: what host_ops may ask the host to do with a stuck author precheck. */
+export const precheckRecoveryActions = ["reinspect", "abandon"] as const;
+export type PrecheckRecoveryAction = (typeof precheckRecoveryActions)[number];
+export interface PrecheckRecoveryRequest {
+  readonly request_id: string;
+  readonly card_id: CardId;
+  readonly attempt_id: string;
+  readonly action: PrecheckRecoveryAction;
+}
+const RECOVERY_TYPES = [
+  "precheck_recovery_requested",
+  "precheck_recovery_handled",
+];
+/**
+ * C-773: the oldest host_ops request on this attempt that the host has not
+ * handled yet. Only a host_ops Assignment can file one and only the system
+ * marks it handled; anything else in the stream is ignored.
+ */
+export function pendingPrecheckRecovery(
+  events: readonly Event[],
+  card: CardId,
+  attempt: string,
+): PrecheckRecoveryRequest | undefined {
+  const relevant = eventsOfTypes(events, RECOVERY_TYPES).filter(
+    (e) =>
+      e.card_id === card &&
+      (e.payload as { attempt_id?: unknown })?.attempt_id === attempt,
+  );
+  const handled = new Set(
+    relevant
+      .filter(
+        (e) =>
+          e.type === "precheck_recovery_handled" && e.actor.kind === "system",
+      )
+      .map((e) => (e.payload as { request_id?: unknown }).request_id),
+  );
+  const request = relevant
+    .filter(
+      (e) =>
+        e.type === "precheck_recovery_requested" &&
+        e.actor.kind === "assignment" &&
+        e.actor.role_id === "host_ops" &&
+        !handled.has(e.id),
+    )
+    .sort((a, b) => a.seq - b.seq)[0];
+  if (!request) return undefined;
+  const action = (request.payload as { action?: unknown }).action;
+  return precheckRecoveryActions.includes(action as PrecheckRecoveryAction)
+    ? {
+        request_id: request.id,
+        card_id: card,
+        attempt_id: attempt,
+        action: action as PrecheckRecoveryAction,
+      }
+    : undefined;
+}

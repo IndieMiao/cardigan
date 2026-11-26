@@ -29,6 +29,7 @@ import {
   type SupervisorUpgradeConfig,
   type SupervisorUpgradeHost,
   SupervisorUpgrader,
+  supervisorHelperArguments,
 } from "./deployment-supervisor-upgrade.js";
 import { fenceLongOperations, holdLongOperation } from "./long-operations.js";
 import { executionOwner } from "./process-identity.js";
@@ -622,4 +623,272 @@ test("C-787: a plan's handed-over deployment is validated with the plan", async 
     });
     await expect(readSupervisorUpgradePlan(l.directory)).rejects.toThrow();
   }
+});
+
+/** The upgrader of `prepareRestart`, with its clock under test control. */
+async function restartingUpgrader() {
+  const l = await layout();
+  let clock = Date.now();
+  const host = fakeHost(l, { now: () => clock });
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  expect(await upgrader.step()).toBe("restarting");
+  const plan = await readSupervisorUpgradePlan(l.directory);
+  expect(await readFile(l.launch, "utf8")).toContain(`release-watch-${TO}`);
+  return {
+    l,
+    host,
+    upgrader,
+    plan,
+    advance(ms: number) {
+      clock += ms;
+    },
+  };
+}
+
+test("C-770: giving up on a helper that never restarted puts the backed-up launch file back, reloads systemd and opens one Needs You", async () => {
+  const { l, host, upgrader, advance } = await restartingUpgrader();
+  // Within 2 × 60 s + 120 s the supervisor keeps waiting.
+  advance(239_000);
+  expect(await upgrader.step()).toBe("restarting");
+  host.calls.length = 0;
+  advance(2_000);
+  expect(await upgrader.step()).toBe("idle");
+  // Any later restart of the unit runs the old checkout again.
+  expect(await readFile(l.launch, "utf8")).toBe(l.original);
+  expect(host.calls).toContain("systemctl --user daemon-reload");
+  expect(await readSupervisorUpgradePlan(l.directory)).toBeUndefined();
+  expect(events().map((e) => e.status)).toEqual([
+    "started",
+    "restarting",
+    "failed",
+  ]);
+  expect(events().at(-1)?.summary).toContain("启动配置已恢复为备份");
+  expect(actions()).toMatchObject([{ status: "open" }]);
+  expect(
+    store.database.prepare("SELECT 1 FROM host_deployment_capacity").get(),
+  ).toBeUndefined();
+  // This version no longer upgrades itself; the human item is the reminder.
+  expect(upgrader.automatic(FROM, TO, ["packages/host"])).toBe(false);
+});
+
+test("C-770: giving up never overwrites a launch file someone edited; Needs You still opens once", async () => {
+  const { l, host, upgrader, advance } = await restartingUpgrader();
+  const edited = `${await readFile(l.launch, "utf8")}# operator edit\n`;
+  await writeFile(l.launch, edited);
+  host.calls.length = 0;
+  advance(241_000);
+  expect(await upgrader.step()).toBe("idle");
+  expect(await readFile(l.launch, "utf8")).toBe(edited);
+  expect(host.calls).not.toContain("systemctl --user daemon-reload");
+  expect(events().at(-1)).toMatchObject({
+    status: "failed",
+    summary: expect.stringContaining("未覆盖"),
+  });
+  expect(actions()).toHaveLength(1);
+});
+
+test("C-770: when the audit cannot be written on giving up, the plan stays and a notice is raised instead", async () => {
+  const { l, upgrader, advance } = await restartingUpgrader();
+  let broken = 1;
+  // Only the terminal record fails; the notice itself is a later write.
+  failWrites(() => broken-- > 0);
+  advance(241_000);
+  expect(await upgrader.step()).toBe("idle");
+  expect(await readFile(l.launch, "utf8")).toBe(l.original);
+  expect(await readSupervisorUpgradePlan(l.directory)).toBeDefined();
+  expect(actions()).toMatchObject([
+    { status: "open", instructions: expect.stringContaining("重启助手超过") },
+  ]);
+});
+
+/** Store writes fail while `when()` holds, as with a locked database. */
+function failWrites(when: () => boolean) {
+  const getter = Object.getOwnPropertyDescriptor(Store.prototype, "uow")?.get;
+  if (!getter) throw new Error("no uow");
+  const target = store;
+  Object.defineProperty(target, "uow", {
+    configurable: true,
+    get() {
+      const uow = getter.call(target) as Store["uow"];
+      return {
+        ...uow,
+        run: ((operation: Parameters<Store["uow"]["run"]>[0]) => {
+          if (when()) throw new Error("database is locked");
+          return uow.run(operation);
+        }) as Store["uow"]["run"],
+      };
+    },
+  });
+}
+
+/** A helper that died: the plan as the helper left it, before or after restarting. */
+async function diedHelper(restarted: boolean) {
+  const l = await prepareRestart();
+  const plan = await readSupervisorUpgradePlan(l.directory);
+  if (!plan) throw new Error("no plan");
+  if (restarted)
+    await writeFile(
+      join(l.directory, "supervisor-upgrade.json"),
+      JSON.stringify({
+        ...plan,
+        restart_requested_at: new Date(0).toISOString(),
+      }),
+      { mode: 0o600 },
+    );
+  return l;
+}
+
+test("C-770: recovery after the helper died with the new supervisor crashing rolls back and opens one Needs You", async () => {
+  const l = await diedHelper(true);
+  const { ports, calls } = restartPorts(l, "crashes");
+  // The unit already restarted into the new checkout before the helper died.
+  await ports.systemctl(["--user", "restart", "--no-block", "x"]);
+  calls.length = 0;
+  expect(
+    await finishSupervisorUpgrade({
+      store,
+      directory: l.directory,
+      ports,
+      resume: true,
+    }),
+  ).toBe("rolled_back");
+  // The recovery never restarts into the new version again.
+  expect(calls.filter((c) => c.startsWith("--user restart"))).toHaveLength(1);
+  expect(await readFile(l.launch, "utf8")).toBe(l.original);
+  expect(events().at(-1)).toMatchObject({
+    status: "rolled_back",
+    summary: expect.stringContaining("重启助手异常退出"),
+  });
+  expect(actions()).toHaveLength(1);
+  expect(await readSupervisorUpgradePlan(l.directory)).toBeUndefined();
+});
+
+test("C-770: recovery after the helper died with the new supervisor healthy completes without Needs You", async () => {
+  const l = await diedHelper(true);
+  const { ports, calls } = restartPorts(l, "healthy");
+  await ports.systemctl(["--user", "restart", "--no-block", "x"]);
+  calls.length = 0;
+  expect(
+    await finishSupervisorUpgrade({
+      store,
+      directory: l.directory,
+      ports,
+      resume: true,
+    }),
+  ).toBe("completed");
+  expect(calls.some((c) => c.includes("restart"))).toBe(false);
+  expect(actions()).toEqual([]);
+  expect(await readFile(l.launch, "utf8")).toContain(`release-watch-${TO}`);
+});
+
+test("C-770: recovery after the helper died before restarting restores the launch file without restarting", async () => {
+  const l = await diedHelper(false);
+  const { ports, calls } = restartPorts(l, "healthy");
+  expect(
+    await finishSupervisorUpgrade({
+      store,
+      directory: l.directory,
+      ports,
+      resume: true,
+    }),
+  ).toBe("failed");
+  expect(calls).toEqual(["--user daemon-reload"]);
+  expect(await readFile(l.launch, "utf8")).toBe(l.original);
+  expect(events().at(-1)?.summary).toContain("重启助手在发出重启前退出");
+  expect(actions()).toHaveLength(1);
+});
+
+test("C-770: recovery after the helper died mid-rollback does not restart a healthy old supervisor again", async () => {
+  const l = await diedHelper(true);
+  const { ports, calls } = restartPorts(l, "crashes");
+  // The helper had already restored the launch file and restarted the old one.
+  await writeFile(l.launch, l.original);
+  await ports.systemctl(["--user", "restart", "--no-block", "x"]);
+  calls.length = 0;
+  expect(
+    await finishSupervisorUpgrade({
+      store,
+      directory: l.directory,
+      ports,
+      resume: true,
+    }),
+  ).toBe("rolled_back");
+  expect(calls.some((c) => c.includes("restart"))).toBe(false);
+  expect(actions()).toHaveLength(1);
+});
+
+test("C-770: recovery after a normal helper exit is a no-op; a helper outcome whose audit failed is replayed", async () => {
+  const l = await prepareRestart();
+  const { ports } = restartPorts(l, "hangs");
+  let fail = true;
+  failWrites(() => fail);
+  expect(
+    await finishSupervisorUpgrade({ store, directory: l.directory, ports }),
+  ).toBe("rolled_back");
+  expect(actions()).toEqual([]);
+  expect(await readSupervisorUpgradePlan(l.directory)).toMatchObject({
+    result: {
+      status: "rolled_back",
+      summary: expect.stringContaining("已用备份恢复"),
+    },
+  });
+  fail = false;
+  expect(
+    await finishSupervisorUpgrade({
+      store,
+      directory: l.directory,
+      ports,
+      resume: true,
+    }),
+  ).toBe("rolled_back");
+  expect(actions()).toMatchObject([
+    { status: "open", instructions: expect.stringContaining("已用备份回滚") },
+  ]);
+  expect(await readSupervisorUpgradePlan(l.directory)).toBeUndefined();
+  expect(
+    await finishSupervisorUpgrade({
+      store,
+      directory: l.directory,
+      ports,
+      resume: true,
+    }),
+  ).toBe("none");
+  expect(actions()).toHaveLength(1);
+});
+
+test("C-770: the helper unit runs the recovery as ExecStopPost= with a stop timeout covering both windows", () => {
+  const args = supervisorHelperArguments({
+    attempt: "0b5c8f9e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    node: "/usr/bin/node",
+    bin: "/srv/self deploy/release-watch-a/apps/cli/dist/bin.js",
+    dataDir: "/srv/data",
+    path: "/usr/bin:/bin",
+    runtimeDir: "/run/user/1000",
+    healthTimeoutMs: 60_000,
+  });
+  expect(args).toContain(
+    '--property=ExecStopPost="/usr/bin/node" "/srv/self deploy/release-watch-a/apps/cli/dist/bin.js" "self-deploy" "recover-upgrade"',
+  );
+  expect(args).toContain("--property=TimeoutStopSec=240s");
+  expect(args).toContain("--unit=cardigan-supervisor-upgrade-0b5c8f9e");
+  expect(args.slice(args.indexOf("--") + 1)).toEqual([
+    "/usr/bin/node",
+    "/srv/self deploy/release-watch-a/apps/cli/dist/bin.js",
+    "self-deploy",
+    "finish-upgrade",
+  ]);
+  expect(
+    supervisorHelperArguments({
+      attempt: "0b5c8f9e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+      node: "/opt/n%de$x/node",
+      bin: '/srv/a"b\\c/bin.js',
+      dataDir: "/d",
+      path: undefined,
+      runtimeDir: undefined,
+      healthTimeoutMs: 10_000,
+    }).find((a) => a.startsWith("--property=ExecStopPost=")),
+  ).toBe(
+    '--property=ExecStopPost="/opt/n%%de$$x/node" "/srv/a\\"b\\\\c/bin.js" "self-deploy" "recover-upgrade"',
+  );
 });

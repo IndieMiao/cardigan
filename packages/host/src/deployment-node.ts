@@ -67,6 +67,7 @@ import {
   type SupervisorUpgradeConfig,
   SupervisorUpgrader,
   type SupervisorUpgradeStep,
+  supervisorHelperArguments,
 } from "./deployment-supervisor-upgrade.js";
 import {
   fenceLongOperations,
@@ -981,22 +982,17 @@ export class NodeDeploymentDriver
       systemctl,
       launchHelper: async (attempt: string, from: string) =>
         (
-          await systemdRun([
-            "--user",
-            "--collect",
-            "--quiet",
-            `--unit=cardigan-supervisor-upgrade-${attempt.slice(0, 8)}`,
-            `--setenv=CARDIGAN_DATA_DIR=${this.options.dataDir}`,
-            `--setenv=PATH=${this.buildEnv.PATH}`,
-            ...(this.options.env.XDG_RUNTIME_DIR
-              ? [`--setenv=XDG_RUNTIME_DIR=${this.options.env.XDG_RUNTIME_DIR}`]
-              : []),
-            "--",
-            process.execPath,
-            join(from, "apps/cli/dist/bin.js"),
-            "self-deploy",
-            "finish-upgrade",
-          ])
+          await systemdRun(
+            supervisorHelperArguments({
+              attempt,
+              node: process.execPath,
+              bin: join(from, "apps/cli/dist/bin.js"),
+              dataDir: this.options.dataDir,
+              path: this.buildEnv.PATH,
+              runtimeDir: this.options.env.XDG_RUNTIME_DIR,
+              healthTimeoutMs: upgrade.config.health_timeout_ms,
+            }),
+          )
         ).code === 0,
       ports: () => this.portTargets(),
       server: () => this.state.process,
