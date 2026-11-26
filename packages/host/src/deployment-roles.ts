@@ -3,6 +3,7 @@ import {
   type Assignment,
   type CommandState,
   deploymentAuditedVersion,
+  type Event,
   eventsOfType,
   type ProjectId,
   pendingRoleConflictActions,
@@ -443,6 +444,52 @@ const instructionsOnly = (e: { payload: unknown }) => {
     )
   );
 };
+const sameSet = (a: readonly string[] = [], b: readonly string[] = []) =>
+  JSON.stringify([...new Set(a)].sort()) ===
+  JSON.stringify([...new Set(b)].sort());
+
+/**
+ * C-786 (V-3491:1): an ordinary upgrade may wait only when the path from the
+ * pinned version to the target is proven, step by step, to change nothing but
+ * the instructions: every version in between has a system audit from exactly
+ * the version before it, each instructions-only, and the pinned and target
+ * versions carry the same tools, capabilities, required capabilities and
+ * worktree. A hand-edited version without an audit, a gap, or a missing role
+ * version is uncertain and never waits.
+ */
+function provenInstructionsOnly(
+  state: CommandState,
+  previous: Assignment,
+  target: number,
+  pending: readonly Event[],
+): boolean {
+  const versions = state.roles.filter((r) => r.role_id === previous.role_id);
+  const pinned = versions.find((r) => r.role_version === previous.role_version);
+  const latest = versions.find((r) => r.role_version === target);
+  if (
+    !pinned ||
+    !latest ||
+    !sameSet(pinned.allowed_tools, latest.allowed_tools) ||
+    !sameSet(pinned.capabilities, latest.capabilities) ||
+    !sameSet(pinned.required_capabilities, latest.required_capabilities) ||
+    (pinned.worktree ?? null) !== (latest.worktree ?? null)
+  )
+    return false;
+  let from = previous.role_version;
+  for (const step of versions
+    .map((r) => r.role_version)
+    .filter((v) => v > previous.role_version && v <= target)
+    .sort((a, b) => a - b)) {
+    const audit = pending.find(
+      (e) =>
+        auditVersion(e) === step &&
+        (e.payload as { from_version?: unknown }).from_version === from,
+    );
+    if (!audit || !instructionsOnly(audit)) return false;
+    from = step;
+  }
+  return from === target;
+}
 const auditRevision = (e: { payload: unknown }) => {
   const r = (e.payload as { security_revision?: unknown }).security_revision;
   return typeof r === "number" && Number.isSafeInteger(r) ? r : 0;
@@ -491,7 +538,8 @@ export function standingRotationDue(
   });
   if (pending.some((e) => auditRevision(e) > pinnedRevision)) return "security";
   // Uncertain counts as immediate: only a proven instructions-only upgrade waits.
-  if (!pending.length || !pending.every(instructionsOnly)) return "permission";
+  if (!provenInstructionsOnly(state, previous, latest.role_version, pending))
+    return "permission";
   if (!previous.runtime_ref) return "no_session";
   const at = Date.parse(now);
   const times = [

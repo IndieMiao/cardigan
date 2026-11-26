@@ -1,7 +1,13 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Assignment, CommandState, Event, Run } from "@cardigan/domain";
+import type {
+  Assignment,
+  CommandState,
+  Event,
+  RoleReference,
+  Run,
+} from "@cardigan/domain";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
@@ -89,8 +95,19 @@ const run = (over: Partial<Run>): Run =>
     status: "completed",
     ...over,
   }) as Run;
-const state = (events: Event[], runs: Run[] = []) =>
-  ({ events, runs }) as unknown as CommandState;
+/** pm v1..v4 with the same tools, capabilities and worktree. */
+const pmRole = (role_version: number, over: Partial<RoleReference> = {}) => ({
+  role_id: "pm",
+  role_version,
+  allowed_tools: ["whoami", "get_card", "merge"],
+  capabilities: ["verify"],
+  required_capabilities: [],
+  worktree: "readonly",
+  ...over,
+});
+const sameRoles = [1, 2, 3, 4].map((v) => pmRole(v));
+const state = (events: Event[], runs: Run[] = [], roles = sameRoles) =>
+  ({ events, runs, roles }) as unknown as CommandState;
 const due = (
   s: CommandState,
   a: Assignment,
@@ -232,6 +249,66 @@ test.each([
       policy,
     ),
   ).toBe("permission");
+});
+
+test("C-786 V-3491:1: a hand-edited version without an audit breaks the proof and never waits", () => {
+  const busy = [run({ finished_at: at(0) })];
+  // Pinned v1; v2 was edited by hand (no audit, a tool removed); the
+  // deployment's v3 audit is relative to v2 and shows only instructions.
+  const roles = [
+    pmRole(1),
+    pmRole(2, { allowed_tools: ["whoami", "get_card"] }),
+    pmRole(3, { allowed_tools: ["whoami", "get_card"] }),
+  ];
+  expect(
+    due(
+      state([upgrade(3, at(0))], busy, roles),
+      standing({ role_version: 1 }),
+      0,
+    ),
+  ).toBe("permission");
+  // The same gap with unchanged tools still breaks the chain of audits.
+  expect(
+    due(state([upgrade(3, at(0))], busy), standing({ role_version: 1 }), 0),
+  ).toBe("permission");
+  // A continuous chain of instructions-only audits waits.
+  expect(
+    due(
+      state([upgrade(2, at(-5)), upgrade(3, at(0))], busy),
+      standing({ role_version: 1 }),
+      0,
+    ),
+  ).toBeUndefined();
+});
+
+test("C-786 V-3491:1: pinned and target versions must carry the same tools, capabilities and worktree", () => {
+  const busy = [run({ finished_at: at(0) })];
+  for (const over of [
+    { allowed_tools: ["whoami", "get_card"] },
+    { capabilities: [] },
+    { required_capabilities: ["browser.chromium"] },
+    { worktree: "write" as const },
+  ])
+    expect(
+      due(
+        state([upgrade(3, at(0))], busy, [pmRole(2), pmRole(3, over)]),
+        standing(),
+        0,
+      ),
+    ).toBe("permission");
+  // A missing pinned or target version is uncertain.
+  expect(
+    due(state([upgrade(3, at(0))], busy, [pmRole(3)]), standing(), 0),
+  ).toBe("permission");
+  expect(
+    due(state([upgrade(3, at(0))], busy, [pmRole(2)]), standing(), 0),
+  ).toBe("permission");
+  // An audit from another source version does not link the chain.
+  const stray = {
+    ...upgrade(3, at(0)),
+    payload: { ...(upgrade(3, at(0)).payload as object), from_version: 1 },
+  } as Event;
+  expect(due(state([stray], busy), standing(), 0)).toBe("permission");
 });
 
 test("C-786: a metadata-only audit changes nothing and waits like an ordinary upgrade", () => {
