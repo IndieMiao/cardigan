@@ -177,10 +177,13 @@ test("lean keeps waited dispatch cards whole and drops other cold dispatch recor
     LEAN_COLD_CARD_OMITTED_EVENT_TYPES.size + 1,
   );
   expect(dropped.filter((e) => e.card_id === c2)).toEqual([]);
-  // The C-639 hot scope keeps every dispatch record.
+  // C-796: the hot scope drops cold dispatch records the same way.
   const dispatch = (events: readonly Event[]) =>
-    events.filter((e) => e.type === "github_check_dispatch").length;
-  expect(dispatch(hotCommandEvents(full))).toBe(dispatch(full.events));
+    events.filter((e) => e.type === "github_check_dispatch");
+  const hot = hotCommandEvents(full);
+  expect(dispatch(hot)).toEqual(dispatch(lean));
+  expect(dispatch(hot).map((e) => e.card_id)).not.toContain(c3);
+  expect(dispatch(hot).map((e) => e.card_id)).toContain(c2);
 });
 
 test("a wait for a GitHub run recorded on a closed card still resumes", () => {

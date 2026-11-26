@@ -459,8 +459,12 @@ export class Store {
       options.commandState ??
       commandStateScope(process.env.CARDIGAN_COMMAND_STATE);
     // C-671: `slim` keeps closed cards' other event types dormant in memory.
+    // C-796: every scope but `full` keeps the GitHub dispatch records the
+    // journal no longer reads dormant (superseded and retired ones).
     if (store.#commandStateScope === "slim")
-      store.#commandEvents = new CommandEvents(SLIM_RESIDENT_EVENT_TYPES);
+      store.#commandEvents = new CommandEvents(SLIM_RESIDENT_EVENT_TYPES, true);
+    else if (store.#commandStateScope !== "full")
+      store.#commandEvents = new CommandEvents(undefined, true);
     try {
       // Opening/configuring the database can contend with another process too.
       db.exec("PRAGMA busy_timeout = 5000");

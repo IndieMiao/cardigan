@@ -99,11 +99,8 @@ export class GithubBranchCleaner {
       )
     )
       return false;
-    const owners = all.filter(
-      (other) =>
-        other.candidate?.repo === candidate.repo &&
-        other.candidate.ref === candidate.ref,
-    );
+    // C-796: every newest intent with this candidate, retired ones included.
+    const owners = journal.candidateOwnersAt(tx, candidate);
     if (owners.length !== 1 || owners[0]?.key !== intent.key) return false;
     const project = intent.project as ProjectId;
     const card = tx.cards.get(project, intent.card as CardId);
