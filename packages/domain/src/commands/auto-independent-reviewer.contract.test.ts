@@ -237,6 +237,37 @@ test("C-790 anti-bypass: removing the security tag keeps the requirement and a l
   expect(again.effect.data.requested_verifiers).toContain(item.id);
 });
 
+test("C-790: an existing PM-made required reviewer is recognised and nothing is added", async () => {
+  const s = base();
+  const io = ports();
+  const created = value(
+    createWorkItem(
+      s,
+      actor(4, "pm"),
+      {
+        card_id: id("card", 1),
+        title: "独立复核",
+        kind: "verify",
+        role_id: "independent_reviewer",
+        required: true,
+        completion_criteria: ["passes"],
+        target_work_item_id: id("work_item", 1),
+      },
+      io,
+    ),
+  );
+  const { state, effect } = await deliver(apply(s, created));
+  expect(only(independent(state)).id).toBe(created.data.id);
+  expect(effect.data.requested_verifiers).toContain(created.data.id);
+  expect(
+    effect.events.some(
+      (e) =>
+        e.type === "work_item_created" ||
+        e.type === "high_risk_review_required",
+    ),
+  ).toBe(false);
+});
+
 test("C-790 anti-bypass: a PM-made reviewer turned optional no longer covers; the next delivery restores a required one", async () => {
   let s = base();
   const io = ports();
