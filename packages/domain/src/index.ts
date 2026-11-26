@@ -118,6 +118,12 @@ export {
   TIMEOUT_AUTO_RERUN,
 } from "./commands/merge-check.js";
 export * from "./commands/merge-check-blockers.js";
+export {
+  PRECHECK_REUSE_SUMMARY,
+  type PrecheckReuseInput,
+  reusablePrecheck,
+  reusePrecheckForCardCheck,
+} from "./commands/merge-check-reuse.js";
 export * from "./commands/merge-check-wait.js";
 export * from "./commands/merge-classification.js";
 export {

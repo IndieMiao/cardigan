@@ -38,6 +38,8 @@ import {
   recordMergeExecutor,
   recordMergePreparation,
   recordMergeResult,
+  reusablePrecheck,
+  reusePrecheckForCardCheck,
   validateBatchStartupObservation,
   validateMergeBatchMembers,
 } from "@cardigan/domain";
@@ -1031,6 +1033,7 @@ export class MergeChecks {
       !previous.recheck_requested
     )
       return undefined;
+    if (await this.reusePrecheck(task)) return undefined;
     const scope = task.batch
       ? { kind: "full" as const }
       : candidate.previous_sha
@@ -1066,6 +1069,69 @@ export class MergeChecks {
     );
     this.seen.add(queued.attempt_id);
     return queued;
+  }
+  /**
+   * C-781: in queue mode the card check of a single-producer card reuses the
+   * author precheck that already passed on the same delivered head. The
+   * precheck ran every configured check (the card tier plus e2e), and a card
+   * result is not bound to a baseline (ADR 0004 §1), so running it again only
+   * repeats the same work. Domain re-derives every condition in the recording
+   * transaction; the batch check still alone authorizes publication.
+   */
+  private async reusePrecheck(task: Task): Promise<boolean> {
+    if (task.batch || !task.settings.queue) return false;
+    if (task.settings.queue.reusePrecheck === false) return false;
+    const project = task.project.project_id;
+    const required = requestChecks(task.settings, undefined, "card")
+      .filter((check) => check.skipReason !== "card_tier")
+      .map((check) => check.name);
+    const reuse = reusablePrecheck(
+      this.state(project),
+      task.plan.card_id,
+      required,
+    );
+    if (!reuse || reuse.plan.completion_id !== task.plan.completion_id)
+      return false;
+    const attempt = randomUUID();
+    const precheck = reuse.precheck.attempt_id;
+    try {
+      const log = await createMergeCheckLog({
+        dataDir: this.options.execution.dataDir,
+        project,
+        attempt,
+        env: task.settings.env,
+      });
+      await log.waiting(
+        `沿用作者预检 ${precheck}（提交 ${reuse.precheck.head_sha}）的通过结果，本次未执行检查。\n预检日志：get_check_log(card_id=${task.plan.card_id}, attempt_id=${precheck})`,
+      );
+    } catch {
+      // The pointer log is a convenience; the reuse fact is the domain record.
+      this.options.onError(new Error("沿用预检的指引日志无法创建"));
+    }
+    try {
+      this.command(project, (s, a, p) => {
+        if (this.fenced(project)) throw new CheckAdmissionClosed();
+        return reusePrecheckForCardCheck(
+          s,
+          a,
+          {
+            card_id: task.plan.card_id,
+            completion_id: task.plan.completion_id,
+            attempt_id: attempt,
+            precheck_attempt_id: precheck,
+            required_checks: required,
+          },
+          p,
+        );
+      });
+    } catch (error) {
+      if (error instanceof CheckAdmissionClosed) throw error;
+      // State moved between the read and the write: run a real check.
+      if (!String((error as Error)?.message).startsWith("illegal_transition"))
+        this.options.onError(new Error("沿用作者预检失败，改为正常检查"));
+      return false;
+    }
+    return true;
   }
   private async scope(
     task: Task,
