@@ -45,7 +45,12 @@ import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
 import { freshResourceNonce, runResourceState } from "./run-resource-state.js";
 import { ToolCallBookkeeping } from "./tool-call-bookkeeping.js";
-import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
+import {
+  createMcpServer,
+  type ToolCatalogSnapshot,
+  type toolCatalogFingerprint,
+  toolCatalogSnapshot,
+} from "./tool-server.js";
 import {
   type CapabilityGuideToolOptions,
   capabilityGuideTool,
@@ -137,6 +142,11 @@ export interface RunningServer {
     allowed: readonly string[],
     assignment: Parameters<typeof toolCatalogFingerprint>[2],
   ): string;
+  /** C-797: the fingerprint with the structure it hashes. */
+  toolCatalogSnapshot(
+    allowed: readonly string[],
+    assignment: Parameters<typeof toolCatalogFingerprint>[2],
+  ): ToolCatalogSnapshot;
   close(): Promise<void>;
 }
 
@@ -209,12 +219,50 @@ export function defaultToolCatalog(
   allowed: readonly string[],
   assignment: Parameters<typeof toolCatalogFingerprint>[2],
 ): string {
+  return defaultToolCatalogSnapshot(allowed, assignment).fingerprint;
+}
+
+const defaultSnapshots = new Map<string, ToolCatalogSnapshot>();
+
+/** C-797: `defaultToolCatalog` with the structure the fingerprint hashes. */
+export function defaultToolCatalogSnapshot(
+  allowed: readonly string[],
+  assignment: Parameters<typeof toolCatalogFingerprint>[2],
+): ToolCatalogSnapshot {
   defaultCatalogTools ??= serverTools({
     deliveryVerifier: () => {
       throw new Error("catalog tools never run");
     },
   });
-  return toolCatalogFingerprint(defaultCatalogTools, allowed, assignment);
+  return cachedSnapshot(
+    defaultSnapshots,
+    defaultCatalogTools,
+    allowed,
+    assignment,
+  );
+}
+
+/** The default tools are fixed for the process, so their snapshots are too. */
+function cachedSnapshot(
+  cache: Map<string, ToolCatalogSnapshot>,
+  tools: readonly ToolDefinition[],
+  allowed: readonly string[],
+  assignment: Parameters<typeof toolCatalogFingerprint>[2],
+): ToolCatalogSnapshot {
+  // Every assignment field `visibleTools` reads.
+  const key = JSON.stringify([
+    [...allowed].sort(),
+    assignment.scope,
+    assignment.role_id,
+    assignment.standing_mode ?? null,
+    assignment.external === true,
+  ]);
+  let snapshot = cache.get(key);
+  if (snapshot === undefined) {
+    snapshot = toolCatalogSnapshot(tools, allowed, assignment);
+    cache.set(key, snapshot);
+  }
+  return snapshot;
 }
 
 /**
@@ -326,7 +374,7 @@ export async function startMcpServer(
     }
   }
 
-  const catalogs = new Map<string, string>();
+  const catalogs = new Map<string, ToolCatalogSnapshot>();
   const bookkeeping = new ToolCallBookkeeping({
     store: options.store,
     acknowledgeRuns: options.acknowledgeRuns !== false,
@@ -718,22 +766,11 @@ export async function startMcpServer(
     host,
     port: address.port,
     url: `http://${bracket(host)}:${address.port}${MCP_PATH}`,
-    toolCatalog: (allowed, assignment) => {
-      // `tools` is fixed for the process, so the fingerprint is too.
-      const key = JSON.stringify([
-        [...allowed].sort(),
-        assignment.scope,
-        assignment.role_id,
-        assignment.standing_mode ?? null,
-        assignment.external === true,
-      ]);
-      let fingerprint = catalogs.get(key);
-      if (fingerprint === undefined) {
-        fingerprint = toolCatalogFingerprint(tools, allowed, assignment);
-        catalogs.set(key, fingerprint);
-      }
-      return fingerprint;
-    },
+    // `tools` is fixed for the process, so the fingerprint is too.
+    toolCatalog: (allowed, assignment) =>
+      cachedSnapshot(catalogs, tools, allowed, assignment).fingerprint,
+    toolCatalogSnapshot: (allowed, assignment) =>
+      cachedSnapshot(catalogs, tools, allowed, assignment),
     close: () =>
       new Promise<void>((resolve, reject) => {
         http.close((error) => {

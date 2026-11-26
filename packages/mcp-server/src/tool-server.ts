@@ -131,20 +131,225 @@ export function toolCatalogFingerprint(
   return catalogHash(listedTools(visibleTools(tools, allowed, assignment)));
 }
 
+/**
+ * C-797: the fingerprint together with the structure it hashes (canonical
+ * JSON), so the host can keep the structure and later tell a compatible
+ * change (only new optional parameters) from an incompatible one.
+ */
+export function toolCatalogSnapshot(
+  tools: readonly ToolDefinition[],
+  allowed: readonly string[],
+  assignment: Parameters<typeof visibleTools>[2],
+): ToolCatalogSnapshot {
+  return catalogSnapshot(listedTools(visibleTools(tools, allowed, assignment)));
+}
+
+export interface ToolCatalogSnapshot {
+  /** The C-786 fingerprint: sha256 of `structure`. */
+  readonly fingerprint: string;
+  /** Canonical JSON of `{ revision, tools: [{ name, inputSchema }] }`. */
+  readonly structure: string;
+}
+
 /** The C-786 fingerprint of tools as `tools/list` serves them. */
 export function catalogHash(
   listed: readonly { readonly name: string; readonly inputSchema: unknown }[],
   revision: number = TOOL_CATALOG_REVISION,
 ): string {
+  return catalogSnapshot(listed, revision).fingerprint;
+}
+
+/** `catalogHash` with the structure it hashes. */
+export function catalogSnapshot(
+  listed: readonly { readonly name: string; readonly inputSchema: unknown }[],
+  revision: number = TOOL_CATALOG_REVISION,
+): ToolCatalogSnapshot {
   const tools = listed
     .map(({ name, inputSchema }) => ({
       name,
       inputSchema: structuralSchema(inputSchema),
     }))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  return createHash("sha256")
-    .update(canonicalJson({ revision, tools }))
-    .digest("hex");
+  const structure = canonicalJson({ revision, tools });
+  return {
+    fingerprint: createHash("sha256").update(structure).digest("hex"),
+    structure,
+  };
+}
+
+/**
+ * C-797: optional parameters that carry a safety or permission meaning (for
+ * example a new guard switch). A live session whose catalog lacks one is
+ * replaced at its next wake instead of continuing without it, the same rule
+ * as C-786's `ROLE_SECURITY_REVISIONS`: add the entry in the same change that
+ * adds the parameter. Keyed by tool name; nested parameters use dotted paths
+ * (`filter.limit`), fields of array items `[]` (`issues[].basis`). Marking a
+ * parameter also covers its nested fields, and marking a nested field also
+ * covers a newly added parent.
+ */
+export const IMMEDIATE_TOOL_PARAMETERS: Readonly<
+  Record<string, readonly string[]>
+> = {};
+
+export type ToolCatalogChange =
+  | { readonly compatible: true }
+  | { readonly compatible: false; readonly reason: string };
+
+/**
+ * C-797: whether a session that listed `previous` may keep running under a
+ * deploy that serves `current` (both `ToolCatalogSnapshot.structure`). The
+ * only compatible difference is a tool gaining optional parameters (also
+ * inside object parameters and array items) that are not marked immediate. Everything
+ * else is incompatible: a tool added or removed (including through
+ * `allowed_tools`), a parameter removed or renamed, optional made required or
+ * the reverse, a changed type, enum, bound, pattern, default or strictness,
+ * another catalog revision, and any structure that cannot be read.
+ *
+ * Compatibility only spares the session a restart; the endpoint still
+ * validates every call against the current tools and the caller's token.
+ */
+export function compareToolCatalogs(
+  previous: string,
+  current: string,
+  immediate: Readonly<
+    Record<string, readonly string[]>
+  > = IMMEDIATE_TOOL_PARAMETERS,
+): ToolCatalogChange {
+  const before = parseStructure(previous);
+  const after = parseStructure(current);
+  if (!before || !after) return incompatible("unreadable");
+  if (before.revision !== after.revision) return incompatible("revision");
+  const names = new Set(after.tools.map((t) => t.name));
+  if (before.tools.length !== after.tools.length)
+    return incompatible("tool_set");
+  for (const tool of before.tools) {
+    if (!names.has(tool.name)) return incompatible("tool_set");
+    const next = after.tools.find((t) => t.name === tool.name);
+    const reason = extendsSchema(
+      tool.inputSchema,
+      next?.inputSchema,
+      "",
+      immediate[tool.name] ?? [],
+    );
+    if (reason) return incompatible(`${tool.name}:${reason}`);
+  }
+  return { compatible: true };
+}
+
+function incompatible(reason: string): ToolCatalogChange {
+  return { compatible: false, reason };
+}
+
+interface CatalogStructure {
+  readonly revision: unknown;
+  readonly tools: readonly { readonly name: string; inputSchema: unknown }[];
+}
+
+function parseStructure(text: string): CatalogStructure | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(value) || !Array.isArray(value.tools)) return undefined;
+  const tools: { name: string; inputSchema: unknown }[] = [];
+  const seen = new Set<string>();
+  for (const tool of value.tools) {
+    if (!isRecord(tool) || typeof tool.name !== "string") return undefined;
+    if (seen.has(tool.name)) return undefined;
+    seen.add(tool.name);
+    tools.push({ name: tool.name, inputSchema: tool.inputSchema });
+  }
+  return { revision: value.revision, tools };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Undefined when `after` accepts every call `before` accepts with the same
+ * meaning and differs only by new optional properties; otherwise the first
+ * difference found. Only object `properties` and a single-schema array
+ * `items` are entered (path `list[].field`); combinators such as `oneOf` are
+ * compared whole, since widening one branch can change which branch matches.
+ */
+function extendsSchema(
+  before: unknown,
+  after: unknown,
+  path: string,
+  immediate: readonly string[],
+): string | undefined {
+  if (canonicalJson(before) === canonicalJson(after)) return undefined;
+  const at = path || "<root>";
+  if (!isRecord(before) || !isRecord(after)) return `changed ${at}`;
+  const objects = isRecord(before.properties) && isRecord(after.properties);
+  const arrays = isRecord(before.items) && isRecord(after.items);
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (objects && (key === "properties" || key === "required")) continue;
+    if (arrays && key === "items") continue;
+    if (canonicalJson(before[key]) !== canonicalJson(after[key]))
+      return `changed ${at}`;
+  }
+  if (arrays) {
+    const reason = extendsSchema(
+      before.items,
+      after.items,
+      `${path}[]`,
+      immediate,
+    );
+    if (reason) return reason;
+  }
+  if (!objects) return undefined;
+  const properties = before.properties as Record<string, unknown>;
+  const nextProperties = after.properties as Record<string, unknown>;
+  const required = requiredNames(before.required);
+  const nextRequired = requiredNames(after.required);
+  if (
+    !required ||
+    !nextRequired ||
+    required.size !== nextRequired.size ||
+    [...required].some((name) => !nextRequired.has(name))
+  )
+    return `required ${at}`;
+  const child = (name: string) => (path ? `${path}.${name}` : name);
+  for (const [name, schema] of Object.entries(properties)) {
+    if (!Object.hasOwn(nextProperties, name)) return `removed ${child(name)}`;
+    const reason = extendsSchema(
+      schema,
+      nextProperties[name],
+      child(name),
+      immediate,
+    );
+    if (reason) return reason;
+  }
+  for (const name of Object.keys(nextProperties)) {
+    if (Object.hasOwn(properties, name)) continue;
+    const added = child(name);
+    if (nextRequired.has(name)) return `added required ${added}`;
+    if (
+      immediate.some((marked) => within(marked, added) || within(added, marked))
+    )
+      return `immediate ${added}`;
+  }
+  return undefined;
+}
+
+/** Whether parameter path `inner` is `outer` or lies inside it. */
+function within(inner: string, outer: string): boolean {
+  return (
+    inner === outer ||
+    inner.startsWith(`${outer}.`) ||
+    inner.startsWith(`${outer}[]`)
+  );
+}
+
+function requiredNames(value: unknown): Set<string> | undefined {
+  if (value === undefined) return new Set();
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string"))
+    return undefined;
+  return new Set(value as string[]);
 }
 
 /** JSON with object keys sorted, so key order never changes the hash. */
