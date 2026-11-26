@@ -72,6 +72,15 @@ export type RetirementEvidence = {
   /** C-746: set when `owner_reason` was re-derived read-only from the worker
    * because the owner (enrolled before C-746) closed without naming it. */
   readonly owner_reason_source?: "worker_probe";
+  /** C-804: under `conditional_close_unavailable`, the macOS idle-owner
+   * precondition that failed (`enrolled_process_missing`, `seed_missing`,
+   * `owner_not_listening`, `owner_key_mismatch`, ...). A bounded token for
+   * diagnosis only; the reason and every decision on it are unchanged. */
+  readonly precondition?: string;
+  /** C-804: the host's record of this launch's idle-owner enrollment:
+   * `enrolled`, the skip reason (`seed_unavailable`, `launch_shape`, ...),
+   * `unrecorded` or `unreadable`. Never a path, key, seed or signature. */
+  readonly enrollment?: string;
 };
 export type RetirementSignalEvidence = {
   readonly pid: number;
