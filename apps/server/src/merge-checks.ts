@@ -124,14 +124,11 @@ import {
   pushCheckCandidateOrWait,
 } from "./git.js";
 import { MergeBatches } from "./merge-batches.js";
-import {
-  MergeStageError,
-  mergeFailureReason,
-  mergeStage,
-} from "./merge-failure.js";
+import { MergeStageError, mergeFailureReason } from "./merge-failure.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
+import { MergeStepDeferred, mergeStep } from "./merge-step.js";
 import {
   MergeLockBusy,
   MergeMutex,
@@ -360,6 +357,7 @@ export class MergeChecks {
         "Confirmed-exit assembly requires a trusted local runner",
       );
     this.batches = new MergeBatches({
+      store: options.store,
       git: options.git,
       state: (id) => this.state(id),
       command: (id, fn) => this.command(id, fn),
@@ -790,14 +788,22 @@ export class MergeChecks {
     if (task.branchError)
       throw new MergeStageError("选择基线分支", task.branchError);
     const git = this.git();
+    // C-799: each Git step is a managed operation a restart waits for.
+    const step = {
+      project_id: task.project.project_id,
+      card_id: task.plan.card_id,
+      subject: `合并 ${task.plan.card_id}`,
+    };
     // Background Git can outlive its admission tick, so give it a separate
     // sample rather than appending a duration to a tick that already logged.
     const sync = () => git.sync(task.project);
-    await mergeStage(
+    await mergeStep(
+      this.options.store,
+      step,
       "同步源仓库",
       () => tickProfiler()?.tick("merge.git_sync", sync) ?? sync(),
     );
-    const baseline = await mergeStage("读取基线", () =>
+    const baseline = await mergeStep(this.options.store, step, "读取基线", () =>
         git.baseline(task.project),
       ),
       id = `${task.project.project_id}/${task.plan.card_id}`;
@@ -806,7 +812,7 @@ export class MergeChecks {
     const value =
       cached?.key === key
         ? cached.value
-        : await mergeStage("准备合并候选", () =>
+        : await mergeStep(this.options.store, step, "准备合并候选", () =>
             git.prepare(task.project, task.plan),
           );
     if (value.status !== "conflicted" && this.valid(task))
@@ -2558,35 +2564,49 @@ export class MergeChecks {
       if (this.fenced(task.project.project_id)) return;
       if (this.abort.signal.aborted || !this.valid(task, true)) return;
       const git = this.git();
-      await mergeStage("发布合并", () =>
-        git.publish(
-          task.project,
-          task.plan.completion_id,
-          candidate,
-          mergePublicationGuard({
-            store: this.options.store,
-            project: task.project.project_id as ProjectId,
-            plan: task.plan,
-            clock: this.options.clock,
-            settings: mergeProjectSettings(
-              this.options.configuration,
-              task.project.project_id,
-            ),
-            stopped: () =>
-              this.abort.signal.aborted || this.fenced(task.project.project_id),
-            result: {
-              kind: "merged",
-              merge_sha: candidate.candidate_sha,
-              previous_sha: candidate.previous_sha,
-              tree_sha: candidate.tree_sha,
-            },
-          }),
-        ),
+      await mergeStep(
+        this.options.store,
+        {
+          project_id: task.project.project_id,
+          card_id: task.plan.card_id,
+          subject: `合并 ${task.plan.card_id}`,
+        },
+        "发布合并",
+        () =>
+          git.publish(
+            task.project,
+            task.plan.completion_id,
+            candidate,
+            mergePublicationGuard({
+              store: this.options.store,
+              project: task.project.project_id as ProjectId,
+              plan: task.plan,
+              clock: this.options.clock,
+              settings: mergeProjectSettings(
+                this.options.configuration,
+                task.project.project_id,
+              ),
+              stopped: () =>
+                this.abort.signal.aborted ||
+                this.fenced(task.project.project_id),
+              result: {
+                kind: "merged",
+                merge_sha: candidate.candidate_sha,
+                previous_sha: candidate.previous_sha,
+                tree_sha: candidate.tree_sha,
+              },
+            }),
+          ),
       );
     });
   }
   private failure(task: Task, error: unknown) {
-    if (error instanceof CheckAdmissionClosed) return;
+    // C-799: a restart fenced the step before it started; retried later.
+    if (
+      error instanceof CheckAdmissionClosed ||
+      error instanceof MergeStepDeferred
+    )
+      return;
     this.report(error);
     if (error instanceof MergeLockBusy) return;
     if (!this.valid(task) || task.batch) return;

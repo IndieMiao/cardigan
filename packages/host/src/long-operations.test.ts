@@ -21,8 +21,10 @@ import {
   keepUntilSettled,
   LONG_OPERATION_FENCE_MAX_MS,
   liveLongOperations,
+  longOperationFenceStands,
   releaseLongOperationFence,
   releaseSettlingHold,
+  tryHoldLongOperation,
   withLongOperation,
 } from "./long-operations.js";
 import { executionOwner } from "./process-identity.js";
@@ -429,6 +431,45 @@ test("C-609: the Node driver keeps other projects' card detail out of the deploy
     ]);
     release();
     expect(await driver.operations()).toEqual([]);
+  } finally {
+    await f.close();
+  }
+});
+
+test("C-799: trying to hold never waits: refused while a fence stands, registered otherwise", async () => {
+  const f = await fixture();
+  try {
+    const step = {
+      kind: "merge_step" as const,
+      project_id: "cardigan",
+      card_id: "C-7",
+      label: "合并 C-7 的「同步源仓库」",
+    };
+    expect(longOperationFenceStands(f.store)).toBe(false);
+    const release = tryHoldLongOperation(f.store, step);
+    expect(release).toBeTypeOf("function");
+    // The fence reads it in the same transaction that closes new starts.
+    expect(fenceLongOperations(f.store)).toMatchObject([step]);
+    expect(longOperationFenceStands(f.store)).toBe(true);
+    expect(tryHoldLongOperation(f.store, step)).toBeUndefined();
+    release?.();
+    release?.();
+    expect(liveLongOperations(f.store)).toEqual([]);
+    // An expired fence no longer refuses (and is retired by the next writer).
+    expect(
+      longOperationFenceStands(
+        f.store,
+        Date.now() + LONG_OPERATION_FENCE_MAX_MS + 1,
+      ),
+    ).toBe(false);
+    releaseLongOperationFence(f.store);
+    expect(longOperationFenceStands(f.store)).toBe(false);
+    const again = tryHoldLongOperation(f.store, step);
+    expect(liveLongOperations(f.store)).toHaveLength(1);
+    again?.();
+    // No identity or table: best effort, never throws, never refuses.
+    f.store.database.exec("DROP TABLE host_long_operation_fence");
+    expect(longOperationFenceStands(f.store)).toBe(false);
   } finally {
     await f.close();
   }

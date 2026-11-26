@@ -10,7 +10,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import {
+  fixture as cardFixture,
+  human,
+  id,
+} from "../../domain/src/commands/test-fixtures.js";
 import { capacityMachine } from "./capacity-owner.js";
 import {
   acquireDeploymentCapacity,
@@ -31,7 +36,12 @@ import {
   SupervisorUpgrader,
   supervisorHelperArguments,
 } from "./deployment-supervisor-upgrade.js";
-import { fenceLongOperations, holdLongOperation } from "./long-operations.js";
+import {
+  fenceLongOperations,
+  holdLongOperation,
+  liveLongOperations,
+  tryHoldLongOperation,
+} from "./long-operations.js";
 import { executionOwner } from "./process-identity.js";
 
 const FROM = "a".repeat(40);
@@ -919,4 +929,174 @@ test("C-770: the helper unit runs the recovery as ExecStopPost= with a stop time
   ).toBe(
     '--property=ExecStopPost="/opt/n%%de$$x/node" "/srv/a\\"b\\\\c/bin.js" "self-deploy" "recover-upgrade"',
   );
+});
+
+/** C-799: a merge step of a card in another project, as the server registers it. */
+function mergeStepCard() {
+  const project = human.project_id;
+  store.createProject({ id: project });
+  store.uow.run((tx) => {
+    for (const c of cardFixture().cards) tx.cards.put(project, c);
+  });
+  const card = id("card", 1) as string;
+  const notes = () =>
+    store.uow
+      .read((tx) => tx.timeline.list(project))
+      .filter((t) => t.card_id === card)
+      .map((t) => t.body);
+  const hold = () =>
+    tryHoldLongOperation(store, {
+      kind: "merge_step",
+      project_id: project,
+      card_id: card,
+      label: `合并 ${card} 的「同步源仓库」`,
+    });
+  return { project, card, notes, hold };
+}
+
+const restartingSummary = () =>
+  events().find((e) => e.status === "restarting")?.summary ?? "";
+
+test("C-799: a running merge step holds the restart, its card hears which step, and the record states what was checked", async () => {
+  const l = await layout();
+  let clock = Date.parse("2026-11-26T16:59:00.000Z");
+  const host = fakeHost(l, {
+    now: () => clock,
+    operationWaitMs: () => 60_000,
+    remoteChecks: () => 1,
+  });
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  const step = mergeStepCard();
+  const release = step.hold();
+  if (!release) throw new Error("not registered");
+  expect(await upgrader.step()).toBe("waiting");
+  clock += 5_000;
+  expect(await upgrader.step()).toBe("waiting");
+  // Prepared, but neither rewritten nor restarted while the step runs.
+  expect(host.calls).toEqual([`checkout ${TO}`, "validate"]);
+  expect(await readFile(l.launch, "utf8")).toBe(l.original);
+  expect(events().map((e) => e.status)).toEqual(["started"]);
+  // The card hears once which of its steps the restart waits for.
+  expect(step.notes()).toEqual([
+    expect.stringContaining(
+      `部署监督器自动升级正在等待本卡的合并 ${step.card} 的「同步源仓库」`,
+    ),
+  ]);
+  expect(step.notes()[0]).toContain("等待有上限");
+  // Nothing about the other project's card lands in the deployment project.
+  expect(store.uow.read((tx) => tx.timeline.list("cardigan"))).toEqual([]);
+  release();
+  clock += 2_000;
+  expect(await upgrader.step()).toBe("restarting");
+  expect(host.calls.at(-1)).toBe(`helper ${l.old}`);
+  const summary = restartingSummary();
+  expect(summary).toContain(
+    "本机没有执行中的单卡或批次合并检查、合并步骤和其它受管长操作（已等待 7 秒）",
+  );
+  // A check already running on GitHub is not reported as idle.
+  expect(summary).toContain(
+    "远端（GitHub）仍在执行的检查 1 项不随服务端停止，重启后由新服务端继续跟踪到出结果",
+  );
+  expect(summary).not.toContain("均空闲");
+  expect(summary).not.toContain(step.card);
+  // The fence stands until the restart: a step that comes now does not start.
+  expect(step.hold()).toBeUndefined();
+  expect(liveLongOperations(store)).toEqual([]);
+  expect(actions()).toEqual([]);
+});
+
+test("C-799: past the bound the restart goes ahead and the step's card is told it was interrupted", async () => {
+  const l = await layout();
+  let clock = Date.parse("2026-11-26T16:59:00.000Z");
+  const host = fakeHost(l, {
+    now: () => clock,
+    operationWaitMs: () => 30_000,
+  });
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  const step = mergeStepCard();
+  const release = step.hold();
+  try {
+    expect(await upgrader.step()).toBe("waiting");
+    clock += 29_000;
+    expect(await upgrader.step()).toBe("waiting");
+    expect(host.calls.some((c) => c.startsWith("helper"))).toBe(false);
+    clock += 1_000;
+    expect(await upgrader.step()).toBe("restarting");
+    expect(restartingSummary()).toContain(
+      "等待受管长操作已达上限（30 秒），照常重启，重启后续跑或重排：合并步骤 1 项",
+    );
+    expect(restartingSummary()).not.toContain(step.card);
+    expect(step.notes()).toEqual([
+      expect.stringContaining("部署监督器自动升级正在等待本卡的"),
+      expect.stringContaining(
+        `部署监督器自动升级等待已达上限，服务端照常重启；本卡的合并 ${step.card} 的「同步源仓库」`,
+      ),
+    ]);
+    // Going ahead is not a failed attempt: no Needs You, no block.
+    expect(actions()).toEqual([]);
+  } finally {
+    release?.();
+  }
+});
+
+test("C-799: with nothing running the restart is not delayed and no card is told anything", async () => {
+  const l = await layout();
+  const host = fakeHost(l, { remoteChecks: () => 0 });
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  const step = mergeStepCard();
+  // Same single step as before: prepare and restart at once.
+  expect(await upgrader.step()).toBe("restarting");
+  expect(restartingSummary()).toBe(
+    "本机没有执行中的单卡或批次合并检查、合并步骤和其它受管长操作，无进行中的部署；远端没有执行中的检查；改写启动配置并通过 systemd 重启监督器",
+  );
+  expect(step.notes()).toEqual([]);
+});
+
+test("C-799: a step registered between the registry read and the fence is seen by the fence and waited for", async () => {
+  const l = await layout();
+  let release: (() => void) | undefined;
+  const step = mergeStepCard();
+  const host = fakeHost(l, { operationWaitMs: () => 60_000 });
+  const upgrader = new SupervisorUpgrader(host, l.config);
+  upgrader.automatic(FROM, TO, ["packages/host"]);
+  // Prepare only (the server still runs the old build).
+  host.deploy(FROM);
+  expect(await upgrader.step()).toBe("waiting");
+  host.deploy(TO);
+  // Transactions of the next step: the registry read, the capacity, then
+  // the fence. The step starts right after the read found nothing.
+  const real = Object.getOwnPropertyDescriptor(Store.prototype, "uow")?.get;
+  if (!real) throw new Error("uow");
+  let calls = 0;
+  const spy = vi.spyOn(store, "uow", "get").mockImplementation(() => {
+    const uow = real.call(store) as Store["uow"];
+    return {
+      ...uow,
+      run: ((work: Parameters<typeof uow.run>[0]) => {
+        if (++calls === 2) release = step.hold();
+        return uow.run(work);
+      }) as typeof uow.run,
+    };
+  });
+  try {
+    expect(await upgrader.step()).toBe("waiting");
+  } finally {
+    spy.mockRestore();
+  }
+  expect(release).toBeDefined();
+  expect(host.calls.some((c) => c.startsWith("helper"))).toBe(false);
+  expect(await readFile(l.launch, "utf8")).toBe(l.original);
+  // The fence and the capacity were given back: the step runs on.
+  expect(
+    store.database.prepare("SELECT 1 FROM host_long_operation_fence").get(),
+  ).toBeUndefined();
+  expect(
+    store.database.prepare("SELECT 1 FROM host_deployment_capacity").get(),
+  ).toBeUndefined();
+  expect(step.notes()).toHaveLength(1);
+  release?.();
+  expect(await upgrader.step()).toBe("restarting");
 });

@@ -61,13 +61,16 @@ const KIND_LABELS: Readonly<Record<string, string>> = {
   mobile_signing: "受管送签",
   artifact_publication: "测试包外发",
   worker_upgrade: "worker 升级",
+  merge_step: "合并步骤",
 };
 
 /**
  * Per-kind counts only: the deployment project's record never names another
  * project or card. Each source card gets its own detailed note.
  */
-const operationSummary = (ops: readonly DeploymentOperation[]) =>
+export const operationSummary = (
+  ops: readonly Pick<DeploymentOperation, "kind">[],
+) =>
   countDeploymentOperations(ops)
     .map(
       ({ kind, count }) => `${KIND_LABELS[kind] ?? "其它长操作"} ${count} 项`,

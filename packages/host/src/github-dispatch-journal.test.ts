@@ -1076,3 +1076,36 @@ test("C-629: batch checks read the cached system stream, never a full re-read, w
     abandoned: "superseded",
   });
 });
+
+test("C-799: remote checks still running count only bound, unfinished, live intents", () => {
+  const f = setup();
+  const save = (intent: GithubDispatchIntent) =>
+    f.store.uow.run((tx) =>
+      tx.events.append(human.project_id, {
+        id: tx.ids.nextEventId(),
+        card_id: f.card.id,
+        seq: tx.ids.nextEventSequence(human.project_id, f.card.id),
+        type: "github_check_dispatch",
+        actor: { kind: "system", project_id: human.project_id },
+        payload: JSON.parse(JSON.stringify(intent)),
+        created_at: f.intent.startedAt,
+      }),
+    );
+  const bound = {
+    ...f.intent,
+    phase: "dispatching" as const,
+    identity: f.identity,
+    externalRun: f.remote,
+  };
+  expect(f.journal.remoteRunning()).toBe(0);
+  // Reserved or dispatching without a bound run still holds check capacity
+  // locally; it is not a remote check yet.
+  save(f.intent);
+  expect(f.journal.remoteRunning()).toBe(0);
+  save(bound);
+  save({ ...bound, attempt: "second" });
+  expect(f.journal.remoteRunning()).toBe(2);
+  save({ ...bound, finished: true });
+  save({ ...bound, attempt: "second", abandoned: "superseded" });
+  expect(f.journal.remoteRunning()).toBe(0);
+});

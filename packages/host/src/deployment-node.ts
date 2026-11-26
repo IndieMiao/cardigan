@@ -71,6 +71,7 @@ import {
   type SupervisorUpgradeStep,
   supervisorHelperArguments,
 } from "./deployment-supervisor-upgrade.js";
+import { GithubDispatchJournal } from "./github-dispatch-journal.js";
 import {
   type HostConfigCheck,
   hostConfigFingerprint,
@@ -1089,6 +1090,10 @@ export class NodeDeploymentDriver
         this.options.config.stop_timeout_ms,
       capacityWaiting: (waiting: boolean) =>
         this.capacityWait.set("upgrade", waiting),
+      // C-799: the same bounded operation wait as a deployment.
+      operationWaitMs: () => this.operationWaitMs,
+      remoteChecks: () =>
+        new GithubDispatchJournal(this.options.store).remoteRunning(),
       now: () => this.now(),
     };
   }

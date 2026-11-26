@@ -277,7 +277,9 @@ export {
   type LongOperation,
   type LongOperationKind,
   liveLongOperations,
+  longOperationFenceStands,
   releaseLongOperationFence,
+  tryHoldLongOperation,
   withLongOperation,
 } from "./long-operations.js";
 export * from "./machine-capabilities.js";

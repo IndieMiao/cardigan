@@ -11,7 +11,12 @@ import {
 } from "@cardigan/domain";
 import { CentralRepositoryService } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
-import { loadMergeGateConfig, parseMergePushConfig } from "@cardigan/host";
+import {
+  fenceLongOperations,
+  loadMergeGateConfig,
+  parseMergePushConfig,
+  releaseLongOperationFence,
+} from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
@@ -258,6 +263,33 @@ test("real checks fail, recheck passes, confirmation merges and only the recorde
     git(c.center, "rev-parse", "main"),
   );
   expect(c.events("merge_pushed")).toHaveLength(1);
+  expect(c.errors).toEqual([]);
+}, 30_000);
+
+test("C-799: under a restart fence the push does not start; the started attempt is pushed once the fence is gone", async () => {
+  const c = await fixture();
+  await c.card("auto");
+  await c.merge().tick();
+  expect(c.f.card().status).toBe("done");
+  await c.confirmFirstPush();
+  const push = vi.spyOn(c.binding, "push");
+  fenceLongOperations(c.f.store);
+  await c.push().tick();
+  await c.push().tick();
+  expect(push).not.toHaveBeenCalled();
+  expect(c.events("merge_pushed")).toHaveLength(0);
+  expect(c.events("merge_push_failed")).toHaveLength(0);
+  expect(git(c.remote, "for-each-ref")).toBe("");
+  const started = c.events("merge_push_started").length;
+  releaseLongOperationFence(c.f.store);
+  await c.push().tick();
+  expect(push).toHaveBeenCalledTimes(1);
+  // The attempt begun under the fence resumed; no second one was begun.
+  expect(c.events("merge_push_started")).toHaveLength(started);
+  expect(c.events("merge_pushed")).toHaveLength(1);
+  expect(git(c.remote, "rev-parse", "main")).toBe(
+    git(c.center, "rev-parse", "main"),
+  );
   expect(c.errors).toEqual([]);
 }, 30_000);
 

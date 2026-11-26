@@ -342,6 +342,19 @@ export class GithubDispatchJournal {
   unfinished(): GithubDispatchIntent[] {
     return this.all().filter((intent) => !intent.finished);
   }
+  /**
+   * C-799: checks bound to a remote run that has not finished. They survive
+   * a server restart: the next server polls the same run, never redispatches.
+   */
+  remoteRunning(): number {
+    return this.store.uow.read(
+      (tx) =>
+        this.allAt(tx).filter(
+          (intent) =>
+            !intent.finished && !intent.abandoned && !!intent.externalRun,
+        ).length,
+    );
+  }
   private unstarted(intent: GithubDispatchIntent): boolean {
     return (
       intent.phase === "reserved" &&

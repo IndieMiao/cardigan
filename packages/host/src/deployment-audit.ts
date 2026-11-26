@@ -346,6 +346,8 @@ export function writeDeferredOperations(
   store: Store,
   attempt: string,
   ops: readonly DeploymentOperation[],
+  /** C-799: the supervisor self-upgrade waits the same way. */
+  cause: "deployment" | "supervisor_upgrade" = "deployment",
 ) {
   writeOperationNotes(
     store,
@@ -353,7 +355,9 @@ export function writeDeferredOperations(
     attempt,
     ops,
     (op) =>
-      `自动部署正在等待本卡的${op.label}（${op.started_at} 开始）结束后再重启服务端；等待有上限，到时照常部署。`,
+      cause === "supervisor_upgrade"
+        ? `部署监督器自动升级正在等待本卡的${op.label}（${op.started_at} 开始）结束后再重启服务端；等待有上限，到时照常重启。`
+        : `自动部署正在等待本卡的${op.label}（${op.started_at} 开始）结束后再重启服务端；等待有上限，到时照常部署。`,
   );
 }
 
@@ -365,6 +369,7 @@ export function writeInterruptedOperations(
   store: Store,
   attempt: string,
   ops: readonly DeploymentOperation[],
+  cause: "deployment" | "supervisor_upgrade" = "deployment",
 ) {
   writeOperationNotes(
     store,
@@ -372,7 +377,7 @@ export function writeInterruptedOperations(
     attempt,
     ops,
     (op) =>
-      `自动部署等待已达上限，服务端照常重启；本卡的${op.label}（${op.started_at} 开始）仍在进行，重启后续跑或重排。`,
+      `${cause === "supervisor_upgrade" ? "部署监督器自动升级" : "自动部署"}等待已达上限，服务端照常重启；本卡的${op.label}（${op.started_at} 开始）仍在进行，重启后续跑或重排。`,
   );
 }
 

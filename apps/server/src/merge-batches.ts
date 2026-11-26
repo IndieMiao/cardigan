@@ -33,8 +33,16 @@ import {
 } from "@cardigan/domain";
 import { type CentralProject, centralBranch } from "@cardigan/git-service";
 import type { ProjectMergeGate } from "@cardigan/host";
+import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { mergeFailureReason, mergeStage } from "./merge-failure.js";
+import {
+  batchSubject,
+  holdMergeStep,
+  MergeStepDeferred,
+  type MergeStepSubject,
+  mergeStep,
+} from "./merge-step.js";
 import { tryPublication } from "./publication-lock.js";
 
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
@@ -51,6 +59,8 @@ type Command = <T>(
 export class MergeBatches {
   constructor(
     private readonly options: {
+      /** C-799: Git steps register as managed operations a restart waits for. */
+      store: Store;
       git: MergeGit;
       state: (project: string) => CommandState;
       command: Command;
@@ -98,18 +108,27 @@ export class MergeBatches {
     // its cards record the failing step, other branches keep their queue.
     const baselines = new Map<string, Promise<string | undefined>>();
     const failures = new Map<string, unknown>();
-    const baselineOf = (branch: string) => {
+    // The first caller of a branch names the card or batch the read is for.
+    const baselineOf = (
+      branch: string,
+      subject: Omit<MergeStepSubject, "project_id">,
+    ) => {
       let read = baselines.get(branch);
       if (!read) {
+        const step = { ...subject, project_id: id };
         read = (async () => {
           const project = await mergeStage("选择基线分支", () => view(branch));
-          await mergeStage("同步源仓库", () => git.sync(project));
-          return mergeStage("读取基线", () => {
+          await mergeStep(this.options.store, step, "同步源仓库", () =>
+            git.sync(project),
+          );
+          return mergeStep(this.options.store, step, "读取基线", () => {
             if (!git.baseline) throw new Error("合并队列缺少可信批次 Git 入口");
             return git.baseline(project);
           });
         })().catch((error: unknown) => {
-          failures.set(branch, error);
+          // C-799: fenced by a restart before the step started; no failure.
+          if (!(error instanceof MergeStepDeferred))
+            failures.set(branch, error);
           return undefined;
         });
         baselines.set(branch, read);
@@ -131,7 +150,10 @@ export class MergeBatches {
           const versions = mergeWindowVersions(snapshot, card.id);
           const files = new Set<string>();
           const branch = card.base_branch ?? registered.base_branch;
-          const base = await baselineOf(branch);
+          const base = await baselineOf(branch, {
+            card_id: card.id,
+            subject: `合并 ${card.id}`,
+          });
           // An unreadable branch keeps its cards' previous protection paths.
           if (base === undefined) continue;
           for (const delivery of snapshot.deliveries.filter((v) =>
@@ -170,7 +192,10 @@ export class MergeBatches {
       }
       let reason: "stale" | "member_left" | undefined;
       const branch = branchOf(batch.members[0]?.card_id ?? "");
-      const base = await baselineOf(branch);
+      const base = await baselineOf(branch, {
+        card_id: batch.members[0]?.card_id,
+        subject: batchSubject(batch),
+      });
       // Retry on a later tick; never abort a batch on an unreadable baseline.
       if (base === undefined) continue;
       const project = view(branch);
@@ -280,7 +305,12 @@ export class MergeBatches {
     let branch: string | undefined;
     for (const item of queue) {
       if (owned.has(item.plan.base_branch)) continue;
-      if ((await baselineOf(item.plan.base_branch)) !== undefined) {
+      if (
+        (await baselineOf(item.plan.base_branch, {
+          card_id: item.plan.card_id,
+          subject: `合并 ${item.plan.card_id}`,
+        })) !== undefined
+      ) {
         branch = item.plan.base_branch;
         break;
       }
@@ -485,27 +515,51 @@ export class MergeBatches {
     if (!git.publishBatch) throw new Error("合并队列缺少可信批次发布入口");
     return tryPublication(project.project_id, async () => {
       if (fenced(project.project_id)) return;
-      const publishing =
-        batch.status === "publishing"
-          ? batch
-          : command(project.project_id, (s, a, p) =>
-              beginMergeBatchPublish(s, a, { batch_id: batch.id }, p),
-            );
-      const result = await git.publishBatch?.(project, publishing);
-      if (result?.status === "published")
-        command(project.project_id, (s, a, p) =>
-          recordMergeBatchResult(s, a, { batch_id: batch.id }, p),
+      // C-799: held before the durable publishing record; a restart that
+      // fenced it first leaves the batch passed for a later pass.
+      let release: () => void;
+      try {
+        release = holdMergeStep(
+          this.options.store,
+          {
+            project_id: project.project_id,
+            card_id: batch.members[0]?.card_id,
+            subject: batchSubject(batch),
+          },
+          "发布合并",
         );
-      else if (result?.status === "stale")
-        command(project.project_id, (s, a, p) =>
-          abortMergeBatchPublish(
-            s,
-            a,
-            { batch_id: batch.id, observed_base_sha: result.observed_base_sha },
-            p,
-          ),
-        );
-      return true;
+      } catch (error) {
+        if (error instanceof MergeStepDeferred) return false;
+        throw error;
+      }
+      try {
+        const publishing =
+          batch.status === "publishing"
+            ? batch
+            : command(project.project_id, (s, a, p) =>
+                beginMergeBatchPublish(s, a, { batch_id: batch.id }, p),
+              );
+        const result = await git.publishBatch?.(project, publishing);
+        if (result?.status === "published")
+          command(project.project_id, (s, a, p) =>
+            recordMergeBatchResult(s, a, { batch_id: batch.id }, p),
+          );
+        else if (result?.status === "stale")
+          command(project.project_id, (s, a, p) =>
+            abortMergeBatchPublish(
+              s,
+              a,
+              {
+                batch_id: batch.id,
+                observed_base_sha: result.observed_base_sha,
+              },
+              p,
+            ),
+          );
+        return true;
+      } finally {
+        release();
+      }
     });
   }
 }

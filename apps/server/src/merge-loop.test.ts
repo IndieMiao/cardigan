@@ -34,7 +34,13 @@ import {
   CentralRepositoryService,
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
-import { loadMergeGateConfig, runInTemporaryCheckout } from "@cardigan/host";
+import {
+  fenceLongOperations,
+  liveLongOperations,
+  loadMergeGateConfig,
+  releaseLongOperationFence,
+  runInTemporaryCheckout,
+} from "@cardigan/host";
 import {
   authenticate,
   getCardTool,
@@ -176,6 +182,43 @@ test("an auto-policy card merges its pinned delivery into the baseline", async (
     .events.filter((event) => event.type === "card_merged");
   expect(merged).toHaveLength(1);
   expect(merged[0]?.actor).toMatchObject({ kind: "system" });
+}, 30_000);
+
+test("C-799: a card merge registers its running Git step for restarts; under a restart fence it neither starts nor records a failure", async () => {
+  const scenario = m4Scenario(f, "auto");
+  const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await pin(product.id, sha);
+  const serverGit = new ServerGit({ store: f.store, dataDir: f.dataDir });
+  const during: unknown[] = [];
+  const sync = serverGit.sync.bind(serverGit);
+  serverGit.sync = async (p) => {
+    during.push(liveLongOperations(f.store));
+    return sync(p);
+  };
+  const loop = new MergeExecutor({ store: f.store, git: serverGit });
+  // A restart decision fenced new managed operations first.
+  fenceLongOperations(f.store);
+  await loop.tick(f.project_id);
+  await loop.tick(f.project_id);
+  expect(during).toEqual([]);
+  expect(await baseline()).toBe(repos.base);
+  expect(f.card().status).toBe("awaiting_merge");
+  expect(f.state().events.filter((e) => e.type === "merge_failed")).toEqual([]);
+  releaseLongOperationFence(f.store);
+  await loop.tick(f.project_id);
+  // While it synced, the step was registered with its card and stage.
+  expect(during).toEqual([
+    [
+      expect.objectContaining({
+        kind: "merge_step",
+        project_id: f.project_id,
+        card_id: scenario.card.id,
+        label: `合并 ${scenario.card.id} 的「同步源仓库」`,
+      }),
+    ],
+  ]);
+  expect(f.card().status).toBe("done");
 }, 30_000);
 
 test("a persisted handoff cannot be bypassed by restarting without gate configuration", async () => {

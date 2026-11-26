@@ -16,7 +16,9 @@ import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 export type LongOperationKind =
   | "mobile_signing"
   | "artifact_publication"
-  | "worker_upgrade";
+  | "worker_upgrade"
+  /** C-799: one Git step of a card merge or merge batch (sync, publish, push). */
+  | "merge_step";
 
 export interface LongOperation {
   readonly id: string;
@@ -60,6 +62,105 @@ function fenceStands(store: Store, now: number): boolean {
   return false;
 }
 
+type OperationInput = {
+  readonly kind: LongOperationKind;
+  readonly project_id: string;
+  readonly card_id?: string | null | undefined;
+  readonly label: string;
+};
+type HoldOptions = {
+  readonly owner?: ExecutionOwner | undefined;
+  readonly now?: () => string;
+};
+
+/**
+ * One registration attempt: the row id, "fenced" while a stop fence stands,
+ * or undefined when registration is unavailable (best effort, never throws).
+ */
+function register(
+  store: Store,
+  operation: OperationInput,
+  options: HoldOptions,
+): string | "fenced" | undefined {
+  try {
+    const owner = options.owner ?? executionOwner(process.pid);
+    if (!owner) return undefined;
+    const row = randomUUID();
+    const machine = capacityMachine();
+    const at = options.now?.() ?? new Date().toISOString();
+    return store.uow.run(() => {
+      if (fenceStands(store, Date.parse(at))) return "fenced" as const;
+      store.database
+        .prepare(
+          `INSERT INTO host_long_operations
+          (id, kind, project_id, card_id, label, started_at, owner_pid, owner_start, owner_machine)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          row,
+          operation.kind,
+          operation.project_id,
+          operation.card_id ?? null,
+          operation.label.slice(0, 200),
+          at,
+          owner.pid,
+          owner.start,
+          machine,
+        );
+      return row;
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function releaser(store: Store, id: string | undefined): () => void {
+  let row = id;
+  return () => {
+    const current = row;
+    row = undefined;
+    if (!current) return;
+    try {
+      store.uow.run(() => {
+        store.database
+          .prepare("DELETE FROM host_long_operations WHERE id = ?")
+          .run(current);
+      });
+    } catch {
+      /* A stale row is reclaimed once its owner is proven dead. */
+    }
+  };
+}
+
+/**
+ * C-799: whether a stop fence currently closes new operations. Read-only and
+ * never throws (an unreadable fence reads as absent, as registration would
+ * then not be possible either); a stale fence is left for the next writer.
+ */
+export function longOperationFenceStands(
+  store: Store,
+  now: number = Date.now(),
+): boolean {
+  try {
+    return store.uow.read(() => {
+      const row = store.database
+        .prepare(
+          "SELECT owner_pid, owner_start, owner_machine, since FROM host_long_operation_fence WHERE singleton = 1",
+        )
+        .get() as FenceRow | undefined;
+      if (!row) return false;
+      const age = now - Date.parse(row.since);
+      return (
+        capacityOwnerState(row) !== "dead" &&
+        age >= 0 &&
+        age < LONG_OPERATION_FENCE_MAX_MS
+      );
+    });
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Register an operation and return its idempotent, never-throwing release.
  * While a deployment's stop fence stands the registration waits, so the
@@ -71,72 +172,34 @@ function fenceStands(store: Store, now: number): boolean {
  */
 export async function holdLongOperation(
   store: Store,
-  operation: {
-    readonly kind: LongOperationKind;
-    readonly project_id: string;
-    readonly card_id?: string | null | undefined;
-    readonly label: string;
-  },
-  options: {
-    readonly owner?: ExecutionOwner | undefined;
-    readonly now?: () => string;
+  operation: OperationInput,
+  options: HoldOptions & {
     readonly pollMs?: number;
     readonly signal?: AbortSignal | undefined;
   } = {},
 ): Promise<() => void> {
-  let id: string | undefined;
   for (;;) {
-    let fenced = false;
-    try {
-      const owner = options.owner ?? executionOwner(process.pid);
-      if (!owner) return () => {};
-      const row = randomUUID();
-      const machine = capacityMachine();
-      const at = options.now?.() ?? new Date().toISOString();
-      fenced = store.uow.run(() => {
-        if (fenceStands(store, Date.parse(at))) return true;
-        store.database
-          .prepare(
-            `INSERT INTO host_long_operations
-            (id, kind, project_id, card_id, label, started_at, owner_pid, owner_start, owner_machine)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            row,
-            operation.kind,
-            operation.project_id,
-            operation.card_id ?? null,
-            operation.label.slice(0, 200),
-            at,
-            owner.pid,
-            owner.start,
-            machine,
-          );
-        return false;
-      });
-      if (!fenced) id = row;
-    } catch {
-      return () => {};
-    }
-    if (!fenced) break;
+    const id = register(store, operation, options);
+    if (id !== "fenced") return releaser(store, id);
     await delay(options.pollMs ?? LONG_OPERATION_FENCE_POLL_MS, undefined, {
       ...(options.signal ? { signal: options.signal } : {}),
     });
   }
-  return () => {
-    const row = id;
-    id = undefined;
-    if (!row) return;
-    try {
-      store.uow.run(() => {
-        store.database
-          .prepare("DELETE FROM host_long_operations WHERE id = ?")
-          .run(row);
-      });
-    } catch {
-      /* A stale row is reclaimed once its owner is proven dead. */
-    }
-  };
+}
+
+/**
+ * C-799: register without waiting. Undefined while a stop fence stands: the
+ * caller does not start the step now and retries on a later pass, so a step
+ * never begins between a restart decision and the restart. Otherwise like
+ * `holdLongOperation` (best effort, never throws).
+ */
+export function tryHoldLongOperation(
+  store: Store,
+  operation: OperationInput,
+  options: HoldOptions = {},
+): (() => void) | undefined {
+  const id = register(store, operation, options);
+  return id === "fenced" ? undefined : releaser(store, id);
 }
 
 /** Hold for the lifetime of `work`, including when it rejects. */
