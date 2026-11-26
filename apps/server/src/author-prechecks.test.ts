@@ -175,6 +175,8 @@ async function setup(shared?: { dataDir: string; project_id: string }) {
     },
     run,
     recovery,
+    // C-773: shutdown handling has its own tests; failures settle at once here.
+    shutdownGraceMs: 0,
   };
   const queue = async () => {
     const p = { work_item_id: s.development.id };
@@ -708,19 +710,18 @@ test.each([false, true])(
     await first.idle();
     expect(x.check().status).toBe("running");
     const resumed = new MergeChecks(options);
-    // Bound remote work survives a busy repository during restart HEAD proof.
+    // C-773: bound remote work re-attaches without a pre-dispatch HEAD read;
+    // a busy repository only delays the proof of its result.
     git.checkHead.mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
-    await (await resumed.schedule([x.f.project_id])).done;
-    expect(x.check()).toMatchObject({
-      status: "running",
-      external_run: { run_id: 123 },
-    });
     const next = await resumed.schedule([x.f.project_id]);
     await vi.waitFor(() =>
       expect(client.run.mock.calls.length).toBeGreaterThan(1),
     );
+    expect(x.check()).toMatchObject({
+      status: "running",
+      external_run: { run_id: 123 },
+    });
     remote.complete = true;
-    git.checkHead.mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
     x.advance();
     await resumed.schedule([x.f.project_id]);
     await next.done;
@@ -1780,4 +1781,594 @@ test("C-783: a newer HEAD cancels the bound GitHub run; the new attempt waits fo
   expect(client.cancel).not.toHaveBeenCalledWith(125, expect.anything());
   expect(x.errors).toEqual([]);
   host.stop();
+});
+
+/**
+ * C-773: bind a GitHub author precheck to run 123 in one controller, stop it
+ * like a server restart, then build the next controller with every
+ * new-dispatch admission gate closed (no precheck slot).
+ */
+async function boundAfterRestart(remoteState: "completed" | "running") {
+  const ctx = await setupGithubPrechecks();
+  const { x, remote, options } = ctx;
+  const first = new MergeChecks(options);
+  const round = await first.schedule([x.f.project_id]);
+  await vi.waitFor(() => expect(x.check().status).toBe("running"));
+  first.stop();
+  await round.done;
+  await first.idle();
+  expect(x.check()).toMatchObject({
+    status: "running",
+    external_run: { run_id: 123 },
+  });
+  remote.started = true;
+  if (remoteState === "completed") remote.complete = true;
+  const resumed = new MergeChecks(options);
+  const reserve = vi.fn(async () => undefined);
+  Reflect.set(resumed, "reservePrecheck", reserve);
+  const progress = () =>
+    x.f.store.uow
+      .read((tx) => tx.events.listAfter(x.f.project_id, x.s.card.id, 0))
+      .filter((event) => event.type === "github_check_progress")
+      .map((event) => (event.payload as { summary: string }).summary);
+  return { ...ctx, resumed, reserve, progress };
+}
+const REATTACHED = "主机已重新接上已绑定的 GitHub 检查，正在核对远端状态";
+
+test.each([false, true])(
+  "C-773: after a restart a bound precheck whose GitHub run already finished settles from that run, past every closed admission gate, without a second dispatch (journal finished=%s)",
+  async (journalFinished) => {
+    const { x, client, git, resumed, reserve, progress } =
+      await boundAfterRestart("completed");
+    if (journalFinished) {
+      // The poller confirmed the remote terminal just before the restart.
+      const journal = new GithubDispatchJournal(x.f.store);
+      const [intent] = journal.unfinished();
+      if (!intent) throw new Error("missing bound intent");
+      journal.finish(intent);
+      expect(journal.unfinished()).toEqual([]);
+    }
+    const { acquireDeploymentCapacity } = await import("@cardigan/host");
+    // A pending deployment also closes new admission (DeploymentInProgress).
+    const deploy = acquireDeploymentCapacity(x.f.store);
+    expect(deploy).toBeTypeOf("function");
+    const reads = client.run.mock.calls.length;
+    try {
+      const round = await resumed.schedule([x.f.project_id]);
+      await vi.waitFor(() =>
+        expect(client.run.mock.calls.length).toBeGreaterThan(reads),
+      );
+      // Progress is only written for a still-unfinished journal intent.
+      if (!journalFinished) expect(progress()).toContain(REATTACHED);
+      x.advance();
+      await resumed.schedule([x.f.project_id]);
+      await round.done;
+      expect(x.check()).toMatchObject({
+        status: "passed",
+        external_run: { run_id: 123, run_attempt: 1 },
+      });
+      expect(x.check().checks).toHaveLength(6);
+      expect(reserve).not.toHaveBeenCalled();
+      expect(client.dispatch).toHaveBeenCalledOnce();
+      expect(git.pushCheckCandidate).toHaveBeenCalledOnce();
+      expect(new GithubDispatchJournal(x.f.store).unfinished()).toEqual([]);
+      expect(x.errors).toEqual([]);
+    } finally {
+      deploy?.();
+      resumed.stop();
+      await resumed.idle();
+    }
+  },
+);
+
+test("C-773: after a restart a bound precheck whose GitHub run is still going resumes progress and later settles from the same run", async () => {
+  const { x, client, remote, resumed, reserve, progress } =
+    await boundAfterRestart("running");
+  const reads = client.run.mock.calls.length;
+  try {
+    const round = await resumed.schedule([x.f.project_id]);
+    await vi.waitFor(() =>
+      expect(client.run.mock.calls.length).toBeGreaterThan(reads),
+    );
+    x.advance();
+    await (await resumed.schedule([x.f.project_id])).done;
+    expect(x.check().status).toBe("running");
+    const seen = progress();
+    expect(seen.indexOf(REATTACHED)).toBeGreaterThanOrEqual(0);
+    expect(seen.at(-1)).toBe("GitHub 检查执行中");
+    // A second pass in the same process neither re-announces nor re-dispatches.
+    x.advance();
+    await (await resumed.schedule([x.f.project_id])).done;
+    expect(progress().filter((s) => s === REATTACHED)).toHaveLength(1);
+    remote.complete = true;
+    x.advance();
+    await resumed.schedule([x.f.project_id]);
+    await round.done;
+    expect(x.check().status).toBe("passed");
+    expect(reserve).not.toHaveBeenCalled();
+    expect(client.dispatch).toHaveBeenCalledOnce();
+    expect(client.cancel).not.toHaveBeenCalled();
+    expect(x.errors).toEqual([]);
+  } finally {
+    resumed.stop();
+    await resumed.idle();
+  }
+});
+
+test("C-773: a queued precheck that never dispatched keeps the existing wait until the stale limit, then ends without any dispatch or run lookup", async () => {
+  const { x, options, client } = await setupGithubPrechecks();
+  const { defaultPrecheckStaleAfterMs } = await import("./author-prechecks.js");
+  const gate = new MergeChecks(options);
+  const reserve = vi.fn(async () => undefined);
+  Reflect.set(gate, "reservePrecheck", reserve);
+  const limit = defaultPrecheckStaleAfterMs(x.settings);
+  try {
+    for (let i = 0; i < 3; i++) {
+      await (await gate.schedule([x.f.project_id])).done;
+      x.advance((limit - 60_000) / 3);
+    }
+    expect(reserve).toHaveBeenCalled();
+    expect(x.check().status).toBe("queued");
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_finished"),
+    ).toEqual([]);
+    x.advance(60_001);
+    await (await gate.schedule([x.f.project_id])).done;
+    expect(x.check()).toMatchObject({
+      status: "interrupted",
+      summary: `预检查超过 ${Math.ceil(limit / 60_000)} 分钟仍未收尾，按核对超时结束；尚未开始执行检查；结果未经主机完整核验，不作为通过依据，请重新 request_check`,
+    });
+    expect(client.dispatch).not.toHaveBeenCalled();
+    expect(client.run).not.toHaveBeenCalled();
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_recovery_handled"),
+    ).toEqual([]);
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test.each(["abort-first", "failure-first"] as const)(
+  "C-773: a restart during the HEAD read leaves the attempt queued instead of an environment failure, and the next controller continues it (%s)",
+  async (order) => {
+    const x = await setup();
+    await x.queue();
+    const stopping = new AbortController();
+    const { CheckHeadFailure } = await import("@cardigan/domain");
+    x.git.checkHead.mockImplementationOnce(async () => {
+      if (order === "abort-first") stopping.abort();
+      // SIGTERM reaches the Git child too: it dies as a repository failure.
+      else setTimeout(() => stopping.abort(), 20);
+      throw new CheckHeadFailure("repository_failed");
+    });
+    const first = new AuthorPrechecks({
+      ...x.options,
+      signal: stopping.signal,
+      shutdownGraceMs: 1_000,
+    });
+    await (await first.schedule([x.f.project_id])).done;
+    expect(x.check().status).toBe("queued");
+    expect(
+      x.f
+        .state()
+        .events.filter((e) =>
+          ["precheck_finished", "precheck_settlement_pending"].includes(e.type),
+        ),
+    ).toEqual([]);
+    expect(x.run).not.toHaveBeenCalled();
+    await (await new AuthorPrechecks(x.options).schedule([x.f.project_id]))
+      .done;
+    // The fixture's executor reports a failing test: it really ran once.
+    expect(x.check().status).toBe("failed");
+    expect(x.run).toHaveBeenCalledOnce();
+  },
+);
+
+test("C-773: the same HEAD-read failure without a shutdown is still recorded as an environment failure", async () => {
+  const x = await setup();
+  await x.queue();
+  const { CheckHeadFailure } = await import("@cardigan/domain");
+  x.git.checkHead.mockRejectedValueOnce(
+    new CheckHeadFailure("repository_failed"),
+  );
+  await (
+    await new AuthorPrechecks({ ...x.options, shutdownGraceMs: 10 }).schedule([
+      x.f.project_id,
+    ])
+  ).done;
+  expect(x.check()).toMatchObject({ status: "environment_failed" });
+  expect(x.check().summary).toContain("读取分支HEAD");
+  expect(x.run).not.toHaveBeenCalled();
+});
+
+test("C-773: HEAD-lock timeouts that keep repeating end the queued attempt once they outlast the limit", async () => {
+  const x = await setup();
+  await x.queue();
+  const { DEFAULT_HEAD_LOCK_TIMEOUT_MS } = await import(
+    "./author-prechecks.js"
+  );
+  x.git.checkHead.mockRejectedValue(new RepositoryLockTimeoutError(1));
+  const host = new AuthorPrechecks(x.options);
+  for (let i = 0; i < 5; i++) {
+    await (await host.schedule([x.f.project_id])).done;
+    expect(x.check().status).toBe("queued");
+    x.advance((DEFAULT_HEAD_LOCK_TIMEOUT_MS - 1_000) / 5);
+  }
+  x.advance(1_000);
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({
+    status: "interrupted",
+    summary:
+      "读取分支HEAD时主机仓库锁持续被占用超过 15 分钟，按超时结束；尚未开始执行检查，请重新 request_check",
+  });
+  expect(x.git.checkHead).toHaveBeenCalledTimes(6);
+  expect(x.run).not.toHaveBeenCalled();
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.git.checkHead).toHaveBeenCalledTimes(6);
+});
+
+test("C-773: a saved result whose HEAD proof keeps hitting a busy lock ends as unverified, never as its own result", async () => {
+  const x = await setup();
+  await x.queue();
+  const { DEFAULT_HEAD_LOCK_TIMEOUT_MS } = await import(
+    "./author-prechecks.js"
+  );
+  x.git.checkHead
+    .mockImplementationOnce(async () => "a".repeat(40))
+    .mockRejectedValue(new RepositoryLockTimeoutError(1));
+  const host = new AuthorPrechecks(x.options);
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.run).toHaveBeenCalledOnce();
+  expect(x.check().status).toBe("running");
+  x.advance(DEFAULT_HEAD_LOCK_TIMEOUT_MS - 1_000);
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.check().status).toBe("running");
+  x.advance(1_000);
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({
+    status: "interrupted",
+    summary:
+      "核对分支HEAD时主机仓库锁持续被占用超过 15 分钟，按超时结束；检查结果未能核验，不作为通过依据，请重新 request_check",
+  });
+  expect(x.run).toHaveBeenCalledOnce();
+  expect(
+    x.f.state().events.filter((e) => e.type === "precheck_finished"),
+  ).toHaveLength(1);
+});
+
+test.each(["completed", "running", "unreadable"] as const)(
+  "C-773: a bound precheck still unsettled past the stale limit ends as a timeout naming the GitHub state it verified (%s)",
+  async (state) => {
+    const { x, client, resumed } = await boundAfterRestart(
+      state === "completed" ? "completed" : "running",
+    );
+    const { acquireMergeCheckCapacity } = await import("@cardigan/host");
+    const { defaultPrecheckStaleAfterMs } = await import(
+      "./author-prechecks.js"
+    );
+    // A live capacity owner (another controller) keeps every pass from executing.
+    const lease = acquireMergeCheckCapacity(
+      x.f.store,
+      x.f.project_id,
+      x.check().attempt_id,
+    );
+    if (state === "unreadable")
+      client.run.mockRejectedValue(new Error("network"));
+    const limit = defaultPrecheckStaleAfterMs(x.settings);
+    expect(limit).toBe(3 * 60 * 60_000 + 2 * x.settings.totalTimeoutMs);
+    const reads = client.run.mock.calls.length;
+    try {
+      x.advance(limit - 60_000);
+      await (await resumed.schedule([x.f.project_id])).done;
+      expect(x.check().status).toBe("running");
+      expect(client.run.mock.calls.length).toBe(reads);
+      x.advance(60_000);
+      await (await resumed.schedule([x.f.project_id])).done;
+      expect(x.check().status).toBe("interrupted");
+      const summary = x.check().summary ?? "";
+      expect(summary).toContain(
+        `预检查超过 ${Math.ceil(limit / 60_000)} 分钟仍未收尾，按核对超时结束`,
+      );
+      expect(summary).toContain("不作为通过依据，请重新 request_check");
+      expect(summary).toContain(
+        state === "completed"
+          ? "已向 GitHub 核实运行 123 已结束（结论 success）"
+          : state === "running"
+            ? "已向 GitHub 核实运行 123 仍为 in_progress 状态"
+            : "未核实：读取 GitHub 运行状态失败",
+      );
+      // The lookup was read-only: one run read, never a second dispatch.
+      expect(client.run.mock.calls.length).toBe(reads + 1);
+      expect(client.dispatch).toHaveBeenCalledOnce();
+      // The ended attempt releases the author's slot for a new request_check.
+      expect(
+        new GithubDispatchJournal(x.f.store)
+          .all()
+          .find((i) => i.attempt === x.check().attempt_id)?.abandoned,
+      ).toBe("attempt_finished");
+      if (state === "running") {
+        await resumed.schedule([x.f.project_id]);
+        await vi.waitFor(() =>
+          expect(client.cancel).toHaveBeenCalledWith(123, expect.anything()),
+        );
+      }
+      await (await resumed.schedule([x.f.project_id])).done;
+      expect(
+        x.f.state().events.filter((e) => e.type === "precheck_finished"),
+      ).toHaveLength(1);
+      expect(client.dispatch).toHaveBeenCalledOnce();
+    } finally {
+      lease();
+      resumed.stop();
+      await resumed.idle();
+    }
+  },
+);
+
+async function hostOpsCaller(x: Awaited<ReturnType<typeof setup>>) {
+  const { createHostOpsAssignment, HOST_OPS_ROLE_TOOLS } = await import(
+    "@cardigan/domain"
+  );
+  const { HostOpsService } = await import("@cardigan/host");
+  const { f } = x;
+  f.store.uow.run((tx) =>
+    tx.roles.put(f.project_id, {
+      role_id: "host_ops",
+      role_version: 1,
+      allowed_tools: HOST_OPS_ROLE_TOOLS,
+      capabilities: [],
+    }),
+  );
+  const ops = f.apply((s, a, p) =>
+    createHostOpsAssignment(s, a, {}, p),
+  ).assignment;
+  const issued = f.store.issueToken({
+    project_id: f.project_id,
+    assignment_id: ops.id,
+    role: { role_version: 1, allowed_tools: HOST_OPS_ROLE_TOOLS },
+  });
+  const host = new HostOpsService({
+    store: f.store,
+    runtime: {} as never,
+    snapshot: async () => {
+      throw new Error("Precheck recovery must not launch terminals");
+    },
+    settings: () => ({ merge_gate_enabled: true }),
+    clock: f.clock,
+  });
+  const tool = mcp
+    .hostOpsTools({ hostOps: host.tools })
+    .find((t) => t.name === "host_ops_recheck_precheck");
+  if (!tool) throw new Error("missing host_ops_recheck_precheck");
+  const call = (p: {
+    action: "reinspect" | "abandon";
+    idempotency_key: string;
+  }) =>
+    tool.handler(
+      {
+        card_id: x.s.card.id,
+        attempt_id: x.check().attempt_id,
+        reason: "GitHub finished but the precheck still shows running",
+        ...p,
+      },
+      {
+        store: f.store,
+        identity: mcp.unwrap(authenticate(f.store, issued.token)),
+      },
+    );
+  return { ops, call };
+}
+
+test("C-773: host_ops reinspect clears a local wait and re-attaches the bound run at once; repeats are idempotent", async () => {
+  const { x, client, remote, resumed, progress } =
+    await boundAfterRestart("running");
+  const { call, ops } = await hostOpsCaller(x);
+  const author = Reflect.get(resumed, "prechecks") as AuthorPrechecks;
+  const retry = Reflect.get(author, "retry") as Map<string, number>;
+  // A long local backoff would otherwise keep this attempt silent.
+  retry.set(x.check().attempt_id, Date.parse(x.f.clock.now()) + 86_400_000);
+  const reads = client.run.mock.calls.length;
+  try {
+    await (await resumed.schedule([x.f.project_id])).done;
+    expect(client.run.mock.calls.length).toBe(reads);
+    const first = await call({ action: "reinspect", idempotency_key: "r-1" });
+    expect(first).toMatchObject({ status: "requested", action: "reinspect" });
+    // Same key replays the result; a new key while pending records nothing.
+    expect(await call({ action: "reinspect", idempotency_key: "r-1" })).toEqual(
+      first,
+    );
+    expect(
+      await call({ action: "reinspect", idempotency_key: "r-2" }),
+    ).toMatchObject({ status: "already_requested" });
+    await expect(
+      call({ action: "abandon", idempotency_key: "a-1" }),
+    ).rejects.toThrow();
+    const requests = () =>
+      x.f
+        .state()
+        .events.filter((e) => e.type === "precheck_recovery_requested");
+    expect(requests()).toHaveLength(1);
+    expect(requests()[0]?.actor).toMatchObject({ assignment_id: ops.id });
+    const round = await resumed.schedule([x.f.project_id]);
+    await vi.waitFor(() =>
+      expect(client.run.mock.calls.length).toBeGreaterThan(reads),
+    );
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_recovery_handled"),
+    ).toMatchObject([
+      {
+        actor: { kind: "system" },
+        payload: { request_id: requests()[0]?.id, outcome: "reattach" },
+      },
+    ]);
+    expect(progress()).toContain(REATTACHED);
+    remote.complete = true;
+    x.advance();
+    await resumed.schedule([x.f.project_id]);
+    await round.done;
+    expect(x.check().status).toBe("passed");
+    expect(client.dispatch).toHaveBeenCalledOnce();
+    await expect(
+      call({ action: "reinspect", idempotency_key: "r-3" }),
+    ).rejects.toThrow();
+  } finally {
+    resumed.stop();
+    await resumed.idle();
+  }
+});
+
+test("C-773: host_ops abandon ends a stuck precheck once, stating the GitHub state it verified, and never dispatches again", async () => {
+  const { x, client, resumed } = await boundAfterRestart("running");
+  const { call } = await hostOpsCaller(x);
+  const { acquireMergeCheckCapacity } = await import("@cardigan/host");
+  const lease = acquireMergeCheckCapacity(
+    x.f.store,
+    x.f.project_id,
+    x.check().attempt_id,
+  );
+  try {
+    await (await resumed.schedule([x.f.project_id])).done;
+    expect(x.check().status).toBe("running");
+    expect(
+      await call({ action: "abandon", idempotency_key: "a-1" }),
+    ).toMatchObject({ status: "requested", action: "abandon" });
+    await (await resumed.schedule([x.f.project_id])).done;
+    expect(x.check()).toMatchObject({
+      status: "interrupted",
+      summary:
+        "主机运维已放弃此次预检查；已向 GitHub 核实运行 123 仍为 in_progress 状态；结果未经主机完整核验，不作为通过依据，请重新 request_check",
+    });
+    const handled = x.f
+      .state()
+      .events.filter((e) => e.type === "precheck_recovery_handled");
+    expect(handled).toMatchObject([
+      { actor: { kind: "system" }, payload: { outcome: "abandoned" } },
+    ]);
+    // The terminal record and its handling are one transaction.
+    const finished = x.f
+      .state()
+      .events.filter((e) => e.type === "precheck_finished");
+    expect(finished).toHaveLength(1);
+    expect(handled[0]?.seq).toBe((finished[0]?.seq ?? 0) + 1);
+    await expect(
+      call({ action: "abandon", idempotency_key: "a-2" }),
+    ).rejects.toThrow();
+    await resumed.schedule([x.f.project_id]);
+    await vi.waitFor(() =>
+      expect(client.cancel).toHaveBeenCalledWith(123, expect.anything()),
+    );
+    expect(client.dispatch).toHaveBeenCalledOnce();
+  } finally {
+    lease();
+    resumed.stop();
+    await resumed.idle();
+  }
+});
+
+test.each([
+  ["the lock frees up", "failed"],
+  ["the lock stays busy", "interrupted"],
+] as const)(
+  "C-773: a saved result still awaiting its HEAD proof past the stale limit settles instead of staying running (%s)",
+  async (_case, expected) => {
+    const x = await setup();
+    await x.queue();
+    x.git.checkHead
+      .mockImplementationOnce(async () => "a".repeat(40))
+      .mockRejectedValue(new RepositoryLockTimeoutError(1));
+    const host = new AuthorPrechecks({
+      ...x.options,
+      staleAfterMs: () => 60_000,
+    });
+    await (await host.schedule([x.f.project_id])).done;
+    expect(x.run).toHaveBeenCalledOnce();
+    expect(x.check().status).toBe("running");
+    x.advance(120_000);
+    if (expected === "failed")
+      x.git.checkHead
+        .mockReset()
+        .mockImplementation(async () => "a".repeat(40));
+    await (await host.schedule([x.f.project_id])).done;
+    await host.idle();
+    if (expected === "failed")
+      // The stale pass gives the saved result one more proof and records
+      // that verified result (this fixture's check failed).
+      expect(x.check()).toMatchObject({
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      });
+    else
+      expect(x.check()).toMatchObject({
+        status: "interrupted",
+        summary:
+          "预检查超过 1 分钟仍未收尾，检查结果已保存但未能核验分支HEAD，按核对超时结束；不作为通过依据，请重新 request_check",
+      });
+    expect(x.run).toHaveBeenCalledOnce();
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_finished"),
+    ).toHaveLength(1);
+    expect(
+      x.f.store.database
+        .prepare("SELECT count(*) n FROM precheck_head_proofs")
+        .get(),
+    ).toEqual({ n: 0 });
+    // Nothing is left to settle on later passes.
+    x.advance(120_000);
+    await (await host.schedule([x.f.project_id])).done;
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_finished"),
+    ).toHaveLength(1);
+  },
+);
+
+test("C-773: host_ops abandon of a saved GitHub result still awaiting its HEAD proof ends it as unverified, with its handling in the same transaction", async () => {
+  const { x, git, client, resumed } = await boundAfterRestart("completed");
+  const { call } = await hostOpsCaller(x);
+  git.checkHead.mockRejectedValue(new RepositoryLockTimeoutError(1));
+  const proofs = () =>
+    x.f.store.database
+      .prepare("SELECT count(*) n FROM precheck_head_proofs")
+      .get();
+  try {
+    const reads = client.run.mock.calls.length;
+    const round = await resumed.schedule([x.f.project_id]);
+    await vi.waitFor(() =>
+      expect(client.run.mock.calls.length).toBeGreaterThan(reads),
+    );
+    x.advance();
+    await resumed.schedule([x.f.project_id]);
+    await round.done;
+    await resumed.idle();
+    expect(proofs()).toEqual({ n: 1 });
+    expect(x.check().status).toBe("running");
+    expect(
+      await call({ action: "abandon", idempotency_key: "a-1" }),
+    ).toMatchObject({ status: "requested", action: "abandon" });
+    // Even once the lock frees up, abandon records no pass.
+    git.checkHead.mockReset().mockImplementation(async () => "a".repeat(40));
+    await (await resumed.schedule([x.f.project_id])).done;
+    await resumed.idle();
+    expect(x.check()).toMatchObject({
+      status: "interrupted",
+      summary:
+        "主机运维已放弃此次预检查；检查结果已保存但未能核验分支HEAD，不作为通过依据，请重新 request_check",
+    });
+    expect(proofs()).toEqual({ n: 0 });
+    const handled = x.f
+      .state()
+      .events.filter((e) => e.type === "precheck_recovery_handled");
+    expect(handled).toMatchObject([
+      { actor: { kind: "system" }, payload: { outcome: "abandoned" } },
+    ]);
+    const finished = x.f
+      .state()
+      .events.filter((e) => e.type === "precheck_finished");
+    expect(finished).toHaveLength(1);
+    expect(handled[0]?.seq).toBe((finished[0]?.seq ?? 0) + 1);
+    expect(client.dispatch).toHaveBeenCalledOnce();
+  } finally {
+    resumed.stop();
+    await resumed.idle();
+  }
 });

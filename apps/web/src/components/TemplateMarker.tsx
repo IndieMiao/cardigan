@@ -71,8 +71,12 @@ export function templateIdentity(
   info?: CardTemplateInfo | null,
 ) {
   const version = card.template_version;
+  // C-771: like the server (cardTemplate), a card that recorded no version is
+  // bound to v1; the label still says the version was not recorded.
   const matched =
-    info?.id === card.template && info?.version === version ? info : undefined;
+    info?.id === card.template && info?.version === (version ?? 1)
+      ? info
+      : undefined;
   const builtin = matched?.builtin === true;
   const kind: Glyph =
     builtin && card.template && Object.hasOwn(TEMPLATE_GLYPHS, card.template)

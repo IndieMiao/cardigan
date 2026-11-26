@@ -279,9 +279,35 @@ afterAll(async () => {
 
 const DOC_TABLES =
   "cards|work_items|assignments|runs|deliveries|reviews|decisions|human_actions|attachments|timeline|events";
-const PROJECT_WIDE = new RegExp(
-  `^(?:SCAN (?:${DOC_TABLES})\\b|SEARCH (?:${DOC_TABLES}) USING (?:COVERING )?(?:INDEX \\S+|PRIMARY KEY) \\(project_id=\\?\\)$)`,
-);
+const SQL_WORDS = new Set([
+  "where",
+  "on",
+  "join",
+  "cross",
+  "inner",
+  "left",
+  "order",
+  "group",
+  "limit",
+  "union",
+  "set",
+  "values",
+]);
+/**
+ * C-774: EXPLAIN shows a table by its alias (`SEARCH t USING INDEX ...`), so
+ * each statement's aliases of the document tables count as the tables too.
+ */
+const projectWide = (sql: string) => {
+  const names = new Set(DOC_TABLES.split("|"));
+  for (const [, , alias] of sql.matchAll(
+    new RegExp(`\\b(${DOC_TABLES})\\s+(?:AS\\s+)?([A-Za-z_]\\w*)\\b`, "g"),
+  ))
+    if (alias && !SQL_WORDS.has(alias.toLowerCase())) names.add(alias);
+  const any = [...names].join("|");
+  return new RegExp(
+    `^(?:SCAN (?:${any})\\b|SEARCH (?:${any}) USING (?:COVERING )?(?:INDEX \\S+|PRIMARY KEY) \\(project_id=\\?\\)$)`,
+  );
+};
 const CACHE_REFRESH = /AS entity_key, typeof\(doc\) FROM /;
 
 test("C-688: detail reads seek by card and never walk a whole project table", async () => {
@@ -303,6 +329,27 @@ test("C-688: detail reads seek by card and never walk a whole project table", as
     ...cards.filter((c) => c.story).map((c) => c.id),
   ];
   expect(sample.length).toBeGreaterThan(4);
+  // C-774: the generator writes no suggestion baselines; without one the
+  // C-303 suggestion progress SQL never runs and this guard cannot see it.
+  store.uow.run((tx) => {
+    const original = tx.decisions.list(project)[0];
+    if (!original) throw new Error("missing fixture decision");
+    tx.decisions.put(project, {
+      ...original,
+      id: "Q-c774-baseline",
+      card_id: sample[0],
+      affected_cards: sample.slice(1),
+      status: "resolved",
+      suggestion: {
+        option: "ok",
+        rationale: "fixture",
+        by: { kind: "system", project_id: project },
+        at: FIXTURE_NOW,
+        basis: "fixture",
+        evidence_baseline: Object.fromEntries(sample.map((id) => [id, 0])),
+      },
+    } as never);
+  });
   const queries = [
     "?limit=20&section=overview",
     "?limit=20",
@@ -353,6 +400,17 @@ test("C-688: detail reads seek by card and never walk a whole project table", as
     db.prepare = prepare;
   }
   expect(seen.length).toBeGreaterThan(sample.length * queries.length);
+  // Both suggestion progress statements ran (and are checked below).
+  expect(
+    seen.some(([sql]) =>
+      /json_each\(\?\) b\s+(?:CROSS )?JOIN events/.test(sql),
+    ),
+  ).toBe(true);
+  expect(
+    seen.some(([sql]) =>
+      /json_each\(\?\) e\s+(?:CROSS )?JOIN timeline/.test(sql),
+    ),
+  ).toBe(true);
   const walks = seen.flatMap(([sql, args]) =>
     CACHE_REFRESH.test(sql)
       ? []
@@ -360,7 +418,7 @@ test("C-688: detail reads seek by card and never walk a whole project table", as
           .prepare(`EXPLAIN QUERY PLAN ${sql}`)
           .all(...(args as never[]))
           .map((row) => String(row.detail))
-          .filter((detail) => PROJECT_WIDE.test(detail))
+          .filter((detail) => projectWide(sql).test(detail))
           .map((detail) => `${detail} <- ${sql.replace(/\s+/g, " ")}`),
   );
   expect(walks).toEqual([]);

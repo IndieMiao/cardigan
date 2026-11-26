@@ -1,0 +1,166 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  /* C-703: 查看改动. Title row like the drawer's (title size, control close). */
+  .heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--ui-space-3);
+    min-width: 0;
+  }
+  .title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    min-width: 0;
+    margin: 0;
+    font-size: var(--ui-text-title);
+    line-height: var(--ui-leading-title);
+    font-weight: 600;
+  }
+  .title > * {
+    margin: 0;
+    font: inherit;
+  }
+  .summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-3);
+    min-width: 0;
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    overflow-wrap: anywhere;
+  }
+  .summary code {
+    font-family: var(--font-code);
+    font-size: var(--ui-text-xs);
+  }
+  .group {
+    display: grid;
+    gap: var(--ui-space-2);
+    min-width: 0;
+    margin-top: var(--ui-space-6);
+  }
+  .groupTitle {
+    margin: 0;
+    font-size: var(--ui-text-base);
+    line-height: var(--ui-leading);
+    font-weight: 600;
+  }
+  .muted {
+    color: var(--text-muted);
+    font-weight: normal;
+  }
+  .empty {
+    margin: var(--ui-space-6) 0 0;
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .files {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+  }
+  .file {
+    min-width: 0;
+  }
+  .file + .file {
+    border-top: var(--ui-stroke) solid var(--border);
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    width: 100%;
+    min-width: 0;
+    min-height: var(--ui-control-regular);
+    padding: 0 var(--ui-space-3);
+    border: 0;
+    border-radius: var(--ui-panel-radius);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    text-align: start;
+  }
+  button.row {
+    padding-inline-start: var(--ui-space-2);
+    cursor: pointer;
+  }
+  button.row:hover {
+    background: var(--surface-muted);
+  }
+  button.row:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: calc(-1 * var(--ui-focus-width));
+  }
+  .row :global(.lucide) {
+    flex: none;
+    width: var(--ui-icon);
+    height: var(--ui-icon);
+    color: var(--text-muted);
+  }
+  .row[aria-expanded="true"] :global(.lucide) {
+    transform: rotate(90deg);
+  }
+  .path {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-code);
+    font-size: var(--ui-text-xs);
+  }
+  .stats {
+    flex: none;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .body {
+    min-width: 0;
+    padding: 0 var(--ui-space-3) var(--ui-space-3);
+  }
+  .body[hidden] {
+    display: none;
+  }
+  /* Long lines scroll inside the patch box, never the sheet. */
+  .patch {
+    min-width: 0;
+    overflow-x: auto;
+    padding: var(--ui-space-2);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-radius);
+    background: var(--surface-muted);
+    font-family: var(--font-code);
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+  }
+  .patch pre {
+    margin: 0;
+    font: inherit;
+    white-space: pre;
+  }
+  .patch:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: var(--ui-focus-width);
+  }
+  .line[data-op="add"] {
+    color: var(--status-done);
+  }
+  .line[data-op="remove"] {
+    color: var(--danger);
+  }
+  .line[data-op="hunk"] {
+    color: var(--text-muted);
+  }
+}

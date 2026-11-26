@@ -1,8 +1,11 @@
 import type { Actor, Assignment } from "../entities.js";
 import { flowAtLeast } from "../flow.js";
-import type { WorkItemId } from "../ids.js";
+import type { CardId, WorkItemId } from "../ids.js";
 import {
   type Precheck,
+  type PrecheckRecoveryAction,
+  pendingPrecheckRecovery,
+  precheckRecoveryActions,
   prechecks,
   precheckView,
   validPrecheckSummary,
@@ -367,5 +370,105 @@ export function recordPrecheck(
       },
     );
     return precheckView(p);
+  });
+}
+
+export interface RecheckPrecheckParams {
+  readonly card_id: CardId;
+  readonly attempt_id: string;
+  readonly action: PrecheckRecoveryAction;
+  readonly reason: string;
+}
+const RECOVERY_TEXT: Record<PrecheckRecoveryAction, string> = {
+  reinspect: "重新核对",
+  abandon: "放弃",
+};
+/**
+ * C-773: host_ops asks the host to reinspect (re-read the bound GitHub run
+ * through the trusted poller, never dispatching again) or abandon a queued or
+ * running GitHub author precheck. The host settles the request; this command
+ * only records it. A repeated request while one is pending is a no-op.
+ */
+export function hostOpsRecheckPrecheck(
+  state: CommandState,
+  actor: Actor,
+  p: RecheckPrecheckParams,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "host_ops_recheck_precheck", ports, (d) => {
+    ensure(
+      actor.kind === "assignment" && actor.role_id === "host_ops",
+      "unauthorized",
+      "只有主机运维可以重新核对或放弃作者预检查",
+    );
+    ensure(
+      precheckRecoveryActions.includes(p.action),
+      "validation_failed",
+      "操作只能是 reinspect 或 abandon",
+    );
+    const reason = typeof p.reason === "string" ? p.reason.trim() : "";
+    ensure(
+      reason.length > 0 && reason.length <= 500,
+      "validation_failed",
+      "请写明原因（不超过 500 字）",
+    );
+    const card = d.card(p.card_id);
+    const check = prechecks(state.events, card.id).find(
+      (c) => c.attempt_id === p.attempt_id,
+    );
+    ensure(check, "not_found", "本卡没有这次预检查");
+    ensure(
+      ["queued", "running"].includes(check.status),
+      "illegal_transition",
+      "预检查已结束，无需重新核对或放弃",
+    );
+    ensure(
+      check.executor?.type === "github",
+      "illegal_transition",
+      "只有 GitHub 执行器上的预检查可以重新核对或放弃",
+    );
+    const pending = pendingPrecheckRecovery(
+      state.events,
+      card.id,
+      p.attempt_id,
+    );
+    if (pending) {
+      ensure(
+        pending.action === p.action,
+        "illegal_transition",
+        `已有待处理的${RECOVERY_TEXT[pending.action]}请求，请等主机处理后再操作`,
+      );
+      return {
+        card_id: card.id,
+        attempt_id: p.attempt_id,
+        action: p.action,
+        request_id: pending.request_id,
+        status: "already_requested" as const,
+      };
+    }
+    const request = d.emit(
+      "precheck_recovery_requested",
+      card.id,
+      { attempt_id: p.attempt_id, action: p.action, reason },
+      {
+        type: "system",
+        work_item_id: check.work_item_id,
+        body: `主机运维请求${RECOVERY_TEXT[p.action]}作者预检查 ${p.attempt_id}：${reason}`,
+      },
+    );
+    d.emit("host_ops_action_taken", card.id, {
+      tool: "host_ops_recheck_precheck",
+      target_id: card.id,
+      attempt_id: p.attempt_id,
+      action: p.action,
+      reason,
+    });
+    return {
+      card_id: card.id,
+      attempt_id: p.attempt_id,
+      action: p.action,
+      request_id: request.id,
+      status: "requested" as const,
+    };
   });
 }
