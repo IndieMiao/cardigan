@@ -14,7 +14,7 @@ import {
   rename,
 } from "node:fs/promises";
 import { connect } from "node:net";
-import { delimiter, join } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -60,6 +60,12 @@ import {
 } from "./deployment-server-log.js";
 import { supervisorChanges } from "./deployment-supervisor-scope.js";
 import {
+  nodeSystemdCommand,
+  type SupervisorUpgradeConfig,
+  SupervisorUpgrader,
+  type SupervisorUpgradeStep,
+} from "./deployment-supervisor-upgrade.js";
+import {
   fenceLongOperations,
   liveLongOperations,
   releaseLongOperationFence,
@@ -84,6 +90,12 @@ export const ROLE_PACK_SNAPSHOT_SCRIPT = `import { pathToFileURL } from 'node:ur
     return [id, createHash('sha256').update(JSON.stringify(p)).digest('hex')];
   }));
   process.stdout.write(JSON.stringify(values));`;
+/** C-767: the new checkout must read the host configuration it will run with. */
+export const SUPERVISOR_CONFIG_CHECK_SCRIPT = `import { pathToFileURL } from 'node:url';
+  const m = await import(pathToFileURL(process.argv[1]).href);
+  await m.loadDeploymentConfig(process.argv[2]);
+  if (typeof m.loadSupervisorUpgradeConfig !== 'function') process.exit(3);
+  await m.loadSupervisorUpgradeConfig(process.argv[2]);`;
 class DeploymentCommandUnavailable extends Error {}
 interface State {
   current: DeploymentBuild;
@@ -121,17 +133,20 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private readonly ports: readonly number[];
   private readonly buildEnv: NodeJS.ProcessEnv;
   private supervisorSha: string | null | undefined;
-  private checkedSupervisorMain?: string;
+  private checkedSupervisorMain: string | undefined;
   private failedSupervisorMain?: string;
   private supervisorRetry?: { sha: string; at: number };
   private lastOperationWait: string | undefined;
   private notedOperations = new Set<string>();
+  private upgrader: SupervisorUpgrader | undefined;
   constructor(
     private readonly options: {
       store: Store;
       dataDir: string;
       config: DeploymentConfig;
       env: NodeJS.ProcessEnv;
+      /** C-767: absent (the default) keeps the human upgrade reminder only. */
+      upgrade?: { config: SupervisorUpgradeConfig; configDir: string };
     },
   ) {
     this.enabled = options.config.enabled;
@@ -549,16 +564,10 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     if (result.code !== 0 || !/^[a-f0-9]{40}$/u.test(sha))
       throw new Error("Central main unavailable");
     if (this.supervisorSha === undefined) {
+      const root = fileURLToPath(new URL("../../../", import.meta.url));
       const version = await this.command(
         "git",
-        [
-          ...gitSafetyArguments,
-          "-C",
-          fileURLToPath(new URL("../../../", import.meta.url)),
-          "rev-parse",
-          "--verify",
-          "HEAD",
-        ],
+        [...gitSafetyArguments, "-C", root, "rev-parse", "--verify", "HEAD"],
         this.central,
         this.gitEnv(),
       );
@@ -566,6 +575,11 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         version.code === 0 && /^[a-f0-9]{40}$/u.test(version.text.trim())
           ? version.text.trim()
           : null;
+      if (this.supervisorSha && this.options.upgrade?.config.enabled)
+        this.upgrader = new SupervisorUpgrader(
+          this.upgradeHost(await realpath(resolve(root)), this.supervisorSha),
+          this.options.upgrade.config,
+        );
     }
     const supervisor = this.supervisorSha;
     if (
@@ -583,11 +597,13 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         const affected = await supervisorChanges(supervisor, sha, (args) =>
           this.readSupervisorGit(args),
         );
+        // C-767: with the switch on, the supervisor upgrades itself instead.
         writeSupervisorComparison(
           this.options.store,
           supervisor,
           sha,
           affected,
+          this.upgrader?.automatic(supervisor, sha, affected) ?? false,
         );
         this.checkedSupervisorMain = sha;
       } catch {
@@ -709,7 +725,12 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   }
   async build(sha: string) {
     if (!/^[a-f0-9]{40}$/u.test(sha)) throw new Error("Invalid deployment SHA");
-    const release = join(this.directory, `release-${sha}-${randomUUID()}`);
+    return this.checkout(
+      sha,
+      join(this.directory, `release-${sha}-${randomUUID()}`),
+    );
+  }
+  private async checkout(sha: string, release: string) {
     let stage: "checkout" | "install" | "build" = "checkout";
     let log = new DeploymentBuildLog();
     try {
@@ -766,6 +787,101 @@ export class NodeDeploymentDriver implements DeploymentDriver {
             : log.finish(stage, "spawn_failed"),
       };
     }
+  }
+
+  /** C-767: one step of the optional automatic supervisor upgrade. */
+  async upgradeSupervisor(): Promise<SupervisorUpgradeStep> {
+    return this.upgrader ? this.upgrader.step() : "idle";
+  }
+  /** C-767: deployment ticks pause while the restart helper takes over. */
+  get supervisorRestarting(): boolean {
+    return this.upgrader?.restarting ?? false;
+  }
+  private portTargets() {
+    const mcp = this.options.env.CARDIGAN_MCP_HOST ?? "";
+    return [
+      {
+        host: ["::1", "localhost"].includes(mcp) ? mcp : "127.0.0.1",
+        port: this.ports[0] as number,
+      },
+      { host: "127.0.0.1", port: this.ports[1] as number },
+    ];
+  }
+  private upgradeHost(root: string, supervisor: string) {
+    const upgrade = this.options.upgrade;
+    if (!upgrade) throw new Error("Supervisor upgrade is not configured");
+    const systemctl = nodeSystemdCommand("systemctl", this.options.env);
+    const systemdRun = nodeSystemdCommand("systemd-run", this.options.env);
+    return {
+      store: this.options.store,
+      directory: this.directory,
+      configDir: upgrade.configDir,
+      root,
+      supervisor,
+      idleDeployment: async () => {
+        const s = this.state;
+        if (
+          !s.ready ||
+          s.running?.sha !== s.current.sha ||
+          s.fence !== (s.dual ? 2 : 1) ||
+          !this.live() ||
+          (s.dual && !this.live("background")) ||
+          (await this.maintenanceActive())
+        )
+          return undefined;
+        return s.current.sha;
+      },
+      checkout: async (sha: string, release: string) => {
+        const result = await this.checkout(sha, release);
+        return { ok: Boolean(result.build), log_tail: result.log_tail };
+      },
+      validate: async (release: string) => {
+        try {
+          await access(join(release, "apps/cli/dist/bin.js"), constants.R_OK);
+          const result = await this.command(
+            process.execPath,
+            [
+              "--input-type=module",
+              "-e",
+              SUPERVISOR_CONFIG_CHECK_SCRIPT,
+              join(release, "packages/host/dist/index.js"),
+              upgrade.configDir,
+            ],
+            release,
+            this.buildEnv,
+          );
+          return result.code === 0;
+        } catch {
+          return false;
+        }
+      },
+      systemctl,
+      launchHelper: async (attempt: string, from: string) =>
+        (
+          await systemdRun([
+            "--user",
+            "--collect",
+            "--quiet",
+            `--unit=cardigan-supervisor-upgrade-${attempt.slice(0, 8)}`,
+            `--setenv=CARDIGAN_DATA_DIR=${this.options.dataDir}`,
+            `--setenv=PATH=${this.buildEnv.PATH}`,
+            ...(this.options.env.XDG_RUNTIME_DIR
+              ? [`--setenv=XDG_RUNTIME_DIR=${this.options.env.XDG_RUNTIME_DIR}`]
+              : []),
+            "--",
+            process.execPath,
+            join(from, "apps/cli/dist/bin.js"),
+            "self-deploy",
+            "finish-upgrade",
+          ])
+        ).code === 0,
+      ports: () => this.portTargets(),
+      server: () => this.state.process,
+      recheck: () => {
+        this.checkedSupervisorMain = undefined;
+      },
+      now: () => this.now(),
+    };
   }
 
   async backup() {

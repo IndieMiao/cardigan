@@ -10,6 +10,7 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   host_deployment_supervisor_change: "确认部署监督器需要升级",
   host_deployment_supervisor_comparison_unavailable:
     "未能核实部署监督器差异，将重试",
+  host_supervisor_upgrade: "记录了部署监督器自动升级",
   host_role_upgraded: "自动升级了角色",
   host_role_overlay_migrated: "把定制角色迁移为默认包加附加规则",
   host_role_launch_checked: "核对了常驻角色的启动配置",

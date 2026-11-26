@@ -81,6 +81,7 @@ export {
 } from "./deployment-capacity.js";
 export {
   type DeploymentConfig,
+  deploymentDirectory,
   loadDeploymentConfig,
   parseDeploymentConfig,
 } from "./deployment-config.js";
@@ -108,6 +109,15 @@ export {
   rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
+export {
+  finishSupervisorUpgrade,
+  loadSupervisorUpgradeConfig,
+  nodeRestartPorts,
+  nodeSystemdCommand,
+  parseSupervisorUpgradeConfig,
+  SUPERVISOR_UPGRADE_FILE,
+  type SupervisorUpgradeConfig,
+} from "./deployment-supervisor-upgrade.js";
 export * from "./device-init.js";
 export { turnSessionKey } from "./dispatch-stalls.js";
 export {

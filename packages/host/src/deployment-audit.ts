@@ -14,7 +14,10 @@ import {
   reconcileSupervisorNotice,
   recordDeployment,
   recordDeploymentStop,
+  recordSupervisorUpgrade,
   requestDeploymentAction,
+  type SupervisorUpgradeStatus,
+  supervisorUpgradeState,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { recordNotification, type Store } from "@cardigan/store";
@@ -531,6 +534,7 @@ export function writeSupervisorComparison(
   supervisor: string,
   main: string,
   affected: string[],
+  automatic = false,
 ) {
   store.uow.run((tx) => {
     persistEffect(
@@ -540,7 +544,7 @@ export function writeSupervisorComparison(
         reconcileSupervisorNotice(
           loadCommandState(tx, "cardigan"),
           { kind: "system", project_id: "cardigan" },
-          { supervisor, main, affected },
+          { supervisor, main, affected, ...(automatic ? { automatic } : {}) },
           { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
         ),
       ),
@@ -571,5 +575,46 @@ export function writeSupervisorComparisonUnavailable(
       created_at: new Date().toISOString(),
       payload: { supervisor, main },
     });
+  });
+}
+
+/** C-767: audit one stage of an automatic supervisor self-upgrade. */
+export function writeSupervisorUpgrade(
+  store: Store,
+  input: {
+    attempt: string;
+    from: string;
+    to: string;
+    status: SupervisorUpgradeStatus;
+    summary: string;
+  },
+) {
+  store.uow.run((tx) => {
+    persistEffect(
+      tx,
+      "cardigan",
+      unwrap(
+        recordSupervisorUpgrade(
+          loadCommandState(tx, "cardigan"),
+          { kind: "system", project_id: "cardigan" },
+          input,
+          { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
+        ),
+      ),
+    );
+  });
+}
+
+/** C-767: only this project's self-upgrade audit, never the whole event log. */
+export function readSupervisorUpgradeState(store: Store, supervisor: string) {
+  return store.uow.read(() => {
+    const events = (
+      store.database
+        .prepare(
+          "SELECT doc FROM events WHERE project_id = ? AND type = ? AND card_id IS NULL ORDER BY seq",
+        )
+        .all("cardigan", "host_supervisor_upgrade") as { doc: string }[]
+    ).map((row) => JSON.parse(row.doc) as Event);
+    return supervisorUpgradeState(events, "cardigan", supervisor);
   });
 }

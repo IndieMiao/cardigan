@@ -15,6 +15,7 @@ export const CLI_TOOLS = {
   "ext-message test": null,
   "self-deploy watch": null,
   "self-deploy roles": null,
+  "self-deploy finish-upgrade": null,
   "deploy adopt": null,
   "deploy pin": null,
   "deploy unpin": null,
