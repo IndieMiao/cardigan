@@ -834,7 +834,7 @@ async function assembleServer(
                 assignmentOps: {
                   runtime: options.dispatcher.runtime,
                   snapshot: options.dispatcher.snapshot,
-                  diff: (project, assignment) => {
+                  diff: async (project, assignment) => {
                     const central = git.projectOf(project);
                     if (!central)
                       throw new Error(`项目 ${project} 没有登记中心仓库`);

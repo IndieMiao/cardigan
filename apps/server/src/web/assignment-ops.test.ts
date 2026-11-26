@@ -1,4 +1,8 @@
-import type { Runtime, RuntimeRef } from "@cardigan/domain";
+import {
+  type Runtime,
+  type RuntimeRef,
+  stopWorkItemAssignment,
+} from "@cardigan/domain";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../../test-support/dispatch.js";
 import { call, type WebHarness, webHarness } from "../../test-support/web.js";
@@ -243,10 +247,60 @@ test("restart without proof that the old session exited starts nothing", async (
   expect(failed.status).toBe(409);
   expect(message(failed.json)).toContain("不会另起会话");
   expect(assignmentOf(assignment.id)?.runtime_ref).toEqual(ref);
-  expect(ops.snapshot).not.toHaveBeenCalled();
+  // The snapshot comes first; nothing is queued without the proof.
+  expect(ops.snapshot).toHaveBeenCalledTimes(1);
   expect(
     runsOf(assignment.id).filter((r) => r.status === "queued"),
   ).toHaveLength(0);
+});
+
+test("after a pause whose release failed, start is refused and restart still needs a proven exit", async () => {
+  const { assignment } = f.create();
+  f.session(assignment, false);
+  const ref = assignmentOf(assignment.id)?.runtime_ref as RuntimeRef;
+  // `assignment stop --hold` recorded, terminal not released yet.
+  f.apply((s, a, p) =>
+    stopWorkItemAssignment(
+      s,
+      a,
+      { assignment_id: assignment.id, reason: "paused", hold: true },
+      p,
+    ),
+  );
+  const refused = await post(assignment.id, "start", "start-paused");
+  expect(refused.status).toBe(409);
+  expect(message(refused.json)).toContain("重启会话");
+  // The terminal is gone from the list, but nothing proves the process exited.
+  runtime.status.mockResolvedValue({
+    ok: false,
+    error: { code: "runtime_not_found", message: "gone" },
+  });
+  const restart = await post(assignment.id, "start", "restart-paused", {
+    restart: true,
+  });
+  expect(restart.status).toBe(409);
+  expect(message(restart.json)).toContain("不会另起会话");
+  expect(assignmentOf(assignment.id)?.runtime_ref).toEqual(ref);
+  expect(
+    runsOf(assignment.id).filter((r) => r.status === "queued"),
+  ).toHaveLength(0);
+});
+
+test("a restart whose snapshot fails leaves the running session alone", async () => {
+  const { assignment } = f.create();
+  const running = f.session(assignment, false);
+  ops.snapshot.mockRejectedValueOnce(
+    new Error("The launch profile has no model"),
+  );
+  const failed = await post(assignment.id, "start", "restart-no-model", {
+    restart: true,
+  });
+  expect(failed.status).toBe(409);
+  expect(message(failed.json)).toContain("The launch profile has no model");
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(runsOf(assignment.id).find((r) => r.id === running.id)?.status).toBe(
+    "running",
+  );
 });
 
 test("diff reads the worktree changes and cuts an oversized patch at a line end", async () => {

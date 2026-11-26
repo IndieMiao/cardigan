@@ -65,6 +65,11 @@ export interface WorkItemStopInput {
   readonly hold?: boolean | undefined;
   /** Summary recorded on the cancelled Runs. */
   readonly reason?: string | undefined;
+  /**
+   * C-703: prove this session's exit even when the stop settles as a pause,
+   * because a start follows it (the Workbench's 重启会话).
+   */
+  readonly require_exit_proof?: boolean | undefined;
   readonly apply: AssignmentStopCommand;
 }
 
@@ -160,6 +165,9 @@ async function stopSession(
   const owner = { project_id: input.project_id, assignment_id: assignment.id };
   // C-620: a managed stop never downgrades an existing pause (domain rule).
   const held = input.hold === true || pausedByHuman(events(), assignment.id);
+  // A managed stop lets new work start a session; a pause does not, unless a
+  // start follows it right away.
+  const prove = !held || input.require_exit_proof === true;
   const command = (extra: {
     released_runtime_ref?: RuntimeRef;
     exit_confirmed_ref?: RuntimeRef;
@@ -182,12 +190,12 @@ async function stopSession(
   // A retry reuses an exit this stop already proved; the terminal row may be
   // gone by now and is never looked for again.
   if (!stopExitConfirmed(events(), assignment.id, ref)) {
-    const live = !held && (await stoppedSessionLive(input.runtime, ref, owner));
+    const live = prove && (await stoppedSessionLive(input.runtime, ref, owner));
     const released = await input.runtime.release(ref, { force: true });
     if (!released.ok && released.error.code !== "runtime_not_found") {
       // C-663: an unreachable worker says nothing about the session either way.
       if (
-        !held &&
+        prove &&
         ref.machine_id !== "local" &&
         released.error.code === "runtime_unavailable"
       )
@@ -208,7 +216,7 @@ async function stopSession(
     // needs this session's exit proven. Its own release proves it only when
     // it ended a live session; a finished or missing terminal row does not.
     // A pause keeps the C-211 rule.
-    if (!held) {
+    if (prove) {
       const verdict =
         live && released.ok
           ? "exited"

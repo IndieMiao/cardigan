@@ -341,6 +341,15 @@ test("patchFiles splits a patch per file and keeps a path with spaces", () => {
     { path: "c.ts", lines: ["diff --git a/c.ts b/c.ts", "-2"] },
   ]);
   expect(patchFiles("")).toEqual([]);
+  // git quotes a non-ASCII path with octal UTF-8 bytes (core.quotepath).
+  expect(
+    patchFiles(
+      'diff --git "a/docs/\\350\\256\\241\\345\\210\\222.md" "b/docs/\\350\\256\\241\\345\\210\\222.md"\n+x\n',
+    ).map((file) => file.path),
+  ).toEqual(["docs/计划.md"]);
+  expect(
+    patchFiles('diff --git "a/q\\"t.ts" "b/q\\"t.ts"\n').map((f) => f.path),
+  ).toEqual(['q"t.ts']);
 });
 
 test("panel facts end with the dot, so a wrapped line never starts with it", async () => {

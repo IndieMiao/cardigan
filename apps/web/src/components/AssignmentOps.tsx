@@ -268,12 +268,48 @@ interface PatchFile {
   readonly path: string;
   readonly lines: readonly string[];
 }
+const escapes: Record<string, number> = {
+  a: 7,
+  b: 8,
+  t: 9,
+  n: 10,
+  v: 11,
+  f: 12,
+  r: 13,
+  '"': 34,
+  "\\": 92,
+};
+/** A header path; git quotes unusual ones C-style, non-ASCII as octal bytes. */
+function headerPath(raw: string): string {
+  if (!raw.startsWith('"')) return raw;
+  const bytes: number[] = [];
+  const body = raw.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i] ?? "";
+    if (ch !== "\\") {
+      bytes.push(...new TextEncoder().encode(ch));
+      continue;
+    }
+    const octal = /^[0-7]{3}/u.exec(body.slice(i + 1))?.[0];
+    if (octal) {
+      bytes.push(Number.parseInt(octal, 8));
+      i += 3;
+    } else {
+      const next = body[i + 1] ?? "";
+      bytes.push(escapes[next] ?? next.charCodeAt(0));
+      i += 1;
+    }
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+const HEADER =
+  /^diff --git (?:"a\/(?:[^"\\]|\\.)*"|a\/.+?) ("b\/(?:[^"\\]|\\.)*"|b\/.+)$/u;
 /** Split `git diff HEAD` into its files, in patch order. */
 export function patchFiles(patch: string): PatchFile[] {
   const files: { path: string; lines: string[] }[] = [];
   for (const line of patch.split("\n")) {
-    const header = /^diff --git a\/.+ b\/(.+)$/u.exec(line);
-    if (header?.[1]) files.push({ path: header[1], lines: [] });
+    const target = HEADER.exec(line)?.[1];
+    if (target) files.push({ path: headerPath(target).slice(2), lines: [] });
     files.at(-1)?.lines.push(line);
   }
   for (const file of files) while (file.lines.at(-1) === "") file.lines.pop();

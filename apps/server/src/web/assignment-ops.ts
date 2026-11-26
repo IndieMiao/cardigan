@@ -1,8 +1,9 @@
 import type { Assignment, ProjectId, Runtime } from "@cardigan/domain";
-import { queueRun } from "@cardigan/domain";
+import { queueRun, stoppedByHuman } from "@cardigan/domain";
 import type { WorktreeDiff } from "@cardigan/git-service";
 import {
   AssignmentStopError,
+  settleTestReviewLimits,
   stopWorkItemSession,
   type WorkItemStopResult,
 } from "@cardigan/host";
@@ -143,11 +144,10 @@ export async function serveAssignmentOps(
   const work = (async () => {
     workItemAssignment(c, id);
     if (action === "stop") return write.record(await stop(c, ops, write, id));
-    if (restart && workItemAssignment(c, id).runtime_ref !== null)
-      await stop(c, ops, write, id);
-    const assignment = workItemAssignment(c, id);
+    // The snapshot (the CLI version probe) first: a restart that cannot
+    // start a new session leaves the old one alone.
     const snapshot = await ops
-      .snapshot(assignment, project)
+      .snapshot(workItemAssignment(c, id), project)
       .catch((error: unknown) => {
         throw new HttpRejection(
           409,
@@ -155,6 +155,45 @@ export async function serveAssignmentOps(
           `无法启动 ${id}：${error instanceof Error ? error.message : String(error)}`,
         );
       });
+    c.authorize();
+    if (restart && workItemAssignment(c, id).runtime_ref !== null) {
+      const stopped = await stop(c, ops, write, id, true);
+      if (stopped.stale)
+        throw new HttpRejection(
+          409,
+          "stale_target",
+          `${id} 的会话已变化，没有重启；请看最新状态后再操作`,
+        );
+    }
+    const assignment = workItemAssignment(c, id);
+    // A start lifts a stop. While the stopped session's terminal is still on
+    // record its exit is unproven, so only 重启会话 (which proves it) may go on.
+    if (
+      assignment.runtime_ref !== null &&
+      stoppedByHuman(
+        c.store.uow.read((tx) =>
+          tx.events.listAfter(
+            project,
+            assignment.work_item_id &&
+              tx.work_items.get(project, assignment.work_item_id)?.card_id,
+            0,
+          ),
+        ),
+        id,
+      )
+    )
+      throw new HttpRejection(
+        409,
+        "illegal_transition",
+        `${id} 的停止还没有确认原会话已退出，不能直接启动；用“重启会话”核对退出后再启动`,
+      );
+    if (
+      assignment.work_item_id &&
+      c.store.uow.read((tx) =>
+        tx.work_items.get(project, assignment.work_item_id as never),
+      )?.kind === "verify"
+    )
+      settleTestReviewLimits(c.store, project);
     c.authorize();
     return write.run((s, a, p) => {
       const queued = queueRun(
@@ -199,6 +238,8 @@ async function stop(
   ops: AssignmentOps,
   write: ReturnType<typeof keyedHumanWrite>,
   id: Assignment["id"],
+  /** A start follows: prove the exit even when the stop is a pause. */
+  restarting = false,
 ): Promise<WorkItemStopResult> {
   try {
     return await stopWorkItemSession({
@@ -207,6 +248,7 @@ async function stop(
       assignment_id: id,
       runtime: ops.runtime,
       reason: STOP_REASON,
+      require_exit_proof: restarting,
       apply: write.apply,
     });
   } catch (error) {
