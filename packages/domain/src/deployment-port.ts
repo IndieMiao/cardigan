@@ -69,7 +69,19 @@ export interface DeploymentDriver {
     controlEventId?: string,
   ): Promise<DeploymentReadyRetry | undefined>;
   promote(build: DeploymentBuild): Promise<void>;
+  /**
+   * Upgrade the deployed roles and start PM Ops. C-801: host adapters throw
+   * a failure naming its step (and a redacted output tail); any other
+   * exception is recorded without its text.
+   */
   refreshRoles(): Promise<void>;
+  /** C-801, optional: wait (ms) before the single automatic retry of refreshRoles. */
+  readonly roleRefreshRetryMs?: number;
+  /**
+   * C-801, optional: the deployment project's standing PM Office and PM Ops
+   * are on duty. Never throws; false when it cannot be confirmed.
+   */
+  standingPmOnDuty?(): Promise<boolean>;
   record(record: DeploymentRecord): Promise<void>;
   now(): number;
   /**

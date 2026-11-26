@@ -4,6 +4,7 @@ import {
   DeploymentController,
   type DeploymentHandoff,
   DeploymentServerUnavailable,
+  RoleRefreshFailed,
   type SupervisorJoinDriver,
 } from "./deployment.js";
 
@@ -704,4 +705,141 @@ test("C-787: the new supervisor finishes a handed-over switch first, restoring t
   await controller.tick();
   expect(taken).toBe(1);
   expect(f.calls.at(7)).toBe("check");
+});
+
+test.each([
+  {
+    step: "previous" as const,
+    error: new RoleRefreshFailed(
+      "previous",
+      "部署状态里没有上一版本，无法比对角色包",
+    ),
+    tail: undefined,
+  },
+  {
+    step: "snapshot" as const,
+    error: new RoleRefreshFailed(
+      "snapshot",
+      "上一版本角色包快照失败：退出码 1",
+      {
+        output:
+          "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/srv/private/release-a/packages/roles/dist/index.js'\n    at finalizeResolution (node:internal/modules/esm/resolve:275:11)",
+      },
+    ),
+    tail: "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '<路径>'",
+  },
+  {
+    step: "sync" as const,
+    error: new RoleRefreshFailed("sync", "self-deploy roles 退出码 1", {
+      output:
+        "CARDIGAN_TOKEN=synthetic-lifecycle-secret\nAuthorization: Bearer synthetic-lifecycle-secret\n角色同步必须由部署监督器提供已核对的角色包差异",
+      changed: ["pm"],
+    }),
+    tail: "CARDIGAN_TOKEN=<已隐去>\nAuthorization: <已隐去>\n角色同步必须由部署监督器提供已核对的角色包差异",
+  },
+])(
+  "C-801: a $step failure is retried once and recorded with its step, text and redacted output",
+  async ({ step, error, tail }) => {
+    const f = fixture();
+    const driver = f.driver as DeploymentDriver & {
+      roleRefreshRetryMs: number;
+    };
+    driver.roleRefreshRetryMs = 1;
+    driver.standingPmOnDuty = async () => true;
+    let calls = 0;
+    driver.refreshRoles = async () => {
+      calls++;
+      throw error;
+    };
+    await new DeploymentController(driver).tick();
+    expect(calls).toBe(2);
+    const record = f.records.at(-1);
+    expect(JSON.stringify(f.records)).not.toMatch(/synthetic|\/srv\/private/u);
+    const attempt = {
+      step,
+      error: error.message,
+      ...(tail ? { output_tail: tail } : {}),
+    };
+    expect(record).toMatchObject({
+      status: "deployed",
+      post_deploy_failed: true,
+      summary: expect.stringContaining(
+        `${error.message}），已自动重试 1 次仍失败`,
+      ),
+      post_deploy_failure: {
+        attempts: [attempt, attempt],
+        ...(step === "sync" ? { changed_roles: ["pm"] } : {}),
+      },
+    });
+    expect(record?.post_deploy_failure?.notice_only).toBeUndefined();
+    expect(f.calls.at(-1)).toBe("unlock");
+  },
+);
+
+test("C-801: a retry that succeeds records the first failure for diagnostics only", async () => {
+  const f = fixture();
+  let calls = 0;
+  f.driver.refreshRoles = async () => {
+    if (calls++ === 0)
+      throw new RoleRefreshFailed("sync", "self-deploy roles 退出码 1", {
+        changed: [],
+      });
+  };
+  await new DeploymentController(f.driver).tick();
+  expect(calls).toBe(2);
+  const record = f.records.at(-1);
+  expect(record).toMatchObject({
+    status: "deployed",
+    summary: expect.stringContaining("自动重试后已完成"),
+    post_deploy_failure: {
+      attempts: [{ step: "sync", error: "self-deploy roles 退出码 1" }],
+      recovered: true,
+    },
+  });
+  expect(record?.post_deploy_failed).toBeUndefined();
+});
+
+test.each([
+  { changed: [] as string[], onDuty: true, notice: true },
+  { changed: ["pm"], onDuty: true, notice: false },
+  { changed: [] as string[], onDuty: false, notice: false },
+  { changed: undefined, onDuty: true, notice: false },
+])(
+  "C-801: only an unchanged pack with the standing PMs on duty is a notice (changed=$changed, on duty=$onDuty)",
+  async ({ changed, onDuty, notice }) => {
+    const f = fixture();
+    f.driver.standingPmOnDuty = async () => onDuty;
+    f.driver.refreshRoles = async () => {
+      throw changed
+        ? new RoleRefreshFailed("sync", "self-deploy roles 退出码 1", {
+            changed,
+          })
+        : new RoleRefreshFailed("snapshot", "当前版本角色包快照输出无法解析");
+    };
+    await new DeploymentController(f.driver).tick();
+    const record = f.records.at(-1);
+    expect(record?.post_deploy_failed).toBe(true);
+    expect(record?.post_deploy_failure?.notice_only).toBe(
+      notice ? true : undefined,
+    );
+    expect(record?.summary).toContain(notice ? "仅知会" : "需主机核对");
+  },
+);
+
+test("C-801: an unrecognised exception keeps no text; a driver without on-duty check never downgrades to a notice", async () => {
+  const f = fixture();
+  f.driver.refreshRoles = async () => {
+    throw new Error("Authorization: Bearer synthetic-lifecycle-secret");
+  };
+  await new DeploymentController(f.driver).tick();
+  expect(JSON.stringify(f.records)).not.toMatch(/synthetic|Authorization/u);
+  expect(f.records.at(-1)).toMatchObject({
+    post_deploy_failed: true,
+    post_deploy_failure: {
+      attempts: [
+        { step: "unknown", error: "host_operation_failed" },
+        { step: "unknown", error: "host_operation_failed" },
+      ],
+    },
+  });
 });

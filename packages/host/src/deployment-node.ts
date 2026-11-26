@@ -20,16 +20,22 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type {
+  Assignment,
   DeploymentBuild,
   DeploymentConfigTrial,
   DeploymentDriver,
   DeploymentOperation,
   DeploymentRecord,
+  Run,
 } from "@cardigan/domain";
 import { currentDeploymentPin } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import type { Store } from "@cardigan/store";
-import type { DeploymentHandoff, SupervisorJoinDriver } from "./deployment.js";
+import {
+  type DeploymentHandoff,
+  RoleRefreshFailed,
+  type SupervisorJoinDriver,
+} from "./deployment.js";
 import {
   deploymentMergeSegments,
   readInterruptedDeployment,
@@ -89,8 +95,43 @@ import { type ServerHeap, serverHeap } from "./server-heap.js";
 const exec = promisify(execFile);
 const CONFIG_TRIAL_MARKER = "CARDIGAN_HOST_CONFIG_CHECK";
 const PROJECT = "cardigan";
+/** C-801: wait before the single automatic retry of the role refresh. */
+export const ROLE_REFRESH_RETRY_MS = 10_000;
+/** C-801: fixed exit wording; a killed command (timeout, signal) has no code. */
+const exitText = (code: number | null) =>
+  code === null ? "被终止（超时或信号）" : `退出码 ${code}`;
+/**
+ * C-801: name a recognised cause (e.g. a database locked by the new server's
+ * startup work) with its fixed label; the matched text itself never leaves.
+ */
+function withCause(message: string, output: string) {
+  const log = new DeploymentBuildLog();
+  log.append(`${output}\n`);
+  const causes = log.causes();
+  return causes.length ? `${message}（${causes.join("、")}）` : message;
+}
+/**
+ * C-801: an active standing PM Office and PM Ops whose sessions exist, so
+ * nobody has to start PM Ops after a deployment.
+ */
+export function standingPmOnDuty(
+  assignments: readonly Assignment[],
+  runs: readonly Run[],
+) {
+  return (["office", "ops"] as const).every((mode) =>
+    assignments.some(
+      (a) =>
+        a.status === "active" &&
+        a.scope === "standing" &&
+        a.role_id === "pm" &&
+        a.standing_mode === mode &&
+        runs.some((r) => r.assignment_id === a.id),
+    ),
+  );
+}
 /** Backoff for a failing supervisor comparison of one unchanged main. */
 const SUPERVISOR_RETRY_MS = 10 * 60_000;
+export const ROLE_PACK_SNAPSHOT_MARKER = "CARDIGAN_ROLE_PACK_SNAPSHOT";
 /** Must hash exactly like deploymentRolePolicyHash, or every default looks hand-edited. */
 export const ROLE_PACK_SNAPSHOT_SCRIPT = `import { pathToFileURL } from 'node:url';
   import { createHash } from 'node:crypto';
@@ -103,7 +144,36 @@ export const ROLE_PACK_SNAPSHOT_SCRIPT = `import { pathToFileURL } from 'node:ur
         ? { required_capabilities: [...r.required_capabilities].sort() } : {}) };
     return [id, createHash('sha256').update(JSON.stringify(p)).digest('hex')];
   }));
-  process.stdout.write(JSON.stringify(values));`;
+  process.stdout.write('\\n${ROLE_PACK_SNAPSHOT_MARKER} ' + JSON.stringify(values) + '\\n');`;
+/**
+ * C-801: the snapshot's own line, so warnings Node prints on stderr (the
+ * command merges both streams) never make the snapshot unreadable.
+ */
+export function parseRolePackSnapshot(
+  text: string,
+): Record<string, string> | undefined {
+  const line = text
+    .split("\n")
+    .findLast((l) => l.startsWith(`${ROLE_PACK_SNAPSHOT_MARKER} `));
+  if (!line) return undefined;
+  try {
+    const values = JSON.parse(
+      line.slice(ROLE_PACK_SNAPSHOT_MARKER.length + 1),
+    ) as unknown;
+    if (
+      !values ||
+      typeof values !== "object" ||
+      Array.isArray(values) ||
+      !Object.values(values).every(
+        (hash) => typeof hash === "string" && /^[a-f0-9]{64}$/u.test(hash),
+      )
+    )
+      return undefined;
+    return values as Record<string, string>;
+  } catch {
+    return undefined;
+  }
+}
 /** C-767: the new checkout must read the host configuration it will run with. */
 export const SUPERVISOR_CONFIG_CHECK_SCRIPT = `import { pathToFileURL } from 'node:url';
   const m = await import(pathToFileURL(process.argv[1]).href);
@@ -1476,43 +1546,98 @@ export class NodeDeploymentDriver
     delete this.state.backup_file;
     await this.saveState();
   }
+  /** C-801: retry the role refresh after this long, once. */
+  roleRefreshRetryMs = ROLE_REFRESH_RETRY_MS;
+  /**
+   * C-801: each failure names its step; command output travels only inside
+   * the error and is redacted by the controller before it is recorded.
+   */
   async refreshRoles() {
     const previous = this.state.previous;
-    if (!previous) throw new Error("Previous role pack unavailable");
-    const snapshot = async (release: string) => {
-      const result = await this.command(
+    if (!previous)
+      throw new RoleRefreshFailed(
+        "previous",
+        "部署状态里没有上一版本，无法比对角色包",
+      );
+    const snapshot = async (label: string, release: string) => {
+      let result: { code: number | null; text: string };
+      try {
+        result = await this.command(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            ROLE_PACK_SNAPSHOT_SCRIPT,
+            join(release, "packages/roles/dist/index.js"),
+          ],
+          release,
+          this.buildEnv,
+        );
+      } catch {
+        throw new RoleRefreshFailed(
+          "snapshot",
+          `${label}角色包快照命令无法启动`,
+        );
+      }
+      if (result.code !== 0)
+        throw new RoleRefreshFailed(
+          "snapshot",
+          withCause(
+            `${label}角色包快照失败：${exitText(result.code)}`,
+            result.text,
+          ),
+          { output: result.text },
+        );
+      const values = parseRolePackSnapshot(result.text);
+      if (!values)
+        throw new RoleRefreshFailed(
+          "snapshot",
+          `${label}角色包快照输出无法解析`,
+          { output: result.text },
+        );
+      return values;
+    };
+    const before = await snapshot("上一版本", previous.release);
+    const after = await snapshot("当前版本", this.state.current.release);
+    const changed = Object.keys(after).filter((id) => after[id] !== before[id]);
+    let result: { code: number | null; text: string };
+    try {
+      result = await this.command(
         process.execPath,
         [
-          "--input-type=module",
-          "-e",
-          ROLE_PACK_SNAPSHOT_SCRIPT,
-          join(release, "packages/roles/dist/index.js"),
+          join(this.state.current.release, "apps/cli/dist/bin.js"),
+          "self-deploy",
+          "roles",
         ],
-        release,
-        this.buildEnv,
+        this.state.current.release,
+        {
+          ...this.options.env,
+          CARDIGAN_DATA_DIR: this.options.dataDir,
+          CARDIGAN_DEPLOYMENT_CHANGED_ROLES: JSON.stringify(changed),
+          CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: JSON.stringify(before),
+        },
       );
-      if (result.code !== 0) throw new Error("Role pack snapshot failed");
-      return JSON.parse(result.text) as Record<string, string>;
-    };
-    const before = await snapshot(previous.release);
-    const after = await snapshot(this.state.current.release);
-    const changed = Object.keys(after).filter((id) => after[id] !== before[id]);
-    const result = await this.command(
-      process.execPath,
-      [
-        join(this.state.current.release, "apps/cli/dist/bin.js"),
-        "self-deploy",
-        "roles",
-      ],
-      this.state.current.release,
-      {
-        ...this.options.env,
-        CARDIGAN_DATA_DIR: this.options.dataDir,
-        CARDIGAN_DEPLOYMENT_CHANGED_ROLES: JSON.stringify(changed),
-        CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: JSON.stringify(before),
-      },
-    );
-    if (result.code !== 0) throw new Error("部署后角色同步未完成，请主机检查");
+    } catch {
+      throw new RoleRefreshFailed("sync", "self-deploy roles 无法启动", {
+        changed,
+      });
+    }
+    if (result.code !== 0)
+      throw new RoleRefreshFailed(
+        "sync",
+        withCause(`self-deploy roles ${exitText(result.code)}`, result.text),
+        { output: result.text, changed },
+      );
+  }
+  /** C-801: PM Office and PM Ops of the deployment project are both on duty. */
+  async standingPmOnDuty() {
+    try {
+      return this.options.store.uow.read((tx) =>
+        standingPmOnDuty(tx.assignments.list(PROJECT), tx.runs.list(PROJECT)),
+      );
+    } catch {
+      return false;
+    }
   }
   /** Called between deploy ticks, still under the exclusive supervisor flock. Rollbacks are not success. */
   async maintainDisk() {

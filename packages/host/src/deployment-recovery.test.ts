@@ -12,10 +12,12 @@ import {
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type { Assignment, Card, Event } from "@cardigan/domain";
+import type { Assignment, Card, Event, Run } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
+import { defaultRoleDefinition } from "@cardigan/roles";
 import { notificationsByRecipient, Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import {
@@ -25,6 +27,7 @@ import {
 import { deploymentInProgress } from "./deployment-capacity.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { NodeDeploymentDriver } from "./deployment-node.js";
+import { deploymentRolePolicyHash } from "./deployment-roles.js";
 import { acquireMergeCheckCapacity } from "./merge-check-capacity.js";
 import { executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
@@ -639,6 +642,238 @@ test.runIf(process.platform === "linux")(
       expect(f.driver.takeHandoff()).toBeUndefined();
       expect((await f.state()).current.sha).toBe(next);
       expect(await f.records()).toHaveLength(count);
+    } finally {
+      await f.close();
+    }
+  },
+  30000,
+);
+
+/**
+ * C-801: the old supervisor's side of a C-787 switch whose new main changes a
+ * default role: built release, stop record, stopped server and restart plan
+ * addressed to this checkout; then a new supervisor process starts.
+ */
+async function handOverRoleChange(f: Fixture) {
+  const policy = (instructions: string) => ({
+    ...defaultRoleDefinition("host_ops", {
+      harness: "codex",
+      launch_profile_ref: "fixture",
+    }),
+    instructions,
+  });
+  const rolePack = (p: ReturnType<typeof policy>) =>
+    `exports.DEFAULT_ROLE_KINDS = { host_ops: 'standing' };
+     exports.defaultRoleDefinition = () => (${JSON.stringify(p)});
+     console.error('(node) ExperimentalWarning: noise on stderr');`;
+  const oldPolicy = policy("Previous default policy");
+  // The running build's pack, as its own build left it (untracked dist).
+  await mkdir(join(f.release, "packages/roles/dist"), { recursive: true });
+  await writeFile(
+    join(f.release, "packages/roles/dist/index.js"),
+    rolePack(oldPolicy),
+  );
+  const work = join(f.root, "work");
+  await f.git(["clone", "-q", f.central, work]);
+  await mkdir(join(work, "packages/roles/dist"), { recursive: true });
+  await writeFile(
+    join(work, "packages/roles/dist/index.js"),
+    rolePack(policy("New default policy")),
+  );
+  // Like the real command: one write transaction with a short busy wait.
+  await mkdir(join(work, "apps/cli/dist"), { recursive: true });
+  await writeFile(
+    join(work, "apps/cli/dist/bin.js"),
+    `const { join } = require('node:path');
+     const { DatabaseSync } = require('node:sqlite');
+     const db = new DatabaseSync(join(process.env.CARDIGAN_DATA_DIR, 'cardigan.db'));
+     db.exec('PRAGMA busy_timeout = 200');
+     try { db.exec('BEGIN IMMEDIATE'); db.exec('COMMIT'); }
+     catch (error) { process.stderr.write('出错了：' + error.message + '\\n'); process.exit(1); }
+     require('node:fs').writeFileSync(join(process.env.CARDIGAN_DATA_DIR, 'role-sync.json'),
+       JSON.stringify({ args: process.argv.slice(2),
+         changed: JSON.parse(process.env.CARDIGAN_DEPLOYMENT_CHANGED_ROLES),
+         previous: JSON.parse(process.env.CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES) }));`,
+  );
+  await f.git(["-C", work, "add", "."]);
+  await f.git(["-C", work, "commit", "-q", "-m", "test: next roles"]);
+  const next = await f.git(["-C", work, "rev-parse", "HEAD"]);
+  await f.git(["-C", work, "push", "-q", "origin", "HEAD:main"]);
+  await writeFile(join(f.root, "pnpm"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o700,
+  });
+  const built = (await f.driver.build(next)).build;
+  if (!built) throw new Error("fixture build failed");
+  const directory = join(f.root, "data/self-deploy");
+  const root = await realpath(
+    fileURLToPath(new URL("../../../", import.meta.url)),
+  );
+  const attempt = "00000000-0000-4000-8000-000000000801";
+  await f.driver.beforeStop({
+    attempt,
+    from: f.sha,
+    to: next,
+    status: "started",
+    build: "passed",
+    ready: false,
+    downtime_ms: 0,
+    summary: "构建已完成",
+  });
+  await f.driver.stop();
+  await writeFile(
+    join(directory, "supervisor-upgrade.json"),
+    JSON.stringify({
+      version: 1,
+      attempt: "00000000-0000-4000-8000-0000000008aa",
+      from: "c".repeat(40),
+      to: next,
+      unit: "cardigan-selfdeploy.service",
+      launch_file: join(f.root, "unit.service"),
+      launch_mode: 0o600,
+      launch_sha256: "0".repeat(64),
+      backup_file: join(directory, "supervisor-launch-x.bak"),
+      old_root: join(dirname(root), "release-watch-old"),
+      new_root: root,
+      health_timeout_ms: 60_000,
+      ports: [{ host: "127.0.0.1", port: 1 }],
+      supervisor: { pid: 1, start: "old-supervisor" },
+      requested_at: new Date().toISOString(),
+      deploy: {
+        attempt,
+        sha: next,
+        release: built.release,
+        from: f.sha,
+        stopped_at: Date.now() - 1_000,
+      },
+    }),
+    { mode: 0o600 },
+  );
+  // A new supervisor process: nothing of the old one's memory survives.
+  await f.restart((driver) => {
+    driver.roleRefreshRetryMs = 0;
+  });
+  return {
+    next,
+    built,
+    attempt,
+    previousHash: deploymentRolePolicyHash(oldPolicy),
+  };
+}
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+test.runIf(process.platform === "linux")(
+  "C-801: after taking over a handed-over switch, the new supervisor refreshes the roles against the build it replaced",
+  async () => {
+    const f = await fixture();
+    try {
+      const { next, built, attempt, previousHash } =
+        await handOverRoleChange(f);
+      const refresh = vi.spyOn(f.driver, "refreshRoles");
+      await new DeploymentController(f.driver).tick();
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(await f.state()).toMatchObject({
+        current: { sha: next, release: built.release },
+        previous: { sha: f.sha },
+      });
+      const records = await f.records();
+      expect(records[0]).toMatchObject({
+        attempt,
+        status: "deployed",
+        summary: expect.stringContaining("与监督器升级合并为一次停起"),
+      });
+      expect(records.some((r) => r.post_deploy_failed)).toBe(false);
+      expect(
+        JSON.parse(await readFile(join(f.root, "data/role-sync.json"), "utf8")),
+      ).toEqual({
+        args: ["self-deploy", "roles"],
+        changed: ["host_ops"],
+        previous: { host_ops: previousHash },
+      });
+      expect(
+        f.store.uow.read((tx) => tx.human_actions.list("cardigan")),
+      ).toHaveLength(0);
+    } finally {
+      await f.close();
+    }
+  },
+  30000,
+);
+
+test.runIf(process.platform === "linux").each([
+  { held: "the first attempt", recovered: true },
+  { held: "both attempts", recovered: false },
+])(
+  "C-801: taking over with Runs in flight, the new server's recovery holds the database during $held",
+  async ({ recovered }) => {
+    const f = await fixture();
+    try {
+      // Runs still running when the old server is stopped.
+      f.store.uow.run((tx) => {
+        for (const assignment_id of ["A-1", "A-2"])
+          tx.runs.put("cardigan", {
+            id: tx.ids.next("cardigan", "run"),
+            assignment_id,
+            trigger_event_id: tx.ids.nextEventId(),
+            kind: "followup",
+            status: "running",
+            role_version: 1,
+            model: "fixture",
+            agent_cli_version: "fixture",
+            outcome: null,
+            summary: "",
+          } as Run);
+      });
+      const { attempt } = await handOverRoleChange(f);
+      expect(
+        (await f.records()).find((r) => r.status === "stopping")?.stop_snapshot
+          ?.runs,
+      ).toHaveLength(2);
+      // The new server's startup writes (recovering those Runs) hold the
+      // write lock while the role command runs.
+      const refresh = f.driver.refreshRoles.bind(f.driver);
+      let calls = 0;
+      f.driver.refreshRoles = async () => {
+        const hold = calls++ === 0 || !recovered;
+        const server = new DatabaseSync(join(f.root, "data/cardigan.db"));
+        if (hold) server.exec("BEGIN IMMEDIATE");
+        try {
+          await refresh();
+        } finally {
+          if (hold) server.exec("ROLLBACK");
+          server.close();
+        }
+      };
+      await new DeploymentController(f.driver).tick();
+      expect(calls).toBe(2);
+      const record = (await f.records())[0];
+      const locked = {
+        step: "sync",
+        error: "self-deploy roles 退出码 1（数据库被锁）",
+        output_tail: expect.stringContaining("database is locked"),
+      };
+      expect(record).toMatchObject({
+        attempt,
+        status: "deployed",
+        post_deploy_failure: {
+          attempts: recovered ? [locked] : [locked, locked],
+          ...(recovered ? {} : { changed_roles: ["host_ops"] }),
+        },
+      });
+      expect(JSON.stringify(record)).not.toContain(f.root);
+      const actions = f.store.uow.read((tx) =>
+        tx.human_actions.list("cardigan"),
+      );
+      if (recovered) {
+        expect(record?.post_deploy_failed).toBeUndefined();
+        expect(record?.post_deploy_failure?.recovered).toBe(true);
+        expect(actions).toHaveLength(0);
+      } else {
+        expect(record?.post_deploy_failed).toBe(true);
+        // A changed pack is never only a notice: the operator checks it.
+        expect(actions).toHaveLength(1);
+        expect(actions[0]).toMatchObject({ executor: "operator" });
+        expect(actions[0]?.instructions).toContain("数据库被锁");
+      }
     } finally {
       await f.close();
     }

@@ -213,6 +213,17 @@ export function writeDeploymentRecord(
       !record.evidence_wait_exceeded
     )
       return;
+    // C-801: no role changed and the standing PMs are on duty; the
+    // notifications above are the notice.
+    if (record.post_deploy_failure?.notice_only) return;
+    const postDeploy = record.post_deploy_failed
+      ? record.post_deploy_failure?.attempts
+          .map(
+            (a, i) =>
+              `第 ${i + 1} 次：${a.step}：${a.error}${a.output_tail ? `；输出尾部：${a.output_tail}` : ""}`,
+          )
+          .join("\n")
+      : undefined;
     persistEffect(
       tx,
       project,
@@ -228,7 +239,12 @@ export function writeDeploymentRecord(
             ...(record.status === "waiting_for_evidence"
               ? { reason: "evidence_wait" as const }
               : {}),
-            instructions: `自动部署 ${record.from} → ${record.to}：${record.summary}。${record.log_tail ? `安全诊断：${record.log_tail}。` : ""}${record.backup_file ? `数据库备份：${record.backup_file}。` : ""}请核对部署记录；Agent 不能部署或重启 server。`,
+            // C-801: the host operator checks a post-deploy failure on the
+            // host; the owner is never pushed.
+            ...(record.post_deploy_failed
+              ? { executor: "operator" as const }
+              : {}),
+            instructions: `自动部署 ${record.from} → ${record.to}：${record.summary}。${record.log_tail ? `安全诊断：${record.log_tail}。` : ""}${postDeploy ? `角色同步失败原因：\n${postDeploy}\n` : ""}${record.backup_file ? `数据库备份：${record.backup_file}。` : ""}请核对部署记录；Agent 不能部署或重启 server。`,
           },
           { ids: tx.ids, clock },
         ),
