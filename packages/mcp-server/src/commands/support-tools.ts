@@ -83,7 +83,7 @@ export type ProjectSnapshotReader = (
  * no run capacity. Authorization is derived from the transaction's state.
  */
 export function readProjectSnapshot(
-  store: Pick<McpBackend, "uow">,
+  store: Pick<McpBackend, "uow" | "streamEventsOfType">,
   actor: AssignmentActor,
   { read_audit_employee_id }: ProjectSnapshotInput,
   /** C-753: end of the seven-day owner-required window. */
@@ -107,9 +107,17 @@ export function readProjectSnapshot(
       ? undefined
       : safeReferenceQuery(() =>
           store.uow.read((tx) =>
-            streamEventsBy(tx.events, project, undefined, "type", [
-              "cross_card_read",
-            ]).flatMap((e) => {
+            // C-785: audit rows are not in the in-memory log; read the table.
+            (
+              store.streamEventsOfType?.(
+                project,
+                undefined,
+                "cross_card_read",
+              ) ??
+              streamEventsBy(tx.events, project, undefined, "type", [
+                "cross_card_read",
+              ])
+            ).flatMap((e) => {
               const p = e.payload;
               if (
                 !p ||

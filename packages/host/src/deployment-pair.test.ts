@@ -17,6 +17,7 @@ import { expect, test, vi } from "vitest";
 import { DeploymentController } from "./deployment.js";
 import { NodeDeploymentDriver } from "./deployment-node.js";
 import { executionOwner } from "./process-identity.js";
+import { DEFAULT_SERVER_HEAP_MB } from "./server-heap.js";
 
 const exec = promisify(execFile);
 async function freePort() {
@@ -36,13 +37,15 @@ async function scripts(release: string, failingBackground = false) {
       ),
       `
       const role = ${JSON.stringify(role)};
+      // C-785: what V8 really runs with, as each child sees it.
+      const heap = require('node:v8').getHeapStatistics().heap_size_limit;
       // Do no work until the supervisor saved our incarnation.
       process.once('message', message => {
         if (message !== 'start') process.exit(9);
         if (${failingBackground} && role === 'background') process.exit(7);
         if (role === 'background') {
           process.on('message', () => {});
-          process.stdout.write(JSON.stringify({ready:true, deployment_fence:2, role})+'\\n');
+          process.stdout.write(JSON.stringify({ready:true, deployment_fence:2, role, heap})+'\\n');
           process.on('SIGTERM', () => process.exit(0));
           return;
         }
@@ -50,7 +53,7 @@ async function scripts(release: string, failingBackground = false) {
         const ports = [process.env.CARDIGAN_MCP_PORT, process.env.CARDIGAN_WEB_PORT].map(Number);
         let listening = 0;
         const sockets = ports.map(port => net.createServer().listen(port, '127.0.0.1', () => {
-          if (++listening === 2) process.stdout.write(JSON.stringify({ready:true, deployment_fence:2, role,
+          if (++listening === 2) process.stdout.write(JSON.stringify({ready:true, deployment_fence:2, role, heap,
             url:'http://127.0.0.1:'+ports[0], web_url:'http://127.0.0.1:'+ports[1]})+'\\n');
         }));
         process.on('SIGTERM', () => { sockets.forEach(socket => socket.close()); process.disconnect(); });
@@ -155,6 +158,19 @@ test.runIf(process.platform === "linux")(
         ).join("");
         expect(content).toContain('[web] {"ready":true');
         expect(content).toContain('[background] {"ready":true');
+        // C-785: both real children run with the supervisor's heap limit.
+        const heaps = [...content.matchAll(/\[(web|background)\] (\{.*\})/gu)]
+          .map((m) => [m[1], JSON.parse(m[2] as string).heap])
+          .filter(([, heap]) => heap !== undefined);
+        expect(new Set(heaps.map(([role]) => role))).toEqual(
+          new Set(["web", "background"]),
+        );
+        for (const [, heap] of heaps)
+          expect(heap).toBeGreaterThanOrEqual(DEFAULT_SERVER_HEAP_MB * 2 ** 20);
+      });
+      expect(driver.serverHeap).toMatchObject({
+        heap_mb: DEFAULT_SERVER_HEAP_MB,
+        source: "default",
       });
       expect(executionOwner(first.process.pid)).toEqual(first.process);
       expect(executionOwner(first.background.pid)).toEqual(first.background);

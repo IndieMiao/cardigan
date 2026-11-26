@@ -1773,9 +1773,8 @@ test("C-389: downloads keep cross-card preference, sensitive-card denial and ref
   expect(response.status).toBe(200);
   expect(response.headers.get("x-source-card-id")).toBe(other);
   expect(Buffer.from(await response.arrayBuffer())).toEqual(content);
-  expect(
-    store.uow.read((tx) => tx.events.listAfter(project_id, undefined, 0)),
-  ).toEqual(
+  // C-785: the audit row is in the table, not the in-memory event log.
+  expect(store.getUpdates({ project_id }).events).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
         type: "cross_card_read",

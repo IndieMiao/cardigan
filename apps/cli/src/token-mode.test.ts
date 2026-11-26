@@ -963,12 +963,9 @@ function itemReadToken(scope: "standing" | "work_item") {
   return issue(["get_card"]);
 }
 
+// C-785: audit rows stay in the table, not in the in-memory event log.
 const referenceAudits = () =>
-  store.uow.read((tx) =>
-    tx.events
-      .listAfter(project, undefined, 0)
-      .filter((e) => e.type === "cross_card_read"),
-  );
+  store.streamEventsOfType(project, undefined, "cross_card_read");
 
 test.each(["standing", "work_item"] as const)(
   "MC-2 %s Token reference reads persist the MCP audit and provenance",
