@@ -11,6 +11,7 @@ import {
   roleUpgradeDiff,
   rotatePmAfterDeployment,
   rotateStandingAfterDeployment,
+  runsOf,
   streamEventsBy,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -463,9 +464,11 @@ export function standingRotationDue(
   const times = [
     previous.created_at,
     previous.last_mcp_activity_at,
-    ...state.runs
-      .filter((r) => r.assignment_id === previous.id)
-      .flatMap((r) => [r.started_at, r.finished_at, r.heartbeat_at]),
+    ...runsOf(state.runs, previous.id).flatMap((r) => [
+      r.started_at,
+      r.finished_at,
+      r.heartbeat_at,
+    ]),
   ]
     .map((t) => (t ? Date.parse(t) : Number.NaN))
     .filter((t) => Number.isFinite(t));
