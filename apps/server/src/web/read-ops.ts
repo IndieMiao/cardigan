@@ -11,6 +11,10 @@ import {
   workerHelperAction,
 } from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
+import {
+  type CommandStateTiming,
+  measureCommandState,
+} from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { readCardDetailCached } from "./card-detail-cache.js";
 import { cardSectionPayload } from "./card-sections.js";
@@ -214,12 +218,40 @@ async function hostFacts(
 const bound = (machine: Machine | undefined): machine is Machine =>
   !!machine && machine.herdr_machine === machine.id;
 
+/**
+ * C-774: every read reports three segments besides its own stages (the pool
+ * adds `read_queue`, the queue wait): `read_state` is the time spent loading
+ * command state, `read_state_rebuild` the part of it that rebuilt the cached
+ * state after a write, and `read_query` everything else (SQL, assembly,
+ * serialization). `read_state + read_query` is the read's whole run time.
+ */
 export async function runWorkbenchRead(
   store: Store,
   op: WorkbenchReadOp,
   host?: HostFactsReader,
 ): Promise<WorkbenchReadResult> {
   const timings: Record<string, number> = {};
+  const started = performance.now();
+  let state: CommandStateTiming = { state_ms: 0, rebuild_ms: 0 };
+  const result = await measureCommandState(
+    () => readOp(store, op, timings, host),
+    (timing) => {
+      state = timing;
+    },
+  );
+  const total = performance.now() - started;
+  timings.read_state = state.state_ms;
+  timings.read_state_rebuild = state.rebuild_ms;
+  timings.read_query = Math.max(0, total - state.state_ms);
+  return result;
+}
+
+async function readOp(
+  store: Store,
+  op: WorkbenchReadOp,
+  timings: Record<string, number>,
+  host: HostFactsReader | undefined,
+): Promise<WorkbenchReadResult> {
   const json = (body: unknown): WorkbenchReadResult => ({
     body: JSON.stringify(body),
     timings,
@@ -236,26 +268,32 @@ export async function runWorkbenchRead(
     case "card": {
       const url = new URL(op.url);
       const at = url.searchParams.get("at");
-      const answer = readCardDetailCached(store, op, () => {
-        const detail = readPagedCard(store, op.project, op.card, url, {
-          recordTiming: (stage, ms) => {
-            timings[stage] = ms;
-          },
-          mergeGateStatus: op.mergeGateStatus,
-          now: op.now,
-          ...(at ? { timelineAnchor: at } : {}),
-        });
-        if (detail === undefined)
-          throw new HttpRejection(
-            404,
-            "not_found",
-            `card ${op.card} not found`,
-          );
-        return {
-          project_id: op.project,
-          ...cardSectionPayload(detail, url.searchParams.get("section")),
-        };
-      });
+      const recordTiming = (stage: string, ms: number) => {
+        timings[stage] = ms;
+      };
+      const answer = readCardDetailCached(
+        store,
+        op,
+        () => {
+          const detail = readPagedCard(store, op.project, op.card, url, {
+            recordTiming,
+            mergeGateStatus: op.mergeGateStatus,
+            now: op.now,
+            ...(at ? { timelineAnchor: at } : {}),
+          });
+          if (detail === undefined)
+            throw new HttpRejection(
+              404,
+              "not_found",
+              `card ${op.card} not found`,
+            );
+          return {
+            project_id: op.project,
+            ...cardSectionPayload(detail, url.searchParams.get("section")),
+          };
+        },
+        { recordTiming },
+      );
       return {
         ...(answer.body === undefined ? {} : { body: answer.body }),
         ...(answer.gzip === undefined ? {} : { gzip: answer.gzip }),

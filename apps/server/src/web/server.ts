@@ -383,7 +383,10 @@ export async function startWebServer(
     return facts;
   };
   const pool = options.workbenchReads
-    ? new WorkbenchReadPool(options.workbenchReads)
+    ? new WorkbenchReadPool({
+        warmProjects: warmOrder(store),
+        ...options.workbenchReads,
+      })
     : undefined;
   const read: RequestContext["read"] = async (op, recordTiming) => {
     if (pool) return pool.read(op, hostFacts, recordTiming);
@@ -1567,5 +1570,22 @@ function capabilityCatalog(context: RequestContext) {
       .map(({ key, os }) => ({ key, os: [...os] }));
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * C-774: projects for the read workers to warm at start, those with the most
+ * cards first, so the two busiest land on different workers. Best effort.
+ */
+function warmOrder(store: Store): string[] {
+  try {
+    return store.database
+      .prepare(
+        "SELECT p.id AS id FROM projects p LEFT JOIN (SELECT project_id, count(*) AS n FROM cards GROUP BY project_id) c ON c.project_id = p.id ORDER BY COALESCE(c.n, 0) DESC, p.id",
+      )
+      .all()
+      .map((row) => String(row.id));
+  } catch {
+    return [];
   }
 }
