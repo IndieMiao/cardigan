@@ -479,7 +479,7 @@ test("C-698: card details offer no one-click suggestion button; decisions not wi
       cardId="C-1"
     />,
   );
-  await screen.findByRole("complementary", { name: "卡片概况" });
+  await screen.findByRole("complementary", { name: "卡片信息" });
   const next = within(screen.getByRole("region", { name: "下一步" }));
   expect(next.queryByText(/等你拍板/u)).toBe(null);
   expect(next.queryAllByRole("radio")).toHaveLength(0);

@@ -60,7 +60,7 @@ test("U5b source quote stays plain text; absent source and relations render noth
   expect(view.container.querySelector("script")).toBeNull();
 });
 
-test("U5b decision source links to its actual card and excess related cards collapse", () => {
+test("U5b decision source links to its actual card; C-699 related cards are not repeated here", () => {
   const base = cardDetail();
   const view = render(
     <CardSource
@@ -89,13 +89,11 @@ test("U5b decision source links to its actual card and excess related cards coll
   expect(
     screen.getByRole("link", { name: "Q-8" }).getAttribute("href"),
   ).toContain("at=decision-Q-8");
-  const more = screen.getByText("另外 1 张").closest("details");
-  expect(more?.open).toBe(false);
-  fireEvent.click(screen.getByText("另外 1 张"));
-  expect(more?.open).toBe(true);
-  expect(
-    within(more as HTMLElement).getByRole("link", { name: "C-5 相关卡 5" }),
-  ).toBeTruthy();
+  // Related cards are listed once, in the overview's 关联 fact.
+  for (const n of [3, 4, 5])
+    expect(
+      screen.queryByRole("link", { name: new RegExp(`^C-${n}`) }),
+    ).toBeNull();
   expect(view.container.textContent).not.toContain("来源：你的原话");
 });
 
@@ -113,7 +111,7 @@ test.each([false, true])(
     const nav = await screen.findByRole("tablist", { name: "卡片区块导航" });
     expect(within(nav).queryByText("准备发布")).toBeNull();
     expect(screen.queryByRole("region", { name: "工作项" })).toBeNull();
-    expect(screen.queryByRole("region", { name: "来源和相关卡片" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "来源" })).toBeNull();
     expect(screen.queryByText(/工作项（.*完成）/)).toBeNull();
     const overview = within(nav).getByRole("tab", { name: "概览" });
     fireEvent.keyDown(overview, { key: "ArrowRight" });

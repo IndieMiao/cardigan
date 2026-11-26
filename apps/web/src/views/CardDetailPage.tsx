@@ -32,7 +32,7 @@ import {
 } from "../components/CardNextStep.js";
 import { CardRecords } from "../components/CardRecords.js";
 import { CardSectionNav } from "../components/CardSectionNav.js";
-import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
+import { CardOverviewFacts, CardWorkItems } from "../components/CardSidebar.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { CardTemplate } from "../components/CardTemplate.js";
 import { CommentBox } from "../components/CommentBox.js";
@@ -48,6 +48,7 @@ import {
   CardActionDockSlot,
   CardDetailHeading,
   CardDetailLayout,
+  CardOverviewGrid,
   DetailNextStepForms,
   DetailStatusRow,
 } from "../components/layout/CardDetailLayout.js";
@@ -57,10 +58,7 @@ import { MergeBlockingControl } from "../components/MergeBlockingControl.js";
 import { Markdown, MarkdownBody } from "../components/Operations.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { StoryDiscussion } from "../components/StoryDiscussion.js";
-import {
-  StoryOverview,
-  useStoryAttachments,
-} from "../components/StoryOverview.js";
+import { StoryOverview } from "../components/StoryOverview.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Timeline } from "../components/Timeline.js";
 import {
@@ -560,13 +558,6 @@ function CardContent({
         : cards;
     });
   }, [referencedAttachments, later.settled, onReferencedCards]);
-  const storyAttachments = useStoryAttachments({
-    detail: head,
-    client,
-    projectId,
-    cardId,
-    revision,
-  });
   // C-581: reveal the anchor's panel once per anchor; a live refresh must not
   // pull a reader back from the panel they switched to.
   const revealed = useRef<string | undefined>(undefined);
@@ -868,7 +859,6 @@ function CardContent({
           />
         )}
         <section {...panel("overview")}>
-          <CardDependencies card={card} projectId={projectId} client={client} />
           <CardBatchChecks
             card={card}
             projectId={projectId}
@@ -926,61 +916,64 @@ function CardContent({
               ))}
             </section>
           )}
-          {card.story ? (
-            <StoryOverview
-              detail={detail}
-              attachments={storyAttachments}
-              client={client}
-              projectId={projectId}
-              cardId={cardId}
-              revision={revision}
-              onLocate={onLocate}
-              onShowTimeline={() => setSelectedSection(sectionId("timeline"))}
-              onSaved={reload}
-            />
-          ) : (
-            <section className="card-purpose" aria-label="目标和验收标准">
-              <h2>目标和验收标准</h2>
-              <Markdown body={card.goal} />
-              <section className="acceptance-criteria">
-                <h3>验收标准（{card.acceptance_criteria.length} 项）</h3>
-                <LongContent>
-                  <ul>
-                    {card.acceptance_criteria.map((criterion) => (
-                      <li key={criterion}>
-                        <MarkdownBody body={criterion} />
-                      </li>
-                    ))}
-                  </ul>
-                </LongContent>
-              </section>
-              {completionId && (
-                <section aria-label="完成申请">
-                  <h3>完成申请</h3>
-                  <p>
-                    整体完成申请已通过：
-                    <IdTag
-                      id={completionId}
-                      label="完成申请"
-                      href={routeHash({
-                        kind: "card",
-                        projectId,
-                        cardId,
-                        anchor: `delivery-${completionId}`,
-                      })}
-                    />
-                  </p>
+          <CardOverviewGrid
+            factsLabel="卡片信息"
+            facts={
+              <CardOverviewFacts
+                detail={detail}
+                projectId={projectId}
+                cardId={cardId}
+              />
+            }
+          >
+            {card.story ? (
+              <StoryOverview
+                detail={detail}
+                client={client}
+                projectId={projectId}
+                cardId={cardId}
+                revision={revision}
+                onLocate={onLocate}
+                onShowTimeline={() => setSelectedSection(sectionId("timeline"))}
+                onSaved={reload}
+              />
+            ) : (
+              <>
+                <section className="card-purpose" aria-label="目标">
+                  <h2>目标</h2>
+                  <Markdown body={card.goal} />
                 </section>
-              )}
-            </section>
-          )}
-          <RecentConclusions
-            detail={detail}
-            projectId={projectId}
-            onLocate={onLocate}
-          />
-          <CardSource detail={detail} projectId={projectId} />
-          <CardSidebar detail={detail} projectId={projectId} cardId={cardId} />
+                {card.acceptance_criteria.length > 0 && (
+                  <section
+                    className="card-purpose acceptance-criteria"
+                    aria-label="验收标准"
+                  >
+                    <h2>验收标准（{card.acceptance_criteria.length}）</h2>
+                    <LongContent>
+                      <ul>
+                        {card.acceptance_criteria.map((criterion) => (
+                          <li key={criterion}>
+                            <MarkdownBody body={criterion} />
+                          </li>
+                        ))}
+                      </ul>
+                    </LongContent>
+                  </section>
+                )}
+              </>
+            )}
+            <CardDependencies
+              card={card}
+              projectId={projectId}
+              client={client}
+            />
+            <RecentConclusions
+              detail={detail}
+              projectId={projectId}
+              onLocate={onLocate}
+            />
+            <CardSource detail={detail} projectId={projectId} />
+          </CardOverviewGrid>
         </section>
         {!!workCount && (
           <div {...panel("work")}>

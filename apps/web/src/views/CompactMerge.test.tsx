@@ -226,9 +226,7 @@ test.each(["review", "human_action", "blocked"] as const)(
     );
     if (kind === "blocked") expect(next.textContent).toContain("待办原文");
     expect(screen.queryByRole("button", { name: "确认合并" })).toBeNull();
-    const overview = screen.getByRole("region", {
-      name: "目标和验收标准",
-    });
+    const overview = screen.getByRole("region", { name: "目标" });
     expect(overview.tagName).toBe("SECTION");
     expect(overview.closest("[hidden]")).toBeNull();
     vi.spyOn(window, "scrollTo").mockImplementation(() => {});

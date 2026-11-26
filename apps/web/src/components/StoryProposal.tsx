@@ -7,7 +7,7 @@ import {
   describeWriteError,
 } from "../api.js";
 import { routeHash } from "../route.js";
-import { EmptyState, StatusTag } from "./Foundation.js";
+import { StatusTag } from "./Foundation.js";
 import { IdTag } from "./IdTag.js";
 import {
   ChecklistActions,
@@ -66,30 +66,28 @@ export function StoryProposalSection({
 }) {
   const proposals = detail.card.story?.proposals ?? [];
   const current = proposals.at(-1);
+  // C-699: an empty section does not render.
+  if (!current) return null;
   return (
     <section className="card-purpose" aria-label="拆解方案">
       <h2>拆解方案</h2>
-      {current ? (
-        <ProposalPanel
-          // A new version starts with fresh confirmation state.
-          key={current.version}
-          proposal={current}
-          closed={["done", "cancelled"].includes(detail.card.status)}
-          // The same condition the server and Needs You use.
-          confirmable={
-            storyProposalConfirmable(detail.card) &&
-            // Unmet prerequisites without an early start: the server refuses.
-            (!!detail.card.early_start ||
-              !detail.card.dependency?.waiting_on.length)
-          }
-          client={client}
-          projectId={projectId}
-          cardId={cardId}
-          onSaved={onSaved}
-        />
-      ) : (
-        <EmptyState>没有拆解方案</EmptyState>
-      )}
+      <ProposalPanel
+        // A new version starts with fresh confirmation state.
+        key={current.version}
+        proposal={current}
+        closed={["done", "cancelled"].includes(detail.card.status)}
+        // The same condition the server and Needs You use.
+        confirmable={
+          storyProposalConfirmable(detail.card) &&
+          // Unmet prerequisites without an early start: the server refuses.
+          (!!detail.card.early_start ||
+            !detail.card.dependency?.waiting_on.length)
+        }
+        client={client}
+        projectId={projectId}
+        cardId={cardId}
+        onSaved={onSaved}
+      />
     </section>
   );
 }

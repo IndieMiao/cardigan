@@ -26,8 +26,7 @@ import { NeedsYouPage } from "../views/NeedsYouPage.js";
 import { AttachmentGrid } from "./AttachmentGrid.js";
 import { Board } from "./Board.js";
 import { CardRecords } from "./CardRecords.js";
-import { CardSidebar } from "./CardSidebar.js";
-import { EmployeeIdentity } from "./EmployeeIdentity.js";
+import { EmployeeIdentity, NextOwners } from "./EmployeeIdentity.js";
 import { TimelineActor } from "./TimelineHeader.js";
 
 const employee = {
@@ -520,7 +519,7 @@ test("delivery/review records, attachment uploaders and next owners use the same
           attachment({ ...identity, mime: "text/plain", inline: false }),
         ]}
       />
-      <CardSidebar detail={detail} projectId="p-1" cardId="C-1" />
+      <NextOwners owners={detail.card.next_owners} />
     </>,
   );
   expect(

@@ -165,8 +165,7 @@
   }
   .page :global(.card-purpose),
   .page :global(.card-source),
-  .page :global(.recent-conclusions),
-  .page :global(.card-sidebar) {
+  .page :global(.recent-conclusions) {
     margin: 0;
     padding: 0;
     border: 0;
@@ -186,8 +185,7 @@
     font-size: var(--ui-text-base);
     line-height: var(--ui-leading);
   }
-  .page :global(.card-purpose > section),
-  .page :global(.card-sidebar > section > section) {
+  .page :global(.card-purpose > section) {
     margin-top: var(--ui-space-6);
   }
   .page :global(.card-purpose p),
@@ -197,16 +195,6 @@
   .page :global(.acceptance-criteria ul) {
     margin: 0;
     padding-inline-start: var(--ui-space-6);
-  }
-  .page :global(.card-background-summary) {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--ui-space-2);
-  }
-  .page :global(.card-background-summary > :last-child) {
-    color: var(--text-muted);
-    font-size: var(--ui-text-sm);
-    font-weight: normal;
   }
   .page :global(.card-source blockquote) {
     margin: 0 0 var(--ui-space-3);
@@ -558,6 +546,58 @@
   .nextFeedback:not(:has(:global(.request-feedback):not(:empty))) {
     display: none;
   }
+  /* C-699: overview columns; the facts column is a bordered panel. */
+  .overview {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--ui-detail-facts);
+    align-items: start;
+    gap: var(--ui-space-6);
+    min-width: 0;
+  }
+  .overviewMain {
+    display: grid;
+    gap: var(--ui-space-6);
+    min-width: 0;
+  }
+  .overviewFacts {
+    min-width: 0;
+    padding: var(--ui-space-4);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+  }
+  /* C-699: DetailFacts compact (the overview's facts column): pairs space-3
+     apart, each label on its value's first line however tall the tags. */
+  .facts[data-compact] {
+    align-items: baseline;
+    column-gap: var(--ui-space-3);
+  }
+  .facts[data-compact] > .fact {
+    grid-template-columns: var(--ui-detail-facts-label) minmax(0, 1fr);
+    align-items: baseline;
+    min-height: 0;
+  }
+  .facts[data-compact] > .fact > dd > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .factGroup {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+  }
+  .page:global(.card-page-drawer) .overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .page:global(.card-page-drawer) .overviewFacts {
+    padding: var(--ui-space-3) 0 0;
+    border: 0;
+    border-top: var(--ui-stroke) solid var(--border);
+    border-radius: 0;
+  }
+  .page:global(.card-page-drawer) .facts[data-compact] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .nextForms {
     display: grid;
     gap: var(--ui-space-3);
@@ -810,6 +850,18 @@
     }
     .page :global(.card-section) {
       padding: var(--ui-space-3);
+    }
+    .overview {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .overviewFacts {
+      padding: var(--ui-space-3) 0 0;
+      border: 0;
+      border-top: var(--ui-stroke) solid var(--border);
+      border-radius: 0;
+    }
+    .page:global(.card-page-drawer) .facts[data-compact] {
+      grid-template-columns: minmax(0, 1fr);
     }
   }
 }

@@ -1,7 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import {
   ApiError,
-  type AttachmentView,
   type CardDetail,
   type CardiganClient,
   type CardListItem,
@@ -15,9 +14,8 @@ import { routeHash } from "../route.js";
 import { BOARD_STATUSES, CARD_STATUS_LABELS } from "../status.js";
 import { type StoryProgress, storyGraph } from "../story-graph.js";
 import { useResource } from "../useResource.js";
-import { AttachmentGrid } from "./AttachmentGrid.js";
 import { DependencyPeek } from "./CardDependencies.js";
-import { EmptyState, LongContent, StatusTag, Time } from "./Foundation.js";
+import { LongContent, StatusTag, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
 import { ChecklistActions, ChecklistAlert } from "./layout/ChecklistLayout.js";
 import {
@@ -44,7 +42,6 @@ const ID_BATCH = 100;
  */
 export function StoryOverview({
   detail,
-  attachments,
   client,
   projectId,
   cardId,
@@ -54,8 +51,6 @@ export function StoryOverview({
   onSaved,
 }: {
   detail: CardDetail;
-  /** Undefined while the overview has only the count; see `StoryAttachments`. */
-  attachments: StoryAttachmentsState;
   client: CardiganClient;
   projectId: string;
   cardId: string;
@@ -66,33 +61,33 @@ export function StoryOverview({
   onSaved: () => void;
 }) {
   const card = detail.card;
+  // C-699: the request, then where its children stand; attachments live in
+  // their own tab and empty sections do not render.
   return (
     <>
       <section className="card-purpose" aria-label="原始需求">
         <h2>原始需求</h2>
-        <Markdown body={card.goal} />
-        {card.acceptance_criteria.length > 0 && (
-          <section className="acceptance-criteria">
-            <h3>验收标准（{card.acceptance_criteria.length} 项）</h3>
-            <LongContent>
-              <ul>
-                {card.acceptance_criteria.map((criterion) => (
-                  <li key={criterion}>
-                    <MarkdownBody body={criterion} />
-                  </li>
-                ))}
-              </ul>
-            </LongContent>
-          </section>
-        )}
-        <section aria-label="需求附件">
-          <h3>
-            附件
-            {attachments.count ? `（${attachments.count}）` : ""}
-          </h3>
-          <StoryAttachments state={attachments} />
-        </section>
+        <LongContent>
+          <Markdown body={card.goal} />
+        </LongContent>
       </section>
+      {card.acceptance_criteria.length > 0 && (
+        <section
+          className="card-purpose acceptance-criteria"
+          aria-label="验收标准"
+        >
+          <h2>验收标准（{card.acceptance_criteria.length}）</h2>
+          <LongContent>
+            <ul>
+              {card.acceptance_criteria.map((criterion) => (
+                <li key={criterion}>
+                  <MarkdownBody body={criterion} />
+                </li>
+              ))}
+            </ul>
+          </LongContent>
+        </section>
+      )}
       <StoryChildren
         story={card}
         progress={card.story_progress}
@@ -119,68 +114,6 @@ export function StoryOverview({
       />
     </>
   );
-}
-
-export type StoryAttachmentsState = {
-  readonly count: number;
-  readonly attachments?: readonly AttachmentView[];
-  readonly error?: string;
-  readonly retry?: () => void;
-};
-
-function StoryAttachments({ state }: { state: StoryAttachmentsState }) {
-  if (!state.count) return <EmptyState>没有附件</EmptyState>;
-  return (
-    <>
-      {state.error && (
-        <RetryLine
-          message={`读取附件失败：${state.error}`}
-          {...(state.retry ? { retry: state.retry } : {})}
-        />
-      )}
-      {state.attachments ? (
-        <AttachmentGrid attachments={state.attachments} />
-      ) : (
-        !state.error && <Skeleton />
-      )}
-    </>
-  );
-}
-
-/**
- * The overview read carries only the attachment count; the story reads the
- * attachments panel itself, the same request the 附件 tab makes.
- */
-export function useStoryAttachments({
-  detail,
-  client,
-  projectId,
-  cardId,
-  revision,
-}: {
-  detail: CardDetail;
-  client: CardiganClient;
-  projectId: string;
-  cardId: string;
-  revision: number;
-}): StoryAttachmentsState {
-  const count = detail.overview?.attachment_count ?? detail.attachments.length;
-  const needed = !!detail.card.story && !!detail.overview && count > 0;
-  const load = useCallback(
-    async () =>
-      client.cardPanel
-        ? ((await client.cardPanel(projectId, cardId, "attachments"))
-            .attachments ?? [])
-        : [],
-    [client, projectId, cardId],
-  );
-  const read = useResource(load, revision, needed);
-  if (!detail.overview) return { count, attachments: detail.attachments };
-  return {
-    count,
-    ...(read.data ? { attachments: read.data } : {}),
-    ...(read.error ? { error: read.error, retry: read.reload } : {}),
-  };
 }
 
 function StoryChildren({
@@ -217,44 +150,39 @@ function StoryChildren({
   ).map(
     (status) => `${CARD_STATUS_LABELS[status]} ${progress?.counts[status]}`,
   );
+  if (!progress || !total) return null;
   return (
     <section className="card-section card-dependencies" aria-label="子卡进度">
       <h2>子卡进度</h2>
-      {!progress || !total ? (
-        <EmptyState>没有子卡</EmptyState>
+      <DependencyGraphFacts>
+        <span>
+          已结束 {progress.finished}/{total}
+        </span>
+        {counts.map((fact) => (
+          <span key={fact}>{fact}</span>
+        ))}
+        <DependencyGraphHelp label="怎么看子卡进度图">
+          图中除需求卡外都是它的子卡。虚线从需求卡连到最先开始的子卡；带箭头的实线是子卡之间的依赖，箭头指向后做的卡。
+        </DependencyGraphHelp>
+      </DependencyGraphFacts>
+      {rows.error && (
+        <RetryLine
+          message={`读取子卡依赖失败：${rows.error}`}
+          retry={rows.reload}
+        />
+      )}
+      {rows.data || rows.error ? (
+        <StoryChildGraph
+          story={story}
+          progress={progress}
+          rows={rows.data ?? []}
+          projectId={projectId}
+          client={client}
+          opened={opened}
+          setOpened={setOpened}
+        />
       ) : (
-        <>
-          <DependencyGraphFacts>
-            <span>
-              已结束 {progress.finished}/{total}
-            </span>
-            {counts.map((fact) => (
-              <span key={fact}>{fact}</span>
-            ))}
-            <DependencyGraphHelp label="怎么看子卡进度图">
-              图中除需求卡外都是它的子卡。虚线从需求卡连到最先开始的子卡；带箭头的实线是子卡之间的依赖，箭头指向后做的卡。
-            </DependencyGraphHelp>
-          </DependencyGraphFacts>
-          {rows.error && (
-            <RetryLine
-              message={`读取子卡依赖失败：${rows.error}`}
-              retry={rows.reload}
-            />
-          )}
-          {rows.data || rows.error ? (
-            <StoryChildGraph
-              story={story}
-              progress={progress}
-              rows={rows.data ?? []}
-              projectId={projectId}
-              client={client}
-              opened={opened}
-              setOpened={setOpened}
-            />
-          ) : (
-            <Skeleton />
-          )}
-        </>
+        <Skeleton />
       )}
     </section>
   );
@@ -371,22 +299,19 @@ function StoryDiscussionFacts({
     (n, group) => n + group.questions.filter((q) => !q.resolution).length,
     0,
   );
-  const facts = groups.length
-    ? [
-        `需求澄清 ${story?.discussion_rounds ?? 0} 轮`,
-        `问题清单 ${groups.length} 组`,
-        open ? `${open} 题待答` : "问题已全部处理",
-      ]
-    : [];
+  if (!groups.length) return null;
+  const facts = [
+    `需求澄清 ${story?.discussion_rounds ?? 0} 轮`,
+    `问题清单 ${groups.length} 组`,
+    open ? `${open} 题待答` : "问题已全部处理",
+  ];
   return (
     <section className="card-purpose" aria-label="讨论">
       <h2>讨论</h2>
       <DependencyGraphFacts>
-        {facts.length ? (
-          facts.map((fact) => <span key={fact}>{fact}</span>)
-        ) : (
-          <span>没有问题清单</span>
-        )}
+        {facts.map((fact) => (
+          <span key={fact}>{fact}</span>
+        ))}
         <Button variant="secondary" onClick={onShowTimeline}>
           查看讨论
         </Button>
@@ -429,62 +354,57 @@ function StorySummary({
   }, [client, projectId, cardId, anchor, id]);
   const read = useResource(load, revision, !!id && !loaded);
   const entry = loaded ?? read.data ?? undefined;
+  if (!id) return null;
   return (
     <section className="card-purpose" aria-label="对照总结">
       <h2>对照总结</h2>
-      {!id ? (
-        <EmptyState>没有总结</EmptyState>
+      <DependencyGraphFacts>
+        {entry && (
+          <>
+            <span>{entry.author_display ?? "常驻 Office"}</span>
+            <Time value={entry.created_at} />
+          </>
+        )}
+        <span>
+          <a
+            href={routeHash({ kind: "card", projectId, cardId, anchor })}
+            onClick={
+              onLocate
+                ? (event) => {
+                    event.preventDefault();
+                    onLocate(anchor);
+                  }
+                : undefined
+            }
+          >
+            <IdBadge id={id} />
+          </a>
+        </span>
+      </DependencyGraphFacts>
+      {!loaded && read.error && (
+        <RetryLine
+          message={`读取总结失败：${read.error}`}
+          retry={read.reload}
+        />
+      )}
+      {entry ? (
+        <Markdown body={entry.body} />
       ) : (
-        <>
-          <DependencyGraphFacts>
-            {entry && (
-              <>
-                <span>{entry.author_display ?? "常驻 Office"}</span>
-                <Time value={entry.created_at} />
-              </>
-            )}
-            <span>
-              <a
-                href={routeHash({ kind: "card", projectId, cardId, anchor })}
-                onClick={
-                  onLocate
-                    ? (event) => {
-                        event.preventDefault();
-                        onLocate(anchor);
-                      }
-                    : undefined
-                }
-              >
-                <IdBadge id={id} />
-              </a>
-            </span>
-          </DependencyGraphFacts>
-          {!loaded && read.error && (
-            <RetryLine
-              message={`读取总结失败：${read.error}`}
-              retry={read.reload}
-            />
-          )}
-          {entry ? (
-            <Markdown body={entry.body} />
-          ) : (
-            !read.error && read.pending && <Skeleton />
-          )}
-          {/* Only a summary the person can read may be confirmed against. */}
-          {entry && (
-            <StoryCompletion
-              // Each summary has its own confirmation state and retry key: a
-              // refusal of an older summary never locks out the newer one.
-              key={id}
-              detail={detail}
-              client={client}
-              projectId={projectId}
-              cardId={cardId}
-              summaryId={id}
-              onSaved={onSaved}
-            />
-          )}
-        </>
+        !read.error && read.pending && <Skeleton />
+      )}
+      {/* Only a summary the person can read may be confirmed against. */}
+      {entry && (
+        <StoryCompletion
+          // Each summary has its own confirmation state and retry key: a
+          // refusal of an older summary never locks out the newer one.
+          key={id}
+          detail={detail}
+          client={client}
+          projectId={projectId}
+          cardId={cardId}
+          summaryId={id}
+          onSaved={onSaved}
+        />
       )}
     </section>
   );

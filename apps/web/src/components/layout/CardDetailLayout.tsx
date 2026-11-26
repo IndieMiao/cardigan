@@ -198,6 +198,38 @@ export function DetailNextStepFact(
   return <span {...props} className={styles.nextFact} />;
 }
 /**
+ * C-699: the overview: a main column and a 280px facts column beside it. In a
+ * drawer and at ≤760px one column, the facts below a 1px rule.
+ */
+export function CardOverviewGrid({
+  facts,
+  factsLabel,
+  children,
+}: {
+  readonly facts?: ReactNode;
+  readonly factsLabel?: string;
+  readonly children?: ReactNode;
+}) {
+  return (
+    <div className={styles.overview}>
+      <div className={styles.overviewMain}>{children}</div>
+      {facts && (
+        <aside aria-label={factsLabel} className={styles.overviewFacts}>
+          {facts}
+        </aside>
+      )}
+    </div>
+  );
+}
+
+/** Items of one fact value that wrap as a group, e.g. a work item and its verdict. */
+export function DetailFactGroup(
+  props: Omit<ComponentProps<"span">, "className">,
+) {
+  return <span {...props} className={styles.factGroup} />;
+}
+
+/**
  * C-701: where CardActionDock renders: the first child of the detail, so the
  * dock sticks to the top of the page or drawer body while it scrolls.
  */
@@ -305,13 +337,23 @@ export function DetailDisclosure({
  */
 export function DetailFacts({
   columns = 1,
+  compact = false,
   children,
 }: {
   readonly columns?: 1 | 2;
+  /**
+   * C-699: the overview's facts column: 64px labels on their value's first
+   * line, lines 20px high, pairs 12px apart; two pairs a line in a drawer.
+   */
+  readonly compact?: boolean;
   readonly children: ReactNode;
 }) {
   return (
-    <dl className={styles.facts} data-columns={columns}>
+    <dl
+      className={styles.facts}
+      data-columns={columns}
+      data-compact={compact || undefined}
+    >
       {children}
     </dl>
   );
