@@ -712,7 +712,10 @@ export class Dispatcher {
         return !!pendingPrecheckConflict(waitState.events, w, project);
       }) ||
       waitState.work_items.some(
-        (w) => w.reported_blocker?.resume_when?.kind === "baseline_updated",
+        (w) =>
+          w.reported_blocker?.resume_when?.kind === "baseline_updated" ||
+          // C-789: a delivered/accepted producer waiting without a state change.
+          w.standby_wait?.condition?.kind === "baseline_updated",
       ) ||
       waitState.runs.some(
         (r) =>

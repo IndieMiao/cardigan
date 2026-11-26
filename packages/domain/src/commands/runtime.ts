@@ -3,6 +3,7 @@ import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import type { RunWait, RunWaitRequest } from "../work-wait.js";
 import {
+  type CommandDraft,
   type CommandPorts,
   type CommandState,
   command,
@@ -10,6 +11,12 @@ import {
   text,
 } from "./core.js";
 import { endRun } from "./end-run.js";
+import {
+  registerStandbyWait,
+  registerUnreportedBlock,
+  STANDBY_CONDITION_KINDS,
+  standbyStatus,
+} from "./standby-waits.js";
 import {
   autoResumeUsed,
   pendingBaselineConflict,
@@ -101,12 +108,26 @@ export function finishRun(
         "仅工作项执行可声明等待基线或部署",
       );
       const item = d.ownWork(assignment.work_item_id);
+      const standby = standbyStatus(item);
       ensure(
-        item.kind === "produce" && item.status === "in_progress",
+        item.kind === "produce" && (item.status === "in_progress" || standby),
         "illegal_transition",
-        "仅进行中的产出工作项可等待基线或部署",
+        "仅进行中、已交付或已验收的产出工作项可声明等待",
       );
-      if (p.wait_for.kind === "baseline_updated") {
+      ensure(
+        !standby || STANDBY_CONDITION_KINDS.has(p.wait_for.kind),
+        "validation_failed",
+        "已交付或已验收的工作项只能等待基线（baseline_updated）或资源名额（resource_available）",
+      );
+      if (p.wait_for.kind === "resource_available") {
+        validateResumeCondition(d, item, p.wait_for);
+        ensure(
+          !run.resource_keys?.includes(p.wait_for.target_id),
+          "validation_failed",
+          `本次 Run 已持有资源 ${p.wait_for.target_id}，不需要等待名额`,
+        );
+        wait = { condition: { ...p.wait_for } };
+      } else if (p.wait_for.kind === "baseline_updated") {
         const sha =
           run.pending_finish?.wait_for?.condition.kind === "baseline_updated"
             ? run.pending_finish.wait_for.condition.target_id
@@ -122,7 +143,7 @@ export function finishRun(
         ensure(
           p.wait_for.kind === "deployment_ready",
           "validation_failed",
-          "执行结束仅支持等待基线或部署",
+          "执行结束仅支持等待基线、部署或资源名额",
         );
         wait = { condition: p.wait_for };
       }
@@ -185,13 +206,36 @@ export function finishRun(
       });
       return next;
     }
-    return endRun(
-      d,
-      { ...run, ...(wait ? { wait_for: wait } : {}) },
-      p.outcome,
-      p.summary,
-    );
+    return applyFinish(d, run, p.outcome, p.summary, wait);
   });
+}
+
+/**
+ * C-789: end the Run with its declared next step. A wait on a delivered or
+ * accepted producer is registered on the item without changing its state; a
+ * `blocked` ending with nothing registered gets a system-registered blocker
+ * for PM. Neither ever refuses the finish.
+ */
+function applyFinish(
+  d: CommandDraft,
+  run: Run,
+  outcome: RunOutcome,
+  summary: string,
+  wait: RunWait | undefined,
+) {
+  const owner = d.get("assignments", run.assignment_id);
+  const item =
+    owner.scope === "work_item" ? d.work(owner.work_item_id) : undefined;
+  if (wait && item && standbyStatus(item)) {
+    registerStandbyWait(d, item, {
+      reason: summary,
+      condition: wait.condition,
+      run,
+    });
+    return endRun(d, run, outcome, summary);
+  }
+  if (outcome === "blocked" && !wait) registerUnreportedBlock(d, run, summary);
+  return endRun(d, wait ? { ...run, wait_for: wait } : run, outcome, summary);
 }
 
 /** Host-only: the caller has observed this exact RuntimeRef alive and reconnected the Run. */
@@ -221,11 +265,12 @@ export function settlePendingRunFinish(
       hostOpsPending(state.events, a.id)
     )
       return run;
-    return endRun(
+    return applyFinish(
       d,
-      { ...run, ...(pending.wait_for ? { wait_for: pending.wait_for } : {}) },
+      run,
       pending.outcome,
       pending.summary,
+      pending.wait_for,
     );
   });
 }

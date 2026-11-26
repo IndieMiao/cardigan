@@ -312,10 +312,14 @@ export function supportTools(options: SupportToolOptions = {}) {
               kind: z.literal("deployment_ready"),
               target_id: z.string().regex(/^[a-f0-9]{40}$/u),
             }),
+            z.object({
+              kind: z.literal("resource_available"),
+              target_id: z.string().min(1).max(64),
+            }),
           ])
           .optional()
           .describe(
-            "Wake this producer once the host baseline differs from its registered baseline, or the specified full SHA is deployed successfully. Omit for normal finish.",
+            "Wake this producer once the host baseline differs from its registered baseline, the specified full SHA is deployed successfully, or (resource_available) in a new Run that holds the named resource this work item requires. Delivered or accepted producers may wait for the baseline or a resource without changing state. Omit for normal finish.",
           ),
       }),
       handler: ({ idempotency_key, ...params }, context) =>

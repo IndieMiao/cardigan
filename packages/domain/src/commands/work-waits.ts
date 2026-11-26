@@ -8,6 +8,7 @@ import type {
 } from "../entities.js";
 import { eventsOfType, eventsOfTypes } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
+import { parseCapabilityRequirement } from "../machine-requirements.js";
 import {
   latestPrecheckConflict,
   pendingPrecheckConflict,
@@ -28,6 +29,7 @@ import {
 import { authorPrecheckWait } from "./precheck-wait.js";
 import { closedResumeTarget, deferResume } from "./resume-attention.js";
 import { resumeBlockReason, resumeWork } from "./resumption.js";
+import { resumeStandbyWaits } from "./standby-waits.js";
 import { stoppedByHuman } from "./stop-state.js";
 
 const payload = (e: Event) => e.payload as Record<string, unknown>;
@@ -93,6 +95,32 @@ function targetEvent(d: CommandDraft, c: ResumeCondition): Event | undefined {
   return undefined;
 }
 
+/**
+ * C-789: the physical resource keys a work item's Runs claim at admission:
+ * its own capability requirements and its owner's pinned role requirements.
+ */
+export function workItemResourceKeys(
+  state: CommandState,
+  item: WorkItem,
+): string[] {
+  const owner = state.assignments.find((a) => a.id === item.assignment_id);
+  const role = owner
+    ? state.roles.find(
+        (r) =>
+          r.role_id === owner.role_id && r.role_version === owner.role_version,
+      )
+    : undefined;
+  const keys = new Set<string>();
+  for (const constraint of [
+    ...(item.requirements?.capabilities ?? []),
+    ...(role?.required_capabilities ?? []),
+  ]) {
+    const parsed = parseCapabilityRequirement(constraint);
+    if (parsed.ok) keys.add(parsed.value.key);
+  }
+  return [...keys];
+}
+
 export function validateResumeCondition(
   d: CommandDraft,
   item: WorkItem,
@@ -139,6 +167,9 @@ export function validateResumeCondition(
       break;
     case "decision_resolved":
       valid = d.list("decisions").some((q) => q.id === c.target_id);
+      break;
+    case "resource_available":
+      valid = workItemResourceKeys(d.state, item).includes(c.target_id);
       break;
   }
   ensure(
@@ -255,6 +286,12 @@ function satisfied(
     return q?.status === "resolved" ? q.id : undefined;
   }
   if (c.kind === "deployment_ready") return deploymentEvidence(d, c.target_id);
+  // C-789: nothing to observe here. The wake is a full-weight trigger, so the
+  // next Run claims the resource at admission and queues until it is free.
+  if (c.kind === "resource_available")
+    return item && workItemResourceKeys(d.state, item).includes(c.target_id)
+      ? `resource:${c.target_id}`
+      : undefined;
   const event = targetEvent(d, c);
   if (!event) return;
   const p = payload(event);
@@ -558,8 +595,14 @@ export function resumeWorkWaits(
         .toSorted((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
       // A live author session continues in place: clear the reported blocker and
       // notify that Run. Baseline conflicts still need a fresh, synced session.
+      // C-789: a resource wait needs a fresh Run that claims the resource.
       const continuing =
-        active && blocker && !conflictWait ? active : undefined;
+        active &&
+        blocker &&
+        !conflictWait &&
+        condition.kind !== "resource_available"
+          ? active
+          : undefined;
       const guard =
         waitOwnerGuard(d, item, owner) ??
         (runs.some((r) => r.dispatch_stop || r.inactivity_stop)
@@ -705,6 +748,9 @@ export function resumeWorkWaits(
         d.put("runs", { ...last, wait_for: { ...wait, resumed_by: event.id } });
       resumed.push(item.id);
     }
+    resumed.push(
+      ...resumeStandbyWaits(d, (c, item) => satisfied(d, c, p.baseline, item)),
+    );
     notifyEvidenceUnblocked(d);
     if (resumed.length)
       d.emit("work_waits_resumed", undefined, {

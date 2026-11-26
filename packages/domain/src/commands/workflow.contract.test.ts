@@ -350,8 +350,24 @@ test.each(["delivered", "accepted"] as const)(
     expect(requested.data.affected_work_items).toEqual([]);
     expect(apply(state, requested).runs).toEqual(state.runs);
     expect(item(apply(state, requested), ctx.producer).status).toBe(status);
+    // C-789: a blocker report on a delivered/accepted producer is a standby
+    // wait for PM; it never changes the state.
+    const standby = value(
+      reportBlocker(
+        state,
+        ctx.coder,
+        { work_item_id: ctx.producer, needs: "role", reason: "Need help" },
+        io,
+      ),
+    );
+    expect(item(apply(state, standby), ctx.producer)).toMatchObject({
+      status,
+      standby_wait: { reason: expect.any(String) },
+    });
+    expect(item(apply(state, standby), ctx.producer).reported_blocker).toBe(
+      undefined,
+    );
     const results = [
-      pause(ctx, state, "blocker"),
       pause(ctx, state, "human_action"),
       requestDecision(
         state,
