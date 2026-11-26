@@ -125,6 +125,7 @@ export function MergeDialogs({
     >
       {mode && (
         <DialogContent
+          narrowSheet
           role={mode === "override" ? "alertdialog" : "dialog"}
           aria-modal={mode === "override" || undefined}
           aria-describedby={undefined}

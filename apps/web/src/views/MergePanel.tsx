@@ -229,8 +229,10 @@ export function MergePanel({
     />
   );
   // The emphasis button the dock repeats; it is the first of the actions.
-  const primary: DockAction | undefined =
-    main !== "emphasis" || needsTakeover
+  // Before a takeover that is 接手处理, which opens the takeover dialog.
+  const primary: DockAction | undefined = needsTakeover
+    ? { label: "接手处理" }
+    : main !== "emphasis"
       ? undefined
       : fresh
         ? {
@@ -529,7 +531,9 @@ function MergeFacts({ q }: { readonly q: NeedsDecision }) {
       {check?.summary &&
         ["failed", "timed_out", "interrupted", "executor_unreachable"].includes(
           check.status,
-        ) && <DetailNextStepLine>{check.summary}</DetailNextStepLine>}
+        ) && (
+          <DetailNextStepLine tone="danger">{check.summary}</DetailNextStepLine>
+        )}
       {merge?.merge_gate_invalid && (
         <DetailNextStepLine tone="danger">
           合并闸门配置无效，请查看 server 启动日志

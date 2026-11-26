@@ -327,6 +327,14 @@ async function capture(outArg, before, merged = false) {
             "时间线",
             "scroll 700",
           ]);
+          // Before a PM takeover the bar repeats 接手处理.
+          await open("cards/C-707", pageReady, theme, "?long");
+          await scrollAway();
+          await record(`dock-page-C-707-${suffix}`, [
+            "?long",
+            "时间线",
+            "scroll 700",
+          ]);
           await open("cards/C-709", pageReady, theme);
           await click(
             "section[aria-label='下一步'] [data-ui=button]",

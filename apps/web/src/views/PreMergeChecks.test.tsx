@@ -7,7 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, expect, onTestFinished, test, vi } from "vitest";
 import type {
   CardDetail,
   NeedsDecision,
@@ -393,6 +393,7 @@ test.each(["needs", "card"])(
   "C-760: %s override names open holds and sends them as follow-ups only when ticked",
   async (page) => {
     // Radix measures the checkbox's form input inside the dialog's form.
+    onTestFinished(() => vi.unstubAllGlobals());
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -465,7 +466,6 @@ test.each(["needs", "card"])(
         true,
       ),
     );
-    vi.unstubAllGlobals();
   },
 );
 

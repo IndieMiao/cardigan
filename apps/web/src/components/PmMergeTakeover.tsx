@@ -16,7 +16,10 @@ export function PmMergeTakeover({
   accepted: boolean;
   onAccept: () => void;
   controls: RefObject<HTMLElement | null>;
-  /** C-697: a 32px button among the “下一步” panel's actions. */
+  /**
+   * C-697: the “下一步” panel's main action until taken over: a 32px
+   * emphasis button (C-687 §3.2).
+   */
   regular?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -27,7 +30,9 @@ export function PmMergeTakeover({
         // A shown button keeps its own display; leave it out once accepted.
         !accepted && (
           <Dialog.Trigger asChild>
-            <Button size="regular">接手处理</Button>
+            <Button size="regular" variant="emphasis">
+              接手处理
+            </Button>
           </Dialog.Trigger>
         )
       ) : (

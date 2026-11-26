@@ -288,7 +288,7 @@ test("C-697: 合并详情 opens the folded evidence below the panel", () => {
   expect(details?.hidden).toBe(true);
 });
 
-test("a merge PM confirms is not yours: no emphasis until you take it over", async () => {
+test("a merge PM confirms is not yours: 接手处理 leads until you take it over", async () => {
   const q = merge({ decider: "role:pm" });
   const { region, title, emphasis } = panel(
     cardDetail({
@@ -298,7 +298,8 @@ test("a merge PM confirms is not yours: no emphasis until you take it over", asy
   );
   expect(title).toBe("等 PM 确认合并Q-2");
   expect(region.dataset.mine).toBeUndefined();
-  expect(emphasis).toHaveLength(0);
+  // C-687 §3.2: before a takeover, 接手处理 is the panel's only main action.
+  expect([...emphasis].map((e) => e.textContent)).toEqual(["接手处理"]);
   expect(within(region).queryByRole("button", { name: "确认合并" })).toBeNull();
   expect(within(region).getByRole("button", { name: "合并详情" })).toBeTruthy();
   fireEvent.click(within(region).getByRole("button", { name: "接手处理" }));
@@ -943,6 +944,52 @@ test("C-697: the drawer dock names the step and repeats 确认合并 from the me
       expect.any(String),
     ),
   );
+  slot.remove();
+  vi.unstubAllGlobals();
+});
+
+test("C-697: before a PM takeover the dock repeats 接手处理 and opens its dialog", async () => {
+  const move = stubPanelObserver();
+  const client = fakeClient();
+  const slot = document.createElement("div");
+  document.body.append(slot);
+  const q = merge({ decider: "role:pm" });
+  render(
+    <CardNextStep
+      detail={cardDetail({
+        card: { ...card, status: "awaiting_merge", waiting_on: [] },
+        merge_confirmations: [q],
+        decisions: [q],
+      })}
+      client={client}
+      projectId="p-1"
+      onSaved={() => {}}
+      onReveal={() => {}}
+      markDone={() => null}
+      mergePanel={(item, { title, mine, dockFor }) => (
+        <MergePanel
+          q={item}
+          client={client}
+          projectId="p-1"
+          done={() => {}}
+          title={title}
+          mine={mine}
+          dockFor={dockFor}
+        />
+      )}
+      inDrawer
+      dock={slot}
+    />,
+  );
+  move("above");
+  const dock = within(slot).getByRole("region", { name: "主操作" });
+  expect(dock.textContent).toBe("等 PM 确认合并Q-2接手处理");
+  const action = within(dock).getByRole("button", { name: "接手处理" });
+  expect(action.className).toContain("ui-button-emphasis");
+  fireEvent.click(action);
+  expect(
+    await screen.findByRole("dialog", { name: "接手 PM 合并确认" }),
+  ).toBeTruthy();
   slot.remove();
   vi.unstubAllGlobals();
 });
