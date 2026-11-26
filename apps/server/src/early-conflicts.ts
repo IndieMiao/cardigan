@@ -38,9 +38,10 @@ export function pathsOverlap(
 /**
  * C-782: after main advances, trial-merge delivered heads of cards in review
  * whose changes overlap main's changes since they forked, and tell idle
- * authors about conflicts early. Git work is read-only merge-tree in the central bare repository: no
- * repository or publication lock, ref, index or worktree is touched, so it
- * never waits for, nor holds up, merges or other cards' Git operations.
+ * authors about conflicts early. The central repository is only read (merge
+ * objects go to a scratch directory) and no repository or publication lock,
+ * ref, index or worktree is touched, so it never waits for, nor holds up,
+ * merges or other cards' Git operations.
  */
 export class EarlyConflictObserver {
   /** `${project}:${delivery}:${head}:${baseline}` → conflicted paths ([] = clean). */

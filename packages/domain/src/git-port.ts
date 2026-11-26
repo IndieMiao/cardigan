@@ -66,6 +66,11 @@ export interface GitWorktreePort {
 /** C-782: `diff3` also prints each conflict's merge-base section. */
 export interface GitMergeTreeOptions {
   readonly conflictStyle?: "diff3";
+  /**
+   * Write the merge's objects to a temporary directory that is removed
+   * afterwards: only the conflict list is usable, the tree id is not.
+   */
+  readonly scratch?: boolean;
 }
 /** In-memory result of `merge-tree --write-tree`; conflicts never move a ref. */
 export interface GitTreeMerge {

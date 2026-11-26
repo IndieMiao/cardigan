@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EARLY_MERGE_CONFLICT } from "@cardigan/domain";
@@ -174,7 +180,7 @@ const git = (cwd: string, ...args: string[]) =>
     { encoding: "utf8" },
   ).trim();
 
-test("C-782: the real trial merge reports conflicts while the project repository lock is held, and takes no lock", async () => {
+test("C-782: the real trial merge reports conflicts while the project repository lock is held, takes no lock and writes nothing to the center", async () => {
   const m4 = m4Fixture();
   const root = mkdtempSync(join(tmpdir(), "cardigan-early-conflict-"));
   try {
@@ -218,6 +224,8 @@ test("C-782: the real trial merge reports conflicts while the project repository
     const refs = () =>
       git(repository, "for-each-ref", "--format=%(refname) %(objectname)");
     const refsBefore = refs();
+    const objects = () => git(repository, "count-objects", "-v");
+    const objectsBefore = objects();
     // Its own in-process queue and (on Linux) flock: a waiting trial merge would hang here.
     const lock = (observed as unknown as { lock: RepositoryLock }).lock;
     const held = Promise.withResolvers<void>();
@@ -237,8 +245,14 @@ test("C-782: the real trial merge reports conflicts while the project repository
       await holding;
     }
     expect(samples.map((sample) => sample.operation)).toEqual(["probe"]);
-    // No ref moved or appeared.
+    // No ref moved or appeared, and the merge objects went to a removed scratch directory.
     expect(refs()).toBe(refsBefore);
+    expect(objects()).toBe(objectsBefore);
+    expect(
+      readdirSync(join(dataDir, "central")).filter((n) =>
+        n.startsWith(".trial-merge-"),
+      ),
+    ).toEqual([]);
   } finally {
     m4.close();
     rmSync(root, { recursive: true, force: true });

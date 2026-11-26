@@ -539,20 +539,12 @@ export class CentralRepositoryService {
     }
     return this.publishBatch(project, batch);
   }
-  /** The final preparation's merge, before any commit object; `undefined` when already merged. */
-  private async resolvedMerge(repository: string, base: string, sha: string) {
-    if (await this.git.isAncestor(repository, sha, base)) return undefined;
-    const merged = await this.git.mergeTree(repository, base, sha);
-    return merged.conflicts.length === 1 &&
-      merged.conflicts[0] === "docs/development-plan.md" &&
-      this.git.resolvePlanConflict
-      ? this.git.resolvePlanConflict(repository, base, sha, merged)
-      : merged;
-  }
   /**
    * C-782: paths the final merge preparation would report as conflicted for a
-   * delivered head on the current baseline. Only merge-tree objects are
-   * written: no commit, ref, index, worktree or repository lock is involved.
+   * delivered head on the current baseline. Read-only for the central
+   * repository: merge objects go to a scratch directory that is removed, and
+   * no commit, ref, index, worktree or repository lock is involved. A lone
+   * development-plan conflict is left to the preparation's union resolution.
    */
   async trialMerge(
     project: CentralProject,
@@ -561,8 +553,18 @@ export class CentralRepositoryService {
   ): Promise<readonly string[]> {
     if (![base, sha].every((value) => fullSha.test(value)))
       throw new Error("Trial merge requires full commit SHAs");
-    const repository = await this.ensureCentral(project);
-    return (await this.resolvedMerge(repository, base, sha))?.conflicts ?? [];
+    if (!(await this.hasCentral(project)))
+      throw new Error("Central repository is missing");
+    const repository = this.repositoryPath(project);
+    if (await this.git.isAncestor(repository, sha, base)) return [];
+    const { conflicts } = await this.git.mergeTree(repository, base, sha, {
+      scratch: true,
+    });
+    return conflicts.length === 1 &&
+      conflicts[0] === "docs/development-plan.md" &&
+      this.git.resolvePlanConflict
+      ? []
+      : conflicts;
   }
   private async mergeCandidate(
     repository: string,
@@ -571,8 +573,20 @@ export class CentralRepositoryService {
     message: string,
     identity: { readonly name: string; readonly email: string },
   ) {
-    const merged = await this.resolvedMerge(repository, base, sha);
-    if (!merged) return { sha: base, conflicts: [] as readonly string[] };
+    if (await this.git.isAncestor(repository, sha, base))
+      return { sha: base, conflicts: [] as readonly string[] };
+    let merged = await this.git.mergeTree(repository, base, sha);
+    if (
+      merged.conflicts.length === 1 &&
+      merged.conflicts[0] === "docs/development-plan.md" &&
+      this.git.resolvePlanConflict
+    )
+      merged = await this.git.resolvePlanConflict(
+        repository,
+        base,
+        sha,
+        merged,
+      );
     if (merged.conflicts.length)
       return { sha: base, conflicts: merged.conflicts };
     return {
