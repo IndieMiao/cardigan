@@ -184,6 +184,11 @@ export class DeploymentController {
         throw new DeploymentServerUnavailable();
       }
       if (!d.enabled) return;
+      // C-390: a human maintenance window holds every automatic deployment.
+      if (await d.maintenanceActive?.()) {
+        this.drain = undefined;
+        return;
+      }
       const current = await d.current();
       const selection = d.target ? await d.target() : { sha: await d.main() };
       const target = selection.sha;

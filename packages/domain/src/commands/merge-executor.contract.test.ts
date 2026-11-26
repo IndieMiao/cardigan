@@ -186,3 +186,176 @@ test.each([
     error: { code: "validation_failed" },
   });
 });
+
+test.each([
+  ["push_timeout", "timeout", "候选推送超时"],
+  ["push_rejected", "auth", "GitHub 拒绝或报错候选推送"],
+  ["push_failed", "local", "候选推送在本机失败"],
+] as const)(
+  "C-758: %s is recorded as a push failure, not an unreachable executor, with the same backoff",
+  (stage, push_failure, label) => {
+    const f = setup();
+    const executor = "github-actions";
+    const failure = {
+      category: "dispatch_unknown",
+      stage,
+      push_failure,
+      push_exit_code: 128,
+      push_attempts: 3,
+      push_duration_ms: 20_140,
+    };
+    const first = f.record({
+      executor,
+      status: "unreachable",
+      attempt_id: "attempt-1",
+      failure,
+    });
+    expect(first.events.map((e) => e.type)).toEqual([
+      "merge_executor_push_failed",
+    ]);
+    expect(first.events[0]?.payload).toMatchObject({
+      executor,
+      attempt_id: "attempt-1",
+      failure,
+      failure_count: 1,
+      description: `${label}，合并检查排队等待并按退避重试`,
+    });
+    expect(JSON.stringify(first.events)).not.toContain("不可达");
+    // Same executor backoff state as before C-758: 1 minute, then doubling.
+    const outage = mergeExecutorOutage(f.state(), executor);
+    expect(
+      Date.parse(outage?.next_retry_at ?? "") - Date.parse(f.io.clock.now()),
+    ).toBe(60_000);
+    // Replaying the same attempt neither counts again nor emits.
+    expect(
+      f.record({
+        executor,
+        status: "unreachable",
+        attempt_id: "attempt-1",
+        failure,
+      }).events,
+    ).toEqual([]);
+    f.advance(60_000);
+    const second = f.record({
+      executor,
+      status: "unreachable",
+      attempt_id: "attempt-2",
+      failure,
+    });
+    expect(second.data?.failure_count).toBe(2);
+    expect(
+      Date.parse(second.data?.next_retry_at ?? "") -
+        Date.parse(f.io.clock.now()),
+    ).toBe(2 * 60_000);
+    // A persistent push failure escalates once with push-specific guidance.
+    f.advance(31 * 60_000);
+    const poll = f.record({ executor, status: "poll" });
+    expect(poll.events.map((e) => e.type)).toEqual([
+      "human_action_requested",
+      "merge_executor_attention_required",
+    ]);
+    const action = f.state().human_actions[0];
+    expect(action?.instructions).toContain("候选推送持续失败");
+    expect(action?.instructions).toContain(label);
+    expect(action?.instructions).not.toContain("SSH");
+    expect(action?.why_human).toBe("候选推送已连续失败超过 30 分钟");
+    const recovery = f.record({ executor, status: "reachable" });
+    expect(recovery.events.map((e) => e.type)).toEqual([
+      "human_action_cancelled",
+      "merge_executor_recovered",
+    ]);
+    expect(recovery.events[1]?.payload).toMatchObject({
+      description: "候选推送已恢复，合并检查自动继续",
+    });
+    expect(mergeExecutorOutage(f.state(), executor)).toBeUndefined();
+  },
+);
+
+test("C-758: only a push that could not reach GitHub is recorded as an unreachable executor", () => {
+  const f = setup();
+  const failure = {
+    category: "dispatch_unknown",
+    stage: "push_unreachable",
+    push_failure: "network",
+  } as const;
+  const effect = f.record({
+    executor: "github-actions",
+    status: "unreachable",
+    attempt_id: "attempt-1",
+    failure,
+  });
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "merge_executor_unreachable",
+  ]);
+  expect(effect.events[0]?.payload).toMatchObject({
+    failure,
+    description: "远程检查机不可达，合并检查排队等待并按退避重试",
+  });
+});
+
+test.each(["not_sent", "push_cancelled"] as const)(
+  "C-758: a local cancellation (%s) is not an executor observation",
+  (stage) => {
+    const f = setup();
+    const executor = "github-actions";
+    const cancelled = f.record({
+      executor,
+      status: "unreachable",
+      attempt_id: "attempt-1",
+      failure: { category: "dispatch_unknown", stage },
+    });
+    expect(cancelled.events).toEqual([]);
+    expect(cancelled.data).toBeUndefined();
+    expect(mergeExecutorOutage(f.state(), executor)).toBeUndefined();
+    // During an existing outage it neither counts nor resets the backoff.
+    const outage = f.record({
+      executor,
+      status: "unreachable",
+      attempt_id: "attempt-2",
+      failure: { category: "dispatch_unknown", stage: "run_not_found" },
+    }).data;
+    const during = f.record({
+      executor,
+      status: "unreachable",
+      attempt_id: "attempt-3",
+      failure: { category: "dispatch_unknown", stage },
+    });
+    expect(during.events).toEqual([]);
+    expect(outage?.failure_count).toBe(1);
+    expect(during.data).toEqual(mergeExecutorOutage(f.state(), executor));
+    expect(mergeExecutorOutage(f.state(), executor)?.failure_count).toBe(1);
+  },
+);
+
+test.each([
+  { category: "dispatch_unknown", stage: "push_failed", push_failure: "boom" },
+  { category: "dispatch_unknown", stage: "push_failed", push_exit_code: 256 },
+  { category: "dispatch_unknown", stage: "push_failed", push_exit_code: -1 },
+  { category: "dispatch_unknown", stage: "push_failed", push_attempts: 1.5 },
+  { category: "dispatch_unknown", stage: "push_failed", push_attempts: 17 },
+  {
+    category: "dispatch_unknown",
+    stage: "push_failed",
+    push_duration_ms: "20s",
+  },
+  {
+    category: "dispatch_unknown",
+    stage: "push_failed",
+    push_failure: "Bearer ghs_x",
+  },
+])("C-758: malformed push failure evidence is rejected (%o)", (failure) => {
+  const state = fixture();
+  expect(
+    recordMergeExecutor(
+      state,
+      { kind: "system", project_id: state.project_id },
+      {
+        executor: "ci",
+        status: "unreachable",
+        attempt_id: "attempt-1",
+        failure: failure as never,
+      },
+      ports(),
+    ),
+  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+});

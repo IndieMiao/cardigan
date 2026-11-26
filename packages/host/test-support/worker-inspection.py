@@ -163,12 +163,20 @@ class CollectorTest(unittest.TestCase):
             user=SimpleNamespace(pw_name='worker',pw_gid=3333,pw_dir=root)
             with patch.dict(probe['main'].__globals__, native={'project_account':lambda r:self.assertEqual(r['project'],'fixture')}), \
                     patch('platform.system',return_value='Linux'), patch('pwd.getpwuid',return_value=user), patch('grp.getgrgid',return_value=SimpleNamespace(gr_name='worker')), \
-                    patch('os.geteuid',return_value=3333), patch('os.getuid',return_value=3333), patch('os.getegid',return_value=3333):
+                    patch('os.geteuid',return_value=3333), patch('os.getuid',return_value=3333), patch('os.getegid',return_value=3333), \
+                    patch.dict(os.environ, XDG_RUNTIME_DIR=str(root/'no-runtime')):
                 evidence=probe['main'](conf)
+                # C-746: each null names its failed read (no core socket, no
+                # registered CLI); a present field carries no reason.
+                self.assertEqual(evidence['unavailable'], dict(terminals='core_socket_missing', processes='no_registered_process'))
+                self.assertEqual(probe['main'](dict(conf, live=False))['unavailable'], {})
+                self.assertEqual(probe['main'](dict(conf, harness=None))['unavailable']['events'], 'harness_unknown')
+                self.assertEqual(probe['main'](dict(conf, local=True))['unavailable']['events'], 'session_not_published')
                 self.assertEqual(evidence['markers'],['identity','published']); self.assertIsNone(evidence['terminals']); self.assertIsNone(evidence['processes'])
                 self.assertEqual(evidence['helpers'][0],__import__('hashlib').sha256(b'').hexdigest()); self.assertGreater(evidence['free_bytes'],0)
                 self.assertEqual(evidence['events'],[dict(type='response_item',time='2026-01-01T00:00:00Z')]); self.assertNotIn('private',json.dumps(evidence))
                 wrong=probe['main'](dict(conf,target='changed'));self.assertIsNone(wrong['markers']);self.assertIsNone(wrong['events'])
+                self.assertEqual(wrong['unavailable']['events'], 'launch_markers_unreadable')
 
                 # Journal fallback also distinguishes an unreadable saved PID
                 # from an hc observation with no candidates.
@@ -176,9 +184,55 @@ class CollectorTest(unittest.TestCase):
                 no_sample = MagicMock(side_effect=OSError('synthetic unavailable sample'))
                 primitives = dict(project_account=lambda _: None, identity=lambda *args: saved)
                 with patch.dict(probe['main'].__globals__, native=primitives, terminals=lambda *args: ([], []), process=no_sample):
-                    self.assertEqual(probe['main'](conf)['processes'], [])
-                    self.assertIsNone(probe['main'](dict(conf, process=saved))['processes'])
+                    empty = probe['main'](conf)
+                    self.assertEqual(empty['processes'], [])
+                    # The core answered but holds no row for this terminal.
+                    self.assertEqual(empty['unavailable'], dict(terminals='terminal_not_registered'))
+                    unconfirmed = probe['main'](dict(conf, process=saved))
+                    self.assertIsNone(unconfirmed['processes'])
+                    self.assertEqual(unconfirmed['unavailable']['processes'], 'process_unconfirmed')
                     no_sample.assert_called_once_with(42)
+                for birth, reason in [(None, 'process_identity_unreadable'), (dict(saved, start='two'), 'process_identity_changed')]:
+                    changed = dict(primitives, identity=lambda *args, b=birth: b)
+                    with patch.dict(probe['main'].__globals__, native=changed, terminals=lambda *args: ([], None)):
+                        result = probe['main'](dict(conf, process=saved))
+                        self.assertIsNone(result['processes'])
+                        self.assertEqual(result['unavailable'], dict(terminals='terminal_unconfirmed', processes=reason))
+                with patch.dict(probe['main'].__globals__, native=primitives, terminals=lambda *args: ([], [])):
+                    self.assertEqual(probe['main'](dict(conf, process=dict(saved, terminal='other')))['unavailable'],
+                                     dict(terminals='terminal_not_registered'))
+
+    def test_unavailable_reasons_are_bounded_codes(self):
+        # C-746: a failed read maps to a fixed code; no message text crosses.
+        reasons = probe['unavailable']
+        self.assertEqual(reasons(FileNotFoundError('/private/path')), 'core_socket_missing')
+        self.assertEqual(reasons(ConnectionRefusedError()), 'core_not_listening')
+        self.assertEqual(reasons(socket.timeout()), 'core_timeout')
+        self.assertEqual(reasons(PermissionError()), 'permission_denied')
+        self.assertEqual(reasons(OSError('other')), 'core_unreachable')
+        self.assertEqual(reasons(KeyError('result')), 'core_reply_incomplete')
+        self.assertEqual(reasons(ValueError('secret')), 'core_reply_invalid')
+        self.assertEqual(reasons(probe['Unavailable']('core_error')), 'core_error')
+        self.assertIsInstance(probe['Unavailable']('x'), ValueError)
+        # An error reply (e.g. an address the core no longer knows) is named.
+        with tempfile.TemporaryDirectory() as raw, socket.socket(socket.AF_UNIX) as server, contextlib.ExitStack() as stack:
+            root = Path(raw).resolve(); path = Path('herdr-core/s.sock'); (root/path.parent).mkdir(parents=True)
+            old = os.getcwd(); os.chdir(root); stack.callback(os.chdir, old)
+            server.bind(str(path)); server.listen(1); server.settimeout(2)
+            def serve():
+                with server.accept()[0] as conn, conn.makefile('rb') as f:
+                    for line in f:
+                        q = json.loads(line)
+                        reply = dict(jsonrpc='2.0', id=q['id'], **({'result': dict(generation=1, framed=False)} if q['method'] == 'hello'
+                                                                  else {'error': dict(code=-32000, message='no such terminal')}))
+                        conn.sendall((json.dumps(reply)+'\n').encode())
+            threading.Thread(target=serve, daemon=True).start()
+            connect = socket.socket.connect
+            stack.enter_context(patch.object(socket.socket,'connect',lambda s,p:connect(s,os.path.relpath(p,root))))
+            stack.enter_context(patch.dict(os.environ, XDG_RUNTIME_DIR=str(root)))
+            with probe['core_rpc'](root, 's', 'linux') as rpc, self.assertRaises(probe['Unavailable']) as raised:
+                rpc('terminal.get', dict(terminal='t86'))
+            self.assertEqual(raised.exception.code, 'core_error')
 
     def test_local_replacement_does_not_inherit_assignment_log(self):
         with tempfile.TemporaryDirectory() as raw, contextlib.ExitStack() as stack:

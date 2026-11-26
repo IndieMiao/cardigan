@@ -27,7 +27,12 @@ c.update(user='fixture', gid=1234, primitive=str(root/'native.py'))
 IDLE = 'done\r\n' + '─' * 20 + '\r\n❯ \r\n' + '─' * 20 + '\r\n  ? for shortcuts'
 # `ticking` keeps redrawing a line above an idle-looking prompt, like any
 # client still drawing output: never two identical reads.
-SCREENS = dict(idle=IDLE, busy='✻ Working… (3s · esc to interrupt)\r\n' + IDLE, ticking='tick {n}\r\n' + IDLE)
+# C-746: what a Cardigan Claude Code session actually draws: its two-line
+# status line (statusLine setting) sits between the editor and the footer.
+STATUS = ('✻ Done\r\n' + '─' * 20 + '\r\n❯ \r\n' + '─' * 20 + '\r\n  fixture | A-1 | coder | C-1/W-1 | R-1'
+          '\r\n  model | 32% | 4m\r\n  ⏵⏵ bypass permissions on (shift+tab to cycle)')
+SCREENS = dict(idle=IDLE, busy='✻ Working… (3s · esc to interrupt)\r\n' + IDLE, ticking='tick {n}\r\n' + IDLE,
+               status=STATUS, status_busy=STATUS + ' · esc to interrupt', status_draft=STATUS.replace('❯ ', '❯ draft'))
 
 def rpc(method, params):
     if method == 'terminal.read':

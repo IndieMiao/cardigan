@@ -70,6 +70,8 @@ export const toolNames = [
   "request_check",
   "run_probe",
   "request_macos_check",
+  // C-734: host-run image generation with a host-held credential.
+  "generate_image",
   "request_mobile_signature",
   "publish_artifact",
   "write_release_note",
@@ -82,6 +84,8 @@ export const toolNames = [
   "send_owner_message",
   "set_merge_solo",
   "set_merge_window",
+  // C-763: PM's non-blocking "wake me when that card settles" note.
+  "watch_card",
   "reserve_machine_resource",
   "create_work_item",
   "update_work_item",
@@ -102,6 +106,8 @@ export const toolNames = [
   "host_ops_cancel_run",
   "host_ops_recheck_merge",
   "host_ops_restart_standing_pm",
+  // C-759: managed stop of a session whose previous turn ended and is idle.
+  "host_ops_stop_assignment",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 export type RoleWorktree = "none" | "write" | "readonly";
@@ -146,6 +152,19 @@ export type RiskTag = "security" | "permission" | "numeric_rule";
 export interface CardHold {
   readonly reason: string;
   readonly resume_condition: string;
+  readonly set_by: Author;
+  readonly set_at: Timestamp;
+}
+
+export interface CardRunDirKeep {
+  readonly reason: string;
+  readonly set_by: Author;
+  readonly set_at: Timestamp;
+}
+
+/** C-750: PM asks the owner to mark a finished human_mark_done card done. */
+export interface CardCloseRequest {
+  readonly reason: string;
   readonly set_by: Author;
   readonly set_at: Timestamp;
 }
@@ -205,6 +224,16 @@ export interface Card {
   readonly status: CardStatus;
   /** Scheduling fence, independent of lifecycle and historical evidence. */
   readonly hold?: CardHold;
+  /**
+   * C-743: PM-named protection. Run directories of this card's released
+   * Assignments are never reclaimed automatically while it is set.
+   */
+  readonly keep_run_dirs?: CardRunDirKeep;
+  /**
+   * C-750: PM's closing note for the owner's "待你标记完成" item. Listed only
+   * while the card can be marked done; never marks it done by itself.
+   */
+  readonly close_request?: CardCloseRequest;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
   /** The replacement card, distinct from other related cards. */
   readonly superseded_by?: CardId;
@@ -658,6 +687,8 @@ export interface Run {
   };
   /** Physical resources pinned by the host at admission, not live editable requirements. */
   readonly resource_keys?: readonly string[];
+  /** C-736: why admission claimed `resource_keys` or skipped the work item's. */
+  readonly resource_reason?: string;
   /** Q-744: fixed on the first independent queue, inherited without reset. */
   readonly recovery_policy?: {
     readonly version: 6;
@@ -713,6 +744,11 @@ export interface Run {
   readonly preparation_retry?: {
     readonly source_run_id: RunId;
     readonly ready_at: Timestamp;
+    /** C-738: a later ready deployment ended the backoff early, once. */
+    readonly expedited?: {
+      readonly at: Timestamp;
+      readonly deployment: string;
+    };
   };
   /** Explicit producer wait, consumed by host maintenance once its condition is met. */
   readonly wait_for?: import("./work-wait.js").RunWait;
@@ -743,6 +779,16 @@ export interface Run {
       | "server_restart"
       | "runtime_exited"
       | "mcp_unavailable";
+  };
+  /**
+   * C-735: why the Run's last start acknowledgement was refused. Proves the
+   * session is up and calling Card tools, so the dispatch watchdog reports the
+   * reason instead of restarting a healthy terminal. Cleared once it starts.
+   */
+  readonly ack_refusal?: {
+    readonly code: string;
+    readonly message: string;
+    readonly at: Timestamp;
   };
   /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
   readonly inactivity_stop?: {
@@ -1102,6 +1148,13 @@ export interface PlainSummary {
   readonly impact: string;
   readonly risk: string;
 }
+/** C-753: why only the owner may decide, and the rule or words it rests on. */
+export interface OwnerRequiredDeclaration {
+  readonly reason: string;
+  readonly basis: string;
+  readonly declared_by: AssignmentId;
+  readonly declared_at: Timestamp;
+}
 export interface ReviewPauseInput {
   readonly owner: AssignmentId;
   readonly confirmers: readonly AssignmentId[];
@@ -1206,6 +1259,14 @@ interface DecisionFields {
    */
   readonly human_required_reason?: string;
   /**
+   * C-753: PM Office or PM Ops declared, with a reason and its basis (project
+   * rule, acceptance criterion or the owner's own words), that only the owner
+   * may decide. Such a question skips category delegation and goes straight
+   * to the owner. Set by request_decision only; audit lives on the
+   * decision_requested event.
+   */
+  readonly owner_required?: OwnerRequiredDeclaration;
+  /**
    * C-167: `false` only when the raiser marked a D12 decision as unrelated to
    * the merge content of its cards (no produce work item, no approval
    * target). Only a human raiser may set it; such a decision does not make
@@ -1297,6 +1358,26 @@ export interface HelperCheckResult {
   readonly status: "passed" | "failed";
   readonly failed_steps: readonly string[];
 }
+export type HumanActionExecutor = "owner" | "operator";
+/**
+ * C-760: one change between "holds the merge" and "post-merge follow-up",
+ * kept on the action as its audit trail (who, when, why, which decision).
+ */
+export interface HumanActionMergeBlockingChange {
+  readonly at: Timestamp;
+  readonly by: Author;
+  readonly blocks_merge: boolean;
+  readonly prerequisite?: "credential" | "external_account";
+  readonly previous_blocks_merge: boolean;
+  readonly previous_prerequisite?: "credential" | "external_account";
+  readonly reason: string;
+  /** The human decision this change carries out, if any. */
+  readonly decision_id?: DecisionId;
+  /** The human's words recorded on that decision. */
+  readonly raw_quote?: string;
+  /** direct: the dedicated command; triage: PM rewrite; merge_override: "仍要合并". */
+  readonly via: "direct" | "triage" | "merge_override";
+}
 export interface HumanActionHandoff {
   readonly terminal?: ActionCommand;
   readonly title: string;
@@ -1338,6 +1419,13 @@ export interface HumanAction {
    * means host_ops.
    */
   readonly host_operator?: "external" | "host_ops";
+  /**
+   * C-742: who has to perform the action. `operator` is the host operator
+   * (the project's external PM Office identity or an operator-marked human
+   * CLI); the owner is never pushed, counted or allowed to complete it.
+   * Absent means `owner`.
+   */
+  readonly executor?: HumanActionExecutor;
   /** Explicit internal read-only diagnostic; absent on ordinary host handoffs. */
   readonly host_diagnostic?: true;
   /** Exact handoff owner (external Office, internal host ops, or fallback PM Ops). */
@@ -1367,6 +1455,8 @@ export interface HumanAction {
   /** Only credential or external-account preparation can hold a merge. */
   readonly prerequisite?: "credential" | "external_account";
   readonly follow_up_work_items?: readonly WorkItemId[];
+  /** C-760: merge-blocking reclassifications, oldest first. */
+  readonly merge_blocking_changes?: readonly HumanActionMergeBlockingChange[];
   readonly status: HumanActionStatus;
   readonly result?: {
     readonly conclusion?: "exited" | "false_alarm" | "unconfirmed";

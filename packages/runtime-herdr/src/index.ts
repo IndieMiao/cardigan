@@ -18,9 +18,14 @@ import { loopbackTerminal, managedLoopback } from "./loopback-terminal.js";
 
 export { managedLoopback } from "./loopback-terminal.js";
 
-import { enrollDarwinOwner, stopDarwinOwner } from "./darwin-idle-owner.js";
+import {
+  enrollDarwinOwner,
+  ownerRefusal,
+  stopDarwinOwner,
+} from "./darwin-idle-owner.js";
 import {
   darwinRetirementObservation,
+  explainDarwinRefusal,
   stopDarwinTurn,
 } from "./darwin-retirement.js";
 import { idleRetirementHelper } from "./idle-retirement.js";
@@ -1289,11 +1294,14 @@ export class HerdrRuntime implements Runtime {
     if (managed.outcome === "exited") return exited();
     if (managed.outcome === "uncertain")
       return confirm({ path: "darwin_idle_owner", signal: "TERM", ...target });
+    // C-746: an owner now names its refusal. Every refusal it used to answer
+    // anonymously (then `probe_invalid`) keeps the same bounded fallback.
     if (
       managed.outcome !== "withdrawn" ||
-      !["conditional_close_unavailable", "probe_invalid"].includes(
+      (!["conditional_close_unavailable", "probe_invalid"].includes(
         managed.evidence.reason,
-      )
+      ) &&
+        managed.evidence.owner_reason === undefined)
     )
       return {
         attempted: false,
@@ -1399,6 +1407,34 @@ export class HerdrRuntime implements Runtime {
             if (Date.now() >= deadline) break;
             await delay(Math.min(250, deadline - Date.now()));
           } while (Date.now() <= deadline);
+        }
+        if (
+          stop.outcome === "withdrawn" &&
+          stop.evidence.owner_reason === "no_reply"
+        ) {
+          // C-746: an owner enrolled before C-746 refused without a word.
+          // Name the failed proof from the worker, read-only; it stays a
+          // refusal either way (sensen A-252 looped on this for hours).
+          const proof = await explainDarwinRefusal(
+            this.execution,
+            ref,
+            options,
+          );
+          // Every current proof passes: the owner applied its older rule
+          // (before C-746 it could not see an idle editor above a status line).
+          const why = proof === null ? "legacy_owner_refused" : proof;
+          if (why)
+            return {
+              ok: true,
+              value: {
+                outcome: "withdrawn",
+                evidence: {
+                  ...stop.evidence,
+                  ...ownerRefusal(why).evidence,
+                  owner_reason_source: "worker_probe",
+                },
+              },
+            };
         }
         return { ok: true, value: stop };
       }

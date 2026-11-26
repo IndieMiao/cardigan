@@ -17,6 +17,44 @@ const statusLine = z.enum([
 ]);
 const instant =
   /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)$/u;
+/** C-746: the fixed reasons a collector may give for a null field; any
+ * other code is reported as `other`, never echoed. */
+export const workerUnavailableReasons = [
+  // terminals
+  "core_socket_missing",
+  "core_socket_untrusted",
+  "core_not_listening",
+  "core_timeout",
+  "core_unreachable",
+  "core_protocol",
+  "core_error",
+  "core_reply_incomplete",
+  "core_reply_invalid",
+  "permission_denied",
+  "platform_unsupported",
+  "terminal_not_registered",
+  "terminal_unconfirmed",
+  // processes
+  "no_registered_process",
+  "registered_process_mismatch",
+  "process_identity_unreadable",
+  "process_identity_changed",
+  "process_unconfirmed",
+  "process_attribution_incomplete",
+  "terminal_unreadable",
+  // events
+  "harness_unknown",
+  "session_not_published",
+  "launch_markers_unreadable",
+  "transcript_unreadable",
+  // host side: the collector was not asked for live facts
+  "run_not_current",
+  "session_not_bound",
+  "local_runtime_only",
+  "other",
+] as const;
+export type WorkerUnavailableReason = (typeof workerUnavailableReasons)[number];
+const unavailableReason = z.enum(workerUnavailableReasons).catch("other");
 export const workerEvidence = z.object({
   terminals: z
     .array(
@@ -102,4 +140,12 @@ export const workerEvidence = z.object({
     )
     .length(3),
   free_bytes: z.number().int().nonnegative(),
+  /** C-746: why a field above is null; bounded codes only, never messages. */
+  unavailable: z
+    .object({
+      terminals: unavailableReason.optional(),
+      processes: unavailableReason.optional(),
+      events: unavailableReason.optional(),
+    })
+    .optional(),
 });

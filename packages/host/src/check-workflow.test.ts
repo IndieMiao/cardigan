@@ -68,7 +68,7 @@ describe("trusted GitHub check workflow", () => {
     const marker = steps.filter((step: { name: string }) =>
       step.name.startsWith("Recovered "),
     );
-    expect(marker).toHaveLength(4);
+    expect(marker).toHaveLength(5);
     for (const step of marker) {
       const key = step.name.slice("Recovered ".length);
       expect(step.if).toBe(
@@ -93,6 +93,8 @@ describe("trusted GitHub check workflow", () => {
       "scope",
       "affected_paths",
       "skip_checks",
+      "hc_version",
+      "hc_sha256",
     ]);
     expect(candidate.permissions).toEqual({ contents: "read" });
     expect(warm.permissions).toEqual({ contents: "read" });
@@ -134,6 +136,13 @@ describe("trusted GitHub check workflow", () => {
       "if-no-files-found": "error",
     });
     expect(archive.if).toBeUndefined();
+  });
+
+  test("a failing page-skeleton comparison names the checked card's receipt", () => {
+    const build = steps.find((step: { id?: string }) => step.id === "build");
+    expect(build.env).toEqual({
+      CARDIGAN_CHECK_CARD: `\${{ inputs.card }}`,
+    });
   });
 
   test("candidate cache is restore only; only main push warms it", () => {
@@ -211,7 +220,9 @@ root = pathlib.Path(sys.argv[1])
 os.chdir(root)
 (root / 'deploy').mkdir()
 mode = sys.argv[2]
-data = b'#!/bin/sh\\nprintf "hc 1.2.3\\n"\\n'
+candidate = mode.startswith('candidate')
+shown = '2.0.0' if candidate else '1.2.3'
+data = ('#!/bin/sh\\nprintf "hc %s\\\\n"\\n' % shown).encode()
 archive = io.BytesIO()
 with tarfile.open(fileobj=archive, mode='w:gz') as bundle:
     member = tarfile.TarInfo('herdr-core')
@@ -227,14 +238,20 @@ with tarfile.open(fileobj=archive, mode='w:gz') as bundle:
     bundle.addfile(extra, io.BytesIO(b'ignored'))
 payload = archive.getvalue()
 checksum = hashlib.sha256(payload).hexdigest()
+if candidate:
+    # The pinned installer checksum must not be what verifies a candidate.
+    os.environ['CANDIDATE_HC_VERSION'] = '2.0.0'
+    os.environ['CANDIDATE_HC_SHA256'] = checksum if mode == 'candidate' else ''
+    checksum = '0' * 64
 if mode == 'checksum': checksum = '0' * 64
 version = '9.9.9' if mode == 'version' else '1.2.3'
+fetched = '2.0.0' if candidate else version
 # This statement must never execute: workflow reads constants with ast only.
 source = 'raise RuntimeError("must not execute installer")\\nVERSION = ' + repr(version) + '\\nCHECKSUMS = ' + repr({platform.machine(): checksum}) + '\\nDOWNLOAD_USER_AGENT = ' + repr(user_agent)
 (root / 'deploy/install-agent.py').write_text(source)
 def urlopen(request, **kwargs):
     assert isinstance(request, urllib.request.Request)
-    assert request.full_url == f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{platform.machine()}.tar.gz'
+    assert request.full_url == f'https://releases.herdr.dev/core/{fetched}/herdr-core-linux-{platform.machine()}.tar.gz'
     assert request.get_method() == 'GET' and request.data is None
     assert dict(request.header_items()) == {'User-agent': user_agent}
     assert kwargs == {'timeout': 60}
@@ -246,6 +263,8 @@ exec(json.loads(sys.argv[3]))
       );
       for (const mode of [
         "success",
+        "candidate",
+        "candidate_unpinned",
         "checksum",
         "version",
         "symlink",
@@ -265,7 +284,7 @@ exec(json.loads(sys.argv[3]))
           ],
           { encoding: "utf8" },
         );
-        if (mode === "success") {
+        if (mode === "success" || mode === "candidate") {
           expect(result.stderr).toBe("");
           expect(result.status).toBe(0);
           expect(readFileSync(join(fixture, "env"), "utf8")).toContain(
@@ -274,11 +293,13 @@ exec(json.loads(sys.argv[3]))
         } else {
           expect(result.status).not.toBe(0);
           const error =
-            mode === "checksum"
-              ? "sha256 mismatch"
-              : mode === "version"
-                ? "hc 缺失或版本不符"
-                : "regular binary";
+            mode === "candidate_unpinned"
+              ? "candidate hc needs hc_version"
+              : mode === "checksum"
+                ? "sha256 mismatch"
+                : mode === "version"
+                  ? "hc 缺失或版本不符"
+                  : "regular binary";
           expect(result.stderr).toContain(error);
           expect(() => readFileSync(join(fixture, "env"))).toThrow();
           expect(() => readFileSync(join(fixture, "path"))).toThrow();
@@ -539,7 +560,7 @@ test("only the trusted complete merge diff grants environment retries (including
       return readFileSync(out, "utf8").trim();
     };
     expect(check("apps/web/src/file.ts")).toBe(
-      "retry_cases=ssh_local ssh_remote loopback corepack",
+      "retry_cases=ssh_local ssh_remote loopback corepack agent_git",
     );
     for (const file of [
       "packages/host/src/check-flake-cases.ts",
@@ -563,8 +584,33 @@ test("only the trusted complete merge diff grants environment retries (including
     expect(
       check("docs/plans/C-77.md", { scope: "docs_only", skip: true }),
     ).toBe("retry_cases=");
-    expect(check("apps/server/src/dispatch.ts")).toBe("retry_cases=corepack");
-    expect(check("packages/roles/src/file.ts")).toBe("retry_cases=");
+    expect(check("apps/server/src/dispatch.ts")).toBe(
+      "retry_cases=corepack agent_git",
+    );
+    expect(check("packages/roles/src/file.ts")).toBe("retry_cases=agent_git");
+    // C-757: the Git transport case, its stack, worker scripts or shared test
+    // configuration changed (including the old side of a rename).
+    for (const file of [
+      "apps/cli/src/agent-git.ts",
+      "apps/cli/test-support/worker-git.ts",
+      "apps/cli/package.json",
+      "packages/host/src/agent-git-transport.ts",
+      "packages/git-service/src/worktree.ts",
+      "packages/git-transport/src/index.ts",
+      "packages/runtime-herdr/src/worker-git.ts",
+      "deploy/worker-git.py",
+      "test-support/setup.ts",
+      "tsconfig.base.json",
+      "pnpm-lock.yaml",
+    ])
+      expect(check(file)).not.toContain("agent_git");
+    expect(check("deploy/install-agent.py")).toBe("retry_cases=agent_git");
+    expect(
+      check("apps/web/src/file.ts", {
+        scope: "affected",
+        affected: "apps/cli apps/web",
+      }),
+    ).toBe("retry_cases=agent_git");
     expect(check("apps/web/src/file.ts", { remove: true })).toBe(
       "retry_cases=",
     );

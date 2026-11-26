@@ -23,6 +23,7 @@ import {
   EXTERNAL_ASSIGNMENT_START_ERROR,
   idleWakeGuard,
   isRunCapacityExempt,
+  preparationRetryWaiting,
   providerAdmission,
   recoverPreparation,
   recoveryTargetCurrent,
@@ -106,7 +107,11 @@ import {
   type ReadResourceLimits,
   runCapacitySnapshot,
 } from "./run-capacity.js";
-import { resourceEntry, verifiedLocalLaunch } from "./run-resource-worker.js";
+import {
+  resourceEntry,
+  sessionFilesRevision,
+  verifiedLocalLaunch,
+} from "./run-resource-worker.js";
 import {
   assignmentResourceKeys,
   unclaimedResourceKeys,
@@ -520,9 +525,12 @@ async function launchWithClaim(
     const cleared = {
       ...run,
       resource_keys: keys,
+      // C-736: host launches always claim the work item's resources.
+      ...(keys.length ? { resource_reason: "主机启动按工作项占用" } : {}),
       ...(probe ? { provider_probe: probe } : {}),
     };
     delete cleared.queue_reason;
+    if (!keys.length) delete cleared.resource_reason;
     tx.runs.put(input.project, cleared);
     const at = clock.now();
     const attempt = {
@@ -724,10 +732,7 @@ async function launch(
   const current = host.store.uow.read((tx) =>
     tx.runs.get(project, input.run.id),
   );
-  if (
-    current?.preparation_retry &&
-    Date.parse(clock.now()) < Date.parse(current.preparation_retry.ready_at)
-  )
+  if (current && preparationRetryWaiting(current, clock.now()))
     throw new HostLaunchError(
       "directory preparation",
       "工作目录准备重试正在退避等待",
@@ -1539,14 +1544,20 @@ async function launch(
       ref === undefined &&
       tokenId === undefined
         ? {
-            preparation: {
-              category:
-                input.run.recovery_policy && preparationUnavailable(error)
-                  ? "runtime_unavailable"
-                  : describePreparationFailure(error).category,
-              execution_exited: preparationExecutionExited(error),
-              backoff_ms: preparationPolicy().retryBackoffMs,
-            },
+            preparation: (() => {
+              const failure = describePreparationFailure(error);
+              const policy = preparationPolicy();
+              return {
+                category:
+                  input.run.recovery_policy && preparationUnavailable(error)
+                    ? "runtime_unavailable"
+                    : failure.category,
+                message: failure.message,
+                execution_exited: preparationExecutionExited(error),
+                backoff_ms: policy.retryBackoffMs,
+                retry_schedule_ms: policy.retryScheduleMs,
+              };
+            })(),
           }
         : {}),
       ...(ref === undefined ? {} : { ref }),
@@ -1575,8 +1586,10 @@ interface Compensation {
   readonly keepRun?: boolean;
   readonly preparation?: {
     category: string;
+    message: string;
     execution_exited: boolean;
     backoff_ms: number;
+    retry_schedule_ms: readonly number[];
   };
 }
 
@@ -1685,11 +1698,14 @@ export function sessionFingerprint(
   catalog: string | undefined,
   role: Pick<Role, "worktree">,
   assignment: Pick<Assignment, "scope">,
+  files: string | undefined = sessionFilesRevision(),
 ): string | undefined {
   if (catalog === undefined) return undefined;
-  return role.worktree === "readonly" && assignment.scope === "work_item"
-    ? `${catalog}+${VERIFIER_LAUNCH_REVISION}`
-    : catalog;
+  const base =
+    role.worktree === "readonly" && assignment.scope === "work_item"
+      ? `${catalog}+${VERIFIER_LAUNCH_REVISION}`
+      : catalog;
+  return files ? `${base}+${files}` : base;
 }
 
 /**

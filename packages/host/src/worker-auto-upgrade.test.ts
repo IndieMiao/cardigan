@@ -33,7 +33,10 @@ import {
   type RuntimeTargets,
 } from "./runtime-targets.js";
 import { loadRuntimeWorkers } from "./runtime-workers-config.js";
-import { patrolHelperUpgrade } from "./worker-auto-upgrade.js";
+import {
+  patrolHelperUpgrade,
+  UPGRADE_RETRY_MS,
+} from "./worker-auto-upgrade.js";
 import {
   digestMismatch,
   helpers,
@@ -47,7 +50,6 @@ import {
 } from "./worker-upgrade-enrollment.js";
 import {
   upgradeHeld,
-  upgradeHold,
   upgradeKey,
   upgradeState,
 } from "./worker-upgrade-gate.js";
@@ -64,6 +66,8 @@ const toolEntries = AGENT_TOOLS.map((n) => `agent-tools/${n}`);
 const project = "sample",
   machine = "worker-a",
   mismatch = { blockers: [digestMismatch], launch_enabled: false },
+  // C-608: a compatible helper awaiting upgrade is recorded as a warning.
+  soft = { blockers: [], warnings: [digestMismatch], launch_enabled: false },
   pass = { blockers: [], launch_enabled: true };
 let cleanup = () => {};
 afterEach(() => {
@@ -137,6 +141,8 @@ async function setup(
   if (!worker) throw new Error("missing test binding");
   const target = runtimeTargetBinding(worker);
   const isHeld = () => upgradeHeld(store, project, machine);
+  const verified = () =>
+    upgradeState(store, project, machine)?.state === "verified";
   const options = {
     store,
     project,
@@ -144,6 +150,7 @@ async function setup(
     env: { CARDIGAN_CONFIG_DIR: root },
     execution: { ...worker.execution, target },
     bindingCurrent: vi.fn(() => true),
+    now: undefined as (() => number) | undefined,
     check: vi.fn(async () => {
       expect(isHeld()).toBe(true);
       return pass;
@@ -228,6 +235,7 @@ async function setup(
     last = r;
     return {
       blockers: r.health?.blockers ?? ["failed"],
+      ...(r.health?.warnings ? { warnings: r.health.warnings } : {}),
       launch_enabled: r.health?.launch_enabled ?? false,
     };
   };
@@ -279,7 +287,9 @@ async function setup(
     options,
     adapters,
     enroll,
+    finalize,
     isHeld,
+    verified,
     target,
     store,
     stageUpgrade,
@@ -294,7 +304,7 @@ test.each(["linux", "macos"])(
   "%s: opt-in, install, both checks, audited release and drift fence",
   async (os) => {
     const f = await setup(os);
-    expect(await f.run()).toEqual(mismatch);
+    expect(await f.run()).toEqual(soft);
     expect(f.adapters.install).not.toHaveBeenCalled();
     expect(f.stageUpgrade).toHaveBeenCalledOnce();
     expect(f.actions()).toEqual([
@@ -331,7 +341,16 @@ test.each(["linux", "macos"])(
       expected: { "worker-files.py": expect.stringMatching(/^[a-f0-9]{64}$/) },
       before: { "worker-files.py": "0".repeat(64) },
     });
-    expect((await f.run()).blockers).toEqual([upgradeHold]);
+    // Drift after a verified install: no root write, no dispatch stop, no retry.
+    expect(await f.run()).toEqual(soft);
+    expect(f.isHeld()).toBe(false);
+    expect(
+      f.store.uow
+        .read((tx) => tx.events.listAfter(project, undefined, 0))
+        .findLast((e) => e.type === "worker_helper_upgrade_failed")?.payload,
+    ).toMatchObject({ stage: "unexpected_drift" });
+    f.options.now = () => Date.now() + UPGRADE_RETRY_MS + 1000;
+    expect(await f.run()).toEqual(soft);
     expect(f.adapters.install).toHaveBeenCalledTimes(1);
   },
 );
@@ -394,9 +413,8 @@ test.each(["removed", "account", "trust", "generation", "enrollment", "saved"])(
     const binding = current
       ? runtimeTargetBinding(current).fingerprint
       : f.target.fingerprint;
-    expect((await f.run(mismatch, true, binding)).blockers).toEqual([
-      upgradeHold,
-    ]);
+    expect(await f.run(mismatch, true, binding)).toEqual(soft);
+    expect(f.isHeld()).toBe(false);
     expect(f.adapters.install).not.toHaveBeenCalled();
     expect(f.adapters.workerCheck).not.toHaveBeenCalled();
     expect(f.options.check).not.toHaveBeenCalled();
@@ -418,7 +436,7 @@ test.each([false, true])(
       onboardWorker({ ...opts, probe: async () => true }),
     );
     const r = await f.run();
-    expect(r.blockers).toEqual(changed ? [upgradeHold] : []);
+    expect(r).toEqual(changed ? soft : pass);
     expect(f.adapters.install).toHaveBeenCalledTimes(changed ? 0 : 1);
   },
 );
@@ -428,7 +446,7 @@ test("a second project on the same machine has its own maintenance and authoriza
   const second = await setup("linux", "second", first);
   first.enroll();
   expect(await first.run(pass)).toEqual(pass);
-  expect(await second.run()).toEqual(mismatch);
+  expect(await second.run()).toEqual(soft);
   expect(first.actions()).toEqual([]);
   expect(second.actions()[0]?.instructions).toContain(
     `项目 second 的机器 ${machine}`,
@@ -440,10 +458,11 @@ test("a second project on the same machine has its own maintenance and authoriza
     `cgu_${createHash("sha256").update("second").digest("hex").slice(0, 20)}`,
   );
   second.adapters.install.mockRejectedValueOnce(new Error("binding_failed"));
-  expect((await second.run()).blockers).toEqual([upgradeHold]);
+  expect(await second.run()).toEqual(soft);
   expect(await first.run()).toEqual(pass);
-  expect(first.isHeld()).toBe(false);
-  expect(second.isHeld()).toBe(true);
+  expect(first.verified()).toBe(true);
+  expect(second.verified()).toBe(false);
+  expect(second.isHeld()).toBe(false);
   expect(first.adapters.install).toHaveBeenCalledOnce();
   expect(second.adapters.install).toHaveBeenCalledOnce();
 });
@@ -454,7 +473,11 @@ test("drained enrolled worker waits for patrol without offering a manual install
     blockers: [digestMismatch, "machine_not_ready"],
     launch_enabled: false,
   };
-  expect(await f.run(paused)).toEqual(paused);
+  expect(await f.run(paused)).toEqual({
+    blockers: ["machine_not_ready"],
+    warnings: [digestMismatch],
+    launch_enabled: false,
+  });
   expect(f.stageUpgrade).not.toHaveBeenCalled();
   expect(f.actions()).toEqual([]);
   expect(f.adapters.install).not.toHaveBeenCalled();
@@ -469,14 +492,14 @@ test("enrollment during manual staging cannot publish its stale command", async 
     f.enroll();
     return f.terminal;
   });
-  expect(await f.run()).toEqual(mismatch);
+  expect(await f.run()).toEqual(soft);
   expect(f.stageUpgrade).toHaveBeenCalledOnce();
   expect(f.actions()).toEqual([]);
   expect(f.adapters.install).not.toHaveBeenCalled();
 });
 
 test.each(["install", "worker_check", "machine_check"])(
-  "failure at %s remains held across patrols, manual recovery cannot skip either check",
+  "failure at %s keeps dispatching on the live check and retries after the cooldown",
   async (stage) => {
     const f = await setup();
     f.enroll();
@@ -486,25 +509,61 @@ test.each(["install", "worker_check", "machine_check"])(
       f.adapters.workerCheck.mockResolvedValueOnce(false);
     if (stage === "machine_check")
       f.options.check.mockRejectedValueOnce(new Error());
-    expect((await f.run()).blockers).toEqual([upgradeHold]);
-    expect(f.isHeld()).toBe(true);
-    expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
+    expect(await f.run()).toEqual(soft);
+    expect(f.isHeld()).toBe(false);
+    expect(await f.run(pass)).toEqual(pass);
     expect(f.actions()).toHaveLength(1);
     expect(f.stageUpgrade).not.toHaveBeenCalled();
     expect(f.actions()[0]?.instructions).toContain(stage);
+    expect(f.actions()[0]?.instructions).toContain("6 小时后自动重试");
     expect(f.actions()[0]?.instructions).not.toContain("private-fixture");
+    // Inside the cooldown the same release is not written again.
+    expect(await f.run()).toEqual(soft);
     expect(f.adapters.install).toHaveBeenCalledTimes(1);
-    await f.manual("machine");
-    expect(f.isHeld()).toBe(true);
-    await f.manual("worker");
-    await f.manual("machine", "different");
-    expect(f.isHeld()).toBe(true);
-    await f.manual("machine");
-    expect(f.isHeld()).toBe(false);
+    f.options.now = () => Date.now() + UPGRADE_RETRY_MS + 1000;
+    expect(await f.run()).toEqual(pass);
+    expect(f.adapters.install).toHaveBeenCalledTimes(2);
+    expect(f.verified()).toBe(true);
   },
 );
+test.each(["install", "worker_check", "machine_check"])(
+  "after a failure at %s manual recovery still needs both checks",
+  async (stage) => {
+    const f = await setup();
+    f.enroll();
+    if (stage === "install")
+      f.adapters.install.mockRejectedValueOnce(new Error("private-fixture"));
+    if (stage === "worker_check")
+      f.adapters.workerCheck.mockResolvedValueOnce(false);
+    if (stage === "machine_check")
+      f.options.check.mockRejectedValueOnce(new Error());
+    await f.run();
+    await f.manual("machine");
+    expect(f.verified()).toBe(false);
+    await f.manual("worker");
+    await f.manual("machine", "different");
+    expect(f.verified()).toBe(false);
+    await f.manual("machine");
+    expect(f.verified()).toBe(true);
+  },
+);
+test("C-608: a manual machine check with the old helper still in place is not upgrade evidence", async () => {
+  const f = await setup();
+  f.enroll();
+  f.adapters.install.mockRejectedValueOnce(new Error());
+  await f.run();
+  await f.manual("worker");
+  expect(upgradeState(f.store, project, machine)?.state).toBe("worker_checked");
+  // Compatible, so the machine dispatches, but the upgrade is not verified.
+  expect(
+    await f.finalize("machine", f.target.fingerprint, async () => mismatch),
+  ).toEqual(soft);
+  expect(f.verified()).toBe(false);
+  await f.manual("machine");
+  expect(f.verified()).toBe(true);
+});
 test.each(["failed", "installing", "worker_checked"])(
-  "revoked enrollment: %s is held until both checks on the new key",
+  "revoked enrollment: %s stays unverified until both checks on the new key",
   async (state) => {
     const f = await setup();
     f.enroll();
@@ -524,12 +583,12 @@ test.each(["failed", "installing", "worker_checked"])(
     });
     await f.manual("worker");
     await f.manual("machine", binding);
-    expect(f.isHeld()).toBe(true);
+    expect(f.verified()).toBe(false);
     await f.manual("worker", binding);
     await f.manual("machine");
-    expect(f.isHeld()).toBe(true);
+    expect(f.verified()).toBe(false);
     await f.manual("machine", binding);
-    expect(f.isHeld()).toBe(false);
+    expect(f.verified()).toBe(true);
     expect(f.adapters.install).toHaveBeenCalledTimes(1);
   },
 );
@@ -537,7 +596,7 @@ test("neither automatic nor manual recovery releases on a failed final observati
   const f = await setup();
   f.enroll();
   await f.run(mismatch, false);
-  expect(f.isHeld()).toBe(true);
+  expect(f.verified()).toBe(false);
   expect(f.actions()[0]?.instructions).toContain("machine_check");
   expect(
     f.store.uow
@@ -546,9 +605,9 @@ test("neither automatic nor manual recovery releases on a failed final observati
   ).toBe(false);
   await f.manual("worker");
   await f.manual("machine", f.target.fingerprint, true, false);
-  expect(f.isHeld()).toBe(true);
+  expect(f.verified()).toBe(false);
   await f.manual("machine");
-  expect(f.isHeld()).toBe(false);
+  expect(f.verified()).toBe(true);
 });
 test("failed and interrupted worker checks supersede earlier success", async () => {
   const f = await setup();
@@ -558,7 +617,7 @@ test("failed and interrupted worker checks supersede earlier success", async () 
   await f.manual("worker");
   await f.manual("worker", f.target.fingerprint, false);
   await f.manual("machine");
-  expect(f.isHeld()).toBe(true);
+  expect(f.verified()).toBe(false);
   await f.manual("worker");
   const { job } = f.journal.claim(project, machine, "worker", "web");
   await expect(
@@ -571,7 +630,7 @@ test("failed and interrupted worker checks supersede earlier success", async () 
     ),
   ).rejects.toThrow();
   await f.manual("machine");
-  expect(f.isHeld()).toBe(true);
+  expect(f.verified()).toBe(false);
 });
 test("new release without positive mismatch evidence never writes helpers", async () => {
   const f = await setup();
@@ -582,10 +641,10 @@ test("new release without positive mismatch evidence never writes helpers", asyn
     .prepare("UPDATE worker_helper_upgrades SET release_key='old'")
     .run();
   await f.run({ blockers: ["connection failed"], launch_enabled: false });
-  expect(f.isHeld()).toBe(true);
+  expect(f.verified()).toBe(false);
   expect(f.adapters.workerCheck).not.toHaveBeenCalled();
   await f.run(pass);
-  expect(f.isHeld()).toBe(false);
+  expect(f.verified()).toBe(true);
   expect(f.adapters.install).toHaveBeenCalledTimes(1);
   expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
 });
@@ -593,7 +652,8 @@ test("changing binding before installation cannot use the enrolled key", async (
   const f = await setup();
   f.enroll();
   f.options.bindingCurrent.mockReturnValue(false);
-  expect((await f.run()).blockers).toEqual([upgradeHold]);
+  expect(await f.run()).toEqual(soft);
+  expect(f.isHeld()).toBe(false);
   expect(f.adapters.install).not.toHaveBeenCalled();
 });
 test("root entry uses only a pinned signer, fixed files and unprivileged test fixtures", () => {
@@ -847,7 +907,7 @@ test("C-599: a tools-only refresh does not hold dispatch while it cannot start",
   expect(f.adapters.install).toHaveBeenCalledOnce();
 });
 
-test("C-599: a failed tools install after the claim holds dispatch and offers no tools command", async () => {
+test("C-599: a failed tools install after the claim is recorded, offers no tools command and (C-608) keeps dispatching", async () => {
   const f = await setup("linux");
   f.enroll();
   f.tools.output = missing;
@@ -855,9 +915,13 @@ test("C-599: a failed tools install after the claim holds dispatch and offers no
     toolsStale: vi.fn(async () => "stale" as const),
   });
   f.adapters.install.mockRejectedValueOnce(new Error("ssh"));
-  expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
-  expect(f.isHeld()).toBe(true);
-  expect(f.last()?.agent_tools).toBeUndefined();
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.isHeld()).toBe(false);
+  expect(upgradeState(f.store, project, machine)).toMatchObject({
+    state: "failed",
+  });
+  // The check passes now, so the tools outcome names the unverified attempt.
+  expect(f.last()?.agent_tools).toEqual({ status: "held" });
   expect(f.stageUpgrade).not.toHaveBeenCalled();
   expect(open(f).map((a) => a.instructions)).toEqual([
     expect.stringContaining("helper 自动升级未获验证（install）"),
@@ -1021,7 +1085,7 @@ test("C-599: any failed observation retires the tools notice; helper mismatch ke
     ...f.terminal,
     command: "helper-command",
   });
-  expect(await f.run(mismatch)).toEqual(mismatch);
+  expect(await f.run(mismatch)).toEqual(soft);
   expect(open(f)).toEqual([
     expect.objectContaining({
       terminal: expect.objectContaining({ command: "helper-command" }),
@@ -1133,9 +1197,13 @@ test("C-599: a tools-only release refused locally before sending does not hold d
   expect(f.isHeld()).toBe(false);
   expect(upgradeState(f.store, project, machine)).toBeUndefined();
   expect(open(f)).toEqual([]);
-  // A helper upgrade that is refused locally still holds, as before.
+  // A helper upgrade refused locally is recorded as failed; C-608: no dispatch stop.
   f.adapters.install.mockRejectedValueOnce(new Error(WORKER_UPGRADE_NOT_SENT));
-  expect((await f.run(mismatch)).blockers).toEqual([upgradeHold]);
+  expect(await f.run(mismatch)).toEqual(soft);
+  expect(f.isHeld()).toBe(false);
+  expect(upgradeState(f.store, project, machine)).toMatchObject({
+    state: "failed",
+  });
 });
 
 test("C-599: the local bundle refusal is reported as not sent, before any SSH", async () => {
@@ -1173,7 +1241,7 @@ test("C-599: enrollment completed while staging never publishes a manual command
   expect(f.last()?.agent_tools).toEqual({ status: "automatic" });
 });
 
-test("C-599: v2 reached the worker but v1 was refused locally: the attempt still holds", async () => {
+test("C-599: v2 reached the worker but v1 was refused locally: the attempt is still recorded as failed", async () => {
   const f = await setup("linux");
   f.enroll();
   f.tools.output = missing;
@@ -1187,9 +1255,9 @@ test("C-599: v2 reached the worker but v1 was refused locally: the attempt still
   f.adapters.install.mockImplementationOnce((worker, p, identity, signal) =>
     installRelease(worker, p, identity, signal, send),
   );
-  expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
+  expect(await f.run(pass)).toEqual(pass);
   expect(send.mock.calls.map((call) => call[3])).toEqual(["v2", "v1"]);
-  expect(f.isHeld()).toBe(true);
+  expect(f.isHeld()).toBe(false);
   expect(upgradeState(f.store, project, machine)).toMatchObject({
     state: "failed",
   });
@@ -1400,7 +1468,7 @@ test("C-599: a failed signed attempt and a failed observation never show the too
     toolsStale: vi.fn(async () => "stale" as const),
   });
   f.adapters.install.mockRejectedValueOnce(new Error("ssh"));
-  expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
+  expect(await f.run(pass)).toEqual(pass);
   expect(upgradeState(f.store, project, machine)).toMatchObject({
     state: "failed",
   });
@@ -1443,11 +1511,12 @@ test("C-609: a resumed install whose check still shows stale helpers installs th
   expect(f.isHeld()).toBe(false);
 });
 
-test("C-609: a second interruption of the same release fails and holds as before", async () => {
+test("C-609: a second interruption of the same release fails; (C-608) dispatch follows the live check", async () => {
   const f = await setup();
   f.enroll();
   cutOff(f, 1);
-  expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.isHeld()).toBe(false);
   expect(f.adapters.install).not.toHaveBeenCalled();
   expect(f.adapters.workerCheck).not.toHaveBeenCalled();
   expect(upgradeState(f.store, project, machine)).toMatchObject({
@@ -1459,7 +1528,8 @@ test("C-609: a second interruption of the same release fails and holds as before
 test("C-609: without enrollment an interrupted install is not resumed", async () => {
   const f = await setup();
   cutOff(f);
-  expect((await f.run(pass)).blockers).toContain(upgradeHold);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.isHeld()).toBe(false);
   expect(f.adapters.install).not.toHaveBeenCalled();
   expect(upgradeState(f.store, project, machine)).toMatchObject({
     state: "failed",
@@ -1571,8 +1641,9 @@ test("C-609: a check that genuinely fails is still a failure", async () => {
   const f = await setup();
   f.enroll();
   f.adapters.workerCheck.mockResolvedValueOnce(false);
-  expect((await f.run(mismatch)).blockers).toEqual([upgradeHold]);
+  // C-608: the failure is recorded; dispatch follows the live check.
+  expect(await f.run(mismatch)).toEqual(soft);
   expect(upgradeState(f.store, project, machine)?.state).toBe("failed");
-  expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
+  expect(await f.run(pass)).toEqual(pass);
   expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
 });

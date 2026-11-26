@@ -668,3 +668,37 @@ test("Web creates parented cards once, reads paged progress, and rejects a stale
     "parent_card_id",
   );
 });
+
+test("C-612: template items may depend on earlier items through the web entry too", async () => {
+  const items = (depends_on: string[]) => [
+    {
+      key: "a",
+      title: "出包",
+      role_id: "coder",
+      kind: "produce",
+      required: true,
+    },
+    {
+      key: "b",
+      title: "送签",
+      role_id: "coder",
+      kind: "produce",
+      required: true,
+      depends_on,
+    },
+  ];
+  const check = async (depends_on: string[]) =>
+    (
+      await write(
+        "/card-templates/validate",
+        {
+          action: "add",
+          definition: definition({ work_items: items(depends_on) }),
+        },
+        null,
+      )
+    ).json;
+  expect(await check(["a"])).toEqual({ valid: true, reason: null });
+  expect(await check(["b"])).toMatchObject({ valid: false });
+  expect(await check(["missing"])).toMatchObject({ valid: false });
+});

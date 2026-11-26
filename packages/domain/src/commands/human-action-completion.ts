@@ -1,5 +1,15 @@
+import {
+  contextRestartRecovery,
+  contextSessionReplaced,
+  humanRestartCommand,
+} from "../context-restart-retry.js";
 import type { HumanAction, WorkItem } from "../entities.js";
 import { eventsOfType } from "../event-index.js";
+import {
+  HUMAN_ACTION_OPERATOR_NAME,
+  isOperatorAction,
+  isOperatorIdentity,
+} from "../human-action-executor.js";
 import type { HumanActionId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
 import { extractReferences } from "../references.js";
@@ -68,10 +78,22 @@ export function completeActionDraft(
     text: string;
     conclusion?: "exited" | "false_alarm" | "unconfirmed";
     attachments?: readonly string[];
+    as_operator?: true;
   },
   helperVerified = false,
 ) {
   const action = d.get("human_actions", p.human_action_id);
+  ensure(
+    !isOperatorAction(action) ||
+      // Host-observed resolutions (deployment, context usage) stay automatic.
+      d.actor.kind === "system" ||
+      (d.actor.kind === "human"
+        ? p.as_operator === true
+        : d.actor.kind === "assignment" &&
+          isOperatorIdentity(d.state, d.assignment)),
+    "unauthorized",
+    `交给${HUMAN_ACTION_OPERATOR_NAME}的待办只能由${HUMAN_ACTION_OPERATOR_NAME}的身份或带 --operator 的人类 CLI 结项；要由所有者处理请先改派给所有者`,
+  );
   ensure(
     !workerHelperAction(d.state, action) || helperVerified,
     "illegal_transition",
@@ -95,6 +117,20 @@ export function completeActionDraft(
     "unauthorized",
     "未分类主机待办须先核对原始请求，不能仅凭完成回帖结项",
   );
+  // C-741: a failed automatic context restart is recovered only once its old
+  // session has been replaced; marking it done alone keeps it open.
+  const recovery = contextRestartRecovery(d.state.events, action.id);
+  if (recovery && p.conclusion !== "unconfirmed") {
+    const owner = d
+      .list("assignments")
+      .find((a) => a.id === recovery.assignment_id);
+    const command = owner && humanRestartCommand(owner, d.state.project_id);
+    ensure(
+      contextSessionReplaced(d.list("assignments"), recovery),
+      "illegal_transition",
+      `${recovery.assignment_id} 的旧会话尚未替换，不能标记完成${command ? `；请先在主机上执行 ${command}，成功后本事项自动结项` : ""}`,
+    );
+  }
   const remote = remoteExitAction(d.state, action.id);
   ensure(
     remote

@@ -207,6 +207,7 @@ test("only complete tail records supply usage; a verified crossing record identi
       cwd: "/fixture",
       session_id: "session",
       updated_at: writtenAt.toISOString(),
+      written_at: writtenAt.toISOString(),
     },
   });
 });

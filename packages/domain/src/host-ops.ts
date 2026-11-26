@@ -1,5 +1,6 @@
 import type { ContextObservation } from "./context-usage.js";
 import type { Event, Run, RuntimeRef, ToolName } from "./entities.js";
+import { eventsOfType, eventsOfTypes } from "./event-index.js";
 import type { AssignmentId, CardId, RunId } from "./ids.js";
 import {
   remoteWorkerExitPending,
@@ -16,6 +17,7 @@ export const HOST_OPS_TOOLS = [
   "host_ops_cancel_run",
   "host_ops_recheck_merge",
   "host_ops_restart_standing_pm",
+  "host_ops_stop_assignment",
 ] as const satisfies readonly ToolName[];
 
 export const HOST_OPS_FORBIDDEN_TOOLS = [
@@ -79,6 +81,8 @@ export interface HostOpsExecution {
   readonly upstream_incident_id?: Event["id"];
   readonly context_usage?: ContextObservation;
   readonly automatic_context_restart?: boolean;
+  /** C-745: the one extra attempt after the upstream diagnosis recovered. */
+  readonly diagnosis_recovery_retry?: boolean;
   readonly dispatch_stall_id?: string;
   /**
    * C-596 automatic standing-PM restart. Kept on the intent so execution
@@ -112,24 +116,24 @@ export function observedLocalExitCause(e: Event | undefined) {
       "observed_local_exit"
   );
 }
+/**
+ * C-671: every read below goes through the type index, so a finish written
+ * on a closed card (a standing assignment's trigger card) still counts in the
+ * `slim` command state.
+ */
 export function pendingHostOpsActions(
   events: readonly Event[],
 ): HostOpsExecution[] {
   const finished = new Set(
-    events
-      .filter(
-        (e) =>
-          e.type === "host_ops_action_finished" ||
-          e.type === "context_session_restart_result",
-      )
-      .map((e) => (e.payload as { action_id: string }).action_id),
+    eventsOfTypes(events, [
+      "host_ops_action_finished",
+      "context_session_restart_result",
+    ]).map((e) => (e.payload as { action_id: string }).action_id),
   );
-  return events
+  return eventsOfType(events, "host_ops_action_taken")
     .filter(
       (e) =>
-        e.type === "host_ops_action_taken" &&
-        (e.payload as { execution?: boolean }).execution &&
-        !finished.has(e.id),
+        (e.payload as { execution?: boolean }).execution && !finished.has(e.id),
     )
     .map((e) => ({
       ...(e.payload as unknown as HostOpsExecution),
@@ -139,15 +143,15 @@ export function pendingHostOpsActions(
 /** C-221: per-snapshot memo; event arrays are immutable (see event-index.ts). */
 const pendingAssignments = new WeakMap<
   readonly Event[],
-  ReadonlySet<unknown>
+  {
+    readonly actions: ReadonlySet<unknown>;
+    readonly fences: ReadonlySet<unknown>;
+  }
 >();
-export function hostOpsPending(
-  events: readonly Event[],
-  assignment_id: AssignmentId,
-): boolean {
+function pendingSets(events: readonly Event[]) {
   let pending = pendingAssignments.get(events);
   if (!pending) {
-    pending = new Set(
+    const actions = new Set<unknown>(
       pendingHostOpsActions(events).map((a) => a.assignment_id),
     );
     for (const loss of remoteWorkerLosses(events)) {
@@ -155,42 +159,110 @@ export function hostOpsPending(
         !remoteWorkerLossReleased(events, loss.action_id) ||
         remoteWorkerExitPending(events, loss)
       ) {
-        (pending as Set<unknown>).add(loss.assignment_id);
-        const assigned = events.findLast(
+        actions.add(loss.assignment_id);
+        const assigned = eventsOfType(events, "work_item_assigned").findLast(
           (e) =>
-            e.type === "work_item_assigned" &&
             (e.payload as { work_item_id?: string }).work_item_id ===
-              loss.work_item_id,
+            loss.work_item_id,
         );
         if (assigned)
-          (pending as Set<unknown>).add(
+          actions.add(
             (assigned.payload as { assignment_id?: string }).assignment_id,
           );
       }
     }
-    for (const event of events) {
-      if (
-        event.type !== "context_session_restart_result" ||
-        (event.payload as { result?: string }).result !== "failed"
-      )
-        continue;
-      // Only an actual human confirmation releases the failure fence.
-      if (
-        !events.some(
-          (e) =>
-            e.type === "human_action_completed" &&
-            e.actor.kind === "human" &&
-            (e.payload as { human_action_id?: string }).human_action_id ===
-              (event.payload as { human_action_id?: string }).human_action_id,
-        )
-      )
-        (pending as Set<unknown>).add(
-          (event.payload as { assignment_id?: string }).assignment_id,
-        );
-    }
+    const fences = new Set<unknown>(
+      openRestartFailures(events).map(
+        (e) => (e.payload as { assignment_id?: string }).assignment_id,
+      ),
+    );
+    pending = { actions, fences };
     pendingAssignments.set(events, pending);
   }
-  return pending.has(assignment_id);
+  return pending;
+}
+/**
+ * Failed automatic restarts whose human action has not been completed by the
+ * human. Only an actual human confirmation releases the failure fence.
+ */
+export function openRestartFailures(events: readonly Event[]): Event[] {
+  const completed = new Set(
+    eventsOfType(events, "human_action_completed")
+      .filter((e) => e.actor.kind === "human")
+      .map((e) => (e.payload as { human_action_id?: string }).human_action_id),
+  );
+  // C-745: the system's one extra attempt on the same session, begun after
+  // the upstream diagnosis recovered, takes over its earlier failure; that
+  // attempt is itself a pending action and fences until its own result.
+  const recoveries = new Map<string, number>();
+  for (const e of eventsOfType(events, "host_ops_action_taken")) {
+    const p = e.payload as {
+      diagnosis_recovery_retry?: boolean;
+      assignment_id?: string;
+      context_usage?: { session_id?: string };
+    };
+    if (p.diagnosis_recovery_retry === true && p.context_usage?.session_id)
+      recoveries.set(
+        `${p.assignment_id}\u0000${p.context_usage.session_id}`,
+        Math.max(
+          e.seq,
+          recoveries.get(
+            `${p.assignment_id}\u0000${p.context_usage.session_id}`,
+          ) ?? 0,
+        ),
+      );
+  }
+  return eventsOfType(events, "context_session_restart_result").filter((e) => {
+    const p = e.payload as {
+      result?: string;
+      human_action_id?: string;
+      assignment_id?: string;
+      context_usage?: { session_id?: string };
+    };
+    if (p.result !== "failed" || completed.has(p.human_action_id)) return false;
+    const recovery = p.context_usage?.session_id
+      ? recoveries.get(`${p.assignment_id}\u0000${p.context_usage.session_id}`)
+      : undefined;
+    return recovery === undefined || recovery < e.seq;
+  });
+}
+/**
+ * C-745: every open failure fence on this assignment belongs to the given
+ * session, so the system's extra attempt on that session may take it over.
+ */
+export function restartFencesOnlyOnSession(
+  events: readonly Event[],
+  assignment_id: AssignmentId,
+  session: string,
+): boolean {
+  return openRestartFailures(events).every((e) => {
+    const p = e.payload as {
+      assignment_id?: string;
+      context_usage?: { session_id?: string };
+    };
+    return (
+      p.assignment_id !== assignment_id ||
+      p.context_usage?.session_id === session
+    );
+  });
+}
+export function hostOpsPending(
+  events: readonly Event[],
+  assignment_id: AssignmentId,
+): boolean {
+  const { actions, fences } = pendingSets(events);
+  return actions.has(assignment_id) || fences.has(assignment_id);
+}
+/**
+ * C-741: a host operation is in flight, ignoring only the failure fence of an
+ * automatic restart. The human's own session restart command clears that
+ * fence in the same transaction, so it may proceed past it.
+ */
+export function hostOpsActionPending(
+  events: readonly Event[],
+  assignment_id: AssignmentId,
+): boolean {
+  return pendingSets(events).actions.has(assignment_id);
 }
 
 const automaticLaunches = new WeakMap<
@@ -205,15 +277,14 @@ export function automaticContextActionForRun(
   let launches = automaticLaunches.get(events);
   if (!launches) {
     const results = new Set(
-      events
-        .filter((e) => e.type === "context_session_restart_result")
-        .map((e) => (e.payload as { action_id: string }).action_id),
+      eventsOfType(events, "context_session_restart_result").map(
+        (e) => (e.payload as { action_id: string }).action_id,
+      ),
     );
     const intents = new Map(
-      events
+      eventsOfType(events, "host_ops_action_taken")
         .filter(
           (e) =>
-            e.type === "host_ops_action_taken" &&
             ((e.payload as { automatic_context_restart?: boolean })
               .automatic_context_restart ||
               (e.payload as { dispatch_stall_id?: string })
@@ -226,8 +297,7 @@ export function automaticContextActionForRun(
         ]),
     );
     const indexed = new Map<unknown, HostOpsExecution>();
-    for (const e of events) {
-      if (e.type !== "host_ops_action_finished") continue;
+    for (const e of eventsOfType(events, "host_ops_action_finished")) {
       const action = intents.get(
         (e.payload as { action_id: Event["id"] }).action_id,
       );

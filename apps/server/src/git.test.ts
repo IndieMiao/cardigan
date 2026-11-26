@@ -760,7 +760,7 @@ test("C-636: the GitHub candidate push runs outside the project lock; only the c
     for (const sha of ["e".repeat(40), "not-a-sha"])
       expect(
         await publicationGit.pushCheckCandidate(project, { ...input, sha }),
-      ).toEqual({ status: "failed", reason: "other" });
+      ).toEqual({ status: "failed", reason: "local" });
     expect(push).not.toHaveBeenCalled();
   } finally {
     remote.resolve({ status: "pushed" });

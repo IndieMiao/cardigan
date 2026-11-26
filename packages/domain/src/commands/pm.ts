@@ -35,6 +35,7 @@ import {
   type AssignWorkItemParams,
   assignWorkItem,
 } from "./assign-work-item.js";
+import { applyCloseRequest, type CardCloseRequestInput } from "./card-close.js";
 import {
   applyCardDependencies,
   type CardDependencyInput,
@@ -49,6 +50,7 @@ import {
   repositoryChangeNotes,
   workItemStartPoint,
 } from "./card-repository.js";
+import { applyKeepRunDirs, type CardRunDirKeepInput } from "./card-run-dirs.js";
 import {
   type CommandDraft,
   type CommandEffect,
@@ -445,7 +447,7 @@ export function createCardInDraft(
         title: w.title,
         role_id: w.role_id,
         required: w.required,
-        depends_on: [],
+        depends_on: (w.depends_on ?? []).map((k) => ids.get(k) as WorkItemId),
         completion_criteria: [
           ...acceptance,
           ...(w.completion_criteria ?? []),
@@ -636,6 +638,10 @@ export function updateCard(
     risk_tags?: Card["risk_tags"];
     high_risk?: boolean;
     hold?: CardHoldInput;
+    /** C-743: protect released Assignments' run directories; not mixed with other edits. */
+    keep_run_dirs?: CardRunDirKeepInput;
+    /** C-750: ask the owner to mark this finished card done; not mixed with other edits. */
+    close_request?: CardCloseRequestInput;
     /** C-160: add or update one pre-merge check; not mixed with other edits. */
     pre_merge_check?: PreMergeCheckInput;
     merge_classification?: MergeClassificationInput;
@@ -660,6 +666,26 @@ export function updateCard(
         "暂停操作不能与其他卡片修改混用",
       );
       return applyCardHold(d, card, p.hold);
+    }
+    if (p.keep_run_dirs !== undefined) {
+      ensure(
+        Object.keys(p).every((key) =>
+          ["card_id", "keep_run_dirs"].includes(key),
+        ),
+        "validation_failed",
+        "保留运行目录不能与其他卡片修改混用",
+      );
+      return applyKeepRunDirs(d, card, p.keep_run_dirs);
+    }
+    if (p.close_request !== undefined) {
+      ensure(
+        Object.keys(p).every((key) =>
+          ["card_id", "close_request"].includes(key),
+        ),
+        "validation_failed",
+        "请所有者结卡不能与其他卡片修改混用",
+      );
+      return applyCloseRequest(d, card, p.close_request);
     }
     if (p.merge_classification !== undefined) {
       ensure(

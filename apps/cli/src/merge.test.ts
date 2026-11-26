@@ -1118,6 +1118,54 @@ test("Q-440: CLI requires an explicit override reason and records the observed b
   ).toBe(true);
 });
 
+test("C-760: CLI override refuses an open hold unless --follow-up-actions turns it into a follow-up", async () => {
+  await seatAwaitingMerge();
+  const hold = apply((s, a, p) =>
+    requestHumanAction(
+      s,
+      a,
+      {
+        card_id: card_id as never,
+        instructions: "在 Google 后台配置账号",
+        why_human: "只有所有者有账号",
+        executor: "owner",
+        expected_return: "配置完成",
+        blocked_work_items: [],
+        blocks_merge: true,
+        prerequisite: "external_account",
+      },
+      p,
+    ),
+  );
+  const before = JSON.stringify(state().decisions);
+  const refused = await cardigan(
+    "merge",
+    "confirm",
+    card_id,
+    "--yes",
+    "--reason",
+    "账号合并后再配",
+  );
+  expect(refused.code).not.toBe(0);
+  expect(refused.err).toContain(hold.id);
+  expect(JSON.stringify(state().decisions)).toBe(before);
+  const result = await cardigan(
+    "merge",
+    "confirm",
+    card_id,
+    "--yes",
+    "--reason",
+    "账号合并后再配",
+    "--follow-up-actions",
+  );
+  expect(result.code).toBe(0);
+  expect(state().human_actions.find((h) => h.id === hold.id)).toMatchObject({
+    status: "open",
+    blocks_merge: false,
+    merge_blocking_changes: [{ via: "merge_override", by: "human" }],
+  });
+});
+
 test("Q-440: CLI Token mode cannot use the human override", async () => {
   await seatAwaitingMerge();
   setCheck("截图核对", "pending");

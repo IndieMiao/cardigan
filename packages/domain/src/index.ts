@@ -15,6 +15,7 @@ export {
   standingRunDormant,
 } from "./card-hold.js";
 export * from "./card-read.js";
+export * from "./card-watch.js";
 export { checkLogAttempts } from "./check-log.js";
 export * from "./check-recovery.js";
 export {
@@ -25,7 +26,9 @@ export {
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
 export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";
+export * from "./commands/card-close.js";
 export { refreshCardDependencies } from "./commands/card-dependencies.js";
+export * from "./commands/card-watch.js";
 export * from "./commands/context-usage.js";
 export * from "./commands/coordination.js";
 export type {
@@ -59,12 +62,18 @@ export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-attached-wait.js";
 export * from "./commands/host-ops-context-restart.js";
+export * from "./commands/host-ops-queued-cancel.js";
 export * from "./commands/host-ops-rotate.js";
+export { reassignHumanAction } from "./commands/human-action-executor.js";
 export { refreshHumanActionFollowUps } from "./commands/human-action-follow-ups.js";
 export {
   cancelHumanAction,
   refreshCancelledHumanActions,
 } from "./commands/human-action-lifecycle.js";
+export {
+  ownerMergeBlockingBasis,
+  setHumanActionMergeBlocking,
+} from "./commands/human-action-merge-blocking.js";
 export {
   beginIdleSessionRetirement,
   clearSupersededRetirement,
@@ -73,10 +82,12 @@ export {
   handoffIdleSessionRetirement,
   releaseRetainedRetirement,
   releaseUnresponsiveSession,
+  sessionTurnEnded,
   settleIdleSessionRetirement,
   trackRetirementDispatch,
   type UnresponsiveRelease,
   unresponsiveReleaseBlocker,
+  untouchedQueuedRun,
 } from "./commands/idle-session-retirement.js";
 export * from "./commands/inactive-run.js";
 export { refreshRequiredVerifiers } from "./commands/late-verifier.js";
@@ -86,6 +97,7 @@ export * from "./commands/machines.js";
 export * from "./commands/member.js";
 export {
   type MergePlan,
+  mergeBlockingHumanActions,
   mergePlan,
   prepareMergePlan,
   requestMerge,
@@ -140,6 +152,7 @@ export * from "./commands/merge-shadow.js";
 export * from "./commands/merge-snooze.js";
 export * from "./commands/merge-window.js";
 export * from "./commands/notices.js";
+export * from "./commands/office-pre-merge-prompt.js";
 export type { OwnerRecordInput } from "./commands/owner-record.js";
 export {
   buildPlainSummary,
@@ -159,6 +172,7 @@ export * from "./commands/precheck.js";
 export * from "./commands/preferences.js";
 export * from "./commands/preparation-recovery.js";
 export * from "./commands/queries.js";
+export * from "./commands/readonly-checkout.js";
 export * from "./commands/release.js";
 export * from "./commands/release-notes.js";
 export * from "./commands/remote-worker-loss.js";
@@ -198,6 +212,7 @@ export {
   heldPause,
 } from "./commands/stop-state.js";
 export * from "./commands/story-proposal.js";
+export * from "./commands/story-summary-handoff.js";
 export * from "./commands/system-completion.js";
 export * from "./commands/system-merge.js";
 export * from "./commands/system-merge-policy.js";
@@ -220,6 +235,7 @@ export * from "./commands/upstream-health.js";
 export { resumeWorkWaits } from "./commands/work-waits.js";
 export * from "./commands/worker-inspection.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
+export * from "./context-restart-retry.js";
 export * from "./context-usage.js";
 export {
   categoryAuthorization,
@@ -241,8 +257,11 @@ export {
   eventById,
   eventsAtSeq,
   eventsForDecision,
+  eventsForHumanAction,
+  eventsForWorkItem,
   eventsOfType,
   eventsOfTypes,
+  eventsWithKey,
   flatMapEvents,
   fullEventHistory,
   isTelemetryEvent,
@@ -251,6 +270,7 @@ export {
   telemetryEvents,
 } from "./event-index.js";
 export {
+  type DormantLoader,
   EventLog,
   EventLogView,
   type HistoryFilter,
@@ -275,7 +295,10 @@ export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
 export * from "./hot-history.js";
 export * from "./hot-history-shadow.js";
+export { isMergePrerequisite } from "./human-action.js";
+export * from "./human-action-executor.js";
 export * from "./ids.js";
+export * from "./image-generation.js";
 export {
   currentInteraction,
   type InteractionSample,
@@ -293,12 +316,14 @@ export { needsYouReadPhase } from "./needs-read-phase.js";
 export * from "./notification.js";
 export * from "./office-changes.js";
 export * from "./owner-message.js";
+export * from "./owner-required.js";
 export * from "./pm-merge-stall-attention.js";
 export * from "./pm-notification.js";
 export * from "./ports.js";
 export * from "./precheck.js";
 export * from "./preferences.js";
 export { cancelledQueueRelease } from "./prelaunch-release.js";
+export * from "./preparation-retry.js";
 export * from "./priority.js";
 export * from "./probes.js";
 export * from "./project-code.js";
@@ -338,6 +363,7 @@ export {
 } from "./shared-review-wake.js";
 export * from "./standing.js";
 export * from "./start-point.js";
+export * from "./startup-failure.js";
 export * from "./states.js";
 export * from "./story.js";
 export * from "./story-discussion.js";

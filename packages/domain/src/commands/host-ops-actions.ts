@@ -6,6 +6,11 @@ import {
   standingRunDormant,
 } from "../card-hold.js";
 import {
+  contextRestartRetryState,
+  type UpstreamHoldDetail,
+  upstreamHoldDetailPayload,
+} from "../context-restart-retry.js";
+import {
   type ContextObservation,
   contextObservationCurrent,
   contextUsageFresh,
@@ -17,8 +22,10 @@ import {
   type HOST_OPS_TOOLS,
   type HostOpsExecution,
   type HostOpsExecutionTool,
+  hostOpsActionPending,
   hostOpsPending,
   pendingHostOpsActions,
+  restartFencesOnlyOnSession,
 } from "../host-ops.js";
 import type {
   AssignmentId,
@@ -27,6 +34,7 @@ import type {
   HumanActionId,
   RunId,
 } from "../ids.js";
+import { rebootExitCompletion } from "../remote-worker-loss.js";
 import {
   retirementOwnsSession,
   retirementWaitReceipt,
@@ -182,6 +190,9 @@ export interface HostOpsActionParams {
   readonly upstream_incident_id?: HostOpsExecution["action_id"];
   /** Internal system path only; never accepted by the MCP tool. */
   readonly automatic_context_restart?: boolean;
+  /** C-745 system path only: the one extra attempt after the upstream
+   * diagnosis recovered on a session closed by its unavailability. */
+  readonly diagnosis_recovery_retry?: boolean;
   readonly dispatch_stall_id?: string;
   /** C-596 system path only; never accepted by the MCP tool. */
   readonly standing_pm_stall?: boolean;
@@ -315,7 +326,14 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
     "验证工作项尚无当前可审交付，请等待交付后再启动",
   );
   ensure(
-    !hostOpsPending(d.state.events, a.id),
+    p.diagnosis_recovery_retry && p.context_usage
+      ? !hostOpsActionPending(d.state.events, a.id) &&
+          restartFencesOnlyOnSession(
+            d.state.events,
+            a.id,
+            p.context_usage.session_id,
+          )
+      : !hostOpsPending(d.state.events, a.id),
     "illegal_transition",
     "A host operation is already pending",
   );
@@ -412,6 +430,12 @@ export function beginHostOpsActionInDraft(
     "Automatic restarts are system-only",
   );
   ensure(
+    !p.diagnosis_recovery_retry ||
+      (p.automatic_context_restart && p.context_usage),
+    "validation_failed",
+    "Only an automatic context restart can be a diagnosis recovery retry",
+  );
+  ensure(
     !p.standing_pm_stall || p.tool === "host_ops_restart_standing_pm",
     "validation_failed",
     "Only a standing PM restart can carry the stall source",
@@ -493,9 +517,8 @@ export function beginHostOpsActionInDraft(
   }
   if (p.upstream_incident_id)
     ensure(
-      !state.events.some(
+      !eventsOfType(state.events, "host_ops_action_taken").some(
         (e) =>
-          e.type === "host_ops_action_taken" &&
           (e.payload as { upstream_incident_id?: string })
             .upstream_incident_id === p.upstream_incident_id &&
           (e.payload as { assignment_id?: string }).assignment_id === a.id,
@@ -513,14 +536,18 @@ export function beginHostOpsActionInDraft(
       "stale_target",
       "上下文未到换会话档，或用量已过期、会话已更换",
     );
+    // C-741: only the system's own retry of an attempt that was held before
+    // any stop may follow it on the same session.
+    const retry = contextRestartRetryState(
+      state.events,
+      a.id,
+      usage.session_id,
+      d.now,
+    );
     ensure(
-      !state.events.some(
-        (e) =>
-          e.type === "host_ops_action_taken" &&
-          (e.payload as { assignment_id?: string }).assignment_id === a.id &&
-          (e.payload as { context_usage?: ContextObservation }).context_usage
-            ?.session_id === usage.session_id,
-      ),
+      retry === "fresh" ||
+        (p.automatic_context_restart && retry === "due") ||
+        (p.diagnosis_recovery_retry && retry === "recoverable"),
       "illegal_transition",
       "本会话已请求过上下文换会话",
     );
@@ -539,6 +566,7 @@ export function beginHostOpsActionInDraft(
     ...(handoff ? { retirement_handoff: handoff } : {}),
     ...(p.dispatch_stall_id ? { dispatch_stall_id: p.dispatch_stall_id } : {}),
     ...(p.automatic_context_restart ? { automatic_context_restart: true } : {}),
+    ...(p.diagnosis_recovery_retry ? { diagnosis_recovery_retry: true } : {}),
     ...(p.standing_pm_stall ? { standing_pm_stall: true } : {}),
     ...(p.upstream_incident_id
       ? { upstream_incident_id: p.upstream_incident_id }
@@ -863,10 +891,8 @@ export function withdrawRecoveredHostOpsAction(
     const changed =
       new_incident_id &&
       new_incident_id !== action.upstream_incident_id &&
-      state.events.some(
-        (e) =>
-          e.id === new_incident_id && e.type === "upstream_incident_started",
-      );
+      eventById(state.events, new_incident_id)?.type ===
+        "upstream_incident_started";
     if (!changed) {
       if (
         !action.upstream_incident_id ||
@@ -905,10 +931,8 @@ export function claimHostOpsAction(
       )
     )
       return undefined;
-    const last = state.events.findLast(
-      (e) =>
-        e.type === "host_ops_action_claimed" &&
-        (e.payload as { action_id: string }).action_id === action_id,
+    const last = eventsOfType(state.events, "host_ops_action_claimed").findLast(
+      (e) => (e.payload as { action_id: string }).action_id === action_id,
     );
     if (last && (last.payload as { lease_until: string }).lease_until > d.now)
       return undefined;
@@ -921,7 +945,8 @@ export function claimHostOpsAction(
 
 /**
  * C-152: state of the human confirmation that a host operation's recorded
- * terminal has exited. Only a human completion counts; a PM triage or a
+ * terminal has exited. Only a human completion counts, or (C-761) the
+ * system's own reboot finding for a remote loss; a PM triage or a
  * cancellation leaves the terminal unconfirmed.
  */
 export type HostOpsExitConfirmation =
@@ -929,32 +954,42 @@ export type HostOpsExitConfirmation =
   | {
       readonly status: "open" | "confirmed" | "rejected";
       readonly human_action_id: HumanActionId;
+      /** C-761: present when the system confirmed the exit from a reboot. */
+      readonly basis?: "reboot";
     };
 export function hostOpsExitConfirmation(
   state: Pick<CommandState, "events" | "human_actions">,
   action_id: HostOpsExecution["action_id"],
 ): HostOpsExitConfirmation {
-  const requested = state.events.findLast(
+  const requested = eventsOfType(
+    state.events,
+    "human_action_requested",
+  ).findLast(
     (e) =>
-      e.type === "human_action_requested" &&
       (e.payload as { host_ops_action_id?: string }).host_ops_action_id ===
-        action_id,
+      action_id,
   );
   if (!requested) return { status: "none" };
   const id = (requested.payload as { human_action_id: HumanActionId })
     .human_action_id;
   const action = state.human_actions.find((h) => h.id === id);
   if (action?.status === "open") return { status: "open", human_action_id: id };
-  const completed = state.events.findLast(
-    (e) =>
-      e.type === "human_action_completed" &&
-      (e.payload as { human_action_id?: string }).human_action_id === id,
+  const completed = eventsOfType(
+    state.events,
+    "human_action_completed",
+  ).findLast(
+    (e) => (e.payload as { human_action_id?: string }).human_action_id === id,
   );
-  return action?.status === "done" &&
-    completed?.actor.kind === "human" &&
-    [undefined, "exited"].includes(
-      (completed.payload as { conclusion?: string }).conclusion,
-    )
+  if (action?.status !== "done" || !completed)
+    return { status: "rejected", human_action_id: id };
+  // C-761: a system completion counts only with its own reboot finding.
+  if (completed.actor.kind !== "human")
+    return rebootExitCompletion(state.events, completed)
+      ? { status: "confirmed", human_action_id: id, basis: "reboot" }
+      : { status: "rejected", human_action_id: id };
+  return [undefined, "exited"].includes(
+    (completed.payload as { conclusion?: string }).conclusion,
+  )
     ? { status: "confirmed", human_action_id: id }
     : { status: "rejected", human_action_id: id };
 }
@@ -1043,6 +1078,8 @@ export interface WithdrawnRecoveryDiagnosis {
   readonly cause: string;
   readonly action: string;
   readonly evidence: readonly string[];
+  /** C-745: why the diagnosis was unavailable, when it was. */
+  readonly upstream_detail?: UpstreamHoldDetail;
 }
 export function withdrawUnstartedStallRestart(
   state: CommandState,
@@ -1073,6 +1110,7 @@ export function withdrawUnstartedStallRestart(
       })
     )
       return;
+    const detail = upstreamHoldDetailPayload(blockedBy?.upstream_detail);
     return d.emit("host_ops_action_finished", undefined, {
       action_id: actionId,
       assignment_id: action.assignment_id,
@@ -1087,6 +1125,7 @@ export function withdrawUnstartedStallRestart(
               cause: blockedBy.cause,
               action: blockedBy.action,
               evidence: [...blockedBy.evidence],
+              ...(detail ? { upstream_detail: detail } : {}),
             },
           }
         : {}),

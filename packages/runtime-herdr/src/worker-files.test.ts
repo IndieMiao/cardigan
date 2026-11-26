@@ -209,7 +209,7 @@ test("publish/commit/clear bind one generation; old revocation cannot alter anot
   expect(run(path, request("publish")).status).not.toBe(0);
 });
 
-test.each(["alive", "reused", "unknown", "gone"])(
+test.each(["alive", "reused", "unknown", "gone", "rebooted", "boot-unknown"])(
   "Darwin publication and loss observation preserve process identity: %s (synthetic)",
   (state) => {
     const path = disk();
@@ -231,8 +231,13 @@ def forbidden(*args): raise AssertionError('Linux identity used on Darwin')
 m.native.linux_identity=forbidden
 def observe(pid):
     if '${state}' in ('unknown','gone'): raise PermissionError()
+    if '${state}'=='rebooted': return ('new-boot',2201,'10:20',12345)
     return ('mac-boot',2201,'changed' if '${state}'=='reused' else '10:20',12345)
 m.native.darwin_identity=observe
+def boot():
+    if '${state}'=='boot-unknown': raise OSError('boot_unknown')
+    return 'new-boot' if '${state}'=='rebooted' else 'mac-boot'
+m.native.darwin_boot=boot
 def exists(pid,signal):
     assert signal==0
     if '${state}'=='gone': raise ProcessLookupError()
@@ -247,7 +252,9 @@ m.os.kill=exists
         timeout: 4000,
       });
     };
-    expect(darwin("publish").status).toBe(0);
+    const published = darwin("publish");
+    expect(published.stderr).toBe("");
+    expect(published.status).toBe(0);
     expect(darwin("commit").status).toBe(0);
     writeFileSync(
       join(generationDir(path), "process"),
@@ -257,10 +264,23 @@ m.os.kill=exists
     const result = darwin("status");
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    const reply = JSON.parse(result.stdout);
+    expect(reply).toMatchObject({
       process,
-      observed: state === "reused" || state === "gone" ? "exited" : state,
+      observed: ["reused", "gone", "rebooted"].includes(state)
+        ? "exited"
+        : state === "boot-unknown"
+          ? "alive"
+          : state,
     });
+    // C-761: the current boot is reported only when it can be read.
+    if (state === "boot-unknown") expect(reply).not.toHaveProperty("boot");
+    else
+      expect(reply.boot).toBe(state === "rebooted" ? "new-boot" : "mac-boot");
+    for (const operation of ["publish", "commit"] as const)
+      expect(JSON.parse(darwin(operation).stdout || "{}")).not.toHaveProperty(
+        "boot",
+      );
   },
 );
 test("clear before publish leaves a durable tombstone; identity mismatch cannot reuse it", () => {

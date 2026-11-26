@@ -140,6 +140,20 @@ test("preparation recovery wakes its owner and a stalled preparation only alerts
       }),
     ),
   ).toEqual(["assignment:A-4"]);
+  // C-738: a used-up retry budget reaches PM via its pm_ops handoff, not host ops.
+  expect(
+    recipients(
+      routeEvent({
+        event: event("run_preparation_stalled", {
+          assignment_id: "A-1",
+          body: "failed",
+          exhausted: true,
+          recovery_root_run_id: "R-1",
+        }),
+        snapshot: state,
+      }),
+    ),
+  ).toEqual([]);
 });
 
 test("§6.4 work-item comment notifies that work item's Assignment", () => {
@@ -1738,6 +1752,16 @@ test("human-confirmed remote worker release asks PM to choose the next machine w
   );
   const result = routeEvent({ event: e, snapshot: snapshot() });
   expect(recipients(result)).toEqual(["pm_ops"]);
+  expect(result.notifications[0]?.summary).toContain("已由人确认退出");
+  // C-761: a release on reboot evidence names the system, not the human.
+  const reboot = routeEvent({
+    event: { ...e, payload: { ...e.payload, exit_basis: "reboot" } },
+    snapshot: snapshot(),
+  });
+  expect(recipients(reboot)).toEqual(["pm_ops"]);
+  expect(reboot.notifications[0]?.summary).toContain(
+    "已由系统按重启证据确认退出",
+  );
   expect(
     routeEvent({ event: { ...e, actor: agent("A-1") }, snapshot: snapshot() })
       .notifications,
@@ -1791,4 +1815,57 @@ test("an author precheck wait routes only its settlement, not an early or duplic
       type === "work_item_resume_requested" ? "assignment:A-1" : "pm_ops",
     ]);
   }
+});
+
+test("C-612: delivered release notes go to the managed PM Office, or warn PM Ops when nobody can send", () => {
+  const route = (options: {
+    enabled?: boolean;
+    office?: boolean;
+    template?: string;
+    key?: string;
+  }) =>
+    routeEvent({
+      event: event("delivery_submitted", { delivery_id: "D-9" }),
+      snapshot: snapshot({
+        cards: [card({ template: options.template ?? "release" })],
+        work_items: [
+          workItem("W-9", {
+            role_id: "release_ops",
+            template_key: options.key ?? "release_notes",
+          }),
+        ],
+        assignments: [
+          assignment("A-3", {
+            scope: "standing",
+            role_id: "pm",
+            standing_mode: "ops",
+          }),
+          ...(options.office === false
+            ? []
+            : [
+                assignment("A-4", {
+                  scope: "standing",
+                  role_id: "pm",
+                  standing_mode: "office",
+                }),
+              ]),
+        ],
+        project_preferences: [
+          { id: project_id, pm_owner_messages: options.enabled ?? true },
+        ],
+        deliveries: [delivery("D-9", { work_item_id: "W-9", kind: "doc" })],
+      }),
+    });
+  const sent = route({});
+  expect(recipients(sent)).toEqual(["pm_office"]);
+  expect(rules(sent)).toEqual(["C-612/release notes"]);
+  expect(sent.notifications[0]?.summary).toContain("send_owner_message");
+  for (const blocked of [{ enabled: false }, { office: false }]) {
+    const warned = route(blocked);
+    expect(recipients(warned)).toEqual(["pm_ops"]);
+    expect(warned.notifications[0]?.summary).toContain("未自动发送");
+  }
+  // Other items or other templates are not release notes.
+  expect(route({ key: "publish" }).notifications).toEqual([]);
+  expect(route({ template: "dev" }).notifications).toEqual([]);
 });

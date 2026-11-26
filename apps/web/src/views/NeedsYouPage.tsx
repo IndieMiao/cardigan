@@ -15,6 +15,7 @@ import {
   type IncidentHandling,
   type MergeConfirmationReview,
   type NeedsAction,
+  type NeedsCardToClose,
   type NeedsDecision,
   type NeedsPage,
   type NeedsStoryProposal,
@@ -44,6 +45,7 @@ import {
   NeedsOpenAction,
   NeedsRow,
 } from "../components/layout/NeedsRowLayout.js";
+import { MergeBlockingControl } from "../components/MergeBlockingControl.js";
 import { MergeCheck } from "../components/MergeCheck.js";
 import { MergeStatusLine } from "../components/MergeStatusLine.js";
 import {
@@ -69,6 +71,7 @@ import {
   storyRefusal,
 } from "../components/StoryProposal.js";
 import { Button } from "../components/ui/button.js";
+import { Checkbox } from "../components/ui/checkbox.js";
 import * as Dialog from "../components/ui/dialog.js";
 import { SelectControl } from "../components/ui/select-control.js";
 import { Skeleton } from "../components/ui/skeleton.js";
@@ -735,6 +738,7 @@ export function MergeConfirmation({
   const [holdUntil, setHoldUntil] = useState("");
   const [overriding, setOverriding] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
+  const [overrideFollowUp, setOverrideFollowUp] = useState(false);
   const [answeringOther, setAnsweringOther] = useState(false);
   const [otherWords, setOtherWords] = useState("");
   const overrideError = mergeOverrideReasonError(overrideReason);
@@ -762,6 +766,7 @@ export function MergeConfirmation({
   const needsTakeover = pmTakeover && acceptedTakeover !== takeoverKey;
   const preChecks = merge?.pre_merge_checks ?? [];
   const blockers = merge?.blockers ?? ["检查状态尚未读取，请刷新"];
+  const holds = merge?.blocking_human_actions ?? [];
   const mergeBlocked = blockers.length > 0;
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge", viaSuggestion = false) =>
@@ -811,18 +816,17 @@ export function MergeConfirmation({
         </button>
       )}
       {!confirmed && mergeBlocked && (
-        <button
+        <Button
           ref={overrideTrigger}
-          type="button"
-          className="quiet"
           disabled={action.busy}
           onClick={() => {
             setOverrideReason("");
+            setOverrideFollowUp(false);
             setOverriding(true);
           }}
         >
           仍要合并
-        </button>
+        </Button>
       )}
       {merge?.merge_gate_enabled &&
         !merge.merge_noop &&
@@ -1188,6 +1192,20 @@ export function MergeConfirmation({
                 {overrideError}
               </p>
             )}
+            {holds.length > 0 && (
+              <fieldset aria-label="挡合并的人工事项">
+                <p>
+                  {`人工事项 ${holds.map((h) => h.id).join("、")} 未完成，会继续挡住合并。`}
+                </p>
+                <label>
+                  <Checkbox
+                    checked={overrideFollowUp}
+                    onCheckedChange={(v) => setOverrideFollowUp(v === true)}
+                  />
+                  一并改为合并后跟进
+                </label>
+              </fieldset>
+            )}
             {action.error && (
               <p className="error" role="alert">
                 {action.error}
@@ -1199,32 +1217,55 @@ export function MergeConfirmation({
                   先不确认
                 </button>
               </Dialog.Close>
-              <button
-                type="button"
-                className="quiet"
-                disabled={action.busy || !!overrideError}
+              <Button
+                disabled={
+                  action.busy ||
+                  !!overrideError ||
+                  (holds.length > 0 && !overrideFollowUp)
+                }
                 onClick={() => {
-                  if (overrideError) return;
+                  if (overrideError || (holds.length > 0 && !overrideFollowUp))
+                    return;
                   void action.run(
-                    [projectId, q.id, "merge-override", quote, overrideReason],
+                    [
+                      projectId,
+                      q.id,
+                      "merge-override",
+                      quote,
+                      overrideReason,
+                      holds.length > 0,
+                    ],
                     async (key) => {
-                      await client.recordDecision(
-                        projectId,
-                        q.id,
-                        "merge",
-                        quote,
-                        key,
-                        false,
-                        undefined,
-                        overrideReason,
-                      );
+                      if (holds.length > 0)
+                        await client.recordDecision(
+                          projectId,
+                          q.id,
+                          "merge",
+                          quote,
+                          key,
+                          false,
+                          undefined,
+                          overrideReason,
+                          true,
+                        );
+                      else
+                        await client.recordDecision(
+                          projectId,
+                          q.id,
+                          "merge",
+                          quote,
+                          key,
+                          false,
+                          undefined,
+                          overrideReason,
+                        );
                       setOverriding(false);
                     },
                   );
                 }}
               >
                 确认仍要合并
-              </button>
+              </Button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
@@ -1729,6 +1770,45 @@ function StoryProposalRow({
     </NeedsRow>
   );
 }
+/** C-750: a finished card the owner marks done on its card page. */
+function CardToCloseRow({
+  item,
+  projectId,
+  elapsed,
+}: {
+  readonly item: NeedsCardToClose;
+  readonly projectId: string;
+  readonly elapsed: number;
+}) {
+  return (
+    <NeedsRow
+      label={`待你标记完成 ${item.card_id}`}
+      ids={<RowCard projectId={projectId} id={item.card_id} />}
+      title={item.card_title}
+      summary={
+        item.close_request
+          ? noticeLine(item.close_request.reason)
+          : `${item.required_work_items} 个必需工作项已全部通过`
+      }
+      time={waitLabel(item.waited_ms, elapsed)}
+      status={<StatusTag status="open" label="待标记完成" />}
+      action={
+        <Button asChild variant="primary">
+          <a
+            aria-label={`标记完成 ${item.card_id}`}
+            href={routeHash({
+              kind: "card",
+              projectId,
+              cardId: item.card_id,
+            })}
+          >
+            标记完成
+          </a>
+        </Button>
+      }
+    />
+  );
+}
 function HumanAction({
   item,
   client,
@@ -1741,6 +1821,8 @@ function HumanAction({
     "exited" | "false_alarm" | "unconfirmed" | ""
   >("");
   const action = useAction(done);
+  // C-742: 张良's actions can be viewed and taken back, never completed here.
+  const operator = item.executor === "operator";
   if (item.completion_notice !== undefined)
     return (
       <NeedsRow
@@ -1800,16 +1882,18 @@ function HumanAction({
           label={
             item.last_loss_observation
               ? "已记录：无法确认"
-              : item.triage === "host"
-                ? item.host_operator === "external"
-                  ? "待外接操作员"
-                  : "待主机操作"
-                : "待你执行"
+              : operator
+                ? "待张良执行"
+                : item.triage === "host"
+                  ? item.host_operator === "external"
+                    ? "待外接操作员"
+                    : "待主机操作"
+                  : "待你执行"
           }
         />
       }
       action={
-        item.triage === "host" ? (
+        item.triage === "host" || operator ? (
           <NeedsOpenAction name={`查看 ${item.id}`} secondary>
             查看
           </NeedsOpenAction>
@@ -1909,64 +1993,92 @@ function HumanAction({
           <p>原期望返回：{item.original_request.expected_return}</p>
         </details>
       )}
-      <form
-        data-needs-focus=""
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (item.requires_loss_conclusion && !conclusion) return;
-          void action.run(
-            [projectId, item.id, "complete", text, conclusion],
-            async (key) => {
-              if (!conclusion)
-                return client.completeAction(projectId, item.id, text, key);
-              await client.completeAction(
+      {item.card_id && (
+        <MergeBlockingControl
+          client={client}
+          projectId={projectId}
+          action={item}
+          done={done}
+        />
+      )}
+      {operator ? (
+        <Button
+          data-needs-focus=""
+          disabled={action.busy}
+          onClick={() =>
+            void action.run([projectId, item.id, "reassign"], (key) =>
+              client.reassignAction(
                 projectId,
                 item.id,
-                text,
+                "owner",
+                "所有者改为自己处理",
                 key,
-                conclusion,
-              );
-              if (conclusion === "unconfirmed") {
-                setText((draft) => (draft === text ? "" : draft));
-              }
-            },
-          );
-        }}
-      >
-        {item.requires_loss_conclusion && (
+              ),
+            )
+          }
+        >
+          改由我处理
+        </Button>
+      ) : (
+        <form
+          data-needs-focus=""
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (item.requires_loss_conclusion && !conclusion) return;
+            void action.run(
+              [projectId, item.id, "complete", text, conclusion],
+              async (key) => {
+                if (!conclusion)
+                  return client.completeAction(projectId, item.id, text, key);
+                await client.completeAction(
+                  projectId,
+                  item.id,
+                  text,
+                  key,
+                  conclusion,
+                );
+                if (conclusion === "unconfirmed") {
+                  setText((draft) => (draft === text ? "" : draft));
+                }
+              },
+            );
+          }}
+        >
+          {item.requires_loss_conclusion && (
+            <label>
+              失联结论
+              <SelectControl
+                required
+                aria-label={`${item.id} 失联结论`}
+                value={conclusion}
+                onValueChange={(v) =>
+                  setConclusion(
+                    v === "exited" || v === "false_alarm" || v === "unconfirmed"
+                      ? v
+                      : "",
+                  )
+                }
+              >
+                <option value="">请选择</option>
+                <option value="exited">已退出</option>
+                <option value="false_alarm">仍在运行（误报）</option>
+                <option value="unconfirmed">无法确认</option>
+              </SelectControl>
+            </label>
+          )}
           <label>
-            失联结论
-            <SelectControl
-              required
-              aria-label={`${item.id} 失联结论`}
-              value={conclusion}
-              onValueChange={(v) =>
-                setConclusion(
-                  v === "exited" || v === "false_alarm" || v === "unconfirmed"
-                    ? v
-                    : "",
-                )
-              }
-            >
-              <option value="">请选择</option>
-              <option value="exited">已退出</option>
-              <option value="false_alarm">仍在运行（误报）</option>
-              <option value="unconfirmed">无法确认</option>
-            </SelectControl>
+            执行结果
+            <Textarea
+              aria-label={`${item.id} 执行结果`}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+            />
           </label>
-        )}
-        <label>
-          执行结果
-          <Textarea
-            aria-label={`${item.id} 执行结果`}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-          />
-        </label>
-        <button type="submit" disabled={action.busy || !text.trim()}>
-          {conclusion === "unconfirmed" ? "记录核对结果" : "确认已完成"}
-        </button>
-      </form>
+          <button type="submit" disabled={action.busy || !text.trim()}>
+            {conclusion === "unconfirmed" ? "记录核对结果" : "确认已完成"}
+          </button>
+        </form>
+      )}
       <RequestFeedback
         interactive
         pending={action.busy}
@@ -2207,13 +2319,24 @@ function NeedsContent({
   const props = { client, projectId, done: reload, elapsed };
   // C-212: host actions are for the host operator; they sit in their own
   // folded group and never count as waiting on the human.
-  const mine = (data?.human_actions ?? []).filter((a) => a.triage !== "host");
-  const host = (data?.human_actions ?? []).filter((a) => a.triage === "host");
+  // C-742: 张良's open actions are listed apart and never count as the
+  // owner's; unclaimed completion notices stay with the owner's actions.
+  const forOperator = (a: NeedsAction) =>
+    a.executor === "operator" && a.completion_notice === undefined;
+  const operator = (data?.human_actions ?? []).filter(forOperator);
+  const mine = (data?.human_actions ?? []).filter(
+    (a) => !forOperator(a) && a.triage !== "host",
+  );
+  const host = (data?.human_actions ?? []).filter(
+    (a) => !forOperator(a) && a.triage === "host",
+  );
   const proposals = data?.story_proposals ?? [];
+  const toClose = data?.cards_to_close ?? [];
   const total = data
     ? data.decisions.length +
       proposals.length +
       mine.length +
+      toClose.length +
       data.incidents.length +
       (data.attention?.length ?? 0)
     : 0;
@@ -2309,6 +2432,7 @@ function NeedsContent({
             !closedMessage &&
             !data.notices?.length &&
             !host.length &&
+            !operator.length &&
             !data.system_rule_attention?.length && (
               <EmptyState>没有需要你处理的事</EmptyState>
             )}
@@ -2434,6 +2558,31 @@ function NeedsContent({
           {!!mine.length && (
             <NeedsList label="待你执行" title={`待你执行（${mine.length}）`}>
               {mine.map((item) => (
+                <HumanAction key={item.id} item={item} {...props} />
+              ))}
+            </NeedsList>
+          )}
+          {!!toClose.length && (
+            <NeedsList
+              label="待你标记完成"
+              title={`待你标记完成（${toClose.length}）`}
+            >
+              {toClose.map((item) => (
+                <CardToCloseRow
+                  key={item.card_id}
+                  item={item}
+                  projectId={projectId}
+                  elapsed={elapsed}
+                />
+              ))}
+            </NeedsList>
+          )}
+          {!!operator.length && (
+            <NeedsList
+              label="交给张良"
+              title={`交给张良（${operator.length}）`}
+            >
+              {operator.map((item) => (
                 <HumanAction key={item.id} item={item} {...props} />
               ))}
             </NeedsList>

@@ -1,3 +1,8 @@
+import {
+  isPublishApprovalRequest,
+  PUBLISH_APPROVAL_FORMAT,
+  publishApprovalShape,
+} from "../artifact-publication.js";
 import { categoryDelegated } from "../decision-authorization.js";
 import { DECISION_OTHER_OPTION, isDecisionOther } from "../decision-other.js";
 import {
@@ -10,8 +15,10 @@ import type {
   Author,
   Decision,
   HumanAction,
+  HumanActionExecutor,
   HumanDecidedMergeBasis,
   MergeDecisionEvidence,
+  OwnerRequiredDeclaration,
   PlainSummary,
   ReviewPauseInput,
   TimelineEntry,
@@ -19,6 +26,12 @@ import type {
 } from "../entities.js";
 import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
+import {
+  classifyHumanActionExecutor,
+  HUMAN_ACTION_OPERATOR_NAME,
+  isOperatorAction,
+  isOperatorIdentity,
+} from "../human-action-executor.js";
 import type {
   AssignmentId,
   AttachmentId,
@@ -75,11 +88,20 @@ import {
   checkHeldResumeAnswer,
 } from "./held-assignment-resume.js";
 import {
+  emitOperatorActionRequested,
+  validExecutor,
+} from "./human-action-executor.js";
+import {
+  changeMergeBlocking,
+  mergeBlockingAudit,
+  ownerMergeBlockingBasis,
+} from "./human-action-merge-blocking.js";
+import {
   buildHumanDecidedMergeBasis,
   humanDecidedMergeQuestions,
 } from "./human-decided-merge.js";
 import { independentReviewLimitItem } from "./independent-review-limit-delegation.js";
-import { syncHumanDecidedMerges } from "./merge.js";
+import { mergeBlockingHumanActions, syncHumanDecidedMerges } from "./merge.js";
 import {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -159,6 +181,7 @@ import {
 } from "./merge-check.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { recordDecisionResolution } from "./review-limit-resolution.js";
+import { storySummaryHandedOff } from "./story-summary-handoff.js";
 import { activeWork } from "./workflow.js";
 
 export function issueInstruction(
@@ -355,12 +378,9 @@ export function postComment(
         refs,
         mentions: commentMentions(
           p.story_discussion?.action === "answer"
-            ? `${p.body}\n${p.story_discussion.answer}`
+            ? [p.body, p.story_discussion.answer]
             : p.story_discussion?.action === "submit_answers"
-              ? [
-                  p.body,
-                  ...p.story_discussion.answers.map((a) => a.answer),
-                ].join("\n")
+              ? [p.body, ...p.story_discussion.answers.map((a) => a.answer)]
               : p.body,
           p.mentions ?? [],
           state.employees ?? [],
@@ -373,12 +393,16 @@ export function postComment(
     );
     if (discussion && d.timeline[0]) discussion.apply(d.timeline[0].id);
     if (p.story_summary) {
+      // C-762: PM Ops may draft it only after the system handed this
+      // settlement over; confirming the story stays with the human.
       ensure(
         d.assignment?.scope === "standing" &&
           d.assignment.role_id === "pm" &&
-          d.assignment.standing_mode === "office",
+          (d.assignment.standing_mode === "office" ||
+            (d.assignment.standing_mode === "ops" &&
+              storySummaryHandedOff(state.events, card.id))),
         "unauthorized",
-        "只有常驻 Office 可提交需求总结",
+        "只有常驻 Office 可提交需求总结；超时转交后 PM Ops 可代笔",
       );
       ensure(
         !card.hold && card.status !== "backlog",
@@ -594,6 +618,11 @@ export type RequestDecisionParams = Pick<
   readonly plain_summary?: PlainSummary;
   /** C-304: explicit human-only reason; requires decider=human. */
   readonly human_required_reason?: string;
+  /**
+   * C-753: PM only. The owner must decide personally: skips category
+   * delegation; both the reason and its basis are required.
+   */
+  readonly owner_required?: { readonly reason: string; readonly basis: string };
   /** C-212: defer when a human decision is shown in Needs You. */
   readonly ready_when?: ReadyConditionInput;
 };
@@ -615,6 +644,20 @@ export function requestDecision(
         p.decider === "human",
         "validation_failed",
         "强制交人理由只能用于 decider=human 的拍板",
+      );
+    }
+    if (p.owner_required !== undefined) {
+      ensure(
+        d.assignment?.scope === "standing" && d.assignment.role_id === "pm",
+        "unauthorized",
+        "只有 PM Office 或 PM Ops 可以声明此拍板须由所有者本人决定",
+      );
+      text(p.owner_required.reason, "owner_required.reason");
+      text(p.owner_required.basis, "owner_required.basis");
+      ensure(
+        p.decider === "human",
+        "validation_failed",
+        "声明须由所有者本人决定的拍板，decider 必须是 human",
       );
     }
     ensure(
@@ -677,19 +720,37 @@ export function requestDecision(
       p.decider === "human" || p.plain_summary !== undefined
         ? buildPlainSummary(p.plain_summary)
         : undefined;
+    // C-754: a publish approval must be one publish_artifact can honour once
+    // the owner says yes; the target is derived from its single attachment.
+    let target = p.target;
+    if (isPublishApprovalRequest(p)) {
+      const shape = publishApprovalShape(p, (id) =>
+        d
+          .list("attachments")
+          .find((a) => a.id === id && !a.streamed_artifact?.expired),
+      );
+      ensure(
+        shape.ok,
+        "validation_failed",
+        shape.ok
+          ? ""
+          : `外发拍板格式不对：${shape.problems.map((m, i) => `${i + 1}) ${m}`).join("；")}。${PUBLISH_APPROVAL_FORMAT}`,
+      );
+      target = shape.target;
+    }
     if (p.kind === "approve") {
       ensure(
-        p.target,
+        target,
         "validation_failed",
         "Approval must bind to a delivery or subject",
       );
-      if ("delivery_id" in p.target)
-        d.work(d.get("deliveries", p.target.delivery_id).work_item_id);
+      if ("delivery_id" in target)
+        d.work(d.get("deliveries", target.delivery_id).work_item_id);
       else {
-        text(p.target.subject.value, "approval subject");
+        text(target.subject.value, "approval subject");
         ensure(
           ["git_head", "artifact_sha256", "doc_version"].includes(
-            p.target.subject.kind,
+            target.subject.kind,
           ),
           "validation_failed",
           "Invalid approval subject",
@@ -765,7 +826,7 @@ export function requestDecision(
       );
       ensure(
         highRiskCategories.includes(p.category) &&
-          !p.target &&
+          !target &&
           items.every((w) => w.kind !== "produce"),
         "validation_failed",
         "只有不涉及产出工作项、也不绑定审批对象的高风险拍板（花钱、账号、权限、删除数据）才能标为与合并无关",
@@ -776,6 +837,15 @@ export function requestDecision(
       for (const item of items) paused(d, item, "waiting_decision");
       endForDecision(d, id, p.question, items);
     }
+    const ownerRequired: OwnerRequiredDeclaration | undefined =
+      p.owner_required && d.assignment
+        ? {
+            reason: p.owner_required.reason.trim(),
+            basis: p.owner_required.basis.trim(),
+            declared_by: d.assignment.id,
+            declared_at: d.now,
+          }
+        : undefined;
     const base = {
       ...(d.assignment?.scope === "work_item"
         ? { pm_triage: true as const }
@@ -804,9 +874,7 @@ export function requestDecision(
                 ...(p.card_id ? { card_id: p.card_id } : {}),
                 affected_cards: cards,
                 affected_work_items: items.map((w) => w.id),
-                ...(p.kind === "approve" && p.target
-                  ? { target: p.target }
-                  : {}),
+                ...(p.kind === "approve" && target ? { target } : {}),
               },
               p.suggestion,
             ),
@@ -819,9 +887,16 @@ export function requestDecision(
       p.decider === "human"
         ? { handoff_group: `${p.card_id}/${p.category}` }
         : {}),
-      ...(p.human_required_reason !== undefined
-        ? { human_required_reason: p.human_required_reason.trim() }
-        : {}),
+      ...(ownerRequired
+        ? {
+            owner_required: ownerRequired,
+            human_required_reason:
+              p.human_required_reason?.trim() ||
+              `${ownerRequired.reason}（依据：${ownerRequired.basis}）`,
+          }
+        : p.human_required_reason !== undefined
+          ? { human_required_reason: p.human_required_reason.trim() }
+          : {}),
       ...(readyWhen ? { ready_when: readyWhen } : {}),
       blocking: p.blocking,
       decider:
@@ -835,7 +910,7 @@ export function requestDecision(
         ? {
             ...base,
             kind: "approve",
-            target: p.target as NonNullable<typeof p.target>,
+            target: target as NonNullable<typeof target>,
           }
         : { ...base, kind: "choose" },
     );
@@ -862,6 +937,14 @@ export function requestDecision(
           decision_id: id,
           affected_work_items: decision.affected_work_items,
           ...routing,
+          ...(ownerRequired
+            ? {
+                owner_required: {
+                  reason: ownerRequired.reason,
+                  basis: ownerRequired.basis,
+                },
+              }
+            : {}),
         },
         {
           type: "decision_request",
@@ -869,7 +952,9 @@ export function requestDecision(
             ? `${p.question}\n已进入 PM 待办，尚未授权处理或交人`
             : decision.delegation_authority
               ? `${p.question}\n已按常驻授权转给 PM`
-              : p.question,
+              : ownerRequired
+                ? `${p.question}\n须由所有者本人决定：${ownerRequired.reason}（依据：${ownerRequired.basis}）`
+                : p.question,
           decision_id: id,
         },
       );
@@ -997,6 +1082,12 @@ export function recordDecision(
     delegate_future?: boolean;
     /** Q-440: explicit human override; blank reasons and Agent actors are rejected. */
     merge_override_reason?: string;
+    /**
+     * C-760: with an override, the human ticked "turn the open merge-holding
+     * actions into post-merge follow-ups"; without it such actions refuse the
+     * override instead of silently holding the confirmed merge.
+     */
+    merge_override_follow_up?: boolean;
     /** C-192: the human clicked "按建议处理"; never accepted from Agents. */
     via_suggestion?: boolean;
     suggestion_progress_token?: string;
@@ -1033,6 +1124,12 @@ export function recordDecision(
       ensure(words.length > 0, "validation_failed", "选“其他”时必须填写说明");
       p = { ...p, raw_quote: words, rationale: words };
     }
+    ensure(
+      p.merge_override_follow_up === undefined ||
+        p.merge_override_reason !== undefined,
+      "validation_failed",
+      "只有强行确认合并时才能一并改为合并后跟进",
+    );
     if (p.merge_override_reason !== undefined) {
       ensure(
         actor.kind === "human",
@@ -1223,9 +1320,33 @@ export function recordDecision(
     );
     if (decision.trigger === "merge_confirmation" && p.option === "merge") {
       const blockers = humanMergeBlockers(d.state, decision);
-      if (p.merge_override_reason !== undefined)
-        mergeOverride = { reason: p.merge_override_reason.trim(), blockers };
-      else
+      if (p.merge_override_reason !== undefined) {
+        const holds = mergeBlockingHumanActions(
+          {
+            human_actions: d.list("human_actions"),
+            work_items: d.list("work_items"),
+          },
+          decision.card_id as CardId,
+        );
+        ensure(
+          holds.length === 0 || p.merge_override_follow_up === true,
+          "illegal_transition",
+          `仍要合并越不过未完成的挡合并待办 ${holds.map((h) => h.id).join("、")}：勾选“一并改为合并后跟进”，或先处理这些待办`,
+          {
+            merge_blockers: blockers,
+            merge_blocking_actions: holds.map((h) => h.id),
+          },
+        );
+        const reason = p.merge_override_reason.trim();
+        for (const hold of holds)
+          changeMergeBlocking(d, hold, {
+            blocks_merge: false,
+            reason: `强行确认合并：${reason}`,
+            basis: { decision_id: decision.id, raw_quote: p.raw_quote.trim() },
+            via: "merge_override",
+          });
+        mergeOverride = { reason, blockers };
+      } else
         ensure(
           blockers.length === 0,
           "illegal_transition",
@@ -1835,10 +1956,17 @@ export function requestHumanAction(
     prerequisite?: HumanAction["prerequisite"];
     /** C-212: defer when the action is shown in Needs You. */
     ready_when?: ReadyConditionInput;
+    /** C-742: absent infers operator from the title prefix or reason. */
+    executor?: HumanActionExecutor;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "request_human_action", ports, (d) => {
+    ensure(
+      p.executor === undefined || validExecutor(p.executor),
+      "validation_failed",
+      "executor 须为 owner 或 operator",
+    );
     ensure(
       d.card(p.card_id).status !== "cancelled",
       "illegal_transition",
@@ -1893,11 +2021,16 @@ export function requestHumanAction(
       : undefined;
     if (blocks) for (const item of items) paused(d, item, "blocked");
     const id = d.ids.next(state.project_id, "human_action");
+    const classified = p.executor
+      ? { executor: p.executor, basis: "explicit" as const }
+      : classifyHumanActionExecutor(p);
+    const executor = classified.executor;
     const action: HumanAction = {
       id,
       key: id,
       card_id: p.card_id,
       requested_by: d.author,
+      ...(executor === "operator" ? { executor } : {}),
       ...(p.terminal ? { terminal: p.terminal } : {}),
       ...(p.category ? { category: p.category } : {}),
       instructions: p.instructions,
@@ -1925,9 +2058,20 @@ export function requestHumanAction(
         ...(action.blocks_merge
           ? { blocks_merge: true, prerequisite: action.prerequisite }
           : {}),
+        executor,
+        executor_basis: classified.basis,
       },
-      { type: "human_action", body: p.instructions, human_action_id: id },
+      {
+        type: "human_action",
+        body:
+          executor === "operator"
+            ? `交给${HUMAN_ACTION_OPERATOR_NAME}：${p.instructions}`
+            : p.instructions,
+        human_action_id: id,
+      },
     );
+    if (executor === "operator")
+      emitOperatorActionRequested(d, action, "requested", classified.basis);
     return action;
   });
 }
@@ -2001,6 +2145,8 @@ export function completeHumanAction(
     conclusion?: "exited" | "false_alarm" | "unconfirmed";
     text: string;
     attachments?: readonly string[];
+    /** C-742: set only by the operator-marked human CLI, never by web or Feishu. */
+    as_operator?: true;
   },
   ports: CommandPorts,
 ) {
@@ -2010,8 +2156,18 @@ export function completeHumanAction(
     actor.kind === "human" ? "request_human_action" : "complete_host_action",
     ports,
     (d) => {
+      ensure(
+        p.as_operator === undefined || actor.kind === "human",
+        "validation_failed",
+        "as_operator 仅用于人类 CLI",
+      );
       if (actor.kind !== "human") {
         const action = d.get("human_actions", p.human_action_id);
+        if (
+          isOperatorAction(action) &&
+          isOperatorIdentity(d.state, d.assignment)
+        )
+          return completeActionDraft(d, p);
         ensure(
           actor.kind === "assignment" &&
             action.triage === "host" &&
@@ -2049,6 +2205,8 @@ export function triageHumanAction(
     /** Explicitly retain a prerequisite or reclassify it as a post-merge follow-up. */
     blocks_merge?: boolean;
     prerequisite?: HumanAction["prerequisite"];
+    /** C-760: the human's resolved decision that lifts a credential or account hold. */
+    basis_decision_id?: DecisionId;
     summary?: string;
     why_human?: string;
     expected_outcome?: string;
@@ -2126,11 +2284,21 @@ export function triageHumanAction(
       "交人事项不能标记为可回填诊断",
     );
     ensure(
+      p.basis_decision_id === undefined || p.blocks_merge === false,
+      "validation_failed",
+      "basis_decision_id 只能和 blocks_merge=false 一起使用",
+    );
+    const basis =
+      p.basis_decision_id === undefined
+        ? undefined
+        : ownerMergeBlockingBasis(d, action, p.basis_decision_id);
+    ensure(
       actor.kind === "human" ||
         !action.prerequisite ||
-        p.blocks_merge !== false,
+        p.blocks_merge !== false ||
+        !!basis,
       "unauthorized",
-      "只有人能移除凭据或账号前置分类",
+      "只有人能移除凭据或账号前置分类；项目经理须引用人已作出的拍板（basis_decision_id）",
     );
     if (external) {
       text(p.host_assignment_id, "host_assignment_id");
@@ -2242,9 +2410,22 @@ export function triageHumanAction(
     text(p.instructions, "instructions");
     text(p.expected_return, "expected_return");
     const { prerequisite: _previousPrerequisite, ...original } = action;
+    const audit = reclassify
+      ? mergeBlockingAudit(d, action, {
+          blocks_merge: blocksMerge === true,
+          ...(blocksMerge && prerequisite ? { prerequisite } : {}),
+          reason: p.rationale,
+          ...(basis ? { basis } : {}),
+          via: "triage",
+        })
+      : undefined;
     const classified: HumanAction = reclassify
       ? {
           ...original,
+          merge_blocking_changes: [
+            ...(action.merge_blocking_changes ?? []),
+            ...(audit ? [audit] : []),
+          ],
           blocks_merge: blocksMerge === true,
           ...(blocksMerge && prerequisite
             ? { prerequisite }
@@ -2295,14 +2476,20 @@ export function triageHumanAction(
       rewritten_by: d.author,
       rewritten_at: d.now,
     };
+    // C-742: an internal host handoff is no longer 张良's; the external
+    // operator and a human handoff keep the executor.
+    const internalHost =
+      p.disposition === "host" && p.host_operator !== "external";
     const {
       host_operator: _operator,
       host_diagnostic: _diagnostic,
       host_assignment_id: _owner,
       ready_when: _ready,
       ready_released: _released,
+      executor,
       ...rest
     } = classified;
+    const keptExecutor = executor && !internalHost ? { executor } : {};
     let owner = p.host_assignment_id;
     if (p.host_diagnostic) {
       ensure(
@@ -2320,6 +2507,7 @@ export function triageHumanAction(
     }
     const next: HumanAction = {
       ...rest,
+      ...keptExecutor,
       triage: p.disposition,
       ...(p.disposition === "host"
         ? {
@@ -2356,6 +2544,7 @@ export function triageHumanAction(
         host_assignment_id: next.host_assignment_id ?? null,
         ...(next.host_operator ? { host_operator: next.host_operator } : {}),
         ...(next.host_diagnostic ? { host_diagnostic: true } : {}),
+        ...(executor && !next.executor ? { previous_executor: executor } : {}),
         ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,
         handoff,
@@ -2368,6 +2557,12 @@ export function triageHumanAction(
               prerequisite: next.prerequisite ?? null,
               follow_up_work_items: next.follow_up_work_items ?? [],
               resume_work_items: resumed.map((item) => item.id),
+              ...(basis
+                ? {
+                    basis_decision_id: basis.decision_id,
+                    raw_quote: basis.raw_quote,
+                  }
+                : {}),
             }
           : {}),
       },

@@ -9,7 +9,7 @@ import { PrecheckMergeConflict } from "@cardigan/git-service";
 import type {
   CandidateDeleteRequest,
   CandidatePushRequest,
-  PushResult,
+  CandidatePushResult,
 } from "@cardigan/git-transport";
 import {
   fileAttachmentStore,
@@ -191,7 +191,7 @@ export class MacosCheckService {
       push: (
         project: string,
         input: CandidatePushRequest,
-      ) => Promise<PushResult>;
+      ) => Promise<CandidatePushResult>;
       remove: (
         project: string,
         input: CandidateDeleteRequest,

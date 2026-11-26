@@ -49,11 +49,8 @@ export function pmRecoveryEligible(
     (!a.runtime_ref || !["lost", "unknown"].includes(a.runtime_state))
   )
     return false;
-  const previous = state.events.findLast(
-    (e) =>
-      e.type === "standing_pm_recovered" &&
-      e.actor.kind === "system" &&
-      payload(e).assignment_id === a.id,
+  const previous = eventsOfType(state.events, "standing_pm_recovered").findLast(
+    (e) => e.actor.kind === "system" && payload(e).assignment_id === a.id,
   );
   // One recovery until an actual new run starts: failed launches cannot spin.
   return (

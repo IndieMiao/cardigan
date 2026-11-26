@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
-import type { RuntimeTargetBinding } from "@cardigan/domain";
+import {
+  REMOTE_BOOT_PATTERN,
+  type RuntimeTargetBinding,
+} from "@cardigan/domain";
 import type { LaunchFile } from "./agent-files.js";
 import { agentProcessCommand } from "./agent-ssh.js";
 import type { ExecutionConfig, WorkerPublishLimits } from "./execution.js";
@@ -70,6 +73,8 @@ export interface WorkerFileReply extends WorkerFileIdentity {
     | "revoked";
   readonly process: WorkerProcessIdentity | null;
   readonly observed: "alive" | "exited" | "unknown";
+  /** C-761: the worker's current boot identity on `status`; absent from older helpers. */
+  readonly boot?: string;
   readonly worktree?: string;
 }
 type Operation = "publish" | "commit" | "clear" | "status" | "inspect";
@@ -331,6 +336,10 @@ export async function workerFiles(
           ![reply.process.boot, reply.process.start].every(
             (v) => typeof v === "string" && /^[A-Za-z0-9:-]+$/u.test(v),
           ))) ||
+      (reply.boot !== undefined &&
+        (operation !== "status" ||
+          typeof reply.boot !== "string" ||
+          !REMOTE_BOOT_PATTERN.test(reply.boot))) ||
       (operation === "inspect" && reply.worktree !== worktree)
     )
       return rejected();
@@ -350,6 +359,7 @@ export async function workerFiles(
           }
         : null,
       observed: reply.observed,
+      ...(reply.boot !== undefined ? { boot: reply.boot } : {}),
       ...(operation === "inspect" ? { worktree } : {}),
     } as WorkerFileReply;
   } catch {

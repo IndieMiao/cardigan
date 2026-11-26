@@ -1428,7 +1428,8 @@ test.each(["failed", "throw", "abort"] as const)(
     f.push.mockImplementationOnce(async () => {
       if (mode === "abort") abort.abort();
       if (mode === "throw") throw new Error("synthetic transport failure");
-      return { status: "failed", reason: "other" };
+      // C-758: a rejected ref is not retried inside the publication fence.
+      return { status: "failed", reason: "rejected" };
     });
     await expect(
       f.executor.dispatch({ ...f.request, signal: abort.signal }),
@@ -1453,7 +1454,7 @@ test.each(["failed", "throw", "abort"] as const)(
       });
       if (mode === "abort") abort.abort();
       if (mode === "throw") throw new Error("synthetic abort");
-      return { status: "failed", reason: "other" };
+      return { status: "failed", reason: "rejected" };
     });
     const work = f.executor.dispatch({ ...f.request, signal: abort.signal });
     const rejected = expect(work).rejects.toBeDefined();

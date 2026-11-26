@@ -1,4 +1,5 @@
 import {
+  appendEvents,
   type CardId,
   type CardView,
   type CommandState,
@@ -107,7 +108,8 @@ export function cardCheckingIndex(
 ) {
   // Trusted system events only (the domain projection), latest per attempt.
   const attempts = new Map(
-    prechecks([...state.events, ...precheckEvents]).map((c) => [
+    // C-671: appended to the indexed history, so lookups still see every card.
+    prechecks(appendEvents(state.events, precheckEvents)).map((c) => [
       c.attempt_id,
       c,
     ]),

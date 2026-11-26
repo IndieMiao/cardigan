@@ -6,7 +6,7 @@ import type {
   RemoteWorkerLoss,
   Runtime,
 } from "@cardigan/domain";
-import { remoteWorkerLossReleased } from "@cardigan/domain";
+import { eventsOfTypes, remoteWorkerLossReleased } from "@cardigan/domain";
 import { idleRetirementPolicy } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
@@ -20,8 +20,16 @@ export type SnapshotOrphan = (
     process: NonNullable<RemoteWorkerLoss["process"]>;
   },
 ) => Promise<string | null>;
-const facts = (s: CommandState, loss: RemoteWorkerLoss) =>
-  s.events.filter(
+/**
+ * System facts of this loss among `types`. C-671: from the type index, so a
+ * released owner's closed card still answers in the `slim` command state.
+ */
+const facts = (
+  s: CommandState,
+  loss: RemoteWorkerLoss,
+  types: readonly string[],
+) =>
+  eventsOfTypes(s.events, types).filter(
     (e) =>
       e.actor.kind === "system" &&
       (e.payload as { action_id?: string } | null)?.action_id ===
@@ -126,11 +134,9 @@ export async function cleanReleasedOrphan(options: {
   const audit = (reason: string, sha?: string) =>
     store.uow.run((tx) => {
       if (
-        !facts(loadCommandState(tx, project), loss).some(
-          (e) =>
-            e.type === "remote_orphan_observed" &&
-            (e.payload as { reason?: string }).reason === reason,
-        )
+        !facts(loadCommandState(tx, project), loss, [
+          "remote_orphan_observed",
+        ]).some((e) => (e.payload as { reason?: string }).reason === reason)
       )
         emit(tx, "remote_orphan_observed", reason, sha);
     });
@@ -141,11 +147,10 @@ export async function cleanReleasedOrphan(options: {
   )
     return;
   const terminalFact = (s: CommandState) =>
-    facts(s, loss).some((e) =>
-      ["remote_worker_exit_observed", "remote_orphan_stop_started"].includes(
-        e.type,
-      ),
-    );
+    facts(s, loss, [
+      "remote_worker_exit_observed",
+      "remote_orphan_stop_started",
+    ]).length > 0;
   if (terminalFact(initial)) return;
   if (!options.alive) return audit("process_unverified");
   const a = exclusive(initial, loss),
@@ -153,11 +158,7 @@ export async function cleanReleasedOrphan(options: {
   if (!a || !receipt) return audit("exclusive_owner_unverified");
   if (!runtime.retire_idle || !snapshot) return audit("unsupported");
   // No repeated IO after a failed backup/unsupported pidfd. Keep observing for exit.
-  if (
-    facts(initial, loss).some(
-      (e) => e.type === "remote_orphan_cleanup_finished",
-    )
-  )
+  if (facts(initial, loss, ["remote_orphan_cleanup_finished"]).length > 0)
     return;
   const eligible = (s: CommandState) =>
     !options.stopped() && !terminalFact(s) && !!exclusive(s, loss);

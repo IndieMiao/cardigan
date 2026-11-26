@@ -6,6 +6,7 @@ import {
   entry,
   event,
   human,
+  project_id,
   snapshot,
 } from "./fixtures.js";
 import { summarizeNotifications } from "./merge.js";
@@ -123,6 +124,54 @@ test("story planning and settlement ring Office; the summary requests human conf
       }).notifications.map((n) => n.recipient.kind),
     ).toEqual([recipient]);
   }
+});
+
+test("C-762: an external Office escalation reaches Needs You and the timed handoff reaches PM Ops; both stop once summarized or closed", () => {
+  const system = { kind: "system", project_id } as ReturnType<
+    typeof event
+  >["actor"];
+  const route = (
+    type: "story_summary_escalated" | "story_summary_handed_off",
+    story: { summary_entry_id?: string } = {},
+    status = "in_progress",
+    actor: ReturnType<typeof event>["actor"] = system,
+  ) =>
+    routeEvent({
+      event: event(type, { notice: "N" }, { actor }),
+      snapshot: snapshot({ cards: [card({ story, status })] }),
+    }).notifications.map((n) => [n.recipient.kind, n.kind, n.rule, n.summary]);
+  expect(route("story_summary_escalated")).toEqual([
+    ["needs_you", "needs_you", "story/summary escalated", "N"],
+  ]);
+  expect(route("story_summary_handed_off")).toEqual([
+    ["pm_ops", "card", "story/summary handoff", "N"],
+  ]);
+  for (const type of [
+    "story_summary_escalated",
+    "story_summary_handed_off",
+  ] as const) {
+    expect(route(type, { summary_entry_id: "C-1#3" })).toEqual([]);
+    expect(route(type, {}, "done")).toEqual([]);
+    expect(route(type, {}, "in_progress", agent("A-office"))).toEqual([]);
+  }
+  // The settlement itself still rings only the Office, external or not.
+  for (const external of [true, false])
+    expect(
+      routeEvent({
+        event: event("story_children_settled", {}, { actor: system }),
+        snapshot: snapshot({
+          cards: [card({ story: {}, status: "in_progress" })],
+          assignments: [
+            assignment("A-office", {
+              scope: "standing",
+              role_id: "pm",
+              standing_mode: "office",
+              external,
+            }),
+          ],
+        }),
+      }).notifications.map((n) => n.recipient.kind),
+    ).toEqual(["pm_office"]);
 });
 
 test("unmentioned human story comments belong to Office with a distinct FYI to Ops; explicit targets and children keep their routes", () => {

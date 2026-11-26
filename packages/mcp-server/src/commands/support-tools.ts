@@ -86,6 +86,8 @@ export function readProjectSnapshot(
   store: Pick<McpBackend, "uow">,
   actor: AssignmentActor,
   { read_audit_employee_id }: ProjectSnapshotInput,
+  /** C-753: end of the seven-day owner-required window. */
+  now: string = new Date().toISOString(),
 ) {
   const project = actor.project_id;
   const snapshot = safeReferenceQuery(() =>
@@ -93,6 +95,7 @@ export function readProjectSnapshot(
       const result = referenceProjectSnapshot(
         loadCommandState(tx, project),
         actor,
+        now,
       );
       if (!result.ok)
         throw new ToolError(result.error.code, result.error.message);
@@ -169,7 +172,7 @@ export function supportTools(options: SupportToolOptions = {}) {
     ),
     defineTool({
       name: "upload_attachment",
-      description: `Upload a base64 attachment (${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint. Videos (video/mp4, video/quicktime, video/webm, video/x-m4v) with artifact_size and sha256 get a resumable chunked upload and become ordinary attachments; their content must match the type.`,
+      description: `Upload a base64 attachment (${formatAttachmentLimit(MAX_ATTACHMENT_BYTES)}), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint. Videos (video/mp4, video/quicktime, video/webm, video/x-m4v) with artifact_size and sha256 get a resumable chunked upload and become ordinary attachments; their content must match the type. The stored sha256 is computed by the server, so a stored attachment needs no read-back download.`,
       input: z.object({
         idempotency_key,
         card_id: id("card"),
@@ -380,7 +383,12 @@ export function supportTools(options: SupportToolOptions = {}) {
         return options.readProjectSnapshot
           ? options.readProjectSnapshot(context, input).then(respond)
           : respond(
-              readProjectSnapshot(context.store, context.identity.actor, input),
+              readProjectSnapshot(
+                context.store,
+                context.identity.actor,
+                input,
+                options.clock?.now(),
+              ),
             );
       },
     }),

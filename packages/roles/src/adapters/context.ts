@@ -95,6 +95,8 @@ export interface ActivityMetadata {
   updated_at: string;
   model_silent_since?: number;
   model_output_at?: string;
+  /** C-752: raw write time of the same transcript (file metadata only). */
+  written_at?: string;
   turn_ended?: true;
   error?: HarnessActivity["error"];
 }
@@ -128,6 +130,11 @@ export function parseActivityMetadata(
     v.model_output_at.length <= 64 &&
     Date.parse(v.model_output_at) <= Date.parse(v.updated_at)
       ? { model_output_at: v.model_output_at }
+      : {}),
+    ...(typeof v.written_at === "string" &&
+    v.written_at.length <= 64 &&
+    Number.isFinite(Date.parse(v.written_at))
+      ? { written_at: v.written_at }
       : {}),
     ...(typeof v.model_silent_since === "number" &&
     Number.isSafeInteger(v.model_silent_since) &&
