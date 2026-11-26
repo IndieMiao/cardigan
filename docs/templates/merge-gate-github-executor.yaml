@@ -1,0 +1,50 @@
+# 与 cardigan-check.yml 模板配套的 merge-gate.yaml 片段（C-794）。
+# 把 <…> 换成本项目的值，合并进主机 ~/.config/cardigan/merge-gate.yaml
+# 已有的 projects 和 executors 下，改后重启 server。一个执行器只服务一个
+# 项目；凭据文件放在数据目录内、只写相对路径，不要把内容贴进来。
+projects:
+  <project_id>:
+    executor: github-actions-<project_id>
+    # 合并后把中心基线推到 GitHub；GitHub 检查要求 run 的提交在基线历史里。
+    # 凭据文件放在数据目录内（文件 0600、目录 0700），这里写相对路径。
+    push:
+      remote: git@github.com:<owner>/<repo>.git
+      key_file: <部署私钥，相对数据目录的路径>
+      known_hosts_file: <known_hosts，相对数据目录的路径>
+    checks:
+      - name: install
+        run: 'true'
+      - name: build
+        run: 'true'
+      - name: test
+        run: 'true'
+      - name: lint
+        run: 'true'
+      - name: deps
+        run: 'true'
+      - name: e2e
+        run: 'true'
+executors:
+  github-actions-<project_id>:
+    type: github
+    repo: <owner>/<repo>
+    workflow: .github/workflows/cardigan-check.yml
+    app_id: <GitHub App 编号>
+    installation_id: <安装编号>
+    private_key_file: <App 私钥，相对数据目录的路径>
+    bot_login: <App 名>[bot]
+    max_concurrent: 2
+    step_contract:
+      steps:
+        - Checkout candidate
+        - Verify candidate identity
+        - Setup Node
+        - install
+        - build
+        - test
+        - lint
+        - deps
+        - e2e
+      post_steps:
+        - Post Setup Node
+        - Post Checkout candidate

@@ -1,0 +1,88 @@
+# Cardigan 合并检查工作流模板（C-794，接入清单第 9 步）。
+# 用法：复制到目标仓库每条基线的 .github/workflows/cardigan-check.yml，
+# 把 install/build/test/lint/deps/e2e 六步的 run 换成本仓库的命令；
+# 再把 merge-gate-github-executor.yaml 里的 step_contract 写进主机
+# merge-gate.yaml 中本项目的执行器（改后重启 server）。
+# 不要改的地方：run-name、六个输入、job 名 check、各步骤的 name 和顺序。
+# 某一步本仓库用不上时保留该步，run 写成 'true'。增删、改名或调整步骤
+# 必须同时改执行器的 step_contract，否则合并检查判“步骤合同不符”。
+name: Cardigan check
+run-name: cardigan/${{ inputs.card }}/${{ inputs.delivery }}/${{ inputs.attempt }}/${{ inputs.kind }}/${{ inputs.sha }}/${{ inputs.tree }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        required: true
+        type: string
+      tree:
+        required: true
+        type: string
+      card:
+        required: true
+        type: string
+      delivery:
+        required: true
+        type: string
+      attempt:
+        required: true
+        type: string
+      kind:
+        required: true
+        type: choice
+        options: [merge_check, precheck]
+      # Sent only when the executor sets scoped_checks: true; this template
+      # accepts and ignores them, so every check runs in full.
+      merge_tier:
+        required: false
+        type: string
+        default: single
+      scope:
+        required: false
+        type: string
+        default: full
+      affected_paths:
+        required: false
+        type: string
+        default: ''
+      skip_checks:
+        required: false
+        type: string
+        default: ''
+permissions:
+  contents: read
+# Cardigan owns capacity, exclusion and cancellation; do not add concurrency.
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Verify candidate identity
+        env:
+          EXPECTED_SHA: ${{ inputs.sha }}
+          EXPECTED_TREE: ${{ inputs.tree }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: install
+        run: npm install --global corepack && corepack enable && pnpm install --frozen-lockfile
+      - name: build
+        run: pnpm build
+      - name: test
+        run: pnpm test
+      - name: lint
+        run: pnpm lint
+      - name: deps
+        run: 'true'
+      - name: e2e
+        run: 'true'

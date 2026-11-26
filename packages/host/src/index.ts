@@ -166,6 +166,11 @@ export {
 export * from "./github-probe.js";
 export * from "./github-rate-limit.js";
 export {
+  compareGithubStepContract,
+  type GithubStepContract,
+  githubStepShape,
+} from "./github-step-contract.js";
+export {
   fetchHcArchive,
   type HcRelease,
   type HcUpgradePlan,
@@ -544,7 +549,10 @@ export * from "./worker-observations.js";
 export * from "./worker-onboarding.js";
 export { observedHelperRelease } from "./worker-readiness.js";
 export { upgradeMaterials } from "./worker-upgrade.js";
-export { manualWorkerUpgradeAllowed } from "./worker-upgrade-enrollment.js";
+export {
+  enrolledUpgradeIdentity,
+  manualWorkerUpgradeAllowed,
+} from "./worker-upgrade-enrollment.js";
 export { upgradeKey } from "./worker-upgrade-gate.js";
 export * from "./worker-wizard-files.js";
 export * from "./worker-wizard-form.js";
@@ -562,3 +570,4 @@ export {
   worktreeBaselinePrompt,
   worktreeProvider,
 } from "./worktree.js";
+export { readWorktreePreparation } from "./worktree-preparation.js";

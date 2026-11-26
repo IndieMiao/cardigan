@@ -29,6 +29,8 @@ export const CLI_TOOLS = {
   "project create": null,
   "project set-repo": null,
   "project code": null,
+  "project copy-setup": null,
+  "project doctor": null,
   "role apply": null,
   "role export": null,
   "role list": null,

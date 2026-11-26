@@ -3,12 +3,20 @@ import { projectCodeSource, Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { announceDataDir, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
+import {
+  copyProjectSetup,
+  formatProjectSetupCopy,
+  runProjectCopySetup,
+} from "./project-copy.js";
+import { runProjectDoctor } from "./project-doctor.js";
 import { runRoleCommand } from "./role.js";
 
 const ADMIN_USAGE = [
   "用法：",
   "  cardigan init [--data-dir <目录>]",
-  "  cardigan project create <project_id> --code <代号> [--name <名字>] [--data-dir <目录>]",
+  "  cardigan project create <project_id> --code <代号> [--name <名字>] [--from <现有项目>] [--data-dir <目录>]",
+  "  cardigan project copy-setup --from <现有项目> [--project <p>]",
+  "  cardigan project doctor [--project <p>]",
   "  cardigan project code [--set <代号>] [--project <p>]",
   "  cardigan role add <project_id> <role_id> [--version <n>] [--allowed-tools a,b] [--capabilities x,y] [--data-dir <目录>]",
   "  cardigan role add --file <role.yaml> [--project <p>]",
@@ -44,7 +52,7 @@ export function parseAdminArgs(args: readonly string[]): ParsedAdminArgs {
     const allowed = ["create", "set-repo", "code"] as const;
     if (next === undefined || !(allowed as readonly string[]).includes(next)) {
       throw new CliError(
-        "用法：cardigan project create|set-repo|code",
+        "用法：cardigan project create|set-repo|code|copy-setup|doctor",
         EXIT.usage,
         [ADMIN_USAGE],
       );
@@ -82,7 +90,8 @@ export function parseAdminArgs(args: readonly string[]): ParsedAdminArgs {
         token === "--base-branch" ||
         token === "--project" ||
         token === "--code" ||
-        token === "--set"
+        token === "--set" ||
+        token === "--from"
       ) {
         flags[token.slice(2)] = value;
       } else {
@@ -179,6 +188,10 @@ export async function runAdminCommand(
   io: CliIo,
 ): Promise<number> {
   if (args[0] === "role") return runRoleCommand(args.slice(1), io);
+  if (args[0] === "project" && args[1] === "doctor")
+    return runProjectDoctor(args.slice(2), io);
+  if (args[0] === "project" && args[1] === "copy-setup")
+    return runProjectCopySetup(args.slice(2), io);
   const { command, subcommand, options } = parseAdminArgs(args);
   const dataDir = announceDataDir(io, options.dataDir);
 
@@ -212,15 +225,18 @@ function initDatabase(dataDir: string, io: CliIo): number {
   }
 }
 
-function createProject(
+async function createProject(
   dataDir: string,
   io: CliIo,
   options: AdminOptions,
-): number {
+): Promise<number> {
   const projectId = requireIdentifier(options.positionals[0], "project_id");
   const store = Store.open({ dataDir });
   try {
     const code = options.flags.code;
+    const from = options.flags.from;
+    if (from !== undefined && !store.getProject(from))
+      throw new CliError(`来源项目 ${from} 不存在`, EXIT.usage);
     if (code === undefined) {
       // C-674: the code is required; offer the suggestion for this name.
       const suggestion = suggestProjectCode(
@@ -250,6 +266,19 @@ function createProject(
     io.stdout(
       `已创建项目 ${created.value.id}（${created.value.name}），代号 ${created.value.code}\n数据库：${dataDir}`,
     );
+    // C-794: onboarding steps 4 and 6 in the same command.
+    if (from !== undefined)
+      io.stdout(
+        formatProjectSetupCopy(
+          from,
+          projectId,
+          await copyProjectSetup(store, io, {
+            from,
+            to: projectId,
+            dataDir,
+          }),
+        ),
+      );
     return EXIT.ok;
   } finally {
     store.close();

@@ -20,6 +20,7 @@ Phase 0（预研与零代码验证）。技术栈已确定：TypeScript + pnpm w
 
 - [开发方案](docs/development-plan.md)：选型、架构、领域模型、协议、部署、路线图、待定决策
 - [AGENTS.md](AGENTS.md)：参与开发的 Agent 必须遵守的规则
+- [接入一个新项目](docs/project-onboarding.md)：19 类步骤、哪些要重启，`cardigan project doctor` 逐项检查
 - [接入一台 Linux worker](docs/linux-worker.md)：人专属接入命令、私有配置与逐步检查
 - [接入一台 macOS worker](docs/macos-worker.md)、[接入 SteamOS 设备](docs/steamos-worker.md)
 
