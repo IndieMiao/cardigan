@@ -55,6 +55,7 @@ import {
   MachineLeases,
   RuntimeTargets,
   targetProbe,
+  withCapacityOverrides,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { secureDataDirectory } from "@cardigan/runtime-herdr";
@@ -2525,8 +2526,11 @@ async function openPlacementStore(
   flags: Args["flags"],
 ): Promise<Store> {
   const dataDir = announceDataDir(io, optional(flags, "data-dir"));
-  const limits = await loadRunCapacityConfig({ env: io.env });
   const store = openCardiganStore({ dataDir });
+  const limits = withCapacityOverrides(
+    await loadRunCapacityConfig({ env: io.env }),
+    store.database,
+  );
   configureMachinePlacement(store, dataDir, io.env, limits, () =>
     loadOptionalConfigSync(cliLaunchPaths(io, dataDir)),
   );

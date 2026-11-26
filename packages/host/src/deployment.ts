@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   countDeploymentOperations,
+  type DeploymentBuild,
+  type DeploymentConfigTrial,
   type DeploymentDriver,
   type DeploymentOperation,
   type DeploymentReadyRetry,
@@ -35,10 +37,27 @@ const operationSummary = (ops: readonly DeploymentOperation[]) =>
     )
     .join("、");
 
+/** C-792: loader messages only (never file contents), bounded for the audit. */
+const CONFIG_LOG_MAX = 2000;
+function configLog(errors: readonly string[]): string {
+  const text = errors.length
+    ? errors.map((error) => `- ${error}`).join("\n")
+    : "- 主机配置试加载未通过";
+  return text.length > CONFIG_LOG_MAX
+    ? `${text.slice(0, CONFIG_LOG_MAX - 1)}…`
+    : text;
+}
+
 /** A supervisor outside the server lifetime; no Agent, HTTP or MCP entry point. */
 export class DeploymentController {
   private busy = false;
   private readonly failed = new Set<string>();
+  /**
+   * C-792: targets whose new build rejected the host configuration, with the
+   * fingerprint of the configuration it rejected (null: not retried). Such a
+   * target is tried again only after the configuration changes.
+   */
+  private readonly configRejected = new Map<string, string | null>();
   /** C-650: cache of the durable retry state per target; restart re-reads it. */
   private readonly retries = new Map<string, DeploymentReadyRetry>();
   /** End of the last attempt that restarted the server (in-memory). */
@@ -171,6 +190,18 @@ export class DeploymentController {
     return durable;
   }
 
+  /** C-792: a trial that cannot run fails closed, like a rejected one. */
+  private async trialConfig(
+    build: DeploymentBuild,
+  ): Promise<DeploymentConfigTrial | undefined> {
+    if (!this.driver.checkConfig) return undefined;
+    try {
+      return await this.driver.checkConfig(build);
+    } catch {
+      return { ok: false, errors: ["主机配置试加载未能运行"] };
+    }
+  }
+
   async tick(): Promise<void> {
     const d = this.driver;
     if (this.busy) return;
@@ -196,6 +227,20 @@ export class DeploymentController {
       if (current.sha === target || this.failed.has(failureKey)) {
         this.drain = undefined;
         return;
+      }
+      if (this.configRejected.has(failureKey)) {
+        const rejected = this.configRejected.get(failureKey);
+        let now: string | undefined;
+        try {
+          now = await d.configFingerprint?.();
+        } catch {
+          now = undefined;
+        }
+        if (rejected === null || now === undefined || now === rejected) {
+          this.drain = undefined;
+          return;
+        }
+        this.configRejected.delete(failureKey);
       }
       const priorRetry = await this.readyRetry(
         failureKey,
@@ -285,6 +330,7 @@ export class DeploymentController {
       let stoppedAt: number | undefined;
       let oldStopped = false;
       let stage: NonNullable<DeploymentRecord["failure_stage"]> = "host";
+      let trial: DeploymentConfigTrial | undefined;
       try {
         if (!fastForward && !selection.control_event_id)
           throw new Error("non_fast_forward");
@@ -296,6 +342,11 @@ export class DeploymentController {
           build: result.build ? "passed" : "failed",
         };
         if (!result.build) throw new Error("build_failed");
+        // C-792: the new build must accept the host configuration before
+        // the old server (and its already-loaded configuration) is stopped.
+        stage = "config";
+        trial = await this.trialConfig(result.build);
+        if (trial && !trial.ok) throw new Error("config_invalid");
         stage = "host";
         const migrations = await d.migrationsChanged(current.sha, target);
         const settled = await this.settle(drainKey, record);
@@ -325,9 +376,12 @@ export class DeploymentController {
         const serverStage = stage === "start" || stage === "ready";
         const code =
           error instanceof Error &&
-          ["non_fast_forward", "build_failed", "ready_failed"].includes(
-            error.message,
-          )
+          [
+            "non_fast_forward",
+            "build_failed",
+            "config_invalid",
+            "ready_failed",
+          ].includes(error.message)
             ? error.message
             : "host_operation_failed";
         // C-650: name a recognised cause (e.g. a locked database), read
@@ -347,6 +401,14 @@ export class DeploymentController {
           failure_stage: stage,
           ...(stage === "start" || stage === "ready"
             ? { log_tail: d.serverDiagnostics(stage) }
+            : {}),
+          ...(stage === "config" && trial
+            ? {
+                summary: trial.fingerprint
+                  ? `${reason}：新构建试加载主机配置未通过，未停旧服务、未切换；修正配置后自动重试`
+                  : `${reason}：新构建试加载主机配置未能完成，未停旧服务、未切换；中心 main 更新后重试`,
+                log_tail: configLog(trial.errors),
+              }
             : {}),
         };
         if (oldStopped) {
@@ -394,7 +456,9 @@ export class DeploymentController {
                 ? `${record.summary}；已自动重试 ${max} 次仍失败，需主机处理`
                 : record.summary,
           };
-        } else this.failed.add(failureKey);
+        } else if (stage === "config")
+          this.configRejected.set(failureKey, trial?.fingerprint ?? null);
+        else this.failed.add(failureKey);
         record = {
           ...record,
           downtime_ms: stoppedAt === undefined ? 0 : d.now() - stoppedAt,

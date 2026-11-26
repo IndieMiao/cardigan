@@ -100,4 +100,19 @@ export interface DeploymentDriver {
   ): Promise<void>;
   /** Interval between operation checks after the build (test seam). */
   sleep?(ms: number): Promise<void>;
+  /**
+   * C-792, optional for legacy adapters: the new build loads a private copy
+   * of the host configuration before the old server is stopped. Never
+   * changes the real configuration. `errors` are fixed loader messages, never
+   * file contents; `fingerprint` identifies the configuration that was tried.
+   */
+  checkConfig?(build: DeploymentBuild): Promise<DeploymentConfigTrial>;
+  /** C-792: fingerprint of the current host configuration; never throws. */
+  configFingerprint?(): Promise<string | undefined>;
+}
+
+export interface DeploymentConfigTrial {
+  readonly ok: boolean;
+  readonly errors: readonly string[];
+  readonly fingerprint?: string;
 }
