@@ -934,7 +934,6 @@ function CardContent({
                 cardId={cardId}
                 revision={revision}
                 onLocate={onLocate}
-                onShowTimeline={() => setSelectedSection(sectionId("timeline"))}
                 onSaved={reload}
               />
             ) : (

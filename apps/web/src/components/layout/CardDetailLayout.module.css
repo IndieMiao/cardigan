@@ -569,7 +569,7 @@
      apart, each label on its value's first line however tall the tags. */
   .facts[data-compact] {
     align-items: baseline;
-    column-gap: var(--ui-space-3);
+    gap: var(--ui-space-3);
   }
   .facts[data-compact] > .fact {
     grid-template-columns: var(--ui-detail-facts-label) minmax(0, 1fr);
@@ -579,6 +579,11 @@
   .facts[data-compact] > .fact > dd > * {
     min-width: 0;
     max-width: 100%;
+  }
+  /* C-771: a linked id is as tall as a line of text (no legacy link floor), so
+     every pair is the same height and the pairs evenly spaced. */
+  .facts[data-compact] :global(a.id-tag) {
+    min-height: 0;
   }
   .factGroup {
     display: inline-flex;
@@ -762,6 +767,55 @@
   .historyTime {
     flex: none;
     margin-inline-start: auto;
+    color: var(--text-muted);
+  }
+  /* C-771: a story's children, one bordered row each (id, title, status). */
+  .cardList {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+  }
+  .cardRow {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-3);
+    min-width: 0;
+    min-height: calc(var(--ui-control) + var(--ui-space-2) * 2);
+    padding: var(--ui-space-2) var(--ui-space-3);
+    font-size: var(--ui-text-base);
+    line-height: var(--ui-leading);
+  }
+  .cardRow + .cardRow {
+    border-top: var(--ui-stroke) solid var(--border);
+  }
+  .cardRowId,
+  .cardRowStatus {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+  }
+  .cardRowTitle {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .cardRowStatus {
+    margin-inline-start: auto;
+  }
+  /* C-771: a story's questions, numbered; the note muted after the text. */
+  .questions {
+    margin: 0;
+    padding-inline-start: var(--ui-space-6);
+    font-size: var(--ui-text-base);
+    line-height: var(--ui-leading);
+  }
+  .question {
+    overflow-wrap: anywhere;
+  }
+  .questionNote {
+    margin-inline-start: var(--ui-space-3);
     color: var(--text-muted);
   }
   /* C-702: copyable commands in a bordered list. */

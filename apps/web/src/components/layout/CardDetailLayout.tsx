@@ -429,6 +429,53 @@ export function DetailHistoryItem({
 /** One-line text of a record; the caller adds the hover with the full text. */
 export const detailHistoryTextClassName = styles.historyText;
 
+/** C-771: a bordered list of cards, one row each (a story's 子卡进度). */
+export function DetailCardList(props: Omit<ComponentProps<"ul">, "className">) {
+  return <ul {...props} className={styles.cardList} />;
+}
+/**
+ * One card: its id first, the title filling the row (wrapping, never cut) and
+ * the status at the right edge, on one line at every width.
+ */
+export function DetailCardRow({
+  id,
+  status,
+  children,
+}: {
+  readonly id: ReactNode;
+  readonly status: ReactNode;
+  readonly children: ReactNode;
+}) {
+  return (
+    <li className={styles.cardRow}>
+      <span className={styles.cardRowId}>{id}</span>
+      <span className={styles.cardRowTitle}>{children}</span>
+      <span className={styles.cardRowStatus}>{status}</span>
+    </li>
+  );
+}
+
+/** C-771: numbered questions, each with a muted note (建议 or the answer). */
+export function DetailQuestionList(
+  props: Omit<ComponentProps<"ol">, "className">,
+) {
+  return <ol {...props} className={styles.questions} />;
+}
+export function DetailQuestion({
+  note,
+  children,
+}: {
+  readonly note: ReactNode;
+  readonly children: ReactNode;
+}) {
+  return (
+    <li className={styles.question}>
+      {children}
+      <span className={styles.questionNote}>{note}</span>
+    </li>
+  );
+}
+
 /**
  * C-702: copyable commands, one per line: the name, the command (12px
  * monospace, one line, full text on hover) and a 28px copy button.
