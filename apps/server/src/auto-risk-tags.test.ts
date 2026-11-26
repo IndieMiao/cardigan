@@ -10,10 +10,11 @@ import {
   submitDelivery,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import { writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { routeProjectEvents } from "./dispatch-inbox.js";
 import { ServerGit } from "./git.js";
-import { m4Fixture, m4Scenario } from "./m4-fixtures.js";
+import { m4Fixture, m4Scenario, REVIEWER_TOOLS } from "./m4-fixtures.js";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync(
@@ -280,3 +281,59 @@ test.each(
     ).toMatchObject({ n: 1 });
   },
 );
+
+test("C-790: with the role registered the system adds and persists the independent reviewer; PM gets no high-risk request", async () => {
+  f.store.uow.run((tx) =>
+    writeRole(
+      tx,
+      f.project_id,
+      {
+        role_id: "independent_reviewer",
+        version: 1,
+        display_name: "independent_reviewer",
+        kind: "work",
+        core_prompt: "You are the independent_reviewer.",
+        harness: "pi",
+        launch_profile_ref: "fixture",
+        allowed_tools: [...REVIEWER_TOOLS],
+        capabilities: [],
+        abilities: [],
+        worktree: "none",
+        required_machine_tags: [],
+      },
+      { mode: "add" },
+    ),
+  );
+  const { params, actor, receipt, scenario } = await prepared("rename");
+  const delivery = f.apply(
+    (s, a, p) => submitDelivery(s, a, params, receipt, p),
+    actor,
+  );
+  const reviewers = f
+    .state()
+    .work_items.filter(
+      (w) =>
+        w.kind === "verify" &&
+        w.role_id === "independent_reviewer" &&
+        w.target_work_item_id === scenario.development.id,
+    );
+  expect(reviewers).toMatchObject([{ required: true, status: "ready" }]);
+  expect(
+    f.state().deliveries.find((v) => v.id === delivery.id)?.requested_verifiers,
+  ).toContain(reviewers[0]?.id);
+  const audit = f
+    .state()
+    .events.find((e) => e.type === "auto_risk_tags_applied");
+  expect(audit?.payload).toMatchObject({ needs_independent_reviewer: false });
+  expect(
+    f.state().events.some((e) => e.type === "high_risk_review_required"),
+  ).toBe(false);
+  routeProjectEvents(f.store, f.project_id);
+  expect(
+    f.store.database
+      .prepare(
+        "SELECT COUNT(*) AS n FROM notifications WHERE project_id = ? AND event_id = ?",
+      )
+      .get(f.project_id, audit?.id),
+  ).toMatchObject({ n: 0 });
+});

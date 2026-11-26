@@ -8,9 +8,12 @@ import { PROJECT_EVENT_STREAM } from "@cardigan/store";
 /**
  * `GET /api/projects/:id/stream` — Server-Sent Events (M5 plan §3.3).
  *
- * The client sends the seq it has already seen per stream
+ * A client may send the seq it has already seen per stream
  * (`?after=project:12,C-1:8`); the server replays what is missing and then
- * pushes new seqs. Only the seq, the type and the card are sent — the body is
+ * pushes new seqs. C-779: the Workbench no longer does — it connects without
+ * cursors and re-reads its views on open — because the cursor list grows with
+ * every card; `after` stays for older pages still open. Only the seq, the type
+ * and the card are sent — the body is
  * fetched by the view that needs it — so a slow reader cannot make the stream
  * expensive.
  *

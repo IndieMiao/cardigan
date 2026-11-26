@@ -35,6 +35,7 @@ import {
   scrubRunCredentials,
 } from "./launch.js";
 import { recoverLaunchPublications } from "./launch-publish.js";
+import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import { RuntimeTargetError, RuntimeTargets } from "./runtime-targets.js";
 import { checkWorkerMcp, WorkerMcpError } from "./worker-mcp.js";
 
@@ -497,6 +498,67 @@ test.each(["local size limit", "remote Git refusal"])(
     } finally {
       guard.mockRestore();
     }
+  },
+);
+
+test.each(["prepared", "given", "unstarted"] as const)(
+  "only a started launch on its own host-prepared worktree attests the worker: %s",
+  async (mode) => {
+    const { target, ...rest } = execution;
+    if (!target) throw new Error("Missing target");
+    rest.gitHelper = {
+      python: "/usr/bin/python3",
+      path: "/opt/worker/worker-git.py",
+    };
+    execution = {
+      ...rest,
+      target: runtimeTargetBinding({ ...target, execution: rest }),
+    };
+    if (mode === "unstarted") failAt = "start_ack";
+    const f = fixture();
+    const tree = {
+      path: "/independent-worker/worktrees/fixture/A-1",
+      base_sha: "a".repeat(40),
+      branch: "agent/fixture",
+    };
+    // The host data-directory guard is Linux-specific, not the boundary under test.
+    const guard = vi
+      .spyOn(workerRuntime, "secureDataDirectory")
+      .mockResolvedValue(undefined);
+    try {
+      const launched = launchRun(f.host, {
+        project: "fixture",
+        assignment_id: "A-1",
+        actor: { kind: "human", project_id: "fixture" },
+        run: f.run,
+        reuse_session: true,
+        ...(mode === "given"
+          ? { worktree: tree }
+          : { prepare_worktree: async () => tree }),
+      });
+      if (mode === "unstarted") await expect(launched).rejects.toThrow();
+      else await launched;
+    } finally {
+      guard.mockRestore();
+    }
+    const evidence = store.database
+      .prepare(
+        "SELECT * FROM worktree_preparation_evidence WHERE project_id=? AND machine_id=?",
+      )
+      .get("fixture", "worker-a");
+    if (mode !== "prepared") {
+      expect(evidence).toBeUndefined();
+      return;
+    }
+    expect(f.latest()?.launch_publication?.phase).toBe("started");
+    expect(evidence).toMatchObject({
+      target_fingerprint: execution.target?.fingerprint,
+      os: "linux",
+      arch: "x64",
+      verified_at: clock.now(),
+      expires_at: new Date(now + 30 * 86_400_000).toISOString(),
+      evidence_ref: `A-1/${f.run.id}`,
+    });
   },
 );
 

@@ -78,6 +78,12 @@ const args = {
   host_ops_recheck_merge: { card_id: "C-1" },
   host_ops_restart_standing_pm: { assignment_id: "A-3", reason: "Refresh" },
   host_ops_stop_assignment: { assignment_id: "A-2", reason: "Idle session" },
+  host_ops_recheck_precheck: {
+    card_id: "C-1",
+    attempt_id: "06H1DXFNGGY39NNE13K986BD38",
+    action: "reinspect",
+    reason: "Stuck after restart",
+  },
 };
 
 test("all host tools register and dispatch only the authenticated host_ops identity", async () => {
@@ -96,7 +102,7 @@ test("all host tools register and dispatch only the authenticated host_ops ident
     expect(result.isError).not.toBe(true);
   }
   expect(read).toHaveBeenCalledTimes(1);
-  expect(execute).toHaveBeenCalledTimes(5);
+  expect(execute).toHaveBeenCalledTimes(6);
   for (const [context] of execute.mock.calls as unknown as [
     { identity: { actor: { role_id: string; project_id: string } } },
   ][])
@@ -170,6 +176,16 @@ test.each([
       card_id: "C-1",
       template_key: "code_review",
       reason: "Replace released reviewer",
+    },
+  },
+  {
+    name: "replace_primary_work_item" as const,
+    arguments: {
+      work_item_id: "W-1",
+      replacement_work_item_id: "W-4",
+      card_id: "C-1",
+      template_key: "development",
+      reason: "Replace mis-assigned producer",
     },
   },
 ])(

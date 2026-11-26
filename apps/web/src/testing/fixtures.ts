@@ -274,6 +274,17 @@ export function fakeClient(
           start + runs.length < all.length ? (runs.at(-1)?.id ?? null) : null,
       };
     },
+    startAssignment: async () => ({ run_id: "R-99" }),
+    stopAssignment: async () => ({ released: true, aborted: true }),
+    assignmentDiff: async () => ({
+      worktree_path: "/work/A-1",
+      head_sha: "a".repeat(40),
+      tracked: [],
+      untracked: [],
+      reachable: true,
+      patch: "",
+      truncated: false,
+    }),
     preferences: async () => ({
       auto_merge_after_minutes: null,
       merge_gate_enabled: false,
@@ -283,6 +294,7 @@ export function fakeClient(
     setHumanCardTemplates: async () => {},
     setSystemRules: async () => {},
     setManualAssign: async () => {},
+    replacePrimaryWorkItem: async () => {},
     templates: async () => ({ templates: [] }),
     template: async () => {
       throw new Error("Missing template fixture");

@@ -53,7 +53,27 @@ const client = fakeClient({
     cards,
     counts: { total: 7, needs_me: 0, agent: 7 },
   }),
-  card: async () => cardDetail({ card: cards[1], attachments: [] }),
+  // C-771: the detail's card is bound to a known template, so the facts
+  // column and the title marker show its name rather than “未知模板”.
+  card: async () =>
+    cardDetail({
+      card: { ...cards[1], template: "dev", template_version: 2 },
+      template: {
+        id: "dev",
+        title: "开发卡",
+        version: 2,
+        description: "",
+        builtin: true,
+        status: "active",
+        requires_repo: true,
+        merge: "confirm",
+        require_acceptance_criteria: true,
+        work_items: [],
+        primary_work_item_key: "development",
+        completion: { mode: "review", reviewer: "reviewer" },
+      },
+      attachments: [],
+    }),
   executionCapacity: async () => ({
     agents: [
       {

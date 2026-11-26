@@ -742,12 +742,16 @@
     overflow-y: auto;
     padding: var(--ui-panel-padding);
   }
+  /* C-703: as wide as a detail drawer; DialogHeader stays, DialogBody scrolls. */
   .ui-sheet {
+    display: flex;
+    flex-direction: column;
     border-radius: 0;
     top: 0;
     right: 0;
     height: 100dvh;
-    width: min(var(--ui-dialog-width), 100vw);
+    width: min(var(--ui-detail-drawer-width), 100vw);
+    overflow: hidden;
   }
   /* A dialog with DialogFooter keeps its header and button row in place; only
      DialogBody scrolls. The parts may sit directly in the panel or in one form. */

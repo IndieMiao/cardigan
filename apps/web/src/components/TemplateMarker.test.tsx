@@ -177,6 +177,26 @@ test("all builtin shapes have legend coverage; old, custom and missing templates
     kind: "custom",
     label: "模板：未识别模板（dev） · v3",
   });
+  // C-771: like the server, a card that recorded no version is bound to v1.
+  expect(
+    templateIdentity({ template: "dev" }, { ...dev, version: 1 }),
+  ).toMatchObject({
+    kind: "dev",
+    name: "开发卡",
+    omitted: false,
+    label: "模板：开发卡 · 版本未记录",
+  });
+  expect(
+    templateIdentity(
+      { template: "general" },
+      { ...dev, id: "general", title: "通用任务", version: 1 },
+    ).name,
+  ).toBe("通用任务");
+  // …never to a newer version the server resolved for someone else.
+  expect(templateIdentity({ template: "dev" }, dev)).toMatchObject({
+    kind: "custom",
+    name: "未识别模板（dev）",
+  });
   expect(templateIdentity({})).toMatchObject({
     omitted: false,
     label: "模板：未知模板 · 版本未记录",

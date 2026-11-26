@@ -1062,7 +1062,16 @@ async function launch(
 
     // The Dispatcher passes no worktree: the host prepares what the Role needs
     // (a writer's branch, or a readonly reviewer at the current delivery).
-    if (!(remote && role.worktree === "none")) worktree ??= await prepare();
+    if (!worktree && !(remote && role.worktree === "none")) {
+      worktree = await prepare();
+      // C-784: only this launch's own host preparation can attest the worker.
+      if (
+        publication &&
+        worktree &&
+        (role.worktree === "write" || role.worktree === "readonly")
+      )
+        publication.preparedWorktree = true;
+    }
     requireTarget();
     const fresh = host.store.uow.read((tx) =>
       tx.runs.get(project, input.run.id),

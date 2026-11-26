@@ -164,8 +164,9 @@ test("watch retires false alarms, retries unknown evidence, and asks exactly onc
 });
 
 // C-767: with the switch on, a verified change is recorded for the automatic
-// path instead of a human reminder; once an attempt fails, the reminder returns.
-test("watch with automatic upgrade records the change without a reminder until an attempt fails", async () => {
+// path instead of a human reminder; once an attempt fails, its Needs You item
+// is the reminder (C-770).
+test("watch with automatic upgrade records the change without a reminder until an attempt fails, then reuses the failure item", async () => {
   const root = await mkdtemp(join(tmpdir(), "cg-supervisor-auto-"));
   const store = Store.open({ dataDir: root, dbPath: ":memory:" });
   const repo = join(root, "work");
@@ -259,13 +260,21 @@ test("watch with automatic upgrade records the change without a reminder until a
         summary: "build: exit 1",
       });
     await driver().main();
-    const reminders = store.uow
-      .read((tx) => tx.human_actions.list("cardigan"))
-      .map((h) => h.instructions);
-    expect(reminders).toHaveLength(2);
-    expect(reminders.some((text) => text.includes("系统不会自我升级"))).toBe(
-      true,
+    // C-770: the failure's own Needs You item is the reminder; no second one.
+    const reminders = store.uow.read((tx) => tx.human_actions.list("cardigan"));
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0]).toMatchObject({ status: "open" });
+    expect(reminders[0]?.instructions).toContain("build: exit 1");
+    expect(reminders[0]?.instructions).toContain(
+      `到中心 main ${main} 的监督器差异涉及：packages/host`,
     );
+    expect(changes().at(-1)).toEqual({
+      supervisor,
+      main,
+      affected: ["packages/host"],
+      human_action_id: reminders[0]?.id,
+      upgrade_attempt: attempt,
+    });
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });

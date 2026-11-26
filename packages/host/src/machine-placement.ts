@@ -16,7 +16,10 @@ import {
 } from "./runtime-workers-config.js";
 import { workerCooldown } from "./worker-maintenance.js";
 import { upgradeHeld, upgradeHold } from "./worker-upgrade-gate.js";
-import { readWorktreePreparation } from "./worktree-preparation.js";
+import {
+  observedWorktreePreparation,
+  readWorktreePreparation,
+} from "./worktree-preparation.js";
 
 /** Installed by server and standalone CLI; evaluated only during a new implicit assignment. */
 export function configureMachinePlacement(
@@ -43,7 +46,7 @@ export function configureMachinePlacement(
       }
     }
     const preparation = allowed.size
-      ? readWorktreePreparation(env, now)
+      ? readWorktreePreparation(env, now, observedWorktreePreparation(store))
       : undefined;
     const { occupied, occupiedOwners, resourcesForMachine, projectUsage } =
       runCapacitySnapshot(

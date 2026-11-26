@@ -8353,3 +8353,395 @@ test("C-651: one author-check reservation scans the queue once, so its loads gro
   expect(large.states).toBe(small.states);
   expect(large.cardChecks).toBe(2 * small.cardChecks);
 });
+
+/** C-781: the host-recorded passed precheck of a card's only producer. */
+function seedPassedPrecheck(
+  f: M4Fixture,
+  card: { id: string },
+  completion: { work_item_id: string },
+  names: readonly string[],
+  attempt = `pre-${card.id}`,
+  head = "a".repeat(40),
+) {
+  f.store.uow.run((tx) => {
+    const current = required(tx.cards.get(f.project_id, card.id as never));
+    tx.cards.put(f.project_id, { ...current, flow_version: 5 });
+    tx.events.append(f.project_id, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(f.project_id, card.id as never),
+      card_id: card.id as never,
+      type: "precheck_finished",
+      actor: { kind: "system", project_id: f.project_id },
+      created_at: f.clock.now(),
+      payload: {
+        attempt_id: attempt,
+        assignment_id: "A-1",
+        work_item_id: completion.work_item_id,
+        card_id: card.id,
+        head_sha: head,
+        status: "passed",
+        branch: "agent/fixture",
+        machine_id: "local",
+        candidate_sha: "7".repeat(40),
+        tree_sha: "8".repeat(40),
+        base_sha: "9".repeat(40),
+        checks: names.map((name) => ({
+          name,
+          status: "passed",
+          exit_code: 0,
+        })),
+        summary: "检查全部通过",
+        log_ref: `${attempt}.log`,
+      },
+    });
+  });
+  return attempt;
+}
+
+test.each([
+  [true, "reuses"],
+  [false, "is configured off and runs"],
+])(
+  "C-781: an SSH queue card check with a passed same-head precheck %s",
+  async (reuse) => {
+    const { f, scenario, completion, check } = await fixture();
+    const c = controller(f);
+    c.setConfig({
+      status: "enabled",
+      checks: [
+        { name: "test", run: "true" },
+        { name: "e2e", run: "true", tiers: ["batch"] },
+      ],
+      env: { SECRET: "fixture-secret" },
+      totalTimeoutMs: 1000,
+      queue: {
+        maxBatchSize: 4,
+        conflictThreshold: 2,
+        windowTimeoutMs: 86_400_000,
+        ...(reuse ? {} : { reusePrecheck: false as const }),
+      },
+    });
+    // Unconfirmed cards never form a batch; the batch writer stays idle.
+    Object.assign(c.git, {
+      prepareBatch: vi.fn(),
+      pinBatch: vi.fn(),
+      publishBatch: vi.fn(),
+    });
+    const precheck = seedPassedPrecheck(f, scenario.card, completion, [
+      "test",
+      "e2e",
+    ]);
+    await c.gate.tick([f.project_id]);
+    await c.gate.idle();
+    expect(check()).toMatchObject({ level: "card", status: "passed" });
+    expect(c.errors).not.toHaveBeenCalled();
+    if (!reuse) {
+      expect(c.run).toHaveBeenCalledTimes(1);
+      expect(check()?.reused_precheck).toBeUndefined();
+      return;
+    }
+    expect(c.run).not.toHaveBeenCalled();
+    expect(c.git.changedPaths).not.toHaveBeenCalled();
+    const reused = required(check());
+    expect(reused).toMatchObject({
+      reused_precheck: { attempt_id: precheck, head_sha: "a".repeat(40) },
+      tree_sha: "8".repeat(40),
+    });
+    // The pointer log is readable under the reused attempt.
+    const log = await readFile(
+      `${f.dataDir}/merge-gate/logs/${f.project_id}/${reused.attempt_id}.log`,
+      "utf8",
+    );
+    expect(log).toContain(`attempt_id=${precheck}`);
+    // Later ticks neither rerun nor re-record it.
+    await c.gate.tick([f.project_id]);
+    expect(c.run).not.toHaveBeenCalled();
+    expect(
+      f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "merge_check_finished" && e.card_id === scenario.card.id,
+        ),
+    ).toHaveLength(1);
+  },
+);
+
+test("C-781: an SSH queue card whose precheck is on another head or lacks a card-tier check runs its card check", async () => {
+  for (const [head, names] of [
+    ["f".repeat(40), ["test"]],
+    ["a".repeat(40), ["build"]],
+  ] as const) {
+    const { f, scenario, completion, check } = await fixture();
+    const c = controller(f);
+    c.setConfig({
+      status: "enabled",
+      checks: [{ name: "test", run: "true" }],
+      env: { SECRET: "fixture-secret" },
+      totalTimeoutMs: 1000,
+      queue: {
+        maxBatchSize: 4,
+        conflictThreshold: 2,
+        windowTimeoutMs: 86_400_000,
+      },
+    });
+    Object.assign(c.git, {
+      prepareBatch: vi.fn(),
+      pinBatch: vi.fn(),
+      publishBatch: vi.fn(),
+    });
+    seedPassedPrecheck(f, scenario.card, completion, names, "pre-x", head);
+    await c.gate.tick([f.project_id]);
+    await c.gate.idle();
+    expect(c.run).toHaveBeenCalledTimes(1);
+    expect(check()).toMatchObject({ level: "card", status: "passed" });
+    expect(check()?.reused_precheck).toBeUndefined();
+  }
+});
+
+test("C-781/C-328: GitHub queue cards reuse their prechecks without any card-tier dispatch; the batch run still runs and binds by exact name", async () => {
+  const { GITHUB_CHECK_NAMES, githubCheckRunName } = await import(
+    "@cardigan/host"
+  );
+  const h = await parallelGithub(2);
+  const initial = h.c.options.configuration.forProject();
+  if (initial.status !== "enabled") throw new Error("Missing config");
+  h.c.setConfig({
+    ...initial,
+    queue: {
+      maxBatchSize: 4,
+      conflictThreshold: 2,
+      windowTimeoutMs: 86_400_000,
+    },
+    executor: { ...h.config, maxConcurrent: 3, scopedChecks: true },
+  });
+  const publish = vi.fn(async () => ({ status: "published" as const }));
+  Object.assign(h.git, {
+    prepareBatch: async (
+      _project: CentralProject,
+      plans: readonly MergePlan[],
+    ) => ({
+      base_sha: "a".repeat(40),
+      conflicts: [],
+      noops: [],
+      members: plans.map((plan, i) => ({
+        card_id: plan.card_id,
+        completion_id: plan.completion_id,
+        merge_sha: String(i + 1).repeat(40),
+        tree_sha: String(i + 4).repeat(40),
+      })),
+    }),
+    pinBatch: async () => {},
+    publishBatch: publish,
+  });
+  const prechecks = h.cards.map((item) =>
+    seedPassedPrecheck(
+      h.f,
+      item.scenario.card,
+      item.completion,
+      GITHUB_CHECK_NAMES,
+    ),
+  );
+  const gate = h.create();
+  try {
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    for (const [i, attempt] of prechecks.entries())
+      expect(h.check(i)).toMatchObject({
+        level: "card",
+        status: "passed",
+        reused_precheck: { attempt_id: attempt },
+      });
+    // No card-tier run was dispatched, and no run is bound to the reuse.
+    expect(h.client.dispatch).not.toHaveBeenCalled();
+    for (const i of [0, 1]) {
+      expect(h.check(i).external_run).toBeUndefined();
+      expect(h.check(i).executor).toBeUndefined();
+    }
+    for (const item of h.cards)
+      h.f.decide(
+        required(mergeConfirmation(h.f, item.scenario.card.id)),
+        "merge",
+      );
+    await vi.waitFor(async () => {
+      await gate.schedule([h.f.project_id]);
+      expect(mergeBatches(h.f.state().events)[0]?.check?.status).toBe(
+        "running",
+      );
+    });
+    const batch = required(mergeBatches(h.f.state().events)[0]);
+    expect(batch.members).toHaveLength(2);
+    expect(h.client.dispatch).toHaveBeenCalledTimes(1);
+    const run = required(
+      h.runs.get(required(batch.check?.external_run).run_id),
+    );
+    expect(run.inputs).toMatchObject({
+      kind: "merge_check",
+      merge_tier: "batch",
+      scope: "full",
+    });
+    // The bound run is the batch's own, found by its exact run name.
+    expect(githubCheckRunName(run.inputs)).toBe(
+      `cardigan/${run.inputs.card}/${run.inputs.delivery}/${batch.check?.attempt_id}/merge_check/${batch.final_sha}/${batch.final_tree_sha}`,
+    );
+    run.conclusion = "success";
+    await vi.waitFor(async () => {
+      h.advance();
+      await gate.schedule([h.f.project_id]);
+      expect(
+        h.f.state().events.filter((e) => e.type === "card_merged"),
+      ).toHaveLength(2);
+    });
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(h.client.dispatch).toHaveBeenCalledTimes(1);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-781: a batch failure after reused card checks is still caught by the batch and split by the existing rules", async () => {
+  const { GITHUB_CHECK_NAMES } = await import("@cardigan/host");
+  const h = await parallelGithub(2);
+  const initial = h.c.options.configuration.forProject();
+  if (initial.status !== "enabled") throw new Error("Missing config");
+  h.c.setConfig({
+    ...initial,
+    queue: {
+      maxBatchSize: 4,
+      conflictThreshold: 2,
+      windowTimeoutMs: 86_400_000,
+    },
+    executor: { ...h.config, maxConcurrent: 3, scopedChecks: true },
+  });
+  const publish = vi.fn(async () => ({ status: "published" as const }));
+  Object.assign(h.git, {
+    prepareBatch: async (
+      _project: CentralProject,
+      plans: readonly MergePlan[],
+    ) => ({
+      base_sha: "a".repeat(40),
+      conflicts: [],
+      noops: [],
+      members: plans.map((plan, i) => ({
+        card_id: plan.card_id,
+        completion_id: plan.completion_id,
+        merge_sha: String(i + 1).repeat(40),
+        tree_sha: String(i + 4).repeat(40),
+      })),
+    }),
+    pinBatch: async () => {},
+    publishBatch: publish,
+  });
+  for (const item of h.cards)
+    seedPassedPrecheck(
+      h.f,
+      item.scenario.card,
+      item.completion,
+      GITHUB_CHECK_NAMES,
+    );
+  const gate = h.create();
+  const project = [h.f.project_id];
+  const batches = () => mergeBatches(h.f.state().events);
+  try {
+    await gate.schedule(project);
+    await gate.idle();
+    for (const i of [0, 1]) expect(h.check(i).reused_precheck).toBeDefined();
+    for (const item of h.cards)
+      h.f.decide(
+        required(mergeConfirmation(h.f, item.scenario.card.id)),
+        "merge",
+      );
+    await vi.waitFor(async () => {
+      await gate.schedule(project);
+      expect(batches()[0]?.check?.status).toBe("running");
+    });
+    const batch = required(batches()[0]);
+    h.complete("failure");
+    required(
+      h.runs.get(required(batch.check?.external_run).run_id),
+    ).conclusion = "failure";
+    await vi.waitFor(async () => {
+      h.advance();
+      await gate.schedule(project);
+      expect(
+        batches().find((b) => b.parent_batch_id === batch.id)?.members,
+      ).toHaveLength(1);
+    });
+    expect(batches().find((b) => b.id === batch.id)?.check?.status).toBe(
+      "failed",
+    );
+    expect(publish).not.toHaveBeenCalled();
+    expect(
+      h.f.state().events.filter((e) => e.type === "card_merged"),
+    ).toHaveLength(0);
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+}, 30_000);
+
+test.each([
+  {
+    paths: ["packages/store/src/index.ts"],
+    scope: "affected",
+    affected: "apps/server packages/store",
+    skip: "",
+  },
+  { paths: ["docs/guide.md"], scope: "docs_only", affected: "", skip: "test" },
+] as const)(
+  "C-781: with scope: affected and skip_docs_only configured, a GitHub card-tier check runs only $scope; the batch stays full",
+  async ({ paths, scope, affected, skip }) => {
+    const { GITHUB_CHECK_NAMES } = await import("@cardigan/host");
+    const h = await parallelGithub(1);
+    const initial = h.c.options.configuration.forProject();
+    if (initial.status !== "enabled") throw new Error("Missing config");
+    // The production checks with the C-781 host configuration applied.
+    h.c.setConfig({
+      ...initial,
+      checks: GITHUB_CHECK_NAMES.map((name) => ({
+        name,
+        run: "true",
+        ...(name === "test"
+          ? { scope: "affected" as const, skipDocsOnly: true }
+          : name === "e2e"
+            ? { skipDocsOnly: true }
+            : {}),
+      })),
+      queue: {
+        maxBatchSize: 4,
+        conflictThreshold: 2,
+        windowTimeoutMs: 86_400_000,
+      },
+      executor: { ...h.config, maxConcurrent: 3, scopedChecks: true },
+    });
+    Object.assign(h.git, {
+      prepareBatch: vi.fn(),
+      pinBatch: vi.fn(),
+      publishBatch: vi.fn(),
+    });
+    h.git.changedPaths.mockResolvedValue(paths);
+    const gate = h.create();
+    try {
+      await gate.schedule([h.f.project_id]);
+      await h.running(0);
+      // No reusable precheck (a flow-1 card): a real, narrowed card check.
+      expect(h.check(0).reused_precheck).toBeUndefined();
+      expect(h.check(0).scope?.kind).toBe(scope);
+      const run = required(
+        h.runs.get(required(h.check(0).external_run).run_id),
+      );
+      expect(run.inputs).toMatchObject({
+        kind: "merge_check",
+        merge_tier: "card",
+        scope,
+        affected_paths: affected,
+        skip_checks: skip,
+      });
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);

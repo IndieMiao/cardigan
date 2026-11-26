@@ -27,6 +27,7 @@ export {
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
 export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";
+export * from "./commands/capacity-override.js";
 export * from "./commands/card-close.js";
 export { refreshCardDependencies } from "./commands/card-dependencies.js";
 export * from "./commands/card-watch.js";
@@ -118,6 +119,12 @@ export {
   TIMEOUT_AUTO_RERUN,
 } from "./commands/merge-check.js";
 export * from "./commands/merge-check-blockers.js";
+export {
+  PRECHECK_REUSE_SUMMARY,
+  type PrecheckReuseInput,
+  reusablePrecheck,
+  reusePrecheckForCardCheck,
+} from "./commands/merge-check-reuse.js";
 export * from "./commands/merge-check-wait.js";
 export * from "./commands/merge-classification.js";
 export {
@@ -179,6 +186,7 @@ export * from "./commands/readonly-checkout.js";
 export * from "./commands/release.js";
 export * from "./commands/release-notes.js";
 export * from "./commands/remote-worker-loss.js";
+export * from "./commands/replace-producer.js";
 export * from "./commands/replace-verifier.js";
 export * from "./commands/request-recheck.js";
 export * from "./commands/review-withdrawal.js";
