@@ -537,7 +537,18 @@ export function identifyMergeBatchCulprit(
       systemReturnFailedCheck(d, member.card_id, {
         ...check,
         completion_id: member.completion_id,
+        level: "batch",
         batch_id: batch.id,
+        // C-766: bisection is the evidence; the prefix without this card passed.
+        failure_class: prefix
+          ? {
+              label: "genuine",
+              basis: `批次二分：不含本卡的前缀 ${prefix.id} 已通过，加入本卡后 ${probe.id} 失败`,
+            }
+          : {
+              label: "unknown",
+              basis: `批次二分只剩本卡（${probe.id}）仍失败，无法区分本卡改动与基线`,
+            },
       });
     return member.card_id;
   });

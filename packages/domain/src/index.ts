@@ -16,6 +16,7 @@ export {
 } from "./card-hold.js";
 export * from "./card-read.js";
 export * from "./card-watch.js";
+export * from "./check-failure-class.js";
 export { checkLogAttempts } from "./check-log.js";
 export * from "./check-recovery.js";
 export {
@@ -106,6 +107,7 @@ export * from "./commands/merge-batch.js";
 export {
   canRecheckMerge,
   FAILURE_EXCERPT_MAX_BYTES,
+  FLAKY_AUTO_RERUN,
   hasAutoRerun,
   hasPassedMergeCheck,
   hasTimeoutAutoRerun,

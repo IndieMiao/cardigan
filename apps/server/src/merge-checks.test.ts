@@ -3786,6 +3786,102 @@ test.each([1, 2])(
   },
 );
 
+test.each([
+  ["genuine", ["packages/host/src/a.ts"]],
+  ["unknown", ["apps/web/src/b.ts"]],
+  ["git error", undefined],
+] as const)(
+  "C-766: the host locates a failed check (%s) and the label reaches the fix notification",
+  async (label, own) => {
+    const { f, scenario, check } = await fixture();
+    const card = { ...f.card(), flow_version: 5 };
+    f.store.uow.run((tx) => tx.cards.put(f.project_id, card));
+    const c = controller(f);
+    const deliveryChangedPaths = vi.fn(async () => {
+      if (!own) throw new Error("synthetic git failure");
+      return own;
+    });
+    Object.assign(c.git, {
+      deliveryChangedPaths,
+      isAncestor: vi.fn(async () => false),
+    });
+    c.run.mockImplementation(async (input) => {
+      input.onReady?.();
+      input.onOutput?.(
+        "test",
+        "packages/host test: FAIL src/a.test.ts > case\npackages/host test: Error: boom\n",
+      );
+      return {
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    const expected =
+      label === "git error"
+        ? { label: "unknown", basis: "主机未提供失败定位证据" }
+        : {
+            label,
+            basis: expect.stringContaining(
+              "失败位置 packages/host/src/a.test.ts",
+            ),
+          };
+    expect(check()?.failure_class).toMatchObject(expected);
+    expect(deliveryChangedPaths).toHaveBeenCalledWith(
+      expect.anything(),
+      "a".repeat(40),
+      "a".repeat(40),
+    );
+    const returned = f
+      .state()
+      .events.find((e) => e.type === "merge_changes_requested");
+    if (!returned) throw new Error("Missing system return");
+    expect(returned.payload).toMatchObject({ failure_class: expected });
+    expect(
+      routeEvent({ event: returned, snapshot: f.state() }).notifications,
+    ).toMatchObject([
+      {
+        recipient: { kind: "assignment", assignment_id: scenario.coder.id },
+        run_kind: "fix",
+        summary: expect.stringContaining(`失败分类：${expected.label}`),
+      },
+    ]);
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test("C-766: failure locations come from redacted output and never block the failed result", async () => {
+  const { f, check } = await fixture();
+  const card = { ...f.card(), flow_version: 5 };
+  f.store.uow.run((tx) => tx.cards.put(f.project_id, card));
+  const c = controller(f);
+  Object.assign(c.git, {
+    deliveryChangedPaths: vi.fn(async () => ["packages/host/src/sk-client.ts"]),
+    isAncestor: vi.fn(async () => false),
+  });
+  c.run.mockImplementation(async (input) => {
+    input.onReady?.();
+    input.onOutput?.(
+      "test",
+      "packages/host test: FAIL src/sk-client.ts > case\n",
+    );
+    return {
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("failed");
+  expect(check()?.failure_class).toEqual({
+    label: "unknown",
+    basis: "日志未定位到失败文件",
+  });
+  expect(check()?.summary).not.toContain("sk-client");
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
 test("A1a: an entry failure with no executed steps retains the safe host diagnosis in the fix notification", async () => {
   const { f, check } = await fixture();
   const card = { ...f.card(), flow_version: 2 };
