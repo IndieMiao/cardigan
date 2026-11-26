@@ -15,14 +15,32 @@ export const BUILD_RETRY_MAX_MS = 6 * 60 * 60_000;
 /** A cause that may pass by itself becomes a finding after this many in a row. */
 export const BUILD_FINDING_AFTER = 3;
 
+/** Host-configurable (`CARDIGAN_BUILD_RETRY_BASE_MS` / `_MAX_MS`). */
+export interface BuildRetryPolicy {
+  readonly baseMs: number;
+  readonly maxMs: number;
+}
+
 interface Retry {
   readonly failures: number;
   readonly next_at: number;
 }
 
-/** Process-local; a restart retries once and then backs off again. */
+/**
+ * Per Assignment backoff. The in-memory schedule is rebuilt after a restart
+ * from the open finding (`restore`): the next try waits the cap after its
+ * last failure, so a restart neither forgets it nor skips it for good.
+ */
 export class BuildCleanupRetries {
   private readonly entries = new Map<string, Retry>();
+  readonly policy: BuildRetryPolicy;
+  constructor(policy: Partial<BuildRetryPolicy> = {}) {
+    const maxMs = policy.maxMs ?? BUILD_RETRY_MAX_MS;
+    this.policy = {
+      baseMs: Math.min(policy.baseMs ?? BUILD_RETRY_BASE_MS, maxMs),
+      maxMs,
+    };
+  }
   private key(project_id: ProjectId, assignment_id: string) {
     return `${project_id}/${assignment_id}`;
   }
@@ -38,12 +56,22 @@ export class BuildCleanupRetries {
   ): Retry {
     const key = this.key(project_id, assignment_id);
     const failures = (this.entries.get(key)?.failures ?? 0) + 1;
+    const { baseMs, maxMs } = this.policy;
     const wait = human
-      ? BUILD_RETRY_MAX_MS
-      : Math.min(BUILD_RETRY_MAX_MS, BUILD_RETRY_BASE_MS * 2 ** (failures - 1));
+      ? maxMs
+      : Math.min(maxMs, baseMs * 2 ** Math.min(failures - 1, 52));
     const entry = { failures, next_at: now + wait };
     this.entries.set(key, entry);
     return entry;
+  }
+  /** After a restart: an open finding last confirmed at `last_failure`. */
+  restore(project_id: ProjectId, assignment_id: string, last_failure: number) {
+    const key = this.key(project_id, assignment_id);
+    if (this.entries.has(key) || !Number.isFinite(last_failure)) return;
+    this.entries.set(key, {
+      failures: BUILD_FINDING_AFTER,
+      next_at: last_failure + this.policy.maxMs,
+    });
   }
   forget(project_id: ProjectId, assignment_id: string) {
     this.entries.delete(this.key(project_id, assignment_id));

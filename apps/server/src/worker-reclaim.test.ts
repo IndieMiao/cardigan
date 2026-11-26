@@ -616,6 +616,36 @@ test("C-791 a refusal without a reason (previous helper) backs off exponentially
   expect(openCleanupFindings()).toEqual([]);
 });
 
+test("C-791 a restart keeps the backoff of an open finding; the cap is configurable", async () => {
+  const stuck = released(scenario.reviewer, "A-357");
+  leftover(stuck.id);
+  const start = Date.parse("2030-01-01T00:00:00.000Z");
+  let now = start;
+  const executor = (maxMs: number) =>
+    new CleanupExecutor({
+      store: f.store,
+      git: service,
+      runtime: runtimeStub,
+      clock: { now: () => new Date(now).toISOString() },
+      report: (message) => reports.push(message),
+      buildRetry: { baseMs: 1_000, maxMs },
+    });
+  await executor(2 * 3_600_000).sweep(f.project_id);
+  expect(removals(stuck.id)).toBe(1);
+  expect(reports).toEqual([
+    expect.stringContaining("next try after 2030-01-01T02:00:00.000Z"),
+  ]);
+  // A new process (deploy) reads the open finding instead of retrying at once.
+  const restarted = executor(2 * 3_600_000);
+  now = start + 60_000;
+  await restarted.sweep(f.project_id);
+  expect(removals(stuck.id)).toBe(1);
+  now = start + 2 * 3_600_000;
+  await restarted.sweep(f.project_id);
+  expect(removals(stuck.id)).toBe(2);
+  expect(lowSpaceEvents("reconcile_finding")).toHaveLength(1);
+});
+
 test("an offline worker is not listed and keeps its directories", async () => {
   const machine = required(
     f.store.uow.read((tx) => tx.machines.get(f.project_id, MACHINE)),

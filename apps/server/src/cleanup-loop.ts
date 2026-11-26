@@ -31,6 +31,7 @@ import {
   BUILD_CLEANUP_FINDING,
   BUILD_FINDING_AFTER,
   BuildCleanupRetries,
+  type BuildRetryPolicy,
   buildCleanupDetail,
 } from "./build-cleanup-retry.js";
 import type { MachineDirectories, ReconcileGit } from "./git.js";
@@ -67,6 +68,8 @@ export interface CleanupOptions {
   readonly onError?: (error: unknown) => void;
   /** Problems that are not worth throwing, e.g. one failed terminal release. */
   readonly report?: (message: string) => void;
+  /** C-791: backoff of failed build removals; defaults to 1 min … 6 h. */
+  readonly buildRetry?: Partial<BuildRetryPolicy>;
 }
 
 const exists = (path: string) =>
@@ -83,7 +86,9 @@ export class CleanupExecutor {
   /** Worktrees this process already cleaned, so a slow git tree is not retried. */
   private readonly cleaned = new Set<string>();
 
-  constructor(private readonly options: CleanupOptions) {}
+  constructor(private readonly options: CleanupOptions) {
+    this.buildRetries = new BuildCleanupRetries(options.buildRetry);
+  }
 
   private get clock(): Clock {
     return this.options.clock ?? systemClock;
@@ -96,7 +101,7 @@ export class CleanupExecutor {
   >();
   private readonly builds = new MaintenanceBatch<ProjectId, string>();
   /** C-791: builds whose removal failed wait out a backoff, per Assignment. */
-  private readonly buildRetries = new BuildCleanupRetries();
+  private readonly buildRetries: BuildCleanupRetries;
   /** C-747: last routing check of owner-held worktree cleanup questions. */
   private readonly routing = new Map<
     ProjectId,
@@ -396,18 +401,29 @@ export class CleanupExecutor {
           if (machines.get(id as AssignmentId) === machine_id) remote.push(id);
       }
       const present = new Set([...owners, ...remote]);
-      // A build that is gone (e.g. removed by a person) needs nothing more.
       for (const finding of this.options.store.listReconcileFindings(
         project_id,
         { openOnly: true },
-      ))
+      )) {
         if (
-          finding.kind === BUILD_CLEANUP_FINDING &&
-          finding.assignment_id !== undefined &&
+          finding.kind !== BUILD_CLEANUP_FINDING ||
+          finding.assignment_id === undefined
+        )
+          continue;
+        // A build that is gone (e.g. removed by a person) needs nothing more.
+        if (
           !present.has(finding.assignment_id) &&
           scanned.has(machines.get(finding.assignment_id) ?? "local")
         )
           this.buildCleaned(project_id, finding.assignment_id);
+        // After a restart the finding still holds its backoff.
+        else
+          this.buildRetries.restore(
+            project_id,
+            finding.assignment_id,
+            Date.parse(finding.last_seen_at),
+          );
+      }
     }
     const listed = [...new Set([...owners, ...remote])];
     await this.builds.run(
@@ -758,11 +774,15 @@ export function startCleanupLoop(options: {
   readonly onError?: (error: unknown) => void;
   readonly report?: (message: string) => void;
   readonly signal?: AbortSignal;
+  readonly buildRetry?: Partial<BuildRetryPolicy>;
 }): CleanupLoop {
   const executor = new CleanupExecutor({
     store: options.store,
     git: options.git,
     runtime: options.runtime,
+    ...(options.buildRetry === undefined
+      ? {}
+      : { buildRetry: options.buildRetry }),
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.onError === undefined ? {} : { onError: options.onError }),
     ...(options.report === undefined ? {} : { report: options.report }),

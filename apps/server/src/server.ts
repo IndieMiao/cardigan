@@ -1096,6 +1096,14 @@ async function assembleServer(
           ? {}
           : { mergeBlockedReminderMs }),
         ...(cleanupIntervalMs === undefined ? {} : { cleanupIntervalMs }),
+        buildRetry: {
+          ...(config.buildRetryBaseMs === undefined
+            ? {}
+            : { baseMs: config.buildRetryBaseMs }),
+          ...(config.buildRetryMaxMs === undefined
+            ? {}
+            : { maxMs: config.buildRetryMaxMs }),
+        },
         ...(reconcileIntervalMs === undefined ? {} : { reconcileIntervalMs }),
         ...(backupIntervalMs === undefined ? {} : { backupIntervalMs }),
         ...(centralMaintenanceWindow === undefined
