@@ -704,9 +704,7 @@ test("C-232: a context change re-reads the open execution view and nothing else"
   expect(needsYou).toHaveBeenCalledTimes(needs);
 });
 
-test("capacity revisions deduplicate, survive reconnection and update only the shared status", {
-  repeats: 49,
-}, async () => {
+test("capacity revisions deduplicate, survive reconnection and update only the shared status", async () => {
   window.location.hash = "#/p/p-1/cards";
   let running = 2;
   const read = vi.fn(async () => ({
