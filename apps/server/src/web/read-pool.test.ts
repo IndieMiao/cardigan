@@ -43,8 +43,10 @@ function stubWorker(): URL {
     `import { parentPort, threadId } from "node:worker_threads";
 let seen = 0;
 const asks = new Map();
+const warm = [];
 parentPort.on("message", (m) => {
   if (m.kind === "close") { parentPort.close(); return; }
+  if (m.kind === "warm") { warm.push(...m.projects); return; }
   if (m.kind === "host") { asks.get(m.id)?.(m.facts); asks.delete(m.id); return; }
   if (m.kind !== "read") return;
   seen++;
@@ -59,7 +61,7 @@ parentPort.on("message", (m) => {
     parentPort.postMessage({ kind: "host", id: m.id, request: { project: op.project, machines: ["m1"], purpose: "needs" } });
     return;
   }
-  setTimeout(() => done({ seen, threadId, project: op.project }), op.delay ?? 0);
+  setTimeout(() => done({ seen, threadId, project: op.project, warm }), op.delay ?? 0);
 });
 `,
   );
@@ -70,6 +72,7 @@ function pool(options: {
   workers?: number;
   maxQueue?: number;
   timeoutMs?: number;
+  warmProjects?: readonly string[];
 }) {
   const p = new WorkbenchReadPool({
     dbPath: "/nonexistent/stub.db",
@@ -206,6 +209,135 @@ test("a project always reads in the same worker; timings come back with the queu
   ).toBeGreaterThan(1);
 });
 
+test("C-774: two active projects never share a worker at workers=2, even when their ids hash alike", async () => {
+  // Before C-774 the hash put this production pair on the same worker.
+  expect(laneFor("cardigan", 2)).toBe(laneFor("sensen-godot", 2));
+  const p = pool({ workers: 2 });
+  const a = body(await p.read(op("ok", { project: "cardigan" })));
+  const b = body(await p.read(op("ok", { project: "sensen-godot" })));
+  expect(b.threadId).not.toBe(a.threadId);
+  expect(p.laneOf("cardigan")).not.toBe(p.laneOf("sensen-godot"));
+  expect(p.stats().projects.map((ids) => ids.length)).toEqual([1, 1]);
+  // A slow read of one project no longer holds the other's reads.
+  let slowDone = false;
+  const slow = p
+    .read(op("slow", { project: "cardigan", delay: 400 }))
+    .then(() => {
+      slowDone = true;
+    });
+  expect(
+    body(await p.read(op("ok", { project: "sensen-godot" }))).threadId,
+  ).toBe(b.threadId);
+  expect(slowDone).toBe(false);
+  await slow;
+});
+
+test("C-774: a project's reads stay in one worker, in order, while other projects read beside it", async () => {
+  const p = pool({ workers: 2 });
+  const projects = ["cardigan", "sensen-godot", "p-web"];
+  const seen = new Map<string, { threadId: number; seen: number }[]>();
+  for (let round = 0; round < 6; round++) {
+    const reads = await Promise.all(
+      projects.map((project) => p.read(op("ok", { project }))),
+    );
+    for (const read of reads) {
+      const value = body(read) as {
+        project: string;
+        threadId: number;
+        seen: number;
+      };
+      seen.set(value.project, [...(seen.get(value.project) ?? []), value]);
+    }
+  }
+  for (const project of projects) {
+    const reads = seen.get(project) ?? [];
+    expect(reads).toHaveLength(6);
+    // One worker for every read of the project, which saw them in order.
+    expect(new Set(reads.map((r) => r.threadId)).size).toBe(1);
+    for (let i = 1; i < reads.length; i++)
+      expect(reads[i]?.seen).toBeGreaterThan(reads[i - 1]?.seen ?? 0);
+  }
+  // The third project shares a worker; the first two never do.
+  expect(p.laneOf("cardigan")).not.toBe(p.laneOf("sensen-godot"));
+});
+
+test("C-774: a project keeps its first worker even when another worker is free", async () => {
+  const p = pool({ workers: 2 });
+  const first = body(await p.read(op("ok", { project: "cardigan" })));
+  const home = p.laneOf("cardigan");
+  const other = body(await p.read(op("ok", { project: "sensen-godot" })));
+  expect(other.threadId).not.toBe(first.threadId);
+  // A third project goes to the worker with fewer projects (ties: hash lane).
+  const third = p.laneOf("p-web");
+  body(await p.read(op("ok", { project: "p-web" })));
+  expect(
+    p
+      .stats()
+      .projects.map((ids) => ids.length)
+      .sort(),
+  ).toEqual([1, 2]);
+  // cardigan's worker is busy; its next reads still queue there instead of
+  // moving (a move would swap its version epoch and rebuild a cold cache).
+  const busy = p.read(op("slow", { project: "cardigan", delay: 200 }));
+  await vi.waitFor(() => expect(p.stats().running).toBe(1));
+  const after = body(await p.read(op("ok", { project: "cardigan" })));
+  expect(after.threadId).toBe(first.threadId);
+  expect(after.seen).toBeGreaterThan(first.seen);
+  expect(p.laneOf("cardigan")).toBe(home);
+  expect(p.laneOf("p-web")).toBe(third);
+  await busy;
+});
+
+test("C-774: a timed-out read still reports its queue wait and run time", async () => {
+  const p = pool({ workers: 1, maxQueue: 8, timeoutMs: 100 });
+  const running: Record<string, number> = {};
+  const queued: Record<string, number> = {};
+  const slow = p.read(op("slow", { delay: 300 }), undefined, (stage, ms) => {
+    running[stage] = ms;
+  });
+  const waiting = p.read(op("ok"), undefined, (stage, ms) => {
+    queued[stage] = ms;
+  });
+  slow.catch(() => undefined);
+  waiting.catch(() => undefined);
+  expect(await rejection(slow)).toMatchObject({ code: "read_timeout" });
+  expect(await rejection(waiting)).toMatchObject({ code: "read_timeout" });
+  expect(Object.keys(running).sort()).toEqual(["read_queue", "read_running"]);
+  expect(running.read_queue).toBeLessThan(100);
+  expect(
+    (running.read_queue ?? 0) + (running.read_running ?? 0),
+  ).toBeGreaterThanOrEqual(95);
+  // Never started: the whole timeout was queue wait.
+  expect(Object.keys(queued)).toEqual(["read_queue"]);
+  expect(queued.read_queue).toBeGreaterThanOrEqual(95);
+  await vi.waitFor(() => expect(p.stats().running).toBe(0));
+});
+
+test("C-774: warm projects are spread over workers that start at once and are told what to warm", async () => {
+  const p = pool({ workers: 2, warmProjects: ["cardigan", "sensen-godot"] });
+  // Both workers start before any read arrives.
+  expect(p.stats().workers).toBe(2);
+  expect(p.laneOf("cardigan")).not.toBe(p.laneOf("sensen-godot"));
+  const a = body(await p.read(op("ok", { project: "cardigan" })));
+  const b = body(await p.read(op("ok", { project: "sensen-godot" })));
+  expect(a.warm).toEqual(["cardigan"]);
+  expect(b.warm).toEqual(["sensen-godot"]);
+  // A worker started later by a read warms the project that read it.
+  const lazy = pool({ workers: 1 });
+  expect(lazy.stats().workers).toBe(0);
+  expect(body(await lazy.read(op("ok"))).warm).toEqual(["p1"]);
+  // The Web server warms only once it listens; a closed pool starts nothing.
+  const later = pool({ workers: 2 });
+  expect(later.stats().workers).toBe(0);
+  later.warm(["cardigan", "sensen-godot"]);
+  expect(later.stats().workers).toBe(2);
+  expect(later.laneOf("cardigan")).not.toBe(later.laneOf("sensen-godot"));
+  const closed = pool({ workers: 2 });
+  await closed.close();
+  closed.warm(["cardigan"]);
+  expect(closed.stats().workers).toBe(0);
+});
+
 test("host facts are asked on the Web thread and answered to the worker", async () => {
   const p = pool({ workers: 1 });
   const host = vi.fn(async () => ({ m1: { tools: "run-tools" } }));
@@ -232,7 +364,12 @@ test("closing rejects queued and running reads with 503 and stops the workers", 
     status: 503,
     code: "read_unavailable",
   });
-  expect(p.stats()).toEqual({ workers: 0, running: 0, queued: 0 });
+  expect(p.stats()).toEqual({
+    workers: 0,
+    running: 0,
+    queued: 0,
+    projects: [[]],
+  });
 });
 
 test("options come from the environment; 0 workers keeps reads inline", () => {
@@ -405,4 +542,172 @@ test("Workbench reads through the worker match the inline reads and never build 
   expect((changed.json as { revision: string }).revision).not.toBe(
     (version.json as { revision: string }).revision,
   );
+});
+
+test("C-774: on real workers a project's polls keep one version beside another project, and every read logs queue, state and query time", async () => {
+  const logs: Readonly<Record<string, unknown>>[] = [];
+  const f = await webHarness({
+    password: PASSWORD,
+    diskStore: true,
+    clock: { now: () => NOW },
+    workbenchReads: { workers: 2, maxQueue: 16, timeoutMs: 30_000 },
+    log: (event) => logs.push(event),
+  });
+  cleanups.push(() => f.close());
+  seedWebProject(f.store, f.dataDir);
+  f.store.createProject({ id: "p-other" as ProjectId, name: "Other project" });
+  const cookie = await f.login(PASSWORD);
+  const version = async (project: string) => {
+    const res = await call(
+      f.port,
+      `/api/projects/${project}/cards/version?view=summary&sort=id&limit=50`,
+      { cookie },
+    );
+    expect(res.status, res.body).toBe(200);
+    return (res.json as { snapshot_version: string }).snapshot_version;
+  };
+  // Each worker stamps its own epoch into the version: a project whose reads
+  // switched workers would see its version flip without any write.
+  const first = await version(project_id);
+  for (let i = 0; i < 4; i++) {
+    await Promise.all([version("p-other"), version("p-other")]);
+    expect(await version(project_id)).toBe(first);
+  }
+  f.store.uow.run((tx) => {
+    const c = tx.cards.get(project_id, "C-1" as CardId);
+    if (!c) throw new Error("missing fixture");
+    tx.cards.put(project_id, { ...c, title: "Renamed by the writer" });
+  });
+  const changed = await version(project_id);
+  expect(changed).not.toBe(first);
+  for (let i = 0; i < 3; i++) {
+    await version("p-other");
+    expect(await version(project_id)).toBe(changed);
+  }
+
+  const detail = await call(
+    f.port,
+    `/api/projects/${encodeURIComponent(project_id)}/cards/C-1`,
+    { cookie },
+  );
+  expect(detail.status).toBe(200);
+  const phases = logs
+    .filter(
+      (e) =>
+        e.event === "web_http" &&
+        e.route === "/api/projects/:project_id/cards/:id",
+    )
+    .map((e) => e.phases_ms as Record<string, number>)
+    .at(-1);
+  expect(phases).toBeDefined();
+  for (const stage of [
+    "read_queue",
+    "read_worker",
+    "read_state",
+    "read_state_rebuild",
+    "read_query",
+    "sql_state",
+    "timeline_sql",
+    "references_sql",
+    "events_sql",
+    "assemble",
+    "detail_version",
+    "detail_serialize",
+  ])
+    expect(phases?.[stage], stage).toBeGreaterThanOrEqual(0);
+  // State and query split the worker's run; the rebuild is part of the state.
+  expect(phases?.read_state_rebuild).toBeLessThanOrEqual(
+    (phases?.read_state ?? 0) + 0.001,
+  );
+  expect(
+    (phases?.read_state ?? 0) + (phases?.read_query ?? 0),
+  ).toBeLessThanOrEqual((phases?.read_worker ?? 0) + 0.5);
+
+  // Needs You builds command state: the worker's first read rebuilds it, a
+  // repeat with nothing written finds it cached.
+  const needs = async () => {
+    const res = await call(
+      f.port,
+      `/api/projects/${encodeURIComponent(project_id)}/needs-you`,
+      { cookie },
+    );
+    expect(res.status).toBe(200);
+    return logs
+      .filter(
+        (e) =>
+          e.event === "web_http" &&
+          e.route === "/api/projects/:project_id/needs-you",
+      )
+      .map((e) => e.phases_ms as Record<string, number>)
+      .at(-1);
+  };
+  const cold = await needs();
+  expect(cold?.read_state).toBeGreaterThan(0);
+  expect(cold?.read_state_rebuild).toBeGreaterThan(0);
+  const warm = await needs();
+  expect(warm?.read_state).toBeGreaterThan(0);
+  expect(warm?.read_state_rebuild).toBe(0);
+});
+
+test("C-774: reads that reach a warming worker at start answer fresh data, the same as inline reads", async () => {
+  const f = await webHarness({
+    password: PASSWORD,
+    diskStore: true,
+    clock: { now: () => NOW },
+  });
+  cleanups.push(() => f.close());
+  seedWebProject(f.store, f.dataDir);
+  const project = project_id as ProjectId;
+  // A write just before the workers start: the warm-up must not hide it.
+  f.store.uow.run((tx) => {
+    const c = tx.cards.get(project_id, "C-1" as CardId);
+    if (!c) throw new Error("missing fixture");
+    tx.cards.put(project_id, { ...c, title: "Written before start" });
+  });
+  const p = new WorkbenchReadPool({
+    dbPath: join(f.dataDir, "cardigan.db"),
+    workers: 2,
+    warmProjects: [project_id],
+  });
+  cleanups.push(() => p.close());
+  const base = `http://workbench.invalid/api/projects/${project_id}`;
+  const reads: WorkbenchReadOp[] = [
+    {
+      kind: "card",
+      project,
+      card: "C-1" as CardId,
+      url: `${base}/cards/C-1`,
+      mergeGateStatus: "disabled",
+      now: NOW,
+    },
+    { kind: "needs", project, counts: false, now: NOW },
+    {
+      kind: "cards",
+      project,
+      url: `${base}/cards?view=summary&sort=id&limit=50`,
+      version: false,
+      cache: { readScope: "test" },
+    },
+  ];
+  // Queued at once, while the worker is still starting and warming.
+  const pooled = await Promise.all(
+    reads.map((read) => p.read(read, async () => ({}))),
+  );
+  const strip = (value: unknown) => {
+    const { snapshot_version: _v, ...rest } = value as Record<string, unknown>;
+    return rest;
+  };
+  for (const [i, read] of reads.entries()) {
+    const inline = await runWorkbenchRead(f.store, read, async () => ({}));
+    expect(strip(body(pooled[i] ?? {}))).toEqual(strip(body(inline)));
+  }
+  expect(pooled[0]?.body).toContain("Written before start");
+  // A write after the warm-up shows on the next read.
+  f.store.uow.run((tx) => {
+    const c = tx.cards.get(project_id, "C-1" as CardId);
+    if (!c) throw new Error("missing fixture");
+    tx.cards.put(project_id, { ...c, title: "Written after start" });
+  });
+  const after = await p.read(reads[0] as WorkbenchReadOp);
+  expect(after.body).toContain("Written after start");
 });

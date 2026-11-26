@@ -20,9 +20,12 @@ export interface HostOpsToolOptions {
       tool:
         | HostOpsExecutionTool
         | "host_ops_recheck_merge"
+        | "host_ops_recheck_precheck"
         | "host_ops_stop_assignment",
       params: {
         target_id: string;
+        attempt_id?: string;
+        action?: "reinspect" | "abandon";
         reason?: string;
         idempotency_key: string;
         context_session_id?: string;
@@ -122,6 +125,30 @@ export function hostOpsTools(options: HostOpsToolOptions = {}) {
       handler: (p, c) =>
         host().execute(c, "host_ops_recheck_merge", {
           target_id: p.card_id,
+          idempotency_key: p.idempotency_key,
+        }),
+    }),
+    defineTool({
+      name: "host_ops_recheck_precheck",
+      description:
+        "Ask the host to settle a stuck GitHub author precheck: reinspect re-reads its bound GitHub run through the trusted poller (never dispatching a second run); abandon ends it as interrupted after one read-only GitHub lookup, stating the GitHub state it verified or that it could not verify it.",
+      input: z.object({
+        card_id: id("card"),
+        attempt_id: z
+          .string()
+          .min(1)
+          .max(80)
+          .regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u),
+        action: z.enum(["reinspect", "abandon"]),
+        reason,
+        idempotency_key,
+      }),
+      handler: (p, c) =>
+        host().execute(c, "host_ops_recheck_precheck", {
+          target_id: p.card_id,
+          attempt_id: p.attempt_id,
+          action: p.action,
+          reason: p.reason,
           idempotency_key: p.idempotency_key,
         }),
     }),

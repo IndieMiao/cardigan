@@ -15,7 +15,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
-import { ApiError } from "../api.js";
+import { ApiError, type CardDetail } from "../api.js";
 import { CommentBox } from "../components/CommentBox.js";
 import { selectCardTab } from "../testing/card-tabs.js";
 import {
@@ -277,6 +277,34 @@ test("C-699 the overview: goal and criteria beside the card's standing facts, no
     expect(within(page).queryByText(gone)).toBeNull();
   await selectCardTab(/^工作项/);
   expect(within(page).getByRole("link", { name: "V-1 交付" })).toBeTruthy();
+});
+
+test("C-771 a card from before template versions were recorded shows its template's name", async () => {
+  const detail = cardDetail();
+  const general = {
+    id: "general",
+    title: "通用任务",
+    version: 1,
+    description: "",
+    builtin: true,
+    status: "active",
+    requires_repo: false,
+    merge: "none",
+    require_acceptance_criteria: false,
+    work_items: [],
+    primary_work_item_key: null,
+    completion: { mode: "human_mark_done" },
+  } as NonNullable<CardDetail["template"]>;
+  renderCard({
+    card: async () => ({
+      ...detail,
+      // The server resolved the missing version as v1.
+      card: { ...detail.card, template: "general" },
+      template: general,
+    }),
+  });
+  expect((await fact("模板")).textContent).toBe("通用任务");
+  expect(screen.queryByText(/未识别模板/u)).toBeNull();
 });
 
 test("C-699 empty overview sections do not render", async () => {
