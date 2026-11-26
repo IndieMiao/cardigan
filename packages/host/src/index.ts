@@ -532,6 +532,7 @@ export { manualUpgradeKey } from "./worker-maintenance.js";
 export { workerMcpConfig } from "./worker-mcp.js";
 export * from "./worker-observations.js";
 export * from "./worker-onboarding.js";
+export { observedHelperRelease } from "./worker-readiness.js";
 export { upgradeMaterials } from "./worker-upgrade.js";
 export { manualWorkerUpgradeAllowed } from "./worker-upgrade-enrollment.js";
 export { upgradeKey } from "./worker-upgrade-gate.js";
