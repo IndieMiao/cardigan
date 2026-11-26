@@ -21,6 +21,7 @@ import {
   cardTemplate,
   currentPreMergeVersions,
   decisionQuestionPayload,
+  EARLY_MERGE_CONFLICT,
   employeeNameKey,
   eventsAtSeq,
   eventsForWorkItem,
@@ -1092,6 +1093,56 @@ function routeVoidedRejection(input: RouteInput, draft: Draft): void {
     );
 }
 
+/** C-782: carry-over compares these delivery fields verbatim across a proved SHA change. */
+const REUSE_HINT =
+  "只合入基线、解冲突的重交：已知遗漏和附件原样沿用上一版，主机可证明代码等价时沿用已有审核。";
+
+/** C-782: advisory only; nobody else is told when the author is gone or has redelivered. */
+function routeEarlyMergeConflict(input: RouteInput, draft: Draft): void {
+  if (
+    input.event.actor.kind !== "system" ||
+    input.event.actor.project_id !== input.snapshot.project_id
+  )
+    return;
+  const item = itemOf(
+    input,
+    payloadString(input.event.payload, "work_item_id") as
+      | WorkItemId
+      | undefined,
+  );
+  const owner = assignmentOf(input, item?.assignment_id);
+  const card = input.snapshot.cards.find((c) => c.id === input.event.card_id);
+  const current =
+    card &&
+    item &&
+    currentPreMergeVersions(
+      card,
+      input.snapshot.work_items,
+      input.snapshot.deliveries,
+    ).find((v) => v.work_item_id === item.id);
+  if (
+    !item ||
+    item.card_id !== input.event.card_id ||
+    item.kind !== "produce" ||
+    !owner ||
+    !isActive(owner) ||
+    current?.delivery_id !== payloadString(input.event.payload, "delivery_id")
+  )
+    return;
+  note(
+    input,
+    draft,
+    recipient.assignment(owner.id),
+    "instruction",
+    "C-782/early merge conflict",
+    `${
+      payloadString(input.event.payload, "body") ??
+      `${item.id} 的交付与最新基线试合并冲突，请合入基线并解决冲突。`
+    }${REUSE_HINT}`,
+    { work_item_id: item.id },
+  );
+}
+
 function routeReview(input: RouteInput, draft: Draft): void {
   const verdict = payloadString(input.event.payload, "verdict");
   const delivery_id = payloadString(input.event.payload, "delivery_id");
@@ -2088,6 +2139,9 @@ export function routeEvent(input: RouteInput): RouteResult {
     case CARD_WATCH_TRIGGERED:
     case CARD_WATCH_ENDED:
       routeCardWatch(input, draft);
+      break;
+    case EARLY_MERGE_CONFLICT:
+      routeEarlyMergeConflict(input, draft);
       break;
     case "story_children_settled": {
       const parent = input.snapshot.cards.find(
@@ -3118,7 +3172,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           rule,
           returned
             ? `Changes requested for ${item.id}: ${payloadString(input.event.payload, "reason") ?? ""}`
-            : `Resolve the merge conflict for ${item.id}`,
+            : `Resolve the merge conflict for ${item.id}. ${REUSE_HINT}`,
           { work_item_id: item.id, run_kind: "fix" },
         );
       else
