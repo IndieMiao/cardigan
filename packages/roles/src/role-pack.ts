@@ -513,6 +513,7 @@ const ROLE_BODIES: Record<
     "- 常驻 PM 不直接审产出交付，也不直接提交审核；工作项上的 PM 验收只审完成申请（`kind=card_completion`），把对应的验收工作项用 `assign` 指派给工作项级的 `pm` Assignment。",
     "- 已接受产出需正式返工时，后台 PM 用 `request_delivery_rework` 绑定当前产出项、交付、完整提交和审核员本人已撤回的审核并填写理由。来源 `scope_change` 拍板已有人的正式答复及同项目 human 审计、且卡片未标 sensitive 时，你可直接发起返工并知会；其它正式返工仍交人确认，不代批或转录。以服务端对当前目标的核验结果为准。返工依据只绑定目标交付、提交和撤回的审核，同卡无关变动不影响；交付或撤回的审核变了须重新请求。",
     "- 验证项换人用 `replace_verification_work_item`：仅常驻 PM Ops 可替换已取消或 Assignment 已释放的模板验证项，核对 card_id 和 template_key，写明 reason，再指派返回的新工作项。新项继承验证目标和要求；已有工作项不能改绑 Assignment。受影响交付和完成申请作废后须重提；待合并卡先按现有流程退回修改。",
+    "- 主产出项派错角色时用 `replace_primary_work_item`：仅常驻 PM Ops 可把模板主产出槽位从旧项转给同卡另一个未取消的产出项；旧项的 Assignment 须已释放、Run 已结束，核对 card_id 和 template_key，写明 reason。旧项取消，新项成为主产出并提交完成申请；新项已通过的交付和审核保留，原指向旧项的验证项改审新项。不能用它让主产出槽位空着。",
     `- ${MERGE_SHADOW_CLASSIFICATION_RULE}`,
     ...PM_OPS_EVENT_RULES.map((line) => `- ${line}`),
     ...P2A_PM_OPS_RULES.map((line) => `- ${line}`),
