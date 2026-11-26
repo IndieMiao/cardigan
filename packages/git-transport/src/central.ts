@@ -28,6 +28,7 @@ import {
   type GitCentralPort,
   type GitCommitTreeInput,
   type GitFileDiff,
+  type GitMergeTreeOptions,
   type GitPreparedBackup,
   type GitPublicationGuard,
   type GitRef,
@@ -1476,16 +1477,26 @@ export class CentralGitTransport
       if (!authorized) return false as const;
     });
   }
-  async mergeTree(repository: string, ours: string, theirs: string) {
+  async mergeTree(
+    repository: string,
+    ours: string,
+    theirs: string,
+    options: GitMergeTreeOptions = {},
+  ) {
     if (![ours, theirs].every((sha) => fullSha.test(sha)))
       throw new Error("Invalid full commit SHA");
-    const result = await this.command(repository, [
-      "merge-tree",
-      "--write-tree",
-      "-z",
-      ours,
-      theirs,
-    ]);
+    const result = await this.command(
+      repository,
+      ["merge-tree", "--write-tree", "-z", ours, theirs],
+      // C-782: command-line scope overrides any repository conflict style.
+      options.conflictStyle === "diff3"
+        ? {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "merge.conflictStyle",
+            GIT_CONFIG_VALUE_0: "diff3",
+          }
+        : {},
+    );
     // 1 means conflicts; anything else non-zero is a real failure.
     if (result.code !== 0 && result.code !== 1)
       throw new Error(result.stderr || "merge-tree failed");

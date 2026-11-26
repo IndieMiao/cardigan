@@ -166,10 +166,16 @@ export function reusableReviews(
     !equivalentReviewTrees(previous, next)
   )
     return [];
+  // C-782: across a host-proved SHA change the author's self-reported test
+  // results necessarily name the new SHA, precheck and baseline; that SHA gets
+  // its own precheck and final merge check. The same SHA keeps the old claims.
+  const sameSha = previous.subject.value === next.subject.value;
   const contents = (v: Delivery) => ({
     attachments: v.attachments,
     known_gaps: v.known_gaps,
-    test_results: v.test_results,
+    ...(sameSha || v.kind === "card_completion"
+      ? { test_results: v.test_results }
+      : {}),
     ...(v.kind === "card_completion"
       ? {
           summary: v.summary,

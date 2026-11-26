@@ -1032,6 +1032,70 @@ test("Flow Lite: a host equivalence proof carries original pass across SHA/tree 
   expect(isReviewStale(s.reviews[0]!, next.data)).toBe(true);
 });
 
+/** C-782: a host conflict proof binding the first delivery to SHA b…b. */
+function conflictProof(first: Delivery, sha: string): DeliveryVerifier {
+  return {
+    verify: async () => ({
+      ok: true,
+      value: [
+        { kind: "commit", details: { sha, tree_sha: "e".repeat(40) } },
+        {
+          kind: "diff",
+          details: {
+            review_equivalence: {
+              version: 1,
+              previous_delivery_id: first.id,
+              old_sha: first.subject.value,
+              new_sha: sha,
+              old_tree: tree,
+              new_tree: "e".repeat(40),
+              baseline_sha: "f".repeat(40),
+              kind: "conflict",
+              paths: ["list.ts"],
+              union_paths: ["list.ts"],
+            },
+          },
+        },
+      ],
+    }),
+  };
+}
+
+test("C-782: across a host-proved SHA change, new self-reported test results still carry the pass", async () => {
+  const { s, first, review } = await passed();
+  const sha = "b".repeat(40);
+  const next = await deliver(
+    s,
+    {
+      ...params,
+      subject: { ...subject, value: sha },
+      test_results: [
+        { command: "request_check P-2 (head b…b)", result: "passed" },
+      ],
+    },
+    conflictProof(first, sha),
+  );
+  expect(next.data).toMatchObject({
+    status: "accepted",
+    reused_reviews: [review.id],
+  });
+});
+
+test("C-782: across a host-proved SHA change, changed known gaps still require review", async () => {
+  const { s, first } = await passed();
+  const sha = "b".repeat(40);
+  const next = await deliver(
+    s,
+    {
+      ...params,
+      subject: { ...subject, value: sha },
+      known_gaps: [{ description: "New untested path" }],
+    },
+    conflictProof(first, sha),
+  );
+  expect(next.data.reused_reviews).toBeUndefined();
+});
+
 test.each([
   "old_sha",
   "new_sha",

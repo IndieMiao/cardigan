@@ -63,6 +63,10 @@ export interface GitWorktreePort {
   pruneWorktrees?(repository: string): Promise<void>;
 }
 
+/** C-782: `diff3` also prints each conflict's merge-base section. */
+export interface GitMergeTreeOptions {
+  readonly conflictStyle?: "diff3";
+}
 /** In-memory result of `merge-tree --write-tree`; conflicts never move a ref. */
 export interface GitTreeMerge {
   readonly tree: string;
@@ -186,6 +190,7 @@ export interface GitCentralPort {
     repository: string,
     ours: string,
     theirs: string,
+    options?: GitMergeTreeOptions,
   ): Promise<GitTreeMerge>;
   /** Candidate preparation only; attribution/review equivalence never use union resolution. */
   resolvePlanConflict?(
