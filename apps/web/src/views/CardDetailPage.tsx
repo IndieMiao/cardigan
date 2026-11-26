@@ -68,6 +68,7 @@ import {
 import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { useAttachmentRefsState } from "../useAttachmentRefs.js";
+import { usePageVisible } from "../usePageVisible.js";
 import { useResource } from "../useResource.js";
 import { MergePanel } from "./MergePanel.js";
 
@@ -212,10 +213,14 @@ export function CardDetailPage(props: CardDetailPageProps) {
       throw error;
     }
   }, [client, projectId, cardId]);
-  const { data, error, reload, pending, interactive, replace } = useResource(
-    load,
-    cardRevision ? cardRevision(cardId, affectedCards) : revision,
-  );
+  // C-775: a background tab stops reading and reads once when shown again.
+  const visible = usePageVisible();
+  const { data, error, overloaded, reload, pending, interactive, replace } =
+    useResource(
+      load,
+      cardRevision ? cardRevision(cardId, affectedCards) : revision,
+      visible,
+    );
   // Older pages are read beside the live head refresh: at most one at a time,
   // dropped when filters, anchors or the card change while it is in flight.
   const [pager, setPager] = useState<PagerStatus>();
@@ -379,7 +384,12 @@ export function CardDetailPage(props: CardDetailPageProps) {
       <RequestFeedback
         pending={pending}
         interactive={interactive}
-        error={error}
+        // C-775: a read timeout with nothing shown yet names the card.
+        error={
+          error && overloaded && data === undefined
+            ? `卡片 ${cardId} 没有加载出来：${error}`
+            : error
+        }
         retry={reload}
         pendingMessage={`正在加载卡片 ${cardId}…`}
       />
@@ -508,10 +518,11 @@ function CardContent({
         : {},
     [client, section, projectId, cardId],
   );
+  const visible = usePageVisible();
   const panelData = useResource(
     panelLoad,
     revision + (section === "work" ? workRevision : 0),
-    !!head.overview && section !== "overview",
+    !!head.overview && section !== "overview" && visible,
   );
   const detail = head.overview ? { ...head, ...panelData.data } : head;
   const panelReady = !head.overview || !!panelData.data;

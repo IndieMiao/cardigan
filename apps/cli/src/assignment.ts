@@ -41,6 +41,7 @@ import {
   targetProbe,
   tryHostOpsLock,
   type WorktreeProvider,
+  withCapacityOverrides,
   worktreeProvider,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
@@ -78,6 +79,7 @@ import {
   resolveProject,
   runCommand,
   systemClock,
+  warmCommandState,
 } from "./host.js";
 import type { CliIo, SpawnedChild } from "./io.js";
 import { cliLaunchPaths } from "./paths.js";
@@ -268,7 +270,10 @@ async function startUnlocked(
     ? { kind: "system", project_id }
     : caller;
   rejectExternalTerminalAction(store, project_id, options.assignment_id);
-  const capacity = await loadRunCapacityConfig({ env: io.env });
+  const capacity = withCapacityOverrides(
+    await loadRunCapacityConfig({ env: io.env }),
+    store.database,
+  );
   for (const error of capacity.errors) io.stderr(error);
   let execution =
     options.execution ?? (await executionFor(io, options.dataDir));
@@ -882,6 +887,7 @@ function moveAssignment(
   const identity = resolveCommandIdentity(io, project_id, store);
   const fail = (error: Parameters<typeof formatCommandError>[2]) =>
     new CliError(formatCommandError("换机", assignmentId, error), EXIT.usage);
+  warmCommandState(store, project_id);
   return store.uow.run((tx) => {
     const actor = identity.revalidateActor?.() ?? identity.actor;
     const ports = {
