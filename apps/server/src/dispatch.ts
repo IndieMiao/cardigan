@@ -71,6 +71,7 @@ import {
   bindRepairAttempt,
   boundedRetirementError,
   CAPACITY_WAIT_REASON,
+  capacityWaiterRunnable,
   crossRepairSendBoundary,
   deferIfTargetWait,
   deferTargetAttempt,
@@ -2410,6 +2411,12 @@ export class Dispatcher {
       created_at: trigger?.created_at ?? a.created_at,
       trigger_event_id: run.trigger_event_id,
     };
+    const runnable = capacityWaiterRunnable(
+      capacity,
+      this.options.leases,
+      this.clock.now(),
+      tx,
+    );
     const earlier = hasEarlierCapacityWait(
       tx,
       capacity.queue,
@@ -2418,14 +2425,8 @@ export class Dispatcher {
       slots,
       this.clock.now(),
       (p, owner, ownerKeys) =>
-        !this.options.leases?.waitingElsewhere(
-          p,
-          owner,
-          this.clock.now(),
-          tx,
-          ownerKeys,
-        ) &&
-        capacity.withinProjectQuota(p, owner, ownerKeys) &&
+        // C-825: the same judgement as the host launch.
+        runnable(p, owner, ownerKeys) &&
         hasRunTarget(owner, {
           work_items: tx.work_items.list(p),
           deliveries: tx.deliveries.list(p),
