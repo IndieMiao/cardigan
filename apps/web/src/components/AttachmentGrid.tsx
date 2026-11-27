@@ -50,15 +50,18 @@ function AttachmentCard({
   attachment: a,
   images,
   basis,
+  anchor,
 }: {
   attachment: AttachmentView;
   images: readonly AttachmentView[];
   basis: "shown" | "always";
+  anchor: boolean;
 }) {
   const kind = attachmentRefKind(a.mime, a.inline);
   return (
     <AttachmentTile
-      id={`attachment-${a.id}`}
+      id={anchor ? `attachment-${a.id}` : undefined}
+      attachmentId={a.id}
       kind={hasPreview(a) ? "media" : "file"}
       media={
         isBitmap(a) ? (
@@ -111,12 +114,15 @@ export function AttachmentList({
   label,
   basis = "shown",
   flow = false,
+  anchor = false,
 }: {
   attachments: readonly AttachmentView[];
   label?: string;
   basis?: "shown" | "always";
   /** Inside a timeline entry or a decision: space above and below. */
   flow?: boolean;
+  /** The attachments tab: each tile is the `attachment-<id>` anchor. */
+  anchor?: boolean;
 }) {
   const sorted = [
     ...attachments.filter(hasPreview),
@@ -131,6 +137,7 @@ export function AttachmentList({
           attachment={a}
           images={images}
           basis={basis}
+          anchor={anchor}
         />
       ))}
     </AttachmentTileGrid>
@@ -145,11 +152,11 @@ export function AttachmentGrid({
   const { current, superseded } = splitSuperseded(attachments);
   return (
     <>
-      <AttachmentList attachments={current} />
+      <AttachmentList attachments={current} anchor />
       {!!superseded.length && (
         <details>
           <summary>已取代的附件（{superseded.length}）</summary>
-          <AttachmentList attachments={superseded} />
+          <AttachmentList attachments={superseded} anchor />
         </details>
       )}
     </>

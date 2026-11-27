@@ -36,6 +36,7 @@ export function AttachmentTileGrid({
  */
 export function AttachmentTile({
   id,
+  attachmentId,
   kind,
   media,
   name,
@@ -45,6 +46,7 @@ export function AttachmentTile({
   footer,
 }: {
   id?: string | undefined;
+  attachmentId?: string | undefined;
   /** `media` has a thumbnail area; `file` a slim icon-and-type strip. */
   kind: "media" | "file";
   media: ReactNode;
@@ -60,6 +62,7 @@ export function AttachmentTile({
       id={id}
       className={styles.tile}
       data-ui="attachment-tile"
+      data-attachment-id={attachmentId}
       data-kind={kind}
     >
       <div className={styles.media} data-attachment-media>

@@ -509,7 +509,7 @@ test("superseded attachments are collapsed", async () => {
   expect(details?.textContent).toContain("F-1");
   // The current attachment stays visible outside the collapsed block.
   expect(
-    comment?.querySelector("#attachment-F-2")?.closest("details"),
+    comment?.querySelector("[data-attachment-id=F-2]")?.closest("details"),
   ).toBeNull();
 });
 

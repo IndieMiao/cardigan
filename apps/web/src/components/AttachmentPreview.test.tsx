@@ -118,6 +118,7 @@ test("C-820: the shared tile puts previews first, keeps one line of facts and op
   const tiles = document.querySelectorAll<HTMLElement>(
     "[data-ui=attachment-tile]",
   );
+  // The attachments tab: each tile is its attachment's anchor.
   expect([...tiles].map((tile) => [tile.id, tile.dataset.kind])).toEqual([
     ["attachment-F-1", "media"],
     ["attachment-F-7", "file"],
@@ -166,6 +167,8 @@ test("C-820: decisions use the same attachment tile as the attachments tab", () 
   const list = screen.getByRole("list", { name: "拍板附件" });
   const tile = within(list).getByRole("listitem");
   expect(tile.dataset.ui).toBe("attachment-tile");
+  // Only the attachments tab carries the `attachment-<id>` anchor.
+  expect(tile.id).toBe("");
   expect(
     within(tile).getByRole("link", { name: "下载 390-dark.png" }),
   ).toBeTruthy();
