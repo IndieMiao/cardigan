@@ -28,7 +28,7 @@ USB 真机同一时刻只能被一个 adb 服务占用。Cardigan 的做法：
    ```
 
    哪个项目要用这台真机，就在哪个项目的专用账号下授权一次。机器检查以项目账号运行，只把该账号已授权的真机算作这个项目可用的设备。
-3. 不要在机器上留常驻的 adb 服务（例如以前写死的固定端口服务，mac-mini 上 `cg_sensen` 的 5137）：它会一直占着真机。`adb_slots` 的 `legacy_adb_ports` 写了旧端口时，巡检会在没有旧 Run 时关闭它；还有旧 Run 可能在用时，巡检发现它占着 USB 真机就以 `ADB_USB=0` 重启它（模拟器按原序列号重新连上，见 [C-833](plans/C-833.md)）。也可以手动 `adb -P <旧端口> kill-server`。
+3. 不要在机器上留常驻的 adb 服务（例如以前写死的固定端口服务，mac-mini 上 `cg_sensen` 的 5137）：它会一直占着真机。`adb_slots` 的 `legacy_adb_ports` 写了旧端口时，巡检会在没有旧 Run 时关闭它；还有旧 Run 可能在用时，巡检发现它占着 USB 真机就以 `ADB_USB=0` 重启它（模拟器按原序列号重新连上，但这个服务上的 `adb forward` / `adb reverse` 规则会丢失，见 [C-833](plans/C-833.md)）。也可以手动 `adb -P <旧端口> kill-server`。
 
    启用或初始化时看不到真机、而它被机器上别的 adb 服务占着时，失败原因会写明占用的端口和会话。
 
@@ -99,6 +99,8 @@ Run 拿到设备时的环境：
 | 只有模拟器 | `emulator-<端口>` | `CARDIGAN_EMULATOR_PORT`（与以前相同）；机器配了真机时加 `ADB_USB=0` |
 | 只有真机 | 真机序列号 | `CARDIGAN_DEVICE_SERIAL` |
 | 两者都有 | 模拟器（`emulator-<端口>`） | `CARDIGAN_EMULATOR_SERIAL`、`CARDIGAN_DEVICE_SERIAL`；操作真机写 `adb -s $CARDIGAN_DEVICE_SERIAL` |
+
+模拟器序列号一律看 `ANDROID_SERIAL`；`CARDIGAN_EMULATOR_SERIAL` 只在“两者都有”时设置（与 `ANDROID_SERIAL` 相同），只有模拟器时没有这个变量。
 
 ### 安卓设备任一（`android.any`，C-815）
 

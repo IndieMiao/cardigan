@@ -645,14 +645,56 @@ test("C-833: a launch records the machine's adb environment; sessions from befor
   // The replacement's launch records the new environment.
   launchDevices(after, "first", "local", launched.id, later(1000));
   expect(after.sessions.stale("first", live)).toBe(false);
-  // A session without a launch generation cannot show its environment.
+  // A session without a launch generation (every local one) is judged by
+  // its Assignment's latest launch: the replacement's record.
   const { launch_generation: _, ...legacyRef } = live.runtime_ref ?? {};
   expect(
     after.sessions.stale("first", {
       ...live,
       runtime_ref: legacyRef,
     } as typeof owner),
-  ).toBe(true);
+  ).toBe(false);
+});
+
+test("C-833: a local session (no launch generation) is replaced once after the switch, not at every wake", async () => {
+  const { probe } = fakeProbe();
+  const { owner } = needs(1, ["other"]);
+  const first = { ...run(1), status: "completed", started_at: at } as Run;
+  setStatus(first, {});
+  // As a real local launch: no launch generation on the runtime reference.
+  const live = {
+    ...owner,
+    runtime_ref: {
+      machine_id: "local",
+      runtime_machine: "local",
+      terminal_ref: "t1",
+      agent_name: "coder",
+    },
+  } as typeof owner;
+  const unmanaged = new MachineLeases(
+    store,
+    await config(undefined, { adb_slots: undefined }),
+    probe,
+  );
+  launchDevices(unmanaged, "first", "local", first.id, at);
+  const l = new MachineLeases(store, await config(), probe);
+  expect(l.sessions.stale("first", live)).toBe(true);
+  // The replacement session of the same Assignment records the new setup.
+  const second = {
+    ...run(2),
+    assignment_id: owner.id,
+    trigger_event_id: "evt-second",
+  } as Run;
+  store.uow.run((tx) =>
+    tx.runs.put("first", {
+      ...second,
+      status: "running",
+      started_at: later(1000),
+    }),
+  );
+  launchDevices(l, "first", "local", second.id, later(1000));
+  expect(l.sessions.stale("first", live)).toBe(false);
+  expect(l.freshSession("first", live)).toBe(false);
 });
 
 test("C-833: old sessions are judged by their launch environment, not the time: launched before slots, or after without machine leases (before C-834)", async () => {
@@ -699,6 +741,99 @@ test("C-833: old sessions are judged by their launch environment, not the time: 
     { project: "first", assignment_id: before.live.id },
     { project: "first", assignment_id: leaseless.live.id },
   ]);
+});
+
+test("C-837: a remote session launched without the slot setup is still replaced; launch records keep one row per live Assignment", async () => {
+  const { probe } = fakeProbe();
+  await writeFile(
+    join(dir, "run-capacity.yaml"),
+    JSON.stringify({
+      machines: {
+        mac: {
+          limit: 6,
+          resources: { "android.emulator": 2, godot: 2, other: 1 },
+          adb_slots: slots,
+        },
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const l = new MachineLeases(
+    store,
+    await loadRunCapacityConfig({ configDir: dir }),
+    probe,
+  );
+  const rows = () =>
+    (
+      store.database
+        .prepare("SELECT run_id FROM machine_adb_launches ORDER BY run_id")
+        .all() as { run_id: string }[]
+    ).map((r) => r.run_id);
+  // A remote launch publishes its launch generation on the runtime reference.
+  const remote = (n: number, launch: string) => {
+    const live = {
+      ...assignment(n),
+      machine_id: "mac",
+      runtime_ref: {
+        machine_id: "mac",
+        runtime_machine: "mac",
+        terminal_ref: `t${n}`,
+        agent_name: "coder",
+        launch_generation: { run_id: launch, generation: `g${n}` },
+      },
+    };
+    store.uow.run((tx) => tx.assignments.put("first", live));
+    return live;
+  };
+  const item = fixture().work_items[0];
+  if (!item) throw new Error("missing item");
+  store.uow.run((tx) => {
+    tx.machines.put("first", {
+      ...tx.machines.get("first", "local"),
+      id: "mac",
+      label: "mac",
+      herdr_machine: "mac",
+    } as Machine);
+    for (const n of [1, 2]) {
+      tx.work_items.put("first", { ...item, id: assignment(n).work_item_id });
+      tx.assignments.put("first", { ...assignment(n), machine_id: "mac" });
+      tx.runs.put("first", { ...run(n), status: "completed" });
+    }
+  });
+  const old = remote(1, run(1).id);
+  const kept = remote(2, run(2).id);
+  // Launched by a path without machine leases (before C-834): no record.
+  launchDevices(undefined, "first", "mac", run(1).id, at);
+  launchDevices(l, "first", "mac", run(2).id, at);
+  expect(l.sessions.stale("first", old)).toBe(true);
+  expect(l.freshSession("first", old)).toBe(true);
+  expect(l.sessions.stale("first", kept)).toBe(false);
+  expect(rows()).toEqual([run(2).id]);
+  // The replacement session of Assignment 1 records; its live session is
+  // that launch, so it is no longer replaced.
+  const next = {
+    ...run(3, 1),
+    trigger_event_id: "evt-next",
+  } as Run;
+  store.uow.run((tx) => tx.runs.put("first", next));
+  launchDevices(l, "first", "mac", next.id, later(1000));
+  const replaced = remote(1, next.id);
+  expect(l.sessions.stale("first", replaced)).toBe(false);
+  // A later launch of Assignment 2 supersedes its earlier record.
+  const again = {
+    ...run(4, 2),
+    trigger_event_id: "evt-again",
+  } as Run;
+  store.uow.run((tx) => tx.runs.put("first", again));
+  launchDevices(l, "first", "mac", again.id, later(2000));
+  expect(rows()).toEqual([next.id, again.id]);
+  // A released Assignment has no session left: its record goes at the next launch.
+  store.uow.run((tx) =>
+    tx.assignments.put("first", { ...replaced, status: "released" }),
+  );
+  launchDevices(l, "first", "mac", again.id, later(3000));
+  expect(rows()).toEqual([again.id]);
+  expect(l.sessions.stale("first", remote(2, again.id))).toBe(false);
 });
 
 // A stand-in adb server speaking the host protocol: it lists a USB device

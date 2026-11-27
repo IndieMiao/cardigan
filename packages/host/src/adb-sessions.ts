@@ -44,14 +44,39 @@ export class AdbSessionEnvironments {
       usb: [...this.usbTypes(machine)].sort(),
     });
   }
+  private table = false;
+  /** The record table exists (cached once seen; migrations never drop it). */
+  private recorded() {
+    this.table ||= hasTable(this.store, "machine_adb_launches");
+    return this.table;
+  }
   /** At launch compilation: this Run's session gets the current environment. */
   record(project: string, machine: string, run: string, now: string) {
-    if (!hasTable(this.store, "machine_adb_launches")) return;
+    if (!this.recorded()) return;
     this.store.database
       .prepare(
         "INSERT INTO machine_adb_launches (project,run_id,machine,environment,launched_at) VALUES (?,?,?,?,?) ON CONFLICT(project,run_id) DO UPDATE SET machine=excluded.machine, environment=excluded.environment, launched_at=excluded.launched_at",
       )
       .run(project, run, machine, this.environment(machine) ?? "none", now);
+    this.prune(project, run);
+  }
+  /**
+   * Only live sessions are judged, so keep one record per Assignment that
+   * may still have one: a new launch supersedes the Assignment's earlier
+   * ones (a reused session never compiles a launch), and a released
+   * Assignment has no session left. Runs only at launch, not at dispatch.
+   */
+  private prune(project: string, run: string) {
+    this.store.database
+      .prepare(
+        "DELETE FROM machine_adb_launches WHERE project=? AND run_id<>? AND run_id IN (SELECT r.id FROM runs r JOIN runs cur ON cur.project_id=r.project_id AND cur.assignment_id=r.assignment_id WHERE cur.project_id=? AND cur.id=?)",
+      )
+      .run(project, run, project, run);
+    this.store.database
+      .prepare(
+        "DELETE FROM machine_adb_launches WHERE rowid IN (SELECT l.rowid FROM machine_adb_launches l JOIN runs r ON r.project_id=l.project AND r.id=l.run_id JOIN assignments a ON a.project_id=r.project_id AND a.id=r.assignment_id WHERE json_extract(a.doc,'$.status')='released')",
+      )
+      .run();
   }
   /** The live session of `a` was launched with another adb environment. */
   stale(project: string, a: Assignment) {
@@ -59,17 +84,25 @@ export class AdbSessionEnvironments {
     const ref = a.runtime_ref;
     if (!current || !ref || a.external || ref.machine_id !== a.machine_id)
       return false;
-    const launch = ref.launch_generation?.run_id;
     // A schema without the record (older fixtures) cannot tell.
-    if (!hasTable(this.store, "machine_adb_launches")) return false;
-    if (!launch) return true;
-    const row = this.store.database
-      .prepare(
-        "SELECT machine, environment FROM machine_adb_launches WHERE project=? AND run_id=?",
-      )
-      .get(project, launch) as
-      | { machine: string; environment: string }
-      | undefined;
+    if (!this.recorded()) return false;
+    const launch = ref.launch_generation?.run_id;
+    // Local sessions carry no launch generation: every new session of the
+    // Assignment records its launch, wakes do not, so the latest record is
+    // the live session's.
+    const row = (
+      launch
+        ? this.store.database
+            .prepare(
+              "SELECT machine, environment FROM machine_adb_launches WHERE project=? AND run_id=?",
+            )
+            .get(project, launch)
+        : this.store.database
+            .prepare(
+              "SELECT l.machine, l.environment FROM machine_adb_launches l JOIN runs r ON r.project_id=l.project AND r.id=l.run_id WHERE l.project=? AND r.assignment_id=? ORDER BY l.launched_at DESC, l.rowid DESC LIMIT 1",
+            )
+            .get(project, a.id)
+    ) as { machine: string; environment: string } | undefined;
     // No record: the launch compiled no adb environment for this machine
     // (before C-833, or a server launch without machine leases before
     // C-834), so it lacks the slot configuration whatever the time.
