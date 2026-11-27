@@ -9,6 +9,7 @@ import type {
   WorkItem,
 } from "@cardigan/domain";
 import {
+  ASSIGNMENT_MISFIT_REASONS,
   pauseDiscussionFor,
   readonlyReviewTarget,
   recordReadonlyCheckout,
@@ -142,6 +143,15 @@ export function readonlyWorktreeTarget(
     throw new Error("Readonly Assignment requires its verification work item");
   return store.uow.read((tx) => {
     const current = tx.work_items.get(project, assignment.work_item_id);
+    // C-836: say why a readonly role's producer can never be checked out.
+    if (
+      current?.kind === "produce" &&
+      current.assignment_id === assignment.id &&
+      current.status !== "cancelled"
+    )
+      throw new Error(
+        `${current.id}：${ASSIGNMENT_MISFIT_REASONS.readonly_producer}`,
+      );
     if (
       current?.kind !== "verify" ||
       current.assignment_id !== assignment.id ||

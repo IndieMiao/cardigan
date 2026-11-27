@@ -1,4 +1,8 @@
-import type { Assignment } from "../entities.js";
+import {
+  ASSIGNMENT_MISFIT_REASONS,
+  workItemMisfit,
+} from "../assignment-misfit.js";
+import type { Assignment, Card, WorkItem } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { DeliveryId, WorkItemId } from "../ids.js";
 import {
@@ -10,6 +14,7 @@ import {
   remoteWorkerLossReleased,
 } from "../remote-worker-loss.js";
 import { isRoleActive } from "../role.js";
+import { cardTemplate, isCompletionVerifier } from "../templates.js";
 import { requireCardDependencyStart } from "./card-dependencies.js";
 import { type CommandDraft, ensure, unwrap } from "./core.js";
 import {
@@ -36,6 +41,21 @@ export interface AssignWorkItemParams extends MachineRequirements {
   machine_id?: string;
   recovery_source?: "main" | "backup";
   confirm_same_machine?: boolean;
+}
+
+/** An unresolvable template falls back to the conservative template-item rule. */
+function completionVerifier(
+  d: CommandDraft,
+  card: Card,
+  item: WorkItem,
+): boolean {
+  const template = cardTemplate(card, [
+    ...(d.ports?.templates ?? []),
+    ...d.list("card_templates"),
+  ]);
+  return template
+    ? isCompletionVerifier(template, item)
+    : item.template_key !== undefined;
 }
 
 /** Shared invariant checks; callers establish PM or system authority first. */
@@ -249,6 +269,21 @@ export function assignWorkItem(
     card.status !== "done" && card.status !== "cancelled",
     "illegal_transition",
     "Card is closed",
+  );
+  // C-836: refuse a combination that could never run, instead of a silent
+  // bell or a Run that fails only while preparing its checkout.
+  const misfit = workItemMisfit(
+    item,
+    role,
+    card,
+    item.kind === "verify" && !item.target_work_item_id
+      ? completionVerifier(d, card, item)
+      : false,
+  );
+  ensure(
+    !misfit,
+    "validation_failed",
+    misfit ? ASSIGNMENT_MISFIT_REASONS[misfit] : "",
   );
   ensure(
     !p.recovery_source || recovery,

@@ -4,6 +4,7 @@ import {
   assignmentCardHeld,
   assignmentCardId,
   assignmentDependenciesAllowStart,
+  assignmentMisfit,
   type Card,
   type CommandState,
   cardDependencyDispatchOrder,
@@ -709,9 +710,14 @@ function candidateResult(
   if (!assignmentDependenciesAllowStart(state, assignment))
     return omit("dependencies");
   if (assignmentCardHeld(assignment, state)) return omit("card_held");
-  if (!hasRunTarget(assignment, state)) return omit("no_target");
+  // C-836: name a combination that can never run instead of a bare no_target.
+  const misfit = assignmentMisfit(assignment, state);
+  if (!hasRunTarget(assignment, state)) return omit(misfit ?? "no_target");
   const target = inboxTarget(state, assignment, notes);
   if ("reason" in target) return omit(target.reason);
+  // No new Run for a readonly producer; one already queued is settled by launch.
+  if (misfit === "readonly_producer" && target.mode !== "queued")
+    return omit(misfit);
   const queued = target.mode === "queued" ? target.run : undefined;
   if (queued && unreadableCommentTrigger(state, queued))
     return omit("unreadable_trigger");

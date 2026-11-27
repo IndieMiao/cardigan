@@ -1,3 +1,7 @@
+import {
+  ASSIGNMENT_MISFIT_REASONS,
+  workItemMisfit,
+} from "../assignment-misfit.js";
 import { cardDependenciesAllowStart } from "../card-dependencies.js";
 import type {
   Actor,
@@ -972,6 +976,22 @@ export function createWorkItem(
       p.kind === "produce" || p.kind === "verify",
       "validation_failed",
       "Unknown work item kind",
+    );
+    // C-836: only template items can be completion verifiers, so an item
+    // created here without a target could never run; neither could a readonly
+    // role's producer. Refuse both now with the fix, not at dispatch time.
+    const misfit = workItemMisfit(
+      p,
+      state.roles
+        .filter((r) => r.role_id === p.role_id)
+        .sort((a, b) => b.role_version - a.role_version)[0],
+      card,
+      false,
+    );
+    ensure(
+      !misfit,
+      "validation_failed",
+      misfit ? ASSIGNMENT_MISFIT_REASONS[misfit] : "",
     );
     for (const id of p.depends_on ?? [])
       ensure(

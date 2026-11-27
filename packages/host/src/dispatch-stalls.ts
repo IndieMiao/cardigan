@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  ASSIGNMENT_MISFIT_REASONS,
   type Assignment,
+  type AssignmentMisfit,
   assignmentCardHeld,
   assignmentDependenciesAllowStart,
+  assignmentMisfit,
   type CardId,
   type CommandState,
   decisionFollowupBlocked,
@@ -57,6 +60,8 @@ export interface DispatchStall {
   runtime_state: Assignment["runtime_state"];
   machine_id: string;
   restart_blocked: string | null;
+  /** C-836: what to change when the assignment itself can never run. */
+  restart_blocked_reason?: string;
 }
 
 export function dispatchHandoffs(state: CommandState) {
@@ -256,7 +261,10 @@ export function dispatchStallCauses(
               staleOwnerRejection(trigger, w))))
       )
         return "trigger_blocked";
-      if (!hasRunTarget(a, state)) return "no_target";
+      // C-836: a combination that can never run says why, with the fix.
+      const misfit = assignmentMisfit(a, state);
+      if (misfit === "readonly_producer") return misfit;
+      if (!hasRunTarget(a, state)) return misfit ?? "no_target";
       if (
         w &&
         !(
@@ -303,6 +311,12 @@ export function dispatchStallCauses(
       age_ms: age,
       runtime_state: a.runtime_state,
       restart_blocked: blocked,
+      ...(blocked && Object.hasOwn(ASSIGNMENT_MISFIT_REASONS, blocked)
+        ? {
+            restart_blocked_reason:
+              ASSIGNMENT_MISFIT_REASONS[blocked as AssignmentMisfit],
+          }
+        : {}),
       machine_id: a.machine_id,
     });
   }

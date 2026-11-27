@@ -17,6 +17,7 @@ import {
   assignmentCardHeld,
   assignmentCardId,
   assignmentDependenciesAllowStart,
+  assignmentMisfit,
   canDispatchRun,
   cardDependencyDispatchOrder,
   compareDispatchOrder,
@@ -1202,7 +1203,11 @@ export class Dispatcher {
     if (!assignmentDependenciesAllowStart(state, a))
       return skip("dependencies");
     if (assignmentCardHeld(a, state)) return skip("card_held");
-    if (!hasRunTarget(a, state)) return skip("no_target");
+    // C-836: never take leases for a new Run whose checkout cannot be
+    // prepared; one already queued is settled by launch as before.
+    const misfit = assignmentMisfit(a, state);
+    if (misfit === "readonly_producer" && !queued) return skip(misfit);
+    if (!hasRunTarget(a, state)) return skip(misfit ?? "no_target");
     if (a.snapshot_retry && a.snapshot_retry.ready_at > this.clock.now())
       return skip("snapshot_backoff");
     // A previously enqueued Run already has its snapshot. Skip remote IO while
