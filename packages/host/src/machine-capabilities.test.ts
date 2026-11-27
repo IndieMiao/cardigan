@@ -20,9 +20,11 @@ import {
 } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import {
+  ANDROID_DEVICE_INIT_SCRIPT,
   ANDROID_DEVICE_PROBE_COMMAND,
   androidDeviceProvider,
 } from "./android-device-provider.js";
+import { DeviceRegistry } from "./device-registry.js";
 import { refreshMachineObservations } from "./machine-capabilities.js";
 import {
   BUILTIN_MACHINE_CAPABILITIES,
@@ -863,6 +865,18 @@ test("C-813: machine check asks each device provider; devices and their states a
     const probe = vi.fn(
       async (_e: ExecutionConfig, _os: string, command: CapabilityCommand) => {
         if (command === ANDROID_DEVICE_PROBE_COMMAND) return listing;
+        if (
+          Array.isArray(command) &&
+          command[4] === ANDROID_DEVICE_INIT_SCRIPT
+        )
+          return {
+            ok: true,
+            output: JSON.stringify({
+              result: "ok",
+              resolution: "1600x2560",
+              version: "12",
+            }),
+          };
         return Array.isArray(command) && command[0] === "adb" && adb
           ? { ok: true, output: "Version 37.0.3" }
           : { ok: false, output: "" };
@@ -889,11 +903,28 @@ test("C-813: machine check asks each device provider; devices and their states a
       model: "MRR-W39",
       version: "12",
     };
-    const first = await refreshMachineObservations(options);
-    expect(first.health?.devices).toEqual([
+    const discovered = await refreshMachineObservations(options);
+    expect(discovered.health?.devices).toEqual([
       { type: "android.device", id: "R58N", state: "unauthorized" },
       tablet,
     ]);
+    // C-817: listed, registered as new, but not offered until enabled.
+    expect(keys(discovered)).toEqual(["android.sdk"]);
+    const registry = new DeviceRegistry(store);
+    expect(registry.list("local").map((d) => [d.id, d.status])).toEqual([
+      ["WGC6R21609003324", "pending"],
+    ]);
+    registry.request({
+      machine: "local",
+      type: "android.device",
+      id: "WGC6R21609003324",
+      request: "enable",
+      projects: ["a"],
+      now: options.now(),
+    });
+    const first = await refreshMachineObservations(options);
+    expect(registry.get("local", "android.device", "WGC6R21609003324"))
+      .toMatchObject({ status: "enabled", resolution: "1600x2560" });
     expect(keys(first)).toEqual([
       "android.device",
       "android.device.model.mrr-w39",

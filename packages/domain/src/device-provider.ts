@@ -46,6 +46,16 @@ export interface DeviceSetupStep {
   readonly command?: string;
 }
 
+/** C-817: one fixed initialization step a provider declares and the host runs. */
+export interface DeviceInitStep {
+  /** Stable key the provider's script reports a failure with. */
+  readonly key: string;
+  /** What the step does, shown in the enable prompt. */
+  readonly title: string;
+  /** What a person can do when this step fails. */
+  readonly hint?: string;
+}
+
 /** What the session of a Run holding devices is given, per held device. */
 export interface DeviceSessionContext {
   /** Serial of the emulator the same Run holds, when it holds one. */
@@ -67,6 +77,20 @@ export interface DeviceProviderPort<Target = unknown> {
   readonly requires_capability?: string;
   /** First-time setup a person follows (USB authorization...). Not executed. */
   readonly setup_steps: readonly DeviceSetupStep[];
+  /**
+   * C-817: fixed steps the host runs once a person enabled a device, listed
+   * in the enable prompt. Providers without them enable devices directly.
+   */
+  readonly init_steps?: readonly DeviceInitStep[];
+  /**
+   * C-817: run exactly `init_steps` on `device` as the project account;
+   * unvalidated result (see `normalizeDeviceInitResult`), `undefined` when
+   * the attempt itself failed. Takes no caller-supplied commands.
+   */
+  initialize?(
+    target: Target,
+    device: DeviceObservation,
+  ): Promise<unknown | undefined>;
   /** Devices currently visible, unvalidated; `undefined` when listing failed. */
   list(target: Target): Promise<readonly unknown[] | undefined>;
   /** Environment of a Run holding `device`; checked by `validateDeviceSessionEnv`. */

@@ -1481,6 +1481,21 @@ export interface HumanActionHandoff {
   readonly rewritten_by: Author;
   readonly rewritten_at: Timestamp;
 }
+export interface DeviceEnablementPrompt {
+  readonly machine_id: MachineId;
+  readonly type: string;
+  readonly device_id: string;
+  readonly label: string;
+  readonly model?: string;
+  /** Projects registering the machine: the choices. */
+  readonly projects: readonly string[];
+  /** Set only when the machine serves exactly one project. */
+  readonly preselected?: string;
+  /** The provider's fixed initialization steps (titles). */
+  readonly steps: readonly string[];
+  readonly phase: "pending" | "initializing" | "failed";
+  readonly failure?: string;
+}
 export interface HumanAction {
   readonly terminal?: ActionCommand;
   /** Host-authored only. Never derive a check target from display text. */
@@ -1489,6 +1504,12 @@ export interface HumanAction {
     /** Null until the host has a matching project/worker binding. */
     readonly binding: string | null;
   };
+  /**
+   * C-817: host-authored enable prompt for a newly discovered external
+   * device. Only the system writes it; the person answers through the
+   * human-only machine device endpoint, never by completing the action.
+   */
+  readonly device_enablement?: DeviceEnablementPrompt;
   readonly helper_checks?: {
     readonly worker: HelperCheckResult;
     readonly machine: HelperCheckResult;
@@ -1530,7 +1551,9 @@ export interface HumanAction {
       | "supervisor_rechecked"
       | "worker_helper_superseded"
       /** C-807: the host's storage CORS recheck passed. */
-      | "storage_rechecked";
+      | "storage_rechecked"
+      /** C-817: the machine check settled a device to-do. */
+      | "device_rechecked";
   };
   readonly triage_rationale?: string;
   readonly ready_when?: ReadyCondition;

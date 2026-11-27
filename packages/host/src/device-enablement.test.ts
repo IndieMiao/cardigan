@@ -1,0 +1,323 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { HumanAction } from "@cardigan/domain";
+import type { ExecutionConfig } from "@cardigan/runtime-herdr";
+import { Store } from "@cardigan/store";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import {
+  assignment,
+  fixture,
+  run,
+} from "../../domain/src/commands/test-fixtures.js";
+import {
+  ANDROID_DEVICE_INIT_SCRIPT,
+  ANDROID_DEVICE_PROBE_COMMAND,
+  androidDeviceProvider,
+} from "./android-device-provider.js";
+import { requestDevice } from "./device-enablement.js";
+import { DeviceRegistry, DeviceRequestError } from "./device-registry.js";
+import type { CapabilityCommand } from "./machine-capability-probe.js";
+import { refreshMachineObservations } from "./machine-capabilities.js";
+import { BUILTIN_MACHINE_CAPABILITIES } from "./machine-capability-catalog.js";
+
+const SERIAL = "WGC6R21609003324";
+const TYPE = "android.device";
+const at = "2026-11-27T00:00:00.000Z";
+let dir: string, store: Store;
+let listing: { ok: boolean; output: string };
+let init: { ok: boolean; output: string };
+let probe: ReturnType<typeof vi.fn>;
+
+const plugged = (state = "device") => ({
+  ok: true,
+  output: JSON.stringify({
+    devices: [{ serial: SERIAL, state, model: "MRR-W39", android: "12" }],
+  }),
+});
+const result = (value: unknown) => ({
+  ok: true,
+  output: JSON.stringify(value),
+});
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "cg-device-enable-"));
+  store = Store.open({ dataDir: dir });
+  store.createProject({ id: "a" });
+  listing = plugged();
+  init = result({ result: "ok", resolution: "1600x2560", version: "12" });
+  probe = vi.fn(
+    async (_e: ExecutionConfig, _os: string, command: CapabilityCommand) => {
+      if (command === ANDROID_DEVICE_PROBE_COMMAND) return listing;
+      if (Array.isArray(command) && command[4] === ANDROID_DEVICE_INIT_SCRIPT)
+        return init;
+      return Array.isArray(command) && command[0] === "adb"
+        ? { ok: true, output: "Version 37.0.3" }
+        : { ok: false, output: "" };
+    },
+  );
+});
+afterEach(() => {
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+function check(project = "a") {
+  const machine = store.uow.read((tx) => tx.machines.get(project, "local"));
+  if (!machine) throw new Error("missing machine");
+  return refreshMachineObservations({
+    store,
+    project,
+    machine: "local",
+    target: () => ({
+      execution: { mode: "local", dataDir: dir },
+      machine,
+    }),
+    check: async () => ({ blockers: [], launch_enabled: true }),
+    catalog: () =>
+      BUILTIN_MACHINE_CAPABILITIES.filter((c) => c.key === "android.sdk"),
+    probe: probe as never,
+    deviceProviders: [androidDeviceProvider],
+    now: () => at,
+  });
+}
+const actions = (project = "a"): HumanAction[] =>
+  store.uow.read((tx) => tx.human_actions.list(project));
+const open = (project = "a") =>
+  actions(project).filter((h) => h.status === "open");
+const keys = (r: Awaited<ReturnType<typeof check>>) =>
+  r.capabilities.map((c) => c.key).filter((k) => k.startsWith(TYPE));
+const registry = () => new DeviceRegistry(store);
+const request = (
+  req: "enable" | "disable" | "assign",
+  projects?: string[],
+) =>
+  requestDevice(
+    store,
+    {
+      machine: "local",
+      type: TYPE,
+      id: SERIAL,
+      request: req,
+      ...(projects ? { projects } : {}),
+    },
+    { now: () => at },
+  );
+const initCalls = () =>
+  probe.mock.calls.filter(
+    ([, , c]) => Array.isArray(c) && c[4] === ANDROID_DEVICE_INIT_SCRIPT,
+  );
+
+test("C-817: a new device asks once in Needs You, preselecting the only project; enabling initializes it and the system closes the prompt", async () => {
+  expect(keys(await check())).toEqual([]);
+  const [prompt] = open();
+  expect(prompt).toMatchObject({
+    requested_by: "system",
+    triage: "human",
+    device_enablement: {
+      machine_id: "local",
+      type: TYPE,
+      device_id: SERIAL,
+      model: "MRR-W39",
+      projects: ["a"],
+      preselected: "a",
+      steps: ["插电常亮", "关闭动画", "关闭锁屏"],
+      phase: "pending",
+    },
+  });
+  expect(prompt?.instructions).toContain("local 发现安卓真机 MRR-W39");
+  expect(prompt?.instructions).toContain("给 a 用？");
+  expect(prompt?.instructions).toContain("不恢复出厂，不装卸其它应用");
+  // Checking again does not ask again or initialize anything.
+  await check();
+  expect(actions()).toHaveLength(1);
+  expect(initCalls()).toHaveLength(0);
+
+  expect(request("enable", ["a"]).status).toBe("initializing");
+  const enabled = await check();
+  expect(initCalls().map(([, , c]) => (c as string[]).at(-1))).toEqual([
+    SERIAL,
+  ]);
+  expect(registry().get("local", TYPE, SERIAL)).toMatchObject({
+    status: "enabled",
+    projects: ["a"],
+    resolution: "1600x2560",
+    version: "12",
+  });
+  expect(keys(enabled)).toEqual([
+    TYPE,
+    `${TYPE}.model.mrr-w39`,
+    `${TYPE}:${SERIAL}`,
+  ]);
+  expect(actions()).toEqual([
+    expect.objectContaining({
+      status: "done",
+      result: expect.objectContaining({
+        text: "已启用安卓真机 MRR-W39（WGC6R21609003324），给 a 用；分辨率 1600x2560，系统版本 12。",
+      }),
+    }),
+  ]);
+  // Later checks do not run the initialization again.
+  await check();
+  expect(initCalls()).toHaveLength(1);
+});
+
+test("C-817: a failed initialization keeps the prompt with the reason and can be retried", async () => {
+  await check();
+  init = result({ result: "failed", step: "lock_screen" });
+  request("enable", ["a"]);
+  await check();
+  expect(registry().get("local", TYPE, SERIAL)).toMatchObject({
+    status: "failed",
+    failure: expect.stringMatching(/^“关闭锁屏”没有成功：/u),
+  });
+  expect(keys(await check())).toEqual([]);
+  const [failed] = open();
+  expect(failed?.device_enablement).toMatchObject({
+    phase: "failed",
+    failure: expect.stringContaining("锁屏"),
+  });
+  expect(failed?.instructions).toContain("上次初始化失败：“关闭锁屏”没有成功");
+  expect(actions()).toHaveLength(1);
+  // Retry after the person removed the lock credential.
+  init = result({ result: "ok", resolution: "1600x2560" });
+  expect(request("enable").status).toBe("initializing");
+  expect(open()[0]?.device_enablement?.phase).toBe("initializing");
+  expect(open()[0]?.instructions).toContain("正在初始化");
+  await check();
+  expect(registry().get("local", TYPE, SERIAL)).toMatchObject({
+    status: "enabled",
+    version: "12",
+  });
+  expect(open()).toEqual([]);
+});
+
+test("C-817: no result, an unauthorized or missing device fail with a plain reason; a failed listing judges nothing", async () => {
+  await check();
+  request("enable", ["a"]);
+  init = { ok: false, output: "" };
+  await check();
+  expect(registry().get("local", TYPE, SERIAL)?.failure).toBe(
+    "初始化没有返回结果：检查机器连接后重试",
+  );
+  request("enable");
+  listing = plugged("unauthorized");
+  await check();
+  expect(registry().get("local", TYPE, SERIAL)?.failure).toContain("授权");
+  request("enable");
+  listing = { ok: false, output: "" };
+  await check();
+  expect(registry().get("local", TYPE, SERIAL)?.status).toBe("initializing");
+  listing = result({ devices: [] });
+  await check();
+  expect(registry().get("local", TYPE, SERIAL)?.failure).toContain(
+    "没有看到这台设备",
+  );
+  expect(initCalls()).toHaveLength(1);
+});
+
+test("C-817: a shared machine asks without preselecting; the initialization runs as a chosen project's account, once", async () => {
+  store.createProject({ id: "b" });
+  await check("a");
+  await check("b");
+  for (const p of ["a", "b"]) {
+    const [prompt] = open(p);
+    expect(prompt?.device_enablement).toMatchObject({ projects: ["a", "b"] });
+    expect(prompt?.device_enablement?.preselected).toBeUndefined();
+    expect(prompt?.instructions).toContain("给 哪个项目 用？");
+  }
+  expect(() => request("enable", ["c"])).toThrow(DeviceRequestError);
+  expect(() => request("enable", [])).toThrow(DeviceRequestError);
+  // Only b's account sees the device: b initializes it.
+  listing = plugged("unauthorized");
+  await check("a");
+  listing = plugged();
+  await check("b");
+  expect(request("enable", ["a", "b"]).init_project).toBe("b");
+  await check("a");
+  expect(initCalls()).toHaveLength(0);
+  await check("b");
+  expect(initCalls()).toHaveLength(1);
+  // Both prompts are closed once it is enabled.
+  expect(open("a")).toEqual([]);
+  expect(open("b")).toEqual([]);
+  // While initializing, a second enable is refused; the claim is single.
+  request("disable");
+  expect(request("enable").status).toBe("enabled");
+});
+
+test("C-817: disabling closes the prompt and stops dispatch; a disable during initialization wins", async () => {
+  await check();
+  request("enable", ["a"]);
+  const reg = registry();
+  const claim = reg.claimInit("local", TYPE, SERIAL, "a", at);
+  expect(claim).toBeDefined();
+  // Another check cannot claim the same initialization meanwhile.
+  expect(reg.claimInit("local", TYPE, SERIAL, "a", at)).toBeUndefined();
+  expect(() => request("enable")).toThrow("设备正在初始化");
+  request("disable");
+  expect(
+    reg.finishInit("local", TYPE, SERIAL, claim as string, { ok: true }, at),
+  ).toBe(false);
+  expect(reg.get("local", TYPE, SERIAL)?.status).toBe("disabled");
+  expect(keys(await check())).toEqual([]);
+  expect(actions()).toEqual([
+    expect.objectContaining({
+      status: "cancelled",
+      cancellation: expect.objectContaining({ source: "device_rechecked" }),
+    }),
+  ]);
+});
+
+function queue(n: number, capabilities: string[]) {
+  const item = fixture().work_items[0];
+  if (!item) throw new Error("missing item");
+  const owner = assignment(n);
+  store.uow.run((tx) => {
+    tx.work_items.put("a", {
+      ...item,
+      id: owner.work_item_id,
+      requirements: { capabilities },
+    });
+    tx.assignments.put("a", owner);
+    tx.runs.put("a", { ...run(n), status: "queued" });
+  });
+  return item.card_id;
+}
+
+test("C-817: an enabled device that drops out reminds only while queued work waits on it, and the reminder closes when it is back", async () => {
+  await check();
+  request("enable", ["a"]);
+  await check();
+  const reminders = () =>
+    open().filter((h) => h.instructions.includes("在等它"));
+  // Unplugged, nothing waiting: no reminder.
+  listing = result({ devices: [] });
+  await check();
+  expect(open()).toEqual([]);
+  // Work waits on it: one reminder naming the card.
+  const card = queue(1, [TYPE]);
+  await check();
+  expect(reminders()).toHaveLength(1);
+  expect(reminders()[0]?.instructions).toContain(
+    `local 上的安卓真机 MRR-W39（${SERIAL}）已拔掉或看不到，${card} 的工作在等它`,
+  );
+  // The authorization dropped instead: same reminder, updated reason.
+  listing = plugged("unauthorized");
+  await check();
+  expect(reminders()).toHaveLength(1);
+  expect(reminders()[0]?.instructions).toContain("掉了授权");
+  // Back: closed by the system.
+  listing = plugged();
+  await check();
+  expect(reminders()).toEqual([]);
+  expect(actions().filter((h) => h.status === "cancelled")).toHaveLength(1);
+  // Work that does not need it never reminds (emulator only).
+  store.uow.run((tx) =>
+    tx.runs.put("a", { ...run(1), status: "completed" } as never),
+  );
+  queue(2, ["android.emulator"]);
+  listing = result({ devices: [] });
+  await check();
+  expect(reminders()).toEqual([]);
+});

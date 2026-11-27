@@ -14,6 +14,7 @@ import {
   run,
 } from "../../domain/src/commands/test-fixtures.js";
 import type { AdbProbe } from "./adb-slot-probe.js";
+import { DeviceRegistry } from "./device-registry.js";
 import { launchDevices } from "./launch.js";
 import { MachineLeases } from "./resource-leases.js";
 import type { ResourceProbe } from "./resource-probe.js";
@@ -95,11 +96,32 @@ function leases(cfg: Awaited<ReturnType<typeof config>>) {
   ) as unknown as ResourceProbe;
   return new MachineLeases(store, cfg, probe);
 }
+/** C-817: a person enabled these devices for `project` (registry only). */
+function enable(devices: readonly DeviceObservation[], project = "first") {
+  const registry = new DeviceRegistry(store);
+  for (const d of devices) {
+    if (!registry.get("local", d.type, d.id))
+      registry.discover("local", { ...d, state: "available" }, at);
+    const current = registry.get("local", d.type, d.id);
+    store.database
+      .prepare(
+        "UPDATE machine_devices SET status='enabled', projects=?, initialized_at=? WHERE machine='local' AND type=? AND device=?",
+      )
+      .run(
+        JSON.stringify([...new Set([...(current?.projects ?? []), project])]),
+        at,
+        d.type,
+        d.id,
+      );
+  }
+}
 function observe(
   devices: readonly DeviceObservation[],
   project = "first",
   checked_at = at,
+  enabled = true,
 ) {
+  if (enabled) enable(devices, project);
   const actor = { kind: "system" as const, project_id: project };
   const id = `obs-${Math.random()}`;
   beginMachineObservation(store, actor, project, "local", id, checked_at);
@@ -326,4 +348,58 @@ test("a machine whose adb slots do not include android.device never hands one ou
       emulator_port: 5600,
     },
   });
+});
+
+test("C-817: only devices a person enabled for the project are handed out; disabling or losing a held device keeps its single lease", async () => {
+  const l = leases(await config());
+  const registry = new DeviceRegistry(store);
+  // Listed but never enabled: not handed out.
+  observe([TABLET], "first", at, false);
+  expect((await claim(l, 1, ["android.device"])).blocked).toContain(
+    "安卓真机",
+  );
+  // Enabled for the other project only.
+  enable([TABLET], "second");
+  expect((await claim(l, 2, ["android.device"])).blocked).toContain(
+    "安卓真机",
+  );
+  enable([TABLET], "first");
+  const holder = await claim(l, 3, ["android.device"]);
+  expect(holder.access?.devices?.map((d) => d.id)).toEqual([TABLET.id]);
+  // A person disables it while the Run holds it: the holder keeps it.
+  registry.request({
+    machine: "local",
+    type: TYPE,
+    id: TABLET.id,
+    request: "disable",
+    now: at,
+  });
+  expect(l.devices.holds("first", holder.run.id, holder.keys)).toBe(true);
+  expect(launch(l, holder.run).device_session?.env.ANDROID_SERIAL).toBe(
+    TABLET.id,
+  );
+  expect((await claim(l, 4, ["android.device"])).blocked).toBeDefined();
+  // Enabled again (initialized before: no new run), then unplugged while
+  // held: still never a second holder.
+  expect(
+    registry.request({
+      machine: "local",
+      type: TYPE,
+      id: TABLET.id,
+      request: "enable",
+      projects: ["first"],
+      now: at,
+    }).status,
+  ).toBe("enabled");
+  observe([], "first", at, false);
+  expect((await claim(l, 5, ["android.device"])).blocked).toBeDefined();
+  observe([TABLET], "first", at, false);
+  expect((await claim(l, 6, ["android.device"])).blocked).toBeDefined();
+  expect(
+    store.database
+      .prepare(
+        "SELECT count(*) AS n FROM machine_device_leases WHERE released_at IS NULL",
+      )
+      .get(),
+  ).toEqual({ n: 1 });
 });
