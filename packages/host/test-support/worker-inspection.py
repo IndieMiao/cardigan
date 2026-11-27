@@ -424,6 +424,30 @@ class CollectorTest(unittest.TestCase):
             self.assertNotIn('launch', probe['main'](dict(conf, launch=None)))
             gone = probe['main'](dict(conf, live=False, harness='codex'))['launch']
             self.assertEqual(gone, dict(terminal=None, mcp=None, unavailable=dict(mcp='harness_unsupported', terminal='run_not_current')))
+            # C-823: a Run that no longer holds the session: its own terminal,
+            # found only by its run label (no generation or pinned address).
+            asked = []
+            def own(*args):
+                asked.append(args)
+                return [dict(rows[0], launch=launch)], []
+            probe['main'].__globals__['terminals'] = own
+            stale = dict(conf, live=False, launch=dict(since_ms=1767229200000, run='R-1'))
+            evidence = probe['main'](stale)
+            self.assertEqual(evidence['launch']['terminal'], launch)
+            self.assertEqual(evidence['launch']['mcp'][0]['status'], 'failed')
+            self.assertEqual(evidence['launch']['unavailable'], {})
+            self.assertIsNone(evidence['terminals'])
+            (home, session, labels, pinned, system, flag), = asked
+            self.assertEqual((session, labels, pinned, flag),
+                             ('s', dict(cardigan='1', project='fixture', assignment='A-1', run='R-1'), None, True))
+            probe['main'].__globals__['terminals'] = lambda *args: ([], [])
+            self.assertEqual(probe['main'](stale)['launch']['unavailable'], dict(terminal='terminal_not_registered'))
+            def missing(*args):
+                raise FileNotFoundError()
+            probe['main'].__globals__['terminals'] = missing
+            self.assertEqual(probe['main'](stale)['launch']['unavailable'], dict(terminal='core_socket_missing'))
+            bad = dict(stale, launch=dict(since_ms=1767229200000, run='R-1; rm'))
+            self.assertEqual(probe['main'](bad)['launch']['unavailable'], dict(terminal='run_not_current'))
 
 if __name__=='__main__':
     unittest.main()

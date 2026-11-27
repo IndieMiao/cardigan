@@ -84,7 +84,7 @@ console.log(JSON.stringify({directory, visits, initial, settings, niceness, chil
 `,
     { mode: 0o700 },
   );
-  async function prepare(run: string) {
+  async function prepare(run: string, workDir = runDir) {
     const compiled = compileAssignmentLaunch({
       ...(agentNice === undefined ? {} : { agent_nice: agentNice }),
       assignment: { assignment_id: assignment.id, run_id: run },
@@ -94,7 +94,7 @@ console.log(JSON.stringify({directory, visits, initial, settings, niceness, chil
         launch_profile: "claude",
         core_prompt: "Fixture",
         allowed_tools: ["whoami"],
-        worktree: "none",
+        worktree: workDir === runDir ? "none" : "write",
       },
       launch: parseLaunchConfig({
         profiles: {
@@ -106,7 +106,7 @@ console.log(JSON.stringify({directory, visits, initial, settings, niceness, chil
         },
       }),
       run_dir: runDir,
-      work_dir: runDir,
+      work_dir: workDir,
       first_prompt: `run=${run}`,
       mcp: { url: "http://localhost/mcp" },
       secrets: {},
@@ -273,7 +273,12 @@ describe.skipIf(process.platform !== "linux")(
           {
             directory: f.configDir,
             visits: 2,
-            initial: {},
+            // C-823: the state Claude saved ('{}') gets trust back on resume.
+            initial: {
+              hasCompletedOnboarding: true,
+              lastOnboardingVersion: "2.1.318",
+              projects: { [f.runDir]: { hasTrustDialogAccepted: true } },
+            },
             settings,
             prompt: "run=R-2\n",
           },
@@ -293,6 +298,80 @@ describe.skipIf(process.platform !== "linux")(
         if (mode === "agent-ssh")
           for (const args of f.launches)
             expect(args.slice(1, 3)).toEqual(["--on", "cardigan-agent"]);
+      },
+    );
+
+    test.each(["local", "agent-ssh"] as const)(
+      "%s trusts a new worktree cwd in saved state that trusted the run directory (C-823)",
+      async (mode) => {
+        const f = await fixture(mode);
+        const firstRef = value(
+          await f.runtime.provision(
+            assignment,
+            { ...role, harness: "claude-code" },
+            machine,
+            await f.prepare("R-1"),
+          ),
+        );
+        // State as an earlier Run left it: trust for the old cwd only.
+        const saved = {
+          hasCompletedOnboarding: true,
+          lastOnboardingVersion: "2.1.300",
+          userID: "kept",
+          projects: {
+            [f.runDir]: { hasTrustDialogAccepted: true, allowedTools: ["x"] },
+          },
+        };
+        await writeFile(
+          join(f.configDir, ".claude.json"),
+          JSON.stringify(saved),
+          { mode: 0o600 },
+        );
+        // The worktree is reached through a symlinked parent: both forms.
+        const real = join(root, "real-worktrees");
+        await mkdir(join(real, "A-1"), { recursive: true });
+        await symlink(real, join(root, "worktrees"), "dir");
+        const worktree = join(root, "worktrees", "A-1");
+        value(
+          await f.runtime.resume_or_replace(
+            firstRef,
+            await f.prepare("R-2", worktree),
+          ),
+        );
+        expect(f.observations[1]?.initial).toEqual({
+          ...saved,
+          projects: {
+            ...saved.projects,
+            [worktree]: { hasTrustDialogAccepted: true },
+            [join(real, "A-1")]: { hasTrustDialogAccepted: true },
+          },
+        });
+        const file = await stat(join(f.configDir, ".claude.json"));
+        expect(file.mode & 0o777).toBe(0o600);
+      },
+    );
+
+    test.each(["symlink", "invalid"] as const)(
+      "refuses a %s Claude state file instead of launching untrusted",
+      async (kind) => {
+        const f = await fixture("local"),
+          launch = await f.prepare("R-1");
+        await mkdir(f.configDir, { mode: 0o700 });
+        const target = join(root, "target.json");
+        await writeFile(target, "untouched");
+        if (kind === "symlink")
+          await symlink(target, join(f.configDir, ".claude.json"));
+        else await writeFile(join(f.configDir, ".claude.json"), "{not json");
+        expect(
+          await f.runtime.provision(
+            assignment,
+            { ...role, harness: "claude-code" },
+            machine,
+            launch,
+          ),
+        ).toMatchObject({ ok: false });
+        expect(f.observations).toEqual([]);
+        expect(await readFile(target, "utf8")).toBe("untouched");
       },
     );
 

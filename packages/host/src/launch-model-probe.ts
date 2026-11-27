@@ -5,6 +5,12 @@ import {
 } from "@cardigan/roles";
 
 class ResponseLimit extends Error {}
+/** The status only; the response body is never read or kept. */
+class HttpStatus extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`);
+  }
+}
 
 /**
  * The credentialed request helper shared by the probe and the model listing:
@@ -56,7 +62,7 @@ function providerClient(
     });
     if (!response.ok) {
       await response.body?.cancel();
-      throw new Error(`HTTP ${response.status}`);
+      throw new HttpStatus(response.status);
     }
 
     const reader = response.body?.getReader();
@@ -285,4 +291,80 @@ export async function probeModel(
     return "接入点检查失败（请核对协议、凭据和模型）";
   }
   return undefined;
+}
+
+/**
+ * C-821: outcome of one recovery probe. Only a status code and a fixed
+ * failure class leave the probe: never the credential, the request, the
+ * response body or an error message.
+ */
+export type UpstreamModelProbe =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly failure:
+        | "http_status"
+        | "timeout"
+        | "connection_error"
+        | "invalid_response"
+        | "not_configured";
+      readonly status?: number;
+    };
+
+/**
+ * C-821: one minimal model request (one input token, one output token) to the
+ * launch profile's explicit endpoint, with the launch configuration's own
+ * credential. No model listing, no redirects, a timeout and a byte limit.
+ */
+export async function probeUpstreamModel(
+  resolved: ResolvedProfile,
+  secrets: Record<string, string>,
+  limits: LaunchConfig["launch_check"],
+  options: { fetch?: typeof fetch; signal?: AbortSignal } = {},
+): Promise<UpstreamModelProbe> {
+  const model = resolved.profile.model;
+  let client: ReturnType<typeof providerClient>;
+  try {
+    if (!model) throw new Error();
+    client = providerClient(
+      resolved,
+      secrets,
+      limits,
+      options.fetch,
+      options.signal,
+    );
+  } catch {
+    return { ok: false, failure: "not_configured" };
+  }
+  const { p, anthropic, call } = client;
+  const responses = p.api === "openai-responses";
+  try {
+    const result = await call(
+      anthropic ? "messages" : responses ? "responses" : "chat/completions",
+      responses
+        ? { model, input: "Hi", max_output_tokens: 16 }
+        : { model, messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
+    );
+    const content = anthropic
+      ? result?.content
+      : responses
+        ? result?.output
+        : result?.choices;
+    return Array.isArray(content) && !result.error
+      ? { ok: true }
+      : { ok: false, failure: "invalid_response" };
+  } catch (error) {
+    if (error instanceof HttpStatus)
+      return { ok: false, failure: "http_status", status: error.status };
+    if (error instanceof ResponseLimit || error instanceof SyntaxError)
+      return { ok: false, failure: "invalid_response" };
+    const name = (error as { name?: unknown } | null)?.name;
+    return {
+      ok: false,
+      failure:
+        name === "TimeoutError" || name === "AbortError"
+          ? "timeout"
+          : "connection_error",
+    };
+  }
 }

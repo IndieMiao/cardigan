@@ -18,6 +18,7 @@ import {
 } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
+import { startupPrompt } from "./launch-prompts.js";
 import { inspectWorker } from "./worker-inspection.js";
 
 export { redactLaunchText, redactWorkerLaunch } from "./launch-redaction.js";
@@ -93,6 +94,9 @@ export async function collectLaunchEvidence(
   for (const [key, value] of Object.entries(launch?.unavailable ?? {}))
     if (value) unavailable[key] = reasonCode(value);
   if (missing) unavailable.terminal = unavailable.mcp = missing;
+  const prompt = launch?.terminal
+    ? startupPrompt(launch.terminal.tail)
+    : undefined;
   return {
     reason,
     machine_id: a.machine_id,
@@ -116,6 +120,7 @@ export async function collectLaunchEvidence(
             : {}),
         }
       : null,
+    ...(prompt ? { startup_prompt: prompt } : {}),
     mcp_servers: launch?.mcp ?? null,
     unavailable,
   };

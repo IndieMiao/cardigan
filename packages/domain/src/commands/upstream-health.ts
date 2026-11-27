@@ -113,20 +113,24 @@ export function recordUpstreamHealth(
       );
       const cluster = health.cluster(targets, p.policy, p.activity);
       const incident = health.incident(group);
-      const affected = failed
-        ? targets
-            .filter((t) => health.hasUnfinishedRun(t.assignment_id))
-            .map((t) => t.assignment_id)
-        : incident
+      // C-821: a session stopped on a model API error is already in its
+      // provider's outage, which resumes it; no second incident or handoff.
+      const affected = (
+        failed
           ? targets
-              .filter(
-                (t) =>
-                  !sessionIsWorking(p.activity[t.assignment_id]) &&
-                  (sessionUpstreamError(p.activity[t.assignment_id]) ||
-                    health.inactivity(t.assignment_id, p.activity)),
-              )
+              .filter((t) => health.hasUnfinishedRun(t.assignment_id))
               .map((t) => t.assignment_id)
-          : cluster;
+          : incident
+            ? targets
+                .filter(
+                  (t) =>
+                    !sessionIsWorking(p.activity[t.assignment_id]) &&
+                    (sessionUpstreamError(p.activity[t.assignment_id]) ||
+                      health.inactivity(t.assignment_id, p.activity)),
+                )
+                .map((t) => t.assignment_id)
+            : cluster
+      ).filter((id) => !health.snapshot.heldByOutage(id, d.now));
       if (!incident && affected.length) {
         const providers = [...new Set(targets.map((t) => t.provider))];
         const body = `上游线路 ${group}（provider: ${providers.join(", ")}）从 ${d.now} 起疑似中断；影响 ${affected.join(", ")}。依据：${failed ? "无凭据连接探测失败" : "同线路多个会话在配置窗口内失活"}。先不重启，复查时必须看到会话活动恢复证据；探测成功不代表模型 API 请求成功。`;
@@ -236,7 +240,8 @@ export function recordUpstreamHealth(
         if (
           sessionIsWorking(p.activity[target.assignment_id]) ||
           sessionInteraction(p.activity[target.assignment_id]) !== undefined ||
-          p.activity[target.assignment_id] === "unknown"
+          p.activity[target.assignment_id] === "unknown" ||
+          health.snapshot.heldByOutage(target.assignment_id, d.now)
         )
           continue;
         const recovery = health.recurrence(target.assignment_id, p.policy);

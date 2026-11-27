@@ -51,7 +51,7 @@ exports[`claude-code LP-2 launch parity 1`] = `
     {
       "mode": 448,
       "path": "/fixture/run/launch.sh",
-      "sha256": "e0412437a842a30bef61edf100848bdb289db02b14d58d400facd3195450411d",
+      "sha256": "f67b3426a151cae3416a2fe2323ba7393c74af28abe7534dd4ad38729d85a7d5",
     },
   ],
   "harness": "claude-code",

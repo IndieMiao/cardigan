@@ -156,6 +156,10 @@ export async function runServer(
         get upstream() {
           return host.upstream;
         },
+        upstreamOutage: {
+          launch: () => host.upstream,
+          probe: host.probeUpstream,
+        },
         snapshot: host.snapshot,
         startRun: host.startRun,
         recoverLaunches: host.recoverLaunches,
