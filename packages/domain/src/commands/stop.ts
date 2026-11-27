@@ -14,6 +14,7 @@ import {
 } from "./core.js";
 import { dropReleasedRetirement } from "./idle-session-retirement.js";
 import { replayStopDeferredResume } from "./resumption.js";
+import { redeliverEscalatedBells } from "./stop-redelivery.js";
 
 import {
   ASSIGNMENT_STOP_EXIT_CONFIRMED,
@@ -174,7 +175,11 @@ export function stopWorkItemAssignment(
         ...(holds ? {} : { superseded: true }),
       });
       // C-620: work that became ready during the stop window starts now.
-      if (managed) replayStopDeferredResume(d, next);
+      // C-812: so do the bells escalated while the stopped session was busy.
+      if (managed) {
+        replayStopDeferredResume(d, next);
+        redeliverEscalatedBells(d, next);
+      }
       return { assignment: next, cancelled: runs.length };
     }
     const queued = d

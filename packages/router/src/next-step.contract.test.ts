@@ -143,3 +143,32 @@ test("a rotation wake rings the in-progress owner", () => {
   });
   expect(recipients(result)).toEqual(["assignment:A-1"]);
 });
+
+test.each(["in_progress", "delivered", "accepted", "changes_requested"])(
+  "C-812 the system's stop redelivery rings the %s owner; nobody else's does",
+  (status) => {
+    const wake = (actor: Parameters<typeof event>[2]) =>
+      routeEvent({
+        event: event(
+          "work_item_resume_requested",
+          {
+            work_item_id: "W-1",
+            assignment_id: "A-1",
+            role_version: 1,
+            stop_redelivery: true,
+          },
+          actor,
+        ),
+        snapshot: owned(status),
+      });
+    expect(recipients(wake(system))).toEqual(["assignment:A-1"]);
+    if (status !== "in_progress")
+      expect(
+        recipients(
+          wake({
+            actor: { kind: "human", project_id },
+          } as Parameters<typeof event>[2]),
+        ),
+      ).toEqual([]);
+  },
+);

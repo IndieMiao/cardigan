@@ -9,6 +9,7 @@ import type {
   Result,
   Run,
   Runtime,
+  RuntimeRef,
 } from "@cardigan/domain";
 import {
   acknowledgeRun,
@@ -394,6 +395,85 @@ test("guard waits survive restart and hand only overdue notes to host ops", asyn
   ).toContainEqual(expect.objectContaining({ event_id: alerts[0]?.id }));
   expect(runtime.release).not.toHaveBeenCalled();
 });
+
+test.each([false, true])(
+  "C-812 bells escalated on a busy session start a fresh session after a managed stop is released (hold=%s)",
+  async (hold) => {
+    standingSession("host_ops");
+    const run = f.session(target.assignment, false);
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "blocked", observed_seq: 3 },
+    });
+    const tick = () =>
+      new Dispatcher({ ...options, dispatchTimeoutMs: 1000 }).tick();
+    // C-811: the precheck bell waits on the continuing turn, then goes to
+    // host ops as needs_attention, never rung.
+    comment("precheck passed");
+    await tick();
+    f.advance(1000);
+    await tick();
+    await tick();
+    const bell = ownNotes().find((n) => n.kind === "comment");
+    expect(bell).toMatchObject({ status: "needs_attention", attempts: 0 });
+    const ref = f
+      .state()
+      .assignments.find((a) => a.id === target.assignment.id)?.runtime_ref;
+    if (!ref) throw new Error("Missing session");
+    const stop = (extra: {
+      hold?: boolean;
+      released_runtime_ref?: RuntimeRef;
+    }) =>
+      f.apply((s, a, p) =>
+        stopWorkItemAssignment(
+          s,
+          a,
+          {
+            assignment_id: target.assignment.id,
+            reason: "stopped by host",
+            ...extra,
+          },
+          p,
+        ),
+      );
+    stop({ hold });
+    stop({ released_runtime_ref: ref });
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+      "cancelled",
+    );
+    const wakes = () =>
+      f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "work_item_resume_requested" &&
+            (e.payload as { stop_redelivery?: boolean }).stop_redelivery,
+        );
+    for (let i = 0; i < 3; i++) await tick();
+    if (hold) {
+      // A pause waits for `cardigan assignment start`.
+      expect(wakes()).toEqual([]);
+      expect(options.startRun).not.toHaveBeenCalled();
+      return;
+    }
+    expect(wakes()).toMatchObject([
+      { payload: { notification_ids: [bell?.id] } },
+    ]);
+    // One fresh session, no human instruction.
+    expect(options.startRun).toHaveBeenCalledOnce();
+    const live = f
+      .state()
+      .runs.filter(
+        (r) =>
+          r.assignment_id === target.assignment.id &&
+          !["completed", "failed", "cancelled"].includes(r.status),
+      );
+    expect(live).toMatchObject([{ status: "dispatched" }]);
+    expect(ownNotes().find((n) => n.event_id === wakes()[0]?.id)).toMatchObject(
+      { status: "belled", run_id: live[0]?.id },
+    );
+  },
+);
 
 test.each(["codex", "claude-code"] as const)(
   "C-475: a no-OSC %s Run that never finishes hands its unread note to a followup only after confirmed exit",

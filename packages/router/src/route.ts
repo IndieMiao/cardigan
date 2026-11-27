@@ -2871,7 +2871,15 @@ export function routeEvent(input: RouteInput): RouteResult {
           (p.standby === true &&
             input.event.actor.kind === "system" &&
             item.kind === "produce" &&
-            ["delivered", "accepted"].includes(item.status))) &&
+            ["delivered", "accepted"].includes(item.status)) ||
+          // C-812: bells escalated before a managed stop reach a fresh
+          // session whatever the producer is waiting for.
+          (p.stop_redelivery === true &&
+            input.event.actor.kind === "system" &&
+            item.kind === "produce" &&
+            ["delivered", "accepted", "changes_requested"].includes(
+              item.status,
+            ))) &&
         card &&
         !["done", "cancelled"].includes(card.status) &&
         owner?.scope === "work_item" &&

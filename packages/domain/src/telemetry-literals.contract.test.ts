@@ -27,6 +27,10 @@ const ALLOWED: Record<string, { why: string; matches: string[] }> = {
     why: "event looked up with eventById",
     matches: ['event?.type !== "run_queued"'],
   },
+  "packages/domain/src/commands/stop-redelivery.ts": {
+    why: "loop over eventsOfTypes (full history, telemetry included)",
+    matches: ['e.type === "run_dispatched"'],
+  },
   "packages/domain/src/commands/stop-state.ts": {
     why: "loop over fullEventHistory",
     matches: ['event.type === "run_dispatched"'],
