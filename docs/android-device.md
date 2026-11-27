@@ -100,6 +100,8 @@ Run 拿到设备时的环境：
 | 只有真机 | 真机序列号 | `CARDIGAN_DEVICE_SERIAL` |
 | 两者都有 | 模拟器（`emulator-<端口>`） | `CARDIGAN_EMULATOR_SERIAL`、`CARDIGAN_DEVICE_SERIAL`；操作真机写 `adb -s $CARDIGAN_DEVICE_SERIAL` |
 
+模拟器序列号一律看 `ANDROID_SERIAL`；`CARDIGAN_EMULATOR_SERIAL` 只在“两者都有”时设置（与 `ANDROID_SERIAL` 相同），只有模拟器时没有这个变量。
+
 ### 安卓设备任一（`android.any`，C-815）
 
 不在乎模拟器还是真机的工作（tester、实测和取证类工作项默认如此）写 `android.any`：

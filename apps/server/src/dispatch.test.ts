@@ -4449,17 +4449,12 @@ test.each([
       .state()
       .runs.find((r) => r.assignment_id === target.assignment.id);
     if (!launched) throw new Error("missing session Run");
-    f.store.uow.run((tx) => {
-      const a = tx.assignments.get(f.project, target.assignment.id);
-      if (!a?.runtime_ref) throw new Error("missing session");
-      tx.assignments.put(f.project, {
-        ...a,
-        runtime_ref: {
-          ...a.runtime_ref,
-          launch_generation: { run_id: launched.id, generation: "g1" },
-        },
-      });
-    });
+    // C-837: a local session as launched, without a launch generation.
+    const live = f.store.uow.read((tx) =>
+      tx.assignments.get(f.project, target.assignment.id),
+    );
+    expect(live?.runtime_ref).toBeTruthy();
+    expect(live?.runtime_ref?.launch_generation).toBeUndefined();
     if (recorded)
       leases.sessions.record(f.project, "local", launched.id, f.clock.now());
     comment();

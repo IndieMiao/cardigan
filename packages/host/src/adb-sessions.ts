@@ -58,6 +58,25 @@ export class AdbSessionEnvironments {
         "INSERT INTO machine_adb_launches (project,run_id,machine,environment,launched_at) VALUES (?,?,?,?,?) ON CONFLICT(project,run_id) DO UPDATE SET machine=excluded.machine, environment=excluded.environment, launched_at=excluded.launched_at",
       )
       .run(project, run, machine, this.environment(machine) ?? "none", now);
+    this.prune(project, run);
+  }
+  /**
+   * Only live sessions are judged, so keep one record per Assignment that
+   * may still have one: a new launch supersedes the Assignment's earlier
+   * ones (a reused session never compiles a launch), and a released
+   * Assignment has no session left. Runs only at launch, not at dispatch.
+   */
+  private prune(project: string, run: string) {
+    this.store.database
+      .prepare(
+        "DELETE FROM machine_adb_launches WHERE project=? AND run_id<>? AND run_id IN (SELECT r.id FROM runs r JOIN runs cur ON cur.project_id=r.project_id AND cur.assignment_id=r.assignment_id WHERE cur.project_id=? AND cur.id=?)",
+      )
+      .run(project, run, project, run);
+    this.store.database
+      .prepare(
+        "DELETE FROM machine_adb_launches WHERE rowid IN (SELECT l.rowid FROM machine_adb_launches l JOIN runs r ON r.project_id=l.project AND r.id=l.run_id JOIN assignments a ON a.project_id=r.project_id AND a.id=r.assignment_id WHERE json_extract(a.doc,'$.status')='released')",
+      )
+      .run();
   }
   /** The live session of `a` was launched with another adb environment. */
   stale(project: string, a: Assignment) {
