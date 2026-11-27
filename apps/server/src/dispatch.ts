@@ -306,6 +306,10 @@ export interface DispatcherOptions {
    */
   readonly roleUpgradePass?: "inline" | "beside";
   readonly queuedRecheckAfterMs?: number;
+  /** C-826: wait before a never-started queued Run may move machines; null disables. */
+  readonly queuedMigrateAfterMs?: number | null;
+  /** C-826: no second migration of the same work item within this interval. */
+  readonly queuedMigrationCooldownMs?: number;
   readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
   /** C-752: optional shorter grace for Runs holding scarce resources; off by default. */
@@ -458,7 +462,9 @@ export class Dispatcher {
    */
   private startup: Map<ProjectId, Set<RunId>> | undefined;
   constructor(readonly options: DispatcherOptions) {
-    this.queuedRunPatrol = new QueuedRunPatrol(options);
+    this.queuedRunPatrol = new QueuedRunPatrol(options, (tx, state, a, run) =>
+      this.queueFit(tx, state, a, run),
+    );
     this.clock = options.clock ?? dispatcherClock;
     this.skips = new DispatchSkips(() => this.clock.now());
     this.leaseMs = options.deliveryLeaseMs ?? 60_000;
@@ -2383,6 +2389,53 @@ export class Dispatcher {
           notes.filter((n) => this.owner(n, state) === owner.id),
         ),
       );
+    };
+  }
+  /**
+   * C-826: could this queued Run start right now on its own machine, and on
+   * which other registered machines, under the same admission as a claim
+   * (resolved resource keys, machine leases and reservations, project quota,
+   * resource slots, earlier waiters, Run limit)?
+   */
+  private queueFit(
+    tx: ReadRepositories,
+    state: CommandState,
+    a: Assignment,
+    run: Run,
+  ) {
+    const project = state.project_id;
+    const at = this.clock.now();
+    const notes = this.readyNotes(
+      state,
+      a,
+      this.options.store.listNotifications({
+        project_id: project,
+        status: "pending",
+        assignment_id: a.id,
+      }),
+    );
+    const keysOn = (owner: Assignment) =>
+      this.runKeys(tx, state, owner, run, notes);
+    const admits = (machine: string) => {
+      const owner = { ...a, machine_id: machine };
+      const keys = keysOn(owner);
+      return (
+        !this.options.leases?.blocked(project, machine, keys, at) &&
+        !!this.availableResources(tx, state, owner, run, keys)
+      );
+    };
+    return {
+      here: admits(a.machine_id),
+      elsewhere: tx.machines
+        .list(project)
+        .map((m) => m.id)
+        .filter((m) => m !== a.machine_id && admits(m)),
+      block: runCapacitySnapshot(
+        this.options.store,
+        tx,
+        this.options.resourceLimits,
+        this.options.projectQuota,
+      ).capacityBlock(project, a, keysOn(a)),
     };
   }
   private availableResources(

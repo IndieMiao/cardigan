@@ -161,6 +161,7 @@ type CommandName =
   | "refresh_cancelled_human_actions"
   | "auto_assign_verifier"
   | "auto_assign_producer"
+  | "migrate_queued_run"
   | "resume_work_waits"
   | "start_dependency_ready_run"
   | "maintain_pm_coordination"
@@ -347,6 +348,7 @@ export class CommandDraft {
       "refresh_cancelled_human_actions",
       "auto_assign_verifier",
       "auto_assign_producer",
+      "migrate_queued_run",
       "resume_work_waits",
       "start_dependency_ready_run",
       "maintain_pm_coordination",

@@ -270,3 +270,22 @@ test("C-527: queued re-evaluation defaults to five minutes and accepts a positiv
   await write("machines: {}\nqueued_recheck_after_minutes: 0\n");
   expect((await loadRunCapacityConfig({ configDir })).errors).toHaveLength(1);
 });
+
+test("C-826: queue migration waits five minutes, cools down thirty, and both accept a positive whole-minute override", async () => {
+  expect(await loadRunCapacityConfig({ configDir })).toMatchObject({
+    queuedMigrateAfterMs: 300_000,
+    queuedMigrationCooldownMs: 1_800_000,
+  });
+  await write(
+    "machines: {}\nqueued_migrate_after_minutes: 10\nqueued_migration_cooldown_minutes: 60\n",
+  );
+  expect(await loadRunCapacityConfig({ configDir })).toMatchObject({
+    errors: [],
+    queuedMigrateAfterMs: 600_000,
+    queuedMigrationCooldownMs: 3_600_000,
+  });
+  await write("machines: {}\nqueued_migration_cooldown_minutes: 0\n");
+  const invalid = await loadRunCapacityConfig({ configDir });
+  expect(invalid.errors).toHaveLength(1);
+  expect(invalid.queuedMigrationCooldownMs).toBe(1_800_000);
+});

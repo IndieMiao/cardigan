@@ -1142,6 +1142,8 @@ async function assembleServer(
         projectQuota: runCapacity.projectQuota,
         resourceLimits: runCapacity.resourcesForMachine,
         queuedRecheckAfterMs: runCapacity.queuedRecheckAfterMs,
+        queuedMigrateAfterMs: runCapacity.queuedMigrateAfterMs,
+        queuedMigrationCooldownMs: runCapacity.queuedMigrationCooldownMs,
         inboxStallAfterMs: runCapacity.inboxStallAfterMs,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         scarceInactiveCancel: runCapacity.scarceInactiveCancel,

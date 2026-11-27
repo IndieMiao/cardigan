@@ -1,12 +1,14 @@
-import type { MachinePlacement } from "@cardigan/domain";
+import type { MachinePlacement, MachineResources } from "@cardigan/domain";
 import type { Harness, LaunchConfig } from "@cardigan/roles";
 import {
   readMachineObservationsInTransaction,
   type Store,
 } from "@cardigan/store";
 import { observationFingerprint } from "./machine-capabilities.js";
+import { listMachineReservations } from "./machine-reservations.js";
 import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
 import type { RunCapacityConfiguration } from "./run-capacity-config.js";
+import { assignmentResourceKeys } from "./run-resources.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   loadRuntimeWorkers,
@@ -59,6 +61,8 @@ export function configureMachinePlacement(
     const pending = new Map<string, number>();
     // C-716: the same prediction, restricted to this project, for its own quota.
     const pendingHere = new Map<string, number>();
+    // C-826: and the resource slots those owners will claim when they start.
+    const pendingSlots = new Map<string, Map<string, number>>();
     for (const [p, holding] of occupiedOwners) {
       const work = p === project ? draft : undefined;
       const runs = work?.runs ?? tx.runs.list(p);
@@ -94,6 +98,13 @@ export function configureMachinePlacement(
         )
           continue;
         pending.set(a.machine_id, (pending.get(a.machine_id) ?? 0) + 1);
+        let slots = pendingSlots.get(a.machine_id);
+        if (!slots) {
+          slots = new Map();
+          pendingSlots.set(a.machine_id, slots);
+        }
+        for (const key of assignmentResourceKeys(tx, p, a))
+          slots.set(key, (slots.get(key) ?? 0) + 1);
         if (p === project)
           pendingHere.set(
             a.machine_id,
@@ -183,7 +194,11 @@ export function configureMachinePlacement(
               ),
               occupied: (occupied.get(id) ?? 0) + (pending.get(id) ?? 0),
               pending_assignments: pending.get(id) ?? 0,
-              resources: resourcesForMachine(id),
+              resources: withPending(
+                resourcesForMachine(id),
+                pendingSlots.get(id),
+              ),
+              ...reservedByOthers(store, project, id, now),
               ...projectQuota(id),
             } satisfies MachinePlacement,
           ];
@@ -191,4 +206,35 @@ export function configureMachinePlacement(
       ),
     };
   });
+}
+
+/** C-826: physical slot use plus the predicted claims of owners still waiting to start. */
+function withPending(
+  slots: MachineResources,
+  pending: ReadonlyMap<string, number> | undefined,
+): MachineResources {
+  if (!pending?.size) return slots;
+  return new Map(
+    [...slots].map(([key, slot]) => [
+      key,
+      { limit: slot.limit, occupied: slot.occupied + (pending.get(key) ?? 0) },
+    ]),
+  );
+}
+
+/** C-826: resources another project's exclusive calendar reservation holds right now. */
+function reservedByOthers(
+  store: Store,
+  project: string,
+  machine: string,
+  now: string,
+): Pick<MachinePlacement, "reserved"> {
+  const reserved = [
+    ...new Set(
+      listMachineReservations(store.database, { now, machine })
+        .filter((r) => r.holder_project !== project && r.starts_at <= now)
+        .map((r) => r.resource),
+    ),
+  ].sort();
+  return reserved.length ? { reserved } : {};
 }

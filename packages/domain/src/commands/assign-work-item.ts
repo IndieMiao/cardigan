@@ -277,14 +277,15 @@ export function assignWorkItem(
     automaticTarget && employee
       ? employeeAssignmentLoad(d, employee)
       : undefined;
+  const requested = {
+    ...(p.os === undefined ? {} : { os: p.os }),
+    ...(p.arch === undefined ? {} : { arch: p.arch }),
+    ...(p.required_tags === undefined ? {} : { tags: [...p.required_tags] }),
+  };
   const required = unwrap(
     mergeMachineRequirements(
       unwrap(effectiveWorkItemRequirements(item.requirements, role)),
-      {
-        ...(p.os === undefined ? {} : { os: p.os }),
-        ...(p.arch === undefined ? {} : { arch: p.arch }),
-        ...(p.required_tags === undefined ? {} : { tags: p.required_tags }),
-      },
+      requested,
     ),
   );
   const { machine_id, audit } = selectMachine(
@@ -381,6 +382,9 @@ export function assignWorkItem(
       work_item_id: item.id,
       assignment_id: id,
       machine_id,
+      // C-826: what the caller asked for beyond the work item and role, so a
+      // queue migration can repeat this selection.
+      requested,
       ...audit,
     });
   return assignment;

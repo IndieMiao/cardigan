@@ -56,6 +56,11 @@ export interface MachinePlacement {
     readonly limit?: { readonly limit: number; readonly occupied: number };
     readonly resources?: MachineResources;
   };
+  /**
+   * C-826: resource keys another project holds on this machine right now by
+   * an exclusive calendar reservation. Work needing one cannot start here.
+   */
+  readonly reserved?: readonly string[];
   readonly limit: number;
   /** Portion of occupied from assigned work not already holding a physical slot. */
   readonly pending_assignments?: number;

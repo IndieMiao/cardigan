@@ -32,6 +32,7 @@ import {
 import { refreshMachineObservations } from "./machine-capabilities.js";
 import { BUILTIN_MACHINE_CAPABILITIES } from "./machine-capability-catalog.js";
 import { configureMachinePlacement } from "./machine-placement.js";
+import { MachineLeases } from "./resource-leases.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import { RuntimeTargets } from "./runtime-targets.js";
@@ -797,16 +798,54 @@ test("placement reads current project opt-in and unexpired observations in the c
     store.uow.run((tx) => {
       const item = tx.work_items.get(project, id("work_item", 1));
       if (!item) throw new Error("Missing work item");
-      tx.work_items.put("other", { ...item, assignment_id: assignment().id });
+      tx.work_items.put("other", {
+        ...item,
+        assignment_id: assignment().id,
+        requirements: { capabilities: ["godot"] },
+      });
       tx.runs.put("other", { ...run(), status: "queued" });
     });
-    expect(read()).toMatchObject({ occupied: 1, pending_assignments: 1 });
-    store.uow.run((tx) => tx.runs.put("other", run()));
-    expect(read()).toMatchObject({ occupied: 1, pending_assignments: 0 });
+    // C-826: the waiting owner's godot claim is forecast as well.
+    const godot = (occupied: number) =>
+      new Map([["godot", { limit: 2, occupied }]]);
+    expect(read()).toMatchObject({
+      occupied: 1,
+      pending_assignments: 1,
+      resources: godot(1),
+    });
+    store.uow.run((tx) =>
+      tx.runs.put("other", { ...run(), resource_keys: ["godot"] }),
+    );
+    expect(read()).toMatchObject({
+      occupied: 1,
+      pending_assignments: 0,
+      resources: godot(1),
+    });
     store.uow.run((tx) =>
       tx.runs.put("other", { ...run(), status: "completed" }),
     );
-    expect(read()).toMatchObject({ occupied: 0, pending_assignments: 0 });
+    expect(read()).toMatchObject({
+      occupied: 0,
+      pending_assignments: 0,
+      resources: godot(0),
+    });
+    // C-826#10: another project's exclusive reservation is reported as such.
+    await new MachineLeases(
+      store,
+      await loadRunCapacityConfig({ env }),
+      (() => {
+        throw new Error("unused probe");
+      }) as never,
+    ).reserve(
+      { kind: "human", project_id: "other" },
+      "worker-a",
+      "godot",
+      now,
+      "2026-01-02T00:00:00.000Z",
+      () => now,
+    );
+    expect(read()?.reserved).toEqual(["godot"]);
+    expect(read("other")?.reserved).toBeUndefined();
     expect(read("other")).toMatchObject({
       remote_binding: "disabled",
       health: null,
