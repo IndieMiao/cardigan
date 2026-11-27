@@ -262,7 +262,7 @@ test("C-833: a device another adb server holds fails naming that server's port a
   expect(registry().get("local", TYPE, SERIAL)).toMatchObject({
     status: "failed",
     failure:
-      "设备被端口 5137 上的旧 adb 服务占用，可能属于切换前起的会话 SEN-A-634、SEN-A-602：系统巡检会让它放开 USB 设备，几分钟后重试",
+      "设备被端口 5137 上的旧 adb 服务占用，可能属于启动时没有槽位配置的旧会话 SEN-A-634、SEN-A-602：系统巡检会让它放开 USB 设备，几分钟后重试",
   });
   expect(open()[0]?.device_enablement?.failure).toContain("5137");
   request("enable");

@@ -244,7 +244,7 @@ test("C-833: a held device names the adb server's port and its sessions; free te
       sessions: ["SEN-A-634", "sensen/A-602"],
     }),
   ).toBe(
-    "设备被端口 5137 上的旧 adb 服务占用，可能属于切换前起的会话 SEN-A-634、sensen/A-602：系统巡检会让它放开 USB 设备，几分钟后重试",
+    "设备被端口 5137 上的旧 adb 服务占用，可能属于启动时没有槽位配置的旧会话 SEN-A-634、sensen/A-602：系统巡检会让它放开 USB 设备，几分钟后重试",
   );
   expect(deviceHeldReason({ port: 5137, kind: "legacy", sessions: [] })).toBe(
     "设备被端口 5137 上的旧 adb 服务占用，不属于系统登记的会话：系统巡检会让它放开 USB 设备，几分钟后重试",

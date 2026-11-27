@@ -655,14 +655,13 @@ test("C-833: a launch records the machine's adb environment; sessions from befor
   ).toBe(true);
 });
 
-test("C-833: sessions launched before the record existed are judged from the slots and leases the machine had then", async () => {
+test("C-833: old sessions are judged by their launch environment, not the time: launched before slots, or after without machine leases (before C-834)", async () => {
   const { probe } = fakeProbe();
-  const l = new MachineLeases(store, await config(), probe);
-  const session = (n: number, started: string) => {
+  const session = (n: number) => {
     const { owner } = needs(n, ["other"]);
-    const r = { ...run(n), status: "completed", started_at: started } as Run;
+    const r = { ...run(n), status: "completed", started_at: at } as Run;
     setStatus(r, {});
-    return {
+    const live = {
       ...owner,
       runtime_ref: {
         machine_id: "local",
@@ -672,30 +671,34 @@ test("C-833: sessions launched before the record existed are judged from the slo
         launch_generation: { run_id: r.id, generation: `g${n}` },
       },
     } as typeof owner;
+    store.uow.run((tx) => tx.assignments.put("first", live));
+    return { live, run: r };
   };
-  const old = session(1, at);
-  await claim(l, 2, ["godot"]); // the first slot row, acquired at `at`
-  const newer = session(3, later(1000));
-  expect(l.sessions.stale("first", old)).toBe(false); // same instant counts
-  expect(l.sessions.stale("first", newer)).toBe(false);
-  const devices = new MachineLeases(
+  // Launched while the machine had no adb slots.
+  const unmanaged = new MachineLeases(
     store,
-    await config(deviceSlots, deviceResources),
+    await config(undefined, { adb_slots: undefined }),
     probe,
   );
-  // No device was ever handed out on this machine before: launched before.
-  expect(devices.sessions.stale("first", newer)).toBe(true);
-  const ancient = session(4, later(-1000));
-  expect(l.sessions.stale("first", ancient)).toBe(true);
-  store.uow.run((tx) => {
-    for (const a of [old, newer, ancient]) tx.assignments.put("first", a);
-  });
+  const before = session(1);
+  launchDevices(unmanaged, "first", "local", before.run.id, at);
+  expect(unmanaged.sessions.stale("first", before.live)).toBe(false);
+  const l = new MachineLeases(store, await config(), probe);
+  // Launched after slots were enabled, but by a path that passed no machine
+  // leases: its environment never got the slot setup.
+  const leaseless = session(2);
+  launchDevices(undefined, "first", "local", leaseless.run.id, later(1000));
+  // Launched after, with the slot setup compiled in.
+  const current = session(3);
+  launchDevices(l, "first", "local", current.run.id, later(2000));
+  expect(l.sessions.stale("first", before.live)).toBe(true);
+  expect(l.sessions.stale("first", leaseless.live)).toBe(true);
+  expect(l.sessions.stale("first", current.live)).toBe(false);
+  expect(l.freshSession("first", leaseless.live)).toBe(true);
   expect(l.sessions.staleSessions("local")).toEqual([
-    { project: "first", assignment_id: ancient.id },
+    { project: "first", assignment_id: before.live.id },
+    { project: "first", assignment_id: leaseless.live.id },
   ]);
-  expect(
-    devices.sessions.staleSessions("local").map((s) => s.assignment_id),
-  ).toEqual([old.id, newer.id, ancient.id].sort());
 });
 
 // A stand-in adb server speaking the host protocol: it lists a USB device

@@ -3,20 +3,18 @@ import type { Store } from "@cardigan/store";
 import type { AdbSlotPolicy } from "./adb-slots.js";
 
 /**
- * C-833: sessions launched before a machine switched its adb environment.
+ * C-833: sessions whose launch environment lacks the machine's adb setup.
  *
  * A session keeps the environment it was launched with across wakes. When a
  * machine starts handing out adb slots (C-679) or USB devices through them
- * (C-813), a session launched before has no slot port and no `ADB_USB=0`;
- * a script of it that starts an adb server on a fixed port then claims the
- * USB devices. Each launch records the machine's adb environment (no ports);
- * a live session whose recorded environment differs from the current one is
- * replaced at its next wake (dispatch `resource_isolation`), without a person.
- *
- * Sessions launched before this record existed are judged from what the
- * database shows about the machine at their launch: some adb slot row
- * (slots were configured) and, when the machine now hands out devices, some
- * device lease. Without that evidence the session counts as launched before.
+ * (C-813), a session launched without that setup has no slot port and no
+ * `ADB_USB=0`; a script of it that starts an adb server on a fixed port then
+ * claims the USB devices. Every launch that compiles the adb environment
+ * (`launchDevices`) records the machine's adb setup it used (no ports). A
+ * live session without such a record, or with a different one, counts as
+ * old and is replaced at its next wake (dispatch `resource_isolation`),
+ * without a person. This covers sessions from before the switch as well as
+ * those launched after it without machine leases (fixed by C-834).
  */
 type Config = { adbSlots(machine: string): AdbSlotPolicy | undefined };
 
@@ -62,43 +60,22 @@ export class AdbSessionEnvironments {
     if (!current || !ref || a.external || ref.machine_id !== a.machine_id)
       return false;
     const launch = ref.launch_generation?.run_id;
+    // A schema without the record (older fixtures) cannot tell.
+    if (!hasTable(this.store, "machine_adb_launches")) return false;
     if (!launch) return true;
-    const row = hasTable(this.store, "machine_adb_launches")
-      ? (this.store.database
-          .prepare(
-            "SELECT machine, environment FROM machine_adb_launches WHERE project=? AND run_id=?",
-          )
-          .get(project, launch) as
-          | { machine: string; environment: string }
-          | undefined)
-      : undefined;
-    if (row) return row.machine !== a.machine_id || row.environment !== current;
-    return !this.inferred(project, a.machine_id, launch);
+    const row = this.store.database
+      .prepare(
+        "SELECT machine, environment FROM machine_adb_launches WHERE project=? AND run_id=?",
+      )
+      .get(project, launch) as
+      | { machine: string; environment: string }
+      | undefined;
+    // No record: the launch compiled no adb environment for this machine
+    // (before C-833, or a server launch without machine leases before
+    // C-834), so it lacks the slot configuration whatever the time.
+    return !row || row.machine !== a.machine_id || row.environment !== current;
   }
-  /** No record: whether the machine already had today's environment then. */
-  private inferred(project: string, machine: string, run: string) {
-    // Raw reads: callers may hold a unit of work (no nested one).
-    const started = (
-      this.store.database
-        .prepare(
-          "SELECT json_extract(doc,'$.started_at') AS started FROM runs WHERE project_id=? AND id=?",
-        )
-        .get(project, run) as { started: string | null } | undefined
-    )?.started;
-    if (!started) return false;
-    const before = (table: string) =>
-      hasTable(this.store, table) &&
-      !!this.store.database
-        .prepare(
-          `SELECT 1 FROM ${table} WHERE machine=? AND acquired_at<=? LIMIT 1`,
-        )
-        .get(machine, started);
-    return (
-      before("machine_adb_slots") &&
-      (!this.usbTypes(machine).length || before("machine_device_leases"))
-    );
-  }
-  /** Live sessions on the machine (any project) launched before the switch. */
+  /** Live sessions on the machine (any project) whose launch lacks its adb setup. */
   staleSessions(machine: string): StaleAdbSession[] {
     const rows: StaleAdbSession[] = [];
     for (const { id: project } of this.store.listProjects())
@@ -126,8 +103,8 @@ const DEFAULT_ADB_PORT = 5037;
 /**
  * C-833: the adb servers that may hold a device on this machine, for an
  * initialization that does not see it: every live Run slot's server (its
- * session), the configured legacy ports (sessions launched before the
- * switch) and the default port. No IO beyond the database.
+ * session), the configured legacy ports (sessions whose launch lacks the
+ * machine's adb setup) and the default port. No IO beyond the database.
  */
 export function adbServerHolders(
   store: Store,

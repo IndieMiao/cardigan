@@ -219,7 +219,7 @@ export function deviceHeldReason(holder: DeviceHolder): string {
     case "slot":
       return `设备被端口 ${port} 上的 adb 服务占用${sessions ? `，属于会话 ${sessions}` : ""}：等这个 Run 结束、系统关掉它的 adb 服务后重试`;
     case "legacy":
-      return `设备被端口 ${port} 上的旧 adb 服务占用，${sessions ? `可能属于切换前起的会话 ${sessions}` : "不属于系统登记的会话"}：系统巡检会让它放开 USB 设备，几分钟后重试`;
+      return `设备被端口 ${port} 上的旧 adb 服务占用，${sessions ? `可能属于启动时没有槽位配置的旧会话 ${sessions}` : "不属于系统登记的会话"}：系统巡检会让它放开 USB 设备，几分钟后重试`;
     default:
       return `设备被端口 ${port} 上的 adb 服务占用，不属于系统登记的会话：在机器上执行 adb -P ${port} kill-server 后重试`;
   }
