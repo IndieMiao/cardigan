@@ -349,6 +349,8 @@ export interface DispatcherOptions {
     resourcePreflight?: () => Promise<boolean>;
     snapshot?: LaunchSnapshot;
     replacement?: DispatchRunParams["replacement"];
+    /** C-834: the launch reads this Run's adb slot and devices from it. */
+    leases?: MachineLeases;
   }) => Promise<void>;
   /** Prepare Git after claiming an idle Run; append current baseline to its prompt. */
   readonly beforeWake?: (input: {
@@ -1921,6 +1923,7 @@ export class Dispatcher {
                 }
               : {}),
             ...(replacement ? { replacement } : {}),
+            ...(this.options.leases ? { leases: this.options.leases } : {}),
           }),
         );
         const actual = this.state(project).runs.find(

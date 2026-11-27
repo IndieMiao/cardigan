@@ -10,6 +10,7 @@ import type {
 import {
   type LaunchHost,
   launchRun,
+  type MachineLeases,
   projectActor,
   type ResourceAccess,
 } from "@cardigan/host";
@@ -51,6 +52,12 @@ export interface StartRunInput {
   readonly resourcePreflight?: () => Promise<boolean>;
   readonly resourceGate?: () => boolean;
   readonly replacement?: DispatchRunParams["replacement"];
+  /**
+   * C-834: the Dispatcher's leases. Without them the launch cannot read the
+   * adb slot and devices this Run holds, so its session would get none of
+   * their environment and keep a worker's fixed adb port.
+   */
+  readonly leases?: MachineLeases;
 }
 
 const hostActor = (project: ProjectId): Actor =>
@@ -74,6 +81,7 @@ export async function startQueuedRun(
     dataDir: host.dataDir,
     ...(host.execution === undefined ? {} : { execution: host.execution }),
     ...(host.clock === undefined ? {} : { clock: host.clock }),
+    ...(input.leases ? { leases: input.leases } : {}),
   };
   await launchRun(launchHost, {
     project: input.project,

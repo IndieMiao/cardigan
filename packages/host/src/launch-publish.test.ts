@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -35,6 +35,9 @@ import {
   scrubRunCredentials,
 } from "./launch.js";
 import { recoverLaunchPublications } from "./launch-publish.js";
+import { MachineLeases } from "./resource-leases.js";
+import type { ResourceProbe } from "./resource-probe.js";
+import { loadRunCapacityConfig } from "./run-capacity-config.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import { RuntimeTargetError, RuntimeTargets } from "./runtime-targets.js";
 import { checkWorkerMcp, WorkerMcpError } from "./worker-mcp.js";
@@ -429,6 +432,94 @@ test.each(["codex", "pi", "claude-code"] as const)(
       ).toEqual({ "/independent-worker/worktrees/fixture/A-1": true });
   },
 );
+test.each(["slot", "no slot"] as const)(
+  "C-834 on a machine with adb slots a worker's fixed adb port never reaches the published launch (%s)",
+  async (mode) => {
+    execution = {
+      ...execution,
+      env: { ANDROID_HOME: "/fixture/sdk", ANDROID_ADB_SERVER_PORT: "5137" },
+    };
+    await writeFile(
+      join(dataDir, "run-capacity.yaml"),
+      JSON.stringify({
+        machines: {
+          "worker-a": {
+            limit: 4,
+            resources: { "android.emulator": 2 },
+            adb_slots: {
+              resources: ["android.emulator"],
+              adb_port_base: 15100,
+              emulator_port_base: 5600,
+            },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const cfg = await loadRunCapacityConfig({ configDir: dataDir });
+    expect(cfg.errors).toEqual([]);
+    const leases = new MachineLeases(
+      store,
+      cfg,
+      Object.assign(vi.fn(), { adb: vi.fn() }) as unknown as ResourceProbe,
+    );
+    const f = fixture();
+    if (mode === "slot")
+      store.database
+        .prepare(
+          "INSERT INTO machine_adb_slots (generation,machine,slot,adb_port,emulator_port,project,assignment_id,run_id,purpose,emulator,target,acquired_at) VALUES ('g-1','worker-a',1,15101,5602,'fixture','A-1',?,'run',1,'t',?)",
+        )
+        .run(f.run.id, clock.now());
+    store.uow.run(() =>
+      beginLaunchAttempt(store.database, {
+        id: "dispatch",
+        project_id: "fixture",
+        assignment_id: f.run.assignment_id,
+        run_id: f.run.id,
+        started_at: clock.now(),
+        lease_until: new Date(now + 60_000).toISOString(),
+      }),
+    );
+    // The Dispatcher's start: no session reuse, leases handed over (C-834).
+    const launched = await launchRun(
+      { ...f.host, leases },
+      {
+        project: "fixture",
+        assignment_id: "A-1",
+        actor: { kind: "human", project_id: "fixture" },
+        run: f.run,
+        worktree: {
+          path: "/independent-worker/worktrees/fixture/A-1",
+          base_sha: "a".repeat(40),
+          branch: "agent/fixture",
+        },
+      },
+    );
+    const files =
+      disk.get(launched.runtime_ref.launch_generation?.generation ?? "")
+        ?.files ?? [];
+    const spec = JSON.parse(
+      files.find((file) => file.path.endsWith("/launch.json"))?.content ?? "{}",
+    ) as { env: Record<string, string> };
+    expect(spec.env.ANDROID_HOME).toBe("/fixture/sdk");
+    expect(JSON.stringify(spec.env)).not.toContain("5137");
+    expect(spec.env).toMatchObject(
+      mode === "slot"
+        ? {
+            ANDROID_ADB_SERVER_PORT: "15101",
+            CARDIGAN_EMULATOR_PORT: "5602",
+            ANDROID_SERIAL: "emulator-5602",
+          }
+        : {
+            ADB_SERVER_SOCKET: "localfilesystem:/dev/null",
+            ANDROID_SERIAL: "cardigan-unassigned",
+          },
+    );
+    if (mode === "no slot")
+      expect(spec.env.ANDROID_ADB_SERVER_PORT).toBeUndefined();
+  },
+);
+
 test.each(["local size limit", "remote Git refusal"])(
   "attributes %s at the preparation boundary before opening a maintenance task",
   async (scenario) => {

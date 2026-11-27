@@ -9,17 +9,27 @@ import {
 import { join } from "node:path";
 import type { Runtime, RuntimeLaunch, RuntimeRef } from "@cardigan/domain";
 import {
+  acknowledgeRun,
+  finishRun,
+  issueInstruction,
   postComment,
   queueRun,
   stoppedByHuman,
   stopWorkItemAssignment,
+  updateWorkItem,
 } from "@cardigan/domain";
-import { runCapacitySnapshot } from "@cardigan/host";
+import {
+  type AdbProbe,
+  loadRunCapacityConfig,
+  MachineLeases,
+  type ResourceProbe,
+  runCapacitySnapshot,
+} from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
-import { unfinishedBellAttempts } from "@cardigan/store";
+import { PROJECT_EVENT_STREAM, unfinishedBellAttempts } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
-import { Dispatcher } from "./dispatch.js";
+import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { hostMcpUrl } from "./host.js";
 import { startQueuedRun } from "./host-start.js";
 
@@ -500,4 +510,202 @@ test("C-497 cold start checks after provisioning, withholds the sentinel and kee
   expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
     "dispatched",
   );
+});
+
+/** C-834: the local machine hands out per-Run adb slots. */
+async function adbSlotLeases(resources: Record<string, number>) {
+  writeFileSync(
+    join(f.dataDir, "run-capacity.yaml"),
+    JSON.stringify({
+      machines: {
+        local: {
+          limit: 4,
+          resources,
+          adb_slots: {
+            resources: ["android.emulator", "android.device"].filter(
+              (key) => key in resources,
+            ),
+            adb_port_base: 15100,
+            emulator_port_base: 5600,
+          },
+        },
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+  expect(cfg.errors).toEqual([]);
+  // The first Run's adb server is not yet confirmed closed, so its slot
+  // stays held and the next Run of the same Assignment gets another one.
+  const adb = vi.fn<AdbProbe>(async (c) =>
+    c.action === "release" ? undefined : { target: "local", found: 0, left: 0 },
+  );
+  const probe = Object.assign(
+    vi.fn(async () => "local"),
+    { adb },
+  ) as unknown as ResourceProbe;
+  return { cfg, leases: new MachineLeases(f.store, cfg, probe) };
+}
+
+const launchEnv = (assignmentId: string) => {
+  const script = readFileSync(
+    join(f.dataDir, "runs", f.project, assignmentId, "launch.sh"),
+    "utf8",
+  );
+  return Object.fromEntries(
+    [...script.matchAll(/^export ([A-Z_]+)='([^']*)'$/gmu)].map((m) => [
+      m[1],
+      m[2],
+    ]),
+  );
+};
+
+test.each(["android.emulator", "android.any"])(
+  "C-834 consecutive %s Runs of one Assignment reuse no session and each launch with their own slot's adb port and serial",
+  async (capability) => {
+    const { cfg, leases } = await adbSlotLeases({ "android.emulator": 2 });
+    const owner = f.create();
+    f.apply((s, a, p) =>
+      updateWorkItem(
+        s,
+        a,
+        {
+          work_item_id: owner.item.id,
+          requirements: { capabilities: [capability] },
+        },
+        p,
+      ),
+    );
+    // An idle session of this Assignment is still alive.
+    f.session(owner.assignment);
+    for (const card_id of [undefined, owner.card.id])
+      f.store.advanceRouterCursor(
+        f.project,
+        card_id ?? PROJECT_EVENT_STREAM,
+        f.store.getUpdates({
+          project_id: f.project,
+          ...(card_id ? { card_id } : {}),
+        }).latest_seq,
+      );
+    let terminal = 10;
+    vi.mocked(runtime.resume_or_replace).mockImplementation(
+      async (previous, desc) => {
+        provisioned.push(desc);
+        return {
+          ok: true as const,
+          value: { ...previous, terminal_ref: `t${terminal++}` },
+        };
+      },
+    );
+    const startRun = vi.fn<DispatcherOptions["startRun"]>((input) =>
+      startQueuedRun(host(f.dataDir), input),
+    );
+    const dispatcher = new Dispatcher({
+      store: f.store,
+      runtime,
+      clock: f.clock,
+      deliveryLeaseMs: 60_000,
+      snapshot: vi.fn(async () => ({
+        model: "fixture-model",
+        agent_cli_version: "pi 1.5.0",
+      })),
+      startRun,
+      leases,
+      resourceLimits: cfg.resourcesForMachine,
+      runLimit: cfg.forMachine,
+    });
+    const work = async (body: string) => {
+      f.advance(1000);
+      f.apply((s, a, p) =>
+        issueInstruction(
+          s,
+          a,
+          { card_id: owner.card.id, work_item_id: owner.item.id, body },
+          p,
+        ),
+      );
+      await dispatcher.tick();
+      await leases.adb.idle();
+      const run = f
+        .state()
+        .runs.findLast((r) => r.assignment_id === owner.assignment.id);
+      if (run?.status !== "dispatched") throw new Error("Run not dispatched");
+      f.apply(
+        (s, a, p) => acknowledgeRun(s, a, { run_id: run.id }, p),
+        f.actorFor(owner.assignment),
+      );
+      const env = launchEnv(owner.assignment.id);
+      f.apply(
+        (s, a, p) =>
+          finishRun(
+            s,
+            a,
+            { run_id: run.id, outcome: "completed", summary: "done" },
+            p,
+          ),
+        f.actorFor(owner.assignment),
+      );
+      return env;
+    };
+
+    const first = await work("Record on the emulator");
+    const second = await work("Record it again");
+    expect(runtime.wake).not.toHaveBeenCalled();
+    expect(startRun).toHaveBeenCalledTimes(2);
+    for (const [input] of startRun.mock.calls)
+      expect(input).toMatchObject({
+        leases,
+        replacement: { reason: "resource_isolation" },
+      });
+    expect(first).toMatchObject({
+      ANDROID_ADB_SERVER_PORT: "15100",
+      CARDIGAN_ADB_SLOT: "0",
+      CARDIGAN_EMULATOR_PORT: "5600",
+      ANDROID_SERIAL: "emulator-5600",
+    });
+    expect(second).toMatchObject({
+      ANDROID_ADB_SERVER_PORT: "15101",
+      CARDIGAN_ADB_SLOT: "1",
+      CARDIGAN_EMULATOR_PORT: "5602",
+      ANDROID_SERIAL: "emulator-5602",
+    });
+    for (const env of [first, second])
+      expect(env.ADB_SERVER_SOCKET).toBeUndefined();
+  },
+);
+
+test("C-834 a Run that holds a USB device launches with the device serial and its own adb port", async () => {
+  const { leases } = await adbSlotLeases({
+    "android.emulator": 1,
+    "android.device": 1,
+  });
+  const { assignment, run } = queuedRun();
+  const at = f.clock.now();
+  f.store.database
+    .prepare(
+      "INSERT INTO machine_adb_slots (generation,machine,slot,adb_port,emulator_port,project,assignment_id,run_id,purpose,emulator,target,acquired_at) VALUES ('g-adb','local',1,15101,5602,?,?,?,'run',0,'local',?)",
+    )
+    .run(f.project, assignment.id, run.id, at);
+  f.store.database
+    .prepare(
+      "INSERT INTO machine_device_leases (generation,machine,type,device,project,assignment_id,run_id,acquired_at) VALUES ('g-dev','local','android.device','TABLET01',?,?,?,?)",
+    )
+    .run(f.project, assignment.id, run.id, at);
+
+  await startQueuedRun(host(f.dataDir), {
+    project: f.project,
+    assignment,
+    run,
+    bell: "[bell] device",
+    leases,
+  });
+
+  const env = launchEnv(assignment.id);
+  expect(env).toMatchObject({
+    ANDROID_ADB_SERVER_PORT: "15101",
+    ANDROID_SERIAL: "TABLET01",
+    CARDIGAN_DEVICE_SERIAL: "TABLET01",
+  });
+  expect(env.CARDIGAN_EMULATOR_PORT).toBeUndefined();
+  expect(env.ADB_USB).toBeUndefined();
 });
