@@ -25,7 +25,8 @@
     gap: var(--ui-space-1);
     min-width: 0;
   }
-  .partTitle {
+  /* Outranks the card detail's `.page h3`. */
+  .part > .partTitle {
     margin: 0;
     color: var(--text-muted);
     font-size: var(--ui-text-sm);

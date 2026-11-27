@@ -178,7 +178,8 @@
     gap: var(--ui-space-2);
     margin-top: var(--ui-space-3);
   }
-  .body :where(form label:not([hidden])) {
+  /* Option rows (DetailChoice) keep their own radio-beside-text layout. */
+  .body :where(form label:not([hidden], :has(> input[type="radio"]))) {
     display: grid;
     gap: var(--ui-space-1);
   }
