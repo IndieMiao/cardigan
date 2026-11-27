@@ -2536,6 +2536,26 @@ export interface ProcessHealthView {
     readonly heap_limit_bytes: number;
     readonly rss_bytes: number;
     readonly checked_at: string;
+    /** C-835: hourly points kept across restarts, grouped by continuous run. */
+    readonly history?: {
+      readonly points: readonly {
+        readonly boot_id: string;
+        readonly started_at: string;
+        readonly checked_at: string;
+        readonly heap_used_bytes: number;
+        readonly heap_limit_bytes: number;
+        readonly rss_bytes: number;
+      }[];
+      readonly segments: readonly {
+        readonly boot_id: string;
+        readonly started_at: string;
+        readonly first_at: string;
+        readonly last_at: string;
+        readonly points: number;
+        /** null below two points of one run: cannot be computed. */
+        readonly heap_growth_bytes_per_day: number | null;
+      }[];
+    };
   }[];
 }
 export interface OffsiteLoopDelay {
