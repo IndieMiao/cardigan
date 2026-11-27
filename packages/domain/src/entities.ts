@@ -1516,7 +1516,9 @@ export interface HumanAction {
       | "human"
       | "card_cancelled"
       | "supervisor_rechecked"
-      | "worker_helper_superseded";
+      | "worker_helper_superseded"
+      /** C-807: the host's storage CORS recheck passed. */
+      | "storage_rechecked";
   };
   readonly triage_rationale?: string;
   readonly ready_when?: ReadyCondition;

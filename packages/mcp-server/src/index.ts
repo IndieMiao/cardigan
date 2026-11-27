@@ -95,17 +95,28 @@ export {
   memoryLogger,
   stdoutLogger,
 } from "./log.js";
+// C-614: off-site copy of attachments and artifacts in a private OSS bucket.
+export {
+  CORS_RULE_METHODS,
+  CORS_UPLOAD_HEADERS,
+  type CorsOriginResult,
+  type CorsRule,
+  type CorsVerdict,
+  corsBlocked,
+  corsPreflight,
+  corsRuleFor,
+} from "./offsite/cors.js";
 export {
   LOOP_DELAY_LIMIT_MS,
   type LoopDelay,
   processLoopDelay,
 } from "./offsite/loop-delay.js";
-// C-614: off-site copy of attachments and artifacts in a private OSS bucket.
 export {
   artifactKey,
   attachmentKey,
   Offsite,
   type OffsiteAlert,
+  type OffsiteCorsView,
   type OffsiteOptions,
   type OffsiteStatusView,
   offsiteFor,

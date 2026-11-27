@@ -1,4 +1,4 @@
-import { ApiError } from "./api.js";
+import { ApiError, type StorageCorsBlock } from "./api.js";
 
 /**
  * C-685: the Workbench side of the shared file library. Listing, directories,
@@ -41,6 +41,8 @@ export interface SharedDirEntry {
 
 export interface SharedListingView {
   readonly availability: "ready" | "not_configured" | "unreachable";
+  /** C-807: the last preflight showed the bucket refuses browser uploads. */
+  readonly cors_blocked?: StorageCorsBlock;
   readonly notice: string;
   readonly path: string;
   readonly dirs: readonly SharedDirEntry[];

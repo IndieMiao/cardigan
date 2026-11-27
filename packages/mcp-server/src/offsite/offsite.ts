@@ -3,6 +3,12 @@ import { link, mkdir, open, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { type OffsiteConfig, readOffsiteConfig } from "./config.js";
 import {
+  type CorsOriginResult,
+  type CorsRule,
+  corsBlocked,
+  corsRuleFor,
+} from "./cors.js";
+import {
   type LoopDelay,
   loopDelaySlow,
   processLoopDelay,
@@ -366,6 +372,31 @@ export class Offsite {
     }
   }
 
+  /**
+   * C-807: the last browser-upload preflight of the current target, with the
+   * rule to add when an origin is refused. Undefined before the first check.
+   */
+  cors(): OffsiteCorsView | undefined {
+    if (this.config().state !== "ready") return undefined;
+    const cors = this.syncStatus()?.cors;
+    if (!cors) return undefined;
+    const refused = cors.results.filter((r) => corsBlocked(r.verdict));
+    return {
+      checked_at: cors.checked_at,
+      origins: cors.results,
+      ...(refused.length
+        ? {
+            blocked: {
+              reason: refused.some((r) => r.verdict === "not_enabled")
+                ? ("not_enabled" as const)
+                : ("not_allowed" as const),
+              rule: corsRuleFor(cors.results.map((r) => r.origin)),
+            },
+          }
+        : {}),
+    };
+  }
+
   thumbnailUrl(digest: string): SignedLink | undefined {
     const entry = this.synced(attachmentKey(digest));
     return entry
@@ -545,9 +576,11 @@ export class Offsite {
         (used.requests / 10_000) * prices.requests_10k
       : 0;
     const alerts: OffsiteAlert[] = [];
+    const cors = this.cors();
     if (config.state === "invalid") alerts.push("config_invalid");
     if (config.state === "ready") {
       if (sync?.reachable === false) alerts.push("unreachable");
+      if (cors?.blocked) alerts.push("cors_blocked");
       if ((sync?.failed.count ?? 0) > 0) alerts.push("sync_failed");
       if (budget !== undefined && estimate > budget) alerts.push("over_budget");
     }
@@ -583,6 +616,7 @@ export class Offsite {
         ...(budget === undefined ? {} : { budget_yuan: budget }),
       },
       ...(delay.sync || delay.server ? { loop_delay: delay } : {}),
+      ...(cors ? { cors } : {}),
       alerts,
     };
   }
@@ -603,7 +637,19 @@ export type OffsiteAlert =
   | "unreachable"
   | "sync_failed"
   | "over_budget"
-  | "loop_slow";
+  | "loop_slow"
+  | "cors_blocked";
+
+/** C-807: browser uploads from the Workbench origins. */
+export interface OffsiteCorsView {
+  readonly checked_at: string;
+  readonly origins: readonly CorsOriginResult[];
+  /** Present while at least one origin is refused: why, and what to add. */
+  readonly blocked?: {
+    readonly reason: "not_enabled" | "not_allowed";
+    readonly rule: CorsRule;
+  };
+}
 export interface OffsiteStatusView {
   readonly configured: SyncStatus["configured"];
   readonly bucket?: string;
@@ -626,6 +672,7 @@ export interface OffsiteStatusView {
     readonly sync?: LoopDelay;
     readonly server?: LoopDelay;
   };
+  readonly cors?: OffsiteCorsView;
   readonly alerts: readonly OffsiteAlert[];
 }
 

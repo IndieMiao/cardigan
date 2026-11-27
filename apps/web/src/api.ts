@@ -2404,6 +2404,15 @@ export type FeishuTestResult =
   | "timeout"
   | "unknown";
 
+/** C-807: the bucket refuses browser uploads; the rule the owner adds. */
+export interface StorageCorsBlock {
+  readonly reason: "not_enabled" | "not_allowed";
+  readonly rule: {
+    readonly origins: readonly string[];
+    readonly methods: readonly string[];
+    readonly headers: readonly string[];
+  };
+}
 /** C-614: off-site copy health of the control host (counts only). */
 export interface OffsiteStatusView {
   readonly configured: "absent" | "invalid" | "ready";
@@ -2431,12 +2440,28 @@ export interface OffsiteStatusView {
     readonly sync?: OffsiteLoopDelay;
     readonly server?: OffsiteLoopDelay;
   };
+  /** C-807: last browser-upload preflight per Workbench origin. */
+  readonly cors?: {
+    readonly checked_at: string;
+    readonly origins: readonly {
+      readonly origin: string;
+      readonly verdict:
+        | "ok"
+        | "not_enabled"
+        | "not_allowed"
+        | "unreachable"
+        | "error";
+      readonly status?: number;
+    }[];
+    readonly blocked?: StorageCorsBlock;
+  };
   readonly alerts: readonly (
     | "config_invalid"
     | "unreachable"
     | "sync_failed"
     | "over_budget"
     | "loop_slow"
+    | "cors_blocked"
   )[];
 }
 /** C-638: V8 heap use against its limit, per server process (numbers only). */

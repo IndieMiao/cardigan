@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import type { CardiganClient, OffsiteStatusView } from "../api.js";
 import { formatBytes, OffsiteStatusSection } from "./OffsiteStatus.js";
@@ -86,4 +86,64 @@ test("C-628: the event-loop delay of the sync and the server is shown, and a slo
       "同步进程 p99 312 ms · 最大 840 ms；服务进程 p99 12 ms · 最大 20 ms",
     ),
   ).toBeTruthy();
+});
+
+test("C-807: a bucket refusing browser uploads is an alert with the rule to add", async () => {
+  render(
+    <OffsiteStatusSection
+      client={client(
+        view({
+          alerts: ["cors_blocked"],
+          cors: {
+            checked_at: "2026-11-27T03:00:00.000Z",
+            origins: [
+              {
+                origin: "https://gs66.example.ts.net",
+                verdict: "not_allowed",
+                status: 403,
+              },
+            ],
+            blocked: {
+              reason: "not_allowed",
+              rule: {
+                origins: ["https://gs66.example.ts.net"],
+                methods: ["PUT", "GET", "HEAD"],
+                headers: ["content-type", "x-oss-forbid-overwrite"],
+              },
+            },
+          },
+        }),
+      )}
+    />,
+  );
+  const rule = await screen.findByRole("region", {
+    name: "存储桶未允许本站跨域上传",
+  });
+  expect(
+    screen.getAllByText("存储桶未允许本站跨域上传").length,
+  ).toBeGreaterThanOrEqual(2);
+  expect(screen.getByText(/^未允许/u)).toBeTruthy();
+  expect(
+    within(rule).getByText("跨域规则不包含本站来源、方法或请求头"),
+  ).toBeTruthy();
+  expect(within(rule).getByText("https://gs66.example.ts.net")).toBeTruthy();
+  expect(within(rule).getByText("content-type")).toBeTruthy();
+  cleanup();
+  render(
+    <OffsiteStatusSection
+      client={client(
+        view({
+          cors: {
+            checked_at: "2026-11-27T03:00:00.000Z",
+            origins: [{ origin: "https://gs66.example.ts.net", verdict: "ok" }],
+          },
+        }),
+      )}
+    />,
+  );
+  expect(await screen.findByText("正常")).toBeTruthy();
+  expect(screen.getByText(/^已允许/u)).toBeTruthy();
+  expect(
+    screen.queryByRole("region", { name: "存储桶未允许本站跨域上传" }),
+  ).toBeNull();
 });

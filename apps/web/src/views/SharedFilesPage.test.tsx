@@ -185,3 +185,63 @@ test("C-685: without storage the page says so and offers no upload", async () =>
       .disabled,
   ).toBe(true);
 });
+
+const corsBlocked = {
+  reason: "not_enabled" as const,
+  rule: {
+    origins: ["https://gs66.example.ts.net"],
+    methods: ["PUT", "GET", "HEAD"],
+    headers: ["content-type", "x-oss-forbid-overwrite"],
+  },
+};
+
+test("C-807: a bucket refusing browser uploads shows the reason and the rule to add", async () => {
+  const { fake } = client({
+    list: vi.fn(async (path: string) =>
+      listing(path, { cors_blocked: corsBlocked }),
+    ),
+  });
+  render(<SharedFilesPage projectId="alpha" client={fake} />);
+  const alert = await screen.findByRole("alert", {
+    name: "存储桶未允许本站跨域上传",
+  });
+  expect(within(alert).getByText("存储桶没有开启跨域（CORS）")).toBeTruthy();
+  expect(within(alert).getByText("https://gs66.example.ts.net")).toBeTruthy();
+  expect(within(alert).getByText("PUT、GET、HEAD")).toBeTruthy();
+  expect(within(alert).getByText("x-oss-forbid-overwrite")).toBeTruthy();
+});
+
+test("C-807: a network error after a refused preflight names the CORS rule, not the connection", async () => {
+  const { ApiError } = await import("../api.js");
+  const unreachable = () =>
+    Promise.reject(
+      new ApiError(0, "storage_unreachable", "无法连接存储，上传未完成"),
+    );
+  const blocked = client({
+    list: vi.fn(async (path: string) =>
+      listing(path, { cors_blocked: corsBlocked }),
+    ),
+    put: vi.fn(unreachable),
+  });
+  render(<SharedFilesPage projectId="alpha" client={blocked.fake} />);
+  await screen.findByText("art/");
+  fireEvent.change(screen.getByLabelText("上传"), {
+    target: { files: [new File(["a"], "a.png", { type: "image/png" })] },
+  });
+  expect(
+    await screen.findByText(
+      "请求失败：存储桶未允许本站跨域上传（存储桶没有开启跨域（CORS）），上传未完成",
+    ),
+  ).toBeTruthy();
+  cleanup();
+  // Without a refused preflight the original message stays.
+  const plain = client({ put: vi.fn(unreachable) });
+  render(<SharedFilesPage projectId="alpha" client={plain.fake} />);
+  await screen.findByText("art/");
+  fireEvent.change(screen.getByLabelText("上传"), {
+    target: { files: [new File(["a"], "a.png", { type: "image/png" })] },
+  });
+  expect(
+    await screen.findByText("请求失败：无法连接存储，上传未完成"),
+  ).toBeTruthy();
+});

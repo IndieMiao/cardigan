@@ -174,6 +174,20 @@ function positive(value: number, name: string, minimum = 1): number {
   return value;
 }
 
+/**
+ * C-807: the origins a browser opens the Workbench from, for the storage
+ * CORS preflight: the configured HTTPS origins (Tailscale included), or the
+ * loopback origins of the listener when none is configured.
+ */
+export function workbenchOrigins(
+  config: Pick<WebConfig, "port" | "publicOrigins">,
+): readonly string[] {
+  if (config.publicOrigins.length) return config.publicOrigins;
+  return config.port > 0
+    ? [`http://localhost:${config.port}`, `http://127.0.0.1:${config.port}`]
+    : [];
+}
+
 /** IPv6 literals need brackets in a URL and in a `Host` header. */
 export function bracket(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;

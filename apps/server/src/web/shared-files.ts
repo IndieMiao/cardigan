@@ -84,8 +84,11 @@ export async function serveSharedFiles(
   if (rest === "") {
     if (req.method !== "GET") methodNotAllowed(["GET"]);
     const listing = await mapped(() => library.list(path));
+    // C-807: the bucket refuses browser uploads from the Workbench origins.
+    const cors = offsiteFor(context.dataDir)?.cors()?.blocked;
     sendJson(res, 200, {
       availability: library.availability(),
+      ...(cors ? { cors_blocked: cors } : {}),
       notice: SHARED_FILES_NOTICE,
       ...listing,
     });

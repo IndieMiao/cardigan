@@ -12,6 +12,7 @@ import {
   SettingsSection,
 } from "./layout/SettingsLayout.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { STORAGE_CORS_TITLE, StorageCorsRule } from "./StorageCors.js";
 
 const ALERTS: Readonly<Record<OffsiteStatusView["alerts"][number], string>> = {
   config_invalid: "配置无效",
@@ -19,7 +20,13 @@ const ALERTS: Readonly<Record<OffsiteStatusView["alerts"][number], string>> = {
   sync_failed: "同步失败",
   over_budget: "超出月度上限",
   loop_slow: "事件循环延迟过高",
+  cors_blocked: STORAGE_CORS_TITLE,
 };
+
+function corsText(cors: NonNullable<OffsiteStatusView["cors"]>) {
+  if (cors.blocked) return "未允许";
+  return cors.origins.every((o) => o.verdict === "ok") ? "已允许" : "未能检查";
+}
 
 const delayText = (label: string, delay: OffsiteLoopDelay | undefined) =>
   delay &&
@@ -110,6 +117,11 @@ export function OffsiteStatusSection({
                 .join("；")}
             </SettingsFact>
           )}
+          {status.cors && (
+            <SettingsFact label="浏览器上传">
+              {corsText(status.cors)} · <Time value={status.cors.checked_at} />
+            </SettingsFact>
+          )}
           <SettingsFact label={`${status.usage.month} 估算费用`}>
             ¥{status.usage.estimated_yuan.toFixed(2)}
             {status.usage.budget_yuan !== undefined &&
@@ -122,6 +134,12 @@ export function OffsiteStatusSection({
             {formatBytes(status.usage.process_bytes)}
           </SettingsFact>
         </SettingsFacts>
+      )}
+      {status?.cors?.blocked && (
+        <section aria-label={STORAGE_CORS_TITLE}>
+          <h3>{STORAGE_CORS_TITLE}</h3>
+          <StorageCorsRule block={status.cors.blocked} />
+        </section>
       )}
     </SettingsSection>
   );
