@@ -7,7 +7,7 @@ import {
 import { cn } from "../../lib/utils.js";
 import type { View } from "../imageZoom.js";
 import { Tooltip } from "../Tooltip.js";
-import { Button, IconButton } from "../ui/button.js";
+import { IconButton } from "../ui/button.js";
 import { FitIcon, ZoomInIcon, ZoomOutIcon } from "../ui/icons.js";
 import styles from "./LightboxLayout.module.css";
 
@@ -128,14 +128,14 @@ export function LightboxZoomBar({
         </IconButton>
       </Tooltip>
       <Tooltip content="原始大小">
-        <Button
+        <IconButton
           variant="ghost"
           size="regular"
           aria-label="原始大小 100%"
           onClick={onActualSize}
         >
           1:1
-        </Button>
+        </IconButton>
       </Tooltip>
     </div>
   );
