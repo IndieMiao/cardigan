@@ -366,11 +366,9 @@ test("radix primitive styles use shared tokens, focus styles and the dark theme"
   expect(tooltip).toContain(
     "max-width: min(280px, calc(100vw - var(--gap) * 2));",
   );
-  for (const rule of [
-    tooltip,
-    layer(".capacity-tooltip"),
-    layer(".employee-card"),
-  ])
+  // C-824: the capacity popover's geometry moved to CapacityLayout.
+  expect(css).not.toContain(".capacity-tooltip");
+  for (const rule of [tooltip, layer(".employee-card")])
     expect(rule).not.toMatch(/background|border|box-shadow/);
   expect(css).not.toContain(".tooltip-arrow");
   expect(css).toContain('body[data-lightbox="open"] .drawer-overlay {');

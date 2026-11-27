@@ -510,24 +510,6 @@ button.build-version[data-feedback] {
 .capacity-compact {
   display: none;
 }
-.capacity-tooltip {
-  z-index: 60;
-  width: min(380px, calc(100vw - 24px));
-  max-height: min(70dvh, var(--radix-popover-content-available-height));
-  overflow: auto;
-  overflow-wrap: anywhere;
-  padding: 16px;
-  font-size: var(--text-sm);
-  line-height: 1.6;
-}
-.capacity-tooltip p {
-  margin: 8px 0 0;
-}
-.capacity-detail-row {
-  display: grid;
-  gap: 2px;
-  margin-top: 12px;
-}
 @media (max-width: 1000px) {
   .capacity-wide {
     display: none;

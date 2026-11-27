@@ -9,16 +9,32 @@ import {
   useState,
 } from "react";
 import type { CardiganClient, ExecutionCapacity } from "../api.js";
+import { routeHash } from "../route.js";
 import { settingKey, trackSettingsRead } from "../settings-clock.js";
 import { usePageVisible } from "../usePageVisible.js";
 import { useResource } from "../useResource.js";
-
+import {
+  CapacityCell,
+  CapacityGroup,
+  CapacityHeading,
+  CapacityLink,
+  CapacityLinks,
+  CapacityPanel,
+  CapacityRow,
+  CapacityTable,
+  CapacityTag,
+  CapacityTags,
+} from "./layout/CapacityLayout.js";
 import { Button } from "./ui/button.js";
 import * as Popover from "./ui/popover.js";
+
+/** The help document that explains how capacity is counted. */
+export const CAPACITY_HELP_SLUG = "07-capacity";
 
 type CapacityResource = ReturnType<typeof useResource<ExecutionCapacity>>;
 const CapacityContext = createContext<
   | (CapacityResource & {
+      projectId: string;
       canEdit: boolean;
       /**
        * C-512 (Q-1017): true from a failed read until a later read of this
@@ -71,7 +87,9 @@ export function CapacityProvider({
   }, [resource.error, resource.pending]);
   const stale = Boolean(resource.error) || failed;
   return (
-    <CapacityContext.Provider value={{ ...resource, canEdit, stale }}>
+    <CapacityContext.Provider
+      value={{ ...resource, projectId, canEdit, stale }}
+    >
       {children}
     </CapacityContext.Provider>
   );
@@ -93,60 +111,143 @@ export function checkCapacityPolicy(
   return "";
 }
 
-export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
+type Slots = { used: number; limit: number; queued: number };
+/** Full, unusable (limit 0) or queued slots need attention. */
+const full = ({ used, limit }: Slots) => limit <= 0 || used >= limit;
+const resourceState = (r: { occupied: number; limit: number }) =>
+  r.limit > 0 && r.occupied >= r.limit
+    ? ("full" as const)
+    : r.limit <= 0 || r.occupied === 0
+      ? ("idle" as const)
+      : ("used" as const);
+
+function SlotCells(slots: Slots) {
   return (
     <>
-      <strong>并发与容量 · 全项目共用</strong>
-      {data.agents.length === 0 && <p>暂无 Agent 机器</p>}
-      {data.agents.map((machine) => (
-        <div className="capacity-detail-row" key={machine.machine_id}>
-          <strong>{machine.label} · Agent</strong>
-          <span>
-            {/* C-576: 占用 is what the scheduler compares with the limit, as
-                on the machine page: limited Runs plus this host's CI slots. */}
-            全部 {machine.total_running} · 占用{" "}
-            {machine.running + machine.merge_check_slots} / 上限{" "}
-            {machine.limit || "不可用"} / 排队 {machine.queued}
-          </span>
-          {!!machine.resources?.length && (
-            <span>
-              资源{" "}
-              {machine.resources
-                .map((r) => `${r.key} ${r.occupied}/${r.limit}`)
-                .join(" · ")}
-            </span>
+      <CapacityCell kind="numeric" tone={full(slots) ? "wait" : undefined}>
+        {slots.used}/{slots.limit > 0 ? slots.limit : "—"}
+      </CapacityCell>
+      <CapacityCell kind="numeric" tone={slots.queued > 0 ? "wait" : undefined}>
+        {slots.queued}
+      </CapacityCell>
+    </>
+  );
+}
+
+/**
+ * C-824: one compact table, a row per Agent machine and CI target. The
+ * counting rules live in the help page, not in the popover.
+ */
+export function CapacityDetails({
+  data,
+  projectId,
+}: {
+  data: ExecutionCapacity;
+  projectId: string;
+}) {
+  const resources = data.agents.some(
+    (m) => m.merge_check_slots > 0 || !!m.resources?.length,
+  );
+  const columns = resources ? 4 : 3;
+  return (
+    <>
+      <CapacityHeading>并发与容量 · 全项目共用</CapacityHeading>
+      <CapacityTable resources={resources}>
+        <CapacityGroup label="Agent" columns={columns}>
+          {data.agents.length === 0 && (
+            <CapacityRow attention={false}>
+              <CapacityCell colSpan={columns}>没有 Agent 机器</CapacityCell>
+            </CapacityRow>
           )}
-          {machine.merge_check_slots > 0 && (
-            <span>
-              本机 CI 另占 {machine.merge_check_slots} 个 Agent 名额。
-            </span>
+          {data.agents.map((machine) => {
+            // C-576: 占用 is what the scheduler compares with the limit:
+            // limited Runs plus this host's CI slots.
+            const slots = {
+              used: machine.running + machine.merge_check_slots,
+              limit: machine.limit,
+              queued: machine.queued,
+            };
+            return (
+              <CapacityRow
+                key={machine.machine_id}
+                attention={full(slots) || slots.queued > 0}
+              >
+                <CapacityCell kind="name">{machine.label}</CapacityCell>
+                <SlotCells {...slots} />
+                {resources && (
+                  <CapacityCell kind="resources">
+                    <CapacityTags>
+                      {machine.merge_check_slots > 0 && (
+                        <CapacityTag state="used">
+                          本机 CI {machine.merge_check_slots}
+                        </CapacityTag>
+                      )}
+                      {machine.resources?.map((r) => (
+                        <CapacityTag key={r.key} state={resourceState(r)}>
+                          {r.key} {r.occupied}/{r.limit}
+                        </CapacityTag>
+                      ))}
+                    </CapacityTags>
+                  </CapacityCell>
+                )}
+              </CapacityRow>
+            );
+          })}
+        </CapacityGroup>
+        <CapacityGroup label="CI" columns={columns}>
+          {data.merge_config_invalid ? (
+            <CapacityRow attention>
+              <CapacityCell colSpan={columns} tone="wait">
+                <span role="alert">合并检查配置无效，容量信息不完整</span>
+              </CapacityCell>
+            </CapacityRow>
+          ) : data.merge_checks.length === 0 ? (
+            <CapacityRow attention={false}>
+              <CapacityCell colSpan={columns}>未启用合并检查</CapacityCell>
+            </CapacityRow>
+          ) : (
+            data.merge_checks.map((target) => {
+              const slots = {
+                used: target.running,
+                limit: target.limit,
+                queued: target.queued,
+              };
+              return (
+                <CapacityRow
+                  key={target.machine_id}
+                  attention={full(slots) || slots.queued > 0}
+                >
+                  <CapacityCell kind="name">{target.machine_id}</CapacityCell>
+                  <SlotCells {...slots} />
+                  {resources && (
+                    <CapacityCell kind="resources">{null}</CapacityCell>
+                  )}
+                </CapacityRow>
+              );
+            })
           )}
-        </div>
-      ))}
-      <p>
-        常驻 PM（Office / Ops）和主机运维不占额度、不参与容量排队；工作项 PM
-        与其他 Agent 一样排队。上限比较占用：占用不含常驻、含本机 CI
-        名额，全部计数包含常驻。占用含启动和停止预留。
-      </p>
-      {data.merge_checks.map((target) => (
-        <div className="capacity-detail-row" key={target.machine_id}>
-          <strong>{target.machine_id} · CI</strong>
-          <span>{checkCapacityPolicy(target)}</span>
-          <span>
-            运行中 {target.running} / 上限 {target.limit || "不可用"} / 排队{" "}
-            {target.queued}
-          </span>
-        </div>
-      ))}
-      {data.merge_config_invalid ? (
-        <p role="alert">合并检查配置无效，容量信息不完整。</p>
-      ) : (
-        data.merge_checks.length === 0 && <p>未启用合并检查</p>
-      )}
-      <p>
-        检查占用包含尚未确认结束的远端运行；排队包含作者预检。上限可在设置 →
-        机器的详情中修改。
-      </p>
+        </CapacityGroup>
+      </CapacityTable>
+      <CapacityLinks>
+        <CapacityLink
+          href={routeHash({
+            kind: "help",
+            projectId,
+            filters: { doc: CAPACITY_HELP_SLUG },
+          })}
+        >
+          口径说明
+        </CapacityLink>
+        <CapacityLink
+          href={routeHash({
+            kind: "settings",
+            projectId,
+            filters: { tab: "machines" },
+          })}
+        >
+          修改上限
+        </CapacityLink>
+      </CapacityLinks>
     </>
   );
 }
@@ -230,32 +331,34 @@ export function CapacitySummary({
           </span>
         </Button>
       </Popover.Anchor>
-      <Popover.Portal>
-        <Popover.Content
-          id={id}
-          role="tooltip"
-          tabIndex={0}
-          className="capacity-tooltip"
-          side="bottom"
-          align="end"
-          sideOffset={8}
-          collisionPadding={12}
-          onOpenAutoFocus={(event) => event.preventDefault()}
-          onCloseAutoFocus={(event) => event.preventDefault()}
-          onPointerEnter={keepOpen}
-          onPointerLeave={leave}
-          onFocus={keepOpen}
-          onBlur={leave}
-        >
-          {error ? (
-            <p role="alert">读取并发信息失败：{error}。可在设置中重试。</p>
-          ) : data ? (
-            <CapacityDetails data={data} />
-          ) : (
-            <p>正在读取并发信息…</p>
-          )}
-        </Popover.Content>
-      </Popover.Portal>
+      <CapacityPanel
+        id={id}
+        role="tooltip"
+        tabIndex={0}
+        className="capacity-tooltip"
+        side="bottom"
+        align="end"
+        sideOffset={8}
+        collisionPadding={12}
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        onCloseAutoFocus={(event) => event.preventDefault()}
+        onPointerEnter={keepOpen}
+        onPointerLeave={leave}
+        onFocus={keepOpen}
+        onBlur={leave}
+        onClick={(event) => {
+          // A link leaves for the help or settings page.
+          if ((event.target as Element).closest("a")) setOpen(false);
+        }}
+      >
+        {error ? (
+          <p role="alert">读取并发信息失败：{error}。可在设置中重试。</p>
+        ) : data ? (
+          <CapacityDetails data={data} projectId={resource.projectId} />
+        ) : (
+          <p>正在读取并发信息…</p>
+        )}
+      </CapacityPanel>
     </Popover.Root>
   );
 }
