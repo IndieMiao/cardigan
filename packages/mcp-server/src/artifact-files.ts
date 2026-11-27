@@ -5,7 +5,7 @@ import type { ServerResponse } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { type Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import type { Attachment } from "@cardigan/domain";
+import { type Attachment, IMAGE_SIGNATURE_BYTES } from "@cardigan/domain";
 import { ToolError } from "./errors.js";
 import { MAX_ARTIFACT_BYTES } from "./limits.js";
 import { offsiteFor } from "./offsite/offsite.js";
@@ -41,11 +41,14 @@ export async function receiveArtifact(
   const file = await open(path, "wx", 0o600);
   const hash = createHash("sha256");
   let bytes = 0;
+  // C-809: the leading bytes, so the record can say whether it is an image.
+  const header = Buffer.alloc(Math.min(size, IMAGE_SIGNATURE_BYTES));
   try {
     await pipeline(
       source,
       new Transform({
         transform(chunk: Buffer, _encoding, cb) {
+          if (bytes < header.length) chunk.copy(header, bytes);
           bytes += chunk.length;
           if (bytes > size)
             return cb(ToolError.validation("Artifact size exceeded"));
@@ -59,7 +62,7 @@ export async function receiveArtifact(
     const sha256 = hash.digest("hex");
     if (bytes !== size || sha256 !== digest)
       throw ToolError.validation("Artifact size or sha256 mismatch");
-    return { id, size: bytes, sha256 };
+    return { id, size: bytes, sha256, header: new Uint8Array(header) };
   } catch (err) {
     await rm(path, { force: true });
     throw err;
@@ -136,18 +139,28 @@ export async function sendArtifact(
   res: ServerResponse,
   head: boolean,
   authorize?: () => void,
+  /**
+   * C-809: the Workbench's verified streamed image (`inline_image`), sent
+   * with its bitmap type and the same neutral file name as an ordinary
+   * inline upload; everything else stays a download.
+   */
+  inlineImage?: { readonly mime: string; readonly filename: string },
 ) {
   const file = await openArtifact(dir, a);
   try {
     authorize?.();
-    const name = (a.original_filename || `${a.id}.bin`).replace(
-      /[^a-zA-Z0-9._-]/gu,
-      "_",
-    );
+    const inline =
+      inlineImage !== undefined && a.streamed_artifact?.inline_image === true;
+    const name = inline
+      ? inlineImage.filename
+      : (a.original_filename || `${a.id}.bin`).replace(
+          /[^a-zA-Z0-9._-]/gu,
+          "_",
+        );
     res.writeHead(200, {
-      "Content-Type": "application/octet-stream",
+      "Content-Type": inline ? inlineImage.mime : "application/octet-stream",
       "Content-Length": a.size,
-      "Content-Disposition": `attachment; filename="${name}"`,
+      "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="${name}"`,
       "Cache-Control": "private, no-store",
       "X-Content-Type-Options": "nosniff",
       "Content-Security-Policy": "default-src 'none'; sandbox",

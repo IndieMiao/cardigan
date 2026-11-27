@@ -2,6 +2,7 @@ import type { Card, Decision, Delivery } from "../entities.js";
 import { transition } from "../transitions.js";
 import { systemCompletionCurrent } from "./completion-binding.js";
 import { type CommandDraft, ensure, unwrap } from "./core.js";
+import { deliveryDecisionAttachments } from "./decision-attachments.js";
 import { assignDecision } from "./delegation.js";
 import { completionPassed } from "./merge.js";
 import { resolveCardTemplate } from "./templates.js";
@@ -54,6 +55,11 @@ export function requestHumanCompletionReview(
     recommended: "approve",
     affected_cards: [card.id],
     affected_work_items: [delivery.work_item_id],
+    // C-809: what to judge and against what, without leaving the decision.
+    ...deliveryDecisionAttachments(d, card, delivery),
+    ...(card.acceptance_criteria.length
+      ? { acceptance_criteria_snapshot: [...card.acceptance_criteria] }
+      : {}),
     blocking: false,
     decider: "human",
     // The template names the human as the completion reviewer: PM Ops never

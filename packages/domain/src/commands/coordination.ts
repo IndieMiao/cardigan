@@ -64,7 +64,10 @@ import {
   workerHelperAction,
 } from "../worker-helper-action.js";
 import { requireCardDependencyStart } from "./card-dependencies.js";
-import { decisionAttachments } from "./decision-attachments.js";
+import {
+  decisionAttachments,
+  referencedDecisionAttachments,
+} from "./decision-attachments.js";
 import {
   buildSuggestion,
   type DecisionSuggestionInput,
@@ -843,7 +846,14 @@ export function requestDecision(
       "validation_failed",
       "只有交给人的拍板可以带就绪条件",
     );
-    const attachment_ids = decisionAttachments(d, p.attachment_ids, cards);
+    // C-809: attachments of the decision's own card its context names are
+    // shown too.
+    const attachmentSelection = referencedDecisionAttachments(
+      d,
+      decisionAttachments(d, p.attachment_ids, cards),
+      p.context,
+      p.card_id,
+    );
     // C-167: only a human raiser can say a D12 question is not about what the
     // card merges (an Agent's own label is no authorization, review V-540 and
     // V-543), and only when it touches no produce work item and binds no
@@ -896,7 +906,7 @@ export function requestDecision(
       recommended: p.recommended,
       affected_cards: cards,
       affected_work_items: items.map((w) => w.id),
-      ...(attachment_ids.length ? { attachment_ids } : {}),
+      ...attachmentSelection,
       ...(p.suggestion
         ? {
             suggestion: buildSuggestion(

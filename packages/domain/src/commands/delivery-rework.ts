@@ -12,6 +12,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { deliveryDecisionAttachments } from "./decision-attachments.js";
 import { isPmOps } from "./delegation.js";
 import {
   supersedeDelivery,
@@ -236,6 +237,8 @@ export function requestDeliveryRework(
       recommended: "return_for_rework",
       affected_cards: [card.id],
       affected_work_items: [],
+      // C-809: the delivery being returned, shown with the question.
+      ...deliveryDecisionAttachments(d, card, delivery),
       blocking: true,
       decider: humanScopeAuthority(d, card) && isPmOps(d) ? "role:pm" : "human",
       ...(humanScopeAuthority(d, card) && isPmOps(d)
