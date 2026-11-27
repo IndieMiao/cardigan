@@ -198,13 +198,6 @@
   {
     "path": "views/NeedsYouPage.tsx",
     "kind": "native-input",
-    "hash": "d7487c2af0fbd0d5",
-    "text": "<input type=\"radio\" name={`decision-${q.id}`} value={o.key} checked={selected === o.key} onChange={() => setOption(o.key)} />",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-input",
     "hash": "820ef84cb19b3b14",
     "text": "<input type=\"checkbox\" checked={delegateFuture} disabled={action.busy} onChange={(e) => setDelegateFuture(e.target.checked)} />",
     "count": 1

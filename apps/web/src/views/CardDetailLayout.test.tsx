@@ -225,9 +225,11 @@ test("U3 structured delivery, review and decision rows use bound versions and or
   expect(review?.textContent).toContain("旧版本结论，已失效");
   expect(review?.textContent).toContain("<script>alert(1)</script> must fix");
   expect(container.querySelector("script")).toBeNull();
-  expect(document.getElementById("entry-C-1#5")?.textContent).toContain(
-    "影响：Simple",
-  );
+  // C-810: the options read by their names; the key and a label prefix are gone.
+  expect(
+    document.getElementById("entry-C-1#5")?.querySelector('[aria-label="选项"]')
+      ?.textContent,
+  ).toBe("First推荐Simple");
   const decision = document.getElementById("entry-C-1#6");
   expect(decision?.textContent).toContain("记录的结果：First");
   expect(decision?.textContent).toContain("Original quote");

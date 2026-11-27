@@ -121,7 +121,7 @@ function renderNeeds(decisions: NeedsDecision[]) {
   return { applySuggestion, recordDecision };
 }
 
-test("C-304: the human-only reason stays visible before folded context and legacy decisions remain readable", async () => {
+test("C-810: the human-only reason folds into 详细信息 after the plain summary and legacy decisions remain readable", async () => {
   const reason = "数值上限与行为规则须由你亲自决定。".repeat(20);
   renderNeeds([
     choose({
@@ -136,7 +136,9 @@ test("C-304: the human-only reason stays visible before folded context and legac
     choose({ id: "Q-5", question: "旧拍板" }),
   ]);
   const shown = await screen.findByText(reason, { exact: false });
-  expect(shown.closest("details")).toBeNull();
+  expect(shown.closest("details")?.querySelector("summary")?.textContent).toBe(
+    "详细信息",
+  );
   const item = screen.getByRole("article", { name: "拍板 Q-4" });
   expect(within(item).getByText("须由你亲自决定：")).toBeTruthy();
   expect(

@@ -577,7 +577,7 @@ test("C-698: an expired suggestion, or one with newer progress, is shown but not
   expect(radios(progressed).some((radio) => radio.checked)).toBe(false);
 });
 
-test("C-698: the human-only reason and plain summary sit under the question", () => {
+test("C-810: the plain summary sits under the question, the human-only reason in 详细信息", () => {
   const { region } = panel(
     cardDetail({
       card: quiet,
@@ -594,15 +594,16 @@ test("C-698: the human-only reason and plain summary sit under the question", ()
     }),
   );
   const text = region.textContent ?? "";
-  expect(text).toContain("须由你亲自决定：改角色规则");
-  expect(text.indexOf("放哪里？")).toBeLessThan(text.indexOf("须由你亲自决定"));
-  expect(text.indexOf("须由你亲自决定")).toBeLessThan(
-    text.indexOf("找设置更快"),
-  );
-  // As in the design: impact and risk; “改了什么” stays in Needs You.
-  expect(text).not.toContain("调整入口");
+  // Question, what changed, impact, risk, options, then 详细信息.
+  expect(text.indexOf("放哪里？")).toBeLessThan(text.indexOf("调整入口"));
+  expect(text.indexOf("调整入口")).toBeLessThan(text.indexOf("找设置更快"));
   expect(text).toContain("风险无");
   expect(text.indexOf("找设置更快")).toBeLessThan(text.indexOf("侧栏底部"));
+  const reason = within(region).getByText("改角色规则");
+  expect(reason.closest("details")?.querySelector("summary")?.textContent).toBe(
+    "详细信息",
+  );
+  expect(text.indexOf("侧栏底部")).toBeLessThan(text.indexOf("须由你亲自决定"));
 });
 
 test("C-698: “其他” needs your words; a failure stays in the panel with the choice kept", async () => {
