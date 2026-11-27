@@ -1,5 +1,6 @@
-import { expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import type { Attachment } from "../entities.js";
+import type { AttachmentId } from "../ids.js";
 import {
   MAX_DECISION_ATTACHMENTS,
   type RequestDecisionParams,
@@ -152,4 +153,87 @@ test("§6 C-95: exactly the limit is accepted", () => {
     ),
   );
   expect(effect.data.attachment_ids).toEqual(ids);
+});
+
+describe("C-809: attachments the context names are attached", () => {
+  const raise = (extra: Partial<RequestDecisionParams>, s = state()) =>
+    value(requestDecision(s, office, { ...params, ...extra }, ports())).data;
+
+  test("an own-card number in the context is attached after the explicit ones", () => {
+    const q = raise({
+      context: "比例见 attachment-1，另一张 attachment-2",
+      attachment_ids: ["attachment-2"],
+    });
+    expect(q.attachment_ids).toEqual(["attachment-2", "attachment-1"]);
+    expect(q).not.toHaveProperty("attachments_omitted");
+  });
+
+  test("another card's attachment stays text unless that card is affected", () => {
+    const q = raise({ context: "参考 attachment-3 和 attachment-1" });
+    expect(q.attachment_ids).toEqual(["attachment-1"]);
+    expect(q).not.toHaveProperty("attachments_omitted");
+    const affected = raise({
+      context: "参考 attachment-3",
+      affected_cards: [id("card", 2)],
+    });
+    expect(affected.attachment_ids).toEqual(["attachment-3"]);
+  });
+
+  test("missing, expired and code-quoted numbers are ignored", () => {
+    const initial = state();
+    const s = {
+      ...initial,
+      attachments: initial.attachments.map((a) =>
+        a.id === "attachment-10"
+          ? {
+              ...a,
+              streamed_artifact: {
+                blob_id: "473bd8c2-5552-44a5-ad33-8b5492ee15b3",
+                run_id: "R-1",
+                created_at: "2026-11-27T00:00:00.000Z",
+                expired: { at: "2026-11-27T01:00:00.000Z", reason: "age" },
+              },
+            }
+          : a,
+      ) as Attachment[],
+    };
+    const q = raise(
+      { context: "attachment-999、attachment-10，命令 `attachment-11`" },
+      s,
+    );
+    expect(q).not.toHaveProperty("attachment_ids");
+    expect(q).not.toHaveProperty("attachments_omitted");
+  });
+
+  test("past the limit the rest is counted, not attached and not refused", () => {
+    const own = Array.from(
+      { length: MAX_DECISION_ATTACHMENTS },
+      (_, i) => `attachment-${10 + i}`,
+    );
+    const q = raise({ context: `截图：attachment-1 ${own.join(" ")}` });
+    expect(q.attachment_ids).toEqual(
+      ["attachment-1", ...own].slice(0, MAX_DECISION_ATTACHMENTS),
+    );
+    expect(q.attachments_omitted).toBe(1);
+    const explicit = raise({
+      context: `截图：attachment-1 ${own.join(" ")}`,
+      attachment_ids: ["attachment-2", "attachment-10"],
+    });
+    expect(explicit.attachment_ids).toEqual([
+      "attachment-2",
+      "attachment-10",
+      "attachment-1",
+      "attachment-11",
+      "attachment-12",
+      "attachment-13",
+    ]);
+    // attachment-14 and attachment-15 did not fit.
+    expect(explicit.attachments_omitted).toBe(2);
+    const full = raise({
+      context: "再看 attachment-1",
+      attachment_ids: own as AttachmentId[],
+    });
+    expect(full.attachment_ids).toEqual(own);
+    expect(full.attachments_omitted).toBe(1);
+  });
 });

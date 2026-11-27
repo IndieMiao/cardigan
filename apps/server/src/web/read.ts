@@ -43,6 +43,7 @@ import {
   hasVerifiedMergeNoop,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
+  INLINE_IMAGE_MIME_TYPES,
   isMergePrerequisite,
   isOfficeDigestStream,
   latestCardTemplate,
@@ -632,13 +633,21 @@ export interface AttachmentView extends WebAuthorView {
 }
 
 /** MIME types safe enough for `<img src>` (§3.2); SVG and HTML are not. */
-export const INLINE_MIME_TYPES: ReadonlySet<string> = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/avif",
-]);
+export const INLINE_MIME_TYPES: ReadonlySet<string> = INLINE_IMAGE_MIME_TYPES;
+
+/**
+ * C-809: whether pages show an attachment as an image — the one rule for
+ * decision cards, the card attachment page, the download, thumbnail and
+ * preview routes. A streamed upload qualifies only when its upload verified
+ * that the file starts like its declared bitmap type (`inline_image`).
+ */
+export function inlineImageAttachment(
+  attachment: Pick<Attachment, "mime" | "streamed_artifact">,
+): boolean {
+  if (!INLINE_MIME_TYPES.has(attachment.mime.toLowerCase())) return false;
+  const stream = attachment.streamed_artifact;
+  return !stream || (!stream.expired && stream.inline_image === true);
+}
 
 function attachmentViewMapper(state: CommandState) {
   const roles = new Map(
@@ -668,9 +677,7 @@ function attachmentViewMapper(state: CommandState) {
     const download_path = `/api/projects/${encodeURIComponent(
       state.project_id,
     )}/attachments/${encodeURIComponent(attachment.id)}`;
-    const inline =
-      !attachment.streamed_artifact &&
-      INLINE_MIME_TYPES.has(attachment.mime.toLowerCase());
+    const inline = inlineImageAttachment(attachment);
     return {
       id: attachment.id,
       ...(attachment.original_filename === undefined

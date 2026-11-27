@@ -29,7 +29,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
-import { MAX_DECISION_ATTACHMENTS } from "./decision-attachments.js";
+import { deliveryDecisionAttachments } from "./decision-attachments.js";
 import {
   assignDecision,
   handoffDecision,
@@ -343,18 +343,6 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
  * C-95: the human sees the completion request's own card attachments
  * (screenshots, designs) on the merge confirmation, up to the shared limit.
  */
-function completionAttachments(d: CommandDraft, card: Card, target: Delivery) {
-  const own = new Set(
-    d
-      .list("attachments")
-      .filter((a) => a.card_id === card.id)
-      .map((a) => a.id),
-  );
-  const attachment_ids = [...new Set(target.attachments)]
-    .filter((id) => own.has(id))
-    .slice(0, MAX_DECISION_ATTACHMENTS);
-  return attachment_ids.length ? { attachment_ids } : {};
-}
 /** Neither a system return nor explicit human rework releases a human handoff. */
 export function returnedHumanConfirmation(d: CommandDraft, card: Card) {
   const returned = appendEvents(d.state.events, d.events)
@@ -468,7 +456,7 @@ function requestConfirmation(
     recommended: "merge",
     affected_cards: [card.id],
     affected_work_items: [],
-    ...completionAttachments(d, card, target),
+    ...deliveryDecisionAttachments(d, card, target),
     blocking: true,
     decider: "human",
     ...(humanRequiredReason

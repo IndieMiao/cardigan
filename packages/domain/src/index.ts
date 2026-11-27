@@ -153,6 +153,7 @@ export * from "./human-action.js";
 export * from "./human-action-executor.js";
 export * from "./ids.js";
 export * from "./image-generation.js";
+export * from "./image-signature.js";
 export * from "./interaction.js";
 export * from "./machine-placement.js";
 export * from "./machine-requirements.js";

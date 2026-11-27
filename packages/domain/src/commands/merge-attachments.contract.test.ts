@@ -4,6 +4,7 @@ import {
   type Assignment,
   type CommandState,
   createCard,
+  type DeliveryId,
   MAX_DECISION_ATTACHMENTS,
   prepareAttachment,
   resolveDelegatedDecision,
@@ -62,7 +63,11 @@ async function setup() {
       get: async () => undefined,
     }),
   );
-  const upload = (mime = "image/png", card_id = f.card.id) => {
+  const upload = (
+    mime = "image/png",
+    card_id = f.card.id,
+    delivery_id?: DeliveryId,
+  ) => {
     const entry = f.state.timeline.find((e) => e.card_id === card_id);
     if (!entry) throw new Error("Missing card entry");
     return f.commit(
@@ -73,7 +78,9 @@ async function setup() {
           card_id,
           kind: "evidence",
           mime,
-          attach_to: { kind: "timeline_entry", id: entry.id },
+          attach_to: delivery_id
+            ? { kind: "delivery", id: delivery_id }
+            : { kind: "timeline_entry", id: entry.id },
         },
         receipt,
         f.io,
@@ -110,7 +117,29 @@ test("§6 C-95: a merge confirmation shows the completion request's card attachm
   expect(confirmation()).toMatchObject({
     trigger: "merge_confirmation",
     attachment_ids: ids.slice(0, MAX_DECISION_ATTACHMENTS),
+    // C-809: what the limit left out can be counted.
+    attachments_omitted: 1,
   });
+});
+
+test("C-809: a merge confirmation also shows files uploaded onto the completion request, after the listed ones", async () => {
+  const { f, upload, confirmation } = await setup();
+  const product = await f.deliver();
+  f.review(product);
+  const listed = upload();
+  const completion = await f.deliver(
+    "card_completion",
+    product.subject.value,
+    true,
+    [],
+    undefined,
+    [listed.id],
+  );
+  const later = upload("image/png", f.card.id, completion.id);
+  f.review(completion);
+  const q = confirmation();
+  expect(q.attachment_ids).toEqual([listed.id, later.id]);
+  expect(q).not.toHaveProperty("attachments_omitted");
 });
 
 test("§6 C-125: a merge confirmation only includes the intersection of completion and own-card attachments", async () => {

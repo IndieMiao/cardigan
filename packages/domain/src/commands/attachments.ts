@@ -11,6 +11,11 @@ import type {
 } from "../entities.js";
 import type { Result } from "../errors.js";
 import type { RunId } from "../ids.js";
+import {
+  IMAGE_SIGNATURE_BYTES,
+  imageMatchesMime,
+  MAX_INLINE_STREAMED_IMAGE_BYTES,
+} from "../image-signature.js";
 import type { AttachmentStore } from "../ports.js";
 import {
   type CommandDraft,
@@ -326,16 +331,39 @@ export function artifactUploadRun(
 /** IO lives in the adapter; mint the receipt only after its stream completed. */
 export async function prepareStreamedArtifact(
   run_id: RunId,
-  put: () => Promise<{ id: string; sha256: string; size: number }>,
+  put: () => Promise<{
+    id: string;
+    sha256: string;
+    size: number;
+    /** C-809: the file's first bytes as received, for the image check. */
+    header?: Uint8Array;
+  }>,
 ) {
-  const { id: blob_id, sha256, size } = await put();
+  const { id: blob_id, sha256, size, header } = await put();
   return {
     [stored]: true as const,
     sha256,
     size,
     storage_path: `artifacts/${blob_id}`,
     stream: { blob_id, run_id },
+    ...(header ? { header: header.slice(0, IMAGE_SIGNATURE_BYTES) } : {}),
   };
+}
+/**
+ * C-809: a streamed file is shown inline exactly when an ordinary upload of
+ * it would be: a known bitmap type whose leading bytes match that type, no
+ * larger than the ordinary attachment ceiling.
+ */
+function streamedInlineImage(
+  mime: string,
+  size: number,
+  header: Uint8Array | undefined,
+): boolean {
+  return (
+    header !== undefined &&
+    size <= MAX_INLINE_STREAMED_IMAGE_BYTES &&
+    imageMatchesMime(header, mime)
+  );
 }
 export function uploadAttachment(
   state: CommandState,
@@ -389,10 +417,20 @@ export function uploadAttachment(
         "illegal_transition",
         "Artifact upload Run is no longer current",
       );
+    const inlineImage =
+      stream &&
+      "header" in receipt &&
+      streamedInlineImage(p.mime, receipt.size, receipt.header);
     const common = {
       id: d.ids.nextAttachmentId(state.project_id),
       ...(stream
-        ? { streamed_artifact: { ...stream, created_at: ports.clock.now() } }
+        ? {
+            streamed_artifact: {
+              ...stream,
+              created_at: ports.clock.now(),
+              ...(inlineImage ? { inline_image: true as const } : {}),
+            },
+          }
         : {}),
       sha256: receipt.sha256,
       size: receipt.size,

@@ -10,7 +10,7 @@ import {
   sendFileRange,
 } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
-import { INLINE_MIME_TYPES } from "./read.js";
+import { inlineImageAttachment } from "./read.js";
 import { localOnly, redirectToOffsite } from "./thumbnails.js";
 
 /**
@@ -71,6 +71,10 @@ export async function serveAttachment(
       attachment,
       res,
       context.req.method === "HEAD",
+      undefined,
+      inlineImageAttachment(attachment)
+        ? { mime: attachment.mime.toLowerCase() }
+        : undefined,
     );
     return true;
   }
@@ -106,7 +110,7 @@ export async function serveAttachment(
   }
 
   const mime = attachment.mime.toLowerCase();
-  const inline = INLINE_MIME_TYPES.has(mime);
+  const inline = inlineImageAttachment(attachment);
   res.writeHead(200, {
     "Content-Type": mime,
     "Content-Length": blob.byteLength,
@@ -134,17 +138,16 @@ export async function serveAttachmentPreview(
   const attachment = store.uow.read((tx) =>
     tx.attachments.get(project_id, attachment_id as AttachmentId),
   );
-  const mime = attachment?.mime.toLowerCase();
-  if (
-    attachment === undefined ||
-    attachment.streamed_artifact ||
-    mime === undefined ||
-    !INLINE_MIME_TYPES.has(mime)
-  )
+  if (attachment === undefined || !inlineImageAttachment(attachment))
     return false;
-  const remote = localOnly(req)
-    ? undefined
-    : offsiteFor(context.dataDir)?.previewUrl(attachment.sha256, mime);
+  // C-809: a streamed image has no off-site preview copy; it is served whole.
+  const remote =
+    localOnly(req) || attachment.streamed_artifact
+      ? undefined
+      : offsiteFor(context.dataDir)?.previewUrl(
+          attachment.sha256,
+          attachment.mime.toLowerCase(),
+        );
   if (remote) {
     redirectToOffsite(res, remote);
     return true;

@@ -1376,6 +1376,18 @@ interface DecisionFields {
    * Absent when the decision references none.
    */
   readonly attachment_ids?: readonly AttachmentId[];
+  /**
+   * C-809: how many more attachments the system would have shown but left
+   * out at the per-decision limit. Absent when none were left out and on
+   * decisions raised before C-809 (never backfilled).
+   */
+  readonly attachments_omitted?: number;
+  /**
+   * C-809: the card's acceptance criteria when a human completion review was
+   * raised, so later edits do not change what was approved. Absent on other
+   * decisions and on older completion reviews (never backfilled).
+   */
+  readonly acceptance_criteria_snapshot?: readonly string[];
   readonly blocking: boolean;
   readonly decider: Decider;
   readonly doc_refs: readonly {
@@ -1572,6 +1584,13 @@ export interface StreamedArtifact {
   readonly blob_id: string;
   readonly run_id: RunId;
   readonly created_at: Timestamp;
+  /**
+   * C-809: the file starts with the signature of its declared bitmap type
+   * (PNG, JPEG, GIF, WebP or AVIF) and fits the inline attachment size, so
+   * pages may show it like an ordinary upload. Absent means download only,
+   * including every stream uploaded before C-809 (never backfilled).
+   */
+  readonly inline_image?: true;
   readonly expired?: {
     readonly at: Timestamp;
     readonly reason: "age" | "capacity";

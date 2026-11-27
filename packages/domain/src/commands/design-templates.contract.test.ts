@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import type {
   Actor,
   Assignment,
+  Attachment,
   RoleReference,
   WorkItem,
 } from "../entities.js";
@@ -15,6 +16,7 @@ import {
 import { autoMergeSchedule } from "./auto-merge.js";
 import { recordDecision, resolveDelegatedDecision } from "./coordination.js";
 import type { CommandState } from "./core.js";
+import { MAX_DECISION_ATTACHMENTS } from "./decision-attachments.js";
 import { prepareDelivery, submitDelivery, submitReview } from "./delivery.js";
 import { HUMAN_COMPLETION_REASON } from "./human-completion.js";
 import { createCard, updateCard } from "./pm.js";
@@ -448,6 +450,111 @@ describe("design template flow (p2v-12 §2.4)", () => {
       expect(f.state.decisions).toEqual([]);
     },
   );
+
+  test("C-809: the human completion review shows the delivery's files and a snapshot of the acceptance criteria", async () => {
+    const f = flow();
+    const file = (n: number) =>
+      ({
+        id: `attachment-${n}`,
+        sha256: String(n).padStart(64, "0"),
+        mime: "image/png",
+        size: 10,
+        card_id: f.card_id,
+        uploaded_by: "human",
+        storage_path: `blobs/${n}`,
+        attach_to: { kind: "timeline_entry", id: `${f.card_id}#1` },
+        kind: "evidence",
+      }) as Attachment;
+    const listed = Array.from(
+      { length: MAX_DECISION_ATTACHMENTS + 1 },
+      (_, i) => file(100 + i),
+    );
+    f.state = { ...f.state, attachments: listed };
+    f.state = apply(f.state, value(await f.deliver(f.design)));
+    const draft = f.state.deliveries[0];
+    if (!draft) throw new Error("Missing design delivery");
+    f.state = apply(
+      f.state,
+      value(
+        submitReview(
+          f.state,
+          director,
+          {
+            delivery_id: draft.id,
+            target_sha: f.subject.value,
+            kind: "design",
+            issues: [],
+          },
+          f.p,
+        ),
+      ),
+    );
+    // Listed in reverse: the decision keeps the delivery's order.
+    const ids = listed.map((a) => a.id).reverse();
+    f.state = apply(
+      f.state,
+      value(await f.deliver(f.completion({ attachments: ids }))),
+    );
+    const decision = f.state.decisions.find(
+      (q) => q.trigger === "completion_review",
+    );
+    expect(decision).toMatchObject({
+      attachment_ids: ids.slice(0, MAX_DECISION_ATTACHMENTS),
+      attachments_omitted: 1,
+      acceptance_criteria_snapshot: ["Every state is drawn"],
+    });
+    // Editing the card later leaves what is being approved unchanged.
+    f.state = apply(
+      f.state,
+      value(
+        updateCard(
+          f.state,
+          human,
+          { card_id: f.card_id, acceptance_criteria: ["Something else"] },
+          f.p,
+        ),
+      ),
+    );
+    expect(
+      f.state.decisions.find((q) => q.id === decision?.id)
+        ?.acceptance_criteria_snapshot,
+    ).toEqual(["Every state is drawn"]);
+  });
+
+  test("C-809: a completion review without files or criteria keeps its earlier shape", async () => {
+    const f = flow();
+    f.state = apply(f.state, value(await f.deliver(f.design)));
+    f.state = apply(
+      f.state,
+      value(
+        submitReview(
+          f.state,
+          director,
+          {
+            delivery_id: f.state.deliveries[0]?.id as never,
+            target_sha: f.subject.value,
+            kind: "design",
+            issues: [],
+          },
+          f.p,
+        ),
+      ),
+    );
+    f.state = {
+      ...f.state,
+      cards: f.state.cards.map((c) =>
+        c.id === f.card_id ? { ...c, acceptance_criteria: [] } : c,
+      ),
+    };
+    f.state = apply(f.state, value(await f.deliver(f.completion())));
+    const decision = f.state.decisions.find(
+      (q) => q.trigger === "completion_review",
+    );
+    expect(decision).toBeDefined();
+    expect(decision).not.toHaveProperty("attachment_ids");
+    expect(decision).not.toHaveProperty("attachments_omitted");
+    expect(decision).not.toHaveProperty("acceptance_criteria_snapshot");
+  });
 
   test("the human completion review stays with the human when PM Ops may take feature details", async () => {
     const f = flow(true);

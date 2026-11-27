@@ -3,11 +3,21 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join, resolve } from "node:path";
-import type { AttachmentId, ProjectId } from "@cardigan/domain";
-import { fileAttachmentStore, offsiteFor } from "@cardigan/mcp-server";
+import {
+  type Attachment,
+  type AttachmentId,
+  imageSignatureMime,
+  MAX_INLINE_STREAMED_IMAGE_BYTES,
+  type ProjectId,
+} from "@cardigan/domain";
+import {
+  fileAttachmentStore,
+  offsiteFor,
+  openArtifact,
+} from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import sharp from "sharp";
-import { INLINE_MIME_TYPES } from "./read.js";
+import { inlineImageAttachment } from "./read.js";
 
 /**
  * C-540: small previews for image attachments.
@@ -34,36 +44,8 @@ const DECODABLE = new Set(["png", "jpeg", "gif", "webp", "heif"]);
  * Signatures of the inline bitmap types (PNG, JPEG, GIF, WebP, AVIF). Anything
  * else never reaches libvips, whose loaders would also parse SVG, PDF or TIFF.
  */
-function bitmapSignature(input: Uint8Array): boolean {
-  const ascii = (start: number, end: number) =>
-    Buffer.from(input.subarray(start, end)).toString("latin1");
-  return (
-    ascii(0, 8) === "\x89PNG\r\n\x1a\n" ||
-    ascii(0, 3) === "\xff\xd8\xff" ||
-    ["GIF87a", "GIF89a"].includes(ascii(0, 6)) ||
-    (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") ||
-    avifBrand(input, ascii)
-  );
-}
-/**
- * An ISO-BMFF file type box naming AVIF as its major or one of its compatible
- * brands (e.g. major `mif1` with `avif` listed), read within the box bounds.
- */
-function avifBrand(
-  input: Uint8Array,
-  ascii: (start: number, end: number) => string,
-): boolean {
-  if (input.byteLength < 16 || ascii(4, 8) !== "ftyp") return false;
-  const size = Buffer.from(input.subarray(0, 4)).readUInt32BE(0);
-  // Sizes 0 (to end of file) and 1 (64-bit) are not used for this box, and
-  // real ones list a handful of brands.
-  if (size < 16 || size > Math.min(input.byteLength, 1024) || size % 4 !== 0)
-    return false;
-  const brands = [ascii(8, 12)];
-  for (let offset = 16; offset < size; offset += 4)
-    brands.push(ascii(offset, offset + 4));
-  return brands.some((brand) => brand === "avif" || brand === "avis");
-}
+const bitmapSignature = (input: Uint8Array) =>
+  imageSignatureMime(input) !== undefined;
 /** About 1440×69000; bounds decoder memory for a hostile upload at the attachment limit. */
 const MAX_INPUT_PIXELS = 100_000_000;
 /** Renders running at once; a page of thumbnails queues behind these. */
@@ -264,6 +246,27 @@ function cacheFor(dataDir: string) {
   return cache;
 }
 
+/** C-809: a verified streamed image's bytes, or undefined when it is gone. */
+async function streamedImage(
+  dataDir: string,
+  attachment: Attachment,
+): Promise<Uint8Array | undefined> {
+  if (attachment.size > MAX_INLINE_STREAMED_IMAGE_BYTES) return undefined;
+  const file = await openArtifact(dataDir, attachment).catch(() => undefined);
+  if (!file) return undefined;
+  try {
+    const { buffer, bytesRead } = await file.read(
+      Buffer.alloc(attachment.size),
+      0,
+      attachment.size,
+      0,
+    );
+    return bytesRead === attachment.size ? buffer : undefined;
+  } finally {
+    await file.close();
+  }
+}
+
 export interface ThumbnailContext {
   readonly store: Store;
   readonly project_id: ProjectId;
@@ -285,11 +288,7 @@ export async function serveAttachmentThumbnail(
   const attachment = store.uow.read((tx) =>
     tx.attachments.get(project_id, attachment_id as AttachmentId),
   );
-  if (
-    attachment === undefined ||
-    attachment.streamed_artifact ||
-    !INLINE_MIME_TYPES.has(attachment.mime.toLowerCase())
-  )
+  if (attachment === undefined || !inlineImageAttachment(attachment))
     return false;
   const digest = attachment.sha256;
   const etag = `"${digest}-${VERSION}"`;
@@ -307,15 +306,20 @@ export async function serveAttachmentThumbnail(
   // C-614: OSS renders the thumbnail from the verified off-site copy. The
   // Workbench retries with `?local=1` when that image fails to load, and any
   // missing configuration, copy or connectivity falls through to local.
-  const remote = localOnly(req)
-    ? undefined
-    : offsiteFor(dataDir)?.thumbnailUrl(digest);
+  // C-809: a streamed image has no off-site copy under its digest; it renders
+  // locally from the artifact file (bounded by `inline_image`'s size limit).
+  const remote =
+    localOnly(req) || attachment.streamed_artifact
+      ? undefined
+      : offsiteFor(dataDir)?.thumbnailUrl(digest);
   if (remote) {
     redirectToOffsite(res, remote);
     return true;
   }
   const output = await cacheFor(dataDir).get(digest, () =>
-    fileAttachmentStore(dataDir).get(digest),
+    attachment.streamed_artifact
+      ? streamedImage(dataDir, attachment)
+      : fileAttachmentStore(dataDir).get(digest),
   );
   if (typeof output === "string") {
     const [status, code, message] =

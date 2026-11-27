@@ -1,6 +1,6 @@
 /** C-540: attachment thumbnails are rendered once, cached and access-checked. */
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
@@ -363,4 +363,130 @@ test("the thumbnail route has the original's session and project checks", async 
   expect(failed.json).toMatchObject({
     error: { code: "thumbnail_unavailable" },
   });
+});
+
+test("C-809: a streamed image whose header matched is shown like an ordinary upload; others stay downloads", async () => {
+  h = await webHarness({ password: PASSWORD });
+  seedWebProject(h.store, h.dataDir);
+  const original = await solid(64, 48).png().toBuffer();
+  await mkdir(join(h.dataDir, "artifacts"), { recursive: true });
+  const streamed = async (
+    id: string,
+    mime: string,
+    body: Buffer,
+    inline_image: boolean,
+  ) => {
+    const blob_id = randomUUID();
+    await writeFile(join(h?.dataDir ?? "", "artifacts", blob_id), body);
+    h?.store.uow.run((tx) =>
+      tx.attachments.put(project_id, {
+        id: id as Attachment["id"],
+        sha256: createHash("sha256").update(body).digest("hex"),
+        mime,
+        size: body.byteLength,
+        card_id: "C-1" as CardId,
+        uploaded_by: "assignment:A-1",
+        storage_path: `artifacts/${blob_id}`,
+        attach_to: {
+          kind: "timeline_entry",
+          id: "C-1#1" as TimelineEntry["id"],
+        },
+        kind: "evidence",
+        streamed_artifact: {
+          blob_id,
+          run_id: "R-1" as never,
+          created_at: "2026-11-27T00:00:00.000Z" as never,
+          ...(inline_image ? { inline_image: true as const } : {}),
+        },
+      }),
+    );
+  };
+  // S-1 passed the upload's header check; S-2 is the same PNG recorded
+  // without that mark (uploaded before C-809, or its header did not match);
+  // S-3 is an SVG.
+  await streamed("S-1", "image/png", original, true);
+  await streamed("S-2", "image/png", original, false);
+  await streamed("S-3", "image/svg+xml", Buffer.from("<svg/>"), false);
+  h.store.uow.run((tx) => {
+    const q = tx.decisions.get(project_id, "D-1" as never);
+    if (!q) throw new Error("Missing seeded decision");
+    tx.decisions.put(project_id, {
+      ...q,
+      attachment_ids: ["S-1", "S-2", "S-3"] as Attachment["id"][],
+    });
+  });
+  const cookie = await h.login(PASSWORD);
+  const at = (suffix: string) => `/api/projects/${project_id}${suffix}`;
+  type View = {
+    id: string;
+    inline: boolean;
+    thumbnail_path: string | null;
+    preview_path: string | null;
+  };
+  const shown = (views: readonly View[]) =>
+    Object.fromEntries(
+      views
+        .filter((v) => v.id.startsWith("S-"))
+        .map((v) => [v.id, [v.inline, v.thumbnail_path, v.preview_path]]),
+    );
+  const expected = {
+    "S-1": [
+      true,
+      at("/attachments/S-1/thumbnail"),
+      at("/attachments/S-1/preview"),
+    ],
+    "S-2": [false, null, null],
+    "S-3": [false, null, null],
+  };
+  // The card's attachment page and the decision card use the same rule.
+  const detail = (await call(h.port, at("/cards/C-1"), { cookie })).json as {
+    attachments: View[];
+    decisions: { id: string; attachments: View[] }[];
+  };
+  expect(shown(detail.attachments)).toEqual(expected);
+  expect(
+    shown(detail.decisions.find((q) => q.id === "D-1")?.attachments ?? []),
+  ).toEqual(expected);
+  const needs = (await call(h.port, at("/needs-you"), { cookie })).json as {
+    decisions: { id: string; attachments: View[] }[];
+  };
+  expect(
+    shown(needs.decisions.find((q) => q.id === "D-1")?.attachments ?? []),
+  ).toEqual(expected);
+
+  const download = await call(h.port, at("/attachments/S-1"), { cookie });
+  expect(download.status).toBe(200);
+  expect(download.headers["content-type"]).toBe("image/png");
+  expect(String(download.headers["content-disposition"])).toMatch(/^inline/);
+  expect(String(download.headers["content-security-policy"])).toContain(
+    "sandbox",
+  );
+  expect(download.headers["x-content-type-options"]).toBe("nosniff");
+  expect(download.bytes.equals(original)).toBe(true);
+  const preview = await call(h.port, at("/attachments/S-1/preview"), {
+    cookie,
+  });
+  expect(preview.status).toBe(200);
+  expect(preview.bytes.equals(original)).toBe(true);
+  const thumbnail = await call(h.port, at("/attachments/S-1/thumbnail"), {
+    cookie,
+  });
+  expect(thumbnail.status).toBe(200);
+  expect(await size(thumbnail.bytes)).toEqual({
+    width: 64,
+    height: 48,
+    format: "webp",
+  });
+
+  for (const id of ["S-2", "S-3"]) {
+    const file = await call(h.port, at(`/attachments/${id}`), { cookie });
+    expect(file.status).toBe(200);
+    expect(file.headers["content-type"]).toBe("application/octet-stream");
+    expect(String(file.headers["content-disposition"])).toMatch(/^attachment/);
+    for (const route of ["thumbnail", "preview"])
+      expect(
+        (await call(h.port, at(`/attachments/${id}/${route}`), { cookie }))
+          .status,
+      ).toBe(404);
+  }
 });

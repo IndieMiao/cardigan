@@ -1929,6 +1929,52 @@ const binaryHeaders = (bearer: string) => ({
   "content-type": "application/octet-stream",
 });
 
+test("C-809: a streamed image is marked inline only when its leading bytes match its declared type", async () => {
+  const send = async (mime: string, body: Buffer, key: string) => {
+    const { upload_query } = await ok<{ upload_query: string }>(
+      coder,
+      "upload_attachment",
+      {
+        ...streamTarget,
+        mime,
+        original_filename: "shot.png",
+        artifact_size: body.length,
+        sha256: sha256(body),
+      },
+      key,
+    );
+    // The signature arrives split across chunks.
+    const response = await fetch(server.url + upload_query, {
+      method: "POST",
+      headers: {
+        ...binaryHeaders(coderToken),
+        "content-length": String(body.length),
+      },
+      body: Readable.toWeb(
+        Readable.from([body.subarray(0, 3), body.subarray(3)]),
+      ) as ReadableStream,
+      duplex: "half",
+    } as RequestInit);
+    expect(response.status).toBe(201);
+    return (await response.json()) as Attachment;
+  };
+  const png = Buffer.concat([
+    Buffer.from("\x89PNG\r\n\x1a\n", "latin1"),
+    Buffer.alloc(64, 1),
+  ]);
+  expect(
+    (await send("image/png", png, "png-upload")).streamed_artifact,
+  ).toMatchObject({ inline_image: true });
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>');
+  for (const [mime, body, key] of [
+    ["image/png", svg, "svg-as-png"],
+    ["image/jpeg", png, "png-as-jpeg"],
+  ] as const)
+    expect((await send(mime, body, key)).streamed_artifact).not.toHaveProperty(
+      "inline_image",
+    );
+});
+
 test("streamed artifact: single-use authenticated transport, provenance, verification and delivery reference", async () => {
   const digest = sha256(content),
     key = "package-upload";
