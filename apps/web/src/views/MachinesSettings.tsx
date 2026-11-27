@@ -87,6 +87,7 @@ import {
   useCapabilityGuides,
 } from "./CapabilityGuide.js";
 import { CapabilityInstallDialog } from "./CapabilityInstall.js";
+import { MachineDevices } from "./MachineDevices.js";
 import { MachineReservations } from "./MachineReservations.js";
 import {
   checkingWithoutId,
@@ -219,7 +220,7 @@ function LatestCheck({ machine }: { machine: MachineView }) {
   return <CheckTag check={{ ...check, label }} />;
 }
 const MACHINES_HELP =
-  "占用：调度计入上限的 Agent 会话，含运行中、启动中和等待停止的会话，以及本机合并检查占用的名额；常驻 PM 和主机运维不计入。上限：点“详情”修改，未改过时为主机配置的默认值，不超过主机配置的最大值。最近检查：机器检查或接入检查的结果与时间。";
+  "占用：调度计入上限的 Agent 会话，含运行中、启动中和等待停止的会话，以及本机合并检查占用的名额；常驻 PM 和主机运维不计入。上限：点“详情”修改，未改过时为主机配置的默认值，不超过主机配置的最大值。最近检查：机器检查或接入检查的结果与时间。设备状态：已启用的设备显示本项目最近一次机器检查看到的连接状态，未启用的显示启用进度；占用为正在用它的 Run。";
 
 /**
  * C-512: the machines this host manages. Machines are global; the detail
@@ -402,6 +403,15 @@ export function MachinesSettings({
             })}
           </TableBody>
         </SettingsTable>
+      )}
+      {machines && machines.length > 0 && (
+        <MachineDevices
+          client={client}
+          projectId={projectId}
+          machines={machines}
+          canEdit={canEdit}
+          revision={revision}
+        />
       )}
       <MergeCheckCapacity />
       {shown && (

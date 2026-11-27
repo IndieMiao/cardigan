@@ -34,6 +34,7 @@ export * from "./deployment-supervisor-upgrade.js";
 export * from "./device-enablement.js";
 export * from "./device-init.js";
 export * from "./device-leases.js";
+export * from "./device-list.js";
 export * from "./device-providers.js";
 export * from "./device-registry.js";
 export * from "./dispatch-stalls.js";
