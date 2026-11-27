@@ -6,12 +6,18 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
 import type { ExecutionCapacity } from "../api.js";
+import { findHelpDocument, helpDocuments } from "../help-content.js";
 import { fakeClient } from "../testing/fixtures.js";
-import { CapacityProvider, useCapacity } from "./Capacity.js";
+import {
+  CAPACITY_HELP_SLUG,
+  CapacityProvider,
+  useCapacity,
+} from "./Capacity.js";
 import { PageTitle } from "./Foundation.js";
 
 const capacity: ExecutionCapacity = {
@@ -39,6 +45,15 @@ const capacity: ExecutionCapacity = {
   ],
   merge_checks: [{ machine_id: "ci-test", running: 1, limit: 3, queued: 4 }],
   merge_config_invalid: false,
+};
+const cellText = (cell: Element) => cell.textContent?.trim() ?? "";
+/** The cells of the table row whose first cell is exactly `name`. */
+const rowCells = (scope: HTMLElement, name: string) => {
+  const row = within(scope)
+    .getAllByRole("row")
+    .find((r) => r.firstElementChild?.textContent === name);
+  if (!row) throw new Error(`No row ${name}`);
+  return Array.from(row.children, cellText);
 };
 afterEach(() => {
   cleanup();
@@ -103,18 +118,41 @@ test("hover, keyboard and touch expose machine/CI details; Escape dismisses", as
   const button = await screen.findByRole("button", { name: /Agent 4\/10/u });
   fireEvent.pointerEnter(button, { pointerType: "mouse" });
   let tooltip = await screen.findByRole("tooltip");
-  expect(tooltip.textContent).toContain("第二台工作机 · Agent");
+  // C-824: one compact table; the header appears once.
+  expect(within(tooltip).getAllByRole("columnheader").map(cellText)).toEqual([
+    "名称",
+    "占用/上限",
+    "排队",
+    "资源",
+  ]);
   // C-576: 占用 adds this host's CI slots (3 + 2), as the scheduler does.
-  expect(tooltip.textContent).toContain("全部 5 · 占用 5 / 上限 6 / 排队 2");
-  expect(tooltip.textContent).toContain("全部 1 · 占用 1 / 上限 4 / 排队 0");
-  expect(tooltip.textContent).not.toContain("非常驻");
-  expect(tooltip.textContent).toContain("上限可在设置 → 机器的详情中修改。");
-  expect(tooltip.textContent).not.toContain("并发与容量”中");
-  expect(tooltip.textContent).toContain("本机 CI 另占 2 个 Agent 名额");
-  expect(tooltip.textContent).toContain(
-    "常驻 PM（Office / Ops）和主机运维不占额度",
-  );
-  expect(tooltip.textContent).toContain("运行中 1 / 上限 3 / 排队 4");
+  expect(rowCells(tooltip, "工作机")).toEqual([
+    "工作机",
+    "5/6",
+    "2",
+    "本机 CI 2",
+  ]);
+  expect(rowCells(tooltip, "第二台工作机")).toEqual([
+    "第二台工作机",
+    "1/4",
+    "0",
+    "",
+  ]);
+  expect(rowCells(tooltip, "ci-test")).toEqual(["ci-test", "1/3", "4", ""]);
+  // No paragraphs of counting rules; they are one link away.
+  expect(tooltip.textContent).not.toContain("常驻 PM");
+  expect(tooltip.textContent).not.toContain("尚未确认结束");
+  expect(tooltip.textContent).not.toContain("全部 5");
+  expect(
+    within(tooltip)
+      .getByRole("link", { name: "口径说明" })
+      .getAttribute("href"),
+  ).toBe("#/p/p/help?doc=07-capacity");
+  expect(
+    within(tooltip)
+      .getByRole("link", { name: "修改上限" })
+      .getAttribute("href"),
+  ).toBe("#/p/p/settings?tab=machines");
   expect(button.getAttribute("aria-describedby")).toBe(tooltip.id);
   fireEvent.keyDown(document, { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
@@ -125,6 +163,150 @@ test("hover, keyboard and touch expose machine/CI details; Escape dismisses", as
   fireEvent.click(button);
   tooltip = await screen.findByRole("tooltip");
   expect(tooltip.querySelector("input")).toBeNull();
+});
+
+test("C-824 marks full or queued rows and full resources; idle ones are muted", async () => {
+  const data: ExecutionCapacity = {
+    agents: [
+      {
+        machine_id: "ci-host",
+        label: "cardigan-ci",
+        running: 4,
+        total_running: 4,
+        limit: 12,
+        max_limit: 16,
+        queued: 1,
+        merge_check_slots: 0,
+        resources: [
+          { key: "android.emulator", occupied: 1, limit: 1 },
+          { key: "blender", occupied: 0, limit: 1 },
+          { key: "godot", occupied: 1, limit: 2 },
+          { key: "ios.simulator", occupied: 0, limit: 0 },
+        ],
+      },
+      {
+        machine_id: "local",
+        label: "local",
+        running: 2,
+        total_running: 3,
+        limit: 4,
+        max_limit: 8,
+        queued: 0,
+        merge_check_slots: 0,
+      },
+      {
+        machine_id: "full",
+        label: "full-host",
+        running: 1,
+        total_running: 1,
+        limit: 2,
+        max_limit: 8,
+        queued: 0,
+        merge_check_slots: 1,
+      },
+      {
+        machine_id: "off",
+        label: "offline-host",
+        running: 0,
+        total_running: 0,
+        limit: 0,
+        max_limit: 8,
+        queued: 0,
+        merge_check_slots: 0,
+      },
+    ],
+    merge_checks: [
+      { machine_id: "github-actions", running: 2, limit: 16, queued: 0 },
+      { machine_id: "github-actions-sensen", running: 4, limit: 4, queued: 0 },
+    ],
+    merge_config_invalid: false,
+  };
+  render(
+    <CapacityProvider
+      client={fakeClient({ executionCapacity: async () => data })}
+      projectId="p"
+      revision={0}
+      canEdit
+    >
+      <PageTitle title="卡片" />
+    </CapacityProvider>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: /Agent 7\/—/u }));
+  const tooltip = await screen.findByRole("tooltip");
+  const row = (name: string) =>
+    within(tooltip)
+      .getAllByRole("row")
+      .find((r) => r.firstElementChild?.textContent === name);
+  const attention = (name: string) =>
+    row(name)?.getAttribute("data-attention") === "true";
+  const tones = (name: string) =>
+    Array.from(row(name)?.children ?? [], (c) => c.getAttribute("data-tone"));
+  // Queued: only the queue count is in the status colour.
+  expect(attention("cardigan-ci")).toBe(true);
+  expect(tones("cardigan-ci")).toEqual([null, null, "wait", null]);
+  // Below the limit and nothing queued: muted.
+  expect(attention("local")).toBe(false);
+  expect(tones("local")).toEqual([null, null, null, null]);
+  // CI slots fill the limit (1 + 1 of 2).
+  expect(attention("full-host")).toBe(true);
+  expect(rowCells(tooltip, "full-host").slice(1, 2)).toEqual(["2/2"]);
+  expect(tones("full-host")).toEqual([null, "wait", null, null]);
+  // An unknown limit never reads as free capacity.
+  expect(attention("offline-host")).toBe(true);
+  expect(rowCells(tooltip, "offline-host").slice(1, 2)).toEqual(["0/—"]);
+  expect(tones("offline-host")[1]).toBe("wait");
+  expect(attention("github-actions")).toBe(false);
+  expect(attention("github-actions-sensen")).toBe(true);
+  const tags = Array.from(
+    row("cardigan-ci")?.querySelectorAll("[data-ui=badge]") ?? [],
+    (tag) => [tag.textContent, tag.getAttribute("data-state")],
+  );
+  expect(tags).toEqual([
+    ["android.emulator 1/1", "full"],
+    ["blender 0/1", "idle"],
+    ["godot 1/2", "used"],
+    ["ios.simulator 0/0", "idle"],
+  ]);
+  // Two groups under a single header row.
+  expect(within(tooltip).getAllByRole("columnheader")).toHaveLength(4);
+  expect(within(tooltip).getByText("Agent")).toBeTruthy();
+  expect(within(tooltip).getByText("CI")).toBeTruthy();
+  // Following a link closes the popover.
+  fireEvent.click(within(tooltip).getByRole("link", { name: "口径说明" }));
+  await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+});
+
+test("C-824 invalid CI config, no CI and no resources keep short facts", async () => {
+  const read = vi
+    .fn()
+    .mockResolvedValueOnce({ ...capacity, merge_config_invalid: true })
+    .mockResolvedValueOnce({
+      ...capacity,
+      agents: capacity.agents.map((m) => ({ ...m, merge_check_slots: 0 })),
+      merge_checks: [],
+    });
+  const client = fakeClient({ executionCapacity: read });
+  const view = render(
+    <CapacityProvider client={client} projectId="p" revision={0} canEdit>
+      <PageTitle title="卡片" />
+    </CapacityProvider>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: /CI —/u }));
+  let tooltip = await screen.findByRole("tooltip");
+  expect(within(tooltip).getByRole("alert").textContent).toBe(
+    "合并检查配置无效，容量信息不完整",
+  );
+  expect(within(tooltip).queryByText("ci-test")).toBeNull();
+  view.rerender(
+    <CapacityProvider client={client} projectId="p" revision={1} canEdit>
+      <PageTitle title="卡片" />
+    </CapacityProvider>,
+  );
+  await screen.findByRole("button", { name: /CI 未启用/u });
+  tooltip = await screen.findByRole("tooltip");
+  expect(within(tooltip).getByText("未启用合并检查")).toBeTruthy();
+  // No machine has resources or CI slots: no resource column.
+  expect(within(tooltip).getAllByRole("columnheader")).toHaveLength(3);
 });
 
 test("unknown limits, invalid CI and failed refreshes never look like idle capacity", async () => {
@@ -205,20 +387,25 @@ test.each(["github", "ssh", "local"] as const)(
     fireEvent.click(
       await screen.findByRole("button", { name: /查看并发与容量详情/u }),
     );
-    expect(
-      screen.getByText(
-        executor_type === "github"
-          ? /GitHub · 同项目可并行/u
-          : executor_type === "ssh"
-            ? /SSH · 每项目一个检查，目标配置上限 3/u
-            : /本机 · 每项目一个检查/u,
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        `运行中 1 / 上限 ${data.merge_checks[0]?.limit} / 排队 2`,
-      ),
-    ).toBeTruthy();
+    // C-824: the admission rule per executor moved to the help page; the
+    // row shows the admission limit the scheduler compares with.
+    const tooltip = screen.getByRole("tooltip");
+    expect(rowCells(tooltip, "fixture-target")).toEqual([
+      "fixture-target",
+      `1/${data.merge_checks[0]?.limit}`,
+      "2",
+      "",
+    ]);
+    expect(tooltip.textContent).not.toMatch(/同项目可并行|每项目一个检查/u);
+    const help =
+      findHelpDocument(helpDocuments, CAPACITY_HELP_SLUG)?.source ?? "";
+    expect(help).toContain(
+      executor_type === "github"
+        ? "GitHub：同项目可并行"
+        : executor_type === "ssh"
+          ? "SSH：每个项目同时一个检查"
+          : "本机：每个项目同时一个检查",
+    );
   },
 );
 
