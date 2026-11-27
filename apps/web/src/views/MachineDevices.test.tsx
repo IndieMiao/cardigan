@@ -237,3 +237,9 @@ test("C-818: a read-only session sees the list without actions", async () => {
   expect(screen.queryByRole("columnheader", { name: "操作" })).toBeNull();
   expect(screen.queryByRole("button", { name: /^停用/ })).toBeNull();
 });
+
+test("C-818: machines without devices show one short empty state", async () => {
+  setup({ machineDevices: vi.fn(async () => ({ devices: [] })) });
+  expect(await screen.findByText("没有设备")).toBeTruthy();
+  expect(screen.queryByRole("table")).toBeNull();
+});

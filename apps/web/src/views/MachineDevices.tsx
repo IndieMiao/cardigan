@@ -198,108 +198,116 @@ export function MachineDevices({
         retry={read.reload}
         pendingMessage="正在加载设备…"
       />
-      {rows && bound.length > 0 && rows.length === 0 && (
-        <SettingsSection title="设备">
-          <p>没有设备</p>
-        </SettingsSection>
-      )}
-      {rows &&
-        bound.map((machine) => {
-          const devices = rows.filter((d) => d.machine === machine.id);
-          if (!devices.length) return null;
-          return (
-            <SettingsSection key={machine.id} title={`${machine.label} 的设备`}>
-              <SettingsTable aria-label={`${machine.label} 的设备`}>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>型号</TableHead>
-                    <TableHead>编号</TableHead>
-                    <TableHead>状态</TableHead>
-                    <TableHead>占用</TableHead>
-                    <TableHead>项目</TableHead>
-                    {writable && <TableHead>操作</TableHead>}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {devices.map((device) => {
-                    const key = deviceKey(device);
-                    const status = deviceStatus(device);
-                    const pending = busy.has(key);
-                    const failure = failed.get(key);
-                    const on =
-                      device.status === "enabled" ||
-                      device.status === "initializing";
-                    return (
-                      <TableRow key={key} aria-label={deviceName(device)}>
-                        <DataTableCell nowrap data-record="lead">
-                          {device.model ?? "—"}
-                        </DataTableCell>
-                        <DataTableCell nowrap data-label="编号">
-                          <code>{device.id}</code>
-                        </DataTableCell>
-                        <DataTableCell nowrap data-label="状态">
-                          <StatusTag
-                            status={status.status}
-                            label={status.label}
-                            subdued={"subdued" in status}
-                          />
-                        </DataTableCell>
-                        <DataTableCell nowrap data-label="占用">
-                          <Holder projectId={projectId} device={device} />
-                        </DataTableCell>
-                        <DataTableCell data-label="项目">
-                          {device.projects.join("、") || "—"}
-                        </DataTableCell>
-                        {writable && (
-                          <DataTableCell nowrap data-record="aside">
-                            <SettingsRowActions>
-                              <Button
-                                aria-label={`${on ? "停用" : "启用"}${deviceName(device)}`}
-                                aria-disabled={pending || undefined}
-                                onClick={() => {
-                                  if (pending) return;
-                                  if (on)
-                                    void send(device, { request: "disable" });
-                                  else enable(device);
-                                }}
-                              >
-                                {on ? "停用" : "启用"}
-                              </Button>
-                              {device.choices.length > 1 && (
+      {/* One block in the panel's grid: the machines' sections inside it
+          are spaced like the sections of a settings drawer. */}
+      {rows && bound.length > 0 && (
+        <div>
+          {rows.length === 0 && (
+            <SettingsSection title="设备">
+              <p>没有设备</p>
+            </SettingsSection>
+          )}
+          {bound.map((machine) => {
+            const devices = rows.filter((d) => d.machine === machine.id);
+            if (!devices.length) return null;
+            return (
+              <SettingsSection
+                key={machine.id}
+                title={`${machine.label} 的设备`}
+              >
+                <SettingsTable aria-label={`${machine.label} 的设备`}>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>型号</TableHead>
+                      <TableHead>编号</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead>占用</TableHead>
+                      <TableHead>项目</TableHead>
+                      {writable && <TableHead>操作</TableHead>}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {devices.map((device) => {
+                      const key = deviceKey(device);
+                      const status = deviceStatus(device);
+                      const pending = busy.has(key);
+                      const failure = failed.get(key);
+                      const on =
+                        device.status === "enabled" ||
+                        device.status === "initializing";
+                      return (
+                        <TableRow key={key} aria-label={deviceName(device)}>
+                          <DataTableCell nowrap data-record="lead">
+                            {device.model ?? "—"}
+                          </DataTableCell>
+                          <DataTableCell nowrap data-label="编号">
+                            <code>{device.id}</code>
+                          </DataTableCell>
+                          <DataTableCell nowrap data-label="状态">
+                            <StatusTag
+                              status={status.status}
+                              label={status.label}
+                              subdued={"subdued" in status}
+                            />
+                          </DataTableCell>
+                          <DataTableCell nowrap data-label="占用">
+                            <Holder projectId={projectId} device={device} />
+                          </DataTableCell>
+                          <DataTableCell data-label="项目">
+                            {device.projects.join("、") || "—"}
+                          </DataTableCell>
+                          {writable && (
+                            <DataTableCell nowrap data-record="aside">
+                              <SettingsRowActions>
                                 <Button
-                                  aria-label={`修改${deviceName(device)}的项目`}
-                                  aria-haspopup="dialog"
+                                  aria-label={`${on ? "停用" : "启用"}${deviceName(device)}`}
                                   aria-disabled={pending || undefined}
                                   onClick={() => {
                                     if (pending) return;
-                                    setChoosing({
-                                      device,
-                                      request: "assign",
-                                      projects: device.projects,
-                                    });
+                                    if (on)
+                                      void send(device, { request: "disable" });
+                                    else enable(device);
                                   }}
                                 >
-                                  改项目
+                                  {on ? "停用" : "启用"}
                                 </Button>
-                              )}
-                            </SettingsRowActions>
-                            <RequestFeedback
-                              interactive
-                              pending={pending}
-                              pendingMessage={`正在提交${deviceName(device)}…`}
-                              error={failure?.error}
-                              retry={failure?.retry}
-                            />
-                          </DataTableCell>
-                        )}
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </SettingsTable>
-            </SettingsSection>
-          );
-        })}
+                                {device.choices.length > 1 && (
+                                  <Button
+                                    aria-label={`修改${deviceName(device)}的项目`}
+                                    aria-haspopup="dialog"
+                                    aria-disabled={pending || undefined}
+                                    onClick={() => {
+                                      if (pending) return;
+                                      setChoosing({
+                                        device,
+                                        request: "assign",
+                                        projects: device.projects,
+                                      });
+                                    }}
+                                  >
+                                    改项目
+                                  </Button>
+                                )}
+                              </SettingsRowActions>
+                              <RequestFeedback
+                                interactive
+                                pending={pending}
+                                pendingMessage={`正在提交${deviceName(device)}…`}
+                                error={failure?.error}
+                                retry={failure?.retry}
+                              />
+                            </DataTableCell>
+                          )}
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </SettingsTable>
+              </SettingsSection>
+            );
+          })}
+        </div>
+      )}
       <SettingsConfirmDialog
         open={!!choosing}
         title={
