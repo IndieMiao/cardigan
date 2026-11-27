@@ -23,6 +23,11 @@ import {
 } from "../api.js";
 import { DecisionAffectedCards } from "../components/DecisionAffectedCards.js";
 import { DecisionAttachments } from "../components/DecisionAttachments.js";
+import {
+  DecisionBrief,
+  DecisionChoices,
+  DecisionOptionList,
+} from "../components/DecisionBrief.js";
 import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   DecisionSuggestion,
@@ -37,6 +42,8 @@ import {
   Time,
 } from "../components/Foundation.js";
 import { IdentityRow } from "../components/IdentityRow.js";
+import { DetailChoiceTag } from "../components/layout/CardDetailLayout.js";
+import { DecisionBriefDetails } from "../components/layout/DecisionBriefLayout.js";
 import {
   NeedsList,
   NeedsListFooter,
@@ -59,7 +66,7 @@ import {
   quote,
   TakeoverWarning,
 } from "../components/Operations.js";
-import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
+import { PlainSummary } from "../components/PlainSummary.js";
 import { PmMergeTakeover } from "../components/PmMergeTakeover.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
@@ -75,6 +82,7 @@ import { SelectControl } from "../components/ui/select-control.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { Textarea } from "../components/ui/textarea.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
+import { PLAIN_SUMMARY_COPY } from "../plain-summary-copy.js";
 import { PRE_MERGE_COPY } from "../pre-merge-copy.js";
 import { routeHash } from "../route.js";
 import { statusLabel } from "../status.js";
@@ -99,17 +107,6 @@ const isMergeConfirmation = (q: NeedsDecision) =>
   q.trigger === "merge_confirmation";
 const isPausedReview = (q: NeedsDecision) =>
   q.trigger === "review_limit" && q.status === "provisional";
-const reworkOptionLabels: Record<string, string> = {
-  return_for_rework: "退回作者修改",
-  keep: "保留当前产出",
-};
-const reviewOptionLabels: Record<string, string> = {
-  pause: "暂停",
-  raise_limit: "增加轮数",
-  change_approach: "换做法",
-  narrow_scope: "收窄范围",
-  split_card: "拆卡",
-};
 type Props = { client: CardiganClient; projectId: string; revision?: number };
 function cardTitle(q: NeedsDecision, id = q.card_id) {
   return q.related_cards.find((card) => card.id === id)?.title;
@@ -239,65 +236,51 @@ function Decision({
         <p>请安排落实，并在卡片时间线引用 {q.id} 记录执行结果。</p>
       </NeedsRow>
     );
-  return (
-    <NeedsRow
-      {...rowHead}
-      label={`拍板 ${q.id}`}
-      urgent={q.blocking}
-      summary={q.plain_summary?.changed}
-      action={<NeedsOpenAction name={`处理 ${q.id}`} />}
-      bodyClassName="needs-decision"
+  const recommendedTag = (item: Pick<NeedsDecision, "recommended">) =>
+    function tag(key: string) {
+      return (
+        item.recommended === key && <DetailChoiceTag>推荐</DetailChoiceTag>
+      );
+    };
+  const meta = (
+    <DecisionDetailsMeta q={q} projectId={projectId} elapsed={elapsed} />
+  );
+  const form = (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (selected === "" || (noteRequired && !quote.trim())) return;
+        void action.run(
+          [projectId, q.id, "resolve", selected, quote, grantCategory],
+          (key) =>
+            grantCategory
+              ? client.recordDecision(
+                  projectId,
+                  q.id,
+                  selected,
+                  quote,
+                  key,
+                  true,
+                )
+              : client.recordDecision(projectId, q.id, selected, quote, key),
+        );
+      }}
     >
-      <DecisionDetailsMeta q={q} projectId={projectId} elapsed={elapsed} />
-      <PlainSummary id={q.id} summary={q.plain_summary} />
-      <DecisionRouting decision={q} />
-      {q.grouped_decisions ? (
-        <section className="needs-decision-group" aria-label="同类待处理事项">
-          <p>本次只回答 {q.id}，其余事项仍待处理。</p>
-          {q.grouped_decisions.map((item) => (
-            <details className="needs-context" key={item.id}>
-              <summary className="needs-decision-group-summary">
-                {item.id} · {item.question}
-                {" · "}
-                {item.blocking ? "阻塞工作" : "不阻塞工作"}
-              </summary>
-              <EmployeeIdentity {...item} showTitle={false} />
-              <StatusTag status={item.status} />
-              <PlainSummary id={item.id} summary={item.plain_summary} />
-              <DecisionRouting decision={item} />
-              <DecisionContext
-                context={item.context}
-                summary={item.plain_summary}
-                legacy="背景"
-              />
-              {item.approval_target && <p>审批版本：{item.approval_target}</p>}
-              <DecisionAttachments attachments={item.attachments} />
-              <ul>
-                {item.options.map((option) => (
-                  <li key={option.key}>
-                    {option.description}：{option.impact}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          ))}
-        </section>
-      ) : (
-        <>
-          <DecisionContext
-            context={q.context}
-            summary={q.plain_summary}
-            legacy="背景"
-          />
-          <DecisionAttachments attachments={q.attachments} />
-        </>
-      )}
-      {q.grouped_decisions && (
-        <p className="needs-answer-target">
-          当前回答 {q.id} ·{" "}
-          {q.grouped_decisions.find((item) => item.id === q.id)?.question}
-        </p>
-      )}
+      <DecisionChoices
+        q={q}
+        options={options}
+        name={`decision-${q.id}`}
+        selected={selected}
+        onSelect={setOption}
+        legend={q.grouped_decisions ? `回答 ${q.id}：选择方案` : "选择方案"}
+        tag={recommendedTag(q)}
+        detail={(o) =>
+          q.trigger === "review_limit" && o.key === "raise_limit"
+            ? "增加一轮审核额度；审核上限加 1；没有其他阻塞且额度可用时自动恢复审核。"
+            : undefined
+        }
+        focus
+      />
       {!paused && (
         <SuggestedDecision
           q={q}
@@ -308,144 +291,129 @@ function Decision({
           action={action}
         />
       )}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (selected === "" || (noteRequired && !quote.trim())) return;
-          void action.run(
-            [projectId, q.id, "resolve", selected, quote, grantCategory],
-            (key) =>
-              grantCategory
-                ? client.recordDecision(
-                    projectId,
-                    q.id,
-                    selected,
-                    quote,
-                    key,
-                    true,
-                  )
-                : client.recordDecision(projectId, q.id, selected, quote, key),
-          );
-        }}
-      >
-        <fieldset className="needs-options" data-needs-focus="">
-          <legend>
-            {q.grouped_decisions ? `回答 ${q.id}：选择方案` : "选择方案"}
-          </legend>
-          {options.map((o) => (
-            <label
-              key={o.key}
-              className={`needs-option${selected === o.key ? " selected" : ""}`}
-            >
-              <input
-                type="radio"
-                name={`decision-${q.id}`}
-                value={o.key}
-                checked={selected === o.key}
-                onChange={() => setOption(o.key)}
-              />
-              <span>
-                <span className="needs-option-head">
-                  <strong>
-                    {o.key === DECISION_OTHER_OPTION
-                      ? o.description
-                      : q.trigger === "review_limit"
-                        ? (reviewOptionLabels[o.key] ?? o.key)
-                        : q.trigger === "accepted_delivery_rework"
-                          ? (reworkOptionLabels[o.key] ?? o.description)
-                          : o.key}
-                  </strong>
-                  {o.key !== DECISION_OTHER_OPTION && (
-                    <span>
-                      {q.trigger === "review_limit" && o.key === "raise_limit"
-                        ? "增加一轮审核额度"
-                        : o.description}
-                    </span>
-                  )}
-                  {q.recommended === o.key && (
-                    <span className="needs-recommended">推荐</span>
-                  )}
-                </span>
-                <span className="needs-option-impact">
-                  影响：
-                  {q.trigger === "review_limit" && o.key === "raise_limit"
-                    ? "审核上限加 1；没有其他阻塞且额度可用时自动恢复审核。"
-                    : o.impact}
-                </span>
-              </span>
-            </label>
-          ))}
-        </fieldset>
-        {canDelegate && !otherChosen && (
-          <label>
-            <input
-              type="checkbox"
-              checked={delegateFuture}
-              disabled={action.busy}
-              onChange={(e) => setDelegateFuture(e.target.checked)}
-            />
-            此类问题以后由 PM 代拍
-          </label>
-        )}
-        {independentLimit && (
-          <p className="hint">
-            本次加轮由你确认，不会开启常驻授权。请在设置的“授权”中
-            <a
-              href={routeHash({
-                kind: "settings",
-                projectId,
-                filters: { tab: "authorization" },
-              })}
-            >
-              管理独立复核加轮授权
-            </a>
-            ，每项累计最多代批 {independentLimit.max_delegated_raises} 次。
-            没有新版本或触发强制交人条件时仍须你确认；重新开启也不接回已交人的事项。
-          </p>
-        )}
+      {canDelegate && !otherChosen && (
         <label>
-          {scopeRequired
-            ? "本轮移出的范围（必填）"
-            : otherChosen
-              ? "你的决定（必填，会作为你的原话记录）"
-              : "补充说明（可选，会作为你的原话记录）"}
-          <Textarea
-            required={noteRequired}
-            aria-label={`${q.id} 原话或补充说明`}
-            value={quote}
-            onChange={(e) => setQuote(e.target.value)}
+          <input
+            type="checkbox"
+            checked={delegateFuture}
+            disabled={action.busy}
+            onChange={(e) => setDelegateFuture(e.target.checked)}
           />
+          此类问题以后由 PM 代拍
         </label>
-        <div className="action-row">
-          <button type="submit" disabled={action.busy || selected === ""}>
-            {q.grouped_decisions
-              ? resumeOnly && !otherChosen
-                ? `为 ${q.id} 增加一轮审核额度`
-                : `按所选回答 ${q.id}`
-              : resumeOnly && !otherChosen
-                ? "增加一轮审核额度"
-                : "按所选拍板"}
-          </button>
-          {!paused &&
-            (["request_information", "explain"] as const).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                className="quiet"
-                disabled={action.busy || !q.card_id}
-                onClick={() =>
-                  void action.run(
-                    [projectId, q.id, "comments", kind, quote],
-                    (key) =>
-                      client.decisionComment(projectId, q.id, kind, quote, key),
-                  )
-                }
-              >
-                {kind === "request_information" ? "要求补充信息" : "请 PM 解释"}
-              </button>
+      )}
+      {independentLimit && (
+        <p className="hint">
+          本次加轮由你确认，不会开启常驻授权。请在设置的“授权”中
+          <a
+            href={routeHash({
+              kind: "settings",
+              projectId,
+              filters: { tab: "authorization" },
+            })}
+          >
+            管理独立复核加轮授权
+          </a>
+          ，每项累计最多代批 {independentLimit.max_delegated_raises} 次。
+          没有新版本或触发强制交人条件时仍须你确认；重新开启也不接回已交人的事项。
+        </p>
+      )}
+      <label>
+        {scopeRequired
+          ? "本轮移出的范围（必填）"
+          : otherChosen
+            ? "你的决定（必填，会作为你的原话记录）"
+            : "补充说明（可选，会作为你的原话记录）"}
+        <Textarea
+          required={noteRequired}
+          aria-label={`${q.id} 原话或补充说明`}
+          value={quote}
+          onChange={(e) => setQuote(e.target.value)}
+        />
+      </label>
+      <div className="action-row">
+        <button type="submit" disabled={action.busy || selected === ""}>
+          {q.grouped_decisions
+            ? resumeOnly && !otherChosen
+              ? `为 ${q.id} 增加一轮审核额度`
+              : `按所选回答 ${q.id}`
+            : resumeOnly && !otherChosen
+              ? "增加一轮审核额度"
+              : "按所选拍板"}
+        </button>
+        {!paused &&
+          (["request_information", "explain"] as const).map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              className="quiet"
+              disabled={action.busy || !q.card_id}
+              onClick={() =>
+                void action.run(
+                  [projectId, q.id, "comments", kind, quote],
+                  (key) =>
+                    client.decisionComment(projectId, q.id, kind, quote, key),
+                )
+              }
+            >
+              {kind === "request_information" ? "要求补充信息" : "请 PM 解释"}
+            </button>
+          ))}
+      </div>
+    </form>
+  );
+  return (
+    <NeedsRow
+      {...rowHead}
+      label={`拍板 ${q.id}`}
+      urgent={q.blocking}
+      summary={q.plain_summary?.changed}
+      action={<NeedsOpenAction name={`处理 ${q.id}`} />}
+      bodyClassName="needs-decision"
+    >
+      {q.grouped_decisions ? (
+        <>
+          <section className="needs-decision-group" aria-label="同类待处理事项">
+            <p>本次只回答 {q.id}，其余事项仍待处理。</p>
+            {q.grouped_decisions.map((item) => (
+              <details className="needs-context" key={item.id}>
+                <summary className="needs-decision-group-summary">
+                  {item.id} · {item.question}
+                  {" · "}
+                  {item.blocking ? "阻塞工作" : "不阻塞工作"}
+                </summary>
+                <DecisionBrief
+                  decision={item}
+                  projectId={projectId}
+                  details={
+                    <>
+                      <EmployeeIdentity {...item} showTitle={false} />
+                      <StatusTag status={item.status} />
+                      {item.approval_target && (
+                        <p>审批版本：{item.approval_target}</p>
+                      )}
+                    </>
+                  }
+                >
+                  <DecisionOptionList q={item} tag={recommendedTag(item)} />
+                </DecisionBrief>
+              </details>
             ))}
-        </div>
-      </form>
+          </section>
+          <p className="needs-answer-target">
+            当前回答 {q.id} ·{" "}
+            {q.grouped_decisions.find((item) => item.id === q.id)?.question}
+          </p>
+          {form}
+          <DecisionBriefDetails summary={PLAIN_SUMMARY_COPY.details}>
+            {meta}
+          </DecisionBriefDetails>
+        </>
+      ) : (
+        <DecisionBrief decision={q} projectId={projectId} details={meta}>
+          {form}
+        </DecisionBrief>
+      )}
       {!q.card_id && <p className="hint">项目级事项请在 PM 对话中补充说明。</p>}
       {q.trigger === "worktree_cleanup" && q.assignment_id && (
         <CopyCommand

@@ -409,7 +409,7 @@ test("decision cards collapse the background, do not preselect an option and exp
   expect(within(card).queryByText("待拍板")).toBeNull();
   expect(within(card).queryByText("等待合并确认")).toBeNull();
   expect(screen.getByText("这是需要折叠的完整背景。")).toBeTruthy();
-  const background = within(card).getByText("背景").closest("details");
+  const background = within(card).getByText("详细信息").closest("details");
   expect(background?.open).toBe(false);
   const radios = within(card).getAllByRole("radio");
   expect(radios).toHaveLength(3);
@@ -417,7 +417,9 @@ test("decision cards collapse the background, do not preselect an option and exp
   for (const radio of radios)
     expect((radio as HTMLInputElement).checked).toBe(false);
   expect(within(card).getByText("推荐")).toBeTruthy();
-  expect(within(card).getByText("影响：影响 A")).toBeTruthy();
+  expect(within(card).getByText("影响 A")).toBeTruthy();
+  // C-810: options read by their names; the stored keys are not shown.
+  expect(within(card).queryByText("a")).toBeNull();
   const submit = within(card).getByRole("button", { name: "按所选拍板" });
   expect((submit as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(radios[1] as HTMLInputElement);
@@ -1348,7 +1350,7 @@ test.each(["decision", "clarification", "completion"] as const)(
     );
     await screen.findByText("需要连接设备");
     if (kind === "decision")
-      fireEvent.click(screen.getByRole("radio", { name: /merge/u }));
+      fireEvent.click(screen.getByRole("radio", { name: /^合并/u }));
     const input = kind === "completion" ? "H-1 执行结果" : "Q-1 原话或补充说明";
     const button =
       kind === "completion"
@@ -1604,7 +1606,7 @@ test("answering a human scope decision can grant future PM authority in the same
   fireEvent.click(
     await screen.findByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
   );
-  fireEvent.click(screen.getByRole("radio", { name: /merge/ }));
+  fireEvent.click(screen.getByRole("radio", { name: /^合并/ }));
   fireEvent.click(screen.getByRole("button", { name: "按所选拍板" }));
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { AttachmentView } from "../api.js";
 import { attachmentRefKind, formatBytes } from "../attachment-refs.js";
 import { attachmentName } from "./AttachmentCaption.js";
@@ -115,6 +116,7 @@ export function AttachmentList({
   basis = "shown",
   flow = false,
   anchor = false,
+  more,
 }: {
   attachments: readonly AttachmentView[];
   label?: string;
@@ -123,6 +125,8 @@ export function AttachmentList({
   flow?: boolean;
   /** The attachments tab: each tile is the `attachment-<id>` anchor. */
   anchor?: boolean;
+  /** A last entry after the tiles, e.g. a decision's “还有 N 个”. */
+  more?: ReactNode;
 }) {
   const sorted = [
     ...attachments.filter(hasPreview),
@@ -130,7 +134,7 @@ export function AttachmentList({
   ];
   const images = sorted.filter(isBitmap);
   return (
-    <AttachmentTileGrid label={label} flow={flow}>
+    <AttachmentTileGrid label={label} flow={flow} more={more}>
       {sorted.map((a) => (
         <AttachmentCard
           key={a.id}

@@ -29,6 +29,10 @@
   .tile[data-kind="media"] + .tile[data-kind="file"] {
     grid-column-start: 1;
   }
+  .more {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
   .tile {
     display: flex;
     flex-direction: column;

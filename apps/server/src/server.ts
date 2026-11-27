@@ -111,6 +111,7 @@ import {
 import { apkPublisher } from "./publish-artifact.js";
 import { approvalPrecheck } from "./publish-precheck.js";
 import { RepositoryLockMetrics } from "./repository-lock-metrics.js";
+import { backfillStreamedInlineImages } from "./streamed-image-backfill.js";
 import {
   clearTickProfileSync,
   releaseSha,
@@ -381,6 +382,18 @@ async function assembleServer(
   // M4.5: stamp `standing_mode` on rows written before the field existed, so
   // routing and token issuance only ever read the field.
   store.backfillStandingModes();
+  // C-819: streamed images uploaded before C-809's check get its verdict once.
+  if (options.role !== "web") {
+    try {
+      const images = await backfillStreamedInlineImages(store, config.dataDir);
+      if (images.inline || images.download || images.skipped)
+        warnLine(
+          `旧流式图片补标记：可内嵌 ${images.inline} 条，只给下载 ${images.download} 条，文件不在本机跳过 ${images.skipped} 条`,
+        );
+    } catch {
+      warnLine("旧流式图片补标记未完成，下次启动重试");
+    }
+  }
   const mergeGate = await loadMergeGateConfig({
     dataDir: config.dataDir,
     baseBranches: Object.fromEntries(

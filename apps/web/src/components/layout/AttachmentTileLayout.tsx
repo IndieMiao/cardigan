@@ -15,16 +15,20 @@ import styles from "./AttachmentTileLayout.module.css";
 export function AttachmentTileGrid({
   label,
   flow = false,
+  more,
   children,
 }: {
   label?: string | undefined;
   /** Inside flowing content (a timeline entry, a decision): space around. */
   flow?: boolean;
+  /** A last entry on a row of its own, e.g. “还有 N 个”. */
+  more?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <ul className={cn(styles.grid, flow && styles.flow)} aria-label={label}>
       {children}
+      {more && <li className={styles.more}>{more}</li>}
     </ul>
   );
 }
