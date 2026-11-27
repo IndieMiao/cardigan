@@ -645,14 +645,56 @@ test("C-833: a launch records the machine's adb environment; sessions from befor
   // The replacement's launch records the new environment.
   launchDevices(after, "first", "local", launched.id, later(1000));
   expect(after.sessions.stale("first", live)).toBe(false);
-  // A session without a launch generation cannot show its environment.
+  // A session without a launch generation (every local one) is judged by
+  // its Assignment's latest launch: the replacement's record.
   const { launch_generation: _, ...legacyRef } = live.runtime_ref ?? {};
   expect(
     after.sessions.stale("first", {
       ...live,
       runtime_ref: legacyRef,
     } as typeof owner),
-  ).toBe(true);
+  ).toBe(false);
+});
+
+test("C-833: a local session (no launch generation) is replaced once after the switch, not at every wake", async () => {
+  const { probe } = fakeProbe();
+  const { owner } = needs(1, ["other"]);
+  const first = { ...run(1), status: "completed", started_at: at } as Run;
+  setStatus(first, {});
+  // As a real local launch: no launch generation on the runtime reference.
+  const live = {
+    ...owner,
+    runtime_ref: {
+      machine_id: "local",
+      runtime_machine: "local",
+      terminal_ref: "t1",
+      agent_name: "coder",
+    },
+  } as typeof owner;
+  const unmanaged = new MachineLeases(
+    store,
+    await config(undefined, { adb_slots: undefined }),
+    probe,
+  );
+  launchDevices(unmanaged, "first", "local", first.id, at);
+  const l = new MachineLeases(store, await config(), probe);
+  expect(l.sessions.stale("first", live)).toBe(true);
+  // The replacement session of the same Assignment records the new setup.
+  const second = {
+    ...run(2),
+    assignment_id: owner.id,
+    trigger_event_id: "evt-second",
+  } as Run;
+  store.uow.run((tx) =>
+    tx.runs.put("first", {
+      ...second,
+      status: "running",
+      started_at: later(1000),
+    }),
+  );
+  launchDevices(l, "first", "local", second.id, later(1000));
+  expect(l.sessions.stale("first", live)).toBe(false);
+  expect(l.freshSession("first", live)).toBe(false);
 });
 
 test("C-833: old sessions are judged by their launch environment, not the time: launched before slots, or after without machine leases (before C-834)", async () => {
