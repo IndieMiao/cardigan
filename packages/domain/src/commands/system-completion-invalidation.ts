@@ -43,7 +43,10 @@ export function invalidateCompletion(
   d: CommandDraft,
   card: Card,
   target: Delivery,
-  reason: "source_changed" | "required_verifier_added" = "source_changed",
+  reason:
+    | "source_changed"
+    | "required_verifier_added"
+    | "independent_review_recheck" = "source_changed",
 ) {
   supersedeDelivery(d, card, target);
   for (const id of target.requested_verifiers) {
@@ -95,7 +98,9 @@ export function invalidateCompletion(
       body:
         reason === "source_changed"
           ? "系统完成申请的产出或审核依据已变化，原申请和确认已作废。"
-          : "新增必需验证项，原完成申请和确认已作废，等待审核完成后重新申请。",
+          : reason === "independent_review_recheck"
+            ? "独立复核须对当前版本重新核对，原完成申请和确认已作废，复核通过后重新申请。"
+            : "新增必需验证项，原完成申请和确认已作废，等待审核完成后重新申请。",
     },
   );
 }

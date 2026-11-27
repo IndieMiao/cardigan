@@ -1,7 +1,10 @@
+import { deriveCardStatus } from "../derived.js";
 import type { Actor, Delivery, PlainSummary } from "../entities.js";
 import { appendEvents } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
+import { mergeBatches } from "../merge-batch.js";
+import { transition } from "../transitions.js";
 import {
   completionSources,
   missingIndependentReview,
@@ -15,8 +18,14 @@ import {
 } from "./core.js";
 import { systemCompletionSubmission } from "./delivery.js";
 import { refreshFastPatch } from "./fast-patch.js";
+import { independentReviewRechecks } from "./independent-review-recheck.js";
+import { latestMergeCheck } from "./merge-check-view.js";
 import { PLAIN_SUMMARY_LIMITS } from "./plain-summary.js";
-import { invalidateSystemCompletions } from "./system-completion-invalidation.js";
+import { screenshotCheckEnforced } from "./screenshot-check.js";
+import {
+  invalidateCompletion,
+  invalidateSystemCompletions,
+} from "./system-completion-invalidation.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import { resolveCardTemplate } from "./templates.js";
 
@@ -29,9 +38,113 @@ export function systemCompleteCard(
 ) {
   return command(state, actor, "system_complete_card", ports, (d) => {
     refreshFastPatch(d, p.card_id);
+    reopenIndependentReview(d, p.card_id);
     invalidateSystemCompletions(d, p.card_id);
     return aggregateCompletion(d, p.card_id);
   });
+}
+
+/**
+ * C-805: when the merge gate no longer accepts a passed independent review,
+ * the review item gets its target back instead of waiting at a gate that
+ * accepts no review. The target delivery returns to review, the completion
+ * built on the old conclusion is revoked, and the reviewer is notified.
+ */
+function reopenIndependentReview(d: CommandDraft, cardId: CardId): void {
+  const card = d.card(cardId);
+  if (
+    card.hold ||
+    !flowAtLeast(card, 5) ||
+    ["backlog", "todo", "done", "cancelled"].includes(card.status) ||
+    appendEvents(d.state.events, d.events).some(
+      (e) => e.card_id === card.id && e.type === "card_merged",
+    )
+  )
+    return;
+  const completions = d
+    .list("deliveries")
+    .filter(
+      (v) =>
+        v.kind === "card_completion" &&
+        v.status !== "superseded" &&
+        d.work(v.work_item_id).card_id === card.id,
+    );
+  // A merge already running or publishing finishes on its own terms.
+  if (
+    completions.some(
+      (v) =>
+        latestMergeCheck(d.state.events, card.id, v.id)?.status === "running",
+    ) ||
+    mergeBatches(d.state.events).some(
+      (b) =>
+        (b.status === "publishing" || b.check?.status === "running") &&
+        !["published", "aborted", "resolved"].includes(b.status) &&
+        b.members.some((m) => m.card_id === card.id),
+    )
+  )
+    return;
+  const rechecks = independentReviewRechecks(
+    { work_items: d.list("work_items"), deliveries: d.list("deliveries") },
+    card,
+    screenshotCheckEnforced({
+      project_id: d.state.project_id,
+      project_preferences: d.list("project_preferences"),
+    }),
+  );
+  if (!rechecks.length) return;
+  for (const { item, producer, target } of rechecks) {
+    const delivery = d.get("deliveries", target.id);
+    d.put("deliveries", {
+      ...delivery,
+      status:
+        delivery.status === "accepted"
+          ? unwrap(transition("delivery", delivery.status, "require_review"))
+          : delivery.status,
+      requested_verifiers: delivery.requested_verifiers.includes(item.id)
+        ? delivery.requested_verifiers
+        : [...delivery.requested_verifiers, item.id],
+    });
+    const owner = d.work(producer.id);
+    if (owner.status === "accepted")
+      d.put("work_items", d.move(owner, "delivery_submitted"));
+    d.put("work_items", d.move(d.work(item.id), "target_redelivered"));
+    d.emit(
+      "delivery_verifier_added",
+      card.id,
+      {
+        delivery_id: target.id,
+        target_work_item_id: producer.id,
+        work_item_id: item.id,
+        target_sha: target.subject.value,
+        previous_status: target.status,
+        reason: "independent_review_recheck",
+      },
+      {
+        type: "system",
+        author: "system",
+        work_item_id: item.id,
+        delivery_id: target.id,
+        body: `合并前核对“独立复核”对当前版本不再有效，${item.id} 重新复核交付 ${target.id}。`,
+      },
+    );
+  }
+  for (const completion of completions)
+    if (d.get("deliveries", completion.id).status !== "superseded")
+      invalidateCompletion(
+        d,
+        d.card(card.id),
+        completion,
+        "independent_review_recheck",
+      );
+  const current = d.card(card.id);
+  if (!["done", "cancelled", "awaiting_merge"].includes(current.status))
+    d.put("cards", {
+      ...current,
+      status: deriveCardStatus(
+        current.status,
+        d.list("work_items").filter((w) => w.card_id === card.id),
+      ),
+    });
 }
 
 function aggregateCompletion(d: CommandDraft, cardId: CardId): Delivery | null {
