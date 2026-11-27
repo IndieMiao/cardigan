@@ -1,3 +1,4 @@
+import { waitsOnOwner } from "@cardigan/domain";
 import { ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -106,10 +107,7 @@ const idNumber = (id: string): number => {
 const nextKind = (card: CardListItem): "human" | "agent" | "none" => {
   if (
     card.next_owners.some((owner) => owner.kind === "human") ||
-    card.waiting_on.some(
-      (waiting) =>
-        waiting.kind === "decision" || waiting.kind === "human_action",
-    )
+    card.waiting_on.some(waitsOnOwner)
   )
     return "human";
   if (

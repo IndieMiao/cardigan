@@ -12,7 +12,7 @@ const fields = [
       ["decision", "拍板"],
       ["comment", "评论"],
       ["instruction", "指令"],
-      ["human_action", "待你执行"],
+      ["human_action", "人工事项"],
       ["handoff", "交接"],
       ["system", "系统"],
     ],

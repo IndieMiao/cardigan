@@ -195,7 +195,12 @@ describe("waiting_on", () => {
   test("includes an unresolved blocking decision", () => {
     const waiting = deriveWaitingOn(input({ decisions: [decision()] }));
     expect(waiting).toEqual([
-      { kind: "decision", ref: "q(1)", label: "等你拍板 q(1)" },
+      {
+        kind: "decision",
+        ref: "q(1)",
+        label: "等你拍板 q(1)",
+        handler: "owner",
+      },
     ]);
   });
 

@@ -59,6 +59,8 @@ export type NextStepState =
       readonly q: DecisionView | undefined;
     }
   | { readonly kind: "human-action"; readonly item: WaitingOnItem }
+  /** C-822: a human action someone else (张良, PM, host ops) handles now. */
+  | { readonly kind: "human-action-other"; readonly item: WaitingOnItem }
   | { readonly kind: "questions"; readonly open: number }
   | { readonly kind: "proposal" }
   | { readonly kind: "mark-done" }
@@ -74,6 +76,19 @@ const otherStep = {
   review: "完成审核",
   blocked: "解除阻塞",
 } as const;
+
+/** C-822: what the panel calls a human action, by who handles it now. */
+const ACTION_STEP: Readonly<
+  Record<NonNullable<WaitingOnItem["handler"]>, string>
+> = {
+  owner: "等你执行",
+  operator: "交给张良",
+  pm: "PM 处理中",
+  host: "待主机操作",
+  system: "等待系统处理",
+};
+/** Older servers omit the handler: the item was the owner's. */
+const handlerOf = (item: WaitingOnItem) => item.handler ?? "owner";
 
 const failedCheck = (q: NeedsDecision) => {
   const merge = q.merge_confirmation;
@@ -116,7 +131,13 @@ export function cardNextSteps(detail: CardDetail): {
     )
       continue;
     const q = detail.decisions.find((d) => d.id === item.ref);
-    if (q ? q.decider === "human" : humanOwner)
+    if (
+      item.handler
+        ? item.handler === "owner"
+        : q
+          ? q.decider === "human"
+          : humanOwner
+    )
       mine.push({ kind: "decision", ref: item.ref, q });
   }
   // C-698: a non-blocking decision is not in waiting_on but still waits on
@@ -130,9 +151,11 @@ export function cardNextSteps(detail: CardDetail): {
       !confirmations.some((merge) => merge.id === q.id)
     )
       mine.push({ kind: "decision", ref: q.id, q });
+  // C-822: only the owner's actions wait on you; 张良's, PM triage and host
+  // actions are shown below as someone else's step.
   if (!generalDone)
     for (const item of waiting)
-      if (item.kind === "human_action")
+      if (item.kind === "human_action" && handlerOf(item) === "owner")
         mine.push({ kind: "human-action", item });
   const open = (card.story?.question_groups ?? []).reduce(
     (n, group) => n + group.questions.filter((q) => !q.resolution).length,
@@ -168,6 +191,11 @@ export function cardNextSteps(detail: CardDetail): {
   const settled = confirmations.find((q) => q.status === "resolved");
   if (settled)
     return { current: { kind: "merge-confirmed", q: settled }, more: 0 };
+  const others = waiting.find(
+    (item) => item.kind === "human_action" && handlerOf(item) !== "owner",
+  );
+  if (others && !generalDone)
+    return { current: { kind: "human-action-other", item: others }, more: 0 };
   const blocked = waiting.filter(
     (item) => item.kind === "blocked" && !precheckWait(item),
   );
@@ -292,19 +320,24 @@ export function CardNextStep({
   );
   const actionTitle = (id: string) =>
     detail.human_actions.find((action) => action.id === id)?.instructions;
-  const humanActionLine = humanActions.length > 0 && (
-    <DetailNextStepLine>
-      等你执行
-      {humanActions.map((item) => (
-        <IdTag
-          key={item.ref}
-          id={item.ref}
-          label={actionTitle(item.ref)}
-          href={needsYou}
-        />
-      ))}
-    </DetailNextStepLine>
-  );
+  // C-822: one line per handler, named as the panel and Needs You name it.
+  const humanActionLine =
+    humanActions.length > 0 &&
+    [...new Set(humanActions.map(handlerOf))].map((handler) => (
+      <DetailNextStepLine key={handler}>
+        {ACTION_STEP[handler]}
+        {humanActions
+          .filter((item) => handlerOf(item) === handler)
+          .map((item) => (
+            <IdTag
+              key={item.ref}
+              id={item.ref}
+              label={actionTitle(item.ref)}
+              href={needsYou}
+            />
+          ))}
+      </DetailNextStepLine>
+    ));
   const checkLine = (checks.precheck || checks.mergeCheck) && (
     <DetailNextStepLine>
       {checks.precheck &&
@@ -480,10 +513,23 @@ export function CardNextStep({
       }
       break;
     }
+    case "human-action-other":
+      mine = false;
+      title = (
+        <>
+          {ACTION_STEP[handlerOf(current.item)]}
+          <IdBadge id={current.item.ref} />
+        </>
+      );
+      lines = actionTitle(current.item.ref) && (
+        <DetailNextStepLine>{actionTitle(current.item.ref)}</DetailNextStepLine>
+      );
+      actions = comment;
+      break;
     case "human-action":
       title = (
         <>
-          等你执行
+          {ACTION_STEP.owner}
           <IdBadge id={current.item.ref} />
         </>
       );

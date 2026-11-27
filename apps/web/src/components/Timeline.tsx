@@ -1,6 +1,7 @@
 import type {
   AttachmentView,
   CardDetail,
+  PendingHandler,
   ReferencedAttachment,
   TimelineEntryView,
 } from "../api.js";
@@ -44,11 +45,25 @@ const TYPE_LABELS: Readonly<Record<string, string>> = {
   review: "审核",
   decision_request: "请求拍板",
   decision_resolved: "拍板结果",
-  human_action: "待你执行",
+  human_action: "人工事项",
   handoff: "交接",
   status_change: "状态变化",
   system: "系统",
 };
+
+/** C-822: a human action's entries name who handles it now, as Needs You does. */
+const HUMAN_ACTION_LABELS: Readonly<Record<PendingHandler, string>> = {
+  owner: "待你执行",
+  operator: "交给张良",
+  pm: "PM 处理中",
+  host: "待主机操作",
+  system: "人工事项",
+  done: "人工事项已处理",
+};
+const entryLabel = (entry: TimelineEntryView) =>
+  entry.type === "human_action" && entry.human_action_handler
+    ? HUMAN_ACTION_LABELS[entry.human_action_handler]
+    : (TYPE_LABELS[entry.type] ?? "系统记录");
 
 export const decisionStatusLabel = statusLabel;
 
@@ -248,10 +263,7 @@ export function Timeline({
           />
         ) : (
           <>
-            <TimelineHeader
-              entry={entry}
-              action={TYPE_LABELS[entry.type] ?? "系统记录"}
-            />
+            <TimelineHeader entry={entry} action={entryLabel(entry)} />
             <LongContent
               lines={["comment", "instruction"].includes(entry.type) ? 15 : 6}
             >

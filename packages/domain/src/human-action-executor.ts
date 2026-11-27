@@ -1,5 +1,6 @@
 import type {
   Assignment,
+  Decision,
   HumanAction,
   HumanActionExecutor,
   RoleReference,
@@ -82,6 +83,43 @@ export function humanActionExecutor(
 
 export function isOperatorAction(action: Pick<HumanAction, "executor">) {
   return humanActionExecutor(action) === "operator";
+}
+
+/**
+ * C-822: who has to act on a human action or decision right now. Needs You
+ * counts, the sidebar badge, the card's next step and its timeline all read
+ * this one answer: `owner` is the project owner, `operator` is 张良, `pm` is
+ * PM triage (or a PM-decided question), `host` is host operations, `system`
+ * a system decision and `done` a settled item.
+ */
+export type PendingHandler =
+  | "owner"
+  | "operator"
+  | "pm"
+  | "host"
+  | "system"
+  | "done";
+
+/** PM triage comes first: its executor applies once it reaches someone. */
+export function humanActionHandler(
+  action: Pick<HumanAction, "status" | "triage" | "executor">,
+): PendingHandler {
+  if (action.status !== "open") return "done";
+  if (action.triage === "pm_ops") return "pm";
+  if (isOperatorAction(action)) return "operator";
+  return action.triage === "host" ? "host" : "owner";
+}
+
+export function decisionHandler(
+  decision: Pick<Decision, "status" | "decider">,
+): PendingHandler {
+  if (!["open", "provisional", "snoozed"].includes(decision.status))
+    return "done";
+  return decision.decider === "human"
+    ? "owner"
+    : decision.decider === "system"
+      ? "system"
+      : "pm";
 }
 
 /**

@@ -59,11 +59,16 @@ export function fixtureNeedsCounts(page: NeedsPage): NeedsCounts {
     fixtureNeedsSection(page, "decisions").decisions.length +
     (page.story_proposals?.length ?? 0);
   const merges = fixtureNeedsSection(page, "merges").decisions.length;
-  const actions = page.human_actions.filter((a) => a.triage !== "host").length;
+  // C-822: the server counts only the owner's actions, as `handler` says.
+  const actions = page.human_actions.filter((a) =>
+    a.handler
+      ? a.handler === "owner"
+      : a.triage !== "host" && a.executor !== "operator",
+  ).length;
   const attention = page.incidents.length + (page.attention?.length ?? 0);
   const system = page.system_rule_attention?.length ?? 0;
   return {
-    total_pending: decisions + merges + actions + attention,
+    total_pending: decisions + merges + actions + attention + system,
     tabs: {
       decisions: { count: decisions, attention: decisions },
       merges: {

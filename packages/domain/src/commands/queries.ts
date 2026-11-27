@@ -29,7 +29,7 @@ import type {
 } from "../entities.js";
 import { eventsForDecision, eventsOfType } from "../event-index.js";
 import { cardFlowVersion } from "../flow.js";
-import { isOperatorAction } from "../human-action-executor.js";
+import { humanActionHandler } from "../human-action-executor.js";
 import type { CardId, WorkItemId } from "../ids.js";
 import { effectiveWorkItemRequirements } from "../machine-requirements.js";
 import { mergeBatches } from "../merge-batch.js";
@@ -840,21 +840,25 @@ export function listNeedsYouCounts(
     // Story proposals count with decisions and never against merges.
     const decisionCount = decisionsOnly + data.story_proposals.length;
     const mergeCount = data.decisions.length - decisionsOnly;
-    // C-742: operator actions are listed apart and never count as the owner's.
+    // C-742/C-822: only the owner's actions count; 张良's, PM triage and
+    // host actions are listed apart.
     const humanActions = data.human_actions.filter(
-      (h) => h.triage !== "host" && !isOperatorAction(h),
+      (h) => h.handler === "owner",
     ).length;
     const attention = data.incidents.length + data.attention.length;
     const toClose = data.cards_to_close.length;
     const noticeList = notices(state);
     const unread = noticeList.filter((n) => !n.read).length;
+    // C-822: the header and the sidebar badge are the sum of what the three
+    // working tabs count as the owner's.
     return {
       total_pending:
         data.decisions.length +
         data.story_proposals.length +
         humanActions +
         toClose +
-        attention,
+        attention +
+        data.system_rule_attention.length,
       tabs: {
         decisions: { count: decisionCount, attention: decisionCount },
         merges: {
@@ -1201,6 +1205,8 @@ function selectNeedsYou<T>(
           )
           .map((h) => ({
             ...h,
+            // C-822: an unclaimed completion notice is the owner's to pass on.
+            handler: h.status === "done" ? "owner" : humanActionHandler(h),
             why: why(
               h.status === "done"
                 ? "已完成，但发起方不可用且无活跃 PM Ops 接手"

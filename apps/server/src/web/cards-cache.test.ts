@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { waitsOnOwner } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import {
@@ -97,12 +98,7 @@ test("selectors preserve the full synthetic workflow distribution, including rev
         held: Number(Boolean(c.hold)),
         needs_me: Number(needsMe(c)),
         agent: Number(waitingOnAgent(c)),
-        human: Number(
-          needsMe(c) ||
-            c.waiting_on.some((w) =>
-              ["decision", "human_action"].includes(w.kind),
-            ),
-        ),
+        human: Number(needsMe(c) || c.waiting_on.some(waitsOnOwner)),
         blocked: Number(
           c.waiting_on.some((w) => ["blocked", "review"].includes(w.kind)),
         ),

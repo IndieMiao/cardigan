@@ -41,6 +41,7 @@ import {
   extractQualifiedReferences,
   extractReferences,
   hasVerifiedMergeNoop,
+  humanActionHandler,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   INLINE_IMAGE_MIME_TYPES,
@@ -1173,10 +1174,16 @@ export function cardDetail(
       entry,
       state.attachments,
     );
+    // C-822: a human action's entries say who handles it now.
+    const action =
+      entry.type === "human_action" && entry.human_action_id
+        ? human_actions.find((a) => a.id === entry.human_action_id)
+        : undefined;
     return {
       ...entry,
       body,
       ...webAuthorView(state, entry.author),
+      ...(action ? { human_action_handler: humanActionHandler(action) } : {}),
       event_type: event?.type ?? null,
       ...(event?.type === "merge_check_blocked"
         ? { merge_check_blocker: event.payload as unknown as MergeCheckBlocker }
@@ -1842,6 +1849,8 @@ export function needsYou(
         ? { host_operator: action.host_operator ?? "host_ops" }
         : {}),
       executor: action.executor ?? "owner",
+      // C-822: who handles it now; every Needs You count reads this.
+      handler: action.handler,
       triage_rationale: action.triage_rationale ?? null,
       blocked_work_items: action.blocked_work_items,
       // C-760: the owner can switch between a merge hold and a follow-up.

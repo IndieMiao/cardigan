@@ -80,7 +80,14 @@ export interface WaitingOnItem {
   readonly kind: "decision" | "human_action" | "review" | "blocked";
   readonly ref: string;
   readonly label: string;
+  /** C-822: who acts on a decision or human action now. */
+  readonly handler?: NonNullable<
+    import("@cardigan/domain").WaitingOnItem["handler"]
+  >;
 }
+
+/** C-822: who acts on a human action or decision now. */
+export type PendingHandler = import("@cardigan/domain").PendingHandler;
 
 export interface NextOwnerItem extends AuthorView {
   readonly kind: "human" | "role" | "assignment";
@@ -450,6 +457,8 @@ export interface TimelineEntryView extends AuthorView {
   readonly delivery_id?: string;
   readonly decision_id?: string;
   readonly human_action_id?: string;
+  /** C-822: who acts on the entry's human action now; `done` once settled. */
+  readonly human_action_handler?: PendingHandler;
   /** What the body spelled; the server-resolved form is `references`. */
   readonly refs: readonly Reference[];
   /** Resolved references with existence and status (`references` in JSON). */
@@ -1020,6 +1029,8 @@ export interface NeedsAction
   readonly host_operator?: "external" | "host_ops";
   /** C-742: `operator` actions belong to 张良; absent on older servers means owner. */
   readonly executor?: "owner" | "operator";
+  /** C-822: who acts on it now; every Needs You count reads this. */
+  readonly handler?: PendingHandler;
   readonly handoff?: HumanActionHandoffView;
   readonly original_request?: {
     readonly instructions: string;
