@@ -40,6 +40,11 @@ import {
   dispatchStallCauses,
 } from "./dispatch-stalls.js";
 import { heldBacklogMs, heldBacklogs } from "./held-backlog.js";
+import {
+  boundIdlePrompt,
+  idlePromptBinding,
+  sessionHarness,
+} from "./idle-prompt.js";
 import { releaseExitedAgent } from "./idle-session-retirement.js";
 import {
   observeTurnOwner,
@@ -217,7 +222,7 @@ const retirementNextStep =
   "系统会复查原通知；请主机运维从派发停滞核对终端名字、归属及客户端状态，确认空闲后续办。不能确认时保留会话，不自动重启。";
 /** C-739: what PM can do about a turn the system could not settle. */
 function managedReleaseNextStep(id: Assignment["id"]) {
-  return `系统没有自动释放 ${id} 的旧会话（原因见 reason），原通知和排队的 Run 保留。PM 核对后可执行受管释放：${managedReleaseCommand(id)}（不带 --hold；确认旧会话退出后，排队的工作在新会话中派发）。工作区有未提交改动时，先确认这些改动可以留在原工作区。`;
+  return `系统没有自动释放 ${id} 的旧会话（原因见 reason），原通知和排队的 Run 保留。主机运维可用 host_ops_stop_assignment 受管停止（上一轮已结束、Agent 报 done 或停在空输入框时可用，保留工作区和分支）。PM 核对后可执行受管释放：${managedReleaseCommand(id)}（不带 --hold；确认旧会话退出后，排队的工作在新会话中派发）。工作区有未提交改动时，先确认这些改动可以留在原工作区。`;
 }
 /** C-739: the managed release entry for a system-ended turn incident. */
 function turnFollowUp(
@@ -1103,6 +1108,19 @@ export class StallPatrol {
       false,
       true,
     );
+    // C-838: Claude Code and Codex never report activity to hc; their
+    // ended turn counts as idle only on the bound empty editor.
+    const idlePrompt =
+      stalled.trigger === "turn_done" &&
+      status?.ok &&
+      status.value.process === "alive" &&
+      status.value.agent === "unknown" &&
+      !status.value.kept
+        ? idlePromptBinding(project, a, sessionHarness(state, a))
+        : undefined;
+    const idle_prompt = idlePrompt
+      ? await boundIdlePrompt(this.runtime, ref, idlePrompt)
+      : undefined;
     if (this.signal.aborted) return "skipped";
     const observedOwner = owner?.ok ? owner.value : "unobserved";
     const decision = stalledSessionDecision({
@@ -1111,12 +1129,16 @@ export class StallPatrol {
       status: status?.ok ? status.value : undefined,
       owner: observedOwner,
       workspace,
+      ...(idle_prompt !== undefined ? { idle_prompt } : {}),
     });
     const facts = {
       workspace,
       terminal_state: status?.ok ? status.value.agent : null,
       process_state: status?.ok ? status.value.process : null,
       terminal_owner: observedOwner,
+      ...(idle_prompt !== undefined
+        ? { idle_prompt: idle_prompt ? "shown" : "not_shown" }
+        : {}),
     };
     if (decision.action === "skip") return "skipped";
     if (decision.action === "hand_off") {
@@ -1146,6 +1168,7 @@ export class StallPatrol {
               s.incident === stalled.incident,
           ),
         scrubCredentials: this.scrubCredentials,
+        ...(decision.idle_basis === "bound_idle_prompt" ? { idlePrompt } : {}),
       },
     );
     if (result.outcome === "settled") return "released";

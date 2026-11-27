@@ -497,10 +497,10 @@ test("Host Ops does not close a remote terminal on an unreadable worker journal 
 
 // C-759: the previous turn ended, the CLI reports `done` and its session
 // stays live while a queued Run waits (sensen A-461, cardigan-ci).
-function idle(agent: "done" | "working" = "done") {
+function idle(agent: "done" | "working" | "unknown" = "done") {
   const f = remote(true);
   const original = vi.mocked(f.runtime.status).getMockImplementation()!;
-  let state: "done" | "working" = agent;
+  let state: "done" | "working" | "unknown" = agent;
   vi.mocked(f.runtime.status).mockImplementation(async (ref) => {
     const seen = await original(ref);
     return seen.ok && seen.value.process === "alive"
@@ -516,7 +516,7 @@ function idle(agent: "done" | "working" = "done") {
   return {
     ...f,
     stop,
-    set agent(value: "done" | "working") {
+    set agent(value: "done" | "working" | "unknown") {
       state = value;
     },
   };
@@ -589,4 +589,98 @@ test("C-759: Host Ops stop is refused while the Agent works or a Run of the sess
   for (const x of [f, g]) expect(x.runtime.release).not.toHaveBeenCalled();
   expect(f.owner().runtime_ref).toEqual(old);
   await expect(f.stop(" ")).rejects.toBeDefined();
+});
+
+/** C-838: a Claude Code session: hc never has its activity (`unknown`). */
+function claudeIdle(editor: () => boolean) {
+  const f = idle("unknown");
+  const ended = queue(f);
+  f.store.uow.run((tx) =>
+    tx.runs.put(f.project, {
+      ...ended,
+      status: "completed",
+      outcome: "completed",
+      summary: "fixture",
+      harness: "claude-code",
+      started_at: f.clock.now(),
+      finished_at: f.clock.now(),
+    } as Run),
+  );
+  const observe_prompt = vi.fn<NonNullable<Runtime["observe_prompt"]>>(
+    async () => ({ ok: true, value: editor() }),
+  );
+  f.runtime.observe_prompt = observe_prompt;
+  // Keep the `agent` setter.
+  return Object.assign(f, { observe_prompt });
+}
+
+test("C-838: Host Ops stops an ended Claude Code turn with no reported activity on its bound empty editor", async () => {
+  const f = claudeIdle(() => true);
+  const old = f.owner().runtime_ref!;
+  const run = queue(f);
+  expect(await f.stop()).toMatchObject({
+    assignment_id: f.owner().id,
+    result: "session_stopped",
+    basis: "bound_idle_prompt",
+  });
+  // Read before deciding and again right before closing.
+  expect(f.observe_prompt).toHaveBeenCalledTimes(2);
+  expect(f.observe_prompt).toHaveBeenCalledWith(old, {
+    project_id: f.project,
+    assignment_id: f.owner().id,
+    harness: "claude-code",
+  });
+  expect(f.runtime.release).toHaveBeenCalledExactlyOnceWith(old, {
+    force: true,
+  });
+  expect(f.owner()).toMatchObject({ runtime_ref: null });
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("queued");
+});
+
+test("C-838: without the editor, Host Ops stop of an unknown session is refused with next steps, not the host CLI", async () => {
+  const f = claudeIdle(() => false);
+  queue(f);
+  const refusal = await f.stop().then(
+    () => undefined,
+    (e: { code: string; message: string }) => e,
+  );
+  expect(refusal).toMatchObject({ code: "illegal_transition" });
+  const message = refusal?.message ?? "";
+  expect(message).toContain("读不到 Agent 的活动状态（unknown）");
+  expect(message).toContain("下一步");
+  expect(message).toContain("host_ops_read_diagnostics");
+  expect(message).toContain("停滞巡检");
+  expect(message).toContain("请 PM 在卡上点名该指派");
+  expect(message).not.toContain("cardigan assignment stop");
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  // Shown when deciding, gone right before closing: still refused.
+  let calls = 0;
+  const g = claudeIdle(() => ++calls === 1);
+  queue(g);
+  await expect(g.stop()).rejects.toMatchObject({
+    code: "illegal_transition",
+  });
+  expect(calls).toBe(2);
+  expect(g.runtime.release).not.toHaveBeenCalled();
+  expect(g.owner().runtime_ref).not.toBeNull();
+});
+
+test("C-838: the editor never stops a session with a Run in flight or a reported turn", async () => {
+  const f = claudeIdle(() => true);
+  const run = queue(f);
+  const ref = f.owner().runtime_ref!;
+  f.apply((s, a, p) =>
+    dispatchRun(s, a, { run_id: run.id, runtime_ref: ref }, p),
+  );
+  await expect(f.stop()).rejects.toMatchObject({
+    message: expect.stringContaining("上一轮没有结束"),
+  });
+  const g = claudeIdle(() => true);
+  queue(g);
+  g.agent = "working";
+  await expect(g.stop()).rejects.toMatchObject({
+    message: expect.stringContaining("Agent 不是空闲状态（working）"),
+  });
+  expect(g.observe_prompt).not.toHaveBeenCalled();
+  for (const x of [f, g]) expect(x.runtime.release).not.toHaveBeenCalled();
 });

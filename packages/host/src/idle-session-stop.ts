@@ -11,6 +11,11 @@ import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { type Store, unfinishedBellAttempts } from "@cardigan/store";
 import { tryHostOpsLock } from "./host-ops-lock.js";
+import {
+  boundIdlePrompt,
+  idlePromptBinding,
+  sessionHarness,
+} from "./idle-prompt.js";
 import { revokeRetiredTokens } from "./idle-session-retirement.js";
 import { sessionExitProof } from "./stall-evidence.js";
 import { stoppedSessionExited, stoppedSessionLive } from "./stop-run.js";
@@ -26,7 +31,7 @@ export type IdleSessionStopRequest = Extract<
 > & { readonly tool: "host_ops_stop_assignment" };
 
 /** Which positive evidence showed the session idle. */
-export type IdleStopBasis = "agent_done" | "agent_exited";
+export type IdleStopBasis = "agent_done" | "agent_exited" | "bound_idle_prompt";
 
 export type IdleSessionStop =
   | { readonly outcome: "settled"; readonly basis: IdleStopBasis }
@@ -51,8 +56,12 @@ const refused = (reason: string): IdleSessionStop => ({
  *   queued ones the session was not launched for;
  * - no bell is being delivered to it;
  * - the CLI itself reports `done` (re-read right before closing), or the
- *   worker shows the Agent CLI gone (C-730 positive proof).
- * Anything else (working, blocked, unknown, unobserved) keeps the session.
+ *   worker shows the Agent CLI gone (C-730 positive proof), or (C-838) hc
+ *   has no activity for this Claude Code / Codex session (`unknown`) and the
+ *   bound CLI shows its empty editor with its own idle footer (read again
+ *   right before closing).
+ * Anything else (working, blocked, a turn, a draft or confirmation on
+ * screen, unobserved) keeps the session.
  */
 export async function stopIdleSession(
   store: Store,
@@ -97,7 +106,17 @@ export async function stopIdleSession(
       const before = current();
       if ("reason" in before) return refused(before.reason);
       let basis: IdleStopBasis;
+      const prompt =
+        status.agent === "unknown" && !status.kept
+          ? idlePromptBinding(
+              project,
+              before.owner,
+              sessionHarness(before.state, before.owner),
+            )
+          : undefined;
       if (status.agent === "done" && !status.kept) basis = "agent_done";
+      else if (prompt && (await boundIdlePrompt(runtime, ref, prompt)))
+        basis = "bound_idle_prompt";
       else {
         const agent = await proof.agent(
           runtime,
@@ -119,6 +138,17 @@ export async function stopIdleSession(
         // The CLI must still be idle right before its terminal is closed.
         const again = await observe();
         if (again?.process !== "alive" || again.agent !== "done" || again.kept)
+          return refused(`agent_${again?.agent ?? "unobserved"}`);
+      }
+      if (basis === "bound_idle_prompt") {
+        // Still no reported activity and still the empty editor.
+        const again = await observe();
+        if (
+          again?.process !== "alive" ||
+          again.agent !== "unknown" ||
+          again.kept ||
+          !(await boundIdlePrompt(runtime, ref, prompt))
+        )
           return refused(`agent_${again?.agent ?? "unobserved"}`);
       }
       const closed = await runtime

@@ -120,6 +120,7 @@ test("C-759: an ended turn is released only on the CLI's own done", () => {
   expect(stalledSessionDecision(base)).toEqual({
     action: "release",
     workspace: "clean",
+    idle_basis: "terminal_status",
   });
   for (const agent of ["idle", "unknown", "working", "blocked"] as const)
     expect(stalledSessionDecision({ ...base, status: live(agent) })).toEqual({
@@ -133,4 +134,54 @@ test("C-759: an ended turn is released only on the CLI's own done", () => {
     action: "hand_off",
     reason: "workspace=dirty",
   });
+});
+
+test("C-838: an ended turn with no reported activity is released only on the bound empty editor", () => {
+  const base = {
+    trigger: "turn_done" as const,
+    can_restart: false,
+    status: live("unknown"),
+    owner: "alive" as const,
+    workspace: "clean" as const,
+    idle_prompt: true,
+  };
+  expect(stalledSessionDecision(base)).toEqual({
+    action: "release",
+    workspace: "clean",
+    idle_basis: "bound_idle_prompt",
+  });
+  // No editor seen (a turn, a draft, a confirmation, a failed read).
+  expect(stalledSessionDecision({ ...base, idle_prompt: false })).toEqual({
+    action: "skip",
+    reason: "terminal_state=unknown",
+  });
+  // The editor never overrides a reported state, a kept shell or the owner.
+  for (const agent of ["idle", "working", "blocked", "error"] as const)
+    expect(stalledSessionDecision({ ...base, status: live(agent) })).toEqual({
+      action: "skip",
+      reason: `terminal_state=${agent}`,
+    });
+  expect(
+    stalledSessionDecision({
+      ...base,
+      status: live("unknown", { kept: true }),
+    }),
+  ).toEqual({ action: "skip", reason: "terminal_not_live" });
+  expect(stalledSessionDecision({ ...base, owner: "unobserved" })).toEqual({
+    action: "skip",
+    reason: "terminal_owner=unobserved",
+  });
+  // Work in the checkout still goes to PM.
+  expect(stalledSessionDecision({ ...base, workspace: "dirty" })).toEqual({
+    action: "hand_off",
+    reason: "workspace=dirty",
+  });
+  // Other triggers keep their own rules.
+  expect(
+    stalledSessionDecision({
+      ...base,
+      trigger: "system_turn",
+      owner: "unknown",
+    }),
+  ).toEqual({ action: "release", workspace: "clean" });
 });

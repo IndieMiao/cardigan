@@ -2698,6 +2698,16 @@ type HostOpsToolName =
   | "host_ops_recheck_precheck"
   | "host_ops_stop_assignment";
 
+/**
+ * C-838: hc reports no activity (`unknown`) and the bound CLI does not show
+ * its empty editor either, so the session cannot be shown idle. Say what
+ * PM or host operations can do instead of sending a human to the host CLI.
+ */
+const AGENT_UNKNOWN_REFUSAL =
+  "读不到 Agent 的活动状态（unknown），终端上也没有看到 CLI 停在空输入框（可能这一轮还在进行、输入框有草稿或在等确认），不关闭终端。";
+const AGENT_UNKNOWN_NEXT_STEPS =
+  "下一步：1. 过几分钟重试本工具，会话回到空输入框后即可停止；排队 Run 等这个会话时，停滞巡检在会话停在空输入框满阈值（默认 10 分钟）后也会自动释放。2. 用 host_ops_read_diagnostics 看该指派的 Run 和最后活动时间，有已开始的 Run 说明上一轮没结束，等它结束。3. 长时间仍不回到空输入框，请 PM 在卡上点名该指派，让它结束这一轮或处理确认框。";
+
 /** C-759: why a managed stop of an idle session did not apply. */
 export function idleStopRefusalText(reason: string) {
   const fixed: Record<string, string> = {
@@ -2718,8 +2728,10 @@ export function idleStopRefusalText(reason: string) {
     failed: "内部错误",
   };
   if (fixed[reason]) return fixed[reason];
+  if (reason === "agent_unknown")
+    return `${AGENT_UNKNOWN_REFUSAL}${AGENT_UNKNOWN_NEXT_STEPS}`;
   if (reason.startsWith("agent_"))
-    return `Agent 不是空闲状态（${reason.slice(6)}），不关闭终端`;
+    return `Agent 不是空闲状态（${reason.slice(6)}），不关闭终端。下一步：等这一轮结束后重试本工具；会话停在确认框或输入框有草稿时，请 PM 在卡上点名该指派处理。`;
   if (reason.startsWith("exit_unconfirmed"))
     return "已关闭终端但未能证实会话退出，保留终端引用，不另起会话";
   return reason;

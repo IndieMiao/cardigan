@@ -104,7 +104,7 @@ export function hostOpsTools(options: HostOpsToolOptions = {}) {
     defineTool({
       name: "host_ops_stop_assignment",
       description:
-        "Managed stop of a work-item session whose previous turn ended and that is idle (CLI reports done, or its Agent CLI is gone), like `cardigan assignment stop`: closes the terminal, confirms the exit and keeps the worktree, branch and queued work. Never queues a Run.",
+        "Managed stop of a work-item session whose previous turn ended and that is idle (CLI reports done; for Claude Code or Codex, which report no activity, the CLI shows its empty editor; or its Agent CLI is gone), like `cardigan assignment stop`: closes the terminal, confirms the exit and keeps the worktree, branch and queued work. Never queues a Run.",
       input: z.object({
         assignment_id: id("assignment"),
         reason,
