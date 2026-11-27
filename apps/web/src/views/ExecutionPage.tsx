@@ -100,7 +100,8 @@ export function ExecutionPage({
     kind: "execution",
     projectId,
   });
-  // C-75: one detail drawer at a time; opening another row replaces it.
+  // C-75: one detail drawer at a time. C-831: like every drawer it is modal,
+  // so any click outside it, rows included, only closes it.
   const [selected, setSelected] = useState<string | undefined>(undefined);
   const lastTrigger = useRef<HTMLElement | null>(null);
   const previousSelected = useRef<string | undefined>(undefined);
@@ -468,17 +469,6 @@ export function ExecutionPage({
             if (!next) setSelected(undefined);
           }}
           className={cardDetailDrawerClassName ?? ""}
-          // C-75: rows stay usable while the drawer is open, so another row's
-          // Assignment replaces the content; any other outside click closes it.
-          modal={false}
-          onInteractOutside={(event) => {
-            const target = event.target;
-            if (
-              target instanceof Element &&
-              target.closest(".execution-table tbody tr, .execution-card")
-            )
-              event.preventDefault();
-          }}
           title={
             detail ? (
               <>

@@ -564,6 +564,14 @@ test("C-702: the 当前 panel and ⋯ menu offer only existing actions for runni
   await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/needs-you"));
   window.location.hash = "#/p/p-1/execution?view=all";
 
+  // C-831: the drawer is modal; close it before opening another row.
+  fireEvent.click(
+    within(screen.getByRole("dialog", { name: "A-1 coder" })).getByRole(
+      "button",
+      { name: "关闭抽屉" },
+    ),
+  );
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   fireEvent.click(screen.getByRole("button", { name: "查看 A-2 详情" }));
   await screen.findByRole("dialog", { name: "A-2 coder" });
   current = screen.getByRole("region", { name: "当前" });
@@ -583,6 +591,14 @@ test("C-702: the 当前 panel and ⋯ menu offer only existing actions for runni
       .getAttribute("href"),
   ).toBe("#/p/p-1/needs-you");
 
+  // C-831: the drawer is modal; close it before opening another row.
+  fireEvent.click(
+    within(screen.getByRole("dialog", { name: "A-2 coder" })).getByRole(
+      "button",
+      { name: "关闭抽屉" },
+    ),
+  );
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   fireEvent.click(screen.getByRole("button", { name: "查看 A-3 详情" }));
   await screen.findByRole("dialog", { name: "A-3 coder" });
   current = screen.getByRole("region", { name: "当前" });
@@ -758,7 +774,7 @@ test("C-702: a Run without a summary shows —, and its machine only when it dif
   ).toBeTruthy();
 });
 
-test("C-75: one detail drawer at a time; another row stays clickable and replaces it; Esc, the close icon and outside clicks close it and return focus", async () => {
+test("C-831: one detail drawer at a time; any outside click, rows included, only closes it; Esc and the close icon close it and return focus", async () => {
   const second = { ...assignment, id: "A-2", session_ref: "session-second" };
   render(
     <ExecutionPage
@@ -781,16 +797,35 @@ test("C-75: one detail drawer at a time; another row stays clickable and replace
     ),
   ).toBe(false);
   const rowsBefore = document.querySelectorAll(".execution-table tr").length;
-  /** Click like a pointer would: Radix dismisses on pointerdown outside. */
+  const other = screen.getByRole("button", { name: "查看 A-2 详情" });
+  const otherRow = other.closest("tr") as HTMLElement;
+  const otherCell = otherRow.querySelector(
+    "[data-column='activity']",
+  ) as HTMLElement;
+  const header = document.querySelector(
+    ".execution-table thead th",
+  ) as HTMLElement;
+  /**
+   * Click like a pointer would. Radix dismisses on pointerdown outside; the
+   * modal overlay takes that press, so the click never reaches the page.
+   */
   const press = (element: Element) => {
-    fireEvent.pointerDown(element);
-    fireEvent.mouseDown(element);
-    fireEvent.pointerUp(element);
-    fireEvent.mouseUp(element);
-    fireEvent.click(element);
+    const overlay = element.closest("[role='dialog']")
+      ? null
+      : document.querySelector(".drawer-overlay");
+    const target = overlay ?? element;
+    fireEvent.pointerDown(target);
+    fireEvent.mouseDown(target);
+    fireEvent.pointerUp(target);
+    fireEvent.mouseUp(target);
+    // The overlay is gone by now, so the click lands on what the pointer
+    // left: the shared ancestor of the press and release targets.
+    fireEvent.click(overlay ? document.body : element);
   };
   // Radix arms its outside-pointer listener on the next tick after opening.
   const settle = () => act(() => new Promise((r) => setTimeout(r, 10)));
+  const closed = () =>
+    waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
   press(first);
   expect(await screen.findByRole("dialog", { name: "A-1 coder" })).toBeTruthy();
@@ -799,42 +834,48 @@ test("C-75: one detail drawer at a time; another row stays clickable and replace
   expect(document.querySelectorAll(".execution-table tr")).toHaveLength(
     rowsBefore,
   );
-  // The page behind stays usable: no pointer blocking, no aria-hidden, so the
-  // other row's 详情 is still reachable by role and takes focus.
-  expect(document.body.style.pointerEvents).not.toBe("none");
-  const other = screen.getByRole("button", { name: "查看 A-2 详情" });
-  expect(other.closest("[aria-hidden='true']")).toBeNull();
-  other.focus();
-  expect(document.activeElement).toBe(other);
-  press(other);
+  // Like every drawer it is modal: the page behind is covered by the overlay.
+  expect(document.querySelector(".drawer-overlay")).toBeTruthy();
+  expect(document.body.style.pointerEvents).toBe("none");
+
+  // Another row closes the drawer without opening that row.
+  press(otherRow);
+  await closed();
+  expect(screen.queryByRole("dialog", { name: "A-2 coder" })).toBeNull();
+  await settle();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(first));
+
+  // Once closed, a click on a row opens that row.
+  press(otherCell);
   const replaced = await screen.findByRole("dialog", { name: "A-2 coder" });
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
   expect(within(replaced).getByText("session-second")).toBeTruthy();
   await settle();
-  expect(screen.getByRole("dialog", { name: "A-2 coder" })).toBe(replaced);
 
-  fireEvent.keyDown(replaced, { key: "Escape" });
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  // The table header closes it too.
+  press(header);
+  await closed();
   await waitFor(() => expect(document.activeElement).toBe(other));
+
+  press(first);
+  const escaped = await screen.findByRole("dialog", { name: "A-1 coder" });
+  fireEvent.keyDown(escaped, { key: "Escape" });
+  await closed();
+  await waitFor(() => expect(document.activeElement).toBe(first));
 
   press(first);
   const drawer = await screen.findByRole("dialog", { name: "A-1 coder" });
   press(within(drawer).getByRole("button", { name: "关闭抽屉" }));
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await closed();
   await waitFor(() => expect(document.activeElement).toBe(first));
 
-  // The dimming overlay lets clicks through, so clicking the dimmed page
-  // outside the rows is an outside click that closes the drawer.
+  // Blank page space outside the table closes it as well.
   press(other);
   await screen.findByRole("dialog", { name: "A-2 coder" });
   await settle();
-  expect(
-    document
-      .querySelector(".drawer-overlay")
-      ?.classList.contains("drawer-overlay-passthrough"),
-  ).toBe(true);
-  press(screen.getByRole("heading", { name: "执行视图" }));
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  press(document.querySelector(".page-title") as HTMLElement);
+  await closed();
   await waitFor(() => expect(document.activeElement).toBe(other));
 });
 

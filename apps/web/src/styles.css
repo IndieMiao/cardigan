@@ -2130,11 +2130,6 @@ fieldset.filters {
   z-index: 100;
   background: var(--overlay);
 }
-/* C-75: a non-modal drawer dims the page but lets clicks reach it; a click
-   outside the drawer closes it through Radix's outside-interaction check. */
-.drawer-overlay-passthrough {
-  pointer-events: none;
-}
 /* The lightbox already dims the whole viewport, including the drawer. */
 body[data-lightbox="open"] .drawer-overlay {
   background: transparent;
