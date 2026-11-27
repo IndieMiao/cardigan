@@ -17,6 +17,7 @@ import {
   run,
 } from "../../domain/src/commands/test-fixtures.js";
 import {
+  ANDROID_DEVICE_HOLDER_SCRIPT,
   ANDROID_DEVICE_INIT_SCRIPT,
   ANDROID_DEVICE_PROBE_COMMAND,
   androidDeviceProvider,
@@ -74,7 +75,10 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function check(project = "a") {
+function check(
+  project = "a",
+  extra: Partial<Parameters<typeof refreshMachineObservations>[0]> = {},
+) {
   const machine = store.uow.read((tx) => tx.machines.get(project, "local"));
   if (!machine) throw new Error("missing machine");
   return refreshMachineObservations({
@@ -93,6 +97,7 @@ function check(project = "a") {
     probe: probe as never,
     deviceProviders: [androidDeviceProvider],
     now: () => at,
+    ...extra,
   });
 }
 const actions = (project = "a"): HumanAction[] =>
@@ -225,6 +230,60 @@ test("C-817: no result, an unauthorized or missing device fail with a plain reas
     "没有看到这台设备",
   );
   expect(initCalls()).toHaveLength(1);
+});
+
+test("C-833: a device another adb server holds fails naming that server's port and session", async () => {
+  await check();
+  request("enable", ["a"]);
+  listing = result({ devices: [] });
+  let held: number | null = 5137;
+  const base = probe.getMockImplementation();
+  const asked: string[][] = [];
+  probe.mockImplementation(
+    async (e: ExecutionConfig, os: string, command: CapabilityCommand) => {
+      if (
+        Array.isArray(command) &&
+        command[4] === ANDROID_DEVICE_HOLDER_SCRIPT
+      ) {
+        asked.push(command.slice(5));
+        return result({ port: held });
+      }
+      return base?.(e, os, command);
+    },
+  );
+  const adbHolders = async () =>
+    [
+      { port: 15100, kind: "slot", sessions: ["SEN-A-12"] },
+      { port: 5137, kind: "legacy", sessions: ["SEN-A-634", "SEN-A-602"] },
+      { port: 5037, kind: "other", sessions: [] },
+    ] as const;
+  await check("a", { adbHolders });
+  expect(asked).toEqual([[SERIAL, "[15100,5137,5037]"]]);
+  expect(registry().get("local", TYPE, SERIAL)).toMatchObject({
+    status: "failed",
+    failure:
+      "设备被端口 5137 上的旧 adb 服务占用，可能属于切换前起的会话 SEN-A-634、SEN-A-602：系统巡检会让它放开 USB 设备，几分钟后重试",
+  });
+  expect(open()[0]?.device_enablement?.failure).toContain("5137");
+  request("enable");
+  held = 15100;
+  await check("a", { adbHolders });
+  expect(registry().get("local", TYPE, SERIAL)?.failure).toBe(
+    "设备被端口 15100 上的 adb 服务占用，属于会话 SEN-A-12：等这个 Run 结束、系统关掉它的 adb 服务后重试",
+  );
+  request("enable");
+  held = 5037;
+  await check("a", { adbHolders });
+  expect(registry().get("local", TYPE, SERIAL)?.failure).toBe(
+    "设备被端口 5037 上的 adb 服务占用，不属于系统登记的会话：在机器上执行 adb -P 5037 kill-server 后重试",
+  );
+  // Nobody holds it: the plain reason stays.
+  request("enable");
+  held = null;
+  await check("a", { adbHolders });
+  expect(registry().get("local", TYPE, SERIAL)?.failure).toContain(
+    "没有看到这台设备",
+  );
 });
 
 test("C-817/C-832: a shared machine asks once without preselecting; the initialization runs as a chosen project's account, once", async () => {

@@ -17,6 +17,7 @@ import {
   type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
+import { AdbSessionEnvironments } from "./adb-sessions.js";
 import { type AdbSlotAccess, AdbSlots } from "./adb-slots.js";
 import { DeviceLeases } from "./device-leases.js";
 import {
@@ -111,6 +112,8 @@ export class MachineLeases {
   private clearances: BindingClearances;
   readonly adb: AdbSlots;
   readonly devices: DeviceLeases;
+  /** C-833: sessions launched before the machine's adb environment changed. */
+  readonly sessions: AdbSessionEnvironments;
   constructor(
     readonly store: Store,
     readonly config: RunCapacityConfiguration,
@@ -131,6 +134,9 @@ export class MachineLeases {
             l.ends_at > now &&
             !l.deadline_recorded,
         ),
+    );
+    this.sessions = new AdbSessionEnvironments(store, config, (machine) =>
+      this.devices.adbTypes(machine),
     );
   }
   private rows(sql: string, ...args: string[]): Lease[] {
@@ -166,6 +172,8 @@ export class MachineLeases {
       this.adbNeeded(project, a) ||
       // C-813: nor a device the previous Run held.
       this.devices.heldBefore(project, a.id) ||
+      // C-833: nor an adb environment from before the machine switched.
+      this.sessions.stale(project, a) ||
       !!this.store.database
         .prepare(
           "SELECT 1 FROM machine_resource_leases WHERE project=? AND assignment_id=? LIMIT 1",

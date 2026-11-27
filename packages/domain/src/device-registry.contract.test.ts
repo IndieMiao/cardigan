@@ -5,6 +5,7 @@ import {
   deviceActionKey,
   deviceAlternativeKeys,
   deviceEnabledFor,
+  deviceHeldReason,
   deviceInitProject,
   deviceRegistrationNext,
   deviceUnavailableReason,
@@ -228,4 +229,39 @@ test("C-817: device to-do keys carry only validated ids", () => {
     ["mac-mini", "android.device", "A:B"],
   ] as const)
     expect(() => deviceActionKey("enable", machine, type, id)).toThrow();
+});
+
+test("C-833: a held device names the adb server's port and its sessions; free text and odd values never pass", () => {
+  expect(
+    deviceHeldReason({ port: 15100, kind: "slot", sessions: ["SEN-A-12"] }),
+  ).toBe(
+    "设备被端口 15100 上的 adb 服务占用，属于会话 SEN-A-12：等这个 Run 结束、系统关掉它的 adb 服务后重试",
+  );
+  expect(
+    deviceHeldReason({
+      port: 5137,
+      kind: "legacy",
+      sessions: ["SEN-A-634", "sensen/A-602"],
+    }),
+  ).toBe(
+    "设备被端口 5137 上的旧 adb 服务占用，可能属于切换前起的会话 SEN-A-634、sensen/A-602：系统巡检会让它放开 USB 设备，几分钟后重试",
+  );
+  expect(deviceHeldReason({ port: 5137, kind: "legacy", sessions: [] })).toBe(
+    "设备被端口 5137 上的旧 adb 服务占用，不属于系统登记的会话：系统巡检会让它放开 USB 设备，几分钟后重试",
+  );
+  expect(deviceHeldReason({ port: 5037, kind: "other", sessions: [] })).toBe(
+    "设备被端口 5037 上的 adb 服务占用，不属于系统登记的会话：在机器上执行 adb -P 5037 kill-server 后重试",
+  );
+  const many = Array.from({ length: 7 }, (_, i) => `SEN-A-${i + 1}`);
+  expect(
+    deviceHeldReason({ port: 5137, kind: "legacy", sessions: many }),
+  ).toContain("SEN-A-5 等 7 个会话");
+  const odd = deviceHeldReason({
+    port: 1e9,
+    kind: "slot",
+    sessions: ["A-1; rm -rf /", "x".repeat(81)],
+  });
+  expect(odd).toBe(
+    "设备被端口 0 上的 adb 服务占用：等这个 Run 结束、系统关掉它的 adb 服务后重试",
+  );
 });

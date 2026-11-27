@@ -8,6 +8,7 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import type { AdbProbe } from "./adb-slot-probe.js";
+import { DEVICE_PROVIDERS } from "./device-providers.js";
 import type { MachinePolicy } from "./resource-policy.js";
 
 /**
@@ -538,10 +539,24 @@ export class AdbSlots {
       if (!checked.found) continue;
       await this.release({ ...row, target: checked.target }, clock);
     }
+    const legacy =
+      reached &&
+      (p.legacyAdbPorts.length > 0 || p.legacyEmulatorPorts.length > 0) &&
+      this.store.uow.read((tx) => this.legacyInUse(tx, machine, p));
+    // C-833: while a session from before the switch may still use a legacy
+    // port it is not closed, but on a machine handing out USB devices its
+    // server must not hold them: restart it with ADB_USB=0.
+    if (
+      legacy &&
+      p.legacyAdbPorts.length &&
+      usbDeviceTypes(p).length &&
+      !(await this.legacyUsbOff(project, machine, p, probe, clock))
+    )
+      return false;
     if (
       reached &&
       (p.legacyAdbPorts.length || p.legacyEmulatorPorts.length) &&
-      this.store.uow.read((tx) => !this.legacyInUse(tx, machine, p))
+      !legacy
     ) {
       const context = {
         action: "release" as const,
@@ -575,6 +590,40 @@ export class AdbSlots {
       }
     }
     return reached;
+  }
+  /**
+   * C-833: restart legacy servers of this project's account that hold USB
+   * devices with `ADB_USB=0` (emulator connections are registered again).
+   * False when the target gave no answer (the sweep is retried sooner).
+   */
+  private async legacyUsbOff(
+    project: string,
+    machine: string,
+    p: AdbSlotPolicy,
+    probe: AdbProbe,
+    clock: () => string,
+  ) {
+    const result = await probe({
+      action: "usb_off",
+      project,
+      machine,
+      generation: randomUUID(),
+      adb_ports: p.legacyAdbPorts,
+      emulator_ports: [],
+    });
+    if (!result) return false;
+    if (result.found)
+      this.store.uow.run((tx) =>
+        this.event(tx, project, "machine_adb_legacy_usb_released", clock(), {
+          machine,
+          legacy: true,
+          restarted: result.found - result.left,
+          failed: result.left,
+          reconnected: result.reconnected ?? 0,
+          missing: result.missing ?? 0,
+        }),
+      );
+    return true;
   }
   /** A Run on this machine that may still use a fixed port from before C-679. */
   private legacyInUse(tx: ReadRepositories, machine: string, p: AdbSlotPolicy) {
@@ -657,6 +706,13 @@ export class AdbSlots {
       });
     return result;
   }
+}
+
+/** adb device types (C-813 providers with `needs_adb_slot`) these slots hand out. */
+export function usbDeviceTypes(p: AdbSlotPolicy) {
+  return DEVICE_PROVIDERS.filter(
+    (d) => d.needs_adb_slot && p.resources.has(d.type),
+  ).map((d) => d.type);
 }
 
 /**
