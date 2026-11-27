@@ -3,6 +3,7 @@ import type { DeviceInitStep, DeviceObservation } from "./device-provider.js";
 import {
   type DeviceRegistration,
   deviceActionKey,
+  deviceAlternativeKeys,
   deviceEnabledFor,
   deviceInitProject,
   deviceRegistrationNext,
@@ -167,6 +168,54 @@ test("C-817: waiting work is affected only when no other usable device can serve
   expect(
     waitsOnDevice(["android.device"], device, [{ ...other, state: "offline" }]),
   ).toBe(true);
+});
+
+test("C-827: a queued android.any waits on the device only while no other option is available", () => {
+  const device = { type: "android.device", id: "AAA", model: "MRR-W39" };
+  const other: DeviceObservation = {
+    type: "android.device",
+    id: "BBB",
+    state: "available",
+  };
+  const any = ["android.any"];
+  // No emulator on the machine: the device is its only way out.
+  expect(deviceAlternativeKeys(any, "android.device", [])).toEqual([
+    "android.any",
+    "android.device",
+  ]);
+  expect(waitsOnDevice(any, device, [], [])).toBe(true);
+  expect(waitsOnDevice(any, device, [], ["android.sdk"])).toBe(true);
+  // Another usable device still serves it.
+  expect(waitsOnDevice(any, device, [other], [])).toBe(false);
+  // An available emulator can still take the work: no reminder.
+  expect(
+    deviceAlternativeKeys(any, "android.device", ["android.emulator"]),
+  ).toBe(any);
+  expect(waitsOnDevice(any, device, [], ["android.emulator"])).toBe(false);
+  // Without the machine's capabilities the C-817 judgment is unchanged.
+  expect(waitsOnDevice(any, device, [])).toBe(false);
+  // Already narrowed to one option: judged by that option as before.
+  expect(
+    waitsOnDevice(["android.any", "android.emulator"], device, [], []),
+  ).toBe(false);
+  expect(
+    waitsOnDevice(
+      ["android.any", "android.device"],
+      device,
+      [],
+      ["android.emulator"],
+    ),
+  ).toBe(true);
+  // Emulator-only and device-only requirements keep their C-817 answers.
+  expect(waitsOnDevice(["android.emulator"], device, [], [])).toBe(false);
+  expect(
+    waitsOnDevice(["android.device"], device, [], ["android.emulator"]),
+  ).toBe(true);
+  expect(
+    waitsOnDevice(["android.device"], device, [other], ["android.emulator"]),
+  ).toBe(false);
+  // A different device type is never added.
+  expect(deviceAlternativeKeys(any, "ios.device", [])).toBe(any);
 });
 
 test("C-817: device to-do keys carry only validated ids", () => {

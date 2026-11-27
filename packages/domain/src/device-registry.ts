@@ -14,6 +14,10 @@
  * No IO here (§20.2).
  */
 import {
+  capabilityAlternatives,
+  unresolvedAlternatives,
+} from "./capability-alternatives.js";
+import {
   DEVICE_ID_PATTERN,
   type DeviceInitStep,
   type DeviceObservation,
@@ -203,16 +207,46 @@ export function deviceUnavailableReason(
 }
 
 /**
+ * C-827: `keys` plus the device `type` when an alternative among them that
+ * names none of its options yet (a queued `android.any`) can only be met by
+ * that type on this machine: `type` is one of its options and no other
+ * option is in `available` (the machine's currently verified capabilities).
+ * While another option is available the Run can still be dispatched to it, so
+ * the keys stay unchanged.
+ */
+export function deviceAlternativeKeys(
+  keys: readonly string[],
+  type: string,
+  available: readonly string[],
+): readonly string[] {
+  if (keys.includes(type)) return keys;
+  const only = unresolvedAlternatives(keys).some((key) => {
+    const options = capabilityAlternatives(key) ?? [];
+    return (
+      options.includes(type) &&
+      !options.some((o) => o !== type && available.includes(o))
+    );
+  });
+  return only ? [...keys, type] : keys;
+}
+
+/**
  * Whether `keys` (a waiting Run's resource requirement) could only be met by
  * this enabled device: it asks for the device's type, the device matches
  * every narrowing key, and no other usable device enabled for the project on
- * the machine matches them.
+ * the machine matches them. With `available` (the machine's verified
+ * capabilities), an unresolved alternative whose only available option is the
+ * device's type counts as asking for it (C-827, `deviceAlternativeKeys`).
  */
 export function waitsOnDevice(
-  keys: readonly string[],
+  requested: readonly string[],
   device: Pick<DeviceObservation, "type" | "id" | "model">,
   others: readonly DeviceObservation[],
+  available?: readonly string[],
 ) {
+  const keys = available
+    ? deviceAlternativeKeys(requested, device.type, available)
+    : requested;
   const own: DeviceObservation = { ...device, state: "available" };
   if (!keys.some((k) => isDeviceKey(device.type, k))) return false;
   if (!deviceMatches(own, keys)) return false;

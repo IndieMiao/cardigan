@@ -28,6 +28,7 @@ let dir: string, store: Store;
 let listing: { ok: boolean; output: string };
 let init: { ok: boolean; output: string };
 let probe: ReturnType<typeof vi.fn>;
+let emulator: boolean;
 
 const plugged = (state = "device") => ({
   ok: true,
@@ -46,11 +47,16 @@ beforeEach(() => {
   store.createProject({ id: "a" });
   listing = plugged();
   init = result({ result: "ok", resolution: "1600x2560", version: "12" });
+  emulator = false;
   probe = vi.fn(
     async (_e: ExecutionConfig, _os: string, command: CapabilityCommand) => {
       if (command === ANDROID_DEVICE_PROBE_COMMAND) return listing;
       if (Array.isArray(command) && command[4] === ANDROID_DEVICE_INIT_SCRIPT)
         return init;
+      if (Array.isArray(command) && command[0] === "emulator")
+        return emulator
+          ? { ok: true, output: "Android emulator version 35.1.4" }
+          : { ok: false, output: "" };
       return Array.isArray(command) && command[0] === "adb"
         ? { ok: true, output: "Version 37.0.3" }
         : { ok: false, output: "" };
@@ -75,7 +81,9 @@ function check(project = "a") {
     }),
     check: async () => ({ blockers: [], launch_enabled: true }),
     catalog: () =>
-      BUILTIN_MACHINE_CAPABILITIES.filter((c) => c.key === "android.sdk"),
+      BUILTIN_MACHINE_CAPABILITIES.filter((c) =>
+        ["android.sdk", "android.emulator"].includes(c.key),
+      ),
     probe: probe as never,
     deviceProviders: [androidDeviceProvider],
     now: () => at,
@@ -363,4 +371,59 @@ test("C-817: a failed listing is not taken for an unplugged device", async () =>
   listing = { ok: false, output: "" };
   await check();
   expect(open().filter((h) => h.instructions.includes("在等它"))).toEqual([]);
+});
+
+test("C-827: a dropped device reminds queued android.any work only while the machine has no available emulator", async () => {
+  await check();
+  request("enable", ["a"]);
+  await check();
+  const reminders = () =>
+    open().filter((h) => h.instructions.includes("在等它"));
+  const card = queue(1, ["android.any"]);
+  // An emulator is available: the work can still be dispatched, no reminder.
+  emulator = true;
+  listing = result({ devices: [] });
+  const withEmulator = await check();
+  expect(withEmulator.capabilities.map((c) => c.key)).toContain(
+    "android.emulator",
+  );
+  expect(reminders()).toEqual([]);
+  // No emulator: the device was its only way out, so it reminds like a
+  // device requirement does.
+  emulator = false;
+  await check();
+  expect(reminders()).toHaveLength(1);
+  expect(reminders()[0]?.instructions).toContain(
+    `local 上的安卓真机 MRR-W39（${SERIAL}）已拔掉或看不到，${card} 的工作在等它`,
+  );
+  // The emulator comes back: closed, nothing waits on the device any more.
+  emulator = true;
+  await check();
+  expect(reminders()).toEqual([]);
+  expect(actions().filter((h) => h.status === "cancelled")).toHaveLength(1);
+});
+
+test("C-827: emulator-only and device-only work keep their reminders whether or not an emulator is available", async () => {
+  await check();
+  request("enable", ["a"]);
+  await check();
+  const reminders = () =>
+    open().filter((h) => h.instructions.includes("在等它"));
+  queue(1, ["android.emulator"]);
+  listing = result({ devices: [] });
+  for (const e of [false, true]) {
+    emulator = e;
+    await check();
+    expect(reminders()).toEqual([]);
+  }
+  store.uow.run((tx) =>
+    tx.runs.put("a", { ...run(1), status: "completed" } as never),
+  );
+  const card = queue(2, [TYPE]);
+  for (const e of [false, true]) {
+    emulator = e;
+    await check();
+    expect(reminders()).toHaveLength(1);
+    expect(reminders()[0]?.instructions).toContain(`${card} 的工作在等它`);
+  }
 });
