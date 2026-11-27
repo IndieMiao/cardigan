@@ -81,7 +81,10 @@ try {
   const until = async (expression, ms = 15000) => {
     const end = Date.now() + ms;
     while (!(await evaluate(expression))) {
-      assert(Date.now() < end, `Timed out: ${expression}`);
+      if (Date.now() >= end)
+        assert.fail(
+          `Timed out: ${expression}\n${JSON.stringify(browser.errors).slice(0, 2000)}\n${String(await evaluate("location.href + ' ' + document.body.textContent.slice(0, 300)"))}`,
+        );
       await delay(25);
     }
   };
@@ -110,7 +113,7 @@ try {
     await send("Page.navigate", { url: "about:blank" });
     await until("location.href === 'about:blank'");
     await send("Page.navigate", {
-      url: `${server.resolvedUrls.local[0]}__c576${path}`,
+      url: `${server.resolvedUrls.local[0]}__c818${path}`,
     });
     await until(ready);
     await run((theme) => {
