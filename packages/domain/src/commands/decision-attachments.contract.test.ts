@@ -168,7 +168,7 @@ describe("C-809: attachments the context names are attached", () => {
     expect(q).not.toHaveProperty("attachments_omitted");
   });
 
-  test("another card's attachment stays text unless that card is affected", () => {
+  test("only the decision's own card is searched: other and affected cards' numbers stay text", () => {
     const q = raise({ context: "参考 attachment-3 和 attachment-1" });
     expect(q.attachment_ids).toEqual(["attachment-1"]);
     expect(q).not.toHaveProperty("attachments_omitted");
@@ -176,7 +176,28 @@ describe("C-809: attachments the context names are attached", () => {
       context: "参考 attachment-3",
       affected_cards: [id("card", 2)],
     });
-    expect(affected.attachment_ids).toEqual(["attachment-3"]);
+    expect(affected).not.toHaveProperty("attachment_ids");
+    expect(affected).not.toHaveProperty("attachments_omitted");
+    // An affected card's file can still be attached explicitly.
+    expect(
+      raise({
+        context: "参考 attachment-3",
+        affected_cards: [id("card", 2)],
+        attachment_ids: ["attachment-3"],
+      }).attachment_ids,
+    ).toEqual(["attachment-3"]);
+    // A project-wide question attaches nothing by itself.
+    const { card_id: _card, ...projectWide } = params;
+    expect(
+      value(
+        requestDecision(
+          state(),
+          office,
+          { ...projectWide, context: "参考 attachment-1" },
+          ports(),
+        ),
+      ).data,
+    ).not.toHaveProperty("attachment_ids");
   });
 
   test("missing, expired and code-quoted numbers are ignored", () => {

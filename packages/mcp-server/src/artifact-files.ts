@@ -141,19 +141,22 @@ export async function sendArtifact(
   authorize?: () => void,
   /**
    * C-809: the Workbench's verified streamed image (`inline_image`), sent
-   * with its bitmap type for an `<img>`; everything else stays a download.
+   * with its bitmap type and the same neutral file name as an ordinary
+   * inline upload; everything else stays a download.
    */
-  inlineImage?: { readonly mime: string },
+  inlineImage?: { readonly mime: string; readonly filename: string },
 ) {
   const file = await openArtifact(dir, a);
   try {
     authorize?.();
-    const name = (a.original_filename || `${a.id}.bin`).replace(
-      /[^a-zA-Z0-9._-]/gu,
-      "_",
-    );
     const inline =
       inlineImage !== undefined && a.streamed_artifact?.inline_image === true;
+    const name = inline
+      ? inlineImage.filename
+      : (a.original_filename || `${a.id}.bin`).replace(
+          /[^a-zA-Z0-9._-]/gu,
+          "_",
+        );
     res.writeHead(200, {
       "Content-Type": inline ? inlineImage.mime : "application/octet-stream",
       "Content-Length": a.size,

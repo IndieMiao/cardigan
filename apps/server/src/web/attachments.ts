@@ -73,7 +73,10 @@ export async function serveAttachment(
       context.req.method === "HEAD",
       undefined,
       inlineImageAttachment(attachment)
-        ? { mime: attachment.mime.toLowerCase() }
+        ? {
+            mime: attachment.mime.toLowerCase(),
+            filename: downloadName(attachment.id, attachment.mime),
+          }
         : undefined,
     );
     return true;

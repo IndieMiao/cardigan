@@ -93,17 +93,21 @@ export function deliveryDecisionAttachments(
 }
 
 /**
- * C-809: a raiser's explicit attachments, then the decision cards' live
- * attachments its context names but did not attach, up to the limit. Numbers
- * of other cards' (or missing) attachments stay text and are not counted.
+ * C-809: a raiser's explicit attachments, then the live attachments of the
+ * decision's own card its context names but did not attach, up to the limit.
+ * Only that one card: numbers of affected or other cards' attachments, of
+ * missing ones, and every number in a project-wide question stay text and
+ * are not counted (an affected card's file needs an explicit reference).
  */
 export function referencedDecisionAttachments(
   d: CommandDraft,
   explicit: readonly AttachmentId[],
   context: string,
-  cards: readonly CardId[],
+  card_id: CardId | undefined,
 ): DecisionAttachmentSelection {
-  const live = new Set(liveCardAttachments(d, cards).map((a) => a.id));
+  const live = new Set(
+    card_id ? liveCardAttachments(d, [card_id]).map((a) => a.id) : [],
+  );
   const named = attachmentReferenceIdsIn([context]).filter(
     (id) =>
       live.has(id as AttachmentId) && !explicit.includes(id as AttachmentId),

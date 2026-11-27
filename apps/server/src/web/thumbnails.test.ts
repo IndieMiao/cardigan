@@ -456,12 +456,18 @@ test("C-809: a streamed image whose header matched is shown like an ordinary upl
 
   const download = await call(h.port, at("/attachments/S-1"), { cookie });
   expect(download.status).toBe(200);
-  expect(download.headers["content-type"]).toBe("image/png");
-  expect(String(download.headers["content-disposition"])).toMatch(/^inline/);
-  expect(String(download.headers["content-security-policy"])).toContain(
-    "sandbox",
-  );
-  expect(download.headers["x-content-type-options"]).toBe("nosniff");
+  // The same headers an ordinary inline image gets (seeded F-1).
+  const ordinary = await call(h.port, at("/attachments/F-1"), { cookie });
+  for (const [name, value] of [
+    ["content-type", "image/png"],
+    ["content-disposition", 'inline; filename="S-1.png"'],
+    ["cache-control", "private, no-store"],
+    ["content-security-policy", "default-src 'none'; sandbox"],
+    ["x-content-type-options", "nosniff"],
+  ] as const) {
+    expect(download.headers[name], name).toBe(value);
+    expect(ordinary.headers[name], name).toBe(value.replace("S-1", "F-1"));
+  }
   expect(download.bytes.equals(original)).toBe(true);
   const preview = await call(h.port, at("/attachments/S-1/preview"), {
     cookie,

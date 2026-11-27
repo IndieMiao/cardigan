@@ -846,12 +846,13 @@ export function requestDecision(
       "validation_failed",
       "只有交给人的拍板可以带就绪条件",
     );
-    // C-809: attachments of these cards the context names are shown too.
+    // C-809: attachments of the decision's own card its context names are
+    // shown too.
     const attachmentSelection = referencedDecisionAttachments(
       d,
       decisionAttachments(d, p.attachment_ids, cards),
       p.context,
-      cards,
+      p.card_id,
     );
     // C-167: only a human raiser can say a D12 question is not about what the
     // card merges (an Agent's own label is no authorization, review V-540 and
