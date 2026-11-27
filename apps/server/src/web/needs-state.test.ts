@@ -46,10 +46,12 @@ function legacyProjection(view: ReturnType<typeof needsYou>) {
       {
         ...legacy,
         notices: legacy.notices.map(({ source: _source, ...notice }) => notice),
-        // C-742 adds each action's executor after the golden response.
+        // C-742 adds each action's executor after the golden response,
+        // C-822 its handler.
         human_actions: legacy.human_actions.map(
           ({
             executor: _executor,
+            handler: _handler,
             blocks_merge: _blocks,
             prerequisite: _prerequisite,
             ...action

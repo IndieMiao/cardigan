@@ -497,3 +497,46 @@ test("human completion results render literally, including Markdown, references 
   expect(content?.querySelector("strong, a, img, script")).toBeNull();
   expect(content?.classList.contains("markdown")).toBe(false);
 });
+
+test("C-822: a human action's entries say who handles it now, as Needs You does", () => {
+  show([
+    timelineEntry({
+      id: "C-1#3",
+      event_seq: 3,
+      type: "human_action",
+      human_action_id: "H-1",
+      human_action_handler: "owner",
+      body: "请登录",
+    }),
+    timelineEntry({
+      id: "C-1#4",
+      event_seq: 4,
+      type: "human_action",
+      human_action_id: "H-2",
+      human_action_handler: "operator",
+      body: "交给张良：换会话",
+    }),
+    timelineEntry({
+      id: "C-1#5",
+      event_seq: 5,
+      type: "human_action",
+      human_action_id: "H-3",
+      human_action_handler: "done",
+      body: "已处理",
+    }),
+    timelineEntry({
+      id: "C-1#6",
+      event_seq: 6,
+      type: "human_action",
+      human_action_id: "H-4",
+      body: "旧服务器",
+    }),
+  ]);
+  const header = (id: string) =>
+    document.getElementById(`entry-${id}`)?.textContent ?? "";
+  expect(header("C-1#3")).toContain("待你执行于");
+  expect(header("C-1#4")).toContain("交给张良于");
+  expect(header("C-1#4")).not.toContain("待你执行");
+  expect(header("C-1#5")).toContain("人工事项已处理于");
+  expect(header("C-1#6")).toContain("人工事项于");
+});

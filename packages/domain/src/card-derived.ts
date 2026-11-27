@@ -14,8 +14,10 @@ import type {
 } from "./entities.js";
 import { eventById, eventsForDecision } from "./event-index.js";
 import {
+  decisionHandler,
   HUMAN_ACTION_OPERATOR_NAME,
-  isOperatorAction,
+  humanActionHandler,
+  type PendingHandler,
 } from "./human-action-executor.js";
 import { pauseLabel, pauseOwners, pendingPause } from "./review-pause.js";
 import type { CardStatus, DecisionStatus } from "./states.js";
@@ -165,14 +167,20 @@ function unresolvedBlockingDecisions(input: CardDerivedInput): Decision[] {
 }
 
 /** C-742: 张良's actions name him instead of the owner. */
+const WAITING_LABEL: Readonly<Record<PendingHandler, string>> = {
+  owner: "等你执行",
+  operator: `等待${HUMAN_ACTION_OPERATOR_NAME}执行`,
+  pm: "等待 PM 分拣",
+  host: "等待主机操作",
+  system: "等待系统处理",
+  done: "已处理",
+};
 function waitingLabel(action: HumanAction) {
-  return action.triage === "pm_ops"
-    ? "等待 PM 分拣"
-    : isOperatorAction(action)
-      ? `等待${HUMAN_ACTION_OPERATOR_NAME}执行`
-      : action.triage === "host"
-        ? "等待主机操作"
-        : "等你执行";
+  return WAITING_LABEL[humanActionHandler(action)];
+}
+/** A pending item's handler; settled items never reach `waiting_on`. */
+function pendingHandler(handler: PendingHandler) {
+  return handler === "done" ? {} : { handler };
 }
 function pendingHumanActions(input: CardDerivedInput): HumanAction[] {
   const workItemIds = new Set(input.work_items.map((item) => item.id));
@@ -235,6 +243,19 @@ function undispatchedRepair(input: CardDerivedInput) {
   }
 }
 
+/**
+ * C-822: a decision or human action the owner handles. Items from older
+ * servers without a handler were all counted as the owner's.
+ */
+export function waitsOnOwner(
+  item: Pick<WaitingOnItem, "kind" | "handler">,
+): boolean {
+  return (
+    (item.kind === "decision" || item.kind === "human_action") &&
+    (item.handler ?? "owner") === "owner"
+  );
+}
+
 /** What the card is waiting for, in the order the plan lists it. */
 export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
   const waiting: WaitingOnItem[] = [];
@@ -254,6 +275,7 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
       label: pause
         ? `${pauseLabel(pause, decision.decider)} ${decision.id}`
         : `${decision.decider === "system" ? "等待系统合并" : decision.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板"} ${decision.id}`,
+      ...pendingHandler(decisionHandler(decision)),
     });
   }
 
@@ -264,6 +286,7 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
       kind: "human_action",
       ref: action.id,
       label: `${waitingLabel(action)} ${action.id}`,
+      ...pendingHandler(humanActionHandler(action)),
     });
   }
 
@@ -340,11 +363,17 @@ export function deriveNextOwners(input: CardDerivedInput): NextOwnerItem[] {
     if (ids?.length) for (const ref of ids) add({ kind: "assignment", ref });
     else add(deciderOwner(decision.decider));
   }
+  // C-822: only the owner's own actions make the human the next owner.
   for (const action of pendingHumanActions(input)) {
+    const handler = humanActionHandler(action);
     add(
-      action.triage === "pm_ops"
-        ? { kind: "role", ref: "pm" }
-        : { kind: "human", ref: "human" },
+      handler === "owner"
+        ? { kind: "human", ref: "human" }
+        : handler === "host" && action.host_assignment_id
+          ? { kind: "assignment", ref: action.host_assignment_id }
+          : handler === "host" && action.host_operator !== "external"
+            ? { kind: "role", ref: "host_ops" }
+            : { kind: "role", ref: "pm" },
     );
   }
 

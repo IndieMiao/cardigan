@@ -4,6 +4,7 @@ import {
   deriveNextOwners,
   deriveWaitingOn,
   type ProjectId,
+  waitsOnOwner,
 } from "@cardigan/domain";
 import type { ReadRepositories } from "@cardigan/store";
 
@@ -60,8 +61,7 @@ export function cardSelectors(tx: ReadRepositories, project: ProjectId) {
             owners.some((o) => o.kind === "role" || o.kind === "assignment"),
         ),
         human: Number(
-          owners.some((o) => o.kind === "human") ||
-            waiting.some((w) => ["decision", "human_action"].includes(w.kind)),
+          owners.some((o) => o.kind === "human") || waiting.some(waitsOnOwner),
         ),
         blocked: Number(
           waiting.some((w) => ["blocked", "review"].includes(w.kind)),
