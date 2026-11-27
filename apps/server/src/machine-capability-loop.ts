@@ -3,6 +3,7 @@ import {
   DeviceRegistry,
   MACHINE_CAPABILITY_INTERVAL_MS,
   type RuntimeTargets,
+  syncDeviceActionsEverywhere,
 } from "@cardigan/host";
 import type { Store } from "@cardigan/store";
 import { type LoopStartup, startTimerLoop } from "./loop.js";
@@ -194,9 +195,18 @@ export function startMachineCapabilityLoop(options: {
     onError: options.onError,
     tick: () =>
       exclusive(async () => {
-        const due = new DeviceRegistry(options.store).dueInits(
-          new Date().toISOString(),
-        );
+        const now = new Date().toISOString();
+        const registry = new DeviceRegistry(options.store);
+        // Initializations no check could run fail with a reason (retryable).
+        for (const machine of registry.expireInits(now))
+          try {
+            syncDeviceActionsEverywhere(options.store, machine, {
+              now: () => new Date().toISOString(),
+            });
+          } catch {
+            options.onError(new Error("Device to-do sync failed"));
+          }
+        const due = registry.dueInits(now);
         const targets = new Set(
           due.map((d) => `${d.init_project}\0${d.machine}`),
         );

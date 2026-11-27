@@ -579,5 +579,8 @@ test("C-817: a discovered device is enabled with one click for the preselected p
     (row.getByRole("button", { name: "初始化中…" }) as HTMLButtonElement)
       .disabled,
   ).toBe(true);
+  // A stuck initialization can still be called off.
+  fireEvent.click(row.getByRole("button", { name: "不启用" }));
+  await waitFor(() => expect(requestMachineDevice).toHaveBeenCalledTimes(4));
   expect(completeAction).not.toHaveBeenCalled();
 });

@@ -1860,7 +1860,7 @@ function DeviceEnablementControls({
       </Button>
       <Button
         variant="secondary"
-        disabled={action.busy || initializing}
+        disabled={action.busy}
         onClick={() => send({ request: "disable" })}
       >
         不启用

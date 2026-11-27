@@ -57,6 +57,18 @@ const ours = (d: CommandDraft, e: Event) =>
 function deviceActions(d: CommandDraft, key: string) {
   const actions = new Map(d.list("human_actions").map((h) => [h.id, h]));
   const out: { action: HumanAction; reopen_key: string }[] = [];
+  // The key an in-place update last showed is the state a person dismissed.
+  const updated = new Map<string, string>();
+  for (const e of d.state.events)
+    if (
+      e.type === "device_action_updated" &&
+      e.actor.kind === "system" &&
+      e.actor.project_id === d.state.project_id
+    ) {
+      const p = e.payload as { human_action_id?: string; reopen_key?: string };
+      if (p.human_action_id && typeof p.reopen_key === "string")
+        updated.set(p.human_action_id, p.reopen_key);
+    }
   for (const e of d.state.events) {
     if (!ours(d, e)) continue;
     const p = e.payload as {
@@ -67,7 +79,10 @@ function deviceActions(d: CommandDraft, key: string) {
     if (p.device_action !== key) continue;
     const action = actions.get(p.human_action_id as HumanActionId);
     if (action?.requested_by !== "system" || action.card_id) continue;
-    out.push({ action, reopen_key: p.reopen_key ?? "" });
+    out.push({
+      action,
+      reopen_key: updated.get(action.id) ?? p.reopen_key ?? "",
+    });
   }
   return out;
 }
@@ -145,7 +160,8 @@ export function reconcileDeviceAction(
         a.instructions === fields.instructions &&
         a.why_human === fields.why_human &&
         a.expected_return === fields.expected_return &&
-        sameJson(a.device_enablement, device_enablement)
+        sameJson(a.device_enablement, device_enablement) &&
+        current.reopen_key === reopen_key
       )
         return a.id;
       const updated: HumanAction = {
@@ -157,6 +173,7 @@ export function reconcileDeviceAction(
       d.emit("device_action_updated", undefined, {
         human_action_id: a.id,
         device_action: input.key,
+        reopen_key,
         ...(device_enablement ? { phase: device_enablement.phase } : {}),
       });
       return a.id;

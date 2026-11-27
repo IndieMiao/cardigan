@@ -318,3 +318,49 @@ test("C-817: an enabled device that drops out reminds only while queued work wai
   await check();
   expect(reminders()).toEqual([]);
 });
+
+test("C-817: an assign during an initialization keeps its claim; an initialization nobody could run fails after the deadline", async () => {
+  await check();
+  request("enable", ["a"]);
+  const reg = registry();
+  const claim = reg.claimInit("local", TYPE, SERIAL, "a", at);
+  expect(claim).toBeDefined();
+  expect(request("assign", ["a"]).status).toBe("initializing");
+  expect(reg.claimInit("local", TYPE, SERIAL, "a", at)).toBeUndefined();
+  expect(
+    reg.finishInit("local", TYPE, SERIAL, claim as string, { ok: true }, at),
+  ).toBe(true);
+  expect(reg.get("local", TYPE, SERIAL)?.status).toBe("enabled");
+
+  // Initializing for over ten minutes, never claimed: failed with a reason.
+  request("disable");
+  store.database
+    .prepare("UPDATE machine_devices SET initialized_at=NULL")
+    .run();
+  request("enable");
+  const later = new Date(Date.parse(at) + 11 * 60_000).toISOString();
+  expect(
+    reg.expireInits(new Date(Date.parse(at) + 9 * 60_000).toISOString()),
+  ).toEqual([]);
+  // A recent claim (a check is running it) is not expired.
+  reg.claimInit("local", TYPE, SERIAL, "a", later);
+  expect(reg.expireInits(later)).toEqual([]);
+  store.database
+    .prepare("UPDATE machine_devices SET init_started_at=NULL")
+    .run();
+  expect(reg.expireInits(later)).toEqual(["local"]);
+  expect(reg.get("local", TYPE, SERIAL)).toMatchObject({
+    status: "failed",
+    failure: expect.stringContaining("一直没能列出这台设备"),
+  });
+});
+
+test("C-817: a failed listing is not taken for an unplugged device", async () => {
+  await check();
+  request("enable", ["a"]);
+  await check();
+  queue(1, [TYPE]);
+  listing = { ok: false, output: "" };
+  await check();
+  expect(open().filter((h) => h.instructions.includes("在等它"))).toEqual([]);
+});

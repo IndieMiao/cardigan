@@ -231,7 +231,11 @@ export function syncDeviceActions(
             : { outcome: "cancelled", text: "设备未启用，不派给任何项目" },
       });
     // Loss is judged only from a listing this check actually made.
-    if (!listing) continue;
+    if (
+      !listing ||
+      health?.capability_failures?.some((f) => f.key === reg.type)
+    )
+      continue;
     const seen = listing.find((d) => d.type === reg.type && d.id === reg.id);
     const reason =
       deviceEnabledFor(reg, project) && !(seen && usableDevice(seen))

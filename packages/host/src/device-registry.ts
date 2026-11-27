@@ -37,6 +37,8 @@ interface Row {
 
 /** A claimed initialization that has not reported back within this is retried. */
 export const DEVICE_INIT_CLAIM_MS = 2 * 60 * 1000;
+/** An initialization nobody could run within this long fails (C-817). */
+export const DEVICE_INIT_DEADLINE_MS = 10 * 60 * 1000;
 
 export class DeviceRequestError extends Error {
   constructor(
@@ -178,37 +180,49 @@ export class DeviceRegistry {
         throw new DeviceRequestError("device_request_invalid", checked.error);
       projects = checked.projects;
     }
-    const init =
-      next.status === "initializing"
-        ? deviceInitProject(projects, (project) =>
-            (
-              readMachineObservations(
-                this.store,
-                project,
-                input.machine,
-                input.now,
-              ).health?.devices ?? []
-            ).some(
-              (d) =>
-                d.type === input.type &&
-                d.id === input.id &&
-                d.state === "available",
-            ),
-          )
-        : current.init_project;
-    this.store.database
+    // A new initialization only when entering `initializing`; an assign
+    // while one runs keeps its project and claim.
+    const starting =
+      next.status === "initializing" && current.status !== "initializing";
+    const init = starting
+      ? deviceInitProject(projects, (project) =>
+          (
+            readMachineObservations(
+              this.store,
+              project,
+              input.machine,
+              input.now,
+            ).health?.devices ?? []
+          ).some(
+            (d) =>
+              d.type === input.type &&
+              d.id === input.id &&
+              d.state === "available",
+          ),
+        )
+      : current.init_project;
+    // Conditional on what was read: a concurrent result is never overwritten.
+    const changed = this.store.database
       .prepare(
-        "UPDATE machine_devices SET status=?, projects=?, init_project=?, init_started_at=NULL, failure=CASE WHEN ?='initializing' THEN NULL ELSE failure END, updated_at=? WHERE machine=? AND type=? AND device=?",
+        "UPDATE machine_devices SET status=?, projects=?, init_project=?, init_started_at=CASE WHEN ? THEN init_started_at ELSE NULL END, failure=CASE WHEN ? THEN NULL ELSE failure END, updated_at=? WHERE machine=? AND type=? AND device=? AND status=? AND updated_at=?",
       )
       .run(
         next.status,
         JSON.stringify(projects),
         init ?? null,
-        next.status,
+        next.status === current.status ? 1 : 0,
+        starting ? 1 : 0,
         input.now,
         input.machine,
         input.type,
         input.id,
+        current.status,
+        current.updated_at,
+      );
+    if (!changed.changes)
+      throw new DeviceRequestError(
+        "device_request_invalid",
+        "设备状态刚刚变化，请刷新后重试",
       );
     return this.get(input.machine, input.type, input.id) as DeviceRegistration;
   }
@@ -269,6 +283,40 @@ export class DeviceRegistry {
           : [outcome.reason, now, machine, type, id, claim]),
       );
     return changed.changes > 0;
+  }
+
+  /**
+   * An initialization no check has run within this long (the chosen
+   * project's check cannot list the device: no adb, machine unreachable...)
+   * fails with a reason instead of waiting forever. Returns the machines.
+   */
+  expireInits(now: string) {
+    if (!hasTable(this.store)) return [];
+    const deadline = new Date(
+      Date.parse(now) - DEVICE_INIT_DEADLINE_MS,
+    ).toISOString();
+    const stale = new Date(
+      Date.parse(now) - DEVICE_INIT_CLAIM_MS,
+    ).toISOString();
+    const machines = new Set<string>();
+    for (const d of this.list()) {
+      if (d.status !== "initializing" || d.updated_at >= deadline) continue;
+      const changed = this.store.database
+        .prepare(
+          "UPDATE machine_devices SET status='failed', init_started_at=NULL, failure=?, updated_at=? WHERE machine=? AND type=? AND device=? AND status='initializing' AND updated_at=? AND (init_started_at IS NULL OR init_started_at<?)",
+        )
+        .run(
+          `${d.init_project ?? "所选项目"} 的机器检查一直没能列出这台设备：确认这个项目的机器账号能用 adb、机器在线，然后重试`,
+          now,
+          d.machine,
+          d.type,
+          d.id,
+          d.updated_at,
+          stale,
+        );
+      if (changed.changes) machines.add(d.machine);
+    }
+    return [...machines];
   }
 
   /** Devices whose initialization this project's checks run, not yet claimed (or stale). */

@@ -247,3 +247,54 @@ test("C-817: only this project's host system writes device to-dos, with valid in
     ).ok,
   ).toBe(true);
 });
+
+test("C-817: a prompt dismissed after an in-place update stays closed in the state it showed", () => {
+  const io = ports();
+  let state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  state = apply(
+    state,
+    value(
+      reconcileDeviceAction(
+        state,
+        system,
+        { key: KEY, open: open("pending") },
+        io,
+      ),
+    ),
+  );
+  state = apply(
+    state,
+    value(
+      reconcileDeviceAction(
+        state,
+        system,
+        { key: KEY, open: open("failed", "初始化没有返回结果") },
+        io,
+      ),
+    ),
+  );
+  const id = state.human_actions[0]?.id;
+  if (!id) throw new Error("missing action");
+  state = apply(
+    state,
+    value(
+      cancelHumanAction(
+        state,
+        human,
+        { human_action_id: id, reason: "先不用" },
+        io,
+      ),
+    ),
+  );
+  expect(
+    value(
+      reconcileDeviceAction(
+        state,
+        system,
+        { key: KEY, open: open("failed", "初始化没有返回结果") },
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+});
