@@ -98,6 +98,7 @@ import {
   recordRetainedWriterRefusal,
   recordRetirementDispatch,
   redactFailureLine,
+  resolveResourceAlternatives,
   retainedWriterRefusal,
   runCapacitySnapshot,
   runResourceClaim,
@@ -2225,7 +2226,7 @@ export class Dispatcher {
     ready: readonly Notification[],
   ) {
     const cause = run ? undefined : inboxCause(state, a, ready);
-    return runResourceClaim(
+    const claim = runResourceClaim(
       tx,
       state.project_id,
       a,
@@ -2240,6 +2241,33 @@ export class Dispatcher {
       },
       ready,
       state.timeline,
+    );
+    return {
+      ...claim,
+      keys: this.resolveKeys(tx, state.project_id, a, claim.keys),
+    };
+  }
+  /** C-815: `android.any` becomes the emulator or device free right now. */
+  private resolveKeys(
+    tx: ReadRepositories,
+    project: string,
+    a: Assignment,
+    keys: readonly string[],
+  ) {
+    return resolveResourceAlternatives(
+      this.options.store,
+      project,
+      a,
+      keys,
+      this.clock.now(),
+      () =>
+        runCapacitySnapshot(
+          this.options.store,
+          tx,
+          this.options.resourceLimits,
+          this.options.projectQuota,
+        ),
+      this.options.leases,
     );
   }
   /**
@@ -2281,10 +2309,17 @@ export class Dispatcher {
   /** C-721: an earlier waiter is judged by what its own Run would claim. */
   private waiterKeys(tx: ReadRepositories) {
     const pending = new Map<string, readonly Notification[]>();
+    const full = (entry: QueuedRun, owner: Assignment) =>
+      this.resolveKeys(
+        tx,
+        entry.project_id,
+        owner,
+        assignmentResourceKeys(tx, entry.project_id, owner),
+      );
     return (entry: QueuedRun, owner: Assignment) => {
       const state = this.loadState(tx, entry.project_id);
       const run = state.runs.find((r) => r.id === entry.run_id);
-      if (!run) return assignmentResourceKeys(tx, entry.project_id, owner);
+      if (!run) return full(entry, owner);
       // Only a light trigger can lighten the Run; skip the notice read otherwise.
       if (
         runResourceKeys(
@@ -2297,7 +2332,7 @@ export class Dispatcher {
           state.timeline,
         ).length
       )
-        return assignmentResourceKeys(tx, entry.project_id, owner);
+        return full(entry, owner);
       let notes = pending.get(entry.project_id);
       if (!notes) {
         notes = this.options.store.listNotifications({

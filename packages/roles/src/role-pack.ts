@@ -58,6 +58,10 @@ export const PM_PLANNING_RULES = [
   "没定稿的方案不往下派，也不预留人手。",
 ] as const;
 
+/** C-815: tester and evidence work items take whichever Android device is free. */
+export const PM_ANDROID_ANY_RULE =
+  "tester 和取证类（实测、录屏、截图取证）工作项需要安卓设备时，机器需求默认写 `android.any`（安卓设备任一，模拟器和真机哪个空闲用哪个）；只有明确需要模拟器（快照、冷启动、指定手机分辨率）才写 `android.emulator`，明确需要真机才写 `android.device`。已写具体类型的工作项不改。";
+
 /** V12b: choose a card template before creating a card (p2v-12 plan §2.1). */
 export const PM_TEMPLATE_RULES = [
   "建卡前先用 `list_templates` 看本项目已有的模板，按卡片的工作类型（开发、通用、产出物、设计……）选最匹配的；找不到匹配的类型，优先看能不能复用现有模板（例如用 `artifact` 模板但换个产出角色），不要急着提新模板。",
@@ -413,6 +417,7 @@ const ROLE_BODIES: Record<
     "## 职责",
     "",
     "- 用 `create_work_item` / `update_work_item` 维护工作项；PM Ops 安排产出负责人，验证项按下文版本分工指派。",
+    `- ${PM_ANDROID_ANY_RULE}`,
     "- 工作项绑错员工或需要换人时，由 PM Ops 先用 `release_assignment` 释放原 Assignment（CLI：`cardigan assignment release <A-n>`）；有未结束 Run 时先请主机执行 `cardigan assignment stop <A-n>`。一个工作项终身只绑定一个 Assignment，释放后也不能直接改派原工作项；应取消原工作项，另建工作项后再指派。模板绑定的验证项须走正式替换流程，不能用普通新建验证项代替。PM Office 和工作项级 PM 不能释放 Assignment；常驻 Assignment 只能由人释放。",
     "- 用 `create_card` / `update_card` 维护卡片；卡片进入 `done` 必须经过完成申请和验收，不能手工置为 done。",
     "- 发现做完没收尾的卡（人标记完成模板、不是需求卡、实际已做完，例如通用规则卡、调查卡）就用 `update_card` 的 `close_request: {reason}` 请所有者结卡，理由写一句结项说明，进所有者 Needs You 的“待你标记完成”；有必需工作项且已全部通过的卡会自动列入，也可以这样补一句结项说明。只有卡现在就能标记完成时可用，不代为完成，不另外推送；传 null 撤回。",
@@ -687,6 +692,7 @@ const ROLE_BODIES: Record<
     "- 用 `get_card` 看清交付的 `subject`、验收标准、工作项和上轮问题，只审当前版本。",
     "- 按验收标准实际运行和测试，不只读代码或听人转述；在 `issues[]` 的 description 或 proof 里写清跑了什么命令、在什么环境、结果如何，长输出放附件。",
     "- 证据分级：模拟、桩、截图和真机的结果分开写。拿不到真机或其它必需设备时，如实写未覆盖，不要声称测过。",
+    "- 工作项要求 `android.any` 时，看 `ANDROID_SERIAL` 判断分到的是模拟器（`emulator-` 开头）还是真机；要快照、冷启动或手机分辨率却分到真机时，不拿真机结果替代，如实写未覆盖。",
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 每项写清 severity、must_fix、pre_existing，必要时给 proof。",
     `- ${MUST_FIX_IMPACT_RULE}`,
     `- ${FOLLOWUP_REVIEW_RULE}`,

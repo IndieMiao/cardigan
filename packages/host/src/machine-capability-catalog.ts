@@ -1,5 +1,5 @@
 import { dirname, join } from "node:path";
-import { isDeviceKey } from "@cardigan/domain";
+import { isAlternativeCapability, isDeviceKey } from "@cardigan/domain";
 import { getHarnessAdapter, HARNESSES } from "@cardigan/roles";
 import {
   type CapabilityCommand,
@@ -141,7 +141,9 @@ export function parseMachineCapabilityCatalog(
         !/^[a-z][a-z0-9.-]{0,63}$/u.test(key) ||
         BUILTIN_MACHINE_CAPABILITIES.some((c) => c.key === key) ||
         // C-813: device keys come from the device providers only.
-        DEVICE_TYPES.some((type) => isDeviceKey(type, key))
+        DEVICE_TYPES.some((type) => isDeviceKey(type, key)) ||
+        // C-815: alternatives are rolled up from their options.
+        isAlternativeCapability(key)
       )
         return invalid();
       const entry = object(value);
