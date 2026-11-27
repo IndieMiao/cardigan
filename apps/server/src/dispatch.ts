@@ -190,6 +190,10 @@ import {
   settleRefusedWake,
   systemTurnWaitingNotes,
 } from "./dispatch-turn-guard.js";
+import {
+  type UpstreamOutageOptions,
+  UpstreamOutageRecovery,
+} from "./dispatch-upstream-outage.js";
 import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
@@ -241,6 +245,8 @@ export interface DispatcherOptions {
     localOnly?: boolean,
   ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
   readonly inactivityInspectionTimeoutMs?: number;
+  /** C-821: model service outages seen on the sessions' own screens. */
+  readonly upstreamOutage?: UpstreamOutageOptions;
   /** C-806: see `HostOpsService.recordLaunchEvidence`. */
   readonly recordLaunchEvidence?: (
     project: ProjectId,
@@ -439,6 +445,7 @@ export class Dispatcher {
   private readonly queuedRunPatrol: QueuedRunPatrol;
   private readonly clientRecovery: ClientRecovery;
   private readonly inactivityAlerts: InactivityAlerts;
+  private readonly upstreamOutage: UpstreamOutageRecovery | undefined;
   /** C-247: set once shutdown begins; no Run is claimed, woken or launched after it. */
   private closing = false;
   /**
@@ -499,17 +506,38 @@ export class Dispatcher {
       this.clock,
       () => this.closing,
     );
+    this.upstreamOutage =
+      options.upstreamOutage && options.runtime.observe_prompt
+        ? new UpstreamOutageRecovery(
+            {
+              store: options.store,
+              runtime: options.runtime,
+              upstreamOutage: options.upstreamOutage,
+              onError: (error) => options.onError?.(error),
+            },
+            this.clock,
+            () => this.closing,
+          )
+        : undefined;
     this.inactivityAlerts = new InactivityAlerts({
       ...options,
+      ...(this.upstreamOutage ? { outage: this.upstreamOutage } : {}),
       clock: this.clock,
       graceMs: this.inactivityGraceMs,
       ...(options.inactivityInspectionTimeoutMs !== undefined
         ? { inspectionTimeoutMs: options.inactivityInspectionTimeoutMs }
         : {}),
     });
+    const outage = this.upstreamOutage;
     this.inactive = new InactiveRunReaper({
       inspectionPending: (project, run) =>
         this.inactivityAlerts.pending(project, run),
+      ...(outage
+        ? {
+            held: (state: CommandState, run: Run, at: string) =>
+              outage.held(state, run.id, at),
+          }
+        : {}),
       store: options.store,
       runtime: options.runtime,
       clock: this.clock,
@@ -567,6 +595,7 @@ export class Dispatcher {
     return Promise.all([
       this.inactive.close(),
       this.clientRecovery.drain(),
+      this.upstreamOutage?.drain(),
       this.roleUpgradesSettled(),
     ]).then(() => {});
   }
@@ -1009,6 +1038,7 @@ export class Dispatcher {
     step("maintenance", () => this.maintenance(project));
     if (this.options.runtime.observe_prompt)
       this.clientRecovery.schedule(this.state(project));
+    this.upstreamOutage?.schedule(this.state(project));
     resolveObsoletePmNotifications(
       store,
       project,

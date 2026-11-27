@@ -46,6 +46,8 @@ interface ReaperOptions {
   clock: Clock;
   afterMs: number | null;
   inspectionPending?: (project: ProjectId, run: Run["id"]) => boolean;
+  /** C-821: a Run waiting for its upstream outage's resume is not stopped. */
+  held?: (state: CommandState, run: Run, at: string) => boolean;
   inspectHarnessActivity?: (
     project: ProjectId,
     assignment: Assignment["id"],
@@ -93,6 +95,11 @@ export class InactiveRunReaper {
         if (
           !run.inactivity_stop &&
           this.options.inspectionPending?.(project, run.id)
+        )
+          continue;
+        if (
+          !run.inactivity_stop &&
+          this.options.held?.(state, run, this.options.clock.now())
         )
           continue;
         const a = owners.get(run.assignment_id);

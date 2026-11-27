@@ -54,6 +54,7 @@ export interface ControlPlaneOptions {
   readonly startup?: LoopStartup;
   readonly machineHost?: MachineHost;
   readonly upstream?: LaunchConfig;
+  readonly upstreamOutage?: DispatcherOptions["upstreamOutage"];
   readonly hostOpsTick?: () => Promise<void>;
   readonly harnessActivity?: DispatcherOptions["harnessActivity"];
   readonly harnessFileActivity?: DispatcherOptions["harnessFileActivity"];
@@ -185,6 +186,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       };
     },
     ...(options.hostOpsTick ? { hostOpsTick: options.hostOpsTick } : {}),
+    ...(options.upstreamOutage
+      ? { upstreamOutage: options.upstreamOutage }
+      : {}),
     ...(options.harnessActivity
       ? { harnessActivity: options.harnessActivity }
       : {}),

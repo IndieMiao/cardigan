@@ -308,6 +308,8 @@ function upstreamClusterFromSnapshot(
 }
 export type UpstreamCause =
   | "upstream_unreachable"
+  /** C-821: the session stopped on a model API error; resumed after recovery. */
+  | "upstream_outage"
   | "upstream_suspected"
   | "waiting_confirmation"
   | "waiting_interaction"
@@ -426,6 +428,13 @@ function classifyUpstreamWithMemo(
   snapshot: UpstreamHealthSnapshot,
 ): UpstreamDiagnosis {
   const base = { ...target };
+  if (snapshot.heldByOutage(target.assignment_id, now))
+    return {
+      ...base,
+      cause: "upstream_outage",
+      action: "wait",
+      evidence: ["model_api_error_screen"],
+    };
   const group = memo(`group:${target.group}`, () =>
     targets.filter((t) => t.group === target.group),
   );

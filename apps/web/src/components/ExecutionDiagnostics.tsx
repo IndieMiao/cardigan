@@ -18,6 +18,7 @@ const causes: Readonly<Record<string, string>> = {
   runtime_exited: "运行终端已退出",
   upstream_unreachable: "线路连接失败",
   upstream_suspected: "疑似线路异常",
+  upstream_outage: "模型服务中断",
   agent_stalled: "会话失活",
   server_problem: "主机派发异常",
   unknown: "运行原因未知",
