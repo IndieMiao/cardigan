@@ -7,6 +7,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -430,7 +431,12 @@ test("C-106: clicking the row or the Assignment id opens the drawer; the id is a
   expect(await screen.findByRole("dialog", { name: /^A-7 / })).toBeTruthy();
   expect(trigger.getAttribute("aria-expanded")).toBe("true");
 
-  // A plain cell of another row opens that row's drawer instead.
+  // C-831: the drawer is modal; once closed, a plain cell of another row
+  // opens that row's drawer.
+  fireEvent.keyDown(screen.getByRole("dialog", { name: /^A-7 / }), {
+    key: "Escape",
+  });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   const coder = cells("A-1");
   fireEvent.click(
     coder.row.querySelector('td[data-column="config"]') as Element,

@@ -16,14 +16,6 @@ export interface DrawerProps {
   readonly actions?: ReactNode;
   readonly className?: string;
   readonly initialFocus?: "title" | "close";
-  /**
-   * C-75: `false` keeps the page behind the drawer usable (no focus trap, no
-   * pointer blocking). The dimming overlay then lets clicks through, and a
-   * click or focus outside the drawer closes it unless `onInteractOutside`
-   * prevents that.
-   */
-  readonly modal?: boolean;
-  readonly onInteractOutside?: (event: Event) => void;
 }
 
 /** Right-side modal drawer built on Radix Dialog. */
@@ -38,27 +30,17 @@ export function Drawer({
   actions,
   className,
   initialFocus = "title",
-  modal = true,
-  onInteractOutside,
 }: DrawerProps) {
   const descriptionId = useId();
   const titleRef = useRef<HTMLHeadingElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange} modal={modal}>
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
       {trigger && <Dialog.Trigger asChild>{trigger}</Dialog.Trigger>}
       <Dialog.Portal>
-        {modal ? (
-          <Dialog.Overlay className="drawer-overlay" />
-        ) : (
-          <div
-            className="drawer-overlay drawer-overlay-passthrough"
-            aria-hidden="true"
-          />
-        )}
+        <Dialog.Overlay className="drawer-overlay" />
         <Dialog.Content
           className={`drawer-content${className ? ` ${className}` : ""}`}
-          onInteractOutside={onInteractOutside}
           onEscapeKeyDown={(event) => {
             // Radix handles Escape in capture; let an inner form dismiss itself
             // before considering the containing drawer.
