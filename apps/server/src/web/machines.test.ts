@@ -1259,6 +1259,10 @@ test("C-817: only the owner's login session enables, disables or assigns a devic
         },
       ],
     });
+    // C-818: no current listing of this project: no state is claimed.
+    expect(
+      (await f.call(list)).json as { devices: Record<string, unknown>[] },
+    ).not.toHaveProperty("devices.0.state");
     for (const body of [
       { request: "wipe" },
       { request: "enable", projects: "all" },
@@ -1297,7 +1301,12 @@ test("C-817: only the owner's login session enables, disables or assigns a devic
     });
     expect(enabled.status).toBe(200);
     expect(enabled.json).toMatchObject({
-      device: { status: "initializing", init_project: project },
+      device: {
+        status: "initializing",
+        init_project: project,
+        // C-818: the whole list row, as the page shows it.
+        choices: [project],
+      },
     });
     // The initialization check is started at once for that project.
     await vi.waitFor(() => expect(check).toHaveBeenCalled());

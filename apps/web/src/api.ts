@@ -1584,6 +1584,48 @@ export interface MachineView {
   readonly reservations?: readonly MachineReservationView[];
   readonly bindings: readonly MachineBindingView[];
 }
+/**
+ * C-818: one external test device as the settings page and
+ * `cardigan machine device list` show it.
+ */
+export interface MachineDeviceView {
+  readonly machine: string;
+  readonly type: string;
+  readonly id: string;
+  readonly status:
+    | "pending"
+    | "initializing"
+    | "failed"
+    | "enabled"
+    | "disabled";
+  /** Projects the device may be given to. */
+  readonly projects: readonly string[];
+  /** Projects registering the machine: what `projects` may be chosen from. */
+  readonly choices: readonly string[];
+  readonly model?: string;
+  readonly version?: string;
+  readonly resolution?: string;
+  readonly failure?: string;
+  /**
+   * This project's latest machine check: the device's state, or `missing`
+   * when it is no longer listed. Absent when there is no current listing.
+   */
+  readonly state?:
+    | "available"
+    | "unauthorized"
+    | "offline"
+    | "unavailable"
+    | "in_use"
+    | "missing";
+  /** The Run holding it now; `card_id` only for this project's Runs. */
+  readonly holder?: {
+    readonly project: string;
+    readonly run_id: string;
+    readonly assignment_id: string;
+    readonly since: string;
+    readonly card_id?: string;
+  };
+}
 /** C-800: reservation metadata only; never the holder project's cards. */
 export interface MachineReservationView {
   readonly reservation_id: string;
@@ -2869,7 +2911,12 @@ export interface CardiganClient {
     body:
       | { request: "enable" | "assign"; projects?: readonly string[] }
       | { request: "disable" },
-  ): Promise<{ device: { status: string } }>;
+  ): Promise<{ device: MachineDeviceView }>;
+  /** C-818: the external devices of a machine this project registers. */
+  machineDevices?(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ devices: readonly MachineDeviceView[] }>;
   createWorkerWizard?(
     projectId: string,
     input: WorkerWizardInput,
@@ -3602,6 +3649,14 @@ export class HttpCardiganClient implements CardiganClient {
       { method: "POST", body: "{}", idempotencyKey, resend: false },
     );
   }
+  machineDevices(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ devices: readonly MachineDeviceView[] }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/devices`,
+    );
+  }
   /** C-817: enable, disable or assign an external device (owner session only). */
   requestMachineDevice(
     projectId: string,
@@ -3611,7 +3666,7 @@ export class HttpCardiganClient implements CardiganClient {
     body:
       | { request: "enable" | "assign"; projects?: readonly string[] }
       | { request: "disable" },
-  ): Promise<{ device: { status: string } }> {
+  ): Promise<{ device: MachineDeviceView }> {
     // Not resent: a late duplicate could undo a later opposite action.
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/devices/${encodeURIComponent(type)}/${encodeURIComponent(deviceId)}`,

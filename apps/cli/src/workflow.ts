@@ -55,6 +55,7 @@ import {
   DeviceLeases,
   DeviceRegistry,
   DeviceRequestError,
+  deviceList,
   effectiveRunLimit,
   findMachineReservation,
   listMachineReservations,
@@ -1100,11 +1101,10 @@ async function machineDeviceCommand(
       throw new CliError("机器管理仅限人类操作", EXIT.usage);
     const registry = new DeviceRegistry(store);
     if (sub === "list") {
+      // C-818: the same rows as the settings page's device list.
       io.stdout(
         JSON.stringify(
-          registry
-            .list(machine)
-            .map((d) => ({ ...d, choices: machineProjects(store, d.machine) })),
+          deviceList(store, project_id, machine, systemClock.now()),
           null,
           2,
         ),

@@ -7,9 +7,8 @@ import {
 } from "@cardigan/domain";
 import {
   cancelMachineReservation,
-  DeviceRegistry,
   DeviceRequestError,
-  machineProjects,
+  deviceList,
   RESERVATION_CANCEL_REASON_MAX,
   requestDevice,
 } from "@cardigan/host";
@@ -216,11 +215,9 @@ async function serveDevices(
   if (!registered) throw missing();
   if (!type || !id) {
     if (c.req.method !== "GET") methodNotAllowed(["GET"]);
-    const choices = machineProjects(c.store, machine);
+    // C-818: the same rows as `cardigan machine device list`.
     return sendJson(c.res, 200, {
-      devices: new DeviceRegistry(c.store)
-        .list(machine)
-        .map((d) => ({ ...d, choices })),
+      devices: deviceList(c.store, project, machine, c.clock.now()),
     });
   }
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
@@ -269,7 +266,10 @@ async function serveDevices(
     } catch {
       // The device follow-up patrol runs it within a minute.
     }
-  sendJson(c.res, 200, {
-    device: { ...device, choices: machineProjects(c.store, machine) },
-  });
+  // C-818: the whole row as the list shows it, so the page refreshes it
+  // from what the server recorded rather than from what it asked for.
+  const row = deviceList(c.store, project, machine, c.clock.now()).find(
+    (d) => d.type === device.type && d.id === device.id,
+  );
+  sendJson(c.res, 200, { device: row ?? device });
 }

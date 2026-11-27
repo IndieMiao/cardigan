@@ -137,6 +137,8 @@ test("C-817: machine device list / enable / disable / assign, with an immediate 
       status: "pending",
       model: "MRR-W39",
       choices: ["sensen"],
+      // C-818: the same row as the settings page, with what the check saw.
+      state: "available",
     }),
   ]);
   expect(humanActions("sensen").map((h) => h.device_enablement?.phase)).toEqual(
