@@ -110,6 +110,7 @@ export * from "./commands/standing-deployment.js";
 export * from "./commands/standing-pm-stall.js";
 export * from "./commands/stop.js";
 export * from "./commands/stop-state.js";
+export * from "./commands/storage-cors.js";
 export * from "./commands/story-proposal.js";
 export * from "./commands/story-summary-handoff.js";
 export * from "./commands/system-completion.js";

@@ -133,6 +133,7 @@ type CommandName =
   | "rotate_deployed_pm"
   | "upgrade_idle_assignment_role"
   | "record_deployment"
+  | "record_storage_cors"
   | "control_deployment"
   | "create_host_ops_assignment"
   | "rotate_host_ops_assignment"
@@ -333,6 +334,7 @@ export class CommandDraft {
       "upgrade_idle_assignment_role",
       "rotate_deployed_pm",
       "record_deployment",
+      "record_storage_cors",
       "manage_host_ops_action",
       "manage_inactive_run_stop",
       "settle_pending_run_finish",

@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import type { CorsOriginResult } from "./cors.js";
 import type { LoopDelay } from "./loop-delay.js";
 
 /**
@@ -162,6 +163,11 @@ export interface SyncStatus {
   readonly reachable: boolean;
   /** C-628: event-loop delay of the process that ran the sync. */
   readonly loop_delay?: LoopDelay;
+  /** C-807: last browser-upload preflight, one result per Workbench origin. */
+  readonly cors?: {
+    readonly checked_at: string;
+    readonly results: readonly CorsOriginResult[];
+  };
 }
 
 function atomicWrite(path: string, content: string) {

@@ -162,7 +162,8 @@ function ActivityRow({
     const p = event.payload as { source?: string; reason?: string } | null;
     return event.type === "human_action_cancelled" &&
       event.actor.kind === "system" &&
-      p?.source === "supervisor_rechecked" &&
+      (p?.source === "supervisor_rechecked" ||
+        p?.source === "storage_rechecked") &&
       typeof p.reason === "string"
       ? [p.reason]
       : [];

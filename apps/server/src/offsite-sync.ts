@@ -13,9 +13,13 @@ import {
   ARTIFACT_BLOB_ID,
   artifactKey,
   attachmentKey,
+  type CorsOriginResult,
+  corsBlocked,
+  corsPreflight,
   type Offsite,
   type OssClient,
   OssError,
+  type OssTransport,
   processLoopDelay,
   type SyncedLedger,
   type SyncStatus,
@@ -64,6 +68,24 @@ export const OFFSITE_READ_BYTES_PER_SECOND = 128 * 1024 * 1024;
 /** C-628: hashing yields the event loop after this much continuous work. */
 export const OFFSITE_SLICE_MS = 10;
 const READ_CHUNK_BYTES = 256 * 1024;
+/** C-807: a passing browser-upload preflight is repeated this often... */
+export const OFFSITE_CORS_RECHECK_OK_MS = 30 * 60_000;
+/** ...a refused or inconclusive one this often, so a new rule shows soon. */
+export const OFFSITE_CORS_RECHECK_MS = 2 * 60_000;
+
+/**
+ * C-807: one settled preflight of every Workbench origin (all answered, or
+ * at least one refused). Origins and the bucket name only; no URL.
+ */
+export interface OffsiteCorsReport {
+  readonly bucket: string;
+  readonly region: string;
+  readonly origins: readonly string[];
+  readonly refused: readonly {
+    readonly origin: string;
+    readonly reason: "not_enabled" | "not_allowed";
+  }[];
+}
 
 /**
  * Hold the host-wide sync lock: a release function, or undefined while
@@ -119,6 +141,18 @@ export interface OffsiteSyncOptions {
   readonly role?: string;
   /** One JSON-able line per lock change and per tick that uploaded. */
   readonly log?: (line: Readonly<Record<string, unknown>>) => void;
+  /**
+   * C-807: origins the Workbench is opened from; each is preflighted against
+   * the bucket like a browser upload. Empty or absent skips the check.
+   */
+  readonly corsOrigins?: readonly string[];
+  /** Transport of the preflight (tests); defaults to Node http(s). */
+  readonly corsTransport?: OssTransport;
+  /**
+   * C-807: called after a settled preflight whose outcome differs from the
+   * last one reported (and once after start). A throw is retried next check.
+   */
+  readonly onCors?: (report: OffsiteCorsReport) => void;
 }
 
 /**
@@ -201,6 +235,17 @@ export class OffsiteSync {
   /** Size and mtime by path; blobs are content-addressed and never rewritten. */
   private stats = new Map<string, { size: number; mtime: number }>();
   private lockState: "owner" | "standby" | undefined;
+  /** C-807: last preflight of the current target and origins. */
+  private cors:
+    | {
+        readonly at: number;
+        readonly origins: string;
+        readonly checked_at: string;
+        readonly results: readonly CorsOriginResult[];
+      }
+    | undefined;
+  /** C-807: the outcome last handed to `onCors`. */
+  private corsReported: string | undefined;
   private readonly lock: OffsiteSyncLock;
   private pacer: Pacer | undefined;
 
@@ -281,6 +326,7 @@ export class OffsiteSync {
       this.lastContact = undefined;
       this.reachable = true;
       this.listing = undefined;
+      this.cors = undefined;
     }
     // The ledger and client of this target, even if the file changes mid-tick.
     const ledger = offsite.ledger.refresh();
@@ -368,6 +414,7 @@ export class OffsiteSync {
       offsite.usage.add({ requests: 1 });
       if (this.reachable) this.lastContact = now;
     }
+    await this.checkCors(config.settings.credentials);
     if (gone.size && this.listing)
       this.listing = {
         ...this.listing,
@@ -421,7 +468,105 @@ export class OffsiteSync {
       ...(this.lastSuccess ? { last_success_at: this.lastSuccess } : {}),
       reachable: configured === "ready" ? this.reachable : true,
       ...(delay ? { loop_delay: delay } : {}),
+      ...(configured === "ready" && this.cors
+        ? {
+            cors: {
+              checked_at: this.cors.checked_at,
+              results: this.cors.results,
+            },
+          }
+        : {}),
     };
+  }
+
+  /**
+   * C-807: preflight a browser upload from every Workbench origin, at most
+   * every `OFFSITE_CORS_RECHECK_OK_MS` while all pass and every
+   * `OFFSITE_CORS_RECHECK_MS` otherwise; a changed origin list or target
+   * checks at once. The preflight carries no credential.
+   */
+  private async checkCors(credentials: {
+    readonly bucket: string;
+    readonly region: string;
+    readonly endpoint?: string;
+  }) {
+    const origins = this.options.corsOrigins ?? [];
+    if (!origins.length || this.abort.signal.aborted) return;
+    const key = origins.join("\n");
+    const now = this.now().getTime();
+    const last = this.cors;
+    if (last && last.origins === key && now >= last.at) {
+      const passing = last.results.every((r) => r.verdict === "ok");
+      const wait = passing
+        ? OFFSITE_CORS_RECHECK_OK_MS
+        : OFFSITE_CORS_RECHECK_MS;
+      if (now - last.at < wait) return;
+    }
+    const results: CorsOriginResult[] = [];
+    try {
+      for (const origin of origins)
+        results.push(
+          await corsPreflight(
+            {
+              bucket: credentials.bucket,
+              region: credentials.region,
+              ...(credentials.endpoint
+                ? { endpoint: credentials.endpoint }
+                : {}),
+            },
+            origin,
+            {
+              ...(this.options.corsTransport
+                ? { transport: this.options.corsTransport }
+                : {}),
+              signal: this.abort.signal,
+            },
+          ),
+        );
+    } catch {
+      // Aborted on shutdown.
+      return;
+    } finally {
+      if (results.length)
+        this.options.offsite.usage.add({ requests: results.length });
+    }
+    this.cors = {
+      at: now,
+      origins: key,
+      checked_at: this.now().toISOString(),
+      results,
+    };
+    const refused = results.flatMap((r) =>
+      corsBlocked(r.verdict)
+        ? [
+            {
+              origin: r.origin,
+              reason: r.verdict as "not_enabled" | "not_allowed",
+            },
+          ]
+        : [],
+    );
+    // Unreachable or unexpected answers say nothing about CORS.
+    if (!refused.length && results.some((r) => r.verdict !== "ok")) return;
+    const report: OffsiteCorsReport = {
+      bucket: credentials.bucket,
+      region: credentials.region,
+      origins: [...origins],
+      refused,
+    };
+    const outcome = JSON.stringify(report);
+    if (outcome === this.corsReported) return;
+    try {
+      this.options.onCors?.(report);
+      this.corsReported = outcome;
+      this.log({
+        event: "offsite_cors_checked",
+        bucket: credentials.bucket,
+        refused,
+      });
+    } catch {
+      this.log({ event: "offsite_cors_report_failed" });
+    }
   }
 
   /**

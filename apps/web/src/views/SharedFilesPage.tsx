@@ -1,5 +1,5 @@
 import { type DragEvent, useCallback, useState } from "react";
-import { describeError } from "../api.js";
+import { ApiError, describeError } from "../api.js";
 import { EmptyState, Time } from "../components/Foundation.js";
 import {
   DataTableCell,
@@ -12,6 +12,11 @@ import {
   settingsDialogClassName,
 } from "../components/layout/SettingsLayout.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import {
+  STORAGE_CORS_TITLE,
+  StorageCorsRule,
+  storageCorsReason,
+} from "../components/StorageCors.js";
 import { Button } from "../components/ui/button.js";
 import { Dialog, DialogContent, DialogTitle } from "../components/ui/dialog.js";
 import { FilePicker } from "../components/ui/file-picker.js";
@@ -105,9 +110,26 @@ export function SharedFilesPage({
           size: file.size,
           ...(file.type ? { content_type: file.type } : {}),
         });
-        await client.put(ticket, file, (fraction) =>
-          setBusy(`正在上传 ${file.name}（${Math.floor(fraction * 100)}%）`),
-        );
+        try {
+          await client.put(ticket, file, (fraction) =>
+            setBusy(`正在上传 ${file.name}（${Math.floor(fraction * 100)}%）`),
+          );
+        } catch (failure) {
+          // C-807: a browser network error after a refused preflight is the
+          // missing CORS rule, not an unreachable store.
+          const cors = listing.data?.cors_blocked;
+          if (
+            cors &&
+            failure instanceof ApiError &&
+            failure.code === "storage_unreachable"
+          )
+            throw new ApiError(
+              0,
+              "storage_cors_blocked",
+              `${STORAGE_CORS_TITLE}（${storageCorsReason(cors)}），上传未完成`,
+            );
+          throw failure;
+        }
         await client.commit(ticket.upload_id);
       }
       setMessage(
@@ -177,6 +199,12 @@ export function SharedFilesPage({
         error={error ?? listing.error}
         retry={listing.reload}
       />
+      {data?.cors_blocked && (
+        <section role="alert" aria-label={STORAGE_CORS_TITLE}>
+          <h2>{STORAGE_CORS_TITLE}</h2>
+          <StorageCorsRule block={data.cors_blocked} />
+        </section>
+      )}
       {data && data.availability !== "ready" && (
         <EmptyState>
           {data.availability === "not_configured"

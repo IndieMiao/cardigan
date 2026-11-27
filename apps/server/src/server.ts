@@ -100,6 +100,7 @@ import {
   registerChainCandidate,
   requestMobileSignature,
 } from "./mobile-signing.js";
+import { recordStorageCors } from "./offsite-cors-notice.js";
 import { OFFSITE_SYNC_INTERVAL_MS, OffsiteSync } from "./offsite-sync.js";
 import { serverProbes } from "./probes.js";
 import { publishProcessHealth } from "./process-health.js";
@@ -120,7 +121,7 @@ import {
   tickStoreObserver,
 } from "./tick-profile.js";
 import { warmCommandEvents } from "./warm-command-events.js";
-import type { WebConfig } from "./web/config.js";
+import { type WebConfig, workbenchOrigins } from "./web/config.js";
 import { machineHost } from "./web/machine-host.js";
 import { readMergeCheckLogRange } from "./web/merge-check-log.js";
 import { workbenchReadOptionsFromEnv } from "./web/read-pool.js";
@@ -1176,11 +1177,17 @@ async function assembleServer(
         // C-628: only this (background) role syncs; the flock inside each
         // tick keeps any other process on standby, so one host never scans
         // and hashes twice at the same time.
+        const clock = options.dispatcher.clock ?? wallClock;
         const sync = new OffsiteSync({
           offsite,
           store,
           role: options.role ?? "server",
           log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+          // C-807: browser uploads from the Workbench need a bucket CORS rule.
+          ...(options.web
+            ? { corsOrigins: workbenchOrigins(options.web.config) }
+            : {}),
+          onCors: (report) => recordStorageCors(store, report, clock),
         });
         offsiteSync = sync;
         offsiteLoop = startTimerLoop({
