@@ -1,26 +1,26 @@
 {
   "capacity-1440-dark.png": {
-    "hash": "d31f5065d9518ce1b5262a9533487e58808cdbd441c4145c6df15c7c45c555fc",
+    "hash": "089ffa051a329c3252dc536c45fa874cf48efbc90e8129048a675ced210520e5",
     "replaces": [
-      "d5c5baa357ebf1e23ef388365b4978e720d4f3e787d5e00f6b020841245d33ba"
+      "ac4554bc0a1c0df2c3744ba2bec2c3434bcd596054a1b856769a30cca14bea12"
     ]
   },
   "capacity-1440-light.png": {
-    "hash": "b740885b1e36da2cf0855f208e21d09844abc025289f4dc640fe0ca8e776fed5",
+    "hash": "b0602e9b1ee99090c4876a5f694a89522ee2af96b98f6b7646faedb9539ac026",
     "replaces": [
-      "c2613193b2580c6401912682a3e2e1ebe75dcf47149d468af28bd15c7c5956ef"
+      "3e621adb1418750a04619db630e9fd93e52cb74017ee2f448018d11fe129faa1"
     ]
   },
   "capacity-390-dark.png": {
-    "hash": "d06bf7a7e74472410b1341bce205fc504140d5bbacb4938a0d44bae9a97d8cbd",
+    "hash": "7c77a0f5d34c19b8b930311f7ec9ca3cbc92c8459a70c8a241d7f1e63053af65",
     "replaces": [
-      "79a81239923599fdd448b208140146c98ecda2ab4eba1529128474c9436258e3"
+      "eb044799594a41dd477a09bc6e0ad1052236291bc14f13b51ee4ef43b04632d2"
     ]
   },
   "capacity-390-light.png": {
-    "hash": "290982bc79d9ecd3e0be9f842ea389bbdfce1c7fd8e531781a1308b4bf4bf8e5",
+    "hash": "83257b47091779e7cbdf20e1d23560ffa1e8c7354870d679caf98a904f4a82db",
     "replaces": [
-      "31678e8ffa612fffc5a89854c2213b08554da8134ac8f321610e76acdbe89636"
+      "a92269d70f2150e6fc2ccbb4ec1883ea457b27cb4cd3689f9dd64609296c4447"
     ]
   }
 }
