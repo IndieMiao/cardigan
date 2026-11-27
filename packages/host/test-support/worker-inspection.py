@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import socket
 import tempfile
@@ -63,9 +64,11 @@ class CollectorTest(unittest.TestCase):
             with self.assertRaises(ValueError): read()
             with patch.dict(terminal,state='finished',pid=None): self.assertEqual(read()['state'], 'finished')
 
-    def hc_fixture(self, system, change=None):
+    def hc_fixture(self, system, change=None, launch=False):
         labels = dict(cardigan='1', project='test', assignment='A-1', run='R-8')
         t = dict(labels=labels, address='t2', state='live', pid=None, created_ms=15, foreground={'pid':42})
+        if launch:
+            t['pid'] = 42
         if change == 'no_candidates':
             t.update(state='finished', foreground=None)
         elif change == 'partial':
@@ -106,13 +109,22 @@ class CollectorTest(unittest.TestCase):
                 return dict(birth, start=101 if change == 'birth' and sampler.called else 100)
             sampler = MagicMock(side_effect=sample)
             stack.enter_context(patch.dict(probe['terminals'].__globals__, native={'identity': identity}, process=sampler))
-            rows,pids = probe['terminals'](root,'s',labels,None,system)
+            usage = MagicMock(return_value=dict(source='process', cpu_ms=1, memory_bytes=2, elapsed_ms=3))
+            stack.enter_context(patch.dict(probe['terminal_launch'].__globals__, resources=usage))
+            rows,pids = probe['terminals'](root,'s',labels,None,system,launch)
             thread.join(2); self.assertFalse(thread.is_alive())
             methods = ['hello','terminal.list'] + ([] if change == 'no_candidates' else ['terminal.get'])
             self.assertEqual([m for m,_ in requests], methods + ['terminal.read','terminal.get'])
             self.assertEqual(requests[-2][1],{'terminal':'t2','lines':0})
             if change != 'exit':
                 self.assertEqual(rows[0]['screen'],['[redacted]']*11+['working'])
+            if launch:
+                # C-806: the failed launch's own tail, bounded; the CLI's resources.
+                self.assertEqual(rows[0]['launch'], dict(state='live', tail=['old']*18+['secret material','Working (esc to interrupt)'],
+                                                         resources=usage.return_value))
+                usage.assert_called_once_with(42, system)
+            elif change != 'exit':
+                self.assertNotIn('launch', rows[0])
             expected = {None: [{'pid':42}], 'partial': [{'pid':43}], 'no_candidates': []}
             self.assertEqual(pids, expected.get(change))
             if change == 'unavailable':
@@ -122,6 +134,7 @@ class CollectorTest(unittest.TestCase):
         for system in ['linux','darwin']:
             for change in [None,'foreground','exit','birth','unavailable','unverified','partial','no_candidates']:
                 with self.subTest(system=system,change=change): self.hc_fixture(system,change)
+            with self.subTest(system=system,launch=True): self.hc_fixture(system,None,True)
 
     def test_transcript_metadata_no_links(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -249,7 +262,8 @@ class CollectorTest(unittest.TestCase):
                         harness='codex', live=True, platform='linux', helpers=[], process=None)
             terminals = [{'address': 't2', 'state': 'live', 'screen': ['idle']}]
             processes = [dict(pid=42, elapsed='00:03', cpu=0.5, command='codex')]
-            def observe(home, session, labels, pinned, system):
+            def observe(home, session, labels, pinned, system, launch=False):
+                self.assertFalse(launch)
                 self.assertEqual(labels, dict(cardigan='1', project='fixture', assignment='A-1', run='R-2', generation=replacement))
                 self.assertEqual(pinned, 't2')
                 return terminals, processes
@@ -296,6 +310,120 @@ class CollectorTest(unittest.TestCase):
         child.stdout=io.BytesIO(f'{os.getuid()} 44 01:02 2.5 /bin/codex resume --model secret-name --token private'.encode())
         with patch('subprocess.Popen',return_value=child) as call:
             self.assertEqual(probe['process'](44),[dict(pid=44,elapsed='01:02',cpu=2.5,command='codex resume --model [redacted] [redacted]')]); self.assertEqual(call.call_args.args[0][0],'/bin/ps')
+
+    # C-806: a failed launch's evidence is bounded and redacted on the worker.
+    TOKEN = 'cdg_' + 'Zx9' * 14
+
+    def test_redaction_removes_tokens_and_credential_paths(self):
+        tail = probe['redacted_tail']('\n'.join([
+            'cardigan: token file is missing: /worker/runs/fixture/A-1/token',
+            '. /worker/runs/fixture/A-1/secrets.env failed; ssh -i ~/.ssh/id_ed25519 host',
+            'Authorization: Bearer ' + self.TOKEN,
+            'MCP_TOKEN=' + self.TOKEN + ' api_key: "hunter2"',
+            'X-Cardigan-Session ' + 'aB3' * 8 + ' url https://user:pw@example.invalid/x https://example.invalid/mcp?sig=abc',
+            '-----BEGIN OPENSSH PRIVATE KEY----- abc -----END OPENSSH PRIVATE KEY-----',
+            'Error: MCP server "card" connection failed: ECONNREFUSED 127.0.0.1:3004',
+            '\x1b[31m' + 'x' * 500,
+        ]))
+        text = '\n'.join(tail)
+        for leaked in [self.TOKEN, 'hunter2', '/worker/runs', 'secrets.env', 'id_ed25519', 'aB3aB3', 'user:pw', 'sig=abc', 'OPENSSH PRIVATE KEY----- abc']:
+            self.assertNotIn(leaked, text)
+        self.assertIn('Error: MCP server "card" connection failed: ECONNREFUSED 127.0.0.1:3004', tail)
+        self.assertIn('https://example.invalid/mcp', text)
+        self.assertTrue(all(len(line) <= 200 and '\x1b' not in line for line in tail))
+        many = probe['redacted_tail']('\n'.join('line %d %s' % (i, 'y' * 150) for i in range(300)))
+        self.assertLessEqual(len('\n'.join(many).encode()), 2048)
+        self.assertTrue(many[-1].startswith('line 299'))
+
+    def write_log(self, folder, stamp, *messages):
+        folder.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps({key: text, 'timestamp': '2026-01-01T00:00:00Z', 'sessionId': 'ignored'}) for key, text in messages]
+        (folder / (stamp + '.jsonl')).write_text('\n'.join(lines) + '\n')
+
+    def test_mcp_connection_results_from_claude_logs(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw).resolve()
+            worktree = Path('/worker/worktrees/fixture/A-1')
+            cache = home / '.cache/claude-cli-nodejs' / '-worker-worktrees-fixture-A-1'
+            # Before this launch: never reported for it.
+            self.write_log(cache / 'mcp-logs-card', '2026-01-01T00-00-00-000Z', ('debug', 'Successfully connected (transport: http) in 9ms'))
+            self.write_log(cache / 'mcp-logs-card', '2026-01-01T01-00-01-000Z',
+                           ('debug', 'Starting connection with timeout of 30000ms'),
+                           ('debug', 'HTTP Connection failed after 36ms: ECONNREFUSED: Unable to connect (Authorization: Bearer ' + self.TOKEN + ')'),
+                           ('error', 'TypeError: ECONNREFUSED\n    at /$bunfs/root/chunk.js:9:5836'))
+            self.write_log(cache / 'mcp-logs-playwright', '2026-01-01T01-00-02-000Z',
+                           ('debug', 'version negotiation probe timed out; reconnecting'),
+                           ('debug', 'Successfully connected (transport: stdio) in 812ms'))
+            self.write_log(cache / 'mcp-logs-slow', '2026-01-01T01-00-02-000Z', ('debug', 'Starting connection with timeout of 30000ms'))
+            (cache / 'mcp-logs-linked').symlink_to(cache / 'mcp-logs-card', target_is_directory=True)
+            since = 1767229200000  # 2026-01-01T01:00:00Z
+            servers = probe['mcp_servers'](home, 'linux', [worktree, Path('/worker/runs/fixture/A-1')], since)
+            self.assertEqual([s['name'] for s in servers], ['card', 'playwright', 'slow'])
+            card, playwright, slow = servers
+            self.assertEqual(card['status'], 'failed')
+            self.assertIn('ECONNREFUSED', card['error'])
+            self.assertNotIn(self.TOKEN, json.dumps(servers))
+            self.assertEqual(playwright, dict(name='playwright', status='connected', transport='stdio', elapsed_ms=812))
+            self.assertEqual(slow, dict(name='slow', status='pending'))
+            self.assertEqual(probe['mcp_servers'](home, 'linux', [worktree], since + 10 ** 7), [])
+            # No log folder for any candidate: searched nothing.
+            self.assertEqual(probe['mcp_servers'](home, 'linux', [Path('/other')], since), [])
+            darwin = home / 'Library/Caches/claude-cli-nodejs' / '-worker-worktrees-fixture-A-1'
+            self.write_log(darwin / 'mcp-logs-card', '2026-01-01T01-00-03-000Z', ('debug', 'Successfully connected (transport: http) in 5ms'))
+            self.assertEqual(probe['mcp_servers'](home, 'darwin', [worktree], since)[0]['status'], 'connected')
+
+    def test_process_and_scope_resources(self):
+        child = MagicMock(); child.__enter__.return_value = child
+        child.stdout = io.BytesIO(f'{os.getuid()} 00:00:00.80 107520 03:02'.encode())
+        with tempfile.TemporaryDirectory() as raw, patch('subprocess.Popen', return_value=child):
+            scope = Path(raw)
+            (scope / 'cpu.stat').write_text('usage_usec 812345\nuser_usec 1\n')
+            (scope / 'memory.current').write_text('110100480\n')
+            (scope / 'memory.peak').write_text('120000000\n')
+            cgroup = io.BytesIO(b'0::/user.slice/user-1.slice/user@1.service/app.slice/cardigan-session-k2-abc.scope\n')
+            opened = []
+            def fake_directory(path):
+                opened.append(path)
+                return probe['directory'](str(scope))
+            with patch('builtins.open', return_value=cgroup), patch.dict(probe['session_scope'].__globals__, directory=fake_directory):
+                self.assertEqual(probe['resources'](42, 'linux'),
+                                 dict(source='scope', cpu_ms=812, memory_bytes=110100480, memory_peak_bytes=120000000, elapsed_ms=182000))
+            self.assertEqual(opened, ['/sys/fs/cgroup/user.slice/user-1.slice/user@1.service/app.slice/cardigan-session-k2-abc.scope'])
+        child.stdout = io.BytesIO(f'{os.getuid()} 1-02:00:01 2048 01:00:00'.encode())
+        with patch('subprocess.Popen', return_value=child):
+            self.assertEqual(probe['resources'](42, 'darwin'),
+                             dict(source='process', cpu_ms=93601000, memory_bytes=2097152, elapsed_ms=3600000))
+        with patch('builtins.open', return_value=io.BytesIO(b'0::/user.slice/other.scope\n')):
+            self.assertIsNone(probe['session_scope'](42))
+
+    def test_failed_launch_evidence_in_collector_output(self):
+        # A simulated failure: card unreachable, CLI exited with code 1.
+        with tempfile.TemporaryDirectory() as raw, contextlib.ExitStack() as stack:
+            root = Path(raw).resolve()
+            user = SimpleNamespace(pw_name='worker', pw_gid=3333, pw_dir=root)
+            for name in ('getuid', 'geteuid', 'getegid'):
+                stack.enter_context(patch('os.' + name, return_value=3333))
+            stack.enter_context(patch('platform.system', return_value='Linux'))
+            stack.enter_context(patch('pwd.getpwuid', return_value=user))
+            stack.enter_context(patch('grp.getgrgid', return_value=SimpleNamespace(gr_name='worker')))
+            cache = root / '.cache/claude-cli-nodejs' / re.sub(r'[^A-Za-z0-9]', '-', str(root / 'worktrees/fixture/A-1'))
+            self.write_log(cache / 'mcp-logs-card', '2026-01-01T01-00-01-000Z', ('debug', 'HTTP Connection failed after 3ms: ECONNREFUSED'))
+            launch = dict(state='finished', exit_code=1, exit_reason='exited', tail=['Error: boom'])
+            rows = [{'address': 't2', 'state': 'finished', 'activity': None, 'screen': [], 'launch': launch}]
+            stack.enter_context(patch.dict(probe['main'].__globals__, native={'project_account': lambda _: None},
+                                           terminals=lambda *args: (rows, [])))
+            conf = dict(root=str(root), project='fixture', assignment='A-1', local=False, generation='a' * 32,
+                        launch_run='R-2', terminal='t2', session='s', target='pin', user='worker', gid=3333,
+                        harness='claude-code', live=True, platform='linux', helpers=[], process=None,
+                        launch=dict(since_ms=1767229200000))
+            evidence = probe['main'](conf)
+            self.assertEqual(evidence['launch']['terminal'], launch)
+            self.assertEqual(evidence['launch']['mcp'], [dict(name='card', status='failed', error='HTTP Connection failed after 3ms: ECONNREFUSED')])
+            self.assertEqual(evidence['launch']['unavailable'], {})
+            self.assertNotIn('launch', evidence['terminals'][0])
+            self.assertNotIn('launch', probe['main'](dict(conf, launch=None)))
+            gone = probe['main'](dict(conf, live=False, harness='codex'))['launch']
+            self.assertEqual(gone, dict(terminal=None, mcp=None, unavailable=dict(mcp='harness_unsupported', terminal='run_not_current')))
 
 if __name__=='__main__':
     unittest.main()

@@ -60,6 +60,7 @@ export * from "./idle-scarce-sessions.js";
 export * from "./idle-session-retirement.js";
 export * from "./idle-session-stop.js";
 export * from "./launch.js";
+export * from "./launch-evidence.js";
 export * from "./launch-files-stamp.js";
 export * from "./launch-fingerprint.js";
 export * from "./launch-model-intent.js";

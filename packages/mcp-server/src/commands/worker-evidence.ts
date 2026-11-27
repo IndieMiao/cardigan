@@ -55,6 +55,13 @@ export const workerUnavailableReasons = [
 ] as const;
 export type WorkerUnavailableReason = (typeof workerUnavailableReasons)[number];
 const unavailableReason = z.enum(workerUnavailableReasons).catch("other");
+/** C-806: why a part of a failed launch's evidence is missing. */
+export const launchUnavailableReasons = [
+  ...workerUnavailableReasons,
+  "harness_unsupported",
+  "mcp_logs_unreadable",
+] as const;
+const launchUnavailable = z.enum(launchUnavailableReasons).catch("other");
 export const workerEvidence = z.object({
   terminals: z
     .array(
@@ -148,4 +155,55 @@ export const workerEvidence = z.object({
       events: unavailableReason.optional(),
     })
     .optional(),
+  /** C-806: only when asked for a failed launch. The host redacts the text
+   * again and applies the domain limits before anything is stored. */
+  launch: z
+    .object({
+      terminal: z
+        .object({
+          state: z.enum(["live", "finished"]),
+          exit_code: z.number().int().min(-255).max(255).optional(),
+          exit_reason: z
+            .string()
+            .regex(/^[a-z_]{1,32}$/u)
+            .optional(),
+          tail: z.array(z.string().max(400)).max(20),
+          resources: z
+            .object({
+              source: z.enum(["scope", "process"]),
+              cpu_ms: z.number().int().nonnegative(),
+              memory_bytes: z.number().int().nonnegative(),
+              memory_peak_bytes: z.number().int().nonnegative().optional(),
+              elapsed_ms: z.number().int().nonnegative(),
+            })
+            .nullable()
+            .optional(),
+        })
+        .nullable(),
+      mcp: z
+        .array(
+          z.object({
+            name: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/u),
+            status: z.enum(["connected", "failed", "pending"]),
+            transport: z
+              .string()
+              .regex(/^[a-z-]{1,16}$/u)
+              .optional(),
+            elapsed_ms: z.number().int().nonnegative().optional(),
+            error: z.string().max(400).optional(),
+          }),
+        )
+        .max(8)
+        .nullable(),
+      unavailable: z.object({
+        terminal: launchUnavailable.optional(),
+        mcp: launchUnavailable.optional(),
+        resources: launchUnavailable.optional(),
+      }),
+    })
+    .optional(),
 });
+/** C-806: a failed launch's evidence as the collector reports it. */
+export type WorkerLaunchEvidence = NonNullable<
+  z.infer<typeof workerEvidence>["launch"]
+>;

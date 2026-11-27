@@ -184,6 +184,7 @@ type CommandName =
   | "accept_merge_push_hold"
   | "record_merge_executor"
   | "record_precheck"
+  | "record_launch_evidence"
   | "record_merge_check"
   | "reuse_precheck_check"
   | "record_merge_preparation"
@@ -365,6 +366,7 @@ export class CommandDraft {
       "manage_merge_batch",
       "record_merge_executor",
       "record_precheck",
+      "record_launch_evidence",
       "record_merge_check",
       "reuse_precheck_check",
       "record_merge_preparation",

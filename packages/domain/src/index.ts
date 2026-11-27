@@ -52,6 +52,7 @@ export * from "./commands/idle-session-retirement.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/late-verifier.js";
 export * from "./commands/launch.js";
+export * from "./commands/launch-evidence.js";
 export * from "./commands/launch-publication.js";
 export * from "./commands/machines.js";
 export * from "./commands/member.js";
