@@ -69,9 +69,9 @@ test("template filter lists used types and narrows list, board and cursor reads"
       );
     const all = read("limit=50");
     expect(all.templates).toEqual([
+      { value: "imported", label: "导入类型" },
       { value: "dev", label: "开发卡" },
       { value: "story", label: "需求卡" },
-      { value: "imported", label: "导入类型" },
       { value: "_custom", label: "自定义或未知模板" },
     ]);
     const story = read("limit=50&template=story");

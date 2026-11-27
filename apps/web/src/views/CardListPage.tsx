@@ -415,7 +415,14 @@ export function CardListPage({
           return [option.value, option];
         }),
       ).values(),
-    ].sort((a, b) => a.label.localeCompare(b.label, "zh-Hans-CN"));
+    ].sort(
+      // Same order as the server: by name, the shared custom option last.
+      (a, b) =>
+        Number(a.value === CUSTOM_TEMPLATE_FILTER) -
+          Number(b.value === CUSTOM_TEMPLATE_FILTER) ||
+        a.label.localeCompare(b.label, "zh-Hans-CN") ||
+        a.value.localeCompare(b.value),
+    );
   // Name a copied "custom" link before the first page arrives.
   const templateOptions =
     filters.template === CUSTOM_TEMPLATE_FILTER &&

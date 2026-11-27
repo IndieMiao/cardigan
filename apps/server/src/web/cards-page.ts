@@ -1,9 +1,5 @@
 import type { SQLInputValue } from "node:sqlite";
-import {
-  builtinCardTemplateVersions,
-  cardTemplate,
-  type ProjectId,
-} from "@cardigan/domain";
+import { cardTemplate, type ProjectId } from "@cardigan/domain";
 import type { ReadRepositories, Store } from "@cardigan/store";
 import {
   missingPrecheckTargets,
@@ -36,9 +32,6 @@ const statuses = [
 /** C-816: every custom, copied or unresolved template is one filter value.
  * Template ids never start with "_", so it cannot collide with a real id. */
 export const CUSTOM_TEMPLATE_FILTER = "_custom";
-const builtinTemplateOrder = [
-  ...new Set(builtinCardTemplateVersions.map((t) => t.id)),
-];
 /** One `template@version` key per stored pair; a missing version binds v1. */
 const templateKeySql =
   "COALESCE(json_extract(c.doc, '$.template'), '') || '@' || COALESCE(json_extract(c.doc, '$.template_version'), 1)";
@@ -82,17 +75,14 @@ function templateFilterIndex(
       String(row.key),
     ]);
   }
-  const rank = (value: string) => {
-    const index = builtinTemplateOrder.indexOf(value);
-    return value === CUSTOM_TEMPLATE_FILTER
-      ? Number.MAX_SAFE_INTEGER
-      : index < 0
-        ? builtinTemplateOrder.length
-        : index;
-  };
   return {
+    // Same order as the web fallback: by name, the shared custom option last.
     options: [...kinds.values()].sort(
-      (a, b) => rank(a.value) - rank(b.value) || a.value.localeCompare(b.value),
+      (a, b) =>
+        Number(a.value === CUSTOM_TEMPLATE_FILTER) -
+          Number(b.value === CUSTOM_TEMPLATE_FILTER) ||
+        a.label.localeCompare(b.label, "zh-Hans-CN") ||
+        a.value.localeCompare(b.value),
     ),
     keys,
   };
