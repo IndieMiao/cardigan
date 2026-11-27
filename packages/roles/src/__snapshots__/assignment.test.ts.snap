@@ -61,6 +61,8 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 - 审核员把必需证据标为平台阻塞待补（\`get_card\` 验证项上的 \`pending_evidence\`）时，不为它改代码；平台阻塞解除后系统会通知你补证，只补仍适用的证据，提交新交付并把证据附件绑定到新交付（\`upload_attachment\` 的 \`attach_to\` 指向新交付），旧版本证据不能沿用。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
+- 发起 \`request_decision\` 时，\`question\` 就是拍板标题：第一句写成“请你确认：……”这样一句人话，说清要确认什么（例如“请你确认：卡片页的筛选改成下拉菜单”）；标题里不写卡片号、交付号、提交号等内部编号，也不写接口名，要引用的编号写进 \`context\`。
+- 需要所有者看图、看视频才能判断的拍板，把对应附件用 \`request_decision\` 的 \`attachment_ids\` 挂在拍板上（填本卡或 \`affected_cards\` 上已有附件的编号，顺序即展示顺序；还没上传的先用 \`upload_attachment\` 传到卡上），不要只在 \`context\` 里写附件编号或文件名。
 ## 本地自测与远程检查
 
 - 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
@@ -281,6 +283,8 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 - 审核员把必需证据标为平台阻塞待补（\`get_card\` 验证项上的 \`pending_evidence\`）时，不为它改代码；平台阻塞解除后系统会通知你补证，只补仍适用的证据，提交新交付并把证据附件绑定到新交付（\`upload_attachment\` 的 \`attach_to\` 指向新交付），旧版本证据不能沿用。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
+- 发起 \`request_decision\` 时，\`question\` 就是拍板标题：第一句写成“请你确认：……”这样一句人话，说清要确认什么（例如“请你确认：卡片页的筛选改成下拉菜单”）；标题里不写卡片号、交付号、提交号等内部编号，也不写接口名，要引用的编号写进 \`context\`。
+- 需要所有者看图、看视频才能判断的拍板，把对应附件用 \`request_decision\` 的 \`attachment_ids\` 挂在拍板上（填本卡或 \`affected_cards\` 上已有附件的编号，顺序即展示顺序；还没上传的先用 \`upload_attachment\` 传到卡上），不要只在 \`context\` 里写附件编号或文件名。
 ## 本地自测与远程检查
 
 - 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
@@ -485,6 +489,8 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 - 审核员把必需证据标为平台阻塞待补（\`get_card\` 验证项上的 \`pending_evidence\`）时，不为它改代码；平台阻塞解除后系统会通知你补证，只补仍适用的证据，提交新交付并把证据附件绑定到新交付（\`upload_attachment\` 的 \`attach_to\` 指向新交付），旧版本证据不能沿用。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
+- 发起 \`request_decision\` 时，\`question\` 就是拍板标题：第一句写成“请你确认：……”这样一句人话，说清要确认什么（例如“请你确认：卡片页的筛选改成下拉菜单”）；标题里不写卡片号、交付号、提交号等内部编号，也不写接口名，要引用的编号写进 \`context\`。
+- 需要所有者看图、看视频才能判断的拍板，把对应附件用 \`request_decision\` 的 \`attachment_ids\` 挂在拍板上（填本卡或 \`affected_cards\` 上已有附件的编号，顺序即展示顺序；还没上传的先用 \`upload_attachment\` 传到卡上），不要只在 \`context\` 里写附件编号或文件名。
 ## 本地自测与远程检查
 
 - 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
