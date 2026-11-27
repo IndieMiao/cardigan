@@ -133,6 +133,8 @@ test("only the system may record, and evidence beyond its limits is refused", ()
       ],
     },
     { ...evidence, unavailable: { mcp: "Free text with a /path" } },
+    { ...evidence, startup_prompt: "Press Enter" },
+    { ...evidence, startup_prompt: "toString" },
   ])
     expect(
       recordLaunchEvidence(
@@ -142,4 +144,33 @@ test("only the system may record, and evidence beyond its limits is refused", ()
         ports(),
       ),
     ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+});
+
+// C-823: sensen A-355 R-5437 waited at Claude Code's folder trust dialog.
+test("a terminal stopped at a first-run confirmation names that confirmation", () => {
+  const effect = value(
+    recordLaunchEvidence(
+      fixture(),
+      system,
+      {
+        run_id: run,
+        evidence: {
+          ...evidence,
+          terminal: {
+            state: "live",
+            tail: ["Yes, I trust this folder"],
+          },
+          startup_prompt: "trust_folder",
+          mcp_servers: [],
+        },
+      },
+      ports(),
+    ),
+  );
+  expect(effect.events[0]?.payload).toMatchObject({
+    startup_prompt: "trust_folder",
+  });
+  expect(effect.timeline[0]?.body).toBe(
+    `${run} 启动证据：回收原因 mcp_unavailable；终端仍在运行；终端停在首次确认框：信任此文件夹（trust_folder）；MCP 无本次连接日志；card 握手 pending。`,
+  );
 });

@@ -15,6 +15,7 @@ import {
   type PreparationRetryOptions,
   parseCachedLaunchConfig,
   prepareRoleWorktree,
+  probeUpstreamModel,
   publishLaunchRefresh,
   RuntimeTargets,
   recordLaunchNotice,
@@ -22,6 +23,7 @@ import {
   resolveMcpUrl,
   selectableLaunchConfig,
   stageModelLaunchConfig,
+  type UpstreamModelProbe,
   withLaunchSnapshot,
   withPreparationQueue,
   withPreparationRetry,
@@ -66,6 +68,11 @@ export interface HostWiring {
   readonly publishWhileBackgroundOwner: () => () => void;
   readonly refreshLaunch: () => Promise<unknown>;
   readonly upstream: LaunchConfig;
+  /** C-821: one minimal model request with this profile's own credentials. */
+  readonly probeUpstream: (
+    profile: string,
+    signal: AbortSignal,
+  ) => Promise<UpstreamModelProbe>;
   readonly adoptLaunch: (generation: LaunchGeneration) => void;
   readonly selectableLaunchConfig: () => LaunchConfig;
   readonly runtime: RuntimeTargets;
@@ -243,6 +250,18 @@ export async function createHostWiring(options: {
     runtime,
     get upstream() {
       return live.current().config;
+    },
+    probeUpstream: async (profile, signal) => {
+      const { config, secrets } = live.current();
+      let resolved: ReturnType<typeof resolveProfile>;
+      try {
+        resolved = resolveProfile(config, profile);
+      } catch {
+        return { ok: false, failure: "not_configured" };
+      }
+      return probeUpstreamModel(resolved, { ...secrets }, config.launch_check, {
+        signal,
+      });
     },
     refreshLaunch: live.refresh,
     adoptLaunch: live.adopt,

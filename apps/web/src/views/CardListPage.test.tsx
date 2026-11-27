@@ -571,7 +571,7 @@ test("the list shows the configurable columns and progress; the reason stays off
   expect(screen.getByText("共 3 张卡片")).toBeTruthy();
 });
 
-test("status, next owner, role, search and sort filter the rows and live in the route", async () => {
+test("status, search and sort filter the rows and live in the route", async () => {
   const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="list" />);
   await screen.findByText("准备发布");
@@ -589,41 +589,6 @@ test("status, next owner, role, search and sort filter the rows and live in the 
   await screen.findByText("写迁移脚本");
   expect(parseRoute(window.location.hash).filters?.status ?? "").toBe("");
   fireEvent.keyDown(document, { key: "Escape" });
-
-  fireEvent.pointerDown(
-    screen.getByRole("combobox", { name: "下一步：全部" }),
-    {
-      button: 0,
-      pointerType: "mouse",
-    },
-  );
-  fireEvent.click(await screen.findByRole("option", { name: "Agent" }));
-  await waitFor(() => expect(screen.queryByText("准备发布")).toBeNull());
-  expect(screen.getByText("写迁移脚本")).toBeTruthy();
-  fireEvent.pointerDown(
-    screen.getByRole("combobox", { name: "下一步：Agent" }),
-    {
-      button: 0,
-      pointerType: "mouse",
-    },
-  );
-  fireEvent.click(await screen.findByRole("option", { name: "全部" }));
-
-  fireEvent.pointerDown(screen.getByRole("combobox", { name: "角色：全部" }), {
-    button: 0,
-    pointerType: "mouse",
-  });
-  fireEvent.click(await screen.findByRole("option", { name: "reviewer" }));
-  await waitFor(() => expect(screen.queryByText("写迁移脚本")).toBeNull());
-  expect(screen.getByText("准备发布")).toBeTruthy();
-  fireEvent.pointerDown(
-    screen.getByRole("combobox", { name: "角色：reviewer" }),
-    {
-      button: 0,
-      pointerType: "mouse",
-    },
-  );
-  fireEvent.click(await screen.findByRole("option", { name: "全部" }));
 
   changeControl(screen.getByLabelText("搜索标题或编号"), {
     target: { value: "C-2" },
@@ -655,7 +620,7 @@ test("status, next owner, role, search and sort filter the rows and live in the 
 
 test("filters from a copied URL are restored", async () => {
   window.location.hash =
-    "#/p/p-1/cards?view=list&status=done&next=none&q=C-3&sort=id";
+    "#/p/p-1/cards?view=list&status=done&next=none&q=C-3&sort=id&template=_custom";
   const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="list" />);
   expect(await screen.findByText("清理 worktree")).toBeTruthy();
@@ -889,9 +854,133 @@ test("long hold reasons live in tooltips and remain fully available in the card 
   expect(next.textContent).toContain(`恢复条件：${reason}`);
 });
 
-test("stale role and status values from an old link stay visible in their dropdowns and clear there", async () => {
+const typed = (
+  id: string,
+  template: string,
+  title: string,
+  builtin = true,
+): Partial<CardListItem> => ({
+  id,
+  template,
+  template_version: 1,
+  template_info: { id: template, title, version: 1, builtin },
+});
+const TYPED_CARDS: readonly CardListItem[] = [
+  card({ ...typed("C-1", "story", "需求卡"), title: "准备发布" }),
+  card({
+    ...typed("C-2", "dev", "开发卡"),
+    title: "写迁移脚本",
+    status: "todo",
+  }),
+  card({
+    ...typed("C-3", "my-flow", "项目流程", false),
+    title: "清理 worktree",
+    status: "done",
+  }),
+  card({
+    ...typed("C-4", "story", "需求卡"),
+    title: "整理需求",
+    status: "todo",
+  }),
+];
+
+test.each(["board", "list"] as const)(
+  "C-816: the %s type filter defaults to all, lists used types and lives in the route",
+  async (view) => {
+    window.location.hash = `#/p/p-1/cards?view=${view}`;
+    const api = client(async () => ({ ...page(), cards: TYPED_CARDS }));
+    render(<CardListPage client={api} projectId="p-1" view={view} />);
+    await screen.findByText("写迁移脚本");
+    // Board: type, sort, search and display; the list adds status.
+    expect(screen.queryByRole("combobox", { name: /^下一步：/ })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: /^角色：/ })).toBeNull();
+    expect(Boolean(screen.queryByRole("button", { name: "状态：全部" }))).toBe(
+      view === "list",
+    );
+    const type = screen.getByRole("combobox", { name: "类型：全部" });
+    fireEvent.pointerDown(type, { button: 0, pointerType: "mouse" });
+    const options = (await screen.findAllByRole("option")).map(
+      (option) => option.textContent,
+    );
+    expect(options).toEqual(["全部", "开发卡", "需求卡", "自定义或未知模板"]);
+    fireEvent.click(screen.getByRole("option", { name: "需求卡" }));
+    await waitFor(() => expect(screen.queryByText("写迁移脚本")).toBeNull());
+    expect(screen.getByText("准备发布")).toBeTruthy();
+    expect(screen.getByText("整理需求")).toBeTruthy();
+    expect(screen.queryByText("清理 worktree")).toBeNull();
+    expect(parseRoute(window.location.hash)).toMatchObject({
+      kind: "cards",
+      filters: { view, template: "story" },
+    });
+    // Search stacks on the type.
+    changeControl(screen.getByLabelText("搜索标题或编号"), {
+      target: { value: "整理" },
+    });
+    await waitFor(() => expect(screen.queryByText("准备发布")).toBeNull());
+    expect(screen.getByText("整理需求")).toBeTruthy();
+    changeControl(screen.getByLabelText("搜索标题或编号"), {
+      target: { value: "" },
+    });
+    fireEvent.pointerDown(
+      screen.getByRole("combobox", { name: "类型：需求卡" }),
+      { button: 0, pointerType: "mouse" },
+    );
+    fireEvent.click(
+      await screen.findByRole("option", { name: "自定义或未知模板" }),
+    );
+    await screen.findByText("清理 worktree");
+    expect(screen.queryByText("准备发布")).toBeNull();
+    expect(parseRoute(window.location.hash).filters?.template).toBe("_custom");
+  },
+);
+
+test("C-816: a copied type link is restored and server type options are used", async () => {
+  window.location.hash = "#/p/p-1/cards?view=board&template=story";
+  const read = vi.fn(async () => ({
+    ...page(),
+    server_filtered: true,
+    cards: TYPED_CARDS.filter((c) => c.template === "story"),
+    templates: [
+      { value: "dev", label: "开发卡" },
+      { value: "story", label: "需求卡" },
+      { value: "_custom", label: "自定义或未知模板" },
+    ],
+  }));
+  render(
+    <CardListPage
+      client={fakeClient({ cards: read })}
+      projectId="p-1"
+      view="board"
+    />,
+  );
+  expect(await screen.findByText("整理需求")).toBeTruthy();
+  expect(screen.getByRole("combobox", { name: "类型：需求卡" })).toBeTruthy();
+  expect(read.mock.calls.at(-1)?.[2]).toMatchObject({ template: "story" });
+});
+
+test("C-816: old status, next-owner and role parameters are ignored on the board", async () => {
   window.location.hash =
-    "#/p/p-1/cards?view=list&role=retired-role&status=retired-status";
+    "#/p/p-1/cards?view=board&status=done&next=none&role=retired-role";
+  const read = vi.fn(async () => page());
+  render(
+    <CardListPage
+      client={fakeClient({ cards: read })}
+      projectId="p-1"
+      view="board"
+    />,
+  );
+  expect(await screen.findByText("准备发布")).toBeTruthy();
+  expect(screen.getByText("写迁移脚本")).toBeTruthy();
+  expect(screen.getByText("清理 worktree")).toBeTruthy();
+  expect(screen.queryByText("没有匹配的卡片")).toBeNull();
+  const options = read.mock.calls.at(-1)?.[2] ?? {};
+  for (const key of ["status", "next", "role"])
+    expect(options[key] ?? "").toBe("");
+});
+
+test("a stale status value from an old link stays visible in the list dropdown and clears there; old role links are ignored", async () => {
+  window.location.hash =
+    "#/p/p-1/cards?view=list&role=retired-role&next=none&status=retired-status";
   render(
     <CardListPage
       client={fakeClient({ cards: async () => page() })}
@@ -900,15 +989,12 @@ test("stale role and status values from an old link stay visible in their dropdo
     />,
   );
   await screen.findByText("没有匹配的卡片");
-  const role = screen.getByRole("combobox", { name: "角色：retired-role" });
-  expect(role.textContent).toContain("retired-role");
+  expect(screen.queryByRole("combobox", { name: /^角色：/ })).toBeNull();
   const status = screen.getByRole("button", {
     name: "状态：retired-status",
   });
   expect(status.textContent).toContain("retired-status");
   expect(screen.queryByRole("button", { name: /^移除/ })).toBeNull();
-  changeControl(role, { target: { value: "" } });
-  expect(screen.getByRole("combobox", { name: "角色：全部" })).toBeTruthy();
   fireEvent.click(status);
   expect(
     screen
@@ -918,10 +1004,12 @@ test("stale role and status values from an old link stay visible in their dropdo
   fireEvent.click(screen.getByRole("checkbox", { name: "全部" }));
   fireEvent.keyDown(document, { key: "Escape" });
   await screen.findByText("准备发布");
+  // Cards are not narrowed by the leftover role or next-owner values.
+  expect(screen.getByText("写迁移脚本")).toBeTruthy();
+  expect(screen.getByText("清理 worktree")).toBeTruthy();
   const { filters } = parseRoute(window.location.hash) as {
     filters: Record<string, string | undefined>;
   };
-  expect(filters.role ?? "").toBe("");
   expect(filters.status ?? "").toBe("");
 });
 

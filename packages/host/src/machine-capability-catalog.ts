@@ -1,10 +1,12 @@
 import { dirname, join } from "node:path";
+import { isDeviceKey } from "@cardigan/domain";
 import { getHarnessAdapter, HARNESSES } from "@cardigan/roles";
 import {
   type CapabilityCommand,
   chromiumSearch,
   VERSION_PATTERN,
 } from "./chromium-search.js";
+import { DEVICE_TYPES } from "./device-providers.js";
 import { runtimeWorkersPath } from "./runtime-workers-config.js";
 import { readOnboardingYaml } from "./worker-onboarding-config.js";
 
@@ -137,7 +139,9 @@ export function parseMachineCapabilityCatalog(
     ...custom.map(([key, value]) => {
       if (
         !/^[a-z][a-z0-9.-]{0,63}$/u.test(key) ||
-        BUILTIN_MACHINE_CAPABILITIES.some((c) => c.key === key)
+        BUILTIN_MACHINE_CAPABILITIES.some((c) => c.key === key) ||
+        // C-813: device keys come from the device providers only.
+        DEVICE_TYPES.some((type) => isDeviceKey(type, key))
       )
         return invalid();
       const entry = object(value);

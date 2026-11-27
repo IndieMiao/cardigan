@@ -244,17 +244,17 @@ test.each(["board", "list"] as const)(
     expect(f.state().cursors).toEqual(beforeRead.cursors);
     expect(screen.getAllByText(/待开始/).length).toBeGreaterThan(0);
     for (const name of [
-      "状态：全部",
-      "下一步：全部",
-      "角色：全部",
+      "类型：全部",
+      ...(view === "list" ? ["状态：全部"] : []),
       "排序：全部",
     ])
       expect(
-        screen.getByRole(
-          /^(下一步|角色|排序)：/.test(name) ? "combobox" : "button",
-          { name },
-        ),
+        screen.getByRole(/^(类型|排序)：/.test(name) ? "combobox" : "button", {
+          name,
+        }),
       ).toBeTruthy();
+    for (const name of [/^下一步：/, /^角色：/])
+      expect(screen.queryByRole("combobox", { name })).toBeNull();
     fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
       target: { value: "没有这张卡" },
     });

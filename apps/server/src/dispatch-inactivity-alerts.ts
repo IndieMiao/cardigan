@@ -22,6 +22,7 @@ import {
   type TerminalEvidence,
   TerminalHistory,
 } from "./dispatch-terminal-evidence.js";
+import type { UpstreamOutageRecovery } from "./dispatch-upstream-outage.js";
 
 interface Options {
   store: Store;
@@ -39,6 +40,8 @@ interface Options {
     localOnly?: boolean,
   ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
   runtime: Partial<Pick<HerdrRuntime, "terminalActivity">>;
+  /** C-821: a quiet Run whose screen shows a model API error joins its outage. */
+  outage?: Pick<UpstreamOutageRecovery, "errorVisible" | "record" | "held">;
   inspectionTimeoutMs?: number;
   onError?: (error: unknown) => void;
 }
@@ -198,6 +201,7 @@ export class InactivityAlerts {
       const key = `${project}/${run.id}`;
       if (
         recorded(state, run, "run_inactive") ||
+        this.options.outage?.held(state, run.id, at) ||
         Date.parse(at) < (this.nextRead.get(key) ?? 0)
       )
         continue;
@@ -253,6 +257,7 @@ export class InactivityAlerts {
     }
     let terminal: TerminalEvidence | undefined;
     let terminalFailed = false;
+    const apiErrors = new Set<Run["id"]>();
     let partial:
       | ReadonlyMap<Assignment["id"], HarnessActivityInspection>
       | undefined;
@@ -274,6 +279,7 @@ export class InactivityAlerts {
         samples ?? partial,
         check,
         terminal,
+        apiErrors,
       );
     };
     timer = setTimeout(() => {
@@ -323,7 +329,18 @@ export class InactivityAlerts {
                     );
                 })
             : undefined;
-        const results = await Promise.allSettled([transcript, output]);
+        const outage = this.options.outage;
+        // C-821: the screen check returns a match only, never terminal text.
+        const screens = outage
+          ? Promise.all(
+              [...targets.values()].map(({ assignment, run }) =>
+                outage.errorVisible(project, assignment, run).then((shown) => {
+                  if (shown) apiErrors.add(run.id);
+                }),
+              ),
+            )
+          : undefined;
+        const results = await Promise.allSettled([transcript, output, screens]);
         finish(
           partial,
           terminalFailed || results.some((r) => r.status === "rejected")
@@ -344,6 +361,7 @@ export class InactivityAlerts {
       | undefined,
     check: Check,
     terminal?: TerminalEvidence,
+    apiErrors?: ReadonlySet<Run["id"]>,
   ) {
     if (this.closed) return;
     this.options.store.uow.run((currentTx) => {
@@ -378,6 +396,7 @@ export class InactivityAlerts {
           },
           check,
           terminal,
+          apiErrors?.has(run.id),
         );
       }
     });
@@ -422,8 +441,13 @@ export class InactivityAlerts {
     inspection: HarnessActivityInspection,
     check: Check,
     terminal?: TerminalEvidence,
+    apiError?: boolean,
   ) {
-    if (!this.due(state, a, run, at) || recorded(state, run, "run_inactive"))
+    if (
+      !this.due(state, a, run, at) ||
+      recorded(state, run, "run_inactive") ||
+      this.options.outage?.held(state, run.id, at)
+    )
       return;
     const now = Date.parse(at);
     // A failed/slow terminal recheck cannot erase output just witnessed for this Run.
@@ -510,6 +534,9 @@ export class InactivityAlerts {
       since >= Date.parse(run.started_at ?? a.created_at)
         ? { command: inspection.foreground.command, since }
         : terminal?.foreground;
+    // C-821: stopped on a model API error. The provider's outage records it
+    // once and resumes it after recovery; no per-session alert.
+    if (apiError && this.options.outage?.record(tx, state, a, run)) return;
     dispatchAlert(tx, this.options.store, state, at, {
       assignment: a,
       type: "run_inactive",

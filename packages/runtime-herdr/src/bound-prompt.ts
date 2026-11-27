@@ -1,4 +1,8 @@
-import type { PromptObservation, RuntimeRef } from "@cardigan/domain";
+import {
+  type PromptObservation,
+  type RuntimeRef,
+  upstreamApiErrorShown,
+} from "@cardigan/domain";
 import type { HcClient } from "./client.js";
 
 interface Terminal {
@@ -55,6 +59,10 @@ function editor(screen: string, binding: PromptObservation) {
     )
   )
     return false;
+  if (binding.require_upstream_error) {
+    while (/^─+$/u.test(bottom.at(-1) ?? "")) bottom.pop();
+    return upstreamApiErrorShown(bottom);
+  }
   if (binding.require_disconnect === undefined) return true;
   while (/^─+$/u.test(bottom.at(-1) ?? "")) bottom.pop();
   const disconnected =

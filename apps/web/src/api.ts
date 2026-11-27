@@ -831,6 +831,11 @@ export interface CardPage {
   readonly page?: number;
   readonly page_size?: number;
   readonly roles?: readonly string[];
+  /** C-816: card types used in the project, named like TemplateMarker. */
+  readonly templates?: readonly {
+    readonly value: string;
+    readonly label: string;
+  }[];
   readonly lanes?: Readonly<
     Record<
       string,

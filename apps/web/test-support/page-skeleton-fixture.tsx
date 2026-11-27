@@ -8,6 +8,16 @@ import "../src/components/ui/theme.css";
 
 // Seven synthetic cards, one per status. No network client or database.
 Date.now = () => new Date(NOW).getTime();
+// C-816: builtin card types for the type filter (and each card's marker).
+const templates = [
+  ["dev", "开发卡", 2],
+  ["dev", "开发卡", 2],
+  ["ui", "界面卡", 1],
+  ["story", "需求卡", 1],
+  ["general", "通用任务", 1],
+  ["design", "设计稿", 1],
+  ["dev", "开发卡", 2],
+] as const;
 const cards = (
   [
     "todo",
@@ -24,6 +34,14 @@ const cards = (
   title:
     i === 1 ? "核对卡片页工具栏、长标题与下一步负责人" : `示例任务 ${i + 1}`,
   status,
+  template: templates[i]?.[0] ?? "dev",
+  template_version: templates[i]?.[2] ?? 2,
+  template_info: {
+    id: templates[i]?.[0] ?? "dev",
+    title: templates[i]?.[1] ?? "开发卡",
+    version: templates[i]?.[2] ?? 2,
+    builtin: true,
+  },
   waiting_on: [],
   why: "等待下一步处理",
   priority: i % 5,

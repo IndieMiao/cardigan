@@ -831,6 +831,7 @@ export function upstreamHoldReason(diagnosis: UpstreamDiagnosis | undefined) {
   if (
     diagnosis.incident_id ||
     diagnosis.cause === "upstream_unreachable" ||
+    diagnosis.cause === "upstream_outage" ||
     diagnosis.cause === "upstream_suspected"
   )
     return "upstream_recovery_not_ready";

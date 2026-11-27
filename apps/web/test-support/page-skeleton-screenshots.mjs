@@ -201,7 +201,7 @@ try {
               ? '[aria-label="自动刷新"]'
               : mode === "reference-filter"
                 ? '[aria-label^="状态："]'
-                : '[aria-label^="下一步："]',
+                : '[aria-label^="类型："]',
           );
           await press("Enter", "Enter", 13);
           await until("!!document.querySelector('[role=listbox]')");

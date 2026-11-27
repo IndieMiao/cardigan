@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import type { ActionCommand, Machine } from "@cardigan/domain";
+import {
+  type ActionCommand,
+  type DeviceObservation,
+  deviceCapabilities,
+  type Machine,
+  mergeHeldDevices,
+  normalizeDeviceInventory,
+} from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
   acceptedBrowserDigest,
@@ -19,6 +26,11 @@ import {
   type AgentToolsOutcome,
   reconcileAgentToolsAction,
 } from "./agent-tools-maintenance.js";
+import { heldDevices } from "./device-leases.js";
+import {
+  DEVICE_PROVIDERS,
+  type HostDeviceProvider,
+} from "./device-providers.js";
 import {
   type CapabilityDefinition,
   loadMachineCapabilityCatalog,
@@ -74,6 +86,8 @@ export interface MachineObservationOptions {
     | Promise<string | undefined>;
   readonly catalog?: () => readonly CapabilityDefinition[];
   readonly probe?: CapabilityProbe;
+  /** C-813: device providers to list; all of them by default only with the production catalog. */
+  readonly deviceProviders?: readonly HostDeviceProvider[];
   /** C-608 readiness patrol; on by default only with the production catalog. */
   readonly readiness?: (input: ReadinessInput) => Promise<ReadinessOutcome>;
   readonly env?: NodeJS.ProcessEnv;
@@ -94,12 +108,13 @@ export async function refreshMachineObservations(
   const now = options.now ?? (() => new Date().toISOString());
   const actor = { kind: "system" as const, project_id: project };
   const observation = options.observationId ?? randomUUID();
-  const previousReadiness = readMachineObservations(
+  const previousHealth = readMachineObservations(
     store,
     project,
     machine,
     now(),
-  ).health?.readiness;
+  ).health;
+  const previousReadiness = previousHealth?.readiness;
   beginMachineObservation(store, actor, project, machine, observation, now());
   let health: MachineHealth = {
     status: "failed",
@@ -210,6 +225,54 @@ export async function refreshMachineObservations(
         evidence_ref: `machine-observation:${observation}#${entry.key}`,
       });
     }
+    // C-813: each device provider whose prerequisite capability was just
+    // verified lists its devices. A failed listing keeps only devices a Run
+    // holds and is reported, instead of failing the whole machine check.
+    const providers =
+      options.deviceProviders ??
+      (options.catalog === undefined ? DEVICE_PROVIDERS : []);
+    let devices: DeviceObservation[] | undefined;
+    for (const provider of providers) {
+      options.signal?.throwIfAborted();
+      if (
+        !provider.os.includes(target.machine.os) ||
+        (provider.requires_capability &&
+          !capabilities.some((c) => c.key === provider.requires_capability))
+      )
+        continue;
+      let raw: readonly unknown[] | undefined;
+      try {
+        raw = await provider.list({
+          execution: target.execution,
+          os: target.machine.os,
+          probe,
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
+      } catch {
+        raw = undefined;
+      }
+      const listed = mergeHeldDevices(
+        normalizeDeviceInventory(provider.type, raw ?? []),
+        previousHealth?.devices?.filter((d) => d.type === provider.type),
+        heldDevices(store, machine, provider.type),
+      );
+      devices = [...(devices ?? []), ...listed];
+      if (!raw)
+        failures.push({
+          key: provider.type,
+          search_locations: [],
+          reason: `无法列出${provider.label}`,
+        });
+      const verified_at = now();
+      for (const key of deviceCapabilities(listed))
+        capabilities.push({
+          key,
+          version: null,
+          verified_at,
+          evidence_ref: `machine-observation:${observation}#${provider.type}`,
+        });
+    }
+    if (devices) health = { ...health, devices };
     if (failures.length) health = { ...health, capability_failures: failures };
     const observe =
       options.readiness ?? (options.catalog === undefined && observeReadiness);

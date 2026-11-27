@@ -315,3 +315,71 @@ test("host_ops inspection carries launch evidence only when asked for a failed l
     }
   }
 });
+
+// C-823: R-5431 stopped after another Run took the session. Its own launch
+// facts are still asked for by its id, and the timeline names the dialog.
+test("a Run that no longer holds the session still gets its own terminal tail and MCP results", async () => {
+  const s = scene("local");
+  const later = {
+    id: "R-2",
+    assignment_id: "A-1",
+    status: "dispatched",
+    harness: "claude-code",
+    trigger_event_id: "2".repeat(26),
+  };
+  const state = {
+    ...s.state,
+    assignments: [
+      {
+        ...s.state.assignments[0],
+        runtime_ref: {
+          ...(s.state.assignments[0]?.runtime_ref as RuntimeRef),
+          launch_generation: {
+            run_id: "R-2",
+            generation: "cad0f00d-bbbb-4bbb-8000-aaaaaaaaaaaa",
+          },
+        },
+      },
+    ],
+    runs: [...s.state.runs, later],
+  } as unknown as CommandState;
+  const trusted = {
+    ...reply,
+    terminals: null,
+    launch: {
+      ...reply.launch,
+      terminal: {
+        state: "finished",
+        exit_code: 137,
+        exit_reason: "killed",
+        tail: [
+          "Accessing workspace:",
+          "Quick safety check: Is this a project you created or one you trust? (Like your",
+          "own code, a well-known open source project, or work from your team).",
+          "❯ 1. No, exit",
+          "  2. Yes, I trust this folder",
+          "Enter to confirm · Esc to cancel",
+        ],
+      },
+      mcp: [],
+    },
+  };
+  vi.mocked(agentProcessCommand).mockImplementationOnce(async () =>
+    transport(
+      `let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const p=JSON.parse(d); if(p.live!==false||p.launch?.run!=='R-1')process.exit(3);console.log(JSON.stringify(${JSON.stringify(trusted)}))})`,
+    ),
+  );
+  const evidence = await collectLaunchEvidence(
+    { ...options(s), loadState: () => state },
+    project,
+    "R-1" as Run["id"],
+    "mcp_unavailable",
+  );
+  expect(evidence).toMatchObject({
+    terminal: { state: "finished", exit_code: 137 },
+    startup_prompt: "trust_folder",
+    mcp_servers: [],
+    unavailable: {},
+  });
+  expect(evidence?.terminal?.tail).toContain("Accessing workspace:");
+});

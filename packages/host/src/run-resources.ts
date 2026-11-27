@@ -12,6 +12,7 @@ import {
   type WorkItemRequirements,
 } from "@cardigan/domain";
 import type { ReadRepositories } from "@cardigan/store";
+import { withDeviceResources } from "./device-providers.js";
 
 function resourceKeys(capabilities: readonly string[]): string[] {
   const keys = new Set<string>();
@@ -20,7 +21,8 @@ function resourceKeys(capabilities: readonly string[]): string[] {
     if (!parsed.ok) throw new Error("Invalid stored capability requirement");
     keys.add(parsed.value.key);
   }
-  return [...keys];
+  // C-813: a device narrowed by id or model still takes a slot of its type.
+  return withDeviceResources([...keys]);
 }
 
 /** New admission: template defaults are already on the item; use the pinned role. */

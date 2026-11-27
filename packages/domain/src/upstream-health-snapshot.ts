@@ -2,6 +2,7 @@ import type { CommandState } from "./commands/core.js";
 import type { Assignment, Event, Run } from "./entities.js";
 import { eventById, eventsOfType } from "./event-index.js";
 import type { AssignmentId } from "./ids.js";
+import { runAwaitingUpstreamResume } from "./upstream-outage.js";
 
 const eventKeys = {
   run_inactive: "assignment_id",
@@ -69,6 +70,14 @@ export class UpstreamHealthSnapshot {
 
   runsFor(id: AssignmentId): readonly Run[] {
     return this.assignmentRuns(id)?.all ?? [];
+  }
+
+  /** C-821: this Assignment's unfinished Run waits for its outage's resume. */
+  heldByOutage(id: AssignmentId, now: string) {
+    const run = this.runsFor(id).findLast(
+      (r) => !["completed", "failed", "cancelled"].includes(r.status),
+    );
+    return !!run && runAwaitingUpstreamResume(this.state, run.id, now);
   }
 
   event(id: unknown) {

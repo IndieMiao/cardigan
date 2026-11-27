@@ -41,6 +41,7 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import {
+  type CompileAssignmentInput,
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
   compiledLaunchSettings,
@@ -85,6 +86,7 @@ import {
   launchEntities,
   wallClock,
 } from "./commands.js";
+import { deviceSession } from "./device-providers.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import { launchFingerprint } from "./launch-fingerprint.js";
@@ -1185,16 +1187,14 @@ async function launch(
           ? { resource_bindings: [] }
           : {}),
       // C-679: read the held slot back, so a retried launch of this Run keeps it.
-      ...(host.leases?.config.adbSlots(assignment.machine_id)
-        ? {
-            adb_slot:
-              host.leases.adb.launchSlot(
-                project,
-                assignment.machine_id,
-                input.run.id,
-              ) ?? null,
-          }
-        : {}),
+      // C-813: likewise its devices; on a machine that hands out adb devices,
+      // a slot Run holding none must not let its adb server claim USB.
+      ...launchDevices(
+        host.leases,
+        project,
+        assignment.machine_id,
+        input.run.id,
+      ),
       ...(capabilityNotes === undefined
         ? {}
         : { capability_notes: capabilityNotes }),
@@ -1772,5 +1772,41 @@ export function statusLineContext(
     ...(baseBranch ? { base_ref: `origin/${baseBranch}` } : {}),
     handoff_remaining_pct: handoff,
     restart_remaining_pct: restart,
+  };
+}
+
+/**
+ * C-813: the launch input for the Run's adb slot and held devices, read back
+ * from the database so a retried launch keeps them.
+ */
+export function launchDevices(
+  leases: MachineLeases | undefined,
+  project: string,
+  machine: string,
+  run: string,
+  now: string = new Date().toISOString(),
+): Pick<CompileAssignmentInput, "adb_slot" | "device_session"> {
+  if (!leases) return {};
+  const policy = leases.config.adbSlots(machine);
+  const slot = policy
+    ? (leases.adb.launchSlot(project, machine, run) ?? null)
+    : undefined;
+  const held = leases.devices.launchDevices(project, machine, run, now);
+  const session = deviceSession(held, {
+    ...(slot?.emulator_port
+      ? { emulator_serial: `emulator-${slot.emulator_port}` }
+      : {}),
+  });
+  const usbOff =
+    !!slot &&
+    !held.some((d) => policy?.resources.has(d.type)) &&
+    leases.devices.adbTypes(machine).length > 0;
+  return {
+    ...(slot === undefined
+      ? {}
+      : {
+          adb_slot: slot && usbOff ? { ...slot, usb_off: true as const } : slot,
+        }),
+    ...(session ? { device_session: session } : {}),
   };
 }
