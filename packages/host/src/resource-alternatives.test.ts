@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { arch, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  type Assignment,
   type DeviceObservation,
   type Machine,
   type Run,
@@ -24,7 +25,11 @@ import { launchDevices } from "./launch.js";
 import { resolveResourceAlternatives } from "./resource-alternatives.js";
 import { MachineLeases } from "./resource-leases.js";
 import type { ResourceProbe } from "./resource-probe.js";
-import { runCapacitySnapshot } from "./run-capacity.js";
+import {
+  capacityWaiterRunnable,
+  hasEarlierCapacityWait,
+  runCapacitySnapshot,
+} from "./run-capacity.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
 import { assignmentResourceKeys } from "./run-resources.js";
 
@@ -325,4 +330,140 @@ test("an android.any Assignment may need an adb slot and a fresh session per Run
   const { owner } = needs(1, ["android.any"]);
   expect(l.adbNeeded("first", owner)).toBe(true);
   expect(l.freshSession("first", owner)).toBe(true);
+});
+
+/**
+ * C-825: an earlier `android.any` waiter both of whose options are held
+ * (the emulator reserved by another project, the tablet in use) waits
+ * elsewhere: it must not hold a later Run back. The emulator has no slot
+ * limit, so only the resolved keys show that it is blocked.
+ */
+test("an earlier android.any waiter held on both options does not hold a later Run, judged by its resolved keys as the dispatcher does", async () => {
+  const capacity = async (resources: Record<string, number>) => {
+    await writeFile(
+      join(dir, "run-capacity.yaml"),
+      JSON.stringify({
+        machines: {
+          local: {
+            limit: 8,
+            resources,
+            adb_slots: {
+              resources: [TYPE],
+              adb_port_base: 15100,
+              emulator_port_base: 5600,
+            },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const loaded = await loadRunCapacityConfig({ configDir: dir });
+    expect(loaded.errors).toEqual([]);
+    return loaded;
+  };
+  // The reservation was made while the emulator still had a limit; it
+  // outlives the limit's removal.
+  const reserved = await capacity({ "android.emulator": 1, [TYPE]: 1 });
+  store.createProject({ id: "second" });
+  await leases(reserved).reserve(
+    { kind: "human", project_id: "second" },
+    "local",
+    "android.emulator",
+    at,
+    later(3_600_000),
+    () => at,
+  );
+  const cfg = await capacity({ [TYPE]: 1 });
+  const l = leases(cfg);
+  observe(BOTH, [TABLET]);
+  const holder = await admit(cfg, l, 1, [TYPE]);
+  expect(holder.access?.devices?.map((d) => d.id)).toEqual([TABLET.id]);
+  const waiting = (n: number, capabilities: string[]) => {
+    const { owner, run: r } = needs(n, capabilities);
+    store.uow.run((tx) => {
+      const id = tx.ids.nextEventId();
+      tx.events.append("first", {
+        id,
+        seq: tx.ids.nextEventSequence("first"),
+        type: "run_queued",
+        actor: { kind: "system", project_id: "first" },
+        payload: { run_id: r.id, assignment_id: owner.id },
+        created_at: later(n * 1000),
+      });
+      tx.runs.put("first", {
+        ...r,
+        trigger_event_id: id,
+        queue_reason: "concurrency_limit",
+      });
+    });
+  };
+  const holdsLater = (
+    eligible: (
+      tx: ReadRepositories,
+      capacity: ReturnType<typeof runCapacitySnapshot>,
+    ) => Parameters<typeof hasEarlierCapacityWait>[6],
+  ) =>
+    store.uow.read((tx) => {
+      const capacity = runCapacitySnapshot(store, tx, (m) =>
+        cfg.resourcesForMachine(m),
+      );
+      const position = capacity.queue.find((e) => e.assignment_id === "A-3");
+      if (!position) throw new Error("Missing later waiter");
+      return hasEarlierCapacityWait(
+        tx,
+        capacity.queue,
+        position,
+        "local",
+        capacity.resourcesForMachine("local"),
+        at,
+        eligible(tx, capacity),
+        undefined,
+        // Host launch and dispatcher: `android.any` resolved now.
+        (entry, o) =>
+          resolveResourceAlternatives(
+            store,
+            entry.project_id,
+            o,
+            assignmentResourceKeys(tx, entry.project_id, o),
+            at,
+            () => capacity,
+            l,
+          ),
+      );
+    });
+  // Before C-825 the host launch judged the waiter by its unresolved keys.
+  const unresolved =
+    (tx: ReadRepositories, capacity: ReturnType<typeof runCapacitySnapshot>) =>
+    (p: string, o: Assignment) =>
+      capacity.withinProjectQuota(p, o) && !l.waitingElsewhere(p, o, at, tx);
+  const shared = (
+    tx: ReadRepositories,
+    capacity: ReturnType<typeof runCapacitySnapshot>,
+  ) => capacityWaiterRunnable(capacity, l, at, tx);
+
+  waiting(2, ["android.any"]);
+  waiting(3, ["godot"]);
+  expect(
+    store.uow.read((tx) =>
+      resolveResourceAlternatives(
+        store,
+        "first",
+        assignment(2),
+        assignmentResourceKeys(tx, "first", assignment(2)),
+        at,
+        () => runCapacitySnapshot(store, tx, (m) => cfg.resourcesForMachine(m)),
+        l,
+      ),
+    ),
+  ).toEqual(["android.any", "android.emulator"]);
+  expect(holdsLater(unresolved)).toBe(true);
+  expect(holdsLater(shared)).toBe(false);
+
+  // A waiter asking for the emulator itself is judged the same as before.
+  waiting(2, ["android.emulator"]);
+  expect([holdsLater(unresolved), holdsLater(shared)]).toEqual([false, false]);
+  // Once the tablet is back the android.any waiter can start: it holds again.
+  waiting(2, ["android.any"]);
+  await end(l, holder.run, 1000);
+  expect(holdsLater(shared)).toBe(true);
 });

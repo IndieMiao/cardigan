@@ -107,6 +107,7 @@ import {
 } from "./retained-writer.js";
 import { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 import {
+  capacityWaiterRunnable,
   effectiveRunLimit,
   hasEarlierCapacityWait,
   type ReadResourceLimits,
@@ -548,9 +549,8 @@ async function launchWithClaim(
               assignment.machine_id,
               slots,
               clock.now(),
-              (p, o) =>
-                capacity.withinProjectQuota(p, o) &&
-                !host.leases?.waitingElsewhere(p, o, clock.now(), tx),
+              // C-825: judged by the resolved keys, as the dispatcher does.
+              capacityWaiterRunnable(capacity, host.leases, clock.now(), tx),
               host.leases?.config.preferred(assignment.machine_id),
               // C-815: an `android.any` waiter is judged by its free option.
               (entry, o) => resolvedKeys(tx, o, entry.project_id),

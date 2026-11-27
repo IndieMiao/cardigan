@@ -354,6 +354,38 @@ export function hasEarlierCapacityWait(
   });
 }
 
+/**
+ * C-825: whether an earlier waiter may still start here rather than waiting
+ * elsewhere, judged by the keys its Run would claim (`android.any` already
+ * resolved), the same in the dispatcher and the host launch.
+ */
+export function capacityWaiterRunnable(
+  capacity: {
+    withinProjectQuota(
+      project: string,
+      owner: Assignment,
+      keys?: readonly string[],
+    ): boolean;
+  },
+  leases:
+    | {
+        waitingElsewhere(
+          project: string,
+          owner: Assignment,
+          now: string,
+          tx: ReadRepositories,
+          keys?: readonly string[],
+        ): boolean;
+      }
+    | undefined,
+  now: string,
+  tx: ReadRepositories,
+) {
+  return (project: string, owner: Assignment, keys: readonly string[]) =>
+    capacity.withinProjectQuota(project, owner, keys) &&
+    !leases?.waitingElsewhere(project, owner, now, tx, keys);
+}
+
 export type ReadResourceLimits = (
   machine: string,
 ) => ReadonlyMap<string, number>;
