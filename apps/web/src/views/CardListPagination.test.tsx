@@ -23,6 +23,14 @@ const cards: CardListItem[] = Array.from({ length: 35 }, (_, index) => ({
   status: index < 15 ? "todo" : "in_progress",
   priority: index < 15 ? 4 : 1,
   roles: [index < 15 ? "reviewer" : "coder"],
+  template: index < 15 ? "story" : "dev",
+  template_version: 1,
+  template_info: {
+    id: index < 15 ? "story" : "dev",
+    title: index < 15 ? "需求卡" : "开发卡",
+    version: 1,
+    builtin: true,
+  },
   waiting_on: [],
   next_owners:
     index < 15
@@ -401,7 +409,7 @@ test.each(["automatic", "manual"])(
   },
 );
 
-test.each(["status", "next", "role", "search", "sort"])(
+test.each(["status", "template", "search", "sort"])(
   "%s applies to all cards before paging and resets to page one",
   async (filter) => {
     route("page=2&count=10");
@@ -411,8 +419,7 @@ test.each(["status", "next", "role", "search", "sort"])(
       fireEvent.click(screen.getByRole("button", { name: "状态：全部" }));
       fireEvent.click(screen.getByRole("checkbox", { name: "待开始" }));
       fireEvent.keyDown(document, { key: "Escape" });
-    } else if (filter === "next") await select("下一步：全部", "所有者");
-    else if (filter === "role") await select("角色：全部", "reviewer");
+    } else if (filter === "template") await select("类型：全部", "需求卡");
     else if (filter === "sort") await select("排序：全部", "优先级");
     else
       changeControl(screen.getByLabelText("搜索标题或编号"), {
@@ -437,8 +444,7 @@ test.each(["status", "next", "role", "search", "sort"])(
       fireEvent.click(screen.getByRole("button", { name: "状态：待开始" }));
       fireEvent.click(screen.getByRole("checkbox", { name: "全部" }));
       fireEvent.keyDown(document, { key: "Escape" });
-    } else if (filter === "next") await select("下一步：所有者", "全部");
-    else if (filter === "role") await select("角色：reviewer", "全部");
+    } else if (filter === "template") await select("类型：需求卡", "全部");
     else if (filter === "sort") await select("排序：优先级", "全部");
     else
       changeControl(screen.getByLabelText("搜索标题或编号"), {

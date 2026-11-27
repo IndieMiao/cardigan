@@ -1,0 +1,130 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  /* C-810: one decision, top to bottom; parts keep no margins of their own. */
+  .brief {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-3);
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  /* `form` outranks the Needs You row's form margin. */
+  .brief > *,
+  .brief > form {
+    margin-block: 0;
+  }
+  .question {
+    color: var(--text);
+    font-size: var(--ui-text-base);
+    font-weight: 600;
+    line-height: var(--ui-leading);
+  }
+  .part {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-1);
+    min-width: 0;
+  }
+  /* Outranks the card detail's `.page h3`. */
+  .part > .partTitle {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    font-weight: 600;
+    line-height: var(--ui-leading);
+  }
+  .criteria {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-1);
+    margin: 0;
+    padding-inline-start: var(--ui-space-6);
+    font-size: var(--ui-text-base);
+    line-height: var(--ui-leading);
+  }
+  /*
+   * Narrow screens: three thumbnails a row at the same 160:104 shape, so the
+   * criteria and options stay close; files and “还有 N 个” take a whole row.
+   */
+  @media (max-width: 760px) {
+    .brief > :global(.decision-attachments) {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .brief
+      > :global(.decision-attachments)
+      > li:not(:has(:global(.attachment-preview))) {
+      grid-column: 1 / -1;
+    }
+    .brief :global(.decision-attachments .attachment-preview) {
+      width: 100%;
+      height: auto;
+      aspect-ratio: 160 / 104;
+    }
+  }
+  /* Fills its list item so it centres beside the thumbnails. */
+  .more {
+    display: inline-flex;
+    align-items: center;
+    height: 100%;
+    min-height: var(--ui-control);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+
+  /* Read-only options: the rows of DetailChoice without the radio. */
+  .options {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-1);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .option {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: var(--ui-space-2);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-radius);
+  }
+  .optionName {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    color: var(--text);
+    font-size: var(--ui-text-base);
+    line-height: var(--ui-leading);
+  }
+  .optionDetail {
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+
+  /* 详细信息: routing, requester, affected cards and the original context. */
+  .details > summary {
+    width: fit-content;
+    min-height: var(--ui-control);
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-control);
+    cursor: pointer;
+  }
+  .details[open] > summary {
+    margin-bottom: var(--ui-space-1);
+  }
+  .detailsBody {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-2);
+    min-width: 0;
+    font-size: var(--ui-text-base);
+    line-height: var(--ui-leading);
+  }
+  .detailsBody > * {
+    margin-block: 0;
+  }
+}

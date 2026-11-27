@@ -1559,6 +1559,13 @@ function decisionActionWebView(
     card_priority:
       state.cards.find((card) => card.id === decision.card_id)?.priority ?? 0,
     attachments: decisionAttachmentViews(state, decision),
+    // C-810: the decision card shows the overflow count and the criteria.
+    ...(decision.attachments_omitted
+      ? { attachments_omitted: decision.attachments_omitted }
+      : {}),
+    ...(decision.acceptance_criteria_snapshot?.length
+      ? { acceptance_criteria_snapshot: decision.acceptance_criteria_snapshot }
+      : {}),
     ...(decision.grouped_decisions
       ? {
           grouped_decisions: decision.grouped_decisions.map((q) => ({

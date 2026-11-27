@@ -1990,57 +1990,6 @@ fieldset.filters {
 .needs-review-issues summary {
   cursor: pointer;
 }
-.needs-options {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-.needs-options legend {
-  margin-bottom: 6px;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-}
-.needs-option {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: start;
-  gap: 10px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  cursor: pointer;
-}
-.needs-option:hover,
-.needs-option.selected {
-  background: var(--surface-muted);
-}
-.needs-option input {
-  margin-top: 4px;
-  accent-color: var(--accent);
-}
-.needs-option-head {
-  display: flex;
-  align-items: baseline;
-  gap: 6px 8px;
-  flex-wrap: wrap;
-}
-.needs-option-impact {
-  display: block;
-  margin-top: 4px;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-}
-.needs-recommended {
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  padding: 0 5px;
-  color: var(--accent);
-  font-size: var(--text-xs);
-  font-weight: 600;
-}
 .needs-merge-section {
   margin-top: 16px;
 }

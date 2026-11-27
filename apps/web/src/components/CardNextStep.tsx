@@ -25,11 +25,13 @@ import { routeHash } from "../route.js";
 import { useCardDecision } from "./CardDecision.js";
 import { CardFormOutlet } from "./CardFormOutlet.js";
 import { useCardResume } from "./CardHold.js";
+import { DecisionBrief, DecisionOptionList } from "./DecisionBrief.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { IdBadge, IdTag } from "./IdTag.js";
 import {
   CardActionDock,
   CardDetailInlineOwner,
+  DetailChoiceTag,
   DetailNextStep,
   DetailNextStepLine,
 } from "./layout/CardDetailLayout.js";
@@ -507,7 +509,18 @@ export function CardNextStep({
         primary = { label: "确认选择", disabled: decision.disabled };
         actions = decision.action;
       } else {
-        lines = q && <DetailNextStepLine>{q.question}</DetailNextStepLine>;
+        // Review limits, reworks and the like keep their controls in Needs
+        // You; what to judge and the options still show here (C-810).
+        lines = q && (
+          <DecisionBrief decision={q} projectId={projectId} question>
+            <DecisionOptionList
+              q={q}
+              tag={(key) =>
+                q.recommended === key && <DetailChoiceTag>推荐</DetailChoiceTag>
+              }
+            />
+          </DecisionBrief>
+        );
         primary = { label: "处理拍板" };
         actions = openNeedsYou(primary.label);
       }

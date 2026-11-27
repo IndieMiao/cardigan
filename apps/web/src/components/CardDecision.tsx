@@ -5,20 +5,18 @@ import {
   type DecisionView,
   describeWriteError,
 } from "../api.js";
-import { PLAIN_SUMMARY_COPY } from "../plain-summary-copy.js";
+import { decisionOption } from "../decision-labels.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
+import { DecisionBrief, DecisionChoices } from "./DecisionBrief.js";
 import { usePrefilledReason } from "./DecisionSuggestion.js";
 import { StatusTag } from "./Foundation.js";
 import {
-  DetailChoice,
   DetailChoiceField,
   DetailChoiceForm,
-  DetailChoices,
   DetailChoiceTag,
   DetailNextStepFeedback,
   DetailNextStepLine,
 } from "./layout/CardDetailLayout.js";
-import { PlainSummaryRisk } from "./PlainSummary.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
 import { Textarea } from "./ui/textarea.js";
@@ -126,10 +124,8 @@ export function useCardDecision({
       setPending(false);
     }
   };
-  const label = (key: string) =>
-    options.find((o) => o.key === key)?.description ?? key;
-  const summary = q.plain_summary;
-  const body = (
+  const label = (key: string) => decisionOption(q, key);
+  const form = (
     <DetailChoiceForm
       id={formId}
       aria-label={`拍板 ${q.id}`}
@@ -138,27 +134,22 @@ export function useCardDecision({
         void submit();
       }}
     >
-      <DetailNextStepLine strong>{q.question}</DetailNextStepLine>
-      {q.human_required_reason && (
-        <DetailNextStepLine>
-          须由你亲自决定：{q.human_required_reason}
-        </DetailNextStepLine>
-      )}
-      {summary && (
-        <>
-          <DetailNextStepLine>
-            <dl>
-              <dt>{PLAIN_SUMMARY_COPY.impact}</dt>
-              <dd>{summary.impact}</dd>
-            </dl>
-          </DetailNextStepLine>
-          <DetailNextStepLine>
-            <dl>
-              <PlainSummaryRisk risk={summary.risk} />
-            </dl>
-          </DetailNextStepLine>
-        </>
-      )}
+      <DecisionChoices
+        q={q}
+        options={options}
+        name={`card-decision-${q.id}`}
+        selected={selected}
+        onSelect={(option) => setPicked({ id: q.id, option })}
+        disabled={pending}
+        tag={(key) =>
+          suggestion?.option === key ? (
+            <DetailChoiceTag>建议</DetailChoiceTag>
+          ) : (
+            !suggestion &&
+            q.recommended === key && <DetailChoiceTag>推荐</DetailChoiceTag>
+          )
+        }
+      />
       {suggestion && (
         <DetailNextStepLine>
           <span>
@@ -175,29 +166,6 @@ export function useCardDecision({
           )}
         </DetailNextStepLine>
       )}
-      <DetailChoices legend="选择方案" disabled={pending}>
-        {options.map((o) => (
-          <DetailChoice
-            key={o.key}
-            name={`card-decision-${q.id}`}
-            value={o.key}
-            checked={selected === o.key}
-            onChange={() => setPicked({ id: q.id, option: o.key })}
-            label={o.description}
-            tags={
-              suggestion?.option === o.key ? (
-                <DetailChoiceTag>建议</DetailChoiceTag>
-              ) : (
-                !suggestion &&
-                q.recommended === o.key && (
-                  <DetailChoiceTag>推荐</DetailChoiceTag>
-                )
-              )
-            }
-            detail={o.key === DECISION_OTHER_OPTION ? undefined : o.impact}
-          />
-        ))}
-      </DetailChoices>
       {other && (
         <DetailChoiceField
           label="你的决定（必填，会作为你的原话记录）"
@@ -239,6 +207,11 @@ export function useCardDecision({
         />
       </DetailNextStepFeedback>
     </DetailChoiceForm>
+  );
+  const body = (
+    <DecisionBrief decision={q} projectId={projectId} question>
+      {form}
+    </DecisionBrief>
   );
   const disabled = pending || busy || !selected;
   const action = (
