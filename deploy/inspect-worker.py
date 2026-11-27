@@ -422,7 +422,189 @@ def retirement_terminal(c):
                 status=dict(state=activity if activity in ('unknown', 'idle', 'done') else 'blocked'))
 
 
-def terminals(home, session, labels, pinned, system):
+# C-806: evidence for a Run whose launch failed. Everything below is read on
+# the worker and leaves it only bounded and redacted: never a whole screen or
+# log, a token, a credential path or an environment.
+TAIL_LINES, TAIL_CHARS, TAIL_BYTES, ERROR_CHARS = 20, 200, 2048, 160
+_PATH_WORDS = r'(?:token|secret|credential|password|passwd|\.ssh|id_rsa|id_ed25519|id_ecdsa|\.pem|\.key|\.netrc|git-credentials|auth)'
+REDACTIONS = (
+    (re.compile(r'-----BEGIN [A-Z ]*PRIVATE\sKEY-----.*?(?:-----END [A-Z ]*PRIVATE\sKEY-----|$)', re.S), '[REDACTED]'),
+    (re.compile(r'(?i)\b(?:authorization|cookie)\b\s*[:=]?\s*(?:(?:bearer|basic|token)\s+)?\S+|\bbearer\s+\S+'), '[REDACTED]'),
+    (re.compile(r'(?i)\b([a-z0-9_]*(?:token|secret|password|passwd|api[_-]?key|access[_-]?key|credential)s?)(["\']?\s*[:=]\s*)\S+'), r'\1\2[REDACTED]'),
+    (re.compile(r'\b(?:gh[opsur]_|github_pat_|sk-|xox[abprs]-|AKIA)[A-Za-z0-9_.-]{8,}'), '[REDACTED]'),
+    (re.compile(r'\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?'), '[REDACTED]'),
+    (re.compile(r'(?i)\b[a-z][a-z0-9+.-]*://[^\s/@]*@\S*'), '[URL]'),
+    (re.compile(r'(?i)\b([a-z][a-z0-9+.-]*://[^\s?#]*)[?#]\S*'), r'\1'),
+    (re.compile(r'(?i)(?:~|\$HOME|\.{1,2})?/[^\s\'"`]*' + _PATH_WORDS + r'[^\s\'"`]*'), '[PATH]'),
+    # Opaque strings: letters and digits mixed, then long base64 runs.
+    (re.compile(r'[A-Za-z0-9_+=-]{24,}'), lambda m: '[REDACTED]' if re.search(r'\d', m[0]) and re.search(r'[A-Za-z]', m[0]) else m[0]),
+    (re.compile(r'[A-Za-z0-9+/]{40,}={0,2}'), '[REDACTED]'),
+)
+
+
+def redact(text, limit):
+    """Remove credentials first, then control characters, then cut to `limit`."""
+    for pattern, replacement in REDACTIONS:
+        text = pattern.sub(replacement, text)
+    text = re.sub(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]', '', text).rstrip()
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
+def redacted_tail(text):
+    lines = [redact(line, TAIL_CHARS) for line in text.splitlines()[-200:] if line.strip()][-TAIL_LINES:]
+    while lines and len('\n'.join(lines).encode()) > TAIL_BYTES:
+        lines.pop(0)
+    return lines
+
+
+def clock_ms(value):
+    # ps TIME/ELAPSED: [[dd-]hh:]mm:ss[.ff]
+    days, _, rest = value.rpartition('-')
+    parts = [float(x) for x in rest.split(':')]
+    if not 1 <= len(parts) <= 3 or any(x < 0 for x in parts):
+        raise ValueError()
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + part
+    return int((seconds + int(days or 0) * 86400) * 1000)
+
+
+def resources(pid, system):
+    # The CLI and, on Linux, its whole session scope (MCP servers included).
+    cmd = ['/bin/ps', '-p', str(pid), '-o', 'uid=,time=,rss=,etime=']
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env={'LC_ALL': 'C'}) as ps:
+        fields = ps.stdout.read(512).decode(errors='replace').split()
+        ps.stdout.close()
+    if len(fields) != 4 or int(fields[0]) != os.getuid():
+        return None
+    result = dict(source='process', cpu_ms=clock_ms(fields[1]), memory_bytes=int(fields[2]) * 1024, elapsed_ms=clock_ms(fields[3]))
+    if system == 'linux':
+        scope = optional(lambda: session_scope(pid))
+        if scope:
+            result.update(scope)
+    return result
+
+
+def session_scope(pid):
+    with open('/proc/%d/cgroup' % pid, 'rb') as f:
+        lines = f.read(4096).decode().splitlines()
+    path = next((line[3:] for line in lines if line.startswith('0::')), '')
+    if not re.fullmatch(r'(?:/[A-Za-z0-9@:._-]+)*/cardigan-session-[A-Za-z0-9_-]+\.scope', path):
+        return None
+    with directory('/sys/fs/cgroup' + path) as fd:
+        def number(name):
+            return int(read(fd, name, 64).split()[0])
+        stats = dict(line.split() for line in read(fd, 'cpu.stat', 4096).decode().splitlines() if len(line.split()) == 2)
+        scope = dict(source='scope', cpu_ms=int(stats['usage_usec']) // 1000, memory_bytes=number('memory.current'))
+        peak = optional(lambda: number('memory.peak'))
+        if peak is not None:
+            scope['memory_peak_bytes'] = peak
+        return scope
+
+
+def terminal_launch(row, text, pid, system):
+    code, reason = row.get('exit_code'), row.get('reason')
+    facts = dict(state=row['state'], tail=redacted_tail(text))
+    if type(code) is int and -255 <= code <= 255:
+        facts['exit_code'] = code
+    if isinstance(reason, str) and re.fullmatch(r'[a-z_]{1,32}', reason):
+        facts['exit_reason'] = reason
+    if pid and row['state'] == 'live':
+        facts['resources'] = optional(lambda: resources(pid, system))
+    return facts
+
+
+MCP_LOG = re.compile(r'(\d{4})-(\d\d)-(\d\d)T(\d\d)-(\d\d)-(\d\d)-(\d{3})Z\.jsonl')
+CONNECTED = re.compile(r'Successfully connected \(transport: ([a-z-]{1,16})\) in (\d{1,9})ms')
+FAILURE = re.compile(r'(?i)connection (?:failed|error|refused|timed out|timeout)|failed to connect|timed out|ECONN|ENOENT|EACCES|spawn')
+
+
+def mcp_log(fd, name):
+    # The connection outcome is written first; read at most the head.
+    with os.fdopen(os.open(name, FILE, dir_fd=fd), 'rb') as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ValueError()
+        data = f.read(65536)
+    result, failure = dict(status='pending'), None
+    for line in data.splitlines()[:400]:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(item, dict):
+            continue
+        message = next((item[k] for k in ('debug', 'error', 'info') if isinstance(item.get(k), str)), '')
+        connected = CONNECTED.search(message)
+        if connected:
+            return dict(status='connected', transport=connected[1], elapsed_ms=int(connected[2]))
+        if failure is None and ('error' in item or FAILURE.search(message)):
+            failure = message.splitlines()[0] if message else 'error'
+    if failure is not None:
+        result = dict(status='failed', error=redact(failure, ERROR_CHARS))
+    return result
+
+
+def mcp_servers(home, system, cwds, since_ms):
+    """Claude Code's own per-server connection logs for launches since `since_ms`."""
+    import calendar
+    cache = Path(home, 'Library/Caches' if system == 'darwin' else '.cache', 'claude-cli-nodejs')
+    newest = {}
+    searched = False
+    for cwd in cwds:
+        try:
+            with directory(cache / re.sub(r'[^A-Za-z0-9]', '-', str(cwd))) as project:
+                searched = True
+                with os.scandir(project) as entries:
+                    folders = [e.name for e in itertools.islice(entries, 256)
+                               if e.name.startswith('mcp-logs-') and e.is_dir(follow_symlinks=False)]
+                for folder in folders:
+                    name = folder[len('mcp-logs-'):]
+                    if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', name):
+                        continue
+                    fd = os.open(folder, DIR, dir_fd=project)
+                    try:
+                        with os.scandir(fd) as logs:
+                            for log in itertools.islice(logs, 512):
+                                m = MCP_LOG.fullmatch(log.name)
+                                if not m or not log.is_file(follow_symlinks=False):
+                                    continue
+                                y, mo, d, h, mi, sec, ms = (int(x) for x in m.groups())
+                                at = calendar.timegm((y, mo, d, h, mi, sec)) * 1000 + ms
+                                if at >= since_ms and (name not in newest or newest[name][0] < at):
+                                    newest[name] = (at, mcp_log(fd, log.name))
+                    finally:
+                        os.close(fd)
+        except FileNotFoundError:
+            continue
+    if not searched:
+        return []
+    return [dict(name=name, **newest[name][1]) for name in sorted(newest)[:8]]
+
+
+def launch_evidence(c, home, row, terminal_why):
+    """C-806: `launch` section of a failed launch (see terminal_launch)."""
+    project, assignment, generation = c['project'], c['assignment'], c['generation']
+    root = Path(c['root'])
+    cwds = [root / 'worktrees' / project / assignment, root / 'runs' / project / assignment]
+    if generation and not c['local']:
+        cwds.append(root / 'runs' / project / assignment / 'generations' / generation)
+    why = {}
+    mcp = None
+    if c['harness'] != 'claude-code':
+        why['mcp'] = 'harness_unsupported'
+    else:
+        mcp = optional(lambda: mcp_servers(home, c['platform'], cwds, int(c['launch']['since_ms']) - 120000))
+        if mcp is None:
+            why['mcp'] = 'mcp_logs_unreadable'
+    facts = (row or {}).get('launch')
+    if not facts:
+        why['terminal'] = terminal_why or 'terminal_not_registered'
+    elif facts.get('resources') is None and facts['state'] == 'live':
+        why['resources'] = 'process_unconfirmed'
+    return dict(terminal=facts or None, mcp=mcp, unavailable=why)
+
+
+def terminals(home, session, labels, pinned, system, launch=False):
     with core_rpc(home, session, system) as rpc:
         result, processes = [], []
         incomplete = False
@@ -445,7 +627,8 @@ def terminals(home, session, labels, pinned, system):
             if not same_terminal(confirmed):
                 incomplete = True
                 continue
-            tail = screen(rpc('terminal.read', dict(terminal=address, lines=0))['text'])
+            text = rpc('terminal.read', dict(terminal=address, lines=0))['text']
+            tail = screen(text)
             rows = {p: optional(lambda: process(p)) for p in pids(confirmed) & before.keys()
                     if before[p] and before[p]['uid'] == os.getuid()}
             after = rpc('terminal.get', dict(terminal=address))
@@ -462,7 +645,13 @@ def terminals(home, session, labels, pinned, system):
                     else:
                         incomplete = True
             activity = (after.get('status') or {}).get('state')
-            result.append(dict(address=address, state=t['state'], activity=activity if activity in ('working', 'idle', 'done', 'error', 'blocked') else None, screen=tail))
+            row = dict(address=address, state=t['state'], activity=activity if activity in ('working', 'idle', 'done', 'error', 'blocked') else None, screen=tail)
+            if launch:
+                # C-806: only a failed launch's own terminal, redacted here.
+                leader = after.get('pid')
+                verified = type(leader) is int and before.get(leader) and before[leader]['uid'] == os.getuid()
+                row['launch'] = terminal_launch(after, text, leader if verified else None, system)
+            result.append(row)
             if len(result) == 4:
                 break
         # Keep verified rows; never turn an unreadable candidate into proof of absence.
@@ -543,7 +732,7 @@ def main(c):
     hc = None
     if c['live']:
         try:
-            hc = terminals(user.pw_dir, c['session'], labels, c['terminal'], c['platform'])
+            hc = terminals(user.pw_dir, c['session'], labels, c['terminal'], c['platform'], bool(c.get('launch')))
         except (OSError, ValueError, KeyError, TypeError, RecursionError) as error:
             why['terminals'] = unavailable(error)
         else:
@@ -599,9 +788,14 @@ def main(c):
             return hashlib.sha256(read(fd, Path(path).name, 2*1024*1024)).hexdigest()
     with directory(c['root']) as fd:
         disk = os.fstatvfs(fd)
-    return dict(terminals=hc[0] if hc else None, processes=processes,
+    rows = hc[0] if hc else None
+    launch = (launch_evidence(c, user.pw_dir, rows[0] if rows else None, why.get('terminals') or ('run_not_current' if not c['live'] else None))
+              if c.get('launch') else None)
+    for row in rows or []:
+        row.pop('launch', None)
+    return dict(terminals=rows, processes=processes,
                 events=events, markers=marks, unavailable=why, helpers=[optional(lambda: digest(p)) if p else None for p in c['helpers']],
-                free_bytes=disk.f_bavail*disk.f_frsize)
+                free_bytes=disk.f_bavail*disk.f_frsize, **({'launch': launch} if launch else {}))
 
 
 if __name__ == '__main__':

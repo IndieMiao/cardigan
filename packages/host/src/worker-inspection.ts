@@ -14,6 +14,7 @@ import {
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
 
+import { redactWorkerLaunch } from "./launch-redaction.js";
 import { observeTurnOwner } from "./stall-evidence.js";
 
 const names = [
@@ -69,6 +70,8 @@ export async function inspectWorker(
   platform: string,
   harness = run?.harness,
   runtime?: Runtime,
+  /** C-806: also collect a failed launch's evidence (from `since`). */
+  launch?: { since: string },
 ) {
   const target = execution.target;
   if (!target) throw unavailable("worker_binding_missing");
@@ -203,6 +206,10 @@ export async function inspectWorker(
     terminal: terminal ?? null,
     process: pub?.process ?? null,
     target: target.fingerprint,
+    launch:
+      launch && Number.isFinite(Date.parse(launch.since))
+        ? { since_ms: Date.parse(launch.since) }
+        : null,
     helpers: [
       execution.fileHelper?.path,
       execution.gitHelper?.path,
@@ -261,10 +268,13 @@ export async function inspectWorker(
       child.stdin?.end(JSON.stringify(payload));
     });
     stage = "invalid_collector_response";
-    const evidence = workerEvidence.parse(JSON.parse(output));
+    const { launch: worker, ...evidence } = workerEvidence.parse(
+      JSON.parse(output),
+    );
     stage = "collector_release_unreadable";
     return {
       ...evidence,
+      ...(launch && worker ? { launch: redactWorkerLaunch(worker) } : {}),
       session_launch_run_id: launchRun ?? null,
       ...(!live ? { terminals: null, processes: null, events: null } : {}),
       unavailable: unavailableFields(evidence, live, current),

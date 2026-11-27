@@ -58,6 +58,7 @@ export interface ControlPlaneOptions {
   readonly harnessActivity?: DispatcherOptions["harnessActivity"];
   readonly harnessFileActivity?: DispatcherOptions["harnessFileActivity"];
   readonly inspectHarnessActivity?: DispatcherOptions["inspectHarnessActivity"];
+  readonly recordLaunchEvidence?: DispatcherOptions["recordLaunchEvidence"];
   readonly inactivityInspectionTimeoutMs?: number;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
@@ -192,6 +193,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       : {}),
     ...(options.inspectHarnessActivity
       ? { inspectHarnessActivity: options.inspectHarnessActivity }
+      : {}),
+    ...(options.recordLaunchEvidence
+      ? { recordLaunchEvidence: options.recordLaunchEvidence }
       : {}),
     ...(options.inactivityInspectionTimeoutMs === undefined
       ? {}

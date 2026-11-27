@@ -81,6 +81,7 @@ export {
   readProjectSnapshot,
 } from "./commands/support-tools.js";
 export {
+  type WorkerLaunchEvidence,
   type WorkerUnavailableReason,
   workerEvidence,
 } from "./commands/worker-evidence.js";

@@ -3,6 +3,8 @@ import { join } from "node:path";
 import {
   type Assignment,
   type ProjectId,
+  type Run,
+  type RunId,
   tickProfileOn,
 } from "@cardigan/domain";
 import {
@@ -1074,6 +1076,11 @@ async function assembleServer(
                 localOnly?: boolean,
               ) =>
                 hostOps.inspectHarnessActivity(project, stopTarget, localOnly),
+              recordLaunchEvidence: (
+                project: ProjectId,
+                run: RunId,
+                reason: NonNullable<Run["dispatch_stop"]>["reason"],
+              ) => hostOps.recordLaunchEvidence(project, run, reason),
               harnessActivity: (
                 project: ProjectId,
                 assignment: Assignment["id"],

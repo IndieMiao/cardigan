@@ -21,6 +21,7 @@ import {
   currentHarnessActivity,
   DEFAULT_ATTACHED_HUMAN_NOTICE_MS,
   directlyCancellableRun,
+  dispatchedAt,
   dispatchRecoveryQueuedAt,
   eventById,
   eventsOfType,
@@ -39,6 +40,7 @@ import {
   pendingHostOpsActions,
   prepareHostOpsAction,
   type RetirementStop,
+  type Run,
   type RunId,
   type Runtime,
   type RuntimeRef,
@@ -101,6 +103,7 @@ import { hostOpsLockHolder, tryHostOpsLock } from "./host-ops-lock.js";
 import { idleScarceSessions } from "./idle-scarce-sessions.js";
 import { releaseExitedAgent } from "./idle-session-retirement.js";
 import { stopIdleSession } from "./idle-session-stop.js";
+import { recordRunLaunchEvidence } from "./launch-evidence.js";
 import {
   incidentIdentity,
   settlementIdentityHolds,
@@ -140,7 +143,6 @@ import {
   upstreamHoldDetail,
   upstreamHoldReason,
 } from "./upstream-health.js";
-
 import { inspectWorker } from "./worker-inspection.js";
 
 interface Options {
@@ -373,6 +375,13 @@ export class HostOpsService {
       );
     };
     const execution = resolve();
+    // C-806: a Run that never started also gets its launch evidence.
+    const since =
+      run && !run.started_at
+        ? store.uow.read((tx) =>
+            dispatchedAt(loadCommandState(tx, project), run),
+          )
+        : undefined;
     const result = await inspectWorker(
       execution,
       project,
@@ -382,6 +391,7 @@ export class HostOpsService {
       platform,
       harness,
       this.options.runtime,
+      since ? { since } : undefined,
     );
     context.revalidateToken?.();
     const fresh = store.uow.read((tx) => {
@@ -1398,6 +1408,25 @@ export class HostOpsService {
     return age < 0 || age > file.stale_after_ms ? undefined : file;
   }
 
+  /** C-806: see recordRunLaunchEvidence; never throws or blocks a stop. */
+  recordLaunchEvidence(
+    project: ProjectId,
+    run: RunId,
+    reason: NonNullable<Run["dispatch_stop"]>["reason"],
+  ): Promise<void> {
+    return recordRunLaunchEvidence(
+      {
+        store: this.options.store,
+        workerExecution: this.options.workerExecution,
+        runtime: this.options.runtime,
+        now: () => this.clock.now(),
+        ...(this.options.onError ? { onError: this.options.onError } : {}),
+      },
+      project,
+      run,
+      reason,
+    );
+  }
   /** Alerts can join an active poll. Destructive checks must start a new, target-only read. */
   async inspectHarnessActivity(
     project: ProjectId,

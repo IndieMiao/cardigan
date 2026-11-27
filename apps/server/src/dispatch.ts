@@ -241,6 +241,12 @@ export interface DispatcherOptions {
     localOnly?: boolean,
   ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
   readonly inactivityInspectionTimeoutMs?: number;
+  /** C-806: see `HostOpsService.recordLaunchEvidence`. */
+  readonly recordLaunchEvidence?: (
+    project: ProjectId,
+    run: RunId,
+    reason: NonNullable<Run["dispatch_stop"]>["reason"],
+  ) => Promise<void>;
   readonly hostOpsTick?: () => Promise<void>;
   readonly baselineForWait?: (
     project: ProjectId,

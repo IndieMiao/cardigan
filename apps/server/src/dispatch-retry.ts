@@ -98,6 +98,12 @@ interface ProviderWatch {
   providerCooldownMs?: number;
   /** C-600: how long a verified new session may take to list the Card tools. */
   mcpHandshakeTimeoutMs?: number;
+  /** C-806: record an unstarted Run's launch evidence before its stop. */
+  recordLaunchEvidence?: (
+    project: ProjectId,
+    run: RunId,
+    reason: NonNullable<Run["dispatch_stop"]>["reason"],
+  ) => Promise<void>;
 }
 async function providerSample(
   options: ProviderWatch,
@@ -277,6 +283,16 @@ export function dispatchRecovery(
     let sample =
       initialSample ??
       (owner && (await providerSample(options, project, owner)));
+    const record = options.recordLaunchEvidence;
+    // C-806: evidence is read while the session still exists, right before
+    // the stop starts; a failed collection never changes the outcome.
+    const beforeStart =
+      owner || record
+        ? async () => {
+            if (owner) sample = await providerSample(options, project, owner);
+            if (record) await record(project, runId, reason).catch(() => {});
+          }
+        : undefined;
     return runStopWorkflow({ store, runtime, clock, loadState }, project, {
       claim: (state, ports) => {
         const run = state.runs.find((r) => r.id === runId);
@@ -330,13 +346,7 @@ export function dispatchRecovery(
           },
           ports,
         ),
-      ...(owner
-        ? {
-            beforeStart: async () => {
-              sample = await providerSample(options, project, owner);
-            },
-          }
-        : {}),
+      ...(beforeStart ? { beforeStart } : {}),
       start: (state, ports, run, stop) =>
         startDispatchStop(
           state,

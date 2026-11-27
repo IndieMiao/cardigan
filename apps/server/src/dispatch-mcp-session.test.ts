@@ -5,6 +5,7 @@ import {
   notices,
   postComment,
 } from "@cardigan/domain";
+import { recordRunLaunchEvidence } from "@cardigan/host";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
@@ -249,4 +250,73 @@ test("C-600 with a 60 s dispatch timeout and 30 s ticks, each launch is rebuilt 
       .events.filter((e) => e.type === "run_dispatch_recovered")
       .map((e) => (e.payload as { reason?: string }).reason),
   ).toEqual(["mcp_unavailable"]);
+});
+
+test("C-806 every failed launch records its evidence before its session is stopped", async () => {
+  const { t, runs } = start();
+  const order: string[] = [];
+  const release = f.runtime.release as ReturnType<typeof vi.fn>;
+  const original = release.getMockImplementation();
+  release.mockImplementation(async (...args: unknown[]) => {
+    order.push("release");
+    return original?.(...(args as Parameters<NonNullable<typeof original>>));
+  });
+  const d = new Dispatcher(
+    verifiedOptions({
+      mcpHandshakeTimeoutMs: 1000,
+      // The real host recorder; this fixture has no worker binding, so the
+      // worker parts are named unavailable while the host facts remain.
+      recordLaunchEvidence: async (project, run, reason) => {
+        order.push(`evidence:${run}`);
+        await recordRunLaunchEvidence(
+          { store: f.store, now: () => f.clock.now() },
+          project,
+          run,
+          reason,
+        );
+      },
+    }),
+  );
+  await d.tick();
+  f.advance(1000);
+  for (let i = 0; i < 3 && runs().length < 2; i++) await d.tick();
+  await untilDispatched(d, runs, runs()[0]?.id);
+  f.advance(1000);
+  for (let i = 0; i < 3; i++) await d.tick();
+  expectSettledAndReported(runs, t.assignment.id);
+  const [first, second] = runs();
+  expect(order).toEqual([
+    `evidence:${first?.id}`,
+    "release",
+    `evidence:${second?.id}`,
+    "release",
+  ]);
+  const evidence = f
+    .state()
+    .events.filter((e) => e.type === "run_launch_evidence");
+  expect(evidence.map((e) => [e.card_id, e.payload])).toEqual(
+    [first, second].map((run) => [
+      t.card.id,
+      expect.objectContaining({
+        run_id: run?.id,
+        assignment_id: t.assignment.id,
+        reason: "mcp_unavailable",
+        // The handshake deadline passed without the tools being listed.
+        card_handshake: "missing",
+        waited_ms: 1000,
+        terminal: null,
+        mcp_servers: null,
+        unavailable: {
+          terminal: "worker_binding_unconfigured",
+          mcp: "worker_binding_unconfigured",
+        },
+      }),
+    ]),
+  );
+  const timeline = f.store.uow.read((tx) => tx.timeline.list(f.project));
+  expect(
+    timeline
+      .filter((entry) => entry.body.includes("启动证据"))
+      .map((e) => e.run_id),
+  ).toEqual([first?.id, second?.id]);
 });
